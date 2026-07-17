@@ -37,7 +37,6 @@
         <activity android:name=".ui.ChatActivity" />
         <activity android:name=".ui.GroupChatActivity" />
         <activity android:name=".ui.QrScanActivity" />
-        <activity android:name=".ui.QrDisplayActivity" />
         <!-- Spec dışı: foto/video ekleri için basit, tam boyut/kalitede
              uygulama içi görüntüleyici — bkz. ChatActivity.onAttachmentClicked
              notu (önceden HER zaman sistem varsayılan uygulamasına

@@ -36,6 +36,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
     enum class Status { PENDING, SENT, ERROR }
 
+    /** bkz. `applySeen`/`lastSeenAvatars` — `displayName` yalnızca bu
+     *  kişinin fotoğrafı yoksa baş harf rozeti üretmek için (bkz.
+     *  AvatarUtil). */
+    data class SeenByViewer(val avatarJpeg: ByteArray?, val displayName: String)
+
     /** Spec dışı: dosya/foto/video/ses eki durumu (bkz. dosya başı notu —
      *  P2PLib.prepareAndSendFile/downloadFile/pollNetwork "file_*" olayları). */
     enum class AttachmentStatus { OFFERED, DOWNLOADING, COMPLETE, FAILED }
@@ -112,6 +117,15 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     private val boundVoiceHolders = mutableMapOf<String, BubbleViewHolder>()
     private val userSeekingFileIds = mutableSetOf<String>()
 
+    /** Spec dışı, kullanıcı isteği: "görüldü" bilgisi SADECE en son
+     *  görülen (kendi gönderdiğimiz) mesajın altında gösterilir — önceki
+     *  tüm mesajlar örtük olarak görülmüş sayılır (WhatsApp/Telegram
+     *  deseni). `applySeen` bu ikisini günceller; `onBindViewHolder`
+     *  sadece `messageId == lastSeenMessageId` olan satırda avatar
+     *  satırını gösterir. */
+    private var lastSeenMessageId: String? = null
+    private var lastSeenAvatars: List<SeenByViewer> = emptyList()
+
     private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
     class BubbleViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
@@ -135,6 +149,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val progressVoicePlayback: Slider = itemView.findViewById(R.id.progressVoicePlayback)
         val txtVoiceDuration: TextView = itemView.findViewById(R.id.txtVoiceDuration)
         val btnVoiceSpeed: TextView = itemView.findViewById(R.id.btnVoiceSpeed)
+        val rowSeenBy: View = itemView.findViewById(R.id.rowSeenBy)
+        val imgSeenBy1: ImageView = itemView.findViewById(R.id.imgSeenBy1)
+        val imgSeenBy2: ImageView = itemView.findViewById(R.id.imgSeenBy2)
+        val imgSeenBy3: ImageView = itemView.findViewById(R.id.imgSeenBy3)
+        val txtSeenByMore: TextView = itemView.findViewById(R.id.txtSeenByMore)
     }
 
     override fun onViewRecycled(holder: BubbleViewHolder) {
@@ -226,6 +245,30 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         notifyItemChanged(idx)
     }
 
+    /**
+     * Bir "görüldü" bildirimi uygular — bkz. `lastSeenMessageId` dosya
+     * başı notu. `viewerAvatars`: bu mesajı gören(ler)in TAM güncel
+     * listesi (artımlı değil — çağıran taraf, ör. bir grupta zamanla
+     * birikensetten, HER seferinde tam listeyi geçirmeli). Hedef mesaj,
+     * şu an "en son görülen" olarak işaretliden DAHA YENİ veya AYNIYSA
+     * (ör. aynı gruptaki başka bir üye de aynı mesajı gördüyse)
+     * güncellenir — daha ESKİ bir mesaj için gelen bir bildirim (nadir,
+     * ör. sıra dışı geliş) yok sayılır ki gösterge geri gitmesin.
+     */
+    fun applySeen(targetMessageId: String, viewerAvatars: List<SeenByViewer>) {
+        val idx = indexOfMessageId(targetMessageId)
+        if (idx < 0) return
+        val previousId = lastSeenMessageId
+        val previousIdx = previousId?.let { indexOfMessageId(it) } ?: -1
+        if (idx < previousIdx) return
+        lastSeenMessageId = targetMessageId
+        lastSeenAvatars = viewerAvatars
+        if (previousId != null && previousId != targetMessageId && previousIdx >= 0) {
+            notifyItemChanged(previousIdx)
+        }
+        notifyItemChanged(idx)
+    }
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): BubbleViewHolder {
         val view = LayoutInflater.from(parent.context)
             .inflate(R.layout.item_message_bubble, parent, false)
@@ -290,6 +333,12 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             )
         } else {
             holder.status.visibility = View.GONE
+        }
+
+        if (item.isMine && !item.isDeleted && item.messageId == lastSeenMessageId && lastSeenAvatars.isNotEmpty()) {
+            bindSeenBy(holder)
+        } else {
+            holder.rowSeenBy.visibility = View.GONE
         }
 
         holder.itemView.setOnLongClickListener {
@@ -451,6 +500,30 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.btnVoiceSpeed.setOnClickListener(null)
             holder.layoutVoiceMessage.setOnLongClickListener(null)
             slider.clearOnSliderTouchListeners()
+        }
+    }
+
+    /** En fazla 3 küçük avatar gösterir, fazlası "+N" ile özetlenir —
+     *  1:1 sohbette `lastSeenAvatars` her zaman tek elemanlıdır, grup
+     *  sohbetinde birden fazla üyenin avatarı olabilir. */
+    private fun bindSeenBy(holder: BubbleViewHolder) {
+        holder.rowSeenBy.visibility = View.VISIBLE
+        val avatars = lastSeenAvatars
+        val slots = listOf(holder.imgSeenBy1, holder.imgSeenBy2, holder.imgSeenBy3)
+        for (i in slots.indices) {
+            if (i < avatars.size && i < 3) {
+                slots[i].visibility = View.VISIBLE
+                AvatarUtil.renderInto(slots[i], avatars[i].avatarJpeg, avatars[i].displayName)
+            } else {
+                slots[i].visibility = View.GONE
+            }
+        }
+        val overflow = avatars.size - 3
+        if (overflow > 0) {
+            holder.txtSeenByMore.visibility = View.VISIBLE
+            holder.txtSeenByMore.text = "+$overflow"
+        } else {
+            holder.txtSeenByMore.visibility = View.GONE
         }
     }
 

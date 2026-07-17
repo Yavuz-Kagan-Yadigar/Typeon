@@ -65,6 +65,17 @@ class GroupChatActivity : AppCompatActivity() {
     private var currentGroupAvatar: ByteArray? = null
     private var memberIdentityIds: List<String> = emptyList()
 
+    /** bkz. `sendNewMessage`/`handleIncomingSeen` — bir `group_message_
+     *  local_id`'nin (bkz. Rust packet.rs notu) gerçekten BİZİM
+     *  gönderdiğimiz bir mesaja ait olup olmadığını ayırt etmek için
+     *  (gelen "seen" olayı `group_id` taşımıyor, bu grup dahil HERHANGİ
+     *  bir sohbetten gelebilir). */
+    private val mySentGroupMessageIds = mutableSetOf<String>()
+    /** group_message_local_id -> (identity_id -> görüntüleyen bilgisi) —
+     *  aynı mesajı gören farklı üyeleri biriktirir (bkz. SimpleChatAdapter
+     *  applySeen'in TAM liste beklediği notu). */
+    private val seenByPerMessage = mutableMapOf<String, MutableMap<String, SimpleChatAdapter.SeenByViewer>>()
+
     /** `registerForActivityResult` Activity STARTED olmadan ÖNCE
      *  çağrılmalı — bkz. ChatActivity/SettingsFragment aynı notu. */
     private val pickGroupAvatarLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -77,8 +88,17 @@ class GroupChatActivity : AppCompatActivity() {
     private val messageListener: (String) -> Unit = { json ->
         try {
             val obj = JSONObject(json)
-            if (obj.optString("type") == "group_message" && obj.optString("group_id") == groupId) {
-                runOnUiThread { handleIncomingGroupMessage(obj) }
+            val type = obj.optString("type")
+            when {
+                type == "group_message" && obj.optString("group_id") == groupId ->
+                    runOnUiThread { handleIncomingGroupMessage(obj) }
+                // "seen" olayı `group_id` TAŞIMAZ (bkz. Rust receive_message
+                // Seen kolu) — bu grubun mesajına mı ait olduğunu
+                // `group_message_local_id`'nin BİZİM gönderdiğimiz bir
+                // mesaja ait olup olmadığına bakarak anlıyoruz.
+                type == "seen" && !obj.isNull("group_message_local_id") &&
+                    obj.optString("group_message_local_id") in mySentGroupMessageIds ->
+                    runOnUiThread { handleIncomingSeen(obj) }
             }
         } catch (e: Exception) {
             // Ayrıştırılamayan olay — sessizce yok say.
@@ -149,6 +169,8 @@ class GroupChatActivity : AppCompatActivity() {
         P2PService.activeConversationId = "group:$groupId"
         localMessages.clear()
         adapter.notifyDataSetChanged()
+        mySentGroupMessageIds.clear()
+        seenByPerMessage.clear()
         refreshGroupInfo()
         return true
     }
@@ -304,22 +326,24 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     private fun sendNewMessage(text: String) {
-        val ok = try {
+        val result = try {
             P2PLib.sendGroupMessage(groupId, text)
         } catch (e: Exception) {
-            false
+            "Error: ${e.message}"
         }
+        val ok = !result.startsWith("Error:")
         if (!ok) {
             Toast.makeText(this, R.string.error_send_failed, Toast.LENGTH_SHORT).show()
         }
-        // Grup fan-out'unun her üyeye giden kopyası ayrı bir message_id
-        // taşıyor (bkz. lib.rs send_group_message) — buradaki tek "kendi
-        // balonumuz" o kopyaların hiçbirine karşılık gelmiyor, sadece
-        // yerel/optimistic bir gösterim. Bu yüzden edit/delete şu an grup
-        // mesajları için desteklenmiyor (uzun basma yok).
+        // bkz. dosya başı `mySentGroupMessageIds` notu — Rust'ın döndürdüğü
+        // `group_message_local_id`'yi KENDİ balonumuzun `messageId`'si
+        // olarak kullanıyoruz (rastgele bir UUID yerine, önceden olduğu
+        // gibi) ki dönen "seen" bildirimleri doğru balonla eşleşebilsin.
+        val localId = if (ok) result else UUID.randomUUID().toString()
+        if (ok) mySentGroupMessageIds.add(localId)
         adapter.addMessage(
             SimpleChatAdapter.Item(
-                messageId = UUID.randomUUID().toString(),
+                messageId = localId,
                 text = text,
                 isMine = true,
                 status = if (ok) SimpleChatAdapter.Status.SENT else SimpleChatAdapter.Status.ERROR
@@ -332,9 +356,10 @@ class GroupChatActivity : AppCompatActivity() {
         val senderIdentityId = obj.optString("sender_identity_id")
         val sender = resolveContactByIdentity(senderIdentityId)
         val senderName = sender?.displayName ?: senderIdentityId.take(8)
+        val messageId = obj.optString("message_id")
         adapter.addMessage(
             SimpleChatAdapter.Item(
-                messageId = obj.optString("message_id"),
+                messageId = messageId,
                 text = obj.optString("text"),
                 isMine = false,
                 senderName = senderName,
@@ -342,6 +367,30 @@ class GroupChatActivity : AppCompatActivity() {
             )
         )
         recycler.scrollToPosition(localMessages.size - 1)
+        // Spec dışı, kullanıcı isteği: "görüldü" — ekran açıkken gelen
+        // canlı grup mesajı için otomatik gönderilir (bkz. ChatActivity
+        // 1:1 karşılığı AYNI gerekçe). `peer`, bu kopyanın geldiği 1:1
+        // kanalın (göndericinin) fingerprint'i.
+        val localId = if (obj.isNull("group_message_local_id")) null else obj.optString("group_message_local_id").ifEmpty { null }
+        try {
+            P2PLib.sendSeenReceipt(obj.optString("peer"), messageId, localId)
+        } catch (e: Exception) { /* yoksay */ }
+    }
+
+    /** bkz. dosya başı `seenByPerMessage` notu — aynı mesajı gören farklı
+     *  üyeleri identity_id bazında biriktirir, adaptöre her seferinde
+     *  TAM güncel listeyi geçirir. */
+    private fun handleIncomingSeen(obj: JSONObject) {
+        val localId = obj.optString("group_message_local_id")
+        val senderIdentityId = obj.optString("sender_identity_id")
+        val sender = resolveContactByIdentity(senderIdentityId)
+        val viewer = SimpleChatAdapter.SeenByViewer(
+            avatarJpeg = sender?.avatarHex?.let { hexToBytes(it) },
+            displayName = sender?.displayName ?: senderIdentityId.take(8)
+        )
+        val viewers = seenByPerMessage.getOrPut(localId) { mutableMapOf() }
+        viewers[senderIdentityId] = viewer
+        adapter.applySeen(localId, viewers.values.toList())
     }
 
     private data class ContactLookup(val displayName: String, val avatarHex: String?)

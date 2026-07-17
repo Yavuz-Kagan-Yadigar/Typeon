@@ -2,6 +2,8 @@ package com.p2p.messenger
 
 import android.app.AlertDialog
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -10,14 +12,19 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.QRCodeWriter
 import com.p2p.messenger.ui.ChatActivity
 import com.p2p.messenger.ui.ChatAdapter
-import com.p2p.messenger.ui.QrDisplayActivity
 import com.p2p.messenger.ui.QrScanActivity
+import com.p2p.messenger.util.QrBinaryCodec
 import com.p2p.messenger.util.hexToBytes
 import org.json.JSONArray
 
@@ -26,6 +33,13 @@ class ContactsFragment : Fragment() {
     private lateinit var adapter: ChatAdapter
     private lateinit var placeholder: View
     private lateinit var recycler: RecyclerView
+    private lateinit var imgOwnQr: ImageView
+    private lateinit var txtOwnIdentityCode: TextView
+    /** bkz. `loadNodeAddressAndGenerateQr` — `getNodeAddress()` swarm
+     *  gerçekten dinlemeye başlayana kadar boş dönebilir, bu yüzden ayrı
+     *  bir handler ile birkaç kez yeniden denenir (bkz. eski
+     *  QrDisplayActivity — bu mantık buraya taşındı). */
+    private val qrRetryHandler = Handler(Looper.getMainLooper())
     private val refreshHandler = Handler(Looper.getMainLooper())
     private val refreshRunnable = object : Runnable {
         override fun run() {
@@ -42,14 +56,22 @@ class ContactsFragment : Fragment() {
             startActivity(intent)
         }
 
-        view.findViewById<Button>(R.id.btn_show_qr).setOnClickListener {
-            val intent = Intent(requireContext(), QrDisplayActivity::class.java)
-            startActivity(intent)
-        }
-
         view.findViewById<Button>(R.id.btn_manual_add).setOnClickListener {
             showManualAddDialog()
         }
+
+        // Spec dışı, kullanıcı isteği: kendi QR kodumuz artık "My QR"
+        // adında ayrı bir düğme/ekrana gitmeden doğrudan bu sekmede
+        // görünür — bkz. eski QrDisplayActivity (silindi), üretim mantığı
+        // birebir buraya taşındı.
+        imgOwnQr = view.findViewById(R.id.imgOwnQr)
+        txtOwnIdentityCode = view.findViewById(R.id.txtOwnIdentityCode)
+        txtOwnIdentityCode.text = try {
+            P2PLib.getIdentityCode()
+        } catch (e: Exception) {
+            ""
+        }
+        loadNodeAddressAndGenerateQr(attemptsLeft = 10)
 
         placeholder = view.findViewById(R.id.contactsPlaceholder)
         recycler = view.findViewById(R.id.recyclerContacts)
@@ -72,6 +94,43 @@ class ContactsFragment : Fragment() {
 
         refreshList()
         return view
+    }
+
+    /** bkz. dosya başı notu — `getNodeAddress()` boşsa kısa aralıklarla
+     *  yeniden dener (sabit bir 0.0.0.0/tcp/0 asla dial edilemez). */
+    private fun loadNodeAddressAndGenerateQr(attemptsLeft: Int) {
+        if (!isAdded) return
+        val nodeAddress = try {
+            P2PLib.getNodeAddress()
+        } catch (e: Exception) {
+            ""
+        }
+        if (nodeAddress.isEmpty() && attemptsLeft > 0) {
+            qrRetryHandler.postDelayed({ loadNodeAddressAndGenerateQr(attemptsLeft - 1) }, 500)
+            return
+        }
+        val qrBytes = try {
+            P2PLib.generateQrPacket(nodeAddress)
+        } catch (e: Exception) {
+            null
+        }
+        if (qrBytes != null && qrBytes.isNotEmpty()) {
+            imgOwnQr.setImageBitmap(encodeBinaryAsQrBitmap(qrBytes, 400, 400))
+        }
+    }
+
+    /** bkz. eski QrDisplayActivity.encodeBinaryAsQrBitmap — birebir aynı. */
+    private fun encodeBinaryAsQrBitmap(data: ByteArray, width: Int, height: Int): Bitmap {
+        val text = QrBinaryCodec.bytesToLatin1String(data)
+        val hints = mapOf(EncodeHintType.CHARACTER_SET to "ISO-8859-1")
+        val bitMatrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, width, height, hints)
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565)
+        for (x in 0 until width) {
+            for (y in 0 until height) {
+                bitmap.setPixel(x, y, if (bitMatrix[x, y]) Color.BLACK else Color.WHITE)
+            }
+        }
+        return bitmap
     }
 
     /** bkz. ChatsFragment.showChatLongPressMenu aynı notu — iki sekme de
@@ -148,6 +207,11 @@ class ContactsFragment : Fragment() {
     override fun onPause() {
         super.onPause()
         refreshHandler.removeCallbacks(refreshRunnable)
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        qrRetryHandler.removeCallbacksAndMessages(null)
     }
 
     private fun refreshList() {

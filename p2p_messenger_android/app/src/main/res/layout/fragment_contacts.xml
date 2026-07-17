@@ -10,24 +10,52 @@
         android:text="Contacts"
         android:textSize="24sp"
         android:textStyle="bold"/>
-    <Button
-        android:id="@+id/btn_scan_qr"
+
+    <!-- Spec dışı, kullanıcı isteği: kendi QR kodumuz artık ayrı bir "My
+         QR" ekranına gitmeden doğrudan bu sekmede görünür (bkz.
+         ContactsFragment — eski QrDisplayActivity'nin QR üretim mantığı
+         buraya taşındı). -->
+    <ImageView
+        android:id="@+id/imgOwnQr"
+        android:layout_width="200dp"
+        android:layout_height="200dp"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginTop="16dp"
+        android:contentDescription="@string/action_show_qr" />
+
+    <TextView
+        android:id="@+id/txtOwnIdentityCode"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Add Contact via QR"
-        android:layout_marginTop="16dp"/>
-    <Button
-        android:id="@+id/btn_show_qr"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginTop="8dp"
+        android:fontFamily="monospace"
+        android:textIsSelectable="true"
+        android:textSize="12sp" />
+
+    <!-- Diğer eşleşme yöntemleri — QR'ın hemen altında, ortalanmış (bkz.
+         kullanıcı isteği). -->
+    <LinearLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="@string/action_show_qr"
-        android:layout_marginTop="8dp"/>
-    <Button
-        android:id="@+id/btn_manual_add"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Manuel Ekle"
-        android:layout_marginTop="8dp"/>
+        android:layout_gravity="center_horizontal"
+        android:layout_marginTop="12dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btn_scan_qr"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Add Contact via QR"/>
+        <Button
+            android:id="@+id/btn_manual_add"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="Manuel Ekle"/>
+
+    </LinearLayout>
+
     <TextView
         android:id="@+id/contactsPlaceholder"
         android:layout_width="match_parent"

@@ -246,4 +246,51 @@
 
     </LinearLayout>
 
+    <!-- Spec dışı, kullanıcı isteği: "görüldü" bildirimi — SADECE en son
+         görülen mesajın altında (bkz. SimpleChatAdapter.applySeen, tüm
+         önceki mesajlar örtük olarak görülmüş sayılır). Hem 1:1 (tek
+         avatar) hem grup (birden fazla görenin avatarı) için aynı satır —
+         gruplarda 3'ten fazla goren "+N" ile özetlenir. -->
+    <LinearLayout
+        android:id="@+id/rowSeenBy"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/imgSeenBy1"
+            android:layout_width="14dp"
+            android:layout_height="14dp"
+            android:layout_marginEnd="2dp"
+            android:contentDescription="@string/msg_read" />
+
+        <ImageView
+            android:id="@+id/imgSeenBy2"
+            android:layout_width="14dp"
+            android:layout_height="14dp"
+            android:layout_marginEnd="2dp"
+            android:visibility="gone"
+            android:contentDescription="@null" />
+
+        <ImageView
+            android:id="@+id/imgSeenBy3"
+            android:layout_width="14dp"
+            android:layout_height="14dp"
+            android:layout_marginEnd="2dp"
+            android:visibility="gone"
+            android:contentDescription="@null" />
+
+        <TextView
+            android:id="@+id/txtSeenByMore"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="10sp"
+            android:textColor="?attr/colorOnSurfaceVariant"
+            android:visibility="gone" />
+
+    </LinearLayout>
+
 </LinearLayout>

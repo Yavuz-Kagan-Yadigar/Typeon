@@ -724,14 +724,23 @@ class ChatActivity : AppCompatActivity() {
     private fun handleIncomingEvent(obj: JSONObject) {
         when (obj.optString("type")) {
             "message" -> {
+                val messageId = obj.optString("message_id")
                 adapter.addMessage(
                     SimpleChatAdapter.Item(
-                        messageId = obj.optString("message_id"),
+                        messageId = messageId,
                         text = obj.optString("text"),
                         isMine = false
                     )
                 )
                 recycler.scrollToPosition(localMessages.size - 1)
+                // Spec dışı, kullanıcı isteği: "görüldü" — sohbet ekranı
+                // AÇIKKEN gelen her canlı mesaj için otomatik gönderilir
+                // (Ack'in aksine bu OTOMATİK değil bir kural değil, burada
+                // "ekranda gösterildi" ile "geldi" aynı ana denk düştüğü
+                // için hemen tetikleniyor). Geçmişten yüklenen mesajlar
+                // için gönderilmez (bkz. loadHistoryIfAvailable notu —
+                // arşiv kararlı bir message_id taşımıyor zaten).
+                markSeen(messageId)
             }
             "edit" -> adapter.applyEdit(obj.optString("message_id"), obj.optString("text"))
             "delete" -> adapter.applyDelete(obj.optString("message_id"))
@@ -760,6 +769,7 @@ class ChatActivity : AppCompatActivity() {
                     )
                 )
                 recycler.scrollToPosition(localMessages.size - 1)
+                markSeen(obj.optString("file_id"))
             }
             "file_progress" -> adapter.applyAttachmentUpdate(
                 obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.DOWNLOADING, obj.optLong("bytes_done")
@@ -781,7 +791,21 @@ class ChatActivity : AppCompatActivity() {
                 val avatarHex = obj.optString("avatar_hex", "")
                 AvatarUtil.renderInto(imgToolbarAvatar, if (avatarHex.isNotEmpty()) hexToBytes(avatarHex) else null, txtToolbarTitle.text.toString())
             }
+            "seen" -> {
+                val messageId = obj.optString("message_id")
+                val peerName = txtToolbarTitle.text.toString()
+                adapter.applySeen(messageId, listOf(SimpleChatAdapter.SeenByViewer(resolveContactAvatar(peerDeviceFingerprint), peerName)))
+            }
         }
+    }
+
+    /** bkz. dosya başı "görüldü" notu — fire-and-forget, sessizce
+     *  başarısız olabilir (en kötü ihtimalle karşı taraf görüldü
+     *  bilgisini görmez, mesajlaşmanın kendisi etkilenmez). */
+    private fun markSeen(messageId: String) {
+        try {
+            P2PLib.sendSeenReceipt(peerDeviceFingerprint, messageId, null)
+        } catch (e: Exception) { /* yoksay */ }
     }
 
     /** bkz. dosya başı "yazıyor..." notu — SADECE geçiş anında (false->true/
