@@ -1,0 +1,70 @@
+```
+# Android build outputs
+*.apk
+*.aar
+*.jar
+*.so
+
+# Android build directories
+build/
+.gradle/
+captures/
+.externalNativeBuild/
+
+# Android Studio
+.idea/
+*.iml
+*.iws
+*.log
+
+# Gradle
+.gradle/
+gradle-app.setting
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Keystore properties
+key.properties
+
+# Log Files
+*.log
+
+# Rust build artifacts
+target/
+Cargo.lock
+
+# CMake
+CMakeFiles/
+cmake_install.cmake
+CMakeCache.txt
+Makefile
+
+# Windows thumbnail cache files
+Thumbs.db
+ehthumbs.db
+
+# macOS
+.DS_Store
+
+# Python (if any Python components exist)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git/modules/
+```

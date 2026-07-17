@@ -1,0 +1,227 @@
+//! Ağ üzerinde taşınan paket biçimleri — Description.md bölüm 1.3, 1.5,
+//! 1.6, 3.3, 5.2.
+
+use serde::{Deserialize, Serialize};
+
+/// QR kodun taşıdığı eşleşme paketi (spec 1.3 — "Karar (v0.1): fingerprint-only
+/// QR"). CBOR ile kodlanır (QR kapasitesi kısıtı nedeniyle tam public key'ler
+/// taşınmaz — bağlantı kurulunca karşı taraftan indirilir ve bu `fingerprint`
+/// ile karşılaştırılır).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QrPacket {
+    pub version: u8,
+    pub device_name: String,
+    /// Kişi kimliği (spec 1.3 v0.2 notu: identity_id de taşınır).
+    pub identity_id: String,
+    /// Bu cihazın kendi fingerprint'i.
+    pub device_fingerprint: String,
+    /// Bağlanmak için yeterli tek bir bilinen adres.
+    pub rendezvous_node: String,
+}
+
+impl QrPacket {
+    pub const CURRENT_VERSION: u8 = 1;
+
+    /// CBOR olarak kodlar (QR'a gömülecek ham bayt dizisi).
+    pub fn to_cbor(&self) -> Result<Vec<u8>, String> {
+        let mut buf = Vec::new();
+        ciborium::into_writer(self, &mut buf).map_err(|e| e.to_string())?;
+        Ok(buf)
+    }
+
+    pub fn from_cbor(data: &[u8]) -> Result<Self, String> {
+        ciborium::from_reader(data).map_err(|e| e.to_string())
+    }
+}
+
+/// Cihaz ekleme QR'ı (spec 1.5 adım 2) — yeni cihazın kendi anahtarlarını
+/// ve geçici bağlantı için KEM public key'lerini taşır.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceLinkRequest {
+    pub device_fingerprint: String,
+    pub device_name: String,
+    pub kem_pubkey_x25519: Vec<u8>,
+    pub kem_pubkey_mlkem: Vec<u8>,
+}
+
+impl DeviceLinkRequest {
+    pub fn to_cbor(&self) -> Result<Vec<u8>, String> {
+        let mut buf = Vec::new();
+        ciborium::into_writer(self, &mut buf).map_err(|e| e.to_string())?;
+        Ok(buf)
+    }
+
+    pub fn from_cbor(data: &[u8]) -> Result<Self, String> {
+        ciborium::from_reader(data).map_err(|e| e.to_string())
+    }
+}
+
+/// Var olan (onaylı) cihaz tarafından imzalanıp yayılan cihaz ekleme
+/// bildirimi (spec 1.5 adım 4).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceAdd {
+    pub identity_id: String,
+    pub new_device_fingerprint: String,
+    /// Onaylayan cihazın fingerprint'i.
+    pub added_by: String,
+    pub signature: Vec<u8>,
+}
+
+/// Cihaz iptali (spec 1.6).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceRevoke {
+    pub identity_id: String,
+    pub revoked_device_fingerprint: String,
+    /// İptali yapan cihazın fingerprint'i.
+    pub revoked_by: String,
+    pub signature: Vec<u8>,
+}
+
+/// Okundu bildirimi (spec 1.7.1) — normal mesaj trafiğinin parçası olarak
+/// şifrelenip imzalanarak gönderilir.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadReceipt {
+    pub message_id: String,
+    pub read_by_identity: String,
+    pub read_at: u64,
+}
+
+/// Grup üyelik değişikliği (spec 5.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GroupChange {
+    Add(String),    // identity_id
+    Remove(String), // identity_id
+    Rename(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupUpdate {
+    pub group_id: String,
+    pub new_version: u32,
+    pub change: GroupChange,
+    /// founder_identity_id olmalı — alıcı taraf bunu doğrular.
+    pub signed_by: String,
+    /// Kurucunun hangi cihazı imzaladı.
+    pub signed_by_device: String,
+    pub signature: Vec<u8>,
+}
+
+/// Grup daveti (spec 5.4) — kurucudan davet edilen kişiye, var olan/o an
+/// kurulan 1:1 bağlantı üzerinden gönderilir.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupInvite {
+    pub group_id: String,
+    pub group_name: String,
+    pub founder_identity_id: String,
+}
+
+/// Ağ üzerinde taşınan üst-seviye paket zarfı. `MessagePacket` header'ı
+/// spec 3.3'teki alanları birebir taşır: `ratchet_pubkey`, `message_number`,
+/// `prev_chain_length` gerçek bir Double Ratchet DH adımını mümkün kılar
+/// (önceki sürümdeki basitleştirilmiş `Packet`'in aksine).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessagePacketHeader {
+    pub sender_identity_id: String,
+    pub sender_device_fingerprint: String,
+    /// Bu mesajın kararlı, ratchet rotasyonlarından bağımsız kimliği (v4
+    /// UUID) — spec dışı, edit/delete'in hangi mesajı hedeflediğini
+    /// belirtebilmesi için gerekli (bkz. `MessageContent::Edit`/`Delete`).
+    /// `message_number`, ratchet rotasyonunda sıfırlanabildiği için tek
+    /// başına kararlı bir kimlik OLAMAZ.
+    pub message_id: String,
+    /// Güncel ratchet adımının public key'i (X25519 + ML-KEM hibrit,
+    /// hibrit anahtarların birleştirilmiş serileştirmesi).
+    pub ratchet_pubkey: Vec<u8>,
+    pub message_number: u32,
+    pub prev_chain_length: u32,
+    /// DOLU İSE: gönderen bu mesajla birlikte bir DH/KEM rotasyonu
+    /// tetikledi — bu alan, rotasyonun ürettiği YENİ Kyber ciphertext'ini
+    /// taşır. Alıcı bunu görünce kendi tarafında da
+    /// `perform_dh_ratchet`'i (kendi inisiyatifiyle değil, bu ciphertext'e
+    /// karşı decapsulate ederek) çalıştırıp aynı yeni anahtarları türetmeli
+    /// — bkz. ratchet.rs `RatchetPublicKeys`/`perform_dh_ratchet`
+    /// dokümantasyonu ve lib.rs `maybe_rotate_ratchet`. Boşsa (None), bu
+    /// mesaj normal bir simetrik-zincir ilerlemesidir, rotasyon yok.
+    pub rotation_kyber_ciphertext: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessagePacket {
+    pub header: MessagePacketHeader,
+    /// AEAD (ChaCha20-Poly1305) şifreli içerik; nonce, header'dan
+    /// deterministik türetilir (message_number bazlı) — ayrıca taşınmaz.
+    /// Çözüldükten sonra bir `MessageContent` olarak CBOR-decode edilir.
+    pub ciphertext: Vec<u8>,
+    /// ML-DSA + Ed25519 hibrit imza (header+ciphertext üzerinde).
+    pub signature_classical: Vec<u8>,
+    pub signature_pq: Vec<u8>,
+}
+
+/// `MessagePacket.ciphertext`'in çözüldükten sonraki gerçek içeriği — spec
+/// dışı, mesaj düzenleme/silme desteği için. Edit/delete AYRI bir paket
+/// tipi/imza akışı olarak DEĞİL, normal bir mesaj gibi aynı ratchet adımıyla
+/// şifrelenip gönderilir (bu yüzden onlar da tam uçtan uca gizlilik/
+/// bütünlük korumasına sahip olur — bir relay/node bunun bir düzenleme mi
+/// yoksa yeni bir mesaj mı olduğunu bile göremez).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MessageContent {
+    /// `group_id`: doluysa bu mesaj bir grup mesajının pairwise
+    /// (1:1 ratchet üzerinden) fan-out kopyasıdır — spec dışı, "gerçek grup
+    /// entegrasyonu" için gerekli. Bu olmadan alıcı taraf, gelen bir grup
+    /// mesajını sıradan bir 1:1 mesajdan AYIRT EDEMİYORDU (bkz. lib.rs
+    /// receive_message/GroupChatActivity notu) — grup sohbeti diye ayrı bir
+    /// yer yoktu, mesajlar göndericinin 1:1 sohbetine karışıyordu.
+    Text { group_id: Option<String>, text: String },
+    Edit { target_message_id: String, new_text: String },
+    Delete { target_message_id: String },
+}
+
+/// El sıkışma paketi — önceki `HandshakeInit` tasarımı; spec'te ayrı bir
+/// paket tipi olarak adlandırılmasa da 3.1'deki hibrit KEM adımını taşımak
+/// için gereklidir (Kyber ciphertext'in karşı tarafa ulaşması şart).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandshakeInit {
+    pub sender_identity_id: String,
+    pub sender_device_fingerprint: String,
+    pub initiator_x25519_pubkey: Vec<u8>,
+    /// Initiator'ın bu oturum için ürettiği Kyber public key'i — responder
+    /// bunu, ratchet.rs'teki DH/KEM rotasyon adımında "karşı tarafın bilinen
+    /// Kyber public key'i" olarak saklamalıdır (yalnızca Kyber ciphertext
+    /// taşımak yeterli değildir; responder'ın kendi rotasyonunu tetikleme
+    /// hakkı için initiator'ın public key'ine de ihtiyacı vardır).
+    pub initiator_kyber_pubkey: Vec<u8>,
+    pub kyber_ciphertext: Vec<u8>,
+    pub timestamp: u64,
+    pub signature_classical: Vec<u8>,
+    pub signature_pq: Vec<u8>,
+}
+
+/// Spec 1.3: "fingerprint-only [...] bağlantı kurulunca karşı taraftan
+/// indirilir ve bu `fingerprint` ile karşılaştırılır". QR/manuel eşleşme
+/// sadece fingerprint taşıdığı için, bağlantı kurulunca tarafların gerçek
+/// public key'lerini birbirine gönderip kendi fingerprint hesaplamasıyla
+/// karşılaştırması gerekir — bu paket o adımı taşır.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityExchange {
+    pub identity_id: String,
+    pub device_fingerprint: String,
+    pub device_name: String,
+    pub sign_pubkey_ed25519: Vec<u8>,
+    pub sign_pubkey_mldsa: Vec<u8>,
+    pub kem_pubkey_x25519: Vec<u8>,
+    pub kem_pubkey_mlkem: Vec<u8>,
+}
+
+/// Ağdan gelen her şeyi taşıyan zarf — hangi varyant olduğunu ayırt etmek
+/// için kullanılır.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum NetworkEnvelope {
+    IdentityExchange(IdentityExchange),
+    Handshake(HandshakeInit),
+    Message(MessagePacket),
+    DeviceAdd(DeviceAdd),
+    DeviceRevoke(DeviceRevoke),
+    GroupUpdate(GroupUpdate),
+    GroupInvite(GroupInvite),
+    ReadReceipt(ReadReceipt),
+}

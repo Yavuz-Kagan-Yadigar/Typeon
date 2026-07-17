@@ -1,0 +1,164 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.p2p.messenger'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.p2p.messenger"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    buildFeatures {
+        viewBinding true
+    }
+
+    packagingOptions {
+        jniLibs {
+            // AGP 8.5+/build-tools zipalign uncompressed native libs to the
+            // page size automatically; keep this explicit so it doesn't
+            // silently regress if legacy packaging is ever re-enabled.
+            useLegacyPackaging = false
+            // `if-watch` (a libp2p dependency, used for network-interface
+            // change detection) declares `crate-type = ["cdylib", "lib"]`
+            // in its own Cargo.toml, so cargo-ndk's build sweeps up a
+            // `libif_watch-*.so` as an incidental side artifact alongside
+            // our real libp2p_messenger.so. Nothing loads it (no
+            // System.loadLibrary call references it) — it's dead weight
+            // that was also failing the 16 KB page-size check, so exclude
+            // it instead of trying to align a library the app never uses.
+            excludes += ["**/libif_watch*.so"]
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
+    implementation 'androidx.activity:activity-ktx:1.8.2'
+    implementation 'androidx.fragment:fragment-ktx:1.6.2'
+
+    // Navigation
+    def nav_version = "2.7.6"
+    implementation "androidx.navigation:navigation-fragment-ktx:$nav_version"
+    implementation "androidx.navigation:navigation-ui-ktx:$nav_version"
+
+    // CameraX for QR
+    // 1.3.1's prebuilt libimage_processing_util_jni.so predates 16 KB page
+    // size support; 1.4.1 ships a 16 KB-aligned build of that library.
+    def camerax_version = "1.4.1"
+    implementation "androidx.camera:camera-core:$camerax_version"
+    implementation "androidx.camera:camera-camera2:$camerax_version"
+    implementation "androidx.camera:camera-lifecycle:$camerax_version"
+    implementation "androidx.camera:camera-view:$camerax_version"
+
+    // ZXing for QR decoding
+    implementation 'com.google.zxing:core:3.5.1'
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+
+    // Coroutines
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+}
+
+// Build the Rust core via cargo-ndk and drop the resulting .so files into
+// jniLibs so System.loadLibrary("p2p_messenger") can find them.
+// Requires: cargo install cargo-ndk, and the Android NDK on PATH/ANDROID_NDK_HOME.
+// Android Studio, masaüstü kısayolundan/uygulama menüsünden (veya Flatpak
+// sandbox'ından) başlatıldığında genelde bir "login shell" DEĞİLDİR — bu
+// yüzden ~/.bashrc/~/.profile hiç çalıştırılmaz ve ~/.cargo/bin PATH'e
+// eklenmez, Gradle "cargo" komutunu bulamaz (error=2: No such file or
+// directory), oysa terminalden `cargo` çalışır çünkü terminal PATH'i
+// .bashrc üzerinden zaten doğru kurulmuştur.
+// Çözüm: cargo'nun tam yolunu kendimiz buluyoruz — önce PATH'te ara, yoksa
+// standart rustup kurulum konumuna (~/.cargo/bin/cargo) düş.
+def resolveCargoExecutable() {
+    def pathEnv = System.getenv("PATH") ?: ""
+    def candidates = pathEnv.split(File.pathSeparator).collect { new File(it, "cargo") }
+    candidates += new File(System.getProperty("user.home"), ".cargo/bin/cargo")
+    def found = candidates.find { it.exists() && it.canExecute() }
+    if (found == null) {
+        throw new GradleException(
+            "cargo bulunamadı. rustup ile Rust kurulu olduğundan emin olun " +
+            "(https://rustup.rs) — beklenen konum: " +
+            "${System.getProperty('user.home')}/.cargo/bin/cargo"
+        )
+    }
+    return found.absolutePath
+}
+
+// ANDROID_NDK_HOME de aynı nedenle (Android Studio'nun süreci kullanıcının
+// shell ortam değişkenlerini miras almayabilir) burada elle çözülüyor.
+// Önce ortam değişkenine bakılır; yoksa local.properties'teki sdk.dir
+// altındaki ndk/ klasöründe kurulu en yeni sürüm otomatik seçilir.
+def resolveNdkHome() {
+    def fromEnv = System.getenv("ANDROID_NDK_HOME") ?: System.getenv("ANDROID_NDK_ROOT")
+    if (fromEnv != null && new File(fromEnv).isDirectory()) {
+        return fromEnv
+    }
+    def localProps = new File(rootDir, "local.properties")
+    if (localProps.exists()) {
+        def props = new Properties()
+        localProps.withInputStream { props.load(it) }
+        def sdkDir = props.getProperty("sdk.dir")
+        if (sdkDir != null) {
+            def ndkRoot = new File(sdkDir, "ndk")
+            if (ndkRoot.isDirectory()) {
+                def versions = ndkRoot.listFiles({ f -> f.isDirectory() } as FileFilter)
+                if (versions != null && versions.length > 0) {
+                    return versions.sort { it.name }.last().absolutePath
+                }
+            }
+        }
+    }
+    return null
+}
+
+task cargoNdkBuild(type: Exec) {
+    workingDir "${projectDir}/src/main/cpp/rust"
+    environment "PATH", "${System.getProperty('user.home')}/.cargo/bin${File.pathSeparator}${System.getenv('PATH') ?: ''}"
+    def ndkHome = resolveNdkHome()
+    if (ndkHome != null) {
+        environment "ANDROID_NDK_HOME", ndkHome
+    }
+    commandLine resolveCargoExecutable(), 'ndk',
+            '-t', 'armeabi-v7a', '-t', 'arm64-v8a', '-t', 'x86_64',
+            '-o', "${projectDir}/src/main/jniLibs",
+            'build', '--release'
+}
+
+preBuild.dependsOn cargoNdkBuild

@@ -1,0 +1,70 @@
+[package]
+name = "p2p_messenger_core"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+name = "p2p_messenger"
+
+[dependencies]
+# Cryptography
+ring = "0.17"
+# NOT: pqcrypto-kyber/pqcrypto-dilithium yerine RustCrypto'nun ml-kem/ml-dsa
+# crate'lerine geçildi — eskiler artık bakımsız (RUSTSEC-2024-0381,
+# RUSTSEC-2024-0380) ve gerçek FIPS 203/204 standardıyla bayt-uyumsuz
+# (PQClean'in round-3 taslak Kyber/Dilithium'una dayanıyorlardı). ml-dsa
+# için >=0.1.0-rc.4 ZORUNLU: rc.2/rc.3 GHSA-5x2r-hc65-25f9 imza malleability
+# açığını taşıyor (tekrarlanan hint index'li sahte imzalar kabul ediliyordu).
+#
+# ml-kem'in Decapsulate/Encapsulate trait'leri kendi kökünde değil, ayrı
+# bir `kem` crate'inden geliyor (ml-kem bunu `pub use ::kem::{...}` ile
+# sadece `ml_kem::kem` alt modülünde, kökte DEĞİL re-export ediyor) — bu
+# yüzden `kem` doğrudan bağımlılık olarak eklendi.
+#
+# ml-kem'in rand_core sürümü (0.6.4) ile x25519-dalek/ed25519-dalek'in
+# kullandığı rand_core (0.6, rand 0.8 üzerinden) AYNI majör sürüm — gerçekte
+# bir çakışma YOK, `rand::rngs::OsRng` doğrudan ml-kem'in `CryptoRngCore`
+# parametrelerine geçirilebiliyor. ml-kem'in "getrandom" diye bir feature'ı
+# YOK (parametresiz üretim desteklemiyor, RNG her zaman elle verilir).
+# ml-dsa ise crypto-common'ın `Generate` trait'i üzerinden gerçekten
+# parametresiz `generate()` sunuyor (`getrandom` feature'ı sayesinde,
+# içeride kendi ambient RNG'sini kullanır) — bu yüzden ml-dsa tarafında
+# hâlâ `SigningKey::generate()` (parametresiz) kullanılıyor.
+ml-kem = "0.2"
+kem = "=0.3.0-pre.0"
+ml-dsa = { version = "0.1.1", features = ["getrandom"] }
+chacha20poly1305 = "0.10"
+rand = "0.8"
+sha2 = "0.10"
+sha3 = "0.10"
+hkdf = "0.12"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hex = "0.4"
+base32 = "0.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ciborium = "0.2"
+zeroize = "1.7"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Networking (libp2p)
+libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "tokio", "macros", "dns"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+futures = "0.3"
+
+# Database
+rusqlite = { version = "0.30", features = ["bundled"] }
+
+# Android JNI
+jni = "0.21"
+android_logger = "0.13"
+log = "0.4"
+lazy_static = "1.4"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

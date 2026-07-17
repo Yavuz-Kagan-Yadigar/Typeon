@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material You (M3) tema renk rolleri — açık tema. Koyu tema
+         karşılıkları values-night/colors.xml'de aynı isimlerle tanımlı;
+         themes.xml bunları @color/md_* üzerinden referans alıyor, böylece
+         tek bir tema tanımı hem açık hem koyu modda doğru rengi çözüyor. -->
+    <color name="md_primary">#6750A4</color>
+    <color name="md_on_primary">#FFFFFF</color>
+    <color name="md_primary_container">#EADDFF</color>
+    <color name="md_on_primary_container">#21005D</color>
+    <color name="md_secondary">#625B71</color>
+    <color name="md_on_secondary">#FFFFFF</color>
+    <color name="md_secondary_container">#E8DEF8</color>
+    <color name="md_on_secondary_container">#1D192B</color>
+    <color name="md_tertiary">#7D5260</color>
+    <color name="md_on_tertiary">#FFFFFF</color>
+    <color name="md_surface">#FFFBFE</color>
+    <color name="md_on_surface">#1C1B1F</color>
+    <color name="md_surface_variant">#E7E0EC</color>
+    <color name="md_on_surface_variant">#49454F</color>
+    <color name="md_background">#FFFBFE</color>
+    <color name="md_on_background">#1C1B1F</color>
+    <color name="md_outline">#79747E</color>
+    <color name="md_error">#B3261E</color>
+    <color name="md_on_error">#FFFFFF</color>
+    <color name="md_error_container">#F9DEDC</color>
+    <color name="md_on_error_container">#410E0B</color>
+
+    <!-- OLED "tam siyah" geçersiz kılma (bkz. ThemeOverlay.P2PMessenger.OledBlack,
+         SettingsFragment'teki OLED anahtarı) — sadece koyu temada uygulanır. -->
+    <color name="pure_black">#FF000000</color>
+
+    <!-- Legacy marka renkleri (bazı eski drawable/tema referansları için korunuyor) -->
+    <color name="primary">#2196F3</color>
+    <color name="primary_dark">#1976D2</color>
+    <color name="secondary">#03DAC5</color>
+    <color name="secondary_dark">#018786</color>
+    <color name="background">#FAFAFA</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="error">#B00020</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="on_secondary">#000000</color>
+    <color name="on_background">#000000</color>
+    <color name="on_surface">#000000</color>
+    <color name="on_error">#FFFFFF</color>
+    
+    <!-- Chat colors -->
+    <color name="message_out">#DCF8C6</color>
+    <color name="message_in">#FFFFFF</color>
+    <color name="message_text_out">#000000</color>
+    <color name="message_text_in">#000000</color>
+    <color name="message_timestamp">#888888</color>
+    
+    <!-- Status colors -->
+    <color name="online">#4CAF50</color>
+    <color name="offline">#9E9E9E</color>
+    <color name="warning">#FF9800</color>
+    <color name="danger">#F44336</color>
+
+
+    <color name="purple_200">#FFBB86FC</color>
+    <color name="purple_500">#FF6200EE</color>
+    <color name="purple_700">#FF3700B3</color>
+    <color name="teal_200">#FF03DAC5</color>
+    <color name="teal_700">#FF018786</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:orientation="vertical"
+              android:padding="16dp"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent">
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Contacts"
+        android:textSize="24sp"
+        android:textStyle="bold"/>
+    <Button
+        android:id="@+id/btn_scan_qr"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Add Contact via QR"
+        android:layout_marginTop="16dp"/>
+    <Button
+        android:id="@+id/btn_show_qr"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/action_show_qr"
+        android:layout_marginTop="8dp"/>
+    <Button
+        android:id="@+id/btn_manual_add"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Manuel Ekle"
+        android:layout_marginTop="8dp"/>
+    <TextView
+        android:id="@+id/contactsPlaceholder"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="16dp"
+        android:gravity="center"
+        android:alpha="0.6"
+        android:text="@string/msg_no_contacts"/>
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/recyclerContacts"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="16dp"
+        android:visibility="gone"/>
+</LinearLayout>

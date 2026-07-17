@@ -1,0 +1,2640 @@
+//! P2P Messenger — Rust çekirdeği.
+//!
+//! Description.md "Aşama A" kapsamını hedefler: tek cihaz (1 Identity = 1
+//! Device) varsayımıyla test edilir, ama Identity/Device ayrımına göre
+//! yazılmıştır (Aşama B'de çoklu cihaza genişletilebilir).
+//!
+//! Modüller:
+//! - `identity`  : bölüm 1 — Identity/Device modeli, fingerprint
+//! - `packet`    : bölüm 1.3-1.6, 3.3, 5.2 — ağ paket formatları
+//! - `ratchet`   : bölüm 3 — hibrit KEM + Double Ratchet
+//! - `contact`   : bölüm 2 — TOFU + güvenlik numarası değişikliği
+//! - `group`     : bölüm 5 — pairwise grup mesajlaşma
+
+mod identity;
+mod packet;
+mod ratchet;
+mod contact;
+mod group;
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use android_logger::Config as LogConfig;
+use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use futures::FutureExt as _;
+use futures::StreamExt as _;
+use hex;
+use jni::objects::{JByteArray, JClass, JString};
+use jni::sys::{jboolean, jobjectArray, jstring};
+use jni::JNIEnv;
+use libp2p::kad::store::MemoryStore;
+use libp2p::swarm::NetworkBehaviour;
+use libp2p::{gossipsub, identify, kad, noise, tcp, yamux, Multiaddr, PeerId, Swarm};
+use log::{error, info};
+// NOT: pqcrypto-dilithium/pqcrypto-kyber yerine RustCrypto'nun aktif bakımlı
+// ml-dsa/ml-kem crate'lerine geçildi (bkz. Cargo.toml notu — RUSTSEC-2024-0380,
+// RUSTSEC-2024-0381, FIPS 204/203 bayt-uyumsuzluğu). Ayrıca spec "ML-DSA-65"
+// istiyordu (bölüm 1.1 tablosu) — önceki kod yanlışlıkla ML-DSA-44 (Dilithium2)
+// kullanıyordu; bu geçişte MlDsa65'e düzeltildi.
+use ml_dsa::{EncodedSignature, EncodedVerifyingKey, Generate as MlDsaGenerate, KeyExport as MlDsaKeyExport, Keypair as MlDsaKeypair, MlDsa65, Signature as MlDsaSignature, SigningKey as MlDsaSigningKey, Signer as MlDsaSigner, VerifyingKey as MlDsaVerifyingKey, Verifier as MlDsaVerifier};
+use ml_kem::{EncodedSizeUser as MlKemEncodedSizeUser, KemCore as MlKemCore, MlKem768};
+use rand::rngs::OsRng;
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
+use tokio::runtime::Runtime;
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+
+
+use contact::{check_incoming_device, Contact, DeviceCheckOutcome};
+use group::{apply_change, validate_group_update, Group, GroupChange};
+use identity::{compute_fingerprint, DeviceStatus};
+use packet::{
+    GroupUpdate, HandshakeInit, IdentityExchange, MessageContent, MessagePacket, MessagePacketHeader,
+    NetworkEnvelope, QrPacket,
+};
+use ratchet::{DeviceRatchetState, MlKem768DecapsulationKey, MlKem768EncapsulationKey, RatchetPublicKeys};
+
+const DB_NAME: &str = "p2p_messenger.db";
+
+lazy_static::lazy_static! {
+    static ref RUNTIME: Runtime = tokio::runtime::Runtime::new().unwrap();
+    static ref CORE: Arc<Mutex<P2PCore>> = Arc::new(Mutex::new(P2PCore::new()));
+}
+
+// --- libp2p birleşik davranış ---
+//
+// Spec bölüm 4.2: DHT (Kademlia) keşif için. Identify protokolü, Kademlia'nın
+// bağlanan peer'ların dinleme adreslerini öğrenip routing tablosuna
+// ekleyebilmesi için ZORUNLUDUR (bkz. docs.rs/libp2p/kad: "the Identify
+// protocol must be manually hooked up to Kademlia"). Gossipsub, mesaj/
+// handshake paketlerinin taşınması için (bölüm 3.3 son not: "Node/relay bu
+// paketi kör taşır").
+#[derive(NetworkBehaviour)]
+struct P2PBehaviour {
+    gossipsub: gossipsub::Behaviour,
+    kad: kad::Behaviour<MemoryStore>,
+    identify: identify::Behaviour,
+}
+
+fn current_time_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+// --- Yerel cihazın secret key'leri (asla ağa/DB'ye çıplak yazılmaz;
+// export_recovery yolu hariç, o da şifreli) ---
+struct DeviceKeys {
+    sign_sk_ed25519: SigningKey,
+    #[allow(dead_code)]
+    sign_pk_ed25519: VerifyingKey,
+    sign_pk_mldsa: MlDsaVerifyingKey<MlDsa65>,
+    sign_sk_mldsa: MlDsaSigningKey<MlDsa65>,
+    kem_sk_x25519: StaticSecret,
+    #[allow(dead_code)]
+    kem_pk_x25519: X25519PublicKey,
+    kem_pk_mlkem: MlKem768EncapsulationKey,
+    kem_sk_mlkem: MlKem768DecapsulationKey,
+}
+
+/// Bir cihazın tüm secret key'lerini taşıyan, JNI sınırı üzerinden
+/// Kotlin'e/Kotlin'den geçirilen paket. Rust bu bloğu ASLA diske yazmaz —
+/// diske yazma/okuma sorumluluğu tamamen Kotlin tarafındadır
+/// (KeystoreCrypto ile şifrelenip ayrı bir tabloya/dosyaya konur). Bu,
+/// "Rust master şifreleme anahtarını hiç görmesin" ilkesini sağlar: Rust
+/// sadece plaintext key üretir/tüketir, şifreleme/diske yazma Kotlin'in
+/// işidir.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SecretKeyBundle {
+    device_fingerprint: String,
+    sign_sk_ed25519: Vec<u8>,
+    sign_sk_mldsa: Vec<u8>,
+    kem_sk_x25519: Vec<u8>,
+    kem_sk_mlkem: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeviceRecord {
+    device_fingerprint: String,
+    identity_id: String,
+    sign_pubkey_ed25519: Vec<u8>,
+    sign_pubkey_mldsa: Vec<u8>,
+    kem_pubkey_x25519: Vec<u8>,
+    kem_pubkey_mlkem: Vec<u8>,
+    device_name: String,
+    is_active: bool,
+    last_seen: u64,
+}
+
+/// Bir bağlantı kurulurken tespit edilen "cihaz değişikliği" durumunun
+/// Kotlin tarafına iletilecek özeti (spec 2.2 uyarı ekranı).
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceAlertInfo {
+    pub contact_display_name: String,
+    pub identity_id: String,
+    pub new_device_fingerprint: String,
+    pub known_device_short_codes: Vec<String>,
+    pub new_device_short_code: String,
+}
+
+/// UI'nin kişi seçici listesi için kullandığı özet.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContactSummary {
+    pub contact_id: String,
+    pub display_name: String,
+    pub identity_id: String,
+    /// None ise: henüz IdentityExchange tamamlanmamış, mesaj gönderilemez.
+    pub active_device_fingerprint: Option<String>,
+}
+
+/// Yerel şifreli arşivden çözülüp Kotlin'e döndürülen tek bir mesaj.
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchivedMessage {
+    pub direction: String, // "sent" | "received"
+    pub text: String,
+    pub timestamp: u64,
+}
+
+/// Groups tab GUI'sinin liste/detay göstermesi için özet (spec dışı —
+/// `list_groups` yoktu, Groups tab'ı hiçbir zaman gerçek grup listesi
+/// göstermiyordu).
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupSummary {
+    pub group_id: String,
+    pub name: String,
+    pub founder_identity_id: String,
+    pub is_founder: bool,
+    pub member_identity_ids: Vec<String>,
+}
+
+/// Bir gönderilen mesajın ("bizim" mesajımızın) UI'da gösterilecek durumu —
+/// spec dışı, kullanıcının istediği gönderim/hata ikonları için.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageSendStatus {
+    /// `publish_envelope` henüz başarılı olmadı — `pending_envelopes`'te
+    /// bekliyor, `poll_events` yeniden deniyor.
+    Pending,
+    /// gossipsub publish() başarıyla tamamlandı (bu, karşı tarafın FİİLEN
+    /// aldığının garantisi DEĞİLDİR — sadece yerel düğümün mesajı ağa
+    /// yayınladığının garantisidir; spec bir teslim onayı/ACK tanımlamıyor).
+    Sent,
+    /// `PENDING_ENVELOPE_TIMEOUT_MS` boyunca gönderilemedi, vazgeçildi.
+    Failed,
+}
+
+impl MessageSendStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            MessageSendStatus::Pending => "pending",
+            MessageSendStatus::Sent => "sent",
+            MessageSendStatus::Failed => "error",
+        }
+    }
+}
+
+/// Bir zarfın `pending_envelopes`'te ne kadar süre bekleyebileceği — bu
+/// süre dolunca kalıcı olarak "Failed" sayılır (bkz. `MessageSendStatus`).
+const PENDING_ENVELOPE_TIMEOUT_MS: u64 = 20_000;
+
+struct P2PCore {
+    db: Option<Connection>,
+    identity: Option<identity::Identity>,
+    /// Aşama A kapsamı: identity_id == device_fingerprint (1 Identity = 1
+    /// Device). Bu map yine de device_fingerprint anahtarlı kalır (Aşama
+    /// B'de birden fazla cihaz eklenebilsin diye).
+    own_devices: HashMap<String, DeviceRecord>,
+    own_device_keys: HashMap<String, DeviceKeys>,
+    /// Bilinen uzak cihazların public key kayıtları (contact exchange /
+    /// QR üzerinden öğrenilir).
+    known_remote_devices: HashMap<String, DeviceRecord>,
+    contacts: HashMap<String, Contact>, // contact_id -> Contact
+    /// identity_id -> contact_id hızlı arama.
+    identity_to_contact: HashMap<String, String>,
+    /// Cihaz-çifti bazlı ratchet oturumları: key = uzak device_fingerprint.
+    ratchets: HashMap<String, DeviceRatchetState>,
+    groups: HashMap<String, Group>,
+    /// Kullanıcının onay beklediği, henüz kabul/red edilmemiş cihaz
+    /// değişikliği uyarıları (spec 2.2). key = new_device_fingerprint.
+    pending_device_alerts: HashMap<String, DeviceAlertInfo>,
+    /// Bekleyen mesajlar (henüz doğrulanmamış/bloklu cihazdan geleni
+    /// tutmuyoruz — spec "yeni mesaj gönderme/alma durur" der, yani
+    /// alert çözülene kadar o cihazdan gelen mesajlar sessizce reddedilir).
+    swarm: Option<Swarm<P2PBehaviour>>,
+    /// `start_network` sonrası swarm'ın gerçekten dinlemeye başladığı
+    /// adresler (`SwarmEvent::NewListenAddr`, bkz. `poll_events`) — QR/"Kodum"
+    /// ekranında gösterilen `node_address` bundan türetilir. Bootstrap
+    /// sırasında istenen `/ip4/0.0.0.0/tcp/0` (spec dışı, wildcard "her
+    /// arayüzde, işletim sistemi seçsin" isteği) BUNUN YERİNE hiçbir zaman
+    /// gösterilmemeli — 0.0.0.0/tcp/0 karşı tarafın dial edebileceği somut
+    /// bir adres değildir.
+    own_listen_addrs: Vec<Multiaddr>,
+    /// `publish_envelope` gossipsub publish() başarısız olduğunda (bkz. o
+    /// fonksiyonun dokümantasyonu — ilk bağlantıdan sonraki ilk birkaç
+    /// saniyede mesh henüz oluşmamış olabilir; HandshakeInit/IdentityExchange/
+    /// Message/GroupUpdate FARK ETMEKSİZİN, herhangi bir zarf bundan
+    /// etkilenebilir) gönderilecek zarfı burada bekletir. `poll_events` her
+    /// turda AYNI zarfı (yeni bir ratchet adımı/message_id tüketmeden)
+    /// yeniden göndermeyi dener — bu, TÜM zarf türleri için TEK, merkezi bir
+    /// yeniden deneme mekanizmasıdır (önceden her çağıran kendi tip-özel
+    /// kuyruğunu tutuyordu, bu hem tekrarlıydı hem de HandshakeInit gibi
+    /// bazı zarflar için hiç kapsanmıyordu). Üçüncü alan: ilk deneme
+    /// zamanı (ms) — `PENDING_ENVELOPE_TIMEOUT_MS`'i aşarsa kalıcı olarak
+    /// "Failed" sayılıp kuyruktan düşürülür (aksi halde asla erişilemeyen
+    /// bir cihaz için sonsuza kadar denenir).
+    pending_envelopes: Vec<(String, NetworkEnvelope, u64)>,
+    /// UI'nin mesaj durumu ikonları göstermesi için (bkz. spec dışı
+    /// "gönderim durumu" isteği) — key: `MessagePacketHeader.message_id`.
+    /// Sınırsız büyümesin diye bir üst sınırı yok şu an (Aşama A kapsamında
+    /// pratikte önemli değil) — bilinen küçük bir sınırlama.
+    message_status: HashMap<String, MessageSendStatus>,
+    /// Node modu açık mı (spec 4.3). Kapalıyken sadece Peer modu: DHT
+    /// sorgular/günceller ama routing tablosuna aktif katkı sağlamaz
+    /// (kad::Mode::Client). Açıkken kad::Mode::Server.
+    node_mode_enabled: bool,
+    /// `createIdentity` sonrası bir kereliğine Kotlin'e teslim edilecek
+    /// plaintext secret bundle. `getPendingSecretBundle` çağrıldığında
+    /// alınıp `None`'a döner (bkz. o fonksiyonun dokümantasyonu).
+    pending_secret_bundle: Option<Vec<u8>>,
+    /// Mesaj geçmişi arşivini şifrelemek için kullanılan 256-bit anahtar.
+    /// Kotlin, Keystore'da sarılı (wrapped) bir "history data key" tutar,
+    /// açılışta çözüp `setHistoryKey` ile buraya yükler — Rust bu anahtarı
+    /// diske hiç yazmaz, sadece bellekte tutar (bkz. dosya sonu "mesaj
+    /// geçmişi" notu). `None` iken (henüz yüklenmedi veya node modu hiç
+    /// açılmadı) mesajlar arşivlenmez, sadece anlık işlenir.
+    history_key: Option<[u8; 32]>,
+    /// Skipped-message-key önbelleğini (bkz. ratchet.rs `skipped_keys`)
+    /// diske şifreli kalıcılaştırmak için kullanılan anahtar. Node
+    /// modundan BAĞIMSIZ olarak her zaman yüklenir (mesajlaşmanın
+    /// güvenilirliği için gerekli — history_key'in aksine bu opsiyonel
+    /// bir arşivleme değil). Kotlin `setSkippedKeyEncryptionKey` ile
+    /// yükler.
+    skipped_key_encryption_key: Option<[u8; 32]>,
+}
+
+impl P2PCore {
+    fn new() -> Self {
+        android_logger::init_once(LogConfig::default().with_max_level(log::LevelFilter::Info));
+        // JNI export'ları çağırdığı her `P2PCore` metodunu `catch_panic` ile
+        // sarmalıyor (bkz. dosya sonu, JNI Bindings bölümü) — ama panic
+        // hook'u burada AYRICA kurmamızın nedeni: stripped release build'de
+        // (Cargo.toml `strip = true`) bir panic'in crash_dump'ı sembol
+        // içermez, tanı imkansızlaşır (bkz. processQrPacket çökmesi geçmişi).
+        // Bu hook, catch_unwind onu yakalamadan ÖNCE (panic sırasında,
+        // unwind başlamadan) TAM panic mesajını + dosya/satır bilgisini
+        // logcat'e yazar.
+        std::panic::set_hook(Box::new(|info| {
+            error!("PANIC yakalandı: {}", info);
+        }));
+        P2PCore {
+            db: None,
+            identity: None,
+            own_devices: HashMap::new(),
+            own_device_keys: HashMap::new(),
+            known_remote_devices: HashMap::new(),
+            contacts: HashMap::new(),
+            identity_to_contact: HashMap::new(),
+            ratchets: HashMap::new(),
+            groups: HashMap::new(),
+            pending_device_alerts: HashMap::new(),
+            swarm: None,
+            own_listen_addrs: Vec::new(),
+            pending_envelopes: Vec::new(),
+            message_status: HashMap::new(),
+            node_mode_enabled: false,
+            pending_secret_bundle: None,
+            history_key: None,
+            skipped_key_encryption_key: None,
+        }
+    }
+
+    /// Android'in `std::env::var("ANDROID_DATA")` ile güvenilir biçimde
+    /// bilinemeyen, uygulamaya özel yazılabilir dizinini Kotlin tarafından
+    /// (`Context.filesDir.absolutePath`) almak zorundayız — bu yüzden DB
+    /// açma `new()`'de otomatik değil, Kotlin'in ilk çağrıda geçtiği gerçek
+    /// dosya yoluyla `init_db` çağrılmasını bekler (bkz. JNI `initDatabase`).
+    fn init_db(&mut self, app_files_dir: &str) -> Result<(), rusqlite::Error> {
+        let path = format!("{}/{}", app_files_dir, DB_NAME);
+        let conn = Connection::open(path)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS identities (id TEXT PRIMARY KEY, primary_device TEXT);
+             CREATE TABLE IF NOT EXISTS own_devices (device_fingerprint TEXT PRIMARY KEY, identity_id TEXT,
+                sign_pk_ed25519 BLOB, sign_pk_mldsa BLOB, kem_pk_x25519 BLOB, kem_pk_mlkem BLOB,
+                device_name TEXT, is_active INTEGER, last_seen INTEGER);
+             CREATE TABLE IF NOT EXISTS contacts (contact_id TEXT PRIMARY KEY, display_name TEXT,
+                trusted_identity_id TEXT, known_devices_json TEXT, last_device_change INTEGER);
+             CREATE TABLE IF NOT EXISTS groups (group_id TEXT PRIMARY KEY, founder TEXT, name TEXT,
+                version INTEGER, members_json TEXT, created_at INTEGER);
+             CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                peer_device_fingerprint TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                encrypted_blob BLOB NOT NULL,
+                nonce BLOB NOT NULL,
+                timestamp INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_messages_peer ON messages(peer_device_fingerprint, timestamp);
+             CREATE TABLE IF NOT EXISTS skipped_message_keys (
+                peer_device_fingerprint TEXT NOT NULL,
+                message_number INTEGER NOT NULL,
+                encrypted_key BLOB NOT NULL,
+                nonce BLOB NOT NULL,
+                PRIMARY KEY (peer_device_fingerprint, message_number)
+             );"
+        )?;
+        self.db = Some(conn);
+        self.load_identity_from_db();
+        Ok(())
+    }
+
+    /// Uygulama yeniden başlatıldığında DB'de kayıtlı identity/device'ın
+    /// PUBLIC key kayıtlarını belleğe yükler. Bulunamazsa (ilk açılış)
+    /// sessizce hiçbir şey yapmaz — `generate_identity` çağrılmasını
+    /// bekler. Secret key'ler burada YÜKLENMEZ — Kotlin, Keystore ile
+    /// şifresini çözdüğü `SecretKeyBundle`'ı ayrıca `load_secret_bundle`
+    /// ile göndermelidir (uygulama akışı: initDatabase → identity varsa
+    /// Kotlin şifreli blob'u okur/çözer → loadSecretBundle çağrılır).
+    fn load_identity_from_db(&mut self) {
+        let conn = match &self.db {
+            Some(c) => c,
+            None => return,
+        };
+        let identity_row: Option<(String, String)> = conn
+            .query_row("SELECT id, primary_device FROM identities LIMIT 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .ok();
+        let (identity_id, primary_device) = match identity_row {
+            Some(v) => v,
+            None => return,
+        };
+
+        let mut stmt = match conn.prepare(
+            "SELECT device_fingerprint, sign_pk_ed25519, sign_pk_mldsa, kem_pk_x25519, kem_pk_mlkem,
+                    device_name, is_active, last_seen
+             FROM own_devices WHERE identity_id = ?1"
+        ) {
+            Ok(s) => s,
+            Err(e) => { error!("load_identity_from_db prepare failed: {}", e); return; }
+        };
+
+        let rows = stmt.query_map(params![identity_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, Vec<u8>>(3)?, row.get::<_, Vec<u8>>(4)?,
+                row.get::<_, String>(5)?, row.get::<_, i32>(6)?, row.get::<_, i64>(7)?,
+            ))
+        });
+
+        let mut device_infos = Vec::new();
+
+        if let Ok(rows) = rows {
+            for row in rows.flatten() {
+                let (fp, sign_pk_ed, sign_pk_mldsa, kem_pk_x, kem_pk_mlkem,
+                     device_name, is_active, last_seen) = row;
+
+                self.own_devices.insert(fp.clone(), DeviceRecord {
+                    device_fingerprint: fp.clone(),
+                    identity_id: identity_id.clone(),
+                    sign_pubkey_ed25519: sign_pk_ed,
+                    sign_pubkey_mldsa: sign_pk_mldsa,
+                    kem_pubkey_x25519: kem_pk_x,
+                    kem_pubkey_mlkem: kem_pk_mlkem,
+                    device_name: device_name.clone(),
+                    is_active: is_active != 0,
+                    last_seen: last_seen as u64,
+                });
+                device_infos.push(identity::DeviceInfo {
+                    device_fingerprint: fp,
+                    device_name,
+                    added_at: last_seen as u64,
+                    status: if is_active != 0 { DeviceStatus::Active } else { DeviceStatus::Revoked },
+                });
+            }
+        }
+
+        if !device_infos.is_empty() {
+            self.identity = Some(identity::Identity {
+                identity_id,
+                devices: device_infos,
+                primary_device: Some(primary_device),
+            });
+            info!("Identity DB'den yüklendi (public key'ler) — secret key'ler henüz yüklenmedi, load_secret_bundle bekleniyor");
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Bölüm 1: Identity/Device
+    // ---------------------------------------------------------------
+
+    /// Kimlik + ilk cihazı üretir. DB'ye SADECE public key'ler yazılır.
+    /// Secret key'ler dönüş değerinde bir `SecretKeyBundle` (CBOR) olarak
+    /// verilir — Rust bunları hiçbir zaman diske yazmaz; çağıran (Kotlin,
+    /// JNI export'u üzerinden) bu bloğu Android Keystore ile şifreleyip
+    /// kendi sorumluluğunda saklamalıdır (bkz. `KeystoreCrypto.kt`).
+    fn generate_identity(&mut self, device_name: String) -> Result<(String, Vec<u8>), String> {
+        let mut csprng = OsRng;
+        let sign_sk_ed25519 = SigningKey::generate(&mut csprng);
+        let sign_pk_ed25519 = sign_sk_ed25519.verifying_key();
+        // ML-DSA-65 (spec 1.1 tablosu) — getrandom feature ile parametresiz
+        // üretim, rand_core sürüm çakışmasını bypass eder (bkz. Cargo.toml notu).
+        let sign_sk_mldsa: MlDsaSigningKey<MlDsa65> = MlDsaGenerate::generate();
+        let sign_pk_mldsa = sign_sk_mldsa.verifying_key().clone();
+        let kem_sk_x25519 = StaticSecret::random_from_rng(&mut csprng);
+        let kem_pk_x25519 = X25519PublicKey::from(&kem_sk_x25519);
+        // X25519 (rand_core 0.6 üzerinden rand 0.8) ve ML-KEM (rand_core
+        // 0.6.4) aynı rand_core majör sürümü — aynı OsRng paylaşılabilir.
+        let (kem_sk_mlkem, _kem_pk_mlkem_dup) = MlKem768::generate(&mut csprng);
+        let kem_pk_mlkem = kem_sk_mlkem.encapsulation_key().clone();
+
+        let fingerprint_raw = compute_fingerprint(
+            sign_pk_ed25519.as_bytes(),
+            &sign_pk_mldsa.encode(),
+            kem_pk_x25519.as_bytes(),
+            &kem_pk_mlkem.as_bytes(),
+        );
+        let fingerprint_hex = hex::encode(&fingerprint_raw);
+
+        // Aşama A: identity_id == ilk (ve tek) cihazın fingerprint'i.
+        let identity_id = fingerprint_hex.clone();
+        let device_fingerprint = fingerprint_hex;
+
+        let identity = identity::Identity {
+            identity_id: identity_id.clone(),
+            devices: vec![identity::DeviceInfo {
+                device_fingerprint: device_fingerprint.clone(),
+                device_name: device_name.clone(),
+                added_at: current_time_ms(),
+                status: DeviceStatus::Active,
+            }],
+            primary_device: Some(device_fingerprint.clone()),
+        };
+
+        let record = DeviceRecord {
+            device_fingerprint: device_fingerprint.clone(),
+            identity_id: identity_id.clone(),
+            sign_pubkey_ed25519: sign_pk_ed25519.as_bytes().to_vec(),
+            sign_pubkey_mldsa: sign_pk_mldsa.encode().to_vec(),
+            kem_pubkey_x25519: kem_pk_x25519.as_bytes().to_vec(),
+            kem_pubkey_mlkem: kem_pk_mlkem.as_bytes().to_vec(),
+            device_name,
+            is_active: true,
+            last_seen: current_time_ms(),
+        };
+
+        let secret_bundle = SecretKeyBundle {
+            device_fingerprint: device_fingerprint.clone(),
+            sign_sk_ed25519: sign_sk_ed25519.to_bytes().to_vec(),
+            // ML-DSA'nın "secret key" serileştirmesi 32 baytlık bir seed'dir
+            // (`KeyExport::to_bytes`) — bu seed'ten `SigningKey::from_seed`
+            // ile deterministik olarak aynı anahtar geri üretilir.
+            sign_sk_mldsa: sign_sk_mldsa.to_bytes().to_vec(),
+            kem_sk_x25519: kem_sk_x25519.to_bytes().to_vec(),
+            // ML-KEM'in seed'ten geri üretimi yok (bkz. ratchet.rs notu) —
+            // tam serileştirilmiş secret key (`EncodedSizeUser::as_bytes`)
+            // saklanır.
+            kem_sk_mlkem: kem_sk_mlkem.as_bytes().to_vec(),
+        };
+        let secret_bundle_bytes = ciborium_bytes(&secret_bundle)?;
+
+        let keys = DeviceKeys {
+            sign_sk_ed25519,
+            sign_pk_ed25519,
+            sign_pk_mldsa,
+            sign_sk_mldsa,
+            kem_sk_x25519,
+            kem_pk_x25519,
+            kem_pk_mlkem,
+            kem_sk_mlkem,
+        };
+
+        if let Some(conn) = &self.db {
+            conn.execute(
+                "INSERT OR REPLACE INTO identities (id, primary_device) VALUES (?1, ?2)",
+                params![identity_id, device_fingerprint],
+            ).map_err(|e| e.to_string())?;
+            // Sadece PUBLIC key'ler burada yazılıyor — secret key'ler bu
+            // bağlantıya hiç yazılmaz (bkz. fonksiyon dokümantasyonu).
+            conn.execute(
+                "INSERT OR REPLACE INTO own_devices
+                 (device_fingerprint, identity_id, sign_pk_ed25519, sign_pk_mldsa, kem_pk_x25519, kem_pk_mlkem,
+                  device_name, is_active, last_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    record.device_fingerprint, record.identity_id,
+                    record.sign_pubkey_ed25519, record.sign_pubkey_mldsa,
+                    record.kem_pubkey_x25519, record.kem_pubkey_mlkem,
+                    record.device_name, record.is_active as i32, record.last_seen as i64,
+                ],
+            ).map_err(|e| e.to_string())?;
+        }
+
+        self.identity = Some(identity);
+        self.own_devices.insert(device_fingerprint.clone(), record);
+        self.own_device_keys.insert(device_fingerprint, keys);
+
+        Ok((identity_id, secret_bundle_bytes))
+    }
+
+    /// Kotlin'in Keystore ile şifresini çözdüğü bir `SecretKeyBundle`'ı
+    /// (CBOR) belleğe yükler — uygulama yeniden başlatıldığında,
+    /// `load_identity_from_db`'nin doldurduğu PUBLIC key kayıtlarını
+    /// tamamlamak için çağrılır. `load_identity_from_db` zaten
+    /// `own_devices`/`identity`'yi doldurmuş olmalı; bu fonksiyon sadece
+    /// eksik olan `own_device_keys` (secret key'ler) map'ini doldurur.
+    fn load_secret_bundle(&mut self, bundle_bytes: &[u8]) -> Result<(), String> {
+        let bundle: SecretKeyBundle = ciborium::from_reader(bundle_bytes).map_err(|e| e.to_string())?;
+
+        let record = self.own_devices.get(&bundle.device_fingerprint).cloned()
+            .ok_or("Bilinmeyen cihaz — önce load_identity_from_db (public key) çalışmalı")?;
+
+        let sign_sk_ed_bytes: [u8; 32] = bundle.sign_sk_ed25519.as_slice().try_into().map_err(|_| "Bozuk Ed25519 secret key")?;
+        let sign_sk_ed25519 = SigningKey::from_bytes(&sign_sk_ed_bytes);
+        let sign_pk_ed25519 = sign_sk_ed25519.verifying_key();
+
+        // ML-DSA secret key'i 32 baytlık seed olarak saklanıyor (bkz.
+        // generate_identity notu) — `from_seed` ile deterministik üretiliyor.
+        let sign_sk_mldsa_seed: ml_dsa::Seed = bundle.sign_sk_mldsa.as_slice().try_into().map_err(|_| "Bozuk ML-DSA secret key")?;
+        let sign_sk_mldsa = MlDsaSigningKey::<MlDsa65>::from_seed(&sign_sk_mldsa_seed);
+        let sign_pk_mldsa_encoded: EncodedVerifyingKey<MlDsa65> = record.sign_pubkey_mldsa.as_slice().try_into().map_err(|_| "Bozuk ML-DSA public key")?;
+        let sign_pk_mldsa = MlDsaVerifyingKey::<MlDsa65>::decode(&sign_pk_mldsa_encoded);
+
+        let kem_sk_x_bytes: [u8; 32] = bundle.kem_sk_x25519.as_slice().try_into().map_err(|_| "Bozuk X25519 secret key")?;
+        let kem_sk_x25519 = StaticSecret::from(kem_sk_x_bytes);
+        let kem_pk_x25519 = X25519PublicKey::from(&kem_sk_x25519);
+
+        // ML-KEM secret key'i tam serileştirilmiş biçimde saklanıyor (bkz.
+        // generate_identity notu — ml-kem'de "seed"ten geri üretim yok).
+        let kem_sk_encoded: ml_kem::Encoded<MlKem768DecapsulationKey> = bundle.kem_sk_mlkem.as_slice().try_into().map_err(|_| "Bozuk Kyber secret key")?;
+        let kem_sk_mlkem = MlKem768DecapsulationKey::from_bytes(&kem_sk_encoded);
+        let kem_pk_encoded: ml_kem::Encoded<MlKem768EncapsulationKey> = record.kem_pubkey_mlkem.as_slice().try_into().map_err(|_| "Bozuk Kyber public key")?;
+        let kem_pk_mlkem = MlKem768EncapsulationKey::from_bytes(&kem_pk_encoded);
+
+        self.own_device_keys.insert(bundle.device_fingerprint, DeviceKeys {
+            sign_sk_ed25519,
+            sign_pk_ed25519,
+            sign_pk_mldsa,
+            sign_sk_mldsa,
+            kem_sk_x25519,
+            kem_pk_x25519,
+            kem_pk_mlkem,
+            kem_sk_mlkem,
+        });
+        Ok(())
+    }
+
+    fn get_active_own_device_fingerprint(&self) -> Result<String, String> {
+        let identity_id = self.identity.as_ref().ok_or("No identity yet")?.identity_id.clone();
+        self.own_devices
+            .iter()
+            .find(|(_, d)| d.identity_id == identity_id && d.is_active)
+            .map(|(fp, _)| fp.clone())
+            .ok_or_else(|| "No active own device".to_string())
+    }
+
+    /// Base32 kişi kodu (spec 1.2) — UI'de gösterilecek.
+    fn identity_code(&self) -> Result<String, String> {
+        let id = self.identity.as_ref().ok_or("No identity yet")?;
+        identity::format_identity_code(&id.identity_id)
+    }
+
+    fn identity_short_code(&self) -> Result<String, String> {
+        let id = self.identity.as_ref().ok_or("No identity yet")?;
+        let raw = hex::decode(&id.identity_id).map_err(|_| "Bad identity_id")?;
+        Ok(identity::format_short_code(&raw))
+    }
+
+    // ---------------------------------------------------------------
+    // Bölüm 1.3/1.4: QR + manuel eşleşme
+    // ---------------------------------------------------------------
+
+    /// Kendi QR paketimizi üretir (spec 1.3 — fingerprint-only karar).
+    /// `rendezvous_node`: bilinen bootstrap node adresi (spec bölüm 6.5 —
+    /// "tek bilinen node" v0.1 için yeterli).
+    fn generate_qr_packet(&self, rendezvous_node: String) -> Result<Vec<u8>, String> {
+        let own_fp = self.get_active_own_device_fingerprint()?;
+        let identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
+        let device_name = self.own_devices.get(&own_fp).map(|d| d.device_name.clone()).unwrap_or_default();
+
+        let packet = QrPacket {
+            version: QrPacket::CURRENT_VERSION,
+            device_name,
+            identity_id,
+            device_fingerprint: own_fp,
+            rendezvous_node,
+        };
+        packet.to_cbor()
+    }
+
+    /// Taranan bir QR'ı (veya manuel girilen aynı formattaki metni, spec
+    /// 1.4) işler: TOFU olarak Contact kaydeder, rendezvous node'u swarm'a
+    /// bilinen adres olarak ekler, ve karşı tarafın gerçek public key'lerini
+    /// indirmek için kendi `IdentityExchange` paketimizi gönderir (spec 1.3:
+    /// "fingerprint-only [...] bağlantı kurulunca karşı taraftan indirilir
+    /// ve bu fingerprint ile karşılaştırılır").
+    fn process_qr_packet(&mut self, cbor_data: &[u8]) -> Result<String, String> {
+        let packet = QrPacket::from_cbor(cbor_data)?;
+        self.register_contact_from_pairing(
+            packet.identity_id.clone(),
+            packet.device_fingerprint.clone(),
+            packet.device_name,
+        )?;
+
+        if let Some(swarm) = &mut self.swarm {
+            if let Ok(addr) = packet.rendezvous_node.parse::<Multiaddr>() {
+                if let Some(peer_id) = extract_peer_id(&addr) {
+                    swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                    // `kad.add_address` sadece bir DHT routing ipucudur —
+                    // kendi başına hiçbir bağlantı AÇMAZ. QR taramasının
+                    // asıl amacı iki cihazı doğrudan birbirine bağlamak
+                    // olduğundan burada açıkça dial ediyoruz (bkz. dosya
+                    // sonu not: bu olmadan iki cihaz asla gerçek bir libp2p
+                    // bağlantısı kurmuyordu — ne gossipsub mesajı ne de
+                    // IdentityExchange karşı tarafa ulaşıyordu).
+                    if let Err(e) = swarm.dial(addr) {
+                        error!("QR taramasından sonra dial başarısız: {}", e);
+                    }
+                }
+            }
+        }
+
+        // `dial()` yukarıda sadece bağlantıyı BAŞLATTI — TCP/noise/gossipsub
+        // el sıkışması tamamlanmadan bu publish() neredeyse kesin
+        // "InsufficientPeers"/"NoPeersSubscribedToTopic" ile başarısız olur.
+        // Bunu ölümcül bir hata olarak yukarı taşımıyoruz: TOFU contact
+        // kaydı (register_contact_from_pairing) zaten YUKARIDA tamamlandı —
+        // "tarama başarısız" göstermek yanlış olur. `send_identity_exchange`
+        // içindeki `publish_envelope` başarısız olursa zaten kendi içinde
+        // `pending_envelopes`'e ekleyip `poll_events`'te yeniden dener.
+        if let Err(e) = self.send_identity_exchange(&packet.device_fingerprint) {
+            error!("IdentityExchange gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
+        }
+        Ok(packet.identity_id)
+    }
+
+    /// Kendi `IdentityExchange` paketimizi karşı tarafa gönderir — spec
+    /// 1.3'teki "fingerprint-only QR + bağlantıda public key indirme"
+    /// adımını taşır. Her iki taraf da eşleşme sonrası bunu birbirine
+    /// gönderdiğinde, ikisi de karşı tarafın gerçek public key'lerini
+    /// öğrenmiş ve kendi taraflarında fingerprint'i yeniden hesaplayıp
+    /// doğrulamış olur (bkz. `process_identity_exchange`).
+    fn send_identity_exchange(&mut self, target_device_fingerprint: &str) -> Result<(), String> {
+        let own_fp = self.get_active_own_device_fingerprint()?;
+        let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
+        let own_record = self.own_devices.get(&own_fp).ok_or("Missing own device record")?.clone();
+
+        let exchange = IdentityExchange {
+            identity_id: own_identity_id,
+            device_fingerprint: own_fp,
+            device_name: own_record.device_name,
+            sign_pubkey_ed25519: own_record.sign_pubkey_ed25519,
+            sign_pubkey_mldsa: own_record.sign_pubkey_mldsa,
+            kem_pubkey_x25519: own_record.kem_pubkey_x25519,
+            kem_pubkey_mlkem: own_record.kem_pubkey_mlkem,
+        };
+        self.publish_envelope(target_device_fingerprint, &NetworkEnvelope::IdentityExchange(exchange))
+    }
+
+    /// Gelen bir `IdentityExchange` paketini işler: taşınan public key'lerden
+    /// fingerprint'i YENİDEN HESAPLAR ve paketin `device_fingerprint`
+    /// alanıyla eşleştiğini doğrular (spec 1.3 — "bu fingerprint ile
+    /// karşılaştırılır"). Eşleşmezse paket reddedilir (sahte/bozuk public
+    /// key ima eder). Eşleşirse `known_remote_devices`'a kaydedilir.
+    fn process_identity_exchange(&mut self, exchange: &IdentityExchange) -> Result<(), String> {
+        let computed = compute_fingerprint(
+            &exchange.sign_pubkey_ed25519,
+            &exchange.sign_pubkey_mldsa,
+            &exchange.kem_pubkey_x25519,
+            &exchange.kem_pubkey_mlkem,
+        );
+        let computed_hex = hex::encode(&computed);
+        if computed_hex != exchange.device_fingerprint {
+            return Err(format!(
+                "IdentityExchange fingerprint uyuşmazlığı: beklenen {}, hesaplanan {}",
+                exchange.device_fingerprint, computed_hex
+            ));
+        }
+
+        let now = current_time_ms();
+        self.known_remote_devices.insert(exchange.device_fingerprint.clone(), DeviceRecord {
+            device_fingerprint: exchange.device_fingerprint.clone(),
+            identity_id: exchange.identity_id.clone(),
+            sign_pubkey_ed25519: exchange.sign_pubkey_ed25519.clone(),
+            sign_pubkey_mldsa: exchange.sign_pubkey_mldsa.clone(),
+            kem_pubkey_x25519: exchange.kem_pubkey_x25519.clone(),
+            kem_pubkey_mlkem: exchange.kem_pubkey_mlkem.clone(),
+            device_name: exchange.device_name.clone(),
+            is_active: true,
+            last_seen: now,
+        });
+
+        // Spec dışı, tek yönlü QR düzeltmesi: bu IdentityExchange, karşı
+        // tarafın BİZİM QR'ımızı taramasından geliyor olabilir (biz hiç
+        // taramadık) — bu durumda bu identity bizim `contacts` listemizde
+        // henüz YOK, sadece `known_remote_devices`'a düştü. Önceden contact
+        // kaydı SADECE QR'ı tarayan tarafta (`process_qr_packet` ->
+        // `register_contact_from_pairing`) oluşuyordu; pasif/taranan taraf
+        // karşı tarafı hiçbir zaman kişi listesinde göremiyordu — iki
+        // tarafın da birbirinin QR'ını taraması gerekiyordu. Burada da TOFU
+        // olarak ekleyerek tek yönlü taramayı yeterli hale getiriyoruz.
+        if !self.identity_to_contact.contains_key(&exchange.identity_id) {
+            let _ = self.register_contact_from_pairing(
+                exchange.identity_id.clone(),
+                exchange.device_fingerprint.clone(),
+                exchange.device_name.clone(),
+            );
+        }
+
+        // Karşı taraf da bize aynı paketi gönderdiyse zaten known_remote_devices
+        // doldu; ama tek taraflı taranan bir QR senaryosunda (biz taradık,
+        // karşı taraf henüz bizim IdentityExchange'imizi görmedi) karşılıklı
+        // exchange'i tamamlamak için biz de kendi paketimizi göndeririz.
+        let _ = self.send_identity_exchange(&exchange.device_fingerprint);
+
+        Ok(())
+    }
+
+    /// Spec 1.4: manuel giriş, QR ile aynı bilgiyi taşıyan bir metin/kod
+    /// formatı. Burada Base32 kişi kodu + fingerprint + rendezvous adresini
+    /// `|` ile ayrılmış tek satır olarak kabul ediyoruz (spec bu formatı
+    /// tam belirtmemiş; en basit, insan tarafından elle girilebilir biçim).
+    fn process_manual_entry(&mut self, text: &str) -> Result<String, String> {
+        let parts: Vec<&str> = text.trim().split('|').collect();
+        if parts.len() != 4 {
+            return Err("Beklenen format: identity_id|device_fingerprint|device_name|rendezvous_node".to_string());
+        }
+        let (identity_id, device_fingerprint, device_name, rendezvous_node) =
+            (parts[0].to_string(), parts[1].to_string(), parts[2].to_string(), parts[3].to_string());
+
+        self.register_contact_from_pairing(identity_id.clone(), device_fingerprint.clone(), device_name)?;
+
+        if let Some(swarm) = &mut self.swarm {
+            if let Ok(addr) = rendezvous_node.parse::<Multiaddr>() {
+                if let Some(peer_id) = extract_peer_id(&addr) {
+                    swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                    // bkz. process_qr_packet'teki aynı dial notu.
+                    if let Err(e) = swarm.dial(addr) {
+                        error!("Manuel eşleşmeden sonra dial başarısız: {}", e);
+                    }
+                }
+            }
+        }
+        // bkz. process_qr_packet'teki aynı not — publish_envelope kendi
+        // içinde yeniden dener, burada sadece logluyoruz.
+        if let Err(e) = self.send_identity_exchange(&device_fingerprint) {
+            error!("IdentityExchange gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
+        }
+        Ok(identity_id)
+    }
+
+    fn register_contact_from_pairing(&mut self, identity_id: String, device_fingerprint: String, device_name: String) -> Result<(), String> {
+        let now = current_time_ms();
+        if let Some(contact_id) = self.identity_to_contact.get(&identity_id).cloned() {
+            // Zaten bilinen identity — spec 2.2 karar ağacı burada da geçerli
+            // olurdu (yeni cihaz mı, bilinen mi); QR/manuel eşleşme akışında
+            // basitçe TOFU ekleme davranışıyla devam ediyoruz.
+            if let Some(contact) = self.contacts.get_mut(&contact_id) {
+                if !contact.is_known_active(&device_fingerprint) {
+                    contact.add_device_unverified(device_fingerprint, now);
+                }
+            }
+            return Ok(());
+        }
+
+        let contact_id = format!("contact-{}", &identity_id[..16.min(identity_id.len())]);
+        let mut contact = Contact::new(contact_id.clone(), device_name, identity_id.clone());
+        contact.add_device_unverified(device_fingerprint, now);
+        self.identity_to_contact.insert(identity_id, contact_id.clone());
+        self.contacts.insert(contact_id, contact);
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------
+    // Bölüm 2: TOFU + cihaz değişikliği tespiti
+    // ---------------------------------------------------------------
+
+    /// Gelen bir paketin gönderen cihazına spec 2.2 karar ağacını uygular.
+    /// `sender_device_known_pubkeys`: bu fonksiyon çağrılmadan önce
+    /// karşı taraftan indirilmiş/bilinen olmalı (imza doğrulaması için).
+    fn evaluate_sender_device(&mut self, identity_id: &str, device_fingerprint: &str, has_valid_signed_device_add: bool, device_name_hint: &str) -> DeviceCheckOutcome {
+        let contact_id = self.identity_to_contact.get(identity_id).cloned();
+        let contact = contact_id.as_ref().and_then(|id| self.contacts.get(id));
+        let outcome = check_incoming_device(contact, device_fingerprint, has_valid_signed_device_add);
+
+        let now = current_time_ms();
+        match outcome {
+            DeviceCheckOutcome::NewContactTofu => {
+                let _ = self.register_contact_from_pairing(identity_id.to_string(), device_fingerprint.to_string(), device_name_hint.to_string());
+            }
+            DeviceCheckOutcome::NewDeviceViaSignedAdd => {
+                if let Some(cid) = contact_id {
+                    if let Some(c) = self.contacts.get_mut(&cid) {
+                        c.add_device_via_signed_chain(device_fingerprint.to_string(), now);
+                    }
+                }
+                // Spec 2.2: "sadece bilgi bildirimi gösterilir" — alarm değil.
+                info!("Identity {} yeni bir cihaz ekledi: {}", identity_id, device_fingerprint);
+            }
+            DeviceCheckOutcome::UnverifiedNewDeviceAlert => {
+                let display_name = contact_id
+                    .as_ref()
+                    .and_then(|cid| self.contacts.get(cid))
+                    .map(|c| c.display_name.clone())
+                    .unwrap_or_else(|| identity_id.to_string());
+                let known_codes: Vec<String> = contact_id
+                    .as_ref()
+                    .and_then(|cid| self.contacts.get(cid))
+                    .map(|c| c.known_devices.iter()
+                        .filter_map(|d| hex::decode(&d.device_fingerprint).ok())
+                        .map(|raw| identity::format_short_code(&raw))
+                        .collect())
+                    .unwrap_or_default();
+                let new_code = hex::decode(device_fingerprint)
+                    .map(|raw| identity::format_short_code(&raw))
+                    .unwrap_or_else(|_| device_fingerprint.to_string());
+
+                self.pending_device_alerts.insert(device_fingerprint.to_string(), DeviceAlertInfo {
+                    contact_display_name: display_name,
+                    identity_id: identity_id.to_string(),
+                    new_device_fingerprint: device_fingerprint.to_string(),
+                    known_device_short_codes: known_codes,
+                    new_device_short_code: new_code,
+                });
+                // Spec: "BLOKLA (yeni mesaj gönderme/alma durur)" — paket bu
+                // cihazdan/bu cihaza işlenmez, `pending_device_alerts`
+                // içinde bekler; kullanıcı UI'dan kabul/red etmeli.
+            }
+            DeviceCheckOutcome::KnownActive => {}
+        }
+        outcome
+    }
+
+    /// Kullanıcı uyarı ekranında "Yeniden doğrula ve kabul et" dediğinde
+    /// çağrılır (spec 2.2).
+    fn accept_pending_device_alert(&mut self, device_fingerprint: &str) -> Result<(), String> {
+        let alert = self.pending_device_alerts.remove(device_fingerprint)
+            .ok_or("No pending alert for this device")?;
+        let contact_id = self.identity_to_contact.get(&alert.identity_id).cloned()
+            .ok_or("Unknown contact")?;
+        if let Some(c) = self.contacts.get_mut(&contact_id) {
+            c.add_device_unverified(device_fingerprint.to_string(), current_time_ms());
+        }
+        Ok(())
+    }
+
+    /// Kullanıcı "Reddet" dediğinde (varsayılan davranış — spec 2.2).
+    fn reject_pending_device_alert(&mut self, device_fingerprint: &str) {
+        self.pending_device_alerts.remove(device_fingerprint);
+    }
+
+    fn list_pending_device_alerts(&self) -> Vec<DeviceAlertInfo> {
+        self.pending_device_alerts.values().cloned().collect()
+    }
+
+    /// UI'nin "kiminle sohbet başlatayım" seçici listesi için bilinen
+    /// kişileri döner. Her kişi için, o identity'nin bilinen (Aşama A'da
+    /// tek) Active cihaz fingerprint'ini de içerir — sohbet ekranı bu
+    /// fingerprint'i `sendMessage`'a hedef olarak geçer.
+    fn list_contacts(&self) -> Vec<ContactSummary> {
+        self.contacts.values().map(|c| ContactSummary {
+            contact_id: c.contact_id.clone(),
+            display_name: c.display_name.clone(),
+            identity_id: c.trusted_identity_id.clone(),
+            active_device_fingerprint: self.resolve_active_device_for_identity(&c.trusted_identity_id),
+        }).collect()
+    }
+
+    /// Groups tab GUI'sinin listesi için — bkz. `GroupSummary` notu.
+    fn list_groups(&self) -> Vec<GroupSummary> {
+        let own_identity_id = self.identity.as_ref().map(|i| i.identity_id.clone()).unwrap_or_default();
+        self.groups.values().map(|g| GroupSummary {
+            group_id: g.group_id.clone(),
+            name: g.name.clone(),
+            founder_identity_id: g.founder_identity_id.clone(),
+            is_founder: g.founder_identity_id == own_identity_id,
+            member_identity_ids: g.member_identity_ids(),
+        }).collect()
+    }
+
+    // ---------------------------------------------------------------
+    // Bölüm 3: Hibrit KEM + Double Ratchet
+    // ---------------------------------------------------------------
+
+    /// Spec dışı: ChatActivity'nin "bağlanılıyor..." göstergesini ne zaman
+    /// gizleyeceğini bilebilmesi için — bir ratchet oturumu var mı.
+    fn has_active_session(&self, peer_device_fingerprint: &str) -> bool {
+        self.ratchets.contains_key(peer_device_fingerprint)
+    }
+
+    /// Spec dışı sağlamlaştırma: kullanıcı bir sohbeti AÇAR açmaz (henüz
+    /// mesaj yazmadan) el sıkışmayı proaktif olarak başlatır — önceden
+    /// handshake sadece İLK `sendMessage` çağrısında (lazily) tetikleniyordu,
+    /// bu da "sohbeti aç, hemen yaz, mesaj git(mesin)" senaryosunda
+    /// kullanıcıya hiçbir bağlanma göstergesi olmadan mesaj kaybı riski
+    /// yaratıyordu. Zaten bir oturum varsa no-op.
+    fn ensure_handshake(&mut self, peer_device_fingerprint: &str) -> Result<(), String> {
+        if self.has_active_session(peer_device_fingerprint) {
+            return Ok(());
+        }
+        self.initiate_handshake_with(peer_device_fingerprint)
+    }
+
+    fn initiate_handshake_with(&mut self, peer_device_fingerprint: &str) -> Result<(), String> {
+        let own_fp = self.get_active_own_device_fingerprint()?;
+        let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
+        let peer = self.known_remote_devices.get(peer_device_fingerprint).cloned()
+            .ok_or("Unknown peer device; complete key exchange first")?;
+
+        let (state, kyber_ct, own_kyber_pub) = DeviceRatchetState::initiate(
+            &peer.kem_pubkey_x25519,
+            &peer.kem_pubkey_mlkem,
+        )?;
+
+        // KRİTİK: `state.own_x25519_secret`, `DeviceRatchetState::initiate()`
+        // içinde ÜRETİLEN TAZE EPHEMERAL secret'tir ve DH hesaplaması zaten
+        // BUNUNLA yapıldı (ratchet.rs). Karşı tarafa (HandshakeInit'te)
+        // gönderilecek "initiator_x25519_pubkey" da AYNI ephemeral secret'ten
+        // türetilmeli — önceden yanlışlıkla `own_keys.kem_sk_x25519`
+        // (cihazın UZUN VADELİ kimlik anahtarı, tamamen farklı bir keypair)
+        // kullanılıyordu. Bu durumda responder tarafı `respond()` içinde
+        // initiator'ın gönderdiği (yanlış/uzun-vadeli) public key'e karşı DH
+        // yapıyor, initiator ise kendi tarafında EPHEMERAL secret'le DH
+        // yapmış oluyordu — iki taraf asla aynı paylaşılan sırra ulaşamıyor,
+        // bu da HER mesajda "Decryption failed" ile sonuçlanıyordu.
+        let initiator_x25519_pub = X25519PublicKey::from(&state.own_x25519_secret).as_bytes().to_vec();
+        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
+
+        let timestamp = current_time_ms();
+        let mut to_sign = Vec::new();
+        to_sign.extend_from_slice(&initiator_x25519_pub);
+        to_sign.extend_from_slice(&own_kyber_pub);
+        to_sign.extend_from_slice(&kyber_ct);
+        to_sign.extend_from_slice(&timestamp.to_be_bytes());
+        let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
+        let sig_pq: MlDsaSignature<MlDsa65> = own_keys.sign_sk_mldsa.sign(&to_sign);
+
+        let handshake = HandshakeInit {
+            sender_identity_id: own_identity_id,
+            sender_device_fingerprint: own_fp,
+            initiator_x25519_pubkey: initiator_x25519_pub,
+            initiator_kyber_pubkey: own_kyber_pub,
+            kyber_ciphertext: kyber_ct,
+            timestamp,
+            signature_classical: sig_classical.to_bytes().to_vec(),
+            signature_pq: sig_pq.encode().to_vec(),
+        };
+
+        self.ratchets.insert(peer_device_fingerprint.to_string(), state);
+        self.publish_envelope(peer_device_fingerprint, &NetworkEnvelope::Handshake(handshake))
+    }
+
+    // NOT: Skipped-key'ler burada (yeni oturum kurulurken) diskten
+    // yüklenmiyor çünkü bu YENİ bir el sıkışma — DB'de bu cihaz-çifti için
+    // henüz hiçbir skipped-key kaydı olamaz (yeni oturumda mesaj numarası
+    // sıfırdan başlar). Skipped-key diske yazma/silme, sadece bir oturum
+    // İÇİNDEYKEN (receive_message'ta) gerçekleşir.
+    //
+    // BİLİNEN SINIR: `ratchets: HashMap<...>` bellek-only'dir — root_key/
+    // ck_send/ck_recv/message_number gibi ratchet state'in TAMAMI
+    // uygulama kapanıp açıldığında kaybolur, sadece identity/device
+    // secret'ları (own_device_keys) kalıcıdır. Yani skipped-key diske
+    // yazılsa bile, uygulama yeniden başladığında zaten o oturum
+    // (DeviceRatchetState) hiç yok — yeni bir el sıkışma gerekir, ve o
+    // el sıkışma farklı bir root_key üretir, bu yüzden eski skipped-key'ler
+    // (varsa) o yeni oturumla eşleşmez. Skipped-key kalıcılığı şu an SADECE
+    // "aynı oturum içinde, süreç arka planda canlı kalırken" (ör. servis
+    // yeniden başlarsa ama identity+ratchet state'ler bellekte hâlâ
+    // duruyorsa) anlamlıdır — tam bir "uygulama kapansa bile gecikmeli
+    // mesaj çözülebilir" garantisi vermez. Bunun için ratchet state'in
+    // TAMAMININ (sadece skipped-key'lerin değil) kalıcı hale getirilmesi
+    // gerekir — bu, mevcut kapsamın (Aşama A) ötesinde bir mimari
+    // genişleme olur.
+
+    fn process_handshake_init(&mut self, handshake: &HandshakeInit) -> Result<(), String> {
+        let sender = self.known_remote_devices.get(&handshake.sender_device_fingerprint).cloned()
+            .ok_or("Unknown sender device; cannot verify signatures")?;
+
+        let mut to_verify = Vec::new();
+        to_verify.extend_from_slice(&handshake.initiator_x25519_pubkey);
+        to_verify.extend_from_slice(&handshake.initiator_kyber_pubkey);
+        to_verify.extend_from_slice(&handshake.kyber_ciphertext);
+        to_verify.extend_from_slice(&handshake.timestamp.to_be_bytes());
+        verify_hybrid_signature(&to_verify, &handshake.signature_classical, &handshake.signature_pq, &sender)?;
+
+        let own_fp = self.get_active_own_device_fingerprint()?;
+        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
+
+        let state = DeviceRatchetState::respond(
+            own_keys.kem_sk_x25519.clone(),
+            own_keys.kem_sk_mlkem.clone(),
+            &handshake.initiator_x25519_pubkey,
+            &handshake.initiator_kyber_pubkey,
+            &handshake.kyber_ciphertext,
+        )?;
+
+        self.ratchets.insert(handshake.sender_device_fingerprint.clone(), state);
+        Ok(())
+    }
+
+    /// Aktif sohbete girmeden önce/mesaj gönderirken çağrılır. `should_rotate()`
+    /// Signal'ın gerçek modelini uyguluyor (bkz. ratchet.rs): 30 dakika
+    /// dolmuş VE biz henüz karşı tarafın güncel public key'ine cevap
+    /// vermemişsek (`has_responded_to_peer_key == false`) rotasyonu BİZ
+    /// tetikleriz. Aksi halde (cevap zaten verilmişse, sıradaki rotasyon
+    /// hakkı karşı tarafta) hiçbir şey yapmayız — deterministik bir
+    /// "fingerprint küçük olan tetikler" kuralına gerek yok, çünkü
+    /// `has_responded_to_peer_key` bayrağı zaten hangi tarafın sırası
+    /// geldiğini doğal olarak belirliyor.
+    fn maybe_rotate_ratchet(&mut self, peer_device_fingerprint: &str) -> Result<Option<Vec<u8>>, String> {
+        let should_rotate = self.ratchets.get(peer_device_fingerprint).map(|s| s.should_rotate()).unwrap_or(false);
+        if !should_rotate {
+            return Ok(None);
+        }
+        if let Some(state) = self.ratchets.get_mut(peer_device_fingerprint) {
+            let kyber_ct = state.perform_dh_ratchet()?;
+            // Biz rotasyonu tetikledik — eski zincire ait diskteki
+            // skipped-key'ler de anlamsızlaştı (bkz. receive_message'daki
+            // simetrik temizlik respond_to_rotation için).
+            self.clear_persisted_skipped_keys(peer_device_fingerprint);
+            return Ok(Some(kyber_ct));
+        }
+        Ok(None)
+    }
+
+    /// `send_message`/`edit_message`/`delete_message`'ın ortak gövdesi —
+    /// üçü de aynı ratchet-şifreli `MessagePacket` yolundan geçer, sadece
+    /// çözüldükten sonraki `MessageContent` türü farklıdır (bkz. packet.rs
+    /// dokümantasyonu — edit/delete de tam uçtan uca şifreli/imzalı olsun
+    /// diye ayrı bir zarf yerine bu ortak yol kullanılıyor).
+    /// `archive_plaintext`: SADECE düz metin mesajlar için Some — edit/delete
+    /// şu an yerel (node modu) arşive yansıtılmıyor (bkz. dosya sonu not).
+    /// Başarılıysa bu mesajın `message_id`'sini döner — çağıran taraf
+    /// (Kotlin) bunu ileride edit/delete hedefi olarak saklayabilir.
+    /// Dönüş: `(message_id, durum_string)` — durum "sent" (hemen
+    /// gönderildi) veya "pending" (geçici olarak kuyrukta, arka planda
+    /// yeniden denenecek) olabilir. Bkz. `MessageSendStatus`.
+    fn send_message_content(&mut self, peer_device_fingerprint: String, content: &MessageContent, archive_plaintext: Option<&[u8]>) -> Result<(String, String), String> {
+        let own_fp = self.get_active_own_device_fingerprint()?;
+        let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
+
+        if !self.ratchets.contains_key(&peer_device_fingerprint) {
+            // `initiate_handshake_with` ratchet state'i publish denemesinden
+            // ÖNCE oluşturur (bkz. o fonksiyon) — bu yüzden HandshakeInit'in
+            // KENDİ gönderimi (aşağıdaki `publish_envelope` gibi) geçici
+            // olarak başarısız olsa bile burada durmuyoruz: state zaten var,
+            // asıl mesajı şifreleyip göndermeye devam edebiliriz.
+            // HandshakeInit'in kendisi başarısız olduysa `publish_envelope`
+            // onu kendi içinde yeniden deneme kuyruğuna zaten ekledi.
+            if let Err(e) = self.initiate_handshake_with(&peer_device_fingerprint) {
+                error!("Handshake gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
+            }
+            // KNOWN GAP (aynı önceki tasarımdan miras): handshake ve mesaj
+            // ardışık gönderiliyor, gossipsub sıra garantisi vermiyor.
+        }
+
+        let rotation_kyber_ciphertext = self.maybe_rotate_ratchet(&peer_device_fingerprint)?;
+
+        let state = self.ratchets.get_mut(&peer_device_fingerprint).ok_or("No ratchet session")?;
+        // NOT: `own_ratchet_pubkeys()` rotasyon SONRASI çağrılıyor
+        // (maybe_rotate_ratchet zaten çalıştı), bu yüzden rotasyon olduysa
+        // burada YENİ public key'ler alınır — karşı tarafın
+        // respond_to_rotation'da beklediği tam olarak budur.
+        let ratchet_pubkeys = state.own_ratchet_pubkeys();
+        let content_bytes = ciborium_bytes(content)?;
+        let (ciphertext, message_number, prev_chain_length) = state.encrypt_next(&content_bytes)?;
+
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let header = MessagePacketHeader {
+            sender_identity_id: own_identity_id,
+            sender_device_fingerprint: own_fp.clone(),
+            message_id: message_id.clone(),
+            ratchet_pubkey: ratchet_pubkeys.to_bytes()?,
+            message_number,
+            prev_chain_length,
+            rotation_kyber_ciphertext,
+        };
+
+        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
+        let mut to_sign = Vec::new();
+        to_sign.extend_from_slice(&ciborium_bytes(&header)?);
+        to_sign.extend_from_slice(&ciphertext);
+        let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
+        let sig_pq: MlDsaSignature<MlDsa65> = own_keys.sign_sk_mldsa.sign(&to_sign);
+
+        let packet = MessagePacket {
+            header,
+            ciphertext,
+            signature_classical: sig_classical.to_bytes().to_vec(),
+            signature_pq: sig_pq.encode().to_vec(),
+        };
+
+        // Spec dışı, kullanıcı tercihi: node modu açıkken (bu cihaz "server
+        // olmayı tercih ediyor") mesaj geçmişi yerelde şifreli arşivlenir.
+        // Ağ paketinin kendisi zaten uçtan uca şifreli; bu AYRI bir
+        // "dinlenme hâlinde şifreleme" katmanıdır (bkz. archive_message).
+        if self.node_mode_enabled {
+            if let Some(plaintext) = archive_plaintext {
+                let _ = self.archive_message(&peer_device_fingerprint, "sent", plaintext);
+            }
+        }
+
+        // Spec dışı sağlamlaştırma: ilk bağlantıdan sonraki ilk birkaç
+        // saniyede gossipsub mesh'i henüz oluşmamış olabilir — bu durumda
+        // publish anında "InsufficientPeers"/"NoPeersSubscribedToTopic" ile
+        // başarısız olur. `publish_envelope` bunu kendi içinde yeniden
+        // deneme kuyruğuna (`pending_envelopes`) zaten ekliyor, biz burada
+        // sadece loglayıp `message_id`'yi YİNE DE döndürüyoruz — şifreleme/
+        // imzalama (asıl önemli olan kısım) zaten tamamlandı, paket
+        // `poll_events` tarafından bağlantı kurulunca otomatik olarak
+        // gönderilecek. Çağıran tarafın (Kotlin/ChatActivity) mesajı hemen
+        // göstermesi ve aynı `message_id` ile edit/delete edebilmesi için
+        // bu senkron dönüş şart — "bağlandı ama ilk mesaj sessizce kayboldu"
+        // sorununun kaynağı tam olarak buradaki eski davranıştı.
+        if let Err(e) = self.publish_envelope(&peer_device_fingerprint, &NetworkEnvelope::Message(packet)) {
+            error!("Mesaj gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
+        }
+        let status = self.message_status.get(&message_id).copied().unwrap_or(MessageSendStatus::Pending);
+        Ok((message_id, status.as_str().to_string()))
+    }
+
+    fn send_message(&mut self, peer_device_fingerprint: String, plaintext: String) -> Result<(String, String), String> {
+        let content = MessageContent::Text { group_id: None, text: plaintext.clone() };
+        self.send_message_content(peer_device_fingerprint, &content, Some(plaintext.as_bytes()))
+    }
+
+    /// Spec dışı: bir mesajı düzenler. `target_message_id`, düzenlenecek
+    /// mesajın `MessagePacketHeader.message_id`'sidir (gönderirken dönen
+    /// değer). Karşı taraf, bu `message_id`'ye sahip bir mesajı daha önce
+    /// gördüyse UI'da güncellemelidir (bkz. ChatActivity).
+    fn edit_message(&mut self, peer_device_fingerprint: String, target_message_id: String, new_text: String) -> Result<(String, String), String> {
+        let content = MessageContent::Edit { target_message_id, new_text };
+        self.send_message_content(peer_device_fingerprint, &content, None)
+    }
+
+    /// Spec dışı: bir mesajı siler (karşı tarafa "sil" bildirimi gönderir).
+    fn delete_message(&mut self, peer_device_fingerprint: String, target_message_id: String) -> Result<(String, String), String> {
+        let content = MessageContent::Delete { target_message_id };
+        self.send_message_content(peer_device_fingerprint, &content, None)
+    }
+
+    fn receive_message(&mut self, packet: &MessagePacket) -> Result<String, String> {
+        let sender = self.known_remote_devices.get(&packet.header.sender_device_fingerprint).cloned()
+            .ok_or("Unknown sender device; cannot verify signatures")?;
+
+        let mut to_verify = Vec::new();
+        to_verify.extend_from_slice(&ciborium_bytes(&packet.header)?);
+        to_verify.extend_from_slice(&packet.ciphertext);
+        verify_hybrid_signature(&to_verify, &packet.signature_classical, &packet.signature_pq, &sender)?;
+
+        // Rotasyon senkronizasyonu (spec 3.2, artık gerçek): gönderen bu
+        // mesajla birlikte bir DH/KEM rotasyonu tetiklediyse
+        // (rotation_kyber_ciphertext dolu), biz de kendi tarafımızda aynı
+        // yeni anahtarları türetmek için respond_to_rotation çağırırız.
+        // Boşsa (normal mesaj, rotasyon yok) hiçbir şey yapmayız —
+        // ratchet_pubkey zaten her mesajda taşınır ama rotasyon olmadıkça
+        // değişmez, bu yüzden onu görmezden gelmek güvenlidir.
+        if let Some(ct) = &packet.header.rotation_kyber_ciphertext {
+            if let Ok(new_peer_keys) = RatchetPublicKeys::from_bytes(&packet.header.ratchet_pubkey) {
+                if let Some(state) = self.ratchets.get_mut(&packet.header.sender_device_fingerprint) {
+                    if let Err(e) = state.respond_to_rotation(&new_peer_keys, ct) {
+                        error!("Rotasyon senkronizasyonu başarısız: {}", e);
+                    } else {
+                        // Rotasyon başarılıysa eski zincire ait diskteki
+                        // skipped-key'ler de anlamsızlaştı — temizle.
+                        self.clear_persisted_skipped_keys(&packet.header.sender_device_fingerprint);
+                    }
+                }
+            }
+        }
+
+        let state = self.ratchets.get_mut(&packet.header.sender_device_fingerprint)
+            .ok_or("No ratchet session for sender")?;
+        let (payload_bytes, skipped_changes) = state.decrypt(&packet.ciphertext, packet.header.message_number)?;
+        let content: MessageContent = ciborium::from_reader(payload_bytes.as_slice()).map_err(|e| e.to_string())?;
+
+        // Skipped-key değişikliklerini diske (Keystore ile şifreli) yansıt.
+        for (msg_num, key) in &skipped_changes.added {
+            if let Err(e) = self.persist_skipped_key(&packet.header.sender_device_fingerprint, *msg_num, key) {
+                error!("Skipped-key diske yazılamadı: {}", e);
+            }
+        }
+        for msg_num in &skipped_changes.used {
+            self.delete_persisted_skipped_key(&packet.header.sender_device_fingerprint, *msg_num);
+        }
+
+        let peer_fp = packet.header.sender_device_fingerprint.clone();
+        let sender_identity_id = packet.header.sender_identity_id.clone();
+        let message_id = packet.header.message_id.clone();
+
+        // Spec dışı: `pollNetwork`'ün Kotlin tarafına döndürdüğü her satır
+        // artık düz metin DEĞİL, `{"type":...}` etiketli bir JSON olayı —
+        // bkz. P2PService/ChatActivity. Bu, edit/delete'i aynı String
+        // kanalından (JNI imzasını değiştirmeden) taşıyabilmek ve mesajın
+        // HANGİ karşı tarafa (peer) ait olduğunu iletebilmek için gerekli —
+        // önceden bu bilgi hiç taşınmıyordu (bkz. eski "cross-chat sızıntısı"
+        // notu: birden çok sohbet varken gelen her mesaj, o an açık olan
+        // HANGİ ChatActivity ise ona ekleniyordu, doğru olanına değil).
+        let event = match content {
+            MessageContent::Text { group_id: None, text } => {
+                if self.node_mode_enabled {
+                    let _ = self.archive_message(&peer_fp, "received", text.as_bytes());
+                }
+                serde_json::json!({"type": "message", "peer": peer_fp, "message_id": message_id, "text": text})
+            }
+            MessageContent::Text { group_id: Some(gid), text } => {
+                // Gerçek grup entegrasyonu: bu, bir grup mesajının pairwise
+                // fan-out kopyası — GroupChatActivity'nin doğru sohbete
+                // yönlendirebilmesi için `group_id` VE göndericinin
+                // `identity_id`'si (bir grupta birden fazla kişi olduğundan
+                // "kim gönderdi" bilgisi 1:1'in aksine zorunlu) taşınıyor.
+                serde_json::json!({
+                    "type": "group_message", "group_id": gid, "peer": peer_fp,
+                    "sender_identity_id": sender_identity_id,
+                    "message_id": message_id, "text": text
+                })
+            }
+            MessageContent::Edit { target_message_id, new_text } => {
+                serde_json::json!({"type": "edit", "peer": peer_fp, "message_id": target_message_id, "text": new_text})
+            }
+            MessageContent::Delete { target_message_id } => {
+                serde_json::json!({"type": "delete", "peer": peer_fp, "message_id": target_message_id})
+            }
+        };
+        Ok(event.to_string())
+    }
+
+    /// Bir mesajı yerel arşive (spec dışı, kullanıcı tercihi: sadece node
+    /// modu açıkken) ekler. `history_key` yüklenmemişse (Kotlin henüz
+    /// Keystore'dan çözüp vermemişse) sessizce atlar — arşivleme best-effort,
+    /// mesajlaşmanın kendisini asla engellemez.
+    fn archive_message(&mut self, peer_device_fingerprint: &str, direction: &str, plaintext: &[u8]) -> Result<(), String> {
+        let key = match &self.history_key {
+            Some(k) => *k,
+            None => return Ok(()), // node modu açık ama key henüz yüklenmedi
+        };
+        let conn = match &self.db {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+
+        let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| "Invalid history key")?;
+        let mut nonce_bytes = [0u8; 12];
+        {
+            use rand::RngCore;
+            OsRng.fill_bytes(&mut nonce_bytes);
+        }
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let encrypted = cipher.encrypt(nonce, plaintext).map_err(|_| "History encryption failed")?;
+
+        conn.execute(
+            "INSERT INTO messages (peer_device_fingerprint, direction, encrypted_blob, nonce, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![peer_device_fingerprint, direction, encrypted, nonce_bytes.to_vec(), current_time_ms() as i64],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Bir kişiyle olan mesaj geçmişini çözüp döner (en yeni `limit` mesaj,
+    /// eskiden yeniye sıralı). `history_key` yoksa boş liste döner.
+    fn load_message_history(&self, peer_device_fingerprint: &str, limit: u32) -> Vec<ArchivedMessage> {
+        let key = match &self.history_key {
+            Some(k) => *k,
+            None => return Vec::new(),
+        };
+        let conn = match &self.db {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+
+        let cipher = match ChaCha20Poly1305::new_from_slice(&key) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut stmt = match conn.prepare(
+            "SELECT direction, encrypted_blob, nonce, timestamp FROM messages
+             WHERE peer_device_fingerprint = ?1 ORDER BY timestamp DESC LIMIT ?2"
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let rows = stmt.query_map(params![peer_device_fingerprint, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        });
+
+        let mut results = Vec::new();
+        if let Ok(rows) = rows {
+            for row in rows.flatten() {
+                let (direction, encrypted_blob, nonce_bytes, timestamp) = row;
+                if nonce_bytes.len() != 12 {
+                    continue;
+                }
+                let nonce = Nonce::from_slice(&nonce_bytes);
+                if let Ok(plaintext) = cipher.decrypt(nonce, encrypted_blob.as_slice()) {
+                    if let Ok(text) = String::from_utf8(plaintext) {
+                        results.push(ArchivedMessage {
+                            direction,
+                            text,
+                            timestamp: timestamp as u64,
+                        });
+                    }
+                }
+            }
+        }
+        results.reverse(); // eskiden yeniye
+        results
+    }
+
+    // ---------------------------------------------------------------
+    // Skipped-message-key kalıcılığı (Double Ratchet sıra dışı mesaj
+    // desteği) — bkz. ratchet.rs `skipped_keys` alanı dokümantasyonu.
+    // ---------------------------------------------------------------
+
+    /// Bir skipped-key'i (bir cihaz-çifti oturumunda atlanmış bir mesaj
+    /// numarasına ait anahtar) Keystore'dan yüklenen anahtarla şifreleyip
+    /// DB'ye yazar. `ratchet.rs decrypt`'in "Greater" dalında yeni bir
+    /// skipped-key üretildiğinde çağrılır. Anahtar yüklenmemişse (Kotlin
+    /// henüz `setSkippedKeyEncryptionKey` çağırmadıysa) sessizce atlanır —
+    /// bu durumda skipped-key sadece bellekte kalır (eski davranış).
+    fn persist_skipped_key(&self, peer_device_fingerprint: &str, message_number: u32, key: &[u8; 32]) -> Result<(), String> {
+        let enc_key = match &self.skipped_key_encryption_key {
+            Some(k) => *k,
+            None => return Ok(()),
+        };
+        let conn = match &self.db {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+
+        let cipher = ChaCha20Poly1305::new_from_slice(&enc_key).map_err(|_| "Invalid skipped-key encryption key")?;
+        let mut nonce_bytes = [0u8; 12];
+        {
+            use rand::RngCore;
+            OsRng.fill_bytes(&mut nonce_bytes);
+        }
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let encrypted = cipher.encrypt(nonce, key.as_slice()).map_err(|_| "Skipped-key encryption failed")?;
+
+        conn.execute(
+            "INSERT OR REPLACE INTO skipped_message_keys (peer_device_fingerprint, message_number, encrypted_key, nonce)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![peer_device_fingerprint, message_number, encrypted, nonce_bytes.to_vec()],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Bir skipped-key kullanıldığında (mesaj çözüldüğünde) DB'den silinir
+    /// — artık tekrar gerekmeyecek (Double Ratchet'in tek-kullanımlık
+    /// mesaj anahtarı prensibi diskteki kopya için de geçerli).
+    fn delete_persisted_skipped_key(&self, peer_device_fingerprint: &str, message_number: u32) {
+        if let Some(conn) = &self.db {
+            let _ = conn.execute(
+                "DELETE FROM skipped_message_keys WHERE peer_device_fingerprint = ?1 AND message_number = ?2",
+                params![peer_device_fingerprint, message_number],
+            );
+        }
+    }
+
+    /// Bir cihaz-çifti oturumu için DB'de kayıtlı (henüz kullanılmamış)
+    /// skipped-key'leri çözüp döner.
+    ///
+    /// NOT: şu an hiçbir çağrı yeri YOK — `ratchets: HashMap` bellek-only
+    /// olduğu için (bkz. initiate_handshake_with sonrası not) bu
+    /// fonksiyonun anlamlı olacağı senaryo (ratchet state'in TAMAMININ
+    /// kalıcı olduğu, sadece skipped-key'lerin ayrıca yüklenmesi gerektiği
+    /// durum) henüz yok. Ratchet state kalıcılığı eklenirse (Aşama A'nın
+    /// ötesinde bir genişleme), yeni oturum yükleme akışı bu fonksiyonu
+    /// çağırıp döndürdüğü map'i `DeviceRatchetState.skipped_keys`'e
+    /// atamalıdır. Şimdilik kod hazır, kablolanmamış.
+    #[allow(dead_code)]
+    fn load_skipped_keys_from_db(&self, peer_device_fingerprint: &str) -> HashMap<u32, [u8; 32]> {
+        let enc_key = match &self.skipped_key_encryption_key {
+            Some(k) => *k,
+            None => return HashMap::new(),
+        };
+        let conn = match &self.db {
+            Some(c) => c,
+            None => return HashMap::new(),
+        };
+
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+
+        let cipher = match ChaCha20Poly1305::new_from_slice(&enc_key) {
+            Ok(c) => c,
+            Err(_) => return HashMap::new(),
+        };
+
+        let mut stmt = match conn.prepare(
+            "SELECT message_number, encrypted_key, nonce FROM skipped_message_keys WHERE peer_device_fingerprint = ?1"
+        ) {
+            Ok(s) => s,
+            Err(_) => return HashMap::new(),
+        };
+
+        let rows = stmt.query_map(params![peer_device_fingerprint], |row| {
+            Ok((row.get::<_, u32>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?))
+        });
+
+        let mut results = HashMap::new();
+        if let Ok(rows) = rows {
+            for row in rows.flatten() {
+                let (message_number, encrypted_key, nonce_bytes) = row;
+                if nonce_bytes.len() != 12 {
+                    continue;
+                }
+                let nonce = Nonce::from_slice(&nonce_bytes);
+                if let Ok(plaintext) = cipher.decrypt(nonce, encrypted_key.as_slice()) {
+                    if let Ok(key_bytes) = <[u8; 32]>::try_from(plaintext.as_slice()) {
+                        results.insert(message_number, key_bytes);
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    /// Bir cihaz-çifti için diskte kayıtlı TÜM skipped-key'leri siler —
+    /// rotasyon olduğunda (`perform_dh_ratchet`/`respond_to_rotation`,
+    /// bkz. ratchet.rs) eski zincire ait skipped-key'ler anlamsız kaldığı
+    /// için bellekteki `skipped_keys.clear()` ile birlikte diskten de
+    /// temizlenmesi gerekir.
+    fn clear_persisted_skipped_keys(&self, peer_device_fingerprint: &str) {
+        if let Some(conn) = &self.db {
+            let _ = conn.execute(
+                "DELETE FROM skipped_message_keys WHERE peer_device_fingerprint = ?1",
+                params![peer_device_fingerprint],
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Bölüm 5: Grup Mesajlaşma (pairwise)
+    // ---------------------------------------------------------------
+
+    fn create_group(&mut self, name: String) -> Result<String, String> {
+        let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
+        let group_id = format!("group-{}", hex::encode(&compute_fingerprint(name.as_bytes(), &current_time_ms().to_be_bytes(), b"", b""))[..16].to_string());
+        let group = Group::new(group_id.clone(), name, own_identity_id, current_time_ms());
+        self.groups.insert(group_id.clone(), group);
+        Ok(group_id)
+    }
+
+    /// Spec 5.4: kurucu, grup daveti üretir; davet edilen kişi zaten var
+    /// olan/kurulmakta olan 1:1 bağlantı üzerinden `GroupUpdate(Add)` alır.
+    /// Burada: kurucu tarafında hem `members`'a ekler hem de tüm mevcut +
+    /// yeni üyelere `GroupUpdate` pairwise gönderir (spec 5.2).
+    fn invite_to_group(&mut self, group_id: &str, new_member_identity_id: &str) -> Result<(), String> {
+        let own_fp = self.get_active_own_device_fingerprint()?;
+        let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
+
+        let group = self.groups.get(group_id).cloned_group()?;
+        if group.founder_identity_id != own_identity_id {
+            return Err("Sadece kurucu üye ekleyebilir".to_string());
+        }
+        let new_version = group.version + 1;
+
+        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
+        let change = GroupChange::Add(new_member_identity_id.to_string());
+        let update = sign_group_update(group_id, new_version, &change, &own_identity_id, &own_fp, own_keys)?;
+
+        // Yerel state'i güncelle.
+        if let Some(g) = self.groups.get_mut(group_id) {
+            apply_change(g, &change, new_version, current_time_ms());
+        }
+
+        // Tüm üyelere (yeni eklenen dahil) pairwise gönder (spec 5.2).
+        let targets = self.groups.get(group_id).map(|g| g.member_identity_ids()).unwrap_or_default();
+        for member_identity_id in targets {
+            if member_identity_id == own_identity_id {
+                continue;
+            }
+            if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id) {
+                let _ = self.publish_envelope(&peer_fp, &NetworkEnvelope::GroupUpdate(update.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_from_group(&mut self, group_id: &str, member_identity_id: &str) -> Result<(), String> {
+        let own_fp = self.get_active_own_device_fingerprint()?;
+        let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
+        let group = self.groups.get(group_id).cloned_group()?;
+        if group.founder_identity_id != own_identity_id {
+            return Err("Sadece kurucu üye çıkarabilir".to_string());
+        }
+        let new_version = group.version + 1;
+        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
+        let change = GroupChange::Remove(member_identity_id.to_string());
+        let update = sign_group_update(group_id, new_version, &change, &own_identity_id, &own_fp, own_keys)?;
+
+        // Çıkarılan üyeye ULAŞMADAN önce eski üye listesini al (spec 5.3:
+        // çıkarılan üyeye artık GroupUpdate/grup mesajı gönderilmez).
+        let remaining_targets: Vec<String> = group.other_members(&own_identity_id)
+            .into_iter()
+            .filter(|id| id != member_identity_id)
+            .collect();
+
+        if let Some(g) = self.groups.get_mut(group_id) {
+            apply_change(g, &change, new_version, current_time_ms());
+        }
+        for member_identity_id in remaining_targets {
+            if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id) {
+                let _ = self.publish_envelope(&peer_fp, &NetworkEnvelope::GroupUpdate(update.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    fn process_group_update(&mut self, update: &GroupUpdate) -> Result<(), String> {
+        let signer = self.known_remote_devices.get(&update.signed_by_device).cloned()
+            .ok_or("Unknown signer device")?;
+        let mut to_verify = Vec::new();
+        to_verify.extend_from_slice(update.group_id.as_bytes());
+        to_verify.extend_from_slice(&update.new_version.to_be_bytes());
+        to_verify.extend_from_slice(&ciborium_bytes(&update.change)?);
+        // NOT: GroupUpdate sadece Ed25519 imzası taşıyor (packet.rs
+        // GroupUpdate.signature tek alan) — MessagePacket'teki hibrit
+        // (Ed25519+ML-DSA) modeliyle tam tutarlı değil, bkz. dosya sonu
+        // "bilinen eksikler" notu.
+        verify_hybrid_signature(&to_verify, &update.signature, &[], &signer)
+            .map_err(|_| "GroupUpdate signature verification failed".to_string())?;
+
+        // signed_by_device'ın kurucunun bilinen/Active bir cihazı olup
+        // olmadığını kontrol et (spec 5.2).
+        let signer_is_active = signer.identity_id == update.signed_by && signer.is_active;
+
+        let group_exists = self.groups.contains_key(&update.group_id);
+        let group_snapshot = self.groups.get(&update.group_id).cloned();
+
+        let default_group = || Group::new(update.group_id.clone(), "".to_string(), update.signed_by.clone(), current_time_ms());
+        let group_ref = group_snapshot.unwrap_or_else(default_group);
+
+        validate_group_update(&group_ref, &update.signed_by, signer_is_active, update.new_version)
+            .map_err(|e| format!("{:?}", e))?;
+
+        if !group_exists {
+            self.groups.insert(update.group_id.clone(), Group::new(update.group_id.clone(), "".to_string(), update.signed_by.clone(), current_time_ms()));
+        }
+        if let Some(g) = self.groups.get_mut(&update.group_id) {
+            apply_change(g, &update.change, update.new_version, current_time_ms());
+        }
+        Ok(())
+    }
+
+    /// Bir Identity için bilinen (ve Aşama A'da tek olan) Active cihaz
+    /// fingerprint'ini bulur.
+    fn resolve_active_device_for_identity(&self, identity_id: &str) -> Option<String> {
+        self.known_remote_devices.values()
+            .find(|d| d.identity_id == identity_id && d.is_active)
+            .map(|d| d.device_fingerprint.clone())
+    }
+
+    fn send_group_message(&mut self, group_id: &str, plaintext: &str) -> Result<(), String> {
+        let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
+        let group = self.groups.get(group_id).cloned_group()?;
+        if !group.is_member(&own_identity_id) {
+            return Err("Grup üyesi değilsiniz".to_string());
+        }
+        // Spec 5.1: her üye için ayrı ayrı, mevcut 1:1 ratchet ile şifrele.
+        // `group_id: Some(...)` — gerçek grup entegrasyonu: alıcı tarafın
+        // bunu sıradan bir 1:1 mesajdan ayırt edip GroupChatActivity'ye
+        // yönlendirebilmesi için (bkz. receive_message notu).
+        let content = MessageContent::Text { group_id: Some(group_id.to_string()), text: plaintext.to_string() };
+        for member_identity_id in group.other_members(&own_identity_id) {
+            if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id) {
+                if let Err(e) = self.send_message_content(peer_fp, &content, Some(plaintext.as_bytes())) {
+                    error!("Grup mesajı bir üyeye gönderilemedi: {}", e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------
+    // Bölüm 4: Ağ / Keşif
+    // ---------------------------------------------------------------
+
+    fn start_network(&mut self, node_mode: bool) -> Result<String, String> {
+        self.node_mode_enabled = node_mode;
+        self.own_listen_addrs.clear();
+
+        let gs_config = gossipsub::ConfigBuilder::default()
+            .heartbeat_interval(std::time::Duration::from_secs(10))
+            .validation_mode(gossipsub::ValidationMode::Strict)
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        let mut swarm = libp2p::SwarmBuilder::with_new_identity()
+            .with_tokio()
+            .with_tcp(
+                tcp::Config::default().nodelay(true),
+                noise::Config::new,
+                yamux::Config::default,
+            )
+            .map_err(|e| e.to_string())?
+            .with_behaviour(|keypair| {
+                let peer_id = keypair.public().to_peer_id();
+                let gossipsub = gossipsub::Behaviour::new(
+                    gossipsub::MessageAuthenticity::Signed(keypair.clone()),
+                    gs_config,
+                )?;
+                let store = MemoryStore::new(peer_id);
+                let kad = kad::Behaviour::new(peer_id, store);
+                let identify = identify::Behaviour::new(identify::Config::new(
+                    "/p2pmessenger/1.0.0".to_string(),
+                    keypair.public(),
+                ));
+                Ok(P2PBehaviour { gossipsub, kad, identify })
+            })
+            .map_err(|e| e.to_string())?
+            .build();
+
+        // Spec 4.3: Node modu kapalıyken Client (pasif), açıkken Server
+        // (routing tablosuna aktif katkı).
+        let mode = if node_mode { kad::Mode::Server } else { kad::Mode::Client };
+        swarm.behaviour_mut().kad.set_mode(Some(mode));
+
+        let peer_id = *swarm.local_peer_id();
+
+        swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().map_err(|_| "bad multiaddr")?)
+            .map_err(|e| e.to_string())?;
+
+        if let Ok(active_fp) = self.get_active_own_device_fingerprint() {
+            let own_topic = gossipsub::IdentTopic::new(format!("p2p_msg_{}", active_fp));
+            swarm.behaviour_mut().gossipsub.subscribe(&own_topic).map_err(|e| e.to_string())?;
+        }
+
+        self.swarm = Some(swarm);
+        Ok(peer_id.to_string())
+    }
+
+    fn set_node_mode(&mut self, enabled: bool) {
+        self.node_mode_enabled = enabled;
+        if let Some(swarm) = &mut self.swarm {
+            let mode = if enabled { kad::Mode::Server } else { kad::Mode::Client };
+            swarm.behaviour_mut().kad.set_mode(Some(mode));
+        }
+    }
+
+    /// QR/"Kodum" ekranında gösterilecek ve karşı tarafa taşınacak
+    /// `rendezvous_node` — swarm'ın gerçekten dinlemeye başladığı bir adres
+    /// (`own_listen_addrs`, bkz. `poll_events`) artı kendi PeerId'imiz
+    /// (`/p2p/<peer_id>` son eki). Bu son ek olmadan `extract_peer_id`
+    /// karşı tarafta hiçbir zaman bir PeerId bulamaz ve taranan QR'ın
+    /// adresi `kad.add_address`/`dial` için sessizce kullanılmaz kalır
+    /// (bkz. process_qr_packet). `start_network` çağrıldıktan sonra ilk
+    /// birkaç `poll_events` turuna kadar `None` dönebilir — henüz hiçbir
+    /// dinleme adresi bildirilmemiş demektir.
+    ///
+    /// Telefonlar genelde Wi-Fi'ye bağlıyken bile mobil veriyi AÇIK tutar —
+    /// `0.0.0.0` üzerinde dinlemek `if-watch` aracılığıyla HER aktif arayüz
+    /// için ayrı bir `NewListenAddr` üretir (Wi-Fi'nin özel LAN adresi VE
+    /// operatörün mobil veri adresi gibi). Aynı Wi-Fi'deki karşı cihaz
+    /// SADECE Wi-Fi'nin özel (RFC 1918) adresinden erişilebilir — mobil
+    /// veri adresi (genelde CGNAT/public, operatöre ait) asla doğrudan
+    /// dial edilemez. Bu yüzden hangi adres ilk raporlandıysa onu almak
+    /// YERİNE, önce özel/LAN bir IPv4 adresi arıyoruz.
+    fn get_node_address(&self) -> Option<String> {
+        let swarm = self.swarm.as_ref()?;
+        let peer_id = *swarm.local_peer_id();
+        let addr = self.own_listen_addrs.iter()
+            .find(|a| is_private_lan_multiaddr(a))
+            .or_else(|| self.own_listen_addrs.iter().find(|a| !is_loopback_multiaddr(a)))
+            .or_else(|| self.own_listen_addrs.first())?;
+        Some(format!("{addr}/p2p/{peer_id}"))
+    }
+
+    /// Sadece ham gossipsub publish — kuyruğa EKLEMEZ, durum güncellemez.
+    /// `publish_envelope` (ilk deneme) ve `poll_events`'teki retry döngüsü
+    /// (sonraki denemeler) tarafından ortak kullanılır.
+    fn try_publish_raw(&mut self, target_device_fingerprint: &str, envelope: &NetworkEnvelope) -> Result<(), String> {
+        let bytes = ciborium_bytes(envelope)?;
+        if let Some(swarm) = &mut self.swarm {
+            let topic = gossipsub::IdentTopic::new(format!("p2p_msg_{}", target_device_fingerprint));
+            swarm.behaviour_mut().gossipsub.publish(topic, bytes).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Herhangi bir zarfı (Handshake/IdentityExchange/Message/GroupUpdate/...)
+    /// bir karşı tarafın gossipsub topic'ine yayınlar. İlk bağlantıdan sonraki
+    /// ilk birkaç saniyede gossipsub mesh'i henüz oluşmamış olabilir — bu
+    /// durumda publish anında "InsufficientPeers"/"NoPeersSubscribedToTopic"
+    /// ile başarısız olur. Bunu MERKEZİ olarak burada ele alıyoruz: başarısız
+    /// olan HER zarf `pending_envelopes`'e eklenir, `poll_events` her turda
+    /// aynı zarfı (yeniden şifreleme/imzalama YAPMADAN) yeniden göndermeyi
+    /// dener. Bu, önceden her çağıranın kendi tip-özel kuyruğunu tutmasından
+    /// (ve HandshakeInit'in hiç kapsanmamasından) daha basit ve eksiksiz.
+    /// `envelope` bir `Message` ise `message_status` da güncellenir (bkz. o
+    /// alanın dokümantasyonu — UI'nin gönderim/hata ikonları için).
+    fn publish_envelope(&mut self, target_device_fingerprint: &str, envelope: &NetworkEnvelope) -> Result<(), String> {
+        if let Err(e) = self.try_publish_raw(target_device_fingerprint, envelope) {
+            if let NetworkEnvelope::Message(m) = envelope {
+                self.message_status.insert(m.header.message_id.clone(), MessageSendStatus::Pending);
+            }
+            self.pending_envelopes.push((target_device_fingerprint.to_string(), envelope.clone(), current_time_ms()));
+            return Err(e);
+        }
+        if let NetworkEnvelope::Message(m) = envelope {
+            self.message_status.insert(m.header.message_id.clone(), MessageSendStatus::Sent);
+        }
+        Ok(())
+    }
+
+    fn poll_events(&mut self) -> Vec<String> {
+        let mut incoming: Vec<Vec<u8>> = Vec::new();
+        let mut new_listen_addrs: Vec<Multiaddr> = Vec::new();
+        if let Some(swarm) = &mut self.swarm {
+            RUNTIME.block_on(async {
+                while let Some(event) = swarm.next().now_or_never().flatten() {
+                    match event {
+                        libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
+                            // Gerçek dinleme adresi — QR/"Kodum" ekranındaki
+                            // `node_address`'in kaynağı budur (bkz.
+                            // own_listen_addrs alanı dokümantasyonu ve
+                            // get_node_address).
+                            new_listen_addrs.push(address);
+                        }
+                        libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Gossipsub(gossipsub::Event::Message { message, .. })) => {
+                            incoming.push(message.data);
+                        }
+                        libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
+                            // Kademlia'ya Identify'dan öğrenilen adresleri
+                            // ekle — bölüm 4.2, Kademlia'nın kendiliğinden
+                            // yapamadığı adres öğrenme adımı.
+                            for addr in info.listen_addrs {
+                                swarm.behaviour_mut().kad.add_address(&peer_id, addr);
+                            }
+                        }
+                        // NOT (tanı amaçlı): dial()'ın kendisi SADECE senkron/
+                        // anlık hataları (bkz. process_qr_packet) yakalar —
+                        // asıl bağlantı denemesi ASENKRON yürür ve
+                        // başarılı/başarısız olduğunda buraya
+                        // ConnectionEstablished/OutgoingConnectionError olarak
+                        // düşer. Bunları loglamadan "handshake neden
+                        // tamamlanmıyor" sorusu tamamen kör kalırdı — bkz.
+                        // `adb logcat` ile bu satırları arayın.
+                        libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                            info!("libp2p bağlantısı kuruldu: peer={} adres={:?}", peer_id, endpoint.get_remote_address());
+                        }
+                        libp2p::swarm::SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                            error!("Dial başarısız: peer={:?} hata={}", peer_id, error);
+                        }
+                        libp2p::swarm::SwarmEvent::IncomingConnectionError { error, send_back_addr, .. } => {
+                            error!("Gelen bağlantı başarısız: adres={} hata={}", send_back_addr, error);
+                        }
+                        libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
+                            info!("libp2p bağlantısı kapandı: peer={} sebep={:?}", peer_id, cause);
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+        self.own_listen_addrs.extend(new_listen_addrs);
+
+        let mut results = Vec::new();
+
+        // bkz. `pending_envelopes` alanı dokümantasyonu: ilk bağlantıdan
+        // sonraki ilk birkaç saniyede gönderilemeyen HERHANGİ bir zarfı
+        // (handshake, identity exchange, mesaj, edit, delete, grup
+        // güncellemesi...) burada, her poll turunda yeniden dener.
+        // `try_publish_raw` (kuyruğa EKLEMEYEN ham versiyon) kullanılıyor —
+        // aksi halde `publish_envelope` her başarısız denemede AYNI girdiyi
+        // tekrar kuyruğa ekler ve zaman aşımı asla işlemezdi. Bir `Message`
+        // zarfı ise başarı/zaman aşımı durumunu `message_status` üzerinden
+        // UI'ye bir "status" olayıyla bildiriyoruz (bkz. MessageSendStatus).
+        if !self.pending_envelopes.is_empty() {
+            let pending = std::mem::take(&mut self.pending_envelopes);
+            let now = current_time_ms();
+            for (peer_fp, envelope, first_attempt_at) in pending {
+                match self.try_publish_raw(&peer_fp, &envelope) {
+                    Ok(()) => {
+                        if let NetworkEnvelope::Message(m) = &envelope {
+                            self.message_status.insert(m.header.message_id.clone(), MessageSendStatus::Sent);
+                            results.push(serde_json::json!({
+                                "type": "status", "peer": peer_fp,
+                                "message_id": m.header.message_id, "status": "sent"
+                            }).to_string());
+                        }
+                    }
+                    Err(_) => {
+                        if now.saturating_sub(first_attempt_at) > PENDING_ENVELOPE_TIMEOUT_MS {
+                            if let NetworkEnvelope::Message(m) = &envelope {
+                                self.message_status.insert(m.header.message_id.clone(), MessageSendStatus::Failed);
+                                results.push(serde_json::json!({
+                                    "type": "status", "peer": peer_fp,
+                                    "message_id": m.header.message_id, "status": "error"
+                                }).to_string());
+                            }
+                            // Handshake/IdentityExchange gibi message_id'siz
+                            // zarflar için de aynı şekilde vazgeçiliyor —
+                            // sonsuza kadar erişilemeyen bir cihaz için
+                            // sınırsız büyüyen bir kuyruk istemiyoruz.
+                        } else {
+                            self.pending_envelopes.push((peer_fp, envelope, first_attempt_at));
+                        }
+                    }
+                }
+            }
+        }
+
+        for raw in incoming {
+            match self.process_incoming_envelope(&raw) {
+                Ok(Some(text)) => results.push(text),
+                Ok(None) => {}
+                Err(e) => error!("Gelen paket işlenemedi: {}", e),
+            }
+        }
+        results
+    }
+
+    fn process_incoming_envelope(&mut self, raw: &[u8]) -> Result<Option<String>, String> {
+        let envelope: NetworkEnvelope = ciborium::from_reader(raw).map_err(|e| e.to_string())?;
+        match envelope {
+            NetworkEnvelope::IdentityExchange(x) => {
+                self.process_identity_exchange(&x)?;
+                Ok(None)
+            }
+            NetworkEnvelope::Handshake(h) => {
+                self.process_handshake_init(&h)?;
+                Ok(None)
+            }
+            NetworkEnvelope::Message(m) => {
+                let text = self.receive_message(&m)?;
+                Ok(Some(text))
+            }
+            NetworkEnvelope::GroupUpdate(u) => {
+                self.process_group_update(&u)?;
+                Ok(None)
+            }
+            NetworkEnvelope::GroupInvite(_) | NetworkEnvelope::DeviceAdd(_) | NetworkEnvelope::ReadReceipt(_) | NetworkEnvelope::DeviceRevoke(_) => {
+                // Aşama A minimum kapsamı: GroupInvite (davetin kendisi
+                // GroupUpdate(Add) ile taşınıyor, bkz. spec 5.4), DeviceAdd/
+                // DeviceRevoke (Aşama B, çoklu cihaz) ve ReadReceipt (Aşama
+                // B, spec 1.7.1) için işleme henüz kablolanmadı. Sessizce
+                // yok say.
+                Ok(None)
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Kurtarma dosyası (spec 1.8) — Aşama A'da da temel bir sürümü var,
+    // tam SyncPayload/çoklu-cihaz entegrasyonu Aşama B.
+    // ---------------------------------------------------------------
+
+    fn export_recovery(&self, passphrase: String) -> Result<Vec<u8>, String> {
+        let identity = self.identity.as_ref().ok_or("No identity to export")?;
+
+        #[derive(Serialize)]
+        struct ExportedDevice {
+            device_fingerprint: String,
+            sign_sk_ed25519: Vec<u8>,
+            sign_sk_mldsa: Vec<u8>,
+            kem_sk_x25519: Vec<u8>,
+            kem_sk_mlkem: Vec<u8>,
+        }
+        #[derive(Serialize)]
+        struct ExportedIdentity {
+            identity_id: String,
+            devices: Vec<ExportedDevice>,
+        }
+
+        let devices: Vec<ExportedDevice> = self.own_devices.values()
+            .filter(|d| d.identity_id == identity.identity_id)
+            .filter_map(|d| self.own_device_keys.get(&d.device_fingerprint).map(|k| ExportedDevice {
+                device_fingerprint: d.device_fingerprint.clone(),
+                sign_sk_ed25519: k.sign_sk_ed25519.to_bytes().to_vec(),
+                sign_sk_mldsa: k.sign_sk_mldsa.to_bytes().to_vec(),
+                kem_sk_x25519: k.kem_sk_x25519.to_bytes().to_vec(),
+                kem_sk_mlkem: k.kem_sk_mlkem.as_bytes().to_vec(),
+            }))
+            .collect();
+
+        let plaintext = serde_json::to_vec(&ExportedIdentity {
+            identity_id: identity.identity_id.clone(),
+            devices,
+        }).map_err(|e| e.to_string())?;
+
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+        use hkdf::Hkdf;
+        use sha2::Sha256;
+
+        let rng = ring::rand::SystemRandom::new();
+        use ring::rand::SecureRandom;
+        let mut salt = [0u8; 16];
+        rng.fill(&mut salt).map_err(|_| "RNG failed")?;
+        let mut nonce_bytes = [0u8; 12];
+        rng.fill(&mut nonce_bytes).map_err(|_| "RNG failed")?;
+
+        // NOT: HKDF memory-hard değildir; production için Argon2id/scrypt
+        // önerilir (önceki inceleme notunda da belirtilmişti).
+        let hk = Hkdf::<Sha256>::new(Some(&salt), passphrase.as_bytes());
+        let mut key = [0u8; 32];
+        hk.expand(b"p2pmsg-v0.1-recovery", &mut key).map_err(|_| "HKDF expand failed")?;
+
+        let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| "Invalid key")?;
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher.encrypt(nonce, plaintext.as_slice()).map_err(|_| "Encryption failed")?;
+
+        #[derive(Serialize)]
+        struct RecoveryFile {
+            ciphertext: Vec<u8>,
+            nonce: Vec<u8>,
+            salt: Vec<u8>,
+        }
+        serde_json::to_vec(&RecoveryFile { ciphertext, nonce: nonce_bytes.to_vec(), salt: salt.to_vec() })
+            .map_err(|e| e.to_string())
+    }
+}
+
+// --- Yardımcı fonksiyonlar ---
+
+fn ciborium_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    ciborium::into_writer(value, &mut buf).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+fn extract_peer_id(addr: &Multiaddr) -> Option<PeerId> {
+    addr.iter().find_map(|p| match p {
+        libp2p::multiaddr::Protocol::P2p(peer_id) => Some(peer_id),
+        _ => None,
+    })
+}
+
+/// 127.0.0.1/::1 gibi loopback adresleri, aynı cihaz dışından hiçbir zaman
+/// dial edilemez — `get_node_address` bunları QR/rendezvous adresi olarak
+/// seçmekten kaçınır (varsa gerçek bir LAN adresi tercih edilir).
+fn is_loopback_multiaddr(addr: &Multiaddr) -> bool {
+    addr.iter().any(|p| match p {
+        libp2p::multiaddr::Protocol::Ip4(ip) => ip.is_loopback(),
+        libp2p::multiaddr::Protocol::Ip6(ip) => ip.is_loopback(),
+        _ => false,
+    })
+}
+
+/// RFC 1918 özel adres aralığı (10/8, 172.16/12, 192.168/16) — ev/ofis Wi-Fi
+/// ağlarının tipik adres biçimi, `Ipv4Addr::is_private()` (stdlib) ile
+/// tespit edilir. Mobil operatör adresleri (CGNAT dahil, ör. 100.64/10) bu
+/// aralığa GİRMEZ — `get_node_address` bu ayrımı, aynı Wi-Fi'deki karşı
+/// cihazın dial edebileceği doğru arayüzü seçmek için kullanır.
+fn is_private_lan_multiaddr(addr: &Multiaddr) -> bool {
+    addr.iter().any(|p| match p {
+        libp2p::multiaddr::Protocol::Ip4(ip) => ip.is_private(),
+        _ => false,
+    })
+}
+
+fn verify_hybrid_signature(message: &[u8], sig_classical: &[u8], sig_pq: &[u8], sender: &DeviceRecord) -> Result<(), String> {
+    if !sig_classical.is_empty() {
+        let pk_bytes: [u8; 32] = sender.sign_pubkey_ed25519.clone().try_into().map_err(|_| "Bad Ed25519 key length")?;
+        let pk = VerifyingKey::from_bytes(&pk_bytes).map_err(|_| "Bad Ed25519 key")?;
+        let sig_bytes: [u8; 64] = sig_classical.to_vec().try_into().map_err(|_| "Bad signature length")?;
+        let sig = Ed25519Signature::from_bytes(&sig_bytes);
+        pk.verify(message, &sig).map_err(|_| "Ed25519 verification failed")?;
+    }
+    if !sig_pq.is_empty() {
+        let pk_encoded: EncodedVerifyingKey<MlDsa65> = sender.sign_pubkey_mldsa.as_slice().try_into().map_err(|_| "Bad ML-DSA key")?;
+        let pk = MlDsaVerifyingKey::<MlDsa65>::decode(&pk_encoded);
+        let sig_encoded: EncodedSignature<MlDsa65> = sig_pq.try_into().map_err(|_| "Bad PQ signature")?;
+        let sig = MlDsaSignature::<MlDsa65>::decode(&sig_encoded).ok_or("Bad PQ signature")?;
+        pk.verify(message, &sig).map_err(|_| "ML-DSA verification failed")?;
+    }
+    Ok(())
+}
+
+fn sign_group_update(
+    group_id: &str,
+    new_version: u32,
+    change: &GroupChange,
+    signed_by: &str,
+    signed_by_device: &str,
+    own_keys: &DeviceKeys,
+) -> Result<GroupUpdate, String> {
+    let mut to_sign = Vec::new();
+    to_sign.extend_from_slice(group_id.as_bytes());
+    to_sign.extend_from_slice(&new_version.to_be_bytes());
+    to_sign.extend_from_slice(&ciborium_bytes(change)?);
+    let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
+    // Spec 3.3 formatındaki "signature" tekil alanla tutarlı olsun diye
+    // GroupUpdate tek bir `signature` alanı taşıyor (packet.rs) — burada
+    // hibrit imzanın klasik kısmını kullanıyoruz; ML-DSA kısmı ayrıca
+    // kontrol edilmiyor çünkü GroupUpdate struct'ı tek imza alanı
+    // tanımlıyor (KNOWN GAP: packet.rs'e ikinci bir signature_pq alanı
+    // eklenmesi, MessagePacket ile tutarlılık için önerilir).
+    Ok(GroupUpdate {
+        group_id: group_id.to_string(),
+        new_version,
+        change: change.clone(),
+        signed_by: signed_by.to_string(),
+        signed_by_device: signed_by_device.to_string(),
+        signature: sig_classical.to_bytes().to_vec(),
+    })
+}
+
+trait OptionGroupExt {
+    fn cloned_group(self) -> Result<Group, String>;
+}
+impl OptionGroupExt for Option<&Group> {
+    fn cloned_group(self) -> Result<Group, String> {
+        self.cloned().ok_or_else(|| "Group not found".to_string())
+    }
+}
+
+// --- JNI Bindings ---
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_initDatabase<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, files_dir: JString<'local>) -> jboolean {
+    let path: String = env.get_string(&files_dir).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(|| {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.init_db(&path).map_err(|e| e.to_string())
+    });
+    match result {
+        Ok(Ok(_)) => true as jboolean,
+        Ok(Err(e)) => { error!("initDatabase failed: {}", e); false as jboolean }
+        Err(e) => { error!("initDatabase panicked: {}", e); false as jboolean }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_createIdentity<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, device_name: JString<'local>) -> jstring {
+    let name: String = env.get_string(&device_name).map(|s| s.into()).unwrap_or_else(|_| "Device".to_string());
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        match core.generate_identity(name) {
+            Ok((id, bundle_bytes)) => {
+                // Kotlin, identity_id'yi aldıktan hemen sonra
+                // getPendingSecretBundle() ile ham secret bundle'ı çekip
+                // Keystore'da şifreleyip saklamalıdır — bundle burada bellekte
+                // tek seferlik tutulur, tekrar okunduğunda temizlenir (bkz.
+                // getPendingSecretBundle).
+                core.pending_secret_bundle = Some(bundle_bytes);
+                Ok(id)
+            }
+            Err(e) => Err(e),
+        }
+    });
+    match result {
+        Ok(Ok(id)) => env.new_string(id).unwrap().into_raw(),
+        Ok(Err(e)) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+        Err(e) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+    }
+}
+
+/// `createIdentity` sonrası bir kereliğine çağrılacak: az önce üretilen
+/// secret key bundle'ını (CBOR, plaintext) döner ve belleğinden siler.
+/// Kotlin bunu ALDIĞI ANDA KeystoreCrypto.encrypt ile şifreleyip diske
+/// yazmalı, plaintext'i kendi tarafında da elden çıkarmalıdır.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_getPendingSecretBundle<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jni::sys::jbyteArray {
+    let result = catch_panic(|| {
+        let mut core = CORE.lock().unwrap();
+        core.pending_secret_bundle.take().unwrap_or_default()
+    });
+    let bundle = result.unwrap_or_else(|e| { error!("getPendingSecretBundle panicked: {}", e); Vec::new() });
+    bytes_to_jbytearray(&mut env, &bundle)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_loadSecretBundle<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, bundle_bytes: JByteArray<'local>) -> jboolean {
+    let raw = jbytearray_to_vec(&mut env, &bundle_bytes);
+    let result = catch_panic(move || {
+        let mut core = CORE.lock().unwrap();
+        core.load_secret_bundle(&raw)
+    });
+    match result {
+        Ok(Ok(_)) => true as jboolean,
+        Ok(Err(e)) => { error!("load_secret_bundle failed: {}", e); false as jboolean }
+        Err(e) => { error!("load_secret_bundle panicked: {}", e); false as jboolean }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_hasStoredIdentity<'local>(_env: JNIEnv<'local>, _class: JClass<'local>) -> jboolean {
+    let result = catch_panic(|| {
+        let core = CORE.lock().unwrap();
+        core.identity.is_some()
+    });
+    result.unwrap_or(false) as jboolean
+}
+
+/// Kotlin'in Keystore ile sarmalanmış (wrapped) bir "history data key"i
+/// çözüp buraya yüklemesi için. `key_bytes` tam 32 bayt olmalıdır (256-bit
+/// ChaCha20-Poly1305 anahtarı). Rust bu anahtarı diske hiç yazmaz, sadece
+/// bellekte tutar — bkz. `history_key` alanı dokümantasyonu.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_setHistoryKey<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, key_bytes: JByteArray<'local>) -> jboolean {
+    let raw = jbytearray_to_vec(&mut env, &key_bytes);
+    let key: [u8; 32] = match raw.as_slice().try_into() {
+        Ok(k) => k,
+        Err(_) => return false as jboolean,
+    };
+    let result = catch_panic(move || {
+        let mut core = CORE.lock().unwrap();
+        core.history_key = Some(key);
+    });
+    result.is_ok() as jboolean
+}
+
+/// Skipped-message-key önbelleğinin diske şifreli kalıcılığı için
+/// kullanılan anahtarı yükler (bkz. `P2PCore.skipped_key_encryption_key`
+/// dokümantasyonu). Node modundan BAĞIMSIZ her zaman yüklenmelidir —
+/// `history_key`'in aksine bu opsiyonel bir arşivleme değil, mesajlaşmanın
+/// güvenilirliği için gerekli bir mekanizmadır.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_setSkippedKeyEncryptionKey<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, key_bytes: JByteArray<'local>) -> jboolean {
+    let raw = jbytearray_to_vec(&mut env, &key_bytes);
+    let key: [u8; 32] = match raw.as_slice().try_into() {
+        Ok(k) => k,
+        Err(_) => return false as jboolean,
+    };
+    let result = catch_panic(move || {
+        let mut core = CORE.lock().unwrap();
+        core.skipped_key_encryption_key = Some(key);
+    });
+    result.is_ok() as jboolean
+}
+
+/// Bir kişiyle olan yerel şifreli mesaj geçmişini çözüp JSON olarak döner
+/// (`List<ArchivedMessage>`). `history_key` yüklenmemişse veya bu kişiyle
+/// hiç arşivlenmiş mesaj yoksa boş dizi döner — bu bir hata değildir (node
+/// modu hiç açılmamış olabilir, spec dışı kullanıcı tercihi).
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_getMessageHistory<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>, limit: jni::sys::jint) -> jstring {
+    let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let core = CORE.lock().unwrap();
+        let history = core.load_message_history(&fp, limit.max(0) as u32);
+        serde_json::to_string(&history).unwrap_or_else(|_| "[]".to_string())
+    });
+    let json = result.unwrap_or_else(|e| { error!("getMessageHistory panicked: {}", e); "[]".to_string() });
+    env.new_string(json).unwrap().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_getIdentityCode<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
+    let result = catch_panic(|| {
+        let core = CORE.lock().unwrap();
+        core.identity_code()
+    });
+    match result {
+        Ok(Ok(code)) => env.new_string(code).unwrap().into_raw(),
+        Ok(Err(e)) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+        Err(e) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_getIdentityShortCode<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
+    let result = catch_panic(|| {
+        let core = CORE.lock().unwrap();
+        core.identity_short_code()
+    });
+    match result {
+        Ok(Ok(code)) => env.new_string(code).unwrap().into_raw(),
+        Ok(Err(e)) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+        Err(e) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_startNetwork<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, node_mode: jboolean) -> jstring {
+    let result = catch_panic(move || {
+        // `SwarmBuilder::with_tokio()` (start_network içinde) bir Tokio runtime
+        // context'inin thread-local olarak aktif olmasını gerektirir — bu JNI
+        // çağrısı ham bir JNI thread'inde çalıştığından, `RUNTIME.enter()` ile
+        // context'i elle kurmadan çağırmak panic'e yol açar (bkz. catch_panic
+        // dokümantasyonu — JNI çağrıları HERHANGİ bir Java/Kotlin thread'inden
+        // gelebilir, bu yüzden context'i HER JNI export'unda ayrı ayrı kurmak
+        // gerekir; bir thread'de enter() etmek başka bir thread'i etkilemez).
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.start_network(node_mode != 0)
+    });
+    match result {
+        Ok(Ok(pid)) => env.new_string(pid).unwrap().into_raw(),
+        Ok(Err(e)) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+        Err(e) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_setNodeMode(_env: JNIEnv, _class: JClass, enabled: jboolean) {
+    let _ = catch_panic(|| {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.set_node_mode(enabled != 0);
+    });
+}
+
+/// Karşı tarafın dial edebileceği gerçek `node_address` (bkz.
+/// `P2PCore::get_node_address`). `start_network` sonrası ilk birkaç
+/// `pollNetwork` turuna kadar (henüz hiçbir dinleme adresi bildirilmediyse)
+/// boş string döner — Kotlin tarafı buna göre "bağlanılıyor" göstermeli,
+/// ASLA sabit bir `/ip4/0.0.0.0/tcp/0` yerine koymamalı.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_getNodeAddress<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
+    let result = catch_panic(|| {
+        let core = CORE.lock().unwrap();
+        core.get_node_address().unwrap_or_default()
+    });
+    let addr = result.unwrap_or_else(|e| { error!("getNodeAddress panicked: {}", e); String::new() });
+    env.new_string(addr).unwrap().into_raw()
+}
+
+/// Spec dışı: ChatActivity'nin "bağlanılıyor..." göstergesi için — bkz.
+/// `P2PCore::has_active_session`.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_hasActiveSession<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>) -> jboolean {
+    let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let core = CORE.lock().unwrap();
+        core.has_active_session(&fp)
+    });
+    result.unwrap_or(false) as jboolean
+}
+
+/// Spec dışı: bir sohbet ekranı açıldığında proaktif olarak el sıkışmayı
+/// başlatır — bkz. `P2PCore::ensure_handshake`.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_ensureHandshake<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>) {
+    let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
+    let _ = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        if let Err(e) = core.ensure_handshake(&fp) {
+            error!("ensure_handshake failed: {}", e);
+        }
+    });
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_generateQrPacket<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, rendezvous_node: JString<'local>) -> jni::sys::jbyteArray {
+    let node: String = env.get_string(&rendezvous_node).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let core = CORE.lock().unwrap();
+        core.generate_qr_packet(node)
+    });
+    match result {
+        Ok(Ok(bytes)) => bytes_to_jbytearray(&mut env, &bytes),
+        Ok(Err(e)) => { error!("generate_qr_packet failed: {}", e); env.new_byte_array(0).unwrap().into_raw() }
+        Err(e) => { error!("generate_qr_packet panicked: {}", e); env.new_byte_array(0).unwrap().into_raw() }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_processQrPacket<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, data: JByteArray<'local>) -> jstring {
+    let raw = jbytearray_to_vec(&mut env, &data);
+    let result = catch_panic(move || {
+        // bkz. startNetwork notu — bu JNI çağrısı (kamera analiz thread'i
+        // gibi) startNetwork'ü çağıran thread'den TAMAMEN FARKLI bir
+        // thread'de çalışabilir; `dial()`'ın tetiklediği libp2p executor
+        // görevleri için burada da AYRICA bir Tokio context'i gerekir —
+        // bu satır olmadan tam olarak bu fonksiyonda yaşanan
+        // "there is no reactor running" panic'i tekrarlanırdı.
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.process_qr_packet(&raw)
+    });
+    match result {
+        Ok(Ok(identity_id)) => env.new_string(identity_id).unwrap().into_raw(),
+        Ok(Err(e)) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+        Err(e) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_processManualEntry<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, text: JString<'local>) -> jstring {
+    let text_str: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.process_manual_entry(&text_str)
+    });
+    match result {
+        Ok(Ok(identity_id)) => env.new_string(identity_id).unwrap().into_raw(),
+        Ok(Err(e)) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+        Err(e) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+    }
+}
+
+/// Dönüş: başarılıysa `{"message_id":"...","status":"sent"|"pending"}`,
+/// başarısızsa `"Error: ..."`. `status`, UI'nin gönderim ikonunu (saat/tik)
+/// hemen doğru göstermesi için — "pending" ise arka planda otomatik olarak
+/// yeniden denenip bir "status" olayıyla (bkz. pollNetwork) güncellenecek.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, target: JString<'local>, msg: JString<'local>) -> jstring {
+    let target_str: String = env.get_string(&target).map(|s| s.into()).unwrap_or_default();
+    let msg_str: String = env.get_string(&msg).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.send_message(target_str, msg_str)
+    });
+    match result {
+        Ok(Ok((message_id, status))) => env.new_string(serde_json::json!({"message_id": message_id, "status": status}).to_string()).unwrap().into_raw(),
+        Ok(Err(e)) => { error!("send_message failed: {}", e); env.new_string(format!("Error: {}", e)).unwrap().into_raw() }
+        Err(e) => { error!("send_message panicked: {}", e); env.new_string(format!("Error: {}", e)).unwrap().into_raw() }
+    }
+}
+
+/// Bir mesajı düzenler — bkz. `P2PCore::edit_message` dokümantasyonu.
+/// Dönüş: `sendMessage` ile aynı JSON biçimi (bu, edit paketinin KENDİ
+/// message_id'sidir — UI, düzenlenen ORİJİNAL mesajın id'sini kullanmaya
+/// devam etmeli, bkz. ChatActivity).
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_editMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, target: JString<'local>, target_message_id: JString<'local>, new_text: JString<'local>) -> jstring {
+    let target_str: String = env.get_string(&target).map(|s| s.into()).unwrap_or_default();
+    let target_message_id_str: String = env.get_string(&target_message_id).map(|s| s.into()).unwrap_or_default();
+    let new_text_str: String = env.get_string(&new_text).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.edit_message(target_str, target_message_id_str, new_text_str)
+    });
+    match result {
+        Ok(Ok((message_id, status))) => env.new_string(serde_json::json!({"message_id": message_id, "status": status}).to_string()).unwrap().into_raw(),
+        Ok(Err(e)) => { error!("edit_message failed: {}", e); env.new_string(format!("Error: {}", e)).unwrap().into_raw() }
+        Err(e) => { error!("edit_message panicked: {}", e); env.new_string(format!("Error: {}", e)).unwrap().into_raw() }
+    }
+}
+
+/// Bir mesajı siler — bkz. `P2PCore::delete_message` dokümantasyonu.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, target: JString<'local>, target_message_id: JString<'local>) -> jstring {
+    let target_str: String = env.get_string(&target).map(|s| s.into()).unwrap_or_default();
+    let target_message_id_str: String = env.get_string(&target_message_id).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.delete_message(target_str, target_message_id_str)
+    });
+    match result {
+        Ok(Ok((message_id, status))) => env.new_string(serde_json::json!({"message_id": message_id, "status": status}).to_string()).unwrap().into_raw(),
+        Ok(Err(e)) => { error!("delete_message failed: {}", e); env.new_string(format!("Error: {}", e)).unwrap().into_raw() }
+        Err(e) => { error!("delete_message panicked: {}", e); env.new_string(format!("Error: {}", e)).unwrap().into_raw() }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_pollNetwork<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jobjectArray {
+    let result = catch_panic(|| {
+        // `poll_events` kendi içinde zaten `RUNTIME.block_on(...)` kullanıyor
+        // (bu da context'i kurar) ama tutarlılık için burada da enter ediyoruz.
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.poll_events()
+    });
+    let texts = result.unwrap_or_else(|e| { error!("pollNetwork panicked: {}", e); Vec::new() });
+    strings_to_jobjectarray(&mut env, &texts)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_listContacts<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
+    let result = catch_panic(|| {
+        let core = CORE.lock().unwrap();
+        let contacts = core.list_contacts();
+        serde_json::to_string(&contacts).unwrap_or_else(|_| "[]".to_string())
+    });
+    let json = result.unwrap_or_else(|e| { error!("listContacts panicked: {}", e); "[]".to_string() });
+    env.new_string(json).unwrap().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_listPendingDeviceAlerts<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
+    let result = catch_panic(|| {
+        let core = CORE.lock().unwrap();
+        let alerts = core.list_pending_device_alerts();
+        serde_json::to_string(&alerts).unwrap_or_else(|_| "[]".to_string())
+    });
+    let json = result.unwrap_or_else(|e| { error!("listPendingDeviceAlerts panicked: {}", e); "[]".to_string() });
+    env.new_string(json).unwrap().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_acceptDeviceAlert<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, fingerprint: JString<'local>) -> jboolean {
+    let fp: String = env.get_string(&fingerprint).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.accept_pending_device_alert(&fp).is_ok()
+    });
+    result.unwrap_or(false) as jboolean
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_rejectDeviceAlert(mut _env: JNIEnv, _class: JClass, fingerprint: JString) {
+    let fp: String = _env.get_string(&fingerprint).map(|s| s.into()).unwrap_or_default();
+    let _ = catch_panic(move || {
+        let mut core = CORE.lock().unwrap();
+        core.reject_pending_device_alert(&fp);
+    });
+}
+
+/// JSON-encoded List<GroupSummary> — Groups tab GUI'si için.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_listGroups<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
+    let result = catch_panic(|| {
+        let core = CORE.lock().unwrap();
+        let groups = core.list_groups();
+        serde_json::to_string(&groups).unwrap_or_else(|_| "[]".to_string())
+    });
+    let json = result.unwrap_or_else(|e| { error!("listGroups panicked: {}", e); "[]".to_string() });
+    env.new_string(json).unwrap().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_createGroup<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, name: JString<'local>) -> jstring {
+    let name_str: String = env.get_string(&name).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.create_group(name_str)
+    });
+    match result {
+        Ok(Ok(id)) => env.new_string(id).unwrap().into_raw(),
+        Ok(Err(e)) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+        Err(e) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_inviteToGroup<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, identity_id: JString<'local>) -> jboolean {
+    let gid: String = env.get_string(&group_id).map(|s| s.into()).unwrap_or_default();
+    let iid: String = env.get_string(&identity_id).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.invite_to_group(&gid, &iid)
+    });
+    match result {
+        Ok(Ok(_)) => true as jboolean,
+        Ok(Err(e)) => { error!("invite_to_group failed: {}", e); false as jboolean }
+        Err(e) => { error!("invite_to_group panicked: {}", e); false as jboolean }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_removeFromGroup<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, identity_id: JString<'local>) -> jboolean {
+    let gid: String = env.get_string(&group_id).map(|s| s.into()).unwrap_or_default();
+    let iid: String = env.get_string(&identity_id).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.remove_from_group(&gid, &iid)
+    });
+    match result {
+        Ok(Ok(_)) => true as jboolean,
+        Ok(Err(e)) => { error!("remove_from_group failed: {}", e); false as jboolean }
+        Err(e) => { error!("remove_from_group panicked: {}", e); false as jboolean }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, msg: JString<'local>) -> jboolean {
+    let gid: String = env.get_string(&group_id).map(|s| s.into()).unwrap_or_default();
+    let msg_str: String = env.get_string(&msg).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.send_group_message(&gid, &msg_str)
+    });
+    match result {
+        Ok(Ok(_)) => true as jboolean,
+        Ok(Err(e)) => { error!("send_group_message failed: {}", e); false as jboolean }
+        Err(e) => { error!("send_group_message panicked: {}", e); false as jboolean }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_exportRecovery<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, pass: JString<'local>) -> jni::sys::jbyteArray {
+    let pass_str: String = env.get_string(&pass).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let core = CORE.lock().unwrap();
+        core.export_recovery(pass_str)
+    });
+    match result {
+        Ok(Ok(bytes)) => bytes_to_jbytearray(&mut env, &bytes),
+        Ok(Err(e)) => { error!("export_recovery failed: {}", e); env.new_byte_array(0).unwrap().into_raw() }
+        Err(e) => { error!("export_recovery panicked: {}", e); env.new_byte_array(0).unwrap().into_raw() }
+    }
+}
+
+// --- JNI yardımcıları ---
+
+/// Rust'ın varsayılan davranışı: bir panic, `extern "system"` (JNI) gibi bir
+/// FFI sınırından unwind ederek geçmeye çalışırsa, bunu güvenle
+/// yapamayacağı için process'i SESSİZCE `abort()` eder — tüm uygulama
+/// çöker (bkz. processQrPacket çökmesi: dial()/gossipsub publish() zincirinde
+/// "there is no reactor running" panic'i oluştu ve tüm süreç düştü). Her JNI
+/// export'u, çağırdığı `P2PCore` metodunu bu fonksiyonla sarmalar: panic
+/// olursa (yukarıdaki `set_hook` sayesinde tam mesajı zaten logcat'e
+/// yazılmış olur) process düşmez, `Err(...)` olarak geri döner.
+///
+/// ÖNEMLİ: `f` kapanışı KESİNLİKLE `env: JNIEnv` yakalamamalı/kullanmamalı.
+/// İlk denemede bunu ihlal etmiştik: panic durumunda `env.new_string(...)`
+/// hiç çalışmadığından `jstring` olarak `std::ptr::null_mut()` dönüyorduk —
+/// bu da Kotlin tarafında `external fun ...: String` (non-null) sözleşmesini
+/// bozup ayrı bir `NullPointerException` çökmesine yol açtı (bkz. o oturumun
+/// geçmişi). Doğru desen: `catch_panic` SADECE saf Rust mantığını
+/// (CORE.lock() + core metodu) çalıştırır; sonucu `env`'e çeviren
+/// `new_string`/`bytes_to_jbytearray` çağrıları HER ZAMAN bu fonksiyonun
+/// DIŞINDA, panic'ten etkilenmeyen çağıran kodda yapılır — böylece panic
+/// olsun olmasın her zaman geçerli bir (non-null) JNI değeri döner.
+fn catch_panic<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|payload| {
+        // Panic mesajının TAMAMI `set_hook` ile zaten logcat'e yazıldı;
+        // burada çağıran tarafa dönecek kısa bir özet üretiyoruz.
+        if let Some(s) = payload.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "internal panic (bkz. logcat 'PANIC yakalandı')".to_string()
+        }
+    })
+}
+
+fn bytes_to_jbytearray<'local>(env: &mut JNIEnv<'local>, bytes: &[u8]) -> jni::sys::jbyteArray {
+    let arr = env.new_byte_array(bytes.len() as i32).unwrap();
+    let i8_bytes: Vec<i8> = bytes.iter().map(|&b| b as i8).collect();
+    env.set_byte_array_region(&arr, 0, &i8_bytes).unwrap();
+    arr.into_raw()
+}
+
+fn jbytearray_to_vec<'local>(env: &mut JNIEnv<'local>, data: &JByteArray<'local>) -> Vec<u8> {
+    let len = env.get_array_length(data).unwrap_or(0) as usize;
+    let mut buf = vec![0i8; len];
+    let _ = env.get_byte_array_region(data, 0, &mut buf);
+    buf.iter().map(|&b| b as u8).collect()
+}
+
+fn strings_to_jobjectarray<'local>(env: &mut JNIEnv<'local>, texts: &[String]) -> jobjectArray {
+    let string_class = env.find_class("java/lang/String").unwrap();
+    let empty = env.new_string("").unwrap();
+    let arr = env.new_object_array(texts.len() as i32, string_class, empty).unwrap();
+    for (i, text) in texts.iter().enumerate() {
+        let jstr = env.new_string(text).unwrap();
+        env.set_object_array_element(&arr, i as i32, jstr).unwrap();
+    }
+    arr.into_raw()
+}
+
+// =====================================================================
+// BİLİNEN EKSİKLER / KAPSAM DIŞI (dürüstçe işaretlenmiştir):
+//
+// 1. [ÇÖZÜLDÜ] DH-ratchet rotasyonu artık senkronize: MessagePacketHeader'a
+//    eklenen `rotation_kyber_ciphertext` alanı, rotasyonu tetikleyen
+//    tarafın ürettiği Kyber ciphertext'ini karşı tarafa taşıyor; alıcı
+//    `respond_to_rotation` ile aynı yeni kök anahtarı türetiyor (bkz.
+//    ratchet.rs). Kalan sınır: initiator/responder rolü hâlâ basit bir
+//    "fingerprint küçük olan tetikler" kuralıyla belirleniyor
+//    (maybe_rotate_ratchet) — Signal'daki gibi "mesaj bazlı, karşılıklı
+//    tetiklenen" bir model değil, ama artık en azından iki taraf da aynı
+//    anahtarlara ulaşıyor.
+// 2. [ÇÖZÜLDÜ] Skipped-message-key cache artık var (bkz. ratchet.rs
+//    skipped_keys/decrypt) — sıra dışı/gecikmeli gelen mesajlar en fazla
+//    1000 mesajlık pencereye kadar hâlâ çözülebilir. Önbellek sadece
+//    bellekte, disk'e yazılmıyor.
+// 3. GroupUpdate sadece Ed25519 imzası taşıyor, ML-DSA değil (packet.rs
+//    GroupUpdate.signature tek alan) — MessagePacket'teki hibrit imza
+//    modeliyle tam tutarlı değil.
+// 4. Aşama B (DeviceAdd/DeviceRevoke akışı, SyncPayload, cihaz-çifti
+//    matrisi, ReadReceipt, ratchet çoklu-cihaz gönderimi, ratchet_states'in
+//    Contact içinde saklanması) bu dosyada YOK — kapsam dışı bırakıldı,
+//    kullanıcı ile "Aşama A" olarak anlaşıldı.
+// 5. Node modu Linux masaüstünde önce test edilmeli deniyordu (spec 7) —
+//    bu kod tabanı sadece Android hedefliyor, ayrı bir Linux masaüstü
+//    istemcisi yok.
+// 6. Circuit Relay v2 (spec 4.3, node modu detayı) kablolanmadı — sadece
+//    Kademlia Server/Client modu switch'i var.
+// 7. process_identity_exchange sadece fingerprint eşleşmesini doğrular,
+//    evaluate_sender_device/spec 2.2 TOFU+uyarı akışına GİRMEZ — bir Contact
+//    zaten varsa ve gelen IdentityExchange bilinmeyen bir cihaz taşıyorsa,
+//    bu şu an sessizce known_remote_devices'a yazılır (bağlantı katmanında,
+//    mesaj/handshake katmanında değil). Üretimde IdentityExchange işlenirken
+//    de evaluate_sender_device çağrılmalı ki "tanınmayan yeni cihaz"
+//    senaryosu burada da yakalansın.
+// =====================================================================

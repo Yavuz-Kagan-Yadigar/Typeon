@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">P2P Messenger</string>
+    <string name="action_settings">Settings</string>
+    <string name="action_scan_qr">Scan QR</string>
+    <string name="action_show_qr">My QR</string>
+    <string name="action_new_chat">New Chat</string>
+    <string name="hint_message">Message</string>
+    <string name="btn_send">Send</string>
+    <string name="lbl_identity_code">Identity Code</string>
+    <string name="lbl_device_fingerprint">Device Fingerprint</string>
+    <string name="lbl_node_address">Node Address</string>
+    <string name="lbl_copy">Copy</string>
+    <string name="lbl_copied">Copied!</string>
+    <string name="msg_no_contacts">No contacts yet. Scan a QR code or add manually to start.</string>
+    <string name="msg_security_warning">Security Warning: Unverified device detected!</string>
+    <string name="msg_device_added">New device added by</string>
+    <string name="msg_read">Seen</string>
+    <string name="title_chats">Chats</string>
+    <string name="title_contacts">Contacts</string>
+    <string name="title_settings">Settings</string>
+    <string name="title_group_chats">Groups</string>
+    <string name="lbl_create_group">Create Group</string>
+    <string name="lbl_group_name">Group Name</string>
+    <string name="lbl_members">Members</string>
+    <string name="lbl_add_member">Add Member</string>
+    <string name="lbl_leave_group">Leave Group</string>
+    <string name="lbl_verify_identity">Verify Identity</string>
+    <string name="lbl_safety_number">Safety Number</string>
+    <string name="lbl_node_mode">Node Mode</string>
+    <string name="lbl_node_mode_desc">Run as a relay node for the network</string>
+    <string name="lbl_key_security">Anahtar Güvenliği</string>
+    <string name="lbl_keys_hardware_backed">✓ Anahtarlarınız cihazın güvenlik donanımında (StrongBox/TEE) korunuyor</string>
+    <string name="lbl_keys_software_backed">⚠ Anahtarlarınız yazılım tabanlı korumada (bu cihaz donanım güvenlik modülünü desteklemiyor)</string>
+    <string name="lbl_oled_black">OLED Siyah</string>
+    <string name="lbl_oled_black_desc">Koyu temadayken arkaplanı tam siyaha (#000000) çevirir — AMOLED ekranlarda pil tasarrufu sağlar</string>
+    <string name="lbl_enable_notifications">Enable Notifications</string>
+    <string name="lbl_backup_identity">Backup Identity</string>
+    <string name="lbl_recovery_file">Recovery File</string>
+    <string name="lbl_download">Download</string>
+    <string name="lbl_status_online">Online</string>
+    <string name="lbl_status_offline">Offline</string>
+    <string name="lbl_typing">typing...</string>
+    <string name="error_camera_permission">Camera permission required for QR scanning</string>
+    <string name="error_network">Network error. Please check your connection.</string>
+    <string name="error_send_failed">Failed to send message</string>
+    <string name="confirm_revoke_device">Revoke this device? It will no longer be able to send or receive messages.</string>
+    <string name="confirm_block_contact">Block this contact?</string>
+
+    <string name="lbl_edited">(düzenlendi)</string>
+    <string name="msg_deleted">Bu mesaj silindi</string>
+    <string name="msg_connecting">Bağlanılıyor…</string>
+    <string name="action_edit_message">Düzenle</string>
+    <string name="action_delete_message">Sil</string>
+    <string name="confirm_delete_message">Bu mesajı silmek istediğinize emin misiniz?</string>
+    <string name="lbl_edit_message_hint">Mesajı düzenle</string>
+
+    <string name="title_groups">Gruplar</string>
+    <string name="msg_no_groups">Henüz grup oluşturmadınız.</string>
+    <string name="action_create_group">Grup Oluştur</string>
+    <string name="lbl_new_group_name_hint">Grup adı</string>
+    <string name="lbl_add_member_to_group">Üye ekle</string>
+    <string name="msg_no_contacts_to_add">Eklenecek kişi yok — önce bir kişi ekleyin.</string>
+
+    <plurals name="lbl_member_count">
+        <item quantity="one">%d üye</item>
+        <item quantity="other">%d üye</item>
+    </plurals>
+</resources>

@@ -1,0 +1,12 @@
+# 16 KB page size (developer.android.com/16kb-page-size): only 64-bit ABIs
+# are affected (32-bit processes keep running under 4 KB page emulation
+# regardless), so this is scoped to aarch64/x86_64 only. Recent NDKs (r28+)
+# default to this already, but pinning it explicitly means our .so stays
+# correctly aligned even if built with an older NDK — cargo-ndk's build
+# picks up this file automatically since it runs `cargo build` from this
+# directory (the crate root).
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
