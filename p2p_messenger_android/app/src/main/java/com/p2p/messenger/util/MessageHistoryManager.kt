@@ -6,15 +6,17 @@ import java.io.File
 import java.security.SecureRandom
 
 /**
- * Mesaj geçmişi arşivinin şifreleme anahtarını yönetir. Artık node
- * modundan BAĞIMSIZ olarak her zaman yüklenir (bkz. P2PService
- * onStartCommand notu) — ama bunu YAZMA POLİTİKASI hâlâ iki farklı
- * kaynağa göre değişir (bkz. lib.rs `archive_message` çağıranları):
- * - Canlı mesaj trafiği: SADECE node modu açık cihazlarda arşivlenir
- *   (kullanıcı tercihi — "server olmayı tercih eden" cihaz).
- * - `HistorySyncResponse` (karşı taraftan çekilen geçmiş): node modu
- *   KAPALI cihazlarda da yerelde kalıcı kılınır — aksi halde uygulama her
- *   kapatılıp açıldığında geçmiş sanki kayboluyormuş gibi görünürdü.
+ * Mesaj geçmişi arşivinin şifreleme anahtarını yönetir. Node modundan
+ * BAĞIMSIZ olarak her zaman yüklenir (bkz. P2PService onStartCommand
+ * notu). Spec dışı düzeltme: önceden hem bu anahtarın yüklenmesi HEM DE
+ * canlı mesaj trafiğinin arşivlenmesi SADECE node modu açıkken
+ * yapılıyordu ("server olmayı tercih eden cihaz" kullanıcı tercihi) —
+ * kullanıcı artık açıkça TÜM cihazlarda (node olsun olmasın) kendi
+ * sohbet geçmişinin yerelde şifreli kalıcı kılınmasını istedi. Node modu
+ * artık SADECE karşı taraflara `HistorySyncRequest` yanıtlarken yardımcı
+ * olma (bkz. lib.rs receive_message) ve DHT routing katılımını
+ * etkiliyor — kendi geçmişini saklama kararını değil (bkz. lib.rs
+ * `archive_message` çağıranları, `node_mode_enabled` kontrolü artık YOK).
  *
  * Anahtar hayat döngüsü, IdentityManager ile aynı desende:
  * - İlk açılışta rastgele 256-bit bir "history data key" üretilir,

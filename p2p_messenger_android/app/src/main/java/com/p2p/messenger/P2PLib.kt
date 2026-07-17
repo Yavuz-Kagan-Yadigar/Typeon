@@ -118,6 +118,13 @@ object P2PLib {
      *  ya da hata varsa "Error: ...". BÜYÜK dosyalar için ANA THREAD'DE
      *  ÇAĞIRMAYIN. */
     external fun getAttachmentPlaintextPath(fileId: String): String
+    /** Spec dışı: bir eki İndirilenler/P2P'ye kaydetmeden önce göndericiden
+     *  onay ister — cevap pollNetwork() üzerinden "save_response" olayıyla
+     *  gelir. */
+    external fun requestSaveApproval(fileId: String, peerDeviceFingerprint: String, fileName: String)
+    /** Spec dışı: gönderici tarafının, gelen bir "save_request" olayına
+     *  (kullanıcının Evet/Hayır dokunuşuyla) cevabı. */
+    external fun respondToSaveRequest(fileId: String, peerDeviceFingerprint: String, approved: Boolean)
 
     // --- Bölüm 5: Grup mesajlaşma ---
     /** JSON-encoded List<GroupSummary>. */

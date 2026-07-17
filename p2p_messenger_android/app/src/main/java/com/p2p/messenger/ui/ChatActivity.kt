@@ -36,11 +36,12 @@ import java.util.UUID
 /**
  * Spec 3 (Mesajlaşma) — tek bir kişiyle 1:1 sohbet ekranı.
  *
- * Mesaj geçmişi kalıcılığı, kullanıcı tercihine bağlıdır (spec dışı):
- * SADECE node modu açık olan cihazda ("server olmayı tercih eden" cihaz)
- * mesajlar yerelde şifreli olarak arşivlenir (bkz. MessageHistoryManager,
- * lib.rs archive_message/load_message_history). Node modu kapalıysa
- * geçmiş bu Activity kapandığında kaybolur — sadece anlık gösterim olur.
+ * Mesaj geçmişi artık HER cihazda (node modu açık olsun olmasın) yerelde
+ * şifreli olarak kalıcı tutulur (bkz. MessageHistoryManager, lib.rs
+ * archive_message/load_message_history) — kullanıcı tercihi (bu
+ * görüşmede netleştirildi). Node modu artık sadece karşı taraflara
+ * geçmiş senkronizasyonunda yardımcı olma (bkz. `requestHistorySync`) ve
+ * DHT routing katılımını etkiliyor.
  */
 class ChatActivity : AppCompatActivity() {
 
@@ -83,6 +84,11 @@ class ChatActivity : AppCompatActivity() {
     private val pickFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { onFilePicked(it) }
     }
+    /** SADECE API 26-28 (scoped storage öncesi) için — bkz.
+     *  saveToPublicDownloads notu. API 29+'ta hiç kullanılmaz. */
+    private val requestStoragePermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* reddedilse bile devam — kaydetme o zaman başarısız olur, mesajlaşma etkilenmez */ }
 
     private val sessionPollHandler = Handler(Looper.getMainLooper())
     /**
@@ -152,6 +158,7 @@ class ChatActivity : AppCompatActivity() {
         adapter = SimpleChatAdapter(localMessages)
         adapter.onItemLongPress = { item -> showEditDeleteDialog(item) }
         adapter.onAttachmentClick = { item -> onAttachmentClicked(item) }
+        adapter.onAttachmentLongClick = { item -> onAttachmentLongClicked(item) }
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = adapter
 
@@ -164,6 +171,13 @@ class ChatActivity : AppCompatActivity() {
         }
         findViewById<ImageButton>(R.id.btnAttach).setOnClickListener {
             pickFileLauncher.launch(arrayOf("*/*"))
+        }
+        // bkz. requestStoragePermission notu — SADECE API 26-28, erkenden
+        // (kullanıcı gerçekten bir şey kaydetmeye çalışmadan önce) istenir
+        // ki o an geldiğinde izin muhtemelen zaten verilmiş olsun.
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q &&
+            androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestStoragePermission.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
 
         if (!bindToIntent(intent)) {
@@ -302,6 +316,156 @@ class ChatActivity : AppCompatActivity() {
             )
             "file_complete" -> adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.COMPLETE)
             "file_failed" -> adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.FAILED)
+            "save_request" -> showSaveRequestDialog(obj.optString("file_id"), obj.optString("file_name"))
+            "save_response" -> handleSaveResponse(obj.optString("file_id"), obj.optBoolean("approved"))
+        }
+    }
+
+    /**
+     * Spec dışı: BİZ bu dosyanın GÖNDERİCİSİYİZ — karşı taraf onu
+     * "İndirilenler/P2P"ye kaydetmek istiyor, onayımızı bekliyor.
+     */
+    private fun showSaveRequestDialog(fileId: String, fileName: String) {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.title_save_request)
+            .setMessage(getString(R.string.msg_save_request, fileName))
+            .setPositiveButton(R.string.action_approve) { _, _ ->
+                lifecycleScope.launch(Dispatchers.IO) {
+                    try {
+                        P2PLib.respondToSaveRequest(fileId, peerDeviceFingerprint, true)
+                    } catch (e: Exception) { /* en iyi çaba — karşı taraf zaten yeniden dener */ }
+                }
+            }
+            .setNegativeButton(R.string.action_decline) { _, _ ->
+                lifecycleScope.launch(Dispatchers.IO) {
+                    try {
+                        P2PLib.respondToSaveRequest(fileId, peerDeviceFingerprint, false)
+                    } catch (e: Exception) { }
+                }
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    /**
+     * Spec dışı: BİZ İSTEYENİZ — gönderdiğimiz SaveRequest'e cevap geldi.
+     * Onaylandıysa, zaten çözülmüş (veya şimdi çözülecek) yerel kopyayı
+     * MediaStore üzerinden "İndirilenler/P2P"ye kopyalar.
+     */
+    private fun handleSaveResponse(fileId: String, approved: Boolean) {
+        if (!approved) {
+            Toast.makeText(this, R.string.msg_save_declined, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val item = localMessages.find { it.attachment?.fileId == fileId }
+        val attachment = item?.attachment ?: return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val plainPath = try {
+                P2PLib.getAttachmentPlaintextPath(fileId)
+            } catch (e: Exception) {
+                "Error: ${e.message}"
+            }
+            if (plainPath.startsWith("Error:")) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@ChatActivity, plainPath, Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+            val saved = saveToPublicDownloads(File(plainPath), attachment.fileName, attachment.mimeType)
+            withContext(Dispatchers.Main) {
+                Toast.makeText(
+                    this@ChatActivity,
+                    if (saved) getString(R.string.msg_saved_to_downloads) else getString(R.string.error_attachment_open_failed),
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    /**
+     * "İndirilenler/P2P" içine kopyalar — API 29+'ta MediaStore.Downloads
+     * ile hiçbir izin gerekmez (scoped storage); API 26-28'de
+     * WRITE_EXTERNAL_STORAGE + doğrudan dosya yazımı gerekir (manifest'te
+     * maxSdkVersion=28 ile tanımlı, bkz. AndroidManifest.xml notu).
+     */
+    private fun saveToPublicDownloads(source: File, displayName: String, mimeType: String): Boolean {
+        return try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Downloads.DISPLAY_NAME, displayName)
+                    put(android.provider.MediaStore.Downloads.MIME_TYPE, mimeType.ifBlank { "application/octet-stream" })
+                    put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/P2P")
+                }
+                val uri = contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: return false
+                contentResolver.openOutputStream(uri)?.use { output ->
+                    source.inputStream().use { input -> input.copyTo(output) }
+                } ?: return false
+                true
+            } else {
+                @Suppress("DEPRECATION")
+                val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                val p2pDir = File(downloadsDir, "P2P").apply { mkdirs() }
+                val dest = File(p2pDir, displayName)
+                source.inputStream().use { input -> dest.outputStream().use { output -> input.copyTo(output) } }
+                // Galeri/dosya yöneticisinin yeni dosyayı hemen görmesi için.
+                android.media.MediaScannerConnection.scanFile(this, arrayOf(dest.absolutePath), arrayOf(mimeType), null)
+                true
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Spec dışı: bir ek balonuna basılı tutulunca (SADECE tamamlanmışsa,
+     * bkz. SimpleChatAdapter) "İndirilenler/P2P"ye kaydet seçeneğini
+     * gösterir. `item.isMine` ayrımı önemli: bu BİZİM gönderdiğimiz bir
+     * dosyaysa (kendi kopyamız), onay istemeye gerek yok — doğrudan
+     * kaydedilir. Karşı taraftan gelen bir dosyaysa, gerçek kaydetme
+     * göndericinin onayından SONRA `handleSaveResponse`'ta gerçekleşir.
+     */
+    private fun onAttachmentLongClicked(item: SimpleChatAdapter.Item) {
+        val attachment = item.attachment ?: return
+        AlertDialog.Builder(this)
+            .setItems(arrayOf(getString(R.string.action_save_to_downloads))) { _, _ ->
+                if (item.isMine) {
+                    saveOwnAttachment(attachment)
+                } else {
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        try {
+                            P2PLib.requestSaveApproval(attachment.fileId, peerDeviceFingerprint, attachment.fileName)
+                        } catch (e: Exception) { }
+                    }
+                    Toast.makeText(this, R.string.msg_save_request_sent, Toast.LENGTH_SHORT).show()
+                }
+            }
+            .show()
+    }
+
+    /** Kendi gönderdiğimiz bir dosya — karşı taraftan onay istemeye gerek
+     *  yok, doğrudan kaydedilir. */
+    private fun saveOwnAttachment(attachment: SimpleChatAdapter.AttachmentInfo) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val plainPath = try {
+                P2PLib.getAttachmentPlaintextPath(attachment.fileId)
+            } catch (e: Exception) {
+                "Error: ${e.message}"
+            }
+            if (plainPath.startsWith("Error:")) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@ChatActivity, plainPath, Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+            val saved = saveToPublicDownloads(File(plainPath), attachment.fileName, attachment.mimeType)
+            withContext(Dispatchers.Main) {
+                Toast.makeText(
+                    this@ChatActivity,
+                    if (saved) getString(R.string.msg_saved_to_downloads) else getString(R.string.error_attachment_open_failed),
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
         }
     }
 
@@ -361,9 +525,23 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Spec dışı: foto/video için, kullanıcının istediği basit uygulama içi
+     * görüntüleyiciyi (bkz. MediaViewerActivity) açar — diğer türler
+     * (ses, belge...) hâlâ sistem varsayılan uygulamasına devredilir.
+     */
     private fun openAttachmentFile(path: String, mimeType: String) {
         try {
             val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", File(path))
+            if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) {
+                val intent = Intent(this, MediaViewerActivity::class.java).apply {
+                    putExtra(MediaViewerActivity.EXTRA_URI, uri)
+                    putExtra(MediaViewerActivity.EXTRA_MIME_TYPE, mimeType)
+                }
+                grantUriPermission(packageName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                startActivity(intent)
+                return
+            }
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, mimeType.ifBlank { "*/*" })
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

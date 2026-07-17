@@ -71,4 +71,13 @@
     <string name="msg_attachment_downloading">İndiriliyor…</string>
     <string name="msg_attachment_failed">İndirme başarısız</string>
     <string name="error_attachment_open_failed">Dosya açılamadı</string>
+
+    <string name="action_save_to_downloads">İndirilenler\'e kaydet</string>
+    <string name="title_save_request">Kaydetme İsteği</string>
+    <string name="msg_save_request">Karşı taraf \"%s\" dosyasını kaydetmek istiyor. Onaylıyor musunuz?</string>
+    <string name="action_approve">Evet</string>
+    <string name="action_decline">Hayır</string>
+    <string name="msg_save_declined">Karşı taraf kaydetme isteğini reddetti</string>
+    <string name="msg_saved_to_downloads">İndirilenler/P2P içine kaydedildi</string>
+    <string name="msg_save_request_sent">Kaydetme isteği gönderildi, onay bekleniyor…</string>
 </resources>

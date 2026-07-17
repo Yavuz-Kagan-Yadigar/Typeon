@@ -5,6 +5,12 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <!-- Spec dışı: "İndirilenler/P2P"ye kaydetme akışı — API 29+'ta
+         MediaStore.Downloads scoped storage üzerinden hiçbir izin
+         gerektirmez; SADECE API 26-28'de (scoped storage öncesi) elle
+         izin istenip doğrudan dosya yazımı için kullanılır (bkz.
+         ChatActivity.saveToPublicDownloads). -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
     <application
         android:name=".P2PApplication"
@@ -28,6 +34,13 @@
         <activity android:name=".ui.GroupChatActivity" />
         <activity android:name=".ui.QrScanActivity" />
         <activity android:name=".ui.QrDisplayActivity" />
+        <!-- Spec dışı: foto/video ekleri için basit, tam boyut/kalitede
+             uygulama içi görüntüleyici — bkz. ChatActivity.onAttachmentClicked
+             notu (önceden HER zaman sistem varsayılan uygulamasına
+             devrediliyordu). -->
+        <activity
+            android:name=".ui.MediaViewerActivity"
+            android:theme="@style/Theme.P2PMessenger" />
 
         <service
             android:name=".service.P2PService"

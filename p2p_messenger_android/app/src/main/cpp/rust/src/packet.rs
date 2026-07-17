@@ -237,6 +237,14 @@ pub enum MessageContent {
         /// jenerik dosya simgesi.
         preview_jpeg: Option<Vec<u8>>,
     },
+    /// Spec dışı: kullanıcı tarafından istenen "kaydetme onayı" akışı.
+    /// Alıcı taraf, indirilmiş bir eki kalıcı/paylaşılan bir konuma
+    /// ("İndirilenler/P2P") kopyalamak istediğinde önce göndericiye bu
+    /// isteği yollar — gönderici onaylamadan dosya uygulamanın kendi
+    /// özel (app-private) alanından ÇIKMAZ.
+    SaveRequest { file_id: String, file_name: String },
+    /// Göndericinin `SaveRequest`'e cevabı.
+    SaveApproval { file_id: String, approved: bool },
 }
 
 /// El sıkışma paketi — önceki `HandshakeInit` tasarımı; spec'te ayrı bir

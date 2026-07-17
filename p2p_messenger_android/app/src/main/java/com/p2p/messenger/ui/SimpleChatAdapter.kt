@@ -73,6 +73,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     /** Bir ek balonundaki "İndir" düğmesine (veya tamamlanmış bir eke)
      *  dokunulduğunda tetiklenir. */
     var onAttachmentClick: ((Item) -> Unit)? = null
+    /** Spec dışı: tamamlanmış bir ek balonuna basılı tutulunca (ör.
+     *  "İndirilenler/P2P"ye kaydet menüsünü açmak için) tetiklenir —
+     *  bkz. `bindAttachment`, SADECE `AttachmentStatus.COMPLETE` iken
+     *  etkin. */
+    var onAttachmentLongClick: ((Item) -> Unit)? = null
 
     private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
@@ -265,6 +270,14 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         }
         holder.btnAttachmentDownload.setOnClickListener(clickListener)
         holder.layoutAttachment.setOnClickListener(clickListener)
+        holder.layoutAttachment.setOnLongClickListener {
+            if (attachment.status == AttachmentStatus.COMPLETE) {
+                onAttachmentLongClick?.invoke(item)
+                true
+            } else {
+                false
+            }
+        }
     }
 
     override fun getItemCount(): Int = items.size

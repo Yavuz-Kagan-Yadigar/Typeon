@@ -222,6 +222,13 @@ pub struct AttachmentSummary {
 /// EKLEME (append) yapılır, seek gerekmez).
 struct DownloadState {
     peer_id: PeerId,
+    /// Bkz. `P2PCore::peer_for_file` — `file_progress`/`file_complete`/
+    /// `file_failed` olaylarının `"peer"` alanını doldurmak için gerekli
+    /// (bkz. o alanın eklenmesine yol açan hata: ChatActivity'nin olay
+    /// dinleyicisi `"peer"` eşleşmezse olayı SESSİZCE YOK SAYIYOR —
+    /// bu alan hiç doldurulmadığı için indirme Rust tarafında tamamen
+    /// başarıyla bitse bile UI hiçbir zaman haberdar olmuyordu).
+    peer_device_fingerprint: String,
     total_size: u64,
     total_chunks: u32,
     next_chunk_index: u32,
@@ -1620,14 +1627,19 @@ impl P2PCore {
             signature_pq: sig_pq.encode().to_vec(),
         };
 
-        // Spec dışı, kullanıcı tercihi: node modu açıkken (bu cihaz "server
-        // olmayı tercih ediyor") mesaj geçmişi yerelde şifreli arşivlenir.
+        // Spec dışı düzeltme: önceden SADECE node modu açık cihazlarda
+        // arşivleniyordu (o zamanki kullanıcı tercihi) — kullanıcı artık
+        // açıkça TÜM cihazlarda (node olsun olmasın) kendi sohbet
+        // geçmişinin yerelde şifreli kalıcı kılınmasını istedi; node modu
+        // artık SADECE "karşı taraflara geçmiş senkronizasyon isteklerinde
+        // yardımcı olma" (bkz. HistorySyncRequest) ve DHT routing
+        // katılımını etkiliyor, kendi geçmişini SAKLAMA kararını değil.
         // Ağ paketinin kendisi zaten uçtan uca şifreli; bu AYRI bir
-        // "dinlenme hâlinde şifreleme" katmanıdır (bkz. archive_message).
-        if self.node_mode_enabled {
-            if let Some(plaintext) = archive_plaintext {
-                let _ = self.archive_message(&peer_device_fingerprint, "sent", plaintext);
-            }
+        // "dinlenme hâlinde şifreleme" katmanıdır (bkz. archive_message —
+        // `history_key` artık node modundan bağımsız her zaman yüklü,
+        // bkz. P2PService/MessageHistoryManager).
+        if let Some(plaintext) = archive_plaintext {
+            let _ = self.archive_message(&peer_device_fingerprint, "sent", plaintext);
         }
 
         // Spec dışı, kullanıcı tarafından istenen güvenilir teslim:
@@ -1657,6 +1669,8 @@ impl P2PCore {
                 | MessageContent::Delete { .. }
                 | MessageContent::HistorySyncRequest { .. }
                 | MessageContent::FileOffer { .. }
+                | MessageContent::SaveRequest { .. }
+                | MessageContent::SaveApproval { .. }
         );
         // Ack, kendisi ONAYLANMASA da (bkz. packet.rs notu — sonsuz döngü
         // riski) artık SINIRLI sayıda yeniden dener (bkz.
@@ -1763,9 +1777,10 @@ impl P2PCore {
         // HANGİ ChatActivity ise ona ekleniyordu, doğru olanına değil).
         let event = match content {
             MessageContent::Text { group_id: None, text } => {
-                if self.node_mode_enabled {
-                    let _ = self.archive_message(&peer_fp, "received", text.as_bytes());
-                }
+                // bkz. send_message_content'teki aynı düzeltme notu —
+                // artık node modundan bağımsız her cihaz kendi geçmişini
+                // yerelde şifreli tutuyor.
+                let _ = self.archive_message(&peer_fp, "received", text.as_bytes());
                 self.send_ack(&peer_fp, &message_id);
                 serde_json::json!({"type": "message", "peer": peer_fp, "message_id": message_id, "text": text})
             }
@@ -1822,24 +1837,19 @@ impl P2PCore {
                 //
                 // Spec dışı düzeltme: senkronla gelen mesajlar önceden
                 // SADECE bu ekranın o anki bellek-içi listesine ekleniyordu
-                // — kalıcı hiçbir kayıt bırakmıyordu. Bu yüzden node modu
-                // KAPALI bir cihazda uygulama kapatılıp açıldığında (veya
-                // karşı taraf o an erişilemezken sohbet tekrar açıldığında)
-                // geçmiş sanki "kayboluyormuş" gibi görünüyordu — aslında
-                // her seferinde ağdan yeniden çekilmesi gerekiyordu. Artık
-                // node modu kapalı cihazlar da senkronla gelen geçmişi
-                // YERELE kalıcı olarak yazıyor (bkz. `archive_message`) —
-                // node modu AÇIK cihazlar zaten kendi canlı trafiğini
-                // arşivliyor, burada tekrar yazıp yinelenen satır
-                // oluşturmamak için atlanıyor. `latest_archived_timestamp`
-                // ile SADECE zaten sahip olmadığımız (daha yeni) mesajlar
-                // yazılıyor — aksi halde her sohbet açılışında (artık her
+                // — kalıcı hiçbir kayıt bırakmıyordu, geçmiş her sohbet
+                // açılışında ağdan yeniden çekilmek zorundaydı. Artık HER
+                // cihaz (node olsun olmasın, bkz. send_message_content/
+                // yukarıdaki Text kolu notu) kendi canlı trafiğini zaten
+                // yerelde arşivliyor — burada `latest_archived_timestamp`
+                // ile SADECE zaten sahip OLMADIĞIMIZ (daha yeni) mesajlar
+                // yazılıyor, aksi halde her sohbet açılışında (artık her
                 // zaman senkron denendiği için) aynı satırlar tekrar tekrar
-                // eklenirdi.
+                // eklenip yinelenen kayıtlar oluşurdu.
                 let already_have_since = self.latest_archived_timestamp(&peer_fp);
                 let flipped: Vec<serde_json::Value> = messages.into_iter().map(|(direction, text, timestamp)| {
                     let our_direction = if direction == "sent" { "received" } else { "sent" };
-                    if !self.node_mode_enabled && already_have_since.map(|t| timestamp > t as u64).unwrap_or(true) {
+                    if already_have_since.map(|t| timestamp > t as u64).unwrap_or(true) {
                         let _ = self.archive_message(&peer_fp, our_direction, text.as_bytes());
                     }
                     serde_json::json!({"direction": our_direction, "text": text, "timestamp": timestamp})
@@ -1858,6 +1868,18 @@ impl P2PCore {
                 self.awaiting_confirmation.remove(&target_message_id);
                 serde_json::json!({"type": "ack", "peer": peer_fp, "message_id": target_message_id})
             }
+            MessageContent::SaveRequest { file_id, file_name } => {
+                // Biz GÖNDERİCİYİZ — karşı taraf (alıcı), indirdiği bu eki
+                // kalıcı/paylaşılan bir konuma kaydetmek istiyor, bizim
+                // onayımızı bekliyor (kullanıcı tarafından istenen akış).
+                self.send_ack(&peer_fp, &message_id);
+                serde_json::json!({"type": "save_request", "peer": peer_fp, "file_id": file_id, "file_name": file_name})
+            }
+            MessageContent::SaveApproval { file_id, approved } => {
+                // Biz ALICIYIZ — gönderdiğimiz SaveRequest'e cevap geldi.
+                self.send_ack(&peer_fp, &message_id);
+                serde_json::json!({"type": "save_response", "peer": peer_fp, "file_id": file_id, "approved": approved})
+            }
         };
         Ok(event.to_string())
     }
@@ -1873,6 +1895,21 @@ impl P2PCore {
         if let Err(e) = self.send_message_content(peer_device_fingerprint.to_string(), &content, None) {
             error!("Ack gönderilemedi: {}", e);
         }
+    }
+
+    /// Spec dışı, kullanıcı tarafından istenen akış: bir eki kalıcı/
+    /// paylaşılan bir konuma ("İndirilenler/P2P") kaydetmeden önce
+    /// göndericiden onay ister.
+    fn request_save_approval(&mut self, file_id: String, peer_device_fingerprint: String, file_name: String) -> Result<(), String> {
+        let content = MessageContent::SaveRequest { file_id, file_name };
+        self.send_message_content(peer_device_fingerprint, &content, None).map(|_| ())
+    }
+
+    /// Göndericinin, gelen bir `SaveRequest`'e (kullanıcının Evet/Hayır
+    /// dokunuşuyla) cevabı.
+    fn respond_to_save_request(&mut self, file_id: String, peer_device_fingerprint: String, approved: bool) -> Result<(), String> {
+        let content = MessageContent::SaveApproval { file_id, approved };
+        self.send_message_content(peer_device_fingerprint, &content, None).map(|_| ())
     }
 
     /// Spec dışı: node modu kapalı bir cihazda sohbet ekranı hiç yerel
@@ -2646,7 +2683,7 @@ impl P2PCore {
                     if let Some(conn) = &self.db {
                         let _ = conn.execute("UPDATE files SET status = 'failed' WHERE file_id = ?1", params![file_id]);
                     }
-                    self.attachment_events.push(serde_json::json!({"type": "file_failed", "file_id": file_id, "error": e}).to_string());
+                    self.attachment_events.push(serde_json::json!({"type": "file_failed", "peer": peer_fp, "file_id": file_id, "error": e}).to_string());
                     false
                 }
             }
@@ -2713,6 +2750,7 @@ impl P2PCore {
 
         self.active_downloads.insert(file_id.clone(), DownloadState {
             peer_id,
+            peer_device_fingerprint: peer_device_fingerprint.clone(),
             total_size,
             total_chunks,
             next_chunk_index: 0,
@@ -2748,23 +2786,44 @@ impl P2PCore {
         self.download_request_ids.insert(request_id, file_id.to_string());
     }
 
+    /// `file_progress`/`file_complete`/`file_failed` olaylarının `"peer"`
+    /// alanını doldurmak için — önce (henüz kaldırılmamışsa)
+    /// `active_downloads`'a, yoksa (ör. indirme zaten sonlandırılmışsa)
+    /// `files` tablosuna bakar. Bulunamazsa boş string döner (olay yine
+    /// de üretilir, sadece Kotlin tarafı eşleştiremez — DB kaydı hiç
+    /// yoksa zaten daha büyük bir sorun var demektir).
+    fn peer_for_file(&self, file_id: &str) -> String {
+        if let Some(state) = self.active_downloads.get(file_id) {
+            return state.peer_device_fingerprint.clone();
+        }
+        self.db.as_ref().and_then(|conn| {
+            conn.query_row(
+                "SELECT peer_device_fingerprint FROM files WHERE file_id = ?1",
+                params![file_id],
+                |r| r.get::<_, String>(0),
+            ).ok()
+        }).unwrap_or_default()
+    }
+
     fn finalize_download(&mut self, file_id: &str) {
-        info!("finalize_download: file_id={} status='complete' olarak işaretlendi, file_complete olayı üretiliyor", file_id);
+        let peer_fp = self.peer_for_file(file_id);
+        info!("finalize_download: file_id={} peer={} status='complete' olarak işaretlendi, file_complete olayı üretiliyor", file_id, peer_fp);
         self.active_downloads.remove(file_id);
         if let Some(conn) = &self.db {
             let _ = conn.execute("UPDATE files SET status = 'complete' WHERE file_id = ?1", params![file_id]);
         }
-        self.attachment_events.push(serde_json::json!({"type": "file_complete", "file_id": file_id}).to_string());
+        self.attachment_events.push(serde_json::json!({"type": "file_complete", "peer": peer_fp, "file_id": file_id}).to_string());
     }
 
     fn fail_download(&mut self, file_id: &str, reason: &str) {
+        let peer_fp = self.peer_for_file(file_id);
         self.active_downloads.remove(file_id);
         self.download_request_ids.retain(|_, fid| fid != file_id);
         if let Some(conn) = &self.db {
             let _ = conn.execute("UPDATE files SET status = 'failed' WHERE file_id = ?1", params![file_id]);
         }
         error!("Dosya indirme başarısız ({}): {}", file_id, reason);
-        self.attachment_events.push(serde_json::json!({"type": "file_failed", "file_id": file_id, "error": reason}).to_string());
+        self.attachment_events.push(serde_json::json!({"type": "file_failed", "peer": peer_fp, "file_id": file_id, "error": reason}).to_string());
     }
 
     /// `poll_events`'ten her turda çağrılır — bkz. `DOWNLOAD_STALL_TIMEOUT_MS`
@@ -2824,7 +2883,7 @@ impl P2PCore {
         if emit_progress {
             if let Some(state) = self.active_downloads.get(file_id) {
                 self.attachment_events.push(serde_json::json!({
-                    "type": "file_progress", "file_id": file_id,
+                    "type": "file_progress", "peer": state.peer_device_fingerprint, "file_id": file_id,
                     "bytes_done": state.bytes_done, "bytes_total": state.total_size
                 }).to_string());
             }
@@ -3907,6 +3966,38 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_requestHistorySync<'local>(
         let mut core = core_lock();
         if let Err(e) = core.request_history_sync(fp, limit_u32) {
             error!("request_history_sync failed: {}", e);
+        }
+    });
+}
+
+/// Spec dışı: kullanıcının bir eki kaydetmeden önce göndericiden onay
+/// istemesi (bkz. `P2PCore::request_save_approval`).
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_requestSaveApproval<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, file_id: JString<'local>, peer_device_fingerprint: JString<'local>, file_name: JString<'local>) {
+    let file_id_str: String = env.get_string(&file_id).map(|s| s.into()).unwrap_or_default();
+    let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
+    let name_str: String = env.get_string(&file_name).map(|s| s.into()).unwrap_or_default();
+    let _ = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = core_lock();
+        if let Err(e) = core.request_save_approval(file_id_str, fp, name_str) {
+            error!("request_save_approval failed: {}", e);
+        }
+    });
+}
+
+/// Spec dışı: göndericinin gelen bir `SaveRequest`'e cevabı (bkz.
+/// `P2PCore::respond_to_save_request`).
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_respondToSaveRequest<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, file_id: JString<'local>, peer_device_fingerprint: JString<'local>, approved: jboolean) {
+    let file_id_str: String = env.get_string(&file_id).map(|s| s.into()).unwrap_or_default();
+    let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
+    let approved_bool = approved != 0;
+    let _ = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = core_lock();
+        if let Err(e) = core.respond_to_save_request(file_id_str, fp, approved_bool) {
+            error!("respond_to_save_request failed: {}", e);
         }
     });
 }
