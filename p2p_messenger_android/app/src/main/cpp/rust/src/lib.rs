@@ -32,9 +32,10 @@ use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jboolean, jobjectArray, jstring};
 use jni::JNIEnv;
 use libp2p::kad::store::MemoryStore;
+use libp2p::multiaddr::Protocol as MultiaddrProtocol;
 use libp2p::request_response;
 use libp2p::swarm::NetworkBehaviour;
-use libp2p::{gossipsub, identify, kad, noise, tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm};
+use libp2p::{autonat, dcutr, gossipsub, identify, kad, noise, relay, tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm};
 use log::{error, info};
 // NOT: pqcrypto-dilithium/pqcrypto-kyber yerine RustCrypto'nun aktif bakımlı
 // ml-dsa/ml-kem crate'lerine geçildi (bkz. Cargo.toml notu — RUSTSEC-2024-0380,
@@ -129,6 +130,28 @@ struct P2PBehaviour {
     /// tabanlı (spec bölüm 4.2 `DHT_Entry`) bir kayıt/sorgu mekanizması
     /// gerekir, bu oturumun kapsamının ötesinde bir genişleme.
     mdns: libp2p::mdns::tokio::Behaviour,
+    /// Spec dışı, güvenlik denetimi devamı (bkz. SECURITY.md "Cross-network
+    /// connectivity" notu): bu cihazın kendisini, doğrudan dial
+    /// edilemeyen (farklı ağ/NAT arkasındaki) peer'lara ULAŞMAK için bir
+    /// röle kullanabilmesini sağlar — her cihazda her zaman açık.
+    relay_client: relay::client::Behaviour,
+    /// Bu cihazın BAŞKALARI için röle GÖREVİ görüp göremeyeceği. Her zaman
+    /// derlemeye dahil (libp2p, canlı bir Swarm'da NetworkBehaviour'ları
+    /// değiştirmeyi desteklemiyor) ama kapasitesi `start_network`'e geçilen
+    /// `node_mode`'a göre ayarlanıyor — Node modu kapalıyken
+    /// `max_reservations`/`max_circuits` sıfırlanıyor, yani pratikte hiçbir
+    /// isteği kabul etmiyor (bkz. `start_network`). Spec §4.3'ün "Node
+    /// modu... isteğe bağlı Circuit Relay v2 hizmeti" ifadesinin gerçek
+    /// karşılığı bu alan — önceden hiç implemente edilmemişti.
+    relay: relay::Behaviour,
+    /// Röle üzerinden kurulan bir bağlantıyı, mümkünse doğrudan bir
+    /// bağlantıya yükseltmeye (hole punching) çalışır — başarısız olursa
+    /// (ör. simetrik NAT) trafik röle üzerinden akmaya devam eder.
+    dcutr: dcutr::Behaviour,
+    /// Bu cihazın dışarıdan doğrudan erişilebilir olup olmadığını tespit
+    /// eder — şu an sadece bilgi amaçlı (identify/kad'ı besliyor), aktif
+    /// bir karar noktası değil.
+    autonat: autonat::Behaviour,
 }
 
 fn current_time_ms() -> u64 {
@@ -340,6 +363,10 @@ impl MessageSendStatus {
 /// üzerinden SÜRESİZ (karşı taraf onaylayana kadar) yeniden denenir.
 const PENDING_ENVELOPE_TIMEOUT_MS: u64 = 20_000;
 
+/// `known_relay_peers` üst sınırı — spec §4.1'in önerdiği "~10, en son
+/// görülen/en güvenilir" ölçeğiyle aynı (bkz. o alanın dokümantasyonu).
+const MAX_KNOWN_RELAYS: usize = 10;
+
 /// Spec dışı, kullanıcı tarafından istenen güvenilir teslim: `Text`
 /// (grup DIŞI)/`Edit`/`Delete`/`HistorySyncRequest` içerikli paketler,
 /// karşı taraftan bir `Ack` (veya HistorySyncRequest için doğrudan
@@ -527,6 +554,15 @@ struct P2PCore {
     /// dosya indirmesi başlatılırken `swarm.add_peer_address` ile
     /// `request_response`'un dial edebileceği bir adres ipucu vermek için.
     peer_id_to_addr: HashMap<PeerId, Multiaddr>,
+    /// Spec dışı, güvenlik denetimi devamı (bkz. SECURITY.md "Cross-network
+    /// connectivity" notu): röle protokolünü desteklediği `identify` ile
+    /// doğrulanmış VE doğrudan erişilebilir (bkz. `dial_with_relay_fallback`)
+    /// bilinen peer'lar. QR paketinde paylaşılır (bkz. `QrPacket.known_relays`)
+    /// ve `identify::Event::Received`'dan organik olarak büyür — sabit bir
+    /// bootstrap listesi hiç var olmadı, bu da spec §4.1'in hiç implemente
+    /// edilmemiş "~10 node adresi paylaşımı" fikrinin röle'ye özelleşmiş
+    /// hâli. En fazla `MAX_KNOWN_RELAYS` kadar tutulur.
+    known_relay_peers: HashMap<PeerId, Multiaddr>,
     /// Devam eden indirmeler: key = file_id (bkz. `DownloadState`).
     active_downloads: HashMap<String, DownloadState>,
     /// `request_response::send_request`'in döndürdüğü `OutboundRequestId`'yi
@@ -594,6 +630,7 @@ impl P2PCore {
             app_files_dir: None,
             device_to_peer_id: HashMap::new(),
             peer_id_to_addr: HashMap::new(),
+            known_relay_peers: HashMap::new(),
             active_downloads: HashMap::new(),
             download_request_ids: HashMap::new(),
             attachment_events: Vec::new(),
@@ -970,12 +1007,26 @@ impl P2PCore {
         let identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let device_name = self.own_devices.get(&own_fp).map(|d| d.device_name.clone()).unwrap_or_default();
 
+        // bkz. SECURITY.md "Cross-network connectivity" notu / spec §4.1
+        // ("~10 node adresi paylaşımı", önceden hiç implemente edilmemişti):
+        // taşıdığımız bilinen röle adaylarından birkaçını da QR'a ekliyoruz
+        // — bu sayede karşı taraf, biz doğrudan dial edilemesek bile (farklı
+        // ağ/NAT) bizi bir röle üzerinden bulabilir. `known_relay_peers`
+        // değerleri zaten TAM adres (`.../p2p/<röle_peer_id>` dahil, bkz.
+        // `record_known_relay` çağrı noktaları) — burada tekrar eklemeye
+        // gerek yok.
+        let known_relays: Vec<String> = self.known_relay_peers.values()
+            .take(5)
+            .map(|addr| addr.to_string())
+            .collect();
+
         let packet = QrPacket {
             version: QrPacket::CURRENT_VERSION,
             device_name,
             identity_id,
             device_fingerprint: own_fp,
             rendezvous_node,
+            known_relays,
         };
         packet.to_cbor()
     }
@@ -994,21 +1045,38 @@ impl P2PCore {
             packet.device_name,
         )?;
 
-        if let Some(swarm) = &mut self.swarm {
-            if let Ok(addr) = packet.rendezvous_node.parse::<Multiaddr>() {
-                if let Some(peer_id) = extract_peer_id(&addr) {
-                    swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
-                    // `kad.add_address` sadece bir DHT routing ipucudur —
-                    // kendi başına hiçbir bağlantı AÇMAZ. QR taramasının
-                    // asıl amacı iki cihazı doğrudan birbirine bağlamak
-                    // olduğundan burada açıkça dial ediyoruz (bkz. dosya
-                    // sonu not: bu olmadan iki cihaz asla gerçek bir libp2p
-                    // bağlantısı kurmuyordu — ne gossipsub mesajı ne de
-                    // IdentityExchange karşı tarafa ulaşıyordu).
-                    if let Err(e) = swarm.dial(addr) {
-                        error!("QR taramasından sonra dial başarısız: {}", e);
+        // bkz. SECURITY.md "Cross-network connectivity" notu: QR'ın taşıdığı
+        // röle adaylarını önce kaydediyoruz — böylece hemen aşağıdaki
+        // `dial_with_relay_fallback` çağrısı, karşı taraf (`rendezvous_node`)
+        // doğrudan erişilemez olsa bile (farklı ağ/NAT) bu adaylardan
+        // birinin üzerinden bağlanmayı deneyebilir.
+        for relay_str in &packet.known_relays {
+            if let Ok(addr) = relay_str.parse::<Multiaddr>() {
+                if let Some(relay_peer_id) = extract_peer_id(&addr) {
+                    if let Some(swarm) = &mut self.swarm {
+                        swarm.behaviour_mut().kad.add_address(&relay_peer_id, addr.clone());
                     }
+                    self.record_known_relay(relay_peer_id, addr);
                 }
+            }
+        }
+
+        if let Ok(addr) = packet.rendezvous_node.parse::<Multiaddr>() {
+            if let Some(peer_id) = extract_peer_id(&addr) {
+                if let Some(swarm) = &mut self.swarm {
+                    swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                }
+                // `kad.add_address` sadece bir DHT routing ipucudur —
+                // kendi başına hiçbir bağlantı AÇMAZ. QR taramasının
+                // asıl amacı iki cihazı doğrudan birbirine bağlamak
+                // olduğundan burada açıkça dial ediyoruz (bkz. dosya
+                // sonu not: bu olmadan iki cihaz asla gerçek bir libp2p
+                // bağlantısı kurmuyordu — ne gossipsub mesajı ne de
+                // IdentityExchange karşı tarafa ulaşıyordu). `rendezvous_node`
+                // doğrudan erişilemezse (farklı ağ/NAT), yukarıda kaydedilen
+                // röle adayları üzerinden de eşzamanlı denenir (bkz.
+                // `dial_with_relay_fallback`).
+                self.dial_with_relay_fallback(peer_id, Some(addr));
             }
         }
 
@@ -1137,15 +1205,16 @@ impl P2PCore {
 
         self.register_contact_from_pairing(identity_id.clone(), device_fingerprint.clone(), device_name)?;
 
-        if let Some(swarm) = &mut self.swarm {
-            if let Ok(addr) = rendezvous_node.parse::<Multiaddr>() {
-                if let Some(peer_id) = extract_peer_id(&addr) {
+        if let Ok(addr) = rendezvous_node.parse::<Multiaddr>() {
+            if let Some(peer_id) = extract_peer_id(&addr) {
+                if let Some(swarm) = &mut self.swarm {
                     swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
-                    // bkz. process_qr_packet'teki aynı dial notu.
-                    if let Err(e) = swarm.dial(addr) {
-                        error!("Manuel eşleşmeden sonra dial başarısız: {}", e);
-                    }
                 }
+                // bkz. process_qr_packet'teki aynı dial notu — manuel giriş
+                // formatı (spec dışı, 4 alanlı metin) bir röle listesi
+                // taşımıyor, ama daha önce QR/identify'dan öğrenilmiş
+                // röleler varsa (bkz. `known_relay_peers`) yine de denenir.
+                self.dial_with_relay_fallback(peer_id, Some(addr));
             }
         }
         // bkz. process_qr_packet'teki aynı not — publish_envelope kendi
@@ -1559,6 +1628,23 @@ impl P2PCore {
             let _ = conn.execute("DELETE FROM ratchet_states WHERE peer_device_fingerprint = ?1", params![device_fingerprint]);
             let _ = conn.execute("DELETE FROM skipped_message_keys WHERE peer_device_fingerprint = ?1", params![device_fingerprint]);
         }
+        Ok(())
+    }
+
+    /// Spec dışı, güvenlik denetimi devamı (bkz. SECURITY.md "Cross-network
+    /// connectivity" notu): kullanıcının Ayarlar'dan elle ekleyebileceği,
+    /// güvendiği/kendi işlettiği bir röle adresi (ör. sabit IP'li bir VPS,
+    /// Node modu açık). Bu, sıfırdan bir kişiyle hiç ortak röle geçmişi
+    /// olmayan iki YABANCI'nın ilk kez farklı ağlardan eşleşebilmesini
+    /// GARANTİ eden tek yol — organik keşif (identify/QR paylaşımı,
+    /// `known_relay_peers`) ancak ağda zaten bilinen bir röle varsa işler.
+    fn add_known_relay_address(&mut self, multiaddr: &str) -> Result<(), String> {
+        let addr: Multiaddr = multiaddr.trim().parse().map_err(|_| "Geçersiz multiaddr".to_string())?;
+        let peer_id = extract_peer_id(&addr).ok_or("Adres bir /p2p/<peer_id> son eki içermeli")?;
+        if let Some(swarm) = &mut self.swarm {
+            swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+        }
+        self.record_known_relay(peer_id, addr);
         Ok(())
     }
 
@@ -3463,7 +3549,15 @@ impl P2PCore {
                 yamux::Config::default,
             )
             .map_err(|e| e.to_string())?
-            .with_behaviour(|keypair| {
+            // bkz. SECURITY.md "Cross-network connectivity" notu — bu
+            // cihazın bir röle ÜZERİNDEN dial edebilmesi (relay_client) için
+            // gereken transport katmanı. `with_behaviour` closure'ı bundan
+            // sonra `(keypair, relay_client)` alır (bkz. libp2p-0.53.2
+            // builder.rs `tcp_relay` testi — bu imza doğrudan oradan
+            // doğrulandı).
+            .with_relay_client(noise::Config::new, yamux::Config::default)
+            .map_err(|e| e.to_string())?
+            .with_behaviour(|keypair, relay_client| {
                 let peer_id = keypair.public().to_peer_id();
                 let gossipsub = gossipsub::Behaviour::new(
                     gossipsub::MessageAuthenticity::Signed(keypair.clone()),
@@ -3480,7 +3574,29 @@ impl P2PCore {
                     request_response::Config::default(),
                 );
                 let mdns = libp2p::mdns::tokio::Behaviour::new(libp2p::mdns::Config::default(), peer_id)?;
-                Ok(P2PBehaviour { gossipsub, kad, identify, file_chunks, mdns })
+                // bkz. `P2PBehaviour.relay` alan dokümantasyonu — Node modu
+                // kapalıyken kapasiteyi SIFIRLIYORUZ (relay::Behaviour
+                // yapıldıktan sonra yeniden yapılandırılamıyor, bu yüzden bu
+                // karar burada, kuruluş anında verilmeli). Node modu daha
+                // sonra `set_node_mode` ile açılırsa, röle GÖREVİ görme
+                // kapasitesi bir sonraki ağ yeniden başlatmasına kadar
+                // etkinleşmez — kad::Mode'un aksine bu canlı toggle
+                // edilemiyor (bkz. `set_node_mode` dokümantasyonu).
+                let relay_config = if node_mode {
+                    relay::Config::default()
+                } else {
+                    relay::Config {
+                        max_reservations: 0,
+                        max_reservations_per_peer: 0,
+                        max_circuits: 0,
+                        max_circuits_per_peer: 0,
+                        ..relay::Config::default()
+                    }
+                };
+                let relay = relay::Behaviour::new(peer_id, relay_config);
+                let dcutr = dcutr::Behaviour::new(peer_id);
+                let autonat = autonat::Behaviour::new(peer_id, autonat::Config::default());
+                Ok(P2PBehaviour { gossipsub, kad, identify, file_chunks, mdns, relay_client, relay, dcutr, autonat })
             })
             .map_err(|e| e.to_string())?
             .build();
@@ -3513,6 +3629,17 @@ impl P2PCore {
         Ok(peer_id.to_string())
     }
 
+    /// KRİTİK SINIR: Kademlia modu (`kad::Mode`) canlı olarak toggle
+    /// edilebiliyor ama röle-sunma KAPASİTESİ (bkz. `P2PBehaviour.relay`
+    /// dokümantasyonu) `start_network`'te `relay::Behaviour::new`'e
+    /// verilen `Config` ile SABİTLENİYOR — libp2p bunu sonradan yeniden
+    /// yapılandırmaya izin vermiyor. Yani Node modu bu fonksiyonla açılırsa
+    /// DHT routing katkısı ANINDA etkinleşir ama bu cihazın gerçekten röle
+    /// GÖREVİ görmesi (başkalarının rezervasyon/circuit isteklerini kabul
+    /// etmesi), ağ bir sonraki `start_network` çağrısına kadar
+    /// etkinleşmez. Kabul edilebilir bir sınır: bu ayar zaten nadiren
+    /// değiştirilir, ve `node_mode_enabled` her `start_network`'te zaten
+    /// okunuyor (bkz. `P2PService`'in kalıcı tercih deposu).
     fn set_node_mode(&mut self, enabled: bool) {
         self.node_mode_enabled = enabled;
         if let Some(swarm) = &mut self.swarm {
@@ -3595,6 +3722,56 @@ impl P2PCore {
             }
             if let Some(new) = new_root_key {
                 let _ = swarm.behaviour_mut().gossipsub.subscribe(&Self::topic_for_root_key(new));
+            }
+        }
+    }
+
+    /// Spec dışı, güvenlik denetimi devamı (bkz. SECURITY.md "Cross-network
+    /// connectivity" notu): `known_relay_peers`'e yeni bir aday ekler,
+    /// `MAX_KNOWN_RELAYS` dolmuşsa rastgele bir eskisini atar (gerçek LRU
+    /// değil — bu sadece opportunistic bir önbellek, kalıcı da değil,
+    /// her süreç kendi görüşüyle yeniden doldurur, bu yüzden hangi girdinin
+    /// atıldığı önemli değil, sadece sınırsız büyümemesi önemli).
+    fn record_known_relay(&mut self, peer_id: PeerId, addr: Multiaddr) {
+        if !self.known_relay_peers.contains_key(&peer_id) && self.known_relay_peers.len() >= MAX_KNOWN_RELAYS {
+            if let Some(evict) = self.known_relay_peers.keys().next().cloned() {
+                self.known_relay_peers.remove(&evict);
+            }
+        }
+        self.known_relay_peers.insert(peer_id, addr);
+    }
+
+    /// Spec dışı, güvenlik denetimi devamı (bkz. SECURITY.md "Cross-network
+    /// connectivity" notu): `direct_addr` (varsa) DOĞRUDAN dial edilir VE
+    /// (varsa) bilinen HER röle adayı üzerinden `/p2p-circuit/` adresiyle
+    /// de AYNI ANDA dial denenir — libp2p aynı `PeerId`'ye birden fazla
+    /// eşzamanlı dial denemesini sorunsuz yönetir (ilk başarılı olan
+    /// kazanır, diğerleri iptal edilir). Bu, "önce doğrudan dene,
+    /// başarısız olursa röleyi dene" sırasına göre daha düşük gecikmeli
+    /// (röle denemesi, başarısız bir doğrudan denemenin zaman aşımını
+    /// beklemeden hemen başlar) VE daha basit (ayrı bir asenkron
+    /// başarısızlık-sonrası-yeniden-dene durum makinesi gerekmiyor).
+    /// Röle üzerinden kurulan bağlantı DCUtR tarafından otomatik olarak
+    /// doğrudan bağlantıya yükseltilmeye çalışılır (bkz.
+    /// `P2PBehaviour.dcutr`); başarısız olursa (ör. simetrik NAT) trafik
+    /// röle üzerinden akmaya devam eder — hangisi olursa olsun uygulama
+    /// katmanı (gossipsub/ratchet) hiçbir şey bilmez, aynı şekilde çalışır.
+    fn dial_with_relay_fallback(&mut self, target_peer_id: PeerId, direct_addr: Option<Multiaddr>) {
+        let Some(swarm) = &mut self.swarm else { return };
+        if let Some(addr) = direct_addr {
+            if let Err(e) = swarm.dial(addr) {
+                error!("Doğrudan dial başarısız: {}", e);
+            }
+        }
+        for (relay_peer_id, relay_addr) in &self.known_relay_peers {
+            if *relay_peer_id == target_peer_id {
+                continue;
+            }
+            let circuit_addr = relay_addr.clone()
+                .with(MultiaddrProtocol::P2pCircuit)
+                .with(MultiaddrProtocol::P2p(target_peer_id));
+            if let Err(e) = swarm.dial(circuit_addr) {
+                error!("Röle üzerinden dial başarısız (röle={}): {}", relay_peer_id, e);
             }
         }
     }
@@ -3763,6 +3940,13 @@ impl P2PCore {
         let mut incoming: Vec<(Option<PeerId>, Vec<u8>)> = Vec::new();
         let mut new_listen_addrs: Vec<Multiaddr> = Vec::new();
         let mut new_peer_addrs: Vec<(PeerId, Multiaddr)> = Vec::new();
+        // bkz. `known_relay_peers` alanı dokümantasyonu — identify'dan
+        // "bu peer röle protokolünü konuşuyor" öğrenildiğinde doldurulur,
+        // döngü bitince (aşağıda `self.record_known_relay` ile) uygulanır
+        // (döngü içinde `self.swarm` zaten `&mut` borrow'lu, `self`'in
+        // TAMAMINA erişemiyoruz — bkz. dosyadaki aynı desenin diğer
+        // örnekleri, ör. `new_peer_addrs`).
+        let mut new_relay_peers: Vec<(PeerId, Multiaddr)> = Vec::new();
         let mut file_chunk_events: Vec<FileChunkEventLocal> = Vec::new();
         if let Some(swarm) = &mut self.swarm {
             RUNTIME.block_on(async {
@@ -3779,6 +3963,21 @@ impl P2PCore {
                             incoming.push((message.source, message.data));
                         }
                         libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
+                            // bkz. `known_relay_peers` alanı dokümantasyonu
+                            // (SECURITY.md "Cross-network connectivity"):
+                            // bu peer röle (Circuit Relay v2 HOP) protokolünü
+                            // konuşuyorsa VE en az bir dinleme adresi
+                            // bildiriyorsa, ileride başka bir erişilemez
+                            // peer'a ulaşmak için kullanılabilecek bir röle
+                            // adayı olarak kaydediyoruz. `listen_addrs`
+                            // tüketilmeden (aşağıdaki kad.add_address
+                            // döngüsü onu MOVE eder) önce, ilk adresi
+                            // kopyalıyoruz.
+                            if info.protocols.iter().any(|p| *p == relay::HOP_PROTOCOL_NAME) {
+                                if let Some(addr) = info.listen_addrs.first() {
+                                    new_relay_peers.push((peer_id, addr.clone().with(MultiaddrProtocol::P2p(peer_id))));
+                                }
+                            }
                             // Kademlia'ya Identify'dan öğrenilen adresleri
                             // ekle — bölüm 4.2, Kademlia'nın kendiliğinden
                             // yapamadığı adres öğrenme adımı.
@@ -3859,6 +4058,9 @@ impl P2PCore {
         self.own_listen_addrs.extend(new_listen_addrs);
         for (pid, addr) in new_peer_addrs {
             self.peer_id_to_addr.insert(pid, addr);
+        }
+        for (pid, addr) in new_relay_peers {
+            self.record_known_relay(pid, addr);
         }
 
         // Dosya parça olaylarını işle — `self.swarm`'ın dışında toplandı
@@ -4855,6 +5057,21 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_revokeContactDevice<'local>
         Ok(Ok(())) => "OK".to_string(),
         Ok(Err(e)) => { error!("revoke_contact_device failed: {}", e); format!("Error: {}", e) }
         Err(e) => { error!("revoke_contact_device panicked: {}", e); format!("Error: {}", e) }
+    };
+    env.new_string(out).unwrap().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_addKnownRelayAddress<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, multiaddr: JString<'local>) -> jstring {
+    let multiaddr_str: String = env.get_string(&multiaddr).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let mut core = core_lock();
+        core.add_known_relay_address(&multiaddr_str)
+    });
+    let out = match result {
+        Ok(Ok(())) => "OK".to_string(),
+        Ok(Err(e)) => { error!("add_known_relay_address failed: {}", e); format!("Error: {}", e) }
+        Err(e) => { error!("add_known_relay_address panicked: {}", e); format!("Error: {}", e) }
     };
     env.new_string(out).unwrap().into_raw()
 }

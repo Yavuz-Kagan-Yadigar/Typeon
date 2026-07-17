@@ -17,10 +17,22 @@ pub struct QrPacket {
     pub device_fingerprint: String,
     /// Bağlanmak için yeterli tek bir bilinen adres.
     pub rendezvous_node: String,
+    /// Spec dışı, güvenlik denetimi devamı (bkz. SECURITY.md "Cross-network
+    /// connectivity" notu, spec §4.1 "~10 node adresi paylaşımı" — önceden
+    /// hiç implemente edilmemişti): QR'ı üreten cihazın bildiği, röle
+    /// (Circuit Relay v2) protokolünü konuşan birkaç peer'in TAM adresi
+    /// (`.../p2p/<peer_id>` dahil). `rendezvous_node` doğrudan erişilemezse
+    /// (farklı ağ/NAT), tarayan taraf bunlardan biri üzerinden bağlanmayı
+    /// dener (bkz. lib.rs `dial_with_relay_fallback`). `#[serde(default)]`
+    /// — v1 QR'lar (bu alan olmadan üretilmiş) hâlâ ayrıştırılabilsin diye;
+    /// CURRENT_VERSION 2'ye yükseltildi ama eski taraf bunu görmezden
+    /// gelebilir, alan sadece boş kalır.
+    #[serde(default)]
+    pub known_relays: Vec<String>,
 }
 
 impl QrPacket {
-    pub const CURRENT_VERSION: u8 = 1;
+    pub const CURRENT_VERSION: u8 = 2;
 
     /// CBOR olarak kodlar (QR'a gömülecek ham bayt dizisi).
     pub fn to_cbor(&self) -> Result<Vec<u8>, String> {
