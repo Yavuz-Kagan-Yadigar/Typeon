@@ -62,6 +62,9 @@ use attachments::{FileChunkRequest, FileChunkResponse};
 const DB_NAME: &str = "p2p_messenger.db";
 /// Dosya ekleri protokol kimliği (bkz. attachments.rs modül notu).
 const FILE_TRANSFER_PROTOCOL: &str = "/p2pmessenger/filexfer/1.0.0";
+/// Kullanıcı tarafından istenen azami dosya eki boyutu (bkz.
+/// `prepare_and_send_file`).
+const MAX_ATTACHMENT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
 lazy_static::lazy_static! {
     static ref RUNTIME: Runtime = tokio::runtime::Runtime::new().unwrap();
@@ -2210,6 +2213,28 @@ impl P2PCore {
     /// tam asenkron bir mimari (ayrı worker thread + kanal) bu kapsamın
     /// dışında bırakıldı, bkz. proje notları.
     fn prepare_and_send_file(&mut self, peer_device_fingerprint: String, source_path: String, file_name: String, mime_type: String) -> Result<(String, String), String> {
+        // `wrap_file_key`'in erken (dosyayı diske şifrelemeden ÖNCE)
+        // çağrılması kasıtlı: `skipped_key_encryption_key` henüz
+        // yüklenmemişse burada hemen hata dönülür — aksi halde
+        // `encrypt_file_to_disk` (potansiyel olarak GB'larca veri
+        // işleyen, saniyeler süren bir işlem) tamamlanır ama sonunda
+        // anahtar sarmalama başarısız olur, diskte hiçbir DB kaydı
+        // olmayan "öksüz" bir `.enc` dosyası kalırdı.
+        if self.skipped_key_encryption_key.is_none() {
+            return Err("Şifreleme anahtarı henüz yüklenmedi, birazdan tekrar deneyin".to_string());
+        }
+        // Kullanıcı tarafından istenen azami boyut (4GB) — dosyanın
+        // TAMAMINI şifrelemeye başlamadan ÖNCE kontrol edilir, aksi halde
+        // aşırı büyük bir dosya için saniyeler/dakikalar süren bir
+        // encrypt_file_to_disk çağrısı boşuna çalışıp sonunda reddedilirdi.
+        let source_size = std::fs::metadata(&source_path).map(|m| m.len()).map_err(|e| e.to_string())?;
+        if source_size > MAX_ATTACHMENT_SIZE {
+            return Err(format!(
+                "Dosya çok büyük ({} bayt) — azami boyut {} bayt (4GB)",
+                source_size, MAX_ATTACHMENT_SIZE
+            ));
+        }
+
         let file_id = uuid::Uuid::new_v4().to_string();
         let mut file_key = [0u8; 32];
         {

@@ -46,6 +46,10 @@ class ChatActivity : AppCompatActivity() {
         private const val HISTORY_LOAD_LIMIT = 200
         private const val HISTORY_SYNC_LIMIT = 30
         private const val SESSION_POLL_INTERVAL_MS = 800L
+        /** bkz. Rust MAX_ATTACHMENT_SIZE (lib.rs) — burada AYRICA kontrol
+         *  edilir ki aşırı büyük bir dosya reddedilmeden önce boşuna
+         *  uygulamanın önbelleğine kopyalanmasın. */
+        private const val MAX_ATTACHMENT_SIZE = 4L * 1024 * 1024 * 1024
     }
 
     private lateinit var peerDeviceFingerprint: String
@@ -331,6 +335,11 @@ class ChatActivity : AppCompatActivity() {
     private fun onFilePicked(uri: Uri) {
         val fileName = queryDisplayName(uri) ?: "file"
         val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+        val size = querySize(uri)
+        if (size != null && size > MAX_ATTACHMENT_SIZE) {
+            Toast.makeText(this, "$fileName: 4GB sınırını aşıyor", Toast.LENGTH_LONG).show()
+            return
+        }
         Toast.makeText(this, fileName, Toast.LENGTH_SHORT).show()
         lifecycleScope.launch(Dispatchers.IO) {
             val tempFile = File(File(cacheDir, "outgoing").apply { mkdirs() }, UUID.randomUUID().toString())
@@ -381,6 +390,22 @@ class ChatActivity : AppCompatActivity() {
                 if (cursor.moveToFirst()) {
                     val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                     if (idx >= 0) cursor.getString(idx) else null
+                } else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** `null` dönerse (bazı content provider'lar boyutu bildirmez) 4GB
+     *  kontrolü atlanır — o durumda Rust tarafındaki asıl kontrol (bkz.
+     *  MAX_ATTACHMENT_SIZE, lib.rs) son çare olarak devreye girer. */
+    private fun querySize(uri: Uri): Long? {
+        return try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (idx >= 0 && !cursor.isNull(idx)) cursor.getLong(idx) else null
                 } else null
             }
         } catch (e: Exception) {
