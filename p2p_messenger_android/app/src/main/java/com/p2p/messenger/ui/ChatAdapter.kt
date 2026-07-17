@@ -1,13 +1,16 @@
 package com.p2p.messenger.ui
 
+import android.graphics.BitmapFactory
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.p2p.messenger.R
+import com.p2p.messenger.util.AvatarUtil
 
 /**
  * Sohbet/kişi listesi adapter'ı. `ListAdapter` + `DiffUtil` kullanır ki
@@ -25,8 +28,36 @@ class ChatAdapter(
         val displayName: String,
         val lastMessage: String,
         val timestamp: Long,
-        val unreadCount: Int = 0
-    )
+        val unreadCount: Int = 0,
+        /** Rust'ın gerçek `contact_id`'si (`contactId` alanı tarihsel
+         *  olarak AYGIT parmak izini taşıyor, bkz. ChatsFragment notu) —
+         *  sadece uzun basma menüsündeki sohbet geçmişi temizleme/kişi
+         *  silme çağrıları için gerekli. */
+        val realContactId: String = "",
+        /** Bu kişinin bize gönderdiği profil fotoğrafı (720p/%85 JPEG),
+         *  yoksa `null` (baş harf rozeti gösterilir). */
+        val avatarJpeg: ByteArray? = null
+    ) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is ChatMessage) return false
+            return contactId == other.contactId && displayName == other.displayName &&
+                lastMessage == other.lastMessage && timestamp == other.timestamp &&
+                unreadCount == other.unreadCount && realContactId == other.realContactId &&
+                (avatarJpeg?.contentEquals(other.avatarJpeg) ?: (other.avatarJpeg == null))
+        }
+
+        override fun hashCode(): Int {
+            var result = contactId.hashCode()
+            result = 31 * result + displayName.hashCode()
+            result = 31 * result + lastMessage.hashCode()
+            result = 31 * result + timestamp.hashCode()
+            result = 31 * result + unreadCount
+            result = 31 * result + realContactId.hashCode()
+            result = 31 * result + (avatarJpeg?.contentHashCode() ?: 0)
+            return result
+        }
+    }
 
     companion object {
         private val DIFF_CALLBACK = object : DiffUtil.ItemCallback<ChatMessage>() {
@@ -38,11 +69,16 @@ class ChatAdapter(
         }
     }
 
+    /** Bir kişi satırına uzun basıldığında (sohbet geçmişini temizle/
+     *  kişiyi sil menüsü ChatsFragment/ContactsFragment'ta gösterilir). */
+    var onContactLongClick: ((ChatMessage) -> Unit)? = null
+
     inner class ChatViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val txtName: TextView = itemView.findViewById(R.id.txtContactName)
         private val txtLastMessage: TextView = itemView.findViewById(R.id.txtLastMessage)
         private val txtTimestamp: TextView = itemView.findViewById(R.id.txtTimestamp)
         private val txtUnread: TextView = itemView.findViewById(R.id.txtUnreadCount)
+        private val imgAvatar: ImageView = itemView.findViewById(R.id.imgAvatar)
 
         fun bind(message: ChatMessage) {
             txtName.text = message.displayName
@@ -50,9 +86,18 @@ class ChatAdapter(
             txtTimestamp.text = if (message.timestamp > 0) formatTimestamp(message.timestamp) else ""
             txtUnread.visibility = if (message.unreadCount > 0) View.VISIBLE else View.GONE
             txtUnread.text = message.unreadCount.toString()
+            AvatarUtil.renderInto(imgAvatar, message.avatarJpeg, message.displayName)
 
             itemView.setOnClickListener {
                 onContactClick(message.contactId, message.displayName)
+            }
+            itemView.setOnLongClickListener {
+                if (message.realContactId.isNotEmpty()) {
+                    onContactLongClick?.invoke(message)
+                    true
+                } else {
+                    false
+                }
             }
         }
 

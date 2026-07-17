@@ -1,17 +1,57 @@
 package com.p2p.messenger
 
+import android.net.Uri
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
+import android.widget.ImageView
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
 import com.google.android.material.switchmaterial.SwitchMaterial
 import com.p2p.messenger.service.P2PService
+import com.p2p.messenger.util.AvatarUtil
+import com.p2p.messenger.util.ImagePreview
 import com.p2p.messenger.util.ThemePrefs
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.util.UUID
 
 class SettingsFragment : Fragment() {
+
+    companion object {
+        /** bkz. ChatActivity PREVIEW_MAX_DIMENSION notu — kullanıcı
+         *  tarafından istenen profil fotoğrafı standardı: 720p/%85 JPEG
+         *  (sohbet eki önizlemelerinden — 480p — daha büyük, çünkü profil
+         *  fotoğrafı tam ekran/daha büyük gösterilebilir). */
+        private const val AVATAR_MAX_DIMENSION = 720
+        private const val AVATAR_JPEG_QUALITY = 85
+    }
+
+    private lateinit var imgOwnAvatar: ImageView
+
+    /** `registerForActivityResult` Fragment STARTED olmadan ÖNCE
+     *  çağrılmalı — bkz. ChatActivity pickFileLauncher aynı notu. */
+    private val pickAvatarLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { onAvatarPicked(it) }
+    }
+
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
         val view = inflater.inflate(R.layout.fragment_settings, container, false)
+
+        imgOwnAvatar = view.findViewById(R.id.img_own_avatar)
+        refreshOwnAvatar()
+        view.findViewById<Button>(R.id.btn_change_picture).setOnClickListener {
+            pickAvatarLauncher.launch(arrayOf("image/*"))
+        }
+        view.findViewById<Button>(R.id.btn_remove_picture).setOnClickListener {
+            setOwnAvatar(null)
+        }
 
         val identityCodeValue = view.findViewById<android.widget.TextView>(R.id.identity_code_value)
         identityCodeValue.text = try {
@@ -47,5 +87,62 @@ class SettingsFragment : Fragment() {
         }
 
         return view
+    }
+
+    private fun refreshOwnAvatar() {
+        val bytes = try {
+            P2PLib.getOwnProfilePicture().takeIf { it.isNotEmpty() }
+        } catch (e: Exception) {
+            null
+        }
+        val name = try {
+            P2PLib.getIdentityShortCode()
+        } catch (e: Exception) {
+            "?"
+        }
+        AvatarUtil.renderInto(imgOwnAvatar, bytes, name)
+    }
+
+    /**
+     * Kullanıcının SAF (`OpenDocument`) ile seçtiği bir görsel — bkz.
+     * ChatActivity.onFilePicked aynı `content://` -> yerel dosya kopyalama
+     * notu. 720p/%85 JPEG'e sıkıştırılıp `setOwnProfilePicture` ile hem
+     * kalıcılaştırılır hem TÜM bilinen kişilere gönderilir (bkz. Rust
+     * `set_own_profile_picture` dokümantasyonu) — bu yüzden ANA THREAD
+     * DIŞINDA yapılır.
+     */
+    private fun onAvatarPicked(uri: Uri) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val tempFile = File(File(requireContext().cacheDir, "avatar").apply { mkdirs() }, UUID.randomUUID().toString())
+            try {
+                requireContext().contentResolver.openInputStream(uri)?.use { input ->
+                    tempFile.outputStream().use { output -> input.copyTo(output, bufferSize = 64 * 1024) }
+                } ?: throw java.io.IOException("Dosya açılamadı")
+                val compressed = ImagePreview.compressFile(tempFile, AVATAR_MAX_DIMENSION, AVATAR_JPEG_QUALITY)
+                withContext(Dispatchers.Main) { setOwnAvatar(compressed) }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(requireContext(), R.string.error_attachment_open_failed, Toast.LENGTH_SHORT).show()
+                }
+            } finally {
+                tempFile.delete()
+            }
+        }
+    }
+
+    private fun setOwnAvatar(avatarJpeg: ByteArray?) {
+        AvatarUtil.renderInto(imgOwnAvatar, avatarJpeg, try { P2PLib.getIdentityShortCode() } catch (e: Exception) { "?" })
+        lifecycleScope.launch(Dispatchers.IO) {
+            val result = try {
+                P2PLib.setOwnProfilePicture(avatarJpeg)
+            } catch (e: Exception) {
+                "Error: ${e.message}"
+            }
+            if (result.startsWith("Error:")) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
     }
 }

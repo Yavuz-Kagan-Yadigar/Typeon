@@ -18,6 +18,7 @@ import com.p2p.messenger.ui.ChatActivity
 import com.p2p.messenger.ui.ChatAdapter
 import com.p2p.messenger.ui.QrDisplayActivity
 import com.p2p.messenger.ui.QrScanActivity
+import com.p2p.messenger.util.hexToBytes
 import org.json.JSONArray
 
 class ContactsFragment : Fragment() {
@@ -66,10 +67,77 @@ class ContactsFragment : Fragment() {
                 Toast.makeText(requireContext(), "Bağlantı henüz tamamlanmadı, birazdan tekrar deneyin", Toast.LENGTH_SHORT).show()
             }
         }
+        adapter.onContactLongClick = { message -> showChatLongPressMenu(message) }
         recycler.adapter = adapter
 
         refreshList()
         return view
+    }
+
+    /** bkz. ChatsFragment.showChatLongPressMenu aynı notu — iki sekme de
+     *  aynı kişi listesini/adapter'ı paylaştığından davranış birebir aynı. */
+    private fun showChatLongPressMenu(message: ChatAdapter.ChatMessage) {
+        val options = arrayOf(
+            getString(R.string.action_clear_chat_history),
+            getString(R.string.action_delete_contact)
+        )
+        AlertDialog.Builder(requireContext())
+            .setTitle(message.displayName)
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> confirmClearChatHistory(message)
+                    1 -> confirmDeleteContactStep1(message)
+                }
+            }
+            .show()
+    }
+
+    private fun confirmClearChatHistory(message: ChatAdapter.ChatMessage) {
+        AlertDialog.Builder(requireContext())
+            .setMessage(R.string.confirm_clear_chat_history)
+            .setPositiveButton(R.string.action_clear_chat_history) { _, _ ->
+                val result = try {
+                    P2PLib.clearChatHistory(message.realContactId)
+                } catch (e: Exception) {
+                    "Error: ${e.message}"
+                }
+                if (result.startsWith("Error:")) {
+                    Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(requireContext(), R.string.msg_chat_history_cleared, Toast.LENGTH_SHORT).show()
+                    refreshList()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun confirmDeleteContactStep1(message: ChatAdapter.ChatMessage) {
+        AlertDialog.Builder(requireContext())
+            .setMessage(R.string.confirm_delete_contact_step1)
+            .setPositiveButton(R.string.action_delete_contact) { _, _ -> confirmDeleteContactStep2(message) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun confirmDeleteContactStep2(message: ChatAdapter.ChatMessage) {
+        AlertDialog.Builder(requireContext())
+            .setMessage(R.string.confirm_delete_contact_step2)
+            .setPositiveButton(R.string.action_delete_contact) { _, _ ->
+                val result = try {
+                    P2PLib.deleteContact(message.realContactId)
+                } catch (e: Exception) {
+                    "Error: ${e.message}"
+                }
+                if (result.startsWith("Error:")) {
+                    Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(requireContext(), R.string.msg_contact_deleted, Toast.LENGTH_SHORT).show()
+                    refreshList()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     override fun onResume() {
@@ -98,11 +166,14 @@ class ContactsFragment : Fragment() {
             val obj = array.getJSONObject(i)
             val fingerprint = if (obj.isNull("active_device_fingerprint")) ""
                 else obj.optString("active_device_fingerprint")
+            val avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null }
             ChatAdapter.ChatMessage(
                 contactId = fingerprint,
                 displayName = obj.optString("display_name", "Bilinmeyen"),
                 lastMessage = "",
-                timestamp = 0L
+                timestamp = 0L,
+                realContactId = obj.optString("contact_id"),
+                avatarJpeg = avatarHex?.let { hexToBytes(it) }
             )
         }
 

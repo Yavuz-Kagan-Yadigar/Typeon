@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
@@ -7,16 +8,32 @@
 
     <!-- Sadece grup sohbetinde, kendi mesajlarımız DIŞINDA gösterilir
          (bir grupta birden fazla gönderici olabileceğinden). -->
-    <TextView
-        android:id="@+id/txtSenderName"
+    <LinearLayout
+        android:id="@+id/rowSender"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginStart="4dp"
         android:layout_marginBottom="2dp"
-        android:textAppearance="?attr/textAppearanceLabelMedium"
-        android:textStyle="bold"
-        android:textColor="?attr/colorPrimary"
-        android:visibility="gone" />
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/imgSenderAvatar"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:layout_marginEnd="4dp"
+            android:contentDescription="@null" />
+
+        <TextView
+            android:id="@+id/txtSenderName"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textAppearance="?attr/textAppearanceLabelMedium"
+            android:textStyle="bold"
+            android:textColor="?attr/colorPrimary" />
+
+    </LinearLayout>
 
     <TextView
         android:id="@+id/txtBubbleText"
@@ -51,6 +68,7 @@
             android:contentDescription="@null" />
 
         <LinearLayout
+            android:id="@+id/rowGenericAttachment"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
@@ -88,11 +106,18 @@
 
             </LinearLayout>
 
-            <ProgressBar
+            <!-- Spec dışı, Material You: gerçek (belirlenimli) ilerleme —
+                 önceden bir platform ProgressBar'dı, hep belirsiz (spinner)
+                 modda, gerçek bytesDone/totalSize'ı HİÇ yansıtmıyordu (bkz.
+                 SimpleChatAdapter.bindAttachment). -->
+            <com.google.android.material.progressindicator.CircularProgressIndicator
                 android:id="@+id/progressAttachment"
                 android:layout_width="24dp"
                 android:layout_height="24dp"
                 android:layout_marginStart="8dp"
+                android:indeterminate="false"
+                app:trackThickness="3dp"
+                app:indicatorSize="24dp"
                 android:visibility="gone" />
 
             <Button
@@ -103,6 +128,71 @@
                 android:layout_marginStart="8dp"
                 android:text="@string/lbl_download"
                 android:visibility="gone" />
+
+        </LinearLayout>
+
+        <!-- Spec dışı: sesli mesaj balonu — jenerik dosya satırının YERİNE
+             (bkz. SimpleChatAdapter.bindVoiceMessage), mime "audio/" ile
+             başladığında. -->
+        <LinearLayout
+            android:id="@+id/layoutVoiceMessage"
+            android:layout_width="220dp"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:visibility="gone">
+
+            <ImageButton
+                android:id="@+id/btnVoicePlayPause"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:padding="8dp"
+                android:background="@drawable/round_icon_button_background"
+                android:src="@drawable/ic_play"
+                android:contentDescription="@null" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:orientation="vertical">
+
+                <!-- Spec dışı, Material You: hem indirme ilerlemesi hem
+                     (indirme tamamlandıktan sonra) çalma konumu için AYNI
+                     çubuk kullanılır. -->
+                <com.google.android.material.progressindicator.LinearProgressIndicator
+                    android:id="@+id/progressVoicePlayback"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:indeterminate="false"
+                    app:trackThickness="4dp"
+                    app:trackCornerRadius="2dp" />
+
+                <TextView
+                    android:id="@+id/txtVoiceDuration"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:textSize="12sp"
+                    android:textColor="?attr/colorOnSurfaceVariant" />
+
+            </LinearLayout>
+
+            <!-- Spec dışı: hız kontrolü — dokununca 1x/1.5x/2x/0.5x
+                 arasında döner (bkz. ChatActivity/PlaybackSpeedMenu). -->
+            <TextView
+                android:id="@+id/btnVoiceSpeed"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:padding="6dp"
+                android:text="1x"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:clickable="true"
+                android:focusable="true" />
 
         </LinearLayout>
 

@@ -11,6 +11,10 @@
          izin istenip doğrudan dosya yazımı için kullanılır (bkz.
          ChatActivity.saveToPublicDownloads). -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <!-- Spec dışı: basılı tut/kaydet sesli mesaj özelliği (bkz.
+         ChatActivity ses kaydı akışı) — çalışma zamanında (ilk basılı
+         tutma denemesinde) istenir. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:name=".P2PApplication"

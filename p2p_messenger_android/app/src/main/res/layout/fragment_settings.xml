@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
+    android:layout_height="match_parent">
+
+<androidx.constraintlayout.widget.ConstraintLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
     android:padding="16dp">
 
     <TextView
@@ -14,6 +18,61 @@
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintStart_toStartOf="parent" />
 
+    <!-- Spec dışı: profil fotoğrafı — bkz. SettingsFragment.kt, 720p/%85
+         JPEG, bilinen tüm kişilere gönderilir. -->
+    <ImageView
+        android:id="@+id/img_own_avatar"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
+        android:layout_marginTop="24dp"
+        android:contentDescription="@string/content_desc_profile_picture"
+        app:layout_constraintTop_toBottomOf="@id/settings_title"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <TextView
+        android:id="@+id/lbl_own_avatar"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:text="@string/lbl_profile_picture"
+        android:textStyle="bold"
+        app:layout_constraintTop_toTopOf="@id/img_own_avatar"
+        app:layout_constraintStart_toEndOf="@id/img_own_avatar"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="4dp"
+        android:text="@string/lbl_profile_picture_desc"
+        android:textSize="12sp"
+        android:alpha="0.7"
+        app:layout_constraintTop_toBottomOf="@id/lbl_own_avatar"
+        app:layout_constraintStart_toEndOf="@id/img_own_avatar"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <Button
+        android:id="@+id/btn_change_picture"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="8dp"
+        android:text="@string/action_change_picture"
+        app:layout_constraintTop_toBottomOf="@id/img_own_avatar"
+        app:layout_constraintStart_toEndOf="@id/img_own_avatar" />
+
+    <Button
+        android:id="@+id/btn_remove_picture"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:text="@string/action_remove_picture"
+        app:layout_constraintTop_toTopOf="@id/btn_change_picture"
+        app:layout_constraintStart_toEndOf="@id/btn_change_picture" />
+
     <TextView
         android:id="@+id/identity_code_label"
         android:layout_width="0dp"
@@ -21,7 +80,7 @@
         android:layout_marginTop="24dp"
         android:text="@string/lbl_identity_code"
         android:textStyle="bold"
-        app:layout_constraintTop_toBottomOf="@id/settings_title"
+        app:layout_constraintTop_toBottomOf="@id/btn_change_picture"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
@@ -108,3 +167,5 @@
         app:layout_constraintEnd_toEndOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
+
+</androidx.core.widget.NestedScrollView>

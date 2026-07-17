@@ -12,6 +12,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.p2p.messenger.P2PLib
 import com.p2p.messenger.R
 import com.p2p.messenger.service.P2PService
+import com.p2p.messenger.util.hexToBytes
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -139,25 +140,32 @@ class GroupChatActivity : AppCompatActivity() {
 
     private fun handleIncomingGroupMessage(obj: JSONObject) {
         val senderIdentityId = obj.optString("sender_identity_id")
-        val senderName = resolveContactNameByIdentity(senderIdentityId) ?: senderIdentityId.take(8)
+        val sender = resolveContactByIdentity(senderIdentityId)
+        val senderName = sender?.displayName ?: senderIdentityId.take(8)
         adapter.addMessage(
             SimpleChatAdapter.Item(
                 messageId = obj.optString("message_id"),
                 text = obj.optString("text"),
                 isMine = false,
-                senderName = senderName
+                senderName = senderName,
+                senderAvatarJpeg = sender?.avatarHex?.let { hexToBytes(it) }
             )
         )
         recycler.scrollToPosition(localMessages.size - 1)
     }
 
-    private fun resolveContactNameByIdentity(identityId: String): String? {
+    private data class ContactLookup(val displayName: String, val avatarHex: String?)
+
+    private fun resolveContactByIdentity(identityId: String): ContactLookup? {
         return try {
             val array = JSONArray(P2PLib.listContacts())
             for (i in 0 until array.length()) {
                 val obj = array.getJSONObject(i)
                 if (obj.optString("identity_id") == identityId) {
-                    return obj.optString("display_name")
+                    return ContactLookup(
+                        displayName = obj.optString("display_name"),
+                        avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null }
+                    )
                 }
             }
             null

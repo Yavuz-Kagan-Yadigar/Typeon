@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spec dışı: ek/sesli mesaj düğmelerinin dairesel arkaplanı — bkz.
+     activity_chat.xml btnAttach/btnVoice notu (önceden sadece kenarlıksız
+     ripple vardı, hiç dolgu yoktu). -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="?attr/colorOnSurfaceVariant">
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="?attr/colorSurfaceVariant" />
+        </shape>
+    </item>
+</ripple>

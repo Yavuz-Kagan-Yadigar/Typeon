@@ -1,20 +1,28 @@
 package com.p2p.messenger.ui
 
+import android.Manifest
 import android.app.AlertDialog
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
+import android.content.pm.PackageManager
 import android.media.MediaMetadataRetriever
+import android.media.MediaPlayer
+import android.media.MediaRecorder
+import android.media.PlaybackParams
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.MotionEvent
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.Toast
+import androidx.core.content.ContextCompat
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
@@ -24,12 +32,14 @@ import androidx.recyclerview.widget.RecyclerView
 import com.p2p.messenger.P2PLib
 import com.p2p.messenger.R
 import com.p2p.messenger.service.P2PService
+import com.p2p.messenger.util.ImagePreview
+import com.p2p.messenger.util.PlaybackSpeed
+import com.p2p.messenger.util.hexToBytes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 
@@ -61,6 +71,22 @@ class ChatActivity : AppCompatActivity() {
          *  uzun kenarın 480px'e sınırlanması olarak yorumlanıyor. */
         private const val PREVIEW_MAX_DIMENSION = 480
         private const val PREVIEW_JPEG_QUALITY = 85
+        /** Kullanıcı yazmayı bıraktıktan bu kadar süre sonra otomatik
+         *  "yazmıyor" gönderilir (karşı tarafa açıkça bildirmeyi unutursa,
+         *  ör. ekranı kapatıp uygulamadan çıkarsa diye). */
+        private const val TYPING_IDLE_TIMEOUT_MS = 3000L
+        /** Karşı taraftan gelen bir "yazıyor" olayının, bir "yazmıyor"
+         *  takibi hiç gelmezse ne kadar süre sonra kendiliğinden
+         *  temizleneceği — kayıp bir paket yüzünden göstergenin sonsuza
+         *  kadar takılı kalmasını önler. */
+        private const val TYPING_INDICATOR_TIMEOUT_MS = 8000L
+        /** Bu kadar kısa bir basılı tutma, kazara dokunma sayılır ve kayıt
+         *  gönderilmeden atılır (bkz. finishVoiceRecording). */
+        private const val RECORDING_MIN_DURATION_MS = 500L
+        /** Bu kadar sola kaydırınca kayıt iptal edilir (bkz. dosya başı
+         *  "basılı tut, bırakınca gönder, sola kaydır iptal et" isteği). */
+        private const val RECORDING_CANCEL_SWIPE_DP = 120f
+        private const val VOICE_PLAYBACK_TICK_MS = 200L
     }
 
     private lateinit var peerDeviceFingerprint: String
@@ -73,6 +99,59 @@ class ChatActivity : AppCompatActivity() {
      *  isteği gönderilir; yanıt gelene kadar bu true kalır ki yanıt geldiğinde
      *  onu listenin başına eklemeyi bilelim (peer değişince sıfırlanır). */
     private var historySyncPending = false
+
+    // --- Spec dışı: "yazıyor..." göstergesi ---
+    /** Karşı taraftan en son alınan "typing" olayının durumu — sohbet
+     *  başlığının altındaki durum yazısını (Bağlı/Bağlanılıyor yerine)
+     *  geçici olarak değiştirir, bkz. `sessionPollRunnable`. */
+    private var peerIsTyping = false
+    private val typingHandler = Handler(Looper.getMainLooper())
+    private val clearPeerTypingRunnable = Runnable { peerIsTyping = false }
+    /** Biz KENDİMİZ karşı tarafa en son "yazıyor" mu "yazmıyor" mu
+     *  bildirdik — sadece false->true/true->false GEÇİŞLERİNDE paket
+     *  göndermek için (her tuş vuruşunda değil). */
+    private var isTypingSent = false
+    private val stopTypingRunnable = Runnable { sendTypingState(false) }
+
+    // --- Spec dışı: basılı tut/kaydet sesli mesaj ---
+    private var mediaRecorder: MediaRecorder? = null
+    private var recordingFile: File? = null
+    private var recordingStartTime: Long = 0L
+    private var recordingTouchStartX: Float = 0f
+    private var recordingCancelled = false
+    private lateinit var layoutMessageInput: View
+    private lateinit var layoutRecording: View
+    private lateinit var txtRecordingTimer: android.widget.TextView
+    private val recordingHandler = Handler(Looper.getMainLooper())
+    private val recordingTimerRunnable = object : Runnable {
+        override fun run() {
+            val elapsed = System.currentTimeMillis() - recordingStartTime
+            txtRecordingTimer.text = formatDurationMs(elapsed)
+            recordingHandler.postDelayed(this, 200)
+        }
+    }
+    private val requestRecordAudioPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* reddedilse bile devam — kullanıcı düğmeye tekrar basmalı */ }
+
+    // --- Spec dışı: sesli mesaj çalma (tek paylaşımlı MediaPlayer — aynı
+    // anda sadece bir sesli mesaj çalar, biri başlarken diğeri durur) ---
+    private var voicePlayer: MediaPlayer? = null
+    private var voicePlayingFileId: String? = null
+    private var voicePlaybackSpeed: Float = 1f
+    private val voicePlaybackHandler = Handler(Looper.getMainLooper())
+    private val voicePlaybackTickRunnable = object : Runnable {
+        override fun run() {
+            val player = voicePlayer
+            val fileId = voicePlayingFileId
+            if (player != null && fileId != null) {
+                try {
+                    adapter.updateVoicePlayback(fileId, true, player.currentPosition, voicePlaybackSpeed)
+                } catch (e: Exception) { /* MediaPlayer o an geçerli bir durumda olmayabilir */ }
+                voicePlaybackHandler.postDelayed(this, VOICE_PLAYBACK_TICK_MS)
+            }
+        }
+    }
 
     /** Spec dışı: dosya/foto/video/ses eki seçimi — SAF `OpenDocument`
      *  kullanılıyor (bkz. dosya sonu `onFilePicked` notu): tüm ek
@@ -121,9 +200,11 @@ class ChatActivity : AppCompatActivity() {
                 false
             }
             connectingBanner.visibility = if (handshakeDone) View.GONE else View.VISIBLE
-            supportActionBar?.subtitle = getString(
-                if (liveConnected) R.string.lbl_status_online else R.string.lbl_status_offline
-            )
+            supportActionBar?.subtitle = when {
+                peerIsTyping -> getString(R.string.lbl_typing)
+                liveConnected -> getString(R.string.lbl_status_online)
+                else -> getString(R.string.lbl_status_offline)
+            }
             sessionPollHandler.postDelayed(
                 this, if (handshakeDone) STEADY_STATE_POLL_INTERVAL_MS else SESSION_POLL_INTERVAL_MS
             )
@@ -169,6 +250,24 @@ class ChatActivity : AppCompatActivity() {
             input.text.clear()
             sendNewMessage(text)
         }
+        // Spec dışı: "yazıyor..." göstergesi — SADECE false->true/
+        // true->false geçişlerinde paket gönderir (her tuş vuruşunda
+        // değil), bkz. `sendTypingState`. Boşta kalma zaman aşımı
+        // (kullanıcı yazmayı bırakıp mesajı hiç göndermezse) için her
+        // metin değişikliğinde `stopTypingRunnable` yeniden zamanlanır.
+        input.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                typingHandler.removeCallbacks(stopTypingRunnable)
+                if (s.isNullOrBlank()) {
+                    sendTypingState(false)
+                } else {
+                    sendTypingState(true)
+                    typingHandler.postDelayed(stopTypingRunnable, TYPING_IDLE_TIMEOUT_MS)
+                }
+            }
+        })
         findViewById<ImageButton>(R.id.btnAttach).setOnClickListener {
             pickFileLauncher.launch(arrayOf("*/*"))
         }
@@ -180,10 +279,247 @@ class ChatActivity : AppCompatActivity() {
             requestStoragePermission.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
 
+        layoutMessageInput = findViewById(R.id.layoutMessageInput)
+        layoutRecording = findViewById(R.id.layoutRecording)
+        txtRecordingTimer = findViewById(R.id.txtRecordingTimer)
+        setupVoiceRecordButton()
+        adapter.onVoicePlayClick = { item -> onVoicePlayClicked(item) }
+        adapter.onVoiceSpeedClick = { item -> onVoiceSpeedClicked(item) }
+
         if (!bindToIntent(intent)) {
             finish()
             return
         }
+    }
+
+    /**
+     * Spec dışı: basılı tut/kaydet sesli mesaj — ACTION_DOWN kaydı başlatır,
+     * ACTION_UP gönderir, sola (bkz. RECORDING_CANCEL_SWIPE_DP) kaydırıp
+     * bırakmak iptal eder (WhatsApp'taki gibi). İzin yoksa ilk basışta
+     * istenir, o basış kayıt BAŞLATMAZ (kullanıcı izni verdikten sonra
+     * tekrar basmalı — standart Android deseni).
+     */
+    private fun setupVoiceRecordButton() {
+        findViewById<ImageButton>(R.id.btnVoice).setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                        requestRecordAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
+                        return@setOnTouchListener true
+                    }
+                    recordingTouchStartX = event.rawX
+                    startVoiceRecording()
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (mediaRecorder != null) {
+                        val dx = event.rawX - recordingTouchStartX
+                        val thresholdPx = RECORDING_CANCEL_SWIPE_DP * resources.displayMetrics.density
+                        recordingCancelled = dx < -thresholdPx
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (mediaRecorder != null) finishVoiceRecording(send = !recordingCancelled)
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    if (mediaRecorder != null) finishVoiceRecording(send = false)
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun startVoiceRecording() {
+        val file = File(File(cacheDir, "voice").apply { mkdirs() }, "${UUID.randomUUID()}.m4a")
+        val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this) else @Suppress("DEPRECATION") MediaRecorder()
+        try {
+            recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            recorder.setAudioEncodingBitRate(64000)
+            recorder.setAudioSamplingRate(44100)
+            recorder.setOutputFile(file.absolutePath)
+            recorder.prepare()
+            recorder.start()
+        } catch (e: Exception) {
+            Toast.makeText(this, R.string.error_recording_failed, Toast.LENGTH_SHORT).show()
+            recorder.release()
+            return
+        }
+        mediaRecorder = recorder
+        recordingFile = file
+        recordingStartTime = System.currentTimeMillis()
+        recordingCancelled = false
+        layoutMessageInput.visibility = View.GONE
+        layoutRecording.visibility = View.VISIBLE
+        txtRecordingTimer.text = "0:00"
+        recordingHandler.post(recordingTimerRunnable)
+    }
+
+    private fun finishVoiceRecording(send: Boolean) {
+        val recorder = mediaRecorder ?: return
+        val file = recordingFile
+        val durationMs = System.currentTimeMillis() - recordingStartTime
+        mediaRecorder = null
+        recordingFile = null
+        recordingHandler.removeCallbacks(recordingTimerRunnable)
+        layoutRecording.visibility = View.GONE
+        layoutMessageInput.visibility = View.VISIBLE
+        try {
+            recorder.stop()
+        } catch (e: Exception) {
+            // Çok kısa bir dokunuştan hemen sonra stop() çağrılırsa
+            // IllegalStateException fırlatabilir — kayıt zaten geçersiz.
+            file?.delete()
+            recorder.release()
+            return
+        }
+        recorder.release()
+        if (!send || durationMs < RECORDING_MIN_DURATION_MS || file == null) {
+            file?.delete()
+            if (send) Toast.makeText(this, R.string.msg_recording_cancelled, Toast.LENGTH_SHORT).show()
+            return
+        }
+        sendVoiceMessage(file, durationMs)
+    }
+
+    private fun sendVoiceMessage(file: File, durationMs: Long) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val result = try {
+                P2PLib.prepareAndSendFile(peerDeviceFingerprint, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt())
+            } catch (e: Exception) {
+                "Error: ${e.message}"
+            }
+            withContext(Dispatchers.Main) {
+                if (result.startsWith("Error:")) {
+                    Toast.makeText(this@ChatActivity, result, Toast.LENGTH_SHORT).show()
+                } else {
+                    val obj = JSONObject(result)
+                    adapter.addMessage(
+                        SimpleChatAdapter.Item(
+                            messageId = obj.optString("message_id"),
+                            text = "",
+                            isMine = true,
+                            attachment = SimpleChatAdapter.AttachmentInfo(
+                                fileId = obj.optString("message_id"),
+                                fileName = file.name,
+                                mimeType = "audio/mp4",
+                                totalSize = file.length(),
+                                status = SimpleChatAdapter.AttachmentStatus.COMPLETE,
+                                bytesDone = file.length(),
+                                durationMs = durationMs.toInt()
+                            )
+                        )
+                    )
+                    recycler.scrollToPosition(localMessages.size - 1)
+                }
+            }
+            file.delete()
+        }
+    }
+
+    private fun formatDurationMs(ms: Long): String {
+        val totalSeconds = ms / 1000
+        val minutes = totalSeconds / 60
+        val seconds = totalSeconds % 60
+        return String.format(java.util.Locale.getDefault(), "%d:%02d", minutes, seconds)
+    }
+
+    /**
+     * Spec dışı: sesli mesaj oynat/duraklat — tek paylaşımlı bir
+     * MediaPlayer kullanılır (aynı anda sadece bir sesli mesaj çalar).
+     * Başka bir mesaj çalınıyorsa önce o durdurulur.
+     */
+    private fun onVoicePlayClicked(item: SimpleChatAdapter.Item) {
+        val attachment = item.attachment ?: return
+        if (attachment.status != SimpleChatAdapter.AttachmentStatus.COMPLETE) return
+
+        if (voicePlayingFileId == attachment.fileId) {
+            // Aynı mesaj — oynat/duraklat arasında geçiş.
+            val player = voicePlayer ?: return
+            if (player.isPlaying) {
+                player.pause()
+                voicePlaybackHandler.removeCallbacks(voicePlaybackTickRunnable)
+                adapter.updateVoicePlayback(attachment.fileId, false, player.currentPosition, voicePlaybackSpeed)
+            } else {
+                player.start()
+                voicePlaybackHandler.post(voicePlaybackTickRunnable)
+                adapter.updateVoicePlayback(attachment.fileId, true, player.currentPosition, voicePlaybackSpeed)
+            }
+            return
+        }
+
+        // Farklı bir mesaj — önce eskisini durdur, yenisini hazırla.
+        stopVoicePlayback()
+        lifecycleScope.launch(Dispatchers.IO) {
+            val path = try {
+                P2PLib.getAttachmentPlaintextPath(attachment.fileId)
+            } catch (e: Exception) {
+                "Error: ${e.message}"
+            }
+            withContext(Dispatchers.Main) {
+                if (path.startsWith("Error:")) {
+                    Toast.makeText(this@ChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
+                    return@withContext
+                }
+                try {
+                    val player = MediaPlayer()
+                    player.setDataSource(path)
+                    player.setOnCompletionListener {
+                        voicePlaybackHandler.removeCallbacks(voicePlaybackTickRunnable)
+                        adapter.updateVoicePlayback(attachment.fileId, false, 0, voicePlaybackSpeed)
+                    }
+                    player.prepare()
+                    voicePlaybackSpeed = attachment.playbackSpeed
+                    if (voicePlaybackSpeed != 1f && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        player.playbackParams = PlaybackParams().setSpeed(voicePlaybackSpeed)
+                    }
+                    player.start()
+                    voicePlayer = player
+                    voicePlayingFileId = attachment.fileId
+                    voicePlaybackHandler.post(voicePlaybackTickRunnable)
+                    adapter.updateVoicePlayback(attachment.fileId, true, 0, voicePlaybackSpeed)
+                } catch (e: Exception) {
+                    Toast.makeText(this@ChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    /** bkz. `PlaybackSpeed` — sesli mesaj VE video oynatıcı AYNI hız
+     *  listesini paylaşır. Çalan mesaj değişse bile hız tercihini item'da
+     *  saklıyoruz ki bir daha oynatılınca hatırlansın. */
+    private fun onVoiceSpeedClicked(item: SimpleChatAdapter.Item) {
+        val attachment = item.attachment ?: return
+        val newSpeed = PlaybackSpeed.next(attachment.playbackSpeed)
+        if (voicePlayingFileId == attachment.fileId) {
+            voicePlaybackSpeed = newSpeed
+            val player = voicePlayer
+            if (player != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                try {
+                    player.playbackParams = PlaybackParams().setSpeed(newSpeed)
+                } catch (e: Exception) { /* bazı cihazlarda desteklenmeyen hız oranı olabilir */ }
+            }
+            adapter.updateVoicePlayback(attachment.fileId, player?.isPlaying ?: false, player?.currentPosition ?: 0, newSpeed)
+        } else {
+            attachment.playbackSpeed = newSpeed
+            adapter.updateVoicePlayback(attachment.fileId, false, attachment.playbackPositionMs, newSpeed)
+        }
+    }
+
+    private fun stopVoicePlayback() {
+        val fileId = voicePlayingFileId
+        voicePlaybackHandler.removeCallbacks(voicePlaybackTickRunnable)
+        try {
+            voicePlayer?.stop()
+            voicePlayer?.release()
+        } catch (e: Exception) { /* zaten serbest bırakılmış olabilir */ }
+        voicePlayer = null
+        voicePlayingFileId = null
+        if (fileId != null) adapter.updateVoicePlayback(fileId, false, 0, voicePlaybackSpeed)
     }
 
     /**
@@ -216,6 +552,10 @@ class ChatActivity : AppCompatActivity() {
         localMessages.clear()
         adapter.notifyDataSetChanged()
         historySyncPending = false
+        typingHandler.removeCallbacksAndMessages(null)
+        peerIsTyping = false
+        isTypingSent = false
+        stopVoicePlayback()
         connectingBanner.visibility = View.VISIBLE
         sessionPollHandler.removeCallbacks(sessionPollRunnable)
         sessionPollHandler.post(sessionPollRunnable)
@@ -300,6 +640,7 @@ class ChatActivity : AppCompatActivity() {
                 val autoDownloading = obj.optBoolean("auto_downloading", false)
                 val previewHex = obj.optString("preview_hex", "")
                 val previewJpeg = if (previewHex.isNotEmpty()) hexToBytes(previewHex) else null
+                val durationMs = obj.optInt("duration_ms", -1).let { if (it < 0) null else it }
                 adapter.addMessage(
                     SimpleChatAdapter.Item(
                         messageId = obj.optString("file_id"),
@@ -312,7 +653,8 @@ class ChatActivity : AppCompatActivity() {
                             totalSize = obj.optLong("total_size"),
                             status = if (autoDownloading) SimpleChatAdapter.AttachmentStatus.DOWNLOADING
                                       else SimpleChatAdapter.AttachmentStatus.OFFERED,
-                            previewJpeg = previewJpeg
+                            previewJpeg = previewJpeg,
+                            durationMs = durationMs
                         )
                     )
                 )
@@ -325,6 +667,27 @@ class ChatActivity : AppCompatActivity() {
             "file_failed" -> adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.FAILED)
             "save_request" -> showSaveRequestDialog(obj.optString("file_id"), obj.optString("file_name"))
             "save_response" -> handleSaveResponse(obj.optString("file_id"), obj.optBoolean("approved"))
+            "typing" -> {
+                peerIsTyping = obj.optBoolean("is_typing", false)
+                typingHandler.removeCallbacks(clearPeerTypingRunnable)
+                if (peerIsTyping) {
+                    typingHandler.postDelayed(clearPeerTypingRunnable, TYPING_INDICATOR_TIMEOUT_MS)
+                }
+            }
+        }
+    }
+
+    /** bkz. dosya başı "yazıyor..." notu — SADECE geçiş anında (false->true/
+     *  true->false) çağrılır, `edtMessage`'ın TextWatcher'ı ve
+     *  `stopTypingRunnable` (boşta kalma zaman aşımı) tarafından. */
+    private fun sendTypingState(isTyping: Boolean) {
+        if (isTypingSent == isTyping) return
+        isTypingSent = isTyping
+        try {
+            P2PLib.sendTypingIndicator(peerDeviceFingerprint, isTyping)
+        } catch (e: Exception) {
+            // fire-and-forget — en kötü ihtimalle gösterge bir sonraki
+            // paket kadar gecikir.
         }
     }
 
@@ -603,7 +966,7 @@ class ChatActivity : AppCompatActivity() {
                     null
                 }
 
-                val result = P2PLib.prepareAndSendFile(peerDeviceFingerprint, tempFile.absolutePath, fileName, mimeType, previewJpeg)
+                val result = P2PLib.prepareAndSendFile(peerDeviceFingerprint, tempFile.absolutePath, fileName, mimeType, previewJpeg, -1)
                 withContext(Dispatchers.Main) {
                     if (result.startsWith("Error:")) {
                         Toast.makeText(this@ChatActivity, result, Toast.LENGTH_SHORT).show()
@@ -638,18 +1001,6 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    /** Rust tarafından `hex::encode` ile hex string olarak taşınan
-     *  önizleme baytlarını geri çözer (bkz. "preview_hex" alanı) — JSON
-     *  ham ikili veri taşıyamadığı için bu kodlama gerekti. */
-    private fun hexToBytes(hex: String): ByteArray {
-        val result = ByteArray(hex.length / 2)
-        for (i in result.indices) {
-            val idx = i * 2
-            result[i] = ((Character.digit(hex[idx], 16) shl 4) + Character.digit(hex[idx + 1], 16)).toByte()
-        }
-        return result
-    }
-
     private fun queryDisplayName(uri: Uri): String? {
         return try {
             contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
@@ -679,29 +1030,11 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Spec dışı: bir görsel dosyasından 480p/%85 JPEG önizleme kapağı
-     * üretir. Büyük görselleri TAM çözünürlükte belleğe yüklememek için
-     * önce sınırları (`inJustDecodeBounds`) okuyup uygun bir
-     * `inSampleSize` hesaplıyoruz — 12MP'lik bir foto için bile bu, kaba
-     * bir ön küçültmeyle (2 kuvvetleri hâlinde) makul bellek kullanımı
-     * sağlar, tam hassas boyuta son adımda `Bitmap.createScaledBitmap`
-     * ile inilir.
-     */
-    private fun generateImagePreview(file: File): ByteArray? {
-        val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.absolutePath, boundsOptions)
-        if (boundsOptions.outWidth <= 0 || boundsOptions.outHeight <= 0) return null
-
-        var sampleSize = 1
-        while (boundsOptions.outWidth / (sampleSize * 2) >= PREVIEW_MAX_DIMENSION &&
-            boundsOptions.outHeight / (sampleSize * 2) >= PREVIEW_MAX_DIMENSION) {
-            sampleSize *= 2
-        }
-        val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-        val sampled = BitmapFactory.decodeFile(file.absolutePath, decodeOptions) ?: return null
-        return scaleAndCompress(sampled)
-    }
+    /** Spec dışı: bir görsel dosyasından 480p/%85 JPEG önizleme kapağı
+     *  üretir — bkz. `ImagePreview.compressFile` (profil fotoğrafıyla
+     *  paylaşılan ortak mantık, sadece hedef boyut farklı). */
+    private fun generateImagePreview(file: File): ByteArray? =
+        ImagePreview.compressFile(file, PREVIEW_MAX_DIMENSION, PREVIEW_JPEG_QUALITY)
 
     /**
      * Spec dışı: bir video dosyasından 480p/%85 JPEG önizleme kapağı
@@ -716,31 +1049,12 @@ class ChatActivity : AppCompatActivity() {
             val frame = retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?: return null
-            scaleAndCompress(frame)
+            ImagePreview.compressBitmap(frame, PREVIEW_MAX_DIMENSION, PREVIEW_JPEG_QUALITY)
         } catch (e: Exception) {
             null
         } finally {
             retriever.release()
         }
-    }
-
-    private fun scaleAndCompress(bitmap: Bitmap): ByteArray {
-        val longEdge = maxOf(bitmap.width, bitmap.height)
-        val scaled = if (longEdge > PREVIEW_MAX_DIMENSION) {
-            val scale = PREVIEW_MAX_DIMENSION.toFloat() / longEdge
-            val scaledBitmap = Bitmap.createScaledBitmap(
-                bitmap, (bitmap.width * scale).toInt().coerceAtLeast(1),
-                (bitmap.height * scale).toInt().coerceAtLeast(1), true
-            )
-            if (scaledBitmap !== bitmap) bitmap.recycle()
-            scaledBitmap
-        } else {
-            bitmap
-        }
-        val out = ByteArrayOutputStream()
-        scaled.compress(Bitmap.CompressFormat.JPEG, PREVIEW_JPEG_QUALITY, out)
-        scaled.recycle()
-        return out.toByteArray()
     }
 
     /**
@@ -913,7 +1227,8 @@ class ChatActivity : AppCompatActivity() {
                             totalSize = obj.optLong("total_size"),
                             status = parseAttachmentStatus(obj.optString("status")),
                             bytesDone = obj.optLong("bytes_transferred"),
-                            previewJpeg = previewJpeg
+                            previewJpeg = previewJpeg,
+                            durationMs = obj.optInt("duration_ms", -1).let { if (it < 0) null else it }
                         )
                     )
                 )
@@ -954,5 +1269,9 @@ class ChatActivity : AppCompatActivity() {
             P2PService.activeConversationId = null
         }
         sessionPollHandler.removeCallbacks(sessionPollRunnable)
+        typingHandler.removeCallbacksAndMessages(null)
+        sendTypingState(false)
+        if (mediaRecorder != null) finishVoiceRecording(send = false)
+        stopVoicePlayback()
     }
 }

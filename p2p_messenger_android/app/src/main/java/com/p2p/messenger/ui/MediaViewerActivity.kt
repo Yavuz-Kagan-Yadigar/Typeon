@@ -3,22 +3,31 @@ package com.p2p.messenger.ui
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.media.MediaPlayer
+import android.media.PlaybackParams
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
 import android.widget.ImageView
-import android.widget.MediaController
 import android.widget.ProgressBar
+import android.widget.TextView
 import android.widget.Toast
 import android.widget.VideoView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.progressindicator.LinearProgressIndicator
 import com.p2p.messenger.R
+import com.p2p.messenger.util.PlaybackSpeed
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 /**
  * Spec dışı: kullanıcı tarafından istenen basit uygulama içi görüntüleyici
@@ -27,7 +36,10 @@ import kotlinx.coroutines.withContext
  * (diğer türler hâlâ sistem uygulamasına gider, bkz. ChatActivity
  * onAttachmentClicked) tam boyut/kalitede, uygulamanın kendi içinde
  * gösterilir. Video oynatma için Android'in kendi `VideoView`'ı
- * kullanılıyor — yeni bir kütüphaneye (ExoPlayer vb.) gerek yok.
+ * kullanılıyor — yeni bir kütüphaneye (ExoPlayer vb.) gerek yok; hız
+ * kontrolü + çift dokunuşla atlama için `VideoView.setOnPreparedListener`in
+ * verdiği GERÇEK `MediaPlayer` referansı kullanılıyor (reflection gerekmez
+ * — `onPrepared(MediaPlayer mp)` zaten canlı nesneyi taşıyor).
  */
 class MediaViewerActivity : AppCompatActivity() {
 
@@ -36,6 +48,27 @@ class MediaViewerActivity : AppCompatActivity() {
         const val EXTRA_MIME_TYPE = "mime_type"
         private const val MIN_SCALE = 1f
         private const val MAX_SCALE = 6f
+        private const val SKIP_MS = 5000
+        private const val SKIP_INDICATOR_DURATION_MS = 500L
+        private const val VIDEO_PROGRESS_TICK_MS = 300L
+    }
+
+    private var videoMediaPlayer: MediaPlayer? = null
+    private var videoSpeed = 1f
+    private val videoHandler = Handler(Looper.getMainLooper())
+    private var videoProgressBar: LinearProgressIndicator? = null
+    private val videoProgressRunnable = object : Runnable {
+        override fun run() {
+            val mp = videoMediaPlayer ?: return
+            val bar = videoProgressBar ?: return
+            try {
+                if (mp.duration > 0) {
+                    bar.max = mp.duration
+                    bar.setProgressCompat(mp.currentPosition, true)
+                }
+            } catch (e: Exception) { /* geçersiz durumda olabilir (ör. tam kapanıyor) */ }
+            videoHandler.postDelayed(this, VIDEO_PROGRESS_TICK_MS)
+        }
     }
 
     // Bkz. `setupZoomableImage` — `ImageView.ScaleType.MATRIX` ile elle
@@ -66,13 +99,20 @@ class MediaViewerActivity : AppCompatActivity() {
             val videoView = findViewById<VideoView>(R.id.videoViewer)
             videoView.visibility = View.VISIBLE
             videoView.setVideoURI(uri)
-            videoView.setMediaController(MediaController(this).apply { setAnchorView(videoView) })
             videoView.setOnErrorListener { _, _, _ ->
                 Toast.makeText(this, R.string.error_attachment_open_failed, Toast.LENGTH_SHORT).show()
                 finish()
                 true
             }
-            videoView.setOnPreparedListener { it.start() }
+            videoView.setOnPreparedListener { mp ->
+                videoMediaPlayer = mp
+                mp.isLooping = false
+                mp.start()
+                videoProgressBar?.visibility = View.VISIBLE
+                findViewById<View>(R.id.btnPlaybackSpeed).visibility = View.VISIBLE
+                videoHandler.post(videoProgressRunnable)
+            }
+            setupVideoControls(videoView)
         } else {
             // Görsel — büyük dosyaları TAM çözünürlükte belleğe yüklememek
             // için ekran boyutuna göre bir `inSampleSize` hesaplanır (bkz.
@@ -194,5 +234,75 @@ class MediaViewerActivity : AppCompatActivity() {
             }
             true
         }
+    }
+
+    /**
+     * Spec dışı: `VideoView`'ın kendi `MediaController`'ı yerine — YouTube
+     * tarzı tek dokunuş (oynat/duraklat), çift dokunuş (ekranın sol/sağ
+     * yarısına göre ±5sn atlama + kısa animasyonlu gösterge), ve hız
+     * rozeti (bkz. `PlaybackSpeed`, sesli mesajlarla AYNI döngü).
+     */
+    private fun setupVideoControls(videoView: VideoView) {
+        videoProgressBar = findViewById(R.id.progressVideoPlayback)
+        val overlay = findViewById<View>(R.id.viewVideoGestureOverlay)
+        val skipLeft = findViewById<TextView>(R.id.txtSkipIndicatorLeft)
+        val skipRight = findViewById<TextView>(R.id.txtSkipIndicatorRight)
+        val speedButton = findViewById<TextView>(R.id.btnPlaybackSpeed)
+        overlay.visibility = View.VISIBLE
+
+        val gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                val mp = videoMediaPlayer ?: return true
+                if (mp.isPlaying) mp.pause() else mp.start()
+                return true
+            }
+
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                val mp = videoMediaPlayer ?: return true
+                val isLeftHalf = e.x < overlay.width / 2f
+                val target = if (isLeftHalf) (mp.currentPosition - SKIP_MS).coerceAtLeast(0)
+                             else (mp.currentPosition + SKIP_MS).coerceAtMost(mp.duration)
+                mp.seekTo(target)
+                showSkipIndicator(if (isLeftHalf) skipLeft else skipRight)
+                return true
+            }
+        })
+        overlay.setOnTouchListener { _, event -> gestureDetector.onTouchEvent(event) }
+
+        speedButton.setOnClickListener {
+            videoSpeed = PlaybackSpeed.next(videoSpeed)
+            speedButton.text = formatSpeedLabel(videoSpeed)
+            val mp = videoMediaPlayer
+            if (mp != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                try {
+                    mp.playbackParams = PlaybackParams().setSpeed(videoSpeed)
+                } catch (e: Exception) { /* bazı cihazlarda desteklenmeyen hız oranı olabilir */ }
+            }
+        }
+    }
+
+    private fun showSkipIndicator(view: TextView) {
+        (view.tag as? Runnable)?.let { videoHandler.removeCallbacks(it) }
+        view.visibility = View.VISIBLE
+        view.alpha = 1f
+        val hide = Runnable { view.animate().alpha(0f).setDuration(150).withEndAction { view.visibility = View.INVISIBLE } }
+        view.tag = hide
+        videoHandler.postDelayed(hide, SKIP_INDICATOR_DURATION_MS)
+    }
+
+    private fun formatSpeedLabel(speed: Float): String {
+        val trimmed = if (speed == speed.toInt().toFloat()) speed.toInt().toString() else speed.toString()
+        return "${trimmed}x"
+    }
+
+    override fun onPause() {
+        super.onPause()
+        videoMediaPlayer?.let { if (it.isPlaying) it.pause() }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        videoHandler.removeCallbacksAndMessages(null)
+        videoMediaPlayer = null
     }
 }

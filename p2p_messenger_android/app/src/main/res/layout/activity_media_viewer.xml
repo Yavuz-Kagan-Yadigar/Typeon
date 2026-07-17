@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#000000">
@@ -18,6 +19,44 @@
         android:layout_height="match_parent"
         android:visibility="gone" />
 
+    <!-- Spec dışı: VideoView'ın kendi dokunuşlarını yakalamıyor — bunun
+         üzerine şeffaf bir katman koyup tek/çift dokunuşu (oynat-duraklat/
+         YouTube tarzı ±5sn atlama) burada işliyoruz, bkz.
+         MediaViewerActivity setupVideoGestures. -->
+    <View
+        android:id="@+id/viewVideoGestureOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
+    <!-- Spec dışı: -5sn/+5sn atlama göstergesi — dokunulan yarıda kısaca
+         belirip kaybolur (bkz. YouTube). -->
+    <TextView
+        android:id="@+id/txtSkipIndicatorLeft"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_vertical|start"
+        android:layout_marginStart="48dp"
+        android:text="-5sn"
+        android:textColor="@android:color/white"
+        android:textSize="18sp"
+        android:background="#66000000"
+        android:padding="12dp"
+        android:visibility="invisible" />
+
+    <TextView
+        android:id="@+id/txtSkipIndicatorRight"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_vertical|end"
+        android:layout_marginEnd="48dp"
+        android:text="+5sn"
+        android:textColor="@android:color/white"
+        android:textSize="18sp"
+        android:background="#66000000"
+        android:padding="12dp"
+        android:visibility="invisible" />
+
     <ProgressBar
         android:id="@+id/progressViewer"
         android:layout_width="wrap_content"
@@ -34,5 +73,33 @@
         android:background="?attr/selectableItemBackgroundBorderless"
         android:src="@android:drawable/ic_menu_close_clear_cancel"
         android:contentDescription="@android:string/cancel" />
+
+    <!-- Spec dışı: hız kontrolü — video için, bkz. ChatActivity sesli
+         mesaj hız rozetiyle AYNI PlaybackSpeed döngüsü. -->
+    <TextView
+        android:id="@+id/btnPlaybackSpeed"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="12dp"
+        android:padding="8dp"
+        android:text="1x"
+        android:textColor="@android:color/white"
+        android:textStyle="bold"
+        android:background="#66000000"
+        android:visibility="gone"
+        android:clickable="true"
+        android:focusable="true" />
+
+    <!-- Spec dışı, Material You: video çalma konumu — bkz.
+         SimpleChatAdapter sesli mesaj çubuğuyla AYNI bileşen. -->
+    <com.google.android.material.progressindicator.LinearProgressIndicator
+        android:id="@+id/progressVideoPlayback"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:indeterminate="false"
+        app:trackThickness="4dp"
+        android:visibility="gone" />
 
 </FrameLayout>

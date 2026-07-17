@@ -1,5 +1,6 @@
 package com.p2p.messenger
 
+import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
@@ -7,11 +8,13 @@ import android.os.Looper
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.p2p.messenger.ui.ChatActivity
 import com.p2p.messenger.ui.ChatAdapter
+import com.p2p.messenger.util.hexToBytes
 import org.json.JSONArray
 
 /**
@@ -50,10 +53,83 @@ class ChatsFragment : Fragment() {
                 startActivity(intent)
             }
         }
+        adapter.onContactLongClick = { message -> showChatLongPressMenu(message) }
         recycler.adapter = adapter
 
         refreshList()
         return view
+    }
+
+    /**
+     * Spec dışı, uzun basma menüsü: kullanıcıyla birlikte netleştirilen iki
+     * ayrı seçenek — "sohbet geçmişini temizle" (yumuşak, tek onay, kişi
+     * paired kalır) ve "kişiyi sil" (sert, ÇİFT onay, eşleşme dahil her şey
+     * silinir).
+     */
+    private fun showChatLongPressMenu(message: ChatAdapter.ChatMessage) {
+        val options = arrayOf(
+            getString(R.string.action_clear_chat_history),
+            getString(R.string.action_delete_contact)
+        )
+        AlertDialog.Builder(requireContext())
+            .setTitle(message.displayName)
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> confirmClearChatHistory(message)
+                    1 -> confirmDeleteContactStep1(message)
+                }
+            }
+            .show()
+    }
+
+    private fun confirmClearChatHistory(message: ChatAdapter.ChatMessage) {
+        AlertDialog.Builder(requireContext())
+            .setMessage(R.string.confirm_clear_chat_history)
+            .setPositiveButton(R.string.action_clear_chat_history) { _, _ ->
+                val result = try {
+                    P2PLib.clearChatHistory(message.realContactId)
+                } catch (e: Exception) {
+                    "Error: ${e.message}"
+                }
+                if (result.startsWith("Error:")) {
+                    Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(requireContext(), R.string.msg_chat_history_cleared, Toast.LENGTH_SHORT).show()
+                    refreshList()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** İlk onay — bkz. dosya başı notu, bu işlem SERT olduğundan (eşleşme
+     *  dahil her şey silinir) çift onay isteniyor. */
+    private fun confirmDeleteContactStep1(message: ChatAdapter.ChatMessage) {
+        AlertDialog.Builder(requireContext())
+            .setMessage(R.string.confirm_delete_contact_step1)
+            .setPositiveButton(R.string.action_delete_contact) { _, _ -> confirmDeleteContactStep2(message) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun confirmDeleteContactStep2(message: ChatAdapter.ChatMessage) {
+        AlertDialog.Builder(requireContext())
+            .setMessage(R.string.confirm_delete_contact_step2)
+            .setPositiveButton(R.string.action_delete_contact) { _, _ ->
+                val result = try {
+                    P2PLib.deleteContact(message.realContactId)
+                } catch (e: Exception) {
+                    "Error: ${e.message}"
+                }
+                if (result.startsWith("Error:")) {
+                    Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(requireContext(), R.string.msg_contact_deleted, Toast.LENGTH_SHORT).show()
+                    refreshList()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     override fun onResume() {
@@ -83,13 +159,20 @@ class ChatsFragment : Fragment() {
                 displayName = contact.displayName,
                 lastMessage = lastMessage?.text ?: "",
                 timestamp = lastMessage?.timestamp ?: 0L,
-                unreadCount = 0 // Aşama A'da okunmamış sayacı takip edilmiyor.
+                unreadCount = 0, // Aşama A'da okunmamış sayacı takip edilmiyor.
+                realContactId = contact.contactId,
+                avatarJpeg = contact.avatarHex?.let { hexToBytes(it) }
             )
         }
         adapter.submitList(chatItems)
     }
 
-    private data class ContactRow(val displayName: String, val activeDeviceFingerprint: String?)
+    private data class ContactRow(
+        val contactId: String,
+        val displayName: String,
+        val activeDeviceFingerprint: String?,
+        val avatarHex: String?
+    )
     private data class LastMessagePreview(val text: String, val timestamp: Long)
 
     private fun loadContacts(): List<ContactRow> {
@@ -108,8 +191,10 @@ class ChatsFragment : Fragment() {
             val fingerprint = if (obj.isNull("active_device_fingerprint")) null
                 else obj.optString("active_device_fingerprint")
             ContactRow(
+                contactId = obj.optString("contact_id"),
                 displayName = obj.optString("display_name", "Bilinmeyen"),
-                activeDeviceFingerprint = fingerprint
+                activeDeviceFingerprint = fingerprint,
+                avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null }
             )
         }
     }

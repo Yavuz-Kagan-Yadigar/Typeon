@@ -52,6 +52,7 @@
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
+        android:gravity="center_vertical"
         android:padding="8dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
@@ -59,12 +60,23 @@
 
         <ImageButton
             android:id="@+id/btnAttach"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
             android:layout_marginEnd="4dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
+            android:padding="12dp"
+            android:background="@drawable/round_icon_button_background"
             android:contentDescription="@string/content_desc_attach_file"
             android:src="@drawable/ic_attach" />
+
+        <ImageButton
+            android:id="@+id/btnVoice"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginEnd="4dp"
+            android:padding="12dp"
+            android:background="@drawable/round_icon_button_background"
+            android:contentDescription="@string/content_desc_record_voice"
+            android:src="@drawable/ic_mic" />
 
         <EditText
             android:id="@+id/edtMessage"
@@ -85,6 +97,50 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="@string/btn_send" />
+
+    </LinearLayout>
+
+    <!-- Spec dışı: basılı tut/kaydet sesli mesaj — kayıt sırasında input
+         satırının YERİNE geçer (bkz. ChatActivity ses kaydı akışı). Sola
+         kaydırınca iptal (WhatsApp'taki gibi), bırakınca gönderilir. -->
+    <LinearLayout
+        android:id="@+id/layoutRecording"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="16dp"
+        android:background="?attr/colorSurfaceVariant"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <ImageView
+            android:layout_width="16dp"
+            android:layout_height="16dp"
+            android:layout_marginEnd="8dp"
+            android:src="@drawable/ic_status_pending"
+            app:tint="?attr/colorError"
+            android:contentDescription="@null" />
+
+        <TextView
+            android:id="@+id/txtRecordingTimer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="0:00"
+            android:fontFamily="monospace"
+            android:textColor="?attr/colorOnSurfaceVariant" />
+
+        <TextView
+            android:id="@+id/txtRecordingHint"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="12dp"
+            android:text="@string/msg_recording_voice"
+            android:textSize="12sp"
+            android:textColor="?attr/colorOnSurfaceVariant" />
 
     </LinearLayout>
 

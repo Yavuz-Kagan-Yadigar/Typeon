@@ -80,4 +80,29 @@
     <string name="msg_save_declined">Karşı taraf kaydetme isteğini reddetti</string>
     <string name="msg_saved_to_downloads">İndirilenler/P2P içine kaydedildi</string>
     <string name="msg_save_request_sent">Kaydetme isteği gönderildi, onay bekleniyor…</string>
+
+    <!-- Spec dışı: sohbet listesinde uzun basma menüsü -->
+    <string name="action_clear_chat_history">Sohbet geçmişini temizle</string>
+    <string name="confirm_clear_chat_history">Bu sohbetin yerel geçmişi (mesajlar ve ekler) silinecek. Kişi listenizde kalacak. Emin misiniz?</string>
+    <string name="action_delete_contact">Kişiyi sil</string>
+    <string name="confirm_delete_contact_step1">Bu kişiyi silmek istediğinize emin misiniz? Sohbet geçmişi de silinecek.</string>
+    <string name="confirm_delete_contact_step2">Bu işlem GERİ ALINAMAZ — yeniden mesajlaşmak için QR kodunu tekrar okutmanız gerekecek. Yine de silmek istiyor musunuz?</string>
+    <string name="msg_chat_history_cleared">Sohbet geçmişi temizlendi</string>
+    <string name="msg_contact_deleted">Kişi silindi</string>
+
+    <!-- Spec dışı: sesli mesaj kaydı -->
+    <string name="content_desc_record_voice">Sesli mesaj kaydet</string>
+    <string name="msg_recording_voice">Kaydediliyor… bırakınca gönderilir, sola kaydırınca iptal olur</string>
+    <string name="msg_recording_cancelled">Kayıt iptal edildi</string>
+    <string name="error_recording_failed">Ses kaydı başlatılamadı</string>
+
+    <!-- Spec dışı: profil fotoğrafı -->
+    <string name="content_desc_profile_picture">Profil fotoğrafı</string>
+    <string name="lbl_profile_picture">Profil Fotoğrafı</string>
+    <string name="lbl_profile_picture_desc">Kişileriniz sohbet listesinde bu fotoğrafı görür</string>
+    <string name="action_change_picture">Fotoğrafı değiştir</string>
+    <string name="action_remove_picture">Fotoğrafı kaldır</string>
+
+    <!-- Spec dışı: video/ses oynatıcı hız kontrolü -->
+    <string name="lbl_playback_speed">Hız</string>
 </resources>
