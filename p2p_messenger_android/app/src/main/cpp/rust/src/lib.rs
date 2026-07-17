@@ -71,6 +71,29 @@ lazy_static::lazy_static! {
     static ref CORE: Arc<Mutex<P2PCore>> = Arc::new(Mutex::new(P2PCore::new()));
 }
 
+/// Her JNI export'u `CORE.lock()` alır — bunu DOĞRUDAN `.unwrap()` etmek
+/// (önceki hâli) ciddi bir kırılganlık taşıyordu: `std::sync::Mutex`,
+/// kilit TUTULURKEN bir panik olursa kalıcı olarak "poisoned" (zehirli)
+/// hâle gelir; `catch_panic` (bkz. dosya sonu, JNI Bindings bölümü) TEK
+/// bir JNI çağrısını izbadılasa da, kilidin kendisi zehirlendiğinde
+/// SONRAKİ HER `core_lock()` çağrısı (yani gerçekte HER JNI
+/// export'u — pollNetwork dahil) ANINDA panikler. Sonuç: TEK bir yerde
+/// (ör. bu oturumda eklenen geniş yeni kod yüzeyinden herhangi biri)
+/// oluşan TEK bir panik, süreç yeniden başlatılana kadar UYGULAMANIN TÜM
+/// ağ/mesajlaşma işlevselliğini SESSİZCE (kullanıcıya hiçbir hata
+/// göstermeden — pollNetwork boş sonuç döner, "her şey normal görünür
+/// ama hiçbir şey ASLA ilerlemez") kalıcı olarak durdurabilirdi. Bu,
+/// "indirme 0B'de sonsuza kadar takılı kalıyor, hiç hata görünmüyor"
+/// gibi tam olarak bu türden bir arızayla eşleşen bir belirti üretir.
+/// `unwrap_or_else(|poisoned| poisoned.into_inner())` ile zehirlenmeyi
+/// YOKSAYIP alttaki veriyi olduğu gibi geri alıyoruz — `catch_panic`
+/// zaten her çağrıyı izbadıladığı için, TEK bir başarısız işlemin
+/// yarım kalmış bir durum bırakma riski (kabul edilebilir, nadir bir
+/// tutarsızlık) her şeyin kalıcı olarak kilitlenmesinden çok daha iyi.
+fn core_lock() -> std::sync::MutexGuard<'static, P2PCore> {
+    CORE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // --- libp2p birleşik davranış ---
 //
 // Spec bölüm 4.2: DHT (Kademlia) keşif için. Identify protokolü, Kademlia'nın
@@ -2569,7 +2592,9 @@ impl P2PCore {
     /// modu açıkken otomatik) başlatır/devam ettirir. Zaten indiriliyorsa
     /// veya tamamlanmışsa no-op.
     fn download_file(&mut self, file_id: String, peer_device_fingerprint: String) -> Result<(), String> {
+        info!("download_file çağrıldı: file_id={} peer={}", file_id, peer_device_fingerprint);
         if self.active_downloads.contains_key(&file_id) {
+            info!("download_file: {} zaten indiriliyor, no-op", file_id);
             return Ok(());
         }
         let conn = self.db.as_ref().ok_or("DB not open")?;
@@ -2580,13 +2605,19 @@ impl P2PCore {
         ).ok();
         let (total_size, encrypted_key, key_nonce, status) = row.ok_or("Unknown file_id")?;
         if status == "complete" {
+            info!("download_file: {} zaten tamamlanmış, no-op", file_id);
             return Ok(());
         }
         let file_key = self.unwrap_file_key(&encrypted_key, &key_nonce)?;
 
         let peer_id = *self.device_to_peer_id.get(&peer_device_fingerprint)
             .ok_or("Bu kişiden henüz doğrudan bir paket alınmadı, karşı taraf şu an erişilebilir değil")?;
-        if let Some(addr) = self.peer_id_to_addr.get(&peer_id).cloned() {
+        let cached_addr = self.peer_id_to_addr.get(&peer_id).cloned();
+        info!(
+            "download_file: peer_id={} biliniyor, önbellekteki adres={:?}, swarm zaten bağlı mı={}",
+            peer_id, cached_addr, self.swarm.as_ref().map(|s| s.is_connected(&peer_id)).unwrap_or(false)
+        );
+        if let Some(addr) = cached_addr {
             if let Some(swarm) = &mut self.swarm {
                 swarm.add_peer_address(peer_id, addr);
             }
@@ -2637,6 +2668,7 @@ impl P2PCore {
         let request_id = swarm.behaviour_mut().file_chunks.send_request(
             &peer_id, FileChunkRequest { file_id: file_id.to_string(), chunk_index: next_index },
         );
+        info!("request_next_chunk: file_id={} chunk={} request_id={} gönderildi (kuyruğa alındı)", file_id, next_index, request_id);
         self.download_request_ids.insert(request_id, file_id.to_string());
     }
 
@@ -2679,7 +2711,10 @@ impl P2PCore {
     /// parça yanıtını işler.
     fn handle_chunk_response(&mut self, file_id: &str, response: FileChunkResponse) {
         let data = match response {
-            FileChunkResponse::Chunk { data } => data,
+            FileChunkResponse::Chunk { data } => {
+                info!("handle_chunk_response: file_id={} {} bayt alındı", file_id, data.len());
+                data
+            }
             FileChunkResponse::NotFound => {
                 self.fail_download(file_id, "Karşı tarafta bu dosya/parça bulunamadı");
                 return;
@@ -2724,6 +2759,7 @@ impl P2PCore {
     /// gönderdiği VEYA tamamen indirip yeniden servis ettiği bir dosyadan
     /// tek bir parça ister.
     fn serve_chunk_request(&self, request: &FileChunkRequest) -> FileChunkResponse {
+        info!("serve_chunk_request: file_id={} chunk={} isteği alındı", request.file_id, request.chunk_index);
         let is_complete = self.db.as_ref().and_then(|conn| {
             conn.query_row(
                 "SELECT status FROM files WHERE file_id = ?1", params![request.file_id],
@@ -2731,6 +2767,7 @@ impl P2PCore {
             ).ok()
         }).map(|s| s == "complete").unwrap_or(false);
         if !is_complete {
+            error!("serve_chunk_request: file_id={} status='complete' değil (veya kayıt yok) — NotFound dönülüyor", request.file_id);
             return FileChunkResponse::NotFound;
         }
         let enc_path = match self.enc_path_for(&request.file_id) {
@@ -2738,8 +2775,14 @@ impl P2PCore {
             Err(_) => return FileChunkResponse::NotFound,
         };
         match attachments::read_chunk_from_disk(&enc_path, request.chunk_index) {
-            Ok(Some(data)) => FileChunkResponse::Chunk { data },
-            _ => FileChunkResponse::NotFound,
+            Ok(Some(data)) => {
+                info!("serve_chunk_request: file_id={} chunk={} {} bayt ile yanıtlanıyor", request.file_id, request.chunk_index, data.len());
+                FileChunkResponse::Chunk { data }
+            }
+            other => {
+                error!("serve_chunk_request: file_id={} chunk={} diskten okunamadı: {:?}", request.file_id, request.chunk_index, other.err());
+                FileChunkResponse::NotFound
+            }
         }
     }
 
@@ -3414,7 +3457,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_initDatabase<'local>(mut en
     let path: String = env.get_string(&files_dir).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(|| {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.init_db(&path).map_err(|e| e.to_string())
     });
     match result {
@@ -3429,7 +3472,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_createIdentity<'local>(mut 
     let name: String = env.get_string(&device_name).map(|s| s.into()).unwrap_or_else(|_| "Device".to_string());
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         match core.generate_identity(name) {
             Ok((id, bundle_bytes)) => {
                 // Kotlin, identity_id'yi aldıktan hemen sonra
@@ -3457,7 +3500,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_createIdentity<'local>(mut 
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_getPendingSecretBundle<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jni::sys::jbyteArray {
     let result = catch_panic(|| {
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.pending_secret_bundle.take().unwrap_or_default()
     });
     let bundle = result.unwrap_or_else(|e| { error!("getPendingSecretBundle panicked: {}", e); Vec::new() });
@@ -3468,7 +3511,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getPendingSecretBundle<'loc
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_loadSecretBundle<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, bundle_bytes: JByteArray<'local>) -> jboolean {
     let raw = jbytearray_to_vec(&mut env, &bundle_bytes);
     let result = catch_panic(move || {
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.load_secret_bundle(&raw)
     });
     match result {
@@ -3481,7 +3524,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_loadSecretBundle<'local>(mu
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_hasStoredIdentity<'local>(_env: JNIEnv<'local>, _class: JClass<'local>) -> jboolean {
     let result = catch_panic(|| {
-        let core = CORE.lock().unwrap();
+        let core = core_lock();
         core.identity.is_some()
     });
     result.unwrap_or(false) as jboolean
@@ -3499,7 +3542,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setHistoryKey<'local>(mut e
         Err(_) => return false as jboolean,
     };
     let result = catch_panic(move || {
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.history_key = Some(key);
     });
     result.is_ok() as jboolean
@@ -3518,7 +3561,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setSkippedKeyEncryptionKey<
         Err(_) => return false as jboolean,
     };
     let result = catch_panic(move || {
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.skipped_key_encryption_key = Some(key);
         // Bu anahtar aynı zamanda ratchet state'lerin diskte şifreli
         // kalıcılığı için de kullanılıyor (bkz. persist_ratchet_state) —
@@ -3537,7 +3580,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setSkippedKeyEncryptionKey<
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_getMessageHistory<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>, limit: jni::sys::jint) -> jstring {
     let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
-        let core = CORE.lock().unwrap();
+        let core = core_lock();
         let history = core.load_message_history(&fp, limit.max(0) as u32);
         serde_json::to_string(&history).unwrap_or_else(|_| "[]".to_string())
     });
@@ -3568,7 +3611,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_prepareAndSendFile<'local>(
     };
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.prepare_and_send_file(target_str, source_str, name_str, mime_str, preview_vec)
     });
     match result {
@@ -3594,7 +3637,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_downloadFile<'local>(mut en
     let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.download_file(file_id_str, fp)
     });
     let out = match result {
@@ -3611,7 +3654,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_downloadFile<'local>(mut en
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_listAttachments<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>) -> jstring {
     let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
-        let core = CORE.lock().unwrap();
+        let core = core_lock();
         let list = core.list_attachments(&fp);
         serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
     });
@@ -3627,7 +3670,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_listAttachments<'local>(mut
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_getAttachmentPlaintextPath<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, file_id: JString<'local>) -> jstring {
     let file_id_str: String = env.get_string(&file_id).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
-        let core = CORE.lock().unwrap();
+        let core = core_lock();
         core.get_attachment_plaintext_path(&file_id_str)
     });
     match result {
@@ -3640,7 +3683,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getAttachmentPlaintextPath<
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_getIdentityCode<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
     let result = catch_panic(|| {
-        let core = CORE.lock().unwrap();
+        let core = core_lock();
         core.identity_code()
     });
     match result {
@@ -3653,7 +3696,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getIdentityCode<'local>(mut
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_getIdentityShortCode<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
     let result = catch_panic(|| {
-        let core = CORE.lock().unwrap();
+        let core = core_lock();
         core.identity_short_code()
     });
     match result {
@@ -3674,7 +3717,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_startNetwork<'local>(mut en
         // gelebilir, bu yüzden context'i HER JNI export'unda ayrı ayrı kurmak
         // gerekir; bir thread'de enter() etmek başka bir thread'i etkilemez).
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.start_network(node_mode != 0)
     });
     match result {
@@ -3688,7 +3731,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_startNetwork<'local>(mut en
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_setNodeMode(_env: JNIEnv, _class: JClass, enabled: jboolean) {
     let _ = catch_panic(|| {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.set_node_mode(enabled != 0);
     });
 }
@@ -3701,7 +3744,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setNodeMode(_env: JNIEnv, _
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_getNodeAddress<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
     let result = catch_panic(|| {
-        let core = CORE.lock().unwrap();
+        let core = core_lock();
         core.get_node_address().unwrap_or_default()
     });
     let addr = result.unwrap_or_else(|e| { error!("getNodeAddress panicked: {}", e); String::new() });
@@ -3714,7 +3757,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getNodeAddress<'local>(mut 
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_hasActiveSession<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>) -> jboolean {
     let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
-        let core = CORE.lock().unwrap();
+        let core = core_lock();
         core.has_active_session(&fp)
     });
     result.unwrap_or(false) as jboolean
@@ -3727,7 +3770,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_hasActiveSession<'local>(mu
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_isPeerConnected<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>) -> jboolean {
     let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
-        let core = CORE.lock().unwrap();
+        let core = core_lock();
         core.is_peer_connected(&fp)
     });
     result.unwrap_or(false) as jboolean
@@ -3740,7 +3783,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_ensureHandshake<'local>(mut
     let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
     let _ = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         if let Err(e) = core.ensure_handshake(&fp) {
             error!("ensure_handshake failed: {}", e);
         }
@@ -3757,7 +3800,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_requestHistorySync<'local>(
     let limit_u32 = limit.max(0) as u32;
     let _ = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         if let Err(e) = core.request_history_sync(fp, limit_u32) {
             error!("request_history_sync failed: {}", e);
         }
@@ -3768,7 +3811,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_requestHistorySync<'local>(
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_generateQrPacket<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, rendezvous_node: JString<'local>) -> jni::sys::jbyteArray {
     let node: String = env.get_string(&rendezvous_node).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
-        let core = CORE.lock().unwrap();
+        let core = core_lock();
         core.generate_qr_packet(node)
     });
     match result {
@@ -3789,7 +3832,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_processQrPacket<'local>(mut
         // bu satır olmadan tam olarak bu fonksiyonda yaşanan
         // "there is no reactor running" panic'i tekrarlanırdı.
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.process_qr_packet(&raw)
     });
     match result {
@@ -3804,7 +3847,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_processManualEntry<'local>(
     let text_str: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.process_manual_entry(&text_str)
     });
     match result {
@@ -3824,7 +3867,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendMessage<'local>(mut env
     let msg_str: String = env.get_string(&msg).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.send_message(target_str, msg_str)
     });
     match result {
@@ -3845,7 +3888,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_editMessage<'local>(mut env
     let new_text_str: String = env.get_string(&new_text).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.edit_message(target_str, target_message_id_str, new_text_str)
     });
     match result {
@@ -3862,7 +3905,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteMessage<'local>(mut e
     let target_message_id_str: String = env.get_string(&target_message_id).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.delete_message(target_str, target_message_id_str)
     });
     match result {
@@ -3878,7 +3921,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_pollNetwork<'local>(mut env
         // `poll_events` kendi içinde zaten `RUNTIME.block_on(...)` kullanıyor
         // (bu da context'i kurar) ama tutarlılık için burada da enter ediyoruz.
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.poll_events()
     });
     let texts = result.unwrap_or_else(|e| { error!("pollNetwork panicked: {}", e); Vec::new() });
@@ -3888,7 +3931,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_pollNetwork<'local>(mut env
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_listContacts<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
     let result = catch_panic(|| {
-        let core = CORE.lock().unwrap();
+        let core = core_lock();
         let contacts = core.list_contacts();
         serde_json::to_string(&contacts).unwrap_or_else(|_| "[]".to_string())
     });
@@ -3899,7 +3942,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_listContacts<'local>(mut en
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_listPendingDeviceAlerts<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
     let result = catch_panic(|| {
-        let core = CORE.lock().unwrap();
+        let core = core_lock();
         let alerts = core.list_pending_device_alerts();
         serde_json::to_string(&alerts).unwrap_or_else(|_| "[]".to_string())
     });
@@ -3912,7 +3955,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_acceptDeviceAlert<'local>(m
     let fp: String = env.get_string(&fingerprint).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.accept_pending_device_alert(&fp).is_ok()
     });
     result.unwrap_or(false) as jboolean
@@ -3922,7 +3965,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_acceptDeviceAlert<'local>(m
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_rejectDeviceAlert(mut _env: JNIEnv, _class: JClass, fingerprint: JString) {
     let fp: String = _env.get_string(&fingerprint).map(|s| s.into()).unwrap_or_default();
     let _ = catch_panic(move || {
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.reject_pending_device_alert(&fp);
     });
 }
@@ -3931,7 +3974,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_rejectDeviceAlert(mut _env:
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_listGroups<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
     let result = catch_panic(|| {
-        let core = CORE.lock().unwrap();
+        let core = core_lock();
         let groups = core.list_groups();
         serde_json::to_string(&groups).unwrap_or_else(|_| "[]".to_string())
     });
@@ -3944,7 +3987,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_createGroup<'local>(mut env
     let name_str: String = env.get_string(&name).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.create_group(name_str)
     });
     match result {
@@ -3960,7 +4003,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_inviteToGroup<'local>(mut e
     let iid: String = env.get_string(&identity_id).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.invite_to_group(&gid, &iid)
     });
     match result {
@@ -3976,7 +4019,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_removeFromGroup<'local>(mut
     let iid: String = env.get_string(&identity_id).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.remove_from_group(&gid, &iid)
     });
     match result {
@@ -3992,7 +4035,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mu
     let msg_str: String = env.get_string(&msg).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = CORE.lock().unwrap();
+        let mut core = core_lock();
         core.send_group_message(&gid, &msg_str)
     });
     match result {
@@ -4006,7 +4049,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mu
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_exportRecovery<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, pass: JString<'local>) -> jni::sys::jbyteArray {
     let pass_str: String = env.get_string(&pass).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
-        let core = CORE.lock().unwrap();
+        let core = core_lock();
         core.export_recovery(pass_str)
     });
     match result {
