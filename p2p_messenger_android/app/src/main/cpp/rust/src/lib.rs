@@ -302,6 +302,25 @@ const ACK_RETRY_MAX_MS: u64 = 120_000;
 /// çekilme (5s, 10s, 20s, 40s, 80s ≈ toplam 2.5 dakika), tek seferlik
 /// fire-and-forget'e göre teslimat olasılığını ciddi ölçüde artırır.
 const ACK_SELF_MAX_RETRIES: u32 = 5;
+/// KRİTİK: bir paket belirli bir ratchet zincir adımına karşı şifrelendi
+/// (bkz. `PendingConfirmation.envelope` notu — yeniden şifrelenmeden
+/// AYNEN tekrar gönderilir). Karşı taraf o adımı zaten TÜKETTİYSE
+/// (normal akış) VE bu peer'le olan oturumda spec 3.2'nin 30 dakikalık
+/// DH/KEM rotasyonu bir kez daha gerçekleştiyse (bkz.
+/// `ratchet::RATCHET_ROTATION_MS`), alıcının o eski zincire ait
+/// skipped-key önbelleği TAMAMEN TEMİZLENİR (`perform_dh_ratchet`/
+/// `respond_to_rotation`, forward secrecy'nin istenen/doğru bir sonucu).
+/// Bu noktadan sonra o paket ARTIK ASLA çözülemez — "onaylanana kadar
+/// sürekli dene" artık kriptografik olarak İMKANSIZ bir şeyi
+/// denemektir, sadece alıcıya sonsuza dek "Decryption failed"/
+/// "skipped-key cache'te yok" hatası ürettirir (gerçek arıza deseni —
+/// uzun bir test oturumunda BİRDEN FAZLA farklı mesajın aynı anda bu
+/// duruma düşmesi gözlemlendi). Bu yüzden `awaiting_confirmation`
+/// SÜRESİZ değil — rotasyon penceresinin biraz altında (güvenlik payı
+/// ile) bir üst yaş sınırı var; aşılırsa paket "Failed" sayılıp
+/// bırakılır (kullanıcı isterse manuel olarak yeni bir mesaj olarak
+/// tekrar gönderebilir).
+const MAX_UNCONFIRMED_AGE_MS: u64 = ratchet::RATCHET_ROTATION_MS - 5 * 60 * 1000;
 
 /// bkz. `DownloadState.last_progress_at` dokümantasyonu — bir indirmenin,
 /// hiçbir libp2p-seviyeli olay (ne parça yanıtı, ne `OutboundFailure`)
@@ -337,15 +356,17 @@ struct PendingConfirmation {
     envelope: NetworkEnvelope,
     next_retry_at: u64,
     retry_interval_ms: u64,
-    /// `None` = karşı taraf onaylayana kadar SÜRESİZ (Text/Edit/Delete/
-    /// HistorySyncRequest — kullanıcının açıkça istediği davranış).
+    /// `None` = karşı taraf onaylayana kadar (bkz. `MAX_UNCONFIRMED_AGE_MS`
+    /// dolana kadar) tekrar dener (Text/Edit/Delete/HistorySyncRequest —
+    /// kullanıcının açıkça istediği davranış, "sayı" bazında bir üst
+    /// sınır yok ama "yaş" bazında var, bkz. o sabitin dokümantasyonu).
     /// `Some(n)` = en fazla `n` kez daha denenir, sonra sessizce vazgeçilir.
     /// SADECE `Ack` paketleri için kullanılır: `Ack`'in kendisi
     /// AYRICA onaylanmıyor (bkz. packet.rs notu — sonsuz "onayı onayla"
     /// döngüsü riski), bu yüzden süresiz deneyemez; ama tek seferlik
     /// fire-and-forget de yetersizdi — bir Ack ağda kaybolursa (aynı
     /// güvenilmezlik, mesajların kendisini neden etkiliyorsa), gönderen
-    /// taraf teslimatı ASLA öğrenemez ve orijinal mesajı SÜRESİZ yeniden
+    /// taraf teslimatı ASLA öğrenemez ve orijinal mesajı yeniden
     /// göndermeye devam eder; alıcı taraf ise her seferinde AYNI (artık
     /// kendi ratchet'inde tüketilmiş) mesaj numarasını çözmeye çalışıp
     /// sürekli "Decryption failed"/"skipped-key cache'te yok" hatası
@@ -354,6 +375,8 @@ struct PendingConfirmation {
     /// göndermeye kıyasla teslimat olasılığını ciddi ölçüde artırırken
     /// sonsuz döngü riskini de önler.
     retries_remaining: Option<u32>,
+    /// İlk gönderim denemesinin zamanı — bkz. `MAX_UNCONFIRMED_AGE_MS`.
+    first_sent_at: u64,
 }
 
 struct P2PCore {
@@ -455,12 +478,17 @@ struct P2PCore {
     /// `Message::Response` olayını doğru `DownloadState`'e yönlendirmek
     /// için (bkz. poll_events `FileChunks` kolu).
     download_request_ids: HashMap<request_response::OutboundRequestId, String>,
-    /// `poll_events`'in senkron döndürdüğü `Vec<String>`'e eklenecek dosya
-    /// eki olayları (`file_progress`/`file_complete`/`file_failed`) —
-    /// `FileChunks` ağ olayları `poll_events` içindeki `RUNTIME.block_on`
-    /// bloğunda üretildiği için, o bloğun DIŞINDAKİ `results` vektörüne
-    /// doğrudan erişemiyor; burada biriktirilip döngü sonunda `results`'a
-    /// taşınır (bkz. `pending_envelopes`'in retry kuyruğuyla aynı desen).
+    /// `poll_events`'in senkron döndürdüğü `Vec<String>`'e eklenecek,
+    /// `poll_events`'in kendi gövdesi DIŞINDAKİ yerlerden (ör. dosya eki
+    /// `file_progress`/`file_complete`/`file_failed` olayları VE artık
+    /// `retry_unconfirmed_messages`'ın azami yaş aşımında ürettiği
+    /// "status":"error" olayı) üretilen olaylar — isim tarihsel olarak
+    /// "attachment" ama artık genel bir "ertelenmiş olay" kuyruğu. Dosya
+    /// eki olayları özelinde: `FileChunks` ağ olayları `poll_events`
+    /// içindeki `RUNTIME.block_on` bloğunda üretildiği için, o bloğun
+    /// DIŞINDAKİ `results` vektörüne doğrudan erişemiyor; burada
+    /// biriktirilip döngü sonunda `results`'a taşınır (bkz.
+    /// `pending_envelopes`'in retry kuyruğuyla aynı desen).
     attachment_events: Vec<String>,
     /// Spec dışı, kullanıcı tarafından istenen güvenilir teslim: key =
     /// gönderilen paketin KENDİ `message_id`'si (Text/Edit/Delete/
@@ -1576,12 +1604,19 @@ impl P2PCore {
         // kendisi onaylanmıyor (sonsuz döngü riski), grup mesajlarının
         // N-yönlü fan-out'u bu mekanizmayı karmaşıklaştırırdı (bilinen
         // sınır, ileride genişletilebilir).
+        // `FileOffer` de dahil: bu paket kaybolursa (aynı ağ
+        // güvenilmezliği, bkz. dosya başı not), alıcı bir dosya
+        // teklif edildiğini HİÇBİR ZAMAN öğrenemez ve ek balonu hiç
+        // görünmez — dosya parça transferinin (request_response,
+        // attachments.rs) KENDİ güvenilirliği (chunk-seviyeli yeniden
+        // deneme) bu METADATA mesajını kapsamıyordu, ayrı bir sorun.
         let needs_delivery_confirmation = matches!(
             content,
             MessageContent::Text { group_id: None, .. }
                 | MessageContent::Edit { .. }
                 | MessageContent::Delete { .. }
                 | MessageContent::HistorySyncRequest { .. }
+                | MessageContent::FileOffer { .. }
         );
         // Ack, kendisi ONAYLANMASA da (bkz. packet.rs notu — sonsuz döngü
         // riski) artık SINIRLI sayıda yeniden dener (bkz.
@@ -1772,6 +1807,7 @@ impl P2PCore {
                 serde_json::json!({"type": "history_sync", "peer": peer_fp, "messages": flipped})
             }
             MessageContent::FileOffer { group_id, file_id, file_name, mime_type, total_size, file_key, sha256_hex, preview_jpeg } => {
+                self.send_ack(&peer_fp, &message_id);
                 self.receive_file_offer(&peer_fp, group_id, &file_id, &file_name, &mime_type, total_size, &file_key, &sha256_hex, &preview_jpeg)
             }
             MessageContent::Ack { target_message_id } => {
@@ -3014,6 +3050,7 @@ impl P2PCore {
             next_retry_at: now + ACK_RETRY_INITIAL_MS,
             retry_interval_ms: ACK_RETRY_INITIAL_MS,
             retries_remaining,
+            first_sent_at: now,
         });
     }
 
@@ -3028,15 +3065,34 @@ impl P2PCore {
             .map(|(id, _)| id.clone())
             .collect();
         for message_id in due_ids {
-            let (peer_fp, envelope, retries_remaining) = match self.awaiting_confirmation.get(&message_id) {
-                Some(p) => (p.peer_device_fingerprint.clone(), p.envelope.clone(), p.retries_remaining),
+            let (peer_fp, envelope, retries_remaining, first_sent_at) = match self.awaiting_confirmation.get(&message_id) {
+                Some(p) => (p.peer_device_fingerprint.clone(), p.envelope.clone(), p.retries_remaining, p.first_sent_at),
                 None => continue,
             };
+            // KRİTİK (bkz. `MAX_UNCONFIRMED_AGE_MS` dokümantasyonu): bu yaşı
+            // aşan bir paket, karşı tarafın ratchet'i muhtemelen bir DH/KEM
+            // rotasyonu yaşadığı için ARTIK KRİPTOGRAFİK OLARAK ÇÖZÜLEMEZ —
+            // yeniden göndermeye devam etmek sadece alıcıya sonsuza dek
+            // "Decryption failed" ürettirir. Vazgeç, "Failed" olarak
+            // işaretle (Text/Edit/Delete/HistorySyncRequest — kullanıcı
+            // isterse manuel olarak yeni bir mesaj gönderebilir).
+            if now.saturating_sub(first_sent_at) > MAX_UNCONFIRMED_AGE_MS {
+                self.awaiting_confirmation.remove(&message_id);
+                if let NetworkEnvelope::Message(m) = &envelope {
+                    self.message_status.insert(m.header.message_id.clone(), MessageSendStatus::Failed);
+                    self.attachment_events.push(serde_json::json!({
+                        "type": "status", "peer": peer_fp,
+                        "message_id": m.header.message_id, "status": "error"
+                    }).to_string());
+                }
+                error!("Paket {} onaylanmadan azami yaşı ({} ms) aştı, vazgeçiliyor (muhtemelen ratchet rotasyonu geçti)", message_id, MAX_UNCONFIRMED_AGE_MS);
+                continue;
+            }
             // bkz. `PendingConfirmation.retries_remaining` dokümantasyonu —
             // SINIRLI girdiler (Ack) tükendiğinde sessizce bırakılır, ARTIK
             // yeniden gönderilmez. Sınırsız girdiler (Text/Edit/Delete/
             // HistorySyncRequest) için `retries_remaining` hep `None`,
-            // buraya hiç girmez.
+            // buraya hiç girmez (ama yukarıdaki yaş sınırına hâlâ tabidir).
             if retries_remaining == Some(0) {
                 self.awaiting_confirmation.remove(&message_id);
                 continue;
