@@ -315,6 +315,42 @@ present, unchanged) and the manual relay-address field remain the
 fallback. Silent and safe either way: if UPnP mapping fails, nothing about
 today's behavior changes.
 
+### Self-healing reconnection (fourth audit round fix)
+
+All the machinery above establishes connections, but until this round
+nothing *re-established* them. A dropped connection — from a network-type
+change (Wi-Fi ↔ mobile data), the app being backgrounded and killed, or the
+peer going briefly offline — was only recovered by mDNS, which works only on
+the same LAN. `ConnectionClosed` and dial-failure events were merely logged;
+nothing re-dialed, and a paired contact on a different network could get
+stuck disconnected until the user manually re-scanned a QR code. This made
+the app feel fragile across real-world usage (different networks, moving
+between Wi-Fi and cellular, phones sleeping).
+
+Now the app is self-healing:
+- **Persistent per-device address hints.** The last address that worked for
+  each contact device is remembered (in a `device_addrs` table), set both at
+  pairing time (the QR/manual rendezvous address) and refreshed to the real
+  connected address every time a packet actually arrives from that peer. This
+  survives app restarts, so reconnection works even after the process is
+  killed and even across networks (unlike the previous in-memory-only,
+  session-scoped state).
+- **A periodic reconnect sweep** (every ≤15 s, piggybacked on the existing
+  1 s poll loop) re-dials every known, active contact device that has an
+  address hint but no live connection — going through the same
+  direct + relay + hole-punch paths as a first connection. Any disconnect
+  now heals automatically within seconds.
+- **Immediate reconnect on intent.** Opening a chat or sending a message
+  triggers an instant reconnect attempt for that peer rather than waiting for
+  the next sweep, so the common case feels immediate.
+
+Structural limitation (unchanged, and honestly noted): if a peer's address
+changes completely (new public IP, no UPnP mapping, no shared relay), direct
+reconnection still can't find them until the address is refreshed some other
+way (mDNS on a shared LAN, a new QR, or relay discovery) — this is inherent
+to P2P without a central rendezvous server. The sweep keeps trying, so
+recovery is automatic the moment any working path reappears.
+
 ### Full traceability resistance (Tor/onion services) — considered, not implemented
 
 A natural follow-up question after the fixes above: can this app be made
@@ -417,10 +453,31 @@ hardening the existing protocol:
   memory only; it can't reach OS-level copies (swap, core dumps) or
   anything the JVM/Kotlin side temporarily holds while decrypting the
   Keystore-wrapped bundle before handing it to Rust.
+- **No device backup (fourth audit round fix).** `android:allowBackup` was
+  `true`, which made the app's private data eligible for Google auto-backup
+  and `adb backup`. While the secret-key blobs are Keystore-wrapped (and
+  Keystore keys are device-bound, so useless off-device), other on-disk data
+  is more exposed: the plaintext decrypted attachment cache
+  (`attachments/plain_cache/`), the plaintext `libp2p_identity.key`, and
+  plaintext metadata columns in SQLite (contact identities, group
+  membership, file names). Backup is now fully disabled (`allowBackup=false`,
+  `fullBackupContent=false`, and a `data_extraction_rules.xml` that excludes
+  everything from both cloud-backup and device-transfer on API 31+).
+- **Recovery file uses Argon2id (fourth audit round fix).** The recovery
+  export (which contains *all* long-term secret keys — Ed25519, ML-DSA,
+  X25519, ML-KEM) previously derived its file-encryption key with
+  HKDF-SHA256(passphrase). HKDF is a single HMAC — essentially free to
+  guess — so if that file ever leaked, a user-chosen passphrase could be
+  brute-forced offline at enormous speed, undoing all the post-quantum work
+  for the one artifact holding the raw keys. It now uses **Argon2id**
+  (memory-hard, OWASP baseline parameters: 19 MiB / 2 iterations / 1 lane),
+  with the algorithm and parameters stored in the file so a future import
+  path can reproduce the key. (Import isn't wired up yet — export is
+  currently the only recovery path.)
 
 ---
 
-## 7. Summary of all three audit rounds
+## 7. Summary of all four audit rounds
 
 | Gap found | Status |
 |---|---|
@@ -433,6 +490,11 @@ hardening the existing protocol:
 | `zeroize` dependency unused (in-memory key erasure) | **Fixed** — upstream crate features + explicit zeroize-on-drop for ratchet/session/message keys and the JNI secret-key bundle |
 | No cross-network (NAT) connectivity — spec called for it, never implemented | **Fixed** — Circuit Relay v2 (open, Node-mode devices) + DCUtR hole-punching + organic/QR/manual relay discovery |
 | Cross-network pairing required someone to operate a relay/VPS | **Fixed** — automatic, serverless UPnP port mapping preferred in `get_node_address()` when available; falls back to relay/manual address otherwise |
+| Message header `sender_identity_id` was never bound to the authenticated device — a paired contact could spoof another identity's group messages / overwrite another contact's avatar | **Fixed** — `receive_message`/`process_handshake_init` now reject any packet whose header identity doesn't match the device's TOFU-recorded identity |
+| Handshake had no replay protection; a replayed `HandshakeInit` could reset a live ratchet (conversation-DoS) | **Fixed** — freshness window (±10 min) + content-based dedup of exact replays; genuine re-pairing (fresh keys) still accepted regardless of clock skew |
+| `allowBackup=true` exposed private data to cloud/adb backup | **Fixed** — backup fully disabled |
+| Recovery file protected only by fast HKDF | **Fixed** — Argon2id (memory-hard) |
+| No reconnection after a drop (network-type change / app restart / peer briefly offline) — only mDNS (same-LAN) recovered; `ConnectionClosed`/dial errors were only logged | **Fixed** — persistent per-device address hints + a self-healing reconnect sweep (≤15 s) + immediate reconnect on chat-open/send; see §5 |
 | mDNS persistent PeerId on LAN | Known limitation, deliberately not changed (would reintroduce a previously-fixed reconnection bug) |
 | Kademlia DHT participation reveals IP to other DHT peers | Known limitation, structural to any DHT-based P2P design; relaying mitigates it for message traffic but not DHT participation itself |
 | Zero-config guarantee that any two strangers can always connect | Not fully achievable without *some* reachable point in the network (structural to decentralized P2P, not fixable by protocol changes alone) — mitigated, not eliminated, by the manual relay-address field |
