@@ -367,6 +367,30 @@ const PENDING_ENVELOPE_TIMEOUT_MS: u64 = 20_000;
 /// görülen/en güvenilir" ölçeğiyle aynı (bkz. o alanın dokümantasyonu).
 const MAX_KNOWN_RELAYS: usize = 10;
 
+/// Spec dışı, kullanıcı isteği (bkz. SECURITY.md "Cross-network
+/// connectivity" notu): manuel röle adresi girişi hâlâ Ayarlar'da mevcut
+/// ve kaldırılmadı, ama sıfırdan hiç ortak röle geçmişi olmayan iki
+/// YABANCI'nın (ör. farklı ağlardaki iki yeni kullanıcı) hiçbir elle
+/// yapılandırma OLMADAN eşleşebilmesi için burada, uygulamaya GÖMÜLÜ
+/// varsayılan bir bootstrap röle listesi tutuluyor — tıpkı IPFS/BitTorrent
+/// istemcilerinin gömülü varsayılan bootstrap node'ları gibi. `start_network`
+/// içinde, her biri Ayarlar'daki manuel ekleme ile AYNI fonksiyon
+/// (`add_known_relay_address`) ile eklenir.
+///
+/// KURULUM NOTU: bu liste kasıtlı olarak BOŞ başlıyor — buraya rastgele/
+/// var olmayan bir adres koymak sessizce başarısız dial denemelerine yol
+/// açar. Kendi (veya güvendiğiniz birinin) Node modu açık, herkese açık bir
+/// IP'de çalışan bir Typoon kopyasını kurduktan sonra, o cihazın
+/// `getNodeAddress()`'inin döndürdüğü tam adresi (ör.
+/// "/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo...") buraya bir dize olarak ekleyin.
+/// Yeniden derleme gerektirir — kullanıcılar yine de Ayarlar'dan kendi
+/// bildikleri ek röleleri manuel olarak eklemeye devam edebilir, bu liste
+/// onun YERİNE değil, İLK KURULUMDA hiç adres bilmeyen biri için bir
+/// başlangıç noktası.
+const DEFAULT_BOOTSTRAP_RELAYS: &[&str] = &[
+    // "/ip4/1.2.3.4/tcp/4001/p2p/12D3KooWExampleReplaceWithRealAddress",
+];
+
 /// Spec dışı, kullanıcı tarafından istenen güvenilir teslim: `Text`
 /// (grup DIŞI)/`Edit`/`Delete`/`HistorySyncRequest` içerikli paketler,
 /// karşı taraftan bir `Ack` (veya HistorySyncRequest için doğrudan
@@ -563,6 +587,13 @@ struct P2PCore {
     /// edilmemiş "~10 node adresi paylaşımı" fikrinin röle'ye özelleşmiş
     /// hâli. En fazla `MAX_KNOWN_RELAYS` kadar tutulur.
     known_relay_peers: HashMap<PeerId, Multiaddr>,
+    /// Spec dışı, hata ayıklama düzeltmesi: `initiate_handshake_with`'in
+    /// bir peer için en son kullanıcıya BİLDİRİLMİŞ kalıcı hatası (ör.
+    /// "Bad Kyber public key length" — bozuk/uyumsuz anahtar verisi).
+    /// Aynı hata tekrar tekrar (her mesaj/typing-indicator/vb. denemesinde)
+    /// sessizce oluşmaya devam etse bile kullanıcıya SADECE bir kez
+    /// bildirilsin diye — bkz. o fonksiyonun dokümantasyonu.
+    handshake_failure_notified: HashMap<String, String>,
     /// Devam eden indirmeler: key = file_id (bkz. `DownloadState`).
     active_downloads: HashMap<String, DownloadState>,
     /// `request_response::send_request`'in döndürdüğü `OutboundRequestId`'yi
@@ -631,6 +662,7 @@ impl P2PCore {
             device_to_peer_id: HashMap::new(),
             peer_id_to_addr: HashMap::new(),
             known_relay_peers: HashMap::new(),
+            handshake_failure_notified: HashMap::new(),
             active_downloads: HashMap::new(),
             download_request_ids: HashMap::new(),
             attachment_events: Vec::new(),
@@ -1029,6 +1061,21 @@ impl P2PCore {
             known_relays,
         };
         packet.to_cbor()
+    }
+
+    /// Spec dışı, kullanıcı isteği: `process_manual_entry`'nin beklediği
+    /// `identity_id|device_fingerprint|device_name|rendezvous_node`
+    /// formatını (bkz. o fonksiyonun dokümantasyonu) burada, TEK bir yerde
+    /// üretir — Kotlin tarafında elle string birleştirmek yerine (format
+    /// driftine karşı; ayrıştırıcı ve üretici aynı formatı Rust'ta paylaşır).
+    /// UI'de "Kodumu kopyala" düğmesi bunu panoya kopyalar, karşı taraf
+    /// "Manuel Ekle" dialoguna yapıştırır — QR taranamayan durumlar için
+    /// (ör. ekranlar fiziksel olarak yan yana değil).
+    fn generate_manual_add_code(&self, rendezvous_node: &str) -> Result<String, String> {
+        let own_fp = self.get_active_own_device_fingerprint()?;
+        let identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
+        let device_name = self.own_devices.get(&own_fp).map(|d| d.device_name.clone()).unwrap_or_default();
+        Ok(format!("{}|{}|{}|{}", identity_id, own_fp, device_name, rendezvous_node))
     }
 
     /// Taranan bir QR'ı (veya manuel girilen aynı formattaki metni, spec
@@ -1708,10 +1755,39 @@ impl P2PCore {
         let peer = self.known_remote_devices.get(peer_device_fingerprint).cloned()
             .ok_or("Unknown peer device; complete key exchange first")?;
 
-        let (state, kyber_ct, own_kyber_pub) = DeviceRatchetState::initiate(
+        // Spec dışı, hata ayıklama düzeltmesi: `DeviceRatchetState::initiate`
+        // burada "Bad Kyber/X25519 public key length" ile başarısız olursa
+        // bu KALICI bir hatadır (bozuk/uyumsuz anahtar verisi — ör. bu kayıt
+        // Category 3->5 (ML-KEM-768->1024) geçişinden ÖNCE, ya da karşı
+        // taraf hâlâ eski bir uygulama sürümüyle eşleşmişken oluşmuş) —
+        // network sorunlarının aksine yeniden denemekle ASLA düzelmez.
+        // Önceden bu, `send_message_content`'in HER çağrısında (mesaj,
+        // typing indicator, profil güncellemesi, geçmiş senkronu — hepsi
+        // aynı yoldan geçiyor) sessizce logcat'e yazılıyor, kullanıcı
+        // arayüzüne HİÇ yansımıyordu — "bağlanamıyorum" şikayetine hiçbir
+        // ipucu vermiyordu. Artık bu peer için İLK KEZ görülüyorsa (veya
+        // hata metni değiştiyse) `attachment_events` üzerinden bir kerelik
+        // bir olay olarak bildiriliyor (bkz. `handshake_failure_notified`).
+        let (state, kyber_ct, own_kyber_pub) = match DeviceRatchetState::initiate(
             &peer.kem_pubkey_x25519,
             &peer.kem_pubkey_mlkem,
-        )?;
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                if self.handshake_failure_notified.get(peer_device_fingerprint) != Some(&e) {
+                    self.handshake_failure_notified.insert(peer_device_fingerprint.to_string(), e.clone());
+                    self.attachment_events.push(serde_json::json!({
+                        "type": "handshake_failed", "peer": peer_device_fingerprint, "error": e
+                    }).to_string());
+                }
+                return Err(e);
+            }
+        };
+        // El sıkışma bu turda başarıyla kuruldu — daha önce bu peer için
+        // bildirilmiş kalıcı bir hata varsa artık geçersiz, temizle (ör.
+        // kişi silinip yeniden eşleştirildi ve bu sefer anahtar uzunluğu
+        // doğru).
+        self.handshake_failure_notified.remove(peer_device_fingerprint);
 
         // KRİTİK: `state.own_x25519_secret`, `DeviceRatchetState::initiate()`
         // içinde ÜRETİLEN TAZE EPHEMERAL secret'tir ve DH hesaplaması zaten
@@ -3626,6 +3702,14 @@ impl P2PCore {
         }
 
         self.swarm = Some(swarm);
+
+        // bkz. `DEFAULT_BOOTSTRAP_RELAYS` dokümantasyonu — boşsa no-op.
+        for addr in DEFAULT_BOOTSTRAP_RELAYS {
+            if let Err(e) = self.add_known_relay_address(addr) {
+                error!("Varsayılan bootstrap röle eklenemedi ({}): {}", addr, e);
+            }
+        }
+
         Ok(peer_id.to_string())
     }
 
@@ -4813,6 +4897,21 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_generateQrPacket<'local>(mu
         Ok(Err(e)) => { error!("generate_qr_packet failed: {}", e); env.new_byte_array(0).unwrap().into_raw() }
         Err(e) => { error!("generate_qr_packet panicked: {}", e); env.new_byte_array(0).unwrap().into_raw() }
     }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_getManualAddCode<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, rendezvous_node: JString<'local>) -> jstring {
+    let node: String = env.get_string(&rendezvous_node).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let core = core_lock();
+        core.generate_manual_add_code(&node)
+    });
+    let out = match result {
+        Ok(Ok(code)) => code,
+        Ok(Err(e)) => { error!("generate_manual_add_code failed: {}", e); String::new() }
+        Err(e) => { error!("generate_manual_add_code panicked: {}", e); String::new() }
+    };
+    env.new_string(out).unwrap().into_raw()
 }
 
 #[no_mangle]
