@@ -67,6 +67,14 @@ object P2PLib {
     /** Bir karşı tarafla aktif bir ratchet oturumu (el sıkışma tamamlanmış)
      *  var mı — ChatActivity'nin "bağlanılıyor..." göstergesi için. */
     external fun hasActiveSession(peerDeviceFingerprint: String): Boolean
+    /** Spec dışı: GERÇEK canlı bağlantı durumu — `hasActiveSession`'ın
+     *  aksine (o, bir ratchet oturumu kuruldu mu diye bakar ve bir kez
+     *  kurulunca SÜRESİZ true kalır), bu, karşı taraf ŞU AN gerçekten
+     *  bağlı mı diye Swarm'ın kendi bağlantı defterine bakar. Sohbet
+     *  ekranındaki "Bağlı"/"Bağlanılıyor" durum yazısı için kullanılmalı —
+     *  "Bağlanılıyor..." banner'ı (ilk el sıkışma) hâlâ hasActiveSession
+     *  kullanır, bunlar farklı sorular. */
+    external fun isPeerConnected(peerDeviceFingerprint: String): Boolean
     /** Bir sohbet açıldığında el sıkışmayı proaktif olarak başlatır (zaten
      *  bir oturum varsa no-op). */
     external fun ensureHandshake(peerDeviceFingerprint: String)

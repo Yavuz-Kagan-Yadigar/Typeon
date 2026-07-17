@@ -205,6 +205,16 @@ struct DownloadState {
     bytes_done: u64,
     file_key: [u8; 32],
     enc_path: std::path::PathBuf,
+    /// Son parçanın alındığı an (hiç parça gelmediyse indirmenin
+    /// başladığı an) — bkz. `DOWNLOAD_STALL_TIMEOUT_MS` ve
+    /// `check_stalled_downloads`. Bu, TCP dial'ın hiç sonuçlanmadığı
+    /// (ne başarı ne açık bir hata — özellikle iki cihaz da NAT arkasında
+    /// olduğunda tipik bir durum) senaryoda `request_response`'un KENDİ
+    /// hiçbir olay üretmediği durumları yakalamak için gerekli — o
+    /// durumda libp2p katmanından ne bir yanıt ne de bir
+    /// OutboundFailure/timeout hiç gelmez, indirme aksi hâlde SÜRESİZ
+    /// "İndiriliyor" durumunda kalırdı.
+    last_progress_at: u64,
 }
 
 /// `poll_events`'in `RUNTIME.block_on` bloğu İÇİNDE (swarm borrow'u altında)
@@ -263,6 +273,16 @@ const PENDING_ENVELOPE_TIMEOUT_MS: u64 = 20_000;
 /// onaylayana kadar sürekli dene" istedi.
 const ACK_RETRY_INITIAL_MS: u64 = 5_000;
 const ACK_RETRY_MAX_MS: u64 = 120_000;
+
+/// bkz. `DownloadState.last_progress_at` dokümantasyonu — bir indirmenin,
+/// hiçbir libp2p-seviyeli olay (ne parça yanıtı, ne `OutboundFailure`)
+/// üretmeden bu kadar süre "sessiz" kalabileceği azami süre. Aşılırsa
+/// `check_stalled_downloads` indirmeyi başarısız sayar (kullanıcı manuel
+/// olarak tekrar deneyebilir) — aksi hâlde (özellikle iki cihaz da NAT
+/// arkasındayken, TCP dial'ın ne başarılı olup ne de temiz bir hatayla
+/// sonuçlanmadığı durumlarda) indirme SÜRESİZ "İndiriliyor" durumunda
+/// takılı kalabilirdi.
+const DOWNLOAD_STALL_TIMEOUT_MS: u64 = 45_000;
 
 /// Bkz. `P2PCore.awaiting_confirmation` dokümantasyonu.
 /// BİLİNEN SINIR: bu paket, belirli bir ratchet zincir adımına (`ck_send`
@@ -1262,6 +1282,24 @@ impl P2PCore {
     /// gizleyeceğini bilebilmesi için — bir ratchet oturumu var mı.
     fn has_active_session(&self, peer_device_fingerprint: &str) -> bool {
         self.ratchets.contains_key(peer_device_fingerprint)
+    }
+
+    /// Spec dışı: GERÇEK canlı bağlantı durumu — `has_active_session`'ın
+    /// aksine (o sadece "bir ratchet oturumu kuruldu mu" sorusuna cevap
+    /// verir, bir kez kurulunca SÜRESİZ true kalır, kriptografik bir
+    /// durumdur, ağ bağlantısından bağımsızdır), bu fonksiyon `Swarm`'ın
+    /// KENDİ canlı bağlantı defterine (`is_connected`) bakar. Önceden
+    /// ChatActivity'nin durum yazısı `has_active_session`'ı kullanıyordu —
+    /// bu yüzden karşı taraf aslında erişilemez olsa bile (ratchet bir kez
+    /// kurulduktan sonra) hep "Bağlı" gösteriyordu. `device_to_peer_id`'de
+    /// hiç kayıt yoksa (bu süreç boyunca o cihazdan hiç paket alınmadıysa)
+    /// `false` döner.
+    fn is_peer_connected(&self, peer_device_fingerprint: &str) -> bool {
+        let peer_id = match self.device_to_peer_id.get(peer_device_fingerprint) {
+            Some(pid) => pid,
+            None => return false,
+        };
+        self.swarm.as_ref().map(|s| s.is_connected(peer_id)).unwrap_or(false)
     }
 
     /// Spec dışı sağlamlaştırma: kullanıcı bir sohbeti AÇAR açmaz (henüz
@@ -2539,6 +2577,7 @@ impl P2PCore {
             bytes_done: 0,
             file_key,
             enc_path,
+            last_progress_at: current_time_ms(),
         });
         self.request_next_chunk(&file_id);
         Ok(())
@@ -2584,6 +2623,23 @@ impl P2PCore {
         self.attachment_events.push(serde_json::json!({"type": "file_failed", "file_id": file_id, "error": reason}).to_string());
     }
 
+    /// `poll_events`'ten her turda çağrılır — bkz. `DOWNLOAD_STALL_TIMEOUT_MS`
+    /// dokümantasyonu. Bir indirme, hiçbir ilerleme/başarısızlık olayı
+    /// üretmeden bu süreyi aşarsa (tipik olarak: TCP dial hiç sonuçlanmadı,
+    /// iki cihaz da NAT arkasında ve doğrudan erişilemez) başarısız
+    /// sayılır — kullanıcı buton hâlâ görünür durumda kalacağı için tekrar
+    /// deneyebilir, ama en azından UI SÜRESİZ "İndiriliyor" göstermez.
+    fn check_stalled_downloads(&mut self) {
+        let now = current_time_ms();
+        let stalled: Vec<String> = self.active_downloads.iter()
+            .filter(|(_, s)| now.saturating_sub(s.last_progress_at) > DOWNLOAD_STALL_TIMEOUT_MS)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for file_id in stalled {
+            self.fail_download(&file_id, "Bağlantı zaman aşımına uğradı — karşı taraf yanıt vermedi");
+        }
+    }
+
     /// `poll_events`'in `FileChunks` olay kolundan çağrılır — gelen bir
     /// parça yanıtını işler.
     fn handle_chunk_response(&mut self, file_id: &str, response: FileChunkResponse) {
@@ -2607,6 +2663,7 @@ impl P2PCore {
         if let Some(state) = self.active_downloads.get_mut(file_id) {
             state.bytes_done += plaintext_len as u64;
             state.next_chunk_index += 1;
+            state.last_progress_at = current_time_ms();
             // Her ~8 parçada bir (yaklaşık 2MB) veya son parçada ilerleme
             // bildir — her parçada bir olay üretmek (4GB/256KB = 16384 olay)
             // pollNetwork'ün döndürdüğü diziyi gereksiz yere şişirirdi.
@@ -3035,6 +3092,12 @@ impl P2PCore {
         // teslim garantisi burası; `pending_envelopes`'in aksine karşı
         // taraf onaylayana kadar süresiz devam eder.
         self.retry_unconfirmed_messages();
+        // bkz. `DOWNLOAD_STALL_TIMEOUT_MS` dokümantasyonu — bir sonraki
+        // turda drenaj edilecek `file_failed` olayları üretebilir (bkz.
+        // `fail_download`), bu turun `results`'ına DEĞİL (attachment_events
+        // zaten yukarıda drenaj edildi) — kabul edilebilir, en fazla 1
+        // saniyelik gecikme.
+        self.check_stalled_downloads();
 
         // bkz. `pending_envelopes` alanı dokümantasyonu: ilk bağlantıdan
         // sonraki ilk birkaç saniyede gönderilemeyen HERHANGİ bir zarfı
@@ -3603,6 +3666,19 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_hasActiveSession<'local>(mu
     let result = catch_panic(move || {
         let core = CORE.lock().unwrap();
         core.has_active_session(&fp)
+    });
+    result.unwrap_or(false) as jboolean
+}
+
+/// Spec dışı: GERÇEK canlı bağlantı durumu (bkz. `P2PCore::is_peer_connected`
+/// dokümantasyonu) — `hasActiveSession`'ın aksine bir kez kurulduktan sonra
+/// hep `true` kalmaz, `Swarm`'ın o anki bağlantı defterini yansıtır.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_isPeerConnected<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>) -> jboolean {
+    let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let core = CORE.lock().unwrap();
+        core.is_peer_connected(&fp)
     });
     result.unwrap_or(false) as jboolean
 }

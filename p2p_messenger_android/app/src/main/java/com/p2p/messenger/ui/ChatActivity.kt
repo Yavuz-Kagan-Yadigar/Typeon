@@ -86,34 +86,40 @@ class ChatActivity : AppCompatActivity() {
 
     private val sessionPollHandler = Handler(Looper.getMainLooper())
     /**
-     * Spec dışı: bağlantı durumu göstergesi — sadece üstteki "Bağlanılıyor"
-     * banner'ı için değil, artık action bar altyazısında (isim yanında)
-     * sürekli gösterilen bir durum metni için de kullanılıyor. Önceden bu
-     * runnable bağlantı kurulur kurulmaz KENDİNİ DURDURUYORDU (bir daha
-     * asla polling yapmıyordu) — bu, durumun sonradan değişmesi (ör. karşı
-     * cihaz kapandı) hâlinde hiç yansımamasına yol açardı. Artık sürekli
-     * (bağlıyken daha seyrek aralıkla) çalışmaya devam ediyor.
+     * Spec dışı: bağlantı durumu göstergesi — iki AYRI sorunun cevabını
+     * ayrı ayrı kontrol eder, çünkü bunlar farklı şeyler:
+     * - `hasActiveSession` (üstteki "Bağlanılıyor" banner'ı için): "bir
+     *   ratchet oturumu kuruldu mu" — kriptografik bir durum, bir kez
+     *   kurulunca SÜRESİZ true kalır (bağlantı kopsa bile geçerliliğini
+     *   korur — mesajlar artık onaylanana kadar yeniden denendiği için,
+     *   bkz. `awaiting_confirmation`, "bağlı değilsin" demek yanlış olurdu).
+     * - `isPeerConnected` (action bar altyazısındaki "Bağlı"/"Bağlanılıyor"
+     *   durum metni için): karşı taraf ŞU AN gerçekten bağlı mı — Swarm'ın
+     *   canlı bağlantı defterine bakar, bağlantı koparsa hemen "Bağlanılıyor"a
+     *   döner.
      *
-     * BİLİNEN SINIR: `hasActiveSession`, "bir ratchet oturumu kuruldu mu"
-     * sorusuna cevap verir — gerçek bir canlı bağlantı/kalp atışı
-     * (heartbeat) sinyali DEĞİLDİR. Yani "Bağlı" göstergesi, karşı cihaz
-     * o an kapalı/erişilemez olsa bile (oturum bir kez kurulduysa) öyle
-     * kalmaya devam edebilir — tam bir çevrimiçi/çevrimdışı takibi için
-     * ayrı bir heartbeat protokolü gerekir, bu kapsamın dışında.
+     * ÖNCEDEN İKİSİ İÇİN DE `hasActiveSession` kullanılıyordu — bu yüzden
+     * durum metni bir kez "Bağlı" olduktan sonra karşı cihaz gerçekten
+     * kapansa/erişilemez olsa bile hep "Bağlı" göstermeye devam ediyordu.
      */
     private val sessionPollRunnable = object : Runnable {
         override fun run() {
-            val connected = try {
+            val handshakeDone = try {
                 P2PLib.hasActiveSession(peerDeviceFingerprint)
             } catch (e: Exception) {
                 false
             }
-            connectingBanner.visibility = if (connected) View.GONE else View.VISIBLE
+            val liveConnected = try {
+                P2PLib.isPeerConnected(peerDeviceFingerprint)
+            } catch (e: Exception) {
+                false
+            }
+            connectingBanner.visibility = if (handshakeDone) View.GONE else View.VISIBLE
             supportActionBar?.subtitle = getString(
-                if (connected) R.string.lbl_status_online else R.string.msg_connecting
+                if (liveConnected) R.string.lbl_status_online else R.string.lbl_status_offline
             )
             sessionPollHandler.postDelayed(
-                this, if (connected) STEADY_STATE_POLL_INTERVAL_MS else SESSION_POLL_INTERVAL_MS
+                this, if (handshakeDone) STEADY_STATE_POLL_INTERVAL_MS else SESSION_POLL_INTERVAL_MS
             )
         }
     }
