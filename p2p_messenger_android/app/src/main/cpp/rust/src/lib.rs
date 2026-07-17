@@ -219,6 +219,8 @@ pub struct GroupSummary {
     pub founder_identity_id: String,
     pub is_founder: bool,
     pub member_identity_ids: Vec<String>,
+    /// bkz. `ContactSummary.avatar_hex` aynı hex-encode deseni.
+    pub avatar_hex: Option<String>,
 }
 
 /// Kotlin'e döndürülen, bir sohbetteki dosya eklerinin listesi (bkz.
@@ -594,7 +596,7 @@ impl P2PCore {
              CREATE TABLE IF NOT EXISTS contacts (contact_id TEXT PRIMARY KEY, display_name TEXT,
                 trusted_identity_id TEXT, known_devices_json TEXT, last_device_change INTEGER, avatar_jpeg BLOB);
              CREATE TABLE IF NOT EXISTS groups (group_id TEXT PRIMARY KEY, founder TEXT, name TEXT,
-                version INTEGER, members_json TEXT, created_at INTEGER);
+                version INTEGER, members_json TEXT, created_at INTEGER, avatar_jpeg BLOB);
              CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 peer_device_fingerprint TEXT NOT NULL,
@@ -654,6 +656,7 @@ impl P2PCore {
         let _ = conn.execute("ALTER TABLE files ADD COLUMN duration_ms INTEGER", []);
         let _ = conn.execute("ALTER TABLE identities ADD COLUMN avatar_jpeg BLOB", []);
         let _ = conn.execute("ALTER TABLE contacts ADD COLUMN avatar_jpeg BLOB", []);
+        let _ = conn.execute("ALTER TABLE groups ADD COLUMN avatar_jpeg BLOB", []);
         self.db = Some(conn);
         self.app_files_dir = Some(app_files_dir.to_string());
         let _ = std::fs::create_dir_all(format!("{}/attachments/plain_cache", app_files_dir));
@@ -1498,6 +1501,7 @@ impl P2PCore {
             founder_identity_id: g.founder_identity_id.clone(),
             is_founder: g.founder_identity_id == own_identity_id,
             member_identity_ids: g.member_identity_ids(),
+            avatar_hex: g.avatar_jpeg.as_ref().map(|a| hex::encode(a)),
         }).collect()
     }
 
@@ -2470,9 +2474,9 @@ impl P2PCore {
             Err(e) => { error!("Group members serileştirilemedi: {}", e); return; }
         };
         let _ = conn.execute(
-            "INSERT OR REPLACE INTO groups (group_id, founder, name, version, members_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![group.group_id, group.founder_identity_id, group.name, group.version, members_json, group.created_at as i64],
+            "INSERT OR REPLACE INTO groups (group_id, founder, name, version, members_json, created_at, avatar_jpeg)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![group.group_id, group.founder_identity_id, group.name, group.version, members_json, group.created_at as i64, group.avatar_jpeg],
         );
     }
 
@@ -2482,7 +2486,7 @@ impl P2PCore {
             None => return,
         };
         let mut stmt = match conn.prepare(
-            "SELECT group_id, founder, name, version, members_json, created_at FROM groups"
+            "SELECT group_id, founder, name, version, members_json, created_at, avatar_jpeg FROM groups"
         ) {
             Ok(s) => s,
             Err(_) => return,
@@ -2491,12 +2495,13 @@ impl P2PCore {
             Ok((
                 row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
                 row.get::<_, u32>(3)?, row.get::<_, String>(4)?, row.get::<_, i64>(5)?,
+                row.get::<_, Option<Vec<u8>>>(6)?,
             ))
         });
         let mut loaded = Vec::new();
         if let Ok(rows) = rows {
             for row in rows.flatten() {
-                let (group_id, founder, name, version, members_json, created_at) = row;
+                let (group_id, founder, name, version, members_json, created_at, avatar_jpeg) = row;
                 let members: Vec<group::GroupMember> = serde_json::from_str(&members_json).unwrap_or_default();
                 loaded.push(Group {
                     group_id,
@@ -2505,6 +2510,7 @@ impl P2PCore {
                     members,
                     created_at: created_at as u64,
                     version,
+                    avatar_jpeg,
                 });
             }
         }
@@ -2578,6 +2584,39 @@ impl P2PCore {
             self.persist_group(g);
         }
         for member_identity_id in remaining_targets {
+            if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id) {
+                let _ = self.publish_envelope(&peer_fp, &NetworkEnvelope::GroupUpdate(update.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Spec dışı: grup profil fotoğrafını ayarlar/kaldırır. `invite_to_group`/
+    /// `remove_from_group` ile AYNI imzalı `GroupUpdate` mekanizmasını
+    /// kullanır (`GroupChange::AvatarUpdate`) — "sadece kurucu değiştirebilir"
+    /// kısıtı zaten `validate_group_update`'in `NotFounder` kontrolünden
+    /// (hem burada gönderen tarafta hem de `process_group_update`'te alıcı
+    /// tarafında) geçer, ayrı bir yetki kontrolü icat edilmedi.
+    fn set_group_avatar(&mut self, group_id: &str, avatar_jpeg: Option<Vec<u8>>) -> Result<(), String> {
+        let own_fp = self.get_active_own_device_fingerprint()?;
+        let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
+        let group = self.groups.get(group_id).cloned_group()?;
+        if group.founder_identity_id != own_identity_id {
+            return Err("Sadece kurucu profil fotoğrafını değiştirebilir".to_string());
+        }
+        let new_version = group.version + 1;
+        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
+        let change = GroupChange::AvatarUpdate(avatar_jpeg);
+        let update = sign_group_update(group_id, new_version, &change, &group.name, &own_identity_id, &own_fp, own_keys)?;
+
+        if let Some(g) = self.groups.get_mut(group_id) {
+            apply_change(g, &change, new_version, current_time_ms());
+        }
+        if let Some(g) = self.groups.get(group_id) {
+            self.persist_group(g);
+        }
+        let targets = group.other_members(&own_identity_id);
+        for member_identity_id in targets {
             if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id) {
                 let _ = self.publish_envelope(&peer_fp, &NetworkEnvelope::GroupUpdate(update.clone()));
             }
@@ -4578,6 +4617,33 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_removeFromGroup<'local>(mut
         Ok(Err(e)) => { error!("remove_from_group failed: {}", e); false as jboolean }
         Err(e) => { error!("remove_from_group panicked: {}", e); false as jboolean }
     }
+}
+
+/// Grup profil fotoğrafını ayarlar/kaldırır — bkz. `P2PCore::set_group_avatar`.
+/// SADECE kurucu için başarılı olur, aksi halde "Error: ..." döner (bkz.
+/// Kotlin tarafının bunu göstermesi gereken bir hata olarak ele alması —
+/// `inviteToGroup`/`removeFromGroup`'un aksine burada dönüş `jboolean`
+/// DEĞİL `jstring`, çünkü "neden" başarısız olduğu kullanıcıya
+/// gösterilmeye değer bir bilgi.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_setGroupProfilePicture<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, avatar_jpeg: JByteArray<'local>) -> jstring {
+    let gid: String = env.get_string(&group_id).map(|s| s.into()).unwrap_or_default();
+    let avatar_vec: Option<Vec<u8>> = if avatar_jpeg.is_null() {
+        None
+    } else {
+        Some(jbytearray_to_vec(&mut env, &avatar_jpeg))
+    };
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = core_lock();
+        core.set_group_avatar(&gid, avatar_vec)
+    });
+    let out = match result {
+        Ok(Ok(())) => "OK".to_string(),
+        Ok(Err(e)) => { error!("set_group_avatar failed: {}", e); format!("Error: {}", e) }
+        Err(e) => { error!("set_group_avatar panicked: {}", e); format!("Error: {}", e) }
+    };
+    env.new_string(out).unwrap().into_raw()
 }
 
 #[no_mangle]

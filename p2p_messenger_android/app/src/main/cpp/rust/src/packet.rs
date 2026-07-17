@@ -92,6 +92,11 @@ pub enum GroupChange {
     Add(String),    // identity_id
     Remove(String), // identity_id
     Rename(String),
+    /// Spec disi: grup profil fotografi -- SADECE kurucu degistirebilir
+    /// (bu zaten `validate_group_update`'in `NotFounder` kontrolunden
+    /// GECER, ayri bir yetki mekanizmasi icat edilmedi). `None` = fotograf
+    /// kaldirildi.
+    AvatarUpdate(Option<Vec<u8>>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

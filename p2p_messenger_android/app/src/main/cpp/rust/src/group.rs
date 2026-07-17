@@ -27,6 +27,10 @@ pub struct Group {
     /// Üyelik listesi her değiştiğinde artar (spec 5.2) — eski/tekrarlanan
     /// GroupUpdate paketlerini reddetmek için kullanılır.
     pub version: u32,
+    /// Spec dışı: grup profil fotoğrafı — SADECE `GroupChange::AvatarUpdate`
+    /// ile (dolayısıyla SADECE kurucu tarafından) değişir.
+    #[serde(default)]
+    pub avatar_jpeg: Option<Vec<u8>>,
 }
 
 impl Group {
@@ -42,6 +46,7 @@ impl Group {
             }],
             created_at: now,
             version: 0,
+            avatar_jpeg: None,
         }
     }
 
@@ -133,6 +138,9 @@ pub fn apply_change(group: &mut Group, change: &GroupChange, new_version: u32, n
         }
         GroupChange::Rename(new_name) => {
             group.name = new_name.clone();
+        }
+        GroupChange::AvatarUpdate(avatar) => {
+            group.avatar_jpeg = avatar.clone();
         }
     }
     group.version = new_version;

@@ -135,6 +135,10 @@ object P2PLib {
     external fun inviteToGroup(groupId: String, identityId: String): Boolean
     external fun removeFromGroup(groupId: String, identityId: String): Boolean
     external fun sendGroupMessage(groupId: String, message: String): Boolean
+    /** Spec dışı: grup profil fotoğrafı — SADECE kurucu için başarılı olur
+     *  (bkz. Rust set_group_avatar). `avatarJpeg` null ise kaldırılır. Her
+     *  iki durumda da TÜM üyelere bir GroupUpdate yayılır. */
+    external fun setGroupProfilePicture(groupId: String, avatarJpeg: ByteArray?): String
 
     // --- Bölüm 1.8: Kurtarma dosyası ---
     external fun exportRecovery(passphrase: String): ByteArray
