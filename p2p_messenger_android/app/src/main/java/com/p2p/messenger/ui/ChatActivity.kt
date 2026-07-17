@@ -273,6 +273,13 @@ class ChatActivity : AppCompatActivity() {
         else -> SimpleChatAdapter.Status.PENDING
     }
 
+    private fun parseAttachmentStatus(status: String): SimpleChatAdapter.AttachmentStatus = when (status) {
+        "downloading" -> SimpleChatAdapter.AttachmentStatus.DOWNLOADING
+        "complete" -> SimpleChatAdapter.AttachmentStatus.COMPLETE
+        "failed" -> SimpleChatAdapter.AttachmentStatus.FAILED
+        else -> SimpleChatAdapter.AttachmentStatus.OFFERED
+    }
+
     private fun handleIncomingEvent(obj: JSONObject) {
         when (obj.optString("type")) {
             "message" -> {
@@ -845,30 +852,75 @@ class ChatActivity : AppCompatActivity() {
      * (karşı taraf farklı bir id ile gönderdi) — spec dışı bir sınırlama.
      */
     private fun loadHistoryIfAvailable() {
+        val textItems = mutableListOf<SimpleChatAdapter.Item>()
         val json = try {
             P2PLib.getMessageHistory(peerDeviceFingerprint, HISTORY_LOAD_LIMIT)
         } catch (e: Exception) {
-            return
+            null
         }
         val array = try {
-            JSONArray(json)
+            if (json != null) JSONArray(json) else null
         } catch (e: Exception) {
-            return
+            null
         }
-        for (i in 0 until array.length()) {
-            val obj = array.getJSONObject(i)
-            val direction = obj.optString("direction")
-            val text = obj.optString("text")
-            val timestamp = obj.optLong("timestamp", System.currentTimeMillis())
-            localMessages.add(
-                SimpleChatAdapter.Item(
-                    messageId = UUID.randomUUID().toString(),
-                    text = text,
-                    isMine = direction == "sent",
-                    timestamp = timestamp
+        if (array != null) {
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                val direction = obj.optString("direction")
+                val text = obj.optString("text")
+                val timestamp = obj.optLong("timestamp", System.currentTimeMillis())
+                textItems.add(
+                    SimpleChatAdapter.Item(
+                        messageId = UUID.randomUUID().toString(),
+                        text = text,
+                        isMine = direction == "sent",
+                        timestamp = timestamp
+                    )
                 )
-            )
+            }
         }
+        // Spec dışı: geçmişte gönderilmiş/alınmış dosya ekleri önceden hiç
+        // yeniden yüklenmiyordu (sadece metin mesajları) — artık
+        // `listAttachments` ile aynı anda çekilip zaman damgasına göre
+        // metin mesajlarıyla ARAYA SERPİŞTİRİLİYOR, tıpkı canlı sohbette
+        // olduğu gibi kronolojik sırada görünsünler diye.
+        val attachmentItems = mutableListOf<SimpleChatAdapter.Item>()
+        val attachmentsJson = try {
+            P2PLib.listAttachments(peerDeviceFingerprint)
+        } catch (e: Exception) {
+            null
+        }
+        val attachmentsArray = try {
+            if (attachmentsJson != null) JSONArray(attachmentsJson) else null
+        } catch (e: Exception) {
+            null
+        }
+        if (attachmentsArray != null) {
+            for (i in 0 until attachmentsArray.length()) {
+                val obj = attachmentsArray.getJSONObject(i)
+                val previewHex = obj.optString("preview_hex", "")
+                val previewJpeg = if (previewHex.isNotEmpty() && previewHex != "null") hexToBytes(previewHex) else null
+                attachmentItems.add(
+                    SimpleChatAdapter.Item(
+                        messageId = obj.optString("file_id"),
+                        text = "",
+                        isMine = obj.optString("direction") == "sent",
+                        timestamp = obj.optLong("created_at", System.currentTimeMillis()),
+                        attachment = SimpleChatAdapter.AttachmentInfo(
+                            fileId = obj.optString("file_id"),
+                            fileName = obj.optString("file_name"),
+                            mimeType = obj.optString("mime_type"),
+                            totalSize = obj.optLong("total_size"),
+                            status = parseAttachmentStatus(obj.optString("status")),
+                            bytesDone = obj.optLong("bytes_transferred"),
+                            previewJpeg = previewJpeg
+                        )
+                    )
+                )
+            }
+        }
+        val merged = (textItems + attachmentItems).sortedBy { it.timestamp }
+        localMessages.addAll(merged)
         if (localMessages.isNotEmpty()) {
             adapter.notifyItemRangeInserted(0, localMessages.size)
             recycler.scrollToPosition(localMessages.size - 1)

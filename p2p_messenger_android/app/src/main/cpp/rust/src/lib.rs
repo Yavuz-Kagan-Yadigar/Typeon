@@ -228,6 +228,11 @@ pub struct AttachmentSummary {
     pub direction: String, // "sent" | "received"
     pub status: String,    // "offered" | "downloading" | "complete" | "failed"
     pub bytes_transferred: u64,
+    pub created_at: u64,
+    /// `file_offer` poll olayındaki "preview_hex" ile AYNI biçim — Kotlin
+    /// tarafı geçmişi yeniden kurarken küçük resmi hemen gösterebilsin diye
+    /// (indirme beklemeden), bkz. `SimpleChatAdapter.AttachmentInfo`.
+    pub preview_hex: Option<String>,
 }
 
 /// Devam eden bir indirmenin bellek-içi durumu (bkz. `download_file`/
@@ -2948,21 +2953,37 @@ impl P2PCore {
             None => return Vec::new(),
         };
         let mut stmt = match conn.prepare(
-            "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred
+            "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred, created_at, preview_jpeg
              FROM files WHERE peer_device_fingerprint = ?1 ORDER BY created_at ASC"
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
         let rows = stmt.query_map(params![peer_device_fingerprint], |r| {
+            let preview: Option<Vec<u8>> = r.get(8)?;
+            let file_id: String = r.get(0)?;
+            let mut status: String = r.get(5)?;
+            // `active_downloads` süreç içi bellekte tutulur — süreç
+            // öldürülüp yeniden başladığında (ör. tam uygulama kapatma)
+            // DB'de "downloading" olarak kalmış ama artık HİÇBİR canlı
+            // indirme ilerlemesi almayacak (ve tıklandığında no-op olan,
+            // bkz. ChatActivity.onAttachmentClicked) kayıtlar bu şekilde
+            // sonsuza dek "İndiriliyor" görünürdü. Gerçekten devam eden bir
+            // indirmenin `active_downloads`'da karşılığı OLMALI — yoksa
+            // durum aslında "failed" (tekrar denenebilir) kabul edilir.
+            if status == "downloading" && !self.active_downloads.contains_key(&file_id) {
+                status = "failed".to_string();
+            }
             Ok(AttachmentSummary {
-                file_id: r.get(0)?,
+                file_id,
                 file_name: r.get(1)?,
                 mime_type: r.get(2)?,
                 total_size: r.get::<_, i64>(3)? as u64,
                 direction: r.get(4)?,
-                status: r.get(5)?,
+                status,
                 bytes_transferred: r.get::<_, i64>(6)? as u64,
+                created_at: r.get::<_, i64>(7)? as u64,
+                preview_hex: preview.map(|p| hex::encode(p)),
             })
         });
         rows.map(|it| it.flatten().collect()).unwrap_or_default()

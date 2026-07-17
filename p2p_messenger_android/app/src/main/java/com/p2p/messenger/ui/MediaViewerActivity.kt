@@ -1,8 +1,12 @@
 package com.p2p.messenger.ui
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.net.Uri
 import android.os.Bundle
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.widget.ImageView
 import android.widget.MediaController
@@ -30,7 +34,22 @@ class MediaViewerActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_URI = "uri"
         const val EXTRA_MIME_TYPE = "mime_type"
+        private const val MIN_SCALE = 1f
+        private const val MAX_SCALE = 6f
     }
+
+    // Bkz. `setupZoomableImage` — `ImageView.ScaleType.MATRIX` ile elle
+    // yönetilen pinch-zoom/pan durumu. `baseMatrix` ekrana tam oturmuş
+    // (fitCenter benzeri) hâli, `currentMatrix` kullanıcının o anki
+    // zoom/pan durumunu taşır.
+    private val baseMatrix = Matrix()
+    private val currentMatrix = Matrix()
+    private var currentScale = MIN_SCALE
+    private lateinit var scaleDetector: ScaleGestureDetector
+    private var lastTouchX = 0f
+    private var lastTouchY = 0f
+    private var activePointerId = -1
+    private var isDragging = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -85,13 +104,95 @@ class MediaViewerActivity : AppCompatActivity() {
                         Toast.makeText(this@MediaViewerActivity, R.string.error_attachment_open_failed, Toast.LENGTH_SHORT).show()
                         finish()
                     } else {
-                        findViewById<ImageView>(R.id.imgViewerImage).apply {
-                            visibility = View.VISIBLE
-                            setImageBitmap(bitmap)
-                        }
+                        val imageView = findViewById<ImageView>(R.id.imgViewerImage)
+                        imageView.visibility = View.VISIBLE
+                        setupZoomableImage(imageView, bitmap)
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Pinch-to-zoom + sürükleyerek gezinme (pan) — proje içinde Glide/Coil/
+     * PhotoView gibi bir görsel kütüphane yok, bu yüzden elle
+     * `ScaleGestureDetector` + `Matrix` ile uygulanıyor.
+     * `ImageView.scaleType` XML'de zaten `matrix` — `imageMatrix` her
+     * güncellemede manuel set edilir.
+     */
+    private fun setupZoomableImage(imageView: ImageView, bitmap: Bitmap) {
+        imageView.setImageBitmap(bitmap)
+        imageView.post {
+            val viewWidth = imageView.width.toFloat()
+            val viewHeight = imageView.height.toFloat()
+            if (viewWidth <= 0f || viewHeight <= 0f) return@post
+            val bmpWidth = bitmap.width.toFloat()
+            val bmpHeight = bitmap.height.toFloat()
+            val scale = minOf(viewWidth / bmpWidth, viewHeight / bmpHeight)
+            val dx = (viewWidth - bmpWidth * scale) / 2f
+            val dy = (viewHeight - bmpHeight * scale) / 2f
+            baseMatrix.reset()
+            baseMatrix.postScale(scale, scale)
+            baseMatrix.postTranslate(dx, dy)
+            currentMatrix.set(baseMatrix)
+            currentScale = MIN_SCALE
+            imageView.imageMatrix = currentMatrix
+        }
+
+        scaleDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                val newScale = (currentScale * detector.scaleFactor).coerceIn(MIN_SCALE, MAX_SCALE)
+                val factor = if (currentScale == 0f) 1f else newScale / currentScale
+                currentScale = newScale
+                currentMatrix.postScale(factor, factor, detector.focusX, detector.focusY)
+                imageView.imageMatrix = currentMatrix
+                return true
+            }
+        })
+
+        imageView.setOnTouchListener { _, event ->
+            scaleDetector.onTouchEvent(event)
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    lastTouchX = event.x
+                    lastTouchY = event.y
+                    activePointerId = event.getPointerId(0)
+                    isDragging = true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (isDragging && !scaleDetector.isInProgress && currentScale > MIN_SCALE) {
+                        val pointerIndex = event.findPointerIndex(activePointerId)
+                        if (pointerIndex != -1) {
+                            val x = event.getX(pointerIndex)
+                            val y = event.getY(pointerIndex)
+                            currentMatrix.postTranslate(x - lastTouchX, y - lastTouchY)
+                            imageView.imageMatrix = currentMatrix
+                            lastTouchX = x
+                            lastTouchY = y
+                        }
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    isDragging = false
+                    activePointerId = -1
+                    if (currentScale <= MIN_SCALE) {
+                        currentMatrix.set(baseMatrix)
+                        currentScale = MIN_SCALE
+                        imageView.imageMatrix = currentMatrix
+                    }
+                }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    val pointerIndex = event.actionIndex
+                    val pointerId = event.getPointerId(pointerIndex)
+                    if (pointerId == activePointerId) {
+                        val newPointerIndex = if (pointerIndex == 0) 1 else 0
+                        lastTouchX = event.getX(newPointerIndex)
+                        lastTouchY = event.getY(newPointerIndex)
+                        activePointerId = event.getPointerId(newPointerIndex)
+                    }
+                }
+            }
+            true
         }
     }
 }
