@@ -1,9 +1,9 @@
-# Security & Network Architecture
+# Typoon — Security & Network Architecture
 
 Plain-language summary of how this app protects messages, and how devices find
-and talk to each other. Written after a full security audit pass; the four
-fixes it produced are called out below alongside what was already correct and
-what is a known, accepted limitation.
+and talk to each other. Written after a full security audit pass (two rounds);
+the fixes each round produced are called out below alongside what was already
+correct and what remains a known, accepted limitation.
 
 ---
 
@@ -186,35 +186,63 @@ Built on [libp2p](https://libp2p.io/), with no central server or relay:
   This is defense in depth: even if something were wrong at the
   application layer, the transport itself isn't sending plaintext over the
   wire.
-- **Message delivery — gossipsub.** Once a message is ratchet-encrypted, it's
-  published to a gossipsub topic named after the *recipient's device
-  fingerprint* (`p2p_msg_<fingerprint>`), and only that device is meaningfully
-  able to make sense of it.
+- **Message delivery — gossipsub.** Encrypted messages are published to a
+  gossipsub topic that the recipient is subscribed to. See "Topic
+  pseudonymization" below for how that topic name is chosen.
 - **Peer metadata — identify.** Standard libp2p peer-info exchange (what
   protocols/addresses a peer supports), feeding discovered addresses into
   Kademlia.
 
-### What this design does *not* hide (accepted, known limitations)
+### Topic pseudonymization (second audit round fix)
 
-Being end-to-end encrypted is not the same as being untraceable. These are
-known properties of the current design that were reviewed in this audit and
-deliberately left as-is (out of scope for "encrypt the messages" — they'd
-require a substantially different transport/anonymity design, e.g. onion
-routing, to fix):
+The first audit round found that the gossipsub topic name was computed
+**directly from the recipient's device fingerprint** (`p2p_msg_<fingerprint>`).
+That fingerprint is exactly the value shown on someone's QR code / shared as
+their public identity — so anyone else participating in the swarm could watch
+which topics had traffic and directly read off *who* was receiving messages
+and *when*, even without being able to decrypt a single byte of content.
 
-- **Gossipsub topic names leak recipient metadata.** Because the topic name
-  is derived from the recipient's device fingerprint, anyone else
-  participating in that swarm can observe *that* messages are flowing to a
-  given fingerprint, and roughly when, even though they can't read the
-  contents. This is a traffic-analysis / metadata exposure, not a
-  confidentiality break.
+**Fix:** once two devices have completed a Double Ratchet handshake (see
+section 4), all further traffic between them — every ordinary message, edit,
+delete, read receipt, group update, typing indicator, everything — moves to a
+topic name derived from that session's `root_key` via HKDF
+(`HKDF-SHA256(root_key, "p2pmsg-v0.1-gossip-topic")`). This value is only
+computable by the two parties who share that ratchet's secret; an outside
+observer sees traffic on a topic that looks like random noise and cannot tie
+it back to either party's fingerprint. Because `root_key` changes on every
+30-minute hybrid rekey (section 4), **the topic itself rotates automatically
+on the same schedule** — even an observer who somehow linked one topic to a
+person loses that link at the next rotation.
+
+**Known residual limitation:** the very first contact between two people (the
+one-time `IdentityExchange`/`HandshakeInit` pairing exchange) still has to use
+the old fingerprint-based "mailbox" topic, because no shared secret exists
+yet to derive anything from — there is no way to bootstrap trust with a
+total stranger without *some* rendezvous point both sides can compute in
+advance. This is an inherent property of any system that supports
+introducing two parties who've never spoken before, not a bug specific to
+this app. Every subsequent message is protected by the rotating scheme above.
+
+### Other known network-level limitations (not addressed)
+
+Being end-to-end encrypted is not the same as being untraceable. These
+remain deliberately out of scope — closing them would require a
+substantially different transport/anonymity layer (e.g. onion routing over
+Tor/I2P), which is a separate, much larger undertaking than hardening the
+existing protocol:
+
 - **mDNS PeerId is persistent on the local network.** A device's libp2p
-  `PeerId` stays the same across restarts, so something else on the same LAN
-  segment can correlate "this PeerId showed up again" over time.
+  `PeerId` stays the same across restarts (this is itself a deliberate,
+  previously-fixed tradeoff — an earlier bug caused a *new random* PeerId
+  every launch, which broke reconnection entirely). The tradeoff: something
+  else on the same LAN segment can correlate "this PeerId showed up again"
+  over time. Rotating it would reintroduce the reconnection problem it was
+  built to fix, so this was reviewed and deliberately left as-is.
 - **Kademlia is routing-only.** It never carries message content, only helps
   peers find each other's network addresses — but participating in a public
   DHT inherently makes a node's IP address discoverable to other DHT
-  participants, which is true of any DHT-based P2P design.
+  participants, which is true of any DHT-based P2P design (IPFS, BitTorrent's
+  DHT, etc. all share this property).
 
 ---
 
@@ -228,18 +256,35 @@ routing, to fix):
   used through AES/GCM with a fresh IV on every operation. Keys never appear
   in JVM/Rust memory as raw exportable material — the Keystore performs the
   crypto operation and only returns results.
-- One known, currently unaddressed gap: the `zeroize` crate is a declared
-  dependency (intended to overwrite sensitive key/message material in memory
-  once it's no longer needed) but isn't actually used anywhere yet — ratchet
-  keys and message keys are today left for Rust's normal drop/deallocation
-  rather than being explicitly zeroed. This doesn't expose anything over the
-  network; it's a defense-in-depth gap against an attacker who can already
-  read process memory (e.g. via a separate device-compromise exploit), and
-  is worth closing in a future pass.
+- **In-memory key hygiene (second audit round fix).** The `zeroize` crate was
+  a declared dependency but wasn't actually wired up anywhere — sensitive key
+  material was left for Rust's normal drop/deallocation, which does not
+  overwrite memory, only frees it. This is now closed on two levels:
+  - The underlying crypto crates (`ml-kem`, `ml-dsa`, `x25519-dalek`,
+    `ed25519-dalek`) now build with their `zeroize` feature enabled, so every
+    long-term identity secret key and every per-session ratchet keypair is
+    automatically overwritten the moment it's dropped — handled by the
+    libraries themselves, not custom code.
+  - The values those libraries can't see — the Double Ratchet's `root_key`,
+    send/receive chain keys, cached skipped-message keys, each individual
+    message's derived symmetric key, and the raw secret-key bundle that
+    crosses the JNI boundary at startup — are explicitly zeroized on drop or
+    immediately after use.
+  - The struct carrying raw secret-key bytes across the JNI boundary
+    (`SecretKeyBundle`) also had its `Debug` derive removed, so a future
+    stray `error!("{:?}", ...)` can't accidentally print a private key to
+    the Android system log.
+
+  This doesn't expose anything over the network — it's defense-in-depth
+  against an attacker who can already read process memory (e.g. a separate
+  device-compromise exploit). Residual limitation: this covers Rust-owned
+  memory only; it can't reach OS-level copies (swap, core dumps) or
+  anything the JVM/Kotlin side temporarily holds while decrypting the
+  Keystore-wrapped bundle before handing it to Rust.
 
 ---
 
-## 7. Summary of this audit round
+## 7. Summary of both audit rounds
 
 | Gap found | Status |
 |---|---|
@@ -248,6 +293,7 @@ routing, to fix):
 | Device revocation flag existed but was never enforced | **Fixed** — real revocation + enforcement added |
 | IdentityExchange skipped the TOFU decision tree | **Fixed** — now runs `evaluate_sender_device` |
 | Category 3 PQ parameters (ML-KEM-768/ML-DSA-65) | **Upgraded** to Category 5 (ML-KEM-1024/ML-DSA-87) |
-| Gossipsub topic-per-fingerprint metadata leakage | Known limitation, not fixed (traffic analysis, not confidentiality) |
-| mDNS persistent PeerId on LAN | Known limitation, not fixed |
-| `zeroize` dependency unused (in-memory key erasure) | Known gap, not fixed this round |
+| Gossipsub topic-per-fingerprint metadata leakage | **Fixed** — topic now derived from ratchet `root_key`, rotates every 30 min; first-contact pairing still uses fingerprint (unavoidable bootstrap) |
+| `zeroize` dependency unused (in-memory key erasure) | **Fixed** — upstream crate features + explicit zeroize-on-drop for ratchet/session/message keys and the JNI secret-key bundle |
+| mDNS persistent PeerId on LAN | Known limitation, deliberately not changed (would reintroduce a previously-fixed reconnection bug) |
+| Kademlia DHT participation reveals IP to other DHT peers | Known limitation, structural to any DHT-based P2P design; would need an anonymity layer (Tor/I2P) to address |
