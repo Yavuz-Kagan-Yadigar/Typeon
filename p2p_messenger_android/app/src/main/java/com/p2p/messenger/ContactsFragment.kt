@@ -126,7 +126,7 @@ class ContactsFragment : Fragment() {
             null
         }
         if (qrBytes != null && qrBytes.isNotEmpty()) {
-            imgOwnQr.setImageBitmap(encodeBinaryAsQrBitmap(qrBytes, 400, 400))
+            imgOwnQr.setImageBitmap(encodeBinaryAsQrBitmap(qrBytes, 1200, 1200))
         }
     }
 

@@ -3,6 +3,10 @@ package com.p2p.messenger.service
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.*
 import androidx.core.app.NotificationCompat
 import com.p2p.messenger.P2PLib
@@ -56,6 +60,7 @@ class P2PService : Service() {
     }
 
     private var isRunning = false
+    private var wifiNetworkCallback: ConnectivityManager.NetworkCallback? = null
     private var handler: Handler = Handler(Looper.getMainLooper())
     private val pollRunnable = object : Runnable {
         override fun run() {
@@ -123,6 +128,10 @@ class P2PService : Service() {
 
         if (!isRunning) {
             isRunning = true
+            // bkz. `bindToWifiIfAvailable` dokümantasyonu — libp2p soketleri
+            // (özellikle UPnP arama) `startNetwork`'ten ÖNCE doğru arayüze
+            // (WiFi) bağlanabilsin diye burada, ağ başlamadan hemen önce.
+            bindToWifiIfAvailable()
             // Güvenlik ağı: sistem bu servisi MainActivity'den bağımsız
             // olarak yeniden başlatırsa (START_STICKY sonrası süreç
             // öldürülüp geri getirilirse), initDatabase VE secret key
@@ -161,6 +170,63 @@ class P2PService : Service() {
         super.onDestroy()
         isRunning = false
         handler.removeCallbacks(pollRunnable)
+        wifiNetworkCallback?.let {
+            try {
+                (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it)
+            } catch (e: Exception) {
+                // Zaten kayıtlı değilse (ör. WiFi hiç bağlanmadıysa) sessizce yok say.
+            }
+        }
+        wifiNetworkCallback = null
+    }
+
+    /**
+     * Spec dışı, hata ayıklama düzeltmesi: gerçek bir cihazda, router'da
+     * UPnP açık olmasına rağmen UPnP taraması hep "gateway bulunamadı"
+     * döndürdüğü rapor edildi. Kök sebep muhtemelen şu: Android telefonlar
+     * genelde WiFi'ye bağlıyken bile mobil veriyi arka planda AÇIK tutar —
+     * Rust tarafındaki UPnP arama soketi (igd_next crate'i) `0.0.0.0`'a
+     * bind olur, yani HANGİ arayüzden çıkacağını işletim sisteminin
+     * varsayılan yönlendirme tablosuna bırakır. Bu, WiFi yerine YANLIŞLIKLA
+     * mobil veri üzerinden gönderilebilir — router hiç görmez, "bulunamadı"
+     * sonucu WiFi UPnP'siyle hiç ilgisi olmadan ortaya çıkar (aynı sınıf
+     * karışıklık teorik olarak libp2p'nin diğer soketlerini de
+     * etkileyebilir).
+     *
+     * `ConnectivityManager.bindProcessToNetwork` bu süreçte AÇILAN TÜM yeni
+     * soketleri (Rust tarafındakiler dahil, aynı process'te çalıştıkları
+     * için) belirtilen ağa zorlar — WiFi varsa ona bağlanır, WiFi
+     * kaybolursa serbest bırakılır (mobil veriye doğal olarak döner, ör.
+     * hiç WiFi'si olmayan bir kullanıcı için).
+     */
+    private fun bindToWifiIfAvailable() {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        // Senkron: şu an zaten bağlı bir WiFi varsa hemen bağla — asenkron
+        // callback'i (aşağıda) beklemeden, startNetwork'ten önce hazır olsun.
+        val active = cm.activeNetwork
+        val activeCaps = active?.let { cm.getNetworkCapabilities(it) }
+        if (activeCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+            cm.bindProcessToNetwork(active)
+        }
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .build()
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                cm.bindProcessToNetwork(network)
+            }
+            override fun onLost(network: Network) {
+                cm.bindProcessToNetwork(null)
+            }
+        }
+        wifiNetworkCallback = callback
+        try {
+            cm.registerNetworkCallback(request, callback)
+        } catch (e: Exception) {
+            // Kayıt başarısız olursa (ör. çok eski/tuhaf bir cihaz) sessizce
+            // devam — süreç varsayılan sistem yönlendirmesini kullanır,
+            // bugünkünden daha kötü olmaz.
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

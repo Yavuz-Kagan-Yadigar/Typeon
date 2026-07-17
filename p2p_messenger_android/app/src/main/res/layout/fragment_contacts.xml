@@ -17,8 +17,8 @@
          buraya taşındı). -->
     <ImageView
         android:id="@+id/imgOwnQr"
-        android:layout_width="200dp"
-        android:layout_height="200dp"
+        android:layout_width="600dp"
+        android:layout_height="600dp"
         android:layout_gravity="center_horizontal"
         android:layout_marginTop="16dp"
         android:contentDescription="@string/action_show_qr" />
