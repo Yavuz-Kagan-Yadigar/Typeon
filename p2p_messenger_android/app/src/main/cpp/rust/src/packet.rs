@@ -99,6 +99,13 @@ pub struct GroupUpdate {
     pub group_id: String,
     pub new_version: u32,
     pub change: GroupChange,
+    /// Spec dışı: grubun GÜNCEL adı, her `GroupUpdate`'te taşınır (sadece
+    /// `Rename` değişikliklerinde değil). Sebep: bir üye ilk kez `Add` ile
+    /// eklendiğinde henüz yerel bir `Group` kaydı yoktur — bu alan
+    /// olmadan `process_group_update` boş bir isimle ("") bir grup
+    /// oluşturuyordu, bu da grup bildirimlerinde/ekranlarında kalıcı olarak
+    /// boş başlık göstermeye yol açıyordu (bkz. dosya sonu not).
+    pub group_name: String,
     /// founder_identity_id olmalı — alıcı taraf bunu doğrular.
     pub signed_by: String,
     /// Kurucunun hangi cihazı imzaladı.
@@ -174,6 +181,19 @@ pub enum MessageContent {
     Text { group_id: Option<String>, text: String },
     Edit { target_message_id: String, new_text: String },
     Delete { target_message_id: String },
+    /// Spec dışı: node modu KAPALI cihazlarda sohbet geçmişi hiç
+    /// arşivlenmediği için (bkz. lib.rs `archive_message`), o cihazlar için
+    /// sohbet ekranı her zaman boş başlıyordu. Karşı taraf (chat peer) node
+    /// modu açıksa zaten kendi tarafında bu konuşmanın her iki yönünü de
+    /// arşivlemiştir — bu istek, doğrudan o arşivden son `limit` mesajı
+    /// ister. Normal mesajlarla AYNI ratchet-şifreli kanaldan taşınır (yeni
+    /// bir libp2p bağlantı/protokolüne gerek yok), yani uçtan uca korunur.
+    HistorySyncRequest { limit: u32 },
+    /// `messages`: (direction, text, timestamp) üçlüleri, eskiden yeniye
+    /// sıralı — `direction` YANITLAYANIN bakış açısıyla ("sent"/"received")
+    /// taşınır; isteyen taraf bunu ters çevirmeli (bkz. lib.rs
+    /// receive_message HistorySyncResponse notu).
+    HistorySyncResponse { messages: Vec<(String, String, u64)> },
 }
 
 /// El sıkışma paketi — önceki `HandshakeInit` tasarımı; spec'te ayrı bir

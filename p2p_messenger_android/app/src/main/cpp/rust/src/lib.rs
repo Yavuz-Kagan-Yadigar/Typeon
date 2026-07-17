@@ -339,10 +339,34 @@ impl P2PCore {
                 encrypted_key BLOB NOT NULL,
                 nonce BLOB NOT NULL,
                 PRIMARY KEY (peer_device_fingerprint, message_number)
+             );
+             CREATE TABLE IF NOT EXISTS remote_devices (
+                device_fingerprint TEXT PRIMARY KEY,
+                identity_id TEXT NOT NULL,
+                sign_pk_ed25519 BLOB, sign_pk_mldsa BLOB, kem_pk_x25519 BLOB, kem_pk_mlkem BLOB,
+                device_name TEXT, is_active INTEGER, last_seen INTEGER
+             );
+             CREATE TABLE IF NOT EXISTS ratchet_states (
+                peer_device_fingerprint TEXT PRIMARY KEY,
+                encrypted_state BLOB NOT NULL,
+                nonce BLOB NOT NULL,
+                updated_at INTEGER NOT NULL
              );"
         )?;
         self.db = Some(conn);
         self.load_identity_from_db();
+        // Spec dışı düzeltme: `contacts`/`groups` tabloları önceden
+        // oluşturuluyor ama hiç yazılıp okunmuyordu — kişiler, gruplar ve
+        // bilinen uzak cihaz public key'leri sadece bellekteydi, her süreç
+        // yeniden başlatmasında (app güncellemesi dahil) kayboluyordu. Artık
+        // her mutasyon noktasında diske yazılıyor (bkz. persist_contact/
+        // persist_group/persist_remote_device) — burada açılışta geri
+        // yükleniyor. (Ratchet oturumları AYRI olarak, şifreleme anahtarı
+        // yüklendiğinde `setSkippedKeyEncryptionKey` içinde geri yüklenir —
+        // bkz. load_ratchet_states_from_db.)
+        self.load_contacts_from_db();
+        self.load_groups_from_db();
+        self.load_remote_devices_from_db();
         Ok(())
     }
 
@@ -716,7 +740,7 @@ impl P2PCore {
         }
 
         let now = current_time_ms();
-        self.known_remote_devices.insert(exchange.device_fingerprint.clone(), DeviceRecord {
+        let record = DeviceRecord {
             device_fingerprint: exchange.device_fingerprint.clone(),
             identity_id: exchange.identity_id.clone(),
             sign_pubkey_ed25519: exchange.sign_pubkey_ed25519.clone(),
@@ -726,7 +750,9 @@ impl P2PCore {
             device_name: exchange.device_name.clone(),
             is_active: true,
             last_seen: now,
-        });
+        };
+        self.persist_remote_device(&record);
+        self.known_remote_devices.insert(exchange.device_fingerprint.clone(), record);
 
         // Spec dışı, tek yönlü QR düzeltmesi: bu IdentityExchange, karşı
         // tarafın BİZİM QR'ımızı taramasından geliyor olabilir (biz hiç
@@ -798,6 +824,9 @@ impl P2PCore {
                     contact.add_device_unverified(device_fingerprint, now);
                 }
             }
+            if let Some(contact) = self.contacts.get(&contact_id) {
+                self.persist_contact(contact);
+            }
             return Ok(());
         }
 
@@ -805,8 +834,142 @@ impl P2PCore {
         let mut contact = Contact::new(contact_id.clone(), device_name, identity_id.clone());
         contact.add_device_unverified(device_fingerprint, now);
         self.identity_to_contact.insert(identity_id, contact_id.clone());
+        self.persist_contact(&contact);
         self.contacts.insert(contact_id, contact);
         Ok(())
+    }
+
+    /// bkz. dosya başı düzeltme notu: `contacts` tablosu önceden hiç
+    /// yazılmıyordu — kişi listesi süreç yeniden başladığında (app
+    /// güncellemesi dahil) kayboluyordu. Her mutasyon noktasından
+    /// (register_contact_from_pairing, evaluate_sender_device,
+    /// accept_pending_device_alert) çağrılır.
+    fn persist_contact(&self, contact: &Contact) {
+        let conn = match &self.db {
+            Some(c) => c,
+            None => return,
+        };
+        let known_devices_json = match serde_json::to_string(&contact.known_devices) {
+            Ok(j) => j,
+            Err(e) => { error!("Contact known_devices serileştirilemedi: {}", e); return; }
+        };
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO contacts (contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                contact.contact_id, contact.display_name, contact.trusted_identity_id,
+                known_devices_json, contact.last_device_change.map(|v| v as i64),
+            ],
+        );
+    }
+
+    /// Açılışta DB'de kayıtlı tüm kişileri `self.contacts`/
+    /// `self.identity_to_contact`'a geri yükler.
+    fn load_contacts_from_db(&mut self) {
+        let conn = match &self.db {
+            Some(c) => c,
+            None => return,
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change FROM contacts"
+        ) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+            ))
+        });
+        let mut loaded = Vec::new();
+        if let Ok(rows) = rows {
+            for row in rows.flatten() {
+                let (contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change) = row;
+                let known_devices: Vec<contact::KnownDevice> = serde_json::from_str(&known_devices_json).unwrap_or_default();
+                loaded.push(Contact {
+                    contact_id,
+                    display_name,
+                    trusted_identity_id,
+                    known_devices,
+                    last_device_change: last_device_change.map(|v| v as u64),
+                });
+            }
+        }
+        for contact in loaded {
+            self.identity_to_contact.insert(contact.trusted_identity_id.clone(), contact.contact_id.clone());
+            self.contacts.insert(contact.contact_id.clone(), contact);
+        }
+    }
+
+    /// bkz. `persist_contact` dosya başı notu — `known_remote_devices`
+    /// (bilinen uzak cihazların PUBLIC key'leri; secret değildir, şifreleme
+    /// gerekmez) de aynı sebeple hiç kalıcı değildi. İmza doğrulama ve
+    /// yeniden el sıkışma bu kayıtlara bağımlı olduğundan, bunlar
+    /// kaybolunca (süreç yeniden başlayınca) var olan bir kişiyle mesajlaşma
+    /// bile YENİ bir IdentityExchange'e kadar mümkün değildi.
+    fn persist_remote_device(&self, device: &DeviceRecord) {
+        let conn = match &self.db {
+            Some(c) => c,
+            None => return,
+        };
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO remote_devices
+             (device_fingerprint, identity_id, sign_pk_ed25519, sign_pk_mldsa, kem_pk_x25519, kem_pk_mlkem,
+              device_name, is_active, last_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                device.device_fingerprint, device.identity_id,
+                device.sign_pubkey_ed25519, device.sign_pubkey_mldsa,
+                device.kem_pubkey_x25519, device.kem_pubkey_mlkem,
+                device.device_name, device.is_active as i32, device.last_seen as i64,
+            ],
+        );
+    }
+
+    fn load_remote_devices_from_db(&mut self) {
+        let conn = match &self.db {
+            Some(c) => c,
+            None => return,
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT device_fingerprint, identity_id, sign_pk_ed25519, sign_pk_mldsa, kem_pk_x25519, kem_pk_mlkem,
+                    device_name, is_active, last_seen FROM remote_devices"
+        ) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?, row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, Vec<u8>>(4)?, row.get::<_, Vec<u8>>(5)?,
+                row.get::<_, String>(6)?, row.get::<_, i32>(7)?, row.get::<_, i64>(8)?,
+            ))
+        });
+        let mut loaded = Vec::new();
+        if let Ok(rows) = rows {
+            for row in rows.flatten() {
+                let (fp, identity_id, sign_pk_ed, sign_pk_mldsa, kem_pk_x, kem_pk_mlkem, device_name, is_active, last_seen) = row;
+                loaded.push(DeviceRecord {
+                    device_fingerprint: fp,
+                    identity_id,
+                    sign_pubkey_ed25519: sign_pk_ed,
+                    sign_pubkey_mldsa: sign_pk_mldsa,
+                    kem_pubkey_x25519: kem_pk_x,
+                    kem_pubkey_mlkem: kem_pk_mlkem,
+                    device_name,
+                    is_active: is_active != 0,
+                    last_seen: last_seen as u64,
+                });
+            }
+        }
+        for device in loaded {
+            self.known_remote_devices.insert(device.device_fingerprint.clone(), device);
+        }
     }
 
     // ---------------------------------------------------------------
@@ -827,9 +990,12 @@ impl P2PCore {
                 let _ = self.register_contact_from_pairing(identity_id.to_string(), device_fingerprint.to_string(), device_name_hint.to_string());
             }
             DeviceCheckOutcome::NewDeviceViaSignedAdd => {
-                if let Some(cid) = contact_id {
-                    if let Some(c) = self.contacts.get_mut(&cid) {
+                if let Some(cid) = &contact_id {
+                    if let Some(c) = self.contacts.get_mut(cid) {
                         c.add_device_via_signed_chain(device_fingerprint.to_string(), now);
+                    }
+                    if let Some(c) = self.contacts.get(cid) {
+                        self.persist_contact(c);
                     }
                 }
                 // Spec 2.2: "sadece bilgi bildirimi gösterilir" — alarm değil.
@@ -878,6 +1044,9 @@ impl P2PCore {
             .ok_or("Unknown contact")?;
         if let Some(c) = self.contacts.get_mut(&contact_id) {
             c.add_device_unverified(device_fingerprint.to_string(), current_time_ms());
+        }
+        if let Some(c) = self.contacts.get(&contact_id) {
+            self.persist_contact(c);
         }
         Ok(())
     }
@@ -985,6 +1154,7 @@ impl P2PCore {
         };
 
         self.ratchets.insert(peer_device_fingerprint.to_string(), state);
+        self.persist_ratchet_state(peer_device_fingerprint);
         self.publish_envelope(peer_device_fingerprint, &NetworkEnvelope::Handshake(handshake))
     }
 
@@ -994,21 +1164,15 @@ impl P2PCore {
     // sıfırdan başlar). Skipped-key diske yazma/silme, sadece bir oturum
     // İÇİNDEYKEN (receive_message'ta) gerçekleşir.
     //
-    // BİLİNEN SINIR: `ratchets: HashMap<...>` bellek-only'dir — root_key/
-    // ck_send/ck_recv/message_number gibi ratchet state'in TAMAMI
-    // uygulama kapanıp açıldığında kaybolur, sadece identity/device
-    // secret'ları (own_device_keys) kalıcıdır. Yani skipped-key diske
-    // yazılsa bile, uygulama yeniden başladığında zaten o oturum
-    // (DeviceRatchetState) hiç yok — yeni bir el sıkışma gerekir, ve o
-    // el sıkışma farklı bir root_key üretir, bu yüzden eski skipped-key'ler
-    // (varsa) o yeni oturumla eşleşmez. Skipped-key kalıcılığı şu an SADECE
-    // "aynı oturum içinde, süreç arka planda canlı kalırken" (ör. servis
-    // yeniden başlarsa ama identity+ratchet state'ler bellekte hâlâ
-    // duruyorsa) anlamlıdır — tam bir "uygulama kapansa bile gecikmeli
-    // mesaj çözülebilir" garantisi vermez. Bunun için ratchet state'in
-    // TAMAMININ (sadece skipped-key'lerin değil) kalıcı hale getirilmesi
-    // gerekir — bu, mevcut kapsamın (Aşama A) ötesinde bir mimari
-    // genişleme olur.
+    // Ratchet state'in TAMAMI (root_key/ck_send/ck_recv/own+peer anahtarlar/
+    // sayaçlar) artık `ratchet_states` tablosuna (skipped_key_encryption_key
+    // ile şifreli) kalıcı hale getiriliyor — bkz. `persist_ratchet_state`/
+    // `load_ratchet_states_from_db`. Süreç yeniden başladığında (uygulama
+    // güncellemesi, arka plan öldürme vb.) `init_db` sonrası
+    // `setSkippedKeyEncryptionKey` çağrıldığı an bu oturumlar geri yüklenir
+    // — yeniden el sıkışma gerekmez, geçmişte alınan gecikmeli/atlanmış
+    // mesaj anahtarları da (skipped_message_keys tablosundan) hâlâ geçerli
+    // kalır.
 
     fn process_handshake_init(&mut self, handshake: &HandshakeInit) -> Result<(), String> {
         let sender = self.known_remote_devices.get(&handshake.sender_device_fingerprint).cloned()
@@ -1033,6 +1197,7 @@ impl P2PCore {
         )?;
 
         self.ratchets.insert(handshake.sender_device_fingerprint.clone(), state);
+        self.persist_ratchet_state(&handshake.sender_device_fingerprint);
         Ok(())
     }
 
@@ -1056,6 +1221,7 @@ impl P2PCore {
             // skipped-key'ler de anlamsızlaştı (bkz. receive_message'daki
             // simetrik temizlik respond_to_rotation için).
             self.clear_persisted_skipped_keys(peer_device_fingerprint);
+            self.persist_ratchet_state(peer_device_fingerprint);
             return Ok(Some(kyber_ct));
         }
         Ok(None)
@@ -1102,6 +1268,11 @@ impl P2PCore {
         let ratchet_pubkeys = state.own_ratchet_pubkeys();
         let content_bytes = ciborium_bytes(content)?;
         let (ciphertext, message_number, prev_chain_length) = state.encrypt_next(&content_bytes)?;
+        // `encrypt_next` her çağrıda ck_send/send_message_number'ı ilerletir
+        // — diskteki kopya bayatlamasın diye her mesajda kalıcılaştırıyoruz
+        // (rotasyon olduysa `maybe_rotate_ratchet` zaten yukarıda ayrıca
+        // yazdı, bu ikinci yazma zararsız/idempotent bir üst kaplama).
+        self.persist_ratchet_state(&peer_device_fingerprint);
 
         let message_id = uuid::Uuid::new_v4().to_string();
         let header = MessagePacketHeader {
@@ -1202,6 +1373,7 @@ impl P2PCore {
                         // Rotasyon başarılıysa eski zincire ait diskteki
                         // skipped-key'ler de anlamsızlaştı — temizle.
                         self.clear_persisted_skipped_keys(&packet.header.sender_device_fingerprint);
+                        self.persist_ratchet_state(&packet.header.sender_device_fingerprint);
                     }
                 }
             }
@@ -1211,6 +1383,10 @@ impl P2PCore {
             .ok_or("No ratchet session for sender")?;
         let (payload_bytes, skipped_changes) = state.decrypt(&packet.ciphertext, packet.header.message_number)?;
         let content: MessageContent = ciborium::from_reader(payload_bytes.as_slice()).map_err(|e| e.to_string())?;
+        // `decrypt` her çağrıda ck_recv/recv_message_number'ı ilerletir —
+        // diskteki kopyayı güncel tut (bkz. send_message_content'teki aynı
+        // notun karşılığı).
+        self.persist_ratchet_state(&packet.header.sender_device_fingerprint);
 
         // Skipped-key değişikliklerini diske (Keystore ile şifreli) yansıt.
         for (msg_num, key) in &skipped_changes.added {
@@ -1259,8 +1435,46 @@ impl P2PCore {
             MessageContent::Delete { target_message_id } => {
                 serde_json::json!({"type": "delete", "peer": peer_fp, "message_id": target_message_id})
             }
+            MessageContent::HistorySyncRequest { limit } => {
+                // `load_message_history` zaten `history_key` yüklenmemişse
+                // (node modu hiç açılmadıysa) veya bu peer için arşiv yoksa
+                // boş liste döner — burada ayrıca `node_mode_enabled`
+                // kontrolüne gerek yok. Bu bir orijinal kullanıcı mesajı
+                // değil, kontrol paketi — kendi arşivimize TEKRAR yazılmaz
+                // (archive_plaintext: None, bkz. send_message_content).
+                let history = self.load_message_history(&peer_fp, limit);
+                let messages: Vec<(String, String, u64)> = history.into_iter()
+                    .map(|m| (m.direction, m.text, m.timestamp))
+                    .collect();
+                let response = MessageContent::HistorySyncResponse { messages };
+                if let Err(e) = self.send_message_content(peer_fp.clone(), &response, None) {
+                    error!("HistorySyncResponse gönderilemedi: {}", e);
+                }
+                serde_json::json!({"type": "history_sync_requested", "peer": peer_fp})
+            }
+            MessageContent::HistorySyncResponse { messages } => {
+                // `messages`'in direction'ı YANITLAYANIN (arşivi tutan
+                // node'un) bakış açısıyla geldi — bizim ekranımız için ters
+                // çevrilmeli: onların "sent"i bizim "received"imiz, onların
+                // "received"i bizim "sent"imiz.
+                let flipped: Vec<serde_json::Value> = messages.into_iter().map(|(direction, text, timestamp)| {
+                    let our_direction = if direction == "sent" { "received" } else { "sent" };
+                    serde_json::json!({"direction": our_direction, "text": text, "timestamp": timestamp})
+                }).collect();
+                serde_json::json!({"type": "history_sync", "peer": peer_fp, "messages": flipped})
+            }
         };
         Ok(event.to_string())
+    }
+
+    /// Spec dışı: node modu kapalı bir cihazda sohbet ekranı hiç yerel
+    /// geçmiş bulamadığında çağrılır (bkz. ChatActivity
+    /// `loadHistoryIfAvailable`) — karşı tarafa (chat peer) şifreli bir
+    /// `HistorySyncRequest` gönderir. Yanıt asenkron gelir (bir sonraki
+    /// `pollNetwork` turunda `{"type":"history_sync",...}` olayı olarak).
+    fn request_history_sync(&mut self, peer_device_fingerprint: String, limit: u32) -> Result<(), String> {
+        let content = MessageContent::HistorySyncRequest { limit };
+        self.send_message_content(peer_device_fingerprint, &content, None).map(|_| ())
     }
 
     /// Bir mesajı yerel arşive (spec dışı, kullanıcı tercihi: sadece node
@@ -1411,17 +1625,9 @@ impl P2PCore {
     }
 
     /// Bir cihaz-çifti oturumu için DB'de kayıtlı (henüz kullanılmamış)
-    /// skipped-key'leri çözüp döner.
-    ///
-    /// NOT: şu an hiçbir çağrı yeri YOK — `ratchets: HashMap` bellek-only
-    /// olduğu için (bkz. initiate_handshake_with sonrası not) bu
-    /// fonksiyonun anlamlı olacağı senaryo (ratchet state'in TAMAMININ
-    /// kalıcı olduğu, sadece skipped-key'lerin ayrıca yüklenmesi gerektiği
-    /// durum) henüz yok. Ratchet state kalıcılığı eklenirse (Aşama A'nın
-    /// ötesinde bir genişleme), yeni oturum yükleme akışı bu fonksiyonu
-    /// çağırıp döndürdüğü map'i `DeviceRatchetState.skipped_keys`'e
-    /// atamalıdır. Şimdilik kod hazır, kablolanmamış.
-    #[allow(dead_code)]
+    /// skipped-key'leri çözüp döner. `load_ratchet_states_from_db` tarafından
+    /// çağrılır — dönen map, geri yüklenen `DeviceRatchetState.skipped_keys`
+    /// alanına atanır.
     fn load_skipped_keys_from_db(&self, peer_device_fingerprint: &str) -> HashMap<u32, [u8; 32]> {
         let enc_key = match &self.skipped_key_encryption_key {
             Some(k) => *k,
@@ -1483,6 +1689,122 @@ impl P2PCore {
         }
     }
 
+    /// `self.ratchets[peer_device_fingerprint]`'i (varsa) diske şifreli
+    /// olarak kalıcılaştırır — aynı `skipped_key_encryption_key` ile
+    /// (`persist_skipped_key`'deki AEAD desenini birebir tekrarlar).
+    /// `skipped_key_encryption_key` henüz yüklenmemişse (Kotlin
+    /// `setSkippedKeyEncryptionKey` çağırmadıysa) sessizce atlar —
+    /// arşivleme gibi bu da best-effort'tur, mesajlaşmanın kendisini
+    /// engellemez (state bellekte zaten güncel).
+    fn persist_ratchet_state(&self, peer_device_fingerprint: &str) {
+        let state = match self.ratchets.get(peer_device_fingerprint) {
+            Some(s) => s,
+            None => return,
+        };
+        let enc_key = match &self.skipped_key_encryption_key {
+            Some(k) => *k,
+            None => return,
+        };
+        let conn = match &self.db {
+            Some(c) => c,
+            None => return,
+        };
+
+        let persistable = state.to_persistable();
+        let plaintext = match ciborium_bytes(&persistable) {
+            Ok(b) => b,
+            Err(e) => { error!("Ratchet state serileştirilemedi: {}", e); return; }
+        };
+
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+
+        let cipher = match ChaCha20Poly1305::new_from_slice(&enc_key) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let mut nonce_bytes = [0u8; 12];
+        {
+            use rand::RngCore;
+            OsRng.fill_bytes(&mut nonce_bytes);
+        }
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let encrypted = match cipher.encrypt(nonce, plaintext.as_slice()) {
+            Ok(e) => e,
+            Err(_) => { error!("Ratchet state şifrelenemedi"); return; }
+        };
+
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO ratchet_states (peer_device_fingerprint, encrypted_state, nonce, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![peer_device_fingerprint, encrypted, nonce_bytes.to_vec(), current_time_ms() as i64],
+        );
+    }
+
+    /// Uygulama açılışında (skipped_key_encryption_key yüklendikten sonra
+    /// — bkz. JNI `setSkippedKeyEncryptionKey`) DB'de kayıtlı TÜM ratchet
+    /// oturumlarını çözüp `self.ratchets`'e geri yükler. Bu, süreç yeniden
+    /// başladığında (app güncellemesi, arka plan öldürme) devam eden
+    /// sohbetlerin YENİDEN el sıkışma gerektirmeden çalışmaya devam
+    /// etmesini sağlar — önceden bu state tamamen bellek-only olduğu için
+    /// her süreç yeniden başlatmasında kayboluyordu (bkz. dosya sonu not).
+    fn load_ratchet_states_from_db(&mut self) {
+        let enc_key = match &self.skipped_key_encryption_key {
+            Some(k) => *k,
+            None => return,
+        };
+        let conn = match &self.db {
+            Some(c) => c,
+            None => return,
+        };
+
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+
+        let cipher = match ChaCha20Poly1305::new_from_slice(&enc_key) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        let mut stmt = match conn.prepare(
+            "SELECT peer_device_fingerprint, encrypted_state, nonce FROM ratchet_states"
+        ) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?))
+        });
+
+        let mut loaded: Vec<(String, DeviceRatchetState)> = Vec::new();
+        if let Ok(rows) = rows {
+            for row in rows.flatten() {
+                let (peer_fp, encrypted, nonce_bytes) = row;
+                if nonce_bytes.len() != 12 {
+                    continue;
+                }
+                let nonce = Nonce::from_slice(&nonce_bytes);
+                let plaintext = match cipher.decrypt(nonce, encrypted.as_slice()) {
+                    Ok(p) => p,
+                    Err(_) => { error!("Ratchet state çözülemedi ({}), atlanıyor", peer_fp); continue; }
+                };
+                let persistable: ratchet::SerializableRatchetState = match ciborium::from_reader(plaintext.as_slice()) {
+                    Ok(p) => p,
+                    Err(e) => { error!("Ratchet state ayrıştırılamadı ({}): {}", peer_fp, e); continue; }
+                };
+                let skipped_keys = self.load_skipped_keys_from_db(&peer_fp);
+                match DeviceRatchetState::from_persistable(persistable, skipped_keys) {
+                    Ok(state) => loaded.push((peer_fp, state)),
+                    Err(e) => error!("Ratchet state yeniden oluşturulamadı ({}): {}", peer_fp, e),
+                }
+            }
+        }
+        for (peer_fp, state) in loaded {
+            self.ratchets.insert(peer_fp, state);
+        }
+    }
+
     // ---------------------------------------------------------------
     // Bölüm 5: Grup Mesajlaşma (pairwise)
     // ---------------------------------------------------------------
@@ -1491,8 +1813,64 @@ impl P2PCore {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group_id = format!("group-{}", hex::encode(&compute_fingerprint(name.as_bytes(), &current_time_ms().to_be_bytes(), b"", b""))[..16].to_string());
         let group = Group::new(group_id.clone(), name, own_identity_id, current_time_ms());
+        self.persist_group(&group);
         self.groups.insert(group_id.clone(), group);
         Ok(group_id)
+    }
+
+    /// bkz. `persist_contact` dosya başı notu — `groups` tablosu da aynı
+    /// şekilde hiç yazılmıyordu.
+    fn persist_group(&self, group: &Group) {
+        let conn = match &self.db {
+            Some(c) => c,
+            None => return,
+        };
+        let members_json = match serde_json::to_string(&group.members) {
+            Ok(j) => j,
+            Err(e) => { error!("Group members serileştirilemedi: {}", e); return; }
+        };
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO groups (group_id, founder, name, version, members_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![group.group_id, group.founder_identity_id, group.name, group.version, members_json, group.created_at as i64],
+        );
+    }
+
+    fn load_groups_from_db(&mut self) {
+        let conn = match &self.db {
+            Some(c) => c,
+            None => return,
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT group_id, founder, name, version, members_json, created_at FROM groups"
+        ) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                row.get::<_, u32>(3)?, row.get::<_, String>(4)?, row.get::<_, i64>(5)?,
+            ))
+        });
+        let mut loaded = Vec::new();
+        if let Ok(rows) = rows {
+            for row in rows.flatten() {
+                let (group_id, founder, name, version, members_json, created_at) = row;
+                let members: Vec<group::GroupMember> = serde_json::from_str(&members_json).unwrap_or_default();
+                loaded.push(Group {
+                    group_id,
+                    name,
+                    founder_identity_id: founder,
+                    members,
+                    created_at: created_at as u64,
+                    version,
+                });
+            }
+        }
+        for group in loaded {
+            self.groups.insert(group.group_id.clone(), group);
+        }
     }
 
     /// Spec 5.4: kurucu, grup daveti üretir; davet edilen kişi zaten var
@@ -1511,11 +1889,14 @@ impl P2PCore {
 
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
         let change = GroupChange::Add(new_member_identity_id.to_string());
-        let update = sign_group_update(group_id, new_version, &change, &own_identity_id, &own_fp, own_keys)?;
+        let update = sign_group_update(group_id, new_version, &change, &group.name, &own_identity_id, &own_fp, own_keys)?;
 
         // Yerel state'i güncelle.
         if let Some(g) = self.groups.get_mut(group_id) {
             apply_change(g, &change, new_version, current_time_ms());
+        }
+        if let Some(g) = self.groups.get(group_id) {
+            self.persist_group(g);
         }
 
         // Tüm üyelere (yeni eklenen dahil) pairwise gönder (spec 5.2).
@@ -1541,7 +1922,7 @@ impl P2PCore {
         let new_version = group.version + 1;
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
         let change = GroupChange::Remove(member_identity_id.to_string());
-        let update = sign_group_update(group_id, new_version, &change, &own_identity_id, &own_fp, own_keys)?;
+        let update = sign_group_update(group_id, new_version, &change, &group.name, &own_identity_id, &own_fp, own_keys)?;
 
         // Çıkarılan üyeye ULAŞMADAN önce eski üye listesini al (spec 5.3:
         // çıkarılan üyeye artık GroupUpdate/grup mesajı gönderilmez).
@@ -1552,6 +1933,9 @@ impl P2PCore {
 
         if let Some(g) = self.groups.get_mut(group_id) {
             apply_change(g, &change, new_version, current_time_ms());
+        }
+        if let Some(g) = self.groups.get(group_id) {
+            self.persist_group(g);
         }
         for member_identity_id in remaining_targets {
             if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id) {
@@ -1568,6 +1952,7 @@ impl P2PCore {
         to_verify.extend_from_slice(update.group_id.as_bytes());
         to_verify.extend_from_slice(&update.new_version.to_be_bytes());
         to_verify.extend_from_slice(&ciborium_bytes(&update.change)?);
+        to_verify.extend_from_slice(update.group_name.as_bytes());
         // NOT: GroupUpdate sadece Ed25519 imzası taşıyor (packet.rs
         // GroupUpdate.signature tek alan) — MessagePacket'teki hibrit
         // (Ed25519+ML-DSA) modeliyle tam tutarlı değil, bkz. dosya sonu
@@ -1582,17 +1967,27 @@ impl P2PCore {
         let group_exists = self.groups.contains_key(&update.group_id);
         let group_snapshot = self.groups.get(&update.group_id).cloned();
 
-        let default_group = || Group::new(update.group_id.clone(), "".to_string(), update.signed_by.clone(), current_time_ms());
+        // Spec dışı düzeltme: önceden burada boş isimle ("") bir grup
+        // oluşturuluyordu — `GroupUpdate` artık her zaman güncel
+        // `group_name`'i taşıdığı için (bkz. packet.rs notu), ilk kez
+        // görülen bir grup da doğru adla oluşturulabiliyor.
+        let default_group = || Group::new(update.group_id.clone(), update.group_name.clone(), update.signed_by.clone(), current_time_ms());
         let group_ref = group_snapshot.unwrap_or_else(default_group);
 
         validate_group_update(&group_ref, &update.signed_by, signer_is_active, update.new_version)
             .map_err(|e| format!("{:?}", e))?;
 
         if !group_exists {
-            self.groups.insert(update.group_id.clone(), Group::new(update.group_id.clone(), "".to_string(), update.signed_by.clone(), current_time_ms()));
+            self.groups.insert(update.group_id.clone(), Group::new(update.group_id.clone(), update.group_name.clone(), update.signed_by.clone(), current_time_ms()));
         }
         if let Some(g) = self.groups.get_mut(&update.group_id) {
             apply_change(g, &update.change, update.new_version, current_time_ms());
+            // Her güncellemede ismi senkron tut (self-healing) — sadece
+            // açık bir Rename değişikliğinde değil.
+            g.name = update.group_name.clone();
+        }
+        if let Some(g) = self.groups.get(&update.group_id) {
+            self.persist_group(g);
         }
         Ok(())
     }
@@ -2026,6 +2421,7 @@ fn sign_group_update(
     group_id: &str,
     new_version: u32,
     change: &GroupChange,
+    group_name: &str,
     signed_by: &str,
     signed_by_device: &str,
     own_keys: &DeviceKeys,
@@ -2034,6 +2430,9 @@ fn sign_group_update(
     to_sign.extend_from_slice(group_id.as_bytes());
     to_sign.extend_from_slice(&new_version.to_be_bytes());
     to_sign.extend_from_slice(&ciborium_bytes(change)?);
+    // `group_name` de imzalanan veriye dahil — aksi halde bir relay/node bu
+    // alanı sessizce değiştirebilirdi (imza sadece `change`'i koruyordu).
+    to_sign.extend_from_slice(group_name.as_bytes());
     let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
     // Spec 3.3 formatındaki "signature" tekil alanla tutarlı olsun diye
     // GroupUpdate tek bir `signature` alanı taşıyor (packet.rs) — burada
@@ -2045,6 +2444,7 @@ fn sign_group_update(
         group_id: group_id.to_string(),
         new_version,
         change: change.clone(),
+        group_name: group_name.to_string(),
         signed_by: signed_by.to_string(),
         signed_by_device: signed_by_device.to_string(),
         signature: sig_classical.to_bytes().to_vec(),
@@ -2173,6 +2573,11 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setSkippedKeyEncryptionKey<
     let result = catch_panic(move || {
         let mut core = CORE.lock().unwrap();
         core.skipped_key_encryption_key = Some(key);
+        // Bu anahtar aynı zamanda ratchet state'lerin diskte şifreli
+        // kalıcılığı için de kullanılıyor (bkz. persist_ratchet_state) —
+        // anahtar yüklenir yüklenmez, önceki süreçten kalan oturumları
+        // geri yükle.
+        core.load_ratchet_states_from_db();
     });
     result.is_ok() as jboolean
 }
@@ -2286,6 +2691,23 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_ensureHandshake<'local>(mut
         let mut core = CORE.lock().unwrap();
         if let Err(e) = core.ensure_handshake(&fp) {
             error!("ensure_handshake failed: {}", e);
+        }
+    });
+}
+
+/// Spec dışı: node modu kapalı bir cihazda sohbet ekranı yerel geçmiş
+/// bulamadığında çağrılır — bkz. `P2PCore::request_history_sync`. Yanıt
+/// asenkron (`pollNetwork` üzerinden `"history_sync"` olayı) geldiği için
+/// bu fonksiyon hemen döner, sonuç beklemez.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_requestHistorySync<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>, limit: jni::sys::jint) {
+    let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
+    let limit_u32 = limit.max(0) as u32;
+    let _ = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        if let Err(e) = core.request_history_sync(fp, limit_u32) {
+            error!("request_history_sync failed: {}", e);
         }
     });
 }

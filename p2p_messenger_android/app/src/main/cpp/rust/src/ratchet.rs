@@ -114,6 +114,78 @@ pub struct DeviceRatchetState {
     pub skipped_keys: HashMap<u32, [u8; 32]>,
 }
 
+/// `DeviceRatchetState`'in diske (şifreli) yazılabilir hâli — secret key
+/// tipleri (`StaticSecret`/`MlKem768DecapsulationKey`/...) doğrudan
+/// `Serialize` implement etmiyor, bu yüzden hepsi ham bayt dizisine
+/// dönüştürülür (aynen `lib.rs`'teki `SecretKeyBundle`'ın kendi cihaz
+/// anahtarları için yaptığı gibi — bkz. `generate_identity`/
+/// `load_secret_bundle`). `skipped_keys` KASITLI OLARAK burada YOK: o
+/// zaten ayrı bir tabloda (`skipped_message_keys`) kendi başına kalıcı
+/// kılınıyor (bkz. lib.rs `persist_skipped_key`/`load_skipped_keys_from_db`)
+/// — burada tekrar taşımak, iki kopyanın birbirinden sapma riskini
+/// (data drift) gereksiz yere ekler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializableRatchetState {
+    pub root_key: Vec<u8>,
+    pub ck_send: Vec<u8>,
+    pub ck_recv: Vec<u8>,
+    pub own_x25519_secret: [u8; 32],
+    pub own_kyber_secret: Vec<u8>,
+    pub peer_x25519_pubkey: [u8; 32],
+    pub peer_kyber_pubkey: Vec<u8>,
+    pub send_message_number: u32,
+    pub recv_message_number: u32,
+    pub prev_chain_length: u32,
+    pub last_rotation: u64,
+    pub has_responded_to_peer_key: bool,
+}
+
+impl DeviceRatchetState {
+    /// bkz. `SerializableRatchetState` dokümantasyonu. `skipped_keys`
+    /// hariç tutulur — çağıran taraf (lib.rs) onu ayrıca yükleyip
+    /// dönen değere atamalıdır (bkz. `from_persistable`).
+    pub fn to_persistable(&self) -> SerializableRatchetState {
+        SerializableRatchetState {
+            root_key: self.root_key.clone(),
+            ck_send: self.ck_send.clone(),
+            ck_recv: self.ck_recv.clone(),
+            own_x25519_secret: self.own_x25519_secret.to_bytes(),
+            own_kyber_secret: self.own_kyber_secret.as_bytes().to_vec(),
+            peer_x25519_pubkey: *self.peer_x25519_pubkey.as_bytes(),
+            peer_kyber_pubkey: self.peer_kyber_pubkey.as_bytes().to_vec(),
+            send_message_number: self.send_message_number,
+            recv_message_number: self.recv_message_number,
+            prev_chain_length: self.prev_chain_length,
+            last_rotation: self.last_rotation,
+            has_responded_to_peer_key: self.has_responded_to_peer_key,
+        }
+    }
+
+    /// `skipped_keys`: diskteki `skipped_message_keys` tablosundan ayrıca
+    /// yüklenip buraya geçirilmelidir (bkz. lib.rs
+    /// `load_skipped_keys_from_db`) — bu fonksiyon kendisi o tabloya
+    /// erişmez (ratchet.rs kripto-only katman, dosya başı notuyla tutarlı).
+    pub fn from_persistable(s: SerializableRatchetState, skipped_keys: HashMap<u32, [u8; 32]>) -> Result<Self, String> {
+        let own_kyber_encoded: ml_kem::Encoded<MlKem768DecapsulationKey> = s.own_kyber_secret.as_slice()
+            .try_into().map_err(|_| "Bozuk kayıtlı Kyber secret key")?;
+        Ok(DeviceRatchetState {
+            root_key: s.root_key,
+            ck_send: s.ck_send,
+            ck_recv: s.ck_recv,
+            own_x25519_secret: StaticSecret::from(s.own_x25519_secret),
+            own_kyber_secret: MlKem768DecapsulationKey::from_bytes(&own_kyber_encoded),
+            peer_x25519_pubkey: X25519PublicKey::from(s.peer_x25519_pubkey),
+            peer_kyber_pubkey: kyber_pubkey_from_bytes(&s.peer_kyber_pubkey)?,
+            send_message_number: s.send_message_number,
+            recv_message_number: s.recv_message_number,
+            prev_chain_length: s.prev_chain_length,
+            last_rotation: s.last_rotation,
+            has_responded_to_peer_key: s.has_responded_to_peer_key,
+            skipped_keys,
+        })
+    }
+}
+
 /// `DeviceRatchetState::decrypt` çağrısı sırasında skipped-key
 /// önbelleğinde olan değişiklikleri raporlar — çağıran taraf (lib.rs) bu
 /// bilgiyle diskteki şifreli kopyayı güncel tutar.

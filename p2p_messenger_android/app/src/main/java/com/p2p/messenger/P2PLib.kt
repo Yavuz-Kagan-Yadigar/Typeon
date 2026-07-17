@@ -81,6 +81,10 @@ object P2PLib {
     external fun setSkippedKeyEncryptionKey(keyBytes: ByteArray): Boolean
     /** JSON-encoded List<ArchivedMessage>, eskiden yeniye sıralı. */
     external fun getMessageHistory(peerDeviceFingerprint: String, limit: Int): String
+    /** Spec dışı: node modu kapalı cihazlarda yerel geçmiş boşsa, karşı
+     *  tarafa (node modu açıksa) şifreli bir geçmiş isteği gönderir. Yanıt
+     *  asenkron gelir — bkz. pollNetwork "history_sync" olayı. */
+    external fun requestHistorySync(peerDeviceFingerprint: String, limit: Int)
 
     // --- Bölüm 5: Grup mesajlaşma ---
     /** JSON-encoded List<GroupSummary>. */

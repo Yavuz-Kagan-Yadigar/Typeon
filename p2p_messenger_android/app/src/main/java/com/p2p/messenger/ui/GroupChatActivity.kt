@@ -1,5 +1,6 @@
 package com.p2p.messenger.ui
 
+import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.widget.Button
@@ -58,13 +59,6 @@ class GroupChatActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_chat)
 
-        groupId = intent.getStringExtra(EXTRA_GROUP_ID) ?: run {
-            finish()
-            return
-        }
-        val groupName = intent.getStringExtra(EXTRA_GROUP_NAME) ?: groupId.take(8)
-        supportActionBar?.title = groupName
-
         // Grup sohbetinde tek bir "el sıkışma" durumu yok (her üyeyle ayrı
         // bir 1:1 bağlantı) — bu banner burada anlamlı değil, gizli kalır.
         findViewById<View>(R.id.layoutConnecting).visibility = View.GONE
@@ -80,6 +74,41 @@ class GroupChatActivity : AppCompatActivity() {
             if (text.isBlank()) return@setOnClickListener
             input.text.clear()
             sendNewMessage(text)
+        }
+
+        if (!bindToIntent(intent)) {
+            finish()
+            return
+        }
+    }
+
+    /**
+     * bkz. ChatActivity.bindToIntent aynı notu — `FLAG_ACTIVITY_CLEAR_TOP`
+     * yığındaki var olan bir `GroupChatActivity`'yi `onNewIntent` ile
+     * çağırdığında, önceden bu override edilmediği için bildirim yanlış
+     * (eski) grubu öne getiriyordu.
+     */
+    private fun bindToIntent(intent: Intent): Boolean {
+        val newGroupId = intent.getStringExtra(EXTRA_GROUP_ID) ?: return false
+        val groupName = intent.getStringExtra(EXTRA_GROUP_NAME) ?: newGroupId.take(8)
+        supportActionBar?.title = groupName
+
+        if (::groupId.isInitialized && groupId == newGroupId) {
+            return true
+        }
+
+        groupId = newGroupId
+        P2PService.activeConversationId = "group:$groupId"
+        localMessages.clear()
+        adapter.notifyDataSetChanged()
+        return true
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (!bindToIntent(intent)) {
+            finish()
         }
     }
 

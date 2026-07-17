@@ -42,10 +42,11 @@ class ChatsFragment : Fragment() {
         noContactsText = view.findViewById(R.id.txtNoContacts)
         recycler.layoutManager = LinearLayoutManager(requireContext())
 
-        adapter = ChatAdapter { peerDeviceFingerprint ->
+        adapter = ChatAdapter { peerDeviceFingerprint, displayName ->
             if (peerDeviceFingerprint.isNotEmpty()) {
                 val intent = Intent(requireContext(), ChatActivity::class.java)
                 intent.putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, peerDeviceFingerprint)
+                intent.putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, displayName)
                 startActivity(intent)
             }
         }

@@ -1,6 +1,7 @@
 package com.p2p.messenger.ui
 
 import android.app.AlertDialog
+import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -33,6 +34,7 @@ class ChatActivity : AppCompatActivity() {
         const val EXTRA_PEER_DEVICE_FINGERPRINT = "peer_device_fingerprint"
         const val EXTRA_PEER_DISPLAY_NAME = "peer_display_name"
         private const val HISTORY_LOAD_LIMIT = 200
+        private const val HISTORY_SYNC_LIMIT = 30
         private const val SESSION_POLL_INTERVAL_MS = 800L
     }
 
@@ -41,6 +43,11 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var adapter: SimpleChatAdapter
     private lateinit var recycler: RecyclerView
     private lateinit var connectingBanner: View
+    /** bkz. `loadHistoryIfAvailable`/`handleIncomingEvent` "history_sync" —
+     *  yereldeki arşiv boşsa karşı tarafa (node modu açıksa) bir geçmiş
+     *  isteği gönderilir; yanıt gelene kadar bu true kalır ki yanıt geldiğinde
+     *  onu listenin başına eklemeyi bilelim (peer değişince sıfırlanır). */
+    private var historySyncPending = false
 
     private val sessionPollHandler = Handler(Looper.getMainLooper())
     private val sessionPollRunnable = object : Runnable {
@@ -80,19 +87,60 @@ class ChatActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_chat)
 
-        peerDeviceFingerprint = intent.getStringExtra(EXTRA_PEER_DEVICE_FINGERPRINT) ?: run {
-            finish()
-            return
-        }
-        val displayName = intent.getStringExtra(EXTRA_PEER_DISPLAY_NAME) ?: peerDeviceFingerprint.take(8)
-        supportActionBar?.title = displayName
-
         connectingBanner = findViewById(R.id.layoutConnecting)
         recycler = findViewById(R.id.recyclerMessages)
         adapter = SimpleChatAdapter(localMessages)
         adapter.onItemLongPress = { item -> showEditDeleteDialog(item) }
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = adapter
+
+        val input = findViewById<EditText>(R.id.edtMessage)
+        findViewById<Button>(R.id.btnSend).setOnClickListener {
+            val text = input.text.toString()
+            if (text.isBlank()) return@setOnClickListener
+            input.text.clear()
+            sendNewMessage(text)
+        }
+
+        if (!bindToIntent(intent)) {
+            finish()
+            return
+        }
+    }
+
+    /**
+     * Spec dışı sağlamlaştırma: hem `onCreate` hem `onNewIntent` tarafından
+     * çağrılır. `PendingIntent`'ler `FLAG_ACTIVITY_CLEAR_TOP` taşıdığından
+     * (bkz. NotificationHelper), geri yığında zaten bir `ChatActivity`
+     * varsa Android yeni bir örnek OLUŞTURMAZ — var olanı `onNewIntent` ile
+     * çağırır. Önceden bu override edilmediği için bildirime tıklamak,
+     * (varsa) yığındaki ESKİ sohbeti öne getiriyordu, bildirimin ait olduğu
+     * sohbeti DEĞİL. Aynı kişi için gelen bir bildirimse (peer değişmedi)
+     * mesaj listesini gereksiz yere sıfırlamıyoruz.
+     *
+     * Dönüş: `false` ise (peer fingerprint hiç yok) çağıran `finish()`
+     * çağırmalı.
+     */
+    private fun bindToIntent(intent: Intent): Boolean {
+        val newPeer = intent.getStringExtra(EXTRA_PEER_DEVICE_FINGERPRINT) ?: return false
+        val displayName = intent.getStringExtra(EXTRA_PEER_DISPLAY_NAME) ?: newPeer.take(8)
+        supportActionBar?.title = displayName
+
+        if (::peerDeviceFingerprint.isInitialized && peerDeviceFingerprint == newPeer) {
+            // Aynı sohbet için tekrar bir intent geldi (ör. aynı kişiden
+            // ardışık bildirimler) — durumu sıfırlamaya gerek yok.
+            return true
+        }
+
+        peerDeviceFingerprint = newPeer
+        P2PService.activeConversationId = peerDeviceFingerprint
+
+        localMessages.clear()
+        adapter.notifyDataSetChanged()
+        historySyncPending = false
+        connectingBanner.visibility = View.VISIBLE
+        sessionPollHandler.removeCallbacks(sessionPollRunnable)
+        sessionPollHandler.post(sessionPollRunnable)
 
         loadHistoryIfAvailable()
 
@@ -105,13 +153,14 @@ class ChatActivity : AppCompatActivity() {
         } catch (e: Exception) {
             // yoksay — sessionPollRunnable zaten periyodik kontrol edecek
         }
+        return true
+    }
 
-        val input = findViewById<EditText>(R.id.edtMessage)
-        findViewById<Button>(R.id.btnSend).setOnClickListener {
-            val text = input.text.toString()
-            if (text.isBlank()) return@setOnClickListener
-            input.text.clear()
-            sendNewMessage(text)
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (!bindToIntent(intent)) {
+            finish()
         }
     }
 
@@ -161,7 +210,33 @@ class ChatActivity : AppCompatActivity() {
             "edit" -> adapter.applyEdit(obj.optString("message_id"), obj.optString("text"))
             "delete" -> adapter.applyDelete(obj.optString("message_id"))
             "status" -> adapter.applyStatus(obj.optString("message_id"), parseStatus(obj.optString("status")))
+            "history_sync" -> applyHistorySync(obj)
         }
+    }
+
+    /**
+     * Spec dışı: node modu kapalı cihazlarda yerel arşiv boş olduğunda
+     * `loadHistoryIfAvailable`'ın gönderdiği `requestHistorySync` isteğine
+     * karşı taraftan (node modu açıksa) gelen yanıt. `historySyncPending`
+     * false ise (yerelde zaten geçmiş vardı, ya da peer bu sırada
+     * değişti) sessizce yok sayılır — tekrar eklenmesin diye.
+     */
+    private fun applyHistorySync(obj: JSONObject) {
+        if (!historySyncPending) return
+        historySyncPending = false
+        val array = obj.optJSONArray("messages") ?: return
+        if (array.length() == 0) return
+        val synced = (0 until array.length()).map { i ->
+            val m = array.getJSONObject(i)
+            SimpleChatAdapter.Item(
+                messageId = UUID.randomUUID().toString(),
+                text = m.optString("text"),
+                isMine = m.optString("direction") == "sent",
+                timestamp = m.optLong("timestamp", System.currentTimeMillis())
+            )
+        }
+        localMessages.addAll(0, synced)
+        adapter.notifyItemRangeInserted(0, synced.size)
     }
 
     /** Kendi mesajımıza uzun basınca: Düzenle/Sil seçenekleri. */
@@ -215,8 +290,12 @@ class ChatActivity : AppCompatActivity() {
 
     /**
      * Node modu açıksa (dolayısıyla history key yüklüyse) bu kişiyle olan
-     * şifreli arşivi çözüp gösterir. Node modu kapalıysa veya arşiv boşsa
-     * sessizce hiçbir şey yapmaz — sohbet boş başlar.
+     * şifreli arşivi çözüp gösterir. Node modu kapalıysa veya arşiv boşsa,
+     * yerelde hiç geçmiş yoksa karşı tarafa (chat peer) şifreli bir
+     * `HistorySyncRequest` gönderilir — o cihaz node modu açıksa zaten bu
+     * konuşmanın her iki yönünü de arşivlemiştir (bkz.
+     * `P2PLib.requestHistorySync`). Yanıt asenkron gelir; bkz.
+     * `applyHistorySync`.
      *
      * BİLİNEN SINIR: arşiv (`ArchivedMessage`) bir `message_id` taşımıyor
      * (DB şeması bunu hiç saklamadı) — bu yüzden geçmişten yüklenen
@@ -252,6 +331,13 @@ class ChatActivity : AppCompatActivity() {
         if (localMessages.isNotEmpty()) {
             adapter.notifyItemRangeInserted(0, localMessages.size)
             recycler.scrollToPosition(localMessages.size - 1)
+        } else {
+            historySyncPending = true
+            try {
+                P2PLib.requestHistorySync(peerDeviceFingerprint, HISTORY_SYNC_LIMIT)
+            } catch (e: Exception) {
+                historySyncPending = false
+            }
         }
     }
 

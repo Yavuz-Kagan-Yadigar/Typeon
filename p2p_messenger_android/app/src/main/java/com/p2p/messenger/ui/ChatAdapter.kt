@@ -17,7 +17,7 @@ import com.p2p.messenger.R
  * yaratır.
  */
 class ChatAdapter(
-    private val onContactClick: (String) -> Unit
+    private val onContactClick: (String, String) -> Unit
 ) : ListAdapter<ChatAdapter.ChatMessage, ChatAdapter.ChatViewHolder>(DIFF_CALLBACK) {
 
     data class ChatMessage(
@@ -52,7 +52,7 @@ class ChatAdapter(
             txtUnread.text = message.unreadCount.toString()
 
             itemView.setOnClickListener {
-                onContactClick(message.contactId)
+                onContactClick(message.contactId, message.displayName)
             }
         }
 
