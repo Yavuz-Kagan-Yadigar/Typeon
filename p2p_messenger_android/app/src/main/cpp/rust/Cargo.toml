@@ -65,7 +65,7 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 # (bkz. SECURITY.md "Cross-network connectivity" notu). Spec §4.3 zaten Node
 # modu için "isteğe bağlı Circuit Relay v2 hizmeti" öngörmüştü, ama hiçbir
 # zaman implemente edilmemişti.
-libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "mdns", "tokio", "macros", "dns", "request-response", "cbor", "relay", "dcutr", "autonat"] }
+libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "mdns", "tokio", "macros", "dns", "request-response", "cbor", "relay", "dcutr", "autonat", "upnp"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 futures = "0.3"
 

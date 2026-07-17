@@ -284,6 +284,37 @@ box (e.g. a cheap VPS) becomes a bootstrap point the rest of their contacts
 can plug in, rather than the app silently failing or overpromising
 "always works, zero setup."
 
+### Serverless cross-network reachability via UPnP — fourth audit round fix
+
+The manual-relay/VPS approach above requires *someone* to operate
+infrastructure — even a cheap always-on box is a real ask. This round adds
+a fully automatic, zero-infrastructure alternative: **UPnP IGD** (Internet
+Gateway Device protocol). Most consumer home routers implement it, and it
+lets a device on the LAN ask the router directly — no logging into the
+router's admin panel, no DDNS, no VPS — to report its current external IP
+and forward a port to itself. libp2p ships an official `upnp` behaviour
+that automates this against the swarm's own listen addresses.
+
+When a mapping succeeds, `get_node_address()` (the address embedded in the
+QR code, the manual-add code, and "Adresimi kopyala") now prefers that
+UPnP-confirmed external address over the private LAN address it used
+before — a private LAN address is useless once shared with someone on a
+different network, so this is the one change that actually lets it work.
+
+**Honest limits:** not universal. Some routers ship with UPnP disabled by
+default (a reasonable security posture), some ISPs block it, and it cannot
+work at all behind CGNAT (carrier-grade NAT — common on mobile data and
+some ISPs), because there's no single home-router boundary to ask; the NAT
+happens further upstream, entirely outside the user's control. This is the
+same fundamental case where DCUtR hole-punching and consumer VPN tools
+(Tailscale, WireGuard) fall back to relaying. The saving grace: a pairing
+only needs **one** side's mapping to succeed for a direct connection to
+work — it only fails outright when both parties are simultaneously
+UPnP-incapable. When that happens, the relay/DCUtR path above (still
+present, unchanged) and the manual relay-address field remain the
+fallback. Silent and safe either way: if UPnP mapping fails, nothing about
+today's behavior changes.
+
 ### Full traceability resistance (Tor/onion services) — considered, not implemented
 
 A natural follow-up question after the fixes above: can this app be made
@@ -401,6 +432,7 @@ hardening the existing protocol:
 | Gossipsub topic-per-fingerprint metadata leakage | **Fixed** — topic now derived from ratchet `root_key`, rotates every 30 min; first-contact pairing still uses fingerprint (unavoidable bootstrap) |
 | `zeroize` dependency unused (in-memory key erasure) | **Fixed** — upstream crate features + explicit zeroize-on-drop for ratchet/session/message keys and the JNI secret-key bundle |
 | No cross-network (NAT) connectivity — spec called for it, never implemented | **Fixed** — Circuit Relay v2 (open, Node-mode devices) + DCUtR hole-punching + organic/QR/manual relay discovery |
+| Cross-network pairing required someone to operate a relay/VPS | **Fixed** — automatic, serverless UPnP port mapping preferred in `get_node_address()` when available; falls back to relay/manual address otherwise |
 | mDNS persistent PeerId on LAN | Known limitation, deliberately not changed (would reintroduce a previously-fixed reconnection bug) |
 | Kademlia DHT participation reveals IP to other DHT peers | Known limitation, structural to any DHT-based P2P design; relaying mitigates it for message traffic but not DHT participation itself |
 | Zero-config guarantee that any two strangers can always connect | Not fully achievable without *some* reachable point in the network (structural to decentralized P2P, not fixable by protocol changes alone) — mitigated, not eliminated, by the manual relay-address field |

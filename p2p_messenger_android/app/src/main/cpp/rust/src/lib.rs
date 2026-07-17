@@ -152,6 +152,17 @@ struct P2PBehaviour {
     /// eder — şu an sadece bilgi amaçlı (identify/kad'ı besliyor), aktif
     /// bir karar noktası değil.
     autonat: autonat::Behaviour,
+    /// Spec dışı, kullanıcı isteği (bkz. SECURITY.md "Cross-network
+    /// connectivity" notu): SUNUCUSUZ bir farklı-ağ eşleşme çözümü — ev
+    /// router'ının UPnP IGD protokolünü destekleyip desteklemediğini
+    /// otomatik dener, destekliyorsa router'dan "şu portu bana yönlendir"
+    /// isteğinde bulunur ve gerçekten dışarıdan çevrilebilir bir adres
+    /// öğrenir (bkz. `own_external_addr`). Router paneline hiç girmeye,
+    /// DDNS/statik IP/VPS'e gerek YOK — ama her router'da açık değildir ve
+    /// CGNAT (çoğu mobil veri/bazı ISS'ler) arkasında hiç işe yaramaz —
+    /// bu durumlarda sessizce başarısız olur, mevcut davranış (LAN/röle)
+    /// değişmeden devam eder.
+    upnp: libp2p::upnp::tokio::Behaviour,
 }
 
 fn current_time_ms() -> u64 {
@@ -518,6 +529,14 @@ struct P2PCore {
     /// gösterilmemeli — 0.0.0.0/tcp/0 karşı tarafın dial edebileceği somut
     /// bir adres değildir.
     own_listen_addrs: Vec<Multiaddr>,
+    /// Spec dışı, kullanıcı isteği (bkz. `P2PBehaviour.upnp` dokümantasyonu):
+    /// UPnP ile router üzerinden başarıyla eşlenmiş, gerçekten dışarıdan
+    /// (farklı ağdan) çevrilebilir adres — varsa `get_node_address()`
+    /// tarafından HER ŞEYDEN ÖNCE tercih edilir (LAN adresinden bile önce,
+    /// çünkü LAN adresi başka bir ağdaki biri için tamamen işe yaramaz).
+    /// Eşleme süresi dolar/başarısız olursa (`Event::ExpiredExternalAddr`)
+    /// temizlenir.
+    own_external_addr: Option<Multiaddr>,
     /// `publish_envelope` gossipsub publish() başarısız olduğunda (bkz. o
     /// fonksiyonun dokümantasyonu — ilk bağlantıdan sonraki ilk birkaç
     /// saniyede mesh henüz oluşmamış olabilir; HandshakeInit/IdentityExchange/
@@ -652,6 +671,7 @@ impl P2PCore {
             pending_device_alerts: HashMap::new(),
             swarm: None,
             own_listen_addrs: Vec::new(),
+            own_external_addr: None,
             pending_envelopes: Vec::new(),
             message_status: HashMap::new(),
             node_mode_enabled: false,
@@ -3672,7 +3692,12 @@ impl P2PCore {
                 let relay = relay::Behaviour::new(peer_id, relay_config);
                 let dcutr = dcutr::Behaviour::new(peer_id);
                 let autonat = autonat::Behaviour::new(peer_id, autonat::Config::default());
-                Ok(P2PBehaviour { gossipsub, kad, identify, file_chunks, mdns, relay_client, relay, dcutr, autonat })
+                // bkz. `P2PBehaviour.upnp` dokümantasyonu — `Default` inşası
+                // yeterli, kendi kendine gateway aramaya/dinleme
+                // adreslerini eşlemeye başlar (bkz. libp2p-upnp
+                // `tokio::Behaviour`/`Default` implementasyonu).
+                let upnp = libp2p::upnp::tokio::Behaviour::default();
+                Ok(P2PBehaviour { gossipsub, kad, identify, file_chunks, mdns, relay_client, relay, dcutr, autonat, upnp })
             })
             .map_err(|e| e.to_string())?
             .build();
@@ -3753,8 +3778,12 @@ impl P2PCore {
     fn get_node_address(&self) -> Option<String> {
         let swarm = self.swarm.as_ref()?;
         let peer_id = *swarm.local_peer_id();
-        let addr = self.own_listen_addrs.iter()
-            .find(|a| is_private_lan_multiaddr(a))
+        // bkz. `own_external_addr` alanı dokümantasyonu — UPnP ile
+        // eşlenmiş, GERÇEKTEN dışarıdan (farklı ağdan) çevrilebilir bir
+        // adres varsa HER ŞEYDEN ÖNCE o tercih edilir; LAN adresi başka
+        // bir ağdaki biri için tamamen işe yaramaz olurdu.
+        let addr = self.own_external_addr.as_ref()
+            .or_else(|| self.own_listen_addrs.iter().find(|a| is_private_lan_multiaddr(a)))
             .or_else(|| self.own_listen_addrs.iter().find(|a| !is_loopback_multiaddr(a)))
             .or_else(|| self.own_listen_addrs.first())?;
         Some(format!("{addr}/p2p/{peer_id}"))
@@ -4031,6 +4060,11 @@ impl P2PCore {
         // TAMAMINA erişemiyoruz — bkz. dosyadaki aynı desenin diğer
         // örnekleri, ör. `new_peer_addrs`).
         let mut new_relay_peers: Vec<(PeerId, Multiaddr)> = Vec::new();
+        // bkz. `own_external_addr` alanı dokümantasyonu — `Some(addr)` yeni
+        // bir UPnP eşlemesi, `None` bir eşlemenin süresinin dolduğunu/
+        // geçersiz olduğunu belirtir. Sırayla (birden fazla olay aynı
+        // pollda gelebilir) döngü bittikten sonra uygulanır.
+        let mut upnp_external_addr_updates: Vec<Option<Multiaddr>> = Vec::new();
         let mut file_chunk_events: Vec<FileChunkEventLocal> = Vec::new();
         if let Some(swarm) = &mut self.swarm {
             RUNTIME.block_on(async {
@@ -4095,6 +4129,30 @@ impl P2PCore {
                                 }
                             }
                         }
+                        // bkz. `P2PBehaviour.upnp`/`own_external_addr` alan
+                        // dokümantasyonları — sunucusuz farklı-ağ eşleşmesi
+                        // BURADA gerçek oluyor: router UPnP ile bir port
+                        // eşlemesi kabul ederse `get_node_address()`'in
+                        // döneceği adres artık gerçekten dışarıdan
+                        // çevrilebilir olur.
+                        libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Upnp(upnp_event)) => {
+                            match upnp_event {
+                                libp2p::upnp::Event::NewExternalAddr(addr) => {
+                                    info!("UPnP: dışarıdan erişilebilir adres eşlendi: {}", addr);
+                                    upnp_external_addr_updates.push(Some(addr));
+                                }
+                                libp2p::upnp::Event::ExpiredExternalAddr(addr) => {
+                                    info!("UPnP: adres eşlemesi sona erdi: {}", addr);
+                                    upnp_external_addr_updates.push(None);
+                                }
+                                libp2p::upnp::Event::GatewayNotFound => {
+                                    info!("UPnP: router IGD gateway'i bulunamadı (UPnP kapalı/desteklenmiyor olabilir) — LAN/röle adresine devam ediliyor");
+                                }
+                                libp2p::upnp::Event::NonRoutableGateway => {
+                                    info!("UPnP: gateway genel ağa doğrudan açık değil (ör. CGNAT arkasında) — LAN/röle adresine devam ediliyor");
+                                }
+                            }
+                        }
                         libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::FileChunks(rr_event)) => {
                             match rr_event {
                                 request_response::Event::Message { message: request_response::Message::Request { request, channel, .. }, .. } => {
@@ -4145,6 +4203,9 @@ impl P2PCore {
         }
         for (pid, addr) in new_relay_peers {
             self.record_known_relay(pid, addr);
+        }
+        for update in upnp_external_addr_updates {
+            self.own_external_addr = update;
         }
 
         // Dosya parça olaylarını işle — `self.swarm`'ın dışında toplandı
