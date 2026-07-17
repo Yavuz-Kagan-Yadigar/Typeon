@@ -3894,13 +3894,44 @@ impl P2PCore {
     /// (sonraki denemeler) tarafından ortak kullanılır.
     fn try_publish_raw(&mut self, target_device_fingerprint: &str, envelope: &NetworkEnvelope) -> Result<(), String> {
         let bytes = ciborium_bytes(envelope)?;
-        // bkz. `topic_for_root_key` dokümantasyonu: bir ratchet oturumu
-        // varsa fingerprint yerine paylaşılan sırdan türetilen rotasyonlu
-        // topic kullanılır; yoksa (ilk eşleşme) kaçınılmaz olarak eski
-        // fingerprint tabanlı "posta kutusu" topic'ine düşülür.
-        let topic = match self.ratchets.get(target_device_fingerprint) {
-            Some(ratchet) => Self::topic_for_root_key(&ratchet.root_key),
-            None => gossipsub::IdentTopic::new(format!("p2p_msg_{}", target_device_fingerprint)),
+        let mailbox_topic = || gossipsub::IdentTopic::new(format!("p2p_msg_{}", target_device_fingerprint));
+        // Spec dışı, hata ayıklama düzeltmesi (gerçek bir cihazda "hiçbir
+        // mesaj gitmiyor da gelmiyor da" olarak rapor edildi): bkz.
+        // `topic_for_root_key` dokümantasyonu — bir ratchet oturumu varsa
+        // fingerprint yerine paylaşılan sırdan türetilen rotasyonlu topic
+        // kullanılır, AMA bunun İKİ istisnası var, ikisi de "karşı taraf bu
+        // ANDA hangi topic'i dinliyor olabilir" sorusuna dayanıyor:
+        //
+        // 1. `Handshake`/`IdentityExchange`: bunlar HER ZAMAN posta kutusu
+        //    topic'inden gider, `self.ratchets`'te bu peer için bir kayıt
+        //    olsa BİLE. Sebep: `initiate_handshake_with` kendi ratchet
+        //    state'ini `self.ratchets`'e, HandshakeInit'i publish etmeden
+        //    ÖNCE ekliyor (bkz. o fonksiyon) — bu yüzden `self.ratchets.get`
+        //    kontrolü burada "true" dönerdi ve rotasyonlu topic seçilirdi.
+        //    Ama karşı taraf bu paketi ALMADAN o rotasyonlu topic'i asla
+        //    hesaplayamaz/abone olamaz (root_key'i bilmiyor) — bu, karşı
+        //    tarafın HİÇBİR ZAMAN dinlemediği bir topic'e mesaj göndermek
+        //    anlamına gelirdi (gerçek üretim hatasıydı, bu düzeltme onu
+        //    kapatıyor).
+        // 2. `Message` içindeki paket bir rotasyon ANONS EDİYORSA
+        //    (`rotation_kyber_ciphertext` dolu): aynı sebepten, karşı taraf
+        //    bu paketi almadan yeni root_key'i (dolayısıyla yeni topic'i)
+        //    bilemez — bu yüzden rotasyonu tetikleyen tarafın kaydettiği
+        //    `prev_root_key`'e (bkz. o alanın dokümantasyonu) karşılık gelen
+        //    ESKİ topic kullanılır. Rotasyon içermeyen sıradan `Message`'lar
+        //    her zamanki gibi GÜNCEL `root_key`'in topic'ini kullanır.
+        let topic = match envelope {
+            NetworkEnvelope::Handshake(_) | NetworkEnvelope::IdentityExchange(_) => mailbox_topic(),
+            NetworkEnvelope::Message(packet) if packet.header.rotation_kyber_ciphertext.is_some() => {
+                match self.ratchets.get(target_device_fingerprint).and_then(|r| r.prev_root_key.as_ref()) {
+                    Some(prev_root_key) => Self::topic_for_root_key(prev_root_key),
+                    None => mailbox_topic(),
+                }
+            }
+            _ => match self.ratchets.get(target_device_fingerprint) {
+                Some(ratchet) => Self::topic_for_root_key(&ratchet.root_key),
+                None => mailbox_topic(),
+            },
         };
         if let Some(swarm) = &mut self.swarm {
             swarm.behaviour_mut().gossipsub.publish(topic, bytes).map_err(|e| e.to_string())?;

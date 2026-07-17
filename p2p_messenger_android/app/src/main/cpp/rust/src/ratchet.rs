@@ -68,6 +68,18 @@ impl RatchetPublicKeys {
 #[derive(Clone)]
 pub struct DeviceRatchetState {
     pub root_key: Vec<u8>,
+    /// Spec dışı, hata ayıklama düzeltmesi (bkz. SECURITY.md "Cross-network
+    /// connectivity" bölümündeki gossipsub topic pseudonymization notu):
+    /// `perform_dh_ratchet`'in üzerine yazmadan ÖNCEKİ `root_key` değeri.
+    /// SADECE `perform_dh_ratchet` çağıran (rotasyonu TETİKLEYEN) tarafta
+    /// anlamlı — bu, o rotasyonu duyuran TEK mesajın (`rotation_kyber_ciphertext`
+    /// dolu olan) hangi gossipsub topic'inden gönderilmesi gerektiğini
+    /// belirlemek için lib.rs `try_publish_raw`'da kullanılır: karşı taraf bu
+    /// mesajı ALANA kadar YENİ `root_key`'i (dolayısıyla yeni topic'i) bilemez
+    /// — o yüzden rotasyonu duyuran mesaj hâlâ ESKİ (paylaşılan) topic'ten
+    /// gönderilmeli, yoksa karşı taraf o topic'e hiç abone olmadığından mesaj
+    /// asla ulaşmaz (gerçek bir üretim hatasıydı — bkz. commit notu).
+    pub prev_root_key: Option<Vec<u8>>,
     pub ck_send: Vec<u8>,
     pub ck_recv: Vec<u8>,
     /// Bu tarafın kendi güncel DH/KEM ratchet anahtar çifti (bir sonraki
@@ -127,6 +139,7 @@ pub struct DeviceRatchetState {
 impl Drop for DeviceRatchetState {
     fn drop(&mut self) {
         self.root_key.zeroize();
+        self.prev_root_key.zeroize();
         self.ck_send.zeroize();
         self.ck_recv.zeroize();
         for key in self.skipped_keys.values_mut() {
@@ -148,6 +161,12 @@ impl Drop for DeviceRatchetState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializableRatchetState {
     pub root_key: Vec<u8>,
+    /// bkz. `DeviceRatchetState.prev_root_key` dokümantasyonu — süreç bir
+    /// rotasyon ANONS EDEN ama henüz karşı tarafça alınmamış bir mesajın
+    /// ortasında yeniden başlarsa, `pending_envelopes` kalıcı olmadığından
+    /// bu değer kaybolursa yeniden denemeler yanlış topic'e düşebilir; bu
+    /// yüzden burada da kalıcı kılınıyor.
+    pub prev_root_key: Option<Vec<u8>>,
     pub ck_send: Vec<u8>,
     pub ck_recv: Vec<u8>,
     pub own_x25519_secret: [u8; 32],
@@ -168,6 +187,7 @@ impl DeviceRatchetState {
     pub fn to_persistable(&self) -> SerializableRatchetState {
         SerializableRatchetState {
             root_key: self.root_key.clone(),
+            prev_root_key: self.prev_root_key.clone(),
             ck_send: self.ck_send.clone(),
             ck_recv: self.ck_recv.clone(),
             own_x25519_secret: self.own_x25519_secret.to_bytes(),
@@ -191,6 +211,7 @@ impl DeviceRatchetState {
             .try_into().map_err(|_| "Bozuk kayıtlı Kyber secret key")?;
         Ok(DeviceRatchetState {
             root_key: s.root_key,
+            prev_root_key: s.prev_root_key,
             ck_send: s.ck_send,
             ck_recv: s.ck_recv,
             own_x25519_secret: StaticSecret::from(s.own_x25519_secret),
@@ -275,6 +296,7 @@ impl DeviceRatchetState {
 
         let state = DeviceRatchetState {
             root_key,
+            prev_root_key: None,
             ck_send,
             ck_recv,
             own_x25519_secret,
@@ -319,6 +341,7 @@ impl DeviceRatchetState {
 
         Ok(DeviceRatchetState {
             root_key,
+            prev_root_key: None,
             ck_send,
             ck_recv,
             own_x25519_secret,
@@ -386,7 +409,10 @@ impl DeviceRatchetState {
         self.prev_chain_length = self.send_message_number;
         self.send_message_number = 0;
         self.recv_message_number = 0;
-        self.root_key = new_root;
+        // bkz. `prev_root_key` alanı dokümantasyonu — bu rotasyonu ANONS
+        // EDEN mesaj hâlâ bu ESKİ değere karşılık gelen gossipsub topic'ten
+        // gönderilmeli (karşı taraf henüz YENİ root_key'i bilmiyor).
+        self.prev_root_key = Some(std::mem::replace(&mut self.root_key, new_root));
         self.ck_send = new_send;
         self.ck_recv = new_recv;
         self.own_x25519_secret = new_x25519_secret;
