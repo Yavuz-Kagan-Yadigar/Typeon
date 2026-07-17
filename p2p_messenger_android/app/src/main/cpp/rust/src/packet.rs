@@ -115,7 +115,14 @@ pub struct GroupUpdate {
     pub signed_by: String,
     /// Kurucunun hangi cihazı imzaladı.
     pub signed_by_device: String,
+    /// Klasik (Ed25519) imza.
     pub signature: Vec<u8>,
+    /// Spec dışı: ML-DSA (post-kuantum) imza — önceden bu alan yoktu ve
+    /// GroupUpdate SADECE Ed25519 ile korunuyordu (MessagePacket/
+    /// HandshakeInit'teki hibrit modelle tutarsızdı, bkz. güvenlik
+    /// denetimi). Artık MessagePacket ile AYNI hibrit doğrulama
+    /// (`verify_hybrid_signature`, HER İKİ imza da zorunlu) uygulanıyor.
+    pub signature_pq: Vec<u8>,
 }
 
 /// Grup daveti (spec 5.4) — kurucudan davet edilen kişiye, var olan/o an
@@ -295,6 +302,15 @@ pub enum MessageContent {
     /// (bkz. process_identity_exchange) ve kullanici fotografini
     /// degistirdiginde tum kisilere tekrar. `None` = fotograf kaldirildi.
     ProfileUpdate { avatar_jpeg: Option<Vec<u8>> },
+    /// Spec disi, guvenlik denetimi duzeltmesi: grup uyelik/isim/avatar
+    /// degisiklikleri ONCEDEN cikta (bare) bir `NetworkEnvelope::GroupUpdate`
+    /// olarak, SADECE Ed25519 imzali ve HIC sifrelenmeden gonderiliyordu --
+    /// grup avatari/ismi gibi icerik acik metin olarak gossipsub'a
+    /// yayilıyordu. Artik digerleriyle AYNI ratchet-sifreli kanaldan
+    /// (hibrit X25519+ML-KEM) gidiyor; ic `GroupUpdate.signature`/
+    /// `signature_pq` alanlari (kurucu yetkisini kanitlayan, tasima
+    /// katmanindan BAGIMSIZ bir ikinci dogrulama) korunuyor.
+    GroupUpdate(GroupUpdate),
 }
 
 /// El sıkışma paketi — önceki `HandshakeInit` tasarımı; spec'te ayrı bir
@@ -342,7 +358,6 @@ pub enum NetworkEnvelope {
     Message(MessagePacket),
     DeviceAdd(DeviceAdd),
     DeviceRevoke(DeviceRevoke),
-    GroupUpdate(GroupUpdate),
     GroupInvite(GroupInvite),
     ReadReceipt(ReadReceipt),
 }

@@ -37,11 +37,13 @@ use libp2p::{gossipsub, identify, kad, noise, tcp, yamux, Multiaddr, PeerId, Str
 use log::{error, info};
 // NOT: pqcrypto-dilithium/pqcrypto-kyber yerine RustCrypto'nun aktif bakımlı
 // ml-dsa/ml-kem crate'lerine geçildi (bkz. Cargo.toml notu — RUSTSEC-2024-0380,
-// RUSTSEC-2024-0381, FIPS 204/203 bayt-uyumsuzluğu). Ayrıca spec "ML-DSA-65"
+// RUSTSEC-2024-0381, FIPS 204/203 bayt-uyumsuzluğu). Spec "ML-DSA-65"
 // istiyordu (bölüm 1.1 tablosu) — önceki kod yanlışlıkla ML-DSA-44 (Dilithium2)
-// kullanıyordu; bu geçişte MlDsa65'e düzeltildi.
-use ml_dsa::{EncodedSignature, EncodedVerifyingKey, Generate as MlDsaGenerate, KeyExport as MlDsaKeyExport, Keypair as MlDsaKeypair, MlDsa65, Signature as MlDsaSignature, SigningKey as MlDsaSigningKey, Signer as MlDsaSigner, VerifyingKey as MlDsaVerifyingKey, Verifier as MlDsaVerifier};
-use ml_kem::{EncodedSizeUser as MlKemEncodedSizeUser, KemCore as MlKemCore, MlKem768};
+// kullanıyordu; o geçişte MlDsa65'e düzeltilmişti. Daha sonra (bu güvenlik
+// denetimi turunda) ekstra marj için NIST Kategori 5'e (ML-KEM-1024/
+// ML-DSA-87) yükseltildi — bkz. SECURITY.md "Anahtar boyutları" notu.
+use ml_dsa::{EncodedSignature, EncodedVerifyingKey, Generate as MlDsaGenerate, KeyExport as MlDsaKeyExport, Keypair as MlDsaKeypair, MlDsa87, Signature as MlDsaSignature, SigningKey as MlDsaSigningKey, Signer as MlDsaSigner, VerifyingKey as MlDsaVerifyingKey, Verifier as MlDsaVerifier};
+use ml_kem::{EncodedSizeUser as MlKemEncodedSizeUser, KemCore as MlKemCore, MlKem1024};
 use rand::rngs::OsRng;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -56,7 +58,7 @@ use packet::{
     GroupUpdate, HandshakeInit, IdentityExchange, MessageContent, MessagePacket, MessagePacketHeader,
     NetworkEnvelope, QrPacket,
 };
-use ratchet::{DeviceRatchetState, MlKem768DecapsulationKey, MlKem768EncapsulationKey, RatchetPublicKeys};
+use ratchet::{DeviceRatchetState, MlKem1024DecapsulationKey, MlKem1024EncapsulationKey, RatchetPublicKeys};
 use attachments::{FileChunkRequest, FileChunkResponse};
 
 const DB_NAME: &str = "p2p_messenger.db";
@@ -138,13 +140,13 @@ struct DeviceKeys {
     sign_sk_ed25519: SigningKey,
     #[allow(dead_code)]
     sign_pk_ed25519: VerifyingKey,
-    sign_pk_mldsa: MlDsaVerifyingKey<MlDsa65>,
-    sign_sk_mldsa: MlDsaSigningKey<MlDsa65>,
+    sign_pk_mldsa: MlDsaVerifyingKey<MlDsa87>,
+    sign_sk_mldsa: MlDsaSigningKey<MlDsa87>,
     kem_sk_x25519: StaticSecret,
     #[allow(dead_code)]
     kem_pk_x25519: X25519PublicKey,
-    kem_pk_mlkem: MlKem768EncapsulationKey,
-    kem_sk_mlkem: MlKem768DecapsulationKey,
+    kem_pk_mlkem: MlKem1024EncapsulationKey,
+    kem_sk_mlkem: MlKem1024DecapsulationKey,
 }
 
 /// Bir cihazın tüm secret key'lerini taşıyan, JNI sınırı üzerinden
@@ -766,15 +768,18 @@ impl P2PCore {
         let mut csprng = OsRng;
         let sign_sk_ed25519 = SigningKey::generate(&mut csprng);
         let sign_pk_ed25519 = sign_sk_ed25519.verifying_key();
-        // ML-DSA-65 (spec 1.1 tablosu) — getrandom feature ile parametresiz
-        // üretim, rand_core sürüm çakışmasını bypass eder (bkz. Cargo.toml notu).
-        let sign_sk_mldsa: MlDsaSigningKey<MlDsa65> = MlDsaGenerate::generate();
+        // ML-DSA-87 — spec 1.1 tablosu ML-DSA-65 (NIST Kategori 3) belirtiyordu;
+        // güvenlik marjını artırmak için ML-KEM-1024/ML-DSA-87'ye (Kategori 5)
+        // yükseltildi (bkz. SECURITY.md "Anahtar boyutları" notu). getrandom
+        // feature ile parametresiz üretim, rand_core sürüm çakışmasını
+        // bypass eder (bkz. Cargo.toml notu).
+        let sign_sk_mldsa: MlDsaSigningKey<MlDsa87> = MlDsaGenerate::generate();
         let sign_pk_mldsa = sign_sk_mldsa.verifying_key().clone();
         let kem_sk_x25519 = StaticSecret::random_from_rng(&mut csprng);
         let kem_pk_x25519 = X25519PublicKey::from(&kem_sk_x25519);
         // X25519 (rand_core 0.6 üzerinden rand 0.8) ve ML-KEM (rand_core
         // 0.6.4) aynı rand_core majör sürümü — aynı OsRng paylaşılabilir.
-        let (kem_sk_mlkem, _kem_pk_mlkem_dup) = MlKem768::generate(&mut csprng);
+        let (kem_sk_mlkem, _kem_pk_mlkem_dup) = MlKem1024::generate(&mut csprng);
         let kem_pk_mlkem = kem_sk_mlkem.encapsulation_key().clone();
 
         let fingerprint_raw = compute_fingerprint(
@@ -885,9 +890,9 @@ impl P2PCore {
         // ML-DSA secret key'i 32 baytlık seed olarak saklanıyor (bkz.
         // generate_identity notu) — `from_seed` ile deterministik üretiliyor.
         let sign_sk_mldsa_seed: ml_dsa::Seed = bundle.sign_sk_mldsa.as_slice().try_into().map_err(|_| "Bozuk ML-DSA secret key")?;
-        let sign_sk_mldsa = MlDsaSigningKey::<MlDsa65>::from_seed(&sign_sk_mldsa_seed);
-        let sign_pk_mldsa_encoded: EncodedVerifyingKey<MlDsa65> = record.sign_pubkey_mldsa.as_slice().try_into().map_err(|_| "Bozuk ML-DSA public key")?;
-        let sign_pk_mldsa = MlDsaVerifyingKey::<MlDsa65>::decode(&sign_pk_mldsa_encoded);
+        let sign_sk_mldsa = MlDsaSigningKey::<MlDsa87>::from_seed(&sign_sk_mldsa_seed);
+        let sign_pk_mldsa_encoded: EncodedVerifyingKey<MlDsa87> = record.sign_pubkey_mldsa.as_slice().try_into().map_err(|_| "Bozuk ML-DSA public key")?;
+        let sign_pk_mldsa = MlDsaVerifyingKey::<MlDsa87>::decode(&sign_pk_mldsa_encoded);
 
         let kem_sk_x_bytes: [u8; 32] = bundle.kem_sk_x25519.as_slice().try_into().map_err(|_| "Bozuk X25519 secret key")?;
         let kem_sk_x25519 = StaticSecret::from(kem_sk_x_bytes);
@@ -895,10 +900,10 @@ impl P2PCore {
 
         // ML-KEM secret key'i tam serileştirilmiş biçimde saklanıyor (bkz.
         // generate_identity notu — ml-kem'de "seed"ten geri üretim yok).
-        let kem_sk_encoded: ml_kem::Encoded<MlKem768DecapsulationKey> = bundle.kem_sk_mlkem.as_slice().try_into().map_err(|_| "Bozuk Kyber secret key")?;
-        let kem_sk_mlkem = MlKem768DecapsulationKey::from_bytes(&kem_sk_encoded);
-        let kem_pk_encoded: ml_kem::Encoded<MlKem768EncapsulationKey> = record.kem_pubkey_mlkem.as_slice().try_into().map_err(|_| "Bozuk Kyber public key")?;
-        let kem_pk_mlkem = MlKem768EncapsulationKey::from_bytes(&kem_pk_encoded);
+        let kem_sk_encoded: ml_kem::Encoded<MlKem1024DecapsulationKey> = bundle.kem_sk_mlkem.as_slice().try_into().map_err(|_| "Bozuk Kyber secret key")?;
+        let kem_sk_mlkem = MlKem1024DecapsulationKey::from_bytes(&kem_sk_encoded);
+        let kem_pk_encoded: ml_kem::Encoded<MlKem1024EncapsulationKey> = record.kem_pubkey_mlkem.as_slice().try_into().map_err(|_| "Bozuk Kyber public key")?;
+        let kem_pk_mlkem = MlKem1024EncapsulationKey::from_bytes(&kem_pk_encoded);
 
         self.own_device_keys.insert(bundle.device_fingerprint, DeviceKeys {
             sign_sk_ed25519,
@@ -1045,6 +1050,24 @@ impl P2PCore {
             ));
         }
 
+        // Spec dışı, güvenlik denetimi düzeltmesi: önceden bu fonksiyon
+        // `evaluate_sender_device`/spec 2.2 TOFU+uyarı karar ağacına HİÇ
+        // girmiyordu — zaten bilinen bir Contact için gelen BEKLENMEYEN
+        // yeni bir cihaz, hiçbir "tanınmayan cihaz" uyarısı tetiklenmeden
+        // sessizce `known_remote_devices`'a yazılıyordu (bkz. SECURITY.md).
+        // Artık `process_qr_packet`/`process_manual_entry` ile AYNI karar
+        // ağacından geçiyor: yeni kişi ise TOFU ile eklenir (aşağıdaki
+        // `register_contact_from_pairing` çağrısına gerek KALMAZ, bu kolu
+        // `evaluate_sender_device` zaten kendi içinde yapar), bilinen bir
+        // kişinin BEKLENMEYEN yeni cihazıysa spec 2.2 "BLOKLA" kuralı
+        // uygulanır — bu fonksiyon `known_remote_devices`'a HİÇ yazmadan,
+        // sessizce döner; kullanıcı `pending_device_alerts`'ten kabul/red
+        // etmeden bu cihazdan gelen/bu cihaza giden hiçbir paket işlenmez.
+        let outcome = self.evaluate_sender_device(&exchange.identity_id, &exchange.device_fingerprint, false, &exchange.device_name);
+        if outcome == DeviceCheckOutcome::UnverifiedNewDeviceAlert {
+            return Ok(());
+        }
+
         let now = current_time_ms();
         let record = DeviceRecord {
             device_fingerprint: exchange.device_fingerprint.clone(),
@@ -1059,23 +1082,6 @@ impl P2PCore {
         };
         self.persist_remote_device(&record);
         self.known_remote_devices.insert(exchange.device_fingerprint.clone(), record);
-
-        // Spec dışı, tek yönlü QR düzeltmesi: bu IdentityExchange, karşı
-        // tarafın BİZİM QR'ımızı taramasından geliyor olabilir (biz hiç
-        // taramadık) — bu durumda bu identity bizim `contacts` listemizde
-        // henüz YOK, sadece `known_remote_devices`'a düştü. Önceden contact
-        // kaydı SADECE QR'ı tarayan tarafta (`process_qr_packet` ->
-        // `register_contact_from_pairing`) oluşuyordu; pasif/taranan taraf
-        // karşı tarafı hiçbir zaman kişi listesinde göremiyordu — iki
-        // tarafın da birbirinin QR'ını taraması gerekiyordu. Burada da TOFU
-        // olarak ekleyerek tek yönlü taramayı yeterli hale getiriyoruz.
-        if !self.identity_to_contact.contains_key(&exchange.identity_id) {
-            let _ = self.register_contact_from_pairing(
-                exchange.identity_id.clone(),
-                exchange.device_fingerprint.clone(),
-                exchange.device_name.clone(),
-            );
-        }
 
         // Karşı taraf da bize aynı paketi gönderdiyse zaten known_remote_devices
         // doldu; ama tek taraflı taranan bir QR senaryosunda (biz taradık,
@@ -1492,6 +1498,42 @@ impl P2PCore {
         Ok(())
     }
 
+    /// Spec dışı, güvenlik denetimi düzeltmesi: önceden `Contact::
+    /// revoke_device`/`DeviceRecord.is_active` her ikisi de VARDI ama
+    /// hiçbir çağıran onları gerçekten `false`/`Revoked` yapmıyordu — bir
+    /// cihaz asla iptal edilemiyordu (bkz. SECURITY.md). Bu, `delete_contact`
+    /// (kişiyi TAMAMEN siler) ile AYNI temizlik adımlarını yapar ama
+    /// kişiyi/geçmişi SİLMEZ — sadece bu TEK cihaz fingerprint'inden
+    /// gelecek/giden her şeyi durdurur (`receive_message`/
+    /// `process_handshake_init`'teki yeni `is_active` kontrolü sayesinde).
+    /// Aynı kişinin BAŞKA bilinen bir cihazı varsa (spec 1.6 çoklu cihaz
+    /// senaryosu) o etkilenmez.
+    fn revoke_contact_device(&mut self, contact_id: &str, device_fingerprint: &str) -> Result<(), String> {
+        let contact = self.contacts.get_mut(contact_id).ok_or("Kişi bulunamadı")?;
+        contact.revoke_device(device_fingerprint, current_time_ms());
+        if let Some(c) = self.contacts.get(contact_id) {
+            self.persist_contact(c);
+        }
+
+        if let Some(record) = self.known_remote_devices.get_mut(device_fingerprint) {
+            record.is_active = false;
+        }
+        if let Some(record) = self.known_remote_devices.get(device_fingerprint) {
+            self.persist_remote_device(record);
+        }
+
+        self.ratchets.remove(device_fingerprint);
+        self.device_to_peer_id.remove(device_fingerprint);
+        self.clear_persisted_skipped_keys(device_fingerprint);
+        self.awaiting_confirmation.retain(|_, pc| pc.peer_device_fingerprint != device_fingerprint);
+        self.active_downloads.retain(|_, d| d.peer_device_fingerprint != device_fingerprint);
+        if let Some(conn) = &self.db {
+            let _ = conn.execute("DELETE FROM ratchet_states WHERE peer_device_fingerprint = ?1", params![device_fingerprint]);
+            let _ = conn.execute("DELETE FROM skipped_message_keys WHERE peer_device_fingerprint = ?1", params![device_fingerprint]);
+        }
+        Ok(())
+    }
+
     /// Groups tab GUI'sinin listesi için — bkz. `GroupSummary` notu.
     fn list_groups(&self) -> Vec<GroupSummary> {
         let own_identity_id = self.identity.as_ref().map(|i| i.identity_id.clone()).unwrap_or_default();
@@ -1578,7 +1620,7 @@ impl P2PCore {
         to_sign.extend_from_slice(&kyber_ct);
         to_sign.extend_from_slice(&timestamp.to_be_bytes());
         let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
-        let sig_pq: MlDsaSignature<MlDsa65> = own_keys.sign_sk_mldsa.sign(&to_sign);
+        let sig_pq: MlDsaSignature<MlDsa87> = own_keys.sign_sk_mldsa.sign(&to_sign);
 
         let handshake = HandshakeInit {
             sender_identity_id: own_identity_id,
@@ -1615,6 +1657,15 @@ impl P2PCore {
     fn process_handshake_init(&mut self, handshake: &HandshakeInit) -> Result<(), String> {
         let sender = self.known_remote_devices.get(&handshake.sender_device_fingerprint).cloned()
             .ok_or("Unknown sender device; cannot verify signatures")?;
+        // Spec dışı, güvenlik denetimi düzeltmesi: önceden `is_active`
+        // hiçbir yerde kontrol edilmiyordu — bu alanı hiçbir zaman false
+        // yapan bir çağrı yolu da olmadığından pratikte etkisizdi. Artık
+        // `revoke_contact_device` gerçekten `false` yapabiliyor VE burada
+        // gerçekten uygulanıyor: iptal edilmiş bir cihazdan gelen bir el
+        // sıkışma reddedilir.
+        if !sender.is_active {
+            return Err("Sender device has been revoked".to_string());
+        }
 
         let mut to_verify = Vec::new();
         to_verify.extend_from_slice(&handshake.initiator_x25519_pubkey);
@@ -1768,7 +1819,7 @@ impl P2PCore {
         to_sign.extend_from_slice(&ciborium_bytes(&header)?);
         to_sign.extend_from_slice(&ciphertext);
         let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
-        let sig_pq: MlDsaSignature<MlDsa65> = own_keys.sign_sk_mldsa.sign(&to_sign);
+        let sig_pq: MlDsaSignature<MlDsa87> = own_keys.sign_sk_mldsa.sign(&to_sign);
 
         let packet = MessagePacket {
             header,
@@ -1821,6 +1872,7 @@ impl P2PCore {
                 | MessageContent::FileOffer { .. }
                 | MessageContent::SaveRequest { .. }
                 | MessageContent::SaveApproval { .. }
+                | MessageContent::GroupUpdate(_)
         );
         // Ack, kendisi ONAYLANMASA da (bkz. packet.rs notu — sonsuz döngü
         // riski) artık SINIRLI sayıda yeniden dener (bkz.
@@ -1869,6 +1921,11 @@ impl P2PCore {
     fn receive_message(&mut self, packet: &MessagePacket) -> Result<String, String> {
         let sender = self.known_remote_devices.get(&packet.header.sender_device_fingerprint).cloned()
             .ok_or("Unknown sender device; cannot verify signatures")?;
+        // bkz. process_handshake_init aynı notu — güvenlik denetimi
+        // düzeltmesi, artık gerçekten uygulanıyor.
+        if !sender.is_active {
+            return Err("Sender device has been revoked".to_string());
+        }
 
         let mut to_verify = Vec::new();
         to_verify.extend_from_slice(&ciborium_bytes(&packet.header)?);
@@ -2057,6 +2114,31 @@ impl P2PCore {
                     "type": "profile_update", "peer": peer_fp,
                     "avatar_hex": avatar_jpeg.as_ref().map(|a| hex::encode(a))
                 })
+            }
+            MessageContent::GroupUpdate(update) => {
+                // Spec dışı, güvenlik denetimi düzeltmesi: artık ratchet-
+                // şifreli kanaldan geliyor (bkz. packet.rs notu) — bu, DIŞ
+                // paketin (`MessagePacket`) zaten hibrit doğrulanmış
+                // göndericisi (`sender_identity_id`/`peer_fp`) İLE
+                // `update.signed_by`'nin AYNI kişi olması gerekmediği
+                // anlamına gelir (ör. kurucu olmayan bir üye de bu paketi
+                // pairwise iletebilir, sadece bu kod tabanında henüz
+                // relay yok) — asıl yetki kontrolü `process_group_update`
+                // içindeki KENDİ (ayrıca hibrit) `update.signature`/
+                // `signature_pq` doğrulaması ve `signed_by == founder`
+                // kısıtıdır, dış paket imzası sadece taşıma bütünlüğünü
+                // garanti eder.
+                let group_id = update.group_id.clone();
+                match self.process_group_update(&update) {
+                    Ok(()) => {
+                        self.send_ack(&peer_fp, &message_id);
+                        serde_json::json!({"type": "group_updated", "peer": peer_fp, "group_id": group_id})
+                    }
+                    Err(e) => {
+                        error!("GroupUpdate işlenemedi: {}", e);
+                        serde_json::json!({"type": "group_update_failed", "peer": peer_fp, "group_id": group_id, "error": e})
+                    }
+                }
             }
             MessageContent::SaveRequest { file_id, file_name } => {
                 // Biz GÖNDERİCİYİZ — karşı taraf (alıcı), indirdiği bu eki
@@ -2585,7 +2667,15 @@ impl P2PCore {
                 continue;
             }
             if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id) {
-                let _ = self.publish_envelope(&peer_fp, &NetworkEnvelope::GroupUpdate(update.clone()));
+                // Spec dışı, güvenlik denetimi düzeltmesi: önceden bare/
+                // şifrelenmemiş bir NetworkEnvelope::GroupUpdate olarak
+                // gönderiliyordu (sadece Ed25519 imzalı, gossipsub'a AÇIK
+                // METİN yayılıyordu) — artık diğer her şeyle AYNI hibrit
+                // ratchet-şifreli kanaldan gidiyor (bkz. MessageContent::
+                // GroupUpdate, needs_delivery_confirmation listesi).
+                if let Err(e) = self.send_message_content(peer_fp, &MessageContent::GroupUpdate(update.clone()), None) {
+                    error!("GroupUpdate bir üyeye gönderilemedi: {}", e);
+                }
             }
         }
         Ok(())
@@ -2618,7 +2708,15 @@ impl P2PCore {
         }
         for member_identity_id in remaining_targets {
             if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id) {
-                let _ = self.publish_envelope(&peer_fp, &NetworkEnvelope::GroupUpdate(update.clone()));
+                // Spec dışı, güvenlik denetimi düzeltmesi: önceden bare/
+                // şifrelenmemiş bir NetworkEnvelope::GroupUpdate olarak
+                // gönderiliyordu (sadece Ed25519 imzalı, gossipsub'a AÇIK
+                // METİN yayılıyordu) — artık diğer her şeyle AYNI hibrit
+                // ratchet-şifreli kanaldan gidiyor (bkz. MessageContent::
+                // GroupUpdate, needs_delivery_confirmation listesi).
+                if let Err(e) = self.send_message_content(peer_fp, &MessageContent::GroupUpdate(update.clone()), None) {
+                    error!("GroupUpdate bir üyeye gönderilemedi: {}", e);
+                }
             }
         }
         Ok(())
@@ -2651,7 +2749,15 @@ impl P2PCore {
         let targets = group.other_members(&own_identity_id);
         for member_identity_id in targets {
             if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id) {
-                let _ = self.publish_envelope(&peer_fp, &NetworkEnvelope::GroupUpdate(update.clone()));
+                // Spec dışı, güvenlik denetimi düzeltmesi: önceden bare/
+                // şifrelenmemiş bir NetworkEnvelope::GroupUpdate olarak
+                // gönderiliyordu (sadece Ed25519 imzalı, gossipsub'a AÇIK
+                // METİN yayılıyordu) — artık diğer her şeyle AYNI hibrit
+                // ratchet-şifreli kanaldan gidiyor (bkz. MessageContent::
+                // GroupUpdate, needs_delivery_confirmation listesi).
+                if let Err(e) = self.send_message_content(peer_fp, &MessageContent::GroupUpdate(update.clone()), None) {
+                    error!("GroupUpdate bir üyeye gönderilemedi: {}", e);
+                }
             }
         }
         Ok(())
@@ -2665,11 +2771,10 @@ impl P2PCore {
         to_verify.extend_from_slice(&update.new_version.to_be_bytes());
         to_verify.extend_from_slice(&ciborium_bytes(&update.change)?);
         to_verify.extend_from_slice(update.group_name.as_bytes());
-        // NOT: GroupUpdate sadece Ed25519 imzası taşıyor (packet.rs
-        // GroupUpdate.signature tek alan) — MessagePacket'teki hibrit
-        // (Ed25519+ML-DSA) modeliyle tam tutarlı değil, bkz. dosya sonu
-        // "bilinen eksikler" notu.
-        verify_hybrid_signature(&to_verify, &update.signature, &[], &signer)
+        // Artık MessagePacket/HandshakeInit ile AYNI hibrit (Ed25519+ML-DSA)
+        // model — bkz. sign_group_update/packet.rs GroupUpdate.signature_pq
+        // notu (güvenlik denetimi düzeltmesi).
+        verify_hybrid_signature(&to_verify, &update.signature, &update.signature_pq, &signer)
             .map_err(|_| "GroupUpdate signature verification failed".to_string())?;
 
         // signed_by_device'ın kurucunun bilinen/Active bir cihazı olup
@@ -3753,17 +3858,13 @@ impl P2PCore {
                 let text = self.receive_message(&m)?;
                 Ok(Some(text))
             }
-            NetworkEnvelope::GroupUpdate(u) => {
-                self.record_peer_id_if_known(source, &u.signed_by_device);
-                self.process_group_update(&u)?;
-                Ok(None)
-            }
             NetworkEnvelope::GroupInvite(_) | NetworkEnvelope::DeviceAdd(_) | NetworkEnvelope::ReadReceipt(_) | NetworkEnvelope::DeviceRevoke(_) => {
                 // Aşama A minimum kapsamı: GroupInvite (davetin kendisi
-                // GroupUpdate(Add) ile taşınıyor, bkz. spec 5.4), DeviceAdd/
-                // DeviceRevoke (Aşama B, çoklu cihaz) ve ReadReceipt (Aşama
-                // B, spec 1.7.1) için işleme henüz kablolanmadı. Sessizce
-                // yok say.
+                // artık MessageContent::GroupUpdate(Add) ile ratchet-şifreli
+                // kanaldan taşınıyor, bkz. spec 5.4 + güvenlik denetimi
+                // düzeltmesi), DeviceAdd/DeviceRevoke (Aşama B, çoklu cihaz)
+                // ve ReadReceipt (Aşama B, spec 1.7.1) için işleme henüz
+                // kablolanmadı. Sessizce yok say.
                 Ok(None)
             }
         }
@@ -3914,21 +4015,29 @@ fn is_private_lan_multiaddr(addr: &Multiaddr) -> bool {
     })
 }
 
+/// Spec dışı, güvenlik denetimi sertleştirmesi: ÖNCEDEN her iki imza alanı
+/// da opsiyoneldi (boşsa o kısım sessizce ATLANIYORDU) — bu, klasik-sadece
+/// veya PQ-sadece imzalı bir paketin de kabul edilebilmesi anlamına
+/// geliyordu (o an hiçbir çağıran bunu istismar etmiyordu ama fonksiyonun
+/// kendisi bunu ZORUNLU kılmıyordu). Artık HER İKİ imza da dolu olmalı —
+/// hibrit korumanın "post-kuantum güvenli" iddiasının, gelecekte bir
+/// çağıran yanlışlıkla boş bir `sig_pq` geçirse bile sessizce klasiğe
+/// düşmeyeceğinden emin olunur.
 fn verify_hybrid_signature(message: &[u8], sig_classical: &[u8], sig_pq: &[u8], sender: &DeviceRecord) -> Result<(), String> {
-    if !sig_classical.is_empty() {
-        let pk_bytes: [u8; 32] = sender.sign_pubkey_ed25519.clone().try_into().map_err(|_| "Bad Ed25519 key length")?;
-        let pk = VerifyingKey::from_bytes(&pk_bytes).map_err(|_| "Bad Ed25519 key")?;
-        let sig_bytes: [u8; 64] = sig_classical.to_vec().try_into().map_err(|_| "Bad signature length")?;
-        let sig = Ed25519Signature::from_bytes(&sig_bytes);
-        pk.verify(message, &sig).map_err(|_| "Ed25519 verification failed")?;
+    if sig_classical.is_empty() || sig_pq.is_empty() {
+        return Err("Hybrid signature requires both classical and post-quantum components".to_string());
     }
-    if !sig_pq.is_empty() {
-        let pk_encoded: EncodedVerifyingKey<MlDsa65> = sender.sign_pubkey_mldsa.as_slice().try_into().map_err(|_| "Bad ML-DSA key")?;
-        let pk = MlDsaVerifyingKey::<MlDsa65>::decode(&pk_encoded);
-        let sig_encoded: EncodedSignature<MlDsa65> = sig_pq.try_into().map_err(|_| "Bad PQ signature")?;
-        let sig = MlDsaSignature::<MlDsa65>::decode(&sig_encoded).ok_or("Bad PQ signature")?;
-        pk.verify(message, &sig).map_err(|_| "ML-DSA verification failed")?;
-    }
+    let pk_bytes: [u8; 32] = sender.sign_pubkey_ed25519.clone().try_into().map_err(|_| "Bad Ed25519 key length")?;
+    let pk = VerifyingKey::from_bytes(&pk_bytes).map_err(|_| "Bad Ed25519 key")?;
+    let sig_bytes: [u8; 64] = sig_classical.to_vec().try_into().map_err(|_| "Bad signature length")?;
+    let sig = Ed25519Signature::from_bytes(&sig_bytes);
+    pk.verify(message, &sig).map_err(|_| "Ed25519 verification failed")?;
+
+    let pk_encoded: EncodedVerifyingKey<MlDsa87> = sender.sign_pubkey_mldsa.as_slice().try_into().map_err(|_| "Bad ML-DSA key")?;
+    let pk = MlDsaVerifyingKey::<MlDsa87>::decode(&pk_encoded);
+    let sig_encoded: EncodedSignature<MlDsa87> = sig_pq.try_into().map_err(|_| "Bad PQ signature")?;
+    let sig = MlDsaSignature::<MlDsa87>::decode(&sig_encoded).ok_or("Bad PQ signature")?;
+    pk.verify(message, &sig).map_err(|_| "ML-DSA verification failed")?;
     Ok(())
 }
 
@@ -3948,13 +4057,14 @@ fn sign_group_update(
     // `group_name` de imzalanan veriye dahil — aksi halde bir relay/node bu
     // alanı sessizce değiştirebilirdi (imza sadece `change`'i koruyordu).
     to_sign.extend_from_slice(group_name.as_bytes());
+    // Spec dışı, güvenlik denetimi düzeltmesi: GroupUpdate artık
+    // MessagePacket/HandshakeInit ile AYNI hibrit (Ed25519 + ML-DSA)
+    // imza modelini kullanıyor — önceden SADECE klasik Ed25519 imzalıydı,
+    // bu da kurucu yetkisinin (üye ekleme/çıkarma/yeniden adlandırma/
+    // avatar) kuantum-yetenekli bir saldırgan tarafından sahtelenebilir
+    // olması anlamına geliyordu.
     let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
-    // Spec 3.3 formatındaki "signature" tekil alanla tutarlı olsun diye
-    // GroupUpdate tek bir `signature` alanı taşıyor (packet.rs) — burada
-    // hibrit imzanın klasik kısmını kullanıyoruz; ML-DSA kısmı ayrıca
-    // kontrol edilmiyor çünkü GroupUpdate struct'ı tek imza alanı
-    // tanımlıyor (KNOWN GAP: packet.rs'e ikinci bir signature_pq alanı
-    // eklenmesi, MessagePacket ile tutarlılık için önerilir).
+    let sig_pq: MlDsaSignature<MlDsa87> = own_keys.sign_sk_mldsa.sign(&to_sign);
     Ok(GroupUpdate {
         group_id: group_id.to_string(),
         new_version,
@@ -3963,6 +4073,7 @@ fn sign_group_update(
         signed_by: signed_by.to_string(),
         signed_by_device: signed_by_device.to_string(),
         signature: sig_classical.to_bytes().to_vec(),
+        signature_pq: sig_pq.encode().to_vec(),
     })
 }
 
@@ -4605,6 +4716,24 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteContact<'local>(mut e
         Ok(Ok(())) => "OK".to_string(),
         Ok(Err(e)) => { error!("delete_contact failed: {}", e); format!("Error: {}", e) }
         Err(e) => { error!("delete_contact panicked: {}", e); format!("Error: {}", e) }
+    };
+    env.new_string(out).unwrap().into_raw()
+}
+
+/// Bir kişinin TEK bir cihazını iptal eder (kişiyi/geçmişi SİLMEZ) — bkz.
+/// `P2PCore::revoke_contact_device`.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_revokeContactDevice<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, contact_id: JString<'local>, device_fingerprint: JString<'local>) -> jstring {
+    let contact_id_str: String = env.get_string(&contact_id).map(|s| s.into()).unwrap_or_default();
+    let fp_str: String = env.get_string(&device_fingerprint).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let mut core = core_lock();
+        core.revoke_contact_device(&contact_id_str, &fp_str)
+    });
+    let out = match result {
+        Ok(Ok(())) => "OK".to_string(),
+        Ok(Err(e)) => { error!("revoke_contact_device failed: {}", e); format!("Error: {}", e) }
+        Err(e) => { error!("revoke_contact_device panicked: {}", e); format!("Error: {}", e) }
     };
     env.new_string(out).unwrap().into_raw()
 }

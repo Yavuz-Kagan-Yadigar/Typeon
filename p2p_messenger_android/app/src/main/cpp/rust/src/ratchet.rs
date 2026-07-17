@@ -1,6 +1,6 @@
 //! Double Ratchet — Description.md bölüm 3.
 //!
-//! - 3.1: hibrit KEM oturum kurulumu (X25519 + ML-KEM-768).
+//! - 3.1: hibrit KEM oturum kurulumu (X25519 + ML-KEM-1024).
 //! - 3.2: simetrik ratchet (her mesajda ilerler) + DH/KEM ratchet
 //!   (30 dakikada bir yeni X25519+ML-KEM çifti üretilip yeniden anahtar
 //!   değişimi yapılır — break-in recovery).
@@ -11,7 +11,7 @@
 //! kullanıyordu — o crate artık bakımsız (RUSTSEC-2024-0381) VE PQClean'in
 //! round-3 taslak Kyber implementasyonuna dayanıyordu, gerçek NIST FIPS 203
 //! ML-KEM standardıyla bayt-uyumsuz. Şimdi RustCrypto'nun aktif bakımlı
-//! `ml-kem` crate'i (gerçek FIPS 203 ML-KEM-768) kullanılıyor. ml-kem'in
+//! `ml-kem` crate'i (gerçek FIPS 203 ML-KEM-1024) kullanılıyor. ml-kem'in
 //! `Decapsulate`/`Encapsulate` trait'leri ayrı bir `kem` crate'inden geliyor
 //! (bkz. Cargo.toml notu) ve üretim/encapsulate her zaman elle bir
 //! `CryptoRngCore` ister — `rand::rngs::OsRng` (rand 0.8) bunun için zaten
@@ -21,15 +21,15 @@ use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use hkdf::Hkdf;
 use kem::{Decapsulate, Encapsulate};
-use ml_kem::{Ciphertext as MlKemCiphertext, EncodedSizeUser, KemCore, MlKem768};
+use ml_kem::{Ciphertext as MlKemCiphertext, EncodedSizeUser, KemCore, MlKem1024};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
-pub type MlKem768DecapsulationKey = ml_kem::kem::DecapsulationKey<ml_kem::MlKem768Params>;
-pub type MlKem768EncapsulationKey = ml_kem::kem::EncapsulationKey<ml_kem::MlKem768Params>;
+pub type MlKem1024DecapsulationKey = ml_kem::kem::DecapsulationKey<ml_kem::MlKem1024Params>;
+pub type MlKem1024EncapsulationKey = ml_kem::kem::EncapsulationKey<ml_kem::MlKem1024Params>;
 
 /// Spec 3.2 kararı: DH/KEM ratchet adımı 30 dakikada bir (mesaj sayısından
 /// bağımsız, zaman bazlı).
@@ -72,11 +72,11 @@ pub struct DeviceRatchetState {
     /// Bu tarafın kendi güncel DH/KEM ratchet anahtar çifti (bir sonraki
     /// rotasyonda karşı tarafa gönderilecek yeni public key'in kaynağı).
     pub own_x25519_secret: StaticSecret,
-    pub own_kyber_secret: MlKem768DecapsulationKey,
+    pub own_kyber_secret: MlKem1024DecapsulationKey,
     /// Karşı taraftan en son alınan ratchet public key'i (rotasyon
     /// tetiklendiğinde bunlara karşı yeni DH/KEM yapılır).
     pub peer_x25519_pubkey: X25519PublicKey,
-    pub peer_kyber_pubkey: MlKem768EncapsulationKey,
+    pub peer_kyber_pubkey: MlKem1024EncapsulationKey,
     /// Bu yönde gönderilen mesaj sayacı (spec 3.3 `message_number`).
     pub send_message_number: u32,
     /// Karşı taraftan alınan mesaj sayacı — tekrar oynatma / sıra dışı
@@ -115,7 +115,7 @@ pub struct DeviceRatchetState {
 }
 
 /// `DeviceRatchetState`'in diske (şifreli) yazılabilir hâli — secret key
-/// tipleri (`StaticSecret`/`MlKem768DecapsulationKey`/...) doğrudan
+/// tipleri (`StaticSecret`/`MlKem1024DecapsulationKey`/...) doğrudan
 /// `Serialize` implement etmiyor, bu yüzden hepsi ham bayt dizisine
 /// dönüştürülür (aynen `lib.rs`'teki `SecretKeyBundle`'ın kendi cihaz
 /// anahtarları için yaptığı gibi — bkz. `generate_identity`/
@@ -166,14 +166,14 @@ impl DeviceRatchetState {
     /// `load_skipped_keys_from_db`) — bu fonksiyon kendisi o tabloya
     /// erişmez (ratchet.rs kripto-only katman, dosya başı notuyla tutarlı).
     pub fn from_persistable(s: SerializableRatchetState, skipped_keys: HashMap<u32, [u8; 32]>) -> Result<Self, String> {
-        let own_kyber_encoded: ml_kem::Encoded<MlKem768DecapsulationKey> = s.own_kyber_secret.as_slice()
+        let own_kyber_encoded: ml_kem::Encoded<MlKem1024DecapsulationKey> = s.own_kyber_secret.as_slice()
             .try_into().map_err(|_| "Bozuk kayıtlı Kyber secret key")?;
         Ok(DeviceRatchetState {
             root_key: s.root_key,
             ck_send: s.ck_send,
             ck_recv: s.ck_recv,
             own_x25519_secret: StaticSecret::from(s.own_x25519_secret),
-            own_kyber_secret: MlKem768DecapsulationKey::from_bytes(&own_kyber_encoded),
+            own_kyber_secret: MlKem1024DecapsulationKey::from_bytes(&own_kyber_encoded),
             peer_x25519_pubkey: X25519PublicKey::from(s.peer_x25519_pubkey),
             peer_kyber_pubkey: kyber_pubkey_from_bytes(&s.peer_kyber_pubkey)?,
             send_message_number: s.send_message_number,
@@ -241,7 +241,7 @@ impl DeviceRatchetState {
         let dh_shared = own_x25519_secret.diffie_hellman(&peer_x25519_pk);
 
         // Kendi taze Kyber çiftimizi üret.
-        let (own_kyber_secret, _own_kyber_ek) = MlKem768::generate(&mut csprng);
+        let (own_kyber_secret, _own_kyber_ek) = MlKem1024::generate(&mut csprng);
         let own_kyber_public_bytes = own_kyber_secret.encapsulation_key().as_bytes().to_vec();
 
         let peer_kyber_pk = kyber_pubkey_from_bytes(peer_kyber_pubkey)?;
@@ -277,7 +277,7 @@ impl DeviceRatchetState {
     /// ve Kyber ciphertext'i kullanarak aynı anahtarları türetir.
     pub fn respond(
         own_x25519_secret: StaticSecret,
-        own_kyber_secret: MlKem768DecapsulationKey,
+        own_kyber_secret: MlKem1024DecapsulationKey,
         initiator_x25519_pubkey: &[u8],
         initiator_kyber_pubkey: &[u8],
         kyber_ciphertext: &[u8],
@@ -348,7 +348,7 @@ impl DeviceRatchetState {
     pub fn perform_dh_ratchet(&mut self) -> Result<Vec<u8>, String> {
         let mut csprng = OsRng;
         let new_x25519_secret = StaticSecret::random_from_rng(&mut csprng);
-        let (new_kyber_secret, _new_kyber_ek) = MlKem768::generate(&mut csprng);
+        let (new_kyber_secret, _new_kyber_ek) = MlKem1024::generate(&mut csprng);
 
         let dh_shared = new_x25519_secret.diffie_hellman(&self.peer_x25519_pubkey);
         let (kyber_ct, kyber_shared) = self.peer_kyber_pubkey.encapsulate(&mut csprng).map_err(|_| "Kyber encapsulate failed")?;
@@ -577,20 +577,20 @@ fn nonce_from_message_number(n: u32) -> Nonce {
     *Nonce::from_slice(&bytes)
 }
 
-/// Ham bayt dizisinden bir ML-KEM-768 EncapsulationKey (public key) ayrıştırır.
+/// Ham bayt dizisinden bir ML-KEM-1024 EncapsulationKey (public key) ayrıştırır.
 /// `EncodedSizeUser::from_bytes` bu implementasyonda infallible'dır (ml-kem
 /// public key noktası doğrulaması yapmaz, sadece boy kontrolü `try_into()`
 /// ile burada yapılır). `hybrid_array::Array<T,N>` doğrudan `TryFrom<&[u8]>`
 /// implement ediyor, bu yüzden `bytes.try_into()` derlenir.
-fn kyber_pubkey_from_bytes(bytes: &[u8]) -> Result<MlKem768EncapsulationKey, String> {
-    let encoded: ml_kem::Encoded<MlKem768EncapsulationKey> = bytes
+fn kyber_pubkey_from_bytes(bytes: &[u8]) -> Result<MlKem1024EncapsulationKey, String> {
+    let encoded: ml_kem::Encoded<MlKem1024EncapsulationKey> = bytes
         .try_into()
         .map_err(|_| "Bad Kyber public key length".to_string())?;
-    Ok(MlKem768EncapsulationKey::from_bytes(&encoded))
+    Ok(MlKem1024EncapsulationKey::from_bytes(&encoded))
 }
 
-/// Ham bayt dizisinden bir ML-KEM-768 Ciphertext ayrıştırır.
-fn kyber_ciphertext_from_bytes(bytes: &[u8]) -> Result<MlKemCiphertext<MlKem768>, String> {
+/// Ham bayt dizisinden bir ML-KEM-1024 Ciphertext ayrıştırır.
+fn kyber_ciphertext_from_bytes(bytes: &[u8]) -> Result<MlKemCiphertext<MlKem1024>, String> {
     bytes.try_into().map_err(|_| "Bad Kyber ciphertext length".to_string())
 }
 
@@ -637,8 +637,8 @@ mod tests {
         (secret, public)
     }
 
-    fn fresh_identity_kyber() -> (MlKem768DecapsulationKey, Vec<u8>) {
-        let (sk, _ek) = MlKem768::generate(&mut OsRng);
+    fn fresh_identity_kyber() -> (MlKem1024DecapsulationKey, Vec<u8>) {
+        let (sk, _ek) = MlKem1024::generate(&mut OsRng);
         let pk_bytes = sk.encapsulation_key().as_bytes().to_vec();
         (sk, pk_bytes)
     }
