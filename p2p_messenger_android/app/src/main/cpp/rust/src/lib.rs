@@ -244,7 +244,51 @@ impl MessageSendStatus {
 
 /// Bir zarfın `pending_envelopes`'te ne kadar süre bekleyebileceği — bu
 /// süre dolunca kalıcı olarak "Failed" sayılır (bkz. `MessageSendStatus`).
+/// SADECE `awaiting_confirmation` kapsamına GİRMEYEN zarf türleri
+/// (Handshake, IdentityExchange, GroupUpdate, Ack, HistorySyncResponse,
+/// FileOffer) bu sınırlı kuyruğu kullanır — Text/Edit/Delete/
+/// HistorySyncRequest artık aşağıdaki `awaiting_confirmation` mekanizması
+/// üzerinden SÜRESİZ (karşı taraf onaylayana kadar) yeniden denenir.
 const PENDING_ENVELOPE_TIMEOUT_MS: u64 = 20_000;
+
+/// Spec dışı, kullanıcı tarafından istenen güvenilir teslim: `Text`
+/// (grup DIŞI)/`Edit`/`Delete`/`HistorySyncRequest` içerikli paketler,
+/// karşı taraftan bir `Ack` (veya HistorySyncRequest için doğrudan
+/// `HistorySyncResponse`) alınana kadar bu aralıklarla tekrar tekrar
+/// gönderilir — üstel geri çekilme (exponential backoff), `MAX` ile
+/// sınırlı. `gossipsub.publish()`'in yerel başarısı, karşı tarafın
+/// GERÇEKTEN aldığının garantisi DEĞİLDİR (bkz. `awaiting_confirmation`
+/// alanı dokümantasyonu) — bu yüzden eski `pending_envelopes` kuyruğunun
+/// aksine burada bir üst zaman sınırı YOK, kullanıcı açıkça "karşı taraf
+/// onaylayana kadar sürekli dene" istedi.
+const ACK_RETRY_INITIAL_MS: u64 = 5_000;
+const ACK_RETRY_MAX_MS: u64 = 120_000;
+
+/// Bkz. `P2PCore.awaiting_confirmation` dokümantasyonu.
+/// BİLİNEN SINIR: bu paket, belirli bir ratchet zincir adımına (`ck_send`
+/// durumuna) karşı şifrelendi — eğer bu peer'le olan oturum, onay
+/// gelmeden ÖNCE bir DH/KEM rotasyonu yaşarsa (spec 3.2, 30 dakikada bir),
+/// alıcı tarafın o eski zincire ait skipped-key önbelleği rotasyonda
+/// TEMİZLENİR (bkz. ratchet.rs `perform_dh_ratchet`/`respond_to_rotation`
+/// notu — bu, forward secrecy'nin doğal/istenen bir sonucu). Böyle bir
+/// durumda bu retry artık kalıcı olarak çözülemez hâle gelir — pratikte
+/// bu, "mesaj 30+ dakika boyunca hiç onaylanmadı" gibi nadir bir kenar
+/// durumu (yaygın "karşı taraf birkaç saniye/dakika erişilemezdi" durumunu
+/// ETKİLEMEZ). Tam çözüm (rotasyon algılandığında bekleyen paketleri YENİ
+/// zincir altında yeniden şifreleyip AYNI message_id ile göndermek),
+/// bilinçli olarak bu turun kapsamı dışında bırakıldı — forward-secrecy
+/// mekanizmasıyla etkileşimi dikkatli test gerektirir.
+struct PendingConfirmation {
+    peer_device_fingerprint: String,
+    /// Zaten şifrelenmiş/imzalanmış paket — her yeniden denemede AYNEN
+    /// tekrar gönderilir, YENİDEN ŞİFRELENMEZ (ratchet'i tekrar
+    /// ilerletmek, karşı tarafın "aynı mantıksal mesaj" olarak
+    /// tanımasını imkansız kılardı — bkz. ratchet.rs simetrik zincir
+    /// notu).
+    envelope: NetworkEnvelope,
+    next_retry_at: u64,
+    retry_interval_ms: u64,
+}
 
 struct P2PCore {
     db: Option<Connection>,
@@ -352,6 +396,16 @@ struct P2PCore {
     /// doğrudan erişemiyor; burada biriktirilip döngü sonunda `results`'a
     /// taşınır (bkz. `pending_envelopes`'in retry kuyruğuyla aynı desen).
     attachment_events: Vec<String>,
+    /// Spec dışı, kullanıcı tarafından istenen güvenilir teslim: key =
+    /// gönderilen paketin KENDİ `message_id`'si (Text/Edit/Delete/
+    /// HistorySyncRequest paketleri). Karşı taraftan onay (Ack veya
+    /// HistorySyncResponse) gelene kadar `poll_events` bu map'teki her
+    /// girdiyi periyodik olarak yeniden yayınlar (bkz.
+    /// `ACK_RETRY_INITIAL_MS`/`ACK_RETRY_MAX_MS`). `gossipsub.publish()`
+    /// başarısı yerel bir garanti olduğundan (bkz. dosya başı not, eski
+    /// `pending_envelopes`'in neden yetersiz kaldığı), bu, uygulamanın TEK
+    /// gerçek uçtan uca teslim garantisi katmanıdır.
+    awaiting_confirmation: HashMap<String, PendingConfirmation>,
 }
 
 impl P2PCore {
@@ -393,6 +447,7 @@ impl P2PCore {
             active_downloads: HashMap::new(),
             download_request_ids: HashMap::new(),
             attachment_events: Vec::new(),
+            awaiting_confirmation: HashMap::new(),
         }
     }
 
@@ -1423,19 +1478,30 @@ impl P2PCore {
             }
         }
 
-        // Spec dışı sağlamlaştırma: ilk bağlantıdan sonraki ilk birkaç
-        // saniyede gossipsub mesh'i henüz oluşmamış olabilir — bu durumda
-        // publish anında "InsufficientPeers"/"NoPeersSubscribedToTopic" ile
-        // başarısız olur. `publish_envelope` bunu kendi içinde yeniden
-        // deneme kuyruğuna (`pending_envelopes`) zaten ekliyor, biz burada
-        // sadece loglayıp `message_id`'yi YİNE DE döndürüyoruz — şifreleme/
-        // imzalama (asıl önemli olan kısım) zaten tamamlandı, paket
-        // `poll_events` tarafından bağlantı kurulunca otomatik olarak
-        // gönderilecek. Çağıran tarafın (Kotlin/ChatActivity) mesajı hemen
-        // göstermesi ve aynı `message_id` ile edit/delete edebilmesi için
-        // bu senkron dönüş şart — "bağlandı ama ilk mesaj sessizce kayboldu"
-        // sorununun kaynağı tam olarak buradaki eski davranıştı.
-        if let Err(e) = self.publish_envelope(&peer_device_fingerprint, &NetworkEnvelope::Message(packet)) {
+        // Spec dışı, kullanıcı tarafından istenen güvenilir teslim:
+        // Text (grup DIŞI)/Edit/Delete/HistorySyncRequest, karşı taraftan
+        // bir onay (Ack veya HistorySyncResponse) gelene kadar SÜRESİZ
+        // yeniden gönderilir (bkz. `awaiting_confirmation` dokümantasyonu)
+        // — `gossipsub.publish()`'in yerel başarısı karşı tarafın GERÇEKTEN
+        // aldığının garantisi değildir, bu yüzden tek seferlik/zaman
+        // sınırlı `publish_envelope`/`pending_envelopes` yetersizdi (bazı
+        // mesajlar/düzenlemeler/silmeler hiç karşı tarafa ulaşmadan
+        // sessizce "gönderildi" sayılıyordu). Diğer içerik türleri (Ack,
+        // HistorySyncResponse, FileOffer, grup mesajları) eski davranışı
+        // (tek seferlik, kısa süreli yeniden deneme) korur — Ack zaten
+        // kendisi onaylanmıyor (sonsuz döngü riski), grup mesajlarının
+        // N-yönlü fan-out'u bu mekanizmayı karmaşıklaştırırdı (bilinen
+        // sınır, ileride genişletilebilir).
+        let needs_delivery_confirmation = matches!(
+            content,
+            MessageContent::Text { group_id: None, .. }
+                | MessageContent::Edit { .. }
+                | MessageContent::Delete { .. }
+                | MessageContent::HistorySyncRequest { .. }
+        );
+        if needs_delivery_confirmation {
+            self.publish_with_ack_tracking(&peer_device_fingerprint, &message_id, NetworkEnvelope::Message(packet));
+        } else if let Err(e) = self.publish_envelope(&peer_device_fingerprint, &NetworkEnvelope::Message(packet)) {
             error!("Mesaj gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
         }
         let status = self.message_status.get(&message_id).copied().unwrap_or(MessageSendStatus::Pending);
@@ -1529,6 +1595,7 @@ impl P2PCore {
                 if self.node_mode_enabled {
                     let _ = self.archive_message(&peer_fp, "received", text.as_bytes());
                 }
+                self.send_ack(&peer_fp, &message_id);
                 serde_json::json!({"type": "message", "peer": peer_fp, "message_id": message_id, "text": text})
             }
             MessageContent::Text { group_id: Some(gid), text } => {
@@ -1544,9 +1611,11 @@ impl P2PCore {
                 })
             }
             MessageContent::Edit { target_message_id, new_text } => {
+                self.send_ack(&peer_fp, &message_id);
                 serde_json::json!({"type": "edit", "peer": peer_fp, "message_id": target_message_id, "text": new_text})
             }
             MessageContent::Delete { target_message_id } => {
+                self.send_ack(&peer_fp, &message_id);
                 serde_json::json!({"type": "delete", "peer": peer_fp, "message_id": target_message_id})
             }
             MessageContent::HistorySyncRequest { limit } => {
@@ -1560,13 +1629,21 @@ impl P2PCore {
                 let messages: Vec<(String, String, u64)> = history.into_iter()
                     .map(|m| (m.direction, m.text, m.timestamp))
                     .collect();
-                let response = MessageContent::HistorySyncResponse { messages };
+                // `request_id`, isteyen tarafın bu yanıtı doğru
+                // `awaiting_confirmation` girdisine eşleyip yeniden
+                // deneme kuyruğundan çıkarabilmesi için isteğin KENDİ
+                // `message_id`'sini taşır (bkz. packet.rs notu).
+                let response = MessageContent::HistorySyncResponse { request_id: message_id.clone(), messages };
                 if let Err(e) = self.send_message_content(peer_fp.clone(), &response, None) {
                     error!("HistorySyncResponse gönderilemedi: {}", e);
                 }
                 serde_json::json!({"type": "history_sync_requested", "peer": peer_fp})
             }
-            MessageContent::HistorySyncResponse { messages } => {
+            MessageContent::HistorySyncResponse { request_id, messages } => {
+                // Bu yanıt geldi — göndericinin (bizim) o isteği artık
+                // yeniden denemesine gerek yok (bkz. `awaiting_confirmation`
+                // dokümantasyonu).
+                self.awaiting_confirmation.remove(&request_id);
                 // `messages`'in direction'ı YANITLAYANIN (arşivi tutan
                 // node'un) bakış açısıyla geldi — bizim ekranımız için ters
                 // çevrilmeli: onların "sent"i bizim "received"imiz, onların
@@ -1601,8 +1678,29 @@ impl P2PCore {
             MessageContent::FileOffer { group_id, file_id, file_name, mime_type, total_size, file_key, sha256_hex, preview_jpeg } => {
                 self.receive_file_offer(&peer_fp, group_id, &file_id, &file_name, &mime_type, total_size, &file_key, &sha256_hex, &preview_jpeg)
             }
+            MessageContent::Ack { target_message_id } => {
+                // Karşı taraf bizim gönderdiğimiz bir Text/Edit/Delete/
+                // HistorySyncRequest'i başarıyla aldı — o paketi artık
+                // yeniden denemeyi bırakabiliriz (bkz.
+                // `awaiting_confirmation` dokümantasyonu).
+                self.awaiting_confirmation.remove(&target_message_id);
+                serde_json::json!({"type": "ack", "peer": peer_fp, "message_id": target_message_id})
+            }
         };
         Ok(event.to_string())
+    }
+
+    /// bkz. `MessageContent::Ack` dokümantasyonu (packet.rs) — Text (grup
+    /// dışı)/Edit/Delete/HistorySyncRequest başarıyla işlendiğinde
+    /// gönderene geri gönderilir. Fire-and-forget: bu çağrının kendisi
+    /// `send_message_content`'in normal (kısa süreli, `pending_envelopes`
+    /// tabanlı) yolundan geçer — Ack'in KENDİSİ `awaiting_confirmation`'a
+    /// eklenmez (sonsuz döngü riski, bkz. packet.rs notu).
+    fn send_ack(&mut self, peer_device_fingerprint: &str, target_message_id: &str) {
+        let content = MessageContent::Ack { target_message_id: target_message_id.to_string() };
+        if let Err(e) = self.send_message_content(peer_device_fingerprint.to_string(), &content, None) {
+            error!("Ack gönderilemedi: {}", e);
+        }
     }
 
     /// Spec dışı: node modu kapalı bir cihazda sohbet ekranı hiç yerel
@@ -2755,6 +2853,68 @@ impl P2PCore {
         Ok(())
     }
 
+    /// bkz. `awaiting_confirmation` alanı dokümantasyonu — `publish_envelope`
+    /// gibi ilk denemeyi hemen yapar (durumu/aynı şekilde günceller), ama
+    /// SONRASINDA da (ilk deneme başarılı olsa BİLE) karşı taraftan bir
+    /// onay gelene kadar paketi periyodik olarak yeniden göndermeye devam
+    /// eder — `pending_envelopes`'in aksine bir üst zaman sınırı yoktur.
+    fn publish_with_ack_tracking(&mut self, target_device_fingerprint: &str, message_id: &str, envelope: NetworkEnvelope) {
+        let now = current_time_ms();
+        match self.try_publish_raw(target_device_fingerprint, &envelope) {
+            Ok(()) => {
+                if let NetworkEnvelope::Message(m) = &envelope {
+                    self.message_status.insert(m.header.message_id.clone(), MessageSendStatus::Sent);
+                }
+            }
+            Err(e) => {
+                error!("İlk gönderim denemesi başarısız (onay alınana kadar yeniden denenecek): {}", e);
+                if let NetworkEnvelope::Message(m) = &envelope {
+                    self.message_status.insert(m.header.message_id.clone(), MessageSendStatus::Pending);
+                }
+            }
+        }
+        self.awaiting_confirmation.insert(message_id.to_string(), PendingConfirmation {
+            peer_device_fingerprint: target_device_fingerprint.to_string(),
+            envelope,
+            next_retry_at: now + ACK_RETRY_INITIAL_MS,
+            retry_interval_ms: ACK_RETRY_INITIAL_MS,
+        });
+    }
+
+    /// `poll_events`'ten çağrılır — `awaiting_confirmation`'daki, süresi
+    /// gelmiş her girdiyi (yeniden şifrelemeden) tekrar yayınlar ve bir
+    /// sonraki deneme aralığını üstel olarak büyütür (`ACK_RETRY_MAX_MS`
+    /// ile sınırlı).
+    fn retry_unconfirmed_messages(&mut self) {
+        let now = current_time_ms();
+        let due_ids: Vec<String> = self.awaiting_confirmation.iter()
+            .filter(|(_, p)| p.next_retry_at <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for message_id in due_ids {
+            let (peer_fp, envelope) = match self.awaiting_confirmation.get(&message_id) {
+                Some(p) => (p.peer_device_fingerprint.clone(), p.envelope.clone()),
+                None => continue,
+            };
+            match self.try_publish_raw(&peer_fp, &envelope) {
+                Ok(()) => {
+                    if let NetworkEnvelope::Message(m) = &envelope {
+                        self.message_status.insert(m.header.message_id.clone(), MessageSendStatus::Sent);
+                    }
+                }
+                Err(_) => {
+                    // Sessizce bir sonraki turda tekrar denenecek — henüz
+                    // "Failed" olarak işaretlemiyoruz, kullanıcı açıkça
+                    // "onaylanana kadar sürekli dene" istedi.
+                }
+            }
+            if let Some(pending) = self.awaiting_confirmation.get_mut(&message_id) {
+                pending.retry_interval_ms = (pending.retry_interval_ms * 2).min(ACK_RETRY_MAX_MS);
+                pending.next_retry_at = current_time_ms() + pending.retry_interval_ms;
+            }
+        }
+    }
+
     fn poll_events(&mut self) -> Vec<String> {
         // `Option<PeerId>` — gossipsub `Signed` authenticity modu (bkz.
         // start_network) her gelen mesajda gönderenin gerçek `PeerId`'sini
@@ -2869,6 +3029,12 @@ impl P2PCore {
 
         let mut results = Vec::new();
         results.append(&mut self.attachment_events);
+
+        // bkz. `awaiting_confirmation` alanı dokümantasyonu — Text (grup
+        // dışı)/Edit/Delete/HistorySyncRequest için TEK gerçek uçtan uca
+        // teslim garantisi burası; `pending_envelopes`'in aksine karşı
+        // taraf onaylayana kadar süresiz devam eder.
+        self.retry_unconfirmed_messages();
 
         // bkz. `pending_envelopes` alanı dokümantasyonu: ilk bağlantıdan
         // sonraki ilk birkaç saniyede gönderilemeyen HERHANGİ bir zarfı

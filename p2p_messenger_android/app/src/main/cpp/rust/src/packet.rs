@@ -189,11 +189,27 @@ pub enum MessageContent {
     /// ister. Normal mesajlarla AYNI ratchet-şifreli kanaldan taşınır (yeni
     /// bir libp2p bağlantı/protokolüne gerek yok), yani uçtan uca korunur.
     HistorySyncRequest { limit: u32 },
-    /// `messages`: (direction, text, timestamp) üçlüleri, eskiden yeniye
-    /// sıralı — `direction` YANITLAYANIN bakış açısıyla ("sent"/"received")
-    /// taşınır; isteyen taraf bunu ters çevirmeli (bkz. lib.rs
-    /// receive_message HistorySyncResponse notu).
-    HistorySyncResponse { messages: Vec<(String, String, u64)> },
+    /// `request_id`: karşılık geldiği `HistorySyncRequest` paketinin
+    /// `MessagePacketHeader.message_id`'si — isteyen tarafın, bu yanıtı
+    /// ait olduğu isteğe eşleyip yeniden deneme kuyruğundan
+    /// (`awaiting_confirmation`) çıkarabilmesi için (bkz. lib.rs
+    /// güvenilir teslim notu). `messages`: (direction, text, timestamp)
+    /// üçlüleri, eskiden yeniye sıralı — `direction` YANITLAYANIN bakış
+    /// açısıyla ("sent"/"received") taşınır; isteyen taraf bunu ters
+    /// çevirmeli (bkz. lib.rs receive_message HistorySyncResponse notu).
+    HistorySyncResponse { request_id: String, messages: Vec<(String, String, u64)> },
+    /// Spec dışı: güvenilir teslim onayı — gossipsub'un `publish()`
+    /// başarısı SADECE yerel düğümün paketi ağa yayınladığını garanti
+    /// eder, karşı tarafın GERÇEKTEN aldığını DEĞİL (bkz. lib.rs
+    /// `awaiting_confirmation` dokümantasyonu). Alıcı taraf, `Text`
+    /// (grup DIŞI)/`Edit`/`Delete`/`HistorySyncRequest` içeriğini
+    /// başarıyla çözüp işlediğinde bu paketi gönderene geri gönderir;
+    /// gönderen taraf bunu alana kadar aynı paketi (yeniden şifrelemeden)
+    /// periyodik olarak tekrar yollamaya devam eder. Ack'in KENDİSİ ayrıca
+    /// onaylanmaz (sonsuz döngüyü önlemek için) — kaybolursa, göndericinin
+    /// asıl paketi tekrar göndermesi alıcının yeni bir Ack denemesi
+    /// yapmasına zaten yol açar.
+    Ack { target_message_id: String },
     /// Spec dışı: dosya/foto/video/ses eki meta verisi (spec bölüm 6
     /// "dosya transferi v0.1/v0.2 kapsamı DIŞINDA" notunu genişleten,
     /// kullanıcı tarafından istenen bir ek özellik, azami 4GB). Gerçek
