@@ -169,7 +169,10 @@ not just sent by whoever relayed it.
 
 ## 5. Network architecture (how devices find each other)
 
-Built on [libp2p](https://libp2p.io/), with no central server or relay:
+Built on [libp2p](https://libp2p.io/). There is no *company-run* server —
+but as of this round, other users' devices can optionally relay traffic for
+each other (see "Cross-network connectivity" below), which is a
+deliberate, disclosed tradeoff, not a central point of control.
 
 - **Local network discovery — mDNS.** On the same Wi-Fi/LAN, devices
   broadcast their presence and find each other automatically, no internet
@@ -186,12 +189,14 @@ Built on [libp2p](https://libp2p.io/), with no central server or relay:
   This is defense in depth: even if something were wrong at the
   application layer, the transport itself isn't sending plaintext over the
   wire.
+- **Cross-network reachability — Circuit Relay v2 + DCUtR.** New this
+  round; see its own subsection below.
 - **Message delivery — gossipsub.** Encrypted messages are published to a
   gossipsub topic that the recipient is subscribed to. See "Topic
   pseudonymization" below for how that topic name is chosen.
 - **Peer metadata — identify.** Standard libp2p peer-info exchange (what
   protocols/addresses a peer supports), feeding discovered addresses into
-  Kademlia.
+  Kademlia, and (new this round) into relay-candidate discovery.
 
 ### Topic pseudonymization (second audit round fix)
 
@@ -222,6 +227,62 @@ total stranger without *some* rendezvous point both sides can compute in
 advance. This is an inherent property of any system that supports
 introducing two parties who've never spoken before, not a bug specific to
 this app. Every subsequent message is protected by the rotating scheme above.
+
+### Cross-network connectivity (Circuit Relay v2 + DCUtR) — third audit round fix
+
+Until this round, two devices on different networks (two different home
+Wi-Fi networks, or one on mobile data/CGNAT) generally **could not connect
+at all**. Connections were only ever dialed against a literal address — the
+QR code's own address, or an mDNS-discovered LAN address — and that address
+is only usable if it's actually reachable from the outside. There was no
+bootstrap node list and no NAT traversal, despite the original protocol
+spec explicitly calling for it.
+
+**What was added:**
+- **Circuit Relay v2** — a device with "Node Mode" on now genuinely relays
+  encrypted traffic for other users on the network (previously the Node
+  Mode description claimed this but it wasn't implemented). A relay only
+  ever blind-forwards Noise-encrypted bytes between two addresses — it
+  cannot decrypt transport traffic, let alone the separately-encrypted
+  (ratchet + hybrid-signed) application payload. Relay service is **open to
+  anyone**, not just the relay operator's own contacts — a contacts-only
+  policy can't solve the actual scenario that matters (two strangers on
+  different networks pairing for the first time have no established
+  relay-contact yet). libp2p's Circuit Relay v2 has built-in abuse limits
+  (reservation count, circuit count/duration, data caps) so this is safe to
+  leave open.
+- **DCUtR** — automatically attempts to upgrade a relayed connection into a
+  direct one via hole-punching. Succeeds for most common NAT combinations;
+  falls back to continuing over the relay when it can't (e.g.
+  symmetric-NAT-to-symmetric-NAT).
+- **Relay discovery** — no fixed relay list exists. Devices remember
+  relay-capable peers they've directly connected to (`known_relay_peers`,
+  capped at 10), and QR pairing packets now carry a small list of the
+  sharer's currently-known relays (`QrPacket.known_relays`, version bumped
+  1→2, backward-compatible with old QR codes) so a new contact can be
+  reached through one even if their own direct address isn't. Settings also
+  has a manual "known relay address" field for pasting a trusted/
+  self-hosted relay's address directly.
+
+**Privacy tradeoff (the honest accounting):** the only new exposure is
+metadata — a relay operator can observe *that* two peers are connected
+through it, and roughly how much/when, the same class of exposure as the
+gossipsub-topic issue above, not a new category of risk. Being someone's
+relay costs that operator bandwidth and reveals to them (not to anyone
+else) which peers are actively talking through their device.
+
+**What this does *not* solve:** a fully zero-config guarantee that any two
+strangers can always connect is not achievable without *some* reachable
+point existing in the network — this is a structural property of any
+decentralized P2P system with no company server (true of Tox, Briar, raw
+IPFS, etc.), not a shortcoming specific to this app. Hole-punching fails for
+some NAT combinations, and a brand-new user with zero contacts and no
+organically-discovered relay has nothing to route through. The manual
+relay-address field in Settings is the honest fix for that gap: a technical
+user (or someone they trust) running the app in Node Mode on a reachable
+box (e.g. a cheap VPS) becomes a bootstrap point the rest of their contacts
+can plug in, rather than the app silently failing or overpromising
+"always works, zero setup."
 
 ### Other known network-level limitations (not addressed)
 
@@ -284,7 +345,7 @@ existing protocol:
 
 ---
 
-## 7. Summary of both audit rounds
+## 7. Summary of all three audit rounds
 
 | Gap found | Status |
 |---|---|
@@ -295,5 +356,7 @@ existing protocol:
 | Category 3 PQ parameters (ML-KEM-768/ML-DSA-65) | **Upgraded** to Category 5 (ML-KEM-1024/ML-DSA-87) |
 | Gossipsub topic-per-fingerprint metadata leakage | **Fixed** — topic now derived from ratchet `root_key`, rotates every 30 min; first-contact pairing still uses fingerprint (unavoidable bootstrap) |
 | `zeroize` dependency unused (in-memory key erasure) | **Fixed** — upstream crate features + explicit zeroize-on-drop for ratchet/session/message keys and the JNI secret-key bundle |
+| No cross-network (NAT) connectivity — spec called for it, never implemented | **Fixed** — Circuit Relay v2 (open, Node-mode devices) + DCUtR hole-punching + organic/QR/manual relay discovery |
 | mDNS persistent PeerId on LAN | Known limitation, deliberately not changed (would reintroduce a previously-fixed reconnection bug) |
-| Kademlia DHT participation reveals IP to other DHT peers | Known limitation, structural to any DHT-based P2P design; would need an anonymity layer (Tor/I2P) to address |
+| Kademlia DHT participation reveals IP to other DHT peers | Known limitation, structural to any DHT-based P2P design; relaying mitigates it for message traffic but not DHT participation itself |
+| Zero-config guarantee that any two strangers can always connect | Not fully achievable without *some* reachable point in the network (structural to decentralized P2P, not fixable by protocol changes alone) — mitigated, not eliminated, by the manual relay-address field |
