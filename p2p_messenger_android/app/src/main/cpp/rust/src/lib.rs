@@ -195,6 +195,10 @@ pub struct ContactSummary {
     pub identity_id: String,
     /// None ise: henüz IdentityExchange tamamlanmamış, mesaj gönderilemez.
     pub active_device_fingerprint: Option<String>,
+    /// Spec dışı: bu kişinin bize gönderdiği profil fotoğrafı (varsa),
+    /// `list_attachments`'taki `preview_hex` ile AYNI hex-encode deseni —
+    /// JSON ham ikili taşıyamadığı için.
+    pub avatar_hex: Option<String>,
 }
 
 /// Yerel şifreli arşivden çözülüp Kotlin'e döndürülen tek bir mesaj.
@@ -233,6 +237,9 @@ pub struct AttachmentSummary {
     /// tarafı geçmişi yeniden kurarken küçük resmi hemen gösterebilsin diye
     /// (indirme beklemeden), bkz. `SimpleChatAdapter.AttachmentInfo`.
     pub preview_hex: Option<String>,
+    /// Sesli mesajlar için çalma süresi (milisaniye) — bkz.
+    /// `MessageContent::FileOffer.duration_ms`.
+    pub duration_ms: Option<u32>,
 }
 
 /// Devam eden bir indirmenin bellek-içi durumu (bkz. `download_file`/
@@ -580,12 +587,12 @@ impl P2PCore {
         let path = format!("{}/{}", app_files_dir, DB_NAME);
         let conn = Connection::open(path)?;
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS identities (id TEXT PRIMARY KEY, primary_device TEXT);
+            "CREATE TABLE IF NOT EXISTS identities (id TEXT PRIMARY KEY, primary_device TEXT, avatar_jpeg BLOB);
              CREATE TABLE IF NOT EXISTS own_devices (device_fingerprint TEXT PRIMARY KEY, identity_id TEXT,
                 sign_pk_ed25519 BLOB, sign_pk_mldsa BLOB, kem_pk_x25519 BLOB, kem_pk_mlkem BLOB,
                 device_name TEXT, is_active INTEGER, last_seen INTEGER);
              CREATE TABLE IF NOT EXISTS contacts (contact_id TEXT PRIMARY KEY, display_name TEXT,
-                trusted_identity_id TEXT, known_devices_json TEXT, last_device_change INTEGER);
+                trusted_identity_id TEXT, known_devices_json TEXT, last_device_change INTEGER, avatar_jpeg BLOB);
              CREATE TABLE IF NOT EXISTS groups (group_id TEXT PRIMARY KEY, founder TEXT, name TEXT,
                 version INTEGER, members_json TEXT, created_at INTEGER);
              CREATE TABLE IF NOT EXISTS messages (
@@ -629,7 +636,8 @@ impl P2PCore {
                 status TEXT NOT NULL,
                 bytes_transferred INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
-                preview_jpeg BLOB
+                preview_jpeg BLOB,
+                duration_ms INTEGER
              );
              CREATE INDEX IF NOT EXISTS idx_files_peer ON files(peer_device_fingerprint, created_at);"
         )?;
@@ -640,6 +648,12 @@ impl P2PCore {
         // `ADD COLUMN IF NOT EXISTS` desteklemediğinden, kolon zaten
         // varsa oluşacak hatayı (duplicate column) sessizce yok sayıyoruz.
         let _ = conn.execute("ALTER TABLE files ADD COLUMN preview_jpeg BLOB", []);
+        // Aynı geçiş deseni: sesli mesaj süresi, kendi profil fotoğrafımız
+        // ve kişilerin bize gönderdiği profil fotoğrafları — hepsi sonradan
+        // eklendi.
+        let _ = conn.execute("ALTER TABLE files ADD COLUMN duration_ms INTEGER", []);
+        let _ = conn.execute("ALTER TABLE identities ADD COLUMN avatar_jpeg BLOB", []);
+        let _ = conn.execute("ALTER TABLE contacts ADD COLUMN avatar_jpeg BLOB", []);
         self.db = Some(conn);
         self.app_files_dir = Some(app_files_dir.to_string());
         let _ = std::fs::create_dir_all(format!("{}/attachments/plain_cache", app_files_dir));
@@ -1066,6 +1080,18 @@ impl P2PCore {
         // exchange'i tamamlamak için biz de kendi paketimizi göndeririz.
         let _ = self.send_identity_exchange(&exchange.device_fingerprint);
 
+        // Spec dışı: eşleşme tamamlanır tamamlanmaz kendi profil
+        // fotoğrafımızı (VARSA) bu yeni kişiye bir kez göndeririz — daha
+        // sonra fotoğraf değişirse `set_own_profile_picture` zaten TÜM
+        // kişilere tekrar gönderir, burası SADECE ilk eşleşme anını
+        // kapsıyor (her yeniden bağlanışta değil, spam önleme).
+        if let Some(avatar) = self.get_own_avatar() {
+            let content = MessageContent::ProfileUpdate { avatar_jpeg: Some(avatar) };
+            if let Err(e) = self.send_message_content(exchange.device_fingerprint.clone(), &content, None) {
+                error!("Eşleşme sonrası ProfileUpdate gönderilemedi: {}", e);
+            }
+        }
+
         Ok(())
     }
 
@@ -1143,11 +1169,11 @@ impl P2PCore {
             Err(e) => { error!("Contact known_devices serileştirilemedi: {}", e); return; }
         };
         let _ = conn.execute(
-            "INSERT OR REPLACE INTO contacts (contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO contacts (contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change, avatar_jpeg)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 contact.contact_id, contact.display_name, contact.trusted_identity_id,
-                known_devices_json, contact.last_device_change.map(|v| v as i64),
+                known_devices_json, contact.last_device_change.map(|v| v as i64), contact.avatar_jpeg,
             ],
         );
     }
@@ -1160,7 +1186,7 @@ impl P2PCore {
             None => return,
         };
         let mut stmt = match conn.prepare(
-            "SELECT contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change FROM contacts"
+            "SELECT contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change, avatar_jpeg FROM contacts"
         ) {
             Ok(s) => s,
             Err(_) => return,
@@ -1172,12 +1198,13 @@ impl P2PCore {
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<Vec<u8>>>(5)?,
             ))
         });
         let mut loaded = Vec::new();
         if let Ok(rows) = rows {
             for row in rows.flatten() {
-                let (contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change) = row;
+                let (contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change, avatar_jpeg) = row;
                 let known_devices: Vec<contact::KnownDevice> = serde_json::from_str(&known_devices_json).unwrap_or_default();
                 loaded.push(Contact {
                     contact_id,
@@ -1185,6 +1212,7 @@ impl P2PCore {
                     trusted_identity_id,
                     known_devices,
                     last_device_change: last_device_change.map(|v| v as u64),
+                    avatar_jpeg,
                 });
             }
         }
@@ -1359,7 +1387,106 @@ impl P2PCore {
             display_name: c.display_name.clone(),
             identity_id: c.trusted_identity_id.clone(),
             active_device_fingerprint: self.resolve_active_device_for_identity(&c.trusted_identity_id),
+            avatar_hex: c.avatar_jpeg.as_ref().map(|a| hex::encode(a)),
         }).collect()
+    }
+
+    /// Kendi profil fotoğrafımızı (varsa) döner — Ayarlar ekranının mevcut
+    /// fotoğrafı gösterebilmesi için.
+    fn get_own_avatar(&self) -> Option<Vec<u8>> {
+        let conn = self.db.as_ref()?;
+        let identity_id = self.identity.as_ref()?.identity_id.clone();
+        conn.query_row(
+            "SELECT avatar_jpeg FROM identities WHERE id = ?1",
+            params![identity_id],
+            |r| r.get::<_, Option<Vec<u8>>>(0),
+        ).ok().flatten()
+    }
+
+    /// Kendi profil fotoğrafımızı ayarlar/kaldırır (`avatar_jpeg: None`) ve
+    /// BİLİNEN HER kişiye (P2P'de merkezi bir dizin olmadığı için tek tek)
+    /// yeni `MessageContent::ProfileUpdate` gönderir. bkz. packet.rs notu —
+    /// bu, otomatik her bağlantıda DEĞİL, sadece kullanıcı fotoğrafı
+    /// değiştirdiğinde tetiklenir (spam önleme).
+    fn set_own_profile_picture(&mut self, avatar_jpeg: Option<Vec<u8>>) -> Result<(), String> {
+        let identity_id = self.identity.as_ref().ok_or("Kimlik yok")?.identity_id.clone();
+        if let Some(conn) = &self.db {
+            conn.execute(
+                "UPDATE identities SET avatar_jpeg = ?1 WHERE id = ?2",
+                params![avatar_jpeg, identity_id],
+            ).map_err(|e| e.to_string())?;
+        }
+        let content = MessageContent::ProfileUpdate { avatar_jpeg };
+        let peer_fps: Vec<String> = self.contacts.values()
+            .flat_map(|c| c.known_devices.iter().map(|d| d.device_fingerprint.clone()))
+            .collect();
+        for fp in peer_fps {
+            if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
+                error!("ProfileUpdate gönderilemedi ({}): {}", fp, e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Spec dışı, kullanıcı tarafından istenen "sohbeti temizle" (yumuşak
+    /// seçenek): sadece yerel mesaj/ek geçmişini (diskteki `.enc` blob'ları
+    /// dahil) siler — eşleşme/ratchet oturumu KORUNUR, kişi listede kalır,
+    /// sohbet boş başlar. bkz. `delete_contact` (sert seçenek).
+    fn clear_chat_history(&mut self, contact_id: &str) -> Result<(), String> {
+        let contact = self.contacts.get(contact_id).ok_or("Kişi bulunamadı")?.clone();
+        let fingerprints: Vec<String> = contact.known_devices.iter().map(|d| d.device_fingerprint.clone()).collect();
+        if let Some(conn) = &self.db {
+            for fp in &fingerprints {
+                if let Ok(mut stmt) = conn.prepare("SELECT file_id FROM files WHERE peer_device_fingerprint = ?1") {
+                    if let Ok(rows) = stmt.query_map(params![fp], |r| r.get::<_, String>(0)) {
+                        for file_id in rows.flatten() {
+                            if let Ok(path) = self.enc_path_for(&file_id) {
+                                let _ = std::fs::remove_file(path);
+                            }
+                        }
+                    }
+                }
+                let _ = conn.execute("DELETE FROM messages WHERE peer_device_fingerprint = ?1", params![fp]);
+                let _ = conn.execute("DELETE FROM files WHERE peer_device_fingerprint = ?1", params![fp]);
+            }
+        }
+        Ok(())
+    }
+
+    /// Spec dışı, kullanıcı tarafından istenen "kişiyi sil" (sert seçenek,
+    /// UI'da çift onaylı): eşleşme/ratchet oturumu DAHİL her şeyi siler —
+    /// yeniden mesajlaşmak için taze bir QR/manuel eşleşme gerekir. bkz.
+    /// `clear_chat_history` (yumuşak seçenek, sadece geçmişi siler).
+    fn delete_contact(&mut self, contact_id: &str) -> Result<(), String> {
+        let contact = self.contacts.remove(contact_id).ok_or("Kişi bulunamadı")?;
+        self.identity_to_contact.remove(&contact.trusted_identity_id);
+        let fingerprints: Vec<String> = contact.known_devices.iter().map(|d| d.device_fingerprint.clone()).collect();
+        for fp in &fingerprints {
+            self.ratchets.remove(fp);
+            self.device_to_peer_id.remove(fp);
+            self.clear_persisted_skipped_keys(fp);
+            self.awaiting_confirmation.retain(|_, pc| &pc.peer_device_fingerprint != fp);
+            self.active_downloads.retain(|_, d| &d.peer_device_fingerprint != fp);
+        }
+        if let Some(conn) = &self.db {
+            for fp in &fingerprints {
+                if let Ok(mut stmt) = conn.prepare("SELECT file_id FROM files WHERE peer_device_fingerprint = ?1") {
+                    if let Ok(rows) = stmt.query_map(params![fp], |r| r.get::<_, String>(0)) {
+                        for file_id in rows.flatten() {
+                            if let Ok(path) = self.enc_path_for(&file_id) {
+                                let _ = std::fs::remove_file(path);
+                            }
+                        }
+                    }
+                }
+                let _ = conn.execute("DELETE FROM messages WHERE peer_device_fingerprint = ?1", params![fp]);
+                let _ = conn.execute("DELETE FROM files WHERE peer_device_fingerprint = ?1", params![fp]);
+                let _ = conn.execute("DELETE FROM ratchet_states WHERE peer_device_fingerprint = ?1", params![fp]);
+                let _ = conn.execute("DELETE FROM skipped_message_keys WHERE peer_device_fingerprint = ?1", params![fp]);
+            }
+            let _ = conn.execute("DELETE FROM contacts WHERE contact_id = ?1", params![contact_id]);
+        }
+        Ok(())
     }
 
     /// Groups tab GUI'sinin listesi için — bkz. `GroupSummary` notu.
@@ -1875,9 +2002,9 @@ impl P2PCore {
                 }).collect();
                 serde_json::json!({"type": "history_sync", "peer": peer_fp, "messages": flipped})
             }
-            MessageContent::FileOffer { group_id, file_id, file_name, mime_type, total_size, file_key, sha256_hex, preview_jpeg } => {
+            MessageContent::FileOffer { group_id, file_id, file_name, mime_type, total_size, file_key, sha256_hex, preview_jpeg, duration_ms } => {
                 self.send_ack(&peer_fp, &message_id);
-                self.receive_file_offer(&peer_fp, group_id, &file_id, &file_name, &mime_type, total_size, &file_key, &sha256_hex, &preview_jpeg)
+                self.receive_file_offer(&peer_fp, group_id, &file_id, &file_name, &mime_type, total_size, &file_key, &sha256_hex, &preview_jpeg, duration_ms)
             }
             MessageContent::Ack { target_message_id } => {
                 // Karşı taraf bizim gönderdiğimiz bir Text/Edit/Delete/
@@ -1886,6 +2013,27 @@ impl P2PCore {
                 // `awaiting_confirmation` dokümantasyonu).
                 self.awaiting_confirmation.remove(&target_message_id);
                 serde_json::json!({"type": "ack", "peer": peer_fp, "message_id": target_message_id})
+            }
+            MessageContent::TypingIndicator { is_typing } => {
+                // Kasitli olarak: arsivlenmez, Ack GONDERILMEZ (bkz.
+                // packet.rs notu) -- birkac saniyede bayatlayan bir bilgi
+                // icin tekrar deneme/onay trafiginin hicbir degeri yok.
+                serde_json::json!({"type": "typing", "peer": peer_fp, "is_typing": is_typing})
+            }
+            MessageContent::ProfileUpdate { avatar_jpeg } => {
+                self.send_ack(&peer_fp, &message_id);
+                if let Some(cid) = self.identity_to_contact.get(&sender_identity_id).cloned() {
+                    if let Some(c) = self.contacts.get_mut(&cid) {
+                        c.avatar_jpeg = avatar_jpeg.clone();
+                    }
+                    if let Some(c) = self.contacts.get(&cid) {
+                        self.persist_contact(c);
+                    }
+                }
+                serde_json::json!({
+                    "type": "profile_update", "peer": peer_fp,
+                    "avatar_hex": avatar_jpeg.as_ref().map(|a| hex::encode(a))
+                })
             }
             MessageContent::SaveRequest { file_id, file_name } => {
                 // Biz GÖNDERİCİYİZ — karşı taraf (alıcı), indirdiği bu eki
@@ -1914,6 +2062,14 @@ impl P2PCore {
         if let Err(e) = self.send_message_content(peer_device_fingerprint.to_string(), &content, None) {
             error!("Ack gönderilemedi: {}", e);
         }
+    }
+
+    /// Spec dışı: "yazıyor..." göstergesi. bkz. `MessageContent::TypingIndicator`
+    /// dokümantasyonu (packet.rs) — arşivlenmez, güvenilir teslim
+    /// kuyruğuna girmez, fire-and-forget.
+    fn send_typing_indicator(&mut self, peer_device_fingerprint: String, is_typing: bool) -> Result<(), String> {
+        let content = MessageContent::TypingIndicator { is_typing };
+        self.send_message_content(peer_device_fingerprint, &content, None).map(|_| ())
     }
 
     /// Spec dışı, kullanıcı tarafından istenen akış: bir eki kalıcı/
@@ -2587,7 +2743,7 @@ impl P2PCore {
     /// KENDİSİ bozulmaz, sadece o birkaç saniye/on saniye ertelenir) —
     /// tam asenkron bir mimari (ayrı worker thread + kanal) bu kapsamın
     /// dışında bırakıldı, bkz. proje notları.
-    fn prepare_and_send_file(&mut self, peer_device_fingerprint: String, source_path: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>) -> Result<(String, String), String> {
+    fn prepare_and_send_file(&mut self, peer_device_fingerprint: String, source_path: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>) -> Result<(String, String), String> {
         // `wrap_file_key`'in erken (dosyayı diske şifrelemeden ÖNCE)
         // çağrılması kasıtlı: `skipped_key_encryption_key` henüz
         // yüklenmemişse burada hemen hata dönülür — aksi halde
@@ -2628,11 +2784,11 @@ impl P2PCore {
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO files
                  (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
-                  sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg)
-                 VALUES (?1, ?2, 'sent', ?3, ?4, ?5, ?6, ?7, ?8, 'complete', ?5, ?9, ?10)",
+                  sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg, duration_ms)
+                 VALUES (?1, ?2, 'sent', ?3, ?4, ?5, ?6, ?7, ?8, 'complete', ?5, ?9, ?10, ?11)",
                 params![
                     file_id, peer_device_fingerprint, file_name, mime_type, total_size as i64,
-                    sha256_hex, encrypted_key, key_nonce, current_time_ms() as i64, preview_jpeg,
+                    sha256_hex, encrypted_key, key_nonce, current_time_ms() as i64, preview_jpeg, duration_ms,
                 ],
             );
         }
@@ -2646,6 +2802,7 @@ impl P2PCore {
             file_key,
             sha256_hex,
             preview_jpeg,
+            duration_ms,
         };
         let (_, status) = self.send_message_content(peer_device_fingerprint, &content, None)?;
         Ok((file_id, status))
@@ -2654,7 +2811,7 @@ impl P2PCore {
     /// Gelen bir `FileOffer`'ı işler: `files` tablosuna bir alıcı kaydı
     /// ekler (node modu açıksa hemen indirmeyi başlatır — kapalıysa sadece
     /// meta veri görünür kalır, kullanıcı "İndir" demeli).
-    fn receive_file_offer(&mut self, peer_fp: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str, preview_jpeg: &Option<Vec<u8>>) -> serde_json::Value {
+    fn receive_file_offer(&mut self, peer_fp: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str, preview_jpeg: &Option<Vec<u8>>, duration_ms: Option<u32>) -> serde_json::Value {
         let auto_download_requested = self.node_mode_enabled;
         // Satır YAZILAMADIYSA (ör. şifreleme anahtarı henüz yüklenmedi),
         // "offered" olarak devam ediyoruz — DB kaydı olmadan "downloading"
@@ -2668,11 +2825,11 @@ impl P2PCore {
                     conn.execute(
                         "INSERT OR REPLACE INTO files
                          (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
-                          sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg)
-                         VALUES (?1, ?2, 'received', ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11)",
+                          sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg, duration_ms)
+                         VALUES (?1, ?2, 'received', ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12)",
                         params![
                             file_id, peer_fp, file_name, mime_type, total_size as i64,
-                            sha256_hex, encrypted_key, key_nonce, status, current_time_ms() as i64, preview_jpeg,
+                            sha256_hex, encrypted_key, key_nonce, status, current_time_ms() as i64, preview_jpeg, duration_ms,
                         ],
                     ).is_ok()
                 } else {
@@ -2716,7 +2873,8 @@ impl P2PCore {
             // önizleme (tipik birkaç on KB) için hex'in base64'e göre ~%37
             // daha büyük olması önemsiz; yeni bir bağımlılık eklemekten
             // kaçınmak için mevcut `hex` crate'i kullanılıyor.
-            "preview_hex": preview_jpeg.as_ref().map(|p| hex::encode(p))
+            "preview_hex": preview_jpeg.as_ref().map(|p| hex::encode(p)),
+            "duration_ms": duration_ms,
         })
     }
 
@@ -2953,7 +3111,7 @@ impl P2PCore {
             None => return Vec::new(),
         };
         let mut stmt = match conn.prepare(
-            "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred, created_at, preview_jpeg
+            "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred, created_at, preview_jpeg, duration_ms
              FROM files WHERE peer_device_fingerprint = ?1 ORDER BY created_at ASC"
         ) {
             Ok(s) => s,
@@ -2961,6 +3119,7 @@ impl P2PCore {
         };
         let rows = stmt.query_map(params![peer_device_fingerprint], |r| {
             let preview: Option<Vec<u8>> = r.get(8)?;
+            let duration: Option<i64> = r.get(9)?;
             let file_id: String = r.get(0)?;
             let mut status: String = r.get(5)?;
             // `active_downloads` süreç içi bellekte tutulur — süreç
@@ -2984,6 +3143,7 @@ impl P2PCore {
                 bytes_transferred: r.get::<_, i64>(6)? as u64,
                 created_at: r.get::<_, i64>(7)? as u64,
                 preview_hex: preview.map(|p| hex::encode(p)),
+                duration_ms: duration.map(|d| d as u32),
             })
         });
         rows.map(|it| it.flatten().collect()).unwrap_or_default()
@@ -3864,7 +4024,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getMessageHistory<'local>(m
 /// çağırmalıdır, aksi halde ANR riski vardır. Dönüş: `sendMessage` ile
 /// aynı JSON biçimi, `message_id` alanı burada `file_id`'dir.
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_prepareAndSendFile<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, target: JString<'local>, source_path: JString<'local>, file_name: JString<'local>, mime_type: JString<'local>, preview_jpeg: JByteArray<'local>) -> jstring {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_prepareAndSendFile<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, target: JString<'local>, source_path: JString<'local>, file_name: JString<'local>, mime_type: JString<'local>, preview_jpeg: JByteArray<'local>, duration_ms: jni::sys::jint) -> jstring {
     let target_str: String = env.get_string(&target).map(|s| s.into()).unwrap_or_default();
     let source_str: String = env.get_string(&source_path).map(|s| s.into()).unwrap_or_default();
     let name_str: String = env.get_string(&file_name).map(|s| s.into()).unwrap_or_default();
@@ -3877,10 +4037,13 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_prepareAndSendFile<'local>(
     } else {
         Some(jbytearray_to_vec(&mut env, &preview_jpeg))
     };
+    // `duration_ms`: sesli mesaj DIŞINDAKİ türler için Kotlin -1 geçirir
+    // (jint null taşıyamadığından) — burada `Option<u32>`'ye çevrilir.
+    let duration_opt: Option<u32> = if duration_ms < 0 { None } else { Some(duration_ms as u32) };
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
         let mut core = core_lock();
-        core.prepare_and_send_file(target_str, source_str, name_str, mime_str, preview_vec)
+        core.prepare_and_send_file(target_str, source_str, name_str, mime_str, preview_vec, duration_opt)
     });
     match result {
         Ok(Ok((file_id, status))) => env.new_string(serde_json::json!({"message_id": file_id, "status": status}).to_string()).unwrap().into_raw(),
@@ -4237,6 +4400,94 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_listContacts<'local>(mut en
     });
     let json = result.unwrap_or_else(|e| { error!("listContacts panicked: {}", e); "[]".to_string() });
     env.new_string(json).unwrap().into_raw()
+}
+
+/// "Yazıyor..." göstergesi gönderir — bkz. `P2PCore::send_typing_indicator`.
+/// Kasıtlı olarak sessizce başarısız olabilir (fire-and-forget, `Boolean`
+/// dönüşü sadece hata ayıklama için, Kotlin tarafı bunu genelde kontrol
+/// etmez).
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendTypingIndicator<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, target: JString<'local>, is_typing: jboolean) -> jboolean {
+    let target_str: String = env.get_string(&target).map(|s| s.into()).unwrap_or_default();
+    let typing = is_typing != 0;
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = core_lock();
+        core.send_typing_indicator(target_str, typing)
+    });
+    match result {
+        Ok(Ok(())) => true as jboolean,
+        Ok(Err(e)) => { error!("send_typing_indicator failed: {}", e); false as jboolean }
+        Err(e) => { error!("send_typing_indicator panicked: {}", e); false as jboolean }
+    }
+}
+
+/// Kendi profil fotoğrafımızı döner (hiç ayarlanmadıysa boş dizi) — bkz.
+/// `P2PCore::get_own_avatar`.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_getOwnProfilePicture<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jni::sys::jbyteArray {
+    let result = catch_panic(|| {
+        let core = core_lock();
+        core.get_own_avatar().unwrap_or_default()
+    });
+    let bytes = result.unwrap_or_else(|e| { error!("getOwnProfilePicture panicked: {}", e); Vec::new() });
+    bytes_to_jbytearray(&mut env, &bytes)
+}
+
+/// Kendi profil fotoğrafımızı ayarlar/kaldırır — bkz.
+/// `P2PCore::set_own_profile_picture`. `avatar_jpeg` null ise fotoğraf
+/// kaldırılır (tüm kişilere `None` bildirimi gönderilir).
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_setOwnProfilePicture<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, avatar_jpeg: JByteArray<'local>) -> jstring {
+    let avatar_vec: Option<Vec<u8>> = if avatar_jpeg.is_null() {
+        None
+    } else {
+        Some(jbytearray_to_vec(&mut env, &avatar_jpeg))
+    };
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = core_lock();
+        core.set_own_profile_picture(avatar_vec)
+    });
+    let out = match result {
+        Ok(Ok(())) => "OK".to_string(),
+        Ok(Err(e)) => { error!("set_own_profile_picture failed: {}", e); format!("Error: {}", e) }
+        Err(e) => { error!("set_own_profile_picture panicked: {}", e); format!("Error: {}", e) }
+    };
+    env.new_string(out).unwrap().into_raw()
+}
+
+/// Bir sohbetin yerel geçmişini (mesajlar+ekler) temizler, eşleşmeyi
+/// KORUR — bkz. `P2PCore::clear_chat_history`.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_clearChatHistory<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, contact_id: JString<'local>) -> jstring {
+    let contact_id_str: String = env.get_string(&contact_id).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let mut core = core_lock();
+        core.clear_chat_history(&contact_id_str)
+    });
+    let out = match result {
+        Ok(Ok(())) => "OK".to_string(),
+        Ok(Err(e)) => { error!("clear_chat_history failed: {}", e); format!("Error: {}", e) }
+        Err(e) => { error!("clear_chat_history panicked: {}", e); format!("Error: {}", e) }
+    };
+    env.new_string(out).unwrap().into_raw()
+}
+
+/// Bir kişiyi TAMAMEN siler (eşleşme dahil) — bkz. `P2PCore::delete_contact`.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteContact<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, contact_id: JString<'local>) -> jstring {
+    let contact_id_str: String = env.get_string(&contact_id).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let mut core = core_lock();
+        core.delete_contact(&contact_id_str)
+    });
+    let out = match result {
+        Ok(Ok(())) => "OK".to_string(),
+        Ok(Err(e)) => { error!("delete_contact failed: {}", e); format!("Error: {}", e) }
+        Err(e) => { error!("delete_contact panicked: {}", e); format!("Error: {}", e) }
+    };
+    env.new_string(out).unwrap().into_raw()
 }
 
 #[no_mangle]

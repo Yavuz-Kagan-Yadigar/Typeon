@@ -236,6 +236,9 @@ pub enum MessageContent {
         /// veya önizleme oluşturulamadı) önizleme gösterilmez, sadece
         /// jenerik dosya simgesi.
         preview_jpeg: Option<Vec<u8>>,
+        /// Spec disi: sesli mesajlar icin calma suresi (milisaniye).
+        /// `None` ise sure bilinmiyor/uygulanamaz (or. siradan bir belge).
+        duration_ms: Option<u32>,
     },
     /// Spec dışı: kullanıcı tarafından istenen "kaydetme onayı" akışı.
     /// Alıcı taraf, indirilmiş bir eki kalıcı/paylaşılan bir konuma
@@ -245,6 +248,18 @@ pub enum MessageContent {
     SaveRequest { file_id: String, file_name: String },
     /// Göndericinin `SaveRequest`'e cevabı.
     SaveApproval { file_id: String, approved: bool },
+    /// Spec disi: yaziyor... gostergesi. Kasitli olarak Ack gibi
+    /// arsivlenmez ve teslim-onayi kuyruguna (`awaiting_confirmation`)
+    /// girmez -- birkac saniye icinde eskiyen bir bilgi icin tekrar
+    /// denemenin hicbir degeri yok, en kotu ihtimalle bir sonraki
+    /// tus vurusu zaten yeni bir paket gonderir.
+    TypingIndicator { is_typing: bool },
+    /// Spec disi: profil fotografi senkronizasyonu. Merkezi bir dizin
+    /// olmadigi icin (P2P), her taraf kendi fotografini BILDIGI her
+    /// kisiye ayri ayri gonderir -- yeni eslesme tamamlandiginda bir kez
+    /// (bkz. process_identity_exchange) ve kullanici fotografini
+    /// degistirdiginde tum kisilere tekrar. `None` = fotograf kaldirildi.
+    ProfileUpdate { avatar_jpeg: Option<Vec<u8>> },
 }
 
 /// El sıkışma paketi — önceki `HandshakeInit` tasarımı; spec'te ayrı bir

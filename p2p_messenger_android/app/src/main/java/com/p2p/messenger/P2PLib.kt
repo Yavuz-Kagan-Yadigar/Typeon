@@ -104,7 +104,9 @@ object P2PLib {
      *  alabilir — ANA THREAD'DE ÇAĞIRMAYIN (coroutine/Dispatchers.IO
      *  kullanın). Dönüş: sendMessage ile aynı JSON biçimi, message_id
      *  alanı burada file_id'dir. */
-    external fun prepareAndSendFile(targetDeviceFingerprint: String, sourcePath: String, fileName: String, mimeType: String, previewJpeg: ByteArray?): String
+    /** `durationMs`: sesli mesajlar için çalma süresi, diğer türler için -1
+     *  geçilmeli (jint null taşıyamadığından, -1 = "yok" sentineli). */
+    external fun prepareAndSendFile(targetDeviceFingerprint: String, sourcePath: String, fileName: String, mimeType: String, previewJpeg: ByteArray?, durationMs: Int): String
     /** Başarılıysa "OK" döner ve ilerleme/tamamlanma pollNetwork() üzerinden
      *  "file_progress"/"file_complete"/"file_failed" olaylarıyla gelir.
      *  Başarısızsa "Error: ..." döner VE bu durumda hiçbir pollNetwork
@@ -136,4 +138,26 @@ object P2PLib {
 
     // --- Bölüm 1.8: Kurtarma dosyası ---
     external fun exportRecovery(passphrase: String): ByteArray
+
+    // --- Spec dışı: yazıyor... göstergesi ---
+    /** Fire-and-forget — arşivlenmez, güvenilir teslim kuyruğuna girmez.
+     *  Kotlin tarafı sadece false->true/true->false GEÇİŞLERİNDE
+     *  çağırmalı, her tuş vuruşunda DEĞİL. */
+    external fun sendTypingIndicator(targetDeviceFingerprint: String, isTyping: Boolean): Boolean
+
+    // --- Spec dışı: profil fotoğrafı (720p/%85 JPEG) ---
+    /** Şu an ayarlı olan kendi profil fotoğrafımız, yoksa boş dizi. */
+    external fun getOwnProfilePicture(): ByteArray
+    /** `avatarJpeg` null ise fotoğraf kaldırılır. Her iki durumda da
+     *  bilinen TÜM kişilere bir `ProfileUpdate` gönderilir — büyük bir
+     *  dosya olabileceğinden (yüzlerce KB) ANA THREAD'DE ÇAĞIRMAYIN. */
+    external fun setOwnProfilePicture(avatarJpeg: ByteArray?): String
+
+    // --- Spec dışı: sohbet/kişi silme (uzun basma menüsü) ---
+    /** Yumuşak seçenek: sadece yerel mesaj/ek geçmişini siler, eşleşme
+     *  KORUNUR. */
+    external fun clearChatHistory(contactId: String): String
+    /** Sert seçenek: eşleşme/ratchet oturumu DAHİL kişiyi tamamen siler —
+     *  yeniden mesajlaşmak için taze bir QR/manuel eşleşme gerekir. */
+    external fun deleteContact(contactId: String): String
 }

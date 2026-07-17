@@ -29,6 +29,11 @@ pub struct Contact {
     // kayıtlarını taşır (spec 2.1'deki alan burada da var ama gerçek
     // ratchet state serileştirilemeyen secret key'ler içerdiği için ayrı
     // bir map'te — bkz. lib.rs P2PCore.ratchets).
+    /// Spec dışı: bu kişinin bize `MessageContent::ProfileUpdate` ile
+    /// gönderdiği en güncel profil fotoğrafı (720p/%85 JPEG). `None` =
+    /// hiç göndermedi ya da fotoğrafını kaldırdı.
+    #[serde(default)]
+    pub avatar_jpeg: Option<Vec<u8>>,
 }
 
 /// Bir bağlantı kurulurken (spec 2.2) `(identity_id, device_fingerprint)`
@@ -54,6 +59,7 @@ impl Contact {
             trusted_identity_id,
             known_devices: Vec::new(),
             last_device_change: None,
+            avatar_jpeg: None,
         }
     }
 
