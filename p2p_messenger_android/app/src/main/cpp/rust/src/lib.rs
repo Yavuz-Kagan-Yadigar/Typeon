@@ -1467,6 +1467,46 @@ impl P2PCore {
         verify_hybrid_signature(&to_verify, &handshake.signature_classical, &handshake.signature_pq, &sender)?;
 
         let own_fp = self.get_active_own_device_fingerprint()?;
+
+        // KRİTİK: eşzamanlı el sıkışma çakışması. İki cihaz da (ör. ikisi
+        // de uygulamayı yeniden başlatıp aynı sohbeti aynı anda açtığında,
+        // `ensure_handshake` ikisinde de `has_active_session == false`
+        // bulur) TAM AYNI ANDA birbirine `HandshakeInit` gönderirse: her
+        // iki taraf da KENDİ `initiate_handshake_with` çağrısında ÖNCE bir
+        // "initiator" ratchet state'i oluşturup `self.ratchets`'e yazar,
+        // SONRA karşı taraftan gelen HandshakeInit'i işlerken (burada) bu
+        // state'i bir "responder" state'iyle EZER. Sorun: responder modu,
+        // KENDİ uzun-vadeli kimlik KEM anahtarını (`own_keys.kem_sk_*`)
+        // karşı tarafın EPHEMERAL (geçici, o el sıkışmaya özel) public
+        // key'iyle DH/decapsulate eder — iki taraf da bunu yaparsa,
+        // türetilen paylaşımlı sırlar birbiriyle UYUŞMAZ (DH'nin simetri
+        // özelliği yalnızca "A'nın ephemeral'ı + B'nin kimliği" ile "B'nin
+        // kimliği + A'nın ephemeral'ı" ÇAPRAZ eşleştiğinde geçerlidir, iki
+        // tarafın da kendi kimliğini kullanması bu simetriyi bozar). Sonuç:
+        // TÜM sonraki mesajlar "Decryption failed"/"skipped-key cache'te
+        // yok" ile başarısız olur — QR yeniden tarama, çakışmayı kırıp
+        // tek taraflı bir el sıkışma zorladığı için "düzeltiyormuş" gibi
+        // görünür.
+        //
+        // Deterministik çözüm: fingerprint'i (hex string, karşılaştırılabilir)
+        // KÜÇÜK olan taraf "kanonik initiator" sayılır. Eğer az önce KENDİ
+        // (henüz hiç mesaj taşımamış — bkz. `send_message_number`/
+        // `recv_message_number` sıfır kontrolü) initiator state'imiz varsa
+        // VE bizim fingerprint'imiz karşı tarafınkinden KÜÇÜKSE, bu gelen
+        // HandshakeInit'i YOK SAYARIZ (kendi initiator state'imizi koruruz)
+        // — karşı taraf (fingerprint'i büyük olan), simetrik olarak BİZİM
+        // HandshakeInit'imizi kabul edip doğru responder state'ini üretecektir.
+        if let Some(existing) = self.ratchets.get(&handshake.sender_device_fingerprint) {
+            let existing_unused = existing.send_message_number == 0 && existing.recv_message_number == 0;
+            if existing_unused && own_fp < handshake.sender_device_fingerprint {
+                info!(
+                    "Eşzamanlı el sıkışma çakışması (peer={}) — kendi initiator state'imiz korunuyor (küçük fingerprint kuralı)",
+                    handshake.sender_device_fingerprint
+                );
+                return Ok(());
+            }
+        }
+
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
 
         let state = DeviceRatchetState::respond(
@@ -2709,6 +2749,7 @@ impl P2PCore {
     }
 
     fn finalize_download(&mut self, file_id: &str) {
+        info!("finalize_download: file_id={} status='complete' olarak işaretlendi, file_complete olayı üretiliyor", file_id);
         self.active_downloads.remove(file_id);
         if let Some(conn) = &self.db {
             let _ = conn.execute("UPDATE files SET status = 'complete' WHERE file_id = ?1", params![file_id]);
@@ -2860,14 +2901,16 @@ impl P2PCore {
     /// dosya için yine de zaman alabilir — Kotlin tarafı bunu ana thread
     /// DIŞINDA çağırmalıdır (bkz. P2PLib.kt dokümantasyonu).
     fn get_attachment_plaintext_path(&self, file_id: &str) -> Result<String, String> {
+        info!("get_attachment_plaintext_path çağrıldı: file_id={}", file_id);
         let conn = self.db.as_ref().ok_or("DB not open")?;
         let (encrypted_key, key_nonce, sha256_hex, status, file_name): (Vec<u8>, Vec<u8>, String, String, String) = conn.query_row(
             "SELECT encrypted_file_key, key_nonce, sha256_hex, status, file_name FROM files WHERE file_id = ?1",
             params![file_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        ).map_err(|_| "Unknown file_id")?;
+        ).map_err(|e| format!("Unknown file_id ({}): {}", file_id, e))?;
+        info!("get_attachment_plaintext_path: file_id={} DB durumu='{}' file_name='{}'", file_id, status, file_name);
         if status != "complete" {
-            return Err("Dosya henüz tamamlanmadı".to_string());
+            return Err(format!("Dosya henüz tamamlanmadı (durum: {})", status));
         }
         let file_key = self.unwrap_file_key(&encrypted_key, &key_nonce)?;
 
@@ -2875,8 +2918,13 @@ impl P2PCore {
         let plain_path = self.attachments_dir()?.join("plain_cache").join(format!("{}{}", file_id, ext));
         if !plain_path.exists() {
             let enc_path = self.enc_path_for(file_id)?;
-            attachments::decrypt_file_from_disk(&enc_path, &plain_path, &file_key, &sha256_hex)?;
+            info!("get_attachment_plaintext_path: {} önbellekte yok, {} adresinden çözülüyor -> {}", plain_path.display(), enc_path.display(), plain_path.display());
+            if let Err(e) = attachments::decrypt_file_from_disk(&enc_path, &plain_path, &file_key, &sha256_hex) {
+                error!("get_attachment_plaintext_path: decrypt_file_from_disk başarısız (file_id={}): {}", file_id, e);
+                return Err(e);
+            }
         }
+        info!("get_attachment_plaintext_path: file_id={} -> {}", file_id, plain_path.display());
         Ok(plain_path.to_string_lossy().to_string())
     }
 
