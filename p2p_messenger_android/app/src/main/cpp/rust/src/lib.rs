@@ -112,6 +112,20 @@ struct P2PBehaviour {
     /// gossipsub üzerinden (küçük/sık mesajlar için tasarlanmış bir pub/sub
     /// ağı) taşımak pratik değil — bkz. attachments.rs modül notu.
     file_chunks: request_response::cbor::Behaviour<FileChunkRequest, FileChunkResponse>,
+    /// KRİTİK: aynı yerel ağdaki (Wi-Fi) kişileri OTOMATİK yeniden keşfeder
+    /// — bkz. dosya sonu "yeniden bağlanma" notu. Önceden bir peer'i
+    /// yeniden bulmanın TEK yolu QR/manuel kodu tekrar okutmaktı (o kodun
+    /// içindeki `rendezvous_node` adresi tek seferlik bir dial ipucuydu,
+    /// hiçbir yerde kalıcı/yeniden keşfedilebilir tutulmuyordu) — bu da
+    /// "her tam kapat/aç sonrası tekrar QR okutman gerekiyor" şikayetinin
+    /// KÖK sebebiydi (PeerId de her süreç başlangıcında rastgele yeniden
+    /// üretiliyordu, bkz. `start_network`'teki kalıcı keypair notu). mDNS,
+    /// AYNI yerel ağdaki iki cihazın (tipik ev/ofis Wi-Fi'ı) hiçbir
+    /// kullanıcı eylemi olmadan birbirini bulmasını sağlar. WAN (farklı
+    /// ağlardaki) yeniden keşif KAPSAM DIŞI bırakıldı — bunun için DHT
+    /// tabanlı (spec bölüm 4.2 `DHT_Entry`) bir kayıt/sorgu mekanizması
+    /// gerekir, bu oturumun kapsamının ötesinde bir genişleme.
+    mdns: libp2p::mdns::tokio::Behaviour,
 }
 
 fn current_time_ms() -> u64 {
@@ -2995,6 +3009,13 @@ impl P2PCore {
         self.node_mode_enabled = node_mode;
         self.own_listen_addrs.clear();
 
+        // KRİTİK: bu artık HER SEFERİNDE rastgele bir keypair (dolayısıyla
+        // PeerId) ÜRETMİYOR — bkz. `load_or_generate_libp2p_keypair`
+        // dokümantasyonu ve `P2PBehaviour.mdns` alanındaki "yeniden
+        // bağlanma" notu.
+        let app_files_dir = self.app_files_dir.clone().ok_or("initDatabase önce çağrılmalı")?;
+        let keypair = load_or_generate_libp2p_keypair(&app_files_dir);
+
         let gs_config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(std::time::Duration::from_secs(10))
             .validation_mode(gossipsub::ValidationMode::Strict)
@@ -3010,7 +3031,7 @@ impl P2PCore {
             .build()
             .map_err(|e| e.to_string())?;
 
-        let mut swarm = libp2p::SwarmBuilder::with_new_identity()
+        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
                 tcp::Config::default().nodelay(true),
@@ -3034,7 +3055,8 @@ impl P2PCore {
                     [(StreamProtocol::new(FILE_TRANSFER_PROTOCOL), request_response::ProtocolSupport::Full)],
                     request_response::Config::default(),
                 );
-                Ok(P2PBehaviour { gossipsub, kad, identify, file_chunks })
+                let mdns = libp2p::mdns::tokio::Behaviour::new(libp2p::mdns::Config::default(), peer_id)?;
+                Ok(P2PBehaviour { gossipsub, kad, identify, file_chunks, mdns })
             })
             .map_err(|e| e.to_string())?
             .build();
@@ -3258,6 +3280,32 @@ impl P2PCore {
                             // yapamadığı adres öğrenme adımı.
                             for addr in info.listen_addrs {
                                 swarm.behaviour_mut().kad.add_address(&peer_id, addr);
+                            }
+                        }
+                        libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Mdns(mdns_event)) => {
+                            // bkz. `P2PBehaviour.mdns` alanı dokümantasyonu —
+                            // AYNI yerel ağdaki bir peer keşfedildiğinde,
+                            // hiçbir kullanıcı eylemi olmadan otomatik dial
+                            // ediyoruz (QR taramasından sonraki `dial()`
+                            // çağrısıyla AYNI desen).
+                            match mdns_event {
+                                libp2p::mdns::Event::Discovered(list) => {
+                                    for (peer_id, addr) in list {
+                                        info!("mDNS: yerel ağda peer keşfedildi: {} @ {}", peer_id, addr);
+                                        swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                                        new_peer_addrs.push((peer_id, addr.clone()));
+                                        if !swarm.is_connected(&peer_id) {
+                                            if let Err(e) = swarm.dial(addr) {
+                                                error!("mDNS keşfinden sonra dial başarısız: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                libp2p::mdns::Event::Expired(list) => {
+                                    for (peer_id, addr) in list {
+                                        info!("mDNS: peer artık yerel ağda görünmüyor: {} @ {}", peer_id, addr);
+                                    }
+                                }
                             }
                         }
                         libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::FileChunks(rr_event)) => {
@@ -3520,6 +3568,42 @@ fn ciborium_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     ciborium::into_writer(value, &mut buf).map_err(|e| e.to_string())?;
     Ok(buf)
+}
+
+/// KRİTİK (bkz. `P2PBehaviour.mdns` alanı dokümantasyonu): önceden HER
+/// `start_network` çağrısı (yani her süreç başlangıcı) `Keypair::generate_ed25519()`
+/// ile RASTGELE, geçici bir libp2p kimliği (ve dolayısıyla `PeerId`)
+/// üretiyordu — bu, "tam kapat/aç sonrası tekrar QR okutman gerekiyor"
+/// şikayetinin kök nedenlerinden biriydi: bilinen bir kişinin `PeerId`'si
+/// (bkz. `device_to_peer_id`) her süreç yeniden başlatmasında GEÇERSİZ
+/// hâle geliyordu, çünkü KARŞI TARAF da kendi PeerId'sini değiştirmişti.
+/// Artık bu kimlik `{app_files_dir}/libp2p_identity.key`'e (protobuf
+/// kodlamasıyla) kalıcı kılınıyor — bir kez üretilip sonsuza kadar aynı
+/// kalıyor. Bu dosya şifrelenmiyor (Android Keystore'un aksine) — bilinçli
+/// bir kapsam kararı: bu, uygulamanın E2E mesaj içeriğini koruyan asıl
+/// kimlik/oturum anahtarlarından (bkz. IdentityManager) AYRI, sadece ağ
+/// katmanı taşıma kimliğidir; sızması mesaj içeriğini DEĞİL, sadece ağ
+/// katmanında cihaz kimliğinin taklit edilebilmesini riske atar — zaten
+/// uygulamaya özel (app-private) depoda, aynı DB dosyasındaki PUBLIC
+/// anahtarlarla aynı güven seviyesinde.
+fn load_or_generate_libp2p_keypair(app_files_dir: &str) -> libp2p::identity::Keypair {
+    let path = format!("{}/libp2p_identity.key", app_files_dir);
+    if let Ok(bytes) = std::fs::read(&path) {
+        if let Ok(kp) = libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {
+            return kp;
+        }
+        error!("libp2p_identity.key bozuk/okunamadı, yeni kimlik üretiliyor");
+    }
+    let kp = libp2p::identity::Keypair::generate_ed25519();
+    match kp.to_protobuf_encoding() {
+        Ok(bytes) => {
+            if let Err(e) = std::fs::write(&path, bytes) {
+                error!("libp2p_identity.key yazılamadı (bu süreçte kullanılacak ama kalıcı olmayacak): {}", e);
+            }
+        }
+        Err(e) => error!("libp2p keypair encode edilemedi: {}", e),
+    }
+    kp
 }
 
 fn extract_peer_id(addr: &Multiaddr) -> Option<PeerId> {

@@ -50,7 +50,7 @@ zeroize = "1.7"
 uuid = { version = "1.6", features = ["v4", "serde"] }
 
 # Networking (libp2p)
-libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "tokio", "macros", "dns", "request-response", "cbor"] }
+libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "mdns", "tokio", "macros", "dns", "request-response", "cbor"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 futures = "0.3"
 
