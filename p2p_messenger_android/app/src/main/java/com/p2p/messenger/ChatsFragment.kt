@@ -90,6 +90,7 @@ class ChatsFragment : Fragment() {
     private fun showChatLongPressMenu(message: ChatAdapter.ChatMessage) {
         val options = arrayOf(
             getString(R.string.action_clear_chat_history),
+            getString(R.string.action_revoke_device),
             getString(R.string.action_delete_contact)
         )
         AlertDialog.Builder(requireContext())
@@ -97,9 +98,36 @@ class ChatsFragment : Fragment() {
             .setItems(options) { _, which ->
                 when (which) {
                     0 -> confirmClearChatHistory(message)
-                    1 -> confirmDeleteContactStep1(message)
+                    1 -> confirmRevokeDevice(message)
+                    2 -> confirmDeleteContactStep1(message)
                 }
             }
+            .show()
+    }
+
+    /** bkz. dosya başı notu — kişiyi/geçmişi SİLMEZ, sadece bu TEK cihazı
+     *  iptal eder (bkz. Rust revoke_contact_device). Tek onay yeterli:
+     *  clear-history'den daha az yıkıcı (geçmiş korunur), delete-contact'tan
+     *  daha az yıkıcı (yeniden eşleşmeye gerek yok, sadece o cihaz
+     *  engellenir). */
+    private fun confirmRevokeDevice(message: ChatAdapter.ChatMessage) {
+        if (message.contactId.isEmpty()) return
+        AlertDialog.Builder(requireContext())
+            .setMessage(R.string.confirm_revoke_device)
+            .setPositiveButton(R.string.action_revoke_device) { _, _ ->
+                val result = try {
+                    P2PLib.revokeContactDevice(message.realContactId, message.contactId)
+                } catch (e: Exception) {
+                    "Error: ${e.message}"
+                }
+                if (result.startsWith("Error:")) {
+                    Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(requireContext(), R.string.msg_device_revoked, Toast.LENGTH_SHORT).show()
+                    refreshList()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
 

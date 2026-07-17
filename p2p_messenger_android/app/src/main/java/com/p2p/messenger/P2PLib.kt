@@ -174,4 +174,10 @@ object P2PLib {
     /** Sert seçenek: eşleşme/ratchet oturumu DAHİL kişiyi tamamen siler —
      *  yeniden mesajlaşmak için taze bir QR/manuel eşleşme gerekir. */
     external fun deleteContact(contactId: String): String
+    /** Spec dışı, güvenlik denetimi düzeltmesi: bu kişinin TEK bir cihazını
+     *  iptal eder — kişiyi/geçmişi SİLMEZ, sadece o cihaz fingerprint'inden
+     *  gelecek/giden her şeyi durdurur (bkz. Rust revoke_contact_device —
+     *  is_active artık receive_message/handshake'te gerçekten kontrol
+     *  ediliyor). Ör. "eski telefonum çalındı, bu cihazı artık güvenme". */
+    external fun revokeContactDevice(contactId: String, deviceFingerprint: String): String
 }

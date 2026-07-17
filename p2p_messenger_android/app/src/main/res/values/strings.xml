@@ -44,7 +44,7 @@
     <string name="error_camera_permission">Camera permission required for QR scanning</string>
     <string name="error_network">Network error. Please check your connection.</string>
     <string name="error_send_failed">Failed to send message</string>
-    <string name="confirm_revoke_device">Revoke this device? It will no longer be able to send or receive messages.</string>
+    <string name="confirm_revoke_device">Bu cihazı iptal etmek istediğinize emin misiniz? Kişi listenizde kalır ama bu cihazdan artık mesaj gönderemez/alamazsınız — geçmiş silinmez.</string>
     <string name="confirm_block_contact">Block this contact?</string>
 
     <string name="lbl_edited">(düzenlendi)</string>
@@ -89,6 +89,10 @@
     <string name="confirm_delete_contact_step2">Bu işlem GERİ ALINAMAZ — yeniden mesajlaşmak için QR kodunu tekrar okutmanız gerekecek. Yine de silmek istiyor musunuz?</string>
     <string name="msg_chat_history_cleared">Sohbet geçmişi temizlendi</string>
     <string name="msg_contact_deleted">Kişi silindi</string>
+    <!-- Spec dışı, güvenlik denetimi düzeltmesi: kişiyi silmeden sadece o
+         cihazı güvenilmez ilan eder (bkz. Rust revoke_contact_device). -->
+    <string name="action_revoke_device">Bu cihazı iptal et</string>
+    <string name="msg_device_revoked">Cihaz iptal edildi — bu kişiden artık mesaj kabul edilmeyecek</string>
 
     <!-- Spec dışı: sesli mesaj kaydı -->
     <string name="content_desc_record_voice">Sesli mesaj kaydet</string>
