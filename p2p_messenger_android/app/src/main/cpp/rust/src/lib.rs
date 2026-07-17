@@ -1,4 +1,4 @@
-//! P2P Messenger — Rust çekirdeği.
+//! Typoon — Rust çekirdeği.
 //!
 //! Description.md "Aşama A" kapsamını hedefler: tek cihaz (1 Identity = 1
 //! Device) varsayımıyla test edilir, ama Identity/Device ayrımına göre
@@ -27,6 +27,7 @@ use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, Verifier,
 use futures::FutureExt as _;
 use futures::StreamExt as _;
 use hex;
+use hkdf::Hkdf;
 use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jboolean, jobjectArray, jstring};
 use jni::JNIEnv;
@@ -156,13 +157,31 @@ struct DeviceKeys {
 /// "Rust master şifreleme anahtarını hiç görmesin" ilkesini sağlar: Rust
 /// sadece plaintext key üretir/tüketir, şifreleme/diske yazma Kotlin'in
 /// işidir.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// Spec dışı, güvenlik denetimi düzeltmesi: `Debug` KASITLI OLARAK derive
+// edilmiyor — bu struct dört ham secret key baytını taşıyor, `Debug`
+// olsaydı ileride biri yanlışlıkla `error!("{:?}", bundle)` gibi bir satır
+// eklerse uzun-vadeli kimlik anahtarları düz metin olarak Android logcat'e
+// yazılabilirdi. Ayrıca `Drop` ile bellekten çıkarken sıfırlanıyor (bkz.
+// Cargo.toml "zeroize" feature notu — tipli `DeviceKeys`/`DeviceRatchetState`
+// için bu upstream crate'lerin kendi `ZeroizeOnDrop`'u hallediyor, ama bu
+// struct ham `Vec<u8>` kullandığından elle yapılması gerekiyor).
+#[derive(Clone, Serialize, Deserialize)]
 struct SecretKeyBundle {
     device_fingerprint: String,
     sign_sk_ed25519: Vec<u8>,
     sign_sk_mldsa: Vec<u8>,
     kem_sk_x25519: Vec<u8>,
     kem_sk_mlkem: Vec<u8>,
+}
+
+impl Drop for SecretKeyBundle {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.sign_sk_ed25519.zeroize();
+        self.sign_sk_mldsa.zeroize();
+        self.kem_sk_x25519.zeroize();
+        self.kem_sk_mlkem.zeroize();
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -905,7 +924,7 @@ impl P2PCore {
         let kem_pk_encoded: ml_kem::Encoded<MlKem1024EncapsulationKey> = record.kem_pubkey_mlkem.as_slice().try_into().map_err(|_| "Bozuk Kyber public key")?;
         let kem_pk_mlkem = MlKem1024EncapsulationKey::from_bytes(&kem_pk_encoded);
 
-        self.own_device_keys.insert(bundle.device_fingerprint, DeviceKeys {
+        self.own_device_keys.insert(bundle.device_fingerprint.clone(), DeviceKeys {
             sign_sk_ed25519,
             sign_pk_ed25519,
             sign_pk_mldsa,
@@ -1471,7 +1490,14 @@ impl P2PCore {
         self.identity_to_contact.remove(&contact.trusted_identity_id);
         let fingerprints: Vec<String> = contact.known_devices.iter().map(|d| d.device_fingerprint.clone()).collect();
         for fp in &fingerprints {
-            self.ratchets.remove(fp);
+            if let Some(state) = self.ratchets.remove(fp) {
+                // bkz. `topic_for_root_key` dokümantasyonu — oturum
+                // silindiğinde artık dinlenmesine gerek kalmayan topic'ten
+                // aboneliği de iptal et (küçük bir hijyen adımı, gizlilik
+                // açısından zorunlu değil ama gereksiz aboneliği bırakmamak
+                // için).
+                self.resubscribe_ratchet_topic(Some(&state.root_key), None);
+            }
             self.device_to_peer_id.remove(fp);
             self.clear_persisted_skipped_keys(fp);
             self.awaiting_confirmation.retain(|_, pc| &pc.peer_device_fingerprint != fp);
@@ -1522,7 +1548,9 @@ impl P2PCore {
             self.persist_remote_device(record);
         }
 
-        self.ratchets.remove(device_fingerprint);
+        if let Some(state) = self.ratchets.remove(device_fingerprint) {
+            self.resubscribe_ratchet_topic(Some(&state.root_key), None);
+        }
         self.device_to_peer_id.remove(device_fingerprint);
         self.clear_persisted_skipped_keys(device_fingerprint);
         self.awaiting_confirmation.retain(|_, pc| pc.peer_device_fingerprint != device_fingerprint);
@@ -1633,6 +1661,7 @@ impl P2PCore {
             signature_pq: sig_pq.encode().to_vec(),
         };
 
+        self.resubscribe_ratchet_topic(None, Some(&state.root_key));
         self.ratchets.insert(peer_device_fingerprint.to_string(), state);
         self.persist_ratchet_state(peer_device_fingerprint);
         self.publish_envelope(peer_device_fingerprint, &NetworkEnvelope::Handshake(handshake))
@@ -1725,6 +1754,7 @@ impl P2PCore {
             &handshake.kyber_ciphertext,
         )?;
 
+        self.resubscribe_ratchet_topic(None, Some(&state.root_key));
         self.ratchets.insert(handshake.sender_device_fingerprint.clone(), state);
         self.persist_ratchet_state(&handshake.sender_device_fingerprint);
         Ok(())
@@ -1745,7 +1775,13 @@ impl P2PCore {
             return Ok(None);
         }
         if let Some(state) = self.ratchets.get_mut(peer_device_fingerprint) {
+            let old_root_key = state.root_key.clone();
             let kyber_ct = state.perform_dh_ratchet()?;
+            let new_root_key = state.root_key.clone();
+            // bkz. `topic_for_root_key` dokümantasyonu — root_key
+            // değiştiği için gossipsub topic'i de eskisinden aboneliği
+            // iptal edip yenisine abone olarak takip etmeli.
+            self.resubscribe_ratchet_topic(Some(&old_root_key), Some(&new_root_key));
             // Biz rotasyonu tetikledik — eski zincire ait diskteki
             // skipped-key'ler de anlamsızlaştı (bkz. receive_message'daki
             // simetrik temizlik respond_to_rotation için).
@@ -1941,15 +1977,34 @@ impl P2PCore {
         // değişmez, bu yüzden onu görmezden gelmek güvenlidir.
         if let Some(ct) = &packet.header.rotation_kyber_ciphertext {
             if let Ok(new_peer_keys) = RatchetPublicKeys::from_bytes(&packet.header.ratchet_pubkey) {
-                if let Some(state) = self.ratchets.get_mut(&packet.header.sender_device_fingerprint) {
-                    if let Err(e) = state.respond_to_rotation(&new_peer_keys, ct) {
-                        error!("Rotasyon senkronizasyonu başarısız: {}", e);
-                    } else {
-                        // Rotasyon başarılıysa eski zincire ait diskteki
-                        // skipped-key'ler de anlamsızlaştı — temizle.
-                        self.clear_persisted_skipped_keys(&packet.header.sender_device_fingerprint);
-                        self.persist_ratchet_state(&packet.header.sender_device_fingerprint);
+                // `rotated_keys`: rotasyon başarılıysa (eski, yeni) root_key
+                // çifti — bu bloktan sonra, `self.ratchets`'in mutable
+                // borrow'u tamamen bittikten sonra `self.resubscribe_ratchet_topic`
+                // (ki `&mut self`'in TAMAMINI ister) güvenle çağrılabilsin diye
+                // ayrı bir adım olarak çıkarıldı.
+                let rotated_keys: Option<(Vec<u8>, Vec<u8>)> = if let Some(state) =
+                    self.ratchets.get_mut(&packet.header.sender_device_fingerprint)
+                {
+                    let old_root_key = state.root_key.clone();
+                    match state.respond_to_rotation(&new_peer_keys, ct) {
+                        Ok(()) => Some((old_root_key, state.root_key.clone())),
+                        Err(e) => {
+                            error!("Rotasyon senkronizasyonu başarısız: {}", e);
+                            None
+                        }
                     }
+                } else {
+                    None
+                };
+                if let Some((old_root_key, new_root_key)) = rotated_keys {
+                    // bkz. `topic_for_root_key` dokümantasyonu — karşı taraf
+                    // rotasyonu tetikledi, biz de aynı şekilde gossipsub
+                    // topic aboneliğimizi yeni root_key'e taşıyoruz.
+                    self.resubscribe_ratchet_topic(Some(&old_root_key), Some(&new_root_key));
+                    // Rotasyon başarılıysa eski zincire ait diskteki
+                    // skipped-key'ler de anlamsızlaştı — temizle.
+                    self.clear_persisted_skipped_keys(&packet.header.sender_device_fingerprint);
+                    self.persist_ratchet_state(&packet.header.sender_device_fingerprint);
                 }
             }
         }
@@ -3445,6 +3500,15 @@ impl P2PCore {
             swarm.behaviour_mut().gossipsub.subscribe(&own_topic).map_err(|e| e.to_string())?;
         }
 
+        // bkz. `topic_for_root_key` dokümantasyonu: `load_ratchet_states_from_db`
+        // (init_db sırasında, swarm henüz yokken) diskten yüklenmiş her
+        // mevcut oturum için, o oturumun rotasyonlu topic'ine de abone ol —
+        // aksi halde bu kişilerden gelen (fingerprint tabanlı posta kutusu
+        // ARTIK dinlenmediği için) hiçbir mesaj alınamaz.
+        for state in self.ratchets.values() {
+            let _ = swarm.behaviour_mut().gossipsub.subscribe(&Self::topic_for_root_key(&state.root_key));
+        }
+
         self.swarm = Some(swarm);
         Ok(peer_id.to_string())
     }
@@ -3485,13 +3549,70 @@ impl P2PCore {
         Some(format!("{addr}/p2p/{peer_id}"))
     }
 
+    /// Spec dışı, güvenlik denetimi düzeltmesi: gossipsub topic adı önceden
+    /// DOĞRUDAN alıcının cihaz fingerprint'inden türetiliyordu
+    /// (`p2p_msg_<fingerprint>`) — ağdaki herhangi bir gözlemci, içeriği
+    /// okuyamasa bile HANGİ fingerprint'e mesaj gittiğini ve NE ZAMAN
+    /// gittiğini doğrudan görebiliyordu (bkz. SECURITY.md "Trafik analizi"
+    /// notu). Bir ratchet oturumu KURULDUKTAN SONRA artık bunun yerine, o
+    /// oturumun `root_key`'inden HKDF ile türetilen sözde-rastgele bir
+    /// topic adı kullanılıyor — bu, sadece o oturumun paylaşılan sırrına
+    /// sahip iki tarafın hesaplayabileceği bir değer, fingerprint'ten
+    /// GERİYE türetilemez. `root_key` her DH/KEM rotasyonunda (30 dakikada
+    /// bir, bkz. ratchet.rs) değiştiğinden, topic adı da otomatik olarak
+    /// rotate olur — uzun vadeli bir gözlemci bile "bu iki topic aynı
+    /// çifte ait" bağlantısını kuramaz.
+    ///
+    /// BİLİNEN SINIR: henüz hiçbir ratchet oturumu yokken (ilk eşleşmenin
+    /// `IdentityExchange`/`HandshakeInit` çifti) paylaşılacak bir sır da
+    /// yok — bu durumda kaçınılmaz olarak eski `p2p_msg_<fingerprint>`
+    /// "posta kutusu" topic'ine düşülür (birini tanımadan önce onunla
+    /// nasıl bir "rastgele buluşma noktası" paylaşılabilir ki?). Yani bu
+    /// düzeltme, bir kişiyle YAPILAN TÜM GERÇEK KONUŞMA trafiğini korur;
+    /// sadece BİR KEZLİK ilk eşleşme anı fingerprint üzerinden görünür
+    /// kalır (SECURITY.md'de belgelendi).
+    fn topic_for_root_key(root_key: &[u8]) -> gossipsub::IdentTopic {
+        use sha2::Sha256;
+        let hk = Hkdf::<Sha256>::new(None, root_key);
+        let mut topic_id = [0u8; 16];
+        hk.expand(b"p2pmsg-v0.1-gossip-topic", &mut topic_id).expect("HKDF expand failed");
+        gossipsub::IdentTopic::new(format!("p2p_rt_{}", hex::encode(topic_id)))
+    }
+
+    /// `topic_for_root_key` dokümantasyonuna bkz. Bir ratchet oturumu
+    /// kurulduğunda/rotasyon geçirdiğinde/silindiğinde çağrılan ortak
+    /// abonelik yardımcı fonksiyonu — `old_root_key: Some(..)` ise önce o
+    /// topic'ten abonelik iptal edilir (rotasyon/silme), sonra
+    /// `new_root_key: Some(..)` ise o topic'e abone olunur (oluşturma/
+    /// rotasyon). Swarm henüz başlamamışsa (`self.swarm == None`) sessizce
+    /// no-op — `load_ratchet_states_from_db` süreç başlangıcında,
+    /// `start_network`'ten ÖNCE çağrıldığı için bu durum normaldir (bkz.
+    /// `start_network`'teki toplu abonelik döngüsü).
+    fn resubscribe_ratchet_topic(&mut self, old_root_key: Option<&[u8]>, new_root_key: Option<&[u8]>) {
+        if let Some(swarm) = &mut self.swarm {
+            if let Some(old) = old_root_key {
+                let _ = swarm.behaviour_mut().gossipsub.unsubscribe(&Self::topic_for_root_key(old));
+            }
+            if let Some(new) = new_root_key {
+                let _ = swarm.behaviour_mut().gossipsub.subscribe(&Self::topic_for_root_key(new));
+            }
+        }
+    }
+
     /// Sadece ham gossipsub publish — kuyruğa EKLEMEZ, durum güncellemez.
     /// `publish_envelope` (ilk deneme) ve `poll_events`'teki retry döngüsü
     /// (sonraki denemeler) tarafından ortak kullanılır.
     fn try_publish_raw(&mut self, target_device_fingerprint: &str, envelope: &NetworkEnvelope) -> Result<(), String> {
         let bytes = ciborium_bytes(envelope)?;
+        // bkz. `topic_for_root_key` dokümantasyonu: bir ratchet oturumu
+        // varsa fingerprint yerine paylaşılan sırdan türetilen rotasyonlu
+        // topic kullanılır; yoksa (ilk eşleşme) kaçınılmaz olarak eski
+        // fingerprint tabanlı "posta kutusu" topic'ine düşülür.
+        let topic = match self.ratchets.get(target_device_fingerprint) {
+            Some(ratchet) => Self::topic_for_root_key(&ratchet.root_key),
+            None => gossipsub::IdentTopic::new(format!("p2p_msg_{}", target_device_fingerprint)),
+        };
         if let Some(swarm) = &mut self.swarm {
-            let topic = gossipsub::IdentTopic::new(format!("p2p_msg_{}", target_device_fingerprint));
             swarm.behaviour_mut().gossipsub.publish(topic, bytes).map_err(|e| e.to_string())?;
         }
         Ok(())

@@ -31,16 +31,26 @@ ring = "0.17"
 # parametresiz `generate()` sunuyor (`getrandom` feature'ı sayesinde,
 # içeride kendi ambient RNG'sini kullanır) — bu yüzden ml-dsa tarafında
 # hâlâ `SigningKey::generate()` (parametresiz) kullanılıyor.
-ml-kem = "0.2"
+# Spec dışı, güvenlik denetimi düzeltmesi: "zeroize" feature'ı dört crate'te
+# de (ml-kem/ml-dsa/x25519-dalek/ed25519-dalek) AÇILDI — bu, uzun-vadeli
+# kimlik secret key'lerinin (DeviceKeys) VE her ratchet oturumunun kendi
+# X25519/Kyber secret key çiftinin (DeviceRatchetState.own_x25519_secret/
+# own_kyber_secret) bellekten düşürülürken (Drop) otomatik olarak sıfırla
+# ÜZERİNE YAZILMASINI sağlar (bkz. SECURITY.md "Bellekte anahtar hijyeni").
+# Önceden bu crate'ler bu feature'sız derleniyordu — secret key baytları
+# normal Rust `drop` ile (yani hiçbir üzerine yazma olmadan) bellekten
+# çıkıyordu; process belleği bir şekilde okunabilseydi (ör. ayrı bir cihaz
+# açığı) bu baytlar hâlâ orada bulunabilirdi.
+ml-kem = { version = "0.2", features = ["zeroize"] }
 kem = "=0.3.0-pre.0"
-ml-dsa = { version = "0.1.1", features = ["getrandom"] }
+ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
 chacha20poly1305 = "0.10"
 rand = "0.8"
 sha2 = "0.10"
 sha3 = "0.10"
 hkdf = "0.12"
-x25519-dalek = { version = "2", features = ["static_secrets"] }
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 hex = "0.4"
 base32 = "0.5"
 serde = { version = "1.0", features = ["derive"] }

@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+use zeroize::Zeroize;
 
 pub type MlKem1024DecapsulationKey = ml_kem::kem::DecapsulationKey<ml_kem::MlKem1024Params>;
 pub type MlKem1024EncapsulationKey = ml_kem::kem::EncapsulationKey<ml_kem::MlKem1024Params>;
@@ -112,6 +113,26 @@ pub struct DeviceRatchetState {
     /// süreç yeniden başlasa bile gecikmeli mesajlar çözülebilsin diye
     /// (kapsam sınırı için bkz. lib.rs ilgili not).
     pub skipped_keys: HashMap<u32, [u8; 32]>,
+}
+
+/// Spec dışı, güvenlik denetimi düzeltmesi: bu struct'ın (`own_x25519_secret`/
+/// `own_kyber_secret` HARİÇ, bkz. Cargo.toml "zeroize" feature notu — onlar
+/// zaten kendi crate'lerinin `ZeroizeOnDrop` implementasyonuyla sıfırlanıyor)
+/// düz `Vec<u8>` olarak tuttuğu simetrik sırlar (`root_key`/`ck_send`/
+/// `ck_recv`) ve atlanmış mesaj anahtarları (`skipped_keys`) önceden normal
+/// Rust `drop` ile (üzerine yazmadan) bellekten çıkıyordu — bir oturum
+/// rotasyon geçirdiğinde (eski root_key değeri atılır) veya kişi/cihaz
+/// silindiğinde/iptal edildiğinde (`self.ratchets.remove`) bu baytlar hâlâ
+/// bellekte kalabilirdi. Artık `Drop` ile açıkça sıfırlanıyor.
+impl Drop for DeviceRatchetState {
+    fn drop(&mut self) {
+        self.root_key.zeroize();
+        self.ck_send.zeroize();
+        self.ck_recv.zeroize();
+        for key in self.skipped_keys.values_mut() {
+            key.zeroize();
+        }
+    }
 }
 
 /// `DeviceRatchetState`'in diske (şifreli) yazılabilir hâli — secret key
@@ -487,13 +508,17 @@ impl DeviceRatchetState {
     /// (aynı chain key altında iki farklı mesaj numarası asla aynı nonce'u
     /// üretmez, bu da AEAD güvenliği için yeterlidir).
     pub fn encrypt_next(&mut self, plaintext: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
-        let message_key = self.advance_send_chain()?;
+        let mut message_key = self.advance_send_chain()?;
         let message_number = self.send_message_number;
         self.send_message_number += 1;
 
         let cipher = ChaCha20Poly1305::new_from_slice(&message_key).map_err(|_| "Invalid key")?;
         let nonce = nonce_from_message_number(message_number);
         let ciphertext = cipher.encrypt(&nonce, plaintext).map_err(|_| "Encryption failed")?;
+        // bkz. `DeviceRatchetState`'in `Drop` notu — bu, tek bir mesaja özel
+        // anahtar, kullanıldıktan hemen sonra bellekten (üzerine yazılarak)
+        // temizleniyor; fonksiyon dönüşünü beklemiyor.
+        message_key.zeroize();
 
         Ok((ciphertext, message_number, self.prev_chain_length))
     }
@@ -523,7 +548,7 @@ impl DeviceRatchetState {
 
         let mut changes = SkippedKeyChanges::default();
 
-        let message_key = match message_number.cmp(&self.recv_message_number) {
+        let mut message_key = match message_number.cmp(&self.recv_message_number) {
             Ordering::Equal => {
                 let key = self.advance_recv_chain()?;
                 self.recv_message_number += 1;
@@ -564,6 +589,8 @@ impl DeviceRatchetState {
         let cipher = ChaCha20Poly1305::new_from_slice(&message_key).map_err(|_| "Invalid key")?;
         let nonce = nonce_from_message_number(message_number);
         let plaintext = cipher.decrypt(&nonce, ciphertext).map_err(|_| "Decryption failed".to_string())?;
+        // bkz. `encrypt_next`'teki aynı not.
+        message_key.zeroize();
         Ok((plaintext, changes))
     }
 }
