@@ -273,6 +273,12 @@ const PENDING_ENVELOPE_TIMEOUT_MS: u64 = 20_000;
 /// onaylayana kadar sürekli dene" istedi.
 const ACK_RETRY_INITIAL_MS: u64 = 5_000;
 const ACK_RETRY_MAX_MS: u64 = 120_000;
+/// bkz. `PendingConfirmation.retries_remaining` dokümantasyonu — bir
+/// `Ack` paketinin (kendisi ayrıca onaylanmadığından) en fazla kaç kez
+/// yeniden denenip sonra sessizce bırakılacağı. 5 deneme + üstel geri
+/// çekilme (5s, 10s, 20s, 40s, 80s ≈ toplam 2.5 dakika), tek seferlik
+/// fire-and-forget'e göre teslimat olasılığını ciddi ölçüde artırır.
+const ACK_SELF_MAX_RETRIES: u32 = 5;
 
 /// bkz. `DownloadState.last_progress_at` dokümantasyonu — bir indirmenin,
 /// hiçbir libp2p-seviyeli olay (ne parça yanıtı, ne `OutboundFailure`)
@@ -308,6 +314,23 @@ struct PendingConfirmation {
     envelope: NetworkEnvelope,
     next_retry_at: u64,
     retry_interval_ms: u64,
+    /// `None` = karşı taraf onaylayana kadar SÜRESİZ (Text/Edit/Delete/
+    /// HistorySyncRequest — kullanıcının açıkça istediği davranış).
+    /// `Some(n)` = en fazla `n` kez daha denenir, sonra sessizce vazgeçilir.
+    /// SADECE `Ack` paketleri için kullanılır: `Ack`'in kendisi
+    /// AYRICA onaylanmıyor (bkz. packet.rs notu — sonsuz "onayı onayla"
+    /// döngüsü riski), bu yüzden süresiz deneyemez; ama tek seferlik
+    /// fire-and-forget de yetersizdi — bir Ack ağda kaybolursa (aynı
+    /// güvenilmezlik, mesajların kendisini neden etkiliyorsa), gönderen
+    /// taraf teslimatı ASLA öğrenemez ve orijinal mesajı SÜRESİZ yeniden
+    /// göndermeye devam eder; alıcı taraf ise her seferinde AYNI (artık
+    /// kendi ratchet'inde tüketilmiş) mesaj numarasını çözmeye çalışıp
+    /// sürekli "Decryption failed"/"skipped-key cache'te yok" hatası
+    /// üretir (bkz. bu alanın eklenmesine yol açan gerçek arıza deseni).
+    /// Sınırlı birkaç deneme (bkz. `ACK_SELF_MAX_RETRIES`), tek seferlik
+    /// göndermeye kıyasla teslimat olasılığını ciddi ölçüde artırırken
+    /// sonsuz döngü riskini de önler.
+    retries_remaining: Option<u32>,
 }
 
 struct P2PCore {
@@ -1537,8 +1560,20 @@ impl P2PCore {
                 | MessageContent::Delete { .. }
                 | MessageContent::HistorySyncRequest { .. }
         );
+        // Ack, kendisi ONAYLANMASA da (bkz. packet.rs notu — sonsuz döngü
+        // riski) artık SINIRLI sayıda yeniden dener (bkz.
+        // `ACK_SELF_MAX_RETRIES`) — tek seferlik fire-and-forget'in kayıp
+        // bir Ack'i asla telafi edememesi, gönderen tarafın orijinal
+        // mesajı SÜRESİZ (artık alıcının ratchet'inde tüketilmiş bir
+        // mesaj numarasına karşı, dolayısıyla ASLA başarılı olamayacak
+        // şekilde) yeniden göndermeye devam etmesine yol açıyordu (bkz.
+        // gerçek arıza deseni: sürekli tekrar eden "Decryption failed"/
+        // "skipped-key cache'te yok" logları).
+        let is_ack = matches!(content, MessageContent::Ack { .. });
         if needs_delivery_confirmation {
-            self.publish_with_ack_tracking(&peer_device_fingerprint, &message_id, NetworkEnvelope::Message(packet));
+            self.publish_with_ack_tracking(&peer_device_fingerprint, &message_id, NetworkEnvelope::Message(packet), None);
+        } else if is_ack {
+            self.publish_with_ack_tracking(&peer_device_fingerprint, &message_id, NetworkEnvelope::Message(packet), Some(ACK_SELF_MAX_RETRIES));
         } else if let Err(e) = self.publish_envelope(&peer_device_fingerprint, &NetworkEnvelope::Message(packet)) {
             error!("Mesaj gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
         }
@@ -2915,7 +2950,7 @@ impl P2PCore {
     /// SONRASINDA da (ilk deneme başarılı olsa BİLE) karşı taraftan bir
     /// onay gelene kadar paketi periyodik olarak yeniden göndermeye devam
     /// eder — `pending_envelopes`'in aksine bir üst zaman sınırı yoktur.
-    fn publish_with_ack_tracking(&mut self, target_device_fingerprint: &str, message_id: &str, envelope: NetworkEnvelope) {
+    fn publish_with_ack_tracking(&mut self, target_device_fingerprint: &str, message_id: &str, envelope: NetworkEnvelope, retries_remaining: Option<u32>) {
         let now = current_time_ms();
         match self.try_publish_raw(target_device_fingerprint, &envelope) {
             Ok(()) => {
@@ -2935,6 +2970,7 @@ impl P2PCore {
             envelope,
             next_retry_at: now + ACK_RETRY_INITIAL_MS,
             retry_interval_ms: ACK_RETRY_INITIAL_MS,
+            retries_remaining,
         });
     }
 
@@ -2949,10 +2985,19 @@ impl P2PCore {
             .map(|(id, _)| id.clone())
             .collect();
         for message_id in due_ids {
-            let (peer_fp, envelope) = match self.awaiting_confirmation.get(&message_id) {
-                Some(p) => (p.peer_device_fingerprint.clone(), p.envelope.clone()),
+            let (peer_fp, envelope, retries_remaining) = match self.awaiting_confirmation.get(&message_id) {
+                Some(p) => (p.peer_device_fingerprint.clone(), p.envelope.clone(), p.retries_remaining),
                 None => continue,
             };
+            // bkz. `PendingConfirmation.retries_remaining` dokümantasyonu —
+            // SINIRLI girdiler (Ack) tükendiğinde sessizce bırakılır, ARTIK
+            // yeniden gönderilmez. Sınırsız girdiler (Text/Edit/Delete/
+            // HistorySyncRequest) için `retries_remaining` hep `None`,
+            // buraya hiç girmez.
+            if retries_remaining == Some(0) {
+                self.awaiting_confirmation.remove(&message_id);
+                continue;
+            }
             match self.try_publish_raw(&peer_fp, &envelope) {
                 Ok(()) => {
                     if let NetworkEnvelope::Message(m) = &envelope {
@@ -2962,10 +3007,15 @@ impl P2PCore {
                 Err(_) => {
                     // Sessizce bir sonraki turda tekrar denenecek — henüz
                     // "Failed" olarak işaretlemiyoruz, kullanıcı açıkça
-                    // "onaylanana kadar sürekli dene" istedi.
+                    // "onaylanana kadar sürekli dene" istedi (sınırsız
+                    // girdiler için) / sınırlı girdiler zaten kendi
+                    // deneme sayacıyla sonlanacak.
                 }
             }
             if let Some(pending) = self.awaiting_confirmation.get_mut(&message_id) {
+                if let Some(n) = pending.retries_remaining {
+                    pending.retries_remaining = Some(n.saturating_sub(1));
+                }
                 pending.retry_interval_ms = (pending.retry_interval_ms * 2).min(ACK_RETRY_MAX_MS);
                 pending.next_retry_at = current_time_ms() + pending.retry_interval_ms;
             }
