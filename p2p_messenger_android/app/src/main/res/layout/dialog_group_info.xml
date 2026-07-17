@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spec dışı: GroupChatActivity üst çubuğuna dokununca açılır — grup
+     profil fotoğrafı (SADECE kurucu değiştirebilir) + üye listesi + (kurucu
+     ise) üye ekleme, tek bir yerde. -->
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <ImageView
+            android:id="@+id/imgGroupAvatarLarge"
+            android:layout_width="96dp"
+            android:layout_height="96dp"
+            android:layout_gravity="center_horizontal"
+            android:contentDescription="@null" />
+
+        <!-- Sadece kurucu görür. -->
+        <LinearLayout
+            android:id="@+id/rowAvatarActions"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <Button
+                android:id="@+id/btnChangeGroupPicture"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/action_change_picture" />
+
+            <Button
+                android:id="@+id/btnRemoveGroupPicture"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/action_remove_picture" />
+
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/txtGroupMemberCount"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/txtGroupMembers"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textIsSelectable="true" />
+
+        <!-- Sadece kurucu görür. -->
+        <Button
+            android:id="@+id/btnAddMemberToGroup"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/lbl_add_member_to_group"
+            android:visibility="gone" />
+
+    </LinearLayout>
+
+</androidx.core.widget.NestedScrollView>

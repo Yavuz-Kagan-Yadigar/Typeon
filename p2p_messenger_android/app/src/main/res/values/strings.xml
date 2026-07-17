@@ -92,7 +92,7 @@
 
     <!-- Spec dışı: sesli mesaj kaydı -->
     <string name="content_desc_record_voice">Sesli mesaj kaydet</string>
-    <string name="msg_recording_voice">Kaydediliyor… bırakınca gönderilir, sola kaydırınca iptal olur</string>
+    <string name="msg_recording_voice">İptal için kaydır ▷</string>
     <string name="msg_recording_cancelled">Kayıt iptal edildi</string>
     <string name="error_recording_failed">Ses kaydı başlatılamadı</string>
 

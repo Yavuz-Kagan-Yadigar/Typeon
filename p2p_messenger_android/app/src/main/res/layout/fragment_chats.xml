@@ -1,25 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-              android:orientation="vertical"
-              android:padding="16dp"
-              android:layout_width="match_parent"
-              android:layout_height="match_parent">
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Chats"
-        android:textSize="24sp"
-        android:textStyle="bold"/>
-    <TextView
-        android:id="@+id/txtNoContacts"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/msg_no_contacts"
-        android:layout_marginTop="8dp"/>
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/recyclerChats"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:orientation="vertical"
+        android:padding="16dp"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:layout_marginTop="8dp"/>
-</LinearLayout>
+        android:layout_height="match_parent">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Chats"
+            android:textSize="24sp"
+            android:textStyle="bold"/>
+        <TextView
+            android:id="@+id/txtNoContacts"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/msg_no_contacts"
+            android:layout_marginTop="8dp"/>
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/recyclerChats"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:layout_marginTop="8dp"/>
+    </LinearLayout>
+
+    <!-- Spec dışı: Gruplar sekmesi kaldırıldı, grup oluşturma buraya
+         taşındı (bkz. kullanıcı isteği "gruplar tabını kaldır ve
+         gruplari da normal chat tabına taşı"). -->
+    <com.google.android.material.floatingactionbutton.FloatingActionButton
+        android:id="@+id/btnCreateGroup"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="24dp"
+        android:contentDescription="@string/action_create_group"
+        app:srcCompat="@android:drawable/ic_menu_agenda" />
+
+</FrameLayout>

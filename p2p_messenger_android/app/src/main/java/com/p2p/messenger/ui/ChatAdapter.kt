@@ -20,7 +20,7 @@ import com.p2p.messenger.util.AvatarUtil
  * yaratır.
  */
 class ChatAdapter(
-    private val onContactClick: (String, String) -> Unit
+    private val onItemClick: (ChatMessage) -> Unit
 ) : ListAdapter<ChatAdapter.ChatMessage, ChatAdapter.ChatViewHolder>(DIFF_CALLBACK) {
 
     data class ChatMessage(
@@ -32,11 +32,15 @@ class ChatAdapter(
         /** Rust'ın gerçek `contact_id`'si (`contactId` alanı tarihsel
          *  olarak AYGIT parmak izini taşıyor, bkz. ChatsFragment notu) —
          *  sadece uzun basma menüsündeki sohbet geçmişi temizleme/kişi
-         *  silme çağrıları için gerekli. */
+         *  silme çağrıları için gerekli. Grup satırlarında boş kalır. */
         val realContactId: String = "",
-        /** Bu kişinin bize gönderdiği profil fotoğrafı (720p/%85 JPEG),
-         *  yoksa `null` (baş harf rozeti gösterilir). */
-        val avatarJpeg: ByteArray? = null
+        /** Bu kişinin/grubun profil fotoğrafı (720p/%85 JPEG), yoksa
+         *  `null` (baş harf rozeti gösterilir). */
+        val avatarJpeg: ByteArray? = null,
+        /** Spec dışı: Gruplar sekmesi kaldırıldı, gruplar bu listeye
+         *  karıştırıldı (bkz. kullanıcı isteği) — `true` ise `contactId`
+         *  aslında bir `group_id`'dir, tıklama `GroupChatActivity` açmalı. */
+        val isGroup: Boolean = false
     ) {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -44,6 +48,7 @@ class ChatAdapter(
             return contactId == other.contactId && displayName == other.displayName &&
                 lastMessage == other.lastMessage && timestamp == other.timestamp &&
                 unreadCount == other.unreadCount && realContactId == other.realContactId &&
+                isGroup == other.isGroup &&
                 (avatarJpeg?.contentEquals(other.avatarJpeg) ?: (other.avatarJpeg == null))
         }
 
@@ -54,6 +59,7 @@ class ChatAdapter(
             result = 31 * result + timestamp.hashCode()
             result = 31 * result + unreadCount
             result = 31 * result + realContactId.hashCode()
+            result = 31 * result + isGroup.hashCode()
             result = 31 * result + (avatarJpeg?.contentHashCode() ?: 0)
             return result
         }
@@ -89,7 +95,7 @@ class ChatAdapter(
             AvatarUtil.renderInto(imgAvatar, message.avatarJpeg, message.displayName)
 
             itemView.setOnClickListener {
-                onContactClick(message.contactId, message.displayName)
+                onItemClick(message)
             }
             itemView.setOnLongClickListener {
                 if (message.realContactId.isNotEmpty()) {

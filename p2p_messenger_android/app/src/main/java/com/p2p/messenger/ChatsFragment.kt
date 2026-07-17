@@ -8,23 +8,29 @@ import android.os.Looper
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
 import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.p2p.messenger.ui.ChatActivity
 import com.p2p.messenger.ui.ChatAdapter
+import com.p2p.messenger.ui.GroupChatActivity
 import com.p2p.messenger.util.hexToBytes
 import org.json.JSONArray
 
 /**
- * Spec 3 minimum kapsamı: bilinen kişilerin listesi, tıklanınca sohbet
- * ekranını açar. `ListAdapter`/`DiffUtil` tabanlı gerçek bir adapter
- * kullanır (bkz. ChatAdapter) ve periyodik olarak yenilenir — yeni bir
- * kişi eklendiğinde veya (node modu açıksa) son mesaj değiştiğinde liste
- * güncellenir. Node modu kapalıyken "son mesaj" alanı boş kalır, çünkü
- * mesaj geçmişi o durumda hiç saklanmıyor (bkz. ChatActivity dosya başı
- * notu / kullanıcı tercihi).
+ * Spec 3 minimum kapsamı: bilinen kişilerin + grupların TEK bir listesi,
+ * tıklanınca ilgili sohbet ekranını açar. `ListAdapter`/`DiffUtil` tabanlı
+ * gerçek bir adapter kullanır (bkz. ChatAdapter) ve periyodik olarak
+ * yenilenir. Node modu kapalıyken kişiler için "son mesaj" alanı boş kalır
+ * (mesaj geçmişi o durumda hiç saklanmıyor); gruplar için zaten hiç mesaj
+ * arşivi yok (bkz. GroupChatActivity dosya başı notu), bu yüzden hep boş.
+ *
+ * Spec dışı: önceden ayrı bir "Gruplar" sekmesi vardı — kullanıcı isteği
+ * üzerine kaldırıldı, grup listesi/oluşturma buraya taşındı (bkz.
+ * `btnCreateGroup`, eski GroupsFragment'in mantığı).
  */
 class ChatsFragment : Fragment() {
 
@@ -45,26 +51,41 @@ class ChatsFragment : Fragment() {
         noContactsText = view.findViewById(R.id.txtNoContacts)
         recycler.layoutManager = LinearLayoutManager(requireContext())
 
-        adapter = ChatAdapter { peerDeviceFingerprint, displayName ->
-            if (peerDeviceFingerprint.isNotEmpty()) {
-                val intent = Intent(requireContext(), ChatActivity::class.java)
-                intent.putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, peerDeviceFingerprint)
-                intent.putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, displayName)
-                startActivity(intent)
+        adapter = ChatAdapter { message ->
+            when {
+                message.isGroup -> openGroupChat(message)
+                message.contactId.isNotEmpty() -> {
+                    val intent = Intent(requireContext(), ChatActivity::class.java)
+                    intent.putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, message.contactId)
+                    intent.putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, message.displayName)
+                    startActivity(intent)
+                }
             }
         }
         adapter.onContactLongClick = { message -> showChatLongPressMenu(message) }
         recycler.adapter = adapter
 
+        view.findViewById<FloatingActionButton>(R.id.btnCreateGroup).setOnClickListener {
+            showCreateGroupDialog()
+        }
+
         refreshList()
         return view
+    }
+
+    private fun openGroupChat(message: ChatAdapter.ChatMessage) {
+        val intent = Intent(requireContext(), GroupChatActivity::class.java)
+        intent.putExtra(GroupChatActivity.EXTRA_GROUP_ID, message.contactId)
+        intent.putExtra(GroupChatActivity.EXTRA_GROUP_NAME, message.displayName)
+        startActivity(intent)
     }
 
     /**
      * Spec dışı, uzun basma menüsü: kullanıcıyla birlikte netleştirilen iki
      * ayrı seçenek — "sohbet geçmişini temizle" (yumuşak, tek onay, kişi
      * paired kalır) ve "kişiyi sil" (sert, ÇİFT onay, eşleşme dahil her şey
-     * silinir).
+     * silinir). SADECE kişiler için — gruplar `realContactId` taşımadığından
+     * (bkz. ChatAdapter) bu menü zaten tetiklenmez.
      */
     private fun showChatLongPressMenu(message: ChatAdapter.ChatMessage) {
         val options = arrayOf(
@@ -132,6 +153,68 @@ class ChatsFragment : Fragment() {
             .show()
     }
 
+    /** bkz. eski GroupsFragment.showCreateGroupDialog — buraya taşındı. */
+    private fun showCreateGroupDialog() {
+        val input = EditText(requireContext())
+        input.hint = getString(R.string.lbl_new_group_name_hint)
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.action_create_group)
+            .setView(input)
+            .setPositiveButton(R.string.action_create_group) { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isBlank()) return@setPositiveButton
+                val groupId = P2PLib.createGroup(name)
+                if (groupId.startsWith("Error:")) {
+                    Toast.makeText(requireContext(), groupId, Toast.LENGTH_LONG).show()
+                } else {
+                    refreshList()
+                    showAddMembersDialog(groupId)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** Kişi listesinden çoklu seçimle grup üyesi ekler (bkz. spec 5.4 —
+     *  kurucu davet üretir, her davet edilen mevcut/kurulmakta olan 1:1
+     *  bağlantı üzerinden GroupUpdate alır). */
+    private fun showAddMembersDialog(groupId: String) {
+        val contactsJson = try {
+            P2PLib.listContacts()
+        } catch (e: Exception) {
+            "[]"
+        }
+        val array = try {
+            JSONArray(contactsJson)
+        } catch (e: Exception) {
+            JSONArray()
+        }
+        if (array.length() == 0) {
+            Toast.makeText(requireContext(), R.string.msg_no_contacts_to_add, Toast.LENGTH_LONG).show()
+            return
+        }
+        val names = (0 until array.length()).map { array.getJSONObject(it).optString("display_name", "Bilinmeyen") }.toTypedArray()
+        val identityIds = (0 until array.length()).map { array.getJSONObject(it).optString("identity_id") }
+        val checked = BooleanArray(names.size)
+
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.lbl_add_member_to_group)
+            .setMultiChoiceItems(names, checked) { _, which, isChecked -> checked[which] = isChecked }
+            .setPositiveButton(R.string.lbl_add_member_to_group) { _, _ ->
+                for (i in identityIds.indices) {
+                    if (checked[i]) {
+                        val ok = P2PLib.inviteToGroup(groupId, identityIds[i])
+                        if (!ok) {
+                            Toast.makeText(requireContext(), "${names[i]}: ${getString(R.string.error_network)}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+                refreshList()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     override fun onResume() {
         super.onResume()
         refreshHandler.post(refreshRunnable)
@@ -149,9 +232,10 @@ class ChatsFragment : Fragment() {
         // "tüm kişiler için son mesajı tek seferde döndüren" toplu bir
         // sorgu eklenmesi düşünülebilir.
         val contacts = loadContacts()
-        noContactsText.visibility = if (contacts.isEmpty()) View.VISIBLE else View.GONE
+        val groups = loadGroups()
+        noContactsText.visibility = if (contacts.isEmpty() && groups.isEmpty()) View.VISIBLE else View.GONE
 
-        val chatItems = contacts.map { contact ->
+        val contactItems = contacts.map { contact ->
             val fingerprint = contact.activeDeviceFingerprint ?: ""
             val lastMessage = if (fingerprint.isNotEmpty()) loadLastMessagePreview(fingerprint) else null
             ChatAdapter.ChatMessage(
@@ -164,7 +248,17 @@ class ChatsFragment : Fragment() {
                 avatarJpeg = contact.avatarHex?.let { hexToBytes(it) }
             )
         }
-        adapter.submitList(chatItems)
+        val groupItems = groups.map { group ->
+            ChatAdapter.ChatMessage(
+                contactId = group.groupId,
+                displayName = group.name,
+                lastMessage = resources.getQuantityString(R.plurals.lbl_member_count, group.memberCount, group.memberCount),
+                timestamp = 0L,
+                avatarJpeg = group.avatarHex?.let { hexToBytes(it) },
+                isGroup = true
+            )
+        }
+        adapter.submitList(contactItems + groupItems)
     }
 
     private data class ContactRow(
@@ -173,6 +267,7 @@ class ChatsFragment : Fragment() {
         val activeDeviceFingerprint: String?,
         val avatarHex: String?
     )
+    private data class GroupRow(val groupId: String, val name: String, val memberCount: Int, val avatarHex: String?)
     private data class LastMessagePreview(val text: String, val timestamp: Long)
 
     private fun loadContacts(): List<ContactRow> {
@@ -194,6 +289,29 @@ class ChatsFragment : Fragment() {
                 contactId = obj.optString("contact_id"),
                 displayName = obj.optString("display_name", "Bilinmeyen"),
                 activeDeviceFingerprint = fingerprint,
+                avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null }
+            )
+        }
+    }
+
+    private fun loadGroups(): List<GroupRow> {
+        val json = try {
+            P2PLib.listGroups()
+        } catch (e: Exception) {
+            return emptyList()
+        }
+        val array = try {
+            JSONArray(json)
+        } catch (e: Exception) {
+            return emptyList()
+        }
+        return (0 until array.length()).map { i ->
+            val obj = array.getJSONObject(i)
+            val members = obj.optJSONArray("member_identity_ids")
+            GroupRow(
+                groupId = obj.optString("group_id"),
+                name = obj.optString("name"),
+                memberCount = members?.length() ?: 0,
                 avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null }
             )
         }

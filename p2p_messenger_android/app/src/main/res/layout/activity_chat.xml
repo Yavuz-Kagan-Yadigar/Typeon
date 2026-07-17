@@ -128,8 +128,9 @@
     </LinearLayout>
 
     <!-- Spec dışı: basılı tut/kaydet sesli mesaj — kayıt sırasında input
-         satırının YERİNE geçer (bkz. ChatActivity ses kaydı akışı). Sola
-         kaydırınca iptal (WhatsApp'taki gibi), bırakınca gönderilir. -->
+         satırının YERİNE geçer (bkz. ChatActivity ses kaydı akışı). Sağa
+         kaydırınca iptal (bkz. txtCancelPill — parmakla birlikte kayar),
+         bırakınca gönderilir. -->
     <LinearLayout
         android:id="@+id/layoutRecording"
         android:layout_width="0dp"
@@ -159,15 +160,30 @@
             android:fontFamily="monospace"
             android:textColor="?attr/colorOnSurfaceVariant" />
 
-        <TextView
-            android:id="@+id/txtRecordingHint"
+        <!-- Parmakla BİRLİKTE sağa kayan (translationX, bkz. ChatActivity
+             setupVoiceRecordButton) iptal pili — sabit kalan kayıt
+             göstergesinin (yukarıdaki nokta+zamanlayıcı) aksine. -->
+        <FrameLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:layout_marginStart="12dp"
-            android:text="@string/msg_recording_voice"
-            android:textSize="12sp"
-            android:textColor="?attr/colorOnSurfaceVariant" />
+            android:layout_marginStart="12dp">
+
+            <TextView
+                android:id="@+id/txtCancelPill"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="start|center_vertical"
+                android:background="@drawable/message_input_background"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp"
+                android:text="@string/msg_recording_voice"
+                android:textSize="12sp"
+                android:textColor="?attr/colorOnSurfaceVariant" />
+
+        </FrameLayout>
 
     </LinearLayout>
 

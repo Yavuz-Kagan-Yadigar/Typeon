@@ -132,6 +132,7 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var layoutMessageInput: View
     private lateinit var layoutRecording: View
     private lateinit var txtRecordingTimer: android.widget.TextView
+    private lateinit var txtCancelPill: android.widget.TextView
     private val recordingHandler = Handler(Looper.getMainLooper())
     private val recordingTimerRunnable = object : Runnable {
         override fun run() {
@@ -313,6 +314,7 @@ class ChatActivity : AppCompatActivity() {
         layoutMessageInput = findViewById(R.id.layoutMessageInput)
         layoutRecording = findViewById(R.id.layoutRecording)
         txtRecordingTimer = findViewById(R.id.txtRecordingTimer)
+        txtCancelPill = findViewById(R.id.txtCancelPill)
         setupVoiceRecordButton()
         adapter.onVoicePlayClick = { item -> onVoicePlayClicked(item) }
         adapter.onVoiceSpeedClick = { item -> onVoiceSpeedClicked(item) }
@@ -326,8 +328,10 @@ class ChatActivity : AppCompatActivity() {
 
     /**
      * Spec dışı: basılı tut/kaydet sesli mesaj — ACTION_DOWN kaydı başlatır,
-     * ACTION_UP gönderir, sola (bkz. RECORDING_CANCEL_SWIPE_DP) kaydırıp
-     * bırakmak iptal eder (WhatsApp'taki gibi). İzin yoksa ilk basışta
+     * ACTION_UP gönderir, SAĞA (bkz. RECORDING_CANCEL_SWIPE_DP) kaydırıp
+     * bırakmak iptal eder. `txtCancelPill` parmakla birlikte sağa kayar
+     * (bkz. `updateCancelPill`) — kullanıcıya ne kadar kaydırması
+     * gerektiğine dair somut bir görsel ipucu verir. İzin yoksa ilk basışta
      * istenir, o basış kayıt BAŞLATMAZ (kullanıcı izni verdikten sonra
      * tekrar basmalı — standart Android deseni).
      */
@@ -347,7 +351,8 @@ class ChatActivity : AppCompatActivity() {
                     if (mediaRecorder != null) {
                         val dx = event.rawX - recordingTouchStartX
                         val thresholdPx = RECORDING_CANCEL_SWIPE_DP * resources.displayMetrics.density
-                        recordingCancelled = dx < -thresholdPx
+                        recordingCancelled = dx > thresholdPx
+                        updateCancelPill(dx, thresholdPx)
                     }
                     true
                 }
@@ -361,6 +366,25 @@ class ChatActivity : AppCompatActivity() {
                 }
                 else -> false
             }
+        }
+    }
+
+    /** Pili parmağın konumuna göre sağa kaydırır (0..eşik arası sıkıştırılmış)
+     *  — eşiği geçince (iptal kesinleşince) renk değiştirerek geri bildirim
+     *  verir. */
+    private fun updateCancelPill(dx: Float, thresholdPx: Float) {
+        txtCancelPill.translationX = dx.coerceIn(0f, thresholdPx)
+        val pastThreshold = dx > thresholdPx
+        txtCancelPill.setTextColor(
+            if (pastThreshold) android.graphics.Color.WHITE
+            else com.google.android.material.color.MaterialColors.getColor(txtCancelPill, com.google.android.material.R.attr.colorOnSurfaceVariant)
+        )
+        txtCancelPill.backgroundTintList = if (pastThreshold) {
+            android.content.res.ColorStateList.valueOf(
+                com.google.android.material.color.MaterialColors.getColor(txtCancelPill, com.google.android.material.R.attr.colorError)
+            )
+        } else {
+            null
         }
     }
 
@@ -388,6 +412,8 @@ class ChatActivity : AppCompatActivity() {
         layoutMessageInput.visibility = View.GONE
         layoutRecording.visibility = View.VISIBLE
         txtRecordingTimer.text = "0:00"
+        txtCancelPill.translationX = 0f
+        txtCancelPill.backgroundTintList = null
         recordingHandler.post(recordingTimerRunnable)
     }
 

@@ -54,11 +54,11 @@ class ContactsFragment : Fragment() {
         placeholder = view.findViewById(R.id.contactsPlaceholder)
         recycler = view.findViewById(R.id.recyclerContacts)
         recycler.layoutManager = LinearLayoutManager(requireContext())
-        adapter = ChatAdapter { peerDeviceFingerprint, displayName ->
-            if (peerDeviceFingerprint.isNotEmpty()) {
+        adapter = ChatAdapter { message ->
+            if (message.contactId.isNotEmpty()) {
                 val intent = Intent(requireContext(), ChatActivity::class.java)
-                intent.putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, peerDeviceFingerprint)
-                intent.putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, displayName)
+                intent.putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, message.contactId)
+                intent.putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, message.displayName)
                 startActivity(intent)
             } else {
                 // Kayıt (TOFU) tamamlandı ama karşı tarafla henüz gerçek bir
