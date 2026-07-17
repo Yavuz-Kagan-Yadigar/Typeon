@@ -78,6 +78,12 @@ object P2PLib {
     /** Bir sohbet açıldığında el sıkışmayı proaktif olarak başlatır (zaten
      *  bir oturum varsa no-op). */
     external fun ensureHandshake(peerDeviceFingerprint: String)
+    /** Spec dışı, kullanıcı tarafından istenen "görüldü" bildirimi — `Ack`
+     *  ile AYNI desen ama OTOMATİK değil: UI, mesajı kullanıcıya EKRANDA
+     *  gösterdiği anda çağırmalı. `groupMessageLocalId`: 1:1 sohbette
+     *  `null`, grup sohbetinde gelen "group_message" olayındaki AYNI
+     *  değer geri gönderilmeli (bkz. Rust packet.rs `Seen` notu). */
+    external fun sendSeenReceipt(targetDeviceFingerprint: String, targetMessageId: String, groupMessageLocalId: String?): Boolean
 
     // --- Mesaj geçmişi (spec dışı, kullanıcı tercihi: sadece node modu
     // açıkken yerelde şifreli arşivlenir) ---
@@ -134,7 +140,11 @@ object P2PLib {
     external fun createGroup(name: String): String
     external fun inviteToGroup(groupId: String, identityId: String): Boolean
     external fun removeFromGroup(groupId: String, identityId: String): Boolean
-    external fun sendGroupMessage(groupId: String, message: String): Boolean
+    /** Dönüş: `group_message_local_id` (bkz. Rust send_group_message notu —
+     *  N üyeye giden fan-out kopyalarını TEK bir yerel kimlikte
+     *  birleştirir, "görüldü" bildirimlerini doğru balona eşlemek için
+     *  gerekli) veya "Error: ...". */
+    external fun sendGroupMessage(groupId: String, message: String): String
     /** Spec dışı: grup profil fotoğrafı — SADECE kurucu için başarılı olur
      *  (bkz. Rust set_group_avatar). `avatarJpeg` null ise kaldırılır. Her
      *  iki durumda da TÜM üyelere bir GroupUpdate yayılır. */

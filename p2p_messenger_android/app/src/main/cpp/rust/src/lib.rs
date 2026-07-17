@@ -1831,10 +1831,13 @@ impl P2PCore {
         // şekilde) yeniden göndermeye devam etmesine yol açıyordu (bkz.
         // gerçek arıza deseni: sürekli tekrar eden "Decryption failed"/
         // "skipped-key cache'te yok" logları).
-        let is_ack = matches!(content, MessageContent::Ack { .. });
+        // `Seen`, `Ack` ile AYNI gerekçeyle (sonsuz "onayı onayla" döngüsü
+        // riski) kendisi onaylanmaz ama sınırlı sayıda kendi-kendine
+        // yeniden dener — bkz. packet.rs `Seen` dokümantasyonu.
+        let is_ack_like = matches!(content, MessageContent::Ack { .. } | MessageContent::Seen { .. });
         if needs_delivery_confirmation {
             self.publish_with_ack_tracking(&peer_device_fingerprint, &message_id, NetworkEnvelope::Message(packet), None);
-        } else if is_ack {
+        } else if is_ack_like {
             self.publish_with_ack_tracking(&peer_device_fingerprint, &message_id, NetworkEnvelope::Message(packet), Some(ACK_SELF_MAX_RETRIES));
         } else if let Err(e) = self.publish_envelope(&peer_device_fingerprint, &NetworkEnvelope::Message(packet)) {
             error!("Mesaj gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
@@ -1844,7 +1847,7 @@ impl P2PCore {
     }
 
     fn send_message(&mut self, peer_device_fingerprint: String, plaintext: String) -> Result<(String, String), String> {
-        let content = MessageContent::Text { group_id: None, text: plaintext.clone() };
+        let content = MessageContent::Text { group_id: None, text: plaintext.clone(), group_message_local_id: None };
         self.send_message_content(peer_device_fingerprint, &content, Some(plaintext.as_bytes()))
     }
 
@@ -1926,7 +1929,7 @@ impl P2PCore {
         // notu: birden çok sohbet varken gelen her mesaj, o an açık olan
         // HANGİ ChatActivity ise ona ekleniyordu, doğru olanına değil).
         let event = match content {
-            MessageContent::Text { group_id: None, text } => {
+            MessageContent::Text { group_id: None, text, .. } => {
                 // bkz. send_message_content'teki aynı düzeltme notu —
                 // artık node modundan bağımsız her cihaz kendi geçmişini
                 // yerelde şifreli tutuyor.
@@ -1934,16 +1937,21 @@ impl P2PCore {
                 self.send_ack(&peer_fp, &message_id);
                 serde_json::json!({"type": "message", "peer": peer_fp, "message_id": message_id, "text": text})
             }
-            MessageContent::Text { group_id: Some(gid), text } => {
+            MessageContent::Text { group_id: Some(gid), text, group_message_local_id } => {
                 // Gerçek grup entegrasyonu: bu, bir grup mesajının pairwise
                 // fan-out kopyası — GroupChatActivity'nin doğru sohbete
                 // yönlendirebilmesi için `group_id` VE göndericinin
                 // `identity_id`'si (bir grupta birden fazla kişi olduğundan
                 // "kim gönderdi" bilgisi 1:1'in aksine zorunlu) taşınıyor.
+                // `group_message_local_id`: Kotlin bu mesajı "gördü" olarak
+                // işaretlerken (bkz. Seen) geri göndermesi gereken kimlik —
+                // `message_id` göndericiye anlamsız (bkz. packet.rs notu),
+                // sadece bu paylaşılan kimlik her N kopya arasında ortak.
                 serde_json::json!({
                     "type": "group_message", "group_id": gid, "peer": peer_fp,
                     "sender_identity_id": sender_identity_id,
-                    "message_id": message_id, "text": text
+                    "message_id": message_id, "text": text,
+                    "group_message_local_id": group_message_local_id
                 })
             }
             MessageContent::Edit { target_message_id, new_text } => {
@@ -2018,6 +2026,17 @@ impl P2PCore {
                 self.awaiting_confirmation.remove(&target_message_id);
                 serde_json::json!({"type": "ack", "peer": peer_fp, "message_id": target_message_id})
             }
+            MessageContent::Seen { target_message_id, group_message_local_id } => {
+                // bkz. packet.rs `Seen` notu — teslim (Ack) değil, GÖRME
+                // bildirimi. Kendisi ayrıca onaylanmaz (Ack'le aynı sonsuz
+                // döngü gerekçesi).
+                serde_json::json!({
+                    "type": "seen", "peer": peer_fp,
+                    "sender_identity_id": sender_identity_id,
+                    "message_id": target_message_id,
+                    "group_message_local_id": group_message_local_id
+                })
+            }
             MessageContent::TypingIndicator { is_typing } => {
                 // Kasitli olarak: arsivlenmez, Ack GONDERILMEZ (bkz.
                 // packet.rs notu) -- birkac saniyede bayatlayan bir bilgi
@@ -2065,6 +2084,20 @@ impl P2PCore {
         let content = MessageContent::Ack { target_message_id: target_message_id.to_string() };
         if let Err(e) = self.send_message_content(peer_device_fingerprint.to_string(), &content, None) {
             error!("Ack gönderilemedi: {}", e);
+        }
+    }
+
+    /// Spec dışı, kullanıcı tarafından istenen "görüldü" bildirimi —
+    /// `send_ack` ile AYNI desen (bkz. packet.rs `Seen` notu). `Ack`'in
+    /// aksine OTOMATİK değil: Kotlin tarafı, mesajı kullanıcıya EKRANDA
+    /// gösterdiği anda çağırmalı (bkz. ChatActivity/GroupChatActivity).
+    fn send_seen(&mut self, peer_device_fingerprint: &str, target_message_id: &str, group_message_local_id: Option<String>) {
+        let content = MessageContent::Seen {
+            target_message_id: target_message_id.to_string(),
+            group_message_local_id,
+        };
+        if let Err(e) = self.send_message_content(peer_device_fingerprint.to_string(), &content, None) {
+            error!("Görüldü bildirimi gönderilemedi: {}", e);
         }
     }
 
@@ -2679,7 +2712,13 @@ impl P2PCore {
             .map(|d| d.device_fingerprint.clone())
     }
 
-    fn send_group_message(&mut self, group_id: &str, plaintext: &str) -> Result<(), String> {
+    /// Dönüş: `group_message_local_id` — bu grup mesajının N üyeye giden
+    /// fan-out kopyalarını TEK bir yerel kimlikte birleştiren id (bkz.
+    /// packet.rs `Text.group_message_local_id` notu). Kotlin, kendi
+    /// optimistic balonunu rastgele bir UUID yerine BUNU `messageId`
+    /// olarak kullanmalı — aksi halde dönen "seen" bildirimleri hiçbir
+    /// yerel balonla eşleşemez.
+    fn send_group_message(&mut self, group_id: &str, plaintext: &str) -> Result<String, String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
         if !group.is_member(&own_identity_id) {
@@ -2689,7 +2728,12 @@ impl P2PCore {
         // `group_id: Some(...)` — gerçek grup entegrasyonu: alıcı tarafın
         // bunu sıradan bir 1:1 mesajdan ayırt edip GroupChatActivity'ye
         // yönlendirebilmesi için (bkz. receive_message notu).
-        let content = MessageContent::Text { group_id: Some(group_id.to_string()), text: plaintext.to_string() };
+        let local_id = uuid::Uuid::new_v4().to_string();
+        let content = MessageContent::Text {
+            group_id: Some(group_id.to_string()),
+            text: plaintext.to_string(),
+            group_message_local_id: Some(local_id.clone()),
+        };
         for member_identity_id in group.other_members(&own_identity_id) {
             if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id) {
                 if let Err(e) = self.send_message_content(peer_fp, &content, Some(plaintext.as_bytes())) {
@@ -2697,7 +2741,7 @@ impl P2PCore {
                 }
             }
         }
-        Ok(())
+        Ok(local_id)
     }
 
     // ---------------------------------------------------------------
@@ -3409,11 +3453,25 @@ impl P2PCore {
     /// ile sınırlı).
     fn retry_unconfirmed_messages(&mut self) {
         let now = current_time_ms();
-        let due_ids: Vec<String> = self.awaiting_confirmation.iter()
+        // KRİTİK: `awaiting_confirmation` bir `HashMap` — Rust'ın std
+        // `HashMap`'i her süreçte rastgele tohumlanmış bir hasher
+        // kullanır (DoS direnci için), yani `.iter()` sırası KOMPOZİSYON
+        // sırasıyla HİÇ ilgili değildir. Kullanıcı çevrimdışıyken art
+        // arda birkaç mesaj biriktiyse, bu sıralama olmadan yeniden
+        // gönderim sırası her `poll_events` turunda değişebilen, rastgele
+        // bir sıraydı — kullanıcı isteği: ilk gönderilemeyen mesajlar
+        // BİRİKTİYSE gönderilme (composition) sırasına göre denenmeli.
+        // `first_sent_at` zaten her `PendingConfirmation`'da var, bu
+        // yüzden `due_ids`'i ona göre sıralamak yeterli (yapıyı
+        // `BTreeMap`'e çevirmek gibi daha büyük bir değişikliğe gerek
+        // yok — tüm `.get`/`.get_mut`/`.remove`/`.insert` çağrı yerlerini
+        // etkilerdi).
+        let mut due_ids: Vec<(String, u64)> = self.awaiting_confirmation.iter()
             .filter(|(_, p)| p.next_retry_at <= now)
-            .map(|(id, _)| id.clone())
+            .map(|(id, p)| (id.clone(), p.first_sent_at))
             .collect();
-        for message_id in due_ids {
+        due_ids.sort_by_key(|(_, first_sent_at)| *first_sent_at);
+        for (message_id, _) in due_ids {
             let (peer_fp, envelope, retries_remaining, first_sent_at) = match self.awaiting_confirmation.get(&message_id) {
                 Some(p) => (p.peer_device_fingerprint.clone(), p.envelope.clone(), p.retries_remaining, p.first_sent_at),
                 None => continue,
@@ -4461,6 +4519,28 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendTypingIndicator<'local>
     }
 }
 
+/// "Görüldü" bildirimi gönderir — bkz. `P2PCore::send_seen`. UI, bir
+/// mesajı kullanıcıya EKRANDA gösterdiği anda çağırmalı (otomatik değil —
+/// bkz. `Ack`'in aksine). `group_message_local_id` 1:1 sohbette null
+/// geçilmeli, grup sohbetinde gelen "group_message" olayındaki AYNI
+/// değer geri gönderilmeli.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendSeenReceipt<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, target: JString<'local>, target_message_id: JString<'local>, group_message_local_id: JString<'local>) -> jboolean {
+    let target_str: String = env.get_string(&target).map(|s| s.into()).unwrap_or_default();
+    let target_message_id_str: String = env.get_string(&target_message_id).map(|s| s.into()).unwrap_or_default();
+    let local_id: Option<String> = if group_message_local_id.is_null() {
+        None
+    } else {
+        env.get_string(&group_message_local_id).ok().map(|s| s.into())
+    };
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = core_lock();
+        core.send_seen(&target_str, &target_message_id_str, local_id);
+    });
+    result.is_ok() as jboolean
+}
+
 /// Kendi profil fotoğrafımızı döner (hiç ayarlanmadıysa boş dizi) — bkz.
 /// `P2PCore::get_own_avatar`.
 #[no_mangle]
@@ -4647,7 +4727,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setGroupProfilePicture<'loc
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, msg: JString<'local>) -> jboolean {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, msg: JString<'local>) -> jstring {
     let gid: String = env.get_string(&group_id).map(|s| s.into()).unwrap_or_default();
     let msg_str: String = env.get_string(&msg).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
@@ -4655,11 +4735,12 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mu
         let mut core = core_lock();
         core.send_group_message(&gid, &msg_str)
     });
-    match result {
-        Ok(Ok(_)) => true as jboolean,
-        Ok(Err(e)) => { error!("send_group_message failed: {}", e); false as jboolean }
-        Err(e) => { error!("send_group_message panicked: {}", e); false as jboolean }
-    }
+    let out = match result {
+        Ok(Ok(local_id)) => local_id,
+        Ok(Err(e)) => { error!("send_group_message failed: {}", e); format!("Error: {}", e) }
+        Err(e) => { error!("send_group_message panicked: {}", e); format!("Error: {}", e) }
+    };
+    env.new_string(out).unwrap().into_raw()
 }
 
 #[no_mangle]

@@ -183,7 +183,20 @@ pub enum MessageContent {
     /// mesajını sıradan bir 1:1 mesajdan AYIRT EDEMİYORDU (bkz. lib.rs
     /// receive_message/GroupChatActivity notu) — grup sohbeti diye ayrı bir
     /// yer yoktu, mesajlar göndericinin 1:1 sohbetine karışıyordu.
-    Text { group_id: Option<String>, text: String },
+    Text {
+        group_id: Option<String>,
+        text: String,
+        /// Spec disi: SADECE `group_id.is_some()` iken dolu -- ayni grup
+        /// mesajinin N uyeye pairwise fan-out edilen (her biri kendi
+        /// ratchet adimiyla FARKLI bir `MessagePacketHeader.message_id`
+        /// tasiyan) kopyalarini TEK bir yerel kimlikte birlestirir. Gorulme
+        /// bildirimleri (bkz. `Seen`) icin gerekli -- alici tarafin geri
+        /// gonderdigi "gorduk" paketini, gonderenin hangi yerel balona ait
+        /// oldugunu bulabilmesi icin (per-uye message_id'ler gonderen
+        /// tarafta zaten bilinmiyor, sadece alici tarafin KENDI kopyasinin
+        /// id'sini bilir).
+        group_message_local_id: Option<String>,
+    },
     Edit { target_message_id: String, new_text: String },
     Delete { target_message_id: String },
     /// Spec dışı: node modu KAPALI cihazlarda sohbet geçmişi hiç
@@ -259,6 +272,23 @@ pub enum MessageContent {
     /// denemenin hicbir degeri yok, en kotu ihtimalle bir sonraki
     /// tus vurusu zaten yeni bir paket gonderir.
     TypingIndicator { is_typing: bool },
+    /// Spec disi, kullanici tarafindan istenen "gorüldu" bildirimi --
+    /// `Ack` ile AYNI desen (bkz. lib.rs `send_seen`/`send_ack`): ratchet-
+    /// sifreli kanaldan gider, kendisi ayrica onaylanmaz (sonsuz döngü
+    /// riski), sinirli sayida kendi-kendine yeniden dener. `Ack`'ten
+    /// FARKI: "paket basariyla COZULDU" (teslim) degil, "kullanici EKRANDA
+    /// GORDU" anlamina gelir -- alici tarafta otomatik degil, UI mesaji
+    /// gosterdiginde tetiklenir.
+    Seen {
+        /// 1:1 sohbette: gorülen mesajin GERCEK `MessagePacketHeader.
+        /// message_id`si. Grup sohbetinde: bu alan alicinin KENDI aldigi
+        /// kopyanin id'si (gonderen tarafta anlamli degil, bkz.
+        /// `group_message_local_id`).
+        target_message_id: String,
+        /// SADECE grup mesajlarinda dolu -- bkz. `Text.group_message_local_id`
+        /// notu, gonderenin dogru balonu bulabilmesi icin gerekli.
+        group_message_local_id: Option<String>,
+    },
     /// Spec disi: profil fotografi senkronizasyonu. Merkezi bir dizin
     /// olmadigi icin (P2P), her taraf kendi fotografini BILDIGI her
     /// kisiye ayri ayri gonderir -- yeni eslesme tamamlandiginda bir kez
