@@ -284,13 +284,57 @@ box (e.g. a cheap VPS) becomes a bootstrap point the rest of their contacts
 can plug in, rather than the app silently failing or overpromising
 "always works, zero setup."
 
+### Full traceability resistance (Tor/onion services) — considered, not implemented
+
+A natural follow-up question after the fixes above: can this app be made
+**completely** untraceable? Honest answer: no — and not because of a gap
+specific to this app. Every low-latency anonymity network in existence,
+including Tor itself, explicitly does not defend against a **global
+passive adversary**: an entity able to observe traffic where it enters
+*and* where it exits at the same time can correlate the two by timing and
+volume, without breaking any encryption. This is a documented limitation
+in Tor's own threat model, not an unsolved bug someone forgot to fix — it's
+considered an open problem in anonymity-network research generally.
+
+What *would* meaningfully raise the bar beyond the current design (hybrid
+PQ encryption, rotating gossipsub topics, open relay/hole-punching above)
+is routing this app's libp2p traffic through Tor. This is concretely
+buildable — `libp2p-community-tor` is a real, existing crate providing a
+libp2p `Transport` built on `arti` (the Tor Project's own Rust
+implementation of Tor). Two independent settings would keep this fully
+interoperable with users who don't enable it:
+- **Hide outbound connections via Tor** — every dial goes through a Tor
+  circuit instead of directly, so whoever you connect to (and any relay in
+  between) sees a Tor exit address, not your real one. Works completely
+  independently of whether the other side uses Tor — a fully classic peer
+  notices nothing different.
+- **Also reachable as a Tor onion service** — adds an onion address
+  *alongside* the existing IP-based listening address (mDNS/relay/direct),
+  rather than replacing it, so classic peers keep finding the device the
+  same way they do today. Onion services are inherently reachable through
+  NAT with no relay/hole-punching needed, so this could even simplify
+  reachability for Tor-enabled devices. A stricter "onion-only, drop my
+  real address entirely" mode is possible but would break inbound
+  reachability from fully-classic peers (they cannot dial a `.onion`
+  address without Tor) — that would need to be a clearly-labeled,
+  non-default, advanced choice.
+
+**Why this isn't implemented now:** it's a substantial engineering
+investment for real, ongoing costs — per-connection latency from Tor
+circuit setup (typically seconds, not milliseconds), meaningful mobile
+battery/memory overhead from Arti maintaining live circuits, and circuit-
+continuity complications when Android backgrounds or kills the app. This
+was evaluated and deliberately deferred rather than rushed in; the design
+above is left here so it can be revisited if the threat model for this
+app's users changes.
+
 ### Other known network-level limitations (not addressed)
 
 Being end-to-end encrypted is not the same as being untraceable. These
 remain deliberately out of scope — closing them would require a
 substantially different transport/anonymity layer (e.g. onion routing over
-Tor/I2P), which is a separate, much larger undertaking than hardening the
-existing protocol:
+Tor/I2P, see above), which is a separate, much larger undertaking than
+hardening the existing protocol:
 
 - **mDNS PeerId is persistent on the local network.** A device's libp2p
   `PeerId` stays the same across restarts (this is itself a deliberate,
@@ -360,3 +404,4 @@ existing protocol:
 | mDNS persistent PeerId on LAN | Known limitation, deliberately not changed (would reintroduce a previously-fixed reconnection bug) |
 | Kademlia DHT participation reveals IP to other DHT peers | Known limitation, structural to any DHT-based P2P design; relaying mitigates it for message traffic but not DHT participation itself |
 | Zero-config guarantee that any two strangers can always connect | Not fully achievable without *some* reachable point in the network (structural to decentralized P2P, not fixable by protocol changes alone) — mitigated, not eliminated, by the manual relay-address field |
+| Complete/absolute untraceability (IP-level, against a global adversary) | Not achievable by design — same limitation Tor itself has. Tor/onion-service integration (`libp2p-community-tor`) was designed and evaluated but deliberately **not implemented**: real latency/battery cost, and even then only raises the bar, doesn't reach "complete" |
