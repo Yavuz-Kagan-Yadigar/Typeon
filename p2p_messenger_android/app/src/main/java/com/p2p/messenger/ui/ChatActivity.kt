@@ -21,6 +21,8 @@ import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.activity.result.contract.ActivityResultContracts
@@ -32,6 +34,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.p2p.messenger.P2PLib
 import com.p2p.messenger.R
 import com.p2p.messenger.service.P2PService
+import com.p2p.messenger.util.AvatarUtil
 import com.p2p.messenger.util.ImagePreview
 import com.p2p.messenger.util.PlaybackSpeed
 import com.p2p.messenger.util.hexToBytes
@@ -100,13 +103,20 @@ class ChatActivity : AppCompatActivity() {
      *  onu listenin başına eklemeyi bilelim (peer değişince sıfırlanır). */
     private var historySyncPending = false
 
-    // --- Spec dışı: "yazıyor..." göstergesi ---
-    /** Karşı taraftan en son alınan "typing" olayının durumu — sohbet
-     *  başlığının altındaki durum yazısını (Bağlı/Bağlanılıyor yerine)
-     *  geçici olarak değiştirir, bkz. `sessionPollRunnable`. */
-    private var peerIsTyping = false
+    // --- Spec dışı: özel ActionBar başlığı (avatar + başlık + alt yazı) —
+    // bkz. actionbar_chat_title.xml. Varsayılan ActionBar.title/subtitle
+    // bir avatar taşıyamadığından setCustomView ile takılıyor.
+    private lateinit var txtToolbarTitle: TextView
+    private lateinit var txtToolbarSubtitle: TextView
+    private lateinit var imgToolbarAvatar: ImageView
+
+    // --- Spec dışı: "yazıyor..." göstergesi — mesaj listesinin ALTINDA
+    // bir balon olarak gösterilir (kullanıcı isteği: yeni mesajın
+    // belireceği noktada olsun, üst çubukta değil), bkz.
+    // layoutTypingIndicator (activity_chat.xml).
+    private lateinit var layoutTypingIndicator: View
     private val typingHandler = Handler(Looper.getMainLooper())
-    private val clearPeerTypingRunnable = Runnable { peerIsTyping = false }
+    private val clearPeerTypingRunnable = Runnable { layoutTypingIndicator.visibility = View.GONE }
     /** Biz KENDİMİZ karşı tarafa en son "yazıyor" mu "yazmıyor" mu
      *  bildirdik — sadece false->true/true->false GEÇİŞLERİNDE paket
      *  göndermek için (her tuş vuruşunda değil). */
@@ -146,7 +156,12 @@ class ChatActivity : AppCompatActivity() {
             val fileId = voicePlayingFileId
             if (player != null && fileId != null) {
                 try {
-                    adapter.updateVoicePlayback(fileId, true, player.currentPosition, voicePlaybackSpeed)
+                    // bkz. SimpleChatAdapter.tickVoicePlayback notu — bu tam
+                    // bir yeniden bind TETİKLEMEZ (updateVoicePlayback'in
+                    // aksine), sadece o an ekranda bağlı kaydırıcıyı
+                    // günceller — aksi halde kullanıcı sürüklerken 200ms'de
+                    // bir yeniden bind, parmağının altından kayardı.
+                    adapter.tickVoicePlayback(fileId, player.currentPosition, player.duration)
                 } catch (e: Exception) { /* MediaPlayer o an geçerli bir durumda olmayabilir */ }
                 voicePlaybackHandler.postDelayed(this, VOICE_PLAYBACK_TICK_MS)
             }
@@ -200,11 +215,14 @@ class ChatActivity : AppCompatActivity() {
                 false
             }
             connectingBanner.visibility = if (handshakeDone) View.GONE else View.VISIBLE
-            supportActionBar?.subtitle = when {
-                peerIsTyping -> getString(R.string.lbl_typing)
-                liveConnected -> getString(R.string.lbl_status_online)
-                else -> getString(R.string.lbl_status_offline)
-            }
+            // Spec dışı: "yazıyor..." artık burada DEĞİL, mesaj listesinin
+            // altında bir balon olarak gösteriliyor (bkz.
+            // layoutTypingIndicator/handleIncomingEvent "typing" kolu) —
+            // kullanıcı isteği: yeni mesajın belireceği noktada olsun, üst
+            // çubukta değil.
+            txtToolbarSubtitle.text = getString(
+                if (liveConnected) R.string.lbl_status_online else R.string.lbl_status_offline
+            )
             sessionPollHandler.postDelayed(
                 this, if (handshakeDone) STEADY_STATE_POLL_INTERVAL_MS else SESSION_POLL_INTERVAL_MS
             )
@@ -235,6 +253,7 @@ class ChatActivity : AppCompatActivity() {
         setContentView(R.layout.activity_chat)
 
         connectingBanner = findViewById(R.id.layoutConnecting)
+        layoutTypingIndicator = findViewById(R.id.layoutTypingIndicator)
         recycler = findViewById(R.id.recyclerMessages)
         adapter = SimpleChatAdapter(localMessages)
         adapter.onItemLongPress = { item -> showEditDeleteDialog(item) }
@@ -242,6 +261,18 @@ class ChatActivity : AppCompatActivity() {
         adapter.onAttachmentLongClick = { item -> onAttachmentLongClicked(item) }
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = adapter
+
+        // bkz. dosya başı notu — avatar taşıyabilen özel bir ActionBar
+        // görünümü (varsayılan title/subtitle bunu desteklemez).
+        val toolbarTitleView = layoutInflater.inflate(R.layout.actionbar_chat_title, null)
+        txtToolbarTitle = toolbarTitleView.findViewById(R.id.txtToolbarTitle)
+        txtToolbarSubtitle = toolbarTitleView.findViewById(R.id.txtToolbarSubtitle)
+        imgToolbarAvatar = toolbarTitleView.findViewById(R.id.imgToolbarAvatar)
+        supportActionBar?.apply {
+            setDisplayShowCustomEnabled(true)
+            setDisplayShowTitleEnabled(false)
+            customView = toolbarTitleView
+        }
 
         val input = findViewById<EditText>(R.id.edtMessage)
         findViewById<Button>(R.id.btnSend).setOnClickListener {
@@ -285,6 +316,7 @@ class ChatActivity : AppCompatActivity() {
         setupVoiceRecordButton()
         adapter.onVoicePlayClick = { item -> onVoicePlayClicked(item) }
         adapter.onVoiceSpeedClick = { item -> onVoiceSpeedClicked(item) }
+        adapter.onVoiceSeek = { item, positionMs -> onVoiceSeeked(item, positionMs) }
 
         if (!bindToIntent(intent)) {
             finish()
@@ -453,6 +485,28 @@ class ChatActivity : AppCompatActivity() {
         }
 
         // Farklı bir mesaj — önce eskisini durdur, yenisini hazırla.
+        loadAndPlayVoiceMessage(item, attachment, 0)
+    }
+
+    /**
+     * Spec dışı: sesli mesaj kaydırıcısı sürüklenip bırakılınca — zaten
+     * çalıyorsa doğrudan `seekTo`, değilse (henüz hiç yüklenmemiş) o
+     * konumdan başlayarak çalmayı başlatır (mesajlaşma uygulamalarında
+     * yaygın davranış: kaydırmak = o noktadan dinlemeye başlamak).
+     */
+    private fun onVoiceSeeked(item: SimpleChatAdapter.Item, positionMs: Int) {
+        val attachment = item.attachment ?: return
+        if (attachment.status != SimpleChatAdapter.AttachmentStatus.COMPLETE) return
+        if (voicePlayingFileId == attachment.fileId) {
+            val player = voicePlayer ?: return
+            player.seekTo(positionMs)
+            adapter.tickVoicePlayback(attachment.fileId, positionMs, player.duration)
+        } else {
+            loadAndPlayVoiceMessage(item, attachment, positionMs)
+        }
+    }
+
+    private fun loadAndPlayVoiceMessage(item: SimpleChatAdapter.Item, attachment: SimpleChatAdapter.AttachmentInfo, startPositionMs: Int) {
         stopVoicePlayback()
         lifecycleScope.launch(Dispatchers.IO) {
             val path = try {
@@ -473,6 +527,7 @@ class ChatActivity : AppCompatActivity() {
                         adapter.updateVoicePlayback(attachment.fileId, false, 0, voicePlaybackSpeed)
                     }
                     player.prepare()
+                    if (startPositionMs > 0) player.seekTo(startPositionMs)
                     voicePlaybackSpeed = attachment.playbackSpeed
                     if (voicePlaybackSpeed != 1f && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                         player.playbackParams = PlaybackParams().setSpeed(voicePlaybackSpeed)
@@ -481,7 +536,7 @@ class ChatActivity : AppCompatActivity() {
                     voicePlayer = player
                     voicePlayingFileId = attachment.fileId
                     voicePlaybackHandler.post(voicePlaybackTickRunnable)
-                    adapter.updateVoicePlayback(attachment.fileId, true, 0, voicePlaybackSpeed)
+                    adapter.updateVoicePlayback(attachment.fileId, true, startPositionMs, voicePlaybackSpeed)
                 } catch (e: Exception) {
                     Toast.makeText(this@ChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
                 }
@@ -538,7 +593,8 @@ class ChatActivity : AppCompatActivity() {
     private fun bindToIntent(intent: Intent): Boolean {
         val newPeer = intent.getStringExtra(EXTRA_PEER_DEVICE_FINGERPRINT) ?: return false
         val displayName = intent.getStringExtra(EXTRA_PEER_DISPLAY_NAME) ?: newPeer.take(8)
-        supportActionBar?.title = displayName
+        txtToolbarTitle.text = displayName
+        AvatarUtil.renderInto(imgToolbarAvatar, resolveContactAvatar(newPeer), displayName)
 
         if (::peerDeviceFingerprint.isInitialized && peerDeviceFingerprint == newPeer) {
             // Aynı sohbet için tekrar bir intent geldi (ör. aynı kişiden
@@ -553,7 +609,7 @@ class ChatActivity : AppCompatActivity() {
         adapter.notifyDataSetChanged()
         historySyncPending = false
         typingHandler.removeCallbacksAndMessages(null)
-        peerIsTyping = false
+        layoutTypingIndicator.visibility = View.GONE
         isTypingSent = false
         stopVoicePlayback()
         connectingBanner.visibility = View.VISIBLE
@@ -620,6 +676,25 @@ class ChatActivity : AppCompatActivity() {
         else -> SimpleChatAdapter.AttachmentStatus.OFFERED
     }
 
+    /** bkz. üst çubuk avatarı — `listContacts()`'ta bu cihaz parmak izine
+     *  sahip kişiyi bulup profil fotoğrafını döner (yoksa `null`, o zaman
+     *  `AvatarUtil` baş harf rozeti gösterir). */
+    private fun resolveContactAvatar(deviceFingerprint: String): ByteArray? {
+        return try {
+            val array = JSONArray(P2PLib.listContacts())
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                if (obj.optString("active_device_fingerprint") == deviceFingerprint) {
+                    val avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null }
+                    return avatarHex?.let { hexToBytes(it) }
+                }
+            }
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun handleIncomingEvent(obj: JSONObject) {
         when (obj.optString("type")) {
             "message" -> {
@@ -668,11 +743,17 @@ class ChatActivity : AppCompatActivity() {
             "save_request" -> showSaveRequestDialog(obj.optString("file_id"), obj.optString("file_name"))
             "save_response" -> handleSaveResponse(obj.optString("file_id"), obj.optBoolean("approved"))
             "typing" -> {
-                peerIsTyping = obj.optBoolean("is_typing", false)
+                val isTyping = obj.optBoolean("is_typing", false)
                 typingHandler.removeCallbacks(clearPeerTypingRunnable)
-                if (peerIsTyping) {
+                layoutTypingIndicator.visibility = if (isTyping) View.VISIBLE else View.GONE
+                if (isTyping) {
                     typingHandler.postDelayed(clearPeerTypingRunnable, TYPING_INDICATOR_TIMEOUT_MS)
+                    recycler.scrollToPosition(localMessages.size - 1)
                 }
+            }
+            "profile_update" -> {
+                val avatarHex = obj.optString("avatar_hex", "")
+                AvatarUtil.renderInto(imgToolbarAvatar, if (avatarHex.isNotEmpty()) hexToBytes(avatarHex) else null, txtToolbarTitle.text.toString())
             }
         }
     }

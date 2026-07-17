@@ -5,6 +5,8 @@ import android.os.Bundle
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -12,6 +14,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.p2p.messenger.P2PLib
 import com.p2p.messenger.R
 import com.p2p.messenger.service.P2PService
+import com.p2p.messenger.util.AvatarUtil
 import com.p2p.messenger.util.hexToBytes
 import org.json.JSONArray
 import org.json.JSONObject
@@ -41,6 +44,8 @@ class GroupChatActivity : AppCompatActivity() {
     private val localMessages = mutableListOf<SimpleChatAdapter.Item>()
     private lateinit var adapter: SimpleChatAdapter
     private lateinit var recycler: RecyclerView
+    private lateinit var txtToolbarTitle: TextView
+    private lateinit var imgToolbarAvatar: ImageView
 
     /** `peer` alanı burada anlamlı değil (grup mesajı birden çok 1:1
      *  bağlantı üzerinden pairwise geliyor) — bunun yerine `group_id`'ye
@@ -69,6 +74,19 @@ class GroupChatActivity : AppCompatActivity() {
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = adapter
 
+        // bkz. ChatActivity aynı notu — grup için gerçek bir "grup
+        // fotoğrafı" kavramı yok, bu yüzden AvatarUtil'in isimden ürettiği
+        // rozet gösterilir (fotoğrafsız kişilerle aynı görsel dil).
+        val toolbarTitleView = layoutInflater.inflate(R.layout.actionbar_chat_title, null)
+        txtToolbarTitle = toolbarTitleView.findViewById(R.id.txtToolbarTitle)
+        imgToolbarAvatar = toolbarTitleView.findViewById(R.id.imgToolbarAvatar)
+        toolbarTitleView.findViewById<View>(R.id.txtToolbarSubtitle).visibility = View.GONE
+        supportActionBar?.apply {
+            setDisplayShowCustomEnabled(true)
+            setDisplayShowTitleEnabled(false)
+            customView = toolbarTitleView
+        }
+
         val input = findViewById<EditText>(R.id.edtMessage)
         findViewById<Button>(R.id.btnSend).setOnClickListener {
             val text = input.text.toString()
@@ -92,7 +110,8 @@ class GroupChatActivity : AppCompatActivity() {
     private fun bindToIntent(intent: Intent): Boolean {
         val newGroupId = intent.getStringExtra(EXTRA_GROUP_ID) ?: return false
         val groupName = intent.getStringExtra(EXTRA_GROUP_NAME) ?: newGroupId.take(8)
-        supportActionBar?.title = groupName
+        txtToolbarTitle.text = groupName
+        AvatarUtil.renderInto(imgToolbarAvatar, null, groupName)
 
         if (::groupId.isInitialized && groupId == newGroupId) {
             return true

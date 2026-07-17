@@ -4,7 +4,7 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:padding="6dp">
+    android:padding="4dp">
 
     <!-- Sadece grup sohbetinde, kendi mesajlarımız DIŞINDA gösterilir
          (bir grupta birden fazla gönderici olabileceğinden). -->
@@ -40,7 +40,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:maxWidth="340dp"
-        android:padding="16dp"
+        android:padding="12dp"
         android:textSize="22sp" />
 
     <!-- Spec dışı: dosya/foto/video/ses eki balonu — `item.attachment`
@@ -54,7 +54,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="10dp"
+        android:padding="8dp"
         android:layout_marginBottom="4dp"
         android:visibility="gone">
 
@@ -136,7 +136,7 @@
              başladığında. -->
         <LinearLayout
             android:id="@+id/layoutVoiceMessage"
-            android:layout_width="220dp"
+            android:layout_width="270dp"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
@@ -144,9 +144,9 @@
 
             <ImageButton
                 android:id="@+id/btnVoicePlayPause"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:padding="8dp"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:padding="10dp"
                 android:background="@drawable/round_icon_button_background"
                 android:src="@drawable/ic_play"
                 android:contentDescription="@null" />
@@ -155,38 +155,52 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginStart="8dp"
-                android:orientation="vertical">
+                android:layout_marginStart="4dp"
+                android:orientation="vertical"
+                android:gravity="center_vertical">
 
                 <!-- Spec dışı, Material You: hem indirme ilerlemesi hem
                      (indirme tamamlandıktan sonra) çalma konumu için AYNI
-                     çubuk kullanılır. -->
-                <com.google.android.material.progressindicator.LinearProgressIndicator
+                     kaydırıcı kullanılır — dokunup sürükleyerek (touch-to-
+                     seek) konumu değiştirmek için `LinearProgressIndicator`
+                     YERİNE `Slider` kullanılıyor (Material progress
+                     göstergeleri kasıtlı olarak etkileşimsizdir, bu yüzden
+                     eski çubukta sürükleme hiç çalışmıyordu). -->
+                <com.google.android.material.slider.Slider
                     android:id="@+id/progressVoicePlayback"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:indeterminate="false"
-                    app:trackThickness="4dp"
-                    app:trackCornerRadius="2dp" />
+                    android:layout_marginStart="-8dp"
+                    android:layout_marginEnd="-8dp"
+                    android:valueFrom="0"
+                    android:valueTo="1"
+                    android:value="0"
+                    app:thumbRadius="7dp"
+                    app:trackHeight="4dp"
+                    app:labelBehavior="gone" />
 
                 <TextView
                     android:id="@+id/txtVoiceDuration"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
+                    android:layout_marginStart="8dp"
                     android:textSize="12sp"
                     android:textColor="?attr/colorOnSurfaceVariant" />
 
             </LinearLayout>
 
             <!-- Spec dışı: hız kontrolü — dokununca 1x/1.5x/2x/0.5x
-                 arasında döner (bkz. ChatActivity/PlaybackSpeedMenu). -->
+                 arasında döner (bkz. ChatActivity/PlaybackSpeedMenu). En az
+                 40dp dokunma hedefi için padding'i büyütüldü. -->
             <TextView
                 android:id="@+id/btnVoiceSpeed"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="4dp"
-                android:padding="6dp"
+                android:layout_marginStart="2dp"
+                android:minWidth="40dp"
+                android:minHeight="40dp"
+                android:gravity="center"
+                android:padding="8dp"
                 android:text="1x"
                 android:textSize="12sp"
                 android:textStyle="bold"

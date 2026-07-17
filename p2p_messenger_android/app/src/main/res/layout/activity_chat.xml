@@ -42,10 +42,37 @@
         android:id="@+id/recyclerMessages"
         android:layout_width="0dp"
         android:layout_height="0dp"
-        app:layout_constraintBottom_toTopOf="@id/layoutMessageInput"
+        app:layout_constraintBottom_toTopOf="@id/layoutTypingIndicator"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/layoutConnecting" />
+
+    <!-- Spec dışı: "yazıyor..." göstergesi — kullanıcı isteği üzerine üst
+         çubuktaki durum yazısından buraya, yeni mesajların BELİRECEĞİ
+         noktaya (mesaj listesinin hemen altına, karşı taraf balonu gibi)
+         taşındı. bkz. ChatActivity peerIsTyping. -->
+    <LinearLayout
+        android:id="@+id/layoutTypingIndicator"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="10dp"
+        android:layout_marginBottom="4dp"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
+        android:background="@drawable/bubble_theirs"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@id/layoutMessageInput"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/lbl_typing"
+            android:textSize="14sp" />
+
+    </LinearLayout>
 
     <LinearLayout
         android:id="@+id/layoutMessageInput"

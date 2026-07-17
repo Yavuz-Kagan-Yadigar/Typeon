@@ -91,15 +91,82 @@
         android:clickable="true"
         android:focusable="true" />
 
-    <!-- Spec dışı, Material You: video çalma konumu — bkz.
-         SimpleChatAdapter sesli mesaj çubuğuyla AYNI bileşen. -->
-    <com.google.android.material.progressindicator.LinearProgressIndicator
-        android:id="@+id/progressVideoPlayback"
+    <!-- Spec dışı: alt kontrol çubuğu — ekran kenarına YAPIŞIK değil (bkz.
+         kullanıcı geri bildirimi), belirgin oynat/duraklat + ±5sn
+         düğmeleri (önceden sadece görünmez çift-dokunuş bölgeleri vardı,
+         hiçbir görsel ipucu yoktu) + dokunup sürüklenebilir (touch-to-
+         seek) bir kaydırıcı. `Slider`, `LinearProgressIndicator`'ın
+         aksine etkileşimlidir — bkz. SimpleChatAdapter sesli mesaj
+         kaydırıcısıyla AYNI gerekçe. -->
+    <LinearLayout
+        android:id="@+id/layoutVideoControls"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:indeterminate="false"
-        app:trackThickness="4dp"
-        android:visibility="gone" />
+        android:layout_marginBottom="32dp"
+        android:orientation="vertical"
+        android:background="#66000000"
+        android:paddingTop="4dp"
+        android:paddingBottom="8dp"
+        android:visibility="gone">
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/progressVideoPlayback"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_marginEnd="8dp"
+            android:valueFrom="0"
+            android:valueTo="1"
+            android:value="0"
+            app:thumbRadius="7dp"
+            app:trackHeight="4dp"
+            app:trackColorActive="@android:color/white"
+            app:trackColorInactive="#66FFFFFF"
+            app:thumbColor="@android:color/white"
+            app:labelBehavior="gone" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <ImageButton
+                android:id="@+id/btnSkipBack"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:padding="10dp"
+                android:layout_marginEnd="16dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@drawable/ic_skip_back"
+                app:tint="@android:color/white"
+                android:contentDescription="@null" />
+
+            <ImageButton
+                android:id="@+id/btnPlayPauseVideo"
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:padding="12dp"
+                android:background="@drawable/round_icon_button_background"
+                android:src="@drawable/ic_pause"
+                app:tint="@android:color/white"
+                android:contentDescription="@null" />
+
+            <ImageButton
+                android:id="@+id/btnSkipForward"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:padding="10dp"
+                android:layout_marginStart="16dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@drawable/ic_skip_forward"
+                app:tint="@android:color/white"
+                android:contentDescription="@null" />
+
+        </LinearLayout>
+
+    </LinearLayout>
 
 </FrameLayout>

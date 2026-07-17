@@ -14,6 +14,7 @@ import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -21,7 +22,7 @@ import android.widget.Toast
 import android.widget.VideoView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import com.google.android.material.progressindicator.LinearProgressIndicator
+import com.google.android.material.slider.Slider
 import com.p2p.messenger.R
 import com.p2p.messenger.util.PlaybackSpeed
 import kotlinx.coroutines.Dispatchers
@@ -56,17 +57,24 @@ class MediaViewerActivity : AppCompatActivity() {
     private var videoMediaPlayer: MediaPlayer? = null
     private var videoSpeed = 1f
     private val videoHandler = Handler(Looper.getMainLooper())
-    private var videoProgressBar: LinearProgressIndicator? = null
+    private var videoSlider: Slider? = null
+    private var btnPlayPauseVideo: ImageButton? = null
+    /** Kullanıcı kaydırıcıyı sürüklerken periyodik konum güncellemesi
+     *  ATLANIR — aksi halde kaydırıcı sürüklemenin altından kayardı (bkz.
+     *  SimpleChatAdapter sesli mesaj kaydırıcısındaki AYNI gerekçe). */
+    private var isSeekingVideo = false
     private val videoProgressRunnable = object : Runnable {
         override fun run() {
             val mp = videoMediaPlayer ?: return
-            val bar = videoProgressBar ?: return
-            try {
-                if (mp.duration > 0) {
-                    bar.max = mp.duration
-                    bar.setProgressCompat(mp.currentPosition, true)
-                }
-            } catch (e: Exception) { /* geçersiz durumda olabilir (ör. tam kapanıyor) */ }
+            val slider = videoSlider ?: return
+            if (!isSeekingVideo) {
+                try {
+                    if (mp.duration > 0) {
+                        if (slider.valueTo != mp.duration.toFloat()) slider.valueTo = mp.duration.toFloat()
+                        slider.value = mp.currentPosition.toFloat().coerceIn(0f, slider.valueTo)
+                    }
+                } catch (e: Exception) { /* geçersiz durumda olabilir (ör. tam kapanıyor) */ }
+            }
             videoHandler.postDelayed(this, VIDEO_PROGRESS_TICK_MS)
         }
     }
@@ -108,8 +116,9 @@ class MediaViewerActivity : AppCompatActivity() {
                 videoMediaPlayer = mp
                 mp.isLooping = false
                 mp.start()
-                videoProgressBar?.visibility = View.VISIBLE
+                findViewById<View>(R.id.layoutVideoControls).visibility = View.VISIBLE
                 findViewById<View>(R.id.btnPlaybackSpeed).visibility = View.VISIBLE
+                btnPlayPauseVideo?.setImageResource(R.drawable.ic_pause)
                 videoHandler.post(videoProgressRunnable)
             }
             setupVideoControls(videoView)
@@ -243,27 +252,42 @@ class MediaViewerActivity : AppCompatActivity() {
      * rozeti (bkz. `PlaybackSpeed`, sesli mesajlarla AYNI döngü).
      */
     private fun setupVideoControls(videoView: VideoView) {
-        videoProgressBar = findViewById(R.id.progressVideoPlayback)
         val overlay = findViewById<View>(R.id.viewVideoGestureOverlay)
         val skipLeft = findViewById<TextView>(R.id.txtSkipIndicatorLeft)
         val skipRight = findViewById<TextView>(R.id.txtSkipIndicatorRight)
         val speedButton = findViewById<TextView>(R.id.btnPlaybackSpeed)
         overlay.visibility = View.VISIBLE
 
+        // Spec dışı: çift dokunuşla ±5sn atlama HÂLÂ çalışır (bkz. gesture
+        // detector aşağıda) ama artık kullanıcıya görünür, dokunulabilir
+        // düğmeler DE var — önceden sadece görünmez bir dokunuş bölgesi
+        // olduğundan kontroller keşfedilemezdi.
+        videoSlider = findViewById(R.id.progressVideoPlayback)
+        btnPlayPauseVideo = findViewById(R.id.btnPlayPauseVideo)
+        val btnSkipBack = findViewById<ImageButton>(R.id.btnSkipBack)
+        val btnSkipForward = findViewById<ImageButton>(R.id.btnSkipForward)
+
+        btnPlayPauseVideo?.setOnClickListener { togglePlayPause() }
+        btnSkipBack.setOnClickListener { skip(-SKIP_MS, skipLeft) }
+        btnSkipForward.setOnClickListener { skip(SKIP_MS, skipRight) }
+
+        videoSlider?.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+            override fun onStartTrackingTouch(slider: Slider) { isSeekingVideo = true }
+            override fun onStopTrackingTouch(slider: Slider) {
+                isSeekingVideo = false
+                videoMediaPlayer?.seekTo(slider.value.toInt())
+            }
+        })
+
         val gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                val mp = videoMediaPlayer ?: return true
-                if (mp.isPlaying) mp.pause() else mp.start()
+                togglePlayPause()
                 return true
             }
 
             override fun onDoubleTap(e: MotionEvent): Boolean {
-                val mp = videoMediaPlayer ?: return true
                 val isLeftHalf = e.x < overlay.width / 2f
-                val target = if (isLeftHalf) (mp.currentPosition - SKIP_MS).coerceAtLeast(0)
-                             else (mp.currentPosition + SKIP_MS).coerceAtMost(mp.duration)
-                mp.seekTo(target)
-                showSkipIndicator(if (isLeftHalf) skipLeft else skipRight)
+                skip(if (isLeftHalf) -SKIP_MS else SKIP_MS, if (isLeftHalf) skipLeft else skipRight)
                 return true
             }
         })
@@ -279,6 +303,25 @@ class MediaViewerActivity : AppCompatActivity() {
                 } catch (e: Exception) { /* bazı cihazlarda desteklenmeyen hız oranı olabilir */ }
             }
         }
+    }
+
+    private fun togglePlayPause() {
+        val mp = videoMediaPlayer ?: return
+        if (mp.isPlaying) {
+            mp.pause()
+            btnPlayPauseVideo?.setImageResource(R.drawable.ic_play)
+        } else {
+            mp.start()
+            btnPlayPauseVideo?.setImageResource(R.drawable.ic_pause)
+        }
+    }
+
+    private fun skip(deltaMs: Int, indicator: TextView) {
+        val mp = videoMediaPlayer ?: return
+        val target = (mp.currentPosition + deltaMs).coerceIn(0, mp.duration.coerceAtLeast(0))
+        mp.seekTo(target)
+        videoSlider?.value = target.toFloat().coerceIn(0f, (videoSlider?.valueTo ?: 1f))
+        showSkipIndicator(indicator)
     }
 
     private fun showSkipIndicator(view: TextView) {

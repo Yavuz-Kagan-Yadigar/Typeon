@@ -13,7 +13,7 @@ import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.color.MaterialColors
 import com.google.android.material.progressindicator.CircularProgressIndicator
-import com.google.android.material.progressindicator.LinearProgressIndicator
+import com.google.android.material.slider.Slider
 import com.p2p.messenger.R
 import com.p2p.messenger.util.AvatarUtil
 import java.text.SimpleDateFormat
@@ -99,6 +99,18 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     var onVoicePlayClick: ((Item) -> Unit)? = null
     /** Hız rozetine (1x/1.5x/2x/0.5x) dokunulduğunda. */
     var onVoiceSpeedClick: ((Item) -> Unit)? = null
+    /** Kullanıcı bir sesli mesajın kaydırıcısını sürükleyip bırakınca —
+     *  hedef konum milisaniye olarak taşınır. */
+    var onVoiceSeek: ((Item, Int) -> Unit)? = null
+
+    /** bkz. `tickVoicePlayback` — çalma sırasında HER karede tam
+     *  `notifyItemChanged` (yeniden bind) yapmak yerine, o an ekranda
+     *  bağlı olan ViewHolder'a doğrudan yazmak için. Sürükleniyorken
+     *  (bkz. `userSeekingFileIds`) programatik güncelleme ATLANIR, aksi
+     *  halde kullanıcının parmağı sürüklerken kaydırıcı sürekli geri
+     *  sıçrardı. */
+    private val boundVoiceHolders = mutableMapOf<String, BubbleViewHolder>()
+    private val userSeekingFileIds = mutableSetOf<String>()
 
     private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
@@ -120,9 +132,18 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val btnAttachmentDownload: Button = itemView.findViewById(R.id.btnAttachmentDownload)
         val layoutVoiceMessage: View = itemView.findViewById(R.id.layoutVoiceMessage)
         val btnVoicePlayPause: ImageView = itemView.findViewById(R.id.btnVoicePlayPause)
-        val progressVoicePlayback: LinearProgressIndicator = itemView.findViewById(R.id.progressVoicePlayback)
+        val progressVoicePlayback: Slider = itemView.findViewById(R.id.progressVoicePlayback)
         val txtVoiceDuration: TextView = itemView.findViewById(R.id.txtVoiceDuration)
         val btnVoiceSpeed: TextView = itemView.findViewById(R.id.btnVoiceSpeed)
+    }
+
+    override fun onViewRecycled(holder: BubbleViewHolder) {
+        super.onViewRecycled(holder)
+        val fileId = holder.itemView.getTag(R.id.layoutVoiceMessage) as? String
+        if (fileId != null && boundVoiceHolders[fileId] === holder) {
+            boundVoiceHolders.remove(fileId)
+            userSeekingFileIds.remove(fileId)
+        }
     }
 
     fun indexOfMessageId(messageId: String): Int = items.indexOfFirst { it.messageId == messageId }
@@ -144,9 +165,12 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         notifyItemChanged(idx)
     }
 
-    /** Sesli mesaj çalma durumunu günceller — ChatActivity'nin paylaşımlı
-     *  MediaPlayer'ı periyodik olarak (çalarken) veya oynat/duraklat/hız
-     *  değişince çağırır. Hedef bulunamazsa sessizce yok sayılır. */
+    /** Sesli mesaj çalma durumunu günceller — ChatActivity oynat/duraklat/
+     *  hız DEĞİŞİKLİKLERİNDE (sık olmayan olaylar) çağırır, tam bir
+     *  `notifyItemChanged` (yeniden bind) tetikler. Sık aralıklı ilerleme
+     *  karolarını (200ms'de bir) bunun YERİNE `tickVoicePlayback`
+     *  kullanmalı — aksi halde sürekli yeniden bind, kullanıcı
+     *  kaydırıcıyı sürüklerken elini altından "kayardı". */
     fun updateVoicePlayback(fileId: String, isPlaying: Boolean, positionMs: Int, speed: Float) {
         val idx = indexOfMessageId(fileId)
         if (idx < 0) return
@@ -155,6 +179,25 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         attachment.playbackPositionMs = positionMs
         attachment.playbackSpeed = speed
         notifyItemChanged(idx)
+    }
+
+    /** bkz. dosya başı `boundVoiceHolders` notu — çalma sırasında sık
+     *  aralıklı (200ms) konum güncellemesi için, TAM yeniden bind
+     *  YAPMADAN doğrudan o an ekranda bağlı ViewHolder'a yazar. Item
+     *  ekranda değilse (kaydırılıp gitmişse) sessizce yok sayılır —
+     *  `attachment.playbackPositionMs` yine de item verisinde güncel
+     *  tutulur ki tekrar ekrana gelince doğru konumla göstersin. */
+    fun tickVoicePlayback(fileId: String, positionMs: Int, durationMs: Int) {
+        val idx = indexOfMessageId(fileId)
+        if (idx >= 0) items[idx].attachment?.playbackPositionMs = positionMs
+        if (fileId in userSeekingFileIds) return
+        val holder = boundVoiceHolders[fileId] ?: return
+        val slider = holder.progressVoicePlayback
+        val safeDuration = durationMs.coerceAtLeast(1)
+        if (slider.valueTo != safeDuration.toFloat()) slider.valueTo = safeDuration.toFloat()
+        slider.value = positionMs.toFloat().coerceIn(0f, slider.valueTo)
+        val remaining = (durationMs - positionMs).coerceAtLeast(0)
+        holder.txtVoiceDuration.text = formatDuration(remaining)
     }
 
     /** Gelen/giden bir edit olayını uygular. Hedef bulunamazsa (ör. geçmişte
@@ -354,13 +397,20 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     private fun bindVoiceMessage(holder: BubbleViewHolder, item: Item, attachment: AttachmentInfo) {
         val isComplete = attachment.status == AttachmentStatus.COMPLETE
         val durationMs = attachment.durationMs ?: 0
+        val slider = holder.progressVoicePlayback
 
-        holder.progressVoicePlayback.max = 1000
+        holder.itemView.setTag(R.id.layoutVoiceMessage, attachment.fileId)
+        boundVoiceHolders[attachment.fileId] = holder
+
         if (isComplete) {
-            val fraction = if (durationMs > 0) {
-                ((attachment.playbackPositionMs.toDouble() / durationMs.toDouble()) * 1000).toInt().coerceIn(0, 1000)
-            } else 0
-            holder.progressVoicePlayback.setProgressCompat(fraction, attachment.isPlaying)
+            slider.isEnabled = true
+            val safeDuration = durationMs.coerceAtLeast(1)
+            // `valueTo` degistirmeden once `value`'nun gecerli araliktan
+            // disari cikmamasi icin sira onemli (Slider, value > valueTo
+            // ise IllegalStateException firlatir).
+            slider.value = 0f
+            slider.valueTo = safeDuration.toFloat()
+            slider.value = attachment.playbackPositionMs.toFloat().coerceIn(0f, safeDuration.toFloat())
             val remaining = (durationMs - attachment.playbackPositionMs).coerceAtLeast(0)
             holder.txtVoiceDuration.text = formatDuration(if (attachment.isPlaying || attachment.playbackPositionMs > 0) remaining else durationMs)
             holder.btnVoicePlayPause.setImageResource(if (attachment.isPlaying) R.drawable.ic_pause else R.drawable.ic_play)
@@ -372,12 +422,21 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                 onAttachmentLongClick?.invoke(item)
                 true
             }
+            slider.clearOnSliderTouchListeners()
+            slider.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+                override fun onStartTrackingTouch(s: Slider) { userSeekingFileIds.add(attachment.fileId) }
+                override fun onStopTrackingTouch(s: Slider) {
+                    userSeekingFileIds.remove(attachment.fileId)
+                    onVoiceSeek?.invoke(item, s.value.toInt())
+                }
+            })
         } else {
-            val max = attachment.totalSize.coerceAtLeast(1L)
-            val fraction = attachment.status.let {
-                if (it == AttachmentStatus.DOWNLOADING) ((attachment.bytesDone.toDouble() / max.toDouble()) * 1000).toInt().coerceIn(0, 1000) else 0
-            }
-            holder.progressVoicePlayback.setProgressCompat(fraction, true)
+            slider.isEnabled = false
+            val safeTotal = attachment.totalSize.coerceAtLeast(1L).toFloat()
+            slider.value = 0f
+            slider.valueTo = safeTotal
+            val downloaded = if (attachment.status == AttachmentStatus.DOWNLOADING) attachment.bytesDone.toFloat() else 0f
+            slider.value = downloaded.coerceIn(0f, safeTotal)
             holder.txtVoiceDuration.text = when (attachment.status) {
                 AttachmentStatus.FAILED -> holder.itemView.context.getString(R.string.msg_attachment_failed)
                 AttachmentStatus.DOWNLOADING -> holder.itemView.context.getString(R.string.msg_attachment_downloading)
@@ -391,6 +450,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.btnVoicePlayPause.setOnClickListener(downloadListener)
             holder.btnVoiceSpeed.setOnClickListener(null)
             holder.layoutVoiceMessage.setOnLongClickListener(null)
+            slider.clearOnSliderTouchListeners()
         }
     }
 
