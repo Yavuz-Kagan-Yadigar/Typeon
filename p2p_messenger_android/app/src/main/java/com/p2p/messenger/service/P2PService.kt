@@ -113,7 +113,7 @@ class P2PService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("P2P Messenger")
+            .setContentTitle("Typoon")
             .setContentText("Secure P2P Connection Active")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setOngoing(true)

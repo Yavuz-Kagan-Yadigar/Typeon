@@ -1,4 +1,4 @@
-# P2P Mesajlaşma Protokolü — Taslak v0.2
+# Typoon P2P Mesajlaşma Protokolü — Taslak v0.2
 
 ## 1. Kimlik (Identity)
 

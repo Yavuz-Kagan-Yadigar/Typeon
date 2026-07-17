@@ -1,4 +1,4 @@
-# P2P Messenger Android
+# Typoon Android
 
 A fully decentralized peer-to-peer messaging app for Android, implemented in Rust with Kotlin UI.
 
