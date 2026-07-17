@@ -50,12 +50,6 @@ class P2PService : Service() {
         fun setNodeModeEnabled(context: Context, enabled: Boolean) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putBoolean(KEY_NODE_MODE, enabled).apply()
-            if (enabled) {
-                // Kullanıcı node modunu çalışma zamanında açtıysa, geçmiş
-                // anahtarını hemen yükle ki bundan sonraki mesajlar
-                // arşivlensin.
-                com.p2p.messenger.util.MessageHistoryManager.ensureHistoryKeyLoaded(context)
-            }
             // Zaten çalışan bir ağ varsa canlı olarak da güncelle.
             P2PLib.setNodeMode(enabled)
         }
@@ -144,12 +138,18 @@ class P2PService : Service() {
             // Node modundan BAĞIMSIZ her zaman yüklenir — mesajlaşmanın
             // güvenilirliği için gerekli (sıra dışı/gecikmeli mesajlar).
             com.p2p.messenger.util.SkippedKeyManager.ensureLoaded(applicationContext)
+            // Spec dışı düzeltme: önceden SADECE node modu açıkken
+            // yükleniyordu ("canlı mesaj trafiğini arşivleme" kuralı hâlâ
+            // node moduna bağlı, bkz. Rust archive_message çağıranları) —
+            // ama artık node modu KAPALI cihazlar da `HistorySyncResponse`
+            // ile öğrendikleri geçmişi yerelde kalıcı kılmak için bu
+            // anahtara ihtiyaç duyuyor (aksi halde uygulama her
+            // kapatılıp açıldığında geçmiş "kayboluyormuş" gibi
+            // görünüyordu — aslında her seferinde ağdan yeniden
+            // çekilmesi gerekiyordu, karşı taraf o an erişilemezse bu
+            // başarısız oluyordu).
+            com.p2p.messenger.util.MessageHistoryManager.ensureHistoryKeyLoaded(applicationContext)
             val nodeMode = isNodeModeEnabled(applicationContext)
-            if (nodeMode) {
-                // Sadece node modu açıkken ("server olmayı tercih eden
-                // cihaz") mesaj geçmişi yerelde şifreli arşivlenir.
-                com.p2p.messenger.util.MessageHistoryManager.ensureHistoryKeyLoaded(applicationContext)
-            }
             P2PLib.startNetwork(nodeMode)
             handler.post(pollRunnable)
         }

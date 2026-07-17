@@ -211,6 +211,15 @@ pub enum MessageContent {
         total_size: u64,
         file_key: [u8; 32],
         sha256_hex: String,
+        /// Spec dışı: foto/video ekleri için gönderen tarafın önceden
+        /// oluşturduğu küçük bir önizleme kapağı (480p, %85 kalite JPEG —
+        /// tipik olarak birkaç on KB). Diğer her şeyle AYNI ratchet-şifreli
+        /// kanaldan taşınır (ayrı bir mesaj/round-trip icat edilmez) —
+        /// alıcı tarafın TAM dosyayı hiç indirmeden bir önizleme
+        /// gösterebilmesi için. `None` ise (dosya türü foto/video değil,
+        /// veya önizleme oluşturulamadı) önizleme gösterilmez, sadece
+        /// jenerik dosya simgesi.
+        preview_jpeg: Option<Vec<u8>>,
     },
 }
 

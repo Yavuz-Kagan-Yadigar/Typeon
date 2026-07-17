@@ -453,10 +453,18 @@ impl P2PCore {
                 key_nonce BLOB NOT NULL,
                 status TEXT NOT NULL,
                 bytes_transferred INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                preview_jpeg BLOB
              );
              CREATE INDEX IF NOT EXISTS idx_files_peer ON files(peer_device_fingerprint, created_at);"
         )?;
+        // Spec dışı geçiş (migration): `preview_jpeg` kolonu bu tabloya
+        // SONRADAN eklendi — `CREATE TABLE IF NOT EXISTS` zaten var olan
+        // bir tabloyu değiştirmez, bu yüzden bu kolon olmadan önceki bir
+        // sürümü çalıştırmış cihazlarda elle eklenmesi gerekir. SQLite
+        // `ADD COLUMN IF NOT EXISTS` desteklemediğinden, kolon zaten
+        // varsa oluşacak hatayı (duplicate column) sessizce yok sayıyoruz.
+        let _ = conn.execute("ALTER TABLE files ADD COLUMN preview_jpeg BLOB", []);
         self.db = Some(conn);
         self.app_files_dir = Some(app_files_dir.to_string());
         let _ = std::fs::create_dir_all(format!("{}/attachments/plain_cache", app_files_dir));
@@ -1563,14 +1571,35 @@ impl P2PCore {
                 // node'un) bakış açısıyla geldi — bizim ekranımız için ters
                 // çevrilmeli: onların "sent"i bizim "received"imiz, onların
                 // "received"i bizim "sent"imiz.
+                //
+                // Spec dışı düzeltme: senkronla gelen mesajlar önceden
+                // SADECE bu ekranın o anki bellek-içi listesine ekleniyordu
+                // — kalıcı hiçbir kayıt bırakmıyordu. Bu yüzden node modu
+                // KAPALI bir cihazda uygulama kapatılıp açıldığında (veya
+                // karşı taraf o an erişilemezken sohbet tekrar açıldığında)
+                // geçmiş sanki "kayboluyormuş" gibi görünüyordu — aslında
+                // her seferinde ağdan yeniden çekilmesi gerekiyordu. Artık
+                // node modu kapalı cihazlar da senkronla gelen geçmişi
+                // YERELE kalıcı olarak yazıyor (bkz. `archive_message`) —
+                // node modu AÇIK cihazlar zaten kendi canlı trafiğini
+                // arşivliyor, burada tekrar yazıp yinelenen satır
+                // oluşturmamak için atlanıyor. `latest_archived_timestamp`
+                // ile SADECE zaten sahip olmadığımız (daha yeni) mesajlar
+                // yazılıyor — aksi halde her sohbet açılışında (artık her
+                // zaman senkron denendiği için) aynı satırlar tekrar tekrar
+                // eklenirdi.
+                let already_have_since = self.latest_archived_timestamp(&peer_fp);
                 let flipped: Vec<serde_json::Value> = messages.into_iter().map(|(direction, text, timestamp)| {
                     let our_direction = if direction == "sent" { "received" } else { "sent" };
+                    if !self.node_mode_enabled && already_have_since.map(|t| timestamp > t as u64).unwrap_or(true) {
+                        let _ = self.archive_message(&peer_fp, our_direction, text.as_bytes());
+                    }
                     serde_json::json!({"direction": our_direction, "text": text, "timestamp": timestamp})
                 }).collect();
                 serde_json::json!({"type": "history_sync", "peer": peer_fp, "messages": flipped})
             }
-            MessageContent::FileOffer { group_id, file_id, file_name, mime_type, total_size, file_key, sha256_hex } => {
-                self.receive_file_offer(&peer_fp, group_id, &file_id, &file_name, &mime_type, total_size, &file_key, &sha256_hex)
+            MessageContent::FileOffer { group_id, file_id, file_name, mime_type, total_size, file_key, sha256_hex, preview_jpeg } => {
+                self.receive_file_offer(&peer_fp, group_id, &file_id, &file_name, &mime_type, total_size, &file_key, &sha256_hex, &preview_jpeg)
             }
         };
         Ok(event.to_string())
@@ -1586,8 +1615,12 @@ impl P2PCore {
         self.send_message_content(peer_device_fingerprint, &content, None).map(|_| ())
     }
 
-    /// Bir mesajı yerel arşive (spec dışı, kullanıcı tercihi: sadece node
-    /// modu açıkken) ekler. `history_key` yüklenmemişse (Kotlin henüz
+    /// Bir mesajı yerel arşive ekler. İki çağıran senaryosu var: (1) canlı
+    /// mesaj trafiği — SADECE node modu açıkken çağrılır (kullanıcı
+    /// tercihi, bkz. çağıran taraflardaki `node_mode_enabled` kontrolü);
+    /// (2) `HistorySyncResponse` — node modu KAPALI cihazlarda da, senkron
+    /// yoluyla öğrenilen geçmişi yerelde kalıcı kılmak için çağrılır (bkz.
+    /// receive_message notu). `history_key` yüklenmemişse (Kotlin henüz
     /// Keystore'dan çözüp vermemişse) sessizce atlar — arşivleme best-effort,
     /// mesajlaşmanın kendisini asla engellemez.
     fn archive_message(&mut self, peer_device_fingerprint: &str, direction: &str, plaintext: &[u8]) -> Result<(), String> {
@@ -1678,6 +1711,22 @@ impl P2PCore {
         }
         results.reverse(); // eskiden yeniye
         results
+    }
+
+    /// Bu peer için yerelde ARŞİVLENMİŞ en yeni mesajın zaman damgası
+    /// (arşiv boşsa/DB yoksa `None`). `HistorySyncResponse` işlenirken,
+    /// zaten sahip olduğumuz mesajları TEKRAR arşivlememek için kullanılır
+    /// (bkz. receive_message notu) — aksi halde her sohbet açılışında
+    /// (artık her zaman senkron denendiği için) aynı satırlar yinelenirdi.
+    /// `history_key` gerektirmez (sadece zaman damgası okunuyor, şifreli
+    /// içerik çözülmüyor).
+    fn latest_archived_timestamp(&self, peer_device_fingerprint: &str) -> Option<i64> {
+        let conn = self.db.as_ref()?;
+        conn.query_row(
+            "SELECT MAX(timestamp) FROM messages WHERE peer_device_fingerprint = ?1",
+            params![peer_device_fingerprint],
+            |row| row.get::<_, Option<i64>>(0),
+        ).ok().flatten()
     }
 
     // ---------------------------------------------------------------
@@ -2212,7 +2261,7 @@ impl P2PCore {
     /// KENDİSİ bozulmaz, sadece o birkaç saniye/on saniye ertelenir) —
     /// tam asenkron bir mimari (ayrı worker thread + kanal) bu kapsamın
     /// dışında bırakıldı, bkz. proje notları.
-    fn prepare_and_send_file(&mut self, peer_device_fingerprint: String, source_path: String, file_name: String, mime_type: String) -> Result<(String, String), String> {
+    fn prepare_and_send_file(&mut self, peer_device_fingerprint: String, source_path: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>) -> Result<(String, String), String> {
         // `wrap_file_key`'in erken (dosyayı diske şifrelemeden ÖNCE)
         // çağrılması kasıtlı: `skipped_key_encryption_key` henüz
         // yüklenmemişse burada hemen hata dönülür — aksi halde
@@ -2253,11 +2302,11 @@ impl P2PCore {
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO files
                  (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
-                  sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at)
-                 VALUES (?1, ?2, 'sent', ?3, ?4, ?5, ?6, ?7, ?8, 'complete', ?5, ?9)",
+                  sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg)
+                 VALUES (?1, ?2, 'sent', ?3, ?4, ?5, ?6, ?7, ?8, 'complete', ?5, ?9, ?10)",
                 params![
                     file_id, peer_device_fingerprint, file_name, mime_type, total_size as i64,
-                    sha256_hex, encrypted_key, key_nonce, current_time_ms() as i64,
+                    sha256_hex, encrypted_key, key_nonce, current_time_ms() as i64, preview_jpeg,
                 ],
             );
         }
@@ -2270,6 +2319,7 @@ impl P2PCore {
             total_size,
             file_key,
             sha256_hex,
+            preview_jpeg,
         };
         let (_, status) = self.send_message_content(peer_device_fingerprint, &content, None)?;
         Ok((file_id, status))
@@ -2278,35 +2328,69 @@ impl P2PCore {
     /// Gelen bir `FileOffer`'ı işler: `files` tablosuna bir alıcı kaydı
     /// ekler (node modu açıksa hemen indirmeyi başlatır — kapalıysa sadece
     /// meta veri görünür kalır, kullanıcı "İndir" demeli).
-    fn receive_file_offer(&mut self, peer_fp: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str) -> serde_json::Value {
-        let auto_download = self.node_mode_enabled;
-        let status = if auto_download { "downloading" } else { "offered" };
-
-        if let Ok((encrypted_key, key_nonce)) = self.wrap_file_key(file_key) {
-            if let Some(conn) = &self.db {
-                let _ = conn.execute(
-                    "INSERT OR REPLACE INTO files
-                     (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
-                      sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at)
-                     VALUES (?1, ?2, 'received', ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)",
-                    params![
-                        file_id, peer_fp, file_name, mime_type, total_size as i64,
-                        sha256_hex, encrypted_key, key_nonce, status, current_time_ms() as i64,
-                    ],
-                );
+    fn receive_file_offer(&mut self, peer_fp: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str, preview_jpeg: &Option<Vec<u8>>) -> serde_json::Value {
+        let auto_download_requested = self.node_mode_enabled;
+        // Satır YAZILAMADIYSA (ör. şifreleme anahtarı henüz yüklenmedi),
+        // "offered" olarak devam ediyoruz — DB kaydı olmadan "downloading"
+        // raporlamak, `download_file`'ın hiçbir zaman bulamayacağı bir
+        // dosya için Kotlin tarafında sonsuza kadar takılı bir UI'ye yol
+        // açardı (bkz. dosya sonu not).
+        let row_written = match self.wrap_file_key(file_key) {
+            Ok((encrypted_key, key_nonce)) => {
+                let status = if auto_download_requested { "downloading" } else { "offered" };
+                let ok = if let Some(conn) = &self.db {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO files
+                         (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
+                          sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg)
+                         VALUES (?1, ?2, 'received', ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11)",
+                        params![
+                            file_id, peer_fp, file_name, mime_type, total_size as i64,
+                            sha256_hex, encrypted_key, key_nonce, status, current_time_ms() as i64, preview_jpeg,
+                        ],
+                    ).is_ok()
+                } else {
+                    false
+                };
+                ok
             }
-        }
-
-        if auto_download {
-            if let Err(e) = self.download_file(file_id.to_string(), peer_fp.to_string()) {
-                error!("Otomatik dosya indirme başlatılamadı (node modu açık): {}", e);
+            Err(e) => {
+                error!("FileOffer için dosya anahtarı sarmalanamadı: {}", e);
+                false
             }
-        }
+        };
+
+        // Spec dışı düzeltme: önceden burada `download_file`'ın başarısız
+        // olması (ör. `device_to_peer_id`'de bu peer henüz yoksa) sadece
+        // loglanıyordu — çağıran taraf (Kotlin) her zaman
+        // "auto_downloading": true görüyordu ve UI "İndiriliyor" durumunda
+        // sonsuza kadar takılı kalıyordu (indirme hiçbir zaman
+        // `active_downloads`'a eklenmediği, dolayısıyla hiçbir zaman
+        // hata/tamamlanma olayı üretmediği için). Artık gerçek sonucu
+        // (`auto_downloading` alanı) doğru raporluyoruz.
+        let auto_downloading = row_written && auto_download_requested && {
+            match self.download_file(file_id.to_string(), peer_fp.to_string()) {
+                Ok(()) => true,
+                Err(e) => {
+                    error!("Otomatik dosya indirme başlatılamadı (node modu açık): {}", e);
+                    if let Some(conn) = &self.db {
+                        let _ = conn.execute("UPDATE files SET status = 'failed' WHERE file_id = ?1", params![file_id]);
+                    }
+                    self.attachment_events.push(serde_json::json!({"type": "file_failed", "file_id": file_id, "error": e}).to_string());
+                    false
+                }
+            }
+        };
 
         serde_json::json!({
             "type": "file_offer", "peer": peer_fp, "group_id": group_id, "file_id": file_id,
             "file_name": file_name, "mime_type": mime_type, "total_size": total_size,
-            "auto_downloading": auto_download
+            "auto_downloading": auto_downloading,
+            // Hex-encoded — JSON ham ikili veri taşıyamaz. Küçük bir
+            // önizleme (tipik birkaç on KB) için hex'in base64'e göre ~%37
+            // daha büyük olması önemsiz; yeni bir bağımlılık eklemekten
+            // kaçınmak için mevcut `hex` crate'i kullanılıyor.
+            "preview_hex": preview_jpeg.as_ref().map(|p| hex::encode(p))
         })
     }
 
@@ -2538,6 +2622,15 @@ impl P2PCore {
         let gs_config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(std::time::Duration::from_secs(10))
             .validation_mode(gossipsub::ValidationMode::Strict)
+            // Varsayılan 64KB — `FileOffer` artık spec dışı bir 480p/%85
+            // JPEG önizleme kapağı taşıyabiliyor (bkz. packet.rs
+            // `preview_jpeg` notu); tipik değeri 64KB'ı zorlayabilir (hibrit
+            // imza/ratchet_pubkey ek yükü ile birlikte). 1MB, olağan bir
+            // önizlemeyi + zarf ek yükünü rahatça karşılıyor, gerçek dosya
+            // baytları zaten AYRI bir protokolden (request_response,
+            // attachments.rs) gittiği için bu artış büyük dosyaları
+            // etkilemiyor.
+            .max_transmit_size(1024 * 1024)
             .build()
             .map_err(|e| e.to_string())?;
 
@@ -3181,15 +3274,23 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getMessageHistory<'local>(m
 /// çağırmalıdır, aksi halde ANR riski vardır. Dönüş: `sendMessage` ile
 /// aynı JSON biçimi, `message_id` alanı burada `file_id`'dir.
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_prepareAndSendFile<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, target: JString<'local>, source_path: JString<'local>, file_name: JString<'local>, mime_type: JString<'local>) -> jstring {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_prepareAndSendFile<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, target: JString<'local>, source_path: JString<'local>, file_name: JString<'local>, mime_type: JString<'local>, preview_jpeg: JByteArray<'local>) -> jstring {
     let target_str: String = env.get_string(&target).map(|s| s.into()).unwrap_or_default();
     let source_str: String = env.get_string(&source_path).map(|s| s.into()).unwrap_or_default();
     let name_str: String = env.get_string(&file_name).map(|s| s.into()).unwrap_or_default();
     let mime_str: String = env.get_string(&mime_type).map(|s| s.into()).unwrap_or_default();
+    // `preview_jpeg` foto/video DIŞINDAKİ türler için Kotlin tarafından
+    // `null` geçirilir (bkz. P2PLib.kt) — JNI'da bu, alttaki JObject'in
+    // null olmasıyla temsil edilir.
+    let preview_vec: Option<Vec<u8>> = if preview_jpeg.is_null() {
+        None
+    } else {
+        Some(jbytearray_to_vec(&mut env, &preview_jpeg))
+    };
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
         let mut core = CORE.lock().unwrap();
-        core.prepare_and_send_file(target_str, source_str, name_str, mime_str)
+        core.prepare_and_send_file(target_str, source_str, name_str, mime_str, preview_vec)
     });
     match result {
         Ok(Ok((file_id, status))) => env.new_string(serde_json::json!({"message_id": file_id, "status": status}).to_string()).unwrap().into_raw(),
@@ -3198,11 +3299,18 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_prepareAndSendFile<'local>(
     }
 }
 
-/// Bir dosyanın parçalarını indirmeyi başlatır — hemen döner, ilerleme/
-/// tamamlanma `pollNetwork`'ün `"file_progress"`/`"file_complete"`/
-/// `"file_failed"` olaylarıyla bildirilir (bkz. `P2PCore::download_file`).
+/// Bir dosyanın parçalarını indirmeyi başlatır — BAŞARIYLA döndüyse
+/// ("OK") ilerleme/tamamlanma `pollNetwork`'ün `"file_progress"`/
+/// `"file_complete"`/`"file_failed"` olaylarıyla bildirilir (bkz.
+/// `P2PCore::download_file`). BAŞARISIZSA (`"Error: ..."`) senkron olarak
+/// hemen döner — bu durumda `pollNetwork` üzerinden HİÇBİR olay
+/// gelmeyecektir (indirme hiç başlamadı: `active_downloads`'a hiç
+/// eklenmedi), çağıran taraf bunu KENDİSİ ele almalı (bkz. ChatActivity
+/// notu — önceden bu dönüş değeri jboolean'dı ve Kotlin tarafında hiç
+/// kontrol edilmiyordu, bu da "İndiriliyor" durumunda sonsuza kadar
+/// takılı kalan bir UI'ye yol açıyordu).
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_downloadFile<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, file_id: JString<'local>, peer_device_fingerprint: JString<'local>) -> jboolean {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_downloadFile<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, file_id: JString<'local>, peer_device_fingerprint: JString<'local>) -> jstring {
     let file_id_str: String = env.get_string(&file_id).map(|s| s.into()).unwrap_or_default();
     let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
     let result = catch_panic(move || {
@@ -3210,11 +3318,12 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_downloadFile<'local>(mut en
         let mut core = CORE.lock().unwrap();
         core.download_file(file_id_str, fp)
     });
-    match result {
-        Ok(Ok(())) => true as jboolean,
-        Ok(Err(e)) => { error!("download_file failed: {}", e); false as jboolean }
-        Err(e) => { error!("download_file panicked: {}", e); false as jboolean }
-    }
+    let out = match result {
+        Ok(Ok(())) => "OK".to_string(),
+        Ok(Err(e)) => { error!("download_file failed: {}", e); format!("Error: {}", e) }
+        Err(e) => { error!("download_file panicked: {}", e); format!("Error: {}", e) }
+    };
+    env.new_string(out).unwrap().into_raw()
 }
 
 /// JSON-encoded `List<AttachmentSummary>` — bir sohbetteki bilinen dosya

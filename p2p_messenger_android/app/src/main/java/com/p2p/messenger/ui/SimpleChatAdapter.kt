@@ -43,7 +43,12 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val mimeType: String,
         val totalSize: Long,
         var status: AttachmentStatus,
-        var bytesDone: Long = 0
+        var bytesDone: Long = 0,
+        /** Spec dışı: gönderen tarafın önceden oluşturduğu küçük bir 480p/
+         *  %85 JPEG önizleme kapağı (foto/video için) — doluysa, TAM dosya
+         *  hiç indirilmeden `bindAttachment`'ta küçük resim olarak
+         *  gösterilir. */
+        var previewJpeg: ByteArray? = null
     )
 
     data class Item(
@@ -218,9 +223,29 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
      */
     private fun bindAttachment(holder: BubbleViewHolder, item: Item, attachment: AttachmentInfo) {
         holder.layoutAttachment.visibility = View.VISIBLE
-        holder.imgAttachmentThumbnail.visibility = View.GONE
         holder.txtAttachmentName.text = attachment.fileName
         val context = holder.itemView.context
+
+        // Spec dışı: küçük (birkaç on KB) bir JPEG olduğundan senkron
+        // decode burada kabul edilebilir — ayrı bir yükleme thread'i/
+        // görsel yükleme kütüphanesi gerektirmiyor. Doluysa TAM dosya hiç
+        // indirilmeden bir önizleme gösterilir.
+        val preview = attachment.previewJpeg
+        if (preview != null) {
+            val bitmap = try {
+                android.graphics.BitmapFactory.decodeByteArray(preview, 0, preview.size)
+            } catch (e: Exception) {
+                null
+            }
+            if (bitmap != null) {
+                holder.imgAttachmentThumbnail.visibility = View.VISIBLE
+                holder.imgAttachmentThumbnail.setImageBitmap(bitmap)
+            } else {
+                holder.imgAttachmentThumbnail.visibility = View.GONE
+            }
+        } else {
+            holder.imgAttachmentThumbnail.visibility = View.GONE
+        }
 
         holder.txtAttachmentSize.text = when (attachment.status) {
             AttachmentStatus.DOWNLOADING -> context.getString(R.string.msg_attachment_downloading) +

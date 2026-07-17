@@ -6,19 +6,21 @@ import java.io.File
 import java.security.SecureRandom
 
 /**
- * Mesaj geçmişi arşivinin şifreleme anahtarını yönetir. Kullanıcı tercihi
- * (bu görüşmede netleştirildi): SADECE node modu açık olan cihazda —
- * yani "server olmayı tercih eden" cihazda — mesaj geçmişi yerelde
- * saklanır. Node modu kapalıyken hiçbir arşivleme yapılmaz (Rust tarafında
- * `node_mode_enabled` bayrağı kontrol edilir, bkz. lib.rs `send_message`/
- * `receive_message`).
+ * Mesaj geçmişi arşivinin şifreleme anahtarını yönetir. Artık node
+ * modundan BAĞIMSIZ olarak her zaman yüklenir (bkz. P2PService
+ * onStartCommand notu) — ama bunu YAZMA POLİTİKASI hâlâ iki farklı
+ * kaynağa göre değişir (bkz. lib.rs `archive_message` çağıranları):
+ * - Canlı mesaj trafiği: SADECE node modu açık cihazlarda arşivlenir
+ *   (kullanıcı tercihi — "server olmayı tercih eden" cihaz).
+ * - `HistorySyncResponse` (karşı taraftan çekilen geçmiş): node modu
+ *   KAPALI cihazlarda da yerelde kalıcı kılınır — aksi halde uygulama her
+ *   kapatılıp açıldığında geçmiş sanki kayboluyormuş gibi görünürdü.
  *
  * Anahtar hayat döngüsü, IdentityManager ile aynı desende:
- * - İlk kez node modu açıldığında rastgele 256-bit bir "history data key"
- *   üretilir, Keystore'daki AYRI bir sarma (wrap) anahtarıyla şifrelenip
- *   diske yazılır.
- * - Her açılışta (node modu açıksa) şifre çözülüp Rust'a `setHistoryKey`
- *   ile yüklenir.
+ * - İlk açılışta rastgele 256-bit bir "history data key" üretilir,
+ *   Keystore'daki AYRI bir sarma (wrap) anahtarıyla şifrelenip diske
+ *   yazılır.
+ * - Her açılışta şifre çözülüp Rust'a `setHistoryKey` ile yüklenir.
  * - Diskte hiçbir zaman plaintext data key bulunmaz.
  */
 object MessageHistoryManager {

@@ -2,6 +2,9 @@ package com.p2p.messenger.ui
 
 import android.app.AlertDialog
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -26,6 +29,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 
@@ -46,10 +50,16 @@ class ChatActivity : AppCompatActivity() {
         private const val HISTORY_LOAD_LIMIT = 200
         private const val HISTORY_SYNC_LIMIT = 30
         private const val SESSION_POLL_INTERVAL_MS = 800L
+        private const val STEADY_STATE_POLL_INTERVAL_MS = 5000L
         /** bkz. Rust MAX_ATTACHMENT_SIZE (lib.rs) — burada AYRICA kontrol
          *  edilir ki aşırı büyük bir dosya reddedilmeden önce boşuna
          *  uygulamanın önbelleğine kopyalanmasın. */
         private const val MAX_ATTACHMENT_SIZE = 4L * 1024 * 1024 * 1024
+        /** Spec dışı: kullanıcı tarafından istenen önizleme boyutu/kalitesi
+         *  — bkz. generateImagePreview/generateVideoPreview. "480p", en
+         *  uzun kenarın 480px'e sınırlanması olarak yorumlanıyor. */
+        private const val PREVIEW_MAX_DIMENSION = 480
+        private const val PREVIEW_JPEG_QUALITY = 85
     }
 
     private lateinit var peerDeviceFingerprint: String
@@ -75,6 +85,22 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private val sessionPollHandler = Handler(Looper.getMainLooper())
+    /**
+     * Spec dışı: bağlantı durumu göstergesi — sadece üstteki "Bağlanılıyor"
+     * banner'ı için değil, artık action bar altyazısında (isim yanında)
+     * sürekli gösterilen bir durum metni için de kullanılıyor. Önceden bu
+     * runnable bağlantı kurulur kurulmaz KENDİNİ DURDURUYORDU (bir daha
+     * asla polling yapmıyordu) — bu, durumun sonradan değişmesi (ör. karşı
+     * cihaz kapandı) hâlinde hiç yansımamasına yol açardı. Artık sürekli
+     * (bağlıyken daha seyrek aralıkla) çalışmaya devam ediyor.
+     *
+     * BİLİNEN SINIR: `hasActiveSession`, "bir ratchet oturumu kuruldu mu"
+     * sorusuna cevap verir — gerçek bir canlı bağlantı/kalp atışı
+     * (heartbeat) sinyali DEĞİLDİR. Yani "Bağlı" göstergesi, karşı cihaz
+     * o an kapalı/erişilemez olsa bile (oturum bir kez kurulduysa) öyle
+     * kalmaya devam edebilir — tam bir çevrimiçi/çevrimdışı takibi için
+     * ayrı bir heartbeat protokolü gerekir, bu kapsamın dışında.
+     */
     private val sessionPollRunnable = object : Runnable {
         override fun run() {
             val connected = try {
@@ -83,9 +109,12 @@ class ChatActivity : AppCompatActivity() {
                 false
             }
             connectingBanner.visibility = if (connected) View.GONE else View.VISIBLE
-            if (!connected) {
-                sessionPollHandler.postDelayed(this, SESSION_POLL_INTERVAL_MS)
-            }
+            supportActionBar?.subtitle = getString(
+                if (connected) R.string.lbl_status_online else R.string.msg_connecting
+            )
+            sessionPollHandler.postDelayed(
+                this, if (connected) STEADY_STATE_POLL_INTERVAL_MS else SESSION_POLL_INTERVAL_MS
+            )
         }
     }
 
@@ -242,6 +271,8 @@ class ChatActivity : AppCompatActivity() {
             "history_sync" -> applyHistorySync(obj)
             "file_offer" -> {
                 val autoDownloading = obj.optBoolean("auto_downloading", false)
+                val previewHex = obj.optString("preview_hex", "")
+                val previewJpeg = if (previewHex.isNotEmpty()) hexToBytes(previewHex) else null
                 adapter.addMessage(
                     SimpleChatAdapter.Item(
                         messageId = obj.optString("file_id"),
@@ -253,7 +284,8 @@ class ChatActivity : AppCompatActivity() {
                             mimeType = obj.optString("mime_type"),
                             totalSize = obj.optLong("total_size"),
                             status = if (autoDownloading) SimpleChatAdapter.AttachmentStatus.DOWNLOADING
-                                      else SimpleChatAdapter.AttachmentStatus.OFFERED
+                                      else SimpleChatAdapter.AttachmentStatus.OFFERED,
+                            previewJpeg = previewJpeg
                         )
                     )
                 )
@@ -281,11 +313,24 @@ class ChatActivity : AppCompatActivity() {
             SimpleChatAdapter.AttachmentStatus.OFFERED, SimpleChatAdapter.AttachmentStatus.FAILED -> {
                 adapter.applyAttachmentUpdate(attachment.fileId, SimpleChatAdapter.AttachmentStatus.DOWNLOADING, 0)
                 lifecycleScope.launch(Dispatchers.IO) {
-                    try {
+                    // KRİTİK: dönüş değeri MUTLAKA kontrol edilmeli — Rust
+                    // tarafı bir hata durumunda (ör. karşı taraf şu an
+                    // erişilebilir değil) SENKRON olarak "Error: ..." döner
+                    // ve bu durumda pollNetwork() üzerinden HİÇBİR olay
+                    // gelmeyecektir (indirme hiç başlamadı). Önceden bu
+                    // dönüş değeri (o zaman Boolean) hiç kontrol edilmiyordu
+                    // — bu da başarısız bir indirmenin UI'de sonsuza kadar
+                    // "İndiriliyor" gösterip 0MB'da takılı kalmasına yol
+                    // açıyordu.
+                    val result = try {
                         P2PLib.downloadFile(attachment.fileId, peerDeviceFingerprint)
                     } catch (e: Exception) {
+                        "Error: ${e.message}"
+                    }
+                    if (result.startsWith("Error:")) {
                         withContext(Dispatchers.Main) {
                             adapter.applyAttachmentUpdate(attachment.fileId, SimpleChatAdapter.AttachmentStatus.FAILED)
+                            Toast.makeText(this@ChatActivity, result, Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
@@ -350,7 +395,24 @@ class ChatActivity : AppCompatActivity() {
                     }
                 } ?: throw java.io.IOException("Dosya açılamadı")
 
-                val result = P2PLib.prepareAndSendFile(peerDeviceFingerprint, tempFile.absolutePath, fileName, mimeType)
+                // Spec dışı: foto/video ekleri için gönderen tarafta
+                // (görünmez şekilde) küçük bir 480p/%85 JPEG önizleme
+                // kapağı oluşturulur — alıcı tarafta TAM dosya hiç
+                // indirilmeden gösterilebilsin diye (bkz.
+                // P2PLib.prepareAndSendFile notu). Oluşturulamazsa (bozuk
+                // dosya, desteklenmeyen codec vb.) sessizce `null` kalır —
+                // önizleme opsiyoneldir, gönderimi ASLA engellemez.
+                val previewJpeg = try {
+                    when {
+                        mimeType.startsWith("image/") -> generateImagePreview(tempFile)
+                        mimeType.startsWith("video/") -> generateVideoPreview(tempFile)
+                        else -> null
+                    }
+                } catch (e: Exception) {
+                    null
+                }
+
+                val result = P2PLib.prepareAndSendFile(peerDeviceFingerprint, tempFile.absolutePath, fileName, mimeType, previewJpeg)
                 withContext(Dispatchers.Main) {
                     if (result.startsWith("Error:")) {
                         Toast.makeText(this@ChatActivity, result, Toast.LENGTH_SHORT).show()
@@ -367,7 +429,8 @@ class ChatActivity : AppCompatActivity() {
                                     mimeType = mimeType,
                                     totalSize = tempFile.length(),
                                     status = SimpleChatAdapter.AttachmentStatus.COMPLETE,
-                                    bytesDone = tempFile.length()
+                                    bytesDone = tempFile.length(),
+                                    previewJpeg = previewJpeg
                                 )
                             )
                         )
@@ -382,6 +445,18 @@ class ChatActivity : AppCompatActivity() {
                 tempFile.delete()
             }
         }
+    }
+
+    /** Rust tarafından `hex::encode` ile hex string olarak taşınan
+     *  önizleme baytlarını geri çözer (bkz. "preview_hex" alanı) — JSON
+     *  ham ikili veri taşıyamadığı için bu kodlama gerekti. */
+    private fun hexToBytes(hex: String): ByteArray {
+        val result = ByteArray(hex.length / 2)
+        for (i in result.indices) {
+            val idx = i * 2
+            result[i] = ((Character.digit(hex[idx], 16) shl 4) + Character.digit(hex[idx + 1], 16)).toByte()
+        }
+        return result
     }
 
     private fun queryDisplayName(uri: Uri): String? {
@@ -414,6 +489,70 @@ class ChatActivity : AppCompatActivity() {
     }
 
     /**
+     * Spec dışı: bir görsel dosyasından 480p/%85 JPEG önizleme kapağı
+     * üretir. Büyük görselleri TAM çözünürlükte belleğe yüklememek için
+     * önce sınırları (`inJustDecodeBounds`) okuyup uygun bir
+     * `inSampleSize` hesaplıyoruz — 12MP'lik bir foto için bile bu, kaba
+     * bir ön küçültmeyle (2 kuvvetleri hâlinde) makul bellek kullanımı
+     * sağlar, tam hassas boyuta son adımda `Bitmap.createScaledBitmap`
+     * ile inilir.
+     */
+    private fun generateImagePreview(file: File): ByteArray? {
+        val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, boundsOptions)
+        if (boundsOptions.outWidth <= 0 || boundsOptions.outHeight <= 0) return null
+
+        var sampleSize = 1
+        while (boundsOptions.outWidth / (sampleSize * 2) >= PREVIEW_MAX_DIMENSION &&
+            boundsOptions.outHeight / (sampleSize * 2) >= PREVIEW_MAX_DIMENSION) {
+            sampleSize *= 2
+        }
+        val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        val sampled = BitmapFactory.decodeFile(file.absolutePath, decodeOptions) ?: return null
+        return scaleAndCompress(sampled)
+    }
+
+    /**
+     * Spec dışı: bir video dosyasından 480p/%85 JPEG önizleme kapağı
+     * üretir — `MediaMetadataRetriever` ile ~1. saniyedeki kareyi (çoğu
+     * video için siyah bir açılış karesinden kaçınmak için) alır, o da
+     * yoksa (çok kısa video) ilk kareye düşer.
+     */
+    private fun generateVideoPreview(file: File): ByteArray? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            val frame = retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                ?: return null
+            scaleAndCompress(frame)
+        } catch (e: Exception) {
+            null
+        } finally {
+            retriever.release()
+        }
+    }
+
+    private fun scaleAndCompress(bitmap: Bitmap): ByteArray {
+        val longEdge = maxOf(bitmap.width, bitmap.height)
+        val scaled = if (longEdge > PREVIEW_MAX_DIMENSION) {
+            val scale = PREVIEW_MAX_DIMENSION.toFloat() / longEdge
+            val scaledBitmap = Bitmap.createScaledBitmap(
+                bitmap, (bitmap.width * scale).toInt().coerceAtLeast(1),
+                (bitmap.height * scale).toInt().coerceAtLeast(1), true
+            )
+            if (scaledBitmap !== bitmap) bitmap.recycle()
+            scaledBitmap
+        } else {
+            bitmap
+        }
+        val out = ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, PREVIEW_JPEG_QUALITY, out)
+        scaled.recycle()
+        return out.toByteArray()
+    }
+
+    /**
      * Spec dışı: node modu kapalı cihazlarda yerel arşiv boş olduğunda
      * `loadHistoryIfAvailable`'ın gönderdiği `requestHistorySync` isteğine
      * karşı taraftan (node modu açıksa) gelen yanıt. `historySyncPending`
@@ -434,8 +573,27 @@ class ChatActivity : AppCompatActivity() {
                 timestamp = m.optLong("timestamp", System.currentTimeMillis())
             )
         }
-        localMessages.addAll(0, synced)
-        adapter.notifyItemRangeInserted(0, synced.size)
+        if (localMessages.isEmpty()) {
+            // Yerelde hiç geçmiş yoktu — tamamı senkrondan geliyor.
+            localMessages.addAll(0, synced)
+            adapter.notifyItemRangeInserted(0, synced.size)
+        } else {
+            // Spec dışı: "hangi cihazda daha güncel mesajlar varsa onunla
+            // yenilensin" — yerelde zaten bir geçmiş varsa, karşı taraftan
+            // gelenlerin SADECE elimizdeki en yeni mesajdan daha yeni
+            // olanlarını sona ekliyoruz (ör. bu cihaz bir süre çevrimdışı
+            // kalıp karşı tarafın gönderdiği mesajları kaçırmışsa). Zaten
+            // sahip olduğumuz mesajları tekrar eklemiyoruz — `ArchivedMessage`
+            // kararlı bir id taşımadığından (bilinen sınır, bkz. dosya
+            // sonu not) eşleştirme zaman damgasına dayanıyor.
+            val latestLocal = localMessages.maxOf { it.timestamp }
+            val newer = synced.filter { it.timestamp > latestLocal }
+            if (newer.isNotEmpty()) {
+                localMessages.addAll(newer)
+                adapter.notifyItemRangeInserted(localMessages.size - newer.size, newer.size)
+                recycler.scrollToPosition(localMessages.size - 1)
+            }
+        }
     }
 
     /** Kendi mesajımıza uzun basınca: Düzenle/Sil seçenekleri. */
@@ -530,13 +688,19 @@ class ChatActivity : AppCompatActivity() {
         if (localMessages.isNotEmpty()) {
             adapter.notifyItemRangeInserted(0, localMessages.size)
             recycler.scrollToPosition(localMessages.size - 1)
-        } else {
-            historySyncPending = true
-            try {
-                P2PLib.requestHistorySync(peerDeviceFingerprint, HISTORY_SYNC_LIMIT)
-            } catch (e: Exception) {
-                historySyncPending = false
-            }
+        }
+        // Spec dışı: önceden SADECE yerel geçmiş boşsa senkron isteniyordu
+        // — artık her sohbet açılışında deneniyor (yerel geçmiş olsun ya
+        // da olmasın), çünkü karşı taraf bu cihazın kaçırdığı DAHA YENİ
+        // mesajlara sahip olabilir (bkz. applyHistorySync'teki
+        // "sadece daha yeni olanları ekle" birleştirme mantığı). Karşı
+        // taraf erişilemezse veya node modu kapalıysa istek sessizce
+        // yanıtsız kalır — mevcut yerel görünüm etkilenmez.
+        historySyncPending = true
+        try {
+            P2PLib.requestHistorySync(peerDeviceFingerprint, HISTORY_SYNC_LIMIT)
+        } catch (e: Exception) {
+            historySyncPending = false
         }
     }
 

@@ -89,14 +89,21 @@ object P2PLib {
     // --- Spec dışı: dosya/foto/video/ses ekleri (azami 4GB) ---
     /** `sourcePath` zaten yerel bir dosya yolu olmalı (content:// URI
      *  DEĞİL — çağıran taraf önce ContentResolver ile yerel bir önbellek
-     *  dosyasına kopyalamalı). BÜYÜK dosyalar için bu çağrı bir süre
+     *  dosyasına kopyalamalı). `previewJpeg`: foto/video ekleri için
+     *  önceden oluşturulmuş küçük bir 480p/%85 JPEG önizleme kapağı (bkz.
+     *  ChatActivity generateImagePreview/generateVideoPreview) — diğer
+     *  türler için `null` geçilmeli. BÜYÜK dosyalar için bu çağrı bir süre
      *  alabilir — ANA THREAD'DE ÇAĞIRMAYIN (coroutine/Dispatchers.IO
      *  kullanın). Dönüş: sendMessage ile aynı JSON biçimi, message_id
      *  alanı burada file_id'dir. */
-    external fun prepareAndSendFile(targetDeviceFingerprint: String, sourcePath: String, fileName: String, mimeType: String): String
-    /** Hemen döner — ilerleme/tamamlanma pollNetwork() üzerinden
-     *  "file_progress"/"file_complete"/"file_failed" olaylarıyla gelir. */
-    external fun downloadFile(fileId: String, peerDeviceFingerprint: String): Boolean
+    external fun prepareAndSendFile(targetDeviceFingerprint: String, sourcePath: String, fileName: String, mimeType: String, previewJpeg: ByteArray?): String
+    /** Başarılıysa "OK" döner ve ilerleme/tamamlanma pollNetwork() üzerinden
+     *  "file_progress"/"file_complete"/"file_failed" olaylarıyla gelir.
+     *  Başarısızsa "Error: ..." döner VE bu durumda hiçbir pollNetwork
+     *  olayı gelmeyecektir (indirme hiç başlamadı) — çağıran taraf bu
+     *  dönüş değerini MUTLAKA kontrol etmeli, aksi halde UI "İndiriliyor"
+     *  durumunda sonsuza kadar takılı kalır. */
+    external fun downloadFile(fileId: String, peerDeviceFingerprint: String): String
     /** JSON-encoded List<AttachmentSummary>, oluşturulma sırasına göre. */
     external fun listAttachments(peerDeviceFingerprint: String): String
     /** Tamamlanmış bir ekin çözülmüş (plaintext) kopyasının mutlak yolu,
