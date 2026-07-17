@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spec dışı, güvenlik denetimi düzeltmesi (allowBackup):
+     Güvenli bir mesajlaşma uygulaması için uygulama verisi HİÇBİR yedeğe
+     (bulut auto-backup, adb backup, cihaz-transfer) dahil edilmez.
+     Diskteki bazı veriler çözülmüş plaintext (attachments/plain_cache/,
+     libp2p_identity.key) ve gizli metadata (SQLite: kişi kimlikleri,
+     grup üyeliği, dosya adları) içerdiğinden bunların cihazdan çıkması
+     istenmez. Secret key blob'ları zaten Android Keystore ile sarmalı ve
+     Keystore anahtarları cihaza-bağlı/dışa-aktarılamaz olduğundan yedekte
+     olsalar bile başka cihazda işe yaramaz — yine de tam kapatıyoruz.
+     API 31+ bu dosyayı kullanır; API 26-30 için manifest'teki
+     fullBackupContent="false" + allowBackup="false" geçerlidir. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>
