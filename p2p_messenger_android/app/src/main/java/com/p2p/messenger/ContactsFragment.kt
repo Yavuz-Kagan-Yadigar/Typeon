@@ -1,6 +1,9 @@
 package com.p2p.messenger
 
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -40,6 +43,10 @@ class ContactsFragment : Fragment() {
      *  bir handler ile birkaç kez yeniden denenir (bkz. eski
      *  QrDisplayActivity — bu mantık buraya taşındı). */
     private val qrRetryHandler = Handler(Looper.getMainLooper())
+    /** bkz. `loadNodeAddressAndGenerateQr` — QR ile aynı kaynaktan, "Kodumu/
+     *  Adresimi kopyala" düğmeleri için ayrıca saklanır. QR üretilene kadar
+     *  boş kalabilir (bkz. o fonksiyonun yeniden deneme notu). */
+    private var ownNodeAddress: String = ""
     private val refreshHandler = Handler(Looper.getMainLooper())
     private val refreshRunnable = object : Runnable {
         override fun run() {
@@ -72,6 +79,9 @@ class ContactsFragment : Fragment() {
             ""
         }
         loadNodeAddressAndGenerateQr(attemptsLeft = 10)
+
+        view.findViewById<Button>(R.id.btn_copy_manual_code).setOnClickListener { copyManualAddCode() }
+        view.findViewById<Button>(R.id.btn_copy_own_address).setOnClickListener { copyOwnAddress() }
 
         placeholder = view.findViewById(R.id.contactsPlaceholder)
         recycler = view.findViewById(R.id.recyclerContacts)
@@ -109,6 +119,7 @@ class ContactsFragment : Fragment() {
             qrRetryHandler.postDelayed({ loadNodeAddressAndGenerateQr(attemptsLeft - 1) }, 500)
             return
         }
+        ownNodeAddress = nodeAddress
         val qrBytes = try {
             P2PLib.generateQrPacket(nodeAddress)
         } catch (e: Exception) {
@@ -293,5 +304,42 @@ class ContactsFragment : Fragment() {
             }
             .setNegativeButton("İptal", null)
             .show()
+    }
+
+    /** bkz. `btn_copy_manual_code` — karşı taraf QR tarayamıyorsa (ör.
+     *  ekranlar yan yana değil, farklı ağ) bu metni "Manuel Ekle"sine
+     *  yapıştırabilir. `getManualAddCode` Rust tarafında tek bir yerden
+     *  üretilir (bkz. o fonksiyonun dokümantasyonu) — format
+     *  `processManualEntry`'nin beklediğiyle birebir aynı kalır. */
+    private fun copyManualAddCode() {
+        if (ownNodeAddress.isEmpty()) {
+            Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val code = try {
+            P2PLib.getManualAddCode(ownNodeAddress)
+        } catch (e: Exception) {
+            ""
+        }
+        if (code.isEmpty()) {
+            Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val clipboard = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Typoon eşleşme kodu", code))
+        Toast.makeText(requireContext(), R.string.msg_manual_code_copied, Toast.LENGTH_LONG).show()
+    }
+
+    /** bkz. `btn_copy_own_address` — bu, aynı zamanda Ayarlar > "Bilinen
+     *  röle adresi" alanına yapıştırılabilecek TAM adres formatıdır (bare
+     *  multiaddr + `/p2p/<peer_id>`, bkz. P2PLib.addKnownRelayAddress). */
+    private fun copyOwnAddress() {
+        if (ownNodeAddress.isEmpty()) {
+            Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val clipboard = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Typoon adresi", ownNodeAddress))
+        Toast.makeText(requireContext(), R.string.msg_own_address_copied, Toast.LENGTH_LONG).show()
     }
 }

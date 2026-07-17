@@ -38,6 +38,14 @@
     <string name="lbl_relay_address_hint">/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo…</string>
     <string name="action_add_relay_address">Ekle</string>
     <string name="msg_relay_address_added">Röle adresi eklendi</string>
+
+    <!-- Spec dışı, kullanıcı isteği: QR yerine kopyala/yapıştır ile eşleşme/
+         röle adresi paylaşımı — bkz. ContactsFragment. -->
+    <string name="action_copy_manual_code">Kodumu kopyala</string>
+    <string name="action_copy_own_address">Adresimi kopyala</string>
+    <string name="msg_manual_code_copied">Eşleşme kodu kopyalandı — karşı tarafın \"Manuel Ekle\"sine yapıştırın</string>
+    <string name="msg_own_address_copied">Adres kopyalandı — Ayarlar &gt; Bilinen röle adresi\'ne yapıştırılabilir</string>
+    <string name="error_address_not_ready">Adres henüz hazır değil, birazdan tekrar deneyin</string>
     <string name="lbl_key_security">Anahtar Güvenliği</string>
     <string name="lbl_keys_hardware_backed">✓ Anahtarlarınız cihazın güvenlik donanımında (StrongBox/TEE) korunuyor</string>
     <string name="lbl_keys_software_backed">⚠ Anahtarlarınız yazılım tabanlı korumada (bu cihaz donanım güvenlik modülünü desteklemiyor)</string>
@@ -53,6 +61,11 @@
     <string name="error_camera_permission">Camera permission required for QR scanning</string>
     <string name="error_network">Network error. Please check your connection.</string>
     <string name="error_send_failed">Failed to send message</string>
+    <!-- Spec dışı, hata ayıklama düzeltmesi: initiate_handshake_with
+         kalıcı olarak başarısız olduğunda (bozuk/uyumsuz anahtar verisi,
+         ör. taraflardan biri eski bir uygulama sürümü/kripto parametresi
+         kullanıyor) gösterilir — bkz. ChatActivity "handshake_failed". -->
+    <string name="error_handshake_incompatible">Bu kişiyle bağlantı kurulamıyor — anahtar formatı uyumsuz. Muhtemelen taraflardan biri farklı bir uygulama sürümü kullanıyor. Kişiyi silip yeniden eşleştirmeyi deneyin.</string>
     <string name="confirm_revoke_device">Bu cihazı iptal etmek istediğinize emin misiniz? Kişi listenizde kalır ama bu cihazdan artık mesaj gönderemez/alamazsınız — geçmiş silinmez.</string>
     <string name="confirm_block_contact">Block this contact?</string>
 

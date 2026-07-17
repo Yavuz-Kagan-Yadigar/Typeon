@@ -796,6 +796,15 @@ class ChatActivity : AppCompatActivity() {
                 val peerName = txtToolbarTitle.text.toString()
                 adapter.applySeen(messageId, listOf(SimpleChatAdapter.SeenByViewer(resolveContactAvatar(peerDeviceFingerprint), peerName)))
             }
+            // Spec dışı, hata ayıklama düzeltmesi: önceden bu hata sadece
+            // logcat'e yazılıyordu — kullanıcı "bağlanamıyorum" derdi ama
+            // arayüzde hiçbir ipucu yoktu. Bu KALICI bir hatadır (bkz. Rust
+            // initiate_handshake_with notu) — yeniden denemekle düzelmez,
+            // muhtemelen iki taraf uyumsuz uygulama sürümü/anahtar
+            // kullanıyor. Rust tarafı zaten peer başına bir kez bildiriyor.
+            "handshake_failed" -> {
+                Toast.makeText(this, R.string.error_handshake_incompatible, Toast.LENGTH_LONG).show()
+            }
         }
     }
 

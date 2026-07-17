@@ -33,6 +33,33 @@
         android:textIsSelectable="true"
         android:textSize="12sp" />
 
+    <!-- Spec dışı, kullanıcı isteği: QR taranamıyorsa (ör. farklı ağ,
+         karşı tarafla ekran paylaşımı) kendi eşleşme kodumu/adresimi elle
+         okutup yazdırmak yerine panoya kopyalayabilmek için — bkz.
+         ContactsFragment.copyManualAddCode/copyOwnAddress. -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btn_copy_manual_code"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/action_copy_manual_code"/>
+        <Button
+            android:id="@+id/btn_copy_own_address"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="@string/action_copy_own_address"/>
+
+    </LinearLayout>
+
     <!-- Diğer eşleşme yöntemleri — QR'ın hemen altında, ortalanmış (bkz.
          kullanıcı isteği). -->
     <LinearLayout

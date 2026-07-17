@@ -43,6 +43,11 @@ object P2PLib {
 
     // --- Bölüm 1.3/1.4: QR + manuel eşleşme ---
     external fun generateQrPacket(rendezvousNode: String): ByteArray
+    /** Spec dışı, kullanıcı isteği: `processManualEntry`'nin beklediği
+     *  `identity_id|device_fingerprint|device_name|rendezvous_node`
+     *  formatını üretir — panoya kopyalayıp karşı tarafa (ör. farklı bir
+     *  ağdaysa, ekran paylaşımı/mesajla) iletmek için. Hata durumunda "". */
+    external fun getManualAddCode(rendezvousNode: String): String
     external fun processQrPacket(data: ByteArray): String
     external fun processManualEntry(text: String): String
     /** JSON-encoded List<ContactSummary>. */
