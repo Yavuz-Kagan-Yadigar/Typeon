@@ -180,4 +180,10 @@ object P2PLib {
      *  is_active artık receive_message/handshake'te gerçekten kontrol
      *  ediliyor). Ör. "eski telefonum çalındı, bu cihazı artık güvenme". */
     external fun revokeContactDevice(contactId: String, deviceFingerprint: String): String
+    /** Spec dışı, güvenlik denetimi devamı (bkz. SECURITY.md "Cross-network
+     *  connectivity" notu): kullanıcının güvendiği/kendi işlettiği bir röle
+     *  (Circuit Relay v2) adresini elle ekler — ör. "/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo...".
+     *  Farklı ağlardaki iki kişinin (aralarında hiç ortak röle geçmişi
+     *  olmadan) ilk kez eşleşebilmesini garanti eden tek yol budur. */
+    external fun addKnownRelayAddress(multiaddr: String): String
 }

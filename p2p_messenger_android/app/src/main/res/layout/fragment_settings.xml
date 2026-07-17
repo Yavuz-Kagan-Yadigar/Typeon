@@ -120,6 +120,55 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
+    <!-- Spec dışı, güvenlik denetimi devamı: farklı ağlardaki iki kişinin
+         (aralarında hiç ortak röle geçmişi olmadan) ilk kez eşleşebilmesini
+         GARANTİ eden tek yol — bkz. SECURITY.md "Cross-network connectivity"
+         notu, P2PLib.addKnownRelayAddress. -->
+    <TextView
+        android:id="@+id/lbl_relay_address"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:text="@string/lbl_relay_address"
+        android:textStyle="bold"
+        app:layout_constraintTop_toBottomOf="@id/node_mode_description"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/lbl_relay_address_desc"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="@string/lbl_relay_address_desc"
+        android:textSize="12sp"
+        android:alpha="0.7"
+        app:layout_constraintTop_toBottomOf="@id/lbl_relay_address"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <EditText
+        android:id="@+id/relay_address_input"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:hint="@string/lbl_relay_address_hint"
+        android:inputType="textUri"
+        android:maxLines="1"
+        app:layout_constraintTop_toBottomOf="@id/lbl_relay_address_desc"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <Button
+        android:id="@+id/btn_add_relay_address"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/action_add_relay_address"
+        app:layout_constraintTop_toBottomOf="@id/relay_address_input"
+        app:layout_constraintStart_toStartOf="parent" />
+
     <!-- Görünüm tercihi (spec dışı): koyu temadayken arkaplanı tam siyaha
          zorlar — bkz. ThemePrefs, P2PApplication, ThemeOverlay.P2PMessenger.OledBlack. -->
     <com.google.android.material.switchmaterial.SwitchMaterial
@@ -128,7 +177,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="32dp"
         android:text="@string/lbl_oled_black"
-        app:layout_constraintTop_toBottomOf="@id/node_mode_description"
+        app:layout_constraintTop_toBottomOf="@id/btn_add_relay_address"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 

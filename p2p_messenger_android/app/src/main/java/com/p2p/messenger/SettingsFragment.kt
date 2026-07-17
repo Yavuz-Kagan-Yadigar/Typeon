@@ -6,6 +6,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.EditText
 import android.widget.ImageView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -64,6 +65,28 @@ class SettingsFragment : Fragment() {
         nodeModeSwitch.isChecked = P2PService.isNodeModeEnabled(requireContext())
         nodeModeSwitch.setOnCheckedChangeListener { _, isChecked ->
             P2PService.setNodeModeEnabled(requireContext(), isChecked)
+        }
+
+        // Spec dışı, güvenlik denetimi devamı: bkz. SECURITY.md
+        // "Cross-network connectivity" notu — organik olarak keşfedilen bir
+        // röle yoksa (ör. hiç Node modu açık, erişilebilir bir kişiyle
+        // karşılaşılmadıysa), farklı ağlardaki iki kişinin ilk eşleşmesi
+        // için tek garanti bu manuel adres.
+        val relayAddressInput = view.findViewById<EditText>(R.id.relay_address_input)
+        view.findViewById<Button>(R.id.btn_add_relay_address).setOnClickListener {
+            val addr = relayAddressInput.text.toString().trim()
+            if (addr.isEmpty()) return@setOnClickListener
+            val result = try {
+                P2PLib.addKnownRelayAddress(addr)
+            } catch (e: Exception) {
+                "Error: ${e.message}"
+            }
+            if (result.startsWith("Error:")) {
+                Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
+            } else {
+                relayAddressInput.text.clear()
+                Toast.makeText(requireContext(), R.string.msg_relay_address_added, Toast.LENGTH_SHORT).show()
+            }
         }
 
         // OLED siyah: ThemeOverlay Activity oluşturulmadan önce (bkz.

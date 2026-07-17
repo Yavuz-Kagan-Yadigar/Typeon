@@ -28,7 +28,16 @@
     <string name="lbl_verify_identity">Verify Identity</string>
     <string name="lbl_safety_number">Safety Number</string>
     <string name="lbl_node_mode">Node Mode</string>
-    <string name="lbl_node_mode_desc">Run as a relay node for the network</string>
+    <!-- Spec dışı, güvenlik denetimi devamı: bu metin ÖNCEDEN yanlıştı —
+         Node modu şimdiye kadar sadece DHT routing'e katkı sağlıyordu,
+         gerçek bir röle görevi görmüyordu (bkz. SECURITY.md "Cross-network
+         connectivity" notu). Artık gerçekten doğru. -->
+    <string name="lbl_node_mode_desc">DHT yönlendirmesine katkı sağlar VE ağdaki herkes için (şifreli) trafiği kör olarak röle eder — içeriğinizi asla göremez, ama röle ettiğiniz kişilerin bant genişliğini kullanır ve kiminle bağlandıklarını görebilir.</string>
+    <string name="lbl_relay_address">Bilinen röle adresi</string>
+    <string name="lbl_relay_address_desc">Farklı ağlardaki (NAT arkasındaki) iki kişinin hiç ortak röle geçmişi olmadan ilk kez eşleşebilmesi için — güvendiğiniz/kendi işlettiğiniz bir röle (Node modu açık, erişilebilir bir cihaz) varsa adresini buraya ekleyin.</string>
+    <string name="lbl_relay_address_hint">/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo…</string>
+    <string name="action_add_relay_address">Ekle</string>
+    <string name="msg_relay_address_added">Röle adresi eklendi</string>
     <string name="lbl_key_security">Anahtar Güvenliği</string>
     <string name="lbl_keys_hardware_backed">✓ Anahtarlarınız cihazın güvenlik donanımında (StrongBox/TEE) korunuyor</string>
     <string name="lbl_keys_software_backed">⚠ Anahtarlarınız yazılım tabanlı korumada (bu cihaz donanım güvenlik modülünü desteklemiyor)</string>
