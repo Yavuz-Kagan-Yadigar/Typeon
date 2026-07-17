@@ -75,13 +75,14 @@ pub enum GroupUpdateError {
     NotFounder,
     /// signed_by_device, kurucunun bilinen/Active bir cihazı değil.
     UnknownOrRevokedSignerDevice,
-    /// İmza geçersiz (Ed25519 veya ML-DSA doğrulaması başarısız).
-    InvalidSignature,
-    /// new_version, mevcut version+1 olmalı (basit sıra kontrolü — spec
-    /// bunu açıkça şart koşmuyor ama tekrar oynatma/eski güncelleme
-    /// saldırılarına karşı makul bir korumadır).
+    /// new_version, mevcut version'dan BÜYÜK olmalı. Eskiden `== version+1`
+    /// şart koşuluyordu ama bu, TEK bir güncelleme kaçırıldığında (ağ
+    /// kesintisi) o üyeyi KALICI olarak kilitliyordu — sonraki tüm
+    /// güncellemeler "sıra dışı" diye reddediliyor ve üye asla yetişemiyordu.
+    /// Artık ileri sıçramalara (gap) izin veriliyor (yalnızca stale/tekrar,
+    /// yani `<= version`, reddedilir); bir gap tespit edildiğinde çağıran
+    /// taraf uyarı loglar (bkz. lib.rs process_group_update).
     StaleOrOutOfOrderVersion,
-    GroupNotFound,
 }
 
 /// Uygulanacak değişikliğin türü (spec 5.2 `GroupChange`). Kanonik tanım
@@ -113,7 +114,9 @@ pub fn validate_group_update(
     if !signed_by_device_is_active {
         return Err(GroupUpdateError::UnknownOrRevokedSignerDevice);
     }
-    if new_version != group.version + 1 {
+    // İleri sıçramalara izin ver (bkz. `StaleOrOutOfOrderVersion` notu) —
+    // sadece stale/tekrar (mevcut version'a eşit veya küçük) reddedilir.
+    if new_version <= group.version {
         return Err(GroupUpdateError::StaleOrOutOfOrderVersion);
     }
     Ok(())
@@ -176,11 +179,27 @@ mod tests {
 
     #[test]
     fn stale_version_rejected() {
-        let group = Group::new("g1".into(), "Test".into(), "founder1".into(), 1000);
+        // Grubu version 3'e getir, sonra STALE (geriye dönük) bir güncelleme
+        // reddedilmeli.
+        let mut group = Group::new("g1".into(), "Test".into(), "founder1".into(), 1000);
+        apply_change(&mut group, &GroupChange::Rename("v3".into()), 3, 2000);
         assert_eq!(
-            validate_group_update(&group, "founder1", true, 5),
+            validate_group_update(&group, "founder1", true, 2),
             Err(GroupUpdateError::StaleOrOutOfOrderVersion)
         );
+        // Eşit version da (zaten uygulanmış) reddedilir.
+        assert_eq!(
+            validate_group_update(&group, "founder1", true, 3),
+            Err(GroupUpdateError::StaleOrOutOfOrderVersion)
+        );
+    }
+
+    #[test]
+    fn forward_version_gap_allowed() {
+        // Tek bir güncelleme kaçırıldığında üye kilitlenmemeli — ileri
+        // sıçrama (gap) kabul edilir (bkz. StaleOrOutOfOrderVersion notu).
+        let group = Group::new("g1".into(), "Test".into(), "founder1".into(), 1000);
+        assert!(validate_group_update(&group, "founder1", true, 5).is_ok());
     }
 
     #[test]

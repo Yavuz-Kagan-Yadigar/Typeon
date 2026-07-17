@@ -103,12 +103,6 @@ impl Contact {
             self.last_device_change = Some(now);
         }
     }
-
-    pub fn mark_verified(&mut self, fingerprint: &str) {
-        if let Some(d) = self.known_devices.iter_mut().find(|d| d.device_fingerprint == fingerprint) {
-            d.verified = true;
-        }
-    }
 }
 
 /// Spec 2.2'deki karar ağacını uygular. `has_valid_signed_device_add`,

@@ -378,6 +378,22 @@ const PENDING_ENVELOPE_TIMEOUT_MS: u64 = 20_000;
 /// görülen/en güvenilir" ölçeğiyle aynı (bkz. o alanın dokümantasyonu).
 const MAX_KNOWN_RELAYS: usize = 10;
 
+/// Spec dışı, ağ sağlamlığı düzeltmesi: `reconnect_sweep` bu aralıkta bir
+/// çalışır (kendini iyileştiren yeniden-bağlanma). `poll_events` zaten
+/// saniyede bir Kotlin tarafından çağrıldığından ayrı bir zamanlayıcıya
+/// gerek yok — sadece bu aralık dolduğunda tarama yapılır. 15 sn: kopmuş
+/// bir kişiye makul hızda yeniden bağlanır ama gereksiz dial trafiği
+/// üretmez.
+const RECONNECT_SWEEP_INTERVAL_MS: u64 = 15_000;
+
+/// Spec dışı, güvenlik denetimi düzeltmesi: bir `HandshakeInit`'in
+/// `timestamp`'i, o an ile bu kadar milisaniyeden fazla sapıyorsa (ileri
+/// VEYA geri) reddedilir — çok eski yakalanmış el sıkışmaların tekrar
+/// oynatılmasını engellerken, cihazlar arası makul saat kaymasına (clock
+/// skew) tolerans gösterir. 10 dakika: iki telefonun saatleri arasında
+/// gerçek dünyada beklenenden bol bir pencere, ama sınırsız değil.
+const HANDSHAKE_MAX_SKEW_MS: u64 = 10 * 60 * 1000;
+
 /// Spec dışı, kullanıcı isteği (bkz. SECURITY.md "Cross-network
 /// connectivity" notu): manuel röle adresi girişi hâlâ Ayarlar'da mevcut
 /// ve kaldırılmadı, ama sıfırdan hiç ortak röle geçmişi olmayan iki
@@ -513,6 +529,20 @@ struct P2PCore {
     identity_to_contact: HashMap<String, String>,
     /// Cihaz-çifti bazlı ratchet oturumları: key = uzak device_fingerprint.
     ratchets: HashMap<String, DeviceRatchetState>,
+    /// Spec dışı, güvenlik denetimi düzeltmesi (el sıkışma tekrar oynatma →
+    /// oturum sıfırlama DoS'u): bu cihazdan freshness penceresi
+    /// (`HANDSHAKE_MAX_SKEW_MS`) içinde KABUL EDİLMİŞ el sıkışmaların
+    /// (timestamp, signature_classical) kayıtları. Gelen bir el sıkışmanın
+    /// imzası bu sette AYNEN varsa, bu bir tekrar oynatmadır (gossipsub
+    /// `Signed` modu ağ gözlemcisinin yakaladığı bir paketi yeniden
+    /// yayınlamasına izin verir) ve reddedilir — böylece canlı bir ratchet
+    /// SIFIRLANAMAZ. İçerik-tabanlı (imza) dedup, monoton-timestamp'e göre
+    /// daha SAĞLAM: gerçek bir yeniden-eşleşme (taze efemeral anahtarlar,
+    /// farklı imza) saat kayması ne olursa olsun kabul edilir; yalnızca
+    /// bayt-aynısı tekrar reddedilir. Pencereden eski girdiler budanır
+    /// (sınırsız büyümez). Bellek-içi; süreç yeniden başlasa da freshness
+    /// penceresi çok eski tekrarları zaten reddeder.
+    recent_handshake_sigs: HashMap<String, Vec<(u64, Vec<u8>)>>,
     groups: HashMap<String, Group>,
     /// Kullanıcının onay beklediği, henüz kabul/red edilmemiş cihaz
     /// değişikliği uyarıları (spec 2.2). key = new_device_fingerprint.
@@ -597,6 +627,18 @@ struct P2PCore {
     /// dosya indirmesi başlatılırken `swarm.add_peer_address` ile
     /// `request_response`'un dial edebileceği bir adres ipucu vermek için.
     peer_id_to_addr: HashMap<PeerId, Multiaddr>,
+    /// Spec dışı, ağ sağlamlığı düzeltmesi: bilinen bir uzak CİHAZ için en
+    /// son işe yaramış/paylaşılmış adres (`/ip4/.../tcp/.../p2p/<peer_id>`
+    /// tam biçimi). key = device_fingerprint. `peer_id_to_addr`'ın aksine
+    /// bu KALICIDIR (bkz. `device_addrs` tablosu) ve süreç yeniden başlasa
+    /// bile korunur — periyodik yeniden-bağlanma taraması (bkz.
+    /// `reconnect_sweep`) bunu kullanarak, mDNS'in yetişemediği (farklı ağ)
+    /// KOPMUŞ bir kişiye yeniden bağlanmayı dener. Eşleşme anında
+    /// (rendezvous_node) ve her paket alındığında (o an bağlı olunan gerçek
+    /// adres) güncellenir.
+    device_last_addr: HashMap<String, String>,
+    /// `reconnect_sweep`'in en son çalıştığı an — bkz. `RECONNECT_SWEEP_INTERVAL_MS`.
+    last_reconnect_sweep_at: u64,
     /// Spec dışı, güvenlik denetimi devamı (bkz. SECURITY.md "Cross-network
     /// connectivity" notu): röle protokolünü desteklediği `identify` ile
     /// doğrulanmış VE doğrudan erişilebilir (bkz. `dial_with_relay_fallback`)
@@ -667,6 +709,7 @@ impl P2PCore {
             contacts: HashMap::new(),
             identity_to_contact: HashMap::new(),
             ratchets: HashMap::new(),
+            recent_handshake_sigs: HashMap::new(),
             groups: HashMap::new(),
             pending_device_alerts: HashMap::new(),
             swarm: None,
@@ -681,6 +724,8 @@ impl P2PCore {
             app_files_dir: None,
             device_to_peer_id: HashMap::new(),
             peer_id_to_addr: HashMap::new(),
+            device_last_addr: HashMap::new(),
+            last_reconnect_sweep_at: 0,
             known_relay_peers: HashMap::new(),
             handshake_failure_notified: HashMap::new(),
             active_downloads: HashMap::new(),
@@ -751,7 +796,12 @@ impl P2PCore {
                 preview_jpeg BLOB,
                 duration_ms INTEGER
              );
-             CREATE INDEX IF NOT EXISTS idx_files_peer ON files(peer_device_fingerprint, created_at);"
+             CREATE INDEX IF NOT EXISTS idx_files_peer ON files(peer_device_fingerprint, created_at);
+             CREATE TABLE IF NOT EXISTS device_addrs (
+                device_fingerprint TEXT PRIMARY KEY,
+                multiaddr TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+             );"
         )?;
         // Spec dışı geçiş (migration): `preview_jpeg` kolonu bu tabloya
         // SONRADAN eklendi — `CREATE TABLE IF NOT EXISTS` zaten var olan
@@ -783,7 +833,52 @@ impl P2PCore {
         self.load_contacts_from_db();
         self.load_groups_from_db();
         self.load_remote_devices_from_db();
+        self.load_device_addrs_from_db();
         Ok(())
+    }
+
+    /// Spec dışı, ağ sağlamlığı düzeltmesi: bilinen cihaz adreslerini
+    /// (`device_last_addr`) diskten belleğe yükler — süreç yeniden başlasa
+    /// bile `reconnect_sweep` kopmuş kişilere (farklı ağdakiler dahil,
+    /// mDNS'in yetişemediği) yeniden bağlanmayı deneyebilsin diye.
+    fn load_device_addrs_from_db(&mut self) {
+        let conn = match &self.db { Some(c) => c, None => return };
+        let mut stmt = match conn.prepare("SELECT device_fingerprint, multiaddr FROM device_addrs") {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
+        if let Ok(rows) = rows {
+            for (fp, addr) in rows.flatten() {
+                self.device_last_addr.insert(fp, addr);
+            }
+        }
+    }
+
+    /// Spec dışı, ağ sağlamlığı düzeltmesi: bir cihaz için en son işe
+    /// yaramış/paylaşılmış adresi hem bellekte hem diskte günceller (bkz.
+    /// `device_last_addr`). Adres `.../p2p/<peer_id>` son ekini içermeli
+    /// (`reconnect_sweep` PeerId'yi buradan çıkarır) — içermiyorsa yok
+    /// sayılır (yeniden bağlanmak için işe yaramaz).
+    fn remember_device_addr(&mut self, device_fingerprint: &str, multiaddr: &str) {
+        if let Ok(parsed) = multiaddr.parse::<Multiaddr>() {
+            if extract_peer_id(&parsed).is_none() {
+                return;
+            }
+        } else {
+            return;
+        }
+        // Değişmediyse diske yazma (gereksiz I/O önle).
+        if self.device_last_addr.get(device_fingerprint).map(|a| a.as_str()) == Some(multiaddr) {
+            return;
+        }
+        self.device_last_addr.insert(device_fingerprint.to_string(), multiaddr.to_string());
+        if let Some(conn) = &self.db {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO device_addrs (device_fingerprint, multiaddr, updated_at) VALUES (?1, ?2, ?3)",
+                params![device_fingerprint, multiaddr, current_time_ms() as i64],
+            );
+        }
     }
 
     /// Uygulama yeniden başlatıldığında DB'de kayıtlı identity/device'ın
@@ -1133,6 +1228,11 @@ impl P2PCore {
                 if let Some(swarm) = &mut self.swarm {
                     swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
                 }
+                // bkz. `device_last_addr` — bu adresi kalıcı yeniden-bağlanma
+                // ipucu olarak sakla ki ilk dial ANINDA başarısız olsa bile
+                // (ör. UPnP henüz eşleşmedi, karşı taraf o an offline)
+                // `reconnect_sweep` tekrar denemeye devam etsin.
+                self.remember_device_addr(&packet.device_fingerprint, &packet.rendezvous_node);
                 // `kad.add_address` sadece bir DHT routing ipucudur —
                 // kendi başına hiçbir bağlantı AÇMAZ. QR taramasının
                 // asıl amacı iki cihazı doğrudan birbirine bağlamak
@@ -1277,6 +1377,9 @@ impl P2PCore {
                 if let Some(swarm) = &mut self.swarm {
                     swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
                 }
+                // bkz. process_qr_packet'teki aynı not — kalıcı yeniden-
+                // bağlanma ipucu olarak sakla.
+                self.remember_device_addr(&device_fingerprint, &rendezvous_node);
                 // bkz. process_qr_packet'teki aynı dial notu — manuel giriş
                 // formatı (spec dışı, 4 alanlı metin) bir röle listesi
                 // taşımıyor, ama daha önce QR/identify'dan öğrenilmiş
@@ -1635,6 +1738,8 @@ impl P2PCore {
                 self.resubscribe_ratchet_topic(Some(&state.root_key), None);
             }
             self.device_to_peer_id.remove(fp);
+            self.device_last_addr.remove(fp);
+            self.recent_handshake_sigs.remove(fp);
             self.clear_persisted_skipped_keys(fp);
             self.awaiting_confirmation.retain(|_, pc| &pc.peer_device_fingerprint != fp);
             self.active_downloads.retain(|_, d| &d.peer_device_fingerprint != fp);
@@ -1654,6 +1759,7 @@ impl P2PCore {
                 let _ = conn.execute("DELETE FROM files WHERE peer_device_fingerprint = ?1", params![fp]);
                 let _ = conn.execute("DELETE FROM ratchet_states WHERE peer_device_fingerprint = ?1", params![fp]);
                 let _ = conn.execute("DELETE FROM skipped_message_keys WHERE peer_device_fingerprint = ?1", params![fp]);
+                let _ = conn.execute("DELETE FROM device_addrs WHERE device_fingerprint = ?1", params![fp]);
             }
             let _ = conn.execute("DELETE FROM contacts WHERE contact_id = ?1", params![contact_id]);
         }
@@ -1688,12 +1794,18 @@ impl P2PCore {
             self.resubscribe_ratchet_topic(Some(&state.root_key), None);
         }
         self.device_to_peer_id.remove(device_fingerprint);
+        // İptal edilen cihaza artık yeniden bağlanmayı deneme (bkz.
+        // reconnect_sweep — zaten is_active=false olduğundan atlanır, ama
+        // kalıcı adres ipucunu da temizliyoruz).
+        self.device_last_addr.remove(device_fingerprint);
+        self.recent_handshake_sigs.remove(device_fingerprint);
         self.clear_persisted_skipped_keys(device_fingerprint);
         self.awaiting_confirmation.retain(|_, pc| pc.peer_device_fingerprint != device_fingerprint);
         self.active_downloads.retain(|_, d| d.peer_device_fingerprint != device_fingerprint);
         if let Some(conn) = &self.db {
             let _ = conn.execute("DELETE FROM ratchet_states WHERE peer_device_fingerprint = ?1", params![device_fingerprint]);
             let _ = conn.execute("DELETE FROM skipped_message_keys WHERE peer_device_fingerprint = ?1", params![device_fingerprint]);
+            let _ = conn.execute("DELETE FROM device_addrs WHERE device_fingerprint = ?1", params![device_fingerprint]);
         }
         Ok(())
     }
@@ -1763,10 +1875,40 @@ impl P2PCore {
     /// kullanıcıya hiçbir bağlanma göstergesi olmadan mesaj kaybı riski
     /// yaratıyordu. Zaten bir oturum varsa no-op.
     fn ensure_handshake(&mut self, peer_device_fingerprint: &str) -> Result<(), String> {
+        // Spec dışı, ağ sağlamlığı: oturum olsun olmasın, o an CANLI bir
+        // bağlantı yoksa hemen yeniden bağlanmayı dene — reconnect_sweep'in
+        // bir sonraki turunu (≤15 sn) beklemeden. Sohbet açılışında/mesaj
+        // öncesinde en hızlı iyileşme yolu.
+        self.ensure_connected(peer_device_fingerprint);
         if self.has_active_session(peer_device_fingerprint) {
             return Ok(());
         }
         self.initiate_handshake_with(peer_device_fingerprint)
+    }
+
+    /// Spec dışı, ağ sağlamlığı düzeltmesi: belirtilen cihaza o an CANLI bir
+    /// libp2p bağlantısı yoksa VE kalıcı bir adres ipucumuz varsa hemen
+    /// (senkron, sweep'i beklemeden) yeniden bağlanmayı başlatır. Bağlıysa
+    /// veya adres yoksa no-op. `ensure_handshake` ve mesaj gönderme yolundan
+    /// çağrılır — kopmuş bir kişiye anında yeniden bağlanma için.
+    fn ensure_connected(&mut self, device_fingerprint: &str) {
+        let addr_str = match self.device_last_addr.get(device_fingerprint) {
+            Some(a) => a.clone(),
+            None => return,
+        };
+        let parsed = match addr_str.parse::<Multiaddr>() {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        let peer_id = match extract_peer_id(&parsed) {
+            Some(p) => p,
+            None => return,
+        };
+        let connected = self.swarm.as_ref().map(|s| s.is_connected(&peer_id)).unwrap_or(false);
+        if connected {
+            return;
+        }
+        self.dial_with_relay_fallback(peer_id, Some(parsed));
     }
 
     fn initiate_handshake_with(&mut self, peer_device_fingerprint: &str) -> Result<(), String> {
@@ -1878,12 +2020,54 @@ impl P2PCore {
             return Err("Sender device has been revoked".to_string());
         }
 
+        // bkz. receive_message'teki aynı kimlik-bağı düzeltmesi: imza sadece
+        // cihazın imzaladığını kanıtlar, header'daki identity_id'nin o cihaza
+        // ait olduğunu değil — kayıtlı (TOFU) bağla eşleşmeyi zorunlu kıl.
+        if handshake.sender_identity_id != sender.identity_id {
+            return Err("HandshakeInit sender_identity_id, kayıtlı cihaz kimliğiyle eşleşmiyor".to_string());
+        }
+
         let mut to_verify = Vec::new();
         to_verify.extend_from_slice(&handshake.initiator_x25519_pubkey);
         to_verify.extend_from_slice(&handshake.initiator_kyber_pubkey);
         to_verify.extend_from_slice(&handshake.kyber_ciphertext);
         to_verify.extend_from_slice(&handshake.timestamp.to_be_bytes());
         verify_hybrid_signature(&to_verify, &handshake.signature_classical, &handshake.signature_pq, &sender)?;
+
+        // Spec dışı, güvenlik denetimi düzeltmesi (el sıkışma tekrar oynatma
+        // → oturum sıfırlama DoS'u): gossipsub `Signed` modu, ağdaki bir
+        // gözlemcinin YAKALADIĞI geçerli bir `HandshakeInit`'i yeniden
+        // yayınlamasına izin verir. Bu fonksiyon (aşağıda) mevcut bir
+        // ratchet'i taze bir `respond` state'iyle EZDİĞİ için, böyle bir
+        // tekrar canlı bir konuşmayı koparabilirdi. İki katmanlı savunma
+        // (bkz. `recent_handshake_sigs` alan notu):
+        // (1) freshness penceresi — çok eski/çok ileri timestamp reddedilir
+        //     (yakalanmış eski el sıkışmaları eler, saat kaymasına tolerans);
+        // (2) içerik dedup — aynı imzalı (bayt-aynısı) el sıkışma pencerede
+        //     ikinci kez uygulanmaz. Gerçek bir yeniden-eşleşme taze efemeral
+        //     anahtarlar → farklı imza taşıdığından, saat kayması ne olursa
+        //     olsun kabul edilir (monoton-timestamp'in re-pair'i kırma riski
+        //     olmadan).
+        let now = current_time_ms();
+        let skew = now.abs_diff(handshake.timestamp);
+        if skew > HANDSHAKE_MAX_SKEW_MS {
+            return Err(format!(
+                "HandshakeInit timestamp'i pencere dışında (sapma {} ms > {} ms) — muhtemel tekrar oynatma, reddedildi",
+                skew, HANDSHAKE_MAX_SKEW_MS
+            ));
+        }
+        {
+            let seen = self.recent_handshake_sigs.entry(handshake.sender_device_fingerprint.clone()).or_default();
+            // Pencereden eski girdileri buda (sınırsız büyümeyi önle).
+            seen.retain(|(ts, _)| now.abs_diff(*ts) <= HANDSHAKE_MAX_SKEW_MS);
+            if seen.iter().any(|(_, sig)| sig == &handshake.signature_classical) {
+                info!(
+                    "HandshakeInit yok sayıldı (peer={}) — aynı imza pencerede zaten görüldü (tekrar oynatma/çift paket)",
+                    handshake.sender_device_fingerprint
+                );
+                return Ok(());
+            }
+        }
 
         let own_fp = self.get_active_own_device_fingerprint()?;
 
@@ -1939,6 +2123,12 @@ impl P2PCore {
         self.resubscribe_ratchet_topic(None, Some(&state.root_key));
         self.ratchets.insert(handshake.sender_device_fingerprint.clone(), state);
         self.persist_ratchet_state(&handshake.sender_device_fingerprint);
+        // Kabul edilen el sıkışmanın imzasını dedup setine ekle (bkz.
+        // recent_handshake_sigs) — aynı paketin tekrarı artık yok sayılır.
+        self.recent_handshake_sigs
+            .entry(handshake.sender_device_fingerprint.clone())
+            .or_default()
+            .push((handshake.timestamp, handshake.signature_classical.clone()));
         Ok(())
     }
 
@@ -1989,6 +2179,12 @@ impl P2PCore {
     fn send_message_content(&mut self, peer_device_fingerprint: String, content: &MessageContent, archive_plaintext: Option<&[u8]>) -> Result<(String, String), String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
+
+        // Spec dışı, ağ sağlamlığı: gönderim yolunda, karşı tarafa canlı bir
+        // bağlantı yoksa hemen yeniden bağlanmayı tetikle — böylece gossipsub
+        // publish, bağlantı kurulur kurulmaz (pending_envelopes retry'siyle)
+        // başarılı olur, reconnect_sweep'in bir sonraki turunu beklemeden.
+        self.ensure_connected(&peer_device_fingerprint);
 
         if !self.ratchets.contains_key(&peer_device_fingerprint) {
             // `initiate_handshake_with` ratchet state'i publish denemesinden
@@ -2143,6 +2339,21 @@ impl P2PCore {
         // düzeltmesi, artık gerçekten uygulanıyor.
         if !sender.is_active {
             return Err("Sender device has been revoked".to_string());
+        }
+
+        // Spec dışı, güvenlik denetimi düzeltmesi (kimlik sahteciliği): imza
+        // SADECE bu paketi `sender` CİHAZININ imzaladığını kanıtlar —
+        // header'daki `sender_identity_id` alanının o cihaza AİT güvenilen
+        // Identity olduğunu KANITLAMAZ. Cihaz→Identity bağı eşleşme (TOFU)
+        // anında kaydedilir (`DeviceRecord.identity_id`); header'daki
+        // değerin bununla eşleştiğini burada zorlamazsak, eşleşmiş bir cihaz
+        // header'a BAŞKA bir kişinin identity_id'sini yazıp grup mesajlarında
+        // o kişiyi taklit edebilir (bkz. group_message kolu) VEYA bir
+        // `ProfileUpdate`'i başka bir kişiye yönlendirip onun avatarını
+        // ezebilir (bkz. ProfileUpdate kolu — `identity_to_contact` lookup'ı
+        // bu alana güveniyordu). Artık uyuşmazlık paketi tamamen reddediyor.
+        if packet.header.sender_identity_id != sender.identity_id {
+            return Err("sender_identity_id, imzalayan cihazın kayıtlı kimliğiyle eşleşmiyor".to_string());
         }
 
         let mut to_verify = Vec::new();
@@ -3031,6 +3242,18 @@ impl P2PCore {
         validate_group_update(&group_ref, &update.signed_by, signer_is_active, update.new_version)
             .map_err(|e| format!("{:?}", e))?;
 
+        // Gap tespiti: bir veya daha fazla ara güncelleme kaçırıldıysa
+        // (ör. Add/Remove) yerel üyelik listesi güncelin gerisinde olabilir —
+        // artık kilitlenmiyoruz (bkz. group.rs StaleOrOutOfOrderVersion notu)
+        // ama bunu görünür kılıyoruz.
+        if group_exists && update.new_version > group_ref.version + 1 {
+            error!(
+                "GroupUpdate gap (group={}): yerel version {} -> gelen {} (aradaki {} güncelleme kaçırıldı; üyelik listesi eksik olabilir)",
+                update.group_id, group_ref.version, update.new_version,
+                update.new_version - group_ref.version - 1
+            );
+        }
+
         if !group_exists {
             self.groups.insert(update.group_id.clone(), Group::new(update.group_id.clone(), update.group_name.clone(), update.signed_by.clone(), current_time_ms()));
         }
@@ -3115,6 +3338,25 @@ impl P2PCore {
     fn record_peer_id_if_known(&mut self, source: Option<PeerId>, device_fingerprint: &str) {
         if let Some(pid) = source {
             self.device_to_peer_id.insert(device_fingerprint.to_string(), pid);
+            // Spec dışı, ağ sağlamlığı düzeltmesi: bu cihazdan GERÇEKTEN
+            // paket aldık — o an bağlı olduğumuz somut adresi (varsa,
+            // `ConnectionEstablished`'ten doldurulan `peer_id_to_addr`)
+            // kalıcı yeniden-bağlanma ipucu olarak sakla. Böylece bir
+            // sonraki kopmada `reconnect_sweep` en son ÇALIŞAN adresi
+            // kullanır (eşleşme anındaki rendezvous adresi bayatladıysa
+            // bile). Adres `/p2p/<peer_id>` son eki içermiyorsa
+            // `remember_device_addr` onu zaten yok sayar.
+            if let Some(addr) = self.peer_id_to_addr.get(&pid).cloned() {
+                // Adres zaten `/p2p/<peer_id>` içeriyorsa (giden dial'de
+                // öyle kurmuştuk) tekrar ekleme — yoksa (gelen bağlantının
+                // ham `/ip4/.../tcp/...` adresi) ekle.
+                let addr_str = if extract_peer_id(&addr).is_some() {
+                    addr.to_string()
+                } else {
+                    addr.with(MultiaddrProtocol::P2p(pid)).to_string()
+                };
+                self.remember_device_addr(device_fingerprint, &addr_str);
+            }
         }
     }
 
@@ -3889,6 +4131,69 @@ impl P2PCore {
         }
     }
 
+    /// Spec dışı, ağ sağlamlığı düzeltmesi (kendini iyileştiren yeniden
+    /// bağlanma): `poll_events`'ten periyodik olarak (bkz.
+    /// `RECONNECT_SWEEP_INTERVAL_MS`) çağrılır. Bilinen + aktif her uzak
+    /// cihaz için, o an CANLI bir libp2p bağlantısı YOKSA VE kalıcı bir
+    /// adres ipucumuz varsa (`device_last_addr`), `dial_with_relay_fallback`
+    /// ile yeniden bağlanmayı dener.
+    ///
+    /// Bu, tek başına en büyük ağ-sağlamlığı kazancıdır — önceden bir kişi
+    /// KOPTUĞUNDA (ağ tipi değişimi: Wi-Fi↔mobil veri, uygulama arka planda
+    /// öldürülüp yeniden başlatıldığında, karşı taraf kısa süre çevrimdışı
+    /// olduğunda) yeniden bağlanmanın TEK yolu mDNS (yalnızca aynı yerel ağ)
+    /// veya elle QR yeniden taramaydı; `ConnectionClosed`/
+    /// `OutgoingConnectionError` olayları yalnızca loglanıyor, hiçbir
+    /// yeniden-dial tetiklemiyordu. Artık her disconnect, bir sonraki
+    /// taramada (≤15 sn) otomatik olarak iyileşir — farklı ağdakiler dahil
+    /// (röle/DCUtR/UPnP yolları hâlâ geçerliyse).
+    ///
+    /// BİLİNEN SINIR: karşı tarafın adresi tamamen değiştiyse (yeni public
+    /// IP, UPnP eşlemesi yok, ortak röle yok) doğrudan yeniden bağlanma yine
+    /// başarısız olur — bu, merkezi bir rendezvous sunucusu olmayan her P2P
+    /// sistemin yapısal sınırıdır. Tarama yine de denemeye devam eder;
+    /// adres bir şekilde tazelendiğinde (mDNS, yeni QR, röle keşfi) bağlanır.
+    fn reconnect_sweep(&mut self) {
+        let now = current_time_ms();
+        if now.saturating_sub(self.last_reconnect_sweep_at) < RECONNECT_SWEEP_INTERVAL_MS {
+            return;
+        }
+        self.last_reconnect_sweep_at = now;
+
+        // Hedefleri önce topla (immutable borrow'lar), sonra dial et
+        // (`dial_with_relay_fallback` `&mut self` ister) — borrow çakışması
+        // önleme, dosyadaki diğer örneklerle aynı desen.
+        let mut targets: Vec<(PeerId, Multiaddr)> = Vec::new();
+        {
+            let swarm = match self.swarm.as_ref() {
+                Some(s) => s,
+                None => return,
+            };
+            for (fp, addr_str) in &self.device_last_addr {
+                match self.known_remote_devices.get(fp) {
+                    Some(rec) if rec.is_active => {}
+                    _ => continue, // bilinmeyen/iptal edilmiş cihaz — atla
+                }
+                let addr = match addr_str.parse::<Multiaddr>() {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+                let peer_id = match extract_peer_id(&addr) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if swarm.is_connected(&peer_id) {
+                    continue; // zaten bağlı
+                }
+                targets.push((peer_id, addr));
+            }
+        }
+        for (peer_id, addr) in targets {
+            info!("reconnect_sweep: kopmuş peer'a yeniden bağlanılıyor: {}", peer_id);
+            self.dial_with_relay_fallback(peer_id, Some(addr));
+        }
+    }
+
     /// Sadece ham gossipsub publish — kuyruğa EKLEMEZ, durum güncellemez.
     /// `publish_envelope` (ilk deneme) ve `poll_events`'teki retry döngüsü
     /// (sonraki denemeler) tarafından ortak kullanılır.
@@ -4285,6 +4590,11 @@ impl P2PCore {
         // saniyelik gecikme.
         self.check_stalled_downloads();
 
+        // bkz. `reconnect_sweep` dokümantasyonu — kopmuş kişilere periyodik
+        // (≤15 sn) otomatik yeniden bağlanma. Kendi içinde aralık kontrolü
+        // yapar, bu yüzden her poll turunda çağrılması ucuzdur.
+        self.reconnect_sweep();
+
         // bkz. `pending_envelopes` alanı dokümantasyonu: ilk bağlantıdan
         // sonraki ilk birkaç saniyede gönderilemeyen HERHANGİ bir zarfı
         // (handshake, identity exchange, mesaj, edit, delete, grup
@@ -4409,8 +4719,6 @@ impl P2PCore {
 
         use chacha20poly1305::aead::{Aead, KeyInit};
         use chacha20poly1305::{ChaCha20Poly1305, Nonce};
-        use hkdf::Hkdf;
-        use sha2::Sha256;
 
         let rng = ring::rand::SystemRandom::new();
         use ring::rand::SecureRandom;
@@ -4419,11 +4727,21 @@ impl P2PCore {
         let mut nonce_bytes = [0u8; 12];
         rng.fill(&mut nonce_bytes).map_err(|_| "RNG failed")?;
 
-        // NOT: HKDF memory-hard değildir; production için Argon2id/scrypt
-        // önerilir (önceki inceleme notunda da belirtilmişti).
-        let hk = Hkdf::<Sha256>::new(Some(&salt), passphrase.as_bytes());
+        // Spec dışı, güvenlik denetimi düzeltmesi: parola-tabanlı anahtar
+        // türetmesi ARTIK Argon2id (memory-hard) — önceden HKDF-SHA256
+        // kullanılıyordu, o tek bir HMAC olduğundan bu dosya (TÜM uzun-vadeli
+        // secret key'leri taşır) sızarsa zayıf bir parola çevrimdışı
+        // saniyeler içinde kırılabilirdi. Parametreler dosyada saklanır ki
+        // gelecekteki bir import aynı anahtarı yeniden türetebilsin (format
+        // kendini tanımlar, sabit parametrelere bağlı değil). OWASP taban
+        // çizgisi: m=19 MiB, t=2, p=1.
+        let (m_cost, t_cost, p_cost) = (19_456u32, 2u32, 1u32);
+        let params = argon2::Params::new(m_cost, t_cost, p_cost, Some(32))
+            .map_err(|e| format!("Argon2 params: {e}"))?;
+        let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
         let mut key = [0u8; 32];
-        hk.expand(b"p2pmsg-v0.1-recovery", &mut key).map_err(|_| "HKDF expand failed")?;
+        argon.hash_password_into(passphrase.as_bytes(), &salt, &mut key)
+            .map_err(|e| format!("Argon2 hash: {e}"))?;
 
         let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| "Invalid key")?;
         let nonce = Nonce::from_slice(&nonce_bytes);
@@ -4431,12 +4749,25 @@ impl P2PCore {
 
         #[derive(Serialize)]
         struct RecoveryFile {
+            /// Anahtar türetme algoritması — import'un ileride HKDF'li eski
+            /// dosyalarla Argon2id'li yenileri ayırt edebilmesi için.
+            kdf: String,
+            argon2_m_cost: u32,
+            argon2_t_cost: u32,
+            argon2_p_cost: u32,
             ciphertext: Vec<u8>,
             nonce: Vec<u8>,
             salt: Vec<u8>,
         }
-        serde_json::to_vec(&RecoveryFile { ciphertext, nonce: nonce_bytes.to_vec(), salt: salt.to_vec() })
-            .map_err(|e| e.to_string())
+        serde_json::to_vec(&RecoveryFile {
+            kdf: "argon2id".to_string(),
+            argon2_m_cost: m_cost,
+            argon2_t_cost: t_cost,
+            argon2_p_cost: p_cost,
+            ciphertext,
+            nonce: nonce_bytes.to_vec(),
+            salt: salt.to_vec(),
+        }).map_err(|e| e.to_string())
     }
 }
 
@@ -5478,36 +5809,29 @@ fn strings_to_jobjectarray<'local>(env: &mut JNIEnv<'local>, texts: &[String]) -
 // =====================================================================
 // BİLİNEN EKSİKLER / KAPSAM DIŞI (dürüstçe işaretlenmiştir):
 //
-// 1. [ÇÖZÜLDÜ] DH-ratchet rotasyonu artık senkronize: MessagePacketHeader'a
-//    eklenen `rotation_kyber_ciphertext` alanı, rotasyonu tetikleyen
-//    tarafın ürettiği Kyber ciphertext'ini karşı tarafa taşıyor; alıcı
-//    `respond_to_rotation` ile aynı yeni kök anahtarı türetiyor (bkz.
-//    ratchet.rs). Kalan sınır: initiator/responder rolü hâlâ basit bir
-//    "fingerprint küçük olan tetikler" kuralıyla belirleniyor
-//    (maybe_rotate_ratchet) — Signal'daki gibi "mesaj bazlı, karşılıklı
-//    tetiklenen" bir model değil, ama artık en azından iki taraf da aynı
-//    anahtarlara ulaşıyor.
-// 2. [ÇÖZÜLDÜ] Skipped-message-key cache artık var (bkz. ratchet.rs
-//    skipped_keys/decrypt) — sıra dışı/gecikmeli gelen mesajlar en fazla
-//    1000 mesajlık pencereye kadar hâlâ çözülebilir. Önbellek sadece
-//    bellekte, disk'e yazılmıyor.
-// 3. GroupUpdate sadece Ed25519 imzası taşıyor, ML-DSA değil (packet.rs
-//    GroupUpdate.signature tek alan) — MessagePacket'teki hibrit imza
-//    modeliyle tam tutarlı değil.
-// 4. Aşama B (DeviceAdd/DeviceRevoke akışı, SyncPayload, cihaz-çifti
-//    matrisi, ReadReceipt, ratchet çoklu-cihaz gönderimi, ratchet_states'in
-//    Contact içinde saklanması) bu dosyada YOK — kapsam dışı bırakıldı,
-//    kullanıcı ile "Aşama A" olarak anlaşıldı.
-// 5. Node modu Linux masaüstünde önce test edilmeli deniyordu (spec 7) —
-//    bu kod tabanı sadece Android hedefliyor, ayrı bir Linux masaüstü
-//    istemcisi yok.
-// 6. Circuit Relay v2 (spec 4.3, node modu detayı) kablolanmadı — sadece
-//    Kademlia Server/Client modu switch'i var.
-// 7. process_identity_exchange sadece fingerprint eşleşmesini doğrular,
-//    evaluate_sender_device/spec 2.2 TOFU+uyarı akışına GİRMEZ — bir Contact
-//    zaten varsa ve gelen IdentityExchange bilinmeyen bir cihaz taşıyorsa,
-//    bu şu an sessizce known_remote_devices'a yazılır (bağlantı katmanında,
-//    mesaj/handshake katmanında değil). Üretimde IdentityExchange işlenirken
-//    de evaluate_sender_device çağrılmalı ki "tanınmayan yeni cihaz"
-//    senaryosu burada da yakalansın.
+// NOT: Bu blok, kod geliştikçe güncel tutulmalı. Aşağıdaki maddeler ŞU AN
+// hâlâ geçerli olan gerçek sınırlardır — daha önce burada listelenip
+// sonradan ÇÖZÜLEN maddeler (GroupUpdate hibrit imzası, rotasyon senkronu,
+// skipped-key cache, IdentityExchange'in TOFU akışına girmesi) yanıltıcı
+// olmasın diye SİLİNDİ; çözümleri ilgili fonksiyonların/SECURITY.md'nin
+// dokümantasyonunda.
+//
+// 1. Aşama B çoklu-cihaz akışı bu dosyada YOK: `NetworkEnvelope::DeviceAdd`/
+//    `DeviceRevoke`/`GroupInvite`/`ReadReceipt` varyantları alınır ama
+//    `process_incoming_envelope`'ta SESSİZCE yok sayılır (işleme
+//    kablolanmadı). Pratik sonuç: cihaz iptali/eklemesi ağ üzerinden
+//    YAYILMAZ — sadece yerel `revoke_contact_device` çalışır. Bir
+//    Identity'ye ikinci bir cihaz eklemenin uçtan uca akışı da yok.
+// 2. Node modu yalnızca Android'de çalışır — ayrı bir Linux masaüstü/
+//    sunucu istemcisi yok (spec 7'deki "önce masaüstünde test" notu bu
+//    kod tabanı için geçersiz).
+// 3. Kurtarma dosyası (`export_recovery`) yalnızca DIŞA aktarır — karşılık
+//    gelen bir içe-aktarma (import) yolu henüz yok (Aşama B). Dosya formatı
+//    kendini tanımlar (kdf/parametreler saklanır) ki ileride import
+//    eklenebilsin.
+// 4. Grup üyelik senkronu "self-healing" değil: bir üye ara güncellemeleri
+//    kaçırırsa artık KİLİTLENMİYOR (ileri sıçramalara izin verilir, bkz.
+//    validate_group_update) ama kaçırılan Add/Remove'lar için tam durum
+//    yeniden-senkronu (founder'dan tüm üyelik listesini çekme) yok —
+//    yerel üyelik listesi geçici olarak eksik kalabilir (loglanır).
 // =====================================================================

@@ -46,28 +46,6 @@ impl QrPacket {
     }
 }
 
-/// Cihaz ekleme QR'ı (spec 1.5 adım 2) — yeni cihazın kendi anahtarlarını
-/// ve geçici bağlantı için KEM public key'lerini taşır.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceLinkRequest {
-    pub device_fingerprint: String,
-    pub device_name: String,
-    pub kem_pubkey_x25519: Vec<u8>,
-    pub kem_pubkey_mlkem: Vec<u8>,
-}
-
-impl DeviceLinkRequest {
-    pub fn to_cbor(&self) -> Result<Vec<u8>, String> {
-        let mut buf = Vec::new();
-        ciborium::into_writer(self, &mut buf).map_err(|e| e.to_string())?;
-        Ok(buf)
-    }
-
-    pub fn from_cbor(data: &[u8]) -> Result<Self, String> {
-        ciborium::from_reader(data).map_err(|e| e.to_string())
-    }
-}
-
 /// Var olan (onaylı) cihaz tarafından imzalanıp yayılan cihaz ekleme
 /// bildirimi (spec 1.5 adım 4).
 #[derive(Debug, Clone, Serialize, Deserialize)]

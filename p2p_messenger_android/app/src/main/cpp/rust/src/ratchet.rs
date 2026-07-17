@@ -503,7 +503,12 @@ impl DeviceRatchetState {
     /// bir "kim tetikler" kuralı (ör. fingerprint karşılaştırması) yerine
     /// Signal'ın asimetrik "sırası gelen tetikler" modelini uygular.
     pub fn should_rotate(&self) -> bool {
-        !self.has_responded_to_peer_key && current_time_ms() - self.last_rotation > RATCHET_ROTATION_MS
+        // `saturating_sub`: `last_rotation` gelecekte olabilir (saat geriye
+        // gitti, ya da başka bir cihazda ileri saatle üretilmiş kalıcı bir
+        // state) — çıplak çıkarma release'de sarar (spurious rotasyon),
+        // debug'da panikler. Doygun çıkarma her iki durumu da güvenli kılar.
+        !self.has_responded_to_peer_key
+            && current_time_ms().saturating_sub(self.last_rotation) > RATCHET_ROTATION_MS
     }
 
     /// Simetrik ratchet ilerlemesi (spec 3.2): her mesajda mesaj anahtarı
