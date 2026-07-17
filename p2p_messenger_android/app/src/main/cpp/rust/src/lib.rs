@@ -16,6 +16,7 @@ mod packet;
 mod ratchet;
 mod contact;
 mod group;
+mod attachments;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -30,8 +31,9 @@ use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jboolean, jobjectArray, jstring};
 use jni::JNIEnv;
 use libp2p::kad::store::MemoryStore;
+use libp2p::request_response;
 use libp2p::swarm::NetworkBehaviour;
-use libp2p::{gossipsub, identify, kad, noise, tcp, yamux, Multiaddr, PeerId, Swarm};
+use libp2p::{gossipsub, identify, kad, noise, tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm};
 use log::{error, info};
 // NOT: pqcrypto-dilithium/pqcrypto-kyber yerine RustCrypto'nun aktif bakımlı
 // ml-dsa/ml-kem crate'lerine geçildi (bkz. Cargo.toml notu — RUSTSEC-2024-0380,
@@ -55,8 +57,11 @@ use packet::{
     NetworkEnvelope, QrPacket,
 };
 use ratchet::{DeviceRatchetState, MlKem768DecapsulationKey, MlKem768EncapsulationKey, RatchetPublicKeys};
+use attachments::{FileChunkRequest, FileChunkResponse};
 
 const DB_NAME: &str = "p2p_messenger.db";
+/// Dosya ekleri protokol kimliği (bkz. attachments.rs modül notu).
+const FILE_TRANSFER_PROTOCOL: &str = "/p2pmessenger/filexfer/1.0.0";
 
 lazy_static::lazy_static! {
     static ref RUNTIME: Runtime = tokio::runtime::Runtime::new().unwrap();
@@ -76,6 +81,11 @@ struct P2PBehaviour {
     gossipsub: gossipsub::Behaviour,
     kad: kad::Behaviour<MemoryStore>,
     identify: identify::Behaviour,
+    /// Dosya eki parça transferi — gossipsub'un aksine, bir hedef `PeerId`'ye
+    /// doğrudan istek/yanıt (RPC benzeri) gönderir. 4GB'a kadar bir dosyayı
+    /// gossipsub üzerinden (küçük/sık mesajlar için tasarlanmış bir pub/sub
+    /// ağı) taşımak pratik değil — bkz. attachments.rs modül notu.
+    file_chunks: request_response::cbor::Behaviour<FileChunkRequest, FileChunkResponse>,
 }
 
 fn current_time_ms() -> u64 {
@@ -165,6 +175,43 @@ pub struct GroupSummary {
     pub founder_identity_id: String,
     pub is_founder: bool,
     pub member_identity_ids: Vec<String>,
+}
+
+/// Kotlin'e döndürülen, bir sohbetteki dosya eklerinin listesi (bkz.
+/// `list_attachments` JNI export).
+#[derive(Debug, Clone, Serialize)]
+pub struct AttachmentSummary {
+    pub file_id: String,
+    pub file_name: String,
+    pub mime_type: String,
+    pub total_size: u64,
+    pub direction: String, // "sent" | "received"
+    pub status: String,    // "offered" | "downloading" | "complete" | "failed"
+    pub bytes_transferred: u64,
+}
+
+/// Devam eden bir indirmenin bellek-içi durumu (bkz. `download_file`/
+/// `request_next_chunk`/attachments.rs modül notu — parçalar HER ZAMAN
+/// sırayla (0, 1, 2, ...) istenir, bu yüzden `.enc` dosyasına sadece
+/// EKLEME (append) yapılır, seek gerekmez).
+struct DownloadState {
+    peer_id: PeerId,
+    total_size: u64,
+    total_chunks: u32,
+    next_chunk_index: u32,
+    bytes_done: u64,
+    file_key: [u8; 32],
+    enc_path: std::path::PathBuf,
+}
+
+/// `poll_events`'in `RUNTIME.block_on` bloğu İÇİNDE (swarm borrow'u altında)
+/// toplanıp, blok BİTTİKTEN SONRA (self'e serbestçe erişilebilecekken)
+/// işlenen dosya-parça olayları — `incoming`/`new_listen_addrs`'in zaten
+/// kullandığı "önce topla, sonra işle" deseninin aynısı (bkz. poll_events).
+enum FileChunkEventLocal {
+    Request { request: FileChunkRequest, channel: request_response::ResponseChannel<FileChunkResponse> },
+    Response { request_id: request_response::OutboundRequestId, response: FileChunkResponse },
+    OutboundFailure { request_id: request_response::OutboundRequestId },
 }
 
 /// Bir gönderilen mesajın ("bizim" mesajımızın) UI'da gösterilecek durumu —
@@ -269,6 +316,39 @@ struct P2PCore {
     /// bir arşivleme değil). Kotlin `setSkippedKeyEncryptionKey` ile
     /// yükler.
     skipped_key_encryption_key: Option<[u8; 32]>,
+    /// `initDatabase`'de Kotlin'den geçirilen `Context.filesDir` — dosya
+    /// eklerinin (`attachments/`) diskte nereye yazılacağını bilmek için
+    /// saklanır (DB yolu gibi diğer her şey zaten bu dizine göreli).
+    app_files_dir: Option<String>,
+    /// `device_fingerprint -> PeerId` — gossipsub topic bazlı "unicast"ın
+    /// aksine, dosya parça transferi (`request_response`) bir hedef
+    /// `PeerId` gerektirir. Bu harita, bir cihazdan gelen HERHANGİ bir
+    /// paketten (IdentityExchange/Handshake/Message/GroupUpdate)
+    /// öğrenilen gossipsub `message.source`'tan pasif olarak doldurulur
+    /// (bkz. `record_peer_id_if_known`) — ayrı bir keşif adımı icat
+    /// edilmez. Süreç yeniden başlarsa (yeni `PeerId` üretilir, bkz.
+    /// `with_new_identity`) bu harita da doğal olarak sıfırlanır; bir
+    /// dosya indirmesi başlatılmadan önce o cihazdan en az bir paket
+    /// alınmış olmalı.
+    device_to_peer_id: HashMap<String, PeerId>,
+    /// `PeerId -> Multiaddr` — `ConnectionEstablished` olayından doldurulur,
+    /// dosya indirmesi başlatılırken `swarm.add_peer_address` ile
+    /// `request_response`'un dial edebileceği bir adres ipucu vermek için.
+    peer_id_to_addr: HashMap<PeerId, Multiaddr>,
+    /// Devam eden indirmeler: key = file_id (bkz. `DownloadState`).
+    active_downloads: HashMap<String, DownloadState>,
+    /// `request_response::send_request`'in döndürdüğü `OutboundRequestId`'yi
+    /// hangi dosyanın indirmesine ait olduğuna eşler — gelen
+    /// `Message::Response` olayını doğru `DownloadState`'e yönlendirmek
+    /// için (bkz. poll_events `FileChunks` kolu).
+    download_request_ids: HashMap<request_response::OutboundRequestId, String>,
+    /// `poll_events`'in senkron döndürdüğü `Vec<String>`'e eklenecek dosya
+    /// eki olayları (`file_progress`/`file_complete`/`file_failed`) —
+    /// `FileChunks` ağ olayları `poll_events` içindeki `RUNTIME.block_on`
+    /// bloğunda üretildiği için, o bloğun DIŞINDAKİ `results` vektörüne
+    /// doğrudan erişemiyor; burada biriktirilip döngü sonunda `results`'a
+    /// taşınır (bkz. `pending_envelopes`'in retry kuyruğuyla aynı desen).
+    attachment_events: Vec<String>,
 }
 
 impl P2PCore {
@@ -304,6 +384,12 @@ impl P2PCore {
             pending_secret_bundle: None,
             history_key: None,
             skipped_key_encryption_key: None,
+            app_files_dir: None,
+            device_to_peer_id: HashMap::new(),
+            peer_id_to_addr: HashMap::new(),
+            active_downloads: HashMap::new(),
+            download_request_ids: HashMap::new(),
+            attachment_events: Vec::new(),
         }
     }
 
@@ -351,9 +437,26 @@ impl P2PCore {
                 encrypted_state BLOB NOT NULL,
                 nonce BLOB NOT NULL,
                 updated_at INTEGER NOT NULL
-             );"
+             );
+             CREATE TABLE IF NOT EXISTS files (
+                file_id TEXT PRIMARY KEY,
+                peer_device_fingerprint TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                total_size INTEGER NOT NULL,
+                sha256_hex TEXT NOT NULL,
+                encrypted_file_key BLOB NOT NULL,
+                key_nonce BLOB NOT NULL,
+                status TEXT NOT NULL,
+                bytes_transferred INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_files_peer ON files(peer_device_fingerprint, created_at);"
         )?;
         self.db = Some(conn);
+        self.app_files_dir = Some(app_files_dir.to_string());
+        let _ = std::fs::create_dir_all(format!("{}/attachments/plain_cache", app_files_dir));
         self.load_identity_from_db();
         // Spec dışı düzeltme: `contacts`/`groups` tabloları önceden
         // oluşturuluyor ama hiç yazılıp okunmuyordu — kişiler, gruplar ve
@@ -1463,6 +1566,9 @@ impl P2PCore {
                 }).collect();
                 serde_json::json!({"type": "history_sync", "peer": peer_fp, "messages": flipped})
             }
+            MessageContent::FileOffer { group_id, file_id, file_name, mime_type, total_size, file_key, sha256_hex } => {
+                self.receive_file_offer(&peer_fp, group_id, &file_id, &file_name, &mime_type, total_size, &file_key, &sha256_hex)
+            }
         };
         Ok(event.to_string())
     }
@@ -2022,6 +2128,381 @@ impl P2PCore {
     }
 
     // ---------------------------------------------------------------
+    // Spec dışı: dosya/foto/video/ses ekleri (bkz. attachments.rs modül
+    // notu, azami 4GB). Kullanıcı tercihi (bu görüşmede netleştirildi):
+    // GÖNDEREN kendi node modu durumundan BAĞIMSIZ olarak gönderdiği
+    // dosyanın kendi kopyasını her zaman tutar; ALICI tarafta, node modu
+    // açıksa yeni bir dosya teklifi geldiğinde OTOMATİK indirilip
+    // saklanır (bkz. receive_message FileOffer kolu), kapalıysa sadece
+    // meta veri gösterilir ve indirme kullanıcının "İndir" dokunuşunu
+    // bekler — bu, mevcut mesaj geçmişi arşivleme kuralıyla (sadece node
+    // modu açıkken yerelde sakla) birebir aynı prensip, dosya baytlarına
+    // genişletilmiş hâli.
+    // ---------------------------------------------------------------
+
+    fn attachments_dir(&self) -> Result<std::path::PathBuf, String> {
+        let base = self.app_files_dir.as_ref().ok_or("initDatabase henüz çağrılmadı")?;
+        Ok(std::path::Path::new(base).join("attachments"))
+    }
+
+    fn enc_path_for(&self, file_id: &str) -> Result<std::path::PathBuf, String> {
+        Ok(self.attachments_dir()?.join(format!("{}.enc", file_id)))
+    }
+
+    /// bkz. `P2PCore.device_to_peer_id` alanı dokümantasyonu — herhangi bir
+    /// gelen paketin gönderen cihaz fingerprint'i ile o paketin geldiği
+    /// gossipsub `PeerId`'sini eşler. `process_incoming_envelope`'un her
+    /// zarf türü için çağırdığı ortak bir yardımcı.
+    fn record_peer_id_if_known(&mut self, source: Option<PeerId>, device_fingerprint: &str) {
+        if let Some(pid) = source {
+            self.device_to_peer_id.insert(device_fingerprint.to_string(), pid);
+        }
+    }
+
+    /// `attachment_key` diye AYRI bir anahtar İCAT ETMİYORUZ — bunun yerine
+    /// zaten node modundan BAĞIMSIZ her zaman yüklenen
+    /// `skipped_key_encryption_key`'i (bkz. o alanın dokümantasyonu) yeniden
+    /// kullanıyoruz. Bu, "gönderen kendi node modundan bağımsız dosya
+    /// kopyasını tutar" kuralının (dosyanın `file_key`'i her zaman diskte
+    /// şifreli saklanabilmeli, node modu kapalı olsa bile) Kotlin tarafında
+    /// yeni bir Keystore anahtarı/yaşam-döngüsü sınıfı gerektirmeden
+    /// çalışmasını sağlar — aynı KEK, farklı küçük sırları (atlanmış mesaj
+    /// anahtarları, ratchet state, şimdi de dosya anahtarları) taze
+    /// nonce'larla sarmaya devam ediyor, standart bir uygulama.
+    fn wrap_file_key(&self, file_key: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let enc_key = self.skipped_key_encryption_key.ok_or("Şifreleme anahtarı henüz yüklenmedi")?;
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+        let cipher = ChaCha20Poly1305::new_from_slice(&enc_key).map_err(|_| "Invalid key")?;
+        let mut nonce_bytes = [0u8; 12];
+        {
+            use rand::RngCore;
+            OsRng.fill_bytes(&mut nonce_bytes);
+        }
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let encrypted = cipher.encrypt(nonce, file_key.as_slice()).map_err(|_| "File key encryption failed")?;
+        Ok((encrypted, nonce_bytes.to_vec()))
+    }
+
+    fn unwrap_file_key(&self, encrypted: &[u8], nonce_bytes: &[u8]) -> Result<[u8; 32], String> {
+        let enc_key = self.skipped_key_encryption_key.ok_or("Şifreleme anahtarı henüz yüklenmedi")?;
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+        let cipher = ChaCha20Poly1305::new_from_slice(&enc_key).map_err(|_| "Invalid key")?;
+        if nonce_bytes.len() != 12 {
+            return Err("Bad nonce length".to_string());
+        }
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let plaintext = cipher.decrypt(nonce, encrypted).map_err(|_| "File key decryption failed")?;
+        plaintext.as_slice().try_into().map_err(|_| "Bad file key length".to_string())
+    }
+
+    /// Kullanıcının seçtiği bir dosyayı (Kotlin tarafından zaten yerel bir
+    /// yola kopyalanmış olmalı — content:// URI burada işlenmez, bkz.
+    /// P2PLib.kt dokümantasyonu) şifreleyip diske yazar, kendi kaydını
+    /// `files` tablosuna ekler (sender-always-keeps-copy kuralı, kendi
+    /// node modumuzdan BAĞIMSIZ) ve karşı tarafa bir `FileOffer` meta veri
+    /// mesajı gönderir. BİLİNEN SINIR: `encrypt_file_to_disk` bounded-
+    /// memory'dir ama SENKRONdur — bu çağrı boyunca `CORE` kilidi tutulur,
+    /// yani çok büyük (GB mertebesinde) bir dosya için bu süre boyunca
+    /// `pollNetwork`/diğer JNI çağrıları gecikebilir (mesajlaşmanın
+    /// KENDİSİ bozulmaz, sadece o birkaç saniye/on saniye ertelenir) —
+    /// tam asenkron bir mimari (ayrı worker thread + kanal) bu kapsamın
+    /// dışında bırakıldı, bkz. proje notları.
+    fn prepare_and_send_file(&mut self, peer_device_fingerprint: String, source_path: String, file_name: String, mime_type: String) -> Result<(String, String), String> {
+        let file_id = uuid::Uuid::new_v4().to_string();
+        let mut file_key = [0u8; 32];
+        {
+            use rand::RngCore;
+            OsRng.fill_bytes(&mut file_key);
+        }
+
+        let _ = std::fs::create_dir_all(self.attachments_dir()?);
+        let dest_path = self.enc_path_for(&file_id)?;
+        let (total_size, sha256_hex) = attachments::encrypt_file_to_disk(
+            std::path::Path::new(&source_path), &dest_path, &file_key,
+        )?;
+
+        let (encrypted_key, key_nonce) = self.wrap_file_key(&file_key)?;
+        if let Some(conn) = &self.db {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO files
+                 (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
+                  sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at)
+                 VALUES (?1, ?2, 'sent', ?3, ?4, ?5, ?6, ?7, ?8, 'complete', ?5, ?9)",
+                params![
+                    file_id, peer_device_fingerprint, file_name, mime_type, total_size as i64,
+                    sha256_hex, encrypted_key, key_nonce, current_time_ms() as i64,
+                ],
+            );
+        }
+
+        let content = MessageContent::FileOffer {
+            group_id: None,
+            file_id: file_id.clone(),
+            file_name,
+            mime_type,
+            total_size,
+            file_key,
+            sha256_hex,
+        };
+        let (_, status) = self.send_message_content(peer_device_fingerprint, &content, None)?;
+        Ok((file_id, status))
+    }
+
+    /// Gelen bir `FileOffer`'ı işler: `files` tablosuna bir alıcı kaydı
+    /// ekler (node modu açıksa hemen indirmeyi başlatır — kapalıysa sadece
+    /// meta veri görünür kalır, kullanıcı "İndir" demeli).
+    fn receive_file_offer(&mut self, peer_fp: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str) -> serde_json::Value {
+        let auto_download = self.node_mode_enabled;
+        let status = if auto_download { "downloading" } else { "offered" };
+
+        if let Ok((encrypted_key, key_nonce)) = self.wrap_file_key(file_key) {
+            if let Some(conn) = &self.db {
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO files
+                     (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
+                      sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at)
+                     VALUES (?1, ?2, 'received', ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)",
+                    params![
+                        file_id, peer_fp, file_name, mime_type, total_size as i64,
+                        sha256_hex, encrypted_key, key_nonce, status, current_time_ms() as i64,
+                    ],
+                );
+            }
+        }
+
+        if auto_download {
+            if let Err(e) = self.download_file(file_id.to_string(), peer_fp.to_string()) {
+                error!("Otomatik dosya indirme başlatılamadı (node modu açık): {}", e);
+            }
+        }
+
+        serde_json::json!({
+            "type": "file_offer", "peer": peer_fp, "group_id": group_id, "file_id": file_id,
+            "file_name": file_name, "mime_type": mime_type, "total_size": total_size,
+            "auto_downloading": auto_download
+        })
+    }
+
+    /// Bir dosyanın indirmesini (kullanıcının "İndir" dokunuşu VEYA node
+    /// modu açıkken otomatik) başlatır/devam ettirir. Zaten indiriliyorsa
+    /// veya tamamlanmışsa no-op.
+    fn download_file(&mut self, file_id: String, peer_device_fingerprint: String) -> Result<(), String> {
+        if self.active_downloads.contains_key(&file_id) {
+            return Ok(());
+        }
+        let conn = self.db.as_ref().ok_or("DB not open")?;
+        let row: Option<(u64, Vec<u8>, Vec<u8>, String)> = conn.query_row(
+            "SELECT total_size, encrypted_file_key, key_nonce, status FROM files WHERE file_id = ?1",
+            params![file_id],
+            |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).ok();
+        let (total_size, encrypted_key, key_nonce, status) = row.ok_or("Unknown file_id")?;
+        if status == "complete" {
+            return Ok(());
+        }
+        let file_key = self.unwrap_file_key(&encrypted_key, &key_nonce)?;
+
+        let peer_id = *self.device_to_peer_id.get(&peer_device_fingerprint)
+            .ok_or("Bu kişiden henüz doğrudan bir paket alınmadı, karşı taraf şu an erişilebilir değil")?;
+        if let Some(addr) = self.peer_id_to_addr.get(&peer_id).cloned() {
+            if let Some(swarm) = &mut self.swarm {
+                swarm.add_peer_address(peer_id, addr);
+            }
+        }
+
+        let total_chunks = attachments::total_chunks(total_size);
+        let enc_path = self.enc_path_for(&file_id)?;
+        let _ = std::fs::create_dir_all(self.attachments_dir()?);
+        // Baştan başlıyoruz — kısmi bir önceki deneme varsa üzerine
+        // yazılır (bkz. dosya sonu not: süreç yeniden başlarsa kaldığı
+        // yerden devam etme desteklenmiyor, baştan indirilir).
+        let _ = std::fs::remove_file(&enc_path);
+
+        if let Some(conn) = &self.db {
+            let _ = conn.execute("UPDATE files SET status = 'downloading', bytes_transferred = 0 WHERE file_id = ?1", params![file_id]);
+        }
+
+        self.active_downloads.insert(file_id.clone(), DownloadState {
+            peer_id,
+            total_size,
+            total_chunks,
+            next_chunk_index: 0,
+            bytes_done: 0,
+            file_key,
+            enc_path,
+        });
+        self.request_next_chunk(&file_id);
+        Ok(())
+    }
+
+    /// Bir sonraki parçayı ister — sıra bittiyse (`next_chunk_index >=
+    /// total_chunks`) indirmeyi tamamlanmış sayar.
+    fn request_next_chunk(&mut self, file_id: &str) {
+        let (peer_id, next_index, done) = match self.active_downloads.get(file_id) {
+            Some(s) if s.next_chunk_index >= s.total_chunks => (s.peer_id, s.next_chunk_index, true),
+            Some(s) => (s.peer_id, s.next_chunk_index, false),
+            None => return,
+        };
+        if done {
+            self.finalize_download(file_id);
+            return;
+        }
+        let swarm = match &mut self.swarm {
+            Some(s) => s,
+            None => return,
+        };
+        let request_id = swarm.behaviour_mut().file_chunks.send_request(
+            &peer_id, FileChunkRequest { file_id: file_id.to_string(), chunk_index: next_index },
+        );
+        self.download_request_ids.insert(request_id, file_id.to_string());
+    }
+
+    fn finalize_download(&mut self, file_id: &str) {
+        self.active_downloads.remove(file_id);
+        if let Some(conn) = &self.db {
+            let _ = conn.execute("UPDATE files SET status = 'complete' WHERE file_id = ?1", params![file_id]);
+        }
+        self.attachment_events.push(serde_json::json!({"type": "file_complete", "file_id": file_id}).to_string());
+    }
+
+    fn fail_download(&mut self, file_id: &str, reason: &str) {
+        self.active_downloads.remove(file_id);
+        self.download_request_ids.retain(|_, fid| fid != file_id);
+        if let Some(conn) = &self.db {
+            let _ = conn.execute("UPDATE files SET status = 'failed' WHERE file_id = ?1", params![file_id]);
+        }
+        error!("Dosya indirme başarısız ({}): {}", file_id, reason);
+        self.attachment_events.push(serde_json::json!({"type": "file_failed", "file_id": file_id, "error": reason}).to_string());
+    }
+
+    /// `poll_events`'in `FileChunks` olay kolundan çağrılır — gelen bir
+    /// parça yanıtını işler.
+    fn handle_chunk_response(&mut self, file_id: &str, response: FileChunkResponse) {
+        let data = match response {
+            FileChunkResponse::Chunk { data } => data,
+            FileChunkResponse::NotFound => {
+                self.fail_download(file_id, "Karşı tarafta bu dosya/parça bulunamadı");
+                return;
+            }
+        };
+        let (chunk_index, enc_path, file_key, total_chunks) = match self.active_downloads.get(file_id) {
+            Some(s) => (s.next_chunk_index, s.enc_path.clone(), s.file_key, s.total_chunks),
+            None => return, // İptal edilmiş/başka nedenle düşmüş bir indirme — sessizce yok say.
+        };
+        let plaintext_len = match attachments::append_verified_chunk(&enc_path, chunk_index, &data, &file_key) {
+            Ok(n) => n,
+            Err(e) => { self.fail_download(file_id, &e); return; }
+        };
+
+        let mut emit_progress = false;
+        if let Some(state) = self.active_downloads.get_mut(file_id) {
+            state.bytes_done += plaintext_len as u64;
+            state.next_chunk_index += 1;
+            // Her ~8 parçada bir (yaklaşık 2MB) veya son parçada ilerleme
+            // bildir — her parçada bir olay üretmek (4GB/256KB = 16384 olay)
+            // pollNetwork'ün döndürdüğü diziyi gereksiz yere şişirirdi.
+            emit_progress = state.next_chunk_index % 8 == 0 || state.next_chunk_index >= total_chunks;
+            if emit_progress {
+                if let Some(conn) = &self.db {
+                    let _ = conn.execute("UPDATE files SET bytes_transferred = ?1 WHERE file_id = ?2", params![state.bytes_done as i64, file_id]);
+                }
+            }
+        }
+        if emit_progress {
+            if let Some(state) = self.active_downloads.get(file_id) {
+                self.attachment_events.push(serde_json::json!({
+                    "type": "file_progress", "file_id": file_id,
+                    "bytes_done": state.bytes_done, "bytes_total": state.total_size
+                }).to_string());
+            }
+        }
+        self.request_next_chunk(file_id);
+    }
+
+    /// `request_response` isteğinin RESPONDER tarafı — bu cihazın
+    /// gönderdiği VEYA tamamen indirip yeniden servis ettiği bir dosyadan
+    /// tek bir parça ister.
+    fn serve_chunk_request(&self, request: &FileChunkRequest) -> FileChunkResponse {
+        let is_complete = self.db.as_ref().and_then(|conn| {
+            conn.query_row(
+                "SELECT status FROM files WHERE file_id = ?1", params![request.file_id],
+                |r| r.get::<_, String>(0),
+            ).ok()
+        }).map(|s| s == "complete").unwrap_or(false);
+        if !is_complete {
+            return FileChunkResponse::NotFound;
+        }
+        let enc_path = match self.enc_path_for(&request.file_id) {
+            Ok(p) => p,
+            Err(_) => return FileChunkResponse::NotFound,
+        };
+        match attachments::read_chunk_from_disk(&enc_path, request.chunk_index) {
+            Ok(Some(data)) => FileChunkResponse::Chunk { data },
+            _ => FileChunkResponse::NotFound,
+        }
+    }
+
+    /// Bir sohbetteki bilinen ekleri listeler (bkz. `listAttachments` JNI
+    /// export) — sadece bu süreç boyunca bilinen/DB'ye yazılmış kayıtlar
+    /// (node modu kapalıyken teklif edilip hiç indirilmemiş bir dosya,
+    /// spec dışı kural gereği zaten DB'ye yazılıyor — bkz.
+    /// `receive_file_offer` — bu yüzden restart sonrası da metadata en
+    /// azından görünür kalır, sadece yeniden indirme gerekir).
+    fn list_attachments(&self, peer_device_fingerprint: &str) -> Vec<AttachmentSummary> {
+        let conn = match &self.db {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred
+             FROM files WHERE peer_device_fingerprint = ?1 ORDER BY created_at ASC"
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![peer_device_fingerprint], |r| {
+            Ok(AttachmentSummary {
+                file_id: r.get(0)?,
+                file_name: r.get(1)?,
+                mime_type: r.get(2)?,
+                total_size: r.get::<_, i64>(3)? as u64,
+                direction: r.get(4)?,
+                status: r.get(5)?,
+                bytes_transferred: r.get::<_, i64>(6)? as u64,
+            })
+        });
+        rows.map(|it| it.flatten().collect()).unwrap_or_default()
+    }
+
+    /// Tamamlanmış bir ekin düz metin (çözülmüş) kopyasının yolunu döner —
+    /// yoksa (ilk açılış) önce diskten çözer. BİLİNEN SINIR:
+    /// `decrypt_file_from_disk` senkron/bounded-memory'dir ama büyük bir
+    /// dosya için yine de zaman alabilir — Kotlin tarafı bunu ana thread
+    /// DIŞINDA çağırmalıdır (bkz. P2PLib.kt dokümantasyonu).
+    fn get_attachment_plaintext_path(&self, file_id: &str) -> Result<String, String> {
+        let conn = self.db.as_ref().ok_or("DB not open")?;
+        let (encrypted_key, key_nonce, sha256_hex, status, file_name): (Vec<u8>, Vec<u8>, String, String, String) = conn.query_row(
+            "SELECT encrypted_file_key, key_nonce, sha256_hex, status, file_name FROM files WHERE file_id = ?1",
+            params![file_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        ).map_err(|_| "Unknown file_id")?;
+        if status != "complete" {
+            return Err("Dosya henüz tamamlanmadı".to_string());
+        }
+        let file_key = self.unwrap_file_key(&encrypted_key, &key_nonce)?;
+
+        let ext = file_name.rsplit_once('.').map(|(_, e)| format!(".{}", e)).unwrap_or_default();
+        let plain_path = self.attachments_dir()?.join("plain_cache").join(format!("{}{}", file_id, ext));
+        if !plain_path.exists() {
+            let enc_path = self.enc_path_for(file_id)?;
+            attachments::decrypt_file_from_disk(&enc_path, &plain_path, &file_key, &sha256_hex)?;
+        }
+        Ok(plain_path.to_string_lossy().to_string())
+    }
+
+    // ---------------------------------------------------------------
     // Bölüm 4: Ağ / Keşif
     // ---------------------------------------------------------------
 
@@ -2055,7 +2536,11 @@ impl P2PCore {
                     "/p2pmessenger/1.0.0".to_string(),
                     keypair.public(),
                 ));
-                Ok(P2PBehaviour { gossipsub, kad, identify })
+                let file_chunks = request_response::cbor::Behaviour::new(
+                    [(StreamProtocol::new(FILE_TRANSFER_PROTOCOL), request_response::ProtocolSupport::Full)],
+                    request_response::Config::default(),
+                );
+                Ok(P2PBehaviour { gossipsub, kad, identify, file_chunks })
             })
             .map_err(|e| e.to_string())?
             .build();
@@ -2153,8 +2638,15 @@ impl P2PCore {
     }
 
     fn poll_events(&mut self) -> Vec<String> {
-        let mut incoming: Vec<Vec<u8>> = Vec::new();
+        // `Option<PeerId>` — gossipsub `Signed` authenticity modu (bkz.
+        // start_network) her gelen mesajda gönderenin gerçek `PeerId`'sini
+        // taşır; bu, dosya eki indirmesi (`request_response`, bkz.
+        // `device_to_peer_id`) için gereken PeerId eşlemesinin KAYNAĞI —
+        // önceden bu bilgi okunup hemen atılıyordu.
+        let mut incoming: Vec<(Option<PeerId>, Vec<u8>)> = Vec::new();
         let mut new_listen_addrs: Vec<Multiaddr> = Vec::new();
+        let mut new_peer_addrs: Vec<(PeerId, Multiaddr)> = Vec::new();
+        let mut file_chunk_events: Vec<FileChunkEventLocal> = Vec::new();
         if let Some(swarm) = &mut self.swarm {
             RUNTIME.block_on(async {
                 while let Some(event) = swarm.next().now_or_never().flatten() {
@@ -2167,7 +2659,7 @@ impl P2PCore {
                             new_listen_addrs.push(address);
                         }
                         libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Gossipsub(gossipsub::Event::Message { message, .. })) => {
-                            incoming.push(message.data);
+                            incoming.push((message.source, message.data));
                         }
                         libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
                             // Kademlia'ya Identify'dan öğrenilen adresleri
@@ -2175,6 +2667,24 @@ impl P2PCore {
                             // yapamadığı adres öğrenme adımı.
                             for addr in info.listen_addrs {
                                 swarm.behaviour_mut().kad.add_address(&peer_id, addr);
+                            }
+                        }
+                        libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::FileChunks(rr_event)) => {
+                            match rr_event {
+                                request_response::Event::Message { message: request_response::Message::Request { request, channel, .. }, .. } => {
+                                    file_chunk_events.push(FileChunkEventLocal::Request { request, channel });
+                                }
+                                request_response::Event::Message { message: request_response::Message::Response { request_id, response }, .. } => {
+                                    file_chunk_events.push(FileChunkEventLocal::Response { request_id, response });
+                                }
+                                request_response::Event::OutboundFailure { request_id, error, .. } => {
+                                    error!("Dosya parça isteği başarısız: {:?}", error);
+                                    file_chunk_events.push(FileChunkEventLocal::OutboundFailure { request_id });
+                                }
+                                request_response::Event::InboundFailure { error, .. } => {
+                                    error!("Dosya parça yanıtı gönderilemedi: {:?}", error);
+                                }
+                                request_response::Event::ResponseSent { .. } => {}
                             }
                         }
                         // NOT (tanı amaçlı): dial()'ın kendisi SADECE senkron/
@@ -2187,6 +2697,7 @@ impl P2PCore {
                         // `adb logcat` ile bu satırları arayın.
                         libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                             info!("libp2p bağlantısı kuruldu: peer={} adres={:?}", peer_id, endpoint.get_remote_address());
+                            new_peer_addrs.push((peer_id, endpoint.get_remote_address().clone()));
                         }
                         libp2p::swarm::SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                             error!("Dial başarısız: peer={:?} hata={}", peer_id, error);
@@ -2203,8 +2714,43 @@ impl P2PCore {
             });
         }
         self.own_listen_addrs.extend(new_listen_addrs);
+        for (pid, addr) in new_peer_addrs {
+            self.peer_id_to_addr.insert(pid, addr);
+        }
+
+        // Dosya parça olaylarını işle — `self.swarm`'ın dışında toplandı
+        // (bkz. yukarısı), böylece burada hem `&mut self` (durum
+        // güncellemesi) hem de (yanıt göndermek için) `self.swarm`'a ayrı
+        // ayrı erişebiliyoruz (aynı anda ikisi birden mümkün değil).
+        let mut pending_chunk_responses: Vec<(request_response::ResponseChannel<FileChunkResponse>, FileChunkResponse)> = Vec::new();
+        for evt in file_chunk_events {
+            match evt {
+                FileChunkEventLocal::Request { request, channel } => {
+                    let response = self.serve_chunk_request(&request);
+                    pending_chunk_responses.push((channel, response));
+                }
+                FileChunkEventLocal::Response { request_id, response } => {
+                    if let Some(file_id) = self.download_request_ids.remove(&request_id) {
+                        self.handle_chunk_response(&file_id, response);
+                    }
+                }
+                FileChunkEventLocal::OutboundFailure { request_id } => {
+                    if let Some(file_id) = self.download_request_ids.remove(&request_id) {
+                        self.fail_download(&file_id, "Ağ hatası (parça istenemedi)");
+                    }
+                }
+            }
+        }
+        if !pending_chunk_responses.is_empty() {
+            if let Some(swarm) = &mut self.swarm {
+                for (channel, response) in pending_chunk_responses {
+                    let _ = swarm.behaviour_mut().file_chunks.send_response(channel, response);
+                }
+            }
+        }
 
         let mut results = Vec::new();
+        results.append(&mut self.attachment_events);
 
         // bkz. `pending_envelopes` alanı dokümantasyonu: ilk bağlantıdan
         // sonraki ilk birkaç saniyede gönderilemeyen HERHANGİ bir zarfı
@@ -2250,8 +2796,8 @@ impl P2PCore {
             }
         }
 
-        for raw in incoming {
-            match self.process_incoming_envelope(&raw) {
+        for (source, raw) in incoming {
+            match self.process_incoming_envelope(source, &raw) {
                 Ok(Some(text)) => results.push(text),
                 Ok(None) => {}
                 Err(e) => error!("Gelen paket işlenemedi: {}", e),
@@ -2260,22 +2806,26 @@ impl P2PCore {
         results
     }
 
-    fn process_incoming_envelope(&mut self, raw: &[u8]) -> Result<Option<String>, String> {
+    fn process_incoming_envelope(&mut self, source: Option<PeerId>, raw: &[u8]) -> Result<Option<String>, String> {
         let envelope: NetworkEnvelope = ciborium::from_reader(raw).map_err(|e| e.to_string())?;
         match envelope {
             NetworkEnvelope::IdentityExchange(x) => {
+                self.record_peer_id_if_known(source, &x.device_fingerprint);
                 self.process_identity_exchange(&x)?;
                 Ok(None)
             }
             NetworkEnvelope::Handshake(h) => {
+                self.record_peer_id_if_known(source, &h.sender_device_fingerprint);
                 self.process_handshake_init(&h)?;
                 Ok(None)
             }
             NetworkEnvelope::Message(m) => {
+                self.record_peer_id_if_known(source, &m.header.sender_device_fingerprint);
                 let text = self.receive_message(&m)?;
                 Ok(Some(text))
             }
             NetworkEnvelope::GroupUpdate(u) => {
+                self.record_peer_id_if_known(source, &u.signed_by_device);
                 self.process_group_update(&u)?;
                 Ok(None)
             }
@@ -2596,6 +3146,82 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getMessageHistory<'local>(m
     });
     let json = result.unwrap_or_else(|e| { error!("getMessageHistory panicked: {}", e); "[]".to_string() });
     env.new_string(json).unwrap().into_raw()
+}
+
+/// Spec dışı: dosya/foto/video/ses eki gönderir (bkz.
+/// `P2PCore::prepare_and_send_file`). `source_path` Kotlin tarafından
+/// zaten yerel bir dosya yoluna kopyalanmış olmalı (content:// URI burada
+/// işlenmez). BİLİNEN SINIR: senkron bir çağrı — büyük dosyalar için
+/// Kotlin tarafı bunu ana thread DIŞINDA (coroutine/Dispatchers.IO)
+/// çağırmalıdır, aksi halde ANR riski vardır. Dönüş: `sendMessage` ile
+/// aynı JSON biçimi, `message_id` alanı burada `file_id`'dir.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_prepareAndSendFile<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, target: JString<'local>, source_path: JString<'local>, file_name: JString<'local>, mime_type: JString<'local>) -> jstring {
+    let target_str: String = env.get_string(&target).map(|s| s.into()).unwrap_or_default();
+    let source_str: String = env.get_string(&source_path).map(|s| s.into()).unwrap_or_default();
+    let name_str: String = env.get_string(&file_name).map(|s| s.into()).unwrap_or_default();
+    let mime_str: String = env.get_string(&mime_type).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.prepare_and_send_file(target_str, source_str, name_str, mime_str)
+    });
+    match result {
+        Ok(Ok((file_id, status))) => env.new_string(serde_json::json!({"message_id": file_id, "status": status}).to_string()).unwrap().into_raw(),
+        Ok(Err(e)) => { error!("prepare_and_send_file failed: {}", e); env.new_string(format!("Error: {}", e)).unwrap().into_raw() }
+        Err(e) => { error!("prepare_and_send_file panicked: {}", e); env.new_string(format!("Error: {}", e)).unwrap().into_raw() }
+    }
+}
+
+/// Bir dosyanın parçalarını indirmeyi başlatır — hemen döner, ilerleme/
+/// tamamlanma `pollNetwork`'ün `"file_progress"`/`"file_complete"`/
+/// `"file_failed"` olaylarıyla bildirilir (bkz. `P2PCore::download_file`).
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_downloadFile<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, file_id: JString<'local>, peer_device_fingerprint: JString<'local>) -> jboolean {
+    let file_id_str: String = env.get_string(&file_id).map(|s| s.into()).unwrap_or_default();
+    let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = CORE.lock().unwrap();
+        core.download_file(file_id_str, fp)
+    });
+    match result {
+        Ok(Ok(())) => true as jboolean,
+        Ok(Err(e)) => { error!("download_file failed: {}", e); false as jboolean }
+        Err(e) => { error!("download_file panicked: {}", e); false as jboolean }
+    }
+}
+
+/// JSON-encoded `List<AttachmentSummary>` — bir sohbetteki bilinen dosya
+/// eklerini listeler (bkz. `P2PCore::list_attachments`).
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_listAttachments<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>) -> jstring {
+    let fp: String = env.get_string(&peer_device_fingerprint).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let core = CORE.lock().unwrap();
+        let list = core.list_attachments(&fp);
+        serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+    });
+    let json = result.unwrap_or_else(|e| { error!("listAttachments panicked: {}", e); "[]".to_string() });
+    env.new_string(json).unwrap().into_raw()
+}
+
+/// Tamamlanmış bir ekin düz metin (çözülmüş) kopyasının mutlak yolunu
+/// döner, ya da hata varsa `"Error: ..."`. BİLİNEN SINIR: senkron — büyük
+/// dosyalar için Kotlin tarafı ana thread DIŞINDA çağırmalıdır (bkz.
+/// `P2PCore::get_attachment_plaintext_path`).
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_getAttachmentPlaintextPath<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, file_id: JString<'local>) -> jstring {
+    let file_id_str: String = env.get_string(&file_id).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let core = CORE.lock().unwrap();
+        core.get_attachment_plaintext_path(&file_id_str)
+    });
+    match result {
+        Ok(Ok(path)) => env.new_string(path).unwrap().into_raw(),
+        Ok(Err(e)) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+        Err(e) => env.new_string(format!("Error: {}", e)).unwrap().into_raw(),
+    }
 }
 
 #[no_mangle]

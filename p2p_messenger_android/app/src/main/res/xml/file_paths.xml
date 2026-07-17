@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Context.getFilesDir()/attachments/plain_cache/ — bkz.
+         P2PCore::get_attachment_plaintext_path (lib.rs). Sadece bu alt
+         dizin paylaşılır; şifreli `.enc` dosyaları veya DB hiçbir zaman
+         FileProvider üzerinden erişilebilir değildir. -->
+    <files-path name="attachment_plain_cache" path="attachments/plain_cache/" />
+</paths>

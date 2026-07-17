@@ -66,4 +66,9 @@
         <item quantity="one">%d üye</item>
         <item quantity="other">%d üye</item>
     </plurals>
+
+    <string name="content_desc_attach_file">Dosya ekle</string>
+    <string name="msg_attachment_downloading">İndiriliyor…</string>
+    <string name="msg_attachment_failed">İndirme başarısız</string>
+    <string name="error_attachment_open_failed">Dosya açılamadı</string>
 </resources>

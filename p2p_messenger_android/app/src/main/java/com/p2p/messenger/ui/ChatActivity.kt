@@ -2,21 +2,31 @@ package com.p2p.messenger.ui
 
 import android.app.AlertDialog
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.OpenableColumns
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageButton
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.p2p.messenger.P2PLib
 import com.p2p.messenger.R
 import com.p2p.messenger.service.P2PService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.UUID
 
 /**
@@ -48,6 +58,17 @@ class ChatActivity : AppCompatActivity() {
      *  isteği gönderilir; yanıt gelene kadar bu true kalır ki yanıt geldiğinde
      *  onu listenin başına eklemeyi bilelim (peer değişince sıfırlanır). */
     private var historySyncPending = false
+
+    /** Spec dışı: dosya/foto/video/ses eki seçimi — SAF `OpenDocument`
+     *  kullanılıyor (bkz. dosya sonu `onFilePicked` notu): tüm ek
+     *  türlerini tek bir seçiciyle kapsar VE hiçbir çalışma zamanı
+     *  depolama izni gerektirmez (Android 13+ READ_MEDIA_*'ye bile gerek
+     *  yok). `registerForActivityResult` Activity STARTED olmadan ÖNCE
+     *  çağrılmalı — bu yüzden alan bildirimi (field initializer) olarak,
+     *  onCreate'ten önce çalışır. */
+    private val pickFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { onFilePicked(it) }
+    }
 
     private val sessionPollHandler = Handler(Looper.getMainLooper())
     private val sessionPollRunnable = object : Runnable {
@@ -91,6 +112,7 @@ class ChatActivity : AppCompatActivity() {
         recycler = findViewById(R.id.recyclerMessages)
         adapter = SimpleChatAdapter(localMessages)
         adapter.onItemLongPress = { item -> showEditDeleteDialog(item) }
+        adapter.onAttachmentClick = { item -> onAttachmentClicked(item) }
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = adapter
 
@@ -100,6 +122,9 @@ class ChatActivity : AppCompatActivity() {
             if (text.isBlank()) return@setOnClickListener
             input.text.clear()
             sendNewMessage(text)
+        }
+        findViewById<ImageButton>(R.id.btnAttach).setOnClickListener {
+            pickFileLauncher.launch(arrayOf("*/*"))
         }
 
         if (!bindToIntent(intent)) {
@@ -211,6 +236,155 @@ class ChatActivity : AppCompatActivity() {
             "delete" -> adapter.applyDelete(obj.optString("message_id"))
             "status" -> adapter.applyStatus(obj.optString("message_id"), parseStatus(obj.optString("status")))
             "history_sync" -> applyHistorySync(obj)
+            "file_offer" -> {
+                val autoDownloading = obj.optBoolean("auto_downloading", false)
+                adapter.addMessage(
+                    SimpleChatAdapter.Item(
+                        messageId = obj.optString("file_id"),
+                        text = "",
+                        isMine = false,
+                        attachment = SimpleChatAdapter.AttachmentInfo(
+                            fileId = obj.optString("file_id"),
+                            fileName = obj.optString("file_name"),
+                            mimeType = obj.optString("mime_type"),
+                            totalSize = obj.optLong("total_size"),
+                            status = if (autoDownloading) SimpleChatAdapter.AttachmentStatus.DOWNLOADING
+                                      else SimpleChatAdapter.AttachmentStatus.OFFERED
+                        )
+                    )
+                )
+                recycler.scrollToPosition(localMessages.size - 1)
+            }
+            "file_progress" -> adapter.applyAttachmentUpdate(
+                obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.DOWNLOADING, obj.optLong("bytes_done")
+            )
+            "file_complete" -> adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.COMPLETE)
+            "file_failed" -> adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.FAILED)
+        }
+    }
+
+    /**
+     * Spec dışı: bir ek balonuna dokunulduğunda (İndir düğmesi VEYA
+     * tamamlanmış bir eke tıklama). OFFERED/FAILED -> indirmeyi başlatır
+     * (hemen "DOWNLOADING" gösterip arka planda `downloadFile` çağırır —
+     * asıl ilerleme/tamamlanma `pollNetwork` "file_progress"/"file_complete"
+     * olaylarıyla gelecek). COMPLETE -> çözülmüş kopyanın yolunu alıp
+     * sistem görüntüleyicisiyle açar.
+     */
+    private fun onAttachmentClicked(item: SimpleChatAdapter.Item) {
+        val attachment = item.attachment ?: return
+        when (attachment.status) {
+            SimpleChatAdapter.AttachmentStatus.OFFERED, SimpleChatAdapter.AttachmentStatus.FAILED -> {
+                adapter.applyAttachmentUpdate(attachment.fileId, SimpleChatAdapter.AttachmentStatus.DOWNLOADING, 0)
+                lifecycleScope.launch(Dispatchers.IO) {
+                    try {
+                        P2PLib.downloadFile(attachment.fileId, peerDeviceFingerprint)
+                    } catch (e: Exception) {
+                        withContext(Dispatchers.Main) {
+                            adapter.applyAttachmentUpdate(attachment.fileId, SimpleChatAdapter.AttachmentStatus.FAILED)
+                        }
+                    }
+                }
+            }
+            SimpleChatAdapter.AttachmentStatus.COMPLETE -> {
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val path = try {
+                        P2PLib.getAttachmentPlaintextPath(attachment.fileId)
+                    } catch (e: Exception) {
+                        "Error: ${e.message}"
+                    }
+                    withContext(Dispatchers.Main) {
+                        if (path.startsWith("Error:")) {
+                            Toast.makeText(this@ChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
+                        } else {
+                            openAttachmentFile(path, attachment.mimeType)
+                        }
+                    }
+                }
+            }
+            SimpleChatAdapter.AttachmentStatus.DOWNLOADING -> { /* no-op, zaten devam ediyor */ }
+        }
+    }
+
+    private fun openAttachmentFile(path: String, mimeType: String) {
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", File(path))
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mimeType.ifBlank { "*/*" })
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(this, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * Spec dışı: kullanıcının SAF (`OpenDocument`) ile seçtiği bir dosya/
+     * foto/video/ses klibi. `content://` URI'sini doğrudan Rust'a
+     * geçiremeyiz (JNI tarafı düz bir dosya sistemi yolu bekliyor, bkz.
+     * P2PLib.kt notu) — önce uygulamanın önbellek dizinine (bounded buffer
+     * ile, akış hâlinde) kopyalanır, sonra `prepareAndSendFile` çağrılır.
+     * TAMAMI ana thread DIŞINDA (Dispatchers.IO) — 4GB'a kadar bir dosya
+     * için bu kopyalama/şifreleme adımı saniyeler/on saniyeler sürebilir.
+     */
+    private fun onFilePicked(uri: Uri) {
+        val fileName = queryDisplayName(uri) ?: "file"
+        val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+        Toast.makeText(this, fileName, Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch(Dispatchers.IO) {
+            val tempFile = File(File(cacheDir, "outgoing").apply { mkdirs() }, UUID.randomUUID().toString())
+            try {
+                contentResolver.openInputStream(uri)?.use { input ->
+                    tempFile.outputStream().use { output ->
+                        input.copyTo(output, bufferSize = 64 * 1024)
+                    }
+                } ?: throw java.io.IOException("Dosya açılamadı")
+
+                val result = P2PLib.prepareAndSendFile(peerDeviceFingerprint, tempFile.absolutePath, fileName, mimeType)
+                withContext(Dispatchers.Main) {
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(this@ChatActivity, result, Toast.LENGTH_SHORT).show()
+                    } else {
+                        val obj = JSONObject(result)
+                        adapter.addMessage(
+                            SimpleChatAdapter.Item(
+                                messageId = obj.optString("message_id"),
+                                text = "",
+                                isMine = true,
+                                attachment = SimpleChatAdapter.AttachmentInfo(
+                                    fileId = obj.optString("message_id"),
+                                    fileName = fileName,
+                                    mimeType = mimeType,
+                                    totalSize = tempFile.length(),
+                                    status = SimpleChatAdapter.AttachmentStatus.COMPLETE,
+                                    bytesDone = tempFile.length()
+                                )
+                            )
+                        )
+                        recycler.scrollToPosition(localMessages.size - 1)
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@ChatActivity, getString(R.string.error_send_failed), Toast.LENGTH_SHORT).show()
+                }
+            } finally {
+                tempFile.delete()
+            }
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String? {
+        return try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0) cursor.getString(idx) else null
+                } else null
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 

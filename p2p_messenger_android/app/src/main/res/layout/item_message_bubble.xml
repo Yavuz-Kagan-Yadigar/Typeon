@@ -26,6 +26,88 @@
         android:padding="16dp"
         android:textSize="22sp" />
 
+    <!-- Spec dışı: dosya/foto/video/ses eki balonu — `item.attachment`
+         doluysa `txtBubbleText` yerine bu gösterilir (bkz.
+         SimpleChatAdapter.onBindViewHolder). Tek, esnek bir düzen (dört
+         ayrı görünüm tipi yerine) — küçük resim önizlemesi SADECE
+         image/video MIME'lerinde görünür, diğerlerinde jenerik dosya
+         simgesi + ad/boyut satırı yeterli. -->
+    <LinearLayout
+        android:id="@+id/layoutAttachment"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="10dp"
+        android:layout_marginBottom="4dp"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/imgAttachmentThumbnail"
+            android:layout_width="220dp"
+            android:layout_height="220dp"
+            android:layout_marginBottom="6dp"
+            android:scaleType="centerCrop"
+            android:visibility="gone"
+            android:contentDescription="@null" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <ImageView
+                android:id="@+id/imgAttachmentIcon"
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:layout_marginEnd="8dp"
+                android:src="@drawable/ic_attachment_file"
+                android:contentDescription="@null" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/txtAttachmentName"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:maxWidth="200dp"
+                    android:maxLines="1"
+                    android:ellipsize="middle"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/txtAttachmentSize"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textSize="12sp"
+                    android:textColor="?attr/colorOnSurfaceVariant" />
+
+            </LinearLayout>
+
+            <ProgressBar
+                android:id="@+id/progressAttachment"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:layout_marginStart="8dp"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/btnAttachmentDownload"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/lbl_download"
+                android:visibility="gone" />
+
+        </LinearLayout>
+
+    </LinearLayout>
+
     <LinearLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"

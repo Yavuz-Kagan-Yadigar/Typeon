@@ -194,6 +194,24 @@ pub enum MessageContent {
     /// taşınır; isteyen taraf bunu ters çevirmeli (bkz. lib.rs
     /// receive_message HistorySyncResponse notu).
     HistorySyncResponse { messages: Vec<(String, String, u64)> },
+    /// Spec dışı: dosya/foto/video/ses eki meta verisi (spec bölüm 6
+    /// "dosya transferi v0.1/v0.2 kapsamı DIŞINDA" notunu genişleten,
+    /// kullanıcı tarafından istenen bir ek özellik, azami 4GB). Gerçek
+    /// bayt içeriği BU paketle TAŞINMAZ — sadece küçük meta veri + bu
+    /// dosyaya özel taze bir AEAD anahtarı (`file_key`), normal
+    /// ratchet-şifreli mesaj kanalıyla taşınır. Gerçek baytlar ayrı bir
+    /// libp2p `request_response` protokolü üzerinden parça parça (chunk)
+    /// istenir/gönderilir (bkz. lib.rs/attachments.rs
+    /// `FileChunkRequest`/`FileChunkResponse`).
+    FileOffer {
+        group_id: Option<String>,
+        file_id: String,
+        file_name: String,
+        mime_type: String,
+        total_size: u64,
+        file_key: [u8; 32],
+        sha256_hex: String,
+    },
 }
 
 /// El sıkışma paketi — önceki `HandshakeInit` tasarımı; spec'te ayrı bir

@@ -86,6 +86,24 @@ object P2PLib {
      *  asenkron gelir — bkz. pollNetwork "history_sync" olayı. */
     external fun requestHistorySync(peerDeviceFingerprint: String, limit: Int)
 
+    // --- Spec dışı: dosya/foto/video/ses ekleri (azami 4GB) ---
+    /** `sourcePath` zaten yerel bir dosya yolu olmalı (content:// URI
+     *  DEĞİL — çağıran taraf önce ContentResolver ile yerel bir önbellek
+     *  dosyasına kopyalamalı). BÜYÜK dosyalar için bu çağrı bir süre
+     *  alabilir — ANA THREAD'DE ÇAĞIRMAYIN (coroutine/Dispatchers.IO
+     *  kullanın). Dönüş: sendMessage ile aynı JSON biçimi, message_id
+     *  alanı burada file_id'dir. */
+    external fun prepareAndSendFile(targetDeviceFingerprint: String, sourcePath: String, fileName: String, mimeType: String): String
+    /** Hemen döner — ilerleme/tamamlanma pollNetwork() üzerinden
+     *  "file_progress"/"file_complete"/"file_failed" olaylarıyla gelir. */
+    external fun downloadFile(fileId: String, peerDeviceFingerprint: String): Boolean
+    /** JSON-encoded List<AttachmentSummary>, oluşturulma sırasına göre. */
+    external fun listAttachments(peerDeviceFingerprint: String): String
+    /** Tamamlanmış bir ekin çözülmüş (plaintext) kopyasının mutlak yolu,
+     *  ya da hata varsa "Error: ...". BÜYÜK dosyalar için ANA THREAD'DE
+     *  ÇAĞIRMAYIN. */
+    external fun getAttachmentPlaintextPath(fileId: String): String
+
     // --- Bölüm 5: Grup mesajlaşma ---
     /** JSON-encoded List<GroupSummary>. */
     external fun listGroups(): String

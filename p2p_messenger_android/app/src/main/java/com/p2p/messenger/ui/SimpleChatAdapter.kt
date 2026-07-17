@@ -1,10 +1,12 @@
 package com.p2p.messenger.ui
 
 import android.graphics.Typeface
+import android.text.format.Formatter
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -31,6 +33,19 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
     enum class Status { PENDING, SENT, ERROR }
 
+    /** Spec dışı: dosya/foto/video/ses eki durumu (bkz. dosya başı notu —
+     *  P2PLib.prepareAndSendFile/downloadFile/pollNetwork "file_*" olayları). */
+    enum class AttachmentStatus { OFFERED, DOWNLOADING, COMPLETE, FAILED }
+
+    data class AttachmentInfo(
+        val fileId: String,
+        val fileName: String,
+        val mimeType: String,
+        val totalSize: Long,
+        var status: AttachmentStatus,
+        var bytesDone: Long = 0
+    )
+
     data class Item(
         val messageId: String,
         var text: String,
@@ -40,13 +55,19 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         var isEdited: Boolean = false,
         var isDeleted: Boolean = false,
         /** Sadece grup sohbetinde, kendi mesajımız değilse gösterilir. */
-        val senderName: String? = null
+        val senderName: String? = null,
+        /** Doluysa bu bir metin değil, dosya eki balonudur (bkz.
+         *  onBindViewHolder) — `messageId` bu durumda `file_id`'dir. */
+        var attachment: AttachmentInfo? = null
     )
 
     /** Kendi mesajlarımıza uzun basıldığında tetiklenir (Düzenle/Sil menüsü
      *  ChatActivity/GroupChatActivity'de gösterilir — adapter sadece
      *  "hangi item" bilgisini taşır). */
     var onItemLongPress: ((Item) -> Unit)? = null
+    /** Bir ek balonundaki "İndir" düğmesine (veya tamamlanmış bir eke)
+     *  dokunulduğunda tetiklenir. */
+    var onAttachmentClick: ((Item) -> Unit)? = null
 
     private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
@@ -57,6 +78,12 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val editedLabel: TextView = itemView.findViewById(R.id.txtEditedLabel)
         val timestamp: TextView = itemView.findViewById(R.id.txtTimestamp)
         val status: ImageView = itemView.findViewById(R.id.imgStatus)
+        val layoutAttachment: LinearLayout = itemView.findViewById(R.id.layoutAttachment)
+        val imgAttachmentThumbnail: ImageView = itemView.findViewById(R.id.imgAttachmentThumbnail)
+        val txtAttachmentName: TextView = itemView.findViewById(R.id.txtAttachmentName)
+        val txtAttachmentSize: TextView = itemView.findViewById(R.id.txtAttachmentSize)
+        val progressAttachment: View = itemView.findViewById(R.id.progressAttachment)
+        val btnAttachmentDownload: Button = itemView.findViewById(R.id.btnAttachmentDownload)
     }
 
     fun indexOfMessageId(messageId: String): Int = items.indexOfFirst { it.messageId == messageId }
@@ -64,6 +91,18 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     fun addMessage(item: Item) {
         items.add(item)
         notifyItemInserted(items.size - 1)
+    }
+
+    /** Bir ekin durumunu/ilerlemesini günceller (bkz. pollNetwork
+     *  "file_progress"/"file_complete"/"file_failed" olayları). Hedef
+     *  bulunamazsa sessizce yok sayılır. */
+    fun applyAttachmentUpdate(fileId: String, status: AttachmentStatus, bytesDone: Long? = null) {
+        val idx = indexOfMessageId(fileId)
+        if (idx < 0) return
+        val attachment = items[idx].attachment ?: return
+        attachment.status = status
+        if (bytesDone != null) attachment.bytesDone = bytesDone
+        notifyItemChanged(idx)
     }
 
     /** Gelen/giden bir edit olayını uygular. Hedef bulunamazsa (ör. geçmişte
@@ -101,14 +140,18 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     override fun onBindViewHolder(holder: BubbleViewHolder, position: Int) {
         val item = items[position]
         holder.container.gravity = if (item.isMine) Gravity.END else Gravity.START
-        holder.textView.setBackgroundResource(if (item.isMine) R.drawable.bubble_mine else R.drawable.bubble_theirs)
+        val bubbleBackground = if (item.isMine) R.drawable.bubble_mine else R.drawable.bubble_theirs
+        holder.textView.setBackgroundResource(bubbleBackground)
+        holder.layoutAttachment.setBackgroundResource(bubbleBackground)
 
         val onColorAttr = if (item.isMine) {
             com.google.android.material.R.attr.colorOnPrimaryContainer
         } else {
             com.google.android.material.R.attr.colorOnSurfaceVariant
         }
-        holder.textView.setTextColor(MaterialColors.getColor(holder.textView, onColorAttr))
+        val onColor = MaterialColors.getColor(holder.textView, onColorAttr)
+        holder.textView.setTextColor(onColor)
+        holder.txtAttachmentName.setTextColor(onColor)
 
         if (!item.isMine && item.senderName != null) {
             holder.senderName.text = item.senderName
@@ -117,16 +160,25 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.senderName.visibility = View.GONE
         }
 
-        if (item.isDeleted) {
-            holder.textView.text = holder.itemView.context.getString(R.string.msg_deleted)
-            holder.textView.setTypeface(holder.textView.typeface, Typeface.ITALIC)
-            holder.textView.alpha = 0.6f
+        val attachment = item.attachment
+        if (attachment != null) {
+            holder.textView.visibility = View.GONE
             holder.editedLabel.visibility = View.GONE
+            bindAttachment(holder, item, attachment)
         } else {
-            holder.textView.text = item.text
-            holder.textView.setTypeface(Typeface.DEFAULT, Typeface.NORMAL)
-            holder.textView.alpha = 1f
-            holder.editedLabel.visibility = if (item.isEdited) View.VISIBLE else View.GONE
+            holder.layoutAttachment.visibility = View.GONE
+            holder.textView.visibility = View.VISIBLE
+            if (item.isDeleted) {
+                holder.textView.text = holder.itemView.context.getString(R.string.msg_deleted)
+                holder.textView.setTypeface(holder.textView.typeface, Typeface.ITALIC)
+                holder.textView.alpha = 0.6f
+                holder.editedLabel.visibility = View.GONE
+            } else {
+                holder.textView.text = item.text
+                holder.textView.setTypeface(Typeface.DEFAULT, Typeface.NORMAL)
+                holder.textView.alpha = 1f
+                holder.editedLabel.visibility = if (item.isEdited) View.VISIBLE else View.GONE
+            }
         }
 
         holder.timestamp.text = timeFormat.format(Date(item.timestamp))
@@ -145,13 +197,49 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         }
 
         holder.itemView.setOnLongClickListener {
-            if (item.isMine && !item.isDeleted) {
+            // Ek balonları için düzenle/sil desteklenmiyor (bkz. dosya başı
+            // notu) — sadece düz metin mesajları uzun basmaya tepki verir.
+            if (item.isMine && !item.isDeleted && item.attachment == null) {
                 onItemLongPress?.invoke(item)
                 true
             } else {
                 false
             }
         }
+    }
+
+    /** Bir ek balonunu doldurur: OFFERED/FAILED -> "İndir" düğmesi,
+     *  DOWNLOADING -> ilerleme göstergesi, COMPLETE -> dokununca açılabilir
+     *  (indirme düğmesi/ilerleme gizli, tüm satır tıklanabilir). Küçük
+     *  resim önizlemesi bilinçli olarak v1 kapsamı DIŞINDA bırakıldı — her
+     *  ek türü aynı jenerik dosya simgesi + ad/boyut satırıyla gösterilir,
+     *  tamamlanmış bir görsele dokunmak sistem görüntüleyicisini açar
+     *  (bkz. ChatActivity openAttachment).
+     */
+    private fun bindAttachment(holder: BubbleViewHolder, item: Item, attachment: AttachmentInfo) {
+        holder.layoutAttachment.visibility = View.VISIBLE
+        holder.imgAttachmentThumbnail.visibility = View.GONE
+        holder.txtAttachmentName.text = attachment.fileName
+        val context = holder.itemView.context
+
+        holder.txtAttachmentSize.text = when (attachment.status) {
+            AttachmentStatus.DOWNLOADING -> context.getString(R.string.msg_attachment_downloading) +
+                " " + Formatter.formatShortFileSize(context, attachment.bytesDone) + " / " +
+                Formatter.formatShortFileSize(context, attachment.totalSize)
+            AttachmentStatus.FAILED -> context.getString(R.string.msg_attachment_failed)
+            else -> Formatter.formatShortFileSize(context, attachment.totalSize)
+        }
+
+        holder.progressAttachment.visibility = if (attachment.status == AttachmentStatus.DOWNLOADING) View.VISIBLE else View.GONE
+        holder.btnAttachmentDownload.visibility = if (attachment.status == AttachmentStatus.OFFERED || attachment.status == AttachmentStatus.FAILED) View.VISIBLE else View.GONE
+
+        val clickListener = View.OnClickListener {
+            if (attachment.status != AttachmentStatus.DOWNLOADING) {
+                onAttachmentClick?.invoke(item)
+            }
+        }
+        holder.btnAttachmentDownload.setOnClickListener(clickListener)
+        holder.layoutAttachment.setOnClickListener(clickListener)
     }
 
     override fun getItemCount(): Int = items.size
