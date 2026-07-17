@@ -14,6 +14,17 @@ import com.p2p.messenger.R
 import com.p2p.messenger.util.NotificationHelper
 import org.json.JSONObject
 
+/** bkz. `P2PService.bindToWifiIfAvailable` dokümantasyonu — transport tipi
+ *  TEK BAŞINA yeterli değil, gerçekten doğrulanmış internet erişimi de
+ *  gerekli (aksi halde internetsiz bir WiFi'ye yanlışlıkla bağlanıp mobil
+ *  veri üzerinden çalışan bir cihazı bağlantısız bırakabiliriz). */
+private fun NetworkCapabilities?.isValidatedWifi(): Boolean {
+    if (this == null) return false
+    return hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+        hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+        hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+}
+
 class P2PService : Service() {
 
     companion object {
@@ -201,15 +212,24 @@ class P2PService : Service() {
      */
     private fun bindToWifiIfAvailable() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        // Senkron: şu an zaten bağlı bir WiFi varsa hemen bağla — asenkron
-        // callback'i (aşağıda) beklemeden, startNetwork'ten önce hazır olsun.
+        // Spec dışı, hata ayıklama düzeltmesi: SADECE WiFi transport'u
+        // kontrol etmek YETERSİZ — bir cihazın WiFi radyosu açık ve
+        // bilinen/kayıtlı bir ağa bağlı olabilir ama o ağın GERÇEK internet
+        // erişimi olmayabilir (ör. boşta duran bir ev ağı, portal arkasında
+        // kalmış bir misafir ağı). Sadece transport'a bakıp bağlarsak, o an
+        // mobil veri üzerinden ÇALIŞAN bir cihazı internetsiz bir WiFi'ye
+        // zorlayıp TAMAMEN bağlantısız bırakabiliriz — NET_CAPABILITY_INTERNET
+        // + NET_CAPABILITY_VALIDATED (sistem gerçekten "bu ağdan internete
+        // çıkabiliyorum" diye doğruladı) ikisi de gerekli.
         val active = cm.activeNetwork
         val activeCaps = active?.let { cm.getNetworkCapabilities(it) }
-        if (activeCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+        if (activeCaps.isValidatedWifi()) {
             cm.bindProcessToNetwork(active)
         }
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
             .build()
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
