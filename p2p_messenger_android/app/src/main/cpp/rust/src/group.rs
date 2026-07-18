@@ -165,6 +165,10 @@ pub fn apply_change(group: &mut Group, change: &GroupChange, new_version: u32, n
         GroupChange::AvatarUpdate(avatar) => {
             group.avatar_jpeg = avatar.clone();
         }
+        // Grup silme, gruba uygulanan bir ALAN değişikliği değil — çağıran
+        // (lib.rs `process_group_update`) grup kaydını tamamen kaldırır.
+        // Burada yapılacak bir şey yok (bkz. GroupChange::Delete notu).
+        GroupChange::Delete => {}
     }
     group.version = new_version;
 }

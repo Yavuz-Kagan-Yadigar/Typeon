@@ -2572,7 +2572,7 @@ impl P2PCore {
             }
             MessageContent::FileOffer { group_id, file_id, file_name, mime_type, total_size, file_key, sha256_hex, preview_jpeg, duration_ms } => {
                 self.send_ack(&peer_fp, &message_id);
-                self.receive_file_offer(&peer_fp, group_id, &file_id, &file_name, &mime_type, total_size, &file_key, &sha256_hex, &preview_jpeg, duration_ms)
+                self.receive_file_offer(&peer_fp, &sender_identity_id, group_id, &file_id, &file_name, &mime_type, total_size, &file_key, &sha256_hex, &preview_jpeg, duration_ms)
             }
             MessageContent::Ack { target_message_id } => {
                 // Karşı taraf bizim gönderdiğimiz bir Text/Edit/Delete/
@@ -3287,6 +3287,47 @@ impl P2PCore {
         Ok(())
     }
 
+    /// Spec dışı, kullanıcı isteği: grubu TÜM üyeler için siler. Yalnızca
+    /// kurucu çağırabilir (aynı `validate_group_update` yetki kuralı karşı
+    /// tarafta da uygulanır). İmzalı `GroupChange::Delete` güncellemesi tüm
+    /// üyelere gönderilir, sonra grup yerelde kaldırılır.
+    fn delete_group(&mut self, group_id: &str) -> Result<(), String> {
+        let own_fp = self.get_active_own_device_fingerprint()?;
+        let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
+        let group = self.groups.get(group_id).cloned_group()?;
+        if group.founder_identity_id != own_identity_id {
+            return Err("Sadece kurucu grubu silebilir".to_string());
+        }
+        let new_version = group.version + 1;
+        let change = GroupChange::Delete;
+        // Üyelik değişmiyor; mevcut liste taşınır (imza kapsamı tutarlı kalsın).
+        let members_after = group.member_identity_ids();
+        let vouched = self.collect_vouched_member_devices(&members_after);
+        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
+        let update = sign_group_update(group_id, new_version, &change, &group.name, &members_after, &vouched, &own_identity_id, &own_fp, own_keys)?;
+
+        // Önce herkese haber ver (yerelde silmeden önce — silersek hedef
+        // listesini kaybederiz).
+        for member_identity_id in group.other_members(&own_identity_id) {
+            if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id) {
+                if let Err(e) = self.send_message_content(peer_fp, &MessageContent::GroupUpdate(update.clone()), None) {
+                    error!("Grup silme bildirimi bir üyeye gönderilemedi: {}", e);
+                }
+            }
+        }
+        self.remove_group_locally(group_id);
+        Ok(())
+    }
+
+    /// Grup kaydını bellekten ve diskten kaldırır (bkz. `delete_group` /
+    /// `process_group_update` Delete kolu).
+    fn remove_group_locally(&mut self, group_id: &str) {
+        self.groups.remove(group_id);
+        if let Some(conn) = &self.db {
+            let _ = conn.execute("DELETE FROM groups WHERE group_id = ?1", params![group_id]);
+        }
+    }
+
     fn process_group_update(&mut self, update: &GroupUpdate) -> Result<(), String> {
         let signer = self.known_remote_devices.get(&update.signed_by_device).cloned()
             .ok_or("Unknown signer device")?;
@@ -3330,6 +3371,16 @@ impl P2PCore {
                 update.group_id, group_ref.version, update.new_version,
                 update.new_version - group_ref.version - 1
             );
+        }
+
+        // Spec dışı, kullanıcı isteği: kurucu grubu TÜM üyeler için sildi —
+        // yerel kaydı kaldır ve çık (aşağıdaki alan güncelleme yolu
+        // uygulanmaz). Yetki zaten yukarıda `validate_group_update` ile
+        // doğrulandı (yalnızca kurucu).
+        if matches!(update.change, GroupChange::Delete) {
+            info!("Grup kurucusu tarafından silindi: {}", update.group_id);
+            self.remove_group_locally(&update.group_id);
+            return Ok(());
         }
 
         if !group_exists {
@@ -3699,7 +3750,7 @@ impl P2PCore {
     /// Gelen bir `FileOffer`'ı işler: `files` tablosuna bir alıcı kaydı
     /// ekler (node modu açıksa hemen indirmeyi başlatır — kapalıysa sadece
     /// meta veri görünür kalır, kullanıcı "İndir" demeli).
-    fn receive_file_offer(&mut self, peer_fp: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str, preview_jpeg: &Option<Vec<u8>>, duration_ms: Option<u32>) -> serde_json::Value {
+    fn receive_file_offer(&mut self, peer_fp: &str, sender_identity_id: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str, preview_jpeg: &Option<Vec<u8>>, duration_ms: Option<u32>) -> serde_json::Value {
         let auto_download_requested = self.node_mode_enabled;
         // Satır YAZILAMADIYSA (ör. şifreleme anahtarı henüz yüklenmedi),
         // "offered" olarak devam ediyoruz — DB kaydı olmadan "downloading"
@@ -3754,7 +3805,11 @@ impl P2PCore {
         };
 
         serde_json::json!({
-            "type": "file_offer", "peer": peer_fp, "group_id": group_id, "file_id": file_id,
+            // `sender_identity_id`: grup eklerinde bildirimi "kim gönderdi"
+            // ile gösterebilmek için (bkz. P2PService.maybeNotify
+            // "file_offer" kolu) — 1:1'de zaten `peer` yeterli.
+            "type": "file_offer", "peer": peer_fp, "sender_identity_id": sender_identity_id,
+            "group_id": group_id, "file_id": file_id,
             "file_name": file_name, "mime_type": mime_type, "total_size": total_size,
             "auto_downloading": auto_downloading,
             // Hex-encoded — JSON ham ikili veri taşıyamaz. Küçük bir
@@ -6076,6 +6131,24 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_removeFromGroup<'local>(mut
         Ok(Err(e)) => { error!("remove_from_group failed: {}", e); false as jboolean }
         Err(e) => { error!("remove_from_group panicked: {}", e); false as jboolean }
     }
+}
+
+/// Spec dışı, kullanıcı isteği: grubu TÜM üyeler için siler (yalnızca
+/// kurucu) — bkz. `P2PCore::delete_group`.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteGroup<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>) -> jstring {
+    let gid: String = env.get_string(&group_id).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let mut core = core_lock();
+        core.delete_group(&gid)
+    });
+    let out = match result {
+        Ok(Ok(())) => "OK".to_string(),
+        Ok(Err(e)) => { error!("delete_group failed: {}", e); format!("Error: {}", e) }
+        Err(e) => { error!("delete_group panicked: {}", e); format!("Error: {}", e) }
+    };
+    env.new_string(out).unwrap().into_raw()
 }
 
 /// Grup profil fotoğrafını ayarlar/kaldırır — bkz. `P2PCore::set_group_avatar`.

@@ -152,6 +152,10 @@ object P2PLib {
     external fun createGroup(name: String): String
     external fun inviteToGroup(groupId: String, identityId: String): Boolean
     external fun removeFromGroup(groupId: String, identityId: String): Boolean
+    /** Spec dışı, kullanıcı isteği: grubu TÜM üyeler için siler (imzalı
+     *  `GroupChange::Delete` herkese gönderilir). SADECE kurucu için
+     *  başarılıdır; aksi halde "Error: ..." döner. */
+    external fun deleteGroup(groupId: String): String
     /** Dönüş: `group_message_local_id` (bkz. Rust send_group_message notu —
      *  N üyeye giden fan-out kopyalarını TEK bir yerel kimlikte
      *  birleştirir, "görüldü" bildirimlerini doğru balona eşlemek için

@@ -88,6 +88,19 @@ class ChatsFragment : Fragment() {
      * (bkz. ChatAdapter) bu menü zaten tetiklenmez.
      */
     private fun showChatLongPressMenu(message: ChatAdapter.ChatMessage) {
+        // Spec dışı, kullanıcı isteği: grup satırlarında DM seçenekleri
+        // (geçmişi temizle/cihaz iptal/kişi sil) anlamsız — kurucuysak
+        // "grubu herkes için sil" gösterilir, değilsek menü yok.
+        if (message.isGroup) {
+            if (!message.isGroupFounder) return
+            AlertDialog.Builder(requireContext())
+                .setTitle(message.displayName)
+                .setItems(arrayOf(getString(R.string.action_delete_group))) { _, _ ->
+                    confirmDeleteGroup(message)
+                }
+                .show()
+            return
+        }
         val options = arrayOf(
             getString(R.string.action_clear_chat_history),
             getString(R.string.action_revoke_device),
@@ -102,6 +115,29 @@ class ChatsFragment : Fragment() {
                     2 -> confirmDeleteContactStep1(message)
                 }
             }
+            .show()
+    }
+
+    /** Spec dışı, kullanıcı isteği: kurucu, grubu TÜM üyeler için siler
+     *  (imzalı `GroupChange::Delete` herkese gider) — geri alınamaz, bu
+     *  yüzden onay isteniyor (bkz. Rust `delete_group`). */
+    private fun confirmDeleteGroup(message: ChatAdapter.ChatMessage) {
+        AlertDialog.Builder(requireContext())
+            .setMessage(R.string.confirm_delete_group)
+            .setPositiveButton(R.string.action_delete_group) { _, _ ->
+                val result = try {
+                    P2PLib.deleteGroup(message.contactId)
+                } catch (e: Exception) {
+                    "Error: ${e.message}"
+                }
+                if (result.startsWith("Error:")) {
+                    Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(requireContext(), R.string.msg_group_deleted, Toast.LENGTH_SHORT).show()
+                    refreshList()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
 
@@ -265,7 +301,11 @@ class ChatsFragment : Fragment() {
 
         val contactItems = contacts.map { contact ->
             val fingerprint = contact.activeDeviceFingerprint ?: ""
-            val lastMessage = if (fingerprint.isNotEmpty()) loadLastMessagePreview(fingerprint) else null
+            // Spec dışı, kullanıcı isteği: son satır SADECE metin mesajı
+            // değil, EK de olabilir — ikisinden hangisi daha yeniyse o
+            // gösterilir (ekler `messages` tablosunda değil `files`
+            // tablosunda tutulduğu için ayrı sorgulanır).
+            val lastMessage = if (fingerprint.isNotEmpty()) newestPreview(fingerprint) else null
             ChatAdapter.ChatMessage(
                 contactId = fingerprint,
                 displayName = contact.displayName,
@@ -283,7 +323,8 @@ class ChatsFragment : Fragment() {
                 lastMessage = resources.getQuantityString(R.plurals.lbl_member_count, group.memberCount, group.memberCount),
                 timestamp = 0L,
                 avatarJpeg = group.avatarHex?.let { hexToBytes(it) },
-                isGroup = true
+                isGroup = true,
+                isGroupFounder = group.isFounder
             )
         }
         adapter.submitList(contactItems + groupItems)
@@ -295,8 +336,58 @@ class ChatsFragment : Fragment() {
         val activeDeviceFingerprint: String?,
         val avatarHex: String?
     )
-    private data class GroupRow(val groupId: String, val name: String, val memberCount: Int, val avatarHex: String?)
+    private data class GroupRow(val groupId: String, val name: String, val memberCount: Int, val avatarHex: String?, val isFounder: Boolean)
     private data class LastMessagePreview(val text: String, val timestamp: Long)
+
+    /** Spec dışı, kullanıcı isteği: son metin mesajı ile son EK'ten hangisi
+     *  daha yeniyse onu döner — böylece sohbet listesinde ekler de
+     *  "son mesaj" olarak görünür (önceden sadece metin mesajları
+     *  gösteriliyordu, ek gönderilen bir sohbet boş görünüyordu). */
+    private fun newestPreview(peerDeviceFingerprint: String): LastMessagePreview? {
+        val msg = loadLastMessagePreview(peerDeviceFingerprint)
+        val att = loadLastAttachmentPreview(peerDeviceFingerprint)
+        return when {
+            msg == null -> att
+            att == null -> msg
+            att.timestamp > msg.timestamp -> att
+            else -> msg
+        }
+    }
+
+    /** En yeni eki, türüne göre etiketlenmiş bir önizleme olarak döner
+     *  (bkz. `newestPreview`). */
+    private fun loadLastAttachmentPreview(peerDeviceFingerprint: String): LastMessagePreview? {
+        val json = try {
+            P2PLib.listAttachments(peerDeviceFingerprint)
+        } catch (e: Exception) {
+            return null
+        }
+        val array = try {
+            JSONArray(json)
+        } catch (e: Exception) {
+            return null
+        }
+        var best: LastMessagePreview? = null
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            val createdAt = obj.optLong("created_at", 0L)
+            if (best != null && createdAt <= best.timestamp) continue
+            best = LastMessagePreview(
+                text = attachmentPreviewLabel(obj.optString("mime_type", ""), obj.optString("file_name", "")),
+                timestamp = createdAt
+            )
+        }
+        return best
+    }
+
+    /** Ek türüne göre kısa etiket — bilinmeyen türlerde dosya adı. */
+    private fun attachmentPreviewLabel(mimeType: String, fileName: String): String = when {
+        mimeType.startsWith("image/") -> getString(R.string.lbl_last_photo)
+        mimeType.startsWith("video/") -> getString(R.string.lbl_last_video)
+        mimeType.startsWith("audio/") -> getString(R.string.lbl_last_voice)
+        fileName.isNotEmpty() -> "📎 $fileName"
+        else -> getString(R.string.lbl_last_file)
+    }
 
     private fun loadContacts(): List<ContactRow> {
         val json = try {
@@ -340,7 +431,10 @@ class ChatsFragment : Fragment() {
                 groupId = obj.optString("group_id"),
                 name = obj.optString("name"),
                 memberCount = members?.length() ?: 0,
-                avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null }
+                avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null },
+                // Spec dışı, kullanıcı isteği: "grubu herkes için sil"
+                // seçeneği yalnızca kurucuya gösterilir.
+                isFounder = obj.optBoolean("is_founder", false)
             )
         }
     }

@@ -44,7 +44,11 @@ class ChatAdapter(
         /** Spec dışı, kullanıcı kararı: bu kişi yüz yüze QR ile DEĞİL, bir
          *  grup üzerinden kurucu kefaletiyle eklendiyse `true` — satırda
          *  uyarı işareti gösterilir (bkz. Rust `Contact.added_via_group`). */
-        val addedViaGroup: Boolean = false
+        val addedViaGroup: Boolean = false,
+        /** Spec dışı, kullanıcı isteği: `isGroup` satırlarında, bu grubun
+         *  kurucusu BİZ miyiz — uzun basma menüsünde "grubu herkes için
+         *  sil" seçeneği yalnızca kurucuya gösterilir. */
+        val isGroupFounder: Boolean = false
     ) {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true

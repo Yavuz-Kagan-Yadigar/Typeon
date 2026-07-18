@@ -87,6 +87,13 @@ pub enum GroupChange {
     /// GECER, ayri bir yetki mekanizmasi icat edilmedi). `None` = fotograf
     /// kaldirildi.
     AvatarUpdate(Option<Vec<u8>>),
+    /// Spec dışı, kullanıcı isteği: grubu TÜM üyeler için siler. Diğer
+    /// değişikliklerin aksine bu, gruba bir alan güncellemesi değil —
+    /// alıcı tarafta grup kaydı tamamen kaldırılır (bkz. lib.rs
+    /// `process_group_update` Delete kolu). Yetki, diğerleriyle AYNI
+    /// kuraldan gelir: `validate_group_update` yalnızca kurucunun imzasını
+    /// kabul eder (`NotFounder`), ayrı bir mekanizma icat edilmedi.
+    Delete,
 }
 
 /// Spec dışı, kullanıcı kararı: bir grup üyesinin, kurucu tarafından
