@@ -351,49 +351,59 @@ way (mDNS on a shared LAN, a new QR, or relay discovery) — this is inherent
 to P2P without a central rendezvous server. The sweep keeps trying, so
 recovery is automatic the moment any working path reappears.
 
-### Full traceability resistance (Tor/onion services) — considered, not implemented
+### Tor onion services — reachability across CGNAT (fifth round, v1: reachability only)
 
-A natural follow-up question after the fixes above: can this app be made
-**completely** untraceable? Honest answer: no — and not because of a gap
-specific to this app. Every low-latency anonymity network in existence,
-including Tor itself, explicitly does not defend against a **global
-passive adversary**: an entity able to observe traffic where it enters
-*and* where it exits at the same time can correlate the two by timing and
-volume, without breaking any encryption. This is a documented limitation
-in Tor's own threat model, not an unsolved bug someone forgot to fix — it's
-considered an open problem in anonymity-network research generally.
+The relay/UPnP work above still fails for the hardest case: **both peers
+behind carrier-grade NAT (CGNAT)** — common on mobile data and, increasingly,
+home ISPs. When the ISP itself NATs you (WAN IP in `100.64.0.0/10`), no port
+forwarding, DMZ, UPnP, or static IP can make you reachable, because your
+whole router is behind the carrier's NAT. This isn't fixable at the app or
+router level.
 
-What *would* meaningfully raise the bar beyond the current design (hybrid
-PQ encryption, rotating gossipsub topics, open relay/hole-punching above)
-is routing this app's libp2p traffic through Tor. This is concretely
-buildable — `libp2p-community-tor` is a real, existing crate providing a
-libp2p `Transport` built on `arti` (the Tor Project's own Rust
-implementation of Tor). Two independent settings would keep this fully
-interoperable with users who don't enable it:
-- **Hide outbound connections via Tor** — every dial goes through a Tor
-  circuit instead of directly, so whoever you connect to (and any relay in
-  between) sees a Tor exit address, not your real one. Works completely
-  independently of whether the other side uses Tor — a fully classic peer
-  notices nothing different.
-- **Also reachable as a Tor onion service** — adds an onion address
-  *alongside* the existing IP-based listening address (mDNS/relay/direct),
-  rather than replacing it, so classic peers keep finding the device the
-  same way they do today. Onion services are inherently reachable through
-  NAT with no relay/hole-punching needed, so this could even simplify
-  reachability for Tor-enabled devices. A stricter "onion-only, drop my
-  real address entirely" mode is possible but would break inbound
-  reachability from fully-classic peers (they cannot dial a `.onion`
-  address without Tor) — that would need to be a clearly-labeled,
-  non-default, advanced choice.
+Tor onion services solve exactly this: both the host and the dialer make
+only *outbound* connections to Tor rendezvous points, so two peers **both
+behind CGNAT can connect** — and unlike a private overlay (Tailscale), a
+`.onion` address is public, so it works between strangers with no account or
+pre-authorization. This is now implemented, in a **reachability-only v1**:
 
-**Why this isn't implemented now:** it's a substantial engineering
-investment for real, ongoing costs — per-connection latency from Tor
-circuit setup (typically seconds, not milliseconds), meaningful mobile
-battery/memory overhead from Arti maintaining live circuits, and circuit-
-continuity complications when Android backgrounds or kills the app. This
-was evaluated and deliberately deferred rather than rushed in; the design
-above is left here so it can be revisited if the threat model for this
-app's users changes.
+**What's implemented:**
+- **Hosting.** When Tor is enabled (a Settings toggle, off by default), the
+  app launches an `arti` onion service (`arti-client`, built on the Tor
+  Project's own Rust Tor). Its `.onion` address is stable across restarts
+  (arti's keystore, the Tor analogue of the persistent libp2p PeerId).
+  Incoming Tor streams are bridged to the app's local libp2p TCP listener,
+  so the swarm treats them as ordinary inbound connections — no custom
+  libp2p listener needed.
+- **Dialing.** A small custom libp2p transport routes `/dns/<hash>.onion/…`
+  dials through `arti`'s `TorClient::connect`, composed alongside the normal
+  TCP/relay transports (it only claims `.onion` addresses, so everything
+  else still uses the fast direct path). Built directly on `arti-client`
+  with **rustls (ring)**, deliberately avoiding `libp2p-community-tor` which
+  forces OpenSSL — this keeps the Android cross-compile clean (verified for
+  all three ABIs).
+- **Advertising.** When the onion service is up, `get_node_address()`
+  advertises the `.onion` address (in the QR / "copy my address"), so a
+  Tor-enabled peer can reach you across any network.
+
+**v1 limitations (honest, and by design for this round):**
+- **Reachability, not anonymity.** Your real IP is still observable via the
+  libp2p `identify` exchange to a peer you connect to. Full IP anonymity
+  (suppressing identify's address advertisement and routing *all* outbound
+  dials through Tor) is a deliberately scoped-out **v2**.
+- **Both peers need Tor enabled** to use a `.onion` — a non-Tor device
+  cannot reach it (the connectivity layer must be on both ends, same rule as
+  any overlay).
+- **Real costs, accepted knowingly:** Tor bootstrap on first launch (seconds
+  to a minute, fetching the network consensus), seconds of circuit setup per
+  new connection, background battery use, and ~5 MB larger native library.
+- The toggle takes effect on the next network-layer start (a transport can't
+  be added to a live swarm), so enabling it prompts an app restart.
+
+**Still true regardless of Tor:** complete/absolute untraceability against a
+**global passive adversary** (one observing traffic entering *and* exiting
+the network simultaneously) is not achievable — this is a documented
+limitation of Tor itself and an open problem in anonymity research, not a gap
+specific to this app.
 
 ### Other known network-level limitations (not addressed)
 
@@ -498,4 +508,5 @@ hardening the existing protocol:
 | mDNS persistent PeerId on LAN | Known limitation, deliberately not changed (would reintroduce a previously-fixed reconnection bug) |
 | Kademlia DHT participation reveals IP to other DHT peers | Known limitation, structural to any DHT-based P2P design; relaying mitigates it for message traffic but not DHT participation itself |
 | Zero-config guarantee that any two strangers can always connect | Not fully achievable without *some* reachable point in the network (structural to decentralized P2P, not fixable by protocol changes alone) — mitigated, not eliminated, by the manual relay-address field |
-| Complete/absolute untraceability (IP-level, against a global adversary) | Not achievable by design — same limitation Tor itself has. Tor/onion-service integration (`libp2p-community-tor`) was designed and evaluated but deliberately **not implemented**: real latency/battery cost, and even then only raises the bar, doesn't reach "complete" |
+| No connectivity when both peers are behind CGNAT | **Fixed (v1)** — Tor onion-service hosting + `.onion` dialing (arti/rustls), reachable across CGNAT; both peers must enable Tor. IP still visible via `identify` (anonymity is a scoped v2) |
+| Complete/absolute untraceability (IP-level, against a global adversary) | Not achievable by design — same limitation Tor itself has; even full Tor routing only raises the bar, doesn't reach "complete" |
