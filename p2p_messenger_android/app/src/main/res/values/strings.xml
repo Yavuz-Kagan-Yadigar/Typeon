@@ -39,6 +39,15 @@
     <string name="action_add_relay_address">Ekle</string>
     <string name="msg_relay_address_added">Röle adresi eklendi</string>
 
+    <!-- Spec dışı, kullanıcı isteği: Tor onion service -->
+    <string name="lbl_tor">Tor üzerinden ulaşılabilirlik</string>
+    <string name="lbl_tor_desc">Farklı ağlardaki cihazlara CGNAT\'a rağmen bağlanmayı sağlar (Tor onion service). İlk açılışta bağlanması saniyeler sürer ve pil kullanır. Karşı tarafta da Tor açık olmalı. Değişiklik uygulama yeniden başlatılınca etkinleşir.</string>
+    <string name="tor_status_disabled">Tor: kapalı</string>
+    <string name="tor_status_bootstrapping">Tor: bağlanıyor…</string>
+    <string name="tor_status_ready">Tor: hazır — .onion adresi yayında</string>
+    <string name="tor_status_failed">Tor: başarısız (bkz. günlük)</string>
+    <string name="tor_restart_needed">Değişiklik için uygulamayı kapatıp açın</string>
+
     <!-- Spec dışı, kullanıcı isteği: QR yerine kopyala/yapıştır ile eşleşme/
          röle adresi paylaşımı — bkz. ContactsFragment. -->
     <string name="action_copy_manual_code">Kodumu kopyala</string>

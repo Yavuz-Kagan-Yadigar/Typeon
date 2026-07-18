@@ -32,6 +32,8 @@ class P2PService : Service() {
         const val NOTIFICATION_ID = 1
         const val PREFS_NAME = "p2p_settings"
         const val KEY_NODE_MODE = "node_mode_enabled"
+        /** Spec dışı, kullanıcı isteği (Tor onion). */
+        const val KEY_TOR_ENABLED = "tor_enabled"
 
         /** Registered by UI components (e.g. ChatActivity) that want to be
          *  notified as decrypted messages arrive. Kept simple/static rather
@@ -67,6 +69,20 @@ class P2PService : Service() {
             prefs.edit().putBoolean(KEY_NODE_MODE, enabled).apply()
             // Zaten çalışan bir ağ varsa canlı olarak da güncelle.
             P2PLib.setNodeMode(enabled)
+        }
+
+        /** Spec dışı, kullanıcı isteği (Tor onion) — node modu gibi kalıcı
+         *  bir tercih. `setNodeMode`'un aksine CANLI toggle YOK: Tor transport'u
+         *  ancak `startNetwork`'te eklenebildiğinden, değişiklik ağ katmanı
+         *  yeniden başlayınca geçerli olur (bkz. tor.rs / lib.rs start_network). */
+        fun isTorEnabled(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_TOR_ENABLED, false)
+        }
+
+        fun setTorEnabled(context: Context, enabled: Boolean) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_TOR_ENABLED, enabled).apply()
         }
     }
 
@@ -170,7 +186,8 @@ class P2PService : Service() {
             // başarısız oluyordu).
             com.p2p.messenger.util.MessageHistoryManager.ensureHistoryKeyLoaded(applicationContext)
             val nodeMode = isNodeModeEnabled(applicationContext)
-            P2PLib.startNetwork(nodeMode)
+            val torEnabled = isTorEnabled(applicationContext)
+            P2PLib.startNetwork(nodeMode, torEnabled)
             handler.post(pollRunnable)
         }
 

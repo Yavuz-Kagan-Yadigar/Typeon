@@ -120,6 +120,42 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
+    <!-- Spec dışı, kullanıcı isteği: Tor onion service — CGNAT arkasında da
+         ulaşılabilirlik (bkz. tor.rs / SECURITY.md "Tor onion"). -->
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/tor_switch"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="28dp"
+        android:text="@string/lbl_tor"
+        app:layout_constraintTop_toBottomOf="@id/node_mode_description"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/tor_description"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/lbl_tor_desc"
+        android:textSize="12sp"
+        android:alpha="0.7"
+        app:layout_constraintTop_toBottomOf="@id/tor_switch"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/tor_status"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="@string/tor_status_disabled"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        app:layout_constraintTop_toBottomOf="@id/tor_description"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
     <!-- Spec dışı, güvenlik denetimi devamı: farklı ağlardaki iki kişinin
          (aralarında hiç ortak röle geçmişi olmadan) ilk kez eşleşebilmesini
          GARANTİ eden tek yol — bkz. SECURITY.md "Cross-network connectivity"
@@ -131,7 +167,7 @@
         android:layout_marginTop="20dp"
         android:text="@string/lbl_relay_address"
         android:textStyle="bold"
-        app:layout_constraintTop_toBottomOf="@id/node_mode_description"
+        app:layout_constraintTop_toBottomOf="@id/tor_status"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 

@@ -30,8 +30,15 @@ object P2PLib {
     external fun getIdentityShortCode(): String
 
     // --- Bölüm 4: Ağ ---
-    external fun startNetwork(nodeMode: Boolean): String
+    /** `torEnabled`: açıksa arti ile bir Tor onion service başlatılır; cihaz
+     *  CGNAT arkasında bile ulaşılabilir olur (bkz. tor.rs / SECURITY.md).
+     *  Tor durumu `torStatus()` ile izlenir. Bu ayarın değişmesi ağ katmanının
+     *  yeniden başlatılmasını gerektirir (canlı swarm'a transport eklenemez). */
+    external fun startNetwork(nodeMode: Boolean, torEnabled: Boolean): String
     external fun setNodeMode(enabled: Boolean)
+    /** Spec dışı, kullanıcı isteği (Tor): UI için Tor durumu. Dönüş:
+     *  "disabled" | "bootstrapping" | "ready" | "ready|<host>.onion" | "failed". */
+    external fun torStatus(): String
     /** Polls the network; returns any messages decrypted during this poll. */
     external fun pollNetwork(): Array<String>
     /** Swarm'ın gerçekten dinlemeye başladığı, karşı tarafın dial edebileceği

@@ -2,12 +2,15 @@ package com.p2p.messenger
 
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.Fragment
@@ -35,6 +38,18 @@ class SettingsFragment : Fragment() {
     }
 
     private lateinit var imgOwnAvatar: ImageView
+
+    /** Spec dışı, kullanıcı isteği (Tor): durum etiketi + periyodik yoklama. */
+    private var torStatusView: TextView? = null
+    private val torStatusHandler = Handler(Looper.getMainLooper())
+    private val torStatusRunnable = object : Runnable {
+        override fun run() {
+            updateTorStatusLabel()
+            // Tor durumu (bootstrap) saniyeler içinde değişebildiğinden 2 sn'de
+            // bir yenile.
+            torStatusHandler.postDelayed(this, 2000)
+        }
+    }
 
     /** `registerForActivityResult` Fragment STARTED olmadan ÖNCE
      *  çağrılmalı — bkz. ChatActivity pickFileLauncher aynı notu. */
@@ -66,6 +81,20 @@ class SettingsFragment : Fragment() {
         nodeModeSwitch.setOnCheckedChangeListener { _, isChecked ->
             P2PService.setNodeModeEnabled(requireContext(), isChecked)
         }
+
+        // Spec dışı, kullanıcı isteği: Tor onion service — CGNAT arkasında da
+        // ulaşılabilirlik (bkz. tor.rs / SECURITY.md). Node modunun aksine
+        // CANLI toggle YOK: değişiklik ancak ağ katmanı yeniden başlayınca
+        // etkinleşir (transport ancak startNetwork'te eklenebiliyor), bu yüzden
+        // kullanıcıya "uygulamayı yeniden başlatın" uyarısı gösterilir.
+        val torSwitch = view.findViewById<SwitchMaterial>(R.id.tor_switch)
+        torStatusView = view.findViewById(R.id.tor_status)
+        torSwitch.isChecked = P2PService.isTorEnabled(requireContext())
+        torSwitch.setOnCheckedChangeListener { _, isChecked ->
+            P2PService.setTorEnabled(requireContext(), isChecked)
+            Toast.makeText(requireContext(), R.string.tor_restart_needed, Toast.LENGTH_LONG).show()
+        }
+        startTorStatusPolling()
 
         // Spec dışı, güvenlik denetimi devamı: bkz. SECURITY.md
         // "Cross-network connectivity" notu — organik olarak keşfedilen bir
@@ -167,5 +196,38 @@ class SettingsFragment : Fragment() {
                 }
             }
         }
+    }
+
+    /** Spec dışı, kullanıcı isteği (Tor): Rust `torStatus()`'u yoklar ve
+     *  etiketi günceller. Dönüş "ready|<host>.onion" ise host'u da gösterir. */
+    private fun startTorStatusPolling() {
+        torStatusHandler.removeCallbacks(torStatusRunnable)
+        torStatusHandler.post(torStatusRunnable)
+    }
+
+    private fun updateTorStatusLabel() {
+        val label = torStatusView ?: return
+        val raw = try {
+            P2PLib.torStatus()
+        } catch (e: Exception) {
+            "failed"
+        }
+        val state = raw.substringBefore('|')
+        label.text = when (state) {
+            "bootstrapping" -> getString(R.string.tor_status_bootstrapping)
+            "ready" -> {
+                val host = raw.substringAfter('|', "")
+                if (host.isNotEmpty()) getString(R.string.tor_status_ready) + "\n" + host
+                else getString(R.string.tor_status_ready)
+            }
+            "failed" -> getString(R.string.tor_status_failed)
+            else -> getString(R.string.tor_status_disabled)
+        }
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        torStatusHandler.removeCallbacks(torStatusRunnable)
+        torStatusView = null
     }
 }
