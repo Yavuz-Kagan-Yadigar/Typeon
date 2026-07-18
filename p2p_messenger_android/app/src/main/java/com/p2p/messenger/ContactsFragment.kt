@@ -72,6 +72,13 @@ class ContactsFragment : Fragment() {
         // görünür — bkz. eski QrDisplayActivity (silindi), üretim mantığı
         // birebir buraya taşındı.
         imgOwnQr = view.findViewById(R.id.imgOwnQr)
+        // Spec dışı, kullanıcı isteği: QR boyutu HARDCODED DEĞİL — ekran
+        // genişliğinin %75'i (kare). Küçük/büyük ekranlarda orantılı kalır.
+        val qrSide = (resources.displayMetrics.widthPixels * 0.75f).toInt()
+        imgOwnQr.layoutParams = imgOwnQr.layoutParams.apply {
+            width = qrSide
+            height = qrSide
+        }
         txtOwnIdentityCode = view.findViewById(R.id.txtOwnIdentityCode)
         txtOwnIdentityCode.text = try {
             P2PLib.getIdentityCode()

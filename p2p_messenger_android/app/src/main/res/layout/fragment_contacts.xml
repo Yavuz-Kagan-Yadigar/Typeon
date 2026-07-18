@@ -1,102 +1,111 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-              android:orientation="vertical"
-              android:padding="16dp"
-              android:layout_width="match_parent"
-              android:layout_height="match_parent">
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Contacts"
-        android:textSize="24sp"
-        android:textStyle="bold"/>
+<!-- Spec dışı, kullanıcı isteği: sayfa kaydırılabilir olmalı (QR büyük
+     olduğundan içerik ekrana sığmayabilir). Root artık NestedScrollView.
+     RecyclerView, NestedScrollView içinde `nestedScrollingEnabled=false` +
+     `wrap_content` ile — tüm kişileri açar, kaydırmayı dış scroll üstlenir
+     (kişi listesi küçük olduğu için recycling kaybı önemsiz). -->
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
 
-    <!-- Spec dışı, kullanıcı isteği: kendi QR kodumuz artık ayrı bir "My
-         QR" ekranına gitmeden doğrudan bu sekmede görünür (bkz.
-         ContactsFragment — eski QrDisplayActivity'nin QR üretim mantığı
-         buraya taşındı). -->
-    <ImageView
-        android:id="@+id/imgOwnQr"
-        android:layout_width="600dp"
-        android:layout_height="600dp"
-        android:layout_gravity="center_horizontal"
-        android:layout_marginTop="16dp"
-        android:contentDescription="@string/action_show_qr" />
-
-    <TextView
-        android:id="@+id/txtOwnIdentityCode"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center_horizontal"
-        android:layout_marginTop="8dp"
-        android:fontFamily="monospace"
-        android:textIsSelectable="true"
-        android:textSize="12sp" />
-
-    <!-- Spec dışı, kullanıcı isteği: QR taranamıyorsa (ör. farklı ağ,
-         karşı tarafla ekran paylaşımı) kendi eşleşme kodumu/adresimi elle
-         okutup yazdırmak yerine panoya kopyalayabilmek için — bkz.
-         ContactsFragment.copyManualAddCode/copyOwnAddress. -->
     <LinearLayout
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center_horizontal"
-        android:layout_marginTop="8dp"
-        android:orientation="horizontal">
+        android:orientation="vertical"
+        android:padding="16dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
 
-        <Button
-            android:id="@+id/btn_copy_manual_code"
-            style="?attr/materialButtonOutlinedStyle"
+        <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="@string/action_copy_manual_code"/>
-        <Button
-            android:id="@+id/btn_copy_own_address"
-            style="?attr/materialButtonOutlinedStyle"
+            android:text="Contacts"
+            android:textSize="24sp"
+            android:textStyle="bold"/>
+
+        <!-- Spec dışı, kullanıcı isteği: kendi QR kodumuz doğrudan bu
+             sekmede görünür. Boyut HARDCODED DEĞİL — ContactsFragment,
+             ekran genişliğinin %75'ine ayarlar (bkz. sizeOwnQr). -->
+        <ImageView
+            android:id="@+id/imgOwnQr"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="@string/action_copy_own_address"/>
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="16dp"
+            android:adjustViewBounds="true"
+            android:scaleType="fitCenter"
+            android:contentDescription="@string/action_show_qr" />
 
+        <TextView
+            android:id="@+id/txtOwnIdentityCode"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="8dp"
+            android:fontFamily="monospace"
+            android:textIsSelectable="true"
+            android:textSize="12sp" />
+
+        <!-- Spec dışı, kullanıcı isteği: QR taranamıyorsa panoya kopyalama. -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btn_copy_manual_code"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/action_copy_manual_code"/>
+            <Button
+                android:id="@+id/btn_copy_own_address"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/action_copy_own_address"/>
+
+        </LinearLayout>
+
+        <!-- Diğer eşleşme yöntemleri — QR'ın hemen altında, ortalanmış. -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="12dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btn_scan_qr"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Add Contact via QR"/>
+            <Button
+                android:id="@+id/btn_manual_add"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Manuel Ekle"/>
+
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/contactsPlaceholder"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:gravity="center"
+            android:alpha="0.6"
+            android:text="@string/msg_no_contacts"/>
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/recyclerContacts"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:nestedScrollingEnabled="false"
+            android:visibility="gone"/>
     </LinearLayout>
 
-    <!-- Diğer eşleşme yöntemleri — QR'ın hemen altında, ortalanmış (bkz.
-         kullanıcı isteği). -->
-    <LinearLayout
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center_horizontal"
-        android:layout_marginTop="12dp"
-        android:orientation="horizontal">
-
-        <Button
-            android:id="@+id/btn_scan_qr"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Add Contact via QR"/>
-        <Button
-            android:id="@+id/btn_manual_add"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Manuel Ekle"/>
-
-    </LinearLayout>
-
-    <TextView
-        android:id="@+id/contactsPlaceholder"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:layout_marginTop="16dp"
-        android:gravity="center"
-        android:alpha="0.6"
-        android:text="@string/msg_no_contacts"/>
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/recyclerContacts"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:layout_marginTop="16dp"
-        android:visibility="gone"/>
-</LinearLayout>
+</androidx.core.widget.NestedScrollView>
