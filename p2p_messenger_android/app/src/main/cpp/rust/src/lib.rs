@@ -17,6 +17,7 @@ mod ratchet;
 mod contact;
 mod group;
 mod attachments;
+mod tor;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -386,6 +387,13 @@ const MAX_KNOWN_RELAYS: usize = 10;
 /// üretmez.
 const RECONNECT_SWEEP_INTERVAL_MS: u64 = 15_000;
 
+/// Spec dışı, kullanıcı isteği (Tor): Tor açıkken libp2p SABİT bir TCP portu
+/// dinler — onion service köprüsü (`bridge_incoming_stream`) gelen Tor
+/// akışlarını `127.0.0.1:<bu port>`'a yönlendirdiği için sabit ve önceden
+/// bilinen bir port gerekir. Tor kapalıyken eskisi gibi rastgele port (0)
+/// kullanılır.
+const TOR_LIBP2P_PORT: u16 = 42611;
+
 /// Spec dışı, güvenlik denetimi düzeltmesi: bir `HandshakeInit`'in
 /// `timestamp`'i, o an ile bu kadar milisaniyeden fazla sapıyorsa (ileri
 /// VEYA geri) reddedilir — çok eski yakalanmış el sıkışmaların tekrar
@@ -551,6 +559,14 @@ struct P2PCore {
     /// tutmuyoruz — spec "yeni mesaj gönderme/alma durur" der, yani
     /// alert çözülene kadar o cihazdan gelen mesajlar sessizce reddedilir).
     swarm: Option<Swarm<P2PBehaviour>>,
+    /// Spec dışı, kullanıcı isteği (bkz. tor.rs / SECURITY.md "Tor onion"):
+    /// Tor katmanı açıksa çalışan onion service tutamacı (client + servis +
+    /// köprü). `None` = Tor kapalı. `start_network`'te (tor_enabled ise)
+    /// başlatılır.
+    tor: Option<tor::TorHandle>,
+    /// Kullanıcının Tor'u açıp açmadığı — `start_network`'e paramla gelir,
+    /// `tor_status`/`get_node_address` tarafından okunur.
+    tor_enabled: bool,
     /// `start_network` sonrası swarm'ın gerçekten dinlemeye başladığı
     /// adresler (`SwarmEvent::NewListenAddr`, bkz. `poll_events`) — QR/"Kodum"
     /// ekranında gösterilen `node_address` bundan türetilir. Bootstrap
@@ -713,6 +729,8 @@ impl P2PCore {
             groups: HashMap::new(),
             pending_device_alerts: HashMap::new(),
             swarm: None,
+            tor: None,
+            tor_enabled: false,
             own_listen_addrs: Vec::new(),
             own_external_addr: None,
             pending_envelopes: Vec::new(),
@@ -3853,8 +3871,9 @@ impl P2PCore {
     // Bölüm 4: Ağ / Keşif
     // ---------------------------------------------------------------
 
-    fn start_network(&mut self, node_mode: bool) -> Result<String, String> {
+    fn start_network(&mut self, node_mode: bool, tor_enabled: bool) -> Result<String, String> {
         self.node_mode_enabled = node_mode;
+        self.tor_enabled = tor_enabled;
         self.own_listen_addrs.clear();
 
         // KRİTİK: bu artık HER SEFERİNDE rastgele bir keypair (dolayısıyla
@@ -3863,6 +3882,28 @@ impl P2PCore {
         // bağlanma" notu.
         let app_files_dir = self.app_files_dir.clone().ok_or("initDatabase önce çağrılmalı")?;
         let keypair = load_or_generate_libp2p_keypair(&app_files_dir);
+
+        // Spec dışı, kullanıcı isteği (Tor): Tor açıksa arti onion service'i
+        // başlat (arka planda bootstrap eder). Onion service, gelen Tor
+        // akışlarını `127.0.0.1:TOR_LIBP2P_PORT`'a köprüler; libp2p bu yüzden
+        // SABİT o portu dinlemeli (bkz. TOR_LIBP2P_PORT). Tor kapalıysa hiç
+        // arti oluşturulmaz (ağır bağımlılık çalışma-zamanı maliyeti yok).
+        let tor_handle: Option<tor::TorHandle> = if tor_enabled {
+            let state_dir = format!("{}/arti_state", app_files_dir);
+            let cache_dir = format!("{}/arti_cache", app_files_dir);
+            match tor::TorHandle::launch(&state_dir, &cache_dir, TOR_LIBP2P_PORT) {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    error!("Tor başlatılamadı: {} — Tor'suz devam ediliyor", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        // Dial transport için client (Tor kapalıysa None — transport inert).
+        let tor_client = tor_handle.as_ref().map(|h| h.client.clone());
+        let listen_port: u16 = if tor_handle.is_some() { TOR_LIBP2P_PORT } else { 0 };
 
         let gs_config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(std::time::Duration::from_secs(10))
@@ -3886,6 +3927,30 @@ impl P2PCore {
                 noise::Config::new,
                 yamux::Config::default,
             )
+            .map_err(|e| e.to_string())?
+            // Spec dışı, kullanıcı isteği (Tor): `.onion` adreslerini Tor
+            // üzerinden dial eden transport (bkz. tor.rs ArtiDialTransport).
+            // `.with_other_transport` yalnızca TcpPhase/OtherTransportPhase'de
+            // var (RelayPhase'de YOK) — bu yüzden with_relay_client'tan ÖNCE
+            // eklenmeli (bkz. libp2p-0.53.2 builder/phase). Kendi Noise+Yamux
+            // upgrade'imizi burada uyguluyoruz (with_other_transport upgraded
+            // bir transport, yani Output=(PeerId, Muxer) ister). Tor kapalıysa
+            // client None → transport her dial'ı reddeder, OrTransport TCP'ye
+            // düşer (inert).
+            .with_other_transport(|keypair| {
+                use libp2p::core::transport::Transport as _;
+                // `TryIntoTransport for Result<T, E>` E'nin TAM olarak
+                // `Box<dyn Error + Send + Sync>` olmasını ister (bkz. libp2p
+                // builder/phase/other_transport.rs) — bu yüzden hata tipi
+                // kutu.
+                let noise_cfg = noise::Config::new(keypair)?;
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
+                    tor::ArtiDialTransport::new(tor_client.clone())
+                        .upgrade(libp2p::core::upgrade::Version::V1Lazy)
+                        .authenticate(noise_cfg)
+                        .multiplex(yamux::Config::default()),
+                )
+            })
             .map_err(|e| e.to_string())?
             // bkz. SECURITY.md "Cross-network connectivity" notu — bu
             // cihazın bir röle ÜZERİNDEN dial edebilmesi (relay_client) için
@@ -3951,7 +4016,9 @@ impl P2PCore {
 
         let peer_id = *swarm.local_peer_id();
 
-        swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().map_err(|_| "bad multiaddr")?)
+        // Tor açıkken SABİT port (onion köprüsü buraya bağlanır), kapalıyken
+        // rastgele (0) — bkz. TOR_LIBP2P_PORT.
+        swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", listen_port).parse().map_err(|_| "bad multiaddr")?)
             .map_err(|e| e.to_string())?;
 
         if let Ok(active_fp) = self.get_active_own_device_fingerprint() {
@@ -3969,6 +4036,7 @@ impl P2PCore {
         }
 
         self.swarm = Some(swarm);
+        self.tor = tor_handle;
 
         // bkz. `DEFAULT_BOOTSTRAP_RELAYS` dokümantasyonu — boşsa no-op.
         for addr in DEFAULT_BOOTSTRAP_RELAYS {
@@ -4020,6 +4088,18 @@ impl P2PCore {
     fn get_node_address(&self) -> Option<String> {
         let swarm = self.swarm.as_ref()?;
         let peer_id = *swarm.local_peer_id();
+        // Spec dışı, kullanıcı isteği (Tor): Tor açık VE onion service yayında
+        // ise, HER ŞEYDEN ÖNCE .onion adresini paylaş — bu, CGNAT dahil HER
+        // ağdan (karşı tarafta da Tor açıksa) ulaşılabilir tek adres. Biçim:
+        // `/dns/<host>.onion/tcp/<port>/p2p/<peer_id>` (bkz. tor.rs
+        // ArtiDialTransport `onion_host_port`). Port keyfi — onion köprüsü
+        // gelen HER portu yerel libp2p'ye yönlendiriyor (bkz.
+        // bridge_incoming_stream), tutarlılık için TOR_LIBP2P_PORT kullanılıyor.
+        if let Some(tor) = &self.tor {
+            if let Some(onion_host) = tor.onion_host() {
+                return Some(format!("/dns/{}/tcp/{}/p2p/{}", onion_host, TOR_LIBP2P_PORT, peer_id));
+            }
+        }
         // bkz. `own_external_addr` alanı dokümantasyonu — UPnP ile
         // eşlenmiş, GERÇEKTEN dışarıdan (farklı ağdan) çevrilebilir bir
         // adres varsa HER ŞEYDEN ÖNCE o tercih edilir; LAN adresi başka
@@ -4029,6 +4109,21 @@ impl P2PCore {
             .or_else(|| self.own_listen_addrs.iter().find(|a| !is_loopback_multiaddr(a)))
             .or_else(|| self.own_listen_addrs.first())?;
         Some(format!("{addr}/p2p/{peer_id}"))
+    }
+
+    /// Spec dışı, kullanıcı isteği (Tor): UI için Tor durumu — "disabled" /
+    /// "bootstrapping" / "ready" / "failed" (+ hazırsa .onion host adı).
+    fn tor_status(&self) -> String {
+        match &self.tor {
+            None => "disabled".to_string(),
+            Some(h) => {
+                let st = h.status().as_str();
+                match h.onion_host() {
+                    Some(host) if h.status() == tor::TorStatus::Ready => format!("{st}|{host}"),
+                    _ => st.to_string(),
+                }
+            }
+        }
     }
 
     /// Spec dışı, güvenlik denetimi düzeltmesi: gossipsub topic adı önceden
@@ -5176,7 +5271,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getIdentityShortCode<'local
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_startNetwork<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, node_mode: jboolean) -> jstring {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_startNetwork<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, node_mode: jboolean, tor_enabled: jboolean) -> jstring {
     let result = catch_panic(move || {
         // `SwarmBuilder::with_tokio()` (start_network içinde) bir Tokio runtime
         // context'inin thread-local olarak aktif olmasını gerektirir — bu JNI
@@ -5187,7 +5282,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_startNetwork<'local>(mut en
         // gerekir; bir thread'de enter() etmek başka bir thread'i etkilemez).
         let _guard = RUNTIME.enter();
         let mut core = core_lock();
-        core.start_network(node_mode != 0)
+        core.start_network(node_mode != 0, tor_enabled != 0)
     });
     match result {
         Ok(Ok(pid)) => env.new_string(pid).unwrap().into_raw(),
@@ -5218,6 +5313,18 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getNodeAddress<'local>(mut 
     });
     let addr = result.unwrap_or_else(|e| { error!("getNodeAddress panicked: {}", e); String::new() });
     env.new_string(addr).unwrap().into_raw()
+}
+
+/// Spec dışı, kullanıcı isteği (Tor): UI için Tor durumu. Dönüş:
+/// "disabled" | "bootstrapping" | "ready" | "ready|<host>.onion" | "failed".
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_torStatus<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
+    let result = catch_panic(|| {
+        let core = core_lock();
+        core.tor_status()
+    });
+    let out = result.unwrap_or_else(|e| { error!("torStatus panicked: {}", e); "failed".to_string() });
+    env.new_string(out).unwrap().into_raw()
 }
 
 /// Spec dışı: ChatActivity'nin "bağlanılıyor..." göstergesi için — bkz.

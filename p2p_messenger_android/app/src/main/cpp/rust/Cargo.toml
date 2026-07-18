@@ -76,7 +76,24 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 futures = "0.3"
 
 # Database
-rusqlite = { version = "0.30", features = ["bundled"] }
+# NOT: rusqlite 0.30 -> 0.32'ye yükseltildi çünkü arti (tor-dirmgr) rusqlite
+# 0.32'ye KOŞULSUZ bağımlı; iki farklı libsqlite3-sys sürümü (ikisi de
+# `links = "sqlite3"`) cargo'nun "multiple packages link to sqlite3"
+# hatasıyla derlemeyi reddetmesine yol açardı. Tek sürüme hizalayarak
+# çakışma önlendi (kullanılan API — Connection/execute/query_map/params/
+# prepare — 0.30-0.32 arasında değişmedi).
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Tor (onion service) — spec dışı, kullanıcı isteği: CGNAT arkasındaki
+# cihazların birbirine ulaşabilmesi için (bkz. SECURITY.md "Tor onion"
+# notu). native-tls YERİNE rustls (openssl cross-compile derdinden kaçınmak
+# için); arti'nin rustls'i `ring` kullanıyor, o da bu projede zaten cross-
+# compile ediliyor. onion-service-service = host etme, onion-service-client
+# + keymgr = kalıcı .onion adresi.
+arti-client = { version = "0.24", default-features = false, features = ["tokio", "rustls", "onion-service-client", "onion-service-service", "compression", "keymgr"] }
+tor-hsservice = "0.24"
+tor-cell = "0.24"
+tor-rtcompat = { version = "0.24", features = ["tokio", "rustls"] }
 
 # Android JNI
 jni = "0.21"
