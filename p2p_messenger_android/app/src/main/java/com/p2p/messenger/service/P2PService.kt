@@ -134,7 +134,37 @@ class P2PService : Service() {
                     )
                 }
             }
+            // Spec dışı, kullanıcı isteği: EKLER de bildirim üretsin —
+            // önceden sadece metin mesajları bildirim üretiyordu, biri
+            // fotoğraf/dosya gönderdiğinde hiçbir uyarı gelmiyordu.
+            "file_offer" -> {
+                val groupId = if (obj.isNull("group_id")) "" else obj.optString("group_id")
+                val label = attachmentNotificationLabel(
+                    obj.optString("mime_type", ""), obj.optString("file_name", "")
+                )
+                if (groupId.isNotEmpty()) {
+                    if (activeConversationId != "group:$groupId") {
+                        NotificationHelper.showGroupMessageNotification(
+                            applicationContext, groupId, obj.optString("sender_identity_id"), label
+                        )
+                    }
+                } else {
+                    val peer = obj.optString("peer")
+                    if (peer.isNotEmpty() && activeConversationId != peer) {
+                        NotificationHelper.showMessageNotification(applicationContext, peer, label)
+                    }
+                }
+            }
         }
+    }
+
+    /** Ek bildirimi için kısa etiket (bkz. `maybeNotify` "file_offer"). */
+    private fun attachmentNotificationLabel(mimeType: String, fileName: String): String = when {
+        mimeType.startsWith("image/") -> getString(R.string.lbl_last_photo)
+        mimeType.startsWith("video/") -> getString(R.string.lbl_last_video)
+        mimeType.startsWith("audio/") -> getString(R.string.lbl_last_voice)
+        fileName.isNotEmpty() -> "📎 $fileName"
+        else -> getString(R.string.lbl_last_file)
     }
 
     override fun onCreate() {

@@ -12,7 +12,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.color.MaterialColors
-import com.google.android.material.progressindicator.CircularProgressIndicator
+import com.google.android.material.progressindicator.LinearProgressIndicator
 import com.google.android.material.slider.Slider
 import com.p2p.messenger.R
 import com.p2p.messenger.util.AvatarUtil
@@ -52,6 +52,10 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val totalSize: Long,
         var status: AttachmentStatus,
         var bytesDone: Long = 0,
+        /** Spec dışı, kullanıcı isteği (ETA sayacı): indirmenin başladığı
+         *  an (ms). İlk `file_progress` olayında set edilir; kalan süre
+         *  ortalama hızdan (bytesDone / geçen süre) hesaplanır. */
+        var downloadStartedAt: Long = 0L,
         /** Spec dışı: gönderen tarafın önceden oluşturduğu küçük bir 480p/
          *  %85 JPEG önizleme kapağı (foto/video için) — doluysa, TAM dosya
          *  hiç indirilmeden `bindAttachment`'ta küçük resim olarak
@@ -142,7 +146,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val rowGenericAttachment: View = itemView.findViewById(R.id.rowGenericAttachment)
         val txtAttachmentName: TextView = itemView.findViewById(R.id.txtAttachmentName)
         val txtAttachmentSize: TextView = itemView.findViewById(R.id.txtAttachmentSize)
-        val progressAttachment: CircularProgressIndicator = itemView.findViewById(R.id.progressAttachment)
+        val progressAttachment: LinearProgressIndicator = itemView.findViewById(R.id.progressAttachment)
+        val txtAttachmentEta: TextView = itemView.findViewById(R.id.txtAttachmentEta)
         val btnAttachmentDownload: Button = itemView.findViewById(R.id.btnAttachmentDownload)
         val layoutVoiceMessage: View = itemView.findViewById(R.id.layoutVoiceMessage)
         val btnVoicePlayPause: ImageView = itemView.findViewById(R.id.btnVoicePlayPause)
@@ -179,6 +184,16 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val idx = indexOfMessageId(fileId)
         if (idx < 0) return
         val attachment = items[idx].attachment ?: return
+        // Spec dışı, kullanıcı isteği (ETA): indirme başlangıcını ilk
+        // DOWNLOADING geçişinde damgala; tamamlanınca/başarısız olunca
+        // sıfırla ki olası bir yeniden denemede taze ölçüm yapılsın.
+        if (status == AttachmentStatus.DOWNLOADING) {
+            if (attachment.downloadStartedAt == 0L) {
+                attachment.downloadStartedAt = System.currentTimeMillis()
+            }
+        } else {
+            attachment.downloadStartedAt = 0L
+        }
         attachment.status = status
         if (bytesDone != null) attachment.bytesDone = bytesDone
         notifyItemChanged(idx)
@@ -414,8 +429,19 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.progressAttachment.max = 1000
             val fraction = ((attachment.bytesDone.toDouble() / max.toDouble()) * 1000).toInt().coerceIn(0, 1000)
             holder.progressAttachment.setProgressCompat(fraction, true)
+            // Spec dışı, kullanıcı isteği: kalan süre (ETA) — ortalama hız
+            // (indirilen bayt / geçen süre) üzerinden. Henüz ölçecek kadar
+            // veri yoksa gizli kalır (yanıltıcı bir tahmin göstermektense).
+            val etaText = formatEta(context, attachment)
+            if (etaText != null) {
+                holder.txtAttachmentEta.visibility = View.VISIBLE
+                holder.txtAttachmentEta.text = etaText
+            } else {
+                holder.txtAttachmentEta.visibility = View.GONE
+            }
         } else {
             holder.progressAttachment.visibility = View.GONE
+            holder.txtAttachmentEta.visibility = View.GONE
         }
         holder.btnAttachmentDownload.visibility = if (attachment.status == AttachmentStatus.OFFERED || attachment.status == AttachmentStatus.FAILED) View.VISIBLE else View.GONE
 
@@ -524,6 +550,31 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.txtSeenByMore.text = "+$overflow"
         } else {
             holder.txtSeenByMore.visibility = View.GONE
+        }
+    }
+
+    /** Spec dışı, kullanıcı isteği: kalan süre (ETA) metni. Ortalama hız
+     *  (indirilen bayt / geçen süre) üzerinden hesaplanır — anlık hız
+     *  yerine ortalama, ağdaki dalgalanmalarda çok daha kararlı bir tahmin
+     *  verir. Ölçüm için yeterli veri yoksa (henüz başlamadı, 1 sn'den az
+     *  geçti, veya hiç bayt inmedi) `null` döner ve sayaç gizlenir —
+     *  yanıltıcı bir "0 sn kaldı" göstermemek için. */
+    private fun formatEta(context: android.content.Context, attachment: AttachmentInfo): String? {
+        val startedAt = attachment.downloadStartedAt
+        if (startedAt <= 0L) return null
+        val elapsedMs = System.currentTimeMillis() - startedAt
+        if (elapsedMs < 1000L) return null
+        val done = attachment.bytesDone
+        if (done <= 0L) return null
+        val remaining = attachment.totalSize - done
+        if (remaining <= 0L) return null
+        val bytesPerMs = done.toDouble() / elapsedMs.toDouble()
+        if (bytesPerMs <= 0.0) return null
+        val etaSeconds = (remaining.toDouble() / bytesPerMs / 1000.0).toLong()
+        return if (etaSeconds >= 60) {
+            context.getString(R.string.lbl_eta_minutes, etaSeconds / 60, etaSeconds % 60)
+        } else {
+            context.getString(R.string.lbl_eta_seconds, etaSeconds.coerceAtLeast(1))
         }
     }
 

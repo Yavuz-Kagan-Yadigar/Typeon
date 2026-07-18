@@ -44,6 +44,20 @@
          eklenen kişiler yüz yüze QR ile doğrulanmadı. -->
     <string name="contact_added_via_group">Grup üzerinden eklendi — yüz yüze doğrulanmadı</string>
 
+    <!-- Spec dışı, kullanıcı isteği: kurucu grubu herkes için silebilir. -->
+    <string name="action_delete_group">Grubu sil (herkes için)</string>
+    <string name="confirm_delete_group">Bu grup TÜM üyeler için silinecek ve geri alınamaz. Emin misiniz?</string>
+    <string name="msg_group_deleted">Grup silindi</string>
+
+    <!-- Spec dışı, kullanıcı isteği: sohbet listesinde ek önizlemesi -->
+    <string name="lbl_last_photo">📷 Fotoğraf</string>
+    <string name="lbl_last_video">🎬 Video</string>
+    <string name="lbl_last_voice">🎤 Sesli mesaj</string>
+    <string name="lbl_last_file">📎 Dosya</string>
+    <!-- Spec dışı, kullanıcı isteği: indirme ETA sayacı -->
+    <string name="lbl_eta_seconds">~%d sn kaldı</string>
+    <string name="lbl_eta_minutes">~%1$d dk %2$d sn kaldı</string>
+
     <string name="lbl_tor">Tor üzerinden ulaşılabilirlik</string>
     <string name="lbl_tor_desc">Farklı ağlardaki cihazlara CGNAT\'a rağmen bağlanmayı sağlar (Tor onion service). İlk açılışta bağlanması saniyeler sürer ve pil kullanır. Karşı tarafta da Tor açık olmalı. Değişiklik uygulama yeniden başlatılınca etkinleşir.</string>
     <string name="tor_status_disabled">Tor: kapalı</string>

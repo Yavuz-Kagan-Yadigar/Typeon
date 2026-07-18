@@ -106,20 +106,6 @@
 
             </LinearLayout>
 
-            <!-- Spec dışı, Material You: gerçek (belirlenimli) ilerleme —
-                 önceden bir platform ProgressBar'dı, hep belirsiz (spinner)
-                 modda, gerçek bytesDone/totalSize'ı HİÇ yansıtmıyordu (bkz.
-                 SimpleChatAdapter.bindAttachment). -->
-            <com.google.android.material.progressindicator.CircularProgressIndicator
-                android:id="@+id/progressAttachment"
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:layout_marginStart="8dp"
-                android:indeterminate="false"
-                app:trackThickness="3dp"
-                app:indicatorSize="24dp"
-                android:visibility="gone" />
-
             <Button
                 android:id="@+id/btnAttachmentDownload"
                 style="?attr/materialButtonOutlinedStyle"
@@ -130,6 +116,30 @@
                 android:visibility="gone" />
 
         </LinearLayout>
+
+        <!-- Spec dışı, kullanıcı isteği: indirme için GERÇEK bir ilerleme
+             ÇUBUĞU (önceden satır içinde 24dp'lik küçük bir dairesel
+             göstergeydi) + kalan süre (ETA) sayacı. Belirlenimli:
+             bytesDone/totalSize'ı yansıtır (bkz.
+             SimpleChatAdapter.bindAttachment). -->
+        <com.google.android.material.progressindicator.LinearProgressIndicator
+            android:id="@+id/progressAttachment"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:indeterminate="false"
+            app:trackCornerRadius="2dp"
+            app:trackThickness="4dp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/txtAttachmentEta"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textSize="11sp"
+            android:textColor="?attr/colorOnSurfaceVariant"
+            android:visibility="gone" />
 
         <!-- Spec dışı: sesli mesaj balonu — jenerik dosya satırının YERİNE
              (bkz. SimpleChatAdapter.bindVoiceMessage), mime "audio/" ile
