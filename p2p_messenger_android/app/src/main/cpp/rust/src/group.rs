@@ -58,6 +58,26 @@ impl Group {
         self.members.iter().map(|m| m.identity_id.clone()).collect()
     }
 
+    /// Spec dışı, hata düzeltmesi (üçüncü üye hatası): üyelik listesini
+    /// kurucudan gelen OTORİTER listeye eşitler (bkz. `GroupUpdate.members`).
+    /// Var olan üyelerin `added_at`'i korunur (gereksiz değişiklik olmasın),
+    /// listede olmayanlar çıkarılır, yeni olanlar eklenir. Bu, hem geç
+    /// katılan bir üyenin TAM üyeliği almasını hem de kaçırılan
+    /// güncellemelerin kendiliğinden düzelmesini sağlar.
+    pub fn sync_members(&mut self, identity_ids: &[String], now: u64) {
+        let founder = self.founder_identity_id.clone();
+        self.members.retain(|m| identity_ids.contains(&m.identity_id));
+        for id in identity_ids {
+            if !self.members.iter().any(|m| &m.identity_id == id) {
+                self.members.push(GroupMember {
+                    identity_id: id.clone(),
+                    added_at: now,
+                    added_by: founder.clone(),
+                });
+            }
+        }
+    }
+
     /// Diğer tüm üyeler (mesaj gönderilecek hedef listesi) — kendisi hariç.
     pub fn other_members(&self, exclude_identity_id: &str) -> Vec<String> {
         self.members
@@ -192,6 +212,47 @@ mod tests {
             validate_group_update(&group, "founder1", true, 3),
             Err(GroupUpdateError::StaleOrOutOfOrderVersion)
         );
+    }
+
+    /// Regresyon (üçüncü üye hatası): kurucu A, önce B'yi (v1) sonra C'yi
+    /// (v2) ekler. C grubu İLK KEZ v2 güncellemesiyle öğrenir — yani
+    /// yerelde `Group::new` (SADECE kurucu) + `Add(C)` uygulanır. Bu, C'nin
+    /// üyeliği [A, C] sanmasına ve B'ye hiç mesaj gönderememesine yol
+    /// açıyordu. `sync_members` (güncellemenin taşıdığı otoriter liste) ile
+    /// C artık TAM üyeliği alır.
+    #[test]
+    fn late_joiner_gets_full_membership() {
+        let founder = "A".to_string();
+        // C tarafında: grup ilk kez oluşturuluyor (yalnızca kurucu ile).
+        let mut c_view = Group::new("g1".into(), "Test".into(), founder.clone(), 1000);
+        let change = GroupChange::Add("C".to_string());
+        apply_change(&mut c_view, &change, 2, 2000);
+
+        // sync_members OLMADAN B eksik kalırdı — hatanın ta kendisi:
+        assert!(!c_view.is_member("B"), "ön koşul: sync'ten önce B bilinmiyor");
+
+        // Güncellemenin taşıdığı otoriter liste ile eşitle.
+        c_view.sync_members(&["A".to_string(), "B".to_string(), "C".to_string()], 2000);
+
+        assert!(c_view.is_member("A"));
+        assert!(c_view.is_member("B"), "geç katılan üye, kendisinden ÖNCE eklenmiş üyeyi de görmeli");
+        assert!(c_view.is_member("C"));
+        // C, grup mesajını hem A'ya hem B'ye gönderebilmeli.
+        let targets = c_view.other_members("C");
+        assert_eq!(targets.len(), 2);
+    }
+
+    /// `sync_members` çıkarılan üyeyi de düşürür (kaçırılmış Remove'lar
+    /// kendiliğinden düzelir).
+    #[test]
+    fn sync_members_drops_removed() {
+        let mut g = Group::new("g1".into(), "Test".into(), "A".into(), 1000);
+        apply_change(&mut g, &GroupChange::Add("B".into()), 1, 2000);
+        apply_change(&mut g, &GroupChange::Add("C".into()), 2, 2000);
+        assert!(g.is_member("B"));
+        g.sync_members(&["A".to_string(), "C".to_string()], 3000);
+        assert!(!g.is_member("B"));
+        assert!(g.is_member("C"));
     }
 
     #[test]

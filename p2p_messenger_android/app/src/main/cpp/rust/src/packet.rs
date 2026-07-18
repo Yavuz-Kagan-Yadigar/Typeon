@@ -101,6 +101,20 @@ pub struct GroupUpdate {
     /// oluşturuyordu, bu da grup bildirimlerinde/ekranlarında kalıcı olarak
     /// boş başlık göstermeye yol açıyordu (bkz. dosya sonu not).
     pub group_name: String,
+    /// Spec dışı, hata düzeltmesi (üçüncü üye hatası): bu değişiklikten
+    /// SONRAKİ TAM üyelik listesi (kurucunun otoritesi). Önceden yoktu ve
+    /// `process_group_update`, grubu yerelde ilk kez oluştururken
+    /// `Group::new` ile SADECE kurucuyu ekleyip üstüne tek bir `change`
+    /// uyguluyordu — yani SONRADAN eklenen bir üye, KENDİSİNDEN ÖNCE
+    /// eklenmiş üyeleri HİÇ öğrenemiyordu (üçüncü cihaz grubu [kurucu, ben]
+    /// olarak görüyor, ikinci üyeye mesaj gönderemiyordu). Artık her
+    /// güncelleme tam listeyi taşıyor: geç katılan üye tam üyeliği alır VE
+    /// arada kaçırılan güncellemeler de kendiliğinden düzelir (self-healing).
+    /// `#[serde(default)]` — bu alan olmadan üretilmiş eski paketler yine
+    /// ayrıştırılabilsin diye (ama imza kapsamına dahil olduğundan, karışık
+    /// sürümler imza doğrulamasında elenir; tüm cihazlar güncellenmeli).
+    #[serde(default)]
+    pub members: Vec<String>,
     /// founder_identity_id olmalı — alıcı taraf bunu doğrular.
     pub signed_by: String,
     /// Kurucunun hangi cihazı imzaladı.

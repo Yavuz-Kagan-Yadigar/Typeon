@@ -387,6 +387,19 @@ const MAX_KNOWN_RELAYS: usize = 10;
 /// üretmez.
 const RECONNECT_SWEEP_INTERVAL_MS: u64 = 15_000;
 
+/// Spec dışı, hata düzeltmesi ("ilk mesaj yutuluyor"): gossipsub SIRA
+/// GARANTİSİ VERMEZ — bir sohbetin İLK mesajı, onu mümkün kılan
+/// `HandshakeInit`'ten ÖNCE varabilir. Önceden bu durumda `receive_message`
+/// "No ratchet session for sender" ile hata verip paketi ATIYORDU; DM'de
+/// ack-retry eninde sonunda kurtarıyordu ama GRUP mesajlarında retry
+/// olmadığı için mesaj KALICI olarak kayboluyordu. Artık böyle paketler
+/// burada tamponlanıp el sıkışma tamamlanınca yeniden oynatılıyor.
+/// Tampon sınırlıdır (bellek/DoS koruması): peer başına en fazla
+/// `MAX_EARLY_PACKETS_PER_PEER`, ve `EARLY_PACKET_TTL_MS`'ten eski girdiler
+/// budanır.
+const EARLY_PACKET_TTL_MS: u64 = 120_000;
+const MAX_EARLY_PACKETS_PER_PEER: usize = 20;
+
 /// Spec dışı, kullanıcı isteği (Tor): Tor açıkken libp2p SABİT bir TCP portu
 /// dinler — onion service köprüsü (`bridge_incoming_stream`) gelen Tor
 /// akışlarını `127.0.0.1:<bu port>`'a yönlendirdiği için sabit ve önceden
@@ -551,6 +564,11 @@ struct P2PCore {
     /// (sınırsız büyümez). Bellek-içi; süreç yeniden başlasa da freshness
     /// penceresi çok eski tekrarları zaten reddeder.
     recent_handshake_sigs: HashMap<String, Vec<(u64, Vec<u8>)>>,
+    /// Spec dışı, hata düzeltmesi ("ilk mesaj yutuluyor") — bkz.
+    /// `EARLY_PACKET_TTL_MS`. key = gönderen device_fingerprint,
+    /// value = (tamponlanma zamanı, paket). El sıkışma tamamlanınca
+    /// `replay_early_packets` ile sırayla işlenir.
+    early_packets: HashMap<String, Vec<(u64, MessagePacket)>>,
     groups: HashMap<String, Group>,
     /// Kullanıcının onay beklediği, henüz kabul/red edilmemiş cihaz
     /// değişikliği uyarıları (spec 2.2). key = new_device_fingerprint.
@@ -726,6 +744,7 @@ impl P2PCore {
             identity_to_contact: HashMap::new(),
             ratchets: HashMap::new(),
             recent_handshake_sigs: HashMap::new(),
+            early_packets: HashMap::new(),
             groups: HashMap::new(),
             pending_device_alerts: HashMap::new(),
             swarm: None,
@@ -3114,9 +3133,16 @@ impl P2PCore {
         }
         let new_version = group.version + 1;
 
-        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
         let change = GroupChange::Add(new_member_identity_id.to_string());
-        let update = sign_group_update(group_id, new_version, &change, &group.name, &own_identity_id, &own_fp, own_keys)?;
+        // Spec dışı, hata düzeltmesi (üçüncü üye hatası): imzalanan/taşınan
+        // üyelik listesi DEĞİŞİKLİK SONRASI olmalı — değişikliği bir klon
+        // üzerinde "projekte edip" sonucu okuyoruz (yerel state aşağıda
+        // ayrıca güncelleniyor). bkz. `GroupUpdate.members`.
+        let mut projected = group.clone();
+        apply_change(&mut projected, &change, new_version, current_time_ms());
+        let members_after = projected.member_identity_ids();
+        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
+        let update = sign_group_update(group_id, new_version, &change, &group.name, &members_after, &own_identity_id, &own_fp, own_keys)?;
 
         // Yerel state'i güncelle.
         if let Some(g) = self.groups.get_mut(group_id) {
@@ -3155,9 +3181,14 @@ impl P2PCore {
             return Err("Sadece kurucu üye çıkarabilir".to_string());
         }
         let new_version = group.version + 1;
-        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
         let change = GroupChange::Remove(member_identity_id.to_string());
-        let update = sign_group_update(group_id, new_version, &change, &group.name, &own_identity_id, &own_fp, own_keys)?;
+        // bkz. invite_to_group'taki aynı not — imzalanan liste değişiklik
+        // SONRASI (çıkarılan üye hariç).
+        let mut projected = group.clone();
+        apply_change(&mut projected, &change, new_version, current_time_ms());
+        let members_after = projected.member_identity_ids();
+        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
+        let update = sign_group_update(group_id, new_version, &change, &group.name, &members_after, &own_identity_id, &own_fp, own_keys)?;
 
         // Çıkarılan üyeye ULAŞMADAN önce eski üye listesini al (spec 5.3:
         // çıkarılan üyeye artık GroupUpdate/grup mesajı gönderilmez).
@@ -3202,9 +3233,13 @@ impl P2PCore {
             return Err("Sadece kurucu profil fotoğrafını değiştirebilir".to_string());
         }
         let new_version = group.version + 1;
-        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
         let change = GroupChange::AvatarUpdate(avatar_jpeg);
-        let update = sign_group_update(group_id, new_version, &change, &group.name, &own_identity_id, &own_fp, own_keys)?;
+        // Avatar değişikliği üyeliği etkilemez ama listeyi yine taşıyoruz —
+        // her güncelleme otoriter üyeliği taşısın ki kaçırılmış üyelik
+        // güncellemeleri de kendiliğinden düzelsin (bkz. GroupUpdate.members).
+        let members_after = group.member_identity_ids();
+        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
+        let update = sign_group_update(group_id, new_version, &change, &group.name, &members_after, &own_identity_id, &own_fp, own_keys)?;
 
         if let Some(g) = self.groups.get_mut(group_id) {
             apply_change(g, &change, new_version, current_time_ms());
@@ -3237,6 +3272,7 @@ impl P2PCore {
         to_verify.extend_from_slice(&update.new_version.to_be_bytes());
         to_verify.extend_from_slice(&ciborium_bytes(&update.change)?);
         to_verify.extend_from_slice(update.group_name.as_bytes());
+        to_verify.extend_from_slice(&ciborium_bytes(&update.members)?);
         // Artık MessagePacket/HandshakeInit ile AYNI hibrit (Ed25519+ML-DSA)
         // model — bkz. sign_group_update/packet.rs GroupUpdate.signature_pq
         // notu (güvenlik denetimi düzeltmesi).
@@ -3280,6 +3316,15 @@ impl P2PCore {
             // Her güncellemede ismi senkron tut (self-healing) — sadece
             // açık bir Rename değişikliğinde değil.
             g.name = update.group_name.clone();
+            // Spec dışı, hata düzeltmesi (üçüncü üye hatası): kurucudan gelen
+            // TAM üyelik listesine eşitle — bkz. `GroupUpdate.members`. Bu
+            // olmadan, sonradan eklenen bir üye kendisinden ÖNCE eklenmiş
+            // üyeleri hiç öğrenemiyordu (grubu [kurucu, ben] sanıyordu).
+            // Eski (members'sız) bir gönderenle uyum için liste boşsa
+            // dokunmuyoruz — o durumda eski davranış korunur.
+            if !update.members.is_empty() {
+                g.sync_members(&update.members, current_time_ms());
+            }
         }
         if let Some(g) = self.groups.get(&update.group_id) {
             self.persist_group(g);
@@ -4689,6 +4734,9 @@ impl P2PCore {
         // (≤15 sn) otomatik yeniden bağlanma. Kendi içinde aralık kontrolü
         // yapar, bu yüzden her poll turunda çağrılması ucuzdur.
         self.reconnect_sweep();
+        // bkz. `early_packets` — el sıkışması hiç gelmeyen tamponlar süresi
+        // dolunca temizlenir.
+        self.prune_early_packets();
 
         // bkz. `pending_envelopes` alanı dokümantasyonu: ilk bağlantıdan
         // sonraki ilk birkaç saniyede gönderilemeyen HERHANGİ bir zarfı
@@ -4744,6 +4792,52 @@ impl P2PCore {
         results
     }
 
+    /// Spec dışı, hata düzeltmesi ("ilk mesaj yutuluyor") — bkz.
+    /// `early_packets`. Ratchet henüz yokken gelen bir paketi tamponlar.
+    /// Peer başına `MAX_EARLY_PACKETS_PER_PEER` ile sınırlı (en eskisi
+    /// atılır) — kötü niyetli bir peer sınırsız bellek tüketemesin.
+    fn buffer_early_packet(&mut self, sender_fp: String, packet: MessagePacket) {
+        let now = current_time_ms();
+        let buf = self.early_packets.entry(sender_fp.clone()).or_default();
+        if buf.len() >= MAX_EARLY_PACKETS_PER_PEER {
+            buf.remove(0);
+        }
+        buf.push((now, packet));
+        info!(
+            "Ratchet henüz yok (peer={}) — paket tamponlandı, el sıkışma sonrası oynatılacak ({} bekliyor)",
+            sender_fp,
+            buf.len()
+        );
+    }
+
+    /// El sıkışma tamamlandıktan sonra, o peer için tamponlanmış paketleri
+    /// GELİŞ SIRASINDA işler. Üretilen olaylar `attachment_events`'e
+    /// eklenir (poll_events onu drenaj edip Kotlin'e iletir).
+    fn replay_early_packets(&mut self, sender_fp: &str) {
+        let buffered = match self.early_packets.remove(sender_fp) {
+            Some(b) if !b.is_empty() => b,
+            _ => return,
+        };
+        info!("El sıkışma tamam (peer={}) — {} tamponlanmış paket oynatılıyor", sender_fp, buffered.len());
+        for (_, packet) in buffered {
+            match self.receive_message(&packet) {
+                Ok(event) => self.attachment_events.push(event),
+                Err(e) => error!("Tamponlanmış paket işlenemedi (peer={}): {}", sender_fp, e),
+            }
+        }
+    }
+
+    /// `poll_events`'ten çağrılır — el sıkışması hiç gelmeyen peer'ların
+    /// tamponlanmış paketlerini süresi dolunca temizler (bkz.
+    /// `EARLY_PACKET_TTL_MS`).
+    fn prune_early_packets(&mut self) {
+        let now = current_time_ms();
+        self.early_packets.retain(|_, buf| {
+            buf.retain(|(t, _)| now.saturating_sub(*t) <= EARLY_PACKET_TTL_MS);
+            !buf.is_empty()
+        });
+    }
+
     fn process_incoming_envelope(&mut self, source: Option<PeerId>, raw: &[u8]) -> Result<Option<String>, String> {
         let envelope: NetworkEnvelope = ciborium::from_reader(raw).map_err(|e| e.to_string())?;
         match envelope {
@@ -4754,11 +4848,30 @@ impl P2PCore {
             }
             NetworkEnvelope::Handshake(h) => {
                 self.record_peer_id_if_known(source, &h.sender_device_fingerprint);
+                let sender_fp = h.sender_device_fingerprint.clone();
                 self.process_handshake_init(&h)?;
+                // Spec dışı, hata düzeltmesi ("ilk mesaj yutuluyor"): el
+                // sıkışmadan ÖNCE gelip tamponlanan paketleri şimdi işle
+                // (bkz. `early_packets`). Olaylar `attachment_events`
+                // kuyruğuna gider, `poll_events` onu zaten drenaj ediyor.
+                self.replay_early_packets(&sender_fp);
                 Ok(None)
             }
             NetworkEnvelope::Message(m) => {
                 self.record_peer_id_if_known(source, &m.header.sender_device_fingerprint);
+                let sender_fp = m.header.sender_device_fingerprint.clone();
+                // bkz. `early_packets` / `EARLY_PACKET_TTL_MS`: henüz ratchet
+                // yoksa (mesaj el sıkışmadan ÖNCE geldi — gossipsub sıra
+                // garantisi vermez) paketi ATMA, tamponla; el sıkışma gelince
+                // yeniden oynatılacak. Sadece BİLİNEN cihazlar tamponlanır
+                // (tanınmayan gönderen zaten reddedilirdi; sınırsız tampon
+                // dolmasını da önler).
+                if !self.ratchets.contains_key(&sender_fp)
+                    && self.known_remote_devices.contains_key(&sender_fp)
+                {
+                    self.buffer_early_packet(sender_fp, m);
+                    return Ok(None);
+                }
                 let text = self.receive_message(&m)?;
                 Ok(Some(text))
             }
@@ -4971,6 +5084,7 @@ fn sign_group_update(
     new_version: u32,
     change: &GroupChange,
     group_name: &str,
+    members: &[String],
     signed_by: &str,
     signed_by_device: &str,
     own_keys: &DeviceKeys,
@@ -4982,6 +5096,10 @@ fn sign_group_update(
     // `group_name` de imzalanan veriye dahil — aksi halde bir relay/node bu
     // alanı sessizce değiştirebilirdi (imza sadece `change`'i koruyordu).
     to_sign.extend_from_slice(group_name.as_bytes());
+    // Üyelik listesi de imza kapsamında — aksi halde bir aracı, üyeliği
+    // (kimin grupta olduğunu) sessizce değiştirebilirdi (bkz.
+    // `GroupUpdate.members` notu).
+    to_sign.extend_from_slice(&ciborium_bytes(&members.to_vec())?);
     // Spec dışı, güvenlik denetimi düzeltmesi: GroupUpdate artık
     // MessagePacket/HandshakeInit ile AYNI hibrit (Ed25519 + ML-DSA)
     // imza modelini kullanıyor — önceden SADECE klasik Ed25519 imzalıydı,
@@ -4995,6 +5113,7 @@ fn sign_group_update(
         new_version,
         change: change.clone(),
         group_name: group_name.to_string(),
+        members: members.to_vec(),
         signed_by: signed_by.to_string(),
         signed_by_device: signed_by_device.to_string(),
         signature: sig_classical.to_bytes().to_vec(),
