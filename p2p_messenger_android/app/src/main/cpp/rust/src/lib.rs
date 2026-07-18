@@ -58,7 +58,7 @@ use contact::{check_incoming_device, Contact, DeviceCheckOutcome};
 use group::{apply_change, validate_group_update, Group, GroupChange};
 use identity::{compute_fingerprint, DeviceStatus};
 use packet::{
-    GroupUpdate, HandshakeInit, IdentityExchange, MessageContent, MessagePacket, MessagePacketHeader,
+    GroupMemberDevice, GroupUpdate, HandshakeInit, IdentityExchange, MessageContent, MessagePacket, MessagePacketHeader,
     NetworkEnvelope, QrPacket,
 };
 use ratchet::{DeviceRatchetState, MlKem1024DecapsulationKey, MlKem1024EncapsulationKey, RatchetPublicKeys};
@@ -255,6 +255,12 @@ pub struct ContactSummary {
     /// `list_attachments`'taki `preview_hex` ile AYNI hex-encode deseni —
     /// JSON ham ikili taşıyamadığı için.
     pub avatar_hex: Option<String>,
+    /// Spec dışı, kullanıcı kararı (üyelerin otomatik tanıştırılması):
+    /// `true` ise bu kişi yüz yüze QR/manuel eşleşmeyle DEĞİL, bir grup
+    /// üzerinden KURUCU KEFALETİYLE eklendi — UI "grup üzerinden eklendi,
+    /// doğrulanmadı" uyarısı gösterir (bkz. `GroupUpdate.member_devices`
+    /// güvenlik notu).
+    pub added_via_group: bool,
 }
 
 /// Yerel şifreli arşivden çözülüp Kotlin'e döndürülen tek bir mesaj.
@@ -853,6 +859,9 @@ impl P2PCore {
         let _ = conn.execute("ALTER TABLE files ADD COLUMN duration_ms INTEGER", []);
         let _ = conn.execute("ALTER TABLE identities ADD COLUMN avatar_jpeg BLOB", []);
         let _ = conn.execute("ALTER TABLE contacts ADD COLUMN avatar_jpeg BLOB", []);
+        // Spec dışı, kullanıcı kararı: kişi grup üzerinden (kurucu
+        // kefaletiyle) mi eklendi — bkz. Contact.added_via_group.
+        let _ = conn.execute("ALTER TABLE contacts ADD COLUMN added_via_group INTEGER", []);
         let _ = conn.execute("ALTER TABLE groups ADD COLUMN avatar_jpeg BLOB", []);
         self.db = Some(conn);
         self.app_files_dir = Some(app_files_dir.to_string());
@@ -1473,11 +1482,12 @@ impl P2PCore {
             Err(e) => { error!("Contact known_devices serileştirilemedi: {}", e); return; }
         };
         let _ = conn.execute(
-            "INSERT OR REPLACE INTO contacts (contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change, avatar_jpeg)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT OR REPLACE INTO contacts (contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change, avatar_jpeg, added_via_group)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 contact.contact_id, contact.display_name, contact.trusted_identity_id,
                 known_devices_json, contact.last_device_change.map(|v| v as i64), contact.avatar_jpeg,
+                contact.added_via_group as i32,
             ],
         );
     }
@@ -1490,7 +1500,7 @@ impl P2PCore {
             None => return,
         };
         let mut stmt = match conn.prepare(
-            "SELECT contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change, avatar_jpeg FROM contacts"
+            "SELECT contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change, avatar_jpeg, added_via_group FROM contacts"
         ) {
             Ok(s) => s,
             Err(_) => return,
@@ -1503,12 +1513,14 @@ impl P2PCore {
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<i64>>(4)?,
                 row.get::<_, Option<Vec<u8>>>(5)?,
+                // Eski satırlarda NULL — doğrudan eklenmiş (false) sayılır.
+                row.get::<_, Option<i64>>(6)?.unwrap_or(0) != 0,
             ))
         });
         let mut loaded = Vec::new();
         if let Ok(rows) = rows {
             for row in rows.flatten() {
-                let (contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change, avatar_jpeg) = row;
+                let (contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change, avatar_jpeg, added_via_group) = row;
                 let known_devices: Vec<contact::KnownDevice> = serde_json::from_str(&known_devices_json).unwrap_or_default();
                 loaded.push(Contact {
                     contact_id,
@@ -1517,6 +1529,7 @@ impl P2PCore {
                     known_devices,
                     last_device_change: last_device_change.map(|v| v as u64),
                     avatar_jpeg,
+                    added_via_group,
                 });
             }
         }
@@ -1692,6 +1705,7 @@ impl P2PCore {
             identity_id: c.trusted_identity_id.clone(),
             active_device_fingerprint: self.resolve_active_device_for_identity(&c.trusted_identity_id),
             avatar_hex: c.avatar_jpeg.as_ref().map(|a| hex::encode(a)),
+            added_via_group: c.added_via_group,
         }).collect()
     }
 
@@ -3141,8 +3155,11 @@ impl P2PCore {
         let mut projected = group.clone();
         apply_change(&mut projected, &change, new_version, current_time_ms());
         let members_after = projected.member_identity_ids();
+        // Kurucu, üyelerin birbirini tanıyabilmesi için anahtarlarına
+        // kefil olur (bkz. GroupUpdate.member_devices).
+        let vouched = self.collect_vouched_member_devices(&members_after);
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
-        let update = sign_group_update(group_id, new_version, &change, &group.name, &members_after, &own_identity_id, &own_fp, own_keys)?;
+        let update = sign_group_update(group_id, new_version, &change, &group.name, &members_after, &vouched, &own_identity_id, &own_fp, own_keys)?;
 
         // Yerel state'i güncelle.
         if let Some(g) = self.groups.get_mut(group_id) {
@@ -3187,8 +3204,11 @@ impl P2PCore {
         let mut projected = group.clone();
         apply_change(&mut projected, &change, new_version, current_time_ms());
         let members_after = projected.member_identity_ids();
+        // Kurucu, üyelerin birbirini tanıyabilmesi için anahtarlarına
+        // kefil olur (bkz. GroupUpdate.member_devices).
+        let vouched = self.collect_vouched_member_devices(&members_after);
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
-        let update = sign_group_update(group_id, new_version, &change, &group.name, &members_after, &own_identity_id, &own_fp, own_keys)?;
+        let update = sign_group_update(group_id, new_version, &change, &group.name, &members_after, &vouched, &own_identity_id, &own_fp, own_keys)?;
 
         // Çıkarılan üyeye ULAŞMADAN önce eski üye listesini al (spec 5.3:
         // çıkarılan üyeye artık GroupUpdate/grup mesajı gönderilmez).
@@ -3238,8 +3258,11 @@ impl P2PCore {
         // her güncelleme otoriter üyeliği taşısın ki kaçırılmış üyelik
         // güncellemeleri de kendiliğinden düzelsin (bkz. GroupUpdate.members).
         let members_after = group.member_identity_ids();
+        // Kurucu, üyelerin birbirini tanıyabilmesi için anahtarlarına
+        // kefil olur (bkz. GroupUpdate.member_devices).
+        let vouched = self.collect_vouched_member_devices(&members_after);
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
-        let update = sign_group_update(group_id, new_version, &change, &group.name, &members_after, &own_identity_id, &own_fp, own_keys)?;
+        let update = sign_group_update(group_id, new_version, &change, &group.name, &members_after, &vouched, &own_identity_id, &own_fp, own_keys)?;
 
         if let Some(g) = self.groups.get_mut(group_id) {
             apply_change(g, &change, new_version, current_time_ms());
@@ -3273,6 +3296,7 @@ impl P2PCore {
         to_verify.extend_from_slice(&ciborium_bytes(&update.change)?);
         to_verify.extend_from_slice(update.group_name.as_bytes());
         to_verify.extend_from_slice(&ciborium_bytes(&update.members)?);
+        to_verify.extend_from_slice(&ciborium_bytes(&update.member_devices)?);
         // Artık MessagePacket/HandshakeInit ile AYNI hibrit (Ed25519+ML-DSA)
         // model — bkz. sign_group_update/packet.rs GroupUpdate.signature_pq
         // notu (güvenlik denetimi düzeltmesi).
@@ -3326,6 +3350,14 @@ impl P2PCore {
                 g.sync_members(&update.members, current_time_ms());
             }
         }
+        // Spec dışı, kullanıcı kararı: kurucunun kefil olduğu üye
+        // anahtarlarını benimse — böylece hiç eşleşmediğimiz üyelerle de
+        // ratchet kurup mesajlaşabiliriz (bkz. adopt_vouched_member_devices;
+        // güvenlik kuralları orada).
+        if !update.member_devices.is_empty() {
+            let devices = update.member_devices.clone();
+            self.adopt_vouched_member_devices(&devices);
+        }
         if let Some(g) = self.groups.get(&update.group_id) {
             self.persist_group(g);
         }
@@ -3334,6 +3366,132 @@ impl P2PCore {
 
     /// Bir Identity için bilinen (ve Aşama A'da tek olan) Active cihaz
     /// fingerprint'ini bulur.
+    /// Spec dışı, kullanıcı kararı (üyelerin otomatik tanıştırılması):
+    /// KURUCU tarafında, verilen üye kimlikleri için kefil olunacak cihaz
+    /// kayıtlarını toplar (bkz. `GroupUpdate.member_devices`). Kendi
+    /// cihazımız `own_devices`'tan, diğerleri `known_remote_devices`'tan
+    /// gelir; bilinmeyen üyeler atlanır (kurucu onları da tanımıyorsa
+    /// kefil olamaz).
+    fn collect_vouched_member_devices(&self, member_ids: &[String]) -> Vec<GroupMemberDevice> {
+        let own_identity_id = self.identity.as_ref().map(|i| i.identity_id.clone()).unwrap_or_default();
+        let mut out = Vec::new();
+        for id in member_ids {
+            let rec = if *id == own_identity_id {
+                self.own_devices.values().find(|d| d.identity_id == *id && d.is_active)
+            } else {
+                self.known_remote_devices.values().find(|d| d.identity_id == *id && d.is_active)
+            };
+            if let Some(d) = rec {
+                out.push(GroupMemberDevice {
+                    identity_id: d.identity_id.clone(),
+                    device_fingerprint: d.device_fingerprint.clone(),
+                    device_name: d.device_name.clone(),
+                    sign_pubkey_ed25519: d.sign_pubkey_ed25519.clone(),
+                    sign_pubkey_mldsa: d.sign_pubkey_mldsa.clone(),
+                    kem_pubkey_x25519: d.kem_pubkey_x25519.clone(),
+                    kem_pubkey_mlkem: d.kem_pubkey_mlkem.clone(),
+                    last_addr: if *id == own_identity_id {
+                        self.get_node_address()
+                    } else {
+                        self.device_last_addr.get(&d.device_fingerprint).cloned()
+                    },
+                });
+            }
+        }
+        out
+    }
+
+    /// Spec dışı, kullanıcı kararı (üyelerin otomatik tanıştırılması):
+    /// ALICI tarafında, kurucunun kefil olduğu üye cihazlarını benimser —
+    /// böylece daha önce hiç eşleşmediğimiz üyelerle de ratchet kurup
+    /// mesajlaşabiliriz (bkz. `GroupUpdate.member_devices`).
+    ///
+    /// GÜVENLİK KURALLARI (bkz. o alanın notu):
+    /// - ZATEN BİLDİĞİMİZ bir cihazın anahtarları ASLA ezilmez (kötü niyetli
+    ///   bir kurucu, güvendiğimiz bir kişinin anahtarını değiştiremez).
+    /// - `device_fingerprint`, anahtarların SHA3-256'sı olmalı (kendi içinde
+    ///   tutarsız kayıtlar reddedilir).
+    /// - Kendi kimliğimiz atlanır.
+    /// - Eklenen kişiler `verified=false` (grup üzerinden eklendi, yüz yüze
+    ///   QR ile doğrulanmadı) — UI bunu gösterir.
+    fn adopt_vouched_member_devices(&mut self, devices: &[GroupMemberDevice]) {
+        let own_identity_id = self.identity.as_ref().map(|i| i.identity_id.clone()).unwrap_or_default();
+        for d in devices {
+            if d.identity_id == own_identity_id {
+                continue;
+            }
+            if self.known_remote_devices.contains_key(&d.device_fingerprint) {
+                continue; // zaten biliyoruz — ASLA ezme
+            }
+            // Fingerprint, anahtarlarla tutarlı mı? (IdentityExchange ile
+            // aynı kontrol.)
+            let computed = hex::encode(compute_fingerprint(
+                &d.sign_pubkey_ed25519,
+                &d.sign_pubkey_mldsa,
+                &d.kem_pubkey_x25519,
+                &d.kem_pubkey_mlkem,
+            ));
+            if computed != d.device_fingerprint {
+                error!(
+                    "Grup üyesi cihaz kaydı tutarsız (beklenen {}, hesaplanan {}) — reddedildi",
+                    d.device_fingerprint, computed
+                );
+                continue;
+            }
+            // Bu kimlik için BAŞKA bir cihazı zaten biliyorsak, kurucunun
+            // sözüyle ikinci bir cihaz eklemiyoruz — bu, bilinen bir kişinin
+            // yerine geçme (impersonation) denemesi olabilir; spec 2.2
+            // "tanınmayan yeni cihaz" akışı QR/IdentityExchange içindir.
+            if self.known_remote_devices.values().any(|k| k.identity_id == d.identity_id) {
+                info!(
+                    "Grup üyesi {} için zaten bilinen bir cihaz var — kefil edilen yeni cihaz eklenmedi",
+                    d.identity_id
+                );
+                continue;
+            }
+
+            let record = DeviceRecord {
+                device_fingerprint: d.device_fingerprint.clone(),
+                identity_id: d.identity_id.clone(),
+                sign_pubkey_ed25519: d.sign_pubkey_ed25519.clone(),
+                sign_pubkey_mldsa: d.sign_pubkey_mldsa.clone(),
+                kem_pubkey_x25519: d.kem_pubkey_x25519.clone(),
+                kem_pubkey_mlkem: d.kem_pubkey_mlkem.clone(),
+                device_name: d.device_name.clone(),
+                is_active: true,
+                last_seen: current_time_ms(),
+            };
+            self.persist_remote_device(&record);
+            self.known_remote_devices.insert(d.device_fingerprint.clone(), record);
+            // Kişi listesine ekle ve "grup üzerinden eklendi" olarak
+            // işaretle (bkz. Contact.added_via_group / güvenlik notu).
+            let is_new_contact = !self.identity_to_contact.contains_key(&d.identity_id);
+            let _ = self.register_contact_from_pairing(
+                d.identity_id.clone(),
+                d.device_fingerprint.clone(),
+                d.device_name.clone(),
+            );
+            if is_new_contact {
+                if let Some(cid) = self.identity_to_contact.get(&d.identity_id).cloned() {
+                    if let Some(c) = self.contacts.get_mut(&cid) {
+                        c.added_via_group = true;
+                    }
+                    if let Some(c) = self.contacts.get(&cid) {
+                        self.persist_contact(c);
+                    }
+                }
+            }
+            // Dial ipucu (varsa) — farklı ağdaki bir üyeye ulaşabilmek için.
+            if let Some(addr) = &d.last_addr {
+                self.remember_device_addr(&d.device_fingerprint, addr);
+            }
+            info!(
+                "Grup üzerinden yeni kişi eklendi (kurucu kefaletiyle, DOĞRULANMADI): {} / {}",
+                d.identity_id, d.device_fingerprint
+            );
+        }
+    }
+
     fn resolve_active_device_for_identity(&self, identity_id: &str) -> Option<String> {
         self.known_remote_devices.values()
             .find(|d| d.identity_id == identity_id && d.is_active)
@@ -5085,6 +5243,7 @@ fn sign_group_update(
     change: &GroupChange,
     group_name: &str,
     members: &[String],
+    member_devices: &[GroupMemberDevice],
     signed_by: &str,
     signed_by_device: &str,
     own_keys: &DeviceKeys,
@@ -5100,6 +5259,10 @@ fn sign_group_update(
     // (kimin grupta olduğunu) sessizce değiştirebilirdi (bkz.
     // `GroupUpdate.members` notu).
     to_sign.extend_from_slice(&ciborium_bytes(&members.to_vec())?);
+    // Kefil olunan üye anahtarları da imza kapsamında — aksi halde bir
+    // aracı, bir üyenin anahtarlarını kendisininkiyle değiştirip o üyeyi
+    // taklit edebilirdi (bkz. `GroupUpdate.member_devices` güvenlik notu).
+    to_sign.extend_from_slice(&ciborium_bytes(&member_devices.to_vec())?);
     // Spec dışı, güvenlik denetimi düzeltmesi: GroupUpdate artık
     // MessagePacket/HandshakeInit ile AYNI hibrit (Ed25519 + ML-DSA)
     // imza modelini kullanıyor — önceden SADECE klasik Ed25519 imzalıydı,
@@ -5114,6 +5277,7 @@ fn sign_group_update(
         change: change.clone(),
         group_name: group_name.to_string(),
         members: members.to_vec(),
+        member_devices: member_devices.to_vec(),
         signed_by: signed_by.to_string(),
         signed_by_device: signed_by_device.to_string(),
         signature: sig_classical.to_bytes().to_vec(),

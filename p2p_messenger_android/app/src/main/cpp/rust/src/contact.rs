@@ -34,6 +34,15 @@ pub struct Contact {
     /// hiç göndermedi ya da fotoğrafını kaldırdı.
     #[serde(default)]
     pub avatar_jpeg: Option<Vec<u8>>,
+    /// Spec dışı, kullanıcı kararı: bu kişi DOĞRUDAN (QR/manuel eşleşme,
+    /// yüz yüze TOFU) mi eklendi — `false`; yoksa bir grup üzerinden
+    /// KURUCU KEFALETİYLE mi — `true`? İkincisi daha zayıf bir güven
+    /// modelidir (kurucunun sözü), bu yüzden UI'de uyarı gösterilir
+    /// (bkz. packet.rs `GroupUpdate.member_devices` güvenlik notu).
+    /// `#[serde(default)]` — bu alan olmadan kaydedilmiş eski kişiler
+    /// doğrudan eklenmiş (false) sayılır.
+    #[serde(default)]
+    pub added_via_group: bool,
 }
 
 /// Bir bağlantı kurulurken (spec 2.2) `(identity_id, device_fingerprint)`
@@ -60,6 +69,7 @@ impl Contact {
             known_devices: Vec::new(),
             last_device_change: None,
             avatar_jpeg: None,
+            added_via_group: false,
         }
     }
 

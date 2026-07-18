@@ -40,6 +40,10 @@
     <string name="msg_relay_address_added">Röle adresi eklendi</string>
 
     <!-- Spec dışı, kullanıcı isteği: Tor onion service -->
+    <!-- Spec dışı, kullanıcı kararı: grup üzerinden (kurucu kefaletiyle)
+         eklenen kişiler yüz yüze QR ile doğrulanmadı. -->
+    <string name="contact_added_via_group">Grup üzerinden eklendi — yüz yüze doğrulanmadı</string>
+
     <string name="lbl_tor">Tor üzerinden ulaşılabilirlik</string>
     <string name="lbl_tor_desc">Farklı ağlardaki cihazlara CGNAT\'a rağmen bağlanmayı sağlar (Tor onion service). İlk açılışta bağlanması saniyeler sürer ve pil kullanır. Karşı tarafta da Tor açık olmalı. Değişiklik uygulama yeniden başlatılınca etkinleşir.</string>
     <string name="tor_status_disabled">Tor: kapalı</string>

@@ -40,7 +40,11 @@ class ChatAdapter(
         /** Spec dışı: Gruplar sekmesi kaldırıldı, gruplar bu listeye
          *  karıştırıldı (bkz. kullanıcı isteği) — `true` ise `contactId`
          *  aslında bir `group_id`'dir, tıklama `GroupChatActivity` açmalı. */
-        val isGroup: Boolean = false
+        val isGroup: Boolean = false,
+        /** Spec dışı, kullanıcı kararı: bu kişi yüz yüze QR ile DEĞİL, bir
+         *  grup üzerinden kurucu kefaletiyle eklendiyse `true` — satırda
+         *  uyarı işareti gösterilir (bkz. Rust `Contact.added_via_group`). */
+        val addedViaGroup: Boolean = false
     ) {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -87,7 +91,9 @@ class ChatAdapter(
         private val imgAvatar: ImageView = itemView.findViewById(R.id.imgAvatar)
 
         fun bind(message: ChatMessage) {
-            txtName.text = message.displayName
+            // Grup üzerinden (kurucu kefaletiyle) eklenmiş kişiler yüz yüze
+            // QR ile doğrulanmadı — isimde görünür bir uyarı işareti.
+            txtName.text = if (message.addedViaGroup) "⚠ ${message.displayName}" else message.displayName
             txtLastMessage.text = message.lastMessage
             txtTimestamp.text = if (message.timestamp > 0) formatTimestamp(message.timestamp) else ""
             txtUnread.visibility = if (message.unreadCount > 0) View.VISIBLE else View.GONE

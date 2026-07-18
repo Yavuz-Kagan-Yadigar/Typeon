@@ -89,6 +89,25 @@ pub enum GroupChange {
     AvatarUpdate(Option<Vec<u8>>),
 }
 
+/// Spec dışı, kullanıcı kararı: bir grup üyesinin, kurucu tarafından
+/// kefil olunan cihaz kaydı (bkz. `GroupUpdate.member_devices`). Alıcı,
+/// `device_fingerprint`'in bu anahtarların SHA3-256'sı olduğunu ayrıca
+/// doğrular (kendi içinde tutarlı olmayan kayıtlar reddedilir).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMemberDevice {
+    pub identity_id: String,
+    pub device_fingerprint: String,
+    pub device_name: String,
+    pub sign_pubkey_ed25519: Vec<u8>,
+    pub sign_pubkey_mldsa: Vec<u8>,
+    pub kem_pubkey_x25519: Vec<u8>,
+    pub kem_pubkey_mlkem: Vec<u8>,
+    /// Kurucunun bildiği son adres — dial ipucu (bkz. lib.rs
+    /// `device_last_addr`). Yoksa alıcı mDNS/röle/DHT'ye güvenir.
+    #[serde(default)]
+    pub last_addr: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupUpdate {
     pub group_id: String,
@@ -115,6 +134,24 @@ pub struct GroupUpdate {
     /// sürümler imza doğrulamasında elenir; tüm cihazlar güncellenmeli).
     #[serde(default)]
     pub members: Vec<String>,
+    /// Spec dışı, kullanıcı kararı (grup üyelerinin otomatik tanıştırılması):
+    /// üyelerin PUBLIC anahtarları + son bilinen adresleri, KURUCUNUN
+    /// kefaletiyle. Pairwise grup mesajlaşması her üye ÇİFTİNİN birbiriyle
+    /// ratchet kurabilmesini gerektirir; ama üyeler yalnızca kurucuyla QR
+    /// eşleşmesi yapmış olabilir (A↔B, A↔C eşleşmiş ama B↔C eşleşmemiş) —
+    /// bu durumda B ve C birbirine HİÇ mesaj gönderemiyordu. Bu alan, her
+    /// üyenin diğerlerinin anahtarlarını kurucudan öğrenmesini sağlar.
+    ///
+    /// GÜVENLİK: bu, QR ile yüz yüze TOFU'dan DAHA ZAYIF bir güven modeli —
+    /// kurucunun sözüne güvenilir. Kötü niyetli bir kurucu, bir üye için
+    /// KENDİ anahtarını verip o üyeyi taklit edebilir (grup içi MITM).
+    /// Bu yüzden: (a) alan imza kapsamındadır (aracılar değiştiremez),
+    /// (b) alıcı ZATEN BİLDİĞİ bir cihazın anahtarlarını ASLA bunlarla
+    /// EZMEZ (bkz. process_group_update), (c) böyle eklenen kişiler
+    /// `verified=false` olarak işaretlenir ve UI'de "grup üzerinden eklendi,
+    /// doğrulanmadı" olarak gösterilir.
+    #[serde(default)]
+    pub member_devices: Vec<GroupMemberDevice>,
     /// founder_identity_id olmalı — alıcı taraf bunu doğrular.
     pub signed_by: String,
     /// Kurucunun hangi cihazı imzaladı.

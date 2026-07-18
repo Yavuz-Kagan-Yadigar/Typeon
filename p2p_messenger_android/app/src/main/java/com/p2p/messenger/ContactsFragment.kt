@@ -273,13 +273,19 @@ class ContactsFragment : Fragment() {
             val fingerprint = if (obj.isNull("active_device_fingerprint")) ""
                 else obj.optString("active_device_fingerprint")
             val avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null }
+            // Spec dışı, kullanıcı kararı: grup üzerinden (kurucu
+            // kefaletiyle) eklenen kişiler yüz yüze doğrulanmadı — kişi
+            // satırında hem uyarı işareti (bkz. ChatAdapter.bind) hem de
+            // açıklama gösterilir.
+            val addedViaGroup = obj.optBoolean("added_via_group", false)
             ChatAdapter.ChatMessage(
                 contactId = fingerprint,
                 displayName = obj.optString("display_name", "Bilinmeyen"),
-                lastMessage = "",
+                lastMessage = if (addedViaGroup) getString(R.string.contact_added_via_group) else "",
                 timestamp = 0L,
                 realContactId = obj.optString("contact_id"),
-                avatarJpeg = avatarHex?.let { hexToBytes(it) }
+                avatarJpeg = avatarHex?.let { hexToBytes(it) },
+                addedViaGroup = addedViaGroup
             )
         }
 
