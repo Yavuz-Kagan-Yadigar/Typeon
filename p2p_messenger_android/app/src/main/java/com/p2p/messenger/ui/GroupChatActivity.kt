@@ -339,6 +339,10 @@ class GroupChatActivity : AppCompatActivity() {
                 type == "seen" && !obj.isNull("group_message_local_id") &&
                     obj.optString("group_message_local_id") in mySentGroupMessageIds ->
                     runOnUiThread { handleIncomingSeen(obj) }
+                // Toplu görüldü (2026-09-07): bir üye "buraya kadar okudum"
+                // sınırı yolladı (bkz. Rust `apply_incoming_read_watermark`).
+                type == "seen_bulk" && obj.optString("group_id") == groupId ->
+                    runOnUiThread { handleIncomingSeenBulk(obj) }
                 // Spec dışı, hata düzeltmesi ("grup fotoğrafı cihazlar
                 // arasında senkron olmuyor"): Rust, bir GroupUpdate
                 // işlendiğinde (isim/üyelik/AVATAR — bkz. lib.rs
@@ -2334,6 +2338,8 @@ class GroupChatActivity : AppCompatActivity() {
         try {
             P2PLib.sendSeenReceipt(obj.optString("peer"), messageId, localId)
         } catch (e: Exception) { /* yoksay */ }
+        // Güvenilir yol: tekil `Seen` kaybolsa bile okuma sınırı diske yazılır.
+        scheduleGroupReadWatermark()
     }
 
     /** bkz. dosya başı `seenByPerMessage` notu — aynı mesajı gören farklı
@@ -2354,6 +2360,28 @@ class GroupChatActivity : AppCompatActivity() {
         val viewers = seenByPerMessage.getOrPut(localId) { mutableMapOf() }
         viewers[senderIdentityId] = viewer
         adapter.applySeen(localId, viewers.values.toList())
+    }
+
+    /** Toplu görüldü: bir üye "buraya kadar okudum" sınırı yolladı; Rust
+     *  BENİM gönderdiğim, sınıra kadar olan mesajların `message_id`'lerini
+     *  verir. Her biri için o üyeyi `seenByPerMessage`'a ekleyip adaptöre
+     *  tam listeyi geçir — tıpkı `handleIncomingSeen` gibi. */
+    private fun handleIncomingSeenBulk(obj: JSONObject) {
+        val arr = obj.optJSONArray("message_ids") ?: return
+        val senderIdentityId = obj.optString("viewer_identity_id")
+        if (senderIdentityId.isEmpty()) return
+        val sender = resolveContactByIdentity(senderIdentityId)
+        val viewer = SimpleChatAdapter.SeenByViewer(
+            avatarJpeg = sender?.avatarHex?.let { hexToBytes(it) },
+            displayName = sender?.displayName ?: senderIdentityId.take(8)
+        )
+        for (i in 0 until arr.length()) {
+            val localId = arr.optString(i)
+            if (localId.isEmpty()) continue
+            val viewers = seenByPerMessage.getOrPut(localId) { mutableMapOf() }
+            viewers[senderIdentityId] = viewer
+            adapter.applySeen(localId, viewers.values.toList())
+        }
     }
 
     private data class ContactLookup(val displayName: String, val avatarHex: String?)
@@ -2686,6 +2714,19 @@ class GroupChatActivity : AppCompatActivity() {
         // message that arrived meanwhile was archived but never appended
         // to the UI. Catch up now.
         syncMissedGroupMessages()
+        // "görüldü" güvenilirlik + hız (2026-09-07): grup açılır açılmaz
+        // "buraya kadar okudum" sınırını üyelere bildir — eskiden sadece
+        // onPause'da ve yalnızca kardeş cihazlara gidiyordu.
+        scheduleGroupReadWatermark()
+    }
+
+    private val groupReadWatermarkHandler = Handler(Looper.getMainLooper())
+    private val groupReadWatermarkRunnable = Runnable {
+        try { P2PLib.syncReadState("", groupId, System.currentTimeMillis()) } catch (e: Exception) {}
+    }
+    private fun scheduleGroupReadWatermark() {
+        groupReadWatermarkHandler.removeCallbacks(groupReadWatermarkRunnable)
+        groupReadWatermarkHandler.postDelayed(groupReadWatermarkRunnable, 700L)
     }
 
     /** See the onResume call site — group version of
@@ -2749,7 +2790,9 @@ class GroupChatActivity : AppCompatActivity() {
             P2PService.activeConversationId = null
         }
         com.p2p.messenger.util.ReadStatePrefs.markRead(this, "group:$groupId")
-        // Çoklu-cihaz (spec 1.7.1): kardeş cihazlar da bu grubu okunmuş saysın.
+        // Kardeş cihazlar VE üyeler bu grubu okunmuş saysın (bkz.
+        // `sync_read_state` — artık iki hedef).
+        groupReadWatermarkHandler.removeCallbacks(groupReadWatermarkRunnable)
         try { P2PLib.syncReadState("", groupId, System.currentTimeMillis()) } catch (e: Exception) {}
         ownStatusPollHandler.removeCallbacks(ownStatusPollRunnable)
         // bkz. ChatActivity onPause aynı notu — Activity görünür değilken

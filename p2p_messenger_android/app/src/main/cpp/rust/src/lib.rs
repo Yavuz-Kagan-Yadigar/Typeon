@@ -4141,14 +4141,25 @@ impl P2PCore {
         }
     }
 
-    /// Çoklu-cihaz (spec 1.7.1): bir sohbet BU cihazda okunduğunda, kardeş
-    /// cihazlara da "okundu" bildir (onlar da okunmuş saysın). `peer_fp`:
-    /// 1:1 sohbetin karşı taraf cihazı (grup için boş); `group_id`: grup
-    /// sohbeti (1:1 için boş). Fire-and-forget.
+    /// Bir sohbet BU cihazda okunduğunda "okuma sınırı" (`read_at_ms`)
+    /// paketini yayar. İKİ hedefe gider:
+    ///   1. Kardeş cihazlar (spec 1.7.1) — orada da okunmuş saysınlar.
+    ///   2. **Karşı taraf / grup üyeleri** (2026-09-07, kullanıcı isteği
+    ///      "görüldü daha hızlı + güvenilir"): 1:1 görüldü makbuzunun asıl
+    ///      GÜVENİLİR yolu artık bu. Tek pakette "şu ana kadar okudum",
+    ///      idempotent (monoton damga), `needs_delivery_confirmation` +
+    ///      `regen_content` sayesinde diske yazılır / ratchet dönünce taze
+    ///      şifrelenir / karşı taraf çevrimdışıysa sunucuya bırakılır /
+    ///      onaylanana (2 güne) kadar yeniden denenir. Tekil `Seen` paketi
+    ///      (kırılgan: 9 bellek-içi deneme, diske yazılmaz, restart/rotasyonda
+    ///      ölür, geçmişten yüklenen mesajlar için hiç gönderilmez) artık
+    ///      yalnızca anlık ince-ayrıntı; dayanıklılık burada.
+    ///
+    /// `peer_fp`: 1:1 sohbetin karşı taraf cihazı (grup için boş);
+    /// `group_id`: grup sohbeti (1:1 için boş).
     fn sync_read_state(&mut self, peer_fp: &str, group_id: &str, read_at_ms: u64) {
-        let siblings = self.sibling_active_devices();
-        if siblings.is_empty() { return; }
-        let content = if !group_id.is_empty() {
+        let is_group = !group_id.is_empty();
+        let content = if is_group {
             MessageContent::ReadStateSync {
                 conversation_identity_id: None,
                 group_id: Some(group_id.to_string()),
@@ -4165,9 +4176,115 @@ impl P2PCore {
                 read_at_ms,
             }
         };
-        for fp in siblings {
+
+        // Birikmeyi önle (bkz. `request_history_sync` AYNI deseni): bu
+        // konuşmaya ait bekleyen ESKİ okuma-sınırı yeniden-denemelerini at —
+        // yeni (daha büyük) `read_at_ms` hepsinin işini görür. Aksi halde
+        // her sohbet açılışı/`onResume` çevrimdışı bir peer'a +1 kalıcı
+        // yeniden-deneme satırı biriktirirdi.
+        let gid_owned = if is_group { Some(group_id.to_string()) } else { None };
+        let conv_id_owned = if is_group {
+            None
+        } else {
+            self.known_remote_devices.get(peer_fp).map(|d| d.identity_id.clone())
+        };
+        let stale: Vec<String> = self.awaiting_confirmation.iter()
+            .filter(|(_, p)| matches!(
+                &p.regen_content,
+                Some(MessageContent::ReadStateSync { group_id: g, conversation_identity_id: c, .. })
+                    if *g == gid_owned && *c == conv_id_owned
+            ))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in stale {
+            self.awaiting_confirmation.remove(&id);
+            self.remove_durable_retry(&id);
+        }
+
+        // Hedefleri topla (borrow-checker: göndermeden ÖNCE).
+        let mut targets: Vec<String> = self.sibling_active_devices();
+        if is_group {
+            if let Ok(group) = self.groups.get(group_id).cloned_group() {
+                let own_id = self.my_identity_id().unwrap_or_default();
+                for member_identity_id in group.other_members(&own_id) {
+                    if let Some(fp) = self.resolve_active_device_for_identity(&member_identity_id) {
+                        targets.push(fp);
+                    }
+                }
+            }
+        } else if let Some(d) = self.known_remote_devices.get(peer_fp) {
+            let ident = d.identity_id.clone();
+            targets.push(self.canonical_device_for_identity(&ident)
+                .unwrap_or_else(|| peer_fp.to_string()));
+        }
+        targets.sort();
+        targets.dedup();
+
+        for fp in targets {
             let _ = self.send_message_content(fp, &content, None);
         }
+    }
+
+    /// Karşı taraftan (kardeş DEĞİL) gelen `ReadStateSync` (okuma sınırı) →
+    /// TOPLU görüldü makbuzu. Gönderenin kimliği = okuyan (`viewer`). Bu
+    /// konuşmada BENİM gönderdiğim, gönderim anı `read_at_ms`'e kadar olan
+    /// tüm mesajları `apply_seen_receipt` ile işaretler (idempotent — eski
+    /// bir sınır yeni bir kaydı ezmez). Etkilenen `message_id`'leri döner
+    /// (en eskiden yeniye), Kotlin `seen_bulk` olayında kullanır.
+    fn apply_incoming_read_watermark(
+        &self,
+        peer_fp: &str,
+        group_id: Option<&str>,
+        viewer_identity_id: &str,
+        read_at_ms: u64,
+    ) -> Vec<String> {
+        let Some(conn) = &self.db else { return Vec::new() };
+        let read_at = read_at_ms as i64;
+        let mut ids: Vec<String> = Vec::new();
+
+        if let Some(gid) = group_id {
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT message_id FROM messages
+                 WHERE group_id = ?1 AND direction = 'sent'
+                   AND message_id IS NOT NULL AND message_id != ''
+                   AND COALESCE(NULLIF(sent_at_ms, 0), timestamp) <= ?2
+                 ORDER BY COALESCE(NULLIF(sent_at_ms, 0), timestamp) ASC"
+            ) {
+                if let Ok(rows) = stmt.query_map(params![gid, read_at], |r| r.get::<_, String>(0)) {
+                    for id in rows.flatten() { ids.push(id); }
+                }
+            }
+        } else {
+            // 1:1: mesajlar peer'ın kanonik cihaz fp'si altında arşivlenmiş
+            // olabilir — hem gelen fp'yi hem kanoniği dene.
+            let mut keys: Vec<String> = vec![peer_fp.to_string()];
+            if let Some(d) = self.known_remote_devices.get(peer_fp) {
+                if let Some(canon) = self.canonical_device_for_identity(&d.identity_id) {
+                    if canon != peer_fp { keys.push(canon); }
+                }
+            }
+            for k in keys {
+                if let Ok(mut stmt) = conn.prepare(
+                    "SELECT message_id FROM messages
+                     WHERE peer_device_fingerprint = ?1 AND direction = 'sent'
+                       AND (group_id IS NULL OR group_id = '')
+                       AND message_id IS NOT NULL AND message_id != ''
+                       AND COALESCE(NULLIF(sent_at_ms, 0), timestamp) <= ?2
+                     ORDER BY COALESCE(NULLIF(sent_at_ms, 0), timestamp) ASC"
+                ) {
+                    if let Ok(rows) = stmt.query_map(params![k, read_at], |r| r.get::<_, String>(0)) {
+                        for id in rows.flatten() {
+                            if !ids.contains(&id) { ids.push(id); }
+                        }
+                    }
+                }
+            }
+        }
+
+        for id in &ids {
+            self.apply_seen_receipt(id, viewer_identity_id, read_at_ms);
+        }
+        ids
     }
 
     /// Çoklu-cihaz (spec 1.7): kendi gönderdiğim bir 1:1 mesaj/düzenleme/silmeyi
@@ -7502,7 +7619,30 @@ impl P2PCore {
                         serde_json::json!({"type": "read_state_sync", "conversation": conversation, "read_at": read_at_ms})
                     }
                 } else {
-                    serde_json::json!({"type": "noop"})
+                    // KARŞI TARAFTAN (2026-09-07): "okuma sınırı" = TOPLU
+                    // görüldü makbuzu. Gönderen = okuyan. bkz.
+                    // `apply_incoming_read_watermark`.
+                    let viewer = self.known_remote_devices.get(&peer_fp).map(|d| d.identity_id.clone());
+                    match viewer {
+                        Some(viewer_id) => {
+                            let affected = self.apply_incoming_read_watermark(
+                                &peer_fp, group_id.as_deref(), &viewer_id, read_at_ms,
+                            );
+                            if affected.is_empty() {
+                                serde_json::json!({"type": "noop"})
+                            } else {
+                                serde_json::json!({
+                                    "type": "seen_bulk",
+                                    "peer": peer_fp,
+                                    "group_id": group_id.clone().unwrap_or_default(),
+                                    "viewer_identity_id": viewer_id,
+                                    "up_to_ms": read_at_ms,
+                                    "message_ids": affected,
+                                })
+                            }
+                        }
+                        None => serde_json::json!({"type": "noop"}),
+                    }
                 }
             }
             // Çoklu-cihaz (spec 1.7): kendi başka cihazımın gönderdiği mesaj/

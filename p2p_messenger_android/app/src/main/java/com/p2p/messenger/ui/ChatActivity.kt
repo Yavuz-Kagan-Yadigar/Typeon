@@ -1044,6 +1044,9 @@ class ChatActivity : AppCompatActivity() {
                 // için gönderilmez (bkz. loadHistoryIfAvailable notu —
                 // arşiv kararlı bir message_id taşımıyor zaten).
                 markSeen(messageId)
+                // Güvenilir yol: tekil `Seen` kaybolsa bile okuma sınırı
+                // (ReadStateSync) diske yazılır + yeniden denenir.
+                scheduleReadWatermark()
             }
             // Çoklu-cihaz (spec 1.7): başka bir cihazımdan gönderdiğim mesaj —
             // burada da "gönderilen" balon olarak göster (markSeen YOK, kendi
@@ -1134,6 +1137,23 @@ class ChatActivity : AppCompatActivity() {
                     messageId,
                     listOf(SimpleChatAdapter.SeenByViewer(resolveContactAvatar(peerDeviceFingerprint), peerName))
                 )
+            }
+            // Toplu görüldü (2026-09-07): karşı taraf "buraya kadar okudum"
+            // sınırı yolladı (bkz. Rust `apply_incoming_read_watermark`).
+            // `message_ids` en eskiden yeniye sıralı — 1:1 adaptörü tek bir
+            // "son görülen" işareti gösterdiğinden EN YENİsini uygulamak yeter.
+            "seen_bulk" -> {
+                if (obj.optString("group_id").isEmpty()) {
+                    val arr = obj.optJSONArray("message_ids")
+                    if (arr != null && arr.length() > 0) {
+                        val newestId = arr.optString(arr.length() - 1)
+                        val peerName = txtToolbarTitle.text.toString()
+                        adapter.applySeen(
+                            newestId,
+                            listOf(SimpleChatAdapter.SeenByViewer(resolveContactAvatar(peerDeviceFingerprint), peerName))
+                        )
+                    }
+                }
             }
             "typing" -> {
                 val isTyping = obj.optBoolean("is_typing", false)
@@ -2474,6 +2494,28 @@ class ChatActivity : AppCompatActivity() {
         sessionPollHandler.post(sessionPollRunnable)
         ownStatusPollHandler.post(ownStatusPollRunnable)
         syncMissedMessages()
+        // "görüldü" güvenilirlik + hız (2026-09-07): sohbeti AÇAR AÇMAZ karşı
+        // tarafa "şu ana kadar okudum" sınırını bildir. Eskiden sadece
+        // `onPause`'da ve yalnızca kardeş cihazlara gidiyordu → store-forward
+        // ile gelip geçmiş olarak yüklenen mesajlar için makbuz HİÇ gitmezdi.
+        scheduleReadWatermark()
+    }
+
+    private val readWatermarkHandler = Handler(Looper.getMainLooper())
+    private val readWatermarkRunnable = Runnable {
+        try {
+            P2PLib.syncReadState(peerDeviceFingerprint, "", System.currentTimeMillis())
+        } catch (e: Exception) {
+        }
+    }
+
+    /** Karşı tarafa "buraya kadar okudum" sınırını yollar — debounce'lu
+     *  (tek pakette toplanır; Rust tarafı bekleyen eski sınırı iptal eder,
+     *  bkz. `sync_read_state`). Sohbet açılışı / `onResume` / canlı gelen
+     *  mesaj sonrası çağrılır. */
+    private fun scheduleReadWatermark() {
+        readWatermarkHandler.removeCallbacks(readWatermarkRunnable)
+        readWatermarkHandler.postDelayed(readWatermarkRunnable, 700L)
     }
 
     /** Ekran arka plandayken gelen mesajlar `messageListener` dinlemediği
@@ -2584,8 +2626,10 @@ class ChatActivity : AppCompatActivity() {
             P2PService.activeConversationId = null
         }
         ReadStatePrefs.markRead(this, peerDeviceFingerprint)
-        // Çoklu-cihaz (spec 1.7.1): bu sohbeti okuduğumuzu kardeş
-        // cihazlara da bildir — orada da okunmamış görünmesin.
+        // Bu sohbeti okuduğumuzu kardeş cihazlara VE karşı tarafa bildir
+        // (bkz. `sync_read_state` — artık iki hedef). Debounce'lu bekleyen
+        // varsa iptal edip HEMEN kesin bir tane yolla.
+        readWatermarkHandler.removeCallbacks(readWatermarkRunnable)
         try {
             P2PLib.syncReadState(peerDeviceFingerprint, "", System.currentTimeMillis())
         } catch (e: Exception) {
