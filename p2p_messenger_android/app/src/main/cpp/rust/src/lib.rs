@@ -633,6 +633,48 @@ mod path_safety_tests {
     }
 }
 
+#[cfg(test)]
+mod delivery_ack_coverage_tests {
+    /// 2026-09-07 iki cihazlı testte bulunan hata: `Reaction` alıcı kolu
+    /// hiç `send_ack` çağırmıyordu, ama `Reaction` `needs_delivery_
+    /// confirmation` listesinde — yani gönderen onu onaylanana kadar (2 güne)
+    /// yeniden dener ve `pending_durable_retries`'e yazar. Sonuç: tepki
+    /// alıcıda uygulansa bile gönderen tarafta yeniden-deneme girdisi
+    /// günlerce asılı kalıyordu.
+    ///
+    /// Bu test, `receive_message`'ın onay bekleyen içerik türlerinin
+    /// kollarının GERÇEKTEN bir Ack yolu tetiklediğini kilitler. Kaynağı
+    /// tarar (`wipe_coverage_tests` ile aynı desen — `P2PCore` kuramadığımız
+    /// için). Her kol ya doğrudan `send_ack(` çağırır, ya da acık biçimde
+    /// muaf listesinde olmalı (Ack'i başka bir yol sağlıyor).
+    #[test]
+    fn reaction_receive_arm_sends_an_ack() {
+        let src = include_str!("lib.rs");
+
+        // `receive_message`'ın `Reaction` kolunun DESTRUCTURE deseni (send
+        // tarafı `let content = MessageContent::Reaction {\n  target_...:`
+        // şeklinde alanları `:` ile yazar; alıcı kolu tek satırda `, ` ile).
+        // Parçalı kurulur ki bu test bloğu deseni kendi içinde barındırıp
+        // `find`'i şaşırtmasın.
+        let arm_pat = ["MessageContent::Reaction { target_message_id,",
+                       " emoji, group_id, reacted_at_ms } =>"].concat();
+        let arm_start = src.find(&arm_pat)
+            .expect("Reaction receive arm not found — did the destructure change?");
+        let after = &src[arm_start + arm_pat.len()..];
+        let arm_end = after.find("MessageContent::").unwrap_or(after.len());
+        let arm_body = &after[..arm_end];
+
+        assert!(
+            arm_body.contains("self.send_ack("),
+            "receive_message'ın `Reaction` kolu `send_ack` çağırmıyor. `Reaction` \
+             `needs_delivery_confirmation` listesinde olduğu için gönderen onu \
+             onaylanana kadar (2 güne) yeniden dener + `pending_durable_retries`'e \
+             yazar — bir tepki alıcıda uygulansa bile gönderende sonsuza dek asılı \
+             kalır (bkz. 2026-09-07 iki cihazlı test bulgusu)."
+        );
+    }
+}
+
 fn current_time_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
 }
@@ -7048,11 +7090,20 @@ impl P2PCore {
                 }
             }
             MessageContent::Reaction { target_message_id, emoji, group_id, reacted_at_ms } => {
+                // Ack KOŞULSUZ (bkz. `apply_edit_or_delete_content` — Edit/Delete
+                // AYNI desen: önce Ack, sonra uygula/reddet). `Reaction`
+                // `needs_delivery_confirmation` listesinde → gönderen bunu
+                // onaylanana kadar (2 güne) yeniden dener ve `pending_durable_
+                // retries`'e yazar. Bu arm eskiden HİÇ Ack göndermiyordu →
+                // tepki alıcıda uygulansa/reddedilse bile gönderen tarafta
+                // yeniden-deneme girdisi günlerce asılı kalıyordu (2026-09-07
+                // iki cihazlı testte bulundu: saatler önceki `Reaction`
+                // girdileri hâlâ `pending_durable_retries`'te).
+                self.send_ack(&peer_fp, &message_id);
                 // Tepkinin hedefi bizde HİÇ olmayabilir (ör. o mesajı hiç
-                // almadık) — o zaman sessizce yok sayılır. `Edit`/`Delete`
-                // gibi tamponlamıyoruz: bir tepki, kaybolduğunda sohbetin
-                // anlamını bozmaz ve gönderen tarafta zaten yeniden deneme
-                // kuyruğunda (`needs_delivery_confirmation`).
+                // almadık) — o zaman sessizce yok sayılır (ama Ack yine de
+                // gitti, yukarıda). `Edit`/`Delete` gibi tamponlamıyoruz: bir
+                // tepki, kaybolduğunda sohbetin anlamını bozmaz.
                 // bkz. `sender_may_post_to_group` — grup Text/FileOffer ile
                 // AYNI boşluk; tepki de arşive (reactions tablosu) yazıyor.
                 if let Some(gid) = &group_id {
