@@ -4,7 +4,11 @@ version = "0.2.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+# "rlib" EKLENDİ: Linux masaüstü istemcisi (bkz. depo kökündeki `Linux/`) bu
+# çekirdeği bir path bağımlılığı olarak DOĞRUDAN linkler (bkz. `api` modülü) —
+# cdylib/staticlib bir Rust crate'i tarafından `use` edilemez, rlib gerekir.
+# Android tarafı için değişen bir şey yok: cargo-ndk hâlâ cdylib'i üretir.
+crate-type = ["cdylib", "staticlib", "rlib"]
 name = "p2p_messenger"
 
 [dependencies]
@@ -71,6 +75,23 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 # (bkz. SECURITY.md "Cross-network connectivity" notu). Spec §4.3 zaten Node
 # modu için "isteğe bağlı Circuit Relay v2 hizmeti" öngörmüştü, ama hiçbir
 # zaman implemente edilmemişti.
+# Spec dışı, kullanıcı isteği ("connection testing and re-connecting
+# automatically should be better", sonra pil sağlamlığı düzeltmesi): aktif
+# bağlantı canlılık testi. Önceden bu uygulamanın bir bağlantının hâlâ
+# GERÇEKTEN çalışır durumda olduğunu doğrulamasının TEK yolu, o bağlantı
+# üzerinden bir yazma denemesinin başarısız olmasıydı (ör. bir mesaj
+# göndermeye çalışmak) — bu, "yarı açık" (half-open) bir bağlantıyı (ağ
+# arayüzü değişti, NAT/güvenlik duvarı boşta bağlantıyı sessizce düşürdü,
+# cihaz uykudan döndü) DAKİKALARCA fark edilmeden bırakabilirdi, çünkü
+# libp2p'nin kendi `is_connected()` bookkeeping'i böyle bir durumda hâlâ
+# "bağlı" der (TCP katmanı henüz bir RST/timeout görmedi). Bu ÖNCEDEN stok
+# "ping" feature'ıyla (libp2p::ping) yapılıyordu; artık lib.rs'teki ÖZEL
+# `keepalive` (request-response tabanlı, bkz. `P2PBehaviour.keepalive`/
+# `KeepAliveState`) davranışıyla yapılıyor — sebep, stok ping'in TÜM
+# bağlantılara tek bir SABİT aralık uygulaması (pil sağlamlığı düzeltmesi:
+# bir bağlantı stabilize olunca aralık genişletilebilsin istendi, stok ping
+# bunu desteklemiyor). "ping" feature'ı artık kullanılmadığından kaldırıldı,
+# "request-response"/"cbor" zaten `file_chunks` için buradaydı.
 libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "mdns", "tokio", "macros", "dns", "request-response", "cbor", "relay", "dcutr", "autonat", "upnp"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 futures = "0.3"

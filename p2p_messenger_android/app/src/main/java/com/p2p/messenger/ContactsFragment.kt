@@ -18,6 +18,7 @@ import android.widget.EditText
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.view.doOnPreDraw
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -30,6 +31,7 @@ import com.p2p.messenger.ui.QrScanActivity
 import com.p2p.messenger.util.QrBinaryCodec
 import com.p2p.messenger.util.hexToBytes
 import org.json.JSONArray
+import org.json.JSONObject
 
 class ContactsFragment : Fragment() {
 
@@ -72,12 +74,28 @@ class ContactsFragment : Fragment() {
         // görünür — bkz. eski QrDisplayActivity (silindi), üretim mantığı
         // birebir buraya taşındı.
         imgOwnQr = view.findViewById(R.id.imgOwnQr)
-        // Spec dışı, kullanıcı isteği: QR boyutu HARDCODED DEĞİL — ekran
-        // genişliğinin %75'i (kare). Küçük/büyük ekranlarda orantılı kalır.
-        val qrSide = (resources.displayMetrics.widthPixels * 0.75f).toInt()
-        imgOwnQr.layoutParams = imgOwnQr.layoutParams.apply {
-            width = qrSide
-            height = qrSide
+        // Not hardcoded, and not just a fraction of the RAW screen size:
+        // `resources.displayMetrics` is the full display, which still
+        // includes the status bar, the system nav bar, AND this app's own
+        // top status-text bar + BottomNavigationView (see activity_main.xml
+        // — nav_host_fragment is constrained between them). Sizing off that
+        // raw figure overshoots the space actually available for this
+        // fragment's content. Instead, wait for this view to be laid out
+        // and size off ITS OWN measured viewport (`view` here is the
+        // NestedScrollView root, match_parent WITHIN nav_host_fragment, so
+        // its height already excludes all of the above) — the smaller of
+        // its width/height, minus a fixed thin margin, so the QR (a
+        // square) always fits with at least that margin regardless of
+        // device or orientation.
+        view.doOnPreDraw {
+            val minDimensionPx = minOf(view.width, view.height)
+            val thinMarginPx = (16 * resources.displayMetrics.density).toInt()
+            val qrSide = (minDimensionPx - thinMarginPx * 2)
+                .coerceAtLeast((160 * resources.displayMetrics.density).toInt())
+            imgOwnQr.layoutParams = imgOwnQr.layoutParams.apply {
+                width = qrSide
+                height = qrSide
+            }
         }
         txtOwnIdentityCode = view.findViewById(R.id.txtOwnIdentityCode)
         txtOwnIdentityCode.text = try {
@@ -103,7 +121,7 @@ class ContactsFragment : Fragment() {
                 // Kayıt (TOFU) tamamlandı ama karşı tarafla henüz gerçek bir
                 // bağlantı/IdentityExchange tamamlanmadı (bkz. Rust
                 // pending_identity_exchanges notu) — sohbet açılamaz.
-                Toast.makeText(requireContext(), "Bağlantı henüz tamamlanmadı, birazdan tekrar deneyin", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), R.string.msg_connection_not_complete, Toast.LENGTH_SHORT).show()
             }
         }
         adapter.onContactLongClick = { message -> showChatLongPressMenu(message) }
@@ -154,20 +172,103 @@ class ContactsFragment : Fragment() {
     /** bkz. ChatsFragment.showChatLongPressMenu aynı notu — iki sekme de
      *  aynı kişi listesini/adapter'ı paylaştığından davranış birebir aynı. */
     private fun showChatLongPressMenu(message: ChatAdapter.ChatMessage) {
-        val options = arrayOf(
+        // Kullanicı kararı (2026-08-27): menuye ENGELLE eklendi ve grup
+        // uzerinden tanisilan kisiler icin "dogrulandi olarak isaretle"
+        // secenegi cikiyor. Engelle, iptalin (revoke) yanina konuldu ama
+        // anlami cok farkli: iptal tek bir cihazi kapatir ve kisi yeni bir
+        // cihazla geri gelebilir; engel ise kimligi hedefler ve yalnizca
+        // yuz yuze yeniden eslesmeyle kalkar.
+        val options = mutableListOf(
             getString(R.string.action_clear_chat_history),
             getString(R.string.action_revoke_device),
+            getString(R.string.action_block),
             getString(R.string.action_delete_contact)
         )
+        if (message.addedViaGroup) {
+            options.add(getString(R.string.action_trust_contact))
+        }
         AlertDialog.Builder(requireContext())
             .setTitle(message.displayName)
-            .setItems(options) { _, which ->
+            .setItems(options.toTypedArray()) { _, which ->
                 when (which) {
                     0 -> confirmClearChatHistory(message)
                     1 -> confirmRevokeDevice(message)
-                    2 -> confirmDeleteContactStep1(message)
+                    2 -> confirmBlockIdentity(message)
+                    3 -> confirmDeleteContactStep1(message)
+                    4 -> confirmTrustContact(message)
                 }
             }
+            .show()
+    }
+
+    /**
+     * Kullanici karari: kalici engelleme. `revoke`'tan farki metinde acikca
+     * anlatiliyor — geri donusu yalnizca yuz yuze yeniden eslesme.
+     */
+    private fun confirmBlockIdentity(message: ChatAdapter.ChatMessage) {
+        val identityId = message.identityId
+        if (identityId.isEmpty()) return
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.confirm_block_title)
+            .setMessage(getString(R.string.confirm_block_body, message.displayName))
+            .setPositiveButton(R.string.action_block) { _, _ ->
+                val result = try {
+                    P2PLib.blockIdentity(identityId)
+                } catch (e: Exception) {
+                    "Error: ${e.message}"
+                }
+                if (result.startsWith("Error:")) {
+                    Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(requireContext(), R.string.msg_identity_blocked, Toast.LENGTH_LONG).show()
+                    refreshList()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Kullanici karari: grup uzerinden tanisilan bir kisiye TAM guven verir
+     * — "grup uzerinden eklendi, dogrulanmadi" isaretini kaldirir.
+     * Sifreleme zaten aynıydi; degisen yalnizca guven gostergesi.
+     */
+    private fun confirmTrustContact(message: ChatAdapter.ChatMessage) {
+        if (message.realContactId.isEmpty()) return
+        // Kullanıcı sorusu (2026-08-28): "güven" derken arkada anahtar
+        // alışverişi olmuyor — anahtarlar ZATEN uçtan uca kullanılıyor.
+        // Eksik olan tek şey, o anahtarların gerçekten bu kişiye ait
+        // olduğunun DOĞRULANMASI. Bunu ancak kullanıcı, kodu başka bir
+        // kanaldan karşılaştırarak yapabilir; o yüzden kod artık burada,
+        // onay penceresinin içinde gösteriliyor.
+        val safetyCode = try {
+            P2PLib.contactSafetyCode(message.identityId)
+        } catch (e: Exception) {
+            ""
+        }
+        val body = if (safetyCode.isNotEmpty()) {
+            getString(R.string.confirm_trust_body, message.displayName) +
+                "\n\n" + getString(R.string.lbl_safety_code, safetyCode)
+        } else {
+            getString(R.string.confirm_trust_body, message.displayName)
+        }
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.confirm_trust_title)
+            .setMessage(body)
+            .setPositiveButton(R.string.action_trust_contact) { _, _ ->
+                val result = try {
+                    P2PLib.trustContact(message.realContactId)
+                } catch (e: Exception) {
+                    "Error: ${e.message}"
+                }
+                if (result.startsWith("Error:")) {
+                    Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(requireContext(), R.string.msg_contact_trusted, Toast.LENGTH_SHORT).show()
+                    refreshList()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
 
@@ -280,12 +381,13 @@ class ContactsFragment : Fragment() {
             val addedViaGroup = obj.optBoolean("added_via_group", false)
             ChatAdapter.ChatMessage(
                 contactId = fingerprint,
-                displayName = obj.optString("display_name", "Bilinmeyen"),
+                displayName = obj.optString("display_name", "Unknown"),
                 lastMessage = if (addedViaGroup) getString(R.string.contact_added_via_group) else "",
                 timestamp = 0L,
                 realContactId = obj.optString("contact_id"),
                 avatarJpeg = avatarHex?.let { hexToBytes(it) },
-                addedViaGroup = addedViaGroup
+                addedViaGroup = addedViaGroup,
+                identityId = obj.optString("identity_id")
             )
         }
 
@@ -301,22 +403,51 @@ class ContactsFragment : Fragment() {
      */
     private fun showManualAddDialog() {
         val input = EditText(requireContext())
-        input.hint = "identity_id|device_fingerprint|device_name|rendezvous_node"
+        input.hint = getString(R.string.hint_manual_add_format)
 
         AlertDialog.Builder(requireContext())
-            .setTitle("Manuel Ekle")
+            .setTitle(R.string.title_add_manually)
             .setView(input)
-            .setPositiveButton("Ekle") { _, _ ->
+            .setPositiveButton(R.string.action_add) { _, _ ->
                 val text = input.text.toString()
                 val result = P2PLib.processManualEntry(text)
                 if (result.startsWith("Error:")) {
                     Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
                 } else {
-                    Toast.makeText(requireContext(), "Eklendi: ${result.take(16)}...", Toast.LENGTH_SHORT).show()
+                    // Spec dışı, kullanıcı isteği: bkz. QrScanActivity AYNI
+                    // desen — ilk eşleşme uzun sürebilir, kullanıcıyı
+                    // DOĞRUDAN yeni kişinin sohbet ekranına yönlendirmek
+                    // (o ekranın "Bağlanılıyor..." göstergesiyle) sadece
+                    // bir toast göstermekten çok daha açık.
+                    openChatForPairingResult(result)
                 }
             }
-            .setNegativeButton("İptal", null)
+            .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    /** bkz. `showManualAddDialog`/QrScanActivity.openChatOrFallback AYNI
+     *  desen — `processManualEntry`'nin JSON dönüşünü ayrıştırıp yeni
+     *  kişinin sohbet ekranını açar. */
+    private fun openChatForPairingResult(resultJson: String) {
+        val deviceFingerprint: String?
+        val deviceName: String
+        try {
+            val obj = JSONObject(resultJson)
+            deviceFingerprint = obj.optString("device_fingerprint").ifEmpty { null }
+            deviceName = obj.optString("device_name")
+        } catch (e: Exception) {
+            Toast.makeText(requireContext(), R.string.msg_added, Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (deviceFingerprint == null) {
+            Toast.makeText(requireContext(), R.string.msg_added, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val intent = Intent(requireContext(), ChatActivity::class.java)
+        intent.putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, deviceFingerprint)
+        intent.putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, deviceName.ifEmpty { deviceFingerprint.take(8) })
+        startActivity(intent)
     }
 
     /** bkz. `btn_copy_manual_code` — karşı taraf QR tarayamıyorsa (ör.
@@ -339,20 +470,32 @@ class ContactsFragment : Fragment() {
             return
         }
         val clipboard = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Typoon eşleşme kodu", code))
+        clipboard.setPrimaryClip(ClipData.newPlainText("Typeon pairing code", code))
         Toast.makeText(requireContext(), R.string.msg_manual_code_copied, Toast.LENGTH_LONG).show()
     }
 
-    /** bkz. `btn_copy_own_address` — bu, aynı zamanda Ayarlar > "Bilinen
-     *  röle adresi" alanına yapıştırılabilecek TAM adres formatıdır (bare
-     *  multiaddr + `/p2p/<peer_id>`, bkz. P2PLib.addKnownRelayAddress). */
+    /** bkz. `btn_copy_own_address` — spec dışı, kullanıcı isteği: bu da
+     *  `copyManualAddCode` ile AYNI `getManualAddCode` formatını kopyalar
+     *  (bkz. o fonksiyonun dokümantasyonu), böylece bir telefonda "Copy my
+     *  address"e basıp öbür telefonda direkt "Add Manually"ye yapıştırmak
+     *  bire bir çalışır — önceden burada bare multiaddr kopyalanıyordu ki
+     *  `processManualEntry`'nin beklediği pipe'lı formatla uyuşmuyordu. */
     private fun copyOwnAddress() {
         if (ownNodeAddress.isEmpty()) {
             Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
             return
         }
+        val code = try {
+            P2PLib.getManualAddCode(ownNodeAddress)
+        } catch (e: Exception) {
+            ""
+        }
+        if (code.isEmpty()) {
+            Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
+            return
+        }
         val clipboard = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Typoon adresi", ownNodeAddress))
+        clipboard.setPrimaryClip(ClipData.newPlainText("Typeon pairing code", code))
         Toast.makeText(requireContext(), R.string.msg_own_address_copied, Toast.LENGTH_LONG).show()
     }
 }

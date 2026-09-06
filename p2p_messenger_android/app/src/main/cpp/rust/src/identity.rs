@@ -34,16 +34,6 @@ pub struct Identity {
     pub primary_device: Option<String>,
 }
 
-impl Identity {
-    pub fn active_device_count(&self) -> usize {
-        self.devices.iter().filter(|d| matches!(d.status, DeviceStatus::Active)).count()
-    }
-
-    pub fn can_add_device(&self) -> bool {
-        self.active_device_count() < MAX_ACTIVE_DEVICES
-    }
-}
-
 /// Bir cihazın hibrit imza + KEM public key'lerinden fingerprint türetir.
 /// `fingerprint = SHA3-256( sign_ed25519 || sign_mldsa || kem_x25519 || kem_mlkem )`
 /// (spec 1.2). Ham fingerprint 32 byte, hex olarak döner; gösterim

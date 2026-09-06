@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spec dışı, kullanıcı isteği: sohbet ekranının alt çubuğu (ek/kamera/
+     ses düğmeleri + metin alanı + gönder) artık TEK bir "pill" içinde.
+     Yarıçap, çubuğun tek satırlık yüksekliğinin yarısından büyük tutuldu
+     (çok satırlı yazarken bile kenarlar yuvarlak kalsın diye Android
+     yarıçapı otomatik kısar). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="?attr/colorSurfaceVariant" />
+    <corners android:radius="999dp" />
+    <stroke
+        android:width="1dp"
+        android:color="?attr/colorOutline" />
+</shape>

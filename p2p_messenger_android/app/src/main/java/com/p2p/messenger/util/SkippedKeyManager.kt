@@ -19,6 +19,19 @@ import java.security.SecureRandom
  * plaintext anahtar bulunmaz.
  */
 object SkippedKeyManager {
+    private const val TAG = "SkippedKeyManager"
+    // Defter #04: cozme HATASINDA anahtar YENIDEN URETILMEZ.
+    //
+    // Burasi eskiden "dosya var ama decrypt istisna atti" durumunda
+    // `generateAndPersist` cagiriyor, yani anahtar dosyasini taze rastgele
+    // bir anahtarla EZIYORDU — "anahtar yok" ile "anahtar bu sefer
+    // cozulemedi"yi ayni sey sayarak. Tek bir gecici Keystore hatasi (cihaz
+    // yedekten donus, ekran kilidi kimlik bilgisinin sifirlanmasi, StrongBox
+    // arizasi) bu anahtarla sifrelenmis HER SEYI geri donusuz yok ediyordu
+    // ve kullanici hicbir uyari gormuyordu. Kardesleri (`ArchiveKeyManager`,
+    // `IdentityManager`) zaten dogru davraniyordu: cozme basarisizsa sadece
+    // geri don. Yeniden uretim artik SADECE dosya hic yokken.
+
     private const val KEY_FILENAME = "skipped_key_enc.enc"
 
     private fun keyFile(context: Context): File =
@@ -38,11 +51,8 @@ object SkippedKeyManager {
             try {
                 KeystoreCrypto.decrypt(encrypted, KeystoreCrypto.ALIAS_SKIPPED_KEYS)
             } catch (e: Exception) {
-                // Keystore anahtarı kayıp/bozuk — diskteki eski skipped-key
-                // kayıtları artık çözülemez (kalıcı kayıp, ama bu sadece
-                // gecikmeli mesajları etkiler, ana mesajlaşmayı etkilemez).
-                // Yeni bir anahtarla baştan başla.
-                generateAndPersist(context)
+                // bkz. TAG notu (#04) — ASLA yeniden uretme.
+                android.util.Log.e(TAG, "Anahtar cozulemedi, YENIDEN URETILMIYOR", e)
                 return
             }
         } else {

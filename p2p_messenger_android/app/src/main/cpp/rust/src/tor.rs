@@ -89,6 +89,33 @@ impl TorHandle {
         self.onion_addr.lock().unwrap().clone()
     }
 
+    /// Ağ arayüzü değiştiğinde (Wi-Fi kopup gelme, hücresele geçiş) çağrılır.
+    /// arti 0.24'te "ağ değişti, ŞİMDİ yeniden dene" için temiz bir genel API
+    /// yok — reaktör kendi zamanlayıcılarıyla eninde sonunda (dakikalar
+    /// içinde) toparlıyor. Burada yaptığımız, arka planda `bootstrap()`'ı
+    /// yeniden çağırmak: zaten bootstrap edilmişse arti belgeleri "no-op"
+    /// diyor ama bootstrap durumu bir ağ kesintisinde gerilemişse bu onu
+    /// yeniden kurar, ve `.onion` adını yeniden yakalar. En kötü ihtimalle
+    /// ucuz bir çağrı. (İstemci tarafı `notifyNetworkChanged` zaten peer'lara
+    /// yeniden dial ediyor — bu, sunucunun onion'unu tazelemek için AYNI
+    /// olayın karşılığı.)
+    pub fn notify_network_changed(&self) {
+        let client = self.client.clone();
+        let status = self.status.clone();
+        tokio::spawn(async move {
+            match client.bootstrap().await {
+                Ok(()) => {
+                    *status.lock().unwrap() = TorStatus::Ready;
+                    log::info!("Tor: ağ değişikliği sonrası bootstrap teyit edildi");
+                }
+                Err(e) => {
+                    *status.lock().unwrap() = TorStatus::Bootstrapping;
+                    log::warn!("Tor: ağ değişikliği sonrası bootstrap henüz tamam değil: {e}");
+                }
+            }
+        });
+    }
+
     /// Tor katmanını başlatır: arti client'ı oluşturur, arka planda bootstrap
     /// eder, onion service'i başlatır ve gelen akışları yerel `local_port`'a
     /// köprüleyen görevi spawn eder. TOKIO CONTEXT İÇİNDE çağrılmalı
@@ -133,25 +160,40 @@ impl TorHandle {
             *onion_addr.lock().unwrap() = Some(hsid.to_string());
         }
 
-        // Arka plan: bootstrap.
+        // Arka plan: bootstrap — spec dışı, kullanıcı isteği ("Tor
+        // bağlantısını izle ve yeniden dene"): önceden bootstrap TEK
+        // seferlik denenir, başarısız olursa `Failed` durumunda SÜRESİZ
+        // kalırdı (uygulama yeniden başlamadan/Tor kapatılıp açılmadan asla
+        // düzelmezdi — geçici bir ağ sorunu bile kalıcı bir "Tor
+        // çalışmıyor" durumuna yol açardı). Artık üstel geri çekilmeyle
+        // (2 sn'den başlayıp 60 sn'de tavan yapar) BAŞARILI olana kadar
+        // yeniden dener. `bootstrap()` zaten idempotent (arti belgeleri:
+        // önceden bootstrap edilmişse no-op) — bu yüzden birden çok kez
+        // çağırmak zararsız.
         {
             let client_bg = client.clone();
             let status_bg = status.clone();
             let service_bg = service.clone();
             let onion_bg = onion_addr.clone();
             tokio::spawn(async move {
-                match client_bg.bootstrap().await {
-                    Ok(()) => {
-                        // Bootstrap sonrası .onion adı kesinlikle var.
-                        if let Some(hsid) = service_bg.onion_name() {
-                            *onion_bg.lock().unwrap() = Some(hsid.to_string());
+                let mut delay = std::time::Duration::from_secs(2);
+                loop {
+                    match client_bg.bootstrap().await {
+                        Ok(()) => {
+                            // Bootstrap sonrası .onion adı kesinlikle var.
+                            if let Some(hsid) = service_bg.onion_name() {
+                                *onion_bg.lock().unwrap() = Some(hsid.to_string());
+                            }
+                            *status_bg.lock().unwrap() = TorStatus::Ready;
+                            log::info!("Tor: bootstrap tamam, onion service yayında");
+                            break;
                         }
-                        *status_bg.lock().unwrap() = TorStatus::Ready;
-                        log::info!("Tor: bootstrap tamam, onion service yayında");
-                    }
-                    Err(e) => {
-                        *status_bg.lock().unwrap() = TorStatus::Failed;
-                        log::error!("Tor bootstrap başarısız: {e}");
+                        Err(e) => {
+                            *status_bg.lock().unwrap() = TorStatus::Failed;
+                            log::error!("Tor bootstrap başarısız ({delay:?} sonra yeniden denenecek): {e}");
+                            tokio::time::sleep(delay).await;
+                            delay = (delay * 2).min(std::time::Duration::from_secs(60));
+                        }
                     }
                 }
             });
@@ -309,8 +351,26 @@ impl Transport for ArtiDialTransport {
         let tor_addr = TorAddr::from((host.as_str(), port))
             .map_err(|e| TransportError::Other(std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())))?;
         Ok(Box::pin(async move {
+            // HER dial kendi Tor devresini alır.
+            //
+            // Varsayılan yalıtımla arti, aynı `TorClient` üzerinden açılan
+            // bütün akışları AYNI devrede toplayabiliyor. Tek devre ise bu
+            // uygulamada ölçülen gerçek tavan: aynı 14 MB'lık dosya, aynı
+            // kod ve aynı cihazlarla bir devrede 270 KB/s, başka bir devrede
+            // 165 KB/s gitti — darboğaz devrenin kendisi. Bağlantı başına
+            // ayrı devre, toplu aktarımda birden çok bağlantı açıldığında
+            // (bkz. `BULK_PARALLEL_CONNECTIONS`) bant genişliğinin gerçekten
+            // toplanmasını sağlar; tek devrede paralel bağlantı hiçbir şey
+            // kazandırmazdı.
+            //
+            // Bu, AKIŞ başına değil BAĞLANTI başına devre demek: bir libp2p
+            // bağlantısı zaten çok sayıda akışı yamux ile çoğulluyor. Yani
+            // eş başına birkaç devre oluyor, arti'nin uyardığı
+            // `isolate_every_stream` savurganlığı değil.
+            let mut prefs = arti_client::StreamPrefs::new();
+            prefs.set_isolation(arti_client::IsolationToken::new());
             let stream = client
-                .connect(tor_addr)
+                .connect_with_prefs(tor_addr, &prefs)
                 .await
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
             Ok(TorStream { inner: stream })

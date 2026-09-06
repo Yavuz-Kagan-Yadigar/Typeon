@@ -31,7 +31,23 @@ pub struct Group {
     /// ile (dolayısıyla SADECE kurucu tarafından) değişir.
     #[serde(default)]
     pub avatar_jpeg: Option<Vec<u8>>,
+    /// Bu grup için bilinen kurucu devirleri — bkz.
+    /// `packet::FounderTransfer` (neden gerekli olduğu orada). Kurucunun
+    /// gönderdiği her `GroupUpdate` bunu taşır; devri kaçıran bir üye
+    /// zinciri yürüyerek yerel kurucusunu ilerletir ve gruptan KALICI
+    /// olarak kopmaz.
+    #[serde(default)]
+    pub founder_chain: Vec<crate::packet::FounderTransfer>,
 }
+
+/// Kurucu devir zincirinde saklanan azami girdi sayısı.
+///
+/// Her girdi bir ML-DSA-87 imzası (~4.6 KB) taşıyor ve zincir HER grup
+/// güncellemesiyle birlikte gidiyor — sınırsız bırakmak gossipsub'ın 1 MB
+/// paket tavanını yiyip bitirirdi. 8 devir, gerçek kullanımda fazlasıyla
+/// yeterli. KABUL EDİLEN SINIR: art arda 8'den fazla devrin TAMAMINI
+/// kaçıran bir üye kendini onaramaz ve gruba yeniden davet edilmelidir.
+pub const MAX_FOUNDER_CHAIN: usize = 8;
 
 impl Group {
     pub fn new(group_id: String, name: String, founder_identity_id: String, now: u64) -> Self {
@@ -47,6 +63,23 @@ impl Group {
             created_at: now,
             version: 0,
             avatar_jpeg: None,
+            founder_chain: Vec::new(),
+        }
+    }
+
+    /// Zincire yeni bir devir ekler (tekrarları eler) ve son
+    /// `MAX_FOUNDER_CHAIN` girdiyi tutar — bkz. o sabitin notu.
+    pub fn push_founder_transfer(&mut self, transfer: crate::packet::FounderTransfer) {
+        if self.founder_chain.iter().any(|t| {
+            t.version == transfer.version && t.to_identity == transfer.to_identity
+        }) {
+            return;
+        }
+        self.founder_chain.push(transfer);
+        self.founder_chain.sort_by_key(|t| t.version);
+        if self.founder_chain.len() > MAX_FOUNDER_CHAIN {
+            let drop = self.founder_chain.len() - MAX_FOUNDER_CHAIN;
+            self.founder_chain.drain(0..drop);
         }
     }
 
@@ -169,6 +202,13 @@ pub fn apply_change(group: &mut Group, change: &GroupChange, new_version: u32, n
         // (lib.rs `process_group_update`) grup kaydını tamamen kaldırır.
         // Burada yapılacak bir şey yok (bkz. GroupChange::Delete notu).
         GroupChange::Delete => {}
+        GroupChange::TransferFounder(new_founder) => {
+            // Hedef üye değilse devir yok sayılır — aksi halde grup
+            // dışındaki birine yetki geçip grup kilitlenirdi.
+            if group.is_member(new_founder) {
+                group.founder_identity_id = new_founder.clone();
+            }
+        }
     }
     group.version = new_version;
 }
@@ -257,6 +297,71 @@ mod tests {
         g.sync_members(&["A".to_string(), "C".to_string()], 3000);
         assert!(!g.is_member("B"));
         assert!(g.is_member("C"));
+    }
+
+    /// Dış inceleme önerisi: kurucu bütün cihazlarını kaybederse grup
+    /// kilitleniyordu. Devir, yetkiyi başka bir ÜYEYE geçirir.
+    #[test]
+    fn founder_can_hand_over_to_a_member() {
+        let mut g = Group::new("g1".into(), "Test".into(), "A".into(), 1000);
+        apply_change(&mut g, &GroupChange::Add("B".into()), 1, 2000);
+        assert_eq!(g.founder_identity_id, "A");
+
+        apply_change(&mut g, &GroupChange::TransferFounder("B".into()), 2, 3000);
+        assert_eq!(g.founder_identity_id, "B", "yetki uyeye gecmeli");
+        // Artik yalnizca B imzalayabilir.
+        assert!(validate_group_update(&g, "B", true, 3).is_ok());
+        assert_eq!(validate_group_update(&g, "A", true, 3), Err(GroupUpdateError::NotFounder));
+    }
+
+    /// Yetki grup DIŞINDAKİ birine geçemez — geçseydi grup büsbütün
+    /// kilitlenirdi.
+    #[test]
+    fn founder_transfer_to_a_non_member_is_ignored() {
+        let mut g = Group::new("g1".into(), "Test".into(), "A".into(), 1000);
+        apply_change(&mut g, &GroupChange::TransferFounder("Z".into()), 1, 2000);
+        assert_eq!(g.founder_identity_id, "A", "uye olmayan yetki alamaz");
+        assert_eq!(g.version, 1, "surum yine de ilerlemeli");
+    }
+
+    fn transfer(version: u32, from: &str, to: &str) -> crate::packet::FounderTransfer {
+        crate::packet::FounderTransfer {
+            group_id: "g1".into(),
+            version,
+            from_identity: from.into(),
+            to_identity: to.into(),
+            signed_by_device: "dev".into(),
+            signature: vec![1],
+            signature_pq: vec![2],
+        }
+    }
+
+    /// bkz. `packet::FounderTransfer` — zincir sürüme göre sıralı kalmalı,
+    /// aynı devri iki kez taşımamalı ve sınırsız büyümemeli (her girdi
+    /// ~4.6 KB'lık bir ML-DSA imzası taşıyor ve HER grup güncellemesiyle
+    /// birlikte gidiyor).
+    #[test]
+    fn founder_chain_dedupes_sorts_and_is_capped() {
+        let mut g = Group::new("g1".into(), "Test".into(), "A".into(), 1000);
+        g.push_founder_transfer(transfer(5, "A", "B"));
+        g.push_founder_transfer(transfer(5, "A", "B"));
+        assert_eq!(g.founder_chain.len(), 1, "ayni devir iki kez girmemeli");
+
+        // Sirasiz eklense de surume gore siralanmali.
+        g.push_founder_transfer(transfer(3, "Z", "A"));
+        assert_eq!(g.founder_chain[0].version, 3);
+        assert_eq!(g.founder_chain[1].version, 5);
+
+        // Ust sinir: en eskiler dusmeli, en yeniler kalmali.
+        for v in 10..10 + MAX_FOUNDER_CHAIN as u32 {
+            g.push_founder_transfer(transfer(v, "X", &format!("Y{}", v)));
+        }
+        assert_eq!(g.founder_chain.len(), MAX_FOUNDER_CHAIN);
+        assert_eq!(g.founder_chain.first().unwrap().version, 10);
+        assert_eq!(
+            g.founder_chain.last().unwrap().version,
+            10 + MAX_FOUNDER_CHAIN as u32 - 1
+        );
     }
 
     #[test]

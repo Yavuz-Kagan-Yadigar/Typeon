@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- İstemcideki aynı gerekçe: sunucunun veri dizini başkalarının şifreli
+     zarflarını, onion servis anahtarını ve kayıt defterini tutuyor. Ne
+     buluta yedeklenmeli ne de cihaz aktarımına girmeli. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+    </device-transfer>
+</data-extraction-rules>

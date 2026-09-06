@@ -2,9 +2,20 @@
 <!-- Spec dışı: sohbet başlığı — bkz. kullanıcı isteği "profil fotoğrafı
      üst çubukta da görünsün". ActionBar.setCustomView ile takılır (bkz.
      ChatActivity/GroupChatActivity onCreate) — varsayılan ActionBar
-     başlığının aksine bir avatar taşıyabilmek için. -->
+     başlığının aksine bir avatar taşıyabilmek için.
+
+     Spec dışı, kullanıcı isteği: BU cihazın bağlantı durumu (bkz.
+     txtOwnConnectionStatus) üst çubuğun EN SAĞINDA — kullanıcı adının/
+     başlığın ALTINDA değil. Bunun için kök genişlik `match_parent`
+     olmalı (bkz. ChatActivity/GroupChatActivity `setCustomView` çağrısı —
+     ActionBar.LayoutParams AÇIKÇA MATCH_PARENT geçiyor, aksi halde
+     ActionBar özel görünümü sadece içeriği kadar dar sarar ve "en sağ"
+     hiçbir zaman gerçek kenara ulaşmaz) ve başlık/altyazı bloğu `weight=1`
+     ile kalan TÜM alanı kaplamalı — böylece uzun bir başlık/altyazı kendi
+     içinde kırpılır (ellipsize), durum metnini asla sağdan iterek ekran
+     dışına ATMAZ. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="wrap_content"
+    android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="horizontal"
     android:gravity="center_vertical">
@@ -17,8 +28,9 @@
         android:contentDescription="@null" />
 
     <LinearLayout
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
+        android:layout_weight="1"
         android:orientation="vertical">
 
         <TextView
@@ -26,15 +38,72 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:textAppearance="?attr/textAppearanceTitleMedium"
+            android:textSize="15sp"
             android:maxLines="1"
             android:ellipsize="end" />
 
-        <TextView
-            android:id="@+id/txtToolbarSubtitle"
+        <!-- Spec dışı, kullanıcı isteği: karşı tarafın bağlantı durumunu
+             düz metnin YANINDA küçük renkli bir noktayla da göster (bkz.
+             ChatActivity dotPeerStatus/updatePeerStatusDot) — "bağlı"/
+             "bağlanılıyor"/"bağlı değil" durumları arasında ilk bakışta
+             ayrım. Grup sohbetinde (tek bir karşı taraf/el sıkışma kavramı
+             olmadığından) bu satırın TAMAMI gizlenir (bkz.
+             GroupChatActivity, txtToolbarSubtitle'ı değil bu satırı gizler). -->
+        <LinearLayout
+            android:id="@+id/layoutToolbarSubtitleRow"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textSize="12sp"
-            android:alpha="0.8"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <View
+                android:id="@+id/dotPeerStatus"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:layout_marginEnd="4dp"
+                android:background="@drawable/status_dot" />
+
+            <TextView
+                android:id="@+id/txtToolbarSubtitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textSize="11sp"
+                android:alpha="0.8"
+                android:maxLines="1"
+                android:ellipsize="end" />
+
+        </LinearLayout>
+
+    </LinearLayout>
+
+    <!-- Spec dışı, kullanıcı isteği: BU cihazın (karşı tarafınki DEĞİL —
+         bkz. txtToolbarSubtitle) genel bağlantı durumu (Tor/node/internet) —
+         bkz. ChatActivity/GroupChatActivity ownStatusPollRunnable. Üst
+         çubuğun EN SAĞINDA, sabit (üstteki başlık bloğu genişleyip
+         daralırken sıçramaması için). Kullanıcı isteği: sadece PEER
+         durumu değil, BU cihazın durumu da aynı renkli nokta + pulse
+         deseniyle gösterilsin (bkz. dotPeerStatus, util.PulsingStatusDot). -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <View
+            android:id="@+id/dotOwnStatus"
+            android:layout_width="8dp"
+            android:layout_height="8dp"
+            android:layout_marginEnd="4dp"
+            android:background="@drawable/status_dot" />
+
+        <TextView
+            android:id="@+id/txtOwnConnectionStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="11sp"
+            android:alpha="0.7"
+            android:gravity="end"
             android:maxLines="1"
             android:ellipsize="end" />
 

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Typeon Sunucu</string>
+    <string name="intro">Kişileriniz çevrimdışıyken mesajlarını saklar, geri döndüklerinde teslim eder. İçeriği okuyamaz: mesajlar buraya zaten uçtan uca şifreli ve ikinci kez mühürlenmiş olarak gelir.</string>
+
+    <string name="lbl_run_server">Sunucuyu çalıştır</string>
+    <string name="state_stopped">Durdu</string>
+    <string name="state_running_fmt">Çalışıyor · Tor: %1$s</string>
+    <string name="state_no_address">Henüz adres yok — Tor açılıyor (ilk çalıştırmada 30–60 sn). Adres olmadan üretilen davet kodu işe yaramaz.</string>
+
+    <string name="lbl_address">Adres</string>
+    <string name="lbl_invite">Katılım kodu</string>
+    <string name="lbl_invite_desc">Herkes için TEK ve kalıcı kod: telefonda Ayarlar → Sunucular bölümünden tarayın ya da kopyalayıp oraya yapıştırın. Sınırsız kişi aynı kodla, size hiçbir şey sormadan katılabilir — bir kez yayımlamanız yeter. Kod sızarsa yenileyin; kaydı tamamlanmış cihazlar etkilenmez.</string>
+    <string name="action_new_invite">Kodu yenile</string>
+    <string name="action_copy_invite">Kodu kopyala</string>
+    <string name="msg_invite_copied">Davet kodu kopyalandı</string>
+    <string name="msg_no_invite_yet">Henüz adres yok — Tor açılışını bekleyin</string>
+    <string name="confirm_rotate_join_code">Mevcut kod anında çalışmayı bırakır. Eski QR/bağlantı elinde olan hiç kimse, yenisini vermediğiniz sürece katılamaz. Kaydı tamamlanmış cihazlar etkilenmez.</string>
+
+    <string name="lbl_devices">Kayıtlı cihazlar</string>
+    <string name="device_row_fmt">%1$s… · %2$s</string>
+    <string name="action_revoke">İptal et</string>
+    <string name="dlg_revoke_title">Bu cihazın kaydı iptal edilsin mi?</string>
+    <string name="dlg_revoke_body">Artık mesaj bırakamaz ve alamaz. Mesajlaşma uygulaması çalışmaya devam eder — sadece doğrudan eşler arası teslime döner.</string>
+
+    <string name="lbl_stats">Etkinlik</string>
+    <string name="stats_fmt">Cihaz: %1$d\nSaklanan: %2$d · Çekilen: %3$d · Servis edilen dosya parçası: %4$d\nDisk: %5$s</string>
+
+    <string name="lbl_options">Seçenekler</string>
+    <string name="lbl_tor_always">Bu sunucu her zaman bir onion service barındırır. Operatör NAT\'ı arkasındaki bir telefonun ulaşılabilir olmasının tek yolu bu — port yönlendirme, alan adı, sertifika gerekmez — bu yüzden kapatılabilir bir seçenek değil.</string>
+    <string name="lbl_node">Ayrıca röle ve DHT düğümü ol</string>
+    <string name="lbl_node_desc">Birbirini tanımayan kullanıcıların bulunup bağlanmasına yardım eder. Posta kutusundan bağımsızdır: canlı trafiği kör taşır, hiçbir şey saklamaz.</string>
+    <string name="action_battery">Pil optimizasyonundan muaf tut</string>
+    <string name="msg_battery_already">Zaten muaf</string>
+    <string name="msg_battery_manual">Bu cihazda mevcut değil — Ayarlar → Pil bölümünden elle yapın.</string>
+
+    <string name="notif_channel">Typeon Sunucu</string>
+    <string name="notif_starting">Başlatılıyor…</string>
+    <string name="notif_running">Sunucu çalışıyor</string>
+
+    <string name="footer_note">Android, bellek baskısı altında bir foreground service\'i yine de öldürebilir. Bu uygulama fişte duran yedek bir telefon içindir; hiçbir şeyi kaçırmaması gereken bir sunucu için küçük bir VPS\'te typeon-server daemon\'ını çalıştırın.</string>
+    <string name="lbl_storage">Depolama konumu</string>
+    <string name="lbl_storage_desc">Dosya ekleri burada tutulur. Kimlik ve Tor durumu her zaman dahili depolamada kalır.</string>
+    <string name="action_choose_storage">Depolama seç</string>
+    <string name="dlg_storage_title">Sunucu depolamasını taşı</string>
+    <string name="dlg_storage_moving">Veri taşınıyor…</string>
+    <string name="msg_storage_moved">Depolama taşındı. Sunucu yeniden başlatılıyor.</string>
+    <string name="msg_storage_failed">Taşınamadı: %1$s</string>
+    <string name="msg_storage_same">Zaten bu konum kullanılıyor.</string>
+    <string name="lbl_internal">Dahili depolama</string>
+    <string name="lbl_sdcard">SD kart</string>
+    <string name="lbl_free_suffix">boş</string>
+    <string name="lbl_external">Cihaz depolaması</string>
+    <string name="action_block">Engelle</string>
+    <string name="action_unblock">Engeli kaldir</string>
+    <string name="dlg_block_title">Bu cihaz engellensin mi?</string>
+    <string name="dlg_block_body">Iptalden farkli olarak engellenen cihaz taze bir davet koduyla bile geri donemez. Daha sonra geri alabilirsiniz.</string>
+</resources>

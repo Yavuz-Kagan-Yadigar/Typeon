@@ -35,13 +35,97 @@
 
     </LinearLayout>
 
+    <!-- Spec dışı, kullanıcı isteği (WhatsApp tarzı "yanıtla"): bu mesaj
+         başka bir mesaja yanıtsa (bkz. SimpleChatAdapter.Item.replyToMessageId)
+         yanıtlanan mesajın küçük bir özeti burada gösterilir — dokununca
+         (bkz. ChatActivity/GroupChatActivity onReplyPreviewClick) sohbet o
+         mesaja kaydırılır. -->
+    <LinearLayout
+        android:id="@+id/layoutReplyQuote"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="8dp"
+        android:layout_marginTop="6dp"
+        android:orientation="horizontal"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:background="@drawable/reply_quote_background"
+        android:visibility="gone">
+
+        <!-- Rengi kodda balonun metin rengine göre veriliyor (bkz.
+             SimpleChatAdapter `bindReplyQuote`) — `?attr/colorPrimary`
+             turuncu giden balonun üzerinde turuncu kalıyordu, yani
+             görünmüyordu. -->
+        <View
+            android:id="@+id/viewReplyQuoteBar"
+            android:layout_width="3dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="8dp" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/txtReplyQuoteSender"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textStyle="bold"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/txtReplyQuoteText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:maxWidth="300dp"
+                android:maxLines="2"
+                android:ellipsize="end"
+                android:textSize="13sp" />
+
+        </LinearLayout>
+
+    </LinearLayout>
+
+    <!-- Spec dışı, kullanıcı isteği: gönderilme saati ve "iletildi/okundu"
+         tikleri artık balonun ALTINDA değil, İÇİNDE (WhatsApp/Telegram
+         deseni). Bu yüzden balon arka planı (bkz. SimpleChatAdapter
+         `bubbleBackground`) ARTIK `txtBubbleText`/`layoutAttachment`'a
+         DEĞİL, ikisini de meta satırıyla birlikte saran BU kapsayıcıya
+         uygulanıyor — tek bir arka plan, üç ayrı parça yerine.
+         `wrap_content` + üstteki `container`ın gravity'si (END/START)
+         balonun hangi kenara yaslanacağını belirlemeye devam ediyor. -->
+    <!-- Spec dışı, kullanıcı isteği: "görüldü ve ulaştı tiklerini mesaj
+         balonunun YANINA, ekran kenarıyla arasına taşı". Bu yüzden balon
+         artık tek başına değil, yatay bir satırın içinde: [balon][yan
+         sütun]. Üstteki `container`ın gravity'si (END/START) satırın
+         tamamını hizaladığı için, KENDİ mesajlarımızda yan sütun balonla
+         ekranın sağ kenarı ARASINDA kalıyor — istenen tam olarak bu. -->
+    <LinearLayout
+        android:id="@+id/rowBubbleLine"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+    <LinearLayout
+        android:id="@+id/layoutBubble"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="5dp">
+
     <TextView
         android:id="@+id/txtBubbleText"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:maxWidth="340dp"
-        android:padding="12dp"
-        android:textSize="22sp" />
+        android:textSize="16sp" />
 
     <!-- Spec dışı: dosya/foto/video/ses eki balonu — `item.attachment`
          doluysa `txtBubbleText` yerine bu gösterilir (bkz.
@@ -54,18 +138,24 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="8dp"
-        android:layout_marginBottom="4dp"
         android:visibility="gone">
 
-        <ImageView
+        <!-- Spec dışı, kullanıcı isteği: gönderilen resim/videolar sohbette
+             yuvarlatılmış köşeli ve ince kenarlıklı görünsün. Düz bir
+             `ImageView` bunu yapamaz (kırpma yok, kenarlık yok);
+             `ShapeableImageView` ikisini de tek bileşende veriyor ve
+             `centerCrop` davranışı aynen korunuyor. -->
+        <com.google.android.material.imageview.ShapeableImageView
             android:id="@+id/imgAttachmentThumbnail"
             android:layout_width="220dp"
             android:layout_height="220dp"
             android:layout_marginBottom="6dp"
             android:scaleType="centerCrop"
             android:visibility="gone"
-            android:contentDescription="@null" />
+            android:contentDescription="@null"
+            app:shapeAppearanceOverlay="@style/ShapeAppearance.P2PMessenger.Attachment"
+            app:strokeColor="?attr/colorOutline"
+            app:strokeWidth="1dp" />
 
         <LinearLayout
             android:id="@+id/rowGenericAttachment"
@@ -222,84 +312,134 @@
 
     </LinearLayout>
 
-    <LinearLayout
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
-        android:orientation="horizontal"
-        android:gravity="center_vertical">
-
+        <!-- Spec dışı, kullanıcı isteği: ek gönderirken "altına bir yazı
+             yazılabilmeli". Açıklama, ekin ALTINDA ve balonun İÇİNDE —
+             `txtBubbleText` kullanılamazdı, o düzende ekin ÜSTÜNDE duruyor
+             ve metin mesajları için ayrılmış. -->
         <TextView
-            android:id="@+id/txtEditedLabel"
+            android:id="@+id/txtAttachmentCaption"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginEnd="6dp"
-            android:text="@string/lbl_edited"
-            android:textSize="12sp"
-            android:textColor="?attr/colorOnSurfaceVariant"
+            android:maxWidth="340dp"
+            android:layout_marginTop="4dp"
+            android:textSize="16sp"
             android:visibility="gone" />
 
-        <TextView
-            android:id="@+id/txtTimestamp"
+        <!-- bkz. `layoutBubble` notu — düzenlendi etiketi + saat + durum
+             tiki artık balonun İÇİNDE, sağ alt köşesinde. Renkleri kodda
+             balonun KENDİ metin rengine göre veriliyor (bkz.
+             SimpleChatAdapter `onColor`): sabit `?attr/colorOnSurfaceVariant`
+             gelen balonda doğruydu ama giden balonun (accent renkli)
+             üzerinde okunmuyordu. -->
+        <LinearLayout
+            android:id="@+id/rowBubbleMeta"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textSize="12sp"
-            android:textColor="?attr/colorOnSurfaceVariant" />
+            android:layout_gravity="end"
+            android:layout_marginTop="2dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
 
-        <ImageView
-            android:id="@+id/imgStatus"
-            android:layout_width="16dp"
-            android:layout_height="16dp"
-            android:layout_marginStart="4dp"
-            android:visibility="gone"
-            android:contentDescription="@null" />
+            <TextView
+                android:id="@+id/txtEditedLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="6dp"
+                android:text="@string/lbl_edited"
+                android:textSize="10sp" />
+
+            <TextView
+                android:id="@+id/txtTimestamp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textSize="10sp" />
+
+        </LinearLayout>
 
     </LinearLayout>
 
-    <!-- Spec dışı, kullanıcı isteği: "görüldü" bildirimi — SADECE en son
-         görülen mesajın altında (bkz. SimpleChatAdapter.applySeen, tüm
-         önceki mesajlar örtük olarak görülmüş sayılır). Hem 1:1 (tek
-         avatar) hem grup (birden fazla görenin avatarı) için aynı satır —
-         gruplarda 3'ten fazla goren "+N" ile özetlenir. -->
-    <LinearLayout
-        android:id="@+id/rowSeenBy"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:visibility="gone">
-
-        <ImageView
-            android:id="@+id/imgSeenBy1"
-            android:layout_width="14dp"
-            android:layout_height="14dp"
-            android:layout_marginEnd="2dp"
-            android:contentDescription="@string/msg_read" />
-
-        <ImageView
-            android:id="@+id/imgSeenBy2"
-            android:layout_width="14dp"
-            android:layout_height="14dp"
-            android:layout_marginEnd="2dp"
-            android:visibility="gone"
-            android:contentDescription="@null" />
-
-        <ImageView
-            android:id="@+id/imgSeenBy3"
-            android:layout_width="14dp"
-            android:layout_height="14dp"
-            android:layout_marginEnd="2dp"
-            android:visibility="gone"
-            android:contentDescription="@null" />
-
-        <TextView
-            android:id="@+id/txtSeenByMore"
+        <!-- Yan sütun: tepkiler + durum tiki + "gören" avatarları. `top`
+             hizası, kullanıcının "bırakılan emojiler mesajın İLK SATIRININ
+             yanında görünsün" isteği için — çok satırlı bir balonda pill
+             aşağı kaymaz. -->
+        <LinearLayout
+            android:id="@+id/colBubbleSide"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textSize="10sp"
-            android:textColor="?attr/colorOnSurfaceVariant"
-            android:visibility="gone" />
+            android:layout_marginStart="4dp"
+            android:orientation="vertical"
+            android:gravity="top">
+
+            <!-- Emoji tepkileri (bkz. SimpleChatAdapter.bindReactions) —
+                 sayı 1'den büyükse emojinin yanında adet de yazar. -->
+            <TextView
+                android:id="@+id/pillReactions"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:paddingTop="2dp"
+                android:paddingBottom="2dp"
+                android:background="@drawable/reaction_pill_background"
+                android:textSize="13sp"
+                android:visibility="gone" />
+
+            <ImageView
+                android:id="@+id/imgStatus"
+                android:layout_width="14dp"
+                android:layout_height="14dp"
+                android:layout_marginTop="3dp"
+                android:visibility="gone"
+                android:contentDescription="@null" />
+
+        <!-- Spec dışı, kullanıcı isteği: "görüldü" bildirimi — SADECE en son
+             görülen mesajın altında (bkz. SimpleChatAdapter.applySeen, tüm
+             önceki mesajlar örtük olarak görülmüş sayılır). Hem 1:1 (tek
+             avatar) hem grup (birden fazla görenin avatarı) için aynı satır —
+             gruplarda 3'ten fazla goren "+N" ile özetlenir. -->
+        <LinearLayout
+            android:id="@+id/rowSeenBy"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:visibility="gone">
+
+            <ImageView
+                android:id="@+id/imgSeenBy1"
+                android:layout_width="14dp"
+                android:layout_height="14dp"
+                android:layout_marginEnd="2dp"
+                android:contentDescription="@string/msg_read" />
+
+            <ImageView
+                android:id="@+id/imgSeenBy2"
+                android:layout_width="14dp"
+                android:layout_height="14dp"
+                android:layout_marginEnd="2dp"
+                android:visibility="gone"
+                android:contentDescription="@null" />
+
+            <ImageView
+                android:id="@+id/imgSeenBy3"
+                android:layout_width="14dp"
+                android:layout_height="14dp"
+                android:layout_marginEnd="2dp"
+                android:visibility="gone"
+                android:contentDescription="@null" />
+
+            <TextView
+                android:id="@+id/txtSeenByMore"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textSize="10sp"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                android:visibility="gone" />
+
+        </LinearLayout>
+
+        </LinearLayout>
 
     </LinearLayout>
 

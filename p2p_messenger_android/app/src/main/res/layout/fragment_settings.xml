@@ -73,6 +73,54 @@
         app:layout_constraintTop_toTopOf="@id/btn_change_picture"
         app:layout_constraintStart_toEndOf="@id/btn_change_picture" />
 
+    <!-- Kullanıcı isteği (2026-09-04): hesap adı. Önceden yalnızca ilk
+         açılıştaki "cihaz adı" diyaloğunda bir kez sorulup bir daha asla
+         değiştirilemiyordu. Profil fotoğrafının hemen altında, çünkü ikisi
+         de AYNI şeyi yapıyor: kişilerin bizi nasıl gördüğünü değiştirmek
+         ve bunu otomatik bildirmek. -->
+    <TextView
+        android:id="@+id/display_name_label"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:text="@string/lbl_display_name"
+        android:textStyle="bold"
+        app:layout_constraintTop_toBottomOf="@id/btn_change_picture"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/display_name_desc"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="@string/lbl_display_name_desc"
+        android:textSize="12sp"
+        android:alpha="0.7"
+        app:layout_constraintTop_toBottomOf="@id/display_name_label"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/display_name_value"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:textIsSelectable="true"
+        app:layout_constraintTop_toBottomOf="@id/display_name_desc"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <Button
+        android:id="@+id/btn_change_display_name"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/action_change_display_name"
+        app:layout_constraintTop_toBottomOf="@id/display_name_value"
+        app:layout_constraintStart_toStartOf="parent" />
+
     <TextView
         android:id="@+id/identity_code_label"
         android:layout_width="0dp"
@@ -80,7 +128,7 @@
         android:layout_marginTop="24dp"
         android:text="@string/lbl_identity_code"
         android:textStyle="bold"
-        app:layout_constraintTop_toBottomOf="@id/btn_change_picture"
+        app:layout_constraintTop_toBottomOf="@id/btn_change_display_name"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
@@ -95,6 +143,274 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
+    <!-- Spec dışı, kullanıcı isteği: metin boyutu/arayüz boyutu kaydırıcıları
+         + sistem fontu seçici — bkz. SettingsFragment.setupAppearanceControls,
+         ThemePrefs, P2PApplication.applyScalePreferences. -->
+    <TextView
+        android:id="@+id/text_scale_label"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="32dp"
+        android:text="@string/lbl_text_scale"
+        android:textStyle="bold"
+        app:layout_constraintTop_toBottomOf="@id/identity_code_value"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/text_scale_value"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textSize="12sp"
+        android:alpha="0.7"
+        app:layout_constraintTop_toBottomOf="@id/text_scale_label"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <com.google.android.material.slider.Slider
+        android:id="@+id/text_scale_slider"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        app:layout_constraintTop_toBottomOf="@id/text_scale_value"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/ui_scale_label"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:text="@string/lbl_ui_scale"
+        android:textStyle="bold"
+        app:layout_constraintTop_toBottomOf="@id/text_scale_slider"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/ui_scale_value"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textSize="12sp"
+        android:alpha="0.7"
+        app:layout_constraintTop_toBottomOf="@id/ui_scale_label"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <com.google.android.material.slider.Slider
+        android:id="@+id/ui_scale_slider"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        app:layout_constraintTop_toBottomOf="@id/ui_scale_value"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/font_family_label"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:text="@string/lbl_font_family"
+        android:textStyle="bold"
+        app:layout_constraintTop_toBottomOf="@id/ui_scale_slider"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/font_family_value"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textSize="12sp"
+        android:alpha="0.7"
+        app:layout_constraintTop_toBottomOf="@id/font_family_label"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/btn_pick_font" />
+
+    <!-- Combobox-style picker: plain Button + AlertDialog.setSingleChoiceItems
+         (a dropdown widget here previously showed only "Default"). -->
+    <Button
+        android:id="@+id/btn_pick_font"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:text="@string/action_choose"
+        app:layout_constraintTop_toTopOf="@id/font_family_value"
+        app:layout_constraintBottom_toBottomOf="@id/font_family_value"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- Language picker (English/Turkish) — same Button+AlertDialog pattern
+         as the font picker above. -->
+    <TextView
+        android:id="@+id/language_label"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:text="@string/lbl_language"
+        android:textStyle="bold"
+        app:layout_constraintTop_toBottomOf="@id/font_family_value"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/language_value"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textSize="12sp"
+        android:alpha="0.7"
+        app:layout_constraintTop_toBottomOf="@id/language_label"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/btn_pick_language" />
+
+    <Button
+        android:id="@+id/btn_pick_language"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:text="@string/action_choose"
+        app:layout_constraintTop_toTopOf="@id/language_value"
+        app:layout_constraintBottom_toBottomOf="@id/language_value"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/chat_appearance_label"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:text="@string/lbl_chat_appearance"
+        android:textStyle="bold"
+        app:layout_constraintTop_toBottomOf="@id/language_value"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/chat_bg_color_label"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="@string/lbl_chat_bg_color"
+        app:layout_constraintTop_toBottomOf="@id/chat_appearance_label"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/chat_bg_color_swatch" />
+
+    <View
+        android:id="@+id/chat_bg_color_swatch"
+        android:layout_width="28dp"
+        android:layout_height="28dp"
+        android:layout_marginTop="12dp"
+        app:layout_constraintTop_toBottomOf="@id/chat_appearance_label"
+        app:layout_constraintEnd_toStartOf="@id/btn_pick_chat_bg_color" />
+
+    <Button
+        android:id="@+id/btn_pick_chat_bg_color"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:text="@string/action_choose"
+        app:layout_constraintTop_toTopOf="@id/chat_bg_color_label"
+        app:layout_constraintBottom_toBottomOf="@id/chat_bg_color_label"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/accent_color_label"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="@string/lbl_accent_color"
+        app:layout_constraintTop_toBottomOf="@id/chat_bg_color_label"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/accent_color_swatch" />
+
+    <View
+        android:id="@+id/accent_color_swatch"
+        android:layout_width="28dp"
+        android:layout_height="28dp"
+        android:layout_marginTop="12dp"
+        app:layout_constraintTop_toBottomOf="@id/chat_bg_color_label"
+        app:layout_constraintEnd_toStartOf="@id/btn_pick_accent_color" />
+
+    <Button
+        android:id="@+id/btn_pick_accent_color"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:text="@string/action_choose"
+        app:layout_constraintTop_toTopOf="@id/accent_color_label"
+        app:layout_constraintBottom_toBottomOf="@id/accent_color_label"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/chat_wallpaper_label"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:text="@string/lbl_chat_wallpaper"
+        app:layout_constraintTop_toBottomOf="@id/accent_color_label"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- Spec dışı, hata düzeltmesi ("Wallpaper etiketi Choose image
+         butonunun üstüne biniyor"): önceki sürümde `btn_pick_chat_wallpaper`
+         dikey konumunu `chat_wallpaper_thumb`'a (GONE olabilen, resim
+         seçilmemişse yüksekliği 0'a çöken bir View) sabitliyordu — hem TOP
+         hem BOTTOM aynı (çökmüş) noktaya bağlı bir `wrap_content` view,
+         ConstraintLayout tarafından o nokta ETRAFINDA ORTALANIR, yani
+         butonun üst yarısı yukarı, etiketin satırına doğru taşıyordu. Artık
+         SADECE `chat_wallpaper_label`'a bağlı — thumb'ın görünürlüğünden
+         TAMAMEN bağımsız, sabit bir konum. -->
+    <ImageView
+        android:id="@+id/chat_wallpaper_thumb"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:layout_marginTop="10dp"
+        android:scaleType="centerCrop"
+        android:visibility="gone"
+        android:contentDescription="@string/content_desc_chat_wallpaper_preview"
+        app:layout_constraintTop_toBottomOf="@id/chat_wallpaper_label"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <Button
+        android:id="@+id/btn_pick_chat_wallpaper"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:layout_marginStart="12dp"
+        android:text="@string/action_choose_wallpaper"
+        app:layout_constraintTop_toBottomOf="@id/chat_wallpaper_label"
+        app:layout_constraintStart_toEndOf="@id/chat_wallpaper_thumb" />
+
+    <Button
+        android:id="@+id/btn_remove_chat_wallpaper"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:visibility="gone"
+        android:text="@string/action_remove_wallpaper"
+        app:layout_constraintTop_toTopOf="@id/btn_pick_chat_wallpaper"
+        app:layout_constraintBottom_toBottomOf="@id/btn_pick_chat_wallpaper"
+        app:layout_constraintStart_toEndOf="@id/btn_pick_chat_wallpaper" />
+
+    <!-- bkz. yukarısı — `node_mode_switch`'in bu bölümün ALTINA doğru
+         konumu, thumb/buton/remove-butonu arasında HANGİSİ o an görünürse
+         onun altına gelmeli. `Barrier`, referans verdiği view'lardan GONE
+         olanları otomatik yok sayar (normal bir `constraintTop_toBottomOf`
+         böyle bir view'a bağlanırsa üstteki AYNI "ortalama" hatası
+         tekrarlanırdı). -->
+    <androidx.constraintlayout.widget.Barrier
+        android:id="@+id/chat_wallpaper_barrier"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        app:barrierDirection="bottom"
+        app:constraint_referenced_ids="chat_wallpaper_thumb,btn_pick_chat_wallpaper,btn_remove_chat_wallpaper" />
+
     <!-- Spec 4.3: Node modu aç/kapa. Açıkken cihaz DHT routing tablosuna
          aktif katkı sağlar (kad::Mode::Server) — daha fazla pil/bant
          genişliği kullanır ama ağın keşfedilebilirliğine katkı sunar. -->
@@ -104,7 +420,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="32dp"
         android:text="@string/lbl_node_mode"
-        app:layout_constraintTop_toBottomOf="@id/identity_code_value"
+        app:layout_constraintTop_toBottomOf="@id/chat_wallpaper_barrier"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
@@ -120,6 +436,56 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
+    <!-- Spec dışı, kullanıcı isteği: node modu açıkken otomatik indirilen
+         eklerin toplam boyutu sınırsız büyüyebilir (bkz. Rust
+         `auto_download_requested = node_mode_enabled`) — bu slider bir üst
+         sınır koyar, aşılırsa en eski ek(ler) tamamen silinir (bkz.
+         `enforce_history_storage_limit`). Sadece node modu AÇIKKEN
+         gösterilir (bkz. SettingsFragment.kt). -->
+    <TextView
+        android:id="@+id/history_storage_limit_label"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="28dp"
+        android:text="@string/lbl_history_storage_limit"
+        android:textStyle="bold"
+        app:layout_constraintTop_toBottomOf="@id/node_mode_description"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/history_storage_limit_desc"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="@string/lbl_history_storage_limit_desc"
+        android:textSize="12sp"
+        android:alpha="0.7"
+        app:layout_constraintTop_toBottomOf="@id/history_storage_limit_label"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/history_storage_limit_value"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:textStyle="bold"
+        app:layout_constraintTop_toBottomOf="@id/history_storage_limit_desc"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <com.google.android.material.slider.Slider
+        android:id="@+id/history_storage_limit_slider"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:valueFrom="0"
+        android:valueTo="8"
+        android:stepSize="1"
+        app:layout_constraintTop_toBottomOf="@id/history_storage_limit_value"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
     <!-- Spec dışı, kullanıcı isteği: Tor onion service — CGNAT arkasında da
          ulaşılabilirlik (bkz. tor.rs / SECURITY.md "Tor onion"). -->
     <com.google.android.material.switchmaterial.SwitchMaterial
@@ -128,7 +494,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="28dp"
         android:text="@string/lbl_tor"
-        app:layout_constraintTop_toBottomOf="@id/node_mode_description"
+        app:layout_constraintTop_toBottomOf="@id/history_storage_limit_slider"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
@@ -205,29 +571,65 @@
         app:layout_constraintTop_toBottomOf="@id/relay_address_input"
         app:layout_constraintStart_toStartOf="parent" />
 
-    <!-- Görünüm tercihi (spec dışı): koyu temadayken arkaplanı tam siyaha
-         zorlar — bkz. ThemePrefs, P2PApplication, ThemeOverlay.P2PMessenger.OledBlack. -->
-    <com.google.android.material.switchmaterial.SwitchMaterial
-        android:id="@+id/oled_black_switch"
+    <!-- Sunucular (store-and-forward). Rölelerden FARKLI: bir röle hiçbir
+         şey saklamaz, sadece iki taraf da o anda bağlıyken canlı bir devre
+         kurar. Sunucu alıcı çevrimdışıyken zarfı diske yazar. -->
+    <TextView
+        android:id="@+id/servers_label"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginTop="32dp"
-        android:text="@string/lbl_oled_black"
+        android:text="@string/lbl_servers"
+        android:textStyle="bold"
+        android:textSize="16sp"
         app:layout_constraintTop_toBottomOf="@id/btn_add_relay_address"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
     <TextView
-        android:id="@+id/oled_black_description"
+        android:id="@+id/servers_desc"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:alpha="0.7"
+        android:text="@string/lbl_servers_desc"
+        android:textSize="12sp"
+        app:layout_constraintTop_toBottomOf="@id/servers_label"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- Sunucu satırları burada programatik olarak oluşturulur (sayıları
+         değişken); bkz. SettingsFragment.refreshServers(). -->
+    <LinearLayout
+        android:id="@+id/servers_container"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:text="@string/lbl_oled_black_desc"
-        android:textSize="12sp"
-        android:alpha="0.7"
-        app:layout_constraintTop_toBottomOf="@id/oled_black_switch"
+        android:orientation="vertical"
+        app:layout_constraintTop_toBottomOf="@id/servers_desc"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
+
+    <Button
+        android:id="@+id/btn_add_server"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/action_add_server"
+        app:layout_constraintTop_toBottomOf="@id/servers_container"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <Button
+        android:id="@+id/btn_add_server_paste"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:layout_marginStart="8dp"
+        android:text="@string/action_add_server_paste"
+        app:layout_constraintTop_toTopOf="@id/btn_add_server"
+        app:layout_constraintStart_toEndOf="@id/btn_add_server" />
 
     <TextView
         android:id="@+id/key_security_label"
@@ -236,7 +638,7 @@
         android:layout_marginTop="32dp"
         android:text="@string/lbl_key_security"
         android:textStyle="bold"
-        app:layout_constraintTop_toBottomOf="@id/oled_black_description"
+        app:layout_constraintTop_toBottomOf="@id/btn_add_server"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
@@ -250,6 +652,191 @@
         app:layout_constraintTop_toBottomOf="@id/key_security_label"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- Spec dışı, güvenlik denetimi düzeltmesi: Rust tarafı (Argon2id ile
+         sertleştirilmiş) bir kurtarma dosyası dışa aktarma akışını zaten
+         tamamen implemente ediyordu (bkz. SECURITY.md §6 "Recovery file
+         uses Argon2id"), ama hiçbir ekranda bu akışı TETİKLEYEN bir düğme
+         yoktu — kullanıcının son cihazını kaybetmesi durumunda dayandığı
+         TEK kurtarma yolu, fiilen erişilemezdi. -->
+    <TextView
+        android:id="@+id/recovery_export_label"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="32dp"
+        android:text="@string/lbl_recovery_export"
+        android:textStyle="bold"
+        app:layout_constraintTop_toBottomOf="@id/key_security_status"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/recovery_export_desc"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="@string/lbl_recovery_export_desc"
+        android:textSize="12sp"
+        android:alpha="0.7"
+        app:layout_constraintTop_toBottomOf="@id/recovery_export_label"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <Button
+        android:id="@+id/btn_export_recovery"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/action_export_recovery"
+        app:layout_constraintTop_toBottomOf="@id/recovery_export_desc"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <!-- Çoklu-cihaz (spec 1.5): aynı hesabı birden fazla cihazda kullan. -->
+    <TextView
+        android:id="@+id/linked_devices_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:text="@string/linked_devices_section_title"
+        android:textStyle="bold"
+        android:textSize="16sp"
+        app:layout_constraintTop_toBottomOf="@id/btn_export_recovery"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <TextView
+        android:id="@+id/linked_devices_desc"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="@string/linked_devices_section_desc"
+        android:textSize="13sp"
+        app:layout_constraintTop_toBottomOf="@id/linked_devices_title"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <Button
+        android:id="@+id/btn_linked_devices"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/linked_devices_manage"
+        app:layout_constraintTop_toBottomOf="@id/linked_devices_desc"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <!-- Spec dışı, kullanıcı isteği: henüz karşı taraftan "ack" alınmamış
+         mesajların listesi (son deneme zamanı + İptal düğmesiyle) — bkz.
+         PendingMessagesActivity. -->
+    <Button
+        android:id="@+id/btn_pending_messages"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="@string/action_view_pending_messages"
+        app:layout_constraintTop_toBottomOf="@id/btn_linked_devices"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <!-- Spec dışı, kullanıcı isteği: bildirimlerde mesaj metnini göster/
+         gizle. Varsayılan AÇIK (mevcut davranış); kapalıyken bildirimde
+         yalnızca gönderen — grup mesajıysa gönderen + grup adı — görünür.
+         bkz. util.NotificationPrefs / NotificationHelper. -->
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/notif_show_message_switch"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="32dp"
+        android:text="@string/lbl_notif_show_message"
+        app:layout_constraintTop_toBottomOf="@id/btn_pending_messages"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/notif_show_message_desc"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/lbl_notif_show_message_desc"
+        android:textSize="12sp"
+        android:alpha="0.7"
+        app:layout_constraintTop_toBottomOf="@id/notif_show_message_switch"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- Spec dışı, kullanıcı isteği: uygulamayı açmak için şifre. Şifre
+         BURADAN sadece DEĞİŞTİRİLEBİLİR — kaldırılamaz ("asla boş
+         olmamalı"), bkz. util.AppLock / ui.AppLockActivity. -->
+    <TextView
+        android:id="@+id/app_lock_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:text="@string/lbl_app_lock_section"
+        android:textStyle="bold"
+        android:textSize="16sp"
+        app:layout_constraintTop_toBottomOf="@id/notif_show_message_desc"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <TextView
+        android:id="@+id/app_lock_desc"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="@string/lbl_app_lock_section_desc"
+        android:textSize="13sp"
+        app:layout_constraintTop_toBottomOf="@id/app_lock_title"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <Button
+        android:id="@+id/btn_change_app_password"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/action_change_app_password"
+        app:layout_constraintTop_toBottomOf="@id/app_lock_desc"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <!-- Spec dışı, kullanıcı isteği: bozuk/yarım kalmış bir eşleşme
+         (ör. çökmüş bir "ikincil cihaz olarak bağlan" denemesi) sonrası
+         kullanıcının BAŞTAN başlayabilmesi için — bkz. SettingsFragment
+         `confirmLogout`/`performLogout`. -->
+    <TextView
+        android:id="@+id/logout_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:text="@string/logout_section_title"
+        android:textStyle="bold"
+        android:textSize="16sp"
+        app:layout_constraintTop_toBottomOf="@id/btn_change_app_password"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <TextView
+        android:id="@+id/logout_desc"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="@string/logout_section_desc"
+        android:textSize="13sp"
+        app:layout_constraintTop_toBottomOf="@id/logout_title"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <Button
+        android:id="@+id/btn_logout"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="24dp"
+        android:text="@string/action_logout"
+        app:strokeColor="?attr/colorError"
+        android:textColor="?attr/colorError"
+        app:layout_constraintTop_toBottomOf="@id/logout_desc"
+        app:layout_constraintStart_toStartOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
 

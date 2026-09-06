@@ -10,6 +10,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.Toast
+import androidx.appcompat.widget.SearchView
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -17,6 +18,8 @@ import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.p2p.messenger.ui.ChatActivity
 import com.p2p.messenger.ui.ChatAdapter
 import com.p2p.messenger.ui.GroupChatActivity
+import com.p2p.messenger.util.PinnedChatsPrefs
+import com.p2p.messenger.util.ReadStatePrefs
 import com.p2p.messenger.util.hexToBytes
 import org.json.JSONArray
 
@@ -24,9 +27,11 @@ import org.json.JSONArray
  * Spec 3 minimum kapsamı: bilinen kişilerin + grupların TEK bir listesi,
  * tıklanınca ilgili sohbet ekranını açar. `ListAdapter`/`DiffUtil` tabanlı
  * gerçek bir adapter kullanır (bkz. ChatAdapter) ve periyodik olarak
- * yenilenir. Node modu kapalıyken kişiler için "son mesaj" alanı boş kalır
- * (mesaj geçmişi o durumda hiç saklanmıyor); gruplar için zaten hiç mesaj
- * arşivi yok (bkz. GroupChatActivity dosya başı notu), bu yüzden hep boş.
+ * yenilenir. En güncel mesaj/ek atılan sohbet en üstte olacak şekilde
+ * sıralanır (bkz. `refreshList` — hem kişiler hem gruplar, tek bir zaman
+ * çizelgesinde). Node modu kapalıyken kişiler için "son mesaj" alanı boş
+ * kalır (mesaj geçmişi o durumda hiç saklanmıyor) — gruplar için de aynı
+ * kısıt geçerli (bkz. `archive_group_message`).
  *
  * Spec dışı: önceden ayrı bir "Gruplar" sekmesi vardı — kullanıcı isteği
  * üzerine kaldırıldı, grup listesi/oluşturma buraya taşındı (bkz.
@@ -34,8 +39,28 @@ import org.json.JSONArray
  */
 class ChatsFragment : Fragment() {
 
+    /**
+     * Spec dışı, kullanıcı isteği ("soldan bir drag barla sürüklenebilir
+     * açılıp kapanan chat list"): bu fragment artık İKİ yerde barınabiliyor
+     * — MainActivity'nin sekmesi (normal, TAM EKRAN kullanım — bu geri
+     * çağrı `null` kalır) VE ChatActivity/GroupChatActivity'nin soldan
+     * açılan çekmecesi (bkz. activity_chat.xml DrawerLayout). Çekmece
+     * içindeyken bir sohbete dokunmak YENİ bir ChatActivity/
+     * GroupChatActivity BAŞLATIR (bkz. aşağıdaki `openGroupChat`/DM kolu) —
+     * ama o zaten AÇIK olan sohbet ekranının ÜSTÜNE yığılmaması için host
+     * (bkz. ChatActivity.setupChatListDrawer) bunu `{ finish() }`'e
+     * ayarlar. MainActivity'nin kendi sekmesinde bu callback set
+     * EDİLMEDİĞİNDEN (varsayılan `null`) davranış orada DEĞİŞMEZ.
+     */
+    var onChatOpenedFromDrawer: (() -> Unit)? = null
+
     private lateinit var adapter: ChatAdapter
     private lateinit var noContactsText: View
+    /** bkz. `applyFilter` — en son çekilen TAM liste (kişi+grup); arama
+     *  sorgusu buradan filtrelenir, `refreshList`'in her 5 sn'de bir
+     *  yenilemesi arama sorgusunu SIFIRLAMAZ. */
+    private var allChatItems: List<ChatAdapter.ChatMessage> = emptyList()
+    private var searchQuery: String = ""
     private val refreshHandler = Handler(Looper.getMainLooper())
     private val refreshRunnable = object : Runnable {
         override fun run() {
@@ -59,11 +84,22 @@ class ChatsFragment : Fragment() {
                     intent.putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, message.contactId)
                     intent.putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, message.displayName)
                     startActivity(intent)
+                    onChatOpenedFromDrawer?.invoke()
                 }
             }
         }
         adapter.onContactLongClick = { message -> showChatLongPressMenu(message) }
         recycler.adapter = adapter
+
+        // Spec dışı, kullanıcı isteği: kişi/grup adına göre arama.
+        view.findViewById<SearchView>(R.id.searchChats).setOnQueryTextListener(object : SearchView.OnQueryTextListener {
+            override fun onQueryTextSubmit(query: String?): Boolean = false
+            override fun onQueryTextChange(newText: String?): Boolean {
+                searchQuery = newText ?: ""
+                applyFilter()
+                return true
+            }
+        })
 
         view.findViewById<FloatingActionButton>(R.id.btnCreateGroup).setOnClickListener {
             showCreateGroupDialog()
@@ -78,6 +114,18 @@ class ChatsFragment : Fragment() {
         intent.putExtra(GroupChatActivity.EXTRA_GROUP_ID, message.contactId)
         intent.putExtra(GroupChatActivity.EXTRA_GROUP_NAME, message.displayName)
         startActivity(intent)
+        onChatOpenedFromDrawer?.invoke()
+    }
+
+    /** See PinnedChatsPrefs — the same key `refreshList` used to compute
+     *  `message.isPinned` for this row. */
+    private fun pinKeyFor(message: ChatAdapter.ChatMessage): String =
+        if (message.isGroup) "group:${message.contactId}" else message.realContactId
+
+    private fun togglePin(message: ChatAdapter.ChatMessage) {
+        val key = pinKeyFor(message)
+        PinnedChatsPrefs.setPinned(requireContext(), key, !message.isPinned)
+        refreshList()
     }
 
     /**
@@ -85,23 +133,33 @@ class ChatsFragment : Fragment() {
      * ayrı seçenek — "sohbet geçmişini temizle" (yumuşak, tek onay, kişi
      * paired kalır) ve "kişiyi sil" (sert, ÇİFT onay, eşleşme dahil her şey
      * silinir). SADECE kişiler için — gruplar `realContactId` taşımadığından
-     * (bkz. ChatAdapter) bu menü zaten tetiklenmez.
+     * (bkz. ChatAdapter) bu menü zaten tetiklenmez. Ayrıca (hem kişi hem
+     * grup satırları için) sohbeti sabitle/kaldır seçeneği — bkz. `togglePin`.
      */
     private fun showChatLongPressMenu(message: ChatAdapter.ChatMessage) {
+        val pinLabel = getString(if (message.isPinned) R.string.action_unpin_chat else R.string.action_pin_chat)
         // Spec dışı, kullanıcı isteği: grup satırlarında DM seçenekleri
         // (geçmişi temizle/cihaz iptal/kişi sil) anlamsız — kurucuysak
-        // "grubu herkes için sil" gösterilir, değilsek menü yok.
+        // "grubu herkes için sil" gösterilir; DİĞER üyeler için "gruptan
+        // ayrıl" gösterilir (bkz. Rust `leave_group` — kurucu ayrılamaz,
+        // sadece herkes için silebilir).
         if (message.isGroup) {
-            if (!message.isGroupFounder) return
+            val destructiveLabel = getString(
+                if (message.isGroupFounder) R.string.action_delete_group else R.string.action_leave_group
+            )
             AlertDialog.Builder(requireContext())
                 .setTitle(message.displayName)
-                .setItems(arrayOf(getString(R.string.action_delete_group))) { _, _ ->
-                    confirmDeleteGroup(message)
+                .setItems(arrayOf(pinLabel, destructiveLabel)) { _, which ->
+                    when (which) {
+                        0 -> togglePin(message)
+                        1 -> if (message.isGroupFounder) confirmDeleteGroup(message) else confirmLeaveGroup(message)
+                    }
                 }
                 .show()
             return
         }
         val options = arrayOf(
+            pinLabel,
             getString(R.string.action_clear_chat_history),
             getString(R.string.action_revoke_device),
             getString(R.string.action_delete_contact)
@@ -110,9 +168,10 @@ class ChatsFragment : Fragment() {
             .setTitle(message.displayName)
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> confirmClearChatHistory(message)
-                    1 -> confirmRevokeDevice(message)
-                    2 -> confirmDeleteContactStep1(message)
+                    0 -> togglePin(message)
+                    1 -> confirmClearChatHistory(message)
+                    2 -> confirmRevokeDevice(message)
+                    3 -> confirmDeleteContactStep1(message)
                 }
             }
             .show()
@@ -134,6 +193,30 @@ class ChatsFragment : Fragment() {
                     Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
                 } else {
                     Toast.makeText(requireContext(), R.string.msg_group_deleted, Toast.LENGTH_SHORT).show()
+                    refreshList()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** Spec dışı, kullanıcı isteği: kurucu OLMAYAN bir üye gruptan kendi
+     *  isteğiyle ayrılır (bkz. Rust `leave_group`) — geri alınamaz (tekrar
+     *  katılmak için yeniden davet edilmek gerekir), bu yüzden onay
+     *  isteniyor. */
+    private fun confirmLeaveGroup(message: ChatAdapter.ChatMessage) {
+        AlertDialog.Builder(requireContext())
+            .setMessage(R.string.confirm_leave_group)
+            .setPositiveButton(R.string.action_leave_group) { _, _ ->
+                val result = try {
+                    P2PLib.leaveGroup(message.contactId)
+                } catch (e: Exception) {
+                    "Error: ${e.message}"
+                }
+                if (result.startsWith("Error:")) {
+                    Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(requireContext(), R.string.msg_left_group, Toast.LENGTH_SHORT).show()
                     refreshList()
                 }
             }
@@ -311,23 +394,60 @@ class ChatsFragment : Fragment() {
                 displayName = contact.displayName,
                 lastMessage = lastMessage?.text ?: "",
                 timestamp = lastMessage?.timestamp ?: 0L,
-                unreadCount = 0, // Aşama A'da okunmamış sayacı takip edilmiyor.
+                hasUnread = lastMessage != null &&
+                    lastMessage.timestamp > ReadStatePrefs.lastReadAt(requireContext(), fingerprint),
+                // Keyed on the STABLE contact id (not the device fingerprint,
+                // which can change if the contact re-pairs a device) so a
+                // pin survives that.
+                isPinned = PinnedChatsPrefs.isPinned(requireContext(), contact.contactId),
                 realContactId = contact.contactId,
                 avatarJpeg = contact.avatarHex?.let { hexToBytes(it) }
             )
         }
         val groupItems = groups.map { group ->
+            // Spec dışı, kullanıcı isteği: gruplar için de gerçek son mesaj/ek
+            // önizlemesi (1:1 kişilerle AYNI mantık) — hem sohbet listesinin
+            // "en güncel mesaj atılan en üstte" sıralanabilmesi için gerçek
+            // bir zaman damgası gerektiğinden, hem de sabit "N üye" metninin
+            // hiçbir zaman değişmeyen, bilgi vermeyen bir önizleme olmasından.
+            val lastMessage = newestGroupPreview(group.groupId)
             ChatAdapter.ChatMessage(
                 contactId = group.groupId,
                 displayName = group.name,
-                lastMessage = resources.getQuantityString(R.plurals.lbl_member_count, group.memberCount, group.memberCount),
-                timestamp = 0L,
+                lastMessage = lastMessage?.text
+                    ?: resources.getQuantityString(R.plurals.lbl_member_count, group.memberCount, group.memberCount),
+                timestamp = lastMessage?.timestamp ?: 0L,
+                hasUnread = lastMessage != null &&
+                    lastMessage.timestamp > ReadStatePrefs.lastReadAt(requireContext(), "group:${group.groupId}"),
+                isPinned = PinnedChatsPrefs.isPinned(requireContext(), "group:${group.groupId}"),
                 avatarJpeg = group.avatarHex?.let { hexToBytes(it) },
                 isGroup = true,
                 isGroupFounder = group.isFounder
             )
         }
-        adapter.submitList(contactItems + groupItems)
+        // Spec dışı, kullanıcı isteği: sohbet listesi en güncel mesaj
+        // atılan/alınan en üstte olacak şekilde sıralanır (hem kişiler hem
+        // gruplar, tek bir zaman çizelgesinde). Hiç mesajı olmayan bir
+        // sohbet (timestamp=0) listenin EN ALTINDA kalır — azalan sıralamada
+        // doğal olarak en son sıraya düşer. Pinlenmiş sohbetler (birden
+        // çok olabilir) bu sıralamanın ÜZERİNDE, kendi aralarında yine en
+        // güncel mesaja göre en üstte durur.
+        allChatItems = (contactItems + groupItems)
+            .sortedWith(compareByDescending<ChatAdapter.ChatMessage> { it.isPinned }.thenByDescending { it.timestamp })
+        applyFilter()
+    }
+
+    /** bkz. `allChatItems`/`searchQuery` dosya başı notu — kişi/grup adına
+     *  (uyarı işareti/baş harf rozeti gibi süslemeler hariç, ham
+     *  `displayName` üzerinden) büyük/küçük harf duyarsız arama. */
+    private fun applyFilter() {
+        val query = searchQuery.trim()
+        val filtered = if (query.isEmpty()) {
+            allChatItems
+        } else {
+            allChatItems.filter { it.displayName.contains(query, ignoreCase = true) }
+        }
+        adapter.submitList(filtered)
     }
 
     private data class ContactRow(
@@ -387,6 +507,72 @@ class ChatsFragment : Fragment() {
         mimeType.startsWith("audio/") -> getString(R.string.lbl_last_voice)
         fileName.isNotEmpty() -> "📎 $fileName"
         else -> getString(R.string.lbl_last_file)
+    }
+
+    /** bkz. `newestPreview` AYNI desen — grup için, metin mesajı ile ek
+     *  önizlemesinden hangisi daha yeniyse onu döner. */
+    private fun newestGroupPreview(groupId: String): LastMessagePreview? {
+        val msg = loadLastGroupMessagePreview(groupId)
+        val att = loadLastGroupAttachmentPreview(groupId)
+        return when {
+            msg == null -> att
+            att == null -> msg
+            att.timestamp > msg.timestamp -> att
+            else -> msg
+        }
+    }
+
+    private fun loadLastGroupMessagePreview(groupId: String): LastMessagePreview? {
+        val json = try {
+            P2PLib.getGroupMessageHistory(groupId, 1)
+        } catch (e: Exception) {
+            return null
+        }
+        val array = try {
+            JSONArray(json)
+        } catch (e: Exception) {
+            return null
+        }
+        if (array.length() == 0) return null
+        val obj = array.getJSONObject(0)
+        // Spec dışı, hata düzeltmesi ("sohbet listesi silinen son mesajı
+        // sonsuza dek gösteriyor"): bu satır silinmişse (`is_deleted`)
+        // sohbet listesindeki önizleme de balon gibi yer tutucu göstermeli
+        // — önceden bu JSON alanı hiç okunmuyordu.
+        val text = if (obj.optBoolean("is_deleted", false)) {
+            getString(R.string.msg_deleted)
+        } else {
+            obj.optString("text", "")
+        }
+        return LastMessagePreview(
+            text = text,
+            timestamp = obj.optLong("timestamp", 0L)
+        )
+    }
+
+    /** bkz. `loadLastAttachmentPreview` AYNI desen — grup ekleri için. */
+    private fun loadLastGroupAttachmentPreview(groupId: String): LastMessagePreview? {
+        val json = try {
+            P2PLib.listGroupAttachments(groupId)
+        } catch (e: Exception) {
+            return null
+        }
+        val array = try {
+            JSONArray(json)
+        } catch (e: Exception) {
+            return null
+        }
+        var best: LastMessagePreview? = null
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            val createdAt = obj.optLong("created_at", 0L)
+            if (best != null && createdAt <= best.timestamp) continue
+            best = LastMessagePreview(
+                text = attachmentPreviewLabel(obj.optString("mime_type", ""), obj.optString("file_name", "")),
+                timestamp = createdAt
+            )
+        }
+        return best
     }
 
     private fun loadContacts(): List<ContactRow> {
@@ -454,8 +640,14 @@ class ChatsFragment : Fragment() {
         }
         if (array.length() == 0) return null
         val obj = array.getJSONObject(0)
+        // bkz. `loadLastGroupMessagePreview` aynı düzeltme notu.
+        val text = if (obj.optBoolean("is_deleted", false)) {
+            getString(R.string.msg_deleted)
+        } else {
+            obj.optString("text", "")
+        }
         return LastMessagePreview(
-            text = obj.optString("text", ""),
+            text = text,
             timestamp = obj.optLong("timestamp", 0L)
         )
     }

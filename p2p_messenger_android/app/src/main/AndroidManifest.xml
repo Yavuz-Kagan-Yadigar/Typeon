@@ -19,6 +19,27 @@
          ChatActivity ses kaydı akışı) — çalışma zamanında (ilk basılı
          tutma denemesinde) istenir. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Spec dışı, kullanıcı isteği: ilk açılışta pil optimizasyonu
+         muafiyeti istemi — bkz. MainActivity.ensureBatteryOptimizationExemption.
+         "Normal" korumalı bir izin (çalışma zamanında ayrıca istenmez,
+         sadece burada bildirilmesi yeterli); asıl kullanıcı onayı
+         `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` sistem diyaloğu
+         üzerinden alınır. Bu izin OLMADAN o intent bazı cihazlarda
+         SecurityException fırlatır. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Spec dışı, gerçek cihazda ölçülen hata: Android 14+ `dataSync`
+         ön plan servisini "app idle" gerekçesiyle DURDURUYOR (logcat:
+         "Stopping service due to app idle") — 14 MB'lık bir aktarımın tam
+         ortasında oldu ve yükleme sessizce durdu, hiçbir hata üretmeden.
+         Kısmi wake lock, aktarım sürerken CPU'nun uykuya dalmasını da
+         engeller. Tek başına yetmez (bkz. SettingsFragment'teki pil
+         optimizasyonu muafiyeti düğmesi), ama ikisi birlikte gerekli. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Bu denetimde bulundu: yeniden başlatmadan sonra uygulama tamamen
+         ölü kalıyor, kullanıcı elle açana kadar hiçbir mesaj alınmıyordu —
+         bkz. service/BootReceiver.kt (neden saatlik WorkManager yedeğinin
+         Android 12+'ta yetmediği de orada). -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:name=".P2PApplication"
@@ -31,18 +52,72 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.P2PMessenger">
 
+        <!-- `singleTop`: aşağıdaki katılım bağlantısı, uygulama zaten
+             açıkken tıklandığında İKİNCİ bir MainActivity yığmasın (aynı
+             örnek `onNewIntent` ile uyandırılır). Uygulamanın kendi
+             gezinme akışını etkilemez — MainActivity zaten yığının
+             kökünde tek örnek olarak duruyor. -->
         <activity
             android:name=".MainActivity"
+            android:launchMode="singleTop"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Kullanıcı isteği (2026-09-04): sunucuya "tek QR/link/metin"
+                 ile katılma. QR ve elle yapıştırma zaten vardı; bu, ÜÇÜNCÜ
+                 yolu açıyor — operatörün yayımladığı `typeon-server:…#…`
+                 kodu bir sohbette/web sayfasında tıklanabilir bir bağlantı
+                 olur ve doğrudan buraya düşer (bkz. MainActivity
+                 `handleJoinLink`). Şema hiyerarşik değil (host yok), bu
+                 yüzden `android:scheme` tek başına yeterli. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="typeon-server" />
+            </intent-filter>
         </activity>
 
-        <activity android:name=".ui.ChatActivity" />
-        <activity android:name=".ui.GroupChatActivity" />
+        <!-- Spec dışı, kullanıcı isteği (klavye telafisi — bkz.
+             util.KeyboardInsets): `adjustResize` ZORUNLU, ama beklenen
+             sebepten değil. Bu cihazda (Redmi Note 8 Pro / Android 16)
+             pencere `adjustResize` bildirilse bile gerçekte YENİDEN
+             BOYUTLANMIYOR (ölçüldü: `dumpsys window`, `mAttrs` `fillxfill`
+             kalıyor) — telafiyi zaten biz elle yapıyoruz. Buradaki asıl
+             işlevi, bildirilmediğinde devreye giren varsayılan davranışı
+             (`adjustPan`) KAPATMAK: pan, pencerenin tamamını yukarı
+             kaydırıyor ve bizim eklediğimiz dolguyla üst üste binip
+             düzeni bozuyordu. İlk denemede eksik olan buydu. -->
+        <activity
+            android:name=".ui.ChatActivity"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.GroupChatActivity"
+            android:windowSoftInputMode="adjustResize" />
         <activity android:name=".ui.QrScanActivity" />
+        <!-- Spec dışı, kullanıcı isteği: sohbetten doğrudan anlık çekim +
+             kırpma (bkz. ui.CameraCaptureActivity). `configChanges`: ekran
+             döndürüldüğünde Activity YENİDEN OLUŞTURULMAMALI — çekilen kare
+             bilerek yalnızca BELLEKTE tutuluyor (diske yazılmıyor), yeniden
+             oluşturma onu geri getirilemez biçimde kaybederdi. -->
+        <activity
+            android:name=".ui.CameraCaptureActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout" />
+        <!-- Spec dışı, kullanıcı isteği: uygulama açılış şifresi (bkz.
+             ui.AppLockActivity / util.AppLock). `singleTop`: kilit ekranı
+             zaten en üstteyken ikinci bir örneği yığına eklenmesin. -->
+        <activity
+            android:name=".ui.AppLockActivity"
+            android:launchMode="singleTop" />
+        <!-- Çoklu-cihaz (spec 1.5): ikincil cihazın bağlanma QR'ını gösteren
+             ve benimsenmeyi bekleyen ekran. -->
+        <activity android:name=".ui.LinkDeviceActivity" />
+        <!-- Spec dışı, kullanıcı isteği: Ayarlar'dan açılan "bekleyen
+             mesajlar" listesi — bkz. PendingMessagesActivity, lib.rs
+             list_pending_messages/cancel_pending_message. -->
+        <activity android:name=".ui.PendingMessagesActivity" />
         <!-- Spec dışı: foto/video ekleri için basit, tam boyut/kalitede
              uygulama içi görüntüleyici — bkz. ChatActivity.onAttachmentClicked
              notu (önceden HER zaman sistem varsayılan uygulamasına
@@ -50,6 +125,20 @@
         <activity
             android:name=".ui.MediaViewerActivity"
             android:theme="@style/Theme.P2PMessenger" />
+
+        <!-- bkz. BootReceiver — ACTION_BOOT_COMPLETED, ön plan servisi
+             başlatma kısıtlarından muaf tutulan yayınlardan biri. -->
+        <receiver
+            android:name=".service.BootReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <service
             android:name=".service.P2PService"
@@ -71,6 +160,18 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- Per-app language (English/Turkish, see SettingsFragment): lets
+             AppCompatDelegate.setApplicationLocales persist and re-apply
+             the chosen locale automatically across restarts. -->
+        <service
+            android:name="androidx.appcompat.app.AppLocalesMetadataHolderService"
+            android:enabled="false"
+            android:exported="false">
+            <meta-data
+                android:name="autoStoreLocales"
+                android:value="true" />
+        </service>
 
         </application>
     </manifest>

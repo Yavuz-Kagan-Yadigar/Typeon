@@ -26,6 +26,19 @@ import java.security.SecureRandom
  * - Diskte hiçbir zaman plaintext data key bulunmaz.
  */
 object MessageHistoryManager {
+    private const val TAG = "MessageHistoryManager"
+    // Defter #04: cozme HATASINDA anahtar YENIDEN URETILMEZ.
+    //
+    // Burasi eskiden "dosya var ama decrypt istisna atti" durumunda
+    // `generateAndPersist` cagiriyor, yani anahtar dosyasini taze rastgele
+    // bir anahtarla EZIYORDU — "anahtar yok" ile "anahtar bu sefer
+    // cozulemedi"yi ayni sey sayarak. Tek bir gecici Keystore hatasi (cihaz
+    // yedekten donus, ekran kilidi kimlik bilgisinin sifirlanmasi, StrongBox
+    // arizasi) bu anahtarla sifrelenmis HER SEYI geri donusuz yok ediyordu
+    // ve kullanici hicbir uyari gormuyordu. Kardesleri (`ArchiveKeyManager`,
+    // `IdentityManager`) zaten dogru davraniyordu: cozme basarisizsa sadece
+    // geri don. Yeniden uretim artik SADECE dosya hic yokken.
+
     private const val HISTORY_KEY_FILENAME = "history_key.enc"
 
     private fun keyFile(context: Context): File =
@@ -48,12 +61,8 @@ object MessageHistoryManager {
             try {
                 KeystoreCrypto.decrypt(encrypted, KeystoreCrypto.ALIAS_HISTORY)
             } catch (e: Exception) {
-                // Keystore anahtarı kayıp/bozuk — mesaj geçmişi arşivi
-                // kurtarılamaz (bu, identity'den farklı olarak recovery
-                // dosyasının kapsamında değil; sadece yerel arşiv). Yeni
-                // bir anahtarla baştan başlanır, eski arşiv satırları
-                // artık çözülemez halde DB'de kalır (temizlenmez).
-                generateAndPersist(context)
+                // bkz. TAG notu (#04) — ASLA yeniden uretme.
+                android.util.Log.e(TAG, "Anahtar cozulemedi, YENIDEN URETILMIYOR", e)
                 return
             }
         } else {

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spec dışı, kullanıcı isteği (WhatsApp tarzı yanıt önizlemesi): bir
+     balonun İÇİNDE, yanıtlanan mesajın küçük özetini saran hafif kontrast
+     dörtgen.
+
+     Kullanıcı raporu ("alıntı mesajlar beyaz görünüyor") — HATA BURADAYDI:
+     burada `<solid android:color="?attr/colorOnSurface" android:alpha="0.12" />`
+     yazıyordu. `android:alpha`, `<solid>` etiketinin GEÇERLİ bir özniteliği
+     DEĞİL; sessizce yok sayılıyor ve dolgu %12 değil TAM OPAK
+     `colorOnSurface` oluyordu. Koyu temada bu renk neredeyse beyaz olduğundan
+     alıntı kutusu, koyu sohbetin ortasında bembeyaz bir blok olarak
+     çiziliyordu.
+
+     Renk artık KODDA veriliyor (bkz. SimpleChatAdapter `bindReplyQuote`):
+     kutunun tonu, içinde bulunduğu balonun KENDİ metin rengine (`onColor`)
+     göre düşük alfayla hesaplanıyor — böylece hem turuncu giden balonda hem
+     gri gelen balonda, açık ve koyu temada okunaklı kalıyor. Buradaki beyaz
+     yalnızca tint'in uygulanacağı nötr taban. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@android:color/white" />
+    <corners android:radius="8dp" />
+</shape>

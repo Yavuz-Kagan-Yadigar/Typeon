@@ -1,5 +1,7 @@
 package com.p2p.messenger.util
 
+import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -10,6 +12,10 @@ import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.Typeface
 import android.widget.ImageView
+import androidx.core.content.FileProvider
+import com.p2p.messenger.ui.MediaViewerActivity
+import java.io.File
+import java.util.UUID
 
 /**
  * Spec dışı: profil fotoğrafı gösterimi (sohbet listesi + grup balonları).
@@ -26,12 +32,81 @@ object AvatarUtil {
         0xFF26A69A.toInt(), 0xFF9CCC65.toInt(), 0xFFFFCA28.toInt(), 0xFFFF7043.toInt()
     )
 
+    /**
+     * Spec dışı, performans denetimi düzeltmesi: `renderInto` — dolayısıyla
+     * `decodeCircularSquare` (BitmapFactory decode + kare kırpma + ölçekleme
+     * + daire maskeleme) — her `RecyclerView.onBindViewHolder`'da (sohbet
+     * listesi, kişi listesi, HER mesaj balonu) sıfırdan çalışıyordu; aynı
+     * kişinin/grubun avatarı bir liste kaydırılırken defalarca yeniden
+     * çözülüyordu, gözle görülür kasılmaya (jank) yol açabiliyordu. Basit
+     * bir bellek-içi önbellek — anahtar olarak baytların `contentHashCode`'u
+     * (tam bir kripto hash'ten çok daha ucuz, çakışma riski teorik olarak
+     * var ama sonucu SADECE bir avatar görselinin geçici olarak yanlış
+     * gösterilmesi, güvenlik/doğruluk açısından kritik bir değer değil) —
+     * aynı fotoğrafı tekrar tekrar decode etmeyi önler. `LruCache`
+     * dahili olarak senkronize, birden fazla RecyclerView/thread'den
+     * güvenle çağrılabilir. 100 giriş × ~36 KB (96x96 ARGB_8888) ≈ 3.6 MB
+     * üst sınır — makul bir bellek/performans dengesi.
+     */
+    private val avatarBitmapCache = android.util.LruCache<Int, Bitmap>(100)
+
     /** `avatarBytes` doluysa gerçek fotoğraf (kare kırpılıp daireye
      *  maskelenir) gösterilir, yoksa `displayName`'in baş harfinden
      *  deterministik renkli bir rozet üretilir. */
     fun renderInto(imageView: ImageView, avatarBytes: ByteArray?, displayName: String) {
-        val bitmap = avatarBytes?.let { decodeCircularSquare(it) } ?: placeholderCircle(displayName)
+        val bitmap = avatarBytes?.let { bytes ->
+            val key = bytes.contentHashCode()
+            avatarBitmapCache.get(key) ?: decodeCircularSquare(bytes)?.also { avatarBitmapCache.put(key, it) }
+        } ?: placeholderCircle(displayName)
         imageView.setImageBitmap(bitmap)
+    }
+
+    /**
+     * Spec dışı, kullanıcı isteği: profil fotoğrafına dokununca tam ekran +
+     * pinch-to-zoom açar (bkz. MediaViewerActivity.setupZoomableImage — tek
+     * dokunuşla kapatma da orada uygulanıyor). `renderInto`'nun aksine burada
+     * `avatarBytes` KIRPILMADAN/küçültülmeden (96x96 önizlemenin tersine)
+     * ham/orijinal çözünürlükte gösterilir. Fotoğraf yoksa (ör. sadece baş
+     * harf rozeti gösteriliyorsa) hiçbir şey yapmaz.
+     */
+    fun openFullscreen(context: Context, avatarBytes: ByteArray?) {
+        if (avatarBytes == null || avatarBytes.isEmpty()) return
+        try {
+            val dir = File(context.cacheDir, "avatar_view").apply { mkdirs() }
+            // Spec dışı, güvenlik/depolama denetimi düzeltmesi: her tıklama
+            // burada yeni bir plaintext JPEG dosyası yazıyordu ama HİÇBİRİ
+            // silinmiyordu (uygulamadaki diğer TÜM geçici dosya yollarının
+            // aksine — bkz. ChatActivity/SettingsFragment/GroupChatActivity
+            // `tempFile.delete()` deseni). Profil fotoğrafları tekrar tekrar
+            // görüntülendikçe uygulama önbelleğinde sınırsız sayıda
+            // şifrelenmemiş yüz fotoğrafı birikiyordu — `allowBackup=false`
+            // bulut sızıntısını engelliyor ama yerel dosya erişimi olan
+            // herhangi bir şeye (root, USB hata ayıklamalı ADB, adli analiz)
+            // gereğinden çok daha uzun süre açık kalıyordu. `MediaViewerActivity`
+            // dosyayı hâlâ görüntülüyor olabileceğinden YENİ dosyayı yazmadan
+            // önce TÜMÜNÜ silmek riskli (o an açık bir görüntüleyiciyi
+            // bozabilir) — bunun yerine makul bir saklama süresini (10 dk)
+            // aşan ESKİ dosyaları buduyoruz, bu da sınırsız birikmeyi önler.
+            val retentionMs = 10 * 60 * 1000L
+            val now = System.currentTimeMillis()
+            dir.listFiles()?.forEach { old ->
+                if (now - old.lastModified() > retentionMs) {
+                    old.delete()
+                }
+            }
+            val file = File(dir, "${UUID.randomUUID()}.jpg")
+            file.writeBytes(avatarBytes)
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            val intent = Intent(context, MediaViewerActivity::class.java).apply {
+                putExtra(MediaViewerActivity.EXTRA_URI, uri)
+                putExtra(MediaViewerActivity.EXTRA_MIME_TYPE, "image/jpeg")
+            }
+            context.grantUriPermission(context.packageName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            // Sessizce yok say — profil fotoğrafı önizlemesi zaten görünür,
+            // tam ekran sadece bir kolaylık.
+        }
     }
 
     private fun decodeCircularSquare(bytes: ByteArray): Bitmap? {

@@ -1,0 +1,10 @@
+<resources>
+    <!-- Spec dışı, kullanıcı isteği (Ayarlar'da sistem fontlarından seçim):
+         Material3'ün type scale stilleri (bkz. themes.xml
+         TextAppearance.P2PMessenger.* ) bu tema özniteliğinden fontFamily
+         okur — böylece bir font seçimi, `ThemeOverlay.P2PMessenger.Font.*`
+         (bkz. themes.xml) SADECE bu TEK özniteliği değiştirerek tüm type
+         scale'i (body/title/label) aynı anda değiştirebilir; her font için
+         13+ ayrı TextAppearance geçersiz kılmaya gerek kalmaz. -->
+    <attr name="appFontFamily" format="string" />
+</resources>

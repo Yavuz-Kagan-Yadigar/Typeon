@@ -1,0 +1,166 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+// Typeon sunucu uygulaması — istemciden AYRI bir APK.
+//
+// Neden ayrı proje: istemcinin derlemesi bundan hiç etkilenmesin. İkisi tek
+// bir Gradle projesinde iki modül olsaydı, sunucunun Rust crate'i (kendi
+// cargo-ndk çağrısıyla) her istemci derlemesine de eklenirdi.
+//
+// GERÇEKÇİ DAĞITIM UYARISI: Android, bellek baskısı altında bir foreground
+// service'i yine de öldürebilir. Bu uygulama "evde duran, sürekli fişte bir
+// yedek telefon" senaryosu içindir; sürekli çalışması gereken bir sunucu için
+// küçük bir VPS'te `typeon-server` daemon'ı önerilir (bkz. typeon-server/README.md).
+android {
+    namespace 'com.p2p.messenger.server'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.p2p.messenger.server"
+        minSdk 26
+        targetSdk 34
+        versionCode 5
+        versionName "1.4"
+
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'
+        }
+    }
+
+    signingConfigs {
+        // İstemcideki AYNI gerekçe: depoya girmiş sabit bir debug keystore,
+        // farklı makinelerden yeniden kurulumda /data/data'nın silinmemesi
+        // için (imza değişirse Android uygulamayı kaldırıp yeniden kurar ve
+        // sunucunun veritabanı/onion kimliği gider).
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Release, BİLEREK depodaki AYNI keystore ile imzalanıyor.
+            //
+            // Gerekçe yukarıdaki `signingConfigs.debug` notuyla aynı ve
+            // burada daha da kritik: imza anahtarı değişirse Android
+            // uygulamayı "farklı uygulama" sayar, üzerine kurulum
+            // REDDEDİLİR ve kullanıcı önce kaldırmak zorunda kalır —
+            // bu da /data/data'yı, yani kimliği, ratchet oturumlarını,
+            // mesaj arşivini ve (sunucu uygulamasında) onion kimliğini
+            // siler. Onion adresi değişince o sunucuyu adresine göre
+            // kayıtlı TÜM istemciler ona bir daha ulaşamaz.
+            //
+            // Bu uygulamalar mağazadan değil elden (sideload) dağıtıldığı
+            // için imzanın "release" anahtarı olması bir gereklilik değil.
+            // Play Store'a çıkılacaksa buraya ayrı bir release keystore
+            // konmalı — ama o geçiş, mevcut kurulumların bir kez
+            // kaldırılmasını gerektirir.
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    packagingOptions {
+        jniLibs {
+            // 16 KB sayfa hizalaması — istemcideki aynı gerekçe.
+            useLegacyPackaging = false
+        }
+        // `if-watch` bağımlılığının ürettiği, hizalama denetimini geçemeyen
+        // yan cdylib (istemcide de dışlanıyor).
+        resources {
+            excludes += ["**/libif_watch*.so"]
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    // Davet kodunun QR'ını çizmek için — istemcide de kullanılan sürüm.
+    implementation 'com.google.zxing:core:3.5.1'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+}
+
+// --- Rust (typeon-server) cross-derlemesi ---
+//
+// İstemcideki `cargoNdkBuild` görevinin birebir eşi; tek farkı çalışma
+// dizini (depo kökündeki `typeon-server/`) ve çıktı `.so`'nun adı
+// (`libtypeon_server.so`).
+
+def resolveCargoExecutable() {
+    def pathEnv = System.getenv("PATH") ?: ""
+    def candidates = pathEnv.split(File.pathSeparator).collect { new File(it, "cargo") }
+    candidates += new File(System.getProperty("user.home"), ".cargo/bin/cargo")
+    def found = candidates.find { it.exists() && it.canExecute() }
+    if (found == null) {
+        throw new GradleException(
+            "cargo bulunamadı. rustup ile Rust kurulu olduğundan emin olun " +
+            "(https://rustup.rs) — beklenen konum: " +
+            "${System.getProperty('user.home')}/.cargo/bin/cargo"
+        )
+    }
+    return found.absolutePath
+}
+
+def resolveNdkHome() {
+    def fromEnv = System.getenv("ANDROID_NDK_HOME") ?: System.getenv("ANDROID_NDK_ROOT")
+    if (fromEnv != null && new File(fromEnv).isDirectory()) {
+        return fromEnv
+    }
+    def localProps = new File(rootDir, "local.properties")
+    if (localProps.exists()) {
+        def props = new Properties()
+        localProps.withInputStream { props.load(it) }
+        def sdkDir = props.getProperty("sdk.dir")
+        if (sdkDir != null) {
+            def ndkRoot = new File(sdkDir, "ndk")
+            if (ndkRoot.isDirectory()) {
+                def versions = ndkRoot.listFiles({ f -> f.isDirectory() } as FileFilter)
+                if (versions != null && versions.length > 0) {
+                    return versions.sort { it.name }.last().absolutePath
+                }
+            }
+        }
+    }
+    return null
+}
+
+task cargoNdkBuild(type: Exec) {
+    workingDir "${rootDir}/../typeon-server"
+    environment "PATH", "${System.getProperty('user.home')}/.cargo/bin${File.pathSeparator}${System.getenv('PATH') ?: ''}"
+    def ndkHome = resolveNdkHome()
+    if (ndkHome != null) {
+        environment "ANDROID_NDK_HOME", ndkHome
+    }
+    // `--lib` ZORUNLU: bu crate ayrıca headless Linux daemon'ını
+    // (`src/bin/typeon-server.rs`) üretiyor ve `cargo ndk build` varsayılan
+    // olarak TÜM hedefleri derliyor. O binary Android'de linklenmiyor —
+    // libp2p'nin `if-watch`'i `getifaddrs`e ihtiyaç duyuyor, cdylib'de sorun
+    // çıkarmayan ama `-pie -nodefaultlibs` ile linklenen bir çalıştırılabilir
+    // için çözülemeyen bir sembol. Zaten Android'de bir daemon binary'sine
+    // ihtiyaç da yok: uygulama kütüphaneyi JNI ile çağırıyor.
+    commandLine resolveCargoExecutable(), 'ndk',
+            '-t', 'armeabi-v7a', '-t', 'arm64-v8a', '-t', 'x86_64',
+            '-o', "${projectDir}/src/main/jniLibs",
+            'build', '--release', '--lib'
+}
+
+preBuild.dependsOn cargoNdkBuild

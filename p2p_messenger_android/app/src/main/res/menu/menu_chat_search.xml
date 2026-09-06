@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <!-- Spec dışı, kullanıcı isteği: "soldan bir drag barla sürüklenebilir
+         açılıp kapanan chat list" — sohbet ekranından ayrılmadan diğer
+         sohbetlere geçiş için soldan açılan bir çekmece (bkz.
+         `activity_chat.xml` DrawerLayout, ChatActivity/GroupChatActivity
+         `openChatListDrawer`). Çekmece kenardan kaydırarak da açılır
+         (DrawerLayout'un kendi jesti) — bu simge SADECE keşfedilebilirlik
+         için, kaydırma tek başına yeterince belirgin değil. -->
+    <item
+        android:id="@+id/action_open_chat_list"
+        android:icon="@drawable/ic_chat_list"
+        android:title="@string/action_open_chat_list"
+        app:showAsAction="ifRoom" />
+
+    <!-- Spec dışı, kullanıcı isteği: sohbet içi mesaj arama. -->
+    <item
+        android:id="@+id/action_search_messages"
+        android:icon="@android:drawable/ic_menu_search"
+        android:title="@string/action_search_messages"
+        app:showAsAction="always" />
+
+    <!-- Spec dışı, kullanıcı isteği: hızlı Tor/ağ bağlantısını kes/yeniden
+         kur — bkz. ChatActivity/GroupChatActivity onOptionsItemSelected,
+         util/AppRestarter.kt (neden tam bir uygulama yeniden başlatması
+         gerektiği). Bu menü dosyası ikisi arasında paylaşılır. -->
+    <item
+        android:id="@+id/action_tor_reconnect"
+        android:icon="@drawable/ic_tor_reconnect"
+        android:title="@string/action_tor_reconnect"
+        app:showAsAction="ifRoom" />
+</menu>

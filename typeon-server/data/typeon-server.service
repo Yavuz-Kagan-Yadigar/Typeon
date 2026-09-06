@@ -1,0 +1,46 @@
+# Typeon sunucusu — systemd birim örneği.
+#
+#   sudo cp data/typeon-server.service /etc/systemd/system/
+#   sudo useradd --system --home /var/lib/typeon-server typeon
+#   sudo install -d -o typeon -g typeon /var/lib/typeon-server
+#   sudo systemctl enable --now typeon-server
+#
+# Davet kodu üretmek (sunucu çalışırken DEĞİL — komut kendi örneğini
+# kaldırdığı için önce servisi durdurun, ya da ayrı bir veri dizini
+# kullanmayın):
+#
+#   sudo systemctl stop typeon-server
+#   sudo -u typeon TYPEON_SERVER_DIR=/var/lib/typeon-server \
+#        /usr/local/bin/typeon-server invite new telefonum 1 7
+#   sudo systemctl start typeon-server
+
+[Unit]
+Description=Typeon store-and-forward server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=typeon
+Group=typeon
+ExecStart=/usr/local/bin/typeon-server run
+Restart=on-failure
+RestartSec=5
+
+Environment=TYPEON_SERVER_DIR=/var/lib/typeon-server
+# Tor açık: sunucu kendi .onion adresini barındırır, port yönlendirme/alan
+# adı/TLS sertifikası gerekmez. Halka açık bir IP'niz varsa TOR=0 + PORT ile
+# düz TCP de kullanabilirsiniz (daha düşük gecikme, ama adresiniz görünür).
+Environment=TYPEON_SERVER_TOR=1
+Environment=TYPEON_SERVER_NAME=Typeon
+
+# Sunucu yalnızca kendi veri dizinine yazar.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=typeon-server
+ReadWritePaths=/var/lib/typeon-server
+
+[Install]
+WantedBy=multi-user.target

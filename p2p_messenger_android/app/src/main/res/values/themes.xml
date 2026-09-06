@@ -23,6 +23,7 @@
         <item name="android:colorBackground">@color/md_background</item>
         <item name="colorOnBackground">@color/md_on_background</item>
         <item name="colorOutline">@color/md_outline</item>
+        <item name="colorOutlineVariant">@color/md_outline_variant</item>
         <item name="colorError">@color/md_error</item>
         <item name="colorOnError">@color/md_on_error</item>
         <item name="colorErrorContainer">@color/md_error_container</item>
@@ -34,23 +35,171 @@
         <item name="android:navigationBarColor">?attr/colorSurface</item>
         <item name="android:windowLightStatusBar">@bool/is_light_theme</item>
         <item name="android:windowLightNavigationBar">@bool/is_light_theme</item>
+        <!-- Spec dışı, kullanıcı isteği (Ayarlar'da sistem fontu seçimi):
+             varsayılan — bkz. attrs.xml `appFontFamily` notu. Tüm M3 type
+             scale attribute'ları (aşağısı) bunun yerine kendi
+             `TextAppearance.P2PMessenger.*` karşılıklarına yönlendiriliyor,
+             onlar da fontFamily'yi buradan okuyor. -->
+        <item name="appFontFamily">sans-serif</item>
+        <!-- Spec dışı, hata düzeltmesi ("uygulamadan gir çık yapınca ya da
+             ekran değiştirince metin tipi varsayılana dönüyor"): font
+             seçimi ESKİDEN tek başına `FontOverride`'ın reflection ile
+             `Typeface.DEFAULT`/`sDefaults` statiklerini değiştirmesine
+             dayanıyordu — bu, hiçbir `textAppearance` BELİRTMEYEN düz
+             TextView'lar için TEK mekanizmaydı ve süreç genelinde tek
+             seferlik olduğu için ROM/Android sürümüne göre kolayca
+             kaybolabiliyordu (belgesiz, resmi olmayan bir teknik).
+             `android:textViewStyle`/`editTextStyle` ise Android'in KENDİ
+             desteklenen mekanizması: bir TextView/EditText, XML'de style
+             verilmemişse varsayılan stilini HER ZAMAN temadan bu
+             öznitelikler üzerinden çözer. Tema her Activity için yeniden
+             çözüldüğünden ekran değiştirmek ya da süreç yeniden başlamak
+             bunu SIFIRLAYAMAZ. -->
+        <item name="android:textViewStyle">@style/Widget.P2PMessenger.TextView</item>
+        <item name="android:editTextStyle">@style/Widget.P2PMessenger.EditText</item>
+        <item name="textAppearanceDisplayLarge">@style/TextAppearance.P2PMessenger.DisplayLarge</item>
+        <item name="textAppearanceDisplayMedium">@style/TextAppearance.P2PMessenger.DisplayMedium</item>
+        <item name="textAppearanceDisplaySmall">@style/TextAppearance.P2PMessenger.DisplaySmall</item>
+        <item name="textAppearanceHeadlineLarge">@style/TextAppearance.P2PMessenger.HeadlineLarge</item>
+        <item name="textAppearanceHeadlineMedium">@style/TextAppearance.P2PMessenger.HeadlineMedium</item>
+        <item name="textAppearanceHeadlineSmall">@style/TextAppearance.P2PMessenger.HeadlineSmall</item>
+        <item name="textAppearanceTitleLarge">@style/TextAppearance.P2PMessenger.TitleLarge</item>
+        <item name="textAppearanceTitleMedium">@style/TextAppearance.P2PMessenger.TitleMedium</item>
+        <item name="textAppearanceTitleSmall">@style/TextAppearance.P2PMessenger.TitleSmall</item>
+        <item name="textAppearanceBodyLarge">@style/TextAppearance.P2PMessenger.BodyLarge</item>
+        <item name="textAppearanceBodyMedium">@style/TextAppearance.P2PMessenger.BodyMedium</item>
+        <item name="textAppearanceBodySmall">@style/TextAppearance.P2PMessenger.BodySmall</item>
+        <item name="textAppearanceLabelLarge">@style/TextAppearance.P2PMessenger.LabelLarge</item>
+        <item name="textAppearanceLabelMedium">@style/TextAppearance.P2PMessenger.LabelMedium</item>
+        <item name="textAppearanceLabelSmall">@style/TextAppearance.P2PMessenger.LabelSmall</item>
     </style>
 
-    <!-- OLED "tam siyah" geçersiz kılma — SettingsFragment'teki anahtar
-         açıkken VE sistem koyu temadayken P2PApplication tarafından her
-         Activity'ye onActivityPreCreated'da uygulanır (bkz. ThemePrefs,
-         P2PApplication). Yüzey/arkaplan rollerini @color/pure_black'e
-         zorlar; DynamicColors'ın uyguladığı overlay'den SONRA
-         uygulandığı için onu ezer. -->
-    <style name="ThemeOverlay.P2PMessenger.OledBlack" parent="">
-        <item name="colorSurface">@color/pure_black</item>
-        <item name="android:colorBackground">@color/pure_black</item>
-        <item name="colorSurfaceContainer">@color/pure_black</item>
-        <item name="colorSurfaceContainerLow">@color/pure_black</item>
-        <item name="colorSurfaceContainerLowest">@color/pure_black</item>
-        <item name="colorSurfaceContainerHigh">@color/pure_black</item>
-        <item name="colorSurfaceContainerHighest">@color/pure_black</item>
-        <item name="android:statusBarColor">@color/pure_black</item>
-        <item name="android:navigationBarColor">@color/pure_black</item>
+    <!-- Spec dışı, kullanıcı isteği: M3 type scale'in HER seviyesi için,
+         orijinal Material3 stilinden TEK farkı `fontFamily`'yi
+         `?attr/appFontFamily`'den okuması olan birebir kopyalar — böylece
+         bir font seçimi (aşağıdaki ThemeOverlay'ler) sadece bu tek
+         özniteliği değiştirerek TÜM type scale'i aynı anda etkiler. -->
+    <style name="TextAppearance.P2PMessenger.DisplayLarge" parent="TextAppearance.Material3.DisplayLarge">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="TextAppearance.P2PMessenger.DisplayMedium" parent="TextAppearance.Material3.DisplayMedium">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="TextAppearance.P2PMessenger.DisplaySmall" parent="TextAppearance.Material3.DisplaySmall">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="TextAppearance.P2PMessenger.HeadlineLarge" parent="TextAppearance.Material3.HeadlineLarge">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="TextAppearance.P2PMessenger.HeadlineMedium" parent="TextAppearance.Material3.HeadlineMedium">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="TextAppearance.P2PMessenger.HeadlineSmall" parent="TextAppearance.Material3.HeadlineSmall">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="TextAppearance.P2PMessenger.TitleLarge" parent="TextAppearance.Material3.TitleLarge">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="TextAppearance.P2PMessenger.TitleMedium" parent="TextAppearance.Material3.TitleMedium">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="TextAppearance.P2PMessenger.TitleSmall" parent="TextAppearance.Material3.TitleSmall">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="TextAppearance.P2PMessenger.BodyLarge" parent="TextAppearance.Material3.BodyLarge">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="TextAppearance.P2PMessenger.BodyMedium" parent="TextAppearance.Material3.BodyMedium">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="TextAppearance.P2PMessenger.BodySmall" parent="TextAppearance.Material3.BodySmall">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="TextAppearance.P2PMessenger.LabelLarge" parent="TextAppearance.Material3.LabelLarge">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="TextAppearance.P2PMessenger.LabelMedium" parent="TextAppearance.Material3.LabelMedium">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="TextAppearance.P2PMessenger.LabelSmall" parent="TextAppearance.Material3.LabelSmall">
+        <item name="fontFamily">?attr/appFontFamily</item>
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+    </style>
+
+    <!-- bkz. Theme.P2PMessenger `android:textViewStyle` notu — tek farkları
+         `fontFamily`'yi `?attr/appFontFamily`'den okumaları. Material/
+         AppCompat bileşenleri de bu iki PLATFORM özniteliğini defStyleAttr
+         olarak kullandığından (AppCompatTextView -> android.R.attr.textViewStyle)
+         onlar da kapsanır. -->
+    <!-- Parent BİLEREK platformun kendi Material stilleri: bu tema
+         zinciri (Theme.Material3 -> ... -> android:Theme.Material)
+         `android:textViewStyle`/`android:editTextStyle` için ZATEN bunları
+         çözüyordu, yani burada tek DEĞİŞEN şey fontFamily — arka plan
+         çizimi, satır kırma stratejisi gibi varsayılanların hiçbiri
+         kaymıyor. (AppCompat karşılıkları farklı arka plan drawable'ları
+         taşıdığından görsel bir kayma yaratırdı.) -->
+    <style name="Widget.P2PMessenger.TextView" parent="@android:style/Widget.Material.TextView">
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+        <item name="fontFamily">?attr/appFontFamily</item>
+    </style>
+    <style name="Widget.P2PMessenger.EditText" parent="@android:style/Widget.Material.EditText">
+        <item name="android:fontFamily">?attr/appFontFamily</item>
+        <item name="fontFamily">?attr/appFontFamily</item>
+    </style>
+
+    <!-- bkz. item_message_bubble.xml `imgAttachmentThumbnail` — sohbetteki
+         resim/video önizlemelerinin köşe yuvarlaklığı. -->
+    <style name="ShapeAppearance.P2PMessenger.Attachment" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">12dp</item>
+    </style>
+
+    <!-- Spec dışı, kullanıcı isteği ("arayüzdeki gri renkleri daha koyu
+         yap"): bu roller Android 12+'ta `DynamicColors` tarafından
+         duvarkağıdı/vurgu renginden türetilenlerle EZİLİYOR — o yüzden
+         statik paletteki koyu değerleri (bkz. colors.xml) dinamik renkten
+         SONRA yeniden bindiriyoruz (bkz.
+         P2PApplication.onActivityPreCreated). `parent=""`: sadece bu dört
+         özniteliği taşısın, temanın geri kalanına dokunmasın. -->
+    <style name="ThemeOverlay.P2PMessenger.Grays" parent="">
+        <item name="colorSurfaceVariant">@color/md_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/md_on_surface_variant</item>
+        <item name="colorOutline">@color/md_outline</item>
+        <item name="colorOutlineVariant">@color/md_outline_variant</item>
+    </style>
+
+    <!-- Spec dışı, kullanıcı isteği: Ayarlar'daki font seçici combobox'ın
+         her seçeneği için — bkz. ThemePrefs.FontChoice/P2PApplication
+         (her Activity oluşturulmadan hemen önce uygulanır). `parent=""`:
+         SADECE bu tek özniteliği taşısın, temanın geri kalanına
+         dokunmasın. -->
+    <style name="ThemeOverlay.P2PMessenger.Font.SansMedium" parent="">
+        <item name="appFontFamily">sans-serif-medium</item>
+    </style>
+    <style name="ThemeOverlay.P2PMessenger.Font.SansCondensed" parent="">
+        <item name="appFontFamily">sans-serif-condensed</item>
+    </style>
+    <style name="ThemeOverlay.P2PMessenger.Font.Serif" parent="">
+        <item name="appFontFamily">serif</item>
+    </style>
+    <style name="ThemeOverlay.P2PMessenger.Font.Monospace" parent="">
+        <item name="appFontFamily">monospace</item>
+    </style>
+    <style name="ThemeOverlay.P2PMessenger.Font.SansBlack" parent="">
+        <item name="appFontFamily">sans-serif-black</item>
     </style>
 </resources>

@@ -29,6 +29,13 @@ class ChatAdapter(
         val lastMessage: String,
         val timestamp: Long,
         val unreadCount: Int = 0,
+        /** True if this conversation has activity since it was last opened
+         *  (see ReadStatePrefs) — drives the row's accent-tinted background.
+         *  Independent of `unreadCount`, which has no real backing signal. */
+        val hasUnread: Boolean = false,
+        /** See PinnedChatsPrefs — pinned rows always sort above unpinned
+         *  ones (ChatsFragment.refreshList) and get a 📌 prefix on the name. */
+        val isPinned: Boolean = false,
         /** Rust'ın gerçek `contact_id`'si (`contactId` alanı tarihsel
          *  olarak AYGIT parmak izini taşıyor, bkz. ChatsFragment notu) —
          *  sadece uzun basma menüsündeki sohbet geçmişi temizleme/kişi
@@ -48,15 +55,32 @@ class ChatAdapter(
         /** Spec dışı, kullanıcı isteği: `isGroup` satırlarında, bu grubun
          *  kurucusu BİZ miyiz — uzun basma menüsünde "grubu herkes için
          *  sil" seçeneği yalnızca kurucuya gösterilir. */
-        val isGroupFounder: Boolean = false
+        val isGroupFounder: Boolean = false,
+        /** Kullanıcı kararı (2026-08-27): ENGELLEME kişiyi (kimliği)
+         *  hedefliyor, cihazı değil — bu yüzden uzun basma menüsünün
+         *  `identity_id`'ye ihtiyacı var. `contactId` tarihsel olarak aygıt
+         *  parmak izini taşıyor, o iş görmüyor. Grup satırlarında boş. */
+        val identityId: String = ""
     ) {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is ChatMessage) return false
             return contactId == other.contactId && displayName == other.displayName &&
                 lastMessage == other.lastMessage && timestamp == other.timestamp &&
-                unreadCount == other.unreadCount && realContactId == other.realContactId &&
+                unreadCount == other.unreadCount && hasUnread == other.hasUnread &&
+                isPinned == other.isPinned &&
+                realContactId == other.realContactId &&
                 isGroup == other.isGroup &&
+                // Spec dışı, güvenlik/kararlılık denetimi düzeltmesi: bu
+                // ikisi önceden eksikti — `DiffUtil.ItemCallback.areContentsTheSame`
+                // bu `equals`'ı kullandığından, GÜVENLİKLE İLGİLİ "⚠
+                // doğrulanmadı" rozetini süren `addedViaGroup` (bkz. `bind`
+                // fonksiyonundaki kullanımı) yalnızca BAŞKA bir alan (ör.
+                // isim/son mesaj) da aynı anda değişirse güncellenirdi — bir
+                // kişi sonradan doğrulanıp `addedViaGroup` tek başına
+                // değiştiğinde satır YENİDEN BAĞLANMAZ, eski uyarı rozeti
+                // ekranda kalırdı.
+                addedViaGroup == other.addedViaGroup && isGroupFounder == other.isGroupFounder &&
                 (avatarJpeg?.contentEquals(other.avatarJpeg) ?: (other.avatarJpeg == null))
         }
 
@@ -66,8 +90,12 @@ class ChatAdapter(
             result = 31 * result + lastMessage.hashCode()
             result = 31 * result + timestamp.hashCode()
             result = 31 * result + unreadCount
+            result = 31 * result + hasUnread.hashCode()
+            result = 31 * result + isPinned.hashCode()
             result = 31 * result + realContactId.hashCode()
             result = 31 * result + isGroup.hashCode()
+            result = 31 * result + addedViaGroup.hashCode()
+            result = 31 * result + isGroupFounder.hashCode()
             result = 31 * result + (avatarJpeg?.contentHashCode() ?: 0)
             return result
         }
@@ -97,18 +125,38 @@ class ChatAdapter(
         fun bind(message: ChatMessage) {
             // Grup üzerinden (kurucu kefaletiyle) eklenmiş kişiler yüz yüze
             // QR ile doğrulanmadı — isimde görünür bir uyarı işareti.
-            txtName.text = if (message.addedViaGroup) "⚠ ${message.displayName}" else message.displayName
+            val pinPrefix = if (message.isPinned) "📌 " else ""
+            val warnPrefix = if (message.addedViaGroup) "⚠ " else ""
+            txtName.text = "$pinPrefix$warnPrefix${message.displayName}"
             txtLastMessage.text = message.lastMessage
             txtTimestamp.text = if (message.timestamp > 0) formatTimestamp(message.timestamp) else ""
             txtUnread.visibility = if (message.unreadCount > 0) View.VISIBLE else View.GONE
             txtUnread.text = message.unreadCount.toString()
             AvatarUtil.renderInto(imgAvatar, message.avatarJpeg, message.displayName)
 
+            // Unread rows get a 20%-alpha accent color overlay on top of the
+            // normal background; cleared once ReadStatePrefs marks it read.
+            itemView.setBackgroundColor(
+                if (message.hasUnread) {
+                    val accent = com.google.android.material.color.MaterialColors.getColor(
+                        itemView, com.google.android.material.R.attr.colorPrimary
+                    )
+                    androidx.core.graphics.ColorUtils.setAlphaComponent(accent, (255 * 0.20f).toInt())
+                } else {
+                    android.graphics.Color.TRANSPARENT
+                }
+            )
+
             itemView.setOnClickListener {
                 onItemClick(message)
             }
             itemView.setOnLongClickListener {
-                if (message.realContactId.isNotEmpty()) {
+                // Group rows never carry a realContactId (they're not a
+                // Contact) — the long-press menu still applies to them
+                // (delete-group for the founder), so gate on isGroup too.
+                // Previously this guard was realContactId-only, which
+                // silently swallowed every long-press on a group row.
+                if (message.isGroup || message.realContactId.isNotEmpty()) {
                     onContactLongClick?.invoke(message)
                     true
                 } else {
@@ -120,11 +168,12 @@ class ChatAdapter(
         private fun formatTimestamp(timestamp: Long): String {
             val now = System.currentTimeMillis()
             val diff = now - timestamp
+            val context = itemView.context
             return when {
-                diff < 60000 -> "Just now"
-                diff < 3600000 -> "${diff / 60000}m ago"
-                diff < 86400000 -> "${diff / 3600000}h ago"
-                else -> "${diff / 86400000}d ago"
+                diff < 60000 -> context.getString(R.string.lbl_time_just_now)
+                diff < 3600000 -> context.getString(R.string.lbl_time_minutes_ago, diff / 60000)
+                diff < 86400000 -> context.getString(R.string.lbl_time_hours_ago, diff / 3600000)
+                else -> context.getString(R.string.lbl_time_days_ago, diff / 86400000)
             }
         }
     }

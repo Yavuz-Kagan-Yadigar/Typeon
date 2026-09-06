@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spec dışı, kullanıcı isteği: karşı tarafın bağlantı durumu için küçük
+     renkli nokta göstergesi — bkz. ChatActivity util/ConnectionDotView
+     (renk/animasyon mantığı), actionbar_chat_title.xml dotPeerStatus.
+     Düz beyaz dolgu — gerçek renk çalışma zamanında backgroundTintList ile
+     uygulanır (bkz. @color/online / @color/warning / @color/offline). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <solid android:color="@android:color/white" />
+</shape>

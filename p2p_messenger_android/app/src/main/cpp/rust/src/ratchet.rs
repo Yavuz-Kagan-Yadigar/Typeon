@@ -71,8 +71,11 @@ pub struct DeviceRatchetState {
     /// Spec dışı, hata ayıklama düzeltmesi (bkz. SECURITY.md "Cross-network
     /// connectivity" bölümündeki gossipsub topic pseudonymization notu):
     /// `perform_dh_ratchet`'in üzerine yazmadan ÖNCEKİ `root_key` değeri.
-    /// SADECE `perform_dh_ratchet` çağıran (rotasyonu TETİKLEYEN) tarafta
-    /// anlamlı — bu, o rotasyonu duyuran TEK mesajın (`rotation_kyber_ciphertext`
+    /// (Güvenilirlik düzeltmesi: artık `respond_to_rotation` da ayarlıyor —
+    /// iki taraf da "bir önceki topic'i bir nesil daha dinle" defteri için
+    /// buna ihtiyaç duyuyor, bkz. lib.rs resubscribe çağıranları.)
+    /// Yayın tarafı kullanımı `perform_dh_ratchet` çağıran (rotasyonu
+    /// TETİKLEYEN) tarafta anlamlı — bu, o rotasyonu duyuran mesajın (`rotation_kyber_ciphertext`
     /// dolu olan) hangi gossipsub topic'inden gönderilmesi gerektiğini
     /// belirlemek için lib.rs `try_publish_raw`'da kullanılır: karşı taraf bu
     /// mesajı ALANA kadar YENİ `root_key`'i (dolayısıyla yeni topic'i) bilemez
@@ -113,6 +116,19 @@ pub struct DeviceRatchetState {
     ///   çağrıldı) ve ben henüz ONUN yeni public key'ine cevap vermedim —
     ///   30 dakika dolduğunda BEN tetiklerim (perform_dh_ratchet).
     pub has_responded_to_peer_key: bool,
+    /// Güvenilirlik düzeltmesi (rotasyon duyurusu kaybı): `perform_dh_ratchet`
+    /// tarafından üretilen Kyber ciphertext'i, karşı tarafın rotasyonu
+    /// UYGULADIĞI DOĞRULANANA kadar burada saklanır — lib.rs
+    /// `send_message_content_inner` bu değer doluyken HER giden pakete
+    /// rotasyon duyurusunu yeniden ekler. Önceden duyuru SADECE rotasyonu
+    /// tetikleyen tek pakette taşınıyordu; o paket güvenilir teslimli
+    /// olmayan bir türse (TypingIndicator/Ack) ve kaybolursa, karşı taraf
+    /// yeni kök anahtarı ASLA öğrenemiyor ve oturum kalıcı olarak
+    /// kopuyordu. Karşı taraftan yeni zincirde bir paket başarıyla
+    /// çözüldüğünde (rotasyonu uyguladığının kanıtı) temizlenir; tekrarlanan
+    /// duyurular alıcı tarafta idempotenttir (bkz. `respond_to_rotation`
+    /// içindeki çift-uygulama koruması).
+    pub pending_rotation_ct: Option<Vec<u8>>,
     /// Sıra dışı/gecikmeli gelen mesajlar için "atlanmış mesaj anahtarları"
     /// önbelleği (Signal Double Ratchet'teki standart mekanizma). Bir mesaj
     /// beklenenden yüksek bir `message_number` ile gelirse, aradaki
@@ -178,6 +194,11 @@ pub struct SerializableRatchetState {
     pub prev_chain_length: u32,
     pub last_rotation: u64,
     pub has_responded_to_peer_key: bool,
+    /// bkz. `DeviceRatchetState.pending_rotation_ct` — `#[serde(default)]`:
+    /// bu alan eklenmeden önce diske yazılmış eski state kayıtları alanı
+    /// içermez, `None` ile geriye dönük uyumlu şekilde yüklenir.
+    #[serde(default)]
+    pub pending_rotation_ct: Option<Vec<u8>>,
 }
 
 impl DeviceRatchetState {
@@ -199,6 +220,7 @@ impl DeviceRatchetState {
             prev_chain_length: self.prev_chain_length,
             last_rotation: self.last_rotation,
             has_responded_to_peer_key: self.has_responded_to_peer_key,
+            pending_rotation_ct: self.pending_rotation_ct.clone(),
         }
     }
 
@@ -223,6 +245,7 @@ impl DeviceRatchetState {
             prev_chain_length: s.prev_chain_length,
             last_rotation: s.last_rotation,
             has_responded_to_peer_key: s.has_responded_to_peer_key,
+            pending_rotation_ct: s.pending_rotation_ct,
             skipped_keys,
         })
     }
@@ -311,6 +334,7 @@ impl DeviceRatchetState {
             // DH+encapsulate yaptı — bu "cevap verdim" sayılır. Sıradaki
             // rotasyon hakkı responder'da.
             has_responded_to_peer_key: true,
+            pending_rotation_ct: None,
             skipped_keys: HashMap::new(),
         };
         Ok((state, kyber_ct.to_vec(), own_kyber_public_bytes))
@@ -357,6 +381,7 @@ impl DeviceRatchetState {
             // TETİKLEME hakkı responder'da (initiator zaten "cevap verdi"
             // sayıldığı için tetiklemeyecek, bkz. initiate()).
             has_responded_to_peer_key: false,
+            pending_rotation_ct: None,
             skipped_keys: HashMap::new(),
         })
     }
@@ -425,6 +450,9 @@ impl DeviceRatchetState {
         // Eski zincire ait atlanmış anahtarlar artık anlamsız (kök anahtar
         // değişti, farklı bir HKDF zinciri) — temizle.
         self.skipped_keys.clear();
+        // bkz. `pending_rotation_ct` alanı — karşı taraf rotasyonu uyguladığı
+        // doğrulanana kadar bu duyuru her giden pakete yeniden eklenir.
+        self.pending_rotation_ct = Some(kyber_ct.to_vec());
         Ok(kyber_ct.to_vec())
     }
 
@@ -444,8 +472,26 @@ impl DeviceRatchetState {
     /// de bizim GELECEKTEKİ rotasyonlarımızda (Kyber kısmı,
     /// `perform_dh_ratchet`'in `self.peer_kyber_pubkey`'e karşı encapsulate
     /// etmesi için) kullanılacağından ikisi birden burada güncellenir.
-    pub fn respond_to_rotation(&mut self, new_peer_keys: &RatchetPublicKeys, rotation_kyber_ciphertext: &[u8]) -> Result<(), String> {
+    ///
+    /// Dönüş: `Ok(true)` = rotasyon UYGULANDI; `Ok(false)` = bu duyuru
+    /// ZATEN uygulanmıştı, hiçbir durum değişmedi (aşağıdaki koruma).
+    ///
+    /// KRİTİK (çift-uygulama koruması): bu fonksiyon KDF'e mevcut
+    /// `root_key`'i katar — AYNI duyuruyu iki kez uygulamak, gönderenin
+    /// hiç görmediği bir kök anahtar türetir ve oturumu KALICI olarak
+    /// koparırdı. Aynı duyurunun tekrar gelmesi ise kaçınılmaz: gönderenin
+    /// `awaiting_confirmation` mekanizması, Ack kaybolduğunda AYNI zarfı
+    /// (aynı rotation ciphertext'iyle) yeniden yayınlar; ayrıca
+    /// `pending_rotation_ct` yeniden-duyuru mekanizması da (bkz. o alan)
+    /// duyuruyu kasıtlı olarak tekrarlar. Karşı tarafın X25519 public
+    /// key'i her rotasyonda TAZE ÜRETİLDİĞİ için, gelen key'in kayıtlı
+    /// `peer_x25519_pubkey` ile AYNI olması "bu rotasyon zaten uygulandı"
+    /// demektir — güvenle yok sayılır.
+    pub fn respond_to_rotation(&mut self, new_peer_keys: &RatchetPublicKeys, rotation_kyber_ciphertext: &[u8]) -> Result<bool, String> {
         let x25519_bytes: [u8; 32] = new_peer_keys.x25519_pubkey.as_slice().try_into().map_err(|_| "Bad peer X25519 key length")?;
+        if x25519_bytes == *self.peer_x25519_pubkey.as_bytes() {
+            return Ok(false);
+        }
         let new_peer_x25519_pk = X25519PublicKey::from(x25519_bytes);
         let new_peer_kyber_pk = kyber_pubkey_from_bytes(&new_peer_keys.kyber_pubkey)?;
 
@@ -469,10 +515,24 @@ impl DeviceRatchetState {
         // Rotasyonu BİZ başlatmadık, karşı taraf başlattı — we_initiate_rotation=false.
         let (new_root, new_send, new_recv) = derive_keys(&ikm, false)?;
 
-        self.prev_chain_length = self.recv_message_number;
+        // Defter #33: burası `recv_message_number`'ı atıyordu. `prev_chain_length`
+        // yalnızca GİDEN başlıkta taşınıyor ve anlamı "benim ÖNCEKİ GÖNDERME
+        // zincirimin uzunluğu" — cevaplayan tarafta alma sayacını yazmak
+        // yanlış bir değer üretiyordu. `perform_dh_ratchet` (aynı dosyada)
+        // zaten doğrusunu yapıyor; ikisi artık tutarlı.
+        self.prev_chain_length = self.send_message_number;
         self.send_message_number = 0;
         self.recv_message_number = 0;
-        self.root_key = new_root;
+        // Karşı taraf rotasyon yaptıysa bizim MEVCUT public key'imizi
+        // biliyor demektir — hâlâ tekrarlanan bir eski duyurumuz varsa
+        // artık gereksiz (bkz. `pending_rotation_ct`).
+        self.pending_rotation_ct = None;
+        // Topic defteri (bkz. lib.rs `try_publish_raw`/`resubscribe_ratchet_topic`
+        // çağıranları): rotasyon-sonrası bir süre daha ESKİ topic'in de
+        // dinlenmesi gerekir (gönderenin tekrar duyuruları eski topic'ten
+        // gelir) — hangi topic'in "bir önceki" olduğunu bilmek için burada
+        // da kaydediyoruz (`perform_dh_ratchet` ile simetrik).
+        self.prev_root_key = Some(std::mem::replace(&mut self.root_key, new_root));
         self.ck_send = new_send;
         self.ck_recv = new_recv;
         // Kendi own_x25519_secret/own_kyber_secret'ımızı DEĞİŞTİRMİYORUZ —
@@ -491,7 +551,7 @@ impl DeviceRatchetState {
         self.has_responded_to_peer_key = false;
         // Eski zincire ait atlanmış anahtarlar artık anlamsız — temizle.
         self.skipped_keys.clear();
-        Ok(())
+        Ok(true)
     }
 
     /// Spec 3.2: 30 dakika kuralı + Signal'ın gerçek modeli — SADECE henüz
@@ -521,16 +581,6 @@ impl DeviceRatchetState {
         hk.expand(b"p2pmsg-v0.1-msgkey", &mut message_key).map_err(|_| "HKDF expand failed")?;
         hk.expand(b"p2pmsg-v0.1-chainkey", &mut next_chain_key).map_err(|_| "HKDF expand failed")?;
         self.ck_send = next_chain_key.to_vec();
-        Ok(message_key)
-    }
-
-    fn advance_recv_chain(&mut self) -> Result<[u8; 32], String> {
-        let hk = Hkdf::<Sha256>::new(None, &self.ck_recv);
-        let mut message_key = [0u8; 32];
-        let mut next_chain_key = [0u8; 32];
-        hk.expand(b"p2pmsg-v0.1-msgkey", &mut message_key).map_err(|_| "HKDF expand failed")?;
-        hk.expand(b"p2pmsg-v0.1-chainkey", &mut next_chain_key).map_err(|_| "HKDF expand failed")?;
-        self.ck_recv = next_chain_key.to_vec();
         Ok(message_key)
     }
 
@@ -577,51 +627,136 @@ impl DeviceRatchetState {
     pub fn decrypt(&mut self, ciphertext: &[u8], message_number: u32) -> Result<(Vec<u8>, SkippedKeyChanges), String> {
         use std::cmp::Ordering;
 
-        let mut changes = SkippedKeyChanges::default();
+        // Spec dışı, güvenlik denetimi düzeltmesi: bu fonksiyon önceden
+        // `self.recv_message_number`/`self.ck_recv`/`self.skipped_keys`'i
+        // AEAD kimlik doğrulaması BAŞARILI olmadan önce (`Ordering::Greater`
+        // dalında) kalıcı olarak değiştiriyordu. Sonuç: zaten güvenilen
+        // (imzalı) ama uydurma/bozuk bir `ciphertext` + suni derecede büyük
+        // bir `message_number` taşıyan TEK bir paket — ki bunu göndermek
+        // için saldırganın ratchet anahtarına değil, sadece geçerli bir
+        // imza anahtarına (yani zaten güvenilen bir kişi/cihaza) ihtiyacı
+        // var — alıcının `recv_message_number`'ını kalıcı olarak ileri
+        // sıçratabiliyordu; asıl (kimliği doğrulanamayan) mesajın anahtarı
+        // hiç önbelleğe alınmadığından o mesaj SÜRESİZ çözülemez hâle
+        // geliyordu, üstüne `skipped_keys` önbelleği gereksiz yere dolduruluyordu.
+        // Artık aday anahtar(lar) ve durum değişiklikleri önce YEREL olarak
+        // hesaplanıyor, `self`'e sadece AEAD doğrulaması BAŞARILI olduktan
+        // SONRA yazılıyor — kimliği doğrulanamayan girdi asla kalıcı duruma
+        // ulaşamaz.
+        struct Pending {
+            message_key: [u8; 32],
+            new_recv_number: Option<u32>,
+            new_ck_recv: Option<Vec<u8>>,
+            newly_skipped: Vec<(u32, [u8; 32])>,
+            consumed_skipped: Option<u32>,
+        }
 
-        let mut message_key = match message_number.cmp(&self.recv_message_number) {
+        fn chain_step(chain_key: &[u8]) -> Result<([u8; 32], [u8; 32]), String> {
+            let hk = Hkdf::<Sha256>::new(None, chain_key);
+            let mut message_key = [0u8; 32];
+            let mut next_chain_key = [0u8; 32];
+            hk.expand(b"p2pmsg-v0.1-msgkey", &mut message_key).map_err(|_| "HKDF expand failed")?;
+            hk.expand(b"p2pmsg-v0.1-chainkey", &mut next_chain_key).map_err(|_| "HKDF expand failed")?;
+            Ok((message_key, next_chain_key))
+        }
+
+        let pending = match message_number.cmp(&self.recv_message_number) {
             Ordering::Equal => {
-                let key = self.advance_recv_chain()?;
-                self.recv_message_number += 1;
-                key
+                let (message_key, next_chain_key) = chain_step(&self.ck_recv)?;
+                Pending {
+                    message_key,
+                    new_recv_number: Some(self.recv_message_number + 1),
+                    new_ck_recv: Some(next_chain_key.to_vec()),
+                    newly_skipped: Vec::new(),
+                    consumed_skipped: None,
+                }
             }
             Ordering::Greater => {
-                let gap = (message_number - self.recv_message_number) as usize;
-                if self.skipped_keys.len() + gap > MAX_SKIPPED_KEYS {
+                // u64 ile hesapla: `message_number - self.recv_message_number`
+                // teorik olarak u32::MAX'a yakın olabilir; `self.skipped_keys.len()
+                // + gap` toplamı 32-bit `usize` (armeabi-v7a, bu projenin
+                // build hedeflerinden biri — bkz. build.gradle abiFilters)
+                // üzerinde SARABİLİRDİ, bu da MAX_SKIPPED_KEYS sınırını
+                // atlatıp aşağıdaki döngüyü milyarlarca adım çalıştırmaya
+                // açık bırakırdı (bellek/CPU DoS). u64 hiçbir hedef mimaride
+                // taşmaz.
+                let gap = (message_number - self.recv_message_number) as u64;
+                if self.skipped_keys.len() as u64 + gap > MAX_SKIPPED_KEYS as u64 {
                     return Err(format!(
                         "Too many skipped messages (gap {}, cache would exceed {} entries) — refusing to avoid unbounded memory use",
                         gap, MAX_SKIPPED_KEYS
                     ));
                 }
-                // Aradaki tüm mesajların anahtarlarını türetip önbelleğe al.
-                while self.recv_message_number < message_number {
-                    let skipped_key = self.advance_recv_chain()?;
-                    self.skipped_keys.insert(self.recv_message_number, skipped_key);
-                    changes.added.push((self.recv_message_number, skipped_key));
-                    self.recv_message_number += 1;
+                // Aradaki tüm mesajların anahtarlarını türet — henüz `self`'e YAZMA.
+                let mut newly_skipped = Vec::new();
+                let mut cursor_chain_key = self.ck_recv.clone();
+                let mut cursor_num = self.recv_message_number;
+                while cursor_num < message_number {
+                    let (skipped_key, next_chain_key) = chain_step(&cursor_chain_key)?;
+                    newly_skipped.push((cursor_num, skipped_key));
+                    cursor_chain_key = next_chain_key.to_vec();
+                    cursor_num += 1;
                 }
                 // Şimdi tam istenen mesaja geldik.
-                let key = self.advance_recv_chain()?;
-                self.recv_message_number += 1;
-                key
+                let (message_key, next_chain_key) = chain_step(&cursor_chain_key)?;
+                Pending {
+                    message_key,
+                    new_recv_number: Some(message_number + 1),
+                    new_ck_recv: Some(next_chain_key.to_vec()),
+                    newly_skipped,
+                    consumed_skipped: None,
+                }
             }
             Ordering::Less => {
-                let key = self.skipped_keys.remove(&message_number).ok_or_else(|| {
+                let key = *self.skipped_keys.get(&message_number).ok_or_else(|| {
                     format!(
                         "Message {} not found in skipped-key cache (already decrypted, or evicted)",
                         message_number
                     )
                 })?;
-                changes.used.push(message_number);
-                key
+                Pending {
+                    message_key: key,
+                    new_recv_number: None,
+                    new_ck_recv: None,
+                    newly_skipped: Vec::new(),
+                    consumed_skipped: Some(message_number),
+                }
             }
         };
 
+        let mut message_key = pending.message_key;
         let cipher = ChaCha20Poly1305::new_from_slice(&message_key).map_err(|_| "Invalid key")?;
         let nonce = nonce_from_message_number(message_number);
-        let plaintext = cipher.decrypt(&nonce, ciphertext).map_err(|_| "Decryption failed".to_string())?;
+        let plaintext = match cipher.decrypt(&nonce, ciphertext) {
+            Ok(p) => p,
+            Err(_) => {
+                message_key.zeroize();
+                for (_, mut skipped) in pending.newly_skipped {
+                    skipped.zeroize();
+                }
+                return Err("Decryption failed".to_string());
+            }
+        };
         // bkz. `encrypt_next`'teki aynı not.
         message_key.zeroize();
+
+        // Kimlik doğrulama BAŞARILI — durum değişikliklerini şimdi kalıcı kıl.
+        let mut changes = SkippedKeyChanges::default();
+        if let Some(consumed) = pending.consumed_skipped {
+            self.skipped_keys.remove(&consumed);
+            changes.used.push(consumed);
+        }
+        for (num, key) in pending.newly_skipped {
+            self.skipped_keys.insert(num, key);
+            changes.added.push((num, key));
+        }
+        if let Some(new_num) = pending.new_recv_number {
+            self.recv_message_number = new_num;
+        }
+        if let Some(new_ck) = pending.new_ck_recv {
+            self.ck_recv = new_ck;
+        }
+
         Ok((plaintext, changes))
     }
 }

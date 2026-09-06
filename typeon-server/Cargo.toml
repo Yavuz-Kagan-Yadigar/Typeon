@@ -1,0 +1,72 @@
+[package]
+name = "typeon-server"
+version = "0.2.0"
+edition = "2021"
+description = "Typeon — blind store-and-forward server (mailbox, encrypted archive, attachment blobs)"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "typeon_server"
+# "cdylib": Android sunucu uygulaması (bkz. `p2p_messenger_android_server/`)
+# bunu cargo-ndk ile derleyip JNI üzerinden çağırır — istemci tarafındaki
+# `p2p_messenger` cdylib'iyle aynı desen.
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "typeon-server"
+path = "src/bin/typeon-server.rs"
+
+[dependencies]
+# Protokolün TEK tanımı — istemcinin gönderdiği tiplerin AYNISI. `Linux/`
+# masaüstü istemcisinin çekirdeği linklemesiyle aynı gerekçe: elle senkron
+# tutulacak ikinci bir kopya yok. Ayrıca `attachments` (dosya parçalarını
+# diskten okuyup servis etmek) ve `tor` (kendi onion service'ini barındırmak)
+# buradan geliyor.
+p2p_messenger_core = { path = "../p2p_messenger_android/app/src/main/cpp/rust" }
+
+# İstemcinin kullandığı SÜRÜMLERİN AYNISI olmak ZORUNDA: `ServerRequest`/
+# `FileChunkRequest` tipleri çekirdekten geliyor ve libp2p'nin
+# `request_response::cbor::Behaviour`'ına parametre olarak veriliyor — iki
+# farklı libp2p sürümü, aynı isimli ama FARKLI tipler demek olurdu ve
+# derlenmezdi. rusqlite için de aynı durum (`links = "sqlite3"` çakışması,
+# bkz. çekirdeğin Cargo.toml notu).
+libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "identify", "kad", "tokio", "macros", "dns", "request-response", "cbor", "relay", "autonat", "upnp"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+futures = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ciborium = "0.2"
+hex = "0.4"
+rand = "0.8"
+sha2 = "0.10"
+# Kayıt (enrollment) imzalarını doğrulamak için. İstemci BU SUNUCUYA ÖZEL
+# taze bir Ed25519 çifti üretir (cihaz kimlik anahtarını DEĞİL — bkz.
+# `ServerRequest::Enroll` notu), sunucu sadece doğrular.
+ed25519-dalek = "2"
+# Kayıt imzası, uygulamanın geri kalanıyla AYNI şekilde hibrit doğrulanır.
+# Sürüm/feature'lar çekirdekle birebir aynı olmak zorunda: `EncodedSignature`
+# gibi tipler protokolde taşınmıyor ama aynı kodlamayı üretmeleri gerekiyor
+# (ve >=0.1.0-rc.4 zorunluluğu — GHSA-5x2r-hc65-25f9 imza malleability'si —
+# aynen geçerli).
+ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
+log = "0.4"
+# Headless Linux daemon'ı için; Android tarafında `android_logger` devreye
+# girer (bkz. src/jni.rs).
+env_logger = "0.11"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+android_logger = "0.13"
+lazy_static = "1.4"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+# Sembol tablosu olmadan Android .so'ları üç katına çıkıyordu (25-34 MB
+# yerine ~10 MB; APK 183 MB yerine ~60 MB). Çekirdek crate'i de aynı sebeple
+# `strip = true` kullanıyor. Linux daemon'ında da tek zararı, panik
+# geri-izlemelerinin sembolsüz kalması — sunucu zaten yapılandırılmış
+# günlükleme (`env_logger`) üzerinden teşhis ediliyor.
+strip = true

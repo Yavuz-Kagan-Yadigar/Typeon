@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Typeon Server</string>
+    <string name="intro">Holds messages for your contacts while they are offline, and delivers them when they come back. It cannot read them: they arrive already end-to-end encrypted and sealed a second time.</string>
+
+    <string name="lbl_run_server">Run the server</string>
+    <string name="state_stopped">Stopped</string>
+    <string name="state_running_fmt">Running · Tor: %1$s</string>
+    <string name="state_no_address">No address yet — Tor is still bootstrapping (30–60s on first run). An invite has no use without one.</string>
+
+    <string name="lbl_address">Address</string>
+    <string name="lbl_invite">Join code</string>
+    <string name="lbl_invite_desc">One permanent code for everyone: scan it from Settings → Servers on a phone, or copy and paste it there. Unlimited people can join with the same code without asking you for anything — publish it once. Rotate it if it leaks; already-enrolled devices keep working.</string>
+    <string name="action_new_invite">Rotate code</string>
+    <string name="action_copy_invite">Copy code</string>
+    <string name="msg_invite_copied">Invite code copied</string>
+    <string name="msg_no_invite_yet">No address yet — wait for Tor to finish starting</string>
+    <string name="confirm_rotate_join_code">The current code stops working immediately. Anyone holding the old QR or link will not be able to join until you give them the new one. Devices that already enrolled are unaffected.</string>
+
+    <string name="lbl_devices">Enrolled devices</string>
+    <string name="device_row_fmt">%1$s… · %2$s</string>
+    <string name="action_revoke">Revoke</string>
+    <string name="dlg_revoke_title">Revoke this device?</string>
+    <string name="dlg_revoke_body">It will stop being able to deposit or fetch. Its messenger keeps working — it just falls back to peer-to-peer delivery.</string>
+
+    <string name="lbl_stats">Activity</string>
+    <string name="stats_fmt">Devices: %1$d\nStored: %2$d · Fetched: %3$d · File chunks served: %4$d\nDisk: %5$s</string>
+
+    <string name="lbl_options">Options</string>
+    <string name="lbl_tor_always">This server always hosts an onion service. That is the only way a phone behind carrier NAT is reachable at all — no port forwarding, no domain, no certificate — so it is not something to switch off.</string>
+    <string name="lbl_node">Also act as a relay and DHT node</string>
+    <string name="lbl_node_desc">Helps unrelated users find each other and connect. Independent of the mailbox: it carries live traffic blindly and stores nothing.</string>
+    <string name="action_battery">Exempt from battery optimisation</string>
+    <string name="msg_battery_already">Already exempt</string>
+    <string name="msg_battery_manual">Not available on this device — set it manually in Settings → Battery.</string>
+
+    <string name="notif_channel">Typeon Server</string>
+    <string name="notif_starting">Starting…</string>
+    <string name="notif_running">Server running</string>
+
+    <string name="footer_note">Android can still kill a foreground service under memory pressure. This app is meant for a spare phone left plugged in; for a server that must never miss anything, run the typeon-server daemon on a small VPS.</string>
+    <string name="lbl_storage">Storage location</string>
+    <string name="lbl_storage_desc">Attachments are stored here. Identity and Tor state always stay in internal storage.</string>
+    <string name="action_choose_storage">Choose storage</string>
+    <string name="dlg_storage_title">Move server storage</string>
+    <string name="dlg_storage_moving">Moving data…</string>
+    <string name="msg_storage_moved">Storage moved. Restarting the server.</string>
+    <string name="msg_storage_failed">Could not move: %1$s</string>
+    <string name="msg_storage_same">Already using this location.</string>
+    <string name="lbl_internal">Internal storage</string>
+    <string name="lbl_sdcard">SD card</string>
+    <string name="lbl_free_suffix">free</string>
+    <string name="lbl_external">External storage</string>
+    <string name="action_block">Block</string>
+    <string name="action_unblock">Unblock</string>
+    <string name="dlg_block_title">Block this device?</string>
+    <string name="dlg_block_body">Unlike revoking, a blocked device cannot come back even with a fresh invite code. You can undo this later.</string>
+</resources>

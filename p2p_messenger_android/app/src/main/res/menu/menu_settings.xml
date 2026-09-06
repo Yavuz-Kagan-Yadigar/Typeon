@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spec dışı, kullanıcı isteği: hızlı Tor/ağ bağlantısını kes/yeniden kur —
+     bkz. SettingsFragment (MenuProvider, sadece bu ekran RESUMED iken
+     görünür), util/AppRestarter.kt. MainActivity kendi özel bir toolbar
+     görünümü KULLANMIYOR (bkz. ChatActivity/GroupChatActivity'nin aksine),
+     bu yüzden burada standart sistem ActionBar'ının menü mekanizması
+     kullanılıyor. -->
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/action_tor_reconnect"
+        android:icon="@drawable/ic_tor_reconnect"
+        android:title="@string/action_tor_reconnect"
+        app:showAsAction="ifRoom" />
+</menu>

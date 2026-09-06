@@ -29,7 +29,7 @@ object NotificationHelper {
     fun createChannel(context: Context) {
         val channel = NotificationChannel(
             MESSAGE_CHANNEL_ID,
-            "Mesajlar",
+            "Messages",
             NotificationManager.IMPORTANCE_HIGH
         )
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -43,7 +43,55 @@ object NotificationHelper {
             putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, displayName)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        show(context, peerDeviceFingerprint.hashCode(), displayName, text, intent)
+        // Spec dışı, kullanıcı isteği: bildirim başlığı artık kişi/grup adı
+        // DEĞİL, her zaman uygulama adı ("Typeon") — kimin/nereden geldiği
+        // bilgisi gövdeye ("{isim}: mesaj" biçiminde) taşındı.
+        //
+        // Spec dışı, kullanıcı isteği (Ayarlar'daki "bildirimlerde mesajları
+        // göster" anahtarı, bkz. NotificationPrefs): kapalıyken gövde
+        // SADECE göndereni taşır, mesaj metni HİÇ yazılmaz.
+        val body = if (NotificationPrefs.showMessageText(context)) "$displayName: $text" else displayName
+        show(context, peerDeviceFingerprint.hashCode(), context.getString(R.string.app_name), body, intent)
+    }
+
+    /** Spec dışı (dış AI incelemesi düzeltmesi — AI2-G, self-revocation): bu
+     *  cihaz birincil cihaz tarafından iptal edildiğinde (kendi
+     *  DeviceRevokeNotice'ını aldı) yerel veri silinip onboarding'e dönülür;
+     *  bu, kullanıcıya NEDEN geri döndüğünü açıklayan tek seferlik bildirim.
+     *  Dokununca MainActivity (onboarding) açılır. */
+    fun showDeviceRevokedNotification(context: Context) {
+        val intent = Intent(context, com.p2p.messenger.MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        show(
+            context, "self_revoked".hashCode(),
+            context.getString(R.string.app_name),
+            context.getString(R.string.device_unlinked_notification),
+            intent
+        )
+    }
+
+    /**
+     * Kullanıcı kararı (2026-08-27): "yeni cihaz" uyarısı artık SESSİZ
+     * değil.
+     *
+     * Önceden bu uyarı yalnızca çekirdekteki bekleyenler listesine
+     * yazılıyor, arayüz de sadece ana ekran ÖN PLANDAYKEN saniyede bir
+     * sorarak fark ediyordu. Yani kullanıcı başka bir ekrandaysa ya da
+     * uygulama arka plandaysa uyarıyı hiç görmüyor, bu arada o kişiden
+     * gelen bütün mesajlar sessizce düşüyordu. Artık bildirim olarak da
+     * çıkıyor ve dokunulduğunda kabul/reddet/engelle penceresi açılıyor.
+     */
+    fun showDeviceAlertNotification(context: Context, contactName: String, shortCode: String) {
+        val intent = Intent(context, com.p2p.messenger.MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        show(
+            context, "device_alert".hashCode(),
+            context.getString(R.string.title_security_warning_dialog),
+            context.getString(R.string.notif_new_device_warning, contactName, shortCode),
+            intent
+        )
     }
 
     fun showGroupMessageNotification(context: Context, groupId: String, senderIdentityId: String, text: String) {
@@ -54,7 +102,70 @@ object NotificationHelper {
             putExtra(GroupChatActivity.EXTRA_GROUP_NAME, groupName)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        show(context, ("group:$groupId").hashCode(), groupName, "$senderName: $text", intent)
+        // bkz. `showMessageNotification` aynı notu — başlık her zaman
+        // uygulama adı, gövde göndereni (parantez içinde grup adıyla) taşır.
+        // "Mesajları göster" kapalıysa gönderen + grup görünür, metin GÖRÜNMEZ.
+        val body = if (NotificationPrefs.showMessageText(context)) {
+            "$senderName ($groupName): $text"
+        } else {
+            "$senderName ($groupName)"
+        }
+        show(context, ("group:$groupId").hashCode(), context.getString(R.string.app_name), body, intent)
+    }
+
+    /** Spec dışı, kullanıcı isteği: uygulama ön plana/ana ekrana her
+     *  girildiğinde TÜM mesaj bildirimlerini temizler — kullanıcı zaten
+     *  uygulamayı açtığından bildirim çubuğunda asılı kalmalarının bir
+     *  anlamı yok. `MainActivity.onResume`'dan çağrılır. */
+    fun clearAll(context: Context) {
+        context.getSystemService(NotificationManager::class.java).cancelAll()
+    }
+
+    /** Spec dışı, kullanıcı isteği: belirli bir 1:1 sohbet açıldığında
+     *  SADECE o kişiye ait bildirimi temizler (bkz. `showMessageNotification`
+     *  AYNI kimlik hesaplaması — `clearAll`'dan daha dar kapsamlı, ChatActivity
+     *  onResume'dan çağrılır). */
+    fun clearForPeer(context: Context, peerDeviceFingerprint: String) {
+        context.getSystemService(NotificationManager::class.java).cancel(peerDeviceFingerprint.hashCode())
+    }
+
+    /** bkz. `clearForPeer` aynı notu — grup sohbeti için. */
+    fun clearForGroup(context: Context, groupId: String) {
+        context.getSystemService(NotificationManager::class.java).cancel(("group:$groupId").hashCode())
+    }
+
+    /** Spec dışı, hata düzeltmesi (bkz. P2PService.maybeNotify "edit" kolu):
+     *  bir mesaj düzenlendiğinde, o kişi için ekranda HÂLÂ asılı bir
+     *  bildirim varsa yeni metinle günceller; yoksa (kullanıcı zaten görüp
+     *  kapatmışsa) YENİ bir bildirim oluşturmaz — düzenlemenin kendisi
+     *  bildirime değer bir "yeni mesaj" olayı değildir. */
+    fun updateMessageNotificationIfShowing(context: Context, peerDeviceFingerprint: String, newText: String) {
+        val id = peerDeviceFingerprint.hashCode()
+        if (!isNotificationActive(context, id)) return
+        showMessageNotification(context, peerDeviceFingerprint, newText)
+    }
+
+    /** bkz. `updateMessageNotificationIfShowing` aynı notu — grup için. */
+    fun updateGroupMessageNotificationIfShowing(context: Context, groupId: String, newText: String) {
+        val id = ("group:$groupId").hashCode()
+        if (!isNotificationActive(context, id)) return
+        // Gönderenin adı canlı düzenleme olayında taşınmıyor (bkz. Rust
+        // `group_edit` olayı) — mevcut bildirim zaten gönderen adını
+        // içerdiğinden, burada jenerik bir etiket yeterli.
+        val groupName = resolveGroupName(groupId) ?: groupId.take(8)
+        val intent = Intent(context, GroupChatActivity::class.java).apply {
+            putExtra(GroupChatActivity.EXTRA_GROUP_ID, groupId)
+            putExtra(GroupChatActivity.EXTRA_GROUP_NAME, groupName)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        // bkz. `showGroupMessageNotification` — aynı "mesajları göster" kuralı.
+        val body = if (NotificationPrefs.showMessageText(context)) "$groupName: $newText" else groupName
+        show(context, ("group:$groupId").hashCode(), context.getString(R.string.app_name), body, intent)
+    }
+
+    private fun isNotificationActive(context: Context, notificationId: Int): Boolean {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        return manager.activeNotifications.any { it.id == notificationId }
     }
 
     /** Aynı sohbetten gelen ardışık mesajlar aynı bildirim ID'sini paylaşır
@@ -65,13 +176,35 @@ object NotificationHelper {
             context, notificationId, contentIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        // Spec dışı, güvenlik denetimi düzeltmesi: bu uygulamanın TÜM amacı
+        // uçtan uca şifreleme olduğu halde, bildirimler çözülmüş mesaj
+        // METNİNİ hiçbir kilit ekranı gizleme/redaksiyonu olmadan
+        // gösteriyordu. Android'in cihaz genelindeki "kilit ekranında
+        // hassas bildirim içeriğini gizle" ayarı bunu KENDİ BAŞINA
+        // düzeltebilir, ama SADECE kullanıcı o ayarı elle bulup açtıysa —
+        // varsayılan olarak kapalı olabilen bir sistem ayarına güvenmek
+        // yerine, Signal'ın yaptığı gibi burada AÇIKÇA `VISIBILITY_PRIVATE`
+        // + içerik taşımayan bir `publicVersion` sağlıyoruz: sistem "hassas
+        // içeriği gizle" AÇIKSA, kilitli ekranda görünen tek şey "Yeni
+        // mesaj" + gönderenin adı olur, mesaj METNİ asla görünmez.
+        // Kilidi açık bir telefonda veya bu ayar KAPALIYSA davranış AYNI
+        // kalır (tam önizleme hâlâ gösterilir) — hiçbir özellik kaldırılmadı,
+        // sadece kilitli+hassas-gizli durumunda ek bir koruma katmanı eklendi.
+        val publicVersion = NotificationCompat.Builder(context, MESSAGE_CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText("New message")
+            .setSmallIcon(R.drawable.ic_notification)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
         val notification = NotificationCompat.Builder(context, MESSAGE_CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(text)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_notification)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicVersion)
             .build()
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.notify(notificationId, notification)

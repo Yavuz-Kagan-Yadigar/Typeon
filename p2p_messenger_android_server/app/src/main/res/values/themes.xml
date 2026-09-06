@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- İstemcinin temasıyla aynı taban (Material 3, gündüz/gece) — sunucu
+         uygulaması istemcinin kapsamlı tema/font özelleştirmelerini
+         taşımıyor, ihtiyacı yok. -->
+    <style name="Theme.TypeonServer" parent="Theme.Material3.DayNight">
+        <item name="android:statusBarColor">?attr/colorSurface</item>
+    </style>
+</resources>

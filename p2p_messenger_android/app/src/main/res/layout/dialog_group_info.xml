@@ -46,6 +46,8 @@
 
         </LinearLayout>
 
+        <!-- Spec dışı, kullanıcı isteği: kurucu için "Üyeleri Yönet" başlığı
+             (sadece "Üye Ekle" değil) — diğer üyeler için mevcut üye sayısı. -->
         <TextView
             android:id="@+id/txtGroupMemberCount"
             android:layout_width="wrap_content"
@@ -53,22 +55,26 @@
             android:layout_marginTop="20dp"
             android:textStyle="bold" />
 
-        <TextView
-            android:id="@+id/txtGroupMembers"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:textIsSelectable="true" />
-
-        <!-- Sadece kurucu görür. -->
+        <!-- Spec dışı, kullanıcı isteği: "Üye Ekle" artık EN ÜSTTE, listenin
+             ÜZERİNDE — sadece kurucu görür. -->
         <Button
             android:id="@+id/btnAddMemberToGroup"
             style="?attr/materialButtonOutlinedStyle"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="8dp"
             android:text="@string/lbl_add_member_to_group"
             android:visibility="gone" />
+
+        <!-- Spec dışı, kullanıcı isteği: her üyenin adı + (SADECE kurucu,
+             kendi satırı HARİÇ) doğrulamalı kaldırma düğmesi — bkz.
+             GroupChatActivity.showGroupInfoDialog / item_group_member.xml. -->
+        <LinearLayout
+            android:id="@+id/layoutMembersList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="vertical" />
 
     </LinearLayout>
 

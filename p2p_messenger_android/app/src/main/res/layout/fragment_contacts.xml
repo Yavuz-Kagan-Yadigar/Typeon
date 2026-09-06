@@ -18,7 +18,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Contacts"
+            android:text="@string/title_contacts"
             android:textSize="24sp"
             android:textStyle="bold"/>
 
@@ -81,13 +81,13 @@
                 android:id="@+id/btn_scan_qr"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Add Contact via QR"/>
+                android:text="@string/action_add_contact_qr"/>
             <Button
                 android:id="@+id/btn_manual_add"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
-                android:text="Manuel Ekle"/>
+                android:text="@string/title_add_manually"/>
 
         </LinearLayout>
 

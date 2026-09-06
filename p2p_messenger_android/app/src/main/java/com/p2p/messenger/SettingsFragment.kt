@@ -1,29 +1,50 @@
 package com.p2p.messenger
 
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.InputType
 import android.view.LayoutInflater
+import android.view.Menu
+import android.view.MenuInflater
+import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatDelegate
+import androidx.core.os.LocaleListCompat
+import androidx.core.view.MenuProvider
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.color.MaterialColors
 import com.google.android.material.switchmaterial.SwitchMaterial
+import com.p2p.messenger.ui.QrScanActivity
+import com.p2p.messenger.util.ArchiveKeyManager
 import com.p2p.messenger.service.P2PService
+import com.p2p.messenger.ui.PendingMessagesActivity
+import com.p2p.messenger.util.AppLock
+import com.p2p.messenger.util.AppRestarter
 import com.p2p.messenger.util.AvatarUtil
 import com.p2p.messenger.util.ImagePreview
+import com.p2p.messenger.util.NotificationPrefs
 import com.p2p.messenger.util.ThemePrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 
 class SettingsFragment : Fragment() {
@@ -35,9 +56,90 @@ class SettingsFragment : Fragment() {
          *  fotoğrafı tam ekran/daha büyük gösterilebilir). */
         private const val AVATAR_MAX_DIMENSION = 720
         private const val AVATAR_JPEG_QUALITY = 85
+
+        /** bkz. `onChatWallpaperPicked` — avatardan daha büyük (tam ekran
+         *  arka plan olarak gösterilecek), ama yine de makul bir üst sınır. */
+        private const val WALLPAPER_MAX_DIMENSION = 1080
+        private const val WALLPAPER_JPEG_QUALITY = 80
+
+        /** Spec dışı, kullanıcı isteği: geçmiş/ek depolama sınırı slider'ı
+         *  — 100MB'dan 32GB'a, ayrık adımlarla (Slider valueFrom=0..8). */
+        private val HISTORY_STORAGE_LIMIT_STEPS_BYTES = longArrayOf(
+            100L * 1024 * 1024,
+            250L * 1024 * 1024,
+            500L * 1024 * 1024,
+            1L * 1024 * 1024 * 1024,
+            2L * 1024 * 1024 * 1024,
+            4L * 1024 * 1024 * 1024,
+            8L * 1024 * 1024 * 1024,
+            16L * 1024 * 1024 * 1024,
+            32L * 1024 * 1024 * 1024
+        )
+
+        private fun formatStorageLimit(bytes: Long): String = when {
+            bytes >= 1024L * 1024 * 1024 -> {
+                val gb = bytes.toDouble() / (1024 * 1024 * 1024)
+                if (gb == gb.toLong().toDouble()) "${gb.toLong()} GB" else "%.2f GB".format(gb)
+            }
+            else -> "${bytes / (1024 * 1024)} MB"
+        }
+
+        private fun closestStepIndex(bytes: Long): Int {
+            var bestIndex = 0
+            var bestDiff = Long.MAX_VALUE
+            for (i in HISTORY_STORAGE_LIMIT_STEPS_BYTES.indices) {
+                val diff = kotlin.math.abs(HISTORY_STORAGE_LIMIT_STEPS_BYTES[i] - bytes)
+                if (diff < bestDiff) {
+                    bestDiff = diff
+                    bestIndex = i
+                }
+            }
+            return bestIndex
+        }
+
+        /**
+         * Spec dışı, hata düzeltmesi (gerçek cihaz çökmesi: "Value(1.24375)
+         * must be equal to valueFrom(0.85) plus a multiple of stepSize(0.05)"):
+         * metin/arayüz boyutu kaydırıcıları önceden ÇIPLAK bir ondalık
+         * `stepSize` (0.05f) kullanıyordu — 0.05 ikili kayan noktada TAM
+         * temsil edilemez, bu yüzden Material Slider'ın kendi iç
+         * `validateValues()` kontrolü (her `onSizeChanged`'da çalışır),
+         * SharedPreferences'tan geri okunan/tekrar atanan bir değerin
+         * "valueFrom + N×stepSize" olup olmadığını doğrularken küçük bir
+         * kayan nokta sapmasında bile `IllegalStateException` fırlatıp
+         * uygulamayı ÇÖKERTİYORDU. Çözüm: `history_storage_limit_slider`
+         * (bkz. yukarısı) ile AYNI desen — kaydırıcı SADECE TAM SAYI
+         * indeksler üzerinde çalışır (`valueFrom=0, stepSize=1`, kayan
+         * nokta hassasiyeti SÖZ KONUSU BİLE DEĞİL), gerçek ölçek değeri bu
+         * sabit dizilerden indekslenir.
+         */
+        private val TEXT_SCALE_STEPS = floatArrayOf(
+            0.70f, 0.75f, 0.80f, 0.85f, 0.90f, 0.95f, 1.00f, 1.05f, 1.10f, 1.15f,
+            1.20f, 1.25f, 1.30f, 1.35f, 1.40f, 1.45f, 1.50f, 1.55f, 1.60f
+        )
+        private val UI_SCALE_STEPS = floatArrayOf(
+            0.75f, 0.80f, 0.85f, 0.90f, 0.95f, 1.00f, 1.05f, 1.10f, 1.15f, 1.20f, 1.25f, 1.30f
+        )
+
+        private fun closestStepIndex(steps: FloatArray, value: Float): Int {
+            var bestIndex = 0
+            var bestDiff = Float.MAX_VALUE
+            for (i in steps.indices) {
+                val diff = kotlin.math.abs(steps[i] - value)
+                if (diff < bestDiff) {
+                    bestDiff = diff
+                    bestIndex = i
+                }
+            }
+            return bestIndex
+        }
     }
 
     private lateinit var imgOwnAvatar: ImageView
+    /** bkz. `imgOwnAvatar` tıklama dinleyicisi — tam ekran görüntüleyiciye
+     *  taşınacak ham profil fotoğrafı baytları (bkz. AvatarUtil.openFullscreen). */
+    private var ownAvatarBytes: ByteArray? = null
+    private var displayNameValue: TextView? = null
 
     /** Spec dışı, kullanıcı isteği (Tor): durum etiketi + periyodik yoklama. */
     private var torStatusView: TextView? = null
@@ -57,16 +159,52 @@ class SettingsFragment : Fragment() {
         uri?.let { onAvatarPicked(it) }
     }
 
+    /** bkz. `onChatWallpaperPicked` — `pickAvatarLauncher` ile AYNI desen. */
+    private val pickWallpaperLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { onChatWallpaperPicked(it) }
+    }
+
+    /**
+     * Spec dışı, güvenlik denetimi düzeltmesi: Rust tarafı (`export_recovery`,
+     * Argon2id ile sertleştirilmiş — bkz. SECURITY.md §6) daha önce hiçbir
+     * ekrandan tetiklenemiyordu. Kullanıcının parolayı SAF (Storage Access
+     * Framework, `CreateDocument`) ile seçtiği hedefe yazmadan HEMEN önce
+     * `showExportRecoveryDialog`'da geçici olarak burada tutulur — bu dosya
+     * TÜM uzun-vadeli kimlik anahtarlarını taşıdığından, hedef kullanıcının
+     * KENDİSİNİN seçtiği bir konum olmalı (WRITE_EXTERNAL_STORAGE izni
+     * gerektirmeyen, herhangi bir API seviyesinde tekdüze çalışan tek yol).
+     */
+    private var pendingRecoveryPassphrase: String? = null
+
+    private val createRecoveryFileLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        val passphrase = pendingRecoveryPassphrase
+        pendingRecoveryPassphrase = null
+        if (uri == null || passphrase == null) return@registerForActivityResult
+        exportRecoveryTo(uri, passphrase)
+    }
+
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
         val view = inflater.inflate(R.layout.fragment_settings, container, false)
 
         imgOwnAvatar = view.findViewById(R.id.img_own_avatar)
         refreshOwnAvatar()
+        // Spec dışı, kullanıcı isteği: profil fotoğrafına dokununca tam
+        // ekran + pinch-to-zoom açar (bkz. AvatarUtil.openFullscreen).
+        imgOwnAvatar.setOnClickListener { AvatarUtil.openFullscreen(requireContext(), ownAvatarBytes) }
         view.findViewById<Button>(R.id.btn_change_picture).setOnClickListener {
+            AppLock.beginTrustedExcursion()
             pickAvatarLauncher.launch(arrayOf("image/*"))
         }
         view.findViewById<Button>(R.id.btn_remove_picture).setOnClickListener {
             setOwnAvatar(null)
+        }
+
+        // Kullanıcı isteği (2026-09-04): hesap adı — bkz.
+        // `showChangeDisplayNameDialog`.
+        displayNameValue = view.findViewById(R.id.display_name_value)
+        refreshDisplayName()
+        view.findViewById<Button>(R.id.btn_change_display_name).setOnClickListener {
+            showChangeDisplayNameDialog()
         }
 
         val identityCodeValue = view.findViewById<android.widget.TextView>(R.id.identity_code_value)
@@ -78,8 +216,35 @@ class SettingsFragment : Fragment() {
 
         val nodeModeSwitch = view.findViewById<SwitchMaterial>(R.id.node_mode_switch)
         nodeModeSwitch.isChecked = P2PService.isNodeModeEnabled(requireContext())
+
+        val historyStorageLimitLabel = view.findViewById<TextView>(R.id.history_storage_limit_label)
+        val historyStorageLimitDesc = view.findViewById<TextView>(R.id.history_storage_limit_desc)
+        val historyStorageLimitValue = view.findViewById<TextView>(R.id.history_storage_limit_value)
+        val historyStorageLimitSlider = view.findViewById<com.google.android.material.slider.Slider>(R.id.history_storage_limit_slider)
+
+        fun setHistoryStorageLimitVisible(visible: Boolean) {
+            val v = if (visible) View.VISIBLE else View.GONE
+            historyStorageLimitLabel.visibility = v
+            historyStorageLimitDesc.visibility = v
+            historyStorageLimitValue.visibility = v
+            historyStorageLimitSlider.visibility = v
+        }
+
+        val currentLimitBytes = P2PService.getHistoryStorageLimitBytes(requireContext())
+        historyStorageLimitSlider.value = closestStepIndex(currentLimitBytes).toFloat()
+        historyStorageLimitValue.text = formatStorageLimit(HISTORY_STORAGE_LIMIT_STEPS_BYTES[closestStepIndex(currentLimitBytes)])
+        setHistoryStorageLimitVisible(nodeModeSwitch.isChecked)
+        historyStorageLimitSlider.addOnChangeListener { _, value, fromUser ->
+            val bytes = HISTORY_STORAGE_LIMIT_STEPS_BYTES[value.toInt()]
+            historyStorageLimitValue.text = formatStorageLimit(bytes)
+            if (fromUser) {
+                P2PService.setHistoryStorageLimitBytes(requireContext(), bytes)
+            }
+        }
+
         nodeModeSwitch.setOnCheckedChangeListener { _, isChecked ->
             P2PService.setNodeModeEnabled(requireContext(), isChecked)
+            setHistoryStorageLimitVisible(isChecked)
         }
 
         // Spec dışı, kullanıcı isteği: Tor onion service — CGNAT arkasında da
@@ -118,16 +283,13 @@ class SettingsFragment : Fragment() {
             }
         }
 
-        // OLED siyah: ThemeOverlay Activity oluşturulmadan önce (bkz.
-        // P2PApplication.onActivityPreCreated) uygulandığından, tercih
-        // değiştiğinde geçerli olması için Activity'nin yeniden
-        // oluşturulması (recreate) gerekiyor.
-        val oledBlackSwitch = view.findViewById<SwitchMaterial>(R.id.oled_black_switch)
-        oledBlackSwitch.isChecked = ThemePrefs.isOledBlackEnabled(requireContext())
-        oledBlackSwitch.setOnCheckedChangeListener { _, isChecked ->
-            ThemePrefs.setOledBlackEnabled(requireContext(), isChecked)
-            requireActivity().recreate()
-        }
+        setupServers(view)
+
+        setupAppearanceControls(view)
+        setupLanguageControl(view)
+        setupChatAppearanceControls(view)
+        setupNotificationControls(view)
+        setupAppLockControls(view)
 
         // Anahtarların donanım güvenlik modülünde (StrongBox/TEE) tutulup
         // tutulmadığını göster — kullanıcıya somut bir güvenlik göstergesi.
@@ -138,7 +300,650 @@ class SettingsFragment : Fragment() {
             getString(R.string.lbl_keys_software_backed)
         }
 
+        // bkz. `pendingRecoveryPassphrase`/`createRecoveryFileLauncher`
+        // dokümantasyonu — daha önce hiçbir ekranda erişilemeyen kurtarma
+        // dosyası dışa aktarma akışının tetiği.
+        view.findViewById<Button>(R.id.btn_export_recovery).setOnClickListener {
+            showExportRecoveryDialog()
+        }
+
+        // Spec dışı, kullanıcı isteği: bekleyen (henüz ack alınmamış)
+        // mesajlar listesi — bkz. ui.PendingMessagesActivity.
+        view.findViewById<Button>(R.id.btn_pending_messages).setOnClickListener {
+            startActivity(Intent(requireContext(), PendingMessagesActivity::class.java))
+        }
+
+        // Çoklu-cihaz (spec 1.5): bağlı cihazları yönet / yeni cihaz ekle.
+        view.findViewById<Button>(R.id.btn_linked_devices).setOnClickListener {
+            showLinkedDevicesDialog()
+        }
+
+        // Spec dışı, kullanıcı isteği: hesaptan çıkış — bkz. `confirmLogout`.
+        view.findViewById<Button>(R.id.btn_logout).setOnClickListener {
+            confirmLogout()
+        }
+
         return view
+    }
+
+    /**
+     * Spec dışı, kullanıcı isteği: kullanıcı gerçek bir cihazda "İkincil
+     * cihaz olarak bağlan" akışında (`LinkDeviceActivity`) bir çökme
+     * yaşadı — çökme ANINDAN önce kimlik zaten diske yazılmıştı
+     * (`createIdentityAndStart` -> `IdentityManager.persistNewIdentity`
+     * `startActivity`'den ÖNCE çalışır), bu yüzden bir sonraki açılışta
+     * `MainActivity.onCreate` `hasStoredIdentity()==true` görüp bu yarım
+     * kalmış/eşleşmemiş kimlikle normal (yalnız) bir hesap gibi devam
+     * ediyordu — kullanıcının baştan başlamasının hiçbir yolu yoktu. Bu,
+     * o kilitlenmeden çıkış için genel bir "çıkış yap" kapısı: yerel
+     * kimlik/mesaj/kişi verisini SİLER (bkz. `performLogout`) ve
+     * `AppRestarter` ile temiz bir süreçte yeniden başlatır — bu da
+     * `MainActivity`'yi `hasStoredIdentity()==false` görüp yeniden
+     * `showDeviceNameDialog()`'a düşürür.
+     */
+    private fun confirmLogout() {
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.logout_confirm_title)
+            .setMessage(R.string.logout_confirm_message)
+            .setPositiveButton(R.string.action_logout_confirm) { _, _ -> performLogout() }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Bu cihazdaki TÜM kalıcı kimlik/mesaj verisini siler: SQLite DB
+     * (+ WAL/SHM yardımcı dosyaları), şifreli secret key bundle'ı
+     * (`identity_secret.enc`), Keystore ile sarılmış DİĞER kimlik
+     * anahtarları (geçmiş/skipped-key/ARK — bkz. [com.p2p.messenger.util.LocalWipe],
+     * bu üçü burada ATLANIYORDU) ve ek (attachment) depolama dizini. Rust
+     * çekirdeği bunları süreç İÇİNDE güvenle "unutacak" doğrulanmış bir
+     * yola sahip değil (bkz. `AppRestarter` dokümantasyonu — AYNI gerekçe:
+     * canlı bir süreçte kimlik/ağ durumunu sıfırlamak yerine dosyaları
+     * silip TEMİZ bir süreçte yeniden başlamak). Görünüm/tema tercihleri
+     * (`ThemePrefs`) kasıtlı olarak dokunulmadan bırakılır — kimliğe değil
+     * cihaza ait, silinmeleri kullanıcı için bir kazanç sağlamaz.
+     */
+    private fun performLogout() {
+        com.p2p.messenger.util.LocalWipe.wipe(requireContext())
+        AppRestarter.restart(requireContext())
+    }
+
+    /**
+     * Çoklu-cihaz (spec 1.5/1.6): kimliğe bağlı cihazları listeler, yeni bir
+     * cihaz eklemeye (QR tarayarak) ve bir kardeş cihazı iptal etmeye izin
+     * verir. "Cihaz ekle" akışı: DİĞER (yeni) cihazda "İkincil cihaz olarak
+     * bağlan" seçilip bir QR gösterilir; BU (var olan) cihaz o QR'ı tarar.
+     */
+    private fun showLinkedDevicesDialog() {
+        val json = try { P2PLib.listLinkedDevices() } catch (e: Exception) { "[]" }
+        val arr = try { org.json.JSONArray(json) } catch (e: Exception) { org.json.JSONArray() }
+        val labels = ArrayList<String>()
+        val fingerprints = ArrayList<String?>()
+        val thisDevice = getString(R.string.linked_devices_this_device)
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            val name = o.optString("device_name").ifEmpty { o.optString("device_fingerprint").take(8) }
+            val isThis = o.optBoolean("is_this_device", false)
+            val isActive = o.optBoolean("is_active", true)
+            val suffix = when {
+                isThis -> " ($thisDevice)"
+                !isActive -> " (${getString(R.string.linked_devices_revoked)})"
+                else -> ""
+            }
+            labels.add(name + suffix)
+            fingerprints.add(if (isThis || !isActive) null else o.optString("device_fingerprint"))
+        }
+
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.linked_devices_section_title)
+            .setItems(labels.toTypedArray()) { _, which ->
+                val fp = fingerprints.getOrNull(which)
+                if (fp != null) confirmRevokeLinkedDevice(fp)
+            }
+            .setPositiveButton(R.string.linked_devices_add) { _, _ ->
+                startActivity(
+                    Intent(requireContext(), com.p2p.messenger.ui.QrScanActivity::class.java).apply {
+                        putExtra(com.p2p.messenger.ui.QrScanActivity.EXTRA_MODE,
+                            com.p2p.messenger.ui.QrScanActivity.MODE_LINK_APPROVE)
+                    }
+                )
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun confirmRevokeLinkedDevice(fingerprint: String) {
+        AlertDialog.Builder(requireContext())
+            .setMessage(R.string.linked_devices_confirm_revoke)
+            .setPositiveButton(R.string.action_revoke_device) { _, _ ->
+                val result = try { P2PLib.revokeLinkedDevice(fingerprint) } catch (e: Exception) { "Error: ${e.message}" }
+                Toast.makeText(requireContext(),
+                    if (result.startsWith("Error:")) result else getString(R.string.msg_device_revoked),
+                    Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Spec dışı, kullanıcı isteği: metin boyutu/arayüz boyutu kaydırıcıları
+     * + sistem fontu seçici — bkz. `ThemePrefs`/`P2PApplication.applyScalePreferences`
+     * (her ikisi de `onActivityPreCreated`'da, Activity daha `onCreate`
+     * ÇALIŞMADAN önce uygulanır). OLED anahtarıyla AYNI sebep: değişiklik
+     * ancak bir sonraki Activity oluşturmasında etkinleşir, bu yüzden HER
+     * ÜÇÜ de değer serbest bırakıldığında (kaydırıcı) / seçildiğinde
+     * (dropdown) `requireActivity().recreate()` çağırır — kaydırma
+     * SIRASINDA değil (aksi hâlde saniyede onlarca gereksiz recreate
+     * olurdu), sadece SONUÇ değerinde.
+     */
+    private fun setupAppearanceControls(view: View) {
+        val textScaleValue = view.findViewById<TextView>(R.id.text_scale_value)
+        val textScaleSlider = view.findViewById<com.google.android.material.slider.Slider>(R.id.text_scale_slider)
+        // bkz. `TEXT_SCALE_STEPS`/`closestStepIndex` dokümantasyonu — TAM
+        // SAYI indeks (kayan nokta `stepSize` DEĞİL), gerçek Material
+        // Slider çökmesini (bkz. o notun ayrıntısı) kökünden önler.
+        textScaleSlider.valueFrom = 0f
+        textScaleSlider.valueTo = (TEXT_SCALE_STEPS.size - 1).toFloat()
+        textScaleSlider.stepSize = 1f
+        val currentTextScale = ThemePrefs.getTextScale(requireContext())
+        textScaleSlider.value = closestStepIndex(TEXT_SCALE_STEPS, currentTextScale).toFloat()
+        textScaleValue.text = formatScalePercent(TEXT_SCALE_STEPS[closestStepIndex(TEXT_SCALE_STEPS, currentTextScale)])
+        textScaleSlider.addOnChangeListener { _, value, _ ->
+            textScaleValue.text = formatScalePercent(TEXT_SCALE_STEPS[value.toInt()])
+        }
+        textScaleSlider.addOnSliderTouchListener(object : com.google.android.material.slider.Slider.OnSliderTouchListener {
+            override fun onStartTrackingTouch(slider: com.google.android.material.slider.Slider) {}
+            override fun onStopTrackingTouch(slider: com.google.android.material.slider.Slider) {
+                ThemePrefs.setTextScale(requireContext(), TEXT_SCALE_STEPS[slider.value.toInt()])
+                requireActivity().recreate()
+            }
+        })
+
+        val uiScaleValue = view.findViewById<TextView>(R.id.ui_scale_value)
+        val uiScaleSlider = view.findViewById<com.google.android.material.slider.Slider>(R.id.ui_scale_slider)
+        uiScaleSlider.valueFrom = 0f
+        uiScaleSlider.valueTo = (UI_SCALE_STEPS.size - 1).toFloat()
+        uiScaleSlider.stepSize = 1f
+        val currentUiScale = ThemePrefs.getUiScale(requireContext())
+        uiScaleSlider.value = closestStepIndex(UI_SCALE_STEPS, currentUiScale).toFloat()
+        uiScaleValue.text = formatScalePercent(UI_SCALE_STEPS[closestStepIndex(UI_SCALE_STEPS, currentUiScale)])
+        uiScaleSlider.addOnChangeListener { _, value, _ ->
+            uiScaleValue.text = formatScalePercent(UI_SCALE_STEPS[value.toInt()])
+        }
+        uiScaleSlider.addOnSliderTouchListener(object : com.google.android.material.slider.Slider.OnSliderTouchListener {
+            override fun onStartTrackingTouch(slider: com.google.android.material.slider.Slider) {}
+            override fun onStopTrackingTouch(slider: com.google.android.material.slider.Slider) {
+                ThemePrefs.setUiScale(requireContext(), UI_SCALE_STEPS[slider.value.toInt()])
+                requireActivity().recreate()
+            }
+        })
+
+        // bkz. ThemePrefs.FontChoice — sırası buradaki görünen isim listesiyle
+        // BİREBİR eşleşmeli (index bazlı eşleme).
+        val fontChoices = ThemePrefs.FontChoice.entries
+        val fontLabels = arrayOf(
+            getString(R.string.lbl_font_default),
+            getString(R.string.lbl_font_sans_medium),
+            getString(R.string.lbl_font_sans_condensed),
+            getString(R.string.lbl_font_serif),
+            getString(R.string.lbl_font_monospace),
+            getString(R.string.lbl_font_sans_black)
+        )
+        // Spec dışı, hata düzeltmesi (ikinci deneme — "comboboxta hâlâ
+        // sadece Default görünüyor"): `MaterialAutoCompleteTextView` +
+        // `setSimpleItems` teoride filtrelenmemesi GEREKEN bir liste
+        // vermeliydi, ama kullanıcı gerçek cihazda hâlâ tek seçenek
+        // gördüğünü bildirdi — bu View'ın (exposed dropdown popup'ının
+        // açılma/gösterim mantığı) bu ortamda hiç test edilemediğinden,
+        // TAMAMEN farklı ve kırılması çok daha zor bir mekanizmaya
+        // geçiliyor: düz bir `Button` + `AlertDialog.setSingleChoiceItems`.
+        // Bu, listeleme/filtreleme gibi hiçbir "akıllı" davranışa sahip
+        // değil — TÜM seçenekler HER ZAMAN gösterilir.
+        //
+        // BİLİNEN SINIR: bu liste sadece Android'in HER cihazda var olması
+        // GARANTİ jenerik takma adlarını (`sans-serif`, `serif`,
+        // `monospace` + ağırlık/genişlik varyantları) sunar — cihaz
+        // üreticisinin (ör. Samsung/Xiaomi) Ayarlar'da gösterdiği MARKALI/
+        // İNDİRİLMİŞ font adlarını (ör. "One UI Sans", indirilen bir Google
+        // Fonts ailesi) numaralandırıp listelemenin genel, resmi bir
+        // Android API'si YOK — bu yüzden burada asla görünmeyecekler.
+        // "Varsayılan" seçeneği yine de cihazın O ANKİ sistem varsayılanını
+        // (kullanıcı üretici ayarlarından değiştirmiş olsa BİLE) kullanır,
+        // çünkü hiçbir override UYGULAMAZ.
+        val fontValueText = view.findViewById<TextView>(R.id.font_family_value)
+        fun currentFontLabel(): String {
+            val choice = ThemePrefs.getFontChoice(requireContext())
+            return fontLabels[fontChoices.indexOf(choice).coerceAtLeast(0)]
+        }
+        fontValueText.text = currentFontLabel()
+        view.findViewById<Button>(R.id.btn_pick_font).setOnClickListener {
+            val currentIndex = fontChoices.indexOf(ThemePrefs.getFontChoice(requireContext())).coerceAtLeast(0)
+            AlertDialog.Builder(requireContext())
+                .setTitle(R.string.lbl_font_family)
+                .setSingleChoiceItems(fontLabels, currentIndex) { dialog, position ->
+                    val chosen = fontChoices[position]
+                    if (chosen != ThemePrefs.getFontChoice(requireContext())) {
+                        ThemePrefs.setFontChoice(requireContext(), chosen)
+                        fontValueText.text = fontLabels[position]
+                        // Spec dışı, kullanıcı isteği ("force font on all UI"):
+                        // bkz. `FontOverride` dokümantasyonu — Android'in
+                        // varsayılan Typeface'ini HEMEN değiştirir
+                        // (P2PApplication.onCreate sadece SÜREÇ başlangıcında
+                        // çalışır, bu çağrı olmadan değişiklik ancak bir
+                        // sonraki tam uygulama yeniden başlatmasında
+                        // görülürdü). `recreate()` bunun ardından bu
+                        // Activity'yi hemen yeniden çizer, ARTIK güncellenmiş
+                        // varsayılan Typeface'le.
+                        com.p2p.messenger.util.FontOverride.apply(chosen.familyName)
+                        requireActivity().recreate()
+                    }
+                    dialog.dismiss()
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+    }
+
+    /**
+     * Spec dışı, kullanıcı isteği: "bildirimlerde mesajları göster"
+     * anahtarı — varsayılan AÇIK. Kapalıyken bildirimde sadece gönderen
+     * (grup mesajıysa gönderen + grup) görünür, metin görünmez. bkz.
+     * util.NotificationPrefs / NotificationHelper.
+     */
+    private fun setupNotificationControls(view: View) {
+        val notifSwitch = view.findViewById<SwitchMaterial>(R.id.notif_show_message_switch)
+        notifSwitch.isChecked = NotificationPrefs.showMessageText(requireContext())
+        notifSwitch.setOnCheckedChangeListener { _, checked ->
+            NotificationPrefs.setShowMessageText(requireContext(), checked)
+        }
+    }
+
+    /**
+     * Spec dışı, kullanıcı isteği: uygulama açılış şifresi — buradan
+     * yalnızca DEĞİŞTİRİLEBİLİR. Kaldırma seçeneği BİLEREK yok ("şifre asla
+     * boş olmamalı"); boş bir yeni şifre de kabul edilmez.
+     *
+     * Mevcut şifre doğrulaması `AppLock.verify` ile yapılıyor — kilitli
+     * olmayan bir oturumda (kullanıcı zaten içeride) telefonu kısa süre
+     * eline geçiren birinin şifreyi sessizce değiştirmesini engeller.
+     * `AppLock.verify`/`setPassword` kasıtlı olarak yavaş bir KDF çalıştırır
+     * (bkz. AppLock.ITERATIONS), bu yüzden ana thread DIŞINDA çağrılıyor.
+     */
+    private fun setupAppLockControls(view: View) {
+        view.findViewById<Button>(R.id.btn_change_app_password).setOnClickListener {
+            val context = requireContext()
+            val container = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                val pad = (20 * resources.displayMetrics.density).toInt()
+                setPadding(pad, pad / 2, pad, 0)
+            }
+            fun passwordField(hintRes: Int) = EditText(context).apply {
+                hint = getString(hintRes)
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            }
+            // Şifre henüz hiç kurulmamışsa (ör. bu sürüme yükseltilmiş eski
+            // bir kurulum, kilit ekranını henüz görmemiş) "mevcut şifre"
+            // alanını sormanın anlamı yok.
+            val hasExisting = AppLock.hasPassword(context)
+            val currentField = passwordField(R.string.hint_app_lock_current)
+            val newField = passwordField(R.string.hint_app_lock_new)
+            val confirmField = passwordField(R.string.hint_app_lock_password_confirm)
+            if (hasExisting) container.addView(currentField)
+            container.addView(newField)
+            container.addView(confirmField)
+
+            AlertDialog.Builder(context)
+                .setTitle(R.string.action_change_app_password)
+                .setView(container)
+                .setPositiveButton(R.string.action_app_lock_save) { _, _ ->
+                    val newPassword = newField.text.toString()
+                    if (newPassword.isBlank()) {
+                        Toast.makeText(context, R.string.error_app_lock_empty, Toast.LENGTH_LONG).show()
+                        return@setPositiveButton
+                    }
+                    if (newPassword != confirmField.text.toString()) {
+                        Toast.makeText(context, R.string.error_app_lock_mismatch, Toast.LENGTH_LONG).show()
+                        return@setPositiveButton
+                    }
+                    val current = currentField.text.toString()
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        val currentOk = !hasExisting || AppLock.verify(context, current)
+                        if (currentOk) AppLock.setPassword(context, newPassword)
+                        withContext(Dispatchers.Main) {
+                            val messageRes = if (currentOk) {
+                                R.string.msg_app_lock_changed
+                            } else {
+                                R.string.error_app_lock_wrong
+                            }
+                            Toast.makeText(context, messageRes, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+    }
+
+    /** Language picker (English/Turkish). AppCompatDelegate.setApplicationLocales
+     *  persists the choice itself (see AndroidManifest AppLocalesMetadataHolderService)
+     *  and recreates all activities; the explicit recreate() below matches this
+     *  screen's own font/color pickers for immediate visual feedback. */
+    private fun setupLanguageControl(view: View) {
+        val languageCodes = arrayOf("en", "tr")
+        val languageLabels = arrayOf("English", "Türkçe")
+        val languageValueText = view.findViewById<TextView>(R.id.language_value)
+        fun currentLanguageIndex(): Int {
+            val current = AppCompatDelegate.getApplicationLocales().toLanguageTags()
+            return languageCodes.indexOfFirst { current.startsWith(it) }.coerceAtLeast(0)
+        }
+        languageValueText.text = languageLabels[currentLanguageIndex()]
+        view.findViewById<Button>(R.id.btn_pick_language).setOnClickListener {
+            AlertDialog.Builder(requireContext())
+                .setTitle(R.string.lbl_language)
+                .setSingleChoiceItems(languageLabels, currentLanguageIndex()) { dialog, position ->
+                    AppCompatDelegate.setApplicationLocales(LocaleListCompat.forLanguageTags(languageCodes[position]))
+                    dialog.dismiss()
+                    requireActivity().recreate()
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+    }
+
+    private fun formatScalePercent(scale: Float): String = getString(R.string.lbl_scale_percent, (scale * 100).toInt())
+
+    /**
+     * Spec dışı, kullanıcı isteği: TEK bir vurgu (accent) rengi — HER YERDE
+     * (düğmeler, anahtarlar, kaydırıcılar, KENDİ mesaj balonlarımız)
+     * varyasyonlarıyla (bkz. `ThemePrefs.applyAccentColor` — Material'ın
+     * content-based dynamic color motoru) kullanılır; metin rengi AYRICA
+     * seçilmez, HER ZAMAN o rengin üzerinde okunaklı siyah/beyaz otomatik
+     * hesaplanır. Arka plan rengi ise hem genel UI hem sohbet ekranı için
+     * GEÇERLİ (bkz. `ThemePrefs.applyGlobalBackground`/`applyChatBackground`).
+     * Renk seçici tam bir HSV seçici (bkz. `HsvColorPickerDialog`) — harici
+     * bir kütüphane GEREKTİRMEZ (bu proje build'i bu ortamda
+     * doğrulanamadığından yeni bir Gradle bağımlılığı eklemekten kaçınıyoruz).
+     * Her iki renk de (accent VE background) tüm uygulamanın temasını
+     * değiştirdiğinden — OLED/font gibi — seçim SONRASI `recreate()` gerekir.
+     */
+    private fun setupChatAppearanceControls(view: View) {
+        val bgSwatch = view.findViewById<View>(R.id.chat_bg_color_swatch)
+        val accentSwatch = view.findViewById<View>(R.id.accent_color_swatch)
+        val wallpaperThumb = view.findViewById<ImageView>(R.id.chat_wallpaper_thumb)
+        val btnRemoveWallpaper = view.findViewById<Button>(R.id.btn_remove_chat_wallpaper)
+
+        fun swatchDrawable(color: Int?): android.graphics.drawable.Drawable {
+            return android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(color ?: MaterialColors.getColor(bgSwatch, com.google.android.material.R.attr.colorSurfaceVariant))
+                setStroke((1.5f * resources.displayMetrics.density).toInt(), MaterialColors.getColor(bgSwatch, com.google.android.material.R.attr.colorOutline))
+            }
+        }
+
+        fun refreshSwatches() {
+            bgSwatch.background = swatchDrawable(ThemePrefs.getChatBackgroundColor(requireContext()))
+            accentSwatch.background = swatchDrawable(ThemePrefs.getAccentColor(requireContext()))
+        }
+
+        fun refreshWallpaperPreview() {
+            val file = ThemePrefs.chatWallpaperFile(requireContext())
+            if (file.exists()) {
+                wallpaperThumb.setImageBitmap(android.graphics.BitmapFactory.decodeFile(file.absolutePath))
+                wallpaperThumb.visibility = View.VISIBLE
+                btnRemoveWallpaper.visibility = View.VISIBLE
+            } else {
+                wallpaperThumb.visibility = View.GONE
+                btnRemoveWallpaper.visibility = View.GONE
+            }
+        }
+
+        refreshSwatches()
+        refreshWallpaperPreview()
+
+        view.findViewById<Button>(R.id.btn_pick_chat_bg_color).setOnClickListener {
+            com.p2p.messenger.util.HsvColorPickerDialog.show(
+                requireContext(), R.string.title_pick_bg_color, ThemePrefs.getChatBackgroundColor(requireContext())
+            ) { picked ->
+                ThemePrefs.setChatBackgroundColor(requireContext(), picked)
+                refreshSwatches()
+                requireActivity().recreate()
+            }
+        }
+        view.findViewById<Button>(R.id.btn_pick_accent_color).setOnClickListener {
+            com.p2p.messenger.util.HsvColorPickerDialog.show(
+                requireContext(), R.string.title_pick_accent_color, ThemePrefs.getAccentColor(requireContext())
+            ) { picked ->
+                ThemePrefs.setAccentColor(requireContext(), picked)
+                refreshSwatches()
+                requireActivity().recreate()
+            }
+        }
+        view.findViewById<Button>(R.id.btn_pick_chat_wallpaper).setOnClickListener {
+            AppLock.beginTrustedExcursion()
+            pickWallpaperLauncher.launch(arrayOf("image/*"))
+        }
+        btnRemoveWallpaper.setOnClickListener {
+            ThemePrefs.clearChatWallpaper(requireContext())
+            refreshWallpaperPreview()
+        }
+    }
+
+    /**
+     * bkz. `onAvatarPicked` AYNI `content://` -> yerel dosya kopyalama
+     * deseni. Profil fotoğrafından FARKI: bu SADECE yerel bir UI tercihi,
+     * hiçbir kişiye gönderilmiyor (bkz. ThemePrefs.chatWallpaperFile) — bu
+     * yüzden Rust'a hiç dokunmuyor.
+     */
+    private fun onChatWallpaperPicked(uri: Uri) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val tempFile = File(File(requireContext().cacheDir, "wallpaper").apply { mkdirs() }, UUID.randomUUID().toString())
+            try {
+                requireContext().contentResolver.openInputStream(uri)?.use { input ->
+                    tempFile.outputStream().use { output -> input.copyTo(output, bufferSize = 64 * 1024) }
+                } ?: throw java.io.IOException("Dosya açılamadı")
+                val compressed = ImagePreview.compressFile(tempFile, WALLPAPER_MAX_DIMENSION, WALLPAPER_JPEG_QUALITY)
+                if (compressed != null) {
+                    ThemePrefs.chatWallpaperFile(requireContext()).writeBytes(compressed)
+                }
+                withContext(Dispatchers.Main) {
+                    view?.let { v ->
+                        val thumb = v.findViewById<ImageView>(R.id.chat_wallpaper_thumb)
+                        val btnRemove = v.findViewById<Button>(R.id.btn_remove_chat_wallpaper)
+                        val file = ThemePrefs.chatWallpaperFile(requireContext())
+                        if (file.exists()) {
+                            thumb.setImageBitmap(android.graphics.BitmapFactory.decodeFile(file.absolutePath))
+                            thumb.visibility = View.VISIBLE
+                            btnRemove.visibility = View.VISIBLE
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(requireContext(), R.string.error_attachment_open_failed, Toast.LENGTH_SHORT).show()
+                }
+            } finally {
+                tempFile.delete()
+            }
+        }
+    }
+
+    /**
+     * Spec dışı, kullanıcı isteği: üst çubukta hızlı Tor/ağ bağlantısını
+     * kes/yeniden kur menü öğesi — bkz. util/AppRestarter.kt (neden tam bir
+     * uygulama yeniden başlatması gerektiği), menu_settings.xml. MainActivity
+     * TEK bir Activity, üç bottom-nav sekmesi (Chats/Contacts/Settings)
+     * paylaşıyor — `MenuProvider`, `viewLifecycleOwner` + `RESUMED` ile
+     * kaydedildiğinden bu menü öğesi SADECE Ayarlar sekmesi görünürken
+     * belirir, diğer sekmelerde otomatik kaybolur (Fragment view'ı
+     * destroy olduğunda provider da kaldırılır — elle temizlemeye gerek
+     * yok). `onCreateView` İÇİNDE değil `onViewCreated`'ta kaydedilir:
+     * `viewLifecycleOwner`, fragment'ın view'ı `onCreateView`'dan DÖNENE
+     * kadar geçerli değildir.
+     */
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        requireActivity().addMenuProvider(object : MenuProvider {
+            override fun onCreateMenu(menu: Menu, menuInflater: MenuInflater) {
+                menuInflater.inflate(R.menu.menu_settings, menu)
+            }
+
+            override fun onMenuItemSelected(menuItem: MenuItem): Boolean {
+                if (menuItem.itemId == R.id.action_tor_reconnect) {
+                    AppRestarter.confirmAndRestart(requireContext())
+                    return true
+                }
+                return false
+            }
+        }, viewLifecycleOwner, Lifecycle.State.RESUMED)
+    }
+
+    /**
+     * Spec dışı, güvenlik denetimi düzeltmesi: parolayı (+ onayını) alır,
+     * eşleşmiyorsa/boşsa kullanıcıyı uyarır, eşleşiyorsa SAF hedef seçici
+     * ile devam eder (bkz. `createRecoveryFileLauncher`). Rust tarafı
+     * (`export_recovery`) parolayı Argon2id ile sertleştirdiğinden burada
+     * herhangi bir minimum uzunluk/karmaşıklık kuralı DAYATMIYORUZ — kısa
+     * bir parola daha ucuz brute-force edilir ama bu kullanıcının kendi
+     * riski/tercihi, spec bunun ötesinde bir politika belirtmiyor.
+     */
+    private fun showExportRecoveryDialog() {
+        val context = requireContext()
+        val layout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = (16 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad, pad, pad)
+        }
+        val passwordInput = EditText(context).apply {
+            hint = getString(R.string.lbl_recovery_password)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val confirmInput = EditText(context).apply {
+            hint = getString(R.string.lbl_recovery_password_confirm)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        layout.addView(passwordInput)
+        layout.addView(confirmInput)
+
+        AlertDialog.Builder(context)
+            .setTitle(R.string.action_export_recovery)
+            .setMessage(R.string.lbl_recovery_export_desc)
+            .setView(layout)
+            .setPositiveButton(R.string.action_export_recovery) { _, _ ->
+                val password = passwordInput.text.toString()
+                val confirm = confirmInput.text.toString()
+                when {
+                    password.isEmpty() -> Toast.makeText(context, R.string.error_recovery_password_empty, Toast.LENGTH_SHORT).show()
+                    password != confirm -> Toast.makeText(context, R.string.error_recovery_password_mismatch, Toast.LENGTH_SHORT).show()
+                    else -> {
+                        pendingRecoveryPassphrase = password
+                        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+                        AppLock.beginTrustedExcursion()
+                        createRecoveryFileLauncher.launch("typoon-recovery-$stamp.txt")
+                    }
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * `uri`'ye (kullanıcının SAF ile seçtiği hedef) Argon2id-şifreli kurtarma
+     * dosyasını yazar. `P2PLib.exportRecovery` KASITLI OLARAK yavaş/bellek-
+     * ağır bir KDF çalıştırdığından (bkz. Cargo.toml Argon2id notu) ANA
+     * THREAD DIŞINDA çağrılır — aksi halde saniyeler süren bir ANR riski
+     * olurdu. Boş bir bayt dizisi (bkz. Rust `Java_..._exportRecovery`
+     * dokümantasyonu) başarısızlık anlamına gelir.
+     */
+    private fun exportRecoveryTo(uri: Uri, passphrase: String) {
+        Toast.makeText(requireContext(), R.string.msg_recovery_exporting, Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch(Dispatchers.IO) {
+            val bytes = try {
+                P2PLib.exportRecovery(passphrase)
+            } catch (e: Exception) {
+                null
+            }
+            val ok = try {
+                if (bytes != null && bytes.isNotEmpty()) {
+                    requireContext().contentResolver.openOutputStream(uri)?.use { out -> out.write(bytes) }
+                    true
+                } else {
+                    false
+                }
+            } catch (e: Exception) {
+                false
+            }
+            withContext(Dispatchers.Main) {
+                if (isAdded) {
+                    Toast.makeText(
+                        requireContext(),
+                        if (ok) R.string.msg_recovery_export_success else R.string.error_recovery_export_failed,
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
+    private fun refreshDisplayName() {
+        val name = try {
+            P2PLib.getDisplayName()
+        } catch (e: Exception) {
+            ""
+        }
+        displayNameValue?.text = name
+    }
+
+    /**
+     * Kullanıcı isteği (2026-09-04): hesap adını değiştirmek ve
+     * değişikliğin kişilere OTOMATİK ulaşması.
+     *
+     * `setOwnAvatar` ile AYNI desen ve AYNI sebep: fan-out kişi başına
+     * ayrı bir şifreleme yapıyor (bkz. Rust `set_display_name`), yani ana
+     * thread'de çağrılamaz. Arayüzdeki ad hemen güncellenir — gönderim
+     * arka planda, çevrimdışı kişiler için günlerce yeniden denenerek
+     * sürer, kullanıcının bunu beklemesi gerekmez.
+     */
+    private fun showChangeDisplayNameDialog() {
+        val current = try {
+            P2PLib.getDisplayName()
+        } catch (e: Exception) {
+            ""
+        }
+        val input = EditText(requireContext()).apply {
+            setText(current)
+            setSingleLine(true)
+            // Rust tarafı da kırpıyor (`MAX_DISPLAY_NAME_CHARS`); buradaki
+            // sınır yalnızca kullanıcının sessizce kesilen bir ad
+            // yazmasını engellemek için.
+            filters = arrayOf(android.text.InputFilter.LengthFilter(48))
+        }
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.dlg_change_display_name_title)
+            .setMessage(R.string.lbl_display_name_desc)
+            .setView(input)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isEmpty()) return@setPositiveButton
+                displayNameValue?.text = name
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val result = try {
+                        P2PLib.setDisplayName(name)
+                    } catch (e: Exception) {
+                        "Error: ${e.message}"
+                    }
+                    withContext(Dispatchers.Main) {
+                        if (!isAdded) return@withContext
+                        if (result.startsWith("Error:")) {
+                            Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
+                            refreshDisplayName()
+                        } else {
+                            Toast.makeText(requireContext(), R.string.msg_display_name_changed, Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     private fun refreshOwnAvatar() {
@@ -147,11 +952,15 @@ class SettingsFragment : Fragment() {
         } catch (e: Exception) {
             null
         }
+        // Fotoğraf yoksa baş harf gösteriliyor (bkz. AvatarUtil) — hesap
+        // adının baş harfi, kimlik kodunun ilk karakterinden ("a3f…")
+        // anlamlı: kişiler bizi zaten o adla görüyor.
         val name = try {
-            P2PLib.getIdentityShortCode()
+            P2PLib.getDisplayName().ifEmpty { P2PLib.getIdentityShortCode() }
         } catch (e: Exception) {
             "?"
         }
+        ownAvatarBytes = bytes
         AvatarUtil.renderInto(imgOwnAvatar, bytes, name)
     }
 
@@ -183,7 +992,10 @@ class SettingsFragment : Fragment() {
     }
 
     private fun setOwnAvatar(avatarJpeg: ByteArray?) {
-        AvatarUtil.renderInto(imgOwnAvatar, avatarJpeg, try { P2PLib.getIdentityShortCode() } catch (e: Exception) { "?" })
+        ownAvatarBytes = avatarJpeg
+        AvatarUtil.renderInto(imgOwnAvatar, avatarJpeg, try {
+            P2PLib.getDisplayName().ifEmpty { P2PLib.getIdentityShortCode() }
+        } catch (e: Exception) { "?" })
         lifecycleScope.launch(Dispatchers.IO) {
             val result = try {
                 P2PLib.setOwnProfilePicture(avatarJpeg)
@@ -230,4 +1042,213 @@ class SettingsFragment : Fragment() {
         torStatusHandler.removeCallbacks(torStatusRunnable)
         torStatusView = null
     }
+
+    // -----------------------------------------------------------------
+    // Sunucular (store-and-forward) — bkz. Rust `server_client` modülü
+    // -----------------------------------------------------------------
+    //
+    // Rölelerden FARKLI oldukları için ayrı bir bölüm: bir röle hiçbir şey
+    // SAKLAMAZ (sadece iki taraf da o anda bağlıyken canlı bir devre kurar),
+    // sunucu ise alıcı çevrimdışıyken zarfı diske yazar. Kullanıcı için
+    // görünen fark tam olarak budur ve tek bir "adres ekle" kutusunda
+    // birleştirilirse yanlış beklenti yaratır.
+
+    private var serversContainer: LinearLayout? = null
+
+    /** Sunucu QR'ı taramak için — bkz. QrScanActivity.MODE_ADD_SERVER. */
+    private val scanServerLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { refreshServers() }
+
+    private fun setupServers(view: View) {
+        serversContainer = view.findViewById(R.id.servers_container)
+
+        view.findViewById<Button>(R.id.btn_add_server).setOnClickListener {
+            val intent = Intent(requireContext(), QrScanActivity::class.java)
+            intent.putExtra(QrScanActivity.EXTRA_MODE, QrScanActivity.MODE_ADD_SERVER)
+            scanServerLauncher.launch(intent)
+        }
+
+        view.findViewById<Button>(R.id.btn_add_server_paste).setOnClickListener {
+            showPasteServerCodeDialog()
+        }
+
+        refreshServers()
+    }
+
+    private fun showPasteServerCodeDialog() {
+        val input = EditText(requireContext()).apply {
+            hint = getString(R.string.dlg_add_server_hint)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(false)
+            maxLines = 4
+        }
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.dlg_add_server_title)
+            .setView(input)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                addServer(input.text.toString().trim())
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun addServer(code: String) {
+        if (code.isEmpty()) return
+        val result = try {
+            P2PLib.addServer(code)
+        } catch (e: Exception) {
+            "Error: ${e.message}"
+        }
+        if (result.startsWith("Error:")) {
+            Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
+        } else {
+            Toast.makeText(requireContext(), R.string.msg_server_added, Toast.LENGTH_SHORT).show()
+            refreshServers()
+        }
+    }
+
+    /**
+     * Sunucu satırlarını yeniden çizer.
+     *
+     * Satır sayısı değişken olduğu için XML'de sabit değil, programatik —
+     * ama görünüm ayarlardaki diğer bölümlerle aynı (kalın 16sp başlık,
+     * 12sp %70 opak açıklama, `?attr/materialButtonOutlinedStyle` butonlar,
+     * `SwitchMaterial`).
+     */
+    private fun refreshServers() {
+        val container = serversContainer ?: return
+        container.removeAllViews()
+
+        val json = try {
+            P2PLib.listServers()
+        } catch (e: Exception) {
+            "[]"
+        }
+        val arr = try {
+            org.json.JSONArray(json)
+        } catch (e: Exception) {
+            org.json.JSONArray()
+        }
+        for (i in 0 until arr.length()) {
+            val obj = arr.optJSONObject(i) ?: continue
+            container.addView(buildServerRow(obj))
+        }
+    }
+
+    private fun buildServerRow(obj: org.json.JSONObject): View {
+        val serverId = obj.optString("server_id")
+        val ctx = requireContext()
+        val density = resources.displayMetrics.density
+        fun dp(v: Int) = (v * density).toInt()
+
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(8) }
+            setBackgroundColor(
+                MaterialColors.getColor(this, com.google.android.material.R.attr.colorSurfaceVariant)
+            )
+        }
+
+        val name = obj.optString("name").ifEmpty { obj.optString("address") }
+        row.addView(TextView(ctx).apply {
+            text = name
+            textSize = 14f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        })
+
+        // Durum: bağlı+kayıtlı / bağlanıyor / kayıtlı değil. Kayıt, operatörün
+        // yayımladığı katılım koduyla yapılır ve başarısız olursa sebebi
+        // burada görünür (`last_error`).
+        val connected = obj.optBoolean("connected")
+        val enrolled = obj.optBoolean("enrolled")
+        val lastError = obj.optString("last_error").takeIf { it.isNotEmpty() && it != "null" }
+        val stateText = when {
+            lastError != null -> lastError
+            connected && enrolled -> getString(R.string.state_server_connected)
+            connected -> getString(R.string.state_server_not_enrolled)
+            else -> getString(R.string.state_server_connecting)
+        }
+        row.addView(TextView(ctx).apply {
+            text = stateText
+            textSize = 12f
+            alpha = 0.7f
+        })
+
+        row.addView(SwitchMaterial(ctx).apply {
+            text = getString(R.string.lbl_server_route)
+            isChecked = obj.optBoolean("route_messages")
+            setOnCheckedChangeListener { _, checked ->
+                try {
+                    P2PLib.setServerRouting(serverId, checked)
+                } catch (e: Exception) {
+                    Toast.makeText(ctx, e.message, Toast.LENGTH_SHORT).show()
+                }
+            }
+        })
+
+        row.addView(SwitchMaterial(ctx).apply {
+            text = getString(R.string.lbl_server_history)
+            isChecked = obj.optBoolean("store_history")
+            setOnCheckedChangeListener { _, checked ->
+                if (checked) {
+                    // Kök arşiv anahtarı (ARK) SADECE burada üretilir —
+                    // bkz. ArchiveKeyManager: açılışta kendiliğinden
+                    // üretilseydi, kardeşinden anahtar almadan önce açılan
+                    // bir cihaz kendi rastgele anahtarını kullanır ve
+                    // yüklediği arşiv diğer cihazlarda okunamaz olurdu.
+                    ArchiveKeyManager.ensureCreated(ctx.applicationContext)
+                }
+                try {
+                    P2PLib.setServerHistory(serverId, checked)
+                } catch (e: Exception) {
+                    Toast.makeText(ctx, e.message, Toast.LENGTH_SHORT).show()
+                }
+            }
+        })
+
+        row.addView(TextView(ctx).apply {
+            text = getString(R.string.lbl_server_history_warn)
+            textSize = 12f
+            alpha = 0.7f
+        })
+
+        // Sıfırdan kurulan bir cihaz için: yukarı kaydırma akışı sohbetin
+        // zaten görünür olmasını varsayıyor, ama burada hiç mesaj yok ve
+        // kaydırılacak bir şey de yok.
+        row.addView(Button(ctx, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = getString(R.string.action_restore_history)
+            setOnClickListener {
+                val result = try {
+                    P2PLib.restoreServerHistory()
+                } catch (e: Exception) {
+                    "Error: ${e.message}"
+                }
+                val msg = if (result.startsWith("Error:")) result
+                else getString(R.string.msg_restore_started)
+                Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+            }
+        })
+
+        row.addView(Button(ctx, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = getString(R.string.action_remove_server)
+            setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorError))
+            setOnClickListener {
+                try {
+                    P2PLib.removeServer(serverId)
+                } catch (e: Exception) {
+                    // yok sayılır — liste zaten yenilenecek
+                }
+                Toast.makeText(ctx, R.string.msg_server_removed, Toast.LENGTH_SHORT).show()
+                refreshServers()
+            }
+        })
+
+        return row
+    }
+
 }

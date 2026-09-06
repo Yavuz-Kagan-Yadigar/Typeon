@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spec dışı, kullanıcı isteği: aynı kişiden art arda gelen ve aralarında
+     2 dakikadan az olan mesajların balonları TEK bir yığın gibi okunsun.
+     Bunu, balonların BİRLEŞTİĞİ kenardaki köşe yarıçapını küçülterek
+     yapıyoruz (kullanıcının gönderdiği görseldeki "kaynamış" blok etkisi).
+
+     Bu, `bubble_mine`'ın grubun İLKİ OLMAYAN üyeleri için varyantı: sağ
+     omurga üstte de bitişik olduğundan üst-sağ köşe de küçük. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="?attr/colorPrimaryContainer" />
+    <corners
+        android:topLeftRadius="18dp"
+        android:topRightRadius="4dp"
+        android:bottomLeftRadius="18dp"
+        android:bottomRightRadius="4dp" />
+</shape>

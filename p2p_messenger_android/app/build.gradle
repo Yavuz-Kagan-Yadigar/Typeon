@@ -11,8 +11,8 @@ android {
         applicationId "com.p2p.messenger"
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode 5
+        versionName "1.4"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
@@ -21,10 +21,46 @@ android {
         }
     }
 
+    // Fixed, checked-in debug key (app/debug.keystore) instead of each
+    // machine's own auto-generated ~/.android/debug.keystore: without this,
+    // rebuilding on a different machine (or after that file is regenerated)
+    // produces a differently-signed APK. `adb install -r`/Play can't update
+    // across a signature change, forcing an uninstall first — which wipes
+    // /data/data (contacts, identity keys), so previously-paired contacts
+    // need re-pairing even though nothing else about them changed.
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Release, BİLEREK depodaki AYNI keystore ile imzalanıyor.
+            //
+            // Gerekçe yukarıdaki `signingConfigs.debug` notuyla aynı ve
+            // burada daha da kritik: imza anahtarı değişirse Android
+            // uygulamayı "farklı uygulama" sayar, üzerine kurulum
+            // REDDEDİLİR ve kullanıcı önce kaldırmak zorunda kalır —
+            // bu da /data/data'yı, yani kimliği, ratchet oturumlarını,
+            // mesaj arşivini ve (sunucu uygulamasında) onion kimliğini
+            // siler. Onion adresi değişince o sunucuyu adresine göre
+            // kayıtlı TÜM istemciler ona bir daha ulaşamaz.
+            //
+            // Bu uygulamalar mağazadan değil elden (sideload) dağıtıldığı
+            // için imzanın "release" anahtarı olması bir gereklilik değil.
+            // Play Store'a çıkılacaksa buraya ayrı bir release keystore
+            // konmalı — ama o geçiş, mevcut kurulumların bir kez
+            // kaldırılmasını gerektirir.
+            signingConfig signingConfigs.debug
         }
     }
 
@@ -69,6 +105,26 @@ dependencies {
     implementation 'androidx.activity:activity-ktx:1.8.2'
     implementation 'androidx.fragment:fragment-ktx:1.6.2'
 
+    // Spec dışı, kullanıcı isteği ("react kısmında tam sistem emoji seçici
+    // ile açılsın"): AndroidX'in tam emoji ızgarası — kategoriler, arama,
+    // "son kullanılanlar" ve ten rengi varyantları dahil. Android'in
+    // klavye emoji panelini bir uygulamanın doğrudan açmasını sağlayan
+    // herhangi bir genel API YOK; bu widget, platformun kendi emoji
+    // verisini (emoji2) kullanan resmi karşılığı.
+    implementation 'androidx.emoji2:emoji2-emojipicker:1.4.0'
+    // Spec dışı, derleme düzeltmesi (emoji seçiciyle birlikte geldi):
+    // guava ÇALIŞMA ZAMANI sınıf yolunda zaten vardı ama DERLEME yolunda
+    // yoktu; `listenablefuture` ise guava ile çakışmasın diye BOŞ
+    // `9999.0-empty-to-avoid-conflict-with-guava` sürümüne yükseliyor.
+    // Sonuç: `ListenableFuture` sınıfı derlemede hiçbir yerde bulunamıyor
+    // ve CameraX kullanan iki ekran (QrScan/CameraCapture) kırılıyor.
+    // guava'yı açıkça bildirmek onu her iki sınıf yoluna da koyar —
+    // artefakt zaten paketleniyordu, ek boyut maliyeti YOK. (Alternatif
+    // olarak `listenablefuture`'ı 1.0'a sabitlemek denendi: bu sefer
+    // guava ile ÇİFT SINIF hatası verdi, çünkü ikisi de aynı sınıfı
+    // taşıyor.)
+    implementation 'com.google.guava:guava:31.0.1-jre'
+
     // Navigation
     def nav_version = "2.7.6"
     implementation "androidx.navigation:navigation-fragment-ktx:$nav_version"
@@ -89,6 +145,12 @@ dependencies {
 
     // Coroutines
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+
+    // Spec dışı, kullanıcı isteği: kalıcı yeniden deneme kuyruğu için
+    // saatte bir arka plan taraması — WorkManager, JobScheduler üzerinden
+    // OS tarafından diğer uygulamaların işleriyle toplu (batched) çalıştırılır,
+    // özel bir AlarmManager/wakelock döngüsünden çok daha bataryayı dostu.
+    implementation 'androidx.work:work-runtime-ktx:2.9.0'
 
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'

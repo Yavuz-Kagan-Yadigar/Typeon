@@ -1,4 +1,3 @@
-```
 # Android build outputs
 *.apk
 *.aar
@@ -67,4 +66,17 @@ coverage.xml
 *.cover
 *.log
 .git/modules/
-```
+
+# Editor local history
+.history/
+
+# Unrelated downloads / distro packages
+*.rpm
+
+# Local recovery scratch
+/ChatActivity-recovered/
+.typeon-backend-guide.html
+
+# Flatpak build output (source in Linux/ is tracked separately)
+/Linux/packaging/repo/
+/Linux/packaging/.flatpak-builder/

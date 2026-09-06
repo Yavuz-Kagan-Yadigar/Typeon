@@ -1,6 +1,7 @@
 package com.p2p.messenger.ui
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
 import android.os.Bundle
@@ -23,6 +24,7 @@ import com.google.zxing.common.HybridBinarizer
 import com.p2p.messenger.P2PLib
 import com.p2p.messenger.R
 import com.p2p.messenger.util.QrBinaryCodec
+import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -35,8 +37,29 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class QrScanActivity : AppCompatActivity() {
 
+    companion object {
+        /** Çoklu-cihaz (spec 1.5): bu extra `"link_approve"` ise taranan QR bir
+         *  KİŞİ eşleşme QR'ı değil, bir İKİNCİL CİHAZ ekleme QR'ıdır —
+         *  `approveDeviceLink` çağrılır (bkz. SettingsFragment "İkinci cihaz
+         *  ekle"). Yoksa/boşsa normal kişi eşleşmesi (`processQrPacket`). */
+        const val EXTRA_MODE = "mode"
+        const val MODE_LINK_APPROVE = "link_approve"
+        /** Sunucu (store-and-forward) davet QR'ı — bkz. SettingsFragment
+         *  "Sunucular" bölümü. Diğer iki modun aksine bu QR CBOR DEĞİL, düz
+         *  metin bir davet kodu taşır (`typeon-server:<multiaddr>#<jeton>`);
+         *  sunucu uygulaması onu kopyalanabilir metin olarak da gösterdiği
+         *  için tek kanonik biçim bu. */
+        const val MODE_ADD_SERVER = "add_server"
+    }
+
     private lateinit var cameraExecutor: ExecutorService
     private val alreadyHandled = AtomicBoolean(false)
+    private val linkApproveMode: Boolean by lazy {
+        intent.getStringExtra(EXTRA_MODE) == MODE_LINK_APPROVE
+    }
+    private val addServerMode: Boolean by lazy {
+        intent.getStringExtra(EXTRA_MODE) == MODE_ADD_SERVER
+    }
 
     private val requestCameraPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -58,6 +81,7 @@ class QrScanActivity : AppCompatActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
         } else {
+            com.p2p.messenger.util.AppLock.beginTrustedExcursion()
             requestCameraPermission.launch(Manifest.permission.CAMERA)
         }
     }
@@ -86,7 +110,7 @@ class QrScanActivity : AppCompatActivity() {
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis)
             } catch (e: Exception) {
-                Toast.makeText(this, "Kamera başlatılamadı: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, getString(R.string.error_camera_start_failed, e.message ?: ""), Toast.LENGTH_LONG).show()
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -134,16 +158,81 @@ class QrScanActivity : AppCompatActivity() {
 
     private fun handleScannedText(text: String) {
         runOnUiThread {
+            if (addServerMode) {
+                // Sunucu davet kodu DÜZ METİN — CBOR'a çevirmiyoruz (bkz.
+                // MODE_ADD_SERVER notu). Rust tarafı adresi ve jetonu
+                // kendisi ayrıştırır.
+                val result = P2PLib.addServer(text.trim())
+                if (result.startsWith("Error:")) {
+                    Toast.makeText(this, result, Toast.LENGTH_LONG).show()
+                    alreadyHandled.set(false)
+                } else {
+                    Toast.makeText(this, getString(R.string.msg_server_added), Toast.LENGTH_LONG).show()
+                    finish()
+                }
+                return@runOnUiThread
+            }
             val cborBytes = QrBinaryCodec.latin1StringToBytes(text)
+            if (linkApproveMode) {
+                // Çoklu-cihaz (spec 1.5): taranan QR bir ikincil cihaz ekleme
+                // isteği — onayla, imzalı DeviceAdd + tam senkron gönder.
+                val result = P2PLib.approveDeviceLink(cborBytes)
+                if (result.startsWith("Error:")) {
+                    Toast.makeText(this, result, Toast.LENGTH_LONG).show()
+                    alreadyHandled.set(false)
+                } else {
+                    Toast.makeText(this, getString(R.string.link_device_approved), Toast.LENGTH_LONG).show()
+                    finish()
+                }
+                return@runOnUiThread
+            }
             val result = P2PLib.processQrPacket(cborBytes)
             if (result.startsWith("Error:")) {
                 Toast.makeText(this, result, Toast.LENGTH_LONG).show()
                 alreadyHandled.set(false)
             } else {
-                Toast.makeText(this, "Bağlanıldı: ${result.take(16)}...", Toast.LENGTH_SHORT).show()
-                finish()
+                // Spec dışı, kullanıcı isteği: ilk eşleşme (gerçek dial/
+                // Noise/IdentityExchange el sıkışması) UZUN sürebilir — bir
+                // toast gösterip bu ekranı kapatmak, kullanıcıyı hiçbir
+                // ilerleme göstergesi olmadan bırakıyordu. Artık kullanıcı
+                // DOĞRUDAN yeni kişinin sohbet ekranına yönlendiriliyor —
+                // o ekran zaten `hasActiveSession`/`isPeerConnected`'a
+                // bakan bir "Bağlanılıyor..." göstergesi (bkz. ChatActivity
+                // sessionPollRunnable/layoutConnecting/dotPeerStatus)
+                // taşıyor, eşleşmenin hâlâ devam ettiğini (WIP) doğal
+                // olarak gösterir.
+                openChatOrFallback(result)
             }
         }
+    }
+
+    /** bkz. `handleScannedText` — `P2PLib.processQrPacket`'in JSON dönüşünü
+     *  (`{"identity_id":...,"device_fingerprint":...,"device_name":...}`)
+     *  ayrıştırıp yeni kişinin sohbet ekranını açar. Ayrıştırma başarısız
+     *  olursa (beklenmeyen bir durum) eski davranışa (toast + kapat) düşer. */
+    private fun openChatOrFallback(resultJson: String) {
+        val deviceFingerprint: String?
+        val deviceName: String
+        try {
+            val obj = JSONObject(resultJson)
+            deviceFingerprint = obj.optString("device_fingerprint").ifEmpty { null }
+            deviceName = obj.optString("device_name")
+        } catch (e: Exception) {
+            Toast.makeText(this, R.string.msg_connected, Toast.LENGTH_SHORT).show()
+            finish()
+            return
+        }
+        if (deviceFingerprint == null) {
+            Toast.makeText(this, R.string.msg_connected, Toast.LENGTH_SHORT).show()
+            finish()
+            return
+        }
+        val intent = Intent(this, ChatActivity::class.java).apply {
+            putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, deviceFingerprint)
+            putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, deviceName.ifEmpty { deviceFingerprint.take(8) })
+        }
+        startActivity(intent)
+        finish()
     }
 
     private fun ByteBuffer.toByteArray(): ByteArray {

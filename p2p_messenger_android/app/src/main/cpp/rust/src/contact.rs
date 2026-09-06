@@ -12,9 +12,20 @@ pub enum KnownDeviceStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnownDevice {
     pub device_fingerprint: String,
-    pub verified: bool,
     pub first_seen: u64,
     pub status: KnownDeviceStatus,
+    /// Bu cihaz yüz yüze QR/manuel eşleşmeyle mi tanındı, yoksa imzalı bir
+    /// `DeviceAdd` zinciriyle mi eklendi?
+    ///
+    /// Defter #31/#32: burada eskiden `verified: bool` vardı ama HER İKİ
+    /// ekleme yolu da onu `false` yazıyor ve hiçbir yer okumuyordu; iki
+    /// ekleme fonksiyonunun (`add_device_unverified` /
+    /// `add_device_via_signed_chain`) gövdeleri de birebir aynıydı, yani
+    /// isimlerin ima ettiği ayrım kodda hiç yoktu. Alan artık o ayrımı
+    /// GERÇEKTEN taşıyor: `canonical_device_for_identity` ve arayüzün
+    /// "doğrulanmadı" uyarısı için anlamlı bir sinyal.
+    #[serde(default)]
+    pub via_signed_chain: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,23 +97,21 @@ impl Contact {
     /// TOFU: yeni bir cihazı doğrulanmamış olarak kaydeder (ilk temas
     /// veya alarm ekranında kullanıcı "kabul et" dediğinde çağrılır).
     pub fn add_device_unverified(&mut self, fingerprint: String, now: u64) {
-        self.known_devices.push(KnownDevice {
-            device_fingerprint: fingerprint,
-            verified: false,
-            first_seen: now,
-            status: KnownDeviceStatus::Active,
-        });
-        self.last_device_change = Some(now);
+        self.push_device(fingerprint, now, false);
     }
 
     /// İmzalı DeviceAdd zinciriyle gelen yeni cihazı sessizce ekler (spec
     /// 2.2 — kullanıcıya sadece bilgi bildirimi gösterilir, alarm değil).
     pub fn add_device_via_signed_chain(&mut self, fingerprint: String, now: u64) {
+        self.push_device(fingerprint, now, true);
+    }
+
+    fn push_device(&mut self, fingerprint: String, now: u64, via_signed_chain: bool) {
         self.known_devices.push(KnownDevice {
             device_fingerprint: fingerprint,
-            verified: false,
             first_seen: now,
             status: KnownDeviceStatus::Active,
+            via_signed_chain,
         });
         self.last_device_change = Some(now);
     }

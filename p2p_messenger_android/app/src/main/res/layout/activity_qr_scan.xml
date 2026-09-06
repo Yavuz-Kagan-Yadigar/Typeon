@@ -28,7 +28,7 @@
         android:id="@+id/txtScanInstruction"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Scan QR Code to Connect"
+        android:text="@string/lbl_scan_qr_instructions"
         android:textColor="@android:color/white"
         android:textSize="18sp"
         android:layout_marginTop="16dp"

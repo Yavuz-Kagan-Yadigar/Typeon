@@ -8,7 +8,7 @@
         android:id="@+id/statusText"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:text="Initializing..."
+        android:text="@string/lbl_initializing"
         android:textAppearance="?attr/textAppearanceLabelMedium"
         android:textColor="?attr/colorOnSurfaceVariant"
         android:paddingHorizontal="16dp"

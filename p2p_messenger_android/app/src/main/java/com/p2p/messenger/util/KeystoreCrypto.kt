@@ -64,6 +64,16 @@ object KeystoreCrypto {
      *  aksine, bu cache mesajlaşmanın güvenilirliği için gerekli (node
      *  modu kapalıyken de sıra dışı mesajlar çözülebilmeli). */
     const val ALIAS_SKIPPED_KEYS = "p2p_messenger_skipped_keys_wrap_key"
+    /** Kök arşiv anahtarını (ARK) sarmalayan anahtarın alias'ı — sunucuda
+     *  saklanan geçmişi çözer (bkz. ArchiveKeyManager).
+     *
+     *  ALIAS_HISTORY'den AYRI olmasının nedeni ikisinin KAPSAMLARININ
+     *  farklı olması: history key CİHAZA ait, rastgele, kurtarma dosyasında
+     *  YOK — sadece yerel arşivi diskte şifreler. ARK ise KİMLİĞE ait,
+     *  kardeş cihazlara `DeviceSync` ile gider ve kurtarma dosyasına da
+     *  girer. Aynı alias altında tutulsalardı "yerel geçmişi sıfırla"
+     *  eylemi sunucudaki arşivi de okunamaz hale getirirdi. */
+    const val ALIAS_ARCHIVE_ROOT = "p2p_messenger_archive_root_wrap_key"
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
     private const val GCM_TAG_LENGTH_BITS = 128
 

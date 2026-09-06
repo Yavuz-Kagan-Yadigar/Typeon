@@ -169,10 +169,13 @@ not just sent by whoever relayed it.
 
 ## 5. Network architecture (how devices find each other)
 
-Built on [libp2p](https://libp2p.io/). There is no *company-run* server —
-but as of this round, other users' devices can optionally relay traffic for
-each other (see "Cross-network connectivity" below), which is a
-deliberate, disclosed tradeoff, not a central point of control.
+Built on [libp2p](https://libp2p.io/). There is no *company-run* server. Two
+things soften that statement, both opt-in and both disclosed: other users'
+devices can relay traffic for each other (see "Cross-network connectivity"
+below), and **you can now point the app at a store-and-forward server that you
+or someone you trust operates** (see "Optional store-and-forward server"
+below). Neither is operated by this project, and both are off until a user
+turns them on.
 
 - **Local network discovery — mDNS.** On the same Wi-Fi/LAN, devices
   broadcast their presence and find each other automatically, no internet
@@ -367,7 +370,10 @@ behind CGNAT can connect** — and unlike a private overlay (Tailscale), a
 pre-authorization. This is now implemented, in a **reachability-only v1**:
 
 **What's implemented:**
-- **Hosting.** When Tor is enabled (a Settings toggle, off by default), the
+- **Hosting.** When Tor is enabled (a Settings toggle, **on by default** since
+  every device should be reachable across CGNAT out of the box without the
+  user having to find and flip a setting — a first install with the toggle
+  left untouched stays on; explicitly turning it off is remembered), the
   app launches an `arti` onion service (`arti-client`, built on the Tor
   Project's own Rust Tor). Its `.onion` address is stable across restarts
   (arti's keystore, the Tor analogue of the persistent libp2p PeerId).
@@ -428,10 +434,139 @@ hardening the existing protocol:
 
 ---
 
+### Optional store-and-forward server (this round)
+
+Until now the app had **no store-and-forward anywhere**, and that gap was
+structural rather than accidental. A libp2p Circuit Relay v2 only builds a
+*live* circuit between two peers who are both online at the same moment; it
+stores nothing. The `p2p_msg_<fingerprint>` gossipsub topic is a naming
+convention, not a mailbox — if the recipient is not subscribed at that
+instant, the packet is gone. All durability therefore lived on the **sender**:
+retry with exponential backoff, re-encrypt under a fresh ratchet step every
+~25 minutes, give up after two days.
+
+That works when both people open the app regularly. It does not work when a
+phone is off for a week, when a device is brand new, or when the sender
+uninstalls. A server closes that gap. It is entirely optional, it is not run
+by this project, and the app works exactly as before without one.
+
+**What the server is.** Another libp2p peer speaking one extra protocol
+(`/typeon/server/1.0.0`). It accepts sealed envelopes addressed to opaque
+mailbox ids, stores them on disk, hands them to the recipient when they next
+connect, and deletes them once the recipient confirms. Because it is an
+ordinary libp2p peer, it inherits Noise transport authentication and the Arti
+onion transport for free — which is what makes it possible to run one on a
+spare phone behind carrier NAT, with no port forwarding, no domain and no TLS
+certificate.
+
+**What it cannot see.**
+
+- *Message content.* Envelopes arrive already end-to-end encrypted, and are
+  then sealed a **second** time under `HKDF(root_key, "…server-seal")` before
+  being deposited. Without that second layer the server's database would hold
+  `MessagePacketHeader.sender_device_fingerprint` in cleartext — that field is
+  openly readable, which is acceptable on a pseudonymous gossipsub topic but
+  not in a log that persists for weeks.
+- *Who is talking to whom, by name.* Mailbox ids are `HKDF` of the topic
+  string, so a fingerprint cannot be read out of a bucket name. Archive bucket
+  ids derive from a per-conversation key and rotate monthly.
+- *History and attachments.* Archive records are encrypted under a key derived
+  from the identity's archive root key; attachment chunks are stored exactly
+  as they arrive, still encrypted under a per-file key that only ever travels
+  inside a sealed envelope.
+- *Who its users are.* Enrolment uses a **fresh keypair generated for that
+  server alone**, never the device's identity keys. The server gets an
+  anti-Sybil gate (the invite token) and a revocation handle, and nothing that
+  identifies a person. That keypair is hybrid — Ed25519 **and** ML-DSA-87,
+  both verified — like every other signature in this app: a classical-only
+  signature would let a harvest-now-break-later adversary forge enrolments
+  once a quantum computer exists. It would not let them *read* anything, since
+  no content encryption depends on it, but there is no reason to leave one
+  signature weaker than the rest.
+
+**What it can see, and can do.** The honest accounting:
+
+- Sizes, timing and volume of everything that passes through.
+- Which `PeerId` registers and polls which mailbox ids. A ratchet mailbox is
+  shared by exactly two devices, so those registrations **join into a pairwise
+  social graph of its own enrolled users**. Connecting over the server's
+  `.onion` hides network location; it does not hide this linkage, and the
+  30-minute mailbox rotation does not help either, because the same device
+  registers both the old and the new id. Hiding it properly needs anonymous
+  per-mailbox credentials and a separate circuit per mailbox. That is not
+  implemented, and this document does not pretend otherwise.
+- It can **drop, delay, reorder or withhold** messages. This is the
+  irreducible power of any store-and-forward operator. It is contained, not
+  eliminated: an ordinary message is server-only for 30 seconds, after which
+  every retry also goes out over gossipsub/Tor/relay, and pairing handshakes
+  and ratchet-rotation announcements always take both paths from the start. A
+  censoring server therefore degrades delivery to "slower, over peer-to-peer",
+  never to "lost".
+- It **cannot forge or modify** anything: the recipient verifies both Ed25519
+  and ML-DSA-87 over header and ciphertext, and a modified byte just makes the
+  envelope undecryptable — a denial, not a forgery. Replaying an old envelope
+  fails too, because the ratchet message key was consumed and deleted, and
+  duplicates are dropped by `message_id`.
+- Its operator learns your device's `PeerId`, which is stable across
+  contacts. A colluding contact and server operator could therefore link an
+  enrolment to a real identity. Fixing that would need a separate swarm
+  identity per server, which a single libp2p swarm cannot provide.
+
+**Is everything on the server post-quantum encrypted?** Content, yes; two
+things, no, and both are worth naming.
+
+- *Pending messages* carry two layers, and both derive from the ratchet
+  `root_key`, which comes out of the hybrid X25519 + ML-KEM-1024 handshake. So
+  they are protected at the same level as live messaging.
+- *The archive and attachment bytes* are sealed with 256-bit symmetric keys
+  (ChaCha20-Poly1305). There is no public-key operation there to break —
+  Grover costs an attacker a square-root speedup at best, leaving the intended
+  128-bit margin — and the keys themselves travel only over the hybrid
+  channels described above, or inside the Argon2id-protected recovery file.
+- *First-contact envelopes* are the exception, and not because of
+  cryptographic strength: `Handshake` and `IdentityExchange` reach the server
+  readable, as described above. They carry public keys and a signature, not
+  secrets, so a future quantum adversary learns nothing new from them — but
+  the server operator sees the sender today.
+- *The transport* between client and server is libp2p Noise, which is X25519
+  and therefore classical. That is true of every connection this app makes, not
+  something the server introduced, and it sits *over* content that is already
+  hybrid-protected.
+- *Metadata is not encrypted at all.* Mailbox and bucket ids are one-way HKDF
+  outputs, but sizes, timings and PeerIds are plainly visible. That is the
+  disclosure in "What it can see" above, and no amount of post-quantum
+  anything changes it.
+
+**Server-side history is a different bargain, so it is a different switch.**
+A stored *delivery* envelope cannot double as history: the ratchet message key
+is destroyed on decryption, so last week's envelope is undecryptable by
+everyone, including its intended recipient, and a newly linked device never
+held those keys at all. History therefore has to be re-encrypted by the client
+under a long-lived **archive root key** — one per identity, kept in the
+platform keystore, passed to sibling devices over the already-encrypted device
+sync channel, and included in the recovery file.
+
+That key is **not forward-secret**. If it ever leaks, every message archived
+to a server up to that point is readable, retroactively. Live messaging keeps
+full hybrid post-quantum forward secrecy; only the archive gives it up. This
+is the same trade Signal's secure backups and WhatsApp's encrypted backups
+make, and it is unavoidable: "let a new device load my old messages" and
+"old messages become permanently unreadable" are mathematically opposed. So
+"Store history on this server" is a separate switch, off by default, sitting
+next to a plain-language warning. Removing a server asks it to purge that
+archive first — though of course no client can *prove* a server deleted
+anything, so the honest reading is "we asked", not "it is gone".
+
+---
+
 ## 6. Local storage
 
 - Chat history, contacts, and ratchet state live in a local SQLite database
-  on-device (no cloud sync, no backup server).
+  on-device. There is no cloud sync and no backup by default — but a user who
+  configures a server *and* separately enables "Store history on this server"
+  is opting into an encrypted off-device archive. That switch is off by
+  default and is deliberately separate from message routing, because it makes
+  a real tradeoff; see "Optional store-and-forward server" below.
 - Long-term private keys are generated and stored via the **Android
   Keystore**, StrongBox-first (dedicated secure hardware) with a TEE
   (trusted execution environment) fallback on devices without StrongBox, and
@@ -473,6 +608,14 @@ hardening the existing protocol:
   membership, file names). Backup is now fully disabled (`allowBackup=false`,
   `fullBackupContent=false`, and a `data_extraction_rules.xml` that excludes
   everything from both cloud-backup and device-transfer on API 31+).
+- **Screenshot and screen-recording prevention (user request).** Every
+  Activity's window carries `FLAG_SECURE` (applied once, globally, from an
+  `Application.ActivityLifecycleCallbacks.onActivityPreCreated` hook in
+  `P2PApplication.kt` — not per-Activity, so no future screen can be added
+  without it). This blocks screenshots and screen recording of any part of
+  the app (chats, attachments, QR codes, group info), and as a side effect
+  the Android "Recent Apps" task switcher shows a blank/default thumbnail
+  instead of a live preview of on-screen content.
 - **Recovery file uses Argon2id (fourth audit round fix).** The recovery
   export (which contains *all* long-term secret keys — Ed25519, ML-DSA,
   X25519, ML-KEM) previously derived its file-encryption key with

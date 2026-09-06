@@ -1,0 +1,365 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Typeon</string>
+    <string name="action_settings">Ayarlar</string>
+    <string name="action_scan_qr">QR Tara</string>
+    <string name="action_show_qr">QR Kodum</string>
+    <string name="action_new_chat">Yeni Sohbet</string>
+    <string name="hint_message">Mesaj</string>
+    <string name="btn_send">Gönder</string>
+    <string name="lbl_send_symbol">»</string>
+    <string name="action_scroll_to_bottom">En alta kaydır</string>
+    <string name="lbl_language">Dil</string>
+    <string name="lbl_identity_code">Kimlik Kodu</string>
+    <string name="lbl_device_fingerprint">Cihaz Parmak İzi</string>
+    <string name="lbl_node_address">Düğüm Adresi</string>
+    <string name="lbl_copy">Kopyala</string>
+    <string name="lbl_copied">Kopyalandı!</string>
+    <string name="msg_no_contacts">Henüz kişi yok. Başlamak için bir QR kodu tarayın ya da elle ekleyin.</string>
+    <string name="hint_search_chats">Sohbet ve gruplarda ara</string>
+    <string name="hint_search_messages">Mesajlarda ara</string>
+    <string name="action_search_messages">Ara</string>
+    <string name="action_open_chat_list">Sohbet listesi</string>
+    <string name="action_search_prev">Önceki eşleşme</string>
+    <string name="action_search_next">Sonraki eşleşme</string>
+    <string name="lbl_search_no_matches">Eşleşme yok</string>
+    <string name="msg_security_warning">Güvenlik Uyarısı: Doğrulanmamış cihaz tespit edildi!</string>
+    <string name="msg_device_added">Yeni cihaz ekleyen:</string>
+    <string name="msg_read">Görüldü</string>
+    <string name="title_chats">Sohbetler</string>
+    <string name="title_contacts">Kişiler</string>
+    <string name="title_settings">Ayarlar</string>
+    <string name="title_group_chats">Gruplar</string>
+    <string name="lbl_create_group">Grup Oluştur</string>
+    <string name="lbl_group_name">Grup Adı</string>
+    <string name="lbl_members">Üyeler</string>
+    <string name="lbl_add_member">Üye Ekle</string>
+    <string name="lbl_leave_group">Gruptan Ayrıl</string>
+    <string name="lbl_verify_identity">Kimliği Doğrula</string>
+    <string name="lbl_safety_number">Güvenlik Numarası</string>
+    <string name="lbl_node_mode">Düğüm Modu</string>
+    <string name="lbl_node_mode_desc">DHT yönlendirmesine katkıda bulunur VE ağdaki başkaları için (şifreli) trafiği körü körüne aktarır — içeriğinizi asla göremez, ama aktardığınız kişinin bant genişliğini kullanır ve o kişinin kimlerle bağlandığını görebilir.</string>
+    <string name="lbl_history_storage_limit">Ek depolama sınırı</string>
+    <string name="lbl_history_storage_limit_desc">Düğüm Modu kendisine sunulan her dosyayı otomatik indirir; bu sınırsız büyüyebilir. Toplam ek depolama bu sınırı aştığında, yer açmak için önce en eski dosyalar silinir.</string>
+    <string name="lbl_relay_address">Bilinen aktarıcı adresi</string>
+    <string name="lbl_relay_address_desc">Farklı ağlardaki (ikisi de NAT arkasında), ortak bir aktarıcı geçmişi olmayan iki kişinin ilk kez eşleşebilmesi için — güvendiğiniz ya da kendiniz çalıştırdığınız bir aktarıcı varsa (Düğüm Modu açık, ulaşılabilir bir cihaz), adresini buraya ekleyin.</string>
+    <string name="lbl_relay_address_hint">/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo…</string>
+    <string name="action_add_relay_address">Ekle</string>
+    <string name="msg_relay_address_added">Röle adresi eklendi</string>
+    <!-- Sunucular (store-and-forward) -->
+    <string name="lbl_servers">Sunucular</string>
+    <string name="lbl_servers_desc">Sunucu, karşı taraf çevrimdışıyken mesajlarınızı saklar ve geri döndüğünde teslim eder. Mesajlarınızı asla göremez: uçtan uca şifreli kalır ve saklanmadan önce ikinci kez mühürlenir. Röleden farkı: röle sadece iki taraf da çevrimiçiyken aktarır, hiçbir şey saklamaz.</string>
+    <string name="action_add_server">Sunucu QR\'ı tara</string>
+    <string name="action_add_server_paste">Kod yapıştır</string>
+    <string name="dlg_add_server_title">Sunucu ekle</string>
+    <string name="dlg_add_server_hint">typeon-server:/dns/…onion/tcp/…/p2p/…#jeton</string>
+    <string name="lbl_display_name">Hesap adı</string>
+    <string name="lbl_display_name_desc">Kişilerinizin sizi gördüğü ad. Değiştirdiğinizde tüm kişilere otomatik bildirilir; o an çevrimdışı olanlar geri döndüklerinde alır.</string>
+    <string name="action_change_display_name">Adı değiştir</string>
+    <string name="dlg_change_display_name_title">Hesap adı</string>
+    <string name="msg_display_name_changed">Ad değişti. Kişilere bildiriliyor.</string>
+    <string name="msg_contact_renamed">%1$s adını %2$s olarak değiştirdi</string>
+    <string name="msg_server_added">Sunucu eklendi. Bağlanılıyor…</string>
+    <string name="msg_join_link_confirm">Bu sunucu eklensin mi?\n\n%1$s</string>
+    <string name="msg_join_link_needs_identity">Önce hesabınızı oluşturun; kod panoya kopyalandı, Ayarlar → Sunucular altına yapıştırabilirsiniz.</string>
+    <string name="msg_server_removed">Sunucu kaldırıldı</string>
+    <string name="lbl_server_route">Mesajları bu sunucu üzerinden gönder</string>
+    <string name="lbl_server_history">Geçmişi bu sunucuda sakla</string>
+    <string name="lbl_server_history_warn">Yeni bir cihazın eski mesajlarınızı yüklemesini sağlar. Canlı mesajların aksine bu yedek ileri-gizli değildir: arşiv anahtarını ele geçiren, o ana kadar yüklenmiş her şeyi okur.</string>
+    <string name="action_remove_server">Kaldır</string>
+    <string name="state_server_connected">Bağlı</string>
+    <string name="state_server_connecting">Bağlanılıyor…</string>
+    <string name="state_server_not_enrolled">Kayıtlı değil</string>
+    <string name="action_restore_history">Geçmişimi bu sunucudan yükle</string>
+    <string name="msg_restore_started">Yükleniyor. Eski mesajlar geldikçe görünecek.</string>
+    <string name="contact_added_via_group">Grup üzerinden eklendi — yüz yüze doğrulanmadı</string>
+
+    <string name="action_delete_group">Grubu sil (herkes için)</string>
+    <string name="confirm_delete_group">Bu grup TÜM üyeler için silinecek ve geri alınamaz. Emin misiniz?</string>
+    <string name="msg_group_deleted">Grup silindi</string>
+    <string name="action_leave_group">Gruptan ayrıl</string>
+    <string name="confirm_leave_group">Bu gruptan ayrılacaksınız ve tekrar katılmak için yeniden davet edilmeniz gerekir. Emin misiniz?</string>
+    <string name="msg_left_group">Gruptan ayrıldınız</string>
+    <string name="status_no_internet">İnternet bağlantısı yok</string>
+    <string name="status_unknown">Durum bilinmiyor</string>
+    <string name="status_tor_bootstrapping">Tor üzerinden bağlanılıyor…</string>
+    <string name="status_tor_failed">Tor bağlantısı başarısız — yeniden deneniyor…</string>
+    <string name="status_connected_tor">Tor üzerinden bağlandı</string>
+    <string name="status_connected_tor_node">Tor üzerinden bağlandı (Düğüm)</string>
+    <string name="status_connected_node">Bağlandı (Düğüm)</string>
+    <string name="status_connected">Bağlandı</string>
+    <string name="status_reconnecting">Yeniden bağlanılıyor…</string>
+
+    <string name="lbl_last_photo">📷 Fotoğraf</string>
+    <string name="lbl_last_video">🎬 Video</string>
+    <string name="lbl_last_voice">🎤 Sesli mesaj</string>
+    <string name="lbl_last_file">📎 Dosya</string>
+    <string name="lbl_eta_seconds">~%d sn kaldı</string>
+    <string name="lbl_eta_minutes">~%1$d dk %2$d sn kaldı</string>
+
+    <string name="lbl_tor">Tor ile erişilebilirlik</string>
+    <string name="lbl_tor_desc">CGNAT\'a rağmen farklı ağlardaki cihazların bağlanmasını sağlar (Tor onion servisi). İlk açılışta bağlanmak birkaç saniye sürer ve pil kullanır. Karşı tarafın da Tor\'u açık olması gerekir. Değişiklikler uygulama yeniden başlatılınca etkin olur.</string>
+    <string name="tor_status_disabled">Tor: kapalı</string>
+    <string name="tor_status_bootstrapping">Tor: bağlanılıyor…</string>
+    <string name="tor_status_ready">Tor: hazır — .onion adresi aktif</string>
+    <string name="tor_status_failed">Tor: başarısız (kayıtlara bakın)</string>
+    <string name="tor_restart_needed">Bu değişikliğin etkili olması için uygulamayı yeniden başlatın</string>
+    <string name="action_tor_reconnect">Tor / ağı yeniden bağla</string>
+    <string name="title_tor_reconnect">Ağ yeniden bağlansın mı?</string>
+    <string name="msg_tor_reconnect">Bu, ağ katmanını (etkinse Tor dahil) kesip yeniden bağlamak için uygulamayı yeniden başlatır. Gönderilmemiş taslak metin kaybolur.</string>
+    <string name="action_reconnect">Yeniden bağlan</string>
+
+    <string name="action_copy_manual_code">Kodumu kopyala</string>
+    <string name="action_copy_own_address">Adresimi kopyala</string>
+    <string name="msg_manual_code_copied">Eşleşme kodu kopyalandı — karşı tarafın \"Elle Ekle\" alanına yapıştırın</string>
+    <string name="msg_own_address_copied">Adres kopyalandı — karşı tarafın \"Elle Ekle\" alanına yapıştırın</string>
+    <string name="error_address_not_ready">Adres henüz hazır değil, kısa süre sonra tekrar deneyin</string>
+    <string name="lbl_key_security">Anahtar Güvenliği</string>
+    <string name="lbl_keys_hardware_backed">✓ Anahtarlarınız cihazın güvenlik donanımı (StrongBox/TEE) tarafından korunuyor</string>
+    <string name="lbl_keys_software_backed">⚠ Anahtarlarınız yalnızca yazılımla korunuyor (bu cihaz bir donanım güvenlik modülü desteklemiyor)</string>
+    <string name="lbl_recovery_export">Kimlik Kurtarma</string>
+    <string name="lbl_recovery_export_desc">Tüm kimlik anahtarlarınızı içeren, parola korumalı bir kurtarma dosyası dışa aktarın. Güvenli ve çevrimdışı bir yerde saklayın (ör. USB bellek) — hem bu dosyaya hem parolaya sahip olan biri sizin yerinize geçebilir. Bu cihazı kaybederseniz kimliğinizi kurtarmanın tek yolu budur.</string>
+    <string name="action_export_recovery">Kurtarma Dosyasını Dışa Aktar…</string>
+    <string name="lbl_recovery_password">Parola</string>
+    <string name="lbl_recovery_password_confirm">Parolayı onayla</string>
+    <string name="error_recovery_password_mismatch">Parolalar eşleşmiyor</string>
+    <string name="error_recovery_password_empty">Bir parola girin</string>
+    <string name="msg_recovery_exporting">Kurtarma dosyası dışa aktarılıyor…</string>
+    <string name="msg_recovery_export_success">Kurtarma dosyası kaydedildi</string>
+    <string name="error_recovery_export_failed">Kurtarma dosyası dışa aktarılamadı</string>
+
+    <!-- Spec dışı, kullanıcı isteği: export'un eksik karşılığı — kurtarma
+         dosyasından geri yükleme (bkz. MainActivity `importRecoveryFrom`). -->
+    <string name="action_restore_from_recovery">Kurtarma dosyasından geri yükle</string>
+    <string name="lbl_recovery_import_desc">Bu kurtarma dosyasını dışa aktarırken kullandığınız parolayı girin.</string>
+    <string name="msg_recovery_importing">Kimlik geri yükleniyor…</string>
+    <string name="msg_recovery_import_success">Kimlik geri yüklendi</string>
+    <string name="lbl_text_scale">Metin boyutu</string>
+    <string name="lbl_ui_scale">Arayüz boyutu</string>
+    <string name="lbl_font_family">Yazı Tipi</string>
+    <string name="lbl_scale_percent">%1$d%%</string>
+    <string name="lbl_font_default">Varsayılan</string>
+    <string name="lbl_font_sans_medium">Sans Medium</string>
+    <string name="lbl_font_sans_condensed">Sans Condensed</string>
+    <string name="lbl_font_serif">Serif</string>
+    <string name="lbl_font_monospace">Monospace</string>
+    <string name="lbl_font_sans_black">Sans Black</string>
+    <string name="lbl_chat_appearance">Görünüm</string>
+    <string name="lbl_chat_bg_color">Arka plan rengi</string>
+    <string name="lbl_accent_color">Vurgu rengi</string>
+    <string name="lbl_chat_wallpaper">Duvar kağıdı</string>
+    <string name="action_choose">Seç</string>
+    <string name="action_reset">Sıfırla</string>
+    <string name="action_choose_wallpaper">Resim seç</string>
+    <string name="action_remove_wallpaper">Kaldır</string>
+    <string name="title_pick_bg_color">Bir arka plan rengi seçin</string>
+    <string name="title_pick_accent_color">Bir vurgu rengi seçin</string>
+    <string name="content_desc_color_swatch">Renk örneği</string>
+    <string name="content_desc_chat_wallpaper_preview">Duvar kağıdı önizlemesi</string>
+    <string name="lbl_enable_notifications">Bildirimleri Etkinleştir</string>
+    <string name="lbl_backup_identity">Kimliği Yedekle</string>
+    <string name="lbl_recovery_file">Kurtarma Dosyası</string>
+    <string name="lbl_download">İndir</string>
+    <string name="lbl_status_online">Çevrimiçi</string>
+    <string name="lbl_status_offline">Çevrimdışı</string>
+    <string name="lbl_typing">yazıyor...</string>
+    <string name="lbl_typing_named">%s yazıyor...</string>
+    <string name="lbl_typing_several">Birkaç kişi yazıyor...</string>
+    <string name="error_camera_permission">Kamera izni gerekli</string>
+    <string name="error_network">Ağ hatası. Lütfen bağlantınızı kontrol edin.</string>
+    <string name="error_send_failed">Mesaj gönderilemedi</string>
+    <string name="error_handshake_incompatible">Bu kişiyle bağlanılamıyor — uyumsuz anahtar biçimi. Karşı taraf muhtemelen farklı bir uygulama sürümü kullanıyor. Kişiyi silip yeniden eşleşmeyi deneyin.</string>
+    <string name="confirm_revoke_device">Bu cihazı iptal etmek istediğinizden emin misiniz? Kişi listenizde kalır, ama artık bu cihazdan mesaj gönderip alamazsınız — geçmiş silinmez.</string>
+    <string name="confirm_block_contact">Bu kişi engellensin mi?</string>
+
+    <string name="lbl_edited">(düzenlendi)</string>
+    <string name="lbl_you">Siz</string>
+    <string name="action_cancel_reply">Yanıtı iptal et</string>
+    <string name="msg_reply_target_not_loaded">Orijinal mesaj yüklenmedi — bulmak için yukarı kaydırın</string>
+    <string name="lbl_sent_at">(gönderim: %s)</string>
+    <string name="lbl_received_sent_at">%1$s (gönderim: %2$s)</string>
+    <string name="title_pending_messages">Bekleyen Mesajlar</string>
+    <string name="action_view_pending_messages">Bekleyen Mesajlar</string>
+    <string name="msg_no_pending_messages">Teslim onayı bekleyen mesaj yok</string>
+    <string name="action_cancel_pending_message">İptal</string>
+    <string name="action_retry_pending_message">Şimdi yeniden dene</string>
+    <string name="msg_pending_message_retrying">Yeniden deneniyor…</string>
+    <string name="lbl_pending_last_attempt">Son deneme: %s</string>
+    <string name="msg_pending_message_cancelled">İptal edildi — artık yeniden denenmiyor</string>
+    <string name="msg_deleted">Bu mesaj silindi</string>
+    <string name="msg_connecting">Bağlanılıyor…</string>
+    <string name="msg_securing_no_send">Bu kişiyle güvenli bağlantı kuruluyor — hazır olunca mesaj gönderebilirsiniz.</string>
+    <string name="msg_wait_secure_connection">Güvenli bağlantı kurulana kadar bekleyin.</string>
+    <string name="action_edit_message">Düzenle</string>
+    <string name="action_delete_message">Sil</string>
+    <string name="action_retry_message">Yeniden dene</string>
+    <string name="msg_retrying_message">Yeniden deneniyor…</string>
+    <string name="confirm_delete_message">Bu mesajı silmek istediğinizden emin misiniz?</string>
+    <string name="lbl_edit_message_hint">Mesajı düzenle</string>
+
+    <string name="title_groups">Gruplar</string>
+    <string name="msg_no_groups">Henüz hiç grup oluşturmadınız.</string>
+    <string name="action_create_group">Grup Oluştur</string>
+    <string name="lbl_new_group_name_hint">Grup adı</string>
+    <string name="lbl_add_member_to_group">Üye ekle</string>
+    <string name="lbl_manage_members">Üyeleri yönet</string>
+    <string name="lbl_founder_badge">%1$s (Kurucu)</string>
+    <string name="action_remove_member">Kaldır</string>
+    <string name="confirm_remove_member">%1$s gruptan çıkarılsın mı?</string>
+    <string name="msg_member_removed">Üye kaldırıldı</string>
+    <string name="msg_no_contacts_to_add">Eklenecek kişi yok — önce bir kişi ekleyin.</string>
+    <string name="msg_voice_not_supported_in_groups">Sesli mesajlar grup sohbetlerinde henüz desteklenmiyor</string>
+
+    <plurals name="lbl_member_count">
+        <item quantity="other">%d üye</item>
+    </plurals>
+
+    <string name="content_desc_attach_file">Dosya ekle</string>
+    <string name="msg_attachment_downloading">İndiriliyor…</string>
+    <string name="msg_attachment_failed">İndirme başarısız</string>
+    <string name="error_attachment_open_failed">Dosya açılamadı</string>
+
+    <string name="action_save_to_downloads">İndirilenler\'e kaydet</string>
+    <string name="msg_saved_to_downloads">İndirilenler/P2P klasörüne kaydedildi</string>
+    <string name="action_open_with">Birlikte aç…</string>
+    <string name="lbl_open_with_chooser">Birlikte aç</string>
+    <string name="lbl_attachment_reply_preview">📎 %1$s</string>
+
+    <string name="action_clear_chat_history">Sohbet geçmişini temizle</string>
+    <string name="confirm_clear_chat_history">Bu sohbetin yerel geçmişi (mesajlar ve ekler) silinecek. Kişi listenizde kalmaya devam eder. Emin misiniz?</string>
+    <string name="action_delete_contact">Kişiyi sil</string>
+    <string name="confirm_delete_contact_step1">Bu kişiyi silmek istediğinizden emin misiniz? Sohbet geçmişi de silinecek.</string>
+    <string name="confirm_delete_contact_step2">Bu işlem GERİ ALINAMAZ — onlarla tekrar mesajlaşmak için QR kodlarını yeniden taramanız gerekir. Yine de silinsin mi?</string>
+    <string name="msg_chat_history_cleared">Sohbet geçmişi temizlendi</string>
+    <string name="msg_contact_deleted">Kişi silindi</string>
+    <string name="action_revoke_device">Bu cihazı iptal et</string>
+    <string name="msg_device_revoked">Cihaz iptal edildi — bu kişiden gelen mesajlar artık kabul edilmeyecek</string>
+
+    <string name="content_desc_record_voice">Sesli mesaj kaydet</string>
+    <string name="msg_recording_voice">İptal etmek için kaydırın ▷</string>
+    <string name="msg_recording_cancelled">Kayıt iptal edildi</string>
+    <string name="error_recording_failed">Ses kaydı başlatılamadı</string>
+
+    <string name="content_desc_profile_picture">Profil fotoğrafı</string>
+    <string name="lbl_profile_picture">Profil Fotoğrafı</string>
+    <string name="lbl_profile_picture_desc">Kişileriniz bu fotoğrafı sohbet listesinde görür</string>
+    <string name="action_change_picture">Fotoğrafı değiştir</string>
+    <string name="action_remove_picture">Fotoğrafı kaldır</string>
+
+    <string name="lbl_playback_speed">Hız</string>
+
+    <string name="hint_username">Kullanıcı adı</string>
+    <string name="title_welcome">Hoş geldiniz</string>
+    <string name="msg_enter_username">Kimliğinizi oluşturmak için bir kullanıcı adı girin.</string>
+    <string name="action_create">Oluştur</string>
+    <string name="msg_identity_read_failed">Kimlik anahtarları okunamadı. Bir kurtarma dosyanız varsa onu kullanmanız gerekebilir.</string>
+    <string name="lbl_id_short">ID: %s…</string>
+    <string name="lbl_id_code">ID: %s</string>
+    <string name="title_reliable_delivery">Güvenilir mesaj teslimi</string>
+    <string name="msg_battery_optimization">Android\'in pil optimizasyonu bu uygulamanın arka planda mesaj teslimini ve yeniden denemelerini geciktirebilir. En güvenilir deneyim için pil kısıtlaması olmadan çalışmasına izin verin — bu daha sonra sistem Ayarlar\'dan değiştirilebilir.</string>
+    <string name="action_open_settings">Ayarları Aç</string>
+    <string name="action_not_now">Şimdi değil</string>
+    <string name="title_security_warning_dialog">Güvenlik Uyarısı</string>
+    <string name="lbl_unknown">Bilinmeyen</string>
+    <string name="msg_new_device_warning">%1$s için yeni, DOĞRULANMAMIŞ bir cihaz tespit edildi.\n\nYeni cihaz kodu: %2$s\n\nBunu, başka bir kanaldan (telefon görüşmesi, yüz yüze) %1$s ile doğrulamadan kabul etmeyin.</string>
+    <string name="action_verified_accept">Doğruladım, Kabul Et</string>
+    <string name="action_reject">Reddet</string>
+    <string name="msg_connection_not_complete">Bağlantı henüz tamamlanmadı, kısa süre sonra tekrar deneyin</string>
+    <string name="title_add_manually">Elle Ekle</string>
+    <string name="action_add">Ekle</string>
+    <string name="msg_added">Eklendi</string>
+    <string name="error_camera_start_failed">Kamera başlatılamadı: %s</string>
+    <string name="msg_connected">Bağlandı</string>
+    <string name="error_file_too_large_named">%s: 4GB sınırını aşıyor</string>
+    <string name="action_add_contact_qr">QR ile Kişi Ekle</string>
+    <string name="lbl_scan_qr_instructions">Bağlanmak için QR Kodu Tarayın</string>
+    <string name="lbl_initializing">Başlatılıyor…</string>
+
+    <string name="lbl_time_just_now">Az önce</string>
+    <string name="lbl_time_minutes_ago">%d dk önce</string>
+    <string name="lbl_time_hours_ago">%d sa önce</string>
+    <string name="lbl_time_days_ago">%d gün önce</string>
+
+    <string name="action_pin_chat">Sohbeti sabitle</string>
+    <string name="action_unpin_chat">Sabitlemeyi kaldır</string>
+
+    <!-- Çoklu-cihaz (spec 1.5/1.6/1.7): ikincil cihaz bağlama -->
+    <string name="linked_devices_section_title">Bağlı cihazlar</string>
+    <string name="linked_devices_section_desc">Bu hesabı birden fazla cihazda kullanın. Her cihaz kendi anahtarlarını tutar; kişiler mesajları aktif tüm cihazlarınıza iletir.</string>
+    <string name="linked_devices_manage">Cihazları yönet / Cihaz ekle</string>
+    <string name="linked_devices_add">Cihaz ekle (tara)</string>
+    <string name="linked_devices_this_device">bu cihaz</string>
+    <string name="linked_devices_revoked">iptal edildi</string>
+    <string name="linked_devices_confirm_revoke">Bu bağlı cihaz iptal edilsin mi? Artık bu hesap adına mesaj gönderip alamaz.</string>
+
+    <!-- Spec dışı, kullanıcı isteği: hesaptan çıkış (yerel verileri sil). -->
+    <string name="logout_section_title">Çıkış yap</string>
+    <string name="logout_section_desc">Bu kimliği bu cihazdan kaldırır: burada saklanan mesajlar, kişiler ve anahtarlar kalıcı olarak silinir. Bu hesaba bağlı diğer cihazlar ve karşı tarafların mesaj kopyaları bundan etkilenmez.</string>
+    <string name="action_logout">Çıkış yap</string>
+    <string name="logout_confirm_title">Çıkış yapılsın mı?</string>
+    <string name="logout_confirm_message">Bu, bu cihazdaki tüm yerel mesajları, kişileri ve anahtarları siler. Bir kurtarma dosyası dışa aktarmadıysanız, bu hesap bu cihazda geri kurtarılamaz. Bu işlem geri alınamaz.</string>
+    <string name="action_logout_confirm">Çıkış yap ve sil</string>
+    <string name="device_unlinked_notification">Bu cihazın hesabınızla bağlantısı kaldırıldı. Yerel verileri silindi.</string>
+    <string name="link_device_as_secondary">Var olan bir hesaba bağlan</string>
+    <string name="link_device_title">Bu cihazı bağla</string>
+    <string name="link_device_instructions">Diğer (birincil) cihazınızda Ayarlar → Bağlı cihazlar → “Cihaz ekle (tara)”yı açın ve aşağıdaki kodu tarayın. Bağlanma tamamlanana kadar bu ekranı açık tutun.</string>
+    <string name="link_device_waiting">Diğer cihazınızın taramasını bekliyor…</string>
+    <string name="link_device_network_not_ready">Ağ henüz hazır değil. Çevrimiçi olduğunuzdan emin olup tekrar deneyin.</string>
+    <string name="link_device_success">Bu cihaz artık hesabınıza bağlı.</string>
+    <string name="link_device_approved">Yeni cihaz hesabınıza eklendi.</string>
+    <string name="error_group_update_rejected">Kurucudan gelen bir grup güncellemesi reddedildi, uygulanmadı.</string>
+    <string name="action_block">Engelle</string>
+    <string name="action_unblock">Engeli kaldir</string>
+    <string name="action_trust_contact">Dogrulandi olarak isaretle</string>
+    <string name="msg_identity_blocked">Engellendi. Yuz yuze yeniden eslesmeden bu kisiden hicbir sey gelmeyecek.</string>
+    <string name="msg_identity_unblocked">Engel kaldirildi.</string>
+    <string name="msg_contact_trusted">Dogrulandi olarak isaretlendi.</string>
+    <string name="notif_new_device_warning">%1$s dogrulamadiginiz bir cihazdan yaziyor (%2$s). Incelemek icin dokunun.</string>
+    <string name="confirm_block_title">Bu kisi engellensin mi?</string>
+    <string name="confirm_block_body">%1$s adli kisinin hicbir cihazindan mesaj veya dosya kabul edilmeyecek. Engel yalnizca yuz yuze yeniden esleserek kalkar.</string>
+    <string name="confirm_trust_title">Dogrulandi olarak isaretlensin mi?</string>
+    <string name="confirm_trust_body">%1$s ile yuz yuze degil, bir grup uzerinden tanistiniz. Bunu yalnizca guvenlik kodunu baska bir yoldan teyit ettiyseniz yapin.</string>
+    <string name="action_transfer_founder">Yoneticiligi devret</string>
+    <string name="msg_founder_transferred">Grup yoneticiligi devredildi.</string>
+    <string name="confirm_transfer_founder">Grup yoneticiligi %1$s adli kisiye devredilsin mi? Bundan sonra uye ekleyip cikaramaz, ad ve fotografi degistiremezsiniz.</string>
+    <string name="lbl_safety_code">Guvenlik kodu: %1$s\n\nBunu onunla baska bir kanaldan karsilastirin — telefonla ya da yuz yuze. Ayniysa anahtarlar gercekten ona ait.</string>
+
+    <!-- Spec dışı, kullanıcı isteği: anlık çekim (kamera) — bkz.
+         ui.CameraCaptureActivity. -->
+    <string name="content_desc_take_photo">Fotoğraf çek</string>
+    <string name="action_capture_photo">Fotoğraf çek</string>
+    <string name="action_flip_camera">Kamerayı değiştir</string>
+    <string name="action_retake_photo">Yeniden çek</string>
+    <string name="action_rotate_photo">Döndür</string>
+
+    <!-- Spec dışı, kullanıcı isteği: bildirimlerde mesaj metnini göster/gizle. -->
+    <string name="lbl_notif_show_message">Bildirimlerde mesajları göster</string>
+    <string name="lbl_notif_show_message_desc">Kapalıyken bildirimde yalnızca kimin yazdığı — ve hangi grupta — görünür, mesajın kendisi hiç görünmez.</string>
+
+    <!-- Spec dışı, kullanıcı isteği: uygulama açılış şifresi. -->
+    <string name="lbl_app_lock_section">Uygulama şifresi</string>
+    <string name="lbl_app_lock_section_desc">Uygulama her ön plana geldiğinde sorulur. Değiştirilebilir ama kaldırılamaz.</string>
+    <string name="action_change_app_password">Şifreyi değiştir</string>
+    <string name="title_app_lock_create">Bir şifre belirleyin</string>
+    <string name="msg_app_lock_create">Bu şifre uygulamanın kilidini açar. Unutulursa geri getirilemez ve boş bırakılamaz.</string>
+    <string name="title_app_lock_unlock">Şifrenizi girin</string>
+    <string name="msg_app_lock_unlock">Devam etmek için uygulama şifrenizi girin.</string>
+    <string name="hint_app_lock_password">Şifre</string>
+    <string name="hint_app_lock_password_confirm">Şifreyi doğrulayın</string>
+    <string name="hint_app_lock_current">Mevcut şifre</string>
+    <string name="hint_app_lock_new">Yeni şifre</string>
+    <string name="action_app_lock_save">Kaydet</string>
+    <string name="action_app_lock_unlock">Kilidi aç</string>
+    <string name="error_app_lock_empty">Şifre boş olamaz.</string>
+    <string name="error_app_lock_mismatch">İki şifre birbirini tutmuyor.</string>
+    <string name="error_app_lock_wrong">Şifre yanlış.</string>
+    <string name="msg_app_lock_changed">Şifre değiştirildi.</string>
+
+    <!-- Spec dışı, kullanıcı isteği: mesajlara emoji tepkisi. -->
+    <string name="title_pick_reaction">Tepki ver</string>
+    <string name="action_react">Tepki ver</string>
+    <string name="action_remove_reaction">Tepkimi kaldır</string>
+    <string name="title_reactions">Tepkiler</string>
+    <string name="title_attachment_caption">Açıklama ekle</string>
+    <string name="hint_attachment_caption">Açıklama (isteğe bağlı)</string>
+</resources>

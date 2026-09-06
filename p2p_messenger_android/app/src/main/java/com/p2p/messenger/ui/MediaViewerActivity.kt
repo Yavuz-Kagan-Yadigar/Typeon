@@ -14,6 +14,7 @@ import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.view.ViewConfiguration
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.ProgressBar
@@ -91,6 +92,14 @@ class MediaViewerActivity : AppCompatActivity() {
     private var lastTouchY = 0f
     private var activePointerId = -1
     private var isDragging = false
+
+    // Bkz. `setupZoomableImage` tek dokunuşla kapatma: ACTION_DOWN
+    // noktasından `touchSlop`u aşan bir sürükleme YA da bir pinch
+    // (multi-touch) olmadıysa, ACTION_UP bir "tek dokunuş" sayılır.
+    private var downX = 0f
+    private var downY = 0f
+    private var hasMovedPastSlop = false
+    private var hadMultiTouch = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -199,14 +208,22 @@ class MediaViewerActivity : AppCompatActivity() {
             }
         })
 
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
         imageView.setOnTouchListener { _, event ->
             scaleDetector.onTouchEvent(event)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     lastTouchX = event.x
                     lastTouchY = event.y
+                    downX = event.x
+                    downY = event.y
+                    hasMovedPastSlop = false
+                    hadMultiTouch = false
                     activePointerId = event.getPointerId(0)
                     isDragging = true
+                }
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    hadMultiTouch = true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (isDragging && !scaleDetector.isInProgress && currentScale > MIN_SCALE) {
@@ -220,6 +237,9 @@ class MediaViewerActivity : AppCompatActivity() {
                             lastTouchY = y
                         }
                     }
+                    if (kotlin.math.abs(event.x - downX) > touchSlop || kotlin.math.abs(event.y - downY) > touchSlop) {
+                        hasMovedPastSlop = true
+                    }
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     isDragging = false
@@ -228,6 +248,12 @@ class MediaViewerActivity : AppCompatActivity() {
                         currentMatrix.set(baseMatrix)
                         currentScale = MIN_SCALE
                         imageView.imageMatrix = currentMatrix
+                    }
+                    // Spec dışı, kullanıcı isteği (profil fotoğrafı tam ekran
+                    // görüntüleyici): pinch/sürükleme OLMADAN tek dokunuş —
+                    // görüntüleyiciyi kapatır.
+                    if (event.actionMasked == MotionEvent.ACTION_UP && !hasMovedPastSlop && !hadMultiTouch) {
+                        finish()
                     }
                 }
                 MotionEvent.ACTION_POINTER_UP -> {

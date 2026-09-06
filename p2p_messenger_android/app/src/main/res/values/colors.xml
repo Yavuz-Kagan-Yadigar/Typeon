@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Spec dışı, kullanıcı isteği ("arayüzdeki gri renkleri daha koyu
+         yap"): NÖTR/gri roller (`*surface_variant`, `outline*`) bilerek
+         Material'ın referans tonlarından DAHA KOYU tutuluyor. Bu roller
+         Android 12+'ta dinamik renk tarafından ezileceği için ayrıca
+         `ThemeOverlay.P2PMessenger.Grays` ile her Activity'ye yeniden
+         uygulanıyor (bkz. themes.xml / P2PApplication.onActivityPreCreated)
+         — aksi halde bu değerler o cihazlarda hiç görünmezdi. -->
     <!-- Material You (M3) tema renk rolleri — açık tema. Koyu tema
          karşılıkları values-night/colors.xml'de aynı isimlerle tanımlı;
          themes.xml bunları @color/md_* üzerinden referans alıyor, böylece
@@ -16,19 +23,16 @@
     <color name="md_on_tertiary">#FFFFFF</color>
     <color name="md_surface">#FFFBFE</color>
     <color name="md_on_surface">#1C1B1F</color>
-    <color name="md_surface_variant">#E7E0EC</color>
-    <color name="md_on_surface_variant">#49454F</color>
+    <color name="md_surface_variant">#CFC7D8</color>
+    <color name="md_on_surface_variant">#35313C</color>
     <color name="md_background">#FFFBFE</color>
     <color name="md_on_background">#1C1B1F</color>
-    <color name="md_outline">#79747E</color>
+    <color name="md_outline">#5A5661</color>
+    <color name="md_outline_variant">#B5AEC1</color>
     <color name="md_error">#B3261E</color>
     <color name="md_on_error">#FFFFFF</color>
     <color name="md_error_container">#F9DEDC</color>
     <color name="md_on_error_container">#410E0B</color>
-
-    <!-- OLED "tam siyah" geçersiz kılma (bkz. ThemeOverlay.P2PMessenger.OledBlack,
-         SettingsFragment'teki OLED anahtarı) — sadece koyu temada uygulanır. -->
-    <color name="pure_black">#FF000000</color>
 
     <!-- Legacy marka renkleri (bazı eski drawable/tema referansları için korunuyor) -->
     <color name="primary">#2196F3</color>
@@ -49,11 +53,11 @@
     <color name="message_in">#FFFFFF</color>
     <color name="message_text_out">#000000</color>
     <color name="message_text_in">#000000</color>
-    <color name="message_timestamp">#888888</color>
+    <color name="message_timestamp">#57545C</color>
     
     <!-- Status colors -->
     <color name="online">#4CAF50</color>
-    <color name="offline">#9E9E9E</color>
+    <color name="offline">#6B6B6B</color>
     <color name="warning">#FF9800</color>
     <color name="danger">#F44336</color>
 

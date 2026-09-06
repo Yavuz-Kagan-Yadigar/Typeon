@@ -16,8 +16,7 @@ import com.google.android.material.progressindicator.LinearProgressIndicator
 import com.google.android.material.slider.Slider
 import com.p2p.messenger.R
 import com.p2p.messenger.util.AvatarUtil
-import java.text.SimpleDateFormat
-import java.util.Date
+import com.p2p.messenger.util.formatAbsoluteTime
 import java.util.Locale
 
 /**
@@ -33,6 +32,10 @@ import java.util.Locale
  * (WhatsApp/Telegram'daki gibi).
  */
 class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Adapter<SimpleChatAdapter.BubbleViewHolder>() {
+
+    companion object {
+        private const val GROUP_WINDOW_MS = 2 * 60 * 1000L
+    }
 
     enum class Status { PENDING, SENT, ERROR }
 
@@ -69,26 +72,110 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
          *  yönetilir (bkz. `updateVoicePlayback`). */
         var isPlaying: Boolean = false,
         var playbackPositionMs: Int = 0,
-        var playbackSpeed: Float = 1f
+        var playbackSpeed: Float = 1f,
+        /** Spec dışı, kullanıcı isteği (grup ekleri): SADECE grup sohbetinde
+         *  dolu — bu ekin `downloadFile` ile HANGİ göndericiden isteneceği
+         *  (1:1'de bu her zaman tek bir sabit peer olduğundan gerek yok,
+         *  ChatActivity kendi `peerDeviceFingerprint` alanını kullanır). */
+        var peerDeviceFingerprint: String = ""
     )
 
     data class Item(
-        val messageId: String,
+        /** Spec dışı, kullanıcı isteği (başarısız mesajı yeniden gönder):
+         *  `var` — bir retry, AYNI balonu tutup içindeki mesaj kimliğini
+         *  yeni gönderimin kimliğiyle değiştirir (bkz. `retryMessage`),
+         *  ikinci bir balon oluşturmaz. */
+        var messageId: String,
         var text: String,
         val isMine: Boolean,
         val timestamp: Long = System.currentTimeMillis(),
+        /** Spec dışı, kullanıcı isteği: SADECE alınan (`!isMine`) mesajlar
+         *  için, göndericinin KENDİ cihazındaki gönderim anı (bkz. Rust
+         *  `MessageContent::Text.sent_at_ms`) — `timestamp` (bu cihazın
+         *  ALDIĞI an) ile birlikte "10:42 (sent at: 10:41)" gibi ikisini
+         *  ayrı ayrı gösterebilmek için. `null`/`0` = bilinmiyor (eski
+         *  sürüm göndericisi, ya da yerel geçmişten yüklenmiş — bkz.
+         *  ChatActivity/GroupChatActivity notu, SADECE canlı gelen
+         *  olaylarda dolduruluyor) — bu durumda `timestamp` tek başına
+         *  gösterilir, önceki davranışla AYNI. */
+        val sentAtMs: Long? = null,
         var status: Status = Status.SENT,
         var isEdited: Boolean = false,
         var isDeleted: Boolean = false,
         /** Sadece grup sohbetinde, kendi mesajımız değilse gösterilir. */
         val senderName: String? = null,
+        /** SADECE grup sohbetinde dolu — bu mesajı gönderenin HAM
+         *  `identity_id`'si (`isMine` ise bu cihazın kendi kimliği).
+         *  `senderName` görüntü amaçlı çözülmüş isimken, BU alan bir
+         *  yanıt başlatıldığında (bkz. GroupChatActivity.startReply)
+         *  `reply_to_sender_identity_id` olarak gönderilmek üzere saklanır
+         *  — alıcı taraf, yanıtlanan mesajı yerelde bulamazsa bunu bir
+         *  YEDEK olarak kullanıp yine de doğru ada çözebilsin diye (bkz.
+         *  `resolveReplyLabel`). */
+        val senderIdentityId: String? = null,
         /** Sadece grup sohbetinde, `senderName` ile birlikte gösterilir —
          *  bkz. AvatarUtil (fotoğraf yoksa baş harf rozeti). */
         val senderAvatarJpeg: ByteArray? = null,
         /** Doluysa bu bir metin değil, dosya eki balonudur (bkz.
          *  onBindViewHolder) — `messageId` bu durumda `file_id`'dir. */
-        var attachment: AttachmentInfo? = null
-    )
+        var attachment: AttachmentInfo? = null,
+        /** Spec dışı, kullanıcı isteği (WhatsApp tarzı "sağa kaydırıp
+         *  yanıtla"): bu mesaj başka bir mesaja yanıtsa, o mesajın kararlı
+         *  kimliği (1:1'de `message_id`, grupta `group_message_local_id`) —
+         *  dolu olması balonun içinde küçük bir alıntı kutusu gösterilmesini
+         *  tetikler (bkz. `onBindViewHolder`/`onReplyPreviewClick`, ona
+         *  dokununca sohbet bu id'ye kaydırılır). */
+        /** Spec dışı, kullanıcı isteği: bu mesaja bırakılmış tepkilerin
+         *  hazır özeti (ör. "👍2 ❤️"); boş = tepki yok. Rust tarafında
+         *  hesaplanıp hem geçmiş JSON'unda hem canlı `reaction` olayında
+         *  aynen geliyor (bkz. `reactions_summary`) — burada ayrıca bir
+         *  toplama/sayma YAPILMAZ, böylece her cihaz aynı dizeyi gösterir. */
+        var reactions: String = "",
+        /** Spec dışı, kullanıcı isteği: ek balonunun ALTINDA gösterilen
+         *  açıklama metni (boş = yok). Metin mesajlarında kullanılmaz —
+         *  onların metni zaten `text`. */
+        var caption: String = "",
+        var replyToMessageId: String? = null,
+        /** Yanıtlanan mesajın (gönderen tarafından gömülen) kısa metin
+         *  özeti — bu cihazın o mesajı yerelde arşivlemiş olması
+         *  GEREKMEZ. */
+        var replyToPreview: String? = null,
+        /** Alıntı kutusunda gösterilecek "kime yanıt verildiği" etiketi —
+         *  1:1'de sabit "Sen" (bkz. R.string.lbl_you) ya da kişi adı,
+         *  grupta yanıtlanan mesajın göndericisinin adı. Çağıran taraf
+         *  (ChatActivity/GroupChatActivity) zaten bu ismi bildiğinden
+         *  BURADA ayrıca bir kimlik çözümlemesi yapılmaz. */
+        var replyToSenderLabel: String? = null,
+        /** SADECE grup mesajlarında dolu — yanıtlanan mesajı gönderenin HAM
+         *  `identity_id`'si (bkz. Rust `MessageContent::Text.
+         *  reply_to_sender_identity_id`). `replyToSenderLabel`'ı hesaplayan
+         *  taraf (bkz. GroupChatActivity.resolveReplyLabel), yanıtlanan
+         *  mesaj bu cihazda YERELDE bulunamazsa (ör. hiç senkronlanmadı)
+         *  BUNU bir YEDEK olarak kullanır — `resolveContactByIdentity` ile
+         *  kişi listesinden ada çevrilebilir, yerel arşive bakmaya gerek
+         *  kalmadan. */
+        var replyToSenderIdentityId: String? = null
+    ) {
+        /** Spec dışı, kullanıcı isteği (gönderim-sırası): balonların SIRALAMA
+         *  anahtarı — göndericinin gönderim anı (`sentAtMs`), bilinmiyorsa
+         *  bu cihazın aldığı/oluşturduğu an (`timestamp`). Gecikmeli teslim
+         *  edilen bir mesaj, ALINMA değil GÖNDERİM sırasındaki yerine oturur
+         *  (bkz. `addMessage` sıralı ekleme).
+         *
+         *  BİLİNEN SINIR (dış inceleme, kasıtlı olarak düzeltilmedi): bu,
+         *  göndericinin HAM yerel saatidir — senkronize bir mantıksal
+         *  (Lamport/vector clock) sayaç DEĞİLDİR. Aynı kişinin farklı
+         *  cihazları (ör. Ahmet'in telefonu + laptop'u) neredeyse aynı anda
+         *  mesaj gönderirse, iki cihazın sistem saatleri arasında kayma
+         *  varsa sıra karışabilir. Bunu KESİN çözmek, her identity için
+         *  cihazlar arası senkronize bir mantıksal sayaç (yeni bir kablo
+         *  alanı + DB kolonu + `SiblingEcho` üzerinden senkron) gerektirir
+         *  — gerçek fayda alanı dar (aynı kişinin İKİ cihazının aynı
+         *  saniye içinde, senkron olmadan yazması) olduğundan ve yanlış
+         *  uygulanırsa asıl mesaj sıralamasını BOZMA riski gerçek olduğundan
+         *  şimdilik ertelendi. */
+        val orderKey: Long get() = sentAtMs?.takeIf { it > 0 } ?: timestamp
+    }
 
     /** Kendi mesajlarımıza uzun basıldığında tetiklenir (Düzenle/Sil menüsü
      *  ChatActivity/GroupChatActivity'de gösterilir — adapter sadece
@@ -111,6 +198,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     /** Kullanıcı bir sesli mesajın kaydırıcısını sürükleyip bırakınca —
      *  hedef konum milisaniye olarak taşınır. */
     var onVoiceSeek: ((Item, Int) -> Unit)? = null
+    /** Spec dışı, kullanıcı isteği (WhatsApp tarzı yanıt): bir balonun
+     *  içindeki küçük alıntı kutusuna dokunulduğunda — hedef
+     *  `replyToMessageId` taşınır, çağıran taraf (bkz. ChatActivity/
+     *  GroupChatActivity) sohbeti o mesaja kaydırır. */
+    var onReplyPreviewClick: ((String) -> Unit)? = null
 
     /** bkz. `tickVoicePlayback` — çalma sırasında HER karede tam
      *  `notifyItemChanged` (yeniden bind) yapmak yerine, o an ekranda
@@ -121,6 +213,51 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     private val boundVoiceHolders = mutableMapOf<String, BubbleViewHolder>()
     private val userSeekingFileIds = mutableSetOf<String>()
 
+    /** Consecutive same-sender messages within this window merge visually
+     *  (tighter spacing, single trailing timestamp, sender name/avatar
+     *  shown once) — WhatsApp/Telegram-style grouping. */
+    private fun isSameSender(a: Item, b: Item): Boolean {
+        if (a.isMine != b.isMine) return false
+        return a.isMine || a.senderIdentityId == b.senderIdentityId
+    }
+
+    private fun isGroupedWithPrevious(position: Int): Boolean {
+        if (position <= 0) return false
+        val prev = items[position - 1]
+        val cur = items[position]
+        if (prev.isDeleted || cur.isDeleted) return false
+        // Spec dışı, hata düzeltmesi (kullanıcı: "alıntılar bozuk"): bir
+        // alıntı kutusu balonun İÇİNDE değil, ÜSTÜNDE ayrı bir blok olarak
+        // duruyor (bkz. item_message_bubble.xml `layoutReplyQuote`). Yani
+        // iki balon arasına dikey bir boşluk giriyor ve birleşik dış hat
+        // (bkz. MergedBubbleDecoration) o boşluğu da doldurup alıntının
+        // arkasını boyuyordu. Alıntılı bir mesaj zaten görsel olarak yeni
+        // bir başlangıç — grubu burada kesmek hem doğrusu hem de en basiti.
+        if (cur.replyToMessageId != null) return false
+        if (!isSameSender(prev, cur)) return false
+        return cur.timestamp - prev.timestamp in 0 until GROUP_WINDOW_MS
+    }
+
+    /** bkz. MergedBubbleDecoration — birleşik şekli çizen dekorasyon,
+     *  grubun sınırlarını ve hangi tarafa yaslı olduğunu bilmek zorunda. */
+    fun isGroupedWithNextPublic(position: Int): Boolean = isGroupedWithNext(position)
+
+    /** Bir grubun İLK üyesi mi? (Gruplanmamış tek bir mesaj da "başlangıç"
+     *  sayılır; dekorasyon en az iki üye bulamazsa hiçbir şey çizmez.) */
+    fun isGroupStart(position: Int): Boolean =
+        position in items.indices && !isGroupedWithPrevious(position)
+
+    fun isMineAt(position: Int): Boolean = items.getOrNull(position)?.isMine ?: false
+
+    private fun isGroupedWithNext(position: Int): Boolean {
+        if (position >= items.size - 1) return false
+        val cur = items[position]
+        val next = items[position + 1]
+        if (cur.isDeleted || next.isDeleted) return false
+        if (!isSameSender(cur, next)) return false
+        return next.timestamp - cur.timestamp in 0 until GROUP_WINDOW_MS
+    }
+
     /** Spec dışı, kullanıcı isteği: "görüldü" bilgisi SADECE en son
      *  görülen (kendi gönderdiğimiz) mesajın altında gösterilir — önceki
      *  tüm mesajlar örtük olarak görülmüş sayılır (WhatsApp/Telegram
@@ -130,14 +267,43 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     private var lastSeenMessageId: String? = null
     private var lastSeenAvatars: List<SeenByViewer> = emptyList()
 
-    private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+    /**
+     * Spec dışı, hata düzeltmesi (kullanıcı raporu: "görülmeyle chatte
+     * hareket eden profil fotoğrafları geç ve yanlış oluyor bazen").
+     *
+     * `applySeen` hedef mesajı listede bulamazsa ESKİDEN olayı tamamen
+     * DÜŞÜRÜYORDU. Bu, düşünüldüğünden çok daha sık oluyor: "görüldü"
+     * bildirimi, karşı taraf sohbeti açar açmaz gelir ve bizim
+     * gönderdiğimiz mesajın balonu o an listeye HENÜZ eklenmemiş olabilir
+     * (arşivden sayfa yükleniyor, ya da olay sırası gereği). Sonuç:
+     * avatarlar ya hiç görünmüyor ya da bir SONRAKİ bildirimle geç
+     * görünüyordu — ve bu arada gösterge, gerçekte daha yeni bir mesaj
+     * görülmüşken hâlâ ESKİ mesajın yanında durduğu için "yanlış" oluyordu.
+     *
+     * Artık uygulanamayan bildirim burada bekletiliyor ve hedef mesaj
+     * listeye girdiği anda (bkz. `addMessage`) uygulanıyor.
+     */
+    private var pendingSeenMessageId: String? = null
+    private var pendingSeenAvatars: List<SeenByViewer> = emptyList()
+
+    /** Spec dışı, kullanıcı isteği: sohbet içi mesaj arama — o an
+     *  "hedeflenen" eşleşmeyi geçici olarak vurgular (bkz. `setHighlighted`,
+     *  ChatActivity/GroupChatActivity arama gezinme düğmeleri). */
+    private var highlightedMessageId: String? = null
 
     class BubbleViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         val container: LinearLayout = itemView as LinearLayout
         val senderRow: View = itemView.findViewById(R.id.rowSender)
         val senderAvatar: ImageView = itemView.findViewById(R.id.imgSenderAvatar)
         val senderName: TextView = itemView.findViewById(R.id.txtSenderName)
+        val bubble: LinearLayout = itemView.findViewById(R.id.layoutBubble)
+        val pillReactions: TextView = itemView.findViewById(R.id.pillReactions)
+        val txtAttachmentCaption: TextView = itemView.findViewById(R.id.txtAttachmentCaption)
         val textView: TextView = itemView.findViewById(R.id.txtBubbleText)
+        val layoutReplyQuote: View = itemView.findViewById(R.id.layoutReplyQuote)
+        val viewReplyQuoteBar: View = itemView.findViewById(R.id.viewReplyQuoteBar)
+        val txtReplyQuoteSender: TextView = itemView.findViewById(R.id.txtReplyQuoteSender)
+        val txtReplyQuoteText: TextView = itemView.findViewById(R.id.txtReplyQuoteText)
         val editedLabel: TextView = itemView.findViewById(R.id.txtEditedLabel)
         val timestamp: TextView = itemView.findViewById(R.id.txtTimestamp)
         val status: ImageView = itemView.findViewById(R.id.imgStatus)
@@ -172,9 +338,101 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
     fun indexOfMessageId(messageId: String): Int = items.indexOfFirst { it.messageId == messageId }
 
+    /**
+     * İKİ CİHAZLI GERÇEK TESTTE (2026-09-06) görüldü: `loadHistoryIfAvailable`
+     * ve `onResume`'daki `syncMissedMessages` ikisi de IO'da geçmişi çekip
+     * `localMessages`'a EKLİYOR (bkz. o iki fonksiyondaki "yarış koşulu"
+     * notları). Nadiren aynı `message_id` iki kez giriyor — bir mesaj balonu
+     * çift görünüyor (veri değil, sadece liste; bir sonraki resume'da
+     * kendiliğinden düzeliyordu). Her birleştirmeden SONRA çağrılır: aynı
+     * NON-BLANK `message_id`'ye sahip fazladan satırları (ilki kalır) atar.
+     * Dönüş: silinen satır sayısı.
+     */
+    fun dedupeByMessageId(): Int {
+        val seen = HashSet<String>()
+        var removed = 0
+        var i = 0
+        while (i < items.size) {
+            val id = items[i].messageId
+            if (id.isNotEmpty() && !seen.add(id)) {
+                items.removeAt(i)
+                notifyItemRemoved(i)
+                removed++
+            } else {
+                i++
+            }
+        }
+        return removed
+    }
+
+    /** bkz. dosya başı `highlightedMessageId` notu — `null` geçilerek
+     *  vurgu kaldırılır (ör. bir zamanlayıcıyla kısa süre sonra, bkz.
+     *  ChatActivity/GroupChatActivity arama gezinmesi). */
+    fun setHighlighted(messageId: String?) {
+        val previous = highlightedMessageId
+        highlightedMessageId = messageId
+        if (previous != null && previous != messageId) {
+            val idx = indexOfMessageId(previous)
+            if (idx >= 0) notifyItemChanged(idx)
+        }
+        if (messageId != null) {
+            val idx = indexOfMessageId(messageId)
+            if (idx >= 0) notifyItemChanged(idx)
+        }
+    }
+
     fun addMessage(item: Item) {
-        items.add(item)
-        notifyItemInserted(items.size - 1)
+        // İKİ CİHAZLI GERÇEK TESTTE BULUNDU (2026-09-06): çok yollu teslim
+        // (LAN + onion + sunucu + gossipsub) aynı zarfı 2-4 kez getirebiliyor;
+        // her kopya için `handleIncomingEvent` bir kez daha `addMessage`
+        // çağırıyordu → AYNI mesaj için birden fazla balon (gönderende de
+        // görülüyordu — geçici, sohbet yeniden yüklenince tek'e düşüyordu).
+        // Artık `messageId` bazında idempotent: aynı kimlikli bir satır zaten
+        // varsa yeni balon EKLENMEZ (rastgele UUID taşıyan hata/iyimser
+        // satırlar zaten benzersiz).
+        if (item.messageId.isNotEmpty() && items.any { it.messageId == item.messageId }) {
+            return
+        }
+        // Spec dışı, kullanıcı isteği: GÖNDERİM sırasına göre ekle — mesajlar
+        // genelde sırayla gelir (sondan başa tarama O(1)'e yakın), ama
+        // gecikmeli teslim edilen bir mesaj (ör. gönderen bir süre çevrimdışı
+        // kaldıysa) ALINMA sırasına göre EN ALTA değil, GÖNDERİM anındaki
+        // doğru konumuna oturur. Eşit anahtarda sona (en yeniden sonra) ekler.
+        var idx = items.size
+        while (idx > 0 && items[idx - 1].orderKey > item.orderKey) idx--
+        items.add(idx, item)
+        notifyItemInserted(idx)
+        // bkz. `pendingSeenMessageId`: hedefi olmadığı için bekletilen bir
+        // "görüldü" bildirimi varsa ve gelen mesaj TAM O hedefse, şimdi
+        // uygula — yoksa gösterge eski mesajın yanında asılı kalırdı.
+        val awaitingSeenId = pendingSeenMessageId
+        if (awaitingSeenId != null && awaitingSeenId == item.messageId) {
+            val avatars = pendingSeenAvatars
+            pendingSeenMessageId = null
+            applySeen(awaitingSeenId, avatars)
+        }
+        // Komşuların "bir sonrakiyle gruplandı" durumu değişmiş olabilir
+        // (yeni bir komşu edindiler) — zaman damgası gizleme/gösterme için
+        // yeniden bind et.
+        if (idx > 0) notifyItemChanged(idx - 1)
+        if (idx < items.size - 1) notifyItemChanged(idx + 1)
+    }
+
+    /** Spec dışı, kullanıcı isteği: bir mesajın tepki özetini günceller
+     *  (bkz. Rust `reaction` olayı / `reactions_summary`). Hedef bu
+     *  listede yoksa sessizce yok sayılır — tepki, kaybolduğunda sohbetin
+     *  anlamını bozmayan bir süs; gönderen tarafta zaten yeniden deneme
+     *  kuyruğunda. */
+    /** Spec dışı, kullanıcı isteği: tepki pill'ine dokununca "kim ne attı"
+     *  listesi açılır (bkz. ChatActivity/GroupChatActivity
+     *  `showReactionsDialog`). */
+    var onReactionsClick: ((Item) -> Unit)? = null
+
+    fun applyReactions(messageId: String, summary: String) {
+        val idx = indexOfMessageId(messageId)
+        if (idx < 0) return
+        items[idx].reactions = summary
+        notifyItemChanged(idx)
     }
 
     /** Bir ekin durumunu/ilerlemesini günceller (bkz. pollNetwork
@@ -249,6 +507,10 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (idx < 0) return
         items[idx].isDeleted = true
         notifyItemChanged(idx)
+        // A deleted message no longer groups with its neighbors — re-bind
+        // them too, so they un-merge (restore spacing/timestamp/sender row).
+        if (idx > 0) notifyItemChanged(idx - 1)
+        if (idx < items.size - 1) notifyItemChanged(idx + 1)
     }
 
     /** Bir gönderim durumu güncellemesi uygular (bkz. Rust "status" olayı —
@@ -256,6 +518,23 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     fun applyStatus(targetMessageId: String, status: Status) {
         val idx = indexOfMessageId(targetMessageId)
         if (idx < 0) return
+        items[idx].status = status
+        notifyItemChanged(idx)
+    }
+
+    /**
+     * Spec dışı, kullanıcı isteği: başarısız (ERROR) bir mesajı yeniden
+     * gönderme — AYNI balonu tutar, ikinci bir kopya EKLEMEZ. Yeniden
+     * gönderim yeni bir ağ paketi (yeni `message_id`/`local_id`, çünkü
+     * eskisinin ratchet konumu artık geçersiz olabilir — bkz. Rust
+     * `MAX_UNCONFIRMED_AGE_MS` notu) olduğundan, bu balonun kimliği de
+     * ileride gelecek "status"/"seen" olaylarının doğru eşleşebilmesi için
+     * yeni kimlikle güncellenir. Hedef bulunamazsa sessizce yok sayılır.
+     */
+    fun retryMessage(oldMessageId: String, newMessageId: String, status: Status) {
+        val idx = indexOfMessageId(oldMessageId)
+        if (idx < 0) return
+        items[idx].messageId = newMessageId
         items[idx].status = status
         notifyItemChanged(idx)
     }
@@ -272,7 +551,13 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
      */
     fun applySeen(targetMessageId: String, viewerAvatars: List<SeenByViewer>) {
         val idx = indexOfMessageId(targetMessageId)
-        if (idx < 0) return
+        if (idx < 0) {
+            // bkz. `pendingSeenMessageId` — düşürmek yerine beklet.
+            pendingSeenMessageId = targetMessageId
+            pendingSeenAvatars = viewerAvatars
+            return
+        }
+        pendingSeenMessageId = null
         val previousId = lastSeenMessageId
         val previousIdx = previousId?.let { indexOfMessageId(it) } ?: -1
         if (idx < previousIdx) return
@@ -292,11 +577,87 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
     override fun onBindViewHolder(holder: BubbleViewHolder, position: Int) {
         val item = items[position]
+        val groupedWithPrevious = isGroupedWithPrevious(position)
+        val groupedWithNext = isGroupedWithNext(position)
         holder.container.gravity = if (item.isMine) Gravity.END else Gravity.START
-        val bubbleBackground = if (item.isMine) R.drawable.bubble_mine else R.drawable.bubble_theirs
-        holder.textView.setBackgroundResource(bubbleBackground)
-        holder.layoutAttachment.setBackgroundResource(bubbleBackground)
+        // Spec dışı, kullanıcı isteği (saat/tikler balonun İÇİNE taşındı):
+        // balon arka planı artık metnin/ek düzeninin KENDİSİNE değil,
+        // ikisini de meta satırıyla birlikte saran kapsayıcıya uygulanıyor
+        // — bkz. item_message_bubble.xml `layoutBubble`. Aksi halde saat,
+        // balonun içinde değil altında/yanında ayrı bir kutuda kalırdı.
+        // Spec dışı, kullanıcı isteği (gönderilen görsel): art arda gelen
+        // ve arası 2 dakikadan kısa olan mesajlar TEK bir yığın gibi
+        // okunsun. Bunu, balonların BİRLEŞTİĞİ kenardaki köşe yarıçapını
+        // küçülterek yapıyoruz — grubun ilki normal, sonrakiler "kaynamış"
+        // varyantı kullanır (bkz. bubble_*_grouped.xml).
+        // Gruplanan balonlar KENDİ arka planlarını ÇİZMEZ: birleşik dış hat
+        // (dışbükey köşeler + basamaklardaki içbükey filetolar) tek bir yol
+        // olarak `MergedBubbleDecoration` tarafından listenin altına
+        // çiziliyor. Burada bir yuvarlak dikdörtgen çizmek, tam da
+        // kullanıcının şikâyet ettiği "hâlâ kendi filetleriyle kalıyorlar"
+        // durumunu geri getirirdi.
+        // Hiçbir balon KENDİ arka planını çizmez — gruplu da, tek de.
+        // Sebep kullanıcı isteği: "en üstteki balonlar daha açık, alttakiler
+        // şu anki renginde, arada gradient". Bir drawable yalnızca kendi
+        // sınırlarını bilir, listenin tamamına gerilmiş bir gradyandan kendi
+        // payına düşen dilimi alamaz. Bütün zeminler tek yerden, ortak bir
+        // shader ile çiziliyor: bkz. MergedBubbleDecoration.
+        holder.bubble.background = null
 
+        // Tepki pill'i — balonun yanında, ilk satır hizasında (bkz.
+        // item_message_bubble.xml `colBubbleSide`).
+        // Açıklama SADECE ek balonlarında (metin mesajının kendi metni
+        // zaten `txtBubbleText`).
+        if (item.attachment != null && item.caption.isNotBlank() && !item.isDeleted) {
+            holder.txtAttachmentCaption.visibility = View.VISIBLE
+            holder.txtAttachmentCaption.text = item.caption
+        } else {
+            holder.txtAttachmentCaption.visibility = View.GONE
+        }
+
+        if (item.reactions.isBlank()) {
+            holder.pillReactions.visibility = View.GONE
+        } else {
+            holder.pillReactions.visibility = View.VISIBLE
+            holder.pillReactions.text = item.reactions
+            holder.pillReactions.setOnClickListener { onReactionsClick?.invoke(item) }
+        }
+
+        // Spec dışı, hata düzeltmesi (kullanıcı: "birleşen balonlar
+        // çalışmıyor"): köşe yarıçapları doğru seçiliyordu ama balonlar
+        // birbirine HİÇ DEĞMİYORDU — önceki satırın ALT dolgusu 4dp olarak
+        // kalıyor, yalnızca sonrakinin ÜST dolgusu 1dp'ye çekiliyordu, yani
+        // arada hâlâ 5dp boşluk vardı ve "kaynamış blok" etkisi hiç
+        // oluşmuyordu. Gruplanan kenarda dolgu artık TAM SIFIR: iki balon
+        // birbirine değiyor ve küçültülmüş köşelerle tek parça okunuyor
+        // (bkz. bubble_*_grouped.xml).
+        val defaultPaddingPx = (4 * holder.itemView.resources.displayMetrics.density).toInt()
+        holder.container.setPadding(
+            defaultPaddingPx,
+            if (groupedWithPrevious) 0 else defaultPaddingPx,
+            defaultPaddingPx,
+            if (groupedWithNext) 0 else defaultPaddingPx
+        )
+
+        // Spec dışı, kullanıcı isteği: arama sonucunda hedeflenen mesajı
+        // geçici olarak vurgular — bubble drawable'ını DEĞİŞTİRMEK yerine
+        // (açık/koyu tema varyantı gerektirirdi) tüm satırın arkaplanına
+        // yarı saydam bir renk uygulanır.
+        holder.container.setBackgroundColor(
+            if (item.messageId == highlightedMessageId) {
+                MaterialColors.getColor(holder.container, com.google.android.material.R.attr.colorTertiaryContainer)
+            } else {
+                android.graphics.Color.TRANSPARENT
+            }
+        )
+
+        // Spec dışı, kullanıcı isteği: metin rengi HER ZAMAN tema rengiyle
+        // (dolayısıyla — kendi balonlarımız için — Ayarlar'daki vurgu/accent
+        // rengiyle, bkz. ThemePrefs.applyAccentColor) OTOMATİK belirlenir,
+        // elle seçilebilir AYRI bir metin rengi tercihi YOK ("text alwasy
+        // should be full black or white depending on accent color" — bunu
+        // Material'ın content-based dynamic color motoru zaten `colorOn*`
+        // rollerinde doğru hesaplıyor).
         val onColorAttr = if (item.isMine) {
             com.google.android.material.R.attr.colorOnPrimaryContainer
         } else {
@@ -305,8 +666,37 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val onColor = MaterialColors.getColor(holder.textView, onColorAttr)
         holder.textView.setTextColor(onColor)
         holder.txtAttachmentName.setTextColor(onColor)
+        holder.txtAttachmentCaption.setTextColor(onColor)
+        // Saat/"düzenlendi"/durum tiki artık balonun İÇİNDE — sabit bir
+        // `?attr/colorOnSurfaceVariant` (XML'deki eski değer) giden balonun
+        // vurgu renkli zemininde okunmuyordu. Balonun kendi metin renginin
+        // hafif soluk bir tonu her iki balonda da, açık ve koyu temada
+        // doğru kontrastı verir.
+        val metaColor = androidx.core.graphics.ColorUtils.setAlphaComponent(onColor, 0xB3)
+        holder.timestamp.setTextColor(metaColor)
+        holder.editedLabel.setTextColor(metaColor)
+        // Ek balonundaki ikincil satırlar da AYNI aileden olmalı: sabit
+        // `?attr/colorOnSurfaceVariant` (XML'deki değer) griler
+        // koyulaştırıldıktan sonra vurgu renkli giden balonun üzerinde
+        // neredeyse okunmuyordu (gerçek cihazda görüldü).
+        holder.txtAttachmentSize.setTextColor(metaColor)
+        holder.txtAttachmentEta.setTextColor(metaColor)
+        holder.txtVoiceDuration.setTextColor(metaColor)
+        // Spec dışı, hata düzeltmesi (kullanıcı: "Redmi'de okunma tikleri
+        // görünmüyor"): durum tiki ve "gören" göstergesi artık balonun
+        // İÇİNDE değil, YANINDA — yani sohbetin arka planının üzerinde
+        // duruyorlar. Balonun metin rengini (`onColor`) miras almaya devam
+        // ediyorlardı ve o renk yalnızca balonun İÇİNDE doğru: turuncu
+        // balonun `colorOnPrimaryContainer`'ı koyu, koyu sohbet zemininde
+        // ise neredeyse görünmez oluyordu. Dışarıda doğru rol yüzeyin
+        // rengi.
+        val sideColor = MaterialColors.getColor(
+            holder.container, com.google.android.material.R.attr.colorOnSurfaceVariant
+        )
+        holder.status.imageTintList = android.content.res.ColorStateList.valueOf(sideColor)
+        holder.txtSeenByMore.setTextColor(sideColor)
 
-        if (!item.isMine && item.senderName != null) {
+        if (!item.isMine && item.senderName != null && !groupedWithPrevious) {
             holder.senderName.text = item.senderName
             AvatarUtil.renderInto(holder.senderAvatar, item.senderAvatarJpeg, item.senderName)
             holder.senderRow.visibility = View.VISIBLE
@@ -314,8 +704,74 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.senderRow.visibility = View.GONE
         }
 
+        // Spec dışı, kullanıcı isteği (WhatsApp tarzı "sağa kaydırıp
+        // yanıtla"): bu mesaj başka bir mesaja yanıtsa, balonun içinde
+        // küçük bir alıntı kutusu — dokununca sohbet yanıtlanan mesaja
+        // kaydırılır (bkz. `onReplyPreviewClick`).
+        // "null" guard: a JSON-parsing bug upstream once let the literal
+        // string "null" through instead of real null here (org.json's
+        // optString(key, "") doesn't fall back on an explicit JSON null,
+        // only a missing key) — kept as a safety net against that class of bug.
+        val replyToId = item.replyToMessageId?.takeIf { it != "null" }
+        if (replyToId != null) {
+            holder.layoutReplyQuote.visibility = View.VISIBLE
+            holder.txtReplyQuoteSender.text = item.replyToSenderLabel?.takeIf { it != "null" }
+            holder.txtReplyQuoteText.text = item.replyToPreview?.takeIf { it != "null" }
+            // Kullanıcı raporu ("alıntı mesajlar beyaz görünüyor").
+            //
+            // Tasarım niyeti doğruydu: yüzey renginin üzerine %12 opaklıkta
+            // `colorOnSurface`. Uygulaması bozuktu — `reply_quote_background.xml`
+            // içinde `<solid android:color="?attr/colorOnSurface"
+            // android:alpha="0.12" />` yazıyordu ve `android:alpha`, `<solid>`
+            // etiketinin GEÇERLİ bir özniteliği DEĞİL. Sessizce yok sayılıp
+            // dolgu TAM OPAK `colorOnSurface` oluyordu; koyu temada bu renk
+            // neredeyse beyaz olduğu için kutu, koyu sohbetin ortasında
+            // bembeyaz bir blok olarak çiziliyordu.
+            //
+            // NOT (ilk denememde yanlış varsaydım): bu kutu balonun İÇİNDE
+            // değil — `item_message_bubble.xml`'de `txtBubbleText`'in KARDEŞİ,
+            // yani sohbet arka planının üzerinde duruyor. Bu yüzden renk
+            // temeli balonun metin rengi değil, YÜZEY rengi olmalı; zaten
+            // balonun altındaki zaman damgası da aynı aileyi kullanıyor ve
+            // bu arka planda okunaklı olduğu görülüyor.
+            //
+            // Alfa artık kodda uygulanıyor (XML'de mümkün olmadığı için),
+            // renkler orijinal niyetteki tema rollerinde kalıyor.
+            val quoteBase = MaterialColors.getColor(
+                holder.layoutReplyQuote, com.google.android.material.R.attr.colorOnSurface
+            )
+            val quoteAccent = MaterialColors.getColor(
+                holder.layoutReplyQuote, com.google.android.material.R.attr.colorPrimary
+            )
+            holder.layoutReplyQuote.backgroundTintList = android.content.res.ColorStateList.valueOf(
+                androidx.core.graphics.ColorUtils.setAlphaComponent(quoteBase, 0x1F)
+            )
+            holder.viewReplyQuoteBar.setBackgroundColor(quoteAccent)
+            holder.txtReplyQuoteSender.setTextColor(quoteAccent)
+            holder.txtReplyQuoteText.setTextColor(quoteBase)
+            holder.layoutReplyQuote.setOnClickListener {
+                onReplyPreviewClick?.invoke(replyToId)
+            }
+        } else {
+            holder.layoutReplyQuote.visibility = View.GONE
+            holder.layoutReplyQuote.setOnClickListener(null)
+        }
+
         val attachment = item.attachment
-        if (attachment != null) {
+        if (attachment != null && item.isDeleted) {
+            // Spec dışı, hata düzeltmesi ("ekleri de uzun basıp silebilmeliyiz"):
+            // önceden bu dal HİÇ `isDeleted`i kontrol etmiyordu — bir ek
+            // silindiğinde (bkz. ChatActivity.confirmDeleteMessage) balon
+            // görsel olarak DEĞİŞMİYORDU, sanki hiç silinmemiş gibi
+            // göründüğü hâlde arka planda mesaj zaten silinmişti. Metin
+            // mesajlarıyla AYNI "Bu mesaj silindi" yer tutucusu.
+            holder.layoutAttachment.visibility = View.GONE
+            holder.textView.visibility = View.VISIBLE
+            holder.editedLabel.visibility = View.GONE
+            holder.textView.text = holder.itemView.context.getString(R.string.msg_deleted)
+            holder.textView.setTypeface(holder.textView.typeface, Typeface.ITALIC)
+            holder.textView.alpha = 0.6f
+        } else if (attachment != null) {
             holder.textView.visibility = View.GONE
             holder.editedLabel.visibility = View.GONE
             bindAttachment(holder, item, attachment)
@@ -332,10 +788,42 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                 holder.textView.setTypeface(Typeface.DEFAULT, Typeface.NORMAL)
                 holder.textView.alpha = 1f
                 holder.editedLabel.visibility = if (item.isEdited) View.VISIBLE else View.GONE
+                // Spec dışı, kullanıcı isteği: mesaj metnindeki linkler
+                // (http/https/www) tıklanabilir olsun. `Linkify.addLinks`
+                // link bulursa TextView'a kendi `LinkMovementMethod`'unu
+                // atar — bu, ACTION_DOWN'ı tüketip üstteki `holder.itemView`
+                // long-click dinleyicisinin hiç tetiklenmemesine yol
+                // açabilir (bilinen Android davranışı: bir alt view kendi
+                // hareket yöntemiyle dokunuşu tüketirse üst view'a asla
+                // ulaşmaz) — bu yüzden AYNI uzun-basma dinleyicisi (bkz.
+                // aşağısı) `holder.textView`'a da AYRICA atanıyor, hangisi
+                // dokunuşu yakalarsa yakalasın menü yine açılır.
+                android.text.util.Linkify.addLinks(holder.textView, android.text.util.Linkify.WEB_URLS)
             }
         }
 
-        holder.timestamp.text = timeFormat.format(Date(item.timestamp))
+        // Spec dışı, kullanıcı isteği: her mesajın altında salt "HH:mm"
+        // yerine tam "(sent at: HH:MM day)" biçiminde, hangi GÜN
+        // gönderildiğini de gösteren mutlak bir zaman damgası — bkz.
+        // util.formatAbsoluteTime (Ayarlar'daki bekleyen mesajlar
+        // listesiyle PAYLAŞILAN aynı biçim). Kullanıcı isteği (genişletme):
+        // ALINAN mesajlarda, göndericinin embed ettiği GERÇEK gönderim anı
+        // (bkz. `Item.sentAtMs`) biliniyorsa "10:42 (sent at: 10:41)" gibi
+        // hem yerel ALINMA anı HEM gönderim anı gösterilir — ikisi network
+        // gecikmesi/kuyruklama yüzünden FARKLI olabilir. Bilinmiyorsa
+        // (gönderiliyor balonu, eski sürüm göndericisi, ya da yerel
+        // geçmişten yüklenmiş bir mesaj) önceki tek-zaman-damgası davranışına
+        // düşülür.
+        val sentAt = item.sentAtMs
+        holder.timestamp.text = if (!item.isMine && sentAt != null && sentAt > 0) {
+            holder.itemView.context.getString(
+                R.string.lbl_received_sent_at, formatAbsoluteTime(item.timestamp), formatAbsoluteTime(sentAt)
+            )
+        } else {
+            holder.itemView.context.getString(R.string.lbl_sent_at, formatAbsoluteTime(item.timestamp))
+        }
+        // Only the last bubble in a grouped run shows a timestamp.
+        holder.timestamp.visibility = if (groupedWithNext) View.GONE else View.VISIBLE
 
         if (item.isMine && !item.isDeleted) {
             holder.status.visibility = View.VISIBLE
@@ -356,16 +844,26 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.rowSeenBy.visibility = View.GONE
         }
 
-        holder.itemView.setOnLongClickListener {
-            // Ek balonları için düzenle/sil desteklenmiyor (bkz. dosya başı
-            // notu) — sadece düz metin mesajları uzun basmaya tepki verir.
-            if (item.isMine && !item.isDeleted && item.attachment == null) {
+        val longPressListener = View.OnLongClickListener {
+            // Ek balonları için düzenle/sil/kopyala desteklenmiyor (bkz.
+            // dosya başı notu) — sadece düz metin mesajları uzun basmaya
+            // tepki verir. Spec dışı, kullanıcı isteği: önceden SADECE
+            // kendi mesajlarımız (`item.isMine`) tepki veriyordu (Düzenle/
+            // Sil için) — artık alınan mesajlar da tepki verir, çağıran
+            // taraf (bkz. ChatActivity/GroupChatActivity) `isMine`'a göre
+            // ya sadece "Kopyala" ya da tam menüyü gösterir.
+            if (!item.isDeleted && item.attachment == null) {
                 onItemLongPress?.invoke(item)
                 true
             } else {
                 false
             }
         }
+        holder.itemView.setOnLongClickListener(longPressListener)
+        // bkz. `Linkify.addLinks` çağrısı yukarısı — link içeren bir metinde
+        // `holder.textView` kendi `LinkMovementMethod`'u yüzünden dokunuşu
+        // tüketebilir, bu yüzden AYNI dinleyici ona da atanıyor.
+        holder.textView.setOnLongClickListener(longPressListener)
     }
 
     /** Bir ek balonunu doldurur: OFFERED/FAILED -> "İndir" düğmesi,
@@ -379,7 +877,13 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     private fun bindAttachment(holder: BubbleViewHolder, item: Item, attachment: AttachmentInfo) {
         holder.layoutAttachment.visibility = View.VISIBLE
 
-        if (attachment.mimeType.startsWith("audio/")) {
+        // Sadece GERÇEK bir sesli mesaj oynatıcı olarak çizilir. Kullanıcının
+        // dosya yöneticisinden eklediği düz bir ses DOSYASININ süresi yoktur
+        // ve oynatıcı olarak çizilince balonda ne dosya adı, ne boyut, ne de
+        // anlamlı bir etiket kalıyordu — alıcı ne geldiğini göremiyordu.
+        // Gönderen gerçek sesli notlarda `duration_ms`'i FileOffer'a koyduğu
+        // için, henüz İNDİRİLMEMİŞ bir sesli not yine oynatıcı olarak çizilir.
+        if (attachment.mimeType.startsWith("audio/") && (attachment.durationMs ?: 0) > 0) {
             holder.imgAttachmentThumbnail.visibility = View.GONE
             holder.rowGenericAttachment.visibility = View.GONE
             holder.layoutVoiceMessage.visibility = View.VISIBLE

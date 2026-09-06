@@ -476,6 +476,52 @@ listesindeki her `device_fingerprint` için ayrı DHT sorgusu yapar.
   isteğe bağlı Circuit Relay v2 hizmeti (simetrik NAT arkasındaki iki
   peer arasında şifreli trafiği kör taşır).
 
+### 4.4 Sunucu modu (opsiyonel, spec dışı — sonradan eklendi)
+
+Node modu ve röle, adı üstünde, **hiçbir şey saklamaz**: Circuit Relay v2
+sadece iki taraf da O ANDA bağlıyken canlı bir devre kurar. Dolayısıyla
+alıcı çevrimdışıyken dayanıklılığın tamamı gönderen tarafta kalıyor
+(`awaiting_confirmation`, 2 güne kadar yeniden deneme). Telefonu bir hafta
+kapalı kalan, ya da yeni kurulmuş bir cihaz için bu yetmiyor.
+
+Bunun için ayrı bir **sunucu** seçeneği var (bkz. depo kökündeki
+`typeon-server/`). Röleden farkı tek cümleyle: sunucu zarfı DİSKE yazar.
+
+```
+Deposit { mailbox_id, sealed }   -> sunucu zarfı saklar
+Fetch   { cursors }              -> alıcı döndüğünde imleçten sonrasını çeker
+Ack     { mailbox_id, seq }      -> işlendi, silinebilir
+```
+
+- `mailbox_id`, istemcinin zaten hesapladığı gossipsub topic adının
+  HKDF ile körleştirilmiş hâli — sunucu bir kutu adından fingerprint
+  okuyamaz.
+- `sealed`, zarfın ratchet `root_key`'inden türetilen AYRI bir anahtarla
+  İKİNCİ kez şifrelenmiş hâli. Aksi halde `MessagePacketHeader`'ın açık
+  taşıdığı `sender_device_fingerprint` sunucunun veritabanına okunabilir
+  girerdi.
+- Katılım tek bir KALICI kodla olur (`typeon-server:<adres>#<jeton>`):
+  operatör onu bir kez yayımlar (QR, bağlantı ya da düz metin) ve sınırsız
+  kişi kendi başına katılır — operatörle hiç konuşmadan. Sybil kapısı
+  jetonun tek kullanımlık olması DEĞİL, saatlik kayıt tavanı (60) ve
+  operatörün kodu istediği an döndürebilmesidir; kod döndürmek kayıtlı
+  cihazları etkilemez. Dar durumlar için (belirli sayıda kullanım / gün)
+  tek kullanımlık davetler duruyor.
+- Kayıt (`Enroll`), operatörün verdiği davet jetonu ve
+  SADECE O SUNUCU İÇİN üretilmiş taze bir anahtar çiftiyle yapılır —
+  cihazın kimlik anahtarları sunucuya hiç gitmez. İmza, uygulamanın geri
+  kalanıyla aynı şekilde HİBRİT (Ed25519 + ML-DSA-87, ikisi de doğrulanır).
+- Sunucu yolu gossipsub'ın YERİNE geçmez: el sıkışmalar ve ratchet
+  rotasyon duyuruları her zaman iki yoldan gider, sıradan mesajlar ise 30
+  saniye sonra gossipsub'a da kopyalanır. Sansürleyen/bozuk bir sunucu
+  teslimi yavaşlatır, engelleyemez.
+
+Geçmişin sunucuda saklanması AYRI ve varsayılan kapalı bir seçenek: teslim
+zarfları geçmiş olarak kullanılamaz (ratchet anahtarları ileri-gizli ve
+silinmiş), bu yüzden arşiv uzun ömürlü bir "kök arşiv anahtarı" ile YENİDEN
+şifrelenir — ve o katman ileri-gizli DEĞİLDİR. Ayrıntılı gerekçe ve tehdit
+modeli için bkz. `SECURITY.md`.
+
 ---
 
 ## 5. Grup Mesajlaşma

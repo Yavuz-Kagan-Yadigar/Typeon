@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spec dışı, kullanıcı isteği: gönder tuşunun simgesi artık jenerik bir
+     ok/"➤" değil, uygulamanın kendi bulut+yağmur logosu — kullanıcının
+     verdiği görselden çizildi.
+
+     "Maske olarak kullan" isteği: şekil BİLEREK tek renk bir siluet olarak
+     tanımlandı (dolgu yok, sadece yuvarlak uçlu konturlar) ve rengi
+     `@android:color/white` — yani gerçek renk, üstüne uygulanan `tint`ten
+     gelir (bkz. activity_chat.xml btnSend `android:tint`). Böylece aynı
+     dosya açık/koyu temada ve seçilen vurgu renginde doğru renkte çizilir;
+     ayrı bir varyant dosyası GEREKMEZ.
+
+     viewport 470x530 (kare DEĞİL): logo dikey — yağmur çizgileri bulutun
+     altına taşıyor. width/height oranı buna eşlenik tutuldu, aksi halde
+     simge yatay eziliyordu. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="27dp"
+    android:viewportWidth="470"
+    android:viewportHeight="530"
+    android:tint="?attr/colorOnPrimary">
+
+    <!-- Bulut: alt kenarı KAPALI DEĞİL (görseldeki gibi) — tek, açık bir
+         eğri; iki ucu yuvarlak kapakla biter. -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="@android:color/white"
+        android:strokeWidth="35"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M152,256 C128,268 92,266 66,244 C30,214 22,156 50,118 C76,82 128,74 158,98 C172,46 222,14 274,22 C330,30 372,76 374,128 C414,132 444,168 436,210 C428,250 392,272 352,262" />
+
+    <!-- Yağmur: üç dikey çizgi; ortadaki en uzun/en yüksekten başlar. -->
+    <path
+        android:strokeColor="@android:color/white"
+        android:strokeWidth="35"
+        android:strokeLineCap="round"
+        android:pathData="M231,175 L231,505" />
+    <path
+        android:strokeColor="@android:color/white"
+        android:strokeWidth="35"
+        android:strokeLineCap="round"
+        android:pathData="M168,305 L168,505" />
+    <path
+        android:strokeColor="@android:color/white"
+        android:strokeWidth="35"
+        android:strokeLineCap="round"
+        android:pathData="M291,262 L291,505" />
+
+</vector>

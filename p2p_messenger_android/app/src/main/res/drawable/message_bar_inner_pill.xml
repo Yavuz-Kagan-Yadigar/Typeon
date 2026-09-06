@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spec dışı, kullanıcı isteği ("pill içine pill çiz ... ayrı ayrı ince
+     border sadece"): dış pill'in (bkz. message_bar_pill.xml) İÇİNDE, düğme
+     grubunu ve metin alanını ayıran ince çerçeveler. Dolgu YOK — sadece
+     kontur; aksi halde dış pill'in üstünde ikinci bir dolu yüzey oluşur ve
+     iki katmanlı/ağır görünürdü. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@android:color/transparent" />
+    <corners android:radius="999dp" />
+    <stroke
+        android:width="1dp"
+        android:color="?attr/colorOutline" />
+</shape>

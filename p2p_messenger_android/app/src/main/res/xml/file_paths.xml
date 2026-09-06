@@ -5,4 +5,9 @@
          dizin paylaşılır; şifreli `.enc` dosyaları veya DB hiçbir zaman
          FileProvider üzerinden erişilebilir değildir. -->
     <files-path name="attachment_plain_cache" path="attachments/plain_cache/" />
+    <!-- Context.getCacheDir()/avatar_view/ — bkz. AvatarUtil.openFullscreen:
+         profil/grup fotoğrafı tam ekran görüntüleyiciye (MediaViewerActivity)
+         taşınırken geçici olarak buraya yazılır. Sadece bu alt dizin
+         paylaşılır. -->
+    <cache-path name="avatar_view" path="avatar_view/" />
 </paths>

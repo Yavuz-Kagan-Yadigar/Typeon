@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- bkz. values/colors.xml aynı not — gri/nötr roller bilerek
+         Material referansından daha koyu. -->
     <!-- Material You (M3) tema renk rolleri — koyu tema. Işık tema
          karşılıkları values/colors.xml'de. -->
     <color name="md_primary">#D0BCFF</color>
@@ -14,11 +16,12 @@
     <color name="md_on_tertiary">#492532</color>
     <color name="md_surface">#1C1B1F</color>
     <color name="md_on_surface">#E6E1E5</color>
-    <color name="md_surface_variant">#49454F</color>
+    <color name="md_surface_variant">#332F3A</color>
     <color name="md_on_surface_variant">#CAC4D0</color>
     <color name="md_background">#1C1B1F</color>
     <color name="md_on_background">#E6E1E5</color>
-    <color name="md_outline">#938F99</color>
+    <color name="md_outline">#736F7C</color>
+    <color name="md_outline_variant">#403C48</color>
     <color name="md_error">#F2B8B5</color>
     <color name="md_on_error">#601410</color>
     <color name="md_error_container">#8C1D18</color>
