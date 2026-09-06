@@ -2257,7 +2257,14 @@ class ChatActivity : AppCompatActivity() {
             isEdited = isEdited,
             isDeleted = isDeleted,
             replyToMessageId = replyToMessageId,
-            replyToPreview = replyToPreview
+            replyToPreview = replyToPreview,
+            // İki cihazlı test (2026-09-07): 1:1 geçmiş yüklemesi tepki özetini
+            // OKUMUYORDU (grup yolu `itemFromGroupHistoryJson` okuyor) — tepki
+            // DB'de kalıcı (`message_reactions`) ve canlı olayda görünüyordu ama
+            // sohbet yeniden açılınca / uygulama yeniden başlayınca balondan
+            // kayboluyordu. `load_message_history` zaten `reactions` alanını
+            // JSON'a koyuyor (bkz. Rust `reactions_summary`).
+            reactions = obj.optString("reactions", "")
         )
     }
 
