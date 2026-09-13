@@ -47,7 +47,12 @@ class P2PApplication : Application() {
         // (hemen, `recreate()`'ten önce) çağırır — bkz. o çağrı noktası.
         val initialFontChoice = com.p2p.messenger.util.ThemePrefs.getFontChoice(this)
         if (initialFontChoice == com.p2p.messenger.util.ThemePrefs.FontChoice.CUSTOM) {
-            com.p2p.messenger.util.FontOverride.applyFile(com.p2p.messenger.util.ThemePrefs.customFontFile(this))
+            // bkz. `ThemePrefs.activeCustomFontFile` — birden fazla içe
+            // aktarılmış font arasından o an SEÇİLİ olanın dosyası; kayıt
+            // bozulmuşsa (null) sessizce hiçbir şey uygulanmaz.
+            com.p2p.messenger.util.ThemePrefs.activeCustomFontFile(this)?.let {
+                com.p2p.messenger.util.FontOverride.applyFile(it)
+            }
         } else {
             com.p2p.messenger.util.FontOverride.apply(initialFontChoice.familyName)
         }
@@ -129,7 +134,9 @@ class P2PApplication : Application() {
                 // `Resources.updateConfiguration` çağırdıktan SONRA
                 // gelmeli.
                 if (fontChoice == com.p2p.messenger.util.ThemePrefs.FontChoice.CUSTOM) {
-                    com.p2p.messenger.util.FontOverride.applyFile(com.p2p.messenger.util.ThemePrefs.customFontFile(activity))
+                    com.p2p.messenger.util.ThemePrefs.activeCustomFontFile(activity)?.let {
+                        com.p2p.messenger.util.FontOverride.applyFile(it)
+                    }
                 } else {
                     com.p2p.messenger.util.FontOverride.apply(fontChoice.familyName)
                 }

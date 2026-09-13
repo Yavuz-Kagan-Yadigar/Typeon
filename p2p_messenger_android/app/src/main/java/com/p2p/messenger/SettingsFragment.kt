@@ -485,19 +485,21 @@ class SettingsFragment : Fragment() {
         })
 
         // bkz. ThemePrefs.FontChoice — sırası buradaki görünen isim listesiyle
-        // BİREBİR eşleşmeli (index bazlı eşleme).
-        val fontChoices = ThemePrefs.FontChoice.entries
+        // BİREBİR eşleşmeli (index bazlı eşleme). `CUSTOM` bu listede YOK —
+        // bir dizin değil, `ThemePrefs.getCustomFonts()`'taki N içe aktarılmış
+        // fonttan HANGİSİNİN seçili olduğunu `getActiveCustomFontId` ayrıca
+        // tutuyor (bkz. aşağıdaki diyalog kurulumu — kullanıcı isteği:
+        // "custom" yerine içe aktarılan fontun GERÇEK adı, birden fazla
+        // içe aktarma desteklenmeli).
+        val fontChoices = ThemePrefs.FontChoice.entries.filter { it != ThemePrefs.FontChoice.CUSTOM }
         val fontLabels = arrayOf(
             getString(R.string.lbl_font_default),
             getString(R.string.lbl_font_sans_medium),
             getString(R.string.lbl_font_sans_condensed),
             getString(R.string.lbl_font_serif),
             getString(R.string.lbl_font_monospace),
-            getString(R.string.lbl_font_sans_black),
-            getString(R.string.lbl_font_custom)
+            getString(R.string.lbl_font_sans_black)
         )
-        // bkz. `fontChoices` — ENUM sırasıyla BİREBİR eşleşmeli;
-        // CUSTOM sona eklendi, index-matched devam eder.
         // Spec dışı, hata düzeltmesi (ikinci deneme — "comboboxta hâlâ
         // sadece Default görünüyor"): `MaterialAutoCompleteTextView` +
         // `setSimpleItems` teoride filtrelenmemesi GEREKEN bir liste
@@ -522,49 +524,76 @@ class SettingsFragment : Fragment() {
         val fontValueText = view.findViewById<TextView>(R.id.font_family_value)
         fun currentFontLabel(): String {
             val choice = ThemePrefs.getFontChoice(requireContext())
-            val idx = fontChoices.indexOf(choice).coerceAtLeast(0)
-            return if (choice == com.p2p.messenger.util.ThemePrefs.FontChoice.CUSTOM) {
-                getString(R.string.lbl_font_custom)
+            return if (choice == ThemePrefs.FontChoice.CUSTOM) {
+                // bkz. `ThemePrefs.activeCustomFontName` — birden fazla içe
+                // aktarılmış font arasından seçili olanın GERÇEK adı; kayıt
+                // bozulmuşsa (id silinmiş) jenerik ada düşülür.
+                ThemePrefs.activeCustomFontName(requireContext()) ?: getString(R.string.lbl_font_custom)
             } else {
-                fontLabels[idx]
+                fontLabels[fontChoices.indexOf(choice).coerceAtLeast(0)]
             }
         }
         fontValueText.text = currentFontLabel()
         view.findViewById<Button>(R.id.btn_pick_font).setOnClickListener {
             val currentChoice = ThemePrefs.getFontChoice(requireContext())
-            val currentIndex = if (currentChoice == com.p2p.messenger.util.ThemePrefs.FontChoice.CUSTOM) {
-                fontChoices.size // CUSTOM = son index, +1 kaydırılmış hali
+            val activeCustomId = ThemePrefs.getActiveCustomFontId(requireContext())
+            val customFonts = ThemePrefs.getCustomFonts(requireContext())
+            // Diyalog satırları: [0] "İçe aktar", [1..fontChoices.size] yerleşik
+            // fontlar, gerisi (varsa) içe aktarılmış fontlar — HER BİRİ kendi
+            // adıyla (bkz. `ThemePrefs.CustomFont.displayName`, kullanıcı
+            // isteği: "custom" değil gerçek font adı, birden fazla olabilmeli).
+            val dialogLabels = arrayOf(getString(R.string.lbl_font_import)) + fontLabels +
+                customFonts.map { it.displayName }.toTypedArray()
+            val currentIndex = if (currentChoice == ThemePrefs.FontChoice.CUSTOM) {
+                val i = customFonts.indexOfFirst { it.id == activeCustomId }
+                if (i >= 0) 1 + fontChoices.size + i else 0
             } else {
                 fontChoices.indexOf(currentChoice).coerceAtLeast(0) + 1
             }
-            val dialogLabels = arrayOf(getString(R.string.lbl_font_import)) + fontLabels
             AlertDialog.Builder(requireContext())
                 .setTitle(R.string.lbl_font_family)
                 .setSingleChoiceItems(dialogLabels, currentIndex) { dialog, position ->
-                    if (position == 0) {
-                        // "Import a .ttf file…" — font seçmez, dialog'u kapatıp
-                        // dosya seçiciyi açar
-                        dialog.dismiss()
-                        pickFontLauncher.launch(arrayOf("font/ttf", "font/otf", "application/x-font-ttf", "application/octet-stream", "*/*"))
-                    } else {
-                        // bkz. `fontChoices` — position 1+ → index = position - 1
-                        val chosen = fontChoices[position - 1]
-                        if (chosen != currentChoice) {
-                            ThemePrefs.setFontChoice(requireContext(), chosen)
-                            fontValueText.text = fontLabels[position - 1]
-                            // Spec dışı, kullanıcı isteği ("force font on all UI"):
-                            // bkz. `FontOverride` dokümantasyonu — Android'in
-                            // varsayılan Typeface'ini HEMEN değiştirir
-                            // (P2PApplication.onCreate sadece SÜREÇ başlangıcında
-                            // çalışır, bu çağrı olmadan değişiklik ancak bir
-                            // sonraki tam uygulama yeniden başlatmasında
-                            // görülürdü). `recreate()` bunun ardından bu
-                            // Activity'yi hemen yeniden çizer, ARTIK güncellenmiş
-                            // varsayılan Typeface'le.
-                            com.p2p.messenger.util.FontOverride.apply(chosen.familyName)
-                            requireActivity().recreate()
+                    when {
+                        position == 0 -> {
+                            // "Import a .ttf file…" — font seçmez, dialog'u
+                            // kapatıp dosya seçiciyi açar.
+                            dialog.dismiss()
+                            pickFontLauncher.launch(arrayOf("font/ttf", "font/otf", "application/x-font-ttf", "application/octet-stream", "*/*"))
                         }
-                        dialog.dismiss()
+                        position <= fontChoices.size -> {
+                            // bkz. `fontChoices` — position 1+ → index = position - 1
+                            val chosen = fontChoices[position - 1]
+                            if (chosen != currentChoice) {
+                                ThemePrefs.setFontChoice(requireContext(), chosen)
+                                fontValueText.text = fontLabels[position - 1]
+                                // Spec dışı, kullanıcı isteği ("force font on all UI"):
+                                // bkz. `FontOverride` dokümantasyonu — Android'in
+                                // varsayılan Typeface'ini HEMEN değiştirir
+                                // (P2PApplication.onCreate sadece SÜREÇ başlangıcında
+                                // çalışır, bu çağrı olmadan değişiklik ancak bir
+                                // sonraki tam uygulama yeniden başlatmasında
+                                // görülürdü). `recreate()` bunun ardından bu
+                                // Activity'yi hemen yeniden çizer, ARTIK güncellenmiş
+                                // varsayılan Typeface'le.
+                                com.p2p.messenger.util.FontOverride.apply(chosen.familyName)
+                                requireActivity().recreate()
+                            }
+                            dialog.dismiss()
+                        }
+                        else -> {
+                            // Daha önce içe aktarılmış fontlardan biri seçildi
+                            // (bkz. `dialogLabels` — bu satırlar `customFonts`'a
+                            // fontChoices.size kadar kaydırılmış eşleşir).
+                            val cf = customFonts[position - 1 - fontChoices.size]
+                            if (!(currentChoice == ThemePrefs.FontChoice.CUSTOM && cf.id == activeCustomId)) {
+                                ThemePrefs.setFontChoice(requireContext(), ThemePrefs.FontChoice.CUSTOM)
+                                ThemePrefs.setActiveCustomFontId(requireContext(), cf.id)
+                                fontValueText.text = cf.displayName
+                                com.p2p.messenger.util.FontOverride.applyFile(ThemePrefs.customFontFile(requireContext(), cf.id))
+                                requireActivity().recreate()
+                            }
+                            dialog.dismiss()
+                        }
                     }
                 }
                 .setNegativeButton(android.R.string.cancel, null)
@@ -800,18 +829,49 @@ class SettingsFragment : Fragment() {
      * `filesDir`'e HAM bayt kopyalama; saf (coroutines/thread) yok,
      * senkron, basit `openInputStream` → `copyTo`. Font dosyası küçük
      * olduğu için (genellikle <1 MB) blok boyutu optimizasyonuna gerek yok.
+     *
+     * Spec dışı, kullanıcı isteği ("custom değil o fontun adı, birden fazla
+     * import edilebilmeli"): her seçim YENİ bir kimlikle (`newCustomFontId`)
+     * kendi dosyasına kopyalanır ve listeye EKLENİR (önceki içe aktarılmış
+     * fontlar KAYBOLMAZ) — görünen ad, SAF'ın verdiği GERÇEK dosya adı
+     * (`OpenableColumns.DISPLAY_NAME`). Kopyalama BAŞARISIZ olursa (ya da
+     * SAF ad vermezse ve kalan yol da başarısız olursa) hiçbir kayıt
+     * eklenmez/seçilmez — yetim bir liste girdisi kalmaz.
      */
     private fun onFontPicked(uri: Uri) {
+        val id = ThemePrefs.newCustomFontId()
+        val file = ThemePrefs.customFontFile(requireContext(), id)
         try {
             requireContext().contentResolver.openInputStream(uri)?.use { input ->
-                ThemePrefs.customFontFile(requireContext()).outputStream().use { out -> input.copyTo(out) }
-            }
+                file.outputStream().use { out -> input.copyTo(out) }
+            } ?: return
+            val displayName = queryDisplayName(uri) ?: file.name
+            ThemePrefs.registerCustomFont(requireContext(), id, displayName)
             ThemePrefs.setFontChoice(requireContext(), ThemePrefs.FontChoice.CUSTOM)
-            view?.findViewById<TextView>(R.id.font_family_value)?.text = getString(R.string.lbl_font_custom)
-            com.p2p.messenger.util.FontOverride.applyFile(ThemePrefs.customFontFile(requireContext()))
+            ThemePrefs.setActiveCustomFontId(requireContext(), id)
+            view?.findViewById<TextView>(R.id.font_family_value)?.text = displayName
+            com.p2p.messenger.util.FontOverride.applyFile(file)
             requireActivity().recreate()
         } catch (e: Exception) {
-            // bkz. `onChatWallpaperPicked` — çökmemeli, sessizce geç
+            // bkz. `onChatWallpaperPicked` — çökmemeli, sessizce geç; yarım
+            // kalmış dosyayı da bırakma (listeye hiç eklenmediği için zaten
+            // seçilemez, ama diskte yetim kalmasın).
+            file.delete()
+        }
+    }
+
+    /** SAF'ın verdiği `content://` URI'den GERÇEK dosya adını okur (bkz.
+     *  `onFontPicked` — font listesinde "Custom" yerine bu ad gösterilir).
+     *  Bazı sağlayıcılar bu sütunu doldurmayabilir; `null` dönerse çağıran
+     *  taraf kendi dosya adına düşer. */
+    private fun queryDisplayName(uri: Uri): String? {
+        return try {
+            requireContext().contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 

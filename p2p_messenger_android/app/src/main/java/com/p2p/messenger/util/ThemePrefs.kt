@@ -146,12 +146,81 @@ object ThemePrefs {
      */
     fun chatWallpaperFile(context: Context): File = File(context.filesDir, WALLPAPER_FILE_NAME)
 
-    /** bkz. `chatWallpaperFile` — `content://` URI'yi DEĞİL, kalıcı
-     *  izin karmaşasına hiç girmeden ham font baytlarını tutuyoruz.
-     *  `OpenDocument` ile seçilen .ttf/.otf dosyasının kopyası burada
-     *  saklanır; varlığı dosyanın kendisi "seçilmiş mi" bilgisini
-     *  taşır, ayrı bir SharedPreferences bayrağına gerek yok. */
-    fun customFontFile(context: Context): File = File(context.filesDir, "custom_font.ttf")
+    /** Spec dışı, kullanıcı isteği ("birden fazla font içe aktarabilmeli,
+     *  her biri kendi adıyla listede görünmeli"): tek sabit dosya yerine
+     *  KİMLİKLİ bir font listesi. `id`, `newCustomFontId()`'nin ürettiği
+     *  (kronolojik SIRALANABİLİR — 13 haneli epoch-ms) bir dizedir; ekranda
+     *  gösterilen ad ayrı saklanır (SAF'ın verdiği gerçek dosya adı, bkz.
+     *  `SettingsFragment.onFontPicked`). */
+    data class CustomFont(val id: String, val displayName: String)
+
+    private const val KEY_CUSTOM_FONTS = "custom_fonts"
+    private const val KEY_ACTIVE_CUSTOM_FONT_ID = "active_custom_font_id"
+    // `id` ve `displayName`'i TEK bir Set<String> girdisinde ayıran işaretçi —
+    // bir dosya adında asla geçmeyecek bir kontrol karakteri (kullanıcı adı
+    // her ne olursa olsun `` yazamaz).
+    private const val CUSTOM_FONT_SEP = ''
+
+    /** bkz. `customFontFile` — `content://` URI'yi DEĞİL, kalıcı izin
+     *  karmaşasına hiç girmeden ham font baytlarını tutuyoruz. Her içe
+     *  aktarılan font KENDİ dosyasını alır (`id` bazlı ad) — tek dosyanın
+     *  üzerine yazmak öncekini sessizce kaybederdi. */
+    fun customFontFile(context: Context, id: String): File = File(context.filesDir, "custom_font_$id.ttf")
+
+    /** Yeni bir içe aktarma için kararlı, kronolojik sıralanabilir bir
+     *  kimlik üretir — dosya adı VE listedeki sıralama anahtarı olarak
+     *  kullanılır (bkz. `getCustomFonts` — id'ye göre string sıralama,
+     *  epoch-ms hep aynı basamak sayısında olduğu sürece kronolojiktir). */
+    fun newCustomFontId(): String = System.currentTimeMillis().toString()
+
+    /** `id`'yi (ve dosyasını, çağıran taraf `customFontFile` ile ayrıca
+     *  silmeli) listeye KAYDETMEZ, sadece görünen adı verilen listeye
+     *  ekler — çağıran taraf font baytlarını dosyaya BAŞARIYLA yazdıktan
+     *  SONRA çağırmalı (bkz. `SettingsFragment.onFontPicked` — kopyalama
+     *  başarısız olursa listeye hiç eklenmez, yetim bir kayıt kalmaz). */
+    fun registerCustomFont(context: Context, id: String, displayName: String) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val current = prefs.getStringSet(KEY_CUSTOM_FONTS, emptySet()) ?: emptySet()
+        val updated = HashSet(current)
+        updated.add("$id$CUSTOM_FONT_SEP$displayName")
+        prefs.edit().putStringSet(KEY_CUSTOM_FONTS, updated).apply()
+    }
+
+    /** İçe aktarılmış tüm fontlar, en eskiden en yeniye (bkz. `newCustomFontId`
+     *  — id'ler epoch-ms olduğundan string sıralama zaman sırasıyla aynı). */
+    fun getCustomFonts(context: Context): List<CustomFont> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val raw = prefs.getStringSet(KEY_CUSTOM_FONTS, emptySet()) ?: emptySet()
+        return raw.mapNotNull { entry ->
+            val sep = entry.indexOf(CUSTOM_FONT_SEP)
+            if (sep < 0) null else CustomFont(entry.substring(0, sep), entry.substring(sep + 1))
+        }.sortedBy { it.id }
+    }
+
+    fun getActiveCustomFontId(context: Context): String? {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_ACTIVE_CUSTOM_FONT_ID, null)
+    }
+
+    fun setActiveCustomFontId(context: Context, id: String) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putString(KEY_ACTIVE_CUSTOM_FONT_ID, id).apply()
+    }
+
+    /** bkz. `getFontChoice`/`FontChoice.CUSTOM` — o an SEÇİLİ olan içe
+     *  aktarılmış fontun dosyası; kayıt bozulmuşsa (id silinmiş/eksik)
+     *  `null` (çağıran taraf sessizce no-op yapar, bkz. `FontOverride.
+     *  applyFile`'ın kendi dosya-yok kontrolü). */
+    fun activeCustomFontFile(context: Context): File? =
+        getActiveCustomFontId(context)?.let { customFontFile(context, it) }
+
+    /** bkz. `getCustomFonts`/`getActiveCustomFontId` — o an seçili içe
+     *  aktarılmış fontun görünen adı; kayıt bulunamazsa `null` (çağıran
+     *  taraf jenerik bir yer tutucu adı gösterir). */
+    fun activeCustomFontName(context: Context): String? {
+        val id = getActiveCustomFontId(context) ?: return null
+        return getCustomFonts(context).find { it.id == id }?.displayName
+    }
 
     fun hasChatWallpaper(context: Context): Boolean = chatWallpaperFile(context).exists()
 
