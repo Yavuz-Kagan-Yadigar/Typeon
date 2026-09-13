@@ -194,6 +194,18 @@ impl Store {
                 CREATE INDEX IF NOT EXISTS idx_mail_dedup ON mail(mailbox_id, depositor);
                 CREATE INDEX IF NOT EXISTS idx_mail_expiry ON mail(expires_at_ms);
 
+                -- Okuyucu başına onay imleci. Kayıt herkese açık olduğundan
+                -- (ilk-temas kutusunun kimliği cihaz parmak izinden türüyor),
+                -- tek bir okuyucunun `Ack`'i postayı başkaları için SİLEMEZ:
+                -- satır ancak bırakan dışındaki bütün okuyucular onaylayınca
+                -- gider (bkz. `delete_fully_acked`).
+                CREATE TABLE IF NOT EXISTS mail_acks (
+                    mailbox_id  TEXT NOT NULL,
+                    owner       BLOB NOT NULL,
+                    through_seq INTEGER NOT NULL,
+                    PRIMARY KEY (mailbox_id, owner)
+                );
+
                 CREATE TABLE IF NOT EXISTS archive (
                     bucket     TEXT NOT NULL,
                     record_id  TEXT NOT NULL,
@@ -598,6 +610,12 @@ impl Store {
             let _ = self
                 .conn
                 .execute("DELETE FROM mailbox_readers WHERE mailbox_id = ?1 AND owner = ?2", params![id, owner]);
+            // Ayrılan okuyucu artık silmeyi bekletmesin; kendi onayı bu
+            // temizlikte hâlâ sayılır, sonra imleci atılır.
+            let _ = self.delete_fully_acked(id);
+            let _ = self
+                .conn
+                .execute("DELETE FROM mail_acks WHERE mailbox_id = ?1 AND owner = ?2", params![id, owner]);
         }
         Ok(())
     }
@@ -611,9 +629,22 @@ impl Store {
             .unwrap_or(false)
     }
 
+    /// Kutu kapasitesi için: henüz HİÇBİR alıcı okuyucunun onaylamadığı
+    /// satırlar. Onaylanmış ama başka bir (ör. hiç onaylamayan yabancı)
+    /// okuyucu yüzünden TTL'e kadar duran satırlar sayılmaz — aksi halde o
+    /// okuyucu kutuyu doldurup yeni teslimleri kilitlerdi.
+    /// ponytail: bu satırlar bayt kotasına (`recount_mail_bytes`) hâlâ sayılır;
+    /// kötü niyetli okuyucular diski TTL boyunca yalnızca kota kadar tutabilir.
     pub fn mailbox_item_count(&self, mailbox_id: &str) -> i64 {
         self.conn
-            .query_row("SELECT COUNT(*) FROM mail WHERE mailbox_id = ?1", params![mailbox_id], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM mail m WHERE m.mailbox_id = ?1
+                   AND NOT EXISTS (SELECT 1 FROM mail_acks a
+                                   WHERE a.mailbox_id = m.mailbox_id AND a.owner != m.depositor
+                                     AND a.through_seq >= m.seq)",
+                params![mailbox_id],
+                |r| r.get(0),
+            )
             .unwrap_or(0)
     }
 
@@ -731,20 +762,49 @@ impl Store {
     /// muhasebeye hiç gerek yok. Bırakanın kendi `Ack`'i sessizce yok sayılır
     /// (aksi halde gönderen, alıcı görmeden mesajı silebilirdi).
     pub fn ack(&self, mailbox_id: &str, through_seq: u64, acker: &[u8]) -> Result<usize, String> {
-        let deleted = self
+        // Defter #03: yalnızca kutuyu KAYDETMİŞ bir okuyucu onaylayabilir.
+        let is_reader = self
             .conn
+            .query_row(
+                "SELECT 1 FROM mailbox_readers WHERE mailbox_id = ?1 AND owner = ?2",
+                params![mailbox_id, acker],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(false);
+        if !is_reader {
+            return Ok(0);
+        }
+        self.conn
             .execute(
-                // Defter #03: kontrol olmadan kayıtlı herhangi bir istemci,
-                // büyük bir `seq` ile BAŞKASININ kutusunu tamamen
-                // boşaltabiliyordu — hedefin bekleyen bütün postası kalıcı
-                // olarak silinirdi.
-                "DELETE FROM mail WHERE mailbox_id = ?1 AND seq <= ?2 AND depositor != ?3
-                   AND EXISTS (SELECT 1 FROM mailbox_readers r
-                               WHERE r.mailbox_id = mail.mailbox_id AND r.owner = ?3)",
-                params![mailbox_id, through_seq as i64, acker],
+                "INSERT INTO mail_acks (mailbox_id, owner, through_seq) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(mailbox_id, owner) DO UPDATE SET through_seq = MAX(through_seq, excluded.through_seq)",
+                params![mailbox_id, acker, through_seq as i64],
             )
             .map_err(|e| e.to_string())?;
-        Ok(deleted)
+        self.delete_fully_acked(mailbox_id)
+    }
+
+    /// Bırakan dışındaki BÜTÜN kayıtlı okuyucuların onayladığı (ve en az
+    /// birinin gerçekten onayladığı) satırları siler. Onaylamayan bir okuyucu
+    /// (ör. kutuya kaydolmuş bir yabancı) satırı TTL'e kadar tutar ama
+    /// başkasının postasını silemez.
+    fn delete_fully_acked(&self, mailbox_id: &str) -> Result<usize, String> {
+        self.conn
+            .execute(
+                "DELETE FROM mail WHERE mailbox_id = ?1
+                   AND EXISTS (SELECT 1 FROM mail_acks a
+                               WHERE a.mailbox_id = mail.mailbox_id AND a.owner != mail.depositor
+                                 AND a.through_seq >= mail.seq)
+                   AND NOT EXISTS (SELECT 1 FROM mailbox_readers r
+                                   WHERE r.mailbox_id = mail.mailbox_id AND r.owner != mail.depositor
+                                     AND r.owner IN (SELECT enrollment_id FROM enrollments WHERE state = 'active')
+                                     AND COALESCE((SELECT a.through_seq FROM mail_acks a
+                                                   WHERE a.mailbox_id = r.mailbox_id AND a.owner = r.owner), 0) < mail.seq)",
+                params![mailbox_id],
+            )
+            .map_err(|e| e.to_string())
     }
 
     /// Süresi dolmuş teslim öğelerini siler. Onaya ek bir emniyet kemeri:
@@ -796,6 +856,30 @@ impl Store {
     }
 
     pub fn sweep_expired_mail(&self, now: i64) -> usize {
+        // Kaydı silinmiş/iptal edilmiş sahiplerin okuyucu satırları: artık
+        // onaylayamazlar, `delete_fully_acked` onları zaten saymıyor; bekleyen
+        // postayı bırakmak için kutuları yeniden değerlendir.
+        let mut orphaned: Vec<String> = Vec::new();
+        if let Ok(mut st) = self.conn.prepare(
+            "SELECT DISTINCT mailbox_id FROM mailbox_readers
+             WHERE owner NOT IN (SELECT enrollment_id FROM enrollments WHERE state = 'active')",
+        ) {
+            if let Ok(rows) = st.query_map([], |r| r.get::<_, String>(0)) {
+                orphaned.extend(rows.flatten());
+            }
+        }
+        let _ = self.conn.execute(
+            "DELETE FROM mailbox_readers WHERE owner NOT IN (SELECT enrollment_id FROM enrollments)",
+            [],
+        );
+        for mailbox in &orphaned {
+            let _ = self.delete_fully_acked(mailbox);
+        }
+        let _ = self.conn.execute(
+            "DELETE FROM mail_acks WHERE NOT EXISTS (SELECT 1 FROM mailbox_readers r
+                WHERE r.mailbox_id = mail_acks.mailbox_id AND r.owner = mail_acks.owner)",
+            [],
+        );
         self.conn
             .execute("DELETE FROM mail WHERE expires_at_ms <= ?1", params![now])
             .unwrap_or(0)
@@ -1275,6 +1359,54 @@ mod tests {
         let (mine, _) = s.fetch(&victim, &[("mb_1".into(), 0)], 10, 4096);
         assert_eq!(mine.len(), 1, "gercek alici hala okuyabilmeli");
         assert_eq!(s.ack("mb_1", seq, &victim).unwrap(), 1);
+    }
+
+    /// İlk-temas kutusunun kimliği parmak izinden türüyor, yani kayıtlı
+    /// herhangi biri kutuya okuyucu olarak kaydolabilir. O okuyucunun `Ack`'i
+    /// gerçek alıcının postasını silmemeli ve hiç onaylamaması kutuyu
+    /// doldurmamalı.
+    #[test]
+    fn a_lurking_reader_can_neither_delete_nor_fill_anothers_mail() {
+        let s = Store::open_in_memory().unwrap();
+        let sender = enroll(&s, b"send", "peerS");
+        let victim = enroll(&s, b"vict", "peerV");
+        let lurker = enroll(&s, b"lurk", "peerL");
+        register(&s, &victim, "mb_fp");
+        register(&s, &lurker, "mb_fp");
+        let seq = s.deposit("mb_fp", b"handshake", &sender, 1, 1000).unwrap();
+
+        assert_eq!(s.ack("mb_fp", seq, &lurker).unwrap(), 0, "yabanci onayi silmemeli");
+        let (mine, _) = s.fetch(&victim, &[("mb_fp".into(), 0)], 10, 4096);
+        assert_eq!(mine.len(), 1, "alici postasini hala almali");
+
+        // Alıcı onaylar; yabancı onaylamamış olsaydı satır TTL'e kadar
+        // kalırdı ama kapasiteye sayılmazdı. Burada ikisi de onayladı.
+        assert_eq!(s.ack("mb_fp", seq, &victim).unwrap(), 1);
+        assert_eq!(s.mailbox_item_count("mb_fp"), 0);
+
+        // Hiç onaylamayan yabancı: satır kalır ama kapasiteye sayılmaz.
+        let seq2 = s.deposit("mb_fp", b"handshake-2", &sender, 2, 1000).unwrap();
+        let silent = enroll(&s, b"sile", "peerQ");
+        register(&s, &silent, "mb_fp");
+        assert_eq!(s.ack("mb_fp", seq2, &victim).unwrap(), 0, "sessiz okuyucu varken silinmez");
+        assert_eq!(s.mailbox_item_count("mb_fp"), 0, "alicinin onayladigi satir kapasiteye sayilmaz");
+        // Sessiz okuyucu ayrılır; kalan yabancı da onaylayınca satır silinir.
+        s.register_mailboxes(&silent, &[], &["mb_fp".to_string()], 3, 100).unwrap();
+        assert_eq!(s.ack("mb_fp", seq2, &lurker).unwrap(), 1);
+    }
+
+    /// Eski sürümde yeniden kayıt yeni bir `enrollment_id` açıp eski okuyucu
+    /// satırlarını sahipsiz bırakıyordu; o sahip onaylayamaz, postayı TTL'e
+    /// kadar tutmamalı.
+    #[test]
+    fn orphaned_reader_does_not_block_deletion() {
+        let s = Store::open_in_memory().unwrap();
+        let sender = enroll(&s, b"send", "peerS");
+        let reader = enroll(&s, b"read", "peerR");
+        register(&s, &reader, "mb_1");
+        register(&s, b"gone", "mb_1");
+        let seq = s.deposit("mb_1", b"x", &sender, 1, 1000).unwrap();
+        assert_eq!(s.ack("mb_1", seq, &reader).unwrap(), 1);
     }
 
     /// Bir ratchet kutusunun İKİ kayıtlı okuyucusu olur ve biri

@@ -182,6 +182,8 @@ class ChatActivity : AppCompatActivity() {
     /** `sessionPollRunnable` günceller — `hasActiveSession` (bir ratchet
      *  oturumu kuruldu mu). Bu `true` olana kadar hiçbir şey gönderilemez. */
     private var handshakeReady = false
+    /** Karşı taraf hesabını sildi (`account_deleted`) — gönderim kapalı. */
+    private var peerAccountDeleted = false
     /** `sessionPollRunnable`'ın el sıkışmayı yeniden dürtme hızını sınırlar. */
     private var lastEnsureHandshakeAt = 0L
     /** bkz. `maybePlayTyphoonEffect` / ui.TyphoonParticleView. */
@@ -303,7 +305,7 @@ class ChatActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 false
             }
-            connectingBanner.visibility = if (handshakeDone) View.GONE else View.VISIBLE
+            connectingBanner.visibility = if (handshakeDone && !peerAccountDeleted) View.GONE else View.VISIBLE
             if (handshakeDone != handshakeReady) {
                 handshakeReady = handshakeDone
                 updateComposerLock()
@@ -343,20 +345,28 @@ class ChatActivity : AppCompatActivity() {
      * kamera/ses düğmeleri devre dışı ve soluk; banner NEDEN'i açıkça yazar.
      */
     private fun updateComposerLock() {
-        val enabled = handshakeReady
+        val enabled = handshakeReady && !peerAccountDeleted
         val alpha = if (enabled) 1f else 0.4f
         for (b in listOf(btnSend, btnAttach, btnCamera, btnVoice)) {
             b.isEnabled = enabled
             b.alpha = alpha
         }
         txtConnectingBanner.setText(
-            if (enabled) R.string.msg_connecting else R.string.msg_securing_no_send
+            when {
+                peerAccountDeleted -> R.string.msg_account_deleted_no_send
+                enabled -> R.string.msg_connecting
+                else -> R.string.msg_securing_no_send
+            }
         )
     }
 
     /** Gönderme yolundaki her giriş noktası (gönder/ek/kamera/ses) bunu
      *  çağırır — hazır değilse kısa bir uyarı gösterip `false` döner. */
     private fun ensureHandshakeReadyOrWarn(): Boolean {
+        if (peerAccountDeleted) {
+            Toast.makeText(this, R.string.msg_account_deleted_no_send, Toast.LENGTH_SHORT).show()
+            return false
+        }
         if (handshakeReady) return true
         Toast.makeText(this, R.string.msg_wait_secure_connection, Toast.LENGTH_SHORT).show()
         return false
@@ -885,6 +895,8 @@ class ChatActivity : AppCompatActivity() {
         peerDeviceFingerprint = newPeer
         P2PService.activeConversationId = peerDeviceFingerprint
         localMessages.clear()
+        // Önceki sohbette açık kalan yanıt, yeni sohbetteki mesaja yapışmasın.
+        cancelReply()
         adapter.notifyDataSetChanged()
         historySyncPending = false
         isLoadingOlderHistory = false
@@ -899,6 +911,7 @@ class ChatActivity : AppCompatActivity() {
         connectingBanner.visibility = View.VISIBLE
         // Yeni sohbet: kanıtlanana kadar (poll'ün ilk turu) gönderim KİLİTLİ.
         handshakeReady = false
+        peerAccountDeleted = isAccountDeleted(newPeer)
         updateComposerLock()
         sessionPollHandler.removeCallbacks(sessionPollRunnable)
         sessionPollHandler.post(sessionPollRunnable)
@@ -990,6 +1003,16 @@ class ChatActivity : AppCompatActivity() {
     /** bkz. üst çubuk avatarı — `listContacts()`'ta bu cihaz parmak izine
      *  sahip kişiyi bulup profil fotoğrafını döner (yoksa `null`, o zaman
      *  `AvatarUtil` baş harf rozeti gösterir). */
+    private fun isAccountDeleted(deviceFingerprint: String): Boolean = try {
+        val array = JSONArray(P2PLib.listContacts())
+        (0 until array.length()).any {
+            val obj = array.getJSONObject(it)
+            obj.optString("active_device_fingerprint") == deviceFingerprint && obj.optBoolean("account_deleted")
+        }
+    } catch (e: Exception) {
+        false
+    }
+
     private fun resolveContactAvatar(deviceFingerprint: String): ByteArray? {
         return try {
             val array = JSONArray(P2PLib.listContacts())
@@ -1143,17 +1166,21 @@ class ChatActivity : AppCompatActivity() {
             // `message_ids` en eskiden yeniye sıralı — 1:1 adaptörü tek bir
             // "son görülen" işareti gösterdiğinden EN YENİsini uygulamak yeter.
             "seen_bulk" -> {
-                if (obj.optString("group_id").isEmpty()) {
-                    val arr = obj.optJSONArray("message_ids")
-                    if (arr != null && arr.length() > 0) {
-                        val newestId = arr.optString(arr.length() - 1)
-                        val peerName = txtToolbarTitle.text.toString()
-                        adapter.applySeen(
-                            newestId,
-                            listOf(SimpleChatAdapter.SeenByViewer(resolveContactAvatar(peerDeviceFingerprint), peerName))
-                        )
-                    }
+                // Grup olayları `messageListener`'da zaten elendi (`group_id` null değilse).
+                val arr = obj.optJSONArray("message_ids")
+                if (arr != null && arr.length() > 0) {
+                    val newestId = arr.optString(arr.length() - 1)
+                    val peerName = txtToolbarTitle.text.toString()
+                    adapter.applySeen(
+                        newestId,
+                        listOf(SimpleChatAdapter.SeenByViewer(resolveContactAvatar(peerDeviceFingerprint), peerName))
+                    )
                 }
+            }
+            "account_deleted" -> {
+                peerAccountDeleted = true
+                connectingBanner.visibility = View.VISIBLE
+                updateComposerLock()
             }
             "typing" -> {
                 val isTyping = obj.optBoolean("is_typing", false)

@@ -510,6 +510,10 @@ class P2PService : Service() {
             return
         }
         when (obj.optString("type")) {
+            "sync", "device_linked" -> com.p2p.messenger.util.ArchiveKeyManager.persistIfNew(applicationContext)
+            "account_deleted" -> NotificationHelper.showAccountDeletedNotification(
+                applicationContext, obj.optString("peer"), obj.optString("display_name")
+            )
             // Spec dışı (dış AI incelemesi düzeltmesi — AI2-G, self-revocation):
             // bu cihaz KENDİ kimliği (birincil cihaz) tarafından iptal edildi.
             // Rust çekirdeği DB tablolarını + ekleri zaten sildi ve artık

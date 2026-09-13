@@ -55,6 +55,10 @@ class SettingsFragment : Fragment() {
          *  (sohbet eki önizlemelerinden — 480p — daha büyük, çünkü profil
          *  fotoğrafı tam ekran/daha büyük gösterilebilir). */
         private const val AVATAR_MAX_DIMENSION = 720
+        /** bkz. `performDeleteAccount`. */
+        private const val ACCOUNT_DELETE_WAIT_MS = 15_000L
+        /** bkz. `onFontPicked` — büyük CJK fontları ~20 MB civarı. */
+        private const val MAX_FONT_BYTES = 32L * 1024 * 1024
         private const val AVATAR_JPEG_QUALITY = 85
 
         /** bkz. `onChatWallpaperPicked` — avatardan daha büyük (tam ekran
@@ -328,6 +332,9 @@ class SettingsFragment : Fragment() {
         view.findViewById<Button>(R.id.btn_logout).setOnClickListener {
             confirmLogout()
         }
+        view.findViewById<Button>(R.id.btn_delete_account).setOnClickListener {
+            confirmDeleteAccount()
+        }
 
         return view
     }
@@ -369,6 +376,43 @@ class SettingsFragment : Fragment() {
      * (`ThemePrefs`) kasıtlı olarak dokunulmadan bırakılır — kimliğe değil
      * cihaza ait, silinmeleri kullanıcı için bir kazanç sağlamaz.
      */
+    /** Hesabı siler: önce tüm kişilere/gruplara/kardeş cihazlara bildirim
+     *  gider (bkz. Rust `delete_account`), onaylar ya da en fazla
+     *  [ACCOUNT_DELETE_WAIT_MS] beklenir (çevrimdışı kişilere sunucu üzerinden
+     *  bırakılır), sonra `performLogout` ile yerel veri silinir. */
+    private fun confirmDeleteAccount() {
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.delete_account_confirm_title)
+            .setMessage(R.string.delete_account_confirm_message)
+            .setPositiveButton(R.string.action_delete_account) { _, _ -> performDeleteAccount() }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun performDeleteAccount() {
+        val ctx = requireContext().applicationContext
+        val progress = AlertDialog.Builder(requireContext())
+            .setMessage(R.string.msg_deleting_account)
+            .setCancelable(false)
+            .show()
+        Thread {
+            try {
+                P2PLib.deleteAccount()
+                val deadline = android.os.SystemClock.elapsedRealtime() + ACCOUNT_DELETE_WAIT_MS
+                while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                    if (P2PLib.accountDeletionPending() == 0) break
+                    Thread.sleep(500)
+                }
+            } catch (e: Exception) {
+            }
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                try { progress.dismiss() } catch (e: Exception) {}
+                com.p2p.messenger.util.LocalWipe.wipe(ctx)
+                AppRestarter.restart(ctx)
+            }
+        }.start()
+    }
+
     private fun performLogout() {
         com.p2p.messenger.util.LocalWipe.wipe(requireContext())
         AppRestarter.restart(requireContext())
@@ -843,7 +887,28 @@ class SettingsFragment : Fragment() {
         val file = ThemePrefs.customFontFile(requireContext(), id)
         try {
             requireContext().contentResolver.openInputStream(uri)?.use { input ->
-                file.outputStream().use { out -> input.copyTo(out) }
+                // "*/*" seçici her dosyayı kabul ediyor: yalnızca font imzası
+                // (TrueType/OpenType/koleksiyon) olan ve makul boyuttaki
+                // dosyalar kopyalanır — yanlışlıkla seçilen bir video
+                // filesDir'i doldurmasın, bozuk dosya listeye girmesin.
+                // `readNBytes` API 33+; minSdk 26 — kısa dosyada EOFException.
+                val head = ByteArray(4).also { java.io.DataInputStream(input).readFully(it) }
+                val magicOk = (
+                    head.contentEquals(byteArrayOf(0, 1, 0, 0)) ||
+                        String(head, Charsets.ISO_8859_1) in setOf("OTTO", "true", "ttcf"))
+                if (!magicOk) throw java.io.IOException("not a font file")
+                file.outputStream().use { out ->
+                    out.write(head)
+                    val buf = ByteArray(64 * 1024)
+                    var total = head.size.toLong()
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        total += n
+                        if (total > MAX_FONT_BYTES) throw java.io.IOException("font too large")
+                        out.write(buf, 0, n)
+                    }
+                }
             } ?: return
             val displayName = queryDisplayName(uri) ?: file.name
             ThemePrefs.registerCustomFont(requireContext(), id, displayName)

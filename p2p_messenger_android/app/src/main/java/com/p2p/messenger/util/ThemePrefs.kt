@@ -52,7 +52,7 @@ object ThemePrefs {
         SERIF("serif", "serif", R.style.ThemeOverlay_P2PMessenger_Font_Serif),
         MONOSPACE("monospace", "monospace", R.style.ThemeOverlay_P2PMessenger_Font_Monospace),
         SANS_BLACK("sans_black", "sans-serif-black", R.style.ThemeOverlay_P2PMessenger_Font_SansBlack),
-        CUSTOM("custom", null, 0);
+        CUSTOM("custom", null, R.style.ThemeOverlay_P2PMessenger_Font_Custom);
 
         companion object {
             fun fromPrefValue(value: String): FontChoice = entries.find { it.prefValue == value } ?: DEFAULT
@@ -221,8 +221,6 @@ object ThemePrefs {
         val id = getActiveCustomFontId(context) ?: return null
         return getCustomFonts(context).find { it.id == id }?.displayName
     }
-
-    fun hasChatWallpaper(context: Context): Boolean = chatWallpaperFile(context).exists()
 
     fun clearChatWallpaper(context: Context) {
         chatWallpaperFile(context).delete()

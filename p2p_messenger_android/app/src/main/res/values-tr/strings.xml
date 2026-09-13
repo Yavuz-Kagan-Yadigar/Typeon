@@ -301,6 +301,12 @@
     <string name="logout_confirm_title">Çıkış yapılsın mı?</string>
     <string name="logout_confirm_message">Bu, bu cihazdaki tüm yerel mesajları, kişileri ve anahtarları siler. Bir kurtarma dosyası dışa aktarmadıysanız, bu hesap bu cihazda geri kurtarılamaz. Bu işlem geri alınamaz.</string>
     <string name="action_logout_confirm">Çıkış yap ve sil</string>
+    <string name="action_delete_account">Hesabı sil</string>
+    <string name="delete_account_confirm_title">Hesabın silinsin mi?</string>
+    <string name="delete_account_confirm_message">Tüm kişilerine ve gruplarına bu hesabın silindiği bildirilir; artık sana mesaj gönderemezler. Bağlı cihazların da silinir. Yerel mesajlar, kişiler ve anahtarlar silinir. Bu işlem geri alınamaz.</string>
+    <string name="msg_deleting_account">Kişilerine bildiriliyor…</string>
+    <string name="msg_contact_deleted_account">%1$s hesabını sildi</string>
+    <string name="msg_account_deleted_no_send">Bu kişi hesabını sildi. Artık mesaj gönderilemez.</string>
     <string name="device_unlinked_notification">Bu cihazın hesabınızla bağlantısı kaldırıldı. Yerel verileri silindi.</string>
     <string name="link_device_as_secondary">Var olan bir hesaba bağlan</string>
     <string name="link_device_title">Bu cihazı bağla</string>
@@ -313,12 +319,12 @@
     <string name="action_block">Engelle</string>
     <string name="action_unblock">Engeli kaldir</string>
     <string name="action_trust_contact">Dogrulandi olarak isaretle</string>
-    <string name="msg_identity_blocked">Engellendi. Yuz yuze yeniden eslesmeden bu kisiden hicbir sey gelmeyecek.</string>
+    <string name="msg_identity_blocked">Engellendi. Engeli kaldirana kadar bu kisiden hicbir sey gelmeyecek.</string>
     <string name="msg_identity_unblocked">Engel kaldirildi.</string>
     <string name="msg_contact_trusted">Dogrulandi olarak isaretlendi.</string>
     <string name="notif_new_device_warning">%1$s dogrulamadiginiz bir cihazdan yaziyor (%2$s). Incelemek icin dokunun.</string>
     <string name="confirm_block_title">Bu kisi engellensin mi?</string>
-    <string name="confirm_block_body">%1$s adli kisinin hicbir cihazindan mesaj veya dosya kabul edilmeyecek. Engel yalnizca yuz yuze yeniden esleserek kalkar.</string>
+    <string name="confirm_block_body">%1$s adli kisinin hicbir cihazindan mesaj veya dosya kabul edilmeyecek. Engeli daha sonra kisi menusunden ya da yuz yuze yeniden esleserek kaldirabilirsin.</string>
     <string name="confirm_trust_title">Dogrulandi olarak isaretlensin mi?</string>
     <string name="confirm_trust_body">%1$s ile yuz yuze degil, bir grup uzerinden tanistiniz. Bunu yalnizca guvenlik kodunu baska bir yoldan teyit ettiyseniz yapin.</string>
     <string name="action_transfer_founder">Yoneticiligi devret</string>

@@ -242,11 +242,6 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
      *  grubun sınırlarını ve hangi tarafa yaslı olduğunu bilmek zorunda. */
     fun isGroupedWithNextPublic(position: Int): Boolean = isGroupedWithNext(position)
 
-    /** Bir grubun İLK üyesi mi? (Gruplanmamış tek bir mesaj da "başlangıç"
-     *  sayılır; dekorasyon en az iki üye bulamazsa hiçbir şey çizmez.) */
-    fun isGroupStart(position: Int): Boolean =
-        position in items.indices && !isGroupedWithPrevious(position)
-
     fun isMineAt(position: Int): Boolean = items.getOrNull(position)?.isMine ?: false
 
     private fun isGroupedWithNext(position: Int): Boolean {

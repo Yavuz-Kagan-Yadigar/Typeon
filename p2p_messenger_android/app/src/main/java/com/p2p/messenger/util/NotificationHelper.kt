@@ -94,6 +94,18 @@ object NotificationHelper {
         )
     }
 
+    /** Bir kişi hesabını sildi — kişi adıyla tek seferlik bildirim. */
+    fun showAccountDeletedNotification(context: Context, peerDeviceFingerprint: String, displayName: String) {
+        val name = displayName.ifBlank { resolveContactNameByFingerprint(peerDeviceFingerprint) ?: peerDeviceFingerprint.take(8) }
+        val intent = Intent(context, ChatActivity::class.java).apply {
+            putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, peerDeviceFingerprint)
+            putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, name)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        show(context, ("deleted:$peerDeviceFingerprint").hashCode(), context.getString(R.string.app_name),
+            context.getString(R.string.msg_contact_deleted_account, name), intent)
+    }
+
     fun showGroupMessageNotification(context: Context, groupId: String, senderIdentityId: String, text: String) {
         val groupName = resolveGroupName(groupId) ?: groupId.take(8)
         val senderName = resolveContactNameByIdentity(senderIdentityId) ?: senderIdentityId.take(8)

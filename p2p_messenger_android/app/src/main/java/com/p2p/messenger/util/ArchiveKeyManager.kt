@@ -45,6 +45,21 @@ object ArchiveKeyManager {
      * okunamaz olurdu. Üretim sadece kullanıcı sunucuda geçmiş saklamayı
      * AÇTIĞINDA yapılır.
      */
+    /** Kardeş cihazdan gelen ARK yalnızca çekirdeğin belleğindeydi —
+     *  yeniden başlatınca kayboluyordu. Dosya henüz yoksa diske yazar. */
+    fun persistIfNew(context: Context) {
+        val file = keyFile(context)
+        if (file.exists()) return
+        val key = try { P2PLib.archiveRootKey() } catch (e: Exception) { return }
+        if (key.size != 32) return
+        try {
+            file.writeBytesAtomic(KeystoreCrypto.encrypt(key, KeystoreCrypto.ALIAS_ARCHIVE_ROOT))
+        } catch (e: Exception) {
+        } finally {
+            key.fill(0)
+        }
+    }
+
     fun loadIfPresent(context: Context) {
         val file = keyFile(context)
         if (!file.exists()) return
@@ -81,10 +96,12 @@ object ArchiveKeyManager {
             loadIfPresent(context)
             return
         }
-        val dataKey = ByteArray(32)
-        SecureRandom().nextBytes(dataKey)
+        // Kardeşten (`DeviceSync`) gelmiş bir ARK bellekte olabilir: onu
+        // yaz, yenisini üretip üstüne yazma (arşiv cihazlar arasında bölünürdü).
+        val fromCore = try { P2PLib.archiveRootKey() } catch (e: Exception) { ByteArray(0) }
+        val dataKey = if (fromCore.size == 32) fromCore else ByteArray(32).also { SecureRandom().nextBytes(it) }
         try {
-            file.writeBytes(KeystoreCrypto.encrypt(dataKey, KeystoreCrypto.ALIAS_ARCHIVE_ROOT))
+            file.writeBytesAtomic(KeystoreCrypto.encrypt(dataKey, KeystoreCrypto.ALIAS_ARCHIVE_ROOT))
             P2PLib.setArchiveRootKey(dataKey)
         } catch (e: Exception) {
             // Keystore erişilemiyorsa sessizce vazgeç — sunucu yönlendirmesi

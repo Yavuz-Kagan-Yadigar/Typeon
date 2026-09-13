@@ -178,10 +178,17 @@ class ContactsFragment : Fragment() {
         // anlami cok farkli: iptal tek bir cihazi kapatir ve kisi yeni bir
         // cihazla geri gelebilir; engel ise kimligi hedefler ve yalnizca
         // yuz yuze yeniden eslesmeyle kalkar.
+        val isBlocked = message.identityId.isNotEmpty() && try {
+            org.json.JSONArray(P2PLib.listBlockedIdentities()).let { arr ->
+                (0 until arr.length()).any { arr.optString(it) == message.identityId }
+            }
+        } catch (e: Exception) {
+            false
+        }
         val options = mutableListOf(
             getString(R.string.action_clear_chat_history),
             getString(R.string.action_revoke_device),
-            getString(R.string.action_block),
+            getString(if (isBlocked) R.string.action_unblock else R.string.action_block),
             getString(R.string.action_delete_contact)
         )
         if (message.addedViaGroup) {
@@ -193,7 +200,7 @@ class ContactsFragment : Fragment() {
                 when (which) {
                     0 -> confirmClearChatHistory(message)
                     1 -> confirmRevokeDevice(message)
-                    2 -> confirmBlockIdentity(message)
+                    2 -> if (isBlocked) unblockIdentity(message) else confirmBlockIdentity(message)
                     3 -> confirmDeleteContactStep1(message)
                     4 -> confirmTrustContact(message)
                 }
@@ -226,6 +233,16 @@ class ContactsFragment : Fragment() {
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    private fun unblockIdentity(message: ChatAdapter.ChatMessage) {
+        try {
+            P2PLib.unblockIdentity(message.identityId)
+            Toast.makeText(requireContext(), R.string.msg_identity_unblocked, Toast.LENGTH_SHORT).show()
+            refreshList()
+        } catch (e: Exception) {
+            Toast.makeText(requireContext(), "Error: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     /**

@@ -67,7 +67,7 @@ object IdentityManager {
         if (plaintext.isEmpty()) return
         try {
             val encrypted = KeystoreCrypto.encrypt(plaintext)
-            secretBundleFile(context).writeBytes(encrypted)
+            secretBundleFile(context).writeBytesAtomic(encrypted)
         } finally {
             plaintext.fill(0)
         }

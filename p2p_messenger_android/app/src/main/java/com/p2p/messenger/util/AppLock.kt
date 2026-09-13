@@ -87,6 +87,8 @@ object AppLock {
      * hiç açılmayan bir ekranın işareti ise kendiliğinden geçersizleşir.
      */
     private const val TRUSTED_EXCURSION_WINDOW_MS = 5_000L
+    private const val MAX_EXCURSION_MS = 3 * 60_000L
+    @Volatile private var excursionLeftAt = 0L
 
     fun hasPassword(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -174,7 +176,10 @@ object AppLock {
         excursionValidUntil = 0L
         // `elapsedRealtime`: duvar saati DEĞİL — kullanıcı/şebeke saati
         // değiştirse bile pencere kayamaz.
-        if (validUntil != 0L && SystemClock.elapsedRealtime() < validUntil) return
+        if (validUntil != 0L && SystemClock.elapsedRealtime() < validUntil) {
+            excursionLeftAt = SystemClock.elapsedRealtime()
+            return
+        }
         unlocked = false
     }
 
@@ -195,6 +200,14 @@ object AppLock {
      */
     fun guard(activity: Activity) {
         if (activity is AppLockActivity) return
+        // Güvenilir gezinti kilidi ertelediyse ve kullanıcı seçiciden Home'a
+        // basıp uzun süre sonra döndüyse kilitli açılmalı — aksi halde
+        // uygulama süresiz kilitsiz kalırdı.
+        val leftAt = excursionLeftAt
+        if (leftAt != 0L) {
+            excursionLeftAt = 0L
+            if (SystemClock.elapsedRealtime() - leftAt > MAX_EXCURSION_MS) unlocked = false
+        }
         if (unlocked) return
         if (promptShowing) return
         promptShowing = true

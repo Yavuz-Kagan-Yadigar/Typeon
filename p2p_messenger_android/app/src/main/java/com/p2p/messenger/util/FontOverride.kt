@@ -40,12 +40,15 @@ import java.lang.reflect.Modifier
  * hiç fontlanmamış değil.
  */
 object FontOverride {
+    private var cachedFile: Pair<Pair<String, Long>, Typeface>? = null
+
     /** `familyName`: `null`/boş ise no-op (varsayılan sistem fontuna
      *  dönmenin GERÇEK yolu süreç yeniden başlatmaktır — bu fonksiyon
      *  SADECE ileri yönde bir değiştirme uygular, geri almaz; bkz.
      *  P2PApplication/SettingsFragment çağıran taraf notu — zaten bir
      *  önceki override varsa üzerine YENİ bir tane yazmak zararsız). */
     fun apply(familyName: String?) {
+        remapSansSerif(null)
         if (familyName.isNullOrBlank()) return
         val newTypeface = try {
             Typeface.create(familyName, Typeface.NORMAL)
@@ -64,8 +67,12 @@ object FontOverride {
      *  Typeface'ı `familyName` yerine bir dosyadan (`Typeface.createFromFile`)
      *  yükler. Dosya yoksa/geçersiz font ise no-op (çökmez). */
     fun applyFile(file: java.io.File) {
-        val newTypeface = try {
-            Typeface.createFromFile(file)
+        // `P2PApplication` bunu HER Activity oluşturulmasında çağırıyor;
+        // `createFromFile` önbelleksiz — her seferinde fontu yeniden okuyup
+        // yeni bir native Typeface ayırırdı. Aynı dosya için öncekini kullan.
+        val key = file.path to file.lastModified()
+        val newTypeface = cachedFile?.takeIf { it.first == key }?.second ?: try {
+            Typeface.createFromFile(file).also { cachedFile = key to it }
         } catch (e: Exception) {
             return
         }
@@ -79,6 +86,31 @@ object FontOverride {
             newTypeface
         }
         applyTypeface(newTypeface, newBoldTypeface)
+        remapSansSerif(newTypeface)
+    }
+
+    /** Material/AppCompat stilleri (ActionBar başlığı, EditText, M3 type
+     *  scale) `fontFamily="sans-serif"` gibi ADLA font ister; bu ad
+     *  `Typeface.DEFAULT`'a değil sistem font haritasına (`sSystemFontMap`)
+     *  gider — içe aktarılmış font oraya ulaşmaz. `sans-serif*` girdileri
+     *  yüklenen fontla değiştirilir; `null` asıllarını geri koyar (sistem
+     *  fontuna geçişte). `monospace`/`serif` girdilerine dokunulmaz. */
+    private var originalSansEntries: Map<String, Typeface>? = null
+
+    private fun remapSansSerif(typeface: Typeface?) {
+        try {
+            val field = Typeface::class.java.getDeclaredField("sSystemFontMap")
+            field.isAccessible = true
+            @Suppress("UNCHECKED_CAST")
+            val map = field.get(null) as? MutableMap<String, Typeface> ?: return
+            val originals = originalSansEntries
+                ?: map.filterKeys { it.startsWith("sans-serif") }.toMap().also { originalSansEntries = it }
+            for ((name, original) in originals) {
+                map[name] = typeface?.let { Typeface.create(it, original.style) } ?: original
+            }
+        } catch (e: Exception) {
+            // bkz. `replaceStaticField` — gizli API engelliyse sessizce vazgeç.
+        }
     }
 
     /** `apply` ve `applyFile` tarafından PAYLAŞILAN: 6 reflection

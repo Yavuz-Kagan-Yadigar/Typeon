@@ -412,6 +412,13 @@ object P2PLib {
      *  ANA THREAD'DE ÇAĞIRMAYIN. Başarılıysa "OK". */
     external fun setDisplayName(name: String): String
 
+    /** Tüm kişilere ve kardeş cihazlara `AccountDeleted` gönderir (grup
+     *  kurucusuysa yetkiyi devreder). Bildirim giden cihaz sayısı; hata `-1`. */
+    external fun deleteAccount(): Int
+
+    /** Henüz onaylanmamış hesap silme bildirimi sayısı. */
+    external fun accountDeletionPending(): Int
+
     // --- Spec dışı: sohbet/kişi silme (uzun basma menüsü) ---
     /** Yumuşak seçenek: sadece yerel mesaj/ek geçmişini siler, eşleşme
      *  KORUNUR. */
@@ -467,6 +474,9 @@ object P2PLib {
      * kurtarma dosyasına da girer.
      */
     external fun setArchiveRootKey(keyBytes: ByteArray): Boolean
+
+    /** Çekirdekteki ARK (yoksa boş) — kardeşten gelenin diske yazılması için. */
+    external fun archiveRootKey(): ByteArray
 
     /**
      * Sunucudaki BÜTÜN geçmişi indirir — kurtarma dosyasından ya da cihaz

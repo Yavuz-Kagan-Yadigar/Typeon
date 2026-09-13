@@ -162,13 +162,16 @@ class ServerActivity : AppCompatActivity() {
         } else {
             (0 until addrs.length()).joinToString("\n") { addrs.optString(it) }
         }
+        val addressesChanged = addressLabel != lastAddresses
         lastAddresses = setTextIfChanged(addressText, addressLabel, lastAddresses)
 
         // Kod, adres hazır olur olmaz kendiliğinden görünür — operatörün
         // bir düğmeye basması gerekmez. Yalnızca henüz gösterilmediyse
         // sorulur: kod KALICI, saniyede bir yeniden okumanın (JNI + iki
         // SQLite sorgusu) hiçbir karşılığı yok.
-        if (addrs.length() > 0 && lastInvite == null) showJoinCode()
+        // Kod adresleri içeriyor: adres değişince (Wi-Fi IP'si, onion hazır
+        // olunca) eski QR yanlış adrese götürür — yeniden oku.
+        if (addrs.length() > 0 && (lastInvite == null || addressesChanged)) showJoinCode()
 
         lastStats = setTextIfChanged(
             statsText,

@@ -72,7 +72,7 @@ object SkippedKeyManager {
         SecureRandom().nextBytes(dataKey)
         try {
             val encrypted = KeystoreCrypto.encrypt(dataKey, KeystoreCrypto.ALIAS_SKIPPED_KEYS)
-            keyFile(context).writeBytes(encrypted)
+            keyFile(context).writeBytesAtomic(encrypted)
             P2PLib.setSkippedKeyEncryptionKey(dataKey)
         } finally {
             dataKey.fill(0)

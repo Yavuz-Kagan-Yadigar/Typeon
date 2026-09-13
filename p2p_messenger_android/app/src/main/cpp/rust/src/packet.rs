@@ -895,6 +895,13 @@ pub enum MessageContent {
     },
     /// bkz. `SiblingHistoryRequest` — kardeşin arşivinden son mesajlar.
     SiblingHistoryResponse { entries: Vec<SiblingHistoryEntry> },
+    /// Gönderen HESABINI sildi (son cihazından). Kişiler: sohbeti "hesap
+    /// silindi" olarak işaretler, artık mesaj göndermez; kurucusu olduğum
+    /// gruplardan üyeyi çıkarırım. Kardeş cihazlar: kendi yerel durumunu siler.
+    AccountDeleted {
+        #[serde(default)]
+        deleted_at_ms: u64,
+    },
 }
 
 /// El sıkışma paketi — önceki `HandshakeInit` tasarımı; spec'te ayrı bir

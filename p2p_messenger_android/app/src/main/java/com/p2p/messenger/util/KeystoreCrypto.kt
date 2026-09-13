@@ -154,3 +154,14 @@ object KeystoreCrypto {
         }
     }
 }
+
+/** Geçici dosyaya yaz + `rename`: şifreli anahtar dosyaları yazılırken
+ *  çökme/güç kesintisi yarım (açılamaz) bir dosya bırakmasın. */
+fun java.io.File.writeBytesAtomic(bytes: ByteArray) {
+    val tmp = java.io.File(parentFile, "$name.tmp")
+    java.io.FileOutputStream(tmp).use { out ->
+        out.write(bytes)
+        out.fd.sync()
+    }
+    if (!tmp.renameTo(this)) throw java.io.IOException("rename failed: $tmp")
+}

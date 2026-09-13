@@ -488,13 +488,6 @@ pub struct ServerInvite {
     pub token: String,
 }
 
-impl ServerInvite {
-    /// Kayıt için kullanılacak `PeerId`'yi taşıyan ilk adres.
-    pub fn first_addr(&self) -> Option<&String> {
-        self.addrs.first()
-    }
-}
-
 /// `typeon-server:<adres>[,<adres>...]#<jeton>` ayrıştırır.
 ///
 /// Jeton `#`'ten SONRA: bir multiaddr asla `#` içermez, bu yüzden ayrım tek

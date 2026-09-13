@@ -827,19 +827,30 @@ impl ServerCore {
             _ => return ServerResponse::Err(ServerErrorCode::BadInvite),
         }
 
-        let mut enrollment_id = vec![0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut enrollment_id);
+        // Aynı PeerId yeniden kayıt olursa (`peer_id` UNIQUE, insert
+        // `OR REPLACE`) eski kimliği ve kota sayaçlarını devral: yeni bir
+        // `enrollment_id` + sıfır sayaç, mevcut mail/arşiv/blob satırlarını
+        // sahipsiz bırakıp kotayı sıfırlamanın yolu olurdu.
+        let prev = self.store.enrollment_by_peer(&peer.to_string());
+        let enrollment_id = match &prev {
+            Some(p) => p.enrollment_id.clone(),
+            None => {
+                let mut id = vec![0u8; 16];
+                rand::rngs::OsRng.fill_bytes(&mut id);
+                id
+            }
+        };
         let e = Enrollment {
             enrollment_id: enrollment_id.clone(),
             enroll_pk,
             enroll_pk_pq,
             peer_id: peer.to_string(),
             state: EnrollmentState::Active,
-            enrolled_at: now,
+            enrolled_at: prev.as_ref().map_or(now, |p| p.enrolled_at),
             last_seen_at: now,
-            bytes_mail: 0,
-            bytes_archive: 0,
-            bytes_blob: 0,
+            bytes_mail: prev.as_ref().map_or(0, |p| p.bytes_mail),
+            bytes_archive: prev.as_ref().map_or(0, |p| p.bytes_archive),
+            bytes_blob: prev.as_ref().map_or(0, |p| p.bytes_blob),
         };
         if let Err(msg) = self.store.insert_enrollment(&e) {
             error!("Kayıt yazılamadı: {msg}");
@@ -1093,8 +1104,19 @@ impl ServerCore {
         if !is_safe_id(&blob_id) {
             return ServerResponse::Err(ServerErrorCode::BadDirection);
         }
-        if data.len() > server_proto::MAX_BLOB_CHUNK_BYTES {
+        if data.len() > server_proto::MAX_BLOB_CHUNK_BYTES
+            || chunk_size as usize + 16 > server_proto::MAX_BLOB_CHUNK_BYTES
+        {
             return ServerResponse::Err(ServerErrorCode::TooLarge);
+        }
+        // Ofset istemcinin `chunk_index`/`chunk_size`'ından geliyor: sınırsız
+        // bırakılırsa 1 baytlık bir parça dosyayı terabaytlarca ileriye
+        // yazar (kotaya 1 bayt sayılır, seyrek dosya desteklemeyen FS'te
+        // disk dolar). Dosyanın sonu cihaz blob kotasını aşamaz.
+        let stride = if chunk_size == 0 { attachments::FILE_CHUNK_SIZE as u64 } else { chunk_size as u64 };
+        let offset = chunk_index as u64 * (stride + 16);
+        if offset + data.len() as u64 > limits.max_blob_bytes {
+            return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
         }
         if e.bytes_blob as u64 + data.len() as u64 > limits.max_blob_bytes {
             return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
@@ -1140,8 +1162,6 @@ impl ServerCore {
         // değerle okumak zorunda, yoksa dosya yanlış ofsetlerden servis
         // edilir.
         self.store.blob_set_chunk_size(&blob_id, chunk_size);
-        let stride = if chunk_size == 0 { attachments::FILE_CHUNK_SIZE as u64 } else { chunk_size as u64 };
-        let offset = chunk_index as u64 * (stride + 16);
         let write = std::fs::OpenOptions::new()
             .create(true)
             .write(true)

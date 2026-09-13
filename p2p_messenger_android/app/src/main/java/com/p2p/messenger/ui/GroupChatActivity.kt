@@ -401,6 +401,14 @@ class GroupChatActivity : AppCompatActivity() {
                 // (`group_updated` yukarıda zaten karşılanıyor.)
                 type == "member_left" && obj.optString("group_id") == groupId ->
                     runOnUiThread { refreshGroupInfo() }
+                // Bir üye hesabını sildi: gruptaki herkese görünür bildirim.
+                type == "account_deleted" &&
+                    (obj.optJSONArray("group_ids")?.let { a -> (0 until a.length()).any { a.optString(it) == groupId } } == true) ->
+                    runOnUiThread {
+                        val name = obj.optString("display_name").ifBlank { obj.optString("identity_id").take(8) }
+                        Toast.makeText(this, getString(R.string.msg_contact_deleted_account, name), Toast.LENGTH_LONG).show()
+                        refreshGroupInfo()
+                    }
                 // Defter #16: bir `GroupUpdate` imza/versiyon/kurucu
                 // doğrulamasından geçemediğinde Rust bu olayı üretiyordu ama
                 // kimse dinlemiyordu — kullanıcı grubun sessizce
@@ -585,6 +593,8 @@ class GroupChatActivity : AppCompatActivity() {
         groupId = newGroupId
         P2PService.activeConversationId = "group:$groupId"
         localMessages.clear()
+        // Önceki sohbette açık kalan yanıt, yeni sohbetteki mesaja yapışmasın.
+        cancelReply()
         adapter.notifyDataSetChanged()
         mySentGroupMessageIds.clear()
         seenByPerMessage.clear()

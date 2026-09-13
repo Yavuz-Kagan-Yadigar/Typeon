@@ -799,6 +799,22 @@ pub fn get_display_name() -> String {
 }
 
 /// Hesap adını değiştirir ve bilinen her kişiye bildirir — bkz.
+/// `P2PCore::delete_account` — bildirim giden cihaz sayısı, hata için `-1`.
+pub fn delete_account() -> i64 {
+    match catch_panic(|| {
+        let _guard = RUNTIME.enter();
+        core_lock().delete_account()
+    }) {
+        Ok(Ok(n)) => n as i64,
+        _ => -1,
+    }
+}
+
+/// `P2PCore::account_deletion_pending`.
+pub fn account_deletion_pending() -> usize {
+    catch_panic(|| core_lock().account_deletion_pending()).unwrap_or(0)
+}
+
 /// `P2PCore::set_display_name`.
 pub fn set_display_name(name: &str) -> String {
     let name = name.to_string();

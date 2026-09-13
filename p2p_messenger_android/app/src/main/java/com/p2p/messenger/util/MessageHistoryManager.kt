@@ -82,7 +82,7 @@ object MessageHistoryManager {
         SecureRandom().nextBytes(dataKey)
         try {
             val encrypted = KeystoreCrypto.encrypt(dataKey, KeystoreCrypto.ALIAS_HISTORY)
-            keyFile(context).writeBytes(encrypted)
+            keyFile(context).writeBytesAtomic(encrypted)
             P2PLib.setHistoryKey(dataKey)
         } finally {
             dataKey.fill(0)

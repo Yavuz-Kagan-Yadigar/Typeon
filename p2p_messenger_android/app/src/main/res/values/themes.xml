@@ -202,4 +202,11 @@
     <style name="ThemeOverlay.P2PMessenger.Font.SansBlack" parent="">
         <item name="appFontFamily">sans-serif-black</item>
     </style>
+    <!-- İçe aktarılmış font: sistemde OLMAYAN bir aile adı. `Typeface.create(ad)`
+         bilinmeyen adda `Typeface.DEFAULT`'a düşer — `FontOverride.applyFile`
+         o alanı yüklenen fontla değiştirdiği için bütün TextView'lar onu alır.
+         "sans-serif" kalsaydı sistem font haritasından gerçek Roboto gelirdi. -->
+    <style name="ThemeOverlay.P2PMessenger.Font.Custom" parent="">
+        <item name="appFontFamily">p2p-imported-font</item>
+    </style>
 </resources>
