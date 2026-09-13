@@ -144,6 +144,8 @@
     <string name="lbl_font_serif">Serif</string>
     <string name="lbl_font_monospace">Monospace</string>
     <string name="lbl_font_sans_black">Sans Black</string>
+    <string name="lbl_font_import">Bir .ttf dosyası içe aktar…</string>
+    <string name="lbl_font_custom">Özel</string>
     <string name="lbl_chat_appearance">Görünüm</string>
     <string name="lbl_chat_bg_color">Arka plan rengi</string>
     <string name="lbl_accent_color">Vurgu rengi</string>

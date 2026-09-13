@@ -51,7 +51,8 @@ object ThemePrefs {
         SANS_CONDENSED("sans_condensed", "sans-serif-condensed", R.style.ThemeOverlay_P2PMessenger_Font_SansCondensed),
         SERIF("serif", "serif", R.style.ThemeOverlay_P2PMessenger_Font_Serif),
         MONOSPACE("monospace", "monospace", R.style.ThemeOverlay_P2PMessenger_Font_Monospace),
-        SANS_BLACK("sans_black", "sans-serif-black", R.style.ThemeOverlay_P2PMessenger_Font_SansBlack);
+        SANS_BLACK("sans_black", "sans-serif-black", R.style.ThemeOverlay_P2PMessenger_Font_SansBlack),
+        CUSTOM("custom", null, 0);
 
         companion object {
             fun fromPrefValue(value: String): FontChoice = entries.find { it.prefValue == value } ?: DEFAULT
@@ -144,6 +145,13 @@ object ThemePrefs {
      * gerek yok.
      */
     fun chatWallpaperFile(context: Context): File = File(context.filesDir, WALLPAPER_FILE_NAME)
+
+    /** bkz. `chatWallpaperFile` — `content://` URI'yi DEĞİL, kalıcı
+     *  izin karmaşasına hiç girmeden ham font baytlarını tutuyoruz.
+     *  `OpenDocument` ile seçilen .ttf/.otf dosyasının kopyası burada
+     *  saklanır; varlığı dosyanın kendisi "seçilmiş mi" bilgisini
+     *  taşır, ayrı bir SharedPreferences bayrağına gerek yok. */
+    fun customFontFile(context: Context): File = File(context.filesDir, "custom_font.ttf")
 
     fun hasChatWallpaper(context: Context): Boolean = chatWallpaperFile(context).exists()
 

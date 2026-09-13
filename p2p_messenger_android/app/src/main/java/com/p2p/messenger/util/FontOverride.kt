@@ -57,6 +57,34 @@ object FontOverride {
         } catch (e: Exception) {
             newTypeface
         }
+        applyTypeface(newTypeface, newBoldTypeface)
+    }
+
+    /** bkz. `apply(String?)` — AYNI reflection zincirini çalıştırır,
+     *  Typeface'ı `familyName` yerine bir dosyadan (`Typeface.createFromFile`)
+     *  yükler. Dosya yoksa/geçersiz font ise no-op (çökmez). */
+    fun applyFile(file: java.io.File) {
+        val newTypeface = try {
+            Typeface.createFromFile(file)
+        } catch (e: Exception) {
+            return
+        }
+        val newBoldTypeface = try {
+            // `createFromFile` bir stil parametresi almaz (sadece
+            // File/String overload'ları var) — kalın varyant, YÜKLENMİŞ
+            // Typeface'ten `Typeface.create(base, style)` ile türetilir
+            // (bkz. `apply(String?)`'in `familyName` yolu ile AYNI amaç).
+            Typeface.create(newTypeface, Typeface.BOLD)
+        } catch (e: Exception) {
+            newTypeface
+        }
+        applyTypeface(newTypeface, newBoldTypeface)
+    }
+
+    /** `apply` ve `applyFile` tarafından PAYLAŞILAN: 6 reflection
+     *  çağrısını (`replaceStaticField` ×5 + `replaceDefaultsArray` ×1)
+     *  TEK bir yerde toplar — duplication'ı önler. */
+    private fun applyTypeface(newTypeface: Typeface, newBoldTypeface: Typeface) {
         replaceStaticField("DEFAULT", newTypeface)
         replaceStaticField("DEFAULT_BOLD", newBoldTypeface)
         replaceStaticField("SANS_SERIF", newTypeface)

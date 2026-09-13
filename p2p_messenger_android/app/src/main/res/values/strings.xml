@@ -158,6 +158,8 @@
     <string name="lbl_font_serif">Serif</string>
     <string name="lbl_font_monospace">Monospace</string>
     <string name="lbl_font_sans_black">Sans Black</string>
+    <string name="lbl_font_import">Import a .ttf file…</string>
+    <string name="lbl_font_custom">Custom</string>
     <string name="lbl_chat_appearance">Appearance</string>
     <string name="lbl_chat_bg_color">Background color</string>
     <string name="lbl_accent_color">Accent color</string>

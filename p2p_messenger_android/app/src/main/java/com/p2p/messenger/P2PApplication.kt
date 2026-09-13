@@ -45,7 +45,12 @@ class P2PApplication : Application() {
         // eski fontla bir an için çizilip sonra değişmesin. Kullanıcı
         // Ayarlar'dan font değiştirdiğinde `SettingsFragment` bunu AYRICA
         // (hemen, `recreate()`'ten önce) çağırır — bkz. o çağrı noktası.
-        com.p2p.messenger.util.FontOverride.apply(com.p2p.messenger.util.ThemePrefs.getFontChoice(this).familyName)
+        val initialFontChoice = com.p2p.messenger.util.ThemePrefs.getFontChoice(this)
+        if (initialFontChoice == com.p2p.messenger.util.ThemePrefs.FontChoice.CUSTOM) {
+            com.p2p.messenger.util.FontOverride.applyFile(com.p2p.messenger.util.ThemePrefs.customFontFile(this))
+        } else {
+            com.p2p.messenger.util.FontOverride.apply(initialFontChoice.familyName)
+        }
 
         // Spec dışı, kullanıcı isteği: gönderilemeyen mesajlar/emirler
         // (Edit/Delete/GroupUpdate — bkz. lib.rs `pending_durable_retries`)
@@ -123,7 +128,11 @@ class P2PApplication : Application() {
                 // SIRA ÖNEMLİ: `applyScalePreferences` yukarıda
                 // `Resources.updateConfiguration` çağırdıktan SONRA
                 // gelmeli.
-                com.p2p.messenger.util.FontOverride.apply(fontChoice.familyName)
+                if (fontChoice == com.p2p.messenger.util.ThemePrefs.FontChoice.CUSTOM) {
+                    com.p2p.messenger.util.FontOverride.applyFile(com.p2p.messenger.util.ThemePrefs.customFontFile(activity))
+                } else {
+                    com.p2p.messenger.util.FontOverride.apply(fontChoice.familyName)
+                }
                 // Spec dışı, kullanıcı isteği ("arayüzdeki gri renkleri
                 // daha koyu yap"): dinamik renkten (yukarıdaki
                 // `applyAccentColor`/`DynamicColors`) SONRA bindirilmeli —
