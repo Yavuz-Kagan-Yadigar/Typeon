@@ -230,7 +230,12 @@ class P2PApplication : Application() {
                 // Uygulama TAMAMEN arka plana düştü (ekranlar arası geçişte
                 // sayaç 0'a inmez, bkz. `startedActivityCount`) — bir
                 // sonraki dönüşte şifre yeniden sorulsun.
-                if (startedActivityCount == 0) {
+                // `isChangingConfigurations`: `recreate()` (ölçek, yazı tipi,
+                // dil, renk/tema ayarları) ve döndürme Activity'yi durdurup
+                // yeniden başlatıyor — sayaç o anda 0'a iniyor ama uygulama
+                // arka plana DÜŞMEDİ; önceden her görünüm değişikliği şifre
+                // soruyordu.
+                if (startedActivityCount == 0 && !activity.isChangingConfigurations) {
                     AppLock.lock()
                 }
             }
