@@ -13852,7 +13852,7 @@ impl P2PCore {
         };
         let unconfirmed_past_first_retry = match envelope {
             NetworkEnvelope::Message(m) => self.awaiting_confirmation.get(&m.header.message_id)
-                .map_or(false, |pc| current_time_ms().saturating_sub(pc.first_sent_at) >= ACK_RETRY_INITIAL_MS),
+                .map_or(false, |pc| current_time_ms().saturating_sub(pc.first_sent_at) >= ACK_SUSPECT_MS),
             _ => false,
         };
         let mut deposited = (!direct || critical || unconfirmed_past_first_retry)
@@ -14072,9 +14072,11 @@ impl P2PCore {
         // bkz. `KeepAliveState.suspect`: canlı sandığımız bir bağlantıdan
         // `ACK_SUSPECT_MS` içinde onay gelmediyse bağlantıyı hemen yokla.
         let mut suspects: Vec<PeerId> = Vec::new();
+        let mut early_deposit: Vec<(String, NetworkEnvelope)> = Vec::new();
         for p in self.awaiting_confirmation.values_mut() {
             if !p.suspect_probed && now.saturating_sub(p.first_sent_at) >= ACK_SUSPECT_MS {
                 p.suspect_probed = true;
+                early_deposit.push((p.peer_device_fingerprint.clone(), p.envelope.clone()));
                 if let Some(pid) = self.device_to_peer_id.get(&p.peer_device_fingerprint) {
                     suspects.push(*pid);
                 }
@@ -14082,6 +14084,15 @@ impl P2PCore {
         }
         for pid in suspects {
             self.mark_connection_suspect(pid);
+        }
+        // Doğrudan gönderilmiş ama `ACK_SUSPECT_MS` içinde onaylanmamış paketi
+        // 5 sn'lik ilk yeniden denemeyi beklemeden sunucuya da bırak: gönderici
+        // bu arada çevrimdışı kalırsa mesaj sunucuda olsun. Aynı baytları
+        // gossipsub zaten `Duplicate` diye tekrar göndermez.
+        for (fp, envelope) in early_deposit {
+            if self.is_connected_to_device(&fp) {
+                let _ = self.try_publish_raw(&fp, &envelope, now);
+            }
         }
         // KRİTİK: `awaiting_confirmation` bir `HashMap` — Rust'ın std
         // `HashMap`'i her süreçte rastgele tohumlanmış bir hasher
