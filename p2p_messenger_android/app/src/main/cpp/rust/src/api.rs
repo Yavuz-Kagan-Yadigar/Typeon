@@ -167,9 +167,15 @@ pub fn own_connection_status() -> String {
 pub fn poll_network() -> Vec<String> {
     catch_panic(|| {
         let _guard = RUNTIME.enter();
-        core_lock().poll_events()
+        crate::CORE_DIRTY.store(false, std::sync::atomic::Ordering::SeqCst);
+        crate::core_lock_poll().poll_events()
     })
     .unwrap_or_default()
+}
+
+/// bkz. lib.rs `wait_for_network_activity` — poll döngüsü sabit uyku yerine bunu çağırır.
+pub fn wait_for_network_activity(timeout_ms: u64) {
+    let _ = catch_panic(|| crate::wait_for_network_activity(timeout_ms));
 }
 
 pub fn notify_network_changed() {

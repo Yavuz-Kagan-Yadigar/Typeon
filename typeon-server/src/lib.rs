@@ -347,7 +347,18 @@ impl ServerCore {
                 let autonat = autonat::Behaviour::new(peer_id, autonat::Config::default());
                 let upnp = libp2p::upnp::tokio::Behaviour::default();
                 let relay: Toggle<relay::Behaviour> = if node_mode {
-                    Some(relay::Behaviour::new(peer_id, relay::Config::default())).into()
+                    // Varsayılan devre sınırı 2 dk / 128 KiB: bir dosya parçası
+                    // bile geçmez, sohbet bağlantısı her 2 dk kopar. Sunucu
+                    // bayt taşımak için var: bayt tavanı yok (0 = sınırsız).
+                    // Süre için "sınırsız" değeri yok (zamanlayıcı her zaman
+                    // kurulur) ve rezervasyon yanıtında u32 saniye taşınır —
+                    // u32::MAX pratikte sınırsız. Ölü devreleri keepalive
+                    // (~6 sn) zaten kapatıyor.
+                    Some(relay::Behaviour::new(peer_id, relay::Config {
+                        max_circuit_duration: Duration::from_secs(u32::MAX as u64),
+                        max_circuit_bytes: 0,
+                        ..relay::Config::default()
+                    })).into()
                 } else {
                     None.into()
                 };

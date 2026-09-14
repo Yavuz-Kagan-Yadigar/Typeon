@@ -199,6 +199,12 @@ object P2PLib {
      *  `observeNetworkChangesForReconnect`, lib.rs `reconnect_all_known_now`.
      *  Bilinen TÜM Aktif cihazlar için, geri çekilme geçmişini yok
      *  sayarak ANINDA yeniden bağlanmayı dener. */
+    /** Poll thread'i: ağda olay olana, başka bir çağrı çekirdeği isteyene ya da
+     *  `timeoutMs` dolana kadar bloklar (bkz. Rust `wait_for_network_activity`).
+     *  Sabit `postDelayed` beklemesinin yerine — mesajlar poll turunu beklemez. */
+    external fun waitForNetworkActivity(timeoutMs: Long)
+    /** PBKDF2-HMAC-SHA256 (Rust/ring) — bkz. `AppLock.derive`. Çekirdek kilidini almaz. */
+    external fun pbkdf2Sha256(password: String, salt: ByteArray, iterations: Int, outLen: Int): ByteArray
     external fun notifyNetworkChanged()
 
     // --- Bölüm 3: Mesajlaşma ---

@@ -85,7 +85,7 @@ pub enum FileChunkResponse {
     /// Şifreli parça (ciphertext + 16 baytlık AEAD etiketi) — sunan taraf
     /// bunu kendi diskindeki `.enc` dosyasından OLDUĞU GİBİ okuyup
     /// gönderir (bkz. modül başı notu).
-    Chunk { data: Vec<u8> },
+    Chunk { #[serde(with = "serde_bytes")] data: Vec<u8> },
     /// `file_id` bilinmiyor (hiç sunulmuyor/tamamlanmamış) veya
     /// `chunk_index` aralık dışı.
     NotFound,

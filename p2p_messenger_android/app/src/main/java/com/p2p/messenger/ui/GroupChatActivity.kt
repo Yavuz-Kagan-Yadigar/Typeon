@@ -379,7 +379,7 @@ class GroupChatActivity : AppCompatActivity() {
                 // GLOBAL olarak benzersiz olduğundan koşulsuz işlenir —
                 // bu ekranın `localMessages`'ında yoksa zaten no-op'tur
                 // (bkz. SimpleChatAdapter.applyAttachmentUpdate).
-                type == "file_offer" && !obj.isNull("group_id") && obj.optString("group_id") == groupId ->
+                (type == "file_offer" || type == "sibling_file") && !obj.isNull("group_id") && obj.optString("group_id") == groupId ->
                     runOnUiThread { handleIncomingGroupFileOffer(obj) }
                 type == "file_progress" -> runOnUiThread {
                     adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.DOWNLOADING, obj.optLong("bytes_done"))
@@ -683,10 +683,13 @@ class GroupChatActivity : AppCompatActivity() {
             val existingIds = localMessages.mapTo(mutableSetOf()) { it.messageId }
             val newItems = merged.filter { it.messageId !in existingIds }
             if (newItems.isNotEmpty()) {
-                val insertStart = localMessages.size
                 localMessages.addAll(newItems)
+                // Geçmiş yüklemesi bir canlı mesajdan SONRA biterse sona eklemek
+                // canlı mesajı eski geçmişin üstüne, ekran dışına itiyordu (cihazda
+                // görüldü) — gönderim sırasına göre yeniden diz.
+                localMessages.sortWith(compareBy { it.orderKey })
                 resolveReplyLabels()
-                adapter.notifyItemRangeInserted(insertStart, newItems.size)
+                adapter.notifyDataSetChanged()
                 adapter.dedupeByMessageId()
                 recycler.scrollToPosition(localMessages.size - 1)
             }
@@ -2197,7 +2200,7 @@ class GroupChatActivity : AppCompatActivity() {
             SimpleChatAdapter.Item(
                 messageId = obj.optString("file_id"),
                 text = "",
-                isMine = false,
+                isMine = obj.optString("type") == "sibling_file",
                 senderName = sender?.displayName ?: senderIdentityId.take(8),
                 senderAvatarJpeg = sender?.avatarHex?.let { hexToBytes(it) },
                 attachment = SimpleChatAdapter.AttachmentInfo(
@@ -2777,10 +2780,13 @@ class GroupChatActivity : AppCompatActivity() {
             val existingIds = localMessages.mapTo(mutableSetOf()) { it.messageId }
             val missed = merged.filter { it.messageId !in existingIds }
             if (missed.isNotEmpty()) {
-                val insertStart = localMessages.size
                 localMessages.addAll(missed)
+                // Geçmiş yüklemesi bir canlı mesajdan SONRA biterse sona eklemek
+                // canlı mesajı eski geçmişin üstüne, ekran dışına itiyordu (cihazda
+                // görüldü) — gönderim sırasına göre yeniden diz.
+                localMessages.sortWith(compareBy { it.orderKey })
                 resolveReplyLabels()
-                adapter.notifyItemRangeInserted(insertStart, missed.size)
+                adapter.notifyDataSetChanged()
                 adapter.dedupeByMessageId()
                 onNewIncomingItemAdded()
             }

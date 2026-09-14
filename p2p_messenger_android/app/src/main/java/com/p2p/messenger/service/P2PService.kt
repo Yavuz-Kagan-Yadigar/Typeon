@@ -303,9 +303,17 @@ class P2PService : Service() {
      *  bir ekranın tekrar açılması aralığı ANINDA 1sn'ye sıfırlar.
      */
     private var consecutiveEmptyPolls = 0
+    /** Bir sonraki turun başında `waitForNetworkActivity` ile beklenecek süre. */
+    @Volatile private var pendingWaitMs = 0L
     private val pollRunnable = object : Runnable {
         override fun run() {
             if (isRunning) {
+                // bkz. aşağıda `pendingWaitMs`: sabit gecikme yerine ağ olayını bekle.
+                val waitMs = pendingWaitMs
+                pendingWaitMs = 0L
+                if (waitMs > 0L) {
+                    try { P2PLib.waitForNetworkActivity(waitMs) } catch (e: Throwable) {}
+                }
                 // An uncaught exception here (pollNetwork, a listener, or
                 // notify) would skip postDelayed below and permanently stop
                 // all polling for the life of the process, so it must not
@@ -336,11 +344,18 @@ class P2PService : Service() {
                         // Doze altında da ateşleyen bir alarm kuruluyor.
                         releaseWakeLock()
                         scheduleDozeWakeup()
+                        handler.postDelayed(this, nextPollDelayMs())
                     } else {
                         acquireWakeLock()
                         cancelDozeWakeup()
+                        // Uyanık modda bekleme Rust'ta: gelen bayt ya da giden
+                        // mesaj beklemeyi anında bitirir (önceden her yön ~1 sn
+                        // poll turunu bekliyordu). Aynı runnable iki kez
+                        // kuyruklanmasın diye önce kaldırılıyor.
+                        pendingWaitMs = nextPollDelayMs()
+                        handler.removeCallbacks(this)
+                        handler.post(this)
                     }
-                    handler.postDelayed(this, nextPollDelayMs())
                 }
             }
         }
@@ -866,7 +881,10 @@ class P2PService : Service() {
             }
             override fun onLost(network: Network) {
                 refreshWifiBinding(cm)
-                notifyNetworkChangedInBackground()
+                // Yeniden bağlanma YALNIZCA yeni varsayılan ağ geldiğinde
+                // (`onAvailable`): ağ yokken yapılan dial/Tor denemeleri anında
+                // "Network is unreachable" ile düşüyor ve arti'nin guard/devre
+                // durumunu bozup yeni ağda toparlanmayı geciktiriyordu.
             }
         }
         defaultNetworkCallback = callback

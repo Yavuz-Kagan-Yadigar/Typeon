@@ -129,9 +129,14 @@ impl TorHandle {
         let runtime = TokioRustlsRuntime::current()
             .map_err(|e| format!("TokioRustlsRuntime alınamadı: {e}"))?;
 
-        let config = TorClientConfigBuilder::from_directories(state_dir, cache_dir)
-            .build()
-            .map_err(|e| format!("Arti config: {e}"))?;
+        let mut config = TorClientConfigBuilder::from_directories(state_dir, cache_dir);
+        // Devre kurma zaman aşımı arti'de ölçümle öğreniliyor; hızlı Wi-Fi'de
+        // öğrenilen kısa değer, mobil veriye geçince devrelerin çoğunu
+        // tamamlanmadan terk ettiriyordu (cihazda: ağ değişiminden sonra onion
+        // dial'ı 6 sn'de "tor operation timed out", toparlanma 20-120 sn).
+        // Öğrenme açık kalıyor, yalnızca alt sınır 10 sn.
+        config.override_net_params().insert("cbtmintimeout".to_string(), 10_000);
+        let config = config.build().map_err(|e| format!("Arti config: {e}"))?;
 
         let client = TorClient::with_runtime(runtime)
             .config(config)

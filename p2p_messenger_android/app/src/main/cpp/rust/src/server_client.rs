@@ -70,7 +70,10 @@ pub(crate) const SERVER_ONLY_GRACE_MS: u64 = 30_000;
 ///
 /// "Bu alıcı benim sunucumda değil" bilgisi mesaj başına bir gidiş-dönüşe
 /// mal olmamalı; ama kalıcı da olmamalı, karşı taraf yarın kaydolabilir.
-pub(crate) const SERVER_UNKNOWN_MAILBOX_TTL_MS: u64 = 10 * 60 * 1000;
+// 10 dk idi: rotasyondan hemen sonra alıcı yeni kutusunu henüz kaydetmemişken
+// (ör. ağ değişiminde sunucudan kopuk) gelen tek bir `UnknownMailbox`, o eşe
+// sunucu yolunu 10 dk kapatıyordu — cihazda tam da gerektiği anda görüldü.
+pub(crate) const SERVER_UNKNOWN_MAILBOX_TTL_MS: u64 = 60 * 1000;
 
 /// Kota/hız sınırı hatası veren bir sunucuya ne kadar süre YENİ yatırma
 /// denenmez.
@@ -237,7 +240,7 @@ pub(crate) enum ServerInflight {
     Hello { server_id: String },
     Enroll { server_id: String },
     Rebind { server_id: String },
-    Register { server_id: String, ids: Vec<String> },
+    Register { server_id: String, ids: Vec<String>, dropped: Vec<String> },
     /// `message_id` varsa, teslim başarısız olursa gossipsub'a düşürmek için.
     ///
     /// `first_attempt_at`: zarfın İLK yayın denemesinin zamanı — sunucu
@@ -1192,9 +1195,10 @@ impl P2PCore {
             if !add.is_empty() || !drop.is_empty() {
                 info!("Sunucuya kutu kaydı: +{} -{}", add.len(), drop.len());
                 let ids = add.clone();
+                let dropped = drop.clone();
                 if let Some(id) = self.send_server_request(peer_id, ServerRequest::Register { add, drop }) {
                     self.server_inflight
-                        .insert(id, ServerInflight::Register { server_id: rec.server_id.clone(), ids });
+                        .insert(id, ServerInflight::Register { server_id: rec.server_id.clone(), ids, dropped });
                 }
             }
 
@@ -1363,10 +1367,15 @@ impl P2PCore {
             }
 
             // --- Register ---
-            (ServerInflight::Register { server_id, ids }, ServerResponse::Ok) => {
+            (ServerInflight::Register { server_id, ids, dropped }, ServerResponse::Ok) => {
                 if let Some(rt) = self.server_rt.get_mut(&server_id) {
                     for id in ids {
                         rt.registered.insert(id);
+                    }
+                    // Düşürülenler çıkarılmıyordu: fark her turda "-1" olarak
+                    // yeniden gönderiliyordu (cihazda sürekli "+0 -1").
+                    for id in dropped {
+                        rt.registered.remove(&id);
                     }
                 }
             }

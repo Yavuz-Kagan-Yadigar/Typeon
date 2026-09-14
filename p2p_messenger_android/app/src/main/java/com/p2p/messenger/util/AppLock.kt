@@ -132,6 +132,13 @@ object AppLock {
     }
 
     private fun derive(password: String, salt: ByteArray, iterations: Int): ByteArray {
+        // Native (ring) yol: aynı çıktı, Java'dan kat kat hızlı — Tab A8'de
+        // Java ile kilit açma 4-8 sn sürüyordu. Kütüphane yüklenemezse Java.
+        try {
+            val out = com.p2p.messenger.P2PLib.pbkdf2Sha256(password, salt, iterations, KEY_LENGTH_BITS / 8)
+            if (out.size == KEY_LENGTH_BITS / 8) return out
+        } catch (e: Throwable) {
+        }
         val spec = PBEKeySpec(password.toCharArray(), salt, iterations, KEY_LENGTH_BITS)
         return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
     }

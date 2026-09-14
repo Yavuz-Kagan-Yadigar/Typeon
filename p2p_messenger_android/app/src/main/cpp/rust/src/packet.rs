@@ -56,11 +56,13 @@ pub struct DeviceAdd {
     pub added_by: String,
     /// Klasik (Ed25519) imza — `identity_id || new_device_fingerprint ||
     /// added_by` üzerinde, onaylayan cihazın anahtarıyla.
+    #[serde(with = "serde_bytes")]
     pub signature: Vec<u8>,
     /// ML-DSA (post-kuantum) imza — MessagePacket/GroupUpdate ile AYNI hibrit
     /// model (bkz. `verify_hybrid_signature`). `#[serde(default)]`: bu alan
     /// olmadan üretilmiş olası eski/boş paketlerle uyum için.
     #[serde(default)]
+    #[serde(with = "serde_bytes")]
     pub signature_pq: Vec<u8>,
 }
 
@@ -73,8 +75,10 @@ pub struct DeviceRevoke {
     pub revoked_by: String,
     /// bkz. `DeviceAdd.signature` — `identity_id || revoked_device_fingerprint
     /// || revoked_by` üzerinde klasik imza.
+    #[serde(with = "serde_bytes")]
     pub signature: Vec<u8>,
     #[serde(default)]
+    #[serde(with = "serde_bytes")]
     pub signature_pq: Vec<u8>,
 }
 
@@ -88,7 +92,7 @@ pub enum GroupChange {
     /// (bu zaten `validate_group_update`'in `NotFounder` kontrolunden
     /// GECER, ayri bir yetki mekanizmasi icat edilmedi). `None` = fotograf
     /// kaldirildi.
-    AvatarUpdate(Option<Vec<u8>>),
+    AvatarUpdate(#[serde(with = "serde_bytes")] Option<Vec<u8>>),
     /// Spec dışı, kullanıcı isteği: grubu TÜM üyeler için siler. Diğer
     /// değişikliklerin aksine bu, gruba bir alan güncellemesi değil —
     /// alıcı tarafta grup kaydı tamamen kaldırılır (bkz. lib.rs
@@ -123,9 +127,13 @@ pub struct GroupMemberDevice {
     pub identity_id: String,
     pub device_fingerprint: String,
     pub device_name: String,
+    #[serde(with = "serde_bytes")]
     pub sign_pubkey_ed25519: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub sign_pubkey_mldsa: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub kem_pubkey_x25519: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub kem_pubkey_mlkem: Vec<u8>,
     /// Kurucunun bildiği son adres — dial ipucu (bkz. lib.rs
     /// `device_last_addr`). Yoksa alıcı mDNS/röle/DHT'ye güvenir.
@@ -167,7 +175,9 @@ pub struct FounderTransfer {
     pub to_identity: String,
     /// Eski kurucunun imzalayan cihazı.
     pub signed_by_device: String,
+    #[serde(with = "serde_bytes")]
     pub signature: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub signature_pq: Vec<u8>,
 }
 
@@ -239,12 +249,14 @@ pub struct GroupUpdate {
     /// Kurucunun hangi cihazı imzaladı.
     pub signed_by_device: String,
     /// Klasik (Ed25519) imza.
+    #[serde(with = "serde_bytes")]
     pub signature: Vec<u8>,
     /// Spec dışı: ML-DSA (post-kuantum) imza — önceden bu alan yoktu ve
     /// GroupUpdate SADECE Ed25519 ile korunuyordu (MessagePacket/
     /// HandshakeInit'teki hibrit modelle tutarsızdı, bkz. güvenlik
     /// denetimi). Artık MessagePacket ile AYNI hibrit doğrulama
     /// (`verify_hybrid_signature`, HER İKİ imza da zorunlu) uygulanıyor.
+    #[serde(with = "serde_bytes")]
     pub signature_pq: Vec<u8>,
     /// Kurucu devir zinciri — bkz. `FounderTransfer` (kilitlenme senaryosu
     /// orada anlatılıyor). Kurucunun gönderdiği HER güncelleme, o gruba
@@ -323,9 +335,13 @@ impl DeviceLinkRequest {
 pub struct SyncedDevice {
     pub device_fingerprint: String,
     pub device_name: String,
+    #[serde(with = "serde_bytes")]
     pub sign_pubkey_ed25519: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub sign_pubkey_mldsa: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub kem_pubkey_x25519: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub kem_pubkey_mlkem: Vec<u8>,
     pub is_active: bool,
     #[serde(default)]
@@ -341,6 +357,7 @@ pub struct SyncedContact {
     #[serde(default)]
     pub added_via_group: bool,
     #[serde(default)]
+    #[serde(with = "serde_bytes")]
     pub avatar_jpeg: Option<Vec<u8>>,
     pub devices: Vec<SyncedDevice>,
 }
@@ -377,6 +394,7 @@ pub struct SyncPayload {
     /// `#[serde(default)]`: bu alan olmadan üretilmiş eski senkron
     /// paketleriyle uyum için.
     #[serde(default)]
+    #[serde(with = "serde_bytes")]
     pub archive_root_key: Option<Vec<u8>>,
 }
 
@@ -396,6 +414,7 @@ pub struct MessagePacketHeader {
     pub message_id: String,
     /// Güncel ratchet adımının public key'i (X25519 + ML-KEM hibrit,
     /// hibrit anahtarların birleştirilmiş serileştirmesi).
+    #[serde(with = "serde_bytes")]
     pub ratchet_pubkey: Vec<u8>,
     pub message_number: u32,
     pub prev_chain_length: u32,
@@ -407,6 +426,7 @@ pub struct MessagePacketHeader {
     /// — bkz. ratchet.rs `RatchetPublicKeys`/`perform_dh_ratchet`
     /// dokümantasyonu ve lib.rs `maybe_rotate_ratchet`. Boşsa (None), bu
     /// mesaj normal bir simetrik-zincir ilerlemesidir, rotasyon yok.
+    #[serde(with = "serde_bytes")]
     pub rotation_kyber_ciphertext: Option<Vec<u8>>,
 }
 
@@ -416,9 +436,12 @@ pub struct MessagePacket {
     /// AEAD (ChaCha20-Poly1305) şifreli içerik; nonce, header'dan
     /// deterministik türetilir (message_number bazlı) — ayrıca taşınmaz.
     /// Çözüldükten sonra bir `MessageContent` olarak CBOR-decode edilir.
+    #[serde(with = "serde_bytes")]
     pub ciphertext: Vec<u8>,
     /// ML-DSA + Ed25519 hibrit imza (header+ciphertext üzerinde).
+    #[serde(with = "serde_bytes")]
     pub signature_classical: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub signature_pq: Vec<u8>,
 }
 
@@ -670,6 +693,7 @@ pub enum MessageContent {
         file_name: String,
         mime_type: String,
         total_size: u64,
+        #[serde(with = "serde_bytes")]
         file_key: [u8; 32],
         sha256_hex: String,
         /// Spec dışı: foto/video ekleri için gönderen tarafın önceden
@@ -680,6 +704,7 @@ pub enum MessageContent {
         /// gösterebilmesi için. `None` ise (dosya türü foto/video değil,
         /// veya önizleme oluşturulamadı) önizleme gösterilmez, sadece
         /// jenerik dosya simgesi.
+        #[serde(with = "serde_bytes")]
         preview_jpeg: Option<Vec<u8>>,
         /// Spec disi: sesli mesajlar icin calma suresi (milisaniye).
         /// `None` ise sure bilinmiyor/uygulanamaz (or. siradan bir belge).
@@ -726,7 +751,7 @@ pub enum MessageContent {
     /// Spec disi, kullanici tarafindan istenen "gorüldu" bildirimi --
     /// `Ack` ile AYNI desen (bkz. lib.rs `send_seen`/`send_ack`): ratchet-
     /// sifreli kanaldan gider, kendisi ayrica onaylanmaz (sonsuz döngü
-    /// riski), sinirli sayida kendi-kendine yeniden dener. `Ack`'ten
+    /// riski), bir kez gönderilir (güvenilir yol `ReadStateSync`). `Ack`'ten
     /// FARKI: "paket basariyla COZULDU" (teslim) degil, "kullanici EKRANDA
     /// GORDU" anlamina gelir -- alici tarafta otomatik degil, UI mesaji
     /// gosterdiginde tetiklenir.
@@ -752,6 +777,7 @@ pub enum MessageContent {
     /// gonderir (ve `set_own_profile_picture` o anki ismi) -- aksi halde
     /// isim degisikligi karsi tarafta fotografi sessizce silerdi.
     ProfileUpdate {
+        #[serde(with = "serde_bytes")]
         avatar_jpeg: Option<Vec<u8>>,
         /// Kullanici istegi (2026-09-04): hesap adini degistirebilmek ve
         /// degisikligin kisilere OTOMATIK ulasmasi. Onceden bir kisinin
@@ -911,16 +937,21 @@ pub enum MessageContent {
 pub struct HandshakeInit {
     pub sender_identity_id: String,
     pub sender_device_fingerprint: String,
+    #[serde(with = "serde_bytes")]
     pub initiator_x25519_pubkey: Vec<u8>,
     /// Initiator'ın bu oturum için ürettiği Kyber public key'i — responder
     /// bunu, ratchet.rs'teki DH/KEM rotasyon adımında "karşı tarafın bilinen
     /// Kyber public key'i" olarak saklamalıdır (yalnızca Kyber ciphertext
     /// taşımak yeterli değildir; responder'ın kendi rotasyonunu tetikleme
     /// hakkı için initiator'ın public key'ine de ihtiyacı vardır).
+    #[serde(with = "serde_bytes")]
     pub initiator_kyber_pubkey: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub kyber_ciphertext: Vec<u8>,
     pub timestamp: u64,
+    #[serde(with = "serde_bytes")]
     pub signature_classical: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub signature_pq: Vec<u8>,
 }
 
@@ -934,9 +965,13 @@ pub struct IdentityExchange {
     pub identity_id: String,
     pub device_fingerprint: String,
     pub device_name: String,
+    #[serde(with = "serde_bytes")]
     pub sign_pubkey_ed25519: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub sign_pubkey_mldsa: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub kem_pubkey_x25519: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub kem_pubkey_mlkem: Vec<u8>,
     /// Spec dışı, hata düzeltmesi (kullanıcı: "özellikle ikincil
     /// cihazlardan gönderilen mesajlar çok sıkıntılı"): bu cihaz bir
@@ -993,6 +1028,11 @@ pub enum SiblingEchoBody {
     /// bkz. `MessageContent::Reaction` — kendi bıraktığım tepki, diğer
     /// cihazlarımda da görünsün diye.
     Reaction { target_message_id: String, emoji: String, #[serde(default)] reacted_at_ms: u64 },
+    /// Kendi gönderdiğim ek (1:1 ya da grup). `offer` her zaman bir
+    /// `MessageContent::FileOffer`; kardeş dosyayı bu teklifle benden
+    /// indirir. Önceden ekler hiç yankılanmıyordu — telefondan atılan foto
+    /// laptopta hiç görünmüyordu.
+    File { offer: Box<MessageContent> },
 }
 
 /// Çoklu-cihaz (spec 1.7 mesaj geçmişi senkronu — kardeşten geri-doldurma):
@@ -1043,4 +1083,39 @@ pub enum NetworkEnvelope {
     IdentityExchange(IdentityExchange),
     Handshake(HandshakeInit),
     Message(MessagePacket),
+}
+
+#[cfg(test)]
+mod wire_size_tests {
+    use super::*;
+
+    /// Bayt alanları CBOR bayt bloğu olarak gitmeli. `serde_bytes` olmadan her
+    /// bayt ayrı bir tam sayı olur ve paket ~1.9 kat büyür (cihazda mesaj
+    /// başına ~15 KB ölçüldü).
+    #[test]
+    fn byte_fields_encode_as_cbor_bytes() {
+        let raw: Vec<u8> = (0..=255u8).cycle().take(4000).collect();
+        let packet = MessagePacket {
+            header: MessagePacketHeader {
+                sender_identity_id: String::new(),
+                sender_device_fingerprint: String::new(),
+                message_id: String::new(),
+                ratchet_pubkey: raw.clone(),
+                message_number: 0,
+                prev_chain_length: 0,
+                rotation_kyber_ciphertext: None,
+            },
+            ciphertext: raw.clone(),
+            signature_classical: Vec::new(),
+            signature_pq: raw.clone(),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&NetworkEnvelope::Message(packet.clone()), &mut buf).unwrap();
+        assert!(buf.len() < 3 * raw.len() + 512, "paket {} bayt", buf.len());
+        let back: NetworkEnvelope = ciborium::from_reader(buf.as_slice()).unwrap();
+        match back {
+            NetworkEnvelope::Message(m) => assert_eq!(m.ciphertext, raw),
+            _ => panic!(),
+        }
+    }
 }

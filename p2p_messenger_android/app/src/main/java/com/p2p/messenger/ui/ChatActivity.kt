@@ -1059,16 +1059,10 @@ class ChatActivity : AppCompatActivity() {
                 )
                 maybePlayTyphoonEffect()
                 onNewIncomingItemAdded()
-                // Spec dışı, kullanıcı isteği: "görüldü" — sohbet ekranı
-                // AÇIKKEN gelen her canlı mesaj için otomatik gönderilir
-                // (Ack'in aksine bu OTOMATİK değil bir kural değil, burada
-                // "ekranda gösterildi" ile "geldi" aynı ana denk düştüğü
-                // için hemen tetikleniyor). Geçmişten yüklenen mesajlar
-                // için gönderilmez (bkz. loadHistoryIfAvailable notu —
-                // arşiv kararlı bir message_id taşımıyor zaten).
-                markSeen(messageId)
-                // Güvenilir yol: tekil `Seen` kaybolsa bile okuma sınırı
-                // (ReadStateSync) diske yazılır + yeniden denenir.
+                // "Görüldü": 1:1'de yalnızca okuma sınırı (ReadStateSync) —
+                // karşı taraf onu `seen_bulk` ile bu mesaja da uygular, diske
+                // yazılır ve yeniden denenir. Mesaj başına ayrıca `Seen`
+                // göndermek aynı bilginin ikinci bir paketiydi.
                 scheduleReadWatermark()
             }
             // Çoklu-cihaz (spec 1.7): başka bir cihazımdan gönderdiğim mesaj —
@@ -1101,7 +1095,8 @@ class ChatActivity : AppCompatActivity() {
             "status" -> adapter.applyStatus(obj.optString("message_id"), parseStatus(obj.optString("status")))
             "history_sync" -> applyHistorySync(obj)
             "older_history" -> applyOlderHistory(obj)
-            "file_offer" -> {
+            // "sibling_file": başka cihazımdan gönderdiğim ek — aynı balon, benim tarafımda.
+            "file_offer", "sibling_file" -> {
                 val autoDownloading = obj.optBoolean("auto_downloading", false)
                 // isNull() check: optString("preview_hex", "") returns the
                 // literal string "null" (not the fallback) for an explicit
@@ -1118,7 +1113,7 @@ class ChatActivity : AppCompatActivity() {
                     SimpleChatAdapter.Item(
                         messageId = obj.optString("file_id"),
                         text = "",
-                        isMine = false,
+                        isMine = obj.optString("type") == "sibling_file",
                         attachment = SimpleChatAdapter.AttachmentInfo(
                             fileId = obj.optString("file_id"),
                             fileName = obj.optString("file_name"),
@@ -1137,7 +1132,9 @@ class ChatActivity : AppCompatActivity() {
                     )
                 )
                 onNewIncomingItemAdded()
-                markSeen(obj.optString("file_id"))
+                // Okuma sınırı yalnızca `messages` tablosunu kapsıyor; ekler
+                // için tekil `Seen` kalıyor. Kendi ekimin yankısına gönderilmez.
+                if (obj.optString("type") == "file_offer") markSeen(obj.optString("file_id"))
             }
             "file_progress" -> adapter.applyAttachmentUpdate(
                 obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.DOWNLOADING, obj.optLong("bytes_done")
@@ -2237,10 +2234,13 @@ class ChatActivity : AppCompatActivity() {
             val existingIds = localMessages.mapTo(mutableSetOf()) { it.messageId }
             val newItems = mergedItems.filter { it.messageId !in existingIds }
             if (newItems.isNotEmpty()) {
-                val insertStart = localMessages.size
                 localMessages.addAll(newItems)
+                // Geçmiş yüklemesi bir canlı mesajdan SONRA biterse sona eklemek
+                // canlı mesajı eski geçmişin üstüne, ekran dışına itiyordu (cihazda
+                // görüldü) — gönderim sırasına göre yeniden diz.
+                localMessages.sortWith(compareBy { it.orderKey })
                 resolveReplyLabels()
-                adapter.notifyItemRangeInserted(insertStart, newItems.size)
+                adapter.notifyDataSetChanged()
                 // bkz. `dedupeByMessageId` — loadHistory/syncMissed yarışı
                 // aynı message_id'yi iki kez ekleyebiliyor.
                 adapter.dedupeByMessageId()
@@ -2629,10 +2629,13 @@ class ChatActivity : AppCompatActivity() {
             val existingIds = localMessages.mapTo(mutableSetOf()) { it.messageId }
             val fresh = missedItems.filter { it.messageId !in existingIds }
             if (fresh.isNotEmpty()) {
-                val insertStart = localMessages.size
                 localMessages.addAll(fresh)
+                // Geçmiş yüklemesi bir canlı mesajdan SONRA biterse sona eklemek
+                // canlı mesajı eski geçmişin üstüne, ekran dışına itiyordu (cihazda
+                // görüldü) — gönderim sırasına göre yeniden diz.
+                localMessages.sortWith(compareBy { it.orderKey })
                 resolveReplyLabels()
-                adapter.notifyItemRangeInserted(insertStart, fresh.size)
+                adapter.notifyDataSetChanged()
                 adapter.dedupeByMessageId()
                 onNewIncomingItemAdded()
             }

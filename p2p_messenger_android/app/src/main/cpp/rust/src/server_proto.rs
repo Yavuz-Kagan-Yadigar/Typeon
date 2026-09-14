@@ -102,25 +102,31 @@ pub enum ServerRequest {
     /// şart: imzayı sunucunun O AN ürettiği tek kullanımlık değere bağlar.
     Enroll {
         version: u16,
+        #[serde(with = "serde_bytes")]
         invite_token: Vec<u8>,
         /// Ed25519 public key (32 bayt).
+        #[serde(with = "serde_bytes")]
         enroll_pk: Vec<u8>,
         /// ML-DSA-87 public key (2592 bayt). İmza uygulamanın geri kalanıyla
         /// AYNI şekilde HİBRİT: klasik bir imza tek başına, hasat-şimdi-
         /// kır-sonra bir saldırgana ileride sahte kayıt üretme imkânı
         /// verirdi. Gizliliği etkilemezdi (içerik şifrelemesi bu imzaya
         /// bağlı değil) ama depodaki "her imza hibrittir" kuralını bozardı.
+        #[serde(with = "serde_bytes")]
         enroll_pk_pq: Vec<u8>,
         /// AZ ÖNCE gelen `Welcome.challenge`. İmza girdisine DAHİL (bkz.
         /// `enroll_signing_input`): sunucu tarafında tek kullanımlık
         /// olmasının yanında, imzayı O BAĞLANTIYA bağlar — aksi halde
         /// yakalanan bir imza, sunucunun yeni bir challenge ürettiği taze
         /// bir bağlantıda hâlâ geçerli olurdu.
+        #[serde(with = "serde_bytes")]
         challenge: Vec<u8>,
         ts_ms: u64,
         /// Ed25519 imzası.
+        #[serde(with = "serde_bytes")]
         sig: Vec<u8>,
         /// ML-DSA-87 imzası — AYNI baytlar üzerinde. İkisi de doğrulanmalı.
+        #[serde(with = "serde_bytes")]
         sig_pq: Vec<u8>,
     },
 
@@ -132,9 +138,12 @@ pub enum ServerRequest {
     ///
     /// İmza girdisi: `enrollment_id || server_peer_id || ts_ms`.
     Rebind {
+        #[serde(with = "serde_bytes")]
         enrollment_id: Vec<u8>,
         ts_ms: u64,
+        #[serde(with = "serde_bytes")]
         sig: Vec<u8>,
+        #[serde(with = "serde_bytes")]
         sig_pq: Vec<u8>,
     },
 
@@ -155,7 +164,7 @@ pub enum ServerRequest {
     /// Kota, kutunun SAHİBİNE değil BIRAKANA yazılır — bir spam gönderici
     /// kendi kotasını yakar ve kimse bir kurbanın kutusunu doldurup ona
     /// hizmet reddi uygulayamaz.
-    Deposit { mailbox: MailboxId, sealed: Vec<u8> },
+    Deposit { mailbox: MailboxId, #[serde(with = "serde_bytes")] sealed: Vec<u8> },
 
     /// Birden çok kutudan TEK gidiş-dönüşte çek.
     ///
@@ -256,6 +265,7 @@ pub enum ServerRequest {
         /// istemci eskisi gibi calisir.
         #[serde(default)]
         chunk_size: u32,
+        #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
 
@@ -266,6 +276,7 @@ pub enum ServerRequest {
     BlobFinish {
         blob_id: String,
         total_chunks: u32,
+        #[serde(with = "serde_bytes")]
         enc_sha256: Vec<u8>,
     },
 
@@ -288,12 +299,14 @@ pub enum ServerResponse {
     Welcome {
         version: u16,
         /// Tek kullanımlık `Enroll` imza girdisi (32 bayt rastgele).
+        #[serde(with = "serde_bytes")]
         challenge: Vec<u8>,
         enrolled: bool,
         limits: ServerLimits,
         server_name: String,
     },
     Enrolled {
+        #[serde(with = "serde_bytes")]
         enrollment_id: Vec<u8>,
         limits: ServerLimits,
     },
@@ -388,6 +401,7 @@ pub struct MailItem {
     pub seq: u64,
     pub deposited_at_ms: u64,
     /// `server_seal::seal_envelope`/`frame_unsealed` çıktısı — sunucu için opak.
+    #[serde(with = "serde_bytes")]
     pub sealed: Vec<u8>,
 }
 
@@ -420,6 +434,7 @@ pub struct ArchiveRecord {
     /// sunucu zaten `deposited_at_ms`'i görüyor.
     pub sent_at_ms: u64,
     /// `server_seal::seal_archive_record` çıktısı.
+    #[serde(with = "serde_bytes")]
     pub sealed: Vec<u8>,
 }
 
