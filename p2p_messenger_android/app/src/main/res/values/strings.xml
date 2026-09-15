@@ -411,4 +411,13 @@
     <string name="title_reactions">Reactions</string>
     <string name="title_attachment_caption">Add a caption</string>
     <string name="hint_attachment_caption">Caption (optional)</string>
+    <!-- Settings screen section headers -->
+    <string name="settings_section_profile">Profile</string>
+    <string name="settings_section_privacy">Privacy &amp; security</string>
+    <string name="settings_section_network">Network &amp; connection</string>
+    <string name="settings_section_devices">Devices &amp; messages</string>
+    <string name="settings_section_account">Account</string>
+    <string name="settings_advanced">Advanced</string>
+    <string name="action_open">Open</string>
+    <string name="msg_group_gone">This group is no longer available</string>
 </resources>

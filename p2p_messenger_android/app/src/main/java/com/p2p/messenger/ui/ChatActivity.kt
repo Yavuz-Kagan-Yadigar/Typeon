@@ -293,48 +293,44 @@ class ChatActivity : AppCompatActivity() {
      * durum metni bir kez "Bağlı" olduktan sonra karşı cihaz gerçekten
      * kapansa/erişilemez olsa bile hep "Bağlı" göstermeye devam ediyordu.
      */
-    private val sessionPollRunnable = object : Runnable {
+    private val sessionPollRunnable: Runnable = object : Runnable {
         override fun run() {
-            val handshakeDone = try {
-                P2PLib.hasActiveSession(peerDeviceFingerprint)
-            } catch (e: Exception) {
-                false
-            }
-            val liveConnected = try {
-                P2PLib.isPeerConnected(peerDeviceFingerprint)
-            } catch (e: Exception) {
-                false
-            }
-            connectingBanner.visibility = if (handshakeDone && !peerAccountDeleted) View.GONE else View.VISIBLE
-            if (handshakeDone != handshakeReady) {
-                handshakeReady = handshakeDone
-                updateComposerLock()
-            }
-            // Oturum yoksa el sıkışmayı yeniden dürt — `bindToIntent` sohbet
-            // açılışında bir kez çağırıyor ama IdentityExchange o an henüz
-            // tamamlanmamış olabilir (o durumda "Unknown peer device" ile
-            // döner). Gönderim artık kilitli olduğundan, IX bittikten sonra
-            // el sıkışmayı tetikleyecek başka bir yol kalmıyordu. `ensureHandshake`
-            // oturum varsa no-op — güvenli.
-            if (!handshakeDone && SystemClock.elapsedRealtime() - lastEnsureHandshakeAt > 3_000L) {
-                lastEnsureHandshakeAt = SystemClock.elapsedRealtime()
-                lifecycleScope.launch(Dispatchers.IO) {
-                    try { P2PLib.ensureHandshake(peerDeviceFingerprint) } catch (_: Exception) {}
+            val self = this
+            // JNI calls wait on the core lock: never on the main thread.
+            lifecycleScope.launch {
+                val (handshakeDone, liveConnected) = withContext(Dispatchers.IO) {
+                    val hs = try { P2PLib.hasActiveSession(peerDeviceFingerprint) } catch (e: Exception) { false }
+                    val live = try { P2PLib.isPeerConnected(peerDeviceFingerprint) } catch (e: Exception) { false }
+                    hs to live
+                }
+                applySessionState(handshakeDone, liveConnected)
+                sessionPollHandler.removeCallbacks(self)
+                if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+                    sessionPollHandler.postDelayed(
+                        self,
+                        if (handshakeDone) STEADY_STATE_POLL_INTERVAL_MS else SESSION_POLL_INTERVAL_MS
+                    )
                 }
             }
-            // Spec dışı: "yazıyor..." artık burada DEĞİL, mesaj listesinin
-            // altında bir balon olarak gösteriliyor (bkz.
-            // layoutTypingIndicator/handleIncomingEvent "typing" kolu) —
-            // kullanıcı isteği: yeni mesajın belireceği noktada olsun, üst
-            // çubukta değil.
-            txtToolbarSubtitle.text = getString(
-                if (liveConnected) R.string.lbl_status_online else R.string.lbl_status_offline
-            )
-            updatePeerStatusDot(connecting = !handshakeDone, online = liveConnected)
-            sessionPollHandler.postDelayed(
-                this, if (handshakeDone) STEADY_STATE_POLL_INTERVAL_MS else SESSION_POLL_INTERVAL_MS
-            )
         }
+    }
+
+    private fun applySessionState(handshakeDone: Boolean, liveConnected: Boolean) {
+        connectingBanner.visibility = if (handshakeDone && !peerAccountDeleted) View.GONE else View.VISIBLE
+        if (handshakeDone != handshakeReady) {
+            handshakeReady = handshakeDone
+            updateComposerLock()
+        }
+        // No session yet: re-poke the handshake (a no-op once a session exists).
+        if (!handshakeDone && SystemClock.elapsedRealtime() - lastEnsureHandshakeAt > 3_000L) {
+            lastEnsureHandshakeAt = SystemClock.elapsedRealtime()
+            lifecycleScope.launch(Dispatchers.IO) {
+                try { P2PLib.ensureHandshake(peerDeviceFingerprint) } catch (_: Exception) {}
+            }
+        }
+        val subtitle = getString(if (liveConnected) R.string.lbl_status_online else R.string.lbl_status_offline)
+        if (txtToolbarSubtitle.text?.toString() != subtitle) txtToolbarSubtitle.text = subtitle
+        updatePeerStatusDot(connecting = !handshakeDone, online = liveConnected)
     }
 
     /**
@@ -394,18 +390,28 @@ class ChatActivity : AppCompatActivity() {
     private val ownStatusPollHandler = Handler(Looper.getMainLooper())
     /** Spec dışı: BU cihazın kendi ağ durumu (bkz. ConnectionStatus) —
      *  karşı tarafın durumunun yanında, ayrı bir nokta + metin olarak. */
-    private val ownStatusPollRunnable = object : Runnable {
+    private val ownStatusPollRunnable: Runnable = object : Runnable {
         override fun run() {
-            val status = ConnectionStatus.current(this@ChatActivity)
-            txtOwnConnectionStatus.text = status.text
-            val colorRes = when (status.level) {
-                ConnectionStatus.Level.CONNECTED -> R.color.online
-                ConnectionStatus.Level.CONNECTING -> R.color.warning
-                ConnectionStatus.Level.PROBLEM -> R.color.danger
+            val self = this
+            lifecycleScope.launch {
+                val status = withContext(Dispatchers.IO) { ConnectionStatus.current(this@ChatActivity) }
+                applyOwnStatus(status)
+                ownStatusPollHandler.removeCallbacks(self)
+                if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+                    ownStatusPollHandler.postDelayed(self, OWN_STATUS_POLL_INTERVAL_MS)
+                }
             }
-            ownStatusDot.update(colorRes, status.level == ConnectionStatus.Level.CONNECTING)
-            ownStatusPollHandler.postDelayed(this, OWN_STATUS_POLL_INTERVAL_MS)
         }
+    }
+
+    private fun applyOwnStatus(status: ConnectionStatus.Status) {
+        if (txtOwnConnectionStatus.text?.toString() != status.text) txtOwnConnectionStatus.text = status.text
+        val colorRes = when (status.level) {
+            ConnectionStatus.Level.CONNECTED -> R.color.online
+            ConnectionStatus.Level.CONNECTING -> R.color.warning
+            ConnectionStatus.Level.PROBLEM -> R.color.danger
+        }
+        ownStatusDot.update(colorRes, status.level == ConnectionStatus.Level.CONNECTING)
     }
 
     /**

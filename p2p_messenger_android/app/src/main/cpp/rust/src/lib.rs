@@ -2468,6 +2468,10 @@ struct P2PCore {
     /// bkz. `BULK_PARALLEL_CONNECTIONS`. Aktarım bitince tam olarak bunlar
     /// kapatılır; `disconnect_peer_id` hepsini kapatacağı için kullanılamaz.
     extra_conns: HashMap<PeerId, Vec<libp2p::swarm::ConnectionId>>,
+    /// Dials opened for a bulk transfer, by connection id. Only these become
+    /// `extra_conns`: a reconnect dial after a network change is ALSO a second
+    /// outbound connection, and closing it as "extra" kept the dead one alive.
+    bulk_dials: HashMap<libp2p::swarm::ConnectionId, PeerId>,
     /// Eş başına açık bağlantılar — bkz. `mark_connection_suspect`: şüpheli
     /// bir eşe yeni bağlantı kurulunca eskileri kapatmak için.
     peer_conns: HashMap<PeerId, Vec<libp2p::swarm::ConnectionId>>,
@@ -2649,6 +2653,7 @@ impl P2PCore {
             fast_reconnect_until: 0,
             relay_listeners: HashMap::new(),
             extra_conns: HashMap::new(),
+            bulk_dials: HashMap::new(),
             peer_conns: HashMap::new(),
             bulk_health: HashMap::new(),
             handshake_failure_notified: HashMap::new(),
@@ -4604,6 +4609,11 @@ impl P2PCore {
             }
         }
 
+        // A read boundary only covers what actually reached the reader: a message
+        // still waiting for its Ack was never displayed there, however old it is.
+        if group_id.is_none() {
+            ids.retain(|id| !self.awaiting_confirmation.contains_key(id));
+        }
         for id in &ids {
             self.apply_seen_receipt(id, viewer_identity_id, read_at_ms);
         }
@@ -5487,7 +5497,7 @@ impl P2PCore {
             .collect();
         for (gid, i_am_founder) in &groups {
             if *i_am_founder {
-                if let Err(e) = self.remove_from_group(gid, identity_id) {
+                if let Err(e) = self.remove_from_group(gid, identity_id, false) {
                     error!("Hesabı silinen üye gruptan çıkarılamadı ({}): {}", gid, e);
                 }
             }
@@ -7977,7 +7987,7 @@ impl P2PCore {
                 // durdurabilir (işleyemesek bile, örn. bu grubun kurucusu
                 // biz değilsek, tekrar denemenin bir faydası olmaz).
                 self.send_ack(&peer_fp, &message_id);
-                if let Err(e) = self.remove_from_group(&group_id, &sender_identity_id) {
+                if let Err(e) = self.remove_from_group(&group_id, &sender_identity_id, false) {
                     error!("LeaveGroupRequest işlenemedi (group={}, ayrılan={}): {}", group_id, sender_identity_id, e);
                 }
                 serde_json::json!({"type": "member_left", "group_id": group_id, "identity_id": sender_identity_id})
@@ -8673,6 +8683,7 @@ impl P2PCore {
         self.message_rate_limiter.clear();
         self.bulk_health.clear();
         self.extra_conns.clear();
+        self.bulk_dials.clear();
         self.deferred_swarm_events.clear();
         self.attachment_events.clear();
         self.blocked_identities.clear();
@@ -10393,7 +10404,7 @@ impl P2PCore {
         Ok(())
     }
 
-    fn remove_from_group(&mut self, group_id: &str, member_identity_id: &str) -> Result<(), String> {
+    fn remove_from_group(&mut self, group_id: &str, member_identity_id: &str, notify_removed: bool) -> Result<(), String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
@@ -10412,6 +10423,17 @@ impl P2PCore {
         let vouched = self.collect_vouched_member_devices(&members_after);
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
         let update = sign_group_update(group_id, new_version, &change, &group.name, &members_after, &vouched, &own_identity_id, &own_fp, own_keys, &group.founder_chain)?;
+        // The removed member gets their own signed copy so the group closes on
+        // their side instead of lingering forever. It carries no member list
+        // and no vouched keys: it only proves the founder removed them.
+        // Only for a founder-initiated removal: a member who left or deleted
+        // their account has already dropped the group, so a notice would
+        // never be acknowledged and would just be retried.
+        let removal_notice = if notify_removed {
+            Some(sign_group_update(group_id, new_version, &change, &group.name, &[], &[], &own_identity_id, &own_fp, own_keys, &group.founder_chain)?)
+        } else {
+            None
+        };
 
         // Çıkarılan üyeye ULAŞMADAN önce eski üye listesini al (spec 5.3:
         // çıkarılan üyeye artık GroupUpdate/grup mesajı gönderilmez).
@@ -10430,6 +10452,9 @@ impl P2PCore {
         // artık sessizce kaybolmaz, `group_sync_sweep` yeniden dener.
         for member_identity_id in remaining_targets {
             self.send_group_update_to_member(group_id, &member_identity_id, &update);
+        }
+        if let Some(notice) = removal_notice {
+            self.send_group_update_to_member(group_id, member_identity_id, &notice);
         }
         Ok(())
     }
@@ -11039,6 +11064,11 @@ impl P2PCore {
             let me = self.identity.as_ref().map(|i| i.identity_id.clone()).unwrap_or_default();
             let makes_us_a_member = update.members.iter().any(|m| *m == me)
                 || matches!(&update.change, GroupChange::Add(id) if *id == me);
+            // A removal notice for a group we no longer have (already left or
+            // deleted it): nothing to do, acknowledge so it is not retried.
+            if matches!(&update.change, GroupChange::Remove(id) if *id == me) && !me.is_empty() {
+                return Ok(());
+            }
             if !me.is_empty() && !makes_us_a_member {
                 warn!(
                     "GroupUpdate REDDEDİLDİ: bilinmeyen bir grup ve bizi üye yapmıyor (group={}, imzalayan={})",
@@ -11096,6 +11126,14 @@ impl P2PCore {
         if !update.member_devices.is_empty() {
             let devices = update.member_devices.clone();
             self.adopt_vouched_member_devices(&devices);
+        }
+        // The founder removed us (see `remove_from_group`'s removal notice):
+        // close the group here, exactly like a founder delete.
+        let me = self.my_identity_id().unwrap_or_default();
+        if matches!(&update.change, GroupChange::Remove(id) if *id == me) && !me.is_empty() {
+            info!("Kurucu bizi gruptan çıkardı: {}", update.group_id);
+            self.remove_group_locally(&update.group_id);
+            return Ok(());
         }
         if let Some(g) = self.groups.get(&update.group_id) {
             self.persist_group(g);
@@ -13499,9 +13537,13 @@ impl P2PCore {
                 .addresses(vec![addr])
                 .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
                 .build();
+            let cid = opts.connection_id();
             if let Some(swarm) = &mut self.swarm {
                 match swarm.dial(opts) {
-                    Ok(()) => info!("Toplu aktarım için fazladan bağlantı açılıyor: peer={} (mevcut {})", peer, have),
+                    Ok(()) => {
+                        self.bulk_dials.insert(cid, *peer);
+                        info!("Toplu aktarım için fazladan bağlantı açılıyor: peer={} (mevcut {})", peer, have)
+                    }
                     Err(e) => warn!("Fazladan bağlantı açılamadı: {}", e),
                 }
             }
@@ -13522,6 +13564,7 @@ impl P2PCore {
             }
             info!("Toplu aktarım bitti, {} fazladan bağlantı kapatılıyor: peer={}", conns.len(), peer);
             self.extra_conns.remove(&peer);
+            self.bulk_dials.retain(|_, p| *p != peer);
             // Sağlık durumu aktarıma özgüdür; bir sonraki aktarım temiz
             // sayfayla başlasın.
             self.bulk_health.remove(&peer);
@@ -14707,7 +14750,9 @@ impl P2PCore {
                             // Kademlia'ya Identify'dan öğrenilen adresleri
                             // ekle — bölüm 4.2, Kademlia'nın kendiliğinden
                             // yapamadığı adres öğrenme adımı.
-                            for addr in info.listen_addrs {
+                            // Not loopback: a peer-id-only dial asks Kademlia for addresses,
+                            // and 127.0.0.1 reaches our own node.
+                            for addr in info.listen_addrs.into_iter().filter(|a| !is_loopback_multiaddr(a)) {
                                 swarm.behaviour_mut().kad.add_address(&peer_id, addr);
                             }
                         }
@@ -14720,6 +14765,11 @@ impl P2PCore {
                             match mdns_event {
                                 libp2p::mdns::Event::Discovered(list) => {
                                     for (peer_id, addr) in list {
+                                        // mDNS announces every listen address, loopback included:
+                                        // dialing 127.0.0.1 reaches our own node ("Unexpected peer ID").
+                                        if is_loopback_multiaddr(&addr) {
+                                            continue;
+                                        }
                                         info!("mDNS: yerel ağda peer keşfedildi: {} @ {}", peer_id, addr);
                                         swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
                                         new_peer_addrs.push((peer_id, addr.clone()));
@@ -15007,8 +15057,15 @@ impl P2PCore {
         // bkz. `keepalive_state` alanı dokümantasyonu — döngü boyunca
         // üzerinde çalışılan yerel kopya geri konuyor.
         self.keepalive_state = keepalive_state;
+        // Second+ outbound connections that are not bulk-transfer dials: reconnect
+        // races (onion + LAN + relay at once) or a suspect's parallel dial.
+        let mut surplus_dials: std::collections::HashSet<libp2p::swarm::ConnectionId> = std::collections::HashSet::new();
         for (peer, cid) in new_extra_conns {
-            self.extra_conns.entry(peer).or_default().push(cid);
+            if self.bulk_dials.remove(&cid).is_some() {
+                self.extra_conns.entry(peer).or_default().push(cid);
+            } else {
+                surplus_dials.insert(cid);
+            }
         }
         for (peer, cid) in &established_conns {
             self.peer_conns.entry(*peer).or_default().push(*cid);
@@ -15029,6 +15086,13 @@ impl P2PCore {
             let others: Vec<libp2p::swarm::ConnectionId> = self.peer_conns.get(peer)
                 .map(|v| v.iter().copied().filter(|c| c != cid).collect())
                 .unwrap_or_default();
+            if surplus_dials.contains(cid) && !suspect && !others.is_empty() {
+                // The existing connection is not in doubt: the new one is surplus.
+                if let Some(swarm) = &mut self.swarm {
+                    swarm.close_connection(*cid);
+                }
+                continue;
+            }
             if suspect && !others.is_empty() {
                 info!("Şüpheli bağlantının yerine yenisi kuruldu, {} eski bağlantı kapatılıyor: peer={}", others.len(), peer);
                 if let Some(swarm) = &mut self.swarm {
@@ -15054,7 +15118,9 @@ impl P2PCore {
         }
         self.own_listen_addrs.extend(new_listen_addrs);
         for (pid, addr) in new_peer_addrs {
-            self.peer_id_to_addr.insert(pid, addr);
+            if !is_loopback_multiaddr(&addr) {
+                self.peer_id_to_addr.insert(pid, addr);
+            }
         }
         for (pid, addr) in new_relay_peers {
             // Identify'ın bildirdiği adresler karşı tarafın KENDİ gözünden:
@@ -17765,7 +17831,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_removeFromGroup<'local>(mut
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
         let mut core = core_lock();
-        core.remove_from_group(&gid, &iid)
+        core.remove_from_group(&gid, &iid, true)
     });
     match result {
         Ok(Ok(_)) => true as jboolean,

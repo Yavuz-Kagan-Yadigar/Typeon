@@ -21,8 +21,8 @@ android {
         applicationId "com.p2p.messenger.server"
         minSdk 26
         targetSdk 34
-        versionCode 9
-        versionName "1.8"
+        versionCode 12
+        versionName "1.8.3"
 
         ndk {
             abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'

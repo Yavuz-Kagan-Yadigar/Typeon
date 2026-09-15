@@ -409,6 +409,22 @@ pub fn send_message(
     }))
 }
 
+pub fn react_to_message(target_device_fingerprint: &str, target_message_id: &str, emoji: &str) -> String {
+    let (target, id, emoji) = (target_device_fingerprint.to_string(), target_message_id.to_string(), emoji.to_string());
+    string_result(catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().react_to_message(target, id, emoji)
+    }))
+}
+
+pub fn react_to_group_message(group_id: &str, target_message_id: &str, emoji: &str) -> String {
+    let (gid, id, emoji) = (group_id.to_string(), target_message_id.to_string(), emoji.to_string());
+    string_result(catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().react_to_group_message(gid, id, emoji)
+    }))
+}
+
 pub fn edit_message(
     target_device_fingerprint: &str,
     target_message_id: &str,
@@ -709,7 +725,7 @@ pub fn remove_from_group(group_id: &str, identity_id: &str) -> bool {
     matches!(
         catch_panic(move || {
             let _guard = RUNTIME.enter();
-            core_lock().remove_from_group(&gid, &iid)
+            core_lock().remove_from_group(&gid, &iid, true)
         }),
         Ok(Ok(_))
     )

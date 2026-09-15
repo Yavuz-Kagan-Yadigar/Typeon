@@ -283,17 +283,24 @@ class GroupChatActivity : AppCompatActivity() {
     /** bkz. util.ConnectionStatus / ChatActivity `ownStatusPollRunnable`
      *  AYNI desen — BU cihazın genel bağlantı durumu. */
     private val ownStatusPollHandler = Handler(Looper.getMainLooper())
-    private val ownStatusPollRunnable = object : Runnable {
+    private val ownStatusPollRunnable: Runnable = object : Runnable {
         override fun run() {
-            val status = ConnectionStatus.current(this@GroupChatActivity)
-            txtOwnConnectionStatus.text = status.text
-            val colorRes = when (status.level) {
-                ConnectionStatus.Level.CONNECTED -> R.color.online
-                ConnectionStatus.Level.CONNECTING -> R.color.warning
-                ConnectionStatus.Level.PROBLEM -> R.color.danger
+            val self = this
+            // ConnectionStatus.current makes a JNI call: keep it off the main thread.
+            lifecycleScope.launch {
+                val status = withContext(Dispatchers.IO) { ConnectionStatus.current(this@GroupChatActivity) }
+                if (txtOwnConnectionStatus.text?.toString() != status.text) txtOwnConnectionStatus.text = status.text
+                val colorRes = when (status.level) {
+                    ConnectionStatus.Level.CONNECTED -> R.color.online
+                    ConnectionStatus.Level.CONNECTING -> R.color.warning
+                    ConnectionStatus.Level.PROBLEM -> R.color.danger
+                }
+                ownStatusDot.update(colorRes, pulsing = status.level == ConnectionStatus.Level.CONNECTING)
+                ownStatusPollHandler.removeCallbacks(self)
+                if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+                    ownStatusPollHandler.postDelayed(self, OWN_STATUS_POLL_INTERVAL_MS)
+                }
             }
-            ownStatusDot.update(colorRes, pulsing = status.level == ConnectionStatus.Level.CONNECTING)
-            ownStatusPollHandler.postDelayed(this, OWN_STATUS_POLL_INTERVAL_MS)
         }
     }
 
@@ -955,6 +962,9 @@ class GroupChatActivity : AppCompatActivity() {
                 AvatarUtil.renderInto(imgToolbarAvatar, currentGroupAvatar, txtToolbarTitle.text.toString())
                 return@launch
             }
+            // The group is gone here: the founder deleted it or removed us.
+            Toast.makeText(this@GroupChatActivity, R.string.msg_group_gone, Toast.LENGTH_LONG).show()
+            finish()
         }
     }
 
@@ -1005,7 +1015,10 @@ class GroupChatActivity : AppCompatActivity() {
                 val rowName = row.findViewById<TextView>(R.id.txtMemberName)
                 val rowRemoveButton = row.findViewById<Button>(R.id.btnRemoveMember)
                 val contact = resolveContactByIdentity(identityId)
-                val displayName = contact?.displayName ?: (identityId.take(16) + "…")
+                val displayName = when {
+                    identityId == ownIdentityId -> getString(R.string.lbl_you)
+                    else -> contact?.displayName ?: (identityId.take(16) + "…")
+                }
                 rowName.text = if (identityId == founderIdentityId) getString(R.string.lbl_founder_badge, displayName) else displayName
                 AvatarUtil.renderInto(rowAvatar, contact?.avatarHex?.let { hexToBytes(it) }, displayName)
                 if (isFounder && identityId != founderIdentityId) {

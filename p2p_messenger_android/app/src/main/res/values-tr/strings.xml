@@ -370,4 +370,13 @@
     <string name="title_reactions">Tepkiler</string>
     <string name="title_attachment_caption">Açıklama ekle</string>
     <string name="hint_attachment_caption">Açıklama (isteğe bağlı)</string>
+    <!-- Settings screen section headers -->
+    <string name="settings_section_profile">Profil</string>
+    <string name="settings_section_privacy">Gizlilik ve güvenlik</string>
+    <string name="settings_section_network">Ağ ve bağlantı</string>
+    <string name="settings_section_devices">Cihazlar ve mesajlar</string>
+    <string name="settings_section_account">Hesap</string>
+    <string name="settings_advanced">Gelişmiş</string>
+    <string name="action_open">Aç</string>
+    <string name="msg_group_gone">Bu grup artık kullanılamıyor</string>
 </resources>

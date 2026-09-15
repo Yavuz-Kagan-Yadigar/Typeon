@@ -18,7 +18,16 @@ import androidx.core.content.ContextCompat
 class PulsingStatusDot(private val dot: View) {
     private var pulseAnimator: ObjectAnimator? = null
 
+    private var lastColorRes = 0
+    private var lastPulsing = false
+
     fun update(colorRes: Int, pulsing: Boolean) {
+        // Polled every 0.8-2 s: an unchanged state must not restart the pulse
+        // or re-tint the view (that kept the screen from ever going idle).
+        val running = pulseAnimator?.isRunning == true
+        if (colorRes == lastColorRes && pulsing == lastPulsing && (!pulsing || running)) return
+        lastColorRes = colorRes
+        lastPulsing = pulsing
         pulseAnimator?.cancel()
         pulseAnimator = null
         dot.alpha = 1f

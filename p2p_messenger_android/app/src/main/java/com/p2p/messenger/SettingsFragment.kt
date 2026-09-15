@@ -50,6 +50,9 @@ import java.util.UUID
 class SettingsFragment : Fragment() {
 
     companion object {
+        /** Which settings cards are open. Process-wide so an appearance change
+         *  (which recreates the activity) does not fold the card the user was in. */
+        private val expandedSections = mutableSetOf("profile")
         /** bkz. ChatActivity PREVIEW_MAX_DIMENSION notu — kullanıcı
          *  tarafından istenen profil fotoğrafı standardı: 720p/%85 JPEG
          *  (sohbet eki önizlemelerinden — 480p — daha büyük, çünkü profil
@@ -191,6 +194,39 @@ class SettingsFragment : Fragment() {
         pendingRecoveryPassphrase = null
         if (uri == null || passphrase == null) return@registerForActivityResult
         exportRecoveryTo(uri, passphrase)
+    }
+
+    /** Each card's header folds/unfolds its body; the chevron shows the state. */
+    private fun setupSections(root: View) {
+        val sections = mapOf(
+            "profile" to (R.id.section_profile_header to R.id.section_profile_body),
+            "appearance" to (R.id.section_appearance_header to R.id.section_appearance_body),
+            "privacy" to (R.id.section_privacy_header to R.id.section_privacy_body),
+            "network" to (R.id.section_network_header to R.id.section_network_body),
+            "servers" to (R.id.section_servers_header to R.id.section_servers_body),
+            "devices" to (R.id.section_devices_header to R.id.section_devices_body),
+            "account" to (R.id.section_account_header to R.id.section_account_body),
+        )
+        for ((key, ids) in sections) {
+            val header = root.findViewById<TextView>(ids.first)
+            val body = root.findViewById<View>(ids.second)
+            // Chevron points down when folded, up when open (level 0 / 10000).
+            val chevron = android.graphics.drawable.RotateDrawable().apply {
+                drawable = header.compoundDrawablesRelative[2]
+                fromDegrees = 0f; toDegrees = 180f
+            }
+            header.setCompoundDrawablesRelativeWithIntrinsicBounds(null, null, chevron, null)
+            fun render() {
+                val open = key in expandedSections
+                body.visibility = if (open) View.VISIBLE else View.GONE
+                chevron.level = if (open) 10000 else 0
+            }
+            render()
+            header.setOnClickListener {
+                if (!expandedSections.remove(key)) expandedSections.add(key)
+                render()
+            }
+        }
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
@@ -336,6 +372,7 @@ class SettingsFragment : Fragment() {
             confirmDeleteAccount()
         }
 
+        setupSections(view)
         return view
     }
 

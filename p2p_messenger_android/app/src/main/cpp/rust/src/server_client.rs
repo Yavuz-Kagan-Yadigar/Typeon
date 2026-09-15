@@ -47,7 +47,11 @@ use crate::{current_time_ms, extract_peer_id, P2PCore};
 /// Normalde çekme, sunucunun ittiği `Notify` ile tetiklenir — bir telefonda
 /// 1 Hz'lik `poll_events` turunda sürekli `Fetch` etmek doğrudan pil demek.
 /// Bu sabit sadece "itme kaybolursa yine de kendini onarsın" içindir.
-pub(crate) const SERVER_FETCH_SWEEP_INTERVAL_MS: u64 = 5 * 60 * 1000;
+/// The server connection has no keepalive: on mobile data it can die silently
+/// and then no push arrives. 5 min left a queued message undelivered that long
+/// (measured on device); this Fetch doubles as the liveness check.
+// ponytail: fixed 60 s poll, a server-side ping would let this go back up if battery matters.
+pub(crate) const SERVER_FETCH_SWEEP_INTERVAL_MS: u64 = 60 * 1000;
 
 /// Sunucu bağlantısı/kayıt durumu tarama aralığı.
 pub(crate) const SERVER_SWEEP_INTERVAL_MS: u64 = 15_000;
