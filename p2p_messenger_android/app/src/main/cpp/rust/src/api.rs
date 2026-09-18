@@ -168,7 +168,13 @@ pub fn poll_network() -> Vec<String> {
     catch_panic(|| {
         let _guard = RUNTIME.enter();
         crate::CORE_DIRTY.store(false, std::sync::atomic::Ordering::SeqCst);
-        crate::core_lock_poll().poll_events()
+        let started = std::time::Instant::now();
+        let out = crate::core_lock_poll().poll_events();
+        let took = started.elapsed().as_millis();
+        if took > 5_000 {
+            log::warn!("poll_events {} ms sürdü", took);
+        }
+        out
     })
     .unwrap_or_default()
 }

@@ -137,19 +137,81 @@ static CORE_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// zaten her çağrıyı izbadıladığı için, TEK bir başarısız işlemin
 /// yarım kalmış bir durum bırakma riski (kabul edilebilir, nadir bir
 /// tutarsızlık) her şeyin kalıcı olarak kilitlenmesinden çok daha iyi.
+#[track_caller]
 fn core_lock() -> CoreGuard {
     use std::sync::atomic::Ordering;
     LOCK_WANTED.fetch_add(1, Ordering::SeqCst);
     NET_WAKE.notify_waiters();
     let guard = CORE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     LOCK_WANTED.fetch_sub(1, Ordering::SeqCst);
+    lock_watch::acquired(std::panic::Location::caller());
     CoreGuard(Some(guard))
 }
 
 /// Poll döngüsünün kendi kilidi — `CORE_DIRTY`'yi işaretlemez, yoksa her
 /// poll turu bir sonrakini hemen uyandırırdı.
-fn core_lock_poll() -> std::sync::MutexGuard<'static, P2PCore> {
-    CORE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+#[track_caller]
+fn core_lock_poll() -> PollGuard {
+    let guard = CORE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    lock_watch::acquired(std::panic::Location::caller());
+    PollGuard(guard)
+}
+
+/// `core_lock_poll` return value; releasing it clears the watchdog record.
+pub(crate) struct PollGuard(std::sync::MutexGuard<'static, P2PCore>);
+impl std::ops::Deref for PollGuard {
+    type Target = P2PCore;
+    fn deref(&self) -> &P2PCore { &self.0 }
+}
+impl std::ops::DerefMut for PollGuard {
+    fn deref_mut(&mut self) -> &mut P2PCore { &mut self.0 }
+}
+impl Drop for PollGuard {
+    fn drop(&mut self) {
+        lock_watch::released();
+    }
+}
+
+/// Diagnostics for a stalled core. Found on device (2026-09-18): the Note 9S
+/// core stopped for 4 minutes (no log line, no keepalive answer) with no crash,
+/// and a release build gives no way to get a stack. A watchdog thread logs who
+/// holds the core lock (caller file:line) and which `poll_events` phase is
+/// running once the lock is held past `STALL_LOG_AFTER_MS`.
+mod lock_watch {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+    const STALL_LOG_AFTER_MS: u64 = 10_000;
+    static HELD_SINCE: AtomicU64 = AtomicU64::new(0);
+    static HOLDER: Mutex<Option<&'static std::panic::Location<'static>>> = Mutex::new(None);
+    static PHASE: Mutex<&'static str> = Mutex::new("-");
+    static STARTED: std::sync::Once = std::sync::Once::new();
+
+    pub(crate) fn acquired(at: &'static std::panic::Location<'static>) {
+        if let Ok(mut h) = HOLDER.lock() { *h = Some(at); }
+        HELD_SINCE.store(crate::current_time_ms(), Ordering::SeqCst);
+        STARTED.call_once(|| {
+            let _ = std::thread::Builder::new().name("core-lock-watch".into()).spawn(|| loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let since = HELD_SINCE.load(Ordering::SeqCst);
+                if since == 0 { continue; }
+                let held = crate::current_time_ms().saturating_sub(since);
+                // The idle wait holds the lock by design, but for at most 30 s.
+                let idle_wait = PHASE.lock().map(|p| *p == "wait_network").unwrap_or(false);
+                if held >= STALL_LOG_AFTER_MS && (!idle_wait || held >= 60_000) {
+                    let holder = HOLDER.lock().ok().and_then(|h| *h).map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+                    let phase = PHASE.lock().map(|p| *p).unwrap_or("?");
+                    log::warn!("Çekirdek kilidi {} sn'dir tutuluyor: alan={} poll_fazı={}", held / 1000, holder, phase);
+                }
+            });
+        });
+    }
+    pub(crate) fn released() {
+        HELD_SINCE.store(0, Ordering::SeqCst);
+        if let Ok(mut p) = PHASE.lock() { *p = "-"; }
+    }
+    pub(crate) fn phase(name: &'static str) {
+        if let Ok(mut p) = PHASE.lock() { *p = name; }
+    }
 }
 
 /// `core_lock` dönüşü: bırakılınca bekleyen poll'u uyandırır.
@@ -163,6 +225,7 @@ impl std::ops::DerefMut for CoreGuard {
 }
 impl Drop for CoreGuard {
     fn drop(&mut self) {
+        lock_watch::released();
         self.0.take();
         CORE_DIRTY.store(true, std::sync::atomic::Ordering::SeqCst);
         NET_WAKE.notify_waiters();
@@ -181,6 +244,7 @@ pub(crate) fn wait_for_network_activity(timeout_ms: u64) {
     tokio::pin!(notified);
     notified.as_mut().enable();
     let mut core = core_lock_poll();
+    lock_watch::phase("wait_network"); // holding the lock while idle-waiting is by design
     if LOCK_WANTED.load(Ordering::SeqCst) > 0 || CORE_DIRTY.swap(false, Ordering::SeqCst) {
         return;
     }
@@ -188,6 +252,7 @@ pub(crate) fn wait_for_network_activity(timeout_ms: u64) {
         return;
     }
     let timeout = std::time::Duration::from_millis(timeout_ms);
+    let started = std::time::Instant::now();
     let event = match core.swarm.as_mut() {
         Some(swarm) => RUNTIME.block_on(async {
             tokio::select! {
@@ -207,6 +272,10 @@ pub(crate) fn wait_for_network_activity(timeout_ms: u64) {
             return;
         }
     };
+    let waited = started.elapsed().as_millis() as u64;
+    if waited > timeout_ms + 5_000 {
+        log::warn!("Ağ beklemesi zaman aşımını aştı: {} ms (zaman aşımı {} ms)", waited, timeout_ms);
+    }
     if let Some(ev) = event {
         core.deferred_swarm_events.push(ev);
     }
@@ -598,6 +667,7 @@ mod wipe_coverage_tests {
         "conn_rank",                     // same, per connection id
         "server_rpc_timeouts",           // connection health counter
         "advertised_onion",              // our own address; rebuilt with the network
+        "ratchets_loaded",               // load gate; the key stays loaded across a wipe
         "peer_onion_addr",               // public addresses, keyed by PeerId
         "peer_direct_addrs",             // same
         "server_sweep_at", "blob_rtt_sum", "blob_rtt_count",
@@ -2582,6 +2652,8 @@ struct P2PCore {
     envelopes_inflight: HashMap<request_response::OutboundRequestId, (String, NetworkEnvelope, u64, bool)>,
     /// Our onion address as announced to identify (`add_external_address`).
     advertised_onion: Option<String>,
+    /// Persisted sessions are loaded (see `initiate_handshake_with`).
+    ratchets_loaded: bool,
     /// Onion addresses peers announced over identify, by PeerId. Applied to
     /// `device_onion_addr` once the PeerId is tied to a device.
     peer_onion_addr: HashMap<PeerId, String>,
@@ -2775,6 +2847,7 @@ impl P2PCore {
             server_rpc_timeouts: HashMap::new(),
             envelopes_inflight: HashMap::new(),
             advertised_onion: None,
+            ratchets_loaded: false,
             peer_onion_addr: HashMap::new(),
             peer_direct_addrs: HashMap::new(),
             bulk_health: HashMap::new(),
@@ -6210,6 +6283,14 @@ impl P2PCore {
     }
 
     fn initiate_handshake_with(&mut self, peer_device_fingerprint: &str) -> Result<(), String> {
+        // Found on device (2026-09-18): at app start something sent a message
+        // before `setSkippedKeyEncryptionKey` had loaded the sessions. No session
+        // was in memory, so a NEW init was created and persisted over the real
+        // session the peer still used. Every restart diverged the two devices
+        // (siblings too) until a re-handshake.
+        if !self.ratchets_loaded {
+            return Err("Oturum durumu henüz yüklenmedi".to_string());
+        }
         // Engellenen biriyle oturum KURULMAZ bile — aksi halde arayüzden
         // sohbet açmak ya da `ensure_handshake` çağrısı taze bir ratchet
         // yaratır ve karşı tarafa el sıkışma yollardı (bkz. `try_publish_raw`
@@ -6347,6 +6428,14 @@ impl P2PCore {
     /// in `process_handshake_init` picks one.
     fn note_undecryptable(&mut self, fp: &str) {
         let now = current_time_ms();
+        // A session installed moments ago (by us or from the peer's init): packets
+        // still in flight from the old session are expected to fail. Re-initiating
+        // here overwrote a freshly adopted session, and the peer then ignored our
+        // init under the collision rule → diverged again (device, 2026-09-18).
+        if self.ratchets.get(fp).map_or(false, |s| now.saturating_sub(s.last_rotation) < HANDSHAKE_COLLISION_WINDOW_MS) {
+            self.undecryptable_from.remove(fp);
+            return;
+        }
         let entry = self.undecryptable_from.entry(fp.to_string()).or_insert((now, 0));
         if now.saturating_sub(entry.0) > UNDECRYPTABLE_WINDOW_MS {
             *entry = (now, 0);
@@ -6570,7 +6659,14 @@ impl P2PCore {
             let we_initiated = !existing.has_responded_to_peer_key;
             let same_round = handshake.timestamp.abs_diff(existing.last_rotation) <= HANDSHAKE_COLLISION_WINDOW_MS;
             let existing_unused = existing.send_message_number == 0 && existing.recv_message_number == 0;
-            if (existing_unused || (we_initiated && same_round)) && own_fp < handshake.sender_device_fingerprint {
+            // A device waiting to be linked (showing its link QR) always adopts:
+            // its own init carries its pre-link identity, which the primary
+            // rejects ("sender_identity_id ... eşleşmiyor"). Keeping it (when this
+            // device's fingerprint happened to be the smaller one) left the two on
+            // different sessions, and the DeviceLinkGrant never decrypted
+            // (device, 2026-09-19).
+            let awaiting_link = self.link_request_open_until > now;
+            if !awaiting_link && (existing_unused || (we_initiated && same_round)) && own_fp < handshake.sender_device_fingerprint {
                 info!(
                     "Eşzamanlı el sıkışma çakışması (peer={}) — kendi initiator state'imiz korunuyor (küçük fingerprint kuralı)",
                     handshake.sender_device_fingerprint
@@ -6679,6 +6775,9 @@ impl P2PCore {
         original_sent_at_override: Option<u64>,
         retry_interval_ms_override: Option<u64>,
     ) -> Result<(String, String), String> {
+        if !self.ratchets_loaded {
+            return Err("Oturum durumu henüz yüklenmedi".to_string()); // see `initiate_handshake_with`
+        }
         let own_fp = self.get_active_own_device_fingerprint()?;
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
 
@@ -7499,7 +7598,12 @@ impl P2PCore {
                     );
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
-                self.note_undecryptable(&packet.header.sender_device_fingerprint);
+                // A number already consumed on the current chain is an old or
+                // duplicate packet (e.g. resent after an app restart, when
+                // `recently_acked` is empty again), not a sign of diverged sessions.
+                if !e.contains("not found in skipped-key cache") {
+                    self.note_undecryptable(&packet.header.sender_device_fingerprint);
+                }
                 return Err(e);
             }
         };
@@ -10177,7 +10281,15 @@ impl P2PCore {
     /// sohbetlerin YENİDEN el sıkışma gerektirmeden çalışmaya devam
     /// etmesini sağlar — önceden bu state tamamen bellek-only olduğu için
     /// her süreç yeniden başlatmasında kayboluyordu (bkz. dosya sonu not).
+    /// Loads the persisted sessions and opens the send gate (`ratchets_loaded`).
     fn load_ratchet_states_from_db(&mut self) {
+        self.load_ratchet_states_from_db_inner();
+        if self.skipped_key_encryption_key.is_some() && self.db.is_some() {
+            self.ratchets_loaded = true;
+        }
+    }
+
+    fn load_ratchet_states_from_db_inner(&mut self) {
         let enc_key = match &self.skipped_key_encryption_key {
             Some(k) => *k,
             None => return,
@@ -13098,6 +13210,11 @@ impl P2PCore {
     // ---------------------------------------------------------------
 
     fn start_network(&mut self, node_mode: bool, tor_enabled: bool) -> Result<String, String> {
+        // The session load gate (`ratchets_loaded`) normally opens when the
+        // skipped-key key arrives. Without that key (keystore failure) nothing
+        // can be loaded anyway, and the app starts the network after the key
+        // step, so open it here too rather than block messaging for good.
+        self.ratchets_loaded = true;
         self.node_mode_enabled = node_mode;
         self.tor_enabled = tor_enabled;
         self.own_listen_addrs.clear();
@@ -14834,6 +14951,7 @@ impl P2PCore {
     }
 
     fn poll_events(&mut self) -> Vec<String> {
+        lock_watch::phase("swarm_events");
         // bkz. `ensure_own_mailbox_subscription` — cihazın ulaşılabilirliğinin
         // ÖN KOŞULU; kimlik ağ katmanından sonra oluşmuş olabilir.
         self.ensure_own_mailbox_subscription();
@@ -15854,6 +15972,7 @@ impl P2PCore {
         // olmak ZORUNDA: aksi halde sunucudan gelen her mesaj bir tur (≈1 sn)
         // geç işlenirdi.
         if !server_events.is_empty() {
+            lock_watch::phase("drive_server_sync");
             let replies = self.drive_server_sync(server_events, &mut incoming);
             if let Some(swarm) = &mut self.swarm {
                 for (channel, response) in replies {
@@ -15875,6 +15994,7 @@ impl P2PCore {
         }
         // bkz. `server_sweep` — bağlantı/kayıt/abonelik/çekme bakımı; kendi
         // aralık kontrolünü kendi yapar (`reconnect_sweep` deseni).
+        lock_watch::phase("server_sweep");
         self.server_sweep();
 
         let mut results = Vec::new();
@@ -15884,6 +16004,7 @@ impl P2PCore {
         // dışı)/Edit/Delete/HistorySyncRequest için TEK gerçek uçtan uca
         // teslim garantisi burası; `pending_envelopes`'in aksine karşı
         // taraf onaylayana kadar süresiz devam eder.
+        lock_watch::phase("retry_unconfirmed");
         self.retry_unconfirmed_messages();
         // bkz. `DOWNLOAD_STALL_TIMEOUT_MS` dokümantasyonu — bir sonraki
         // turda drenaj edilecek `file_failed` olayları üretebilir (bkz.
@@ -15895,10 +16016,12 @@ impl P2PCore {
         // bkz. `reconnect_sweep` dokümantasyonu — kopmuş kişilere periyodik
         // (≤15 sn) otomatik yeniden bağlanma. Kendi içinde aralık kontrolü
         // yapar, bu yüzden her poll turunda çağrılması ucuzdur.
+        lock_watch::phase("reconnect_sweep");
         self.reconnect_sweep();
         // bkz. `pending_group_syncs` dokümantasyonu — hedef cihazı henüz
         // çözülemediği için gönderilemeyen grup üyelik/isim/avatar
         // güncellemelerini periyodik (≤20 sn) olarak yeniden dener.
+        lock_watch::phase("group_sync_sweep");
         self.group_sync_sweep();
         // bkz. `early_packets` — el sıkışması hiç gelmeyen tamponlar süresi
         // dolunca temizlenir.
@@ -15998,6 +16121,7 @@ impl P2PCore {
         // kuyruğa koymayı gerektiriyor.
         let deferred = std::mem::take(&mut self.deferred_incoming);
         let queued_before = deferred.len();
+        lock_watch::phase("incoming_envelopes");
         for (source, raw) in deferred.into_iter().chain(incoming) {
             if let Some(peer) = source {
                 match self.rate_verdict(peer) {

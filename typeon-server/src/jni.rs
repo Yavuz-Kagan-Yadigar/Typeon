@@ -46,6 +46,9 @@ lazy_static::lazy_static! {
         .build()
         .expect("tokio runtime");
     static ref CONTROL: Mutex<Option<Control>> = Mutex::new(None);
+    /// The loop task of the last started server. `stopServer` only signals it;
+    /// the next `startServer` waits for it to end.
+    static ref LAST_RUN: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
 }
 
 fn jstr(env: &mut JNIEnv, s: &JString) -> String {
@@ -140,6 +143,18 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
     }
 
     let _guard = RUNTIME.enter();
+    // Found on device (2026-09-18): toggling the relay/DHT switch restarts the
+    // server 600 ms after `stopServer`, which only signals the old loop. The old
+    // arti client still held its state lock, so the new one failed with "Onion
+    // service başlatılamadı: local resource (port, lockfile, etc.) already in use"
+    // and the server had no address until toggled again. Wait for the old loop
+    // (and the Tor client it owns) to be dropped first.
+    let previous = LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()).take();
+    if let Some(handle) = previous {
+        if RUNTIME.block_on(tokio::time::timeout(std::time::Duration::from_secs(20), handle)).is_err() {
+            log::warn!("Önceki sunucu döngüsü 20 sn içinde kapanmadı, yine de başlatılıyor");
+        }
+    }
     let mut core = match ServerCore::new(config.clone()) {
         Ok(c) => c,
         Err(e) => return out(&mut env, format!("Error: {e}")),
@@ -157,7 +172,8 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     core.set_net_changed_rx(net_rx);
-    RUNTIME.spawn(async move {
+    // `run_until` consumes the core: when it returns, the Tor client is dropped.
+    let handle = RUNTIME.spawn(async move {
         // `oneshot` gönderen düşerse de sonlanır — kanal hatası da bir
         // kapatma sinyali sayılır.
         if let Err(e) = core.run_until(async { let _ = stop_rx.await; }).await {
@@ -165,6 +181,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
         }
         log::info!("Sunucu döngüsü sonlandı.");
     });
+    *LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
 
     *CONTROL.lock().unwrap_or_else(|p| p.into_inner()) = Some(Control {
         shared,
