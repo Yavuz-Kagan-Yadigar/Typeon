@@ -248,9 +248,10 @@
          yok, alt çubukla birlikte `viewReplyIsland` adasının içinde duruyor
          (adanın kenarlarından 12dp içeride, çubuğun hemen üstünde). -->
     <!-- Kullanıcı isteği: alıntı + alt çubuk tek bir ADA içinde (bkz.
-         reply_island.xml). Ada, önizlemenin üstünden kılavuzun altına kadar
-         uzanan bir arka plan; yanıt açıkken alt çubuk adanın içine çekilir
-         (bkz. util.ReplyIsland). XML'de ikisinden ÖNCE: arkada çizilsin. -->
+         reply_island.xml). Ada çubuğun ETRAFINA taşar, çubuğu yeniden
+         boyutlandırmaz: yan/alt kenarları çubuğun gerçek konumundan kodda
+         hesaplanır (bkz. util.ReplyIsland; ConstraintLayout negatif kenar
+         boşluğu desteklemiyor). XML'de ikisinden ÖNCE: arkada çizilsin. -->
     <View
         android:id="@+id/viewReplyIsland"
         android:layout_width="0dp"
@@ -258,9 +259,9 @@
         android:background="@drawable/reply_island"
         android:visibility="gone"
         app:layout_constraintTop_toTopOf="@id/layoutReplyPreview"
-        app:layout_constraintBottom_toTopOf="@id/guideInputBottom"
-        app:layout_constraintStart_toStartOf="@id/guideInputStart"
-        app:layout_constraintEnd_toEndOf="@id/guideInputEnd" />
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
 
     <LinearLayout
         android:id="@+id/layoutReplyPreview"
