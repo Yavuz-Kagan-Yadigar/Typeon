@@ -41,7 +41,28 @@ object KeyboardInsets {
         // bkz. aşağıdaki `addOnLayoutChangeListener` notu — insets
         // dağıtıldığında (yerleşim henüz TETİKLENMEDEN) alınan bir
         // an-görüntü: kullanıcı o an listenin dibinde miydi?
-        var wasNearBottomBeforeResize = false
+        var wasNearBottomBeforeResize = true
+
+        // Found on device (Note 9S, Android 12, 2026-09-19): the insets listener
+        // below is never called there. The chat root sits inside a DrawerLayout
+        // that consumes the insets, and the window resizes by itself
+        // (adjustResize works). The flag stayed false, so on keyboard CLOSE the
+        // "not at bottom" branch scrolled back by the keyboard height ON TOP of
+        // LinearLayoutManager's own re-anchoring, and the list jumped up. The flag
+        // is now tracked from real scrolls: dy == 0 calls (sent after every
+        // layout, including the resize itself) do not touch it, so it still
+        // holds the state from before the resize when the layout listener runs.
+        recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                if (dy != 0) wasNearBottomBeforeResize = isRecyclerNearBottom(rv)
+            }
+        })
+        // New items at the end while the user was at the bottom keep them there.
+        recycler.adapter?.registerAdapterDataObserver(object : RecyclerView.AdapterDataObserver() {
+            override fun onItemRangeInserted(positionStart: Int, itemCount: Int) {
+                if (!recycler.canScrollVertically(1)) wasNearBottomBeforeResize = true
+            }
+        })
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom

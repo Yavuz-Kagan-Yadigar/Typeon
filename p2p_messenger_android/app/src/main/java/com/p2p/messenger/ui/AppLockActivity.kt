@@ -1,7 +1,9 @@
 package com.p2p.messenger.ui
 
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
@@ -87,6 +89,20 @@ class AppLockActivity : AppCompatActivity() {
                 }
             }
         }
+
+        // Kullanıcı isteği: klavyedeki onay/ok tuşu da kilidi açsın. Oluşturma
+        // modunda ilk alan önce onay alanına geçer; son alanda gönderir.
+        if (createMode) password.imeOptions = EditorInfo.IME_ACTION_NEXT
+        val submitOnIme = TextView.OnEditorActionListener { _, actionId, event ->
+            val enterKey = event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN
+            if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_GO || enterKey) {
+                if (submit.isEnabled) submit.performClick()
+                true
+            } else {
+                false
+            }
+        }
+        (if (createMode) confirm else password).setOnEditorActionListener(submitOnIme)
 
         // Geri tuşu kilidi ATLAYAMAZ: kilit ekranı kapanacaksa uygulamadan
         // tamamen çıkılır (arkadaki Activity yığını görünür kalmamalı).

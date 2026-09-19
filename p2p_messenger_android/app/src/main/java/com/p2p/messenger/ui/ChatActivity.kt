@@ -59,6 +59,7 @@ import com.p2p.messenger.util.ReactionPicker
 import com.p2p.messenger.util.ConnectionStatus
 import com.p2p.messenger.util.ImagePreview
 import com.p2p.messenger.util.KeyboardInsets
+import com.p2p.messenger.util.ReplyIsland
 import com.p2p.messenger.util.NotificationHelper
 import com.p2p.messenger.util.PlaybackSpeed
 import com.p2p.messenger.util.PulsingStatusDot
@@ -205,6 +206,7 @@ class ChatActivity : AppCompatActivity() {
     private var fabBlinkAnimator: ObjectAnimator? = null
 
     private lateinit var layoutReplyPreview: View
+    private lateinit var swipeHelper: ItemTouchHelper
     private lateinit var txtReplyPreviewSender: TextView
     private lateinit var txtReplyPreviewText: TextView
     /** Şu an yanıtlanmakta olan mesaj (bkz. `startReply`/`cancelReply`). */
@@ -464,6 +466,11 @@ class ChatActivity : AppCompatActivity() {
         val chatLayoutManager = LinearLayoutManager(this)
         recycler.layoutManager = chatLayoutManager
         recycler.adapter = adapter
+        // Kullanıcı: "mesaj balonları bazen titriyor". Tik/görüldü/tepki
+        // güncellemeleri `notifyItemChanged` ile geliyor ve varsayılan
+        // animatör her birinde balonun eski ve yeni hâli arasında çapraz
+        // geçiş (crossfade) oynatıyordu. Ekleme/silme animasyonları kalıyor.
+        (recycler.itemAnimator as? androidx.recyclerview.widget.SimpleItemAnimator)?.supportsChangeAnimations = false
         // Birleşen balonların TEK dış hattı — bkz. MergedBubbleDecoration
         // (neden her balonun kendi arka planı yetmiyor, orada yazılı).
         recycler.addItemDecoration(MergedBubbleDecoration(adapter))
@@ -2043,6 +2050,16 @@ class ChatActivity : AppCompatActivity() {
             override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {
                 val position = viewHolder.adapterPosition
                 // Balonu geri yerine oturt — bu bir "kaydırıp sil" değil.
+                // Değişiklik animasyonu kapalıyken (bkz. `supportsChangeAnimations`)
+                // `notifyItemChanged` AYNI görünümü yeniden bağlar ve ItemTouchHelper
+                // o görünümü "kaydırılmış" olarak tutup her karede kaydırılmış
+                // konumda çizmeye devam eder (eskiden eski görünüm ayrıldığı için
+                // temizleniyordu). Helper'ı ayırıp yeniden bağlamak bu durumu
+                // temizler ve ötelemeyi sıfırlar.
+                recycler.post {
+                    swipeHelper.attachToRecyclerView(null)
+                    swipeHelper.attachToRecyclerView(recycler)
+                }
                 if (position != RecyclerView.NO_POSITION) adapter.notifyItemChanged(position)
                 // bkz. `onSelectedChanged` — hedef, hareketin BAŞLADIĞI mesaj.
                 val startedOn = swipeStartMessageId
@@ -2051,7 +2068,8 @@ class ChatActivity : AppCompatActivity() {
                 if (item != null && !item.isDeleted) startReply(item)
             }
         }
-        ItemTouchHelper(callback).attachToRecyclerView(recycler)
+        swipeHelper = ItemTouchHelper(callback)
+        swipeHelper.attachToRecyclerView(recycler)
     }
 
     private fun startReply(item: SimpleChatAdapter.Item) {
@@ -2061,6 +2079,7 @@ class ChatActivity : AppCompatActivity() {
         txtReplyPreviewSender.text = if (item.isMine) getString(R.string.lbl_you) else txtToolbarTitle.text
         txtReplyPreviewText.text = preview
         layoutReplyPreview.visibility = View.VISIBLE
+        ReplyIsland.set(this, true)
     }
 
     /** Ek balonlarında metin yok — dosya adı gösterilir. */
@@ -2077,6 +2096,7 @@ class ChatActivity : AppCompatActivity() {
         activeReplyToMessageId = null
         activeReplyToPreview = null
         layoutReplyPreview.visibility = View.GONE
+        ReplyIsland.set(this, false)
     }
 
     /** Alıntı kutusuna dokunulunca yanıtlanan mesaja kaydırır ve kısa süre
