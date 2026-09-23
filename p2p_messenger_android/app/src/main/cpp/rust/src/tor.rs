@@ -394,3 +394,54 @@ impl Transport for ArtiDialTransport {
         Poll::Pending
     }
 }
+
+/// Sarmaladığı transport'u SADECE gelen bağlantılar için bırakan, HER `dial`'ı
+/// reddeden sarmalayıcı. Onion-only garantisinin taşıma-katmanı çıpası:
+///
+/// TCP taşıması swarm'dan tamamen ÇIKARILAMAZ — onion service köprüsü
+/// (`bridge_incoming_stream`) gelen Tor akışlarını `127.0.0.1:<port>`'a bağlar,
+/// yani yerel bir TCP dinleyicisi gerekir. Ama giden TCP dial'ı bir eşin
+/// GERÇEK IP'sine doğrudan (clearnet) bağlanır ve Tor anonimliğini bozar
+/// (deanonymization — bkz. defter/pentest 2026-09-23: UPnP + `:42611` direct
+/// SYN'ler). Bu sarmalayıcı TCP'yi "yalnızca dinle" yapar: `listen_on`/gelen
+/// akış olduğu gibi devreder, `dial`/`dial_as_listener` daima
+/// `MultiaddrNotSupported` döner. Böylece çıkışın tamamı `ArtiDialTransport`
+/// (onion) veya röle (onion üzerinden) üzerinden gider; libp2p asla bir eşin
+/// clearnet adresine doğrudan bağlanamaz — kim `swarm.dial()` çağırırsa
+/// çağırsın (mDNS keşfi, kad, identify, dcutr hole-punch dahil).
+#[derive(Clone)]
+pub struct DialReject<T>(pub T);
+
+impl<T> Transport for DialReject<T>
+where
+    T: Transport + Unpin,
+{
+    type Output = T::Output;
+    type Error = T::Error;
+    type Dial = T::Dial;
+    type ListenerUpgrade = T::ListenerUpgrade;
+
+    fn listen_on(&mut self, id: ListenerId, addr: Multiaddr) -> Result<(), TransportError<Self::Error>> {
+        self.0.listen_on(id, addr)
+    }
+
+    fn remove_listener(&mut self, id: ListenerId) -> bool {
+        self.0.remove_listener(id)
+    }
+
+    fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
+        Err(TransportError::MultiaddrNotSupported(addr))
+    }
+
+    fn dial_as_listener(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
+        Err(TransportError::MultiaddrNotSupported(addr))
+    }
+
+    fn address_translation(&self, listen: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
+        self.0.address_translation(listen, observed)
+    }
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<TransportEvent<Self::ListenerUpgrade, Self::Error>> {
+        Pin::new(&mut self.get_mut().0).poll(cx)
+    }
+}

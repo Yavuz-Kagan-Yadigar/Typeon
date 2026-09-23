@@ -864,10 +864,12 @@ mod delivery_ack_coverage_tests {
 mod conn_path_rank_tests {
     use super::conn_path_rank;
     #[test]
-    fn direct_beats_onion_beats_relay() {
+    fn onion_beats_clearnet_and_relay() {
         let r = |s: &str| conn_path_rank(&s.parse().unwrap());
         let peer = "12D3KooWKyUGW1BQhQRTn6gGcidXMotu34zMsfodWjAZD6ebL1Uv";
-        assert_eq!(r(&format!("/ip4/192.168.1.103/tcp/42611/p2p/{peer}")), 2);
+        // Onion-only (deanon fix): clearnet doğrudan yol artık en düşük (0),
+        // asla onion'un üstüne çıkmaz.
+        assert_eq!(r(&format!("/ip4/192.168.1.103/tcp/42611/p2p/{peer}")), 0);
         assert_eq!(r(&format!("/dns/abc.onion/tcp/42611/p2p/{peer}")), 1);
         assert_eq!(r("/ip4/127.0.0.1/tcp/47420"), 1); // inbound over our onion service
         assert_eq!(r(&format!("/dns/abc.onion/tcp/42612/p2p/{peer}/p2p-circuit/p2p/{peer}")), 0);
@@ -13283,7 +13285,11 @@ impl P2PCore {
             use libp2p::core::transport::Transport as _;
             use libp2p::core::upgrade::Version;
             let noise_for = |kp: &libp2p::identity::Keypair| noise::Config::new(kp).map_err(|e| e.to_string());
-            let tcp_t = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
+            // Onion-only (deanon fix, bkz. tor.rs `DialReject`): TCP taşıması
+            // yalnızca gelen onion-köprüsü bağlantıları için tutulur; giden
+            // her TCP (clearnet) dial'ı reddedilir, böylece hiçbir eşin gerçek
+            // IP'sine doğrudan bağlanılmaz. Çıkış tamamen onion/röle üzerinden.
+            let tcp_t = tor::DialReject(tcp::tokio::Transport::new(tcp::Config::default().nodelay(true)))
                 .upgrade(Version::V1Lazy)
                 .authenticate(noise_for(&keypair)?)
                 .multiplex(tuned_yamux())
@@ -13445,7 +13451,16 @@ impl P2PCore {
 
         // Tor açıkken SABİT port (onion köprüsü buraya bağlanır), kapalıyken
         // rastgele (0) — bkz. TOR_LIBP2P_PORT.
-        swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", listen_port).parse().map_err(|_| "bad multiaddr")?)
+        //
+        // Onion-only (deanon fix): `0.0.0.0` DEĞİL `127.0.0.1` — dinleyici
+        // yalnızca loopback'te. Onion köprüsü (`bridge_incoming_stream`) zaten
+        // `127.0.0.1:<port>`'a bağlanır (bkz. tor.rs:247), yani gelen onion
+        // trafiği etkilenmez; buna karşılık LAN/internetten doğrudan clearnet
+        // bağlantı KABUL EDİLMEZ. Ayrıca dinlenen tek adres loopback olduğu
+        // için libp2p-upnp eşlenecek yönlendirilebilir bir adres bulamaz
+        // (UPnP AddPortMapping fırtınası biter) ve identify/mDNS eşlere
+        // yönlendirilebilir bir adres duyurmaz.
+        swarm.listen_on(format!("/ip4/127.0.0.1/tcp/{}", listen_port).parse().map_err(|_| "bad multiaddr")?)
             .map_err(|e| e.to_string())?;
 
         // bkz. `own_mailbox_topic_fp` dokümantasyonu: bu abonelik OLMADAN
@@ -15170,21 +15185,16 @@ impl P2PCore {
                             // çağrısıyla AYNI desen).
                             match mdns_event {
                                 libp2p::mdns::Event::Discovered(list) => {
-                                    for (peer_id, addr) in list {
-                                        // mDNS announces every listen address, loopback included:
-                                        // dialing 127.0.0.1 reaches our own node ("Unexpected peer ID").
-                                        if is_loopback_multiaddr(&addr) {
-                                            continue;
-                                        }
-                                        info!("mDNS: yerel ağda peer keşfedildi: {} @ {}", peer_id, addr);
-                                        swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
-                                        new_peer_addrs.push((peer_id, addr.clone()));
-                                        if !swarm.is_connected(&peer_id) {
-                                            if let Err(e) = swarm.dial(addr) {
-                                                error!("mDNS keşfinden sonra dial başarısız: {}", e);
-                                            }
-                                        }
-                                    }
+                                    // Onion-only (deanon fix): mDNS bir eşi YALNIZCA LAN
+                                    // clearnet adresiyle (ör. /ip4/192.168.x.y/tcp/42611)
+                                    // duyurur. Bu adrese ARTIK ne dial ederiz ne de kad'a
+                                    // ekleriz — aksi halde doğrudan bağlantı Tor'u atlar ve
+                                    // eşe gerçek IP'mizi sızdırır (bkz. pentest 2026-09-23:
+                                    // :42611 direct SYN'ler). mDNS keşfi kasıtlı NO-OP.
+                                    // (Yayının kendisi libp2p tarafından hâlâ gönderilir ama
+                                    // hiçbir yere yol açmaz; tam susturmak için behaviour'dan
+                                    // `mdns`'i çıkarmak gerekir — ayrı, daha büyük değişiklik.)
+                                    let _ = list;
                                 }
                                 libp2p::mdns::Event::Expired(list) => {
                                     for (peer_id, addr) in list {
@@ -16820,7 +16830,13 @@ fn conn_path_rank(addr: &Multiaddr) -> u8 {
         Protocol::Onion(..) | Protocol::Onion3(_) => true,
         _ => false,
     });
-    if onion || is_loopback_multiaddr(addr) { 1 } else { 2 }
+    // Onion-only (deanon fix): clearnet doğrudan yol ARTIK tercih edilmez.
+    // Eskiden clearnet=2 onion=1 idi (hız için gerçek IP tercih ediliyordu);
+    // artık yalnızca onion (ve kendi onion servisimize gelen loopback) tercih
+    // edilir, clearnet röle ile aynı en düşük seviyeye (0) düşer. Zaten
+    // `DialReject` ile clearnet bağlantı hiç kurulmaz; bu, o yol bir şekilde
+    // görünürse bile onion'un üstüne çıkmamasını garanti eder.
+    if onion || is_loopback_multiaddr(addr) { 1 } else { 0 }
 }
 
 /// The peer an address leads to: the LAST `/p2p`. In a relay circuit address
