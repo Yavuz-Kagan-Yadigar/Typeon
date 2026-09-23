@@ -322,7 +322,27 @@ impl ServerCore {
 
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
-            .with_tcp(tcp::Config::default().nodelay(true), noise::Config::new, tuned_yamux)
+            // Onion-only (deanon fix, istemciyle AYNI çıpa): TCP taşıması
+            // yalnızca gelen onion-köprüsü bağlantıları için tutulur; giden
+            // her TCP (clearnet) dial'ı `DialReject` ile reddedilir. Sunucu
+            // zaten dışarı dial etmez (store-and-forward yalnızca istemcilerin
+            // ona bağlanmasıyla çalışır, tor transport'u da yok) — bu, kad/
+            // autonat/relay gibi bir davranışın kazara bir eşin gerçek IP'sine
+            // clearnet dial etmesini de kesin olarak engeller.
+            .with_other_transport(|keypair| {
+                use libp2p::core::muxing::StreamMuxerBox;
+                use libp2p::core::transport::Transport as _;
+                use libp2p::core::upgrade::Version;
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
+                    p2p_messenger::tor::DialReject(
+                        tcp::tokio::Transport::new(tcp::Config::default().nodelay(true)),
+                    )
+                    .upgrade(Version::V1Lazy)
+                    .authenticate(noise::Config::new(keypair)?)
+                    .multiplex(tuned_yamux())
+                    .map(|(p, m), _| (p, StreamMuxerBox::new(m))),
+                )
+            })
             .map_err(|e| e.to_string())?
             .with_behaviour(|keypair| {
                 let peer_id = keypair.public().to_peer_id();
@@ -375,8 +395,15 @@ impl ServerCore {
             .kad
             .set_mode(Some(if node_mode { kad::Mode::Server } else { kad::Mode::Client }));
 
+        // Onion-only (deanon fix, istemciyle AYNI, bkz. p2p_messenger::tor
+        // `DialReject`): `0.0.0.0` DEĞİL `127.0.0.1` — dinleyici yalnızca
+        // loopback'te. Sunucunun onion service köprüsü gelen Tor akışlarını
+        // zaten `127.0.0.1:TOR_LIBP2P_PORT`'a bağlar, yani gelen onion trafiği
+        // etkilenmez; buna karşılık LAN/internetten doğrudan clearnet bağlantı
+        // KABUL EDİLMEZ (sunucunun gerçek IP'si ifşa olmaz) ve libp2p-upnp
+        // eşlenecek yönlendirilebilir bir adres bulamaz.
         swarm
-            .listen_on(format!("/ip4/0.0.0.0/tcp/{}", listen_port).parse().map_err(|_| "bad multiaddr")?)
+            .listen_on(format!("/ip4/127.0.0.1/tcp/{}", listen_port).parse().map_err(|_| "bad multiaddr")?)
             .map_err(|e| e.to_string())?;
 
         Ok(ServerCore {

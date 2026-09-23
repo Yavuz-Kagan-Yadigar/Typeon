@@ -12,6 +12,12 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 name = "p2p_messenger"
 
 [dependencies]
+# Paylaşılan kripto çekirdeği (identity/ratchet/packet/server_proto/server_seal).
+# Bu modüller buradan `typeon-crypto`'ya taşındı; `lib.rs` onları `pub use` ile
+# yeniden yayımlar, böylece hem bu çekirdek hem de tarayıcı (wasm) tarafı AYNI
+# kodu kullanır. Sürümler aşağıdaki kripto crate'leriyle birebir aynı olmalı.
+typeon-crypto = { path = "../../../../../../typeon-crypto" }
+
 # Cryptography
 ring = "0.17"
 # NOT: pqcrypto-kyber/pqcrypto-dilithium yerine RustCrypto'nun ml-kem/ml-dsa

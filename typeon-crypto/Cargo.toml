@@ -1,0 +1,36 @@
+[package]
+name = "typeon-crypto"
+version = "0.2.0"
+edition = "2021"
+
+# TypeOn'un denetlenmiş kripto çekirdeği (identity, double ratchet, paket
+# çerçeveleme, sunucu store-and-forward mührü) burada yaşar. AYNI kod hem native
+# (Android/Linux/relay) hem de tarayıcı (wasm32) tarafında derlenir — protokolü
+# ikinci kez yazmamak için. Bu crate'te SQLite, libp2p, Tor, JNI YOK: sadece
+# saf kripto + serde. wasm-uyumsuz her şey (rusqlite/arti/libp2p) çekirdekte
+# (p2p_messenger_core) kalır.
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json = "1.0"
+ciborium = "0.2"
+hex = "0.4"
+base32 = "0.5"
+# NOT: sürümler çekirdekle (p2p_messenger_core/Cargo.toml) BİREBİR aynı olmalı —
+# aynı bayt formatı iki tarafta da çözülebilsin. ml-dsa/ed25519 BİLEREK yok:
+# bu modüller imza/anahtarları ham bayt olarak taşır, o crate'lere ihtiyaç duymaz.
+ml-kem = { version = "0.2", features = ["zeroize"] }
+kem = "=0.3.0-pre.0"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+sha3 = "0.10"
+zeroize = "1.7"
+rand = "0.8"
+
+# wasm32'de OsRng (getrandom 0.2) tarayıcı Crypto.getRandomValues'a bağlanır;
+# "js" feature'ı olmadan wasm hedefinde derlenmez. Native hedefleri etkilemez.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

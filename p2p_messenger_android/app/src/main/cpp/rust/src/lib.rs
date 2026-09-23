@@ -11,9 +11,12 @@
 //! - `contact`   : bölüm 2 — TOFU + güvenlik numarası değişikliği
 //! - `group`     : bölüm 5 — pairwise grup mesajlaşma
 
-mod identity;
-mod packet;
-mod ratchet;
+/// Kripto çekirdeği ayrı bir crate'e (`typeon-crypto`) taşındı — aynı denetlenmiş
+/// kod native (Android/Linux/relay) VE tarayıcı (wasm) tarafında çalışsın diye.
+/// Bu `pub use`, eski yolları (`crate::packet::…`, `crate::identity::…`,
+/// dışarıdan `p2p_messenger::server_proto::…`) OLDUĞU GİBİ korur; çağıran kod
+/// değişmez.
+pub use typeon_crypto::{identity, packet, ratchet, server_proto, server_seal};
 mod contact;
 mod group;
 /// `pub`: `typeon-server/` sunucu crate'i, dosya eklerini istemcilerin ZATEN
@@ -26,13 +29,10 @@ pub mod attachments;
 /// yolu bu.
 pub mod tor;
 
-/// Sunucu (store-and-forward) seçeneğinin ORTAK kablo tipleri ve ikinci
-/// şifreleme katmanı. `api` gibi bunlar da `pub`: depo kökündeki
-/// `typeon-server/` crate'i bu çekirdeği path bağımlılığı olarak linkler ve
-/// AYNI tanımları kullanır — protokolün iki ucu arasında elle senkron
-/// tutulacak ikinci bir kopya yok.
-pub mod server_proto;
-pub mod server_seal;
+// NOT: `server_proto` ve `server_seal` artık `typeon-crypto` crate'inde;
+// yukarıdaki `pub use typeon_crypto::{…}` bunları eskisi gibi
+// `p2p_messenger::server_proto::…` / `crate::server_seal::…` olarak erişilebilir
+// tutar (`typeon-server/` crate'i AYNI tanımları kullanmaya devam eder).
 /// Sunucu seçeneğinin istemci tarafı — `impl P2PCore` blokları. `lib.rs`
 /// zaten 12.8k satır olduğu için ayrı dosyada; alt modül olduğundan
 /// `P2PCore`'un private alanlarını görebiliyor.
