@@ -13681,12 +13681,13 @@ impl P2PCore {
     /// Hiçbiri yoksa yapılacak tek şey GELEN bir bağlantıyı kabul etmek —
     /// o da saniyede bir yoklamayı gerektirmiyor.
     fn has_pending_work(&self) -> bool {
-        let connected = self.swarm.as_ref().map(|s| s.connected_peers().count()).unwrap_or(0) > 0;
-        connected
-            || !self.awaiting_confirmation.is_empty()
-            || !self.pending_envelopes.is_empty()
-            || !self.active_downloads.is_empty()
-            || !self.pending_group_messages.is_empty()
+        // Pil: BAĞLI eş tek başına "meşgul" sayılmaz — sürekli açık bir Tor/sunucu
+        // bağlantısı ekran kapalıyken wake lock'u 7/24 tutup günde %20-40 pil
+        // yiyordu. Yalnızca gerçek bekleyen iş uyanık tutar.
+        // awaiting_confirmation / pending_envelopes / pending_group_messages burada YOK:
+        // çevrimdışı eşe bekleyen mesajlar saatlerce kalır; zamanlayıcıyla yeniden denenir,
+        // CPU'yu 7/24 uyanık tutmaz (ölçüldü: wake lock 15/15 dk tutuluyordu).
+        !self.active_downloads.is_empty()
             || !self.server_archive_queue.is_empty()
             || !self.server_blob_uploads.is_empty()
             || !self.server_inflight.is_empty()

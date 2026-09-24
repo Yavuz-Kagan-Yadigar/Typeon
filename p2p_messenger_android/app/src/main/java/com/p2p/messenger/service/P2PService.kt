@@ -81,7 +81,7 @@ class P2PService : Service() {
         private const val POLL_INTERVAL_SCREEN_OFF_MS = 5000L
         /** Ekran kapalı VE çekirdek tamamen boşta. Bağlı eş yok, bekleyen
          *  iş yok — olabilecek tek şey gelen bir bağlantı. */
-        private const val POLL_INTERVAL_DEEP_IDLE_MS = 30000L
+        private const val POLL_INTERVAL_DEEP_IDLE_MS = 60000L
         /** Derin boşta moduna geçmeden önce kaç ardışık boş tur beklenir
          *  (~1 dk) — anlık bir sessizlikte moda düşüp gecikme yaratmasın. */
         private const val DEEP_IDLE_AFTER_EMPTY_POLLS = 12
@@ -263,6 +263,7 @@ class P2PService : Service() {
      * bkz. `SettingsFragment` — ama o kullanıcının onayına bağlı, bu değil).
      */
     private var wakeLock: android.os.PowerManager.WakeLock? = null
+    @Volatile private var wakeTimed = false
     private var wifiNetworkCallback: ConnectivityManager.NetworkCallback? = null
     /** bkz. `observeNetworkChangesForReconnect` — `wifiNetworkCallback`'ten
      *  (WiFi'ye ÖZEL, sadece süreç bağlama amaçlı) AYRI, HERHANGİ bir
@@ -313,6 +314,9 @@ class P2PService : Service() {
                 pendingWaitMs = 0L
                 if (waitMs > 0L) {
                     try { P2PLib.waitForNetworkActivity(waitMs) } catch (e: Throwable) {}
+                    // Derin boşta kilit yok: ağ olayı CPU'yu uyandırdı, işlem
+                    // bitene kadar kısa zamanlı kilit tut (mesaj kaçmasın).
+                    acquireWakeLock(20_000L)
                 }
                 // An uncaught exception here (pollNetwork, a listener, or
                 // notify) would skip postDelayed below and permanently stop
@@ -342,9 +346,14 @@ class P2PService : Service() {
                         // gerçekten uyuyabiliyor. Cihaz uykuya dalarsa
                         // `postDelayed` (uptime tabanlı) durur — bu yüzden
                         // Doze altında da ateşleyen bir alarm kuruluyor.
+                        // Kilitsiz ama uyanık-bekleyen: Rust'ta ağ olayını bekle
+                        // (gelen bayt CPU'yu uyandırır → mesaj gecikmez). Doze
+                        // alarmı yedek.
                         releaseWakeLock()
                         scheduleDozeWakeup()
-                        handler.postDelayed(this, nextPollDelayMs())
+                        pendingWaitMs = nextPollDelayMs()
+                        handler.removeCallbacks(this)
+                        handler.post(this)
                     } else {
                         acquireWakeLock()
                         cancelDozeWakeup()
@@ -818,12 +827,17 @@ class P2PService : Service() {
     }
 
     /** bkz. `wakeLock` alan notu. */
-    private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
+    private fun acquireWakeLock(timeoutMs: Long = 0L) {
+        if (wakeLock?.isHeld == true) {
+            // Zamanlı (kısa) kilit varsa ve süresiz istendiyse yükselt.
+            if (timeoutMs != 0L || !wakeTimed) return
+            releaseWakeLock()
+        }
+        wakeTimed = timeoutMs != 0L
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
             wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "Typeon:network")
-                .also { it.setReferenceCounted(false); it.acquire() }
+                .also { it.setReferenceCounted(false); if (timeoutMs > 0) it.acquire(timeoutMs) else it.acquire() }
         } catch (e: Exception) {
             Log.w(TAG, "Wake lock alınamadı: ${e.message}")
         }

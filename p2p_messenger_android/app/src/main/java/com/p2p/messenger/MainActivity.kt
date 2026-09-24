@@ -342,12 +342,12 @@ class MainActivity : AppCompatActivity() {
     private fun ensureBatteryOptimizationExemption() {
         val powerManager = getSystemService(android.os.PowerManager::class.java) ?: return
         if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
-        // Her açılışta sormak dırdır olurdu: kullanıcı reddettiyse bir hafta
+        // Her açılışta sormak dırdır olurdu: kullanıcı reddettiyse bir gün
         // boyunca bir daha sorma. (Muafiyet zaten varsa yukarıda çıkıldı.)
         val prefs = getSharedPreferences("p2p_settings", Context.MODE_PRIVATE)
         val lastAsked = prefs.getLong("battery_prompt_last_ms", 0L)
         val now = System.currentTimeMillis()
-        if (now - lastAsked < 7L * 24 * 60 * 60 * 1000) return
+        if (now - lastAsked < 24L * 60 * 60 * 1000) return
         prefs.edit().putLong("battery_prompt_last_ms", now).apply()
         AlertDialog.Builder(this)
             .setTitle(R.string.title_reliable_delivery)

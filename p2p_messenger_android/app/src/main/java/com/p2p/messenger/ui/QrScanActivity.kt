@@ -88,9 +88,12 @@ class QrScanActivity : AppCompatActivity() {
 
     private fun startCamera() {
         val previewView = findViewById<PreviewView>(R.id.cameraPreview)
+        // SurfaceView (PERFORMANCE) bazı cihazlarda siyah kare veriyor; TextureView güvenli.
+        previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
 
         cameraProviderFuture.addListener({
+            if (isFinishing || isDestroyed) return@addListener
             val cameraProvider = cameraProviderFuture.get()
 
             val preview = androidx.camera.core.Preview.Builder().build().also {
@@ -156,13 +159,31 @@ class QrScanActivity : AppCompatActivity() {
         }
     }
 
+    /** Rust çağrıları (eşleşme/el sıkışma) uzun sürebilir: ana thread'de
+     *  çalışınca kamera önizlemesi donup siyah ekran kalıyordu. Arka planda
+     *  çalıştır, sonucu UI'ya döndür. */
     private fun handleScannedText(text: String) {
-        runOnUiThread {
+        Thread {
+            val cborBytes = if (addServerMode) ByteArray(0) else QrBinaryCodec.latin1StringToBytes(text)
+            val result = try {
+                when {
+                    addServerMode -> P2PLib.addServer(text.trim())
+                    linkApproveMode -> P2PLib.approveDeviceLink(cborBytes)
+                    else -> P2PLib.processQrPacket(cborBytes)
+                }
+            } catch (e: Throwable) {
+                "Error: ${e.message}"
+            }
+            runOnUiThread { if (!isFinishing) onScanResult(result) }
+        }.start()
+    }
+
+    private fun onScanResult(result: String) {
+        run {
             if (addServerMode) {
                 // Sunucu davet kodu DÜZ METİN — CBOR'a çevirmiyoruz (bkz.
                 // MODE_ADD_SERVER notu). Rust tarafı adresi ve jetonu
                 // kendisi ayrıştırır.
-                val result = P2PLib.addServer(text.trim())
                 if (result.startsWith("Error:")) {
                     Toast.makeText(this, result, Toast.LENGTH_LONG).show()
                     alreadyHandled.set(false)
@@ -170,13 +191,11 @@ class QrScanActivity : AppCompatActivity() {
                     Toast.makeText(this, getString(R.string.msg_server_added), Toast.LENGTH_LONG).show()
                     finish()
                 }
-                return@runOnUiThread
+                return@run
             }
-            val cborBytes = QrBinaryCodec.latin1StringToBytes(text)
             if (linkApproveMode) {
                 // Çoklu-cihaz (spec 1.5): taranan QR bir ikincil cihaz ekleme
                 // isteği — onayla, imzalı DeviceAdd + tam senkron gönder.
-                val result = P2PLib.approveDeviceLink(cborBytes)
                 if (result.startsWith("Error:")) {
                     Toast.makeText(this, result, Toast.LENGTH_LONG).show()
                     alreadyHandled.set(false)
@@ -184,9 +203,8 @@ class QrScanActivity : AppCompatActivity() {
                     Toast.makeText(this, getString(R.string.link_device_approved), Toast.LENGTH_LONG).show()
                     finish()
                 }
-                return@runOnUiThread
+                return@run
             }
-            val result = P2PLib.processQrPacket(cborBytes)
             if (result.startsWith("Error:")) {
                 Toast.makeText(this, result, Toast.LENGTH_LONG).show()
                 alreadyHandled.set(false)

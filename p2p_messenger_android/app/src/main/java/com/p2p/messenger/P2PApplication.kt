@@ -1,6 +1,7 @@
 package com.p2p.messenger
 
 import android.app.Activity
+import android.content.Intent
 import android.app.Application
 import android.content.res.Configuration
 import android.os.Bundle
@@ -217,6 +218,18 @@ class P2PApplication : Application() {
                         // (sadece bir HashMap üzerinde zaman damgası
                         // günceller, ağ I/O'su YAPMAZ) tutarlılık için.
                         Thread { P2PLib.retryAllPendingNow() }.start()
+                        // Servis yalnızca MainActivity.onResume'dan başlıyordu: sistem
+                        // servisi durdurduktan sonra kullanıcı doğrudan ChatActivity'ye
+                        // dönerse (görev geri yükleme/bildirim) mesaj alımı hiç
+                        // yeniden başlamıyordu. Startın idempotent (bkz. onStartCommand).
+                        try {
+                            androidx.core.content.ContextCompat.startForegroundService(
+                                this@P2PApplication,
+                                Intent(this@P2PApplication, com.p2p.messenger.service.P2PService::class.java)
+                            )
+                        } catch (e: Exception) {
+                            android.util.Log.w("P2PApplication", "Servis başlatılamadı: ${e.message}")
+                        }
                     }
                 }
                 startedActivityCount++

@@ -427,17 +427,18 @@ class ContactsFragment : Fragment() {
             .setView(input)
             .setPositiveButton(R.string.action_add) { _, _ ->
                 val text = input.text.toString()
-                val result = P2PLib.processManualEntry(text)
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
-                } else {
-                    // Spec dışı, kullanıcı isteği: bkz. QrScanActivity AYNI
-                    // desen — ilk eşleşme uzun sürebilir, kullanıcıyı
-                    // DOĞRUDAN yeni kişinin sohbet ekranına yönlendirmek
-                    // (o ekranın "Bağlanılıyor..." göstergesiyle) sadece
-                    // bir toast göstermekten çok daha açık.
-                    openChatForPairingResult(result)
-                }
+                // Rust el sıkışması uzun sürebilir: ana thread'i bloklama.
+                Thread {
+                    val result = try { P2PLib.processManualEntry(text) } catch (e: Throwable) { "Error: ${e.message}" }
+                    activity?.runOnUiThread {
+                        if (!isAdded) return@runOnUiThread
+                        if (result.startsWith("Error:")) {
+                            Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
+                        } else {
+                            openChatForPairingResult(result)
+                        }
+                    }
+                }.start()
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
