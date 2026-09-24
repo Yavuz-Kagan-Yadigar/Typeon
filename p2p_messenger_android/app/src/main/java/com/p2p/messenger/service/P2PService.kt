@@ -81,7 +81,7 @@ class P2PService : Service() {
         private const val POLL_INTERVAL_SCREEN_OFF_MS = 5000L
         /** Ekran kapalı VE çekirdek tamamen boşta. Bağlı eş yok, bekleyen
          *  iş yok — olabilecek tek şey gelen bir bağlantı. */
-        private const val POLL_INTERVAL_DEEP_IDLE_MS = 60000L
+        private const val POLL_INTERVAL_DEEP_IDLE_MS = 20000L
         /** Derin boşta moduna geçmeden önce kaç ardışık boş tur beklenir
          *  (~1 dk) — anlık bir sessizlikte moda düşüp gecikme yaratmasın. */
         private const val DEEP_IDLE_AFTER_EMPTY_POLLS = 12

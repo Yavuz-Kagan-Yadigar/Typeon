@@ -187,6 +187,9 @@ class ChatActivity : AppCompatActivity() {
     private var peerAccountDeleted = false
     /** `sessionPollRunnable`'ın el sıkışmayı yeniden dürtme hızını sınırlar. */
     private var lastEnsureHandshakeAt = 0L
+    /** Ardışık başarısız dürtme sayısı: eşleşmesi hiç tamamlanmayan kişide her 3 sn'de bir
+     *  hata + uyanma yerine ilk 5 denemeden sonra 30 sn'ye seyrelir. */
+    private var ensureHandshakeStreak = 0
     /** bkz. `maybePlayTyphoonEffect` / ui.TyphoonParticleView. */
     private lateinit var typhoonEffect: TyphoonParticleView
     private lateinit var progressSending: ProgressBar
@@ -324,8 +327,11 @@ class ChatActivity : AppCompatActivity() {
             updateComposerLock()
         }
         // No session yet: re-poke the handshake (a no-op once a session exists).
-        if (!handshakeDone && SystemClock.elapsedRealtime() - lastEnsureHandshakeAt > 3_000L) {
+        if (handshakeDone) ensureHandshakeStreak = 0
+        val pokeGapMs = if (ensureHandshakeStreak < 5) 3_000L else 30_000L
+        if (!handshakeDone && SystemClock.elapsedRealtime() - lastEnsureHandshakeAt > pokeGapMs) {
             lastEnsureHandshakeAt = SystemClock.elapsedRealtime()
+            ensureHandshakeStreak++
             lifecycleScope.launch(Dispatchers.IO) {
                 try { P2PLib.ensureHandshake(peerDeviceFingerprint) } catch (_: Exception) {}
             }
