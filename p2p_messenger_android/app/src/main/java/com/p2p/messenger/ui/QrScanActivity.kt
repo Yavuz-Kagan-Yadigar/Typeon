@@ -111,7 +111,21 @@ class QrScanActivity : AppCompatActivity() {
 
             try {
                 cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis)
+                val camera = cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis)
+                // Kamera açılamazsa (gizlilik anahtarı/ERROR_CAMERA_DISABLED, başka
+                // uygulama kullanıyor, donanım hatası) önizleme SİYAH kalıyordu ve
+                // kullanıcıya hiçbir şey söylenmiyordu: hatayı göster ve ekranı kapat.
+                camera.cameraInfo.cameraState.observe(this) { st ->
+                    val err = st.error ?: return@observe
+                    if (err.type == androidx.camera.core.CameraState.ErrorType.CRITICAL ||
+                        err.code == androidx.camera.core.CameraState.ERROR_CAMERA_DISABLED ||
+                        err.code == androidx.camera.core.CameraState.ERROR_CAMERA_FATAL_ERROR
+                    ) {
+                        Toast.makeText(this, getString(R.string.error_camera_start_failed,
+                            "camera unavailable (code ${err.code}) — check the system camera privacy switch"), Toast.LENGTH_LONG).show()
+                        finish()
+                    }
+                }
             } catch (e: Exception) {
                 Toast.makeText(this, getString(R.string.error_camera_start_failed, e.message ?: ""), Toast.LENGTH_LONG).show()
             }

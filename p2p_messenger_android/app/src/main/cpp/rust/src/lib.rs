@@ -13687,7 +13687,10 @@ impl P2PCore {
         // awaiting_confirmation / pending_envelopes / pending_group_messages burada YOK:
         // çevrimdışı eşe bekleyen mesajlar saatlerce kalır; zamanlayıcıyla yeniden denenir,
         // CPU'yu 7/24 uyanık tutmaz (ölçüldü: wake lock 15/15 dk tutuluyordu).
-        !self.active_downloads.is_empty()
+        // Aktif eşleşme (TTL'li, 15 dk): IdentityExchange/Handshake turları hızlı poll ister;
+        // bu olmadan eşleşme derin boşta 60 sn'lik bekleyişlere takılıp tamamlanmıyordu.
+        !self.pairing_mailbox_subs.is_empty()
+            || !self.active_downloads.is_empty()
             || !self.server_archive_queue.is_empty()
             || !self.server_blob_uploads.is_empty()
             || !self.server_inflight.is_empty()
