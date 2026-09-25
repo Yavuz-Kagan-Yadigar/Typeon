@@ -51,7 +51,7 @@ use crate::{current_time_ms, extract_peer_id, P2PCore};
 /// and then no push arrives. 5 min left a queued message undelivered that long
 /// (measured on device); this Fetch doubles as the liveness check.
 // ponytail: fixed 60 s poll, a server-side ping would let this go back up if battery matters.
-pub(crate) const SERVER_FETCH_SWEEP_INTERVAL_MS: u64 = 20 * 1000;
+pub(crate) const SERVER_FETCH_SWEEP_INTERVAL_MS: u64 = 30 * 1000;
 
 /// Sunucu bağlantısı/kayıt durumu tarama aralığı.
 pub(crate) const SERVER_SWEEP_INTERVAL_MS: u64 = 15_000;

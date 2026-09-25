@@ -13700,11 +13700,13 @@ impl P2PCore {
         // CPU'yu 7/24 uyanık tutmaz (ölçüldü: wake lock 15/15 dk tutuluyordu).
         // Aktif eşleşme (TTL'li, 15 dk): IdentityExchange/Handshake turları hızlı poll ister;
         // bu olmadan eşleşme derin boşta 60 sn'lik bekleyişlere takılıp tamamlanmıyordu.
+        // Sunucu işleri YALNIZCA sunucuya bağlıyken "iş" sayılır: sunucu erişilmezken bu
+        // kuyruklar ilerleyemez, sayılırlarsa wake lock yine 7/24 tutuluyordu (ölçüldü:
+        // 15/15 dk). `server_archive_queue` arka plan senkron birikimi: hiç sayılmaz.
+        let server_up = self.server_rt.values().any(|r| r.connected && r.enrolled);
         !self.pairing_mailbox_subs.is_empty()
             || !self.active_downloads.is_empty()
-            || !self.server_archive_queue.is_empty()
-            || !self.server_blob_uploads.is_empty()
-            || !self.server_inflight.is_empty()
+            || (server_up && (!self.server_blob_uploads.is_empty() || !self.server_inflight.is_empty()))
             || !self.early_packets.is_empty()
             // Ertelenmiş gelen paket varsa kesinlikle boşta değiliz —
             // aksi halde 30 sn'lik derin boşta kademesine düşüp teslimi
