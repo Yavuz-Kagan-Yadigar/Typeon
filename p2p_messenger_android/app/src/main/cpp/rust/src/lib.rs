@@ -4024,7 +4024,18 @@ impl P2PCore {
         // `knew_device_before` burada AYRICA profil fotoğrafı gönderimini de
         // kapılıyor (bkz. aşağıdaki blok / defter #18).
         let first_contact = !knew_device_before;
-        if first_contact && reply_due {
+        // Peer re-added us (its IX arrives) while we still hold its OLD record — e.g. it deleted
+        // us and scanned/typed our code again. It lost our keys and can only get them from our
+        // IX; without a reply it stays at "Unknown peer device" forever. Reply when we are not
+        // the initiator (loop-safe: reply_due caps replies to 1/min and the initiator side
+        // never re-replies to a known device).
+        let peer_readded_us = !first_contact
+            && !as_sibling
+            && !self.pairing_mailbox_subs.contains_key(&exchange.device_fingerprint);
+        info!("IdentityExchange işlendi: peer={} knew_before={} as_sibling={} reply_due={} peer_readded_us={} we_have_pairing_sub={}",
+            &exchange.device_fingerprint[..8.min(exchange.device_fingerprint.len())], knew_device_before, as_sibling, reply_due,
+            peer_readded_us, self.pairing_mailbox_subs.contains_key(&exchange.device_fingerprint));
+        if (first_contact || peer_readded_us) && reply_due {
             self.last_identity_exchange_reply.insert(exchange.device_fingerprint.clone(), now);
             // We started this pairing ourselves (QR/manual subscribed the peer's
             // mailbox): our fresh IX is already on its way, so the reply may be
