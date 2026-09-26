@@ -379,4 +379,32 @@
     <string name="settings_advanced">Gelişmiş</string>
     <string name="action_open">Aç</string>
     <string name="msg_group_gone">Bu grup artık kullanılamıyor</string>
+    <string name="msg_background_restricted">Typeon arka planda çalışması kısıtlandığı için ekran kapalıyken mesaj ve arama gelemiyor. Uygulama ayarlarını açıp Pil ayarını \"Kısıtlama yok\" yapın.</string>
+    <!-- Calls -->
+    <string name="action_voice_call">Sesli arama</string>
+    <string name="action_video_call">Görüntülü arama</string>
+    <string name="call_calling">Aranıyor…</string>
+    <string name="call_incoming_voice">Gelen sesli arama</string>
+    <string name="call_incoming_video">Gelen görüntülü arama</string>
+    <string name="call_connecting">Bağlanıyor…</string>
+    <string name="call_accept">Cevapla</string>
+    <string name="call_decline">Reddet</string>
+    <string name="call_hangup">Kapat</string>
+    <string name="call_mute">Sessiz</string>
+    <string name="call_unmute">Sesi aç</string>
+    <string name="call_speaker">Hoparlör</string>
+    <string name="call_earpiece">Ahize</string>
+    <string name="call_camera_off">Kamerayı kapat</string>
+    <string name="call_camera_on">Kamerayı aç</string>
+    <string name="call_ended">Arama bitti</string>
+    <string name="call_rejected">Arama reddedildi</string>
+    <string name="call_busy">Meşgul</string>
+    <string name="call_no_answer">Cevap yok</string>
+    <string name="call_missed">Cevapsız arama</string>
+    <string name="call_via_p2p">doğrudan</string>
+    <string name="call_via_server">sunucu üzerinden</string>
+    <string name="call_waiting_media">medya bekleniyor</string>
+    <string name="call_permission_needed">Aramalar için mikrofon (görüntülü için kamera) izni gerekli</string>
+    <string name="call_channel_name">Aramalar</string>
+    <string name="call_notification_title">Typeon araması</string>
 </resources>

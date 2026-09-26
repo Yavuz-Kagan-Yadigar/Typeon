@@ -15,6 +15,18 @@
         android:title="@string/action_open_chat_list"
         app:showAsAction="ifRoom" />
 
+    <!-- Voice / video call (1:1 and group — this menu is shared). -->
+    <item
+        android:id="@+id/action_voice_call"
+        android:icon="@drawable/ic_call"
+        android:title="@string/action_voice_call"
+        app:showAsAction="ifRoom" />
+    <item
+        android:id="@+id/action_video_call"
+        android:icon="@drawable/ic_videocam"
+        android:title="@string/action_video_call"
+        app:showAsAction="ifRoom" />
+
     <!-- Spec dışı, kullanıcı isteği: sohbet içi mesaj arama. -->
     <item
         android:id="@+id/action_search_messages"

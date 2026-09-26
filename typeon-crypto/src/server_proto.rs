@@ -49,6 +49,17 @@ use serde::{Deserialize, Serialize};
 /// `request_response` yalnızca istek-BAŞLATAN tarafı belirler, yön değil.
 pub const SERVER_PROTOCOL: &str = "/typeon/server/1.0.0";
 
+/// Live call-media relay: ONE long-lived libp2p stream per client, opened by
+/// the client while it is in a call. Frames are `[u16 mailbox len][mailbox]
+/// [u32 len][data]` (core `call::encode_frame`). Client -> server: "push
+/// `data` to whoever is connected and listening on `mailbox`" (the target's
+/// `p2p_msg_<fp>` box). Server -> client: the same frame with an empty
+/// mailbox. Nothing is stored: a target that is not connected right now
+/// simply misses the frame, which is the right thing for live audio/video.
+/// `data` is already end-to-end encrypted with a per-call key the server
+/// never sees (it travels inside the ratchet, `MessageContent::Call`).
+pub const RELAY_PROTOCOL: &str = "/typeon/relay/1.0.0";
+
 /// Kablo formatı sürümü — `Hello`/`Welcome` içinde takas edilir.
 pub const SERVER_PROTOCOL_VERSION: u16 = 1;
 
@@ -288,6 +299,13 @@ pub enum ServerRequest {
     /// turunda `Fetch` eder. Kimlikleri listelemek, kötü niyetli bir eşe
     /// yoklama imkânı verirdi ve zaten gereksiz — `Fetch` ucuz.
     Notify,
+
+    /// `Notify` WITH the item, saving the client's `Fetch` round trip (1-2 s
+    /// over Tor on mobile data — most of a call ring's delay). The server only
+    /// sends it when this item is the reader's ONLY unacknowledged one in the
+    /// mailbox, so processing it and moving the cursor to its `seq` cannot
+    /// skip anything; otherwise it sends a plain `Notify`.
+    Push { item: MailItem },
 }
 
 // ---------------------------------------------------------------------------

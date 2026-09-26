@@ -928,6 +928,39 @@ pub enum MessageContent {
         #[serde(default)]
         deleted_at_ms: u64,
     },
+    /// Voice/video call signalling (see core `call.rs`). Ephemeral like
+    /// `TypingIndicator`: never archived, never acked, never retried — a ring
+    /// delivered a minute late is worthless, the receiver drops stale ones by
+    /// `sent_at_ms`.
+    ///
+    /// `media_key`/`stream_id` are the SENDER's own media key (32 B) and
+    /// stream id (8 B), carried on `Invite`/`Accept`. They travel inside the
+    /// ratchet, so the media streams (which the server may relay) are
+    /// end-to-end encrypted with keys the server never sees.
+    Call {
+        call_id: String,
+        action: CallAction,
+        #[serde(default)]
+        group_id: Option<String>,
+        #[serde(default)]
+        video: bool,
+        #[serde(default, with = "serde_bytes")]
+        media_key: Vec<u8>,
+        #[serde(default, with = "serde_bytes")]
+        stream_id: Vec<u8>,
+        #[serde(default)]
+        sent_at_ms: u64,
+    },
+}
+
+/// See `MessageContent::Call`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallAction {
+    Invite,
+    Accept,
+    Reject,
+    Hangup,
+    Busy,
 }
 
 /// El sıkışma paketi — önceki `HandshakeInit` tasarımı; spec'te ayrı bir

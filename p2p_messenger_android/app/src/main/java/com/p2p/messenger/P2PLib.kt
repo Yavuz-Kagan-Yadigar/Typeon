@@ -493,4 +493,29 @@ object P2PLib {
      * hiç mesaj yoktur ve kullanıcının kaydıracağı bir şey de yoktur.
      */
     external fun restoreServerHistory(): String
+
+    // --- Voice/video calls (Rust `call.rs`) ---
+    /** Rings a 1:1 contact device. Returns the call id or "Error: ...". */
+    external fun startCall(peerFingerprint: String, video: Boolean): String
+    /** Rings every other member of the group. Returns the call id or "Error: ...". */
+    external fun startGroupCall(groupId: String, video: Boolean): String
+    /** Answers the ringing incoming call. */
+    external fun acceptCall(): Boolean
+    /** Rejects a ringing call, hangs up otherwise. */
+    external fun endCall(): Boolean
+    /** JSON: `{"state":"idle|outgoing|incoming|active", participants:[{fp,name,joined,slot}], media:{...}}`. */
+    external fun callState(): String
+    /** Queues one encoded frame (1 = Opus bundle, 2 = H.264) for every participant.
+     *  Takes no core lock: safe to call 20-40 times a second from media threads. */
+    external fun callSend(kind: Int, data: ByteArray): Boolean
+    /** Next received frame `[kind][slot][payload]`, or null after [timeoutMs]. No core lock. */
+    external fun callRecv(timeoutMs: Int): ByteArray?
+    /** Deepest outgoing link queue, in frames (0..48) — the congestion signal. */
+    external fun callBacklog(): Int
+    /** Metered (cellular) network: Tor channel padding off; otherwise reduced. */
+    external fun setMeteredNetwork(metered: Boolean)
+    /** Our decoder for [slot] needs a keyframe; asks that sender in the next report. */
+    external fun callRequestKeyframe(slot: Int)
+    /** True once after a participant asked us for a keyframe. */
+    external fun callTakeKeyframeRequest(): Boolean
 }

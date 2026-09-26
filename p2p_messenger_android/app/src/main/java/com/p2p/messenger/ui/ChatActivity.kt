@@ -2530,6 +2530,10 @@ class ChatActivity : AppCompatActivity() {
                 toggleMessageSearch()
                 true
             }
+            R.id.action_voice_call, R.id.action_video_call -> {
+                CallActivity.startOutgoing(this, peerDeviceFingerprint, null, item.itemId == R.id.action_video_call)
+                true
+            }
             // bkz. AppRestarter — Tor devresi/ağ yığını sadece süreç
             // yeniden başlayınca temiz kurulabiliyor.
             R.id.action_tor_reconnect -> {

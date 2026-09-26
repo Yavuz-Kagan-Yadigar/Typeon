@@ -37,6 +37,8 @@ pub mod tor;
 /// zaten 12.8k satır olduğu için ayrı dosyada; alt modül olduğundan
 /// `P2PCore`'un private alanlarını görebiliyor.
 pub mod server_client;
+/// Voice/video calls — signalling + media streams, see module docs.
+pub mod call;
 
 /// Toplu aktarım isteklerinin zaman aşımı (ms) — sunucu tarafı da AYNI
 /// değeri kullanmalı, yoksa bir uç diğerinden önce vazgeçer.
@@ -438,6 +440,9 @@ struct P2PBehaviour {
     acks: request_response::cbor::Behaviour<AckBatchRequest, AckBatchResponse>,
     /// bkz. `ENVELOPE_PROTOCOL`.
     envelopes: request_response::cbor::Behaviour<EnvelopeRequest, EnvelopeResponse>,
+    /// Call media streams (`call::MEDIA_PROTOCOL`, and the server relay) —
+    /// long-lived streams driven by tokio tasks, see `call` module docs.
+    stream: libp2p_stream::Behaviour,
     /// Dosya eki parça transferi — gossipsub'un aksine, bir hedef `PeerId`'ye
     /// doğrudan istek/yanıt (RPC benzeri) gönderir. 4GB'a kadar bir dosyayı
     /// gossipsub üzerinden (küçük/sık mesajlar için tasarlanmış bir pub/sub
@@ -677,6 +682,9 @@ mod wipe_coverage_tests {
         // Sadece "en son ne zaman budama yaptık" — kimlik taşımaz; haritanın
         // KENDİSİ (`recent_inbound_digests`) `wipe_all_local_state`'te temizleniyor.
         "last_inbound_dedup_prune_at",
+        "stream_control",                // swarm handle, rebuilt with the network
+        "call_stats_logged_at",          // log timer
+        "call_signal_sending",           // transient send flag
     ];
 
     #[test]
@@ -857,6 +865,34 @@ mod delivery_ack_coverage_tests {
              yazar — bir tepki alıcıda uygulansa bile gönderende sonsuza dek asılı \
              kalır (bkz. 2026-09-07 iki cihazlı test bulgusu)."
         );
+    }
+}
+
+#[cfg(test)]
+mod fanout_staleness_tests {
+    use super::*;
+
+    fn dev(fp: &str, last_seen: u64) -> DeviceRecord {
+        DeviceRecord {
+            device_fingerprint: fp.into(), identity_id: "id".into(),
+            sign_pubkey_ed25519: vec![], sign_pubkey_mldsa: vec![], kem_pubkey_x25519: vec![], kem_pubkey_mlkem: vec![],
+            device_name: String::new(), is_active: true, last_seen,
+        }
+    }
+
+    /// 2026-09-26: `last_seen` was never refreshed, so a filter on it dropped
+    /// live devices; with every device stale the invite went only to a dead one.
+    #[test]
+    fn stale_devices_are_skipped_but_never_everyone() {
+        let mut core = P2PCore::new();
+        let old = current_time_ms() - STALE_PEER_RETRY_HORIZON_MS - 1;
+        core.known_remote_devices.insert("dead".into(), dev("dead", old));
+        core.known_remote_devices.insert("live".into(), dev("live", old));
+        let mut all = core.fanout_targets("dead");
+        all.sort();
+        assert_eq!(all, vec!["dead".to_string(), "live".to_string()], "all stale: everyone, not just the primary");
+        core.touch_device_seen("live");
+        assert_eq!(core.fanout_targets("dead"), vec!["live".to_string()], "a packet from live makes dead skippable");
     }
 }
 
@@ -2459,6 +2495,19 @@ struct P2PCore {
     /// dosya indirmesi başlatılmadan önce o cihazdan en az bir paket
     /// alınmış olmalı.
     device_to_peer_id: HashMap<String, PeerId>,
+    /// The one call in progress (ringing or active) — see `call` module.
+    call: Option<call::CallSession>,
+    /// `(call_id, reason)` of the last call that ended, for the call screen.
+    last_call_end: Option<(String, String)>,
+    /// Last periodic media stats log line (ms).
+    call_stats_logged_at: u64,
+    /// Set while `call::send_call_signal` publishes: the envelope goes to the
+    /// server AND the direct link. A "connected" peer can be a half-open link
+    /// to a phone that just restarted; the direct copy then dies in a
+    /// timeout and the ring never arrives (seen 2026-09-26).
+    call_signal_sending: bool,
+    /// Opens call media streams; set per swarm in `start_network`.
+    stream_control: Option<libp2p_stream::Control>,
     /// `PeerId -> Multiaddr` — `ConnectionEstablished` olayından doldurulur,
     /// dosya indirmesi başlatılırken `swarm.add_peer_address` ile
     /// `request_response`'un dial edebileceği bir adres ipucu vermek için.
@@ -2824,6 +2873,11 @@ impl P2PCore {
             skipped_key_encryption_key: None,
             app_files_dir: None,
             device_to_peer_id: HashMap::new(),
+            call: None,
+            last_call_end: None,
+            call_stats_logged_at: 0,
+            call_signal_sending: false,
+            stream_control: None,
             peer_id_to_addr: HashMap::new(),
             device_last_addr: HashMap::new(),
             device_onion_addr: HashMap::new(),
@@ -4266,15 +4320,51 @@ impl P2PCore {
     /// 1:1 gönderim fan-out hedefleri: `primary_fp`'nin kimliğinin TÜM aktif
     /// cihazları (`primary_fp` dahil). Kimlik bilinmiyorsa yalnızca
     /// `primary_fp` (mevcut davranış — tek cihaz).
+    ///
+    /// A device unseen for `STALE_PEER_RETRY_HORIZON_MS` is left out, like
+    /// `sibling_active_devices` does: a contact's abandoned old phone made
+    /// every message (and call invite) also go to its server mailbox, which
+    /// filled to the 5000-item cap (seen 2026-09-26). If that leaves nobody,
+    /// every active device is kept.
     fn fanout_targets(&self, primary_fp: &str) -> Vec<String> {
         match self.known_remote_devices.get(primary_fp).map(|d| d.identity_id.clone()) {
             Some(id) => {
-                let mut v = self.active_devices_for_identity(&id);
-                if !v.iter().any(|f| f == primary_fp) { v.push(primary_fp.to_string()); }
+                let all = self.active_devices_for_identity(&id);
+                let mut v: Vec<String> = all.iter().filter(|fp| self.device_recently_seen(fp)).cloned().collect();
+                // Nobody recently seen (e.g. `last_seen` not refreshed yet
+                // after an upgrade): fall back to every active device.
+                if v.is_empty() { v = all; }
+                if v.is_empty() { v.push(primary_fp.to_string()); }
                 v
             }
             None => vec![primary_fp.to_string()],
         }
+    }
+
+    /// Refreshes `last_seen` on every successfully decrypted packet. It was
+    /// only ever written at pairing, so the staleness filters built on it
+    /// (`sibling_active_devices`, `fanout_targets`, durable-retry skip) wrote
+    /// off LIVE devices seven days after pairing. Persisted at most hourly.
+    fn touch_device_seen(&mut self, fp: &str) {
+        let now = current_time_ms();
+        let Some(d) = self.known_remote_devices.get_mut(fp) else { return };
+        if now.saturating_sub(d.last_seen) < 60 * 60 * 1000 {
+            return;
+        }
+        d.last_seen = now;
+        if let Some(conn) = &self.db {
+            let _ = conn.execute(
+                "UPDATE remote_devices SET last_seen = ?1 WHERE device_fingerprint = ?2",
+                params![now as i64, fp],
+            );
+        }
+    }
+
+    /// Seen within `STALE_PEER_RETRY_HORIZON_MS` (or never stamped: 0).
+    fn device_recently_seen(&self, fp: &str) -> bool {
+        self.known_remote_devices.get(fp).map_or(true, |d| {
+            d.last_seen == 0 || current_time_ms().saturating_sub(d.last_seen) < STALE_PEER_RETRY_HORIZON_MS
+        })
     }
 
     /// Kendi kimliğimin, BU cihaz DIŞINDAKİ aktif kardeş cihazları — senkron
@@ -7621,6 +7711,7 @@ impl P2PCore {
             }
         };
         self.undecryptable_from.remove(&packet.header.sender_device_fingerprint);
+        self.touch_device_seen(&packet.header.sender_device_fingerprint);
         let state = self.ratchets.get_mut(&packet.header.sender_device_fingerprint)
             .ok_or("No ratchet session for sender")?;
         // bkz. `pending_rotation_ct` (ratchet.rs): rotasyonu BİZ tetiklediysek,
@@ -7884,7 +7975,7 @@ impl P2PCore {
                         "message_id": target_message_id, "reactions": summary
                     }),
                     None => serde_json::json!({
-                        "type": "reaction", "peer": peer_fp,
+                        "type": "reaction", "peer": chat_key,
                         "message_id": target_message_id, "reactions": summary
                     }),
                 }
@@ -8214,11 +8305,14 @@ impl P2PCore {
                 }
                 self.apply_seen_receipt(&seen_key, &sender_identity_id, current_time_ms());
                 serde_json::json!({
-                    "type": "seen", "peer": peer_fp,
+                    "type": "seen", "peer": chat_key,
                     "sender_identity_id": sender_identity_id,
                     "message_id": target_message_id,
                     "group_message_local_id": group_message_local_id
                 })
+            }
+            MessageContent::Call { call_id, action, group_id, video, media_key, stream_id, sent_at_ms } => {
+                self.handle_call_signal(&peer_fp, &sender_identity_id, call_id, action, group_id, video, media_key, stream_id, sent_at_ms)
             }
             MessageContent::TypingIndicator { is_typing, group_id } => {
                 // Kasitli olarak: arsivlenmez, Ack GONDERILMEZ (bkz.
@@ -8231,7 +8325,7 @@ impl P2PCore {
                         "sender_identity_id": sender_identity_id, "is_typing": is_typing
                     }),
                     None => serde_json::json!({
-                        "type": "typing", "peer": peer_fp,
+                        "type": "typing", "peer": chat_key,
                         "sender_identity_id": sender_identity_id, "is_typing": is_typing
                     }),
                 }
@@ -8274,7 +8368,7 @@ impl P2PCore {
                     }
                 }
                 serde_json::json!({
-                    "type": "profile_update", "peer": peer_fp,
+                    "type": "profile_update", "peer": chat_key,
                     "avatar_hex": avatar_jpeg.as_ref().map(|a| hex::encode(a)),
                     // Arayüz, ad GERÇEKTEN değiştiyse kullanıcıya
                     // gösterebilsin diye eski/yeni ad birlikte veriliyor
@@ -8917,6 +9011,10 @@ impl P2PCore {
     /// `load_secret_bundle`) — UI, `self_revoked` olayını alınca onu KENDİ
     /// tarafında siler ve onboarding'e döner.
     fn wipe_all_local_state(&mut self) {
+        // Drops the call (and its media keys) without signalling anyone.
+        self.call = None;
+        self.last_call_end = None;
+        call::drop_media();
         if let Some(conn) = &self.db {
             for table in [
                 "identities", "own_devices", "contacts", "groups", "messages",
@@ -13429,7 +13527,8 @@ impl P2PCore {
                     request_response::Config::default()
                         .with_request_timeout(std::time::Duration::from_secs(ACK_REQUEST_TIMEOUT_SECS)),
                 );
-                Ok(P2PBehaviour { server_rpc, gossipsub, kad, identify, file_chunks, mdns, relay_client, relay, dcutr, autonat, upnp, keepalive, acks, envelopes })
+                let stream = libp2p_stream::Behaviour::new();
+                Ok(P2PBehaviour { server_rpc, gossipsub, kad, identify, file_chunks, mdns, relay_client, relay, dcutr, autonat, upnp, keepalive, acks, envelopes, stream })
             })(keypair_ref, relay_client)
             .map_err(|e| e.to_string())?;
             // Spec dışı, ağ sağlamlığı düzeltmesi (kullanıcı isteği: "her şey
@@ -13511,6 +13610,9 @@ impl P2PCore {
             }
         }
 
+        let mut stream_control = swarm.behaviour().stream.new_control();
+        call::spawn_media_acceptor(&mut stream_control);
+        self.stream_control = Some(stream_control);
         self.swarm = Some(swarm);
         self.tor = tor_handle;
 
@@ -13706,16 +13808,41 @@ impl P2PCore {
         let server_up = self.server_rt.values().any(|r| r.connected && r.enrolled);
         !self.pairing_mailbox_subs.is_empty()
             || !self.active_downloads.is_empty()
-            || (server_up && (!self.server_blob_uploads.is_empty() || !self.server_inflight.is_empty()))
+            // `server_inflight` is NOT work: the 30 s Fetch sweep is sent in
+            // the very poll turn the service then checks, so it read "busy"
+            // every time and no phone ever reached deep idle (measured
+            // 2026-09-26: wake lock 30/30 min, LTE radio active 93 %, 35 mAh
+            // per half hour). Its reply is a network event, which wakes the
+            // native wait anyway.
+            || (server_up && !self.server_blob_uploads.is_empty())
             || !self.early_packets.is_empty()
             // Ertelenmiş gelen paket varsa kesinlikle boşta değiliz —
             // aksi halde 30 sn'lik derin boşta kademesine düşüp teslimi
             // geciktirirdik (bkz. `deferred_incoming`).
             || !self.deferred_incoming.is_empty()
+            || self.call.is_some()
+    }
+
+    /// Which `has_pending_work` terms are true — logged when busy so a phone
+    /// that never reaches deep idle (seen: Note 9S, wake lock held 30/30 min)
+    /// says why.
+    fn busy_reasons(&self) -> String {
+        let server_up = self.server_rt.values().any(|r| r.connected && r.enrolled);
+        let mut r = Vec::new();
+        if !self.pairing_mailbox_subs.is_empty() { r.push(format!("pairing={}", self.pairing_mailbox_subs.len())); }
+        if !self.active_downloads.is_empty() { r.push(format!("downloads={}", self.active_downloads.len())); }
+        if server_up && !self.server_blob_uploads.is_empty() { r.push(format!("blob_uploads={}", self.server_blob_uploads.len())); }
+        if !self.early_packets.is_empty() { r.push(format!("early_packets={}", self.early_packets.len())); }
+        if !self.deferred_incoming.is_empty() { r.push(format!("deferred_incoming={}", self.deferred_incoming.len())); }
+        if self.call.is_some() { r.push("call".into()); }
+        r.join(",")
     }
 
     fn own_connection_status(&self) -> serde_json::Value {
         let connected_peers = self.swarm.as_ref().map(|s| s.connected_peers().count()).unwrap_or(0);
+        if self.has_pending_work() {
+            info!("Çekirdek meşgul: {}", self.busy_reasons());
+        }
         serde_json::json!({
             "busy": self.has_pending_work(),
             "connected_peers": connected_peers,
@@ -14289,7 +14416,7 @@ impl P2PCore {
         // Handshake/IdentityExchange/rotasyon duyurusu yine hep iki yoldan
         // (bkz. `should_shadow_on_gossipsub` — kaybı telafi edilemez).
         let direct = self.is_connected_to_device(target_device_fingerprint);
-        let critical = match envelope {
+        let critical = self.call_signal_sending || match envelope {
             NetworkEnvelope::Handshake(_) | NetworkEnvelope::IdentityExchange(_) => true,
             NetworkEnvelope::Message(m) => m.header.rotation_kyber_ciphertext.is_some(),
         };
@@ -14984,6 +15111,7 @@ impl P2PCore {
 
     fn poll_events(&mut self) -> Vec<String> {
         lock_watch::phase("swarm_events");
+        self.call_sweep();
         // bkz. `ensure_own_mailbox_subscription` — cihazın ulaşılabilirliğinin
         // ÖN KOŞULU; kimlik ağ katmanından sonra oluşmuş olabilir.
         self.ensure_own_mailbox_subscription();
@@ -18376,6 +18504,18 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_retryAllPendingNow(_env: JN
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_waitForNetworkActivity(_env: JNIEnv, _class: JClass, timeout_ms: jlong) {
     let _ = catch_panic(|| wait_for_network_activity(timeout_ms.max(0) as u64));
+}
+
+/// Metered (cellular) network or not — picks Tor channel padding, see
+/// `tor::client_config`.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_setMeteredNetwork(_env: JNIEnv, _class: JClass, metered: jboolean) {
+    let _ = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        if let Some(tor) = core_lock().tor.as_ref() {
+            tor.set_metered(metered != 0);
+        }
+    });
 }
 
 #[no_mangle]

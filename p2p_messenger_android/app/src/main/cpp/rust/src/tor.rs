@@ -73,6 +73,9 @@ pub struct TorHandle {
     onion_addr: Arc<Mutex<Option<String>>>,
     /// Onion service'i canlı tutmak için (drop edilirse servis durur).
     _service: Arc<tor_hsservice::RunningOnionService>,
+    /// For rebuilding the config in `set_metered`.
+    state_dir: String,
+    cache_dir: String,
 }
 
 impl TorHandle {
@@ -129,14 +132,7 @@ impl TorHandle {
         let runtime = TokioRustlsRuntime::current()
             .map_err(|e| format!("TokioRustlsRuntime alınamadı: {e}"))?;
 
-        let mut config = TorClientConfigBuilder::from_directories(state_dir, cache_dir);
-        // Devre kurma zaman aşımı arti'de ölçümle öğreniliyor; hızlı Wi-Fi'de
-        // öğrenilen kısa değer, mobil veriye geçince devrelerin çoğunu
-        // tamamlanmadan terk ettiriyordu (cihazda: ağ değişiminden sonra onion
-        // dial'ı 6 sn'de "tor operation timed out", toparlanma 20-120 sn).
-        // Öğrenme açık kalıyor, yalnızca alt sınır 10 sn.
-        config.override_net_params().insert("cbtmintimeout".to_string(), 10_000);
-        let config = config.build().map_err(|e| format!("Arti config: {e}"))?;
+        let config = client_config(state_dir, cache_dir, false)?;
 
         let client = TorClient::with_runtime(runtime)
             .config(config)
@@ -222,8 +218,42 @@ impl TorHandle {
             status,
             onion_addr,
             _service: service,
+            state_dir: state_dir.to_string(),
+            cache_dir: cache_dir.to_string(),
         })
     }
+
+    /// Switches channel padding for the network we are on (see
+    /// `client_config`). Arti applies it to live channels.
+    pub fn set_metered(&self, metered: bool) {
+        match client_config(&self.state_dir, &self.cache_dir, metered) {
+            Ok(cfg) => match self.client.reconfigure(&cfg, tor_config::Reconfigure::WarnOnFailures) {
+                Ok(()) => log::info!("Tor kanal dolgusu: {}", if metered { "kapalı (ölçülü ağ)" } else { "azaltılmış" }),
+                Err(e) => log::warn!("Tor yeniden yapılandırılamadı: {e}"),
+            },
+            Err(e) => log::warn!("{e}"),
+        }
+    }
+}
+
+/// The one place the arti config is built (launch and `set_metered`).
+///
+/// Channel padding: Normal sends a 514-byte cell per idle guard channel every
+/// 1.5-9.5 s. Measured on the Note 9S on LTE, idle half hour: Normal 4.4 MB,
+/// radio awake 92 %, 35 mAh; Reduced 1.8 MB, 87 %, 33.5 mAh; None 36 % radio,
+/// ~21 mAh. So: Reduced (Tor's own mobile recommendation, Orbot's
+/// ReducedConnectionPadding) on Wi-Fi where the radio is cheap, None on a
+/// metered (cellular) network where every packet keeps the radio awake.
+fn client_config(state_dir: &str, cache_dir: &str, metered: bool) -> Result<arti_client::TorClientConfig, String> {
+    let mut config = TorClientConfigBuilder::from_directories(state_dir, cache_dir);
+    // Devre kurma zaman aşımı arti'de ölçümle öğreniliyor; hızlı Wi-Fi'de
+    // öğrenilen kısa değer, mobil veriye geçince devrelerin çoğunu
+    // tamamlanmadan terk ettiriyordu (cihazda: ağ değişiminden sonra onion
+    // dial'ı 6 sn'de "tor operation timed out", toparlanma 20-120 sn).
+    // Öğrenme açık kalıyor, yalnızca alt sınır 10 sn.
+    config.override_net_params().insert("cbtmintimeout".to_string(), 10_000);
+    config.channel().padding(if metered { tor_config::PaddingLevel::None } else { tor_config::PaddingLevel::Reduced });
+    config.build().map_err(|e| format!("Arti config: {e}"))
 }
 
 /// Tek bir gelen onion akışını kabul edip yerel libp2p TCP dinleyicisine

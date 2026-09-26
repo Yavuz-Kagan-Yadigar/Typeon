@@ -341,6 +341,31 @@ class MainActivity : AppCompatActivity() {
      */
     private fun ensureBatteryOptimizationExemption() {
         val powerManager = getSystemService(android.os.PowerManager::class.java) ?: return
+        // "Background restricted" (MIUI battery saver "Restrict", Android's
+        // "Restricted") is a different switch from the optimisation exemption
+        // and worse: startForeground() is refused, so nothing arrives with
+        // the screen off (seen on the Note 9S: "not allowed due to bg
+        // restriction"). Only the app's settings page can lift it.
+        val am = getSystemService(android.app.ActivityManager::class.java)
+        val prefs0 = getSharedPreferences("p2p_settings", Context.MODE_PRIVATE)
+        if (Build.VERSION.SDK_INT >= 28 && am?.isBackgroundRestricted == true &&
+            System.currentTimeMillis() - prefs0.getLong("bg_restricted_prompt_ms", 0L) > 24L * 60 * 60 * 1000) {
+            prefs0.edit().putLong("bg_restricted_prompt_ms", System.currentTimeMillis()).apply()
+            AlertDialog.Builder(this)
+                .setTitle(R.string.title_reliable_delivery)
+                .setMessage(R.string.msg_background_restricted)
+                .setPositiveButton(R.string.action_open_settings) { _, _ ->
+                    try {
+                        AppLock.beginTrustedExcursion()
+                        startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = android.net.Uri.parse("package:$packageName")
+                        })
+                    } catch (e: Exception) { }
+                }
+                .setNegativeButton(R.string.action_not_now, null)
+                .show()
+            return
+        }
         if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
         // Her açılışta sormak dırdır olurdu: kullanıcı reddettiyse bir gün
         // boyunca bir daha sorma. (Muafiyet zaten varsa yukarıda çıkıldı.)

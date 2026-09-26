@@ -5,6 +5,10 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- API 34+: dataSync foreground services are capped at 6 h a day on
+         Android 15+, after which the service is demoted and (MIUI) loses the
+         network in the background. remoteMessaging has no cap. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Sunucunun ekran kapalıyken de teslim yapabilmesi için; kullanıcı
          onayı istenir, reddedilirse sunucu yine çalışır ama Android onu
@@ -52,6 +56,6 @@
         <service
             android:name=".ServerService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync|remoteMessaging" />
     </application>
 </manifest>

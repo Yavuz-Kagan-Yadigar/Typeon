@@ -581,6 +581,9 @@ class P2PService : Service() {
                     }
                 }
             }
+            "call" -> if (obj.optString("action") == "invite") {
+                com.p2p.messenger.ui.CallActivity.ring(applicationContext, obj.optString("name"), obj.optBoolean("video"))
+            }
             "message" -> {
                 val peer = obj.optString("peer")
                 if (peer.isNotEmpty() && activeConversationId != peer) {
@@ -701,7 +704,12 @@ class P2PService : Service() {
             .setOngoing(true)
             .build()
 
-        startForeground(NOTIFICATION_ID, notification)
+        // See the manifest note: remoteMessaging on API 34+ (no daily cap).
+        androidx.core.app.ServiceCompat.startForeground(
+            this, NOTIFICATION_ID, notification,
+            if (Build.VERSION.SDK_INT >= 34) android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+            else android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        )
         acquireWakeLock()
 
         // Doze uyandırma alarmından geldiysek servis zaten çalışıyor; tek
@@ -781,6 +789,7 @@ class P2PService : Service() {
                 val nodeMode = isNodeModeEnabled(applicationContext)
                 val torEnabled = isTorEnabled(applicationContext)
                 P2PLib.startNetwork(nodeMode, torEnabled)
+                applyMeteredToTor()
                 P2PLib.setHistoryStorageLimitBytes(getHistoryStorageLimitBytes(applicationContext))
             }
             wakePollNow = {
@@ -932,8 +941,19 @@ class P2PService : Service() {
     /** JNI çağrısını ana thread dışında yapar — `ConnectivityManager`
      *  callback'leri genellikle ana thread'de çağrılır, `notifyNetworkChanged`
      *  (bir dial turu başlatabilir) burada onu bloklamamalı. */
+    /** See `P2PLib.setMeteredNetwork` — padding keeps a cellular radio awake. */
+    private fun applyMeteredToTor() {
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            P2PLib.setMeteredNetwork(cm.isActiveNetworkMetered)
+        } catch (e: Exception) {
+            Log.w(TAG, "Metered state not applied: ${e.message}")
+        }
+    }
+
     private fun notifyNetworkChangedInBackground() {
         Thread {
+            applyMeteredToTor()
             try {
                 P2PLib.notifyNetworkChanged()
             } catch (e: Exception) {

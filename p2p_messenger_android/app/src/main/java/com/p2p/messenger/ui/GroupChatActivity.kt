@@ -2737,6 +2737,10 @@ class GroupChatActivity : AppCompatActivity() {
             toggleMessageSearch()
             return true
         }
+        if (item.itemId == R.id.action_voice_call || item.itemId == R.id.action_video_call) {
+            CallActivity.startOutgoing(this, null, groupId, item.itemId == R.id.action_video_call)
+            return true
+        }
         if (item.itemId == R.id.action_tor_reconnect) {
             AppRestarter.confirmAndRestart(this)
             return true

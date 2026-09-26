@@ -420,4 +420,32 @@
     <string name="settings_advanced">Advanced</string>
     <string name="action_open">Open</string>
     <string name="msg_group_gone">This group is no longer available</string>
+    <string name="msg_background_restricted">Typeon is restricted from running in the background, so messages and calls cannot arrive while the screen is off. Open the app settings and set Battery to \"Unrestricted\" / \"No restrictions\".</string>
+    <!-- Calls -->
+    <string name="action_voice_call">Voice call</string>
+    <string name="action_video_call">Video call</string>
+    <string name="call_calling">Calling…</string>
+    <string name="call_incoming_voice">Incoming voice call</string>
+    <string name="call_incoming_video">Incoming video call</string>
+    <string name="call_connecting">Connecting…</string>
+    <string name="call_accept">Answer</string>
+    <string name="call_decline">Decline</string>
+    <string name="call_hangup">Hang up</string>
+    <string name="call_mute">Mute</string>
+    <string name="call_unmute">Unmute</string>
+    <string name="call_speaker">Speaker</string>
+    <string name="call_earpiece">Earpiece</string>
+    <string name="call_camera_off">Camera off</string>
+    <string name="call_camera_on">Camera on</string>
+    <string name="call_ended">Call ended</string>
+    <string name="call_rejected">Call declined</string>
+    <string name="call_busy">Busy</string>
+    <string name="call_no_answer">No answer</string>
+    <string name="call_missed">Missed call</string>
+    <string name="call_via_p2p">direct</string>
+    <string name="call_via_server">via server</string>
+    <string name="call_waiting_media">waiting for media</string>
+    <string name="call_permission_needed">Microphone (and camera for video) permission is needed for calls</string>
+    <string name="call_channel_name">Calls</string>
+    <string name="call_notification_title">Typeon call</string>
 </resources>

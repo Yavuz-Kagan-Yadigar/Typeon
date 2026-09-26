@@ -33,6 +33,8 @@ p2p_messenger_core = { path = "../p2p_messenger_android/app/src/main/cpp/rust" }
 libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "identify", "kad", "tokio", "macros", "dns", "request-response", "cbor", "relay", "autonat", "upnp"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 futures = "0.3"
+# Live call-media relay streams (see `RELAY_PROTOCOL`).
+libp2p-stream = "=0.1.0-alpha.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 serde = { version = "1.0", features = ["derive"] }

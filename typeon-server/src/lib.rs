@@ -54,8 +54,9 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 use p2p_messenger::attachments::{self, FileChunkRequest, FileChunkResponse};
+use p2p_messenger::call::{encode_frame, pump_writes, read_frame, LINK_QUEUE, RELAY_PROTOCOL};
 use p2p_messenger::server_proto::{
-    self, ServerErrorCode, ServerLimits, ServerRequest, ServerResponse, MAX_DEPOSIT_BYTES,
+    self, MailItem, ServerErrorCode, ServerLimits, ServerRequest, ServerResponse, MAX_DEPOSIT_BYTES,
     MAX_FETCH_BATCH_BYTES, MAX_FETCH_BATCH_ITEMS, SERVER_PROTOCOL, SERVER_PROTOCOL_VERSION,
 };
 
@@ -79,6 +80,17 @@ const SWEEP_INTERVAL_MS: u64 = 60_000;
 /// ANLIK bir sınır: amaç, tek bir eşin sunucunun disk/CPU'sunu tek başına
 /// tüketmesini engellemek.
 const RATE_WINDOW_MS: u64 = 60_000;
+
+/// Call-media relay budget per client: bytes per `RELAY_WINDOW_MS`. ~6.7
+/// Mbit/s — several times a 480p video call, so it only stops a flood. Relay
+/// frames skip `check_rate`: a call is ~30 frames/s, which alone would eat
+/// `requests_per_minute`.
+const RELAY_BYTES_PER_WINDOW: usize = 8 * 1024 * 1024;
+const RELAY_WINDOW_MS: u64 = 10_000;
+
+/// Largest item `notify_owner_of` pushes inline (`ServerRequest::Push`).
+/// Messages and call signals are ~8-15 KB; big ones keep the Fetch path.
+const PUSH_INLINE_MAX: usize = 64 * 1024;
 
 pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
@@ -204,6 +216,41 @@ pub struct ServerBehaviour {
     /// duyurur, yani sıfır kapasiteli bir `Behaviour` bile identify üzerinden
     /// "röleyim" yalanını yayardı (çekirdekteki aynı notun karşılığı).
     relay: Toggle<relay::Behaviour>,
+    /// Call-media relay streams — see `RELAY_PROTOCOL`.
+    stream: libp2p_stream::Behaviour,
+}
+
+/// Relay stream task -> main loop. The loop owns authentication and routing
+/// (`live_interest`); the per-stream tasks only move bytes.
+enum RelayEvent {
+    Open { peer: PeerId, id: u64, tx: tokio::sync::mpsc::Sender<Vec<u8>> },
+    Frame { peer: PeerId, mailbox: String, data: Vec<u8> },
+    Closed { peer: PeerId, id: u64 },
+}
+
+/// Accepts relay streams and turns each into `RelayEvent`s.
+async fn accept_relay_streams(mut incoming: libp2p_stream::IncomingStreams, events: tokio::sync::mpsc::UnboundedSender<RelayEvent>) {
+    let mut next_id = 0u64;
+    while let Some((peer, stream)) = incoming.next().await {
+        next_id += 1;
+        let id = next_id;
+        let events = events.clone();
+        tokio::spawn(async move {
+            let (mut rd, wr) = futures::AsyncReadExt::split(stream);
+            let (tx, rx) = tokio::sync::mpsc::channel(LINK_QUEUE);
+            if events.send(RelayEvent::Open { peer, id, tx }).is_err() {
+                return;
+            }
+            tokio::spawn(pump_writes(wr, rx));
+            while let Ok((mailbox, data)) = read_frame(&mut rd).await {
+                let Ok(mailbox) = String::from_utf8(mailbox) else { break };
+                if events.send(RelayEvent::Frame { peer, mailbox, data }).is_err() {
+                    break;
+                }
+            }
+            let _ = events.send(RelayEvent::Closed { peer, id });
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +285,12 @@ pub struct ServerCore {
     /// bkz. `set_net_changed_rx` / `notify_network_changed` — Android ağ
     /// değişikliği bildirimi. `run_until` bunu `take()` edip select!'te dinler.
     net_changed_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
+    /// Taken by `run_until`, which spawns `accept_relay_streams` on it.
+    relay_incoming: Option<libp2p_stream::IncomingStreams>,
+    /// Authenticated relay links: peer -> (stream id, writer queue).
+    relay_links: HashMap<PeerId, (u64, tokio::sync::mpsc::Sender<Vec<u8>>)>,
+    /// Peer -> (window start ms, bytes relayed in window).
+    relay_budget: HashMap<PeerId, (u64, usize)>,
 }
 
 /// Ana döngünün DIŞINDAN okunabilen anlık görüntü.
@@ -262,6 +315,7 @@ pub struct ServerStats {
     pub blob_chunks_served: u64,
     pub enrollments: u64,
     pub rejected: u64,
+    pub relayed: u64,
 }
 
 
@@ -382,7 +436,7 @@ impl ServerCore {
                 } else {
                     None.into()
                 };
-                ServerBehaviour { server_rpc, file_chunks, identify, kad, autonat, upnp, relay }
+                ServerBehaviour { server_rpc, file_chunks, identify, kad, autonat, upnp, relay, stream: libp2p_stream::Behaviour::new() }
             })
             .map_err(|e| e.to_string())?
             // Çekirdekteki 600 sn ile aynı gerekçe: sessiz dönemlerde
@@ -406,6 +460,8 @@ impl ServerCore {
             .listen_on(format!("/ip4/127.0.0.1/tcp/{}", listen_port).parse().map_err(|_| "bad multiaddr")?)
             .map_err(|e| e.to_string())?;
 
+        let relay_incoming = swarm.behaviour().stream.new_control().accept(RELAY_PROTOCOL).ok();
+
         Ok(ServerCore {
             tor_error,
             config,
@@ -418,6 +474,9 @@ impl ServerCore {
             stats: ServerStats::default(),
             shared: None,
             net_changed_rx: None,
+            relay_incoming,
+            relay_links: HashMap::new(),
+            relay_budget: HashMap::new(),
         })
     }
 
@@ -620,12 +679,17 @@ impl ServerCore {
         // bkz. modül notu / yukarıdaki yorum — `self`i ödünç alan bir arm
         // future'ı satır içinde yazılamaz; alıcıyı bir yerel değişkene alıyoruz.
         let mut net_changed_rx = self.net_changed_rx.take();
+        let (relay_tx, mut relay_rx) = tokio::sync::mpsc::unbounded_channel();
+        if let Some(incoming) = self.relay_incoming.take() {
+            tokio::spawn(accept_relay_streams(incoming, relay_tx));
+        }
         futures::pin_mut!(ctrlc);
         futures::pin_mut!(shutdown);
         loop {
             tokio::select! {
                 event = self.swarm.select_next_some() => self.handle_swarm_event(event),
                 _ = sweep.tick() => self.maybe_sweep(),
+                Some(ev) = relay_rx.recv() => self.handle_relay(ev),
                 // bkz. `notify_network_changed` — kanal yoksa/kapandıysa bu
                 // dal sonsuza kadar bekler (asla tetiklenmez).
                 Some(()) = async {
@@ -688,6 +752,7 @@ impl ServerCore {
                 if num_established == 0 {
                     self.conns.remove(&peer_id);
                     self.live_interest.remove(&peer_id);
+                    self.relay_budget.remove(&peer_id);
                 }
             }
             SwarmEvent::Behaviour(ServerBehaviourEvent::ServerRpc(
@@ -1004,7 +1069,8 @@ impl ServerCore {
                 match self.store.deposit(&mailbox, &sealed, &e.enrollment_id, now, limits.mailbox_ttl_ms as i64) {
                     Ok(seq) => {
                         self.stats.deposits += 1;
-                        self.notify_owner_of(&mailbox, peer);
+                        let item = MailItem { mailbox_id: mailbox.clone(), seq, deposited_at_ms: now as u64, sealed };
+                        self.notify_owner_of(&mailbox, peer, item);
                         ServerResponse::Deposited { seq }
                     }
                     Err(msg) => {
@@ -1112,7 +1178,8 @@ impl ServerCore {
             ServerRequest::Hello { .. }
             | ServerRequest::Enroll { .. }
             | ServerRequest::Rebind { .. }
-            | ServerRequest::Notify => ServerResponse::Err(ServerErrorCode::BadDirection),
+            | ServerRequest::Notify
+            | ServerRequest::Push { .. } => ServerResponse::Err(ServerErrorCode::BadDirection),
         }
     }
 
@@ -1356,7 +1423,7 @@ impl ServerCore {
     /// Bu olmadan istemcinin sürekli `Fetch` ile yoklaması gerekirdi; bir
     /// telefonda bu doğrudan pil demek. Yük burada taşınmaz — istemci kendi
     /// turunda `Fetch` eder, böylece imleç mantığı bozulmaz.
-    fn notify_owner_of(&mut self, mailbox: &str, depositor: PeerId) {
+    fn notify_owner_of(&mut self, mailbox: &str, depositor: PeerId, item: MailItem) {
         let targets: Vec<PeerId> = self
             .live_interest
             .iter()
@@ -1364,7 +1431,60 @@ impl ServerCore {
             .map(|(peer, _)| *peer)
             .collect();
         for peer in targets {
-            self.swarm.behaviour_mut().server_rpc.send_request(&peer, ServerRequest::Notify);
+            // See `ServerRequest::Push`: inline only when nothing older is
+            // pending for this reader, so the client cannot skip an item.
+            let inline = item.sealed.len() <= PUSH_INLINE_MAX
+                && self.authenticate(peer).map_or(false, |e| self.store.unacked_for(mailbox, &e.enrollment_id) == 1);
+            let req = if inline { ServerRequest::Push { item: item.clone() } } else { ServerRequest::Notify };
+            self.swarm.behaviour_mut().server_rpc.send_request(&peer, req);
+        }
+    }
+
+    /// Call-media relay (see `RELAY_PROTOCOL`): forwards a frame to every
+    /// OTHER connected client listening on the frame's mailbox. Only enrolled,
+    /// non-revoked clients get a link; everyone else's frames are ignored.
+    fn handle_relay(&mut self, ev: RelayEvent) {
+        match ev {
+            RelayEvent::Open { peer, id, tx } => match self.authenticate(peer) {
+                Some(e) if e.state != EnrollmentState::Revoked => {
+                    info!("Arama rölesi açıldı: {peer}");
+                    self.relay_links.insert(peer, (id, tx));
+                }
+                // Dropping `tx` ends the writer, which closes the stream.
+                _ => self.stats.rejected += 1,
+            },
+            RelayEvent::Closed { peer, id } => {
+                if self.relay_links.get(&peer).map(|(i, _)| *i) == Some(id) {
+                    self.relay_links.remove(&peer);
+                    info!("Arama rölesi kapandı: {peer}");
+                }
+            }
+            RelayEvent::Frame { peer, mailbox, data } => {
+                if !self.relay_links.contains_key(&peer) {
+                    return;
+                }
+                let now = now_ms() as u64;
+                let budget = self.relay_budget.entry(peer).or_insert((now, 0));
+                if now.saturating_sub(budget.0) > RELAY_WINDOW_MS {
+                    *budget = (now, 0);
+                }
+                budget.1 += data.len();
+                if budget.1 > RELAY_BYTES_PER_WINDOW {
+                    self.stats.rejected += 1;
+                    return;
+                }
+                let frame = encode_frame(&[], &data);
+                for (target, boxes) in &self.live_interest {
+                    if *target == peer || !boxes.contains(&mailbox) {
+                        continue;
+                    }
+                    if let Some((_, tx)) = self.relay_links.get(target) {
+                        if tx.try_send(frame.clone()).is_ok() {
+                            self.stats.relayed += 1;
+                        }
+                    }
+                }
+            }
         }
     }
 

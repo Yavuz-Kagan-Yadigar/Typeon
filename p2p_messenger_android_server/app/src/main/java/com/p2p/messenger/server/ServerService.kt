@@ -127,7 +127,14 @@ class ServerService : Service() {
         isRunning = true
 
         createChannel()
-        startForeground(NOTIFICATION_ID, buildNotification(getString(R.string.notif_starting)))
+        // API 34+: remoteMessaging, which has no daily cap (dataSync is
+        // capped at 6 h a day on Android 15+ and then demoted).
+        val notification = buildNotification(getString(R.string.notif_starting))
+        if (android.os.Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
 
         // Ekran kapalıyken de teslim yapabilmek için. Sunucu tanım gereği
         // "her zaman açık" olmalı; kullanıcı pil optimizasyonu muafiyetini

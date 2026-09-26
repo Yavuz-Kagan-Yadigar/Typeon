@@ -6,6 +6,10 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- API 34+: dataSync foreground services are capped at 6 h a day on
+         Android 15+, after which the service is demoted and (MIUI) loses the
+         network in the background. remoteMessaging has no cap. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -19,6 +23,9 @@
          ChatActivity ses kaydı akışı) — çalışma zamanında (ilk basılı
          tutma denemesinde) istenir. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Calls: speakerphone/communication mode, and the ringing screen over the lock screen. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <!-- Spec dışı, kullanıcı isteği: ilk açılışta pil optimizasyonu
          muafiyeti istemi — bkz. MainActivity.ensureBatteryOptimizationExemption.
          "Normal" korumalı bir izin (çalışma zamanında ayrıca istenmez,
@@ -114,6 +121,15 @@
         <!-- Çoklu-cihaz (spec 1.5): ikincil cihazın bağlanma QR'ını gösteren
              ve benimsenmeyi bekleyen ekran. -->
         <activity android:name=".ui.LinkDeviceActivity" />
+        <!-- Voice/video call screen (ringing, in call). singleTask: a second
+             ring notification tap must reuse the screen, not stack another. -->
+        <activity
+            android:name=".ui.CallActivity"
+            android:launchMode="singleTask"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:excludeFromRecents="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden" />
         <!-- Spec dışı, kullanıcı isteği: Ayarlar'dan açılan "bekleyen
              mesajlar" listesi — bkz. PendingMessagesActivity, lib.rs
              list_pending_messages/cancel_pending_message. -->
@@ -144,7 +160,7 @@
             android:name=".service.P2PService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync|remoteMessaging" />
 
         <!-- Spec dışı: dosya/foto/video/ses ekleri (bkz. ChatActivity
              openAttachmentFile) — çözülmüş (plaintext) ek kopyalarını

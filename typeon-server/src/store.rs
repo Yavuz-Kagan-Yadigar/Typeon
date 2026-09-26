@@ -761,6 +761,20 @@ impl Store {
     /// biri bırakandır — dolayısıyla "bütün aboneler onayladı mı" gibi bir
     /// muhasebeye hiç gerek yok. Bırakanın kendi `Ack`'i sessizce yok sayılır
     /// (aksi halde gönderen, alıcı görmeden mesajı silebilirdi).
+    /// Items in `mailbox_id` that `reader` has not acknowledged (and did not
+    /// deposit itself) — see `ServerRequest::Push`.
+    pub fn unacked_for(&self, mailbox_id: &str, reader: &[u8]) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM mail m WHERE m.mailbox_id = ?1 AND m.depositor != ?2
+                   AND m.seq > COALESCE((SELECT a.through_seq FROM mail_acks a
+                                         WHERE a.mailbox_id = ?1 AND a.owner = ?2), 0)",
+                params![mailbox_id, reader],
+                |r| r.get(0),
+            )
+            .unwrap_or(i64::MAX)
+    }
+
     pub fn ack(&self, mailbox_id: &str, through_seq: u64, acker: &[u8]) -> Result<usize, String> {
         // Defter #03: yalnızca kutuyu KAYDETMİŞ bir okuyucu onaylayabilir.
         let is_reader = self
@@ -1234,6 +1248,22 @@ mod tests {
         let (mid, _) = s.fetch(&b, &[("mb_1".into(), s1)], 10, 4096);
         assert_eq!(mid.len(), 1);
         assert_eq!(mid[0].sealed, b"two");
+    }
+
+    #[test]
+    fn unacked_counts_only_what_the_reader_has_not_acked() {
+        let s = Store::open_in_memory().unwrap();
+        let a = enroll(&s, b"aaaa", "peerA");
+        let b = enroll(&s, b"bbbb", "peerB");
+        s.register_mailboxes(&a, &["mb_1".into()], &[], 0, 10).unwrap();
+        s.register_mailboxes(&b, &["mb_1".into()], &[], 0, 10).unwrap();
+        let s1 = s.deposit("mb_1", b"one", &a, 1, 1000).unwrap();
+        assert_eq!(s.unacked_for("mb_1", &b), 1, "only the new item: safe to push inline");
+        assert_eq!(s.unacked_for("mb_1", &a), 0, "own deposits never count");
+        s.deposit("mb_1", b"two", &a, 2, 1000).unwrap();
+        assert_eq!(s.unacked_for("mb_1", &b), 2, "an older item is pending: Notify only");
+        s.ack("mb_1", s1, &b).unwrap();
+        assert_eq!(s.unacked_for("mb_1", &b), 1);
     }
 
     #[test]

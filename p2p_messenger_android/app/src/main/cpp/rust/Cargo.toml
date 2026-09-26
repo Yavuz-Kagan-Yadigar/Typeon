@@ -102,6 +102,9 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 # "request-response"/"cbor" zaten `file_chunks` için buradaydı.
 libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "mdns", "tokio", "macros", "dns", "request-response", "cbor", "relay", "dcutr", "autonat", "upnp"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# Call media: one long-lived stream per peer instead of a request/response
+# substream (and multistream round trip) per 60 ms audio packet. See call.rs.
+libp2p-stream = "=0.1.0-alpha.1"
 futures = "0.3"
 
 # Database
@@ -122,6 +125,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 arti-client = { version = "0.24", default-features = false, features = ["tokio", "rustls", "onion-service-client", "onion-service-service", "compression", "keymgr"] }
 tor-hsservice = "0.24"
 tor-cell = "0.24"
+tor-config = "0.24"
 tor-rtcompat = { version = "0.24", features = ["tokio", "rustls"] }
 
 # Android JNI

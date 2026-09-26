@@ -1274,7 +1274,7 @@ impl P2PCore {
         for evt in events {
             match evt {
                 ServerEventLocal::Request { peer, request, channel } => {
-                    let resp = self.handle_server_push(peer, request);
+                    let resp = self.handle_server_push(peer, request, incoming);
                     replies.push((channel, resp));
                 }
                 ServerEventLocal::Response { request_id, response } => {
@@ -1293,8 +1293,37 @@ impl P2PCore {
     }
 
     /// Sunucudan gelen tek meşru istek: `Notify`.
-    fn handle_server_push(&mut self, peer: PeerId, request: ServerRequest) -> ServerResponse {
+    fn handle_server_push(
+        &mut self,
+        peer: PeerId,
+        request: ServerRequest,
+        incoming: &mut Vec<(Option<PeerId>, Vec<u8>)>,
+    ) -> ServerResponse {
         match request {
+            // The item itself (see `ServerRequest::Push`): run it through the
+            // exact `Fetch` path — opening, cursor, ack — as a one-item batch.
+            ServerRequest::Push { item } => {
+                let sid = self
+                    .server_rt
+                    .iter()
+                    .find(|(_, rt)| rt.peer_id == Some(peer))
+                    .map(|(sid, _)| sid.clone());
+                let Some(server_id) = sid else {
+                    return ServerResponse::Err(ServerErrorCode::BadDirection);
+                };
+                // The batch path clears `fetch_inflight`; a real Fetch may
+                // still be out, keep its flag.
+                let inflight = self.server_rt.get(&server_id).map_or(false, |rt| rt.fetch_inflight);
+                self.handle_server_response(
+                    ServerInflight::Fetch { server_id: server_id.clone() },
+                    ServerResponse::Batch { items: vec![item], more: false },
+                    incoming,
+                );
+                if let Some(rt) = self.server_rt.get_mut(&server_id) {
+                    rt.fetch_inflight = inflight;
+                }
+                ServerResponse::Ok
+            }
             ServerRequest::Notify => {
                 // Yükü burada TAŞIMIYORUZ — sadece "bir sonraki turda çek"
                 // diyoruz, böylece imleç mantığı bozulmaz.
@@ -1717,6 +1746,22 @@ impl P2PCore {
                         let r = r.clone();
                         self.persist_server(&r);
                     }
+                }
+                self.retry_deposit_over_gossipsub(&inflight);
+            }
+            // A full mailbox (5000 undelivered items for a device that has
+            // not fetched in a week — seen on device, 2026-09-26) must only
+            // stop deposits to THAT mailbox. The server-wide backoff below
+            // locked the whole account out of the server, call invites
+            // included, for as long as the dead mailbox stayed full.
+            // ponytail: QuotaExceeded also covers the per-account and disk
+            // caps; for those this retries each mailbox once per backoff
+            // instead of once per server — bounded by the mailbox count.
+            ServerErrorCode::QuotaExceeded if matches!(inflight, ServerInflight::Deposit { .. }) => {
+                if let ServerInflight::Deposit { mailbox, .. } = &inflight {
+                    warn!("Sunucu kutusu dolu, bu kutuya yatırma {} sn durduruldu: {}", SERVER_DEPOSIT_BACKOFF_MS / 1000, mailbox);
+                    self.server_unknown_mailboxes
+                        .insert(mailbox.clone(), current_time_ms() + SERVER_DEPOSIT_BACKOFF_MS);
                 }
                 self.retry_deposit_over_gossipsub(&inflight);
             }
