@@ -982,3 +982,68 @@ pub fn restore_server_history() -> String {
 pub fn archive_root_key() -> Vec<u8> {
     catch_panic(|| core_lock().archive_root_key_bytes().unwrap_or_default()).unwrap_or_default()
 }
+
+// --- Calls (see `call.rs`; mirrors the `P2PLib.startCall`.. JNI exports) ---
+
+/// Rings `peer` (a device fingerprint or chat key). Call id or `"Error: .."`.
+pub fn start_call(peer: &str, video: bool) -> String {
+    let peer = peer.to_string();
+    string_result(catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().start_call(peer, video)
+    }))
+}
+
+pub fn start_group_call(group_id: &str, video: bool) -> String {
+    let group_id = group_id.to_string();
+    string_result(catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().start_group_call(group_id, video)
+    }))
+}
+
+pub fn accept_call() -> bool {
+    matches!(
+        catch_panic(|| {
+            let _guard = RUNTIME.enter();
+            core_lock().accept_call()
+        }),
+        Ok(Ok(()))
+    )
+}
+
+pub fn end_call() {
+    let _ = catch_panic(|| {
+        let _guard = RUNTIME.enter();
+        core_lock().end_call()
+    });
+}
+
+/// `{"state": "idle"|"outgoing"|"incoming"|"active", ...}`.
+pub fn call_state() -> String {
+    catch_panic(|| core_lock().call_state_json()).unwrap_or_else(|_| "{\"state\":\"idle\"}".to_string())
+}
+
+/// Media calls take no core lock: the audio/video threads call them often.
+pub fn call_send(kind: u8, payload: &[u8]) -> bool {
+    let payload = payload.to_vec();
+    catch_panic(move || crate::call::media_send(kind, &payload)).unwrap_or(false)
+}
+
+/// `[kind][slot][payload]`, or `None` on timeout.
+pub fn call_recv(timeout_ms: u64) -> Option<Vec<u8>> {
+    catch_panic(move || crate::call::media_recv(timeout_ms)).ok().flatten()
+}
+
+pub fn call_request_keyframe(slot: u8) {
+    let _ = catch_panic(move || crate::call::media_request_keyframe(slot));
+}
+
+pub fn call_take_keyframe_request() -> bool {
+    catch_panic(crate::call::media_take_keyframe_request).unwrap_or(false)
+}
+
+/// Send queue depth in 100 ms units — the congestion signal.
+pub fn call_backlog() -> usize {
+    catch_panic(crate::call::media_backlog).unwrap_or(0)
+}

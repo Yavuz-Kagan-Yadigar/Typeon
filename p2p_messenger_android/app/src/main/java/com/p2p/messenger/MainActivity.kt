@@ -366,6 +366,29 @@ class MainActivity : AppCompatActivity() {
                 .show()
             return
         }
+        // Android 14+ grants full-screen intents only to dialer/alarm apps by
+        // default; without it an incoming call on a locked phone is just a
+        // notification (seen on the Note 8 Pro: "USE_FULL_SCREEN_INTENT ...
+        // rejectTime"). Only the system settings page can grant it.
+        val nm = getSystemService(android.app.NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= 34 && nm?.canUseFullScreenIntent() == false &&
+            System.currentTimeMillis() - prefs0.getLong("fsi_prompt_ms", 0L) > 24L * 60 * 60 * 1000) {
+            prefs0.edit().putLong("fsi_prompt_ms", System.currentTimeMillis()).apply()
+            AlertDialog.Builder(this)
+                .setTitle(R.string.call_channel_name)
+                .setMessage(R.string.msg_full_screen_intent)
+                .setPositiveButton(R.string.action_open_settings) { _, _ ->
+                    try {
+                        AppLock.beginTrustedExcursion()
+                        startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
+                            data = android.net.Uri.parse("package:$packageName")
+                        })
+                    } catch (e: Exception) { }
+                }
+                .setNegativeButton(R.string.action_not_now, null)
+                .show()
+            return
+        }
         if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
         // Her açılışta sormak dırdır olurdu: kullanıcı reddettiyse bir gün
         // boyunca bir daha sorma. (Muafiyet zaten varsa yukarıda çıkıldı.)

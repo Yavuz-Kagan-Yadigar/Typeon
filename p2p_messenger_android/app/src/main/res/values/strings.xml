@@ -420,6 +420,7 @@
     <string name="settings_advanced">Advanced</string>
     <string name="action_open">Open</string>
     <string name="msg_group_gone">This group is no longer available</string>
+    <string name="msg_full_screen_intent">To show incoming calls on the lock screen, Typeon needs the \"Full screen notifications\" permission. Open the setting and allow it.</string>
     <string name="msg_background_restricted">Typeon is restricted from running in the background, so messages and calls cannot arrive while the screen is off. Open the app settings and set Battery to \"Unrestricted\" / \"No restrictions\".</string>
     <!-- Calls -->
     <string name="action_voice_call">Voice call</string>

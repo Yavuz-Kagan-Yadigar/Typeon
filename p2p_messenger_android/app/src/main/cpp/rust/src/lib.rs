@@ -16378,7 +16378,10 @@ impl P2PCore {
         // üzerinden organik olarak öğrenilemeyebilirdi.
         let tor_ready_now = self.tor.as_ref().map(|h| h.status() == tor::TorStatus::Ready).unwrap_or(false);
         if tor_ready_now && !self.tor_was_ready {
-            info!("Tor Ready durumuna geçti — bilinen kişilere .onion adresi bildiriliyor");
+            info!(
+                "Tor Ready durumuna geçti — bilinen kişilere .onion adresi bildiriliyor: {}",
+                self.get_node_address().unwrap_or_default()
+            );
             self.announce_address_to_all_contacts();
         }
         self.tor_was_ready = tor_ready_now;

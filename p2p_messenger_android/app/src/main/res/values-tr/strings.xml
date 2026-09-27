@@ -379,6 +379,7 @@
     <string name="settings_advanced">Gelişmiş</string>
     <string name="action_open">Aç</string>
     <string name="msg_group_gone">Bu grup artık kullanılamıyor</string>
+    <string name="msg_full_screen_intent">Gelen aramaların kilit ekranında görünmesi için Typeon\'a \"Tam ekran bildirimleri\" izni gerekiyor. Ayarı açıp izin verin.</string>
     <string name="msg_background_restricted">Typeon arka planda çalışması kısıtlandığı için ekran kapalıyken mesaj ve arama gelemiyor. Uygulama ayarlarını açıp Pil ayarını \"Kısıtlama yok\" yapın.</string>
     <!-- Calls -->
     <string name="action_voice_call">Sesli arama</string>

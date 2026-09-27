@@ -60,6 +60,10 @@ pub const LINK_QUEUE: usize = 48;
 const INBOX_MAX: usize = 64;
 /// Ring timeout, both directions.
 const RING_TIMEOUT_MS: u64 = 45_000;
+/// Every participant sends a state packet each second, even muted with the
+/// camera off: this long with nothing from anyone means the others are gone
+/// (app killed, device off, network lost) and never got to send a Hangup.
+const MEDIA_LOST_MS: u64 = 30_000;
 /// An Invite older than this (store-and-forward delivered it late) no longer rings.
 const INVITE_MAX_AGE_MS: u64 = 60_000;
 const REOPEN_BACKOFF_MS: u64 = 3_000;
@@ -920,6 +924,17 @@ impl P2PCore {
                 return;
             }
             CallPhase::Incoming => return,
+            CallPhase::Active => {
+                let last = s.joined.iter().map(|fp| media_last_rx(fp)).max().unwrap_or(0).max(s.connected_at);
+                if s.connected_at > 0 && now.saturating_sub(last) > MEDIA_LOST_MS {
+                    info!("Arama koptu: {} sn boyunca kimseden medya gelmedi", MEDIA_LOST_MS / 1000);
+                    self.end_call();
+                    if let Some((_, r)) = self.last_call_end.as_mut() {
+                        *r = "lost".to_string();
+                    }
+                    return;
+                }
+            }
             _ => {}
         }
         let Some(control) = &self.stream_control else { return };

@@ -409,6 +409,8 @@ class CallActivity : AppCompatActivity() {
         for ((slot, p) in live) {
             val tile = tiles[slot] ?: newTile(slot).also { tiles[slot] = it; grid.addView(it.root) }
             tile.label.text = p.optString("name")
+            // Camera off on their side: hide the last frame instead of freezing on it.
+            tile.texture?.visibility = if (p.optBoolean("video_off")) View.INVISIBLE else View.VISIBLE
             // Muted participants get a mic-off icon before their name.
             val muted = p.optBoolean("muted")
             if (muted != tile.mutedShown) {
