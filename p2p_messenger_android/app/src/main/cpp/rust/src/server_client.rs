@@ -1110,6 +1110,11 @@ impl P2PCore {
         if self.servers.is_empty() {
             return;
         }
+        // Radio saver (see `RADIO_WINDOW_MS`): inside the window only. New
+        // mail still arrives at once as server push over the open connection.
+        if !self.radio_window_open {
+            return;
+        }
         let now = current_time_ms();
         if now < self.server_sweep_at {
             return;
@@ -1337,6 +1342,9 @@ impl P2PCore {
                         rt.fetch_due_at = 0;
                     }
                     self.server_sweep_at = 0;
+                    // The radio is up for this push anyway: open the saver
+                    // window now so the Fetch rides it (`RADIO_WINDOW_MS`).
+                    self.radio_window_at = 0;
                 }
                 ServerResponse::Ok
             }

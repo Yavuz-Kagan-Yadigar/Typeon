@@ -71,7 +71,7 @@ use libp2p::multiaddr::Protocol as MultiaddrProtocol;
 use libp2p::request_response;
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::NetworkBehaviour;
-use libp2p::{autonat, dcutr, gossipsub, identify, kad, noise, relay, tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm};
+use libp2p::{dcutr, gossipsub, identify, kad, noise, relay, tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm};
 use log::{error, info, warn};
 // NOT: pqcrypto-dilithium/pqcrypto-kyber yerine RustCrypto'nun aktif bakımlı
 // ml-dsa/ml-kem crate'lerine geçildi (bkz. Cargo.toml notu — RUSTSEC-2024-0380,
@@ -364,8 +364,46 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
 /// olmalı — `#[derive(Serialize, Deserialize)]` bunu ek alan olmadan sağlar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeepAliveRequest;
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeepAliveResponse;
+/// `quiet_ms`: "I am saving radio (metered network, screen off) — do not
+/// probe me again for this long". Without it a phone on mobile data could
+/// quiet its own timers but every peer's 20-60 s probe still woke its radio.
+///
+/// Wire: `None` is encoded as CBOR null — byte-identical to the old unit
+/// struct, so older peers keep working; the hint is a one-field map, sent
+/// only in radio-saver mode. Both forms decode.
+#[derive(Debug, Clone, Default)]
+pub struct KeepAliveResponse {
+    pub quiet_ms: Option<u64>,
+}
+
+impl Serialize for KeepAliveResponse {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self.quiet_ms {
+            None => s.serialize_unit(),
+            Some(q) => {
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("quiet_ms", &q)?;
+                m.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for KeepAliveResponse {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Hint { quiet_ms: u64 },
+            Other(serde::de::IgnoredAny),
+        }
+        Ok(match Wire::deserialize(d)? {
+            Wire::Hint { quiet_ms } => KeepAliveResponse { quiet_ms: Some(quiet_ms) },
+            Wire::Other(_) => KeepAliveResponse { quiet_ms: None },
+        })
+    }
+}
 
 /// Toplu teslim onayı — bkz. `ACK_PROTOCOL`/`flush_outbound_acks`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -404,6 +442,13 @@ struct KeepAliveState {
     /// Şu an yanıt bekleyen bir istek varsa kimliği — aynı anda birden
     /// fazla keepalive isteğinin aynı bağlantı için havada kalmasını önler.
     outstanding: Option<request_response::OutboundRequestId>,
+    /// Interval chosen at the last successful probe (0 = none yet). An
+    /// inbound probe also proves liveness and restarts this interval, so
+    /// both sides fall into one schedule — the radio-saver peer's window —
+    /// instead of each waking the other's LTE radio on its own clock.
+    interval_ms: u64,
+    /// Peer advertised `KEEPALIVE_QUIET_PROTOCOL` (can decode `quiet_ms`).
+    quiet_capable: bool,
 }
 
 // --- libp2p birleşik davranış ---
@@ -500,10 +545,6 @@ struct P2PBehaviour {
     /// bağlantıya yükseltmeye (hole punching) çalışır — başarısız olursa
     /// (ör. simetrik NAT) trafik röle üzerinden akmaya devam eder.
     dcutr: dcutr::Behaviour,
-    /// Bu cihazın dışarıdan doğrudan erişilebilir olup olmadığını tespit
-    /// eder — şu an sadece bilgi amaçlı (identify/kad'ı besliyor), aktif
-    /// bir karar noktası değil.
-    autonat: autonat::Behaviour,
     /// Spec dışı, kullanıcı isteği (bkz. SECURITY.md "Cross-network
     /// connectivity" notu): SUNUCUSUZ bir farklı-ağ eşleşme çözümü — ev
     /// router'ının UPnP IGD protokolünü destekleyip desteklemediğini
@@ -664,6 +705,7 @@ mod wipe_coverage_tests {
         "tor", "tor_enabled", "tor_was_ready",
         "own_listen_addrs", "own_external_addr", // KENDİ adreslerimiz
         "node_mode_enabled", "history_storage_limit_bytes", "power_save",
+        "metered", "radio_window_at", "radio_window_open", "tor_dormant", // network state / timers
         "app_files_dir",
         "known_relay_peers",             // herkese açık röle adresleri
         "relay_listeners",               // swarm dinleyici kimlikleri; ağla birlikte yeniden kurulur
@@ -865,6 +907,30 @@ mod delivery_ack_coverage_tests {
              yazar — bir tepki alıcıda uygulansa bile gönderende sonsuza dek asılı \
              kalır (bkz. 2026-09-07 iki cihazlı test bulgusu)."
         );
+    }
+}
+
+#[cfg(test)]
+mod keepalive_wire_tests {
+    use super::*;
+
+    fn cbor<T: Serialize>(v: &T) -> Vec<u8> {
+        let mut b = Vec::new();
+        ciborium::into_writer(v, &mut b).unwrap();
+        b
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct OldResponse;
+
+    /// Old peers send and expect the unit struct; the hint is optional.
+    #[test]
+    fn keepalive_response_stays_wire_compatible() {
+        assert_eq!(cbor(&KeepAliveResponse { quiet_ms: None }), cbor(&OldResponse), "no hint = old bytes");
+        let from_old: KeepAliveResponse = ciborium::from_reader(cbor(&OldResponse).as_slice()).unwrap();
+        assert_eq!(from_old.quiet_ms, None);
+        let hinted: KeepAliveResponse = ciborium::from_reader(cbor(&KeepAliveResponse { quiet_ms: Some(240_000) }).as_slice()).unwrap();
+        assert_eq!(hinted.quiet_ms, Some(240_000));
     }
 }
 
@@ -1516,10 +1582,30 @@ const KEEPALIVE_STABILIZE_MS: u64 = 120_000;
 /// 6 → 4 sn: o 6 sn'nin ~2 sn'si iki uçtaki poll bekleyişiydi (yanıt ancak
 /// bir sonraki `poll_events` turunda işleniyordu). Poll artık olay güdümlü
 /// (`wait_for_network_activity`) — Tor üzerinde ölçülen gidiş-dönüş <1 sn.
-const KEEPALIVE_TIMEOUT_SECS: u64 = 4;
+///
+/// 4 → 10 s: a probe to a phone whose LTE radio sleeps waits for the radio to
+/// come up before Tor even starts; 4 s declared live links dead and every
+/// "reconnect" cost a full onion circuit build (the churn that kept the 9S
+/// radio awake).
+const KEEPALIVE_TIMEOUT_SECS: u64 = 10;
+
+/// Radio-saver window (metered network + screen off, see `P2PCore.metered`):
+/// every periodic network job — keepalive probes, server sweep, reconnect
+/// sweep — runs together once per window, so the cellular radio wakes once
+/// per window instead of never sleeping (each packet keeps LTE up ~10 s).
+/// Incoming data still arrives at once over the open links and server push;
+/// a direct link that died in between is covered by the server path, so the
+/// window length mostly trades wakeups against dead-link detection time.
+const RADIO_WINDOW_MS: u64 = 8 * 60 * 1000;
+/// How long Tor stays non-dormant after a radio-saver window opens.
+const RADIO_AWAKE_MS: u64 = 30_000;
 /// bkz. `KeepAliveState.suspect` — canlı bağlantıdan bu sürede Ack gelmezse yokla.
 const ACK_SUSPECT_MS: u64 = 1_500;
 const KEEPALIVE_PROTOCOL: &str = "/p2pmessenger/keepalive/1.0.0";
+/// Advertised (never preferred) so identify tells peers we decode
+/// `KeepAliveResponse.quiet_ms`. Older builds expect a unit response and
+/// fail every probe on anything else, then drop the link every ~20 s.
+const KEEPALIVE_QUIET_PROTOCOL: &str = "/p2pmessenger/keepalive/1.1.0";
 /// Ack'lerin taşındığı `request_response` protokolü. Eşle canlı bir libp2p
 /// bağlantısı varken Ack'ler ratchet-şifreli `MessageContent::Ack` paketi
 /// yerine bununla, eş başına TOPLU gider:
@@ -1837,6 +1923,10 @@ const PENDING_LINK_RETRY_HORIZON_MS: u64 = 60 * 60 * 1000;
 /// denemelere düşer.
 const RECONNECT_BACKOFF_BASE_MS: u64 = RECONNECT_SWEEP_INTERVAL_MS;
 const RECONNECT_BACKOFF_MAX_MS: u64 = 10 * 60 * 1000;
+/// Radio saver cap: every failed onion dial burns hs-pool circuits (HsDir
+/// lookups) and the pool refills itself in the background, so a long-gone
+/// peer must not be retried every window. It reconnects to us when back.
+const RECONNECT_BACKOFF_SAVER_MAX_MS: u64 = 30 * 60 * 1000;
 
 /// Spec dışı, hata düzeltmesi ("Tor üzerinden bağlı bir cihaz gruba davet
 /// edilmesine rağmen grubu hiç görmüyor"): `group_sync_sweep`'in çalışma
@@ -2767,6 +2857,15 @@ struct P2PCore {
     /// eş için ayrı ayrı. Ekran kapalıyken bunu 60 saniyeye çekmek,
     /// canlılık tespitini kaybetmeden radyoya uzun uyku pencereleri açıyor.
     power_save: bool,
+    /// Active network is metered (Kotlin `setMeteredNetwork`). With
+    /// `power_save` this is radio-saver mode, see `RADIO_WINDOW_MS`.
+    metered: bool,
+    /// Next radio-saver window (ms); `radio_window_open` is this poll turn's
+    /// verdict, read by the sweeps.
+    radio_window_at: u64,
+    radio_window_open: bool,
+    /// Last `TorHandle::set_dormant` value, see `RADIO_AWAKE_MS`.
+    tor_dormant: bool,
     /// Devam eden indirmeler: key = file_id (bkz. `DownloadState`).
     active_downloads: HashMap<String, DownloadState>,
     /// `request_response::send_request`'in döndürdüğü `OutboundRequestId`'yi
@@ -2914,6 +3013,10 @@ impl P2PCore {
             blocked_identities: std::collections::HashSet::new(),
             deleted_identities: std::collections::HashSet::new(),
             power_save: false,
+            metered: false,
+            radio_window_at: 0,
+            radio_window_open: true,
+            tor_dormant: false,
             active_downloads: HashMap::new(),
             download_request_ids: HashMap::new(),
             attachment_events: Vec::new(),
@@ -6306,7 +6409,7 @@ impl P2PCore {
         // attempts=3 -> 4x, ... `RECONNECT_BACKOFF_MAX_MS`'te tavan yapar.
         let delay = RECONNECT_BACKOFF_BASE_MS
             .saturating_mul(1u64 << attempts.saturating_sub(1).min(16))
-            .min(RECONNECT_BACKOFF_MAX_MS);
+            .min(if self.radio_saver() { RECONNECT_BACKOFF_SAVER_MAX_MS } else { RECONNECT_BACKOFF_MAX_MS });
         self.reconnect_backoff.insert(fp.to_string(), (now + delay, attempts));
         info!(
             "try_reconnect_device: kopmuş peer'a yeniden bağlanılıyor (deneme #{}, force={}, onion adayı={}): {}",
@@ -13444,7 +13547,10 @@ impl P2PCore {
                 let identify = identify::Behaviour::new(identify::Config::new(
                     "/p2pmessenger/1.0.0".to_string(),
                     keypair.public(),
-                ).with_cache_size(0));
+                ).with_cache_size(0)
+                // Default 5 min per peer: with 3-4 peers the LTE radio woke
+                // every ~75 s. Addresses change rarely; push covers changes.
+                .with_interval(std::time::Duration::from_secs(3600)));
                 // Spec dışı, ağ sağlamlığı düzeltmesi: kütüphanenin
                 // varsayılan `request_timeout`'u (10sn) Tor üzerinden 256
                 // KiB'lik bir dosya parçası (bkz. `FILE_CHUNK_SIZE`) için
@@ -13489,7 +13595,6 @@ impl P2PCore {
                     None.into()
                 };
                 let dcutr = dcutr::Behaviour::new(peer_id);
-                let autonat = autonat::Behaviour::new(peer_id, autonat::Config::default());
                 // bkz. `P2PBehaviour.upnp` dokümantasyonu — `Default` inşası
                 // yeterli, kendi kendine gateway aramaya/dinleme
                 // adreslerini eşlemeye başlar (bkz. libp2p-upnp
@@ -13504,7 +13609,10 @@ impl P2PCore {
                 // `with_request_timeout`, tek bir isteğin yanıt için beklediği
                 // azami süre (bkz. `KEEPALIVE_TIMEOUT_SECS`).
                 let keepalive = request_response::cbor::Behaviour::new(
-                    [(StreamProtocol::new(KEEPALIVE_PROTOCOL), request_response::ProtocolSupport::Full)],
+                    [
+                        (StreamProtocol::new(KEEPALIVE_PROTOCOL), request_response::ProtocolSupport::Full),
+                        (StreamProtocol::new(KEEPALIVE_QUIET_PROTOCOL), request_response::ProtocolSupport::Full),
+                    ],
                     request_response::Config::default()
                         .with_request_timeout(std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS)),
                 );
@@ -13528,7 +13636,7 @@ impl P2PCore {
                         .with_request_timeout(std::time::Duration::from_secs(ACK_REQUEST_TIMEOUT_SECS)),
                 );
                 let stream = libp2p_stream::Behaviour::new();
-                Ok(P2PBehaviour { server_rpc, gossipsub, kad, identify, file_chunks, mdns, relay_client, relay, dcutr, autonat, upnp, keepalive, acks, envelopes, stream })
+                Ok(P2PBehaviour { server_rpc, gossipsub, kad, identify, file_chunks, mdns, relay_client, relay, dcutr, upnp, keepalive, acks, envelopes, stream })
             })(keypair_ref, relay_client)
             .map_err(|e| e.to_string())?;
             // Spec dışı, ağ sağlamlığı düzeltmesi (kullanıcı isteği: "her şey
@@ -13615,6 +13723,7 @@ impl P2PCore {
         self.stream_control = Some(stream_control);
         self.swarm = Some(swarm);
         self.tor = tor_handle;
+        self.tor_dormant = false;
 
         // bkz. `server_client` — yapılandırılmış sunuculara bağlanma/kayıt
         // ilk `server_sweep` turunda yapılır.
@@ -13670,6 +13779,18 @@ impl P2PCore {
                 .build();
             let _ = swarm.dial(opts);
         }
+    }
+
+    /// See `RADIO_WINDOW_MS`.
+    fn radio_saver(&self) -> bool {
+        self.power_save && self.metered
+    }
+
+    fn set_metered(&mut self, metered: bool) {
+        if self.metered != metered {
+            info!("Ölçülü ağ: {}", metered);
+        }
+        self.metered = metered;
     }
 
     fn set_power_save(&mut self, enabled: bool) {
@@ -14230,6 +14351,10 @@ impl P2PCore {
         // çekilmeyi yok sayarak dene — ilk denemeler Tor henüz hazır değilken
         // düşüyor ve sıradan geri çekilme sonrakini ~20 sn erteliyordu.
         let fast = now < self.fast_reconnect_until;
+        // Radio saver: dials (onion circuit builds) only inside the window.
+        if !fast && !self.radio_window_open {
+            return;
+        }
         let interval = if fast { FAST_RECONNECT_INTERVAL_MS } else { RECONNECT_SWEEP_INTERVAL_MS };
         if now.saturating_sub(self.last_reconnect_sweep_at) < interval {
             return;
@@ -14249,8 +14374,11 @@ impl P2PCore {
             .filter(|d| d.is_active)
             .map(|d| d.device_fingerprint.clone())
             .collect();
+        // Not forced even in the fast window: `reconnect_all_known_now`
+        // already forced one dial and reset the backoff to 15 s; forcing
+        // every 3 s stacked parallel onion dials to peers that are offline.
         for fp in fps {
-            self.try_reconnect_device(&fp, fast);
+            self.try_reconnect_device(&fp, false);
         }
         // Spec dışı, gerçek cihaz çökmesi düzeltmesi ("QR tarandı, iki
         // cihazda da hiçbir şey olmadı", ilk dial bir Tor onion timeout'uyla
@@ -15111,6 +15239,26 @@ impl P2PCore {
 
     fn poll_events(&mut self) -> Vec<String> {
         lock_watch::phase("swarm_events");
+        {
+            let now = current_time_ms();
+            let saver = self.radio_saver();
+            self.radio_window_open = !saver || now >= self.radio_window_at;
+            if saver && self.radio_window_open {
+                self.radio_window_at = now + RADIO_WINDOW_MS;
+            }
+            // Tor dormant between windows; awake RADIO_AWAKE_MS after each
+            // window opens (circuit builds, dir refresh) and during calls.
+            let dormant = saver
+                && self.call.is_none()
+                && now >= (self.radio_window_at + RADIO_AWAKE_MS).saturating_sub(RADIO_WINDOW_MS);
+            if dormant != self.tor_dormant {
+                if let Some(tor) = &self.tor {
+                    tor.set_dormant(dormant);
+                    info!("Tor dormant: {}", dormant);
+                    self.tor_dormant = dormant;
+                }
+            }
+        }
         self.call_sweep();
         // bkz. `ensure_own_mailbox_subscription` — cihazın ulaşılabilirliğinin
         // ÖN KOŞULU; kimlik ağ katmanından sonra oluşmuş olabilir.
@@ -15199,6 +15347,8 @@ impl P2PCore {
         // için bayrak ÖNCEDEN yerel bir kopyaya alınıyor (bkz. `server_peers`
         // aynı desen).
         let power_save = self.power_save;
+        let saver = self.radio_saver();
+        let window_open = self.radio_window_open;
         // bkz. `deferred_swarm_events` — geçen turun flush'ında düşen
         // olaylar, taze olaylardan ÖNCE işlenmeli (geliş sırası).
         let mut deferred = std::mem::take(&mut self.deferred_swarm_events);
@@ -15216,7 +15366,7 @@ impl P2PCore {
                 // gerek yok.
                 let now = current_time_ms();
                 let due: Vec<PeerId> = keepalive_state.iter()
-                    .filter(|(_, s)| s.outstanding.is_none() && now >= s.next_due_at)
+                    .filter(|(_, s)| s.outstanding.is_none() && now >= s.next_due_at && window_open)
                     .map(|(peer, _)| *peer)
                     // Sunucu bu protokolü konuşmuyor: her yoklama boşa bir
                     // gidiş-dönüş (üstelik veriyi taşıyan AYNI Tor devresinde)
@@ -15260,6 +15410,11 @@ impl P2PCore {
                             incoming.push((message.source, message.data));
                         }
                         libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
+                            if info.protocols.iter().any(|p| p.as_ref() == KEEPALIVE_QUIET_PROTOCOL) {
+                                if let Some(state) = keepalive_state.get_mut(&peer_id) {
+                                    state.quiet_capable = true;
+                                }
+                            }
                             // bkz. `known_relay_peers` alanı dokümantasyonu
                             // (SECURITY.md "Cross-network connectivity"):
                             // bu peer röle (Circuit Relay v2 HOP) protokolünü
@@ -15509,6 +15664,8 @@ impl P2PCore {
                                 consecutive_failures: 0,
                                 outstanding: None,
                                 suspect: false,
+                                interval_ms: 0,
+                                quiet_capable: false,
                             });
                         }
                         libp2p::swarm::SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
@@ -15570,10 +15727,18 @@ impl P2PCore {
                         // bağlantıyı KAPATMIYORUZ.
                         libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Keepalive(rr_event)) => {
                             match rr_event {
-                                request_response::Event::Message { message: request_response::Message::Request { channel, .. }, .. } => {
-                                    let _ = swarm.behaviour_mut().keepalive.send_response(channel, KeepAliveResponse);
+                                request_response::Event::Message { peer, message: request_response::Message::Request { channel, .. }, .. } => {
+                                    let capable = keepalive_state.get(&peer).is_some_and(|s| s.quiet_capable);
+                                    let quiet_ms = (saver && capable).then_some(RADIO_WINDOW_MS);
+                                    let _ = swarm.behaviour_mut().keepalive.send_response(channel, KeepAliveResponse { quiet_ms });
+                                    if let Some(state) = keepalive_state.get_mut(&peer) {
+                                        if !saver && state.outstanding.is_none() && !state.suspect && state.interval_ms > 0 {
+                                            state.consecutive_failures = 0;
+                                            state.next_due_at = current_time_ms() + state.interval_ms;
+                                        }
+                                    }
                                 }
-                                request_response::Event::Message { peer, message: request_response::Message::Response { .. }, .. } => {
+                                request_response::Event::Message { peer, message: request_response::Message::Response { response, .. }, .. } => {
                                     if let Some(state) = keepalive_state.get_mut(&peer) {
                                         state.consecutive_failures = 0;
                                         state.outstanding = None;
@@ -15584,14 +15749,22 @@ impl P2PCore {
                                         // ekran kapalıyken kanıtlanmış bir
                                         // bağlantı 60 sn'de bir yoklanıyor,
                                         // radyoya uzun uyku pencereleri açsın diye.
-                                        let interval = if !stabilized {
+                                        // Radio saver: straight to the window,
+                                        // no 2 s "stabilizing" probes (each
+                                        // one is a radio wake on LTE).
+                                        let interval = if saver {
+                                            RADIO_WINDOW_MS
+                                        } else if !stabilized {
                                             KEEPALIVE_FAST_INTERVAL_MS
                                         } else if power_save {
                                             KEEPALIVE_POWER_SAVE_INTERVAL_MS
                                         } else {
                                             KEEPALIVE_IDLE_INTERVAL_MS
                                         };
+                                        // The peer is saving radio: honour it.
+                                        let interval = interval.max(response.quiet_ms.unwrap_or(0));
                                         state.next_due_at = now + interval;
+                                        state.interval_ms = interval;
                                     }
                                 }
                                 request_response::Event::OutboundFailure { peer, error, .. } => {
@@ -15825,7 +15998,10 @@ impl P2PCore {
                 .filter(|(_, pid)| connections_lost.contains(pid))
                 .map(|(fp, _)| fp.clone())
                 .collect();
-            for fp in fps {
+            // Radio saver: redial in the next window, not now — on mobile
+            // data every onion dial is a burst of circuit builds.
+            let redial_now = self.radio_window_open;
+            for fp in fps.into_iter().filter(|_| redial_now) {
                 match self.known_remote_devices.get(&fp) {
                     Some(rec) if rec.is_active => {
                         self.try_reconnect_device(&fp, false);
@@ -18506,15 +18682,13 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_waitForNetworkActivity(_env
     let _ = catch_panic(|| wait_for_network_activity(timeout_ms.max(0) as u64));
 }
 
-/// Metered (cellular) network or not — picks Tor channel padding, see
-/// `tor::client_config`.
+/// Metered (cellular) network or not — with the screen off this is
+/// radio-saver mode, see `RADIO_WINDOW_MS`.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_setMeteredNetwork(_env: JNIEnv, _class: JClass, metered: jboolean) {
     let _ = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        if let Some(tor) = core_lock().tor.as_ref() {
-            tor.set_metered(metered != 0);
-        }
+        core_lock().set_metered(metered != 0);
     });
 }
 

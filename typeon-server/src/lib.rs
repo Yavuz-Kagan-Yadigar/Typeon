@@ -47,7 +47,7 @@ use futures::StreamExt as _;
 use libp2p::request_response::{self, ProtocolSupport, ResponseChannel};
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
-use libp2p::{autonat, identify, kad, noise, relay, tcp, yamux, PeerId, StreamProtocol, Swarm};
+use libp2p::{identify, kad, noise, relay, tcp, yamux, PeerId, StreamProtocol, Swarm};
 use libp2p::kad::store::MemoryStore;
 use log::{error, info, warn};
 use rand::RngCore;
@@ -209,7 +209,6 @@ pub struct ServerBehaviour {
     file_chunks: request_response::cbor::Behaviour<FileChunkRequest, FileChunkResponse>,
     identify: identify::Behaviour,
     kad: kad::Behaviour<MemoryStore>,
-    autonat: autonat::Behaviour,
     upnp: libp2p::upnp::tokio::Behaviour,
     /// Node modu açıkken röle hizmeti. `Toggle::from(None)` KASITLI:
     /// libp2p-relay'in HOP handler'ı `Config`'e bakmadan protokolü her zaman
@@ -416,9 +415,10 @@ impl ServerCore {
                 let identify = identify::Behaviour::new(identify::Config::new(
                     "/p2pmessenger/1.0.0".to_string(),
                     keypair.public(),
-                ));
+                )
+                // Default 5 min per client wakes every idle phone's LTE radio.
+                .with_interval(Duration::from_secs(3600)));
                 let kad = kad::Behaviour::new(peer_id, MemoryStore::new(peer_id));
-                let autonat = autonat::Behaviour::new(peer_id, autonat::Config::default());
                 let upnp = libp2p::upnp::tokio::Behaviour::default();
                 let relay: Toggle<relay::Behaviour> = if node_mode {
                     // Varsayılan devre sınırı 2 dk / 128 KiB: bir dosya parçası
@@ -436,7 +436,7 @@ impl ServerCore {
                 } else {
                     None.into()
                 };
-                ServerBehaviour { server_rpc, file_chunks, identify, kad, autonat, upnp, relay, stream: libp2p_stream::Behaviour::new() }
+                ServerBehaviour { server_rpc, file_chunks, identify, kad, upnp, relay, stream: libp2p_stream::Behaviour::new() }
             })
             .map_err(|e| e.to_string())?
             // Çekirdekteki 600 sn ile aynı gerekçe: sessiz dönemlerde

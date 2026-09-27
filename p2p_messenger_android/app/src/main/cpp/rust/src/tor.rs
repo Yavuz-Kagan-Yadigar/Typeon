@@ -73,9 +73,6 @@ pub struct TorHandle {
     onion_addr: Arc<Mutex<Option<String>>>,
     /// Onion service'i canlı tutmak için (drop edilirse servis durur).
     _service: Arc<tor_hsservice::RunningOnionService>,
-    /// For rebuilding the config in `set_metered`.
-    state_dir: String,
-    cache_dir: String,
 }
 
 impl TorHandle {
@@ -102,6 +99,14 @@ impl TorHandle {
     /// ucuz bir çağrı. (İstemci tarafı `notifyNetworkChanged` zaten peer'lara
     /// yeniden dial ediyor — bu, sunucunun onion'unu tazelemek için AYNI
     /// olayın karşılığı.)
+    /// Radio saver: `Soft` stops our channel padding (relays already got
+    /// STOP from `PaddingLevel::Reduced`) and arti's periodic tasks, so an
+    /// idle LTE radio can sleep between windows. `false` re-fires the tasks.
+    pub fn set_dormant(&self, dormant: bool) {
+        use arti_client::DormantMode;
+        self.client.set_dormant(if dormant { DormantMode::Soft } else { DormantMode::Normal });
+    }
+
     pub fn notify_network_changed(&self) {
         let client = self.client.clone();
         let status = self.status.clone();
@@ -132,7 +137,8 @@ impl TorHandle {
         let runtime = TokioRustlsRuntime::current()
             .map_err(|e| format!("TokioRustlsRuntime alınamadı: {e}"))?;
 
-        let config = client_config(state_dir, cache_dir, false)?;
+        trim_dir_cache(cache_dir);
+        let config = client_config(state_dir, cache_dir)?;
 
         let client = TorClient::with_runtime(runtime)
             .config(config)
@@ -218,41 +224,66 @@ impl TorHandle {
             status,
             onion_addr,
             _service: service,
-            state_dir: state_dir.to_string(),
-            cache_dir: cache_dir.to_string(),
         })
-    }
-
-    /// Switches channel padding for the network we are on (see
-    /// `client_config`). Arti applies it to live channels.
-    pub fn set_metered(&self, metered: bool) {
-        match client_config(&self.state_dir, &self.cache_dir, metered) {
-            Ok(cfg) => match self.client.reconfigure(&cfg, tor_config::Reconfigure::WarnOnFailures) {
-                Ok(()) => log::info!("Tor kanal dolgusu: {}", if metered { "kapalı (ölçülü ağ)" } else { "azaltılmış" }),
-                Err(e) => log::warn!("Tor yeniden yapılandırılamadı: {e}"),
-            },
-            Err(e) => log::warn!("{e}"),
-        }
     }
 }
 
-/// The one place the arti config is built (launch and `set_metered`).
+/// The arti config.
 ///
-/// Channel padding: Normal sends a 514-byte cell per idle guard channel every
-/// 1.5-9.5 s. Measured on the Note 9S on LTE, idle half hour: Normal 4.4 MB,
-/// radio awake 92 %, 35 mAh; Reduced 1.8 MB, 87 %, 33.5 mAh; None 36 % radio,
-/// ~21 mAh. So: Reduced (Tor's own mobile recommendation, Orbot's
-/// ReducedConnectionPadding) on Wi-Fi where the radio is cheap, None on a
-/// metered (cellular) network where every packet keeps the radio awake.
-fn client_config(state_dir: &str, cache_dir: &str, metered: bool) -> Result<arti_client::TorClientConfig, String> {
+/// Channel padding doubles as the NAT keepalive, so its interval is the one
+/// knob that decides a phone's standby cost on mobile data (each packet keeps
+/// LTE awake ~10 s). Measured on the Note 9S on LTE, idle half hour:
+/// Normal (a cell per idle guard channel every 1.5-9.5 s) 4.4 MB, radio awake
+/// 92 %, 35 mAh; Reduced (9-14 s) 87 %, 33.5 mAh; None — the carrier NAT
+/// dropped the idle guard channel, every peer link died within a minute and
+/// the redials (onion circuit builds) kept the radio up anyway (37 mAh).
+/// So: Reduced, with its idle timeout stretched to 45-55 s — just under the
+/// 60 s cap arti allows and still inside typical netflow record windows.
+/// arti keeps every hourly consensus (~3.3 MB) until 4 days past expiry, so
+/// dir_blobs grows to ~150-330 MB. The retention is a private constant in
+/// tor-dirmgr, so before arti opens the cache keep only the two newest
+/// consensuses per flavour (the latest plus one diff base). Best effort.
+fn trim_dir_cache(cache_dir: &str) {
+    let dir = std::path::Path::new(cache_dir);
+    let Ok(conn) = rusqlite::Connection::open(dir.join("dir.sqlite3")) else { return };
+    let files: Vec<String> = (|| -> rusqlite::Result<Vec<String>> {
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        let q = "SELECT filename FROM ExtDocs e WHERE type LIKE 'con%' AND \
+                 (SELECT COUNT(*) FROM ExtDocs n WHERE n.type = e.type AND n.created > e.created) >= 2";
+        let names: Vec<String> = conn.prepare(q)?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        for n in &names {
+            conn.execute("DELETE FROM ExtDocs WHERE filename = ?", [n])?;
+        }
+        Ok(names)
+    })()
+    .unwrap_or_default();
+    for f in &files {
+        let _ = std::fs::remove_file(dir.join("dir_blobs").join(f));
+    }
+    if !files.is_empty() {
+        log::info!("Tor dizin önbelleği budandı: {} eski konsensüs silindi", files.len());
+    }
+}
+
+fn client_config(state_dir: &str, cache_dir: &str) -> Result<arti_client::TorClientConfig, String> {
     let mut config = TorClientConfigBuilder::from_directories(state_dir, cache_dir);
     // Devre kurma zaman aşımı arti'de ölçümle öğreniliyor; hızlı Wi-Fi'de
     // öğrenilen kısa değer, mobil veriye geçince devrelerin çoğunu
     // tamamlanmadan terk ettiriyordu (cihazda: ağ değişiminden sonra onion
     // dial'ı 6 sn'de "tor operation timed out", toparlanma 20-120 sn).
-    // Öğrenme açık kalıyor, yalnızca alt sınır 10 sn.
-    config.override_net_params().insert("cbtmintimeout".to_string(), 10_000);
-    config.channel().padding(if metered { tor_config::PaddingLevel::None } else { tor_config::PaddingLevel::Reduced });
+    // Öğrenme açık kalıyor, yalnızca alt sınır.
+    // 20 s: an extend is budgeted 4/6 of this (3->4 hops). At 10 s the
+    // ~6.7 s extend to a slow intro point on LTE timed out every try, and
+    // each IPT status change re-uploaded the descriptor to 16 HSDirs
+    // (~130 KB) once a minute.
+    config.override_net_params().insert("cbtmintimeout".to_string(), 20_000);
+    config.override_net_params().insert("nf_ito_low_reduced".to_string(), 45_000);
+    config.override_net_params().insert("nf_ito_high_reduced".to_string(), 55_000);
+    // No preemptive exit circuits: the app only ever dials onion services,
+    // but arti keeps circuits for ports 80/443 warm by default — pure radio
+    // and battery cost.
+    config.preemptive_circuits().initial_predicted_ports().clear();
+    config.channel().padding(tor_config::PaddingLevel::Reduced);
     config.build().map_err(|e| format!("Arti config: {e}"))
 }
 
@@ -473,5 +504,26 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<TransportEvent<Self::ListenerUpgrade, Self::Error>> {
         Pin::new(&mut self.get_mut().0).poll(cx)
+    }
+}
+
+#[cfg(test)]
+mod trim_tests {
+    #[test]
+    fn keeps_two_newest_consensuses() {
+        let dir = std::env::temp_dir().join(format!("trim_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("dir_blobs")).unwrap();
+        let conn = rusqlite::Connection::open(dir.join("dir.sqlite3")).unwrap();
+        conn.execute_batch("CREATE TABLE ExtDocs (digest TEXT PRIMARY KEY, created DATE, expires DATE, type TEXT, filename TEXT);").unwrap();
+        for (i, t) in ["con:microdesc"; 4].iter().chain(["other"].iter()).enumerate() {
+            let f = format!("f{i}");
+            std::fs::write(dir.join("dir_blobs").join(&f), b"x").unwrap();
+            conn.execute("INSERT INTO ExtDocs VALUES (?1, ?2, '2099-01-01', ?3, ?1)", rusqlite::params![f, format!("2026-01-0{} 00:00:00", i + 1), t]).unwrap();
+        }
+        drop(conn);
+        super::trim_dir_cache(dir.to_str().unwrap());
+        let left: Vec<bool> = (0..5).map(|i| dir.join("dir_blobs").join(format!("f{i}")).exists()).collect();
+        assert_eq!(left, [false, false, true, true, true]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

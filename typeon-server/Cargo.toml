@@ -30,7 +30,7 @@ p2p_messenger_core = { path = "../p2p_messenger_android/app/src/main/cpp/rust" }
 # farklı libp2p sürümü, aynı isimli ama FARKLI tipler demek olurdu ve
 # derlenmezdi. rusqlite için de aynı durum (`links = "sqlite3"` çakışması,
 # bkz. çekirdeğin Cargo.toml notu).
-libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "identify", "kad", "tokio", "macros", "dns", "request-response", "cbor", "relay", "autonat", "upnp"] }
+libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "identify", "kad", "tokio", "macros", "dns", "request-response", "cbor", "relay", "upnp"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 futures = "0.3"
 # Live call-media relay streams (see `RELAY_PROTOCOL`).
