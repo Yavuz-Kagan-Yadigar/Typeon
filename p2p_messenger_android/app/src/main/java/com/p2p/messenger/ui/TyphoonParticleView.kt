@@ -64,7 +64,7 @@ class TyphoonParticleView @JvmOverloads constructor(
          * bir hız izinin koniklenmesini ve sönmesini veriyor — üstelik
          * `BlurMaskFilter`'dan kat kat ucuz.
          */
-        const val TRAIL_SEGMENTS = 6
+        const val TRAIL_SEGMENTS = 10
         /** Huninin ucu (alt) — görünüm genişliğinin oranı olarak. */
         const val FUNNEL_TIP_RADIUS = 0.045f
         /** Huninin ağzı (üst). Kullanıcı "üstte geniş" istedi. */
@@ -75,7 +75,7 @@ class TyphoonParticleView @JvmOverloads constructor(
         const val BASE_SPIN = 7.0f
         /** İzin en uzun hâlinin zaman cinsinden karşılığı — gerçek uzunluk
          *  parçacığın boyutuyla ölçekleniyor (bkz. `Particle.trailSpan`). */
-        const val TRAIL_SPAN_MAX = 0.11f
+        const val TRAIL_SPAN_MAX = 0.22f
     }
 
     private class Particle(
@@ -119,7 +119,7 @@ class TyphoonParticleView @JvmOverloads constructor(
             // Boyut önce oranı olarak seçiliyor: hem piksel boyutu hem iz
             // uzunluğu AYNI rastgele değerden türesin diye.
             val sizeFraction = random.nextFloat()
-            val sizePx = (3.0f + sizeFraction * 6.5f) * resources.displayMetrics.density
+            val sizePx = (4.0f + sizeFraction * 7.5f) * resources.displayMetrics.density
             Particle(
                 angle0 = random.nextFloat() * 6.2832f,
                 // Başlangıç yüksekliği tüm huniye dağılsın ki efekt daha
@@ -147,7 +147,7 @@ class TyphoonParticleView @JvmOverloads constructor(
                 floatArrayOf(
                     (hsv[0] + p.hueShift + 360f) % 360f,
                     (hsv[1] + p.satShift).coerceIn(0.25f, 1f),
-                    (hsv[2] + p.valShift).coerceIn(0.35f, 1f),
+                    (hsv[2] + p.valShift).coerceIn(0.5f, 1f),
                 )
             )
         }

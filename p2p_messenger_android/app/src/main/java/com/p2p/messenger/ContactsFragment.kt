@@ -116,7 +116,7 @@ class ContactsFragment : Fragment() {
                 val intent = Intent(requireContext(), ChatActivity::class.java)
                 intent.putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, message.contactId)
                 intent.putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, message.displayName)
-                startActivity(intent)
+                startActivity(com.p2p.messenger.util.ShareIntake.attachTo(intent))
             } else {
                 // Kayıt (TOFU) tamamlandı ama karşı tarafla henüz gerçek bir
                 // bağlantı/IdentityExchange tamamlanmadı (bkz. Rust

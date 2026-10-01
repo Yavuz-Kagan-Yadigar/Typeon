@@ -90,6 +90,11 @@ object AppLock {
     private const val MAX_EXCURSION_MS = 3 * 60_000L
     @Volatile private var excursionLeftAt = 0L
 
+    /** Kullanıcı isteği: arka planda bu süreden uzun kalırsa şifre sorulur
+     *  (ekran kilitlenince hemen — bkz. `lockNow`); kısa geçişlerde sorulmaz. */
+    private const val BACKGROUND_LOCK_MS = 60_000L
+    @Volatile private var backgroundedAt = 0L
+
     fun hasPassword(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return prefs.contains(KEY_HASH) && prefs.contains(KEY_SALT)
@@ -187,6 +192,11 @@ object AppLock {
             excursionLeftAt = SystemClock.elapsedRealtime()
             return
         }
+        backgroundedAt = SystemClock.elapsedRealtime()
+    }
+
+    /** Ekran kapandı: bekleme olmadan hemen kilitle. */
+    fun lockNow() {
         unlocked = false
     }
 
@@ -215,6 +225,9 @@ object AppLock {
             excursionLeftAt = 0L
             if (SystemClock.elapsedRealtime() - leftAt > MAX_EXCURSION_MS) unlocked = false
         }
+        val bgAt = backgroundedAt
+        backgroundedAt = 0L
+        if (bgAt != 0L && SystemClock.elapsedRealtime() - bgAt > BACKGROUND_LOCK_MS) unlocked = false
         if (unlocked) return
         if (promptShowing) return
         promptShowing = true

@@ -85,6 +85,13 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="typeon-server" />
             </intent-filter>
+            <!-- Android paylaşım ekranında "Typeon" — bkz. util.ShareIntake. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
         </activity>
 
         <!-- Spec dışı, kullanıcı isteği (klavye telafisi — bkz.

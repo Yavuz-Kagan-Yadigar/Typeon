@@ -408,4 +408,5 @@
     <string name="call_permission_needed">Aramalar için mikrofon (görüntülü için kamera) izni gerekli</string>
     <string name="call_channel_name">Aramalar</string>
     <string name="call_notification_title">Typeon araması</string>
+    <string name="msg_share_pick_chat">Paylaşmak için bir sohbet seçin</string>
 </resources>

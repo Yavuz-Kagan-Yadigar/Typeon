@@ -184,8 +184,16 @@ object NotificationHelper {
      *  (conversationId'nin hash'i) — bu yüzden yığılıp bildirim çubuğunu
      *  doldurmak yerine tek bildirim güncellenir. */
     private fun show(context: Context, notificationId: Int, title: String, text: String, contentIntent: Intent) {
+        // Kullanıcı isteği: bildirime dokunmak belirli sohbeti değil uygulamayı
+        // normal (launcher) şekilde açsın — geri tuşu da tek seferde çıkar.
+        val isChat = contentIntent.component?.className.let {
+            it == ChatActivity::class.java.name || it == GroupChatActivity::class.java.name
+        }
+        val launchIntent = if (isChat) {
+            context.packageManager.getLaunchIntentForPackage(context.packageName) ?: contentIntent
+        } else contentIntent
         val pendingIntent = PendingIntent.getActivity(
-            context, notificationId, contentIntent,
+            context, notificationId, launchIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         // Spec dışı, güvenlik denetimi düzeltmesi: bu uygulamanın TÜM amacı

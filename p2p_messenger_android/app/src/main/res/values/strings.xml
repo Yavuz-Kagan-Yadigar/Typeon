@@ -449,4 +449,5 @@
     <string name="call_permission_needed">Microphone (and camera for video) permission is needed for calls</string>
     <string name="call_channel_name">Calls</string>
     <string name="call_notification_title">Typeon call</string>
+    <string name="msg_share_pick_chat">Choose a chat to share to</string>
 </resources>

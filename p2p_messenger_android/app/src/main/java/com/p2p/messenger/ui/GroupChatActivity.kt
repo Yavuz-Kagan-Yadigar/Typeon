@@ -585,6 +585,16 @@ class GroupChatActivity : AppCompatActivity() {
             finish()
             return
         }
+        consumeShare(intent)
+    }
+
+    /** Paylaşım ekranından seçilen içerik (bkz. util.ShareIntake). */
+    private fun consumeShare(intent: Intent) {
+        val share = com.p2p.messenger.util.ShareIntake.take(intent) ?: return
+        com.p2p.messenger.util.ShareIntake.text(share)?.let {
+            findViewById<EditText>(R.id.edtMessage).apply { setText(it); setSelection(text.length) }
+        }
+        com.p2p.messenger.util.ShareIntake.uris(share).forEach { onGroupFilePicked(it) }
     }
 
     /**
@@ -1203,7 +1213,9 @@ class GroupChatActivity : AppCompatActivity() {
         setIntent(intent)
         if (!bindToIntent(intent)) {
             finish()
+            return
         }
+        consumeShare(intent)
     }
 
     /**

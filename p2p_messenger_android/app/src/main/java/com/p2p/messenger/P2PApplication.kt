@@ -37,6 +37,9 @@ class P2PApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        registerReceiver(object : android.content.BroadcastReceiver() {
+            override fun onReceive(c: android.content.Context?, i: Intent?) = AppLock.lockNow()
+        }, android.content.IntentFilter(Intent.ACTION_SCREEN_OFF))
 
         // Spec dışı, kullanıcı isteği ("break material, doesn't matter,
         // force font on all UI"): Android'in kendi varsayılan Typeface

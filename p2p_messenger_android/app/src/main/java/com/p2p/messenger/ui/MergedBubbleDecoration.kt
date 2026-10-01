@@ -123,6 +123,13 @@ class MergedBubbleDecoration(
                 val member = parent.getChildAt(cursor)
                 if (parent.getChildAdapterPosition(member) != cursorPosition) break
                 if (!collectBubble(member)) break
+                // Kaydırılan (translationX != 0) satır kendi başına çizilir;
+                // aksi halde birleşik şekil tüm grubu birlikte bozar/kaydırır.
+                val moved = member.translationX != 0f
+                if (moved && memberCount >= 2) {
+                    memberCount--
+                    break
+                }
                 // Grup, balonlar GERÇEKTEN bitişik olduğu sürece devam eder.
                 // Aradaki HER dikey boşluk (alıntı kutusu, gönderen satırı)
                 // birleşik şeklin o boşluğu da doldurmasına yol açıyordu —
@@ -134,6 +141,7 @@ class MergedBubbleDecoration(
                 }
                 cursor++
                 cursorPosition++
+                if (moved) break
                 if (!adapter.isGroupedWithNextPublic(cursorPosition - 1)) break
             }
             val isMine = adapter.isMineAt(position)

@@ -138,6 +138,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         handleJoinLink(intent)
+        handleShare(intent)
+    }
+
+    /** Paylaşım ekranından gelen içerik: bekletilir, kullanıcı sohbet seçince
+     *  gönderilir (bkz. util.ShareIntake). */
+    private fun handleShare(intent: Intent?) {
+        if (!com.p2p.messenger.util.ShareIntake.isShare(intent)) return
+        com.p2p.messenger.util.ShareIntake.pending = intent
+        android.widget.Toast.makeText(this, R.string.msg_share_pick_chat, android.widget.Toast.LENGTH_LONG).show()
     }
 
     /** `singleTop` — uygulama zaten açıkken tıklanan katılım bağlantısı
@@ -146,6 +155,7 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleJoinLink(intent)
+        handleShare(intent)
     }
 
     /**

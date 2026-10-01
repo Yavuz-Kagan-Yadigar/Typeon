@@ -567,7 +567,16 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): BubbleViewHolder {
         val view = LayoutInflater.from(parent.context)
             .inflate(R.layout.item_message_bubble, parent, false)
-        return BubbleViewHolder(view)
+        val holder = BubbleViewHolder(view)
+        // Sabit 340dp maxWidth + yan sütun (tepki/görüldü) dar ekranda satırı
+        // ekrandan taşırıyordu; sınırı ekran genişliğinden türet.
+        val d = parent.resources.displayMetrics
+        val screenDp = d.widthPixels / d.density
+        val textMax = (minOf(340f, screenDp - 8f - 72f - 24f) * d.density).toInt()
+        holder.textView.maxWidth = textMax
+        holder.txtAttachmentCaption.maxWidth = textMax
+        holder.txtReplyQuoteText.maxWidth = (minOf(300f, screenDp - 80f) * d.density).toInt()
+        return holder
     }
 
     override fun onBindViewHolder(holder: BubbleViewHolder, position: Int) {

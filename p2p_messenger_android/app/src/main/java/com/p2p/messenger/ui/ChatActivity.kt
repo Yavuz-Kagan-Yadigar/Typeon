@@ -590,7 +590,16 @@ class ChatActivity : AppCompatActivity() {
         adapter.onVoiceSpeedClick = { item -> onVoiceSpeedClicked(item) }
         adapter.onVoiceSeek = { item, positionMs -> onVoiceSeeked(item, positionMs) }
 
-        if (!bindToIntent(intent)) finish()
+        if (!bindToIntent(intent)) finish() else consumeShare(intent)
+    }
+
+    /** Paylaşım ekranından seçilen içerik (bkz. util.ShareIntake). */
+    private fun consumeShare(intent: Intent) {
+        val share = com.p2p.messenger.util.ShareIntake.take(intent) ?: return
+        com.p2p.messenger.util.ShareIntake.text(share)?.let {
+            findViewById<EditText>(R.id.edtMessage).apply { setText(it); setSelection(text.length) }
+        }
+        com.p2p.messenger.util.ShareIntake.uris(share).forEach { onFilePicked(it) }
     }
 
     // ---------------------------------------------------------------
@@ -963,7 +972,7 @@ class ChatActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (!bindToIntent(intent)) finish()
+        if (!bindToIntent(intent)) finish() else consumeShare(intent)
     }
 
     private fun sendNewMessage(text: String) {
