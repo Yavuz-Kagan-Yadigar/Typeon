@@ -139,3 +139,8 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+
+# TypeOn patch of tor-hsservice 0.24: stop re-uploading the onion descriptor
+# every time an intro circuit is rebuilt (see vendor/tor-hsservice, "TypeOn patch").
+[patch.crates-io]
+tor-hsservice = { path = "vendor/tor-hsservice" }

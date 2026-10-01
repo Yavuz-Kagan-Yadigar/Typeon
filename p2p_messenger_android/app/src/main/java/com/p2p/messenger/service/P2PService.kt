@@ -583,6 +583,10 @@ class P2PService : Service() {
             }
             "call" -> if (obj.optString("action") == "invite") {
                 com.p2p.messenger.ui.CallActivity.ring(applicationContext, obj.optString("name"), obj.optBoolean("video"))
+            } else if (obj.optBoolean("ended")) {
+                // Caller gave up while we were only a notification (no
+                // full-screen permission, screen on): don't leave it ringing.
+                com.p2p.messenger.ui.CallActivity.cancelRing(applicationContext)
             }
             "message" -> {
                 val peer = obj.optString("peer")
@@ -731,6 +735,7 @@ class P2PService : Service() {
             // Pil düzeltmesi: ekran durumu, yoklama kademesinin en güçlü
             // sinyali (bkz. companion object'teki not).
             observeScreenState()
+            BatteryLog.start(this)
             // Spec dışı, kullanıcı isteği ("connection testing and
             // re-connecting automatically should be better") — bkz.
             // `observeNetworkChangesForReconnect` dokümantasyonu.
@@ -806,6 +811,7 @@ class P2PService : Service() {
         super.onDestroy()
         isRunning = false
         releaseWakeLock()
+        BatteryLog.stop()
         wakePollNow = null
         handler.removeCallbacks(pollRunnable)
         cancelDozeWakeup()
@@ -835,30 +841,40 @@ class P2PService : Service() {
         defaultNetworkCallback = null
     }
 
-    /** bkz. `wakeLock` alan notu. */
+    /** bkz. `wakeLock` alan notu.
+     *
+     * One lock object for the service's lifetime, and both functions are
+     * synchronized: they run on the poll thread and on the main thread (screen
+     * receiver, onStartCommand). Creating a new lock per call let a race or an
+     * overwrite drop a held lock that nothing ever released again (9S,
+     * 2026-09-30: three 'Typeon:network' locks held at once, one for 1h42m,
+     * CPU never slept, ~180 mA all night with the screen off). */
+    @Synchronized
     private fun acquireWakeLock(timeoutMs: Long = 0L) {
-        if (wakeLock?.isHeld == true) {
-            // Zamanlı (kısa) kilit varsa ve süresiz istendiyse yükselt.
-            if (timeoutMs != 0L || !wakeTimed) return
-            releaseWakeLock()
-        }
-        wakeTimed = timeoutMs != 0L
         try {
-            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
-            wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "Typeon:network")
-                .also { it.setReferenceCounted(false); if (timeoutMs > 0) it.acquire(timeoutMs) else it.acquire() }
+            val lock = wakeLock ?: (getSystemService(Context.POWER_SERVICE) as android.os.PowerManager)
+                .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "Typeon:network")
+                .also { it.setReferenceCounted(false); wakeLock = it }
+            if (lock.isHeld) {
+                // Zamanlı (kısa) kilit varsa ve süresiz istendiyse yükselt.
+                if (timeoutMs != 0L || !wakeTimed) return
+                lock.release()
+            }
+            wakeTimed = timeoutMs != 0L
+            if (timeoutMs > 0) lock.acquire(timeoutMs) else lock.acquire()
+            BatteryLog.wakeAcquired(timeoutMs)
         } catch (e: Exception) {
             Log.w(TAG, "Wake lock alınamadı: ${e.message}")
         }
     }
 
+    @Synchronized
     private fun releaseWakeLock() {
         try {
-            wakeLock?.let { if (it.isHeld) it.release() }
+            wakeLock?.let { if (it.isHeld) { it.release(); BatteryLog.wakeReleased() } }
         } catch (e: Exception) {
             // Zaten bırakılmışsa yok say.
         }
-        wakeLock = null
     }
 
     /**

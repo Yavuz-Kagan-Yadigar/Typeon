@@ -236,6 +236,10 @@ pub(crate) struct ServerRuntime {
     /// `Deposit` denenmez (kota/hız hatası sonrası). `Fetch`/`Ack` bundan
     /// ETKİLENMEZ: gelen postayı almaya devam etmek her zaman doğru.
     pub deposit_backoff_until: u64,
+    /// Unreachable server: no new dial before this (ms), see `server_sweep`.
+    pub dial_backoff_until: u64,
+    /// Dials since the last successful connection.
+    pub dial_attempts: u32,
 }
 
 /// Havada bekleyen bir sunucu RPC'si.
@@ -1171,6 +1175,13 @@ impl P2PCore {
             let connected = connected || really_connected;
 
             if !connected {
+                // Offline server: back off 15 s doubling to 30 min. Without it
+                // every sweep (15 s) was one more failed onion lookup, the CPU
+                // never idled (9S 2026-09-30: 35 dials in 11 min on Wi-Fi).
+                let Some(rt) = self.server_rt.get_mut(&rec.server_id) else { continue };
+                if now < rt.dial_backoff_until { continue; }
+                rt.dial_backoff_until = now + (SERVER_SWEEP_INTERVAL_MS << rt.dial_attempts.min(7)).min(30 * 60 * 1000);
+                rt.dial_attempts += 1;
                 // Bağlı değiliz: BİLİNEN HER adresi aynı anda dene (bkz.
                 // `ServerRecord.address`).
                 for a in rec.address.split(',').filter_map(|a| a.trim().parse::<Multiaddr>().ok()) {
@@ -1934,6 +1945,8 @@ impl P2PCore {
         if let Some(rt) = self.server_rt.get_mut(&sid) {
             rt.connected = connected;
             if connected {
+                rt.dial_attempts = 0;
+                rt.dial_backoff_until = 0;
                 // Yeniden bağlanmada abonelikler sunucuda hâlâ duruyor ama
                 // bizim görüşümüz bayat olabilir — sıfırla, fark yeniden
                 // hesaplansın.

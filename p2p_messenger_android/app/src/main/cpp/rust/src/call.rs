@@ -598,6 +598,11 @@ pub(crate) fn spawn_media_acceptor(control: &mut libp2p_stream::Control) {
     };
     RUNTIME.spawn(async move {
         while let Some((_peer, mut stream)) = incoming.next().await {
+            // Outside a call nobody has a reason to push media: drop the
+            // stream instead of parking a reader (and up to MAX_FRAME) on it.
+            if !media().active {
+                continue;
+            }
             tokio::spawn(async move {
                 while let Ok((_, data)) = read_frame(&mut stream).await {
                     media_on_packet(&data);
