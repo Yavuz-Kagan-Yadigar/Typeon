@@ -137,6 +137,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private lateinit var peerDeviceFingerprint: String
+    private lateinit var whiteboard: WhiteboardPanel
     private val localMessages = mutableListOf<SimpleChatAdapter.Item>()
     private lateinit var adapter: SimpleChatAdapter
     private lateinit var recycler: RecyclerView
@@ -446,6 +447,7 @@ class ChatActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_chat)
+        whiteboard = WhiteboardPanel(this, findViewById(R.id.whiteboardHost), findViewById(R.id.whiteboardHandle))
         ThemePrefs.applyChatBackground(this)
         // bkz. util.ChatListDrawer dokümantasyonu.
         com.p2p.messenger.util.ChatListDrawer.setup(this)
@@ -921,6 +923,7 @@ class ChatActivity : AppCompatActivity() {
         if (::peerDeviceFingerprint.isInitialized && peerDeviceFingerprint == newPeer) return true
 
         peerDeviceFingerprint = newPeer
+        whiteboard.bind(peerDeviceFingerprint, "")
         P2PService.activeConversationId = peerDeviceFingerprint
         localMessages.clear()
         // Önceki sohbette açık kalan yanıt, yeni sohbetteki mesaja yapışmasın.

@@ -450,4 +450,17 @@
     <string name="call_channel_name">Calls</string>
     <string name="call_notification_title">Typeon call</string>
     <string name="msg_share_pick_chat">Choose a chat to share to</string>
+    <string name="action_whiteboard">Whiteboard</string>
+    <string name="whiteboard_prev_page">Previous page</string>
+    <string name="whiteboard_next_page">Next page</string>
+    <string name="whiteboard_pen">Pen</string>
+    <string name="whiteboard_eraser">Eraser</string>
+    <string name="whiteboard_color">Colour</string>
+    <string name="whiteboard_export_pdf">Export as PDF</string>
+    <string name="whiteboard_page_full">This page is full. Erase something or use another page.</string>
+    <string name="whiteboard_pdf_saved">Whiteboard saved as PDF</string>
+    <string name="whiteboard_pdf_failed">Could not save the PDF</string>
+    <string name="whiteboard_undo">Undo</string>
+    <string name="whiteboard_redo">Redo</string>
+    <string name="whiteboard_pen_size">Pen size</string>
 </resources>

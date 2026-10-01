@@ -518,4 +518,25 @@ object P2PLib {
     external fun callRequestKeyframe(slot: Int)
     /** True once after a participant asked us for a keyframe. */
     external fun callTakeKeyframeRequest(): Boolean
+
+    // --- Shared whiteboard (see whiteboard.rs). Every call names a chat: a
+    // group by [groupId], or the 1:1 chat with [peer] when [groupId] is "". ---
+
+    /** A finished stroke on the 1600x1000 board; [points] are little-endian u16
+     *  x,y pairs, [shade] 0 light / 1 base / 2 dark, [width] the pen width in
+     *  board units (0 = default). Returns the new stroke
+     *  ids as hex (16 digits each), or "Error: ...". */
+    external fun whiteboardAddStroke(peer: String, groupId: String, page: Int, shade: Int, width: Int, points: ByteArray): String
+    /** [ids]: 8 bytes per erased stroke. */
+    external fun whiteboardErase(peer: String, groupId: String, ids: ByteArray): String
+    /** The board was opened: syncs with the devices that are connected now. */
+    external fun whiteboardOpen(peer: String, groupId: String)
+    external fun whiteboardMarkRead(peer: String, groupId: String, page: Int)
+    /** JSON: `{"pages", "unread" (bit per page), "me", "participants":[{"id","name"}]}`;
+     *  the participant order is the colour order. */
+    external fun whiteboardInfo(peer: String, groupId: String): String
+    /** Per stroke: id(8) shade(1) author index(1, 255 = left) width(1) point count(u16) points. */
+    external fun whiteboardPage(peer: String, groupId: String, page: Int): ByteArray
+    /** Sends batched strokes / the settling summary if they are due. */
+    external fun whiteboardTick()
 }

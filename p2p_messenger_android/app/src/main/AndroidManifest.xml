@@ -133,6 +133,7 @@
         <activity
             android:name=".ui.CallActivity"
             android:launchMode="singleTask"
+            android:supportsPictureInPicture="true"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:excludeFromRecents="true"

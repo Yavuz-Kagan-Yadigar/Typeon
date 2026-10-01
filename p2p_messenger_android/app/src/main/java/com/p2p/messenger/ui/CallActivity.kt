@@ -4,9 +4,11 @@ import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.SurfaceTexture
 import android.media.AudioManager
@@ -16,6 +18,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.util.Rational
 import android.util.Size
 import android.view.Gravity
 import android.view.Surface
@@ -111,6 +114,8 @@ class CallActivity : AppCompatActivity() {
     private lateinit var txtName: TextView
     private lateinit var txtStatus: TextView
     private lateinit var grid: LinearLayout
+    private lateinit var header: View
+    private lateinit var bar: View
     private lateinit var selfView: PreviewView
     private lateinit var btnAccept: Button
     private lateinit var btnHangup: Button
@@ -136,6 +141,8 @@ class CallActivity : AppCompatActivity() {
 
     private class Tile(val root: FrameLayout, val label: TextView, var texture: TextureView?) {
         var mutedShown = false
+        var videoW = 0
+        var videoH = 0
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -154,14 +161,16 @@ class CallActivity : AppCompatActivity() {
         poll()
     }
 
-    override fun onResume() {
-        super.onResume()
+    // onStart/onStop, not onResume/onPause: a picture-in-picture call is
+    // paused but still on screen and still needs the fast poll.
+    override fun onStart() {
+        super.onStart()
         // Keeps the service poll loop at its fast rate for signalling/link upkeep.
         P2PService.addMessageListener(keepPollFast)
     }
 
-    override fun onPause() {
-        super.onPause()
+    override fun onStop() {
+        super.onStop()
         P2PService.removeMessageListener(keepPollFast)
     }
 
@@ -179,7 +188,38 @@ class CallActivity : AppCompatActivity() {
 
     @Deprecated("Back would leave a call running with no screen; use Hang up.")
     override fun onBackPressed() {
-        moveTaskToBack(true)
+        if (!enterPip()) moveTaskToBack(true)
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        enterPip()
+    }
+
+    /** Shrinks the call into the system's draggable picture-in-picture window.
+     *  Not while ringing in: Accept has to stay reachable. */
+    private fun enterPip(): Boolean {
+        if (state != "active" && state != "outgoing") return false
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return false
+        val ratio = if (video) Rational(3, 4) else Rational(16, 9)
+        return try {
+            enterPictureInPictureMode(PictureInPictureParams.Builder().setAspectRatio(ratio).build())
+        } catch (e: IllegalStateException) {
+            false
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(inPip: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(inPip, newConfig)
+        val dp = resources.displayMetrics.density
+        header.visibility = if (inPip) View.GONE else View.VISIBLE
+        bar.visibility = if (inPip) View.GONE else View.VISIBLE
+        selfView.visibility = if (!inPip && cameraProvider != null && CallMedia.videoEncoder?.enabled == true) View.VISIBLE else View.GONE
+        (grid.layoutParams as FrameLayout.LayoutParams).apply {
+            topMargin = if (inPip) 0 else (96 * dp).toInt()
+            bottomMargin = if (inPip) 0 else (88 * dp).toInt()
+        }
+        grid.requestLayout()
     }
 
     // ---------------------------------------------------------------- actions
@@ -359,7 +399,7 @@ class CallActivity : AppCompatActivity() {
     }
 
     private fun startCamera() {
-        selfView.visibility = View.VISIBLE
+        selfView.visibility = if (isInPictureInPictureMode) View.GONE else View.VISIBLE
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             if (!mediaRunning) return@addListener
@@ -439,7 +479,9 @@ class CallActivity : AppCompatActivity() {
                 surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                     override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
                         val tv = this@apply
-                        CallMedia.attachVideo(slot, Surface(st)) { vw, vh -> ui.post { fitVideo(tv, root, vw, vh) } }
+                        CallMedia.attachVideo(slot, Surface(st)) { vw, vh ->
+                            ui.post { tiles[slot]?.let { it.videoW = vw; it.videoH = vh }; fitVideo(tv, root, vw, vh) }
+                        }
                     }
                     override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {}
                     override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean { CallMedia.dropSlot(slot); return true }
@@ -452,7 +494,12 @@ class CallActivity : AppCompatActivity() {
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             if (video) Gravity.BOTTOM or Gravity.START else Gravity.CENTER
         ))
-        return Tile(root, label, texture)
+        val tile = Tile(root, label, texture)
+        // The tile is resized when the call enters or leaves picture-in-picture.
+        root.addOnLayoutChangeListener { _, l, t, r, b, oldL, oldT, oldR, oldB ->
+            if (r - l != oldR - oldL || b - t != oldB - oldT) texture?.let { tv -> root.post { fitVideo(tv, root, tile.videoW, tile.videoH) } }
+        }
+        return tile
     }
 
     /** Letterbox the remote video into its tile, keeping the aspect ratio. */
@@ -486,6 +533,7 @@ class CallActivity : AppCompatActivity() {
         header.addView(txtName)
         header.addView(txtStatus)
         root.addView(header)
+        this.header = header
         selfView = PreviewView(this).apply {
             visibility = View.GONE
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
@@ -537,6 +585,7 @@ class CallActivity : AppCompatActivity() {
         btnCamera.visibility = View.GONE
         btnAccept.visibility = View.GONE
         root.addView(bar, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
+        this.bar = bar
         return root
     }
 }

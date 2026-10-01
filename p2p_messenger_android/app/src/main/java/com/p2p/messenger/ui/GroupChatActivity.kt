@@ -128,6 +128,7 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     private lateinit var groupId: String
+    private lateinit var whiteboard: WhiteboardPanel
     private val localMessages = mutableListOf<SimpleChatAdapter.Item>()
     private lateinit var adapter: SimpleChatAdapter
     private lateinit var recycler: RecyclerView
@@ -436,6 +437,7 @@ class GroupChatActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_chat)
+        whiteboard = WhiteboardPanel(this, findViewById(R.id.whiteboardHost), findViewById(R.id.whiteboardHandle))
         com.p2p.messenger.util.ThemePrefs.applyChatBackground(this)
         // bkz. util.ChatListDrawer dokümantasyonu.
         com.p2p.messenger.util.ChatListDrawer.setup(this)
@@ -615,6 +617,7 @@ class GroupChatActivity : AppCompatActivity() {
         }
 
         groupId = newGroupId
+        whiteboard.bind("", groupId)
         P2PService.activeConversationId = "group:$groupId"
         localMessages.clear()
         // Önceki sohbette açık kalan yanıt, yeni sohbetteki mesaja yapışmasın.

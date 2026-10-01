@@ -951,6 +951,84 @@ pub enum MessageContent {
         #[serde(default)]
         sent_at_ms: u64,
     },
+    /// Shared whiteboard (one board per 1:1 chat or group). `group_id` /
+    /// `conversation_identity_id` name the board the same way `ReadStateSync`
+    /// names a conversation: a group id, or (only from my own sibling
+    /// devices) the contact the 1:1 board belongs to. From a contact, the 1:1
+    /// board is simply the sender's.
+    ///
+    /// Live drawing: strokes finished and strokes erased since the last
+    /// packet. Sent once, never acked or retried — a lost packet is repaired
+    /// by `WbDigest`. The author of every stroke is
+    /// the packet sender (`WbStroke::author` is ignored here).
+    WbOps {
+        #[serde(default)]
+        group_id: Option<String>,
+        #[serde(default)]
+        conversation_identity_id: Option<String>,
+        strokes: Vec<WbStroke>,
+        /// 9-byte records: page, then the 8-byte stroke id.
+        #[serde(default, with = "serde_bytes")]
+        erased: Vec<u8>,
+    },
+    /// "This is what my board looks like": pages that hold strokes, each with
+    /// a stroke count and the XOR of its stroke ids. The one reliable
+    /// whiteboard packet; the receiver pulls the pages that differ.
+    WbDigest {
+        #[serde(default)]
+        group_id: Option<String>,
+        #[serde(default)]
+        conversation_identity_id: Option<String>,
+        pages: Vec<WbPageDigest>,
+    },
+    /// Asks the sender of a `WbDigest` for whole pages.
+    WbPageRequest {
+        #[serde(default)]
+        group_id: Option<String>,
+        #[serde(default)]
+        conversation_identity_id: Option<String>,
+        #[serde(with = "serde_bytes")]
+        pages: Vec<u8>,
+    },
+    /// One whole page. `WbStroke::author` indexes `authors`.
+    WbPage {
+        #[serde(default)]
+        group_id: Option<String>,
+        #[serde(default)]
+        conversation_identity_id: Option<String>,
+        page: u8,
+        authors: Vec<String>,
+        strokes: Vec<WbStroke>,
+        /// Erased stroke ids, 8 bytes each.
+        #[serde(default, with = "serde_bytes")]
+        tombstones: Vec<u8>,
+    },
+}
+
+/// One whiteboard stroke. `points` are little-endian `u16` x,y pairs on the
+/// 1600x1000 virtual canvas. The colour is not carried: it follows from the
+/// author and `shade` (0 light, 1 base, 2 dark). `width` is the pen width in
+/// canvas units; 0 (also what a sender without the field means) = default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WbStroke {
+    #[serde(with = "serde_bytes")]
+    pub id: Vec<u8>,
+    pub page: u8,
+    pub shade: u8,
+    #[serde(default)]
+    pub author: u8,
+    #[serde(default)]
+    pub width: u8,
+    #[serde(with = "serde_bytes")]
+    pub points: Vec<u8>,
+}
+
+/// See `MessageContent::WbDigest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WbPageDigest {
+    pub page: u8,
+    pub count: u32,
+    pub hash: u64,
 }
 
 /// See `MessageContent::Call`.

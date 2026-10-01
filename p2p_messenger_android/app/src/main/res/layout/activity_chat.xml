@@ -197,7 +197,30 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/layoutSearchMessages" />
+        app:layout_constraintTop_toBottomOf="@id/whiteboardHost" />
+
+    <!-- Shared whiteboard (see ui.WhiteboardPanel). Empty and gone until
+         first opened; the message list starts below it, so the chat stays
+         usable while drawing. -->
+    <FrameLayout
+        android:id="@+id/whiteboardHost"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:visibility="gone"
+        app:layout_constraintTop_toBottomOf="@id/layoutSearchMessages"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- The pull tab of the whiteboard: hangs under the top bar (or under the
+         open board), centred, over the top of the message list. -->
+    <View
+        android:id="@+id/whiteboardHandle"
+        android:layout_width="112dp"
+        android:layout_height="28dp"
+        android:contentDescription="@string/action_whiteboard"
+        app:layout_constraintTop_toBottomOf="@id/whiteboardHost"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
 
     <!-- Spec dışı: "yazıyor..." göstergesi — kullanıcı isteği üzerine üst
          çubuktaki durum yazısından buraya, yeni mesajların BELİRECEĞİ

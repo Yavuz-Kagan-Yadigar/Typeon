@@ -39,6 +39,8 @@ pub mod tor;
 pub mod server_client;
 /// Voice/video calls — signalling + media streams, see module docs.
 pub mod call;
+/// Shared whiteboard per chat — storage, sync and limits, see module docs.
+mod whiteboard;
 
 /// Toplu aktarım isteklerinin zaman aşımı (ms) — sunucu tarafı da AYNI
 /// değeri kullanmalı, yoksa bir uç diğerinden önce vazgeçer.
@@ -2747,6 +2749,10 @@ struct P2PCore {
     /// açılışında `load_pending_group_messages_from_db` ile geri yükleniyor
     /// — süreç öldürülüp yeniden başlasa bile bu kuyruk hayatta kalır.
     pending_group_messages: HashMap<(String, String), Vec<MessageContent>>,
+    /// Whiteboard strokes/erases not sent yet, by board — see `whiteboard`.
+    wb_outbox: HashMap<String, whiteboard::WbOutbox>,
+    /// (board, device) -> when a page from it was last answered with a digest.
+    wb_reply_at: HashMap<(String, String), u64>,
     last_group_sync_sweep_at: u64,
     /// `enforce_history_storage_limit`'in periyodik taramasının en son
     /// çalıştığı an — bkz. `HISTORY_STORAGE_SWEEP_INTERVAL_MS`.
@@ -2990,6 +2996,8 @@ impl P2PCore {
             deferred_incoming: Vec::new(),
             pending_group_syncs: HashMap::new(),
             pending_group_messages: HashMap::new(),
+            wb_outbox: HashMap::new(),
+            wb_reply_at: HashMap::new(),
             last_group_sync_sweep_at: 0,
             last_storage_sweep_at: 0,
             known_relay_peers: HashMap::new(),
@@ -3205,6 +3213,9 @@ impl P2PCore {
         )?;
         // Sunucu (store-and-forward) tabloları — bkz. `server_client`.
         Self::init_server_tables(&conn);
+        conn.execute_batch(whiteboard::SCHEMA)?;
+        // Pen width came after the first builds; same ALTER pattern as below.
+        let _ = conn.execute("ALTER TABLE wb_strokes ADD COLUMN width INTEGER NOT NULL DEFAULT 0", []);
 
         // Spec dışı geçiş (migration): `preview_jpeg` kolonu bu tabloya
         // SONRADAN eklendi — `CREATE TABLE IF NOT EXISTS` zaten var olan
@@ -6082,6 +6093,7 @@ impl P2PCore {
                 let _ = conn.execute("DELETE FROM files WHERE peer_device_fingerprint = ?1 AND group_id IS NULL", params![fp]);
             }
         }
+        self.wb_delete_board(None, Some(&contact.trusted_identity_id));
         Ok(())
     }
 
@@ -6092,6 +6104,7 @@ impl P2PCore {
     fn delete_contact(&mut self, contact_id: &str) -> Result<(), String> {
         let contact = self.contacts.remove(contact_id).ok_or("Kişi bulunamadı")?;
         self.identity_to_contact.remove(&contact.trusted_identity_id);
+        self.wb_delete_board(None, Some(&contact.trusted_identity_id));
         let fingerprints: Vec<String> = contact.known_devices.iter().map(|d| d.device_fingerprint.clone()).collect();
         // `device_to_peer_id`'den aşağıdaki döngüde silinmeden ÖNCE
         // yakalanır — canlı bağlantıyı kapatmak için son kullanım (bkz.
@@ -7046,6 +7059,7 @@ impl P2PCore {
                 | MessageContent::ReadStateSync { .. }
                 | MessageContent::SiblingHistoryRequest { .. }
                 | MessageContent::AccountDeleted { .. }
+                | MessageContent::WbDigest { .. }
         );
 
         // Güvenilirlik düzeltmesi (rotasyon duyurusu kaybı): rotasyon SADECE
@@ -7297,6 +7311,7 @@ impl P2PCore {
                 | MessageContent::HistorySyncRequest { .. }
                 | MessageContent::LeaveGroupRequest { .. }
                 | MessageContent::AccountDeleted { .. }
+                | MessageContent::WbDigest { .. }
         ).then(|| content.clone());
         if needs_delivery_confirmation {
             self.publish_with_ack_tracking(
@@ -8417,6 +8432,22 @@ impl P2PCore {
             MessageContent::Call { call_id, action, group_id, video, media_key, stream_id, sent_at_ms } => {
                 self.handle_call_signal(&peer_fp, &sender_identity_id, call_id, action, group_id, video, media_key, stream_id, sent_at_ms)
             }
+            // Whiteboard — see `whiteboard`. Only the digest is acked (it is
+            // the one reliable packet); the handlers check who may touch
+            // which board.
+            MessageContent::WbOps { group_id, conversation_identity_id, strokes, erased } => {
+                self.wb_on_ops(&peer_fp, group_id, conversation_identity_id, strokes, erased)
+            }
+            MessageContent::WbDigest { group_id, conversation_identity_id, pages } => {
+                self.send_ack(&peer_fp, &message_id);
+                self.wb_on_digest(&peer_fp, group_id, conversation_identity_id, pages)
+            }
+            MessageContent::WbPageRequest { group_id, conversation_identity_id, pages } => {
+                self.wb_on_page_request(&peer_fp, group_id, conversation_identity_id, pages)
+            }
+            MessageContent::WbPage { group_id, conversation_identity_id, page, authors, strokes, tombstones } => {
+                self.wb_on_page(&peer_fp, group_id, conversation_identity_id, page, authors, strokes, tombstones)
+            }
             MessageContent::TypingIndicator { is_typing, group_id } => {
                 // Kasitli olarak: arsivlenmez, Ack GONDERILMEZ (bkz.
                 // packet.rs notu) -- birkac saniyede bayatlayan bir bilgi
@@ -9133,6 +9164,7 @@ impl P2PCore {
                 // Engel listesi de bu cihazın yerel durumu — silinen bir
                 // kimliğin kimleri engellediği geride kalmamalı.
                 "blocked_identities", "deleted_identities",
+                "wb_strokes", "wb_tombstones",
             ] {
                 let _ = conn.execute(&format!("DELETE FROM {}", table), []);
             }
@@ -9153,6 +9185,8 @@ impl P2PCore {
         self.groups.clear();
         self.awaiting_confirmation.clear();
         self.pending_group_messages.clear();
+        self.wb_outbox.clear();
+        self.wb_reply_at.clear();
         self.pending_group_syncs.clear();
         self.pending_edits_deletes.clear();
         self.pending_envelopes.clear();
@@ -11206,6 +11240,7 @@ impl P2PCore {
         // bkz. `pending_group_messages` AYNI notu.
         self.pending_group_messages.retain(|(gid, _), _| gid != group_id);
         self.remove_persisted_pending_group_messages_for_group(group_id);
+        self.wb_delete_board(Some(group_id), None);
     }
 
     /// bkz. `pending_group_messages` alanı dokümantasyonu — bir üyeye bir
@@ -16354,6 +16389,8 @@ impl P2PCore {
         // güncellemelerini periyodik (≤20 sn) olarak yeniden dener.
         lock_watch::phase("group_sync_sweep");
         self.group_sync_sweep();
+        // Whiteboard: batched strokes and the settling digest, see `whiteboard`.
+        self.wb_sweep();
         // bkz. `early_packets` — el sıkışması hiç gelmeyen tamponlar süresi
         // dolunca temizlenir.
         self.prune_early_packets();

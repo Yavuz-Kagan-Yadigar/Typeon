@@ -409,4 +409,17 @@
     <string name="call_channel_name">Aramalar</string>
     <string name="call_notification_title">Typeon araması</string>
     <string name="msg_share_pick_chat">Paylaşmak için bir sohbet seçin</string>
+    <string name="action_whiteboard">Beyaz tahta</string>
+    <string name="whiteboard_prev_page">Önceki sayfa</string>
+    <string name="whiteboard_next_page">Sonraki sayfa</string>
+    <string name="whiteboard_pen">Kalem</string>
+    <string name="whiteboard_eraser">Silgi</string>
+    <string name="whiteboard_color">Renk</string>
+    <string name="whiteboard_export_pdf">PDF olarak dışa aktar</string>
+    <string name="whiteboard_page_full">Bu sayfa doldu. Bir şeyler silin ya da başka sayfa kullanın.</string>
+    <string name="whiteboard_pdf_saved">Beyaz tahta PDF olarak kaydedildi</string>
+    <string name="whiteboard_pdf_failed">PDF kaydedilemedi</string>
+    <string name="whiteboard_undo">Geri al</string>
+    <string name="whiteboard_redo">Yinele</string>
+    <string name="whiteboard_pen_size">Kalem boyutu</string>
 </resources>
