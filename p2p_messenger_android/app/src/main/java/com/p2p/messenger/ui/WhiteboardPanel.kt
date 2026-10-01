@@ -1,5 +1,6 @@
 package com.p2p.messenger.ui
 
+import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorFilter
@@ -19,13 +20,13 @@ import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageButton
 import android.widget.LinearLayout
-import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
+import com.google.android.material.slider.Slider
 import com.p2p.messenger.P2PLib
 import com.p2p.messenger.R
 import com.p2p.messenger.service.P2PService
@@ -67,6 +68,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
     private var pageCount = 1
     private var unread = 0
     private var built = false
+    private var pdfPage = 0
     private val undoStack = ArrayDeque<Step>()
     private val redoStack = ArrayDeque<Step>()
     private lateinit var undoButton: View
@@ -280,22 +282,20 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         loadPage()
     }
 
+    /** Saves the page that was on screen when PDF was tapped. */
     private fun exportPdf(uri: Uri) {
-        val count = pageCount
+        val shown = pdfPage
         val participants = board.participants
         val (peer, groupId) = Pair(peer, groupId)
         io.execute {
             val ok = try {
                 val pdf = PdfDocument()
-                val paint = WhiteboardView.strokePaint()
-                for (p in 0 until count) {
-                    val strokes = WhiteboardView.parsePage(P2PLib.whiteboardPage(peer, groupId, p))
-                    val pdfPage = pdf.startPage(
-                        PdfDocument.PageInfo.Builder(WhiteboardView.WIDTH.toInt(), WhiteboardView.HEIGHT.toInt(), p + 1).create()
-                    )
-                    WhiteboardView.drawPage(pdfPage.canvas, strokes, participants, paint)
-                    pdf.finishPage(pdfPage)
-                }
+                val strokes = WhiteboardView.parsePage(P2PLib.whiteboardPage(peer, groupId, shown))
+                val sheet = pdf.startPage(
+                    PdfDocument.PageInfo.Builder(WhiteboardView.WIDTH.toInt(), WhiteboardView.HEIGHT.toInt(), 1).create()
+                )
+                WhiteboardView.drawPage(sheet.canvas, strokes, participants, WhiteboardView.strokePaint())
+                pdf.finishPage(sheet)
                 activity.contentResolver.openOutputStream(uri)!!.use { pdf.writeTo(it) }
                 pdf.close()
                 true
@@ -364,9 +364,22 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         pages.addView(pageLabel, LinearLayout.LayoutParams((48 * dp).toInt(), height))
         text(pages, "›", R.string.whiteboard_next_page) { goToPage(page + 1) }
         pages.addView(View(activity), LinearLayout.LayoutParams(0, 1, 1f))
-        undoButton = text(pages, "↶", R.string.whiteboard_undo) { flip(undoStack, redoStack) }
-        redoButton = text(pages, "↷", R.string.whiteboard_redo) { flip(redoStack, undoStack) }
-        text(pages, "PDF", R.string.whiteboard_export_pdf) { savePdf.launch("whiteboard.pdf") }.apply { textSize = 13f }
+        // Pen size: 1..MAX_PEN_WIDTH board units. Only finished strokes carry it.
+        val white = ColorStateList.valueOf(Color.WHITE)
+        val sizeBar = Slider(activity).apply {
+            valueFrom = 1f
+            valueTo = WhiteboardView.MAX_PEN_WIDTH.toFloat()
+            stepSize = 1f
+            value = board.penWidth.toFloat()
+            isTickVisible = false
+            trackActiveTintList = white
+            thumbTintList = white
+            trackInactiveTintList = ColorStateList.valueOf(Color.argb(70, 255, 255, 255))
+            contentDescription = activity.getString(R.string.whiteboard_pen_size)
+            addOnChangeListener { _, value, _ -> board.penWidth = value.toInt() }
+        }
+        pages.addView(sizeBar, LinearLayout.LayoutParams((150 * dp).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT))
+        text(pages, "PDF", R.string.whiteboard_export_pdf) { pdfPage = page; savePdf.launch("whiteboard-${page + 1}.pdf") }.apply { textSize = 13f }
 
         val tools = row()
         toolButtons.add(icon(tools, R.drawable.ic_pen, R.string.whiteboard_pen) { board.erasing = false; styleTools() })
@@ -381,19 +394,8 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
                 marginStart = (5 * dp).toInt(); marginEnd = (5 * dp).toInt()
             })
         }
-        // Pen size: 1..MAX_PEN_WIDTH board units. Only finished strokes carry it.
-        val sizeBar = SeekBar(activity).apply {
-            max = WhiteboardView.MAX_PEN_WIDTH - 1
-            progress = board.penWidth - 1
-            background = pill(false)
-            contentDescription = activity.getString(R.string.whiteboard_pen_size)
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(bar: SeekBar, value: Int, fromUser: Boolean) { board.penWidth = value + 1 }
-                override fun onStartTrackingTouch(bar: SeekBar) {}
-                override fun onStopTrackingTouch(bar: SeekBar) {}
-            })
-        }
-        tools.addView(sizeBar, LinearLayout.LayoutParams(0, height, 1f).apply { marginStart = (6 * dp).toInt(); marginEnd = (3 * dp).toInt() })
+        undoButton = text(tools, "↶", R.string.whiteboard_undo) { flip(undoStack, redoStack) }
+        redoButton = text(tools, "↷", R.string.whiteboard_redo) { flip(redoStack, undoStack) }
 
         host.addView(root, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         updatePageLabel()
