@@ -15033,6 +15033,20 @@ impl P2PCore {
                 // sonsuza dek (günler/haftalar) tazelenip denenmeye devam
                 // ederdi, "2 gün" sınırının hiçbir anlamı kalmazdı.
                 let give_up_for_real = now.saturating_sub(original_sent_at) > TEXT_RETRY_GIVE_UP_MS;
+                // Sync packets are not refreshed: re-encrypting and re-depositing
+                // them every ~30 min for 7 days to a device that is switched off
+                // cost ~1000 server deposits a day on mobile data. The first
+                // deposit stays on the server, and a returning device catches up
+                // anyway (sibling backfill, roster on reconnect, next read mark,
+                // next digest).
+                if matches!(regen_content, Some(
+                    MessageContent::SiblingEcho { .. } | MessageContent::ReadStateSync { .. }
+                    | MessageContent::DeviceSync(_) | MessageContent::WbDigest { .. })) {
+                    info!("Paket {} (senkron -> {}) tazelenmeden bırakıldı", message_id, &peer_fp[..peer_fp.len().min(8)]);
+                    self.awaiting_confirmation.remove(&message_id);
+                    self.remove_durable_retry(&message_id);
+                    continue;
+                }
                 if !give_up_for_real {
                     // Clone (not move) so `regen_content` is still available below for the give-up event.
                     if let Some(content) = regen_content.clone() {

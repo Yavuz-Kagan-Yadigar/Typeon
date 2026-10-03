@@ -54,7 +54,7 @@ This server closes that gap without giving up end-to-end encryption.
 
 | Store | Holds | Lifetime |
 |---|---|---|
-| `mail` | sealed delivery envelopes | deleted on the recipient's `Ack`, else 30 days |
+| `mail` | sealed delivery envelopes | deleted on the recipient's `Ack`, else 14 days |
 | `archive` | re-encrypted history records | until the owner purges them or hits quota |
 
 They cannot be merged. A ratchet message key is consumed and destroyed on

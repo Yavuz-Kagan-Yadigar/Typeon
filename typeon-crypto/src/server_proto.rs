@@ -487,10 +487,10 @@ impl Default for ServerLimits {
             max_mail_bytes: 256 * 1024 * 1024,
             max_archive_bytes: 1024 * 1024 * 1024,
             max_blob_bytes: 4 * 1024 * 1024 * 1024,
-            // 30 gün: mevcut gönderen-tarafı vazgeçme süresinin
-            // (`TEXT_RETRY_GIVE_UP_MS` = 2 gün) çok üstünde — dayanıklılığın
-            // asıl sınırı artık burası.
-            mailbox_ttl_ms: 30 * 24 * 60 * 60 * 1000,
+            // 14 gün: gönderen-tarafı vazgeçme süresinin
+            // (`TEXT_RETRY_GIVE_UP_MS` = 7 gün) üstünde — dayanıklılığın
+            // asıl sınırı burası.
+            mailbox_ttl_ms: 14 * 24 * 60 * 60 * 1000,
             blob_ttl_ms: 30 * 24 * 60 * 60 * 1000,
             requests_per_minute: 1_800,
         }
