@@ -289,10 +289,14 @@ pub(crate) fn wait_for_network_activity(timeout_ms: u64) {
 /// sürebilen dosya şifrelemesi GLOBAL core kilidi TUTULMADAN burada, iki
 /// kısa kilitli fazın arasında yapılır. JNI ve `api` sarmalayıcıları eski
 /// tek parça `prepare_and_send_file` yerine artık bunu çağırır.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare_and_send_file_unlocked(peer_device_fingerprint: String, source_path: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>) -> Result<(String, String), String> {
-    let (file_id, file_key, dest_path) = core_lock().begin_outgoing_file(&source_path, None)?;
-    let encrypted = attachments::encrypt_file_to_disk_with(std::path::Path::new(&source_path), &dest_path, &file_key, attachments::FILE_CHUNK_SIZE_V2);
+/// Shared skeleton of the two wrappers below: begin (locked), encrypt
+/// (unlocked), finish (locked). If any step fails, nothing of the file stays
+/// behind: neither the `.enc` nor the `files` row / queued server upload that
+/// `finish` may already have written (a row marked 'complete' for a deleted
+/// `.enc` made the attachment undownloadable forever).
+fn encrypt_then_finish<T>(source_path: &str, group_id: Option<&str>, finish: impl FnOnce(&mut P2PCore, String, [u8; 32], u64, String) -> Result<T, String>) -> Result<T, String> {
+    let (file_id, file_key, dest_path) = core_lock().begin_outgoing_file(source_path, group_id)?;
+    let encrypted = attachments::encrypt_file_to_disk_with(std::path::Path::new(source_path), &dest_path, &file_key, attachments::FILE_CHUNK_SIZE_V2);
     let (total_size, sha256_hex) = match encrypted {
         Ok(v) => v,
         Err(e) => {
@@ -301,30 +305,29 @@ pub(crate) fn prepare_and_send_file_unlocked(peer_device_fingerprint: String, so
             return Err(e);
         }
     };
-    let result = core_lock().finish_outgoing_file(peer_device_fingerprint, file_id, file_key, total_size, sha256_hex, file_name, mime_type, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview);
+    let mut core = core_lock();
+    let result = finish(&mut *core, file_id.clone(), file_key, total_size, sha256_hex);
     if result.is_err() {
+        core.discard_outgoing_file(&file_id);
         let _ = std::fs::remove_file(&dest_path);
     }
     result
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_and_send_file_unlocked(peer_device_fingerprint: String, source_path: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>) -> Result<(String, String), String> {
+    encrypt_then_finish(&source_path, None, |core, file_id, file_key, total_size, sha256_hex| {
+        core.finish_outgoing_file(peer_device_fingerprint, file_id, file_key, total_size, sha256_hex, file_name, mime_type, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview)
+    })
+}
+
 /// bkz. `prepare_and_send_file_unlocked` — grup karşılığı.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_and_send_group_file_unlocked(group_id: String, source_path: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>) -> Result<String, String> {
-    let (file_id, file_key, dest_path) = core_lock().begin_outgoing_file(&source_path, Some(&group_id))?;
-    let encrypted = attachments::encrypt_file_to_disk_with(std::path::Path::new(&source_path), &dest_path, &file_key, attachments::FILE_CHUNK_SIZE_V2);
-    let (total_size, sha256_hex) = match encrypted {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = std::fs::remove_file(&dest_path);
-            return Err(e);
-        }
-    };
-    let result = core_lock().finish_outgoing_group_file(group_id, file_id, file_key, total_size, sha256_hex, file_name, mime_type, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id);
-    if result.is_err() {
-        let _ = std::fs::remove_file(&dest_path);
-    }
-    result
+    let gid = group_id.clone();
+    encrypt_then_finish(&source_path, Some(&gid), |core, file_id, file_key, total_size, sha256_hex| {
+        core.finish_outgoing_group_file(group_id, file_id, file_key, total_size, sha256_hex, file_name, mime_type, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id)
+    })
 }
 
 /// bkz. `P2PCore::begin_attachment_decrypt` — AYNI kilit-bölme deseni,
@@ -665,6 +668,9 @@ fn safe_file_name(name: &str) -> String {
 /// büyük, sınırın kendisinden rahatça küçük.
 const MAX_AVATAR_BYTES: usize = 256 * 1024;
 
+/// Largest Argon2 memory cost `import_recovery` accepts from a file: 256 MiB.
+const MAX_RECOVERY_ARGON2_M_COST_KIB: u32 = 256 * 1024;
+
 /// Bir hesap adının azami uzunluğu — KARAKTER (bayt değil) cinsinden.
 ///
 /// Kullanıcı isteği (2026-09-04, hesap adı değiştirme): ad artık ağdan
@@ -681,13 +687,23 @@ const MAX_DISPLAY_NAME_CHARS: usize = 48;
 /// kişi satırına gömülen `\n`, bildirim/sohbet başlığında sahte bir
 /// ikinci satır ("...doğrulandı" gibi) üretebilirdi.
 fn sanitize_display_name(name: &str) -> Option<String> {
+    // Bidi override/embedding/isolate and zero-width characters go too (same
+    // set as `safe_file_name`): U+202E lets a contact show a reversed name in
+    // the contact list and in notifications.
     let cleaned: String = name
         .chars()
-        .filter(|c| !c.is_control())
-        .take(MAX_DISPLAY_NAME_CHARS)
+        .filter(|c| !c.is_control() && !matches!(*c as u32, 0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069 | 0xFEFF))
         .collect();
-    let trimmed = cleaned.trim();
+    // Trim first, so leading spaces do not use up the length budget.
+    let cut: String = cleaned.trim().chars().take(MAX_DISPLAY_NAME_CHARS).collect();
+    let trimmed = cut.trim_end();
     if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+}
+
+/// A device fingerprint (and an identity id, which is the first device's
+/// fingerprint): hex of a SHA3-256.
+fn is_fingerprint_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// `wipe_all_local_state`'in HİÇBİR alanı atlamadığını kaynak metin
@@ -722,7 +738,6 @@ mod wipe_coverage_tests {
         "advertised_onion",              // our own address; rebuilt with the network
         "ratchets_loaded",               // load gate; the key stays loaded across a wipe
         "peer_onion_addr",               // public addresses, keyed by PeerId
-        "peer_direct_addrs",             // same
         "server_sweep_at", "blob_rtt_sum", "blob_rtt_count",
         "last_reconnect_sweep_at", "last_sibling_backfill_at",
         "last_sibling_roster_sync_at", "last_group_sync_sweep_at",
@@ -799,6 +814,66 @@ mod wipe_coverage_tests {
             "wipe_all_local_state su alanlari atliyor: {:?}\n             Ya temizleyin ya da gerekcesiyle EXEMPT listesine ekleyin.",
             missing
         );
+    }
+
+    /// The same check for SQL tables: `message_reactions` and `message_seen`
+    /// (other people's identity ids) were created and never added to the wipe.
+    #[test]
+    fn every_table_is_wiped() {
+        let lib = include_str!("lib.rs");
+        let needle = format!("    fn wipe_all_{}(&mut self)", "local_state");
+        let wbody = &lib[lib.find(&needle).expect("wipe tanimi bulunamadi")..];
+        let wbody = &wbody[..wbody.find("\n    fn ").expect("wipe sonu bulunamadi")];
+        // Built from parts: see the trap described in the test above.
+        let marker = ["CREATE TABLE IF NOT", " EXISTS "].concat();
+        let mut missing = Vec::new();
+        for src in [lib, include_str!("server_client.rs"), include_str!("whiteboard.rs")] {
+            for part in src.split(marker.as_str()).skip(1) {
+                let table: String = part.chars().take_while(|c| c.is_ascii_lowercase() || *c == '_').collect();
+                if !table.is_empty() && !wbody.contains(&format!("\"{}\"", table)) {
+                    missing.push(table);
+                }
+            }
+        }
+        assert!(missing.is_empty(), "wipe_all_local_state su tablolari atliyor: {:?}", missing);
+    }
+}
+
+#[cfg(test)]
+mod review_oct2026_tests {
+    use super::*;
+
+    #[test]
+    fn display_name_drops_bidi_and_trims_before_the_length_cut() {
+        assert_eq!(sanitize_display_name("ali\u{202E}ce\u{200B}").as_deref(), Some("alice"));
+        assert_eq!(sanitize_display_name(" \u{2066}\n "), None);
+        let padded = format!("   {}", "x".repeat(60));
+        assert_eq!(sanitize_display_name(&padded).map(|n| n.chars().count()), Some(MAX_DISPLAY_NAME_CHARS));
+    }
+
+    #[test]
+    fn recovery_file_with_a_huge_argon2_cost_is_rejected() {
+        let file = br#"{"kdf":"argon2id","argon2_m_cost":4294967295,"argon2_t_cost":2,"argon2_p_cost":1,"ciphertext":[],"nonce":[],"salt":[1,2,3,4,5,6,7,8]}"#;
+        let err = P2PCore::new().import_recovery(file, "x", "n".to_string()).unwrap_err();
+        assert!(err.contains("Argon2 parametreleri"), "{err}");
+    }
+
+    #[test]
+    fn pairing_rejects_malformed_and_own_codes() {
+        let mut core = P2PCore::new();
+        let id = "a".repeat(64);
+        let fp = "b".repeat(64);
+        assert!(core.register_contact_from_pairing("not-hex".into(), fp.clone(), "x".into()).is_err());
+        assert!(core.register_contact_from_pairing(id.clone(), "short".into(), "x".into()).is_err());
+        core.register_contact_from_pairing(id.clone(), fp.clone(), "Ali\u{202E}".into()).unwrap();
+        // Same first 16 characters, another identity: a second contact, not a replacement.
+        let twin = format!("{}{}", "a".repeat(16), "c".repeat(48));
+        core.register_contact_from_pairing(twin.clone(), "d".repeat(64), "Eve".into()).unwrap();
+        assert_eq!(core.contacts.len(), 2);
+        let first = &core.contacts[&core.identity_to_contact[&id]];
+        assert_eq!(first.trusted_identity_id, id);
+        assert_eq!(first.display_name, "Ali");
+        assert!(first.is_known_active(&fp));
     }
 }
 
@@ -878,7 +953,7 @@ mod path_safety_tests {
 mod delivery_ack_coverage_tests {
     /// 2026-09-07 iki cihazlı testte bulunan hata: `Reaction` alıcı kolu
     /// hiç `send_ack` çağırmıyordu, ama `Reaction` `needs_delivery_
-    /// confirmation` listesinde — yani gönderen onu onaylanana kadar (2 güne)
+    /// confirmation` listesinde — yani gönderen onu onaylanana kadar (7 güne)
     /// yeniden dener ve `pending_durable_retries`'e yazar. Sonuç: tepki
     /// alıcıda uygulansa bile gönderen tarafta yeniden-deneme girdisi
     /// günlerce asılı kalıyordu.
@@ -909,7 +984,7 @@ mod delivery_ack_coverage_tests {
             arm_body.contains("self.send_ack("),
             "receive_message'ın `Reaction` kolu `send_ack` çağırmıyor. `Reaction` \
              `needs_delivery_confirmation` listesinde olduğu için gönderen onu \
-             onaylanana kadar (2 güne) yeniden dener + `pending_durable_retries`'e \
+             onaylanana kadar (7 güne) yeniden dener + `pending_durable_retries`'e \
              yazar — bir tepki alıcıda uygulansa bile gönderende sonsuza dek asılı \
              kalır (bkz. 2026-09-07 iki cihazlı test bulgusu)."
         );
@@ -1111,7 +1186,7 @@ fn handshake_signing_input(x25519_pub: &[u8], kyber_pub: &[u8], kyber_ct: &[u8],
 }
 
 fn current_time_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
 // --- Yerel cihazın secret key'leri (asla ağa/DB'ye çıplak yazılmaz;
@@ -1557,7 +1632,7 @@ const PENDING_ENVELOPE_TIMEOUT_MS: u64 = 20_000;
 /// toparlanıyor) doğrudan çözer. Daha uzun kesintiler için ikinci bir
 /// savunma katmanı var: `maybe_redo_handshake` (bkz.) — onaylanmamış bir
 /// mesajın tazeleme turunda el sıkışmayı da tazeler, yani el sıkışma
-/// pratikte mesajın kendisiyle AYNI (2 günlük) dayanıklılığı kazanır.
+/// pratikte mesajın kendisiyle AYNI (7 günlük) dayanıklılığı kazanır.
 const PENDING_HANDSHAKE_TIMEOUT_MS: u64 = 5 * 60 * 1000;
 
 /// İKİ CİHAZLI GERÇEK TESTTE ÖLÇÜLDÜ (2026-09-06): 4 taşıma yolu birden açık
@@ -2241,7 +2316,7 @@ const DOWNLOAD_GIVE_UP_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 
 /// bkz. `enforce_history_storage_limit` dokümantasyonu — bir dosya
 /// TAMAMLANDIKTAN sonra en az bu süre boyunca depolama-sınırı
-/// tahliyesinden korunur. `TEXT_RETRY_GIVE_UP_MS` (2 gün) ile AYNI
+/// tahliyesinden korunur. `TEXT_RETRY_GIVE_UP_MS` (7 gün) ile AYNI
 /// tutuluyor — mantık: `FileOffer` metadata'sının kendisi de bu kadar
 /// süre teslim edilmeye çalışılır, yani bir alıcının teklifi bu pencere
 /// içinde GEÇ almasına rağmen dosyanın diskte hâlâ durması makul.
@@ -2308,7 +2383,7 @@ struct PendingConfirmation {
     first_sent_at: u64,
     /// Spec dışı, kullanıcı isteği: bu mesajın İLK KEZ kuyruğa girdiği an
     /// — `regen_content` tazelemeleri arasında SABİT kalır (bkz.
-    /// `first_sent_at`'in aksine). `TEXT_RETRY_GIVE_UP_MS`'nin (2 gün)
+    /// `first_sent_at`'in aksine). `TEXT_RETRY_GIVE_UP_MS`'nin (7 gün)
     /// ölçtüğü budur — "karşı taraf günlerce çevrimdışı olsa bile mesaj
     /// hâlâ deneniyor mu" sorusunun cevabı, ciphertext'in kaçıncı
     /// rotasyon-döngüsünde olduğuyla değil, mesajın ne zaman
@@ -2335,7 +2410,7 @@ struct PendingConfirmation {
     /// `message_id` korunduğundan UI balonu/`awaiting_confirmation` girdisi
     /// KESİNTİSİZ aynı kalır, `retryMessage(oldId,newId,status)` (manuel
     /// yeniden gönderim) akışıyla çakışmaz — o hâlâ SADECE gerçekten
-    /// "Failed" (2 günü de aşmış) bir mesaj için kullanılabilir.
+    /// "Failed" (7 günü de aşmış) bir mesaj için kullanılabilir.
     regen_content: Option<MessageContent>,
 }
 
@@ -2595,7 +2670,7 @@ struct P2PCore {
     /// -> yatırma anı (ms).
     ///
     /// Neden var: `awaiting_confirmation` uçtan uca `Ack` gelene kadar zarfı
-    /// yeniden gönderir (2 güne kadar). Bu, gossipsub yolu için doğru —
+    /// yeniden gönderir (7 güne kadar). Bu, gossipsub yolu için doğru —
     /// orada hiçbir şey saklanmaz. Ama sunucu yolunda zarf zaten DİSKTE:
     /// yeniden yatırmak alıcının onu görme ihtimalini bir gram artırmaz,
     /// yalnızca aynı baytları tekrar tekrar yollar.
@@ -2863,10 +2938,6 @@ struct P2PCore {
     /// Onion addresses peers announced over identify, by PeerId. Applied to
     /// `device_onion_addr` once the PeerId is tied to a device.
     peer_onion_addr: HashMap<PeerId, String>,
-    /// Direct (IP) listen addresses peers announced over identify: LAN and, with
-    /// UPnP, public. Used by `try_reconnect_device`. Kad does not help here:
-    /// client-mode peers never enter its routing table.
-    peer_direct_addrs: HashMap<PeerId, Vec<Multiaddr>>,
     /// Eş başına paralel-aktarım sağlık durumu — bkz. `BulkHealth`.
     bulk_health: HashMap<PeerId, BulkHealth>,
     /// Spec dışı, hata ayıklama düzeltmesi: `initiate_handshake_with`'in
@@ -3076,7 +3147,6 @@ impl P2PCore {
             advertised_onion: None,
             ratchets_loaded: false,
             peer_onion_addr: HashMap::new(),
-            peer_direct_addrs: HashMap::new(),
             bulk_health: HashMap::new(),
             handshake_failure_notified: HashMap::new(),
             last_handshake_redo: HashMap::new(),
@@ -3274,6 +3344,10 @@ impl P2PCore {
              CREATE TABLE IF NOT EXISTS deleted_identities (
                 identity_id TEXT PRIMARY KEY,
                 deleted_at  INTEGER NOT NULL
+             );
+             -- bkz. `contact_removed_locally`.
+             CREATE TABLE IF NOT EXISTS removed_contacts (
+                identity_id TEXT PRIMARY KEY
              );
              CREATE TABLE IF NOT EXISTS app_meta (
                 k TEXT PRIMARY KEY,
@@ -3591,7 +3665,7 @@ impl P2PCore {
             None => return,
         };
         let identity_row: Option<(String, String)> = conn
-            .query_row("SELECT id, primary_device FROM identities LIMIT 1", [], |row| {
+            .query_row("SELECT id, primary_device FROM identities ORDER BY rowid DESC LIMIT 1", [], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
             .ok();
@@ -3744,6 +3818,9 @@ impl P2PCore {
         };
 
         if let Some(conn) = &self.db {
+            // One identity per database: a leftover row of an older identity
+            // could be the one `load_identity_from_db` picks at the next start.
+            let _ = conn.execute("DELETE FROM identities WHERE id != ?1", params![identity_id]);
             conn.execute(
                 "INSERT OR REPLACE INTO identities (id, primary_device) VALUES (?1, ?2)",
                 params![identity_id, device_fingerprint],
@@ -3804,6 +3881,17 @@ impl P2PCore {
         let kem_sk_mlkem = MlKem1024DecapsulationKey::from_bytes(&kem_sk_encoded);
         let kem_pk_encoded: ml_kem::Encoded<MlKem1024EncapsulationKey> = record.kem_pubkey_mlkem.as_slice().try_into().map_err(|_| "Bozuk Kyber public key")?;
         let kem_pk_mlkem = MlKem1024EncapsulationKey::from_bytes(&kem_pk_encoded);
+
+        // The secrets must be the ones behind the stored public keys (the
+        // fingerprint peers trust). A bundle of another device would sign and
+        // decrypt with keys nobody can verify.
+        if sign_pk_ed25519.as_bytes().to_vec() != record.sign_pubkey_ed25519
+            || sign_sk_mldsa.verifying_key().encode().to_vec() != record.sign_pubkey_mldsa
+            || kem_pk_x25519.as_bytes().to_vec() != record.kem_pubkey_x25519
+            || kem_sk_mlkem.encapsulation_key().as_bytes().to_vec() != record.kem_pubkey_mlkem
+        {
+            return Err("Secret key paketi bu cihazın kayıtlı public key'leriyle eşleşmiyor".to_string());
+        }
 
         self.own_device_keys.insert(bundle.device_fingerprint.clone(), DeviceKeys {
             sign_sk_ed25519,
@@ -3932,21 +4020,22 @@ impl P2PCore {
         let packet = QrPacket::from_cbor(cbor_data)?;
         let device_fingerprint = packet.device_fingerprint.clone();
         let device_name = packet.device_name.clone();
-        // Engelden çıkmanın TEK yolu: kullanıcının fiziksel olarak bir kod
-        // okutması (bkz. `unblock_identity` / `block_identity`).
-        self.unblock_identity(&packet.identity_id);
         self.register_contact_from_pairing(
             packet.identity_id.clone(),
             packet.device_fingerprint.clone(),
             packet.device_name,
         )?;
+        // Engelden çıkmanın TEK yolu: kullanıcının fiziksel olarak bir kod
+        // okutması (bkz. `unblock_identity` / `block_identity`). Only after
+        // the code was accepted: a rejected code must not lift a block.
+        self.unblock_identity(&packet.identity_id);
 
         // bkz. SECURITY.md "Cross-network connectivity" notu: QR'ın taşıdığı
         // röle adaylarını önce kaydediyoruz — böylece hemen aşağıdaki
         // `dial_with_relay_fallback` çağrısı, karşı taraf (`rendezvous_node`)
         // doğrudan erişilemez olsa bile (farklı ağ/NAT) bu adaylardan
         // birinin üzerinden bağlanmayı deneyebilir.
-        for relay_str in &packet.known_relays {
+        for relay_str in packet.known_relays.iter().take(MAX_KNOWN_RELAYS) {
             if let Ok(addr) = relay_str.parse::<Multiaddr>() {
                 if let Some(relay_peer_id) = extract_peer_id(&addr) {
                     if let Some(swarm) = &mut self.swarm {
@@ -4112,6 +4201,45 @@ impl P2PCore {
         let fp = exchange.device_fingerprint.clone();
         let my_id = self.my_identity_id();
         let is_pending_link = self.pending_link_target.as_deref() == Some(fp.as_str());
+
+        // A revoked device stays revoked. Its record is kept with
+        // `is_active = false`; the device still holds its keys, so its
+        // IdentityExchange is byte-valid, and storing the record below with
+        // `is_active = true` gave a revoked sibling contacts, groups and the
+        // archive key again on the next `sync_to_siblings`. Only the user
+        // brings a device back: linking it again (`is_pending_link`), or
+        // pairing with the contact again (the contact entry is Active again).
+        if let Some(prev) = self.known_remote_devices.get(&fp) {
+            if !prev.is_active && !is_pending_link {
+                let paired_again = self.identity_to_contact.get(&prev.identity_id)
+                    .and_then(|cid| self.contacts.get(cid))
+                    .map_or(false, |c| c.is_known_active(&fp));
+                if !paired_again {
+                    return Err("IdentityExchange iptal edilmiş bir cihazdan geldi, yok sayıldı".to_string());
+                }
+            }
+        }
+        // Checked before `as_sibling` is computed: a sibling that introduces
+        // itself with its signed DeviceAdd is a sibling from this first packet.
+        if !self.verified_device_adds.contains_key(&fp) {
+            if let Some(da) = &exchange.device_add {
+                let consistent = da.new_device_fingerprint == fp && da.identity_id == exchange.identity_id;
+                let under_cap = self.known_remote_devices.contains_key(&fp) || {
+                    self.known_remote_devices.values()
+                        .filter(|d| d.identity_id == da.identity_id && d.is_active)
+                        .count() < identity::MAX_ACTIVE_DEVICES
+                };
+                if consistent
+                    && under_cap
+                    && self.verify_device_auth(
+                        &da.identity_id, &da.new_device_fingerprint, &da.added_by,
+                        &da.signature, &da.signature_pq,
+                    ).is_ok()
+                {
+                    self.verified_device_adds.insert(fp.clone(), da.identity_id.clone());
+                }
+            }
+        }
         let is_sibling_by_add = my_id.is_some()
             && self.verified_device_adds.get(&fp).map(|s| Some(s) == my_id.as_ref()).unwrap_or(false);
         let is_existing_sibling = self.known_remote_devices.get(&fp)
@@ -4137,25 +4265,8 @@ impl P2PCore {
             // modeli `apply_device_add_notice` ile birebir aynı (imza +
             // fingerprint tutarlılığı + aktif cihaz üst sınırı), sadece
             // taşıyıcı paket farklı.
-            if !self.verified_device_adds.contains_key(&fp) {
-                if let Some(da) = &exchange.device_add {
-                    let consistent = da.new_device_fingerprint == fp && da.identity_id == exchange.identity_id;
-                    let under_cap = self.known_remote_devices.contains_key(&fp) || {
-                        self.known_remote_devices.values()
-                            .filter(|d| d.identity_id == da.identity_id && d.is_active)
-                            .count() < identity::MAX_ACTIVE_DEVICES
-                    };
-                    if consistent
-                        && under_cap
-                        && self.verify_device_auth(
-                            &da.identity_id, &da.new_device_fingerprint, &da.added_by,
-                            &da.signature, &da.signature_pq,
-                        ).is_ok()
-                    {
-                        self.verified_device_adds.insert(fp.clone(), da.identity_id.clone());
-                    }
-                }
-            }
+            // (The signed `DeviceAdd` this packet carries was checked above,
+            // before `as_sibling`.)
             let signed = self.verified_device_adds.get(&fp).map(|s| s.as_str()) == Some(exchange.identity_id.as_str());
             // `identity_id` IdentityExchange'te imzasız bir İDDİA. İmzalı bir
             // DeviceAdd olmadan (1) bilinen bir cihazın kimliği değiştirilemez,
@@ -4348,17 +4459,21 @@ impl P2PCore {
     /// bkz. `process_qr_packet` dokümantasyonu — AYNI gerekçeyle,
     /// `(identity_id, device_fingerprint, device_name)` döner.
     fn process_manual_entry(&mut self, text: &str) -> Result<(String, String, String), String> {
-        let parts: Vec<&str> = text.trim().split('|').collect();
-        if parts.len() != 4 {
-            return Err("Beklenen format: identity_id|device_fingerprint|device_name|rendezvous_node".to_string());
-        }
-        let (identity_id, device_fingerprint, device_name, rendezvous_node) =
-            (parts[0].to_string(), parts[1].to_string(), parts[2].to_string(), parts[3].to_string());
+        const FORMAT_ERR: &str = "Beklenen format: identity_id|device_fingerprint|device_name|rendezvous_node";
+        // The device name is free text and may itself contain `|`: the first
+        // two fields are taken from the left, the address from the right.
+        let (head, rendezvous_node) = text.trim().rsplit_once('|').ok_or(FORMAT_ERR)?;
+        let mut head = head.splitn(3, '|');
+        let (identity_id, device_fingerprint, device_name) = match (head.next(), head.next(), head.next()) {
+            (Some(a), Some(b), Some(c)) => (a.to_string(), b.to_string(), c.to_string()),
+            _ => return Err(FORMAT_ERR.to_string()),
+        };
+        let rendezvous_node = rendezvous_node.to_string();
 
+        self.register_contact_from_pairing(identity_id.clone(), device_fingerprint.clone(), device_name.clone())?;
         // bkz. `process_qr_packet` aynı notu — manuel kod da yüz yüze
         // paylaşılan bir sır, engeli yalnızca bu kaldırabilir.
         self.unblock_identity(&identity_id);
-        self.register_contact_from_pairing(identity_id.clone(), device_fingerprint.clone(), device_name.clone())?;
 
         if let Ok(addr) = rendezvous_node.parse::<Multiaddr>() {
             if let Some(peer_id) = extract_peer_id(&addr) {
@@ -4397,6 +4512,16 @@ impl P2PCore {
         // SESSİZCE kalkması demek olurdu. Engel yalnızca `process_qr_packet`
         // ve `process_manual_entry` içinde, yani kullanıcının fiziksel
         // olarak bir kod okuttuğu noktada kalkıyor.
+        //
+        // Both values come from outside (QR, typed code, IdentityExchange,
+        // group vouching) and no caller validated them: scanning our own code
+        // made a contact of ourselves.
+        if !is_fingerprint_hex(&identity_id) || !is_fingerprint_hex(&device_fingerprint) {
+            return Err("Geçersiz kişi kodu".to_string());
+        }
+        if self.my_identity_id().as_deref() == Some(identity_id.as_str()) || self.own_devices.contains_key(&device_fingerprint) {
+            return Err("Kendi kodunuzu kişi olarak ekleyemezsiniz".to_string());
+        }
         let now = current_time_ms();
         if let Some(contact_id) = self.identity_to_contact.get(&identity_id).cloned() {
             // Zaten bilinen identity — spec 2.2 karar ağacı burada da geçerli
@@ -4413,16 +4538,46 @@ impl P2PCore {
             return Ok(());
         }
 
-        // identity_id is attacker-influenced (QR/manual entry/IdentityExchange);
-        // byte-slicing it can panic mid-UTF8-char, so truncate by char count.
-        let short_id: String = identity_id.chars().take(16).collect();
-        let contact_id = format!("contact-{}", short_id);
-        let mut contact = Contact::new(contact_id.clone(), device_name, identity_id.clone());
+        let contact_id = self.new_contact_id(&identity_id);
+        // `device_name` is the peer's own claim; it becomes the display name.
+        let mut contact = Contact::new(contact_id.clone(), sanitize_display_name(&device_name).unwrap_or_default(), identity_id.clone());
         contact.add_device_unverified(device_fingerprint, now);
+        // The contact is back: a sibling's sync may add it again from now on
+        // (bkz. `contact_removed_locally`).
+        if let Some(conn) = &self.db {
+            let _ = conn.execute("DELETE FROM removed_contacts WHERE identity_id = ?1", params![identity_id]);
+        }
         self.identity_to_contact.insert(identity_id, contact_id.clone());
         self.persist_contact(&contact);
         self.contacts.insert(contact_id, contact);
         Ok(())
+    }
+
+    /// The id for a NEW contact: `contact-` + the first 16 characters of its
+    /// identity id. `identity_id` is an unsigned claim, and `persist_contact`
+    /// is `INSERT OR REPLACE`: an identity that shares those 16 characters
+    /// with a known contact used to replace that contact (devices, name,
+    /// trusted identity). If the short id is taken, the full identity id is used.
+    fn new_contact_id(&self, identity_id: &str) -> String {
+        // Truncate by char count: byte-slicing can panic mid-UTF8-char.
+        let short_id: String = identity_id.chars().take(16).collect();
+        let contact_id = format!("contact-{}", short_id);
+        if self.contacts.contains_key(&contact_id) {
+            format!("contact-{}", identity_id)
+        } else {
+            contact_id
+        }
+    }
+
+    /// The user deleted this contact on THIS device (`delete_contact`). A
+    /// sibling that still has it must not bring it back with its next sync
+    /// (`import_sync_payload`); pairing again clears the mark.
+    /// ponytail: local mark only, the delete is not sent to siblings. Add a
+    /// sync message if contacts must disappear on every device.
+    fn contact_removed_locally(&self, identity_id: &str) -> bool {
+        self.db.as_ref().map_or(false, |conn| {
+            conn.query_row("SELECT 1 FROM removed_contacts WHERE identity_id = ?1", params![identity_id], |_| Ok(())).is_ok()
+        })
     }
 
     // ===============================================================
@@ -4554,7 +4709,10 @@ impl P2PCore {
         let now = current_time_ms();
         self.known_remote_devices.values()
             .filter(|d| d.identity_id == my_id && d.is_active)
-            .filter(|d| now.saturating_sub(d.last_seen) < STALE_PEER_RETRY_HORIZON_MS)
+            // Never stamped (0) counts as recent, as in `device_recently_seen`:
+            // only a decrypted packet stamps it, and a sibling left out here
+            // never gets the sync that would make it answer.
+            .filter(|d| d.last_seen == 0 || now.saturating_sub(d.last_seen) < STALE_PEER_RETRY_HORIZON_MS)
             .map(|d| d.device_fingerprint.clone())
             .filter(|fp| own_fp.as_deref() != Some(fp.as_str()))
             .collect()
@@ -4654,19 +4812,23 @@ impl P2PCore {
     /// gerekçeyle bu fonksiyon o el sıkışmayı BEKLEMEDEN döner.
     fn approve_device_link(&mut self, request_cbor: &[u8]) -> Result<(String, String), String> {
         let req = DeviceLinkRequest::from_cbor(request_cbor)?;
-        self.my_identity_id().ok_or("Önce bir kimlik oluşturun")?;
-        if req.device_fingerprint == self.get_active_own_device_fingerprint()? {
+        let my_id = self.my_identity_id().ok_or("Önce bir kimlik oluşturun")?;
+        let own_fp = self.get_active_own_device_fingerprint()?;
+        if req.device_fingerprint == own_fp {
             return Err("Bu zaten bu cihaz".to_string());
         }
-        // Aktif cihaz sınırı (spec 1.1 — max 5).
-        let active_count = 1 + self.sibling_active_devices().len();
+        // Aktif cihaz sınırı (spec 1.1 — max 5). Not `sibling_active_devices`:
+        // that leaves out siblings not seen for a week, which are still active.
+        let active_count = 1 + self.known_remote_devices.values()
+            .filter(|d| d.identity_id == my_id && d.is_active && d.device_fingerprint != own_fp)
+            .count();
         if active_count >= identity::MAX_ACTIVE_DEVICES {
             return Err(format!("En fazla {} aktif cihaz olabilir", identity::MAX_ACTIVE_DEVICES));
         }
         let new_fp = req.device_fingerprint.clone();
 
         // Bağlan: QR'daki rendezvous + röle adaylarını dial et.
-        for relay in &req.known_relays {
+        for relay in req.known_relays.iter().take(MAX_KNOWN_RELAYS) {
             if let Ok(addr) = relay.parse::<Multiaddr>() {
                 if let Some(pid) = extract_peer_id(&addr) {
                     if let Some(swarm) = &mut self.swarm {
@@ -4809,6 +4971,9 @@ impl P2PCore {
         let mut learned = Vec::new();
         for sc in &sync.contacts {
             if my_id.as_deref() == Some(sc.identity_id.as_str()) { continue; }
+            if !is_fingerprint_hex(&sc.identity_id) { continue; }
+            // Deleted on this device: the sibling's copy must not bring it back.
+            if !self.identity_to_contact.contains_key(&sc.identity_id) && self.contact_removed_locally(&sc.identity_id) { continue; }
             // Cihaz public anahtarlarını ekle (bilinenleri ezmeden).
             for sd in &sc.devices {
                 // fingerprint = anahtarların hash'i — güven modeli gereği doğrula.
@@ -4835,14 +5000,39 @@ impl P2PCore {
                     self.remember_device_addr(&sd.device_fingerprint, addr);
                 }
             }
+            // A device counts only if its record is stored for this identity
+            // (key hash checked above, or known before) and it is active.
+            let usable: Vec<String> = sc.devices.iter()
+                .filter(|sd| sd.is_active)
+                .filter(|sd| self.known_remote_devices.get(&sd.device_fingerprint)
+                    .map_or(false, |d| d.identity_id == sc.identity_id && d.is_active))
+                .map(|sd| sd.device_fingerprint.clone())
+                .collect();
             // Kişi kaydını ekle (bilinen kişiyi ezmeden).
-            if !self.identity_to_contact.contains_key(&sc.identity_id) {
-                let contact_id = format!("contact-{}", sc.identity_id.chars().take(16).collect::<String>());
-                let mut contact = Contact::new(contact_id.clone(), sc.display_name.clone(), sc.identity_id.clone());
+            if let Some(cid) = self.identity_to_contact.get(&sc.identity_id).cloned() {
+                // Known contact: its devices the sibling learned first. Without
+                // an entry in `known_devices` such a device raised a false
+                // "unknown device" alert and its packets were blocked. A device
+                // this side revoked has an entry and is left alone.
+                let mut changed = false;
+                if let Some(contact) = self.contacts.get_mut(&cid) {
+                    for fp in &usable {
+                        if contact.find_device(fp).is_none() {
+                            contact.add_device_via_signed_chain(fp.clone(), now);
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    if let Some(contact) = self.contacts.get(&cid) { self.persist_contact(contact); }
+                }
+            } else {
+                let contact_id = self.new_contact_id(&sc.identity_id);
+                let mut contact = Contact::new(contact_id.clone(), sanitize_display_name(&sc.display_name).unwrap_or_default(), sc.identity_id.clone());
                 contact.added_via_group = sc.added_via_group;
                 contact.avatar_jpeg = sc.avatar_jpeg.clone();
-                for sd in &sc.devices {
-                    if sd.is_active { contact.add_device_via_signed_chain(sd.device_fingerprint.clone(), now); }
+                for fp in &usable {
+                    contact.add_device_via_signed_chain(fp.clone(), now);
                 }
                 self.identity_to_contact.insert(sc.identity_id.clone(), contact_id.clone());
                 self.persist_contact(&contact);
@@ -4978,7 +5168,7 @@ impl P2PCore {
     ///      idempotent (monoton damga), `needs_delivery_confirmation` +
     ///      `regen_content` sayesinde diske yazılır / ratchet dönünce taze
     ///      şifrelenir / karşı taraf çevrimdışıysa sunucuya bırakılır /
-    ///      onaylanana (2 güne) kadar yeniden denenir. Tekil `Seen` paketi
+    ///      onaylanana (7 güne) kadar yeniden denenir. Tekil `Seen` paketi
     ///      (kırılgan: 9 bellek-içi deneme, diske yazılmaz, restart/rotasyonda
     ///      ölür, geçmişten yüklenen mesajlar için hiç gönderilmez) artık
     ///      yalnızca anlık ince-ayrıntı; dayanıklılık burada.
@@ -5288,7 +5478,9 @@ impl P2PCore {
                 for m in self.load_message_history(&peer_fp, limit, before_timestamp) {
                     if m.is_deleted { continue; }
                     let mid = match &m.message_id { Some(id) if !id.is_empty() => id.clone(), _ => continue };
-                    if m.text.len() > text_budget { return entries; }
+                    // Skip, do not stop: one long early message used to cut
+                    // off every later conversation, on every backfill.
+                    if m.text.len() > text_budget { continue; }
                     text_budget -= m.text.len();
                     entries.push(SiblingHistoryEntry {
                         conversation_identity_id: Some(identity_id.clone()),
@@ -5316,7 +5508,9 @@ impl P2PCore {
                 for m in self.load_group_message_history(&gid, limit, before_timestamp) {
                     if m.is_deleted { continue; }
                     let mid = match &m.message_id { Some(id) if !id.is_empty() => id.clone(), _ => continue };
-                    if m.text.len() > text_budget { return entries; }
+                    // Skip, do not stop: one long early message used to cut
+                    // off every later conversation, on every backfill.
+                    if m.text.len() > text_budget { continue; }
                     text_budget -= m.text.len();
                     entries.push(SiblingHistoryEntry {
                         conversation_identity_id: None,
@@ -5589,8 +5783,13 @@ impl P2PCore {
                         "TOFU reddedildi: contacts tablosu üst sınırda ({} >= {}), identity {} eklenmedi",
                         self.contacts.len(), MAX_CONTACTS, identity_id
                     );
-                } else {
-                    let _ = self.register_contact_from_pairing(identity_id.to_string(), device_fingerprint.to_string(), device_name_hint.to_string());
+                    // "Blocked", without an alert. Returning `NewContactTofu`
+                    // let the caller store the device record anyway, so
+                    // `remote_devices` grew without limit under a flood.
+                    return DeviceCheckOutcome::UnverifiedNewDeviceAlert;
+                } else if let Err(e) = self.register_contact_from_pairing(identity_id.to_string(), device_fingerprint.to_string(), device_name_hint.to_string()) {
+                    warn!("TOFU reddedildi: {}", e);
+                    return DeviceCheckOutcome::UnverifiedNewDeviceAlert;
                 }
             }
             DeviceCheckOutcome::NewDeviceViaSignedAdd => {
@@ -5769,15 +5968,27 @@ impl P2PCore {
     }
 
     fn accept_pending_device_alert(&mut self, device_fingerprint: &str) -> Result<(), String> {
-        let alert = self.pending_device_alerts.remove(device_fingerprint)
-            .ok_or("No pending alert for this device")?;
-        let contact_id = self.identity_to_contact.get(&alert.identity_id).cloned()
+        let identity_id = self.pending_device_alerts.get(device_fingerprint)
+            .ok_or("No pending alert for this device")?.identity_id.clone();
+        // The alert is removed only once the contact is found: an error
+        // must leave it for the user to answer again.
+        let contact_id = self.identity_to_contact.get(&identity_id).cloned()
             .ok_or("Unknown contact")?;
+        self.pending_device_alerts.remove(device_fingerprint);
         if let Some(c) = self.contacts.get_mut(&contact_id) {
             c.add_device_unverified(device_fingerprint.to_string(), current_time_ms());
         }
         if let Some(c) = self.contacts.get(&contact_id) {
             self.persist_contact(c);
+        }
+        // The IdentityExchange that raised the alert was dropped before its
+        // keys were stored, so there is no `known_remote_devices` record and
+        // the accepted device could neither send nor receive. Ask again, as a
+        // pairing does: the peer answers our IdentityExchange with its own,
+        // which now passes as `KnownActive`.
+        self.subscribe_pairing_mailbox(device_fingerprint);
+        if let Err(e) = self.send_identity_exchange_fresh(device_fingerprint) {
+            error!("IdentityExchange gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
         }
         Ok(())
     }
@@ -6094,7 +6305,7 @@ impl P2PCore {
         // Defter #26: `status == Active` filtresi YOKTU — iptal edilmiş
         // (revoked) cihazlara da profil güncellemesi gidiyordu. Karşı taraf
         // zaten `receive_message`'ta iptal edilmiş göndericiyi reddediyor,
-        // ama biz de boşuna şifreleyip 2 gün yeniden denemeyelim.
+        // ama biz de boşuna şifreleyip 7 gün yeniden denemeyelim.
         let peer_fps: Vec<String> = self.contacts.values()
             .flat_map(|c| {
                 c.known_devices.iter()
@@ -6126,8 +6337,15 @@ impl P2PCore {
             None => return,
         };
         let content = MessageContent::AddressAnnounce { multiaddr: addr };
+        // Active devices only, as in `set_own_profile_picture`: a revoked
+        // device has no session, so this send started a new handshake with it
+        // and gave it our current addresses.
         let peer_fps: Vec<String> = self.contacts.values()
-            .flat_map(|c| c.known_devices.iter().map(|d| d.device_fingerprint.clone()))
+            .flat_map(|c| {
+                c.known_devices.iter()
+                    .filter(|d| matches!(d.status, contact::KnownDeviceStatus::Active))
+                    .map(|d| d.device_fingerprint.clone())
+            })
             .collect();
         for fp in peer_fps {
             if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
@@ -6221,8 +6439,17 @@ impl P2PCore {
             // ederdi — karşı taraf bunu alıp karşılıklı `IdentityExchange`
             // yanıtı gönderdiğinde yukarıdaki TOFU dirilişini tetiklerdi.
             self.pending_envelopes.retain(|(target_fp, _, _)| target_fp != fp);
+            self.early_packets.remove(fp);
+            self.undecryptable_from.remove(fp);
+            self.last_handshake_redo.remove(fp);
+            // Otherwise the reply to a re-pairing within a minute is suppressed.
+            self.last_identity_exchange_reply.remove(fp);
         }
+        // An alert of the deleted contact could still be shown and accepted.
+        self.pending_device_alerts.retain(|_, a| a.identity_id != contact.trusted_identity_id);
         if let Some(conn) = &self.db {
+            // bkz. `contact_removed_locally`.
+            let _ = conn.execute("INSERT OR REPLACE INTO removed_contacts (identity_id) VALUES (?1)", params![contact.trusted_identity_id]);
             for fp in &fingerprints {
                 // bkz. `clear_chat_history` aynı `group_id IS NULL` notu —
                 // bir kişiyi silmek, o kişinin ORTAK OLDUĞU grupların
@@ -6273,6 +6500,12 @@ impl P2PCore {
     /// senaryosu) o etkilenmez.
     fn revoke_contact_device(&mut self, contact_id: &str, device_fingerprint: &str) -> Result<(), String> {
         let contact = self.contacts.get_mut(contact_id).ok_or("Kişi bulunamadı")?;
+        // Everything below acts on the fingerprint alone: for a device of
+        // someone else (even one of our own siblings) it would deactivate the
+        // record and delete the session.
+        if contact.find_device(device_fingerprint).is_none() {
+            return Err("Bu cihaz bu kişiye ait değil".to_string());
+        }
         contact.revoke_device(device_fingerprint, current_time_ms());
         if let Some(c) = self.contacts.get(contact_id) {
             self.persist_contact(c);
@@ -6299,6 +6532,12 @@ impl P2PCore {
         self.awaiting_confirmation.retain(|_, pc| pc.peer_device_fingerprint != device_fingerprint);
         self.remove_durable_retries_for_peer(device_fingerprint);
         self.active_downloads.retain(|_, d| d.peer_device_fingerprint != device_fingerprint);
+        // Queued envelopes were still published by `poll_events`.
+        self.pending_envelopes.retain(|(target_fp, _, _)| target_fp != device_fingerprint);
+        self.early_packets.remove(device_fingerprint);
+        self.undecryptable_from.remove(device_fingerprint);
+        self.last_handshake_redo.remove(device_fingerprint);
+        self.reconnect_backoff.remove(device_fingerprint);
         if let Some(conn) = &self.db {
             let _ = conn.execute("DELETE FROM ratchet_states WHERE peer_device_fingerprint = ?1", params![device_fingerprint]);
             let _ = conn.execute("DELETE FROM skipped_message_keys WHERE peer_device_fingerprint = ?1", params![device_fingerprint]);
@@ -6510,13 +6749,11 @@ impl P2PCore {
             }
         }
         self.dial_with_relay_fallback(peer_id, primary_addr);
-        // Also every address the DHT/identify know for this peer, e.g. a UPnP-mapped
-        // public IP. That is a plain TCP path, not bounded by Tor: after mobile
-        // data came back, onion circuits took 20-130 s to rebuild (device,
-        // 2026-09-18), while the peer's public address was reachable at once.
+        // Also every address the behaviours know for this peer. No direct (IP)
+        // addresses are added: the node is onion-only since the 2026-09-23
+        // deanon fix (`DialReject` refuses clearnet dials anyway).
         if let Some(swarm) = &mut self.swarm {
             let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
-                .addresses(self.peer_direct_addrs.get(&peer_id).cloned().unwrap_or_default())
                 .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
                 .build();
             let _ = swarm.dial(opts);
@@ -6683,7 +6920,7 @@ impl P2PCore {
     /// yalnızca ratchet YOKKEN çağrılıyor, oysa gönderen tarafta ratchet
     /// ARTIK VAR. Alıcı ise gelen paketleri `early_packets`'e tamponlayıp
     /// hiç gelmeyecek el sıkışmayı bekler. İki uçta da hiçbir hata
-    /// görünmez; mesajlar 2 gün boyunca boşuna yeniden denenir.
+    /// görünmez; mesajlar 7 gün boyunca boşuna yeniden denenir.
     ///
     /// Çözüm: karşı taraf `MAX_UNCONFIRMED_AGE_MS` boyunca HİÇBİR ŞEYİ
     /// onaylamadıysa (tek bir Ack bile yok), oturumun karşı tarafta hiç
@@ -7347,7 +7584,7 @@ impl P2PCore {
         // `regen_content` ile bunun yerine TAZE bir ratchet adımıyla, AYNI
         // `message_id` ile yeniden şifrelenirler (bkz. `message_id_override`)
         // — alıcı zaten `message_id` üzerinden dedup ettiği için çift arşiv
-        // oluşmaz, ve `TEXT_RETRY_GIVE_UP_MS`'ye (2 gün) kadar hayatta
+        // oluşmaz, ve `TEXT_RETRY_GIVE_UP_MS`'ye (7 gün) kadar hayatta
         // kalırlar. `Ack`/`Seen`/`TypingIndicator` KASITLI olarak dışarıda
         // (bkz. yukarıdaki notlar); `HistorySyncResponse` de dışarıda —
         // toplu bir yanıt, kaybolursa istek zaten yeniden sorulur ve
@@ -7966,7 +8203,7 @@ impl P2PCore {
                 // (UI ekranda maskeliyordu ama arşiv/geçmiş senkronu çiftleri
                 // taşımaya devam ediyordu). Ack YİNE gönderilir — gönderenin
                 // yeniden denemesi ancak böyle durur.
-                info!("Metin alındı: id={} kaynak={}", &display_id[..8.min(display_id.len())], if source.is_some() { "p2p" } else { "sunucu" });
+                info!("Metin alındı: id={} kaynak={}", display_id.chars().take(8).collect::<String>(), if source.is_some() { "p2p" } else { "sunucu" });
                 if self.message_exists_with_id(&display_id) {
                     self.send_ack(&peer_fp, &message_id);
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
@@ -8133,7 +8370,7 @@ impl P2PCore {
                 // Ack KOŞULSUZ (bkz. `apply_edit_or_delete_content` — Edit/Delete
                 // AYNI desen: önce Ack, sonra uygula/reddet). `Reaction`
                 // `needs_delivery_confirmation` listesinde → gönderen bunu
-                // onaylanana kadar (2 güne) yeniden dener ve `pending_durable_
+                // onaylanana kadar (7 güne) yeniden dener ve `pending_durable_
                 // retries`'e yazar. Bu arm eskiden HİÇ Ack göndermiyordu →
                 // tepki alıcıda uygulansa/reddedilse bile gönderen tarafta
                 // yeniden-deneme girdisi günlerce asılı kalıyordu (2026-09-07
@@ -9233,8 +9470,10 @@ impl P2PCore {
                 "servers", "server_cursors", "server_archive_queue", "server_blob_uploads",
                 // Engel listesi de bu cihazın yerel durumu — silinen bir
                 // kimliğin kimleri engellediği geride kalmamalı.
-                "blocked_identities", "deleted_identities",
+                "blocked_identities", "deleted_identities", "removed_contacts",
                 "wb_strokes", "wb_tombstones",
+                // They hold other people's identity ids (who reacted, who saw).
+                "message_reactions", "message_seen",
             ] {
                 let _ = conn.execute(&format!("DELETE FROM {}", table), []);
             }
@@ -10195,9 +10434,25 @@ impl P2PCore {
         // `before_timestamp`: bkz. `request_older_history` — dolu ise
         // sonsuz kaydırma sayfalaması (bu zaman damgasından eski mesajlar),
         // `None` ise mevcut davranış (en yeni `limit` mesaj).
+        //
+        // The cursor is a timestamp only, and a history sync archives a whole
+        // batch within one millisecond. A plain `LIMIT` that cut through such
+        // a batch lost the rest of it: the next page asks for
+        // `timestamp < boundary`. So the page runs to the end of the
+        // millisecond of its `limit`-th row (the subquery) and can be a few
+        // rows longer than `limit`.
+        // ponytail: page size is not exact. A (timestamp, id) cursor through
+        // JNI and both UIs is the upgrade if that ever matters.
+        if limit == 0 {
+            return Vec::new();
+        }
         let mut stmt = match conn.prepare(
             "SELECT direction, encrypted_blob, nonce, timestamp, message_id, status, reply_to_message_id, reply_to_preview, is_deleted, is_edited, COALESCE(NULLIF(sent_at_ms,0), timestamp) FROM messages
-             WHERE peer_device_fingerprint = ?1 AND (?3 IS NULL OR timestamp < ?3) ORDER BY timestamp DESC, id DESC LIMIT ?2"
+             WHERE peer_device_fingerprint = ?1 AND (?3 IS NULL OR timestamp < ?3)
+               AND timestamp >= COALESCE((SELECT timestamp FROM messages
+                    WHERE peer_device_fingerprint = ?1 AND (?3 IS NULL OR timestamp < ?3)
+                    ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?2 - 1), 0)
+             ORDER BY timestamp DESC, id DESC"
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -10298,9 +10553,16 @@ impl P2PCore {
         };
 
         // bkz. `load_message_history` aynı `before_timestamp` notu.
+        if limit == 0 {
+            return Vec::new();
+        }
         let mut stmt = match conn.prepare(
             "SELECT direction, encrypted_blob, nonce, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, COALESCE(NULLIF(sent_at_ms,0), timestamp) FROM messages
-             WHERE group_id = ?1 AND (?3 IS NULL OR timestamp < ?3) ORDER BY timestamp DESC, id DESC LIMIT ?2"
+             WHERE group_id = ?1 AND (?3 IS NULL OR timestamp < ?3)
+               AND timestamp >= COALESCE((SELECT timestamp FROM messages
+                    WHERE group_id = ?1 AND (?3 IS NULL OR timestamp < ?3)
+                    ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?2 - 1), 0)
+             ORDER BY timestamp DESC, id DESC"
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -10684,11 +10946,11 @@ impl P2PCore {
     /// DEĞİL. Spec dışı, teslim garantisi düzeltmesi: burası eskiden her
     /// yazışta `current_time_ms()` damgalıyordu, ama bu kolon
     /// `load_pending_durable_retries_from_db` tarafından `original_sent_at`
-    /// olarak geri okunuyor — yani `TEXT_RETRY_GIVE_UP_MS` (2 gün) penceresi
+    /// olarak geri okunuyor — yani `TEXT_RETRY_GIVE_UP_MS` (7 gün) penceresi
     /// HER uygulama açılışında ve HER `regen` tazelemesinde (25 dakikada bir)
     /// sıfırlanıyordu. Sonuç: artık var olmayan bir eşe giden bir mesaj
     /// sonsuza kadar yeniden deneniyor ve kullanıcıya asla "gönderilemedi"
-    /// denmiyordu. Gerçek başlangıç anı taşınınca 2 günlük tavan gerçekten
+    /// denmiyordu. Gerçek başlangıç anı taşınınca 7 günlük tavan gerçekten
     /// işliyor.
     fn persist_durable_retry(&self, message_id: &str, peer_device_fingerprint: &str, content: &MessageContent, original_sent_at: u64) {
         let conn = match &self.db { Some(c) => c, None => return };
@@ -11101,6 +11363,16 @@ impl P2PCore {
         }
         if let Some(g) = self.groups.get(group_id) {
             self.persist_group(g);
+        }
+        // What was queued for the removed member while it was still a member
+        // (group updates with name, avatar and member list; messages) must not
+        // reach it later through `group_sync_sweep`. Every removal path comes
+        // through here: leave, founder removal, deleted account. The removal
+        // notice below is queued after this, so it stays.
+        let removed_key = (group_id.to_string(), member_identity_id.to_string());
+        self.pending_group_syncs.remove(&removed_key);
+        if self.pending_group_messages.remove(&removed_key).is_some() {
+            self.remove_persisted_pending_group_messages(group_id, member_identity_id);
         }
         // bkz. `send_group_update_to_member` — hedef cihaz henüz çözülemiyorsa
         // artık sessizce kaybolmaz, `group_sync_sweep` yeniden dener.
@@ -11903,6 +12175,25 @@ impl P2PCore {
                 continue;
             }
 
+            // `register_contact_from_pairing` would refuse it below, after the
+            // device record was already stored.
+            if !is_fingerprint_hex(&d.identity_id) {
+                continue;
+            }
+            // bkz. `MAX_CONTACTS` — the same no-user-action contact creation as
+            // the TOFU path (`evaluate_sender_device`), with the same cap: a
+            // founder could flood the contact list with one large
+            // `member_devices` list. Checked before the device record is
+            // stored, so `remote_devices` stays bounded too.
+            let is_new_contact = !self.identity_to_contact.contains_key(&d.identity_id);
+            if is_new_contact && self.contacts.len() >= MAX_CONTACTS {
+                warn!(
+                    "Grup kefaleti reddedildi: contacts tablosu üst sınırda ({} >= {}), identity {} eklenmedi",
+                    self.contacts.len(), MAX_CONTACTS, d.identity_id
+                );
+                continue;
+            }
+
             let record = DeviceRecord {
                 device_fingerprint: d.device_fingerprint.clone(),
                 identity_id: d.identity_id.clone(),
@@ -11918,7 +12209,6 @@ impl P2PCore {
             self.known_remote_devices.insert(d.device_fingerprint.clone(), record);
             // Kişi listesine ekle ve "grup üzerinden eklendi" olarak
             // işaretle (bkz. Contact.added_via_group / güvenlik notu).
-            let is_new_contact = !self.identity_to_contact.contains_key(&d.identity_id);
             let _ = self.register_contact_from_pairing(
                 d.identity_id.clone(),
                 d.device_fingerprint.clone(),
@@ -12392,8 +12682,11 @@ impl P2PCore {
             );
             // bkz. yukarıdaki not — bu INSERT sessizce başarısız oluyordu.
             // Bir daha fark edilmeden geçmesin diye artık hata loglanıyor.
+            // Without the row we cannot serve the file: sending the offer
+            // anyway gave the recipient an attachment it could never download.
             if let Err(e) = res {
                 error!("finish_outgoing_file: `files` satırı yazılamadı (file_id={}): {}", file_id, e);
+                return Err(format!("Dosya kaydı yazılamadı: {}", e));
             }
         }
         // Kendi gönderdiğimiz dosya da toplam depolamaya katkı sağlar —
@@ -12429,6 +12722,17 @@ impl P2PCore {
         self.fanout_extra_copies(&peer_device_fingerprint, &content);
         self.echo_1to1_to_siblings(&peer_device_fingerprint, SiblingEchoBody::File { offer: Box::new(content) });
         Ok((file_id, status))
+    }
+
+    /// Undoes what `finish_outgoing_file` / `finish_outgoing_group_file` wrote
+    /// before they failed: the caller (`encrypt_then_finish`) deletes the
+    /// `.enc`, so a 'complete' row and a queued server upload would point at a
+    /// file that no longer exists.
+    fn discard_outgoing_file(&mut self, file_id: &str) {
+        self.finish_blob_upload(file_id);
+        if let Some(conn) = &self.db {
+            let _ = conn.execute("DELETE FROM files WHERE file_id = ?1 AND direction = 'sent'", params![file_id]);
+        }
     }
 
     /// Spec dışı, kullanıcı isteği (grup ekleri): `prepare_and_send_file`'ın
@@ -12470,6 +12774,7 @@ impl P2PCore {
             );
             if let Err(e) = res {
                 error!("finish_outgoing_group_file: `files` satırı yazılamadı (file_id={}): {}", file_id, e);
+                return Err(format!("Dosya kaydı yazılamadı: {}", e));
             }
         }
         self.enforce_history_storage_limit();
@@ -12908,6 +13213,35 @@ impl P2PCore {
         }
     }
 
+    /// Moves the download to its next alternative source (bkz.
+    /// `DownloadState.alt_source_peer_ids`) and dials it. `None`: no candidate
+    /// left, nothing changed. The caller asks for the chunks again
+    /// (`request_next_chunk`).
+    fn switch_to_alt_source(&mut self, file_id: &str) -> Option<PeerId> {
+        let s = self.active_downloads.get_mut(file_id)?;
+        let next_peer = s.alt_source_peer_ids.pop_front()?;
+        s.peer_id = next_peer;
+        s.retries_on_current_source = 0;
+        // Eski kaynağa gönderilmiş istekler artık gelmeyecek; temizlenmezse o
+        // indeksler sonsuza dek "havada" sayılır ve pencere bir daha dolmaz.
+        s.inflight_chunks.clear();
+        s.chunk_sent_at.clear();
+        // Yeni kaynağın kapasitesi bilinmiyor — pencere ve taban gecikme
+        // ölçümü baştan.
+        s.window = DOWNLOAD_WINDOW_START;
+        s.rtt_min = u64::MAX;
+        // Up to `window` requests are still open at the old source. Their late
+        // answers (it usually says NotFound to each) must not count against
+        // the new source: every one of them switched the source again, and a
+        // download that ran fine used up its candidates and failed.
+        self.download_request_ids.retain(|_, (fid, _)| fid != file_id);
+        let already_connected = self.swarm.as_ref().map(|s| s.is_connected(&next_peer)).unwrap_or(false);
+        if !already_connected {
+            self.dial_with_relay_fallback(next_peer, None);
+        }
+        Some(next_peer)
+    }
+
     /// Spec dışı, ağ sağlamlığı düzeltmesi (kullanıcı isteği: "her şey
     /// onaylanana/çok çok uzun -10 dk- bir zaman aşımına kadar denenmeli"):
     /// bir parça isteği stall oldu (`check_stalled_downloads`) VEYA
@@ -12934,38 +13268,18 @@ impl P2PCore {
         // aday varsa (bkz. `DownloadState.alt_source_peer_ids`), aynı
         // kaynağı süresiz yoklamak yerine bir sonraki adaya geçilir.
         const RETRIES_BEFORE_SOURCE_SWITCH: u32 = 2;
-        let switched_to = {
+        let over_limit = {
             let s = match self.active_downloads.get_mut(file_id) { Some(s) => s, None => return };
             s.last_retry_at = now;
             s.retries_on_current_source += 1;
-            if s.retries_on_current_source > RETRIES_BEFORE_SOURCE_SWITCH {
-                s.alt_source_peer_ids.pop_front().map(|next_peer| {
-                    s.peer_id = next_peer;
-                    s.retries_on_current_source = 0;
-                    // bkz. diğer iki kaynak değişim noktası — havadaki
-                    // istekler eski kaynağa gitmişti, temizlenmezse pencere
-                    // bir daha dolmaz.
-                    s.inflight_chunks.clear();
-                    s.chunk_sent_at.clear();
-                    // Yeni kaynağın kapasitesi bilinmiyor — pencere ve taban
-                    // gecikme ölçümü baştan.
-                    s.window = DOWNLOAD_WINDOW_START;
-                    s.rtt_min = u64::MAX;
-                    next_peer
-                })
-            } else {
-                None
-            }
+            s.retries_on_current_source > RETRIES_BEFORE_SOURCE_SWITCH
         };
+        let switched_to = if over_limit { self.switch_to_alt_source(file_id) } else { None };
         if let Some(next_peer) = switched_to {
             warn!(
                 "İndirme mevcut kaynaktan {} kez yanıt alamadı, ALTERNATİF bir kaynağa geçiliyor: file_id={} yeni_peer={}",
                 RETRIES_BEFORE_SOURCE_SWITCH, file_id, next_peer
             );
-            let already_connected = self.swarm.as_ref().map(|s| s.is_connected(&next_peer)).unwrap_or(false);
-            if !already_connected {
-                self.dial_with_relay_fallback(next_peer, None);
-            }
         }
         info!("İndirme geçici olarak yanıt vermedi ({}), parçalar yeniden isteniyor: file_id={}", reason, file_id);
         // Havadaki istekler takıldı (yanıt gelmedi ya da kaynak değişti):
@@ -13098,29 +13412,10 @@ impl P2PCore {
                     .map(|s| s.peer_id)
                     .map(|p| self.is_server_peer(&p))
                     .unwrap_or(false);
-                let next_peer = self.active_downloads.get_mut(file_id).and_then(|s| {
-                    s.alt_source_peer_ids.pop_front().map(|p| {
-                        s.peer_id = p;
-                        s.retries_on_current_source = 0;
-                        // Eski kaynağa gönderilmiş istekler artık gelmeyecek;
-                        // temizlenmezse o indeksler sonsuza dek "havada"
-                        // sayılır ve pencere bir daha dolmaz.
-                        s.inflight_chunks.clear();
-                        s.chunk_sent_at.clear();
-                        // Yeni kaynağın kapasitesi bilinmiyor — pencere ve
-                        // taban gecikme ölçümü baştan.
-                        s.window = DOWNLOAD_WINDOW_START;
-                        s.rtt_min = u64::MAX;
-                        p
-                    })
-                });
+                let next_peer = self.switch_to_alt_source(file_id);
                 match next_peer {
                     Some(peer) => {
                         warn!("Kaynakta dosya/parça bulunamadı, ALTERNATİF bir kaynağa geçiliyor: file_id={} yeni_peer={}", file_id, peer);
-                        let already_connected = self.swarm.as_ref().map(|s| s.is_connected(&peer)).unwrap_or(false);
-                        if !already_connected {
-                            self.dial_with_relay_fallback(peer, None);
-                        }
                         self.request_next_chunk(file_id);
                     }
                     None if from_server => {
@@ -13161,29 +13456,10 @@ impl P2PCore {
             // yazılmış olabilir" gerekçesine dayanıyordu, oysa çözme yazmadan
             // önce olduğu için bu mümkün değil.)
             Err(attachments::ChunkAppendError::Auth(e)) => {
-                let next_peer = self.active_downloads.get_mut(file_id).and_then(|s| {
-                    s.alt_source_peer_ids.pop_front().map(|p| {
-                        s.peer_id = p;
-                        s.retries_on_current_source = 0;
-                        // Eski kaynağa gönderilmiş istekler artık gelmeyecek;
-                        // temizlenmezse o indeksler sonsuza dek "havada"
-                        // sayılır ve pencere bir daha dolmaz.
-                        s.inflight_chunks.clear();
-                        s.chunk_sent_at.clear();
-                        // Yeni kaynağın kapasitesi bilinmiyor — pencere ve
-                        // taban gecikme ölçümü baştan.
-                        s.window = DOWNLOAD_WINDOW_START;
-                        s.rtt_min = u64::MAX;
-                        p
-                    })
-                });
+                let next_peer = self.switch_to_alt_source(file_id);
                 match next_peer {
                     Some(peer) => {
                         warn!("Parça doğrulanamadı ({}), ALTERNATİF bir kaynağa geçiliyor: file_id={} yeni_peer={}", e, file_id, peer);
-                        let already_connected = self.swarm.as_ref().map(|s| s.is_connected(&peer)).unwrap_or(false);
-                        if !already_connected {
-                            self.dial_with_relay_fallback(peer, None);
-                        }
                         self.request_next_chunk(file_id);
                     }
                     None => {
@@ -14876,7 +15152,7 @@ impl P2PCore {
         // yeniden başlasa bile bu kaybolmasın diye şifreli DB'ye de yazılır.
         // Struct'a taşınmadan (move) ÖNCE, referans üzerinden.
         // bkz. `persist_durable_retry` — diske GERÇEK başlangıç anı yazılır,
-        // `now` değil; yoksa 2 günlük vazgeçme penceresi her tazelemede
+        // `now` değil; yoksa 7 günlük vazgeçme penceresi her tazelemede
         // sıfırlanırdı.
         let original_sent_at = original_sent_at_override.unwrap_or(now);
         if let Some(content) = &regen_content {
@@ -15031,7 +15307,7 @@ impl P2PCore {
                 // üzerinden `TEXT_RETRY_GIVE_UP_MS`. Bu, `regen_content`
                 // dolu olsa BİLE kontrol edilir — aksi halde bir mesaj
                 // sonsuza dek (günler/haftalar) tazelenip denenmeye devam
-                // ederdi, "2 gün" sınırının hiçbir anlamı kalmazdı.
+                // ederdi, "7 gün" sınırının hiçbir anlamı kalmazdı.
                 let give_up_for_real = now.saturating_sub(original_sent_at) > TEXT_RETRY_GIVE_UP_MS;
                 // Sync packets are not refreshed: re-encrypting and re-depositing
                 // them every ~30 min for 7 days to a device that is switched off
@@ -15054,7 +15330,7 @@ impl P2PCore {
                         // bazı yerlerde sorun çıkarabilir... adam 6 saat
                         // interneti açmadı, ne yapalım?" + kullanıcı isteği:
                         // sıradan Text de dahil, karşı taraf onaylayana
-                        // kadar ~2 güne kadar dener): AYNI bayatlamış
+                        // kadar ~7 güne kadar dener): AYNI bayatlamış
                         // şifreli paketi tekrar göndermenin anlamı yok —
                         // orijinal düz metni TAZE bir ratchet adımıyla
                         // yeniden şifreleyip AYNI `message_id`/`original_sent_at`
@@ -15218,10 +15494,10 @@ impl P2PCore {
     /// çağrılır — HERHANGİ bir bekleyen mesajın bir sonraki deneme zamanını
     /// (`next_retry_at`) HEMEN'e çeker, üstel geri çekilmenin doğal
     /// aralığını (şu an 120s'ye kadar) beklemeden. `awaiting_confirmation`
-    /// zaten SADECE `TEXT_RETRY_GIVE_UP_MS` (2 gün) içindeki girdileri
+    /// zaten SADECE `TEXT_RETRY_GIVE_UP_MS` (7 gün) içindeki girdileri
     /// tutar — daha eskiler `retry_unconfirmed_messages`'ın yaş-aşımı
     /// kolunda zaten kalıcı olarak temizlenmiştir — bu yüzden burada AYRICA
-    /// bir yaş filtresi gerekmez, mevcut TÜM girdiler zaten "son 2 gün"
+    /// bir yaş filtresi gerekmez, mevcut TÜM girdiler zaten "son 7 gün"
     /// kapsamındadır. Gerçek gönderim denemesi, bir sonraki `poll_events`
     /// turunda (saniyede bir, Kotlin tarafından zaten çağrılıyor) normal
     /// `retry_unconfirmed_messages` yolundan geçer — burada AYRI bir ağ
@@ -15444,7 +15720,6 @@ impl P2PCore {
         let mut new_listen_addrs: Vec<Multiaddr> = Vec::new();
         let mut new_peer_addrs: Vec<(PeerId, Multiaddr)> = Vec::new();
         let mut new_peer_onions: Vec<(PeerId, Multiaddr)> = Vec::new();
-        let mut new_peer_direct: Vec<(PeerId, Vec<Multiaddr>)> = Vec::new();
         // bkz. `known_relay_peers` alanı dokümantasyonu — identify'dan
         // "bu peer röle protokolünü konuşuyor" öğrenildiğinde doldurulur,
         // döngü bitince (aşağıda `self.record_known_relay` ile) uygulanır
@@ -15626,13 +15901,6 @@ impl P2PCore {
                             // and 127.0.0.1 reaches our own node.
                             if let Some(addr) = info.listen_addrs.iter().find(|a| is_onion_multiaddr(a)) {
                                 new_peer_onions.push((peer_id, addr.clone()));
-                            }
-                            let direct: Vec<Multiaddr> = info.listen_addrs.iter()
-                                .filter(|a| !is_loopback_multiaddr(a) && !is_onion_multiaddr(a) && conn_path_rank(a) == 2)
-                                .cloned()
-                                .collect();
-                            if !direct.is_empty() {
-                                new_peer_direct.push((peer_id, direct));
                             }
                             for addr in info.listen_addrs.into_iter().filter(|a| !is_loopback_multiaddr(a)) {
                                 swarm.behaviour_mut().kad.add_address(&peer_id, addr);
@@ -15931,8 +16199,11 @@ impl P2PCore {
                                             KEEPALIVE_IDLE_INTERVAL_MS
                                         };
                                         // The peer is saving radio: honour it.
-                                        let interval = interval.max(response.quiet_ms.unwrap_or(0));
-                                        state.next_due_at = now + interval;
+                                        // `quiet_ms` is peer-supplied: an honest peer never asks for
+                                        // more than `RADIO_WINDOW_MS`. Unclamped, a huge value turned
+                                        // keepalive off, and `u64::MAX` wrapped `next_due_at`.
+                                        let interval = interval.max(response.quiet_ms.unwrap_or(0).min(RADIO_WINDOW_MS));
+                                        state.next_due_at = now.saturating_add(interval);
                                         state.interval_ms = interval;
                                     }
                                 }
@@ -16092,9 +16363,6 @@ impl P2PCore {
         // which first needs its own Tor connection to the server: ~40 s after
         // mobile data came back (device, 2026-09-18). Peers now announce their
         // onion address over identify (see `advertised_onion`).
-        for (pid, addrs) in new_peer_direct {
-            self.peer_direct_addrs.insert(pid, addrs);
-        }
         for (pid, addr) in new_peer_onions {
             let addr = if extract_peer_id(&addr).is_some() { addr } else { addr.with(MultiaddrProtocol::P2p(pid)) };
             let addr_str = addr.to_string();
@@ -17126,6 +17394,13 @@ impl P2PCore {
         use chacha20poly1305::aead::{Aead, KeyInit};
         use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 
+        // The parameters come from the file. Unchecked, a damaged or crafted
+        // file asked for gigabytes of memory (the app is killed) or hours of
+        // work, before the passphrase is even tested. `export_recovery`
+        // writes m=19 MiB, t=2, p=1.
+        if file.argon2_m_cost > MAX_RECOVERY_ARGON2_M_COST_KIB || file.argon2_t_cost > 10 || file.argon2_p_cost > 4 {
+            return Err("Bozuk kurtarma dosyası (Argon2 parametreleri sınır dışı)".to_string());
+        }
         let params = argon2::Params::new(file.argon2_m_cost, file.argon2_t_cost, file.argon2_p_cost, Some(32))
             .map_err(|e| format!("Argon2 params: {e}"))?;
         let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
@@ -17208,6 +17483,8 @@ impl P2PCore {
             };
 
             if let Some(conn) = &self.db {
+                // bkz. `generate_identity` — one identity per database.
+                let _ = conn.execute("DELETE FROM identities WHERE id != ?1", params![exported.identity_id]);
                 conn.execute(
                     "INSERT OR REPLACE INTO identities (id, primary_device) VALUES (?1, ?2)",
                     params![exported.identity_id, computed_fp],

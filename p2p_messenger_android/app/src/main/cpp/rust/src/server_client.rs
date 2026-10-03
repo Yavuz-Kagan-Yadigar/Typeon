@@ -2502,7 +2502,7 @@ impl P2PCore {
         self.server_sweep_at = 0;
     }
 
-    fn finish_blob_upload(&mut self, file_id: &str) {
+    pub(crate) fn finish_blob_upload(&mut self, file_id: &str) {
         self.server_blob_uploads.retain(|u| u.file_id != file_id);
         if let Some(conn) = &self.db {
             let _ = conn.execute("DELETE FROM server_blob_uploads WHERE file_id = ?1", params![file_id]);

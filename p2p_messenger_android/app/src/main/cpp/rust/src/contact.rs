@@ -107,12 +107,21 @@ impl Contact {
     }
 
     fn push_device(&mut self, fingerprint: String, now: u64, via_signed_chain: bool) {
-        self.known_devices.push(KnownDevice {
-            device_fingerprint: fingerprint,
-            first_seen: now,
-            status: KnownDeviceStatus::Active,
-            via_signed_chain,
-        });
+        // A device that is already listed (revoked) is reactivated in place.
+        // A second entry stayed hidden behind the revoked one in
+        // `find_device`, so the device never became usable and every
+        // re-pairing added one more entry.
+        if let Some(d) = self.known_devices.iter_mut().find(|d| d.device_fingerprint == fingerprint) {
+            d.status = KnownDeviceStatus::Active;
+            d.via_signed_chain = via_signed_chain;
+        } else {
+            self.known_devices.push(KnownDevice {
+                device_fingerprint: fingerprint,
+                first_seen: now,
+                status: KnownDeviceStatus::Active,
+                via_signed_chain,
+            });
+        }
         self.last_device_change = Some(now);
     }
 
@@ -181,6 +190,16 @@ mod tests {
             check_incoming_device(Some(&c), "dev2", true),
             DeviceCheckOutcome::NewDeviceViaSignedAdd
         );
+    }
+
+    #[test]
+    fn re_adding_a_revoked_device_reactivates_its_entry() {
+        let mut c = Contact::new("c1".into(), "Alice".into(), "id1".into());
+        c.add_device_unverified("dev1".into(), 1000);
+        c.revoke_device("dev1", 2000);
+        c.add_device_unverified("dev1".into(), 3000);
+        assert_eq!(c.known_devices.len(), 1);
+        assert!(c.is_known_active("dev1"));
     }
 
     #[test]
