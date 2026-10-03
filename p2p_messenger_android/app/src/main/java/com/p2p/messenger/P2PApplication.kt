@@ -236,6 +236,7 @@ class P2PApplication : Application() {
                     }
                 }
                 startedActivityCount++
+                com.p2p.messenger.service.P2PService.setAppVisible(true)
             }
 
             override fun onActivityResumed(activity: Activity) {}
@@ -253,6 +254,7 @@ class P2PApplication : Application() {
                 // soruyordu.
                 if (startedActivityCount == 0 && !activity.isChangingConfigurations) {
                     AppLock.lock()
+                    com.p2p.messenger.service.P2PService.setAppVisible(false)
                 }
             }
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}

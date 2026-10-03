@@ -711,7 +711,7 @@ mod wipe_coverage_tests {
         "tor", "tor_enabled", "tor_was_ready",
         "own_listen_addrs", "own_external_addr", // KENDİ adreslerimiz
         "node_mode_enabled", "history_storage_limit_bytes", "power_save",
-        "metered", "radio_window_at", "radio_window_open", "tor_dormant", // network state / timers
+        "metered", "radio_window_at", "radio_window_open", "tor_dormant", "tor_wake_at", "resync_since", // network state / timers
         "app_files_dir",
         "known_relay_peers",             // herkese açık röle adresleri
         "relay_listeners",               // swarm dinleyici kimlikleri; ağla birlikte yeniden kurulur
@@ -1650,8 +1650,16 @@ const KEEPALIVE_TIMEOUT_SECS: u64 = 10;
 /// a direct link that died in between is covered by the server path, so the
 /// window length mostly trades wakeups against dead-link detection time.
 const RADIO_WINDOW_MS: u64 = 8 * 60 * 1000;
-/// How long Tor stays non-dormant after a radio-saver window opens.
+/// How long Tor stays non-dormant after a full wake, see `TOR_FULL_WAKE_MS`.
 const RADIO_AWAKE_MS: u64 = 30_000;
+/// In radio-saver mode Tor leaves dormant only this often, not at every
+/// window. Leaving dormant re-fires arti's periodic tasks: it refills the
+/// onion-service circuit pool (12-16 circuits, ~130 KB) and that kept the LTE
+/// radio up ~100 s per window (9S 2026-10-02: 32 % radio, 22 mAh/h). The
+/// window's own work (keepalive, server poll, redial) runs on existing
+/// circuits and builds what it needs on demand. The consensus is valid 3 h,
+/// so a refresh every 45 min keeps it fresh.
+const TOR_FULL_WAKE_MS: u64 = 45 * 60 * 1000;
 /// bkz. `KeepAliveState.suspect` — canlı bağlantıdan bu sürede Ack gelmezse yokla.
 const ACK_SUSPECT_MS: u64 = 1_500;
 const KEEPALIVE_PROTOCOL: &str = "/p2pmessenger/keepalive/1.0.0";
@@ -1924,7 +1932,7 @@ const STALE_PEER_RETRY_HORIZON_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// Çoklu-cihaz (spec 1.7): kardeşlerden geçmiş geri-doldurma isteklerinin
 /// asgari aralığı — her kişi/grup için son N mesajı tekrar tekrar istemek
 /// (tekrarlar zaten `message_id` ile eleniyor) israf olmasın diye.
-const SIBLING_BACKFILL_INTERVAL_MS: u64 = 5 * 60_000;
+const SIBLING_BACKFILL_INTERVAL_MS: u64 = 30 * 60_000;
 /// Geri-doldurmada kişi/grup başına istenecek/gönderilecek azami mesaj.
 const SIBLING_BACKFILL_PER_CONVERSATION: u32 = 30;
 /// Çoklu-cihaz kendini-onarma: kardeş cihazlara cihaz listesini (roster)
@@ -1941,7 +1949,7 @@ const SIBLING_BACKFILL_PER_CONVERSATION: u32 = 30;
 /// bağlantı KURULDUĞUNDA roster yeniden gönderiliyor (bu debounce ile
 /// seyreltilerek). Yük düşük: `build_sync_payload` avatarları KASITLI olarak
 /// dışarıda bırakıyor (bkz. o fonksiyon), geriye anahtarlar/adlar kalıyor.
-const SIBLING_ROSTER_SYNC_INTERVAL_MS: u64 = 10 * 60 * 1000;
+const SIBLING_ROSTER_SYNC_INTERVAL_MS: u64 = 60 * 60 * 1000;
 /// Bir `SiblingHistoryResponse`'ta taşınacak azami toplam kayıt (gossipsub
 /// 1MB sınırının çok altında kalmak için — bkz. `start_network`
 /// `max_transmit_size`).
@@ -2923,6 +2931,11 @@ struct P2PCore {
     radio_window_open: bool,
     /// Last `TorHandle::set_dormant` value, see `RADIO_AWAKE_MS`.
     tor_dormant: bool,
+    /// Next full Tor wake in radio-saver mode (ms), see `TOR_FULL_WAKE_MS`.
+    tor_wake_at: u64,
+    /// When power save was last left (ms); the links are re-verified from
+    /// then on, see `own_connection_status` "syncing".
+    resync_since: u64,
     /// Devam eden indirmeler: key = file_id (bkz. `DownloadState`).
     active_downloads: HashMap<String, DownloadState>,
     /// `request_response::send_request`'in döndürdüğü `OutboundRequestId`'yi
@@ -3076,6 +3089,8 @@ impl P2PCore {
             radio_window_at: 0,
             radio_window_open: true,
             tor_dormant: false,
+            tor_wake_at: 0,
+            resync_since: 0,
             active_downloads: HashMap::new(),
             download_request_ids: HashMap::new(),
             attachment_events: Vec::new(),
@@ -4941,6 +4956,10 @@ impl P2PCore {
     /// idempotent birleştirir.
     fn sync_to_siblings(&mut self) {
         let siblings = self.sibling_active_devices();
+        self.sync_roster_to(siblings);
+    }
+
+    fn sync_roster_to(&mut self, siblings: Vec<String>) {
         if siblings.is_empty() { return; }
         let content = MessageContent::DeviceSync(self.build_sync_payload());
         for fp in siblings {
@@ -5171,7 +5190,12 @@ impl P2PCore {
         if now.saturating_sub(self.last_sibling_backfill_at) < SIBLING_BACKFILL_INTERVAL_MS {
             return;
         }
-        let siblings = self.sibling_active_devices();
+        // Connected siblings only: an offline one cannot answer, and the request
+        // was retried and re-deposited on the server until it expired, then sent
+        // again (9S 2026-10-02: an 8 KB deposit every window all night, radio
+        // on 28 % of the time, Typeon 19 % of the battery used).
+        let siblings: Vec<String> = self.sibling_active_devices().into_iter()
+            .filter(|fp| self.is_connected_to_device(fp)).collect();
         if siblings.is_empty() { return; }
         self.last_sibling_backfill_at = now;
         let content = MessageContent::SiblingHistoryRequest {
@@ -13899,6 +13923,7 @@ impl P2PCore {
         // beklemesin.
         if !enabled {
             let now = current_time_ms();
+            self.resync_since = now;
             for state in self.keepalive_state.values_mut() {
                 if state.next_due_at > now + KEEPALIVE_FAST_INTERVAL_MS {
                     state.next_due_at = now + KEEPALIVE_FAST_INTERVAL_MS;
@@ -14059,8 +14084,17 @@ impl P2PCore {
         if self.has_pending_work() {
             info!("Çekirdek meşgul: {}", self.busy_reasons());
         }
+        // Coming out of power save: true until every link's pulled-forward
+        // keepalive probe was answered (the UI shows a spinner meanwhile);
+        // 10 s cap so a dead link cannot keep it spinning.
+        let syncing = self.resync_since != 0
+            && current_time_ms().saturating_sub(self.resync_since) < 10_000
+            && self.keepalive_state.values().any(|s| {
+                s.outstanding.is_some() || s.next_due_at <= self.resync_since + KEEPALIVE_FAST_INTERVAL_MS
+            });
         serde_json::json!({
             "busy": self.has_pending_work(),
+            "syncing": syncing,
             "connected_peers": connected_peers,
             "listening": !self.own_listen_addrs.is_empty(),
             "tor_enabled": self.tor_enabled,
@@ -14942,8 +14976,18 @@ impl P2PCore {
                 stamp_cache.insert(fp, stamp);
             }
         }
+        // Radio saver: retries wait for the window like every other periodic
+        // job. They ran on their own clock (5 s doubling to 120 s), so one
+        // connected peer that never acks kept the LTE radio up all the time:
+        // an 8 KB envelope re-sent every minute or two, for days (9S
+        // 2026-10-02: radio 74 % of a 10-min screen-off run). A packet queued
+        // in the last minute is still sent at once.
+        let hold_retries = self.radio_saver() && !self.radio_window_open;
         let mut due_ids: Vec<(String, u64)> = self.awaiting_confirmation.iter()
             .filter(|(_, p)| {
+                if hold_retries && now.saturating_sub(p.original_sent_at) > 60_000 {
+                    return false;
+                }
                 if p.next_retry_at <= now {
                     return true;
                 }
@@ -15003,7 +15047,12 @@ impl P2PCore {
                         // (bkz. `send_message_content_inner`) ile devam
                         // ediyoruz, böylece UI balonu/`awaiting_confirmation`
                         // girdisi KESİNTİSİZ aynı kalır.
-                        warn!("Paket {} onaylanmadan azami yaşı aştı, TAZELENİP AYNI kimlikle yeniden deneniyor", message_id);
+                        // Kind and target: the pending-messages screen lists only
+                        // Text, so this line is the only place the rest shows up.
+                        let kind = format!("{:?}", content);
+                        let kind = kind.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
+                        warn!("Paket {} ({} -> {}) onaylanmadan azami yaşı aştı, TAZELENİP AYNI kimlikle yeniden deneniyor",
+                            message_id, kind, &peer_fp[..peer_fp.len().min(8)]);
                         if let Err(e) = self.send_message_content_inner(
                             peer_fp.clone(), &content, None,
                             Some(message_id.clone()), Some(original_sent_at), Some(retry_interval_ms),
@@ -15348,12 +15397,15 @@ impl P2PCore {
             self.radio_window_open = !saver || now >= self.radio_window_at;
             if saver && self.radio_window_open {
                 self.radio_window_at = now + RADIO_WINDOW_MS;
+                if now >= self.tor_wake_at {
+                    self.tor_wake_at = now + TOR_FULL_WAKE_MS;
+                }
             }
-            // Tor dormant between windows; awake RADIO_AWAKE_MS after each
-            // window opens (circuit builds, dir refresh) and during calls.
+            // Tor dormant in radio-saver mode; awake RADIO_AWAKE_MS after a
+            // full wake (dir refresh, circuit pool) and during calls.
             let dormant = saver
                 && self.call.is_none()
-                && now >= (self.radio_window_at + RADIO_AWAKE_MS).saturating_sub(RADIO_WINDOW_MS);
+                && now >= (self.tor_wake_at + RADIO_AWAKE_MS).saturating_sub(TOR_FULL_WAKE_MS);
             if dormant != self.tor_dormant {
                 if let Some(tor) = &self.tor {
                     tor.set_dormant(dormant);
@@ -16212,7 +16264,10 @@ impl P2PCore {
                 && now.saturating_sub(self.last_sibling_roster_sync_at) >= SIBLING_ROSTER_SYNC_INTERVAL_MS
             {
                 self.last_sibling_roster_sync_at = now;
-                self.sync_to_siblings();
+                // The siblings that are connected, not all: see `request_sibling_backfill`.
+                let connected: Vec<String> = self.sibling_active_devices().into_iter()
+                    .filter(|fp| self.is_connected_to_device(fp)).collect();
+                self.sync_roster_to(connected);
             }
 
             // Spec dışı, gerçek cihaz hatası düzeltmesi ("QR tarandı, iki

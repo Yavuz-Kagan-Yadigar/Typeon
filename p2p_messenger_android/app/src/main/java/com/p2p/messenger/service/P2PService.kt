@@ -150,6 +150,29 @@ class P2PService : Service() {
 
         fun removeMessageListener(listener: (String) -> Unit) {
             listeners.remove(listener)
+            // The screen may have gone off while this listener was still
+            // registered; without this, power save stayed off until the next
+            // screen event.
+            listenerRemoved?.invoke()
+        }
+
+        @Volatile
+        private var listenerRemoved: (() -> Unit)? = null
+
+        /** True while one of our activities is started (set by P2PApplication).
+         *  Power save follows this, not just the screen: with the screen on
+         *  in ANOTHER app the service ran at full rate, the LTE radio never
+         *  slept and all of it was billed to us (9S 2026-10-02: ~1 mAh per
+         *  minute of screen-on time). */
+        @Volatile
+        var appVisible = false
+            private set
+
+        fun setAppVisible(visible: Boolean) {
+            if (appVisible == visible) return
+            appVisible = visible
+            listenerRemoved?.invoke()
+            if (visible) wakePollNow?.invoke()
         }
 
         /**
@@ -398,7 +421,7 @@ class P2PService : Service() {
 
     /** Derin boşta mıyız — wake lock'ın bırakıldığı tek durum. */
     private fun inDeepIdle(): Boolean =
-        !screenOn && listeners.isEmpty() && !coreBusy &&
+        !(screenOn && appVisible) && listeners.isEmpty() && !coreBusy &&
             consecutiveEmptyPolls >= DEEP_IDLE_AFTER_EMPTY_POLLS
 
     /**
@@ -409,7 +432,7 @@ class P2PService : Service() {
      * saniyede bir. Ekran açıkken zaten hızlı turdayız, cevabı önemsiz.
      */
     private fun refreshCoreBusy() {
-        if (screenOn) { coreBusy = true; return }
+        if (screenOn && appVisible) { coreBusy = true; return }
         val now = android.os.SystemClock.elapsedRealtime()
         if (now - lastBusyCheckAt < 15000L) return
         lastBusyCheckAt = now
@@ -473,7 +496,7 @@ class P2PService : Service() {
     /** bkz. Rust `set_power_save` — sessiz bekleyen bağlantıların canlılık
      *  yoklaması 20sn yerine 60sn'de bir yapılır, radyo uzun uyuyabilir. */
     private fun applyPowerSave() {
-        val enabled = !screenOn && listeners.isEmpty()
+        val enabled = !(screenOn && appVisible) && listeners.isEmpty()
         try {
             P2PLib.setPowerSave(enabled)
         } catch (e: Exception) {
@@ -797,6 +820,7 @@ class P2PService : Service() {
                 applyMeteredToTor()
                 P2PLib.setHistoryStorageLimitBytes(getHistoryStorageLimitBytes(applicationContext))
             }
+            listenerRemoved = { applyPowerSave() }
             wakePollNow = {
                 handler.removeCallbacks(pollRunnable)
                 handler.post(pollRunnable)
@@ -813,6 +837,7 @@ class P2PService : Service() {
         releaseWakeLock()
         BatteryLog.stop()
         wakePollNow = null
+        listenerRemoved = null
         handler.removeCallbacks(pollRunnable)
         cancelDozeWakeup()
         screenReceiver?.let {

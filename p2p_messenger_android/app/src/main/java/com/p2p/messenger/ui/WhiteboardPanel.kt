@@ -96,10 +96,22 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
     init {
         handle.background = tab
         handle.setOnClickListener { toggle() }
-        P2PService.addMessageListener(listener)
+        // Listen only while the chat is on screen. Held until onDestroy, a chat
+        // left in the back stack kept the service in "a screen is open" mode
+        // with the phone locked: no power save, no deep idle (9S 2026-10-02).
         activity.lifecycle.addObserver(object : DefaultLifecycleObserver {
-            override fun onDestroy(owner: LifecycleOwner) {
+            override fun onStart(owner: LifecycleOwner) {
+                P2PService.addMessageListener(listener)
+                // Catch up on what changed while the chat was not visible.
+                if (peer.isNotEmpty() || groupId.isNotEmpty()) {
+                    refreshInfo()
+                    if (isOpen) loadPage()
+                }
+            }
+            override fun onStop(owner: LifecycleOwner) {
                 P2PService.removeMessageListener(listener)
+            }
+            override fun onDestroy(owner: LifecycleOwner) {
                 ui.removeCallbacksAndMessages(null)
                 // Whatever is still queued goes out before the screen is gone.
                 io.execute { P2PLib.whiteboardTick() }

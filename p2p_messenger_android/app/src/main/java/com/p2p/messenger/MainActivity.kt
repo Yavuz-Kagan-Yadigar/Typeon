@@ -399,6 +399,26 @@ class MainActivity : AppCompatActivity() {
                 .show()
             return
         }
+        // Phone unlocked, another app in front: the system shows an incoming
+        // call as a banner only. "Display over other apps" lets us open the
+        // call screen itself, like a phone call.
+        if (!android.provider.Settings.canDrawOverlays(this) &&
+            System.currentTimeMillis() - prefs0.getLong("overlay_prompt_ms", 0L) > 24L * 60 * 60 * 1000) {
+            prefs0.edit().putLong("overlay_prompt_ms", System.currentTimeMillis()).apply()
+            AlertDialog.Builder(this)
+                .setTitle(R.string.call_channel_name)
+                .setMessage(R.string.msg_overlay_for_calls)
+                .setPositiveButton(R.string.action_open_settings) { _, _ ->
+                    try {
+                        AppLock.beginTrustedExcursion()
+                        startActivity(Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            android.net.Uri.parse("package:$packageName")))
+                    } catch (e: Exception) { }
+                }
+                .setNegativeButton(R.string.action_not_now, null)
+                .show()
+            return
+        }
         if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
         // Her açılışta sormak dırdır olurdu: kullanıcı reddettiyse bir gün
         // boyunca bir daha sorma. (Muafiyet zaten varsa yukarıda çıkıldı.)

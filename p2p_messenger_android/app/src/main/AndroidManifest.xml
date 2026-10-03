@@ -26,6 +26,9 @@
     <!-- Calls: speakerphone/communication mode, and the ringing screen over the lock screen. -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- Opens the call screen while another app is in front (a full-screen
+         intent is only a heads-up banner when the phone is unlocked). -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Spec dışı, kullanıcı isteği: ilk açılışta pil optimizasyonu
          muafiyeti istemi — bkz. MainActivity.ensureBatteryOptimizationExemption.
          "Normal" korumalı bir izin (çalışma zamanında ayrıca istenmez,

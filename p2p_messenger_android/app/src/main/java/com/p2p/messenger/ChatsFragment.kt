@@ -68,6 +68,25 @@ class ChatsFragment : Fragment() {
             refreshHandler.postDelayed(this, 5000)
         }
     }
+    /** Spinner while the service leaves power save and re-verifies its links
+     *  ("syncing" in `ownConnectionStatus`); refreshes the list when done.
+     *  Polls off the main thread (the JNI call takes the core lock) and stops
+     *  by itself once the core says it is in sync. */
+    private val syncRunnable = object : Runnable {
+        override fun run() {
+            Thread {
+                val syncing = try {
+                    org.json.JSONObject(P2PLib.ownConnectionStatus()).optBoolean("syncing", false)
+                } catch (e: Exception) { false }
+                refreshHandler.post {
+                    val spinner = view?.findViewById<View>(R.id.progressSync) ?: return@post
+                    if (!syncing && spinner.visibility == View.VISIBLE) refreshList()
+                    spinner.visibility = if (syncing) View.VISIBLE else View.GONE
+                    if (syncing && isResumed) refreshHandler.postDelayed(this, 400)
+                }
+            }.start()
+        }
+    }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
         val view = inflater.inflate(R.layout.fragment_chats, container, false)
@@ -365,11 +384,14 @@ class ChatsFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         refreshHandler.post(refreshRunnable)
+        // 300 ms: the service flips out of power save on the same resume.
+        refreshHandler.postDelayed(syncRunnable, 300)
     }
 
     override fun onPause() {
         super.onPause()
         refreshHandler.removeCallbacks(refreshRunnable)
+        refreshHandler.removeCallbacks(syncRunnable)
     }
 
     private fun refreshList() {

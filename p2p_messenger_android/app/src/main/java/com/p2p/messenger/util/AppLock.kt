@@ -216,7 +216,10 @@ object AppLock {
      * kullanıcı isteği gereği şifresiz bir durum kalıcı olamaz.
      */
     fun guard(activity: Activity) {
-        if (activity is AppLockActivity) return
+        // The call screen works like a phone call: answer or decline without
+        // the app password. Since the app locks on screen-off the password
+        // prompt covered every incoming call. Everything else stays guarded.
+        if (activity is AppLockActivity || activity is com.p2p.messenger.ui.CallActivity) return
         // Güvenilir gezinti kilidi ertelediyse ve kullanıcı seçiciden Home'a
         // basıp uzun süre sonra döndüyse kilitli açılmalı — aksi halde
         // uygulama süresiz kilitsiz kalırdı.

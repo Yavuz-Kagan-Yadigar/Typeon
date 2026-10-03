@@ -145,8 +145,19 @@ class CallActivity : AppCompatActivity() {
         var videoH = 0
     }
 
+    /** The ring opened this screen while the app was in the background: when
+     *  the call ends, go back to what the user was doing, not to the app's
+     *  password prompt (the task's own screens are still locked). */
+    private var cameFromBackground = false
+
+    override fun finish() {
+        if (cameFromBackground) moveTaskToBack(true)
+        super.finish()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        cameFromBackground = !com.p2p.messenger.service.P2PService.appVisible
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         supportActionBar?.hide()
         setContentView(buildLayout())
