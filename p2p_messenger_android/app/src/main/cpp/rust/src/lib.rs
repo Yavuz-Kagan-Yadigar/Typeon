@@ -1725,6 +1725,8 @@ const KEEPALIVE_TIMEOUT_SECS: u64 = 10;
 /// a direct link that died in between is covered by the server path, so the
 /// window length mostly trades wakeups against dead-link detection time.
 const RADIO_WINDOW_MS: u64 = 8 * 60 * 1000;
+/// Window on an unmetered network: a Wi-Fi wakeup has no LTE-style radio tail.
+const RADIO_WINDOW_WIFI_MS: u64 = 4 * 60 * 1000;
 /// How long Tor stays non-dormant after a full wake, see `TOR_FULL_WAKE_MS`.
 const RADIO_AWAKE_MS: u64 = 30_000;
 /// In radio-saver mode Tor leaves dormant only this often, not at every
@@ -14182,6 +14184,10 @@ impl P2PCore {
         self.power_save
     }
 
+    fn radio_window_ms(&self) -> u64 {
+        if self.metered { RADIO_WINDOW_MS } else { RADIO_WINDOW_WIFI_MS }
+    }
+
     fn set_metered(&mut self, metered: bool) {
         if self.metered != metered {
             info!("Ölçülü ağ: {}", metered);
@@ -15687,7 +15693,7 @@ impl P2PCore {
             let saver = self.radio_saver();
             self.radio_window_open = !saver || now >= self.radio_window_at;
             if saver && self.radio_window_open {
-                self.radio_window_at = now + RADIO_WINDOW_MS;
+                self.radio_window_at = now + self.radio_window_ms();
                 if now >= self.tor_wake_at {
                     self.tor_wake_at = now + TOR_FULL_WAKE_MS;
                 }
@@ -15793,6 +15799,7 @@ impl P2PCore {
         // aynı desen).
         let power_save = self.power_save;
         let saver = self.radio_saver();
+        let window_ms = self.radio_window_ms();
         let window_open = self.radio_window_open;
         // bkz. `deferred_swarm_events` — geçen turun flush'ında düşen
         // olaylar, taze olaylardan ÖNCE işlenmeli (geliş sırası).
@@ -16167,7 +16174,7 @@ impl P2PCore {
                             match rr_event {
                                 request_response::Event::Message { peer, message: request_response::Message::Request { channel, .. }, .. } => {
                                     let capable = keepalive_state.get(&peer).is_some_and(|s| s.quiet_capable);
-                                    let quiet_ms = (saver && capable).then_some(RADIO_WINDOW_MS);
+                                    let quiet_ms = (saver && capable).then_some(window_ms);
                                     let _ = swarm.behaviour_mut().keepalive.send_response(channel, KeepAliveResponse { quiet_ms });
                                     if let Some(state) = keepalive_state.get_mut(&peer) {
                                         if !saver && state.outstanding.is_none() && !state.suspect && state.interval_ms > 0 {
@@ -16191,7 +16198,7 @@ impl P2PCore {
                                         // no 2 s "stabilizing" probes (each
                                         // one is a radio wake on LTE).
                                         let interval = if saver {
-                                            RADIO_WINDOW_MS
+                                            window_ms
                                         } else if !stabilized {
                                             KEEPALIVE_FAST_INTERVAL_MS
                                         } else if power_save {
