@@ -14176,9 +14176,10 @@ impl P2PCore {
         }
     }
 
-    /// See `RADIO_WINDOW_MS`.
+    /// See `RADIO_WINDOW_MS`. Wi-Fi too: with Tor awake a night on Wi-Fi woke
+    /// the CPU ~once a second (2026-10-04: 64 % in 7 h, screen off).
     fn radio_saver(&self) -> bool {
-        self.power_save && self.metered
+        self.power_save
     }
 
     fn set_metered(&mut self, metered: bool) {
