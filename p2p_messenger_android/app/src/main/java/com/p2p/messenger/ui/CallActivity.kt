@@ -64,7 +64,7 @@ class CallActivity : AppCompatActivity() {
         const val EXTRA_GROUP = "call_group"
         const val EXTRA_VIDEO = "call_video"
         private const val CHANNEL_ID = "calls"
-        private const val NOTIFICATION_ID = 0x0CA11
+        const val NOTIFICATION_ID = 0x0CA11
         private const val REQ_PERMS = 41
 
         /** From a chat screen: ring [peer] (1:1) or every member of [groupId]. */
@@ -125,7 +125,7 @@ class CallActivity : AppCompatActivity() {
 
     /** Saw a non-idle state at least once — only then does "idle" mean "ended". */
     private var callSeen = false
-    private val createdAt = System.currentTimeMillis()
+    private val createdAt = android.os.SystemClock.elapsedRealtime()
     private var starting = false
     private var finishingAt = 0L
     private var mediaRunning = false
@@ -169,23 +169,16 @@ class CallActivity : AppCompatActivity() {
             txtStatus.setText(R.string.call_calling)
             if (hasPermissions(video)) placeCall(peer, group) else requestPermissions(video)
         }
+        // Keeps the service poll loop at its fast rate for signalling/link
+        // upkeep. For the whole life of the screen, not onStart..onStop: a
+        // call with the screen off or behind another app dropped into power
+        // save.
+        P2PService.addMessageListener(keepPollFast)
         poll()
     }
 
-    // onStart/onStop, not onResume/onPause: a picture-in-picture call is
-    // paused but still on screen and still needs the fast poll.
-    override fun onStart() {
-        super.onStart()
-        // Keeps the service poll loop at its fast rate for signalling/link upkeep.
-        P2PService.addMessageListener(keepPollFast)
-    }
-
-    override fun onStop() {
-        super.onStop()
-        P2PService.removeMessageListener(keepPollFast)
-    }
-
     override fun onDestroy() {
+        P2PService.removeMessageListener(keepPollFast)
         ui.removeCallbacksAndMessages(null)
         stopTones()
         stopMedia()
@@ -251,7 +244,8 @@ class CallActivity : AppCompatActivity() {
     private fun accept() {
         if (!hasPermissions(video)) { requestPermissions(video); return }
         btnAccept.isEnabled = false
-        io.execute { P2PLib.acceptCall() }
+        // A refused accept must leave the button usable: the call still rings.
+        io.execute { if (!P2PLib.acceptCall()) ui.post { btnAccept.isEnabled = true } }
     }
 
     private fun hangup() {
@@ -282,6 +276,8 @@ class CallActivity : AppCompatActivity() {
         if (grantResults.size > 1 && grantResults[1] != PackageManager.PERMISSION_GRANTED) video = false
         if (starting) placeCall(intent.getStringExtra(EXTRA_PEER), intent.getStringExtra(EXTRA_GROUP))
         else if (state == "incoming") accept()
+        // Granted while the call was already active: media never started.
+        else if (state == "active") startMedia()
     }
 
     // ---------------------------------------------------------------- state
@@ -304,7 +300,7 @@ class CallActivity : AppCompatActivity() {
         state = newState
         if (newState == "idle") {
             // Opened from a ring that already ended (timeout, caller hung up).
-            if (!callSeen && !starting && System.currentTimeMillis() - createdAt > 2000) finish()
+            if (!callSeen && !starting && android.os.SystemClock.elapsedRealtime() - createdAt > 2000) finish()
             return
         }
 
@@ -336,6 +332,7 @@ class CallActivity : AppCompatActivity() {
 
     private fun onStateChanged(old: String, new: String, s: JSONObject) {
         stopTones()
+        if (new != "idle") finishingAt = 0L
         when (new) {
             "incoming" -> {
                 try {
@@ -365,7 +362,8 @@ class CallActivity : AppCompatActivity() {
                         }
                     )
                     btnAccept.visibility = View.GONE
-                    ui.postDelayed({ finish() }, 1500)
+                    // Not if another call arrived on this screen meanwhile.
+                    ui.postDelayed({ if (state == "idle") finish() }, 1500)
                 }
             }
         }
@@ -385,6 +383,7 @@ class CallActivity : AppCompatActivity() {
         if (mediaRunning) return
         if (!hasPermissions(false)) { requestPermissions(video); return }
         mediaRunning = true
+        P2PService.setCallActive(this, true)
         val am = getSystemService(AudioManager::class.java)
         am.mode = AudioManager.MODE_IN_COMMUNICATION
         @Suppress("DEPRECATION")
@@ -397,6 +396,7 @@ class CallActivity : AppCompatActivity() {
     private fun stopMedia() {
         if (!mediaRunning) return
         mediaRunning = false
+        P2PService.setCallActive(this, false)
         cameraProvider?.unbindAll()
         cameraProvider = null
         selfView.visibility = View.GONE

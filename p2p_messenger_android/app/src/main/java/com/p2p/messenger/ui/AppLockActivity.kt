@@ -128,6 +128,20 @@ class AppLockActivity : AppCompatActivity() {
         AppLock.promptClosed()
     }
 
+    /** A stopped lock screen (Home pressed) guards nothing that starts
+     *  later: an activity launched by a share, a link or a notification
+     *  saw the flag still set and opened unlocked. */
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations) AppLock.promptClosed()
+    }
+
+    /** A second lock screen may have unlocked the app meanwhile. */
+    override fun onStart() {
+        super.onStart()
+        if (AppLock.isUnlocked()) finish()
+    }
+
     private fun showError(view: TextView, message: String) {
         view.text = message
         view.visibility = View.VISIBLE

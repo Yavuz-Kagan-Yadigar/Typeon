@@ -305,6 +305,7 @@
     <string name="delete_account_confirm_title">Hesabın silinsin mi?</string>
     <string name="delete_account_confirm_message">Tüm kişilerine ve gruplarına bu hesabın silindiği bildirilir; artık sana mesaj gönderemezler. Bağlı cihazların da silinir. Yerel mesajlar, kişiler ve anahtarlar silinir. Bu işlem geri alınamaz.</string>
     <string name="msg_deleting_account">Kişilerine bildiriliyor…</string>
+    <string name="error_delete_account_failed">Kişilerine bildirilemedi. Hesap silinmedi, bağlantı varken yeniden dene.</string>
     <string name="msg_contact_deleted_account">%1$s hesabını sildi</string>
     <string name="msg_account_deleted_no_send">Bu kişi hesabını sildi. Artık mesaj gönderilemez.</string>
     <string name="device_unlinked_notification">Bu cihazın hesabınızla bağlantısı kaldırıldı. Yerel verileri silindi.</string>

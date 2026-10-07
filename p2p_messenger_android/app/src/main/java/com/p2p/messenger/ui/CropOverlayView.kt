@@ -96,10 +96,10 @@ class CropOverlayView @JvmOverloads constructor(
         if (imageRect.width() <= 0f || imageRect.height() <= 0f) return source
         val scaleX = source.width / imageRect.width()
         val scaleY = source.height / imageRect.height()
-        val left = ((cropRect.left - imageRect.left) * scaleX).roundToInt().coerceIn(0, source.width - 1)
-        val top = ((cropRect.top - imageRect.top) * scaleY).roundToInt().coerceIn(0, source.height - 1)
-        val right = ((cropRect.right - imageRect.left) * scaleX).roundToInt().coerceIn(left + 1, source.width)
-        val bottom = ((cropRect.bottom - imageRect.top) * scaleY).roundToInt().coerceIn(top + 1, source.height)
+        val left = ((cropRect.left - imageRect.left) * scaleX).roundToInt().coerceAtMost(source.width - 1).coerceAtLeast(0)
+        val top = ((cropRect.top - imageRect.top) * scaleY).roundToInt().coerceAtMost(source.height - 1).coerceAtLeast(0)
+        val right = ((cropRect.right - imageRect.left) * scaleX).roundToInt().coerceAtMost(source.width).coerceAtLeast(left + 1)
+        val bottom = ((cropRect.bottom - imageRect.top) * scaleY).roundToInt().coerceAtMost(source.height).coerceAtLeast(top + 1)
         return try {
             Bitmap.createBitmap(source, left, top, right - left, bottom - top)
         } catch (e: Exception) {
@@ -204,24 +204,26 @@ class CropOverlayView @JvmOverloads constructor(
         }
     }
 
+    // coerceAtMost/coerceAtLeast, not coerceIn: at the minimum crop size float
+    // rounding can leave the range empty, and coerceIn then throws.
     private fun applyDrag(dx: Float, dy: Float) {
         if (activeHandle == HANDLE_MOVE) {
-            val clampedDx = dx.coerceIn(imageRect.left - cropRect.left, imageRect.right - cropRect.right)
-            val clampedDy = dy.coerceIn(imageRect.top - cropRect.top, imageRect.bottom - cropRect.bottom)
+            val clampedDx = dx.coerceAtMost(imageRect.right - cropRect.right).coerceAtLeast(imageRect.left - cropRect.left)
+            val clampedDy = dy.coerceAtMost(imageRect.bottom - cropRect.bottom).coerceAtLeast(imageRect.top - cropRect.top)
             cropRect.offset(clampedDx, clampedDy)
             return
         }
         if (activeHandle and EDGE_LEFT != 0) {
-            cropRect.left = (cropRect.left + dx).coerceIn(imageRect.left, cropRect.right - minCropSize)
+            cropRect.left = (cropRect.left + dx).coerceAtMost(cropRect.right - minCropSize).coerceAtLeast(imageRect.left)
         }
         if (activeHandle and EDGE_RIGHT != 0) {
-            cropRect.right = (cropRect.right + dx).coerceIn(cropRect.left + minCropSize, imageRect.right)
+            cropRect.right = (cropRect.right + dx).coerceAtMost(imageRect.right).coerceAtLeast(cropRect.left + minCropSize)
         }
         if (activeHandle and EDGE_TOP != 0) {
-            cropRect.top = (cropRect.top + dy).coerceIn(imageRect.top, cropRect.bottom - minCropSize)
+            cropRect.top = (cropRect.top + dy).coerceAtMost(cropRect.bottom - minCropSize).coerceAtLeast(imageRect.top)
         }
         if (activeHandle and EDGE_BOTTOM != 0) {
-            cropRect.bottom = (cropRect.bottom + dy).coerceIn(cropRect.top + minCropSize, imageRect.bottom)
+            cropRect.bottom = (cropRect.bottom + dy).coerceAtMost(imageRect.bottom).coerceAtLeast(cropRect.top + minCropSize)
         }
     }
 

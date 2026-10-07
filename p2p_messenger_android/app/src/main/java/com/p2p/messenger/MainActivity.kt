@@ -29,6 +29,10 @@ import org.json.JSONArray
 
 class MainActivity : AppCompatActivity() {
 
+    private companion object {
+        const val MAX_RECOVERY_FILE_BYTES = 1024 * 1024
+    }
+
     private lateinit var statusText: TextView
     private val alertPollHandler = android.os.Handler(android.os.Looper.getMainLooper())
     /** Spec dışı, kararlılık denetimi düzeltmesi: `checkPendingDeviceAlerts`
@@ -138,7 +142,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         handleJoinLink(intent)
-        handleShare(intent)
+        // Only on a real start: a rotation, a theme change or a restore after
+        // process death replays the same intent and queued the share again.
+        if (savedInstanceState == null) handleShare(intent)
+    }
+
+    override fun onDestroy() {
+        if (isFinishing) com.p2p.messenger.util.ShareIntake.pending = null
+        super.onDestroy()
     }
 
     /** Paylaşım ekranından gelen içerik: bekletilir, kullanıcı sohbet seçince
@@ -282,8 +293,19 @@ class MainActivity : AppCompatActivity() {
     private fun importRecoveryFrom(uri: Uri, passphrase: String) {
         Toast.makeText(this, R.string.msg_recovery_importing, Toast.LENGTH_SHORT).show()
         lifecycleScope.launch(Dispatchers.IO) {
+            // Bounded: the user may pick any file, and a huge one ended in
+            // an OutOfMemoryError that no `catch (Exception)` stops.
             val bytes = try {
-                contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                contentResolver.openInputStream(uri)?.use { input ->
+                    val out = java.io.ByteArrayOutputStream()
+                    val buf = ByteArray(8192)
+                    while (out.size() <= MAX_RECOVERY_FILE_BYTES) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                    }
+                    if (out.size() > MAX_RECOVERY_FILE_BYTES) null else out.toByteArray()
+                }
             } catch (e: Exception) {
                 null
             }
@@ -305,6 +327,10 @@ class MainActivity : AppCompatActivity() {
                     showDeviceNameDialog()
                 } else {
                     IdentityManager.persistNewIdentity(applicationContext)
+                    // The archive root key came back with the recovery file
+                    // but lived only in the core's memory: after a restart it
+                    // was gone and a new random one split the server archive.
+                    com.p2p.messenger.util.ArchiveKeyManager.persistIfNew(applicationContext)
                     statusText.text = getString(R.string.lbl_id_short, identityId.take(8))
                     startNetworkService()
                     ensureBatteryOptimizationExemption()
@@ -318,12 +344,19 @@ class MainActivity : AppCompatActivity() {
         val identityId = P2PLib.createIdentity(deviceName)
         if (identityId.startsWith("Error:")) {
             Toast.makeText(this, identityId, Toast.LENGTH_LONG).show()
+            showDeviceNameDialog()
             return
         }
         // Secret key bundle'ını HEMEN Keystore ile şifreleyip diske yaz —
         // aksi halde süreç öldüğünde kaybolur. (İkincil cihaz da KENDİ
         // anahtarlarını böyle saklar; benimseme sadece identity_id'yi değiştirir.)
-        IdentityManager.persistNewIdentity(applicationContext)
+        try {
+            IdentityManager.persistNewIdentity(applicationContext)
+        } catch (e: Exception) {
+            // Keystore or disk failure: without this the identity exists in
+            // the database but its secret keys are lost at the next restart.
+            Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+        }
         statusText.text = getString(R.string.lbl_id_short, identityId.take(8))
         startNetworkService()
         ensureBatteryOptimizationExemption()
@@ -453,7 +486,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun startNetworkService() {
         val serviceIntent = Intent(this, P2PService::class.java)
-        startForegroundService(serviceIntent)
+        try {
+            startForegroundService(serviceIntent)
+        } catch (e: Exception) {
+            // API 31+: ForegroundServiceStartNotAllowedException when this runs
+            // after the user left the app (e.g. during a recovery import).
+            android.util.Log.w("MainActivity", "Service not started: ${e.message}")
+        }
         try {
             statusText.text = getString(R.string.lbl_id_code, P2PLib.getIdentityShortCode())
         } catch (e: Exception) {

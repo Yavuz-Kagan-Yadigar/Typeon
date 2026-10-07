@@ -84,6 +84,10 @@ object MessageHistoryManager {
             val encrypted = KeystoreCrypto.encrypt(dataKey, KeystoreCrypto.ALIAS_HISTORY)
             keyFile(context).writeBytesAtomic(encrypted)
             P2PLib.setHistoryKey(dataKey)
+        } catch (e: Exception) {
+            // Keystore or disk failure: this runs on unguarded start-up
+            // paths and took the process down before the network started.
+            android.util.Log.e(TAG, "Anahtar uretilemedi", e)
         } finally {
             dataKey.fill(0)
         }

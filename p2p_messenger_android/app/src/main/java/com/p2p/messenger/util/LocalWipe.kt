@@ -68,17 +68,28 @@ object LocalWipe {
      *  tema/bildirim/uygulama kilidi gibi cihaza ait tercihleri tutuyor. */
     private val CONVERSATION_PREFS = listOf("chat_read_state", "pinned_chats")
 
+    /** bkz. Rust `start_network`: arti'nin durum ve önbellek dizinleri. */
+    private val TOR_DIRS = listOf("arti_state", "arti_cache")
+
     fun wipe(context: Context) {
         val filesDir = context.applicationContext.filesDir
         for (name in DB_FILES) File(filesDir, name).delete()
         for (name in SECRET_FILES) File(filesDir, name).delete()
         File(filesDir, "attachments").deleteRecursively()
+        // The Tor state holds the onion service key: left behind, the next
+        // identity on this phone came up at the SAME .onion address.
+        for (name in TOR_DIRS) File(filesDir, name).deleteRecursively()
+        // Plaintext leftovers: voice recordings, outgoing copies, avatars.
+        context.applicationContext.cacheDir.deleteRecursively()
+        context.applicationContext.getExternalFilesDir(null)?.deleteRecursively()
         for (name in CONVERSATION_PREFS) {
             context.applicationContext
                 .getSharedPreferences(name, Context.MODE_PRIVATE)
                 .edit()
                 .clear()
-                .apply()
+                // commit, not apply: the caller exits the process right after
+                // and an asynchronous write never ran.
+                .commit()
         }
     }
 }

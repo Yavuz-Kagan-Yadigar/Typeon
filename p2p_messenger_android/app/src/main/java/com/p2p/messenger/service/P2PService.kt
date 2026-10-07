@@ -168,6 +168,20 @@ class P2PService : Service() {
         var appVisible = false
             private set
 
+        /** See `onStartCommand`: the microphone service type follows this. */
+        @Volatile
+        private var callActive = false
+
+        fun setCallActive(context: Context, active: Boolean) {
+            if (callActive == active) return
+            callActive = active
+            try {
+                androidx.core.content.ContextCompat.startForegroundService(context, Intent(context, P2PService::class.java))
+            } catch (e: Exception) {
+                Log.w(TAG, "Call state not applied to service: ${e.message}")
+            }
+        }
+
         fun setAppVisible(visible: Boolean) {
             if (appVisible == visible) return
             appVisible = visible
@@ -352,10 +366,18 @@ class P2PService : Service() {
                     } else {
                         consecutiveEmptyPolls++
                     }
+                    // One guard per event: the batch is already drained from
+                    // the core, so an exception used to lose every event
+                    // after it (notification, read sync, remote wipe).
                     for (msg in messages) {
-                        if (msg.isNotEmpty()) {
-                            listeners.forEach { it(msg) }
-                            maybeNotify(msg)
+                        if (msg.isEmpty()) continue
+                        for (listener in listeners) {
+                            try { listener(msg) } catch (e: Exception) {
+                                android.util.Log.e("P2PService", "Listener failed", e)
+                            }
+                        }
+                        try { maybeNotify(msg) } catch (e: Exception) {
+                            android.util.Log.e("P2PService", "Notify failed", e)
                         }
                     }
                 } catch (e: Exception) {
@@ -364,7 +386,10 @@ class P2PService : Service() {
                     // Pil düzeltmesi: her turdan sonra hangi kademede
                     // olduğumuza yeniden karar ver.
                     refreshCoreBusy()
-                    if (inDeepIdle()) {
+                    if (!isRunning) {
+                        // onDestroy ran during the blocking wait above: do not
+                        // take the wake lock or set the alarm again.
+                    } else if (inDeepIdle()) {
                         // Derin boşta: wake lock BIRAKILIYOR, böylece işlemci
                         // gerçekten uyuyabiliyor. Cihaz uykuya dalarsa
                         // `postDelayed` (uptime tabanlı) durur — bu yüzden
@@ -405,7 +430,9 @@ class P2PService : Service() {
         // 2) Yeni bir olay geldi ya da henüz yeterince sessizlik yok —
         //    eski davranışın aynısı (1sn -> 2sn kademeli).
         if (consecutiveEmptyPolls < POLL_IDLE_BACKOFF_THRESHOLD) return POLL_INTERVAL_ACTIVE_MS
-        if (screenOn) {
+        // `appVisible` like `inDeepIdle`: with the screen on in ANOTHER app the
+        // loop counted as deep idle but still polled every 2-3 s.
+        if (screenOn && appVisible) {
             val idleSteps = consecutiveEmptyPolls - POLL_IDLE_BACKOFF_THRESHOLD
             val delay = POLL_INTERVAL_SCREEN_ON_MS + idleSteps * POLL_IDLE_STEP_MS
             return delay.coerceAtMost(POLL_INTERVAL_SCREEN_ON_MS + POLL_IDLE_STEP_MS * 2)
@@ -597,11 +624,9 @@ class P2PService : Service() {
                     // durmaya devam ediyor — "okuduğum şey hâlâ okunmamış
                     // görünüyor". Sohbet listesi zaten düzeliyordu, sadece
                     // bildirim geride kalıyordu.
-                    if (conv.startsWith("group:")) {
-                        NotificationHelper.clearForGroup(applicationContext, conv.removePrefix("group:"))
-                    } else {
-                        NotificationHelper.clearForPeer(applicationContext, conv)
-                    }
+                    // Compared with `read_at`: a late sync must not remove
+                    // the notification of a message that arrived after it.
+                    NotificationHelper.clearIfReadUpTo(applicationContext, conv, readAt)
                 }
             }
             "call" -> if (obj.optString("action") == "invite") {
@@ -732,22 +757,45 @@ class P2PService : Service() {
             .build()
 
         // See the manifest note: remoteMessaging on API 34+ (no daily cap).
-        androidx.core.app.ServiceCompat.startForeground(
-            this, NOTIFICATION_ID, notification,
+        val baseType =
             if (Build.VERSION.SDK_INT >= 34) android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
             else android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-        )
-        acquireWakeLock()
+        // During a call the service also carries the microphone type: on
+        // Android 11+ a service without it records silence as soon as the
+        // call screen is not visible (screen off, Back without PiP).
+        val micType =
+            if (callActive && Build.VERSION.SDK_INT >= 30 &&
+                checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
+        try {
+            androidx.core.app.ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, baseType or micType)
+        } catch (e: Exception) {
+            // Microphone type refused (started from the background), or the
+            // start itself is not allowed: keep running with what we get.
+            Log.w(TAG, "startForeground failed: ${e.message}")
+            if (micType != 0) {
+                try {
+                    androidx.core.app.ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, baseType)
+                } catch (e2: Exception) {
+                    Log.w(TAG, "startForeground failed: ${e2.message}")
+                }
+            }
+        }
 
         // Doze uyandırma alarmından geldiysek servis zaten çalışıyor; tek
         // yapılacak hemen bir tur atmak (bkz. `scheduleDozeWakeup`).
         if (intent?.action == ACTION_WAKE_POLL && isRunning) {
-            consecutiveEmptyPolls = 0
+            // Timed, and the empty-poll counter is NOT reset: an indefinite
+            // lock plus twelve fresh empty turns kept the CPU awake 40-70 s
+            // per alarm, a fifth of the night. The turn itself releases the
+            // lock as soon as it finds the core still idle.
+            acquireWakeLock(20_000L)
             lastBusyCheckAt = 0L
             handler.removeCallbacks(pollRunnable)
             handler.post(pollRunnable)
             return START_STICKY
         }
+        acquireWakeLock()
 
         if (!isRunning) {
             isRunning = true
@@ -791,9 +839,14 @@ class P2PService : Service() {
             // kaldı — Android onu 5 sn içinde orada bekliyor.
             handler.post {
                 P2PLib.initDatabase(applicationContext.filesDir.absolutePath)
-                if (P2PLib.hasStoredIdentity()) {
-                    com.p2p.messenger.util.IdentityManager.loadIfPresent(applicationContext)
+                if (!P2PLib.hasStoredIdentity()) {
+                    // START_STICKY brought the service back after a logout or
+                    // a remote wipe: no account, nothing to run.
+                    isRunning = false
+                    stopSelf()
+                    return@post
                 }
+                com.p2p.messenger.util.IdentityManager.loadIfPresent(applicationContext)
             // Node modundan BAĞIMSIZ her zaman yüklenir — mesajlaşmanın
             // güvenilirliği için gerekli (sıra dışı/gecikmeli mesajlar).
                 com.p2p.messenger.util.SkippedKeyManager.ensureLoaded(applicationContext)

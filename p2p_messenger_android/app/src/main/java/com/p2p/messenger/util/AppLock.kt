@@ -148,6 +148,8 @@ object AppLock {
         return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
     }
 
+    fun isUnlocked(): Boolean = unlocked
+
     fun markUnlocked() {
         unlocked = true
         promptShowing = false
@@ -219,7 +221,7 @@ object AppLock {
         // The call screen works like a phone call: answer or decline without
         // the app password. Since the app locks on screen-off the password
         // prompt covered every incoming call. Everything else stays guarded.
-        if (activity is AppLockActivity || activity is com.p2p.messenger.ui.CallActivity) return
+        if (activity is AppLockActivity) return
         // Güvenilir gezinti kilidi ertelediyse ve kullanıcı seçiciden Home'a
         // basıp uzun süre sonra döndüyse kilitli açılmalı — aksi halde
         // uygulama süresiz kilitsiz kalırdı.
@@ -231,6 +233,10 @@ object AppLock {
         val bgAt = backgroundedAt
         backgroundedAt = 0L
         if (bgAt != 0L && SystemClock.elapsedRealtime() - bgAt > BACKGROUND_LOCK_MS) unlocked = false
+        // After the timeouts above: skipping them here let the call screen's
+        // own stop renew `backgroundedAt`, so the app opened without the
+        // password for a minute after any call.
+        if (activity is com.p2p.messenger.ui.CallActivity) return
         if (unlocked) return
         if (promptShowing) return
         promptShowing = true

@@ -100,6 +100,7 @@ class ChatActivity : AppCompatActivity() {
         private const val HISTORY_SYNC_LIMIT = 30
         /** Sonsuz kaydırmada bir seferde çekilen "daha eski" sayfa boyutu. */
         private const val OLDER_HISTORY_PAGE_SIZE = 50
+        private const val OLDER_HISTORY_REPLY_WAIT_MS = 15_000L
         /** Listenin başına bu kadar yaklaşıldığında bir sonraki sayfa istenir. */
         private const val LOAD_OLDER_HISTORY_THRESHOLD = 3
 
@@ -150,6 +151,13 @@ class ChatActivity : AppCompatActivity() {
     private var isLoadingOlderHistory = false
     /** Karşı taraf da boş sayfa döndürdüyse artık hiç sorma. */
     private var noMoreOlderHistory = false
+    private var olderHistoryRequest = 0
+    private var olderHistoryEmptyReply = false
+    /** Set in onResume: the chat is really in front of the user, not just
+     *  resumed for a moment underneath the app lock screen. */
+    private var resumedUnlocked = false
+    /** Invalidates a voice message still being loaded (see `loadAndPlayVoiceMessage`). */
+    private var voiceLoadRequest = 0
 
     /** Sohbet içi arama: eşleşen satırların `localMessages` içindeki
      *  indeksleri (bkz. `runMessageSearch`/`goToSearchMatch`). */
@@ -436,7 +444,8 @@ class ChatActivity : AppCompatActivity() {
             val obj = JSONObject(json)
             val isForThisPeer = obj.optString("peer") == peerDeviceFingerprint
             val isGroupScoped = !obj.isNull("group_id") || !obj.isNull("group_message_local_id")
-            if (isForThisPeer && !isGroupScoped) {
+            // "history_backfilled" covers several chats and carries no peer.
+            if ((isForThisPeer && !isGroupScoped) || obj.optString("type") == "history_backfilled") {
                 runOnUiThread { handleIncomingEvent(obj) }
             }
         } catch (e: Exception) {
@@ -592,7 +601,8 @@ class ChatActivity : AppCompatActivity() {
         adapter.onVoiceSpeedClick = { item -> onVoiceSpeedClicked(item) }
         adapter.onVoiceSeek = { item, positionMs -> onVoiceSeeked(item, positionMs) }
 
-        if (!bindToIntent(intent)) finish() else consumeShare(intent)
+        // Not on a restore: the same intent would send the files again.
+        if (!bindToIntent(intent)) finish() else if (savedInstanceState == null) consumeShare(intent)
     }
 
     /** Paylaşım ekranından seçilen içerik (bkz. util.ShareIntake). */
@@ -725,7 +735,7 @@ class ChatActivity : AppCompatActivity() {
             // yazılabilsin. Kayıt bırakılır bırakılmaz gönderilmiyor, önce
             // açıklama soruluyor — kullanıcı boş bırakırsa davranış eskisiyle
             // aynı.
-            promptAttachmentCaption { caption -> sendVoiceMessage(file, durationMs, caption) }
+            promptAttachmentCaption(onCancel = { file.delete() }) { caption -> sendVoiceMessage(file, durationMs, caption) }
         } else {
             file?.delete()
             if (send) {
@@ -738,11 +748,15 @@ class ChatActivity : AppCompatActivity() {
      *  "audio/mp4") — tek fark `durationMs`'in taşınması, bkz. Rust
      *  `FileOffer.duration_ms`. */
     private fun sendVoiceMessage(file: File, durationMs: Long, caption: String = "") {
+        // Taken and cleared here: the next message was sent as a reply too.
+        val replyId = activeReplyToMessageId
+        val replyPreview = activeReplyToPreview
+        cancelReply()
         lifecycleScope.launch(Dispatchers.IO) {
             val result = try {
                 P2PLib.prepareAndSendFile(
                     peerDeviceFingerprint, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
-                    caption, activeReplyToMessageId ?: "", activeReplyToPreview ?: ""
+                    caption, replyId ?: "", replyPreview ?: ""
                 )
             } catch (e: Exception) {
                 "Error: ${e.message}"
@@ -757,6 +771,9 @@ class ChatActivity : AppCompatActivity() {
                             messageId = obj.optString("message_id"),
                             text = "",
                             isMine = true,
+                            caption = caption,
+                            replyToMessageId = replyId,
+                            replyToPreview = replyPreview,
                             attachment = SimpleChatAdapter.AttachmentInfo(
                                 fileId = obj.optString("message_id"),
                                 fileName = file.name,
@@ -768,6 +785,7 @@ class ChatActivity : AppCompatActivity() {
                             )
                         )
                     )
+                    resolveReplyLabels()
                     scrollToBottomNow()
                 }
             }
@@ -826,6 +844,7 @@ class ChatActivity : AppCompatActivity() {
         startPositionMs: Int
     ) {
         stopVoicePlayback()
+        val request = voiceLoadRequest
         lifecycleScope.launch(Dispatchers.IO) {
             val path = try {
                 P2PLib.getAttachmentPlaintextPath(attachment.fileId)
@@ -833,6 +852,9 @@ class ChatActivity : AppCompatActivity() {
                 "Error: ${e.message}"
             }
             withContext(Dispatchers.Main) {
+                // Another tap or a pause came first: starting now would leave
+                // a second player that nobody ever releases.
+                if (request != voiceLoadRequest) return@withContext
                 if (path.startsWith("Error:")) {
                     Toast.makeText(this@ChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
                     return@withContext
@@ -874,7 +896,10 @@ class ChatActivity : AppCompatActivity() {
             val player = voicePlayer
             if (player != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
                 try {
+                    // Setting the speed starts a paused player (documented): put it back.
+                    val wasPlaying = player.isPlaying
                     player.playbackParams = PlaybackParams().setSpeed(newSpeed)
+                    if (!wasPlaying) player.pause()
                 } catch (e: Exception) {
                 }
             }
@@ -888,6 +913,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private fun stopVoicePlayback() {
+        voiceLoadRequest++
         val fileId = voicePlayingFileId
         voicePlaybackHandler.removeCallbacks(voicePlaybackTickRunnable)
         try {
@@ -1126,6 +1152,8 @@ class ChatActivity : AppCompatActivity() {
             "status" -> adapter.applyStatus(obj.optString("message_id"), parseStatus(obj.optString("status")))
             "history_sync" -> applyHistorySync(obj)
             "older_history" -> applyOlderHistory(obj)
+            // Server or sibling restore covering several chats: reload from the archive.
+            "history_backfilled" -> syncMissedMessages()
             // "sibling_file": başka cihazımdan gönderdiğim ek — aynı balon, benim tarafımda.
             "file_offer", "sibling_file" -> {
                 val autoDownloading = obj.optBoolean("auto_downloading", false)
@@ -1371,7 +1399,7 @@ class ChatActivity : AppCompatActivity() {
      * birlikte gidiyor. Bu pencere yalnızca açıklamayı soruyor; boş
      * bırakılabilir.
      */
-    private fun promptAttachmentCaption(onConfirm: (String) -> Unit) {
+    private fun promptAttachmentCaption(onCancel: () -> Unit = {}, onConfirm: (String) -> Unit) {
         val input = EditText(this).apply {
             hint = getString(R.string.hint_attachment_caption)
             setSingleLine(false)
@@ -1387,7 +1415,8 @@ class ChatActivity : AppCompatActivity() {
             .setTitle(R.string.title_attachment_caption)
             .setView(container)
             .setPositiveButton(R.string.btn_send) { _, _ -> onConfirm(input.text.toString()) }
-            .setNegativeButton(android.R.string.cancel, null)
+            .setNegativeButton(android.R.string.cancel) { _, _ -> onCancel() }
+            .setOnCancelListener { onCancel() }
             .show()
     }
 
@@ -2384,7 +2413,11 @@ class ChatActivity : AppCompatActivity() {
     private fun loadOlderHistory() {
         if (isLoadingOlderHistory || noMoreOlderHistory || localMessages.isEmpty()) return
         isLoadingOlderHistory = true
-        val beforeTimestamp = localMessages.minOf { it.timestamp }
+        // Text rows only: the first load mixes the newest texts with EVERY
+        // attachment ever sent, so one old photo used to move the cursor
+        // past all the texts between it and the oldest loaded one.
+        val beforeTimestamp = localMessages.filter { it.attachment == null }.minOfOrNull { it.timestamp }
+            ?: localMessages.minOf { it.timestamp }
         val localOlder = try {
             val json = P2PLib.getMessageHistoryBefore(peerDeviceFingerprint, beforeTimestamp, OLDER_HISTORY_PAGE_SIZE)
             val array = JSONArray(json)
@@ -2404,6 +2437,18 @@ class ChatActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 isLoadingOlderHistory = false
             }
+            // Several sources are asked (the peer side and our own devices)
+            // and any of them may never answer: the request ends on a timer,
+            // not on the first reply. Without it the loading flag stayed set
+            // for the whole session, and one empty reply ended the history.
+            olderHistoryEmptyReply = false
+            val request = ++olderHistoryRequest
+            recycler.postDelayed({
+                if (request == olderHistoryRequest && isLoadingOlderHistory) {
+                    isLoadingOlderHistory = false
+                    if (olderHistoryEmptyReply) noMoreOlderHistory = true
+                }
+            }, OLDER_HISTORY_REPLY_WAIT_MS)
             // Spec dışı, dış inceleme düzeltmesi: karşı taraf (contact) o an
             // ulaşılamıyorsa yukarıdaki istek boşuna beklerdi — AYNI anda
             // kendi kardeş cihazlarımıza da sorulur (`message_id` bazlı dedup
@@ -2422,12 +2467,13 @@ class ChatActivity : AppCompatActivity() {
      *  artık tekrar denenmez. */
     private fun applyOlderHistory(obj: JSONObject) {
         if (!isLoadingOlderHistory) return
-        isLoadingOlderHistory = false
         val array = obj.optJSONArray("messages") ?: return
         if (array.length() == 0) {
-            noMoreOlderHistory = true
+            // Another source may still answer: see the timer in the request.
+            olderHistoryEmptyReply = true
             return
         }
+        isLoadingOlderHistory = false
         val items = (0 until array.length()).map { itemFromHistoryJson(array.getJSONObject(it)) }
         prependOlderMessages(items)
     }
@@ -2441,6 +2487,20 @@ class ChatActivity : AppCompatActivity() {
         val existingIds = localMessages.mapTo(mutableSetOf()) { it.messageId }
         val fresh = items.filter { it.messageId !in existingIds }.sortedBy { it.orderKey }
         if (fresh.isEmpty()) return
+        if (fresh.last().orderKey > localMessages.firstOrNull()?.orderKey ?: Long.MAX_VALUE) {
+            // The page belongs BELOW rows already shown (old attachments):
+            // merge by send order and keep the row the user is looking at.
+            val lm = recycler.layoutManager as? LinearLayoutManager
+            val anchorPos = lm?.findFirstVisibleItemPosition() ?: -1
+            val anchor = localMessages.getOrNull(anchorPos)
+            val anchorTop = lm?.findViewByPosition(anchorPos)?.top ?: 0
+            localMessages.addAll(fresh)
+            localMessages.sortWith(compareBy { it.orderKey })
+            resolveReplyLabels()
+            adapter.notifyDataSetChanged()
+            if (anchor != null) lm?.scrollToPositionWithOffset(localMessages.indexOf(anchor), anchorTop)
+            return
+        }
         localMessages.addAll(0, fresh)
         // bkz. `resolveReplyLabels` — eski sayfa, daha önce görülmemiş bir
         // yanıt zinciri getirmiş olabilir (ör. yanıtlanan mesaj da bu
@@ -2562,7 +2622,11 @@ class ChatActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        NotificationHelper.clearForPeer(this, peerDeviceFingerprint)
+        // A locked app resumes this screen for a moment under the password
+        // prompt: nothing was read, so no notification is cleared and no
+        // "read up to now" goes out (see onPause too).
+        resumedUnlocked = AppLock.isUnlocked()
+        if (resumedUnlocked) NotificationHelper.clearForPeer(this, peerDeviceFingerprint)
         ThemePrefs.applyChatBackground(this)
         P2PService.addMessageListener(messageListener)
         P2PService.activeConversationId = peerDeviceFingerprint
@@ -2573,7 +2637,7 @@ class ChatActivity : AppCompatActivity() {
         // tarafa "şu ana kadar okudum" sınırını bildir. Eskiden sadece
         // `onPause`'da ve yalnızca kardeş cihazlara gidiyordu → store-forward
         // ile gelip geçmiş olarak yüklenen mesajlar için makbuz HİÇ gitmezdi.
-        scheduleReadWatermark()
+        if (resumedUnlocked) scheduleReadWatermark()
     }
 
     private val readWatermarkHandler = Handler(Looper.getMainLooper())
@@ -2676,6 +2740,7 @@ class ChatActivity : AppCompatActivity() {
             val (missedItems, seenMessageIds) = missed
             val existingIds = localMessages.mapTo(mutableSetOf()) { it.messageId }
             val fresh = missedItems.filter { it.messageId !in existingIds }
+            if (adapter.refreshFrom(missedItems)) resolveReplyLabels()
             if (fresh.isNotEmpty()) {
                 localMessages.addAll(fresh)
                 // Geçmiş yüklemesi bir canlı mesajdan SONRA biterse sona eklemek
@@ -2703,15 +2768,20 @@ class ChatActivity : AppCompatActivity() {
         if (P2PService.activeConversationId == peerDeviceFingerprint) {
             P2PService.activeConversationId = null
         }
-        ReadStatePrefs.markRead(this, peerDeviceFingerprint)
         // Bu sohbeti okuduğumuzu kardeş cihazlara VE karşı tarafa bildir
         // (bkz. `sync_read_state` — artık iki hedef). Debounce'lu bekleyen
         // varsa iptal edip HEMEN kesin bir tane yolla.
         readWatermarkHandler.removeCallbacks(readWatermarkRunnable)
-        try {
-            P2PLib.syncReadState(peerDeviceFingerprint, "", System.currentTimeMillis())
-        } catch (e: Exception) {
+        if (resumedUnlocked) {
+            ReadStatePrefs.markRead(this, peerDeviceFingerprint)
+            try {
+                P2PLib.syncReadState(peerDeviceFingerprint, "", System.currentTimeMillis())
+            } catch (e: Exception) {
+            }
         }
+        resumedUnlocked = false
+        fabBlinkAnimator?.cancel()
+        fabBlinkAnimator = null
         sessionPollHandler.removeCallbacks(sessionPollRunnable)
         ownStatusPollHandler.removeCallbacks(ownStatusPollRunnable)
         peerStatusDot.cancelPulse()

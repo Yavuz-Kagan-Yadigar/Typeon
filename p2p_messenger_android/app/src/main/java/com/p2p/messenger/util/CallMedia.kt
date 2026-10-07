@@ -84,8 +84,10 @@ object CallMedia {
         audioSinks.clear()
         videoSinks.values.forEach { it.release() }
         videoSinks.clear()
-        videoEncoder?.release()
+        val encoder = videoEncoder
         videoEncoder = null
+        encoder?.enabled = false
+        encoder?.release()
     }
 
     /** Renders [slot]'s video into [surface]; [onSize] gets the displayed (rotated) size. */
@@ -303,8 +305,13 @@ object CallMedia {
                 setByteBuffer("csd-1", nativeLong(0))
                 setByteBuffer("csd-2", nativeLong(80_000_000))
             }
-            dec.configure(fmt, null, null, 0)
-            dec.start()
+            try {
+                dec.configure(fmt, null, null, 0)
+                dec.start()
+            } catch (e: Exception) {
+                dec.release()
+                throw e
+            }
         }
 
         fun feed(frame: ByteArray, off: Int) {
@@ -364,12 +371,22 @@ object CallMedia {
                 val padMs = (PAD_BASE_MS + PAD_STEP_MS * minOf(underruns, 3)) // <= 200 ms, under the cap
                 if (written > 0) underruns++
                 val pad = ByteArray(outRate * padMs / 1000 * frameBytes)
-                written += t.write(pad, 0, pad.size, AudioTrack.WRITE_NON_BLOCKING) / frameBytes
+                written += t.write(pad, 0, pad.size, AudioTrack.WRITE_NON_BLOCKING).coerceAtLeast(0) / frameBytes
             } else if (android.os.Build.VERSION.SDK_INT >= 31 && buffered > outRate.toLong() * MAX_BUFFER_MS / 1000) {
                 statOverflow++
                 return
             }
-            written += t.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING) / frameBytes
+            val n = t.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
+            if (n < 0) {
+                // ERROR_DEAD_OBJECT and friends: the track is gone, the next
+                // packet builds a new one. Adding the code to `written` only
+                // skewed the jitter maths and left this participant silent.
+                Log.w(TAG, "AudioTrack write failed ($n), recreating")
+                t.release()
+                track = null
+                return
+            }
+            written += n / frameBytes
         }
 
         private fun newTrack(): AudioTrack = AudioTrack.Builder()
@@ -498,10 +515,15 @@ object CallMedia {
         @Volatile var enabled = true
         /** Congestion pause, see [adapt]. */
         private var paused = false
+        /** The encoder could not be created: do not retry on every frame. */
+        private var failed = false
+        /** A keyframe was asked for inside the minimum gap: send it when the gap ends. */
+        private var keyPending = false
 
         /** Called on the analyzer thread; the caller closes [image]. */
+        @Synchronized
         fun encode(image: ImageProxy) {
-            if (!enabled) return
+            if (!enabled || failed) return
             adapt()
             if (paused) return
             val now = System.nanoTime()
@@ -511,8 +533,10 @@ object CallMedia {
             // At most one on-demand keyframe per KEYFRAME_MIN_GAP_MS: a
             // receiver stuck in a decode loop must not turn the stream into
             // all-keyframes (seen: ~2 Mbps).
-            val keyAsked = P2PLib.callTakeKeyframeRequest() && now - lastKeyNs > VideoTuning.KEYFRAME_MIN_GAP_MS * 1_000_000
+            if (P2PLib.callTakeKeyframeRequest()) keyPending = true
+            val keyAsked = keyPending && now - lastKeyNs > VideoTuning.KEYFRAME_MIN_GAP_MS * 1_000_000
             if (keyAsked) {
+                keyPending = false
                 lastKeyNs = now
                 c.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
             }
@@ -563,9 +587,24 @@ object CallMedia {
             hevc = mime == MediaFormat.MIMETYPE_VIDEO_HEVC
             if (!hevc) bitrate = (VideoTuning.START_BITRATE * VideoTuning.AVC_BITRATE_FACTOR).toInt()
             val c = if (name != null) MediaCodec.createByCodecName(name) else MediaCodec.createEncoderByType(mime)
+            try {
+                configureAndStart(c, mime, w, h)
+            } catch (e: Exception) {
+                c.release()
+                failed = true
+                throw e
+            }
+            codec = c
+            Log.i(TAG, "Video encoder ${c.name} $mime ${w}x$h accepted=${c.outputFormat}")
+            return c
+        }
+
+        private fun configureAndStart(c: MediaCodec, mime: String, w: Int, h: Int) {
             val caps = c.codecInfo.getCapabilitiesForType(mime)
             val enc = caps.encoderCapabilities
-            val base = MediaFormat.createVideoFormat(mime, w, h).apply {
+            // A function, not `MediaFormat(base)`: the copy constructor is API 29+
+            // and killed the process on the first camera frame on Android 8-9.
+            fun baseFormat() = MediaFormat.createVideoFormat(mime, w, h).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
                 setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
                 // VBR: a still scene may cost almost nothing; CBR would pad it.
@@ -576,7 +615,8 @@ object CallMedia {
                 setInteger(MediaFormat.KEY_FRAME_RATE, VideoTuning.MAX_FPS)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, VideoTuning.KEYFRAME_INTERVAL_S)
             }
-            val tuned = MediaFormat(base).apply {
+            val base = baseFormat()
+            val tuned = baseFormat().apply {
                 setInteger(MediaFormat.KEY_OPERATING_RATE, VideoTuning.MAX_FPS)
                 setInteger(MediaFormat.KEY_PRIORITY, 0) // real time
                 setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
@@ -605,9 +645,6 @@ object CallMedia {
                 c.configure(base, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             }
             c.start()
-            codec = c
-            Log.i(TAG, "Video encoder ${c.name} $mime ${w}x$h accepted=${c.outputFormat}")
-            return c
         }
 
         private fun drain(c: MediaCodec, rotation: Int) {
@@ -663,6 +700,7 @@ object CallMedia {
             stillSkips = 0
         }
 
+        @Synchronized
         fun release() {
             codec?.let {
                 try { it.stop() } catch (_: Exception) {}

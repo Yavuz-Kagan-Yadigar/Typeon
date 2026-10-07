@@ -345,6 +345,7 @@
     <string name="delete_account_confirm_title">Delete your account?</string>
     <string name="delete_account_confirm_message">All your contacts and groups are told that this account was deleted, and they can no longer message you. Your linked devices are wiped too. Local messages, contacts, and keys are deleted. This cannot be undone.</string>
     <string name="msg_deleting_account">Notifying your contacts…</string>
+    <string name="error_delete_account_failed">Couldn\'t notify your contacts. Account not deleted, try again when connected.</string>
     <string name="msg_contact_deleted_account">%1$s deleted their account</string>
     <string name="msg_account_deleted_no_send">This person deleted their account. Messages can no longer be sent.</string>
     <string name="device_unlinked_notification">This device was unlinked from your account. Its local data has been erased.</string>

@@ -84,7 +84,8 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
     private val listener: (String) -> Unit = { json ->
         try {
             val obj = JSONObject(json)
-            if (obj.optString("type") == "whiteboard" &&
+            // An unbound panel ("" / "") matched every group event: those carry no "peer".
+            if (obj.optString("type") == "whiteboard" && (peer.isNotEmpty() || groupId.isNotEmpty()) &&
                 (if (groupId.isNotEmpty()) obj.optString("group_id") == groupId else obj.optString("peer") == peer)
             ) ui.post { onBoardChanged(obj) }
         } catch (e: Exception) { }
@@ -300,20 +301,22 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         val participants = board.participants
         val (peer, groupId) = Pair(peer, groupId)
         io.execute {
+            val pdf = PdfDocument()
             val ok = try {
-                val pdf = PdfDocument()
                 val strokes = WhiteboardView.parsePage(P2PLib.whiteboardPage(peer, groupId, shown))
                 val sheet = pdf.startPage(
                     PdfDocument.PageInfo.Builder(WhiteboardView.WIDTH.toInt(), WhiteboardView.HEIGHT.toInt(), 1).create()
                 )
                 WhiteboardView.drawPage(sheet.canvas, strokes, participants, WhiteboardView.strokePaint())
                 pdf.finishPage(sheet)
-                activity.contentResolver.openOutputStream(uri)!!.use { pdf.writeTo(it) }
-                pdf.close()
-                true
+                activity.contentResolver.openOutputStream(uri)?.use { pdf.writeTo(it); true } ?: false
             } catch (e: Exception) {
                 false
+            } finally {
+                pdf.close()
             }
+            // The picker already created the file: do not leave it empty.
+            if (!ok) try { android.provider.DocumentsContract.deleteDocument(activity.contentResolver, uri) } catch (e: Exception) { }
             ui.post {
                 Toast.makeText(activity, if (ok) R.string.whiteboard_pdf_saved else R.string.whiteboard_pdf_failed, Toast.LENGTH_SHORT).show()
             }

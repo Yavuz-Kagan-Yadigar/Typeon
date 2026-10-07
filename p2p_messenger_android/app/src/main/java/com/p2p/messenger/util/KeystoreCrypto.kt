@@ -83,6 +83,7 @@ object KeystoreCrypto {
 
     /** Verilen alias için Keystore anahtarını döner, yoksa üretir
      *  (StrongBox varsa onda, yoksa TEE'de). */
+    @Synchronized
     private fun getOrCreateKey(alias: String): SecretKey {
         (keyStore.getKey(alias, null) as? SecretKey)?.let { return it }
 
@@ -114,7 +115,12 @@ object KeystoreCrypto {
                 // düşüyoruz.
             }
         }
-        keyGenerator.init(baseSpec.setIsStrongBoxBacked(false).build())
+        // API 28+ only, like the call above: on 8.0/8.1 this method does not
+        // exist and the first launch died with NoSuchMethodError.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            baseSpec.setIsStrongBoxBacked(false)
+        }
+        keyGenerator.init(baseSpec.build())
         return keyGenerator.generateKey()
     }
 
@@ -137,7 +143,11 @@ object KeystoreCrypto {
         val iv = ivAndCiphertext.copyOfRange(0, 12)
         val ciphertext = ivAndCiphertext.copyOfRange(12, ivAndCiphertext.size)
         val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(alias), GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
+        // Never create here: a missing alias must fail, not be replaced by a
+        // fresh key that cannot open anything written before.
+        val key = keyStore.getKey(alias, null) as? SecretKey
+            ?: throw java.security.KeyStoreException("Keystore key missing: $alias")
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
         return cipher.doFinal(ciphertext)
     }
 

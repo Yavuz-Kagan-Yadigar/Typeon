@@ -144,6 +144,10 @@ class ContactsFragment : Fragment() {
             qrRetryHandler.postDelayed({ loadNodeAddressAndGenerateQr(attemptsLeft - 1) }, 500)
             return
         }
+        // Tor not ready after the fast retries: show what we have, but keep
+        // trying. A code without the rendezvous address was never refreshed
+        // and pairing from it hung.
+        if (nodeAddress.isEmpty()) qrRetryHandler.postDelayed({ loadNodeAddressAndGenerateQr(0) }, 3000)
         ownNodeAddress = nodeAddress
         val qrBytes = try {
             P2PLib.generateQrPacket(nodeAddress)
@@ -361,6 +365,9 @@ class ContactsFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
+        // The core accepts a stranger's pairing only for a day after the code
+        // was produced; this view can live longer than that.
+        if (ownNodeAddress.isNotEmpty()) runCatching { P2PLib.generateQrPacket(ownNodeAddress) }
         refreshHandler.post(refreshRunnable)
     }
 

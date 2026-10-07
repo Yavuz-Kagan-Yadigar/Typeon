@@ -14,8 +14,17 @@ import androidx.core.content.IntentCompat
 object ShareIntake {
     const val EXTRA_SHARE = "typeon_share"
 
+    /** A share nobody picked a chat for must not ride along with a chat
+     *  opened much later. */
+    private const val PENDING_TTL_MS = 5 * 60_000L
+    private var pendingAt = 0L
+
     @Volatile
     var pending: Intent? = null
+        set(value) {
+            field = value
+            pendingAt = android.os.SystemClock.elapsedRealtime()
+        }
 
     fun isShare(intent: Intent?): Boolean =
         intent?.action == Intent.ACTION_SEND || intent?.action == Intent.ACTION_SEND_MULTIPLE
@@ -23,7 +32,9 @@ object ShareIntake {
     /** Bekleyen paylaşımı (varsa) `target`a ekler ve bekleyeni temizler. */
     fun attachTo(target: Intent): Intent {
         val share = pending ?: return target
+        val expired = android.os.SystemClock.elapsedRealtime() - pendingAt > PENDING_TTL_MS
         pending = null
+        if (expired) return target
         target.putExtra(EXTRA_SHARE, share)
         val uris = uris(share)
         if (uris.isNotEmpty()) {
@@ -41,12 +52,23 @@ object ShareIntake {
         return share
     }
 
-    fun text(share: Intent): String? = share.getStringExtra(Intent.EXTRA_TEXT)?.takeIf { it.isNotBlank() }
+    fun text(share: Intent): String? =
+        share.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()?.takeIf { it.isNotBlank() }
 
-    fun uris(share: Intent): List<Uri> =
-        if (share.action == Intent.ACTION_SEND_MULTIPLE) {
+    /** The share target is exported: the URIs come from another app and are
+     *  opened with OUR identity. Only `content:` from a foreign provider is
+     *  accepted, otherwise `file:///data/data/<us>/...` or our own
+     *  FileProvider would send the database or the key files to a chat. */
+    fun uris(share: Intent): List<Uri> {
+        val raw: List<Uri?> = if (share.action == Intent.ACTION_SEND_MULTIPLE) {
             IntentCompat.getParcelableArrayListExtra(share, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
         } else {
-            listOfNotNull(IntentCompat.getParcelableExtra(share, Intent.EXTRA_STREAM, Uri::class.java))
+            listOf(IntentCompat.getParcelableExtra(share, Intent.EXTRA_STREAM, Uri::class.java))
         }
+        return raw.filterNotNull().filter {
+            it.scheme == "content" && it.authority?.substringAfter('@')?.startsWith(OWN_PACKAGE) != true
+        }
+    }
+
+    private const val OWN_PACKAGE = "com.p2p.messenger"
 }

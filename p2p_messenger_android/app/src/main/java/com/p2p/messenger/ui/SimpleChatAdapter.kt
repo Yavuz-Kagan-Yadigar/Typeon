@@ -249,6 +249,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val cur = items[position]
         val next = items[position + 1]
         if (cur.isDeleted || next.isDeleted) return false
+        // Same break as `isGroupedWithPrevious`: a bubble followed by a
+        // reply ends its group, otherwise it never showed its time.
+        if (next.replyToMessageId != null) return false
         if (!isSameSender(cur, next)) return false
         return next.timestamp - cur.timestamp in 0 until GROUP_WINDOW_MS
     }
@@ -332,6 +335,34 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     }
 
     fun indexOfMessageId(messageId: String): Int = items.indexOfFirst { it.messageId == messageId }
+
+    /**
+     * Applies freshly loaded history to rows that are ALREADY on screen.
+     * The live listener is detached while a chat is paused, so a download
+     * that finished, an edit, a delete or a pending->sent change in that
+     * time never reached the bubble: it stayed "downloading" until the chat
+     * was closed and reopened. Returns true if any row changed.
+     */
+    fun refreshFrom(loaded: List<Item>): Boolean {
+        val byId = loaded.associateBy { it.messageId }
+        var changed = false
+        for (i in items.indices) {
+            val old = items[i]
+            val now = byId[old.messageId] ?: continue
+            val sameAttachment = old.attachment?.status == now.attachment?.status
+            if (old.text == now.text && old.isEdited == now.isEdited && old.isDeleted == now.isDeleted &&
+                old.reactions == now.reactions && sameAttachment && (!old.isMine || old.status == now.status)) continue
+            old.text = now.text
+            old.isEdited = now.isEdited
+            old.isDeleted = now.isDeleted
+            old.reactions = now.reactions
+            if (old.isMine) old.status = now.status
+            if (!sameAttachment) old.attachment = now.attachment
+            notifyItemChanged(i)
+            changed = true
+        }
+        return changed
+    }
 
     /**
      * İKİ CİHAZLI GERÇEK TESTTE (2026-09-06) görüldü: `loadHistoryIfAvailable`
@@ -891,6 +922,18 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.imgAttachmentThumbnail.visibility = View.GONE
             holder.rowGenericAttachment.visibility = View.GONE
             holder.layoutVoiceMessage.visibility = View.VISIBLE
+            // A recycled holder keeps the previous FILE row's state: stale
+            // progress, and a tap that opened the other message's file.
+            holder.progressAttachment.visibility = View.GONE
+            holder.txtAttachmentEta.visibility = View.GONE
+            val voiceClick = View.OnClickListener {
+                if (attachment.status != AttachmentStatus.DOWNLOADING && attachment.status != AttachmentStatus.COMPLETE) {
+                    onAttachmentClick?.invoke(item)
+                }
+            }
+            holder.btnAttachmentDownload.setOnClickListener(voiceClick)
+            holder.layoutAttachment.setOnClickListener(voiceClick)
+            holder.layoutAttachment.setOnLongClickListener(null)
             bindVoiceMessage(holder, item, attachment)
             return
         }
@@ -905,11 +948,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         // indirilmeden bir önizleme gösterilir.
         val preview = attachment.previewJpeg
         if (preview != null) {
-            val bitmap = try {
-                android.graphics.BitmapFactory.decodeByteArray(preview, 0, preview.size)
-            } catch (e: Exception) {
-                null
-            }
+            // Sender-controlled bytes: bounded decode (see ImagePreview.decodeBytes).
+            val bitmap = com.p2p.messenger.util.ImagePreview.decodeBytes(preview, 1024)
             if (bitmap != null) {
                 holder.imgAttachmentThumbnail.visibility = View.VISIBLE
                 holder.imgAttachmentThumbnail.setImageBitmap(bitmap)

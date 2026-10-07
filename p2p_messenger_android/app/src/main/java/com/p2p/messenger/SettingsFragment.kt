@@ -192,8 +192,35 @@ class SettingsFragment : Fragment() {
     private val createRecoveryFileLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         val passphrase = pendingRecoveryPassphrase
         pendingRecoveryPassphrase = null
-        if (uri == null || passphrase == null) return@registerForActivityResult
+        if (uri == null) return@registerForActivityResult
+        if (passphrase == null) {
+            // The fragment was recreated while the picker was open (rotation,
+            // process death) and the passphrase is gone. The picker already
+            // created the file: remove it, or an empty file stays behind as
+            // the user's "recovery file".
+            try {
+                android.provider.DocumentsContract.deleteDocument(requireContext().contentResolver, uri)
+            } catch (e: Exception) {
+            }
+            Toast.makeText(requireContext(), R.string.error_recovery_export_failed, Toast.LENGTH_LONG).show()
+            return@registerForActivityResult
+        }
         exportRecoveryTo(uri, passphrase)
+    }
+
+    /** Set while a server switch is put back after a failed change. */
+    private var revertingServerToggle = false
+
+    /** Runs a core server setting; on failure shows it and puts the switch
+     *  back, so it never shows ON while nothing is stored or routed. */
+    private fun applyServerToggle(switch: android.widget.CompoundButton, checked: Boolean, change: () -> String) {
+        if (revertingServerToggle) return
+        val result = try { change() } catch (e: Exception) { "Error: ${e.message}" }
+        if (!result.startsWith("Error")) return
+        Toast.makeText(switch.context, result, Toast.LENGTH_LONG).show()
+        revertingServerToggle = true
+        switch.isChecked = !checked
+        revertingServerToggle = false
     }
 
     /** Each card's header folds/unfolds its body; the chevron shows the state. */
@@ -433,17 +460,26 @@ class SettingsFragment : Fragment() {
             .setCancelable(false)
             .show()
         Thread {
-            try {
-                P2PLib.deleteAccount()
+            // -1 or an exception: nothing was announced. Wiping now would
+            // destroy the only keys that can ever announce it, and contacts,
+            // groups and sibling devices would never learn of the deletion.
+            val announced = try {
+                val sent = P2PLib.deleteAccount()
                 val deadline = android.os.SystemClock.elapsedRealtime() + ACCOUNT_DELETE_WAIT_MS
-                while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                while (sent >= 0 && android.os.SystemClock.elapsedRealtime() < deadline) {
                     if (P2PLib.accountDeletionPending() == 0) break
                     Thread.sleep(500)
                 }
+                sent >= 0
             } catch (e: Exception) {
+                false
             }
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 try { progress.dismiss() } catch (e: Exception) {}
+                if (!announced) {
+                    Toast.makeText(ctx, R.string.error_delete_account_failed, Toast.LENGTH_LONG).show()
+                    return@post
+                }
                 com.p2p.messenger.util.LocalWipe.wipe(ctx)
                 AppRestarter.restart(ctx)
             }
@@ -1074,8 +1110,7 @@ class SettingsFragment : Fragment() {
             }
             val ok = try {
                 if (bytes != null && bytes.isNotEmpty()) {
-                    requireContext().contentResolver.openOutputStream(uri)?.use { out -> out.write(bytes) }
-                    true
+                    requireContext().contentResolver.openOutputStream(uri)?.use { out -> out.write(bytes); true } ?: false
                 } else {
                     false
                 }
@@ -1189,7 +1224,10 @@ class SettingsFragment : Fragment() {
                 requireContext().contentResolver.openInputStream(uri)?.use { input ->
                     tempFile.outputStream().use { output -> input.copyTo(output, bufferSize = 64 * 1024) }
                 } ?: throw java.io.IOException("Dosya açılamadı")
+                // null = not an image. `setOwnAvatar(null)` means "remove" and
+                // would publish the removal to every contact.
                 val compressed = ImagePreview.compressFile(tempFile, AVATAR_MAX_DIMENSION, AVATAR_JPEG_QUALITY)
+                    ?: throw java.io.IOException("Not an image")
                 withContext(Dispatchers.Main) { setOwnAvatar(compressed) }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -1392,31 +1430,26 @@ class SettingsFragment : Fragment() {
         row.addView(SwitchMaterial(ctx).apply {
             text = getString(R.string.lbl_server_route)
             isChecked = obj.optBoolean("route_messages")
-            setOnCheckedChangeListener { _, checked ->
-                try {
-                    P2PLib.setServerRouting(serverId, checked)
-                } catch (e: Exception) {
-                    Toast.makeText(ctx, e.message, Toast.LENGTH_SHORT).show()
-                }
+            setOnCheckedChangeListener { button, checked ->
+                applyServerToggle(button, checked) { P2PLib.setServerRouting(serverId, checked) }
             }
         })
 
         row.addView(SwitchMaterial(ctx).apply {
             text = getString(R.string.lbl_server_history)
             isChecked = obj.optBoolean("store_history")
-            setOnCheckedChangeListener { _, checked ->
-                if (checked) {
+            setOnCheckedChangeListener { button, checked ->
+                applyServerToggle(button, checked) {
                     // Kök arşiv anahtarı (ARK) SADECE burada üretilir —
                     // bkz. ArchiveKeyManager: açılışta kendiliğinden
                     // üretilseydi, kardeşinden anahtar almadan önce açılan
                     // bir cihaz kendi rastgele anahtarını kullanır ve
                     // yüklediği arşiv diğer cihazlarda okunamaz olurdu.
-                    ArchiveKeyManager.ensureCreated(ctx.applicationContext)
-                }
-                try {
-                    P2PLib.setServerHistory(serverId, checked)
-                } catch (e: Exception) {
-                    Toast.makeText(ctx, e.message, Toast.LENGTH_SHORT).show()
+                    if (checked && !revertingServerToggle && !ArchiveKeyManager.ensureCreated(ctx.applicationContext)) {
+                        "Error: archive key unavailable"
+                    } else {
+                        P2PLib.setServerHistory(serverId, checked)
+                    }
                 }
             }
         })

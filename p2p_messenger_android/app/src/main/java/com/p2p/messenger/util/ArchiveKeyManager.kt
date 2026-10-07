@@ -90,11 +90,11 @@ object ArchiveKeyManager {
      * ama diskteki kopya ayrışır. Bu yüzden çağıran, kullanıcı geçmiş
      * saklamayı açtığında ve SADECE o zaman çağırmalı.
      */
-    fun ensureCreated(context: Context) {
+    fun ensureCreated(context: Context): Boolean {
         val file = keyFile(context)
         if (file.exists()) {
             loadIfPresent(context)
-            return
+            return true
         }
         // Kardeşten (`DeviceSync`) gelmiş bir ARK bellekte olabilir: onu
         // yaz, yenisini üretip üstüne yazma (arşiv cihazlar arasında bölünürdü).
@@ -103,9 +103,12 @@ object ArchiveKeyManager {
         try {
             file.writeBytesAtomic(KeystoreCrypto.encrypt(dataKey, KeystoreCrypto.ALIAS_ARCHIVE_ROOT))
             P2PLib.setArchiveRootKey(dataKey)
+            return true
         } catch (e: Exception) {
-            // Keystore erişilemiyorsa sessizce vazgeç — sunucu yönlendirmesi
-            // (mesaj teslimi) bundan ETKİLENMEZ, sadece geçmiş yüklenmez.
+            // Keystore erişilemiyor — sunucu yönlendirmesi (mesaj teslimi)
+            // bundan ETKİLENMEZ, sadece geçmiş yüklenmez. Çağıran anahtarı
+            // AÇIK göstermesin diye `false`.
+            return false
         } finally {
             dataKey.fill(0)
         }

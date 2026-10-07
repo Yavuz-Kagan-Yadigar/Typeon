@@ -110,11 +110,7 @@ object AvatarUtil {
     }
 
     private fun decodeCircularSquare(bytes: ByteArray): Bitmap? {
-        val raw = try {
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-        } catch (e: Exception) {
-            null
-        } ?: return null
+        val raw = ImagePreview.decodeBytes(bytes, SIZE_PX) ?: return null
         val edge = minOf(raw.width, raw.height)
         val x = (raw.width - edge) / 2
         val y = (raw.height - edge) / 2
@@ -137,7 +133,10 @@ object AvatarUtil {
     private fun placeholderCircle(displayName: String): Bitmap {
         val bitmap = Bitmap.createBitmap(SIZE_PX, SIZE_PX, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
-        val initial = displayName.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+        val initial = displayName.trim().let { n ->
+            // A whole code point: an emoji is two UTF-16 units.
+            if (n.isEmpty()) "?" else n.substring(0, n.offsetByCodePoints(0, 1)).uppercase()
+        }
         val bgColor = PALETTE[Math.abs(displayName.hashCode()) % PALETTE.size]
         val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = bgColor }
         canvas.drawCircle(SIZE_PX / 2f, SIZE_PX / 2f, SIZE_PX / 2f, bgPaint)

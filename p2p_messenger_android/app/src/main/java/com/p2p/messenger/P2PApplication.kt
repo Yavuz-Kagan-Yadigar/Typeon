@@ -203,7 +203,25 @@ class P2PApplication : Application() {
                 res.updateConfiguration(config, metrics)
             }
 
-            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            /**
+             * Runs inside `super.onCreate()`, before the activity's own
+             * `onCreate` body. After process death Android recreates the top
+             * activity directly: a chat screen came up on a core that had
+             * never opened its database (empty history, sends fail, no
+             * service start) until the user went back to MainActivity.
+             */
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+                if (P2PLib.hasStoredIdentity()) return
+                try {
+                    P2PLib.initDatabase(filesDir.absolutePath)
+                    if (P2PLib.hasStoredIdentity()) {
+                        com.p2p.messenger.util.IdentityManager.loadIfPresent(this@P2PApplication)
+                        com.p2p.messenger.util.MessageHistoryManager.ensureHistoryKeyLoaded(this@P2PApplication)
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("P2PApplication", "Core init failed: ${e.message}")
+                }
+            }
 
             override fun onActivityStarted(activity: Activity) {
                 // Spec dışı, kullanıcı isteği: uygulamayı açmak için şifre.

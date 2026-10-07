@@ -49,6 +49,8 @@ class MediaViewerActivity : AppCompatActivity() {
         const val EXTRA_URI = "uri"
         const val EXTRA_MIME_TYPE = "mime_type"
         private const val MIN_SCALE = 1f
+        /** Longest bitmap edge decoded; a canvas refuses to draw much more. */
+        private const val MAX_BITMAP_EDGE = 4096
         private const val MAX_SCALE = 6f
         private const val SKIP_MS = 5000
         private const val SKIP_INDICATOR_DURATION_MS = 500L
@@ -149,11 +151,16 @@ class MediaViewerActivity : AppCompatActivity() {
                             bounds.outHeight / (sampleSize * 2) >= metrics.heightPixels) {
                             sampleSize *= 2
                         }
+                        // The rule above never samples a panorama or a long
+                        // screenshot (one edge stays under the screen's): cap
+                        // the long edge at what a canvas can draw.
+                        while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > MAX_BITMAP_EDGE) sampleSize *= 2
                         contentResolver.openInputStream(uri)?.use { input2 ->
                             BitmapFactory.decodeStream(input2, null, BitmapFactory.Options().apply { inSampleSize = sampleSize })
                         }
                     }
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
+                    // Throwable: OutOfMemoryError is not an Exception.
                     null
                 }
                 withContext(Dispatchers.Main) {
@@ -366,7 +373,9 @@ class MediaViewerActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        videoMediaPlayer?.let { if (it.isPlaying) it.pause() }
+        // VideoView releases the player when its surface goes away (screen
+        // off): `isPlaying` then throws IllegalStateException.
+        try { videoMediaPlayer?.let { if (it.isPlaying) it.pause() } } catch (e: IllegalStateException) { }
     }
 
     override fun onDestroy() {

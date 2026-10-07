@@ -101,6 +101,7 @@ class GroupChatActivity : AppCompatActivity() {
         private const val CONTACT_CACHE_TTL_MS = 5000L
         /** bkz. ChatActivity aynı sabitler (sonsuz kaydırma). */
         private const val OLDER_HISTORY_PAGE_SIZE = 50
+        private const val OLDER_HISTORY_REPLY_WAIT_MS = 15_000L
         private const val LOAD_OLDER_HISTORY_THRESHOLD = 3
         /** bkz. ChatActivity aynı sabitler (grup ekleri). */
         private const val MAX_ATTACHMENT_SIZE = 4L * 1024 * 1024 * 1024
@@ -180,6 +181,13 @@ class GroupChatActivity : AppCompatActivity() {
     /** bkz. ChatActivity aynı alanlar (sonsuz kaydırma). */
     private var isLoadingOlderHistory = false
     private var noMoreOlderHistory = false
+    private var olderHistoryRequest = 0
+    private var olderHistoryEmptyReply = false
+    /** Set in onResume: the chat is really in front of the user, not just
+     *  resumed for a moment underneath the app lock screen. */
+    private var resumedUnlocked = false
+    /** Invalidates a voice message still being loaded (see `loadAndPlayVoiceMessage`). */
+    private var voiceLoadRequest = 0
     /** bkz. ChatActivity aynı alanlar (sohbet içi mesaj arama). */
     private var searchMatches: List<Int> = emptyList()
     private var currentSearchMatchIndex: Int = -1
@@ -394,6 +402,7 @@ class GroupChatActivity : AppCompatActivity() {
                 type == "file_progress" -> runOnUiThread {
                     adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.DOWNLOADING, obj.optLong("bytes_done"))
                 }
+                type == "history_backfilled" -> runOnUiThread { syncMissedGroupMessages() }
                 type == "file_complete" -> runOnUiThread {
                     adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.COMPLETE)
                 }
@@ -587,7 +596,8 @@ class GroupChatActivity : AppCompatActivity() {
             finish()
             return
         }
-        consumeShare(intent)
+        // Not on a restore: the same intent would send the files again.
+        if (savedInstanceState == null) consumeShare(intent)
     }
 
     /** Paylaşım ekranından seçilen içerik (bkz. util.ShareIntake). */
@@ -892,7 +902,11 @@ class GroupChatActivity : AppCompatActivity() {
     private fun loadOlderGroupHistory() {
         if (isLoadingOlderHistory || noMoreOlderHistory || localMessages.isEmpty()) return
         isLoadingOlderHistory = true
-        val beforeTimestamp = localMessages.minOf { it.timestamp }
+        // Text rows only: the first load mixes the newest texts with EVERY
+        // attachment ever sent, so one old photo used to move the cursor
+        // past all the texts between it and the oldest loaded one.
+        val beforeTimestamp = localMessages.filter { it.attachment == null }.minOfOrNull { it.timestamp }
+            ?: localMessages.minOf { it.timestamp }
         val localOlder = try {
             val json = P2PLib.getGroupMessageHistoryBefore(groupId, beforeTimestamp, OLDER_HISTORY_PAGE_SIZE)
             val array = JSONArray(json)
@@ -909,6 +923,18 @@ class GroupChatActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 isLoadingOlderHistory = false
             }
+            // Several sources are asked (the peer side and our own devices)
+            // and any of them may never answer: the request ends on a timer,
+            // not on the first reply. Without it the loading flag stayed set
+            // for the whole session, and one empty reply ended the history.
+            olderHistoryEmptyReply = false
+            val request = ++olderHistoryRequest
+            recycler.postDelayed({
+                if (request == olderHistoryRequest && isLoadingOlderHistory) {
+                    isLoadingOlderHistory = false
+                    if (olderHistoryEmptyReply) noMoreOlderHistory = true
+                }
+            }, OLDER_HISTORY_REPLY_WAIT_MS)
             // Spec dışı, dış inceleme düzeltmesi: diğer üyeler o an
             // ulaşılamıyorsa yukarıdaki istek boşuna beklerdi — AYNI anda
             // kendi kardeş cihazlarımıza da sorulur (`message_id` bazlı dedup
@@ -925,12 +951,13 @@ class GroupChatActivity : AppCompatActivity() {
      *  ağ yanıtı. Boş dizi dönerse artık bu grup için tekrar denenmez. */
     private fun applyOlderGroupHistory(obj: JSONObject) {
         if (!isLoadingOlderHistory) return
-        isLoadingOlderHistory = false
         val array = obj.optJSONArray("messages") ?: return
         if (array.length() == 0) {
-            noMoreOlderHistory = true
+            // Another source may still answer: see the timer in the request.
+            olderHistoryEmptyReply = true
             return
         }
+        isLoadingOlderHistory = false
         val items = (0 until array.length()).map { itemFromGroupHistoryJson(array.getJSONObject(it)) }
         prependOlderMessages(items)
     }
@@ -941,6 +968,20 @@ class GroupChatActivity : AppCompatActivity() {
         val existingIds = localMessages.mapTo(mutableSetOf()) { it.messageId }
         val fresh = items.filter { it.messageId !in existingIds }.sortedBy { it.orderKey }
         if (fresh.isEmpty()) return
+        if (fresh.last().orderKey > localMessages.firstOrNull()?.orderKey ?: Long.MAX_VALUE) {
+            // The page belongs BELOW rows already shown (old attachments):
+            // merge by send order and keep the row the user is looking at.
+            val lm = recycler.layoutManager as? LinearLayoutManager
+            val anchorPos = lm?.findFirstVisibleItemPosition() ?: -1
+            val anchor = localMessages.getOrNull(anchorPos)
+            val anchorTop = lm?.findViewByPosition(anchorPos)?.top ?: 0
+            localMessages.addAll(fresh)
+            localMessages.sortWith(compareBy { it.orderKey })
+            resolveReplyLabels()
+            adapter.notifyDataSetChanged()
+            if (anchor != null) lm?.scrollToPositionWithOffset(localMessages.indexOf(anchor), anchorTop)
+            return
+        }
         localMessages.addAll(0, fresh)
         resolveReplyLabels()
         adapter.notifyItemRangeInserted(0, fresh.size)
@@ -1688,7 +1729,7 @@ class GroupChatActivity : AppCompatActivity() {
             return
         }
         // bkz. ChatActivity aynı notu — sesli mesajın altına da yazı.
-        promptAttachmentCaption { caption -> sendVoiceMessage(file, durationMs, caption) }
+        promptAttachmentCaption(onCancel = { file.delete() }) { caption -> sendVoiceMessage(file, durationMs, caption) }
     }
 
     /** bkz. ChatActivity.sendVoiceMessage AYNI desen — tek fark
@@ -1696,12 +1737,17 @@ class GroupChatActivity : AppCompatActivity() {
      *  bir dosya kimliği string'i olması (bkz. `onGroupFilePicked` AYNI
      *  dönüş biçimi notu, 1:1'in JSON `{message_id, status}`'ından farklı). */
     private fun sendVoiceMessage(file: File, durationMs: Long, caption: String = "") {
+        // Taken and cleared here: the next message was sent as a reply too.
+        val replyId = activeReplyToMessageId
+        val replyPreview = activeReplyToPreview
+        val replySender = activeReplyToSenderIdentityId
+        cancelReply()
         lifecycleScope.launch(Dispatchers.IO) {
             val result = try {
                 P2PLib.prepareAndSendGroupFile(
                     groupId, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
-                    caption, activeReplyToMessageId ?: "", activeReplyToPreview ?: "",
-                    activeReplyToSenderIdentityId ?: ""
+                    caption, replyId ?: "", replyPreview ?: "",
+                    replySender ?: ""
                 )
             } catch (e: Exception) {
                 "Error: ${e.message}"
@@ -1715,6 +1761,10 @@ class GroupChatActivity : AppCompatActivity() {
                             messageId = result,
                             text = "",
                             isMine = true,
+                            caption = caption,
+                            replyToMessageId = replyId,
+                            replyToPreview = replyPreview,
+                            replyToSenderIdentityId = replySender,
                             attachment = SimpleChatAdapter.AttachmentInfo(
                                 fileId = result,
                                 fileName = file.name,
@@ -1726,6 +1776,7 @@ class GroupChatActivity : AppCompatActivity() {
                             )
                         )
                     )
+                    resolveReplyLabels()
                     scrollToBottomNow()
                 }
             }
@@ -1779,6 +1830,7 @@ class GroupChatActivity : AppCompatActivity() {
 
     private fun loadAndPlayVoiceMessage(item: SimpleChatAdapter.Item, attachment: SimpleChatAdapter.AttachmentInfo, startPositionMs: Int) {
         stopVoicePlayback()
+        val request = voiceLoadRequest
         lifecycleScope.launch(Dispatchers.IO) {
             val path = try {
                 P2PLib.getAttachmentPlaintextPath(attachment.fileId)
@@ -1786,6 +1838,9 @@ class GroupChatActivity : AppCompatActivity() {
                 "Error: ${e.message}"
             }
             withContext(Dispatchers.Main) {
+                // Another tap or a pause came first: starting now would leave
+                // a second player that nobody ever releases.
+                if (request != voiceLoadRequest) return@withContext
                 if (path.startsWith("Error:")) {
                     Toast.makeText(this@GroupChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
                     return@withContext
@@ -1823,7 +1878,10 @@ class GroupChatActivity : AppCompatActivity() {
             val player = voicePlayer
             if (player != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 try {
+                    // Setting the speed starts a paused player (documented): put it back.
+                    val wasPlaying = player.isPlaying
                     player.playbackParams = PlaybackParams().setSpeed(newSpeed)
+                    if (!wasPlaying) player.pause()
                 } catch (e: Exception) { /* bazı cihazlarda desteklenmeyen hız oranı olabilir */ }
             }
             adapter.updateVoicePlayback(attachment.fileId, player?.isPlaying ?: false, player?.currentPosition ?: 0, newSpeed)
@@ -1834,6 +1892,7 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     private fun stopVoicePlayback() {
+        voiceLoadRequest++
         val fileId = voicePlayingFileId
         voicePlaybackHandler.removeCallbacks(voicePlaybackTickRunnable)
         try {
@@ -2375,7 +2434,6 @@ class GroupChatActivity : AppCompatActivity() {
         // message got the literal string "null" here.
         val replyToMessageId = if (obj.isNull("reply_to_message_id")) null else obj.optString("reply_to_message_id").ifEmpty { null }
         val replyToSenderIdentityId = if (obj.isNull("reply_to_sender_identity_id")) null else obj.optString("reply_to_sender_identity_id").ifEmpty { null }
-        android.util.Log.d("ReplyDbg", "isNullField=${obj.isNull("reply_to_message_id")} rawField=${obj.opt("reply_to_message_id")} parsed=$replyToMessageId")
         adapter.addMessage(
             SimpleChatAdapter.Item(
                 messageId = bubbleId,
@@ -2577,7 +2635,7 @@ class GroupChatActivity : AppCompatActivity() {
      * birlikte gidiyor. Bu pencere yalnızca açıklamayı soruyor; boş
      * bırakılabilir.
      */
-    private fun promptAttachmentCaption(onConfirm: (String) -> Unit) {
+    private fun promptAttachmentCaption(onCancel: () -> Unit = {}, onConfirm: (String) -> Unit) {
         val input = EditText(this).apply {
             hint = getString(R.string.hint_attachment_caption)
             setSingleLine(false)
@@ -2593,7 +2651,8 @@ class GroupChatActivity : AppCompatActivity() {
             .setTitle(R.string.title_attachment_caption)
             .setView(container)
             .setPositiveButton(R.string.btn_send) { _, _ -> onConfirm(input.text.toString()) }
-            .setNegativeButton(android.R.string.cancel, null)
+            .setNegativeButton(android.R.string.cancel) { _, _ -> onCancel() }
+            .setOnCancelListener { onCancel() }
             .show()
     }
 
@@ -2767,7 +2826,11 @@ class GroupChatActivity : AppCompatActivity() {
         super.onResume()
         // Spec dışı, kullanıcı isteği: bu grup sohbeti açıldığında ona ait
         // bekleyen bildirim varsa temizlensin.
-        com.p2p.messenger.util.NotificationHelper.clearForGroup(this, groupId)
+        // A locked app resumes this screen for a moment under the password
+        // prompt: nothing was read, so no notification is cleared and no
+        // "read up to now" goes out (see onPause too).
+        resumedUnlocked = com.p2p.messenger.util.AppLock.isUnlocked()
+        if (resumedUnlocked) com.p2p.messenger.util.NotificationHelper.clearForGroup(this, groupId)
         // Spec dışı, kullanıcı isteği: Ayarlar'dan duvarkağıdı/renk
         // değiştirilip bu ekrana geri dönüldüğünde HEMEN yansısın.
         com.p2p.messenger.util.ThemePrefs.applyChatBackground(this)
@@ -2782,7 +2845,7 @@ class GroupChatActivity : AppCompatActivity() {
         // "görüldü" güvenilirlik + hız (2026-09-07): grup açılır açılmaz
         // "buraya kadar okudum" sınırını üyelere bildir — eskiden sadece
         // onPause'da ve yalnızca kardeş cihazlara gidiyordu.
-        scheduleGroupReadWatermark()
+        if (resumedUnlocked) scheduleGroupReadWatermark()
     }
 
     private val groupReadWatermarkHandler = Handler(Looper.getMainLooper())
@@ -2831,6 +2894,7 @@ class GroupChatActivity : AppCompatActivity() {
             // earlier would be stale, causing duplicate inserts.
             val existingIds = localMessages.mapTo(mutableSetOf()) { it.messageId }
             val missed = merged.filter { it.messageId !in existingIds }
+            if (adapter.refreshFrom(merged)) resolveReplyLabels()
             if (missed.isNotEmpty()) {
                 localMessages.addAll(missed)
                 // Geçmiş yüklemesi bir canlı mesajdan SONRA biterse sona eklemek
@@ -2857,11 +2921,16 @@ class GroupChatActivity : AppCompatActivity() {
         if (P2PService.activeConversationId == "group:$groupId") {
             P2PService.activeConversationId = null
         }
-        com.p2p.messenger.util.ReadStatePrefs.markRead(this, "group:$groupId")
         // Kardeş cihazlar VE üyeler bu grubu okunmuş saysın (bkz.
         // `sync_read_state` — artık iki hedef).
         groupReadWatermarkHandler.removeCallbacks(groupReadWatermarkRunnable)
-        try { P2PLib.syncReadState("", groupId, System.currentTimeMillis()) } catch (e: Exception) {}
+        if (resumedUnlocked) {
+            com.p2p.messenger.util.ReadStatePrefs.markRead(this, "group:$groupId")
+            try { P2PLib.syncReadState("", groupId, System.currentTimeMillis()) } catch (e: Exception) {}
+        }
+        resumedUnlocked = false
+        fabBlinkAnimator?.cancel()
+        fabBlinkAnimator = null
         ownStatusPollHandler.removeCallbacks(ownStatusPollRunnable)
         // bkz. ChatActivity onPause aynı notu — Activity görünür değilken
         // bir pulse animasyonunun arka planda vsync'e kayıtlı kalmaması için.
@@ -2869,6 +2938,7 @@ class GroupChatActivity : AppCompatActivity() {
         // Tell members we stopped typing and clear pending timeouts.
         typingHandler.removeCallbacksAndMessages(null)
         typingMembers.clear()
+        updateTypingIndicatorUi()
         sendTypingState(false)
         // bkz. ChatActivity onPause AYNI notu — kullanıcı ekranı kapatırken
         // devam eden bir kayıt/oynatma varsa temiz bir şekilde durdurulur.

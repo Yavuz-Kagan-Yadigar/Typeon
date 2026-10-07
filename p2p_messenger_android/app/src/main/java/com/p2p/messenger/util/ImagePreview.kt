@@ -21,14 +21,62 @@ object ImagePreview {
         BitmapFactory.decodeFile(file.absolutePath, boundsOptions)
         if (boundsOptions.outWidth <= 0 || boundsOptions.outHeight <= 0) return null
 
-        var sampleSize = 1
-        while (boundsOptions.outWidth / (sampleSize * 2) >= maxDimension &&
-            boundsOptions.outHeight / (sampleSize * 2) >= maxDimension) {
-            sampleSize *= 2
+        val decodeOptions = BitmapFactory.Options().apply {
+            inSampleSize = sampleSizeFor(boundsOptions.outWidth, boundsOptions.outHeight, maxDimension)
         }
-        val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-        val sampled = BitmapFactory.decodeFile(file.absolutePath, decodeOptions) ?: return null
-        return compressBitmap(sampled, maxDimension, quality)
+        val sampled = try {
+            BitmapFactory.decodeFile(file.absolutePath, decodeOptions)
+        } catch (e: OutOfMemoryError) {
+            null
+        } ?: return null
+        return compressBitmap(applyExifOrientation(sampled, file), maxDimension, quality)
+    }
+
+    /** Largest power of two that keeps the LONG edge at or above
+     *  `maxDimension`. With `&&` a panorama or a long screenshot was never
+     *  sampled down and decoded at full size. */
+    fun sampleSizeFor(width: Int, height: Int, maxDimension: Int): Int {
+        var sampleSize = 1
+        while (maxOf(width, height) / (sampleSize * 2) >= maxDimension) sampleSize *= 2
+        return sampleSize
+    }
+
+    /** Decodes untrusted image bytes (a contact's avatar, an attachment
+     *  preview) without ever allocating the full-resolution bitmap: a 25 KB
+     *  palette PNG can declare 16000x12000 pixels. */
+    fun decodeBytes(bytes: ByteArray, maxDimension: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sampleSizeFor(bounds.outWidth, bounds.outHeight, maxDimension)
+        }
+        return try {
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+        } catch (e: Throwable) {
+            null
+        }
+    }
+
+    /** Cameras store the rotation in EXIF instead of rotating the pixels. */
+    private fun applyExifOrientation(bitmap: Bitmap, file: File): Bitmap {
+        val degrees = try {
+            when (android.media.ExifInterface(file.absolutePath)
+                .getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 0)) {
+                android.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                android.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                android.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                else -> return bitmap
+            }
+        } catch (e: Exception) {
+            return bitmap
+        }
+        val rotated = Bitmap.createBitmap(
+            bitmap, 0, 0, bitmap.width, bitmap.height,
+            android.graphics.Matrix().apply { postRotate(degrees) }, true
+        )
+        if (rotated !== bitmap) bitmap.recycle()
+        return rotated
     }
 
     /** En uzun kenarı `maxDimension`'a sığdırır (en-boy oranı KORUNUR —

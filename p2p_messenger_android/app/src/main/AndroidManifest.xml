@@ -10,6 +10,9 @@
          Android 15+, after which the service is demoted and (MIUI) loses the
          network in the background. remoteMessaging has no cap. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <!-- Calls: without the microphone type the recorder gets silence as
+         soon as the call screen is not visible (see P2PService.onStartCommand). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -171,7 +174,7 @@
             android:name=".service.P2PService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="dataSync|remoteMessaging" />
+            android:foregroundServiceType="dataSync|remoteMessaging|microphone" />
 
         <!-- Spec dışı: dosya/foto/video/ses ekleri (bkz. ChatActivity
              openAttachmentFile) — çözülmüş (plaintext) ek kopyalarını

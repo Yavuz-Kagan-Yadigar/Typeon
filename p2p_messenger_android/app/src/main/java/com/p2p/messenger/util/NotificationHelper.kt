@@ -130,7 +130,21 @@ object NotificationHelper {
      *  uygulamayı açtığından bildirim çubuğunda asılı kalmalarının bir
      *  anlamı yok. `MainActivity.onResume`'dan çağrılır. */
     fun clearAll(context: Context) {
-        context.getSystemService(NotificationManager::class.java).cancelAll()
+        // Not cancelAll(): that also removed a ringing call's notification,
+        // the only way to answer when the call screen could not open itself.
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.activeNotifications
+            .filter { it.id != com.p2p.messenger.ui.CallActivity.NOTIFICATION_ID }
+            .forEach { manager.cancel(it.tag, it.id) }
+    }
+
+    /** Sibling device read [conversationId] up to [readAt]: remove its
+     *  notification unless a newer message posted it after that. */
+    fun clearIfReadUpTo(context: Context, conversationId: String, readAt: Long) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val id = conversationId.hashCode()
+        val shown = manager.activeNotifications.firstOrNull { it.id == id } ?: return
+        if (shown.postTime <= readAt) manager.cancel(id)
     }
 
     /** Spec dışı, kullanıcı isteği: belirli bir 1:1 sohbet açıldığında
