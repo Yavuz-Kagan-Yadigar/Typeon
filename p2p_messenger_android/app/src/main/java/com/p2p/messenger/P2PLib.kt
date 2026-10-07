@@ -359,6 +359,9 @@ object P2PLib {
     external fun listGroups(): String
     external fun createGroup(name: String): String
     external fun inviteToGroup(groupId: String, identityId: String): Boolean
+    /** "Retry" on a group bubble: 1 = sent again to the devices that missed
+     *  it, 0 = nothing recorded for this id, -1 = nothing could be sent. */
+    external fun retryGroupMessageCopies(groupId: String, localId: String): Int
     external fun removeFromGroup(groupId: String, identityId: String): Boolean
     /** Spec dışı, kullanıcı isteği: grubu TÜM üyeler için siler (imzalı
      *  `GroupChange::Delete` herkese gönderilir). SADECE kurucu için

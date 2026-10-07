@@ -3166,6 +3166,12 @@ struct P2PCore {
     /// açılışında `load_pending_group_messages_from_db` ile geri yükleniyor
     /// — süreç öldürülüp yeniden başlasa bile bu kuyruk hayatta kalır.
     pending_group_messages: HashMap<(String, String), Vec<MessageContent>>,
+    /// Group texts with a copy that was given up or cancelled: group-wide id
+    /// -> the content and the devices that missed it. "Retry" on the bubble
+    /// sends to these only (`retry_group_message_copies`).
+    /// ponytail: memory only, like the red bubble itself; after a restart the
+    /// record is gone. Add a table if the failed state has to survive.
+    group_failed_copies: HashMap<String, (MessageContent, Vec<String>)>,
     /// Whiteboard strokes/erases not sent yet, by board — see `whiteboard`.
     wb_outbox: HashMap<String, whiteboard::WbOutbox>,
     /// (board, device) -> when a page from it was last answered with a digest.
@@ -3417,6 +3423,7 @@ impl P2PCore {
             deferred_incoming: Vec::new(),
             pending_group_syncs: HashMap::new(),
             pending_group_messages: HashMap::new(),
+            group_failed_copies: HashMap::new(),
             wb_outbox: HashMap::new(),
             wb_reply_at: HashMap::new(),
             last_group_sync_sweep_at: 0,
@@ -13517,6 +13524,42 @@ impl P2PCore {
     /// mesajın göndericisinin `identity_id`'si (bkz. packet.rs
     /// `reply_to_sender_identity_id` notu — alıcı tarafın "Ahmet'e yanıt"
     /// gösterebilmesi için).
+    /// See `group_failed_copies`.
+    fn note_group_copy_failed(&mut self, content: &MessageContent, device_fingerprint: &str) {
+        let MessageContent::Text { group_id: Some(_), group_message_local_id: Some(local_id), .. } = content else { return };
+        if self.group_failed_copies.len() >= 1_000 {
+            self.group_failed_copies.clear();
+        }
+        let entry = self.group_failed_copies.entry(local_id.clone()).or_insert_with(|| (content.clone(), Vec::new()));
+        if !entry.1.iter().any(|fp| fp == device_fingerprint) {
+            entry.1.push(device_fingerprint.to_string());
+        }
+    }
+
+    /// "Retry" on a group bubble: the same message, under the same group-wide
+    /// id, only to the devices whose copy failed. `Ok(false)`: nothing is
+    /// recorded for this id, the caller sends the message as a new one.
+    fn retry_group_message_copies(&mut self, group_id: &str, local_id: &str) -> Result<bool, String> {
+        let Some((content, devices)) = self.group_failed_copies.remove(local_id) else { return Ok(false) };
+        let group = self.groups.get(group_id).cloned_group()?;
+        let mut sent = false;
+        for device in devices {
+            // Removed from the group since: no copy.
+            let still_member = self.identity_id_for_device(&device).map(|id| group.is_member(&id)).unwrap_or(false);
+            if !still_member {
+                continue;
+            }
+            match self.send_message_content(device.clone(), &content, None) {
+                Ok(_) => sent = true,
+                Err(e) => {
+                    error!("Grup mesajı yeniden gönderilemedi ({}): {}", device, e);
+                    self.note_group_copy_failed(&content, &device);
+                }
+            }
+        }
+        if sent { Ok(true) } else { Err("No copy could be sent".to_string()) }
+    }
+
     fn send_group_message(&mut self, group_id: &str, plaintext: &str, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>) -> Result<String, String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
@@ -16747,6 +16790,9 @@ impl P2PCore {
                 if let NetworkEnvelope::Message(m) = &envelope {
                     self.set_message_status(&m.header.message_id, MessageSendStatus::Failed);
                     // Same fix as the Ack arm: resolve the real target from regen_content.
+                    if let Some(content) = &regen_content {
+                        self.note_group_copy_failed(content, &peer_fp);
+                    }
                     let (event_message_id, event_group_id) = match &regen_content {
                         Some(MessageContent::Edit { target_message_id: real_target, group_id, .. }) =>
                             (real_target.clone(), group_id.clone()),
@@ -16939,6 +16985,9 @@ impl P2PCore {
         if let NetworkEnvelope::Message(m) = &pending.envelope {
             self.set_message_status(&m.header.message_id, MessageSendStatus::Failed);
             // Same fix as the Ack arm.
+            if let Some(content) = &pending.regen_content {
+                self.note_group_copy_failed(content, &pending.peer_device_fingerprint);
+            }
             let (event_message_id, event_group_id) = match &pending.regen_content {
                 Some(MessageContent::Edit { target_message_id: real_target, group_id, .. }) =>
                     (real_target.clone(), group_id.clone()),
@@ -20770,6 +20819,24 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_createGroup<'local>(mut env
         Ok(Ok(id)) => safe_new_jstring(&mut env, id),
         Ok(Err(e)) => safe_new_jstring(&mut env, format!("Error: {}", e)),
         Err(e) => safe_new_jstring(&mut env, format!("Error: {}", e)),
+    }
+}
+
+/// 1 = the failed copies went out again, 0 = nothing recorded for this id
+/// (send as a new message), -1 = recorded but nothing could be sent.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_retryGroupMessageCopies<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, local_id: JString<'local>) -> jni::sys::jint {
+    let gid: String = env.get_string(&group_id).map(|s| s.into()).unwrap_or_default();
+    let lid: String = env.get_string(&local_id).map(|s| s.into()).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().retry_group_message_copies(&gid, &lid)
+    });
+    match result {
+        Ok(Ok(true)) => 1,
+        Ok(Ok(false)) => 0,
+        Ok(Err(e)) => { error!("retry_group_message_copies failed: {}", e); -1 }
+        Err(e) => { error!("retry_group_message_copies panicked: {}", e); -1 }
     }
 }
 

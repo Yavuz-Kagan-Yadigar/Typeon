@@ -1340,6 +1340,13 @@ class GroupChatActivity : AppCompatActivity() {
      * `sendNewMessage` aynı mekanizma).
      */
     private fun retryFailedGroupMessage(item: SimpleChatAdapter.Item) {
+        // Some members got it: send only the copies that failed, under the
+        // same id (see Rust `retry_group_message_copies`). 0 = the message
+        // never left this device, so it is sent as a new one below.
+        when (try { P2PLib.retryGroupMessageCopies(groupId, item.messageId) } catch (e: Exception) { 0 }) {
+            1 -> { adapter.applyStatus(item.messageId, SimpleChatAdapter.Status.SENT); return }
+            -1 -> { Toast.makeText(this, R.string.error_send_failed, Toast.LENGTH_SHORT).show(); return }
+        }
         // bkz. ChatActivity.retryFailedMessage AYNI notu — bir yanıtsa AYNI
         // yanıt korunmalı.
         val result = try {
