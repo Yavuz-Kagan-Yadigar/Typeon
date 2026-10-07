@@ -93,10 +93,8 @@ android {
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
-    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
     // Davet kodunun QR'ını çizmek için — istemcide de kullanılan sürüm.
     implementation 'com.google.zxing:core:3.5.1'
-    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
 }
 
 // --- Rust (typeon-server) cross-derlemesi ---

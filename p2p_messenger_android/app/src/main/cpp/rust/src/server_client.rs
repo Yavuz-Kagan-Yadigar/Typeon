@@ -2001,7 +2001,8 @@ impl P2PCore {
         // A token wins over the stored id: the user pasted it to enroll anew.
         // If the server refuses it, it is cleared and this falls to `Rebind`.
         if let Some(enrollment_id) = rec.enrollment_id.clone().filter(|_| rec.token.is_empty()) {
-            let input = server_proto::rebind_signing_input(&enrollment_id, server_id, ts_ms);
+            let Some(me) = self.swarm.as_ref().map(|s| s.local_peer_id().to_string()) else { return };
+            let input = server_proto::rebind_signing_input(&enrollment_id, server_id, &me, challenge, ts_ms);
             let sig = signing.sign(&input).to_bytes().to_vec();
             let sig_pq: MlDsaSignature<MlDsa87> = signing_pq.sign(&input);
             let req = ServerRequest::Rebind {

@@ -588,9 +588,13 @@ struct P2PBehaviour {
 /// Kendi ürettiğimiz kimlikler UUID (hex + tire) olduğu için bu filtreden
 /// sorunsuz geçer.
 fn is_safe_file_id(id: &str) -> bool {
+    // Lower case only, same rule as the server's `is_safe_id`: ids are our own
+    // lower-case UUIDs, and on a case-insensitive volume `AB` and `ab` are one
+    // file. A peer's offer with another spelling is refused here, before it
+    // could be uploaded to a server that refuses it too.
     !id.is_empty()
         && id.len() <= 128
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
 /// `file_name`'den türetilen uzantının yol ayırıcı taşımadığını garanti eder

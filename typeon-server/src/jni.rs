@@ -23,7 +23,7 @@ use jni::sys::{jboolean, jstring};
 use jni::JNIEnv;
 use log::info;
 
-use crate::{now_ms, ServerConfig, ServerCore, ServerShared};
+use crate::{now_ms, CoreSignal, ServerConfig, ServerCore, ServerShared};
 use crate::store::{EnrollmentState, Store};
 
 struct Control {
@@ -37,7 +37,7 @@ struct Control {
     /// Defter #11: `stopServer` bunu tetikleyerek `run_until`'ı sonlandırır.
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     /// bkz. `ServerCore::set_net_changed_rx` — `notifyNetworkChanged` bunu iter.
-    net_changed: tokio::sync::mpsc::UnboundedSender<()>,
+    net_changed: tokio::sync::mpsc::UnboundedSender<CoreSignal>,
 }
 
 lazy_static::lazy_static! {
@@ -46,6 +46,10 @@ lazy_static::lazy_static! {
         .build()
         .expect("tokio runtime");
     static ref CONTROL: Mutex<Option<Control>> = Mutex::new(None);
+    /// Held for the whole of `startServer` and `stopServer`. Without it two
+    /// starts both passed the `CONTROL` check (the second one, Tor-less,
+    /// replaced the working server), and a stop during a start was a no-op.
+    static ref START_STOP: Mutex<()> = Mutex::new(());
     /// The loop task of the last started server. `stopServer` only signals it;
     /// the next `startServer` waits for it to end.
     static ref LAST_RUN: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
@@ -79,6 +83,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
     let server_name = jstr(&mut env, &name);
     let node = node_mode != 0;
 
+    let _serial = START_STOP.lock().unwrap_or_else(|p| p.into_inner());
     {
         let guard = CONTROL.lock().unwrap_or_else(|p| p.into_inner());
         if guard.is_some() {
@@ -88,13 +93,6 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
     }
 
     let mut config = ServerConfig::new(PathBuf::from(&dir));
-    // Tor, Android sunucusunda HER ZAMAN açık — kapatılabilir bir seçenek
-    // değil. Bir telefonun operatör NAT'ı arkasından ulaşılabilir olmasının
-    // tek yolu kendi onion service'i; kapatmak, sunucuyu sessizce
-    // erişilemez kılardı ve kullanıcı bunu ancak kimse bağlanamadığında
-    // fark ederdi. (Headless Linux daemon'ında hâlâ kapatılabiliyor: orada
-    // genellikle herkese açık bir IP var, bkz. `TYPEON_SERVER_TOR`.)
-    config.tor_enabled = true;
     config.node_mode = node;
     // Yalnızca BLOBLAR taşınabilir; kimlik ve Tor durumu dahilide kalır
     // (bkz. `ServerConfig.blob_dir`).
@@ -170,7 +168,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
 
     let blob_dir = config.blob_dir.clone();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel::<CoreSignal>();
     core.set_net_changed_rx(net_rx);
     // `run_until` consumes the core: when it returns, the Tor client is dropped.
     let handle = RUNTIME.spawn(async move {
@@ -204,7 +202,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_notifyNetworkChan
 ) {
     let guard = CONTROL.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(c) = guard.as_ref() {
-        let _ = c.net_changed.send(());
+        let _ = c.net_changed.send(CoreSignal::NetworkChanged);
     }
 }
 
@@ -218,17 +216,23 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_stopServer<'local
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
+    let _serial = START_STOP.lock().unwrap_or_else(|p| p.into_inner());
     let taken = CONTROL.lock().unwrap_or_else(|p| p.into_inner()).take();
-    match taken {
-        Some(mut control) => {
-            if let Some(tx) = control.shutdown.take() {
-                let _ = tx.send(());
-            }
-            info!("Sunucu durduruldu (JNI).");
-            out(&mut env, "OK".to_string())
-        }
-        None => out(&mut env, "OK".to_string()),
+    if let Some(tx) = taken.and_then(|mut control| control.shutdown.take()) {
+        let _ = tx.send(());
     }
+    // Wait until the loop has really ended: the caller may move or delete the
+    // blob files next. On a timeout the handle stays for `startServer`.
+    // `LAST_RUN` is not held across the wait: `serverStatus` locks it too.
+    let running = LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()).take();
+    if let Some(mut handle) = running {
+        if RUNTIME.block_on(tokio::time::timeout(std::time::Duration::from_secs(20), &mut handle)).is_err() {
+            log::warn!("Sunucu döngüsü 20 sn içinde kapanmadı");
+            *LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
+        }
+    }
+    info!("Sunucu durduruldu (JNI).");
+    out(&mut env, "OK".to_string())
 }
 
 /// Arayüzün saniyede bir çektiği durum. `{peer_id, tor, addresses, stats}`
@@ -237,7 +241,13 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_serverStatus<'loc
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
-    let guard = CONTROL.lock().unwrap_or_else(|p| p.into_inner());
+    // The loop task ended on its own (a panic is swallowed by tokio): report
+    // it and clear the state, so the next `startServer` is not a no-op.
+    let dead = LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map_or(false, |h| h.is_finished());
+    let mut guard = CONTROL.lock().unwrap_or_else(|p| p.into_inner());
+    if dead {
+        guard.take();
+    }
     let Some(control) = guard.as_ref() else {
         return out(&mut env, r#"{"running":false}"#.to_string());
     };
@@ -252,7 +262,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_serverStatus<'loc
         .map(|a| a.iter().filter(|x| !crate::is_private_multiaddr(x)).cloned().collect())
         .unwrap_or_default();
     let stats = control.shared.stats.lock().map(|s| s.clone()).unwrap_or_default();
-    let devices = control.store.list_enrollments().len();
+    let devices = control.store.count_enrollments_since(i64::MIN);
     let json = serde_json::json!({
         "running": true,
         "peer_id": peer_id,
@@ -356,6 +366,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_revokeDevice<'loc
         return out(&mut env, "Error: geçersiz kimlik".to_string());
     };
     let res = control.store.revoke_enrollment(&id);
+    let _ = control.net_changed.send(CoreSignal::EnrollmentsChanged);
     drop(guard);
     match res {
         Ok(()) => out(&mut env, "OK".to_string()),
@@ -385,6 +396,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_blockDevice<'loca
     };
     let blocked = control.store.block_enrollment_key(&existing.enroll_pk, now_ms());
     let revoked = control.store.revoke_enrollment(&id);
+    let _ = control.net_changed.send(CoreSignal::EnrollmentsChanged);
     drop(guard);
     match (blocked, revoked) {
         (Ok(()), Ok(())) => out(&mut env, "OK".to_string()),

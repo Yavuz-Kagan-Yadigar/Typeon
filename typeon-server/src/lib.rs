@@ -36,7 +36,7 @@ mod jni;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use ml_dsa::{
@@ -80,6 +80,8 @@ const SWEEP_INTERVAL_MS: u64 = 60_000;
 /// ANLIK bir sınır: amaç, tek bir eşin sunucunun disk/CPU'sunu tek başına
 /// tüketmesini engellemek.
 const RATE_WINDOW_MS: u64 = 60_000;
+/// File-chunk requests per connection per `RATE_WINDOW_MS` (see `serve_chunk`).
+const CHUNKS_PER_MINUTE: u32 = 6_000;
 
 /// Call-media relay budget per client: bytes per `RELAY_WINDOW_MS`. ~6.7
 /// Mbit/s — several times a 480p video call, so it only stops a flood. Relay
@@ -93,7 +95,62 @@ const RELAY_WINDOW_MS: u64 = 10_000;
 const PUSH_INLINE_MAX: usize = 64 * 1024;
 
 pub fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+    // No unwrap: a clock before 1970 must not kill the server loop.
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+/// Monotonic ms since process start. Rate windows and sweep pacing use this,
+/// not the wall clock: a corrected phone clock otherwise freezes them.
+fn mono_ms() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// A wall-clock step larger than this is not trusted at once: the TTL sweep
+/// waits `CLOCK_JUMP_HOLD_MS` first (a clock set a month ahead deleted all
+/// mail and blobs in one sweep).
+const CLOCK_JUMP_MS: i64 = 24 * 60 * 60 * 1000;
+const CLOCK_JUMP_HOLD_MS: u64 = 60 * 60 * 1000;
+
+/// Inbound connection caps. Every client arrives from 127.0.0.1 through the
+/// onion bridge and PeerIds are free, so only a total stops a connection flood.
+const MAX_INBOUND_CONNECTIONS: u32 = 512;
+const MAX_CONNECTIONS_PER_PEER: u32 = 8;
+
+/// `meta` key: the addresses the running server last advertised, one per
+/// line. Management commands read it instead of starting a second server.
+const ADVERTISED_ADDRS_KEY: &str = "advertised_addrs";
+
+/// The addresses the running server last advertised (peer id included).
+pub fn advertised_addrs(store: &Store) -> Result<Vec<String>, String> {
+    let raw = store.meta_get(ADVERTISED_ADDRS_KEY).unwrap_or_default();
+    let addrs: Vec<String> = String::from_utf8_lossy(&raw).lines().map(str::to_string).collect();
+    if addrs.is_empty() {
+        return Err("Sunucunun henüz bir adresi yok — önce `typeon-server run` ile başlatın".to_string());
+    }
+    Ok(addrs)
+}
+
+/// Yeni bir davet üretir ve tam davet kodunu döner. `uses <= 0` = SINIRSIZ
+/// (bkz. `Store::create_invite`). Needs only the store: see
+/// `ADVERTISED_ADDRS_KEY`.
+pub fn create_invite(store: &Store, label: &str, uses: i64, ttl_ms: i64) -> Result<String, String> {
+    let addrs = advertised_addrs(store)?;
+    let mut token = [0u8; 20];
+    rand::rngs::OsRng.fill_bytes(&mut token);
+    // Jeton HASH'lenmiş saklanır: sunucu diski ele geçse bile henüz
+    // kullanılmamış davetler kullanılamaz.
+    let now = now_ms();
+    let expires = if ttl_ms <= 0 { 0 } else { now + ttl_ms };
+    store.create_invite(Sha256::digest(token).as_slice(), label, uses, expires, now)?;
+    Ok(server_proto::format_server_invite(&addrs, &hex::encode(token)))
+}
+
+/// Sunucunun KALICI, herkese açık katılım kodu (bkz. `public_join_token`).
+/// `rotate`: eski kod ANINDA geçersiz olur; kayıtlı cihazlar etkilenmez.
+pub fn join_code(store: &Store, rotate: bool) -> Result<String, String> {
+    let addrs = advertised_addrs(store)?;
+    Ok(server_proto::format_server_invite(&addrs, &public_join_token(store, rotate)?))
 }
 
 /// Herkese açık katılım jetonunu döner; yoksa üretir. `rotate` ise ÖNCE
@@ -168,8 +225,6 @@ pub struct ServerConfig {
     /// kimlik/Tor durumu HER ZAMAN dahili depolamada kalır, yalnızca
     /// bloblar taşınır.
     pub blob_dir: PathBuf,
-    pub listen_port: u16,
-    pub tor_enabled: bool,
     /// Kad'a Server modunda katıl + Circuit Relay v2 hizmeti ver. Kapalıysa
     /// sunucu SADECE posta kutusu işi yapar.
     pub node_mode: bool,
@@ -186,8 +241,6 @@ impl ServerConfig {
         ServerConfig {
             blob_dir: data_dir.join("blobs"),
             data_dir,
-            listen_port: 0,
-            tor_enabled: true,
             node_mode: false,
             server_name: "Typeon Server".to_string(),
             limits: ServerLimits::default(),
@@ -209,7 +262,7 @@ pub struct ServerBehaviour {
     file_chunks: request_response::cbor::Behaviour<FileChunkRequest, FileChunkResponse>,
     identify: identify::Behaviour,
     kad: kad::Behaviour<MemoryStore>,
-    upnp: libp2p::upnp::tokio::Behaviour,
+    limits: libp2p::connection_limits::Behaviour,
     /// Node modu açıkken röle hizmeti. `Toggle::from(None)` KASITLI:
     /// libp2p-relay'in HOP handler'ı `Config`'e bakmadan protokolü her zaman
     /// duyurur, yani sıfır kapasiteli bir `Behaviour` bile identify üzerinden
@@ -228,7 +281,10 @@ enum RelayEvent {
 }
 
 /// Accepts relay streams and turns each into `RelayEvent`s.
-async fn accept_relay_streams(mut incoming: libp2p_stream::IncomingStreams, events: tokio::sync::mpsc::UnboundedSender<RelayEvent>) {
+///
+/// `events` is bounded and awaited: a peer that floods frames is slowed down
+/// by its own stream instead of growing a queue in memory.
+async fn accept_relay_streams(mut incoming: libp2p_stream::IncomingStreams, events: tokio::sync::mpsc::Sender<RelayEvent>) {
     let mut next_id = 0u64;
     while let Some((peer, stream)) = incoming.next().await {
         next_id += 1;
@@ -237,17 +293,17 @@ async fn accept_relay_streams(mut incoming: libp2p_stream::IncomingStreams, even
         tokio::spawn(async move {
             let (mut rd, wr) = futures::AsyncReadExt::split(stream);
             let (tx, rx) = tokio::sync::mpsc::channel(LINK_QUEUE);
-            if events.send(RelayEvent::Open { peer, id, tx }).is_err() {
+            if events.send(RelayEvent::Open { peer, id, tx }).await.is_err() {
                 return;
             }
             tokio::spawn(pump_writes(wr, rx));
             while let Ok((mailbox, data)) = read_frame(&mut rd).await {
                 let Ok(mailbox) = String::from_utf8(mailbox) else { break };
-                if events.send(RelayEvent::Frame { peer, mailbox, data }).is_err() {
+                if events.send(RelayEvent::Frame { peer, mailbox, data }).await.is_err() {
                     break;
                 }
             }
-            let _ = events.send(RelayEvent::Closed { peer, id });
+            let _ = events.send(RelayEvent::Closed { peer, id }).await;
         });
     }
 }
@@ -260,37 +316,64 @@ async fn accept_relay_streams(mut incoming: libp2p_stream::IncomingStreams, even
 struct ConnState {
     /// Bu bağlantıya verilmiş, henüz kullanılmamış `Enroll` challenge'ı.
     challenge: Option<Vec<u8>>,
+    /// `mono_ms`.
     window_start: u64,
     requests_in_window: u32,
+    chunks_in_window: u32,
 }
 
 pub struct ServerCore {
     config: ServerConfig,
     store: Store,
     swarm: Swarm<ServerBehaviour>,
-    tor: Option<p2p_messenger::tor::TorHandle>,
-    /// Tor açılamadıysa sebebi — bkz. `tor_status`. Sessiz bırakmak,
-    /// sunucuyu ulaşılamaz hâlde "çalışıyor" göstermek demekti.
-    tor_error: Option<String>,
+    tor: p2p_messenger::tor::TorHandle,
+    /// Kept after the connection closes (see `maybe_sweep`): a reconnect must
+    /// not hand out a fresh rate budget.
     conns: HashMap<PeerId, ConnState>,
     /// Hangi kayıt hangi kutuları dinliyor — `Notify` itmek için. Bellekte:
     /// kalıcı gerçek `mailboxes` tablosunda, bu sadece bağlı eşlerin canlı
     /// görünümü.
     live_interest: HashMap<PeerId, HashSet<String>>,
-    last_sweep: u64,
+    /// Peers with a `Notify` not yet answered by a `Fetch`: one is enough.
+    notified: HashSet<PeerId>,
+    /// `mono_ms` of the last sweep; `None` = sweep on the first tick.
+    last_sweep: Option<u64>,
+    /// (wall ms, mono ms) pair the wall clock is checked against, and since
+    /// when (mono ms) it has been off: see `clock_jumped`.
+    clock_anchor: Option<(i64, u64)>,
+    clock_off_since: Option<u64>,
+    /// Set by `handle_blob_finish`: the request is answered by
+    /// `finish_blob_hash`, not by the value `handle_request` returned.
+    hash_job: Option<(String, Vec<u8>)>,
+    /// Blobs being hashed off the loop -> everyone waiting for the result.
+    blob_hashing: HashMap<String, Vec<ResponseChannel<ServerResponse>>>,
+    hash_tx: tokio::sync::mpsc::UnboundedSender<HashDone>,
+    hash_rx: Option<tokio::sync::mpsc::UnboundedReceiver<HashDone>>,
     pub stats: ServerStats,
     /// bkz. `ServerShared` — döngü dışından okunacak anlık görüntü.
     shared: Option<std::sync::Arc<ServerShared>>,
     /// bkz. `set_net_changed_rx` / `notify_network_changed` — Android ağ
     /// değişikliği bildirimi. `run_until` bunu `take()` edip select!'te dinler.
-    net_changed_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
+    net_changed_rx: Option<tokio::sync::mpsc::UnboundedReceiver<CoreSignal>>,
     /// Taken by `run_until`, which spawns `accept_relay_streams` on it.
     relay_incoming: Option<libp2p_stream::IncomingStreams>,
     /// Authenticated relay links: peer -> (stream id, writer queue).
     relay_links: HashMap<PeerId, (u64, tokio::sync::mpsc::Sender<Vec<u8>>)>,
-    /// Peer -> (window start ms, bytes relayed in window).
+    /// Peer -> (window start `mono_ms`, bytes relayed in window).
     relay_budget: HashMap<PeerId, (u64, usize)>,
 }
+
+/// What the embedding app tells the running loop (Android JNI).
+pub enum CoreSignal {
+    /// Wi-Fi/cellular changed: see `notify_network_changed`.
+    NetworkChanged,
+    /// A device was revoked or blocked: cut its live links now, not at the
+    /// next sweep tick.
+    EnrollmentsChanged,
+}
+
+/// (blob id, hash the client claimed, hash of the file or `None` if unreadable).
+type HashDone = (String, Vec<u8>, Option<Vec<u8>>);
 
 /// Ana döngünün DIŞINDAN okunabilen anlık görüntü.
 ///
@@ -336,41 +419,26 @@ fn tuned_yamux() -> yamux::Config {
 impl ServerCore {
     pub fn new(config: ServerConfig) -> Result<ServerCore, String> {
         std::fs::create_dir_all(&config.data_dir).map_err(|e| format!("Veri dizini: {e}"))?;
+        // The DB holds the libp2p key and the join token: owner only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&config.data_dir, std::fs::Permissions::from_mode(0o700));
+        }
         std::fs::create_dir_all(&config.blob_dir).map_err(|e| format!("Blob dizini: {e}"))?;
 
         let store = Store::open(&config.data_dir.join("typeon_server.db"))?;
         let keypair = load_or_generate_keypair(&store)?;
 
-        // Tor: sunucunun kendi onion service'i. Bir TELEFONUN (Android
-        // sunucu uygulaması) CGNAT arkasından ulaşılabilir olmasının TEK
-        // yolu bu — ne port yönlendirme, ne alan adı, ne TLS sertifikası.
-        let mut tor_error: Option<String> = None;
-        let tor = if config.tor_enabled {
-            let state_dir = config.data_dir.join("arti_state");
-            let cache_dir = config.data_dir.join("arti_cache");
-            match p2p_messenger::tor::TorHandle::launch(
-                &state_dir.to_string_lossy(),
-                &cache_dir.to_string_lossy(),
-                TOR_LIBP2P_PORT,
-            ) {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    // SESSİZ kalmak kabul edilemez: onion service olmadan
-                    // sunucu, kayıtlı istemcilerin HİÇBİRİ için ulaşılabilir
-                    // değil (hepsi `.onion` adresini kullanıyor) ama arayüz
-                    // "çalışıyor" göstermeye devam ediyordu. Gerçek testte
-                    // tam olarak bu oldu: veri SD karta taşınınca arti
-                    // açılamadı, sunucu rastgele portta Tor'suz kalktı ve
-                    // sebep yalnızca logcat'te görünüyordu.
-                    error!("Tor başlatılamadı: {e} — Tor'suz devam ediliyor");
-                    tor_error = Some(e.to_string());
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let listen_port = if tor.is_some() { TOR_LIBP2P_PORT } else { config.listen_port };
+        // Tor: sunucunun kendi onion service'i, ulaşılabilir olmasının TEK
+        // yolu (dinleyici yalnızca loopback'te). Açılamazsa hata: Tor'suz bir
+        // sunucuya hiçbir istemci ulaşamaz ama "çalışıyor" görünürdü.
+        let tor = p2p_messenger::tor::TorHandle::launch(
+            &config.data_dir.join("arti_state").to_string_lossy(),
+            &config.data_dir.join("arti_cache").to_string_lossy(),
+            TOR_LIBP2P_PORT,
+        )
+        .map_err(|e| format!("Tor başlatılamadı: {e}"))?;
         let node_mode = config.node_mode;
 
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
@@ -419,7 +487,12 @@ impl ServerCore {
                 // Default 5 min per client wakes every idle phone's LTE radio.
                 .with_interval(Duration::from_secs(3600)));
                 let kad = kad::Behaviour::new(peer_id, MemoryStore::new(peer_id));
-                let upnp = libp2p::upnp::tokio::Behaviour::default();
+                let limits = libp2p::connection_limits::Behaviour::new(
+                    libp2p::connection_limits::ConnectionLimits::default()
+                        .with_max_pending_incoming(Some(MAX_INBOUND_CONNECTIONS))
+                        .with_max_established_incoming(Some(MAX_INBOUND_CONNECTIONS))
+                        .with_max_established_per_peer(Some(MAX_CONNECTIONS_PER_PEER)),
+                );
                 let relay: Toggle<relay::Behaviour> = if node_mode {
                     // Varsayılan devre sınırı 2 dk / 128 KiB: bir dosya parçası
                     // bile geçmez, sohbet bağlantısı her 2 dk kopar. Sunucu
@@ -428,15 +501,25 @@ impl ServerCore {
                     // kurulur) ve rezervasyon yanıtında u32 saniye taşınır —
                     // u32::MAX pratikte sınırsız. Ölü devreleri keepalive
                     // (~6 sn) zaten kapatıyor.
-                    Some(relay::Behaviour::new(peer_id, relay::Config {
+                    // Per-peer rate limits only (the library's own numbers). The
+                    // default per-IP ones are one shared budget here: every
+                    // client arrives from 127.0.0.1 through the onion bridge,
+                    // so one peer used it up for everybody.
+                    let per_peer = std::num::NonZeroU32::new(30).expect("30 > 0");
+                    let config = relay::Config {
                         max_circuit_duration: Duration::from_secs(u32::MAX as u64),
                         max_circuit_bytes: 0,
+                        reservation_rate_limiters: Vec::new(),
+                        circuit_src_rate_limiters: Vec::new(),
                         ..relay::Config::default()
-                    })).into()
+                    }
+                    .reservation_rate_per_peer(per_peer, Duration::from_secs(120))
+                    .circuit_src_per_peer(per_peer, Duration::from_secs(120));
+                    Some(relay::Behaviour::new(peer_id, config)).into()
                 } else {
                     None.into()
                 };
-                ServerBehaviour { server_rpc, file_chunks, identify, kad, upnp, relay, stream: libp2p_stream::Behaviour::new() }
+                ServerBehaviour { server_rpc, file_chunks, identify, kad, limits, relay, stream: libp2p_stream::Behaviour::new() }
             })
             .map_err(|e| e.to_string())?
             // Çekirdekteki 600 sn ile aynı gerekçe: sessiz dönemlerde
@@ -454,23 +537,29 @@ impl ServerCore {
         // loopback'te. Sunucunun onion service köprüsü gelen Tor akışlarını
         // zaten `127.0.0.1:TOR_LIBP2P_PORT`'a bağlar, yani gelen onion trafiği
         // etkilenmez; buna karşılık LAN/internetten doğrudan clearnet bağlantı
-        // KABUL EDİLMEZ (sunucunun gerçek IP'si ifşa olmaz) ve libp2p-upnp
-        // eşlenecek yönlendirilebilir bir adres bulamaz.
+        // KABUL EDİLMEZ (sunucunun gerçek IP'si ifşa olmaz).
         swarm
-            .listen_on(format!("/ip4/127.0.0.1/tcp/{}", listen_port).parse().map_err(|_| "bad multiaddr")?)
+            .listen_on(format!("/ip4/127.0.0.1/tcp/{}", TOR_LIBP2P_PORT).parse().map_err(|_| "bad multiaddr")?)
             .map_err(|e| e.to_string())?;
 
         let relay_incoming = swarm.behaviour().stream.new_control().accept(RELAY_PROTOCOL).ok();
 
+        let (hash_tx, hash_rx) = tokio::sync::mpsc::unbounded_channel();
         Ok(ServerCore {
-            tor_error,
             config,
             store,
             swarm,
             tor,
             conns: HashMap::new(),
             live_interest: HashMap::new(),
-            last_sweep: 0,
+            notified: HashSet::new(),
+            last_sweep: None,
+            clock_anchor: None,
+            clock_off_since: None,
+            hash_job: None,
+            blob_hashing: HashMap::new(),
+            hash_tx,
+            hash_rx: Some(hash_rx),
             stats: ServerStats::default(),
             shared: None,
             net_changed_rx: None,
@@ -483,7 +572,7 @@ impl ServerCore {
     /// bkz. `notify_network_changed` — Android arayüzü `startServer`'da
     /// bir kanal kurup uçlarından birini burada, diğerini `Control`'de
     /// tutar; `ConnectivityManager` geri çağrısı ağ değiştiğinde iter.
-    pub fn set_net_changed_rx(&mut self, rx: tokio::sync::mpsc::UnboundedReceiver<()>) {
+    pub fn set_net_changed_rx(&mut self, rx: tokio::sync::mpsc::UnboundedReceiver<CoreSignal>) {
         self.net_changed_rx = Some(rx);
     }
 
@@ -492,12 +581,10 @@ impl ServerCore {
     /// etmez), o yüzden yapılacak tek şey Tor'u dürtmek: devreler/onion
     /// descriptor bir Wi-Fi kesintisinden sonra periyodik iyileşmeyi
     /// (dakikalar) beklemesin (bkz. `tor::TorHandle::notify_network_changed`).
-    /// libp2p dinleyicisi `0.0.0.0` üzerinde, süreç boyunca bağlı kalır —
-    /// yeniden `listen_on` gereksiz.
+    /// libp2p dinleyicisi loopback'te, süreç boyunca bağlı kalır — yeniden
+    /// `listen_on` gereksiz.
     pub fn notify_network_changed(&self) {
-        if let Some(tor) = &self.tor {
-            tor.notify_network_changed();
-        }
+        self.tor.notify_network_changed();
     }
 
     /// Döngü dışından okunacak anlık görüntüyü bağlar (Android arayüzü).
@@ -510,6 +597,11 @@ impl ServerCore {
     }
 
     fn publish_shared(&self) {
+        // For `create_invite` / `join_code`, which see only the store.
+        let addrs = self.invite_addrs().join("\n");
+        if self.store.meta_get(ADVERTISED_ADDRS_KEY).as_deref() != Some(addrs.as_bytes()) {
+            let _ = self.store.meta_set(ADVERTISED_ADDRS_KEY, addrs.as_bytes());
+        }
         let Some(shared) = &self.shared else { return };
         if let Ok(mut a) = shared.addrs.lock() {
             *a = self.advertised_addrs();
@@ -526,123 +618,26 @@ impl ServerCore {
         *self.swarm.local_peer_id()
     }
 
-    pub fn onion_host(&self) -> Option<String> {
-        self.tor.as_ref().and_then(|t| t.onion_host())
-    }
-
     pub fn tor_status(&self) -> String {
-        if let Some(err) = &self.tor_error {
-            // Arayüz bunu görünce "çalışıyor" değil "ulaşılamaz" göstermeli.
-            return format!("error: {err}");
-        }
-        self.tor
-            .as_ref()
-            .map(|t| t.status().as_str().to_string())
-            .unwrap_or_else(|| "disabled".to_string())
+        self.tor.status().as_str().to_string()
     }
 
-    /// Davet kodları için ilan edilecek adresler — onion varsa ÖNCE o
-    /// (CGNAT/ev bağlantısı arkasında çalışan tek adres odur).
+    /// İlan edilen adres: yalnızca onion (dinleyici loopback'te, bkz. `new`).
     pub fn advertised_addrs(&self) -> Vec<String> {
-        let peer = self.local_peer_id();
-        let mut out = Vec::new();
-        if let Some(host) = self.onion_host() {
-            out.push(format!("/dns/{}/tcp/{}/p2p/{}", host, TOR_LIBP2P_PORT, peer));
-        }
-        for addr in self.swarm.listeners() {
-            let s = addr.to_string();
-            if s.contains("127.0.0.1") || s.contains("/ip6/::1") {
-                continue;
-            }
-            out.push(format!("{}/p2p/{}", s, peer));
-        }
-        out
+        self.tor
+            .onion_host()
+            .map(|host| format!("/dns/{}/tcp/{}/p2p/{}", host, TOR_LIBP2P_PORT, self.local_peer_id()))
+            .into_iter()
+            .collect()
     }
 
-    /// Davet koduna GİRECEK adresler — `advertised_addrs`'ten farkı: ÖZEL
-    /// ağ adresleri elenir.
-    ///
-    /// Neden: davet kodu, başka bir ağdaki bir kişiye gönderilir. Oradan
-    /// `192.168.x.x` gibi bir adres zaten ULAŞILAMAZ; koda girmesinin tek
-    /// etkisi, sunucunun iç ağ yapısını kodu gören herkese söylemek olur.
-    /// Aynı yerel ağdaki iki kişinin yazışması gerçekçi bir senaryo değil,
-    /// dolayısıyla bunun bir faydası da yok.
-    ///
-    /// Geriye kalan — onion ve varsa GENEL IP — gerçekçi kurulumun ta
-    /// kendisi: halka açık bir VPS'te çalışan bir sunucuya istemci doğrudan
-    /// bağlanır (Tor'a hiç girmeden), erişilemiyorsa onion'a düşer.
+    /// Davet koduna GİRECEK adresler — özel ağ adresleri elenir: başka bir
+    /// ağdaki alıcı için ulaşılamazlar ve sunucunun iç ağ yapısını sızdırırlar.
     pub fn invite_addrs(&self) -> Vec<String> {
         self.advertised_addrs()
             .into_iter()
             .filter(|a| !is_private_multiaddr(a))
             .collect()
-    }
-
-    pub fn store(&self) -> &Store {
-        &self.store
-    }
-
-    /// Yeni bir davet üretir ve tam davet kodunu döner. `uses <= 0` =
-    /// SINIRSIZ (bkz. `Store::create_invite`).
-    pub fn create_invite(&self, label: &str, uses: i64, ttl_ms: i64) -> Result<String, String> {
-        let mut token = [0u8; 20];
-        rand::rngs::OsRng.fill_bytes(&mut token);
-        // Jeton HASH'lenmiş saklanır: sunucu diski ele geçse bile henüz
-        // kullanılmamış davetler kullanılamaz.
-        let hash = Sha256::digest(token);
-        let hash = hash.as_slice();
-        let now = now_ms();
-        let expires = if ttl_ms <= 0 { 0 } else { now + ttl_ms };
-        self.store.create_invite(hash, label, uses, expires, now)?;
-
-        let token_str = hex::encode(token);
-        // Ulaşılabilir BÜTÜN adresler koda girer (onion + varsa genel IP);
-        // özel ağ adresleri elenir (bkz. `invite_addrs`). İstemci hepsini
-        // aynı anda dial eder, libp2p ilk kuranı kullanır — yani halka açık
-        // bir VPS'e doğrudan bağlanılır, olmazsa onion'a düşülür.
-        let addrs = self.invite_addrs();
-        if addrs.is_empty() {
-            return Err("Sunucunun henüz bir dinleme adresi yok (birkaç saniye sonra tekrar deneyin)".to_string());
-        }
-        Ok(server_proto::format_server_invite(&addrs, &token_str))
-    }
-
-    /// Sunucunun KALICI, herkese açık katılım kodu — bir kez yayımlanır,
-    /// sınırsız kişi kendi başına katılır.
-    ///
-    /// Kullanıcı isteği: "tek QR/link ile birden çok kişi katılabilmeli,
-    /// server ile etkileşime girmeye gerek kalmadan". `create_invite` bunu
-    /// tek başına çözmüyordu, çünkü kod her çağrıda DEĞİŞİYOR ve jeton
-    /// hash'li saklandığı için bir daha GÖSTERİLEMİYORDU: operatör kodu
-    /// kaybettiği anda tek çıkışı yeni bir kod üretip herkese yeniden
-    /// dağıtmaktı.
-    ///
-    /// Bu yüzden herkese açık jeton `meta` içinde AÇIK saklanır. Hash'leme
-    /// tek kullanımlık davetlerde diski ele geçiren saldırganın HENÜZ
-    /// KULLANILMAMIŞ bir daveti kullanmasını engellemek içindi; kalıcı
-    /// katılım kodu tanımı gereği ZATEN herkese açık (afişte, mesajda,
-    /// web sayfasında), yani hash'lemenin koruyacağı bir sır yok — buna
-    /// karşılık geri okunabilir olması özelliğin TEMELİ.
-    pub fn join_code(&self) -> Result<String, String> {
-        let addrs = self.invite_addrs();
-        if addrs.is_empty() {
-            return Err("Sunucunun henüz bir dinleme adresi yok (birkaç saniye sonra tekrar deneyin)".to_string());
-        }
-        let token = public_join_token(&self.store, false)?;
-        Ok(server_proto::format_server_invite(&addrs, &token))
-    }
-
-    /// Herkese açık kodu değiştirir: eskisi ANINDA geçersiz olur (kayıtlı
-    /// cihazlar etkilenmez — onların kaydı jetondan bağımsız, bkz.
-    /// `handle_rebind`). Operatörün kod sızdığında/istenmeyen katılım
-    /// olduğunda tek hamlede kapıyı kapatma yolu.
-    pub fn rotate_join_code(&self) -> Result<String, String> {
-        let addrs = self.invite_addrs();
-        if addrs.is_empty() {
-            return Err("Sunucunun henüz bir dinleme adresi yok (birkaç saniye sonra tekrar deneyin)".to_string());
-        }
-        let token = public_join_token(&self.store, true)?;
-        Ok(server_proto::format_server_invite(&addrs, &token))
     }
 
     // -----------------------------------------------------------------
@@ -679,7 +674,10 @@ impl ServerCore {
         // bkz. modül notu / yukarıdaki yorum — `self`i ödünç alan bir arm
         // future'ı satır içinde yazılamaz; alıcıyı bir yerel değişkene alıyoruz.
         let mut net_changed_rx = self.net_changed_rx.take();
-        let (relay_tx, mut relay_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (relay_tx, mut relay_rx) = tokio::sync::mpsc::channel(LINK_QUEUE);
+        let Some(mut hash_rx) = self.hash_rx.take() else {
+            return Err("run_until çağrıldı: döngü zaten çalıştırılmış".to_string());
+        };
         if let Some(incoming) = self.relay_incoming.take() {
             tokio::spawn(accept_relay_streams(incoming, relay_tx));
         }
@@ -690,17 +688,21 @@ impl ServerCore {
                 event = self.swarm.select_next_some() => self.handle_swarm_event(event),
                 _ = sweep.tick() => self.maybe_sweep(),
                 Some(ev) = relay_rx.recv() => self.handle_relay(ev),
+                Some(done) = hash_rx.recv() => self.finish_blob_hash(done),
                 // bkz. `notify_network_changed` — kanal yoksa/kapandıysa bu
                 // dal sonsuza kadar bekler (asla tetiklenmez).
-                Some(()) = async {
+                Some(signal) = async {
                     match &mut net_changed_rx {
                         Some(rx) => rx.recv().await,
-                        None => std::future::pending::<Option<()>>().await,
+                        None => std::future::pending::<Option<CoreSignal>>().await,
                     }
-                } => {
-                    info!("Ağ değişikliği bildirildi — Tor tazeleniyor");
-                    self.notify_network_changed();
-                }
+                } => match signal {
+                    CoreSignal::NetworkChanged => {
+                        info!("Ağ değişikliği bildirildi — Tor tazeleniyor");
+                        self.notify_network_changed();
+                    }
+                    CoreSignal::EnrollmentsChanged => self.drop_revoked_peers(),
+                },
                 _ = &mut shutdown => {
                     info!("Durdurma istendi, kapatılıyor.");
                     return Ok(());
@@ -709,26 +711,6 @@ impl ServerCore {
                     info!("Kapatılıyor.");
                     return Ok(());
                 }
-            }
-        }
-    }
-
-    /// Swarm'ı sınırlı bir süre boyunca döndürür, sonra döner.
-    ///
-    /// `run` sonsuz döngüsünün yanında buna ihtiyaç var çünkü yönetim
-    /// komutları (`invite new`, `address`) bir dinleme adresi GÖRÜNENE kadar
-    /// beklemek zorunda: adres olmadan üretilen bir davet kodu kimseye
-    /// yaramaz. Tor açıkken onion adresi arti'nin bootstrap'ını bekler.
-    pub async fn pump_for(&mut self, duration: Duration) {
-        let deadline = tokio::time::Instant::now() + duration;
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return;
-            }
-            match tokio::time::timeout(remaining, self.swarm.select_next_some()).await {
-                Ok(event) => self.handle_swarm_event(event),
-                Err(_) => return,
             }
         }
     }
@@ -744,15 +726,20 @@ impl ServerCore {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 self.conns.entry(peer_id).or_insert(ConnState {
                     challenge: None,
-                    window_start: now_ms() as u64,
+                    window_start: mono_ms(),
                     requests_in_window: 0,
+                    chunks_in_window: 0,
                 });
             }
             SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
                 if num_established == 0 {
-                    self.conns.remove(&peer_id);
+                    // The rate window and relay budget outlive the
+                    // connection; `maybe_sweep` drops them once expired.
+                    if let Some(c) = self.conns.get_mut(&peer_id) {
+                        c.challenge = None;
+                    }
                     self.live_interest.remove(&peer_id);
-                    self.relay_budget.remove(&peer_id);
+                    self.notified.remove(&peer_id);
                 }
             }
             SwarmEvent::Behaviour(ServerBehaviourEvent::ServerRpc(
@@ -760,7 +747,12 @@ impl ServerCore {
             )) => {
                 if let request_response::Message::Request { request, channel, .. } = message {
                     let response = self.handle_request(peer, request);
-                    let _ = self.swarm.behaviour_mut().server_rpc.send_response(channel, response);
+                    match self.hash_job.take() {
+                        Some((blob_id, enc_sha256)) => self.start_blob_hash(blob_id, enc_sha256, channel),
+                        None => {
+                            let _ = self.swarm.behaviour_mut().server_rpc.send_response(channel, response);
+                        }
+                    }
                 }
             }
             SwarmEvent::Behaviour(ServerBehaviourEvent::FileChunks(
@@ -779,7 +771,7 @@ impl ServerCore {
     // -----------------------------------------------------------------
 
     fn handle_request(&mut self, peer: PeerId, req: ServerRequest) -> ServerResponse {
-        if !self.check_rate(peer) {
+        if !self.check_rate(peer, false) {
             self.stats.rejected += 1;
             return ServerResponse::Err(ServerErrorCode::RateLimited);
         }
@@ -859,25 +851,24 @@ impl ServerCore {
             return ServerResponse::Err(ServerErrorCode::Unsupported);
         }
         let now = now_ms();
-        if (now - ts_ms as i64).abs() > server_proto::ENROLL_MAX_SKEW_MS as i64 {
+        if (now as u64).abs_diff(ts_ms) > server_proto::ENROLL_MAX_SKEW_MS {
             return ServerResponse::Err(ServerErrorCode::Stale);
         }
-        // Challenge tek kullanımlık: aksi halde bir gözlemci imzayı yakalayıp
-        // başka bir bağlantıda tekrar oynatabilirdi.
-        let expected = self.conns.get(&peer).and_then(|c| c.challenge.clone());
-        let Some(challenge) = expected else {
+        // Cheap gate before the hybrid verify (ML-DSA-87 is the expensive
+        // step, and PeerIds are free): no usable invite, no signature check.
+        let hash = Sha256::digest(&invite_token);
+        if matches!(self.store.invite_uses_left(hash.as_slice()), None | Some(0)) {
+            return ServerResponse::Err(ServerErrorCode::BadInvite);
+        }
+        // Challenge tek kullanımlık (`take`): aksi halde bir gözlemci imzayı
+        // yakalayıp tekrar oynatabilirdi. Rastgele ve bağlantıya özel, yani
+        // bellekten silmek yeter.
+        let Some(challenge) = self.conns.get_mut(&peer).and_then(|c| c.challenge.take()) else {
             return ServerResponse::Err(ServerErrorCode::BadSignature);
         };
         // İstemcinin imzaladığı challenge, BİZİM verdiğimiz olmalı.
         if client_challenge != challenge {
             return ServerResponse::Err(ServerErrorCode::BadSignature);
-        }
-        match self.store.consume_challenge(&challenge, now) {
-            Ok(true) => {}
-            _ => return ServerResponse::Err(ServerErrorCode::BadSignature),
-        }
-        if let Some(c) = self.conns.get_mut(&peer) {
-            c.challenge = None;
         }
 
         let signing_input = server_proto::enroll_signing_input(
@@ -905,7 +896,6 @@ impl ServerCore {
             return ServerResponse::Err(ServerErrorCode::Revoked);
         }
 
-        let hash = Sha256::digest(&invite_token);
         // Herkese açık (sınırsız) katılım kodunun Sybil kapısı, jetonun
         // TEK KULLANIMLIK olması değil — o özellik bilerek bırakıldı (bkz.
         // `join_code`). Yerine geçen kapı bu: sınırsız bir kod, son bir
@@ -925,11 +915,6 @@ impl ServerCore {
                 return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
             }
         }
-        match self.store.consume_invite(hash.as_slice(), now) {
-            Ok(true) => {}
-            _ => return ServerResponse::Err(ServerErrorCode::BadInvite),
-        }
-
         // Aynı PeerId yeniden kayıt olursa (`peer_id` UNIQUE, insert
         // `OR REPLACE`) eski kimliği ve kota sayaçlarını devral: yeni bir
         // `enrollment_id` + sıfır sayaç, mevcut mail/arşiv/blob satırlarını
@@ -955,9 +940,14 @@ impl ServerCore {
             bytes_archive: prev.as_ref().map_or(0, |p| p.bytes_archive),
             bytes_blob: prev.as_ref().map_or(0, |p| p.bytes_blob),
         };
-        if let Err(msg) = self.store.insert_enrollment(&e) {
-            error!("Kayıt yazılamadı: {msg}");
-            return ServerResponse::Err(ServerErrorCode::Internal);
+        // One transaction: a failed insert must not cost the invite its use.
+        match self.store.enroll_with_invite(hash.as_slice(), now, &e) {
+            Ok(true) => {}
+            Ok(false) => return ServerResponse::Err(ServerErrorCode::BadInvite),
+            Err(msg) => {
+                error!("Kayıt yazılamadı: {msg}");
+                return ServerResponse::Err(ServerErrorCode::Internal);
+            }
         }
         self.stats.enrollments += 1;
         info!("Yeni kayıt: {}", hex::encode(&enrollment_id));
@@ -973,9 +963,15 @@ impl ServerCore {
         sig_pq: Vec<u8>,
     ) -> ServerResponse {
         let now = now_ms();
-        if (now - ts_ms as i64).abs() > server_proto::ENROLL_MAX_SKEW_MS as i64 {
+        if (now as u64).abs_diff(ts_ms) > server_proto::ENROLL_MAX_SKEW_MS {
             return ServerResponse::Err(ServerErrorCode::Stale);
         }
+        // Same single-use challenge as `Enroll`: without it (and the caller's
+        // PeerId) in the signed bytes, a captured Rebind moved the enrollment
+        // to whoever replayed it within the skew window.
+        let Some(challenge) = self.conns.get_mut(&peer).and_then(|c| c.challenge.take()) else {
+            return ServerResponse::Err(ServerErrorCode::BadSignature);
+        };
         let Some(existing) = self.store.enrollment_by_id(&enrollment_id) else {
             return ServerResponse::Err(ServerErrorCode::NotEnrolled);
         };
@@ -986,7 +982,13 @@ impl ServerCore {
         if self.store.is_key_blocked(&existing.enroll_pk) {
             return ServerResponse::Err(ServerErrorCode::Revoked);
         }
-        let input = server_proto::rebind_signing_input(&enrollment_id, &self.local_peer_id().to_string(), ts_ms);
+        let input = server_proto::rebind_signing_input(
+            &enrollment_id,
+            &self.local_peer_id().to_string(),
+            &peer.to_string(),
+            &challenge,
+            ts_ms,
+        );
         if !verify_hybrid(&existing.enroll_pk, &existing.enroll_pk_pq, &input, &sig, &sig_pq) {
             return ServerResponse::Err(ServerErrorCode::BadSignature);
         }
@@ -1003,6 +1005,13 @@ impl ServerCore {
     /// gerekçe.
     fn authenticate(&self, peer: PeerId) -> Option<Enrollment> {
         self.store.enrollment_by_peer(&peer.to_string())
+    }
+
+    /// `authenticate`, but only an enrollment the operator has not revoked.
+    /// Read from the DB each time: revoke and block arrive through another
+    /// connection (JNI, CLI) while the peer stays connected.
+    fn active(&self, peer: PeerId) -> Option<Enrollment> {
+        self.authenticate(peer).filter(|e| e.state == EnrollmentState::Active)
     }
 
     /// Sunucunun TOPLAM disk tavanı (defter #23) — `incoming` bayt daha
@@ -1024,11 +1033,33 @@ impl ServerCore {
 
     fn handle_authenticated(&mut self, peer: PeerId, e: &Enrollment, req: ServerRequest) -> ServerResponse {
         let now = now_ms();
-        self.store.touch_enrollment(&e.enrollment_id, now);
+        // `last_seen_at` is for the operator, not a write per request.
+        if now - e.last_seen_at > 60_000 {
+            self.store.touch_enrollment(&e.enrollment_id, now);
+        }
         let limits = self.config.limits.clone();
+
+        // Every list costs a query per element inside the event loop.
+        let boxes = limits.max_mailboxes as usize;
+        let too_long = match &req {
+            ServerRequest::Register { add, drop } => add.len().max(drop.len()) > boxes,
+            ServerRequest::Fetch { cursors, .. } => cursors.len() > boxes,
+            ServerRequest::Ack { acks } => acks.len() > boxes,
+            ServerRequest::ArchiveProbe { buckets } | ServerRequest::ArchivePurge { buckets } => buckets.len() > boxes,
+            ServerRequest::Cancel { seqs, .. } => seqs.len() > limits.max_items_per_mailbox as usize,
+            _ => false,
+        };
+        if too_long {
+            return ServerResponse::Err(ServerErrorCode::TooLarge);
+        }
 
         match req {
             ServerRequest::Register { add, drop } => {
+                // Ids are stored: without a bound, megabyte ids filled the
+                // disk outside every quota.
+                if !add.iter().all(|id| is_safe_id(id)) {
+                    return ServerResponse::Err(ServerErrorCode::BadDirection);
+                }
                 if let Err(msg) = self.store.register_mailboxes(&e.enrollment_id, &add, &drop, now, limits.max_mailboxes) {
                     warn!("Register reddedildi: {msg}");
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
@@ -1054,7 +1085,9 @@ impl ServerCore {
                 if !self.store.mailbox_is_registered(&mailbox) {
                     return ServerResponse::Err(ServerErrorCode::UnknownMailbox);
                 }
-                if self.store.quota_exceeded(e, &limits) {
+                // Only this request's own counter: a full blob quota must not
+                // stop the device from messaging.
+                if e.bytes_mail as u64 > limits.max_mail_bytes {
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
                 // bkz. `total_budget_exceeded` — kayıt başına kota TEK
@@ -1081,6 +1114,7 @@ impl ServerCore {
             }
 
             ServerRequest::Fetch { cursors, max_items, max_bytes } => {
+                self.notified.remove(&peer);
                 let (items, more) = self.store.fetch(
                     &e.enrollment_id,
                     &cursors,
@@ -1117,13 +1151,19 @@ impl ServerCore {
             }
 
             ServerRequest::ArchivePut { bucket, records } => {
-                if self.store.quota_exceeded(e, &limits) {
+                if !is_safe_id(&bucket) {
+                    return ServerResponse::Err(ServerErrorCode::BadDirection);
+                }
+                if records.iter().any(|r| r.sealed.len() > MAX_DEPOSIT_BYTES) {
+                    return ServerResponse::Err(ServerErrorCode::TooLarge);
+                }
+                if e.bytes_archive as u64 > limits.max_archive_bytes {
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
                 // bkz. `total_budget_exceeded` — arşiv, postanın aksine
                 // TTL'siz: bir kez yazıldı mı `ArchivePurge` gelene kadar
                 // durur, yani toplam tavana en çok yaklaştıran taraf.
-                let incoming: usize = records.iter().map(|r| r.sealed.len()).sum();
+                let incoming: usize = records.iter().map(|r| r.sealed.len() + r.record_id.len()).sum();
                 if self.total_budget_exceeded(incoming) {
                     warn!("Toplam disk bütçesi doldu, arşiv yazımı reddedildi");
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
@@ -1148,14 +1188,14 @@ impl ServerCore {
                 let (records, more) = self.store.archive_fetch(
                     &bucket,
                     before_ms,
-                    max_items.min(MAX_FETCH_BATCH_ITEMS),
+                    max_items.clamp(1, MAX_FETCH_BATCH_ITEMS),
                     max_bytes.min(MAX_FETCH_BATCH_BYTES),
                 );
                 ServerResponse::ArchiveBatch { records, more }
             }
 
             ServerRequest::ArchivePurge { buckets } => {
-                self.store.archive_purge(&buckets, &e.enrollment_id);
+                self.store.archive_purge(&buckets);
                 ServerResponse::Ok
             }
 
@@ -1164,7 +1204,7 @@ impl ServerCore {
             }
 
             ServerRequest::BlobFinish { blob_id, total_chunks, enc_sha256 } => {
-                self.handle_blob_finish(e, blob_id, total_chunks, enc_sha256, now)
+                self.handle_blob_finish(e, blob_id, total_chunks, enc_sha256)
             }
 
             ServerRequest::BlobDelete { blob_id } => {
@@ -1244,9 +1284,18 @@ impl ServerCore {
             if state.owner != e.enrollment_id {
                 return ServerResponse::Err(ServerErrorCode::BadDirection);
             }
+            // A verified blob is final: another chunk (or a new stride)
+            // would make `serve_chunk` hand out bytes the hash never covered.
+            if state.complete {
+                return ServerResponse::Ok;
+            }
             if chunk_index >= total_chunks.max(state.total_chunks) {
                 return ServerResponse::Err(ServerErrorCode::BadDirection);
             }
+        }
+        // Same reason while `BlobFinish` is hashing the file.
+        if self.blob_hashing.contains_key(&blob_id) {
+            return ServerResponse::Err(ServerErrorCode::RateLimited);
         }
         // Zaten yazılmış bir parçanın tekrarı — idempotent.
         if self.store.blob_has_chunk(&blob_id, chunk_index) {
@@ -1280,6 +1329,8 @@ impl ServerCore {
             return ServerResponse::Err(ServerErrorCode::Internal);
         }
         let _ = self.store.blob_record_chunk(&blob_id, chunk_index, data.len());
+        // An upload in progress is not garbage (see `Store::blobs_to_gc`).
+        self.store.blob_touch(&blob_id, now);
         self.store.add_blob_bytes(&e.enrollment_id, data.len() as i64);
         ServerResponse::Ok
     }
@@ -1290,7 +1341,6 @@ impl ServerCore {
         blob_id: String,
         total_chunks: u32,
         enc_sha256: Vec<u8>,
-        now: i64,
     ) -> ServerResponse {
         if !is_safe_id(&blob_id) {
             return ServerResponse::Err(ServerErrorCode::BadDirection);
@@ -1301,31 +1351,53 @@ impl ServerCore {
         if state.owner != e.enrollment_id {
             return ServerResponse::Err(ServerErrorCode::BadDirection);
         }
+        if state.complete {
+            return ServerResponse::Ok;
+        }
         if state.received_chunks < total_chunks {
             return ServerResponse::Err(ServerErrorCode::Internal);
         }
-        // ŞİFRELİ baytların hash'i — sunucu içeriği çözemez ama kırpılmış
-        // bir yüklemeyi asla servis etmemeyi garanti edebilir.
-        // Defter #07: burası `std::fs::read` ile dosyanın TAMAMINI belleğe
-        // alıyordu — varsayılan `max_blob_bytes` 4 GiB, yani sunucu bir
-        // telefonda çalışırken herhangi bir kayıtlı istemcinin
-        // tetikleyebildiği doğrudan OOM. İstemci tarafındaki karşılığı
-        // (`server_client::sha256_file`) zaten 64 KiB'lık tamponla akış
-        // hâlinde hash'liyor; aynı desen.
-        match hash_file_streaming(&self.blob_path(&blob_id)) {
-            Some((actual, len)) => {
-                if actual.as_slice() != enc_sha256.as_slice() {
-                    warn!("Blob hash uyuşmuyor, reddedildi: {blob_id}");
-                    let _ = std::fs::remove_file(self.blob_path(&blob_id));
-                    self.store.blob_forget(&blob_id);
-                    self.store.add_blob_bytes(&e.enrollment_id, -(len as i64));
-                    return ServerResponse::Err(ServerErrorCode::Internal);
-                }
-            }
-            None => return ServerResponse::Err(ServerErrorCode::Internal),
-        }
-        let _ = self.store.blob_finish(&blob_id, &enc_sha256, now);
+        // Placeholder: the caller sees `hash_job` and answers through
+        // `start_blob_hash` / `finish_blob_hash` instead.
+        self.hash_job = Some((blob_id, enc_sha256));
         ServerResponse::Ok
+    }
+
+    /// Hashes the ŞİFRELİ bytes on the blocking pool — the server cannot read
+    /// the content but never serves a truncated upload. Up to `max_blob_bytes`
+    /// (GiBs): inside the event loop it stalled every client for the duration.
+    fn start_blob_hash(&mut self, blob_id: String, enc_sha256: Vec<u8>, channel: ResponseChannel<ServerResponse>) {
+        let waiters = self.blob_hashing.entry(blob_id.clone()).or_default();
+        waiters.push(channel);
+        // A repeated `BlobFinish` waits for the running hash, it starts none.
+        if waiters.len() > 1 {
+            return;
+        }
+        let path = self.blob_path(&blob_id);
+        let tx = self.hash_tx.clone();
+        tokio::spawn(async move {
+            let hashed = tokio::task::spawn_blocking(move || hash_file_streaming(&path)).await.ok().flatten();
+            let _ = tx.send((blob_id, enc_sha256, hashed));
+        });
+    }
+
+    fn finish_blob_hash(&mut self, (blob_id, enc_sha256, hashed): HashDone) {
+        let response = match hashed {
+            Some(actual) if actual == enc_sha256 => {
+                let _ = self.store.blob_finish(&blob_id, &enc_sha256, now_ms());
+                ServerResponse::Ok
+            }
+            Some(_) => {
+                warn!("Blob hash uyuşmuyor, reddedildi: {blob_id}");
+                let _ = std::fs::remove_file(self.blob_path(&blob_id));
+                self.store.blob_forget(&blob_id);
+                ServerResponse::Err(ServerErrorCode::Internal)
+            }
+            None => ServerResponse::Err(ServerErrorCode::Internal),
+        };
+        for channel in self.blob_hashing.remove(&blob_id).unwrap_or_default() {
+            let _ = self.swarm.behaviour_mut().server_rpc.send_response(channel, response.clone());
+        }
     }
 
     /// Dosya parçası servisi.
@@ -1365,12 +1437,11 @@ impl ServerCore {
         // indirmenin binlerce parça isteğiyle paylaştırmak, meşru
         // indirmeleri sessizce böler. Yük koruması kayıt kapısı + kota
         // tarafında.
-        let enrolled = self
-            .authenticate(peer)
-            .map(|e| e.state != EnrollmentState::Revoked)
-            .unwrap_or(false);
-        if !enrolled {
-            warn!("Kayıtsız eşten dosya parçası isteği reddedildi: {peer}");
+        // Far above any real download (Tor carries about one chunk a second),
+        // so only a request loop reaches it. `NotFound` is the only refusal
+        // the protocol has; the client then tries another source.
+        if self.active(peer).is_none() || !self.check_rate(peer, true) {
+            warn!("Dosya parçası isteği reddedildi (kayıtsız eş ya da hız sınırı): {peer}");
             self.stats.rejected += 1;
             let _ = self
                 .swarm
@@ -1384,18 +1455,21 @@ impl ServerCore {
         } else {
             match self.store.blob_state(&req.file_id) {
                 Some(state) if state.complete => {
-                    self.store.blob_touch(&req.file_id, now_ms());
+                    // Once per download keeps the blob alive; once per chunk
+                    // was a DB write for each of thousands of chunks.
+                    if req.chunk_index == 0 {
+                        self.store.blob_touch(&req.file_id, now_ms());
+                    }
                     // Defter #06: burası `read_chunk_from_disk` (sabit 256
                     // KiB adım) çağırıyordu, oysa `handle_blob_put` adımı
                     // İSTEMCİDEN alıp (`BlobPut.chunk_size`) ona göre
                     // yazıyor. İkisi ayrıştığı anda her blob yanlış
                     // ofsetlerden okunurdu — daha önce ölçümü bozan tam o
                     // hata. Adım artık blob'la birlikte saklanıyor.
-                    let stride = self.store.blob_chunk_size(&req.file_id).unwrap_or(0) as usize;
                     match attachments::read_chunk_from_disk_with(
                         &self.blob_path(&req.file_id),
                         req.chunk_index,
-                        stride,
+                        state.chunk_size as usize,
                     ) {
                         Ok(Some(data)) => {
                             self.stats.blob_chunks_served += 1;
@@ -1431,10 +1505,17 @@ impl ServerCore {
             .map(|(peer, _)| *peer)
             .collect();
         for peer in targets {
+            // Revoked or blocked while connected: nothing more is pushed.
+            let Some(reader) = self.active(peer) else { continue };
             // See `ServerRequest::Push`: inline only when nothing older is
             // pending for this reader, so the client cannot skip an item.
             let inline = item.sealed.len() <= PUSH_INLINE_MAX
-                && self.authenticate(peer).map_or(false, |e| self.store.unacked_for(mailbox, &e.enrollment_id) == 1);
+                && self.store.unacked_for(mailbox, &reader.enrollment_id) == 1;
+            // One `Notify` until the peer fetches: a deposit flood otherwise
+            // woke the reader's radio once per item.
+            if !inline && !self.notified.insert(peer) {
+                continue;
+            }
             let req = if inline { ServerRequest::Push { item: item.clone() } } else { ServerRequest::Notify };
             self.swarm.behaviour_mut().server_rpc.send_request(&peer, req);
         }
@@ -1445,8 +1526,8 @@ impl ServerCore {
     /// non-revoked clients get a link; everyone else's frames are ignored.
     fn handle_relay(&mut self, ev: RelayEvent) {
         match ev {
-            RelayEvent::Open { peer, id, tx } => match self.authenticate(peer) {
-                Some(e) if e.state != EnrollmentState::Revoked => {
+            RelayEvent::Open { peer, id, tx } => match self.active(peer) {
+                Some(_) => {
                     info!("Arama rölesi açıldı: {peer}");
                     self.relay_links.insert(peer, (id, tx));
                 }
@@ -1463,7 +1544,7 @@ impl ServerCore {
                 if !self.relay_links.contains_key(&peer) {
                     return;
                 }
-                let now = now_ms() as u64;
+                let now = mono_ms();
                 let budget = self.relay_budget.entry(peer).or_insert((now, 0));
                 if now.saturating_sub(budget.0) > RELAY_WINDOW_MS {
                     *budget = (now, 0);
@@ -1488,17 +1569,25 @@ impl ServerCore {
         }
     }
 
-    fn check_rate(&mut self, peer: PeerId) -> bool {
+    /// `chunk`: a file-chunk request, counted against `CHUNKS_PER_MINUTE`
+    /// instead of the RPC limit.
+    fn check_rate(&mut self, peer: PeerId, chunk: bool) -> bool {
         let limit = self.config.limits.requests_per_minute;
-        let now = now_ms() as u64;
+        let now = mono_ms();
         let entry = self.conns.entry(peer).or_insert(ConnState {
             challenge: None,
             window_start: now,
             requests_in_window: 0,
+            chunks_in_window: 0,
         });
         if now.saturating_sub(entry.window_start) > RATE_WINDOW_MS {
             entry.window_start = now;
             entry.requests_in_window = 0;
+            entry.chunks_in_window = 0;
+        }
+        if chunk {
+            entry.chunks_in_window += 1;
+            return entry.chunks_in_window <= CHUNKS_PER_MINUTE;
         }
         entry.requests_in_window += 1;
         entry.requests_in_window <= limit
@@ -1516,29 +1605,69 @@ impl ServerCore {
         &self.config.data_dir
     }
 
+    /// `true` while the wall clock sits more than `CLOCK_JUMP_MS` away from
+    /// where the monotonic clock says it should be. After
+    /// `CLOCK_JUMP_HOLD_MS` the new time is accepted as the real one.
+    fn clock_jumped(&mut self, now: i64, mono: u64) -> bool {
+        let (wall0, mono0) = *self.clock_anchor.get_or_insert((now, mono));
+        if (now - (wall0 + (mono - mono0) as i64)).abs() <= CLOCK_JUMP_MS {
+            self.clock_off_since = None;
+            return false;
+        }
+        if mono - *self.clock_off_since.get_or_insert(mono) < CLOCK_JUMP_HOLD_MS {
+            return true;
+        }
+        self.clock_anchor = Some((now, mono));
+        self.clock_off_since = None;
+        false
+    }
+
+    /// A device revoked or blocked while connected loses its pushes and its
+    /// call-relay link, not only its RPCs. Runs at once on
+    /// `CoreSignal::EnrollmentsChanged` (Android) and on every 5 s tick, which
+    /// is what covers a revoke from the CLI, a separate process.
+    fn drop_revoked_peers(&mut self) {
+        let gone: Vec<PeerId> = self
+            .live_interest
+            .keys()
+            .chain(self.relay_links.keys())
+            .copied()
+            .filter(|p| self.active(*p).is_none())
+            .collect();
+        for peer in gone {
+            self.live_interest.remove(&peer);
+            self.relay_links.remove(&peer);
+        }
+    }
+
     fn maybe_sweep(&mut self) {
-        let now = now_ms();
-        if (now as u64).saturating_sub(self.last_sweep) < SWEEP_INTERVAL_MS {
+        self.drop_revoked_peers();
+        let mono = mono_ms();
+        if self.last_sweep.map_or(false, |t| mono - t < SWEEP_INTERVAL_MS) {
             return;
         }
-        self.last_sweep = now as u64;
+        self.last_sweep = Some(mono);
         self.publish_shared();
 
-        let expired = self.store.sweep_expired_mail(now);
-        if expired > 0 {
-            info!("Süresi dolan {expired} teslim öğesi silindi");
+        let swarm = &self.swarm;
+        self.conns.retain(|p, c| swarm.is_connected(p) || mono - c.window_start <= RATE_WINDOW_MS);
+        self.relay_budget.retain(|_, b| mono - b.0 <= RELAY_WINDOW_MS);
+
+        let now = now_ms();
+        if self.clock_jumped(now, mono) {
+            warn!("Sistem saati sıçradı — TTL süpürmesi bekletiliyor");
+            return;
+        }
+        let removed = self.store.sweep_expired_mail(now);
+        if removed > 0 {
+            info!("Süpürmede {removed} teslim öğesi silindi");
             self.store.recount_mail_bytes();
         }
         for blob_id in self.store.blobs_to_gc(now, self.config.limits.blob_ttl_ms as i64) {
-            let path = self.blob_path(&blob_id);
-            if let Ok(meta) = std::fs::metadata(&path) {
-                if let Some(state) = self.store.blob_state(&blob_id) {
-                    self.store.add_blob_bytes(&state.owner, -(meta.len() as i64));
-                }
-            }
-            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(self.blob_path(&blob_id));
             self.store.blob_forget(&blob_id);
         }
+        self.store.incremental_vacuum();
     }
 }
 
@@ -1548,23 +1677,20 @@ impl ServerCore {
 
 /// libp2p kimliği kalıcı: `PeerId` yeniden başlatmalar arasında DEĞİŞMEMELİ,
 /// yoksa dağıtılmış her davet kodu geçersiz olurdu.
-/// Bir dosyayı belleğe TAMAMEN almadan SHA-256'lar — dönüş (özet, bayt sayısı).
-/// bkz. defter #07.
-fn hash_file_streaming(path: &std::path::Path) -> Option<(Vec<u8>, u64)> {
+/// Bir dosyayı belleğe TAMAMEN almadan SHA-256'lar. bkz. defter #07.
+fn hash_file_streaming(path: &std::path::Path) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut file = std::fs::File::open(path).ok()?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
-    let mut total: u64 = 0;
     loop {
         let n = file.read(&mut buf).ok()?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
-        total += n as u64;
     }
-    Some((hasher.finalize().to_vec(), total))
+    Some(hasher.finalize().to_vec())
 }
 
 fn load_or_generate_keypair(store: &Store) -> Result<libp2p::identity::Keypair, String> {
@@ -1623,10 +1749,14 @@ pub(crate) fn is_private_multiaddr(addr: &str) -> bool {
 ///
 /// `blob_id` ve `file_id` istemciden geliyor. Doğrulanmadan bir yola
 /// gömülseydi `../../` ile veri dizini dışına yazma/okuma mümkün olurdu.
+///
+/// No upper case: on a case-insensitive blob volume (FAT/exFAT SD card) `AB12`
+/// and `ab12` are one file but two DB rows, so a second uploader overwrote
+/// the first one's blob. Client ids are lower-case hex and UUIDs.
 fn is_safe_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
 fn sanitize_id(id: &str) -> String {
@@ -1667,6 +1797,7 @@ mod tests {
         assert!(!is_safe_id(".."));
         assert!(!is_safe_id(""));
         assert!(!is_safe_id(&"x".repeat(129)));
+        assert!(!is_safe_id("BL_ABC123"), "case-insensitive volumes: one file, two rows");
     }
 
     #[test]

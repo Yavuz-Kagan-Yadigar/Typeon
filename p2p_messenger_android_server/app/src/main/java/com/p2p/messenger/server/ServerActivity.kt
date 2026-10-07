@@ -40,11 +40,19 @@ class ServerActivity : AppCompatActivity() {
     private lateinit var devicesContainer: LinearLayout
     private lateinit var qrImage: ImageView
     private lateinit var inviteCodeText: TextView
+    @Volatile
     private var lastInvite: String? = null
+
+    /** JNI calls hit SQLite and the filesystem: never on the main thread. */
+    private val io = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private var refreshing = false
+    private var tick = 0
+    @Volatile
+    private var lastDisk = 0L
 
     /**
      * Son çizilen cihaz listesinin ham JSON'u ve son yazılan durum/istatistik
-     * metinleri. Yenileme turu saniyede bir dönüyor; DEĞİŞMEDİĞİ hâlde
+     * metinleri. Yenileme turu 2 saniyede bir dönüyor; DEĞİŞMEDİĞİ hâlde
      * satırları söküp yeniden kurmak ScrollView'ın odağı kaybedip listenin
      * başına zıplamasına yol açıyordu (ekran kendiliğinden yukarı kayıyor).
      */
@@ -62,7 +70,18 @@ class ServerActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // The join code is a bearer token for unlimited enrollments: keep the
+        // QR out of the recents thumbnail and screen recordings. Debuggable
+        // builds stay capturable (adb screenshots in device tests).
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) {
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }
         setContentView(R.layout.activity_server)
+        // Android 13+: without this the service notification, the only place
+        // a start error is shown after a boot, is suppressed.
+        if (Build.VERSION.SDK_INT >= 33) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 0)
+        }
 
         statusText = findViewById(R.id.status_text)
         addressText = findViewById(R.id.address_text)
@@ -77,6 +96,9 @@ class ServerActivity : AppCompatActivity() {
             ServerService.setEnabled(this, checked)
             if (checked) {
                 startServerService()
+                // Without the exemption a background restart of the service
+                // is refused on Android 12+ (see ServerService.onStartCommand).
+                requestIgnoreBatteryOptimizations(quiet = true)
             } else {
                 // Defter #11: artık gerçekten duruyor — `ServerService.onDestroy`
                 // `ServerLib.stopServer()` çağırıyor, o da Rust döngüsünü
@@ -118,6 +140,29 @@ class ServerActivity : AppCompatActivity() {
         handler.removeCallbacks(refreshRunnable)
     }
 
+    override fun onDestroy() {
+        // The delayed restart of `restartServerService` must not fire into a
+        // destroyed activity.
+        handler.removeCallbacksAndMessages(null)
+        io.shutdown()
+        super.onDestroy()
+    }
+
+    /**
+     * Runs [work] off the main thread and hands the result to [done] on it.
+     * `Throwable`: a library that failed to load is an Error, not an Exception.
+     */
+    private fun <T> bg(work: () -> T, onError: (Throwable) -> T, done: (T) -> Unit) {
+        try {
+            io.execute {
+                val result = try { work() } catch (e: Throwable) { onError(e) }
+                runOnUiThread { if (!isDestroyed) done(result) }
+            }
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // Activity destroyed.
+        }
+    }
+
     /**
      * Sunucuyu durdurup yeniden başlatır — yapılandırma değişiklikleri
      * (node modu, blob dizini, disk bütçesi) yalnızca `startServer`
@@ -129,24 +174,44 @@ class ServerActivity : AppCompatActivity() {
     }
 
     private fun startServerService() {
-        val intent = Intent(this, ServerService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
+        try {
+            startForegroundService(Intent(this, ServerService::class.java))
+        } catch (e: Exception) {
+            // Android 12+ refuses this while the app is in the background
+            // (the end of a long storage move, the delayed restart).
+            Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
+    /** One poll: status, device list and (every fifth time) disk usage. */
     private fun refreshStatus() {
-        val json = try {
-            JSONObject(ServerLib.serverStatus())
-        } catch (e: Exception) {
-            JSONObject()
+        if (refreshing) return
+        refreshing = true
+        val withDisk = tick++ % 5 == 0
+        bg({
+            val status = JSONObject(ServerLib.serverStatus())
+            val running = status.optBoolean("running")
+            // Stats every file in the data and blob dirs: not every 2 s.
+            if (running && withDisk) lastDisk = ServerLib.diskUsage().toLongOrNull() ?: 0L
+            status to (if (running) ServerLib.listDevices() else "[]")
+        }, { JSONObject() to "[]" }) { (status, devices) ->
+            refreshing = false
+            render(status, devices)
         }
+    }
+
+    private fun render(json: JSONObject, devices: String) {
         if (!json.optBoolean("running")) {
-            lastStatus = setTextIfChanged(statusText, getString(R.string.state_stopped), lastStatus)
+            // The native side reports running only once init has finished
+            // (20+ s): "Stopped" there invited a second toggle.
+            val state = when {
+                !ServerService.isEnabled(this) -> getString(R.string.state_stopped)
+                else -> ServerService.lastError ?: getString(R.string.notif_starting)
+            }
+            lastStatus = setTextIfChanged(statusText, state, lastStatus)
             lastAddresses = setTextIfChanged(addressText, "", lastAddresses)
             lastStats = setTextIfChanged(statsText, "", lastStats)
+            renderDevices("[]")
             return
         }
 
@@ -165,12 +230,10 @@ class ServerActivity : AppCompatActivity() {
         val addressesChanged = addressLabel != lastAddresses
         lastAddresses = setTextIfChanged(addressText, addressLabel, lastAddresses)
 
-        // Kod, adres hazır olur olmaz kendiliğinden görünür — operatörün
-        // bir düğmeye basması gerekmez. Yalnızca henüz gösterilmediyse
-        // sorulur: kod KALICI, saniyede bir yeniden okumanın (JNI + iki
-        // SQLite sorgusu) hiçbir karşılığı yok.
-        // Kod adresleri içeriyor: adres değişince (Wi-Fi IP'si, onion hazır
-        // olunca) eski QR yanlış adrese götürür — yeniden oku.
+        // Kod, adres hazır olur olmaz kendiliğinden görünür. Yalnızca henüz
+        // gösterilmediyse ya da adres değiştiyse okunur (kod adresleri
+        // içeriyor: eski QR yanlış adrese götürür). `lastInvite` is cleared
+        // when the read fails, so the next poll tries again.
         if (addrs.length() > 0 && (lastInvite == null || addressesChanged)) showJoinCode()
 
         lastStats = setTextIfChanged(
@@ -181,19 +244,19 @@ class ServerActivity : AppCompatActivity() {
                 json.optLong("deposits"),
                 json.optLong("fetches"),
                 json.optLong("chunks_served"),
-                formatBytes(diskUsage())
+                formatBytes(lastDisk)
             ),
             lastStats
         )
 
-        refreshDevices()
+        renderDevices(devices)
     }
 
     /**
      * Metni yalnızca gerçekten değiştiyse yazar.
      *
      * `TextView.setText` aynı metinle bile yeni bir ölçüm/yerleşim turu
-     * tetikliyor; saniyede bir tüm ekranı yeniden yerleştirmek kaydırma
+     * tetikliyor; her yoklamada tüm ekranı yeniden yerleştirmek kaydırma
      * konumunu oynatıyordu. Karşılaştırmayı `TextView.getText` yerine ayrı
      * bir alanda tutuyoruz: seçilebilir metinlerde (`textIsSelectable`)
      * getText, span'lar yüzünden yazdığımız String'e eşit çıkmayabiliyor.
@@ -203,12 +266,6 @@ class ServerActivity : AppCompatActivity() {
         return value
     }
 
-    private fun diskUsage(): Long = try {
-        ServerLib.diskUsage().toLong()
-    } catch (e: Exception) {
-        0L
-    }
-
     private fun formatBytes(bytes: Long): String = when {
         bytes >= 1_073_741_824 -> String.format("%.1f GB", bytes / 1_073_741_824.0)
         bytes >= 1_048_576 -> String.format("%.1f MB", bytes / 1_048_576.0)
@@ -216,12 +273,7 @@ class ServerActivity : AppCompatActivity() {
         else -> "$bytes B"
     }
 
-    private fun refreshDevices() {
-        val raw = try {
-            ServerLib.listDevices()
-        } catch (e: Exception) {
-            "[]"
-        }
+    private fun renderDevices(raw: String) {
         // Liste aynıysa hiçbir şeye dokunma: `removeAllViews` + yeniden ekleme,
         // o an odaklı olan satır düğmesini yok ediyor ve ScrollView odağı
         // yukarıdaki ilk odaklanabilir view'a taşıyarak ekranı kaydırıyordu.
@@ -271,22 +323,22 @@ class ServerActivity : AppCompatActivity() {
         }
     }
 
+    /** Runs one device action off the main thread, then redraws the list. */
+    private fun deviceAction(call: () -> String) {
+        bg(call, { "Error: ${it.message}" }) { res ->
+            if (res.startsWith("Error:")) {
+                Toast.makeText(this, res, Toast.LENGTH_LONG).show()
+            }
+            lastDevicesJson = null
+            refreshStatus()
+        }
+    }
+
     private fun confirmRevoke(enrollmentId: String) {
         AlertDialog.Builder(this)
             .setTitle(R.string.dlg_revoke_title)
             .setMessage(R.string.dlg_revoke_body)
-            .setPositiveButton(R.string.action_revoke) { _, _ ->
-                val res = try {
-                    ServerLib.revokeDevice(enrollmentId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (res.startsWith("Error:")) {
-                    Toast.makeText(this, res, Toast.LENGTH_LONG).show()
-                }
-                lastDevicesJson = null
-                refreshDevices()
-            }
+            .setPositiveButton(R.string.action_revoke) { _, _ -> deviceAction { ServerLib.revokeDevice(enrollmentId) } }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
@@ -299,62 +351,37 @@ class ServerActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle(R.string.dlg_block_title)
             .setMessage(R.string.dlg_block_body)
-            .setPositiveButton(R.string.action_block) { _, _ ->
-                val res = try {
-                    ServerLib.blockDevice(enrollmentId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (res.startsWith("Error:")) {
-                    Toast.makeText(this, res, Toast.LENGTH_LONG).show()
-                }
-                lastDevicesJson = null
-                refreshDevices()
-            }
+            .setPositiveButton(R.string.action_block) { _, _ -> deviceAction { ServerLib.blockDevice(enrollmentId) } }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
 
-    private fun unblock(enrollmentId: String) {
-        val res = try {
-            ServerLib.unblockDevice(enrollmentId)
-        } catch (e: Exception) {
-            "Error: ${e.message}"
-        }
-        if (res.startsWith("Error:")) {
-            Toast.makeText(this, res, Toast.LENGTH_LONG).show()
-        }
-        lastDevicesJson = null
-        refreshDevices()
-    }
+    private fun unblock(enrollmentId: String) = deviceAction { ServerLib.unblockDevice(enrollmentId) }
 
     /**
      * Kalıcı katılım kodunu gösterir (bkz. `ServerLib.joinCode`).
      *
-     * `refreshStatus` her turda çağırır ama iş YALNIZCA kod değiştiğinde
-     * yapılır: QR kodlama 900x900'lük bir bitmap'i piksel piksel dolduruyor,
-     * saniyede bir tekrarlamak ana thread'i boşuna meşgul ederdi. Sunucunun
-     * adresi (Tor bootstrap) hazır olur olmaz kod kendiliğinden belirir —
-     * operatörün bir düğmeye basması gerekmez.
+     * Kod yalnızca DEĞİŞTİYSE yeniden çizilir; okuma ve QR kodlama ana
+     * thread'in dışında yapılır.
      */
     private fun showJoinCode(rotate: Boolean = false) {
-        val code = try {
-            ServerLib.joinCode(rotate)
-        } catch (e: Exception) {
-            "Error: ${e.message}"
+        bg<Pair<String, Bitmap?>>({
+            val code = ServerLib.joinCode(rotate)
+            code to (if (code.startsWith("Error:") || code == lastInvite) null else encodeQr(code, 900, 900))
+        }, { "Error: ${it.message}" to null }) { (code, qr) ->
+            if (code.startsWith("Error:")) {
+                // Adres henüz yokken (Tor açılıyor) hata NORMAL; yalnızca
+                // kullanıcı kodu KENDİSİ yenilemek istediğinde söylüyoruz.
+                if (rotate) Toast.makeText(this, code, Toast.LENGTH_LONG).show()
+                // Retry on the next poll: a failed read on the poll where the
+                // address changed otherwise left the old QR up for good.
+                lastInvite = null
+            } else if (qr != null) {
+                lastInvite = code
+                qrImage.setImageBitmap(qr)
+                inviteCodeText.text = code
+            }
         }
-        if (code.startsWith("Error:")) {
-            // Adres henüz yokken (Tor açılıyor) hata NORMAL: bir sonraki
-            // yenileme turu tekrar dener. Kullanıcıyı her 2 saniyede bir
-            // Toast'la rahatsız etmenin anlamı yok — yalnızca kodu
-            // KENDİSİ yenilemek istediğinde söylüyoruz.
-            if (rotate) Toast.makeText(this, code, Toast.LENGTH_LONG).show()
-            return
-        }
-        if (code == lastInvite) return
-        lastInvite = code
-        qrImage.setImageBitmap(encodeQr(code, 900, 900))
-        inviteCodeText.text = code
     }
 
     /**
@@ -372,14 +399,19 @@ class ServerActivity : AppCompatActivity() {
     }
 
     private fun copyInvite() {
-        if (lastInvite == null) showJoinCode()
         val code = lastInvite
         if (code == null) {
+            showJoinCode()
             Toast.makeText(this, R.string.msg_no_invite_yet, Toast.LENGTH_SHORT).show()
             return
         }
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Typeon server invite", code))
+        val clip = android.content.ClipData.newPlainText("Typeon server invite", code)
+        // ClipDescription.EXTRA_IS_SENSITIVE (API 33): no clipboard preview.
+        clip.description.extras = android.os.PersistableBundle().apply {
+            putBoolean("android.content.extra.IS_SENSITIVE", true)
+        }
+        clipboard.setPrimaryClip(clip)
         Toast.makeText(this, R.string.msg_invite_copied, Toast.LENGTH_SHORT).show()
     }
 
@@ -394,20 +426,9 @@ class ServerActivity : AppCompatActivity() {
     private fun encodeQr(text: String, width: Int, height: Int): Bitmap {
         val hints = mapOf(EncodeHintType.CHARACTER_SET to "UTF-8")
         val matrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, width, height, hints)
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565)
-        for (x in 0 until width) {
-            for (y in 0 until height) {
-                bitmap.setPixel(x, y, if (matrix[x, y]) Color.BLACK else Color.WHITE)
-            }
-        }
-        return bitmap
+        val pixels = IntArray(width * height) { if (matrix[it % width, it / width]) Color.BLACK else Color.WHITE }
+        return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.RGB_565)
     }
-
-    /**
-     * Pil optimizasyonu muafiyeti. Bir sunucunun tanım gereği her zaman
-     * açık olması gerekiyor; Android'in uyku kısıtlamaları bunu doğrudan
-     * baltalar.
-     */
 
     /** Seçili konumu ve boş alanını gösterir. */
     private fun refreshStorageLabel() {
@@ -474,46 +495,49 @@ class ServerActivity : AppCompatActivity() {
     }
 
     private fun moveStorage(from: java.io.File, to: java.io.File) {
-        val wasRunning = ServerService.isEnabled(this)
+        // One move at a time: after a rotation the progress dialog is gone
+        // and the storage button could start a second one on the same tree.
+        if (!ServerService.moving.compareAndSet(false, true)) return
+        val app = applicationContext
         val progress = AlertDialog.Builder(this)
             .setMessage(R.string.dlg_storage_moving)
             .setCancelable(false)
             .show()
-        // Defter #12: `stopService` TEK BAŞINA çekirdeği durdurmuyordu —
-        // yani `copyTree` canlı bir sunucunun yazdığı blob'ları kopyalıyor,
-        // `deleteTree` de orijinalleri onun altından siliyordu (devam eden
-        // yükleme bozulur, tamamlanmış blob'lar diskten gider ama `blobs`
-        // tablosu hâlâ "var" der). Artık `ServerService.onDestroy` →
-        // `ServerLib.stopServer()` gerçekten durduruyor; kopyalamaya
-        // başlamadan önce kısa bir pay bırakıyoruz.
-        stopService(Intent(this, ServerService::class.java))
+        // The service is NOT stopped, only the native core: it stays in the
+        // foreground through the copy (the process is not killable half-way)
+        // and can bring the core back with the app in the background.
         Thread {
-            try { Thread.sleep(800) } catch (e: InterruptedException) { }
             val error = try {
+                // Queued behind a start that is still initialising, and back
+                // only once the native loop has ended: nothing writes to the
+                // blob files while they are copied and deleted.
+                ServerService.core.submit(Runnable { ServerLib.stopServer() }).get()
+                val needed = from.listFiles()?.sumOf { it.length() } ?: 0L
+                if (android.os.StatFs(to.parentFile!!.absolutePath).availableBytes < needed) {
+                    throw java.io.IOException("hedefte yeterli boş alan yok")
+                }
                 copyTree(from, to)
-                // Kopya bittikten SONRA sil — yarıda kalırsa veri kaybolmasın.
+                // Saved HERE, between copy and delete, and not in the UI
+                // callback: if the activity is gone by then, the setting would
+                // still point at the directory that was just emptied.
+                ServerService.setBlobDir(app, to)
                 deleteTree(from, keepRoot = true)
                 null
             } catch (e: Throwable) {
+                // Do not leave a partial copy filling the target.
+                if (ServerService.blobDir(app).absolutePath != to.absolutePath) deleteTree(to, keepRoot = true)
                 e.message ?: "bilinmeyen hata"
+            } finally {
+                ServerService.moving.set(false)
             }
+            ServerService.restartCore()
             runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
                 progress.dismiss()
-                if (error == null) {
-                    // Defter #12: yeni dizin YALNIZCA `startServer` anında
-                    // okunuyor. Eskiden `startServer` no-op olduğu için
-                    // taşıma sonrası çalışan çekirdek ESKİ (artık
-                    // boşaltılmış) dizine yazmaya devam ediyordu; artık
-                    // durdurma gerçek olduğu için yeniden başlatma yeni
-                    // dizini alıyor.
-                    ServerService.setBlobDir(this, to)
-                    refreshStorageLabel()
-                    Toast.makeText(this, R.string.msg_storage_moved, Toast.LENGTH_LONG).show()
-                    if (wasRunning) startServerService()
-                } else {
-                    Toast.makeText(this, getString(R.string.msg_storage_failed, error), Toast.LENGTH_LONG).show()
-                    if (wasRunning) startServerService()
-                }
+                refreshStorageLabel()
+                val message = if (error == null) getString(R.string.msg_storage_moved)
+                else getString(R.string.msg_storage_failed, error)
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
             }
         }.start()
     }
@@ -525,8 +549,10 @@ class ServerActivity : AppCompatActivity() {
             if (child.isDirectory) {
                 copyTree(child, dest)
             } else {
-                child.inputStream().use { input ->
-                    dest.outputStream().use { output -> input.copyTo(output, 1 shl 16) }
+                java.io.FileOutputStream(dest).use { output ->
+                    child.inputStream().use { input -> input.copyTo(output, 1 shl 16) }
+                    // On disk before the original is deleted.
+                    output.fd.sync()
                 }
             }
         }
@@ -539,11 +565,15 @@ class ServerActivity : AppCompatActivity() {
         if (!keepRoot) dir.delete()
     }
 
-    private fun requestIgnoreBatteryOptimizations() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+    /**
+     * Pil optimizasyonu muafiyeti. Bir sunucunun tanım gereği her zaman
+     * açık olması gerekiyor; Android'in uyku kısıtlamaları bunu doğrudan
+     * baltalar. [quiet]: no toast when already exempt.
+     */
+    private fun requestIgnoreBatteryOptimizations(quiet: Boolean = false) {
         val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
         if (pm.isIgnoringBatteryOptimizations(packageName)) {
-            Toast.makeText(this, R.string.msg_battery_already, Toast.LENGTH_SHORT).show()
+            if (!quiet) Toast.makeText(this, R.string.msg_battery_already, Toast.LENGTH_SHORT).show()
             return
         }
         try {

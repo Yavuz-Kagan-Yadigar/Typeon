@@ -147,7 +147,8 @@ pub enum ServerRequest {
     /// kullanımlık bir davetle kurulan bir cihaz, bir kez yeniden kurulumdan
     /// sonra sunucuya bir daha bağlanamazdı).
     ///
-    /// İmza girdisi: `enrollment_id || server_peer_id || ts_ms`.
+    /// İmza girdisi: bkz. `rebind_signing_input` (the `Hello` challenge and
+    /// the caller's PeerId are part of it, neither travels in the request).
     Rebind {
         #[serde(with = "serde_bytes")]
         enrollment_id: Vec<u8>,
@@ -586,8 +587,20 @@ pub fn enroll_signing_input(version: u16, server_peer_id: &str, invite_token: &[
 }
 
 /// `Rebind.sig`'in üzerinde hesaplandığı baytlar.
-pub fn rebind_signing_input(enrollment_id: &[u8], server_peer_id: &str, ts_ms: u64) -> Vec<u8> {
-    signing_input(b"p2pmsg-v0.2-server-rebind", &[enrollment_id, server_peer_id.as_bytes(), &ts_ms.to_be_bytes()])
+///
+/// `client_peer_id` and the `Hello` challenge are signed too: a Rebind that
+/// leaks is useless from any other PeerId and on any other connection.
+pub fn rebind_signing_input(
+    enrollment_id: &[u8],
+    server_peer_id: &str,
+    client_peer_id: &str,
+    challenge: &[u8],
+    ts_ms: u64,
+) -> Vec<u8> {
+    signing_input(
+        b"p2pmsg-v0.3-server-rebind",
+        &[enrollment_id, server_peer_id.as_bytes(), client_peer_id.as_bytes(), challenge, &ts_ms.to_be_bytes()],
+    )
 }
 
 #[cfg(test)]
@@ -658,15 +671,18 @@ mod tests {
         assert_ne!(base, enroll_signing_input(1, "peer", b"tok", b"chal2", 100));
         assert_ne!(base, enroll_signing_input(1, "peer", b"tok", b"chal", 101));
 
-        let rb = rebind_signing_input(b"eid", "peer", 100);
-        assert_ne!(rb, rebind_signing_input(b"eid", "other", 100));
-        assert_ne!(rb, rebind_signing_input(b"eid2", "peer", 100));
+        let rb = rebind_signing_input(b"eid", "peer", "me", b"chal", 100);
+        assert_ne!(rb, rebind_signing_input(b"eid", "other", "me", b"chal", 100));
+        assert_ne!(rb, rebind_signing_input(b"eid2", "peer", "me", b"chal", 100));
+        // A replay from another PeerId or on another connection fails.
+        assert_ne!(rb, rebind_signing_input(b"eid", "peer", "thief", b"chal", 100));
+        assert_ne!(rb, rebind_signing_input(b"eid", "peer", "me", b"chal2", 100));
 
         // A shifted field boundary is another message, and an Enroll
         // signature is never a Rebind signature.
         assert_ne!(enroll_signing_input(1, "ab", b"c", b"chal", 100), enroll_signing_input(1, "a", b"bc", b"chal", 100));
         assert_ne!(enroll_signing_input(1, "p", b"tok", b"chal", 100), enroll_signing_input(1, "p", b"tokc", b"hal", 100));
-        assert_ne!(rebind_signing_input(b"ei", "dpeer", 100), rebind_signing_input(b"eid", "peer", 100));
+        assert_ne!(rebind_signing_input(b"ei", "dpeer", "me", b"c", 100), rebind_signing_input(b"eid", "peer", "me", b"c", 100));
         assert_ne!(rb[..25], base[..25], "different tags");
     }
 }

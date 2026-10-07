@@ -24,7 +24,7 @@ use std::path::Path;
 // NOT: paket adı `p2p_messenger_core`, ama crate `p2p_messenger` adıyla
 // linkleniyor (bkz. o crate'in `[lib] name`'i) — `use` yolu bu yüzden
 // paket adından farklı.
-use p2p_messenger::server_proto::{ArchiveRecord, BucketStat, MailItem, ServerLimits};
+use p2p_messenger::server_proto::{ArchiveRecord, BucketStat, MailItem};
 
 /// Bir kaydın (enrollment) durumu.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +80,8 @@ pub struct BlobState {
     pub received_chunks: u32,
     pub byte_len: i64,
     pub complete: bool,
+    /// Stride the blob was written with; 0 = legacy 256 KiB.
+    pub chunk_size: u32,
 }
 
 pub struct Store {
@@ -89,6 +91,15 @@ pub struct Store {
 impl Store {
     pub fn open(db_path: &Path) -> Result<Store, String> {
         let conn = Connection::open(db_path).map_err(|e| format!("DB açılamadı: {e}"))?;
+        // Incremental auto-vacuum, so the file shrinks after mail is acked
+        // (see `incremental_vacuum`). It only takes effect before the first
+        // table exists or through one VACUUM, hence the one-time VACUUM on
+        // a database created before this.
+        let auto_vacuum: i64 = conn.pragma_query_value(None, "auto_vacuum", |r| r.get(0)).unwrap_or(2);
+        if auto_vacuum != 2 {
+            let _ = conn.pragma_update(None, "auto_vacuum", 2);
+            let _ = conn.execute_batch("VACUUM");
+        }
         // WAL: sunucu tek süreç ama okuma/yazma iç içe geçiyor; ayrıca ani
         // güç kesintisinde rollback journal'a göre çok daha dayanıklı.
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
@@ -146,11 +157,9 @@ impl Store {
                     created_at INTEGER NOT NULL
                 );
 
-                -- Enroll imzalarının tekrar oynatılmasını engeller.
-                CREATE TABLE IF NOT EXISTS used_challenges (
-                    challenge  BLOB PRIMARY KEY,
-                    used_at    INTEGER NOT NULL
-                );
+                -- The challenge is random per connection and taken out of
+                -- `ConnState` on use: a table of used ones only grew.
+                DROP TABLE IF EXISTS used_challenges;
 
                 CREATE TABLE IF NOT EXISTS mailboxes (
                     mailbox_id   TEXT PRIMARY KEY,
@@ -178,6 +187,7 @@ impl Store {
                 -- Mevcut kurulumlardan tek seferlik taşıma (idempotent).
                 INSERT OR IGNORE INTO mailbox_readers (mailbox_id, owner, created_at, last_seen_at)
                     SELECT mailbox_id, owner, created_at, last_seen_at FROM mailboxes;
+                DELETE FROM mailboxes;
 
                 CREATE TABLE IF NOT EXISTS mail (
                     seq             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -193,6 +203,9 @@ impl Store {
                 -- yazılmasını engelleyen sorgu bu indeksi kullanır.
                 CREATE INDEX IF NOT EXISTS idx_mail_dedup ON mail(mailbox_id, depositor);
                 CREATE INDEX IF NOT EXISTS idx_mail_expiry ON mail(expires_at_ms);
+                -- Covering: `recount_mail_bytes` and `total_stored_bytes` sum
+                -- from the index and never touch the `sealed` blobs.
+                CREATE INDEX IF NOT EXISTS idx_mail_depositor ON mail(depositor, byte_len);
 
                 -- Okuyucu başına onay imleci. Kayıt herkese açık olduğundan
                 -- (ilk-temas kutusunun kimliği cihaz parmak izinden türüyor),
@@ -218,6 +231,7 @@ impl Store {
                     PRIMARY KEY (bucket, record_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_archive_page ON archive(bucket, sent_at_ms DESC);
+                CREATE INDEX IF NOT EXISTS idx_archive_owner ON archive(owner, byte_len);
 
                 CREATE TABLE IF NOT EXISTS blobs (
                     blob_id         TEXT PRIMARY KEY,
@@ -264,54 +278,7 @@ impl Store {
             .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
         // Mevcut kurulumlar için (kolon yoksa ekle; varsa hata yutulur).
         let _ = self.conn.execute("ALTER TABLE blobs ADD COLUMN chunk_size INTEGER NOT NULL DEFAULT 0", []);
-        self.dedupe_existing_mail();
         Ok(())
-    }
-
-    /// Tek seferlik onarım: aynı kutuda, aynı bırakanın BİREBİR AYNI baytları
-    /// birden fazla satırda duruyorsa en küçük `seq` dışındakileri siler ve
-    /// kotaları yeniden sayar.
-    ///
-    /// Neden gerekli: bkz. `deposit` — istemci tarafındaki tekilleştirme
-    /// boşluğu yüzünden bir el sıkışma saniyede bir yeniden yatırılıyordu.
-    /// Sadece yeni yatırmaları engellemek yetmez; ZATEN birikmiş kopyalar
-    /// kutu TTL'i (30 gün) boyunca kotayı dolu tutar ve kullanıcı bir ay
-    /// boyunca hiçbir şey gönderemezdi.
-    ///
-    /// Kopyayı atmak güvenli: alıcı `message_id` ile zaten tekilleştiriyor ve
-    /// birebir aynı ciphertext'in ikinci kopyası hiçbir bilgi taşımıyor.
-    /// Silinen satır sayısı 0 ise (temiz kurulum) hiçbir maliyeti yok.
-    fn dedupe_existing_mail(&self) {
-        let removed = self
-            .conn
-            .execute(
-                "DELETE FROM mail WHERE seq NOT IN (
-                     SELECT MIN(seq) FROM mail GROUP BY mailbox_id, depositor, sealed
-                 )",
-                [],
-            )
-            .unwrap_or(0);
-        if removed > 0 {
-            log::warn!("Postada {} yinelenen kopya temizlendi (bkz. Store::deposit)", removed);
-            // Kota tek yönlü artmasın — silinen baytlar bırakanın hesabından
-            // düşmeli, yoksa temizlik görünür bir fayda sağlamazdı.
-            self.recount_mail_bytes();
-        }
-    }
-
-    /// bkz. defter #06 — bir blob'un yazılırken kullanılan parça adımı.
-    /// `None`/0 ise çağıran miras 256 KiB'a düşer.
-    pub fn blob_chunk_size(&self, blob_id: &str) -> Option<u32> {
-        self.conn
-            .query_row(
-                "SELECT chunk_size FROM blobs WHERE blob_id = ?1",
-                params![blob_id],
-                |r| r.get::<_, i64>(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
-            .map(|v| v.max(0) as u32)
     }
 
     /// bkz. defter #06 — ilk parçayla birlikte adımı sabitler.
@@ -448,17 +415,16 @@ impl Store {
         Ok(changed > 0)
     }
 
-    /// Bir `challenge`'ı tek kullanımlık olarak işaretler — daha önce
-    /// kullanılmışsa `false`.
-    pub fn consume_challenge(&self, challenge: &[u8], now: i64) -> Result<bool, String> {
-        let changed = self
-            .conn
-            .execute(
-                "INSERT OR IGNORE INTO used_challenges (challenge, used_at) VALUES (?1, ?2)",
-                params![challenge, now],
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(changed > 0)
+    /// Consumes one invite use and writes the enrollment: both or neither.
+    /// `Ok(false)`: the invite is spent, expired or gone.
+    pub fn enroll_with_invite(&self, token_hash: &[u8], now: i64, e: &Enrollment) -> Result<bool, String> {
+        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        if !self.consume_invite(token_hash, now)? {
+            return Ok(false);
+        }
+        self.insert_enrollment(e)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(true)
     }
 
     pub fn insert_enrollment(&self, e: &Enrollment) -> Result<(), String> {
@@ -520,9 +486,10 @@ impl Store {
     pub fn rebind_enrollment(&self, enrollment_id: &[u8], new_peer_id: &str, now: i64) -> Result<(), String> {
         // Aynı PeerId'ye bağlı BAŞKA bir kayıt varsa önce onu çöz — `peer_id`
         // UNIQUE, aksi halde INSERT çakışırdı (uygulamayı silip yeniden kuran
-        // bir cihaz aynı libp2p anahtarını yeniden üretebilir).
+        // bir cihaz aynı libp2p anahtarını yeniden üretebilir). The placeholder
+        // is unique per row: a shared '' broke the index on the second collision.
         let _ = self.conn.execute(
-            "UPDATE enrollments SET peer_id = '' WHERE peer_id = ?1 AND enrollment_id != ?2",
+            "UPDATE enrollments SET peer_id = 'unbound:' || hex(enrollment_id) WHERE peer_id = ?1 AND enrollment_id != ?2",
             params![new_peer_id, enrollment_id],
         );
         self.conn
@@ -537,8 +504,8 @@ impl Store {
     pub fn revoke_enrollment(&self, enrollment_id: &[u8]) -> Result<(), String> {
         self.conn
             .execute("UPDATE enrollments SET state = 'revoked' WHERE enrollment_id = ?1", params![enrollment_id])
-            .map(|_| ())
             .map_err(|e| e.to_string())
+            .and_then(|n| if n == 0 { Err("Kayıt bulunamadı".to_string()) } else { Ok(()) })
     }
 
     pub fn list_enrollments(&self) -> Vec<Enrollment> {
@@ -663,8 +630,8 @@ impl Store {
     /// birebir aynı ciphertext'in ikinci kopyası hiçbir bilgi taşımıyor.
     pub fn deposit(&self, mailbox_id: &str, sealed: &[u8], depositor: &[u8], now: i64, ttl_ms: i64) -> Result<u64, String> {
         if let Ok(existing) = self.conn.query_row(
-            "SELECT seq FROM mail WHERE mailbox_id = ?1 AND depositor = ?2 AND sealed = ?3 LIMIT 1",
-            params![mailbox_id, depositor, sealed],
+            "SELECT seq FROM mail WHERE mailbox_id = ?1 AND depositor = ?2 AND byte_len = ?4 AND sealed = ?3 LIMIT 1",
+            params![mailbox_id, depositor, sealed, sealed.len() as i64],
             |row| row.get::<_, i64>(0),
         ) {
             // TTL'i tazele — gönderen hâlâ ısrar ediyorsa alıcı henüz almamış
@@ -706,49 +673,40 @@ impl Store {
         let mut total = 0usize;
         let mut more = false;
 
+        // Defter #03: yalnızca kutuyu KAYDETMİŞ bir okuyucu okuyabilir.
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT m.seq, m.deposited_at_ms, m.sealed FROM mail m
+             WHERE m.mailbox_id = ?1 AND m.seq > ?2 AND m.depositor != ?3
+               AND EXISTS (SELECT 1 FROM mailbox_readers r
+                           WHERE r.mailbox_id = m.mailbox_id AND r.owner = ?3)
+             ORDER BY m.seq",
+        ) else {
+            return (items, false);
+        };
         for (mailbox_id, after_seq) in cursors {
             if items.len() as u32 >= max_items || total >= max_bytes as usize {
                 more = true;
                 break;
             }
-            let mut stmt = match self
-                .conn
-                .prepare(
-                    // Defter #03: erişim kontrolü eskiden HİÇ yoktu —
-                    // `server_mailbox_id` anahtarsız HKDF ve ilk-temas
-                    // kutusunun girdisi herkese açık bir fingerprint, yani o
-                    // kutunun kimliği tahmin edilebilir. Kayıtlı HERHANGİ
-                    // bir istemci başkasının kutusunu okuyabiliyordu (ve
-                    // oradaki ilk-temas zarfları `frame_unsealed`, yani
-                    // ikinci katman şifreleme olmadan duruyor). Artık en
-                    // azından kutuyu KAYDETMİŞ olmak gerekiyor.
-                    "SELECT m.seq, m.deposited_at_ms, m.sealed FROM mail m
-                     WHERE m.mailbox_id = ?1 AND m.seq > ?2 AND m.depositor != ?3
-                       AND EXISTS (SELECT 1 FROM mailbox_readers r
-                                   WHERE r.mailbox_id = m.mailbox_id AND r.owner = ?3)
-                     ORDER BY m.seq",
-                )
-            {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let mb = mailbox_id.clone();
-            let rows = stmt.query_map(params![mailbox_id, *after_seq as i64, requester], move |r| {
-                Ok(MailItem {
-                    mailbox_id: mb.clone(),
-                    seq: r.get::<_, i64>(0)? as u64,
-                    deposited_at_ms: r.get::<_, i64>(1)? as u64,
-                    sealed: r.get(2)?,
-                })
+            let rows = stmt.query_map(params![mailbox_id, *after_seq as i64, requester], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Vec<u8>>(2)?))
             });
             let Ok(rows) = rows else { continue };
-            for item in rows.flatten() {
-                if items.len() as u32 >= max_items || total + item.sealed.len() > max_bytes as usize {
+            for (seq, deposited_at_ms, sealed) in rows.flatten() {
+                // The first item always goes out, even over `max_bytes`: an
+                // item larger than the batch cap otherwise blocks its mailbox
+                // (zero items, `more` forever) until the TTL.
+                if items.len() as u32 >= max_items || (!items.is_empty() && total + sealed.len() > max_bytes as usize) {
                     more = true;
                     break;
                 }
-                total += item.sealed.len();
-                items.push(item);
+                total += sealed.len();
+                items.push(MailItem {
+                    mailbox_id: mailbox_id.clone(),
+                    seq: seq as u64,
+                    deposited_at_ms: deposited_at_ms as u64,
+                    sealed,
+                });
             }
         }
         (items, more)
@@ -883,20 +841,24 @@ impl Store {
             }
         }
         let _ = self.conn.execute(
-            "DELETE FROM mailbox_readers WHERE owner NOT IN (SELECT enrollment_id FROM enrollments)",
+            "DELETE FROM mailbox_readers WHERE owner NOT IN (SELECT enrollment_id FROM enrollments WHERE state = 'active')",
             [],
         );
+        // Counted in the result, so the caller recounts the depositors' quota.
+        let mut removed = 0;
         for mailbox in &orphaned {
-            let _ = self.delete_fully_acked(mailbox);
+            removed += self.delete_fully_acked(mailbox).unwrap_or(0);
         }
         let _ = self.conn.execute(
             "DELETE FROM mail_acks WHERE NOT EXISTS (SELECT 1 FROM mailbox_readers r
                 WHERE r.mailbox_id = mail_acks.mailbox_id AND r.owner = mail_acks.owner)",
             [],
         );
-        self.conn
-            .execute("DELETE FROM mail WHERE expires_at_ms <= ?1", params![now])
-            .unwrap_or(0)
+        removed
+            + self
+                .conn
+                .execute("DELETE FROM mail WHERE expires_at_ms <= ?1", params![now])
+                .unwrap_or(0)
     }
 
     // -----------------------------------------------------------------
@@ -910,9 +872,19 @@ impl Store {
     /// yazar. Bu, mevcut `HistorySyncResponse` mekanizmasının YAPAMADIĞI bir
     /// şeydir (geç gelen bir Edit'i geçmişte düzeltmek). Aynı kural, N
     /// cihazımın AYNI kaydı yüklemesini de tek satıra indirir.
+    ///
+    /// The last writer becomes `owner` and pays for the row. The quota counts
+    /// `sealed` plus `record_id`, the two peer-sized columns.
     pub fn archive_put(&self, bucket: &str, records: &[ArchiveRecord], owner: &[u8], now: i64) -> Result<u64, String> {
         let mut newest = 0u64;
+        // One transaction: one WAL commit per batch, and all or nothing.
+        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         for rec in records {
+            // Skipped, not refused: the client drops what was answered `Ok`,
+            // and one over-long id must not block its archive queue.
+            if rec.record_id.len() > 128 {
+                continue;
+            }
             self.conn
                 .execute(
                     "INSERT INTO archive (bucket, record_id, rev, sent_at_ms, sealed, byte_len, owner, updated_at)
@@ -920,23 +892,25 @@ impl Store {
                      ON CONFLICT(bucket, record_id) DO UPDATE SET
                         rev = excluded.rev, sent_at_ms = excluded.sent_at_ms,
                         sealed = excluded.sealed, byte_len = excluded.byte_len,
-                        updated_at = excluded.updated_at
+                        owner = excluded.owner, updated_at = excluded.updated_at
                      WHERE excluded.rev > archive.rev",
-                    params![bucket, rec.record_id, rec.rev as i64, rec.sent_at_ms as i64, rec.sealed, rec.sealed.len() as i64, owner, now],
+                    params![bucket, rec.record_id, rec.rev as i64, rec.sent_at_ms as i64, rec.sealed, (rec.sealed.len() + rec.record_id.len()) as i64, owner, now],
                 )
                 .map_err(|e| e.to_string())?;
             newest = newest.max(rec.rev);
         }
-        self.recount_archive_bytes(owner);
+        tx.commit().map_err(|e| e.to_string())?;
+        self.recount_archive_bytes();
         Ok(newest)
     }
 
-    fn recount_archive_bytes(&self, owner: &[u8]) {
+    /// Every owner, not only the caller: an overwrite or a purge changes what
+    /// another enrollment is charged for.
+    fn recount_archive_bytes(&self) {
         let _ = self.conn.execute(
             "UPDATE enrollments SET bytes_archive =
-                (SELECT COALESCE(SUM(byte_len), 0) FROM archive WHERE owner = ?1)
-             WHERE enrollment_id = ?1",
-            params![owner],
+                COALESCE((SELECT SUM(byte_len) FROM archive WHERE archive.owner = enrollments.enrollment_id), 0)",
+            [],
         );
     }
 
@@ -963,18 +937,22 @@ impl Store {
     }
 
     /// Yeniden eskiye bir sayfa. `before_ms: None` = en yeni sayfa.
+    ///
+    /// The client continues with `before_ms` = the oldest `sent_at_ms` it got,
+    /// so a page never ends inside a group of records that share a timestamp:
+    /// the rest of that group would be skipped.
+    /// ponytail: a group larger than a page is sent whole, over the caps; add
+    /// a `(sent_at_ms, record_id)` cursor to the protocol if that ever matters.
     pub fn archive_fetch(&self, bucket: &str, before_ms: Option<u64>, max_items: u32, max_bytes: u32) -> (Vec<ArchiveRecord>, bool) {
         let before = before_ms.map(|v| v as i64).unwrap_or(i64::MAX);
         let mut stmt = match self.conn.prepare(
             "SELECT record_id, rev, sent_at_ms, sealed FROM archive
-             WHERE bucket = ?1 AND sent_at_ms < ?2 ORDER BY sent_at_ms DESC LIMIT ?3",
+             WHERE bucket = ?1 AND sent_at_ms < ?2 ORDER BY sent_at_ms DESC",
         ) {
             Ok(s) => s,
             Err(_) => return (Vec::new(), false),
         };
-        // Bir fazlasını iste: `more` bayrağını ekstra bir COUNT sorgusu
-        // yapmadan öğrenmenin en ucuz yolu.
-        let rows = stmt.query_map(params![bucket, before, (max_items as i64) + 1], |r| {
+        let rows = stmt.query_map(params![bucket, before], |r| {
             Ok(ArchiveRecord {
                 record_id: r.get(0)?,
                 rev: r.get::<_, i64>(1)? as u64,
@@ -986,27 +964,31 @@ impl Store {
 
         let mut out: Vec<ArchiveRecord> = Vec::new();
         let mut total = 0usize;
-        let mut more = false;
         for rec in rows.flatten() {
-            if out.len() as u32 >= max_items || total + rec.sealed.len() > max_bytes as usize {
-                more = true;
-                break;
+            // `!out.is_empty()`: the first record always goes out, or one
+            // record over `max_bytes` hides everything older in its bucket.
+            let full = !out.is_empty()
+                && (out.len() as u32 >= max_items || total + rec.sealed.len() > max_bytes as usize);
+            if full && out[0].sent_at_ms != rec.sent_at_ms {
+                // Hand the split timestamp group to the next page as a whole.
+                out.retain(|r| r.sent_at_ms != rec.sent_at_ms);
+                return (out, true);
             }
             total += rec.sealed.len();
             out.push(rec);
         }
-        (out, more)
+        (out, false)
     }
 
-    pub fn archive_purge(&self, buckets: &[String], owner: &[u8]) -> usize {
+    /// Deletes whole buckets, whoever uploaded the rows. The bucket id is the
+    /// capability, as it is for `archive_fetch` and for overwriting a record:
+    /// a chat deleted on one linked device goes for all of them.
+    pub fn archive_purge(&self, buckets: &[String]) -> usize {
         let mut n = 0;
         for b in buckets {
-            n += self
-                .conn
-                .execute("DELETE FROM archive WHERE bucket = ?1 AND owner = ?2", params![b, owner])
-                .unwrap_or(0);
+            n += self.conn.execute("DELETE FROM archive WHERE bucket = ?1", params![b]).unwrap_or(0);
         }
-        self.recount_archive_bytes(owner);
+        self.recount_archive_bytes();
         n
     }
 
@@ -1084,7 +1066,7 @@ impl Store {
     pub fn blob_state(&self, blob_id: &str) -> Option<BlobState> {
         self.conn
             .query_row(
-                "SELECT blob_id, owner, total_chunks, received_chunks, byte_len, complete FROM blobs WHERE blob_id = ?1",
+                "SELECT blob_id, owner, total_chunks, received_chunks, byte_len, complete, chunk_size FROM blobs WHERE blob_id = ?1",
                 params![blob_id],
                 |r| {
                     Ok(BlobState {
@@ -1094,6 +1076,7 @@ impl Store {
                         received_chunks: r.get::<_, i64>(3)? as u32,
                         byte_len: r.get(4)?,
                         complete: r.get::<_, i64>(5)? != 0,
+                        chunk_size: r.get::<_, i64>(6)?.max(0) as u32,
                     })
                 },
             )
@@ -1106,11 +1089,13 @@ impl Store {
         let _ = self.conn.execute("UPDATE blobs SET last_served_at = ?2 WHERE blob_id = ?1", params![blob_id, now]);
     }
 
+    /// `true` if `owner` owned the blob; the caller then removes the file.
     pub fn blob_delete(&self, blob_id: &str, owner: &[u8]) -> bool {
-        self.conn
-            .execute("DELETE FROM blobs WHERE blob_id = ?1 AND owner = ?2", params![blob_id, owner])
-            .unwrap_or(0)
-            > 0
+        let owned = self.blob_state(blob_id).map_or(false, |s| s.owner == owner);
+        if owned {
+            self.blob_forget(blob_id);
+        }
+        owned
     }
 
     /// Silinmesi gereken blob kimliklerini döner (dosyaları çağıran siler).
@@ -1118,12 +1103,12 @@ impl Store {
     /// İki kural: tamamlanmışlar `blob_ttl_ms` boyunca SON SERVİSTEN sonra
     /// yaşar (indirilmeye devam eden bir dosya yaşamaya devam eder — dış
     /// incelemedeki #4 maddesinin istediği davranış), yarım kalmış
-    /// yüklemeler 24 saat sonra atılır.
+    /// yüklemeler son parçadan 24 saat sonra atılır (`blob_touch` per chunk).
     pub fn blobs_to_gc(&self, now: i64, ttl_ms: i64) -> Vec<String> {
         let mut stmt = match self.conn.prepare(
             "SELECT blob_id FROM blobs
              WHERE (complete = 1 AND last_served_at + ?1 <= ?2)
-                OR (complete = 0 AND created_at + 86400000 <= ?2)",
+                OR (complete = 0 AND last_served_at + 86400000 <= ?2)",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -1133,7 +1118,15 @@ impl Store {
             .unwrap_or_default()
     }
 
+    /// The one way a blob leaves the DB: refunds the owner exactly the bytes
+    /// charged (`byte_len`, not the file length: a sparse file is far longer
+    /// than what was paid for) and drops the chunk rows with the blob row.
     pub fn blob_forget(&self, blob_id: &str) {
+        let _ = self.conn.execute(
+            "UPDATE enrollments SET bytes_blob = MAX(0, bytes_blob - (SELECT byte_len FROM blobs WHERE blob_id = ?1))
+             WHERE enrollment_id = (SELECT owner FROM blobs WHERE blob_id = ?1)",
+            params![blob_id],
+        );
         let _ = self.conn.execute("DELETE FROM blobs WHERE blob_id = ?1", params![blob_id]);
         let _ = self.conn.execute("DELETE FROM blob_chunks WHERE blob_id = ?1", params![blob_id]);
     }
@@ -1141,13 +1134,6 @@ impl Store {
     // -----------------------------------------------------------------
     // Kota
     // -----------------------------------------------------------------
-
-    /// Bir kaydın kotası dolmuş mu? `None` = sorun yok.
-    pub fn quota_exceeded(&self, e: &Enrollment, limits: &ServerLimits) -> bool {
-        e.bytes_mail as u64 > limits.max_mail_bytes
-            || e.bytes_archive as u64 > limits.max_archive_bytes
-            || e.bytes_blob as u64 > limits.max_blob_bytes
-    }
 
     pub fn add_blob_bytes(&self, owner: &[u8], delta: i64) {
         let _ = self.conn.execute(
@@ -1164,6 +1150,11 @@ impl Store {
             "UPDATE enrollments SET bytes_mail =
                 COALESCE((SELECT SUM(byte_len) FROM mail WHERE mail.depositor = enrollments.enrollment_id), 0);",
         );
+    }
+
+    /// Returns freed pages to the filesystem (see `open`).
+    pub fn incremental_vacuum(&self) {
+        let _ = self.conn.execute_batch("PRAGMA incremental_vacuum;");
     }
 }
 
@@ -1466,12 +1457,12 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         let a = enroll(&s, b"aaaa", "peerA");
         s.blob_begin("bl_s", &a, 2, 0).unwrap();
-        assert_eq!(s.blob_chunk_size("bl_s"), Some(0), "baslangicta bilinmiyor");
+        assert_eq!(s.blob_state("bl_s").unwrap().chunk_size, 0, "baslangicta bilinmiyor");
         s.blob_set_chunk_size("bl_s", 512 * 1024);
-        assert_eq!(s.blob_chunk_size("bl_s"), Some(512 * 1024));
+        assert_eq!(s.blob_state("bl_s").unwrap().chunk_size, 512 * 1024);
         // Ilk deger SABITLENIR — sonraki parcalar farkli bir adim iddia edemez.
         s.blob_set_chunk_size("bl_s", 256 * 1024);
-        assert_eq!(s.blob_chunk_size("bl_s"), Some(512 * 1024));
+        assert_eq!(s.blob_state("bl_s").unwrap().chunk_size, 512 * 1024);
     }
 
     /// Defter #23: kayıt başına kotanın üstünde genel bir tavan da olmalı.
@@ -1485,7 +1476,8 @@ mod tests {
         s.archive_put("ar_1", &[rec("m1", 1, 100, &vec![b'y'; 50])], &a, 0).unwrap();
         s.blob_begin("bl_1", &a, 1, 0).unwrap();
         s.blob_record_chunk("bl_1", 0, 25).unwrap();
-        assert_eq!(s.total_stored_bytes(), 175);
+        // 100 mail + 50 archive + 2 for the record id "m1" + 25 blob.
+        assert_eq!(s.total_stored_bytes(), 177);
     }
 
     /// Dış inceleme önerisi: gönderen KENDİ teslim edilmemiş paketini geri
@@ -1619,10 +1611,83 @@ mod tests {
     }
 
     #[test]
-    fn challenge_cannot_be_replayed() {
+    fn a_failed_enrollment_does_not_spend_the_invite() {
         let s = Store::open_in_memory().unwrap();
-        assert!(s.consume_challenge(b"chal", 1).unwrap());
-        assert!(!s.consume_challenge(b"chal", 2).unwrap());
+        s.create_invite(b"h", "x", 1, 0, 0).unwrap();
+        enroll(&s, b"aaaa", "peerA");
+        let e = s.enrollment_by_peer("peerA").unwrap();
+        // Make the insert fail: no table to write to.
+        s.conn.execute_batch("ALTER TABLE enrollments RENAME TO gone").unwrap();
+        assert!(s.enroll_with_invite(b"h", 1, &e).is_err());
+        s.conn.execute_batch("ALTER TABLE gone RENAME TO enrollments").unwrap();
+        assert_eq!(s.invite_uses_left(b"h"), Some(1), "the use came back with the rollback");
+        assert!(s.enroll_with_invite(b"h", 1, &e).unwrap());
+        assert!(!s.enroll_with_invite(b"h", 1, &e).unwrap(), "spent");
+    }
+
+    #[test]
+    fn an_item_over_the_batch_cap_still_leaves_its_mailbox() {
+        let s = Store::open_in_memory().unwrap();
+        let a = enroll(&s, b"aaaa", "peerA");
+        let b = enroll(&s, b"bbbb", "peerB");
+        register(&s, &b, "mb_1");
+        s.deposit("mb_1", &[7u8; 600], &a, 1, 1000).unwrap();
+        s.deposit("mb_1", b"next", &a, 2, 1000).unwrap();
+        let (items, more) = s.fetch(&b, &[("mb_1".into(), 0)], 10, 512);
+        assert_eq!(items.len(), 1, "the oversized head goes out alone");
+        assert!(more);
+        let (items, more) = s.fetch(&b, &[("mb_1".into(), items[0].seq)], 10, 512);
+        assert_eq!(items[0].sealed, b"next");
+        assert!(!more);
+    }
+
+    #[test]
+    fn archive_paging_never_splits_a_timestamp_and_never_stalls() {
+        let s = Store::open_in_memory().unwrap();
+        let a = enroll(&s, b"aaaa", "peerA");
+        s.archive_put("ar_1", &[rec("m1", 1, 100, b"a"), rec("m2", 1, 200, b"b"), rec("m3", 1, 200, b"c"), rec("m4", 1, 300, b"d")], &a, 0).unwrap();
+        // Walk the bucket two at a time, the way the client does.
+        let mut seen = Vec::new();
+        let mut before = None;
+        loop {
+            let (page, more) = s.archive_fetch("ar_1", before, 2, 65536);
+            before = page.iter().map(|r| r.sent_at_ms).min();
+            seen.extend(page.into_iter().map(|r| r.record_id));
+            if !more {
+                break;
+            }
+        }
+        seen.sort();
+        assert_eq!(seen, ["m1", "m2", "m3", "m4"], "the two records at ts=200 share a page");
+        // A record over the byte cap is still returned.
+        let (page, _) = s.archive_fetch("ar_1", None, 10, 0);
+        assert_eq!(page.len(), 1);
+    }
+
+    #[test]
+    fn archive_charges_the_last_writer_and_any_holder_can_purge() {
+        let s = Store::open_in_memory().unwrap();
+        let a = enroll(&s, b"aaaa", "peerA");
+        let b = enroll(&s, b"bbbb", "peerB");
+        s.archive_put("ar_1", &[rec("m1", 1, 100, b"small")], &a, 0).unwrap();
+        s.archive_put("ar_1", &[rec("m1", 2, 100, &[0u8; 1000])], &b, 0).unwrap();
+        assert_eq!(s.enrollment_by_id(&a).unwrap().bytes_archive, 0);
+        assert_eq!(s.enrollment_by_id(&b).unwrap().bytes_archive, 1002, "sealed + record_id");
+        assert_eq!(s.archive_purge(&["ar_1".to_string()]), 1, "a's purge removes b's row");
+        assert_eq!(s.enrollment_by_id(&b).unwrap().bytes_archive, 0);
+    }
+
+    #[test]
+    fn deleting_a_blob_refunds_what_was_charged_and_frees_the_id() {
+        let s = Store::open_in_memory().unwrap();
+        let a = enroll(&s, b"aaaa", "peerA");
+        s.blob_begin("bl_1", &a, 1, 0).unwrap();
+        s.blob_record_chunk("bl_1", 0, 10).unwrap();
+        s.add_blob_bytes(&a, 10);
+        assert!(!s.blob_delete("bl_1", b"other"), "only the owner");
+        assert!(s.blob_delete("bl_1", &a));
+        assert_eq!(s.enrollment_by_id(&a).unwrap().bytes_blob, 0);
+        assert!(!s.blob_has_chunk("bl_1", 0), "the id can be uploaded again");
     }
 
     #[test]
@@ -1633,6 +1698,12 @@ mod tests {
         s.rebind_enrollment(&a, "peerNew", 5).unwrap();
         let found = s.enrollment_by_peer("peerNew").unwrap();
         assert_eq!(found.enrollment_id, a, "yeni PeerId artik a kaydina cozulmeli");
+        // A second displaced holder must not collide with the first one.
+        let c = enroll(&s, b"cccc", "peerThird");
+        enroll(&s, b"dddd", "peerFourth");
+        s.rebind_enrollment(&c, "peerFourth", 6).unwrap();
+        assert_eq!(s.enrollment_by_peer("peerFourth").unwrap().enrollment_id, c);
+        assert!(s.revoke_enrollment(b"nope").is_err(), "a typo is not a revoke");
     }
 
     #[test]

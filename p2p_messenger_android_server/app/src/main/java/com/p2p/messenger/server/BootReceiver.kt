@@ -23,13 +23,16 @@ import androidx.core.content.ContextCompat
  * `ACTION_MY_PACKAGE_REPLACED` de dinleniyor: uygulama güncellendiğinde süreç
  * öldürülüyor ve servis kendiliğinden geri gelmiyor (bu, release APK'ları
  * kurarken gerçek cihazda gözlemlendi — sunucu kurulumdan sonra kapalı kaldı).
+ *
+ * Not direct-boot aware (the data is in credential-protected storage): after
+ * a reboot the server returns only once the phone has been unlocked. An
+ * unattended server phone should have no lock screen.
  */
 class BootReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent?) {
         when (intent?.action) {
             Intent.ACTION_BOOT_COMPLETED,
-            Intent.ACTION_LOCKED_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED -> {}
             else -> return
         }

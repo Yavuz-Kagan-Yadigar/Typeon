@@ -23,8 +23,6 @@
 //! doğal olarak yapıyor:
 //!
 //! - `TYPEON_SERVER_DIR`   (varsayılan `~/.local/share/typeon-server`)
-//! - `TYPEON_SERVER_PORT`  (Tor açıkken yok sayılır)
-//! - `TYPEON_SERVER_TOR`   (`0` ile kapatılır; varsayılan açık)
 //! - `TYPEON_SERVER_NODE`  (`1` ile Kad Server + Circuit Relay v2 hizmeti)
 //! - `TYPEON_SERVER_NAME`
 //! - `TYPEON_SERVER_BUDGET_BYTES` (sunucunun kullanabileceği TOPLAM disk;
@@ -32,6 +30,7 @@
 
 use std::path::PathBuf;
 
+use typeon_server::store::Store;
 use typeon_server::{now_ms, ServerConfig, ServerCore};
 
 fn data_dir() -> PathBuf {
@@ -55,13 +54,7 @@ fn env_flag(key: &str, default: bool) -> bool {
 
 fn build_config() -> ServerConfig {
     let mut cfg = ServerConfig::new(data_dir());
-    cfg.tor_enabled = env_flag("TYPEON_SERVER_TOR", true);
     cfg.node_mode = env_flag("TYPEON_SERVER_NODE", false);
-    if let Ok(port) = std::env::var("TYPEON_SERVER_PORT") {
-        if let Ok(p) = port.parse() {
-            cfg.listen_port = p;
-        }
-    }
     if let Ok(name) = std::env::var("TYPEON_SERVER_NAME") {
         cfg.server_name = name;
     }
@@ -80,6 +73,32 @@ fn build_config() -> ServerConfig {
     cfg
 }
 
+/// Management commands open ONLY the database. Building a `ServerCore` here
+/// started a second Tor client on the state dir the daemon holds locked: the
+/// command waited 90 s and failed while the server was running. The address a
+/// code needs is the one the daemon last wrote to the DB.
+fn open_store() -> Store {
+    match Store::open(&data_dir().join("typeon_server.db")) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Açılamadı: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// A CLI number: absent = `default`, unparsable = usage error (not `default`).
+fn arg_num(args: &[String], index: usize, default: i64) -> i64 {
+    match args.get(index).map(|v| v.parse::<i64>()) {
+        None => default,
+        Some(Ok(n)) => n,
+        Some(Err(_)) => {
+            eprintln!("Sayı bekleniyor: {}", args[index]);
+            std::process::exit(2);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -89,14 +108,10 @@ async fn main() {
 
     match cmd {
         "run" => run().await,
-        // Yönetim komutları sunucuyu AYAĞA KALDIRIR (davet kodu, ilan
-        // edilecek adresi içermek zorunda ve o adres ancak dinleme
-        // başladıktan sonra biliniyor). Tor açıkken onion adresinin
-        // görünmesi bootstrap'ı bekler, bu yüzden kısa bir tolerans var.
-        "join-code" => join_code(&args[1..]).await,
-        "invite" => invite(&args[1..]).await,
+        "join-code" => join_code(&args[1..]),
+        "invite" => invite(&args[1..]),
         "devices" => devices(&args[1..]),
-        "address" => address().await,
+        "address" => address(),
         "help" | "--help" | "-h" => usage(),
         other => {
             eprintln!("Bilinmeyen komut: {other}\n");
@@ -135,34 +150,12 @@ async fn run() {
     }
 }
 
-/// Sunucuyu kaldırır ve bir dinleme adresi görünene kadar bekler.
-///
-/// Tor açıkken onion adresi arti'nin bootstrap'ını bekler; bu 30-60 sn
-/// sürebilir. Adres olmadan üretilen bir davet kodu kimseye yaramaz, bu
-/// yüzden beklemek doğru davranış — sessizce eksik bir kod basmaktansa.
-async fn boot_and_wait_for_address(max_wait_s: u64) -> ServerCore {
-    let mut core = match ServerCore::new(build_config()) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Sunucu başlatılamadı: {e}");
-            std::process::exit(1);
-        }
-    };
-    let deadline = now_ms() + (max_wait_s * 1000) as i64;
-    while core.advertised_addrs().is_empty() && now_ms() < deadline {
-        core.pump_for(std::time::Duration::from_millis(500)).await;
-    }
-    core
-}
-
 /// Kullanıcı isteği: tek bir kodun HERKESE dağıtılabilmesi. `invite new`
 /// her çağrıda YENİ bir kod üretir ve jetonu bir daha gösteremez; bu komut
 /// AYNI kalıcı kodu döner (bkz. `ServerCore::join_code`).
-async fn join_code(args: &[String]) {
+fn join_code(args: &[String]) {
     let rotate = matches!(args.first().map(String::as_str), Some("rotate") | Some("yenile"));
-    let core = boot_and_wait_for_address(90).await;
-    let res = if rotate { core.rotate_join_code() } else { core.join_code() };
-    match res {
+    match typeon_server::join_code(&open_store(), rotate) {
         Ok(code) => {
             println!("{code}");
             if rotate {
@@ -178,15 +171,19 @@ async fn join_code(args: &[String]) {
     }
 }
 
-async fn invite(args: &[String]) {
+fn invite(args: &[String]) {
     match args.first().map(String::as_str) {
         Some("new") | None => {
             let label = args.get(1).cloned().unwrap_or_else(|| "davet".to_string());
             // 0 (ya da negatif) = SINIRSIZ — bkz. `Store::create_invite`.
-            let uses: i64 = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(1);
-            let days: i64 = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(7);
-            let core = boot_and_wait_for_address(90).await;
-            match core.create_invite(&label, uses, days * 24 * 60 * 60 * 1000) {
+            let uses = arg_num(args, 2, 1);
+            let days = arg_num(args, 3, 7);
+            // An overflow wrapped negative, which means "never expires".
+            let Some(ttl_ms) = days.checked_mul(24 * 60 * 60 * 1000) else {
+                eprintln!("Gün sayısı çok büyük: {days}");
+                std::process::exit(2);
+            };
+            match typeon_server::create_invite(&open_store(), &label, uses, ttl_ms) {
                 Ok(code) => {
                     println!("{code}");
                     eprintln!("\nBu kodu istemcide Ayarlar > Sunucular > Sunucu ekle bölümüne yapıştırın.");
@@ -200,15 +197,7 @@ async fn invite(args: &[String]) {
             }
         }
         Some("list") => {
-            let core = match ServerCore::new(build_config()) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("Açılamadı: {e}");
-                    std::process::exit(1);
-                }
-            };
-            let now = now_ms();
-            for (label, uses, expires, valid) in core.store().list_invites(now) {
+            for (label, uses, expires, valid) in open_store().list_invites(now_ms()) {
                 println!(
                     "{:<20} kalan={:<9} bitiş={:<15} {}",
                     label,
@@ -226,16 +215,10 @@ async fn invite(args: &[String]) {
 }
 
 fn devices(args: &[String]) {
-    let core = match ServerCore::new(build_config()) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Açılamadı: {e}");
-            std::process::exit(1);
-        }
-    };
+    let store = open_store();
     match args.first().map(String::as_str) {
         Some("list") | None => {
-            for e in core.store().list_enrollments() {
+            for e in store.list_enrollments() {
                 println!(
                     "{} peer={} durum={:?} posta={}B arşiv={}B dosya={}B",
                     hex::encode(&e.enrollment_id),
@@ -256,7 +239,7 @@ fn devices(args: &[String]) {
                 eprintln!("Geçersiz enrollment_id (hex bekleniyor)");
                 std::process::exit(2);
             };
-            match core.store().revoke_enrollment(&id) {
+            match store.revoke_enrollment(&id) {
                 Ok(()) => println!("İptal edildi: {id_hex}"),
                 Err(e) => {
                     eprintln!("İptal edilemedi: {e}");
@@ -271,11 +254,12 @@ fn devices(args: &[String]) {
     }
 }
 
-async fn address() {
-    let core = boot_and_wait_for_address(90).await;
-    println!("peer_id: {}", core.local_peer_id());
-    println!("tor: {}", core.tor_status());
-    for addr in core.advertised_addrs() {
-        println!("{addr}");
+fn address() {
+    match typeon_server::advertised_addrs(&open_store()) {
+        Ok(addrs) => addrs.iter().for_each(|a| println!("{a}")),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
     }
 }

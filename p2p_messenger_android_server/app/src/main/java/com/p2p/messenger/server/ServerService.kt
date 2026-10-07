@@ -16,6 +16,9 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Sunucuyu ayakta tutan foreground service.
@@ -36,12 +39,44 @@ class ServerService : Service() {
         private const val TAG = "TypeonServerSvc"
         private const val CHANNEL_ID = "TypeonServerChannel"
         private const val NOTIFICATION_ID = 1
+        private const val ERROR_NOTIFICATION_ID = 2
 
         const val PREFS_NAME = "typeon_server_settings"
         private const val KEY_NODE = "node_mode"
-        private const val KEY_NAME = "server_name"
         private const val KEY_ENABLED = "server_enabled"
-        private const val KEY_DATA_DIR = "data_dir"
+        // Holds the BLOB dir. The stored key keeps its old name; identity,
+        // database and Tor state never move (see `dataDir`).
+        private const val KEY_BLOB_DIR = "data_dir"
+
+        /**
+         * Every native start and stop runs here, one at a time and in order,
+         * so a stop always queues behind a start that is still initialising.
+         * On separate threads the stop was a no-op and the server then came
+         * up with no service, no wake lock and the switch off.
+         */
+        val core: ExecutorService = Executors.newSingleThreadExecutor()
+
+        /** Why the last start failed; the activity shows it. */
+        @Volatile
+        var lastError: String? = null
+
+        /** A storage move is copying or deleting blob files. */
+        val moving = AtomicBoolean(false)
+
+        private const val WATCHDOG_MS = 60_000L
+
+        @Volatile
+        private var instance: ServerService? = null
+
+        /**
+         * Starts the native core again inside the running service (after a
+         * storage move stopped it). The service stays in the foreground the
+         * whole time, so this works with the app in the background, where
+         * Android 12+ refuses to start a service.
+         */
+        fun restartCore() {
+            instance?.startCore()
+        }
 
         fun isNodeMode(context: Context): Boolean =
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_NODE, false)
@@ -50,10 +85,6 @@ class ServerService : Service() {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit().putBoolean(KEY_NODE, enabled).apply()
         }
-
-        fun serverName(context: Context): String =
-            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .getString(KEY_NAME, "Typeon") ?: "Typeon"
 
         fun isEnabled(context: Context): Boolean =
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_ENABLED, false)
@@ -81,18 +112,21 @@ class ServerService : Service() {
          */
         fun blobDir(context: Context): java.io.File {
             val saved = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .getString(KEY_DATA_DIR, null)
-            if (!saved.isNullOrEmpty()) {
-                val f = java.io.File(saved)
-                if ((f.isDirectory || f.mkdirs()) && f.canWrite()) return f
-                Log.w(TAG, "Seçili blob dizini kullanılamıyor, dahiliye dönülüyor: $saved")
-            }
-            return java.io.File(context.filesDir, "blobs")
+                .getString(KEY_BLOB_DIR, null)
+            // A chosen dir is never replaced silently. With the SD card not
+            // mounted the server used to start on an empty internal dir:
+            // every stored attachment failed and new uploads were orphaned.
+            // The service checks `blobDirUsable` and refuses to start instead.
+            if (!saved.isNullOrEmpty()) return java.io.File(saved)
+            // Created here: `StatFs` throws on a path that does not exist.
+            return java.io.File(context.filesDir, "blobs").apply { mkdirs() }
         }
+
+        fun blobDirUsable(dir: java.io.File): Boolean = (dir.isDirectory || dir.mkdirs()) && dir.canWrite()
 
         fun setBlobDir(context: Context, dir: java.io.File) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit().putString(KEY_DATA_DIR, dir.absolutePath).apply()
+                .edit().putString(KEY_BLOB_DIR, dir.absolutePath).apply()
         }
 
         /**
@@ -106,6 +140,9 @@ class ServerService : Service() {
          */
         fun storageVolumes(context: Context): List<java.io.File> {
             val out = mutableListOf(context.filesDir)
+            // Before Android 11 any app with the storage permission can read
+            // another app's external files dir (blob names, sizes, times).
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return out
             context.getExternalFilesDirs(null)
                 .filterNotNull()
                 .filter { it.absolutePath != context.filesDir.absolutePath }
@@ -125,15 +162,27 @@ class ServerService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (isRunning) return START_STICKY
         isRunning = true
+        instance = this
+        lastError = null
 
         createChannel()
         // API 34+: remoteMessaging, which has no daily cap (dataSync is
         // capped at 6 h a day on Android 15+ and then demoted).
         val notification = buildNotification(getString(R.string.notif_starting))
-        if (android.os.Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            // Android 12+: a sticky restart in the background, without the
+            // battery exemption, may not go foreground. Uncaught, this
+            // crashed the process on every restart attempt.
+            Log.w(TAG, "Ön plana geçilemedi: ${e.message}")
+            isRunning = false
+            stopSelf()
+            return START_NOT_STICKY
         }
 
         // Ekran kapalıyken de teslim yapabilmek için. Sunucu tanım gereği
@@ -185,29 +234,73 @@ class ServerService : Service() {
             Log.w(TAG, "Ağ geri çağrısı kaydedilemedi: ${e.message}")
         }
 
-        Thread {
+        startCore()
+        watchdog.postDelayed(watchdogTick, WATCHDOG_MS)
+        return START_STICKY
+    }
+
+    private val watchdog = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /**
+     * The native loop can end on its own (a panic inside it). Nobody else
+     * notices with the screen off: the service kept the wake lock and the
+     * Wi-Fi lock for a server that was gone. Start it again.
+     */
+    private val watchdogTick = object : Runnable {
+        override fun run() {
+            core.execute {
+                try {
+                    val dead = !org.json.JSONObject(ServerLib.serverStatus()).optBoolean("running")
+                    if (isRunning && dead && !moving.get()) {
+                        Log.w(TAG, "Sunucu döngüsü ölmüş, yeniden başlatılıyor")
+                        startCore()
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "Durum okunamadı: ${e.message}")
+                }
+            }
+            watchdog.postDelayed(this, WATCHDOG_MS)
+        }
+    }
+
+    private fun startCore() {
+        core.execute {
+            // A stop is queued behind this one, or a move owns the blob files.
+            if (!isRunning || moving.get()) return@execute
             val result = try {
+                val blobs = awaitBlobDir()
+                    ?: throw java.io.IOException("depolama konumu kullanılamıyor: ${blobDir(this).absolutePath}")
                 // Tor parametresi yok — onion service her zaman açık
                 // (bkz. ServerLib.startServer notu).
                 ServerLib.startServer(
                     dataDir(this).absolutePath,
                     isNodeMode(this),
-                    serverName(this),
-                    storageBudgetBytes(),
-                    blobDir(this).absolutePath
+                    "Typeon",
+                    storageBudgetBytes(blobs),
+                    blobs.absolutePath
                 )
             } catch (e: Throwable) {
                 Log.e(TAG, "Sunucu başlatılamadı", e)
                 "Error: ${e.message}"
             }
-            Log.i(TAG, "startServer -> $result")
-            updateNotification(
-                if (result.startsWith("Error:")) result
-                else getString(R.string.notif_running)
-            )
-        }.start()
-
-        return START_STICKY
+            val failed = result.startsWith("Error:")
+            // The success value is the server's peer id: not for logcat.
+            Log.i(TAG, if (failed) "startServer: $result" else "startServer: ok")
+            // Stopped meanwhile: `onDestroy` queued the stop behind this.
+            if (!isRunning) return@execute
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (failed) {
+                // Not running: do not hold the foreground slot, the wake lock
+                // and the Wi-Fi lock for it (`onDestroy` releases them). The
+                // error stays as an ordinary notification.
+                lastError = result
+                nm.notify(ERROR_NOTIFICATION_ID, buildNotification(result, ongoing = false))
+                stopSelf()
+            } else {
+                nm.cancel(ERROR_NOTIFICATION_ID)
+                nm.notify(NOTIFICATION_ID, buildNotification(getString(R.string.notif_running)))
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -215,13 +308,13 @@ class ServerService : Service() {
         // yalnızca wake lock bırakılıyordu; sunucu süreçte çalışmaya devam
         // ediyor, arayüzdeki anahtar "kapalı" gösterse bile posta kabul
         // etmeyi sürdürüyordu.
-        Thread {
+        core.execute {
             try {
                 ServerLib.stopServer()
             } catch (e: Throwable) {
                 Log.w(TAG, "Sunucu durdurulamadı: ${e.message}")
             }
-        }.start()
+        }
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
         wifiLock?.let { if (it.isHeld) it.release() }
@@ -233,6 +326,8 @@ class ServerService : Service() {
             } catch (_: Exception) {}
         }
         netCallback = null
+        watchdog.removeCallbacks(watchdogTick)
+        if (instance === this) instance = null
         isRunning = false
         super.onDestroy()
     }
@@ -251,18 +346,16 @@ class ServerService : Service() {
     }
 
     private fun createChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                getString(R.string.notif_channel),
-                NotificationManager.IMPORTANCE_LOW
-            )
-            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-                .createNotificationChannel(channel)
-        }
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            getString(R.string.notif_channel),
+            NotificationManager.IMPORTANCE_LOW
+        )
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+            .createNotificationChannel(channel)
     }
 
-    private fun buildNotification(text: String): Notification {
+    private fun buildNotification(text: String, ongoing: Boolean = true): Notification {
         val intent = PendingIntent.getActivity(
             this, 0, Intent(this, ServerActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -272,33 +365,45 @@ class ServerService : Service() {
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setContentIntent(intent)
-            .setOngoing(true)
+            .setOngoing(ongoing)
             .build()
     }
 
 
     /**
-     * Sunucunun kullanabileceği disk bütçesi: o anki BOŞ alanın yarısı,
-     * 8 GB'ı geçmemek üzere.
+     * The chosen blob dir, waiting up to a minute for it: after a reboot
+     * BOOT_COMPLETED can arrive before the SD card is mounted.
+     */
+    private fun awaitBlobDir(): java.io.File? {
+        val dir = blobDir(this)
+        repeat(30) {
+            if (blobDirUsable(dir)) return dir
+            if (!isRunning) return null
+            try { Thread.sleep(2000) } catch (e: InterruptedException) { return null }
+        }
+        return null
+    }
+
+    /**
+     * Sunucunun disk bütçesi: ZATEN sakladığı bloblar + o anki BOŞ alanın
+     * yarısı, 8 GB'ı geçmemek üzere.
      *
      * "Yarısı", cihazın kendi işine (güncelleme, fotoğraf, kurulum) yer
-     * bırakmak için — test sırasında sunucu diski doldurunca yeni bir APK
-     * bile kurulamadı. Tavan ise makul bir üst sınır: boş alanı 500 GB olan
-     * bir cihazda 250 GB'lık kota vaat etmenin anlamı yok.
+     * bırakmak için. What the server already stores is added back: half of
+     * the free space alone shrank on every start as the server filled, fell
+     * below current usage, and then every deposit was refused with space left.
+     * ponytail: counts the blob dir only; mail and archive live in the
+     * database on internal storage and are small next to blobs.
      */
-    private fun storageBudgetBytes(): Long {
+    private fun storageBudgetBytes(blobs: java.io.File): Long {
         return try {
-            val fs = android.os.StatFs(blobDir(this).absolutePath)
-            val free = fs.availableBytes
-            (free / 2).coerceAtMost(8L * 1024 * 1024 * 1024).coerceAtLeast(64L * 1024 * 1024)
+            val free = android.os.StatFs(blobs.absolutePath).availableBytes
+            val used = blobs.listFiles()?.sumOf { it.length() } ?: 0L
+            // At least 1: 0 means "no budget" to the native side.
+            (used + free / 2).coerceAtMost(8L * 1024 * 1024 * 1024).coerceAtLeast(1L)
         } catch (e: Throwable) {
             Log.w(TAG, "Boş alan okunamadı, varsayılan bütçe: ${e.message}")
             512L * 1024 * 1024
         }
-    }
-
-    private fun updateNotification(text: String) {
-        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-            .notify(NOTIFICATION_ID, buildNotification(text))
     }
 }
