@@ -26,6 +26,11 @@ pub struct KnownDevice {
     /// "doğrulanmadı" uyarısı için anlamlı bir sinyal.
     #[serde(default)]
     pub via_signed_chain: bool,
+    /// Revoked by the contact's own signed `DeviceRevoke`, not by the local
+    /// user. Such a device never becomes Active again: a stolen device still
+    /// shows its code and still holds its old `DeviceAdd`.
+    #[serde(default)]
+    pub owner_revoked: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +117,9 @@ impl Contact {
         // `find_device`, so the device never became usable and every
         // re-pairing added one more entry.
         if let Some(d) = self.known_devices.iter_mut().find(|d| d.device_fingerprint == fingerprint) {
+            if d.owner_revoked {
+                return;
+            }
             d.status = KnownDeviceStatus::Active;
             d.via_signed_chain = via_signed_chain;
         } else {
@@ -120,9 +128,31 @@ impl Contact {
                 first_seen: now,
                 status: KnownDeviceStatus::Active,
                 via_signed_chain,
+                owner_revoked: false,
             });
         }
         self.last_device_change = Some(now);
+    }
+
+    /// The contact revoked its device with a signed notice (see `owner_revoked`).
+    /// A device this side never saw gets an entry too: its old `DeviceAdd`
+    /// must not introduce it later.
+    pub fn revoke_device_by_owner(&mut self, fingerprint: &str, now: u64) {
+        // ponytail: 32 entries. The owner signs each one, so only the contact
+        // itself can fill the list.
+        if self.find_device(fingerprint).is_none() && self.known_devices.len() < 32 {
+            self.known_devices.push(KnownDevice {
+                device_fingerprint: fingerprint.to_string(),
+                first_seen: now,
+                status: KnownDeviceStatus::Revoked,
+                via_signed_chain: true,
+                owner_revoked: true,
+            });
+        }
+        self.revoke_device(fingerprint, now);
+        if let Some(d) = self.known_devices.iter_mut().find(|d| d.device_fingerprint == fingerprint) {
+            d.owner_revoked = true;
+        }
     }
 
     pub fn revoke_device(&mut self, fingerprint: &str, now: u64) {
@@ -200,6 +230,20 @@ mod tests {
         c.add_device_unverified("dev1".into(), 3000);
         assert_eq!(c.known_devices.len(), 1);
         assert!(c.is_known_active("dev1"));
+    }
+
+    #[test]
+    fn owner_revoked_device_stays_revoked() {
+        let mut c = Contact::new("c1".into(), "Alice".into(), "id1".into());
+        c.add_device_unverified("dev1".into(), 1000);
+        c.revoke_device_by_owner("dev1", 2000);
+        c.add_device_unverified("dev1".into(), 3000);
+        c.add_device_via_signed_chain("dev1".into(), 4000);
+        assert!(!c.is_known_active("dev1"));
+        // Never seen before the revoke: remembered, and it stays out.
+        c.revoke_device_by_owner("dev2", 5000);
+        c.add_device_via_signed_chain("dev2".into(), 6000);
+        assert!(!c.is_known_active("dev2"));
     }
 
     #[test]

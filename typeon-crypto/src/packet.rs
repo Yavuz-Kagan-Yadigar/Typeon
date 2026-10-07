@@ -118,6 +118,17 @@ pub enum GroupChange {
     TransferFounder(String),
 }
 
+/// Proof that a device belongs to an identity, checkable by someone who knows
+/// neither: the `DeviceAdd` is signed by the identity's first device (whose
+/// fingerprint IS the identity id), and `signer` carries that device's keys.
+/// Travels beside a third party's claim "this device is that identity's"
+/// (group vouching, sibling sync); a first device needs none.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceAddProof {
+    pub device_add: DeviceAdd,
+    pub signer: SyncedDevice,
+}
+
 /// Spec dışı, kullanıcı kararı: bir grup üyesinin, kurucu tarafından
 /// kefil olunan cihaz kaydı (bkz. `GroupUpdate.member_devices`). Alıcı,
 /// `device_fingerprint`'in bu anahtarların SHA3-256'sı olduğunu ayrıca
@@ -244,6 +255,13 @@ pub struct GroupUpdate {
     /// doğrulanmadı" olarak gösterilir.
     #[serde(default)]
     pub member_devices: Vec<GroupMemberDevice>,
+    /// For each vouched device that is not its identity's first device: the
+    /// proof that it belongs to that identity (bkz. `DeviceAddProof`).
+    /// Outside the founder's signature, like `founder_chain`: each proof is
+    /// signed by itself, and a version that does not know the field still
+    /// verifies the update.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_device_proofs: Vec<DeviceAddProof>,
     /// founder_identity_id olmalı — alıcı taraf bunu doğrular.
     pub signed_by: String,
     /// Kurucunun hangi cihazı imzaladı.
@@ -360,6 +378,10 @@ pub struct SyncedContact {
     #[serde(with = "serde_bytes")]
     pub avatar_jpeg: Option<Vec<u8>>,
     pub devices: Vec<SyncedDevice>,
+    /// bkz. `DeviceAddProof`: one for each device that is not the contact's
+    /// first device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub device_proofs: Vec<DeviceAddProof>,
 }
 
 /// Senkron yükü (spec 1.7). İlk bağlanmada tam kopya olarak taşınır;
@@ -396,6 +418,12 @@ pub struct SyncPayload {
     #[serde(default)]
     #[serde(with = "serde_bytes")]
     pub archive_root_key: Option<Vec<u8>>,
+    /// When the account name was last changed by the user (ms), on the device
+    /// that sends this. A sync has no order: the receiver takes the name only
+    /// from a payload whose stamp is newer than its own. 0 = a version without
+    /// the stamp.
+    #[serde(default)]
+    pub name_changed_at_ms: u64,
 }
 
 /// Ağ üzerinde taşınan üst-seviye paket zarfı. `MessagePacket` header'ı
@@ -1111,6 +1139,21 @@ pub struct IdentityExchange {
     /// ayrıştırılmaya devam eder (`None` = birincil cihaz ya da eski sürüm).
     #[serde(default)]
     pub device_add: Option<DeviceAdd>,
+    /// The signed `DeviceRevoke`s of this identity. A revoke used to reach
+    /// only the contacts that existed (and were reachable) when it was made:
+    /// to anyone who paired later, the revoked device's old `DeviceAdd` was
+    /// still good. Left out when empty, so the packet of an identity that
+    /// never revoked a device is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revokes: Vec<DeviceRevoke>,
+    /// The public keys of the device that signed `device_add`. `identity_id`
+    /// is the fingerprint of the identity's first device, so when that device
+    /// signed the add, these keys prove the claim to someone who knows
+    /// neither device: they hash to `identity_id` and verify the signature.
+    /// Without it `identity_id` was a bare claim, and anyone could register
+    /// under an identity we had not met yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_add_signer: Option<SyncedDevice>,
 }
 
 /// Çoklu-cihaz (spec 1.7 mesaj geçmişi senkronu): kendi GÖNDERDİĞİM bir

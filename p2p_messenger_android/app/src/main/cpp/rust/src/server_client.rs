@@ -2582,6 +2582,8 @@ mod tests {
             kem_pubkey_x25519: vec![5],
             kem_pubkey_mlkem: vec![6],
             device_add: None,
+            revokes: Vec::new(),
+            device_add_signer: None,
         })
     }
 
