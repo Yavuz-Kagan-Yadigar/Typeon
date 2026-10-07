@@ -1,0 +1,87 @@
+# Flatpak manifest — Typeon Linux masaüstü istemcisi.
+#
+# Neden Flatpak: uygulama GTK4 + libadwaita üzerine kurulu. Bu ikisini bir
+# AppImage'a elle paketlemek (gdk-pixbuf loader önbelleği, derlenmiş GSettings
+# şemaları, ikon teması) kırılgan; GNOME runtime bunların HEPSİNİ zaten doğru
+# sürümlerle sağlıyor.
+#
+# Derleme SANDBOX İÇİNDE yapılıyor (host'ta değil): host openSUSE'de GTK 4.22
+# var, runtime'da 4.20 — host'ta derleyip runtime'da çalıştırmak sembol
+# uyuşmazlığı riski taşırdı.
+app-id: com.p2p.messenger.Typeon
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: typeon
+
+finish-args:
+  # libp2p/gossipsub + Tor: ağ olmadan uygulamanın hiçbir anlamı yok.
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  # Camera for video calls (v4l2); it also covers the GPU (VA-API video
+  # encode/decode) that `--device=dri` granted before.
+  - --device=all
+  # Sesli mesaj kaydı/çalması, arama sesi.
+  - --socket=pulseaudio
+  # KRİTİK: kasa anahtarı sistem anahtarlığında tutuluyor ve uygulama
+  # anahtarlık olmadan AÇILMIYOR (bkz. src/keyring.rs).
+  - --talk-name=org.freedesktop.secrets
+  # ...ve SADECE yukarıdaki ad YETMİYOR. Gerçek cihazda doğrulandı: yalnız
+  # `org.freedesktop.secrets` verildiğinde uygulama "No system keyring found
+  # — Neither KDE Wallet nor GNOME Keyring is installed" diyerek açılmıyordu.
+  #
+  # Sebep `keyring.rs`'in kendi dosya başı notunda yazıyor: KDE'de
+  # `org.freedesktop.secrets` çoğu zaman KENDİ BAŞINA D-Bus ile
+  # başlatılabilir DEĞİL, bu yüzden `ensure_available` önce cüzdanı GERÇEK
+  # adıyla aktive ediyor (`StartServiceByName`). Flatpak'in D-Bus proxy'si
+  # ise izin verilmeyen adları `ListActivatableNames` sonucundan da
+  # gizliyor — uygulama hiçbir aday göremeyip "kurulu değil" sonucuna
+  # varıyordu. Dört arka uç adı da `BACKEND_NAMES` listesinden.
+  - --talk-name=org.kde.secretservicecompat
+  - --talk-name=org.kde.kwalletd6
+  - --talk-name=org.kde.kwalletd5
+  - --talk-name=org.gnome.keyring
+  # Dosya seçme/kaydetme portal üzerinden gidiyor (gtk::FileDialog), bu
+  # yüzden geniş dosya sistemi izni İSTEMİYORUZ.
+
+modules:
+  - name: typeon
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/typeon/cargo
+        CARGO_TERM_COLOR: never
+      # Cargo bağımlılıkları sandbox içinde kendisi çeksin diye ağ açık.
+      # (Alternatifi `cargo vendor` ile kaynakları depoya gömmek olurdu.)
+      build-args:
+        - --share=network
+    build-commands:
+      - cargo build --release --manifest-path Linux/Cargo.toml
+      - install -Dm755 Linux/target/release/typeon /app/bin/typeon
+      - install -Dm644 Linux/data/com.p2p.messenger.Typeon.desktop /app/share/applications/com.p2p.messenger.Typeon.desktop
+      - install -Dm644 Linux/data/com.p2p.messenger.Typeon.svg /app/share/icons/hicolor/scalable/apps/com.p2p.messenger.Typeon.svg
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - Linux/target
+          - Linux/target-sdk
+          # `Linux/packaging` KOMPLE atlanıyor (sadece build çıktıları
+          # değil): kaynak `../..`, yani manifest'in KENDİSİ de kopyalanan
+          # ağacın içinde. Atlanmazsa manifest'te tek satır değiştirmek
+          # kaynak hash'ini değiştiriyor, flatpak-builder önbelleği ıskalıyor
+          # ve sadece izin (finish-args) düzenlemesi için TÜM Rust bağımlılık
+          # ağacı baştan derleniyor (~15 dk). Bir kez bu şekilde kaybedildi.
+          - Linux/packaging
+          - p2p_messenger_android/app/build
+          - p2p_messenger_android/app/src/main/cpp/rust/target
+          - p2p_messenger_android_server/app/build
+          - typeon-server/target
+          - plasticity-26.1.3-2.x86_64.rpm
+          - ChatActivity-recovered

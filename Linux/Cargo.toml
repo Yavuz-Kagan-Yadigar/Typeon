@@ -1,0 +1,90 @@
+[package]
+name = "typeon-linux"
+version = "2.0.0"
+edition = "2021"
+description = "Typeon — native Linux desktop client (secondary device)"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "typeon"
+path = "src/main.rs"
+
+[dependencies]
+# THE protocol core — the very same crate the Android app ships (crypto,
+# double ratchet, SQLite schema, libp2p/Tor transport, multi-device linking).
+# Linked directly as an rlib, in-process: there is no second implementation of
+# the protocol here, and nothing to keep in sync by hand. See that crate's
+# `api` module for the JNI-free façade this client calls.
+p2p_messenger_core = { path = "../p2p_messenger_android/app/src/main/cpp/rust" }
+
+# GTK4 + libadwaita: a real native toolkit (no Electron, no webview, no
+# container). Requires `gtk4-devel` + `libadwaita-devel` at build time.
+# `v4_10` unlocks gtk::FileDialog; `v1_5` unlocks AdwToolbarView/NavigationView/
+# SwitchRow. The runtimes on openSUSE Tumbleweed (GTK 4.22 / libadwaita 1.9)
+# are far newer than both baselines.
+gtk = { package = "gtk4", version = "0.9", features = ["v4_10"] }
+adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
+
+# Worker thread -> GTK main loop hand-off. gtk-rs removed glib::MainContext
+#::channel in 0.8; async-channel + glib::spawn_future_local is the documented
+# replacement.
+async-channel = "2"
+
+# Çekirdek `log` makrolarıyla epey teşhis bilgisi yayıyor (bağlantı
+# durumu, ratchet olayları, sunucu kayıt/teslim akışı). Android tarafında
+# bunu `android_logger` logcat'e veriyor; masaüstünde ise HİÇBİR logger
+# kurulu değildi, yani o çıktının tamamı sessizce yutuluyordu — bir sorun
+# olduğunda elde hiçbir şey kalmıyordu. `RUST_LOG=info` ile açılır.
+env_logger = "0.11"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+
+# fontdb: Load .ttf/.otf files, extract family names, register with the
+# system font database so GTK4's CSS `font-family`/`local()` resolves them.
+# Lightweight, no Cairo dependency — we only need family names at startup
+# and Pango will handle rendering once the font is registered.
+fontdb = "0.21"
+
+# Device-link QR rendering (the Android app scans this). Pure Rust; default
+# features off so it does not drag in the `image` crate — we rasterise the
+# modules ourselves onto a cairo surface.
+qrcode = { version = "0.14", default-features = false }
+
+# At-rest protection for the local secret vault (see src/secrets.rs). Same
+# primitives/versions the core already uses, so no new crypto enters the tree.
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+sha2 = "0.10"
+rand = "0.8"
+zeroize = "1.7"
+
+# The vault key lives in the desktop's own secret store — KDE Wallet or GNOME
+# Keyring, whichever is present. Both speak the freedesktop Secret Service
+# D-Bus API (KDE via ksecretd), so one client covers both. Pure Rust + zbus:
+# no libdbus, no openssl, nothing new for the build to link against.
+#
+# The async-io backend rather than the tokio one on purpose: these calls are
+# made synchronously from the GTK main thread at startup, and async-io drives
+# its own reactor thread, so there is no ambient tokio runtime to arrange. (The
+# core does run a tokio runtime, but it is private to that crate and only
+# entered inside its own API calls.)
+secret-service = { version = "5.1", default-features = false, features = ["rt-async-io-crypto-rust"] }
+# Used directly to detect and D-Bus-activate whichever wallet is installed
+# before handing over to secret-service (see src/keyring.rs).
+# `blocking-api` is in zbus's defaults and is what generates the blocking proxy
+# types (`zbus::blocking::fdo::DBusProxy`), so it has to be named explicitly
+# alongside the runtime once default features are off.
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+
+# Voice/video calls (src/call_media.rs): Opus, HEVC/H.264, camera, echo
+# cancellation. The GNOME runtime ships GStreamer with all of these (VA-API
+# encoders, libav decoders via codecs-extra), so nothing is bundled here.
+gstreamer = "0.23"
+gstreamer-app = "0.23"
+gstreamer-video = "0.23"
+
+[profile.release]
+opt-level = 2
+lto = "thin"

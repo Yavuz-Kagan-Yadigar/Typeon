@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Typeon
+GenericName=Secure Messenger
+Comment=Peer-to-peer encrypted messaging — linked desktop device
+Exec=typeon
+Icon=com.p2p.messenger.Typeon
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+Keywords=chat;messaging;p2p;encrypted;tor;
+StartupNotify=true
+StartupWMClass=typeon
