@@ -39,8 +39,8 @@
 //! felaketi demek olurdu, bu yüzden nonce 12 bayt rastgele ve şifre metninin
 //! ÖNÜNE eklenir.
 
-use chacha20poly1305::aead::{Aead, KeyInit};
-use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -54,24 +54,44 @@ const NONCE_LEN: usize = 12;
 // Anahtar türetme
 // ---------------------------------------------------------------------------
 
-/// `ikm`'den `info` etiketiyle 32 baytlık bir alt anahtar türetir.
+/// `ikm`'den `info` etiketiyle `N` baytlık bir alt anahtar (32) ya da
+/// körleştirilmiş kimlik (16) türetir.
 ///
 /// Dönen değer `Zeroizing` DEĞİL — çağıranlar kendi kapsamlarında
 /// `zeroize()` çağırır (bu depoda `zeroize`, ratchet/DeviceKeys tarafında
 /// aynı elle-çağrı deseniyle kullanılıyor).
-fn derive32(ikm: &[u8], info: &[u8]) -> Result<[u8; 32], String> {
+fn derive<const N: usize>(ikm: &[u8], info: &[u8]) -> Result<[u8; N], String> {
     let hk = Hkdf::<Sha256>::new(None, ikm);
-    let mut out = [0u8; 32];
+    let mut out = [0u8; N];
     hk.expand(info, &mut out).map_err(|_| "HKDF expand failed".to_string())?;
     Ok(out)
 }
 
-/// `ikm`'den `info` etiketiyle 16 baytlık bir kimlik türetir (körleştirme).
-fn derive16(ikm: &[u8], info: &[u8]) -> Result<[u8; 16], String> {
-    let hk = Hkdf::<Sha256>::new(None, ikm);
-    let mut out = [0u8; 16];
-    hk.expand(info, &mut out).map_err(|_| "HKDF expand failed".to_string())?;
+/// `nonce(12) || ciphertext` under `key`, which is wiped. The one framing of
+/// this module (mailbox envelopes and archive records). `aad` is
+/// authenticated, not stored: the opener must supply the same bytes.
+fn seal(mut key: [u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    key.zeroize();
+    let mut out = vec![0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut out);
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&out), Payload { msg: plaintext, aad })
+        .map_err(|_| "Mühürlenemedi".to_string())?;
+    out.extend_from_slice(&ciphertext);
     Ok(out)
+}
+
+/// `seal`'in tersi.
+fn open(mut key: [u8; 32], aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>, String> {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    key.zeroize();
+    if sealed.len() <= NONCE_LEN {
+        return Err("Mühürlü veri çok kısa".to_string());
+    }
+    cipher
+        .decrypt(Nonce::from_slice(&sealed[..NONCE_LEN]), Payload { msg: &sealed[NONCE_LEN..], aad })
+        .map_err(|_| "Mühür açılamadı (yanlış anahtar veya bozuk veri)".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -94,10 +114,14 @@ fn derive16(ikm: &[u8], info: &[u8]) -> Result<[u8; 16], String> {
 ///    oturum kutusu mu" ayrımını YAPAMAMASINI sağlar (uzunluk/önek
 ///    farkı kalmaz), ki bu tek başına faydalı bir gizlemedir.
 ///
-/// Fingerprint'ler 256-bit SHA3 çıktısı olduğundan sözlük saldırısıyla
-/// geri çevrilemez.
+/// KNOWN LIMIT: the id has no key. A server that knows a fingerprint (every
+/// unsealed `Handshake`/`IdentityExchange` it stores names its sender)
+/// computes that device's first-contact mailbox id, and so links the sender
+/// of a first-contact deposit to its recipient. A keyed id needs a secret
+/// both sides hold before first contact, and a fingerprint-only QR carries
+/// none. Session mailboxes (`p2p_rt_`) come from the root key and stay blind.
 pub fn server_mailbox_id(topic: &str) -> String {
-    let id = derive16(topic.as_bytes(), b"p2pmsg-v0.1-server-mailbox")
+    let id: [u8; 16] = derive(topic.as_bytes(), b"p2pmsg-v0.1-server-mailbox")
         .expect("HKDF expand 16 bayt için asla başarısız olmaz");
     format!("mb_{}", hex::encode(id))
 }
@@ -126,12 +150,14 @@ pub fn archive_epoch_for(ts_ms: u64) -> u64 {
 /// `conv_key`: 1:1 için karşı tarafın `identity_id`'si, grup için `group_id`.
 /// KASITLI olarak `identity_id`, device fingerprint DEĞİL — karşı taraf
 /// cihazını değiştirdiğinde (spec §2.2) arşivin okunabilirliği kaybolmasın
-/// diye.
+/// diye. The two kinds share this key space with no tag (a tag would orphan
+/// every stored archive): the caller keeps them apart by format, a group id
+/// is `group-<16 hex>` and an identity id 64 hex (lib.rs `process_group_update`).
 fn conv_archive_key(archive_root_key: &[u8; 32], conv_key: &str) -> Result<[u8; 32], String> {
     let mut info = Vec::with_capacity(24 + conv_key.len());
     info.extend_from_slice(b"p2pmsg-v0.1-archive-conv");
     info.extend_from_slice(conv_key.as_bytes());
-    derive32(archive_root_key, &info)
+    derive(archive_root_key, &info)
 }
 
 /// Sunucu arşivinde bir sohbetin, BELLİ BİR DÖNEMDEKİ körleştirilmiş kova
@@ -145,7 +171,7 @@ pub fn server_archive_bucket(archive_root_key: &[u8; 32], conv_key: &str, epoch:
     let mut info = Vec::with_capacity(26 + 8);
     info.extend_from_slice(b"p2pmsg-v0.1-archive-bucket");
     info.extend_from_slice(&epoch.to_be_bytes());
-    let id = derive16(&cak, &info);
+    let id = derive::<16>(&cak, &info);
     cak.zeroize();
     Ok(format!("ar_{}", hex::encode(id?)))
 }
@@ -169,23 +195,18 @@ pub fn server_archive_bucket(archive_root_key: &[u8; 32], conv_key: &str, epoch:
 /// türetilen anahtarla mühürler.
 ///
 /// Çıktı: `nonce(12) || ciphertext`.
-pub fn seal_envelope(root_key: &[u8], envelope_cbor: &[u8]) -> Result<Vec<u8>, String> {
-    let mut key = derive32(root_key, b"p2pmsg-v0.1-server-seal")?;
-    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| "Geçersiz mühür anahtarı".to_string())?;
-    key.zeroize();
+///
+/// The seal is bound to the mailbox it is deposited in and to the device that
+/// sent it (`sender_fp`): both ends of a session share the root key and the
+/// mailbox, so without that the server could hand a deposit back to its own
+/// sender, or move it to the session's other mailbox.
+pub fn seal_envelope(root_key: &[u8], mailbox_id: &str, sender_fp: &str, envelope_cbor: &[u8]) -> Result<Vec<u8>, String> {
+    seal(derive(root_key, b"p2pmsg-v0.1-server-seal")?, &envelope_aad(mailbox_id, sender_fp), envelope_cbor)
+}
 
-    let mut nonce_bytes = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(nonce, envelope_cbor)
-        .map_err(|_| "Zarf mühürlenemedi".to_string())?;
-
-    let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-    out.extend_from_slice(&nonce_bytes);
-    out.extend_from_slice(&ciphertext);
-    Ok(out)
+/// Neither part contains a 0 byte (`mb_<hex>`, hex fingerprint).
+fn envelope_aad(mailbox_id: &str, sender_fp: &str) -> Vec<u8> {
+    [mailbox_id.as_bytes(), b"\0", sender_fp.as_bytes()].concat()
 }
 
 /// `seal_envelope`'ın tersi.
@@ -195,18 +216,11 @@ pub fn seal_envelope(root_key: &[u8], envelope_cbor: &[u8]) -> Result<Vec<u8>, S
 /// nesil geriyi de dinle" kuralının aynısı (karşı taraf bizim son
 /// rotasyonumuzu henüz uygulamamış olabilir ve mühür ESKİ root_key'le
 /// atılmış olabilir).
-pub fn open_envelope(root_key: &[u8], sealed: &[u8]) -> Result<Vec<u8>, String> {
-    if sealed.len() <= NONCE_LEN {
-        return Err("Mühürlü zarf çok kısa".to_string());
-    }
-    let mut key = derive32(root_key, b"p2pmsg-v0.1-server-seal")?;
-    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| "Geçersiz mühür anahtarı".to_string())?;
-    key.zeroize();
-
-    let nonce = Nonce::from_slice(&sealed[..NONCE_LEN]);
-    cipher
-        .decrypt(nonce, &sealed[NONCE_LEN..])
-        .map_err(|_| "Mühür açılamadı (yanlış anahtar veya bozuk veri)".to_string())
+///
+/// `mailbox_id`: the mailbox the item was fetched from; `sender_fp`: the
+/// device at the other end of the session that owns `root_key`.
+pub fn open_envelope(root_key: &[u8], mailbox_id: &str, sender_fp: &str, sealed: &[u8]) -> Result<Vec<u8>, String> {
+    open(derive(root_key, b"p2pmsg-v0.1-server-seal")?, &envelope_aad(mailbox_id, sender_fp), sealed)
 }
 
 /// İlk-temas zarfları (`Handshake`/`IdentityExchange`) için "mühür" —
@@ -230,7 +244,8 @@ pub fn frame_unsealed(envelope_cbor: &[u8]) -> Vec<u8> {
 }
 
 /// `frame_unsealed`'ın tersi. `None` = bu öğe çerçevelenmemiş (yani gerçekten
-/// mühürlü), çağıran `open_envelope` denemeli.
+/// mühürlü). ONLY for a mailbox that has no key (first contact): in a
+/// session's mailbox an unsealed item is something the server put there.
 pub fn open_unsealed(sealed: &[u8]) -> Option<&[u8]> {
     if sealed.len() > NONCE_LEN && sealed[..NONCE_LEN] == [0u8; NONCE_LEN] {
         Some(&sealed[NONCE_LEN..])
@@ -263,7 +278,7 @@ fn archive_record_key(
     info.extend_from_slice(b"p2pmsg-v0.1-archive-record");
     info.extend_from_slice(record_id.as_bytes());
     info.extend_from_slice(&rev.to_be_bytes());
-    let key = derive32(&cak, &info);
+    let key = derive(&cak, &info);
     cak.zeroize();
     key
 }
@@ -295,26 +310,17 @@ pub fn seal_archive_record(
     rev: u64,
     record_cbor: &[u8],
 ) -> Result<Vec<u8>, String> {
-    let mut key = archive_record_key(archive_root_key, conv_key, record_id, rev)?;
-    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| "Geçersiz arşiv anahtarı".to_string())?;
-    key.zeroize();
-
-    let mut nonce_bytes = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(nonce, record_cbor)
-        .map_err(|_| "Arşiv kaydı şifrelenemedi".to_string())?;
-
-    let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-    out.extend_from_slice(&nonce_bytes);
-    out.extend_from_slice(&ciphertext);
-    Ok(out)
+    seal(archive_record_key(archive_root_key, conv_key, record_id, rev)?, b"", record_cbor)
 }
 
 /// `seal_archive_record`'un tersi. `rev`, sunucudan gelen `ArchiveRecord.rev`
 /// alanıdır — anahtar türetmesine girdiği için doğru değerle çağrılmalı.
+///
+/// KNOWN LIMIT: this proves the record was sealed as revision `rev`, not that
+/// `rev` is the newest. A server that kept an older revision can serve it,
+/// and a device restoring from nothing cannot tell: an edited or deleted
+/// message comes back in its old form. Only state the client keeps itself
+/// (it skips records it already holds) stands against that.
 pub fn open_archive_record(
     archive_root_key: &[u8; 32],
     conv_key: &str,
@@ -322,17 +328,7 @@ pub fn open_archive_record(
     rev: u64,
     sealed: &[u8],
 ) -> Result<Vec<u8>, String> {
-    if sealed.len() <= NONCE_LEN {
-        return Err("Mühürlü arşiv kaydı çok kısa".to_string());
-    }
-    let mut key = archive_record_key(archive_root_key, conv_key, record_id, rev)?;
-    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| "Geçersiz arşiv anahtarı".to_string())?;
-    key.zeroize();
-
-    let nonce = Nonce::from_slice(&sealed[..NONCE_LEN]);
-    cipher
-        .decrypt(nonce, &sealed[NONCE_LEN..])
-        .map_err(|_| "Arşiv kaydı çözülemedi (yanlış anahtar veya bozuk veri)".to_string())
+    open(archive_record_key(archive_root_key, conv_key, record_id, rev)?, b"", sealed)
 }
 
 #[cfg(test)]
@@ -354,23 +350,27 @@ mod tests {
     fn envelope_seal_roundtrip() {
         let root_key = [7u8; 32];
         let payload = b"merhaba dunya";
-        let sealed = seal_envelope(&root_key, payload).unwrap();
+        let sealed = seal_envelope(&root_key, "mb_1", "alice", payload).unwrap();
         assert_ne!(&sealed[12..], payload, "sifreli metin duz metne esit olmamali");
-        let opened = open_envelope(&root_key, &sealed).unwrap();
+        let opened = open_envelope(&root_key, "mb_1", "alice", &sealed).unwrap();
         assert_eq!(opened, payload);
+        // Finding 18: not in another mailbox, and not back to its sender
+        // (who would open it as coming from the peer).
+        assert!(open_envelope(&root_key, "mb_2", "alice", &sealed).is_err());
+        assert!(open_envelope(&root_key, "mb_1", "bob", &sealed).is_err());
     }
 
     #[test]
     fn envelope_seal_rejects_wrong_key() {
-        let sealed = seal_envelope(&[7u8; 32], b"gizli").unwrap();
-        assert!(open_envelope(&[8u8; 32], &sealed).is_err());
+        let sealed = seal_envelope(&[7u8; 32], "mb", "fp", b"gizli").unwrap();
+        assert!(open_envelope(&[8u8; 32], "mb", "fp", &sealed).is_err());
     }
 
     #[test]
     fn envelope_seal_uses_fresh_nonce() {
         let root_key = [7u8; 32];
-        let a = seal_envelope(&root_key, b"ayni girdi").unwrap();
-        let b = seal_envelope(&root_key, b"ayni girdi").unwrap();
+        let a = seal_envelope(&root_key, "mb", "fp", b"ayni girdi").unwrap();
+        let b = seal_envelope(&root_key, "mb", "fp", b"ayni girdi").unwrap();
         assert_ne!(a, b, "ayni duz metin iki kez ayni sifreli metni vermemeli");
     }
 
@@ -381,7 +381,7 @@ mod tests {
         assert_eq!(open_unsealed(&framed), Some(&payload[..]));
         // Gerçek bir mühür, çerçevelenmiş sayılmamalı (nonce rastgele
         // olduğundan 12 sıfır bayt olma olasılığı ihmal edilebilir).
-        let sealed = seal_envelope(&[1u8; 32], payload).unwrap();
+        let sealed = seal_envelope(&[1u8; 32], "mb", "fp", payload).unwrap();
         assert!(open_unsealed(&sealed).is_none());
     }
 

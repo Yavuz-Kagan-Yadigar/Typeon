@@ -873,24 +873,25 @@ impl P2PCore {
         out
     }
 
-    /// Kutu kimliği -> o kutunun zarflarını açacak `root_key`.
+    /// Kutu kimliği -> o kutunun zarflarını açacak `root_key` and the device
+    /// at the other end of that session (the seal names its sender).
     ///
     /// `None` değer = ilk temas kutusu (mühürsüz çerçeve, bkz.
     /// `server_seal::frame_unsealed`).
-    fn mailbox_key_index(&self) -> HashMap<String, Option<Vec<u8>>> {
+    fn mailbox_key_index(&self) -> HashMap<String, Option<(Vec<u8>, String)>> {
         let mut idx = HashMap::new();
         if let Some(fp) = &self.own_mailbox_topic_fp {
             idx.insert(server_seal::server_mailbox_id(&format!("p2p_msg_{}", fp)), None);
         }
-        for state in self.ratchets.values() {
+        for (peer_fp, state) in &self.ratchets {
             idx.insert(
                 server_seal::server_mailbox_id(&Self::topic_for_root_key(&state.root_key).to_string()),
-                Some(state.root_key.clone()),
+                Some((state.root_key.clone(), peer_fp.clone())),
             );
             if let Some(prev) = &state.prev_root_key {
                 idx.insert(
                     server_seal::server_mailbox_id(&Self::topic_for_root_key(prev).to_string()),
-                    Some(prev.clone()),
+                    Some((prev.clone(), peer_fp.clone())),
                 );
             }
         }
@@ -961,7 +962,7 @@ impl P2PCore {
                     self.ratchets.get(target_fp).map(|r| r.root_key.clone())
                 };
                 match root {
-                    Some(root_key) => match server_seal::seal_envelope(&root_key, bytes) {
+                    Some(root_key) => match server_seal::seal_envelope(&root_key, &mailbox, &m.header.sender_device_fingerprint, bytes) {
                         Ok(s) => s,
                         Err(e) => {
                             warn!("Zarf mühürlenemedi, sunucu atlanıyor: {}", e);
@@ -1560,11 +1561,15 @@ impl P2PCore {
                         highest.insert(item.mailbox_id.clone(), item.seq);
                         continue;
                     };
+                    // No unsealed fallback for a session's mailbox: only
+                    // first-contact envelopes travel unsealed, and those go to
+                    // the keyless `p2p_msg_` mailbox. The fallback let whoever
+                    // can deposit (the server) put a cleartext envelope, such
+                    // as a recorded HandshakeInit, into a live session's mailbox.
                     let opened = match key {
-                        Some(root_key) => server_seal::open_envelope(root_key, &item.sealed).ok(),
+                        Some((root_key, peer_fp)) => server_seal::open_envelope(root_key, &item.mailbox_id, peer_fp, &item.sealed).ok(),
                         None => server_seal::open_unsealed(&item.sealed).map(|b| b.to_vec()),
-                    }
-                    .or_else(|| server_seal::open_unsealed(&item.sealed).map(|b| b.to_vec()));
+                    };
 
                     match opened {
                         Some(raw) => {
@@ -2735,6 +2740,8 @@ mod tests {
             device_add: None,
             revokes: Vec::new(),
             device_add_signer: None,
+            signature: Vec::new(),
+            signature_pq: Vec::new(),
         })
     }
 

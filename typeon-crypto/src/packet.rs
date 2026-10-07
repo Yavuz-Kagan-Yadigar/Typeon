@@ -3,6 +3,55 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A QR code holds under 3 KB, so a longer pairing code is not one. This
+/// also bounds every field in it (`known_relays`, `rendezvous_node`).
+const MAX_PAIRING_CODE_BYTES: usize = 4096;
+
+fn to_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    ciborium::into_writer(value, &mut buf).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+/// `keys_match_fingerprint()` for every record that carries a device's four
+/// public keys beside its fingerprint (see `identity::keys_match_fingerprint`).
+macro_rules! impl_keys_match_fingerprint {
+    ($($record:ty),*) => {$(
+        impl $record {
+            pub fn keys_match_fingerprint(&self) -> bool {
+                crate::identity::keys_match_fingerprint(
+                    &self.device_fingerprint,
+                    &self.sign_pubkey_ed25519, &self.sign_pubkey_mldsa,
+                    &self.kem_pubkey_x25519, &self.kem_pubkey_mlkem,
+                )
+            }
+        }
+    )*};
+}
+impl_keys_match_fingerprint!(SyncedDevice, GroupMemberDevice, IdentityExchange);
+
+/// Parses a scanned or pasted pairing code. `version` reads the version of
+/// the parsed value; one outside `versions` is refused instead of being read
+/// with this version's meaning.
+fn pairing_code_from_cbor<T: serde::de::DeserializeOwned>(
+    data: &[u8],
+    versions: std::ops::RangeInclusive<u8>,
+    version: fn(&T) -> u8,
+) -> Result<T, String> {
+    if data.len() > MAX_PAIRING_CODE_BYTES {
+        return Err("Kod çok uzun".to_string());
+    }
+    let parsed: T = ciborium::from_reader(data).map_err(|e| e.to_string())?;
+    let v = version(&parsed);
+    if v > *versions.end() {
+        return Err(format!("Bu kod daha yeni bir sürümle üretilmiş (v{}): uygulamayı güncelleyin", v));
+    }
+    if v < *versions.start() {
+        return Err(format!("Bu kod eski bir sürümle üretilmiş (v{}): karşı taraf uygulamayı güncellemeli", v));
+    }
+    Ok(parsed)
+}
+
 /// QR kodun taşıdığı eşleşme paketi (spec 1.3 — "Karar (v0.1): fingerprint-only
 /// QR"). CBOR ile kodlanır (QR kapasitesi kısıtı nedeniyle tam public key'ler
 /// taşınmaz — bağlantı kurulunca karşı taraftan indirilir ve bu `fingerprint`
@@ -36,13 +85,12 @@ impl QrPacket {
 
     /// CBOR olarak kodlar (QR'a gömülecek ham bayt dizisi).
     pub fn to_cbor(&self) -> Result<Vec<u8>, String> {
-        let mut buf = Vec::new();
-        ciborium::into_writer(self, &mut buf).map_err(|e| e.to_string())?;
-        Ok(buf)
+        to_cbor(self)
     }
 
+    /// v1 (no `known_relays`) reads the same way and is still accepted.
     pub fn from_cbor(data: &[u8]) -> Result<Self, String> {
-        ciborium::from_reader(data).map_err(|e| e.to_string())
+        pairing_code_from_cbor(data, 1..=Self::CURRENT_VERSION, |p: &Self| p.version)
     }
 }
 
@@ -336,12 +384,10 @@ impl DeviceLinkRequest {
     /// zaten hiçbir gerçek cihazda üretilemiyordu (üretim anında çöküyordu).
     pub const CURRENT_VERSION: u8 = 2;
     pub fn to_cbor(&self) -> Result<Vec<u8>, String> {
-        let mut buf = Vec::new();
-        ciborium::into_writer(self, &mut buf).map_err(|e| e.to_string())?;
-        Ok(buf)
+        to_cbor(self)
     }
     pub fn from_cbor(data: &[u8]) -> Result<Self, String> {
-        ciborium::from_reader(data).map_err(|e| e.to_string())
+        pairing_code_from_cbor(data, Self::CURRENT_VERSION..=Self::CURRENT_VERSION, |p: &Self| p.version)
     }
 }
 
@@ -525,6 +571,9 @@ pub struct SyncedMessage {
 /// yoksa yeni bir mesaj mı olduğunu bile göremez).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessageContent {
+    // The type is recursive (`SiblingEcho` → `SiblingEchoBody::File.offer`):
+    // parse what a peer sent with `MessageContent::from_cbor`, which bounds
+    // the nesting.
     /// `group_id`: doluysa bu mesaj bir grup mesajının pairwise
     /// (1:1 ratchet üzerinden) fan-out kopyasıdır — spec dışı, "gerçek grup
     /// entegrasyonu" için gerekli. Bu olmadan alıcı taraf, gelen bir grup
@@ -1033,6 +1082,21 @@ pub enum MessageContent {
     },
 }
 
+impl MessageContent {
+    /// Deepest CBOR nesting accepted in a peer's content. The deepest real
+    /// one (`DeviceLinkGrant` → sync → group → founder chain → signature as a
+    /// JSON array) needs about 10.
+    const MAX_NESTING: usize = 32;
+
+    /// Parses the decrypted content of a packet. ciborium's own limit (256)
+    /// lets a contact nest `SiblingEcho` inside `File.offer` some 60 times,
+    /// each level several large visitor frames on the receiving thread's
+    /// stack, before any check of who sent it.
+    pub fn from_cbor(data: &[u8]) -> Result<Self, String> {
+        ciborium::de::from_reader_with_recursion_limit(data, Self::MAX_NESTING).map_err(|e| e.to_string())
+    }
+}
+
 /// One whiteboard stroke. `points` are little-endian `u16` x,y pairs on the
 /// 1600x1000 virtual canvas. The colour is not carried: it follows from the
 /// author and `shade` (0 light, 1 base, 2 dark). `width` is the pen width in
@@ -1154,6 +1218,27 @@ pub struct IdentityExchange {
     /// under an identity we had not met yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_add_signer: Option<SyncedDevice>,
+    /// Hybrid signature of this device over `identity_exchange_signing_input`.
+    /// The fingerprint only says the four keys belong together: without this,
+    /// whoever carried the packet (it travels unsealed) could change
+    /// `device_name` or `identity_id`, or send the keys of a device it does
+    /// not hold. A receiver refuses a packet without it.
+    #[serde(default, with = "serde_bytes")]
+    pub signature: Vec<u8>,
+    #[serde(default, with = "serde_bytes")]
+    pub signature_pq: Vec<u8>,
+}
+
+/// The bytes `IdentityExchange.signature` covers. The keys are covered through
+/// `device_fingerprint`; `device_add`, `revokes` and `device_add_signer` prove
+/// themselves.
+pub fn identity_exchange_signing_input(identity_id: &str, device_fingerprint: &str, device_name: &str) -> Vec<u8> {
+    let mut out = b"p2pmsg-v0.3-identity-exchange".to_vec();
+    for field in [identity_id, device_fingerprint, device_name] {
+        out.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        out.extend_from_slice(field.as_bytes());
+    }
+    out
 }
 
 /// Çoklu-cihaz (spec 1.7 mesaj geçmişi senkronu): kendi GÖNDERDİĞİM bir
@@ -1271,5 +1356,90 @@ mod wire_size_tests {
             NetworkEnvelope::Message(m) => assert_eq!(m.ciphertext, raw),
             _ => panic!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod parse_limit_tests {
+    use super::*;
+
+    fn qr(version: u8) -> Vec<u8> {
+        QrPacket {
+            version,
+            device_name: "d".into(),
+            identity_id: "i".into(),
+            device_fingerprint: "f".into(),
+            rendezvous_node: "/dns/x.onion/tcp/1".into(),
+            known_relays: Vec::new(),
+        }.to_cbor().unwrap()
+    }
+
+    #[test]
+    fn pairing_codes_of_another_version_are_refused() {
+        assert!(QrPacket::from_cbor(&qr(1)).is_ok());
+        assert!(QrPacket::from_cbor(&qr(QrPacket::CURRENT_VERSION)).is_ok());
+        assert!(QrPacket::from_cbor(&qr(QrPacket::CURRENT_VERSION + 1)).unwrap_err().contains("güncelleyin"));
+        assert!(QrPacket::from_cbor(&qr(0)).is_err());
+
+        let link = |version| DeviceLinkRequest {
+            version, device_name: "d".into(), device_fingerprint: "f".into(),
+            rendezvous_node: "/dns/x.onion/tcp/1".into(), known_relays: Vec::new(),
+        }.to_cbor().unwrap();
+        assert!(DeviceLinkRequest::from_cbor(&link(DeviceLinkRequest::CURRENT_VERSION)).is_ok());
+        assert!(DeviceLinkRequest::from_cbor(&link(1)).is_err());
+        assert!(DeviceLinkRequest::from_cbor(&link(3)).is_err());
+
+        let mut huge = QrPacket::from_cbor(&qr(2)).unwrap();
+        huge.known_relays = vec!["/dns/relay.onion/tcp/1".repeat(10); 40];
+        assert!(QrPacket::from_cbor(&huge.to_cbor().unwrap()).is_err());
+    }
+
+    #[test]
+    fn nested_sibling_echo_is_refused_before_it_is_deep() {
+        let offer = MessageContent::FileOffer {
+            group_id: None, file_id: "f".into(), file_name: "n".into(), mime_type: "m".into(), total_size: 1,
+            file_key: [0; 32], sha256_hex: String::new(), preview_jpeg: None, duration_ms: None,
+            caption: String::new(), reply_to_message_id: None, reply_to_preview: None,
+            reply_to_sender_identity_id: None, chunk_size: None,
+        };
+        let echo = |inner| MessageContent::SiblingEcho {
+            conversation_identity_id: None, group_id: None,
+            body: SiblingEchoBody::File { offer: Box::new(inner) },
+        };
+        let bytes = |content: &MessageContent| to_cbor(content).unwrap();
+        // What a sibling really sends.
+        assert!(MessageContent::from_cbor(&bytes(&echo(offer.clone()))).is_ok());
+        // The deepest honest content: a link grant with proofs and a group
+        // (more JSON nesting than `group::Group` has).
+        let add = DeviceAdd {
+            identity_id: "i".into(), new_device_fingerprint: "f".into(), added_by: "a".into(),
+            signature: vec![1], signature_pq: vec![2],
+        };
+        let device = SyncedDevice {
+            device_fingerprint: "f".into(), device_name: "d".into(), sign_pubkey_ed25519: vec![1],
+            sign_pubkey_mldsa: vec![2], kem_pubkey_x25519: vec![3], kem_pubkey_mlkem: vec![4],
+            is_active: true, last_addr: None,
+        };
+        let grant = MessageContent::DeviceLinkGrant {
+            identity_id: "i".into(),
+            device_add: add.clone(),
+            sync: SyncPayload {
+                contacts: vec![SyncedContact {
+                    identity_id: "c".into(), display_name: "n".into(), added_via_group: false, avatar_jpeg: None,
+                    devices: vec![device.clone()],
+                    device_proofs: vec![DeviceAddProof { device_add: add, signer: device.clone() }],
+                }],
+                groups: vec![serde_json::json!({"founder_chain": [{"signature": [1, 2], "x": {"y": {"z": [[1]]}}}]})],
+                siblings: vec![device],
+                archive_root_key: Some(vec![0; 32]),
+                name_changed_at_ms: 0,
+            },
+        };
+        assert!(MessageContent::from_cbor(&bytes(&grant)).is_ok());
+        let mut nested = offer;
+        for _ in 0..40 {
+            nested = echo(nested);
+        }
+        assert!(MessageContent::from_cbor(&bytes(&nested)).is_err());
     }
 }

@@ -949,13 +949,35 @@ mod review_oct2026_tests {
             device_add: Some(primary.sign_device_add(&sec_fp).unwrap()),
             revokes: Vec::new(),
             device_add_signer: primary.own_synced_device(),
+            signature: Vec::new(),
+            signature_pq: Vec::new(),
         };
+        let keys = &secondary.own_device_keys[&sec_fp];
+        let to_sign = packet::identity_exchange_signing_input(&ix.identity_id, &ix.device_fingerprint, &ix.device_name);
+        let sig_classical: Ed25519Signature = keys.sign_sk_ed25519.sign(&to_sign);
+        let sig_pq: MlDsaSignature<MlDsa87> = keys.sign_sk_mldsa.sign(&to_sign);
+        ix.signature = sig_classical.to_bytes().to_vec();
+        ix.signature_pq = sig_pq.encode().to_vec();
+        // Both signatures are deterministic: a resent IdentityExchange stays
+        // byte-identical, which the server deposit dedup relies on.
+        let again: MlDsaSignature<MlDsa87> = keys.sign_sk_mldsa.sign(&to_sign);
+        assert_eq!(again.encode().to_vec(), ix.signature_pq);
         assert!(P2PCore::identity_proved_by_root(&ix));
         // A stranger accepts it only with the proof, and never a bare claim.
         let mut stranger = P2PCore::new();
         stranger.link_request_open_until = current_time_ms() + 60_000; // pairing open
         let bare = IdentityExchange { device_add: None, device_add_signer: None, ..ix.clone() };
-        assert!(stranger.process_identity_exchange(None, &bare).is_err());
+        let refused = stranger.process_identity_exchange(None, &bare).unwrap_err();
+        assert!(!refused.contains("imzası"), "refused for the claim, not the signature: {refused}");
+        // The device signs its name and identity: a relay cannot change them,
+        // and an unsigned packet (a version before the signature) is refused.
+        for forged in [
+            IdentityExchange { device_name: "Mallory".into(), ..ix.clone() },
+            IdentityExchange { identity_id: sec_fp.clone(), ..ix.clone() },
+            IdentityExchange { signature: Vec::new(), signature_pq: Vec::new(), ..ix.clone() },
+        ] {
+            assert!(stranger.process_identity_exchange(None, &forged).unwrap_err().contains("imzası"));
+        }
         // The secondary's own keys as "signer": they do not hash to the identity id.
         let own = IdentityExchange { device_add_signer: secondary.own_synced_device(), ..ix.clone() };
         assert!(stranger.process_identity_exchange(None, &own).is_err());
@@ -1254,7 +1276,7 @@ mod peer_mapping_tests {
         let call = ["self.record_peer_id_if_known", "(source"].concat();
         assert!(!body(src, &["fn process_identity_", "exchange(&mut self"].concat()).contains(&call));
         let recv = body(src, &["fn receive_", "message(&mut self, source"].concat());
-        let decrypt = recv.find("candidate.decrypt(").expect("decrypt call");
+        let decrypt = recv.find("state.decrypt(").expect("decrypt call");
         assert!(recv.find(&call).expect("mapping call") > decrypt, "map only after the packet decrypted");
     }
 }
@@ -1307,7 +1329,6 @@ mod authz_coverage_tests {
             (&["fn heal_founder_chain", "(&self"], 1500, "t.version > floor"),
             (&["MessageContent::Reaction { target_message_id,", " emoji, group_id, reacted_at_ms } =>"], 3000, "reaction_fits_chat("),
             (&["fn apply_edit_or_delete_content", "(&mut self"], 1500, "ex_member"),
-            (&["let mut candidate = self.ratchets", ".get(&packet.header.sender_device_fingerprint)"], 1500, "if result.is_ok()"),
         ];
         for (start, len, guard) in cases {
             assert!(
@@ -2291,7 +2312,9 @@ const RECONNECT_BACKOFF_MAX_MS: u64 = 10 * 60 * 1000;
 /// Radio saver cap: every failed onion dial burns hs-pool circuits (HsDir
 /// lookups) and the pool refills itself in the background, so a long-gone
 /// peer must not be retried every window. It reconnects to us when back.
-const RECONNECT_BACKOFF_SAVER_MAX_MS: u64 = 30 * 60 * 1000;
+/// 3 h: at 30 min, four long-offline peers cost 270-410 KB and 40-75 s of
+/// LTE radio per round (pcap 2026-10-07).
+const RECONNECT_BACKOFF_SAVER_MAX_MS: u64 = 3 * 60 * 60 * 1000;
 
 /// Spec dışı, hata düzeltmesi ("Tor üzerinden bağlı bir cihaz gruba davet
 /// edilmesine rağmen grubu hiç görmüyor"): `group_sync_sweep`'in çalışma
@@ -4528,6 +4551,10 @@ impl P2PCore {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let own_record = self.own_devices.get(&own_fp).ok_or("Missing own device record")?.clone();
 
+        let to_sign = packet::identity_exchange_signing_input(&own_identity_id, &own_fp, &own_record.device_name);
+        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
+        let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
+        let sig_pq: MlDsaSignature<MlDsa87> = own_keys.sign_sk_mldsa.sign(&to_sign);
         let exchange = IdentityExchange {
             identity_id: own_identity_id,
             device_fingerprint: own_fp,
@@ -4545,6 +4572,8 @@ impl P2PCore {
             device_add: self.own_device_add.clone(),
             revokes: self.own_revokes(),
             device_add_signer: self.own_device_add.as_ref().and_then(|da| self.synced_device_for(&da.added_by)),
+            signature: sig_classical.to_bytes().to_vec(),
+            signature_pq: sig_pq.encode().to_vec(),
         };
         let envelope = NetworkEnvelope::IdentityExchange(exchange);
         if fresh {
@@ -4571,31 +4600,21 @@ impl P2PCore {
         if self.own_device_keys.contains_key(&exchange.device_fingerprint) {
             return Err("IdentityExchange kendi cihazımızdan geldi, yok sayıldı".to_string());
         }
-        // `compute_fingerprint` hashes the four keys with no length prefixes:
-        // the same bytes split at other boundaries give the same fingerprint
-        // and keys that verify nothing. With the lengths fixed, a fingerprint
-        // has exactly one valid key set.
-        if exchange.sign_pubkey_ed25519.len() != 32 || exchange.sign_pubkey_mldsa.len() != 2592
-            || exchange.kem_pubkey_x25519.len() != 32 || exchange.kem_pubkey_mlkem.len() != 1568
-        {
-            return Err("IdentityExchange anahtar uzunlukları geçersiz".to_string());
+        // Key lengths and fingerprint, bkz. `identity::keys_match_fingerprint`.
+        if !exchange.keys_match_fingerprint() {
+            return Err(format!("IdentityExchange anahtarları fingerprint ile tutarsız: {}", exchange.device_fingerprint));
         }
-        let computed = compute_fingerprint(
-            &exchange.sign_pubkey_ed25519,
-            &exchange.sign_pubkey_mldsa,
-            &exchange.kem_pubkey_x25519,
-            &exchange.kem_pubkey_mlkem,
-        );
-        let computed_hex = hex::encode(&computed);
-        if computed_hex != exchange.device_fingerprint {
-            return Err(format!(
-                "IdentityExchange fingerprint uyuşmazlığı: beklenen {}, hesaplanan {}",
-                exchange.device_fingerprint, computed_hex
-            ));
-        }
-        // No `record_peer_id_if_known` here (security review 2026-09-27): a
-        // matching fingerprint only proves the public keys are consistent, not
-        // that the sender holds the private keys. The keys are public, so any
+        // Signed by the device itself: the packet travels unsealed, and the
+        // fingerprint covers neither `device_name` nor `identity_id`. A
+        // version before this one sends no signature and cannot pair with us.
+        verify_hybrid_signature_with(
+            &packet::identity_exchange_signing_input(&exchange.identity_id, &exchange.device_fingerprint, &exchange.device_name),
+            &exchange.signature, &exchange.signature_pq,
+            &exchange.sign_pubkey_ed25519, &exchange.sign_pubkey_mldsa,
+        ).map_err(|e| format!("IdentityExchange imzası geçersiz: {}", e))?;
+        // No `record_peer_id_if_known` here (security review 2026-09-27): the
+        // signature proves who WROTE the packet, not who delivered it, and a
+        // matching fingerprint only proves the public keys are consistent. The keys are public, so any
         // contact who knows this device could build this packet and get its own
         // PeerId mapped to it, then take our direct sends to the device and fake
         // AckBatch receipts for them. The signed Handshake that follows maps the
@@ -4959,19 +4978,13 @@ impl P2PCore {
         if da.identity_id != identity_id
             || da.new_device_fingerprint != device_fingerprint
             || da.added_by != identity_id
-            || signer.sign_pubkey_ed25519.len() != 32 || signer.sign_pubkey_mldsa.len() != 2592
-            || signer.kem_pubkey_x25519.len() != 32 || signer.kem_pubkey_mlkem.len() != 1568
+            || signer.device_fingerprint != da.added_by
+            || !signer.keys_match_fingerprint()
         {
             return false;
         }
-        let computed = hex::encode(compute_fingerprint(
-            &signer.sign_pubkey_ed25519, &signer.sign_pubkey_mldsa, &signer.kem_pubkey_x25519, &signer.kem_pubkey_mlkem,
-        ));
-        if computed != da.added_by {
-            return false;
-        }
         let root = DeviceRecord {
-            device_fingerprint: computed,
+            device_fingerprint: da.added_by.clone(),
             identity_id: da.identity_id.clone(),
             sign_pubkey_ed25519: signer.sign_pubkey_ed25519.clone(),
             sign_pubkey_mldsa: signer.sign_pubkey_mldsa.clone(),
@@ -5597,10 +5610,7 @@ impl P2PCore {
             // Cihaz public anahtarlarını ekle (bilinenleri ezmeden).
             for sd in &sc.devices {
                 // fingerprint = anahtarların hash'i — güven modeli gereği doğrula.
-                let computed = hex::encode(compute_fingerprint(
-                    &sd.sign_pubkey_ed25519, &sd.sign_pubkey_mldsa, &sd.kem_pubkey_x25519, &sd.kem_pubkey_mlkem,
-                ));
-                if computed != sd.device_fingerprint { continue; }
+                if !sd.keys_match_fingerprint() { continue; }
                 // A device learned here must be bound to the identity (first
                 // device, or proof): the sibling's word alone does not put a
                 // device under a contact.
@@ -5716,10 +5726,7 @@ impl P2PCore {
             for sd in &sync.siblings {
                 if own_fp.as_deref() == Some(sd.device_fingerprint.as_str()) { continue; }
                 if self.known_remote_devices.contains_key(&sd.device_fingerprint) { continue; }
-                let computed = hex::encode(compute_fingerprint(
-                    &sd.sign_pubkey_ed25519, &sd.sign_pubkey_mldsa, &sd.kem_pubkey_x25519, &sd.kem_pubkey_mlkem,
-                ));
-                if computed != sd.device_fingerprint { continue; }
+                if !sd.keys_match_fingerprint() { continue; }
                 let rec = DeviceRecord {
                     device_fingerprint: sd.device_fingerprint.clone(),
                     identity_id: my.clone(),
@@ -7426,7 +7433,10 @@ impl P2PCore {
         }
         if !force {
             if let Some(&(next_allowed_at, _)) = self.reconnect_backoff.get(fp) {
-                if now < next_allowed_at {
+                // A wait set in saver mode can be hours long; once the app is
+                // on screen again it must not outlast the normal cap.
+                let wait_cap = if self.radio_saver() { RECONNECT_BACKOFF_SAVER_MAX_MS } else { RECONNECT_BACKOFF_MAX_MS };
+                if now < next_allowed_at && next_allowed_at - now <= wait_cap {
                     return false;
                 }
             }
@@ -7585,6 +7595,7 @@ impl P2PCore {
         let (state, kyber_ct, own_kyber_pub) = match DeviceRatchetState::initiate(
             &peer.kem_pubkey_x25519,
             &peer.kem_pubkey_mlkem,
+            current_time_ms(),
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -7729,15 +7740,14 @@ impl P2PCore {
 
     fn maybe_redo_handshake(&mut self, peer_device_fingerprint: &str) {
         // Oturum hiç yoksa normal yol zaten el sıkışmayı başlatıyor.
-        // KESİN ölçüt: bu oturumda karşı taraftan HİÇ bir şey çözemedik mi?
-        // `recv_message_number == 0` tek başına yetmez — bir rotasyon da
-        // sayacı sıfırlar; `prev_root_key.is_none()` ile birlikte "bu oturum
-        // hiç rotasyon görmedi VE hiç paket almadı" demek, yani karşı taraf
+        // KESİN ölçüt: bu oturumda karşı taraftan HİÇ bir şey çözemedik mi
+        // (bkz. ratchet.rs `never_heard` — bir rotasyon alma sayacını
+        // sıfırlar, o yüzden önceki zincir de sayılır)? Öyleyse karşı taraf
         // el sıkışmamızı işlememiş olabilir. Karşı taraf BİR KEZ bile cevap
         // verdiyse (recv > 0) burası bir daha ASLA tetiklenmez — sağlıklı,
         // sadece sessiz bir oturum hiçbir koşulda sıfırlanmaz.
         let never_heard = match self.ratchets.get(peer_device_fingerprint) {
-            Some(s) => s.recv_message_number == 0 && s.prev_root_key.is_none(),
+            Some(s) => s.never_heard(),
             None => return,
         };
         if !never_heard {
@@ -7939,7 +7949,13 @@ impl P2PCore {
             // rotated, `!has_responded_to_peer_key`) against any init created
             // within the collision window. A later init is a real re-handshake
             // (the peer's `maybe_redo_handshake`) and is still accepted.
-            let we_initiated = !existing.has_responded_to_peer_key;
+            // The session we initiated, in its first generation: untouched
+            // (flag set, no rotation), or after the peer's first rotation,
+            // which a responder makes before its first send (flag clear, one
+            // rotation). `!has_responded_to_peer_key` alone was also true for
+            // a session we had only responded to, and false for our own
+            // untouched one.
+            let we_initiated = existing.has_responded_to_peer_key == existing.prev_root_key.is_none();
             let same_round = handshake.timestamp.abs_diff(existing.last_rotation) <= HANDSHAKE_COLLISION_WINDOW_MS;
             let existing_unused = existing.send_message_number == 0 && existing.recv_message_number == 0;
             // A device waiting to be linked (showing its link QR) always adopts:
@@ -7966,6 +7982,7 @@ impl P2PCore {
             &handshake.initiator_x25519_pubkey,
             &handshake.initiator_kyber_pubkey,
             &handshake.kyber_ciphertext,
+            now,
         )?;
 
         self.resubscribe_ratchet_topic(None, Some(&state.root_key));
@@ -7996,7 +8013,8 @@ impl P2PCore {
     /// `has_responded_to_peer_key` bayrağı zaten hangi tarafın sırası
     /// geldiğini doğal olarak belirliyor.
     fn maybe_rotate_ratchet(&mut self, peer_device_fingerprint: &str) -> Result<Option<Vec<u8>>, String> {
-        let should_rotate = self.ratchets.get(peer_device_fingerprint).map(|s| s.should_rotate()).unwrap_or(false);
+        let now = current_time_ms();
+        let should_rotate = self.ratchets.get(peer_device_fingerprint).map(|s| s.should_rotate(now)).unwrap_or(false);
         if !should_rotate {
             return Ok(None);
         }
@@ -8005,7 +8023,7 @@ impl P2PCore {
             // üzerine yazacak, artık iki nesil eski) topic — aboneliği
             // ancak şimdi bırakılır (bkz. aşağıdaki resubscribe notu).
             let dropped_prev = state.prev_root_key.clone();
-            let kyber_ct = state.perform_dh_ratchet()?;
+            let kyber_ct = state.perform_dh_ratchet(now)?;
             let new_root_key = state.root_key.clone();
             // bkz. `topic_for_root_key` dokümantasyonu — yeni root_key
             // topic'ine abone ol. Güvenilirlik düzeltmesi: az önceki (bir
@@ -8015,9 +8033,9 @@ impl P2PCore {
             // abonelik iptali o pencerede gelen her paketi kaçırırdı.
             // Eski topic bir SONRAKİ rotasyonda (dropped_prev) bırakılır.
             self.resubscribe_ratchet_topic(dropped_prev.as_deref(), Some(&new_root_key));
-            // Biz rotasyonu tetikledik — eski zincire ait diskteki
-            // skipped-key'ler de anlamsızlaştı (bkz. receive_message'daki
-            // simetrik temizlik respond_to_rotation için).
+            // Biz rotasyonu tetikledik — eski zincirin skipped-key'leri
+            // state'in içine taşındı (`old_recv`), tablodaki kopyaları
+            // artık yeni zincirin numaralarıyla çakışırdı.
             self.clear_persisted_skipped_keys(peer_device_fingerprint);
             self.persist_ratchet_state(peer_device_fingerprint);
             return Ok(Some(kyber_ct));
@@ -8141,7 +8159,12 @@ impl P2PCore {
         // eklenir — alıcı tarafta idempotent (bkz. `respond_to_rotation`
         // çift-uygulama koruması), `try_publish_raw` bu paketleri karşı
         // tarafın hâlâ dinlediği ESKİ topic'ten yollar.
-        let fresh_rotation_ct = if needs_delivery_confirmation {
+        // A responder leaves the handshake chain before it sends anything at
+        // all, an Ack included (bkz. ratchet.rs `respond`): that chain is a
+        // function of the HandshakeInit alone. The announcement is repeated
+        // on every packet until confirmed, so it may ride an unreliable one.
+        let fresh_responder = self.ratchets.get(&peer_device_fingerprint).map_or(false, |s| s.is_fresh_responder());
+        let fresh_rotation_ct = if needs_delivery_confirmation || fresh_responder {
             self.maybe_rotate_ratchet(&peer_device_fingerprint)?
         } else {
             None
@@ -8168,9 +8191,13 @@ impl P2PCore {
         let state = self.ratchets.get_mut(&peer_device_fingerprint).ok_or("No ratchet session")?;
         // NOT: `own_ratchet_pubkeys()` rotasyon SONRASI çağrılıyor
         // (maybe_rotate_ratchet zaten çalıştı), bu yüzden rotasyon olduysa
-        // burada YENİ public key'ler alınır — karşı tarafın
-        // respond_to_rotation'da beklediği tam olarak budur.
-        let ratchet_pubkeys = state.own_ratchet_pubkeys();
+        // burada YENİ public key'ler alınır. Sent only with a rotation
+        // announcement: the receiver reads it in no other packet, and it was
+        // 1.6 KB of every message, ack and typing indicator.
+        let ratchet_pubkey = match rotation_kyber_ciphertext {
+            Some(_) => state.own_ratchet_pubkeys().to_bytes()?,
+            None => Vec::new(),
+        };
         let content_bytes = ciborium_bytes(content)?;
         let (ciphertext, message_number, prev_chain_length) = state.encrypt_next(&content_bytes)?;
         // `encrypt_next` her çağrıda ck_send/send_message_number'ı ilerletir
@@ -8212,7 +8239,7 @@ impl P2PCore {
             sender_identity_id: own_identity_id,
             sender_device_fingerprint: own_fp.clone(),
             message_id: message_id.clone(),
-            ratchet_pubkey: ratchet_pubkeys.to_bytes()?,
+            ratchet_pubkey,
             message_number,
             prev_chain_length,
             rotation_kyber_ciphertext,
@@ -8832,45 +8859,37 @@ impl P2PCore {
         // Boşsa (normal mesaj, rotasyon yok) hiçbir şey yapmayız —
         // ratchet_pubkey zaten her mesajda taşınır ama rotasyon olmadıkça
         // değişmez, bu yüzden onu görmezden gelmek güvenlidir.
-        // Rotasyon + şifre çözme bir KOPYA üzerinde denenir, yalnızca çözme
-        // başarılıysa kalıcı olur. Başlık alıcıya bağlı değil: A'nın B'ye
-        // gönderdiği rotasyonlu paket C'ye tekrar oynatılırsa, önce uygulanan
-        // rotasyon C'nin A oturumunu (çözme başarısız olsa bile) bozardı.
+        // The ratchet applies the rotation only if the packet then decrypts
+        // on the new chain (bkz. ratchet.rs `decrypt`). Başlık alıcıya bağlı
+        // değil: A'nın B'ye gönderdiği rotasyonlu paket C'ye tekrar
+        // oynatılırsa, önce uygulanan rotasyon C'nin A oturumunu bozardı.
         // `rotated_keys`: rotasyon gerçekten uygulandıysa (iki nesil önceki,
         // yeni) root_key çifti — abonelik/temizlik adımları için.
         let mut rotated_keys: Option<(Option<Vec<u8>>, Vec<u8>)> = None;
         let decrypted = {
-            let mut candidate = self.ratchets.get(&packet.header.sender_device_fingerprint)
-                .ok_or("No ratchet session for sender")?
-                .clone();
-            if let Some(ct) = &packet.header.rotation_kyber_ciphertext {
-                if let Ok(new_peer_keys) = RatchetPublicKeys::from_bytes(&packet.header.ratchet_pubkey) {
-                    let dropped_prev = candidate.prev_root_key.clone();
-                    match candidate.respond_to_rotation(&new_peer_keys, ct) {
-                        Ok(true) => rotated_keys = Some((dropped_prev, candidate.root_key.clone())),
-                        Ok(false) => {}
-                        Err(e) => error!("Rotasyon senkronizasyonu başarısız: {}", e),
-                    }
-                }
-            }
-            let result = candidate.decrypt(&packet.ciphertext, packet.header.message_number);
-            if result.is_ok() {
-                self.ratchets.insert(packet.header.sender_device_fingerprint.clone(), candidate);
+            let state = self.ratchets.get_mut(&packet.header.sender_device_fingerprint)
+                .ok_or("No ratchet session for sender")?;
+            let new_peer_keys = packet.header.rotation_kyber_ciphertext.as_ref()
+                .and_then(|_| RatchetPublicKeys::from_bytes(&packet.header.ratchet_pubkey).ok());
+            let rotation = new_peer_keys.as_ref().zip(packet.header.rotation_kyber_ciphertext.as_deref());
+            let dropped_prev = state.prev_root_key.clone();
+            let result = state.decrypt(&packet.ciphertext, packet.header.message_number, rotation, current_time_ms());
+            if result.as_ref().map_or(false, |(_, changes)| changes.rotated) {
+                rotated_keys = Some((dropped_prev, state.root_key.clone()));
             }
             result
         };
-        if decrypted.is_ok() {
-            if let Some((dropped_prev, new_root_key)) = rotated_keys.take() {
-                // Eski topic hemen bırakılmaz (gönderen hâlâ oradan yayınlayabilir),
-                // bir sonraki rotasyonda bırakılır.
-                self.resubscribe_ratchet_topic(dropped_prev.as_deref(), Some(&new_root_key));
-                // Eski zincirin diskteki skipped-key'leri anlamsızlaştı; bu
-                // çözmenin eklediği yeni anahtarlar aşağıda yeniden yazılır.
-                self.clear_persisted_skipped_keys(&packet.header.sender_device_fingerprint);
-                self.persist_ratchet_state(&packet.header.sender_device_fingerprint);
-                // Eski zincirle şifrelenmiş bekleyen paketler hemen taze zincirle yeniden gönderilir.
-                self.regen_pending_for_peer(&packet.header.sender_device_fingerprint);
-            }
+        if let Some((dropped_prev, new_root_key)) = rotated_keys.take() {
+            // Eski topic hemen bırakılmaz (gönderen hâlâ oradan yayınlayabilir),
+            // bir sonraki rotasyonda bırakılır.
+            self.resubscribe_ratchet_topic(dropped_prev.as_deref(), Some(&new_root_key));
+            // Eski zincirin skipped-key'leri state'in içine taşındı
+            // (`old_recv`); bu çözmenin eklediği yeni anahtarlar aşağıda
+            // tabloya yazılır.
+            self.clear_persisted_skipped_keys(&packet.header.sender_device_fingerprint);
+            self.persist_ratchet_state(&packet.header.sender_device_fingerprint);
+            // Eski zincirle şifrelenmiş bekleyen paketler hemen taze zincirle yeniden gönderilir.
+            self.regen_pending_for_peer(&packet.header.sender_device_fingerprint);
         }
         let (payload_bytes, skipped_changes) = match decrypted {
             Ok(v) => v,
@@ -8938,11 +8957,11 @@ impl P2PCore {
         let state = self.ratchets.get_mut(&packet.header.sender_device_fingerprint)
             .ok_or("No ratchet session for sender")?;
         // bkz. `pending_rotation_ct` (ratchet.rs): rotasyonu BİZ tetiklediysek,
-        // karşı taraftan gelen bir paketin BAŞARIYLA çözülmesi onun yeni
-        // zincire geçtiğinin kanıtıdır (eski zincirin skipped-key'leri
-        // rotasyonda temizlendiğinden eski-zincir paketleri zaten çözülemez)
-        // — duyuruyu her pakete eklemeyi artık bırakabiliriz.
-        if state.pending_rotation_ct.take().is_some() {
+        // karşı taraftan YENİ zincirde gelen bir paketin çözülmesi onun
+        // rotasyonu uyguladığının kanıtıdır — duyuruyu her pakete eklemeyi
+        // bırakabiliriz. A packet of the chain before the rotation
+        // (`old_chain`) proves nothing: the peer sent it before it knew.
+        if !skipped_changes.old_chain && state.pending_rotation_ct.take().is_some() {
             info!(
                 "Rotasyon karşı tarafça uygulandı (peer={}) — duyuru tekrarı durduruluyor",
                 packet.header.sender_device_fingerprint
@@ -8969,7 +8988,7 @@ impl P2PCore {
         let message_id = packet.header.message_id.clone();
         // Parsed only after the ratchet is on disk. A variant this version
         // does not know is acked: a retry can never parse either.
-        let content: MessageContent = match ciborium::from_reader(payload_bytes.as_slice()) {
+        let content: MessageContent = match MessageContent::from_cbor(payload_bytes.as_slice()) {
             Ok(c) => c,
             Err(e) => {
                 warn!("Paket içeriği ayrıştırılamadı (id={}): {}", message_id, e);
@@ -10221,10 +10240,7 @@ impl P2PCore {
         if device.device_fingerprint != device_add.new_device_fingerprint {
             return Err("DeviceAddNotice: cihaz fingerprint'i DeviceAdd ile uyuşmuyor".to_string());
         }
-        let computed = hex::encode(compute_fingerprint(
-            &device.sign_pubkey_ed25519, &device.sign_pubkey_mldsa, &device.kem_pubkey_x25519, &device.kem_pubkey_mlkem,
-        ));
-        if computed != device.device_fingerprint {
+        if !device.keys_match_fingerprint() {
             return Err("DeviceAddNotice: anahtarlar fingerprint ile tutarsız".to_string());
         }
         // Güvenlik/DoS: bir kişi (kimlik) SINIRSIZ cihaz iddia edip bizim ona
@@ -13376,17 +13392,8 @@ impl P2PCore {
             }
             // Fingerprint, anahtarlarla tutarlı mı? (IdentityExchange ile
             // aynı kontrol.)
-            let computed = hex::encode(compute_fingerprint(
-                &d.sign_pubkey_ed25519,
-                &d.sign_pubkey_mldsa,
-                &d.kem_pubkey_x25519,
-                &d.kem_pubkey_mlkem,
-            ));
-            if computed != d.device_fingerprint {
-                error!(
-                    "Grup üyesi cihaz kaydı tutarsız (beklenen {}, hesaplanan {}) — reddedildi",
-                    d.device_fingerprint, computed
-                );
+            if !d.keys_match_fingerprint() {
+                error!("Grup üyesi cihaz kaydı tutarsız ({}) — reddedildi", d.device_fingerprint);
                 continue;
             }
             // Bu kimlik için BAŞKA bir cihazı zaten biliyorsak, kurucunun
@@ -19196,17 +19203,21 @@ fn is_onion_multiaddr(addr: &Multiaddr) -> bool {
 /// çağıran yanlışlıkla boş bir `sig_pq` geçirse bile sessizce klasiğe
 /// düşmeyeceğinden emin olunur.
 fn verify_hybrid_signature(message: &[u8], sig_classical: &[u8], sig_pq: &[u8], sender: &DeviceRecord) -> Result<(), String> {
+    verify_hybrid_signature_with(message, sig_classical, sig_pq, &sender.sign_pubkey_ed25519, &sender.sign_pubkey_mldsa)
+}
+
+fn verify_hybrid_signature_with(message: &[u8], sig_classical: &[u8], sig_pq: &[u8], pubkey_ed25519: &[u8], pubkey_mldsa: &[u8]) -> Result<(), String> {
     if sig_classical.is_empty() || sig_pq.is_empty() {
         return Err("Hybrid signature requires both classical and post-quantum components".to_string());
     }
-    let pk_bytes: [u8; 32] = sender.sign_pubkey_ed25519.clone().try_into().map_err(|_| "Bad Ed25519 key length")?;
+    let pk_bytes: [u8; 32] = pubkey_ed25519.try_into().map_err(|_| "Bad Ed25519 key length")?;
     let pk = VerifyingKey::from_bytes(&pk_bytes).map_err(|_| "Bad Ed25519 key")?;
     let sig_bytes: [u8; 64] = sig_classical.to_vec().try_into().map_err(|_| "Bad signature length")?;
     let sig = Ed25519Signature::from_bytes(&sig_bytes);
     // Strict: no second valid encoding of one signature.
     pk.verify_strict(message, &sig).map_err(|_| "Ed25519 verification failed")?;
 
-    let pk_encoded: EncodedVerifyingKey<MlDsa87> = sender.sign_pubkey_mldsa.as_slice().try_into().map_err(|_| "Bad ML-DSA key")?;
+    let pk_encoded: EncodedVerifyingKey<MlDsa87> = pubkey_mldsa.try_into().map_err(|_| "Bad ML-DSA key")?;
     let pk = MlDsaVerifyingKey::<MlDsa87>::decode(&pk_encoded);
     let sig_encoded: EncodedSignature<MlDsa87> = sig_pq.try_into().map_err(|_| "Bad PQ signature")?;
     let sig = MlDsaSignature::<MlDsa87>::decode(&sig_encoded).ok_or("Bad PQ signature")?;

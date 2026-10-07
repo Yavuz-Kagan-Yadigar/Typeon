@@ -558,26 +558,36 @@ pub fn format_server_invite(addrs: &[String], token: &str) -> String {
     format!("{}{}#{}", SERVER_INVITE_SCHEME, joined, token.trim())
 }
 
+/// Signed bytes of the enrollment messages: a tag for the kind of message,
+/// then every field with its length. Without the lengths, (peer "ab", token
+/// "c…") and (peer "a", token "bc…") were the same bytes; without the tag,
+/// the one enroll key signed `Enroll` and `Rebind` in a shared format.
+///
+/// PROTOCOL BREAK (2026-10-07): a client and a server on different sides of
+/// this change cannot enroll or rebind with each other (`BadSignature`). A
+/// device the server already knows by its peer id does neither, and goes on.
+fn signing_input(tag: &[u8], fields: &[&[u8]]) -> Vec<u8> {
+    let mut out = tag.to_vec();
+    for field in fields {
+        out.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        out.extend_from_slice(field);
+    }
+    out
+}
+
 /// `Enroll.sig`'in üzerinde hesaplandığı baytlar. İstemci ve sunucu AYNI
 /// fonksiyonu çağırır — imza girdisini iki yerde elle kurmak, bu tür
 /// protokollerde klasik bir uyumsuzluk kaynağı.
 pub fn enroll_signing_input(version: u16, server_peer_id: &str, invite_token: &[u8], challenge: &[u8], ts_ms: u64) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&version.to_be_bytes());
-    out.extend_from_slice(server_peer_id.as_bytes());
-    out.extend_from_slice(invite_token);
-    out.extend_from_slice(challenge);
-    out.extend_from_slice(&ts_ms.to_be_bytes());
-    out
+    signing_input(
+        b"p2pmsg-v0.2-server-enroll",
+        &[&version.to_be_bytes(), server_peer_id.as_bytes(), invite_token, challenge, &ts_ms.to_be_bytes()],
+    )
 }
 
 /// `Rebind.sig`'in üzerinde hesaplandığı baytlar.
 pub fn rebind_signing_input(enrollment_id: &[u8], server_peer_id: &str, ts_ms: u64) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(enrollment_id);
-    out.extend_from_slice(server_peer_id.as_bytes());
-    out.extend_from_slice(&ts_ms.to_be_bytes());
-    out
+    signing_input(b"p2pmsg-v0.2-server-rebind", &[enrollment_id, server_peer_id.as_bytes(), &ts_ms.to_be_bytes()])
 }
 
 #[cfg(test)]
@@ -651,6 +661,13 @@ mod tests {
         let rb = rebind_signing_input(b"eid", "peer", 100);
         assert_ne!(rb, rebind_signing_input(b"eid", "other", 100));
         assert_ne!(rb, rebind_signing_input(b"eid2", "peer", 100));
+
+        // A shifted field boundary is another message, and an Enroll
+        // signature is never a Rebind signature.
+        assert_ne!(enroll_signing_input(1, "ab", b"c", b"chal", 100), enroll_signing_input(1, "a", b"bc", b"chal", 100));
+        assert_ne!(enroll_signing_input(1, "p", b"tok", b"chal", 100), enroll_signing_input(1, "p", b"tokc", b"hal", 100));
+        assert_ne!(rebind_signing_input(b"ei", "dpeer", 100), rebind_signing_input(b"eid", "peer", 100));
+        assert_ne!(rb[..25], base[..25], "different tags");
     }
 }
 
@@ -666,23 +683,36 @@ mod tests {
 /// gerçekçi bir senaryo değil.
 pub fn is_private_multiaddr(addr: &str) -> bool {
     use std::net::{Ipv4Addr, Ipv6Addr};
+    // 100.64.0.0/10 (CGNAT, RFC 6598) is not `is_private()`.
+    fn private_v4(v4: Ipv4Addr) -> bool {
+        let o = v4.octets();
+        v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
+            || (o[0] == 100 && (o[1] & 0xc0) == 64)
+    }
     for part in addr.split('/') {
         if let Ok(v4) = part.parse::<Ipv4Addr>() {
-            if v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() {
+            if private_v4(v4) {
                 return true;
             }
         }
         if let Ok(v6) = part.parse::<Ipv6Addr>() {
             // fc00::/7 (unique-local) ve fe80::/10 (link-local) — `std`'de
-            // kararlı bir yardımcı yok, önekten bakıyoruz.
+            // kararlı bir yardımcı yok, önekten bakıyoruz. `::ffff:a.b.c.d`
+            // is the IPv4 address in another spelling.
             let o = v6.octets();
             if v6.is_loopback()
                 || v6.is_unspecified()
                 || (o[0] & 0xfe) == 0xfc
                 || (o[0] == 0xfe && (o[1] & 0xc0) == 0x80)
+                || v6.to_ipv4_mapped().is_some_and(private_v4)
             {
                 return true;
             }
+        }
+        // `/dns4/localhost/...`, mDNS names.
+        let name = part.to_ascii_lowercase();
+        if name == "localhost" || name.ends_with(".localhost") || name.ends_with(".local") {
+            return true;
         }
     }
     false
@@ -717,3 +747,38 @@ where
 /// etiketine + CBOR çerçevelemesine rahatça yer bırakıyor hem de sınırın
 /// belirgin biçimde altında kalıyor.
 pub const MAX_BLOB_CHUNK_BYTES: usize = 768 * 1024;
+
+#[cfg(test)]
+mod private_addr_tests {
+    use super::is_private_multiaddr;
+
+    #[test]
+    fn private_addresses_in_every_spelling() {
+        for private in [
+            "/ip4/192.168.1.5/tcp/42612/p2p/12D3KooW",
+            "/ip4/100.64.0.7/tcp/42612/p2p/12D3KooW",
+            "/ip4/100.127.255.254/tcp/1",
+            "/ip6/::ffff:192.168.1.5/tcp/42612/p2p/12D3KooW",
+            "/ip6/::ffff:127.0.0.1/tcp/1",
+            "/ip6/fe80::1/tcp/1",
+            "/ip6/fd00::1/tcp/1",
+            "/dns4/localhost/tcp/1",
+            "/dns/LOCALHOST/tcp/1",
+            "/dns4/printer.local/tcp/1",
+            "/dns4/10.0.0.5/tcp/1",
+        ] {
+            assert!(is_private_multiaddr(private), "{private}");
+        }
+        for public in [
+            "/dns/abcdef.onion/tcp/42612/p2p/12D3KooW",
+            "/ip4/203.0.113.7/tcp/42612/p2p/12D3KooW",
+            "/ip4/100.63.255.255/tcp/1",
+            "/ip4/100.128.0.1/tcp/1",
+            "/ip6/::ffff:203.0.113.7/tcp/1",
+            "/ip6/2001:db8::1/tcp/1",
+            "/dns4/localhost.example.org/tcp/1",
+        ] {
+            assert!(!is_private_multiaddr(public), "{public}");
+        }
+    }
+}
