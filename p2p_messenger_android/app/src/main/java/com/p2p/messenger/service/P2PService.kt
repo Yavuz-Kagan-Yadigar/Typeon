@@ -816,8 +816,16 @@ class P2PService : Service() {
                 com.p2p.messenger.util.ArchiveKeyManager.loadIfPresent(applicationContext)
                 val nodeMode = isNodeModeEnabled(applicationContext)
                 val torEnabled = isTorEnabled(applicationContext)
-                P2PLib.startNetwork(nodeMode, torEnabled)
-                applyMeteredToTor()
+                // The core returns an error when Tor cannot start (it no longer
+                // runs a swarm that can dial nothing): try again.
+                fun startNet() {
+                    if (P2PLib.startNetwork(nodeMode, torEnabled).startsWith("Error")) {
+                        handler.postDelayed({ if (isRunning) startNet() }, 30_000)
+                    } else {
+                        applyMeteredToTor()
+                    }
+                }
+                startNet()
                 P2PLib.setHistoryStorageLimitBytes(getHistoryStorageLimitBytes(applicationContext))
             }
             listenerRemoved = { applyPowerSave() }
