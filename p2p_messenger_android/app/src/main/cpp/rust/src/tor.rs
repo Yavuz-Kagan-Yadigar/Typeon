@@ -308,8 +308,12 @@ fn client_config(state_dir: &str, cache_dir: &str) -> Result<arti_client::TorCli
     // each IPT status change re-uploaded the descriptor to 16 HSDirs
     // (~130 KB) once a minute.
     config.override_net_params().insert("cbtmintimeout".to_string(), 20_000);
-    config.override_net_params().insert("nf_ito_low_reduced".to_string(), 45_000);
-    config.override_net_params().insert("nf_ito_high_reduced".to_string(), 55_000);
+    // 225-245 s: the carrier NAT kept an idle TCP connection to both guards
+    // for 290 s (9S on LTE, 2026-10-07; closed at 300 s). At 45-55 s the
+    // padding cell alone woke the LTE radio once a minute. arti caps the
+    // value at 60 s, hence the vendored tor-netdir.
+    config.override_net_params().insert("nf_ito_low_reduced".to_string(), 225_000);
+    config.override_net_params().insert("nf_ito_high_reduced".to_string(), 245_000);
     // No preemptive exit circuits: the app only ever dials onion services,
     // but arti keeps circuits for ports 80/443 warm by default — pure radio
     // and battery cost.

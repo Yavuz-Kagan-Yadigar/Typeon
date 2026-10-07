@@ -144,3 +144,4 @@ strip = true
 # every time an intro circuit is rebuilt (see vendor/tor-hsservice, "TypeOn patch").
 [patch.crates-io]
 tor-hsservice = { path = "vendor/tor-hsservice" }
+tor-netdir = { path = "vendor/tor-netdir" }
