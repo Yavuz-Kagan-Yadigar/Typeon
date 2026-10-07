@@ -36,9 +36,11 @@ pub const MAX_STROKE_POINTS: usize = 512;
 pub const MAX_PAGE_BYTES: usize = 48 * 1024;
 pub const MAX_OPS_STROKES: usize = 64;
 pub const MAX_PEN_WIDTH: u8 = 40;
-// ponytail: tombstones are capped, oldest dropped. A device that stays offline
-// through more than this many erases on one page can bring an erased stroke
-// back. Add a per-page epoch (clear = epoch + 1) if that ever shows up.
+// ponytail: tombstones are capped; dropped first are those for strokes this
+// device never held (a peer can make up any number of those), then the oldest.
+// A device that stays offline through more than this many erases on one page
+// can bring an erased stroke back. Add a per-page epoch (clear = epoch + 1) if
+// that ever shows up.
 pub const MAX_TOMBSTONES: usize = 2048;
 
 /// Pen has been up this long: the burst is over, send it.
@@ -49,6 +51,10 @@ const DIGEST_DELAY_MS: u64 = 5_000;
 // ponytail: two full pages with different strokes can never become equal, so
 // answering a page with a digest is rate limited instead of tracked per round.
 const DIGEST_REPLY_MIN_MS: u64 = 30_000;
+/// Budget for what one device may make us send on one board: a whole board
+/// (`MAX_PAGES` pages, or as many digests) at once, then one per this long.
+/// A page answer is ~64 KB sent for an ~8 KB request.
+const PULL_COST_MS: u64 = 15_000;
 
 pub(crate) const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS wb_strokes (
@@ -67,6 +73,7 @@ pub(crate) const SCHEMA: &str = "
         board TEXT NOT NULL,
         page INTEGER NOT NULL,
         stroke_id BLOB NOT NULL,
+        seen INTEGER NOT NULL DEFAULT 1,
         UNIQUE (board, stroke_id)
     );
 ";
@@ -138,29 +145,82 @@ impl P2PCore {
     /// Adds a stroke unless it is invalid, already here, erased, or the page
     /// is full. `true` = the page changed.
     fn wb_insert(&self, board: &str, stroke: &WbStroke, author: &str) -> bool {
+        let mut used = self.wb_page_used(board, stroke.page);
+        self.wb_insert_counted(board, stroke, author, &mut used)
+    }
+
+    /// Stored stroke bytes of a page. `LENGTH` of the sealed blob, as before.
+    fn wb_page_used(&self, board: &str, page: u8) -> usize {
+        self.db.as_ref().map_or(0, |conn| {
+            conn.query_row(
+                "SELECT COALESCE(SUM(LENGTH(points)), 0) FROM wb_strokes WHERE board = ?1 AND page = ?2",
+                params![board, page],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as usize
+        })
+    }
+
+    /// `wb_insert` for many strokes of one page: `used` is that page's
+    /// `wb_page_used`, kept current here, so a whole page costs one SUM.
+    fn wb_insert_counted(&self, board: &str, stroke: &WbStroke, author: &str, used: &mut usize) -> bool {
         let Some(conn) = &self.db else { return false };
         if !stroke_ok(stroke) || self.wb_is_tombstoned(board, &stroke.id) {
             return false;
         }
-        let used: i64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(LENGTH(points)), 0) FROM wb_strokes WHERE board = ?1 AND page = ?2",
-                params![board, stroke.page],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        if used as usize + stroke.points.len() > MAX_PAGE_BYTES {
+        if *used + stroke.points.len() > MAX_PAGE_BYTES {
             return false;
         }
-        conn.execute(
-            "INSERT OR IGNORE INTO wb_strokes (board, page, stroke_id, author, shade, points, width) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![board, stroke.page, stroke.id, author, stroke.shade, self.wb_seal(&stroke.points), stroke.width],
-        )
-        .map_or(false, |n| n > 0)
+        let sealed = self.wb_seal(&stroke.points);
+        let added = sealed.len();
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO wb_strokes (board, page, stroke_id, author, shade, points, width) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![board, stroke.page, stroke.id, author, stroke.shade, sealed, stroke.width],
+            )
+            .map_or(false, |n| n > 0);
+        if inserted {
+            *used += added;
+        }
+        inserted
+    }
+
+    /// One transaction around a packet's worth of statements: a peer can send
+    /// thousands, and each autocommit is a sync under the core lock.
+    fn wb_tx(&self) -> Option<rusqlite::Transaction<'_>> {
+        self.db.as_ref().and_then(|conn| conn.unchecked_transaction().ok())
+    }
+
+    /// Enforces `MAX_TOMBSTONES` per page. Once per packet, not per erase.
+    fn wb_trim_tombstones(&self, board: &str) {
+        let Some(conn) = &self.db else { return };
+        let _ = conn.execute(
+            "DELETE FROM wb_tombstones WHERE seq IN (
+                SELECT seq FROM (
+                    SELECT seq, ROW_NUMBER() OVER (PARTITION BY page ORDER BY seen DESC, seq DESC) AS n
+                    FROM wb_tombstones WHERE board = ?1)
+                WHERE n > ?2)",
+            params![board, MAX_TOMBSTONES as i64],
+        );
+    }
+
+    /// Token bucket (as a virtual clock in `wb_reply_at`) for what `peer_fp`
+    /// may make us send on a board. `false` = over budget, drop the request.
+    fn wb_pull_allowed(&mut self, kind: &str, board: &str, peer_fp: &str, units: u64) -> bool {
+        let now = current_time_ms();
+        let slot = (format!("{}#{}", board, kind), peer_fp.to_string());
+        let due = self.wb_reply_at.get(&slot).copied().unwrap_or(0).max(now) + units * PULL_COST_MS;
+        if due - now > MAX_PAGES as u64 * PULL_COST_MS {
+            warn!("Whiteboard {} from {} dropped: over budget", kind, &peer_fp[..peer_fp.len().min(8)]);
+            return false;
+        }
+        self.wb_reply_at.insert(slot, due);
+        true
     }
 
     /// Erases a stroke and remembers its id so a late copy cannot come back.
-    /// Returns the page of the stroke if it was here.
+    /// Returns the page of the stroke if it was here. The caller runs
+    /// `wb_trim_tombstones` when it is done.
     fn wb_erase(&self, board: &str, hint_page: u8, id: &[u8]) -> Option<u8> {
         let conn = self.db.as_ref()?;
         if id.len() != 8 || hint_page >= MAX_PAGES {
@@ -176,14 +236,8 @@ impl P2PCore {
         let page = live.unwrap_or(hint_page);
         let _ = conn.execute("DELETE FROM wb_strokes WHERE board = ?1 AND stroke_id = ?2", params![board, id]);
         let _ = conn.execute(
-            "INSERT OR IGNORE INTO wb_tombstones (board, page, stroke_id) VALUES (?1, ?2, ?3)",
-            params![board, page, id],
-        );
-        let _ = conn.execute(
-            "DELETE FROM wb_tombstones WHERE board = ?1 AND page = ?2 AND seq <= (
-                SELECT seq FROM wb_tombstones WHERE board = ?1 AND page = ?2
-                ORDER BY seq DESC LIMIT 1 OFFSET ?3)",
-            params![board, page, MAX_TOMBSTONES as i64],
+            "INSERT OR IGNORE INTO wb_tombstones (board, page, stroke_id, seen) VALUES (?1, ?2, ?3, ?4)",
+            params![board, page, id, live.is_some()],
         );
         live
     }
@@ -270,7 +324,7 @@ impl P2PCore {
         }
         self.wb_set_unread(&key, 0);
         self.wb_outbox.remove(&key);
-        self.wb_reply_at.retain(|(board, _), _| board != &key);
+        self.wb_reply_at.retain(|(board, _), _| board.split('#').next() != Some(key.as_str()));
     }
 }
 
@@ -436,7 +490,7 @@ impl P2PCore {
         }
         let step = (MAX_STROKE_POINTS - 1) * 4;
         let mut start = 0;
-        let mut ids = String::new();
+        let mut segments = Vec::new();
         loop {
             let end = (start + MAX_STROKE_POINTS * 4).min(points.len());
             let mut id = vec![0u8; 8];
@@ -445,18 +499,30 @@ impl P2PCore {
             if !stroke_ok(&stroke) {
                 return Err("Invalid stroke".to_string());
             }
-            if !self.wb_insert(&board.key, &stroke, &me) {
-                return Err("Page full".to_string());
-            }
-            ids.push_str(&hex::encode(&stroke.id));
-            self.wb_queue(&board).strokes.push(stroke);
+            segments.push(stroke);
             if end == points.len() {
                 break;
             }
             start += step;
         }
-        if self.wb_outbox.get(&board.key).map_or(false, |o| o.strokes.len() >= MAX_OPS_STROKES) {
-            self.wb_flush_ops(&board.key);
+        // All segments or none: the UI gets no ids on an error, so a stroke
+        // stored in part could be neither shown nor undone, yet went to peers.
+        let mut used = self.wb_page_used(&board.key, page);
+        let sealing = self.wb_seal(&[]).len(); // what `wb_seal` adds per stroke
+        if used + segments.iter().map(|s| s.points.len() + sealing).sum::<usize>() > MAX_PAGE_BYTES {
+            return Err("Page full".to_string());
+        }
+        let mut ids = String::new();
+        for stroke in segments {
+            if !self.wb_insert_counted(&board.key, &stroke, &me, &mut used) {
+                continue; // database error only: the checks above passed
+            }
+            ids.push_str(&hex::encode(&stroke.id));
+            // The receiver drops a whole packet over `MAX_OPS_STROKES`.
+            if self.wb_outbox.get(&board.key).map_or(false, |o| o.strokes.len() >= MAX_OPS_STROKES) {
+                self.wb_flush_ops(&board.key);
+            }
+            self.wb_queue(&board).strokes.push(stroke);
         }
         // Continuous drawing never reaches the debounce; this enforces the maximum delay.
         self.wb_sweep();
@@ -468,6 +534,10 @@ impl P2PCore {
         let board = self.wb_board(peer_fp, group_id)?;
         for id in ids.chunks_exact(8) {
             let Some(page) = self.wb_erase(&board.key, 0, id) else { continue };
+            // The receiver drops a whole packet over this many erase records.
+            if self.wb_outbox.get(&board.key).map_or(false, |o| o.erased.len() >= MAX_TOMBSTONES * 9) {
+                self.wb_flush_ops(&board.key);
+            }
             let outbox = self.wb_queue(&board);
             // Drawn and erased within one burst: nobody else has it.
             if let Some(at) = outbox.strokes.iter().position(|s| s.id == id) {
@@ -477,6 +547,7 @@ impl P2PCore {
                 outbox.erased.extend_from_slice(id);
             }
         }
+        self.wb_trim_tombstones(&board.key);
         self.wb_sweep();
         Ok(())
     }
@@ -600,6 +671,7 @@ impl P2PCore {
             return noop();
         }
         let mut pages = BTreeSet::new();
+        let tx = self.wb_tx();
         for stroke in &strokes {
             // The author is whoever sent the packet, never a field in it.
             if self.wb_insert(&board.key, stroke, &sender) {
@@ -611,13 +683,17 @@ impl P2PCore {
                 pages.insert(page);
             }
         }
+        if !erased.is_empty() {
+            self.wb_trim_tombstones(&board.key);
+        }
+        let _ = tx.map(|tx| tx.commit());
         self.wb_changed(&board, &pages, !from_self)
     }
 
     /// Their board summary: pull every page that differs from mine.
     pub(crate) fn wb_on_digest(&mut self, peer_fp: &str, group_id: Option<String>, conversation_identity_id: Option<String>, pages: Vec<WbPageDigest>) -> serde_json::Value {
         let Some((board, _, _)) = self.wb_incoming_board(peer_fp, &group_id, &conversation_identity_id) else { return noop() };
-        if pages.len() > MAX_PAGES as usize {
+        if pages.len() > MAX_PAGES as usize || !self.wb_pull_allowed("digest", &board.key, peer_fp, 1) {
             return noop();
         }
         let theirs: HashMap<u8, (u32, u64)> = pages.iter().map(|d| (d.page, (d.count, d.hash))).collect();
@@ -639,6 +715,9 @@ impl P2PCore {
     pub(crate) fn wb_on_page_request(&mut self, peer_fp: &str, group_id: Option<String>, conversation_identity_id: Option<String>, pages: Vec<u8>) -> serde_json::Value {
         let Some((board, _, _)) = self.wb_incoming_board(peer_fp, &group_id, &conversation_identity_id) else { return noop() };
         let pages: BTreeSet<u8> = pages.into_iter().filter(|p| *p < MAX_PAGES).collect();
+        if pages.is_empty() || !self.wb_pull_allowed("pages", &board.key, peer_fp, pages.len() as u64) {
+            return noop();
+        }
         for page in pages {
             let mut authors: Vec<String> = Vec::new();
             let strokes: Vec<WbStroke> = self.wb_page_strokes(&board.key, page).into_iter().filter_map(|(mut stroke, author)| {
@@ -683,14 +762,20 @@ impl P2PCore {
         }
         let me = self.my_identity_id().unwrap_or_default();
         let participants = self.wb_participants(&board);
-        let mut changed = false;
+        let mut changed = BTreeSet::new();
         let mut foreign = false;
+        let tx = self.wb_tx();
         for id in tombstones.chunks_exact(8) {
-            if self.wb_erase(&board.key, page, id).is_some() {
-                changed = true;
+            // The stroke may live on another page here: that page changed.
+            if let Some(live_page) = self.wb_erase(&board.key, page, id) {
+                changed.insert(live_page);
                 foreign = true;
             }
         }
+        if !tombstones.is_empty() {
+            self.wb_trim_tombstones(&board.key);
+        }
+        let mut used = self.wb_page_used(&board.key, page);
         let mut they_lack = false;
         let mut theirs: HashSet<&[u8]> = HashSet::new();
         for stroke in strokes.iter().filter(|s| s.page == page) {
@@ -699,14 +784,15 @@ impl P2PCore {
             if author.len() > 128 || (board.group_id.is_none() && !participants.contains(author)) {
                 continue;
             }
-            if self.wb_insert(&board.key, stroke, author) {
-                changed = true;
+            if self.wb_insert_counted(&board.key, stroke, author, &mut used) {
+                changed.insert(page);
                 foreign |= *author != me;
             } else if self.wb_is_tombstoned(&board.key, &stroke.id) {
                 they_lack = true; // erased here, still alive there
             }
         }
         they_lack |= self.wb_page_strokes(&board.key, page).iter().any(|(s, _)| !theirs.contains(s.id.as_slice()));
+        let _ = tx.map(|tx| tx.commit());
         if they_lack {
             let now = current_time_ms();
             let slot = (board.key.clone(), peer_fp.to_string());
@@ -715,8 +801,7 @@ impl P2PCore {
                 self.wb_send_digest(&board, vec![peer_fp.to_string()]);
             }
         }
-        let pages: BTreeSet<u8> = if changed { [page].into() } else { BTreeSet::new() };
-        self.wb_changed(&board, &pages, foreign)
+        self.wb_changed(&board, &changed, foreign)
     }
 }
 
@@ -884,12 +969,17 @@ mod tests {
     #[test]
     fn tombstones_are_capped() {
         let core = core();
-        for n in 0..(MAX_TOMBSTONES as u64 + 10) {
+        // One real erase first, then a flood of ids this device never held.
+        assert!(core.wb_insert("g:x", &stroke(1, 0), "alice"));
+        assert_eq!(core.wb_erase("g:x", 0, &[1; 8]), Some(0));
+        for n in 1000..(1000 + MAX_TOMBSTONES as u64 + 10) {
             core.wb_erase("g:x", 0, &n.to_le_bytes());
         }
+        core.wb_trim_tombstones("g:x");
         assert_eq!(core.wb_page_tombstones("g:x", 0).len(), MAX_TOMBSTONES * 8);
-        assert!(!core.wb_is_tombstoned("g:x", &0u64.to_le_bytes()), "oldest dropped");
-        assert!(core.wb_is_tombstoned("g:x", &(MAX_TOMBSTONES as u64 + 9).to_le_bytes()));
+        assert!(core.wb_is_tombstoned("g:x", &[1; 8]), "a real erase outlives made-up ids");
+        assert!(!core.wb_is_tombstoned("g:x", &1000u64.to_le_bytes()), "oldest made-up id dropped");
+        assert!(core.wb_is_tombstoned("g:x", &(1000 + MAX_TOMBSTONES as u64 + 9).to_le_bytes()));
     }
 
     #[test]
@@ -903,6 +993,15 @@ mod tests {
         assert_eq!(core.wb_unread("g:x"), 0);
         assert!(core.wb_digest("g:x").is_empty());
         assert!(core.wb_page_tombstones("g:x", 0).is_empty());
+    }
+
+    #[test]
+    fn pulls_are_budgeted_per_device() {
+        let mut core = core();
+        assert!(core.wb_pull_allowed("pages", "g:x", "fp", MAX_PAGES as u64), "one whole board at once");
+        assert!(!core.wb_pull_allowed("pages", "g:x", "fp", 1));
+        assert!(core.wb_pull_allowed("pages", "g:x", "other", 1), "per device");
+        assert!(core.wb_pull_allowed("digest", "g:x", "fp", 1), "per kind");
     }
 
     /// Every packet handler has to go through the authorization gate before it

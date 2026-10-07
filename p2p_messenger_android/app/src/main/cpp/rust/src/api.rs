@@ -60,24 +60,28 @@ pub fn create_identity(device_name: &str) -> String {
     let name = device_name.to_string();
     string_result(catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let mut core = core_lock();
-        match core.generate_identity(name) {
-            Ok((id, bundle_bytes)) => {
-                core.pending_secret_bundle = Some(bundle_bytes);
-                Ok(id)
-            }
-            Err(e) => Err(e),
-        }
+        core_lock().create_identity(name)
     }))
 }
 
+/// Not a destructive read, see JNI `getPendingSecretBundle`.
 pub fn get_pending_secret_bundle() -> Vec<u8> {
-    catch_panic(|| core_lock().pending_secret_bundle.take().unwrap_or_default()).unwrap_or_default()
+    catch_panic(|| core_lock().pending_secret_bundle.clone().unwrap_or_default()).unwrap_or_default()
 }
 
 pub fn load_secret_bundle(bundle_bytes: &[u8]) -> bool {
     let raw = bundle_bytes.to_vec();
-    matches!(catch_panic(move || core_lock().load_secret_bundle(&raw)), Ok(Ok(_)))
+    matches!(
+        catch_panic(move || {
+            let mut core = core_lock();
+            let loaded = core.load_secret_bundle(&raw);
+            if loaded.is_ok() {
+                core.pending_secret_bundle = None;
+            }
+            loaded
+        }),
+        Ok(Ok(_))
+    )
 }
 
 pub fn get_identity_code() -> String {
@@ -826,7 +830,6 @@ pub fn get_display_name() -> String {
     catch_panic(|| core_lock().own_display_name().unwrap_or_default()).unwrap_or_default()
 }
 
-/// Hesap adını değiştirir ve bilinen her kişiye bildirir — bkz.
 /// `P2PCore::delete_account` — bildirim giden cihaz sayısı, hata için `-1`.
 pub fn delete_account() -> i64 {
     match catch_panic(|| {
@@ -839,8 +842,11 @@ pub fn delete_account() -> i64 {
 }
 
 /// `P2PCore::account_deletion_pending`.
-pub fn account_deletion_pending() -> usize {
-    catch_panic(|| core_lock().account_deletion_pending()).unwrap_or(0)
+///
+/// -1 on a panic, NOT 0: 0 means "every notice was delivered" and the caller
+/// goes on to wipe the device.
+pub fn account_deletion_pending() -> i64 {
+    catch_panic(|| core_lock().account_deletion_pending()).map(|n| n as i64).unwrap_or(-1)
 }
 
 /// `P2PCore::set_display_name`.
@@ -898,6 +904,13 @@ pub fn import_recovery(file_bytes: &[u8], passphrase: &str, device_name: &str) -
 
 /// JSON dizisi dönen çağrıların panik yolu — JNI tarafındaki
 /// `unwrap_or_else(|_| "[]")` deseninin aynısı.
+/// JNI `listReactions`: the stored reactions of a message, for a chat that is
+/// opened again.
+pub fn list_reactions(target_message_id: &str) -> String {
+    let id = target_message_id.to_string();
+    json_list(catch_panic(move || core_lock().list_reactions(&id)))
+}
+
 fn json_list(result: Result<String, String>) -> String {
     result.unwrap_or_else(|_| "[]".to_string())
 }

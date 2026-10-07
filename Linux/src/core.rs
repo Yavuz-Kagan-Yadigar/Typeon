@@ -296,7 +296,7 @@ pub fn delete_account() -> i64 {
     api::delete_account()
 }
 
-pub fn account_deletion_pending() -> usize {
+pub fn account_deletion_pending() -> i64 {
     api::account_deletion_pending()
 }
 

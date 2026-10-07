@@ -967,7 +967,7 @@ fn confirm_delete_account(app: &Rc<App>) {
                 || {
                     if core::delete_account() >= 0 {
                         let deadline = util::now_ms() + 15_000;
-                        while util::now_ms() < deadline && core::account_deletion_pending() > 0 {
+                        while util::now_ms() < deadline && core::account_deletion_pending() != 0 {
                             std::thread::sleep(std::time::Duration::from_millis(500));
                         }
                     }

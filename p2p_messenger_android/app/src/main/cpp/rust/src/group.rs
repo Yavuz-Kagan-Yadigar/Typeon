@@ -136,7 +136,13 @@ pub enum GroupUpdateError {
     /// yani `<= version`, reddedilir); bir gap tespit edildiğinde çağıran
     /// taraf uyarı loglar (bkz. lib.rs process_group_update).
     StaleOrOutOfOrderVersion,
+    /// new_version is implausibly far ahead. One accepted update at
+    /// `u32::MAX` would freeze the group for good: nothing can follow it.
+    VersionTooFarAhead,
 }
+
+/// Largest forward gap one update may make (missed updates are allowed).
+pub const MAX_VERSION_JUMP: u32 = 1 << 20;
 
 /// Uygulanacak değişikliğin türü (spec 5.2 `GroupChange`). Kanonik tanım
 /// `packet::GroupChange`'te (ağ paket formatı, `GroupUpdate.change` alanı) —
@@ -171,6 +177,9 @@ pub fn validate_group_update(
     // sadece stale/tekrar (mevcut version'a eşit veya küçük) reddedilir.
     if new_version <= group.version {
         return Err(GroupUpdateError::StaleOrOutOfOrderVersion);
+    }
+    if new_version > group.version.saturating_add(MAX_VERSION_JUMP) {
+        return Err(GroupUpdateError::VersionTooFarAhead);
     }
     Ok(())
 }
@@ -216,6 +225,26 @@ pub fn apply_change(group: &mut Group, change: &GroupChange, new_version: u32, n
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_cannot_jump_to_the_end() {
+        let group = Group::new("g1".into(), "Test".into(), "founder1".into(), 1000);
+        assert!(validate_group_update(&group, "founder1", true, MAX_VERSION_JUMP).is_ok());
+        assert_eq!(
+            validate_group_update(&group, "founder1", true, u32::MAX),
+            Err(GroupUpdateError::VersionTooFarAhead)
+        );
+    }
+
+    /// A late joiner holds [founder, me]; the update that hands the group to B
+    /// also carries the member list with B in it.
+    #[test]
+    fn transfer_to_a_member_the_same_update_brings() {
+        let mut g = Group::new("g1".into(), "Test".into(), "founder1".into(), 1000);
+        g.sync_members(&["founder1".to_string(), "b".to_string()], 1001);
+        apply_change(&mut g, &GroupChange::TransferFounder("b".into()), 1, 1001);
+        assert_eq!(g.founder_identity_id, "b");
+    }
 
     #[test]
     fn founder_can_update() {

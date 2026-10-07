@@ -177,7 +177,9 @@ pub fn check_incoming_device(
         Some(c) => {
             if c.is_known_active(device_fingerprint) {
                 DeviceCheckOutcome::KnownActive
-            } else if has_valid_signed_device_add {
+            // A device listed here and not Active was revoked. A replayed
+            // signed DeviceAdd must not bring it back without the user.
+            } else if has_valid_signed_device_add && c.find_device(device_fingerprint).is_none() {
                 DeviceCheckOutcome::NewDeviceViaSignedAdd
             } else {
                 DeviceCheckOutcome::UnverifiedNewDeviceAlert

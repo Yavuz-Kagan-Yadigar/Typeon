@@ -41,6 +41,13 @@ use std::path::Path;
 /// bayttır (son parça hariç, o daha kısa olabilir).
 pub const FILE_CHUNK_SIZE: usize = 256 * 1024;
 
+/// What a peer's `FileOffer.chunk_size` may be. It sizes buffers and file
+/// offsets on this device: too large is a multi-GiB allocation, too small is
+/// billions of chunks for one file.
+pub fn chunk_size_ok(chunk_size: usize) -> bool {
+    (64 * 1024..=crate::server_proto::MAX_BLOB_CHUNK_BYTES - 16).contains(&chunk_size)
+}
+
 /// YENI dosyalar icin parca boyutu.
 ///
 /// SU AN 256 KiB — miras boyutla ayni. Yer tutucu degil, OLCULMUS bir karar.
@@ -271,6 +278,10 @@ impl std::fmt::Display for ChunkAppendError {
 /// bir kaynaktan güvenle yeniden isteyebilir (bkz. `ChunkAppendError`).
 pub fn write_verified_chunk_at_with(dest_enc_path: &Path, chunk_index: u32, ciphertext: &[u8], file_key: &[u8; 32], chunk_size: usize) -> Result<usize, ChunkAppendError> {
     let chunk_size = if chunk_size == 0 { FILE_CHUNK_SIZE } else { chunk_size };
+    // A longer chunk would be written over the next chunk's slot.
+    if ciphertext.len() > chunk_size + 16 {
+        return Err(ChunkAppendError::Auth(format!("Chunk {} is longer than the file's chunk size", chunk_index)));
+    }
     let cipher = ChaCha20Poly1305::new_from_slice(file_key)
         .map_err(|_| ChunkAppendError::Auth("Invalid file key".to_string()))?;
     let nonce = nonce_from_chunk_index(chunk_index);

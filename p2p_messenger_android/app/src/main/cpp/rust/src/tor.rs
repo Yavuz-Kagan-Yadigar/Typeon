@@ -65,6 +65,9 @@ impl TorStatus {
     }
 }
 
+/// Inbound onion streams bridged at once. A peer needs one per connection.
+const MAX_INBOUND_ONION_STREAMS: usize = 64;
+
 /// Çalışan Tor katmanının paylaşılan tutamacı. `TorClient` dial transport'u
 /// tarafından da kullanılır (bkz. `ArtiDialTransport`), bu yüzden `Arc`.
 pub struct TorHandle {
@@ -73,6 +76,8 @@ pub struct TorHandle {
     onion_addr: Arc<Mutex<Option<String>>>,
     /// Onion service'i canlı tutmak için (drop edilirse servis durur).
     _service: Arc<tor_hsservice::RunningOnionService>,
+    /// A `notify_network_changed` retry loop is running.
+    rebootstrapping: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TorHandle {
@@ -108,19 +113,35 @@ impl TorHandle {
     }
 
     pub fn notify_network_changed(&self) {
+        use std::sync::atomic::Ordering;
+        // One loop at a time; it runs until the bootstrap holds.
+        if self.rebootstrapping.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let client = self.client.clone();
         let status = self.status.clone();
+        let running = self.rebootstrapping.clone();
         tokio::spawn(async move {
-            match client.bootstrap().await {
-                Ok(()) => {
-                    *status.lock().unwrap() = TorStatus::Ready;
-                    log::info!("Tor: ağ değişikliği sonrası bootstrap teyit edildi");
-                }
-                Err(e) => {
-                    *status.lock().unwrap() = TorStatus::Bootstrapping;
-                    log::warn!("Tor: ağ değişikliği sonrası bootstrap henüz tamam değil: {e}");
+            // Retries like the launch loop: one failed attempt left the status
+            // at "bootstrapping" until the next network change, even after
+            // arti recovered by itself.
+            let mut delay = std::time::Duration::from_secs(2);
+            loop {
+                match client.bootstrap().await {
+                    Ok(()) => {
+                        *status.lock().unwrap() = TorStatus::Ready;
+                        log::info!("Tor: ağ değişikliği sonrası bootstrap teyit edildi");
+                        break;
+                    }
+                    Err(e) => {
+                        *status.lock().unwrap() = TorStatus::Bootstrapping;
+                        log::warn!("Tor: ağ değişikliği sonrası bootstrap henüz tamam değil ({delay:?} sonra yeniden): {e}");
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(std::time::Duration::from_secs(60));
+                    }
                 }
             }
+            running.store(false, Ordering::SeqCst);
         });
     }
 
@@ -209,10 +230,19 @@ impl TorHandle {
         // Arka plan: gelen onion akışlarını yerel libp2p TCP portuna köprüle.
         {
             tokio::spawn(async move {
+                // Anyone who knows the .onion can open streams, and each one
+                // costs a task, a socket and a libp2p upgrade that the swarm
+                // sees as 127.0.0.1. Over the cap the request is dropped.
+                let slots = Arc::new(tokio::sync::Semaphore::new(MAX_INBOUND_ONION_STREAMS));
                 let mut stream_requests = Box::pin(handle_rend_requests(rend_requests));
                 while let Some(stream_request) = stream_requests.next().await {
+                    let Ok(slot) = slots.clone().try_acquire_owned() else {
+                        log::warn!("Tor: gelen akış sınırı dolu, istek düşürüldü");
+                        continue;
+                    };
                     tokio::spawn(async move {
                         bridge_incoming_stream(stream_request, local_port).await;
+                        drop(slot);
                     });
                 }
                 log::info!("Tor: gelen akış köprüsü sonlandı");
@@ -224,6 +254,7 @@ impl TorHandle {
             status,
             onion_addr,
             _service: service,
+            rebootstrapping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 }
