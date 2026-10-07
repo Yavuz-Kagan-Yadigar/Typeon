@@ -403,6 +403,7 @@
     <string name="error_app_lock_empty">The password cannot be empty.</string>
     <string name="error_app_lock_mismatch">The two passwords do not match.</string>
     <string name="error_app_lock_wrong">Wrong password.</string>
+    <string name="error_app_lock_wait">Too many wrong attempts. Try again in %1$d s.</string>
     <string name="msg_app_lock_changed">Password changed.</string>
 
     <!-- Spec dışı, kullanıcı isteği: mesajlara emoji tepkisi. -->
@@ -449,6 +450,7 @@
     <string name="call_via_p2p">direct</string>
     <string name="call_via_server">via server</string>
     <string name="call_waiting_media">waiting for media</string>
+    <string name="call_needs_android10">Calls need Android 10 or newer</string>
     <string name="call_permission_needed">Microphone (and camera for video) permission is needed for calls</string>
     <string name="call_channel_name">Calls</string>
     <string name="call_notification_title">Typeon call</string>

@@ -35,6 +35,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
     companion object {
         private const val GROUP_WINDOW_MS = 2 * 60 * 1000L
+        private const val ORDER_MAX_AGE_MS = 31L * 24 * 60 * 60 * 1000
     }
 
     enum class Status { PENDING, SENT, ERROR }
@@ -174,7 +175,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
          *  saniye içinde, senkron olmadan yazması) olduğundan ve yanlış
          *  uygulanırsa asıl mesaj sıralamasını BOZMA riski gerçek olduğundan
          *  şimdilik ertelendi. */
-        val orderKey: Long get() = sentAtMs?.takeIf { it > 0 } ?: timestamp
+        val orderKey: Long get() = sentAtMs?.takeIf { it > 0 }
+            // The sender's clock is not trusted without bounds: nothing was
+            // sent after we received it, and the server holds mail 30 days.
+            // A clock far ahead used to pin a message to the bottom forever.
+            ?.coerceIn(timestamp - ORDER_MAX_AGE_MS, timestamp) ?: timestamp
     }
 
     /** Kendi mesajlarımıza uzun basıldığında tetiklenir (Düzenle/Sil menüsü
@@ -235,7 +240,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         // bir başlangıç — grubu burada kesmek hem doğrusu hem de en basiti.
         if (cur.replyToMessageId != null) return false
         if (!isSameSender(prev, cur)) return false
-        return cur.timestamp - prev.timestamp in 0 until GROUP_WINDOW_MS
+        // Send order, like the sort: messages sent hours apart and delivered
+        // together are not one group.
+        return cur.orderKey - prev.orderKey in 0 until GROUP_WINDOW_MS
     }
 
     /** bkz. MergedBubbleDecoration — birleşik şekli çizen dekorasyon,
@@ -253,7 +260,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         // reply ends its group, otherwise it never showed its time.
         if (next.replyToMessageId != null) return false
         if (!isSameSender(cur, next)) return false
-        return next.timestamp - cur.timestamp in 0 until GROUP_WINDOW_MS
+        return next.orderKey - cur.orderKey in 0 until GROUP_WINDOW_MS
     }
 
     /** Spec dışı, kullanıcı isteği: "görüldü" bilgisi SADECE en son
@@ -357,7 +364,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             old.isDeleted = now.isDeleted
             old.reactions = now.reactions
             if (old.isMine) old.status = now.status
-            if (!sameAttachment) old.attachment = now.attachment
+            if (!sameAttachment) {
+                // The reload may skip the preview of a row it knows is on screen.
+                now.attachment?.let { if (it.previewJpeg == null) it.previewJpeg = old.attachment?.previewJpeg }
+                old.attachment = now.attachment
+            }
             notifyItemChanged(i)
             changed = true
         }
@@ -583,7 +594,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             pendingSeenAvatars = viewerAvatars
             return
         }
-        pendingSeenMessageId = null
+        // Only its own: an older "seen" arriving first used to drop the one
+        // held back for a message not in the list yet.
+        if (pendingSeenMessageId == targetMessageId) pendingSeenMessageId = null
         val previousId = lastSeenMessageId
         val previousIdx = previousId?.let { indexOfMessageId(it) } ?: -1
         if (idx < previousIdx) return

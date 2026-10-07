@@ -203,16 +203,15 @@ class ChatsFragment : Fragment() {
         AlertDialog.Builder(requireContext())
             .setMessage(R.string.confirm_delete_group)
             .setPositiveButton(R.string.action_delete_group) { _, _ ->
-                val result = try {
-                    P2PLib.deleteGroup(message.contactId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
-                } else {
-                    Toast.makeText(requireContext(), R.string.msg_group_deleted, Toast.LENGTH_SHORT).show()
-                    refreshList()
+                offMain({
+                    try { P2PLib.deleteGroup(message.contactId) } catch (e: Exception) { "Error: ${e.message}" }
+                }) { result ->
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(requireContext(), R.string.msg_group_deleted, Toast.LENGTH_SHORT).show()
+                        refreshList()
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -227,16 +226,15 @@ class ChatsFragment : Fragment() {
         AlertDialog.Builder(requireContext())
             .setMessage(R.string.confirm_leave_group)
             .setPositiveButton(R.string.action_leave_group) { _, _ ->
-                val result = try {
-                    P2PLib.leaveGroup(message.contactId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
-                } else {
-                    Toast.makeText(requireContext(), R.string.msg_left_group, Toast.LENGTH_SHORT).show()
-                    refreshList()
+                offMain({
+                    try { P2PLib.leaveGroup(message.contactId) } catch (e: Exception) { "Error: ${e.message}" }
+                }) { result ->
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(requireContext(), R.string.msg_left_group, Toast.LENGTH_SHORT).show()
+                        refreshList()
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -329,12 +327,13 @@ class ChatsFragment : Fragment() {
             .setPositiveButton(R.string.action_create_group) { _, _ ->
                 val name = input.text.toString().trim()
                 if (name.isBlank()) return@setPositiveButton
-                val groupId = P2PLib.createGroup(name)
-                if (groupId.startsWith("Error:")) {
-                    Toast.makeText(requireContext(), groupId, Toast.LENGTH_LONG).show()
-                } else {
-                    refreshList()
-                    showAddMembersDialog(groupId)
+                offMain({ P2PLib.createGroup(name) }) { groupId ->
+                    if (groupId.startsWith("Error:")) {
+                        Toast.makeText(requireContext(), groupId, Toast.LENGTH_LONG).show()
+                    } else {
+                        refreshList()
+                        showAddMembersDialog(groupId)
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -367,15 +366,14 @@ class ChatsFragment : Fragment() {
             .setTitle(R.string.lbl_add_member_to_group)
             .setMultiChoiceItems(names, checked) { _, which, isChecked -> checked[which] = isChecked }
             .setPositiveButton(R.string.lbl_add_member_to_group) { _, _ ->
-                for (i in identityIds.indices) {
-                    if (checked[i]) {
-                        val ok = P2PLib.inviteToGroup(groupId, identityIds[i])
-                        if (!ok) {
-                            Toast.makeText(requireContext(), "${names[i]}: ${getString(R.string.error_network)}", Toast.LENGTH_SHORT).show()
-                        }
+                offMain({
+                    identityIds.indices.filter { checked[it] && !P2PLib.inviteToGroup(groupId, identityIds[it]) }
+                }) { failed ->
+                    for (i in failed) {
+                        Toast.makeText(requireContext(), "${names[i]}: ${getString(R.string.error_network)}", Toast.LENGTH_SHORT).show()
                     }
+                    refreshList()
                 }
-                refreshList()
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -394,15 +392,47 @@ class ChatsFragment : Fragment() {
         refreshHandler.removeCallbacks(syncRunnable)
     }
 
+    /** JNI calls that take the core lock, off the main thread; [done] runs on
+     *  the main thread while the fragment is still attached. */
+    private val worker = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private fun <T> offMain(work: () -> T, done: (T) -> Unit) {
+        worker.execute {
+            // A detached fragment throws from getString: drop the result.
+            val result = try { work() } catch (e: Exception) { return@execute }
+            refreshHandler.post { if (isAdded && view != null) done(result) }
+        }
+    }
+
+    @Volatile private var refreshing = false
+    /** A refresh was asked for while one was running (after a delete, a
+     *  pin...): run once more, the running one may have read the old state. */
+    private var refreshAgain = false
+
+    /** Runs every 5 s, also in the drawer of every chat screen: one history
+     *  query and the whole attachment list per chat, under the core lock.
+     *  On the main thread that was stutter, and an ANR behind a long poll turn.
+     *  ponytail: still O(chats x media) work per refresh; add one core query
+     *  that returns every chat's newest row if the list gets slow. */
     private fun refreshList() {
-        // NOT: Her yenilemede kişi başına bir getMessageHistory JNI çağrısı
-        // yapılıyor (O(n)). Aşama A kapsamındaki küçük kişi sayıları için
-        // sorun değil; çok sayıda kişiye ölçeklenecekse Rust tarafında
-        // "tüm kişiler için son mesajı tek seferde döndüren" toplu bir
-        // sorgu eklenmesi düşünülebilir.
+        if (refreshing) { refreshAgain = true; return }
+        val ctx = context?.applicationContext ?: return
+        refreshing = true
+        worker.execute {
+            val result = try { buildChatItems(ctx) } catch (e: Exception) { null }
+            refreshHandler.post {
+                refreshing = false
+                if (refreshAgain) { refreshAgain = false; refreshList() }
+                if (result == null || !isAdded || view == null) return@post
+                noContactsText.visibility = if (result.isEmpty()) View.VISIBLE else View.GONE
+                allChatItems = result
+                applyFilter()
+            }
+        }
+    }
+
+    private fun buildChatItems(ctx: android.content.Context): List<ChatAdapter.ChatMessage> {
         val contacts = loadContacts()
         val groups = loadGroups()
-        noContactsText.visibility = if (contacts.isEmpty() && groups.isEmpty()) View.VISIBLE else View.GONE
 
         val contactItems = contacts.map { contact ->
             val fingerprint = contact.activeDeviceFingerprint ?: ""
@@ -417,11 +447,11 @@ class ChatsFragment : Fragment() {
                 lastMessage = lastMessage?.text ?: "",
                 timestamp = lastMessage?.timestamp ?: 0L,
                 hasUnread = lastMessage != null &&
-                    lastMessage.timestamp > ReadStatePrefs.lastReadAt(requireContext(), fingerprint),
+                    lastMessage.timestamp > ReadStatePrefs.lastReadAt(ctx, fingerprint),
                 // Keyed on the STABLE contact id (not the device fingerprint,
                 // which can change if the contact re-pairs a device) so a
                 // pin survives that.
-                isPinned = PinnedChatsPrefs.isPinned(requireContext(), contact.contactId),
+                isPinned = PinnedChatsPrefs.isPinned(ctx, contact.contactId),
                 realContactId = contact.contactId,
                 avatarJpeg = contact.avatarHex?.let { hexToBytes(it) }
             )
@@ -440,8 +470,8 @@ class ChatsFragment : Fragment() {
                     ?: resources.getQuantityString(R.plurals.lbl_member_count, group.memberCount, group.memberCount),
                 timestamp = lastMessage?.timestamp ?: 0L,
                 hasUnread = lastMessage != null &&
-                    lastMessage.timestamp > ReadStatePrefs.lastReadAt(requireContext(), "group:${group.groupId}"),
-                isPinned = PinnedChatsPrefs.isPinned(requireContext(), "group:${group.groupId}"),
+                    lastMessage.timestamp > ReadStatePrefs.lastReadAt(ctx, "group:${group.groupId}"),
+                isPinned = PinnedChatsPrefs.isPinned(ctx, "group:${group.groupId}"),
                 avatarJpeg = group.avatarHex?.let { hexToBytes(it) },
                 isGroup = true,
                 isGroupFounder = group.isFounder
@@ -454,9 +484,8 @@ class ChatsFragment : Fragment() {
         // doğal olarak en son sıraya düşer. Pinlenmiş sohbetler (birden
         // çok olabilir) bu sıralamanın ÜZERİNDE, kendi aralarında yine en
         // güncel mesaja göre en üstte durur.
-        allChatItems = (contactItems + groupItems)
+        return (contactItems + groupItems)
             .sortedWith(compareByDescending<ChatAdapter.ChatMessage> { it.isPinned }.thenByDescending { it.timestamp })
-        applyFilter()
     }
 
     /** bkz. `allChatItems`/`searchQuery` dosya başı notu — kişi/grup adına
@@ -469,7 +498,7 @@ class ChatsFragment : Fragment() {
         } else {
             allChatItems.filter { it.displayName.contains(query, ignoreCase = true) }
         }
-        adapter.submitList(filtered)
+        adapter.submitList(filtered) { adapter.refreshTimeLabels() }
     }
 
     private data class ContactRow(

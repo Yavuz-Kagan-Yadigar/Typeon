@@ -59,6 +59,7 @@ class MediaViewerActivity : AppCompatActivity() {
 
     private var videoMediaPlayer: MediaPlayer? = null
     private var videoSpeed = 1f
+    private var resumePositionMs = 0
     private val videoHandler = Handler(Looper.getMainLooper())
     private var videoSlider: Slider? = null
     private var btnPlayPauseVideo: ImageButton? = null
@@ -126,10 +127,18 @@ class MediaViewerActivity : AppCompatActivity() {
             videoView.setOnPreparedListener { mp ->
                 videoMediaPlayer = mp
                 mp.isLooping = false
+                // The surface comes back after screen off and prepares again:
+                // continue where it stopped, at the chosen speed.
+                if (resumePositionMs > 0) mp.seekTo(resumePositionMs)
+                if (videoSpeed != 1f && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    try { mp.playbackParams = PlaybackParams().setSpeed(videoSpeed) } catch (e: Exception) { }
+                }
                 mp.start()
                 findViewById<View>(R.id.layoutVideoControls).visibility = View.VISIBLE
                 findViewById<View>(R.id.btnPlaybackSpeed).visibility = View.VISIBLE
                 btnPlayPauseVideo?.setImageResource(R.drawable.ic_pause)
+                // One chain: every prepare used to start another 300 ms tick.
+                videoHandler.removeCallbacks(videoProgressRunnable)
                 videoHandler.post(videoProgressRunnable)
             }
             setupVideoControls(videoView)
@@ -157,6 +166,15 @@ class MediaViewerActivity : AppCompatActivity() {
                         while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > MAX_BITMAP_EDGE) sampleSize *= 2
                         contentResolver.openInputStream(uri)?.use { input2 ->
                             BitmapFactory.decodeStream(input2, null, BitmapFactory.Options().apply { inSampleSize = sampleSize })
+                        }?.let { decoded ->
+                            // Same as the thumbnails: the camera's rotation is in EXIF.
+                            try {
+                                contentResolver.openInputStream(uri)?.use { input3 ->
+                                    com.p2p.messenger.util.ImagePreview.rotateForExif(decoded, android.media.ExifInterface(input3))
+                                } ?: decoded
+                            } catch (e: Exception) {
+                                decoded
+                            }
                         }
                     }
                 } catch (e: Throwable) {
@@ -233,16 +251,18 @@ class MediaViewerActivity : AppCompatActivity() {
                     hadMultiTouch = true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (isDragging && !scaleDetector.isInProgress && currentScale > MIN_SCALE) {
-                        val pointerIndex = event.findPointerIndex(activePointerId)
-                        if (pointerIndex != -1) {
-                            val x = event.getX(pointerIndex)
-                            val y = event.getY(pointerIndex)
+                    val pointerIndex = event.findPointerIndex(activePointerId)
+                    if (isDragging && pointerIndex != -1) {
+                        val x = event.getX(pointerIndex)
+                        val y = event.getY(pointerIndex)
+                        if (!scaleDetector.isInProgress && currentScale > MIN_SCALE) {
                             currentMatrix.postTranslate(x - lastTouchX, y - lastTouchY)
                             imageView.imageMatrix = currentMatrix
-                            lastTouchX = x
-                            lastTouchY = y
                         }
+                        // Also during a pinch: with a stale point the image
+                        // jumped when panning started again.
+                        lastTouchX = x
+                        lastTouchY = y
                     }
                     if (kotlin.math.abs(event.x - downX) > touchSlop || kotlin.math.abs(event.y - downY) > touchSlop) {
                         hasMovedPastSlop = true
@@ -332,7 +352,11 @@ class MediaViewerActivity : AppCompatActivity() {
             val mp = videoMediaPlayer
             if (mp != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 try {
+                    // Setting the speed starts a paused player (documented):
+                    // put it back, the icon still says "play".
+                    val wasPlaying = mp.isPlaying
                     mp.playbackParams = PlaybackParams().setSpeed(videoSpeed)
+                    if (!wasPlaying) mp.pause()
                 } catch (e: Exception) { /* bazı cihazlarda desteklenmeyen hız oranı olabilir */ }
             }
         }
@@ -375,7 +399,12 @@ class MediaViewerActivity : AppCompatActivity() {
         super.onPause()
         // VideoView releases the player when its surface goes away (screen
         // off): `isPlaying` then throws IllegalStateException.
-        try { videoMediaPlayer?.let { if (it.isPlaying) it.pause() } } catch (e: IllegalStateException) { }
+        try {
+            videoMediaPlayer?.let {
+                resumePositionMs = it.currentPosition
+                if (it.isPlaying) it.pause()
+            }
+        } catch (e: IllegalStateException) { }
     }
 
     override fun onDestroy() {

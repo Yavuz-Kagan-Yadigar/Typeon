@@ -59,17 +59,19 @@ object ImagePreview {
     }
 
     /** Cameras store the rotation in EXIF instead of rotating the pixels. */
-    private fun applyExifOrientation(bitmap: Bitmap, file: File): Bitmap {
-        val degrees = try {
-            when (android.media.ExifInterface(file.absolutePath)
-                .getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 0)) {
-                android.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90f
-                android.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180f
-                android.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270f
-                else -> return bitmap
-            }
+    private fun applyExifOrientation(bitmap: Bitmap, file: File): Bitmap =
+        try {
+            rotateForExif(bitmap, android.media.ExifInterface(file.absolutePath))
         } catch (e: Exception) {
-            return bitmap
+            bitmap
+        }
+
+    fun rotateForExif(bitmap: Bitmap, exif: android.media.ExifInterface): Bitmap {
+        val degrees = when (exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 0)) {
+            android.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+            android.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+            android.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+            else -> return bitmap
         }
         val rotated = Bitmap.createBitmap(
             bitmap, 0, 0, bitmap.width, bitmap.height,

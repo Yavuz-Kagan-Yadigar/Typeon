@@ -62,32 +62,45 @@ object CallMedia {
     /** Set while a video call runs; fed by the camera analyzer. */
     @Volatile var videoEncoder: VideoEncoder? = null
 
+    /** Each call's threads carry their own number: `running` alone let a
+     *  thread that outlived `stop()` come back to life with the next call. */
+    @Volatile private var generation = 0
+
     fun start(video: Boolean) {
         if (running) return
+        val gen = ++generation
         running = true
         muted = false
         if (video) videoEncoder = VideoEncoder()
-        audioThread = Thread(::captureLoop, "call-audio-tx").apply { start() }
-        recvThread = Thread(::receiveLoop, "call-rx").apply { start() }
+        audioThread = Thread({ captureLoop(gen) }, "call-audio-tx").apply { start() }
+        recvThread = Thread({ receiveLoop(gen) }, "call-rx").apply { start() }
     }
 
+    /** Called on the UI thread: everything is detached here, the waiting
+     *  (up to 1.5 s per thread, 1 s per lane) happens on a thread of its own. */
     fun stop() {
         if (!running) return
         running = false
-        audioThread?.join(1500)
-        recvThread?.join(1500)
+        val threads = listOfNotNull(audioThread, recvThread)
         audioThread = null
         recvThread = null
-        lanes.values.forEach { it.stop() }
+        val oldLanes = lanes.values.toList()
         lanes.clear()
-        audioSinks.values.forEach { it.release() }
+        oldLanes.forEach { it.alive = false }
+        val oldAudio = audioSinks.values.toList()
         audioSinks.clear()
+        // Video sinks now: their Surface goes away with the screen.
         videoSinks.values.forEach { it.release() }
         videoSinks.clear()
         val encoder = videoEncoder
         videoEncoder = null
         encoder?.enabled = false
-        encoder?.release()
+        Thread({
+            threads.forEach { it.join(1500) }
+            oldLanes.forEach { it.stop() }
+            oldAudio.forEach { it.release() }
+            encoder?.release()
+        }, "call-stop").start()
     }
 
     /** Renders [slot]'s video into [surface]; [onSize] gets the displayed (rotated) size. */
@@ -99,13 +112,28 @@ object CallMedia {
 
     fun dropSlot(slot: Int) {
         Log.i(TAG, "dropSlot $slot")
-        listOf(KIND_AUDIO, KIND_VIDEO).forEach { lanes.remove(slot * 4 + it)?.stop() }
-        audioSinks.remove(slot)?.release()
+        // UI thread, see `stop`.
+        val oldLanes = listOf(KIND_AUDIO, KIND_VIDEO).mapNotNull { lanes.remove(slot * 4 + it) }
+        oldLanes.forEach { it.alive = false }
+        val oldAudio = audioSinks.remove(slot)
         videoSinks.remove(slot)?.release()
+        Thread({
+            oldLanes.forEach { it.stop() }
+            oldAudio?.release()
+        }, "call-drop").start()
     }
 
-    private fun captureLoop() {
+    private fun captureLoop(gen: Int) {
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+        // A recorder that stops delivering (audio server restart) is built
+        // again; any other failure ends the capture as before.
+        while (running && generation == gen && captureSession(gen)) Thread.sleep(500)
+    }
+
+    private class CaptureStalled(message: String) : Exception(message)
+
+    /** @return true when the recorder died and a new session should start. */
+    private fun captureSession(gen: Int): Boolean {
         var rec: AudioRecord? = null
         var enc: MediaCodec? = null
         try {
@@ -132,7 +160,7 @@ object CallMedia {
             var peak = 0
             var sentBundles = 0
             var logAt = System.currentTimeMillis()
-            while (running) {
+            while (running && generation == gen) {
                 val nowMs = System.currentTimeMillis()
                 val flags = (if (muted) 1 else 0) or (if (videoEncoder?.enabled == false) 2 else 0)
                 if (flags != lastFlags || nowMs - stateAt >= STATE_EVERY_MS) {
@@ -145,10 +173,14 @@ object CallMedia {
                     peak = 0; sentBundles = 0; logAt = nowMs
                 }
                 var read = 0
+                var dry = 0
                 while (read < pcm.size && running) {
                     val n = rec.read(pcm, read, pcm.size - read)
-                    if (n <= 0) { Thread.sleep(10); break }
-                    read += n
+                    if (n > 0) { read += n; dry = 0; continue }
+                    // It used to spin here 100 times a second until the call
+                    // ended, silent and without a log line.
+                    if (++dry > 100) throw CaptureStalled("AudioRecord.read = $n")
+                    Thread.sleep(10)
                 }
                 if (read < pcm.size) continue
                 peak = maxOf(peak, peakOf(pcm))
@@ -174,6 +206,9 @@ object CallMedia {
                     }
                 }
             }
+        } catch (e: CaptureStalled) {
+            Log.w(TAG, "Audio capture stalled, restarting", e)
+            return true
         } catch (e: Exception) {
             Log.e(TAG, "Audio capture failed", e)
         } finally {
@@ -182,6 +217,7 @@ object CallMedia {
             try { enc?.stop() } catch (_: Exception) {}
             enc?.release()
         }
+        return false
     }
 
     /**
@@ -190,8 +226,8 @@ object CallMedia {
      * (Codec2 calls wait on the codec's looper: up to 0.5 s each on the Note
      * 9S in a 3-way video call) starve every other participant's audio.
      */
-    private fun receiveLoop() {
-        while (running) {
+    private fun receiveLoop(gen: Int) {
+        while (running && generation == gen) {
             val f = P2PLib.callRecv(200) ?: continue
             if (f.size < 3) continue
             val kind = f[0].toInt()
@@ -223,13 +259,19 @@ object CallMedia {
             }
         }, "call-rx-$kind-$slot").apply { start() }
 
+        private var audioRetryAt = 0L
+
         private fun decode(f: ByteArray) {
+            if (!alive) return
             when (kind) {
                 KIND_AUDIO -> try {
+                    // Not on every 60 ms packet after a failure.
+                    if (android.os.SystemClock.elapsedRealtime() < audioRetryAt) return
                     audioSinks.getOrPut(slot) { AudioSink() }.feed(f, 2)
                 } catch (e: Exception) {
                     Log.w(TAG, "Audio decode failed (slot $slot), resetting", e)
                     audioSinks.remove(slot)?.release()
+                    audioRetryAt = android.os.SystemClock.elapsedRealtime() + 2_000
                 }
                 KIND_VIDEO -> try {
                     videoSinks[slot]?.feed(f, 2)
@@ -403,7 +445,10 @@ object CallMedia {
                     .setChannelMask(if (outChannels == 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO)
                     .build()
             )
-            .setBufferSizeInBytes(outRate * 2 * outChannels * BUFFER_MS / 1000)
+            .setBufferSizeInBytes(
+                outRate * 2 * outChannels *
+                    (if (android.os.Build.VERSION.SDK_INT >= 31) BUFFER_MS else LEGACY_BUFFER_MS) / 1000
+            )
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
             .also {
@@ -429,6 +474,11 @@ object CallMedia {
             const val PAD_STEP_MS = 40
             /** AudioTrack buffer, start threshold, and jitter cap (API 31+). */
             const val BUFFER_MS = 800
+            /** Below API 31 there is no start threshold: the track starts
+             *  when its WHOLE buffer is full, so the buffer size is the added
+             *  delay (0.8 s with [BUFFER_MS]). Not measured on a device:
+             *  raise it if audio breaks up on LTE bursts there. */
+            const val LEGACY_BUFFER_MS = 300
             const val START_MS = 60
             const val MAX_BUFFER_MS = 600 // LTE+Tor delivers audio in ~1 s bursts
 
@@ -652,23 +702,28 @@ object CallMedia {
                 val o = c.dequeueOutputBuffer(info, 0)
                 if (o == MediaCodec.INFO_TRY_AGAIN_LATER) return
                 if (o < 0) continue
-                val data = ByteArray(info.size)
-                c.getOutputBuffer(o)!!.apply { position(info.offset); limit(info.offset + info.size); get(data) }
+                val buf = c.getOutputBuffer(o)!!.apply { position(info.offset); limit(info.offset + info.size) }
                 val flags = info.flags
-                c.releaseOutputBuffer(o, false)
-                if (flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) { csd = data; continue }
-                if (data.isEmpty()) continue
+                if (flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                    csd = ByteArray(info.size).also { buf.get(it) }
+                    c.releaseOutputBuffer(o, false)
+                    continue
+                }
+                if (info.size == 0) { c.releaseOutputBuffer(o, false); continue }
                 val key = flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
                 // Headers are prepended by the encoder too (PREPEND_HEADER...);
                 // repeating them is harmless where it is not.
-                val body = if (key) (csd ?: ByteArray(0)) + data else data
-                val hdr = ByteBuffer.allocate(6)
+                val head = if (key) csd else null
+                // Straight from the codec buffer into the packet.
+                val out = ByteBuffer.allocate(6 + (head?.size ?: 0) + info.size)
                     .put(((if (key) 1 else 0) or (if (hevc) 2 else 0)).toByte())
                     .put((rotation / 90).toByte())
                     .putShort(width.toShort())
                     .putShort(height.toShort())
-                    .array()
-                P2PLib.callSend(KIND_VIDEO, hdr + body)
+                head?.let { out.put(it) }
+                out.put(buf)
+                c.releaseOutputBuffer(o, false)
+                P2PLib.callSend(KIND_VIDEO, out.array())
             }
         }
 
@@ -818,8 +873,10 @@ object CallMedia {
                     try {
                         newDecoder(MediaFormat(fmt).apply { setInteger(MediaFormat.KEY_LOW_LATENCY, 1) })
                     } catch (e: Exception) {
-                        noLowLatency.add(mime)
-                        newDecoder(fmt)
+                        // Marked only when the plain format works: a bad size
+                        // from the peer or a dead Surface fails both, and used
+                        // to switch low latency off for every later call.
+                        newDecoder(fmt).also { noLowLatency.add(mime) }
                     }
                 } else newDecoder(fmt)
                 codec = c

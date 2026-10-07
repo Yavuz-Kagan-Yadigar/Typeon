@@ -135,28 +135,33 @@ class ContactsFragment : Fragment() {
      *  yeniden dener (sabit bir 0.0.0.0/tcp/0 asla dial edilemez). */
     private fun loadNodeAddressAndGenerateQr(attemptsLeft: Int) {
         if (!isAdded) return
-        val nodeAddress = try {
-            P2PLib.getNodeAddress()
-        } catch (e: Exception) {
-            ""
-        }
-        if (nodeAddress.isEmpty() && attemptsLeft > 0) {
-            qrRetryHandler.postDelayed({ loadNodeAddressAndGenerateQr(attemptsLeft - 1) }, 500)
-            return
-        }
-        // Tor not ready after the fast retries: show what we have, but keep
-        // trying. A code without the rendezvous address was never refreshed
-        // and pairing from it hung.
-        if (nodeAddress.isEmpty()) qrRetryHandler.postDelayed({ loadNodeAddressAndGenerateQr(0) }, 3000)
-        ownNodeAddress = nodeAddress
-        val qrBytes = try {
-            P2PLib.generateQrPacket(nodeAddress)
-        } catch (e: Exception) {
-            null
-        }
-        if (qrBytes != null && qrBytes.isNotEmpty()) {
-            imgOwnQr.setImageBitmap(encodeBinaryAsQrBitmap(qrBytes, 1200, 1200))
-        }
+        // Two JNI calls and a 1200x1200 QR bitmap: off the main thread.
+        Thread {
+            val nodeAddress = try {
+                P2PLib.getNodeAddress()
+            } catch (e: Exception) {
+                ""
+            }
+            val retryFast = nodeAddress.isEmpty() && attemptsLeft > 0
+            val bitmap = if (retryFast) null else try {
+                P2PLib.generateQrPacket(nodeAddress).takeIf { it.isNotEmpty() }?.let { encodeBinaryAsQrBitmap(it, 1200, 1200) }
+            } catch (e: Exception) {
+                null
+            }
+            qrRetryHandler.post {
+                if (!isAdded || view == null) return@post
+                if (retryFast) {
+                    qrRetryHandler.postDelayed({ loadNodeAddressAndGenerateQr(attemptsLeft - 1) }, 500)
+                    return@post
+                }
+                // Tor not ready after the fast retries: show what we have, but keep
+                // trying. A code without the rendezvous address was never refreshed
+                // and pairing from it hung.
+                if (nodeAddress.isEmpty()) qrRetryHandler.postDelayed({ loadNodeAddressAndGenerateQr(0) }, 3000)
+                ownNodeAddress = nodeAddress
+                bitmap?.let { imgOwnQr.setImageBitmap(it) }
+            }
+        }.start()
     }
 
     /** bkz. eski QrDisplayActivity.encodeBinaryAsQrBitmap — birebir aynı. */
@@ -164,13 +169,9 @@ class ContactsFragment : Fragment() {
         val text = QrBinaryCodec.bytesToLatin1String(data)
         val hints = mapOf(EncodeHintType.CHARACTER_SET to "ISO-8859-1")
         val bitMatrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, width, height, hints)
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565)
-        for (x in 0 until width) {
-            for (y in 0 until height) {
-                bitmap.setPixel(x, y, if (bitMatrix[x, y]) Color.BLACK else Color.WHITE)
-            }
-        }
-        return bitmap
+        // One bulk write instead of 1.44 million `setPixel` calls.
+        val pixels = IntArray(width * height) { if (bitMatrix[it % width, it / width]) Color.BLACK else Color.WHITE }
+        return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.RGB_565)
     }
 
     /** bkz. ChatsFragment.showChatLongPressMenu aynı notu — iki sekme de
@@ -378,15 +379,47 @@ class ContactsFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        // The next view starts with an empty adapter.
+        lastContactsJson = null
         qrRetryHandler.removeCallbacksAndMessages(null)
     }
 
+    private var lastContactsJson: String? = null
+    @Volatile private var refreshing = false
+    /** A refresh was asked for while one was running (after a delete, a
+     *  pin...): run once more, the running one may have read the old state. */
+    private var refreshAgain = false
+
+    /** Every 5 s: off the main thread (the JNI call takes the core lock), and
+     *  an unchanged list is not parsed and its avatars not decoded again. */
     private fun refreshList() {
-        val json = try {
-            P2PLib.listContacts()
-        } catch (e: Exception) {
-            "[]"
-        }
+        if (refreshing) { refreshAgain = true; return }
+        val viaGroupLabel = context?.getString(R.string.contact_added_via_group) ?: return
+        refreshing = true
+        Thread {
+            val json = try {
+                P2PLib.listContacts()
+            } catch (e: Exception) {
+                "[]"
+            }
+            val items = if (json == lastContactsJson) null else try {
+                parseContacts(json, viaGroupLabel)
+            } catch (e: Exception) {
+                null
+            }
+            refreshHandler.post {
+                refreshing = false
+                if (refreshAgain) { refreshAgain = false; refreshList() }
+                if (items == null || !isAdded || view == null) return@post
+                lastContactsJson = json
+                placeholder.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
+                recycler.visibility = if (items.isEmpty()) View.GONE else View.VISIBLE
+                adapter.submitList(items)
+            }
+        }.start()
+    }
+
+    private fun parseContacts(json: String, viaGroupLabel: String): List<ChatAdapter.ChatMessage> {
         val array = try {
             JSONArray(json)
         } catch (e: Exception) {
@@ -406,7 +439,7 @@ class ContactsFragment : Fragment() {
             ChatAdapter.ChatMessage(
                 contactId = fingerprint,
                 displayName = obj.optString("display_name", "Unknown"),
-                lastMessage = if (addedViaGroup) getString(R.string.contact_added_via_group) else "",
+                lastMessage = if (addedViaGroup) viaGroupLabel else "",
                 timestamp = 0L,
                 realContactId = obj.optString("contact_id"),
                 avatarJpeg = avatarHex?.let { hexToBytes(it) },
@@ -415,9 +448,7 @@ class ContactsFragment : Fragment() {
             )
         }
 
-        placeholder.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
-        recycler.visibility = if (items.isEmpty()) View.GONE else View.VISIBLE
-        adapter.submitList(items)
+        return items
     }
 
     /**

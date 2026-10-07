@@ -189,7 +189,9 @@ class GroupChatActivity : AppCompatActivity() {
     /** Invalidates a voice message still being loaded (see `loadAndPlayVoiceMessage`). */
     private var voiceLoadRequest = 0
     /** bkz. ChatActivity aynı alanlar (sohbet içi mesaj arama). */
-    private var searchMatches: List<Int> = emptyList()
+    /** Message ids, not list positions: an older page prepended or a
+     *  re-sort moves every position. */
+    private var searchMatches: List<String> = emptyList()
     private var currentSearchMatchIndex: Int = -1
     private lateinit var layoutSearchMessages: View
     private lateinit var searchMessagesView: SearchView
@@ -242,7 +244,7 @@ class GroupChatActivity : AppCompatActivity() {
     private val recordingHandler = Handler(Looper.getMainLooper())
     private val recordingTimerRunnable = object : Runnable {
         override fun run() {
-            val elapsed = System.currentTimeMillis() - recordingStartTime
+            val elapsed = android.os.SystemClock.elapsedRealtime() - recordingStartTime
             txtRecordingTimer.text = formatDurationMs(elapsed)
             recordingHandler.postDelayed(this, 200)
         }
@@ -270,22 +272,6 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. `sendNewMessage`/`handleIncomingSeen` — bir `group_message_
-     *  local_id`'nin (bkz. Rust packet.rs notu) gerçekten BİZİM
-     *  gönderdiğimiz bir mesaja ait olup olmadığını ayırt etmek için
-     *  (gelen "seen" olayı `group_id` taşımıyor, bu grup dahil HERHANGİ
-     *  bir sohbetten gelebilir).
-     *
-     *  Thread güvenliği düzeltmesi: `messageListener`'ın `when` koşulu
-     *  BURAYA (`in mySentGroupMessageIds`) `runOnUiThread`'e sarmadan ÖNCE
-     *  bakıyor — ve `P2PService.pollRunnable` artık kendi arka plan
-     *  `HandlerThread`'inde çalıştığından (bkz. P2PService dokümantasyonu)
-     *  bu okuma artık ANA THREAD DIŞINDA gerçekleşebiliyor, `sendNewMessage`/
-     *  `retryFailedGroupMessage`'ın (ana thread'deki) yazmalarıyla
-     *  YARIŞABİLİR. Düz bir `mutableSetOf` (HashSet) burada GÜVENLİ DEĞİL
-     *  — `ConcurrentHashMap.newKeySet()` kilitlenmeden thread-güvenli
-     *  add/remove/contains sağlıyor. */
-    private val mySentGroupMessageIds: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
     /** group_message_local_id -> (identity_id -> görüntüleyen bilgisi) —
      *  aynı mesajı gören farklı üyeleri biriktirir (bkz. SimpleChatAdapter
      *  applySeen'in TAM liste beklediği notu). */
@@ -350,12 +336,9 @@ class GroupChatActivity : AppCompatActivity() {
                 // mesajı — burada da "gönderilen" olarak göster.
                 type == "sibling_group_message" && obj.optString("group_id") == groupId ->
                     runOnUiThread { handleSiblingGroupMessage(obj) }
-                // "seen" olayı `group_id` TAŞIMAZ (bkz. Rust receive_message
-                // Seen kolu) — bu grubun mesajına mı ait olduğunu
-                // `group_message_local_id`'nin BİZİM gönderdiğimiz bir
-                // mesaja ait olup olmadığına bakarak anlıyoruz.
-                type == "seen" && !obj.isNull("group_message_local_id") &&
-                    obj.optString("group_message_local_id") in mySentGroupMessageIds ->
+                // "seen" carries no `group_id`: `handleIncomingSeen` keeps it
+                // only when it names one of OUR messages in this list.
+                type == "seen" && !obj.isNull("group_message_local_id") ->
                     runOnUiThread { handleIncomingSeen(obj) }
                 // Toplu görüldü (2026-09-07): bir üye "buraya kadar okudum"
                 // sınırı yolladı (bkz. Rust `apply_incoming_read_watermark`).
@@ -406,6 +389,10 @@ class GroupChatActivity : AppCompatActivity() {
                 type == "file_complete" -> runOnUiThread {
                     adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.COMPLETE)
                 }
+                // A copy of one of our group messages was given up or cancelled.
+                type == "status" && obj.optString("group_id") == groupId && obj.optString("status") == "error" -> runOnUiThread {
+                    adapter.applyStatus(obj.optString("message_id"), SimpleChatAdapter.Status.ERROR)
+                }
                 type == "file_failed" -> runOnUiThread {
                     adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.FAILED)
                 }
@@ -449,7 +436,10 @@ class GroupChatActivity : AppCompatActivity() {
         whiteboard = WhiteboardPanel(this, findViewById(R.id.whiteboardHost), findViewById(R.id.whiteboardHandle))
         com.p2p.messenger.util.ThemePrefs.applyChatBackground(this)
         // bkz. util.ChatListDrawer dokümantasyonu.
-        com.p2p.messenger.util.ChatListDrawer.setup(this)
+        com.p2p.messenger.util.ChatListDrawer.setup(this) {
+            // Back with the search bar open closes the bar, not the chat.
+            (layoutSearchMessages.visibility == View.VISIBLE).also { if (it) toggleMessageSearch() }
+        }
 
         // Grup sohbetinde tek bir "el sıkışma" durumu yok (her üyeyle ayrı
         // bir 1:1 bağlantı) — bu banner burada anlamlı değil, gizli kalır.
@@ -592,6 +582,17 @@ class GroupChatActivity : AppCompatActivity() {
             }
         })
 
+        // See ChatActivity: saving to Downloads below API 29 needs it, and a
+        // user who only ever saved from a group was never asked.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            AppLock.beginTrustedExcursion()
+            androidx.core.app.ActivityCompat.requestPermissions(
+                this, arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), 0
+            )
+        }
+
         if (!bindToIntent(intent)) {
             finish()
             return
@@ -633,7 +634,6 @@ class GroupChatActivity : AppCompatActivity() {
         // Önceki sohbette açık kalan yanıt, yeni sohbetteki mesaja yapışmasın.
         cancelReply()
         adapter.notifyDataSetChanged()
-        mySentGroupMessageIds.clear()
         seenByPerMessage.clear()
         isLoadingOlderHistory = false
         noMoreOlderHistory = false
@@ -750,12 +750,12 @@ class GroupChatActivity : AppCompatActivity() {
      *  `listGroupAttachments`'ın JSON satırından bir `Item` üretir.
      *  Gönderen (kendi mesajımız değilse) `sender_identity_id` üzerinden
      *  çözülür — metin mesajlarıyla AYNI mantık. */
-    private fun itemFromGroupAttachmentJson(obj: JSONObject): SimpleChatAdapter.Item {
+    private fun itemFromGroupAttachmentJson(obj: JSONObject, knownIds: Set<String> = emptySet()): SimpleChatAdapter.Item {
         val isMine = obj.optString("direction") == "sent"
         val senderIdentityId = if (obj.isNull("sender_identity_id")) null else obj.optString("sender_identity_id").ifEmpty { null }
         val sender = if (!isMine && senderIdentityId != null) resolveContactByIdentity(senderIdentityId) else null
         val previewHex = obj.optString("preview_hex", "")
-        val previewJpeg = if (previewHex.isNotEmpty() && previewHex != "null") hexToBytes(previewHex) else null
+        val previewJpeg = if (obj.optString("file_id") !in knownIds && previewHex.isNotEmpty() && previewHex != "null") hexToBytes(previewHex) else null
         return SimpleChatAdapter.Item(
             messageId = obj.optString("file_id"),
             text = "",
@@ -763,6 +763,7 @@ class GroupChatActivity : AppCompatActivity() {
             timestamp = obj.optLong("created_at", System.currentTimeMillis()),
             senderName = sender?.displayName ?: senderIdentityId?.take(8),
             senderAvatarJpeg = sender?.avatarHex?.let { hexToBytes(it) },
+            senderIdentityId = senderIdentityId,
             attachment = SimpleChatAdapter.AttachmentInfo(
                 fileId = obj.optString("file_id"),
                 fileName = obj.optString("file_name"),
@@ -1163,6 +1164,8 @@ class GroupChatActivity : AppCompatActivity() {
                 }
                 if (ok) {
                     Toast.makeText(this, R.string.msg_member_removed, Toast.LENGTH_SHORT).show()
+                    // `refreshGroupInfo` is asynchronous; the dialog redraws now.
+                    memberIdentityIds = memberIdentityIds - identityId
                     refreshGroupInfo()
                     onRemoved()
                 } else {
@@ -1307,12 +1310,11 @@ class GroupChatActivity : AppCompatActivity() {
             if (!ok) {
                 Toast.makeText(this@GroupChatActivity, R.string.error_send_failed, Toast.LENGTH_SHORT).show()
             }
-            // bkz. dosya başı `mySentGroupMessageIds` notu — Rust'ın döndürdüğü
+            // Rust'ın döndürdüğü
             // `group_message_local_id`'yi KENDİ balonumuzun `messageId`'si
             // olarak kullanıyoruz (rastgele bir UUID yerine, önceden olduğu
             // gibi) ki dönen "seen" bildirimleri doğru balonla eşleşebilsin.
             val localId = if (ok) result else UUID.randomUUID().toString()
-            if (ok) mySentGroupMessageIds.add(localId)
             adapter.addMessage(
                 SimpleChatAdapter.Item(
                     messageId = localId,
@@ -1335,9 +1337,7 @@ class GroupChatActivity : AppCompatActivity() {
      * yeniden gönderir — AYNI balonu tutar (bkz.
      * `SimpleChatAdapter.retryMessage`), ikinci bir kopya eklemez. Yeni bir
      * `group_message_local_id` ile yeniden fan-out edilir (bkz.
-     * `sendNewMessage` aynı mekanizma) — eski id `mySentGroupMessageIds`'ten
-     * çıkarılıp yenisi eklenir, aksi halde bu mesaj için gelecek "seen"
-     * bildirimleri hiçbir zaman eşleşmezdi.
+     * `sendNewMessage` aynı mekanizma).
      */
     private fun retryFailedGroupMessage(item: SimpleChatAdapter.Item) {
         // bkz. ChatActivity.retryFailedMessage AYNI notu — bir yanıtsa AYNI
@@ -1353,8 +1353,6 @@ class GroupChatActivity : AppCompatActivity() {
             adapter.applyStatus(item.messageId, SimpleChatAdapter.Status.ERROR)
             return
         }
-        mySentGroupMessageIds.remove(item.messageId)
-        mySentGroupMessageIds.add(result)
         adapter.retryMessage(item.messageId, result, SimpleChatAdapter.Status.SENT)
     }
 
@@ -1696,7 +1694,7 @@ class GroupChatActivity : AppCompatActivity() {
         }
         mediaRecorder = recorder
         recordingFile = file
-        recordingStartTime = System.currentTimeMillis()
+        recordingStartTime = android.os.SystemClock.elapsedRealtime()
         recordingCancelled = false
         layoutMessageInput.visibility = View.GONE
         layoutRecording.visibility = View.VISIBLE
@@ -1709,7 +1707,7 @@ class GroupChatActivity : AppCompatActivity() {
     private fun finishVoiceRecording(send: Boolean) {
         val recorder = mediaRecorder ?: return
         val file = recordingFile
-        val durationMs = System.currentTimeMillis() - recordingStartTime
+        val durationMs = android.os.SystemClock.elapsedRealtime() - recordingStartTime
         mediaRecorder = null
         recordingFile = null
         recordingHandler.removeCallbacks(recordingTimerRunnable)
@@ -2028,15 +2026,20 @@ class GroupChatActivity : AppCompatActivity() {
         val replyPreview = activeReplyToPreview ?: ""
         val replySender = activeReplyToSenderIdentityId ?: ""
         cancelReply()
-        val fileName = queryDisplayName(uri) ?: "file"
-        val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
-        val size = querySize(uri)
-        if (size != null && size > MAX_ATTACHMENT_SIZE) {
-            Toast.makeText(this, getString(R.string.error_file_too_large_named, fileName), Toast.LENGTH_LONG).show()
-            return
-        }
-        Toast.makeText(this, fileName, Toast.LENGTH_SHORT).show()
         lifecycleScope.launch(Dispatchers.IO) {
+            // Provider queries are IPC to another app: not on the main thread.
+            val fileName = queryDisplayName(uri) ?: "file"
+            val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+            val size = querySize(uri)
+            val tooLarge = size != null && size > MAX_ATTACHMENT_SIZE
+            withContext(Dispatchers.Main) {
+                if (tooLarge) {
+                    Toast.makeText(this@GroupChatActivity, getString(R.string.error_file_too_large_named, fileName), Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this@GroupChatActivity, fileName, Toast.LENGTH_SHORT).show()
+                }
+            }
+            if (tooLarge) return@launch
             val tempFile = File(File(cacheDir, "outgoing").apply { mkdirs() }, UUID.randomUUID().toString())
             try {
                 contentResolver.openInputStream(uri)?.use { input ->
@@ -2150,7 +2153,13 @@ class GroupChatActivity : AppCompatActivity() {
                 return
             }
             val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, mimeType.ifBlank { "*/*" })
+                // The file's own extension picks the handler, not the type
+                // the sender declared.
+                setDataAndType(
+                    uri,
+                    android.webkit.MimeTypeMap.getSingleton()
+                        .getMimeTypeFromExtension(File(path).extension.lowercase()) ?: "*/*"
+                )
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             AppLock.beginTrustedExcursion()
@@ -2265,17 +2274,31 @@ class GroupChatActivity : AppCompatActivity() {
                     put(android.provider.MediaStore.Downloads.MIME_TYPE, mimeType.ifBlank { "application/octet-stream" })
                     put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/P2P")
                 }
+                // Pending until the copy is complete, and removed when it
+                // fails: a half file used to stay in Download/P2P.
+                values.put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
                 val uri = contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                     ?: return false
-                contentResolver.openOutputStream(uri)?.use { output ->
-                    source.inputStream().use { input -> input.copyTo(output) }
-                } ?: return false
+                try {
+                    contentResolver.openOutputStream(uri)!!.use { output ->
+                        source.inputStream().use { input -> input.copyTo(output) }
+                    }
+                    values.clear()
+                    values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
+                    contentResolver.update(uri, values, null, null)
+                } catch (e: Exception) {
+                    contentResolver.delete(uri, null, null)
+                    return false
+                }
                 true
             } else {
                 @Suppress("DEPRECATION")
                 val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
                 val p2pDir = File(downloadsDir, "P2P").apply { mkdirs() }
-                val dest = File(p2pDir, safeName)
+                // Never over an earlier file of the same name.
+                val dest = File(p2pDir, safeName).let {
+                    if (it.exists()) File(p2pDir, "${System.currentTimeMillis()}_$safeName") else it
+                }
                 source.inputStream().use { input -> dest.outputStream().use { output -> input.copyTo(output) } }
                 android.media.MediaScannerConnection.scanFile(this, arrayOf(dest.absolutePath), arrayOf(mimeType), null)
                 true
@@ -2324,11 +2347,14 @@ class GroupChatActivity : AppCompatActivity() {
                 // Spec dışı, kullanıcı isteği: ek + açıklama + yanıt.
                 caption = attachmentCaption,
                 replyToMessageId = attachmentReplyId,
-                replyToPreview = attachmentReplyPreview
+                replyToPreview = attachmentReplyPreview,
+                senderIdentityId = senderIdentityId,
+                replyToSenderLabel = resolveReplyLabel(attachmentReplyId)
             )
         )
-        maybePlayTyphoonEffect()
         onNewIncomingItemAdded()
+        // Sibling devices keep the notification until the watermark moves.
+        if (obj.optString("type") == "file_offer") scheduleGroupReadWatermark()
     }
 
     private fun queryDisplayName(uri: Uri): String? {
@@ -2387,7 +2413,6 @@ class GroupChatActivity : AppCompatActivity() {
         val sentAtMs = obj.optLong("sent_at_ms", 0L).takeIf { it > 0 }
         val replyToMessageId = if (obj.isNull("reply_to_message_id")) null else obj.optString("reply_to_message_id").ifEmpty { null }
         val replyToSenderIdentityId = if (obj.isNull("reply_to_sender_identity_id")) null else obj.optString("reply_to_sender_identity_id").ifEmpty { null }
-        mySentGroupMessageIds.add(localId)
         adapter.addMessage(
             SimpleChatAdapter.Item(
                 messageId = localId,
@@ -2449,6 +2474,7 @@ class GroupChatActivity : AppCompatActivity() {
                 replyToSenderLabel = resolveReplyLabel(replyToMessageId, replyToSenderIdentityId)
             )
         )
+        maybePlayTyphoonEffect()
         onNewIncomingItemAdded()
         // Spec dışı, kullanıcı isteği: "görüldü" — ekran açıkken gelen
         // canlı grup mesajı için otomatik gönderilir (bkz. ChatActivity
@@ -2470,6 +2496,10 @@ class GroupChatActivity : AppCompatActivity() {
         // the literal string "null" and silently mismatch every bubble).
         val localId = if (obj.isNull("group_message_local_id")) null else obj.optString("group_message_local_id").ifEmpty { null }
         if (localId == null) return
+        // Asked of the list itself: a separate set of "ids I sent" held only
+        // this session's text sends, so a "seen" for a message loaded from
+        // history or for an attachment was dropped.
+        if (localMessages.none { it.isMine && it.messageId == localId }) return
         val senderIdentityId = obj.optString("sender_identity_id")
         val sender = resolveContactByIdentity(senderIdentityId)
         val viewer = SimpleChatAdapter.SeenByViewer(
@@ -2772,9 +2802,9 @@ class GroupChatActivity : AppCompatActivity() {
             adapter.setHighlighted(null)
             return
         }
-        searchMatches = localMessages.withIndex()
-            .filter { (_, item) -> !item.isDeleted && item.attachment == null && item.text.contains(query, ignoreCase = true) }
-            .map { it.index }
+        searchMatches = localMessages
+            .filter { item -> !item.isDeleted && item.attachment == null && item.text.contains(query, ignoreCase = true) }
+            .map { it.messageId }
         currentSearchMatchIndex = if (searchMatches.isEmpty()) -1 else searchMatches.size - 1
         goToSearchMatch()
     }
@@ -2792,9 +2822,11 @@ class GroupChatActivity : AppCompatActivity() {
             return
         }
         txtSearchMatchCount.text = "${currentSearchMatchIndex + 1}/${searchMatches.size}"
-        val position = searchMatches[currentSearchMatchIndex]
+        val matchId = searchMatches[currentSearchMatchIndex]
+        val position = localMessages.indexOfFirst { it.messageId == matchId }
+        if (position < 0) return
         recycler.scrollToPosition(position)
-        adapter.setHighlighted(localMessages[position].messageId)
+        adapter.setHighlighted(matchId)
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -2862,6 +2894,8 @@ class GroupChatActivity : AppCompatActivity() {
      *  message/file id so it's safe to call redundantly. */
     private fun syncMissedGroupMessages() {
         val targetGroupId = groupId
+        // See ChatActivity.syncMissedMessages: rows on screen keep their preview.
+        val knownIds = localMessages.mapTo(HashSet()) { it.messageId }
         lifecycleScope.launch {
             val (merged, seenEntries) = withContext(Dispatchers.IO) {
                 val json = try { P2PLib.getGroupMessageHistory(targetGroupId, HISTORY_LOAD_LIMIT) } catch (e: Exception) { null }
@@ -2882,7 +2916,7 @@ class GroupChatActivity : AppCompatActivity() {
                 val attachmentsJson = try { P2PLib.listGroupAttachments(targetGroupId) } catch (e: Exception) { null }
                 val attachmentsArray = try { if (attachmentsJson != null) JSONArray(attachmentsJson) else null } catch (e: Exception) { null }
                 val attachmentItems = if (attachmentsArray != null) {
-                    (0 until attachmentsArray.length()).map { itemFromGroupAttachmentJson(attachmentsArray.getJSONObject(it)) }
+                    (0 until attachmentsArray.length()).map { itemFromGroupAttachmentJson(attachmentsArray.getJSONObject(it), knownIds) }
                 } else emptyList()
 
                 (textItems + attachmentItems).sortedBy { it.orderKey } to seenEntries

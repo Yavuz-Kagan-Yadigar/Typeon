@@ -141,10 +141,7 @@ class P2PService : Service() {
             listeners.add(listener)
             // Bir sohbet ekranı açıldı: güç tasarrufundan ÇIK ve hemen bir
             // tur at — kullanıcı gecikme hissetmesin.
-            try {
-                P2PLib.setPowerSave(false)
-            } catch (e: Exception) {
-            }
+            listenerRemoved?.invoke()
             wakePollNow?.invoke()
         }
 
@@ -158,6 +155,8 @@ class P2PService : Service() {
 
         @Volatile
         private var listenerRemoved: (() -> Unit)? = null
+
+        private val powerSaveExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
         /** True while one of our activities is started (set by P2PApplication).
          *  Power save follows this, not just the screen: with the screen on
@@ -285,6 +284,7 @@ class P2PService : Service() {
     private var lastBusyCheckAt = 0L
 
     private var screenReceiver: android.content.BroadcastReceiver? = null
+    @Volatile private var dozeAlarmSet = false
 
     /**
      * Spec dışı, gerçek cihazda ölçülen hata düzeltmesi.
@@ -485,13 +485,18 @@ class P2PService : Service() {
                 when (intent?.action) {
                     Intent.ACTION_SCREEN_ON -> {
                         screenOn = true
-                        coreBusy = true
-                        consecutiveEmptyPolls = 0
                         applyPowerSave()
-                        // Ekran açıldı: gecikmeyi hemen kapat.
-                        acquireWakeLock()
-                        handler.removeCallbacks(pollRunnable)
-                        handler.post(pollRunnable)
+                        // Only when Typeon itself is on screen: a glance at
+                        // the clock restarted ~40 s of fast polling under an
+                        // indefinite wake lock. `setAppVisible(true)` already
+                        // triggers a turn when the app comes to the front.
+                        if (appVisible) {
+                            coreBusy = true
+                            consecutiveEmptyPolls = 0
+                            acquireWakeLock()
+                            handler.removeCallbacks(pollRunnable)
+                            handler.post(pollRunnable)
+                        }
                     }
                     Intent.ACTION_SCREEN_OFF -> {
                         screenOn = false
@@ -523,11 +528,16 @@ class P2PService : Service() {
     /** bkz. Rust `set_power_save` — sessiz bekleyen bağlantıların canlılık
      *  yoklaması 20sn yerine 60sn'de bir yapılır, radyo uzun uyuyabilir. */
     private fun applyPowerSave() {
-        val enabled = !(screenOn && appVisible) && listeners.isEmpty()
-        try {
-            P2PLib.setPowerSave(enabled)
-        } catch (e: Exception) {
-            Log.w(TAG, "Güç tasarrufu modu ayarlanamadı: ${e.message}")
+        // Off the caller's thread: the JNI call takes the core lock and the
+        // callers are the main thread (screen receiver, every chat onPause).
+        // The state is read when the task runs, so the order does not matter.
+        powerSaveExecutor.execute {
+            val enabled = !(screenOn && appVisible) && listeners.isEmpty()
+            try {
+                P2PLib.setPowerSave(enabled)
+            } catch (e: Exception) {
+                Log.w(TAG, "Güç tasarrufu modu ayarlanamadı: ${e.message}")
+            }
         }
     }
 
@@ -537,6 +547,7 @@ class P2PService : Service() {
      * bile periyodik bir uyanma garantisi veriyor.
      */
     private fun scheduleDozeWakeup() {
+        dozeAlarmSet = true
         try {
             val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
             val intent = Intent(this, P2PService::class.java).setAction(ACTION_WAKE_POLL)
@@ -555,6 +566,10 @@ class P2PService : Service() {
     }
 
     private fun cancelDozeWakeup() {
+        // Runs every awake turn: without the flag that was two binder calls
+        // per turn for an alarm that is almost never set.
+        if (!dozeAlarmSet) return
+        dozeAlarmSet = false
         try {
             val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
             val intent = Intent(this, P2PService::class.java).setAction(ACTION_WAKE_POLL)
@@ -639,14 +654,15 @@ class P2PService : Service() {
             "message" -> {
                 val peer = obj.optString("peer")
                 if (peer.isNotEmpty() && activeConversationId != peer) {
-                    NotificationHelper.showMessageNotification(applicationContext, peer, obj.optString("text"))
+                    NotificationHelper.showMessageNotification(applicationContext, peer, obj.optString("text"), obj.optString("message_id"))
                 }
             }
             "group_message" -> {
                 val groupId = obj.optString("group_id")
                 if (groupId.isNotEmpty() && activeConversationId != "group:$groupId") {
                     NotificationHelper.showGroupMessageNotification(
-                        applicationContext, groupId, obj.optString("sender_identity_id"), obj.optString("text")
+                        applicationContext, groupId, obj.optString("sender_identity_id"), obj.optString("text"),
+                        obj.optString("message_id")
                     )
                 }
             }
@@ -664,15 +680,8 @@ class P2PService : Service() {
             // bildirim göstermenin bir anlamı yok).
             "delete" -> {
                 val peer = obj.optString("peer")
-                if (peer.isNotEmpty()) NotificationHelper.clearForPeer(applicationContext, peer)
+                if (peer.isNotEmpty()) NotificationHelper.clearIfShowing(applicationContext, peer, obj.optString("message_id"))
             }
-            // Defter #16: Rust bu olayı hem depolama sınırı tahliyesinde hem
-            // de ekli bir mesaj silindiğinde üretiyordu ama HİÇBİR istemci
-            // dinlemiyordu — balon "tamamlandı" görünmeye devam ediyor,
-            // kullanıcı dokununca dosya yok. Sohbet ekranları bunu
-            // `messageListener` üzerinden alıyor; burada sadece bildirim
-            // tarafında bir şey yapmıyoruz (kasıtlı), olayın düşmesi yeterli.
-            "file_evicted" -> { }
             // Kullanıcı kararı: tanınmayan cihaz uyarısı artık bildirim
             // olarak da çıkıyor (bkz. NotificationHelper.showDeviceAlertNotification).
             // Ana ekran ön plandaysa dialog zaten açılıyor; bu, uygulama
@@ -687,7 +696,7 @@ class P2PService : Service() {
             }
             "group_delete" -> {
                 val groupId = obj.optString("group_id")
-                if (groupId.isNotEmpty()) NotificationHelper.clearForGroup(applicationContext, groupId)
+                if (groupId.isNotEmpty()) NotificationHelper.clearIfShowing(applicationContext, "group:$groupId", obj.optString("message_id"))
             }
             "edit" -> {
                 val peer = obj.optString("peer")
@@ -712,13 +721,14 @@ class P2PService : Service() {
                 if (groupId.isNotEmpty()) {
                     if (activeConversationId != "group:$groupId") {
                         NotificationHelper.showGroupMessageNotification(
-                            applicationContext, groupId, obj.optString("sender_identity_id"), label
+                            applicationContext, groupId, obj.optString("sender_identity_id"), label,
+                            obj.optString("file_id")
                         )
                     }
                 } else {
                     val peer = obj.optString("peer")
                     if (peer.isNotEmpty() && activeConversationId != peer) {
-                        NotificationHelper.showMessageNotification(applicationContext, peer, label)
+                        NotificationHelper.showMessageNotification(applicationContext, peer, label, obj.optString("file_id"))
                     }
                 }
             }
@@ -795,10 +805,12 @@ class P2PService : Service() {
             handler.post(pollRunnable)
             return START_STICKY
         }
-        acquireWakeLock()
-
         if (!isRunning) {
             isRunning = true
+            // Only here: on a running service the poll loop owns the lock, and
+            // an indefinite one taken by every other start (retry worker, call
+            // end, boot receiver) stayed held until the blocking wait returned.
+            acquireWakeLock()
             // bkz. `bindToWifiIfAvailable` dokümantasyonu — libp2p soketleri
             // (özellikle UPnP arama) `startNetwork`'ten ÖNCE doğru arayüze
             // (WiFi) bağlanabilsin diye burada, ağ başlamadan hemen önce.

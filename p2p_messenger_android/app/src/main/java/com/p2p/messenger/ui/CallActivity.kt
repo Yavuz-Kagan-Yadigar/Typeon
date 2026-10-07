@@ -69,6 +69,12 @@ class CallActivity : AppCompatActivity() {
 
         /** From a chat screen: ring [peer] (1:1) or every member of [groupId]. */
         fun startOutgoing(context: Context, peer: String?, groupId: String?, video: Boolean) {
+            // The platform Opus encoder arrived with Android 10: below it the
+            // call connected with no outgoing audio and no error.
+            if (android.os.Build.VERSION.SDK_INT < 29) {
+                Toast.makeText(context, R.string.call_needs_android10, Toast.LENGTH_LONG).show()
+                return
+            }
             context.startActivity(Intent(context, CallActivity::class.java).apply {
                 putExtra(EXTRA_PEER, peer)
                 putExtra(EXTRA_GROUP, groupId)
@@ -134,6 +140,7 @@ class CallActivity : AppCompatActivity() {
     private var ringtone: android.media.Ringtone? = null
     private var ringback: ToneGenerator? = null
     private var cameraProvider: ProcessCameraProvider? = null
+    private var imageAnalysis: ImageAnalysis? = null
     private val analysisExecutor = Executors.newSingleThreadExecutor()
     /** slot -> tile */
     private val tiles = HashMap<Int, Tile>()
@@ -226,6 +233,15 @@ class CallActivity : AppCompatActivity() {
         grid.requestLayout()
     }
 
+    /** The manifest keeps this screen alive across a rotation, so the use
+     *  case kept the rotation it was bound with and the other side saw the
+     *  picture sideways after the sender turned the phone. */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        @Suppress("DEPRECATION")
+        imageAnalysis?.targetRotation = windowManager.defaultDisplay.rotation
+    }
+
     // ---------------------------------------------------------------- actions
 
     private fun placeCall(peer: String?, group: String?) {
@@ -285,9 +301,14 @@ class CallActivity : AppCompatActivity() {
     private fun poll() {
         io.execute {
             val json = try { JSONObject(P2PLib.callState()) } catch (e: Exception) { null }
-            ui.post { if (json != null && !isFinishing) render(json) }
+            ui.post {
+                if (isDestroyed) return@post
+                if (json != null && !isFinishing) render(json)
+                // After the answer, not on a fixed clock: with the core lock
+                // busy the queries piled up behind each other.
+                ui.postDelayed(::poll, 500)
+            }
         }
-        ui.postDelayed(::poll, 500)
     }
 
     private fun render(s: JSONObject) {
@@ -427,6 +448,7 @@ class CallActivity : AppCompatActivity() {
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                 .build()
+            imageAnalysis = analysis
             analysis.setAnalyzer(analysisExecutor) { image ->
                 try { CallMedia.videoEncoder?.encode(image) } catch (e: Exception) {
                     Log.w(TAG, "Video encode failed", e)

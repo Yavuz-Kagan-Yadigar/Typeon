@@ -69,7 +69,7 @@ class ChatAdapter(
                 lastMessage == other.lastMessage && timestamp == other.timestamp &&
                 unreadCount == other.unreadCount && hasUnread == other.hasUnread &&
                 isPinned == other.isPinned &&
-                realContactId == other.realContactId &&
+                realContactId == other.realContactId && identityId == other.identityId &&
                 isGroup == other.isGroup &&
                 // Spec dışı, güvenlik/kararlılık denetimi düzeltmesi: bu
                 // ikisi önceden eksikti — `DiffUtil.ItemCallback.areContentsTheSame`
@@ -186,5 +186,16 @@ class ChatAdapter(
 
     override fun onBindViewHolder(holder: ChatViewHolder, position: Int) {
         holder.bind(getItem(position))
+    }
+
+    private var labelsMinute = 0L
+
+    /** "Just now" is computed when a row is bound, and an unchanged row is
+     *  never bound again: called on every list refresh, rebinds once a minute. */
+    fun refreshTimeLabels() {
+        val minute = System.currentTimeMillis() / 60_000
+        if (minute == labelsMinute) return
+        labelsMinute = minute
+        notifyItemRangeChanged(0, itemCount)
     }
 }

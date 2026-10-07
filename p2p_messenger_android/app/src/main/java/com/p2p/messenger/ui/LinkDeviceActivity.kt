@@ -89,7 +89,18 @@ class LinkDeviceActivity : AppCompatActivity() {
             }
             return
         }
-        qrImage.setImageBitmap(encodeBinaryAsQrBitmap(bytes, 1000, 1000))
+        try {
+            qrImage.setImageBitmap(encodeBinaryAsQrBitmap(bytes, 1000, 1000))
+        } catch (e: Exception) {
+            // WriterException: the request does not fit a QR code.
+            statusText.text = getString(R.string.link_device_network_not_ready)
+        }
+    }
+
+    override fun onDestroy() {
+        // The QR retry lambda is not `pollAdopted`: onPause does not remove it.
+        handler.removeCallbacksAndMessages(null)
+        super.onDestroy()
     }
 
     /** Birincil cihaz benimseyene kadar 2 saniyede bir yoklar. */
@@ -112,12 +123,8 @@ class LinkDeviceActivity : AppCompatActivity() {
         val text = QrBinaryCodec.bytesToLatin1String(data)
         val hints = mapOf(EncodeHintType.CHARACTER_SET to "ISO-8859-1")
         val bitMatrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, width, height, hints)
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565)
-        for (x in 0 until width) {
-            for (y in 0 until height) {
-                bitmap.setPixel(x, y, if (bitMatrix[x, y]) Color.BLACK else Color.WHITE)
-            }
-        }
-        return bitmap
+        // One bulk write instead of a million `setPixel` calls.
+        val pixels = IntArray(width * height) { if (bitMatrix[it % width, it / width]) Color.BLACK else Color.WHITE }
+        return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.RGB_565)
     }
 }

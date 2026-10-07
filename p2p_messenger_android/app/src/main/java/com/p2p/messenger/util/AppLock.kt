@@ -153,6 +153,23 @@ object AppLock {
     fun markUnlocked() {
         unlocked = true
         promptShowing = false
+        failedAttempts = 0
+    }
+
+    /** ponytail: in memory only, a force stop resets it. Persist the counter
+     *  if the lock ever has to hold against someone with time and the phone. */
+    private const val FREE_ATTEMPTS = 5
+    @Volatile private var failedAttempts = 0
+    @Volatile private var retryAllowedAt = 0L
+
+    /** Seconds until the next attempt is allowed, 0 = now. */
+    fun retryWaitSeconds(): Int =
+        ((retryAllowedAt - SystemClock.elapsedRealtime() + 999) / 1000).coerceAtLeast(0).toInt()
+
+    /** After [FREE_ATTEMPTS] wrong passwords: 30 s, doubling to 16 min. */
+    fun noteFailedAttempt() {
+        val over = ++failedAttempts - FREE_ATTEMPTS
+        if (over >= 0) retryAllowedAt = SystemClock.elapsedRealtime() + (30_000L shl over.coerceAtMost(5))
     }
 
     /**

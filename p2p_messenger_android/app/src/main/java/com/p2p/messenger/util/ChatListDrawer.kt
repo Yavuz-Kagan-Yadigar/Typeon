@@ -29,7 +29,7 @@ object ChatListDrawer {
      * standart `DrawerLayout` davranışı, kullanıcının "yanlışlıkla çekmeceyi
      * açtım, geri tuşuna bastım, tüm sohbetten çıktım" şaşkınlığını önler.
      */
-    fun setup(activity: AppCompatActivity): DrawerLayout? {
+    fun setup(activity: AppCompatActivity, onBack: () -> Boolean = { false }): DrawerLayout? {
         val drawer = activity.findViewById<DrawerLayout>(R.id.chatDrawerLayout) ?: return null
         val fragment = activity.supportFragmentManager
             .findFragmentById(R.id.chatListDrawerContainer) as? ChatsFragment
@@ -39,6 +39,8 @@ object ChatListDrawer {
             override fun handleOnBackPressed() {
                 if (drawer.isDrawerOpen(GravityCompat.START)) {
                     drawer.closeDrawer(GravityCompat.START)
+                } else if (onBack()) {
+                    // The screen used Back itself (closed its search bar).
                 } else {
                     activity.finish()
                 }

@@ -326,7 +326,12 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this@MainActivity, identityId, Toast.LENGTH_LONG).show()
                     showDeviceNameDialog()
                 } else {
-                    IdentityManager.persistNewIdentity(applicationContext)
+                    try {
+                        IdentityManager.persistNewIdentity(applicationContext)
+                    } catch (e: Exception) {
+                        // Keystore or disk failure, as in `createIdentityAndStart`.
+                        Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
                     // The archive root key came back with the recovery file
                     // but lived only in the core's memory: after a restart it
                     // was gone and a new random one split the server archive.
@@ -530,11 +535,16 @@ class MainActivity : AppCompatActivity() {
      * kullanıcıya bir uyarı dialog'u gösterir (kabul/red).
      */
     private fun checkPendingDeviceAlerts() {
-        val json = try {
-            P2PLib.listPendingDeviceAlerts()
-        } catch (e: Exception) {
-            return
+        // Every 5 s, and the JNI call takes the core lock: not on the main thread.
+        lifecycleScope.launch {
+            val json = withContext(Dispatchers.IO) {
+                try { P2PLib.listPendingDeviceAlerts() } catch (e: Exception) { null }
+            } ?: return@launch
+            if (!isFinishing && !isDestroyed) showPendingDeviceAlert(json)
         }
+    }
+
+    private fun showPendingDeviceAlert(json: String) {
         val array = try {
             JSONArray(json)
         } catch (e: Exception) {

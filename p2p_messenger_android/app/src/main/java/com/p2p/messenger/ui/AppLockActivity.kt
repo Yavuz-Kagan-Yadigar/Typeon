@@ -64,6 +64,11 @@ class AppLockActivity : AppCompatActivity() {
                 showError(error, getString(R.string.error_app_lock_empty))
                 return@setOnClickListener
             }
+            val wait = AppLock.retryWaitSeconds()
+            if (!createMode && wait > 0) {
+                showError(error, getString(R.string.error_app_lock_wait, wait))
+                return@setOnClickListener
+            }
             if (createMode && entered != confirm.text.toString()) {
                 showError(error, getString(R.string.error_app_lock_mismatch))
                 return@setOnClickListener
@@ -83,6 +88,7 @@ class AppLockActivity : AppCompatActivity() {
                         AppLock.markUnlocked()
                         finish()
                     } else {
+                        if (!createMode) AppLock.noteFailedAttempt()
                         password.text.clear()
                         showError(error, getString(R.string.error_app_lock_wrong))
                     }

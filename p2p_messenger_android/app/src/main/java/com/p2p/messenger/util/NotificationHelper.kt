@@ -36,7 +36,21 @@ object NotificationHelper {
         manager.createNotificationChannel(channel)
     }
 
-    fun showMessageNotification(context: Context, peerDeviceFingerprint: String, text: String) {
+    /** Message each chat's single slot shows now, see `clearIfShowing`. */
+    private val shownMessageId = java.util.concurrent.ConcurrentHashMap<Int, String>()
+
+    /** A delete removes the chat's notification only when the slot shows
+     *  that message (or we do not know what it shows): deleting an old, read
+     *  message used to remove the notification of the unread ones. */
+    fun clearIfShowing(context: Context, conversationId: String, messageId: String) {
+        val id = conversationId.hashCode()
+        val shown = shownMessageId[id]
+        if (shown != null && shown != messageId) return
+        shownMessageId.remove(id)
+        context.getSystemService(NotificationManager::class.java).cancel(id)
+    }
+
+    fun showMessageNotification(context: Context, peerDeviceFingerprint: String, text: String, messageId: String = "", alert: Boolean = true) {
         val displayName = resolveContactNameByFingerprint(peerDeviceFingerprint) ?: peerDeviceFingerprint.take(8)
         val intent = Intent(context, ChatActivity::class.java).apply {
             putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, peerDeviceFingerprint)
@@ -51,7 +65,8 @@ object NotificationHelper {
         // göster" anahtarı, bkz. NotificationPrefs): kapalıyken gövde
         // SADECE göndereni taşır, mesaj metni HİÇ yazılmaz.
         val body = if (NotificationPrefs.showMessageText(context)) "$displayName: $text" else displayName
-        show(context, peerDeviceFingerprint.hashCode(), context.getString(R.string.app_name), body, intent)
+        if (messageId.isNotEmpty()) shownMessageId[peerDeviceFingerprint.hashCode()] = messageId
+        show(context, peerDeviceFingerprint.hashCode(), context.getString(R.string.app_name), body, intent, alert)
     }
 
     /** Spec dışı (dış AI incelemesi düzeltmesi — AI2-G, self-revocation): bu
@@ -106,7 +121,7 @@ object NotificationHelper {
             context.getString(R.string.msg_contact_deleted_account, name), intent)
     }
 
-    fun showGroupMessageNotification(context: Context, groupId: String, senderIdentityId: String, text: String) {
+    fun showGroupMessageNotification(context: Context, groupId: String, senderIdentityId: String, text: String, messageId: String = "") {
         val groupName = resolveGroupName(groupId) ?: groupId.take(8)
         val senderName = resolveContactNameByIdentity(senderIdentityId) ?: senderIdentityId.take(8)
         val intent = Intent(context, GroupChatActivity::class.java).apply {
@@ -122,6 +137,7 @@ object NotificationHelper {
         } else {
             "$senderName ($groupName)"
         }
+        if (messageId.isNotEmpty()) shownMessageId[("group:$groupId").hashCode()] = messageId
         show(context, ("group:$groupId").hashCode(), context.getString(R.string.app_name), body, intent)
     }
 
@@ -168,7 +184,7 @@ object NotificationHelper {
     fun updateMessageNotificationIfShowing(context: Context, peerDeviceFingerprint: String, newText: String) {
         val id = peerDeviceFingerprint.hashCode()
         if (!isNotificationActive(context, id)) return
-        showMessageNotification(context, peerDeviceFingerprint, newText)
+        showMessageNotification(context, peerDeviceFingerprint, newText, alert = false)
     }
 
     /** bkz. `updateMessageNotificationIfShowing` aynı notu — grup için. */
@@ -186,7 +202,7 @@ object NotificationHelper {
         }
         // bkz. `showGroupMessageNotification` — aynı "mesajları göster" kuralı.
         val body = if (NotificationPrefs.showMessageText(context)) "$groupName: $newText" else groupName
-        show(context, ("group:$groupId").hashCode(), context.getString(R.string.app_name), body, intent)
+        show(context, ("group:$groupId").hashCode(), context.getString(R.string.app_name), body, intent, alert = false)
     }
 
     private fun isNotificationActive(context: Context, notificationId: Int): Boolean {
@@ -197,14 +213,17 @@ object NotificationHelper {
     /** Aynı sohbetten gelen ardışık mesajlar aynı bildirim ID'sini paylaşır
      *  (conversationId'nin hash'i) — bu yüzden yığılıp bildirim çubuğunu
      *  doldurmak yerine tek bildirim güncellenir. */
-    private fun show(context: Context, notificationId: Int, title: String, text: String, contentIntent: Intent) {
+    private fun show(context: Context, notificationId: Int, title: String, text: String, contentIntent: Intent, alert: Boolean = true) {
         // Kullanıcı isteği: bildirime dokunmak belirli sohbeti değil uygulamayı
         // normal (launcher) şekilde açsın — geri tuşu da tek seferde çıkar.
         val isChat = contentIntent.component?.className.let {
             it == ChatActivity::class.java.name || it == GroupChatActivity::class.java.name
         }
         val launchIntent = if (isChat) {
-            context.packageManager.getLaunchIntentForPackage(context.packageName) ?: contentIntent
+            // Package cleared: with it set the intent does not equal the one
+            // the launcher started the task with, and Android 8-10 then put a
+            // second MainActivity on top of the open chat.
+            context.packageManager.getLaunchIntentForPackage(context.packageName)?.setPackage(null) ?: contentIntent
         } else contentIntent
         val pendingIntent = PendingIntent.getActivity(
             context, notificationId, launchIntent,
@@ -235,6 +254,8 @@ object NotificationHelper {
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_notification)
             .setAutoCancel(true)
+            // An edit updates the slot silently instead of ringing again.
+            .setOnlyAlertOnce(!alert)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
@@ -244,48 +265,62 @@ object NotificationHelper {
         manager.notify(notificationId, notification)
     }
 
-    private fun resolveContactNameByFingerprint(peerDeviceFingerprint: String): String? {
-        return try {
-            val array = JSONArray(P2PLib.listContacts())
-            for (i in 0 until array.length()) {
-                val obj = array.getJSONObject(i)
-                if (obj.optString("active_device_fingerprint") == peerDeviceFingerprint) {
-                    return obj.optString("display_name")
-                }
-            }
-            null
-        } catch (e: Exception) {
-            null
-        }
-    }
+    /** Every notification parsed the whole contact list (each avatar as
+     *  hex) on the poll thread to read one name: 50 queued messages after a
+     *  reconnect were 50-100 full serialisations. */
+    private const val NAME_CACHE_TTL_MS = 30_000L
+    private var namesLoadedAt = 0L
+    private var namesByFingerprint = emptyMap<String, String>()
+    private var namesByIdentity = emptyMap<String, String>()
+    private var groupNames = emptyMap<String, String>()
 
-    private fun resolveContactNameByIdentity(identityId: String): String? {
-        return try {
-            val array = JSONArray(P2PLib.listContacts())
-            for (i in 0 until array.length()) {
-                val obj = array.getJSONObject(i)
-                if (obj.optString("identity_id") == identityId) {
-                    return obj.optString("display_name")
-                }
+    @Synchronized
+    private fun refreshNames() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (namesLoadedAt != 0L && now - namesLoadedAt < NAME_CACHE_TTL_MS) return
+        try {
+            val byFp = HashMap<String, String>()
+            val byId = HashMap<String, String>()
+            val contacts = JSONArray(P2PLib.listContacts())
+            for (i in 0 until contacts.length()) {
+                val obj = contacts.getJSONObject(i)
+                val name = obj.optString("display_name")
+                byFp[obj.optString("active_device_fingerprint")] = name
+                byId[obj.optString("identity_id")] = name
             }
-            null
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    private fun resolveGroupName(groupId: String): String? {
-        return try {
+            val groups = HashMap<String, String>()
             val array = JSONArray(P2PLib.listGroups())
             for (i in 0 until array.length()) {
                 val obj = array.getJSONObject(i)
-                if (obj.optString("group_id") == groupId) {
-                    return obj.optString("name")
-                }
+                groups[obj.optString("group_id")] = obj.optString("name")
             }
-            null
+            namesByFingerprint = byFp
+            namesByIdentity = byId
+            groupNames = groups
+            namesLoadedAt = now
         } catch (e: Exception) {
-            null
         }
     }
+
+    /** A name missing from the cache may belong to a contact added since. */
+    private fun lookup(key: String, map: () -> Map<String, String>): String? {
+        refreshNames()
+        map()[key]?.let { return it }
+        // Not on every miss: a group member who is not a contact never resolves.
+        synchronized(this) {
+            if (android.os.SystemClock.elapsedRealtime() - namesLoadedAt < 2_000L) return null
+            namesLoadedAt = 0L
+        }
+        refreshNames()
+        return map()[key]
+    }
+
+    private fun resolveContactNameByFingerprint(peerDeviceFingerprint: String): String? =
+        lookup(peerDeviceFingerprint) { namesByFingerprint }
+
+    private fun resolveContactNameByIdentity(identityId: String): String? =
+        lookup(identityId) { namesByIdentity }
+
+    private fun resolveGroupName(groupId: String): String? =
+        lookup(groupId) { groupNames }
 }

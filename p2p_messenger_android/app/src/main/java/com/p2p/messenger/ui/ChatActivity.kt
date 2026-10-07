@@ -156,12 +156,15 @@ class ChatActivity : AppCompatActivity() {
     /** Set in onResume: the chat is really in front of the user, not just
      *  resumed for a moment underneath the app lock screen. */
     private var resumedUnlocked = false
+    private var toolbarAvatarLoaded = false
     /** Invalidates a voice message still being loaded (see `loadAndPlayVoiceMessage`). */
     private var voiceLoadRequest = 0
 
     /** Sohbet içi arama: eşleşen satırların `localMessages` içindeki
      *  indeksleri (bkz. `runMessageSearch`/`goToSearchMatch`). */
-    private var searchMatches: List<Int> = emptyList()
+    /** Message ids, not list positions: an older page prepended or a
+     *  re-sort moves every position. */
+    private var searchMatches: List<String> = emptyList()
     private var currentSearchMatchIndex = -1
     private lateinit var layoutSearchMessages: View
     private lateinit var searchMessagesView: SearchView
@@ -238,7 +241,7 @@ class ChatActivity : AppCompatActivity() {
     private val recordingHandler = Handler(Looper.getMainLooper())
     private val recordingTimerRunnable = object : Runnable {
         override fun run() {
-            val elapsed = System.currentTimeMillis() - recordingStartTime
+            val elapsed = android.os.SystemClock.elapsedRealtime() - recordingStartTime
             txtRecordingTimer.text = formatDurationMs(elapsed)
             recordingHandler.postDelayed(this, VOICE_PLAYBACK_TICK_MS)
         }
@@ -334,6 +337,7 @@ class ChatActivity : AppCompatActivity() {
         if (handshakeDone != handshakeReady) {
             handshakeReady = handshakeDone
             updateComposerLock()
+            flushPendingShare()
         }
         // No session yet: re-poke the handshake (a no-op once a session exists).
         if (handshakeDone) ensureHandshakeStreak = 0
@@ -459,7 +463,10 @@ class ChatActivity : AppCompatActivity() {
         whiteboard = WhiteboardPanel(this, findViewById(R.id.whiteboardHost), findViewById(R.id.whiteboardHandle))
         ThemePrefs.applyChatBackground(this)
         // bkz. util.ChatListDrawer dokümantasyonu.
-        com.p2p.messenger.util.ChatListDrawer.setup(this)
+        com.p2p.messenger.util.ChatListDrawer.setup(this) {
+            // Back with the search bar open closes the bar, not the chat.
+            (layoutSearchMessages.visibility == View.VISIBLE).also { if (it) toggleMessageSearch() }
+        }
 
         connectingBanner = findViewById(R.id.layoutConnecting)
         layoutTypingIndicator = findViewById(R.id.layoutTypingIndicator)
@@ -611,7 +618,19 @@ class ChatActivity : AppCompatActivity() {
         com.p2p.messenger.util.ShareIntake.text(share)?.let {
             findViewById<EditText>(R.id.edtMessage).apply { setText(it); setSelection(text.length) }
         }
-        com.p2p.messenger.util.ShareIntake.uris(share).forEach { onFilePicked(it) }
+        pendingShare = com.p2p.messenger.util.ShareIntake.uris(share)
+        flushPendingShare()
+    }
+
+    /** Shared files go out under the same lock as every send button: the
+     *  chat has just opened and the handshake is not proven yet. */
+    private var pendingShare: List<Uri> = emptyList()
+
+    private fun flushPendingShare() {
+        if (!handshakeReady || peerAccountDeleted || pendingShare.isEmpty()) return
+        val uris = pendingShare
+        pendingShare = emptyList()
+        uris.forEach { onFilePicked(it) }
     }
 
     // ---------------------------------------------------------------
@@ -701,7 +720,7 @@ class ChatActivity : AppCompatActivity() {
         }
         mediaRecorder = recorder
         recordingFile = file
-        recordingStartTime = System.currentTimeMillis()
+        recordingStartTime = android.os.SystemClock.elapsedRealtime()
         recordingCancelled = false
         layoutMessageInput.visibility = View.GONE
         layoutRecording.visibility = View.VISIBLE
@@ -715,7 +734,7 @@ class ChatActivity : AppCompatActivity() {
     private fun finishVoiceRecording(send: Boolean) {
         val recorder = mediaRecorder ?: return
         val file = recordingFile
-        val durationMs = System.currentTimeMillis() - recordingStartTime
+        val durationMs = android.os.SystemClock.elapsedRealtime() - recordingStartTime
         mediaRecorder = null
         recordingFile = null
         recordingHandler.removeCallbacks(recordingTimerRunnable)
@@ -968,7 +987,9 @@ class ChatActivity : AppCompatActivity() {
         connectingBanner.visibility = View.VISIBLE
         // Yeni sohbet: kanıtlanana kadar (poll'ün ilk turu) gönderim KİLİTLİ.
         handshakeReady = false
-        peerAccountDeleted = isAccountDeleted(newPeer)
+        pendingShare = emptyList()
+        peerAccountDeleted = false
+        toolbarAvatarLoaded = false
         updateComposerLock()
         sessionPollHandler.removeCallbacks(sessionPollRunnable)
         sessionPollHandler.post(sessionPollRunnable)
@@ -976,9 +997,15 @@ class ChatActivity : AppCompatActivity() {
         // `listContacts` bir JNI çağrısı — ana thread'de yapılmaz.
         lifecycleScope.launch(Dispatchers.IO) {
             val avatarBytes = resolveContactAvatar(newPeer)
+            val deleted = isAccountDeleted(newPeer)
             withContext(Dispatchers.Main) {
                 // Bu arada başka bir sohbete geçilmiş olabilir.
                 if (peerDeviceFingerprint == newPeer) {
+                    if (deleted) {
+                        peerAccountDeleted = true
+                        updateComposerLock()
+                    }
+                    toolbarAvatarLoaded = true
                     toolbarAvatarBytes = avatarBytes
                     AvatarUtil.renderInto(imgToolbarAvatar, avatarBytes, displayName)
                 }
@@ -1069,6 +1096,11 @@ class ChatActivity : AppCompatActivity() {
     } catch (e: Exception) {
         false
     }
+
+    /** The avatar loaded when the chat opened. Every "seen" event used to
+     *  parse the whole contact list on the UI thread to find it again. */
+    private fun peerAvatar(): ByteArray? =
+        if (toolbarAvatarLoaded) toolbarAvatarBytes else resolveContactAvatar(peerDeviceFingerprint)
 
     private fun resolveContactAvatar(deviceFingerprint: String): ByteArray? {
         return try {
@@ -1193,7 +1225,11 @@ class ChatActivity : AppCompatActivity() {
                 onNewIncomingItemAdded()
                 // Okuma sınırı yalnızca `messages` tablosunu kapsıyor; ekler
                 // için tekil `Seen` kalıyor. Kendi ekimin yankısına gönderilmez.
-                if (obj.optString("type") == "file_offer") markSeen(obj.optString("file_id"))
+                if (obj.optString("type") == "file_offer") {
+                    markSeen(obj.optString("file_id"))
+                    // Sibling devices keep the notification until the watermark moves.
+                    scheduleReadWatermark()
+                }
             }
             "file_progress" -> adapter.applyAttachmentUpdate(
                 obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.DOWNLOADING, obj.optLong("bytes_done")
@@ -1214,7 +1250,7 @@ class ChatActivity : AppCompatActivity() {
                 val peerName = txtToolbarTitle.text.toString()
                 adapter.applySeen(
                     messageId,
-                    listOf(SimpleChatAdapter.SeenByViewer(resolveContactAvatar(peerDeviceFingerprint), peerName))
+                    listOf(SimpleChatAdapter.SeenByViewer(peerAvatar(), peerName))
                 )
             }
             // Toplu görüldü (2026-09-07): karşı taraf "buraya kadar okudum"
@@ -1229,7 +1265,7 @@ class ChatActivity : AppCompatActivity() {
                     val peerName = txtToolbarTitle.text.toString()
                     adapter.applySeen(
                         newestId,
-                        listOf(SimpleChatAdapter.SeenByViewer(resolveContactAvatar(peerDeviceFingerprint), peerName))
+                        listOf(SimpleChatAdapter.SeenByViewer(peerAvatar(), peerName))
                     )
                 }
             }
@@ -1256,6 +1292,7 @@ class ChatActivity : AppCompatActivity() {
             "profile_update" -> {
                 val avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null }
                 toolbarAvatarBytes = avatarHex?.let { hexToBytes(it) }
+                toolbarAvatarLoaded = true
                 // `previous_display_name` yalnızca ad GERÇEKTEN değiştiyse
                 // dolu (her fotoğraf değişikliği de bu paketi taşıyor, bkz.
                 // Rust tarafındaki not) — kullanıcıya bildirimi ona bakarak
@@ -1488,17 +1525,31 @@ class ChatActivity : AppCompatActivity() {
                     put(android.provider.MediaStore.Downloads.MIME_TYPE, mimeType.ifBlank { "application/octet-stream" })
                     put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/P2P")
                 }
+                // Pending until the copy is complete, and removed when it
+                // fails: a half file used to stay in Download/P2P.
+                values.put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
                 val uri = contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                     ?: return false
-                contentResolver.openOutputStream(uri)?.use { output ->
-                    source.inputStream().use { input -> input.copyTo(output) }
-                } ?: return false
+                try {
+                    contentResolver.openOutputStream(uri)!!.use { output ->
+                        source.inputStream().use { input -> input.copyTo(output) }
+                    }
+                    values.clear()
+                    values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
+                    contentResolver.update(uri, values, null, null)
+                } catch (e: Exception) {
+                    contentResolver.delete(uri, null, null)
+                    return false
+                }
                 true
             } else {
                 @Suppress("DEPRECATION")
                 val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
                 val p2pDir = File(downloadsDir, "P2P").apply { mkdirs() }
-                val dest = File(p2pDir, safeName)
+                // Never over an earlier file of the same name.
+                val dest = File(p2pDir, safeName).let {
+                    if (it.exists()) File(p2pDir, "${System.currentTimeMillis()}_$safeName") else it
+                }
                 source.inputStream().use { input -> dest.outputStream().use { output -> input.copyTo(output) } }
                 // Galeri/dosya yöneticisinin yeni dosyayı hemen görmesi için.
                 MediaScannerConnection.scanFile(this, arrayOf(dest.absolutePath), arrayOf(mimeType), null)
@@ -1658,7 +1709,13 @@ class ChatActivity : AppCompatActivity() {
                 return
             }
             val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, mimeType.ifBlank { "*/*" })
+                // The file's own extension picks the handler, not the type
+                // the sender declared.
+                setDataAndType(
+                    uri,
+                    android.webkit.MimeTypeMap.getSingleton()
+                        .getMimeTypeFromExtension(File(path).extension.lowercase()) ?: "*/*"
+                )
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             AppLock.beginTrustedExcursion()
@@ -1747,15 +1804,20 @@ class ChatActivity : AppCompatActivity() {
         val replyId = activeReplyToMessageId ?: ""
         val replyPreview = activeReplyToPreview ?: ""
         cancelReply()
-        val fileName = queryDisplayName(uri) ?: "file"
-        val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
-        val size = querySize(uri)
-        if (size != null && size > MAX_ATTACHMENT_SIZE) {
-            Toast.makeText(this, getString(R.string.error_file_too_large_named, fileName), Toast.LENGTH_LONG).show()
-            return
-        }
-        Toast.makeText(this, fileName, Toast.LENGTH_SHORT).show()
         lifecycleScope.launch(Dispatchers.IO) {
+            // Provider queries are IPC to another app: not on the main thread.
+            val fileName = queryDisplayName(uri) ?: "file"
+            val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+            val size = querySize(uri)
+            val tooLarge = size != null && size > MAX_ATTACHMENT_SIZE
+            withContext(Dispatchers.Main) {
+                if (tooLarge) {
+                    Toast.makeText(this@ChatActivity, getString(R.string.error_file_too_large_named, fileName), Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this@ChatActivity, fileName, Toast.LENGTH_SHORT).show()
+                }
+            }
+            if (tooLarge) return@launch
             val tempFile = File(File(cacheDir, "outgoing").apply { mkdirs() }, UUID.randomUUID().toString())
             try {
                 contentResolver.openInputStream(uri)?.use { input ->
@@ -1870,11 +1932,12 @@ class ChatActivity : AppCompatActivity() {
         historySyncPending = false
         val array = obj.optJSONArray("messages") ?: return
         if (array.length() == 0) return
+        val withoutId = HashSet<String>()
         val synced = (0 until array.length()).map { i ->
             val m = array.getJSONObject(i)
             val messageId = if (m.isNull("message_id")) null else m.optString("message_id").ifEmpty { null }
             SimpleChatAdapter.Item(
-                messageId = messageId ?: UUID.randomUUID().toString(),
+                messageId = messageId ?: UUID.randomUUID().toString().also { withoutId.add(it) },
                 text = m.optString("text"),
                 isMine = m.optString("direction") == "sent",
                 timestamp = m.optLong("timestamp", System.currentTimeMillis()),
@@ -1896,7 +1959,10 @@ class ChatActivity : AppCompatActivity() {
             synced
         } else {
             val latestLocal = localMessages.maxOf { it.timestamp }
-            synced.filter { it.timestamp > latestLocal && it.messageId !in existingIds }
+            // The peer's archive clock is not ours: a missed message older
+            // than our newest row (or any, with the peer's clock behind) was
+            // never merged. Only rows without an id still need the clock.
+            synced.filter { it.messageId !in existingIds && (it.messageId !in withoutId || it.timestamp > latestLocal) }
         }
         if (toAdd.isEmpty()) return
         localMessages.addAll(toAdd)
@@ -2329,7 +2395,7 @@ class ChatActivity : AppCompatActivity() {
             // `indexOfMessageId` henüz eklenmemiş bir satır için -1 döner.
             if (seenMessageIds.isNotEmpty()) {
                 val viewer = SimpleChatAdapter.SeenByViewer(
-                    resolveContactAvatar(peerDeviceFingerprint), txtToolbarTitle.text.toString()
+                    peerAvatar(), txtToolbarTitle.text.toString()
                 )
                 for (id in seenMessageIds) adapter.applySeen(id, listOf(viewer))
             }
@@ -2562,9 +2628,9 @@ class ChatActivity : AppCompatActivity() {
             adapter.setHighlighted(null)
             return
         }
-        searchMatches = localMessages.withIndex()
-            .filter { (_, item) -> !item.isDeleted && item.attachment == null && item.text.contains(query, ignoreCase = true) }
-            .map { it.index }
+        searchMatches = localMessages
+            .filter { item -> !item.isDeleted && item.attachment == null && item.text.contains(query, ignoreCase = true) }
+            .map { it.messageId }
         currentSearchMatchIndex = if (searchMatches.isEmpty()) -1 else searchMatches.size - 1
         goToSearchMatch()
     }
@@ -2582,9 +2648,11 @@ class ChatActivity : AppCompatActivity() {
             return
         }
         txtSearchMatchCount.text = "${currentSearchMatchIndex + 1}/${searchMatches.size}"
-        val position = searchMatches[currentSearchMatchIndex]
+        val matchId = searchMatches[currentSearchMatchIndex]
+        val position = localMessages.indexOfFirst { it.messageId == matchId }
+        if (position < 0) return
         recycler.scrollToPosition(position)
-        adapter.setHighlighted(localMessages[position].messageId)
+        adapter.setHighlighted(matchId)
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -2663,6 +2731,11 @@ class ChatActivity : AppCompatActivity() {
      *  çalışır ve hangisinin önce biteceği belli değildir). */
     private fun syncMissedMessages() {
         val targetPeer = peerDeviceFingerprint
+        // Runs on every resume: rows already on screen keep their decoded
+        // preview (see `refreshFrom`) instead of decoding it from hex again.
+        // ponytail: the archive is still fetched whole; fetch only rows after
+        // the newest loaded one if a media-heavy chat still stutters here.
+        val knownIds = localMessages.mapTo(HashSet()) { it.messageId }
         lifecycleScope.launch {
             val missed = withContext(Dispatchers.IO) {
                 val textItems = mutableListOf<SimpleChatAdapter.Item>()
@@ -2707,7 +2780,7 @@ class ChatActivity : AppCompatActivity() {
                         val obj = attachmentsArray.getJSONObject(i)
                         val fileId = obj.optString("file_id")
                         val previewHex = obj.optString("preview_hex", "")
-                        val previewJpeg = if (previewHex.isNotEmpty() && previewHex != "null") hexToBytes(previewHex) else null
+                        val previewJpeg = if (fileId !in knownIds && previewHex.isNotEmpty() && previewHex != "null") hexToBytes(previewHex) else null
                         attachmentItems.add(
                             SimpleChatAdapter.Item(
                                 messageId = fileId,
@@ -2755,7 +2828,7 @@ class ChatActivity : AppCompatActivity() {
             // bkz. `loadHistoryIfAvailable` altındaki AYNI "seen" replay notu.
             if (seenMessageIds.isNotEmpty()) {
                 val viewer = SimpleChatAdapter.SeenByViewer(
-                    resolveContactAvatar(peerDeviceFingerprint), txtToolbarTitle.text.toString()
+                    peerAvatar(), txtToolbarTitle.text.toString()
                 )
                 for (id in seenMessageIds) adapter.applySeen(id, listOf(viewer))
             }
@@ -2787,6 +2860,9 @@ class ChatActivity : AppCompatActivity() {
         peerStatusDot.cancelPulse()
         ownStatusDot.cancelPulse()
         typingHandler.removeCallbacksAndMessages(null)
+        // The 6 s cleaner was just cancelled and the peer's "stopped typing"
+        // event is missed while paused.
+        layoutTypingIndicator.visibility = View.GONE
         sendTypingState(false)
         if (mediaRecorder != null) finishVoiceRecording(send = false)
         stopVoicePlayback()

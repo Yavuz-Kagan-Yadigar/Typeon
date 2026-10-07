@@ -71,6 +71,9 @@ private class SvPickerView(context: Context) : View(context) {
             Color.WHITE, Color.BLACK,
             Shader.TileMode.CLAMP
         )
+        // Two shaders of the same kind are not composed by the hardware
+        // canvas before API 28: the square came out wrong on Android 8.x.
+        if (android.os.Build.VERSION.SDK_INT < 28 && layerType != LAYER_TYPE_SOFTWARE) setLayerType(LAYER_TYPE_SOFTWARE, null)
         fillPaint.shader = ComposeShader(valShader, satShader, PorterDuff.Mode.MULTIPLY)
     }
 

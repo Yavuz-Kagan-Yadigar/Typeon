@@ -47,8 +47,21 @@ class PendingMessagesActivity : AppCompatActivity() {
         loadPendingMessages()
     }
 
+    /** A message acknowledged or given up while this screen is open. */
+    private val listener: (String) -> Unit = { json ->
+        if (json.contains("\"type\":\"ack\"") || json.contains("\"type\":\"status\"")) {
+            runOnUiThread { loadPendingMessages() }
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        com.p2p.messenger.service.P2PService.removeMessageListener(listener)
+    }
+
     override fun onResume() {
         super.onResume()
+        com.p2p.messenger.service.P2PService.addMessageListener(listener)
         // Bu ekran açıkken bir mesaj onaylanırsa (bkz. `retry_unconfirmed_messages`
         // — arka planda P2PService poll döngüsü çalışmaya devam eder) liste
         // bayatlar; her ön plana gelişte tazelemek basit ve yeterli (canlı

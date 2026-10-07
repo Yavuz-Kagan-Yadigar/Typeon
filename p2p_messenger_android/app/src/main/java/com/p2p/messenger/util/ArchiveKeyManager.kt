@@ -47,6 +47,7 @@ object ArchiveKeyManager {
      */
     /** Kardeş cihazdan gelen ARK yalnızca çekirdeğin belleğindeydi —
      *  yeniden başlatınca kayboluyordu. Dosya henüz yoksa diske yazar. */
+    @Synchronized
     fun persistIfNew(context: Context) {
         val file = keyFile(context)
         if (file.exists()) return
@@ -60,6 +61,7 @@ object ArchiveKeyManager {
         }
     }
 
+    @Synchronized
     fun loadIfPresent(context: Context) {
         val file = keyFile(context)
         if (!file.exists()) return
@@ -90,6 +92,7 @@ object ArchiveKeyManager {
      * ama diskteki kopya ayrışır. Bu yüzden çağıran, kullanıcı geçmiş
      * saklamayı açtığında ve SADECE o zaman çağırmalı.
      */
+    @Synchronized
     fun ensureCreated(context: Context): Boolean {
         val file = keyFile(context)
         if (file.exists()) {

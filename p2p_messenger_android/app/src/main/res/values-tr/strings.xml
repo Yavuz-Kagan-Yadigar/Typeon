@@ -362,6 +362,7 @@
     <string name="error_app_lock_empty">Şifre boş olamaz.</string>
     <string name="error_app_lock_mismatch">İki şifre birbirini tutmuyor.</string>
     <string name="error_app_lock_wrong">Şifre yanlış.</string>
+    <string name="error_app_lock_wait">Çok fazla yanlış deneme. %1$d sn sonra tekrar deneyin.</string>
     <string name="msg_app_lock_changed">Şifre değiştirildi.</string>
 
     <!-- Spec dışı, kullanıcı isteği: mesajlara emoji tepkisi. -->
@@ -408,6 +409,7 @@
     <string name="call_via_p2p">doğrudan</string>
     <string name="call_via_server">sunucu üzerinden</string>
     <string name="call_waiting_media">medya bekleniyor</string>
+    <string name="call_needs_android10">Aramalar için Android 10 veya üstü gerekli</string>
     <string name="call_permission_needed">Aramalar için mikrofon (görüntülü için kamera) izni gerekli</string>
     <string name="call_channel_name">Aramalar</string>
     <string name="call_notification_title">Typeon araması</string>

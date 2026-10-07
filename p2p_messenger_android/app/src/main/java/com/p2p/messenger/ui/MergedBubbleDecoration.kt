@@ -292,6 +292,12 @@ class MergedBubbleDecoration(
             if (lefts[i] < flushLeft) flushLeft = lefts[i]
             if (rights[i] > flushRight) flushRight = rights[i]
         }
+        // The path measures every member from ONE aligned edge. A bubble with
+        // a reaction pill or seen avatars beside it starts further in, and its
+        // background was drawn shifted: the first ~20 dp of text had none.
+        for (i in 0 until memberCount) {
+            widths[i] = if (isMine) flushRight - lefts[i] else rights[i] - flushLeft
+        }
         val outerR = minOf(outer, minHeight / 2f, minWidth / 2f)
         path.moveTo(outerR, top)
         path.lineTo(widths[0] - outerR, top)

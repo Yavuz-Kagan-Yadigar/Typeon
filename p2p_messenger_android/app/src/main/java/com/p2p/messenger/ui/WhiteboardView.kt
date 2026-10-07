@@ -90,10 +90,22 @@ class WhiteboardView(context: Context) : View(context) {
     }
 
     var strokes: ArrayList<Stroke> = ArrayList()
-        set(value) { field = value; invalidate() }
+        set(value) { field = value; strokesChanged() }
+
+    /** The finished strokes, drawn once. Every finger move used to draw
+     *  the whole page again: hundreds of paths per frame on a busy page. */
+    private var cache: android.graphics.Bitmap? = null
+    private var cacheDirty = true
+
+    /** After a change inside [strokes] (add, erase). */
+    fun strokesChanged() {
+        cacheDirty = true
+        invalidate()
+    }
     /** Strokes drawn here that the core has not echoed back in [strokes] yet. */
     val pending = ArrayList<Stroke>()
     var participants = 2
+        set(value) { if (field != value) { field = value; strokesChanged() } }
     var me = 0
     var shade = 1
     var penWidth = DEFAULT_PEN_WIDTH
@@ -104,6 +116,8 @@ class WhiteboardView(context: Context) : View(context) {
 
     private val paint = strokePaint()
     private val current = ArrayList<Float>()
+    /** The first finger is down and owns the stroke. */
+    private var drawing = false
 
     override fun onMeasure(widthSpec: Int, heightSpec: Int) {
         var w = MeasureSpec.getSize(widthSpec)
@@ -117,9 +131,23 @@ class WhiteboardView(context: Context) : View(context) {
     }
 
     override fun onDraw(canvas: Canvas) {
+        if (width == 0 || height == 0) return
+        var page = cache
+        if (page == null || page.width != width || page.height != height) {
+            page?.recycle()
+            page = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+            cache = page
+            cacheDirty = true
+        }
+        if (cacheDirty) {
+            cacheDirty = false
+            val pageCanvas = Canvas(page!!)
+            pageCanvas.scale(width / WIDTH, height / HEIGHT)
+            drawPage(pageCanvas, strokes, participants, paint)
+        }
+        canvas.drawBitmap(page!!, 0f, 0f, null)
         canvas.save()
         canvas.scale(width / WIDTH, height / HEIGHT)
-        drawPage(canvas, strokes, participants, paint)
         for (s in pending) drawStroke(canvas, s, participants, paint)
         if (current.size >= 2) {
             paint.color = colorOf(me, participants, shade)
@@ -141,15 +169,19 @@ class WhiteboardView(context: Context) : View(context) {
                 // The chat-list drawer and the message list must not steal the gesture.
                 parent?.requestDisallowInterceptTouchEvent(true)
                 current.clear()
+                drawing = true
                 touch(event.x, event.y)
             }
-            MotionEvent.ACTION_MOVE -> {
+            MotionEvent.ACTION_MOVE -> if (drawing) {
                 for (i in 0 until event.historySize) touch(event.getHistoricalX(i), event.getHistoricalY(i))
                 touch(event.x, event.y)
             }
-            MotionEvent.ACTION_UP -> finishStroke()
-            MotionEvent.ACTION_CANCEL -> current.clear()
-            else -> return false
+            MotionEvent.ACTION_UP -> if (drawing) { drawing = false; finishStroke() }
+            MotionEvent.ACTION_CANCEL -> { drawing = false; current.clear() }
+            // A second finger or the palm: `event.x` follows pointer 0, and
+            // when the first finger lifted the line jumped to the other one.
+            MotionEvent.ACTION_POINTER_UP -> if (drawing && event.actionIndex == 0) { drawing = false; finishStroke() }
+            else -> return true
         }
         invalidate()
         return true
@@ -178,6 +210,7 @@ class WhiteboardView(context: Context) : View(context) {
         val hit = strokes.filter { near(it, x, y) }
         if (hit.isEmpty()) return
         strokes.removeAll(hit.toSet())
+        cacheDirty = true
         onErase?.invoke(hit)
     }
 

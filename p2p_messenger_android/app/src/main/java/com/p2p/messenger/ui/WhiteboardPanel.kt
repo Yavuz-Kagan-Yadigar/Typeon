@@ -51,12 +51,20 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         private const val MAX_UNDO = 50
         /** Just past the core's 800 ms burst debounce and its 5 s digest delay. */
         private const val TICK_OPS_MS = 900L
+        /** Static: the screen (and this panel) is created again when the
+         *  phone is turned while the file picker is open. */
+        private var pdfPage = 0
         private const val TICK_DIGEST_MS = 6_000L
         private val PANEL_COLOR = Color.rgb(18, 18, 20)
     }
 
     private val ui = Handler(Looper.getMainLooper())
-    private val io = Executors.newSingleThreadExecutor()
+    /** Discards after shutdown: a board event still in flight when the screen
+     *  is destroyed must not throw RejectedExecutionException on the UI thread. */
+    private val io = java.util.concurrent.ThreadPoolExecutor(
+        1, 1, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
+        java.util.concurrent.LinkedBlockingQueue(), java.util.concurrent.ThreadPoolExecutor.DiscardPolicy()
+    )
     private val dp = activity.resources.displayMetrics.density
     private val board = WhiteboardView(activity)
     private val legend = LinearLayout(activity)
@@ -68,7 +76,6 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
     private var pageCount = 1
     private var unread = 0
     private var built = false
-    private var pdfPage = 0
     private val undoStack = ArrayDeque<Step>()
     private val redoStack = ArrayDeque<Step>()
     private lateinit var undoButton: View
@@ -239,10 +246,20 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
             val result = P2PLib.whiteboardAddStroke(peer, groupId, shown, stroke.shade, stroke.width, pointBytes(stroke))
             val failed = result.startsWith("Error")
             if (!failed) step.ids = hexToBytes(result)
-            val strokes = WhiteboardView.parsePage(P2PLib.whiteboardPage(peer, groupId, shown))
             ui.post {
                 board.pending.remove(stroke)
-                if (shown == page && peer == this.peer && groupId == this.groupId) board.strokes = strokes
+                if (shown == page && peer == this.peer && groupId == this.groupId) {
+                    if (!failed && step.ids.size == 8) {
+                        // The call returned the new id: keep the stroke. The
+                        // whole page was fetched and rebuilt after every
+                        // stroke, and that older snapshot also brought back
+                        // a stroke erased in the meantime.
+                        board.strokes.add(WhiteboardView.Stroke(step.ids, stroke.shade, stroke.author, stroke.width, stroke.points))
+                        board.strokesChanged()
+                    } else {
+                        loadPage()
+                    }
+                }
                 if (failed) {
                     undoStack.remove(step)
                     styleTools()

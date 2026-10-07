@@ -49,7 +49,10 @@ object FontOverride {
      *  önceki override varsa üzerine YENİ bir tane yazmak zararsız). */
     fun apply(familyName: String?) {
         remapSansSerif(null)
-        if (familyName.isNullOrBlank()) return
+        if (familyName.isNullOrBlank()) {
+            restoreOriginals()
+            return
+        }
         val newTypeface = try {
             Typeface.create(familyName, Typeface.NORMAL)
         } catch (e: Exception) {
@@ -116,7 +119,45 @@ object FontOverride {
     /** `apply` ve `applyFile` tarafından PAYLAŞILAN: 6 reflection
      *  çağrısını (`replaceStaticField` ×5 + `replaceDefaultsArray` ×1)
      *  TEK bir yerde toplar — duplication'ı önler. */
+    private val STATIC_FIELDS = listOf("DEFAULT", "DEFAULT_BOLD", "SANS_SERIF", "SERIF", "MONOSPACE")
+    /** The system's own typefaces, captured before the first replacement. */
+    private var originalStatics: Map<String, Typeface>? = null
+    private var originalDefaults: Array<Typeface>? = null
+
+    private fun captureOriginals() {
+        if (originalStatics != null) return
+        originalStatics = STATIC_FIELDS.mapNotNull { name ->
+            try {
+                val field = Typeface::class.java.getDeclaredField(name).apply { isAccessible = true }
+                (field.get(null) as? Typeface)?.let { name to it }
+            } catch (e: Exception) {
+                null
+            }
+        }.toMap()
+        originalDefaults = try {
+            val field = Typeface::class.java.getDeclaredField("sDefaults").apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            (field.get(null) as? Array<Typeface>)?.clone()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** Back to the system font without a process restart: every view with
+     *  no explicit `fontFamily` kept the old custom font until then. */
+    private fun restoreOriginals() {
+        for ((name, typeface) in originalStatics ?: return) replaceStaticField(name, typeface)
+        try {
+            val field = Typeface::class.java.getDeclaredField("sDefaults").apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            val defaults = field.get(null) as? Array<Typeface> ?: return
+            originalDefaults?.copyInto(defaults)
+        } catch (e: Exception) {
+        }
+    }
+
     private fun applyTypeface(newTypeface: Typeface, newBoldTypeface: Typeface) {
+        captureOriginals()
         replaceStaticField("DEFAULT", newTypeface)
         replaceStaticField("DEFAULT_BOLD", newBoldTypeface)
         replaceStaticField("SANS_SERIF", newTypeface)

@@ -16752,6 +16752,11 @@ impl P2PCore {
                             (real_target.clone(), group_id.clone()),
                         Some(MessageContent::Delete { target_message_id: real_target, group_id }) =>
                             (real_target.clone(), group_id.clone()),
+                        // As in `cancel_pending_message`: the group bubble is keyed
+                        // by the group-wide id. With the packet id and no
+                        // `group_id` no screen could match this event.
+                        Some(MessageContent::Text { group_id: Some(gid), group_message_local_id, .. }) =>
+                            (group_message_local_id.clone().unwrap_or_else(|| m.header.message_id.clone()), Some(gid.clone())),
                         _ => (m.header.message_id.clone(), None),
                     };
                     let mut status_event = serde_json::json!({

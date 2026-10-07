@@ -539,10 +539,17 @@ class SettingsFragment : Fragment() {
         AlertDialog.Builder(requireContext())
             .setMessage(R.string.linked_devices_confirm_revoke)
             .setPositiveButton(R.string.action_revoke_device) { _, _ ->
-                val result = try { P2PLib.revokeLinkedDevice(fingerprint) } catch (e: Exception) { "Error: ${e.message}" }
-                Toast.makeText(requireContext(),
-                    if (result.startsWith("Error:")) result else getString(R.string.msg_device_revoked),
-                    Toast.LENGTH_SHORT).show()
+                // Signs and fans the revocation out to every contact and
+                // sibling under the core lock: not on the main thread.
+                val ctx = requireContext().applicationContext
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val result = try { P2PLib.revokeLinkedDevice(fingerprint) } catch (e: Exception) { "Error: ${e.message}" }
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(ctx,
+                            if (result.startsWith("Error:")) result else ctx.getString(R.string.msg_device_revoked),
+                            Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -882,6 +889,11 @@ class SettingsFragment : Fragment() {
                 refreshSwatches()
                 requireActivity().recreate()
             }
+        }
+        // `ThemePrefs.applyAccentColor` rides on dynamic colour (Android 12+).
+        if (!com.google.android.material.color.DynamicColors.isDynamicColorAvailable()) {
+            view.findViewById<Button>(R.id.btn_pick_accent_color).visibility = View.GONE
+            accentSwatch.visibility = View.GONE
         }
         view.findViewById<Button>(R.id.btn_pick_accent_color).setOnClickListener {
             com.p2p.messenger.util.HsvColorPickerDialog.show(
@@ -1343,16 +1355,22 @@ class SettingsFragment : Fragment() {
 
     private fun addServer(code: String) {
         if (code.isEmpty()) return
-        val result = try {
-            P2PLib.addServer(code)
-        } catch (e: Exception) {
-            "Error: ${e.message}"
-        }
-        if (result.startsWith("Error:")) {
-            Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
-        } else {
-            Toast.makeText(requireContext(), R.string.msg_server_added, Toast.LENGTH_SHORT).show()
-            refreshServers()
+        val ctx = requireContext().applicationContext
+        // Writes to disk and starts a dial under the core lock.
+        lifecycleScope.launch(Dispatchers.IO) {
+            val result = try {
+                P2PLib.addServer(code)
+            } catch (e: Exception) {
+                "Error: ${e.message}"
+            }
+            withContext(Dispatchers.Main) {
+                if (result.startsWith("Error:")) {
+                    Toast.makeText(ctx, result, Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(ctx, R.string.msg_server_added, Toast.LENGTH_SHORT).show()
+                    if (view != null) refreshServers()
+                }
+            }
         }
     }
 
@@ -1466,14 +1484,18 @@ class SettingsFragment : Fragment() {
         row.addView(Button(ctx, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
             text = getString(R.string.action_restore_history)
             setOnClickListener {
-                val result = try {
-                    P2PLib.restoreServerHistory()
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val result = try {
+                        P2PLib.restoreServerHistory()
+                    } catch (e: Exception) {
+                        "Error: ${e.message}"
+                    }
+                    withContext(Dispatchers.Main) {
+                        val msg = if (result.startsWith("Error:")) result
+                        else ctx.getString(R.string.msg_restore_started)
+                        Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+                    }
                 }
-                val msg = if (result.startsWith("Error:")) result
-                else getString(R.string.msg_restore_started)
-                Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
             }
         })
 

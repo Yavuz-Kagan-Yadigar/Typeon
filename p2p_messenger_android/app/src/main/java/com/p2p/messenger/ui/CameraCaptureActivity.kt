@@ -151,6 +151,11 @@ class CameraCaptureActivity : AppCompatActivity() {
 
     private fun capture() {
         val capture = imageCapture ?: return
+        // A second tap failed after `unbindAll` and showed an error for a
+        // photo that was taken.
+        val shutter = findViewById<ImageButton>(R.id.btnShutter)
+        if (!shutter.isEnabled) return
+        shutter.isEnabled = false
         capture.takePicture(
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageCapturedCallback() {
@@ -164,6 +169,7 @@ class CameraCaptureActivity : AppCompatActivity() {
                     } finally {
                         image.close()
                     }
+                    shutter.isEnabled = true
                     if (bitmap == null) {
                         Toast.makeText(
                             this@CameraCaptureActivity,
@@ -176,6 +182,7 @@ class CameraCaptureActivity : AppCompatActivity() {
                 }
 
                 override fun onError(exception: ImageCaptureException) {
+                    shutter.isEnabled = true
                     Toast.makeText(
                         this@CameraCaptureActivity,
                         getString(R.string.error_camera_start_failed, exception.message ?: ""),
@@ -214,9 +221,11 @@ class CameraCaptureActivity : AppCompatActivity() {
         // gördüğüyle çekilen kare aynı olsun diye yatayda çevriliyor.
         val mirrored = lensFacing == CameraSelector.LENS_FACING_FRONT
         if (degrees == 0 && !mirrored) return decoded
+        // Upright first, then mirror: mirrored first, a 90/270 degree sensor
+        // (every phone held upright) gave the selfie upside down.
         val matrix = Matrix().apply {
-            if (mirrored) postScale(-1f, 1f)
             if (degrees != 0) postRotate(degrees.toFloat())
+            if (mirrored) postScale(-1f, 1f)
         }
         val rotated = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
         if (rotated !== decoded) decoded.recycle()
@@ -256,6 +265,8 @@ class CameraCaptureActivity : AppCompatActivity() {
         // bitmap çizilmeye çalışılabilirdi.
         cropOverlay.setBitmap(null)
         findViewById<Button>(R.id.btnUsePhoto).isEnabled = false
+        // The photo is on its way: "Retake" now would still send it.
+        findViewById<Button>(R.id.btnRetake).isEnabled = false
         lifecycleScope.launch(Dispatchers.IO) {
             val jpeg = try {
                 ImagePreview.compressBitmap(cropped, CAPTURE_MAX_DIMENSION, CAPTURE_JPEG_QUALITY)

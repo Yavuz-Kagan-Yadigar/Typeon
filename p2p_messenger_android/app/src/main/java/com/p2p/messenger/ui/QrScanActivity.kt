@@ -154,8 +154,10 @@ class QrScanActivity : AppCompatActivity() {
         }
 
         val bytes = imageProxy.planes[0].buffer.toByteArray()
+        // The plane's row stride is the data width: with padded rows (stride
+        // wider than the image) the picture was sheared and never decoded.
         val source = PlanarYUVLuminanceSource(
-            bytes, imageProxy.width, imageProxy.height,
+            bytes, imageProxy.planes[0].rowStride, imageProxy.height,
             0, 0, imageProxy.width, imageProxy.height, false
         )
         val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
@@ -192,6 +194,12 @@ class QrScanActivity : AppCompatActivity() {
         }.start()
     }
 
+    /** Not at once: a bad code that stays in view started a thread, a JNI
+     *  call and a long toast on every camera frame. */
+    private fun rearmLater() {
+        window.decorView.postDelayed({ alreadyHandled.set(false) }, 2000)
+    }
+
     private fun onScanResult(result: String) {
         run {
             if (addServerMode) {
@@ -200,7 +208,7 @@ class QrScanActivity : AppCompatActivity() {
                 // kendisi ayrıştırır.
                 if (result.startsWith("Error:")) {
                     Toast.makeText(this, result, Toast.LENGTH_LONG).show()
-                    alreadyHandled.set(false)
+                    rearmLater()
                 } else {
                     Toast.makeText(this, getString(R.string.msg_server_added), Toast.LENGTH_LONG).show()
                     finish()
@@ -212,7 +220,7 @@ class QrScanActivity : AppCompatActivity() {
                 // isteği — onayla, imzalı DeviceAdd + tam senkron gönder.
                 if (result.startsWith("Error:")) {
                     Toast.makeText(this, result, Toast.LENGTH_LONG).show()
-                    alreadyHandled.set(false)
+                    rearmLater()
                 } else {
                     Toast.makeText(this, getString(R.string.link_device_approved), Toast.LENGTH_LONG).show()
                     finish()
@@ -221,7 +229,7 @@ class QrScanActivity : AppCompatActivity() {
             }
             if (result.startsWith("Error:")) {
                 Toast.makeText(this, result, Toast.LENGTH_LONG).show()
-                alreadyHandled.set(false)
+                rearmLater()
             } else {
                 // Spec dışı, kullanıcı isteği: ilk eşleşme (gerçek dial/
                 // Noise/IdentityExchange el sıkışması) UZUN sürebilir — bir

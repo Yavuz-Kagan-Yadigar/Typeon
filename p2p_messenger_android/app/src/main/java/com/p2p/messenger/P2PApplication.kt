@@ -176,11 +176,16 @@ class P2PApplication : Application() {
                 val res = activity.resources
                 val textScale = ThemePrefs.getTextScale(activity)
                 val uiScale = ThemePrefs.getUiScale(activity)
-                if (textScale == ThemePrefs.TEXT_SCALE_DEFAULT && uiScale == ThemePrefs.UI_SCALE_DEFAULT) {
+                val system = android.content.res.Resources.getSystem()
+                val atDefault = textScale == ThemePrefs.TEXT_SCALE_DEFAULT && uiScale == ThemePrefs.UI_SCALE_DEFAULT
+                if (atDefault && res.configuration.fontScale == system.configuration.fontScale &&
+                    res.configuration.densityDpi == system.displayMetrics.densityDpi) {
                     return
                 }
                 val config = Configuration(res.configuration)
-                config.fontScale = textScale
+                // At default after a non-default value: the shared Resources
+                // were changed for good and stayed scaled until a restart.
+                config.fontScale = if (atDefault) system.configuration.fontScale else textScale
                 val metrics = res.displayMetrics
                 // Spec dışı, hata düzeltmesi ("hangi kaydırıcıyı hareket
                 // ettirirsem ettireyim aynı şeyi yapıyor, birbirini
