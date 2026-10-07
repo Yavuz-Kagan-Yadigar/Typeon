@@ -39,6 +39,7 @@ object SkippedKeyManager {
 
     /** Uygulama her başladığında (initDatabase sonrası, node modundan
      *  bağımsız) çağrılmalıdır. */
+    @Synchronized
     fun ensureLoaded(context: Context) {
         val file = keyFile(context)
 
@@ -53,6 +54,7 @@ object SkippedKeyManager {
             } catch (e: Exception) {
                 // bkz. TAG notu (#04) — ASLA yeniden uretme.
                 android.util.Log.e(TAG, "Anahtar cozulemedi, YENIDEN URETILMIYOR", e)
+                KeystoreCrypto.reportKeyFailure(context)
                 return
             }
         } else {

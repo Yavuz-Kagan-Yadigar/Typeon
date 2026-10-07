@@ -64,7 +64,7 @@ class AppLockActivity : AppCompatActivity() {
                 showError(error, getString(R.string.error_app_lock_empty))
                 return@setOnClickListener
             }
-            val wait = AppLock.retryWaitSeconds()
+            val wait = AppLock.retryWaitSeconds(this)
             if (!createMode && wait > 0) {
                 showError(error, getString(R.string.error_app_lock_wait, wait))
                 return@setOnClickListener
@@ -85,10 +85,11 @@ class AppLockActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) {
                     submit.isEnabled = true
                     if (ok) {
+                        AppLock.clearFailedAttempts(this@AppLockActivity)
                         AppLock.markUnlocked()
                         finish()
                     } else {
-                        if (!createMode) AppLock.noteFailedAttempt()
+                        if (!createMode) AppLock.noteFailedAttempt(this@AppLockActivity)
                         password.text.clear()
                         showError(error, getString(R.string.error_app_lock_wrong))
                     }

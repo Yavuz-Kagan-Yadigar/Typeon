@@ -294,7 +294,7 @@ fn newest_direct(fingerprint: &str) -> Option<(String, u64)> {
         newest = Some((text, message.timestamp));
     }
 
-    if let Some(attachment) = core::list_attachments(fingerprint)
+    if let Some(attachment) = core::list_attachments_brief(fingerprint)
         .into_iter()
         .max_by_key(|a| a.created_at)
     {
@@ -325,7 +325,7 @@ fn newest_group(group_id: &str) -> Option<(String, u64)> {
         newest = Some((text, message.timestamp));
     }
 
-    if let Some(attachment) = core::list_group_attachments(group_id)
+    if let Some(attachment) = core::list_group_attachments_brief(group_id)
         .into_iter()
         .max_by_key(|a| a.created_at)
     {

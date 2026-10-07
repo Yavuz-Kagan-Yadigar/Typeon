@@ -92,6 +92,9 @@ object P2PLib {
      *  `createIdentity` + `startNetwork`'ten geçmiş (provizyonel bir kimlik
      *  üretmiş) olmalı; `getNodeAddress()` hazır olana kadar boş dönebilir. */
     external fun buildDeviceLinkRequest(): ByteArray
+
+    /** Closes the window in which a link grant is accepted (QR screen left). */
+    external fun closeDeviceLinkWindow()
     /** Birincil (var olan hesabın) cihazında: taranan ikincil cihaz QR'ını
      *  (CBOR) işler — onaylar, bağlanır, tam senkron gönderir, tüm kişilere
      *  yeni cihazı duyurur. Dönüş: başarılıysa
@@ -203,6 +206,9 @@ object P2PLib {
      *  `timeoutMs` dolana kadar bloklar (bkz. Rust `wait_for_network_activity`).
      *  Sabit `postDelayed` beklemesinin yerine — mesajlar poll turunu beklemez. */
     external fun waitForNetworkActivity(timeoutMs: Long)
+
+    /** Ends a running [waitForNetworkActivity] at once. Takes no core lock. */
+    external fun wakePoll()
     /** PBKDF2-HMAC-SHA256 (Rust/ring) — bkz. `AppLock.derive`. Çekirdek kilidini almaz. */
     external fun pbkdf2Sha256(password: String, salt: ByteArray, iterations: Int, outLen: Int): ByteArray
     external fun notifyNetworkChanged()
@@ -337,6 +343,10 @@ object P2PLib {
     external fun downloadFile(fileId: String, peerDeviceFingerprint: String): String
     /** JSON-encoded List<AttachmentSummary>, oluşturulma sırasına göre. */
     external fun listAttachments(peerDeviceFingerprint: String): String
+
+    /** [listAttachments] / [listGroupAttachments] without the preview images. */
+    external fun listAttachmentsBrief(peerDeviceFingerprint: String): String
+    external fun listGroupAttachmentsBrief(groupId: String): String
     /** Spec dışı, kullanıcı isteği (grup ekleri): `prepareAndSendFile`'ın
      *  grup karşılığı — dosya TEK SEFERDE şifrelenir, ulaşılabilir TÜM diğer
      *  üyelere aynı `file_id`/anahtarla sunulur. Dönüş: başarılıysa

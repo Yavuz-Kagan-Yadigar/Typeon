@@ -640,7 +640,7 @@ pub(crate) fn spawn_media_acceptor(control: &mut libp2p_stream::Control) {
         Err(e) => { warn!("Arama akışı dinleyicisi kurulamadı: {}", e); return; }
     };
     RUNTIME.spawn(async move {
-        while let Some((_peer, mut stream)) = incoming.next().await {
+        while let Some((peer, mut stream)) = incoming.next().await {
             // Outside a call nobody has a reason to push media: drop the
             // stream instead of parking a reader (and up to MAX_FRAME) on it.
             let generation = {
@@ -652,13 +652,19 @@ pub(crate) fn spawn_media_acceptor(control: &mut libp2p_stream::Control) {
             };
             // Ends with the call, and on a silent stream: every participant
             // sends a state packet each second.
-            // ponytail: no cap on streams per peer during a call; add one if
-            // a contact abuses it.
+            // Only from a device in the call. `Target::peer` is filled by the
+            // next poll turn, so a stream that arrives first gets a few seconds.
+            // ponytail: no cap on streams per call peer; add one if a contact abuses it.
             tokio::spawn(async move {
                 let idle = Duration::from_millis(MEDIA_LOST_MS);
+                let opened = std::time::Instant::now();
                 while let Ok(Ok((_, data))) = tokio::time::timeout(idle, read_frame(&mut stream)).await {
-                    if media().generation != generation {
-                        break;
+                    {
+                        let m = media();
+                        let in_call = m.targets.values().any(|t| t.peer == Some(peer));
+                        if m.generation != generation || (!in_call && opened.elapsed() > Duration::from_secs(5)) {
+                            break;
+                        }
                     }
                     media_on_packet(&data);
                 }

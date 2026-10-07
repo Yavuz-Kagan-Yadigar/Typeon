@@ -254,6 +254,11 @@ fn pairing_result(result: Result<Result<(String, String, String), String>, Strin
 
 // --- Çoklu-cihaz (spec 1.5/1.6/1.7) ---
 
+/// The link QR is no longer shown: a grant that comes now is refused.
+pub fn close_device_link_window() {
+    let _ = catch_panic(|| core_lock().set_link_request_open_until(0));
+}
+
 pub fn build_device_link_request() -> Vec<u8> {
     match catch_panic(|| core_lock().build_device_link_request()) {
         Ok(Ok(bytes)) => bytes,
@@ -523,7 +528,7 @@ pub fn list_contacts() -> String {
 pub fn get_message_history(peer_device_fingerprint: &str, limit: u32) -> String {
     let fp = peer_device_fingerprint.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&core_lock().load_message_history(&fp, limit, None))
+        serde_json::to_string(&core_lock().load_message_history(&fp, limit.min(crate::MAX_HISTORY_PAGE as u32), None))
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }
@@ -535,7 +540,7 @@ pub fn get_message_history_before(
 ) -> String {
     let fp = peer_device_fingerprint.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&core_lock().load_message_history(&fp, limit, Some(before_timestamp)))
+        serde_json::to_string(&core_lock().load_message_history(&fp, limit.min(crate::MAX_HISTORY_PAGE as u32), Some(before_timestamp)))
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }
@@ -543,7 +548,7 @@ pub fn get_message_history_before(
 pub fn get_group_message_history(group_id: &str, limit: u32) -> String {
     let gid = group_id.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&core_lock().load_group_message_history(&gid, limit, None))
+        serde_json::to_string(&core_lock().load_group_message_history(&gid, limit.min(crate::MAX_HISTORY_PAGE as u32), None))
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }
@@ -557,7 +562,7 @@ pub fn get_group_message_history_before(
     json_list(catch_panic(move || {
         serde_json::to_string(&core_lock().load_group_message_history(
             &gid,
-            limit,
+            limit.min(crate::MAX_HISTORY_PAGE as u32),
             Some(before_timestamp),
         ))
         .unwrap_or_else(|_| "[]".to_string())
@@ -681,6 +686,24 @@ pub fn list_attachments(peer_device_fingerprint: &str) -> String {
     let fp = peer_device_fingerprint.to_string();
     json_list(catch_panic(move || {
         serde_json::to_string(&core_lock().list_attachments(&fp))
+            .unwrap_or_else(|_| "[]".to_string())
+    }))
+}
+
+/// Without the preview images, and without marking the core dirty: the chat
+/// lists poll this.
+pub fn list_attachments_brief(peer_device_fingerprint: &str) -> String {
+    let fp = peer_device_fingerprint.to_string();
+    json_list(catch_panic(move || {
+        serde_json::to_string(&crate::core_lock_read().list_attachments_opt(&fp, false))
+            .unwrap_or_else(|_| "[]".to_string())
+    }))
+}
+
+pub fn list_group_attachments_brief(group_id: &str) -> String {
+    let gid = group_id.to_string();
+    json_list(catch_panic(move || {
+        serde_json::to_string(&crate::core_lock_read().list_group_attachments_opt(&gid, false))
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }

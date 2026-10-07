@@ -567,6 +567,15 @@ pub fn list_attachments(peer_fingerprint: &str) -> Vec<AttachmentSummary> {
     parse_list(api::list_attachments(peer_fingerprint))
 }
 
+/// Without the preview images, for the chat list.
+pub fn list_attachments_brief(peer_fingerprint: &str) -> Vec<AttachmentSummary> {
+    parse_list(api::list_attachments_brief(peer_fingerprint))
+}
+
+pub fn list_group_attachments_brief(group_id: &str) -> Vec<AttachmentSummary> {
+    parse_list(api::list_group_attachments_brief(group_id))
+}
+
 pub fn list_group_attachments(group_id: &str) -> Vec<AttachmentSummary> {
     parse_list(api::list_group_attachments(group_id))
 }

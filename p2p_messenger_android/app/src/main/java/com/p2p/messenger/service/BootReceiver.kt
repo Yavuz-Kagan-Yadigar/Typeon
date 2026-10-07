@@ -34,19 +34,27 @@ class BootReceiver : BroadcastReceiver() {
             Intent.ACTION_MY_PACKAGE_REPLACED -> {}
             else -> return
         }
-        try {
-            // bkz. P2PRetryWorker aynı notu: süreç yeni doğmuş olabilir,
-            // `hasStoredIdentity` DB açılmadan yanlış (false) döner.
-            // `initDatabase` idempotent.
-            P2PLib.initDatabase(context.applicationContext.filesDir.absolutePath)
-            if (!P2PLib.hasStoredIdentity()) return
-            val serviceIntent = Intent(context.applicationContext, P2PService::class.java)
-            ContextCompat.startForegroundService(context.applicationContext, serviceIntent)
-        } catch (e: Exception) {
-            // Cihaz henüz doğrudan-önyükleme (direct boot) aşamasındaysa
-            // veya OEM kısıtlaması varsa: sessizce geç — `P2PRetryWorker`
-            // ve kullanıcının uygulamayı açması hâlâ yedek yollar.
-            Log.w("BootReceiver", "Açılışta servis başlatılamadı: ${e.message}")
-        }
+        // Opening the database on the main thread held up every other boot
+        // receiver of the process (and can run into the broadcast ANR limit).
+        val pending = goAsync()
+        val app = context.applicationContext
+        Thread {
+            try {
+                // bkz. P2PRetryWorker aynı notu: süreç yeni doğmuş olabilir,
+                // `hasStoredIdentity` DB açılmadan yanlış (false) döner.
+                // `initDatabase` idempotent.
+                P2PLib.initDatabase(app.filesDir.absolutePath)
+                if (P2PLib.hasStoredIdentity()) {
+                    ContextCompat.startForegroundService(app, Intent(app, P2PService::class.java))
+                }
+            } catch (e: Throwable) {
+                // Cihaz henüz doğrudan-önyükleme (direct boot) aşamasındaysa
+                // veya OEM kısıtlaması varsa: sessizce geç — `P2PRetryWorker`
+                // ve kullanıcının uygulamayı açması hâlâ yedek yollar.
+                Log.w("BootReceiver", "Açılışta servis başlatılamadı: ${e.message}")
+            } finally {
+                pending.finish()
+            }
+        }.start()
     }
 }

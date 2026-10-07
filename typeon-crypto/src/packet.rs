@@ -374,15 +374,21 @@ pub struct DeviceLinkRequest {
     /// bkz. `QrPacket.known_relays` — farklı ağ/NAT için röle adayları.
     #[serde(default)]
     pub known_relays: Vec<String>,
+    /// 16 random bytes made for this QR. The grant has to repeat them: only
+    /// the device that scanned the code knows them, so no other device with
+    /// a session to the new one can claim it (v3).
+    #[serde(with = "serde_bytes")]
+    pub nonce: Vec<u8>,
 }
 
 impl DeviceLinkRequest {
+    /// v3: carries `nonce`.
     /// v2: fingerprint-only (bkz. struct dokümantasyonu — v1 tam public
     /// key'ler taşıyordu ve QR kapasitesini aşıyordu, hiçbir zaman
     /// çalışmıyordu). Eski v1 QR'lar artık `from_cbor` ile
     /// ayrıştırılamaz (alanlar kalıcı olarak kaldırıldı) — zararsız, v1
     /// zaten hiçbir gerçek cihazda üretilemiyordu (üretim anında çöküyordu).
-    pub const CURRENT_VERSION: u8 = 2;
+    pub const CURRENT_VERSION: u8 = 3;
     pub fn to_cbor(&self) -> Result<Vec<u8>, String> {
         to_cbor(self)
     }
@@ -561,6 +567,10 @@ pub struct SyncedMessage {
     /// etiketi eksikti.
     #[serde(default)]
     pub is_edited: bool,
+    /// See `MessageContent::Text.author_proof`. Needed for a group row the
+    /// responder did not write itself.
+    #[serde(default)]
+    pub author_proof: Option<String>,
 }
 
 /// `MessagePacket.ciphertext`'in çözüldükten sonraki gerçek içeriği — spec
@@ -581,6 +591,13 @@ pub enum MessageContent {
     /// receive_message/GroupChatActivity notu) — grup sohbeti diye ayrı bir
     /// yer yoktu, mesajlar göndericinin 1:1 sohbetine karışıyordu.
     Text {
+        /// Group messages only: the author's signature over the message
+        /// (`"<device fingerprint>:<Ed25519 hex>:<ML-DSA hex>"`, see core
+        /// `group_author_statement`). Another member hands it on with the
+        /// group history, so a row there cannot be attributed to someone
+        /// who did not write it.
+        #[serde(default)]
+        author_proof: Option<String>,
         group_id: Option<String>,
         text: String,
         /// Spec disi: SADECE `group_id.is_some()` iken dolu -- ayni grup
@@ -668,6 +685,9 @@ pub enum MessageContent {
         new_text: String,
         #[serde(default)]
         group_id: Option<String>,
+        /// As `Text.author_proof`, over the new text.
+        #[serde(default)]
+        author_proof: Option<String>,
         /// Spec dışı (dış AI incelemesi düzeltmesi — sıra-dışı Edit / "revert"
         /// koruması): bu düzenlemenin ÜRETİLDİĞİ andaki gönderici yerel saati
         /// (ms, epoch). gossipsub sıra garantisi VERMEZ — aynı mesajın iki
@@ -924,6 +944,9 @@ pub enum MessageContent {
         identity_id: String,
         device_add: DeviceAdd,
         sync: SyncPayload,
+        /// `DeviceLinkRequest.nonce` of the QR this grant answers.
+        #[serde(default, with = "serde_bytes")]
+        nonce: Vec<u8>,
     },
     /// Çoklu-cihaz (spec 1.5 adım 5, kişilere yayım): "bu kimliğe yeni bir
     /// cihaz eklendi". Alıcı, `device_add.signature`'ı o kimliğin BİLİNEN
@@ -1152,6 +1175,15 @@ pub struct HandshakeInit {
     #[serde(with = "serde_bytes")]
     pub kyber_ciphertext: Vec<u8>,
     pub timestamp: u64,
+    /// Which of the recipient's keys the initiator encapsulated to: the id
+    /// of a `SignedPrekey`, or 0 for the device's long-term KEM keys (no
+    /// prekey of the recipient was known). Signed with the rest.
+    #[serde(default)]
+    pub recipient_prekey_id: u64,
+    /// The sender's current prekey, so the recipient can use it for the
+    /// next handshake in the other direction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_prekey: Option<SignedPrekey>,
     #[serde(with = "serde_bytes")]
     pub signature_classical: Vec<u8>,
     #[serde(with = "serde_bytes")]
@@ -1218,6 +1250,10 @@ pub struct IdentityExchange {
     /// under an identity we had not met yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_add_signer: Option<SyncedDevice>,
+    /// This device's current prekey (see `SignedPrekey`). Carries its own
+    /// signature; not part of `identity_exchange_signing_input`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prekey: Option<SignedPrekey>,
     /// Hybrid signature of this device over `identity_exchange_signing_input`.
     /// The fingerprint only says the four keys belong together: without this,
     /// whoever carried the packet (it travels unsealed) could change
@@ -1232,6 +1268,38 @@ pub struct IdentityExchange {
 /// The bytes `IdentityExchange.signature` covers. The keys are covered through
 /// `device_fingerprint`; `device_add`, `revokes` and `device_add_signer` prove
 /// themselves.
+/// A short-lived KEM key pair of a device, signed with its long-term signing
+/// keys. A handshake encapsulates to it instead of the long-term KEM keys;
+/// the device deletes the secret half some weeks after it stops handing the
+/// public half out. What an initiator sent before the first reply can then
+/// no longer be opened with keys taken from the device later.
+///
+/// `id` is the creation time in ms on the owner's clock: unique per device
+/// and larger for a newer key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedPrekey {
+    pub id: u64,
+    #[serde(with = "serde_bytes")]
+    pub kem_pubkey_x25519: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub kem_pubkey_mlkem: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub signature: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub signature_pq: Vec<u8>,
+}
+
+/// What the owner of a `SignedPrekey` signs.
+pub fn prekey_signing_input(device_fingerprint: &str, id: u64, kem_pubkey_x25519: &[u8], kem_pubkey_mlkem: &[u8]) -> Vec<u8> {
+    let mut out = b"p2pmsg-v0.4-prekey".to_vec();
+    for field in [device_fingerprint.as_bytes(), kem_pubkey_x25519, kem_pubkey_mlkem] {
+        out.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        out.extend_from_slice(field);
+    }
+    out.extend_from_slice(&id.to_be_bytes());
+    out
+}
+
 pub fn identity_exchange_signing_input(identity_id: &str, device_fingerprint: &str, device_name: &str) -> Vec<u8> {
     let mut out = b"p2pmsg-v0.3-identity-exchange".to_vec();
     for field in [identity_id, device_fingerprint, device_name] {
@@ -1264,6 +1332,9 @@ pub enum SiblingEchoBody {
     },
     Edit { target_message_id: String, new_text: String, #[serde(default)] edited_at_ms: u64 },
     Delete { target_message_id: String },
+    /// This identity left the group (`group_id` of the echo): the sibling
+    /// drops it too, without waiting for the founder's update.
+    GroupLeft,
     /// bkz. `MessageContent::Reaction` — kendi bıraktığım tepki, diğer
     /// cihazlarımda da görünsün diye.
     Reaction { target_message_id: String, emoji: String, #[serde(default)] reacted_at_ms: u64 },
@@ -1302,6 +1373,9 @@ pub struct SiblingHistoryEntry {
     /// Gönderim anı — geri-doldurulan mesajlar da GÖNDERİM sırasına otursun.
     #[serde(default)]
     pub sent_at_ms: u64,
+    /// See `MessageContent::Text.author_proof`.
+    #[serde(default)]
+    pub author_proof: Option<String>,
 }
 
 /// Ağdan gelen her şeyi taşıyan zarf — hangi varyant olduğunu ayırt etmek
@@ -1383,11 +1457,11 @@ mod parse_limit_tests {
 
         let link = |version| DeviceLinkRequest {
             version, device_name: "d".into(), device_fingerprint: "f".into(),
-            rendezvous_node: "/dns/x.onion/tcp/1".into(), known_relays: Vec::new(),
+            rendezvous_node: "/dns/x.onion/tcp/1".into(), known_relays: Vec::new(), nonce: vec![7; 16],
         }.to_cbor().unwrap();
         assert!(DeviceLinkRequest::from_cbor(&link(DeviceLinkRequest::CURRENT_VERSION)).is_ok());
         assert!(DeviceLinkRequest::from_cbor(&link(1)).is_err());
-        assert!(DeviceLinkRequest::from_cbor(&link(3)).is_err());
+        assert!(DeviceLinkRequest::from_cbor(&link(DeviceLinkRequest::CURRENT_VERSION + 1)).is_err());
 
         let mut huge = QrPacket::from_cbor(&qr(2)).unwrap();
         huge.known_relays = vec!["/dns/relay.onion/tcp/1".repeat(10); 40];
@@ -1421,6 +1495,7 @@ mod parse_limit_tests {
             is_active: true, last_addr: None,
         };
         let grant = MessageContent::DeviceLinkGrant {
+            nonce: vec![7; 16],
             identity_id: "i".into(),
             device_add: add.clone(),
             sync: SyncPayload {

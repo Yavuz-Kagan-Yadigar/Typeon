@@ -88,6 +88,8 @@ pub struct Store {
     conn: Connection,
 }
 
+const MAX_READERS_PER_MAILBOX: i64 = 2;
+
 impl Store {
     pub fn open(db_path: &Path) -> Result<Store, String> {
         let conn = Connection::open(db_path).map_err(|e| format!("DB açılamadı: {e}"))?;
@@ -559,6 +561,20 @@ impl Store {
                 .unwrap_or(false);
             if !exists && count >= max as i64 {
                 return Err("Kutu kotası doldu".to_string());
+            }
+            // A mailbox has at most two readers: both ends of a session, or
+            // the one device of a first-contact box. Without the cap any number
+            // of enrolled clients could lurk on a box whose id they computed.
+            // ponytail: one lurker still fits on a first-contact box; closing
+            // that needs a proof of ownership in Register.
+            if !exists {
+                let readers: i64 = self
+                    .conn
+                    .query_row("SELECT COUNT(*) FROM mailbox_readers WHERE mailbox_id = ?1", params![id], |r| r.get(0))
+                    .unwrap_or(0);
+                if readers >= MAX_READERS_PER_MAILBOX {
+                    return Err("Kutu okuyucu sınırı doldu".to_string());
+                }
             }
             // Defter #03: kayıt artık ÇOK-OKUYUCULU (bkz. `mailbox_readers`
             // şema notu). Aynı ratchet kutusunu iki taraf da kaydeder;
@@ -1298,6 +1314,18 @@ mod tests {
         let (for_b, _) = s.fetch(&b, &[("mb_1".into(), 0)], 10, 4096);
         assert_eq!(for_b.len(), 1);
         assert_eq!(for_b[0].sealed, b"a-dan");
+    }
+
+    #[test]
+    fn a_mailbox_takes_no_third_reader() {
+        let s = Store::open_in_memory().unwrap();
+        let a = enroll(&s, b"aaaa", "peerA");
+        let b = enroll(&s, b"bbbb", "peerB");
+        let c = enroll(&s, b"cccc", "peerC");
+        register(&s, &a, "mb_1");
+        register(&s, &b, "mb_1");
+        register(&s, &a, "mb_1");
+        assert!(s.register_mailboxes(&c, &["mb_1".to_string()], &[], 0, 100).is_err());
     }
 
     #[test]

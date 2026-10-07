@@ -125,6 +125,29 @@ This is a *soft* action distinct from "delete contact": the person and your
 chat history stay; only that one device is cut off from sending or receiving
 anything further. (Deleting a contact remains the "wipe everything" option.)
 
+### Linking a second device
+
+A new device shows a QR code; a device that already belongs to the identity
+scans it and answers with a signed `DeviceLinkGrant`, which hands the new
+device the identity, the contacts, the groups and the archive key.
+
+The grant is only worth as much as the proof that it answers *that* QR code,
+because any device with a session to the new one can send a grant signed by
+itself. Three checks tie it down (2026-10-07):
+
+- The QR code carries **16 random bytes** (`DeviceLinkRequest.nonce`, format
+  v3). The grant has to repeat them. They are shown on the screen and travel
+  nowhere else, so only the device that scanned the code can produce them.
+- The new device accepts a grant only while it is **showing the code**. The
+  window closes when a grant is adopted or the QR screen is left, and the
+  nonce is deleted with it.
+- A device that already has contacts of another identity is **never** moved
+  to a new identity by a grant.
+
+Before the nonce, the only tie was the time window (24 hours): a device that
+showed its code and backed out could be claimed by any paired device until
+the window ran out.
+
 ---
 
 ## 4. Sending a message: the Double Ratchet
@@ -152,6 +175,44 @@ previously either signature could be empty and verification would still
 pass, silently downgrading a message to classical-only security if the PQ
 signature was ever missing.
 
+### Starting a session: signed prekeys
+
+The ratchet protects a session once both sides have spoken. The gap was the
+start: everything the initiator sent **before the first reply** was encrypted
+to the recipient's *long-term* KEM keys. Those never change, so someone who
+recorded that traffic and took the recipient's device keys later, at any time,
+could open it. With the recipient online the gap is seconds; with the
+recipient off for a week it is every message waiting in the server mailbox.
+
+Since 2026-10-07 a handshake goes to a **signed prekey** instead:
+
+- Each device makes a short-lived KEM key pair (X25519 + ML-KEM-1024), signs
+  it with its long-term Ed25519 + ML-DSA-87 keys, and hands the public half
+  out in every `HandshakeInit` and `IdentityExchange` it sends.
+- The initiator encapsulates to that prekey and names it
+  (`recipient_prekey_id`). Both prekey ids are inside the handshake
+  signature, so a relay can neither swap the key nor strip the field.
+- A new prekey is made every **7 days**. The secret half of an old one is
+  deleted **21 days** after it was made: 7 days of being handed out, 7 days
+  that a handshake can wait in a mailbox, 7 days of slack. On disk the
+  secrets are sealed with the local storage key.
+- If a handshake names a prekey the recipient no longer has, the recipient
+  starts the handshake from its own side, which also delivers its current
+  prekey. That costs one extra round.
+
+What this does **not** give:
+
+- **It is not a one-time prekey.** The exposure went from "forever" to 21
+  days, not to zero: a device taken today still holds the prekeys of the last
+  three weeks. Per-session forward secrecy for the opening messages needs
+  one-time prekeys and a server that hands each out once. Not implemented.
+- **The very first handshake can still fall back** to the long-term keys
+  (`recipient_prekey_id = 0`) when the initiator has not yet received any
+  packet from that device. In a QR pairing the `IdentityExchange` normally
+  arrives first, so the fallback is the exception.
+- A device whose local storage key cannot be loaded (Keystore failure) hands
+  out no prekey, because it could not keep the secret across a restart.
+
 ### Groups
 
 **Audit fix:** group membership changes (`GroupUpdate` — add/remove a member,
@@ -164,6 +225,35 @@ every other signed operation in the app. The inner signature still matters
 even though the outer transport is now also encrypted/authenticated: it's
 what proves the change was authorized by the group's founder specifically,
 not just sent by whoever relayed it.
+
+**Who wrote a message, when it comes from someone else's copy.** A group
+message reaches each member over that member's own 1:1 session with the
+author, so a live message is authenticated by the session. Group *history* is
+different: a device that joins late, or was offline, asks another member for
+the rows it lacks, and that member could attribute any text to any name,
+including the asking user's own.
+
+Since 2026-10-07 the author signs every group message and every edit with the
+device's hybrid signature (Ed25519 + ML-DSA-87) over the group id, the message
+id, the author's identity, the signing device and the text. The signature
+travels with the message, is stored by every member, and is handed on with
+history, with the sibling-device backfill and in the server archive. A row
+that the answering member did not write itself is taken only with a valid
+signature of a device known to belong to the claimed author.
+
+Limits:
+
+- Messages from before this version carry no signature, so other members'
+  old rows no longer arrive through history sync.
+- A row whose author's devices the receiver has never learned (a member who
+  left before the receiver joined) cannot be checked and is skipped.
+- A deleted message has no text left to check. It is accepted unsigned, as an
+  empty mark, and only under the name of a current member.
+- The send time is not signed (each receiver stores its own), so a member can
+  present a genuine message with a different time.
+- An edit echoed to the author's own other devices carries no signature; that
+  device's copy of the edited row is not handed on to others.
+- The signature costs about 9.4 KB per message (hex text).
 
 ---
 
@@ -443,7 +533,7 @@ stores nothing. The `p2p_msg_<fingerprint>` gossipsub topic is a naming
 convention, not a mailbox — if the recipient is not subscribed at that
 instant, the packet is gone. All durability therefore lived on the **sender**:
 retry with exponential backoff, re-encrypt under a fresh ratchet step every
-~25 minutes, give up after two days.
+~25 minutes, give up after seven days.
 
 That works when both people open the app regularly. It does not work when a
 phone is off for a week, when a device is brand new, or when the sender

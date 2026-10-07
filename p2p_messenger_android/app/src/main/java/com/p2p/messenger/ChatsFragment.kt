@@ -447,7 +447,7 @@ class ChatsFragment : Fragment() {
                 lastMessage = lastMessage?.text ?: "",
                 timestamp = lastMessage?.timestamp ?: 0L,
                 hasUnread = lastMessage != null &&
-                    lastMessage.timestamp > ReadStatePrefs.lastReadAt(ctx, fingerprint),
+                    lastMessage.timestamp > ReadStatePrefs.lastReadAtForContact(ctx, contact.contactId, fingerprint),
                 // Keyed on the STABLE contact id (not the device fingerprint,
                 // which can change if the contact re-pairs a device) so a
                 // pin survives that.
@@ -529,7 +529,7 @@ class ChatsFragment : Fragment() {
      *  (bkz. `newestPreview`). */
     private fun loadLastAttachmentPreview(peerDeviceFingerprint: String): LastMessagePreview? {
         val json = try {
-            P2PLib.listAttachments(peerDeviceFingerprint)
+            P2PLib.listAttachmentsBrief(peerDeviceFingerprint)
         } catch (e: Exception) {
             return null
         }
@@ -604,7 +604,7 @@ class ChatsFragment : Fragment() {
     /** bkz. `loadLastAttachmentPreview` AYNI desen — grup ekleri için. */
     private fun loadLastGroupAttachmentPreview(groupId: String): LastMessagePreview? {
         val json = try {
-            P2PLib.listGroupAttachments(groupId)
+            P2PLib.listGroupAttachmentsBrief(groupId)
         } catch (e: Exception) {
             return null
         }

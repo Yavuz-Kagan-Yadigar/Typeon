@@ -77,6 +77,8 @@
     <string name="state_server_not_enrolled">Not enrolled</string>
     <string name="action_restore_history">Load my history from this server</string>
     <string name="msg_restore_started">Loading. Older messages will appear as they arrive.</string>
+    <string name="error_key_unreadable">A stored key could not be read. Message history and session state are not being saved on this device.</string>
+    <string name="msg_restore_incomplete">The server did not send all of the history. Try again later.</string>
 
     <!-- Spec dışı, kullanıcı isteği: Tor onion service -->
     <!-- Spec dışı, kullanıcı kararı: grup üzerinden (kurucu kefaletiyle)

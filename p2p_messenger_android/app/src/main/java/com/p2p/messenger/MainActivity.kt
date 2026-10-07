@@ -152,6 +152,16 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    override fun onStop() {
+        // Left without picking a chat (Home, another screen): the share must
+        // not ride along with the next chat opened. Not while the lock prompt
+        // covers this screen, the share is still wanted after the password.
+        if (!isChangingConfigurations && com.p2p.messenger.util.AppLock.isUnlocked()) {
+            com.p2p.messenger.util.ShareIntake.pending = null
+        }
+        super.onStop()
+    }
+
     /** Paylaşım ekranından gelen içerik: bekletilir, kullanıcı sohbet seçince
      *  gönderilir (bkz. util.ShareIntake). */
     private fun handleShare(intent: Intent?) {
@@ -331,6 +341,9 @@ class MainActivity : AppCompatActivity() {
                     } catch (e: Exception) {
                         // Keystore or disk failure, as in `createIdentityAndStart`.
                         Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+                        com.p2p.messenger.util.LocalWipe.wipe(applicationContext)
+                        com.p2p.messenger.util.AppRestarter.restart(applicationContext)
+                        return@withContext
                     }
                     // The archive root key came back with the recovery file
                     // but lived only in the core's memory: after a restart it
@@ -359,8 +372,13 @@ class MainActivity : AppCompatActivity() {
             IdentityManager.persistNewIdentity(applicationContext)
         } catch (e: Exception) {
             // Keystore or disk failure: without this the identity exists in
-            // the database but its secret keys are lost at the next restart.
+            // the database but its secret keys are lost at the next restart,
+            // and the install is stuck at "identity read failed". The identity
+            // is seconds old: remove it and start the setup again.
             Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+            com.p2p.messenger.util.LocalWipe.wipe(applicationContext)
+            com.p2p.messenger.util.AppRestarter.restart(applicationContext)
+            return
         }
         statusText.text = getString(R.string.lbl_id_short, identityId.take(8))
         startNetworkService()

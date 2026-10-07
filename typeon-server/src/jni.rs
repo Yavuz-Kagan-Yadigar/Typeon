@@ -396,6 +396,9 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_blockDevice<'loca
     };
     let blocked = control.store.block_enrollment_key(&existing.enroll_pk, now_ms());
     let revoked = control.store.revoke_enrollment(&id);
+    // The block is keyed on a key the device makes itself: with the old
+    // public code it would enroll again under a new key.
+    let _ = crate::public_join_token(&control.store, true);
     let _ = control.net_changed.send(CoreSignal::EnrollmentsChanged);
     drop(guard);
     match (blocked, revoked) {

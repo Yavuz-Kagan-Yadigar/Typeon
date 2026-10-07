@@ -379,6 +379,9 @@ impl App {
                     &format!("{who} is writing from a device you have not verified ({code})."),
                 );
             }
+            "history_restore_incomplete" => {
+                self.toast("The server did not send all of the history. Try again later.");
+            }
             "account_deleted" => {
                 let name = event.string("display_name");
                 let name = if name.is_empty() { self.contact_name(&event.string("peer")) } else { name };

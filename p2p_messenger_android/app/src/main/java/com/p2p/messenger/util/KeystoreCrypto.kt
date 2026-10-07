@@ -153,6 +153,19 @@ object KeystoreCrypto {
 
     /** Bu cihazda anahtarın gerçekten donanım içinde tutulup tutulmadığını
      *  bildirir — teşhis/ayarlar ekranında gösterilebilir. */
+    private val keyFailureShown = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** A stored key could not be opened, so history or session state is not
+     *  kept from here on. Said once per process: the log line alone left the
+     *  user with an app that quietly forgot things. */
+    fun reportKeyFailure(context: android.content.Context) {
+        if (!keyFailureShown.compareAndSet(false, true)) return
+        val app = context.applicationContext
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            android.widget.Toast.makeText(app, com.p2p.messenger.R.string.error_key_unreadable, android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+
     fun isHardwareBacked(alias: String = ALIAS_IDENTITY): Boolean {
         return try {
             val key = keyStore.getKey(alias, null) as? SecretKey ?: return false

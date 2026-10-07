@@ -49,6 +49,7 @@ object MessageHistoryManager {
      * açıldığında) çağrılır: anahtar dosyası yoksa yeni bir data key
      * üretip şifreleyerek diske yazar; varsa çözüp Rust'a yükler.
      */
+    @Synchronized
     fun ensureHistoryKeyLoaded(context: Context) {
         val file = keyFile(context)
 
@@ -63,6 +64,7 @@ object MessageHistoryManager {
             } catch (e: Exception) {
                 // bkz. TAG notu (#04) — ASLA yeniden uretme.
                 android.util.Log.e(TAG, "Anahtar cozulemedi, YENIDEN URETILMIYOR", e)
+                KeystoreCrypto.reportKeyFailure(context)
                 return
             }
         } else {

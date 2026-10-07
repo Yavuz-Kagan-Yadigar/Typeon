@@ -367,6 +367,9 @@ impl P2PCore {
                 last_seq   INTEGER NOT NULL,
                 PRIMARY KEY (server_id, mailbox_id)
             );
+            CREATE TABLE IF NOT EXISTS server_archived_convs (
+                conv_key TEXT PRIMARY KEY
+            );
             CREATE TABLE IF NOT EXISTS server_archive_queue (
                 record_id  TEXT PRIMARY KEY,
                 conv_key   TEXT NOT NULL,
@@ -732,6 +735,7 @@ impl P2PCore {
             let _ = conn.execute("DELETE FROM servers WHERE server_id = ?1", params![server_id]);
             let _ = conn.execute("DELETE FROM server_cursors WHERE server_id = ?1", params![server_id]);
             if no_servers_left {
+                let _ = conn.execute("DELETE FROM server_archived_convs", []);
                 let _ = conn.execute("DELETE FROM server_archive_queue", []);
                 let _ = conn.execute("DELETE FROM server_blob_uploads", []);
             }
@@ -758,6 +762,17 @@ impl P2PCore {
         // kalsın).
         let mut conv_keys: Vec<String> = self.groups.keys().cloned().collect();
         conv_keys.extend(self.contacts.values().map(|c| c.trusted_identity_id.clone()));
+        // And every conversation ever archived: a contact or group deleted
+        // since then left its buckets on the server.
+        if let Some(conn) = &self.db {
+            if let Ok(mut stmt) = conn.prepare("SELECT conv_key FROM server_archived_convs") {
+                if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+                    conv_keys.extend(rows.flatten());
+                }
+            }
+        }
+        conv_keys.sort();
+        conv_keys.dedup();
 
         let now = current_time_ms();
         let buckets: Vec<String> = conv_keys.iter().flat_map(|c| archive_buckets(&ark, c, now)).collect();
@@ -788,7 +803,6 @@ impl P2PCore {
         }
         // One history server: the upload queue is global and a record leaves
         // it on the first `Ok`, so two would each hold a part of the history.
-        let had_history = self.servers.iter().any(|s| s.store_history);
         let mut changed = Vec::new();
         for s in self.servers.iter_mut() {
             let want = if s.server_id == server_id { enabled } else { s.store_history && !enabled };
@@ -800,7 +814,8 @@ impl P2PCore {
         for rec in &changed {
             self.persist_server(rec);
         }
-        if enabled && !had_history {
+        // Also when history moves to another server: that one holds nothing yet.
+        if enabled && !changed.is_empty() {
             self.backfill_server_archive();
         }
         Ok(())
@@ -1800,6 +1815,13 @@ impl P2PCore {
             _ => {}
         }
 
+        // As in `handle_server_failure`: the caller of a restore already got
+        // "OK", and the rest of this conversation's buckets is not asked for.
+        if let ServerInflight::ArchiveFetch { .. } | ServerInflight::ArchiveProbe { .. } = &inflight {
+            warn!("Sunucu geçmiş isteğini reddetti ({:?}), geri yükleme eksik", code);
+            self.attachment_events.push(serde_json::json!({"type": "history_restore_incomplete"}).to_string());
+        }
+
         match code {
             ServerErrorCode::UnknownMailbox => {
                 warn!("Sunucu kutuyu tanımıyor (alıcı bu sunucuda değil)");
@@ -2183,6 +2205,9 @@ impl P2PCore {
         // yok) satırlar SÜRESİZ olarak diskte düz metin kalıyordu.
         // `seal_local_blob` yoksa (anahtar henüz yüklenmedi) satır hiç
         // yazılmaz — bellekteki kopya yine de bu turda gönderilir.
+        if let Some(conn) = &self.db {
+            let _ = conn.execute("INSERT OR IGNORE INTO server_archived_convs (conv_key) VALUES (?1)", params![entry.conv_key]);
+        }
         let stored = self.seal_local_blob(&entry.plaintext);
         if let (Some(conn), Some(blob)) = (&self.db, stored) {
             let _ = conn.execute(
@@ -2415,6 +2440,7 @@ impl P2PCore {
                     archived.reply_to_preview.as_deref(),
                     archived.reply_to_sender_identity_id.as_deref(),
                     archived.sent_at_ms,
+                    archived.author_proof.as_deref(),
                 )
             } else {
                 // Sunucu arşivi KİMLİK bazlı (`conv_key` = identity_id) ama
@@ -2525,10 +2551,10 @@ impl P2PCore {
             return;
         }
         // Progress counts for one server only (see `PendingBlobUpload.server_id`).
-        // ponytail: after a restart the server is not remembered; if another
-        // one is picked, `BlobFinish` is refused there and the upload dropped.
+        // After a restart the server is not remembered (`None`): start over,
+        // or the chunks could end up split between two servers.
         let Some(head) = self.server_blob_uploads.first_mut() else { return };
-        if head.server_id.as_deref().map_or(false, |s| s != server_id) {
+        if head.server_id.as_deref() != Some(server_id) {
             head.inflight.clear();
             head.done.clear();
             head.next_chunk = 0;
@@ -2741,6 +2767,7 @@ mod tests {
             device_add: None,
             revokes: Vec::new(),
             device_add_signer: None,
+            prekey: None,
             signature: Vec::new(),
             signature_pq: Vec::new(),
         })

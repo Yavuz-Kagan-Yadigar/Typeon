@@ -86,6 +86,11 @@ class CallActivity : AppCompatActivity() {
          *  (the only way to surface an activity from the background), plus a
          *  direct start that works when the app is in the foreground. */
         fun ring(context: Context, name: String, video: Boolean) {
+            // Same limit as `startOutgoing`: an accepted call sent no audio.
+            if (android.os.Build.VERSION.SDK_INT < 29) {
+                Thread { try { P2PLib.endCall() } catch (e: Throwable) { } }.start()
+                return
+            }
             val intent = Intent(context, CallActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             val pending = PendingIntent.getActivity(
                 context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -222,6 +227,10 @@ class CallActivity : AppCompatActivity() {
 
     override fun onPictureInPictureModeChanged(inPip: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(inPip, newConfig)
+        // The call screen stays started in PiP, so the app never counts as
+        // backgrounded and never locked. A screen of this app that starts
+        // right after (PiP by Back) clears the mark again in `guard`.
+        if (inPip) com.p2p.messenger.util.AppLock.lock()
         val dp = resources.displayMetrics.density
         header.visibility = if (inPip) View.GONE else View.VISIBLE
         bar.visibility = if (inPip) View.GONE else View.VISIBLE

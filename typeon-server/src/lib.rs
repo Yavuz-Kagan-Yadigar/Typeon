@@ -89,6 +89,11 @@ const CHUNKS_PER_MINUTE: u32 = 6_000;
 /// `requests_per_minute`.
 const RELAY_BYTES_PER_WINDOW: usize = 8 * 1024 * 1024;
 const RELAY_WINDOW_MS: u64 = 10_000;
+/// How long the summed store size is reused, see `total_budget_exceeded`.
+const TOTAL_CACHE_MS: u64 = 5_000;
+/// What a sender may relay per window to a listener that sends nothing back:
+/// enough for the once-a-second state packets that start a call.
+const RELAY_COLD_BYTES_PER_WINDOW: usize = 64 * 1024;
 
 /// Largest item `notify_owner_of` pushes inline (`ServerRequest::Push`).
 /// Messages and call signals are ~8-15 KB; big ones keep the Fetch path.
@@ -361,6 +366,12 @@ pub struct ServerCore {
     relay_links: HashMap<PeerId, (u64, tokio::sync::mpsc::Sender<Vec<u8>>)>,
     /// Peer -> (window start `mono_ms`, bytes relayed in window).
     relay_budget: HashMap<PeerId, (u64, usize)>,
+    /// (sender, listener) -> `mono_ms` of the last frame delivered.
+    relay_pairs: HashMap<(PeerId, PeerId), u64>,
+    /// An Ack or Cancel removed mail: `maybe_sweep` recounts the quotas.
+    mail_recount_due: bool,
+    /// (`mono_ms` of the read, bytes) for `total_budget_exceeded`.
+    total_cache: std::cell::Cell<(u64, u64)>,
 }
 
 /// What the embedding app tells the running loop (Android JNI).
@@ -566,6 +577,9 @@ impl ServerCore {
             relay_incoming,
             relay_links: HashMap::new(),
             relay_budget: HashMap::new(),
+            relay_pairs: HashMap::new(),
+            mail_recount_due: false,
+            total_cache: std::cell::Cell::new((0, 0)),
         })
     }
 
@@ -1028,7 +1042,18 @@ impl ServerCore {
         let Some(total_budget) = self.config.total_storage_budget_bytes else {
             return false;
         };
-        self.store.total_stored_bytes() as u64 + incoming as u64 > total_budget
+        // The sum reads every mail, archive and blob row: at most once per
+        // `TOTAL_CACHE_MS`, with what was let in since added on top (a
+        // refused write is counted too, which only errs on the full side).
+        let mono = mono_ms();
+        let (at, mut total) = self.total_cache.get();
+        if at == 0 || mono.saturating_sub(at) > TOTAL_CACHE_MS {
+            total = self.store.total_stored_bytes().max(0) as u64;
+            self.total_cache.set((mono.max(1), total));
+        }
+        let (at, _) = self.total_cache.get();
+        self.total_cache.set((at, total + incoming as u64));
+        total + incoming as u64 > total_budget
     }
 
     fn handle_authenticated(&mut self, peer: PeerId, e: &Enrollment, req: ServerRequest) -> ServerResponse {
@@ -1133,7 +1158,7 @@ impl ServerCore {
                 if deleted > 0 {
                     // Kota tek yönlü artmamalı — teslim edilen baytlar
                     // bırakanın hesabından düşer.
-                    self.store.recount_mail_bytes();
+                    self.mail_recount_due = true;
                 }
                 ServerResponse::Ok
             }
@@ -1144,7 +1169,7 @@ impl ServerCore {
             ServerRequest::Cancel { mailbox, seqs } => {
                 let removed = self.store.cancel_own_deposits(&mailbox, &seqs, &e.enrollment_id);
                 if removed > 0 {
-                    self.store.recount_mail_bytes();
+                    self.mail_recount_due = true;
                     info!("Gönderen {} paketi geri çekti", removed);
                 }
                 ServerResponse::Ok
@@ -1554,14 +1579,27 @@ impl ServerCore {
                     self.stats.rejected += 1;
                     return;
                 }
+                let cold_bytes = budget.1;
                 let frame = encode_frame(&[], &data);
-                for (target, boxes) in &self.live_interest {
-                    if *target == peer || !boxes.contains(&mailbox) {
+                let targets: Vec<PeerId> = self
+                    .live_interest
+                    .iter()
+                    .filter(|(target, boxes)| **target != peer && boxes.contains(&mailbox))
+                    .map(|(target, _)| *target)
+                    .collect();
+                for target in targets {
+                    // A call sends both ways. Until the target has sent this
+                    // peer a frame, only the first few packets pass, so a
+                    // client cannot flood a call it is not part of.
+                    let mutual = self.relay_pairs.get(&(target, peer)).map_or(false, |t| now.saturating_sub(*t) <= RELAY_WINDOW_MS);
+                    if !mutual && cold_bytes > RELAY_COLD_BYTES_PER_WINDOW {
+                        self.stats.rejected += 1;
                         continue;
                     }
-                    if let Some((_, tx)) = self.relay_links.get(target) {
+                    if let Some((_, tx)) = self.relay_links.get(&target) {
                         if tx.try_send(frame.clone()).is_ok() {
                             self.stats.relayed += 1;
+                            self.relay_pairs.insert((peer, target), now);
                         }
                     }
                 }
@@ -1642,6 +1680,10 @@ impl ServerCore {
 
     fn maybe_sweep(&mut self) {
         self.drop_revoked_peers();
+        // Once per tick, not once per Ack: the recount rewrites every enrollment.
+        if std::mem::take(&mut self.mail_recount_due) {
+            self.store.recount_mail_bytes();
+        }
         let mono = mono_ms();
         if self.last_sweep.map_or(false, |t| mono - t < SWEEP_INTERVAL_MS) {
             return;
@@ -1652,6 +1694,7 @@ impl ServerCore {
         let swarm = &self.swarm;
         self.conns.retain(|p, c| swarm.is_connected(p) || mono - c.window_start <= RATE_WINDOW_MS);
         self.relay_budget.retain(|_, b| mono - b.0 <= RELAY_WINDOW_MS);
+        self.relay_pairs.retain(|_, t| mono - *t <= RELAY_WINDOW_MS);
 
         let now = now_ms();
         if self.clock_jumped(now, mono) {

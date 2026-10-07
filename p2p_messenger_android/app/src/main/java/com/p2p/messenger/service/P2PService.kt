@@ -163,6 +163,11 @@ class P2PService : Service() {
          *  in ANOTHER app the service ran at full rate, the LTE radio never
          *  slept and all of it was billed to us (9S 2026-10-02: ~1 mAh per
          *  minute of screen-on time). */
+        /** The service is up and polling (see `P2PRetryWorker`). */
+        @Volatile
+        var alive = false
+            private set
+
         @Volatile
         var appVisible = false
             private set
@@ -600,6 +605,10 @@ class P2PService : Service() {
         }
         when (obj.optString("type")) {
             "sync", "device_linked" -> com.p2p.messenger.util.ArchiveKeyManager.persistIfNew(applicationContext)
+            // The restore button already said "loading": say that it stopped short.
+            "history_restore_incomplete" -> android.os.Handler(android.os.Looper.getMainLooper()).post {
+                android.widget.Toast.makeText(applicationContext, R.string.msg_restore_incomplete, android.widget.Toast.LENGTH_LONG).show()
+            }
             "account_deleted" -> NotificationHelper.showAccountDeletedNotification(
                 applicationContext, obj.optString("peer"), obj.optString("display_name")
             )
@@ -801,12 +810,19 @@ class P2PService : Service() {
             // lock as soon as it finds the core still idle.
             acquireWakeLock(20_000L)
             lastBusyCheckAt = 0L
+            // The poll thread sits in the native wait (up to 30 s): end it,
+            // or the lock runs out before the turn and the CPU sleeps again.
+            try { P2PLib.wakePoll() } catch (e: Throwable) { }
+            // Armed again here: if the turn still does not run, the next alarm
+            // does, and the chain of Doze wake-ups cannot stop.
+            scheduleDozeWakeup()
             handler.removeCallbacks(pollRunnable)
             handler.post(pollRunnable)
             return START_STICKY
         }
         if (!isRunning) {
             isRunning = true
+            alive = true
             // Only here: on a running service the poll loop owns the lock, and
             // an indefinite one taken by every other start (retry worker, call
             // end, boot receiver) stayed held until the blocking wait returned.
@@ -855,6 +871,7 @@ class P2PService : Service() {
                     // START_STICKY brought the service back after a logout or
                     // a remote wipe: no account, nothing to run.
                     isRunning = false
+                    alive = false
                     stopSelf()
                     return@post
                 }
@@ -907,6 +924,7 @@ class P2PService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
+        alive = false
         releaseWakeLock()
         BatteryLog.stop()
         wakePollNow = null

@@ -72,6 +72,8 @@
     <string name="state_server_not_enrolled">Kayıtlı değil</string>
     <string name="action_restore_history">Geçmişimi bu sunucudan yükle</string>
     <string name="msg_restore_started">Yükleniyor. Eski mesajlar geldikçe görünecek.</string>
+    <string name="error_key_unreadable">Kayıtlı bir anahtar okunamadı. Mesaj geçmişi ve oturum durumu bu cihazda kaydedilmiyor.</string>
+    <string name="msg_restore_incomplete">Sunucu geçmişin tamamını göndermedi. Daha sonra yeniden deneyin.</string>
     <string name="contact_added_via_group">Grup üzerinden eklendi — yüz yüze doğrulanmadı</string>
 
     <string name="action_delete_group">Grubu sil (herkes için)</string>

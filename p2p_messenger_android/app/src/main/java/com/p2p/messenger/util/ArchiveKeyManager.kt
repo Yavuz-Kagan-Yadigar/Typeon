@@ -102,6 +102,9 @@ object ArchiveKeyManager {
         // Kardeşten (`DeviceSync`) gelmiş bir ARK bellekte olabilir: onu
         // yaz, yenisini üretip üstüne yazma (arşiv cihazlar arasında bölünürdü).
         val fromCore = try { P2PLib.archiveRootKey() } catch (e: Exception) { ByteArray(0) }
+        // A linked device waits for its sibling's key: one made here would
+        // stay for good and split the archive between the devices.
+        if (fromCore.size != 32 && try { P2PLib.isSecondaryDevice() } catch (e: Exception) { false }) return false
         val dataKey = if (fromCore.size == 32) fromCore else ByteArray(32).also { SecureRandom().nextBytes(it) }
         try {
             file.writeBytesAtomic(KeystoreCrypto.encrypt(dataKey, KeystoreCrypto.ALIAS_ARCHIVE_ROOT))

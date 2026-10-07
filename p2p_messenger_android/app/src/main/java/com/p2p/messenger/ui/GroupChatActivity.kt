@@ -1747,10 +1747,11 @@ class GroupChatActivity : AppCompatActivity() {
         val replyPreview = activeReplyToPreview
         val replySender = activeReplyToSenderIdentityId
         cancelReply()
+        val targetGroupId = groupId
         lifecycleScope.launch(Dispatchers.IO) {
             val result = try {
                 P2PLib.prepareAndSendGroupFile(
-                    groupId, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
+                    targetGroupId, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
                     caption, replyId ?: "", replyPreview ?: "",
                     replySender ?: ""
                 )
@@ -2361,7 +2362,13 @@ class GroupChatActivity : AppCompatActivity() {
         )
         onNewIncomingItemAdded()
         // Sibling devices keep the notification until the watermark moves.
-        if (obj.optString("type") == "file_offer") scheduleGroupReadWatermark()
+        if (obj.optString("type") == "file_offer") {
+            // The watermark covers text rows only: the sender gets "seen" for
+            // an attachment from this receipt, as on the 1:1 screen.
+            val fileId = obj.optString("file_id")
+            try { P2PLib.sendSeenReceipt(obj.optString("peer"), fileId, fileId) } catch (e: Exception) { }
+            scheduleGroupReadWatermark()
+        }
     }
 
     private fun queryDisplayName(uri: Uri): String? {

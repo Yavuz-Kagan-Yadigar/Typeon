@@ -153,23 +153,36 @@ object AppLock {
     fun markUnlocked() {
         unlocked = true
         promptShowing = false
-        failedAttempts = 0
     }
 
-    /** ponytail: in memory only, a force stop resets it. Persist the counter
-     *  if the lock ever has to hold against someone with time and the phone. */
+    /** Stored, so a force stop does not hand out fresh attempts.
+     *  ponytail: wall clock (it has to survive a reboot), so moving the system
+     *  clock forward skips the wait. */
     private const val FREE_ATTEMPTS = 5
-    @Volatile private var failedAttempts = 0
-    @Volatile private var retryAllowedAt = 0L
+    private const val MAX_WAIT_MS = 30_000L shl 5
+    private const val KEY_FAILED_ATTEMPTS = "app_lock_failed_attempts"
+    private const val KEY_RETRY_ALLOWED_AT = "app_lock_retry_allowed_at"
 
     /** Seconds until the next attempt is allowed, 0 = now. */
-    fun retryWaitSeconds(): Int =
-        ((retryAllowedAt - SystemClock.elapsedRealtime() + 999) / 1000).coerceAtLeast(0).toInt()
+    fun retryWaitSeconds(context: Context): Int {
+        val at = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getLong(KEY_RETRY_ALLOWED_AT, 0L)
+        // Capped: a clock set back must not lock the owner out for good.
+        return ((at - System.currentTimeMillis()).coerceIn(0L, MAX_WAIT_MS) + 999).div(1000).toInt()
+    }
 
     /** After [FREE_ATTEMPTS] wrong passwords: 30 s, doubling to 16 min. */
-    fun noteFailedAttempt() {
-        val over = ++failedAttempts - FREE_ATTEMPTS
-        if (over >= 0) retryAllowedAt = SystemClock.elapsedRealtime() + (30_000L shl over.coerceAtMost(5))
+    fun noteFailedAttempt(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val failed = prefs.getInt(KEY_FAILED_ATTEMPTS, 0) + 1
+        val over = failed - FREE_ATTEMPTS
+        val edit = prefs.edit().putInt(KEY_FAILED_ATTEMPTS, failed)
+        if (over >= 0) edit.putLong(KEY_RETRY_ALLOWED_AT, System.currentTimeMillis() + (30_000L shl over.coerceAtMost(5)))
+        edit.commit()
+    }
+
+    fun clearFailedAttempts(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .remove(KEY_FAILED_ATTEMPTS).remove(KEY_RETRY_ALLOWED_AT).apply()
     }
 
     /**
@@ -255,7 +268,9 @@ object AppLock {
         // password for a minute after any call.
         if (activity is com.p2p.messenger.ui.CallActivity) return
         if (unlocked) return
-        if (promptShowing) return
+        // No `promptShowing` short-circuit: an activity started over the prompt
+        // (a notification with CLEAR_TOP) finished it and stayed open unlocked.
+        // SINGLE_TOP keeps a prompt that is already on top from stacking.
         promptShowing = true
         activity.startActivity(
             Intent(activity, AppLockActivity::class.java)

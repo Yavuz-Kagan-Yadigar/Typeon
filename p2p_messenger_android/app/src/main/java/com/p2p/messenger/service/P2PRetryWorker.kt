@@ -33,6 +33,9 @@ class P2PRetryWorker(context: Context, params: WorkerParameters) : Worker(contex
         // bu çağrı olmadan YANLIŞ (false negatif) sonuç verir. `initDatabase`
         // zaten idempotent (bkz. P2PService.onStartCommand notu) — servis
         // zaten çalışıyorsa bu zararsız bir tekrar çağrıdır.
+        // The service is polling: nothing to restart, and `initDatabase` plus a
+        // service start every hour only woke the core.
+        if (P2PService.alive) return Result.success()
         P2PLib.initDatabase(applicationContext.filesDir.absolutePath)
         if (P2PLib.hasStoredIdentity()) {
             val serviceIntent = Intent(applicationContext, P2PService::class.java)

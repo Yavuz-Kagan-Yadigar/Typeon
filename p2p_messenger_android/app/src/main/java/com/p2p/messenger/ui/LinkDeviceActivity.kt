@@ -100,6 +100,10 @@ class LinkDeviceActivity : AppCompatActivity() {
     override fun onDestroy() {
         // The QR retry lambda is not `pollAdopted`: onPause does not remove it.
         handler.removeCallbacksAndMessages(null)
+        // Left without a link: a grant that comes later must not be accepted.
+        if (isFinishing && !done) {
+            try { P2PLib.closeDeviceLinkWindow() } catch (e: Throwable) { }
+        }
         super.onDestroy()
     }
 
