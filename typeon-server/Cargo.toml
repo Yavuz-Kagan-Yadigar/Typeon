@@ -72,3 +72,8 @@ lto = "thin"
 # geri-izlemelerinin sembolsüz kalması — sunucu zaten yapılandırılmış
 # günlükleme (`env_logger`) üzerinden teşhis ediliyor.
 strip = true
+
+# Same TypeOn patch of tor-hsservice as the core crate; cargo ignores the
+# [patch] section of a path dependency, so every root manifest repeats it.
+[patch.crates-io]
+tor-hsservice = { path = "../p2p_messenger_android/app/src/main/cpp/rust/vendor/tor-hsservice" }

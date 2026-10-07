@@ -88,3 +88,8 @@ gstreamer-video = "0.23"
 [profile.release]
 opt-level = 2
 lto = "thin"
+
+# Same TypeOn patch of tor-hsservice as the core crate; cargo ignores the
+# [patch] section of a path dependency, so every root manifest repeats it.
+[patch.crates-io]
+tor-hsservice = { path = "../p2p_messenger_android/app/src/main/cpp/rust/vendor/tor-hsservice" }

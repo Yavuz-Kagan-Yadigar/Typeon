@@ -140,7 +140,7 @@ pub(super) struct Reactor<R: Runtime, M: Mockable> {
     ipt_watcher: IptsPublisherView,
     /// TypeOn patch: the IPT set (by local id, plus lifetime) last acted on,
     /// so a notification that leaves it unchanged does not re-upload.
-    last_ipt_key: Option<(Vec<crate::ipt_lid::IptLocalId>, std::time::Duration)>,
+    last_ipt_key: Option<String>,
     /// A channel for receiving onion service config change notifications.
     config_rx: watch::Receiver<Arc<OnionServiceConfig>>,
     /// A channel for receiving restricted discovery key_dirs change notifications.
@@ -838,6 +838,9 @@ impl<R: Runtime, M: Mockable> Reactor<R, M> {
             humantime::format_duration(duration),
         );
 
+        // TypeOn patch: one reupload timer per time period. Upstream pushed a new
+        // one for every upload round and each kept its own 60-120 min chain alive.
+        inner.reupload_timers.retain(|t| t.period != time_period);
         inner.reupload_timers.push(ReuploadTimer {
             period: time_period,
             when: reupload_when,
@@ -1068,11 +1071,29 @@ impl<R: Runtime, M: Mockable> Reactor<R, M> {
                 // TypeOn patch: the IPT manager notifies on every update of the
                 // shared set, changed or not; each notification used to re-upload
                 // the descriptor to every HsDir (~200 KB on mobile data).
-                let key = self.ipt_watcher.borrow_for_publish().ipts.as_ref().map(|s| {
-                    (s.ipts.iter().map(|i| i.lid).collect::<Vec<_>>(), s.lifetime)
-                });
+                // The key is the whole set (lids, relay details, lifetime), so a
+                // relay that changes its ntor key or address still re-uploads.
+                let key = self
+                    .ipt_watcher
+                    .borrow_for_publish()
+                    .ipts
+                    .as_ref()
+                    .map(|s| format!("{s:?}"));
                 if key.is_some() && key == self.last_ipt_key {
                     trace!(nickname=%self.imm.nickname, "introduction points unchanged");
+                    // An earlier upload of this same set may have failed and left
+                    // HsDirs Dirty; this notification is the only prompt retry.
+                    let dirty = self
+                        .inner
+                        .lock()
+                        .expect("poisoned lock")
+                        .time_periods
+                        .iter()
+                        .any(|tp| tp.hs_dirs.iter().any(|(_, st)| *st == DescriptorStatus::Dirty));
+                    if dirty {
+                        self.update_publish_status_unless_rate_lim(PublishStatus::UploadScheduled)
+                            .await?;
+                    }
                     return Ok(ShutdownStatus::Continue);
                 }
                 self.last_ipt_key = key;

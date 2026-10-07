@@ -1693,8 +1693,15 @@ impl<R: Runtime, M: Mockable<R>> State<R, M> {
         // (same relay, same keys) stays Good, so it stays in the published set.
         // It leaves only when it turns Faulty. Otherwise every lost intro circuit
         // changed the set twice and re-uploaded the descriptor to all HsDirs.
-        if matches!((&update, &ipt.status_last), (ISS::Establishing, TS::Good { .. })) {
-            return;
+        // The Good that follows keeps the original time_to_establish (only the
+        // details are refreshed), so the publish holdoff keeps working.
+        match (&update, &mut ipt.status_last) {
+            (ISS::Establishing, TS::Good { .. }) => return,
+            (ISS::Good(new), TS::Good { details, .. }) => {
+                *details = new.clone();
+                return;
+            }
+            _ => {}
         }
         ipt.status_last = match update {
             ISS::Establishing => TS::Establishing {
