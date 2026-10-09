@@ -18135,6 +18135,14 @@ impl P2PCore {
             self.radio_window_open = !saver || now >= self.radio_window_at;
             if saver && self.radio_window_open {
                 self.radio_window_at = now + self.radio_window_ms();
+                // Every window fetches. A sleeping phone can miss the
+                // server's Notify (its CPU was suspended: device test
+                // 2026-10-08), and with the 5 min fetch sweep a window could
+                // pass without one. The radio is up for the window anyway.
+                for rt in self.server_rt.values_mut() {
+                    rt.fetch_due_at = 0;
+                }
+                self.server_sweep_at = 0;
                 if now >= self.tor_wake_at {
                     self.tor_wake_at = now + TOR_FULL_WAKE_MS;
                 }

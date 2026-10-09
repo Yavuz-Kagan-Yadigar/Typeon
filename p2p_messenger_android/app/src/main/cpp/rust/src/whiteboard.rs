@@ -527,6 +527,12 @@ impl P2PCore {
         }
         // Continuous drawing never reaches the debounce; this enforces the maximum delay.
         self.wb_sweep();
+        // Nothing stored (database error): an error, not an empty success.
+        // The screen took "" for a stroke without id and reloaded the page,
+        // so the stroke vanished without a word.
+        if ids.is_empty() {
+            return Err("Stroke not stored".to_string());
+        }
         Ok(ids)
     }
 
