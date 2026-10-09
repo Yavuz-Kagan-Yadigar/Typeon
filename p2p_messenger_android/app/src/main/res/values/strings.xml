@@ -470,4 +470,9 @@
     <string name="whiteboard_undo">Undo</string>
     <string name="whiteboard_redo">Redo</string>
     <string name="whiteboard_pen_size">Pen size</string>
+    <string name="msg_primary_device_only">Only the primary device can add a device.</string>
+    <string name="lbl_material_you">Material You (system colors)</string>
+    <string name="lbl_text_color">Text color</string>
+    <string name="title_pick_text_color">Pick a text color</string>
+    <string name="call_pip">PiP</string>
 </resources>

@@ -95,7 +95,7 @@ class P2PApplication : Application() {
         // Material You: cihazın duvar kağıdından türetilen dinamik renkler
         // (Android 12+). Desteklenmeyen cihazlarda no-op'tur — otomatik
         // olarak themes.xml'deki statik M3 paletine düşülür.
-        DynamicColors.applyToActivitiesIfAvailable(this)
+        // ThemePrefs.applyAccentColor uygular (Material You anahtarına bağlı).
 
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) {
@@ -215,6 +215,10 @@ class P2PApplication : Application() {
              * never opened its database (empty history, sends fail, no
              * service start) until the user went back to MainActivity.
              */
+            override fun onActivityPostCreated(activity: Activity, savedInstanceState: Bundle?) {
+                ThemePrefs.applyTextColor(activity)
+            }
+
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
                 if (P2PLib.hasStoredIdentity()) return
                 try {

@@ -429,4 +429,9 @@
     <string name="whiteboard_undo">Geri al</string>
     <string name="whiteboard_redo">Yinele</string>
     <string name="whiteboard_pen_size">Kalem boyutu</string>
+    <string name="msg_primary_device_only">Yalnızca ana cihaz yeni cihaz ekleyebilir.</string>
+    <string name="lbl_material_you">Material You (sistem renkleri)</string>
+    <string name="lbl_text_color">Metin rengi</string>
+    <string name="title_pick_text_color">Bir metin rengi seçin</string>
+    <string name="call_pip">PiP</string>
 </resources>

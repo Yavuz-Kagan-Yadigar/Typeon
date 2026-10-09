@@ -524,6 +524,14 @@ class SettingsFragment : Fragment() {
                 if (fp != null) confirmRevokeLinkedDevice(fp)
             }
             .setPositiveButton(R.string.linked_devices_add) { _, _ ->
+                // Only the root device may add one (the core refuses the grant):
+                // say so before the camera opens, not after a scan.
+                val isRoot = (0 until arr.length()).map { arr.getJSONObject(it) }
+                    .any { it.optBoolean("is_this_device") && it.optString("device_fingerprint") == P2PLib.getOwnIdentityId() }
+                if (!isRoot) {
+                    Toast.makeText(requireContext(), R.string.msg_primary_device_only, Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
                 startActivity(
                     Intent(requireContext(), com.p2p.messenger.ui.QrScanActivity::class.java).apply {
                         putExtra(com.p2p.messenger.ui.QrScanActivity.EXTRA_MODE,
@@ -850,6 +858,7 @@ class SettingsFragment : Fragment() {
     private fun setupChatAppearanceControls(view: View) {
         val bgSwatch = view.findViewById<View>(R.id.chat_bg_color_swatch)
         val accentSwatch = view.findViewById<View>(R.id.accent_color_swatch)
+        val textSwatch = view.findViewById<View>(R.id.text_color_swatch)
         val wallpaperThumb = view.findViewById<ImageView>(R.id.chat_wallpaper_thumb)
         val btnRemoveWallpaper = view.findViewById<Button>(R.id.btn_remove_chat_wallpaper)
 
@@ -864,6 +873,7 @@ class SettingsFragment : Fragment() {
         fun refreshSwatches() {
             bgSwatch.background = swatchDrawable(ThemePrefs.getChatBackgroundColor(requireContext()))
             accentSwatch.background = swatchDrawable(ThemePrefs.getAccentColor(requireContext()))
+            textSwatch.background = swatchDrawable(ThemePrefs.getTextColor(requireContext()))
         }
 
         fun refreshWallpaperPreview() {
@@ -894,6 +904,33 @@ class SettingsFragment : Fragment() {
         if (!com.google.android.material.color.DynamicColors.isDynamicColorAvailable()) {
             view.findViewById<Button>(R.id.btn_pick_accent_color).visibility = View.GONE
             accentSwatch.visibility = View.GONE
+        }
+        view.findViewById<Button>(R.id.btn_pick_text_color).setOnClickListener {
+            com.p2p.messenger.util.HsvColorPickerDialog.show(
+                requireContext(), R.string.title_pick_text_color, ThemePrefs.getTextColor(requireContext())
+            ) { picked ->
+                ThemePrefs.setTextColor(requireContext(), picked)
+                refreshSwatches()
+                requireActivity().recreate()
+            }
+        }
+        val myBtn = view.findViewById<SwitchMaterial>(R.id.material_you_switch)
+        val accentBtn = view.findViewById<Button>(R.id.btn_pick_accent_color)
+        fun syncAccentEnabled() {
+            val on = ThemePrefs.isMaterialYou(requireContext())
+            accentBtn.isEnabled = !on
+            accentSwatch.alpha = if (on) 0.4f else 1f
+        }
+        if (!com.google.android.material.color.DynamicColors.isDynamicColorAvailable()) {
+            myBtn.visibility = View.GONE
+            (myBtn.parent as View).visibility = View.GONE
+        }
+        myBtn.isChecked = ThemePrefs.isMaterialYou(requireContext())
+        syncAccentEnabled()
+        myBtn.setOnCheckedChangeListener { _, on ->
+            ThemePrefs.setMaterialYou(requireContext(), on)
+            syncAccentEnabled()
+            requireActivity().recreate()
         }
         view.findViewById<Button>(R.id.btn_pick_accent_color).setOnClickListener {
             com.p2p.messenger.util.HsvColorPickerDialog.show(
@@ -1416,7 +1453,7 @@ class SettingsFragment : Fragment() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(8) }
             setBackgroundColor(
-                MaterialColors.getColor(this, com.google.android.material.R.attr.colorSurfaceVariant)
+                MaterialColors.getColor(this, com.google.android.material.R.attr.colorSurfaceContainerHigh)
             )
         }
 

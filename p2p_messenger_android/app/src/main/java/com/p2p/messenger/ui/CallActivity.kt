@@ -66,6 +66,7 @@ class CallActivity : AppCompatActivity() {
         private const val CHANNEL_ID = "calls"
         const val NOTIFICATION_ID = 0x0CA11
         private const val REQ_PERMS = 41
+        private const val ACTION_PIP_MUTE = "com.p2p.messenger.CALL_PIP_MUTE"
 
         /** From a chat screen: ring [peer] (1:1) or every member of [groupId]. */
         fun startOutgoing(context: Context, peer: String?, groupId: String?, video: Boolean) {
@@ -133,6 +134,7 @@ class CallActivity : AppCompatActivity() {
     private lateinit var btnMute: Button
     private lateinit var btnSpeaker: Button
     private lateinit var btnCamera: Button
+    private lateinit var btnPip: Button
 
     /** Saw a non-idle state at least once — only then does "idle" mean "ended". */
     private var callSeen = false
@@ -185,12 +187,16 @@ class CallActivity : AppCompatActivity() {
         // upkeep. For the whole life of the screen, not onStart..onStop: a
         // call with the screen off or behind another app dropped into power
         // save.
+        androidx.core.content.ContextCompat.registerReceiver(
+            this, pipMuteReceiver, android.content.IntentFilter(ACTION_PIP_MUTE), androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         P2PService.addMessageListener(keepPollFast)
         poll()
     }
 
     override fun onDestroy() {
         P2PService.removeMessageListener(keepPollFast)
+        unregisterReceiver(pipMuteReceiver)
         ui.removeCallbacksAndMessages(null)
         stopTones()
         stopMedia()
@@ -219,10 +225,32 @@ class CallActivity : AppCompatActivity() {
         if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return false
         val ratio = if (video) Rational(3, 4) else Rational(16, 9)
         return try {
-            enterPictureInPictureMode(PictureInPictureParams.Builder().setAspectRatio(ratio).build())
+            enterPictureInPictureMode(pipParams(ratio))
         } catch (e: IllegalStateException) {
             false
         }
+    }
+
+    private fun pipParams(ratio: Rational = if (video) Rational(3, 4) else Rational(16, 9)): PictureInPictureParams {
+        val muted = CallMedia.muted
+        val pi = PendingIntent.getBroadcast(
+            this, 0, Intent(ACTION_PIP_MUTE).setPackage(packageName), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val title = getString(if (muted) R.string.call_unmute else R.string.call_mute)
+        val action = android.app.RemoteAction(
+            android.graphics.drawable.Icon.createWithResource(this, if (muted) R.drawable.ic_mic_off else R.drawable.ic_mic), title, title, pi
+        )
+        return PictureInPictureParams.Builder().setAspectRatio(ratio).setActions(listOf(action)).build()
+    }
+
+    private fun toggleMute() {
+        CallMedia.muted = !CallMedia.muted
+        btnMute.setText(if (CallMedia.muted) R.string.call_unmute else R.string.call_mute)
+        if (isInPictureInPictureMode) setPictureInPictureParams(pipParams())
+    }
+
+    private val pipMuteReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) { toggleMute() }
     }
 
     override fun onPictureInPictureModeChanged(inPip: Boolean, newConfig: Configuration) {
@@ -357,6 +385,7 @@ class CallActivity : AppCompatActivity() {
         btnMute.visibility = if (inCall) View.VISIBLE else View.GONE
         btnSpeaker.visibility = if (inCall) View.VISIBLE else View.GONE
         btnCamera.visibility = if (inCall && video) View.VISIBLE else View.GONE
+        btnPip.visibility = if (inCall || newState == "outgoing") View.VISIBLE else View.GONE
         if (inCall && participants != null) syncTiles(participants)
     }
 
@@ -591,17 +620,23 @@ class CallActivity : AppCompatActivity() {
         fun button(text: Int, color: Int, onClick: () -> Unit) = Button(this).apply {
             setText(text)
             setTextColor(Color.WHITE)
-            backgroundTintList = android.content.res.ColorStateList.valueOf(color)
+            isAllCaps = false
+            maxLines = 1
+            textSize = 13f
+            setPadding((8 * dp).toInt(), 0, (8 * dp).toInt(), 0)
+            minHeight = (48 * dp).toInt()
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = 100 * dp
+                setColor(color)
+            }
             setOnClickListener { onClick() }
             bar.addView(this, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginStart = (4 * dp).toInt(); marginEnd = (4 * dp).toInt()
             })
         }
         val grey = Color.rgb(60, 60, 66)
-        btnMute = button(R.string.call_mute, grey) {
-            CallMedia.muted = !CallMedia.muted
-            btnMute.setText(if (CallMedia.muted) R.string.call_unmute else R.string.call_mute)
-        }
+        btnMute = button(R.string.call_mute, grey) { toggleMute() }
         btnSpeaker = button(R.string.call_speaker, grey) {
             val am = getSystemService(AudioManager::class.java)
             @Suppress("DEPRECATION")
@@ -620,11 +655,13 @@ class CallActivity : AppCompatActivity() {
             }
             btnCamera.setText(if (enc.enabled) R.string.call_camera_off else R.string.call_camera_on)
         }
+        btnPip = button(R.string.call_pip, grey) { enterPip() }
         btnAccept = button(R.string.call_accept, Color.rgb(46, 160, 67)) { accept() }
         btnHangup = button(R.string.call_hangup, Color.rgb(211, 47, 47)) { hangup() }
         btnMute.visibility = View.GONE
         btnSpeaker.visibility = View.GONE
         btnCamera.visibility = View.GONE
+        btnPip.visibility = View.GONE
         btnAccept.visibility = View.GONE
         root.addView(bar, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
         this.bar = bar
