@@ -262,7 +262,9 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_serverStatus<'loc
         .map(|a| a.iter().filter(|x| !crate::is_private_multiaddr(x)).cloned().collect())
         .unwrap_or_default();
     let stats = control.shared.stats.lock().map(|s| s.clone()).unwrap_or_default();
-    let devices = control.store.count_enrollments_since(i64::MIN);
+    // Active ones: a revoked device stays in the list (dimmed, so it can
+    // still be blocked) but is not a device of this server any more.
+    let devices = control.store.list_enrollments().iter().filter(|e| e.state != EnrollmentState::Revoked).count();
     let json = serde_json::json!({
         "running": true,
         "peer_id": peer_id,

@@ -75,6 +75,11 @@ const TOR_LIBP2P_PORT: u16 = 42612;
 
 /// Süpürme aralıkları.
 const SWEEP_INTERVAL_MS: u64 = 60_000;
+/// A `Notify` (or inline `Push`) that drew no `Fetch` is sent again after
+/// this long. It used to be sent once: lost on a sleeping phone, all later
+/// mail waited for the client's own safety poll, which therefore had to run
+/// every 30 s and kept the LTE radio up.
+const NOTIFY_RESEND_MS: u64 = 20_000;
 
 /// Bir bağlantının dakikada yapabileceği azami istek. Kotanın aksine bu
 /// ANLIK bir sınır: amaç, tek bir eşin sunucunun disk/CPU'sunu tek başına
@@ -339,8 +344,10 @@ pub struct ServerCore {
     /// kalıcı gerçek `mailboxes` tablosunda, bu sadece bağlı eşlerin canlı
     /// görünümü.
     live_interest: HashMap<PeerId, HashSet<String>>,
-    /// Peers with a `Notify` not yet answered by a `Fetch`: one is enough.
-    notified: HashSet<PeerId>,
+    /// Peers that owe a `Fetch`, with the `mono_ms` of the last `Notify` sent
+    /// (0 = send one on the next tick). One per `NOTIFY_RESEND_MS`, repeated
+    /// until the peer fetches: see `resend_notifies`.
+    notified: HashMap<PeerId, u64>,
     /// `mono_ms` of the last sweep; `None` = sweep on the first tick.
     last_sweep: Option<u64>,
     /// (wall ms, mono ms) pair the wall clock is checked against, and since
@@ -563,7 +570,7 @@ impl ServerCore {
             tor,
             conns: HashMap::new(),
             live_interest: HashMap::new(),
-            notified: HashSet::new(),
+            notified: HashMap::new(),
             last_sweep: None,
             clock_anchor: None,
             clock_off_since: None,
@@ -767,6 +774,15 @@ impl ServerCore {
                             let _ = self.swarm.behaviour_mut().server_rpc.send_response(channel, response);
                         }
                     }
+                }
+            }
+            // A `Push` or `Notify` that did not arrive: the reader still owes
+            // a `Fetch`. Due at once (0), `resend_notifies` sends it.
+            SwarmEvent::Behaviour(ServerBehaviourEvent::ServerRpc(
+                request_response::Event::OutboundFailure { peer, .. },
+            )) => {
+                if self.live_interest.contains_key(&peer) {
+                    self.notified.entry(peer).or_insert(0);
                 }
             }
             SwarmEvent::Behaviour(ServerBehaviourEvent::FileChunks(
@@ -1538,11 +1554,33 @@ impl ServerCore {
                 && self.store.unacked_for(mailbox, &reader.enrollment_id) == 1;
             // One `Notify` until the peer fetches: a deposit flood otherwise
             // woke the reader's radio once per item.
-            if !inline && !self.notified.insert(peer) {
-                continue;
+            if !inline {
+                if self.notified.contains_key(&peer) {
+                    continue; // `resend_notifies` repeats it
+                }
+                self.notified.insert(peer, mono_ms());
             }
             let req = if inline { ServerRequest::Push { item: item.clone() } } else { ServerRequest::Notify };
             self.swarm.behaviour_mut().server_rpc.send_request(&peer, req);
+        }
+    }
+
+    /// Repeats the `Notify` of every connected reader that has not fetched
+    /// since its last one (bkz. `NOTIFY_RESEND_MS`). Called every tick (5 s).
+    fn resend_notifies(&mut self) {
+        let now = mono_ms();
+        let due: Vec<PeerId> = self.notified.iter()
+            .filter(|(_, sent)| now.saturating_sub(**sent) >= NOTIFY_RESEND_MS)
+            .map(|(peer, _)| *peer)
+            .collect();
+        for peer in due {
+            if self.active(peer).is_none() || !self.swarm.is_connected(&peer) {
+                self.notified.remove(&peer);
+                continue;
+            }
+            self.notified.insert(peer, now);
+            info!("Notify yinelendi (Fetch gelmedi): {peer}");
+            self.swarm.behaviour_mut().server_rpc.send_request(&peer, ServerRequest::Notify);
         }
     }
 
@@ -1684,6 +1722,7 @@ impl ServerCore {
         if std::mem::take(&mut self.mail_recount_due) {
             self.store.recount_mail_bytes();
         }
+        self.resend_notifies();
         let mono = mono_ms();
         if self.last_sweep.map_or(false, |t| mono - t < SWEEP_INTERVAL_MS) {
             return;

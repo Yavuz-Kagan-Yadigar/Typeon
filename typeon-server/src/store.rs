@@ -1435,12 +1435,12 @@ mod tests {
 
         // Hiç onaylamayan yabancı: satır kalır ama kapasiteye sayılmaz.
         let seq2 = s.deposit("mb_fp", b"handshake-2", &sender, 2, 1000).unwrap();
-        let silent = enroll(&s, b"sile", "peerQ");
-        register(&s, &silent, "mb_fp");
+        // A third reader is refused: two per mailbox (2026-10-07).
+        let third = enroll(&s, b"sile", "peerQ");
+        assert!(s.register_mailboxes(&third, &["mb_fp".to_string()], &[], 0, 100).is_err());
+        // The lurker is the silent reader here: it has not acked seq2.
         assert_eq!(s.ack("mb_fp", seq2, &victim).unwrap(), 0, "sessiz okuyucu varken silinmez");
         assert_eq!(s.mailbox_item_count("mb_fp"), 0, "alicinin onayladigi satir kapasiteye sayilmaz");
-        // Sessiz okuyucu ayrılır; kalan yabancı da onaylayınca satır silinir.
-        s.register_mailboxes(&silent, &[], &["mb_fp".to_string()], 3, 100).unwrap();
         assert_eq!(s.ack("mb_fp", seq2, &lurker).unwrap(), 1);
     }
 
