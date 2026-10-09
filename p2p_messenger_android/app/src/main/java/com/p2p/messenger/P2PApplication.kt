@@ -102,12 +102,6 @@ class P2PApplication : Application() {
                 // Spec dışı, kullanıcı isteği: Ayarlar'daki vurgu (accent)
                 // rengi — bkz. ThemePrefs.applyAccentColor dokümantasyonu.
                 ThemePrefs.applyAccentColor(activity)
-                // Spec dışı, kullanıcı isteği: Ayarlar'daki arka plan rengi
-                // — SADECE sohbet ekranı değil, TÜM ekranların genel arka
-                // planı (bkz. ThemePrefs.applyGlobalBackground). Tema
-                // özniteliği sistemine dokunmadığından (doğrudan `Window`
-                // arkaplanı) sıra burada önemli değil.
-                ThemePrefs.applyGlobalBackground(activity)
                 // Spec dışı, kullanıcı isteği: Ayarlar'daki metin/arayüz
                 // boyutu kaydırıcıları — bkz. ThemePrefs dokümantasyonu.
                 applyScalePreferences(activity)
@@ -144,14 +138,6 @@ class P2PApplication : Application() {
                 } else {
                     com.p2p.messenger.util.FontOverride.apply(fontChoice.familyName)
                 }
-                // Spec dışı, kullanıcı isteği ("arayüzdeki gri renkleri
-                // daha koyu yap"): dinamik renkten (yukarıdaki
-                // `applyAccentColor`/`DynamicColors`) SONRA bindirilmeli —
-                // aksi halde Android 12+ cihazlarda gri roller duvarkağıdı/
-                // vurgu renginden türetilenlerle ezilir ve statik paletteki
-                // koyu değerler HİÇ görünmez. bkz. themes.xml
-                // `ThemeOverlay.P2PMessenger.Grays`.
-                activity.theme.applyStyle(R.style.ThemeOverlay_P2PMessenger_Grays, true)
             }
 
             /**
@@ -215,10 +201,6 @@ class P2PApplication : Application() {
              * never opened its database (empty history, sends fail, no
              * service start) until the user went back to MainActivity.
              */
-            override fun onActivityPostCreated(activity: Activity, savedInstanceState: Bundle?) {
-                ThemePrefs.applyTextColor(activity)
-            }
-
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
                 if (P2PLib.hasStoredIdentity()) return
                 try {

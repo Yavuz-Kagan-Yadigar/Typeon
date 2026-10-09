@@ -859,7 +859,7 @@ class SettingsFragment : Fragment() {
      * content-based dynamic color motoru) kullanılır; metin rengi AYRICA
      * seçilmez, HER ZAMAN o rengin üzerinde okunaklı siyah/beyaz otomatik
      * hesaplanır. Arka plan rengi ise hem genel UI hem sohbet ekranı için
-     * GEÇERLİ (bkz. `ThemePrefs.applyGlobalBackground`/`applyChatBackground`).
+     * GEÇERLİ (bkz. `ThemePrefs.applyChatBackground`).
      * Renk seçici tam bir HSV seçici (bkz. `HsvColorPickerDialog`) — harici
      * bir kütüphane GEREKTİRMEZ (bu proje build'i bu ortamda
      * doğrulanamadığından yeni bir Gradle bağımlılığı eklemekten kaçınıyoruz).
@@ -929,8 +929,10 @@ class SettingsFragment : Fragment() {
         val accentBtn = view.findViewById<Button>(R.id.btn_pick_accent_color)
         fun syncAccentEnabled() {
             val on = ThemePrefs.isMaterialYou(requireContext())
-            accentBtn.isEnabled = !on
-            accentSwatch.alpha = if (on) 0.4f else 1f
+            for (b in listOf(accentBtn, view.findViewById<Button>(R.id.btn_pick_chat_bg_color), view.findViewById<Button>(R.id.btn_pick_text_color))) {
+                b.isEnabled = !on
+            }
+            for (sw in listOf(accentSwatch, bgSwatch, textSwatch)) sw.alpha = if (on) 0.4f else 1f
         }
         if (!com.google.android.material.color.DynamicColors.isDynamicColorAvailable()) {
             myBtn.visibility = View.GONE

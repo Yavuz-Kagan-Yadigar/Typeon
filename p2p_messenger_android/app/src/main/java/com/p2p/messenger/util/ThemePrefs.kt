@@ -3,13 +3,12 @@ package com.p2p.messenger.util
 import android.app.Activity
 import android.content.Context
 import android.graphics.BitmapFactory
-import android.graphics.drawable.ColorDrawable
 import android.view.View
 import android.widget.ImageView
 import com.google.android.material.color.DynamicColors
 import com.google.android.material.color.DynamicColorsOptions
-import com.google.android.material.color.MaterialColors
 import com.p2p.messenger.R
+import com.google.android.material.R.color as MR
 import java.io.File
 
 /**
@@ -93,14 +92,14 @@ object ThemePrefs {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: arka plan rengi — hem genel UI hem sohbet
-     * ekranı için GEÇERLİ, TEK (kişi/grup başına AYRI değil) tercih. `null`
-     * = "tercih yok, tema varsayılanı kullan" (bkz. `applyGlobalBackground`/
-     * `applyChatBackground`). Metin rengiyle İLGİSİ YOK — bkz. `getAccentColor`
+     * Spec dışı, kullanıcı isteği: sohbet ekranının arka plan rengi — TEK
+     * (kişi/grup başına AYRI değil) tercih. `null` = "tercih yok, tema
+     * varsayılanı kullan" (bkz. `applyChatBackground`). Metin rengiyle İLGİSİ YOK — bkz. `getAccentColor`
      * dokümantasyonu, o amaçla kullanıcı isteği üzerine kaldırıldı.
      */
     fun getChatBackgroundColor(context: Context): Int? {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (isMaterialYou(context)) return null
         return if (prefs.contains(KEY_BG_COLOR)) prefs.getInt(KEY_BG_COLOR, 0) else null
     }
 
@@ -127,6 +126,7 @@ object ThemePrefs {
      */
     fun getAccentColor(context: Context): Int? {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (isMaterialYou(context)) return null
         return if (prefs.contains(KEY_ACCENT_COLOR)) prefs.getInt(KEY_ACCENT_COLOR, 0) else null
     }
 
@@ -141,7 +141,8 @@ object ThemePrefs {
 
     /** Material You açıkken sistem (duvarkağıdı) renkleri kullanılır, vurgu seçici devre dışıdır. */
     fun isMaterialYou(context: Context): Boolean =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_MATERIAL_YOU, true)
+        DynamicColors.isDynamicColorAvailable() &&
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_MATERIAL_YOU, true)
 
     fun setMaterialYou(context: Context, on: Boolean) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(KEY_MATERIAL_YOU, on).apply()
@@ -149,6 +150,7 @@ object ThemePrefs {
 
     fun getTextColor(context: Context): Int? {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (isMaterialYou(context)) return null
         return if (prefs.contains(KEY_TEXT_COLOR)) prefs.getInt(KEY_TEXT_COLOR, 0) else null
     }
 
@@ -156,37 +158,6 @@ object ThemePrefs {
         val e = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
         if (color == null) e.remove(KEY_TEXT_COLOR) else e.putInt(KEY_TEXT_COLOR, color)
         e.apply()
-    }
-
-    /**
-     * Metin rengi tema düzeyinde çalışma anında değiştirilemez; bu yüzden pencere
-     * yerleşiminde, rengi temanın varsayılan metin renklerinden biri olan
-     * TextView'ları seçilen renge boyar (düğme/hata/balon renkleri dokunulmaz).
-     * ponytail: her layout geçişinde ağacı gezer; ölçülebilir yavaşlık olursa
-     * adapter/fragment bazlı uygulamaya geç.
-     */
-    fun applyTextColor(activity: Activity) {
-        val color = getTextColor(activity) ?: return
-        val decor = activity.window.decorView
-        fun attr(a: Int) = MaterialColors.getColor(activity, a, 0) and 0xFFFFFF
-        val defaults = setOf(
-            attr(com.google.android.material.R.attr.colorOnSurface),
-            attr(com.google.android.material.R.attr.colorOnBackground),
-            attr(com.google.android.material.R.attr.colorOnSurfaceVariant),
-            attr(android.R.attr.textColorPrimary),
-            attr(android.R.attr.textColorSecondary),
-        )
-        fun walk(v: View) {
-            if (v is android.widget.TextView && v !is android.widget.Button && v !is android.widget.EditText) {
-                val cur = v.currentTextColor
-                if ((cur and 0xFFFFFF) in defaults) {
-                    val tinted = (color and 0xFFFFFF) or (cur and 0xFF000000.toInt())
-                    if (tinted != cur) v.setTextColor(tinted)
-                }
-            }
-            if (v is android.view.ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
-        }
-        decor.viewTreeObserver.addOnGlobalLayoutListener { walk(decor) }
     }
 
     /**
@@ -314,24 +285,6 @@ object ThemePrefs {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: seçilen arka plan rengi sadece sohbet
-     * ekranıyla SINIRLI değil, TÜM ekranların (Ayarlar/Kişiler/Sohbetler
-     * listesi...) genel arka planı olarak da kullanılmalı. `Window`'un
-     * KENDİ arka planını değiştirmek (tema özniteliği ÜZERİNDEN DEĞİL) —
-     * her ekranın kök düzeninin ÇOĞU zaman kendi opak arkaplanı olmadığından
-     * (bkz. bu ekranların layout dosyaları), altlarındaki pencere arka planı
-     * görünür kalır — TEK bir yerden, tema sistemini hiç kurcalamadan (bkz.
-     * `applyAccentColor` dokümantasyonu — kartlar/diyaloglar gibi KENDİ
-     * opak `colorSurface` arkaplanı olan bileşenler bunun ÜZERİNE çizilir,
-     * onları etkilemez, sadece "boş" alanı boyar). `onActivityPreCreated`da
-     * (bkz. P2PApplication) — `Window` bu noktada zaten hazır.
-     */
-    fun applyGlobalBackground(activity: Activity) {
-        val bgColor = getChatBackgroundColor(activity) ?: return
-        activity.window.setBackgroundDrawable(ColorDrawable(bgColor))
-    }
-
-    /**
      * Spec dışı, kullanıcı isteği ("accent color picker, kullanılsın her
      * yerde, varyasyonlarla, metin her zaman rengin üzerinde okunaklı siyah/
      * beyaz olsun"): elle bir kontrast hesabı YAPMIYORUZ — Material
@@ -362,13 +315,29 @@ object ThemePrefs {
      * (Activity oluşturulduğunda) çağrılır, kullanıcının AÇIKÇA seçtiği
      * vurgu rengi duvarkağıdı tabanlı otomatik rengin ÜZERİNE biner.
      */
+    @android.annotation.SuppressLint("RestrictedApi")
     fun applyAccentColor(activity: Activity) {
         if (isMaterialYou(activity)) {
             DynamicColors.applyToActivityIfAvailable(activity)
             return
         }
-        val accent = getAccentColor(activity) ?: return
-        val options = DynamicColorsOptions.Builder().setContentBasedSource(accent).build()
-        DynamicColors.applyToActivityIfAvailable(activity, options)
+        // Arka plan rengi yalnızca sohbet arka planıdır (bkz. applyChatBackground), palete girmez.
+        val accent = getAccentColor(activity)
+        val text = getTextColor(activity)
+        val seed = accent ?: text ?: return
+        if (!DynamicColors.isDynamicColorAvailable()) return
+        DynamicColors.applyToActivityIfAvailable(activity, DynamicColorsOptions.Builder().setContentBasedSource(seed).build())
+        if (text != null) {
+            // Seçilen metin rengini temanın yüzey üstü metin rollerine taşır: dinamik
+            // temanın renk kaynaklarının değerini çalışma anında değiştirir.
+            com.google.android.material.color.ColorResourcesOverride.getInstance()?.applyIfPossible(
+                activity,
+                mapOf(
+                    MR.material_personalized_color_on_surface to text,
+                    MR.material_personalized_color_on_background to text,
+                    MR.material_personalized_color_on_surface_variant to text,
+                )
+            )
+        }
     }
 }
