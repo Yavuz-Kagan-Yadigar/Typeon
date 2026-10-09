@@ -444,7 +444,20 @@ class SettingsFragment : Fragment() {
      *  gider (bkz. Rust `delete_account`), onaylar ya da en fazla
      *  [ACCOUNT_DELETE_WAIT_MS] beklenir (çevrimdışı kişilere sunucu üzerinden
      *  bırakılır), sonra `performLogout` ile yerel veri silinir. */
+    /** This device is the root of the account (its fingerprint is the identity id). */
+    private fun isRootDevice(): Boolean = try {
+        val arr = org.json.JSONArray(P2PLib.listLinkedDevices())
+        (0 until arr.length()).map { arr.getJSONObject(it) }
+            .any { it.optBoolean("is_this_device") && it.optString("device_fingerprint") == P2PLib.getOwnIdentityId() }
+    } catch (e: Exception) { true }
+
     private fun confirmDeleteAccount() {
+        // The core refuses it on a linked device; the generic "couldn't
+        // notify your contacts" was shown for that.
+        if (!isRootDevice()) {
+            Toast.makeText(requireContext(), R.string.msg_primary_device_only_delete, Toast.LENGTH_LONG).show()
+            return
+        }
         AlertDialog.Builder(requireContext())
             .setTitle(R.string.delete_account_confirm_title)
             .setMessage(R.string.delete_account_confirm_message)
@@ -526,9 +539,7 @@ class SettingsFragment : Fragment() {
             .setPositiveButton(R.string.linked_devices_add) { _, _ ->
                 // Only the root device may add one (the core refuses the grant):
                 // say so before the camera opens, not after a scan.
-                val isRoot = (0 until arr.length()).map { arr.getJSONObject(it) }
-                    .any { it.optBoolean("is_this_device") && it.optString("device_fingerprint") == P2PLib.getOwnIdentityId() }
-                if (!isRoot) {
+                if (!isRootDevice()) {
                     Toast.makeText(requireContext(), R.string.msg_primary_device_only, Toast.LENGTH_LONG).show()
                     return@setPositiveButton
                 }

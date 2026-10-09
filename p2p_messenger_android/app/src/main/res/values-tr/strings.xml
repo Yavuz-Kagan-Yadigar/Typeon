@@ -434,4 +434,5 @@
     <string name="lbl_text_color">Metin rengi</string>
     <string name="title_pick_text_color">Bir metin rengi seçin</string>
     <string name="call_pip">PiP</string>
+    <string name="msg_primary_device_only_delete">Hesabı yalnızca ana cihaz silebilir.</string>
 </resources>

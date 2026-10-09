@@ -254,7 +254,8 @@ class MainActivity : AppCompatActivity() {
             // secret anahtarı asla kopyalanmaz) ve bir bağlanma QR'ı gösterir;
             // birincil cihaz bu QR'ı tarayınca bu cihaz hesaba katılır.
             .setNeutralButton(R.string.link_device_as_secondary) { _, _ ->
-                createIdentityAndStart(input.text.toString().ifBlank { "Device" }, linkAsSecondary = true)
+                // The primary lists this device under that name: the model says more than "Device".
+                createIdentityAndStart(input.text.toString().ifBlank { android.os.Build.MODEL ?: "Device" }, linkAsSecondary = true)
             }
             .setNegativeButton(R.string.action_restore_from_recovery) { _, _ ->
                 pendingImportDeviceName = input.text.toString().ifBlank { "Device" }

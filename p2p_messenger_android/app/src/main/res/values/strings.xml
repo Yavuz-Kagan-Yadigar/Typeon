@@ -475,4 +475,5 @@
     <string name="lbl_text_color">Text color</string>
     <string name="title_pick_text_color">Pick a text color</string>
     <string name="call_pip">PiP</string>
+    <string name="msg_primary_device_only_delete">Only the primary device can delete the account.</string>
 </resources>
