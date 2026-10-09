@@ -245,6 +245,8 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         io.execute {
             val result = P2PLib.whiteboardAddStroke(peer, groupId, shown, stroke.shade, stroke.width, pointBytes(stroke))
             val failed = result.startsWith("Error")
+            // The stroke disappears from the board without a word otherwise.
+            if (failed || result.length != 16) android.util.Log.w("Whiteboard", "addStroke: '$result' peer=${peer.take(8)} page=$shown points=${stroke.points.size}")
             if (!failed) step.ids = hexToBytes(result)
             ui.post {
                 board.pending.remove(stroke)

@@ -144,6 +144,7 @@ impl P2PCore {
 
     /// Adds a stroke unless it is invalid, already here, erased, or the page
     /// is full. `true` = the page changed.
+    #[cfg(test)]
     fn wb_insert(&self, board: &str, stroke: &WbStroke, author: &str) -> bool {
         let mut used = self.wb_page_used(board, stroke.page);
         self.wb_insert_counted(board, stroke, author, &mut used)
@@ -672,9 +673,12 @@ impl P2PCore {
         }
         let mut pages = BTreeSet::new();
         let tx = self.wb_tx();
+        // One SUM per page of the packet, not one per stroke.
+        let mut used: HashMap<u8, usize> = HashMap::new();
         for stroke in &strokes {
+            let used = used.entry(stroke.page).or_insert_with(|| self.wb_page_used(&board.key, stroke.page));
             // The author is whoever sent the packet, never a field in it.
-            if self.wb_insert(&board.key, stroke, &sender) {
+            if self.wb_insert_counted(&board.key, stroke, &sender, used) {
                 pages.insert(stroke.page);
             }
         }
@@ -694,6 +698,12 @@ impl P2PCore {
     pub(crate) fn wb_on_digest(&mut self, peer_fp: &str, group_id: Option<String>, conversation_identity_id: Option<String>, pages: Vec<WbPageDigest>) -> serde_json::Value {
         let Some((board, _, _)) = self.wb_incoming_board(peer_fp, &group_id, &conversation_identity_id) else { return noop() };
         if pages.len() > MAX_PAGES as usize || !self.wb_pull_allowed("digest", &board.key, peer_fp, 1) {
+            return noop();
+        }
+        // Strokes of mine are still on their way out: the pages differ only
+        // by those, and pulling now moved two full pages each time one side
+        // paused while both were drawing. My own digest follows the flush.
+        if self.wb_outbox.get(&board.key).map_or(false, |o| !o.strokes.is_empty() || !o.erased.is_empty()) {
             return noop();
         }
         let theirs: HashMap<u8, (u32, u64)> = pages.iter().map(|d| (d.page, (d.count, d.hash))).collect();

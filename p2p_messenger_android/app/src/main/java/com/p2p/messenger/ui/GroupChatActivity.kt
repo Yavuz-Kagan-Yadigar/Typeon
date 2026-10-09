@@ -1233,8 +1233,15 @@ class GroupChatActivity : AppCompatActivity() {
             Toast.makeText(this, R.string.msg_no_contacts_to_add, Toast.LENGTH_LONG).show()
             return
         }
-        val names = (0 until array.length()).map { array.getJSONObject(it).optString("display_name", "Bilinmeyen") }.toTypedArray()
-        val identityIds = (0 until array.length()).map { array.getJSONObject(it).optString("identity_id") }
+        // Not the people who are in the group already.
+        val candidates = (0 until array.length()).map { array.getJSONObject(it) }
+            .filter { it.optString("identity_id") !in memberIdentityIds }
+        if (candidates.isEmpty()) {
+            Toast.makeText(this, R.string.msg_no_contacts_to_add, Toast.LENGTH_LONG).show()
+            return
+        }
+        val names = candidates.map { it.optString("display_name", "Bilinmeyen") }.toTypedArray()
+        val identityIds = candidates.map { it.optString("identity_id") }
         val checked = BooleanArray(names.size)
 
         AlertDialog.Builder(this)

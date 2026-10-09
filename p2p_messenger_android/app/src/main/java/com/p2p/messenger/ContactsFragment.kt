@@ -194,7 +194,8 @@ class ContactsFragment : Fragment() {
             getString(R.string.action_clear_chat_history),
             getString(R.string.action_revoke_device),
             getString(if (isBlocked) R.string.action_unblock else R.string.action_block),
-            getString(R.string.action_delete_contact)
+            getString(R.string.action_delete_contact),
+            getString(R.string.lbl_safety_number)
         )
         if (message.addedViaGroup) {
             options.add(getString(R.string.action_trust_contact))
@@ -207,9 +208,21 @@ class ContactsFragment : Fragment() {
                     1 -> confirmRevokeDevice(message)
                     2 -> if (isBlocked) unblockIdentity(message) else confirmBlockIdentity(message)
                     3 -> confirmDeleteContactStep1(message)
-                    4 -> confirmTrustContact(message)
+                    4 -> showSafetyCode(message)
+                    5 -> confirmTrustContact(message)
                 }
             }
+            .show()
+    }
+
+    /** The code of any contact, not only of one that came through a group. */
+    private fun showSafetyCode(message: ChatAdapter.ChatMessage) {
+        val code = try { P2PLib.contactSafetyCode(message.identityId) } catch (e: Exception) { "" }
+        if (code.isEmpty()) return
+        AlertDialog.Builder(requireContext())
+            .setTitle(message.displayName)
+            .setMessage(getString(R.string.lbl_safety_code, code))
+            .setPositiveButton(android.R.string.ok, null)
             .show()
     }
 

@@ -726,7 +726,9 @@ pub fn is_private_multiaddr(addr: &str) -> bool {
             }
         }
         // `/dns4/localhost/...`, mDNS names.
+        // A trailing dot is the same name.
         let name = part.to_ascii_lowercase();
+        let name = name.trim_end_matches('.');
         if name == "localhost" || name.ends_with(".localhost") || name.ends_with(".local") {
             return true;
         }

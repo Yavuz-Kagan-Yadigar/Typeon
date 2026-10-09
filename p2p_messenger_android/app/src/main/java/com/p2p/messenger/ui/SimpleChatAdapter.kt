@@ -548,6 +548,14 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         // them too, so they un-merge (restore spacing/timestamp/sender row).
         if (idx > 0) notifyItemChanged(idx - 1)
         if (idx < items.size - 1) notifyItemChanged(idx + 1)
+        // Replies on screen that quote it lose the text too (the core has
+        // cleared it; these rows were loaded before).
+        items.forEachIndexed { i, it ->
+            if (it.replyToMessageId == targetMessageId && it.replyToPreview != null) {
+                it.replyToPreview = null
+                notifyItemChanged(i)
+            }
+        }
     }
 
     /** Bir gönderim durumu güncellemesi uygular (bkz. Rust "status" olayı —
@@ -663,7 +671,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.txtAttachmentCaption.visibility = View.GONE
         }
 
-        if (item.reactions.isBlank()) {
+        if (item.reactions.isBlank() || item.isDeleted) {
             holder.pillReactions.visibility = View.GONE
         } else {
             holder.pillReactions.visibility = View.VISIBLE
@@ -764,7 +772,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (replyToId != null) {
             holder.layoutReplyQuote.visibility = View.VISIBLE
             holder.txtReplyQuoteSender.text = item.replyToSenderLabel?.takeIf { it != "null" }
-            holder.txtReplyQuoteText.text = item.replyToPreview?.takeIf { it != "null" }
+            // No preview left: the quoted message was deleted.
+            holder.txtReplyQuoteText.text = item.replyToPreview?.takeIf { it != "null" && it.isNotEmpty() }
+                ?: holder.itemView.context.getString(R.string.msg_deleted)
             // Kullanıcı raporu ("alıntı mesajlar beyaz görünüyor").
             //
             // Tasarım niyeti doğruydu: yüzey renginin üzerine %12 opaklıkta

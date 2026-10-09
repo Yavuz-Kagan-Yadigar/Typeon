@@ -51,7 +51,14 @@ use crate::{current_time_ms, extract_peer_id, P2PCore};
 /// and then no push arrives. 5 min left a queued message undelivered that long
 /// (measured on device); this Fetch doubles as the liveness check.
 // ponytail: fixed 30 s poll, a server-side ping would let this go back up if battery matters.
-pub(crate) const SERVER_FETCH_SWEEP_INTERVAL_MS: u64 = 30 * 1000;
+/// A safety net only. New mail comes as `Push`/`Notify` over the open
+/// connection, and the server repeats an unanswered `Notify` every 20 s
+/// (`NOTIFY_RESEND_MS` in typeon-server) until we fetch; a reconnect fetches
+/// at once. At 30 s this poll kept the LTE radio out of idle. It must NOT be
+/// raised against a server without the resend: one lost `Notify` then delays
+/// all mail by this interval (device test 2026-10-08: a call invite 4 minutes
+/// late).
+pub(crate) const SERVER_FETCH_SWEEP_INTERVAL_MS: u64 = 5 * 60 * 1000;
 
 /// Sunucu bağlantısı/kayıt durumu tarama aralığı.
 pub(crate) const SERVER_SWEEP_INTERVAL_MS: u64 = 15_000;
@@ -233,6 +240,10 @@ pub(crate) struct ServerRuntime {
     /// `Hello`s sent since we were last enrolled: backs off an enrollment the
     /// server keeps refusing, see `server_sweep`.
     pub hello_attempts: u32,
+    /// A refused `Register`: not sent again before this (ms).
+    pub register_backoff_until: u64,
+    /// Last `Notify` taken from this server (ms), see `handle_server_push`.
+    pub notified_at: u64,
 }
 
 /// Havada bekleyen bir sunucu RPC'si.
@@ -794,7 +805,26 @@ impl P2PCore {
         rec.route_messages = enabled;
         let rec = rec.clone();
         self.persist_server(&rec);
+        // Uploads go to routing servers only: with none left the queue never
+        // drained and counted as pending work for good.
+        if !self.servers.iter().any(|s| s.route_messages) {
+            self.server_blob_uploads.clear();
+            if let Some(conn) = &self.db {
+                let _ = conn.execute("DELETE FROM server_blob_uploads", []);
+            }
+        }
         Ok(())
+    }
+
+    /// A queued blob upload that a server can take now: a routing server,
+    /// connected, enrolled and not in deposit backoff.
+    pub(crate) fn blob_upload_can_run(&self) -> bool {
+        let now = current_time_ms();
+        !self.server_blob_uploads.is_empty()
+            && self.servers.iter().any(|s| {
+                s.route_messages
+                    && self.server_rt.get(&s.server_id).map_or(false, |r| r.connected && r.enrolled && now >= r.deposit_backoff_until)
+            })
     }
 
     pub(crate) fn set_server_history(&mut self, server_id: &str, enabled: bool) -> Result<(), String> {
@@ -825,7 +855,7 @@ impl P2PCore {
     /// newest rows now, or a restored device shows a gap up to today.
     // ponytail: newest 2000 rows only; page through `messages` if a full
     // backfill is wanted.
-    fn backfill_server_archive(&mut self) {
+    pub(crate) fn backfill_server_archive(&mut self) {
         let Some(conn) = &self.db else { return };
         let Ok(mut stmt) = conn.prepare(
             "SELECT message_id, group_id, peer_device_fingerprint FROM messages \
@@ -1022,10 +1052,15 @@ impl P2PCore {
             .map(|s| s.server_id.clone())
             .collect();
         if candidates.is_empty() {
-            info!(
-                "Sunucu atlandı (bu kutu için bağlı+kayıtlı sunucu yok; {} yapılandırılmış)",
-                self.servers.len()
-            );
+            // Once a minute: every retry of every pending packet comes here.
+            static LAST_LOG_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            if now_ms.saturating_sub(LAST_LOG_MS.load(std::sync::atomic::Ordering::Relaxed)) >= 60_000 {
+                LAST_LOG_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Sunucu atlandı (bu kutu için bağlı+kayıtlı sunucu yok; {} yapılandırılmış)",
+                    self.servers.len()
+                );
+            }
             return false;
         }
 
@@ -1256,7 +1291,7 @@ impl P2PCore {
                 // server path is onion-only, do not dial the LAN.
                 let addrs = server_proto::public_server_addrs(rec.address.split(','));
                 if addrs.is_empty() {
-                    rt.last_error = Some("Ulaşılabilir adres yok — sunucuyu yeni bir davet koduyla ekleyin".to_string());
+                    rt.last_error = Some("No reachable address. Add the server again with a new invite code".to_string());
                     continue;
                 }
                 if now < rt.dial_backoff_until { continue; }
@@ -1285,15 +1320,19 @@ impl P2PCore {
             }
 
             // Kayıtlıyız: abonelik farkını gönder.
-            let wanted: HashSet<String> = self
-                .own_mailbox_topics()
-                .iter()
-                .map(|t| server_seal::server_mailbox_id(t))
-                .collect();
-            let current = self.server_rt.get(&rec.server_id).map(|r| r.registered.clone()).unwrap_or_default();
+            // A server that only stores history gets no mailbox ids (it saw
+            // one per conversation and each rotation) and is not polled for
+            // mail that cannot arrive there.
+            let wanted: HashSet<String> = if rec.route_messages {
+                self.own_mailbox_topics().iter().map(|t| server_seal::server_mailbox_id(t)).collect()
+            } else {
+                HashSet::new()
+            };
+            let (current, register_ok) = self.server_rt.get(&rec.server_id)
+                .map(|r| (r.registered.clone(), now >= r.register_backoff_until)).unwrap_or_default();
             let add: Vec<String> = wanted.difference(&current).cloned().collect();
             let drop: Vec<String> = current.difference(&wanted).cloned().collect();
-            if !add.is_empty() || !drop.is_empty() {
+            if register_ok && (!add.is_empty() || !drop.is_empty()) {
                 info!("Sunucuya kutu kaydı: +{} -{}", add.len(), drop.len());
                 let ids = add.clone();
                 let dropped = drop.clone();
@@ -1305,7 +1344,7 @@ impl P2PCore {
 
             // Emniyet çekmesi (itme kaybolduysa).
             let due = self.server_rt.get(&rec.server_id).map(|r| r.fetch_due_at).unwrap_or(0);
-            if now >= due {
+            if rec.route_messages && now >= due {
                 self.server_fetch(&rec.server_id, peer_id);
             }
 
@@ -1344,7 +1383,6 @@ impl P2PCore {
         }
         if let Some(rt) = self.server_rt.get_mut(server_id) {
             rt.fetch_due_at = current_time_ms() + SERVER_FETCH_SWEEP_INTERVAL_MS;
-            rt.fetch_inflight = true;
         }
         let req = ServerRequest::Fetch {
             cursors,
@@ -1353,6 +1391,11 @@ impl P2PCore {
         };
         if let Some(id) = self.send_server_request(peer_id, req) {
             self.server_inflight.insert(id, ServerInflight::Fetch { server_id: server_id.to_string() });
+            // Only for a request that went out: set before, a failed send
+            // left it true and nothing was fetched until the next reconnect.
+            if let Some(rt) = self.server_rt.get_mut(server_id) {
+                rt.fetch_inflight = true;
+            }
         }
     }
 
@@ -1433,6 +1476,18 @@ impl P2PCore {
                     .iter()
                     .find(|(_, rt)| rt.peer_id == Some(peer))
                     .map(|(sid, _)| sid.clone());
+                // One per 5 s: each Notify opens the radio window and forces a
+                // sweep, so a server sending them in a row kept the phone
+                // fetching without end. A second one inside that time is
+                // covered by the fetch the first one started.
+                let now = current_time_ms();
+                let sid = sid.filter(|sid| {
+                    self.server_rt.get_mut(sid).map_or(false, |rt| {
+                        let ok = now.saturating_sub(rt.notified_at) >= 5_000;
+                        if ok { rt.notified_at = now; }
+                        ok
+                    })
+                });
                 if let Some(sid) = sid {
                     if let Some(rt) = self.server_rt.get_mut(&sid) {
                         rt.fetch_due_at = 0;
@@ -1571,9 +1626,8 @@ impl P2PCore {
 
                 for item in items {
                     let Some(key) = index.get(&item.mailbox_id) else {
-                        // Artık dinlemediğimiz bir kutu — imleci yine de
-                        // ilerlet ki sunucu bunu sonsuza dek geri vermesin.
-                        highest.insert(item.mailbox_id.clone(), item.seq);
+                        // Not a mailbox of ours: nothing is stored for it. A
+                        // cursor row was written for any id the server named.
                         continue;
                     };
                     // No unsealed fallback for a session's mailbox: only
@@ -1600,8 +1654,9 @@ impl P2PCore {
                             // sunucuyu dial eder, dosya parçaları yanlış
                             // eşten istenirdi.
                             incoming.push((None, raw));
-                            highest.insert(item.mailbox_id.clone(), item.seq);
-                            ack_upto.insert(item.mailbox_id.clone(), item.seq);
+                            let h = highest.entry(item.mailbox_id.clone()).or_insert(0);
+                            *h = (*h).max(item.seq);
+                            ack_upto.insert(item.mailbox_id.clone(), *h);
                         }
                         None => {
                             // Unopenable (e.g. older than a rotation). The
@@ -1609,8 +1664,9 @@ impl P2PCore {
                             // it again: ack it too. Holding the ack back only
                             // lasted until the next item of that mailbox.
                             warn!("Sunucudan gelen zarf açılamadı, atlanıyor (kutu={})", item.mailbox_id);
-                            highest.insert(item.mailbox_id.clone(), item.seq);
-                            ack_upto.insert(item.mailbox_id.clone(), item.seq);
+                            let h = highest.entry(item.mailbox_id.clone()).or_insert(0);
+                            *h = (*h).max(item.seq);
+                            ack_upto.insert(item.mailbox_id.clone(), *h);
                         }
                     }
                 }
@@ -1618,9 +1674,16 @@ impl P2PCore {
                 if count > 0 {
                     info!("Sunucudan {} zarf çekildi ({} bayt)", count, bytes);
                 }
+                // Forward only: a Push of an old seq moved the cursor back and
+                // everything after it was delivered again.
+                let mut advanced = false;
                 for (mailbox, seq) in highest {
-                    self.server_cursors.insert((server_id.clone(), mailbox.clone()), seq);
-                    self.persist_cursor(&server_id, &mailbox, seq);
+                    let key = (server_id.clone(), mailbox.clone());
+                    if seq > self.server_cursors.get(&key).copied().unwrap_or(0) {
+                        self.server_cursors.insert(key, seq);
+                        self.persist_cursor(&server_id, &mailbox, seq);
+                        advanced = true;
+                    }
                 }
                 for (mailbox, seq) in ack_upto {
                     acks.push((mailbox, seq));
@@ -1638,7 +1701,9 @@ impl P2PCore {
                         }
                     }
                 }
-                if more {
+                // `more` with no progress would be the same Fetch again, at once
+                // and for as long as the server says so.
+                if more && advanced {
                     if let Some(rt) = self.server_rt.get_mut(&server_id) {
                         rt.fetch_due_at = 0;
                     }
@@ -1796,10 +1861,21 @@ impl P2PCore {
                 self.persist_server(&r);
             }
         }
+        // `Internal` is the server's own trouble (SQLite busy, disk): dropping
+        // on it lost one queued archive record per sweep while it lasted.
+        // A chunk over the blob quota gets the same answer every time: kept,
+        // it was sent again every 5 minutes for good, in front of every later
+        // upload, and stopped message deposits to the server each time.
         let permanent = !matches!(
             code,
-            ServerErrorCode::NotEnrolled | ServerErrorCode::Revoked | ServerErrorCode::QuotaExceeded | ServerErrorCode::RateLimited
-        );
+            ServerErrorCode::NotEnrolled | ServerErrorCode::Revoked | ServerErrorCode::QuotaExceeded | ServerErrorCode::RateLimited | ServerErrorCode::Internal
+        ) || matches!((&inflight, &code), (ServerInflight::BlobPut { .. }, ServerErrorCode::QuotaExceeded));
+        if let ServerInflight::Register { .. } = &inflight {
+            // Refused (too many mailboxes, a taken id): not again each sweep.
+            if let Some(rt) = self.server_rt.get_mut(&server_id) {
+                rt.register_backoff_until = current_time_ms() + SERVER_DEPOSIT_BACKOFF_MS;
+            }
+        }
         match &inflight {
             // The same chunk gets the same answer: give the upload up, the
             // direct peer path still serves the file.
@@ -1846,18 +1922,38 @@ impl P2PCore {
                 self.retry_deposit_over_gossipsub(&inflight);
             }
             ServerErrorCode::NotEnrolled => {
+                // A new Hello at once only when this was not the enrollment
+                // itself: Hello -> Welcome -> Rebind -> NotEnrolled ran at
+                // round-trip speed, two signatures a round, past the backoff.
+                let enrolling = matches!(inflight, ServerInflight::Hello { .. } | ServerInflight::Enroll { .. } | ServerInflight::Rebind { .. });
                 if let Some(rt) = self.server_rt.get_mut(&server_id) {
                     rt.enrolled = false;
-                    rt.hello_sent_at = 0;
+                    if !enrolling {
+                        rt.hello_sent_at = 0;
+                    }
                 }
-                self.server_sweep_at = 0;
+                if !enrolling {
+                    self.server_sweep_at = 0;
+                }
+                // The server does not know this enrollment (any more): the id
+                // is useless, as in the Revoked arm.
+                if matches!(inflight, ServerInflight::Rebind { .. }) {
+                    if let Some(rt) = self.server_rt.get_mut(&server_id) {
+                        rt.last_error = Some("The server does not know this enrollment. Add it again with a new invite code".to_string());
+                    }
+                    if let Some(r) = self.servers.iter_mut().find(|s| s.server_id == server_id) {
+                        r.enrollment_id = None;
+                        let r = r.clone();
+                        self.persist_server(&r);
+                    }
+                }
                 self.retry_deposit_over_gossipsub(&inflight);
             }
             ServerErrorCode::Revoked => {
                 warn!("Sunucu kaydımızı iptal etti: {}", server_id);
                 if let Some(rt) = self.server_rt.get_mut(&server_id) {
                     rt.enrolled = false;
-                    rt.last_error = Some("Operatör kaydı iptal etti".to_string());
+                    rt.last_error = Some("The operator revoked this enrollment".to_string());
                 }
                 // İptal edilmiş kimliği SAKLAMANIN faydası yok, zararı var:
                 // elimizde kalırsa bir sonraki tur `Rebind` deneyip aynı
@@ -1894,8 +1990,12 @@ impl P2PCore {
                 warn!("Sunucu hatası: {:?}", other);
                 // Any refused Deposit backs off too: its mark is gone (see
                 // top), so without this the retry would deposit again at once.
-                let backs_off = matches!(other, ServerErrorCode::QuotaExceeded | ServerErrorCode::RateLimited)
-                    || matches!(inflight, ServerInflight::Deposit { .. });
+                // Deposits (and the blob chunks behind the same gate) only: a
+                // refused Register or archive request stopped all message
+                // deposits to the server for 5 minutes, again and again.
+                let backs_off = matches!(inflight, ServerInflight::Deposit { .. })
+                    || (matches!(other, ServerErrorCode::RateLimited)
+                        && matches!(inflight, ServerInflight::BlobPut { .. } | ServerInflight::BlobFinish { .. }));
                 if let Some(rt) = self.server_rt.get_mut(&server_id) {
                     rt.last_error = Some(format!("{:?}", other));
                     rt.fetch_inflight = false;
@@ -1931,6 +2031,11 @@ impl P2PCore {
             // yalnızca `Message` geri alınıyordu, ki zaten yalnızca `Message`
             // işaretleniyordu.
             self.server_deposited.remove(&(server_id.clone(), dedup_key.clone()));
+            // No answer: without a backoff the retry below deposited again at
+            // once (the server still counts as ready), every request timeout.
+            if let Some(rt) = self.server_rt.get_mut(server_id) {
+                rt.deposit_backoff_until = current_time_ms() + SERVER_DEPOSIT_BACKOFF_MS;
+            }
         }
         // The caller of a restore already got "OK": tell the UI it is partial.
         if let ServerInflight::ArchiveFetch { .. } | ServerInflight::ArchiveProbe { .. } = &inflight {
@@ -1964,7 +2069,11 @@ impl P2PCore {
 
     /// Sunucuya bırakılamamış bir zarfı hemen gossipsub'a verir.
     fn retry_deposit_over_gossipsub(&mut self, inflight: &ServerInflight) {
-        if let ServerInflight::Deposit { envelope, target_fp, first_attempt_at, .. } = inflight {
+        if let ServerInflight::Deposit { envelope, target_fp, first_attempt_at, cancelled, .. } = inflight {
+            // Withdrawn by the user, or confirmed meanwhile: nothing to resend.
+            if *cancelled {
+                return;
+            }
             let envelope = envelope.clone();
             let target_fp = target_fp.clone();
             // `publish_envelope` DEĞİL: o, girdiyi `current_time_ms()` ile
@@ -2041,13 +2150,13 @@ impl P2PCore {
 
         if rec.token.is_empty() {
             if let Some(rt) = self.server_rt.get_mut(server_id) {
-                rt.last_error = Some("Davet jetonu yok — sunucuyu yeni bir kodla ekleyin".to_string());
+                rt.last_error = Some("No invite token. Add the server again with a new code".to_string());
             }
             return;
         }
         let Ok(token_bytes) = hex::decode(&rec.token) else {
             if let Some(rt) = self.server_rt.get_mut(server_id) {
-                rt.last_error = Some("Davet jetonu bozuk".to_string());
+                rt.last_error = Some("The invite token is damaged".to_string());
             }
             return;
         };
@@ -2194,7 +2303,9 @@ impl P2PCore {
             conv_key: conv_key.to_string(),
             record_id: record_id.to_string(),
             rev,
-            sent_at_ms,
+            // The bucket comes from this: a peer's clock far ahead put the
+            // record where no probe or purge looks.
+            sent_at_ms: sent_at_ms.min(current_time_ms()),
             plaintext,
         };
         // Defter #10: bu kolon eskiden mesaj gövdesini DÜZ METİN yazıyordu —

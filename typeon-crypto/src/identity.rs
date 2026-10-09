@@ -98,12 +98,15 @@ pub fn format_fingerprint_base32(raw: &[u8]) -> String {
         .join("-")
 }
 
-/// Kısa doğrulama kodu (spec 1.2): fingerprint'in ilk 8 baytı, 2 baytlık 4
-/// grup, her biri 5 haneli ondalık (00000-65535). The code is worth 64 bits
-/// (not the 4 x 5 digits it looks like); the full fingerprint is
+/// Kısa doğrulama kodu (spec 1.2): fingerprint'in ilk 16 baytı, 2 baytlık 8
+/// grup, her biri 5 haneli ondalık (00000-65535). The full fingerprint is
 /// `format_fingerprint_base32`.
+///
+/// 16 bytes, 8 groups. At 8 bytes a key set with a victim's code took about
+/// 2^64 cheap trials (only the X25519 key has to vary), divided by the number
+/// of targets: within reach of a funded attacker.
 pub fn format_short_code(raw: &[u8]) -> String {
-    raw[..8.min(raw.len())]
+    raw[..16.min(raw.len())]
         .chunks(2)
         .map(|chunk| format!("{:05}", chunk.iter().fold(0u32, |v, b| (v << 8) | *b as u32)))
         .collect::<Vec<_>>()
@@ -131,10 +134,10 @@ mod tests {
     }
 
     #[test]
-    fn short_code_has_four_groups() {
+    fn short_code_has_eight_groups() {
         let raw = vec![1u8; 32];
         let code = format_short_code(&raw);
-        assert_eq!(code.split(' ').count(), 4);
+        assert_eq!(code.split(' ').count(), 8);
         assert_eq!(format_short_code(&[0xff, 0xff, 0, 1, 0x12, 0x34, 0, 0]), "65535 00001 04660 00000");
     }
 

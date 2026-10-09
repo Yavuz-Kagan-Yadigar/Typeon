@@ -114,22 +114,7 @@ pub fn set_skipped_key_encryption_key(key_bytes: &[u8]) -> bool {
         Err(_) => return false,
     };
     catch_panic(move || {
-        let mut core = core_lock();
-        core.skipped_key_encryption_key = Some(key);
-        core.load_ratchet_states_from_db();
-        core.load_pending_durable_retries_from_db();
-        // DİKKAT — bu üç yükleme JNI karşılığıyla (bkz. lib.rs
-        // `Java_..._setSkippedKeyEncryptionKey`) BİREBİR aynı olmak zorunda.
-        // Aşağıdaki ikisi bir süre eksikti ve sonuçları sessizdi:
-        //   * `pending_group_messages`: çevrimdışı bir üyeye gönderilemeyip
-        //     kuyruğa alınmış grup mesajları masaüstünde her yeniden
-        //     başlatmada kayboluyordu (Android'de kaybolmuyordu).
-        //   * `servers`: yapılandırılmış sunucular yeniden başlatmadan sonra
-        //     belleğe hiç gelmiyordu, yani sunucu yönlendirmesi ilk oturumdan
-        //     sonra SESSİZCE devre dışı kalıyordu — kullanıcı arayüzde
-        //     sunucuyu görmeye devam ederken.
-        core.load_pending_group_messages_from_db();
-        core.load_servers_from_db();
+        core_lock().install_skipped_key(key);
     })
     .is_ok()
 }

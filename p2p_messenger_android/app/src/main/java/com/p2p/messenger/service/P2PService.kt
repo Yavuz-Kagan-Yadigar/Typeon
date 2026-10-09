@@ -659,6 +659,9 @@ class P2PService : Service() {
                 // Caller gave up while we were only a notification (no
                 // full-screen permission, screen on): don't leave it ringing.
                 com.p2p.messenger.ui.CallActivity.cancelRing(applicationContext)
+                if (obj.optBoolean("missed")) {
+                    NotificationHelper.showMessageNotification(applicationContext, obj.optString("peer"), getString(R.string.call_missed), "")
+                }
             }
             "message" -> {
                 val peer = obj.optString("peer")
@@ -901,6 +904,10 @@ class P2PService : Service() {
                 // The core returns an error when Tor cannot start (it no longer
                 // runs a swarm that can dial nothing): try again.
                 fun startNet() {
+                    // The core refuses to start without its storage keys; a
+                    // keystore that failed at boot is tried again here.
+                    com.p2p.messenger.util.SkippedKeyManager.ensureLoaded(applicationContext)
+                    com.p2p.messenger.util.MessageHistoryManager.ensureHistoryKeyLoaded(applicationContext)
                     if (P2PLib.startNetwork(nodeMode, torEnabled).startsWith("Error")) {
                         handler.postDelayed({ if (isRunning) startNet() }, 30_000)
                     } else {

@@ -71,7 +71,7 @@ impl Group {
     /// `MAX_FOUNDER_CHAIN` girdiyi tutar — bkz. o sabitin notu.
     pub fn push_founder_transfer(&mut self, transfer: crate::packet::FounderTransfer) {
         if self.founder_chain.iter().any(|t| {
-            t.version == transfer.version && t.to_identity == transfer.to_identity
+            t.version == transfer.version && t.from_identity == transfer.from_identity && t.to_identity == transfer.to_identity
         }) {
             return;
         }
@@ -99,9 +99,11 @@ impl Group {
     /// güncellemelerin kendiliğinden düzelmesini sağlar.
     pub fn sync_members(&mut self, identity_ids: &[String], now: u64) {
         let founder = self.founder_identity_id.clone();
-        self.members.retain(|m| identity_ids.contains(&m.identity_id));
+        let wanted: std::collections::HashSet<&String> = identity_ids.iter().collect();
+        self.members.retain(|m| wanted.contains(&m.identity_id));
+        let mut have: std::collections::HashSet<String> = self.members.iter().map(|m| m.identity_id.clone()).collect();
         for id in identity_ids {
-            if !self.members.iter().any(|m| &m.identity_id == id) {
+            if have.insert(id.clone()) {
                 self.members.push(GroupMember {
                     identity_id: id.clone(),
                     added_at: now,
@@ -142,7 +144,8 @@ pub enum GroupUpdateError {
 }
 
 /// Largest forward gap one update may make (missed updates are allowed).
-pub const MAX_VERSION_JUMP: u32 = 1 << 20;
+/// 4096: at 2^20 a founder reached `u32::MAX` in 4096 updates.
+pub const MAX_VERSION_JUMP: u32 = 1 << 12;
 
 /// Uygulanacak değişikliğin türü (spec 5.2 `GroupChange`). Kanonik tanım
 /// `packet::GroupChange`'te (ağ paket formatı, `GroupUpdate.change` alanı) —
@@ -199,7 +202,11 @@ pub fn apply_change(group: &mut Group, change: &GroupChange, new_version: u32, n
             }
         }
         GroupChange::Remove(identity_id) => {
-            group.members.retain(|m| m.identity_id != *identity_id);
+            // The founder stays a member: removed, its updates still validated
+            // while its messages failed the membership check.
+            if *identity_id != group.founder_identity_id {
+                group.members.retain(|m| m.identity_id != *identity_id);
+            }
         }
         GroupChange::Rename(new_name) => {
             group.name = new_name.clone();
@@ -416,4 +423,15 @@ mod tests {
         apply_change(&mut group, &GroupChange::Remove("member2".into()), 2, 3000);
         assert!(!group.is_member("member2"));
     }
+    #[test]
+    fn removing_the_founder_is_ignored() {
+        let mut g = Group::new("g".into(), "n".into(), "A".into(), 1);
+        g.sync_members(&["A".to_string(), "B".to_string(), "B".to_string()], 2);
+        assert_eq!(g.member_identity_ids(), vec!["A".to_string(), "B".to_string()], "no duplicate member");
+        apply_change(&mut g, &GroupChange::Remove("A".into()), 2, 3);
+        assert!(g.is_member("A") && g.version == 2);
+        apply_change(&mut g, &GroupChange::Remove("B".into()), 3, 4);
+        assert!(!g.is_member("B"));
+    }
+
 }

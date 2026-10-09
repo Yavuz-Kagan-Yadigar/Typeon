@@ -104,7 +104,13 @@ pub fn encode_frame(mailbox: &[u8], data: &[u8]) -> Vec<u8> {
 pub async fn read_frame<R: futures::AsyncRead + Unpin>(r: &mut R) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
     let mut len2 = [0u8; 2];
     r.read_exact(&mut len2).await?;
-    let mut mailbox = vec![0u8; u16::from_be_bytes(len2) as usize];
+    // A mailbox id is 64 hex characters. The length went straight into an
+    // allocation: 64 KiB per stream for six header bytes.
+    let mailbox_len = u16::from_be_bytes(len2) as usize;
+    if mailbox_len > 128 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "mailbox too long"));
+    }
+    let mut mailbox = vec![0u8; mailbox_len];
     r.read_exact(&mut mailbox).await?;
     let mut len4 = [0u8; 4];
     r.read_exact(&mut len4).await?;
@@ -336,9 +342,13 @@ fn media_add_remote(fp: &str, key: &[u8], sid: &[u8]) {
     // and a fresh slot per Accept would wrap into someone else's).
     let slot = match m.remotes.get(fp) {
         Some(r) => r.slot,
+        // The next slot nobody holds. The bare counter wrapped after 256
+        // joins (a participant alternating Hangup and Accept) into a slot in
+        // use, and its frames were shown as the other participant's.
         None => {
-            let s = m.next_slot;
-            m.next_slot = m.next_slot.wrapping_add(1);
+            let from = m.next_slot;
+            let Some(s) = (0..=u8::MAX).map(|i| from.wrapping_add(i)).find(|s| !m.remotes.values().any(|r| r.slot == *s)) else { return };
+            m.next_slot = s.wrapping_add(1);
             s
         }
     };
@@ -871,7 +881,10 @@ impl P2PCore {
                 // more than a minute behind never rings and one ahead can ring
                 // late. A clock-free age needs the server to stamp how long it
                 // held the item (`MailItem` carries none).
-                if !keys_ok || sent_at_ms == 0 || now.saturating_sub(sent_at_ms) > INVITE_MAX_AGE_MS {
+                // Not from the future either: a `sent_at_ms` far ahead passed
+                // the age test for good, and a held invite rang whenever it
+                // was delivered.
+                if !keys_ok || sent_at_ms == 0 || now.abs_diff(sent_at_ms) > INVITE_MAX_AGE_MS {
                     return noop();
                 }
                 // The call already ended here; also a Hangup that overtook its
@@ -1007,6 +1020,8 @@ impl P2PCore {
                     (Some(_), CallPhase::Outgoing) => s.invited.is_empty(),
                     (Some(_), CallPhase::Active) => s.joined.is_empty(),
                 };
+                // The caller gave up while it rang here.
+                let missed = over && action == CallAction::Hangup && s.phase == CallPhase::Incoming && s.group_id.is_none();
                 if over {
                     if let Some(s) = self.call.take() {
                         // Devices still ringing for this call hear from nobody
@@ -1025,9 +1040,15 @@ impl P2PCore {
                     };
                     self.last_call_end = Some((call_id.clone(), reason.to_string()));
                 }
+                if missed {
+                    // The callee had no trace of it: a row in the chat, and
+                    // `missed` for the notification.
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let _ = self.archive_message(peer_fp, "received", "\u{1F4DE} Missed call".as_bytes(), Some(&id), None, None, None, crate::current_time_ms());
+                }
                 serde_json::json!({
                     "type": "call", "action": format!("{:?}", action).to_lowercase(),
-                    "call_id": call_id, "peer": self.canonical_peer_key(peer_fp), "ended": over,
+                    "call_id": call_id, "peer": self.canonical_peer_key(peer_fp), "ended": over, "missed": missed,
                 })
             }
         }
