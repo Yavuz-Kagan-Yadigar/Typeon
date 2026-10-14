@@ -14,17 +14,18 @@
 //!   multistream round trip per 60 ms audio packet — over Tor that is +1 RTT.
 //! - **Path** per target device: a direct stream when we hold a live
 //!   connection to it, otherwise the server relay stream (`RELAY_PROTOCOL`)
-//!   addressed to the target's `p2p_msg_<fp>` mailbox, which every client
-//!   already registers. The server pushes it to the target only if the target
-//!   is connected at that moment; nothing is stored.
+//!   addressed to `relay_mailbox_id(pair_key)`: an id only the sender and
+//!   that receiver compute, which the receiver registers for the call
+//!   (`relay_listen_keys`). The server pushes it to the target only if the
+//!   target is connected at that moment; nothing is stored.
 //!
 //! Packet: `[ver=1][stream_id 8][seq u64 BE]` then ChaCha20-Poly1305 over
 //! `[kind][sent_ms u32 BE][payload]` (`sent_ms` = wall clock mod 2^32, only for
 //! the one-way delay estimate in the stats), header as AAD, nonce = `stream_id[..4] || seq`. Every
 //! participant picks a fresh random key + stream id per call and ships them
 //! inside the ratchet (Invite/Accept), so the server relays ciphertext only.
-//! One key per sender (not per pair) lets a group sender encrypt a frame once
-//! and fan the same bytes out to everyone.
+//! Each receiver gets its own key (`pair_key`): with one key per sender, any
+//! group member could seal packets as any other member.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Condvar, Mutex, MutexGuard};
@@ -39,6 +40,7 @@ use jni::JNIEnv;
 use libp2p::{PeerId, StreamProtocol};
 use log::{info, warn};
 use rand::RngCore as _;
+use zeroize::Zeroizing;
 
 use crate::packet::{CallAction, MessageContent};
 use crate::{current_time_ms, server_seal, P2PCore, OptionGroupExt as _, RUNTIME};
@@ -68,6 +70,11 @@ const MEDIA_LOST_MS: u64 = 30_000;
 const INVITE_MAX_AGE_MS: u64 = 60_000;
 const REOPEN_BACKOFF_MS: u64 = 3_000;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(20);
+/// Inbound media streams one peer may hold at once (one is normal, a second
+/// overlaps it while the peer reopens).
+const MAX_INBOUND_PER_PEER: u8 = 4;
+/// How long an inbound stream may stay open before its peer is a call target.
+const INBOUND_GRACE: Duration = Duration::from_secs(5);
 
 /// Receiver -> sender report, see `media_on_packet`. Never reaches Kotlin.
 /// Payload `[target stream id 8][queue ms u16][flags u8]`, flag bit 0 =
@@ -118,8 +125,12 @@ pub async fn read_frame<R: futures::AsyncRead + Unpin>(r: &mut R) -> std::io::Re
     if n > MAX_FRAME {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too large"));
     }
-    let mut data = vec![0u8; n];
-    r.read_exact(&mut data).await?;
+    // Grows with the bytes that arrive: a declared length alone allocates nothing.
+    let mut data = Vec::new();
+    futures::AsyncReadExt::take(&mut *r, n as u64).read_to_end(&mut data).await?;
+    if data.len() != n {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
     Ok((mailbox, data))
 }
 
@@ -143,6 +154,17 @@ fn nonce_for(sid: &[u8; 8], seq: u64) -> [u8; 12] {
     n[..4].copy_from_slice(&sid[..4]);
     n[4..].copy_from_slice(&seq.to_be_bytes());
     n
+}
+
+/// The key this device seals with for one receiver: HKDF-SHA256 of the call's
+/// master key (which never leaves this device) and the receiver's fingerprint.
+/// The receiver gets it inside the ratchet and cannot compute anyone else's.
+fn pair_key(master: &[u8; 32], receiver_fp: &str) -> Zeroizing<[u8; 32]> {
+    let mut key = Zeroizing::new([0u8; 32]);
+    hkdf::Hkdf::<sha2::Sha256>::new(None, master)
+        .expand_multi_info(&[&b"typeon-call-pair-v1"[..], receiver_fp.as_bytes()], &mut key[..])
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    key
 }
 
 fn seal_packet(key: &[u8; 32], sid: &[u8; 8], seq: u64, kind: u8, payload: &[u8]) -> Vec<u8> {
@@ -188,7 +210,7 @@ fn open_packet(key: &[u8; 32], sid: &[u8; 8], seq: u64, packet: &[u8]) -> Option
 struct Remote {
     fp: String,
     slot: u8,
-    key: [u8; 32],
+    key: Zeroizing<[u8; 32]>,
     /// Peer-chosen, so not unique: `Media.remotes` is keyed by `fp`.
     sid: [u8; 8],
     max_seq: u64,
@@ -214,7 +236,7 @@ struct Remote {
 impl Remote {
     fn new(fp: &str, slot: u8, key: [u8; 32], sid: [u8; 8]) -> Self {
         Remote {
-            fp: fp.to_string(), slot, key, sid, max_seq: 0, seen: 0, last_rx_ms: 0,
+            fp: fp.to_string(), slot, key: Zeroizing::new(key), sid, max_seq: 0, seen: 0, last_rx_ms: 0,
             delay_ewma: 0.0, delay_min: 0.0, samples: 0, last_report_ms: 0, want_keyframe: false,
             muted: false, video_off: false,
         }
@@ -250,8 +272,10 @@ impl Remote {
 struct Target {
     /// Live connection to this device, refreshed every poll by `media_supervise`.
     peer: Option<PeerId>,
-    /// `server_mailbox_id("p2p_msg_<fp>")` — the relay address.
+    /// `relay_mailbox_id(key)` — the relay address.
     mailbox: Vec<u8>,
+    /// `pair_key` for this device: what we seal its copy of a frame with.
+    key: Zeroizing<[u8; 32]>,
 }
 
 struct Link {
@@ -265,7 +289,8 @@ struct Media {
     /// Bumped on every start/stop so a link opened for a previous call never
     /// registers into the next one.
     generation: u64,
-    key: [u8; 32],
+    /// Master key: only `pair_key` uses it, it is never sent.
+    key: Zeroizing<[u8; 32]>,
     sid: [u8; 8],
     seq: u64,
     /// By device fingerprint. A stream id is peer-chosen: keyed by it, one
@@ -278,6 +303,8 @@ struct Media {
     /// Peer -> no new open attempt before this (ms): an open in flight
     /// (`OPEN_TIMEOUT`) or the `REOPEN_BACKOFF_MS` after a failed one.
     opening: HashMap<PeerId, u64>,
+    /// Open inbound streams per peer (`MAX_INBOUND_PER_PEER`).
+    inbound: HashMap<PeerId, u8>,
     next_link_id: u64,
     inbox: VecDeque<Vec<u8>>,
     sent: u64,
@@ -313,7 +340,7 @@ fn media_start(key: [u8; 32], sid: [u8; 8]) {
     let mut m = media();
     let generation = m.generation + 1;
     let next_link_id = m.next_link_id;
-    *m = Media { active: true, generation, key, sid, next_link_id, ..Default::default() };
+    *m = Media { active: true, generation, key: Zeroizing::new(key), sid, next_link_id, ..Default::default() };
 }
 
 /// Dropping the links closes their channels, which ends the writer tasks and
@@ -335,7 +362,7 @@ pub(crate) fn drop_media() {
 fn media_add_remote(fp: &str, key: &[u8], sid: &[u8]) {
     let (Ok(key), Ok(sid)) = (<[u8; 32]>::try_from(key), <[u8; 8]>::try_from(sid)) else { return };
     let mut m = media();
-    if !m.active || m.remotes.get(fp).map_or(false, |r| r.sid == sid && r.key == key) {
+    if !m.active || m.remotes.get(fp).map_or(false, |r| r.sid == sid && *r.key == key) {
         return;
     }
     // A re-key keeps the device's slot (Kotlin holds one decoder per slot,
@@ -353,8 +380,16 @@ fn media_add_remote(fp: &str, key: &[u8], sid: &[u8]) {
         }
     };
     m.remotes.insert(fp.to_string(), Remote::new(fp, slot, key, sid));
-    let mailbox = server_seal::server_mailbox_id(&format!("p2p_msg_{}", fp)).into_bytes();
-    m.targets.insert(fp.to_string(), Target { peer: None, mailbox });
+    let send_key = pair_key(&m.key, fp);
+    let mailbox = server_seal::relay_mailbox_id(&send_key[..]).into_bytes();
+    m.targets.insert(fp.to_string(), Target { peer: None, mailbox, key: send_key });
+}
+
+/// The keys the call's remotes seal our media with. Each gives the relay
+/// address its sender writes to (`server_seal::relay_mailbox_id`), which this
+/// device registers at its servers while the call runs.
+pub(crate) fn relay_listen_keys() -> Vec<Vec<u8>> {
+    media().remotes.values().map(|r| r.key.to_vec()).collect()
 }
 
 fn media_remove_remote(fp: &str) {
@@ -411,10 +446,13 @@ pub fn media_send(kind: u8, payload: &[u8]) -> bool {
         return false;
     }
     m.seq += 1;
-    let packet = seal_packet(&m.key, &m.sid, m.seq, kind, payload);
-    let targets: Vec<(Option<PeerId>, Vec<u8>)> = m.targets.values().map(|t| (t.peer, t.mailbox.clone())).collect();
+    let targets: Vec<(Option<PeerId>, Vec<u8>, Vec<u8>)> = m
+        .targets
+        .values()
+        .map(|t| (t.peer, t.mailbox.clone(), seal_packet(&t.key, &m.sid, m.seq, kind, payload)))
+        .collect();
     let mut any = false;
-    for (peer, mailbox) in targets {
+    for (peer, mailbox, packet) in targets {
         if let Some(p) = peer {
             let res = m.direct.get(&p).map(|l| l.tx.try_send(encode_frame(&[], &packet)));
             match res {
@@ -602,7 +640,7 @@ async fn open_link(mut control: libp2p_stream::Control, peer: PeerId, relay: boo
     let stream = match opened {
         Ok(s) => s,
         Err(e) => {
-            warn!("Arama akışı açılamadı ({}, {}): {}", what, peer, e);
+            warn!("Arama akışı açılamadı ({}, {}): {}", what, crate::log_id(&peer), e);
             let mut m = media();
             if m.generation == generation {
                 m.opening.insert(peer, current_time_ms() + REOPEN_BACKOFF_MS);
@@ -624,7 +662,7 @@ async fn open_link(mut control: libp2p_stream::Control, peer: PeerId, relay: boo
         m.opening.remove(&peer);
         id
     };
-    info!("Arama akışı açıldı ({}, {})", what, peer);
+    info!("Arama akışı açıldı ({}, {})", what, crate::log_id(&peer));
     tokio::spawn(pump_writes(wr, rx));
     // Relay links carry the server's pushes back to us; on a direct outbound
     // link the read only notices the peer closing it.
@@ -639,7 +677,7 @@ async fn open_link(mut control: libp2p_stream::Control, peer: PeerId, relay: boo
     if map.get(&peer).map(|l| l.id) == Some(id) {
         map.remove(&peer);
     }
-    info!("Arama akışı kapandı ({}, {})", what, peer);
+    info!("Arama akışı kapandı ({}, {})", what, crate::log_id(&peer));
 }
 
 /// Reads media frames peers push to us over direct streams. Registered once
@@ -654,29 +692,51 @@ pub(crate) fn spawn_media_acceptor(control: &mut libp2p_stream::Control) {
             // Outside a call nobody has a reason to push media: drop the
             // stream instead of parking a reader (and up to MAX_FRAME) on it.
             let generation = {
-                let m = media();
+                let mut m = media();
                 if !m.active {
                     continue;
                 }
+                let open = m.inbound.entry(peer).or_insert(0);
+                if *open >= MAX_INBOUND_PER_PEER {
+                    continue;
+                }
+                *open += 1;
                 m.generation
             };
             // Ends with the call, and on a silent stream: every participant
             // sends a state packet each second.
             // Only from a device in the call. `Target::peer` is filled by the
-            // next poll turn, so a stream that arrives first gets a few seconds.
-            // ponytail: no cap on streams per call peer; add one if a contact abuses it.
+            // next poll turn, so a stream that arrives first gets
+            // `INBOUND_GRACE` in total, however little it sends.
             tokio::spawn(async move {
                 let idle = Duration::from_millis(MEDIA_LOST_MS);
-                let opened = std::time::Instant::now();
-                while let Ok(Ok((_, data))) = tokio::time::timeout(idle, read_frame(&mut stream)).await {
-                    {
+                let opened = Instant::now();
+                loop {
+                    let wait = {
                         let m = media();
-                        let in_call = m.targets.values().any(|t| t.peer == Some(peer));
-                        if m.generation != generation || (!in_call && opened.elapsed() > Duration::from_secs(5)) {
+                        if m.generation != generation {
                             break;
                         }
-                    }
+                        if m.targets.values().any(|t| t.peer == Some(peer)) {
+                            idle
+                        } else {
+                            match INBOUND_GRACE.checked_sub(opened.elapsed()) {
+                                Some(left) => left,
+                                None => break,
+                            }
+                        }
+                    };
+                    let Ok(Ok((_, data))) = tokio::time::timeout(wait, read_frame(&mut stream)).await else { break };
                     media_on_packet(&data);
+                }
+                let mut m = media();
+                if m.generation == generation {
+                    let left = m.inbound.get(&peer).map_or(0, |n| n.saturating_sub(1));
+                    if left == 0 {
+                        m.inbound.remove(&peer);
+                    } else {
+                        m.inbound.insert(peer, left);
+                    }
                 }
             });
         }
@@ -707,10 +767,11 @@ pub(crate) struct CallSession {
     invited: Vec<String>,
     /// Remote media keys learned so far, kept while still ringing so a group
     /// member who answered before us is wired up the moment we answer.
-    keys: HashMap<String, (Vec<u8>, Vec<u8>)>,
+    keys: HashMap<String, (Zeroizing<Vec<u8>>, Vec<u8>)>,
     /// Devices currently in the call (media flows to/from these).
     joined: HashSet<String>,
-    my_key: [u8; 32],
+    /// Master key, see `pair_key`.
+    my_key: Zeroizing<[u8; 32]>,
     my_sid: [u8; 8],
     started_at: u64,
     connected_at: u64,
@@ -718,9 +779,9 @@ pub(crate) struct CallSession {
 
 impl CallSession {
     fn new(call_id: String, group_id: Option<String>, video: bool, phase: CallPhase, peer_fp: String, invited: Vec<String>) -> Self {
-        let mut my_key = [0u8; 32];
+        let mut my_key = Zeroizing::new([0u8; 32]);
         let mut my_sid = [0u8; 8];
-        rand::rngs::OsRng.fill_bytes(&mut my_key);
+        rand::rngs::OsRng.fill_bytes(&mut my_key[..]);
         rand::rngs::OsRng.fill_bytes(&mut my_sid);
         CallSession {
             call_id, group_id, video, phase, peer_fp, invited,
@@ -749,7 +810,7 @@ impl P2PCore {
         }
         let call_id = uuid::Uuid::new_v4().to_string();
         let s = CallSession::new(call_id.clone(), None, video, CallPhase::Outgoing, peer_fp, invited);
-        media_start(s.my_key, s.my_sid);
+        media_start(*s.my_key, s.my_sid);
         self.call = Some(s);
         self.call_broadcast(CallAction::Invite);
         info!("Arama başlatıldı: {} video={}", &call_id[..8], video);
@@ -766,7 +827,7 @@ impl P2PCore {
         }
         let call_id = uuid::Uuid::new_v4().to_string();
         let s = CallSession::new(call_id.clone(), Some(group_id), video, CallPhase::Outgoing, String::new(), invited);
-        media_start(s.my_key, s.my_sid);
+        media_start(*s.my_key, s.my_sid);
         self.call = Some(s);
         self.call_broadcast(CallAction::Invite);
         info!("Grup araması başlatıldı: {} video={}", &call_id[..8], video);
@@ -780,12 +841,14 @@ impl P2PCore {
         }
         s.phase = CallPhase::Active;
         s.connected_at = current_time_ms();
-        media_start(s.my_key, s.my_sid);
+        media_start(*s.my_key, s.my_sid);
         for fp in &s.joined {
             if let Some((k, sid)) = s.keys.get(fp) {
                 media_add_remote(fp, k, sid);
             }
         }
+        // Register the relay addresses now (bkz. `relay_listen_keys`).
+        self.server_sweep_at = 0;
         self.call_broadcast(CallAction::Accept);
         Ok(())
     }
@@ -827,7 +890,7 @@ impl P2PCore {
 
     fn call_signal(&mut self, fp: &str, s: &CallSession, action: CallAction) {
         let with_keys = matches!(action, CallAction::Invite | CallAction::Accept);
-        let keys = with_keys.then(|| (s.my_key.to_vec(), s.my_sid.to_vec()));
+        let keys = with_keys.then(|| (pair_key(&s.my_key, fp).to_vec(), s.my_sid.to_vec()));
         self.send_call_signal(fp, &s.call_id, s.group_id.clone(), s.video, action, keys);
     }
 
@@ -929,7 +992,7 @@ impl P2PCore {
                     invited.push(peer_fp.to_string());
                 }
                 let mut s = CallSession::new(call_id.clone(), group_id.clone(), video, CallPhase::Incoming, peer_fp.to_string(), invited);
-                s.keys.insert(peer_fp.to_string(), (media_key, stream_id));
+                s.keys.insert(peer_fp.to_string(), (Zeroizing::new(media_key), stream_id));
                 s.joined.insert(peer_fp.to_string());
                 self.call = Some(s);
                 let name = self.call_title();
@@ -956,7 +1019,7 @@ impl P2PCore {
                     s.invited.push(peer_fp.to_string());
                 }
                 let was_active = s.phase == CallPhase::Active;
-                let new_key = s.keys.insert(peer_fp.to_string(), (media_key.clone(), stream_id.clone())).is_none();
+                let new_key = s.keys.insert(peer_fp.to_string(), (Zeroizing::new(media_key.clone()), stream_id.clone())).is_none();
                 s.joined.insert(peer_fp.to_string());
                 // Group: a joiner we never sent our key to (it was missing
                 // from our invited list, or its Accept reached us before the
@@ -964,7 +1027,7 @@ impl P2PCore {
                 // first-seen key once; the reply carries a known key back, so
                 // it stops there.
                 let reply = (was_active && new_key && s.group_id.is_some())
-                    .then(|| (s.call_id.clone(), s.group_id.clone(), s.video, (s.my_key.to_vec(), s.my_sid.to_vec())));
+                    .then(|| (s.call_id.clone(), s.group_id.clone(), s.video, (pair_key(&s.my_key, peer_fp).to_vec(), s.my_sid.to_vec())));
                 let mut stop_ringing = Vec::new();
                 if s.phase == CallPhase::Outgoing {
                     s.phase = CallPhase::Active;
@@ -979,6 +1042,7 @@ impl P2PCore {
                 }
                 if s.phase == CallPhase::Active {
                     media_add_remote(peer_fp, &media_key, &stream_id);
+                    self.server_sweep_at = 0;
                 }
                 if !stop_ringing.is_empty() {
                     let (cid, video) = (s.call_id.clone(), s.video);
@@ -1141,6 +1205,7 @@ impl P2PCore {
             .into_iter()
             .map(|fp| serde_json::json!({
                 "fp": fp,
+                "peer": self.canonical_peer_key(fp),
                 "name": self.device_display_name(fp),
                 "joined": s.joined.contains(fp),
                 "slot": media_slot_of(fp),
@@ -1276,6 +1341,19 @@ mod tests {
     }
 
     #[test]
+    fn every_receiver_gets_its_own_key() {
+        let master = [7u8; 32];
+        assert_eq!(*pair_key(&master, "bob"), *pair_key(&master, "bob"));
+        assert_ne!(*pair_key(&master, "bob"), *pair_key(&master, "carol"));
+        assert_ne!(*pair_key(&master, "bob"), master);
+        // What we seal for bob opens with bob's key only.
+        let sid = [1u8; 8];
+        let p = seal_packet(&pair_key(&master, "bob"), &sid, 1, 1, b"x");
+        assert!(open_packet(&pair_key(&master, "bob"), &sid, 1, &p).is_some());
+        assert!(open_packet(&pair_key(&master, "carol"), &sid, 1, &p).is_none());
+    }
+
+    #[test]
     fn frame_round_trip() {
         let f = encode_frame(b"mb_1", b"data");
         let (mb, d) = futures::executor::block_on(read_frame(&mut futures::io::Cursor::new(f))).unwrap();
@@ -1326,6 +1404,12 @@ mod tests {
         // A second device claiming the same stream id does not lock the first
         // out: the key decides.
         media_add_remote("thief", &[4u8; 32], &[9u8; 8]);
+        // The relay address of a direction comes from that direction's key.
+        assert!(relay_listen_keys().contains(&vec![3u8; 32]));
+        let m = media();
+        assert_eq!(m.targets["self"].mailbox, server_seal::relay_mailbox_id(&pair_key(&m.key, "self")[..]).into_bytes());
+        assert_ne!(m.targets["self"].mailbox, m.targets["thief"].mailbox);
+        drop(m);
         media_on_packet(&seal_packet(&[3u8; 32], &[9u8; 8], 7, 1, b"mine"));
         assert_eq!(media_recv(0).unwrap(), b"\x01\x00mine");
         // A re-key keeps the slot.

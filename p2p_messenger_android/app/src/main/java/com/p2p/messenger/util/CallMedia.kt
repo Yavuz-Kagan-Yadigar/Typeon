@@ -110,6 +110,10 @@ object CallMedia {
         videoSinks[slot] = VideoSink(slot, surface, onSize)
     }
 
+    /** True while [slot]'s audio is clearly above its own noise floor. */
+    fun isSpeaking(slot: Int): Boolean =
+        (audioSinks[slot]?.speakingUntil ?: 0L) > android.os.SystemClock.elapsedRealtime()
+
     fun dropSlot(slot: Int) {
         Log.i(TAG, "dropSlot $slot")
         // UI thread, see `stop`.
@@ -340,6 +344,25 @@ object CallMedia {
         private var statPeak = 0
         private var statOverflow = 0
         private var statAt = System.currentTimeMillis()
+        /** Noise floor (peak units) and last time the level stood clear of it. */
+        private var noise = 400f
+        @Volatile var speakingUntil = 0L
+
+        /** SNR proxy, ~50 ops per 20 ms frame: strided peak against a
+         *  min-tracking noise floor. Speaking = >= ~10 dB over the floor and
+         *  above an absolute minimum; held 400 ms so the frame does not flicker. */
+        private fun trackLevel(pcm: ByteArray) {
+            var p = 0
+            var i = 0
+            while (i + 1 < pcm.size) { // every 16th sample
+                val v = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xff)).toShort().toInt()
+                val a = if (v < 0) -v else v
+                if (a > p) p = a
+                i += 32
+            }
+            noise = if (p < noise) p.toFloat().coerceAtLeast(60f) else noise + (p - noise) * 0.002f
+            if (p > 1500 && p > noise * 3.2f) speakingUntil = android.os.SystemClock.elapsedRealtime() + 400
+        }
 
         init {
             val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48000, 1).apply {
@@ -402,6 +425,7 @@ object CallMedia {
             val frameBytes = 2 * outChannels
             val buffered = written - (t.playbackHeadPosition.toLong() and 0xffffffffL)
             statPackets++
+            trackLevel(pcm)
             statPeak = maxOf(statPeak, peakOf(pcm))
             val now = System.currentTimeMillis()
             if (now - statAt >= 5000) {
@@ -844,6 +868,7 @@ object CallMedia {
         private var rot = 0
         private var pts = 0L
         private var askedAt = 0L
+        private var createdAt = -1000L
         private val info = MediaCodec.BufferInfo()
 
         /** feed() runs on the receive thread, release() on the UI thread. */
@@ -856,8 +881,16 @@ object CallMedia {
             val r = (f[off + 1].toInt() and 3) * 90
             val fw = ((f[off + 2].toInt() and 0xff) shl 8) or (f[off + 3].toInt() and 0xff)
             val fh = ((f[off + 4].toInt() and 0xff) shl 8) or (f[off + 5].toInt() and 0xff)
+            // The header is the peer's: no vendor decoder is asked for 65535x65535.
+            if (fw !in 16..4096 || fh !in 16..4096) return
             if (codec == null || fw != w || fh != h || r != rot || m != mime) {
                 if (!key) { askKeyframe(); return }
+                // One new decoder a second per slot, whatever the peer's
+                // keyframes claim: alternating sizes used to churn hardware
+                // decoders at frame rate.
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (now - createdAt < 1000) return
+                createdAt = now
                 reset()
                 w = fw; h = fh; rot = r; mime = m
                 val fmt = MediaFormat.createVideoFormat(mime, w, h).apply {

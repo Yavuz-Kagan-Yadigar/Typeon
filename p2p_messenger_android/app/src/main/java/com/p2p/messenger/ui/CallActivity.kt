@@ -28,6 +28,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -155,6 +156,9 @@ class CallActivity : AppCompatActivity() {
 
     private class Tile(val root: FrameLayout, val label: TextView, var texture: TextureView?) {
         var mutedShown = false
+        var avatar: ImageView? = null
+        var peer = ""
+        var framed = false
         var videoW = 0
         var videoH = 0
     }
@@ -386,7 +390,7 @@ class CallActivity : AppCompatActivity() {
         btnSpeaker.visibility = if (inCall) View.VISIBLE else View.GONE
         btnCamera.visibility = if (inCall && video) View.VISIBLE else View.GONE
         btnPip.visibility = if (inCall || newState == "outgoing") View.VISIBLE else View.GONE
-        if (inCall && participants != null) syncTiles(participants)
+        if (inCall && participants != null) { syncTiles(participants); frameTiles() }
     }
 
     private fun onStateChanged(old: String, new: String, s: JSONObject) {
@@ -521,7 +525,15 @@ class CallActivity : AppCompatActivity() {
             val tile = tiles[slot] ?: newTile(slot).also { tiles[slot] = it; grid.addView(it.root) }
             tile.label.text = p.optString("name")
             // Camera off on their side: hide the last frame instead of freezing on it.
-            tile.texture?.visibility = if (p.optBoolean("video_off")) View.INVISIBLE else View.VISIBLE
+            val camOff = p.optBoolean("video_off")
+            tile.texture?.visibility = if (camOff) View.INVISIBLE else View.VISIBLE
+            // Camera off (or voice call): their profile picture instead of a black tile.
+            tile.avatar?.visibility = if (camOff || tile.texture == null) View.VISIBLE else View.GONE
+            val peerKey = p.optString("peer")
+            if (tile.peer != peerKey) {
+                tile.peer = peerKey
+                loadAvatar(tile, peerKey, p.optString("name"))
+            }
             // Muted participants get a mic-off icon before their name.
             val muted = p.optBoolean("muted")
             if (muted != tile.mutedShown) {
@@ -565,12 +577,45 @@ class CallActivity : AppCompatActivity() {
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             if (video) Gravity.BOTTOM or Gravity.START else Gravity.CENTER
         ))
-        val tile = Tile(root, label, texture)
+        val size = (112 * resources.displayMetrics.density).toInt()
+        val avatar = ImageView(this).apply { visibility = View.GONE }
+        root.addView(avatar, 0, FrameLayout.LayoutParams(size, size, Gravity.CENTER))
+        val tile = Tile(root, label, texture).also { it.avatar = avatar }
         // The tile is resized when the call enters or leaves picture-in-picture.
         root.addOnLayoutChangeListener { _, l, t, r, b, oldL, oldT, oldR, oldB ->
             if (r - l != oldR - oldL || b - t != oldB - oldT) texture?.let { tv -> root.post { fitVideo(tv, root, tile.videoW, tile.videoH) } }
         }
         return tile
+    }
+
+    /** Placeholder now; the real picture once the contact list is read (off the UI thread). */
+    private fun loadAvatar(tile: Tile, peer: String, name: String) {
+        com.p2p.messenger.util.AvatarUtil.renderInto(tile.avatar!!, null, name)
+        Thread {
+            val jpeg = try {
+                val a = org.json.JSONArray(P2PLib.listContacts())
+                (0 until a.length()).map { a.getJSONObject(it) }
+                    .firstOrNull { it.optString("active_device_fingerprint") == peer }
+                    ?.optString("avatar_hex")?.ifEmpty { null }?.let { com.p2p.messenger.util.hexToBytes(it) }
+            } catch (e: Exception) { null }
+            if (jpeg != null) ui.post {
+                if (!isDestroyed && tile.peer == peer) com.p2p.messenger.util.AvatarUtil.renderInto(tile.avatar!!, jpeg, name)
+            }
+        }.start()
+    }
+
+    /** Accent frame around a tile while its participant speaks. */
+    private fun frameTiles() {
+        for ((slot, t) in tiles) {
+            val on = CallMedia.isSpeaking(slot)
+            if (on == t.framed) continue
+            t.framed = on
+            t.root.foreground = if (!on) null else android.graphics.drawable.GradientDrawable().apply {
+                setStroke((3 * resources.displayMetrics.density).toInt(),
+                    com.p2p.messenger.util.ThemePrefs.getAccentColor(this@CallActivity)
+                        ?: com.google.android.material.color.MaterialColors.getColor(t.root, androidx.appcompat.R.attr.colorPrimary))
+            }
+        }
     }
 
     /** Letterbox the remote video into its tile, keeping the aspect ratio. */
