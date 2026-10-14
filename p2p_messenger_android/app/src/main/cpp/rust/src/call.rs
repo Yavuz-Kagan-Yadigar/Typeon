@@ -289,6 +289,9 @@ struct Target {
     mailbox: Vec<u8>,
     /// `pair_key` for this device: what we seal its copy of a frame with.
     key: Zeroizing<[u8; 32]>,
+    /// Its audio copy held back, see [`AUDIO_HOLD_ABOVE_MS`]: decided by
+    /// this device's own report, so one slow receiver mutes nobody else.
+    audio_hold: bool,
 }
 
 struct Link {
@@ -321,8 +324,6 @@ struct Media {
     next_link_id: u64,
     inbox: VecDeque<Vec<u8>>,
     sent: u64,
-    /// Audio held back, see [`AUDIO_HOLD_ABOVE_MS`].
-    audio_hold: bool,
     received: u64,
     /// Outgoing copies dropped on a full link queue.
     dropped: u64,
@@ -330,11 +331,11 @@ struct Media {
     rx_dropped: u64,
     via_direct: u64,
     via_relay: u64,
-    /// Reporter stream id -> (queue ms it sees on OUR stream, when).
+    /// Reporter device fingerprint -> (queue ms it sees on OUR stream, when).
     /// Tor/yamux buffer hundreds of KB inside the stream, so our own link
     /// queue stays empty while seconds pile up on the path — only the far
     /// end can see that.
-    reports: HashMap<[u8; 8], (u32, u64)>,
+    reports: HashMap<String, (u32, u64)>,
     /// A receiver asked us for a keyframe; Kotlin takes it via `media_take_keyframe_request`.
     keyframe_asked: bool,
     /// Encrypted media bytes queued out (per copy) / accepted in.
@@ -397,7 +398,7 @@ fn media_add_remote(fp: &str, key: &[u8], sid: &[u8]) {
     m.remotes.insert(fp.to_string(), Remote::new(fp, slot, key, sid));
     let send_key = pair_key(&m.key, fp);
     let mailbox = server_seal::relay_mailbox_id(&send_key[..]).into_bytes();
-    m.targets.insert(fp.to_string(), Target { peer: None, mailbox, key: send_key });
+    m.targets.insert(fp.to_string(), Target { peer: None, mailbox, key: send_key, audio_hold: false });
 }
 
 /// The keys the call's remotes seal our media with. Each gives the relay
@@ -469,13 +470,20 @@ pub fn media_send(kind: u8, payload: &[u8]) -> bool {
         return false;
     }
     if kind == KIND_AUDIO {
-        let q = reported_queue(&m);
-        if m.audio_hold && q < AUDIO_HOLD_BELOW_MS {
-            m.audio_hold = false;
-        } else if !m.audio_hold && q > AUDIO_HOLD_ABOVE_MS {
-            m.audio_hold = true;
+        let now = current_time_ms();
+        let fresh: HashMap<String, u32> = m.reports.iter()
+            .filter(|(_, (_, at))| now.saturating_sub(*at) < REPORT_TTL_MS)
+            .map(|(fp, (q, _))| (fp.clone(), *q))
+            .collect();
+        for (fp, t) in m.targets.iter_mut() {
+            let q = fresh.get(fp).copied().unwrap_or(0);
+            if t.audio_hold && q < AUDIO_HOLD_BELOW_MS {
+                t.audio_hold = false;
+            } else if !t.audio_hold && q > AUDIO_HOLD_ABOVE_MS {
+                t.audio_hold = true;
+            }
         }
-        if m.audio_hold {
+        if m.targets.values().all(|t| t.audio_hold) {
             m.dropped += 1;
             return false;
         }
@@ -484,6 +492,7 @@ pub fn media_send(kind: u8, payload: &[u8]) -> bool {
     let targets: Vec<(Option<PeerId>, Vec<u8>, Vec<u8>)> = m
         .targets
         .values()
+        .filter(|t| kind != KIND_AUDIO || !t.audio_hold)
         .map(|t| (t.peer, t.mailbox.clone(), seal_packet(&t.key, &m.sid, m.seq, kind, payload)))
         .collect();
     let mut any = false;
@@ -567,7 +576,7 @@ fn media_on_packet(packet: &[u8]) {
     if pt[0] == KIND_REPORT {
         if pt.len() >= 5 + 10 && pt[5..13] == m.sid {
             let q = u16::from_be_bytes([pt[13], pt[14]]) as u32;
-            m.reports.insert(sid, (q, now));
+            m.reports.insert(fp.clone(), (q, now));
             if pt.len() >= 16 && pt[15] & 1 != 0 {
                 m.keyframe_asked = true;
             }
