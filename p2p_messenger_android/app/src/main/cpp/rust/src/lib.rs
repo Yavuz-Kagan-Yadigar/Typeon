@@ -1270,6 +1270,7 @@ mod review_oct2026_tests {
             kem_pubkey_x25519: rec.kem_pubkey_x25519,
             kem_pubkey_mlkem: rec.kem_pubkey_mlkem,
             last_addr: None,
+            first_contact_secret: Vec::new(),
         };
         me.adopt_vouched_member_devices(&[claim.clone()], &[]);
         assert!(me.contacts.is_empty() && me.known_remote_devices.is_empty());
@@ -5065,6 +5066,7 @@ impl P2PCore {
     /// old. The server refuses a whole `Register`/`Fetch` above 512 ids.
     pub(crate) fn first_contact_secrets(&self) -> Vec<Vec<u8>> {
         let mut out: Vec<Vec<u8>> = self.pairing_nonces().into_iter().map(|(n, _)| n).collect();
+        out.push(self.own_group_contact_secret());
         out.push(self.link_request_nonce.clone());
         out.push(self.pending_link_nonce.clone());
         if let Some(conn) = &self.db {
@@ -5124,6 +5126,40 @@ impl P2PCore {
             .collect();
         others.sort();
         others.into_iter().find_map(|fp| self.stored_pairing_secrets(fp).into_iter().next())
+            .or_else(|| self.meta_str(&format!("gf:{}", target_fp)).and_then(|v| hex::decode(v).ok()).filter(|s| s.len() == 16))
+    }
+
+    /// Gives the founder device that sent a group update our group
+    /// first-contact secret, once (bkz. `GroupMemberDevice.first_contact_secret`).
+    fn give_founder_contact_secret(&mut self, group_id: &str, sender_identity_id: &str, peer_fp: &str) {
+        let Some(g) = self.groups.get(group_id) else { return };
+        if g.founder_identity_id != sender_identity_id || self.my_identity_id().as_deref() == Some(sender_identity_id) {
+            return;
+        }
+        let sent = format!("gfs:{}", peer_fp);
+        if self.meta_str(&sent).is_some() {
+            return;
+        }
+        let secret = self.own_group_contact_secret();
+        if secret.len() == 16 && self.send_message_content(peer_fp.to_string(), &MessageContent::FirstContactSecret { secret }, None).is_ok() {
+            self.meta_put(&sent, "1");
+        }
+    }
+
+    /// This device's group first-contact secret (bkz.
+    /// `GroupMemberDevice.first_contact_secret`), made on first use. Its
+    /// mailbox is always registered.
+    fn own_group_contact_secret(&self) -> Vec<u8> {
+        if let Some(s) = self.meta_str("own_gfc").and_then(|v| hex::decode(v).ok()).filter(|s| s.len() == 16) {
+            return s;
+        }
+        if self.db.is_none() {
+            return Vec::new();
+        }
+        let mut s = vec![0u8; 16];
+        OsRng.fill_bytes(&mut s);
+        self.meta_put("own_gfc", &hex::encode(&s));
+        s
     }
 
     /// The signed revokes of my own identity, oldest first (bkz.
@@ -8187,7 +8223,7 @@ impl P2PCore {
                     "DELETE FROM remote_devices WHERE device_fingerprint = ?1",
                     // Its first-contact mailbox secrets: the mailbox made
                     // only from them is no longer registered.
-                    "DELETE FROM app_meta WHERE k = 'pn:' || ?1 OR k = 'pk:' || ?1 OR k = 'pt:' || ?1",
+                    "DELETE FROM app_meta WHERE k = 'pn:' || ?1 OR k = 'pk:' || ?1 OR k = 'pt:' || ?1 OR k = 'gf:' || ?1 OR k = 'gfs:' || ?1",
                 ] {
                     tx.execute(sql, params![fp]).map_err(|e| e.to_string())?;
                 }
@@ -9400,6 +9436,7 @@ impl P2PCore {
                 | MessageContent::DeviceLinkGrant { .. }
                 | MessageContent::DeviceAddNotice { .. }
                 | MessageContent::DeviceRevokeNotice(_)
+                | MessageContent::FirstContactSecret { .. }
                 | MessageContent::DeviceSync(_)
                 | MessageContent::SiblingEcho { .. }
                 | MessageContent::ReadStateSync { .. }
@@ -9665,6 +9702,7 @@ impl P2PCore {
                 | MessageContent::DeviceLinkGrant { .. }
                 | MessageContent::DeviceAddNotice { .. }
                 | MessageContent::DeviceRevokeNotice(_)
+                | MessageContent::FirstContactSecret { .. }
                 | MessageContent::ReadStateSync { .. }
                 | MessageContent::ProfileUpdate { .. }
                 | MessageContent::FileOffer { .. }
@@ -11051,6 +11089,7 @@ impl P2PCore {
                 match self.process_group_update(&update) {
                     Ok(()) => {
                         self.send_ack(&peer_fp, &message_id);
+                        self.give_founder_contact_secret(&group_id, &sender_identity_id, &peer_fp);
                         serde_json::json!({"type": "group_updated", "peer": peer_fp, "group_id": group_id})
                     }
                     Err(e) => {
@@ -11432,6 +11471,17 @@ impl P2PCore {
                 }
             }
             // Çoklu-cihaz (spec 1.7): kardeşten geçmiş geri-doldurma isteği.
+            MessageContent::FirstContactSecret { secret } => {
+                self.send_ack(&peer_fp, &message_id);
+                // Kept only by a founder: only it forwards the secret.
+                let me = self.my_identity_id().unwrap_or_default();
+                let founder_of_shared = self.groups.values()
+                    .any(|g| g.founder_identity_id == me && g.members.iter().any(|m| m.identity_id == sender_identity_id));
+                if secret.len() == 16 && founder_of_shared {
+                    self.meta_put(&format!("gf:{}", peer_fp), &hex::encode(&secret));
+                }
+                serde_json::json!({"type": "noop"})
+            }
             MessageContent::AccountDeleted { .. } => {
                 self.send_ack(&peer_fp, &message_id);
                 let my_id_now = self.my_identity_id();
@@ -15014,6 +15064,10 @@ impl P2PCore {
                 .filter(|d| update.members.contains(&d.identity_id))
                 .cloned()
                 .collect();
+            let own_identity_id = self.my_identity_id().unwrap_or_default();
+            for d in devices.iter().filter(|d| d.first_contact_secret.len() == 16 && d.identity_id != own_identity_id) {
+                self.meta_put(&format!("gf:{}", d.device_fingerprint), &hex::encode(&d.first_contact_secret));
+            }
             self.adopt_vouched_member_devices(&devices, &update.member_device_proofs);
         }
         // The founder removed us (see `remove_from_group`'s removal notice):
@@ -15077,6 +15131,11 @@ impl P2PCore {
                     } else {
                         self.device_onion_addr.get(&d.device_fingerprint).cloned()
                             .or_else(|| self.device_last_addr.get(&d.device_fingerprint).cloned())
+                    },
+                    first_contact_secret: if *id == own_identity_id {
+                        self.own_group_contact_secret()
+                    } else {
+                        self.meta_str(&format!("gf:{}", d.device_fingerprint)).and_then(|v| hex::decode(v).ok()).unwrap_or_default()
                     },
                 });
             }

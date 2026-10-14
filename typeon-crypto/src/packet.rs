@@ -226,6 +226,12 @@ pub struct GroupMemberDevice {
     /// `device_last_addr`). Yoksa alıcı mDNS/röle/DHT'ye güvenir.
     #[serde(default)]
     pub last_addr: Option<String>,
+    /// The device's group first-contact secret (16 bytes), which it gave the
+    /// founder in `MessageContent::FirstContactSecret`: a member that never
+    /// paired with the device reaches it through its first-contact mailbox on
+    /// the server. Every member can fill that mailbox.
+    #[serde(default, with = "serde_bytes", skip_serializing_if = "Vec::is_empty")]
+    pub first_contact_secret: Vec<u8>,
 }
 
 /// Kurucu yetkisinin devredildiğine dair, KENDİ BAŞINA doğrulanabilir,
@@ -1023,6 +1029,12 @@ pub enum MessageContent {
     /// Çoklu-cihaz (spec 1.6): imzalı cihaz iptali — kişilere ve kardeş
     /// cihazlara yayılır. Alıcı imzayı doğrulayıp o cihazı `Revoked` yapar.
     DeviceRevokeNotice(DeviceRevoke),
+    /// To a group's founder: the sender device's group first-contact secret,
+    /// forwarded to the members in `GroupMemberDevice.first_contact_secret`.
+    FirstContactSecret {
+        #[serde(with = "serde_bytes")]
+        secret: Vec<u8>,
+    },
     /// Çoklu-cihaz (spec 1.7 delta senkron): var olan bir cihaz, kendi
     /// kimliğinin DİĞER (kardeş) cihazlarına güncel kişi/grup durumunu
     /// yeniden gönderir — ör. yeni bir kişi eklendiğinde. Alıcı idempotent
