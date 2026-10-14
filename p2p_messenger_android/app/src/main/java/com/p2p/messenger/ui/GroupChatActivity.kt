@@ -309,7 +309,7 @@ class GroupChatActivity : AppCompatActivity() {
 
     /** bkz. ChatActivity `pickFileLauncher` aynı notu (grup ekleri). */
     private val pickGroupFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { picked -> promptAttachmentCaption(offerHiRes = true) { caption, hiRes -> onGroupFilePicked(picked, caption, hiRes) } }
+        uri?.let { picked -> promptAttachmentCaption(offerHiRes = contentResolver.getType(picked)?.startsWith("image/") == true) { caption, hiRes -> onGroupFilePicked(picked, caption, hiRes) } }
     }
 
     /** bkz. ChatActivity `takePhotoLauncher` aynı notu — anlık çekim +
@@ -2187,28 +2187,6 @@ class GroupChatActivity : AppCompatActivity() {
 
     /** bkz. ChatActivity.onAttachmentLongClicked AYNI desen — önceden bu
      *  ekranda hiç kablolanmamıştı (grup ek balonuna uzun basmak no-op'tu). */
-    private fun copyAttachmentImage(attachment: SimpleChatAdapter.AttachmentInfo) {
-        lifecycleScope.launch(Dispatchers.IO) {
-            val path = try {
-                P2PLib.getAttachmentPlaintextPath(attachment.fileId)
-            } catch (e: Exception) {
-                "Error: ${e.message}"
-            }
-            withContext(Dispatchers.Main) {
-                val copied = !path.startsWith("Error:") &&
-                    runCatching { OutgoingMedia.copyImage(this@GroupChatActivity, File(path), attachment.fileName) }.isSuccess
-                // Android 13+ shows its own confirmation.
-                if (!copied || android.os.Build.VERSION.SDK_INT < 33) {
-                    Toast.makeText(
-                        this@GroupChatActivity,
-                        if (copied) getString(R.string.lbl_copied) else getString(R.string.error_attachment_open_failed),
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
-            }
-        }
-    }
-
     private fun onGroupAttachmentLongClicked(item: SimpleChatAdapter.Item) {
         val attachment = item.attachment ?: return
         // bkz. ChatActivity.onAttachmentLongClicked AYNI desen — sadece
@@ -2224,7 +2202,7 @@ class GroupChatActivity : AppCompatActivity() {
                 when (options[which]) {
                     getString(R.string.action_open_with) -> openGroupAttachmentWithChooser(attachment)
                     getString(R.string.action_save_to_downloads) -> saveGroupAttachmentToDownloads(attachment)
-                    getString(R.string.action_copy_image) -> copyAttachmentImage(attachment)
+                    getString(R.string.action_copy_image) -> OutgoingMedia.copyImage(this, attachment.fileId)
                     getString(R.string.action_delete_message) -> confirmDeleteGroupMessage(item)
                 }
             }

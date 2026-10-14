@@ -67,16 +67,18 @@ object ImagePreview {
         }
 
     fun rotateForExif(bitmap: Bitmap, exif: android.media.ExifInterface): Bitmap {
-        val degrees = when (exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 0)) {
-            android.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90f
-            android.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180f
-            android.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+        val matrix = android.graphics.Matrix()
+        when (exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 0)) {
+            android.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.setScale(-1f, 1f)
+            android.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.setRotate(180f)
+            android.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.setScale(1f, -1f)
+            android.media.ExifInterface.ORIENTATION_TRANSPOSE -> matrix.apply { setRotate(90f); postScale(-1f, 1f) }
+            android.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.setRotate(90f)
+            android.media.ExifInterface.ORIENTATION_TRANSVERSE -> matrix.apply { setRotate(-90f); postScale(-1f, 1f) }
+            android.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.setRotate(270f)
             else -> return bitmap
         }
-        val rotated = Bitmap.createBitmap(
-            bitmap, 0, 0, bitmap.width, bitmap.height,
-            android.graphics.Matrix().apply { postRotate(degrees) }, true
-        )
+        val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
         if (rotated !== bitmap) bitmap.recycle()
         return rotated
     }

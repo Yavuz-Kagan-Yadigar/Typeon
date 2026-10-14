@@ -105,7 +105,7 @@ use futures::FutureExt as _;
 use futures::StreamExt as _;
 use hex;
 use hkdf::Hkdf;
-use jni::objects::{JByteArray, JClass, JString};
+use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jboolean, jlong, jobjectArray, jstring};
 use jni::JNIEnv;
 use libp2p::kad::store::MemoryStore;
@@ -22252,28 +22252,69 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getAttachmentPlaintextPath<
 /// Writes a lossless JPEG XL to `out_path`. "OK" or "Error: ...".
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_encodeJxlLossless<'local>(
-    mut env: JNIEnv<'local>, _class: JClass<'local>, pixels: jni::objects::JByteBuffer<'local>,
-    width: jni::sys::jint, height: jni::sys::jint, has_alpha: jboolean, out_path: JString<'local>,
+    mut env: JNIEnv<'local>, _class: JClass<'local>, bitmap: JObject<'local>,
+    has_alpha: jboolean, out_path: JString<'local>,
 ) -> jstring {
     let out: String = env.get_string(&out_path).map(|s| s.into()).unwrap_or_default();
-    let buffer = env.get_direct_buffer_address(&pixels).ok().zip(env.get_direct_buffer_capacity(&pixels).ok());
-    let result = match buffer {
-        Some((address, len)) if !address.is_null() && width > 0 && height > 0 => {
-            let address = address as usize;
-            catch_panic(move || {
-                // SAFETY: the buffer is pinned native memory of the caller,
-                // alive and not touched by Java for the length of this call.
-                let rgba = unsafe { std::slice::from_raw_parts_mut(address as *mut u8, len) };
-                attachments::encode_jxl_lossless(rgba, width as u32, height as u32, has_alpha != 0, std::path::Path::new(&out))
-            })
-        }
-        _ => Ok(Err("not a direct buffer".to_string())),
+    // Native heap, not the Java one: a direct ByteBuffer on Android is a
+    // managed array, and 48 MP of pixels ran the app out of Java memory.
+    let rgba = bitmap_rgba(&env, &bitmap);
+    let result = match rgba {
+        Some((mut rgba, width, height)) => catch_panic(move || {
+            attachments::encode_jxl_lossless(&mut rgba, width, height, has_alpha != 0, std::path::Path::new(&out))
+        }),
+        None => Ok(Err("not an RGBA_8888 bitmap".to_string())),
     };
     let out = match result {
         Ok(Ok(())) => "OK".to_string(),
         Ok(Err(e)) | Err(e) => format!("Error: {}", e),
     };
     safe_new_jstring(&mut env, out)
+}
+
+/// The pixels of an `ARGB_8888` `android.graphics.Bitmap` (RGBA bytes in
+/// memory), copied row by row past its stride. ponytail: one native copy of
+/// the image; lock the pixels across the encode if memory gets tight.
+#[cfg(target_os = "android")]
+fn bitmap_rgba(env: &JNIEnv, bitmap: &JObject) -> Option<(Vec<u8>, u32, u32)> {
+    #[repr(C)]
+    struct AndroidBitmapInfo { width: u32, height: u32, stride: u32, format: i32, flags: u32 }
+    #[link(name = "jnigraphics")]
+    extern "C" {
+        fn AndroidBitmap_getInfo(env: *mut jni::sys::JNIEnv, bitmap: jni::sys::jobject, info: *mut AndroidBitmapInfo) -> i32;
+        fn AndroidBitmap_lockPixels(env: *mut jni::sys::JNIEnv, bitmap: jni::sys::jobject, addr: *mut *mut std::ffi::c_void) -> i32;
+        fn AndroidBitmap_unlockPixels(env: *mut jni::sys::JNIEnv, bitmap: jni::sys::jobject) -> i32;
+    }
+    const RGBA_8888: i32 = 1;
+    let (raw_env, raw_bitmap) = (env.get_raw(), bitmap.as_raw());
+    let mut info = AndroidBitmapInfo { width: 0, height: 0, stride: 0, format: 0, flags: 0 };
+    // SAFETY: a live JNI env and a Bitmap reference of this call; the pixels
+    // are read only between lock and unlock.
+    unsafe {
+        if AndroidBitmap_getInfo(raw_env, raw_bitmap, &mut info) != 0 || info.format != RGBA_8888 {
+            return None;
+        }
+        let (w, h, stride) = (info.width as usize, info.height as usize, info.stride as usize);
+        if (w as u64 * h as u64) > attachments::MAX_IMAGE_PIXELS || stride < w * 4 {
+            return None;
+        }
+        let mut addr = std::ptr::null_mut();
+        if AndroidBitmap_lockPixels(raw_env, raw_bitmap, &mut addr) != 0 || addr.is_null() {
+            return None;
+        }
+        let src = std::slice::from_raw_parts(addr as *const u8, stride * h);
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            rgba.extend_from_slice(&src[y * stride..y * stride + w * 4]);
+        }
+        AndroidBitmap_unlockPixels(raw_env, raw_bitmap);
+        Some((rgba, info.width, info.height))
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn bitmap_rgba(_env: &JNIEnv, _bitmap: &JObject) -> Option<(Vec<u8>, u32, u32)> {
+    None
 }
 
 #[no_mangle]

@@ -13,6 +13,8 @@ import com.p2p.messenger.P2PLib
 import java.io.File
 import java.nio.ByteBuffer
 import java.util.UUID
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
 /**
  * What an outgoing photo or video becomes before it is encrypted:
@@ -30,8 +32,11 @@ import java.util.UUID
 object OutgoingMedia {
     private const val TAG = "OutgoingMedia"
     private const val JPEG_QUALITY = 90
-    /** Same cap as the core's `attachments::MAX_IMAGE_PIXELS`. */
+    /** Re-encoded as JPEG up to this; larger images go as they are. */
     private const val MAX_PIXELS = 64_000_000L
+    /** Same cap as the core's `attachments::MAX_IMAGE_PIXELS`: a larger
+     *  hi-res image becomes JPEG, the receiver could not open the JPEG XL. */
+    private const val MAX_JXL_PIXELS = 24_000_000L
 
     class Prepared(val file: File, val fileName: String, val mimeType: String)
 
@@ -62,20 +67,55 @@ object OutgoingMedia {
     /** A received image on the clipboard: its decrypted copy (a JPEG XL is
      *  already PNG there, bkz. `savedAs`). The AppLock purge of `plain_cache`
      *  makes a later paste fail. */
-    fun copyImage(context: android.content.Context, plain: File, label: String) {
-        val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", plain)
-        context.getSystemService(android.content.ClipboardManager::class.java)
-            .setPrimaryClip(android.content.ClipData.newUri(context.contentResolver, label, uri))
+    fun copyImage(activity: androidx.appcompat.app.AppCompatActivity, fileId: String) {
+        activity.lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val path = try {
+                P2PLib.getAttachmentPlaintextPath(fileId)
+            } catch (e: Exception) {
+                "Error: ${e.message}"
+            }
+            val copied = !path.startsWith("Error:") && runCatching {
+                val uri = androidx.core.content.FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", File(path))
+                val clip = android.content.ClipData.newUri(activity.contentResolver, "image", uri)
+                // Keyboards and the system overlay do not preview it.
+                if (Build.VERSION.SDK_INT >= 33) {
+                    clip.description.extras = android.os.PersistableBundle().apply {
+                        putBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE, true)
+                    }
+                }
+                activity.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(clip)
+            }.isSuccess
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                // Android 13+ shows its own confirmation.
+                if (!copied || Build.VERSION.SDK_INT < 33) {
+                    android.widget.Toast.makeText(
+                        activity,
+                        if (copied) com.p2p.messenger.R.string.lbl_copied else com.p2p.messenger.R.string.error_attachment_open_failed,
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
     }
 
     private fun prepareImage(src: File, fileName: String, hiRes: Boolean): Prepared? {
         val head = ByteArray(256).also { b -> src.inputStream().use { it.read(b) } }
         if (isGif(head) || isAnimatedWebp(head) || isImageSequence(head) || isAnimatedPng(head, src)) return null
         if (hiRes && isJpeg(head)) return null
+        // Size from the header, before a decode that could run out of memory.
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(src.absolutePath, bounds)
+        val pixels = bounds.outWidth.toLong() * bounds.outHeight
+        if (pixels > MAX_PIXELS) return null
+        @Suppress("NAME_SHADOWING")
+        val hiRes = hiRes && pixels <= MAX_JXL_PIXELS
         val bitmap = decode(src, srgb = hiRes) ?: return null
         try {
             if (bitmap.width.toLong() * bitmap.height > MAX_PIXELS) return null
             val opaque = isOpaque(bitmap)
+            // Below Android 9 the alpha is premultiplied: not lossless. The
+            // file goes as it is (the core drops its metadata chunks).
+            if (hiRes && !opaque && bitmap.isPremultiplied) return null
             val base = fileName.substringBeforeLast('.', fileName)
             return if (!hiRes) {
                 if (!opaque) return null
@@ -84,13 +124,10 @@ object OutgoingMedia {
                 Prepared(out, "$base.jpg", "image/jpeg")
             } else {
                 val argb = if (bitmap.config == Bitmap.Config.ARGB_8888) bitmap else bitmap.copy(Bitmap.Config.ARGB_8888, false)
-                // Native memory: a 48 MP photo is ~190 MB of pixels.
-                val pixels = ByteBuffer.allocateDirect(argb.width * argb.height * 4)
-                argb.copyPixelsToBuffer(pixels)
-                val (w, h) = argb.width to argb.height
-                if (argb !== bitmap) argb.recycle()
                 val out = sibling(src)
-                val result = P2PLib.encodeJxlLossless(pixels, w, h, !opaque, out.absolutePath)
+                // The core reads the pixels straight from the bitmap.
+                val result = P2PLib.encodeJxlLossless(argb, !opaque, out.absolutePath)
+                if (argb !== bitmap) argb.recycle()
                 if (result != "OK") {
                     out.delete()
                     Log.w(TAG, "JPEG XL: $result")
@@ -113,7 +150,8 @@ object OutgoingMedia {
                 if (srgb) decoder.setTargetColorSpace(android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB))
             }
         } else {
-            BitmapFactory.decodeFile(src.absolutePath, BitmapFactory.Options().apply { inPremultiplied = false })
+            // Premultiplied: the EXIF rotation draws it on a canvas.
+            BitmapFactory.decodeFile(src.absolutePath)
                 ?.let { ImagePreview.rotateForExif(it, android.media.ExifInterface(src.absolutePath)) }
         }
 
@@ -186,8 +224,9 @@ object OutgoingMedia {
                     when (type) {
                         "moov", "trak", "mdia" -> walk(pos + header, pos + size)
                         "udta", "meta" -> {
-                            f.seek(pos + header - 4)
+                            f.seek(pos + 4)
                             f.write("free".toByteArray(Charsets.ISO_8859_1))
+                            f.seek(pos + header)
                             f.write(ByteArray((size - header).toInt()))
                         }
                         "mvhd", "tkhd", "mdhd" -> {
@@ -210,6 +249,8 @@ object OutgoingMedia {
             "video/mp4" -> MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
             "video/3gpp" -> MediaMuxer.OutputFormat.MUXER_OUTPUT_3GPP
             "video/webm" -> MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM
+            // An iPhone .mov (its GPS in a ©xyz atom): same codecs, MP4 box.
+            "video/quicktime" -> MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
             else -> return null
         }
         val out = sibling(src)
@@ -253,6 +294,9 @@ object OutgoingMedia {
             m.release()
             muxer = null
             if (container != MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM) scrubMp4(out)
+            if (mimeType == "video/quicktime") {
+                return Prepared(out, fileName.substringBeforeLast('.', fileName) + ".mp4", "video/mp4")
+            }
             return Prepared(out, fileName, mimeType)
         } catch (e: Exception) {
             Log.w(TAG, "video left unchanged: ${e.message}")

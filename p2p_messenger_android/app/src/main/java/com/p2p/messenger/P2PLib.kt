@@ -377,7 +377,7 @@ object P2PLib {
     external fun getAttachmentPlaintextPath(fileId: String): String
     /** Lossless JPEG XL of [pixels] (direct buffer, `width * height` RGBA,
      *  not premultiplied; changed by the call) to [outPath]. "OK" or "Error: ...". */
-    external fun encodeJxlLossless(pixels: java.nio.ByteBuffer, width: Int, height: Int, hasAlpha: Boolean, outPath: String): String
+    external fun encodeJxlLossless(bitmap: android.graphics.Bitmap, hasAlpha: Boolean, outPath: String): String
 
     // --- Bölüm 5: Grup mesajlaşma ---
     /** JSON-encoded List<GroupSummary>. */
