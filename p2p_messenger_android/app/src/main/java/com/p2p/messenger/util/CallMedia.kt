@@ -56,6 +56,9 @@ object CallMedia {
     /** `callBacklog` (frames, 100 ms each when reported by the peer) to drop / to restore. */
     private const val AUDIO_LOW_AT = 4
     private const val AUDIO_HIGH_AT = 1
+    /** Stay low at least this long: while audio is held the queue empties at once
+     *  and an immediate climb back flapped 6/12 kbps every ~4 s. */
+    private const val AUDIO_LOW_HOLD_MS = 10_000L
     /** Frames a decode lane may hold (~1 s of audio bundles or video). */
     private const val LANE_QUEUE = 24
 
@@ -175,13 +178,16 @@ object CallMedia {
             var bitrate = AUDIO_BITRATE
             var perFrame = PACKETS_PER_FRAME
             var rateAt = 0L
+            var lowAt = 0L
             while (running && generation == gen) {
                 val nowMs = System.currentTimeMillis()
                 if (nowMs - rateAt >= 1000) {
                     rateAt = nowMs
                     val backlog = P2PLib.callBacklog()
+                    if (backlog >= AUDIO_LOW_AT) lowAt = nowMs
                     val want = if (backlog >= AUDIO_LOW_AT) AUDIO_BITRATE_LOW
-                        else if (backlog <= AUDIO_HIGH_AT) AUDIO_BITRATE else bitrate
+                        else if (backlog <= AUDIO_HIGH_AT && nowMs - lowAt >= AUDIO_LOW_HOLD_MS) AUDIO_BITRATE
+                        else bitrate
                     if (want != bitrate) {
                         bitrate = want
                         perFrame = if (want == AUDIO_BITRATE_LOW) PACKETS_PER_FRAME_LOW else PACKETS_PER_FRAME
