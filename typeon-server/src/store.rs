@@ -422,7 +422,9 @@ impl Store {
                 &format!(
                     "DELETE FROM mail WHERE mailbox_id IN (SELECT mailbox_id FROM mailbox_readers WHERE owner IN ({sleepers}))
                        AND NOT EXISTS (SELECT 1 FROM mailbox_readers r
-                                       WHERE r.mailbox_id = mail.mailbox_id AND r.owner NOT IN ({sleepers}))"
+                                       WHERE r.mailbox_id = mail.mailbox_id AND r.owner NOT IN ({sleepers})
+                                         AND r.owner != mail.depositor
+                                         AND r.owner IN (SELECT enrollment_id FROM enrollments WHERE state = 'active'))"
                 ),
                 params![before],
             )
@@ -1402,11 +1404,12 @@ mod tests {
         register(&s, &a, "shared");
         register(&s, &b, "shared");
         s.deposit("box", b"waiting", &b, 1, 1000).unwrap();
-        s.deposit("shared", b"kept", &b, 2, 1000).unwrap();
+        s.deposit("shared", b"kept", &a, 2, 1000).unwrap();
+        s.deposit("shared", b"own", &b, 3, 1000).unwrap();
         s.conn.execute("UPDATE enrollments SET bytes_archive = 7 WHERE enrollment_id = ?1", params![a]).unwrap();
         s.touch_enrollment(&b, 1_000);
         assert_eq!(s.count_active_enrollments(500), 1);
-        assert_eq!(s.sleep_idle_enrollments(500), 1, "only the box nobody else reads loses its mail");
+        assert_eq!(s.sleep_idle_enrollments(500), 2, "mail only a sleeper or its depositor reads goes");
         let row = s.enrollment_by_id(&a).expect("the row stays");
         assert_eq!(row.state, EnrollmentState::Active);
         assert_eq!(row.bytes_archive, 7, "quota counters stay");
