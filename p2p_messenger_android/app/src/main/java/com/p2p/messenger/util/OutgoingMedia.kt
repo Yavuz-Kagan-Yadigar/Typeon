@@ -69,8 +69,8 @@ object OutgoingMedia {
     }
 
     private fun prepareImage(src: File, fileName: String, hiRes: Boolean): Prepared? {
-        val head = ByteArray(32).also { b -> src.inputStream().use { it.read(b) } }
-        if (isGif(head) || isAnimatedWebp(head)) return null
+        val head = ByteArray(256).also { b -> src.inputStream().use { it.read(b) } }
+        if (isGif(head) || isAnimatedWebp(head) || isImageSequence(head) || isAnimatedPng(head, src)) return null
         if (hiRes && isJpeg(head)) return null
         val bitmap = decode(src, srgb = hiRes) ?: return null
         try {
@@ -135,6 +135,33 @@ object OutgoingMedia {
     private fun isAnimatedWebp(h: ByteArray) =
         String(h, 0, 4, Charsets.ISO_8859_1) == "RIFF" && String(h, 8, 8, Charsets.ISO_8859_1) == "WEBPVP8X" &&
             (h[20].toInt() and 0x02) != 0
+
+    /** HEIF/AVIF image sequence: an `ftyp` brand msf1, hevs or avis. */
+    private fun isImageSequence(h: ByteArray): Boolean {
+        if (String(h, 4, 4, Charsets.ISO_8859_1) != "ftyp") return false
+        val size = ByteBuffer.wrap(h, 0, 4).int.coerceIn(8, h.size)
+        return (8..size - 4 step 4).any { String(h, it, 4, Charsets.ISO_8859_1) in SEQUENCE_BRANDS }
+    }
+
+    private val SEQUENCE_BRANDS = setOf("msf1", "hevs", "avis")
+
+    /** APNG: an `acTL` chunk before the first `IDAT`. */
+    private fun isAnimatedPng(h: ByteArray, src: File): Boolean {
+        if (String(h, 1, 3, Charsets.ISO_8859_1) != "PNG") return false
+        java.io.RandomAccessFile(src, "r").use { f ->
+            var pos = 8L
+            while (pos + 8 <= f.length()) {
+                f.seek(pos)
+                val length = f.readInt().toLong() and 0xFFFFFFFFL
+                when (ByteArray(4).also { f.readFully(it) }.toString(Charsets.ISO_8859_1)) {
+                    "acTL" -> return true
+                    "IDAT", "IEND" -> return false
+                }
+                pos += 12 + length
+            }
+        }
+        return false
+    }
 
     private fun sibling(src: File) = File(src.parentFile, UUID.randomUUID().toString())
 

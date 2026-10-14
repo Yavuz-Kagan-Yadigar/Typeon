@@ -324,14 +324,19 @@ fn image_for_sending(
     out: &std::path::Path,
 ) -> Option<(std::path::PathBuf, String, String)> {
     use std::io::Read;
-    let mut head = [0u8; 32];
+    let mut head = [0u8; 256];
     let read = std::fs::File::open(source).ok()?.read(&mut head).ok()?;
     let head = &head[..read];
     let animated_webp = head.len() > 20
         && &head[0..4] == b"RIFF"
         && &head[8..16] == b"WEBPVP8X"
         && head[20] & 0x02 != 0;
-    if head.starts_with(b"GIF8") || animated_webp || (hi_res && head.starts_with(&[0xFF, 0xD8, 0xFF])) {
+    if head.starts_with(b"GIF8")
+        || animated_webp
+        || is_image_sequence(head)
+        || is_animated_png(head, source)
+        || (hi_res && head.starts_with(&[0xFF, 0xD8, 0xFF]))
+    {
         return None;
     }
     let pixbuf = gdk_pixbuf::Pixbuf::from_file(source).ok()?;
@@ -374,4 +379,63 @@ fn image_for_sending(
     }
     crate::core::encode_jxl_lossless(&mut rgba, width as u32, height as u32, !opaque, out.to_str()?).ok()?;
     Some((out.to_path_buf(), format!("{base}.jxl"), "image/jxl".to_string()))
+}
+
+/// HEIF/AVIF image sequence: an `ftyp` brand msf1, hevs or avis.
+fn is_image_sequence(head: &[u8]) -> bool {
+    if head.len() < 12 || &head[4..8] != b"ftyp" {
+        return false;
+    }
+    let size = (u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize).clamp(8, head.len());
+    head[8..size].chunks_exact(4).any(|brand| matches!(brand, b"msf1" | b"hevs" | b"avis"))
+}
+
+/// APNG: an `acTL` chunk before the first `IDAT`.
+fn is_animated_png(head: &[u8], source: &std::path::Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    if head.len() < 8 || &head[1..4] != b"PNG" {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(source) else { return false };
+    let mut pos = 8u64;
+    let mut chunk = [0u8; 8];
+    while file.seek(SeekFrom::Start(pos)).is_ok() && file.read_exact(&mut chunk).is_ok() {
+        match &chunk[4..8] {
+            b"acTL" => return true,
+            b"IDAT" | b"IEND" => return false,
+            _ => pos += 12 + u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64,
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn animation_is_detected() {
+        let mut seq = vec![0, 0, 0, 24];
+        seq.extend_from_slice(b"ftypmif1\0\0\0\0mif1msf1");
+        assert!(is_image_sequence(&seq));
+        seq[20..24].copy_from_slice(b"heic");
+        assert!(!is_image_sequence(&seq));
+
+        let dir = std::env::temp_dir().join(format!("typeon-apng-{}", std::process::id()));
+        let png = |chunks: &[&[u8; 4]]| {
+            let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+            for c in chunks {
+                out.extend_from_slice(&[0, 0, 0, 1]);
+                out.extend_from_slice(*c);
+                out.extend_from_slice(&[0; 5]);
+            }
+            out
+        };
+        for (chunks, animated) in [(&[b"IHDR", b"acTL", b"IDAT"][..], true), (&[b"IHDR", b"IDAT", b"acTL"][..], false)] {
+            let data = png(chunks);
+            std::fs::write(&dir, &data).unwrap();
+            assert_eq!(is_animated_png(&data, &dir), animated);
+        }
+        let _ = std::fs::remove_file(&dir);
+    }
 }
