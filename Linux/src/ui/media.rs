@@ -432,6 +432,15 @@ fn launch_externally(app: &Rc<App>, path: &str) {
 /// browsed to.
 fn save_copy(app: &Rc<App>, path: &str, suggested_name: &str) {
     let Some(window) = app.window() else { return };
+    // The core opens a JPEG XL as PNG: the copy is a PNG and is named so.
+    let png_name;
+    let suggested_name = match suggested_name.strip_suffix(".jxl") {
+        Some(base) if path.ends_with(".png") => {
+            png_name = format!("{base}.png");
+            png_name.as_str()
+        }
+        _ => suggested_name,
+    };
     let dialog = gtk::FileDialog::builder()
         .title("Save a copy")
         .initial_name(suggested_name)

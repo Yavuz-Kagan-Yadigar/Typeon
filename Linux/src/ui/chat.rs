@@ -1885,7 +1885,7 @@ impl ChatView {
         let view = self.clone();
         let app = self.app().clone();
         let conversation = self.conversation.clone();
-        self.prompt_attachment_caption(move |caption| {
+        self.prompt_attachment_caption(false, move |caption, _| {
             let view = view.clone();
             let app = app.clone();
             let conversation = conversation.clone();
@@ -2033,9 +2033,9 @@ impl ChatView {
     /// açıklamayı sorar. Gerçek bir "vazgeç" yolu kasıtlı olarak yok — dosya
     /// zaten seçilmiş/kaydedilmiş, "Skip" boş açıklamayla göndermeye devam
     /// eder (Android'deki aynı davranış).
-    fn prompt_attachment_caption(self: &Rc<Self>, on_confirm: impl FnOnce(String) + 'static) {
+    fn prompt_attachment_caption(self: &Rc<Self>, offer_hi_res: bool, on_confirm: impl FnOnce(String, bool) + 'static) {
         let Some(window) = self.app().window() else {
-            on_confirm(String::new());
+            on_confirm(String::new(), false);
             return;
         };
         let field = gtk::Entry::builder()
@@ -2043,7 +2043,15 @@ impl ChatView {
             .activates_default(true)
             .build();
         let dialog = adw::MessageDialog::new(Some(&window), Some("Add a caption?"), None);
-        dialog.set_extra_child(Some(&crate::ui::widgets::dialog_field(&field)));
+        let hi_res = gtk::CheckButton::with_label("Hi-res (lossless)");
+        if offer_hi_res {
+            let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            column.append(&crate::ui::widgets::dialog_field(&field));
+            column.append(&hi_res);
+            dialog.set_extra_child(Some(&column));
+        } else {
+            dialog.set_extra_child(Some(&crate::ui::widgets::dialog_field(&field)));
+        }
         dialog.add_response("skip", "Skip");
         dialog.add_response("send", "Send");
         dialog.set_default_response(Some("send"));
@@ -2063,7 +2071,7 @@ impl ChatView {
                 String::new()
             };
             if let Some(f) = on_confirm.borrow_mut().take() {
-                f(caption);
+                f(caption, hi_res.is_active());
             }
         });
         dialog.present();
@@ -2077,23 +2085,23 @@ impl ChatView {
             let Ok(file) = result else { return };
             let Some(path) = file.path() else { return };
             let send_view = view.clone();
-            view.prompt_attachment_caption(move |caption| send_view.send_attachment(&path, caption));
+            view.prompt_attachment_caption(true, move |caption, hi_res| send_view.send_attachment(&path, caption, hi_res));
         });
     }
 
-    fn send_attachment(self: &Rc<Self>, path: &std::path::Path, caption: String) {
+    fn send_attachment(self: &Rc<Self>, path: &std::path::Path, caption: String, hi_res: bool) {
         let file_name = path
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "file".to_string());
         let mime = util::guess_mime(&file_name);
-        let source = path.to_string_lossy().to_string();
+        let source = path.to_path_buf();
 
         // Photos travel with a small cover so the receiver sees something
         // before downloading. Video previews would need a decoder we do not
         // ship, so those go without — the receiver still gets a file card.
         let preview = if util::is_image(&mime) {
-            util::scaled_jpeg(&source, 480, 85)
+            util::scaled_jpeg(&path.to_string_lossy(), 480, 85)
         } else {
             None
         };
@@ -2115,16 +2123,25 @@ impl ChatView {
         // Encryption rewrites the whole file; on a 4 GB attachment this is very
         // much not instant.
         app::run_in_background(
-            move || match &conversation {
-                Conversation::Direct { fingerprint, .. } => core::prepare_and_send_file(
-                    fingerprint, &source, &file_name, &mime, preview, None,
-                    caption, reply_id, reply_preview,
-                )
-                .map(|receipt| receipt.message_id),
-                Conversation::Group { group_id, .. } => core::prepare_and_send_group_file(
-                    group_id, &source, &file_name, &mime, preview, None,
-                    caption, reply_id, reply_preview, reply_sender,
-                ),
+            move || {
+                let tmp_dir = crate::data_directory().join("attachments/plain_cache");
+                let (sent, file_name, mime) = util::prepare_outgoing(&source, &file_name, &mime, hi_res, &tmp_dir);
+                let sent_path = sent.to_string_lossy().to_string();
+                let outcome = match &conversation {
+                    Conversation::Direct { fingerprint, .. } => core::prepare_and_send_file(
+                        fingerprint, &sent_path, &file_name, &mime, preview, None,
+                        caption, reply_id, reply_preview,
+                    )
+                    .map(|receipt| receipt.message_id),
+                    Conversation::Group { group_id, .. } => core::prepare_and_send_group_file(
+                        group_id, &sent_path, &file_name, &mime, preview, None,
+                        caption, reply_id, reply_preview, reply_sender,
+                    ),
+                };
+                if sent != source {
+                    let _ = std::fs::remove_file(&sent);
+                }
+                outcome
             },
             move |result| match result {
                 // The attachment row comes from the archive, so a reload is the

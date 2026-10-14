@@ -201,6 +201,7 @@ pub fn guess_mime(file_name: &str) -> String {
         "png" => "image/png",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "jxl" => "image/jxl",
         "bmp" => "image/bmp",
         "svg" => "image/svg+xml",
         "mp4" | "m4v" => "video/mp4",
@@ -268,4 +269,105 @@ pub fn preview_text(text: &str, max_chars: usize) -> String {
 /// Fingerprints are long hex; the UI only ever shows the head of one.
 pub fn short_fingerprint(fingerprint: &str) -> String {
     fingerprint.chars().take(12).collect()
+}
+
+/// What an outgoing file becomes before it is encrypted, same rules as the
+/// Android `util.OutgoingMedia`: an image becomes JPEG quality 90 (hi-res: a
+/// JPEG goes as it is, anything else becomes lossless JPEG XL), upright and
+/// without metadata; GIF, animated WebP and images with transparent pixels go
+/// as they are. A video is copied into a new container without metadata.
+/// Anything that fails goes out unchanged. Returns (path, name, mime); the
+/// path is `source` or a new file in `tmp_dir` that the caller deletes.
+pub fn prepare_outgoing(
+    source: &std::path::Path,
+    name: &str,
+    mime: &str,
+    hi_res: bool,
+    tmp_dir: &std::path::Path,
+) -> (std::path::PathBuf, String, String) {
+    let out = tmp_dir.join(format!("out-{}", glib::uuid_string_random()));
+    let converted = if is_image(mime) {
+        image_for_sending(source, name, hi_res, &out)
+    } else if is_video(mime) {
+        let ext = name.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("mp4");
+        let out = out.with_extension(ext);
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(source)
+            .args(["-map", "0", "-map_metadata", "-1", "-map_chapters", "-1", "-c", "copy"])
+            .arg(&out)
+            .stdin(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !ok {
+            let _ = std::fs::remove_file(&out);
+        }
+        ok.then(|| (out, name.to_string(), mime.to_string()))
+    } else {
+        None
+    };
+    if converted.is_none() {
+        let _ = std::fs::remove_file(&out);
+    }
+    converted.unwrap_or_else(|| (source.to_path_buf(), name.to_string(), mime.to_string()))
+}
+
+fn image_for_sending(
+    source: &std::path::Path,
+    name: &str,
+    hi_res: bool,
+    out: &std::path::Path,
+) -> Option<(std::path::PathBuf, String, String)> {
+    use std::io::Read;
+    let mut head = [0u8; 32];
+    let read = std::fs::File::open(source).ok()?.read(&mut head).ok()?;
+    let head = &head[..read];
+    let animated_webp = head.len() > 20
+        && &head[0..4] == b"RIFF"
+        && &head[8..16] == b"WEBPVP8X"
+        && head[20] & 0x02 != 0;
+    if head.starts_with(b"GIF8") || animated_webp || (hi_res && head.starts_with(&[0xFF, 0xD8, 0xFF])) {
+        return None;
+    }
+    let pixbuf = gdk_pixbuf::Pixbuf::from_file(source).ok()?;
+    let pixbuf = pixbuf.apply_embedded_orientation().unwrap_or(pixbuf);
+    let (width, height) = (pixbuf.width() as usize, pixbuf.height() as usize);
+    let channels = pixbuf.n_channels() as usize;
+    if (width * height) as u64 > 64_000_000 || pixbuf.bits_per_sample() != 8 || channels < 3 {
+        return None;
+    }
+    let stride = pixbuf.rowstride() as usize;
+    let bytes = pixbuf.read_pixel_bytes();
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for y in 0..height {
+        for px in bytes[y * stride..y * stride + width * channels].chunks_exact(channels) {
+            rgba.extend_from_slice(&px[..3]);
+            rgba.push(if channels == 4 { px[3] } else { 255 });
+        }
+    }
+    drop(bytes);
+    drop(pixbuf);
+    let opaque = rgba.chunks_exact(4).all(|px| px[3] == 255);
+    let base = name.rsplit_once('.').map_or(name, |(base, _)| base);
+    if !hi_res {
+        if !opaque {
+            return None;
+        }
+        let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect();
+        drop(rgba);
+        let rgb = gdk_pixbuf::Pixbuf::from_bytes(
+            &glib::Bytes::from_owned(rgb),
+            gdk_pixbuf::Colorspace::Rgb,
+            false,
+            8,
+            width as i32,
+            height as i32,
+            (width * 3) as i32,
+        );
+        rgb.savev(out, "jpeg", &[("quality", "90")]).ok()?;
+        return Some((out.to_path_buf(), format!("{base}.jpg"), "image/jpeg".to_string()));
+    }
+    crate::core::encode_jxl_lossless(&mut rgba, width as u32, height as u32, !opaque, out.to_str()?).ok()?;
+    Some((out.to_path_buf(), format!("{base}.jxl"), "image/jxl".to_string()))
 }

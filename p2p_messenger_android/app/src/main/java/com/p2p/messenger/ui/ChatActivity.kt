@@ -59,6 +59,7 @@ import com.p2p.messenger.util.ImagePreview
 import com.p2p.messenger.util.KeyboardInsets
 import com.p2p.messenger.util.ReplyIsland
 import com.p2p.messenger.util.NotificationHelper
+import com.p2p.messenger.util.OutgoingMedia
 import com.p2p.messenger.util.PlaybackSpeed
 import com.p2p.messenger.util.PulsingStatusDot
 import com.p2p.messenger.util.ReadStatePrefs
@@ -1669,7 +1670,8 @@ class ChatActivity : AppCompatActivity() {
                 }
                 return@launch
             }
-            val saved = saveToPublicDownloads(File(plainPath), attachment.fileName, attachment.mimeType)
+            val (name, mime) = OutgoingMedia.savedAs(File(plainPath), attachment.fileName, attachment.mimeType)
+            val saved = saveToPublicDownloads(File(plainPath), name, mime)
             withContext(Dispatchers.Main) {
                 Toast.makeText(
                     this@ChatActivity,
@@ -1775,6 +1777,7 @@ class ChatActivity : AppCompatActivity() {
         val fileName = "IMG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
         lifecycleScope.launch(Dispatchers.IO) {
             val tempFile = File(File(cacheDir, "outgoing").apply { mkdirs() }, UUID.randomUUID().toString())
+            var sent = tempFile
             try {
                 tempFile.writeBytes(jpeg)
                 val previewJpeg = try {
@@ -1782,8 +1785,10 @@ class ChatActivity : AppCompatActivity() {
                 } catch (e: Exception) {
                     null
                 }
+                val prepared = OutgoingMedia.prepare(tempFile, fileName, "image/jpeg", hiRes)
+                sent = prepared.file
                 val result = P2PLib.prepareAndSendFile(
-                    peerDeviceFingerprint, tempFile.absolutePath, fileName, "image/jpeg", previewJpeg, -1,
+                    peerDeviceFingerprint, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
                     caption, replyId, replyPreview
                 )
                 withContext(Dispatchers.Main) {
@@ -1798,11 +1803,11 @@ class ChatActivity : AppCompatActivity() {
                                 isMine = true,
                                 attachment = SimpleChatAdapter.AttachmentInfo(
                                     fileId = obj.optString("message_id"),
-                                    fileName = fileName,
-                                    mimeType = "image/jpeg",
-                                    totalSize = tempFile.length(),
+                                    fileName = prepared.fileName,
+                                    mimeType = prepared.mimeType,
+                                    totalSize = prepared.file.length(),
                                     status = SimpleChatAdapter.AttachmentStatus.COMPLETE,
-                                    bytesDone = tempFile.length(),
+                                    bytesDone = prepared.file.length(),
                                     previewJpeg = previewJpeg
                                 
                                 ),
@@ -1819,6 +1824,7 @@ class ChatActivity : AppCompatActivity() {
                 }
             } finally {
                 tempFile.delete()
+                sent.delete()
             }
         }
     }
@@ -1849,6 +1855,7 @@ class ChatActivity : AppCompatActivity() {
             }
             if (tooLarge) return@launch
             val tempFile = File(File(cacheDir, "outgoing").apply { mkdirs() }, UUID.randomUUID().toString())
+            var sent = tempFile
             try {
                 contentResolver.openInputStream(uri)?.use { input ->
                     tempFile.outputStream().use { output -> input.copyTo(output, bufferSize = 64 * 1024) }
@@ -1864,8 +1871,10 @@ class ChatActivity : AppCompatActivity() {
                     null
                 }
 
+                val prepared = OutgoingMedia.prepare(tempFile, fileName, mimeType, hiRes)
+                sent = prepared.file
                 val result = P2PLib.prepareAndSendFile(
-                    peerDeviceFingerprint, tempFile.absolutePath, fileName, mimeType, previewJpeg, -1,
+                    peerDeviceFingerprint, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
                     caption, replyId, replyPreview
                 )
                 withContext(Dispatchers.Main) {
@@ -1880,11 +1889,11 @@ class ChatActivity : AppCompatActivity() {
                                 isMine = true,
                                 attachment = SimpleChatAdapter.AttachmentInfo(
                                     fileId = obj.optString("message_id"),
-                                    fileName = fileName,
-                                    mimeType = mimeType,
-                                    totalSize = tempFile.length(),
+                                    fileName = prepared.fileName,
+                                    mimeType = prepared.mimeType,
+                                    totalSize = prepared.file.length(),
                                     status = SimpleChatAdapter.AttachmentStatus.COMPLETE,
-                                    bytesDone = tempFile.length(),
+                                    bytesDone = prepared.file.length(),
                                     previewJpeg = previewJpeg
                                 
                                 ),
@@ -1901,6 +1910,7 @@ class ChatActivity : AppCompatActivity() {
                 }
             } finally {
                 tempFile.delete()
+                sent.delete()
             }
         }
     }

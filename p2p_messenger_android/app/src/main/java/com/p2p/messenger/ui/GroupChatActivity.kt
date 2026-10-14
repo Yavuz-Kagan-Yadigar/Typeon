@@ -52,6 +52,7 @@ import com.p2p.messenger.util.ReactionPicker
 import com.p2p.messenger.util.ConnectionStatus
 import com.p2p.messenger.util.ImagePreview
 import com.p2p.messenger.util.KeyboardInsets
+import com.p2p.messenger.util.OutgoingMedia
 import com.p2p.messenger.util.ReplyIsland
 import com.p2p.messenger.util.PlaybackSpeed
 import com.p2p.messenger.util.PulsingStatusDot
@@ -1972,6 +1973,7 @@ class GroupChatActivity : AppCompatActivity() {
         val fileName = "IMG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
         lifecycleScope.launch(Dispatchers.IO) {
             val tempFile = File(File(cacheDir, "outgoing").apply { mkdirs() }, UUID.randomUUID().toString())
+            var sent = tempFile
             try {
                 tempFile.writeBytes(jpeg)
                 val previewJpeg = try {
@@ -1979,8 +1981,10 @@ class GroupChatActivity : AppCompatActivity() {
                 } catch (e: Exception) {
                     null
                 }
+                val prepared = OutgoingMedia.prepare(tempFile, fileName, "image/jpeg", hiRes)
+                sent = prepared.file
                 val result = P2PLib.prepareAndSendGroupFile(
-                    groupId, tempFile.absolutePath, fileName, "image/jpeg", previewJpeg, -1,
+                    groupId, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
                     caption, replyId, replyPreview, replySender
                 )
                 withContext(Dispatchers.Main) {
@@ -1994,11 +1998,11 @@ class GroupChatActivity : AppCompatActivity() {
                                 isMine = true,
                                 attachment = SimpleChatAdapter.AttachmentInfo(
                                     fileId = result,
-                                    fileName = fileName,
-                                    mimeType = "image/jpeg",
-                                    totalSize = tempFile.length(),
+                                    fileName = prepared.fileName,
+                                    mimeType = prepared.mimeType,
+                                    totalSize = prepared.file.length(),
                                     status = SimpleChatAdapter.AttachmentStatus.COMPLETE,
-                                    bytesDone = tempFile.length(),
+                                    bytesDone = prepared.file.length(),
                                     previewJpeg = previewJpeg
                                 
                                 ),
@@ -2015,6 +2019,7 @@ class GroupChatActivity : AppCompatActivity() {
                 }
             } finally {
                 tempFile.delete()
+                sent.delete()
             }
         }
     }
@@ -2048,6 +2053,7 @@ class GroupChatActivity : AppCompatActivity() {
             }
             if (tooLarge) return@launch
             val tempFile = File(File(cacheDir, "outgoing").apply { mkdirs() }, UUID.randomUUID().toString())
+            var sent = tempFile
             try {
                 contentResolver.openInputStream(uri)?.use { input ->
                     tempFile.outputStream().use { output -> input.copyTo(output, bufferSize = 64 * 1024) }
@@ -2063,8 +2069,10 @@ class GroupChatActivity : AppCompatActivity() {
                     null
                 }
 
+                val prepared = OutgoingMedia.prepare(tempFile, fileName, mimeType, hiRes)
+                sent = prepared.file
                 val result = P2PLib.prepareAndSendGroupFile(
-                    groupId, tempFile.absolutePath, fileName, mimeType, previewJpeg, -1,
+                    groupId, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
                     caption, replyId, replyPreview, replySender
                 )
                 withContext(Dispatchers.Main) {
@@ -2078,11 +2086,11 @@ class GroupChatActivity : AppCompatActivity() {
                                 isMine = true,
                                 attachment = SimpleChatAdapter.AttachmentInfo(
                                     fileId = result,
-                                    fileName = fileName,
-                                    mimeType = mimeType,
-                                    totalSize = tempFile.length(),
+                                    fileName = prepared.fileName,
+                                    mimeType = prepared.mimeType,
+                                    totalSize = prepared.file.length(),
                                     status = SimpleChatAdapter.AttachmentStatus.COMPLETE,
-                                    bytesDone = tempFile.length(),
+                                    bytesDone = prepared.file.length(),
                                     previewJpeg = previewJpeg
                                 
                                 ),
@@ -2099,6 +2107,7 @@ class GroupChatActivity : AppCompatActivity() {
                 }
             } finally {
                 tempFile.delete()
+                sent.delete()
             }
         }
     }
@@ -2245,7 +2254,8 @@ class GroupChatActivity : AppCompatActivity() {
                 }
                 return@launch
             }
-            val saved = saveToPublicDownloads(File(plainPath), attachment.fileName, attachment.mimeType)
+            val (name, mime) = OutgoingMedia.savedAs(File(plainPath), attachment.fileName, attachment.mimeType)
+            val saved = saveToPublicDownloads(File(plainPath), name, mime)
             withContext(Dispatchers.Main) {
                 Toast.makeText(
                     this@GroupChatActivity,

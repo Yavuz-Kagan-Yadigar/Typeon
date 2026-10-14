@@ -416,6 +416,7 @@
     <string name="title_reactions">Reactions</string>
     <string name="title_attachment_caption">Add a caption</string>
     <string name="hint_attachment_caption">Caption (optional)</string>
+    <string name="attachment_hi_res">Hi-res (lossless)</string>
     <!-- Settings screen section headers -->
     <string name="settings_section_profile">Profile</string>
     <string name="settings_section_privacy">Privacy &amp; security</string>

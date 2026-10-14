@@ -375,6 +375,7 @@
     <string name="title_reactions">Tepkiler</string>
     <string name="title_attachment_caption">Açıklama ekle</string>
     <string name="hint_attachment_caption">Açıklama (isteğe bağlı)</string>
+    <string name="attachment_hi_res">Yüksek çözünürlük (kayıpsız)</string>
     <!-- Settings screen section headers -->
     <string name="settings_section_profile">Profil</string>
     <string name="settings_section_privacy">Gizlilik ve güvenlik</string>

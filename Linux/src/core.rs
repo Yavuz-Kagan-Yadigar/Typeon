@@ -552,6 +552,11 @@ pub fn prepare_and_send_file(
     ))
 }
 
+/// Lossless JPEG XL of an RGBA image (see `util::prepare_outgoing`).
+pub fn encode_jxl_lossless(rgba: &mut [u8], width: u32, height: u32, has_alpha: bool, out_path: &str) -> Result<(), String> {
+    api::encode_jxl_lossless(rgba, width, height, has_alpha, out_path)
+}
+
 pub fn prepare_and_send_group_file(
     group_id: &str,
     source_path: &str,
