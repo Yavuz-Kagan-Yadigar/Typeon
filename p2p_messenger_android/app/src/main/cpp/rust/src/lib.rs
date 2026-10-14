@@ -944,7 +944,7 @@ mod review_oct2026_tests {
 
     #[test]
     fn recovery_file_with_a_huge_argon2_cost_is_rejected() {
-        let file = br#"{"kdf":"argon2id","argon2_m_cost":4294967295,"argon2_t_cost":2,"argon2_p_cost":1,"ciphertext":[],"nonce":[],"salt":[1,2,3,4,5,6,7,8]}"#;
+        let file = br#"{"kdf":"argon2id","argon2_m_cost":4294967295,"argon2_t_cost":2,"argon2_p_cost":1,"ciphertext":"","nonce":[],"salt":[1,2,3,4,5,6,7,8]}"#;
         let err = P2PCore::new().import_recovery(file, "x", "n".to_string()).unwrap_err();
         assert!(err.contains("Argon2 parametreleri"), "{err}");
     }
@@ -1281,6 +1281,47 @@ mod review_oct2026_tests {
         assert_eq!(parts.len(), 2);
         assert_eq!(parts.iter().map(|p| p.contacts.len()).sum::<usize>(), 150);
         assert!(parts.iter().all(|p| p.contacts.iter().map(|c| c.devices.len()).sum::<usize>() <= 100));
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    fn core_on_disk(dir: &std::path::Path) -> P2PCore {
+        let mut core = P2PCore::new();
+        core.init_db(dir.to_str().unwrap(), &[1u8; 32]).unwrap();
+        core.history_key = Some([2u8; 32]);
+        core.skipped_key_encryption_key = Some([3u8; 32]);
+        core
+    }
+
+    #[test]
+    fn a_recovery_file_brings_back_contacts_and_chats() {
+        let base = std::env::temp_dir().join(format!("typeon-recovery-{}", std::process::id()));
+        let (da, db, dp) = (base.join("a"), base.join("b"), base.join("peer"));
+        for d in [&da, &db, &dp] { std::fs::create_dir_all(d).unwrap(); }
+        let mut a = core_on_disk(&da);
+        let mut peer = core_on_disk(&dp);
+        a.generate_identity("a".into()).unwrap();
+        let pid = peer.generate_identity("p".into()).unwrap().0;
+        let rec = peer.own_devices[&pid].clone();
+        a.known_remote_devices.insert(rec.device_fingerprint.clone(), rec.clone());
+        a.persist_remote_device(&rec);
+        a.register_contact_from_pairing(pid.clone(), pid.clone(), "p".into()).unwrap();
+        a.archive_message(&pid, "sent", b"hello", Some("m1"), Some("sent"), None, None, 5).unwrap();
+        a.archive_message(&pid, "received", b"hi back", Some("m2"), None, Some("m1"), Some("hello"), 6).unwrap();
+
+        let file = a.export_recovery("long enough passphrase".into()).unwrap();
+        let mut b = core_on_disk(&db);
+        b.import_recovery(&file, "long enough passphrase", "b".into()).unwrap();
+        assert!(b.identity_to_contact.contains_key(&pid), "contact restored");
+        let rows = b.load_message_history_opt(&pid, 10, None, false);
+        let texts: Vec<&str> = rows.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, ["hello", "hi back"]);
+        assert_eq!(rows[1].direction, "received");
+        assert_eq!(rows[1].reply_to_message_id.as_deref(), Some("m1"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
 
@@ -20767,6 +20808,9 @@ impl P2PCore {
             /// kişileri geri gelir ama arşiv okunamaz bir blob olarak
             /// kalırdı. `Option`: sunucu hiç kullanılmamışsa ARK de yoktur.
             archive_root_key: Option<Vec<u8>>,
+            /// Contacts, groups and every chat (`RecoveryData`), CBOR.
+            #[serde(with = "serde_bytes")]
+            data: Vec<u8>,
         }
 
         let mut devices: Vec<ExportedDevice> = self.own_devices.values()
@@ -20782,11 +20826,14 @@ impl P2PCore {
         // Primary first: import takes the first device (bkz. `import_recovery`).
         devices.sort_by_key(|d| Some(&d.device_fingerprint) != identity.primary_device.as_ref());
 
-        let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&ExportedIdentity {
+        // CBOR: as JSON every byte was a number, and a few thousand messages
+        // made a file of several MB.
+        let plaintext = zeroize::Zeroizing::new(ciborium_bytes(&ExportedIdentity {
             identity_id: identity.identity_id.clone(),
             devices,
             archive_root_key: self.archive_root_key_bytes(),
-        }).map_err(|e| e.to_string())?);
+            data: ciborium_bytes(&self.recovery_data())?,
+        })?);
 
         use chacha20poly1305::aead::{Aead, KeyInit};
         use chacha20poly1305::{ChaCha20Poly1305, Nonce};
@@ -20828,7 +20875,8 @@ impl P2PCore {
             argon2_m_cost: u32,
             argon2_t_cost: u32,
             argon2_p_cost: u32,
-            ciphertext: Vec<u8>,
+            /// Hex.
+            ciphertext: String,
             nonce: Vec<u8>,
             salt: Vec<u8>,
         }
@@ -20837,7 +20885,7 @@ impl P2PCore {
             argon2_m_cost: m_cost,
             argon2_t_cost: t_cost,
             argon2_p_cost: p_cost,
-            ciphertext,
+            ciphertext: hex::encode(ciphertext),
             nonce: nonce_bytes.to_vec(),
             salt: salt.to_vec(),
         }).map_err(|e| e.to_string())
@@ -20884,7 +20932,7 @@ impl P2PCore {
             argon2_m_cost: u32,
             argon2_t_cost: u32,
             argon2_p_cost: u32,
-            ciphertext: Vec<u8>,
+            ciphertext: String,
             nonce: Vec<u8>,
             salt: Vec<u8>,
         }
@@ -20915,7 +20963,8 @@ impl P2PCore {
             return Err("Bozuk kurtarma dosyası (nonce)".to_string());
         }
         let nonce = Nonce::from_slice(&file.nonce);
-        let plaintext = zeroize::Zeroizing::new(cipher.decrypt(nonce, file.ciphertext.as_slice())
+        let ciphertext = hex::decode(&file.ciphertext).map_err(|_| "Bozuk kurtarma dosyası".to_string())?;
+        let plaintext = zeroize::Zeroizing::new(cipher.decrypt(nonce, ciphertext.as_slice())
             .map_err(|_| "Yanlış parola veya bozuk dosya".to_string())?);
 
         #[derive(Deserialize)]
@@ -20927,8 +20976,10 @@ impl P2PCore {
             /// içe aktarılabilmeli.
             #[serde(default)]
             archive_root_key: Option<Vec<u8>>,
+            #[serde(default, with = "serde_bytes")]
+            data: Vec<u8>,
         }
-        let exported: ExportedIdentity = serde_json::from_slice(&plaintext)
+        let exported: ExportedIdentity = ciborium::from_reader(plaintext.as_slice())
             .map_err(|_| "Bozuk kurtarma dosyası (içerik)".to_string())?;
         if exported.devices.is_empty() {
             return Err("Kurtarma dosyasında cihaz anahtarı yok".to_string());
@@ -21060,8 +21111,81 @@ impl P2PCore {
                 error!("Kurtarma: arşiv kök anahtarı yüklenemedi, sunucudaki geçmiş okunamayacak");
             }
         }
+        if !exported.data.is_empty() {
+            let data: RecoveryData = ciborium::from_reader(exported.data.as_slice())
+                .map_err(|_| "Kurtarma dosyası bozuk (kişiler ve sohbetler)")?;
+            self.apply_recovery_data(data);
+        }
         Ok((exported.identity_id, own_bundle_bytes.unwrap_or_default()))
     }
+
+    /// What a recovery file carries besides the keys: the sibling sync
+    /// payload (contacts with their keys, groups, other own devices) and
+    /// every chat, 1:1 and group. Attachments stay out (their files are
+    /// sealed with this device's keys).
+    fn recovery_data(&self) -> RecoveryData {
+        let mut chats = Vec::new();
+        let distinct = |sql: &str| -> Vec<String> {
+            self.db.as_ref()
+                .and_then(|c| c.prepare(sql).ok())
+                .map(|mut st| st.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default())
+                .unwrap_or_default()
+        };
+        for key in distinct("SELECT DISTINCT peer_device_fingerprint FROM messages WHERE group_id IS NULL AND peer_device_fingerprint IS NOT NULL") {
+            let rows = self.load_message_history_opt(&key, u32::MAX, None, false);
+            chats.push((None, key, rows));
+        }
+        for gid in distinct("SELECT DISTINCT group_id FROM messages WHERE group_id IS NOT NULL") {
+            let mut rows = self.load_group_message_history_opt(&gid, u32::MAX, None, false);
+            for m in rows.iter_mut() {
+                m.author_proof = m.message_id.as_deref().and_then(|id| self.group_author_proof(id));
+            }
+            chats.push((Some(gid), String::new(), rows));
+        }
+        RecoveryData { sync: self.build_sync_payload(), chats }
+    }
+
+    fn apply_recovery_data(&mut self, data: RecoveryData) {
+        self.import_sync_payload(&data.sync);
+        let own_id = self.my_identity_id().unwrap_or_default();
+        for (gid, key, rows) in data.chats {
+            for m in rows {
+                let mid = m.message_id.as_deref();
+                if mid.map_or(false, |id| self.message_exists_in_chat(id, gid.as_deref(), &key)) {
+                    continue;
+                }
+                let stored = match &gid {
+                    Some(g) => {
+                        let author = m.sender_identity_id.clone().unwrap_or_else(|| own_id.clone());
+                        self.archive_group_message(g, &author, &m.direction, m.text.as_bytes(), mid,
+                            m.reply_to_message_id.as_deref(), m.reply_to_preview.as_deref(), m.reply_to_sender_identity_id.as_deref(),
+                            m.sent_at_ms, m.author_proof.as_deref())
+                    }
+                    None => self.archive_message(&key, &m.direction, m.text.as_bytes(), mid, m.status.as_deref(),
+                        m.reply_to_message_id.as_deref(), m.reply_to_preview.as_deref(), m.sent_at_ms),
+                };
+                if let Err(e) = stored {
+                    warn!("Kurtarma: mesaj yazılamadı: {}", e);
+                    continue;
+                }
+                self.backdate_archived(gid.as_deref(), &key, mid, m.timestamp);
+                let synced = SyncedMessage {
+                    direction: m.direction.clone(), text: m.text.clone(), timestamp: m.timestamp,
+                    sender_identity_id: m.sender_identity_id.clone(), message_id: m.message_id.clone(),
+                    sent_at_ms: m.sent_at_ms, is_deleted: m.is_deleted, is_edited: m.is_edited,
+                    author_proof: m.author_proof.clone(),
+                };
+                self.apply_synced_message_flags(gid.as_deref(), &key, &synced);
+            }
+        }
+    }
+}
+
+/// bkz. `P2PCore::recovery_data`: (group id, 1:1 chat key, rows) per chat.
+#[derive(Serialize, Deserialize)]
+struct RecoveryData {
+    sync: SyncPayload,
+    chats: Vec<(Option<String>, String, Vec<ArchivedMessage>)>,
 }
 
 // --- Yardımcı fonksiyonlar ---

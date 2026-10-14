@@ -1197,7 +1197,7 @@ class SettingsFragment : Fragment() {
                         pendingRecoveryPassphrase = password
                         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
                         AppLock.beginTrustedExcursion()
-                        createRecoveryFileLauncher.launch("typoon-recovery-$stamp.txt")
+                        createRecoveryFileLauncher.launch("typeon-recovery-$stamp.txt")
                     }
                 }
             }

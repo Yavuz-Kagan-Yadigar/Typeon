@@ -30,7 +30,7 @@ import org.json.JSONArray
 class MainActivity : AppCompatActivity() {
 
     private companion object {
-        const val MAX_RECOVERY_FILE_BYTES = 1024 * 1024
+        const val MAX_RECOVERY_FILE_BYTES = 64 * 1024 * 1024
     }
 
     private lateinit var statusText: TextView
@@ -334,6 +334,9 @@ class MainActivity : AppCompatActivity() {
                 return@launch
             }
             val identityId = try {
+                // The chats in the file are stored under the history key; with
+                // no identity yet the app had not loaded one.
+                com.p2p.messenger.util.MessageHistoryManager.ensureHistoryKeyLoaded(applicationContext)
                 P2PLib.importRecovery(bytes, passphrase, pendingImportDeviceName)
             } catch (e: Exception) {
                 "Error: ${e.message}"
