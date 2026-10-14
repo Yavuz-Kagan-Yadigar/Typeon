@@ -48,6 +48,11 @@ object CallMedia {
     private const val FRAME_SAMPLES = 320 // 20 ms
     private const val PACKETS_PER_FRAME = 3
     private const val AUDIO_BITRATE = 12000
+    /** Used while the send queue stands (slow link); back to [AUDIO_BITRATE] once it is empty. */
+    private const val AUDIO_BITRATE_LOW = 6000
+    /** `callBacklog` (frames, 100 ms each when reported by the peer) to drop / to restore. */
+    private const val AUDIO_LOW_AT = 4
+    private const val AUDIO_HIGH_AT = 1
     /** Frames a decode lane may hold (~1 s of audio bundles or video). */
     private const val LANE_QUEUE = 24
 
@@ -164,8 +169,21 @@ object CallMedia {
             var peak = 0
             var sentBundles = 0
             var logAt = System.currentTimeMillis()
+            var bitrate = AUDIO_BITRATE
+            var rateAt = 0L
             while (running && generation == gen) {
                 val nowMs = System.currentTimeMillis()
+                if (nowMs - rateAt >= 1000) {
+                    rateAt = nowMs
+                    val backlog = P2PLib.callBacklog()
+                    val want = if (backlog >= AUDIO_LOW_AT) AUDIO_BITRATE_LOW
+                        else if (backlog <= AUDIO_HIGH_AT) AUDIO_BITRATE else bitrate
+                    if (want != bitrate) {
+                        bitrate = want
+                        Log.i(TAG, "audio bitrate $bitrate (backlog $backlog)")
+                        enc.setParameters(Bundle().apply { putInt(MediaFormat.KEY_BIT_RATE, bitrate) })
+                    }
+                }
                 val flags = (if (muted) 1 else 0) or (if (videoEncoder?.enabled == false) 2 else 0)
                 if (flags != lastFlags || nowMs - stateAt >= STATE_EVERY_MS) {
                     P2PLib.callSend(KIND_STATE, byteArrayOf(flags.toByte()))
