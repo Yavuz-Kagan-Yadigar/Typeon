@@ -189,7 +189,7 @@ class SettingsFragment : Fragment() {
      */
     private var pendingRecoveryPassphrase: String? = null
 
-    private val createRecoveryFileLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+    private val createRecoveryFileLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         val passphrase = pendingRecoveryPassphrase
         pendingRecoveryPassphrase = null
         if (uri == null) return@registerForActivityResult
@@ -1197,7 +1197,7 @@ class SettingsFragment : Fragment() {
                         pendingRecoveryPassphrase = password
                         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
                         AppLock.beginTrustedExcursion()
-                        createRecoveryFileLauncher.launch("typeon-recovery-$stamp.txt")
+                        createRecoveryFileLauncher.launch("typeon-recovery-$stamp.bin")
                     }
                 }
             }

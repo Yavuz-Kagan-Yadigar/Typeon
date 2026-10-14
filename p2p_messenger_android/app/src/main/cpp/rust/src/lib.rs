@@ -737,6 +737,10 @@ const MAX_AVATAR_BYTES: usize = 256 * 1024;
 
 /// Largest Argon2 memory cost `import_recovery` accepts from a file: 256 MiB.
 const MAX_RECOVERY_ARGON2_M_COST_KIB: u32 = 256 * 1024;
+/// Largest recovery file the apps import (Android `MAX_RECOVERY_FILE_BYTES`).
+const MAX_RECOVERY_FILE_BYTES: usize = 64 * 1024 * 1024;
+/// Chats over that size: only this many newest messages go into the file.
+const RECOVERY_TRIMMED_MESSAGES: usize = 6500;
 
 /// Bir hesap adının azami uzunluğu — KARAKTER (bayt değil) cinsinden.
 ///
@@ -944,8 +948,11 @@ mod review_oct2026_tests {
 
     #[test]
     fn recovery_file_with_a_huge_argon2_cost_is_rejected() {
-        let file = br#"{"kdf":"argon2id","argon2_m_cost":4294967295,"argon2_t_cost":2,"argon2_p_cost":1,"ciphertext":"","nonce":[],"salt":[1,2,3,4,5,6,7,8]}"#;
-        let err = P2PCore::new().import_recovery(file, "x", "n".to_string()).unwrap_err();
+        let file = ciborium_bytes(&RecoveryFile {
+            kdf: "argon2id".into(), argon2_m_cost: u32::MAX, argon2_t_cost: 2, argon2_p_cost: 1,
+            ciphertext: Vec::new(), nonce: Vec::new(), salt: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        }).unwrap();
+        let err = P2PCore::new().import_recovery(&file, "x", "n".to_string()).unwrap_err();
         assert!(err.contains("Argon2 parametreleri"), "{err}");
     }
 
@@ -1321,6 +1328,16 @@ mod recovery_tests {
         assert_eq!(texts, ["hello", "hi back"]);
         assert_eq!(rows[1].direction, "received");
         assert_eq!(rows[1].reply_to_message_id.as_deref(), Some("m1"));
+
+        // Over the size cap only the newest rows go in.
+        a.archive_message(&pid, "sent", b"third", Some("m3"), Some("sent"), None, None, 7).unwrap();
+        a.backdate_archived(None, &pid, Some("m1"), 1);
+        a.backdate_archived(None, &pid, Some("m2"), 2);
+        a.backdate_archived(None, &pid, Some("m3"), 3);
+        let mut data = a.recovery_data();
+        data.keep_newest(2);
+        let kept: Vec<&str> = data.chats.iter().flat_map(|(_, _, r)| r.iter().map(|m| m.text.as_str())).collect();
+        assert_eq!(kept, ["hi back", "third"]);
         let _ = std::fs::remove_dir_all(&base);
     }
 }
@@ -20826,13 +20843,23 @@ impl P2PCore {
         // Primary first: import takes the first device (bkz. `import_recovery`).
         devices.sort_by_key(|d| Some(&d.device_fingerprint) != identity.primary_device.as_ref());
 
+        // Over the import cap the file would be written and never open again:
+        // then only the newest messages go in. 1 MiB is left for the keys.
+        let mut data = self.recovery_data();
+        let mut data_bytes = ciborium_bytes(&data)?;
+        if data_bytes.len() > MAX_RECOVERY_FILE_BYTES - 1024 * 1024 {
+            data.keep_newest(RECOVERY_TRIMMED_MESSAGES);
+            data_bytes = ciborium_bytes(&data)?;
+            warn!("Kurtarma dosyası sınırı aşıyor, yalnızca en yeni {} mesaj eklendi", RECOVERY_TRIMMED_MESSAGES);
+        }
+        drop(data);
         // CBOR: as JSON every byte was a number, and a few thousand messages
         // made a file of several MB.
         let plaintext = zeroize::Zeroizing::new(ciborium_bytes(&ExportedIdentity {
             identity_id: identity.identity_id.clone(),
             devices,
             archive_root_key: self.archive_root_key_bytes(),
-            data: ciborium_bytes(&self.recovery_data())?,
+            data: data_bytes,
         })?);
 
         use chacha20poly1305::aead::{Aead, KeyInit};
@@ -20867,28 +20894,21 @@ impl P2PCore {
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = cipher.encrypt(nonce, plaintext.as_slice()).map_err(|_| "Encryption failed")?;
 
-        #[derive(Serialize)]
-        struct RecoveryFile {
-            /// Anahtar türetme algoritması — import'un ileride HKDF'li eski
-            /// dosyalarla Argon2id'li yenileri ayırt edebilmesi için.
-            kdf: String,
-            argon2_m_cost: u32,
-            argon2_t_cost: u32,
-            argon2_p_cost: u32,
-            /// Hex.
-            ciphertext: String,
-            nonce: Vec<u8>,
-            salt: Vec<u8>,
-        }
-        serde_json::to_vec(&RecoveryFile {
+        let file = ciborium_bytes(&RecoveryFile {
             kdf: "argon2id".to_string(),
             argon2_m_cost: m_cost,
             argon2_t_cost: t_cost,
             argon2_p_cost: p_cost,
-            ciphertext: hex::encode(ciphertext),
+            ciphertext,
             nonce: nonce_bytes.to_vec(),
             salt: salt.to_vec(),
-        }).map_err(|e| e.to_string())
+        })?;
+        // Still over (the newest messages alone are that large): no file that
+        // looks saved and cannot be imported.
+        if file.len() > MAX_RECOVERY_FILE_BYTES {
+            return Err("Kurtarma dosyası 64 MB sınırını aşıyor".to_string());
+        }
+        Ok(file)
     }
 
     /// `export_recovery`'nin karşılığı (bkz. dosya sonu "BİLİNEN EKSİKLER"
@@ -20926,17 +20946,7 @@ impl P2PCore {
             return Err("Parola boş olamaz".to_string());
         }
 
-        #[derive(Deserialize)]
-        struct RecoveryFile {
-            kdf: String,
-            argon2_m_cost: u32,
-            argon2_t_cost: u32,
-            argon2_p_cost: u32,
-            ciphertext: String,
-            nonce: Vec<u8>,
-            salt: Vec<u8>,
-        }
-        let file: RecoveryFile = serde_json::from_slice(file_bytes).map_err(|_| "Bozuk kurtarma dosyası".to_string())?;
+        let file: RecoveryFile = ciborium::from_reader(file_bytes).map_err(|_| "Bozuk kurtarma dosyası".to_string())?;
         if file.kdf != "argon2id" {
             return Err(format!("Desteklenmeyen anahtar türetme algoritması: {}", file.kdf));
         }
@@ -20963,8 +20973,7 @@ impl P2PCore {
             return Err("Bozuk kurtarma dosyası (nonce)".to_string());
         }
         let nonce = Nonce::from_slice(&file.nonce);
-        let ciphertext = hex::decode(&file.ciphertext).map_err(|_| "Bozuk kurtarma dosyası".to_string())?;
-        let plaintext = zeroize::Zeroizing::new(cipher.decrypt(nonce, ciphertext.as_slice())
+        let plaintext = zeroize::Zeroizing::new(cipher.decrypt(nonce, file.ciphertext.as_slice())
             .map_err(|_| "Yanlış parola veya bozuk dosya".to_string())?);
 
         #[derive(Deserialize)]
@@ -21181,11 +21190,55 @@ impl P2PCore {
     }
 }
 
+/// The recovery file: Argon2id parameters and salt, then ChaCha20-Poly1305
+/// over the CBOR of the keys and `RecoveryData`. CBOR, not JSON with hex: a
+/// group row's author proof is about 9.4 KB, and hex doubled it again.
+#[derive(Serialize, Deserialize)]
+struct RecoveryFile {
+    /// Anahtar türetme algoritması — import'un ileride HKDF'li eski
+    /// dosyalarla Argon2id'li yenileri ayırt edebilmesi için.
+    kdf: String,
+    argon2_m_cost: u32,
+    argon2_t_cost: u32,
+    argon2_p_cost: u32,
+    #[serde(with = "serde_bytes")]
+    ciphertext: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    nonce: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    salt: Vec<u8>,
+}
+
 /// bkz. `P2PCore::recovery_data`: (group id, 1:1 chat key, rows) per chat.
 #[derive(Serialize, Deserialize)]
 struct RecoveryData {
     sync: SyncPayload,
     chats: Vec<(Option<String>, String, Vec<ArchivedMessage>)>,
+}
+
+impl RecoveryData {
+    /// Keeps the `n` newest messages over all chats, by `timestamp`.
+    fn keep_newest(&mut self, n: usize) {
+        let mut times: Vec<u64> = self.chats.iter().flat_map(|(_, _, rows)| rows.iter().map(|m| m.timestamp)).collect();
+        if n == 0 || times.len() <= n {
+            return;
+        }
+        times.sort_unstable_by(|a, b| b.cmp(a));
+        let cutoff = times[n - 1];
+        // Rows at the cutoff time: only as many as fit.
+        let mut room = times[..n].iter().filter(|t| **t == cutoff).count();
+        for (_, _, rows) in &mut self.chats {
+            rows.retain(|m| {
+                if m.timestamp != cutoff {
+                    return m.timestamp > cutoff;
+                }
+                let keep = room > 0;
+                room = room.saturating_sub(1);
+                keep
+            });
+        }
+        self.chats.retain(|(_, _, rows)| !rows.is_empty());
+    }
 }
 
 // --- Yardımcı fonksiyonlar ---

@@ -347,6 +347,12 @@ fn ask_recovery_passphrase(
             return;
         };
 
+        // The chats in the file are stored under the history key: without it
+        // in the core every message row failed and only the contacts came back.
+        let mut vault = Vault::new(Vec::new());
+        vault.skipped_key = storage_key;
+        core::set_history_key(&vault.history_key);
+
         let app_inner = app.clone();
         let host_inner = host.clone();
         let name = device_name.clone();
@@ -369,8 +375,8 @@ fn ask_recovery_passphrase(
                     app_inner.toast("Restore produced no keys.");
                     return;
                 }
-                let mut vault = Vault::new(bundle);
-                vault.skipped_key = storage_key;
+                let mut vault = vault;
+                vault.identity_bundle = bundle;
                 if let Err(error) =
                     secrets::save(&app_inner.data_dir, &vault, &vault_passphrase)
                 {
