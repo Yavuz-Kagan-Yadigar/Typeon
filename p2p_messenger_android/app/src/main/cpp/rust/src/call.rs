@@ -45,6 +45,7 @@ use zeroize::Zeroizing;
 use crate::packet::{CallAction, MessageContent};
 use crate::{current_time_ms, server_seal, P2PCore, OptionGroupExt as _, RUNTIME};
 
+const KIND_AUDIO: u8 = 1;
 const KIND_VIDEO: u8 = 2;
 
 pub const MEDIA_PROTOCOL: StreamProtocol = StreamProtocol::new("/typeon/media/1.0.0");
@@ -62,6 +63,12 @@ pub const LINK_QUEUE: usize = 48;
 /// audio keeps ~1 s at most. Reports and state use the whole queue.
 const VIDEO_QUEUE_MAX: usize = 6;
 const AUDIO_QUEUE_MAX: usize = 16;
+/// A receiver-reported standing queue (ms) above which audio is held back at
+/// the sender, and below which it resumes. The backlog lives in the Tor/TCP
+/// pipe (hundreds of cells in flight), invisible to the local queue depth;
+/// only not sending drains it. State and report packets keep flowing.
+const AUDIO_HOLD_ABOVE_MS: u32 = 400;
+const AUDIO_HOLD_BELOW_MS: u32 = 150;
 /// Received frames waiting for Kotlin. ~1 s of a 3-way video call: a slow
 /// decoder must shed old frames, never let them pile up (256 here once meant
 /// 4-5 s of delay on a phone decoding two videos).
@@ -314,6 +321,8 @@ struct Media {
     next_link_id: u64,
     inbox: VecDeque<Vec<u8>>,
     sent: u64,
+    /// Audio held back, see [`AUDIO_HOLD_ABOVE_MS`].
+    audio_hold: bool,
     received: u64,
     /// Outgoing copies dropped on a full link queue.
     dropped: u64,
@@ -458,6 +467,18 @@ pub fn media_send(kind: u8, payload: &[u8]) -> bool {
     let mut m = media();
     if !m.active || m.targets.is_empty() || payload.len() > MAX_FRAME - 64 {
         return false;
+    }
+    if kind == KIND_AUDIO {
+        let q = reported_queue(&m);
+        if m.audio_hold && q < AUDIO_HOLD_BELOW_MS {
+            m.audio_hold = false;
+        } else if !m.audio_hold && q > AUDIO_HOLD_ABOVE_MS {
+            m.audio_hold = true;
+        }
+        if m.audio_hold {
+            m.dropped += 1;
+            return false;
+        }
     }
     m.seq += 1;
     let targets: Vec<(Option<PeerId>, Vec<u8>, Vec<u8>)> = m

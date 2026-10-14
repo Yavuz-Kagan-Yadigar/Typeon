@@ -47,6 +47,9 @@ object CallMedia {
     private const val SAMPLE_RATE = 16000
     private const val FRAME_SAMPLES = 320 // 20 ms
     private const val PACKETS_PER_FRAME = 3
+    /** While the path queues: 120 ms per write, half the Tor cells (a cell is a
+     *  fixed ~500 bytes, so lowering the Opus bitrate alone saves none). */
+    private const val PACKETS_PER_FRAME_LOW = 6
     private const val AUDIO_BITRATE = 12000
     /** Used while the send queue stands (slow link); back to [AUDIO_BITRATE] once it is empty. */
     private const val AUDIO_BITRATE_LOW = 6000
@@ -170,6 +173,7 @@ object CallMedia {
             var sentBundles = 0
             var logAt = System.currentTimeMillis()
             var bitrate = AUDIO_BITRATE
+            var perFrame = PACKETS_PER_FRAME
             var rateAt = 0L
             while (running && generation == gen) {
                 val nowMs = System.currentTimeMillis()
@@ -180,6 +184,7 @@ object CallMedia {
                         else if (backlog <= AUDIO_HIGH_AT) AUDIO_BITRATE else bitrate
                     if (want != bitrate) {
                         bitrate = want
+                        perFrame = if (want == AUDIO_BITRATE_LOW) PACKETS_PER_FRAME_LOW else PACKETS_PER_FRAME
                         Log.i(TAG, "audio bitrate $bitrate (backlog $backlog)")
                         enc.setParameters(Bundle().apply { putInt(MediaFormat.KEY_BIT_RATE, bitrate) })
                     }
@@ -222,7 +227,7 @@ object CallMedia {
                         bundle.add(b)
                     }
                     enc.releaseOutputBuffer(outIdx, false)
-                    if (bundle.size >= PACKETS_PER_FRAME) {
+                    if (bundle.size >= perFrame) {
                         if (!muted && P2PLib.callSend(KIND_AUDIO, packBundle(bundle))) sentBundles++
                         bundle.clear()
                     }
@@ -358,6 +363,10 @@ object CallMedia {
         private var written = 0L
         private var pts = 0L
         private var underruns = 0
+        private var lastUnderrunAt = 0L
+        /** Since when [buffered] stands above [CATCHUP_MS]; 0 = not. */
+        private var overSince = 0L
+        private var catchupTick = 0
         private var statPackets = 0
         private var statPeak = 0
         private var statOverflow = 0
@@ -451,14 +460,26 @@ object CallMedia {
                     "underruns $underruns, overflow drops $statOverflow, track state ${t.playState} rate $outRate ch $outChannels ")
                 statPackets = 0; statPeak = 0; statOverflow = 0; statAt = now
             }
+            val nowMs = android.os.SystemClock.elapsedRealtime()
+            // Sit on a low target: a standing buffer above CATCHUP_MS for
+            // CATCHUP_AFTER_MS plays 25 % fast (every 4th packet skipped).
+            if (buffered > outRate.toLong() * CATCHUP_MS / 1000) {
+                if (overSince == 0L) overSince = nowMs
+                if (nowMs - overSince >= CATCHUP_AFTER_MS && ++catchupTick % 4 == 0) { statOverflow++; return }
+            } else overSince = 0
             if (buffered <= 0) {
+                if (nowMs - lastUnderrunAt > UNDERRUN_FORGET_MS) underruns = 0
                 val padMs = (PAD_BASE_MS + PAD_STEP_MS * minOf(underruns, 3)) // <= 200 ms, under the cap
-                if (written > 0) underruns++
+                if (written > 0) { underruns++; lastUnderrunAt = nowMs }
                 val pad = ByteArray(outRate * padMs / 1000 * frameBytes)
                 written += t.write(pad, 0, pad.size, AudioTrack.WRITE_NON_BLOCKING).coerceAtLeast(0) / frameBytes
             } else if (android.os.Build.VERSION.SDK_INT >= 31 && buffered > outRate.toLong() * MAX_BUFFER_MS / 1000) {
+                // Skip ahead: drop what is queued (stale), keep this packet.
+                // Dropping the newest left the stale audio playing.
                 statOverflow++
-                return
+                try { t.pause(); t.flush(); t.play() } catch (_: Exception) {}
+                written = 0
+                overSince = 0
             }
             val n = t.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
             if (n < 0) {
@@ -523,6 +544,9 @@ object CallMedia {
             const val LEGACY_BUFFER_MS = 300
             const val START_MS = 60
             const val MAX_BUFFER_MS = 600 // LTE+Tor delivers audio in ~1 s bursts
+            const val CATCHUP_MS = 250
+            const val CATCHUP_AFTER_MS = 2_000L
+            const val UNDERRUN_FORGET_MS = 10_000L
 
             /** RFC 7845 identification header, mono, 16 kHz input. */
             fun opusHead(): ByteArray = ByteBuffer.allocate(19).order(ByteOrder.LITTLE_ENDIAN).apply {
