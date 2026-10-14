@@ -226,7 +226,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_stopServer<'local
     // `LAST_RUN` is not held across the wait: `serverStatus` locks it too.
     let running = LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()).take();
     if let Some(mut handle) = running {
-        if RUNTIME.block_on(tokio::time::timeout(std::time::Duration::from_secs(20), &mut handle)).is_err() {
+        if RUNTIME.block_on(async { tokio::time::timeout(std::time::Duration::from_secs(20), &mut handle).await }).is_err() {
             log::warn!("Sunucu döngüsü 20 sn içinde kapanmadı");
             *LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
         }
@@ -259,7 +259,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_serverStatus<'loc
         .shared
         .addrs
         .lock()
-        .map(|a| a.iter().filter(|x| !crate::is_private_multiaddr(x)).cloned().collect())
+        .map(|a| a.iter().filter(|x| p2p_messenger::server_proto::is_onion_server_addr(x)).cloned().collect())
         .unwrap_or_default();
     let stats = control.shared.stats.lock().map(|s| s.clone()).unwrap_or_default();
     // Active ones: a revoked device stays in the list (dimmed, so it can
@@ -287,7 +287,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_serverStatus<'loc
 ///
 /// Neden `ServerCore::join_code` doğrudan çağrılmıyor: `ServerCore` ağ
 /// görevinin İÇİNDE, JNI tarafında yalnızca `shared` + `store` görünür.
-/// Adres filtresi (`is_private_multiaddr`) bu yüzden burada TEKRARLANIYOR —
+/// Adres filtresi (`is_onion_server_addr`) bu yüzden burada TEKRARLANIYOR —
 /// bkz. `ServerCore::invite_addrs`: özel ağ adresleri koda girmez, çünkü
 /// başka bir ağdaki alıcı için ulaşılamazlar ve iç ağ yapısını sızdırırlar.
 #[no_mangle]
@@ -304,7 +304,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_joinCode<'local>(
         .shared
         .addrs
         .lock()
-        .map(|a| a.iter().filter(|x| !crate::is_private_multiaddr(x)).cloned().collect())
+        .map(|a| a.iter().filter(|x| p2p_messenger::server_proto::is_onion_server_addr(x)).cloned().collect())
         .unwrap_or_default();
     if addrs.is_empty() {
         return out(

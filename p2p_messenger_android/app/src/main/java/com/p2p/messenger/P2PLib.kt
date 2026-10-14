@@ -9,7 +9,14 @@ object P2PLib {
     /** Android'in uygulamaya özel dosya dizini (Context.filesDir.absolutePath)
      *  ile SQLite veritabanını açar. Diğer her şeyden ÖNCE çağrılmalıdır.
      *  Varsa, kayıtlı identity'nin PUBLIC key'lerini de belleğe yükler. */
-    external fun initDatabase(filesDir: String): Boolean
+    fun initDatabase(filesDir: String): Boolean {
+        if (databaseOpen) return true
+        return com.p2p.messenger.util.SkippedKeyManager.openDatabase(java.io.File(filesDir)).also { databaseOpen = it }
+    }
+    @Volatile private var databaseOpen = false
+    /** The database is encrypted under [storageKey] (the SkippedKeyManager
+     *  key). Only through [initDatabase]. */
+    external fun initDatabaseKeyed(filesDir: String, storageKey: ByteArray): Boolean
     /** initDatabase sonrası: DB'de daha önce oluşturulmuş bir identity var mı
      *  (public key kayıtları belleğe yüklendi mi). */
     external fun hasStoredIdentity(): Boolean
@@ -69,7 +76,7 @@ object P2PLib {
     // --- Bölüm 1.3/1.4: QR + manuel eşleşme ---
     external fun generateQrPacket(rendezvousNode: String): ByteArray
     /** Spec dışı, kullanıcı isteği: `processManualEntry`'nin beklediği
-     *  `identity_id|device_fingerprint|device_name|rendezvous_node`
+     *  `identity_id|device_fingerprint|nonce|device_name|rendezvous_node`
      *  formatını üretir — panoya kopyalayıp karşı tarafa (ör. farklı bir
      *  ağdaysa, ekran paylaşımı/mesajla) iletmek için. Hata durumunda "". */
     external fun getManualAddCode(rendezvousNode: String): String
@@ -100,6 +107,11 @@ object P2PLib {
      *  yeni cihazı duyurur. Dönüş: başarılıysa
      *  `{"device_fingerprint":...,"device_name":...}`, aksi halde "Error: ...". */
     external fun approveDeviceLink(data: ByteArray): String
+    /** Reads a scanned link QR without acting on it. Same return shape. */
+    external fun peekDeviceLink(data: ByteArray): String
+    /** Six-digit compare code of a link QR ("123 456"): the new device and the
+     *  approving device both show it. Empty if [data] is not a link request. */
+    external fun deviceLinkCode(data: ByteArray): String
     /** Kimliğime ait cihazların listesi (bu cihaz + bağlı kardeş cihazlar).
      *  JSON dizi: `[{"device_fingerprint","device_name","is_active","is_this_device"}]`. */
     external fun listLinkedDevices(): String
@@ -506,6 +518,15 @@ object P2PLib {
      * hiç mesaj yoktur ve kullanıcının kaydıracağı bir şey de yoktur.
      */
     external fun restoreServerHistory(): String
+
+    /**
+     * One chat's older history from the server archive, for a "fetch history
+     * from server" button; scrolling up never asks the server. [chatKey]: the
+     * peer device fingerprint, or the group id. [beforeTimestamp]: the oldest
+     * message on screen (ms), 0 = from the newest. Returns "OK" or
+     * "Error: ..."; the rows arrive later with a `history_backfilled` event.
+     */
+    external fun fetchServerHistory(chatKey: String, isGroup: Boolean, beforeTimestamp: Long): String
 
     // --- Voice/video calls (Rust `call.rs`) ---
     /** Rings a 1:1 contact device. Returns the call id or "Error: ...". */

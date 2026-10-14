@@ -52,6 +52,7 @@ object AppLock {
      *  yazılmış kayıtların gerçek iterasyon sayısı. */
     private const val LEGACY_ITERATIONS = 120_000
     private const val KEY_LENGTH_BITS = 256
+    const val MIN_PASSWORD_LENGTH = 6
 
     /** Süreç ömrü boyunca tutulan kilit durumu — DİSKE YAZILMAZ: süreç
      *  öldüğünde (ya da uygulama arka plana düşüp `lock()` çağrıldığında)
@@ -102,7 +103,7 @@ object AppLock {
 
     /** `false` döner (ve HİÇBİR ŞEY yazmaz) şifre boşsa — bkz. sınıf notu. */
     fun setPassword(context: Context, password: String): Boolean {
-        if (password.isBlank()) return false
+        if (password.isBlank() || password.length < MIN_PASSWORD_LENGTH) return false
         val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
         val hash = derive(password, salt, ITERATIONS)
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
@@ -155,19 +156,26 @@ object AppLock {
         promptShowing = false
     }
 
-    /** Stored, so a force stop does not hand out fresh attempts.
-     *  ponytail: wall clock (it has to survive a reboot), so moving the system
-     *  clock forward skips the wait. */
+    /** Stored, so a force stop does not hand out fresh attempts. Time since
+     *  boot, not the wall clock: the user can set that one forward. */
     private const val FREE_ATTEMPTS = 5
-    private const val MAX_WAIT_MS = 30_000L shl 5
     private const val KEY_FAILED_ATTEMPTS = "app_lock_failed_attempts"
-    private const val KEY_RETRY_ALLOWED_AT = "app_lock_retry_allowed_at"
+    private const val KEY_WAIT_FROM = "app_lock_wait_from_elapsed"
+    private const val KEY_WAIT_MS = "app_lock_wait_ms"
 
     /** Seconds until the next attempt is allowed, 0 = now. */
     fun retryWaitSeconds(context: Context): Int {
-        val at = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getLong(KEY_RETRY_ALLOWED_AT, 0L)
-        // Capped: a clock set back must not lock the owner out for good.
-        return ((at - System.currentTimeMillis()).coerceIn(0L, MAX_WAIT_MS) + 999).div(1000).toInt()
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val waitMs = prefs.getLong(KEY_WAIT_MS, 0L)
+        if (waitMs <= 0L) return 0
+        val now = SystemClock.elapsedRealtime()
+        var from = prefs.getLong(KEY_WAIT_FROM, 0L)
+        if (now < from) {
+            // Rebooted: the time since boot started over, so does the wait.
+            from = now
+            prefs.edit().putLong(KEY_WAIT_FROM, now).commit()
+        }
+        return ((from + waitMs - now).coerceAtLeast(0L) + 999).div(1000).toInt()
     }
 
     /** After [FREE_ATTEMPTS] wrong passwords: 30 s, doubling to 16 min. */
@@ -176,13 +184,16 @@ object AppLock {
         val failed = prefs.getInt(KEY_FAILED_ATTEMPTS, 0) + 1
         val over = failed - FREE_ATTEMPTS
         val edit = prefs.edit().putInt(KEY_FAILED_ATTEMPTS, failed)
-        if (over >= 0) edit.putLong(KEY_RETRY_ALLOWED_AT, System.currentTimeMillis() + (30_000L shl over.coerceAtMost(5)))
+        if (over >= 0) {
+            edit.putLong(KEY_WAIT_FROM, SystemClock.elapsedRealtime())
+                .putLong(KEY_WAIT_MS, 30_000L shl over.coerceAtMost(5))
+        }
         edit.commit()
     }
 
     fun clearFailedAttempts(context: Context) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-            .remove(KEY_FAILED_ATTEMPTS).remove(KEY_RETRY_ALLOWED_AT).apply()
+            .remove(KEY_FAILED_ATTEMPTS).remove(KEY_WAIT_FROM).remove(KEY_WAIT_MS).apply()
     }
 
     /**
@@ -228,8 +239,18 @@ object AppLock {
     }
 
     /** Ekran kapandı: bekleme olmadan hemen kilitle. */
-    fun lockNow() {
+    fun lockNow(context: Context?) {
+        if (!unlocked) return
         unlocked = false
+        if (context != null) purgePlainCache(context)
+    }
+
+    /** Decrypted attachment copies do not outlive the unlocked session. Only
+     *  where the lock really engages: a trusted excursion (picker, external
+     *  viewer) keeps `unlocked`, so the file it has open stays. */
+    private fun purgePlainCache(context: Context) {
+        if (!hasPassword(context)) return
+        java.io.File(context.filesDir, "attachments/plain_cache").listFiles()?.forEach { it.deleteRecursively() }
     }
 
     /** Kilit ekranı kullanıcı tarafından kapatıldığında (geri tuşu →
@@ -255,6 +276,7 @@ object AppLock {
         // Güvenilir gezinti kilidi ertelediyse ve kullanıcı seçiciden Home'a
         // basıp uzun süre sonra döndüyse kilitli açılmalı — aksi halde
         // uygulama süresiz kilitsiz kalırdı.
+        val wasUnlocked = unlocked
         val leftAt = excursionLeftAt
         if (leftAt != 0L) {
             excursionLeftAt = 0L
@@ -263,10 +285,15 @@ object AppLock {
         val bgAt = backgroundedAt
         backgroundedAt = 0L
         if (bgAt != 0L && SystemClock.elapsedRealtime() - bgAt > BACKGROUND_LOCK_MS) unlocked = false
+        if (wasUnlocked && !unlocked) purgePlainCache(activity)
         // After the timeouts above: skipping them here let the call screen's
         // own stop renew `backgroundedAt`, so the app opened without the
         // password for a minute after any call.
         if (activity is com.p2p.messenger.ui.CallActivity) return
+        // The screen under the prompt is drawn for a moment before the prompt
+        // covers it: its content stays hidden until the password is in.
+        activity.findViewById<android.view.View>(android.R.id.content)?.visibility =
+            if (unlocked) android.view.View.VISIBLE else android.view.View.INVISIBLE
         if (unlocked) return
         // No `promptShowing` short-circuit: an activity started over the prompt
         // (a notification with CLEAR_TOP) finished it and stayed open unlocked.

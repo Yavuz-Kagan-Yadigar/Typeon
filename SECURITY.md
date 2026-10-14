@@ -586,11 +586,12 @@ certificate.
   per-mailbox credentials and a separate circuit per mailbox. That is not
   implemented, and this document does not pretend otherwise.
 - **Who made first contact with whom, by device fingerprint.** `Handshake` and
-  `IdentityExchange` are stored unsealed and name their sender, and the id of
-  a first-contact mailbox is an unkeyed hash of the recipient's fingerprint,
-  which the operator can compute for every fingerprint it has seen. Keying
-  that id would change little: the operator already has the same pair as
-  depositor and reader `PeerId` (previous point).
+  `IdentityExchange` are stored unsealed and name their sender. The id of a
+  first-contact mailbox is keyed with the nonce of the pairing code, so the
+  operator cannot compute it from a fingerprint, and `Register` needs a
+  signature by the mailbox key, so nobody else can read or occupy it. The
+  operator still has the pair as depositor and reader `PeerId` (previous
+  point).
 - It can **serve an old revision of an archived message** to a device that
   restores its history from nothing: an edited or deleted message comes back
   in its earlier form. The seal proves which revision a record is, not that

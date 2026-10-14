@@ -36,11 +36,12 @@ pub fn is_available() -> bool {
 impl Recording {
     /// Starts capturing to a temporary file.
     pub fn start() -> Result<Self, String> {
-        let path = std::env::temp_dir().join(format!(
-            "typeon-voice-{}-{}.ogg",
-            std::process::id(),
-            crate::util::now_ms()
-        ));
+        // Inside the 0700 data directory, not the shared `$TMPDIR`. The core
+        // empties `plain_cache` at every start, which also removes a
+        // recording a crash left behind.
+        let path = crate::data_directory()
+            .join("attachments/plain_cache")
+            .join(format!("voice-{}.ogg", crate::util::now_ms()));
 
         let child = Command::new("ffmpeg")
             .args([

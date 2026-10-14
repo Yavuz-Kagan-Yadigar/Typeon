@@ -66,7 +66,7 @@
     <string name="msg_contact_renamed">%1$s changed their name to %2$s</string>
     <string name="msg_server_added">Server added. Connecting…</string>
     <string name="msg_join_link_confirm">Add this server?\n\n%1$s</string>
-    <string name="msg_join_link_needs_identity">Create your account first, then paste the copied code under Settings → Servers.</string>
+    <string name="msg_join_link_needs_identity">Create your account first, then open the link again.</string>
     <string name="msg_server_removed">Server removed</string>
     <string name="lbl_server_route">Route messages through this server</string>
     <string name="lbl_server_history">Store history on this server</string>
@@ -306,7 +306,7 @@
     <string name="action_reject">Reject</string>
     <string name="msg_connection_not_complete">Connection not complete yet, try again shortly</string>
     <!-- Field-name format, intentionally untranslated. -->
-    <string name="hint_manual_add_format" translatable="false">identity_id|device_fingerprint|device_name|rendezvous_node</string>
+    <string name="hint_manual_add_format" translatable="false">identity_id|device_fingerprint|nonce|device_name|rendezvous_node</string>
     <string name="title_add_manually">Add Manually</string>
     <string name="action_add">Add</string>
     <string name="msg_added">Added</string>
@@ -358,6 +358,7 @@
     <string name="link_device_waiting">Waiting for your other device to scan…</string>
     <string name="link_device_network_not_ready">Network not ready yet. Make sure you are online and try again.</string>
     <string name="link_device_success">This device is now linked to your account.</string>
+    <string name="link_device_confirm">Link this device to your account? It gets your contacts, groups and history.\n\n%1$s\n%2$s</string>
     <string name="link_device_approved">New device added to your account.</string>
     <string name="error_group_update_rejected">A group update from the founder was rejected and not applied.</string>
     <string name="action_block">Block</string>
@@ -476,4 +477,13 @@
     <string name="title_pick_text_color">Pick a text color</string>
     <string name="call_pip">PiP</string>
     <string name="msg_primary_device_only_delete">Only the primary device can delete the account.</string>
+    <string name="msg_open_link_warning">%1$s\n\nThis link opens in your browser, outside Tor. The site sees your real IP address.</string>
+    <string name="confirm_send_shared">Send %1$d file(s) to %2$s?</string>
+    <string name="error_app_lock_short">The password needs at least %1$d characters.</string>
+    <string name="error_recovery_password_short">The recovery password needs at least %1$d characters.</string>
+    <string name="action_fetch_older_history">Fetch older history</string>
+    <string name="msg_fetch_history_requested">Requested…</string>
+    <string name="link_device_code_shown">Compare code: %1$s\nYour other device shows the same code before you approve.</string>
+    <string name="link_device_code_check">Compare code: %1$s\nApprove only if the new device shows the same code.</string>
+    <string name="notif_new_message">New message</string>
 </resources>

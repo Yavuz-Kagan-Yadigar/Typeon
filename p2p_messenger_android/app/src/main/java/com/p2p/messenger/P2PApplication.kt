@@ -37,8 +37,12 @@ class P2PApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Plaintext a killed process left behind: a recording or an
+        // outgoing copy that was never sent.
+        java.io.File(cacheDir, "voice").deleteRecursively()
+        java.io.File(cacheDir, "outgoing").deleteRecursively()
         registerReceiver(object : android.content.BroadcastReceiver() {
-            override fun onReceive(c: android.content.Context?, i: Intent?) = AppLock.lockNow()
+            override fun onReceive(c: android.content.Context?, i: Intent?) = AppLock.lockNow(c)
         }, android.content.IntentFilter(Intent.ACTION_SCREEN_OFF))
 
         // Spec dışı, kullanıcı isteği ("break material, doesn't matter,
@@ -99,6 +103,8 @@ class P2PApplication : Application() {
 
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) {
+                // The Recents card showed the last chat without the app password.
+                if (android.os.Build.VERSION.SDK_INT >= 33) activity.setRecentsScreenshotEnabled(false)
                 // Spec dışı, kullanıcı isteği: Ayarlar'daki vurgu (accent)
                 // rengi — bkz. ThemePrefs.applyAccentColor dokümantasyonu.
                 ThemePrefs.applyAccentColor(activity)
@@ -248,7 +254,14 @@ class P2PApplication : Application() {
                 com.p2p.messenger.service.P2PService.setAppVisible(true)
             }
 
-            override fun onActivityResumed(activity: Activity) {}
+            override fun onActivityResumed(activity: Activity) {
+                // `AppLock.guard` hides the content under the prompt and shows
+                // it again in `onStart`; a screen that was never stopped under
+                // the prompt gets only this call.
+                if (AppLock.isUnlocked()) {
+                    activity.findViewById<android.view.View>(android.R.id.content)?.visibility = android.view.View.VISIBLE
+                }
+            }
             override fun onActivityPaused(activity: Activity) {}
 
             override fun onActivityStopped(activity: Activity) {

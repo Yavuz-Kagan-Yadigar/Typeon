@@ -20,15 +20,14 @@
 //! `root_key`'den türetilen AYRI bir anahtarla bir kez daha AEAD'lenir.
 //! Sunucu opak bayt görür.
 //!
-//! ## Kapsanmayan (dürüst artık risk)
+//! ## First contact
 //!
-//! `Handshake` ve `IdentityExchange` MÜHÜRLENEMEZ: bunlar İLK temastır,
-//! paylaşılan bir sır henüz yoktur, ve `QrPacket` v2 sadece fingerprint
-//! taşır (tam ML-DSA-87 + ML-KEM-1024 public key'leri bir QR'a SIĞMIYOR,
-//! bkz. `DeviceLinkRequest` v2 notu) — yani gönderen, alıcının public
-//! key'lerine de sahip değildir. Bu zarflar sunucuya OKUNABİLİR ulaşır.
-//! Bu, SECURITY.md'nin gossipsub posta kutusu topic'i için ZATEN belgelediği
-//! artık riskin aynısıdır ve her yeni kişi başına BİR pakettir.
+//! `Handshake` and `IdentityExchange` go to a first-contact mailbox, before
+//! a session exists. They are sealed with a key from the pairing (or link)
+//! secret the mailbox id is made from, and inside that to the recipient
+//! device's KEM keys when the sender has them (`seal_first_contact`). The
+//! first IdentityExchange after reading a code has only the outer layer: the
+//! code carries a fingerprint, not the keys.
 //!
 //! ## Neden nonce rastgele (ratchet'in aksine)
 //!
@@ -114,16 +113,41 @@ fn open(mut key: [u8; 32], aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>, String>
 ///    oturum kutusu mu" ayrımını YAPAMAMASINI sağlar (uzunluk/önek
 ///    farkı kalmaz), ki bu tek başına faydalı bir gizlemedir.
 ///
-/// KNOWN LIMIT: the id has no key. A server that knows a fingerprint (every
-/// unsealed `Handshake`/`IdentityExchange` it stores names its sender)
-/// computes that device's first-contact mailbox id, and so links the sender
-/// of a first-contact deposit to its recipient. A keyed id needs a secret
-/// both sides hold before first contact, and a fingerprint-only QR carries
-/// none. Session mailboxes (`p2p_rt_`) come from the root key and stay blind.
+/// Only for session topics (`p2p_rt_`, from the root key). A first-contact
+/// box has no topic id: see `first_contact_mailbox_id`.
 pub fn server_mailbox_id(topic: &str) -> String {
     let id: [u8; 16] = derive(topic.as_bytes(), b"p2pmsg-v0.1-server-mailbox")
         .expect("HKDF expand 16 bayt için asla başarısız olmaz");
     format!("mb_{}", hex::encode(id))
+}
+
+/// The first-contact mailbox of `device_fingerprint` for the holders of
+/// `secret` (the nonce of a pairing or link code). The fingerprint alone,
+/// which is public, gives no id.
+pub fn first_contact_mailbox_id(secret: &[u8], device_fingerprint: &str) -> String {
+    let info = [&b"p2pmsg-v0.5-first-contact-mailbox:"[..], device_fingerprint.as_bytes()].concat();
+    let id: [u8; 16] = derive(secret, &info).expect("HKDF expand 16 bayt için asla başarısız olmaz");
+    format!("mb_{}", hex::encode(id))
+}
+
+/// The relay address of one direction of a call: from the key the sender
+/// seals that receiver's media with, which only those two devices hold.
+pub fn relay_mailbox_id(pair_key: &[u8]) -> String {
+    let id: [u8; 16] = derive(pair_key, b"p2pmsg-v0.5-call-relay-mailbox")
+        .expect("HKDF expand 16 bayt için asla başarısız olmaz");
+    format!("mb_{}", hex::encode(id))
+}
+
+/// Seeds (Ed25519, ML-DSA-87) of the key that signs `Register` for `mailbox`
+/// (`server_proto::MailboxProof`). `secret` is what the readers of the box
+/// hold and nobody else: the root key of a session box, the pair key of a
+/// relay box, a device-only secret for a first-contact box.
+pub fn mailbox_proof_seeds(secret: &[u8], mailbox: &str) -> Result<([u8; 32], [u8; 32]), String> {
+    let info = |tag: &[u8]| [tag, mailbox.as_bytes()].concat();
+    Ok((
+        derive(secret, &info(b"p2pmsg-v0.5-mailbox-proof-ed25519:"))?,
+        derive(secret, &info(b"p2pmsg-v0.5-mailbox-proof-mldsa:"))?,
+    ))
 }
 
 /// Arşiv KOVA döngüsü — bir kova bu kadar ms'lik bir pencereyi kapsar (30 gün).
@@ -223,34 +247,48 @@ pub fn open_envelope(root_key: &[u8], mailbox_id: &str, sender_fp: &str, sealed:
     open(derive(root_key, b"p2pmsg-v0.1-server-seal")?, &envelope_aad(mailbox_id, sender_fp), sealed)
 }
 
-/// İlk-temas zarfları (`Handshake`/`IdentityExchange`) için "mühür" —
-/// KASITLI OLARAK kimlik dönüşümü, gerçek bir şifreleme DEĞİL.
+/// Seals an envelope for a first-contact mailbox (`Handshake`,
+/// `IdentityExchange`, and anything sent before a session exists): the server
+/// sees no identity metadata of a first contact.
 ///
-/// Modül başındaki "Kapsanmayan" notuna bakın: bu zarflar için paylaşılan
-/// bir sır yoktur. Yine de sunucuya HAM CBOR göndermek yerine tek tip bir
-/// çerçeveye sokuyoruz ki sunucunun kod yolu (ve `MailboxItem.sealed`
-/// alanının sözleşmesi) tek olsun — sunucu "bu mühürlü mü değil mi" diye
-/// bakmak zorunda kalmasın. Baştaki 12 sıfır bayt, `open_envelope`'ın
-/// asla başarılı olamayacağı (ve `open_unsealed`'ın tanıyacağı) bir
-/// işaretleyicidir.
+/// Two layers. Outside, always: a key from `secret`, the pairing or link
+/// secret the mailbox id is made from (`first_contact_mailbox_id`). Inside,
+/// when the sender knows the recipient device's public KEM keys
+/// (`recipient_kem`: X25519, ML-KEM-1024): a hybrid KEM to them
+/// (`ratchet::kem_key_to`), so the code alone does not open it. Both layers
+/// are bound to the mailbox, which is made from the recipient's fingerprint.
 ///
-/// Bu fonksiyonun HİÇBİR gizlilik iddiası YOKTUR. Adı bunu yansıtsın diye
-/// `seal_` ÖNEKİ KULLANILMADI.
-pub fn frame_unsealed(envelope_cbor: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(NONCE_LEN + envelope_cbor.len());
-    out.extend_from_slice(&[0u8; NONCE_LEN]);
-    out.extend_from_slice(envelope_cbor);
-    out
+/// Plaintext of the outer layer: `0 || envelope`, or
+/// `1 || KEM header || nonce || ciphertext`.
+pub fn seal_first_contact(secret: &[u8], mailbox_id: &str, recipient_kem: Option<(&[u8], &[u8])>, envelope_cbor: &[u8]) -> Result<Vec<u8>, String> {
+    let inner = match recipient_kem {
+        Some((x25519_pubkey, kyber_pubkey)) => {
+            let (key, header) = crate::ratchet::kem_key_to(x25519_pubkey, kyber_pubkey)?;
+            let body = seal(key, mailbox_id.as_bytes(), envelope_cbor)?;
+            [&[1u8][..], &header[..], &body[..]].concat()
+        }
+        None => [&[0u8][..], envelope_cbor].concat(),
+    };
+    seal(derive(secret, b"p2pmsg-v0.5-first-contact-seal")?, mailbox_id.as_bytes(), &inner)
 }
 
-/// `frame_unsealed`'ın tersi. `None` = bu öğe çerçevelenmemiş (yani gerçekten
-/// mühürlü). ONLY for a mailbox that has no key (first contact): in a
-/// session's mailbox an unsealed item is something the server put there.
-pub fn open_unsealed(sealed: &[u8]) -> Option<&[u8]> {
-    if sealed.len() > NONCE_LEN && sealed[..NONCE_LEN] == [0u8; NONCE_LEN] {
-        Some(&sealed[NONCE_LEN..])
-    } else {
-        None
+/// `seal_first_contact`'s reverse. `own_x25519_secret`/`own_kyber_secret`:
+/// the long-term KEM keys of the device the mailbox belongs to.
+pub fn open_first_contact(
+    secret: &[u8],
+    mailbox_id: &str,
+    own_x25519_secret: &x25519_dalek::StaticSecret,
+    own_kyber_secret: &crate::ratchet::MlKem1024DecapsulationKey,
+    sealed: &[u8],
+) -> Result<Vec<u8>, String> {
+    let inner = open(derive(secret, b"p2pmsg-v0.5-first-contact-seal")?, mailbox_id.as_bytes(), sealed)?;
+    match inner.split_first() {
+        Some((&0, envelope)) => Ok(envelope.to_vec()),
+        Some((&1, rest)) if rest.len() > crate::ratchet::KEM_HEADER_LEN => {
+            let (header, body) = rest.split_at(crate::ratchet::KEM_HEADER_LEN);
+            open(crate::ratchet::kem_key_from(own_x25519_secret, own_kyber_secret, header)?, mailbox_id.as_bytes(), body)
+        }
+        _ => Err("Bilinmeyen ilk temas mührü".to_string()),
     }
 }
 
@@ -308,9 +346,21 @@ pub fn seal_archive_record(
     conv_key: &str,
     record_id: &str,
     rev: u64,
+    bucket: &str,
+    sent_at_ms: u64,
     record_cbor: &[u8],
 ) -> Result<Vec<u8>, String> {
-    seal(archive_record_key(archive_root_key, conv_key, record_id, rev)?, b"", record_cbor)
+    seal(archive_record_key(archive_root_key, conv_key, record_id, rev)?, &archive_record_aad(bucket, sent_at_ms), record_cbor)
+}
+
+/// What the record's tag covers besides the body: the bucket it is stored in
+/// (key generation, conversation, month) and the page stamp the server sorts
+/// by. The record key already covers `record_id` and `rev`. A record moved to
+/// another bucket, or served with another stamp, does not open.
+fn archive_record_aad(bucket: &str, sent_at_ms: u64) -> Vec<u8> {
+    let mut aad = bucket.as_bytes().to_vec();
+    aad.extend_from_slice(&sent_at_ms.to_be_bytes());
+    aad
 }
 
 /// `seal_archive_record`'un tersi. `rev`, sunucudan gelen `ArchiveRecord.rev`
@@ -326,9 +376,11 @@ pub fn open_archive_record(
     conv_key: &str,
     record_id: &str,
     rev: u64,
+    bucket: &str,
+    sent_at_ms: u64,
     sealed: &[u8],
 ) -> Result<Vec<u8>, String> {
-    open(archive_record_key(archive_root_key, conv_key, record_id, rev)?, b"", sealed)
+    open(archive_record_key(archive_root_key, conv_key, record_id, rev)?, &archive_record_aad(bucket, sent_at_ms), sealed)
 }
 
 #[cfg(test)]
@@ -344,6 +396,17 @@ mod tests {
         assert!(id.starts_with("mb_"));
         assert!(!id.contains(&fp), "fingerprint kutu adında görünmemeli");
         assert_ne!(id, server_mailbox_id("p2p_msg_other"));
+    }
+
+    #[test]
+    fn first_contact_mailbox_needs_the_secret_and_the_fingerprint() {
+        let fp = "a".repeat(64);
+        let id = first_contact_mailbox_id(&[7; 16], &fp);
+        assert_eq!(id, first_contact_mailbox_id(&[7; 16], &fp));
+        assert_ne!(id, first_contact_mailbox_id(&[8; 16], &fp));
+        assert_ne!(id, first_contact_mailbox_id(&[7; 16], &"b".repeat(64)));
+        assert_ne!(id, server_mailbox_id(&format!("p2p_msg_{}", fp)));
+        assert_ne!(mailbox_proof_seeds(&[7; 16], &id).unwrap(), mailbox_proof_seeds(&[8; 16], &id).unwrap());
     }
 
     #[test]
@@ -375,29 +438,44 @@ mod tests {
     }
 
     #[test]
-    fn unsealed_frame_roundtrip() {
+    fn first_contact_seal_roundtrip() {
+        use ml_kem::{EncodedSizeUser, KemCore};
+        let x_secret = x25519_dalek::StaticSecret::random_from_rng(&mut OsRng);
+        let x_public = x25519_dalek::PublicKey::from(&x_secret);
+        let (kyber_secret, kyber_ek) = ml_kem::MlKem1024::generate(&mut OsRng);
+        let kyber_public = kyber_ek.as_bytes();
         let payload = b"ilk temas zarfi";
-        let framed = frame_unsealed(payload);
-        assert_eq!(open_unsealed(&framed), Some(&payload[..]));
-        // Gerçek bir mühür, çerçevelenmiş sayılmamalı (nonce rastgele
-        // olduğundan 12 sıfır bayt olma olasılığı ihmal edilebilir).
-        let sealed = seal_envelope(&[1u8; 32], "mb", "fp", payload).unwrap();
-        assert!(open_unsealed(&sealed).is_none());
+        for kem in [None, Some((&x_public.as_bytes()[..], &kyber_public[..]))] {
+            let sealed = seal_first_contact(&[7; 16], "mb_1", kem, payload).unwrap();
+            assert_eq!(open_first_contact(&[7; 16], "mb_1", &x_secret, &kyber_secret, &sealed).unwrap(), payload);
+            assert!(open_first_contact(&[8; 16], "mb_1", &x_secret, &kyber_secret, &sealed).is_err());
+            assert!(open_first_contact(&[7; 16], "mb_2", &x_secret, &kyber_secret, &sealed).is_err());
+        }
+        // The KEM layer needs the device's keys, not only the code.
+        let sealed = seal_first_contact(&[7; 16], "mb_1", Some((&x_public.as_bytes()[..], &kyber_public[..])), payload).unwrap();
+        let (other_kyber, _) = ml_kem::MlKem1024::generate(&mut OsRng);
+        assert!(open_first_contact(&[7; 16], "mb_1", &x_secret, &other_kyber, &sealed).is_err());
+        // A clear envelope (the format before the seal) does not open.
+        let clear = [&[0u8; 12][..], payload].concat();
+        assert!(open_first_contact(&[7; 16], "mb_1", &x_secret, &kyber_secret, &clear).is_err());
     }
 
     #[test]
     fn archive_record_roundtrip() {
         let ark = [3u8; 32];
-        let sealed = seal_archive_record(&ark, "conv-a", "msg-1", 7, b"arsiv satiri").unwrap();
+        let sealed = seal_archive_record(&ark, "conv-a", "msg-1", 7, "ar_x", 5, b"arsiv satiri").unwrap();
         assert_eq!(
-            open_archive_record(&ark, "conv-a", "msg-1", 7, &sealed).unwrap(),
+            open_archive_record(&ark, "conv-a", "msg-1", 7, "ar_x", 5, &sealed).unwrap(),
             b"arsiv satiri"
         );
         // Her bilesen anahtara girmeli.
-        assert!(open_archive_record(&[4u8; 32], "conv-a", "msg-1", 7, &sealed).is_err());
-        assert!(open_archive_record(&ark, "conv-b", "msg-1", 7, &sealed).is_err());
-        assert!(open_archive_record(&ark, "conv-a", "msg-2", 7, &sealed).is_err());
-        assert!(open_archive_record(&ark, "conv-a", "msg-1", 8, &sealed).is_err());
+        assert!(open_archive_record(&[4u8; 32], "conv-a", "msg-1", 7, "ar_x", 5, &sealed).is_err());
+        assert!(open_archive_record(&ark, "conv-b", "msg-1", 7, "ar_x", 5, &sealed).is_err());
+        assert!(open_archive_record(&ark, "conv-a", "msg-2", 7, "ar_x", 5, &sealed).is_err());
+        assert!(open_archive_record(&ark, "conv-a", "msg-1", 8, "ar_x", 5, &sealed).is_err());
+        // The bucket and the page stamp are under the tag too.
+        assert!(open_archive_record(&ark, "conv-a", "msg-1", 7, "ar_y", 5, &sealed).is_err());
+        assert!(open_archive_record(&ark, "conv-a", "msg-1", 7, "ar_x", 6, &sealed).is_err());
     }
 
     #[test]
@@ -406,10 +484,10 @@ mod tests {
         // sifreleme ayni anahtari kullanirdi. Ayni acma anahtari ikisini de
         // acabiliyorsa nonce tekrari riski geri gelmis demektir.
         let ark = [5u8; 32];
-        let v1 = seal_archive_record(&ark, "c", "m", 1, b"ilk hali").unwrap();
-        let v2 = seal_archive_record(&ark, "c", "m", 2, b"duzeltilmis hali").unwrap();
-        assert!(open_archive_record(&ark, "c", "m", 1, &v2).is_err());
-        assert!(open_archive_record(&ark, "c", "m", 2, &v1).is_err());
+        let v1 = seal_archive_record(&ark, "c", "m", 1, "b", 0, b"ilk hali").unwrap();
+        let v2 = seal_archive_record(&ark, "c", "m", 2, "b", 0, b"duzeltilmis hali").unwrap();
+        assert!(open_archive_record(&ark, "c", "m", 1, "b", 0, &v2).is_err());
+        assert!(open_archive_record(&ark, "c", "m", 2, "b", 0, &v1).is_err());
     }
 
     #[test]

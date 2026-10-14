@@ -25,8 +25,9 @@
 //! - `TYPEON_SERVER_DIR`   (varsayılan `~/.local/share/typeon-server`)
 //! - `TYPEON_SERVER_NODE`  (`1` ile Kad Server + Circuit Relay v2 hizmeti)
 //! - `TYPEON_SERVER_NAME`
-//! - `TYPEON_SERVER_BUDGET_BYTES` (sunucunun kullanabileceği TOPLAM disk;
-//!   ayarlanmazsa sınırsız — kayıt başına kotalar yine geçerli)
+//! - `TYPEON_SERVER_BUDGET_BYTES` (total disk the server may use; default
+//!   336 GiB = 64 devices x the per-device quotas)
+//! - `TYPEON_SERVER_MAX_DEVICES` (most enrolled devices; default 64)
 
 use std::path::PathBuf;
 
@@ -61,13 +62,18 @@ fn build_config() -> ServerConfig {
     // Bu denetimde bulundu: `total_storage_budget_bytes` okunuyor ama hiçbir
     // yerde set edilmiyordu, yani sunucunun TOPLAM disk tavanı (defter #23)
     // ölü koddu — yalnızca kayıt başına kotalar uygulanıyordu ve N kayıtla
-    // gerçek kullanım N × kota'ya çıkabiliyordu. Bir VPS'te sınırsız kalmak
-    // makul bir varsayılan (bu yüzden `None`), ama küçük bir diskte
-    // operatörün bir tavan koyabilmesi gerekiyor.
+    // gerçek kullanım N × kota'ya çıkabiliyordu. The default is
+    // `ServerConfig::new`'s 336 GiB; a small disk needs a lower one.
     if let Ok(v) = std::env::var("TYPEON_SERVER_BUDGET_BYTES") {
         match v.trim().parse::<u64>() {
             Ok(bytes) if bytes > 0 => cfg.total_storage_budget_bytes = Some(bytes),
             _ => eprintln!("TYPEON_SERVER_BUDGET_BYTES yok sayıldı (pozitif bir bayt sayısı bekleniyor): {v}"),
+        }
+    }
+    if let Ok(v) = std::env::var("TYPEON_SERVER_MAX_DEVICES") {
+        match v.trim().parse::<u32>() {
+            Ok(n) if n > 0 => cfg.max_enrollments = n,
+            _ => eprintln!("TYPEON_SERVER_MAX_DEVICES ignored (a positive number is expected): {v}"),
         }
     }
     cfg
@@ -130,7 +136,8 @@ fn usage() {
          invite new [etiket] [adet] [gün]    Davet kodu üret (adet 0 = sınırsız)\n\
          invite list                         Davetleri listele\n\
          devices list                        Kayıtlı cihazlar\n\
-         devices revoke <enrollment_id>      Bir cihazın kaydını iptal et\n\
+         devices revoke <enrollment_id>      Bir cihazın kaydını iptal et ve engelle\n\
+         devices unblock <enrollment_id>     Engeli kaldır (cihaz yeniden kaydolabilir)\n\
          address                             İlan edilen adresler\n"
     );
 }
@@ -246,6 +253,14 @@ fn devices(args: &[String]) {
                     std::process::exit(1);
                 }
             }
+        }
+        Some("unblock") => {
+            let Some(e) = args.get(1).and_then(|h| hex::decode(h).ok()).and_then(|id| store.enrollment_by_id(&id)) else {
+                eprintln!("Kullanım: devices unblock <enrollment_id_hex>");
+                std::process::exit(2);
+            };
+            store.unblock_enrollment_key(&e.enroll_pk);
+            println!("Engel kaldırıldı");
         }
         Some(other) => {
             eprintln!("Bilinmeyen devices alt komutu: {other}");

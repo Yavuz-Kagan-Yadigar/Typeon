@@ -2,8 +2,6 @@ package com.p2p.messenger.ui
 
 import android.Manifest
 import android.app.AlertDialog
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -181,6 +179,7 @@ class GroupChatActivity : AppCompatActivity() {
     /** bkz. ChatActivity aynı alanlar (sonsuz kaydırma). */
     private var isLoadingOlderHistory = false
     private var noMoreOlderHistory = false
+    private lateinit var fetchHistoryButton: FetchHistoryButton
     private var olderHistoryRequest = 0
     private var olderHistoryEmptyReply = false
     /** Set in onResume: the chat is really in front of the user, not just
@@ -385,7 +384,14 @@ class GroupChatActivity : AppCompatActivity() {
                 type == "file_progress" -> runOnUiThread {
                     adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.DOWNLOADING, obj.optLong("bytes_done"))
                 }
-                type == "history_backfilled" -> runOnUiThread { syncMissedGroupMessages() }
+                type == "history_backfilled" -> runOnUiThread {
+                    syncMissedGroupMessages()
+                    // Rows older than the loaded page: read them from the local archive now.
+                    if (fetchHistoryButton.onBackfilled()) {
+                        noMoreOlderHistory = false
+                        loadOlderGroupHistory()
+                    }
+                }
                 type == "file_complete" -> runOnUiThread {
                     adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.COMPLETE)
                 }
@@ -472,8 +478,11 @@ class GroupChatActivity : AppCompatActivity() {
                     loadOlderGroupHistory()
                 }
                 updateScrollToBottomFabVisibility()
+                fetchHistoryButton.update()
             }
         })
+        fetchHistoryButton = FetchHistoryButton(findViewById(R.id.btnFetchHistory), recycler, true,
+            { groupId }, { localMessages.minOfOrNull { it.orderKey } ?: 0L })
         // Spec dışı, kullanıcı isteği: grup mesajları için de Düzenle/Sil
         // (+ başarısızsa Yeniden Gönder) — bkz. ChatActivity.showEditDeleteDialog
         // AYNI desen.
@@ -607,7 +616,14 @@ class GroupChatActivity : AppCompatActivity() {
         com.p2p.messenger.util.ShareIntake.text(share)?.let {
             findViewById<EditText>(R.id.edtMessage).apply { setText(it); setSelection(text.length) }
         }
-        com.p2p.messenger.util.ShareIntake.uris(share).forEach { onGroupFilePicked(it) }
+        val uris = com.p2p.messenger.util.ShareIntake.uris(share)
+        if (uris.isEmpty()) return
+        // The chat was picked with one tap in a list that reorders itself.
+        AlertDialog.Builder(this)
+            .setMessage(getString(R.string.confirm_send_shared, uris.size, txtToolbarTitle.text))
+            .setPositiveButton(R.string.btn_send) { _, _ -> uris.forEach { onGroupFilePicked(it) } }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     /**
@@ -861,27 +877,17 @@ class GroupChatActivity : AppCompatActivity() {
         return out
     }
 
-    /** bkz. ChatActivity.resolveReplyLabel AYNI desen — grup için, "Sen"
-     *  ya da yanıtlanan mesajın (zaten çözülmüş) `senderName`'i. Yanıtlanan
-     *  mesaj bu cihazda YERELDE bulunamazsa (ör. hiç senkronlanmadı),
-     *  göndericinin gömdüğü `replyToSenderIdentityId`'yi bir YEDEK olarak
-     *  kullanır — `resolveContactByIdentity` ile kişi listesinden ada
-     *  çevrilir, yerel arşive bakmaya gerek KALMAZ. Bu, bu fonksiyonun
-     *  önceki sürümünün taşıdığı bilinen bir sınırı (bkz. eski dokümantasyon
-     *  notu) giderir.
-     */
+    /** The label over a quote: "You" or the sender name of the quoted
+     *  message, only when that message is in the local history. */
     private fun resolveReplyLabel(replyToMessageId: String?, replyToSenderIdentityId: String? = null): String? {
         if (replyToMessageId == null) return null
         val target = localMessages.find { it.messageId == replyToMessageId }
         if (target != null) {
             return if (target.isMine) getString(R.string.lbl_you) else target.senderName
         }
-        if (replyToSenderIdentityId == null) return null
-        return if (replyToSenderIdentityId == ownIdentityId) {
-            getString(R.string.lbl_you)
-        } else {
-            resolveContactByIdentity(replyToSenderIdentityId)?.displayName ?: replyToSenderIdentityId.take(8)
-        }
+        // The quoted message is not here: the name the sender claims for it
+        // is not shown ("You" or a member over words they never wrote).
+        return null
     }
 
     /** bkz. ChatActivity.resolveReplyLabels AYNI desen. */
@@ -918,47 +924,19 @@ class GroupChatActivity : AppCompatActivity() {
         if (localOlder.isNotEmpty()) {
             prependOlderMessages(localOlder)
         }
-        if (localOlder.size < OLDER_HISTORY_PAGE_SIZE) {
-            try {
-                P2PLib.requestOlderGroupMessageHistory(groupId, beforeTimestamp, OLDER_HISTORY_PAGE_SIZE)
-            } catch (e: Exception) {
-                isLoadingOlderHistory = false
-            }
-            // Several sources are asked (the peer side and our own devices)
-            // and any of them may never answer: the request ends on a timer,
-            // not on the first reply. Without it the loading flag stayed set
-            // for the whole session, and one empty reply ended the history.
-            olderHistoryEmptyReply = false
-            val request = ++olderHistoryRequest
-            recycler.postDelayed({
-                if (request == olderHistoryRequest && isLoadingOlderHistory) {
-                    isLoadingOlderHistory = false
-                    if (olderHistoryEmptyReply) noMoreOlderHistory = true
-                }
-            }, OLDER_HISTORY_REPLY_WAIT_MS)
-            // Spec dışı, dış inceleme düzeltmesi: diğer üyeler o an
-            // ulaşılamıyorsa yukarıdaki istek boşuna beklerdi — AYNI anda
-            // kendi kardeş cihazlarımıza da sorulur (`message_id` bazlı dedup
-            // sayesinde çakışma olmaz).
-            try {
-                P2PLib.requestOlderSiblingGroupHistory(groupId, beforeTimestamp, OLDER_HISTORY_PAGE_SIZE)
-            } catch (e: Exception) { /* best-effort ek kaynak, ana akışı etkilemez */ }
-        } else {
-            isLoadingOlderHistory = false
-        }
+        // Local archive only: scrolling sends nothing to the network.
+        isLoadingOlderHistory = false
     }
 
     /** bkz. `loadOlderGroupHistory` — bir üyeden gelen "older_group_history"
      *  ağ yanıtı. Boş dizi dönerse artık bu grup için tekrar denenmez. */
     private fun applyOlderGroupHistory(obj: JSONObject) {
-        if (!isLoadingOlderHistory) return
+        // Only what the "Fetch older history" button asked for.
+        if (!fetchHistoryButton.acceptsReply()) return
         val array = obj.optJSONArray("messages") ?: return
-        if (array.length() == 0) {
-            // Another source may still answer: see the timer in the request.
-            olderHistoryEmptyReply = true
-            return
-        }
-        isLoadingOlderHistory = false
+        // Empty: another source (peer, own device, server) may still answer.
+        if (array.length() == 0) return
+        fetchHistoryButton.onBackfilled()
         val items = (0 until array.length()).map { itemFromGroupHistoryJson(array.getJSONObject(it)) }
         prependOlderMessages(items)
     }
@@ -1437,6 +1415,7 @@ class GroupChatActivity : AppCompatActivity() {
                 // Kişi listesi okunamazsa isimler kısaltılmış kimliğe düşer.
             }
             val rows = mutableListOf<String>()
+            var myRow = -1
             try {
                 val array = JSONArray(raw)
                 for (i in 0 until array.length()) {
@@ -1449,6 +1428,7 @@ class GroupChatActivity : AppCompatActivity() {
                         names[identityId]?.isNotBlank() == true -> names[identityId]!!
                         else -> identityId.take(8)
                     }
+                    if (entry.optBoolean("is_me", false)) myRow = rows.size
                     rows.add("${entry.optString("emoji")}   $who")
                 }
             } catch (e: Exception) {
@@ -1458,7 +1438,20 @@ class GroupChatActivity : AppCompatActivity() {
                 if (rows.isEmpty()) return@withContext
                 AlertDialog.Builder(this@GroupChatActivity)
                     .setTitle(R.string.title_reactions)
-                    .setItems(rows.toTypedArray(), null)
+                    .setItems(rows.toTypedArray()) { _, which ->
+                        // Kendi satırıma dokunmak tepkimi kaldırır (boş emoji).
+                        if (which != myRow) return@setItems
+                        lifecycleScope.launch(Dispatchers.IO) {
+                            val summary = try { P2PLib.reactToGroupMessage(groupId, item.messageId, "") } catch (e: Exception) { "Error: ${e.message}" }
+                            withContext(Dispatchers.Main) {
+                                if (summary.startsWith("Error:")) {
+                                    Toast.makeText(this@GroupChatActivity, summary, Toast.LENGTH_SHORT).show()
+                                } else {
+                                    adapter.applyReactions(item.messageId, summary)
+                                }
+                            }
+                        }
+                    }
                     .setNegativeButton(android.R.string.ok, null)
                     .show()
             }
@@ -1505,8 +1498,7 @@ class GroupChatActivity : AppCompatActivity() {
 
     /** bkz. ChatActivity.copyMessageText AYNI desen. */
     private fun copyMessageText(item: SimpleChatAdapter.Item) {
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("message", item.text))
+        com.p2p.messenger.util.copySensitive(this, "message", item.text)
         Toast.makeText(this, R.string.lbl_copied, Toast.LENGTH_SHORT).show()
     }
 
@@ -2145,7 +2137,7 @@ class GroupChatActivity : AppCompatActivity() {
                         if (path.startsWith("Error:")) {
                             Toast.makeText(this@GroupChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
                         } else {
-                            openGroupAttachmentFile(path, attachment.mimeType)
+                            openGroupAttachmentFile(path)
                         }
                     }
                 }
@@ -2155,7 +2147,11 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /** bkz. ChatActivity.openAttachmentFile — AYNI, peer'e bağımlı değil. */
-    private fun openGroupAttachmentFile(path: String, mimeType: String) {
+    private fun openGroupAttachmentFile(path: String) {
+        // The file's own extension picks the viewer and the handler, not the
+        // type the sender declared.
+        val mimeType = android.webkit.MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(File(path).extension.lowercase()) ?: "*/*"
         try {
             val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", File(path))
             if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) {
@@ -2170,11 +2166,7 @@ class GroupChatActivity : AppCompatActivity() {
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 // The file's own extension picks the handler, not the type
                 // the sender declared.
-                setDataAndType(
-                    uri,
-                    android.webkit.MimeTypeMap.getSingleton()
-                        .getMimeTypeFromExtension(File(path).extension.lowercase()) ?: "*/*"
-                )
+                setDataAndType(uri, mimeType)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             AppLock.beginTrustedExcursion()
@@ -2222,7 +2214,12 @@ class GroupChatActivity : AppCompatActivity() {
                 try {
                     val uri = FileProvider.getUriForFile(this@GroupChatActivity, "$packageName.fileprovider", File(path))
                     val intent = Intent(Intent.ACTION_VIEW).apply {
-                        setDataAndType(uri, attachment.mimeType.ifBlank { "*/*" })
+                        // The file's own extension, never the type the sender declared.
+                        setDataAndType(
+                            uri,
+                            android.webkit.MimeTypeMap.getSingleton()
+                                .getMimeTypeFromExtension(File(path).extension.lowercase()) ?: "*/*"
+                        )
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
                     AppLock.beginTrustedExcursion()
@@ -2273,7 +2270,11 @@ class GroupChatActivity : AppCompatActivity() {
      */
     private fun safeSaveFileName(name: String): String {
         val cleaned = name
-            .filter { it != '/' && it != '\\' && it != ':' && !it.isISOControl() }
+            .filter {
+                it != '/' && it != '\\' && it != ':' && !it.isISOControl() &&
+                    // Bidi overrides and zero-width characters disguise the extension.
+                    Character.getType(it) != Character.FORMAT.toInt()
+            }
             .trim()
             .trimStart('.')
             .trim()

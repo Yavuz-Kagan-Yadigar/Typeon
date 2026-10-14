@@ -70,6 +70,12 @@ modules:
         path: ../..
         skip:
           - .git
+          # Local tooling state and release output: not sources, and they
+          # must not end up in a build cache.
+          - .claude
+          - .crush
+          - dist
+          - reviews
           - Linux/target
           - Linux/target-sdk
           # `Linux/packaging` KOMPLE atlanıyor (sadece build çıktıları

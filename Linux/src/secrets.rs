@@ -182,7 +182,9 @@ pub fn save(dir: &Path, vault: &Vault, passphrase: &str) -> Result<(), String> {
     out.extend_from_slice(&nonce_bytes);
     out.extend_from_slice(&sealed);
 
-    write_private(&vault_path(dir), &out)
+    write_private(&vault_path(dir), &out)?;
+    remember_archive_seal(vault);
+    Ok(())
 }
 
 pub fn load(dir: &Path, passphrase: &str) -> Result<Vault, String> {
@@ -228,6 +230,9 @@ pub fn load(dir: &Path, passphrase: &str) -> Result<Vault, String> {
 
     let vault = Vault::decode(&body);
     body.zeroize();
+    if let Ok(vault) = &vault {
+        remember_archive_seal(vault);
+    }
     vault
 }
 
@@ -322,15 +327,23 @@ fn archive_path(dir: &Path) -> PathBuf {
     dir.join(ARCHIVE_FILE)
 }
 
-fn archive_cipher(dir: &Path) -> Result<ChaCha20Poly1305, String> {
-    let profile = dir.to_string_lossy().to_string();
-    let mut wallet_key = keyring::load_key(&profile)?.ok_or("no wallet key yet")?;
+/// Key that seals the archive file, derived from a secret inside the vault
+/// and held for the session. The wallet key alone must not open the archive
+/// key: with a passphrase set, that would bypass the passphrase.
+static ARCHIVE_SEAL: std::sync::Mutex<Option<[u8; 32]>> = std::sync::Mutex::new(None);
+
+fn remember_archive_seal(vault: &Vault) {
     let mut hasher = Sha256::new();
-    hasher.update(b"typeon-archive-key-v1");
-    hasher.update(wallet_key);
-    let derived = hasher.finalize();
-    wallet_key.zeroize();
-    ChaCha20Poly1305::new_from_slice(&derived).map_err(|_| "bad archive key".to_string())
+    hasher.update(b"typeon-archive-key-v2");
+    hasher.update(vault.history_key);
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&hasher.finalize());
+    *ARCHIVE_SEAL.lock().unwrap_or_else(|e| e.into_inner()) = Some(key);
+}
+
+fn archive_cipher() -> Result<ChaCha20Poly1305, String> {
+    let key = (*ARCHIVE_SEAL.lock().unwrap_or_else(|e| e.into_inner())).ok_or("the vault is not open")?;
+    ChaCha20Poly1305::new_from_slice(&key).map_err(|_| "bad archive key".to_string())
 }
 
 /// Reads the stored archive root key, if there is one.
@@ -339,21 +352,16 @@ pub fn load_archive_key(dir: &Path) -> Option<[u8; 32]> {
     if raw.len() < ARCHIVE_MAGIC.len() + NONCE_LEN + 32 || !raw.starts_with(ARCHIVE_MAGIC) {
         return None;
     }
-    let cipher = archive_cipher(dir).ok()?;
+    let cipher = archive_cipher().ok()?;
     let nonce_start = ARCHIVE_MAGIC.len();
     let body_start = nonce_start + NONCE_LEN;
     let nonce = Nonce::from_slice(&raw[nonce_start..body_start]);
     let plain = cipher.decrypt(nonce, &raw[body_start..]).ok()?;
-    let mut key = [0u8; 32];
-    if plain.len() != 32 {
-        return None;
-    }
-    key.copy_from_slice(&plain);
-    Some(key)
+    plain.try_into().ok()
 }
 
 pub fn store_archive_key(dir: &Path, key: &[u8; 32]) -> Result<(), String> {
-    let cipher = archive_cipher(dir)?;
+    let cipher = archive_cipher()?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);

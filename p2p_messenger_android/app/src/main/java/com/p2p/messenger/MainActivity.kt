@@ -115,9 +115,13 @@ class MainActivity : AppCompatActivity() {
         // tarafına geçirip SQLite'ı orada açıyoruz (Rust kendi başına bu
         // yolu bilemez). Bu, varsa mevcut identity'nin PUBLIC key'lerini
         // de belleğe yükler.
-        P2PLib.initDatabase(applicationContext.filesDir.absolutePath)
+        val databaseOpen = P2PLib.initDatabase(applicationContext.filesDir.absolutePath)
 
-        if (P2PLib.hasStoredIdentity()) {
+        if (!databaseOpen) {
+            // No database (its key could not be read): not a first start. A
+            // new identity made here would overwrite the stored one.
+            com.p2p.messenger.util.KeystoreCrypto.reportKeyFailure(this)
+        } else if (P2PLib.hasStoredIdentity()) {
             // Public key'ler yüklendi ama secret key'ler henüz Rust
             // belleğinde değil — Keystore ile şifrelenmiş dosyadan çözüp
             // yüklüyoruz.
@@ -166,6 +170,12 @@ class MainActivity : AppCompatActivity() {
      *  gönderilir (bkz. util.ShareIntake). */
     private fun handleShare(intent: Intent?) {
         if (!com.p2p.messenger.util.ShareIntake.isShare(intent)) return
+        // The share target is exported: a sender that grants no read access
+        // to its URIs made `startActivity` (which passes the grant on to the
+        // chat screen) throw SecurityException and kill the app.
+        if (com.p2p.messenger.util.ShareIntake.uris(intent!!).any {
+                checkCallingOrSelfUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) != android.content.pm.PackageManager.PERMISSION_GRANTED
+            }) return
         com.p2p.messenger.util.ShareIntake.pending = intent
         android.widget.Toast.makeText(this, R.string.msg_share_pick_chat, android.widget.Toast.LENGTH_LONG).show()
     }
@@ -200,12 +210,8 @@ class MainActivity : AppCompatActivity() {
 
         val code = data.toString()
         if (!P2PLib.hasStoredIdentity()) {
-            // Hesap yokken sunucu eklenemez (çekirdeğin kimliği yok).
-            // Kullanıcı hesabı oluşturduktan sonra kodu Ayarlar'a
-            // yapıştırabilir — kodu panoya bırakmak sessizce kaybolmasını
-            // engeller.
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Typeon server", code))
+            // No account, no server. Not put on the clipboard: any web page
+            // could overwrite what the user had copied.
             Toast.makeText(this, R.string.msg_join_link_needs_identity, Toast.LENGTH_LONG).show()
             return
         }

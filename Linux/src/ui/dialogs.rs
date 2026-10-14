@@ -266,14 +266,14 @@ pub fn chat_context_menu(
 
 /// Adds a contact from a pasted manual code. There is no camera path here on
 /// purpose: a desktop rarely has a usable one, and the manual code carries the
-/// exact same payload as the QR (`identity|fingerprint|name|rendezvous`).
+/// exact same payload as the QR (`identity|fingerprint|nonce|name|rendezvous`).
 pub fn add_contact(app: &Rc<App>) {
     let app_for_submit = app.clone();
     prompt(
         app,
         "Add a contact",
         "Paste the code from the other person's \"My contact code\" screen.",
-        "identity|fingerprint|name|/ip4/…",
+        "identity|fingerprint|nonce|name|/ip4/…",
         "",
         "Add",
         move |text| match core::process_manual_entry(&text) {
@@ -588,7 +588,7 @@ pub fn pending_messages(app: &Rc<App>) {
                 );
                 let row = adw::ActionRow::builder()
                     .title(glib::markup_escape_text(&util::preview_text(&message.text, 70)).as_str())
-                    .subtitle(subtitle.as_str())
+                    .subtitle(glib::markup_escape_text(&subtitle).as_str())
                     .build();
 
                 let buttons = gtk::Box::builder()

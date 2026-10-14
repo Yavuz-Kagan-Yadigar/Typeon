@@ -24,6 +24,8 @@ use crate::util;
 /// Zoom bounds for the image viewer's scroll-to-zoom.
 const MIN_ZOOM: f64 = 0.2;
 const MAX_ZOOM: f64 = 8.0;
+/// Largest image the viewer decodes: 64 megapixels is 256 MB of RGBA.
+const MAX_IMAGE_PIXELS: i64 = 64_000_000;
 
 /// Opens `path` in a viewer window, choosing the pane by MIME type. Anything
 /// that is not an image, video or audio file is handed straight to the desktop.
@@ -95,9 +97,21 @@ pub fn open(app: &Rc<App>, path: &str, mime: &str, title: &str) {
 /// the viewport, so the size request *is* what makes zooming past 100%
 /// scrollable at all.
 fn image_pane(path: &str) -> gtk::Widget {
-    let natural_size = gdk_pixbuf::Pixbuf::from_file(path)
-        .ok()
-        .map(|pixbuf| (pixbuf.width(), pixbuf.height()));
+    // Header only, nothing is decoded here. The file is the sender's: the
+    // decoder is picked from its content, so only the common formats are let
+    // through, and a canvas large enough to exhaust memory is refused.
+    let natural_size = gdk_pixbuf::Pixbuf::file_info(path).and_then(|(format, width, height)| {
+        let known = matches!(format.name().as_deref(), Some("jpeg" | "png" | "gif" | "webp"));
+        (known && width as i64 * height as i64 <= MAX_IMAGE_PIXELS).then_some((width, height))
+    });
+    let Some((natural_w, natural_h)) = natural_size else {
+        return adw::StatusPage::builder()
+            .icon_name("dialog-warning-symbolic")
+            .title("Cannot show this image here")
+            .description("Its format is not supported or it is too large. Use \"Save a copy\".")
+            .build()
+            .upcast();
+    };
 
     let picture = gtk::Picture::for_filename(path);
     picture.set_can_shrink(true);
@@ -112,13 +126,6 @@ fn image_pane(path: &str) -> gtk::Widget {
         .vexpand(true)
         .child(&picture)
         .build();
-
-    // A file that failed to decode as a pixbuf (corrupt, or a format only
-    // `GdkTexture` handles) has no dimensions to zoom against — leave it at
-    // its default fit-to-window size rather than guessing.
-    let Some((natural_w, natural_h)) = natural_size else {
-        return scroller.upcast();
-    };
 
     let zoom = Rc::new(Cell::new(1.0f64));
     let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
@@ -397,10 +404,27 @@ fn launch_externally(app: &Rc<App>, path: &str) {
         app.toast("This file type is not opened directly. Use \"Save a copy\".");
         return;
     }
-    let uri = gio::File::for_path(path).uri();
-    if gio::AppInfo::launch_default_for_uri(&uri, gio::AppLaunchContext::NONE).is_err() {
-        app.toast(&format!("No application is registered for this file. It is at {path}"));
-    }
+    // The other program runs outside Typeon and outside Tor: a document can
+    // fetch remote content and give away this computer's address. One click
+    // on a received file must not be enough for that.
+    let app_for_launch = app.clone();
+    let path = path.to_string();
+    crate::ui::dialogs::confirm(
+        app,
+        "Open in another application?",
+        "The file opens in your system's default application, which does not use Tor. A \
+         document can load content from the internet and reveal your network address to its \
+         author. Only open files from people you trust.",
+        "Open",
+        false,
+        move || {
+            let uri = gio::File::for_path(&path).uri();
+            if gio::AppInfo::launch_default_for_uri(&uri, gio::AppLaunchContext::NONE).is_err() {
+                app_for_launch
+                    .toast(&format!("No application is registered for this file. It is at {path}"));
+            }
+        },
+    );
 }
 
 /// Copies the decrypted attachment somewhere the user chooses. The plaintext

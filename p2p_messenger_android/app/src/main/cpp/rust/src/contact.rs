@@ -138,9 +138,9 @@ impl Contact {
     /// A device this side never saw gets an entry too: its old `DeviceAdd`
     /// must not introduce it later.
     pub fn revoke_device_by_owner(&mut self, fingerprint: &str, now: u64) {
-        // ponytail: 32 entries. The owner signs each one, so only the contact
-        // itself can fill the list.
-        if self.find_device(fingerprint).is_none() && self.known_devices.len() < 32 {
+        // ponytail: 32 never-seen revoked entries. The owner signs each one,
+        // so only the contact itself can fill the list.
+        if self.find_device(fingerprint).is_none() && self.known_devices.iter().filter(|d| d.owner_revoked).count() < 32 {
             self.known_devices.push(KnownDevice {
                 device_fingerprint: fingerprint.to_string(),
                 first_seen: now,
@@ -246,6 +246,12 @@ mod tests {
         c.revoke_device_by_owner("dev2", 5000);
         c.add_device_via_signed_chain("dev2".into(), 6000);
         assert!(!c.is_known_active("dev2"));
+        // Many live devices do not use up the room for revoked ones.
+        for i in 0..40 {
+            c.add_device_unverified(format!("live{i}"), 7000);
+        }
+        c.revoke_device_by_owner("dev3", 8000);
+        assert!(c.find_device("dev3").is_some());
     }
 
     #[test]

@@ -29,6 +29,7 @@ use crate::util;
 
 /// How many messages a page of history holds, matching the Android chat.
 const PAGE_SIZE: u32 = 50;
+const FETCH_HISTORY_LABEL: &str = "Fetch older history";
 /// Hard cap on bubble width, in pixels.
 ///
 /// A wrapping GtkLabel's `max-width-chars` turned out not to bound the
@@ -212,6 +213,7 @@ struct ChatView {
     conversation: Conversation,
     messages: gtk::Box,
     scroller: gtk::ScrolledWindow,
+    fetch_history: gtk::Button,
     bubbles: RefCell<HashMap<String, Rc<Bubble>>>,
     /// Ids we have already sent a read receipt for. Survives `reload()`, which
     /// clears `bubbles` — see `insert_entry`.
@@ -296,13 +298,27 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         .margin_start(12)
         .margin_end(12)
         .valign(gtk::Align::End)
+        .vexpand(true)
         .hexpand(true)
         .build();
+
+    // "Fetch older history" sits above the oldest loaded message, so it shows
+    // only when the user has scrolled to the top. It is the only place the
+    // chat asks the network for history; scrolling reads the local archive.
+    let fetch_history = gtk::Button::builder()
+        .label(FETCH_HISTORY_LABEL)
+        .halign(gtk::Align::Center)
+        .margin_top(8)
+        .build();
+    fetch_history.add_css_class("flat");
+    let timeline = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+    timeline.append(&fetch_history);
+    timeline.append(&messages);
 
     let scroller = gtk::ScrolledWindow::builder()
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
-        .child(&messages)
+        .child(&timeline)
         .build();
     // Hook for the chat wallpaper (see theme.rs); harmless when none is set.
     scroller.add_css_class("chat-messages");
@@ -342,6 +358,7 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         conversation: conversation.clone(),
         messages: messages.clone(),
         scroller: scroller.clone(),
+        fetch_history: fetch_history.clone(),
         bubbles: RefCell::new(HashMap::new()),
         seen_sent: RefCell::new(HashSet::new()),
         watermark_pending: Cell::new(false),
@@ -455,6 +472,11 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
             view.mark_read_and_sync();
             *view.app().active_conversation.borrow_mut() = None;
         });
+    }
+
+    {
+        let view = view.clone();
+        fetch_history.connect_clicked(move |_| view.fetch_server_history());
     }
 
     // Infinite scroll upward.
@@ -757,16 +779,39 @@ impl ChatView {
                 }
                 view.scroll_to_bottom();
 
-                // With node mode off nothing is archived locally, so an empty
-                // chat may simply mean "ask the peer for it".
-                if view.order.borrow().is_empty() {
-                    if let Conversation::Direct { fingerprint, .. } = &view.conversation {
-                        let fingerprint = fingerprint.clone();
-                        std::thread::spawn(move || core::request_history_sync(&fingerprint, PAGE_SIZE));
-                    }
+            },
+        );
+    }
+
+    /// The "Fetch older history" button. The rows arrive later with a
+    /// `history_backfilled` event, which reloads the chat.
+    fn fetch_server_history(self: &Rc<Self>) {
+        let (chat_key, is_group) = match &self.conversation {
+            Conversation::Direct { fingerprint, .. } => (fingerprint.clone(), false),
+            Conversation::Group { group_id, .. } => (group_id.clone(), true),
+        };
+        let before = self.order.borrow().first().map(|(key, _)| *key).unwrap_or(0);
+        self.fetch_history.set_sensitive(false);
+        self.fetch_history.set_label("Requested…");
+        let view = self.clone();
+        crate::app::run_in_background(
+            move || core::fetch_server_history(&chat_key, is_group, before as i64),
+            move |result| match result {
+                Err(error) => {
+                    view.reset_fetch_history();
+                    view.app().toast(&error);
+                }
+                // No reply (server offline, nothing older): the button comes back.
+                Ok(()) => {
+                    glib::timeout_add_local_once(std::time::Duration::from_secs(20), move || view.reset_fetch_history());
                 }
             },
         );
+    }
+
+    fn reset_fetch_history(&self) {
+        self.fetch_history.set_sensitive(true);
+        self.fetch_history.set_label(FETCH_HISTORY_LABEL);
     }
 
     fn load_older(self: &Rc<Self>) {
@@ -787,24 +832,7 @@ impl ChatView {
             move || {
                 let (older, oldest) =
                     fetch_page(&conversation, &own_identity, Some(cursor as i64), cursor);
-                if older.is_empty() {
-                    // Nothing left locally — ask the peer (or, in a group,
-                    // everyone reachable). The answer arrives as an
-                    // `older_history` event. Also ask this device's own
-                    // siblings (dedupes by message_id): this client is always
-                    // a secondary device, so the phone is often the more
-                    // reliable source.
-                    match &conversation {
-                        Conversation::Direct { fingerprint, .. } => {
-                            core::request_older_message_history(fingerprint, cursor as i64, PAGE_SIZE);
-                            core::request_older_sibling_history(fingerprint, cursor as i64, PAGE_SIZE);
-                        }
-                        Conversation::Group { group_id, .. } => {
-                            core::request_older_group_message_history(group_id, cursor as i64, PAGE_SIZE);
-                            core::request_older_sibling_group_history(group_id, cursor as i64, PAGE_SIZE);
-                        }
-                    }
-                }
+                // Local archive only: scrolling sends nothing to the network.
                 (older, oldest)
             },
             move |(mut older, oldest)| {
@@ -2486,6 +2514,7 @@ impl ChatView {
             // --- bulk history changes: rebuild rather than patch ---
             (_, "history_sync") | (_, "older_history") | (_, "older_group_history") => {
                 if self.event_belongs_here(event) {
+                    self.reset_fetch_history();
                     self.reload();
                 }
             }
@@ -2501,6 +2530,7 @@ impl ChatView {
             (_, "history_backfilled") => {
                 let unaddressed = event.optional("group_id").is_none()
                     && event.string("peer").is_empty();
+                self.reset_fetch_history();
                 if unaddressed || self.event_belongs_here(event) {
                     self.reload();
                 }

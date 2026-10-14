@@ -91,6 +91,12 @@ class LinkDeviceActivity : AppCompatActivity() {
         }
         try {
             qrImage.setImageBitmap(encodeBinaryAsQrBitmap(bytes, 1000, 1000))
+            // The approving device shows the same code in its confirm dialog.
+            val code = try { P2PLib.deviceLinkCode(bytes) } catch (e: Throwable) { "" }
+            if (code.isNotEmpty()) {
+                statusText.textAlignment = View.TEXT_ALIGNMENT_CENTER
+                statusText.text = getString(R.string.link_device_waiting) + "\n\n" + getString(R.string.link_device_code_shown, code)
+            }
         } catch (e: Exception) {
             // WriterException: the request does not fit a QR code.
             statusText.text = getString(R.string.link_device_network_not_ready)

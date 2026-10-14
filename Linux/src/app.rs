@@ -423,10 +423,12 @@ impl App {
     /// re-learned on every launch — and a restart before the next sync would
     /// leave the server-side archive unreadable on this machine.
     fn persist_archive_key_if_new(self: &Rc<Self>) {
-        if crate::secrets::load_archive_key(&self.data_dir).is_some() {
-            return;
-        }
+        // Also when the key changed: the primary device replaces it when it
+        // revokes a device.
         if let Some(ark) = core::archive_root_key() {
+            if crate::secrets::load_archive_key(&self.data_dir).as_ref() == Some(&ark) {
+                return;
+            }
             if let Err(e) = crate::secrets::store_archive_key(&self.data_dir, &ark) {
                 eprintln!("could not store the archive root key: {e}");
             }
@@ -461,6 +463,13 @@ impl App {
             return;
         }
 
+        // The setting hides who wrote and what: the title is a contact or
+        // group name.
+        let (title, body) = if self.prefs.borrow().hide_notification_content {
+            ("Typeon", "New message")
+        } else {
+            (title, body)
+        };
         let notification = gio::Notification::new(title);
         notification.set_body(Some(body));
         notification.set_priority(gio::NotificationPriority::Normal);
@@ -532,7 +541,8 @@ impl App {
 
     pub fn toast(&self, message: &str) {
         if let Some(overlay) = self.toasts.borrow().as_ref() {
-            overlay.add_toast(adw::Toast::new(message));
+            // Toast titles are Pango markup; callers pass peer-chosen names.
+            overlay.add_toast(adw::Toast::new(&gtk::glib::markup_escape_text(message)));
         }
     }
 

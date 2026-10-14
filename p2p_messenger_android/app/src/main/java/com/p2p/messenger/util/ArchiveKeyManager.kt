@@ -50,9 +50,16 @@ object ArchiveKeyManager {
     @Synchronized
     fun persistIfNew(context: Context) {
         val file = keyFile(context)
-        if (file.exists()) return
         val key = try { P2PLib.archiveRootKey() } catch (e: Exception) { return }
         if (key.size != 32) return
+        // Written again when the key changed: it is replaced when a device
+        // is revoked.
+        if (file.exists()) {
+            val stored = try { KeystoreCrypto.decrypt(file.readBytes(), KeystoreCrypto.ALIAS_ARCHIVE_ROOT) } catch (e: Exception) { null }
+            val same = stored != null && stored.contentEquals(key)
+            stored?.fill(0)
+            if (same) { key.fill(0); return }
+        }
         try {
             file.writeBytesAtomic(KeystoreCrypto.encrypt(key, KeystoreCrypto.ALIAS_ARCHIVE_ROOT))
         } catch (e: Exception) {

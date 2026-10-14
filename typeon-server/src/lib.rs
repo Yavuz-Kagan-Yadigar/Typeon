@@ -49,7 +49,7 @@ use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{identify, kad, noise, relay, tcp, yamux, PeerId, StreamProtocol, Swarm};
 use libp2p::kad::store::MemoryStore;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
@@ -126,6 +126,11 @@ const CLOCK_JUMP_HOLD_MS: u64 = 60 * 60 * 1000;
 /// onion bridge and PeerIds are free, so only a total stops a connection flood.
 const MAX_INBOUND_CONNECTIONS: u32 = 512;
 const MAX_CONNECTIONS_PER_PEER: u32 = 8;
+/// A connected peer without an active enrollment is cut after this long: it
+/// otherwise held one of the `MAX_INBOUND_CONNECTIONS` slots for good.
+const UNENROLLED_GRACE_MS: u64 = 60_000;
+/// `BlobFinish` hashes running at once; each reads a whole blob from disk.
+const MAX_HASH_JOBS: usize = 4;
 
 /// `meta` key: the addresses the running server last advertised, one per
 /// line. Management commands read it instead of starting a second server.
@@ -199,7 +204,7 @@ pub fn public_join_token(store: &Store, rotate: bool) -> Result<String, String> 
     };
     let raw = hex::decode(&token).map_err(|_| "Katılım jetonu bozuk".to_string())?;
     let hash = Sha256::digest(&raw);
-    if store.invite_uses_left(hash.as_slice()) != Some(-1) {
+    if store.invite_uses_left(hash.as_slice(), now_ms()) != Some(-1) {
         store.create_invite(hash.as_slice(), PUBLIC_JOIN_LABEL, 0, 0, now_ms())?;
     }
     Ok(token)
@@ -218,6 +223,10 @@ const PUBLIC_JOIN_LABEL: &str = "herkese-acik";
 /// Herkese açık kodla saatte açılabilecek azami YENİ kayıt — bkz.
 /// `handle_enroll`.
 const MAX_PUBLIC_ENROLLMENTS_PER_HOUR: i64 = 60;
+/// Default `ServerConfig::max_enrollments`.
+pub const DEFAULT_MAX_ENROLLMENTS: u32 = 64;
+/// An active enrollment not seen for this long is removed by `maybe_sweep`.
+const ENROLLMENT_IDLE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -241,20 +250,27 @@ pub struct ServerConfig {
     pub server_name: String,
     pub limits: ServerLimits,
     /// Sunucunun kullanabileceği TOPLAM disk bütçesi (bkz. defter #23).
-    /// `None` = sınırsız (VPS); Android sunucu uygulaması bunu cihazın
-    /// gerçek boş alanından türetip veriyor.
+    /// `None` = sınırsız; the default is 64 x the per-device quotas. Android
+    /// sunucu uygulaması bunu cihazın gerçek boş alanından türetip veriyor.
     pub total_storage_budget_bytes: Option<u64>,
+    /// Most active enrollments; a new device is refused above it.
+    pub max_enrollments: u32,
 }
 
 impl ServerConfig {
     pub fn new(data_dir: PathBuf) -> Self {
+        let limits = ServerLimits::default();
+        // 64 x (256 MiB mail + 1 GiB archive + 4 GiB blob) = 336 GiB.
+        let total = DEFAULT_MAX_ENROLLMENTS as u64
+            * (limits.max_mail_bytes + limits.max_archive_bytes + limits.max_blob_bytes);
         ServerConfig {
             blob_dir: data_dir.join("blobs"),
             data_dir,
             node_mode: false,
             server_name: "Typeon Server".to_string(),
-            limits: ServerLimits::default(),
-            total_storage_budget_bytes: None,
+            limits,
+            total_storage_budget_bytes: Some(total),
+            max_enrollments: DEFAULT_MAX_ENROLLMENTS,
         }
     }
 }
@@ -306,8 +322,15 @@ async fn accept_relay_streams(mut incoming: libp2p_stream::IncomingStreams, even
             if events.send(RelayEvent::Open { peer, id, tx }).await.is_err() {
                 return;
             }
-            tokio::spawn(pump_writes(wr, rx));
-            while let Ok((mailbox, data)) = read_frame(&mut rd).await {
+            let mut pump = tokio::spawn(pump_writes(wr, rx));
+            loop {
+                let frame = tokio::select! {
+                    // The loop dropped `tx` (not enrolled, revoked, replaced):
+                    // stop reading, or the peer keeps feeding `events`.
+                    _ = &mut pump => break,
+                    frame = read_frame(&mut rd) => frame,
+                };
+                let Ok((mailbox, data)) = frame else { break };
                 let Ok(mailbox) = String::from_utf8(mailbox) else { break };
                 if events.send(RelayEvent::Frame { peer, mailbox, data }).await.is_err() {
                     break;
@@ -330,6 +353,8 @@ struct ConnState {
     window_start: u64,
     requests_in_window: u32,
     chunks_in_window: u32,
+    /// `mono_ms` of the peer's first open connection, see `UNENROLLED_GRACE_MS`.
+    connected_at: u64,
 }
 
 pub struct ServerCore {
@@ -512,28 +537,8 @@ impl ServerCore {
                         .with_max_established_per_peer(Some(MAX_CONNECTIONS_PER_PEER)),
                 );
                 let relay: Toggle<relay::Behaviour> = if node_mode {
-                    // Varsayılan devre sınırı 2 dk / 128 KiB: bir dosya parçası
-                    // bile geçmez, sohbet bağlantısı her 2 dk kopar. Sunucu
-                    // bayt taşımak için var: bayt tavanı yok (0 = sınırsız).
-                    // Süre için "sınırsız" değeri yok (zamanlayıcı her zaman
-                    // kurulur) ve rezervasyon yanıtında u32 saniye taşınır —
-                    // u32::MAX pratikte sınırsız. Ölü devreleri keepalive
-                    // (~6 sn) zaten kapatıyor.
-                    // Per-peer rate limits only (the library's own numbers). The
-                    // default per-IP ones are one shared budget here: every
-                    // client arrives from 127.0.0.1 through the onion bridge,
-                    // so one peer used it up for everybody.
-                    let per_peer = std::num::NonZeroU32::new(30).expect("30 > 0");
-                    let config = relay::Config {
-                        max_circuit_duration: Duration::from_secs(u32::MAX as u64),
-                        max_circuit_bytes: 0,
-                        reservation_rate_limiters: Vec::new(),
-                        circuit_src_rate_limiters: Vec::new(),
-                        ..relay::Config::default()
-                    }
-                    .reservation_rate_per_peer(per_peer, Duration::from_secs(120))
-                    .circuit_src_per_peer(per_peer, Duration::from_secs(120));
-                    Some(relay::Behaviour::new(peer_id, config)).into()
+                    // Same limits as a client in node mode.
+                    Some(relay::Behaviour::new(peer_id, p2p_messenger::relay_server_config())).into()
                 } else {
                     None.into()
                 };
@@ -657,7 +662,7 @@ impl ServerCore {
     pub fn invite_addrs(&self) -> Vec<String> {
         self.advertised_addrs()
             .into_iter()
-            .filter(|a| !is_private_multiaddr(a))
+            .filter(|a| server_proto::is_onion_server_addr(a))
             .collect()
     }
 
@@ -744,13 +749,18 @@ impl ServerCore {
                 // bu yüzden anlık görüntüyü beklemeden tazele.
                 self.publish_shared();
             }
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                self.conns.entry(peer_id).or_insert(ConnState {
+            SwarmEvent::ConnectionEstablished { peer_id, num_established, .. } => {
+                let now = mono_ms();
+                let conn = self.conns.entry(peer_id).or_insert(ConnState {
                     challenge: None,
-                    window_start: mono_ms(),
+                    window_start: now,
                     requests_in_window: 0,
                     chunks_in_window: 0,
+                    connected_at: now,
                 });
+                if num_established.get() == 1 {
+                    conn.connected_at = now;
+                }
             }
             SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
                 if num_established == 0 {
@@ -887,7 +897,7 @@ impl ServerCore {
         // Cheap gate before the hybrid verify (ML-DSA-87 is the expensive
         // step, and PeerIds are free): no usable invite, no signature check.
         let hash = Sha256::digest(&invite_token);
-        if matches!(self.store.invite_uses_left(hash.as_slice()), None | Some(0)) {
+        if matches!(self.store.invite_uses_left(hash.as_slice(), now), None | Some(0)) {
             return ServerResponse::Err(ServerErrorCode::BadInvite);
         }
         // Challenge tek kullanımlık (`take`): aksi halde bir gözlemci imzayı
@@ -920,7 +930,12 @@ impl ServerCore {
         // kaydolamaz. Kontrol imza doğrulandıktan SONRA: anahtarın gerçekten
         // bu cihaza ait olduğu kanıtlanmadan engel uygulamak, başkasının
         // anahtarını yazarak onu engelletmeye yol açardı.
-        if self.store.is_key_blocked(&enroll_pk) {
+        // The key this PeerId enrolled with before counts too: the device
+        // makes its enroll key itself, a fresh one alone must not lift a block.
+        let prev = self.store.enrollment_by_peer(&peer.to_string());
+        if self.store.is_key_blocked(&enroll_pk)
+            || prev.as_ref().map_or(false, |p| self.store.is_key_blocked(&p.enroll_pk))
+        {
             warn!("Engellenen anahtarla kayıt denemesi reddedildi");
             self.stats.rejected += 1;
             return ServerResponse::Err(ServerErrorCode::Revoked);
@@ -937,7 +952,7 @@ impl ServerCore {
         // operatör bu sırada `rotate_join_code` ile kodu kapatabilir.
         // Tavan SAYAÇ TÜKETMEDEN önce bakılır: reddedilen bir deneme,
         // davetin kullanım hakkını hiç harcamamalı.
-        if self.store.invite_uses_left(hash.as_slice()) == Some(-1) {
+        if self.store.invite_uses_left(hash.as_slice(), now) == Some(-1) {
             let since = now - 60 * 60 * 1000;
             if self.store.count_enrollments_since(since) >= MAX_PUBLIC_ENROLLMENTS_PER_HOUR {
                 warn!("Herkese açık katılım kodu saatlik tavanı aştı, kayıt reddedildi");
@@ -945,11 +960,18 @@ impl ServerCore {
                 return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
             }
         }
+        // A PeerId that enrolls again takes no new place.
+        if !prev.as_ref().map_or(false, |p| p.state == EnrollmentState::Active)
+            && self.store.count_active_enrollments() >= self.config.max_enrollments as i64
+        {
+            warn!("Enrollment refused: the server holds its maximum number of devices");
+            self.stats.rejected += 1;
+            return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
+        }
         // Aynı PeerId yeniden kayıt olursa (`peer_id` UNIQUE, insert
         // `OR REPLACE`) eski kimliği ve kota sayaçlarını devral: yeni bir
         // `enrollment_id` + sıfır sayaç, mevcut mail/arşiv/blob satırlarını
         // sahipsiz bırakıp kotayı sıfırlamanın yolu olurdu.
-        let prev = self.store.enrollment_by_peer(&peer.to_string());
         let enrollment_id = match &prev {
             Some(p) => p.enrollment_id.clone(),
             None => {
@@ -980,7 +1002,7 @@ impl ServerCore {
             }
         }
         self.stats.enrollments += 1;
-        info!("Yeni kayıt: {}", hex::encode(&enrollment_id));
+        debug!("Yeni kayıt: {}", hex::encode(&enrollment_id));
         ServerResponse::Enrolled { enrollment_id, limits: self.config.limits.clone() }
     }
 
@@ -1083,7 +1105,9 @@ impl ServerCore {
         // Every list costs a query per element inside the event loop.
         let boxes = limits.max_mailboxes as usize;
         let too_long = match &req {
-            ServerRequest::Register { add, drop } => add.len().max(drop.len()) > boxes,
+            ServerRequest::Register { add, drop, proofs } => {
+                add.len().max(drop.len()) > boxes || proofs.len() > server_proto::MAX_REGISTER_PROOFS
+            }
             ServerRequest::Fetch { cursors, .. } => cursors.len() > boxes,
             ServerRequest::Ack { acks } => acks.len() > boxes,
             ServerRequest::ArchiveProbe { buckets } | ServerRequest::ArchivePurge { buckets } => buckets.len() > boxes,
@@ -1095,22 +1119,59 @@ impl ServerCore {
         }
 
         match req {
-            ServerRequest::Register { add, drop } => {
+            ServerRequest::Register { add, drop, proofs } => {
                 // Ids are stored: without a bound, megabyte ids filled the
                 // disk outside every quota.
                 if !add.iter().all(|id| is_safe_id(id)) {
                     return ServerResponse::Err(ServerErrorCode::BadDirection);
                 }
-                if let Err(msg) = self.store.register_mailboxes(&e.enrollment_id, &add, &drop, now, limits.max_mailboxes) {
-                    warn!("Register reddedildi: {msg}");
-                    return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
-                }
+                // Only a proof for an id of `add` is verified, and only one
+                // with a valid signature reaches the store.
+                let me = self.swarm.local_peer_id().to_string();
+                let proved: Vec<(String, Vec<u8>)> = proofs
+                    .iter()
+                    .filter(|p| add.contains(&p.mailbox))
+                    .filter(|p| {
+                        let input = server_proto::register_signing_input(&p.mailbox, &e.enrollment_id, &me);
+                        verify_hybrid(&p.pk, &p.pk_pq, &input, &p.sig, &p.sig_pq)
+                    })
+                    .map(|p| (p.mailbox.clone(), mailbox_key_hash(&p.pk, &p.pk_pq)))
+                    .collect();
+                // A proof that did not verify is a refusal, not `ProofNeeded`:
+                // the client would send the same bytes again.
+                let bad_proof = proofs.len() - proved.len();
+                let registered = self.store.register_mailboxes_proved(&e.enrollment_id, &add, &drop, &proved, now, limits.max_mailboxes);
+                let (refused, unproven) = match registered {
+                    Ok((refused, unproven)) => {
+                        let (bad, unproven): (Vec<String>, Vec<String>) =
+                            unproven.into_iter().partition(|id| proofs.iter().any(|p| &p.mailbox == id));
+                        (refused.into_iter().chain(bad).collect::<Vec<String>>(), unproven)
+                    }
+                    Err(msg) => {
+                        error!("Register yazılamadı: {msg}");
+                        return ServerResponse::Err(ServerErrorCode::Internal);
+                    }
+                };
                 let interest = self.live_interest.entry(peer).or_default();
                 for id in add {
-                    interest.insert(id);
+                    if !refused.contains(&id) && !unproven.contains(&id) {
+                        interest.insert(id);
+                    }
                 }
                 for id in &drop {
                     interest.remove(id);
+                }
+                // The registered ids stay registered and get their pushes;
+                // the error only tells the client that some id was refused.
+                // The refused ids go with them: the client takes every id this
+                // answer does not name as registered. Sent again with a proof,
+                // a refused id gets the error below.
+                if !unproven.is_empty() {
+                    return ServerResponse::ProofNeeded(unproven.into_iter().chain(refused).collect());
+                }
+                if !refused.is_empty() {
+                    warn!("Register: {} kutu reddedildi (kota, okuyucu sınırı ya da kanıt; geçersiz imza: {})", refused.len(), bad_proof);
+                    return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
                 ServerResponse::Ok
             }
@@ -1304,7 +1365,13 @@ impl ServerCore {
         if offset + data.len() as u64 > limits.max_blob_bytes {
             return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
         }
-        if e.bytes_blob as u64 + data.len() as u64 > limits.max_blob_bytes {
+        // Charged: how far this write extends the file, not `data.len()`. A
+        // 1-byte chunk at a far offset allocates the whole gap on a volume
+        // without sparse files (SD card) and cost 1 byte of quota.
+        let path = self.blob_path(&blob_id);
+        let file_len = std::fs::metadata(&path).map_or(0, |m| m.len());
+        let growth = (offset + data.len() as u64).saturating_sub(file_len);
+        if e.bytes_blob.max(0) as u64 + growth > limits.max_blob_bytes {
             return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
         }
         // Defter #23: kotalar SADECE kayıt başına uygulanıyordu. Bütçe sabit
@@ -1312,7 +1379,7 @@ impl ServerCore {
         // gerçek tavan bütçenin 2,5 katı oluyordu — bu mekanizmanın var olma
         // sebebi zaten tabletin dolan diskiydi. Artık toplam da kontrol
         // ediliyor.
-        if self.total_budget_exceeded(data.len()) {
+        if self.total_budget_exceeded(growth as usize) {
             warn!("Toplam disk bütçesi doldu, blob parçası reddedildi");
             return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
         }
@@ -1350,7 +1417,6 @@ impl ServerCore {
         // `.enc` formatı sabit adımlı olduğundan (bkz.
         // `attachments::read_chunk_from_disk`) konuma yazmak güvenli.
         use std::io::{Seek, SeekFrom, Write};
-        let path = self.blob_path(&blob_id);
         // Adim ISTEMCIDEN gelir (bkz. `ServerRequest::BlobPut.chunk_size`);
         // sunucunun kendi sabitinden tahmin etmesi dosyayi bozuyordu.
         // Adım blob'la birlikte SAKLANIR (defter #06) — `serve_chunk` aynı
@@ -1369,10 +1435,10 @@ impl ServerCore {
             error!("Blob yazılamadı: {err}");
             return ServerResponse::Err(ServerErrorCode::Internal);
         }
-        let _ = self.store.blob_record_chunk(&blob_id, chunk_index, data.len());
+        let _ = self.store.blob_record_chunk(&blob_id, chunk_index, growth as usize);
         // An upload in progress is not garbage (see `Store::blobs_to_gc`).
         self.store.blob_touch(&blob_id, now);
-        self.store.add_blob_bytes(&e.enrollment_id, data.len() as i64);
+        self.store.add_blob_bytes(&e.enrollment_id, growth as i64);
         ServerResponse::Ok
     }
 
@@ -1397,6 +1463,9 @@ impl ServerCore {
         }
         if state.received_chunks < total_chunks {
             return ServerResponse::Err(ServerErrorCode::Internal);
+        }
+        if !self.blob_hashing.contains_key(&blob_id) && self.blob_hashing.len() >= MAX_HASH_JOBS {
+            return ServerResponse::Err(ServerErrorCode::RateLimited);
         }
         // Placeholder: the caller sees `hash_job` and answers through
         // `start_blob_hash` / `finish_blob_hash` instead.
@@ -1482,7 +1551,7 @@ impl ServerCore {
         // so only a request loop reaches it. `NotFound` is the only refusal
         // the protocol has; the client then tries another source.
         if self.active(peer).is_none() || !self.check_rate(peer, true) {
-            warn!("Dosya parçası isteği reddedildi (kayıtsız eş ya da hız sınırı): {peer}");
+            warn!("Dosya parçası isteği reddedildi (kayıtsız eş ya da hız sınırı)");
             self.stats.rejected += 1;
             let _ = self
                 .swarm
@@ -1579,7 +1648,7 @@ impl ServerCore {
                 continue;
             }
             self.notified.insert(peer, now);
-            info!("Notify yinelendi (Fetch gelmedi): {peer}");
+            debug!("Notify yinelendi (Fetch gelmedi): {peer}");
             self.swarm.behaviour_mut().server_rpc.send_request(&peer, ServerRequest::Notify);
         }
     }
@@ -1591,7 +1660,7 @@ impl ServerCore {
         match ev {
             RelayEvent::Open { peer, id, tx } => match self.active(peer) {
                 Some(_) => {
-                    info!("Arama rölesi açıldı: {peer}");
+                    debug!("Arama rölesi açıldı: {peer}");
                     self.relay_links.insert(peer, (id, tx));
                 }
                 // Dropping `tx` ends the writer, which closes the stream.
@@ -1600,7 +1669,7 @@ impl ServerCore {
             RelayEvent::Closed { peer, id } => {
                 if self.relay_links.get(&peer).map(|(i, _)| *i) == Some(id) {
                     self.relay_links.remove(&peer);
-                    info!("Arama rölesi kapandı: {peer}");
+                    debug!("Arama rölesi kapandı: {peer}");
                 }
             }
             RelayEvent::Frame { peer, mailbox, data } => {
@@ -1655,6 +1724,7 @@ impl ServerCore {
             window_start: now,
             requests_in_window: 0,
             chunks_in_window: 0,
+            connected_at: now,
         });
         if now.saturating_sub(entry.window_start) > RATE_WINDOW_MS {
             entry.window_start = now;
@@ -1735,10 +1805,29 @@ impl ServerCore {
         self.relay_budget.retain(|_, b| mono - b.0 <= RELAY_WINDOW_MS);
         self.relay_pairs.retain(|_, t| mono - *t <= RELAY_WINDOW_MS);
 
+        // ponytail: not in node mode, where strangers are served on purpose
+        // (Kad, circuit relay); there the connection cap is still one flood wide.
+        if !self.config.node_mode {
+            let idle: Vec<PeerId> = self
+                .conns
+                .iter()
+                .filter(|(p, c)| mono.saturating_sub(c.connected_at) > UNENROLLED_GRACE_MS && self.swarm.is_connected(p))
+                .map(|(p, _)| *p)
+                .filter(|p| self.active(*p).is_none())
+                .collect();
+            for peer in idle {
+                let _ = self.swarm.disconnect_peer_id(peer);
+            }
+        }
+
         let now = now_ms();
         if self.clock_jumped(now, mono) {
             warn!("Sistem saati sıçradı — TTL süpürmesi bekletiliyor");
             return;
+        }
+        let idle = self.store.remove_idle_enrollments(now - ENROLLMENT_IDLE_MS);
+        if idle > 0 {
+            info!("Sweep removed {idle} enrollments not seen for 30 days");
         }
         let removed = self.store.sweep_expired_mail(now);
         if removed > 0 {
@@ -1810,21 +1899,19 @@ fn verify_hybrid(pk: &[u8], pk_pq: &[u8], message: &[u8], sig: &[u8], sig_pq: &[
     vk.verify(message, &parsed).is_ok()
 }
 
+/// What `mailbox_keys` stores for the key of a `MailboxProof`.
+fn mailbox_key_hash(pk: &[u8], pk_pq: &[u8]) -> Vec<u8> {
+    let mut h = Sha256::new();
+    h.update(pk);
+    h.update(pk_pq);
+    h.finalize().to_vec()
+}
+
 fn verify_ed25519(pubkey: &[u8], message: &[u8], sig: &[u8]) -> bool {
     let Ok(pk_bytes): Result<[u8; 32], _> = pubkey.try_into() else { return false };
     let Ok(sig_bytes): Result<[u8; 64], _> = sig.try_into() else { return false };
     let Ok(vk) = VerifyingKey::from_bytes(&pk_bytes) else { return false };
     vk.verify(message, &Signature::from_bytes(&sig_bytes)).is_ok()
-}
-
-/// Bir multiaddr özel/yerel bir ağa mı işaret ediyor?
-///
-/// Davet kodundan elenirler (bkz. `invite_addrs`): başka bir ağdaki alıcı
-/// için ulaşılamazlar ve sunucunun iç ağ yapısını sızdırırlar.
-pub(crate) fn is_private_multiaddr(addr: &str) -> bool {
-    // Tek tanım çekirdekte (bkz. `server_proto::is_private_multiaddr`) —
-    // istemci de AYNI kuralı uyguluyor, ikisi ayrışmasın.
-    server_proto::is_private_multiaddr(addr)
 }
 
 /// Kimliklerin dosya yolu olarak kullanılmadan önceki kontrolü.
@@ -1851,22 +1938,6 @@ fn sanitize_id(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn invites_never_carry_private_addresses() {
-        // Baska bir agdaki alici icin ulasilamazlar ve ic ag yapisini
-        // sizdirirlar. Ayni LAN'da yazismak gercekci bir senaryo degil.
-        assert!(is_private_multiaddr("/ip4/192.168.1.103/tcp/42612/p2p/12D3KooW"));
-        assert!(is_private_multiaddr("/ip4/10.0.0.5/tcp/42612/p2p/12D3KooW"));
-        assert!(is_private_multiaddr("/ip4/172.16.0.9/tcp/42612/p2p/12D3KooW"));
-        assert!(is_private_multiaddr("/ip4/127.0.0.1/tcp/42612/p2p/12D3KooW"));
-        assert!(is_private_multiaddr("/ip4/169.254.1.1/tcp/42612/p2p/12D3KooW"));
-        assert!(is_private_multiaddr("/ip6/fe80::1/tcp/42612/p2p/12D3KooW"));
-        assert!(is_private_multiaddr("/ip6/fd00::1/tcp/42612/p2p/12D3KooW"));
-        // Gercekci kurulum: onion + genel IP.
-        assert!(!is_private_multiaddr("/dns/abc.onion/tcp/42612/p2p/12D3KooW"));
-        assert!(!is_private_multiaddr("/ip4/203.0.113.7/tcp/42612/p2p/12D3KooW"));
-    }
 
     #[test]
     fn unsafe_ids_are_rejected_before_touching_the_filesystem() {

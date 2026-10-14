@@ -114,7 +114,10 @@ futures = "0.3"
 # hatasıyla derlemeyi reddetmesine yol açardı. Tek sürüme hizalayarak
 # çakışma önlendi (kullanılan API — Connection/execute/query_map/params/
 # prepare — 0.30-0.32 arasında değişmedi).
-rusqlite = { version = "0.32", features = ["bundled"] }
+# SQLCipher: the whole client database is encrypted (see `init_db`). OpenSSL
+# is built from source so Android (NDK), desktop and the Flatpak SDK need no
+# system libcrypto.
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # Tor (onion service) — spec dışı, kullanıcı isteği: CGNAT arkasındaki
 # cihazların birbirine ulaşabilmesi için (bkz. SECURITY.md "Tor onion"

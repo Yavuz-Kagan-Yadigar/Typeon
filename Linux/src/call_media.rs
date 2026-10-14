@@ -95,6 +95,7 @@ struct VideoLane {
     height: u16,
     rotation: u8,
     asked_at: Option<Instant>,
+    built_at: Option<Instant>,
 }
 
 /// Shared by the receive thread and the UI.
@@ -462,7 +463,7 @@ fn receive(shared: Arc<Shared>) {
 
 impl VideoLane {
     fn new() -> Self {
-        VideoLane { pipeline: None, src: None, hevc: false, width: 0, height: 0, rotation: 0, asked_at: None }
+        VideoLane { pipeline: None, src: None, hevc: false, width: 0, height: 0, rotation: 0, asked_at: None, built_at: None }
     }
 
     fn feed(&mut self, shared: &Shared, slot: u8, f: &[u8]) {
@@ -490,6 +491,12 @@ impl VideoLane {
                 self.ask_keyframe(slot);
                 return;
             }
+            // The sender picks these bits per frame; without a floor it could
+            // make this side build a decoder pipeline on every keyframe.
+            if self.built_at.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+                return;
+            }
+            self.built_at = Some(Instant::now());
             self.teardown();
             match build_decoder(shared, slot, hevc, rotation) {
                 Ok((p, src)) => {
@@ -628,6 +635,12 @@ impl VideoTx {
         let (w, h) = (tuning::WIDTH, tuning::HEIGHT);
         // Development/testing: e.g. TYPEON_CAMERA_SRC="videotestsrc is-live=true pattern=ball".
         let camera = std::env::var("TYPEON_CAMERA_SRC").unwrap_or_else(|_| "v4l2src".into());
+        // One source element and its properties, nothing more: a `!` would
+        // splice arbitrary elements (file or network sinks) into the pipeline.
+        let source = camera.split_whitespace().next();
+        if camera.contains('!') || !matches!(source, Some("v4l2src" | "videotestsrc" | "pipewiresrc")) {
+            return Err("TYPEON_CAMERA_SRC must be one v4l2src, videotestsrc or pipewiresrc element".into());
+        }
         let pipeline = launch(&format!(
             "{camera} ! videoconvert ! videoscale ! videorate max-rate={fps} drop-only=true ! \
              video/x-raw,format=NV12,width={w},height={h},pixel-aspect-ratio=1/1 ! tee name=t \

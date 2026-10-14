@@ -19,6 +19,7 @@
 //! zaman ve sıra numaraları. Bunların ne sızdırdığı SECURITY.md'de yazılı.
 
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 // NOT: paket adı `p2p_messenger_core`, ama crate `p2p_messenger` adıyla
@@ -186,6 +187,13 @@ impl Store {
                 );
                 CREATE INDEX IF NOT EXISTS idx_reader_owner ON mailbox_readers(owner);
 
+                -- The key a mailbox is bound to: hash of the public keys of
+                -- the first `MailboxProof` registered for it.
+                CREATE TABLE IF NOT EXISTS mailbox_keys (
+                    mailbox_id TEXT PRIMARY KEY,
+                    key_hash   BLOB NOT NULL
+                );
+
                 -- Mevcut kurulumlardan tek seferlik taşıma (idempotent).
                 INSERT OR IGNORE INTO mailbox_readers (mailbox_id, owner, created_at, last_seen_at)
                     SELECT mailbox_id, owner, created_at, last_seen_at FROM mailboxes;
@@ -198,12 +206,12 @@ impl Store {
                     byte_len        INTEGER NOT NULL,
                     deposited_at_ms INTEGER NOT NULL,
                     expires_at_ms   INTEGER NOT NULL,
-                    depositor       BLOB NOT NULL
+                    depositor       BLOB NOT NULL,
+                    sealed_hash     BLOB
                 );
                 CREATE INDEX IF NOT EXISTS idx_mail_fetch ON mail(mailbox_id, seq);
-                -- bkz. `deposit` — aynı kutuya aynı baytların ikinci kez
-                -- yazılmasını engelleyen sorgu bu indeksi kullanır.
-                CREATE INDEX IF NOT EXISTS idx_mail_dedup ON mail(mailbox_id, depositor);
+                -- Replaced by `idx_mail_hash` (created below, after the column).
+                DROP INDEX IF EXISTS idx_mail_dedup;
                 CREATE INDEX IF NOT EXISTS idx_mail_expiry ON mail(expires_at_ms);
                 -- Covering: `recount_mail_bytes` and `total_stored_bytes` sum
                 -- from the index and never touch the `sealed` blobs.
@@ -280,6 +288,11 @@ impl Store {
             .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
         // Mevcut kurulumlar için (kolon yoksa ekle; varsa hata yutulur).
         let _ = self.conn.execute("ALTER TABLE blobs ADD COLUMN chunk_size INTEGER NOT NULL DEFAULT 0", []);
+        let _ = self.conn.execute("ALTER TABLE mail ADD COLUMN sealed_hash BLOB", []);
+        // `deposit` finds a repeated item through this index alone.
+        self.conn
+            .execute_batch("CREATE INDEX IF NOT EXISTS idx_mail_hash ON mail(mailbox_id, depositor, sealed_hash)")
+            .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
         Ok(())
     }
 
@@ -361,12 +374,14 @@ impl Store {
     }
 
     /// Kalan kullanım hakkı: `Some(-1)` sınırsız, `Some(0)` tükenmiş,
-    /// `None` böyle bir davet yok. Süre kontrolü YAPMAZ (çağıran zaten
-    /// `consume_invite` ile yapıyor) — bu yalnızca "bu jeton herkese açık
-    /// mı" sorusuna cevap verir.
-    pub fn invite_uses_left(&self, token_hash: &[u8]) -> Option<i64> {
+    /// `None` böyle bir davet yok ya da süresi dolmuş.
+    pub fn invite_uses_left(&self, token_hash: &[u8], now: i64) -> Option<i64> {
         self.conn
-            .query_row("SELECT uses_left FROM invites WHERE token_hash = ?1", params![token_hash], |r| r.get(0))
+            .query_row(
+                "SELECT uses_left FROM invites WHERE token_hash = ?1 AND (expires_at = 0 OR expires_at > ?2)",
+                params![token_hash, now],
+                |r| r.get(0),
+            )
             .optional()
             .ok()
             .flatten()
@@ -377,6 +392,21 @@ impl Store {
     pub fn count_enrollments_since(&self, since: i64) -> i64 {
         self.conn
             .query_row("SELECT COUNT(*) FROM enrollments WHERE enrolled_at > ?1", params![since], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
+    pub fn count_active_enrollments(&self) -> i64 {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM enrollments WHERE state = 'active'", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
+    /// Removes active enrollments last seen before `before`. Revoked rows stay:
+    /// they are the block list. Returns the number removed; the caller runs
+    /// `sweep_expired_mail` next, which drops their reader rows.
+    pub fn remove_idle_enrollments(&self, before: i64) -> usize {
+        self.conn
+            .execute("DELETE FROM enrollments WHERE state = 'active' AND last_seen_at < ?1", params![before])
             .unwrap_or(0)
     }
 
@@ -503,7 +533,16 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
+    /// Revoke is a block: the enroll key goes on the block list, and the row
+    /// stays, so `handle_enroll` finds the blocked key for this PeerId too.
     pub fn revoke_enrollment(&self, enrollment_id: &[u8]) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO blocked_keys (enroll_pk, blocked_at)
+                 SELECT enroll_pk, CAST(strftime('%s','now') AS INTEGER) * 1000 FROM enrollments WHERE enrollment_id = ?1",
+                params![enrollment_id],
+            )
+            .map_err(|e| e.to_string())?;
         self.conn
             .execute("UPDATE enrollments SET state = 'revoked' WHERE enrollment_id = ?1", params![enrollment_id])
             .map_err(|e| e.to_string())
@@ -533,7 +572,32 @@ impl Store {
     // Posta kutusu
     // -----------------------------------------------------------------
 
-    pub fn register_mailboxes(&self, owner: &[u8], add: &[String], drop: &[String], now: i64, max: u32) -> Result<(), String> {
+    /// Tests: every id comes with a proof by one shared key.
+    #[cfg(test)]
+    pub fn register_mailboxes(&self, owner: &[u8], add: &[String], drop: &[String], now: i64, max: u32) -> Result<Vec<String>, String> {
+        let proofs: Vec<(String, Vec<u8>)> = add.iter().map(|id| (id.clone(), b"test-key".to_vec())).collect();
+        self.register_mailboxes_proved(owner, add, drop, &proofs, now, max).map(|(refused, _)| refused)
+    }
+
+    /// `Ok`: the ids of `add` that were refused (mailbox quota, reader cap,
+    /// a proof by another key than the mailbox is bound to), then the ids
+    /// that need a proof and came without one. The other ids are registered:
+    /// one refused id does not cost the batch.
+    ///
+    /// `proofs`: (mailbox id, hash of the mailbox key) of each `MailboxProof`
+    /// whose signature the caller verified. An id `owner` reads already needs
+    /// none. The first proof binds the mailbox to its key (`mailbox_keys`).
+    pub fn register_mailboxes_proved(
+        &self,
+        owner: &[u8],
+        add: &[String],
+        drop: &[String],
+        proofs: &[(String, Vec<u8>)],
+        now: i64,
+        max: u32,
+    ) -> Result<(Vec<String>, Vec<String>), String> {
+        let mut refused = Vec::new();
+        let mut unproven = Vec::new();
         for id in add {
             let count: i64 = self
                 .conn
@@ -560,20 +624,41 @@ impl Store {
                 .flatten()
                 .unwrap_or(false);
             if !exists && count >= max as i64 {
-                return Err("Kutu kotası doldu".to_string());
+                refused.push(id.clone());
+                continue;
             }
             // A mailbox has at most two readers: both ends of a session, or
             // the one device of a first-contact box. Without the cap any number
             // of enrolled clients could lurk on a box whose id they computed.
-            // ponytail: one lurker still fits on a first-contact box; closing
-            // that needs a proof of ownership in Register.
             if !exists {
                 let readers: i64 = self
                     .conn
                     .query_row("SELECT COUNT(*) FROM mailbox_readers WHERE mailbox_id = ?1", params![id], |r| r.get(0))
                     .unwrap_or(0);
                 if readers >= MAX_READERS_PER_MAILBOX {
-                    return Err("Kutu okuyucu sınırı doldu".to_string());
+                    refused.push(id.clone());
+                    continue;
+                }
+                let Some((_, key_hash)) = proofs.iter().find(|(m, _)| m == id) else {
+                    unproven.push(id.clone());
+                    continue;
+                };
+                let bound: Option<Vec<u8>> = self
+                    .conn
+                    .query_row("SELECT key_hash FROM mailbox_keys WHERE mailbox_id = ?1", params![id], |r| r.get(0))
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                match bound {
+                    Some(k) if &k != key_hash => {
+                        refused.push(id.clone());
+                        continue;
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.conn
+                            .execute("INSERT INTO mailbox_keys (mailbox_id, key_hash) VALUES (?1, ?2)", params![id, key_hash])
+                            .map_err(|e| e.to_string())?;
+                    }
                 }
             }
             // Defter #03: kayıt artık ÇOK-OKUYUCULU (bkz. `mailbox_readers`
@@ -589,10 +674,15 @@ impl Store {
                 .map_err(|e| e.to_string())?;
         }
         for id in drop {
-            // SADECE sahibi kaldırabilir.
-            let _ = self
+            // SADECE sahibi kaldırabilir. Not a reader: nothing changed, and
+            // the cleanup below is a scan of the whole box.
+            let left = self
                 .conn
-                .execute("DELETE FROM mailbox_readers WHERE mailbox_id = ?1 AND owner = ?2", params![id, owner]);
+                .execute("DELETE FROM mailbox_readers WHERE mailbox_id = ?1 AND owner = ?2", params![id, owner])
+                .unwrap_or(0);
+            if left == 0 {
+                continue;
+            }
             // Ayrılan okuyucu artık silmeyi bekletmesin; kendi onayı bu
             // temizlikte hâlâ sayılır, sonra imleci atılır.
             let _ = self.delete_fully_acked(id);
@@ -600,7 +690,7 @@ impl Store {
                 .conn
                 .execute("DELETE FROM mail_acks WHERE mailbox_id = ?1 AND owner = ?2", params![id, owner]);
         }
-        Ok(())
+        Ok((refused, unproven))
     }
 
     pub fn mailbox_is_registered(&self, mailbox_id: &str) -> bool {
@@ -645,9 +735,12 @@ impl Store {
     /// Tekrarı ATMAK güvenli: alıcı zaten `message_id` ile tekilleştiriyor ve
     /// birebir aynı ciphertext'in ikinci kopyası hiçbir bilgi taşımıyor.
     pub fn deposit(&self, mailbox_id: &str, sealed: &[u8], depositor: &[u8], now: i64, ttl_ms: i64) -> Result<u64, String> {
+        // By hash, from the index: comparing `sealed` itself read every
+        // same-length blob of this depositor in the box on each deposit.
+        let hash = Sha256::digest(sealed);
         if let Ok(existing) = self.conn.query_row(
-            "SELECT seq FROM mail WHERE mailbox_id = ?1 AND depositor = ?2 AND byte_len = ?4 AND sealed = ?3 LIMIT 1",
-            params![mailbox_id, depositor, sealed, sealed.len() as i64],
+            "SELECT seq FROM mail WHERE mailbox_id = ?1 AND depositor = ?2 AND sealed_hash = ?3 LIMIT 1",
+            params![mailbox_id, depositor, hash.as_slice()],
             |row| row.get::<_, i64>(0),
         ) {
             // TTL'i tazele — gönderen hâlâ ısrar ediyorsa alıcı henüz almamış
@@ -660,9 +753,9 @@ impl Store {
         }
         self.conn
             .execute(
-                "INSERT INTO mail (mailbox_id, sealed, byte_len, deposited_at_ms, expires_at_ms, depositor)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![mailbox_id, sealed, sealed.len() as i64, now, now + ttl_ms, depositor],
+                "INSERT INTO mail (mailbox_id, sealed, byte_len, deposited_at_ms, expires_at_ms, depositor, sealed_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![mailbox_id, sealed, sealed.len() as i64, now, now + ttl_ms, depositor, hash.as_slice()],
             )
             .map_err(|e| e.to_string())?;
         let seq = self.conn.last_insert_rowid() as u64;
@@ -764,13 +857,23 @@ impl Store {
         if !is_reader {
             return Ok(0);
         }
-        self.conn
+        // Clamped to what the box holds: an ack of a future seq otherwise
+        // covered every later item too.
+        let moved = self
+            .conn
             .execute(
-                "INSERT INTO mail_acks (mailbox_id, owner, through_seq) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(mailbox_id, owner) DO UPDATE SET through_seq = MAX(through_seq, excluded.through_seq)",
-                params![mailbox_id, acker, through_seq as i64],
+                "INSERT INTO mail_acks (mailbox_id, owner, through_seq)
+                 VALUES (?1, ?2, MIN(?3, COALESCE((SELECT MAX(seq) FROM mail WHERE mailbox_id = ?1), 0)))
+                 ON CONFLICT(mailbox_id, owner) DO UPDATE SET through_seq = excluded.through_seq
+                 WHERE excluded.through_seq > mail_acks.through_seq",
+                params![mailbox_id, acker, through_seq.min(i64::MAX as u64) as i64],
             )
             .map_err(|e| e.to_string())?;
+        // The cursor did not move: nothing new to delete, and the delete is a
+        // scan of the whole box (a repeated ack ran it 512 times per request).
+        if moved == 0 {
+            return Ok(0);
+        }
         self.delete_fully_acked(mailbox_id)
     }
 
@@ -870,6 +973,11 @@ impl Store {
                 WHERE r.mailbox_id = mail_acks.mailbox_id AND r.owner = mail_acks.owner)",
             [],
         );
+        // A mailbox nobody reads is free again: its key binding goes.
+        let _ = self.conn.execute(
+            "DELETE FROM mailbox_keys WHERE mailbox_id NOT IN (SELECT mailbox_id FROM mailbox_readers)",
+            [],
+        );
         removed
             + self
                 .conn
@@ -893,6 +1001,8 @@ impl Store {
     /// `sealed` plus `record_id`, the two peer-sized columns.
     pub fn archive_put(&self, bucket: &str, records: &[ArchiveRecord], owner: &[u8], now: i64) -> Result<u64, String> {
         let mut newest = 0u64;
+        // Whose charge changes: the writer and the owners it overwrites.
+        let mut owners = vec![owner.to_vec()];
         // One transaction: one WAL commit per batch, and all or nothing.
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         for rec in records {
@@ -900,6 +1010,16 @@ impl Store {
             // and one over-long id must not block its archive queue.
             if rec.record_id.len() > 128 {
                 continue;
+            }
+            let old = self.conn.query_row(
+                "SELECT owner FROM archive WHERE bucket = ?1 AND record_id = ?2",
+                params![bucket, rec.record_id],
+                |r| r.get::<_, Vec<u8>>(0),
+            );
+            if let Ok(old) = old {
+                if !owners.contains(&old) {
+                    owners.push(old);
+                }
             }
             self.conn
                 .execute(
@@ -910,24 +1030,28 @@ impl Store {
                         sealed = excluded.sealed, byte_len = excluded.byte_len,
                         owner = excluded.owner, updated_at = excluded.updated_at
                      WHERE excluded.rev > archive.rev",
-                    params![bucket, rec.record_id, rec.rev as i64, rec.sent_at_ms as i64, rec.sealed, (rec.sealed.len() + rec.record_id.len()) as i64, owner, now],
+                    params![bucket, rec.record_id, rec.rev.min(i64::MAX as u64) as i64, rec.sent_at_ms as i64, rec.sealed, (rec.sealed.len() + rec.record_id.len()) as i64, owner, now],
                 )
                 .map_err(|e| e.to_string())?;
             newest = newest.max(rec.rev);
         }
         tx.commit().map_err(|e| e.to_string())?;
-        self.recount_archive_bytes();
+        self.recount_archive_bytes(&owners);
         Ok(newest)
     }
 
-    /// Every owner, not only the caller: an overwrite or a purge changes what
-    /// another enrollment is charged for.
-    fn recount_archive_bytes(&self) {
-        let _ = self.conn.execute(
-            "UPDATE enrollments SET bytes_archive =
-                COALESCE((SELECT SUM(byte_len) FROM archive WHERE archive.owner = enrollments.enrollment_id), 0)",
-            [],
-        );
+    /// Only the owners whose rows changed (an overwrite or a purge changes
+    /// what another enrollment is charged for). Over every enrollment it was
+    /// a scan of the whole archive on each request.
+    fn recount_archive_bytes(&self, owners: &[Vec<u8>]) {
+        for owner in owners {
+            let _ = self.conn.execute(
+                "UPDATE enrollments SET bytes_archive =
+                    COALESCE((SELECT SUM(byte_len) FROM archive WHERE archive.owner = ?1), 0)
+                 WHERE enrollment_id = ?1",
+                params![owner],
+            );
+        }
     }
 
     pub fn archive_probe(&self, buckets: &[String]) -> Vec<BucketStat> {
@@ -957,8 +1081,9 @@ impl Store {
     /// The client continues with `before_ms` = the oldest `sent_at_ms` it got,
     /// so a page never ends inside a group of records that share a timestamp:
     /// the rest of that group would be skipped.
-    /// ponytail: a group larger than a page is sent whole, over the caps; add
-    /// a `(sent_at_ms, record_id)` cursor to the protocol if that ever matters.
+    /// ponytail: a group that fills a page alone is cut at 4x `max_items` /
+    /// 2x `max_bytes` and the client never sees its rest; add a
+    /// `(sent_at_ms, record_id)` cursor to the protocol if that ever matters.
     pub fn archive_fetch(&self, bucket: &str, before_ms: Option<u64>, max_items: u32, max_bytes: u32) -> (Vec<ArchiveRecord>, bool) {
         let before = before_ms.map(|v| v as i64).unwrap_or(i64::MAX);
         let mut stmt = match self.conn.prepare(
@@ -990,6 +1115,15 @@ impl Store {
                 out.retain(|r| r.sent_at_ms != rec.sent_at_ms);
                 return (out, true);
             }
+            // The page is one timestamp group. Without a hard stop a client
+            // that put its whole quota under one `sent_at_ms` got it back in
+            // one response, all of it in memory.
+            if full
+                && (out.len() as u32 >= max_items.saturating_mul(4)
+                    || total + rec.sealed.len() > (max_bytes as usize).saturating_mul(2))
+            {
+                return (out, true);
+            }
             total += rec.sealed.len();
             out.push(rec);
         }
@@ -1001,10 +1135,20 @@ impl Store {
     /// a chat deleted on one linked device goes for all of them.
     pub fn archive_purge(&self, buckets: &[String]) -> usize {
         let mut n = 0;
+        let mut owners: Vec<Vec<u8>> = Vec::new();
         for b in buckets {
+            if let Ok(mut st) = self.conn.prepare("SELECT DISTINCT owner FROM archive WHERE bucket = ?1") {
+                if let Ok(rows) = st.query_map(params![b], |r| r.get::<_, Vec<u8>>(0)) {
+                    for o in rows.flatten() {
+                        if !owners.contains(&o) {
+                            owners.push(o);
+                        }
+                    }
+                }
+            }
             n += self.conn.execute("DELETE FROM archive WHERE bucket = ?1", params![b]).unwrap_or(0);
         }
-        self.recount_archive_bytes();
+        self.recount_archive_bytes(&owners);
         n
     }
 
@@ -1208,30 +1352,37 @@ mod tests {
         id.to_vec()
     }
 
-    /// İptal edilen bir cihaz, TAZE bir davetle yeniden kaydolabilmeli.
-    ///
-    /// `peer_id` üzerinde UNIQUE indeks var; yeni kayıt farklı bir
-    /// `enrollment_id` ile geldiği için `INSERT OR REPLACE` eski satırı
-    /// silmek zorunda. Bu davranış bozulursa (ör. indeks kaldırılırsa)
-    /// `enrollment_by_peer` iptal edilmiş satırı döndürmeye devam eder ve
-    /// cihaz sunucuya bir daha ASLA giremez — bkz. lib.rs `handle_hello`.
+    /// Revoke = block: the key is refused until the operator unblocks it, and
+    /// the revoked row stays so the PeerId still leads to the blocked key.
     #[test]
-    fn a_revoked_device_can_enroll_again_with_a_fresh_invite() {
+    fn a_revoked_device_is_blocked_until_unblocked() {
         let s = Store::open_in_memory().unwrap();
-        let old_id = enroll(&s, b"oldoldoldoldold1", "peerR");
-        s.revoke_enrollment(&old_id).unwrap();
+        let id = enroll(&s, b"oldoldoldoldold1", "peerR");
+        assert!(!s.is_key_blocked(&[1u8; 32]));
+        s.revoke_enrollment(&id).unwrap();
         let revoked = s.enrollment_by_peer("peerR").unwrap();
         assert_eq!(revoked.state, EnrollmentState::Revoked);
+        assert!(s.is_key_blocked(&revoked.enroll_pk));
+        // The idle sweep must not remove the row that carries the block.
+        assert_eq!(s.remove_idle_enrollments(i64::MAX), 0);
+        assert!(s.enrollment_by_peer("peerR").is_some());
+        s.unblock_enrollment_key(&revoked.enroll_pk);
+        assert!(!s.is_key_blocked(&revoked.enroll_pk));
+    }
 
-        // Yeni kayıt: aynı PeerId, YENİ kimlik.
-        let new_id = enroll(&s, b"newnewnewnewnew1", "peerR");
-        assert_ne!(new_id, old_id);
-        let now = s.enrollment_by_peer("peerR").unwrap();
-        assert_eq!(now.state, EnrollmentState::Active, "yeni kayit etkin olmali");
-        assert_eq!(now.enrollment_id, new_id);
-        // Eski satır gerçekten gitmiş olmalı, yoksa iki kayıt yarışır.
-        assert!(s.enrollment_by_id(&old_id).is_none(), "iptal edilmis satir silinmeliydi");
-        assert_eq!(s.list_enrollments().len(), 1);
+    #[test]
+    fn an_idle_enrollment_is_removed_and_its_reader_rows_go_with_the_sweep() {
+        let s = Store::open_in_memory().unwrap();
+        let a = enroll(&s, b"aaaa", "peerA");
+        let b = enroll(&s, b"bbbb", "peerB");
+        register(&s, &a, "box");
+        s.touch_enrollment(&b, 1_000);
+        assert_eq!(s.count_active_enrollments(), 2);
+        assert_eq!(s.remove_idle_enrollments(500), 1);
+        assert!(s.enrollment_by_id(&a).is_none());
+        assert!(s.enrollment_by_id(&b).is_some());
+        s.sweep_expired_mail(0);
+        assert!(!s.mailbox_is_registered("box"));
     }
 
     #[test]
@@ -1317,6 +1468,24 @@ mod tests {
     }
 
     #[test]
+    fn register_needs_a_proof_by_the_key_the_mailbox_is_bound_to() {
+        let s = Store::open_in_memory().unwrap();
+        let owner = enroll(&s, b"aaaa", "peerA");
+        let squatter = enroll(&s, b"bbbb", "peerB");
+        let id = vec!["mb_1".to_string()];
+        let proof = |key: &[u8]| vec![("mb_1".to_string(), key.to_vec())];
+        // No proof: not registered, reported as unproven.
+        assert_eq!(s.register_mailboxes_proved(&owner, &id, &[], &[], 0, 10).unwrap(), (vec![], id.clone()));
+        assert!(!s.mailbox_is_registered("mb_1"));
+        assert_eq!(s.register_mailboxes_proved(&owner, &id, &[], &proof(b"k1"), 0, 10).unwrap(), (vec![], vec![]));
+        // Another key is refused, the bound key is taken (second end of a session).
+        assert_eq!(s.register_mailboxes_proved(&squatter, &id, &[], &proof(b"k2"), 0, 10).unwrap(), (id.clone(), vec![]));
+        assert_eq!(s.register_mailboxes_proved(&squatter, &id, &[], &proof(b"k1"), 0, 10).unwrap(), (vec![], vec![]));
+        // A reader registers again without a proof.
+        assert_eq!(s.register_mailboxes_proved(&owner, &id, &[], &[], 1, 10).unwrap(), (vec![], vec![]));
+    }
+
+    #[test]
     fn a_mailbox_takes_no_third_reader() {
         let s = Store::open_in_memory().unwrap();
         let a = enroll(&s, b"aaaa", "peerA");
@@ -1325,7 +1494,7 @@ mod tests {
         register(&s, &a, "mb_1");
         register(&s, &b, "mb_1");
         register(&s, &a, "mb_1");
-        assert!(s.register_mailboxes(&c, &["mb_1".to_string()], &[], 0, 100).is_err());
+        assert_eq!(s.register_mailboxes(&c, &["mb_1".to_string()], &[], 0, 100).unwrap().len(), 1);
     }
 
     #[test]
@@ -1437,7 +1606,7 @@ mod tests {
         let seq2 = s.deposit("mb_fp", b"handshake-2", &sender, 2, 1000).unwrap();
         // A third reader is refused: two per mailbox (2026-10-07).
         let third = enroll(&s, b"sile", "peerQ");
-        assert!(s.register_mailboxes(&third, &["mb_fp".to_string()], &[], 0, 100).is_err());
+        assert_eq!(s.register_mailboxes(&third, &["mb_fp".to_string()], &[], 0, 100).unwrap().len(), 1);
         // The lurker is the silent reader here: it has not acked seq2.
         assert_eq!(s.ack("mb_fp", seq2, &victim).unwrap(), 0, "sessiz okuyucu varken silinmez");
         assert_eq!(s.mailbox_item_count("mb_fp"), 0, "alicinin onayladigi satir kapasiteye sayilmaz");
@@ -1603,11 +1772,11 @@ mod tests {
     fn an_unlimited_invite_never_runs_out() {
         let s = Store::open_in_memory().unwrap();
         s.create_invite(b"pub", "herkese-acik", 0, 0, 0).unwrap();
-        assert_eq!(s.invite_uses_left(b"pub"), Some(-1));
+        assert_eq!(s.invite_uses_left(b"pub", 0), Some(-1));
         for _ in 0..50 {
             assert!(s.consume_invite(b"pub", 10).unwrap(), "sinirsiz davet tukenmemeli");
         }
-        assert_eq!(s.invite_uses_left(b"pub"), Some(-1), "sayac azalmamali");
+        assert_eq!(s.invite_uses_left(b"pub", 0), Some(-1), "sayac azalmamali");
         // Süre yine de bağlar: sınırsız DEMEK süresiz DEMEK değil.
         s.create_invite(b"pub2", "gecici", 0, 100, 0).unwrap();
         assert!(!s.consume_invite(b"pub2", 200).unwrap());
@@ -1619,7 +1788,7 @@ mod tests {
         s.create_invite(b"pub", "herkese-acik", 0, 0, 0).unwrap();
         s.delete_invite(b"pub").unwrap();
         assert!(!s.consume_invite(b"pub", 10).unwrap(), "donen kod eskisini gecersiz kilmali");
-        assert_eq!(s.invite_uses_left(b"pub"), None);
+        assert_eq!(s.invite_uses_left(b"pub", 0), None);
     }
 
     #[test]
@@ -1648,7 +1817,7 @@ mod tests {
         s.conn.execute_batch("ALTER TABLE enrollments RENAME TO gone").unwrap();
         assert!(s.enroll_with_invite(b"h", 1, &e).is_err());
         s.conn.execute_batch("ALTER TABLE gone RENAME TO enrollments").unwrap();
-        assert_eq!(s.invite_uses_left(b"h"), Some(1), "the use came back with the rollback");
+        assert_eq!(s.invite_uses_left(b"h", 0), Some(1), "the use came back with the rollback");
         assert!(s.enroll_with_invite(b"h", 1, &e).unwrap());
         assert!(!s.enroll_with_invite(b"h", 1, &e).unwrap(), "spent");
     }
@@ -1739,9 +1908,10 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         let a = enroll(&s, b"aaaa", "peerA");
         s.register_mailboxes(&a, &["mb_1".into(), "mb_2".into()], &[], 0, 2).unwrap();
-        assert!(s.register_mailboxes(&a, &["mb_3".into()], &[], 0, 2).is_err());
+        // The refused id does not cost the batch: `mb_2` stays registered.
+        assert_eq!(s.register_mailboxes(&a, &["mb_3".into(), "mb_2".into()], &[], 0, 2).unwrap(), ["mb_3"]);
         // Zaten kayitli olani tekrar kaydetmek kotaya takilmamali.
-        assert!(s.register_mailboxes(&a, &["mb_1".into()], &[], 1, 2).is_ok());
+        assert!(s.register_mailboxes(&a, &["mb_1".into()], &[], 1, 2).unwrap().is_empty());
         s.register_mailboxes(&a, &[], &["mb_1".into()], 1, 2).unwrap();
         assert!(!s.mailbox_is_registered("mb_1"));
     }

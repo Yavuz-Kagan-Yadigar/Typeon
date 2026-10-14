@@ -40,6 +40,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
     enum class Status { PENDING, SENT, ERROR }
 
+    /** Decoded attachment previews by file id: a rebind does not decode again. */
+    private val previewCache = object : android.util.LruCache<String, android.graphics.Bitmap>(24 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: android.graphics.Bitmap): Int = value.byteCount
+    }
+
     /** bkz. `applySeen`/`lastSeenAvatars` — `displayName` yalnızca bu
      *  kişinin fotoğrafı yoksa baş harf rozeti üretmek için (bkz.
      *  AvatarUtil). */
@@ -773,8 +778,17 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.layoutReplyQuote.visibility = View.VISIBLE
             holder.txtReplyQuoteSender.text = item.replyToSenderLabel?.takeIf { it != "null" }
             // No preview left: the quoted message was deleted.
-            holder.txtReplyQuoteText.text = item.replyToPreview?.takeIf { it != "null" && it.isNotEmpty() }
-                ?: holder.itemView.context.getString(R.string.msg_deleted)
+            // The sender writes the preview: when the quoted message is here,
+            // its own text is shown, so nobody can put words under "You".
+            val replyTarget = items.firstOrNull { it.messageId == replyToId }
+            val quoteText = when {
+                replyTarget == null -> item.replyToPreview?.takeIf { it != "null" && it.isNotEmpty() }
+                replyTarget.isDeleted -> null
+                else -> replyTarget.attachment
+                    ?.let { holder.itemView.context.getString(R.string.lbl_attachment_reply_preview, it.fileName) }
+                    ?: replyTarget.text.take(120)
+            }
+            holder.txtReplyQuoteText.text = quoteText ?: holder.itemView.context.getString(R.string.msg_deleted)
             // Kullanıcı raporu ("alıntı mesajlar beyaz görünüyor").
             //
             // Tasarım niyeti doğruydu: yüzey renginin üzerine %12 opaklıkta
@@ -856,7 +870,19 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                 // ulaşmaz) — bu yüzden AYNI uzun-basma dinleyicisi (bkz.
                 // aşağısı) `holder.textView`'a da AYRICA atanıyor, hangisi
                 // dokunuşu yakalarsa yakalasın menü yine açılır.
-                android.text.util.Linkify.addLinks(holder.textView, android.text.util.Linkify.WEB_URLS)
+                val linked = android.text.SpannableString(item.text)
+                if (android.text.util.Linkify.addLinks(linked, android.text.util.Linkify.WEB_URLS)) {
+                    // A tap leaves Tor for the system browser: ask first.
+                    for (span in linked.getSpans(0, linked.length, android.text.style.URLSpan::class.java)) {
+                        val start = linked.getSpanStart(span)
+                        val end = linked.getSpanEnd(span)
+                        val flags = linked.getSpanFlags(span)
+                        linked.removeSpan(span)
+                        linked.setSpan(ConfirmUrlSpan(span.url), start, end, flags)
+                    }
+                    holder.textView.text = linked
+                    holder.textView.movementMethod = android.text.method.LinkMovementMethod.getInstance()
+                }
             }
         }
 
@@ -972,7 +998,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val preview = attachment.previewJpeg
         if (preview != null) {
             // Sender-controlled bytes: bounded decode (see ImagePreview.decodeBytes).
-            val bitmap = com.p2p.messenger.util.ImagePreview.decodeBytes(preview, 1024)
+            // ponytail: the first bind still decodes on the main thread;
+            // decode on a worker if one preview alone ever janks.
+            val bitmap = previewCache.get(attachment.fileId)
+                ?: com.p2p.messenger.util.ImagePreview.decodeBytes(preview, 1024)
+                    ?.also { previewCache.put(attachment.fileId, it) }
             if (bitmap != null) {
                 holder.imgAttachmentThumbnail.visibility = View.VISIBLE
                 holder.imgAttachmentThumbnail.setImageBitmap(bitmap)
@@ -1162,4 +1192,28 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     }
 
     override fun getItemCount(): Int = items.size
+}
+
+/** A link in a message: shows the real host and asks before it opens. */
+private class ConfirmUrlSpan(url: String) : android.text.style.URLSpan(url) {
+    override fun onClick(widget: View) {
+        val host = try {
+            java.net.IDN.toASCII(android.net.Uri.parse(url).host ?: "")
+        } catch (e: Exception) {
+            ""
+        }
+        android.app.AlertDialog.Builder(widget.context)
+            .setTitle(host.ifEmpty { url })
+            .setMessage(widget.context.getString(R.string.msg_open_link_warning, url))
+            .setPositiveButton(R.string.action_open) { _, _ -> open(widget) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun open(widget: View) {
+        try {
+            super.onClick(widget)
+        } catch (e: Exception) {
+        }
+    }
 }

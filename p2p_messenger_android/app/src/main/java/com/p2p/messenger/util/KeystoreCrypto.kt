@@ -124,6 +124,14 @@ object KeystoreCrypto {
         return keyGenerator.generateKey()
     }
 
+    /** Account wipe, see [LocalWipe]. */
+    @Synchronized
+    fun deleteAllKeys() {
+        for (alias in listOf(ALIAS_IDENTITY, ALIAS_HISTORY, ALIAS_SKIPPED_KEYS, ALIAS_ARCHIVE_ROOT)) {
+            try { keyStore.deleteEntry(alias) } catch (e: Exception) { }
+        }
+    }
+
     /**
      * Veriyi belirtilen Keystore anahtarıyla şifreler. Dönen bayt dizisi
      * `[12 byte IV][ciphertext+tag]` biçimindedir — dosyaya/BLOB olarak

@@ -288,7 +288,9 @@ fn trim_dir_cache(cache_dir: &str) {
         Ok(names)
     })()
     .unwrap_or_default();
-    for f in &files {
+    // A bare file name only: the name comes from a database file, and `..` or
+    // an absolute path would delete outside `dir_blobs`.
+    for f in files.iter().filter(|f| std::path::Path::new(f).file_name() == Some(std::ffi::OsStr::new(f))) {
         let _ = std::fs::remove_file(dir.join("dir_blobs").join(f));
     }
     if !files.is_empty() {

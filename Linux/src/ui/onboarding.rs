@@ -48,6 +48,17 @@ pub fn start(app: &Rc<App>, host: &adw::ToastOverlay) {
     let app_after = app.clone();
     let host_after = host.clone();
     unlock(app, host, move |vault| {
+        if !core::init_database(&app_after.data_dir.to_string_lossy(), &vault.skipped_key) {
+            fatal(
+                &app_after,
+                &host_after,
+                "Could not open the database",
+                "The vault opened but the database did not. Check that the data directory is \
+                 writable and has free space. If the database was made with another vault it \
+                 cannot be read any more.",
+            );
+            return;
+        }
         if !core::load_secret_bundle(&vault.identity_bundle) {
             fatal(
                 &app_after,
@@ -180,6 +191,34 @@ fn welcome_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
     page.upcast()
 }
 
+/// First run: the database is made before the vault exists, under the key the
+/// vault then carries as `skipped_key`. One key per process, so a retry after
+/// a failed attempt still matches the database that is already open.
+fn open_fresh_database(app: &Rc<App>) -> Option<[u8; 32]> {
+    use rand::RngCore;
+    static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    let first = KEY.get().is_none();
+    let key = *KEY.get_or_init(|| {
+        let mut key = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut key);
+        key
+    });
+    let dir = app.data_dir.to_string_lossy();
+    if core::init_database(&dir, &key) {
+        return Some(key);
+    }
+    // A database from a first run that ended before its vault was written:
+    // its key lived in that process only, so nothing can open it again, and
+    // it blocked every later setup. Only before this process made one.
+    if !first || secrets::exists(&app.data_dir) {
+        return None;
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(app.data_dir.join(format!("p2p_messenger.db{suffix}")));
+    }
+    core::init_database(&dir, &key).then_some(key)
+}
+
 /// Generates a brand-new identity and persists it. `awaiting_link` decides
 /// whether this computer is its own account or is about to be adopted by one.
 fn start_fresh_identity(
@@ -194,6 +233,12 @@ fn start_fresh_identity(
     // would orphan the first.
     button.set_sensitive(false);
 
+    let Some(storage_key) = open_fresh_database(app) else {
+        button.set_sensitive(true);
+        app.toast("Could not open the database.");
+        return;
+    };
+
     if let Err(error) = core::create_identity(device_name) {
         button.set_sensitive(true);
         app.toast(&format!("Could not create device keys: {}", error));
@@ -207,7 +252,8 @@ fn start_fresh_identity(
         return;
     }
 
-    let vault = Vault::new(bundle);
+    let mut vault = Vault::new(bundle);
+    vault.skipped_key = storage_key;
     if let Err(error) = secrets::save(&app.data_dir, &vault, passphrase) {
         // Without a persisted vault the identity would be lost on exit, so this
         // is fatal rather than a warning.
@@ -296,6 +342,10 @@ fn ask_recovery_passphrase(
             app.toast("Could not read that file.");
             return;
         };
+        let Some(storage_key) = open_fresh_database(&app) else {
+            app.toast("Could not open the database.");
+            return;
+        };
 
         let app_inner = app.clone();
         let host_inner = host.clone();
@@ -319,7 +369,8 @@ fn ask_recovery_passphrase(
                     app_inner.toast("Restore produced no keys.");
                     return;
                 }
-                let vault = Vault::new(bundle);
+                let mut vault = Vault::new(bundle);
+                vault.skipped_key = storage_key;
                 if let Err(error) =
                     secrets::save(&app_inner.data_dir, &vault, &vault_passphrase)
                 {
@@ -532,7 +583,11 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
             match qr::qr_widget(&payload) {
                 Some(widget) => {
                     qr_slot.append(&widget);
-                    status.set_label("Waiting for your phone to scan this…");
+                    // The phone shows the same code in its confirm dialog.
+                    status.set_label(&format!(
+                        "Waiting for your phone to scan this…\n\nCompare code: {}\nYour phone shows the same code before you approve.",
+                        core::device_link_code(&payload)
+                    ));
                 }
                 None => status.set_label("Could not render the link code."),
             }

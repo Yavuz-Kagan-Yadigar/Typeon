@@ -179,8 +179,39 @@ class QrScanActivity : AppCompatActivity() {
      *  çalışınca kamera önizlemesi donup siyah ekran kalıyordu. Arka planda
      *  çalıştır, sonucu UI'ya döndür. */
     private fun handleScannedText(text: String) {
+        val cborBytes = if (addServerMode) ByteArray(0) else QrBinaryCodec.latin1StringToBytes(text)
+        if (!addServerMode && !linkApproveMode) {
+            runScanned(text, cborBytes)
+            return
+        }
+        // Not at once: any code caught in the frame added a server, or linked
+        // a device with the whole account. The user sees what it is first.
+        val question = if (addServerMode) {
+            getString(R.string.msg_join_link_confirm, text.trim().take(300))
+        } else {
+            val peek = try { P2PLib.peekDeviceLink(cborBytes) } catch (e: Throwable) { "Error: ${e.message}" }
+            val obj = if (peek.startsWith("Error:")) null else try { JSONObject(peek) } catch (e: Exception) { null }
+            if (obj == null) {
+                runOnUiThread { if (!isFinishing) onScanResult(if (peek.startsWith("Error:")) peek else "Error: $peek") }
+                return
+            }
+            val code = try { P2PLib.deviceLinkCode(cborBytes) } catch (e: Throwable) { "" }
+            getString(R.string.link_device_confirm, obj.optString("device_name"), obj.optString("device_fingerprint")) +
+                "\n\n" + getString(R.string.link_device_code_check, code)
+        }
+        runOnUiThread {
+            if (isFinishing) return@runOnUiThread
+            androidx.appcompat.app.AlertDialog.Builder(this)
+                .setMessage(question)
+                .setPositiveButton(android.R.string.ok) { _, _ -> runScanned(text, cborBytes) }
+                .setNegativeButton(android.R.string.cancel) { _, _ -> rearmLater() }
+                .setOnCancelListener { rearmLater() }
+                .show()
+        }
+    }
+
+    private fun runScanned(text: String, cborBytes: ByteArray) {
         Thread {
-            val cborBytes = if (addServerMode) ByteArray(0) else QrBinaryCodec.latin1StringToBytes(text)
             val result = try {
                 when {
                     addServerMode -> P2PLib.addServer(text.trim())

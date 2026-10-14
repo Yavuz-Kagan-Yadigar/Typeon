@@ -230,7 +230,10 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
         (_, true, false) => "Not enrolled".to_string(),
         _ => "Connecting…".to_string(),
     };
-    let row = adw::ExpanderRow::builder().title(&title).subtitle(&subtitle).build();
+    let row = adw::ExpanderRow::builder()
+        .title(gtk::glib::markup_escape_text(&title).as_str())
+        .subtitle(gtk::glib::markup_escape_text(&subtitle).as_str())
+        .build();
 
     let route = adw::SwitchRow::builder()
         .title("Route messages through this server")
@@ -792,6 +795,20 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
         devices.connect_activated(move |_| dialogs::linked_devices(&app));
     }
     identity.add(&devices);
+    let hide_content = adw::SwitchRow::builder()
+        .title("Hide message content in notifications")
+        .subtitle("Notifications say \"New message\" without the sender or the text.")
+        .active(app.prefs.borrow().hide_notification_content)
+        .build();
+    {
+        let app = app.clone();
+        hide_content.connect_active_notify(move |row| {
+            let mut prefs = app.prefs.borrow_mut();
+            prefs.hide_notification_content = row.is_active();
+            prefs.save();
+        });
+    }
+    identity.add(&hide_content);
     page.add(&identity);
 
     let profile = adw::PreferencesGroup::builder().title("Profile").build();
@@ -1117,6 +1134,11 @@ fn export_recovery(app: &Rc<App>) {
             app_for_prompt.toast("A recovery file without a passphrase would protect nothing.");
             return;
         }
+        // The core refuses it too, but its export call returns no reason.
+        if passphrase.chars().count() < p2p_messenger::RECOVERY_PASSPHRASE_MIN_CHARS {
+            app_for_prompt.toast("The passphrase must have at least 12 characters.");
+            return;
+        }
         let app = app_for_prompt.clone();
         // Argon2id is deliberately slow — off the main thread it goes.
         app::run_in_background(
@@ -1143,7 +1165,21 @@ fn save_recovery_bytes(app: &Rc<App>, bytes: Vec<u8>) {
     dialog.save(Some(&window), gio::Cancellable::NONE, move |result| {
         let Ok(file) = result else { return };
         let Some(path) = file.path() else { return };
-        match std::fs::write(&path, &bytes) {
+        // Every long-term key is in this file: owner-only from the first byte.
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut file| {
+                // An existing file keeps its old mode through `open`.
+                let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+                file.write_all(&bytes)
+            });
+        match written {
             Ok(()) => app.toast(&format!("Recovery file written to {}", path.display())),
             Err(error) => app.toast(&format!("Could not write the file: {}", error)),
         }

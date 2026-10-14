@@ -69,6 +69,10 @@ class AppLockActivity : AppCompatActivity() {
                 showError(error, getString(R.string.error_app_lock_wait, wait))
                 return@setOnClickListener
             }
+            if (createMode && entered.length < AppLock.MIN_PASSWORD_LENGTH) {
+                showError(error, getString(R.string.error_app_lock_short, AppLock.MIN_PASSWORD_LENGTH))
+                return@setOnClickListener
+            }
             if (createMode && entered != confirm.text.toString()) {
                 showError(error, getString(R.string.error_app_lock_mismatch))
                 return@setOnClickListener

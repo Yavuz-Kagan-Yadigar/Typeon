@@ -411,5 +411,13 @@ class MediaViewerActivity : AppCompatActivity() {
         super.onDestroy()
         videoHandler.removeCallbacksAndMessages(null)
         videoMediaPlayer = null
+        // The full-size avatar copy of `AvatarUtil.openFullscreen` is plaintext
+        // on disk and has no other use.
+        if (isFinishing) {
+            intent.getParcelableExtra<Uri>(EXTRA_URI)
+                ?.takeIf { it.authority == "$packageName.fileprovider" && it.pathSegments.firstOrNull() == "avatar_view" }
+                ?.lastPathSegment
+                ?.let { java.io.File(java.io.File(cacheDir, "avatar_view"), it).delete() }
+        }
     }
 }

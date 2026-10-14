@@ -368,9 +368,62 @@ fn derive_keys(mut ikm: Vec<u8>, transcript: &[u8; 32], we_initiated: bool) -> R
     for (label, key) in labels.into_iter().zip(keys.iter_mut()) {
         hk.expand_multi_info(&[label, transcript], key).map_err(|_| "HKDF expand failed")?;
     }
-    let [root_key, key_a, key_b] = keys.map(|k| k.to_vec());
+    // From slices: `keys.map` copied each key by value into a temporary that
+    // nothing wiped.
+    let (root_key, key_a, key_b) = (keys[0].to_vec(), keys[1].to_vec(), keys[2].to_vec());
     keys.zeroize();
     Ok(if we_initiated { (root_key, key_a, key_b) } else { (root_key, key_b, key_a) })
+}
+
+/// `kem_key_to` header: X25519 public key + ML-KEM-1024 ciphertext.
+pub const KEM_HEADER_LEN: usize = 32 + 1568;
+
+/// The key of a hybrid KEM to a device's public KEM keys, without a session:
+/// the sender half of `DeviceRatchetState::initiate` (fresh X25519 secret,
+/// ML-KEM encapsulation, both shared secrets and the transcript into HKDF),
+/// with no ML-KEM key of the sender. Returns the key and the header the
+/// recipient needs: `x25519 public (32) || ML-KEM ciphertext`.
+pub fn kem_key_to(peer_x25519_pubkey: &[u8], peer_kyber_pubkey: &[u8]) -> Result<([u8; 32], Vec<u8>), String> {
+    let mut csprng = OsRng;
+    let own_x25519_secret = StaticSecret::random_from_rng(&mut csprng);
+    let own_x25519_bytes = *X25519PublicKey::from(&own_x25519_secret).as_bytes();
+    let peer_x25519_bytes: [u8; 32] = peer_x25519_pubkey.try_into().map_err(|_| "Bad peer X25519 key length")?;
+    let dh_shared = x25519(&own_x25519_secret, &X25519PublicKey::from(peer_x25519_bytes))?;
+    let peer_kyber_pk = kyber_pubkey_from_bytes(peer_kyber_pubkey)?;
+    let (kyber_ct, mut kyber_shared) = peer_kyber_pk.encapsulate(&mut csprng).map_err(|_| "Kyber encapsulate failed")?;
+    let kyber_ct = kyber_ct.to_vec();
+    let ikm = [dh_shared.as_bytes().as_slice(), kyber_shared.as_slice()].concat();
+    kyber_shared.as_mut_slice().zeroize();
+    let bound_to = transcript(&own_x25519_bytes, &[], &kyber_ct, &peer_x25519_bytes, &peer_kyber_pk.as_bytes());
+    Ok((kem_key(ikm, &bound_to)?, [&own_x25519_bytes[..], &kyber_ct].concat()))
+}
+
+/// The recipient half of `kem_key_to` (as `DeviceRatchetState::respond`).
+pub fn kem_key_from(own_x25519_secret: &StaticSecret, own_kyber_secret: &MlKem1024DecapsulationKey, header: &[u8]) -> Result<[u8; 32], String> {
+    if header.len() != KEM_HEADER_LEN {
+        return Err("Bad KEM header length".to_string());
+    }
+    let (sender_x25519, kyber_ciphertext) = header.split_at(32);
+    let sender_x25519_bytes: [u8; 32] = sender_x25519.try_into().map_err(|_| "Bad sender X25519 key length")?;
+    let dh_shared = x25519(own_x25519_secret, &X25519PublicKey::from(sender_x25519_bytes))?;
+    let ct = kyber_ciphertext_from_bytes(kyber_ciphertext)?;
+    let mut kyber_shared = own_kyber_secret.decapsulate(&ct).map_err(|_| "Kyber decapsulate failed")?;
+    let ikm = [dh_shared.as_bytes().as_slice(), kyber_shared.as_slice()].concat();
+    kyber_shared.as_mut_slice().zeroize();
+    let bound_to = transcript(
+        &sender_x25519_bytes, &[], kyber_ciphertext,
+        X25519PublicKey::from(own_x25519_secret).as_bytes(), &own_kyber_secret.encapsulation_key().as_bytes(),
+    );
+    kem_key(ikm, &bound_to)
+}
+
+/// `derive_keys` for one key, under a label of its own.
+fn kem_key(mut ikm: Vec<u8>, transcript: &[u8; 32]) -> Result<[u8; 32], String> {
+    let hk = Hkdf::<Sha256>::new(None, &ikm);
+    ikm.zeroize();
+    let mut key = [0u8; 32];
+    hk.expand_multi_info(&[b"p2pmsg-v0.5-kem-seal", transcript], &mut key).map_err(|_| "HKDF expand failed")?;
+    Ok(key)
 }
 
 /// One symmetric ratchet step (spec 3.2): the key of this message and the
@@ -413,10 +466,11 @@ impl DeviceRatchetState {
         let own_kyber_public_bytes = own_kyber_ek.as_bytes().to_vec();
 
         let peer_kyber_pk = kyber_pubkey_from_bytes(peer_kyber_pubkey)?;
-        let (kyber_ct, kyber_shared) = peer_kyber_pk.encapsulate(&mut csprng).map_err(|_| "Kyber encapsulate failed")?;
+        let (kyber_ct, mut kyber_shared) = peer_kyber_pk.encapsulate(&mut csprng).map_err(|_| "Kyber encapsulate failed")?;
         let kyber_ct = kyber_ct.to_vec();
 
         let ikm = [dh_shared.as_bytes().as_slice(), kyber_shared.as_slice()].concat();
+        kyber_shared.as_mut_slice().zeroize();
         let bound_to = transcript(
             X25519PublicKey::from(&own_x25519_secret).as_bytes(), &own_kyber_public_bytes, &kyber_ct,
             &peer_x25519_bytes, &peer_kyber_pk.as_bytes(),
@@ -470,11 +524,12 @@ impl DeviceRatchetState {
         let dh_shared = x25519(&own_x25519_secret, &initiator_x25519_pk)?;
 
         let ct = kyber_ciphertext_from_bytes(kyber_ciphertext)?;
-        let kyber_shared = own_kyber_secret.decapsulate(&ct).map_err(|_| "Kyber decapsulate failed")?;
+        let mut kyber_shared = own_kyber_secret.decapsulate(&ct).map_err(|_| "Kyber decapsulate failed")?;
 
         let initiator_kyber_pk = kyber_pubkey_from_bytes(initiator_kyber_pubkey)?;
 
         let ikm = [dh_shared.as_bytes().as_slice(), kyber_shared.as_slice()].concat();
+        kyber_shared.as_mut_slice().zeroize();
         let bound_to = transcript(
             &initiator_x25519_bytes, &initiator_kyber_pk.as_bytes(), kyber_ciphertext,
             X25519PublicKey::from(&own_x25519_secret).as_bytes(), &own_kyber_secret.encapsulation_key().as_bytes(),
@@ -538,10 +593,11 @@ impl DeviceRatchetState {
         let (new_kyber_secret, new_kyber_ek) = MlKem1024::generate(&mut csprng);
 
         let dh_shared = x25519(&new_x25519_secret, &self.peer_x25519_pubkey)?;
-        let (kyber_ct, kyber_shared) = self.peer_kyber_pubkey.encapsulate(&mut csprng).map_err(|_| "Kyber encapsulate failed")?;
+        let (kyber_ct, mut kyber_shared) = self.peer_kyber_pubkey.encapsulate(&mut csprng).map_err(|_| "Kyber encapsulate failed")?;
         let kyber_ct = kyber_ct.to_vec();
 
         let ikm = [self.root_key.as_slice(), dh_shared.as_bytes().as_slice(), kyber_shared.as_slice()].concat();
+        kyber_shared.as_mut_slice().zeroize();
         let bound_to = transcript(
             X25519PublicKey::from(&new_x25519_secret).as_bytes(), &new_kyber_ek.as_bytes(), &kyber_ct,
             self.peer_x25519_pubkey.as_bytes(), &self.peer_kyber_pubkey.as_bytes(),
@@ -638,9 +694,10 @@ impl DeviceRatchetState {
         // çağrısının simetriği (karşı taraf BİZİM eski Kyber public
         // key'imize karşı encapsulate etmişti).
         let ct = kyber_ciphertext_from_bytes(rotation_kyber_ciphertext)?;
-        let kyber_shared = self.own_kyber_secret.decapsulate(&ct).map_err(|_| "Kyber decapsulate failed")?;
+        let mut kyber_shared = self.own_kyber_secret.decapsulate(&ct).map_err(|_| "Kyber decapsulate failed")?;
 
         let ikm = [self.root_key.as_slice(), dh_shared.as_bytes().as_slice(), kyber_shared.as_slice()].concat();
+        kyber_shared.as_mut_slice().zeroize();
         let bound_to = transcript(
             &x25519_bytes, &new_peer_kyber_pk.as_bytes(), rotation_kyber_ciphertext,
             X25519PublicKey::from(&self.own_x25519_secret).as_bytes(), &self.own_kyber_secret.encapsulation_key().as_bytes(),
@@ -857,12 +914,17 @@ fn chain_decrypt(
             for (number, key) in &changes.added {
                 skipped.insert(*number, *key);
             }
-            while skipped.len() > MAX_SKIPPED_KEYS {
-                let Some(oldest) = skipped.keys().min().copied() else { break };
-                if let Some(mut key) = skipped.remove(&oldest) {
-                    key.zeroize();
+            // One sort, not a scan of the whole map per evicted key.
+            let excess = skipped.len().saturating_sub(MAX_SKIPPED_KEYS);
+            if excess > 0 {
+                let mut numbers: Vec<u32> = skipped.keys().copied().collect();
+                numbers.sort_unstable();
+                for oldest in numbers.into_iter().take(excess) {
+                    if let Some(mut key) = skipped.remove(&oldest) {
+                        key.zeroize();
+                    }
+                    changes.used.push(oldest);
                 }
-                changes.used.push(oldest);
             }
         }
         None => {
@@ -938,6 +1000,19 @@ mod tests {
         let (init, x_secret, kyber_secret) = handshake_init();
         let responder = respond_to(&init, x_secret, kyber_secret);
         (init.0, responder)
+    }
+
+    #[test]
+    fn kem_key_needs_the_recipient_secrets() {
+        let x_secret = StaticSecret::random_from_rng(&mut OsRng);
+        let (kyber_secret, kyber_ek) = MlKem1024::generate(&mut OsRng);
+        let (key, header) = kem_key_to(X25519PublicKey::from(&x_secret).as_bytes(), &kyber_ek.as_bytes()).unwrap();
+        assert_eq!(header.len(), KEM_HEADER_LEN);
+        assert_eq!(kem_key_from(&x_secret, &kyber_secret, &header).unwrap(), key);
+        let other_x = StaticSecret::random_from_rng(&mut OsRng);
+        assert_ne!(kem_key_from(&other_x, &kyber_secret, &header).unwrap(), key);
+        let (other_kyber, _) = MlKem1024::generate(&mut OsRng);
+        assert_ne!(kem_key_from(&x_secret, &other_kyber, &header).unwrap(), key);
     }
 
     type Init = (DeviceRatchetState, Vec<u8>, Vec<u8>);

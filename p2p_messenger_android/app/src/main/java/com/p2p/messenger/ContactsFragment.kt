@@ -1,8 +1,6 @@
 package com.p2p.messenger
 
 import android.app.AlertDialog
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -439,6 +437,9 @@ class ContactsFragment : Fragment() {
             JSONArray()
         }
 
+        val duplicateNames = com.p2p.messenger.util.ContactNames.duplicates(
+            (0 until array.length()).map { array.getJSONObject(it).optString("display_name", "Unknown") }
+        )
         val items = (0 until array.length()).map { i ->
             val obj = array.getJSONObject(i)
             val fingerprint = if (obj.isNull("active_device_fingerprint")) ""
@@ -451,7 +452,9 @@ class ContactsFragment : Fragment() {
             val addedViaGroup = obj.optBoolean("added_via_group", false)
             ChatAdapter.ChatMessage(
                 contactId = fingerprint,
-                displayName = obj.optString("display_name", "Unknown"),
+                displayName = com.p2p.messenger.util.ContactNames.label(
+                    obj.optString("display_name", "Unknown"), obj.optString("identity_id"), duplicateNames
+                ),
                 lastMessage = if (addedViaGroup) viaGroupLabel else "",
                 timestamp = 0L,
                 realContactId = obj.optString("contact_id"),
@@ -466,7 +469,7 @@ class ContactsFragment : Fragment() {
 
     /**
      * Spec 1.4: manuel giriş, QR'ın taşıdığı bilgiyi elle girmek için.
-     * Format: identity_id|device_fingerprint|device_name|rendezvous_node
+     * Format: identity_id|device_fingerprint|nonce|device_name|rendezvous_node
      * (bkz. Rust P2PLib.processManualEntry dokümantasyonu).
      */
     private fun showManualAddDialog() {
@@ -538,8 +541,7 @@ class ContactsFragment : Fragment() {
             Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
             return
         }
-        val clipboard = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Typeon pairing code", code))
+        com.p2p.messenger.util.copySensitive(requireContext(), "Typeon pairing code", code)
         Toast.makeText(requireContext(), R.string.msg_manual_code_copied, Toast.LENGTH_LONG).show()
     }
 
@@ -563,8 +565,7 @@ class ContactsFragment : Fragment() {
             Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
             return
         }
-        val clipboard = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Typeon pairing code", code))
+        com.p2p.messenger.util.copySensitive(requireContext(), "Typeon pairing code", code)
         Toast.makeText(requireContext(), R.string.msg_own_address_copied, Toast.LENGTH_LONG).show()
     }
 }

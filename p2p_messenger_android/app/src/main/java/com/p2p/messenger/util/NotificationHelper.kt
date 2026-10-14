@@ -243,9 +243,10 @@ object NotificationHelper {
         // Kilidi açık bir telefonda veya bu ayar KAPALIYSA davranış AYNI
         // kalır (tam önizleme hâlâ gösterilir) — hiçbir özellik kaldırılmadı,
         // sadece kilitli+hassas-gizli durumunda ek bir koruma katmanı eklendi.
+        // The lock screen shows neither the sender nor the text.
         val publicVersion = NotificationCompat.Builder(context, MESSAGE_CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText("New message")
+            .setContentTitle(context.getString(R.string.app_name))
+            .setContentText(context.getString(R.string.notif_new_message))
             .setSmallIcon(R.drawable.ic_notification)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()

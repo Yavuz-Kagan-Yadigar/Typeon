@@ -68,6 +68,8 @@ pub struct Prefs {
     /// Id of the custom font currently selected by the user; `None` means a
     /// built-in font or the system default is active.
     pub active_custom_font_id: Option<String>,
+    /// Message notifications say "New message" instead of the sender's text.
+    pub hide_notification_content: bool,
 
     #[serde(skip)]
     path: PathBuf,
@@ -99,6 +101,7 @@ impl Default for Prefs {
             font_family: None,
             custom_fonts: HashMap::new(),
             active_custom_font_id: None,
+            hide_notification_content: false,
             path: PathBuf::new(),
             dirty: false,
         }

@@ -131,6 +131,123 @@ fn read_full<R: Read>(r: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
     Ok(total)
 }
 
+/// The byte ranges of the metadata segments of a JPEG file: APP1 (EXIF with
+/// the GPS position, XMP) and APP13 (Photoshop/IPTC). The image data, JFIF
+/// and the ICC profile (APP2) are outside them. With them the EXIF
+/// orientation of the photo, if it is not the upright one: the caller puts
+/// that one tag back (`orientation_segment`), or a photo taken rotated is
+/// shown as the sensor stored it.
+/// Empty for a file that is not a JPEG, and on any doubt about its structure:
+/// the file is then sent as it is.
+fn jpeg_metadata_ranges(file: &mut File) -> (Vec<(u64, u64)>, Option<u8>) {
+    let scan = |file: &mut File| -> Option<(Vec<(u64, u64)>, Option<u8>)> {
+        let len = file.metadata().ok()?.len();
+        let mut head = [0u8; 4];
+        file.seek(SeekFrom::Start(0)).ok()?;
+        if read_full(file, &mut head[..2]).ok()? != 2 || head[..2] != [0xFF, 0xD8] {
+            return None;
+        }
+        let mut ranges = Vec::new();
+        let mut orientation = None;
+        let mut at: u64 = 2;
+        // ponytail: 4096 segments; a real file has a few dozen.
+        for _ in 0..4096 {
+            file.seek(SeekFrom::Start(at)).ok()?;
+            if read_full(file, &mut head).ok()? != 4 || head[0] != 0xFF {
+                return None;
+            }
+            let marker = head[1];
+            // Start of scan: the header is over, the rest is image data.
+            if marker == 0xDA {
+                return Some((ranges, orientation));
+            }
+            // Only segments that carry a length are expected before the scan.
+            let known = matches!(marker, 0xC0..=0xCF | 0xDB..=0xDF | 0xE0..=0xEF | 0xFE) && marker != 0xC8;
+            let size = u16::from_be_bytes([head[2], head[3]]) as u64;
+            let end = at.checked_add(2 + size)?;
+            if !known || size < 2 || end > len {
+                return None;
+            }
+            if marker == 0xE1 || marker == 0xED {
+                ranges.push((at, end));
+            }
+            if marker == 0xE1 && orientation.is_none() {
+                let mut body = vec![0u8; size as usize - 2];
+                if read_full(file, &mut body).ok()? != body.len() {
+                    return None;
+                }
+                orientation = exif_orientation(&body);
+            }
+            at = end;
+        }
+        None
+    };
+    let found = scan(file).unwrap_or_default();
+    // The caller reads from the start. A failed rewind: nothing is skipped
+    // (an empty list), and the read below fails or starts where it is.
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        return (Vec::new(), None);
+    }
+    found
+}
+
+/// The orientation (2..=8, not the upright 1) in the body of an EXIF APP1
+/// segment: tag 0x0112 of the first image directory.
+fn exif_orientation(body: &[u8]) -> Option<u8> {
+    let tiff = body.strip_prefix(b"Exif\0\0")?;
+    let big_endian = match tiff.get(..4)? {
+        b"MM\0*" => true,
+        b"II*\0" => false,
+        _ => return None,
+    };
+    let u16_at = |at: usize| -> Option<u16> {
+        let b: [u8; 2] = tiff.get(at..at.checked_add(2)?)?.try_into().ok()?;
+        Some(if big_endian { u16::from_be_bytes(b) } else { u16::from_le_bytes(b) })
+    };
+    let dir_bytes: [u8; 4] = tiff.get(4..8)?.try_into().ok()?;
+    let dir = (if big_endian { u32::from_be_bytes(dir_bytes) } else { u32::from_le_bytes(dir_bytes) }) as usize;
+    for i in 0..u16_at(dir)? as usize {
+        let entry = dir.checked_add(2 + 12 * i)?;
+        if u16_at(entry)? == 0x0112 {
+            let value = u16_at(entry.checked_add(8)?)?;
+            return (2..=8).contains(&value).then_some(value as u8);
+        }
+    }
+    None
+}
+
+/// An EXIF APP1 segment that holds the orientation and nothing else.
+fn orientation_segment(orientation: u8) -> [u8; 36] {
+    let mut segment = *b"\xFF\xE1\0\x22Exif\0\0MM\0*\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\0\0\0\0\0\0\0";
+    segment[29] = orientation;
+    segment
+}
+
+/// Reads a file without the given ranges (sorted, not overlapping).
+struct SkipRanges {
+    file: File,
+    pos: u64,
+    ranges: std::collections::VecDeque<(u64, u64)>,
+}
+
+impl Read for SkipRanges {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut max = buf.len();
+        while let Some(&(start, end)) = self.ranges.front() {
+            if self.pos < start {
+                max = max.min((start - self.pos) as usize);
+                break;
+            }
+            self.file.seek(SeekFrom::Start(end))?;
+            self.pos = end;
+            self.ranges.pop_front();
+        }
+        let n = self.file.read(&mut buf[..max])?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
 /// `source_path`'i (kullanıcının seçtiği dosya — Kotlin tarafından zaten
 /// yerel bir yola kopyalanmış olmalı, content:// URI burada işlenmez)
 /// `FILE_CHUNK_SIZE`'lık parçalar hâlinde OKUYUP her parçayı ayrı ayrı
@@ -145,6 +262,18 @@ pub fn encrypt_file_to_disk_with(
 ) -> Result<(u64, String), String> {
     let cipher = ChaCha20Poly1305::new_from_slice(file_key).map_err(|_| "Invalid file key")?;
     let mut src = File::open(source_path).map_err(|e| e.to_string())?;
+    // A photo goes out without its EXIF/XMP: size and hash below are those
+    // of the bytes that are sent.
+    let (ranges, orientation) = jpeg_metadata_ranges(&mut src);
+    // The one tag that goes back in, right after the start-of-image marker.
+    let mut head = Vec::new();
+    if let Some(orientation) = orientation {
+        head.extend_from_slice(&[0xFF, 0xD8]);
+        head.extend_from_slice(&orientation_segment(orientation));
+        src.seek(SeekFrom::Start(2)).map_err(|e| e.to_string())?;
+    }
+    let pos = if head.is_empty() { 0 } else { 2 };
+    let mut src = std::io::Cursor::new(head).chain(SkipRanges { file: src, pos, ranges: ranges.into() });
     let mut dest = File::create(dest_enc_path).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
     let chunk_size = if chunk_size == 0 { FILE_CHUNK_SIZE } else { chunk_size };
@@ -235,6 +364,14 @@ pub fn read_chunk_from_disk_with(enc_path: &Path, chunk_index: u32, chunk_size: 
     Ok(Some(buf))
 }
 
+/// One chunk of a `.enc` file, decrypted (bkz. lib.rs `handle_chunk_response`:
+/// the whole-file hash of a download).
+pub fn read_plain_chunk_with(enc_path: &Path, chunk_index: u32, file_key: &[u8; 32], chunk_size: usize) -> Result<Vec<u8>, String> {
+    let data = read_chunk_from_disk_with(enc_path, chunk_index, chunk_size)?.ok_or("Chunk missing")?;
+    let cipher = ChaCha20Poly1305::new_from_slice(file_key).map_err(|_| "Invalid file key")?;
+    cipher.decrypt(&nonce_from_chunk_index(chunk_index), data.as_slice()).map_err(|_| format!("Chunk {} decryption failed", chunk_index))
+}
+
 /// `write_verified_chunk_at_with`'in başarısızlık türü — çağıranın (bkz. lib.rs
 /// `handle_chunk_response`) kurtarma stratejisini seçebilmesi için KRİTİK
 /// ayrım (dış AI incelemesi düzeltmesi): AEAD hatası mı yoksa disk yazma
@@ -294,4 +431,66 @@ pub fn write_verified_chunk_at_with(dest_enc_path: &Path, chunk_index: u32, ciph
     f.seek(SeekFrom::Start(offset)).map_err(|e| ChunkAppendError::Io(e.to_string()))?;
     f.write_all(ciphertext).map_err(|e| ChunkAppendError::Io(e.to_string()))?;
     Ok(plaintext_len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_chunks_read_back_give_the_file_hash() {
+        let base = std::env::temp_dir().join(format!("typeon-att-{}", std::process::id()));
+        let (src, enc) = (base.with_extension("src"), base.with_extension("enc"));
+        std::fs::write(&src, vec![7u8; 40]).unwrap();
+        let key = [1u8; 32];
+        let (total, sha) = encrypt_file_to_disk_with(&src, &enc, &key, 16).unwrap();
+        let mut hasher = Sha256::new();
+        for i in 0..total_chunks_with(total, 16) {
+            hasher.update(read_plain_chunk_with(&enc, i, &key, 16).unwrap());
+        }
+        assert_eq!(hex::encode(hasher.finalize()), sha);
+        assert!(read_plain_chunk_with(&enc, 0, &[2u8; 32], 16).is_err());
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&enc);
+    }
+
+    #[test]
+    fn exif_is_cut_from_a_jpeg_and_a_doubtful_file_is_sent_whole() {
+        let base = std::env::temp_dir().join(format!("typeon-jpg-{}", std::process::id()));
+        let (src, enc) = (base.with_extension("src"), base.with_extension("enc"));
+        let key = [1u8; 32];
+        let sent = |bytes: &[u8]| -> Vec<u8> {
+            std::fs::write(&src, bytes).unwrap();
+            let (total, _) = encrypt_file_to_disk_with(&src, &enc, &key, 16).unwrap();
+            let out: Vec<u8> = (0..total_chunks_with(total, 16)).flat_map(|i| read_plain_chunk_with(&enc, i, &key, 16).unwrap()).collect();
+            assert_eq!(out.len() as u64, total);
+            out
+        };
+        let soi = [0xFF, 0xD8];
+        let jfif = [0xFF, 0xE0, 0, 4, b'J', b'F'];
+        let exif = [0xFF, 0xE1, 0, 6, b'E', b'x', b'i', b'f'];
+        let icc = [0xFF, 0xE2, 0, 4, b'I', b'C'];
+        let iptc = [0xFF, 0xED, 0, 4, b'P', b'S'];
+        // Image data may hold anything, a marker of a metadata segment too.
+        let scan = [0xFF, 0xDA, 0, 2, 1, 2, 0xFF, 0xE1, 0, 2, 0xFF, 0xD9];
+        let photo = [&soi[..], &jfif, &exif, &icc, &iptc, &scan].concat();
+        assert_eq!(sent(&photo), [&soi[..], &jfif, &icc, &scan].concat());
+        // A rotated photo keeps its orientation, and only that.
+        let rotated = b"\xFF\xE1\0\x32Exif\0\0II*\0\x08\0\0\0\x02\0\x0F\x01\x02\0\x01\0\0\0A\0\0\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0GPS!";
+        assert_eq!(rotated.len(), 2 + 0x32);
+        let photo = [&soi[..], &jfif, &rotated[..], &exif, &scan].concat();
+        assert_eq!(sent(&photo), [&soi[..], &orientation_segment(6), &jfif, &scan].concat());
+        assert_eq!(exif_orientation(&orientation_segment(6)[4..]), Some(6));
+        // A segment longer than the file: unchanged.
+        let cut = [&soi[..], &exif, &[0xFF, 0xE1, 0xFF, 0xFF, 1]].concat();
+        assert_eq!(sent(&cut), cut);
+        // No start-of-scan after the segments: unchanged.
+        let headless = [&soi[..], &exif].concat();
+        assert_eq!(sent(&headless), headless);
+        // Not a JPEG: unchanged.
+        let other = [&[0x89, b'P', b'N', b'G'][..], &exif].concat();
+        assert_eq!(sent(&other), other);
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&enc);
+    }
 }

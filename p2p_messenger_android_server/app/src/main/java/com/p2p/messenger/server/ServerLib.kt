@@ -85,10 +85,8 @@ object ServerLib {
     /**
      * Kaydı ENGELLER (kullanıcı kararı, 2026-08-27).
      *
-     * `revokeDevice`'tan farkı kasıtlı: iptal yalnızca MEVCUT kaydı kapatır
-     * ve o cihaz taze bir davet koduyla geri dönebilir. Engel, kayıt
-     * ANAHTARININ kendisine konur — aynı cihaz yeni bir davetle bile
-     * kaydolamaz, `Rebind` de yapamaz.
+     * `revokeDevice` de kayıt anahtarını engeller (iptal = engel). Farkı:
+     * bu çağrı herkese açık katılım kodunu da yeniler.
      */
     external fun blockDevice(enrollmentId: String): String
 

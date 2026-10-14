@@ -377,7 +377,7 @@ class SettingsFragment : Fragment() {
         // dokümantasyonu — daha önce hiçbir ekranda erişilemeyen kurtarma
         // dosyası dışa aktarma akışının tetiği.
         view.findViewById<Button>(R.id.btn_export_recovery).setOnClickListener {
-            showExportRecoveryDialog()
+            withAppPassword { showExportRecoveryDialog() }
         }
 
         // Spec dışı, kullanıcı isteği: bekleyen (henüz ack alınmamış)
@@ -393,10 +393,10 @@ class SettingsFragment : Fragment() {
 
         // Spec dışı, kullanıcı isteği: hesaptan çıkış — bkz. `confirmLogout`.
         view.findViewById<Button>(R.id.btn_logout).setOnClickListener {
-            confirmLogout()
+            withAppPassword { confirmLogout() }
         }
         view.findViewById<Button>(R.id.btn_delete_account).setOnClickListener {
-            confirmDeleteAccount()
+            withAppPassword { confirmDeleteAccount() }
         }
 
         setupSections(view)
@@ -534,7 +534,7 @@ class SettingsFragment : Fragment() {
             .setTitle(R.string.linked_devices_section_title)
             .setItems(labels.toTypedArray()) { _, which ->
                 val fp = fingerprints.getOrNull(which)
-                if (fp != null) confirmRevokeLinkedDevice(fp)
+                if (fp != null) withAppPassword { confirmRevokeLinkedDevice(fp) }
             }
             .setPositiveButton(R.string.linked_devices_add) { _, _ ->
                 // Only the root device may add one (the core refuses the grant):
@@ -543,12 +543,57 @@ class SettingsFragment : Fragment() {
                     Toast.makeText(requireContext(), R.string.msg_primary_device_only, Toast.LENGTH_LONG).show()
                     return@setPositiveButton
                 }
-                startActivity(
-                    Intent(requireContext(), com.p2p.messenger.ui.QrScanActivity::class.java).apply {
-                        putExtra(com.p2p.messenger.ui.QrScanActivity.EXTRA_MODE,
-                            com.p2p.messenger.ui.QrScanActivity.MODE_LINK_APPROVE)
+                withAppPassword {
+                    startActivity(
+                        Intent(requireContext(), com.p2p.messenger.ui.QrScanActivity::class.java).apply {
+                            putExtra(com.p2p.messenger.ui.QrScanActivity.EXTRA_MODE,
+                                com.p2p.messenger.ui.QrScanActivity.MODE_LINK_APPROVE)
+                        }
+                    )
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** Asks for the app password before [action]: whoever holds the unlocked
+     *  phone is not always its owner. */
+    private fun withAppPassword(action: () -> Unit) {
+        val context = requireContext()
+        if (!AppLock.hasPassword(context)) {
+            action()
+            return
+        }
+        val wait = AppLock.retryWaitSeconds(context)
+        if (wait > 0) {
+            Toast.makeText(context, getString(R.string.error_app_lock_wait, wait), Toast.LENGTH_LONG).show()
+            return
+        }
+        val field = EditText(context).apply {
+            hint = getString(R.string.hint_app_lock_current)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val container = LinearLayout(context).apply {
+            val pad = (20 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad / 2, pad, 0)
+            addView(field)
+        }
+        AlertDialog.Builder(context)
+            .setTitle(R.string.title_app_lock_unlock)
+            .setView(container)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val entered = field.text.toString()
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val ok = AppLock.verify(context, entered)
+                    if (ok) AppLock.clearFailedAttempts(context) else AppLock.noteFailedAttempt(context)
+                    withContext(Dispatchers.Main) {
+                        if (!ok) {
+                            Toast.makeText(context, R.string.error_app_lock_wrong, Toast.LENGTH_LONG).show()
+                        } else if (isAdded) {
+                            action()
+                        }
                     }
-                )
+                }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -799,6 +844,10 @@ class SettingsFragment : Fragment() {
                     val newPassword = newField.text.toString()
                     if (newPassword.isBlank()) {
                         Toast.makeText(context, R.string.error_app_lock_empty, Toast.LENGTH_LONG).show()
+                        return@setPositiveButton
+                    }
+                    if (newPassword.length < AppLock.MIN_PASSWORD_LENGTH) {
+                        Toast.makeText(context, getString(R.string.error_app_lock_short, AppLock.MIN_PASSWORD_LENGTH), Toast.LENGTH_LONG).show()
                         return@setPositiveButton
                     }
                     if (newPassword != confirmField.text.toString()) {
@@ -1141,6 +1190,8 @@ class SettingsFragment : Fragment() {
                 val confirm = confirmInput.text.toString()
                 when {
                     password.isEmpty() -> Toast.makeText(context, R.string.error_recovery_password_empty, Toast.LENGTH_SHORT).show()
+                    // Offline guessing is the only thing between this file and every key.
+                    password.length < 12 -> Toast.makeText(context, getString(R.string.error_recovery_password_short, 12), Toast.LENGTH_LONG).show()
                     password != confirm -> Toast.makeText(context, R.string.error_recovery_password_mismatch, Toast.LENGTH_SHORT).show()
                     else -> {
                         pendingRecoveryPassphrase = password

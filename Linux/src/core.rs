@@ -78,8 +78,9 @@ pub struct OwnStatus {
 
 // --- identity / lifecycle ---
 
-pub fn init_database(dir: &str) -> bool {
-    api::init_database(dir)
+/// `storage_key`: the vault's `skipped_key`. The database is encrypted under it.
+pub fn init_database(dir: &str, storage_key: &[u8; 32]) -> bool {
+    api::init_database(dir, storage_key)
 }
 
 pub fn has_stored_identity() -> bool {
@@ -214,6 +215,12 @@ pub fn build_device_link_request() -> Vec<u8> {
     api::build_device_link_request()
 }
 
+/// The short code this device and the approving device both show while
+/// linking. Empty for bytes that are not a link request.
+pub fn device_link_code(request: &[u8]) -> String {
+    api::device_link_code(request)
+}
+
 /// True once a primary device has adopted us into its identity.
 pub fn is_secondary_device() -> bool {
     api::is_secondary_device()
@@ -234,7 +241,21 @@ pub fn sync_read_state(peer_fingerprint: &str, group_id: &str, read_at_ms: u64) 
 // --- contacts ---
 
 pub fn list_contacts() -> Vec<ContactSummary> {
-    parse_list(api::list_contacts())
+    let mut contacts: Vec<ContactSummary> = parse_list(api::list_contacts());
+    // Two contacts with the same name get the head of their identity id, so
+    // the lists and the chat header tell them apart. Display only.
+    let key = |name: &str| name.trim().to_lowercase();
+    let mut counts = std::collections::HashMap::<String, usize>::new();
+    for contact in &contacts {
+        *counts.entry(key(&contact.display_name)).or_default() += 1;
+    }
+    for contact in &mut contacts {
+        if counts[&key(&contact.display_name)] > 1 {
+            let head: String = contact.identity_id.chars().take(6).collect();
+            contact.display_name = format!("{} ({})", contact.display_name, head);
+        }
+    }
+    contacts
 }
 
 pub fn clear_chat_history(contact_id: &str) -> Result<(), String> {
@@ -659,6 +680,14 @@ pub fn set_archive_root_key(key: &[u8]) -> bool {
     api::set_archive_root_key(key)
 }
 
+/// One chat's older history from the server archive, for a "fetch history
+/// from server" button. Scrolling never asks the server. `chat_key`: the peer
+/// device fingerprint, or the group id; `before_timestamp`: the oldest message
+/// on screen (ms), 0 = from the newest.
+pub fn fetch_server_history(chat_key: &str, is_group: bool, before_timestamp: i64) -> Result<(), String> {
+    parse_unit(api::fetch_server_history(chat_key, is_group, before_timestamp))
+}
+
 /// Downloads the entire server-side archive — for a device set up from a
 /// recovery file or by linking. Returns how many conversations were asked for.
 pub fn restore_server_history() -> Result<u32, String> {
@@ -677,13 +706,7 @@ pub fn restore_server_history() -> Result<u32, String> {
 /// encrypted sync channel, long after the vault passphrase is gone from
 /// memory — see `secrets::store_archive_key`.
 pub fn archive_root_key() -> Option<[u8; 32]> {
-    let bytes = api::archive_root_key();
-    if bytes.len() != 32 {
-        return None;
-    }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&bytes);
-    Some(key)
+    api::archive_root_key().try_into().ok()
 }
 
 // --- calls (see `call.rs` in the core) ---

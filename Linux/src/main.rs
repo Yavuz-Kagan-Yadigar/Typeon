@@ -61,7 +61,16 @@ fn activate(application: &adw::Application) {
     }
 
     let data_dir = data_directory();
-    if let Err(error) = std::fs::create_dir_all(&data_dir) {
+    // 0700 on the one directory everything lives under: settings, the
+    // database and decrypted attachments are then closed to other local users
+    // whatever mode the files inside were created with.
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let created = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&data_dir)
+        .and_then(|_| std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700)));
+    if let Err(error) = created {
         eprintln!("typeon: cannot create {}: {error}", data_dir.display());
         return;
     }
@@ -80,18 +89,8 @@ fn activate(application: &adw::Application) {
         }
     };
 
-    // Everything else depends on this: it opens the SQLite database and, if an
-    // identity is already stored, loads its public keys into memory.
-    if !core::init_database(&data_dir.to_string_lossy()) {
-        let detail = format!(
-            "Typeon could not open its database in {}.\n\nCheck that the directory is writable \
-             and that no other copy of Typeon is running.",
-            data_dir.display()
-        );
-        eprintln!("typeon: {detail}");
-        show_blocking_error(application, "Could not open the database", &detail);
-        return;
-    }
+    // The database is encrypted under a key from the vault, so it is opened
+    // in `ui::onboarding`, once the vault is.
 
     let preferences = prefs::Prefs::load(&data_dir);
     let app = app::App::new(application.clone(), data_dir, preferences, backend);
@@ -126,6 +125,13 @@ fn activate(application: &adw::Application) {
         let app = app.clone();
         window.connect_close_request(move |_| {
             app.prefs.borrow_mut().flush();
+            // Decrypted attachment copies do not outlive the session. The
+            // directory itself stays: the core writes into it.
+            if let Ok(entries) = std::fs::read_dir(app.data_dir.join("attachments/plain_cache")) {
+                for entry in entries.flatten() {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
             glib::Propagation::Proceed
         });
     }

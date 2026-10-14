@@ -434,6 +434,7 @@ class ChatsFragment : Fragment() {
         val contacts = loadContacts()
         val groups = loadGroups()
 
+        val duplicateNames = com.p2p.messenger.util.ContactNames.duplicates(contacts.map { it.displayName })
         val contactItems = contacts.map { contact ->
             val fingerprint = contact.activeDeviceFingerprint ?: ""
             // Spec dışı, kullanıcı isteği: son satır SADECE metin mesajı
@@ -443,7 +444,7 @@ class ChatsFragment : Fragment() {
             val lastMessage = if (fingerprint.isNotEmpty()) newestPreview(fingerprint) else null
             ChatAdapter.ChatMessage(
                 contactId = fingerprint,
-                displayName = contact.displayName,
+                displayName = com.p2p.messenger.util.ContactNames.label(contact.displayName, contact.identityId, duplicateNames),
                 lastMessage = lastMessage?.text ?: "",
                 timestamp = lastMessage?.timestamp ?: 0L,
                 hasUnread = lastMessage != null &&
@@ -504,6 +505,7 @@ class ChatsFragment : Fragment() {
     private data class ContactRow(
         val contactId: String,
         val displayName: String,
+        val identityId: String,
         val activeDeviceFingerprint: String?,
         val avatarHex: String?
     )
@@ -644,6 +646,7 @@ class ChatsFragment : Fragment() {
             ContactRow(
                 contactId = obj.optString("contact_id"),
                 displayName = obj.optString("display_name", "Bilinmeyen"),
+                identityId = obj.optString("identity_id"),
                 activeDeviceFingerprint = fingerprint,
                 avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null }
             )

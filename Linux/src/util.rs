@@ -20,7 +20,15 @@ pub fn texture_from_bytes(bytes: &[u8]) -> Option<gdk::Texture> {
     if bytes.is_empty() {
         return None;
     }
-    let loader = gdk_pixbuf::PixbufLoader::new();
+    // Peer-supplied bytes: every client sends JPEG, so no other decoder is
+    // reachable, and a header that announces a huge canvas is refused before
+    // any pixel buffer is allocated (a zero size makes the loader fail).
+    let loader = gdk_pixbuf::PixbufLoader::with_type("jpeg").ok()?;
+    loader.connect_size_prepared(|loader, width, height| {
+        if width > 4096 || height > 4096 {
+            loader.set_size(0, 0);
+        }
+    });
     if loader.write(bytes).is_err() {
         // `close` must still be called or the loader logs a warning on drop.
         let _ = loader.close();

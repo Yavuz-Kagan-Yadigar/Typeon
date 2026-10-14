@@ -78,19 +78,40 @@ pub struct QrPacket {
     /// gelebilir, alan sadece boş kalır.
     #[serde(default)]
     pub known_relays: Vec<String>,
+    /// Random, issued by the device that shows the code. The scanner proves
+    /// it read the code with `pairing_nonce_proof` in its IdentityExchange.
+    /// Not named `nonce`: with that name this packet also parsed as a
+    /// `DeviceLinkRequest`, and a contact's code scanned on the "add a
+    /// device" screen was taken for a device to link.
+    #[serde(with = "serde_bytes")]
+    pub pairing_nonce: Vec<u8>,
+}
+
+/// What a device that read a pairing or link code puts into its
+/// IdentityExchange (`pairing_proof`): the code's nonce, bound to the device
+/// that sends it. The packet travels unsealed; the nonce itself in it could
+/// be taken from the wire and used by another device.
+pub fn pairing_nonce_proof(nonce: &[u8], sender_device_fingerprint: &str) -> Vec<u8> {
+    use sha3::Digest;
+    sha3::Sha3_256::new()
+        .chain_update(b"typeon-pairing-nonce")
+        .chain_update(nonce)
+        .chain_update(sender_device_fingerprint.as_bytes())
+        .finalize()
+        .to_vec()
 }
 
 impl QrPacket {
-    pub const CURRENT_VERSION: u8 = 2;
+    pub const CURRENT_VERSION: u8 = 3;
 
     /// CBOR olarak kodlar (QR'a gömülecek ham bayt dizisi).
     pub fn to_cbor(&self) -> Result<Vec<u8>, String> {
         to_cbor(self)
     }
 
-    /// v1 (no `known_relays`) reads the same way and is still accepted.
+    /// A code without `nonce` (v1, v2) cannot pair any more.
     pub fn from_cbor(data: &[u8]) -> Result<Self, String> {
-        pairing_code_from_cbor(data, 1..=Self::CURRENT_VERSION, |p: &Self| p.version)
+        pairing_code_from_cbor(data, Self::CURRENT_VERSION..=Self::CURRENT_VERSION, |p: &Self| p.version)
     }
 }
 
@@ -112,6 +133,13 @@ pub struct DeviceAdd {
     #[serde(default)]
     #[serde(with = "serde_bytes")]
     pub signature_pq: Vec<u8>,
+    /// Hybrid signature of the ADDED device over the same bytes plus a tag
+    /// (lib.rs `device_add_consent_bytes`). The first device's signature alone
+    /// let any identity claim a device whose public keys it knew.
+    #[serde(default, with = "serde_bytes")]
+    pub consent: Vec<u8>,
+    #[serde(default, with = "serde_bytes")]
+    pub consent_pq: Vec<u8>,
 }
 
 /// Cihaz iptali (spec 1.6).
@@ -416,6 +444,12 @@ pub struct SyncedDevice {
     pub is_active: bool,
     #[serde(default)]
     pub last_addr: Option<String>,
+    /// Hex. The secrets of this device's first-contact mailbox that the
+    /// sender holds (`first_contact_secrets`). Filled only in a `SyncPayload`
+    /// (ratchet-encrypted, siblings only): every device of an identity then
+    /// reaches, and is reached by, the devices its siblings paired with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mailbox_secrets: Vec<String>,
 }
 
 /// Bir kişinin, cihazlar arası senkron için serileştirilmiş biçimi
@@ -454,6 +488,10 @@ pub struct SyncPayload {
     /// paketleriyle uyum için.
     #[serde(default)]
     pub siblings: Vec<SyncedDevice>,
+    /// bkz. `DeviceAddProof`: one for each of `siblings` that is not the
+    /// identity's first device. A sibling without one is not taken.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sibling_proofs: Vec<DeviceAddProof>,
     /// Kök arşiv anahtarı (ARK) — sunucuda saklanan geçmişi çözen anahtar
     /// (bkz. lib.rs `set_archive_root_key`, `server_seal`).
     ///
@@ -508,6 +546,10 @@ pub struct MessagePacketHeader {
     /// mesaj normal bir simetrik-zincir ilerlemesidir, rotasyon yok.
     #[serde(with = "serde_bytes")]
     pub rotation_kyber_ciphertext: Option<Vec<u8>>,
+    /// Sender's clock when the packet was made. Signed with the header, so a
+    /// receiver can tell a replayed old packet from one its session should
+    /// decrypt (lib.rs `note_undecryptable`).
+    pub sent_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -709,6 +751,10 @@ pub enum MessageContent {
         target_message_id: String,
         #[serde(default)]
         group_id: Option<String>,
+        /// Group only: the author's signature over the deletion (lib.rs
+        /// `GROUP_TOMBSTONE`). Members hand it on with history.
+        #[serde(default)]
+        author_proof: Option<String>,
     },
     /// Spec dışı: node modu KAPALI cihazlarda sohbet geçmişi hiç
     /// arşivlenmediği için (bkz. lib.rs `archive_message`), o cihazlar için
@@ -1070,6 +1116,9 @@ pub enum MessageContent {
         /// 9-byte records: page, then the 8-byte stroke id.
         #[serde(default, with = "serde_bytes")]
         erased: Vec<u8>,
+        /// The sender device's signature for each page of `strokes`.
+        #[serde(default)]
+        sigs: Vec<WbPageSig>,
     },
     /// "This is what my board looks like": pages that hold strokes, each with
     /// a stroke count and the XOR of its stroke ids. The one reliable
@@ -1102,6 +1151,9 @@ pub enum MessageContent {
         /// Erased stroke ids, 8 bytes each.
         #[serde(default, with = "serde_bytes")]
         tombstones: Vec<u8>,
+        /// The signature of each device that drew a stroke of `strokes`.
+        #[serde(default)]
+        sigs: Vec<WbPageSig>,
     },
 }
 
@@ -1136,6 +1188,30 @@ pub struct WbStroke {
     pub width: u8,
     #[serde(with = "serde_bytes")]
     pub points: Vec<u8>,
+    /// The device that drew the stroke (raw fingerprint, 32 bytes): its
+    /// `WbPageSig` of this page signs the stroke.
+    #[serde(default, with = "serde_bytes")]
+    pub sig: Vec<u8>,
+}
+
+/// One device's hybrid signature (Ed25519 + ML-DSA-87) over every stroke it
+/// drew on one page of a board: lib `whiteboard.rs`, `wb_page_statement`.
+/// A newer one (`at`) replaces the older one of the same device and page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WbPageSig {
+    pub page: u8,
+    /// Raw device fingerprint, 32 bytes.
+    #[serde(with = "serde_bytes")]
+    pub device: Vec<u8>,
+    /// When it was signed (ms), rising per device and page.
+    pub at: u64,
+    /// SHA-256 of each signed stroke, 32 bytes each.
+    #[serde(with = "serde_bytes")]
+    pub hashes: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub sig: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub sig_pq: Vec<u8>,
 }
 
 /// See `MessageContent::WbDigest`.
@@ -1250,6 +1326,19 @@ pub struct IdentityExchange {
     /// under an identity we had not met yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_add_signer: Option<SyncedDevice>,
+    /// `pairing_nonce_proof` of the code this device read from the receiver
+    /// (pairing code, or link code when the first device answers it). Signed.
+    /// A stranger becomes a contact only with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_bytes")]
+    pub pairing_proof: Vec<u8>,
+    /// A device that shows its link code, to the first device that proved it
+    /// read the code: this device's half of the `DeviceAdd` (`consent`,
+    /// `consent_pq`). Checks against this device's keys, so it is not part of
+    /// the packet signature.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_bytes")]
+    pub link_consent: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_bytes")]
+    pub link_consent_pq: Vec<u8>,
     /// This device's current prekey (see `SignedPrekey`). Carries its own
     /// signature; not part of `identity_exchange_signing_input`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1300,11 +1389,11 @@ pub fn prekey_signing_input(device_fingerprint: &str, id: u64, kem_pubkey_x25519
     out
 }
 
-pub fn identity_exchange_signing_input(identity_id: &str, device_fingerprint: &str, device_name: &str) -> Vec<u8> {
-    let mut out = b"p2pmsg-v0.3-identity-exchange".to_vec();
-    for field in [identity_id, device_fingerprint, device_name] {
+pub fn identity_exchange_signing_input(identity_id: &str, device_fingerprint: &str, device_name: &str, pairing_proof: &[u8]) -> Vec<u8> {
+    let mut out = b"p2pmsg-v0.4-identity-exchange".to_vec();
+    for field in [identity_id.as_bytes(), device_fingerprint.as_bytes(), device_name.as_bytes(), pairing_proof] {
         out.extend_from_slice(&(field.len() as u32).to_be_bytes());
-        out.extend_from_slice(field.as_bytes());
+        out.extend_from_slice(field);
     }
     out
 }
@@ -1417,6 +1506,7 @@ mod wire_size_tests {
                 message_number: 0,
                 prev_chain_length: 0,
                 rotation_kyber_ciphertext: None,
+                sent_at_ms: 0,
             },
             ciphertext: raw.clone(),
             signature_classical: Vec::new(),
@@ -1445,12 +1535,13 @@ mod parse_limit_tests {
             device_fingerprint: "f".into(),
             rendezvous_node: "/dns/x.onion/tcp/1".into(),
             known_relays: Vec::new(),
+            pairing_nonce: vec![7; 16],
         }.to_cbor().unwrap()
     }
 
     #[test]
     fn pairing_codes_of_another_version_are_refused() {
-        assert!(QrPacket::from_cbor(&qr(1)).is_ok());
+        assert!(QrPacket::from_cbor(&qr(2)).is_err(), "a code without a nonce");
         assert!(QrPacket::from_cbor(&qr(QrPacket::CURRENT_VERSION)).is_ok());
         assert!(QrPacket::from_cbor(&qr(QrPacket::CURRENT_VERSION + 1)).unwrap_err().contains("güncelleyin"));
         assert!(QrPacket::from_cbor(&qr(0)).is_err());
@@ -1460,10 +1551,13 @@ mod parse_limit_tests {
             rendezvous_node: "/dns/x.onion/tcp/1".into(), known_relays: Vec::new(), nonce: vec![7; 16],
         }.to_cbor().unwrap();
         assert!(DeviceLinkRequest::from_cbor(&link(DeviceLinkRequest::CURRENT_VERSION)).is_ok());
+        // Neither code reads as the other.
+        assert!(DeviceLinkRequest::from_cbor(&qr(DeviceLinkRequest::CURRENT_VERSION)).is_err());
+        assert!(QrPacket::from_cbor(&link(QrPacket::CURRENT_VERSION)).is_err());
         assert!(DeviceLinkRequest::from_cbor(&link(1)).is_err());
         assert!(DeviceLinkRequest::from_cbor(&link(DeviceLinkRequest::CURRENT_VERSION + 1)).is_err());
 
-        let mut huge = QrPacket::from_cbor(&qr(2)).unwrap();
+        let mut huge = QrPacket::from_cbor(&qr(QrPacket::CURRENT_VERSION)).unwrap();
         huge.known_relays = vec!["/dns/relay.onion/tcp/1".repeat(10); 40];
         assert!(QrPacket::from_cbor(&huge.to_cbor().unwrap()).is_err());
     }
@@ -1487,12 +1581,12 @@ mod parse_limit_tests {
         // (more JSON nesting than `group::Group` has).
         let add = DeviceAdd {
             identity_id: "i".into(), new_device_fingerprint: "f".into(), added_by: "a".into(),
-            signature: vec![1], signature_pq: vec![2],
+            signature: vec![1], signature_pq: vec![2], consent: vec![3], consent_pq: vec![4],
         };
         let device = SyncedDevice {
             device_fingerprint: "f".into(), device_name: "d".into(), sign_pubkey_ed25519: vec![1],
             sign_pubkey_mldsa: vec![2], kem_pubkey_x25519: vec![3], kem_pubkey_mlkem: vec![4],
-            is_active: true, last_addr: None,
+            is_active: true, last_addr: None, mailbox_secrets: Vec::new(),
         };
         let grant = MessageContent::DeviceLinkGrant {
             nonce: vec![7; 16],
@@ -1506,6 +1600,7 @@ mod parse_limit_tests {
                 }],
                 groups: vec![serde_json::json!({"founder_chain": [{"signature": [1, 2], "x": {"y": {"z": [[1]]}}}]})],
                 siblings: vec![device],
+                sibling_proofs: Vec::new(),
                 archive_root_key: Some(vec![0; 32]),
                 name_changed_at_ms: 0,
             },

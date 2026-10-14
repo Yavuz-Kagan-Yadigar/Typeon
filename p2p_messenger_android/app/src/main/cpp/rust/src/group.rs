@@ -100,7 +100,8 @@ impl Group {
     pub fn sync_members(&mut self, identity_ids: &[String], now: u64) {
         let founder = self.founder_identity_id.clone();
         let wanted: std::collections::HashSet<&String> = identity_ids.iter().collect();
-        self.members.retain(|m| wanted.contains(&m.identity_id));
+        // The founder stays, as in `apply_change(Remove)`.
+        self.members.retain(|m| wanted.contains(&m.identity_id) || m.identity_id == founder);
         let mut have: std::collections::HashSet<String> = self.members.iter().map(|m| m.identity_id.clone()).collect();
         for id in identity_ids {
             if have.insert(id.clone()) {
@@ -333,6 +334,13 @@ mod tests {
         g.sync_members(&["A".to_string(), "C".to_string()], 3000);
         assert!(!g.is_member("B"));
         assert!(g.is_member("C"));
+    }
+
+    #[test]
+    fn sync_members_keeps_the_founder() {
+        let mut g = Group::new("g1".into(), "Test".into(), "A".into(), 1000);
+        g.sync_members(&["B".to_string()], 2000);
+        assert!(g.is_member("A") && g.is_member("B"));
     }
 
     /// Dış inceleme önerisi: kurucu bütün cihazlarını kaybederse grup

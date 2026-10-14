@@ -42,12 +42,19 @@ fn ok_result(result: Result<Result<(), String>, String>) -> String {
 
 // --- Bölüm 1: Identity/Device ---
 
-pub fn init_database(files_dir: &str) -> bool {
+/// `storage_key`: the 32-byte local storage key, the same one later handed
+/// to `set_skipped_key_encryption_key`. The database is encrypted under it.
+pub fn init_database(files_dir: &str, storage_key: &[u8]) -> bool {
+    let key: [u8; 32] = match storage_key.try_into() {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+    let key = zeroize::Zeroizing::new(key);
     let path = files_dir.to_string();
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
         let mut core = core_lock();
-        core.init_db(&path).map_err(|e| e.to_string())
+        core.init_db(&path, &key).map_err(|e| e.to_string())
     });
     matches!(result, Ok(Ok(_)))
 }
@@ -249,6 +256,11 @@ pub fn build_device_link_request() -> Vec<u8> {
         Ok(Ok(bytes)) => bytes,
         _ => Vec::new(),
     }
+}
+
+/// The compare code of a link QR (see `device_link_code`); empty if invalid.
+pub fn device_link_code(data: &[u8]) -> String {
+    crate::device_link_code(data)
 }
 
 pub fn approve_device_link(data: &[u8]) -> String {
@@ -969,6 +981,16 @@ pub fn set_server_routing(server_id: &str, enabled: bool) -> String {
 pub fn set_server_history(server_id: &str, enabled: bool) -> String {
     let sid = server_id.to_string();
     ok_result(catch_panic(move || core_lock().set_server_history(&sid, enabled)))
+}
+
+/// One chat's older history from the server archive. For a "fetch history
+/// from server" button: nothing else asks the server for a chat's history.
+/// `chat_key`: the peer device fingerprint, or the group id; `before_timestamp`:
+/// the oldest message on screen (ms), 0 = from the newest. "OK" or "Error: ...";
+/// the rows arrive later with a `history_backfilled` event.
+pub fn fetch_server_history(chat_key: &str, is_group: bool, before_timestamp: i64) -> String {
+    let key = chat_key.to_string();
+    ok_result(catch_panic(move || core_lock().fetch_server_history(&key, is_group, before_timestamp.max(0) as u64)))
 }
 
 /// Kök arşiv anahtarını (ARK) yükler. `set_history_key` ile aynı desen ama

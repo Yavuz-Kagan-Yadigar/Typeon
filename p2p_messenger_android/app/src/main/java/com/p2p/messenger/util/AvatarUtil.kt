@@ -101,7 +101,6 @@ object AvatarUtil {
                 putExtra(MediaViewerActivity.EXTRA_URI, uri)
                 putExtra(MediaViewerActivity.EXTRA_MIME_TYPE, "image/jpeg")
             }
-            context.grantUriPermission(context.packageName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             context.startActivity(intent)
         } catch (e: Exception) {
             // Sessizce yok say — profil fotoğrafı önizlemesi zaten görünür,

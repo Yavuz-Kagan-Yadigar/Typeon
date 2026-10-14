@@ -3,8 +3,6 @@ package com.p2p.messenger.ui
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.app.AlertDialog
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -147,6 +145,7 @@ class ChatActivity : AppCompatActivity() {
     /** `requestHistorySync` gönderildi, yanıtı bekleniyor — bkz.
      *  `applyHistorySync` (yanıt gelmezse hiçbir şey olmaz). */
     private var historySyncPending = false
+    private lateinit var fetchHistoryButton: FetchHistoryButton
     /** Sonsuz kaydırmada aynı anda tek bir sayfa isteği olsun diye. */
     private var isLoadingOlderHistory = false
     /** Karşı taraf da boş sayfa döndürdüyse artık hiç sorma. */
@@ -513,8 +512,11 @@ class ChatActivity : AppCompatActivity() {
                     loadOlderHistory()
                 }
                 updateScrollToBottomFabVisibility()
+                fetchHistoryButton.update()
             }
         })
+        fetchHistoryButton = FetchHistoryButton(findViewById(R.id.btnFetchHistory), recycler, false,
+            { peerDeviceFingerprint }, { localMessages.minOfOrNull { it.orderKey } ?: 0L })
 
         val toolbarTitleView = layoutInflater.inflate(R.layout.actionbar_chat_title, null)
         txtToolbarTitle = toolbarTitleView.findViewById(R.id.txtToolbarTitle)
@@ -630,7 +632,12 @@ class ChatActivity : AppCompatActivity() {
         if (!handshakeReady || peerAccountDeleted || pendingShare.isEmpty()) return
         val uris = pendingShare
         pendingShare = emptyList()
-        uris.forEach { onFilePicked(it) }
+        // The chat was picked with one tap in a list that reorders itself.
+        AlertDialog.Builder(this)
+            .setMessage(getString(R.string.confirm_send_shared, uris.size, txtToolbarTitle.text))
+            .setPositiveButton(R.string.btn_send) { _, _ -> uris.forEach { onFilePicked(it) } }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     // ---------------------------------------------------------------
@@ -1185,7 +1192,14 @@ class ChatActivity : AppCompatActivity() {
             "history_sync" -> applyHistorySync(obj)
             "older_history" -> applyOlderHistory(obj)
             // Server or sibling restore covering several chats: reload from the archive.
-            "history_backfilled" -> syncMissedMessages()
+            "history_backfilled" -> {
+                syncMissedMessages()
+                // Rows older than the loaded page: read them from the local archive now.
+                if (fetchHistoryButton.onBackfilled()) {
+                    noMoreOlderHistory = false
+                    loadOlderHistory()
+                }
+            }
             // "sibling_file": başka cihazımdan gönderdiğim ek — aynı balon, benim tarafımda.
             "file_offer", "sibling_file" -> {
                 val autoDownloading = obj.optBoolean("auto_downloading", false)
@@ -1509,7 +1523,11 @@ class ChatActivity : AppCompatActivity() {
      */
     private fun safeSaveFileName(name: String): String {
         val cleaned = name
-            .filter { it != '/' && it != '\\' && it != ':' && !it.isISOControl() }
+            .filter {
+                it != '/' && it != '\\' && it != ':' && !it.isISOControl() &&
+                    // Bidi overrides and zero-width characters disguise the extension.
+                    Character.getType(it) != Character.FORMAT.toInt()
+            }
             .trim()
             .trimStart('.')
             .trim()
@@ -1614,7 +1632,12 @@ class ChatActivity : AppCompatActivity() {
                 try {
                     val uri = FileProvider.getUriForFile(this@ChatActivity, "$packageName.fileprovider", File(path))
                     val intent = Intent(Intent.ACTION_VIEW).apply {
-                        setDataAndType(uri, attachment.mimeType.ifBlank { "*/*" })
+                        // The file's own extension, never the type the sender declared.
+                        setDataAndType(
+                            uri,
+                            android.webkit.MimeTypeMap.getSingleton()
+                                .getMimeTypeFromExtension(File(path).extension.lowercase()) ?: "*/*"
+                        )
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
                     AppLock.beginTrustedExcursion()
@@ -1683,7 +1706,7 @@ class ChatActivity : AppCompatActivity() {
                         if (path.startsWith("Error:")) {
                             Toast.makeText(this@ChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
                         } else {
-                            openAttachmentFile(path, attachment.mimeType)
+                            openAttachmentFile(path)
                         }
                     }
                 }
@@ -1696,7 +1719,11 @@ class ChatActivity : AppCompatActivity() {
 
     /** Foto/video uygulama İÇİNDEKİ görüntüleyiciye (MediaViewerActivity),
      *  diğer türler sistem varsayılanına gider. */
-    private fun openAttachmentFile(path: String, mimeType: String) {
+    private fun openAttachmentFile(path: String) {
+        // The file's own extension picks the viewer and the handler, not the
+        // type the sender declared.
+        val mimeType = android.webkit.MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(File(path).extension.lowercase()) ?: "*/*"
         try {
             val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", File(path))
             if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) {
@@ -1711,11 +1738,7 @@ class ChatActivity : AppCompatActivity() {
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 // The file's own extension picks the handler, not the type
                 // the sender declared.
-                setDataAndType(
-                    uri,
-                    android.webkit.MimeTypeMap.getSingleton()
-                        .getMimeTypeFromExtension(File(path).extension.lowercase()) ?: "*/*"
-                )
+                setDataAndType(uri, mimeType)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             AppLock.beginTrustedExcursion()
@@ -2036,6 +2059,7 @@ class ChatActivity : AppCompatActivity() {
                 // Kişi listesi okunamazsa isimler kısaltılmış kimliğe düşer.
             }
             val rows = mutableListOf<String>()
+            var myRow = -1
             try {
                 val array = JSONArray(raw)
                 for (i in 0 until array.length()) {
@@ -2048,6 +2072,7 @@ class ChatActivity : AppCompatActivity() {
                         names[identityId]?.isNotBlank() == true -> names[identityId]!!
                         else -> identityId.take(8)
                     }
+                    if (entry.optBoolean("is_me", false)) myRow = rows.size
                     rows.add("${entry.optString("emoji")}   $who")
                 }
             } catch (e: Exception) {
@@ -2057,7 +2082,20 @@ class ChatActivity : AppCompatActivity() {
                 if (rows.isEmpty()) return@withContext
                 AlertDialog.Builder(this@ChatActivity)
                     .setTitle(R.string.title_reactions)
-                    .setItems(rows.toTypedArray(), null)
+                    .setItems(rows.toTypedArray()) { _, which ->
+                        // Kendi satırıma dokunmak tepkimi kaldırır (boş emoji).
+                        if (which != myRow) return@setItems
+                        lifecycleScope.launch(Dispatchers.IO) {
+                            val summary = try { P2PLib.reactToMessage(peerDeviceFingerprint, item.messageId, "") } catch (e: Exception) { "Error: ${e.message}" }
+                            withContext(Dispatchers.Main) {
+                                if (summary.startsWith("Error:")) {
+                                    Toast.makeText(this@ChatActivity, summary, Toast.LENGTH_SHORT).show()
+                                } else {
+                                    adapter.applyReactions(item.messageId, summary)
+                                }
+                            }
+                        }
+                    }
                     .setNegativeButton(android.R.string.ok, null)
                     .show()
             }
@@ -2091,8 +2129,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private fun copyMessageText(item: SimpleChatAdapter.Item) {
-        val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("message", item.text))
+        com.p2p.messenger.util.copySensitive(this, "message", item.text)
         Toast.makeText(this, R.string.lbl_copied, Toast.LENGTH_SHORT).show()
     }
 
@@ -2399,21 +2436,8 @@ class ChatActivity : AppCompatActivity() {
                 )
                 for (id in seenMessageIds) adapter.applySeen(id, listOf(viewer))
             }
-            // Spec dışı: önceden SADECE yerel geçmiş boşsa senkron isteniyordu
-            // — artık her sohbet açılışında deneniyor (yerel geçmiş olsun ya
-            // da olmasın), çünkü karşı taraf bu cihazın kaçırdığı DAHA YENİ
-            // mesajlara sahip olabilir (bkz. applyHistorySync'teki
-            // "sadece daha yeni olanları ekle" birleştirme mantığı). Karşı
-            // taraf erişilemezse veya node modu kapalıysa istek sessizce
-            // yanıtsız kalır — mevcut yerel görünüm etkilenmez.
-            historySyncPending = true
-            withContext(Dispatchers.IO) {
-                try {
-                    P2PLib.requestHistorySync(targetPeer, HISTORY_SYNC_LIMIT)
-                } catch (e: Exception) {
-                    withContext(Dispatchers.Main) { historySyncPending = false }
-                }
-            }
+            // No history request to the peer on open: only the "fetch older
+            // history" action goes to the network (P2PLib.fetchServerHistory).
         }
     }
 
@@ -2473,8 +2497,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Sonsuz kaydırma: önce YEREL arşivden bir sayfa, sayfa dolmadıysa
-     * ayrıca ağdan (karşı taraftan VE kendi kardeş cihazlarımızdan) istenir.
+     * Sonsuz kaydırma: YEREL arşivden bir sayfa. Ağa hiçbir şey gitmez.
      */
     private fun loadOlderHistory() {
         if (isLoadingOlderHistory || noMoreOlderHistory || localMessages.isEmpty()) return
@@ -2494,37 +2517,8 @@ class ChatActivity : AppCompatActivity() {
         if (localOlder.isNotEmpty()) {
             prependOlderMessages(localOlder)
         }
-        if (localOlder.size < OLDER_HISTORY_PAGE_SIZE) {
-            // Yerelde bitti — karşı tarafta daha eskisi olabilir. Yanıt
-            // `applyOlderHistory` ile gelir (gelmezse bayrak `bindToIntent`/
-            // bir sonraki denemede sıfırlanır).
-            try {
-                P2PLib.requestOlderMessageHistory(peerDeviceFingerprint, beforeTimestamp, OLDER_HISTORY_PAGE_SIZE)
-            } catch (e: Exception) {
-                isLoadingOlderHistory = false
-            }
-            // Several sources are asked (the peer side and our own devices)
-            // and any of them may never answer: the request ends on a timer,
-            // not on the first reply. Without it the loading flag stayed set
-            // for the whole session, and one empty reply ended the history.
-            olderHistoryEmptyReply = false
-            val request = ++olderHistoryRequest
-            recycler.postDelayed({
-                if (request == olderHistoryRequest && isLoadingOlderHistory) {
-                    isLoadingOlderHistory = false
-                    if (olderHistoryEmptyReply) noMoreOlderHistory = true
-                }
-            }, OLDER_HISTORY_REPLY_WAIT_MS)
-            // Spec dışı, dış inceleme düzeltmesi: karşı taraf (contact) o an
-            // ulaşılamıyorsa yukarıdaki istek boşuna beklerdi — AYNI anda
-            // kendi kardeş cihazlarımıza da sorulur (`message_id` bazlı dedup
-            // sayesinde iki yanıt çakışmaz, ilk gelen boşluğu doldurur).
-            try {
-                P2PLib.requestOlderSiblingHistory(peerDeviceFingerprint, beforeTimestamp, OLDER_HISTORY_PAGE_SIZE)
-            } catch (e: Exception) { /* best-effort ek kaynak, ana akışı etkilemez */ }
-        } else {
-            isLoadingOlderHistory = false
-        }
+        // Local archive only: scrolling sends nothing to the network.
+        isLoadingOlderHistory = false
     }
 
     /** bkz. `loadOlderHistory` — karşı taraftan gelen "older_history" ağ
@@ -2532,14 +2526,12 @@ class ChatActivity : AppCompatActivity() {
      *  mesaj kalmadı) `noMoreOlderHistory` işaretlenir, bu sohbet için
      *  artık tekrar denenmez. */
     private fun applyOlderHistory(obj: JSONObject) {
-        if (!isLoadingOlderHistory) return
+        // Only what the "Fetch older history" button asked for.
+        if (!fetchHistoryButton.acceptsReply()) return
         val array = obj.optJSONArray("messages") ?: return
-        if (array.length() == 0) {
-            // Another source may still answer: see the timer in the request.
-            olderHistoryEmptyReply = true
-            return
-        }
-        isLoadingOlderHistory = false
+        // Empty: another source (peer, own device, server) may still answer.
+        if (array.length() == 0) return
+        fetchHistoryButton.onBackfilled()
         val items = (0 until array.length()).map { itemFromHistoryJson(array.getJSONObject(it)) }
         prependOlderMessages(items)
     }

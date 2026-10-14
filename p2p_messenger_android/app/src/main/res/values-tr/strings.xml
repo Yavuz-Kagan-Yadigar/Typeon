@@ -61,7 +61,7 @@
     <string name="msg_contact_renamed">%1$s adını %2$s olarak değiştirdi</string>
     <string name="msg_server_added">Sunucu eklendi. Bağlanılıyor…</string>
     <string name="msg_join_link_confirm">Bu sunucu eklensin mi?\n\n%1$s</string>
-    <string name="msg_join_link_needs_identity">Önce hesabınızı oluşturun; kod panoya kopyalandı, Ayarlar → Sunucular altına yapıştırabilirsiniz.</string>
+    <string name="msg_join_link_needs_identity">Önce hesabınızı oluşturun, sonra bağlantıyı yeniden açın.</string>
     <string name="msg_server_removed">Sunucu kaldırıldı</string>
     <string name="lbl_server_route">Mesajları bu sunucu üzerinden gönder</string>
     <string name="lbl_server_history">Geçmişi bu sunucuda sakla</string>
@@ -317,6 +317,7 @@
     <string name="link_device_waiting">Diğer cihazınızın taramasını bekliyor…</string>
     <string name="link_device_network_not_ready">Ağ henüz hazır değil. Çevrimiçi olduğunuzdan emin olup tekrar deneyin.</string>
     <string name="link_device_success">Bu cihaz artık hesabınıza bağlı.</string>
+    <string name="link_device_confirm">Bu cihaz hesabınıza bağlansın mı? Kişilerinize, gruplarınıza ve geçmişinize erişir.\n\n%1$s\n%2$s</string>
     <string name="link_device_approved">Yeni cihaz hesabınıza eklendi.</string>
     <string name="error_group_update_rejected">Kurucudan gelen bir grup güncellemesi reddedildi, uygulanmadı.</string>
     <string name="action_block">Engelle</string>
@@ -435,4 +436,13 @@
     <string name="title_pick_text_color">Bir metin rengi seçin</string>
     <string name="call_pip">PiP</string>
     <string name="msg_primary_device_only_delete">Hesabı yalnızca ana cihaz silebilir.</string>
+    <string name="msg_open_link_warning">%1$s\n\nBu bağlantı tarayıcınızda, Tor dışında açılır. Site gerçek IP adresinizi görür.</string>
+    <string name="confirm_send_shared">%1$d dosya %2$s sohbetine gönderilsin mi?</string>
+    <string name="error_app_lock_short">Şifre en az %1$d karakter olmalı.</string>
+    <string name="error_recovery_password_short">Kurtarma parolası en az %1$d karakter olmalı.</string>
+    <string name="action_fetch_older_history">Eski geçmişi getir</string>
+    <string name="msg_fetch_history_requested">İstendi…</string>
+    <string name="link_device_code_shown">Karşılaştırma kodu: %1$s\nOnaylamadan önce diğer cihazınız aynı kodu gösterir.</string>
+    <string name="link_device_code_check">Karşılaştırma kodu: %1$s\nYalnızca yeni cihaz aynı kodu gösteriyorsa onaylayın.</string>
+    <string name="notif_new_message">Yeni mesaj</string>
 </resources>

@@ -53,7 +53,9 @@ pub const SERVER_PROTOCOL: &str = "/typeon/server/1.0.0";
 /// the client while it is in a call. Frames are `[u16 mailbox len][mailbox]
 /// [u32 len][data]` (core `call::encode_frame`). Client -> server: "push
 /// `data` to whoever is connected and listening on `mailbox`" (the target's
-/// `p2p_msg_<fp>` box). Server -> client: the same frame with an empty
+/// `server_seal::relay_mailbox_id`, registered for the call). The sender is
+/// not checked against the readers of `mailbox`: the id is its capability,
+/// and the receiver registers it, not the sender. Server -> client: the same frame with an empty
 /// mailbox. Nothing is stored: a target that is not connected right now
 /// simply misses the frame, which is the right thing for live audio/video.
 /// `data` is already end-to-end encrypted with a per-call key the server
@@ -166,9 +168,14 @@ pub enum ServerRequest {
     /// eder ve `Fetch`'e servis eder, (b) yeni bir şey düştüğünde `Notify`
     /// ile İTEBİLİR. `drop`, rotasyonda artık dinlenmeyen bir nesil eski
     /// topic'i geri alır.
+    ///
+    /// An id this enrollment does not read yet needs a `MailboxProof` in
+    /// `proofs`. Without one the answer is `ProofNeeded` with those ids (the
+    /// other ids are registered); the client sends them again with proofs.
     Register {
         add: Vec<MailboxId>,
         drop: Vec<MailboxId>,
+        proofs: Vec<MailboxProof>,
     },
 
     /// Mühürlü bir zarfı kutuya bırak.
@@ -341,9 +348,34 @@ pub enum ServerResponse {
     Batch { items: Vec<MailItem>, more: bool },
     ArchiveProbed { present: Vec<BucketStat> },
     ArchiveBatch { records: Vec<ArchiveRecord>, more: bool },
+    /// `Register`: these ids are not registered, the others are. They came
+    /// without a `MailboxProof`, or were refused in a request that had such ids.
+    ProofNeeded(Vec<MailboxId>),
     Ok,
     Err(ServerErrorCode),
 }
+
+/// Proof that the sender of a `Register` owns `mailbox`: a hybrid signature
+/// over `register_signing_input` by the mailbox key. The server binds a
+/// mailbox to the first key that registers it and takes no other key for it
+/// while it has a reader. The readers derive the key from a secret only they
+/// hold (`server_seal::mailbox_proof_seeds`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailboxProof {
+    pub mailbox: MailboxId,
+    #[serde(with = "serde_bytes")]
+    pub pk: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub pk_pq: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub sig: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub sig_pq: Vec<u8>,
+}
+
+/// Proofs in one `Register`: each is about 7.3 KB and the request cap is
+/// 1 MiB (`MAX_DEPOSIT_BYTES` note).
+pub const MAX_REGISTER_PROOFS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServerErrorCode {
@@ -419,7 +451,7 @@ pub struct MailItem {
     /// ve tüketilmiş ratchet anahtarının çözülememesi bunu yutar.
     pub seq: u64,
     pub deposited_at_ms: u64,
-    /// `server_seal::seal_envelope`/`frame_unsealed` çıktısı — sunucu için opak.
+    /// `server_seal::seal_envelope`/`seal_first_contact` çıktısı — sunucu için opak.
     #[serde(with = "serde_bytes")]
     pub sealed: Vec<u8>,
 }
@@ -603,9 +635,24 @@ pub fn rebind_signing_input(
     )
 }
 
+/// The bytes a `MailboxProof` signs. The enrollment and the server are in
+/// it: a proof read off the wire registers nothing for another enrollment
+/// or at another server.
+pub fn register_signing_input(mailbox: &str, enrollment_id: &[u8], server_peer_id: &str) -> Vec<u8> {
+    signing_input(b"p2pmsg-v0.5-server-register", &[mailbox.as_bytes(), enrollment_id, server_peer_id.as_bytes()])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn register_proof_is_bound_to_mailbox_enrollment_and_server() {
+        let base = register_signing_input("mb_a", b"eid", "peer");
+        assert_ne!(base, register_signing_input("mb_b", b"eid", "peer"));
+        assert_ne!(base, register_signing_input("mb_a", b"eid2", "peer"));
+        assert_ne!(base, register_signing_input("mb_a", b"eid", "other"));
+    }
 
     #[test]
     fn invite_carries_every_address() {
@@ -687,58 +734,21 @@ mod tests {
     }
 }
 
-/// Bir multiaddr ÖZEL bir ağ adresi mi?
-///
-/// Tek tanım, iki taraf: sunucu bunu davet kodundan eleme için, istemci ise
-/// kaydettiği/aradığı sunucu adreslerini elemek için kullanır. İki kopya
-/// olsaydı biri düzeltilip diğeri unutulurdu — nitekim tam olarak bu oldu:
-/// sunucu tarafı elemeye başladıktan sonra da istemcilerde ESKİ davetlerden
-/// kalma `192.168.x.x` adresleri duruyordu ve libp2p bütün adresleri aynı
-/// anda deneyip LAN'ı kazandırıyordu. Ölçüm o yüzden "Tor" değil LAN
-/// ölçüyordu (~1.75 MB/s), oysa aynı yerel ağdaki iki kişinin yazışması
-/// gerçekçi bir senaryo değil.
-pub fn is_private_multiaddr(addr: &str) -> bool {
-    use std::net::{Ipv4Addr, Ipv6Addr};
-    // 100.64.0.0/10 (CGNAT, RFC 6598) is not `is_private()`.
-    fn private_v4(v4: Ipv4Addr) -> bool {
-        let o = v4.octets();
-        v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
-            || (o[0] == 100 && (o[1] & 0xc0) == 64)
+/// Is `addr` an onion address? A server address is nothing else: any other
+/// kind (an IP, or a DNS name that can resolve to a private address) is
+/// refused in invites and server records. The first component decides.
+pub fn is_onion_server_addr(addr: &str) -> bool {
+    let mut parts = addr.split('/').skip(1);
+    match (parts.next(), parts.next()) {
+        (Some("dns" | "dns4" | "dns6"), Some(host)) => host.len() > ".onion".len() && host.ends_with(".onion"),
+        (Some("onion3"), Some(_)) => true,
+        _ => false,
     }
-    for part in addr.split('/') {
-        if let Ok(v4) = part.parse::<Ipv4Addr>() {
-            if private_v4(v4) {
-                return true;
-            }
-        }
-        if let Ok(v6) = part.parse::<Ipv6Addr>() {
-            // fc00::/7 (unique-local) ve fe80::/10 (link-local) — `std`'de
-            // kararlı bir yardımcı yok, önekten bakıyoruz. `::ffff:a.b.c.d`
-            // is the IPv4 address in another spelling.
-            let o = v6.octets();
-            if v6.is_loopback()
-                || v6.is_unspecified()
-                || (o[0] & 0xfe) == 0xfc
-                || (o[0] == 0xfe && (o[1] & 0xc0) == 0x80)
-                || v6.to_ipv4_mapped().is_some_and(private_v4)
-            {
-                return true;
-            }
-        }
-        // `/dns4/localhost/...`, mDNS names.
-        // A trailing dot is the same name.
-        let name = part.to_ascii_lowercase();
-        let name = name.trim_end_matches('.');
-        if name == "localhost" || name.ends_with(".localhost") || name.ends_with(".local") {
-            return true;
-        }
-    }
-    false
 }
 
-/// Bir sunucu için SAKLANMAYA/aranmaya değer adresler — özel ağ adresleri
-/// elenmiş hâli (bkz. `is_private_multiaddr`). Hepsi elendiyse liste boş
-/// döner; çağıran bunu "bu davet kullanılamaz" diye okumalı.
+/// The addresses of a server worth storing and dialing: the onion ones
+/// (see `is_onion_server_addr`). An empty result means "this invite cannot
+/// be used".
 pub fn public_server_addrs<I, S>(addrs: I) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
@@ -747,7 +757,7 @@ where
     addrs
         .into_iter()
         .map(|a| a.as_ref().trim().to_string())
-        .filter(|a| !a.is_empty() && !is_private_multiaddr(a))
+        .filter(|a| is_onion_server_addr(a))
         .collect()
 }
 
@@ -767,36 +777,29 @@ where
 pub const MAX_BLOB_CHUNK_BYTES: usize = 768 * 1024;
 
 #[cfg(test)]
-mod private_addr_tests {
-    use super::is_private_multiaddr;
+mod onion_addr_tests {
+    use super::{is_onion_server_addr, public_server_addrs};
 
     #[test]
-    fn private_addresses_in_every_spelling() {
-        for private in [
-            "/ip4/192.168.1.5/tcp/42612/p2p/12D3KooW",
-            "/ip4/100.64.0.7/tcp/42612/p2p/12D3KooW",
-            "/ip4/100.127.255.254/tcp/1",
-            "/ip6/::ffff:192.168.1.5/tcp/42612/p2p/12D3KooW",
-            "/ip6/::ffff:127.0.0.1/tcp/1",
-            "/ip6/fe80::1/tcp/1",
-            "/ip6/fd00::1/tcp/1",
-            "/dns4/localhost/tcp/1",
-            "/dns/LOCALHOST/tcp/1",
-            "/dns4/printer.local/tcp/1",
-            "/dns4/10.0.0.5/tcp/1",
-        ] {
-            assert!(is_private_multiaddr(private), "{private}");
+    fn a_server_address_is_onion_or_refused() {
+        for onion in ["/dns/abcdef.onion/tcp/42612/p2p/12D3KooW", "/dns4/abcdef.onion/tcp/1", "/onion3/abcdef:42612/p2p/12D3KooW"] {
+            assert!(is_onion_server_addr(onion), "{onion}");
         }
-        for public in [
-            "/dns/abcdef.onion/tcp/42612/p2p/12D3KooW",
+        for other in [
             "/ip4/203.0.113.7/tcp/42612/p2p/12D3KooW",
-            "/ip4/100.63.255.255/tcp/1",
-            "/ip4/100.128.0.1/tcp/1",
-            "/ip6/::ffff:203.0.113.7/tcp/1",
+            "/ip4/192.168.1.5/tcp/42612/p2p/12D3KooW",
             "/ip6/2001:db8::1/tcp/1",
-            "/dns4/localhost.example.org/tcp/1",
+            "/dns4/example.org/tcp/1",
+            "/dns4/localhost/tcp/1",
+            "/dns/.onion/tcp/1",
+            "/dns/abcdef.onion./tcp/1",
+            "/ip4/10.0.0.1/tcp/1/dns/abcdef.onion",
+            "abcdef.onion",
+            "",
         ] {
-            assert!(!is_private_multiaddr(public), "{public}");
+            assert!(!is_onion_server_addr(other), "{other}");
         }
+        let kept = public_server_addrs(["/dns4/example.org/tcp/1", " /dns/abcdef.onion/tcp/1 "]);
+        assert_eq!(kept, vec!["/dns/abcdef.onion/tcp/1".to_string()]);
     }
 }

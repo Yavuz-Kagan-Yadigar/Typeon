@@ -41,27 +41,12 @@ object SkippedKeyManager {
      *  bağımsız) çağrılmalıdır. */
     @Synchronized
     fun ensureLoaded(context: Context) {
-        val file = keyFile(context)
-
-        val dataKey: ByteArray = if (file.exists()) {
-            val encrypted = try {
-                file.readBytes()
-            } catch (e: Exception) {
-                return
-            }
-            try {
-                KeystoreCrypto.decrypt(encrypted, KeystoreCrypto.ALIAS_SKIPPED_KEYS)
-            } catch (e: Exception) {
-                // bkz. TAG notu (#04) — ASLA yeniden uretme.
-                android.util.Log.e(TAG, "Anahtar cozulemedi, YENIDEN URETILMIYOR", e)
-                KeystoreCrypto.reportKeyFailure(context)
-                return
-            }
-        } else {
-            generateAndPersist(context)
+        val existed = keyFile(context).exists()
+        val dataKey = loadOrCreate(context.filesDir)
+        if (dataKey == null) {
+            if (existed) KeystoreCrypto.reportKeyFailure(context)
             return
         }
-
         try {
             P2PLib.setSkippedKeyEncryptionKey(dataKey)
         } finally {
@@ -69,19 +54,42 @@ object SkippedKeyManager {
         }
     }
 
-    private fun generateAndPersist(context: Context) {
+    /** The database is encrypted under this key, so it is needed before the
+     *  database opens. Only through [P2PLib.initDatabase]. Same lock as
+     *  [ensureLoaded]: two first starts must not make two keys. */
+    @Synchronized
+    fun openDatabase(filesDir: File): Boolean {
+        val dataKey = loadOrCreate(filesDir) ?: return false
+        try {
+            return P2PLib.initDatabaseKeyed(filesDir.absolutePath, dataKey)
+        } finally {
+            dataKey.fill(0)
+        }
+    }
+
+    /** `null`: the key file could not be read or decrypted (it is NOT made
+     *  again then, see #04 above), or a first key could not be stored. */
+    private fun loadOrCreate(filesDir: File): ByteArray? {
+        val file = File(filesDir, KEY_FILENAME)
+        if (file.exists()) {
+            return try {
+                KeystoreCrypto.decrypt(file.readBytes(), KeystoreCrypto.ALIAS_SKIPPED_KEYS)
+            } catch (e: Exception) {
+                android.util.Log.e(TAG, "Anahtar cozulemedi, YENIDEN URETILMIYOR", e)
+                null
+            }
+        }
         val dataKey = ByteArray(32)
         SecureRandom().nextBytes(dataKey)
-        try {
-            val encrypted = KeystoreCrypto.encrypt(dataKey, KeystoreCrypto.ALIAS_SKIPPED_KEYS)
-            keyFile(context).writeBytesAtomic(encrypted)
-            P2PLib.setSkippedKeyEncryptionKey(dataKey)
+        return try {
+            file.writeBytesAtomic(KeystoreCrypto.encrypt(dataKey, KeystoreCrypto.ALIAS_SKIPPED_KEYS))
+            dataKey
         } catch (e: Exception) {
             // Keystore or disk failure: this runs on unguarded start-up
             // paths and took the process down before the network started.
             android.util.Log.e(TAG, "Anahtar uretilemedi", e)
-        } finally {
             dataKey.fill(0)
+            null
         }
     }
 }
