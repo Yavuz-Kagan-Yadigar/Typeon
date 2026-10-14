@@ -5059,14 +5059,18 @@ impl P2PCore {
     /// either direction. A stranger holds none of them.
     /// ponytail: two range scans of `app_meta` per server sweep and fetch;
     /// keep the list in memory if that shows.
+    ///
+    /// Only for devices still waiting for a first handshake: one of the
+    /// identity's devices has no session, or the code is less than 7 days
+    /// old. The server refuses a whole `Register`/`Fetch` above 512 ids.
     pub(crate) fn first_contact_secrets(&self) -> Vec<Vec<u8>> {
         let mut out: Vec<Vec<u8>> = self.pairing_nonces().into_iter().map(|(n, _)| n).collect();
         out.push(self.link_request_nonce.clone());
         out.push(self.pending_link_nonce.clone());
         if let Some(conn) = &self.db {
-            if let Ok(mut st) = conn.prepare("SELECT v FROM app_meta WHERE (k >= 'pn:' AND k < 'pn;') OR (k >= 'pk:' AND k < 'pk;')") {
-                if let Ok(rows) = st.query_map([], |r| r.get::<_, String>(0)) {
-                    out.extend(rows.flatten().filter_map(|v| hex::decode(v).ok()));
+            if let Ok(mut st) = conn.prepare("SELECT k, v FROM app_meta WHERE (k >= 'pn:' AND k < 'pn;') OR (k >= 'pk:' AND k < 'pk;')") {
+                if let Ok(rows) = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+                    out.extend(rows.flatten().filter(|(k, _)| self.awaits_first_contact(&k[3..])).filter_map(|(_, v)| hex::decode(v).ok()));
                 }
             }
         }
@@ -5074,6 +5078,30 @@ impl P2PCore {
         out.sort();
         out.dedup();
         out
+    }
+
+    /// Stores a first-contact secret of `fp` (`pn`/`pk`, bkz.
+    /// `first_contact_secrets`) with the time it was made.
+    fn put_pairing_secret(&self, kind: &str, fp: &str, nonce: &[u8]) {
+        self.meta_put(&format!("{}:{}", kind, fp), &hex::encode(nonce));
+        self.meta_put(&format!("pt:{}", fp), &current_time_ms().to_string());
+    }
+
+    /// `first_contact_secrets` keeps the mailbox of `fp`: paired in the last
+    /// 7 days, or a device of its identity has no session yet.
+    fn awaits_first_contact(&self, fp: &str) -> bool {
+        const RECENT_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+        let paired_at = self.meta_str(&format!("pt:{}", fp)).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        if current_time_ms().saturating_sub(paired_at) < RECENT_MS {
+            return true;
+        }
+        let own_fp = self.own_mailbox_topic_fp.as_deref();
+        let Some(identity) = self.known_remote_devices.get(fp).or_else(|| self.own_devices.get(fp)).map(|d| &d.identity_id) else {
+            return true;
+        };
+        self.known_remote_devices.values().chain(self.own_devices.values())
+            .filter(|d| d.is_active && &d.identity_id == identity && Some(d.device_fingerprint.as_str()) != own_fp)
+            .any(|d| !self.ratchets.contains_key(&d.device_fingerprint))
     }
 
     /// The secret of `target_fp`'s first-contact mailbox that this device
@@ -5199,7 +5227,7 @@ impl P2PCore {
         // Goes into each IdentityExchange to this device (`pairing_proof`).
         // ponytail: the row stays after the nonce expired (the proof is then
         // ignored), and is replaced by the next code of the same device.
-        self.meta_put(&format!("pn:{}", device_fingerprint), &hex::encode(nonce));
+        self.put_pairing_secret("pn", &device_fingerprint, nonce);
         // Also the secret of our first-contact mailbox for this device
         // (bkz. `first_contact_secrets`): registered before its reply comes.
         self.server_sweep_at = 0;
@@ -5578,7 +5606,7 @@ impl P2PCore {
                 .find(|n| packet::pairing_nonce_proof(n, &fp) == exchange.pairing_proof)
         };
         if let Some(nonce) = proved_nonce {
-            self.meta_put(&format!("pk:{}", fp), &hex::encode(nonce));
+            self.put_pairing_secret("pk", &fp, &nonce);
         }
         // The revokes this contact's identity signed (bkz.
         // `IdentityExchange.revokes`). The packet is not authenticated, each
@@ -6350,7 +6378,7 @@ impl P2PCore {
         self.meta_put("pending_link_nonce", &hex::encode(&req.nonce));
         // Kept after the link: bkz. `first_contact_secrets`.
         if req.nonce.len() == 16 {
-            self.meta_put(&format!("pn:{}", new_fp), &hex::encode(&req.nonce));
+            self.put_pairing_secret("pn", &new_fp, &req.nonce);
             self.server_sweep_at = 0;
         }
         // Fresh: after a failed link or an unlink, the identical packet of the
@@ -8159,7 +8187,7 @@ impl P2PCore {
                     "DELETE FROM remote_devices WHERE device_fingerprint = ?1",
                     // Its first-contact mailbox secrets: the mailbox made
                     // only from them is no longer registered.
-                    "DELETE FROM app_meta WHERE k = 'pn:' || ?1 OR k = 'pk:' || ?1",
+                    "DELETE FROM app_meta WHERE k = 'pn:' || ?1 OR k = 'pk:' || ?1 OR k = 'pt:' || ?1",
                 ] {
                     tx.execute(sql, params![fp]).map_err(|e| e.to_string())?;
                 }
