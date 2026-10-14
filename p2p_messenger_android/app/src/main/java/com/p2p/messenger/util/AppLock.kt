@@ -224,14 +224,31 @@ object AppLock {
         excursionValidUntil = SystemClock.elapsedRealtime() + TRUSTED_EXCURSION_WINDOW_MS
     }
 
+    /** Our screen was covered within the window (a chooser or a dialog of
+     *  another app): the excursion holds until our screen comes back, however
+     *  long the user takes to pick an app there. */
+    @Volatile private var excursionCovered = false
+
+    fun excursionPaused() {
+        val validUntil = excursionValidUntil
+        if (validUntil != 0L && SystemClock.elapsedRealtime() < validUntil) excursionCovered = true
+    }
+
+    /** Our screen is back without the app having left: the excursion ended. */
+    fun excursionResumed() {
+        excursionCovered = false
+    }
+
     /** bkz. P2PApplication.onActivityStopped — uygulama tamamen arka plana
      *  düştüğünde çağrılır. */
     fun lock() {
         val validUntil = excursionValidUntil
+        val covered = excursionCovered
         excursionValidUntil = 0L
+        excursionCovered = false
         // `elapsedRealtime`: duvar saati DEĞİL — kullanıcı/şebeke saati
         // değiştirse bile pencere kayamaz.
-        if (validUntil != 0L && SystemClock.elapsedRealtime() < validUntil) {
+        if (covered || (validUntil != 0L && SystemClock.elapsedRealtime() < validUntil)) {
             excursionLeftAt = SystemClock.elapsedRealtime()
             return
         }

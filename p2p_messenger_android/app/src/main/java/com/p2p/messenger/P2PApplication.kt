@@ -261,6 +261,7 @@ class P2PApplication : Application() {
             }
 
             override fun onActivityResumed(activity: Activity) {
+                AppLock.excursionResumed()
                 // `AppLock.guard` hides the content under the prompt and shows
                 // it again in `onStart`; a screen that was never stopped under
                 // the prompt gets only this call.
@@ -268,7 +269,7 @@ class P2PApplication : Application() {
                     activity.findViewById<android.view.View>(android.R.id.content)?.visibility = android.view.View.VISIBLE
                 }
             }
-            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) = AppLock.excursionPaused()
 
             override fun onActivityStopped(activity: Activity) {
                 startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
