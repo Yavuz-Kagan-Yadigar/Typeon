@@ -394,7 +394,11 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
     // A JPEG XL ("hi-res" image) is handed out as PNG: no viewer of ours
     // reads JPEG XL. Lossless both ways.
     let jxl = decrypted_path.extension().map_or(false, |e| e.eq_ignore_ascii_case("jxl"));
-    let plain_path = if jxl { decrypted_path.with_extension("png") } else { decrypted_path };
+    let plain_path = if jxl { decrypted_path.with_extension("png") } else { decrypted_path.clone() };
+    // A JPEG XL that would not convert is kept as it came.
+    if jxl && !plain_path.exists() && decrypted_path.exists() {
+        return Ok(decrypted_path.to_string_lossy().to_string());
+    }
     if !plain_path.exists() {
         info!(
             "get_attachment_plaintext_path: {} önbellekte yok, {} adresinden çözülüyor",
@@ -415,12 +419,13 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
             let mut png_tmp = tmp_path.clone().into_os_string();
             png_tmp.push(".png");
             let png_tmp = std::path::PathBuf::from(png_tmp);
-            let converted = attachments::jxl_to_png(&tmp_path, &png_tmp);
-            let _ = std::fs::remove_file(&tmp_path);
-            if let Err(e) = converted {
+            if let Err(e) = attachments::jxl_to_png(&tmp_path, &png_tmp) {
+                warn!("JPEG XL not converted, kept as it is ({}): {}", file_id, e);
                 let _ = std::fs::remove_file(&png_tmp);
-                return Err(e);
+                std::fs::rename(&tmp_path, &decrypted_path).map_err(|e| e.to_string())?;
+                return Ok(decrypted_path.to_string_lossy().to_string());
             }
+            let _ = std::fs::remove_file(&tmp_path);
             if let Err(e) = std::fs::rename(&png_tmp, &plain_path) {
                 let _ = std::fs::remove_file(&png_tmp);
                 return Err(e.to_string());

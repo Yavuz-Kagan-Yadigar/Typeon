@@ -157,8 +157,14 @@ fn jpeg_metadata_ranges(file: &mut File) -> (Vec<(u64, u64)>, Option<u8>) {
                 return None;
             }
             let marker = head[1];
-            // Start of scan: the header is over, the rest is image data.
+            // Start of scan: the header is over, the rest is image data up to
+            // the end-of-image marker. What follows it (a motion-photo video,
+            // a second "multi-picture" JPEG with its own EXIF) is dropped.
             if marker == 0xDA {
+                let eoi = jpeg_image_end(file, at)?;
+                if eoi < len {
+                    ranges.push((eoi, len));
+                }
                 return Some((ranges, orientation));
             }
             // Only segments that carry a length are expected before the scan.
@@ -170,6 +176,14 @@ fn jpeg_metadata_ranges(file: &mut File) -> (Vec<(u64, u64)>, Option<u8>) {
             }
             if marker == 0xE1 || marker == 0xED {
                 ranges.push((at, end));
+            }
+            // The multi-picture index points into the dropped trailer.
+            if marker == 0xE2 && size >= 6 {
+                let mut tag = [0u8; 4];
+                if read_full(file, &mut tag).ok()? == 4 && &tag == b"MPF\0" {
+                    ranges.push((at, end));
+                }
+                file.seek(SeekFrom::Start(at + 4)).ok()?;
             }
             if marker == 0xE1 && orientation.is_none() {
                 let mut body = vec![0u8; size as usize - 2];
@@ -189,6 +203,96 @@ fn jpeg_metadata_ranges(file: &mut File) -> (Vec<(u64, u64)>, Option<u8>) {
         return (Vec::new(), None);
     }
     found
+}
+
+/// The offset just past the end-of-image marker, scanning from the start-of-
+/// scan segment at `sos`: entropy-coded data, and between progressive scans
+/// further marker segments with a length.
+fn jpeg_image_end(file: &mut File, sos: u64) -> Option<u64> {
+    let mut reader = std::io::BufReader::with_capacity(1 << 16, &mut *file);
+    reader.seek(SeekFrom::Start(sos + 1)).ok()?;
+    let mut at = sos + 1;
+    let mut byte = [0u8; 1];
+    let mut next = |reader: &mut std::io::BufReader<&mut File>, at: &mut u64| -> Option<u8> {
+        reader.read_exact(&mut byte).ok()?;
+        *at += 1;
+        Some(byte[0])
+    };
+    // At a marker (0xFF already read): its code, then the segment if it has one.
+    let mut marker_segment = true;
+    loop {
+        if marker_segment {
+            let code = next(&mut reader, &mut at)?;
+            let mut len = [0u8; 2];
+            len[0] = next(&mut reader, &mut at)?;
+            len[1] = next(&mut reader, &mut at)?;
+            let size = u16::from_be_bytes(len) as i64;
+            if size < 2 || code == 0xD9 {
+                return None;
+            }
+            reader.seek_relative(size - 2).ok()?;
+            at += size as u64 - 2;
+            marker_segment = false;
+        }
+        if next(&mut reader, &mut at)? != 0xFF {
+            continue;
+        }
+        let mut code = next(&mut reader, &mut at)?;
+        while code == 0xFF {
+            code = next(&mut reader, &mut at)?;
+        }
+        match code {
+            0x00 | 0xD0..=0xD7 => {}
+            0xD9 => return Some(at),
+            _ => {
+                // Back over the code: the segment branch reads it again.
+                reader.seek_relative(-2).ok()?;
+                at -= 2;
+                next(&mut reader, &mut at)?;
+                marker_segment = true;
+            }
+        }
+    }
+}
+
+/// PNG chunks that carry text, time or EXIF (`eXIf` can hold the GPS
+/// position), and anything after `IEND`. Image chunks and the colour profile
+/// stay. Empty for a file that is not a PNG, and on any doubt.
+fn png_metadata_ranges(file: &mut File) -> Vec<(u64, u64)> {
+    let scan = |file: &mut File| -> Option<Vec<(u64, u64)>> {
+        let len = file.metadata().ok()?.len();
+        let mut head = [0u8; 8];
+        file.seek(SeekFrom::Start(0)).ok()?;
+        if read_full(file, &mut head).ok()? != 8 || head != *b"\x89PNG\r\n\x1a\n" {
+            return None;
+        }
+        let mut ranges = Vec::new();
+        let mut at = 8u64;
+        // ponytail: 1 << 16 chunks; real files have tens (APNG: frames x2).
+        for _ in 0..1 << 16 {
+            file.seek(SeekFrom::Start(at)).ok()?;
+            if read_full(file, &mut head).ok()? != 8 {
+                return None;
+            }
+            let end = at.checked_add(12 + u32::from_be_bytes(head[..4].try_into().ok()?) as u64)?;
+            if end > len {
+                return None;
+            }
+            match &head[4..8] {
+                b"eXIf" | b"tEXt" | b"iTXt" | b"zTXt" | b"tIME" => ranges.push((at, end)),
+                b"IEND" => {
+                    if end < len {
+                        ranges.push((end, len));
+                    }
+                    return Some(ranges);
+                }
+                _ => {}
+            }
+            at = end;
+        }
+        None
+    };
+    scan(file).unwrap_or_default()
 }
 
 /// The orientation (2..=8, not the upright 1) in the body of an EXIF APP1
@@ -264,7 +368,11 @@ pub fn encrypt_file_to_disk_with(
     let mut src = File::open(source_path).map_err(|e| e.to_string())?;
     // A photo goes out without its EXIF/XMP: size and hash below are those
     // of the bytes that are sent.
-    let (ranges, orientation) = jpeg_metadata_ranges(&mut src);
+    let (mut ranges, orientation) = jpeg_metadata_ranges(&mut src);
+    if ranges.is_empty() {
+        ranges = png_metadata_ranges(&mut src);
+        src.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    }
     // The one tag that goes back in, right after the start-of-image marker.
     let mut head = Vec::new();
     if let Some(orientation) = orientation {
@@ -435,7 +543,7 @@ pub fn write_verified_chunk_at_with(dest_enc_path: &Path, chunk_index: u32, ciph
 
 /// Largest image the JPEG XL paths take, in pixels: 64 MP is 256 MB as RGBA,
 /// and a received file names its own size.
-pub const MAX_IMAGE_PIXELS: u64 = 64_000_000;
+pub const MAX_IMAGE_PIXELS: u64 = 24_000_000;
 
 /// A "hi-res" image attachment: lossless JPEG XL of 8-bit RGBA pixels, row
 /// after row, not premultiplied. With `has_alpha` false the alpha bytes are
@@ -468,11 +576,13 @@ pub fn encode_jxl_lossless(rgba: &mut [u8], width: u32, height: u32, has_alpha: 
 /// size is checked before the frame is rendered, and the decoder's
 /// allocations are capped.
 pub fn jxl_to_png(src: &Path, out: &Path) -> Result<(), String> {
-    use jxl_oxide::{AllocTracker, JxlImage, PixelFormat};
-    let image = JxlImage::builder()
-        .alloc_tracker(AllocTracker::with_limit(1 << 30))
+    use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, PixelFormat, RenderingIntent};
+    let mut image = JxlImage::builder()
+        .alloc_tracker(AllocTracker::with_limit(512 << 20))
         .open(src)
         .map_err(|e| format!("JPEG XL: {e}"))?;
+    // The PNG carries no colour profile: render in sRGB.
+    image.request_color_encoding(EnumColourEncoding::srgb(RenderingIntent::Relative));
     if image.width() as u64 * image.height() as u64 > MAX_IMAGE_PIXELS {
         return Err("Image too large".to_string());
     }
@@ -492,19 +602,62 @@ pub fn jxl_to_png(src: &Path, out: &Path) -> Result<(), String> {
     if stream.channels() as usize != color.samples() {
         return Err("JPEG XL: unexpected channel count".to_string());
     }
-    let mut pixels = vec![0u8; width as usize * height as usize * color.samples()];
-    stream.write_to_buffer(&mut pixels);
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(File::create(out).map_err(|e| e.to_string())?), width, height);
     encoder.set_color(color);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-    writer.write_image_data(&pixels).map_err(|e| e.to_string())?;
-    writer.finish().map_err(|e| e.to_string())
+    // Row by row: no second full-size buffer next to the rendered frame.
+    let mut rows = writer.stream_writer().map_err(|e| e.to_string())?;
+    let mut row = vec![0u8; width as usize * color.samples()];
+    for _ in 0..height {
+        let mut filled = 0;
+        while filled < row.len() {
+            let n = stream.write_to_buffer(&mut row[filled..]);
+            if n == 0 {
+                return Err("JPEG XL: frame ended early".to_string());
+            }
+            filled += n;
+        }
+        rows.write_all(&row).map_err(|e| e.to_string())?;
+    }
+    rows.finish().map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jpeg_trailer_and_png_text_are_dropped() {
+        let path = std::env::temp_dir().join(format!("typeon-meta-{}", std::process::id()));
+        // SOI, APP0, SOS, entropy data with a stuffed byte and a restart
+        // marker, a DHT between scans, a second SOS, EOI, then a trailer.
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 1, 2, 0xFF, 0xDA, 0, 3, 9, 0x11, 0xFF, 0x00, 0x22, 0xFF, 0xD3, 0x33];
+        jpeg.extend_from_slice(&[0xFF, 0xC4, 0, 3, 7, 0xFF, 0xDA, 0, 3, 9, 0x44, 0xFF, 0xD9]);
+        let eoi = jpeg.len() as u64;
+        jpeg.extend_from_slice(b"MOTIONPHOTO");
+        std::fs::write(&path, &jpeg).unwrap();
+        let (ranges, _) = jpeg_metadata_ranges(&mut File::open(&path).unwrap());
+        assert_eq!(ranges, vec![(eoi, jpeg.len() as u64)]);
+
+        let chunk = |kind: &[u8; 4], body: &[u8]| {
+            let mut c = (body.len() as u32).to_be_bytes().to_vec();
+            c.extend_from_slice(kind);
+            c.extend_from_slice(body);
+            c.extend_from_slice(&[0; 4]);
+            c
+        };
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend(chunk(b"IHDR", &[0; 13]));
+        let text_at = png.len() as u64;
+        png.extend(chunk(b"tEXt", b"GPS"));
+        let text_end = png.len() as u64;
+        png.extend(chunk(b"IDAT", &[1, 2]));
+        png.extend(chunk(b"IEND", &[]));
+        std::fs::write(&path, &png).unwrap();
+        assert_eq!(png_metadata_ranges(&mut File::open(&path).unwrap()), vec![(text_at, text_end)]);
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn plain_chunks_read_back_give_the_file_hash() {
