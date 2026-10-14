@@ -248,8 +248,12 @@ object AppLock {
         excursionCovered = false
         // `elapsedRealtime`: duvar saati DEĞİL — kullanıcı/şebeke saati
         // değiştirse bile pencere kayamaz.
-        if (covered || (validUntil != 0L && SystemClock.elapsedRealtime() < validUntil)) {
+        val inWindow = validUntil != 0L && SystemClock.elapsedRealtime() < validUntil
+        if (covered || inWindow) {
             excursionLeftAt = SystemClock.elapsedRealtime()
+            // Left later from a chooser: the user may have gone Home from it,
+            // so the usual background timeout, not the long excursion one.
+            excursionLimitMs = if (inWindow) MAX_EXCURSION_MS else BACKGROUND_LOCK_MS
             return
         }
         backgroundedAt = SystemClock.elapsedRealtime()
@@ -269,18 +273,24 @@ object AppLock {
         // the user comes back (`guard`), at the latest when the excursion
         // would have timed out anyway.
         purgePending = true
-        val app = context.applicationContext
-        val wait = (leftAt + MAX_EXCURSION_MS - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            if (purgePending) {
-                purgePending = false
-                purgePlainCache(app)
-            }
-        }, wait)
+        purgeContext = context.applicationContext
+        val wait = (leftAt + excursionLimitMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+        mainHandler.removeCallbacks(purgeLater)
+        mainHandler.postDelayed(purgeLater, wait)
     }
 
     /** `lockNow` during a trusted excursion: the purge waits for its end. */
     @Volatile private var purgePending = false
+    @Volatile private var purgeContext: Context? = null
+    @Volatile private var excursionLimitMs = MAX_EXCURSION_MS
+    private val mainHandler by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
+    private val purgeLater = Runnable {
+        val context = purgeContext
+        if (purgePending && context != null) {
+            purgePending = false
+            purgePlainCache(context)
+        }
+    }
 
     /** Decrypted attachment copies do not outlive the unlocked session. Only
      *  where the lock really engages: a trusted excursion (picker, external
@@ -317,13 +327,14 @@ object AppLock {
         val leftAt = excursionLeftAt
         if (leftAt != 0L) {
             excursionLeftAt = 0L
-            if (SystemClock.elapsedRealtime() - leftAt > MAX_EXCURSION_MS) unlocked = false
+            if (SystemClock.elapsedRealtime() - leftAt > excursionLimitMs) unlocked = false
         }
         val bgAt = backgroundedAt
         backgroundedAt = 0L
         if (bgAt != 0L && SystemClock.elapsedRealtime() - bgAt > BACKGROUND_LOCK_MS) unlocked = false
         if ((wasUnlocked && !unlocked) || purgePending) {
             purgePending = false
+            mainHandler.removeCallbacks(purgeLater)
             purgePlainCache(activity)
         }
         // After the timeouts above: skipping them here let the call screen's
