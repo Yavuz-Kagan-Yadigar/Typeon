@@ -306,9 +306,9 @@ pub(crate) enum ServerInflight {
     ///
     /// `rest`: buckets of the same conversation still to fetch, one at a time.
     ArchiveFetch { server_id: String, conv_key: String, group: bool, bucket_more: Option<String>, rest: Vec<String> },
-    /// `all_buckets`: tam geri yüklemede DOLU olan HER kova çekilir;
-    /// sıradan "yukarı kaydır" akışında sadece en yenisi.
-    ArchiveProbe { server_id: String, conv_key: String, group: bool, all_buckets: bool },
+    /// `before_ms`: "fetch older history" page older than this, from the
+    /// newest present bucket back; `None`: full restore, every present bucket.
+    ArchiveProbe { server_id: String, conv_key: String, group: bool, before_ms: Option<u64> },
     /// The buckets of replaced archive keys, bkz. `purge_retired_archive`.
     /// `keys`: the `ark_purge` value this run covers; `rest`: buckets not sent yet.
     ArchivePurge { server_id: String, keys: String, rest: Vec<String> },
@@ -1868,25 +1868,20 @@ impl P2PCore {
                 let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { return };
                 self.send_archive_purge(peer_id, server_id, keys, rest);
             }
-            (ServerInflight::ArchiveProbe { server_id, conv_key, group, all_buckets }, ServerResponse::ArchiveProbed { present }) => {
+            (ServerInflight::ArchiveProbe { server_id, conv_key, group, before_ms }, ServerResponse::ArchiveProbed { mut present }) => {
                 let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { return };
-                // "Yukarı kaydır" akışında sadece en yeni dolu kova yeter;
-                // tam geri yüklemede dolu olan HEPSİ istenir.
-                let mut wanted: Vec<String> = if all_buckets {
-                    present.iter().map(|b| b.bucket.clone()).collect()
-                } else {
-                    present
-                        .iter()
-                        .max_by_key(|b| b.newest_ms)
-                        .map(|b| vec![b.bucket.clone()])
-                        .unwrap_or_default()
-                };
+                // Older history: newest present bucket first, read from
+                // `before_ms` back, then the older buckets in turn.
+                if before_ms.is_some() {
+                    present.sort_by(|a, b| b.newest_ms.cmp(&a.newest_ms));
+                }
+                let mut wanted: Vec<String> = present.into_iter().map(|b| b.bucket).collect();
                 // One bucket in flight per conversation; the `ArchiveBatch`
                 // arm asks for the next. All at once was hundreds of 512 KiB
                 // replies over one Tor circuit, and the timeouts were silent.
                 if !wanted.is_empty() {
                     let bucket = wanted.remove(0);
-                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, None, wanted);
+                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, before_ms, wanted);
                 }
             }
             (
@@ -2772,7 +2767,8 @@ impl P2PCore {
         // Hangi kovalar var? Sabit bir sohbet kimliği yerine aylık kovalar
         // kullanıldığından (bkz. `server_archive_bucket`), önce son ~36 ayı
         // TEK istekte yokluyoruz.
-        let buckets = archive_buckets(&ark, conv_key, if before_ms == 0 { current_time_ms() } else { before_ms });
+        let before_ms = if before_ms == 0 { current_time_ms() } else { before_ms };
+        let buckets = archive_buckets(&ark, conv_key, before_ms);
         let req = ServerRequest::ArchiveProbe { buckets };
         if let Some(id) = self.send_server_request(peer_id, req) {
             self.server_inflight.insert(
@@ -2781,7 +2777,7 @@ impl P2PCore {
                     server_id,
                     conv_key: conv_key.to_string(),
                     group,
-                    all_buckets: false,
+                    before_ms: Some(before_ms),
                 },
             );
         }
@@ -2860,9 +2856,7 @@ impl P2PCore {
                         server_id: server_id.clone(),
                         conv_key,
                         group,
-                        // Tam geri yüklemede DOLU olan HER kova çekilir,
-                        // sadece en yenisi değil.
-                        all_buckets: true,
+                        before_ms: None,
                     },
                 );
                 asked += 1;
