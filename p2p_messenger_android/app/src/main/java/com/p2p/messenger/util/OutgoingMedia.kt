@@ -129,6 +129,45 @@ object OutgoingMedia {
 
     private fun sibling(src: File) = File(src.parentFile, UUID.randomUUID().toString())
 
+    /**
+     * MediaMuxer writes its own metadata: the device maker and model, the
+     * Android version (`moov/meta`) and the mux time. In place, so no chunk
+     * offset moves: a `udta`/`meta` box becomes a zeroed `free` box of the same
+     * size, and the creation/modification times of `mvhd`/`tkhd`/`mdhd` become 0.
+     */
+    private fun scrubMp4(file: File) {
+        java.io.RandomAccessFile(file, "rw").use { f ->
+            fun walk(start: Long, end: Long) {
+                var pos = start
+                while (pos + 8 <= end) {
+                    f.seek(pos)
+                    var size = f.readInt().toLong() and 0xFFFFFFFFL
+                    val type = ByteArray(4).also { f.readFully(it) }.toString(Charsets.ISO_8859_1)
+                    var header = 8L
+                    if (size == 1L) { size = f.readLong(); header = 16 }
+                    if (size == 0L) size = end - pos
+                    if (size < header || pos + size > end) return
+                    when (type) {
+                        "moov", "trak", "mdia" -> walk(pos + header, pos + size)
+                        "udta", "meta" -> {
+                            f.seek(pos + header - 4)
+                            f.write("free".toByteArray(Charsets.ISO_8859_1))
+                            f.write(ByteArray((size - header).toInt()))
+                        }
+                        "mvhd", "tkhd", "mdhd" -> {
+                            f.seek(pos + header)
+                            val version = f.read()
+                            f.seek(pos + header + 4)
+                            f.write(ByteArray(if (version == 1) 16 else 8))
+                        }
+                    }
+                    pos += size
+                }
+            }
+            walk(0, f.length())
+        }
+    }
+
     /** A copy of the audio and video tracks in a new container: no metadata, same bytes of media. */
     private fun remuxVideo(src: File, fileName: String, mimeType: String): Prepared? {
         val container = when (mimeType) {
@@ -175,6 +214,9 @@ object OutgoingMedia {
                 extractor.advance()
             }
             m.stop()
+            m.release()
+            muxer = null
+            if (container != MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM) scrubMp4(out)
             return Prepared(out, fileName, mimeType)
         } catch (e: Exception) {
             Log.w(TAG, "video left unchanged: ${e.message}")
