@@ -242,8 +242,28 @@ object AppLock {
     fun lockNow(context: Context?) {
         if (!unlocked) return
         unlocked = false
-        if (context != null) purgePlainCache(context)
+        if (context == null) return
+        val leftAt = excursionLeftAt
+        if (leftAt == 0L) {
+            purgePlainCache(context)
+            return
+        }
+        // An external viewer may still have a decrypted file open: purge when
+        // the user comes back (`guard`), at the latest when the excursion
+        // would have timed out anyway.
+        purgePending = true
+        val app = context.applicationContext
+        val wait = (leftAt + MAX_EXCURSION_MS - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (purgePending) {
+                purgePending = false
+                purgePlainCache(app)
+            }
+        }, wait)
     }
+
+    /** `lockNow` during a trusted excursion: the purge waits for its end. */
+    @Volatile private var purgePending = false
 
     /** Decrypted attachment copies do not outlive the unlocked session. Only
      *  where the lock really engages: a trusted excursion (picker, external
@@ -285,7 +305,10 @@ object AppLock {
         val bgAt = backgroundedAt
         backgroundedAt = 0L
         if (bgAt != 0L && SystemClock.elapsedRealtime() - bgAt > BACKGROUND_LOCK_MS) unlocked = false
-        if (wasUnlocked && !unlocked) purgePlainCache(activity)
+        if ((wasUnlocked && !unlocked) || purgePending) {
+            purgePending = false
+            purgePlainCache(activity)
+        }
         // After the timeouts above: skipping them here let the call screen's
         // own stop renew `backgroundedAt`, so the app opened without the
         // password for a minute after any call.
