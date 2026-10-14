@@ -59,6 +59,13 @@ rand = "0.8"
 sha2 = "0.10"
 sha3 = "0.10"
 hkdf = "0.12"
+# "Hi-res" image attachments: lossless JPEG XL out (zune-jpegxl), and a
+# received one opened as PNG for the viewers (jxl-oxide, png). All pure Rust,
+# no C++ for the NDK or the Flatpak SDK.
+zune-jpegxl = "0.5"
+zune-core = "0.5"
+jxl-oxide = { version = "0.12", default-features = false }
+png = "0.18"
 # Spec dışı, güvenlik denetimi düzeltmesi: kurtarma dosyası (tüm uzun-vadeli
 # secret key'leri taşır) parola-tabanlı anahtar türetmesi için ARTIK
 # Argon2id kullanıyor — önceden HKDF-SHA256 (tek bir HMAC, çevrimdışı

@@ -200,6 +200,12 @@ class P2PApplication : Application() {
                 res.updateConfiguration(config, metrics)
             }
 
+            // After the activity's `onCreate`: its views exist. Android 12+ gets
+            // the text color through the theme (`applyAccentColor`).
+            override fun onActivityPostCreated(activity: Activity, savedInstanceState: Bundle?) {
+                ThemePrefs.applyTextColorLegacy(activity)
+            }
+
             /**
              * Runs inside `super.onCreate()`, before the activity's own
              * `onCreate` body. After process death Android recreates the top

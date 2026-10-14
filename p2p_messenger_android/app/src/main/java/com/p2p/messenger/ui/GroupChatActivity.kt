@@ -308,7 +308,7 @@ class GroupChatActivity : AppCompatActivity() {
 
     /** bkz. ChatActivity `pickFileLauncher` aynı notu (grup ekleri). */
     private val pickGroupFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { picked -> promptAttachmentCaption { caption -> onGroupFilePicked(picked, caption) } }
+        uri?.let { picked -> promptAttachmentCaption(offerHiRes = true) { caption, hiRes -> onGroupFilePicked(picked, caption, hiRes) } }
     }
 
     /** bkz. ChatActivity `takePhotoLauncher` aynı notu — anlık çekim +
@@ -317,7 +317,7 @@ class GroupChatActivity : AppCompatActivity() {
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
-            CapturedImage.take()?.let { jpeg -> promptAttachmentCaption { caption -> onGroupPhotoCaptured(jpeg, caption) } }
+            CapturedImage.take()?.let { jpeg -> promptAttachmentCaption(offerHiRes = true) { caption, hiRes -> onGroupPhotoCaptured(jpeg, caption, hiRes) } }
         }
     }
 
@@ -1733,7 +1733,7 @@ class GroupChatActivity : AppCompatActivity() {
             return
         }
         // bkz. ChatActivity aynı notu — sesli mesajın altına da yazı.
-        promptAttachmentCaption(onCancel = { file.delete() }) { caption -> sendVoiceMessage(file, durationMs, caption) }
+        promptAttachmentCaption(onCancel = { file.delete() }) { caption, _ -> sendVoiceMessage(file, durationMs, caption) }
     }
 
     /** bkz. ChatActivity.sendVoiceMessage AYNI desen — tek fark
@@ -1960,7 +1960,7 @@ class GroupChatActivity : AppCompatActivity() {
      *  gelen kare bellekten geçici bir önbellek dosyasına yazılıp
      *  gönderilir ve dosya hemen silinir; galeriye/paylaşılan depolamaya
      *  hiçbir şey yazılmaz. */
-    private fun onGroupPhotoCaptured(jpeg: ByteArray, caption: String = "") {
+    private fun onGroupPhotoCaptured(jpeg: ByteArray, caption: String = "", hiRes: Boolean = false) {
         // Ekle birlikte gidecek yanıt bağlamı, coroutine BAŞLAMADAN
         // yakalanıyor: `cancelReply()` aşağıda hemen çağrılıyor (kullanıcı
         // arayüzde yanıtın tüketildiğini anında görmeli) ve arka planda
@@ -2024,7 +2024,7 @@ class GroupChatActivity : AppCompatActivity() {
      * AYNI desen — SAF ile seçilen dosya önce önbelleğe kopyalanır, sonra
      * `prepareAndSendGroupFile` ile TÜM üyelere sunulur.
      */
-    private fun onGroupFilePicked(uri: Uri, caption: String = "") {
+    private fun onGroupFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false) {
         // Ekle birlikte gidecek yanıt bağlamı, coroutine BAŞLAMADAN
         // yakalanıyor: `cancelReply()` aşağıda hemen çağrılıyor (kullanıcı
         // arayüzde yanıtın tüketildiğini anında görmeli) ve arka planda
@@ -2687,7 +2687,7 @@ class GroupChatActivity : AppCompatActivity() {
      * birlikte gidiyor. Bu pencere yalnızca açıklamayı soruyor; boş
      * bırakılabilir.
      */
-    private fun promptAttachmentCaption(onCancel: () -> Unit = {}, onConfirm: (String) -> Unit) {
+    private fun promptAttachmentCaption(onCancel: () -> Unit = {}, offerHiRes: Boolean = false, onConfirm: (caption: String, hiRes: Boolean) -> Unit) {
         val input = EditText(this).apply {
             hint = getString(R.string.hint_attachment_caption)
             setSingleLine(false)
@@ -2699,10 +2699,17 @@ class GroupChatActivity : AppCompatActivity() {
             setPadding(pad, pad / 2, pad, 0)
             addView(input)
         }
+        // Images: lossless (a JPEG as it is, other formats as JPEG XL)
+        // instead of JPEG quality 90. See util.OutgoingMedia.
+        val hiRes = android.widget.CheckBox(this).apply {
+            setText(R.string.attachment_hi_res)
+            visibility = if (offerHiRes) View.VISIBLE else View.GONE
+        }
+        container.addView(hiRes)
         AlertDialog.Builder(this)
             .setTitle(R.string.title_attachment_caption)
             .setView(container)
-            .setPositiveButton(R.string.btn_send) { _, _ -> onConfirm(input.text.toString()) }
+            .setPositiveButton(R.string.btn_send) { _, _ -> onConfirm(input.text.toString(), hiRes.isChecked) }
             .setNegativeButton(android.R.string.cancel) { _, _ -> onCancel() }
             .setOnCancelListener { onCancel() }
             .show()

@@ -713,6 +713,12 @@ pub fn list_group_attachments(group_id: &str) -> String {
     }))
 }
 
+/// "Hi-res" image: lossless JPEG XL of `rgba` (`width * height` RGBA
+/// pixels, not premultiplied; the buffer is changed) to `out_path`.
+pub fn encode_jxl_lossless(rgba: &mut [u8], width: u32, height: u32, has_alpha: bool, out_path: &str) -> Result<(), String> {
+    catch_panic(move || crate::attachments::encode_jxl_lossless(rgba, width, height, has_alpha, std::path::Path::new(out_path)))?
+}
+
 pub fn get_attachment_plaintext_path(file_id: &str) -> String {
     let id = file_id.to_string();
     string_result(catch_panic(move || {

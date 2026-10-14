@@ -269,7 +269,7 @@ class ChatActivity : AppCompatActivity() {
 
     private val pickFileLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
-    ) { uri -> uri?.let { picked -> promptAttachmentCaption { caption -> onFilePicked(picked, caption) } } }
+    ) { uri -> uri?.let { picked -> promptAttachmentCaption(offerHiRes = true) { caption, hiRes -> onFilePicked(picked, caption, hiRes) } } }
 
     /**
      * Spec dışı, kullanıcı isteği: giriş çubuğundaki kamera düğmesi —
@@ -281,7 +281,7 @@ class ChatActivity : AppCompatActivity() {
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
-            CapturedImage.take()?.let { jpeg -> promptAttachmentCaption { caption -> onPhotoCaptured(jpeg, caption) } }
+            CapturedImage.take()?.let { jpeg -> promptAttachmentCaption(offerHiRes = true) { caption, hiRes -> onPhotoCaptured(jpeg, caption, hiRes) } }
         }
     }
 
@@ -761,7 +761,7 @@ class ChatActivity : AppCompatActivity() {
             // yazılabilsin. Kayıt bırakılır bırakılmaz gönderilmiyor, önce
             // açıklama soruluyor — kullanıcı boş bırakırsa davranış eskisiyle
             // aynı.
-            promptAttachmentCaption(onCancel = { file.delete() }) { caption -> sendVoiceMessage(file, durationMs, caption) }
+            promptAttachmentCaption(onCancel = { file.delete() }) { caption, _ -> sendVoiceMessage(file, durationMs, caption) }
         } else {
             file?.delete()
             if (send) {
@@ -1450,7 +1450,7 @@ class ChatActivity : AppCompatActivity() {
      * birlikte gidiyor. Bu pencere yalnızca açıklamayı soruyor; boş
      * bırakılabilir.
      */
-    private fun promptAttachmentCaption(onCancel: () -> Unit = {}, onConfirm: (String) -> Unit) {
+    private fun promptAttachmentCaption(onCancel: () -> Unit = {}, offerHiRes: Boolean = false, onConfirm: (caption: String, hiRes: Boolean) -> Unit) {
         val input = EditText(this).apply {
             hint = getString(R.string.hint_attachment_caption)
             setSingleLine(false)
@@ -1462,10 +1462,17 @@ class ChatActivity : AppCompatActivity() {
             setPadding(pad, pad / 2, pad, 0)
             addView(input)
         }
+        // Images: lossless (a JPEG as it is, other formats as JPEG XL)
+        // instead of JPEG quality 90. See util.OutgoingMedia.
+        val hiRes = android.widget.CheckBox(this).apply {
+            setText(R.string.attachment_hi_res)
+            visibility = if (offerHiRes) View.VISIBLE else View.GONE
+        }
+        container.addView(hiRes)
         AlertDialog.Builder(this)
             .setTitle(R.string.title_attachment_caption)
             .setView(container)
-            .setPositiveButton(R.string.btn_send) { _, _ -> onConfirm(input.text.toString()) }
+            .setPositiveButton(R.string.btn_send) { _, _ -> onConfirm(input.text.toString(), hiRes.isChecked) }
             .setNegativeButton(android.R.string.cancel) { _, _ -> onCancel() }
             .setOnCancelListener { onCancel() }
             .show()
@@ -1760,7 +1767,7 @@ class ChatActivity : AppCompatActivity() {
      * `finally`'de siliniyor — fotoğraf sistem galerisine/paylaşılan
      * depolamaya HİÇ yazılmıyor (kullanıcı isteği: "diske kaydedilmeden").
      */
-    private fun onPhotoCaptured(jpeg: ByteArray, caption: String = "") {
+    private fun onPhotoCaptured(jpeg: ByteArray, caption: String = "", hiRes: Boolean = false) {
         // bkz. grup karşılığı — yanıt bağlamı coroutine BAŞLAMADAN yakalanır.
         val replyId = activeReplyToMessageId ?: ""
         val replyPreview = activeReplyToPreview ?: ""
@@ -1822,7 +1829,7 @@ class ChatActivity : AppCompatActivity() {
      * gerçek bir dosya yolu ister), sonra `prepareAndSendFile` ile
      * şifrelenip teklif edilir.
      */
-    private fun onFilePicked(uri: Uri, caption: String = "") {
+    private fun onFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false) {
         // bkz. grup karşılığı — yanıt bağlamı coroutine BAŞLAMADAN yakalanır.
         val replyId = activeReplyToMessageId ?: ""
         val replyPreview = activeReplyToPreview ?: ""

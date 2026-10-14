@@ -433,6 +433,75 @@ pub fn write_verified_chunk_at_with(dest_enc_path: &Path, chunk_index: u32, ciph
     Ok(plaintext_len)
 }
 
+/// Largest image the JPEG XL paths take, in pixels: 64 MP is 256 MB as RGBA,
+/// and a received file names its own size.
+pub const MAX_IMAGE_PIXELS: u64 = 64_000_000;
+
+/// A "hi-res" image attachment: lossless JPEG XL of 8-bit RGBA pixels, row
+/// after row, not premultiplied. With `has_alpha` false the alpha bytes are
+/// dropped first, in place: `rgba` is the caller's buffer and is changed.
+pub fn encode_jxl_lossless(rgba: &mut [u8], width: u32, height: u32, has_alpha: bool, out: &Path) -> Result<(), String> {
+    use zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions};
+    let pixels = width as u64 * height as u64;
+    if width < 2 || height < 2 || pixels > MAX_IMAGE_PIXELS || rgba.len() as u64 != pixels * 4 {
+        return Err("Bad image size".to_string());
+    }
+    let pixels = pixels as usize;
+    let (data, colorspace): (&[u8], ColorSpace) = if has_alpha {
+        (&*rgba, ColorSpace::RGBA)
+    } else {
+        for i in 0..pixels {
+            rgba.copy_within(i * 4..i * 4 + 3, i * 3);
+        }
+        (&rgba[..pixels * 3], ColorSpace::RGB)
+    };
+    let options = EncoderOptions::new(width as usize, height as usize, colorspace, BitDepth::Eight);
+    let mut encoded = Vec::new();
+    zune_jpegxl::JxlSimpleEncoder::new(data, options)
+        .encode(&mut encoded)
+        .map_err(|e| format!("JPEG XL: {e:?}"))?;
+    std::fs::write(out, encoded).map_err(|e| e.to_string())
+}
+
+/// A received JPEG XL as PNG: no Android version decodes JPEG XL, and the
+/// Linux viewer takes the common formats only. The file is the sender's: its
+/// size is checked before the frame is rendered, and the decoder's
+/// allocations are capped.
+pub fn jxl_to_png(src: &Path, out: &Path) -> Result<(), String> {
+    use jxl_oxide::{AllocTracker, JxlImage, PixelFormat};
+    let image = JxlImage::builder()
+        .alloc_tracker(AllocTracker::with_limit(1 << 30))
+        .open(src)
+        .map_err(|e| format!("JPEG XL: {e}"))?;
+    if image.width() as u64 * image.height() as u64 > MAX_IMAGE_PIXELS {
+        return Err("Image too large".to_string());
+    }
+    let color = match image.pixel_format() {
+        PixelFormat::Gray => png::ColorType::Grayscale,
+        PixelFormat::Graya => png::ColorType::GrayscaleAlpha,
+        PixelFormat::Rgb => png::ColorType::Rgb,
+        PixelFormat::Rgba => png::ColorType::Rgba,
+        _ => return Err("Unsupported JPEG XL colour format".to_string()),
+    };
+    if image.num_loaded_keyframes() == 0 {
+        return Err("JPEG XL: no frame".to_string());
+    }
+    let render = image.render_frame(0).map_err(|e| format!("JPEG XL: {e}"))?;
+    let mut stream = render.stream();
+    let (width, height) = (stream.width(), stream.height());
+    if stream.channels() as usize != color.samples() {
+        return Err("JPEG XL: unexpected channel count".to_string());
+    }
+    let mut pixels = vec![0u8; width as usize * height as usize * color.samples()];
+    stream.write_to_buffer(&mut pixels);
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(File::create(out).map_err(|e| e.to_string())?), width, height);
+    encoder.set_color(color);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+    writer.write_image_data(&pixels).map_err(|e| e.to_string())?;
+    writer.finish().map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,6 +521,31 @@ mod tests {
         assert!(read_plain_chunk_with(&enc, 0, &[2u8; 32], 16).is_err());
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&enc);
+    }
+
+    #[test]
+    fn hi_res_jpeg_xl_opens_as_the_same_pixels() {
+        let base = std::env::temp_dir().join(format!("typeon-jxl-{}", std::process::id()));
+        let (jxl, out) = (base.with_extension("jxl"), base.with_extension("png"));
+        let (w, h) = (7u32, 5u32);
+        let rgba: Vec<u8> = (0..w * h * 4).map(|i| (i * 37 % 251) as u8).collect();
+        for has_alpha in [true, false] {
+            encode_jxl_lossless(&mut rgba.clone(), w, h, has_alpha, &jxl).unwrap();
+            jxl_to_png(&jxl, &out).unwrap();
+            let mut reader = png::Decoder::new(std::io::BufReader::new(File::open(&out).unwrap())).read_info().unwrap();
+            let mut got = vec![0u8; reader.output_buffer_size().unwrap()];
+            reader.next_frame(&mut got).unwrap();
+            let want: Vec<u8> = if has_alpha {
+                rgba.clone()
+            } else {
+                rgba.chunks(4).flat_map(|p| p[..3].to_vec()).collect()
+            };
+            assert_eq!(got, want, "alpha={has_alpha}");
+        }
+        assert!(encode_jxl_lossless(&mut vec![0; 4], 1, 1, true, &jxl).is_err(), "1x1");
+        assert!(encode_jxl_lossless(&mut vec![0; 8], 2, 2, true, &jxl).is_err(), "short buffer");
+        let _ = std::fs::remove_file(&jxl);
+        let _ = std::fs::remove_file(&out);
     }
 
     #[test]

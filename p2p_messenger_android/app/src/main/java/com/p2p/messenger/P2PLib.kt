@@ -375,6 +375,9 @@ object P2PLib {
      *  ya da hata varsa "Error: ...". BÜYÜK dosyalar için ANA THREAD'DE
      *  ÇAĞIRMAYIN. */
     external fun getAttachmentPlaintextPath(fileId: String): String
+    /** Lossless JPEG XL of [pixels] (direct buffer, `width * height` RGBA,
+     *  not premultiplied; changed by the call) to [outPath]. "OK" or "Error: ...". */
+    external fun encodeJxlLossless(pixels: java.nio.ByteBuffer, width: Int, height: Int, hasAlpha: Boolean, outPath: String): String
 
     // --- Bölüm 5: Grup mesajlaşma ---
     /** JSON-encoded List<GroupSummary>. */

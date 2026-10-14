@@ -7,6 +7,7 @@ import android.view.View
 import android.widget.ImageView
 import com.google.android.material.color.DynamicColors
 import com.google.android.material.color.DynamicColorsOptions
+import com.google.android.material.color.MaterialColors
 import com.p2p.messenger.R
 import com.google.android.material.R.color as MR
 import java.io.File
@@ -158,6 +159,38 @@ object ThemePrefs {
         val e = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
         if (color == null) e.remove(KEY_TEXT_COLOR) else e.putInt(KEY_TEXT_COLOR, color)
         e.apply()
+    }
+
+    /**
+     * Below Android 12 there is no dynamic theme for `applyAccentColor` to
+     * recolor: the chosen text color is painted onto the TextViews that use a
+     * default theme text color (buttons, errors and bubble colors untouched).
+     * ponytail: walks the tree on every layout pass; per-adapter painting if
+     * that is ever measurably slow.
+     */
+    fun applyTextColorLegacy(activity: Activity) {
+        if (DynamicColors.isDynamicColorAvailable()) return
+        val color = getTextColor(activity) ?: return
+        val decor = activity.window.decorView
+        fun attr(a: Int) = MaterialColors.getColor(activity, a, 0) and 0xFFFFFF
+        val defaults = setOf(
+            attr(com.google.android.material.R.attr.colorOnSurface),
+            attr(com.google.android.material.R.attr.colorOnBackground),
+            attr(com.google.android.material.R.attr.colorOnSurfaceVariant),
+            attr(android.R.attr.textColorPrimary),
+            attr(android.R.attr.textColorSecondary),
+        )
+        fun walk(v: View) {
+            if (v is android.widget.TextView && v !is android.widget.Button && v !is android.widget.EditText) {
+                val cur = v.currentTextColor
+                if ((cur and 0xFFFFFF) in defaults) {
+                    val tinted = (color and 0xFFFFFF) or (cur and 0xFF000000.toInt())
+                    if (tinted != cur) v.setTextColor(tinted)
+                }
+            }
+            if (v is android.view.ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
+        }
+        decor.viewTreeObserver.addOnGlobalLayoutListener { walk(decor) }
     }
 
     /**

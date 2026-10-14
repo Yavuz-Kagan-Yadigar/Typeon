@@ -390,7 +390,11 @@ pub(crate) fn prepare_and_send_group_file_unlocked(group_id: String, source_path
 /// bir geçici yola çözülür, sonra atomik `rename` ile yerine konur
 /// (ikinci çağrının rename'i kazanır — iki içerik de birebir aynı).
 pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String, String> {
-    let (file_key, sha256_hex, enc_path, plain_path) = core_lock().begin_attachment_decrypt(file_id)?;
+    let (file_key, sha256_hex, enc_path, decrypted_path) = core_lock().begin_attachment_decrypt(file_id)?;
+    // A JPEG XL ("hi-res" image) is handed out as PNG: no viewer of ours
+    // reads JPEG XL. Lossless both ways.
+    let jxl = decrypted_path.extension().map_or(false, |e| e.eq_ignore_ascii_case("jxl"));
+    let plain_path = if jxl { decrypted_path.with_extension("png") } else { decrypted_path };
     if !plain_path.exists() {
         info!(
             "get_attachment_plaintext_path: {} önbellekte yok, {} adresinden çözülüyor",
@@ -407,7 +411,21 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
             let _ = std::fs::remove_file(&tmp_path);
             return Err(e);
         }
-        if let Err(e) = std::fs::rename(&tmp_path, &plain_path) {
+        if jxl {
+            let mut png_tmp = tmp_path.clone().into_os_string();
+            png_tmp.push(".png");
+            let png_tmp = std::path::PathBuf::from(png_tmp);
+            let converted = attachments::jxl_to_png(&tmp_path, &png_tmp);
+            let _ = std::fs::remove_file(&tmp_path);
+            if let Err(e) = converted {
+                let _ = std::fs::remove_file(&png_tmp);
+                return Err(e);
+            }
+            if let Err(e) = std::fs::rename(&png_tmp, &plain_path) {
+                let _ = std::fs::remove_file(&png_tmp);
+                return Err(e.to_string());
+            }
+        } else if let Err(e) = std::fs::rename(&tmp_path, &plain_path) {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(e.to_string());
         }
@@ -15472,6 +15490,8 @@ impl P2PCore {
             if is_safe_file_id(file_id) {
                 if let Ok(dir) = self.attachments_dir() {
                     let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("{}{}", file_id, ext)));
+                    // A JPEG XL is opened as PNG (`attachment_plaintext_path_unlocked`).
+                    let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("{}.png", file_id)));
                 }
             }
         }
@@ -22119,6 +22139,35 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getAttachmentPlaintextPath<
         Ok(Err(e)) => safe_new_jstring(&mut env, format!("Error: {}", e)),
         Err(e) => safe_new_jstring(&mut env, format!("Error: {}", e)),
     }
+}
+
+/// `pixels`: a direct ByteBuffer of `width * height` RGBA pixels, not
+/// premultiplied (native memory: a 48 MP photo does not fit the Java heap).
+/// Writes a lossless JPEG XL to `out_path`. "OK" or "Error: ...".
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_encodeJxlLossless<'local>(
+    mut env: JNIEnv<'local>, _class: JClass<'local>, pixels: jni::objects::JByteBuffer<'local>,
+    width: jni::sys::jint, height: jni::sys::jint, has_alpha: jboolean, out_path: JString<'local>,
+) -> jstring {
+    let out: String = env.get_string(&out_path).map(|s| s.into()).unwrap_or_default();
+    let buffer = env.get_direct_buffer_address(&pixels).ok().zip(env.get_direct_buffer_capacity(&pixels).ok());
+    let result = match buffer {
+        Some((address, len)) if !address.is_null() && width > 0 && height > 0 => {
+            let address = address as usize;
+            catch_panic(move || {
+                // SAFETY: the buffer is pinned native memory of the caller,
+                // alive and not touched by Java for the length of this call.
+                let rgba = unsafe { std::slice::from_raw_parts_mut(address as *mut u8, len) };
+                attachments::encode_jxl_lossless(rgba, width as u32, height as u32, has_alpha != 0, std::path::Path::new(&out))
+            })
+        }
+        _ => Ok(Err("not a direct buffer".to_string())),
+    };
+    let out = match result {
+        Ok(Ok(())) => "OK".to_string(),
+        Ok(Err(e)) | Err(e) => format!("Error: {}", e),
+    };
+    safe_new_jstring(&mut env, out)
 }
 
 #[no_mangle]
