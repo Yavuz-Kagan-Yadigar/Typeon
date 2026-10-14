@@ -224,6 +224,7 @@
     <string name="error_attachment_open_failed">Dosya açılamadı</string>
 
     <string name="action_save_to_downloads">İndirilenler\'e kaydet</string>
+    <string name="action_copy_image">Resmi kopyala</string>
     <string name="msg_saved_to_downloads">İndirilenler/P2P klasörüne kaydedildi</string>
     <string name="action_open_with">Birlikte aç…</string>
     <string name="lbl_open_with_chooser">Birlikte aç</string>

@@ -59,6 +59,15 @@ object OutgoingMedia {
             fileName to mimeType
         }
 
+    /** A received image on the clipboard: its decrypted copy (a JPEG XL is
+     *  already PNG there, bkz. `savedAs`). The AppLock purge of `plain_cache`
+     *  makes a later paste fail. */
+    fun copyImage(context: android.content.Context, plain: File, label: String) {
+        val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", plain)
+        context.getSystemService(android.content.ClipboardManager::class.java)
+            .setPrimaryClip(android.content.ClipData.newUri(context.contentResolver, label, uri))
+    }
+
     private fun prepareImage(src: File, fileName: String, hiRes: Boolean): Prepared? {
         val head = ByteArray(32).also { b -> src.inputStream().use { it.read(b) } }
         if (isGif(head) || isAnimatedWebp(head)) return null

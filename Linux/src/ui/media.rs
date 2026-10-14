@@ -68,6 +68,23 @@ pub fn open(app: &Rc<App>, path: &str, mime: &str, title: &str) {
     }
     header.pack_end(&save);
 
+    if util::is_image(mime) {
+        let copy = gtk::Button::builder()
+            .icon_name("edit-copy-symbolic")
+            .tooltip_text("Copy image")
+            .build();
+        let app = app.clone();
+        let path = path.to_string();
+        copy.connect_clicked(move |button| match gtk::gdk::Texture::from_filename(&path) {
+            Ok(texture) => {
+                button.clipboard().set_texture(&texture);
+                app.toast("Image copied");
+            }
+            Err(error) => app.toast(&format!("Could not copy the image: {error}")),
+        });
+        header.pack_end(&copy);
+    }
+
     let content: gtk::Widget = if util::is_image(mime) {
         image_pane(path)
     } else {

@@ -249,6 +249,7 @@
     <string name="error_attachment_open_failed">Couldn\'t open file</string>
 
     <string name="action_save_to_downloads">Save to Downloads</string>
+    <string name="action_copy_image">Copy image</string>
     <string name="msg_saved_to_downloads">Saved to Downloads/P2P</string>
     <string name="action_open_with">Open with…</string>
     <string name="lbl_open_with_chooser">Open with</string>

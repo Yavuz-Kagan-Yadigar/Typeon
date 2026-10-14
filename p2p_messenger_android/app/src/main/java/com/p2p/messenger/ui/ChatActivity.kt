@@ -1602,6 +1602,28 @@ class ChatActivity : AppCompatActivity() {
      * round-trip) kullanıcı deneyimi açısından değeri yoktu. Artık
      * `item.isMine`'dan BAĞIMSIZ, doğrudan yerelde kaydedilir.
      */
+    private fun copyAttachmentImage(attachment: SimpleChatAdapter.AttachmentInfo) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val path = try {
+                P2PLib.getAttachmentPlaintextPath(attachment.fileId)
+            } catch (e: Exception) {
+                "Error: ${e.message}"
+            }
+            withContext(Dispatchers.Main) {
+                val copied = !path.startsWith("Error:") &&
+                    runCatching { OutgoingMedia.copyImage(this@ChatActivity, File(path), attachment.fileName) }.isSuccess
+                // Android 13+ shows its own confirmation.
+                if (!copied || android.os.Build.VERSION.SDK_INT < 33) {
+                    Toast.makeText(
+                        this@ChatActivity,
+                        if (copied) getString(R.string.lbl_copied) else getString(R.string.error_attachment_open_failed),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+    }
+
     private fun onAttachmentLongClicked(item: SimpleChatAdapter.Item) {
         val attachment = item.attachment ?: return
         // Spec dışı, kullanıcı isteği: "Başka bir uygulamayla aç" eklendi —
@@ -1612,6 +1634,7 @@ class ChatActivity : AppCompatActivity() {
         val options = mutableListOf<String>().apply {
             add(getString(R.string.action_open_with))
             add(getString(R.string.action_save_to_downloads))
+            if (attachment.mimeType.startsWith("image/")) add(getString(R.string.action_copy_image))
             if (item.isMine) add(getString(R.string.action_delete_message))
         }
         AlertDialog.Builder(this)
@@ -1619,6 +1642,7 @@ class ChatActivity : AppCompatActivity() {
                 when (options[which]) {
                     getString(R.string.action_open_with) -> openAttachmentWithChooser(attachment)
                     getString(R.string.action_save_to_downloads) -> saveAttachmentToDownloads(attachment)
+                    getString(R.string.action_copy_image) -> copyAttachmentImage(attachment)
                     getString(R.string.action_delete_message) -> confirmDeleteMessage(item)
                 }
             }
