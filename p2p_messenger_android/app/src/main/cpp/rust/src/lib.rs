@@ -5059,13 +5059,16 @@ impl P2PCore {
     /// device wipes itself on it. At most once per 10 min per device.
     fn answer_revoked_sibling(&mut self, fp: &str) {
         let now = current_time_ms();
-        if self.last_identity_exchange_reply.get(fp).map_or(false, |&t| now < t + 10 * 60_000) {
+        // Its own key: the plain one is set by any IdentityExchange reply,
+        // the one of the link a few minutes earlier too.
+        let key = format!("revoked:{fp}");
+        if self.last_identity_exchange_reply.get(&key).map_or(false, |&t| now < t + 10 * 60_000) {
             return;
         }
         if !self.own_revokes().iter().any(|r| r.revoked_device_fingerprint == fp) {
             return;
         }
-        self.last_identity_exchange_reply.insert(fp.to_string(), now);
+        self.last_identity_exchange_reply.insert(key, now);
         info!("İptal edilmiş kardeş cihaz hâlâ gönderiyor, iptal yeniden iletiliyor: {}", crate::log_id(fp));
         if let Err(e) = self.send_identity_exchange_fresh(fp) {
             warn!("İptal yeniden iletilemedi: {}", e);

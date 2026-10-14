@@ -1857,6 +1857,12 @@ impl P2PCore {
             // --- Arşiv ---
             (ServerInflight::ArchivePut { records, .. }, ServerResponse::Ok) => {
                 self.drop_archive_records(&records);
+                // The next batch now, as for mail and chunks (bkz.
+                // `server_sweep`): one batch per radio window took the
+                // re-upload after a revoke the better part of an hour.
+                if !self.server_archive_queue.is_empty() {
+                    self.server_sweep_at = 0;
+                }
             }
             (ServerInflight::ArchivePurge { server_id, keys, rest }, ServerResponse::Ok) => {
                 let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { return };
