@@ -56,6 +56,12 @@ pub const MAX_FRAME: usize = 256 * 1024;
 /// video). A filling queue is the congestion signal Kotlin reads through
 /// `media_backlog` to lower the video frame rate and bitrate.
 pub const LINK_QUEUE: usize = 48;
+/// Queue depth above which a frame of that kind is dropped instead of queued.
+/// The link is one ordered stream, so whatever is queued is delay for the
+/// audio behind it: video yields first (a 40 KB keyframe is seconds on Tor),
+/// audio keeps ~1 s at most. Reports and state use the whole queue.
+const VIDEO_QUEUE_MAX: usize = 6;
+const AUDIO_QUEUE_MAX: usize = 16;
 /// Received frames waiting for Kotlin. ~1 s of a 3-way video call: a slow
 /// decoder must shed old frames, never let them pile up (256 here once meant
 /// 4-5 s of delay on a phone decoding two videos).
@@ -437,6 +443,14 @@ fn reported_queue(m: &Media) -> u32 {
     m.reports.values().filter(|(_, at)| now.saturating_sub(*at) < REPORT_TTL_MS).map(|(q, _)| *q).max().unwrap_or(0)
 }
 
+fn depth_max(kind: u8) -> usize {
+    match kind {
+        KIND_VIDEO => VIDEO_QUEUE_MAX,
+        KIND_REPORT | KIND_STATE => LINK_QUEUE,
+        _ => AUDIO_QUEUE_MAX,
+    }
+}
+
 /// Encrypts one frame and queues it for every call participant. Never blocks:
 /// a full link queue drops the frame (live media, late = useless).
 pub fn media_send(kind: u8, payload: &[u8]) -> bool {
@@ -454,7 +468,10 @@ pub fn media_send(kind: u8, payload: &[u8]) -> bool {
     let mut any = false;
     for (peer, mailbox, packet) in targets {
         if let Some(p) = peer {
-            let res = m.direct.get(&p).map(|l| l.tx.try_send(encode_frame(&[], &packet)));
+            let res = m.direct.get(&p).map(|l| {
+                if LINK_QUEUE - l.tx.capacity() >= depth_max(kind) { Err(TrySendError::Full(Vec::new())) }
+                else { l.tx.try_send(encode_frame(&[], &packet)) }
+            });
             match res {
                 Some(Ok(())) => { m.via_direct += 1; m.bytes_out += packet.len() as u64; any = true; continue; }
                 Some(Err(TrySendError::Full(_))) => { m.dropped += 1; continue; }
@@ -472,7 +489,9 @@ pub fn media_send(kind: u8, payload: &[u8]) -> bool {
         let frame = encode_frame(&mailbox, &packet);
         let mut relayed = false;
         for s in servers {
-            match m.relays[&s].tx.try_send(frame.clone()) {
+            let l = &m.relays[&s];
+            let r = if LINK_QUEUE - l.tx.capacity() >= depth_max(kind) { Err(TrySendError::Full(Vec::new())) } else { l.tx.try_send(frame.clone()) };
+            match r {
                 Ok(()) => { m.bytes_out += packet.len() as u64; relayed = true; }
                 Err(TrySendError::Full(_)) => { m.dropped += 1; }
                 Err(TrySendError::Closed(_)) => { m.relays.remove(&s); }
