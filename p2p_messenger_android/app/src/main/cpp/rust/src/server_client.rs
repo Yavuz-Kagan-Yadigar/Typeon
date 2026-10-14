@@ -2763,6 +2763,13 @@ impl P2PCore {
         let Some(ark) = self.archive_root_key else { return };
         let Some(server_id) = self.history_server() else { return };
         let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { return };
+        // A chain for this conversation is running: it already walks every
+        // older bucket.
+        if self.server_inflight.values().any(|f| matches!(f,
+            ServerInflight::ArchiveProbe { conv_key: c, .. } | ServerInflight::ArchiveFetch { conv_key: c, .. } if c == conv_key))
+        {
+            return;
+        }
 
         // Hangi kovalar var? Sabit bir sohbet kimliği yerine aylık kovalar
         // kullanıldığından (bkz. `server_archive_bucket`), önce son ~36 ayı
