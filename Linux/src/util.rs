@@ -289,7 +289,8 @@ pub fn prepare_outgoing(
     tmp_dir: &std::path::Path,
 ) -> (std::path::PathBuf, String, String) {
     let out = tmp_dir.join(format!("out-{}", glib::uuid_string_random()));
-    let converted = if is_image(mime) {
+    // A vector image would be rasterized: it goes as it is, as on Android.
+    let converted = if is_image(mime) && mime != "image/svg+xml" {
         image_for_sending(source, name, hi_res, &out)
     } else if is_video(mime) {
         let ext = name.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("mp4");
