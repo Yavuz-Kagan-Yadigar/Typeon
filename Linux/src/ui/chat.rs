@@ -2085,7 +2085,8 @@ impl ChatView {
             let Ok(file) = result else { return };
             let Some(path) = file.path() else { return };
             let send_view = view.clone();
-            view.prompt_attachment_caption(true, move |caption, hi_res| send_view.send_attachment(&path, caption, hi_res));
+            let offer_hi_res = file.basename().is_some_and(|name| util::is_image(&util::guess_mime(&name.to_string_lossy())));
+            view.prompt_attachment_caption(offer_hi_res, move |caption, hi_res| send_view.send_attachment(&path, caption, hi_res));
         });
     }
 
@@ -2138,15 +2139,19 @@ impl ChatView {
                         caption, reply_id, reply_preview, reply_sender,
                     ),
                 };
+                let unscrubbed = sent == source && util::is_video(&mime);
                 if sent != source {
                     let _ = std::fs::remove_file(&sent);
                 }
-                outcome
+                (outcome, unscrubbed)
             },
-            move |result| match result {
+            move |(result, unscrubbed)| match result {
                 // The attachment row comes from the archive, so a reload is the
                 // simplest way to show it exactly as a restart would.
                 Ok(_) => {
+                    if unscrubbed {
+                        app.toast("Sent without removing metadata");
+                    }
                     view.clear_reply();
                     view.reload();
                 }

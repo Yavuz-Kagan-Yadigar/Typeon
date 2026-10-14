@@ -298,13 +298,15 @@ pub fn prepare_outgoing(
         let ok = std::process::Command::new("ffmpeg")
             .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
             .arg(source)
-            .args(["-map", "0", "-map_metadata", "-1", "-map_chapters", "-1", "-c", "copy"])
+            .args(["-map", "0:v?", "-map", "0:a?", "-dn", "-sn", "-map_metadata", "-1", "-map_chapters", "-1"])
+            .args(["-fflags", "+bitexact", "-flags:v", "+bitexact", "-flags:a", "+bitexact", "-c", "copy"])
             .arg(&out)
             .stdin(std::process::Stdio::null())
             .status()
             .map(|status| status.success())
             .unwrap_or(false);
         if !ok {
+            log::warn!("ffmpeg remux failed or missing: {name} goes out with its metadata");
             let _ = std::fs::remove_file(&out);
         }
         ok.then(|| (out, name.to_string(), mime.to_string()))
@@ -339,12 +341,29 @@ fn image_for_sending(
     {
         return None;
     }
+    let (_, info_w, info_h) = gdk_pixbuf::Pixbuf::file_info(source)?;
+    if info_w as u64 * info_h as u64 > 64_000_000 {
+        return None;
+    }
     let pixbuf = gdk_pixbuf::Pixbuf::from_file(source).ok()?;
+    let icc = pixbuf.option("icc-profile");
     let pixbuf = pixbuf.apply_embedded_orientation().unwrap_or(pixbuf);
     let (width, height) = (pixbuf.width() as usize, pixbuf.height() as usize);
     let channels = pixbuf.n_channels() as usize;
     if (width * height) as u64 > 64_000_000 || pixbuf.bits_per_sample() != 8 || channels < 3 {
         return None;
+    }
+    let base = name.rsplit_once('.').map_or(name, |(base, _)| base);
+    let save_jpeg = |jpeg: &gdk_pixbuf::Pixbuf| {
+        let mut options = vec![("quality", "90")];
+        if let Some(icc) = icc.as_deref() {
+            options.push(("icc-profile", icc));
+        }
+        jpeg.savev(out, "jpeg", &options).ok()?;
+        Some((out.to_path_buf(), format!("{base}.jpg"), "image/jpeg".to_string()))
+    };
+    if !hi_res && !pixbuf.has_alpha() {
+        return save_jpeg(&pixbuf);
     }
     let stride = pixbuf.rowstride() as usize;
     let bytes = pixbuf.read_pixel_bytes();
@@ -358,7 +377,6 @@ fn image_for_sending(
     drop(bytes);
     drop(pixbuf);
     let opaque = rgba.chunks_exact(4).all(|px| px[3] == 255);
-    let base = name.rsplit_once('.').map_or(name, |(base, _)| base);
     if !hi_res {
         if !opaque {
             return None;
@@ -374,8 +392,7 @@ fn image_for_sending(
             height as i32,
             (width * 3) as i32,
         );
-        rgb.savev(out, "jpeg", &[("quality", "90")]).ok()?;
-        return Some((out.to_path_buf(), format!("{base}.jpg"), "image/jpeg".to_string()));
+        return save_jpeg(&rgb);
     }
     crate::core::encode_jxl_lossless(&mut rgba, width as u32, height as u32, !opaque, out.to_str()?).ok()?;
     Some((out.to_path_buf(), format!("{base}.jxl"), "image/jxl".to_string()))

@@ -75,12 +75,18 @@ pub fn open(app: &Rc<App>, path: &str, mime: &str, title: &str) {
             .build();
         let app = app.clone();
         let path = path.to_string();
-        copy.connect_clicked(move |button| match gtk::gdk::Texture::from_filename(&path) {
-            Ok(texture) => {
-                button.clipboard().set_texture(&texture);
-                app.toast("Image copied");
-            }
-            Err(error) => app.toast(&format!("Could not copy the image: {error}")),
+        copy.connect_clicked(move |button| {
+            let (app, path, clipboard) = (app.clone(), path.clone(), button.clipboard());
+            crate::app::run_in_background(
+                move || gtk::gdk::Texture::from_filename(&path),
+                move |result| match result {
+                    Ok(texture) => {
+                        clipboard.set_texture(&texture);
+                        app.toast("Image copied");
+                    }
+                    Err(error) => app.toast(&format!("Could not copy the image: {error}")),
+                },
+            );
         });
         header.pack_end(&copy);
     }
@@ -451,7 +457,11 @@ fn save_copy(app: &Rc<App>, path: &str, suggested_name: &str) {
     let Some(window) = app.window() else { return };
     // The core opens a JPEG XL as PNG: the copy is a PNG and is named so.
     let png_name;
-    let suggested_name = match suggested_name.strip_suffix(".jxl") {
+    let jxl_base = suggested_name
+        .rsplit_once('.')
+        .filter(|(_, ext)| ext.eq_ignore_ascii_case("jxl"))
+        .map(|(base, _)| base);
+    let suggested_name = match jxl_base {
         Some(base) if path.ends_with(".png") => {
             png_name = format!("{base}.png");
             png_name.as_str()
