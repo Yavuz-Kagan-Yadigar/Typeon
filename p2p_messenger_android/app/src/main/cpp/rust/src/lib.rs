@@ -5157,7 +5157,7 @@ impl P2PCore {
             return Vec::new();
         }
         let mut s = vec![0u8; 16];
-        OsRng.fill_bytes(&mut s);
+        rand::RngCore::fill_bytes(&mut OsRng, &mut s);
         self.meta_put("own_gfc", &hex::encode(&s));
         s
     }
