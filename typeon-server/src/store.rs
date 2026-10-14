@@ -395,19 +395,41 @@ impl Store {
             .unwrap_or(0)
     }
 
-    pub fn count_active_enrollments(&self) -> i64 {
+    /// Active enrollments seen at or after `idle_before`: a sleeping one
+    /// (see `sleep_idle_enrollments`) holds no place under the cap.
+    pub fn count_active_enrollments(&self, idle_before: i64) -> i64 {
         self.conn
-            .query_row("SELECT COUNT(*) FROM enrollments WHERE state = 'active'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM enrollments WHERE state = 'active' AND last_seen_at >= ?1",
+                params![idle_before],
+                |r| r.get(0),
+            )
             .unwrap_or(0)
     }
 
-    /// Removes active enrollments last seen before `before`. Revoked rows stay:
-    /// they are the block list. Returns the number removed; the caller runs
-    /// `sweep_expired_mail` next, which drops their reader rows.
-    pub fn remove_idle_enrollments(&self, before: i64) -> usize {
-        self.conn
-            .execute("DELETE FROM enrollments WHERE state = 'active' AND last_seen_at < ?1", params![before])
-            .unwrap_or(0)
+    /// Puts active enrollments last seen before `before` to sleep: their
+    /// reader rows go, and mail in boxes nobody reads any more goes with them.
+    /// The row, its key and its quota counters stay, so the device comes back
+    /// with `Rebind` (or its old PeerId), which refreshes `last_seen_at`.
+    /// Returns the mail rows removed; the caller recounts the depositors.
+    pub fn sleep_idle_enrollments(&self, before: i64) -> usize {
+        let sleepers = "SELECT enrollment_id FROM enrollments WHERE state = 'active' AND last_seen_at < ?1";
+        let Ok(tx) = self.conn.unchecked_transaction() else { return 0 };
+        // Mail stays while any reader that is awake still has the box.
+        let removed = self
+            .conn
+            .execute(
+                &format!(
+                    "DELETE FROM mail WHERE mailbox_id IN (SELECT mailbox_id FROM mailbox_readers WHERE owner IN ({sleepers}))
+                       AND NOT EXISTS (SELECT 1 FROM mailbox_readers r
+                                       WHERE r.mailbox_id = mail.mailbox_id AND r.owner NOT IN ({sleepers}))"
+                ),
+                params![before],
+            )
+            .unwrap_or(0);
+        let _ = self.conn.execute(&format!("DELETE FROM mailbox_readers WHERE owner IN ({sleepers})"), params![before]);
+        let _ = tx.commit();
+        removed
     }
 
     pub fn list_invites(&self, now: i64) -> Vec<(String, i64, i64, bool)> {
@@ -1364,25 +1386,36 @@ mod tests {
         assert_eq!(revoked.state, EnrollmentState::Revoked);
         assert!(s.is_key_blocked(&revoked.enroll_pk));
         // The idle sweep must not remove the row that carries the block.
-        assert_eq!(s.remove_idle_enrollments(i64::MAX), 0);
+        s.sleep_idle_enrollments(i64::MAX);
         assert!(s.enrollment_by_peer("peerR").is_some());
         s.unblock_enrollment_key(&revoked.enroll_pk);
         assert!(!s.is_key_blocked(&revoked.enroll_pk));
     }
 
+    /// Owner decision K3: an idle enrollment sleeps, it is not removed.
     #[test]
-    fn an_idle_enrollment_is_removed_and_its_reader_rows_go_with_the_sweep() {
+    fn an_idle_enrollment_sleeps_and_rebinds_without_an_invite() {
         let s = Store::open_in_memory().unwrap();
         let a = enroll(&s, b"aaaa", "peerA");
         let b = enroll(&s, b"bbbb", "peerB");
         register(&s, &a, "box");
+        register(&s, &a, "shared");
+        register(&s, &b, "shared");
+        s.deposit("box", b"waiting", &b, 1, 1000).unwrap();
+        s.deposit("shared", b"kept", &b, 2, 1000).unwrap();
+        s.conn.execute("UPDATE enrollments SET bytes_archive = 7 WHERE enrollment_id = ?1", params![a]).unwrap();
         s.touch_enrollment(&b, 1_000);
-        assert_eq!(s.count_active_enrollments(), 2);
-        assert_eq!(s.remove_idle_enrollments(500), 1);
-        assert!(s.enrollment_by_id(&a).is_none());
-        assert!(s.enrollment_by_id(&b).is_some());
-        s.sweep_expired_mail(0);
+        assert_eq!(s.count_active_enrollments(500), 1);
+        assert_eq!(s.sleep_idle_enrollments(500), 1, "only the box nobody else reads loses its mail");
+        let row = s.enrollment_by_id(&a).expect("the row stays");
+        assert_eq!(row.state, EnrollmentState::Active);
+        assert_eq!(row.bytes_archive, 7, "quota counters stay");
         assert!(!s.mailbox_is_registered("box"));
+        assert!(s.mailbox_is_registered("shared"), "b still reads it");
+        assert_eq!(s.count_active_enrollments(500), 1, "a sleeper holds no place under the cap");
+        s.rebind_enrollment(&a, "peerA2", 2_000).unwrap();
+        assert_eq!(s.enrollment_by_peer("peerA2").unwrap().enrollment_id, a);
+        assert_eq!(s.count_active_enrollments(500), 2, "back awake");
     }
 
     #[test]

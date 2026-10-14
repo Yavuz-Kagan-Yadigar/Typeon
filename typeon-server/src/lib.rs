@@ -962,7 +962,7 @@ impl ServerCore {
         }
         // A PeerId that enrolls again takes no new place.
         if !prev.as_ref().map_or(false, |p| p.state == EnrollmentState::Active)
-            && self.store.count_active_enrollments() >= self.config.max_enrollments as i64
+            && self.store.count_active_enrollments(now - ENROLLMENT_IDLE_MS) >= self.config.max_enrollments as i64
         {
             warn!("Enrollment refused: the server holds its maximum number of devices");
             self.stats.rejected += 1;
@@ -1825,11 +1825,8 @@ impl ServerCore {
             warn!("Sistem saati sıçradı — TTL süpürmesi bekletiliyor");
             return;
         }
-        let idle = self.store.remove_idle_enrollments(now - ENROLLMENT_IDLE_MS);
-        if idle > 0 {
-            info!("Sweep removed {idle} enrollments not seen for 30 days");
-        }
-        let removed = self.store.sweep_expired_mail(now);
+        let slept = self.store.sleep_idle_enrollments(now - ENROLLMENT_IDLE_MS);
+        let removed = self.store.sweep_expired_mail(now) + slept;
         if removed > 0 {
             info!("Süpürmede {removed} teslim öğesi silindi");
             self.store.recount_mail_bytes();
