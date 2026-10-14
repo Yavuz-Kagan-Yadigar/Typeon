@@ -6,7 +6,9 @@ set -eu
 K="${TYPEON_SIGNING:-$HOME/.config/typeon-signing}"
 B="$HOME/Android/Sdk/build-tools/36.0.0"
 D="$(dirname "$0")/p2p_messenger_android/app/debug.keystore"
-"$B/apksigner" sign --out "$2" \
+# --rotation-min-sdk-version 28: the default (33) left Android 9-12 on the
+# tracked debug key.
+"$B/apksigner" sign --out "$2" --rotation-min-sdk-version 28 --v4-signing-enabled false \
   --ks "$D" --ks-key-alias androiddebugkey --ks-pass pass:android \
   --next-signer --ks "$K/typeon-release.jks" --ks-key-alias typeon --ks-pass "file:$K/pass.txt" \
   --lineage "$K/lineage.bin" "$1"
