@@ -5098,8 +5098,9 @@ impl P2PCore {
             return true;
         }
         let own_fp = self.own_mailbox_topic_fp.as_deref();
+        // A code whose pairing never completed: only its first 7 days.
         let Some(identity) = self.known_remote_devices.get(fp).or_else(|| self.own_devices.get(fp)).map(|d| &d.identity_id) else {
-            return true;
+            return false;
         };
         self.known_remote_devices.values().chain(self.own_devices.values())
             .filter(|d| d.is_active && &d.identity_id == identity && Some(d.device_fingerprint.as_str()) != own_fp)
@@ -5131,16 +5132,22 @@ impl P2PCore {
 
     /// Gives the founder device that sent a group update our group
     /// first-contact secret, once (bkz. `GroupMemberDevice.first_contact_secret`).
-    fn give_founder_contact_secret(&mut self, group_id: &str, sender_identity_id: &str, peer_fp: &str) {
-        let Some(g) = self.groups.get(group_id) else { return };
+    /// Again whenever the founder's update lists this device without it (the
+    /// founder lost it); once per founder device when it lists another
+    /// device of ours.
+    fn give_founder_contact_secret(&mut self, update: &GroupUpdate, sender_identity_id: &str, peer_fp: &str) {
+        let Some(g) = self.groups.get(&update.group_id) else { return };
         if g.founder_identity_id != sender_identity_id || self.my_identity_id().as_deref() == Some(sender_identity_id) {
             return;
         }
+        let secret = self.own_group_contact_secret();
         let sent = format!("gfs:{}", peer_fp);
-        if self.meta_str(&sent).is_some() {
+        let listed = update.member_devices.iter()
+            .find(|d| Some(&d.device_fingerprint) == self.own_mailbox_topic_fp.as_ref())
+            .map(|d| d.first_contact_secret == secret);
+        if listed == Some(true) || (listed.is_none() && self.meta_str(&sent).is_some()) {
             return;
         }
-        let secret = self.own_group_contact_secret();
         if secret.len() == 16 && self.send_message_content(peer_fp.to_string(), &MessageContent::FirstContactSecret { secret }, None).is_ok() {
             self.meta_put(&sent, "1");
         }
@@ -11089,7 +11096,7 @@ impl P2PCore {
                 match self.process_group_update(&update) {
                     Ok(()) => {
                         self.send_ack(&peer_fp, &message_id);
-                        self.give_founder_contact_secret(&group_id, &sender_identity_id, &peer_fp);
+                        self.give_founder_contact_secret(&update, &sender_identity_id, &peer_fp);
                         serde_json::json!({"type": "group_updated", "peer": peer_fp, "group_id": group_id})
                     }
                     Err(e) => {
@@ -15064,11 +15071,18 @@ impl P2PCore {
                 .filter(|d| update.members.contains(&d.identity_id))
                 .cloned()
                 .collect();
-            let own_identity_id = self.my_identity_id().unwrap_or_default();
-            for d in devices.iter().filter(|d| d.first_contact_secret.len() == 16 && d.identity_id != own_identity_id) {
-                self.meta_put(&format!("gf:{}", d.device_fingerprint), &hex::encode(&d.first_contact_secret));
-            }
             self.adopt_vouched_member_devices(&devices, &update.member_device_proofs);
+            // Only for a device we hold with these keys (adopted above or
+            // known before), and the first one given wins: a founder of
+            // another group cannot redirect our first contact with it.
+            for d in devices.iter().filter(|d| d.first_contact_secret.len() == 16) {
+                let known = self.known_remote_devices.get(&d.device_fingerprint)
+                    .map_or(false, |k| k.sign_pubkey_ed25519 == d.sign_pubkey_ed25519 && k.sign_pubkey_mldsa == d.sign_pubkey_mldsa);
+                let key = format!("gf:{}", d.device_fingerprint);
+                if known && self.meta_str(&key).is_none() {
+                    self.meta_put(&key, &hex::encode(&d.first_contact_secret));
+                }
+            }
         }
         // The founder removed us (see `remove_from_group`'s removal notice):
         // close the group here, exactly like a founder delete.
@@ -15132,7 +15146,7 @@ impl P2PCore {
                         self.device_onion_addr.get(&d.device_fingerprint).cloned()
                             .or_else(|| self.device_last_addr.get(&d.device_fingerprint).cloned())
                     },
-                    first_contact_secret: if *id == own_identity_id {
+                    first_contact_secret: if Some(&d.device_fingerprint) == self.own_mailbox_topic_fp.as_ref() {
                         self.own_group_contact_secret()
                     } else {
                         self.meta_str(&format!("gf:{}", d.device_fingerprint)).and_then(|v| hex::decode(v).ok()).unwrap_or_default()
