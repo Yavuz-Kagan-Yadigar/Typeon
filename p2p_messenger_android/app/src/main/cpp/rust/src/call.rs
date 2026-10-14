@@ -471,20 +471,18 @@ pub fn media_send(kind: u8, payload: &[u8]) -> bool {
     }
     if kind == KIND_AUDIO {
         let now = current_time_ms();
-        let fresh: HashMap<String, u32> = m.reports.iter()
-            .filter(|(_, (_, at))| now.saturating_sub(*at) < REPORT_TTL_MS)
-            .map(|(fp, (q, _))| (fp.clone(), *q))
-            .collect();
-        for (fp, t) in m.targets.iter_mut() {
-            let q = fresh.get(fp).copied().unwrap_or(0);
+        let Media { targets, reports, .. } = &mut *m;
+        for (fp, t) in targets.iter_mut() {
+            let q = reports.get(fp).filter(|(_, at)| now.saturating_sub(*at) < REPORT_TTL_MS).map_or(0, |(q, _)| *q);
             if t.audio_hold && q < AUDIO_HOLD_BELOW_MS {
                 t.audio_hold = false;
             } else if !t.audio_hold && q > AUDIO_HOLD_ABOVE_MS {
                 t.audio_hold = true;
             }
         }
-        if m.targets.values().all(|t| t.audio_hold) {
-            m.dropped += 1;
+        let held = m.targets.values().filter(|t| t.audio_hold).count();
+        m.dropped += held as u64;
+        if held == m.targets.len() {
             return false;
         }
     }
