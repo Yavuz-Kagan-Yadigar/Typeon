@@ -161,10 +161,22 @@ impl TorHandle {
         trim_dir_cache(cache_dir);
         let config = client_config(state_dir, cache_dir)?;
 
-        let client = TorClient::with_runtime(runtime)
-            .config(config)
-            .create_unbootstrapped()
-            .map_err(|e| format!("Arti client: {e}"))?;
+        let client = match TorClient::with_runtime(runtime.clone()).config(config).create_unbootstrapped() {
+            Ok(client) => client,
+            // A power loss mid-write leaves a state file (guards) that arti
+            // refuses for good: the server never came back. That state is
+            // only a cache of the network; the onion identity is in
+            // `keystore/`, which stays.
+            Err(e) if e.to_string().contains("corrupted data in persistent state") => {
+                log::warn!("Tor: persistent state corrupted, cleared ({e})");
+                let _ = std::fs::remove_dir_all(std::path::Path::new(state_dir).join("state"));
+                TorClient::with_runtime(runtime)
+                    .config(client_config(state_dir, cache_dir)?)
+                    .create_unbootstrapped()
+                    .map_err(|e| format!("Arti client: {e}"))?
+            }
+            Err(e) => return Err(format!("Arti client: {e}")),
+        };
         let client = Arc::new(client);
 
         let status = Arc::new(Mutex::new(TorStatus::Bootstrapping));
