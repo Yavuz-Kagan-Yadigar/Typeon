@@ -159,41 +159,42 @@ impl TorHandle {
             .map_err(|e| format!("TokioRustlsRuntime alınamadı: {e}"))?;
 
         trim_dir_cache(cache_dir);
-        let config = client_config(state_dir, cache_dir)?;
 
-        let client = match TorClient::with_runtime(runtime.clone()).config(config).create_unbootstrapped() {
-            Ok(client) => client,
-            // A power loss mid-write leaves a state file (guards) that arti
-            // refuses for good: the server never came back. That state is
-            // only a cache of the network; the onion identity is in
-            // `keystore/`, which stays.
-            Err(e) if e.to_string().contains("corrupted data in persistent state") => {
+        // A power loss mid-write leaves a state file (guards, intro points)
+        // that arti refuses on every start: the server never came back. That
+        // state is a network cache; the onion identity is in `keystore/`,
+        // which stays. Cleared once, then one more try.
+        let start = || -> Result<_, String> {
+            let client = TorClient::with_runtime(runtime.clone())
+                .config(client_config(state_dir, cache_dir)?)
+                .create_unbootstrapped()
+                .map_err(|e| format!("Arti client: {e}"))?;
+            let nickname: tor_hsservice::HsNickname = ONION_NICKNAME
+                .parse()
+                .map_err(|e| format!("Onion nickname: {e}"))?;
+            let svc_config = OnionServiceConfigBuilder::default()
+                .nickname(nickname)
+                .build()
+                .map_err(|e| format!("Onion config: {e}"))?;
+            let (service, rend_requests) = client
+                .launch_onion_service(svc_config)
+                .map_err(|e| format!("Onion service başlatılamadı: {e}"))?;
+            Ok((client, service, rend_requests))
+        };
+        let (client, service, rend_requests) = match start() {
+            Err(e) if e.contains("corrupted data in persistent state") => {
                 log::warn!("Tor: persistent state corrupted, cleared ({e})");
-                let _ = std::fs::remove_dir_all(std::path::Path::new(state_dir).join("state"));
-                TorClient::with_runtime(runtime)
-                    .config(client_config(state_dir, cache_dir)?)
-                    .create_unbootstrapped()
-                    .map_err(|e| format!("Arti client: {e}"))?
+                for dir in ["state", "hss"] {
+                    let _ = std::fs::remove_dir_all(std::path::Path::new(state_dir).join(dir));
+                }
+                start()?
             }
-            Err(e) => return Err(format!("Arti client: {e}")),
+            other => other?,
         };
         let client = Arc::new(client);
 
         let status = Arc::new(Mutex::new(TorStatus::Bootstrapping));
         let onion_addr = Arc::new(Mutex::new(None::<String>));
-
-        // Onion service'i başlat (bootstrap'ı beklemez — publish, client
-        // bootstrap olunca gerçekleşir; .onion adı anahtardan hemen türetilir).
-        let nickname: tor_hsservice::HsNickname = ONION_NICKNAME
-            .parse()
-            .map_err(|e| format!("Onion nickname: {e}"))?;
-        let svc_config = OnionServiceConfigBuilder::default()
-            .nickname(nickname)
-            .build()
-            .map_err(|e| format!("Onion config: {e}"))?;
-        let (service, rend_requests) = client
-            .launch_onion_service(svc_config)
-            .map_err(|e| format!("Onion service başlatılamadı: {e}"))?;
 
         // .onion adını (varsa) hemen yakala.
         if let Some(hsid) = service.onion_name() {
