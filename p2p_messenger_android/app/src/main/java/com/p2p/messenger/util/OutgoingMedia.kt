@@ -294,7 +294,10 @@ object OutgoingMedia {
             m.release()
             muxer = null
             if (container != MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM) scrubMp4(out)
-            if (mimeType == "video/quicktime") {
+            // An MP4 box under another name (a .mov the provider called
+            // video/mp4, or video/quicktime) is named for what it now is.
+            val ext = fileName.substringAfterLast('.', "").lowercase()
+            if (container == MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4 && ext != "mp4" && ext != "m4v") {
                 return Prepared(out, fileName.substringBeforeLast('.', fileName) + ".mp4", "video/mp4")
             }
             return Prepared(out, fileName, mimeType)
