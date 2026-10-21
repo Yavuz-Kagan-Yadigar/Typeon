@@ -646,6 +646,8 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
             if in_flight.replace(true) {
                 return glib::ControlFlow::Continue;
             }
+            // Past the cap the timer stops (checked before `attempts` moves below).
+            let give_up = attempts.get() >= 60;
             let (qr_slot, status, attempts, in_flight) =
                 (qr_slot.clone(), status.clone(), attempts.clone(), in_flight.clone());
             app::run_in_background(
@@ -683,7 +685,7 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
                     }
                 },
             );
-            if attempts.get() >= 60 {
+            if give_up {
                 glib::ControlFlow::Break
             } else {
                 glib::ControlFlow::Continue

@@ -53,11 +53,13 @@ struct State {
     strokes: Vec<Stroke>,
     /// Drawn here, not echoed back by the core yet.
     pending: Vec<Stroke>,
-    /// M148: pending strokes erased while their add is still in flight. The
-    /// core does not know them yet — they cannot be erased by id until the
-    /// add is acked, and `add_stroke`'s callback then finishes the job (and
-    /// must not resurrect the stroke on screen meanwhile).
-    erased_pending: Vec<Stroke>,
+    /// M148: pending strokes erased while their add is still in flight,
+    /// tagged with the page they were drawn on (a same-shaped stroke on a
+    /// different page must not inherit this erase). The core does not know
+    /// them yet — they cannot be erased by id until the add is acked, and
+    /// `add_stroke`'s callback then finishes the job (and must not resurrect
+    /// the stroke on screen meanwhile).
+    erased_pending: Vec<(u8, Stroke)>,
     current: Vec<(f64, f64)>,
     drag_origin: (f64, f64),
     shade: u8,
@@ -598,11 +600,14 @@ impl Inner {
                             let erased = st
                                 .erased_pending
                                 .iter()
-                                .position(|p| p.points == stroke.points)
-                                .is_some();
+                                .any(|(entry_page, p)| {
+                                    *entry_page == page && p.points == stroke.points
+                                });
                             if erased {
                                 st.erased_pending
-                                    .retain(|p| p.points != stroke.points);
+                                    .retain(|(entry_page, p)| {
+                                        !(*entry_page == page && p.points == stroke.points)
+                                    });
                                 if !ids.is_empty() {
                                     if let Some(step) = st.undo.iter_mut().rev().find(|s| {
                                         !s.live
@@ -681,7 +686,10 @@ impl Inner {
             let (pending_hit, keep): (Vec<Stroke>, Vec<Stroke>) =
                 st.pending.drain(..).partition(|s| near(s, p));
             st.pending = keep;
-            st.erased_pending.extend(pending_hit.iter().cloned());
+            let this_page = st.page;
+            for stroke in pending_hit.iter() {
+                st.erased_pending.push((this_page, stroke.clone()));
+            }
             (hit, pending_hit)
         };
         if hit.is_empty() && pending_hit.is_empty() {
@@ -695,10 +703,15 @@ impl Inner {
         let mut all = hit;
         all.extend(pending_hit);
         self.remember(Step { page, strokes: all, ids: ids.clone(), live: false });
-        let (peer, gid) = (self.peer.clone(), self.group_id.clone());
-        std::thread::spawn(move || {
-            let _ = core::whiteboard_erase(&peer, &gid, &ids);
-        });
+        // Live hits have ids to erase now; a pending-only erase catches up in
+        // `add_stroke`'s ack (M148). Sending an empty id list would be a
+        // pointless core round trip.
+        if !ids.is_empty() {
+            let (peer, gid) = (self.peer.clone(), self.group_id.clone());
+            std::thread::spawn(move || {
+                let _ = core::whiteboard_erase(&peer, &gid, &ids);
+            });
+        }
         self.area.queue_draw();
         self.schedule_ticks();
     }
@@ -752,7 +765,7 @@ impl Inner {
                     // M148: the restore went out, so the erase remembered
                     // for those shapes must not fire on the ack.
                     if !restored_points.is_empty() {
-                        st.erased_pending.retain(|p| {
+                        st.erased_pending.retain(|(_, p)| {
                             !restored_points.iter().any(|pts| *pts == p.points)
                         });
                     }

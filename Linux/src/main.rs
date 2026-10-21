@@ -104,12 +104,35 @@ fn activate(application: &adw::Application) {
         return;
     }
     let hold = application.hold();
+    // H134: a window has to exist while the probe blocks — that wait is
+    // exactly when the user is staring at the launcher. A bare spinner
+    // splash is enough; the real boot (below, in the probe's completion
+    // handler) replaces it.
+    let splash = adw::Window::builder()
+        .application(application)
+        .title("Typeon")
+        .default_width(280)
+        .default_height(140)
+        .resizable(false)
+        .build();
+    let splash_status = adw::StatusPage::builder()
+        .title("Starting Typeon")
+        .description("Checking the system keyring…")
+        .build();
+    let splash_spinner = gtk::Spinner::new();
+    splash_spinner.set_spinning(true);
+    splash_status.set_child(Some(&splash_spinner));
+    splash.set_content(Some(&splash_status));
+    splash.present();
     let application_owned = application.clone();
     app::run_in_background(keyring::ensure_available, move |probe| {
     // Only the probe is guarded: a later activate (window closed) builds again.
     STARTING.store(false, std::sync::atomic::Ordering::Release);
     let _hold = hold;
     let application = &application_owned;
+    // The splash has served its purpose — closed on the happy and the error
+    // path alike (the UI-test early returns close it first thing, too).
+    splash.close();
     let backend = match probe {
         Ok(backend) => backend,
         Err(reason) => {

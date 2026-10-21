@@ -294,15 +294,24 @@ pub fn add_contact(app: &Rc<App>) {
         "identity|fingerprint|nonce|name|/ip4/…",
         "",
         "Add",
-        move |text| match core::process_manual_entry(&text) {
-            Ok(peer) => {
-                app_for_submit.refresh_caches();
-                app_for_submit.toast(&format!(
-                    "Pairing with {} — this finishes once both devices are reachable.",
-                    peer.device_name
-                ));
-            }
-            Err(error) => app_for_submit.toast(&format!("Could not add contact: {}", error)),
+        move |text| {
+            // Core lock — the poll thread can hold it for seconds — so the
+            // manual-entry processing runs off the GTK thread and the UI only
+            // reports the result (H125 pattern).
+            let app = app_for_submit.clone();
+            crate::app::run_in_background(
+                move || core::process_manual_entry(&text),
+                move |result| match result {
+                    Ok(peer) => {
+                        app.refresh_caches();
+                        app.toast(&format!(
+                            "Pairing with {} — this finishes once both devices are reachable.",
+                            peer.device_name
+                        ));
+                    }
+                    Err(error) => app.toast(&format!("Could not add contact: {}", error)),
+                },
+            );
         },
     );
 }
@@ -576,6 +585,7 @@ pub fn linked_devices(app: &Rc<App>) {
                     group.add(&row);
                     rows.borrow_mut().push(row);
                 }
+            });
         })
     };
 
@@ -710,6 +720,7 @@ pub fn pending_messages(app: &Rc<App>) {
                     group.add(&row);
                     rows.borrow_mut().push(row);
                 }
+            });
         })
     };
 

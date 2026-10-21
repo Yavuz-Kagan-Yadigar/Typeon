@@ -86,7 +86,7 @@ pub fn texture_from_hex(hex_string: &str) -> Option<gdk::Texture> {
         if c.len() >= CACHE_MAX_ENTRIES || total + new_cost > CACHE_BYTE_BUDGET {
             c.clear();
         }
-        c.insert(key, texture.clone());
+        c.insert(key, (texture.as_ref().map(|(t, _)| t.clone()), new_cost));
     });
     texture.map(|(t, _)| t)
 }

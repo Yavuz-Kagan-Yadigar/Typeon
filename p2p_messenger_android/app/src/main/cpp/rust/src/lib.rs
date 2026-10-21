@@ -12399,6 +12399,8 @@ impl P2PCore {
         self.fast_reconnect_fps.clear();
         self.keepalive_state.clear();
         self.message_rate_limiter.clear();
+        self.server_mail_rate = (0, 0);
+        self.unknown_peer_rate = (0, 0);
         self.bulk_health.clear();
         self.extra_conns.clear();
         self.bulk_dials.clear();
