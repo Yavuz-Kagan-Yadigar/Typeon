@@ -223,7 +223,7 @@ class SettingsFragment : Fragment() {
             val result = try { change() } catch (e: Exception) { "Error: ${e.message}" }
             if (!result.startsWith("Error")) return@launch
             withContext(Dispatchers.Main) {
-                Toast.makeText(switch.context, result, Toast.LENGTH_LONG).show()
+                Toast.makeText(switch.context, com.p2p.messenger.util.coreErrorText(switch.context, result), Toast.LENGTH_LONG).show()
                 revertingServerToggle = true
                 switch.isChecked = !checked
                 revertingServerToggle = false
@@ -359,7 +359,7 @@ class SettingsFragment : Fragment() {
                 "Error: ${e.message}"
             }
             if (result.startsWith("Error:")) {
-                Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), com.p2p.messenger.util.coreErrorText(requireContext(), result), Toast.LENGTH_SHORT).show()
             } else {
                 relayAddressInput.text.clear()
                 Toast.makeText(requireContext(), R.string.msg_relay_address_added, Toast.LENGTH_SHORT).show()
@@ -624,7 +624,7 @@ class SettingsFragment : Fragment() {
                     val result = try { P2PLib.revokeLinkedDevice(fingerprint) } catch (e: Exception) { "Error: ${e.message}" }
                     withContext(Dispatchers.Main) {
                         Toast.makeText(ctx,
-                            if (result.startsWith("Error:")) result else ctx.getString(R.string.msg_device_revoked),
+                            if (result.startsWith("Error:")) com.p2p.messenger.util.coreErrorText(ctx, result) else ctx.getString(R.string.msg_device_revoked),
                             Toast.LENGTH_SHORT).show()
                     }
                 }
@@ -1311,7 +1311,7 @@ class SettingsFragment : Fragment() {
                     withContext(Dispatchers.Main) {
                         if (!isAdded) return@withContext
                         if (result.startsWith("Error:")) {
-                            Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
+                            Toast.makeText(requireContext(), com.p2p.messenger.util.coreErrorText(requireContext(), result), Toast.LENGTH_LONG).show()
                             refreshDisplayName()
                         } else {
                             Toast.makeText(requireContext(), R.string.msg_display_name_changed, Toast.LENGTH_SHORT).show()
@@ -1384,7 +1384,7 @@ class SettingsFragment : Fragment() {
             }
             if (result.startsWith("Error:")) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
+                    Toast.makeText(requireContext(), com.p2p.messenger.util.coreErrorText(requireContext(), result), Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -1503,7 +1503,7 @@ class SettingsFragment : Fragment() {
             }
             withContext(Dispatchers.Main) {
                 if (result.startsWith("Error:")) {
-                    Toast.makeText(ctx, result, Toast.LENGTH_LONG).show()
+                    Toast.makeText(ctx, com.p2p.messenger.util.coreErrorText(ctx, result), Toast.LENGTH_LONG).show()
                 } else {
                     Toast.makeText(ctx, R.string.msg_server_added, Toast.LENGTH_SHORT).show()
                     if (view != null) refreshServers()
@@ -1629,7 +1629,7 @@ class SettingsFragment : Fragment() {
                         "Error: ${e.message}"
                     }
                     withContext(Dispatchers.Main) {
-                        val msg = if (result.startsWith("Error:")) result
+                        val msg = if (result.startsWith("Error:")) com.p2p.messenger.util.coreErrorText(ctx, result)
                         else ctx.getString(R.string.msg_restore_started)
                         Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
                     }

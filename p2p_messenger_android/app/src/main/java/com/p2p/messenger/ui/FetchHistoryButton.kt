@@ -70,7 +70,7 @@ class FetchHistoryButton(
                 if (current != request || !button.isAttachedToWindow) return@post
                 if (result != "OK") {
                     finish()
-                    Toast.makeText(button.context, result.removePrefix("Error: "), Toast.LENGTH_LONG).show()
+                    Toast.makeText(button.context, com.p2p.messenger.util.coreErrorText(button.context, result), Toast.LENGTH_LONG).show()
                 } else {
                     // No reply (server offline, nothing older): the button comes back.
                     button.postDelayed({ if (current == request) finish() }, REPLY_WAIT_MS)

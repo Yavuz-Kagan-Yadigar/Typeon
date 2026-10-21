@@ -806,7 +806,7 @@ class ChatActivity : AppCompatActivity() {
             }
             withContext(Dispatchers.Main) {
                 if (result.startsWith("Error:")) {
-                    Toast.makeText(this@ChatActivity, result, Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@ChatActivity, com.p2p.messenger.util.coreErrorText(this@ChatActivity, result), Toast.LENGTH_SHORT).show()
                 } else {
                     val obj = JSONObject(result)
                     adapter.addMessage(
@@ -1699,7 +1699,7 @@ class ChatActivity : AppCompatActivity() {
             }
             if (plainPath.startsWith("Error:")) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@ChatActivity, plainPath, Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@ChatActivity, com.p2p.messenger.util.coreErrorText(this@ChatActivity, plainPath), Toast.LENGTH_SHORT).show()
                 }
                 return@launch
             }
@@ -1732,7 +1732,7 @@ class ChatActivity : AppCompatActivity() {
                     if (result.startsWith("Error:")) {
                         withContext(Dispatchers.Main) {
                             adapter.applyAttachmentUpdate(attachment.fileId, SimpleChatAdapter.AttachmentStatus.FAILED)
-                            Toast.makeText(this@ChatActivity, result, Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@ChatActivity, com.p2p.messenger.util.coreErrorText(this@ChatActivity, result), Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
@@ -1826,7 +1826,7 @@ class ChatActivity : AppCompatActivity() {
                 )
                 withContext(Dispatchers.Main) {
                     if (result.startsWith("Error:")) {
-                        Toast.makeText(this@ChatActivity, result, Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@ChatActivity, com.p2p.messenger.util.coreErrorText(this@ChatActivity, result), Toast.LENGTH_SHORT).show()
                     } else {
                         val obj = JSONObject(result)
                         adapter.addMessage(
@@ -1924,7 +1924,7 @@ class ChatActivity : AppCompatActivity() {
                 )
                 withContext(Dispatchers.Main) {
                     if (result.startsWith("Error:")) {
-                        Toast.makeText(this@ChatActivity, result, Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@ChatActivity, com.p2p.messenger.util.coreErrorText(this@ChatActivity, result), Toast.LENGTH_SHORT).show()
                     } else {
                         val obj = JSONObject(result)
                         adapter.addMessage(

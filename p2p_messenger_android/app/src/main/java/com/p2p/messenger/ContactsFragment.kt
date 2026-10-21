@@ -93,7 +93,7 @@ class ContactsFragment : Fragment() {
     /** Çekirdek bir hatayı "Error: ..." metniyle döner; kullanıcıya
      *  gösterilen metin kaynaktan gelir (sabit İngilizce değil). */
     private fun errorText(result: String): String =
-        getString(R.string.error_with_message, result.removePrefix("Error:").trim())
+        com.p2p.messenger.util.coreErrorText(requireContext(), result)
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
         val view = inflater.inflate(R.layout.fragment_contacts, container, false)

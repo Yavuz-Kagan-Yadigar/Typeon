@@ -314,7 +314,7 @@ class CallActivity : AppCompatActivity() {
             ui.post {
                 starting = false
                 if (r.startsWith("Error")) {
-                    Toast.makeText(this, r.removePrefix("Error: "), Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, com.p2p.messenger.util.coreErrorText(this, r), Toast.LENGTH_LONG).show()
                     finish()
                 }
             }

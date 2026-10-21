@@ -46,6 +46,7 @@ import com.p2p.messenger.P2PLib
 import com.p2p.messenger.R
 import com.p2p.messenger.service.P2PService
 import com.p2p.messenger.util.AppLock
+import com.p2p.messenger.util.coreErrorText
 import com.p2p.messenger.util.AppRestarter
 import com.p2p.messenger.util.AvatarUtil
 import com.p2p.messenger.util.CapturedImage
@@ -1193,7 +1194,7 @@ class GroupChatActivity : AppCompatActivity() {
                         try { P2PLib.transferGroupFounder(gid, identityId) } catch (e: Throwable) { "Error: ${e.message}" }
                     }
                     if (result.startsWith("Error:")) {
-                        Toast.makeText(this@GroupChatActivity, result, Toast.LENGTH_LONG).show()
+                        Toast.makeText(this@GroupChatActivity, com.p2p.messenger.util.coreErrorText(this@GroupChatActivity, result), Toast.LENGTH_LONG).show()
                     } else {
                         Toast.makeText(this@GroupChatActivity, R.string.msg_founder_transferred, Toast.LENGTH_LONG).show()
                         refreshGroupInfo()
@@ -1213,16 +1214,16 @@ class GroupChatActivity : AppCompatActivity() {
                 lifecycleScope.launch {
                     // H121: signed fan-out to every member; not on the main thread.
                     val ok = withContext(Dispatchers.IO) {
-                        try { P2PLib.removeFromGroup(gid, identityId) } catch (e: Throwable) { false }
+                        try { P2PLib.removeFromGroup(gid, identityId) } catch (e: Throwable) { "Error: ${e.message}" }
                     }
-                    if (ok) {
+                    if (ok == "OK") {
                         Toast.makeText(this@GroupChatActivity, R.string.msg_member_removed, Toast.LENGTH_SHORT).show()
                         // `refreshGroupInfo` is asynchronous; the dialog redraws now.
                         if (gid == groupId) memberIdentityIds = memberIdentityIds - identityId
                         refreshGroupInfo()
                         onRemoved()
                     } else {
-                        Toast.makeText(this@GroupChatActivity, R.string.error_network, Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@GroupChatActivity, coreErrorText(this@GroupChatActivity, ok), Toast.LENGTH_SHORT).show()
                     }
                 }
             }
@@ -1264,7 +1265,7 @@ class GroupChatActivity : AppCompatActivity() {
             }
             if (result.startsWith("Error:")) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@GroupChatActivity, result, Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@GroupChatActivity, com.p2p.messenger.util.coreErrorText(this@GroupChatActivity, result), Toast.LENGTH_SHORT).show()
                     refreshGroupInfo()
                 }
             }
@@ -1305,8 +1306,8 @@ class GroupChatActivity : AppCompatActivity() {
                 for (i in identityIds.indices) {
                     if (checked[i]) {
                         val ok = P2PLib.inviteToGroup(groupId, identityIds[i])
-                        if (!ok) {
-                            Toast.makeText(this, "${names[i]}: ${getString(R.string.error_network)}", Toast.LENGTH_SHORT).show()
+                        if (ok != "OK") {
+                            Toast.makeText(this, "${names[i]}: ${coreErrorText(this, ok)}", Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
@@ -1843,7 +1844,7 @@ class GroupChatActivity : AppCompatActivity() {
             }
             withContext(Dispatchers.Main) {
                 if (result.startsWith("Error:")) {
-                    Toast.makeText(this@GroupChatActivity, result, Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@GroupChatActivity, com.p2p.messenger.util.coreErrorText(this@GroupChatActivity, result), Toast.LENGTH_SHORT).show()
                 } else {
                     adapter.addMessage(
                         SimpleChatAdapter.Item(
@@ -2079,7 +2080,7 @@ class GroupChatActivity : AppCompatActivity() {
                 )
                 withContext(Dispatchers.Main) {
                     if (result.startsWith("Error:")) {
-                        Toast.makeText(this@GroupChatActivity, result, Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@GroupChatActivity, com.p2p.messenger.util.coreErrorText(this@GroupChatActivity, result), Toast.LENGTH_SHORT).show()
                     } else {
                         adapter.addMessage(
                             SimpleChatAdapter.Item(
@@ -2182,7 +2183,7 @@ class GroupChatActivity : AppCompatActivity() {
                 )
                 withContext(Dispatchers.Main) {
                     if (result.startsWith("Error:")) {
-                        Toast.makeText(this@GroupChatActivity, result, Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@GroupChatActivity, com.p2p.messenger.util.coreErrorText(this@GroupChatActivity, result), Toast.LENGTH_SHORT).show()
                     } else {
                         adapter.addMessage(
                             SimpleChatAdapter.Item(
@@ -2236,7 +2237,7 @@ class GroupChatActivity : AppCompatActivity() {
                     if (result.startsWith("Error:")) {
                         withContext(Dispatchers.Main) {
                             adapter.applyAttachmentUpdate(attachment.fileId, SimpleChatAdapter.AttachmentStatus.FAILED)
-                            Toast.makeText(this@GroupChatActivity, result, Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@GroupChatActivity, com.p2p.messenger.util.coreErrorText(this@GroupChatActivity, result), Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
@@ -2358,7 +2359,7 @@ class GroupChatActivity : AppCompatActivity() {
             }
             if (plainPath.startsWith("Error:")) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@GroupChatActivity, plainPath, Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@GroupChatActivity, com.p2p.messenger.util.coreErrorText(this@GroupChatActivity, plainPath), Toast.LENGTH_SHORT).show()
                 }
                 return@launch
             }

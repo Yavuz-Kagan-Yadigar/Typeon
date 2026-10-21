@@ -186,18 +186,27 @@ class QrScanActivity : AppCompatActivity() {
     private fun handleScannedText(text: String) {
         val cborBytes = if (addServerMode) ByteArray(0) else QrBinaryCodec.latin1StringToBytes(text)
         if (!addServerMode && !linkApproveMode) {
-            // #87: confirm before the handshake starts; cancel = nothing sent.
-            // ponytail: no name/safety code yet, needs a contact-QR peek JNI.
-            runOnUiThread {
-                if (isFinishing) return@runOnUiThread
-                androidx.appcompat.app.AlertDialog.Builder(this)
-                    .setTitle(R.string.title_confirm_contact)
-                    .setMessage(R.string.msg_confirm_contact)
-                    .setPositiveButton(android.R.string.ok) { _, _ -> runScanned(text, cborBytes) }
-                    .setNegativeButton(android.R.string.cancel) { _, _ -> rearmLater() }
-                    .setOnCancelListener { rearmLater() }
-                    .show()
-            }
+            // #87: confirm before the handshake starts (name + safety code from
+            // a side-effect-free peek); cancel = nothing sent.
+            Thread {
+                val peek = try { P2PLib.peekContactQr(cborBytes) } catch (e: Throwable) { "Error: ${e.message}" }
+                val obj = if (peek.startsWith("Error:")) null else try { JSONObject(peek) } catch (e: Exception) { null }
+                runOnUiThread {
+                    if (isFinishing) return@runOnUiThread
+                    if (obj == null) {
+                        Toast.makeText(this, com.p2p.messenger.util.coreErrorText(this, peek), Toast.LENGTH_LONG).show()
+                        rearmLater()
+                        return@runOnUiThread
+                    }
+                    androidx.appcompat.app.AlertDialog.Builder(this)
+                        .setTitle(R.string.title_confirm_contact)
+                        .setMessage(getString(R.string.msg_confirm_contact_named, obj.optString("name"), obj.optString("safety_code")))
+                        .setPositiveButton(android.R.string.ok) { _, _ -> runScanned(text, cborBytes) }
+                        .setNegativeButton(android.R.string.cancel) { _, _ -> rearmLater() }
+                        .setOnCancelListener { rearmLater() }
+                        .show()
+                }
+            }.start()
             return
         }
         // Not at once: any code caught in the frame added a server, or linked
@@ -254,7 +263,7 @@ class QrScanActivity : AppCompatActivity() {
                 // MODE_ADD_SERVER notu). Rust tarafı adresi ve jetonu
                 // kendisi ayrıştırır.
                 if (result.startsWith("Error:")) {
-                    Toast.makeText(this, result, Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, com.p2p.messenger.util.coreErrorText(this, result), Toast.LENGTH_LONG).show()
                     rearmLater()
                 } else {
                     Toast.makeText(this, getString(R.string.msg_server_added), Toast.LENGTH_LONG).show()
@@ -266,7 +275,7 @@ class QrScanActivity : AppCompatActivity() {
                 // Çoklu-cihaz (spec 1.5): taranan QR bir ikincil cihaz ekleme
                 // isteği — onayla, imzalı DeviceAdd + tam senkron gönder.
                 if (result.startsWith("Error:")) {
-                    Toast.makeText(this, result, Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, com.p2p.messenger.util.coreErrorText(this, result), Toast.LENGTH_LONG).show()
                     rearmLater()
                 } else {
                     Toast.makeText(this, getString(R.string.link_device_approved), Toast.LENGTH_LONG).show()
@@ -275,7 +284,7 @@ class QrScanActivity : AppCompatActivity() {
                 return@run
             }
             if (result.startsWith("Error:")) {
-                Toast.makeText(this, result, Toast.LENGTH_LONG).show()
+                Toast.makeText(this, com.p2p.messenger.util.coreErrorText(this, result), Toast.LENGTH_LONG).show()
                 rearmLater()
             } else {
                 // Spec dışı, kullanıcı isteği: ilk eşleşme (gerçek dial/

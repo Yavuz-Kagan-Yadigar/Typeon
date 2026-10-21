@@ -265,7 +265,7 @@ class MainActivity : AppCompatActivity() {
             }
             withContext(Dispatchers.Main) {
                 if (result.startsWith("Error:")) {
-                    Toast.makeText(this@MainActivity, result, Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, com.p2p.messenger.util.coreErrorText(this@MainActivity, result), Toast.LENGTH_LONG).show()
                 } else {
                     Toast.makeText(this@MainActivity, R.string.msg_server_added, Toast.LENGTH_LONG).show()
                 }
@@ -372,7 +372,7 @@ class MainActivity : AppCompatActivity() {
             }
             if (identityId.startsWith("Error:")) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, identityId, Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, com.p2p.messenger.util.coreErrorText(this@MainActivity, identityId), Toast.LENGTH_LONG).show()
                     showDeviceNameDialog()
                 }
                 return@launch
@@ -419,7 +419,7 @@ class MainActivity : AppCompatActivity() {
                 try { P2PLib.createIdentity(deviceName) } catch (e: Exception) { "Error: ${e.message}" }
             }
             if (identityId.startsWith("Error:")) {
-                Toast.makeText(this@MainActivity, identityId, Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, com.p2p.messenger.util.coreErrorText(this@MainActivity, identityId), Toast.LENGTH_LONG).show()
                 showDeviceNameDialog()
                 return@launch
             }
@@ -695,7 +695,7 @@ class MainActivity : AppCompatActivity() {
             val result = try { P2PLib.blockIdentity(identityId) } catch (e: Exception) { "Error: ${e.message}" }
             withContext(Dispatchers.Main) {
                 if (result.startsWith("Error:")) {
-                    Toast.makeText(this@MainActivity, result, Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, com.p2p.messenger.util.coreErrorText(this@MainActivity, result), Toast.LENGTH_LONG).show()
                 } else {
                     Toast.makeText(this@MainActivity, R.string.msg_identity_blocked, Toast.LENGTH_SHORT).show()
                 }

@@ -393,15 +393,24 @@ object P2PLib {
      *  not premultiplied; changed by the call) to [outPath]. "OK" or "Error: ...". */
     external fun encodeJxlLossless(bitmap: android.graphics.Bitmap, hasAlpha: Boolean, outPath: String): String
 
+    /** Animated lossless JPEG XL; [frames] = full-canvas RGBA (<= 300 frames, <= 24 MP in all). "OK" or "Error: ...". */
+    external fun encodeJxlAnimated(frames: Array<ByteArray>, width: Int, height: Int, delaysMs: IntArray, hasAlpha: Boolean, outPath: String): String
+    /** An animated JPEG XL as GIF. "OK" or "Error: ...". */
+    external fun jxlToGif(inPath: String, outPath: String): String
+    /** Contact QR preview, no side effects: JSON {name, short_code, safety_code, identity_id, device_fingerprint} or "Error: CODE: ...". */
+    external fun peekContactQr(data: ByteArray): String
+
     // --- Bölüm 5: Grup mesajlaşma ---
     /** JSON-encoded List<GroupSummary>. */
     external fun listGroups(): String
     external fun createGroup(name: String): String
-    external fun inviteToGroup(groupId: String, identityId: String): Boolean
+    /** "OK" or "Error: CODE: detail". */
+    external fun inviteToGroup(groupId: String, identityId: String): String
     /** "Retry" on a group bubble: 1 = sent again to the devices that missed
      *  it, 0 = nothing recorded for this id, -1 = nothing could be sent. */
     external fun retryGroupMessageCopies(groupId: String, localId: String): Int
-    external fun removeFromGroup(groupId: String, identityId: String): Boolean
+    /** "OK" or "Error: CODE: detail". */
+    external fun removeFromGroup(groupId: String, identityId: String): String
     /** Spec dışı, kullanıcı isteği: grubu TÜM üyeler için siler (imzalı
      *  `GroupChange::Delete` herkese gönderilir). SADECE kurucu için
      *  başarılıdır; aksi halde "Error: ..." döner. */

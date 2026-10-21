@@ -512,4 +512,15 @@
     <string name="msg_loading">Loading…</string>
     <string name="action_resend_group">Resend group to everyone</string>
     <string name="msg_group_resent">Group sent to everyone again</string>
+    <string name="err_core_locked">The app is locked. Unlock it and try again.</string>
+    <string name="err_core_not_founder">Only the group founder can do this.</string>
+    <string name="err_core_already">This was already done.</string>
+    <string name="err_core_blocked">This contact is blocked.</string>
+    <string name="err_core_too_large">Too large.</string>
+    <string name="err_core_no_session">No secure session with this contact yet.</string>
+    <string name="err_core_invalid">Invalid input or code.</string>
+    <string name="err_core_not_allowed">Not allowed.</string>
+    <string name="err_core_not_found">Not found.</string>
+    <string name="err_core_internal">Something went wrong inside the app.</string>
+    <string name="msg_confirm_contact_named">Add %1$s?\n\nSafety code: %2$s\n\nCompare this code with your contact before you accept.</string>
 </resources>

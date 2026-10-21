@@ -73,7 +73,7 @@ class ChatsFragment : Fragment() {
     /** Çekirdek bir hatayı "Error: ..." metniyle döner; kullanıcıya
      *  gösterilen metin kaynaktan gelir (sabit İngilizce değil). */
     private fun errorText(result: String): String =
-        getString(R.string.error_with_message, result.removePrefix("Error:").trim())
+        com.p2p.messenger.util.coreErrorText(requireContext(), result)
     private val refreshHandler = Handler(Looper.getMainLooper())
     /**
      * 5 saniyede bir TAM liste yeniden kurma YOK: her turda (ve her açık
@@ -395,10 +395,11 @@ class ChatsFragment : Fragment() {
                     .setMultiChoiceItems(names, checked) { _, which, isChecked -> checked[which] = isChecked }
                     .setPositiveButton(R.string.lbl_add_member_to_group) { _, _ ->
                         offMain({
-                            identityIds.indices.filter { checked[it] && !P2PLib.inviteToGroup(groupId, identityIds[it]) }
+                            identityIds.indices.filter { checked[it] }
+                                .map { it to P2PLib.inviteToGroup(groupId, identityIds[it]) }.filter { it.second != "OK" }
                         }) { failed ->
-                            for (i in failed) {
-                                Toast.makeText(requireContext(), "${names[i]}: ${getString(R.string.error_network)}", Toast.LENGTH_SHORT).show()
+                            for ((i, r) in failed) {
+                                Toast.makeText(requireContext(), "${names[i]}: ${errorText(r)}", Toast.LENGTH_SHORT).show()
                             }
                             refreshList()
                         }

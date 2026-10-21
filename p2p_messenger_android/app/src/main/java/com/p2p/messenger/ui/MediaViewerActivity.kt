@@ -142,6 +142,30 @@ class MediaViewerActivity : AppCompatActivity() {
                 videoHandler.post(videoProgressRunnable)
             }
             setupVideoControls(videoView)
+        } else if (mimeType == "image/gif" && Build.VERSION.SDK_INT >= 28) {
+            // Animated (a received animated JPEG XL arrives as .gif). No pinch-zoom: fit-center.
+            lifecycleScope.launch(Dispatchers.IO) {
+                val drawable = try {
+                    android.graphics.ImageDecoder.decodeDrawable(android.graphics.ImageDecoder.createSource(contentResolver, uri))
+                } catch (e: Throwable) { null }
+                withContext(Dispatchers.Main) {
+                    progress.visibility = View.GONE
+                    if (drawable == null) {
+                        Toast.makeText(this@MediaViewerActivity, R.string.error_attachment_open_failed, Toast.LENGTH_SHORT).show()
+                        finish()
+                    } else {
+                        val imageView = findViewById<ImageView>(R.id.imgViewerImage)
+                        imageView.scaleType = ImageView.ScaleType.FIT_CENTER
+                        imageView.visibility = View.VISIBLE
+                        imageView.setImageDrawable(drawable)
+                        (drawable as? android.graphics.drawable.AnimatedImageDrawable)?.apply {
+                            repeatCount = android.graphics.drawable.AnimatedImageDrawable.REPEAT_INFINITE
+                            start()
+                        }
+                        imageView.setOnClickListener { finish() }
+                    }
+                }
+            }
         } else {
             // Görsel — büyük dosyaları TAM çözünürlükte belleğe yüklememek
             // için ekran boyutuna göre bir `inSampleSize` hesaplanır (bkz.

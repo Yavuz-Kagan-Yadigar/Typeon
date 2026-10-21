@@ -21,8 +21,8 @@ import kotlinx.coroutines.launch
  *
  * - Image, default: JPEG quality 90, upright, without metadata; an image with
  *   transparent pixels becomes lossless JPEG XL; one over the pixel cap is
- *   scaled down first. Left as it is: GIF, animated WebP/APNG (the animation
- *   would be lost).
+ *   scaled down first. GIF becomes animated JPEG XL; animated WebP/APNG are left as
+ *   they are (no frame decoder).
  * - Image, "hi-res": a JPEG goes as it is (the core strips its EXIF); any
  *   other format becomes lossless JPEG XL.
  * - Video: MP4, 3GP and WebM are copied into a new container without
@@ -39,6 +39,7 @@ object OutgoingMedia {
     /** Same cap as the core's `attachments::MAX_IMAGE_PIXELS`: a larger
      *  hi-res image becomes JPEG, the receiver could not open the JPEG XL. */
     private const val MAX_JXL_PIXELS = 24_000_000L
+    private const val MAX_ANIM_FRAMES = 300
 
     class Prepared(val file: File, val fileName: String, val mimeType: String)
 
@@ -84,8 +85,9 @@ object OutgoingMedia {
 
     /** A saved hi-res image: the core opens a JPEG XL as PNG, so it is stored under that name and type. */
     fun savedAs(plain: File, fileName: String, mimeType: String): Pair<String, String> =
-        if (plain.extension.equals("png", true) && fileName.endsWith(".jxl", true)) {
-            fileName.dropLast(4) + ".png" to "image/png"
+        if (fileName.endsWith(".jxl", true) && (plain.extension.equals("png", true) || plain.extension.equals("gif", true))) {
+            val gif = plain.extension.equals("gif", true)
+            fileName.dropLast(4) + (if (gif) ".gif" else ".png") to (if (gif) "image/gif" else "image/png")
         } else {
             fileName to mimeType
         }
@@ -126,7 +128,10 @@ object OutgoingMedia {
 
     private fun prepareImage(src: File, fileName: String, hiRes: Boolean): Prepared? {
         val head = ByteArray(256).also { b -> src.inputStream().use { it.read(b) } }
-        if (isGif(head) || isAnimatedWebp(head) || isImageSequence(head) || isAnimatedPng(head, src)) return null
+        // #46d: GIF -> animated JPEG XL (own decoder). Animated WebP/APNG have no frame
+        // decoder on API 26+ here: they, and GIFs over the caps, go unchanged.
+        if (isGif(head)) return animatedGif(src, fileName)
+        if (isAnimatedWebp(head) || isImageSequence(head) || isAnimatedPng(head, src)) return null
         if (hiRes && isJpeg(head)) return null
         // Size from the header, before a decode that could run out of memory.
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -164,6 +169,18 @@ object OutgoingMedia {
         } finally {
             bitmap.recycle()
         }
+    }
+
+    private fun animatedGif(src: File, fileName: String): Prepared? {
+        val gif = GifFrames.decode(src, MAX_ANIM_FRAMES, MAX_JXL_PIXELS) ?: return null
+        val out = sibling(src)
+        val result = P2PLib.encodeJxlAnimated(gif.frames, gif.width, gif.height, gif.delaysMs, gif.hasAlpha, out.absolutePath)
+        if (result != "OK") {
+            out.delete()
+            Log.w(TAG, "animated JPEG XL: $result")
+            return null
+        }
+        return Prepared(out, fileName.substringBeforeLast('.', fileName) + ".jxl", "image/jxl")
     }
 
     /** Upright, not premultiplied (lossless alpha), sRGB (JPEG XL here carries no ICC profile). [sample]: 1/sample size. */

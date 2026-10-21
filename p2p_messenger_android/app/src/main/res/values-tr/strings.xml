@@ -471,4 +471,15 @@
     <string name="msg_loading">Yükleniyor…</string>
     <string name="action_resend_group">Grubu herkese yeniden gönder</string>
     <string name="msg_group_resent">Grup herkese yeniden gönderildi</string>
+    <string name="err_core_locked">Uygulama kilitli. Kilidi açıp tekrar deneyin.</string>
+    <string name="err_core_not_founder">Bunu yalnızca grubun kurucusu yapabilir.</string>
+    <string name="err_core_already">Bu zaten yapılmış.</string>
+    <string name="err_core_blocked">Bu kişi engellenmiş.</string>
+    <string name="err_core_too_large">Çok büyük.</string>
+    <string name="err_core_no_session">Bu kişiyle henüz güvenli bir oturum yok.</string>
+    <string name="err_core_invalid">Geçersiz girdi veya kod.</string>
+    <string name="err_core_not_allowed">İzin verilmiyor.</string>
+    <string name="err_core_not_found">Bulunamadı.</string>
+    <string name="err_core_internal">Uygulamada bir şeyler ters gitti.</string>
+    <string name="msg_confirm_contact_named">%1$s eklensin mi?\n\nGüvenlik kodu: %2$s\n\nKabul etmeden önce bu kodu kişiyle karşılaştırın.</string>
 </resources>
