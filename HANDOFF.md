@@ -16,10 +16,10 @@ Bu dosyadaki sayıların hepsi kodda kontrol edildi. Kontrol edilmeyen şey "DO�
 6. **Küçük değişiklik yap.** Önce `grep` ile fonksiyonu çağıran her yeri bul. Kök nedeni tek yerde düzelt. Yeni kütüphane ekleme.
 7. **Yeni Android metni** hem `res/values/strings.xml` hem `res/values-tr/strings.xml` dosyasına girer.
 8. **Dürüst rapor ver:** "derledim / sadece okudum / cihazda denedim / başarısız oldu" ayrı ayrı yaz.
-9. **Dokunma:** `service/BatteryLog.kt`; klavye düzeltmesi (`util/KeyboardInsets.kt`, `adjustResize`, input bar); istemciye `FLAG_SECURE` ekleme (sunucu uygulamasında release'te var, kalsın); sunucu kaydına LAN adresi ekleme; `app/build.gradle` içindeki imza ayarı.
+9. **Dokunma:** `service/BatteryLog.kt`; klavye düzeltmesi (`util/KeyboardInsets.kt`, `adjustResize`, input bar); istemciye `FLAG_SECURE` ekleme (sunucu uygulamasında release'te var, kalsın); sunucu kaydına LAN adresi ekleme. **İmza:** `app/build.gradle`'a release imzası **ekleme** — Gradle release'ı imzasız üretir, imzayı `./sign-release.sh` yapar (özel anahtar, v3 soy zinciri).
 10. **Redmi Note 9S sahibin günlük telefonu.** Silme, sıfırlama, ağ ayarı bırakma. Ayarı değiştirdiysen eski haline getir.
 
-Yayın (release) kuralı: önce sürüm artır (3 yer: `p2p_messenger_android/app/build.gradle`, `p2p_messenger_android_server/app/build.gradle`, `Linux/Cargo.toml`). Sonra dosyaları `dist/` içine `typeon-client-<sürüm>.apk` gibi koy. `dist/SHA256SUMS` dosyasını komutla yeniden üret, elle yazma.
+Yayın (release) kuralı: önce sürüm artır (3 yer: `p2p_messenger_android/app/build.gradle`, `p2p_messenger_android_server/app/build.gradle`, `Linux/Cargo.toml`). Sonra dosyaları `dist/` içine `typeon-client-<sürüm>.apk` gibi koy. **İmzayı `sign-release.sh` yapar** (Gradle imzalamaz). `dist/SHA256SUMS` dosyasını komutla yeniden üret, elle yazma.
 
 ---
 
@@ -171,7 +171,9 @@ JNI fonksiyonunu değiştirirsen hem `lib.rs` hem `P2PLib.kt` (gerekirse `api.rs
 - Linux bildirimi için kurulu `.desktop` dosyası ve bildirim servisi gerekir.
 - Android `Kotlin` artımlı derleme önbelleği bazen eski APK verir. "Değişiklik yok" derse `dumpsys package` `lastUpdateTime` bak.
 - Arti (Tor) durumu bozulursa `tor.rs` `state/` ve `hss/` klasörünü silip bir kez yeniden başlatır. `keystore/` (onion kimliği) **silinmez**.
-- Debug APK, cihazdaki release imzasıyla uyuşmaz (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). `./sign-release.sh giris.apk cikis.apk` ile yeniden imzala.
+- Debug APK, cihazdaki release imzasıyla uyuşmaz (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). `./sign-release.sh giris.apk cikis.apk` ile yeniden imzala. Gradle'in `assembleRelease` çıktısı **imzasızdır**; dağıtımdan önce hep bu betikle imzala.
+- **Bildirimlerde mesaj metni varsayılan kapalı** (Ayarlar'daki "bildirimlerde mesajları göster" anahtarı). Kapalıyken bildirim yalnız "Yeni mesaj" der: ne gönderen ne metin görünür.
+- `SYSTEM_ALERT_WINDOW` izni **kaldırıldı**; arama ekranı bu izinle açılmıyor, geri ekleme.
 - **Uygulamayı kaldırıp yeniden kurma:** kimlik, kişiler, ratchet (sunucuda onion adresi) silinir. Yapma.
 - `FLAG_SECURE`: istemcide **yok** (sahip kuralı, eklenmez); sunucu uygulamasında debug olmayan derlemede var (`ServerActivity`). `SECURITY.md` bu duruma göre güncellendi.
 
@@ -187,6 +189,7 @@ cd p2p_messenger_android && ./gradlew assembleDebug     # veya assembleRelease
 ```
 - JDK 21 gerekir (sistemdeki JDK 25 olmaz).
 - `assembleRelease` komutuna `--offline` ekleme (lint önbellekte yok). Lint'i kapatma.
+- `assembleRelease` **imzasız** APK üretir (Gradle release'ı imzalamaz). Yayınlamadan önce `./sign-release.sh <apk> <çıktı.apk>` ile imzala; betik en yeni build-tools'ı kullanır ve iki uygulama (istemci + sunucu) için de aynıdır.
 - `-x cargoNdkBuild` Rust'ı yeniden derlemez.
 - Linux: `cd Linux && cargo check`.
 - Flatpak: `Linux/packaging/README.md`. Komut: `flatpak run org.flatpak.Builder --user --force-clean --disable-rofiles-fuse --repo=repo build-dir com.p2p.messenger.Typeon.yml` sonra `flatpak build-bundle repo typeon.flatpak com.p2p.messenger.Typeon`. `build-bundle` derleme patlasa da başarılı döner: derleme çıkış kodunu kontrol et.

@@ -48,7 +48,7 @@ Bu doküman `HANDOFF.md`'nin (çalışma kuralları, dosya haritası) teknik tam
 - X25519 ortak sırrı "contributory" değilse (küçük mertebe nokta) reddedilir (`x25519()` ratchet.rs).
 - ML-KEM şifre çözme asla hata vermez (yanlış anahtar → rastgele bayt); bu yüzden rotasyon bir **kopya üzerinde** denenir, yalnız paket yeni zincirde çözülürse kalıcılaştırılır (bkz. §5).
 - Tüm gizli simetrik alanlar (`root_key`, `ck_send`, `ck_recv`, atlanmış anahtarlar, mesaj anahtarı) `zeroize` ile silinir; kütüphane anahtarları `zeroize` feature'ıyla build edilir.
-- İmza girdileri **alan-ayrımlı ve uzunluk-önekli**: `p2pmsg-v0.4-handshake`, `p2pmsg-v0.3-recipient` (paket), `p2pmsg-v0.4-identity-exchange`, `p2pmsg-v0.4-prekey`, `p2pmsg-v0.1-founder-transfer`.
+- İmza girdileri **alan-ayrımlı ve uzunluk-önekli**: `p2pmsg-v0.4-handshake`, `p2pmsg-v0.6-packet` (paket), `p2pmsg-v0.5-identity-exchange`, `p2pmsg-v0.4-prekey`, `p2pmsg-v0.1-founder-transfer`.
 
 ---
 
@@ -63,8 +63,8 @@ Bu doküman `HANDOFF.md`'nin (çalışma kuralları, dosya haritası) teknik tam
 ### 3.2 İlk temas (pairing)
 1. A kendi QR'ını gösterir: `QrPacket` (CBOR, `version=3`): `device_name, identity_id, device_fingerprint, rendezvous_node (onion multiaddr), known_relays, pairing_nonce(16 bayt)`.
 2. B tarar. B, A'nın kimliğini **QR'dan alır** (TOFU), ama anahtarları henüz bilmez.
-3. İki taraf `IdentityExchange` yollar (`send_identity_exchange_opts`): tam 4 public key + `pairing_proof = SHA3-256("typeon-pairing-nonce"‖uzunluk(nonce, u32 BE)‖nonce‖gönderen_fp)` + hibrit imza (`identity_exchange_signing_input`).
-4. Alan taraf (`process_identity_exchange`) sırayla: kendi cihazından mı → reddet; `keys_match_fingerprint` → değilse reddet; hibrit imza doğrula; iptal edilmiş cihaz mı → reddet; kimlik iddiası cihaza bağlı mı (`identity_id == fp` ya da imzalı `DeviceAdd`) ; `evaluate_sender_device` ile cihaz güveni kararı; sonra `DeviceRecord` yazılır.
+3. İki taraf `IdentityExchange` yollar (`send_identity_exchange_opts`): tam 4 public key + `pairing_proof = SHA3-256("typeon-pairing-nonce"‖uzunluk(nonce, u32 BE)‖nonce‖gönderen_fp)` + hibrit imza (`identity_exchange_signing_input`: imza **alıcı cihazın fingerprint'ini** ve **zaman damgasını** da kapsar; etiket `p2pmsg-v0.5-identity-exchange`). Gönderen zaman damgasını **10 dk'lık kovalara** yuvarlar (`now - now % HANDSHAKE_REDO_MIN_INTERVAL_MS`): yeniden gönderimler bayt-aynı kalır, sunucudaki tekrar elenir.
+4. Alan taraf (`process_identity_exchange`) sırayla: kendi cihazından mı → reddet; `keys_match_fingerprint` → değilse reddet; **zaman damgası penceresi** (`HandshakeInit` ile aynı: geçmişe aitse `HANDSHAKE_MAX_AGE_MS` = 7 gün, ileriye aitse `HANDSHAKE_MAX_SKEW_MS` = 10 dk; dışı **imzadan önce** reddedilir); hibrit imza doğrula (imza alıcı fp'yi bağlar → başka bir cihaza oynanmış paket reddedilir); iptal edilmiş cihaz mı → reddet; kimlik iddiası cihaza bağlı mı (`identity_id == fp` ya da imzalı `DeviceAdd`) ; `evaluate_sender_device` ile cihaz güveni kararı; sonra `DeviceRecord` yazılır.
 5. İlk-temas mesajları ortak sırla mühürlenmiş posta kutusundan gider (`first_contact_mailbox_id`, sır = pairing nonce); sunucu mailbox adından fingerprint çıkaramaz.
 
 ### 3.3 Güven karar akışı (özet)
@@ -87,7 +87,7 @@ Yalnızca **tek-tur, asenkron** (karşı tarafın çevrimiçi olması gerekmez).
 **Responder** (`process_handshake_init` → `respond`):
 1. Gönderen bilinmiyorsa tamponla; iptalse reddet; `sender_identity_id` kayıtla uyuşmalı.
 2. İmza doğrula (alıcı fp = kendi aktif fp'miz).
-3. **Tekrar oynatma koruması:** zaman damgası ±`HANDSHAKE_MAX_SKEW_MS` (10 dk) içinde olmalı (eski ise `HANDSHAKE_MAX_AGE_MS` = 7 gün pencere), aynı klasik imza pencerede görüldüyse yok sayılır (`recent_handshake_sigs`, kalıcı).
+3. **Tekrar oynatma koruması (H37):** zaman damgası ±`HANDSHAKE_MAX_SKEW_MS` (10 dk) içinde olmalı (eski ise `HANDSHAKE_MAX_AGE_MS` = 7 gün pencere), aynı klasik imza pencerede görüldüyse yok sayılır (`recent_handshake_sigs`, kalıcı). Ayrıca **daha önce kabul edilmiş bir el sıkışmadan eski** her init yok sayılır (yalnız sapma penceresini aşan değil) ve **mevcut oturumdan eski** init (`handshake.timestamp < existing.last_rotation`, çakışma penceresi dışında) yok sayılır — gönderen o anahtarları değiştirmiştir.
 4. İlk temas `recipient_prekey_id == 0` ise ve prekey varsa **reddedilir** + yeniden el sıkışma başlatılır (id 0 yalnız link penceresinde kabul).
 5. **Eşzamanlı el sıkışma çakışması** (90 sn): kendi initiator durumu varsa ve `own_fp < sender_fp` ise kendininkini koru; yoksa karşıyı kabul et (küçük fingerprint kazanır).
 6. Kendi prekey/KEM gizli anahtarıyla `respond` → aynı anahtarlar türetilir, `has_responded_to_peer_key = false`, `ratchet_states`'e yazılır, gossipsub topic'ine abone olunur.
@@ -126,16 +126,18 @@ NetworkEnvelope (CBOR) =
    IdentityExchange | Handshake(HandshakeInit) | Message(MessagePacket)
 
 MessagePacket {
-  header { sender_identity_id, sender_device_fingerprint, message_id(UUIDv4),
-           ratchet_pubkey (yalnız rotasyonda dolu), message_number, prev_chain_length,
-           rotation_kyber_ciphertext (rotasyonda), sent_at_ms }
-  ciphertext   = ChaCha20-Poly1305( CBOR(MessageContent) )
+  header = SignedHeader (CBOR baytları **olduğu gibi** taşınır)
+    { sender_identity_id, sender_device_fingerprint, message_id(UUIDv4),
+      ratchet_pubkey (yalnız rotasyonda dolu), message_number, prev_chain_length,
+      rotation_kyber_ciphertext (rotasyonda), sent_at_ms }
+  ciphertext   = ChaCha20-Poly1305( CBOR(MessageContent), AAD = ham header baytları )
   signature_classical (Ed25519), signature_pq (ML-DSA-87)
 }
-imza girdisi = CBOR(header) ‖ ciphertext ‖ "p2pmsg-v0.3-recipient" ‖ alıcı_fp
+imza girdisi = ham header baytları ‖ ciphertext ‖ alıcı_fp (uzunluk-önekli, etiket "p2pmsg-v0.6-packet")
 ```
+- **Başlık önce kurulur** (`SignedHeader::new`): imza bu ham baytları, ratchet AEAD de aynı baytları **associated data** olarak kapsar → alıcı yalnız gönderenin şifrelediği başlığa göre işlem yapar; başlığı değiştirilmiş paket etiketi geçmez.
 - İmza **alıcıya bağlı**: A→M paketi B'de de geçerli olup oturumu bozamaz (bilinçli protokol kırılması).
-- `MessageContent` (CBOR enum): `Text, Reaction, Edit, Delete, HistorySyncRequest/Response, Ack, FileOffer, TypingIndicator, Seen, ProfileUpdate, GroupUpdate, LeaveGroupRequest, AddressAnnounce, DeviceLinkGrant, DeviceAddNotice, ReadStateSync, DeviceRevokeNotice, FirstContactSecret, DeviceSync, SiblingEcho, SiblingHistoryRequest/Response, AccountDeleted, Call, WbOps/WbDigest/WbPageRequest/WbPage`.
+- `MessageContent` (CBOR enum): `Text, Reaction, Edit, Delete, HistorySyncRequest/Response, Ack, FileOffer, TypingIndicator, Seen, ProfileUpdate, GroupUpdate, GroupSyncRequest, LeaveGroupRequest, AddressAnnounce, DeviceLinkGrant, DeviceAddNotice, ReadStateSync, DeviceRevokeNotice, FirstContactSecret{secret, group_id}, DeviceSync, SiblingEcho, SiblingHistoryRequest/Response, AccountDeleted, Call{call_id, action, group_id, video, media_key, stream_id, sent_at_ms, participants}, WbOps/WbDigest/WbPageRequest/WbPage`.
 - Zarf üst sınırı `MAX_ENVELOPE_BYTES = 1 MiB`.
 
 ---
@@ -149,12 +151,13 @@ imza girdisi = CBOR(header) ‖ ciphertext ‖ "p2pmsg-v0.3-recipient" ‖ alıc
 2. ensure_connected(peer)           # bağlantı yoksa hemen dial
 3. ratchet yoksa initiate_handshake_with(peer)
 4. needs_delivery_confirmation = içerik türü Ack'lenenlerden mi
-5. if needs_confirm || fresh_responder: maybe_rotate_ratchet(peer)
+5. if (needs_confirm || Seen) || fresh_responder: maybe_rotate_ratchet(peer)
         -> rotasyon yapıldıysa regen_pending_for_peer (bekleyenleri yeni zincirle yeniden üret)
+        (`Seen` de rotasyon sırası alır: yalnız okuyan taraf rotasyonu hiç yapmazsa iyileşmez)
 6. rotation_ct = taze rotasyon ?? state.pending_rotation_ct
-7. (ciphertext, n, prev_len) = state.encrypt_next(CBOR(content))
+7. header'ı kur (n, prev_len = state.next_send_numbers()); (ciphertext, n, prev_len) = state.encrypt_next(CBOR(content), AAD = header.raw())
 8. persist_ratchet_state()  — başarısızsa DUR
-9. header oluştur; imzala (Ed25519 + ML-DSA, alıcıya bağlı)
+9. header'ın ham baytlarını imzala (Ed25519 + ML-DSA, alıcıya bağlı)
 10. arşive "sent / pending" yaz (metin için)
 11. if needs_confirm: publish_with_ack_tracking(...)
     else:             publish_envelope(...)
@@ -238,9 +241,13 @@ Kaynaklar: gossipsub mesajı, doğrudan envelope isteği, sunucu `Push`/`Batch`.
 
 **Yapı** (`group.rs`): `Group{group_id, name, founder_identity_id, members[GroupMember{identity_id, added_at, added_by}], version, avatar_jpeg, founder_chain}`. `group_id` biçimi `group-<16..48 hex>`; hex kısmı kurucu kimliği + nonce'tan türer (`group_id_for_founder`), yani bilinmeyen bir grup kimliği kurucusuna bağlanamıyorsa reddedilir. Üye sınırı `MAX_GROUP_MEMBERS`, `member_devices` ≤ üye × 5.
 
+**İlk temas sırrı artık grup başına:** `FirstContactSecret{secret, group_id}` — cihazın sırrı `SHA-256("typeon-group-first-contact-v1" ‖ master ‖ group_id)`'in ilk 16 baytıdır (`own_group_contact_secret(group_id)`), kurucu onu `gf:<fp>:<group_id>` altında saklar ve **yalnız o grubun** üyelerine dağıtır. Eski **kişisel** sır kaldırıldı: üyeler artık tek bir kişisel ilk-temas kutusuna değil, **kendi grubunun** kutusuna erişir; bu kutu yalnız cihaz grupta olduğu sürece kayıtlı tutulur (`first_contact_secrets`).
+
 **Değişiklik türleri** (`GroupChange`): `Add(id)`, `Remove(id)`, `Rename(ad)`, `AvatarUpdate(Option<bytes>)`, `Delete`, `TransferFounder(id)`. Hepsini **yalnız mevcut kurucu** imzalayabilir (ayrı yetki mekanizması yok; üyeler kendi başlarına değişiklik yapamaz). Üye ayrılmak isterse `leave_group`: kurucunun tüm aktif cihazlarına `LeaveGroupRequest` yollar (Ack'li), kendi yerelinde `remove_group_locally` yapar (`removed_groups`'a sürüm+kurucu yazılır, bekleyen kuyruklar ve beyaz tahta silinir) ve kardeşlere `SiblingEchoBody::GroupLeft` yansıtır. Kurucu bu isteği alınca `remove_from_group` ile `Remove` yayınlar (bu fonksiyon yalnız kurucuda çalışır: "Sadece kurucu üye çıkarabilir"). **Kurucu ayrılamaz**; grubu herkes için silebilir (`Delete`) ya da yetkiyi `TransferFounder` ile devreder.
 
 **Doğrulama** (`validate_group_update`): imzalayan kimlik = `founder_identity_id` (aksi `NotFounder`); imzalayan cihaz aktif olmalı; `new_version > group.version` (aksi `StaleOrOutOfOrderVersion`, zararsız sayılıp onaylanır); `new_version <= version + 4096` (`MAX_VERSION_JUMP`). `apply_change`: `Remove` kurucuyu çıkaramaz; `TransferFounder` hedefi üye değilse yok sayılır (sürüm yine ilerler).
+
+**Eşit sürüm çakışması (H78):** iki kurucu cihazı aynı sürümü imzalayabilir. Alıcı, elinde tuttuğu sürümdeki bir güncelleme için `group_tie_hash` (SHA-256: grup id + sürüm + değişiklik + ad + üye listesi + imzalayan) **daha büyükse** güncellemeyi yeniden alır; `Delete` ve aynı üye/adı tekrarlayan bir "yeniden gönderim" de alınır. Böylece her üye aynı sürümde **aynı** durumda biter; kaybeden kurucu cihaz kardeşinin güncellemesini alır ve sonraki değişikliği `max(görülen sürüm)+1` olarak yapar.
 
 **Alım adımları** (`process_group_update`, lib.rs ~14806):
 1. `group_id` biçimi → imzalayan cihaz bilinen mi → `group_update_signing_input` (grup id, sürüm, değişiklik, ad, üyeler, üye cihazlar, imzalayan kimlik+cihaz) üzerinde hibrit imza.
@@ -248,7 +255,9 @@ Kaynaklar: gossipsub mesajı, doğrudan envelope isteği, sunucu `Push`/`Batch`.
 3. Grup yerelde yoksa: daha önce **ayrıldığımız** (`removed_groups`) bir grup yeni sürümle ve bizi `Add` ile eklemeden geri gelemez; bizi üye yapmayan bilinmeyen grup **reddedilir**.
 4. Kurucu zinciri: `heal_founder_chain` ile `FounderTransfer` zinciri yürünür (her halka eski kurucunun hibrit imzası, `founder_transfer_signing_input`); `founder_transfer_floor` geri sarmayı engeller; zincir `MAX_FOUNDER_CHAIN` ile kısıtlı.
 5. `Delete` → `remove_group_locally`. Aksi halde `sync_members` + `apply_change`; bizi `Remove` ediyorsa grup yerelden silinir.
-6. `member_devices` + `member_device_proofs`: üyenin cihaz anahtarları kurucu tarafından "vouch" edilir (`adopt_vouched_member_devices`); `first_contact_secret` (16 bayt) `gf:<fp>` anahtarıyla saklanır → hiç eşleşmemiş üyeye ilk temas kutusu açılabilir.
+6. `member_devices` + `member_device_proofs`: üyenin cihaz anahtarları kurucu tarafından "vouch" edilir (`adopt_vouched_member_devices`); güncelleme **delta**dır: yalnız son güncellemeden sonra **yeni veya değişmiş** cihazlar taşınır (yeni eklenen üyeye tam liste gider). Eksik kalan üye ya da sürüm boşluğu `GroupSyncRequest` ile kurucudan **tam durum** ister (kurucu üye başına en çok 10 dk'da bir yanıtlar, `sign_group_resync`); `first_contact_secret` (16 bayt) `gf:<fp>:<group_id>` anahtarıyla saklanır → hiç eşleşmemiş üye o grubun ilk temas kutusuna açılabilir.
+
+**Kurucu cihazları ve yeniden gönderme:** Kurucunun imzaladığı her güncelleme **kurucunun kendi kardeş cihazlarına** da gider (`send_group_update_to_siblings`); böylece iki kurucu cihazı aynı sürümü imzalamaz. Kurucu ayrıca grubu herkese yeniden gönderebilir (`resend_group_to_all`; Android `P2PLib.resendGroupToAll`): güncel imzalı durum **her üye cihazına** tekrar gönderilir.
 
 **Mesaj gönderme** (`send_group_message`): üye olduğunu kontrol et → `local_id` (UUID) üret → `sign_group_author`: cihaz imzası ile `author_proof = "cihaz_fp:imza_klasik_hex:imza_pq_hex"` (`group_author_statement(group_id, message_id, identity, device, text)`) → arşive yaz → **her diğer üye için** `send_group_message_to_member`: üyenin tüm aktif cihazlarına ayrı 1:1 paket (`send_message_content`). Üyenin aktif cihazı henüz bilinmiyorsa içerik `pending_group_messages` kuyruğuna (üye başına `MAX_PENDING_GROUP_MESSAGES_PER_MEMBER`, taşarsa en eski atılır, DB'de kalıcı) yazılır ve `group_sync_sweep` periyodik yeniden dener. Son olarak kardeş cihazlara `SiblingEcho` yansıtılır.
 
@@ -328,7 +337,7 @@ Kaynaklar: gossipsub mesajı, doğrudan envelope isteği, sunucu `Push`/`Batch`.
 Zaman aşımı/bağlantı hatası (`handle_server_failure`): bırakma geri çekilmesi + gossipsub'a düşme. **Her başarısız bırakma gossipsub'a düşer**; sunucu hiçbir zaman tek teslim yolu değildir.
 
 ### 13.5 Sunucu tarafı gizlilik ve mühür
-- Oturum kutusu `mb_<hex16>` (`server_seal::session_mailbox`) cihaz çifti başına **sabit**tir: iki cihazın uzun ömürlü KEM X25519 anahtarlarıyla statik DH + sıralı fingerprint'lerden HKDF (`p2pmsg-v0.6-session-mailbox`); rotasyonda değişmez, root_key/topic'ten türemez (yalnız X25519, statik ML-KEM yok). Mühür anahtarı yine ratchet root'tan gelir (alıcı mevcut + önceki root'u dener); ilk temas kutusu = HKDF(pairing nonce, `p2pmsg-v0.5-first-contact-mailbox:`‖fp); arama röle kutusu = HKDF(pair_key, `p2pmsg-v0.5-call-relay-mailbox`).
+- Oturum kutusu `mb_<hex16>` (`server_seal::session_mailbox`) cihaz çifti başına **sabit**tir: iki cihazın uzun ömürlü KEM X25519 anahtarlarıyla statik DH + sıralı fingerprint'lerden HKDF (`p2pmsg-v0.6-session-mailbox`); rotasyonda değişmez, root_key/topic'ten türemez (yalnız X25519, statik ML-KEM yok). Mühür anahtarı yine ratchet root'tan gelir (alıcı mevcut + önceki root'u dener); ilk temas kutusu = HKDF(sır, `p2pmsg-v0.5-first-contact-mailbox:`‖fp) — sır eşleşme nonce'u, link nonce'u ya da **grup başına** ilk temas sırrı olabilir (bkz. §11); arama röle kutusu = HKDF(pair_key, `p2pmsg-v0.5-call-relay-mailbox`).
 - `seal_envelope`: ChaCha20-Poly1305(HKDF(root_key, `p2pmsg-v0.1-server-seal`), AAD = mailbox‖0‖sender_fp, CBOR(zarf)). Sunucu AAD'yi bilir ama anahtarı bilmez.
 - `seal_first_contact`: ortak sır (`p2pmsg-v0.5-first-contact-seal`) + varsa alıcının KEM anahtarı; açma `open_first_contact(secret, mailbox, kem_sk_x25519, kem_sk_mlkem, sealed)`.
 - Sunucu veritabanında kimlik/fingerprint/içerik yoktur; `enrollments` yalnızca `enroll_pk`, `enroll_pk_pq`, `peer_id`, durum, sayaçlar tutar.
@@ -338,6 +347,12 @@ Zaman aşımı/bağlantı hatası (`handle_server_failure`): bırakma geri çeki
 **Arşiv — istemci:** kayıtlar **yalnız `store_history` açık bir sunucu varsa ve kök arşiv anahtarı mevcutsa** `queue_archive_record` ile kuyruğa girer (düz metin yerelde `seal_local_blob` ile mühürlü bekler); `ArchivePut` partisi 50 kayıtta (`SERVER_ARCHIVE_BATCH`) ya da mühürlü bayt `MAX_DEPOSIT_BYTES/2`'yi aşınca kapanır. Geri yükleme: `ArchiveProbe(buckets)` → dolu kovalar (`before_ms` verilmişse en yeni önce) → `ArchiveFetch{bucket, before_ms}` sayfalama (`more` ise `before_ms` = sayfadaki en eski `sent_at_ms`) → `merge_server_archive`: kaydı `open_archive_record(ark, conv_key, record_id, rev, bucket, sent_at_ms, sealed)` ile aç (AAD bu alanları bağlar); `note_archive_rev` ile **görülenden eski `rev` reddedilir** (`server_archive_revs` tablosu); yerelde aynı `record_id`'li mesaj zaten varsa **atlanır** (yani sunucu arşivi mevcut mesajı değiştirmez, yalnız eksik olanı doldurur); grup değilse `resolve_active_device_for_identity(conv_key)` ile sohbete yazılır. Sonuç `history_backfilled{count, source:"server"}` olayı. Çözülemeyen/ayrıştırılamayan kayıt atlanır.
 **Blob — istemci** (`queue_blob_upload` / `server_flush_blobs`): yalnız `route_messages` açık bir sunucu varsa kuyruğa alınır; kuyrukta **aynı anda tek blob** (baştaki) yüklenir; durum `server_blob_uploads` tablosunda kalıcıdır. Parçalar diskte şifreli dosyadan `chunk_size` ile okunur, `window` kadarı havada tutulur (başlangıç 4, min 2, max 40; RTT tabanın 2 katını aşmadıkça ve 90 sn zaman aşımının %80'i altındaysa büyür, zaman aşımında yarıya iner). Tüm parçalar bitince şifreli dosyanın SHA-256'sı ile `BlobFinish`. Sunucu değişirse yükleme baştan başlar.
 **Blob — sunucu:** `BlobPut` parçayı dosyada `offset = chunk_index × (chunk_size + 16)` konumuna yazar (rastgele erişim; parça ≤768 KiB; sahip kontrolü; hem tek blob ofseti hem kayıt başına `bytes_blob` `max_blob_bytes` 4 GiB'ı aşamaz; aynı parça tekrar gelirse `Ok`, hash sürerken `RateLimited`); `BlobFinish`: sahip eşleşmeli, alınan parça sayısı `total_chunks`'tan az olmamalı, aynı anda en çok `MAX_HASH_JOBS` = 4 hash işi (aksi `RateLimited`); hash arka planda akışlı hesaplanır, yanıt hash bitince gider. **Uyuşmazsa dosya silinir ve `Internal` döner.** Tamamlanan blob `filexfer` protokolüyle servis edilir (`serve_chunk`, parça hız sınırı 600/dk, relay/cold bütçeleri ayrı); `blob_ttl` (30 gün) sonra GC.
+
+### 13.7 Veri dizini kilidi, DB şifreleme, arşiv ömrü
+- **Süreç kilidi:** veri dizininde `server.lock` dosyası `flock` ile kilitlenir (`ServerCore` ömrü boyunca tutulur, `_dir_lock`); ikinci bir sunucu aynı dizini açamaz ("bu veri dizini başka bir sunucu işlemi tarafından kullanılıyor").
+- **DB şifreleme:** Android sunucu uygulaması DB'yi **SQLCipher** ile açar — anahtar 32 rastgele bayt, Android Keystore'daki (dışa aktarılamayan) AES-GCM anahtarıyla sarılır (`DbKey.get`), `ServerLib.setDbKey` ile çekirdeğe 64 hex olarak verilir. Eski (düz) DB ilk açılışta **bir kez** şifreli DB'ye geçirilir (`sqlcipher_export`); anahtar gelmezse sunucu **düşer** (fail-closed, düz DB'ye düşmez). Linux `typeon-server` **düz** kalır; `TYPEON_SERVER_DB_KEY` (64 hex) verilirse aynı şekilde şifreli açılır (düz DB yine bir kez geçirilir).
+- **Arşiv ömrü:** arşiv satırları son yazıldıktan **13 ay** sonra silinir (`ARCHIVE_TTL_MS` = 13×30 gün; `sweep_expired_archive`, posta süpürmesiyle birlikte çalışır, kota sayaçları yeniden hesaplanır).
+- **PIN kilidi (sunucu uygulaması):** tüm ekran (katılım kodu, cihaz listesi, ayarlar) PIN arkasında; PBKDF2-HMAC-SHA256, 300.000 iterasyon, en az 6 karakter; 5 hatalı denemeden sonra artan bekleme (30 sn, sonra katlanarak); ekran kapanınca anında, uygulamadan çıkınca 30 sn sonra kilitlenir.
 
 ---
 
@@ -368,7 +383,9 @@ Zaman aşımı/bağlantı hatası (`handle_server_failure`): bırakma geri çeki
 
 **Başlatma:** `start_call(peer)`: `fanout_targets(peer)` içinde ratchet'i olan **tüm cihazlara** davet. Grup: `group_call_devices` = diğer üyelerin aktif ve **yakın zamanda görülmüş** cihazları. Her katılımcı arama başına **taze rastgele** `my_key` (32 bayt) ve `my_sid` (8 bayt) üretir (`CallSession::new`) ve `media_start` ile medya motorunu açar.
 
-**Sinyal** = `MessageContent::Call{call_id, action, group_id, video, media_key, stream_id, sent_at_ms}`, normal ratchet/E2E yolundan; `call_signal_sending=true` iken `critical` sayılır (sunucuya + doğrudan birlikte). `Invite` ve `Accept` içinde **alıcıya özel** anahtar gider: `media_key = pair_key(my_key, alıcı_fp) = HKDF(my_key, "typeon-call-pair-v1"‖alıcı_fp)`, `stream_id = my_sid`. Her alıcı ayrı anahtar aldığı için bir üye başka üyeymiş gibi paket mühürleyemez.
+**Sinyal** = `MessageContent::Call{call_id, action, group_id, video, media_key, stream_id, sent_at_ms, participants}`, normal ratchet/E2E yolundan; `call_signal_sending=true` iken `critical` sayılır (sunucuya + doğrudan birlikte). `Invite` ve `Accept` içinde **alıcıya özel** anahtar gider: `media_key = pair_key(my_key, alıcı_fp) = HKDF(my_key, "typeon-call-pair-v1"‖alıcı_fp)`, `stream_id = my_sid`. Her alıcı ayrı anahtar aldığı için bir üye başka üyeymiş gibi paket mühürleyemez.
+
+**Grup daveti katılımcıları taşır (C10):** grup `Invite`'ında `participants` = arayanın **çalldığı tüm cihazların** fingerprint'idir (≤ `MAX_INVITE_PARTICIPANTS` = 1024). Alıcı, "bayat" saydığı üyelerle de anahtar değiştirir: listedeki cihazlar grubun aktif üye cihazlarıysa davete eklenir (kendi cihazı hariç).
 
 **Alıcı kuralları** (`handle_call_signal`):
 - `Invite`: anahtar uzunlukları 32/8; `sent_at_ms` ±60 sn (`INVITE_MAX_AGE_MS`, geç teslim edilen davet çalmaz); bu `call_id` zaten bitmişse yok say; grup araması ise gönderen üye olmalı. **Glare:** iki taraf aynı anda 1:1 ararsa `call_id` küçük olan kazanır (`ours < call_id` → gelen yok sayılır, aksi halde kendi arama bitirilip gelen kabul). Başka aramadaysak `Busy` yanıtı.
@@ -386,6 +403,8 @@ Kotlin kodlar (Opus ses; video H.264/HEVC — bayrak biti), çekirdek `media_sen
 
 ### 16.3 Beyaz tahta (`whiteboard.rs`)
 `WbOps` (imzalı vuruşlar `WbStroke`) 1:1 veya grup; sayfa bütünlüğü `WbPageSig`/`WbPageDigest`. Senkron: `WbDigest` (Ack'li, `regen_content`'li) ile durum özeti, farkta `WbPageRequest` → `WbPage`. Grup tahtası grup silinince/ayrılınca `wb_delete_board` ile temizlenir.
+
+**Özet vuruş başına içerik hash'idir:** sayfa hash'i artık vuruş id'lerinin XOR'u değil, her vuruşun `SHA-256("typeon-wb-digest-v1" ‖ vuruş hash'i ‖ yazar ‖ imza)`'sinin ilk 8 baytının XOR'udur (`wb_digest_item`; vuruş hash'i id + sayfa + ton + kalınlık + noktaları kapsar) → aynı id ama farklı içerikli iki kopya **eşit sayılmaz**.
 
 ---
 
@@ -417,6 +436,7 @@ Kotlin kodlar (Opus ses; video H.264/HEVC — bayrak biti), çekirdek `media_sen
 | `MAX_UNCONFIRMED_AGE_MS` | 25 dk | lib.rs 2980 |
 | `TEXT_RETRY_GIVE_UP_MS` | 7 gün | lib.rs 3003 |
 | `HANDSHAKE_MAX_SKEW_MS` / `HANDSHAKE_COLLISION_WINDOW_MS` | 10 dk / 90 sn | lib.rs 2905, 2913 |
+| `HANDSHAKE_REDO_MIN_INTERVAL_MS` (IdentityExchange zaman kovası) | 10 dk | lib.rs 2530 |
 | `UNDECRYPTABLE_BEFORE_REHANDSHAKE` / pencere / min aralık | 3 / 2 dk / 2 dk | lib.rs 2915-2917 |
 | `PREKEY_ROTATE_MS` | 7 gün | lib.rs 1897 |
 | `INBOUND_DEDUP_WINDOW_MS` / `_MAX_ENTRIES` | 10 dk / 8192 | lib.rs 2388 |
@@ -433,6 +453,8 @@ Kotlin kodlar (Opus ses; video H.264/HEVC — bayrak biti), çekirdek `media_sen
 | `PAIRING_WINDOW_MS` / `PAIRING_NONCE_REUSE_MS` | 30 dk / 5 dk | lib.rs 3061, 3064 |
 | `RATE_LIMIT_MAX_UNKNOWN_TOTAL` (tanınmayan eşler, toplam) | 300 / 10 sn | lib.rs 2710 |
 | `MAX_ARCHIVE_PUT_RECORDS` | 256 | server_proto.rs 82 |
+| `ARCHIVE_TTL_MS` (sunucu arşiv satırı) | 13 ay (13×30 gün) | typeon-server/src/store.rs |
+| `MAX_INVITE_PARTICIPANTS` | 1024 | call.rs |
 | AppLock PBKDF2 | 300.000 it. | AppLock.kt |
 
 Not: Bu sabitler zamanla değişir. Bir sayıya güvenmeden önce `grep -n "SABIT_ADI"` ile doğrula.
@@ -446,8 +468,9 @@ Kaynak: `reviews/MERGED_REVIEWS.md`, raporlar `reviews/fixpass-2026-10-20/report
 **PROTOKOL KIRILMALARI**
 - **Sunucu protokolü v3** (`SERVER_PROTOCOL_VERSION`): `Register` → `Registered{proof_needed, refused}` (kalıcı reddedilenler `refused`'da); `Welcome` `enrollment_id` taşır; `enroll_signing_input` istemci PeerId'sini + `enroll_pk` + `enroll_pk_pq`'yu da bağlar.
 - **Arşiv kablo kayıt kimliği** = `HKDF(arşiv anahtarı, konuşma, mesaj kimliği)` (anahtarlı; eskiden açık türetim). DB: `server_blob_uploads.server_id` sütunu. `sent_at_ms` hâlâ açık (karar bekliyor).
-- **Paket imza girdisi** etiketli ve çerçeveli (`"p2pmsg-v0.5-packet"`); **DeviceAdd/DeviceRevoke/onay** imza baytları `"typeon-device-auth-v1"` ile. Sonuç: **TÜM cihazlar yeniden bağlanmalı (re-link), tüm kişiler yeniden eşleşmeli (re-pair)**; sürüm yükseltilmeli.
+- **Paket imza girdisi** etiketli ve çerçeveli (`"p2pmsg-v0.5-packet"`; 3. turda `"p2pmsg-v0.6-packet"` ve **ham başlık baytları**); **DeviceAdd/DeviceRevoke/onay** imza baytları `"typeon-device-auth-v1"` ile. Sonuç: **TÜM cihazlar yeniden bağlanmalı (re-link), tüm kişiler yeniden eşleşmeli (re-pair)**; sürüm yükseltilmeli.
 - **2. tur (2026-10-21):** oturum posta kutusu kimliği (artık çift başına sabit, bkz. §13.5); `ServerErrorCode::BadHash`; `FileChunkResponse::Busy`; eşleşme nonce kanıtı uzunluk-önekli; `DeviceAdd`/`DeviceRevoke` `signature_pq` zorunlu (`serde(default)` yok). Sürüm yükseltilmeli, tüm cihazlar güncellenmeli.
+- **3. tur (2026-10-21, bu tur):** `MessagePacket.header` artık **ham CBOR baytları** olarak taşınır (`SignedHeader`) — imza o baytları kapsar (`p2pmsg-v0.6-packet`) ve aynı baytlar ratchet AEAD'in **associated data**'sıdır; `IdentityExchange` imzası **alıcı cihazın fingerprint'ini + zaman damgasını** kapsar (`p2pmsg-v0.5-identity-exchange`); `FirstContactSecret.group_id` eklendi (grup başına ilk temas sırrı, kişisel sır kaldırıldı); `GroupSyncRequest` yeni mesaj türü; `member_devices` artık **delta**; `Call.participants` eklendi; beyaz tahta özeti vuruş başına **içerik hash**'i. Sonuç: **TÜM cihazlar yeniden bağlanmalı (re-link), tüm kişiler yeniden eşleşmeli (re-pair)**; sürüm yükseltilmeli.
 - `Contact.avatar_jpeg` `serde_bytes` (kardeş senkronu).
 - `SiblingHistoryRequest.since_timestamp` alanı eklendi.
 
@@ -463,5 +486,8 @@ Kaynak: `reviews/MERGED_REVIEWS.md`, raporlar `reviews/fixpass-2026-10-20/report
 - Linux: 60 sn etkinlik yoksa güç tasarrufu (`set_power_save`), ölçülü ağ (`gio::NetworkMonitor`) bildirimi.
 - Bağlantı/kişi limiti dolunca `pairing_failed` (`contact_limit`) olayı; istemciler kullanıcıya bildirir.
 - Sunucu panic'i `core_panic` olayı olarak bildirilir (yeniden başlatma yok).
+- **Bildirimlerde mesaj metni varsayılan KAPALI** (`NotificationPrefs.showMessageText` = false): kapalıyken bildirim yalnız "Yeni mesaj" der — ne gönderen ne metin görünür; kullanıcı Ayarlar'dan açabilir.
+- **`SYSTEM_ALERT_WINDOW` izni kaldırıldı** (istemci `AndroidManifest.xml`): arama ekranı bu izinle açılmıyor.
+- **Release APK Gradle tarafından imzalanmaz** (`signingConfig` yok): imzayı yalnız `sign-release.sh` yapar (özel anahtar, v3 soy zinciri; en yeni build-tools; iki uygulama için de aynı betik).
 
 **Sahip kuralı (D-21):** istemcide `FLAG_SECURE` yoktur ve eklenmez; sunucu uygulaması (`ServerActivity`) release (debug olmayan) derlemelerde kullanır.
