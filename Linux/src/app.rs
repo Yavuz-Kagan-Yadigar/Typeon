@@ -102,6 +102,11 @@ pub struct App {
     /// `P2PService.activeConversationId` does.
     pub active_conversation: RefCell<Option<String>>,
 
+    /// True while the idle lock is up (see `ui::window::idle_lock`): the
+    /// window shows a lock page, so an open conversation is NOT being
+    /// looked at and a new message must still raise a notification.
+    pub locked: Cell<bool>,
+
     pub window: RefCell<Option<adw::ApplicationWindow>>,
     pub toasts: RefCell<Option<adw::ToastOverlay>>,
 
@@ -134,6 +139,7 @@ impl App {
             next_listener_id: Cell::new(1),
             core_panic_reported: Cell::new(false),
             active_conversation: RefCell::new(None),
+            locked: Cell::new(false),
             window: RefCell::new(None),
             toasts: RefCell::new(None),
             contacts: RefCell::new(Vec::new()),
@@ -510,7 +516,9 @@ impl App {
             .map(|window| window.is_active())
             .unwrap_or(false);
         // Visible and focused means the user is already looking at it.
-        if is_open && is_focused {
+        // A locked window is not: the content is hidden behind the lock
+        // page, so a message that arrives then must still be announced.
+        if is_open && is_focused && !self.locked.get() {
             return;
         }
 

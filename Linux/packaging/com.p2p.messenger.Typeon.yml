@@ -66,6 +66,7 @@ modules:
       - cargo build --release --manifest-path Linux/Cargo.toml
       - install -Dm755 Linux/target/release/typeon /app/bin/typeon
       - install -Dm644 Linux/data/com.p2p.messenger.Typeon.desktop /app/share/applications/com.p2p.messenger.Typeon.desktop
+      - install -Dm644 Linux/data/com.p2p.messenger.Typeon.metainfo.xml /app/share/metainfo/com.p2p.messenger.Typeon.metainfo.xml
       - install -Dm644 Linux/data/com.p2p.messenger.Typeon.svg /app/share/icons/hicolor/scalable/apps/com.p2p.messenger.Typeon.svg
     sources:
       - type: dir

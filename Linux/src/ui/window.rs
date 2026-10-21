@@ -8,15 +8,17 @@
 //! back to the phone's push/pop behaviour on a narrow one, so nothing is lost.
 //! Everything below the layout — every feature, every core call — matches.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
+use zeroize::Zeroize;
 
 use crate::app::App;
 use crate::core;
 use crate::ui::{chat, chats, contacts, dialogs, settings, widgets};
+use crate::util;
 
 /// What the content pane is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +168,260 @@ pub fn build_main(app: &Rc<App>, host: &adw::ToastOverlay) {
     // trusting new keys, so it is checked on a timer and shown modally —
     // the same treatment MainActivity gives it.
     dialogs::watch_device_alerts(app);
+
+    // M172: a passphrase-sealed vault re-locks itself after 10 minutes
+    // without input. The gate is installed either way: the passphrase can
+    // be added or removed in Settings at any time, and the watcher checks
+    // the vault before it locks.
+    idle_lock(app, host);
+}
+
+// --- M172: idle re-lock ---
+
+/// Ten minutes of no user input re-locks the window. A constant, not a
+/// setting: the owner decision was "a setting only if trivial".
+const IDLE_LOCK_MS: u64 = 10 * 60 * 1000;
+
+/// How often the idle watcher looks. Cheap: a timestamp comparison, plus a
+/// nine-byte read of the vault header.
+const IDLE_TICK_SECONDS: u32 = 15;
+
+/// Puts a lock page over the main UI when the vault is passphrase-sealed and
+/// the user has been idle for `IDLE_LOCK_MS`.
+///
+/// The content is not torn down: a `GtkStack` above the live UI swaps in the
+/// lock page. Detaching the conversation tree instead would make every
+/// per-chat timer break on its `root().is_none()` guard (see `ui/chat.rs`),
+/// while a page that is merely not visible is simply skipped.
+///
+/// The core keeps running the whole time: messages still arrive, and
+/// notifications still follow the hide-content setting (`App::notify_if_away`
+/// treats a locked window as "not looking at it"). The passphrase is
+/// re-verified with `secrets::load` off the GTK thread, exactly as
+/// `onboarding::prompt_passphrase` does — Argon2id (64 MiB x 3) plus the
+/// wallet round-trip froze the UI for seconds when it ran inline (H133).
+fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
+    let Some(window) = app.window() else { return };
+    let main = window.clone();
+
+    // --- the lock page ---
+    let error = gtk::Label::builder().wrap(true).build();
+    error.add_css_class("error");
+
+    let entry = gtk::PasswordEntry::builder().show_peek_icon(true).build();
+    entry.set_placeholder_text(Some("Passphrase"));
+
+    let unlock = gtk::Button::builder().label("Unlock").build();
+    unlock.add_css_class("suggested-action");
+    unlock.add_css_class("pill");
+
+    // Without this the user would be stuck: the lock page replaces the whole
+    // window content, so the header bar (and its close button) is gone too.
+    let quit = gtk::Button::builder().label("Quit Typeon").build();
+    quit.add_css_class("flat");
+
+    let form = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .build();
+    form.append(&entry);
+    form.append(&unlock);
+    form.append(&error);
+    form.append(&quit);
+
+    let lock_page = adw::StatusPage::builder()
+        .icon_name("system-lock-screen-symbolic")
+        .title("Typeon is locked")
+        .description(
+            "Ten minutes without input. Messages keep arriving — enter your \
+             passphrase to continue.",
+        )
+        .child(&adw::Clamp::builder().maximum_size(420).child(&form).build())
+        .build();
+
+    // --- the stack: the live UI under, the lock page over it ---
+    let stack = gtk::Stack::new();
+    // The window lets go of `host` first — `add_child` reparents, and a
+    // widget cannot have two parents.
+    window.set_content(Some(&stack));
+    stack.add_child(host);
+    stack.set_visible_child(host);
+    stack.add_child(&lock_page);
+
+    // --- activity ---
+    // Any input event that reaches the window counts, watched in the capture
+    // phase: the composer stops some key events of its own (see `ui/chat.rs`)
+    // and a bubble-phase controller would never see those.
+    let activity = Rc::new(Cell::new(util::now_ms()));
+    {
+        let activity = activity.clone();
+        let controller = gtk::EventControllerLegacy::new();
+        controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+        controller.connect_event(move |_, _| {
+            activity.set(util::now_ms());
+            glib::Propagation::Proceed
+        });
+        window.add_controller(controller);
+    }
+    {
+        // Coming back to the window counts as being there: the user may
+        // have been working in another window (Settings) the whole time,
+        // and that window's input never reaches this one.
+        let activity = activity.clone();
+        window.connect_is_active_notify(move |window| {
+            if window.is_active() {
+                activity.set(util::now_ms());
+            }
+        });
+    }
+
+    // Whether the lock page is up, and the windows it put away.
+    let locked = Rc::new(Cell::new(false));
+    let hidden = Rc::new(RefCell::new(Vec::<gtk::Window>::new()));
+
+    // --- unlock ---
+    let try_unlock: Rc<dyn Fn()> = {
+        let app = app.clone();
+        let entry = entry.clone();
+        let unlock = unlock.clone();
+        let error = error.clone();
+        let stack = stack.clone();
+        let host = host.clone();
+        let activity = activity.clone();
+        let locked = locked.clone();
+        let hidden = hidden.clone();
+        Rc::new(move || {
+            let mut passphrase = entry.text().to_string();
+            if passphrase.is_empty() {
+                error.set_text("Enter your passphrase.");
+                return;
+            }
+            let data_dir = app.data_dir.clone();
+            entry.set_sensitive(false);
+            unlock.set_sensitive(false);
+            error.set_text("");
+            let (app, entry, unlock, error, stack, host, activity, locked, hidden) = (
+                app.clone(),
+                entry.clone(),
+                unlock.clone(),
+                error.clone(),
+                stack.clone(),
+                host.clone(),
+                activity.clone(),
+                locked.clone(),
+                hidden.clone(),
+            );
+            // The core loaded its keys at boot, so this `load` only proves
+            // the passphrase — the fresh vault is dropped as soon as it
+            // arrives.
+            crate::app::run_in_background(
+                move || {
+                    let result = crate::secrets::load(&data_dir, &passphrase).err();
+                    passphrase.zeroize();
+                    result
+                },
+                move |failure| {
+                    entry.set_sensitive(true);
+                    unlock.set_sensitive(true);
+                    match failure {
+                        Some(message) => {
+                            error.set_text(&message);
+                            // A typo costs one keystroke, not a retype.
+                            entry.set_text("");
+                        }
+                        None => {
+                            error.set_text("");
+                            stack.set_visible_child(&host);
+                            for other in hidden.borrow_mut().drain(..) {
+                                other.set_visible(true);
+                            }
+                            app.locked.set(false);
+                            activity.set(util::now_ms());
+                            locked.set(false);
+                        }
+                    }
+                },
+            );
+        })
+    };
+    {
+        let try_unlock = try_unlock.clone();
+        entry.connect_activate(move |_| try_unlock());
+    }
+    {
+        let try_unlock = try_unlock;
+        unlock.connect_clicked(move |_| try_unlock());
+    }
+    {
+        let app = app.clone();
+        quit.connect_clicked(move |_| app.application.quit());
+    }
+
+    // --- the watcher ---
+    let watcher = {
+        let app = app.clone();
+        let activity = activity.clone();
+        let locked = locked.clone();
+        let stack = stack.clone();
+        let lock_page = lock_page.clone();
+        let hidden = hidden.clone();
+        let main = main.clone();
+        move || {
+            if locked.get() {
+                return glib::ControlFlow::Continue;
+            }
+            let now = util::now_ms();
+            if now.saturating_sub(activity.get()) < IDLE_LOCK_MS {
+                return glib::ControlFlow::Continue;
+            }
+            // Working in another window (Settings, a call) is not idle time.
+            if app
+                .application
+                .windows()
+                .iter()
+                .any(|other| other.is_active() && !is_same_window(other, &main))
+            {
+                activity.set(now);
+                return glib::ControlFlow::Continue;
+            }
+            // A wallet-only vault has no second factor: there is nothing to
+            // re-verify, so there is no gate either. The passphrase can be
+            // added or removed in Settings at any time, so this is checked
+            // here and not once at startup.
+            if !crate::secrets::is_passphrase_protected(&app.data_dir) {
+                activity.set(now);
+                return glib::ControlFlow::Continue;
+            }
+            // Everything but the main window goes away: a modal Settings
+            // window on top of the lock page would be a dead end. A live
+            // call keeps its window — the call is not idle.
+            let away: Vec<gtk::Window> = app
+                .application
+                .windows()
+                .into_iter()
+                .filter(|other| {
+                    other.is_visible()
+                        && !is_same_window(other, &main)
+                        && other.title().as_deref() != Some("Call")
+                })
+                .collect();
+            for other in &away {
+                other.set_visible(false);
+            }
+            *hidden.borrow_mut() = away;
+            app.locked.set(true);
+            locked.set(true);
+            stack.set_visible_child(&lock_page);
+            glib::ControlFlow::Continue
+        }
+    };
+    glib::timeout_add_seconds_local(IDLE_TICK_SECONDS, watcher);
+}
+
+/// Whether two windows are the same one (`gtk::Application::windows` hands
+/// out `gtk::Window`s, the main window is an `adw::ApplicationWindow`).
+fn is_same_window(one: &gtk::Window, other: &adw::ApplicationWindow) -> bool {
+    std::ptr::eq(one, other.upcast_ref::<gtk::Window>())
 }
 
 fn sidebar(main: &Rc<MainUi>) -> adw::NavigationPage {

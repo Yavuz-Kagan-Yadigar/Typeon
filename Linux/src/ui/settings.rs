@@ -72,11 +72,21 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
     {
         let app = app.clone();
         tor.connect_active_notify(move |row| {
+            let enabled = row.is_active();
             let mut prefs = app.prefs.borrow_mut();
-            prefs.tor_enabled = row.is_active();
+            prefs.tor_enabled = enabled;
             prefs.save();
             drop(prefs);
+            // M177: the notice is a toast, like the Android client's — the
+            // transport can only be added when the network starts, so the
+            // change lands at the next launch.
             app.toast("Tor setting applies after a restart.");
+            if !enabled {
+                // Tor is the only transport this client has: without it the
+                // device cannot reach anybody, and the user should know that
+                // before they wait for a connection that never comes.
+                app.toast("Tor is off: the network will not start without Tor.");
+            }
         });
     }
     connectivity.add(&tor);
@@ -1305,12 +1315,17 @@ fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
             std::process::id(),
             nanos
         ));
-        // A USB stick (FAT/exFAT) has no Unix permissions: the file is still
-        // written (it is passphrase-encrypted), but the user is told.
-        let mut private = true;
+        // A USB stick (FAT/exFAT) has no Unix permissions: the mode stays
+        // 0755 whatever we ask for, so the file can never be private there.
+        // The full key set must not sit wide-open anywhere — even
+        // passphrase-wrapped — so such a location is REFUSED (owner
+        // decision, round 3) instead of being written with a warning.
+        let refused = "Recovery file not written: that location cannot make it private. \
+                       Choose a folder inside your home directory.";
         // Only a file this `create_new` call actually created may ever be
         // deleted again.
         let mut created = false;
+        let mut refused_here = false;
         let written = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1319,23 +1334,51 @@ fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
             .and_then(|mut file| {
                 created = true;
                 let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
-                private = file.metadata()?.permissions().mode() & 0o077 == 0;
+                let private = file.metadata()?.permissions().mode() & 0o077 == 0;
+                if !private {
+                    // The mode is checked BEFORE the first secret byte is
+                    // written: the key set never reaches a location that
+                    // cannot keep it to its owner.
+                    refused_here = true;
+                    return Ok(());
+                }
                 file.write_all(&bytes)?;
                 file.sync_all()
             })
-            .and_then(|()| std::fs::rename(&tmp, &path));
+            .and_then(|()| {
+                if refused_here {
+                    // Nothing was written: the empty temp file goes away and
+                    // the target is left exactly as it was.
+                    return Ok(());
+                }
+                std::fs::rename(&tmp, &path)
+            });
         // The plaintext has left the heap's useful life either way: it is on
         // disk (or the write failed). Do not leave a copy in memory.
         bytes.zeroize();
         if written.is_err() && created {
             let _ = std::fs::remove_file(&tmp);
         }
+        if refused_here {
+            let _ = std::fs::remove_file(&tmp);
+            app.toast(refused);
+            return;
+        }
         match written {
-            Ok(()) if private => app.toast(&format!("Recovery file written to {}", path.display())),
-            Ok(()) => app.toast(&format!(
-                "Recovery file written to {}. This drive cannot make it private: anyone with access can copy it (it stays passphrase-protected)",
-                path.display()
-            )),
+            Ok(()) => {
+                // The rename keeps the mode, but the file is checked once
+                // more where it ended up: a location that cannot make it
+                // private must not keep the key set either.
+                let private = std::fs::metadata(&path)
+                    .map(|meta| meta.permissions().mode() & 0o077 == 0)
+                    .unwrap_or(false);
+                if private {
+                    app.toast(&format!("Recovery file written to {}", path.display()));
+                } else {
+                    let _ = std::fs::remove_file(&path);
+                    app.toast(refused);
+                }
+            }
             Err(error) => app.toast(&format!("Could not write the file: {}", error)),
         }
     });

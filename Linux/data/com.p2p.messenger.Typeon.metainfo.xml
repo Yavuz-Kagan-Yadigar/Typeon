@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metainfo for the Typeon desktop client (app id
+  com.p2p.messenger.Typeon — the same id as the Flatpak manifest and the
+  .desktop file). Installed by the Flatpak manifest into
+  /app/share/metainfo/, which is where the software centres look for it.
+-->
+<component type="desktop-application">
+  <id>com.p2p.messenger.Typeon</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>Typeon</name>
+  <summary>Peer-to-peer encrypted messaging — linked desktop device</summary>
+  <description>
+    <p>
+      Typeon joins your existing Typeon account as a secondary device: it
+      generates its own keys, shows a device-link QR code and is adopted by
+      the primary (a phone). A Linux machine can also be its own account, or
+      restore one from a recovery file.
+    </p>
+    <p>
+      Every message is end-to-end encrypted with a hybrid post-quantum
+      handshake and a double ratchet, and the local message archive is sealed
+      in a file vault whose key lives in your system keyring — with an
+      optional passphrase as a second factor. Reachability is deliberate: a
+      Tor onion service by default, so devices behind CGNAT find each other.
+    </p>
+    <ul>
+      <li>Direct and group chats, read receipts, edits, replies, reactions</li>
+      <li>Attachments, voice messages and a shared whiteboard</li>
+      <li>Encrypted voice and video calls</li>
+      <li>Optional store-and-forward servers for offline delivery and history</li>
+      <li>Multi-device linking, device verification and revocation</li>
+    </ul>
+    <p>
+      The desktop client is native GTK4 + libadwaita — the message protocol is
+      the exact same core the Android app ships, linked in process.
+    </p>
+  </description>
+  <developer id="com.p2p.messenger">
+    <name>Typeon project</name>
+  </developer>
+  <launchable type="desktop-id">com.p2p.messenger.Typeon.desktop</launchable>
+  <categories>
+    <category>Network</category>
+    <category>InstantMessaging</category>
+    <category>Chat</category>
+  </categories>
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-info">mild</content_attribute>
+  </content_rating>
+  <releases>
+    <release version="3.0.0" date="2026-10-21">
+      <description>
+        <p>Current release of the Linux desktop client.</p>
+      </description>
+    </release>
+  </releases>
+</component>
