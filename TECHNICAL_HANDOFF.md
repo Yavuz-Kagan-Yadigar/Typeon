@@ -463,7 +463,7 @@ Not: Bu sabitler zamanla değişir. Bir sayıya güvenmeden önce `grep -n "SABI
 
 ## 19. 2026-10-20/21 düzeltme turu (protokol ve davranış değişiklikleri)
 
-Kaynak: `reviews/MERGED_REVIEWS.md`, raporlar `reviews/fixpass-2026-10-20/report_*.md`. Derlenmedi/cihazda denenmedi. Eski sürümlerle uyum aranmaz.
+Kaynak: `reviews/archive/MERGED_REVIEWS.md`, raporlar `reviews/fixpass-2026-10-20/report_*.md`. Derlenmedi/cihazda denenmedi. Eski sürümlerle uyum aranmaz.
 
 **PROTOKOL KIRILMALARI**
 - **Sunucu protokolü v3** (`SERVER_PROTOCOL_VERSION`): `Register` → `Registered{proof_needed, refused}` (kalıcı reddedilenler `refused`'da); `Welcome` `enrollment_id` taşır; `enroll_signing_input` istemci PeerId'sini + `enroll_pk` + `enroll_pk_pq`'yu da bağlar.
