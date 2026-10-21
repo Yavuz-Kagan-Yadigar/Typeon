@@ -96,6 +96,27 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // #48: the database / key work is slow: not on the main thread. A loading
+        // screen meanwhile; the real layout (and its fragments) only after the core is up.
+        setContentView(android.widget.FrameLayout(this).apply {
+            addView(android.widget.ProgressBar(this@MainActivity), android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT, android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.CENTER))
+            contentDescription = getString(R.string.msg_loading)
+        })
+        lifecycleScope.launch {
+            // 0 = no database, 1 = identity stored (+ secrets loaded?), 2 = first start
+            val state = withContext(Dispatchers.IO) {
+                if (!P2PLib.initDatabase(applicationContext.filesDir.absolutePath)) 0
+                else if (P2PLib.hasStoredIdentity()) (if (IdentityManager.loadIfPresent(applicationContext)) 1 else 3)
+                else 2
+            }
+            continueStartup(savedInstanceState, state)
+        }
+    }
+
+    /** Core is open. [state]: 0 no database, 1 identity loaded, 3 identity unreadable, 2 first start. */
+    private fun continueStartup(savedInstanceState: Bundle?, state: Int) {
         setContentView(R.layout.activity_main)
 
         ensureNotificationPermission()
@@ -120,22 +141,12 @@ class MainActivity : AppCompatActivity() {
         val navController = navHostFragment.navController
         navView.setupWithNavController(navController)
 
-        // Her şeyden önce: Android'in uygulamaya özel dosya dizinini Rust
-        // tarafına geçirip SQLite'ı orada açıyoruz (Rust kendi başına bu
-        // yolu bilemez). Bu, varsa mevcut identity'nin PUBLIC key'lerini
-        // de belleğe yükler.
-        val databaseOpen = P2PLib.initDatabase(applicationContext.filesDir.absolutePath)
-
-        if (!databaseOpen) {
+        if (state == 0) {
             // No database (its key could not be read): not a first start. A
             // new identity made here would overwrite the stored one.
             com.p2p.messenger.util.KeystoreCrypto.reportKeyFailure(this)
-        } else if (P2PLib.hasStoredIdentity()) {
-            // Public key'ler yüklendi ama secret key'ler henüz Rust
-            // belleğinde değil — Keystore ile şifrelenmiş dosyadan çözüp
-            // yüklüyoruz.
-            val loaded = IdentityManager.loadIfPresent(applicationContext)
-            if (!loaded) {
+        } else if (state != 2) {
+            if (state == 3) {
                 // identity_secret.enc kayıp/bozuk — Keystore anahtarı
                 // muhtemelen kaybolmuş (ör. cihaz sıfırlandı). Kurtarma
                 // dosyasından geri yükleme akışı burada tetiklenmeli
@@ -158,7 +169,11 @@ class MainActivity : AppCompatActivity() {
         // Only on a real start: a rotation, a theme change or a restore after
         // process death replays the same intent and queued the share again.
         if (savedInstanceState == null) handleShare(intent)
+        ready = true
+        if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) resumeWork()
     }
+
+    @Volatile private var ready = false
 
     override fun onDestroy() {
         if (isFinishing) com.p2p.messenger.util.ShareIntake.pending = null
@@ -198,6 +213,7 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (!ready) return // continueStartup handles the current intent
         handleJoinLink(intent)
         handleShare(intent)
     }
@@ -507,26 +523,6 @@ class MainActivity : AppCompatActivity() {
                 .show()
             return
         }
-        // Phone unlocked, another app in front: the system shows an incoming
-        // call as a banner only. "Display over other apps" lets us open the
-        // call screen itself, like a phone call.
-        if (!android.provider.Settings.canDrawOverlays(this) &&
-            System.currentTimeMillis() - prefs0.getLong("overlay_prompt_ms", 0L) > 24L * 60 * 60 * 1000) {
-            prefs0.edit().putLong("overlay_prompt_ms", System.currentTimeMillis()).apply()
-            AlertDialog.Builder(this)
-                .setTitle(R.string.call_channel_name)
-                .setMessage(R.string.msg_overlay_for_calls)
-                .setPositiveButton(R.string.action_open_settings) { _, _ ->
-                    try {
-                        AppLock.beginTrustedExcursion()
-                        startActivity(Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                            android.net.Uri.parse("package:$packageName")))
-                    } catch (e: Exception) { }
-                }
-                .setNegativeButton(R.string.action_not_now, null)
-                .show()
-            return
-        }
         if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
         // Her açılışta sormak dırdır olurdu: kullanıcı reddettiyse bir gün
         // boyunca bir daha sorma. (Muafiyet zaten varsa yukarıda çıkıldı.)
@@ -578,6 +574,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (ready) resumeWork()
+    }
+
+    private fun resumeWork() {
         // Spec dışı, kullanıcı isteği: uygulamaya girildiğinde bildirim
         // çubuğundaki TÜM mesaj bildirimleri temizlensin.
         // AMA kilit ekranı bu ekranın üstüne geldiğinde bildirim çubuğu

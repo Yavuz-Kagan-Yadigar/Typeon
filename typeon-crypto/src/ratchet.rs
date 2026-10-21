@@ -17,7 +17,7 @@
 //! `CryptoRngCore` ister — `rand::rngs::OsRng` (rand 0.8) bunun için zaten
 //! uyumlu, x25519-dalek ile aynı RNG paylaşılabilir.
 
-use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use hkdf::Hkdf;
 use kem::{Decapsulate, Encapsulate};
@@ -789,7 +789,11 @@ impl DeviceRatchetState {
     /// alanlarını üretir). Nonce, message_number'dan deterministik türetilir
     /// (aynı chain key altında iki farklı mesaj numarası asla aynı nonce'u
     /// üretmez, bu da AEAD güvenliği için yeterlidir).
-    pub fn encrypt_next(&mut self, plaintext: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    ///
+    /// `aad`: the packet's raw header bytes (M-89): the tag binds them, so
+    /// the header the receiver acts on is the one the sender encrypted under.
+    /// `next_send_numbers` gives the numbers to put in that header first.
+    pub fn encrypt_next(&mut self, plaintext: &[u8], aad: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
         // The handshake chain of a responder is a function of the
         // HandshakeInit alone (see `respond`): never sent on.
         if self.is_fresh_responder() {
@@ -805,13 +809,18 @@ impl DeviceRatchetState {
 
         let cipher = ChaCha20Poly1305::new_from_slice(&message_key).map_err(|_| "Invalid key")?;
         let nonce = nonce_from_message_number(message_number);
-        let ciphertext = cipher.encrypt(&nonce, plaintext).map_err(|_| "Encryption failed")?;
+        let ciphertext = cipher.encrypt(&nonce, Payload { msg: plaintext, aad }).map_err(|_| "Encryption failed")?;
         // bkz. `DeviceRatchetState`'in `Drop` notu — bu, tek bir mesaja özel
         // anahtar, kullanıldıktan hemen sonra bellekten (üzerine yazılarak)
         // temizleniyor; fonksiyon dönüşünü beklemiyor.
         message_key.zeroize();
 
         Ok((ciphertext, message_number, self.prev_chain_length))
+    }
+
+    /// `(message_number, prev_chain_length)` the next `encrypt_next` uses.
+    pub fn next_send_numbers(&self) -> (u32, u32) {
+        (self.send_message_number, self.prev_chain_length)
     }
 
     /// Gelen bir mesajı çözer. `message_number` paketin header'ından gelir;
@@ -833,6 +842,7 @@ impl DeviceRatchetState {
         message_number: u32,
         rotation: Option<(&RatchetPublicKeys, &[u8])>,
         now_ms: u64,
+        aad: &[u8],
     ) -> Result<(Vec<u8>, SkippedKeyChanges), String> {
         if self.old_recv.is_some() && now_ms.abs_diff(self.last_rotation) > OLD_RECV_MAX_AGE_MS {
             self.old_recv = None;
@@ -845,7 +855,7 @@ impl DeviceRatchetState {
                 if let Ok(true) = candidate.respond_to_rotation(new_peer_keys, kyber_ct, now_ms) {
                     let opened = chain_decrypt(
                         &mut candidate.ck_recv, &mut candidate.recv_message_number, &mut candidate.skipped_keys,
-                        ciphertext, message_number,
+                        ciphertext, message_number, aad,
                     );
                     if let Ok((plaintext, mut changes)) = opened {
                         changes.rotated = true;
@@ -855,10 +865,10 @@ impl DeviceRatchetState {
                 }
             }
         }
-        let current = chain_decrypt(&mut self.ck_recv, &mut self.recv_message_number, &mut self.skipped_keys, ciphertext, message_number);
+        let current = chain_decrypt(&mut self.ck_recv, &mut self.recv_message_number, &mut self.skipped_keys, ciphertext, message_number, aad);
         let Err(current_err) = current else { return current };
         if let Some(old) = &mut self.old_recv {
-            if let Ok((plaintext, _)) = chain_decrypt(&mut old.ck, &mut old.next, &mut old.skipped, ciphertext, message_number) {
+            if let Ok((plaintext, _)) = chain_decrypt(&mut old.ck, &mut old.next, &mut old.skipped, ciphertext, message_number, aad) {
                 let mut changes = SkippedKeyChanges::default();
                 changes.old_chain = true;
                 return Ok((plaintext, changes));
@@ -889,6 +899,7 @@ fn chain_decrypt(
     skipped: &mut HashMap<u32, [u8; 32]>,
     ciphertext: &[u8],
     message_number: u32,
+    aad: &[u8],
 ) -> Result<(Vec<u8>, SkippedKeyChanges), String> {
     let mut changes = SkippedKeyChanges::default();
     // The message key and, when the chain advances, (new chain key, new `next`).
@@ -922,7 +933,7 @@ fn chain_decrypt(
     let opened = ChaCha20Poly1305::new_from_slice(&message_key)
         .map_err(|_| "Invalid key".to_string())
         .and_then(|cipher| {
-            cipher.decrypt(&nonce_from_message_number(message_number), ciphertext).map_err(|_| "Decryption failed".to_string())
+            cipher.decrypt(&nonce_from_message_number(message_number), Payload { msg: ciphertext, aad }).map_err(|_| "Decryption failed".to_string())
         });
     message_key.zeroize();
     let plaintext = match opened {
@@ -1064,7 +1075,7 @@ mod tests {
     /// ciphertext, message ciphertext, message number).
     fn rotate_and_send(from: &mut DeviceRatchetState, text: &[u8]) -> (RatchetPublicKeys, Vec<u8>, Vec<u8>, u32) {
         let kyber_ct = from.perform_dh_ratchet(T0).unwrap();
-        let (ciphertext, number, _) = from.encrypt_next(text).unwrap();
+        let (ciphertext, number, _) = from.encrypt_next(text, b"").unwrap();
         (from.own_ratchet_pubkeys(), kyber_ct, ciphertext, number)
     }
 
@@ -1075,11 +1086,22 @@ mod tests {
         assert_eq!(initiator.ck_send, responder.ck_recv, "initiator send == responder recv");
         assert_eq!(initiator.ck_recv, responder.ck_send, "initiator recv == responder send");
 
-        let (ciphertext, number, _) = initiator.encrypt_next(b"merhaba").unwrap();
-        assert_eq!(responder.decrypt(&ciphertext, number, None, T0).unwrap().0, b"merhaba");
-        assert!(responder.encrypt_next(b"x").is_err(), "a fresh responder must rotate first");
+        let (ciphertext, number, _) = initiator.encrypt_next(b"merhaba", b"").unwrap();
+        assert_eq!(responder.decrypt(&ciphertext, number, None, T0, b"").unwrap().0, b"merhaba");
+        assert!(responder.encrypt_next(b"x", b"").is_err(), "a fresh responder must rotate first");
         let (keys, kyber_ct, ciphertext, number) = rotate_and_send(&mut responder, b"selam");
-        assert_eq!(initiator.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0).unwrap().0, b"selam");
+        assert_eq!(initiator.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0, b"").unwrap().0, b"selam");
+    }
+
+    /// M-89: the header is the AEAD's associated data; another header fails
+    /// the tag and leaves the chain where it was.
+    #[test]
+    fn changed_header_does_not_decrypt() {
+        let (mut initiator, mut responder) = session();
+        assert_eq!(initiator.next_send_numbers(), (0, 0));
+        let (ciphertext, number, _) = initiator.encrypt_next(b"m", b"header").unwrap();
+        assert!(responder.decrypt(&ciphertext, number, None, T0, b"header2").is_err());
+        assert_eq!(responder.decrypt(&ciphertext, number, None, T0, b"header").unwrap().0, b"m");
     }
 
     /// Findings 1 and 2: packets of the chain a rotation replaced still
@@ -1090,34 +1112,34 @@ mod tests {
         let (mut b, mut a) = session();
         // A, the responder, leaves the handshake chain first.
         let (keys0, ct0, hello, n_hello) = rotate_and_send(&mut a, b"hello");
-        b.decrypt(&hello, n_hello, Some((&keys0, &ct0)), T0).unwrap();
+        b.decrypt(&hello, n_hello, Some((&keys0, &ct0)), T0, b"").unwrap();
         // Sent by A before it knows of B's rotation.
-        let (late_a0, n_a0, _) = a.encrypt_next(b"a0").unwrap();
-        let (late_a1, n_a1, _) = a.encrypt_next(b"a1").unwrap();
+        let (late_a0, n_a0, _) = a.encrypt_next(b"a0", b"").unwrap();
+        let (late_a1, n_a1, _) = a.encrypt_next(b"a1", b"").unwrap();
         // Sent by B on its old chain, overtaken by the rotation packet.
-        let (late_b0, n_b0, _) = b.encrypt_next(b"b0").unwrap();
+        let (late_b0, n_b0, _) = b.encrypt_next(b"b0", b"").unwrap();
         let (keys, kyber_ct, rotated, n_rot) = rotate_and_send(&mut b, b"b1");
 
-        let (plain, changes) = a.decrypt(&rotated, n_rot, Some((&keys, &kyber_ct)), T0).unwrap();
+        let (plain, changes) = a.decrypt(&rotated, n_rot, Some((&keys, &kyber_ct)), T0, b"").unwrap();
         assert_eq!(plain, b"b1");
         assert!(changes.rotated && !changes.old_chain);
         assert_eq!(a.root_key, b.root_key);
-        let (plain, changes) = a.decrypt(&late_b0, n_b0, None, T0).unwrap();
+        let (plain, changes) = a.decrypt(&late_b0, n_b0, None, T0, b"").unwrap();
         assert_eq!(plain, b"b0");
         assert!(changes.old_chain && !changes.rotated && changes.added.is_empty() && changes.used.is_empty());
 
         // Out of order on the old chain too: the skipped key lives in `old_recv`.
-        assert!(b.decrypt(&late_a1, n_a1, None, T0).unwrap().1.old_chain);
-        assert_eq!(b.decrypt(&late_a0, n_a0, None, T0).unwrap().0, b"a0");
-        assert!(b.decrypt(&late_a0, n_a0, None, T0).is_err(), "a replay must not decrypt twice");
+        assert!(b.decrypt(&late_a1, n_a1, None, T0, b"").unwrap().1.old_chain);
+        assert_eq!(b.decrypt(&late_a0, n_a0, None, T0, b"").unwrap().0, b"a0");
+        assert!(b.decrypt(&late_a0, n_a0, None, T0, b"").is_err(), "a replay must not decrypt twice");
 
         // The repeated announcement is a no-op, and the new chains work both ways.
-        let (ciphertext, number, _) = b.encrypt_next(b"b2").unwrap();
-        let (plain, changes) = a.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0).unwrap();
+        let (ciphertext, number, _) = b.encrypt_next(b"b2", b"").unwrap();
+        let (plain, changes) = a.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0, b"").unwrap();
         assert_eq!(plain, b"b2");
         assert!(!changes.rotated);
-        let (ciphertext, number, _) = a.encrypt_next(b"a2").unwrap();
-        let (plain, changes) = b.decrypt(&ciphertext, number, None, T0).unwrap();
+        let (ciphertext, number, _) = a.encrypt_next(b"a2", b"").unwrap();
+        let (plain, changes) = b.decrypt(&ciphertext, number, None, T0, b"").unwrap();
         assert_eq!(plain, b"a2");
         assert!(!changes.old_chain);
     }
@@ -1130,11 +1152,11 @@ mod tests {
         let (_, mut stranger) = session();
         let (keys, kyber_ct, ciphertext, number) = rotate_and_send(&mut stranger, b"x");
         let root_before = a.root_key.clone();
-        assert!(a.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0).is_err());
+        assert!(a.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0, b"").is_err());
         assert_eq!(a.root_key, root_before);
         assert!(a.old_recv.is_none());
-        let (ciphertext, number, _) = b.encrypt_next(b"still fine").unwrap();
-        assert_eq!(a.decrypt(&ciphertext, number, None, T0).unwrap().0, b"still fine");
+        let (ciphertext, number, _) = b.encrypt_next(b"still fine", b"").unwrap();
+        assert_eq!(a.decrypt(&ciphertext, number, None, T0, b"").unwrap().0, b"still fine");
     }
 
     /// Finding 4: a long run of never-delivered packets does not kill the
@@ -1144,22 +1166,22 @@ mod tests {
         let (mut a, mut b) = session();
         let mut sent = Vec::new();
         for _ in 0..1500 {
-            sent.push(a.encrypt_next(b"m").unwrap());
+            sent.push(a.encrypt_next(b"m", b"").unwrap());
         }
         let (ciphertext, number, _) = &sent[1400];
-        let (_, changes) = b.decrypt(ciphertext, *number, None, T0).unwrap();
+        let (_, changes) = b.decrypt(ciphertext, *number, None, T0, b"").unwrap();
         assert_eq!(changes.added.len(), MAX_SKIPPED_KEYS);
         assert_eq!(b.skipped_keys.len(), MAX_SKIPPED_KEYS);
         // One more gap: the oldest key makes room and is reported for deletion.
         let (ciphertext, number, _) = &sent[1402];
-        let (_, changes) = b.decrypt(ciphertext, *number, None, T0).unwrap();
+        let (_, changes) = b.decrypt(ciphertext, *number, None, T0, b"").unwrap();
         assert_eq!(changes.used, vec![400]);
         assert_eq!(b.skipped_keys.len(), MAX_SKIPPED_KEYS);
-        assert!(b.decrypt(&sent[400].0, 400, None, T0).is_err(), "evicted");
-        assert_eq!(b.decrypt(&sent[401].0, 401, None, T0).unwrap().0, b"m");
+        assert!(b.decrypt(&sent[400].0, 400, None, T0, b"").is_err(), "evicted");
+        assert_eq!(b.decrypt(&sent[401].0, 401, None, T0, b"").unwrap().0, b"m");
 
         // A jump past the work limit changes nothing.
-        assert!(b.decrypt(b"garbage", 1403 + MAX_SKIP_AHEAD + 1, None, T0).is_err());
+        assert!(b.decrypt(b"garbage", 1403 + MAX_SKIP_AHEAD + 1, None, T0, b"").is_err());
         assert_eq!(b.recv_message_number, 1403);
     }
 
@@ -1220,7 +1242,7 @@ mod tests {
         }
         let (mut a, mut b) = session();
         let (keys, kyber_ct, ciphertext, number) = rotate_and_send(&mut b, b"x");
-        a.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0).unwrap();
+        a.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0, b"").unwrap();
         let p = a.to_persistable();
         let old = OldFormat {
             root_key: p.root_key.clone(),
@@ -1252,18 +1274,18 @@ mod tests {
         let loaded: SerializableRatchetState = ciborium::from_reader(new_bytes.as_slice()).unwrap();
         assert!(DeviceRatchetState::from_persistable(loaded, HashMap::new()).unwrap().old_recv.is_some());
 
-        let (ciphertext, number, _) = b.encrypt_next(b"after restart").unwrap();
-        assert_eq!(restored.decrypt(&ciphertext, number, None, T0).unwrap().0, b"after restart");
+        let (ciphertext, number, _) = b.encrypt_next(b"after restart", b"").unwrap();
+        assert_eq!(restored.decrypt(&ciphertext, number, None, T0, b"").unwrap().0, b"after restart");
     }
 
     #[test]
     fn old_chain_expires_and_header_keys_are_bounded() {
         let (mut b, mut a) = session();
         let (keys, kyber_ct, ciphertext, number) = rotate_and_send(&mut a, b"x");
-        b.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0).unwrap();
+        b.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0, b"").unwrap();
         assert!(b.old_recv.is_some());
-        let (ciphertext, number, _) = a.encrypt_next(b"y").unwrap();
-        b.decrypt(&ciphertext, number, None, T0 + OLD_RECV_MAX_AGE_MS + 1).unwrap();
+        let (ciphertext, number, _) = a.encrypt_next(b"y", b"").unwrap();
+        b.decrypt(&ciphertext, number, None, T0 + OLD_RECV_MAX_AGE_MS + 1, b"").unwrap();
         assert!(b.old_recv.is_none());
         assert!(RatchetPublicKeys::from_bytes(&keys.to_bytes().unwrap()).is_ok());
         let short = RatchetPublicKeys { x25519_pubkey: vec![0; 31], kyber_pubkey: keys.kyber_pubkey.clone() };
@@ -1275,7 +1297,7 @@ mod tests {
     fn counters_do_not_wrap() {
         let (mut a, mut b) = session();
         a.send_message_number = u32::MAX;
-        assert!(a.encrypt_next(b"x").is_err());
-        assert!(b.decrypt(b"x", u32::MAX, None, T0).is_err());
+        assert!(a.encrypt_next(b"x", b"").is_err());
+        assert!(b.decrypt(b"x", u32::MAX, None, T0, b"").is_err());
     }
 }

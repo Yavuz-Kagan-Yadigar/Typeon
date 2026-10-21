@@ -352,7 +352,7 @@
 
     <!-- Spec dışı, kullanıcı isteği: bildirimlerde mesaj metnini göster/gizle. -->
     <string name="lbl_notif_show_message">Bildirimlerde mesajları göster</string>
-    <string name="lbl_notif_show_message_desc">Kapalıyken bildirimde yalnızca kimin yazdığı — ve hangi grupta — görünür, mesajın kendisi hiç görünmez.</string>
+    <string name="lbl_notif_show_message_desc">Kapalıyken bildirim yalnızca "Yeni mesaj" der; ne gönderen ne metin görünür.</string>
 
     <!-- Spec dışı, kullanıcı isteği: uygulama açılış şifresi. -->
     <string name="lbl_app_lock_section">Uygulama şifresi</string>
@@ -392,7 +392,6 @@
     <string name="action_open">Aç</string>
     <string name="msg_group_gone">Bu grup artık kullanılamıyor</string>
     <string name="msg_full_screen_intent">Gelen aramaların kilit ekranında görünmesi için Typeon\'a \"Tam ekran bildirimleri\" izni gerekiyor. Ayarı açıp izin verin.</string>
-    <string name="msg_overlay_for_calls">Başka bir uygulamadayken arama ekranının açılabilmesi için Typeon\'a diğer uygulamaların üzerinde gösterme izni verin. Bu izin olmadan gelen arama yalnızca bir bildirim olarak görünür.</string>
     <string name="desc_syncing">Güncelleniyor</string>
     <string name="msg_background_restricted">Typeon arka planda çalışması kısıtlandığı için ekran kapalıyken mesaj ve arama gelemiyor. Uygulama ayarlarını açıp Pil ayarını \"Kısıtlama yok\" yapın.</string>
     <!-- Calls -->
@@ -460,4 +459,12 @@
     <string name="channel_messages_name">Mesajlar</string>
     <string name="error_edit_failed">Mesaj düzenlenemedi</string>
     <string name="error_delete_failed">Mesaj silinemedi</string>
+    <string name="action_discard">At</string>
+    <string name="msg_recording_in_background">Sesli kayıt hâlâ sürüyor. Gönderilsin mi, atılsın mı?</string>
+    <string name="notif_fg_recording">Sesli mesaj kaydediliyor</string>
+    <string name="msg_media_scrub_failed">Bu videodan konum/cihaz verisi temizlenemedi. Yine de gönderilsin mi?</string>
+    <string name="action_send_anyway">Yine de gönder</string>
+    <string name="title_confirm_contact">Bu kişi eklensin mi?</string>
+    <string name="msg_confirm_contact">Bu QR kodundaki kişi eklensin mi?</string>
+    <string name="msg_loading">Yükleniyor…</string>
 </resources>

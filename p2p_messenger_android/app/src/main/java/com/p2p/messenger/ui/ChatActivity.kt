@@ -230,6 +230,19 @@ class ChatActivity : AppCompatActivity() {
     private val replyHighlightHandler = Handler(Looper.getMainLooper())
 
     private var mediaRecorder: MediaRecorder? = null
+    private var backgrounded = false
+    private var recordingDialog: AlertDialog? = null
+
+    /** #86: the finger is gone (touch cancelled / app was in the background): keep recording, ask send or discard. */
+    private fun promptRecordingDecision() {
+        if (mediaRecorder == null || recordingDialog?.isShowing == true) return
+        recordingDialog = AlertDialog.Builder(this)
+            .setMessage(R.string.msg_recording_in_background)
+            .setCancelable(false)
+            .setPositiveButton(R.string.btn_send) { _, _ -> finishVoiceRecording(send = true) }
+            .setNegativeButton(R.string.action_discard) { _, _ -> finishVoiceRecording(send = false) }
+            .show()
+    }
     private var recordingFile: File? = null
     private var recordingStartTime: Long = 0
     private var recordingTouchStartX = 0f
@@ -677,7 +690,8 @@ class ChatActivity : AppCompatActivity() {
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
-                    if (mediaRecorder != null) finishVoiceRecording(send = false)
+                    // #86: backgrounding cancels the touch; the recording goes on, the user decides
+                    promptRecordingDecision()
                     true
                 }
                 else -> false
@@ -727,6 +741,7 @@ class ChatActivity : AppCompatActivity() {
             return
         }
         mediaRecorder = recorder
+        P2PService.setRecordingActive(applicationContext, true)
         recordingFile = file
         recordingStartTime = android.os.SystemClock.elapsedRealtime()
         recordingCancelled = false
@@ -745,6 +760,7 @@ class ChatActivity : AppCompatActivity() {
         val durationMs = android.os.SystemClock.elapsedRealtime() - recordingStartTime
         mediaRecorder = null
         recordingFile = null
+        P2PService.setRecordingActive(applicationContext, false)
         recordingHandler.removeCallbacks(recordingTimerRunnable)
         layoutRecording.visibility = View.GONE
         layoutMessageInput.visibility = View.VISIBLE
@@ -1801,7 +1817,7 @@ class ChatActivity : AppCompatActivity() {
                 } catch (e: Exception) {
                     null
                 }
-                val prepared = OutgoingMedia.prepare(tempFile, fileName, "image/jpeg", hiRes)
+                val prepared = OutgoingMedia.prepare(tempFile, fileName, "image/jpeg", hiRes) { OutgoingMedia.askSendUnscrubbed(this@ChatActivity) }
                 sent = prepared.file
                 val result = P2PLib.prepareAndSendFile(
                     peerDeviceFingerprint, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
@@ -1835,6 +1851,7 @@ class ChatActivity : AppCompatActivity() {
                     }
                 }
             } catch (e: Exception) {
+                if (e is java.util.concurrent.CancellationException) return@launch
                 withContext(Dispatchers.Main) {
                     Toast.makeText(this@ChatActivity, getString(R.string.error_send_failed), Toast.LENGTH_SHORT).show()
                 }
@@ -1898,7 +1915,7 @@ class ChatActivity : AppCompatActivity() {
                     null
                 }
 
-                val prepared = OutgoingMedia.prepare(tempFile, fileName, mimeType, hiRes)
+                val prepared = OutgoingMedia.prepare(tempFile, fileName, mimeType, hiRes) { OutgoingMedia.askSendUnscrubbed(this@ChatActivity) }
                 sent = prepared.file
                 val result = P2PLib.prepareAndSendFile(
                     peerDeviceFingerprint, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
@@ -1932,6 +1949,7 @@ class ChatActivity : AppCompatActivity() {
                     }
                 }
             } catch (e: Exception) {
+                if (e is java.util.concurrent.CancellationException) return@launch
                 withContext(Dispatchers.Main) {
                     if (e.message == "too_large") Toast.makeText(this@ChatActivity, getString(R.string.error_file_too_large_named, fileName), Toast.LENGTH_LONG).show() else Toast.makeText(this@ChatActivity, getString(R.string.error_send_failed), Toast.LENGTH_SHORT).show()
                 }
@@ -2751,6 +2769,9 @@ class ChatActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        val wasBackgrounded = backgrounded
+        backgrounded = false
+        if (wasBackgrounded) promptRecordingDecision()
         // A locked app resumes this screen for a moment under the password
         // prompt: nothing was read, so no notification is cleared and no
         // "read up to now" goes out (see onPause too).
@@ -2929,11 +2950,7 @@ class ChatActivity : AppCompatActivity() {
         // event is missed while paused.
         layoutTypingIndicator.visibility = View.GONE
         sendTypingState(false)
-        if (mediaRecorder != null) {
-            // H150: a discard on backgrounding is not silent.
-            Toast.makeText(this, R.string.msg_recording_cancelled, Toast.LENGTH_SHORT).show()
-            finishVoiceRecording(send = false)
-        }
+        backgrounded = true // #86: the recording keeps running (service has the microphone type)
         stopVoicePlayback()
     }
 
@@ -2945,6 +2962,7 @@ class ChatActivity : AppCompatActivity() {
      * callback survived the pause and kept the whole screen alive.
      */
     override fun onDestroy() {
+        if (mediaRecorder != null) finishVoiceRecording(send = false)
         typingHandler.removeCallbacksAndMessages(null)
         replyHighlightHandler.removeCallbacksAndMessages(null)
         recordingHandler.removeCallbacksAndMessages(null)

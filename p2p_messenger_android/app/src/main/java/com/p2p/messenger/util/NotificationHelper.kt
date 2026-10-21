@@ -77,7 +77,7 @@ object NotificationHelper {
         // Spec dışı, kullanıcı isteği (Ayarlar'daki "bildirimlerde mesajları
         // göster" anahtarı, bkz. NotificationPrefs): kapalıyken gövde
         // SADECE göndereni taşır, mesaj metni HİÇ yazılmaz.
-        val body = if (NotificationPrefs.showMessageText(context)) "$displayName: $text" else displayName
+        val body = if (NotificationPrefs.showMessageText(context)) "$displayName: $text" else context.getString(R.string.notif_new_message)
         if (messageId.isNotEmpty()) shownMessageId[peerDeviceFingerprint.hashCode()] = messageId
         show(context, peerDeviceFingerprint.hashCode(), context.getString(R.string.app_name), body, intent, alert)
     }
@@ -152,7 +152,7 @@ object NotificationHelper {
         val body = if (NotificationPrefs.showMessageText(context)) {
             "$senderName ($groupName): $text"
         } else {
-            "$senderName ($groupName)"
+            context.getString(R.string.notif_new_message)
         }
         if (messageId.isNotEmpty()) shownMessageId[("group:$groupId").hashCode()] = messageId
         show(context, ("group:$groupId").hashCode(), context.getString(R.string.app_name), body, intent)
@@ -230,7 +230,7 @@ object NotificationHelper {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         // bkz. `showGroupMessageNotification` — aynı "mesajları göster" kuralı.
-        val body = if (NotificationPrefs.showMessageText(context)) "$groupName: $newText" else groupName
+        val body = if (NotificationPrefs.showMessageText(context)) "$groupName: $newText" else context.getString(R.string.notif_new_message)
         show(context, ("group:$groupId").hashCode(), context.getString(R.string.app_name), body, intent, alert = false)
     }
 

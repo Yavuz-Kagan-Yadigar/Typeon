@@ -186,9 +186,23 @@ class P2PService : Service() {
         @Volatile
         private var callActive = false
 
+        /** #86: a voice recording runs in a chat screen; same microphone type + notification text. */
+        @Volatile
+        private var recordingActive = false
+
         fun setCallActive(context: Context, active: Boolean) {
             if (callActive == active) return
             callActive = active
+            refreshForeground(context)
+        }
+
+        fun setRecordingActive(context: Context, active: Boolean) {
+            if (recordingActive == active) return
+            recordingActive = active
+            refreshForeground(context)
+        }
+
+        private fun refreshForeground(context: Context) {
             try {
                 androidx.core.content.ContextCompat.startForegroundService(context, Intent(context, P2PService::class.java))
             } catch (e: Exception) {
@@ -812,7 +826,7 @@ class P2PService : Service() {
         // olduğundan en görünür olanıydı.
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText(getString(R.string.notif_fg_text))
+            .setContentText(getString(if (recordingActive) R.string.notif_fg_recording else R.string.notif_fg_text))
             .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
             .build()
@@ -825,7 +839,7 @@ class P2PService : Service() {
         // Android 11+ a service without it records silence as soon as the
         // call screen is not visible (screen off, Back without PiP).
         val micType =
-            if (callActive && Build.VERSION.SDK_INT >= 30 &&
+            if ((callActive || recordingActive) && Build.VERSION.SDK_INT >= 30 &&
                 checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
             ) android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
         try {

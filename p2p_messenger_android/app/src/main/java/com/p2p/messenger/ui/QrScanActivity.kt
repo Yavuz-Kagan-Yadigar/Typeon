@@ -186,7 +186,18 @@ class QrScanActivity : AppCompatActivity() {
     private fun handleScannedText(text: String) {
         val cborBytes = if (addServerMode) ByteArray(0) else QrBinaryCodec.latin1StringToBytes(text)
         if (!addServerMode && !linkApproveMode) {
-            runScanned(text, cborBytes)
+            // #87: confirm before the handshake starts; cancel = nothing sent.
+            // ponytail: no name/safety code yet, needs a contact-QR peek JNI.
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                androidx.appcompat.app.AlertDialog.Builder(this)
+                    .setTitle(R.string.title_confirm_contact)
+                    .setMessage(R.string.msg_confirm_contact)
+                    .setPositiveButton(android.R.string.ok) { _, _ -> runScanned(text, cborBytes) }
+                    .setNegativeButton(android.R.string.cancel) { _, _ -> rearmLater() }
+                    .setOnCancelListener { rearmLater() }
+                    .show()
+            }
             return
         }
         // Not at once: any code caught in the frame added a server, or linked

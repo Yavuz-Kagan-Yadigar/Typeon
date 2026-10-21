@@ -1090,6 +1090,7 @@ mod review_oct2026_tests {
             link_consent: Vec::new(),
             link_consent_pq: Vec::new(),
             prekey: None,
+            timestamp: 0,
             signature: Vec::new(),
             signature_pq: Vec::new(),
         };
@@ -1126,11 +1127,17 @@ mod review_oct2026_tests {
             link_consent: Vec::new(),
             link_consent_pq: Vec::new(),
             prekey: None,
+            timestamp: 0,
             signature: Vec::new(),
             signature_pq: Vec::new(),
         };
+        let mut stranger = P2PCore::new();
+        let (stranger_fp, _) = stranger.generate_identity("X".into()).unwrap();
+        ix.timestamp = current_time_ms();
         let keys = &secondary.own_device_keys[&sec_fp];
-        let to_sign = packet::identity_exchange_signing_input(&ix.identity_id, &ix.device_fingerprint, &ix.device_name, &ix.pairing_proof);
+        let to_sign = packet::identity_exchange_signing_input(
+            &ix.identity_id, &ix.device_fingerprint, &ix.device_name, &ix.pairing_proof, &stranger_fp, ix.timestamp,
+        );
         let sig_classical: Ed25519Signature = keys.sign_sk_ed25519.sign(&to_sign);
         let sig_pq: MlDsaSignature<MlDsa87> = keys.sign_sk_mldsa.sign(&to_sign);
         ix.signature = sig_classical.to_bytes().to_vec();
@@ -1148,7 +1155,6 @@ mod review_oct2026_tests {
             assert!(!P2PCore::identity_proved_by_root(&squat));
         }
         // A stranger accepts it only with the proof, and never a bare claim.
-        let mut stranger = P2PCore::new();
         stranger.link_request_open_until = current_time_ms() + 60_000; // pairing open
         let bare = IdentityExchange { device_add: None, device_add_signer: None, ..ix.clone() };
         let refused = stranger.process_identity_exchange(None, &bare).unwrap_err();
@@ -1159,9 +1165,19 @@ mod review_oct2026_tests {
             IdentityExchange { device_name: "Mallory".into(), ..ix.clone() },
             IdentityExchange { identity_id: sec_fp.clone(), ..ix.clone() },
             IdentityExchange { signature: Vec::new(), signature_pq: Vec::new(), ..ix.clone() },
+            // L-40: signed for another recipient, or at another time.
+            IdentityExchange { timestamp: ix.timestamp - 1, ..ix.clone() },
         ] {
             assert!(stranger.process_identity_exchange(None, &forged).unwrap_err().contains("imzası"));
         }
+        // L-40: addressed to the stranger, so another device refuses it; and
+        // one older than the window is refused before the signature.
+        let mut other = P2PCore::new();
+        other.generate_identity("O".into()).unwrap();
+        other.link_request_open_until = current_time_ms() + 60_000;
+        assert!(other.process_identity_exchange(None, &ix).unwrap_err().contains("imzası"));
+        let old = IdentityExchange { timestamp: ix.timestamp - HANDSHAKE_MAX_AGE_MS - 1, ..ix.clone() };
+        assert!(stranger.process_identity_exchange(None, &old).unwrap_err().contains("pencere"));
         // The secondary's own keys as "signer": they do not hash to the identity id.
         let own = IdentityExchange { device_add_signer: secondary.own_synced_device(), ..ix.clone() };
         assert!(stranger.process_identity_exchange(None, &own).is_err());
@@ -1821,15 +1837,17 @@ fn handshake_signing_input(x25519_pub: &[u8], kyber_pub: &[u8], kyber_ct: &[u8],
 ///
 /// L-36 (2026-10-21): tagged and length-framed, like `handshake_signing_input`.
 /// Older versions do not verify.
-fn packet_signing_input(header: &MessagePacketHeader, ciphertext: &[u8], recipient_fp: &str) -> Result<Vec<u8>, String> {
-    let header = ciborium_bytes(header)?;
+///
+/// L-221 (2026-10-21): `header` is the raw header bytes as sent
+/// (`SignedHeader::raw`), not a re-encoding. Older versions do not verify.
+fn packet_signing_input(header: &[u8], ciphertext: &[u8], recipient_fp: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(32 + header.len() + ciphertext.len() + recipient_fp.len());
-    out.extend_from_slice(b"p2pmsg-v0.5-packet");
-    for field in [header.as_slice(), ciphertext, recipient_fp.as_bytes()] {
+    out.extend_from_slice(b"p2pmsg-v0.6-packet");
+    for field in [header, ciphertext, recipient_fp.as_bytes()] {
         out.extend_from_slice(&(field.len() as u32).to_be_bytes());
         out.extend_from_slice(field);
     }
-    Ok(out)
+    out
 }
 
 /// ChaCha20-Poly1305 with a fresh random nonce: (ciphertext, nonce). The one
@@ -1881,8 +1899,9 @@ mod founder_floor_tests {
             ratchet_pubkey: vec![1], message_number: 0, prev_chain_length: 0, rotation_kyber_ciphertext: None,
             sent_at_ms: 0,
         };
-        let to_b = super::packet_signing_input(&header, b"ct", "bbbb").unwrap();
-        let to_c = super::packet_signing_input(&header, b"ct", "cccc").unwrap();
+        let header = crate::packet::SignedHeader::new(header).unwrap();
+        let to_b = super::packet_signing_input(header.raw(), b"ct", "bbbb");
+        let to_c = super::packet_signing_input(header.raw(), b"ct", "cccc");
         assert_ne!(to_b, to_c);
         let (sealed, nonce) = super::seal_with(&[7u8; 32], b"x").unwrap();
         assert!(sealed != b"x" && nonce != [0u8; 12]);
@@ -5537,7 +5556,13 @@ impl P2PCore {
         } else {
             (Vec::new(), Vec::new())
         };
-        let to_sign = packet::identity_exchange_signing_input(&own_identity_id, &own_fp, &own_record.device_name, &pairing_proof);
+        // Rounded down so resends stay byte-identical (the deposit dedup keys
+        // on the bytes): at most one new copy per interval and target.
+        let now = current_time_ms();
+        let timestamp = now - now % HANDSHAKE_REDO_MIN_INTERVAL_MS;
+        let to_sign = packet::identity_exchange_signing_input(
+            &own_identity_id, &own_fp, &own_record.device_name, &pairing_proof, target_device_fingerprint, timestamp,
+        );
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
         let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
         let sig_pq: MlDsaSignature<MlDsa87> = own_keys.sign_sk_mldsa.sign(&to_sign);
@@ -5562,6 +5587,7 @@ impl P2PCore {
             link_consent,
             link_consent_pq,
             prekey,
+            timestamp,
             signature: sig_classical.to_bytes().to_vec(),
             signature_pq: sig_pq.encode().to_vec(),
         };
@@ -5594,11 +5620,22 @@ impl P2PCore {
         if !exchange.keys_match_fingerprint() {
             return Err(format!("IdentityExchange anahtarları fingerprint ile tutarsız: {}", exchange.device_fingerprint));
         }
+        // L-40: same window as a HandshakeInit (it also waits in the mailbox).
+        let now = current_time_ms();
+        let window = if exchange.timestamp < now { HANDSHAKE_MAX_AGE_MS } else { HANDSHAKE_MAX_SKEW_MS };
+        if now.abs_diff(exchange.timestamp) > window {
+            return Err("IdentityExchange timestamp'i pencere dışında, reddedildi".to_string());
+        }
         // Signed by the device itself: the packet travels unsealed, and the
         // fingerprint covers neither `device_name` nor `identity_id`. A
         // version before this one sends no signature and cannot pair with us.
+        // The signature also names this device as the recipient (L-40).
+        let own_fp = self.get_active_own_device_fingerprint()?;
         verify_hybrid_signature_with(
-            &packet::identity_exchange_signing_input(&exchange.identity_id, &exchange.device_fingerprint, &exchange.device_name, &exchange.pairing_proof),
+            &packet::identity_exchange_signing_input(
+                &exchange.identity_id, &exchange.device_fingerprint, &exchange.device_name, &exchange.pairing_proof,
+                &own_fp, exchange.timestamp,
+            ),
             &exchange.signature, &exchange.signature_pq,
             &exchange.sign_pubkey_ed25519, &exchange.sign_pubkey_mldsa,
         ).map_err(|e| format!("IdentityExchange imzası geçersiz: {}", e))?;
@@ -9438,8 +9475,9 @@ impl P2PCore {
             // Pencereden eski girdileri buda (sınırsız büyümeyi önle).
             seen.retain(|(ts, _)| now.abs_diff(*ts) <= HANDSHAKE_MAX_AGE_MS);
             // A stored init older than one already accepted would put the
-            // session back on keys the sender has replaced.
-            if stale && seen.iter().any(|(ts, _)| *ts > handshake.timestamp) {
+            // session back on keys the sender has replaced. H37: any older
+            // one, not only one past the skew window (both on the sender's clock).
+            if seen.iter().any(|(ts, _)| *ts > handshake.timestamp) {
                 info!("HandshakeInit yok sayıldı (peer={}) — daha yenisi zaten kabul edildi", crate::log_id(&handshake.sender_device_fingerprint));
                 return Ok(());
             }
@@ -9554,9 +9592,10 @@ impl P2PCore {
             // different sessions, and the DeviceLinkGrant never decrypted
             // (device, 2026-09-19).
             let awaiting_link = self.link_request_open_until > now;
-            // An init that waited (server mailbox) and is older than the
-            // session we hold: the sender has moved on from it.
-            if stale && handshake.timestamp < existing.last_rotation {
+            // An init older than the session we hold (H37: not only one that
+            // waited past the skew window): the sender has moved on from it.
+            // Inside the collision window the rule below decides instead.
+            if !same_round && handshake.timestamp < existing.last_rotation {
                 info!("HandshakeInit yok sayıldı (peer={}) — oturumdan eski", crate::log_id(&handshake.sender_device_fingerprint));
                 return Ok(());
             }
@@ -9789,7 +9828,11 @@ impl P2PCore {
         // function of the HandshakeInit alone. The announcement is repeated
         // on every packet until confirmed, so it may ride an unreliable one.
         let fresh_responder = self.ratchets.get(&peer_device_fingerprint).map_or(false, |s| s.is_fresh_responder());
-        let fresh_rotation_ct = if needs_delivery_confirmation || fresh_responder {
+        // M-94: a peer that only reads sends `Seen` (and `ReadStateSync`,
+        // in the list above); it takes its rotation turn on them too, or it
+        // never heals. The announcement repeats on every packet until confirmed.
+        let rotation_turn = needs_delivery_confirmation || matches!(content, MessageContent::Seen { .. });
+        let fresh_rotation_ct = if rotation_turn || fresh_responder {
             self.maybe_rotate_ratchet(&peer_device_fingerprint)?
         } else {
             None
@@ -9824,10 +9867,28 @@ impl P2PCore {
             None => Vec::new(),
         };
         let content_bytes = ciborium_bytes(content)?;
+        let message_id = message_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // M-89: the header is built first; its raw bytes are the AEAD's
+        // associated data and what the signature covers.
+        let (message_number, prev_chain_length) = state.next_send_numbers();
+        let header = packet::SignedHeader::new(MessagePacketHeader {
+            sender_identity_id: own_identity_id,
+            sender_device_fingerprint: own_fp.clone(),
+            message_id: message_id.clone(),
+            ratchet_pubkey,
+            message_number,
+            prev_chain_length,
+            rotation_kyber_ciphertext,
+            sent_at_ms: current_time_ms(),
+        })?;
         // Rollback copy: a state that cannot be saved must not burn the
         // message number (nothing is published with it).
         let snapshot = state.clone();
-        let (ciphertext, message_number, prev_chain_length) = state.encrypt_next(&content_bytes)?;
+        let (ciphertext, used_number, used_prev) = state.encrypt_next(&content_bytes, header.raw())?;
+        if (used_number, used_prev) != (message_number, prev_chain_length) {
+            self.ratchets.insert(peer_device_fingerprint.clone(), snapshot);
+            return Err("Ratchet numbers moved under the header".to_string());
+        }
         // `encrypt_next` her çağrıda ck_send/send_message_number'ı ilerletir
         // — diskteki kopya bayatlamasın diye her mesajda kalıcılaştırıyoruz
         // (rotasyon olduysa `maybe_rotate_ratchet` zaten yukarıda ayrıca
@@ -9838,7 +9899,6 @@ impl P2PCore {
         }
         drop(snapshot);
 
-        let message_id = message_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         if let MessageContent::HistorySyncRequest { group_id, .. } = content {
             let now = current_time_ms();
             // Yanıt, isteğin yeniden deneme ömrü içinde gelir; daha eskisi atılır.
@@ -9867,19 +9927,8 @@ impl P2PCore {
             }
             self.outstanding_history_requests.insert(message_id.clone(), entry);
         }
-        let header = MessagePacketHeader {
-            sender_identity_id: own_identity_id,
-            sender_device_fingerprint: own_fp.clone(),
-            message_id: message_id.clone(),
-            ratchet_pubkey,
-            message_number,
-            prev_chain_length,
-            rotation_kyber_ciphertext,
-            sent_at_ms: current_time_ms(),
-        };
-
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
-        let to_sign = packet_signing_input(&header, &ciphertext, &peer_device_fingerprint)?;
+        let to_sign = packet_signing_input(header.raw(), &ciphertext, &peer_device_fingerprint);
         let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
         let sig_pq: MlDsaSignature<MlDsa87> = own_keys.sign_sk_mldsa.sign(&to_sign);
 
@@ -10507,7 +10556,7 @@ impl P2PCore {
             return Err("sender_identity_id, imzalayan cihazın kayıtlı kimliğiyle eşleşmiyor".to_string());
         }
 
-        let to_verify = packet_signing_input(&packet.header, &packet.ciphertext, &self.get_active_own_device_fingerprint()?)?;
+        let to_verify = packet_signing_input(packet.header.raw(), &packet.ciphertext, &self.get_active_own_device_fingerprint()?);
         verify_hybrid_signature(&to_verify, &packet.signature_classical, &packet.signature_pq, &sender)?;
 
 
@@ -10537,7 +10586,7 @@ impl P2PCore {
                 .and_then(|_| RatchetPublicKeys::from_bytes(&packet.header.ratchet_pubkey).ok());
             let rotation = new_peer_keys.as_ref().zip(packet.header.rotation_kyber_ciphertext.as_deref());
             let dropped_prev = state.prev_root_key.clone();
-            let result = state.decrypt(&packet.ciphertext, packet.header.message_number, rotation, current_time_ms());
+            let result = state.decrypt(&packet.ciphertext, packet.header.message_number, rotation, current_time_ms(), packet.header.raw());
             if result.as_ref().map_or(false, |(_, changes)| changes.rotated) {
                 rotated_keys = Some((dropped_prev, state.root_key.clone()));
             }
@@ -21666,7 +21715,7 @@ impl P2PCore {
                         // fingerprint in the header is only a claim, and a
                         // stranger with throw-away peer ids filled this
                         // device's buffer and pushed the real packets out.
-                        let to_verify = packet_signing_input(&m.header, &m.ciphertext, &self.get_active_own_device_fingerprint()?)?;
+                        let to_verify = packet_signing_input(m.header.raw(), &m.ciphertext, &self.get_active_own_device_fingerprint()?);
                         verify_hybrid_signature(&to_verify, &m.signature_classical, &m.signature_pq, &sender)?;
                         self.buffer_early_packet(sender_fp, source, m);
                         return Ok(None);

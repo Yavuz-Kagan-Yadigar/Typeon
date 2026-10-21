@@ -583,15 +583,57 @@ pub struct MessagePacketHeader {
     pub sent_at_ms: u64,
 }
 
+/// A `MessagePacketHeader` with the exact CBOR bytes it travels as (L-221,
+/// M-89). The packet signature and the ratchet AEAD (associated data) cover
+/// these bytes, never a re-encoding: a receiver checks what the sender made,
+/// and acts only on a header the tag binds to the ciphertext.
+#[derive(Debug, Clone)]
+pub struct SignedHeader {
+    raw: Vec<u8>,
+    parsed: MessagePacketHeader,
+}
+
+impl SignedHeader {
+    pub fn new(header: MessagePacketHeader) -> Result<Self, String> {
+        Ok(Self { raw: to_cbor(&header)?, parsed: header })
+    }
+
+    pub fn raw(&self) -> &[u8] {
+        &self.raw
+    }
+}
+
+impl std::ops::Deref for SignedHeader {
+    type Target = MessagePacketHeader;
+    fn deref(&self) -> &MessagePacketHeader {
+        &self.parsed
+    }
+}
+
+impl Serialize for SignedHeader {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.raw)
+    }
+}
+
+impl<'de> Deserialize<'de> for SignedHeader {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = serde_bytes::ByteBuf::deserialize(deserializer)?.into_vec();
+        let parsed = ciborium::de::from_reader_with_recursion_limit(raw.as_slice(), 4)
+            .map_err(|e| serde::de::Error::custom(e.to_string()))?;
+        Ok(Self { raw, parsed })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagePacket {
-    pub header: MessagePacketHeader,
+    pub header: SignedHeader,
     /// AEAD (ChaCha20-Poly1305) şifreli içerik; nonce, header'dan
     /// deterministik türetilir (message_number bazlı) — ayrıca taşınmaz.
     /// Çözüldükten sonra bir `MessageContent` olarak CBOR-decode edilir.
     #[serde(with = "serde_bytes")]
     pub ciphertext: Vec<u8>,
-    /// ML-DSA + Ed25519 hibrit imza (header+ciphertext üzerinde).
+    /// ML-DSA + Ed25519 hibrit imza (raw header bytes + ciphertext + recipient).
     #[serde(with = "serde_bytes")]
     pub signature_classical: Vec<u8>,
     #[serde(with = "serde_bytes")]
@@ -1446,6 +1488,10 @@ pub struct IdentityExchange {
     /// signature; not part of `identity_exchange_signing_input`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prekey: Option<SignedPrekey>,
+    /// Sender's clock (ms) when made. Signed with the recipient's device
+    /// fingerprint (L-40): a captured packet replays to no other device and
+    /// only inside the receiver's freshness window.
+    pub timestamp: u64,
     /// Hybrid signature of this device over `identity_exchange_signing_input`.
     /// The fingerprint only says the four keys belong together: without this,
     /// whoever carried the packet (it travels unsealed) could change
@@ -1457,9 +1503,6 @@ pub struct IdentityExchange {
     pub signature_pq: Vec<u8>,
 }
 
-/// The bytes `IdentityExchange.signature` covers. The keys are covered through
-/// `device_fingerprint`; `device_add`, `revokes` and `device_add_signer` prove
-/// themselves.
 /// A short-lived KEM key pair of a device, signed with its long-term signing
 /// keys. A handshake encapsulates to it instead of the long-term KEM keys;
 /// the device deletes the secret half some weeks after it stops handing the
@@ -1492,12 +1535,24 @@ pub fn prekey_signing_input(device_fingerprint: &str, id: u64, kem_pubkey_x25519
     out
 }
 
-pub fn identity_exchange_signing_input(identity_id: &str, device_fingerprint: &str, device_name: &str, pairing_proof: &[u8]) -> Vec<u8> {
-    let mut out = b"p2pmsg-v0.4-identity-exchange".to_vec();
-    for field in [identity_id.as_bytes(), device_fingerprint.as_bytes(), device_name.as_bytes(), pairing_proof] {
+/// The bytes `IdentityExchange.signature` covers. The keys are covered through
+/// `device_fingerprint`; `device_add`, `revokes` and `device_add_signer` prove
+/// themselves. `recipient_fp` is the device the packet is for (not carried:
+/// the receiver uses its own).
+pub fn identity_exchange_signing_input(
+    identity_id: &str,
+    device_fingerprint: &str,
+    device_name: &str,
+    pairing_proof: &[u8],
+    recipient_fp: &str,
+    timestamp: u64,
+) -> Vec<u8> {
+    let mut out = b"p2pmsg-v0.5-identity-exchange".to_vec();
+    for field in [identity_id.as_bytes(), device_fingerprint.as_bytes(), device_name.as_bytes(), pairing_proof, recipient_fp.as_bytes()] {
         out.extend_from_slice(&(field.len() as u32).to_be_bytes());
         out.extend_from_slice(field);
     }
+    out.extend_from_slice(&timestamp.to_be_bytes());
     out
 }
 
@@ -1601,7 +1656,7 @@ mod wire_size_tests {
     fn byte_fields_encode_as_cbor_bytes() {
         let raw: Vec<u8> = (0..=255u8).cycle().take(4000).collect();
         let packet = MessagePacket {
-            header: MessagePacketHeader {
+            header: SignedHeader::new(MessagePacketHeader {
                 sender_identity_id: String::new(),
                 sender_device_fingerprint: String::new(),
                 message_id: String::new(),
@@ -1610,7 +1665,7 @@ mod wire_size_tests {
                 prev_chain_length: 0,
                 rotation_kyber_ciphertext: None,
                 sent_at_ms: 0,
-            },
+            }).unwrap(),
             ciphertext: raw.clone(),
             signature_classical: Vec::new(),
             signature_pq: raw.clone(),
@@ -1620,7 +1675,11 @@ mod wire_size_tests {
         assert!(buf.len() < 3 * raw.len() + 512, "paket {} bayt", buf.len());
         let back: NetworkEnvelope = ciborium::from_reader(buf.as_slice()).unwrap();
         match back {
-            NetworkEnvelope::Message(m) => assert_eq!(m.ciphertext, raw),
+            NetworkEnvelope::Message(m) => {
+                assert_eq!(m.ciphertext, raw);
+                assert_eq!(m.header.raw(), packet.header.raw());
+                assert_eq!(m.header.ratchet_pubkey, raw);
+            }
             _ => panic!(),
         }
     }

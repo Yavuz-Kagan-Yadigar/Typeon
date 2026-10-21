@@ -4,9 +4,8 @@ import android.content.Context
 
 /**
  * Spec dışı, kullanıcı isteği: "bildirimlerde mesajları göster" anahtarı
- * (Ayarlar). Varsayılan AÇIK — mevcut davranış korunur; kapatıldığında
- * bildirim yalnızca KİMDEN (ve grup mesajıysa hangi grupta) geldiğini
- * gösterir, mesaj METNİ hiç görünmez (bkz. NotificationHelper).
+ * (Ayarlar). Varsayılan KAPALI (#43); kapalıyken
+ * bildirim yalnızca "Yeni mesaj" der — ne gönderen ne metin görünür (bkz. NotificationHelper).
  *
  * Bu, `NotificationHelper`'daki kilit ekranı `publicVersion`
  * redaksiyonundan FARKLI ve ondan bağımsız bir katman: o yalnızca cihaz
@@ -19,7 +18,7 @@ object NotificationPrefs {
 
     fun showMessageText(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_SHOW_MESSAGE_TEXT, true)
+            .getBoolean(KEY_SHOW_MESSAGE_TEXT, false) // #43: hidden by default
 
     fun setShowMessageText(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()

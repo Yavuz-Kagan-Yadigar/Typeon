@@ -215,7 +215,8 @@ class P2PApplication : Application() {
              * service start) until the user went back to MainActivity.
              */
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
-                if (P2PLib.hasStoredIdentity()) return
+                // #48: MainActivity opens the core itself, off the main thread.
+                if (activity is MainActivity || P2PLib.hasStoredIdentity()) return
                 try {
                     P2PLib.initDatabase(filesDir.absolutePath)
                     if (P2PLib.hasStoredIdentity()) {

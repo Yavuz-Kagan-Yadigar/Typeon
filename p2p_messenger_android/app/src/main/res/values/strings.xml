@@ -393,7 +393,7 @@
 
     <!-- Spec dışı, kullanıcı isteği: bildirimlerde mesaj metnini göster/gizle. -->
     <string name="lbl_notif_show_message">Show messages in notifications</string>
-    <string name="lbl_notif_show_message_desc">When off, a notification only shows who wrote — and which group — never the message itself.</string>
+    <string name="lbl_notif_show_message_desc">When off, a notification only says "New message" — no sender, no text.</string>
 
     <!-- Spec dışı, kullanıcı isteği: uygulama açılış şifresi. -->
     <string name="lbl_app_lock_section">App password</string>
@@ -433,7 +433,6 @@
     <string name="action_open">Open</string>
     <string name="msg_group_gone">This group is no longer available</string>
     <string name="msg_full_screen_intent">To show incoming calls on the lock screen, Typeon needs the \"Full screen notifications\" permission. Open the setting and allow it.</string>
-    <string name="msg_overlay_for_calls">To open the call screen while you are using another app, allow Typeon to display over other apps. Without it an incoming call is only a notification banner.</string>
     <string name="desc_syncing">Updating</string>
     <string name="msg_background_restricted">Typeon is restricted from running in the background, so messages and calls cannot arrive while the screen is off. Open the app settings and set Battery to \"Unrestricted\" / \"No restrictions\".</string>
     <!-- Calls -->
@@ -501,4 +500,12 @@
     <string name="channel_messages_name">Messages</string>
     <string name="error_edit_failed">Couldn\'t edit the message</string>
     <string name="error_delete_failed">Couldn\'t delete the message</string>
+    <string name="action_discard">Discard</string>
+    <string name="msg_recording_in_background">A voice recording is still running. Send it or discard it?</string>
+    <string name="notif_fg_recording">Recording a voice message</string>
+    <string name="msg_media_scrub_failed">Location/device data could not be removed from this video. Send anyway?</string>
+    <string name="action_send_anyway">Send anyway</string>
+    <string name="title_confirm_contact">Add this contact?</string>
+    <string name="msg_confirm_contact">Add the contact from this QR code?</string>
+    <string name="msg_loading">Loading…</string>
 </resources>

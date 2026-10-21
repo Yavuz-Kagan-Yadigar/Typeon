@@ -3992,6 +3992,7 @@ mod tests {
             link_consent: Vec::new(),
             link_consent_pq: Vec::new(),
             prekey: None,
+            timestamp: 0,
             signature: Vec::new(),
             signature_pq: Vec::new(),
         })

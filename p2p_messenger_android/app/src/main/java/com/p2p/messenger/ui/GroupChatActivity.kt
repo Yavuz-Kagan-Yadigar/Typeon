@@ -233,6 +233,19 @@ class GroupChatActivity : AppCompatActivity() {
     // bkz. ChatActivity AYNI alanlar/desen, tek fark gönderim
     // `prepareAndSendGroupFile` ile TÜM üyelere yapılır.
     private var mediaRecorder: MediaRecorder? = null
+    private var backgrounded = false
+    private var recordingDialog: AlertDialog? = null
+
+    /** #86: the finger is gone (touch cancelled / app was in the background): keep recording, ask send or discard. */
+    private fun promptRecordingDecision() {
+        if (mediaRecorder == null || recordingDialog?.isShowing == true) return
+        recordingDialog = AlertDialog.Builder(this)
+            .setMessage(R.string.msg_recording_in_background)
+            .setCancelable(false)
+            .setPositiveButton(R.string.btn_send) { _, _ -> finishVoiceRecording(send = true) }
+            .setNegativeButton(R.string.action_discard) { _, _ -> finishVoiceRecording(send = false) }
+            .show()
+    }
     private var recordingFile: File? = null
     private var recordingStartTime: Long = 0L
     private var recordingTouchStartX: Float = 0f
@@ -1690,7 +1703,8 @@ class GroupChatActivity : AppCompatActivity() {
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
-                    if (mediaRecorder != null) finishVoiceRecording(send = false)
+                    // #86: backgrounding cancels the touch; the recording goes on, the user decides
+                    promptRecordingDecision()
                     true
                 }
                 else -> false
@@ -1732,6 +1746,7 @@ class GroupChatActivity : AppCompatActivity() {
             return
         }
         mediaRecorder = recorder
+        P2PService.setRecordingActive(applicationContext, true)
         recordingFile = file
         recordingStartTime = android.os.SystemClock.elapsedRealtime()
         recordingCancelled = false
@@ -1749,6 +1764,7 @@ class GroupChatActivity : AppCompatActivity() {
         val durationMs = android.os.SystemClock.elapsedRealtime() - recordingStartTime
         mediaRecorder = null
         recordingFile = null
+        P2PService.setRecordingActive(applicationContext, false)
         recordingHandler.removeCallbacks(recordingTimerRunnable)
         layoutRecording.visibility = View.GONE
         layoutMessageInput.visibility = View.VISIBLE
@@ -2020,7 +2036,7 @@ class GroupChatActivity : AppCompatActivity() {
                 } catch (e: Exception) {
                     null
                 }
-                val prepared = OutgoingMedia.prepare(tempFile, fileName, "image/jpeg", hiRes)
+                val prepared = OutgoingMedia.prepare(tempFile, fileName, "image/jpeg", hiRes) { OutgoingMedia.askSendUnscrubbed(this@GroupChatActivity) }
                 sent = prepared.file
                 val result = P2PLib.prepareAndSendGroupFile(
                     targetGroupId, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
@@ -2053,6 +2069,7 @@ class GroupChatActivity : AppCompatActivity() {
                     }
                 }
             } catch (e: Exception) {
+                if (e is java.util.concurrent.CancellationException) return@launch
                 withContext(Dispatchers.Main) {
                     Toast.makeText(this@GroupChatActivity, getString(R.string.error_send_failed), Toast.LENGTH_SHORT).show()
                 }
@@ -2122,7 +2139,7 @@ class GroupChatActivity : AppCompatActivity() {
                     null
                 }
 
-                val prepared = OutgoingMedia.prepare(tempFile, fileName, mimeType, hiRes)
+                val prepared = OutgoingMedia.prepare(tempFile, fileName, mimeType, hiRes) { OutgoingMedia.askSendUnscrubbed(this@GroupChatActivity) }
                 sent = prepared.file
                 val result = P2PLib.prepareAndSendGroupFile(
                     targetGroupId, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
@@ -2155,6 +2172,7 @@ class GroupChatActivity : AppCompatActivity() {
                     }
                 }
             } catch (e: Exception) {
+                if (e is java.util.concurrent.CancellationException) return@launch
                 withContext(Dispatchers.Main) {
                     if (e.message == "too_large") Toast.makeText(this@GroupChatActivity, getString(R.string.error_file_too_large_named, fileName), Toast.LENGTH_LONG).show() else Toast.makeText(this@GroupChatActivity, getString(R.string.error_send_failed), Toast.LENGTH_SHORT).show()
                 }
@@ -2950,6 +2968,9 @@ class GroupChatActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        val wasBackgrounded = backgrounded
+        backgrounded = false
+        if (wasBackgrounded) promptRecordingDecision()
         // Spec dışı, kullanıcı isteği: bu grup sohbeti açıldığında ona ait
         // bekleyen bildirim varsa temizlensin.
         // A locked app resumes this screen for a moment under the password
@@ -3081,10 +3102,7 @@ class GroupChatActivity : AppCompatActivity() {
         sendTypingState(false)
         // bkz. ChatActivity onPause AYNI notu — kullanıcı ekranı kapatırken
         // devam eden bir kayıt/oynatma varsa temiz bir şekilde durdurulur.
-        if (mediaRecorder != null) {
-            Toast.makeText(this, R.string.msg_recording_cancelled, Toast.LENGTH_SHORT).show() // H150
-            finishVoiceRecording(send = false)
-        }
+        backgrounded = true // #86: the recording keeps running (service has the microphone type)
         stopVoicePlayback()
     }
 
@@ -3096,6 +3114,7 @@ class GroupChatActivity : AppCompatActivity() {
      * survived the pause and kept the whole screen alive.
      */
     override fun onDestroy() {
+        if (mediaRecorder != null) finishVoiceRecording(send = false)
         typingHandler.removeCallbacksAndMessages(null)
         replyHighlightHandler.removeCallbacksAndMessages(null)
         recordingHandler.removeCallbacksAndMessages(null)

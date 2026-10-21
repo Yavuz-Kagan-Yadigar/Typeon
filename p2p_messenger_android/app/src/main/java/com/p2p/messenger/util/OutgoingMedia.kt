@@ -19,21 +19,22 @@ import kotlinx.coroutines.launch
 /**
  * What an outgoing photo or video becomes before it is encrypted:
  *
- * - Image, default: JPEG quality 90 at full resolution, upright, without
- *   metadata. Left as it is: GIF and animated WebP (the animation would be
- *   lost) and images with transparent pixels.
+ * - Image, default: JPEG quality 90, upright, without metadata; an image with
+ *   transparent pixels becomes lossless JPEG XL; one over the pixel cap is
+ *   scaled down first. Left as it is: GIF, animated WebP/APNG (the animation
+ *   would be lost).
  * - Image, "hi-res": a JPEG goes as it is (the core strips its EXIF); any
  *   other format becomes lossless JPEG XL.
  * - Video: MP4, 3GP and WebM are copied into a new container without
  *   metadata (location, device, dates); nothing is re-encoded.
  *
- * A JPEG/PNG that cannot be decoded fails the send; other formats that cannot be
- * decoded or remuxed go out unchanged.
+ * A JPEG/PNG that cannot be decoded fails the send; a video that cannot be
+ * remuxed goes out unchanged only after the user confirms.
  */
 object OutgoingMedia {
     private const val TAG = "OutgoingMedia"
     private const val JPEG_QUALITY = 90
-    /** Re-encoded as JPEG up to this; larger images go as they are. */
+    /** Larger images are scaled down (sampled decode) to at most MAX_JXL_PIXELS. */
     private const val MAX_PIXELS = 64_000_000L
     /** Same cap as the core's `attachments::MAX_IMAGE_PIXELS`: a larger
      *  hi-res image becomes JPEG, the receiver could not open the JPEG XL. */
@@ -42,23 +43,44 @@ object OutgoingMedia {
     class Prepared(val file: File, val fileName: String, val mimeType: String)
 
     /** The returned file is either [src] or a new file next to it; the caller deletes both. */
-    fun prepare(src: File, fileName: String, mimeType: String, hiRes: Boolean): Prepared {
+    suspend fun prepare(
+        src: File, fileName: String, mimeType: String, hiRes: Boolean,
+        confirmUnscrubbed: suspend () -> Boolean,
+    ): Prepared {
         val unchanged = Prepared(src, fileName, mimeType)
         return try {
             when {
                 mimeType.startsWith("image/") -> prepareImage(src, fileName, hiRes) ?: unchanged
-                mimeType.startsWith("video/") -> remuxVideo(src, fileName, mimeType) ?: unchanged
+                mimeType.startsWith("video/") -> remuxVideo(src, fileName, mimeType)
+                    ?: if (confirmUnscrubbed()) unchanged else throw java.util.concurrent.CancellationException("send cancelled")
                 else -> unchanged
             }
+        } catch (e: java.util.concurrent.CancellationException) {
+            throw e
         } catch (e: Throwable) {
             Log.w(TAG, "left unchanged: ${e.message}")
             // H-07: a JPEG/PNG that failed to decode goes out NOT as it is (GPS
             // in its EXIF): the caller shows the send-failed error.
             // ponytail: GIF/HEIC/video keep the unchanged fallback (owner decision).
             if (mimeType.startsWith("image/") && isJpegOrPng(src)) throw java.io.IOException("image scrub failed", e)
+            if (mimeType.startsWith("video/") && !confirmUnscrubbed()) throw java.util.concurrent.CancellationException("send cancelled")
             unchanged
         }
     }
+
+    /** #46c: "Location/device data could not be removed. Send anyway?" Cancel = nothing sent. */
+    suspend fun askSendUnscrubbed(activity: android.app.Activity): Boolean =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+            kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+                val d = androidx.appcompat.app.AlertDialog.Builder(activity)
+                    .setMessage(com.p2p.messenger.R.string.msg_media_scrub_failed)
+                    .setPositiveButton(com.p2p.messenger.R.string.action_send_anyway) { _, _ -> if (cont.isActive) cont.resume(true) {} }
+                    .setNegativeButton(android.R.string.cancel) { _, _ -> if (cont.isActive) cont.resume(false) {} }
+                    .setOnCancelListener { if (cont.isActive) cont.resume(false) {} }
+                    .show()
+                cont.invokeOnCancellation { d.dismiss() }
+            }
+        }
 
     /** A saved hi-res image: the core opens a JPEG XL as PNG, so it is stored under that name and type. */
     fun savedAs(plain: File, fileName: String, mimeType: String): Pair<String, String> =
@@ -110,19 +132,19 @@ object OutgoingMedia {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(src.absolutePath, bounds)
         val pixels = bounds.outWidth.toLong() * bounds.outHeight
-        if (pixels > MAX_PIXELS) return null
+        // Over the cap: sampled decode (power of 2), aspect kept.
+        var sample = 1
+        if (pixels > MAX_PIXELS) while (pixels / (sample.toLong() * sample) > MAX_JXL_PIXELS) sample *= 2
         @Suppress("NAME_SHADOWING")
         val hiRes = hiRes && pixels <= MAX_JXL_PIXELS
-        val bitmap = decode(src, srgb = hiRes) ?: throw java.io.IOException("decode failed")
+        val bitmap = decode(src, sample) ?: throw java.io.IOException("decode failed")
         try {
-            if (bitmap.width.toLong() * bitmap.height > MAX_PIXELS) return null
             val opaque = isOpaque(bitmap)
             // Below Android 9 the alpha is premultiplied: not lossless. The
             // file goes as it is (the core drops its metadata chunks).
-            if (hiRes && !opaque && bitmap.isPremultiplied) return null
+            if (!opaque && bitmap.isPremultiplied) return null
             val base = fileName.substringBeforeLast('.', fileName)
-            return if (!hiRes) {
-                if (!opaque) return null
+            return if (!hiRes && opaque) {
                 val out = sibling(src)
                 out.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, it) }
                 Prepared(out, "$base.jpg", "image/jpeg")
@@ -144,18 +166,19 @@ object OutgoingMedia {
         }
     }
 
-    /** Upright, not premultiplied (lossless alpha). [srgb]: JPEG XL here carries no ICC profile. */
-    private fun decode(src: File, srgb: Boolean): Bitmap? =
+    /** Upright, not premultiplied (lossless alpha), sRGB (JPEG XL here carries no ICC profile). [sample]: 1/sample size. */
+    private fun decode(src: File, sample: Int): Bitmap? =
         if (Build.VERSION.SDK_INT >= 28) {
             // Also HEIC; EXIF orientation is applied by the decoder.
             ImageDecoder.decodeBitmap(ImageDecoder.createSource(src)) { decoder, _, _ ->
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
                 decoder.isUnpremultipliedRequired = true
-                if (srgb) decoder.setTargetColorSpace(android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB))
+                decoder.setTargetColorSpace(android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB))
+                if (sample > 1) decoder.setTargetSampleSize(sample)
             }
         } else {
             // Premultiplied: the EXIF rotation draws it on a canvas.
-            BitmapFactory.decodeFile(src.absolutePath)
+            BitmapFactory.decodeFile(src.absolutePath, BitmapFactory.Options().apply { inSampleSize = sample })
                 ?.let { ImagePreview.rotateForExif(it, android.media.ExifInterface(src.absolutePath)) }
         }
 
