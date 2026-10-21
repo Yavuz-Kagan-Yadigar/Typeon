@@ -159,9 +159,9 @@ struct Bubble {
     seen: Cell<bool>,
     /// Reaction pill under the bubble; hidden while there are none.
     reactions: gtk::Label,
-    /// Last known delivery status ("pending"/"sent"/"error"), kept so a later
-    /// edit can redraw the meta label (time + tick + "edited") without
-    /// forgetting the tick that was already showing there.
+    /// Last known delivery status ("pending"/"sent"/"delivered"/"error"), kept
+    /// so a later edit can redraw the meta label (time + tick + "edited")
+    /// without forgetting the tick that was already showing there.
     status: RefCell<Option<String>>,
     /// Set once an edit lands, so the meta label shows a small "edited" next
     /// to the time — matching Android's `txtEditedLabel`, which sits beside
@@ -252,6 +252,10 @@ struct ChatView {
     /// Oldest local receive timestamp on screen — the pagination cursor. The
     /// core paginates on receive time, so this must not use `order_key`.
     oldest_timestamp: Cell<u64>,
+    /// Oldest attachment timestamp on screen — the pagination cursor of the
+    /// file list (the core keeps the files in their own table, so they page
+    /// separately from the messages). Zero until a page carried a file.
+    oldest_attachment_timestamp: Cell<u64>,
     /// Bumped per `reload`; a page fetched off-thread is dropped if a newer
     /// reload started meanwhile.
     load_gen: Cell<u64>,
@@ -387,6 +391,7 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         reply_label: reply_label.clone(),
         reply_to: RefCell::new(None),
         oldest_timestamp: Cell::new(0),
+        oldest_attachment_timestamp: Cell::new(0),
         load_gen: Cell::new(0),
         live_serial: Cell::new(0),
         loading_older: Cell::new(false),
@@ -786,8 +791,8 @@ impl ChatView {
         // The core lock is shared with the poll thread; on the GTK thread this
         // read froze the window whenever a poll round was running.
         crate::app::run_in_background(
-            move || fetch_page(&conversation, &own_identity, None, 0),
-            move |(mut entries, oldest)| {
+            move || fetch_page(&conversation, &own_identity, None, 0, None),
+            move |page| {
                 if view.load_gen.get() != generation {
                     return;
                 }
@@ -805,8 +810,10 @@ impl ChatView {
                 view.search_matches.borrow_mut().clear();
                 view.search_index.set(0);
                 view.exhausted_locally.set(false);
-                view.oldest_timestamp.set(oldest);
+                view.oldest_timestamp.set(page.oldest);
+                view.oldest_attachment_timestamp.set(page.oldest_attachment);
 
+                let mut entries = page.entries;
                 entries.sort_by_key(|entry| entry.order_key);
                 let mut previous_day = 0u64;
                 for entry in entries {
@@ -871,24 +878,35 @@ impl ChatView {
         let generation = self.load_gen.get();
         let conversation = self.conversation.clone();
         let own_identity = self.app().own_identity_id.borrow().clone();
+        // The files page on their own cursor (the core keeps them in their own
+        // table): the older ones come in below the oldest file on screen.
+        let attachment_cursor = self.oldest_attachment_timestamp.get();
         let view = self.clone();
         crate::app::run_in_background(
             move || {
-                let (older, oldest) =
-                    fetch_page(&conversation, &own_identity, Some(cursor as i64), cursor);
                 // Local archive only: scrolling sends nothing to the network.
-                (older, oldest)
+                fetch_page(
+                    &conversation,
+                    &own_identity,
+                    Some(cursor as i64),
+                    cursor,
+                    Some(attachment_cursor),
+                )
             },
-            move |(mut older, oldest)| {
+            move |page| {
                 view.loading_older.set(false);
                 if view.load_gen.get() != generation {
                     return; // a reload replaced the timeline meanwhile
                 }
+                let mut older = page.entries;
                 if older.is_empty() {
                     view.exhausted_locally.set(true);
                     return;
                 }
-                view.oldest_timestamp.set(oldest);
+                view.oldest_timestamp.set(page.oldest);
+                if page.oldest_attachment > 0 {
+                    view.oldest_attachment_timestamp.set(page.oldest_attachment);
+                }
                 older.sort_by_key(|entry| entry.order_key);
 
                 // Preserve the reading position. Inserting above shifts
@@ -967,15 +985,32 @@ impl ChatView {
     }
 }
 
+/// One page of a conversation: the merged timeline plus the two cursors the
+/// next page starts from.
+struct Page {
+    entries: Vec<Entry>,
+    /// Oldest message timestamp on the page — the message paging cursor.
+    oldest: u64,
+    /// Oldest attachment timestamp on the page — the attachment paging
+    /// cursor (the core keeps the files in their own table, so they page on
+    /// their own). Zero when the page carried no attachment.
+    oldest_attachment: u64,
+}
+
 /// Reads one page of messages *and* attachments and merges them onto a
 /// single timeline — the core stores them separately but the user sees one
 /// conversation.
+///
+/// `before` is the message cursor (`None` = the newest page), and
+/// `attachment_before` the attachment one: the `created_at` of the oldest
+/// attachment already on screen (`None` = take the newest ones).
 fn fetch_page(
     conversation: &Conversation,
     own_identity: &str,
     before: Option<i64>,
     mut oldest: u64,
-) -> (Vec<Entry>, u64) {
+    attachment_before: Option<u64>,
+) -> Page {
     let mut entries = Vec::new();
     let peer_fingerprint = match conversation {
         Conversation::Direct { fingerprint, .. } => fingerprint.clone(),
@@ -1022,6 +1057,8 @@ fn fetch_page(
             // A missing status is an archive row from before the column
             // existed; treating it as delivered is the safe reading.
             // Ticks describe delivery of MY messages; a received one has none.
+            // "delivered" is the core's end-to-end Ack — a state between
+            // "sent" and "seen" (bkz. `format_meta`).
             status: mine.then(|| message.status.clone().unwrap_or_else(|| "sent".to_string())),
             reply_preview: message.reply_to_preview.clone(),
             reply_sender: message.reply_to_sender_identity_id.clone(),
@@ -1033,53 +1070,82 @@ fn fetch_page(
         });
     }
 
-    // Attachments are not paginated by the core, so they are only merged in
-    // on the first page; older pages stay text-only.
-    if before.is_none() {
-        let listed = match conversation {
-            Conversation::Direct { fingerprint, .. } => core::list_attachments(fingerprint),
-            Conversation::Group { group_id, .. } => core::list_group_attachments(group_id),
-        };
-        for attachment in listed {
-            let sender_identity = attachment.sender_identity_id.clone().unwrap_or_default();
-            let source = if attachment.peer_device_fingerprint.is_empty() {
-                peer_fingerprint.clone()
-            } else {
-                attachment.peer_device_fingerprint.clone()
-            };
-            entries.push(Entry {
-                id: attachment.file_id.clone(),
-                mine: attachment.direction == "sent",
-                sender_identity,
-                text: String::new(),
-                order_key: attachment.created_at,
-                status: None,
-                reply_preview: None,
-                reply_sender: None,
-                deleted: false,
-                edited: false,
-                attachment: Some(Attachment {
-                    file_id: attachment.file_id,
-                    file_name: attachment.file_name,
-                    mime: attachment.mime_type,
-                    total_size: attachment.total_size,
-                    source_fingerprint: source,
-                    status: attachment.status,
-                    preview_hex: attachment.preview_hex,
-                    bytes_done: attachment.bytes_transferred,
-                    duration_ms: attachment.duration_ms,
-                }),
-                // Ekler için kalıcı bir "görüldü" kaynağı yok (bkz.
-                // `Entry.seen` notu — `message_seen` tablosu `files`'a
-                // değil `messages.message_id`'ye bağlı); ESKİ davranışla
-                // aynı, hiçbir zaman görüldü göstermiyordu.
-                seen: false,
-                reactions: String::new(),
-            });
+    // Attachments live in their own table in the core, so they page on a
+    // cursor of their own: the first page takes the newest ones, an older
+    // page (loaded while scrolling up) takes the ones below the oldest
+    // already on screen.
+    let listed: Vec<core::AttachmentSummary> = match conversation {
+        Conversation::Direct { fingerprint, .. } => match (before, attachment_before) {
+            (None, _) => core::list_attachments(fingerprint),
+            (Some(_), Some(cursor)) if cursor > 0 => {
+                core::list_attachments_before(fingerprint, cursor, PAGE_SIZE as usize)
+            }
+            (Some(_), _) => Vec::new(),
+        },
+        Conversation::Group { group_id, .. } => match (before, attachment_before) {
+            (None, _) => core::list_group_attachments(group_id),
+            (Some(_), Some(cursor)) if cursor > 0 => {
+                core::list_group_attachments_before(group_id, cursor, PAGE_SIZE as usize)
+            }
+            (Some(_), _) => Vec::new(),
+        },
+    };
+
+    let mut oldest_attachment = 0u64;
+    for attachment in listed {
+        if oldest_attachment == 0 || attachment.created_at < oldest_attachment {
+            oldest_attachment = attachment.created_at;
         }
+        entries.push(attachment_entry(&attachment, &peer_fingerprint));
     }
 
-    (entries, oldest)
+    Page {
+        entries,
+        oldest,
+        oldest_attachment,
+    }
+}
+
+/// One archive attachment row as a timeline entry — the core keeps the files
+/// in their own table, but the user sees them inside the conversation.
+fn attachment_entry(attachment: &core::AttachmentSummary, peer_fingerprint: &str) -> Entry {
+    let sender_identity = attachment.sender_identity_id.clone().unwrap_or_default();
+    // In a group the file belongs to the member who sent it, so the row
+    // carries that member's device; in a 1:1 the conversation key is it.
+    let source = if attachment.peer_device_fingerprint.is_empty() {
+        peer_fingerprint.to_string()
+    } else {
+        attachment.peer_device_fingerprint.clone()
+    };
+    Entry {
+        id: attachment.file_id.clone(),
+        mine: attachment.direction == "sent",
+        sender_identity,
+        text: String::new(),
+        order_key: attachment.created_at,
+        status: None,
+        reply_preview: None,
+        reply_sender: None,
+        deleted: false,
+        edited: false,
+        attachment: Some(Attachment {
+            file_id: attachment.file_id.clone(),
+            file_name: attachment.file_name.clone(),
+            mime: attachment.mime_type.clone(),
+            total_size: attachment.total_size,
+            source_fingerprint: source,
+            status: attachment.status.clone(),
+            preview_hex: attachment.preview_hex.clone(),
+            bytes_done: attachment.bytes_transferred,
+            duration_ms: attachment.duration_ms,
+        }),
+        // Ekler için kalıcı bir "görüldü" kaynağı yok (bkz. `Entry.seen`
+        // notu — `message_seen` tablosu `files`'a değil
+        // `messages.message_id`'ye bağlı); ESKİ davranışla aynı, hiçbir
+        // zaman görüldü göstermiyordu.
+        seen: false,
+        reactions: String::new(),
+    }
 }
 
 // --- rendering ---
@@ -1109,8 +1175,19 @@ impl ChatView {
             existing.text.set_label(&display_text(&entry));
             self.search_lower.borrow_mut().clear();
             existing.edited.set(entry.edited);
-            *existing.status.borrow_mut() = entry.status.clone();
-            existing.meta.set_label(&meta_text(&entry, existing.seen.get()));
+            // Never downgrade: a stale archive row must not pull a bubble that
+            // already got the end-to-end Ack back to "sent".
+            let status = match (existing.status.borrow().as_deref(), entry.status.as_deref()) {
+                (Some("delivered"), Some("sent" | "pending")) => Some("delivered".to_string()),
+                _ => entry.status.clone(),
+            };
+            *existing.status.borrow_mut() = status.clone();
+            existing.meta.set_markup(&format_meta(
+                entry.order_key,
+                status.as_deref(),
+                existing.seen.get(),
+                entry.edited,
+            ));
             return;
         }
 
@@ -1237,12 +1314,12 @@ impl ChatView {
             column.append(&text);
         }
 
-        let meta = gtk::Label::builder()
-            .label(meta_text(entry, entry.seen).as_str())
-            .xalign(1.0)
-            .build();
+        let meta = gtk::Label::builder().xalign(1.0).build();
         meta.add_css_class("caption");
         meta.add_css_class("dim-label");
+        // Markup, not plain text: the delivered double tick carries its own
+        // grey (see `format_meta`).
+        meta.set_markup(&meta_text(entry, entry.seen));
         column.append(&meta);
 
         let reactions = gtk::Label::builder()
@@ -1417,7 +1494,7 @@ impl ChatView {
         block.append(&eta);
 
         let action = gtk::Button::builder()
-            .label(action_label(&attachment.status).as_str())
+            .label(action_label(&attachment.status, attachment.bytes_done).as_str())
             .halign(gtk::Align::Start)
             .build();
         action.set_visible(attachment.status != "downloading");
@@ -2816,7 +2893,7 @@ impl ChatView {
             bubble.text.set_label(new_text);
             self.search_lower.borrow_mut().clear();
             bubble.edited.set(true);
-            bubble.meta.set_label(&format_meta(
+            bubble.meta.set_markup(&format_meta(
                 bubble.order_key,
                 bubble.status.borrow().as_deref(),
                 bubble.seen.get(),
@@ -2846,10 +2923,18 @@ impl ChatView {
         if !bubble.mine || bubble.seen.get() {
             return;
         }
+        // Never downgrade: the end-to-end Ack ("delivered") is a stronger
+        // promise than "sent", and the events can arrive out of order — a
+        // late "sent" must not pull the double tick back to one.
+        if bubble.status.borrow().as_deref() == Some("delivered")
+            && matches!(status, "sent" | "pending")
+        {
+            return;
+        }
         *bubble.status.borrow_mut() = Some(status.to_string());
         bubble
             .meta
-            .set_label(&format_meta(bubble.order_key, Some(status), false, bubble.edited.get()));
+            .set_markup(&format_meta(bubble.order_key, Some(status), false, bubble.edited.get()));
     }
 
     fn apply_reactions(&self, id: &str, summary: &str) {
@@ -2900,7 +2985,7 @@ impl ChatView {
         bubble.seen.set(true);
         bubble
             .meta
-            .set_label(&format_meta(bubble.order_key, Some("sent"), true, bubble.edited.get()));
+            .set_markup(&format_meta(bubble.order_key, Some("sent"), true, bubble.edited.get()));
     }
 
     fn apply_progress(&self, file_id: &str, done: u64, total: u64) {
@@ -2984,7 +3069,7 @@ impl ChatView {
         }
         if let Some(action) = &state.action {
             action.set_visible(true);
-            action.set_label(if new_status == "complete" { "Open" } else { "Retry" });
+            action.set_label(&action_label(new_status, state.bytes_done.get()));
         }
     }
 
@@ -3125,8 +3210,46 @@ fn group_members(view: &Rc<ChatView>) {
         list.add(&row);
     }
 
+    // The founder can re-send the current group state to every member — the
+    // fix for a member whose group update never arrived. The core rejects it
+    // for anyone but the founder, so the button only exists for the founder.
+    let mut resend_row = None;
+    if summary.is_founder {
+        let resend = adw::ActionRow::builder()
+            .title("Resend group to everyone")
+            .subtitle("Sends the current group state to every member again.")
+            .build();
+        let resend_button = gtk::Button::builder()
+            .label("Resend")
+            .valign(gtk::Align::Center)
+            .build();
+        {
+            let view = view.clone();
+            let group_id = group_id.clone();
+            resend_button.connect_clicked(move |_| {
+                let (view, group_id) = (view.clone(), group_id.clone());
+                // The core call takes the shared core lock — off the GTK
+                // thread, so a slow poll round cannot stall the window.
+                crate::app::run_in_background(
+                    move || core::resend_group_to_all(&group_id),
+                    move |result| match result {
+                        Ok(()) => view.app().toast("Group state sent to everyone."),
+                        Err(error) => view.app().toast(&error),
+                    },
+                );
+            });
+        }
+        resend.add_suffix(&resend_button);
+        resend_row = Some(resend);
+    }
+
     let page = adw::PreferencesPage::new();
     page.add(&list);
+    if let Some(resend) = resend_row {
+        let actions = adw::PreferencesGroup::builder().title("Group").build();
+        actions.add(&resend);
+        page.add(&actions);
+    }
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&adw::HeaderBar::new());
     toolbar.set_content(Some(&page));
@@ -3586,15 +3709,24 @@ fn meta_text(entry: &Entry, seen: bool) -> String {
 /// Time plus a delivery tick, and — small, right beside the time, matching
 /// Android's `txtEditedLabel` — an "edited" marker instead of the old inline
 /// suffix on the message text itself. The ticks mean what the core can
-/// actually promise: one tick is "handed to the network", two is "the peer's
-/// app told us it displayed this". There is no "delivered to device" state to
-/// show.
+/// actually promise: one tick is "handed to the network", two GREY ticks are
+/// "the peer's device acknowledged it" (delivered), two plain ticks are "the
+/// peer's app told us it displayed this" (seen).
+///
+/// The result is Pango markup (the meta label is set with `set_markup`), so a
+/// tick can carry its own colour — the delivered one is grey, the seen one
+/// keeps the label's own tone. Everything in here is generated by us (a
+/// timestamp and fixed glyphs), so there is no user text to escape.
 fn format_meta(timestamp: u64, status: Option<&str>, seen: bool, edited: bool) -> String {
     let time = util::format_bubble_time(timestamp);
     let tick = match (status, seen) {
+        // Seen wins over delivered: it is the later, stronger promise.
         (_, true) => " ✓✓",
         (Some("pending"), _) => " ⏱",
         (Some("error"), _) => " ⚠",
+        // The end-to-end Ack (the core's `delivered` status) — a double tick
+        // in grey, so it does not read as the "seen" tick.
+        (Some("delivered"), _) => "<span foreground=\"grey\"> ✓✓</span>",
         (Some("sent"), _) => " ✓",
         _ => "",
     };
@@ -3619,9 +3751,15 @@ fn attachment_status_text(attachment: &Attachment) -> String {
     }
 }
 
-fn action_label(status: &str) -> String {
+/// The label of an attachment's action button.
+///
+/// A download that already moved some bytes is RESUMED, not started over —
+/// the core keeps `bytes_transferred` and continues from there (bkz.
+/// `Attachment.bytes_done`), so the button says so.
+fn action_label(status: &str, bytes_done: u64) -> String {
     match status {
         "complete" => "Open".to_string(),
+        "failed" if bytes_done > 0 => "Resume".to_string(),
         "failed" => "Retry".to_string(),
         _ => "Download".to_string(),
     }

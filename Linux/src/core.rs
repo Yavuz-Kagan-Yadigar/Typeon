@@ -471,6 +471,13 @@ pub fn leave_group(group_id: &str) -> Result<(), String> {
     parse_unit(api::leave_group(group_id))
 }
 
+/// The founder re-sends the current group state to every member — the fix
+/// for a member whose group update never arrived. The core rejects it for
+/// anyone but the founder.
+pub fn resend_group_to_all(group_id: &str) -> Result<(), String> {
+    parse_unit(api::resend_group_to_all(group_id))
+}
+
 pub fn set_group_profile_picture(group_id: &str, jpeg: Option<Vec<u8>>) -> Result<(), String> {
     parse_unit(api::set_group_profile_picture(group_id, jpeg))
 }
@@ -614,6 +621,26 @@ pub fn list_group_attachments_brief(group_id: &str) -> Vec<AttachmentSummary> {
 
 pub fn list_group_attachments(group_id: &str) -> Vec<AttachmentSummary> {
     parse_list(api::list_group_attachments(group_id))
+}
+
+/// The `limit` newest attachments OLDER than `before_ms`, oldest first — the
+/// paging counterpart of `list_attachments` (the core keeps the files in
+/// their own table, so scrolling up needs a cursor of its own).
+pub fn list_attachments_before(
+    peer_fingerprint: &str,
+    before_ms: u64,
+    limit: usize,
+) -> Vec<AttachmentSummary> {
+    parse_list(api::list_attachments_before(peer_fingerprint, before_ms, limit))
+}
+
+/// The group counterpart of `list_attachments_before`.
+pub fn list_group_attachments_before(
+    group_id: &str,
+    before_ms: u64,
+    limit: usize,
+) -> Vec<AttachmentSummary> {
+    parse_list(api::list_group_attachments_before(group_id, before_ms, limit))
 }
 
 /// Decrypts a completed attachment to a plaintext file and returns its path.
