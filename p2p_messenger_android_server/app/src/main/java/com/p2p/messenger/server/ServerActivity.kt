@@ -121,6 +121,12 @@ class ServerActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btn_new_invite).setOnClickListener { confirmRotateJoinCode() }
         findViewById<Button>(R.id.btn_copy_invite).setOnClickListener { copyInvite() }
+        findViewById<Button>(R.id.btn_pin).setOnClickListener { ServerLock.showSettings(this) }
+        // Screen off locks at once; leaving the app locks after a short grace (ServerLock).
+        androidx.core.content.ContextCompat.registerReceiver(
+            this, screenOff, android.content.IntentFilter(Intent.ACTION_SCREEN_OFF),
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         findViewById<Button>(R.id.btn_battery).setOnClickListener { requestIgnoreBatteryOptimizations() }
         findViewById<Button>(R.id.btn_storage).setOnClickListener { chooseStorage() }
         refreshStorageLabel()
@@ -130,9 +136,32 @@ class ServerActivity : AppCompatActivity() {
         }
     }
 
+    private val screenOff = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) = ServerLock.lockNow()
+    }
+    private var lockDialog: AlertDialog? = null
+
+    /** Hides the whole screen behind the PIN prompt while locked. */
+    private fun guardLock() {
+        val content = findViewById<android.view.View>(android.R.id.content)
+        if (!ServerLock.isLocked(this)) {
+            content.visibility = android.view.View.VISIBLE
+            return
+        }
+        content.visibility = android.view.View.INVISIBLE
+        if (lockDialog?.isShowing == true) return
+        lockDialog = ServerLock.showUnlock(this) { content.visibility = android.view.View.VISIBLE }
+    }
+
     override fun onResume() {
         super.onResume()
+        guardLock()
         handler.post(refreshRunnable)
+    }
+
+    override fun onStop() {
+        ServerLock.noteLeft()
+        super.onStop()
     }
 
     override fun onPause() {
@@ -144,6 +173,8 @@ class ServerActivity : AppCompatActivity() {
         // The delayed restart of `restartServerService` must not fire into a
         // destroyed activity.
         handler.removeCallbacksAndMessages(null)
+        try { unregisterReceiver(screenOff) } catch (e: IllegalArgumentException) { }
+        lockDialog?.dismiss()
         io.shutdown()
         super.onDestroy()
     }

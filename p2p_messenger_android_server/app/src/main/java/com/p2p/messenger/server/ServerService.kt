@@ -294,6 +294,9 @@ class ServerService : Service() {
                     ?: throw java.io.IOException(getString(R.string.err_storage_unavailable))
                 // Tor parametresi yok — onion service her zaman açık
                 // (bkz. ServerLib.startServer notu).
+                // DB encryption at rest: fail closed, never fall back to a plain DB.
+                val keyRes = ServerLib.setDbKey(DbKey.get(this))
+                if (keyRes.startsWith("Error:")) throw java.io.IOException(keyRes)
                 ServerLib.startServer(
                     dataDir(this).absolutePath,
                     isNodeMode(this),

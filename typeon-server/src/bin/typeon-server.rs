@@ -27,6 +27,7 @@
 //! - `TYPEON_SERVER_NAME`
 //! - `TYPEON_SERVER_BUDGET_BYTES` (total disk the server may use; default
 //!   `DEFAULT_BUDGET_BYTES`, 16 GiB)
+//! - `TYPEON_SERVER_DB_KEY` (optional 64-hex SQLCipher key; a plain DB is migrated)
 //! - `TYPEON_SERVER_MAX_DEVICES` (most enrolled devices; default 64)
 
 use std::path::PathBuf;
@@ -123,6 +124,14 @@ fn arg_num(args: &[String], index: usize, default: i64) -> i64 {
 #[tokio::main]
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // Optional SQLCipher key (64 hex chars); a plain DB is migrated on first use.
+    if let Ok(k) = std::env::var("TYPEON_SERVER_DB_KEY") {
+        if let Err(e) = typeon_server::store::set_db_key(Some(k.trim().to_string())) {
+            eprintln!("TYPEON_SERVER_DB_KEY: {e}");
+            std::process::exit(1);
+        }
+    }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("run");

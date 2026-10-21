@@ -86,6 +86,21 @@ fn guarded<'local>(env: &mut JNIEnv<'local>, body: impl FnOnce(JNIEnv<'local>) -
         })
 }
 
+/// SQLCipher key (64 hex) for the server DB; call before `startServer`.
+/// Empty string = plain DB. Returns "ok" or "Error: ...".
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_setDbKey<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    key: JString<'local>,
+) -> jstring {
+    guarded(&mut env, |mut env| {
+        let k = jstr(&mut env, &key);
+        let r = crate::store::set_db_key(if k.is_empty() { None } else { Some(k) });
+        out(&mut env, r.map(|_| "ok".to_string()).unwrap_or_else(|e| format!("Error: {e}")))
+    })
+}
+
 /// Sunucuyu başlatır. Yeniden çağrılırsa no-op (foreground service
 /// `START_STICKY` ile yeniden başlatılabiliyor). Önceki döngü hâlâ
 /// kapanıyorsa `Error:` döner.

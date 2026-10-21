@@ -212,6 +212,14 @@
             android:text="@string/action_choose_storage" />
 
         <Button
+            android:id="@+id/btn_pin"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/btn_pin" />
+
+        <Button
             android:id="@+id/btn_battery"
             style="?attr/materialButtonOutlinedStyle"
             android:layout_width="wrap_content"

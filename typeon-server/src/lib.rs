@@ -413,6 +413,8 @@ struct ConnState {
 }
 
 pub struct ServerCore {
+    /// Held for the core's lifetime (flock on `server.lock`).
+    _dir_lock: std::fs::File,
     config: ServerConfig,
     store: Store,
     swarm: Swarm<ServerBehaviour>,
@@ -533,6 +535,20 @@ impl ServerCore {
             let _ = std::fs::set_permissions(&config.blob_dir, std::fs::Permissions::from_mode(0o700));
         }
 
+        // One process per data dir: a second server on the same DB and Tor state
+        // would fight over both. Released when the core is dropped.
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(config.data_dir.join("server.lock"))
+            .map_err(|e| format!("Kilit dosyası: {e}"))?;
+        if lock.try_lock().is_err() {
+            return Err(format!(
+                "Bu veri dizini ({}) başka bir sunucu işlemi tarafından kullanılıyor",
+                config.data_dir.display()
+            ));
+        }
         let store = Store::open(&config.data_dir.join("typeon_server.db"))?;
         // Rows dated by a wrong clock before a restart (see `clock_jumped`
         // for the same within one run).
@@ -637,6 +653,7 @@ impl ServerCore {
 
         let (hash_tx, hash_rx) = tokio::sync::mpsc::unbounded_channel();
         Ok(ServerCore {
+            _dir_lock: lock,
             config,
             store,
             swarm,
@@ -2002,6 +2019,10 @@ impl ServerCore {
         }
         let slept = self.store.sleep_idle_enrollments(now - ENROLLMENT_IDLE_MS);
         let removed = self.store.sweep_expired_mail(now) + slept;
+        let archived = self.store.sweep_expired_archive(now);
+        if archived > 0 {
+            info!("Süpürmede {archived} arşiv kaydı (13 ay) silindi");
+        }
         if removed > 0 {
             info!("Süpürmede {removed} teslim öğesi silindi");
             self.store.recount_mail_bytes();

@@ -737,6 +737,14 @@ anything, so the honest reading is "we asked", not "it is gone".
 - **Protocol breaks** (server protocol v3, tagged/framed packet and device-auth signatures, keyed archive record ids): all devices must be re-linked and contacts re-paired. Details in `TECHNICAL_HANDOFF.md` section 19.
 - **Server rate limits:** mail from the server 600/10 s, unknown peers 300/10 s total, global Enroll/Rebind verify budget, `ArchivePut` <= 256 records.
 - **Open by decision:** server `sent_at_ms` stays in clear.
-- **Server metadata is unencrypted at rest.** The server's SQLite database (enrollments, mailbox ids, depositor/reader `PeerId`s, sizes, timestamps) is not encrypted; only envelope bodies are sealed. Protect the phone/disk itself (full-disk encryption, device lock).
+- **Server metadata at rest:** the Android server app now keeps its SQLite database in SQLCipher (random key wrapped by an Android Keystore AES key; a plain DB from an older install is migrated once). The Linux `typeon-server` stays plain unless `TYPEON_SERVER_DB_KEY` (64 hex) is set; there, protect the disk. Sizes/timestamps are still not padded. Archive rows expire 13 months after their last write. One process per data dir (`server.lock`, flock). The Android server app has a PIN lock (join code, device list, settings).
+- **Accepted server items (2026-10-21):**
+  - SQLite runs inline on the server's single event loop (#16): a slow disk delays all peers; accepted until a load test shows stalls.
+  - Node mode relays circuits for strangers (#17): by design, it is the relay/DHT mode and is opt-in.
+  - A revoke/block bans only the enroll key (#18): a reinstall with a valid join code gets back in; rotate the join code for a real ban.
+  - The server stores each client's global libp2p `PeerId` (#20): servers can link the same device across servers; no per-server identity.
+  - The join token is stored in plaintext (#22): the join code must stay re-showable; it is behind the DB encryption and the app PIN.
+  - The server app holds a wake lock and Wi-Fi lock while running (#23): without them Doze drops the Tor circuits; costs battery.
+  - Blob ids and archive bucket ids are pure capabilities (#72): anyone enrolled who learns one can fetch/purge it; ids are random and derived from secrets the server never sees.
 - **2nd round protocol breaks (2026-10-21):** stable session mailbox id, `ServerErrorCode::BadHash`, `FileChunkResponse::Busy`, length-prefixed pairing nonce proof, mandatory `signature_pq` on `DeviceAdd`/`DeviceRevoke`. Bump the version; every device must update.
 - **Unopenable server mail is not acked:** the mailbox cursor stays before it for 5 minutes, then it is passed over (details in `TECHNICAL_HANDOFF.md` section 13.4).

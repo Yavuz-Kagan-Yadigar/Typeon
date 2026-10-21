@@ -104,9 +104,70 @@ pub fn archive_row_bytes(rec: &ArchiveRecord) -> usize {
     rec.sealed.len() + rec.record_id.len() + ARCHIVE_ROW_OVERHEAD
 }
 
+/// Archive rows older than this (since last write) are swept: 13 months.
+pub const ARCHIVE_TTL_MS: i64 = 13 * 30 * 24 * 3600 * 1000;
+
+/// SQLCipher key (64 hex chars) for every later `Store::open`. Unset = plain
+/// SQLite (Linux CLI default). The Android app sets it from a Keystore-wrapped
+/// random key before `startServer`.
+static DB_KEY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_db_key(hex_key: Option<String>) -> Result<(), String> {
+    if let Some(k) = &hex_key {
+        if k.len() != 64 || !k.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("DB anahtarı 64 hex karakter olmalı".into());
+        }
+    }
+    *DB_KEY.lock().unwrap_or_else(|p| p.into_inner()) = hex_key;
+    Ok(())
+}
+
+/// Opens `path` with the raw key; Err if the key does not match.
+fn open_keyed(path: &Path, key: &str) -> Result<Connection, String> {
+    let conn = Connection::open(path).map_err(|e| format!("DB açılamadı: {e}"))?;
+    conn.execute_batch(&format!("PRAGMA key = \"x'{key}'\";")).map_err(|e| format!("DB anahtarı: {e}"))?;
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
+        .map_err(|e| format!("DB şifre çözülemedi: {e}"))?;
+    Ok(conn)
+}
+
+/// One-time migration of a plain DB to SQLCipher (sqlcipher_export into a new
+/// file, then rename over the old one). No-op when the file is absent or
+/// already opens with the key.
+fn migrate_plain_to_keyed(path: &Path, key: &str) -> Result<(), String> {
+    if !path.exists() || open_keyed(path, key).is_ok() {
+        return Ok(());
+    }
+    let plain = Connection::open(path).map_err(|e| format!("DB açılamadı: {e}"))?;
+    plain
+        .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
+        .map_err(|_| "DB ne düz ne de bu anahtarla açılıyor (yanlış anahtar?)".to_string())?;
+    let _ = plain.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    let tmp = path.with_extension("db.enc");
+    let _ = std::fs::remove_file(&tmp);
+    let tmp_s = tmp.to_string_lossy().replace('\'', "''");
+    plain
+        .execute_batch(&format!(
+            "ATTACH DATABASE '{tmp_s}' AS enc KEY \"x'{key}'\"; SELECT sqlcipher_export('enc'); DETACH DATABASE enc;"
+        ))
+        .map_err(|e| format!("DB şifreleme geçişi: {e}"))?;
+    drop(plain);
+    for ext in ["db-wal", "db-shm"] {
+        let _ = std::fs::remove_file(path.with_extension(ext));
+    }
+    std::fs::rename(&tmp, path).map_err(|e| format!("DB şifreleme geçişi: {e}"))
+}
+
 impl Store {
     pub fn open(db_path: &Path) -> Result<Store, String> {
-        let conn = Connection::open(db_path).map_err(|e| format!("DB açılamadı: {e}"))?;
+        let key = DB_KEY.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let conn = match &key {
+            Some(k) => {
+                migrate_plain_to_keyed(db_path, k)?;
+                open_keyed(db_path, k)?
+            }
+            None => Connection::open(db_path).map_err(|e| format!("DB açılamadı: {e}"))?,
+        };
         // Incremental auto-vacuum, so the file shrinks after mail is acked
         // (see `incremental_vacuum`). It only takes effect before the first
         // table exists or through one VACUUM, hence the one-time VACUUM on
@@ -1091,6 +1152,22 @@ impl Store {
                 .unwrap_or(0)
     }
 
+    /// Deletes archive rows not written for `ARCHIVE_TTL_MS`; quotas recounted.
+    pub fn sweep_expired_archive(&self, now: i64) -> usize {
+        let cutoff = now - ARCHIVE_TTL_MS;
+        let mut owners: Vec<Vec<u8>> = Vec::new();
+        if let Ok(mut st) = self.conn.prepare("SELECT DISTINCT owner FROM archive WHERE updated_at < ?1") {
+            if let Ok(rows) = st.query_map(params![cutoff], |r| r.get::<_, Vec<u8>>(0)) {
+                owners.extend(rows.flatten());
+            }
+        }
+        let n = self.conn.execute("DELETE FROM archive WHERE updated_at < ?1", params![cutoff]).unwrap_or(0);
+        if n > 0 {
+            self.recount_archive_bytes(&owners);
+        }
+        n
+    }
+
     // -----------------------------------------------------------------
     // Arşiv
     // -----------------------------------------------------------------
@@ -1913,6 +1990,34 @@ mod tests {
         s.deposit("mb_1", b"x", &a, 1000, 10).unwrap();
         assert_eq!(s.sweep_expired_mail(1005), 0, "henuz dolmadi");
         assert_eq!(s.sweep_expired_mail(1010), 1);
+    }
+
+    #[test]
+    fn archive_rows_expire_after_ttl() {
+        let s = Store::open_in_memory().unwrap();
+        let a = enroll(&s, b"a", "peerA");
+        s.archive_put("ar_1", &[rec("m1", 1, 100, b"x")], &a, 1000).unwrap();
+        assert_eq!(s.sweep_expired_archive(1000 + ARCHIVE_TTL_MS), 0);
+        assert_eq!(s.sweep_expired_archive(1001 + ARCHIVE_TTL_MS), 1);
+        assert!(s.archive_fetch("ar_1", None, 10, 65536).0.is_empty());
+    }
+
+    #[test]
+    fn plain_db_migrates_to_sqlcipher() {
+        let dir = std::env::temp_dir().join(format!("typeon_mig_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("typeon_server.db");
+        set_db_key(None).unwrap();
+        { let s = Store::open(&p).unwrap(); s.meta_set("k", b"v").unwrap(); }
+        let key = "ab".repeat(32);
+        set_db_key(Some(key)).unwrap();
+        let s = Store::open(&p).unwrap();
+        assert_eq!(s.meta_get("k").as_deref(), Some(&b"v"[..]));
+        drop(s);
+        set_db_key(None).unwrap();
+        assert!(Store::open(&p).is_err(), "plain open of an encrypted DB must fail");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

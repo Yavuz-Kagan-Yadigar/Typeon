@@ -67,6 +67,9 @@ object ServerLib {
      * öldürülmeden uygulanmıyordu. Durdurma sonrası `startServer` temiz bir
      * kurulum yapar.
      */
+    /** SQLCipher key (64 hex) for the server DB; call before [startServer]. "ok" or "Error: ...". */
+    external fun setDbKey(keyHex: String): String
+
     external fun stopServer(): String
 
     /** `{running, peer_id, tor, addresses, devices, deposits, fetches, ...}` */
