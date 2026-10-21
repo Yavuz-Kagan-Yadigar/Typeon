@@ -2,6 +2,8 @@
 *.apk
 *.aar
 *.jar
+# H107: the Gradle wrapper must be in a fresh clone.
+!gradle-wrapper.jar
 *.so
 
 # Android build directories
@@ -88,3 +90,12 @@ dist/
 # Fix-pass backups of pre-edit files (local only)
 reviews/fixpass-2026-10-20/backups/
 Linux/packaging/build-dir/
+
+# C5: signing keys never go in git (the two debug.keystore files are the
+# lineage's old signer and stay tracked).
+*.jks
+*.p12
+*.pfx
+*.keystore
+!p2p_messenger_android/app/debug.keystore
+!p2p_messenger_android_server/app/debug.keystore

@@ -49,23 +49,10 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            // Release, BİLEREK depodaki AYNI keystore ile imzalanıyor.
-            //
-            // Gerekçe yukarıdaki `signingConfigs.debug` notuyla aynı ve
-            // burada daha da kritik: imza anahtarı değişirse Android
-            // uygulamayı "farklı uygulama" sayar, üzerine kurulum
-            // REDDEDİLİR ve kullanıcı önce kaldırmak zorunda kalır —
-            // bu da /data/data'yı, yani kimliği, ratchet oturumlarını,
-            // mesaj arşivini ve (sunucu uygulamasında) onion kimliğini
-            // siler. Onion adresi değişince o sunucuyu adresine göre
-            // kayıtlı TÜM istemciler ona bir daha ulaşamaz.
-            //
-            // Bu uygulamalar mağazadan değil elden (sideload) dağıtıldığı
-            // için imzanın "release" anahtarı olması bir gereklilik değil.
-            // Play Store'a çıkılacaksa buraya ayrı bir release keystore
-            // konmalı — ama o geçiş, mevcut kurulumların bir kez
-            // kaldırılmasını gerektirir.
-            signingConfig signingConfigs.debug
+            // C5: release is NOT signed by Gradle (the tracked debug key would
+            // let anyone with the repo sign an update). `sign-release.sh`
+            // signs it with the private key through the v3 lineage
+            // (~/.config/typeon-signing), so installs update without a wipe.
         }
     }
 
@@ -179,7 +166,7 @@ task cargoNdkBuild(type: Exec) {
     commandLine resolveCargoExecutable(), 'ndk',
             '-t', 'armeabi-v7a', '-t', 'arm64-v8a', '-t', 'x86_64',
             '-o', "${projectDir}/src/main/jniLibs",
-            'build', '--release', '--lib'
+            'build', '--release', '--lib', '--locked'
 }
 
 preBuild.dependsOn cargoNdkBuild
