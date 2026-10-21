@@ -1101,6 +1101,7 @@ class ChatActivity : AppCompatActivity() {
 
     private fun parseStatus(status: String): SimpleChatAdapter.Status = when (status) {
         "sent" -> SimpleChatAdapter.Status.SENT
+        "delivered" -> SimpleChatAdapter.Status.DELIVERED
         "error" -> SimpleChatAdapter.Status.ERROR
         else -> SimpleChatAdapter.Status.PENDING
     }
@@ -2586,6 +2587,7 @@ class ChatActivity : AppCompatActivity() {
         // past all the texts between it and the oldest loaded one.
         val beforeTimestamp = localMessages.filter { it.attachment == null }.minOfOrNull { it.timestamp }
             ?: localMessages.minOf { it.timestamp }
+        val beforeAttachment = localMessages.filter { it.attachment != null }.minOfOrNull { it.timestamp } ?: Long.MAX_VALUE
         val peer = peerDeviceFingerprint
         // H121: the archive query takes the core lock; scrolling must not wait for it.
         lifecycleScope.launch {
@@ -2598,14 +2600,48 @@ class ChatActivity : AppCompatActivity() {
                     null
                 }
             }
+            // Attachments older than the oldest loaded one (own cursor).
+            val olderAttachments = withContext(Dispatchers.IO) {
+                try {
+                    val array = JSONArray(P2PLib.listAttachmentsBefore(peer, beforeAttachment, OLDER_HISTORY_PAGE_SIZE))
+                    (0 until array.length()).map { attachmentItemFromJson(array.getJSONObject(it)) }
+                } catch (e: Exception) {
+                    emptyList()
+                }
+            }
             if (peer == peerDeviceFingerprint) {
-                if (!localOlder.isNullOrEmpty()) prependOlderMessages(localOlder)
+                val page = (localOlder ?: emptyList()) + olderAttachments
+                if (page.isNotEmpty()) prependOlderMessages(page)
                 // M115: an empty page from the local archive is the end of it.
                 else if (localOlder != null) noMoreOlderHistory = true
             }
             // Local archive only: scrolling sends nothing to the network.
             isLoadingOlderHistory = false
         }
+    }
+
+    /** Item from one `listAttachments`-shaped JSON row (older-page path). */
+    private fun attachmentItemFromJson(obj: JSONObject): SimpleChatAdapter.Item {
+        val previewHex = obj.optString("preview_hex", "")
+        return SimpleChatAdapter.Item(
+            messageId = obj.optString("file_id"),
+            text = "",
+            isMine = obj.optString("direction") == "sent",
+            timestamp = obj.optLong("created_at", System.currentTimeMillis()),
+            attachment = SimpleChatAdapter.AttachmentInfo(
+                fileId = obj.optString("file_id"),
+                fileName = obj.optString("file_name"),
+                mimeType = obj.optString("mime_type"),
+                totalSize = obj.optLong("total_size"),
+                status = parseAttachmentStatus(obj.optString("status")),
+                bytesDone = obj.optLong("bytes_transferred"),
+                previewJpeg = if (previewHex.isNotEmpty() && previewHex != "null") hexToBytes(previewHex) else null,
+                durationMs = obj.optInt("duration_ms", -1).let { if (it < 0) null else it }
+            ),
+            caption = obj.optString("caption", ""),
+            replyToMessageId = if (obj.isNull("reply_to_message_id")) null else obj.optString("reply_to_message_id").ifEmpty { null },
+            replyToPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null }
+        )
     }
 
     /** bkz. `loadOlderHistory` — karşı taraftan gelen "older_history" ağ

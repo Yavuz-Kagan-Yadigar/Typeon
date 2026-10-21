@@ -366,6 +366,10 @@ object P2PLib {
     /** JSON-encoded List<AttachmentSummary>, oluşturulma sırasına göre. */
     external fun listAttachments(peerDeviceFingerprint: String): String
 
+    /** [listAttachments] rows older than [beforeMs] (created_at), oldest first. */
+    external fun listAttachmentsBefore(peerDeviceFingerprint: String, beforeMs: Long, limit: Int): String
+    external fun listGroupAttachmentsBefore(groupId: String, beforeMs: Long, limit: Int): String
+
     /** [listAttachments] / [listGroupAttachments] without the preview images. */
     external fun listAttachmentsBrief(peerDeviceFingerprint: String): String
     external fun listGroupAttachmentsBrief(groupId: String): String

@@ -38,7 +38,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         private const val ORDER_MAX_AGE_MS = 31L * 24 * 60 * 60 * 1000
     }
 
-    enum class Status { PENDING, SENT, ERROR }
+    enum class Status { PENDING, SENT, DELIVERED, ERROR }
 
     /** Decoded attachment previews by file id: a rebind does not decode again. */
     private val previewCache = object : android.util.LruCache<String, android.graphics.Bitmap>(24 * 1024 * 1024) {
@@ -568,6 +568,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     fun applyStatus(targetMessageId: String, status: Status) {
         val idx = indexOfMessageId(targetMessageId)
         if (idx < 0) return
+        // delivered never goes back to sent/pending (events can arrive out of order)
+        if (items[idx].status == Status.DELIVERED && (status == Status.SENT || status == Status.PENDING)) return
         items[idx].status = status
         notifyItemChanged(idx)
     }
@@ -911,10 +913,13 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
         if (item.isMine && !item.isDeleted) {
             holder.status.visibility = View.VISIBLE
+            holder.status.contentDescription =
+                if (item.status == Status.DELIVERED) holder.itemView.context.getString(R.string.cd_status_delivered) else null
             holder.status.setImageResource(
                 when (item.status) {
                     Status.PENDING -> R.drawable.ic_status_pending
                     Status.SENT -> R.drawable.ic_status_sent
+                    Status.DELIVERED -> R.drawable.ic_status_delivered
                     Status.ERROR -> R.drawable.ic_status_error
                 }
             )
@@ -1046,6 +1051,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.progressAttachment.visibility = View.GONE
             holder.txtAttachmentEta.visibility = View.GONE
         }
+        holder.btnAttachmentDownload.setText(
+            if (attachment.status == AttachmentStatus.FAILED && attachment.bytesDone > 0) R.string.action_resume_download else R.string.lbl_download
+        )
         holder.btnAttachmentDownload.visibility = if (attachment.status == AttachmentStatus.OFFERED || attachment.status == AttachmentStatus.FAILED) View.VISIBLE else View.GONE
 
         val clickListener = View.OnClickListener {

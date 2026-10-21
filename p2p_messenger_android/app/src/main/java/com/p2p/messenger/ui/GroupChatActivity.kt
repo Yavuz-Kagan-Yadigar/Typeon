@@ -414,6 +414,10 @@ class GroupChatActivity : AppCompatActivity() {
                 type == "status" && obj.optString("group_id") == groupId && obj.optString("status") == "error" -> runOnUiThread {
                     adapter.applyStatus(obj.optString("message_id"), SimpleChatAdapter.Status.ERROR)
                 }
+                // End-to-end Ack from a member: bubble gets the double tick.
+                type == "status" && obj.optString("group_id") == groupId && obj.optString("status") == "delivered" -> runOnUiThread {
+                    adapter.applyStatus(obj.optString("message_id"), SimpleChatAdapter.Status.DELIVERED)
+                }
                 type == "file_failed" -> runOnUiThread {
                     adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.FAILED)
                 }
@@ -850,6 +854,7 @@ class GroupChatActivity : AppCompatActivity() {
             messageId = messageId ?: UUID.randomUUID().toString(),
             text = obj.optString("text"),
             isMine = isMine,
+            status = if (isMine && obj.optString("status") == "delivered") SimpleChatAdapter.Status.DELIVERED else SimpleChatAdapter.Status.SENT,
             timestamp = obj.optLong("timestamp", System.currentTimeMillis()),
             // Gönderim-sırası: göndericinin gönderim anı (bkz. ChatActivity aynı not).
             sentAtMs = obj.optLong("sent_at_ms", 0L).takeIf { it > 0 },
@@ -946,6 +951,7 @@ class GroupChatActivity : AppCompatActivity() {
         // past all the texts between it and the oldest loaded one.
         val beforeTimestamp = localMessages.filter { it.attachment == null }.minOfOrNull { it.timestamp }
             ?: localMessages.minOf { it.timestamp }
+        val beforeAttachment = localMessages.filter { it.attachment != null }.minOfOrNull { it.timestamp } ?: Long.MAX_VALUE
         val gid = groupId
         // H121: off the main thread (core lock); M115: empty page = end of archive.
         lifecycleScope.launch {
@@ -958,8 +964,18 @@ class GroupChatActivity : AppCompatActivity() {
                     null
                 }
             }
+            // Attachments older than the oldest loaded one (own cursor).
+            val olderAttachments = withContext(Dispatchers.IO) {
+                try {
+                    val array = JSONArray(P2PLib.listGroupAttachmentsBefore(gid, beforeAttachment, OLDER_HISTORY_PAGE_SIZE))
+                    (0 until array.length()).map { itemFromGroupAttachmentJson(array.getJSONObject(it)) }
+                } catch (e: Exception) {
+                    emptyList()
+                }
+            }
             if (gid == groupId) {
-                if (!localOlder.isNullOrEmpty()) prependOlderMessages(localOlder)
+                val page = (localOlder ?: emptyList()) + olderAttachments
+                if (page.isNotEmpty()) prependOlderMessages(page)
                 else if (localOlder != null) noMoreOlderHistory = true
             }
             isLoadingOlderHistory = false
