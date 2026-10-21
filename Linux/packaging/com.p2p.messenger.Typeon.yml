@@ -22,9 +22,11 @@ finish-args:
   - --share=ipc
   - --socket=wayland
   - --socket=fallback-x11
-  # Camera for video calls (v4l2); it also covers the GPU (VA-API video
-  # encode/decode) that `--device=dri` granted before.
-  - --device=all
+  # GPU (VA-API video encode/decode) + camera for video calls. Not
+  # `--device=all`: that exposes every node (/dev/kvm, raw /dev/snd).
+  # `v4l2` needs flatpak >= 1.15.6; on older flatpak use `--device=all`.
+  - --device=dri
+  - --device=v4l2
   # Sesli mesaj kaydı/çalması, arama sesi.
   - --socket=pulseaudio
   # KRİTİK: kasa anahtarı sistem anahtarlığında tutuluyor ve uygulama

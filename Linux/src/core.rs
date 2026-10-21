@@ -35,7 +35,12 @@ fn parse_unit(value: String) -> Result<(), String> {
 }
 
 fn parse_list<T: for<'de> Deserialize<'de>>(json: String) -> Vec<T> {
-    serde_json::from_str(&json).unwrap_or_default()
+    // An "Error: ..." reply or bad JSON is logged, not silently shown as "empty".
+    serde_json::from_str(&json).unwrap_or_else(|e| {
+        let head: String = if json.starts_with("Error") { json.chars().take(120).collect() } else { String::new() };
+        log::warn!("core list reply unparsable ({e}) {head}");
+        Vec::new()
+    })
 }
 
 /// Result of a send/edit/delete: the stable message id plus the immediate
@@ -169,6 +174,20 @@ pub fn poll_network() -> Vec<String> {
 
 pub fn notify_network_changed() {
     api::notify_network_changed();
+}
+
+/// R-06: drops the core's keepalive ladder and radio-window throttling when
+/// the platform says this app is idle (bkz. `P2PCore::set_power_save`).
+/// Android feeds this from the app lifecycle; the desktop client had nothing,
+/// so it burned radio time like a phone in power-save-off mode.
+pub fn set_power_save(enabled: bool) {
+    api::set_power_save(enabled);
+}
+
+/// R-06: metered (cellular) link or not — the core coalesces its radio
+/// windows differently there (bkz. `P2PCore::set_metered`).
+pub fn set_metered(metered: bool) {
+    api::set_metered(metered);
 }
 
 pub fn add_known_relay_address(multiaddr: &str) -> Result<(), String> {
@@ -307,10 +326,6 @@ pub fn display_name() -> String {
     api::get_display_name()
 }
 
-/// Renames the account and notifies every known contact automatically
-/// (see the core's `set_display_name`). Contacts that are offline pick the
-/// change up when they come back, so this returning `Ok` means "queued and
-/// encrypted", not "everyone has seen it".
 /// Sends `AccountDeleted` to every contact and sibling; devices notified, or
 /// `-1` on failure.
 pub fn delete_account() -> i64 {
@@ -321,6 +336,10 @@ pub fn account_deletion_pending() -> i64 {
     api::account_deletion_pending()
 }
 
+/// Renames the account and notifies every known contact automatically
+/// (see the core's `set_display_name`). Contacts that are offline pick the
+/// change up when they come back, so this returning `Ok` means "queued and
+/// encrypted", not "everyone has seen it".
 pub fn set_display_name(name: &str) -> Result<(), String> {
     parse_unit(api::set_display_name(name))
 }
@@ -725,6 +744,9 @@ pub const KIND_STATE: u8 = 4;
 pub struct CallParticipant {
     #[serde(default)]
     pub fp: String,
+    /// Canonical contact key — matches a contact's active device fingerprint.
+    #[serde(default)]
+    pub peer: String,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -812,4 +834,58 @@ pub fn call_take_keyframe_request() -> bool {
 /// Send queue depth, 1 = 100 ms.
 pub fn call_backlog() -> usize {
     api::call_backlog()
+}
+
+// --- shared whiteboard (one board per chat: `group_id` "" = the 1:1 with `peer`) ---
+
+/// New stroke ids, 8 bytes each.
+pub fn whiteboard_add_stroke(peer: &str, group_id: &str, page: u8, shade: u8, width: u8, points: &[u8]) -> Result<Vec<u8>, String> {
+    let hex = parse(api::whiteboard_add_stroke(peer, group_id, page, shade, width, points))?;
+    // Not `str` slicing: a non-ASCII reply would panic on a char boundary.
+    hex::decode(&hex).map_err(|e| e.to_string())
+}
+
+pub fn whiteboard_erase(peer: &str, group_id: &str, ids: &[u8]) -> Result<(), String> {
+    parse_unit(api::whiteboard_erase(peer, group_id, ids))
+}
+
+pub fn whiteboard_open(peer: &str, group_id: &str) {
+    api::whiteboard_open(peer, group_id)
+}
+
+pub fn whiteboard_mark_read(peer: &str, group_id: &str, page: u8) {
+    api::whiteboard_mark_read(peer, group_id, page)
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WhiteboardParticipant {
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WhiteboardInfo {
+    #[serde(default)]
+    pub pages: u32,
+    /// A bit per page.
+    #[serde(default)]
+    pub unread: u32,
+    #[serde(default)]
+    pub me: Option<usize>,
+    #[serde(default)]
+    pub participants: Vec<WhiteboardParticipant>,
+}
+
+pub fn whiteboard_info(peer: &str, group_id: &str) -> Result<WhiteboardInfo, String> {
+    let json = parse(api::whiteboard_info(peer, group_id))?;
+    serde_json::from_str(&json).map_err(|e| e.to_string())
+}
+
+/// Raw page blob, see `api::whiteboard_page`.
+pub fn whiteboard_page(peer: &str, group_id: &str, page: u8) -> Vec<u8> {
+    api::whiteboard_page(peer, group_id, page)
+}
+
+pub fn whiteboard_tick() {
+    api::whiteboard_tick()
 }

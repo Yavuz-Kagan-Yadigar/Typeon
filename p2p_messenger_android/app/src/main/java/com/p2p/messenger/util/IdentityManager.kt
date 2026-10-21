@@ -19,6 +19,17 @@ import java.io.File
 object IdentityManager {
     private const val SECRET_BUNDLE_FILENAME = "identity_secret.enc"
 
+    /**
+     * Bundle YÜKLEME bir kez yapılır: `P2PApplication` (Activity oluşturulurken)
+     * ve `MainActivity` her soğuk başlangıçta aynı şeyi istiyor — her istek
+     * dosyayı yeniden okuyup Keystore'da yeniden çözüyor ve Rust'a yeniden
+     * yüklüyordu (süreç başlangıcının ANR'ye en duyarlı penceresinde).
+     * Yalnızca BAŞARILI yükleme hatırlanır: başarısız olan yeniden
+     * denenebilir kalmalı (kurtarma dosyası akışı).
+     */
+    @Volatile
+    private var loaded = false
+
     private fun secretBundleFile(context: Context): File =
         File(context.filesDir, SECRET_BUNDLE_FILENAME)
 
@@ -30,8 +41,13 @@ object IdentityManager {
      * yükler. Dosya yoksa veya bozuksa false döner (identity_secret.enc
      * kaybolmuş/bozulmuş demektir — kurtarma dosyasından geri yükleme
      * gerekir, spec 1.8).
+     *
+     * Sonuç SÜREÇ BOYUNCA hatırlanır: aynı bundle'ı ikinci kez yüklemek
+     * (Keystore çözme + dosya okuma + `loadSecretBundle`) gereksiz.
      */
+    @Synchronized
     fun loadIfPresent(context: Context): Boolean {
+        if (loaded) return true
         val file = secretBundleFile(context)
         if (!file.exists()) return false
 
@@ -50,26 +66,34 @@ object IdentityManager {
             return false
         }
 
-        return try {
+        val ok = try {
             P2PLib.loadSecretBundle(plaintext)
         } finally {
             plaintext.fill(0) // bellekte iz bırakmamak için sıfırla
         }
+        if (ok) loaded = true
+        return ok
     }
 
     /**
      * createIdentity() çağrısından HEMEN SONRA çağrılmalıdır: Rust'ın
      * ürettiği plaintext secret bundle'ı alır, Keystore ile şifreler,
      * diske yazar.
+     *
+     * DÖNÜŞ: `true` = bundle diske yazıldı, `false` = YAZILAMADI (çekirdekte
+     * bekleyen bundle yoktu). Çağıran, `false` aldığında "kimlik oluşturuldu"
+     * diye devam etmemeli: secret key'ler diskte olmadığı için bir sonraki
+     * açılışta o kimlik yüklenemez.
      */
-    fun persistNewIdentity(context: Context) {
+    fun persistNewIdentity(context: Context): Boolean {
         val plaintext = P2PLib.getPendingSecretBundle()
-        if (plaintext.isEmpty()) return
+        if (plaintext.isEmpty()) return false
         try {
             val encrypted = KeystoreCrypto.encrypt(plaintext)
             secretBundleFile(context).writeBytesAtomic(encrypted)
         } finally {
             plaintext.fill(0)
         }
+        return true
     }
 }

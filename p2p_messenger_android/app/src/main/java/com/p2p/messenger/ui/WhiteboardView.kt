@@ -96,6 +96,10 @@ class WhiteboardView(context: Context) : View(context) {
      *  the whole page again: hundreds of paths per frame on a busy page. */
     private var cache: android.graphics.Bitmap? = null
     private var cacheDirty = true
+    /** Under memory pressure the cache bitmap cannot be allocated; the board
+     *  then draws uncached (slower, a full page redraw per frame) instead of
+     *  an uncaught OutOfMemoryError inside `onDraw` killing the process. */
+    private var cacheDisabled = false
 
     /** After a change inside [strokes] (add, erase). */
     fun strokesChanged() {
@@ -130,22 +134,43 @@ class WhiteboardView(context: Context) : View(context) {
         setMeasuredDimension(w, h)
     }
 
+    private fun drawBoardDirect(canvas: Canvas) {
+        canvas.save()
+        canvas.scale(width / WIDTH, height / HEIGHT)
+        drawPage(canvas, strokes, participants, paint)
+        canvas.restore()
+    }
+
     override fun onDraw(canvas: Canvas) {
         if (width == 0 || height == 0) return
-        var page = cache
-        if (page == null || page.width != width || page.height != height) {
-            page?.recycle()
-            page = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
-            cache = page
-            cacheDirty = true
+        // The board surface never needs per-pixel alpha: the background is
+        // opaque black and the strokes are opaque paint, so RGB_565 halves
+        // the allocation (the old ARGB_8888 screen-sized one, ~5 MB).
+        if (!cacheDisabled) {
+            var page = cache
+            if (page == null || page.width != width || page.height != height) {
+                page = try {
+                    android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.RGB_565)
+                } catch (e: OutOfMemoryError) {
+                    null
+                }
+                if (page != null) {
+                    cacheDirty = true
+                    cache = page
+                } else {
+                    cacheDisabled = true
+                    cache = null
+                }
+            }
+            if (cacheDirty) {
+                cacheDirty = false
+                val pageCanvas = Canvas(cache!!)
+                pageCanvas.scale(width / WIDTH, height / HEIGHT)
+                drawPage(pageCanvas, strokes, participants, paint)
+            }
         }
-        if (cacheDirty) {
-            cacheDirty = false
-            val pageCanvas = Canvas(page!!)
-            pageCanvas.scale(width / WIDTH, height / HEIGHT)
-            drawPage(pageCanvas, strokes, participants, paint)
-        }
-        canvas.drawBitmap(page!!, 0f, 0f, null)
+        val page = cache
+        if (page == null) drawBoardDirect(canvas) else canvas.drawBitmap(page, 0f, 0f, null)
         canvas.save()
         canvas.scale(width / WIDTH, height / HEIGHT)
         for (s in pending) drawStroke(canvas, s, participants, paint)

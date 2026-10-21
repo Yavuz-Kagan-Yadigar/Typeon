@@ -5,14 +5,13 @@
 #   sudo install -d -o typeon -g typeon /var/lib/typeon-server
 #   sudo systemctl enable --now typeon-server
 #
-# Davet kodu üretmek (sunucu çalışırken DEĞİL — komut kendi örneğini
-# kaldırdığı için önce servisi durdurun, ya da ayrı bir veri dizini
-# kullanmayın):
+# Katılım/davet kodu (sunucu ÇALIŞIRKEN — yönetim komutları yalnızca
+# veritabanını açar, sunucunun son ilan ettiği onion adresini oradan okur):
 #
-#   sudo systemctl stop typeon-server
+#   sudo -u typeon TYPEON_SERVER_DIR=/var/lib/typeon-server \
+#        /usr/local/bin/typeon-server join-code
 #   sudo -u typeon TYPEON_SERVER_DIR=/var/lib/typeon-server \
 #        /usr/local/bin/typeon-server invite new telefonum 1 7
-#   sudo systemctl start typeon-server
 
 [Unit]
 Description=Typeon store-and-forward server
@@ -28,19 +27,39 @@ Restart=on-failure
 RestartSec=5
 
 Environment=TYPEON_SERVER_DIR=/var/lib/typeon-server
-# Tor açık: sunucu kendi .onion adresini barındırır, port yönlendirme/alan
-# adı/TLS sertifikası gerekmez. Halka açık bir IP'niz varsa TOR=0 + PORT ile
-# düz TCP de kullanabilirsiniz (daha düşük gecikme, ama adresiniz görünür).
-Environment=TYPEON_SERVER_TOR=1
+# Tor her zaman açık: sunucu yalnızca kendi .onion adresinden ulaşılır
+# (dinleyici 127.0.0.1'de); port yönlendirme/alan adı/TLS gerekmez.
 Environment=TYPEON_SERVER_NAME=Typeon
+# Toplam disk bütçesi (bayt). Yoksa 16 GiB; diskinize göre ayarlayın.
+#Environment=TYPEON_SERVER_BUDGET_BYTES=17179869184
 
-# Sunucu yalnızca kendi veri dizinine yazar.
+# Sunucu yalnızca kendi veri dizinine yazar. Veritabanı libp2p anahtarını ve
+# katılım jetonunu tutar: dosyalar yalnızca sahibine açık.
+UMask=0077
+StateDirectory=typeon-server
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/typeon-server
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
-StateDirectory=typeon-server
-ReadWritePaths=/var/lib/typeon-server
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+# AF_NETLINK: arayüz değişikliklerini izlemek için (libp2p if-watch).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 
 [Install]
 WantedBy=multi-user.target

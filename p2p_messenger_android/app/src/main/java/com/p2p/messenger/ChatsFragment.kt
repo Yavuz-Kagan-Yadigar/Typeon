@@ -39,6 +39,13 @@ import org.json.JSONArray
  */
 class ChatsFragment : Fragment() {
 
+    companion object {
+        /** Olay geldiğinde listenin yenilenmesi için beklenen süre: bir
+         *  olay patlaması TEK yenileme olsun (her olayda yenilemek, eskiden
+         *  5 saniyelik turdan çok daha pahalı olurdu). */
+        private const val EVENT_REFRESH_DEBOUNCE_MS = 1000L
+    }
+
     /**
      * Spec dışı, kullanıcı isteği ("soldan bir drag barla sürüklenebilir
      * açılıp kapanan chat list"): bu fragment artık İKİ yerde barınabiliyor
@@ -57,15 +64,34 @@ class ChatsFragment : Fragment() {
     private lateinit var adapter: ChatAdapter
     private lateinit var noContactsText: View
     /** bkz. `applyFilter` — en son çekilen TAM liste (kişi+grup); arama
-     *  sorgusu buradan filtrelenir, `refreshList`'in her 5 sn'de bir
-     *  yenilemesi arama sorgusunu SIFIRLAMAZ. */
+     *  sorgusu buradan filtrelenir, listenin yenilenmesi arama sorgusunu
+     *  SIFIRLAMAZ. */
     private var allChatItems: List<ChatAdapter.ChatMessage> = emptyList()
     private var searchQuery: String = ""
+
+    /** Çekirdek bir hatayı "Error: ..." metniyle döner; kullanıcıya
+     *  gösterilen metin kaynaktan gelir (sabit İngilizce değil). */
+    private fun errorText(result: String): String =
+        getString(R.string.error_with_message, result.removePrefix("Error:").trim())
     private val refreshHandler = Handler(Looper.getMainLooper())
-    private val refreshRunnable = object : Runnable {
-        override fun run() {
-            refreshList()
-            refreshHandler.postDelayed(this, 5000)
+    /**
+     * 5 saniyede bir TAM liste yeniden kurma YOK: her turda (ve her açık
+     * sohbetin çekmecesinde) tüm kişi/grup listesi, son mesaj önizlemeleri
+     * ve ekler yeniden okunuyordu — çekirdek kilidinde O(sohbet × ek) işi,
+     * her 5 saniyede bir (bkz. `refreshList` notu).
+     *
+     * Liste artık OLAYLA tazelenir: ekrana dönüşte ve servisten bir olay
+     * geldiğinde (mesaj, okundu, eşleşme, grup güncellemesi...).
+     */
+    /** A refresh is queued (`Handler.hasCallbacks` is API 29, minSdk 26). */
+    @Volatile private var eventRefreshQueued = false
+    private val eventRefreshRunnable = Runnable { eventRefreshQueued = false; refreshList() }
+    private val eventListener: (String) -> Unit = { _ ->
+        // Olaylar tek tek gelir (bir patlamada 50 mesaj = 50 yeniden kurma
+        // olurdu): bekleyen bir yenileme varsa yenisini EKLEME.
+        if (!eventRefreshQueued) {
+            eventRefreshQueued = true
+            refreshHandler.postDelayed(eventRefreshRunnable, EVENT_REFRESH_DEBOUNCE_MS)
         }
     }
     /** Spinner while the service leaves power save and re-verifies its links
@@ -74,7 +100,7 @@ class ChatsFragment : Fragment() {
      *  by itself once the core says it is in sync. */
     private val syncRunnable = object : Runnable {
         override fun run() {
-            Thread {
+            runOnWorker {
                 val syncing = try {
                     org.json.JSONObject(P2PLib.ownConnectionStatus()).optBoolean("syncing", false)
                 } catch (e: Exception) { false }
@@ -84,7 +110,7 @@ class ChatsFragment : Fragment() {
                     spinner.visibility = if (syncing) View.VISIBLE else View.GONE
                     if (syncing && isResumed) refreshHandler.postDelayed(this, 400)
                 }
-            }.start()
+            }
         }
     }
 
@@ -207,7 +233,7 @@ class ChatsFragment : Fragment() {
                     try { P2PLib.deleteGroup(message.contactId) } catch (e: Exception) { "Error: ${e.message}" }
                 }) { result ->
                     if (result.startsWith("Error:")) {
-                        Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
+                        Toast.makeText(requireContext(), errorText(result), Toast.LENGTH_LONG).show()
                     } else {
                         Toast.makeText(requireContext(), R.string.msg_group_deleted, Toast.LENGTH_SHORT).show()
                         refreshList()
@@ -230,7 +256,7 @@ class ChatsFragment : Fragment() {
                     try { P2PLib.leaveGroup(message.contactId) } catch (e: Exception) { "Error: ${e.message}" }
                 }) { result ->
                     if (result.startsWith("Error:")) {
-                        Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
+                        Toast.makeText(requireContext(), errorText(result), Toast.LENGTH_LONG).show()
                     } else {
                         Toast.makeText(requireContext(), R.string.msg_left_group, Toast.LENGTH_SHORT).show()
                         refreshList()
@@ -251,16 +277,16 @@ class ChatsFragment : Fragment() {
         AlertDialog.Builder(requireContext())
             .setMessage(R.string.confirm_revoke_device)
             .setPositiveButton(R.string.action_revoke_device) { _, _ ->
-                val result = try {
-                    P2PLib.revokeContactDevice(message.realContactId, message.contactId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(requireContext(), R.string.msg_device_revoked, Toast.LENGTH_SHORT).show()
-                    refreshList()
+                offMain({
+                    try { P2PLib.revokeContactDevice(message.realContactId, message.contactId) }
+                    catch (e: Exception) { "Error: ${e.message}" }
+                }) { result ->
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(requireContext(), errorText(result), Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(requireContext(), R.string.msg_device_revoked, Toast.LENGTH_SHORT).show()
+                        refreshList()
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -271,16 +297,16 @@ class ChatsFragment : Fragment() {
         AlertDialog.Builder(requireContext())
             .setMessage(R.string.confirm_clear_chat_history)
             .setPositiveButton(R.string.action_clear_chat_history) { _, _ ->
-                val result = try {
-                    P2PLib.clearChatHistory(message.realContactId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(requireContext(), R.string.msg_chat_history_cleared, Toast.LENGTH_SHORT).show()
-                    refreshList()
+                offMain({
+                    try { P2PLib.clearChatHistory(message.realContactId) }
+                    catch (e: Exception) { "Error: ${e.message}" }
+                }) { result ->
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(requireContext(), errorText(result), Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(requireContext(), R.string.msg_chat_history_cleared, Toast.LENGTH_SHORT).show()
+                        refreshList()
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -301,16 +327,16 @@ class ChatsFragment : Fragment() {
         AlertDialog.Builder(requireContext())
             .setMessage(R.string.confirm_delete_contact_step2)
             .setPositiveButton(R.string.action_delete_contact) { _, _ ->
-                val result = try {
-                    P2PLib.deleteContact(message.realContactId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(requireContext(), R.string.msg_contact_deleted, Toast.LENGTH_SHORT).show()
-                    refreshList()
+                offMain({
+                    try { P2PLib.deleteContact(message.realContactId) }
+                    catch (e: Exception) { "Error: ${e.message}" }
+                }) { result ->
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(requireContext(), errorText(result), Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(requireContext(), R.string.msg_contact_deleted, Toast.LENGTH_SHORT).show()
+                        refreshList()
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -329,7 +355,7 @@ class ChatsFragment : Fragment() {
                 if (name.isBlank()) return@setPositiveButton
                 offMain({ P2PLib.createGroup(name) }) { groupId ->
                     if (groupId.startsWith("Error:")) {
-                        Toast.makeText(requireContext(), groupId, Toast.LENGTH_LONG).show()
+                        Toast.makeText(requireContext(), errorText(groupId), Toast.LENGTH_LONG).show()
                     } else {
                         refreshList()
                         showAddMembersDialog(groupId)
@@ -344,61 +370,97 @@ class ChatsFragment : Fragment() {
      *  kurucu davet üretir, her davet edilen mevcut/kurulmakta olan 1:1
      *  bağlantı üzerinden GroupUpdate alır). */
     private fun showAddMembersDialog(groupId: String) {
-        val contactsJson = try {
-            P2PLib.listContacts()
-        } catch (e: Exception) {
-            "[]"
-        }
-        val array = try {
-            JSONArray(contactsJson)
-        } catch (e: Exception) {
-            JSONArray()
-        }
-        if (array.length() == 0) {
-            Toast.makeText(requireContext(), R.string.msg_no_contacts_to_add, Toast.LENGTH_LONG).show()
-            return
-        }
-        val names = (0 until array.length()).map { array.getJSONObject(it).optString("display_name", "Bilinmeyen") }.toTypedArray()
-        val identityIds = (0 until array.length()).map { array.getJSONObject(it).optString("identity_id") }
-        val checked = BooleanArray(names.size)
-
-        AlertDialog.Builder(requireContext())
-            .setTitle(R.string.lbl_add_member_to_group)
-            .setMultiChoiceItems(names, checked) { _, which, isChecked -> checked[which] = isChecked }
-            .setPositiveButton(R.string.lbl_add_member_to_group) { _, _ ->
-                offMain({
-                    identityIds.indices.filter { checked[it] && !P2PLib.inviteToGroup(groupId, identityIds[it]) }
-                }) { failed ->
-                    for (i in failed) {
-                        Toast.makeText(requireContext(), "${names[i]}: ${getString(R.string.error_network)}", Toast.LENGTH_SHORT).show()
-                    }
-                    refreshList()
-                }
+        // `listContacts` her kişinin avatarını hex olarak taşır: ana thread'de
+        // çağrılmaz.
+        offMain({
+            try { P2PLib.listContacts() } catch (e: Exception) { "[]" }
+        }) { contactsJson ->
+            val array = try {
+                JSONArray(contactsJson)
+            } catch (e: Exception) {
+                JSONArray()
             }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+            if (array.length() == 0) {
+                Toast.makeText(requireContext(), R.string.msg_no_contacts_to_add, Toast.LENGTH_LONG).show()
+            } else {
+                val names = (0 until array.length()).map {
+                    array.getJSONObject(it).optString("display_name", getString(R.string.lbl_unknown))
+                }.toTypedArray()
+                val identityIds = (0 until array.length()).map { array.getJSONObject(it).optString("identity_id") }
+                val checked = BooleanArray(names.size)
+
+                AlertDialog.Builder(requireContext())
+                    .setTitle(R.string.lbl_add_member_to_group)
+                    .setMultiChoiceItems(names, checked) { _, which, isChecked -> checked[which] = isChecked }
+                    .setPositiveButton(R.string.lbl_add_member_to_group) { _, _ ->
+                        offMain({
+                            identityIds.indices.filter { checked[it] && !P2PLib.inviteToGroup(groupId, identityIds[it]) }
+                        }) { failed ->
+                            for (i in failed) {
+                                Toast.makeText(requireContext(), "${names[i]}: ${getString(R.string.error_network)}", Toast.LENGTH_SHORT).show()
+                            }
+                            refreshList()
+                        }
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        refreshHandler.post(refreshRunnable)
+        // Liste ekrana dönüşte ve servisten olay geldiğinde yenilenir
+        // (5 saniyelik tam yeniden kurma yok — bkz. `eventListener`).
+        refreshList()
+        com.p2p.messenger.service.P2PService.addMessageListener(eventListener)
         // 300 ms: the service flips out of power save on the same resume.
         refreshHandler.postDelayed(syncRunnable, 300)
     }
 
     override fun onPause() {
         super.onPause()
-        refreshHandler.removeCallbacks(refreshRunnable)
+        com.p2p.messenger.service.P2PService.removeMessageListener(eventListener)
+        refreshHandler.removeCallbacks(eventRefreshRunnable)
+        eventRefreshQueued = false
         refreshHandler.removeCallbacks(syncRunnable)
+    }
+
+    /** Görünüm yok edilince avatar baytları da bırakılır: `allChatItems`
+     *  her kişi/grubun TAM avatarını (100-250 KB) tutuyordu ve liste
+     *  başka bir sekmede açıkken de bellekte kalıyordu. */
+    override fun onDestroyView() {
+        super.onDestroyView()
+        refreshHandler.removeCallbacksAndMessages(null)
+        allChatItems = emptyList()
+        if (::adapter.isInitialized) adapter.submitList(emptyList())
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // The worker is a live non-daemon thread: shut it down with the
+        // fragment.
+        worker.shutdownNow()
     }
 
     /** JNI calls that take the core lock, off the main thread; [done] runs on
      *  the main thread while the fragment is still attached. */
     private val worker = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    /** Runs [work] on the worker thread; the executor is gone after
+     *  `onDestroy` (a late callback must not crash the app). */
+    private fun runOnWorker(work: () -> Unit) {
+        try {
+            worker.execute(work)
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // Fragment yok — sonuç zaten gösterecek bir ekran da yok.
+        }
+    }
+
     private fun <T> offMain(work: () -> T, done: (T) -> Unit) {
-        worker.execute {
+        runOnWorker {
             // A detached fragment throws from getString: drop the result.
-            val result = try { work() } catch (e: Exception) { return@execute }
+            val result = try { work() } catch (e: Exception) { return@runOnWorker }
             refreshHandler.post { if (isAdded && view != null) done(result) }
         }
     }
@@ -406,18 +468,19 @@ class ChatsFragment : Fragment() {
     @Volatile private var refreshing = false
     /** A refresh was asked for while one was running (after a delete, a
      *  pin...): run once more, the running one may have read the old state. */
-    private var refreshAgain = false
+    @Volatile private var refreshAgain = false
 
-    /** Runs every 5 s, also in the drawer of every chat screen: one history
-     *  query and the whole attachment list per chat, under the core lock.
-     *  On the main thread that was stutter, and an ANR behind a long poll turn.
-     *  ponytail: still O(chats x media) work per refresh; add one core query
-     *  that returns every chat's newest row if the list gets slow. */
+    /** Rebuilds the whole list: one history query and the whole attachment
+     *  list per chat, under the core lock. On the main thread that was
+     *  stutter, and an ANR behind a long poll turn.
+     *  Runs when the screen comes back and when the service reports an event
+     *  — NOT every 5 s (that was the cost this list had in every open chat
+     *  and in every chat screen's drawer). */
     private fun refreshList() {
         if (refreshing) { refreshAgain = true; return }
         val ctx = context?.applicationContext ?: return
         refreshing = true
-        worker.execute {
+        runOnWorker {
             val result = try { buildChatItems(ctx) } catch (e: Exception) { null }
             refreshHandler.post {
                 refreshing = false
@@ -431,7 +494,7 @@ class ChatsFragment : Fragment() {
     }
 
     private fun buildChatItems(ctx: android.content.Context): List<ChatAdapter.ChatMessage> {
-        val contacts = loadContacts()
+        val contacts = loadContacts(ctx)
         val groups = loadGroups()
 
         val duplicateNames = com.p2p.messenger.util.ContactNames.duplicates(contacts.map { it.displayName })
@@ -628,7 +691,7 @@ class ChatsFragment : Fragment() {
         return best
     }
 
-    private fun loadContacts(): List<ContactRow> {
+    private fun loadContacts(ctx: android.content.Context): List<ContactRow> {
         val json = try {
             P2PLib.listContacts()
         } catch (e: Exception) {
@@ -645,7 +708,9 @@ class ChatsFragment : Fragment() {
                 else obj.optString("active_device_fingerprint")
             ContactRow(
                 contactId = obj.optString("contact_id"),
-                displayName = obj.optString("display_name", "Bilinmeyen"),
+                // The fallback is the same in both tabs (it used to be
+                // "Bilinmeyen" here and "Unknown" in the contacts tab).
+                displayName = obj.optString("display_name", ctx.getString(R.string.lbl_unknown)),
                 identityId = obj.optString("identity_id"),
                 activeDeviceFingerprint = fingerprint,
                 avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null }

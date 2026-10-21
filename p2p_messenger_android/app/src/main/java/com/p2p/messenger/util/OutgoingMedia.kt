@@ -27,7 +27,8 @@ import kotlinx.coroutines.launch
  * - Video: MP4, 3GP and WebM are copied into a new container without
  *   metadata (location, device, dates); nothing is re-encoded.
  *
- * Anything that cannot be decoded or remuxed goes out unchanged.
+ * A JPEG/PNG that cannot be decoded fails the send; other formats that cannot be
+ * decoded or remuxed go out unchanged.
  */
 object OutgoingMedia {
     private const val TAG = "OutgoingMedia"
@@ -50,8 +51,11 @@ object OutgoingMedia {
                 else -> unchanged
             }
         } catch (e: Throwable) {
-            // OutOfMemoryError included: a huge image goes out as it is.
             Log.w(TAG, "left unchanged: ${e.message}")
+            // H-07: a JPEG/PNG that failed to decode goes out NOT as it is (GPS
+            // in its EXIF): the caller shows the send-failed error.
+            // ponytail: GIF/HEIC/video keep the unchanged fallback (owner decision).
+            if (mimeType.startsWith("image/") && isJpegOrPng(src)) throw java.io.IOException("image scrub failed", e)
             unchanged
         }
     }
@@ -109,7 +113,7 @@ object OutgoingMedia {
         if (pixels > MAX_PIXELS) return null
         @Suppress("NAME_SHADOWING")
         val hiRes = hiRes && pixels <= MAX_JXL_PIXELS
-        val bitmap = decode(src, srgb = hiRes) ?: return null
+        val bitmap = decode(src, srgb = hiRes) ?: throw java.io.IOException("decode failed")
         try {
             if (bitmap.width.toLong() * bitmap.height > MAX_PIXELS) return null
             val opaque = isOpaque(bitmap)
@@ -164,6 +168,12 @@ object OutgoingMedia {
         }
         return true
     }
+
+    private fun isJpegOrPng(src: File): Boolean = try {
+        val h = ByteArray(8)
+        val n = src.inputStream().use { it.read(h) }
+        n >= 4 && (isJpeg(h) || (h[0] == 0x89.toByte() && h[1] == 'P'.code.toByte() && h[2] == 'N'.code.toByte() && h[3] == 'G'.code.toByte()))
+    } catch (e: Exception) { false }
 
     private fun isJpeg(h: ByteArray) = h[0] == 0xFF.toByte() && h[1] == 0xD8.toByte() && h[2] == 0xFF.toByte()
 

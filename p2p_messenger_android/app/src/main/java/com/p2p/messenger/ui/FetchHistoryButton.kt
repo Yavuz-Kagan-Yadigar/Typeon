@@ -57,6 +57,9 @@ class FetchHistoryButton(
         button.setText(R.string.msg_fetch_history_requested)
         val key = chatKey()
         val before = oldestTimestamp()
+        // L-189: a stuck JNI call must not leave the button disabled for good
+        // (finish() also drops the late result, `current` no longer matches).
+        button.postDelayed({ if (current == request) finish() }, JNI_WAIT_MS)
         Thread {
             val result = try {
                 P2PLib.fetchServerHistory(key, isGroup, before)
@@ -64,7 +67,7 @@ class FetchHistoryButton(
                 "Error: ${e.message}"
             }
             button.post {
-                if (current != request) return@post
+                if (current != request || !button.isAttachedToWindow) return@post
                 if (result != "OK") {
                     finish()
                     Toast.makeText(button.context, result.removePrefix("Error: "), Toast.LENGTH_LONG).show()
@@ -86,5 +89,6 @@ class FetchHistoryButton(
 
     private companion object {
         const val REPLY_WAIT_MS = 20_000L
+        const val JNI_WAIT_MS = 30_000L
     }
 }

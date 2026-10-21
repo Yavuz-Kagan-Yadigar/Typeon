@@ -80,6 +80,7 @@ pub(crate) const SCHEMA: &str = "
         seen INTEGER NOT NULL DEFAULT 1,
         UNIQUE (board, stroke_id)
     );
+    CREATE INDEX IF NOT EXISTS wb_tombstones_page ON wb_tombstones (board, page);
     CREATE TABLE IF NOT EXISTS wb_page_sigs (
         board TEXT NOT NULL,
         page INTEGER NOT NULL,
@@ -183,8 +184,10 @@ impl P2PCore {
         self.seal_local_blob(points)
     }
 
-    fn wb_unseal(&self, stored: Vec<u8>) -> Vec<u8> {
-        self.open_local_blob(&stored).unwrap_or(stored)
+    /// `None`: the blob does not open (no key, damaged). Never handed on as
+    /// points: it would be ciphertext with a wrong point count.
+    fn wb_unseal(&self, stored: Vec<u8>) -> Option<Vec<u8>> {
+        self.open_local_blob(&stored)
     }
 
     /// The board as both sides name it. `Board.key` of a 1:1 board holds the
@@ -230,13 +233,21 @@ impl P2PCore {
     /// Keeps the newest signature per board, page and device.
     fn wb_store_sig(&self, board: &str, sig: &WbPageSig) {
         if let Some(conn) = &self.db {
-            let _ = conn.execute(
+            if let Err(e) = conn.execute(
                 "INSERT INTO wb_page_sigs (board, page, device, at, hashes, sig, sig_pq) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT (board, page, device) DO UPDATE SET at = excluded.at, hashes = excluded.hashes, sig = excluded.sig, sig_pq = excluded.sig_pq
                  WHERE excluded.at > wb_page_sigs.at",
                 params![board, sig.page, sig.device, sig.at as i64, sig.hashes, sig.sig, sig.sig_pq],
-            );
+            ) {
+                warn!("Whiteboard page signature not stored: {}", e);
+            }
         }
+    }
+
+    /// The stored signature hashes of one device on one page.
+    fn wb_device_sig_hashes(&self, board: &str, page: u8, device: &[u8]) -> Option<Vec<u8>> {
+        self.db.as_ref()?.prepare_cached("SELECT hashes FROM wb_page_sigs WHERE board = ?1 AND page = ?2 AND device = ?3").ok()?
+            .query_row(params![board, page, device], |r| r.get(0)).ok()
     }
 
     fn wb_page_sigs(&self, board: &str, page: u8) -> Vec<WbPageSig> {
@@ -274,8 +285,8 @@ impl P2PCore {
             // What counts is the newest signature held after the store, not
             // the one in the packet: an older one, replayed, named strokes
             // its author had dropped since.
-            let newest = self.wb_page_sigs(&board.key, sig.page).into_iter().find(|s| s.device == sig.device);
-            let hashes = newest.as_ref().map_or(&sig.hashes, |s| &s.hashes);
+            let newest = self.wb_device_sig_hashes(&board.key, sig.page, &sig.device);
+            let hashes = newest.as_ref().unwrap_or(&sig.hashes);
             out.insert((sig.page, sig.device.clone()), (device.identity_id.clone(), hash_set(hashes)));
         }
         out
@@ -283,12 +294,9 @@ impl P2PCore {
 
     fn wb_is_tombstoned(&self, board: &str, id: &[u8]) -> bool {
         self.db.as_ref().map_or(false, |conn| {
-            conn.query_row(
-                "SELECT 1 FROM wb_tombstones WHERE board = ?1 AND stroke_id = ?2",
-                params![board, id],
-                |_| Ok(()),
-            )
-            .is_ok()
+            conn.prepare_cached("SELECT 1 FROM wb_tombstones WHERE board = ?1 AND stroke_id = ?2")
+                .and_then(|mut stmt| stmt.query_row(params![board, id], |_| Ok(())))
+                .is_ok()
         })
     }
 
@@ -308,7 +316,8 @@ impl P2PCore {
                 params![board, page],
                 |r| r.get::<_, i64>(0),
             )
-            .unwrap_or(0) as usize
+            // Unknown = full: a busy database must not let a page past its cap.
+            .map_or(MAX_PAGE_BYTES, |n| n as usize)
         })
     }
 
@@ -325,10 +334,10 @@ impl P2PCore {
         let Some(sealed) = self.wb_seal(&stroke.points) else { return false };
         let added = sealed.len();
         let inserted = conn
-            .execute(
+            .prepare_cached(
                 "INSERT OR IGNORE INTO wb_strokes (board, page, stroke_id, author, shade, points, width, sig) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![board, stroke.page, stroke.id, author, stroke.shade, sealed, stroke.width, stroke.sig],
             )
+            .and_then(|mut stmt| stmt.execute(params![board, stroke.page, stroke.id, author, stroke.shade, sealed, stroke.width, stroke.sig]))
             .map_or(false, |n| n > 0);
         if inserted {
             *used += added;
@@ -342,17 +351,48 @@ impl P2PCore {
         self.db.as_ref().and_then(|conn| conn.unchecked_transaction().ok())
     }
 
+    /// Commits a `wb_tx`; a failure is logged, not dropped silently.
+    fn wb_commit(tx: Option<rusqlite::Transaction<'_>>) {
+        if let Some(Err(e)) = tx.map(|tx| tx.commit()) {
+            warn!("Whiteboard changes not saved: {}", e);
+        }
+    }
+
+    /// The page a stroke is on, if it is here.
+    fn wb_stroke_page(&self, board: &str, id: &[u8]) -> Option<u8> {
+        self.db.as_ref()?.prepare_cached("SELECT page FROM wb_strokes WHERE board = ?1 AND stroke_id = ?2").ok()?
+            .query_row(params![board, id], |r| r.get(0)).ok()
+    }
+
+    /// Stroke ids of one page, without reading and opening the points.
+    fn wb_page_ids(&self, board: &str, page: u8) -> Vec<Vec<u8>> {
+        let Some(conn) = &self.db else { return Vec::new() };
+        let Ok(mut stmt) = conn.prepare_cached("SELECT stroke_id FROM wb_strokes WHERE board = ?1 AND page = ?2") else { return Vec::new() };
+        let rows = stmt.query_map(params![board, page], |r| r.get::<_, Vec<u8>>(0));
+        let ids: Vec<Vec<u8>> = rows.map(|rows| rows.flatten().collect()).unwrap_or_default();
+        ids
+    }
+
     /// Enforces `MAX_TOMBSTONES` per page. Once per packet, not per erase.
     fn wb_trim_tombstones(&self, board: &str) {
         let Some(conn) = &self.db else { return };
-        let _ = conn.execute(
-            "DELETE FROM wb_tombstones WHERE seq IN (
-                SELECT seq FROM (
-                    SELECT seq, ROW_NUMBER() OVER (PARTITION BY page ORDER BY seen DESC, seq DESC) AS n
-                    FROM wb_tombstones WHERE board = ?1)
-                WHERE n > ?2)",
-            params![board, MAX_TOMBSTONES as i64],
-        );
+        // M-14: a count per page first; the sorted delete runs only for a
+        // page over the cap (the window function sorted every tombstone of
+        // the board on every packet).
+        let mut over: Vec<u8> = Vec::new();
+        if let Ok(mut stmt) = conn.prepare_cached("SELECT page FROM wb_tombstones WHERE board = ?1 GROUP BY page HAVING COUNT(*) > ?2") {
+            if let Ok(rows) = stmt.query_map(params![board, MAX_TOMBSTONES as i64], |r| r.get::<_, u8>(0)) {
+                over = rows.flatten().collect();
+            }
+        }
+        for page in over {
+            let _ = conn.execute(
+                "DELETE FROM wb_tombstones WHERE seq IN (
+                    SELECT seq FROM wb_tombstones WHERE board = ?1 AND page = ?2
+                    ORDER BY seen DESC, seq DESC LIMIT -1 OFFSET ?3)",
+                params![board, page, MAX_TOMBSTONES as i64],
+            );
+        }
     }
 
     /// Token bucket (as a virtual clock in `wb_reply_at`) for what `peer_fp`
@@ -377,19 +417,17 @@ impl P2PCore {
         if id.len() != 8 || hint_page >= MAX_PAGES {
             return None;
         }
-        let live: Option<u8> = conn
-            .query_row(
-                "SELECT page FROM wb_strokes WHERE board = ?1 AND stroke_id = ?2",
-                params![board, id],
-                |r| r.get(0),
-            )
-            .ok();
+        let live = self.wb_stroke_page(board, id);
         let page = live.unwrap_or(hint_page);
-        let _ = conn.execute("DELETE FROM wb_strokes WHERE board = ?1 AND stroke_id = ?2", params![board, id]);
-        let _ = conn.execute(
-            "INSERT OR IGNORE INTO wb_tombstones (board, page, stroke_id, seen) VALUES (?1, ?2, ?3, ?4)",
-            params![board, page, id, live.is_some()],
-        );
+        let deleted = conn
+            .prepare_cached("DELETE FROM wb_strokes WHERE board = ?1 AND stroke_id = ?2")
+            .and_then(|mut stmt| stmt.execute(params![board, id]));
+        let tombstoned = conn
+            .prepare_cached("INSERT OR IGNORE INTO wb_tombstones (board, page, stroke_id, seen) VALUES (?1, ?2, ?3, ?4)")
+            .and_then(|mut stmt| stmt.execute(params![board, page, id, live.is_some()]));
+        if let Err(e) = deleted.and(tombstoned) {
+            warn!("Whiteboard erase not stored: {}", e);
+        }
         live
     }
 
@@ -422,7 +460,11 @@ impl P2PCore {
                 });
                 if let Ok(rows) = rows {
                     for (id, shade, points, author, width, sig) in rows.flatten() {
-                        out.push((WbStroke { id, page, shade, author: 0, width, points: self.wb_unseal(points), sig }, author));
+                        let Some(points) = self.wb_unseal(points) else {
+                            warn!("Whiteboard stroke skipped: stored points do not open");
+                            continue;
+                        };
+                        out.push((WbStroke { id, page, shade, author: 0, width, points, sig }, author));
                     }
                 }
             }
@@ -470,13 +512,32 @@ impl P2PCore {
             (None, None) => return,
         };
         if let Some(conn) = &self.db {
-            let _ = conn.execute("DELETE FROM wb_strokes WHERE board = ?1", params![key]);
-            let _ = conn.execute("DELETE FROM wb_tombstones WHERE board = ?1", params![key]);
-            let _ = conn.execute("DELETE FROM wb_page_sigs WHERE board = ?1", params![key]);
+            for table in ["wb_strokes", "wb_tombstones", "wb_page_sigs"] {
+                if let Err(e) = conn.execute(&format!("DELETE FROM {} WHERE board = ?1", table), params![key]) {
+                    warn!("Whiteboard not deleted from {}: {}", table, e);
+                }
+            }
         }
         self.wb_set_unread(&key, 0);
         self.wb_outbox.remove(&key);
-        self.wb_reply_at.retain(|(board, _), _| board.split('#').next() != Some(key.as_str()));
+        // Slots are `<board>` or `<board>#<kind>`; a key may hold '#' itself.
+        self.wb_reply_at.retain(|(board, _), _| board != &key && !board.strip_prefix(key.as_str()).map_or(false, |rest| rest.starts_with('#')));
+        // Queued whiteboard packets of this board would be retried to its
+        // former participants until the generic give-up.
+        let (g, c) = (group_id.map(str::to_string), if group_id.is_none() { identity_id.map(str::to_string) } else { None });
+        let stale: Vec<String> = self.awaiting_confirmation.iter()
+            .filter(|(_, p)| matches!(
+                &p.regen_content,
+                Some(MessageContent::WbDigest { group_id: pg, conversation_identity_id: pc, .. }
+                    | MessageContent::WbOps { group_id: pg, conversation_identity_id: pc, .. })
+                    if *pg == g && *pc == c
+            ))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in stale {
+            self.awaiting_confirmation.remove(&id);
+            self.remove_durable_retry(&id);
+        }
     }
 }
 
@@ -644,7 +705,9 @@ impl P2PCore {
     pub(crate) fn wb_add_stroke(&mut self, peer_fp: &str, group_id: &str, page: u8, shade: u8, width: u8, points: &[u8]) -> Result<String, String> {
         let board = self.wb_board(peer_fp, group_id)?;
         let me = self.my_identity_id().ok_or("No identity")?;
-        if points.is_empty() || points.len() % 4 != 0 {
+        // A stroke larger than a whole page can never be stored: refused
+        // before it is split and copied.
+        if points.is_empty() || points.len() % 4 != 0 || points.len() > MAX_PAGE_BYTES {
             return Err("Invalid stroke".to_string());
         }
         // `WbStroke.sig`: this device. Its page signature follows when the
@@ -700,8 +763,19 @@ impl P2PCore {
     /// Strokes erased on this device. `ids`: 8 bytes per stroke.
     pub(crate) fn wb_erase_strokes(&mut self, peer_fp: &str, group_id: &str, ids: &[u8]) -> Result<(), String> {
         let board = self.wb_board(peer_fp, group_id)?;
+        // One transaction for the database part, then the outbox.
+        let tx = self.wb_tx();
+        let mut erased: Vec<(u8, &[u8])> = Vec::new();
         for id in ids.chunks_exact(8) {
-            let Some(page) = self.wb_erase(&board.key, 0, id) else { continue };
+            // Not here: no tombstone on a guessed page that nobody hears of.
+            let Some(live) = self.wb_stroke_page(&board.key, id) else { continue };
+            if let Some(page) = self.wb_erase(&board.key, live, id) {
+                erased.push((page, id));
+            }
+        }
+        self.wb_trim_tombstones(&board.key);
+        Self::wb_commit(tx);
+        for (page, id) in erased {
             // The receiver drops a whole packet over this many erase records.
             if self.wb_outbox.get(&board.key).map_or(false, |o| o.erased.len() >= MAX_TOMBSTONES * 9) {
                 self.wb_flush_ops(&board.key);
@@ -715,7 +789,6 @@ impl P2PCore {
                 outbox.erased.extend_from_slice(id);
             }
         }
-        self.wb_trim_tombstones(&board.key);
         self.wb_sweep();
         Ok(())
     }
@@ -838,6 +911,12 @@ impl P2PCore {
         if strokes.len() > MAX_OPS_STROKES || sigs.len() > MAX_PAGES as usize || erased.len() % 9 != 0 || erased.len() > MAX_TOMBSTONES * 9 {
             return noop();
         }
+        // Each erase record is three statements under the core lock: one
+        // budget unit per 256 of them (clearing a full page is a few units).
+        let erase_units = (erased.len() / 9).div_ceil(256) as u64;
+        if erase_units > 0 && !self.wb_pull_allowed("erase", &board.key, peer_fp, erase_units) {
+            return noop();
+        }
         let mut pages = BTreeSet::new();
         let tx = self.wb_tx();
         let signed = self.wb_verified_sigs(&board, &sigs);
@@ -862,7 +941,7 @@ impl P2PCore {
         if !erased.is_empty() {
             self.wb_trim_tombstones(&board.key);
         }
-        let _ = tx.map(|tx| tx.commit());
+        Self::wb_commit(tx);
         self.wb_changed(&board, &pages, !from_self)
     }
 
@@ -1004,8 +1083,8 @@ impl P2PCore {
                 they_lack = true; // erased here, still alive there
             }
         }
-        they_lack |= self.wb_page_strokes(&board.key, page).iter().any(|(s, _)| !theirs.contains(s.id.as_slice()));
-        let _ = tx.map(|tx| tx.commit());
+        they_lack |= self.wb_page_ids(&board.key, page).iter().any(|id| !theirs.contains(id.as_slice()));
+        Self::wb_commit(tx);
         if they_lack {
             let now = current_time_ms();
             let slot = (board.key.clone(), peer_fp.to_string());

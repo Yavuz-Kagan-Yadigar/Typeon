@@ -217,6 +217,17 @@ task cargoNdkBuild(type: Exec) {
     if (ndkHome != null) {
         environment "ANDROID_NDK_HOME", ndkHome
     }
+    // M-161/M-167: RUSTFLAGS env, config'teki rustflags'i tamamen ezer ve sunucu
+    // crate'inde .cargo/config.toml bulunmaz => 16 KB bayragini + yol maskelemeyi
+    // hedef-ozel env ile burada veriyoruz. ($HOME ve proje yolu .so'ya sizmasin)
+    environment.remove("RUSTFLAGS")
+    environment.remove("CARGO_ENCODED_RUSTFLAGS")
+    def home = System.getProperty('user.home')
+    def remap = ["--remap-path-prefix=${home}=/build", "--remap-path-prefix=${rootDir.parentFile.absolutePath}=/src"]
+    def page = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+    environment "CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS", (remap + page).join(" ")
+    environment "CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS", (remap + page).join(" ")
+    environment "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_RUSTFLAGS", remap.join(" ")
     commandLine resolveCargoExecutable(), 'ndk',
             '-t', 'armeabi-v7a', '-t', 'arm64-v8a', '-t', 'x86_64',
             '-o', "${projectDir}/src/main/jniLibs",

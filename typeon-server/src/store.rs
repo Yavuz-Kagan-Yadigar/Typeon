@@ -91,6 +91,16 @@ pub struct Store {
 
 const MAX_READERS_PER_MAILBOX: i64 = 2;
 
+/// What an archive row costs beyond its two peer-sized columns (bucket,
+/// ints, owner, primary key, two index entries). Charging only `sealed` +
+/// `record_id` let a 2-byte record cost 2 bytes against a ~150-byte row.
+const ARCHIVE_ROW_OVERHEAD: usize = 128;
+
+/// Bytes an archive record is charged: quota and the server-wide budget.
+pub fn archive_row_bytes(rec: &ArchiveRecord) -> usize {
+    rec.sealed.len() + rec.record_id.len() + ARCHIVE_ROW_OVERHEAD
+}
+
 impl Store {
     pub fn open(db_path: &Path) -> Result<Store, String> {
         let conn = Connection::open(db_path).map_err(|e| format!("DB açılamadı: {e}"))?;
@@ -106,7 +116,9 @@ impl Store {
         // WAL: sunucu tek süreç ama okuma/yazma iç içe geçiyor; ayrıca ani
         // güç kesintisinde rollback journal'a göre çok daha dayanıklı.
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
-        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        // FULL: a `Deposited` answer lets the sender drop its copy, so the
+        // mail row must be on disk before it, not only in the WAL.
+        let _ = conn.pragma_update(None, "synchronous", "FULL");
         // Defter #22: JNI kontrol yüzeyi (`serverStatus`/`joinCode`/
         // `listDevices`/`revokeDevice`) AYNI dosyaya İKİNCİ bir bağlantı
         // açıyor. WAL çoğu durumu kurtarıyor ama `busy_timeout` olmadan
@@ -273,10 +285,11 @@ impl Store {
                     PRIMARY KEY (blob_id, chunk_index)
                 );
 
-                -- Kullanıcı kararı: ENGELLENEN kayıt anahtarları. `revoke`
-                -- yalnızca mevcut kaydı kapatır ve taze bir davetle geri
-                -- dönüşe izin verir; engel ise anahtarın KENDİSİNE konur,
-                -- yani aynı cihaz yeni bir davetle bile kaydolamaz.
+                -- ENGELLENEN kayıt anahtarları. Hem `revoke` hem `block`
+                -- buraya yazar (sahip kararı: iptal = engel): aynı anahtar ve
+                -- aynı PeerId taze bir davetle bile kaydolamaz. Anahtarı ve
+                -- PeerId'yi yenileyen bir cihaz (yeniden kurulum) geçer; bu
+                -- yüzden engel join kodunu da döndürür (bkz. jni `blockDevice`).
                 CREATE TABLE IF NOT EXISTS blocked_keys (
                     enroll_pk  BLOB PRIMARY KEY,
                     blocked_at INTEGER NOT NULL
@@ -387,11 +400,16 @@ impl Store {
             .flatten()
     }
 
-    /// `since`'ten (dahil değil) beri açılan kayıt sayısı — herkese açık
-    /// davetin saatlik tavanı için.
-    pub fn count_enrollments_since(&self, since: i64) -> i64 {
+    /// Enrollments opened in (`since`, `now`] — the public code's hourly cap.
+    /// Rows dated after `now` (clock stepped back) are not counted: they
+    /// froze the cap until the clock caught up.
+    pub fn count_enrollments_since(&self, since: i64, now: i64) -> i64 {
         self.conn
-            .query_row("SELECT COUNT(*) FROM enrollments WHERE enrolled_at > ?1", params![since], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM enrollments WHERE enrolled_at > ?1 AND enrolled_at <= ?2",
+                params![since, now],
+                |r| r.get(0),
+            )
             .unwrap_or(0)
     }
 
@@ -544,17 +562,25 @@ impl Store {
         // UNIQUE, aksi halde INSERT çakışırdı (uygulamayı silip yeniden kuran
         // bir cihaz aynı libp2p anahtarını yeniden üretebilir). The placeholder
         // is unique per row: a shared '' broke the index on the second collision.
-        let _ = self.conn.execute(
-            "UPDATE enrollments SET peer_id = 'unbound:' || hex(enrollment_id) WHERE peer_id = ?1 AND enrollment_id != ?2",
-            params![new_peer_id, enrollment_id],
-        );
+        // One transaction: a failed second UPDATE left the device unbound.
+        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         self.conn
+            .execute(
+                "UPDATE enrollments SET peer_id = 'unbound:' || hex(enrollment_id) WHERE peer_id = ?1 AND enrollment_id != ?2",
+                params![new_peer_id, enrollment_id],
+            )
+            .map_err(|e| e.to_string())?;
+        let n = self
+            .conn
             .execute(
                 "UPDATE enrollments SET peer_id = ?1, last_seen_at = ?2 WHERE enrollment_id = ?3",
                 params![new_peer_id, now, enrollment_id],
             )
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("Kayıt bulunamadı".to_string());
+        }
+        tx.commit().map_err(|e| e.to_string())
     }
 
     /// Revoke is a block: the enroll key goes on the block list, and the row
@@ -620,6 +646,9 @@ impl Store {
         now: i64,
         max: u32,
     ) -> Result<(Vec<String>, Vec<String>), String> {
+        // One transaction: a key binding without its reader row locked the
+        // mailbox for every other key until the sweep.
+        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let mut refused = Vec::new();
         let mut unproven = Vec::new();
         for id in add {
@@ -714,6 +743,7 @@ impl Store {
                 .conn
                 .execute("DELETE FROM mail_acks WHERE mailbox_id = ?1 AND owner = ?2", params![id, owner]);
         }
+        tx.commit().map_err(|e| e.to_string())?;
         Ok((refused, unproven))
     }
 
@@ -775,6 +805,8 @@ impl Store {
             );
             return Ok(existing as u64);
         }
+        // Row and charge together: a swallowed charge under-counted the quota.
+        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         self.conn
             .execute(
                 "INSERT INTO mail (mailbox_id, sealed, byte_len, deposited_at_ms, expires_at_ms, depositor, sealed_hash)
@@ -786,10 +818,13 @@ impl Store {
         // Kota BIRAKANA yazılır, kutunun SAHİBİNE değil — bir spam gönderici
         // kendi kotasını yakar; kimse bir kurbanın kutusunu doldurup ona
         // hizmet reddi uygulayamaz.
-        let _ = self.conn.execute(
-            "UPDATE enrollments SET bytes_mail = bytes_mail + ?1 WHERE enrollment_id = ?2",
-            params![sealed.len() as i64, depositor],
-        );
+        self.conn
+            .execute(
+                "UPDATE enrollments SET bytes_mail = bytes_mail + ?1 WHERE enrollment_id = ?2",
+                params![sealed.len() as i64, depositor],
+            )
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(seq)
     }
 
@@ -821,7 +856,7 @@ impl Store {
                 more = true;
                 break;
             }
-            let rows = stmt.query_map(params![mailbox_id, *after_seq as i64, requester], |r| {
+            let rows = stmt.query_map(params![mailbox_id, (*after_seq).min(i64::MAX as u64) as i64, requester], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Vec<u8>>(2)?))
             });
             let Ok(rows) = rows else { continue };
@@ -934,17 +969,15 @@ impl Store {
                 .conn
                 .execute(
                     "DELETE FROM mail WHERE mailbox_id = ?1 AND seq = ?2 AND depositor = ?3",
-                    params![mailbox_id, *seq as i64, depositor],
+                    params![mailbox_id, (*seq).min(i64::MAX as u64) as i64, depositor],
                 )
                 .unwrap_or(0);
         }
         removed
     }
 
-    /// bkz. `ServerRequest::Block` / defter dışı kullanıcı kararı: iptal
-    /// (`revoke`) yeni bir davetle geri dönmeye izin verir, ENGEL vermez.
-    /// Engel, kayıt anahtarının kendisine konur; aynı anahtarla yeni bir
-    /// kayıt açılamaz.
+    /// Puts an enroll key on the block list: no new enrollment with it (see
+    /// `revoke_enrollment`, which does the same for the enrollment's key).
     pub fn block_enrollment_key(&self, enroll_pk: &[u8], now: i64) -> Result<(), String> {
         self.conn
             .execute(
@@ -1021,8 +1054,8 @@ impl Store {
     /// şeydir (geç gelen bir Edit'i geçmişte düzeltmek). Aynı kural, N
     /// cihazımın AYNI kaydı yüklemesini de tek satıra indirir.
     ///
-    /// The last writer becomes `owner` and pays for the row. The quota counts
-    /// `sealed` plus `record_id`, the two peer-sized columns.
+    /// The last writer becomes `owner` and pays for the row: see
+    /// `archive_row_bytes`.
     pub fn archive_put(&self, bucket: &str, records: &[ArchiveRecord], owner: &[u8], now: i64) -> Result<u64, String> {
         let mut newest = 0u64;
         // Whose charge changes: the writer and the owners it overwrites.
@@ -1054,7 +1087,7 @@ impl Store {
                         sealed = excluded.sealed, byte_len = excluded.byte_len,
                         owner = excluded.owner, updated_at = excluded.updated_at
                      WHERE excluded.rev > archive.rev",
-                    params![bucket, rec.record_id, rec.rev.min(i64::MAX as u64) as i64, rec.sent_at_ms as i64, rec.sealed, (rec.sealed.len() + rec.record_id.len()) as i64, owner, now],
+                    params![bucket, rec.record_id, rec.rev.min(i64::MAX as u64) as i64, rec.sent_at_ms.min(i64::MAX as u64) as i64, rec.sealed, archive_row_bytes(rec) as i64, owner, now],
                 )
                 .map_err(|e| e.to_string())?;
             newest = newest.max(rec.rev);
@@ -1109,7 +1142,7 @@ impl Store {
     /// 2x `max_bytes` and the client never sees its rest; add a
     /// `(sent_at_ms, record_id)` cursor to the protocol if that ever matters.
     pub fn archive_fetch(&self, bucket: &str, before_ms: Option<u64>, max_items: u32, max_bytes: u32) -> (Vec<ArchiveRecord>, bool) {
-        let before = before_ms.map(|v| v as i64).unwrap_or(i64::MAX);
+        let before = before_ms.map(|v| v.min(i64::MAX as u64) as i64).unwrap_or(i64::MAX);
         let mut stmt = match self.conn.prepare(
             "SELECT record_id, rev, sent_at_ms, sealed FROM archive
              WHERE bucket = ?1 AND sent_at_ms < ?2 ORDER BY sent_at_ms DESC",
@@ -1236,15 +1269,21 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
+    /// `Err` also when no row matched (gone, or chunks missing): the caller
+    /// must not answer `Ok` for a blob that will never be served.
     pub fn blob_finish(&self, blob_id: &str, enc_sha256: &[u8], now: i64) -> Result<(), String> {
-        self.conn
+        let n = self
+            .conn
             .execute(
                 "UPDATE blobs SET complete = 1, enc_sha256 = ?2, last_served_at = ?3
                  WHERE blob_id = ?1 AND received_chunks >= total_chunks",
                 params![blob_id, enc_sha256, now],
             )
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("Blob tamamlanamadı (eksik parça ya da satır yok)".to_string());
+        }
+        Ok(())
     }
 
     pub fn blob_state(&self, blob_id: &str) -> Option<BlobState> {
@@ -1334,6 +1373,42 @@ impl Store {
             "UPDATE enrollments SET bytes_mail =
                 COALESCE((SELECT SUM(byte_len) FROM mail WHERE mail.depositor = enrollments.enrollment_id), 0);",
         );
+    }
+
+    /// The wall clock stepped forward by `shift` and the step was accepted:
+    /// every deadline stamped on the old clock (at or before `upto`) moves
+    /// with it, so it keeps the time it had left. Without this a corrected
+    /// clock expired all mail, blobs and idle enrollments in one sweep.
+    pub fn shift_deadlines(&self, shift: i64, upto: i64) {
+        let Ok(tx) = self.conn.unchecked_transaction() else { return };
+        let _ = self.conn.execute(
+            "UPDATE mail SET expires_at_ms = expires_at_ms + ?1 WHERE deposited_at_ms <= ?2",
+            params![shift, upto],
+        );
+        let _ = self.conn.execute(
+            "UPDATE blobs SET last_served_at = last_served_at + ?1 WHERE last_served_at <= ?2",
+            params![shift, upto],
+        );
+        let _ = self.conn.execute(
+            "UPDATE enrollments SET last_seen_at = last_seen_at + ?1 WHERE last_seen_at <= ?2",
+            params![shift, upto],
+        );
+        let _ = tx.commit();
+    }
+
+    /// Rows stamped before `floor` were stamped by a clock that was wrong
+    /// (a phone booted with a 1970/2020 RTC, then restarted with the right
+    /// time): they are dated `now`, keeping their TTL length.
+    pub fn restamp_before(&self, floor: i64, now: i64) {
+        let Ok(tx) = self.conn.unchecked_transaction() else { return };
+        let _ = self.conn.execute(
+            "UPDATE mail SET expires_at_ms = ?2 + (expires_at_ms - deposited_at_ms), deposited_at_ms = ?2
+             WHERE deposited_at_ms < ?1",
+            params![floor, now],
+        );
+        let _ = self.conn.execute("UPDATE blobs SET last_served_at = ?2 WHERE last_served_at < ?1", params![floor, now]);
+        let _ = self.conn.execute("UPDATE enrollments SET last_seen_at = ?2 WHERE last_seen_at < ?1", params![floor, now]);
+        let _ = tx.commit();
     }
 
     /// Returns freed pages to the filesystem (see `open`).
@@ -1709,8 +1784,8 @@ mod tests {
         s.archive_put("ar_1", &[rec("m1", 1, 100, &vec![b'y'; 50])], &a, 0).unwrap();
         s.blob_begin("bl_1", &a, 1, 0).unwrap();
         s.blob_record_chunk("bl_1", 0, 25).unwrap();
-        // 100 mail + 50 archive + 2 for the record id "m1" + 25 blob.
-        assert_eq!(s.total_stored_bytes(), 177);
+        // 100 mail + 50 archive + 2 for the record id "m1" + row + 25 blob.
+        assert_eq!(s.total_stored_bytes(), 177 + ARCHIVE_ROW_OVERHEAD as i64);
     }
 
     /// Dış inceleme önerisi: gönderen KENDİ teslim edilmemiş paketini geri
@@ -1905,7 +1980,7 @@ mod tests {
         s.archive_put("ar_1", &[rec("m1", 1, 100, b"small")], &a, 0).unwrap();
         s.archive_put("ar_1", &[rec("m1", 2, 100, &[0u8; 1000])], &b, 0).unwrap();
         assert_eq!(s.enrollment_by_id(&a).unwrap().bytes_archive, 0);
-        assert_eq!(s.enrollment_by_id(&b).unwrap().bytes_archive, 1002, "sealed + record_id");
+        assert_eq!(s.enrollment_by_id(&b).unwrap().bytes_archive, 1002 + ARCHIVE_ROW_OVERHEAD as i64, "sealed + record_id + row");
         assert_eq!(s.archive_purge(&["ar_1".to_string()]), 1, "a's purge removes b's row");
         assert_eq!(s.enrollment_by_id(&b).unwrap().bytes_archive, 0);
     }
@@ -1973,7 +2048,7 @@ mod tests {
         s.blob_begin("bl_1", &a, 3, 0).unwrap();
         s.blob_record_chunk("bl_1", 0, 10).unwrap();
         s.blob_record_chunk("bl_1", 1, 10).unwrap();
-        s.blob_finish("bl_1", b"hash", 5).unwrap();
+        assert!(s.blob_finish("bl_1", b"hash", 5).is_err());
         assert!(!s.blob_state("bl_1").unwrap().complete, "eksik yukleme servis edilemez");
         s.blob_record_chunk("bl_1", 2, 10).unwrap();
         s.blob_finish("bl_1", b"hash", 5).unwrap();
@@ -1989,7 +2064,7 @@ mod tests {
         s.blob_begin("bl_1", &a, 3, 0).unwrap();
         s.blob_record_chunk("bl_1", 2, 10).unwrap();
         s.blob_record_chunk("bl_1", 0, 10).unwrap();
-        s.blob_finish("bl_1", b"h", 5).unwrap();
+        assert!(s.blob_finish("bl_1", b"h", 5).is_err());
         assert!(!s.blob_state("bl_1").unwrap().complete, "eksik parcayla tamamlanmamali");
         assert_eq!(s.blob_state("bl_1").unwrap().received_chunks, 2);
         s.blob_record_chunk("bl_1", 1, 10).unwrap();

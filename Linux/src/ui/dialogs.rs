@@ -91,7 +91,6 @@ pub fn chat_context_menu(
     conversation: &Conversation,
     pin_key: &str,
     pinned: bool,
-    is_group: bool,
     is_founder: bool,
     x: f64,
     y: f64,
@@ -244,7 +243,6 @@ pub fn chat_context_menu(
             ));
         }
     }
-    let _ = is_group;
 
     for (icon, label, destructive, action) in entries {
         let button = crate::ui::widgets::menu_item(icon, label.as_str());
@@ -384,7 +382,11 @@ pub fn show_own_code(app: &Rc<App>) {
                 // capturing a clone — capturing would make the button own a
                 // closure that owns the button.
                 copy.connect_clicked(move |button| {
-                    button.clipboard().set_text(&manual_for_copy);
+                    // The pairing code is a 24 h bearer secret: mark it so
+                    // clipboard managers do not record/preview it.
+                    let text = gtk::gdk::ContentProvider::for_value(&manual_for_copy.to_value());
+                    let hint = gtk::gdk::ContentProvider::for_bytes("x-kde-passwordManagerHint", &glib::Bytes::from_static(b"secret"));
+                    let _ = button.clipboard().set_content(Some(&gtk::gdk::ContentProvider::new_union(&[text, hint])));
                 });
             }
             let payload = core::generate_qr_packet(&address);
@@ -663,16 +665,21 @@ pub fn pending_messages(app: &Rc<App>) {
 pub fn watch_device_alerts(app: &Rc<App>) {
     let showing: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let app = app.clone();
+    let in_flight = Rc::new(std::cell::Cell::new(false));
     glib::timeout_add_seconds_local(5, move || {
-        if showing.borrow().is_some() {
+        // The core read runs off the GTK thread (shared core lock); one at a
+        // time, and none while an alert is on screen.
+        if showing.borrow().is_some() || in_flight.replace(true) {
             return glib::ControlFlow::Continue;
         }
-        let Some(alert) = core::list_pending_device_alerts().into_iter().next() else {
-            return glib::ControlFlow::Continue;
-        };
-        let Some(window) = app.window() else {
-            return glib::ControlFlow::Continue;
-        };
+        let (app, showing, in_flight) = (app.clone(), showing.clone(), in_flight.clone());
+        crate::app::run_in_background(core::list_pending_device_alerts, move |alerts| {
+        in_flight.set(false);
+        let Some(alert) = alerts.into_iter().next() else { return };
+        let Some(window) = app.window() else { return };
+        if showing.borrow().is_some() {
+            return;
+        }
 
         *showing.borrow_mut() = Some(alert.new_device_fingerprint.clone());
 
@@ -715,7 +722,7 @@ pub fn watch_device_alerts(app: &Rc<App>) {
             *showing_for_response.borrow_mut() = None;
         });
         dialog.present();
-
+        });
         glib::ControlFlow::Continue
     });
 }

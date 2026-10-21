@@ -38,7 +38,7 @@
     <string name="lbl_verify_identity">Kimliği Doğrula</string>
     <string name="lbl_safety_number">Güvenlik Numarası</string>
     <string name="lbl_node_mode">Düğüm Modu</string>
-    <string name="lbl_node_mode_desc">DHT yönlendirmesine katkıda bulunur VE ağdaki başkaları için (şifreli) trafiği körü körüne aktarır — içeriğinizi asla göremez, ama aktardığınız kişinin bant genişliğini kullanır ve o kişinin kimlerle bağlandığını görebilir.</string>
+    <string name="lbl_node_mode_desc">Ağdaki başkaları için (şifreli) trafiği körü körüne aktarır (yalnızca Circuit Relay v2; DHT katkısı yok) — içeriğinizi asla göremez, ama aktardığınız kişinin bant genişliğini kullanır ve o kişinin kimlerle bağlandığını görebilir.</string>
     <string name="lbl_history_storage_limit">Ek depolama sınırı</string>
     <string name="lbl_history_storage_limit_desc">Düğüm Modu kendisine sunulan her dosyayı otomatik indirir; bu sınırsız büyüyebilir. Toplam ek depolama bu sınırı aştığında, yer açmak için önce en eski dosyalar silinir.</string>
     <string name="lbl_relay_address">Bilinen aktarıcı adresi</string>
@@ -222,6 +222,8 @@
     <string name="msg_attachment_downloading">İndiriliyor…</string>
     <string name="msg_attachment_failed">İndirme başarısız</string>
     <string name="error_attachment_open_failed">Dosya açılamadı</string>
+    <!-- %1$s = error detail from the core/system. -->
+    <string name="error_with_message">Hata: %1$s</string>
 
     <string name="action_save_to_downloads">İndirilenler\'e kaydet</string>
     <string name="action_copy_image">Resmi kopyala</string>
@@ -258,6 +260,7 @@
     <string name="msg_enter_username">Kimliğinizi oluşturmak için bir kullanıcı adı girin.</string>
     <string name="action_create">Oluştur</string>
     <string name="msg_identity_read_failed">Kimlik anahtarları okunamadı. Bir kurtarma dosyanız varsa onu kullanmanız gerekebilir.</string>
+    <string name="error_identity_persist_failed">Kimlik anahtarları kaydedilemedi. Kurulum yeniden başlayacak — bir kurtarma dosyanız varsa onu kullanmanız gerekebilir.</string>
     <string name="lbl_id_short">ID: %s…</string>
     <string name="lbl_id_code">ID: %s</string>
     <string name="title_reliable_delivery">Güvenilir mesaj teslimi</string>
@@ -277,6 +280,8 @@
     <string name="msg_connected">Bağlandı</string>
     <string name="error_file_too_large_named">%s: 4GB sınırını aşıyor</string>
     <string name="action_add_contact_qr">QR ile Kişi Ekle</string>
+    <!-- Clipboard label of the pairing code. -->
+    <string name="lbl_clipboard_pairing_code">Typeon eşleşme kodu</string>
     <string name="lbl_scan_qr_instructions">Bağlanmak için QR Kodu Tarayın</string>
     <string name="lbl_initializing">Başlatılıyor…</string>
 
@@ -447,4 +452,7 @@
     <string name="link_device_code_shown">Karşılaştırma kodu: %1$s\nOnaylamadan önce diğer cihazınız aynı kodu gösterir.</string>
     <string name="link_device_code_check">Karşılaştırma kodu: %1$s\nYalnızca yeni cihaz aynı kodu gösteriyorsa onaylayın.</string>
     <string name="notif_new_message">Yeni mesaj</string>
+    <string name="title_scan_qr">QR Tara</string>
+    <string name="tor_off_no_network">Tor kapalı: Tor olmadan ağ başlamaz.</string>
+    <string name="msg_pairing_contact_limit">Eşleşme başarısız: kişi listeniz dolu.</string>
 </resources>

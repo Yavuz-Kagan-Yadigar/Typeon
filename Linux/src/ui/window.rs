@@ -118,16 +118,27 @@ pub(crate) fn sidebar_toggle_button(main: &Rc<MainUi>) -> gtk::Button {
     // olduğu ipucu metninden ve düğmenin basılı/basılı-değil görünümünden
     // zaten anlaşılıyor.
     button.set_icon_name("sidebar-show-symbolic");
+    // Weak refs both ways: the handler lives on `split`, the button inside
+    // it — strong captures would be a cycle that leaks every chat page.
     let sync = {
-        let split = main.split.clone();
-        let button = button.clone();
+        let split = main.split.downgrade();
+        let button = button.downgrade();
         move || {
+            let (Some(split), Some(button)) = (split.upgrade(), button.upgrade()) else { return };
             let collapsed = split.is_collapsed();
             button.set_tooltip_text(Some(if collapsed { "Show chat list" } else { "Collapse chat list" }));
         }
     };
     sync();
-    main.split.connect_collapsed_notify(move |_| sync());
+    let handler = main.split.connect_collapsed_notify(move |_| sync());
+    // A new button is made per chat page; drop the handler with it.
+    let handler = RefCell::new(Some(handler));
+    let split = main.split.downgrade();
+    button.connect_destroy(move |_| {
+        if let (Some(split), Some(id)) = (split.upgrade(), handler.borrow_mut().take()) {
+            split.disconnect(id);
+        }
+    });
 
     let main = main.clone();
     button.connect_clicked(move |_| main.toggle_sidebar());
@@ -279,8 +290,13 @@ fn status_indicator(app: &Rc<App>) -> gtk::Box {
 
     refresh();
     let _ = app;
+    let row_weak = row.downgrade();
     glib::timeout_add_seconds_local(2, move || {
-        refresh();
+        // Gone -> stop; hidden/minimized -> no thread + core round-trip.
+        let Some(row) = row_weak.upgrade() else { return glib::ControlFlow::Break };
+        if row.is_mapped() {
+            refresh();
+        }
         glib::ControlFlow::Continue
     });
 

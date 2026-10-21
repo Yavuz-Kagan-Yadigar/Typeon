@@ -107,7 +107,7 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 # bir bağlantı stabilize olunca aralık genişletilebilsin istendi, stok ping
 # bunu desteklemiyor). "ping" feature'ı artık kullanılmadığından kaldırıldı,
 # "request-response"/"cbor" zaten `file_chunks` için buradaydı.
-libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "mdns", "tokio", "macros", "dns", "request-response", "cbor", "relay", "dcutr", "upnp"] }
+libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "tokio", "macros", "dns", "request-response", "cbor", "relay", "dcutr"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 # Call media: one long-lived stream per peer instead of a request/response
 # substream (and multistream round trip) per 60 ms audio packet. See call.rs.

@@ -109,8 +109,13 @@ pub fn total_chunks_with(total_size: u64, chunk_size: usize) -> u32 {
     // kendi başına da (savunma katmanı) `total_size` neredeyse `u64::MAX`
     // olsa bile taşmasın diye doygun toplama kullanıyor — çıplak `+`
     // release'de sessizce sarardı.
-    let cs = if chunk_size == 0 { FILE_CHUNK_SIZE } else { chunk_size } as u64;
+    let cs = chunk_or_default(chunk_size) as u64;
     ((total_size.saturating_add(cs - 1)) / cs) as u32
+}
+
+/// `chunk_size` 0 = the legacy fixed size (files from before per-file sizes).
+fn chunk_or_default(chunk_size: usize) -> usize {
+    if chunk_size == 0 { FILE_CHUNK_SIZE } else { chunk_size }
 }
 
 fn nonce_from_chunk_index(index: u32) -> Nonce {
@@ -137,10 +142,10 @@ fn read_full<R: Read>(r: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
 /// orientation of the photo, if it is not the upright one: the caller puts
 /// that one tag back (`orientation_segment`), or a photo taken rotated is
 /// shown as the sensor stored it.
-/// Empty for a file that is not a JPEG, and on any doubt about its structure:
-/// the file is then sent as it is.
-fn jpeg_metadata_ranges(file: &mut File) -> (Vec<(u64, u64)>, Option<u8>) {
-    let scan = |file: &mut File| -> Option<(Vec<(u64, u64)>, Option<u8>)> {
+/// None for a file that is not a JPEG and on any doubt about its structure:
+/// the caller then refuses to send it (fail closed, the EXIF may hold GPS).
+fn jpeg_metadata_ranges(file: &mut File) -> Option<(Vec<(u64, u64)>, Option<u8>)> {
+    {
         let len = file.metadata().ok()?.len();
         let mut head = [0u8; 4];
         file.seek(SeekFrom::Start(0)).ok()?;
@@ -195,14 +200,7 @@ fn jpeg_metadata_ranges(file: &mut File) -> (Vec<(u64, u64)>, Option<u8>) {
             at = end;
         }
         None
-    };
-    let found = scan(file).unwrap_or_default();
-    // The caller reads from the start. A failed rewind: nothing is skipped
-    // (an empty list), and the read below fails or starts where it is.
-    if file.seek(SeekFrom::Start(0)).is_err() {
-        return (Vec::new(), None);
     }
-    found
 }
 
 /// The offset just past the end-of-image marker, scanning from the start-of-
@@ -257,9 +255,9 @@ fn jpeg_image_end(file: &mut File, sos: u64) -> Option<u64> {
 
 /// PNG chunks that carry text, time or EXIF (`eXIf` can hold the GPS
 /// position), and anything after `IEND`. Image chunks and the colour profile
-/// stay. Empty for a file that is not a PNG, and on any doubt.
-fn png_metadata_ranges(file: &mut File) -> Vec<(u64, u64)> {
-    let scan = |file: &mut File| -> Option<Vec<(u64, u64)>> {
+/// stay. None for a file that is not a PNG, and on any doubt.
+fn png_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
+    {
         let len = file.metadata().ok()?.len();
         let mut head = [0u8; 8];
         file.seek(SeekFrom::Start(0)).ok()?;
@@ -291,8 +289,7 @@ fn png_metadata_ranges(file: &mut File) -> Vec<(u64, u64)> {
             at = end;
         }
         None
-    };
-    scan(file).unwrap_or_default()
+    }
 }
 
 /// The orientation (2..=8, not the upright 1) in the body of an EXIF APP1
@@ -367,12 +364,19 @@ pub fn encrypt_file_to_disk_with(
     let cipher = ChaCha20Poly1305::new_from_slice(file_key).map_err(|_| "Invalid file key")?;
     let mut src = File::open(source_path).map_err(|e| e.to_string())?;
     // A photo goes out without its EXIF/XMP: size and hash below are those
-    // of the bytes that are sent.
-    let (mut ranges, orientation) = jpeg_metadata_ranges(&mut src);
-    if ranges.is_empty() {
-        ranges = png_metadata_ranges(&mut src);
-        src.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-    }
+    // of the bytes that are sent. A JPEG/PNG the scanner cannot follow is
+    // refused, not sent with its metadata.
+    let mut magic = [0u8; 8];
+    let got = read_full(&mut src, &mut magic).map_err(|e| e.to_string())?;
+    const DOUBT: &str = "Photo metadata could not be removed; file not sent";
+    let (ranges, orientation) = if got >= 2 && magic[..2] == [0xFF, 0xD8] {
+        jpeg_metadata_ranges(&mut src).ok_or(DOUBT)?
+    } else if got == 8 && magic == *b"\x89PNG\r\n\x1a\n" {
+        (png_metadata_ranges(&mut src).ok_or(DOUBT)?, None)
+    } else {
+        (Vec::new(), None)
+    };
+    src.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     // The one tag that goes back in, right after the start-of-image marker.
     let mut head = Vec::new();
     if let Some(orientation) = orientation {
@@ -384,7 +388,7 @@ pub fn encrypt_file_to_disk_with(
     let mut src = std::io::Cursor::new(head).chain(SkipRanges { file: src, pos, ranges: ranges.into() });
     let mut dest = File::create(dest_enc_path).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
-    let chunk_size = if chunk_size == 0 { FILE_CHUNK_SIZE } else { chunk_size };
+    let chunk_size = chunk_or_default(chunk_size);
     let mut buf = vec![0u8; chunk_size];
     let mut total: u64 = 0;
     let mut chunk_index: u32 = 0;
@@ -398,7 +402,7 @@ pub fn encrypt_file_to_disk_with(
         let ciphertext = cipher.encrypt(&nonce, &buf[..n]).map_err(|_| "Chunk encryption failed")?;
         dest.write_all(&ciphertext).map_err(|e| e.to_string())?;
         total += n as u64;
-        chunk_index += 1;
+        chunk_index = chunk_index.checked_add(1).ok_or("File too large")?;
         if n < chunk_size {
             break;
         }
@@ -420,7 +424,7 @@ pub fn decrypt_file_from_disk_with(
     expected_sha256_hex: &str,
     chunk_size: usize,
 ) -> Result<(), String> {
-    let chunk_size = if chunk_size == 0 { FILE_CHUNK_SIZE } else { chunk_size };
+    let chunk_size = chunk_or_default(chunk_size);
     let cipher = ChaCha20Poly1305::new_from_slice(file_key).map_err(|_| "Invalid file key")?;
     let mut src = File::open(src_enc_path).map_err(|e| e.to_string())?;
     let mut dest = File::create(dest_plain_path).map_err(|e| e.to_string())?;
@@ -436,7 +440,7 @@ pub fn decrypt_file_from_disk_with(
         let plaintext = cipher.decrypt(&nonce, &buf[..n]).map_err(|_| format!("Chunk {} decryption failed", chunk_index))?;
         hasher.update(&plaintext);
         dest.write_all(&plaintext).map_err(|e| e.to_string())?;
-        chunk_index += 1;
+        chunk_index = chunk_index.checked_add(1).ok_or("File too large")?;
         if n < buf.len() {
             break;
         }
@@ -454,7 +458,7 @@ pub fn decrypt_file_from_disk_with(
 /// (şifreli) okuması — tekrar şifrelemeye gerek yok, disk formatı zaten
 /// ağ formatıyla aynı (bkz. modül başı notu).
 pub fn read_chunk_from_disk_with(enc_path: &Path, chunk_index: u32, chunk_size: usize) -> Result<Option<Vec<u8>>, String> {
-    let chunk_size = if chunk_size == 0 { FILE_CHUNK_SIZE } else { chunk_size };
+    let chunk_size = chunk_or_default(chunk_size);
     let mut f = match File::open(enc_path) {
         Ok(f) => f,
         Err(_) => return Ok(None),
@@ -522,7 +526,7 @@ impl std::fmt::Display for ChunkAppendError {
 /// `Auth` hatasında diske HİÇBİR ŞEY yazılmaz — çağıran aynı parçayı başka
 /// bir kaynaktan güvenle yeniden isteyebilir (bkz. `ChunkAppendError`).
 pub fn write_verified_chunk_at_with(dest_enc_path: &Path, chunk_index: u32, ciphertext: &[u8], file_key: &[u8; 32], chunk_size: usize) -> Result<usize, ChunkAppendError> {
-    let chunk_size = if chunk_size == 0 { FILE_CHUNK_SIZE } else { chunk_size };
+    let chunk_size = chunk_or_default(chunk_size);
     // A longer chunk would be written over the next chunk's slot.
     if ciphertext.len() > chunk_size + 16 {
         return Err(ChunkAppendError::Auth(format!("Chunk {} is longer than the file's chunk size", chunk_index)));
@@ -538,6 +542,9 @@ pub fn write_verified_chunk_at_with(dest_enc_path: &Path, chunk_index: u32, ciph
     let offset = chunk_index as u64 * (chunk_size as u64 + 16);
     f.seek(SeekFrom::Start(offset)).map_err(|e| ChunkAppendError::Io(e.to_string()))?;
     f.write_all(ciphertext).map_err(|e| ChunkAppendError::Io(e.to_string()))?;
+    // The caller records the chunk as received: it must be on disk first,
+    // or a power loss leaves a hole in a download marked done.
+    f.sync_data().map_err(|e| ChunkAppendError::Io(e.to_string()))?;
     Ok(plaintext_len)
 }
 
@@ -637,7 +644,7 @@ mod tests {
         let eoi = jpeg.len() as u64;
         jpeg.extend_from_slice(b"MOTIONPHOTO");
         std::fs::write(&path, &jpeg).unwrap();
-        let (ranges, _) = jpeg_metadata_ranges(&mut File::open(&path).unwrap());
+        let (ranges, _) = jpeg_metadata_ranges(&mut File::open(&path).unwrap()).unwrap();
         assert_eq!(ranges, vec![(eoi, jpeg.len() as u64)]);
 
         let chunk = |kind: &[u8; 4], body: &[u8]| {
@@ -655,7 +662,7 @@ mod tests {
         png.extend(chunk(b"IDAT", &[1, 2]));
         png.extend(chunk(b"IEND", &[]));
         std::fs::write(&path, &png).unwrap();
-        assert_eq!(png_metadata_ranges(&mut File::open(&path).unwrap()), vec![(text_at, text_end)]);
+        assert_eq!(png_metadata_ranges(&mut File::open(&path).unwrap()), Some(vec![(text_at, text_end)]));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -702,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn exif_is_cut_from_a_jpeg_and_a_doubtful_file_is_sent_whole() {
+    fn exif_is_cut_from_a_jpeg_and_a_doubtful_jpeg_is_refused() {
         let base = std::env::temp_dir().join(format!("typeon-jpg-{}", std::process::id()));
         let (src, enc) = (base.with_extension("src"), base.with_extension("enc"));
         let key = [1u8; 32];
@@ -728,12 +735,11 @@ mod tests {
         let photo = [&soi[..], &jfif, &rotated[..], &exif, &scan].concat();
         assert_eq!(sent(&photo), [&soi[..], &orientation_segment(6), &jfif, &scan].concat());
         assert_eq!(exif_orientation(&orientation_segment(6)[4..]), Some(6));
-        // A segment longer than the file: unchanged.
-        let cut = [&soi[..], &exif, &[0xFF, 0xE1, 0xFF, 0xFF, 1]].concat();
-        assert_eq!(sent(&cut), cut);
-        // No start-of-scan after the segments: unchanged.
-        let headless = [&soi[..], &exif].concat();
-        assert_eq!(sent(&headless), headless);
+        // A segment longer than the file, or no start-of-scan: refused.
+        for doubtful in [[&soi[..], &exif, &[0xFF, 0xE1, 0xFF, 0xFF, 1]].concat(), [&soi[..], &exif].concat()] {
+            std::fs::write(&src, &doubtful).unwrap();
+            assert!(encrypt_file_to_disk_with(&src, &enc, &key, 16).is_err());
+        }
         // Not a JPEG: unchanged.
         let other = [&[0x89, b'P', b'N', b'G'][..], &exif].concat();
         assert_eq!(sent(&other), other);

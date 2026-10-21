@@ -45,14 +45,19 @@ class P2PRetryWorker(context: Context, params: WorkerParameters) : Worker(contex
             // olarak arka planda çalışıyor. Uygulama pil optimizasyonundan
             // MUAFSA izin veriliyor, değilse istisna fırlıyor; WorkManager
             // onu yakalayıp işi "failed" sayıyordu, yani yedek mekanizma
-            // sessizce hiç çalışmıyordu. Artık istisna yutuluyor ve iş
-            // BAŞARILI dönüyor: periyodik program bozulmasın, bir sonraki
-            // turda (ya da kullanıcı uygulamayı açtığında) tekrar denensin.
-            // Asıl açılış yolu artık `BootReceiver` (kısıttan muaf).
+            // sessizce hiç çalışmıyordu. Artık istisna yutuluyor ama iş
+            // "BAŞARILI" sayılmıyor: `Result.retry()` ile WorkManager'a
+            // durum bildiriliyor (kendi geri çekilme kuralıyla yeniden
+            // denenir), periyodik program bozulmuyor. Asıl açılış yolu artık
+            // `BootReceiver` (kısıttan muaf).
             try {
                 ContextCompat.startForegroundService(applicationContext, serviceIntent)
             } catch (e: Exception) {
                 android.util.Log.w("P2PRetryWorker", "Servis arka plandan başlatılamadı: ${e.message}")
+                // "Başarılı" demek, bu yedeğin HİÇ çalışmadığını gizliyordu.
+                // WorkManager'a durumu bildir: iş kendi geri çekilme
+                // (backoff) kuralıyla yeniden denensin.
+                return Result.retry()
             }
         }
         return Result.success()

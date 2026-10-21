@@ -51,6 +51,8 @@ impl Recording {
                 // device exclusively and fight whatever else is using it.
                 "-f", "pulse",
                 "-i", "default",
+                // Hard cap: a recording nobody stops must not run forever.
+                "-t", "600",
                 // Mono at a voice bitrate: this is speech, not music, and the
                 // file crosses a phone's data connection.
                 "-ac", "1",

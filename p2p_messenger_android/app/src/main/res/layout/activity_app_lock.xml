@@ -47,7 +47,7 @@
             android:inputType="textPassword"
             android:imeOptions="actionDone"
             android:hint="@string/hint_app_lock_password"
-            android:autofillHints="password" />
+            android:importantForAutofill="no" />
 
         <EditText
             android:id="@+id/edt_app_lock_confirm"
@@ -59,7 +59,7 @@
             android:inputType="textPassword"
             android:imeOptions="actionDone"
             android:hint="@string/hint_app_lock_password_confirm"
-            android:autofillHints="password"
+            android:importantForAutofill="no"
             android:visibility="gone" />
 
         <TextView

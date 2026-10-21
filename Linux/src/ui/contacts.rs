@@ -66,42 +66,91 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
     container.append(&add);
 
     let query = Rc::new(RefCell::new(String::new()));
-    let refresh: Rc<dyn Fn()> = {
+    // Core reads (contacts, blocked ids, safety codes) happen off the GTK
+    // thread into `data`; typing in the search box only re-filters it.
+    let data: Rc<RefCell<Vec<(core::ContactSummary, bool, String)>>> = Rc::new(RefCell::new(Vec::new()));
+    let render: Rc<dyn Fn()> = {
         let main = main.clone();
         let list = list.clone();
         let stack = stack.clone();
         let query = query.clone();
+        let data = data.clone();
         Rc::new(move || {
-            let contacts = core::list_contacts();
             let needle = query.borrow().to_lowercase();
-
             while let Some(child) = list.first_child() {
                 list.remove(&child);
             }
-            for contact in contacts.iter() {
+            for (contact, blocked, code) in data.borrow().iter() {
                 if !needle.is_empty() && !contact.display_name.to_lowercase().contains(&needle) {
                     continue;
                 }
-                list.append(&build_row(&main, contact));
+                list.append(&build_row(&main, contact, *blocked, code.clone()));
             }
             stack.set_visible_child_name(if list.first_child().is_none() { "empty" } else { "list" });
         })
     };
+    let refresh: Rc<dyn Fn()> = {
+        let render = render.clone();
+        let data = data.clone();
+        let generation = Rc::new(std::cell::Cell::new(0u64));
+        let pending = Rc::new(std::cell::Cell::new(false));
+        Rc::new(move || {
+            // Burst of events -> one rebuild.
+            if pending.replace(true) {
+                return;
+            }
+            let (render, data, generation, pending) = (render.clone(), data.clone(), generation.clone(), pending.clone());
+            glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
+                pending.set(false);
+                let mine = generation.get() + 1;
+                generation.set(mine);
+                crate::app::run_in_background(
+                    || {
+                        let blocked = core::list_blocked_identities();
+                        core::list_contacts()
+                            .into_iter()
+                            .map(|contact| {
+                                let is_blocked = blocked.contains(&contact.identity_id);
+                                let code = if contact.added_via_group {
+                                    core::contact_safety_code(&contact.identity_id)
+                                } else {
+                                    String::new()
+                                };
+                                (contact, is_blocked, code)
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                    move |rows| {
+                        if generation.get() != mine {
+                            return;
+                        }
+                        *data.borrow_mut() = rows;
+                        render();
+                    },
+                );
+            });
+        })
+    };
 
     {
-        let refresh = refresh.clone();
+        let render = render.clone();
         let query = query.clone();
         search.connect_search_changed(move |entry| {
             *query.borrow_mut() = entry.text().to_string();
-            refresh();
+            render();
         });
     }
 
     refresh();
     {
         let refresh = refresh.clone();
+        let container = container.downgrade();
         glib::timeout_add_seconds_local(30, move || {
-            refresh();
+            // Torn down -> stop; hidden (other tab / minimized) -> skip.
+            let Some(container) = container.upgrade() else { return glib::ControlFlow::Break };
+            if container.is_mapped() {
+                refresh();
+            }
             glib::ControlFlow::Continue
         });
     }
@@ -120,7 +169,7 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
     container.upcast()
 }
 
-fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary) -> gtk::ListBoxRow {
+fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, safety_code: String) -> gtk::ListBoxRow {
     let fingerprint = contact.active_device_fingerprint.clone().unwrap_or_default();
     let ready = !fingerprint.is_empty();
 
@@ -192,7 +241,7 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary) -> gtk::ListBoxR
 
     // Engel kimliği hedefler (hiçbir cihazından paket kabul edilmez).
     // Engelliyse aynı yerde "Engeli kaldır" düğmesi durur.
-    if core::list_blocked_identities().contains(&contact.identity_id) {
+    if blocked {
         let unblock = gtk::Button::builder()
             .icon_name("object-select-symbolic")
             .tooltip_text("Unblock this person")
@@ -256,7 +305,6 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary) -> gtk::ListBoxR
         // şey, o anahtarların gerçekten bu kişiye ait olduğunun
         // DOĞRULANMASI; bunu ancak kullanıcı başka bir kanaldan
         // karşılaştırarak yapabilir. O yüzden kod pencerenin İÇİNDE.
-        let safety_code = core::contact_safety_code(&contact.identity_id);
         trust.connect_clicked(move |_| {
             let app_inner = app.clone();
             let contact_id = contact_id.clone();

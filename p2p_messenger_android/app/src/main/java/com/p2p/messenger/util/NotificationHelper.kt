@@ -39,6 +39,19 @@ object NotificationHelper {
     /** Message each chat's single slot shows now, see `clearIfShowing`. */
     private val shownMessageId = java.util.concurrent.ConcurrentHashMap<Int, String>()
 
+    /**
+     * Güvenlik uyarılarının bildirim slotları — `clearAll` bunları SİLMEZ:
+     * "yeni cihaz", "kendi hesabım iptal edildi" ve "hesabı silindi"
+     * uyarılarının bildirim çubuğundaki tek izi budur; mesaj bildirimleri
+     * gibi temizleniyordu, kullanıcı uyarıyı hiç okuyamadan kayboluyordu.
+     */
+    private val securityAlertIds = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+
+    /** `showDeviceAlertNotification`/`showDeviceRevokedNotification` —
+     *  sabit slotlar, kimlikten bağımsız. */
+    private val DEVICE_ALERT_NOTIFICATION_ID = "device_alert".hashCode()
+    private val SELF_REVOKED_NOTIFICATION_ID = "self_revoked".hashCode()
+
     /** A delete removes the chat's notification only when the slot shows
      *  that message (or we do not know what it shows): deleting an old, read
      *  message used to remove the notification of the unread ones. */
@@ -78,8 +91,9 @@ object NotificationHelper {
         val intent = Intent(context, com.p2p.messenger.MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
+        securityAlertIds.add(SELF_REVOKED_NOTIFICATION_ID)
         show(
-            context, "self_revoked".hashCode(),
+            context, SELF_REVOKED_NOTIFICATION_ID,
             context.getString(R.string.app_name),
             context.getString(R.string.device_unlinked_notification),
             intent
@@ -101,8 +115,9 @@ object NotificationHelper {
         val intent = Intent(context, com.p2p.messenger.MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
+        securityAlertIds.add(DEVICE_ALERT_NOTIFICATION_ID)
         show(
-            context, "device_alert".hashCode(),
+            context, DEVICE_ALERT_NOTIFICATION_ID,
             context.getString(R.string.title_security_warning_dialog),
             context.getString(R.string.notif_new_device_warning, contactName, shortCode),
             intent
@@ -117,7 +132,9 @@ object NotificationHelper {
             putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, name)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        show(context, ("deleted:$peerDeviceFingerprint").hashCode(), context.getString(R.string.app_name),
+        val id = ("deleted:$peerDeviceFingerprint").hashCode()
+        securityAlertIds.add(id)
+        show(context, id, context.getString(R.string.app_name),
             context.getString(R.string.msg_contact_deleted_account, name), intent)
     }
 
@@ -144,13 +161,23 @@ object NotificationHelper {
     /** Spec dışı, kullanıcı isteği: uygulama ön plana/ana ekrana her
      *  girildiğinde TÜM mesaj bildirimlerini temizler — kullanıcı zaten
      *  uygulamayı açtığından bildirim çubuğunda asılı kalmalarının bir
-     *  anlamı yok. `MainActivity.onResume`'dan çağrılır. */
+     *  anlamı yok. `MainActivity.onResume`'dan çağrılır.
+     *
+     *  GÜVENLİK UYARILARI ve ön plan servisinin kalıcı bildirimi
+     *  TEMİZLENMEZ: "yeni cihaz", "hesabım iptal edildi" ve "hesabı silindi"
+     *  uyarılarının tek izi bildirim çubuğudur; önceki sürümde hepsi
+     *  mesaj bildirimleriyle birlikte siliniyordu — kullanıcı uyarıyı
+     *  okumadan kayboluyordu. */
     fun clearAll(context: Context) {
         // Not cancelAll(): that also removed a ringing call's notification,
         // the only way to answer when the call screen could not open itself.
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.activeNotifications
             .filter { it.id != com.p2p.messenger.ui.CallActivity.NOTIFICATION_ID }
+            // The foreground service notification is not a message: it is the
+            // service's own ongoing slot.
+            .filter { it.id != com.p2p.messenger.service.P2PService.NOTIFICATION_ID }
+            .filter { !securityAlertIds.contains(it.id) }
             .forEach { manager.cancel(it.tag, it.id) }
     }
 

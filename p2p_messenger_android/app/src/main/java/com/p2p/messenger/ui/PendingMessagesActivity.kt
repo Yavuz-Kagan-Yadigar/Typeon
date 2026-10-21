@@ -62,11 +62,11 @@ class PendingMessagesActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         com.p2p.messenger.service.P2PService.addMessageListener(listener)
-        // Bu ekran açıkken bir mesaj onaylanırsa (bkz. `retry_unconfirmed_messages`
-        // — arka planda P2PService poll döngüsü çalışmaya devam eder) liste
-        // bayatlar; her ön plana gelişte tazelemek basit ve yeterli (canlı
-        // bir olay akışına abone olmaya gerek yok — bu ekran nadiren uzun
-        // süre açık kalır).
+        // Bu ekran ASLINDA canlı bir olay akışına abonedir: `listener` bir
+        // ack/status olayında listeyi yeniden yükler (bir mesaj bu ekran
+        // açıkken onaylanırsa satır bayatlamasın — bkz. `retry_unconfirmed_
+        // messages`, arka planda P2PService poll döngüsü çalışmaya devam
+        // eder). Her ön plana gelişte tekrar tazelemek de basit ve yeterli.
         loadPendingMessages()
     }
 

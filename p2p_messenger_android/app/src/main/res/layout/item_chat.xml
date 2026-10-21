@@ -25,7 +25,7 @@
         android:layout_marginStart="16dp"
         android:textSize="16sp"
         android:textStyle="bold"
-        app:layout_constraintEnd_toStartOf="@id/txtUnreadCount"
+        app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toEndOf="@id/imgAvatar"
         app:layout_constraintTop_toTopOf="parent" />
 
@@ -47,23 +47,6 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:textSize="12sp"
-        app:layout_constraintEnd_toStartOf="@id/txtUnreadCount"
-        app:layout_constraintTop_toTopOf="parent" />
-
-    <!-- Zemin `colorSurfaceVariant` (bkz. message_input_background); metin de
-         onun eşi olan `colorOnSurfaceVariant` olmalı. Sabit `@android:color/white`,
-         AÇIK temada açık gri zeminin üzerinde neredeyse okunmuyordu —
-         kullanıcının bildirdiği alıntı kutusu hatasıyla aynı sınıf: tek bir
-         temada çalışan sabit renk. -->
-    <TextView
-        android:id="@+id/txtUnreadCount"
-        android:layout_width="24dp"
-        android:layout_height="24dp"
-        android:background="@drawable/message_input_background"
-        android:gravity="center"
-        android:textColor="?attr/colorOnSurfaceVariant"
-        android:textSize="12sp"
-        android:visibility="gone"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 

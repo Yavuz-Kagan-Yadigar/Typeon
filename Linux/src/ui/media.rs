@@ -478,9 +478,16 @@ fn save_copy(app: &Rc<App>, path: &str, suggested_name: &str) {
     dialog.save(Some(&window), gio::Cancellable::NONE, move |result| {
         let Ok(file) = result else { return };
         let Some(target) = file.path() else { return };
-        match std::fs::copy(&source, &target) {
-            Ok(_) => app.toast(&format!("Saved to {}", target.display())),
-            Err(error) => app.toast(&format!("Could not save: {error}")),
-        }
+        // A multi-GB copy must not block the GTK thread.
+        let source = source.clone();
+        let shown = target.display().to_string();
+        let app = app.clone();
+        crate::app::run_in_background(
+            move || std::fs::copy(&source, &target),
+            move |result| match result {
+                Ok(_) => app.toast(&format!("Saved to {shown}")),
+                Err(error) => app.toast(&format!("Could not save: {error}")),
+            },
+        );
     });
 }

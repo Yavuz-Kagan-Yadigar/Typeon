@@ -22,19 +22,25 @@ pub fn texture_from_bytes(bytes: &[u8]) -> Option<gdk::Texture> {
     }
     // Peer-supplied bytes: every client sends JPEG, so no other decoder is
     // reachable, and a header that announces a huge canvas is refused before
-    // any pixel buffer is allocated (a zero size makes the loader fail).
+    // any pixel buffer is allocated. `set_size(0, 0)` would mean "natural
+    // size" (no abort), so shrink the decode to 1x1 instead and drop the result.
     let loader = gdk_pixbuf::PixbufLoader::with_type("jpeg").ok()?;
-    loader.connect_size_prepared(|loader, width, height| {
-        if width > 4096 || height > 4096 {
-            loader.set_size(0, 0);
-        }
-    });
+    let too_big = std::rc::Rc::new(std::cell::Cell::new(false));
+    {
+        let too_big = too_big.clone();
+        loader.connect_size_prepared(move |loader, width, height| {
+            if width > 4096 || height > 4096 {
+                too_big.set(true);
+                loader.set_size(1, 1);
+            }
+        });
+    }
     if loader.write(bytes).is_err() {
         // `close` must still be called or the loader logs a warning on drop.
         let _ = loader.close();
         return None;
     }
-    if loader.close().is_err() {
+    if loader.close().is_err() || too_big.get() {
         return None;
     }
     let pixbuf = loader.pixbuf()?;
@@ -44,26 +50,42 @@ pub fn texture_from_bytes(bytes: &[u8]) -> Option<gdk::Texture> {
 /// Hex-encoded image bytes as the core sends them (`avatar_hex`,
 /// `preview_hex`) — JSON cannot carry raw binary.
 pub fn texture_from_hex(hex_string: &str) -> Option<gdk::Texture> {
-    let bytes = hex::decode(hex_string).ok()?;
-    texture_from_bytes(&bytes)
+    use std::hash::{Hash, Hasher};
+    // Lists rebuild on every event; decode each distinct image once.
+    // GTK main thread only (the textures are not Send), hence thread_local.
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<u64, Option<gdk::Texture>>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hex_string.hash(&mut hasher);
+    let key = hasher.finish();
+    if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let texture = hex::decode(hex_string).ok().and_then(|bytes| texture_from_bytes(&bytes));
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= 256 {
+            c.clear();
+        }
+        c.insert(key, texture.clone());
+    });
+    texture
 }
 
 /// Re-encodes an image file as a JPEG no larger than `max_dimension` on its
 /// long edge — the same shape of preview the Android app attaches to photo
 /// messages (480p) and profile pictures (720p).
 pub fn scaled_jpeg(path: &str, max_dimension: i32, quality: u8) -> Option<Vec<u8>> {
-    let pixbuf = gdk_pixbuf::Pixbuf::from_file(path).ok()?;
-    let (width, height) = (pixbuf.width(), pixbuf.height());
+    // Header first, then decode at the target size: a 100 MP photo is never
+    // fully materialised.
+    let (_, width, height) = gdk_pixbuf::Pixbuf::file_info(path)?;
     let longest = width.max(height);
     let scaled = if longest > max_dimension && longest > 0 {
-        let ratio = max_dimension as f64 / longest as f64;
-        pixbuf.scale_simple(
-            ((width as f64 * ratio).round() as i32).max(1),
-            ((height as f64 * ratio).round() as i32).max(1),
-            gdk_pixbuf::InterpType::Bilinear,
-        )?
+        gdk_pixbuf::Pixbuf::from_file_at_scale(path, max_dimension, max_dimension, true).ok()?
     } else {
-        pixbuf
+        gdk_pixbuf::Pixbuf::from_file(path).ok()?
     };
     let quality = quality.to_string();
     scaled

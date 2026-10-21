@@ -222,8 +222,8 @@ pub struct GroupMemberDevice {
     pub kem_pubkey_x25519: Vec<u8>,
     #[serde(with = "serde_bytes")]
     pub kem_pubkey_mlkem: Vec<u8>,
-    /// Kurucunun bildiği son adres — dial ipucu (bkz. lib.rs
-    /// `device_last_addr`). Yoksa alıcı mDNS/röle/DHT'ye güvenir.
+    /// Kurucunun bildiği son `.onion` adresi — dial ipucu (M-28: never a
+    /// clearnet/UPnP address). Yoksa alıcı röle/sunucuya güvenir.
     #[serde(default)]
     pub last_addr: Option<String>,
     /// The device's group first-contact secret (16 bytes), which it gave the
@@ -480,7 +480,7 @@ pub struct SyncedContact {
 /// `DeviceLinkGrant`'in içinde (ratchet-şifreli) yeni cihaza gider, ayrıca
 /// `MessageContent::DeviceSync` ile sonraki değişikliklerde kardeş cihazlara
 /// yeniden gönderilir (idempotent birleştirme).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SyncPayload {
     pub contacts: Vec<SyncedContact>,
     /// Serileştirilmiş `group::Group` kayıtları — alıcı bunları olduğu gibi
@@ -627,7 +627,7 @@ pub struct SyncedMessage {
 /// şifrelenip gönderilir (bu yüzden onlar da tam uçtan uca gizlilik/
 /// bütünlük korumasına sahip olur — bir relay/node bunun bir düzenleme mi
 /// yoksa yeni bir mesaj mı olduğunu bile göremez).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum MessageContent {
     // The type is recursive (`SiblingEcho` → `SiblingEchoBody::File.offer`):
     // parse what a peer sent with `MessageContent::from_cbor`, which bounds
@@ -1076,6 +1076,10 @@ pub enum MessageContent {
         group_id: Option<String>,
         #[serde(default)]
         before_timestamp: Option<i64>,
+        /// M-68 watermark for the unscoped backfill: only rows the responder
+        /// archived (its local `timestamp`, ms) at or after this.
+        #[serde(default)]
+        since_timestamp: Option<i64>,
     },
     /// bkz. `SiblingHistoryRequest` — kardeşin arşivinden son mesajlar.
     SiblingHistoryResponse { entries: Vec<SiblingHistoryEntry> },
@@ -1169,7 +1173,69 @@ pub enum MessageContent {
     },
 }
 
+// No derived `Debug` on these three: it printed file/media/archive keys and
+// message text into logs. Only the variant name is shown.
+impl std::fmt::Debug for MessageContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.kind())
+    }
+}
+
+impl std::fmt::Debug for SyncPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SyncPayload")
+    }
+}
+
+impl std::fmt::Debug for SiblingEchoBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SiblingEchoBody::Text { .. } => "Text",
+            SiblingEchoBody::Edit { .. } => "Edit",
+            SiblingEchoBody::Delete { .. } => "Delete",
+            SiblingEchoBody::GroupLeft => "GroupLeft",
+            SiblingEchoBody::Reaction { .. } => "Reaction",
+            SiblingEchoBody::File { .. } => "File",
+        })
+    }
+}
+
 impl MessageContent {
+    /// The variant name, for logs.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Text { .. } => "Text",
+            Self::Reaction { .. } => "Reaction",
+            Self::Edit { .. } => "Edit",
+            Self::Delete { .. } => "Delete",
+            Self::HistorySyncRequest { .. } => "HistorySyncRequest",
+            Self::HistorySyncResponse { .. } => "HistorySyncResponse",
+            Self::Ack { .. } => "Ack",
+            Self::FileOffer { .. } => "FileOffer",
+            Self::TypingIndicator { .. } => "TypingIndicator",
+            Self::Seen { .. } => "Seen",
+            Self::ProfileUpdate { .. } => "ProfileUpdate",
+            Self::GroupUpdate(_) => "GroupUpdate",
+            Self::LeaveGroupRequest { .. } => "LeaveGroupRequest",
+            Self::AddressAnnounce { .. } => "AddressAnnounce",
+            Self::DeviceLinkGrant { .. } => "DeviceLinkGrant",
+            Self::DeviceAddNotice { .. } => "DeviceAddNotice",
+            Self::ReadStateSync { .. } => "ReadStateSync",
+            Self::DeviceRevokeNotice(_) => "DeviceRevokeNotice",
+            Self::FirstContactSecret { .. } => "FirstContactSecret",
+            Self::DeviceSync(_) => "DeviceSync",
+            Self::SiblingEcho { .. } => "SiblingEcho",
+            Self::SiblingHistoryRequest { .. } => "SiblingHistoryRequest",
+            Self::SiblingHistoryResponse { .. } => "SiblingHistoryResponse",
+            Self::AccountDeleted { .. } => "AccountDeleted",
+            Self::Call { .. } => "Call",
+            Self::WbOps { .. } => "WbOps",
+            Self::WbDigest { .. } => "WbDigest",
+            Self::WbPageRequest { .. } => "WbPageRequest",
+            Self::WbPage { .. } => "WbPage",
+        }
+    }
+
     /// Deepest CBOR nesting accepted in a peer's content. The deepest real
     /// one (`DeviceLinkGrant` → sync → group → founder chain → signature as a
     /// JSON array) needs about 10.
@@ -1415,7 +1481,7 @@ pub fn identity_exchange_signing_input(identity_id: &str, device_fingerprint: &s
 /// yazdığım mesaj/düzenleme/silme diğer cihazlarımda da görünür. Alınan
 /// mesajlar zaten fan-out ile tüm cihazlara ulaştığından yankı SADECE
 /// giden (benim) işlemler içindir.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum SiblingEchoBody {
     Text {
         /// 1:1'de `MessagePacketHeader.message_id` (kişinin kanonik cihazına

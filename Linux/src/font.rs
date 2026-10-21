@@ -7,12 +7,14 @@
 //!    The file is copied into the app's data directory
 //!    (`$XDG_DATA_HOME/typeon/`).
 //! 2. On every `apply_theme` call the `FontManager` scans the data directory,
-//!    loads every `.ttf`/`.otf` it finds, registers the font(s) with the
-//!    system font database (`fontdb` → fontconfig), and extracts the CSS-safe
-//!    family name from each file.
+//!    parses every `.ttf`/`.otf` it finds with `fontdb` (only to read the
+//!    family name — `fontdb` does not install anything), and copies the active
+//!    font into `$XDG_DATA_HOME/fonts`, the directory fontconfig/Pango scan.
 //! 3. `Appearance.custom_font_family` carries the active family name into the
-//!    CSS generator, which injects it as `font-family: local("Family Name");`
-//!    so the *entire* app (including stock libadwaita widgets) uses it.
+//!    CSS generator, which injects it as a plain quoted
+//!    `font-family: "Family Name";` so the *entire* app (including stock
+//!    libadwaita widgets) uses it. Fontconfig may only notice the new file
+//!    after a restart.
 //!
 //! This mirrors the Android flow:
 //! - `SettingsFragment.onFontPicked` → copies file, registers it.
@@ -52,8 +54,8 @@ impl FontManager {
         }
     }
 
-    /// Register the active custom font with the system font database and return
-    /// its CSS family name (if any).
+    /// Install the active custom font for fontconfig and return its CSS family
+    /// name (if any).
     ///
     /// This must be called **before** applying the theme stylesheet.
     pub fn register_active(&mut self) -> Option<String> {
@@ -64,6 +66,15 @@ impl FontManager {
                     "register_active: font family={name} path={}",
                     font.path.display()
                 );
+                // Make it visible to Pango: copy into the user font directory.
+                let fonts_dir = gtk::glib::user_data_dir().join("fonts");
+                let ext = font.path.extension().and_then(|e| e.to_str()).unwrap_or("ttf");
+                let target = fonts_dir.join(format!("typeon-{}.{ext}", font.id));
+                if !target.exists() && std::fs::create_dir_all(&fonts_dir).is_ok() {
+                    if let Err(e) = std::fs::copy(&font.path, &target) {
+                        log::warn!("could not install font: {e}");
+                    }
+                }
                 return Some(name.clone());
             }
         }
@@ -83,9 +94,9 @@ impl FontManager {
     pub fn discover(&mut self) -> Vec<CustomFont> {
         self.custom_fonts.clear();
 
+        // Only the imported files are parsed (family names); no system font
+        // scan — this runs on every theme change.
         let mut db = fontdb::Database::new();
-        // Load system fonts so custom fonts are merged in, not replacing them.
-        db.load_system_fonts();
 
         // Collect font files from the data directory.
         let font_files: Vec<PathBuf> = if self.data_dir.is_dir() {
@@ -107,7 +118,7 @@ impl FontManager {
 
         // Load each font file into fontdb and extract family names.
         for file in &font_files {
-            // Load into fontdb so fontconfig can resolve it.
+            // Parse to read the family name.
             let _ = db.load_font_file(file);
         }
 

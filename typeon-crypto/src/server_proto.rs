@@ -63,7 +63,8 @@ pub const SERVER_PROTOCOL: &str = "/typeon/server/1.0.0";
 pub const RELAY_PROTOCOL: &str = "/typeon/relay/1.0.0";
 
 /// Kablo formatı sürümü — `Hello`/`Welcome` içinde takas edilir.
-pub const SERVER_PROTOCOL_VERSION: u16 = 1;
+/// 2: `Register` answers `Registered { proof_needed, refused }`.
+pub const SERVER_PROTOCOL_VERSION: u16 = 3;
 
 /// Tek bir `Deposit`in azami yükü. Modül başındaki "Boyut tavanı" notuna
 /// bakın: codec'in sert sınırı 1 MiB, buradaki pay CBOR enum/alan
@@ -75,6 +76,10 @@ pub const MAX_DEPOSIT_BYTES: usize = 900 * 1024;
 /// büyük bir yığın, mesaj listesini süren döngüyü doğrudan takar.
 pub const MAX_FETCH_BATCH_BYTES: u32 = 512 * 1024;
 pub const MAX_FETCH_BATCH_ITEMS: u32 = 64;
+
+/// Records in one `ArchivePut`. The client sends up to 50; each record costs
+/// the server a SELECT + INSERT inside its single event loop.
+pub const MAX_ARCHIVE_PUT_RECORDS: usize = 256;
 
 /// `Enroll`/`Rebind` zaman damgası toleransı. Bu kadar eski/ileri bir imza
 /// reddedilir (`ServerErrorCode::Stale`).
@@ -170,8 +175,10 @@ pub enum ServerRequest {
     /// topic'i geri alır.
     ///
     /// An id this enrollment does not read yet needs a `MailboxProof` in
-    /// `proofs`. Without one the answer is `ProofNeeded` with those ids (the
-    /// other ids are registered); the client sends them again with proofs.
+    /// `proofs`. Without one the id comes back in `Registered.proof_needed`
+    /// and the client sends it again with a proof. An id in
+    /// `Registered.refused` is refused for good (mailbox cap, reader cap,
+    /// bad proof, other key): sending it again gets the same answer.
     Register {
         add: Vec<MailboxId>,
         drop: Vec<MailboxId>,
@@ -328,6 +335,10 @@ pub enum ServerResponse {
         #[serde(with = "serde_bytes")]
         challenge: Vec<u8>,
         enrolled: bool,
+        /// The id of this PeerId's active enrollment (with `enrolled`): a
+        /// client whose `Enrolled` answer was lost gets it back here.
+        #[serde(with = "serde_bytes")]
+        enrollment_id: Option<Vec<u8>>,
         limits: ServerLimits,
         server_name: String,
     },
@@ -348,9 +359,12 @@ pub enum ServerResponse {
     Batch { items: Vec<MailItem>, more: bool },
     ArchiveProbed { present: Vec<BucketStat> },
     ArchiveBatch { records: Vec<ArchiveRecord>, more: bool },
-    /// `Register`: these ids are not registered, the others are. They came
-    /// without a `MailboxProof`, or were refused in a request that had such ids.
-    ProofNeeded(Vec<MailboxId>),
+    /// `Register` with ids that were not registered; every other id of `add`
+    /// is. `proof_needed`: came without a `MailboxProof`, send again with one.
+    /// `refused`: over `ServerLimits.max_mailboxes`, over the reader cap, a
+    /// proof that did not verify or a key other than the mailbox's: do not
+    /// send again. All ids registered = plain `Ok`.
+    Registered { proof_needed: Vec<MailboxId>, refused: Vec<MailboxId> },
     Ok,
     Err(ServerErrorCode),
 }
@@ -611,10 +625,33 @@ fn signing_input(tag: &[u8], fields: &[&[u8]]) -> Vec<u8> {
 /// `Enroll.sig`'in üzerinde hesaplandığı baytlar. İstemci ve sunucu AYNI
 /// fonksiyonu çağırır — imza girdisini iki yerde elle kurmak, bu tür
 /// protokollerde klasik bir uyumsuzluk kaynağı.
-pub fn enroll_signing_input(version: u16, server_peer_id: &str, invite_token: &[u8], challenge: &[u8], ts_ms: u64) -> Vec<u8> {
+///
+/// Both enrollment keys and the client's PeerId are signed too: the
+/// signature commits to the keys it is verified with and is useless from
+/// any other PeerId.
+#[allow(clippy::too_many_arguments)]
+pub fn enroll_signing_input(
+    version: u16,
+    server_peer_id: &str,
+    client_peer_id: &str,
+    invite_token: &[u8],
+    enroll_pk: &[u8],
+    enroll_pk_pq: &[u8],
+    challenge: &[u8],
+    ts_ms: u64,
+) -> Vec<u8> {
     signing_input(
-        b"p2pmsg-v0.2-server-enroll",
-        &[&version.to_be_bytes(), server_peer_id.as_bytes(), invite_token, challenge, &ts_ms.to_be_bytes()],
+        b"p2pmsg-v0.4-server-enroll",
+        &[
+            &version.to_be_bytes(),
+            server_peer_id.as_bytes(),
+            client_peer_id.as_bytes(),
+            invite_token,
+            enroll_pk,
+            enroll_pk_pq,
+            challenge,
+            &ts_ms.to_be_bytes(),
+        ],
     )
 }
 
@@ -707,16 +744,23 @@ mod tests {
 
     #[test]
     fn signing_inputs_bind_every_field() {
-        let base = enroll_signing_input(1, "peer", b"tok", b"chal", 100);
-        assert_ne!(base, enroll_signing_input(2, "peer", b"tok", b"chal", 100));
+        #[allow(clippy::too_many_arguments)]
+        fn e(v: u16, sp: &str, cp: &str, tok: &[u8], pk: &[u8], pq: &[u8], ch: &[u8], ts: u64) -> Vec<u8> {
+            enroll_signing_input(v, sp, cp, tok, pk, pq, ch, ts)
+        }
+        let base = e(1, "peer", "me", b"tok", b"pk", b"pq", b"chal", 100);
+        assert_ne!(base, e(2, "peer", "me", b"tok", b"pk", b"pq", b"chal", 100));
         // Sunucu kimliği imzaya dahil olmalı — yoksa bir sunucu, aldigi
         // Enroll'u baska bir sunucuya karsi tekrar oynatabilirdi.
-        assert_ne!(base, enroll_signing_input(1, "other", b"tok", b"chal", 100));
-        assert_ne!(base, enroll_signing_input(1, "peer", b"tok2", b"chal", 100));
+        assert_ne!(base, e(1, "other", "me", b"tok", b"pk", b"pq", b"chal", 100));
+        assert_ne!(base, e(1, "peer", "thief", b"tok", b"pk", b"pq", b"chal", 100));
+        assert_ne!(base, e(1, "peer", "me", b"tok2", b"pk", b"pq", b"chal", 100));
+        assert_ne!(base, e(1, "peer", "me", b"tok", b"pk2", b"pq", b"chal", 100));
+        assert_ne!(base, e(1, "peer", "me", b"tok", b"pk", b"pq2", b"chal", 100));
         // Challenge imzaya dahil olmali — yoksa yakalanan bir imza, taze bir
         // baglantida hala gecerli olurdu.
-        assert_ne!(base, enroll_signing_input(1, "peer", b"tok", b"chal2", 100));
-        assert_ne!(base, enroll_signing_input(1, "peer", b"tok", b"chal", 101));
+        assert_ne!(base, e(1, "peer", "me", b"tok", b"pk", b"pq", b"chal2", 100));
+        assert_ne!(base, e(1, "peer", "me", b"tok", b"pk", b"pq", b"chal", 101));
 
         let rb = rebind_signing_input(b"eid", "peer", "me", b"chal", 100);
         assert_ne!(rb, rebind_signing_input(b"eid", "other", "me", b"chal", 100));
@@ -727,8 +771,8 @@ mod tests {
 
         // A shifted field boundary is another message, and an Enroll
         // signature is never a Rebind signature.
-        assert_ne!(enroll_signing_input(1, "ab", b"c", b"chal", 100), enroll_signing_input(1, "a", b"bc", b"chal", 100));
-        assert_ne!(enroll_signing_input(1, "p", b"tok", b"chal", 100), enroll_signing_input(1, "p", b"tokc", b"hal", 100));
+        assert_ne!(e(1, "ab", "c", b"t", b"k", b"q", b"chal", 100), e(1, "a", "bc", b"t", b"k", b"q", b"chal", 100));
+        assert_ne!(e(1, "p", "m", b"tok", b"k", b"q", b"chal", 100), e(1, "p", "m", b"tokk", b"", b"q", b"chal", 100));
         assert_ne!(rebind_signing_input(b"ei", "dpeer", "me", b"c", 100), rebind_signing_input(b"eid", "peer", "me", b"c", 100));
         assert_ne!(rb[..25], base[..25], "different tags");
     }

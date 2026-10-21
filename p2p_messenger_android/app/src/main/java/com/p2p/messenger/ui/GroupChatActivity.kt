@@ -657,6 +657,16 @@ class GroupChatActivity : AppCompatActivity() {
         searchMatches = emptyList()
         currentSearchMatchIndex = -1
         if (::layoutSearchMessages.isInitialized) layoutSearchMessages.visibility = View.GONE
+        // "…yazıyor" satırları ve sesli mesajın sesi ÖNCEKİ grubun aitti:
+        // 1:1'in `bindToIntent`'i bunu sıfırlıyor, grup ikizi sıfırlamıyordu
+        // (A grubu ön plandayken B açılırsa A'nın göstergesi B'nin üstünde
+        // kalıyordu). `isTypingSent` de sıfırlanmalı: aksi halde B'nin ilk
+        // "yazıyor" paketi bastırılıyordu.
+        typingHandler.removeCallbacksAndMessages(null)
+        typingMembers.clear()
+        updateTypingIndicatorUi()
+        isTypingSent = false
+        stopVoicePlayback()
         refreshGroupInfo()
         loadGroupHistoryIfAvailable()
         return true
@@ -888,7 +898,14 @@ class GroupChatActivity : AppCompatActivity() {
         }
         // The quoted message is not here: the name the sender claims for it
         // is not shown ("You" or a member over words they never wrote).
-        return null
+        // bkz. `Item.replyToSenderIdentityId` dokümantasyonu — gönderenin
+        // kimliği yedek olarak taşınır ve kişi listesinden ADA çevrilebilir
+        // (yerel arşive bakmaya gerek kalmadan). Önceden bu yedek
+        // KULLANILMIYORDU: alıntı kutusu boş gönderici etiketi gösteriyordu.
+        val identityId = replyToSenderIdentityId
+        if (identityId.isNullOrEmpty()) return null
+        val name = resolveContactByIdentity(identityId)?.displayName
+        return name?.takeIf { it.isNotBlank() }
     }
 
     /** bkz. ChatActivity.resolveReplyLabels AYNI desen. */
@@ -1600,7 +1617,7 @@ class GroupChatActivity : AppCompatActivity() {
         return if (attachment != null) {
             getString(R.string.lbl_attachment_reply_preview, attachment.fileName)
         } else {
-            item.text.take(REPLY_PREVIEW_MAX_CHARS)
+            item.text.takeWholeChars(REPLY_PREVIEW_MAX_CHARS)
         }
     }
 
@@ -1971,6 +1988,11 @@ class GroupChatActivity : AppCompatActivity() {
         val replySender = activeReplyToSenderIdentityId ?: ""
         cancelReply()
         val fileName = "IMG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
+        // The group is captured BEFORE the coroutine: `groupId` was read
+        // INSIDE the IO block, and the user can switch to another group
+        // (singleTop) while the picture is being prepared — the file would
+        // then be sent to the WRONG group (or to none).
+        val targetGroupId = groupId
         lifecycleScope.launch(Dispatchers.IO) {
             val tempFile = File(File(cacheDir, "outgoing").apply { mkdirs() }, UUID.randomUUID().toString())
             var sent = tempFile
@@ -1984,7 +2006,7 @@ class GroupChatActivity : AppCompatActivity() {
                 val prepared = OutgoingMedia.prepare(tempFile, fileName, "image/jpeg", hiRes)
                 sent = prepared.file
                 val result = P2PLib.prepareAndSendGroupFile(
-                    groupId, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
+                    targetGroupId, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
                     caption, replyId, replyPreview, replySender
                 )
                 withContext(Dispatchers.Main) {
@@ -2038,6 +2060,9 @@ class GroupChatActivity : AppCompatActivity() {
         val replyPreview = activeReplyToPreview ?: ""
         val replySender = activeReplyToSenderIdentityId ?: ""
         cancelReply()
+        // The group is captured BEFORE the coroutine (bkz.
+        // `onGroupPhotoCaptured` aynı not).
+        val targetGroupId = groupId
         lifecycleScope.launch(Dispatchers.IO) {
             // Provider queries are IPC to another app: not on the main thread.
             val fileName = queryDisplayName(uri) ?: "file"
@@ -2056,8 +2081,19 @@ class GroupChatActivity : AppCompatActivity() {
             var sent = tempFile
             try {
                 contentResolver.openInputStream(uri)?.use { input ->
-                    tempFile.outputStream().use { output -> input.copyTo(output, bufferSize = 64 * 1024) }
-                } ?: throw java.io.IOException("Dosya açılamadı")
+                    tempFile.outputStream().use { output ->
+                        // SIZE column can lie: hard cap on bytes actually copied.
+                        val buf = ByteArray(64 * 1024)
+                        var total = 0L
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            total += n
+                            if (total > MAX_ATTACHMENT_SIZE) throw IllegalStateException("too_large")
+                            output.write(buf, 0, n)
+                        }
+                    }
+                } ?: throw java.io.IOException(getString(R.string.error_attachment_open_failed))
 
                 val previewJpeg = try {
                     when {
@@ -2072,7 +2108,7 @@ class GroupChatActivity : AppCompatActivity() {
                 val prepared = OutgoingMedia.prepare(tempFile, fileName, mimeType, hiRes)
                 sent = prepared.file
                 val result = P2PLib.prepareAndSendGroupFile(
-                    groupId, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
+                    targetGroupId, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
                     caption, replyId, replyPreview, replySender
                 )
                 withContext(Dispatchers.Main) {
@@ -2103,7 +2139,7 @@ class GroupChatActivity : AppCompatActivity() {
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@GroupChatActivity, getString(R.string.error_send_failed), Toast.LENGTH_SHORT).show()
+                    if (e.message == "too_large") Toast.makeText(this@GroupChatActivity, getString(R.string.error_file_too_large_named, fileName), Toast.LENGTH_LONG).show() else Toast.makeText(this@GroupChatActivity, getString(R.string.error_send_failed), Toast.LENGTH_SHORT).show()
                 }
             } finally {
                 tempFile.delete()
@@ -2386,7 +2422,7 @@ class GroupChatActivity : AppCompatActivity() {
             // The watermark covers text rows only: the sender gets "seen" for
             // an attachment from this receipt, as on the 1:1 screen.
             val fileId = obj.optString("file_id")
-            try { P2PLib.sendSeenReceipt(obj.optString("peer"), fileId, fileId) } catch (e: Exception) { }
+            if (AppLock.isUnlocked()) try { P2PLib.sendSeenReceipt(obj.optString("peer"), fileId, fileId) } catch (e: Exception) { }
             scheduleGroupReadWatermark()
         }
     }
@@ -2514,7 +2550,7 @@ class GroupChatActivity : AppCompatActivity() {
         // canlı grup mesajı için otomatik gönderilir (bkz. ChatActivity
         // 1:1 karşılığı AYNI gerekçe). `peer`, bu kopyanın geldiği 1:1
         // kanalın (göndericinin) fingerprint'i.
-        try {
+        if (AppLock.isUnlocked()) try {
             P2PLib.sendSeenReceipt(obj.optString("peer"), messageId, localId)
         } catch (e: Exception) { /* yoksay */ }
         // Güvenilir yol: tekil `Seen` kaybolsa bile okuma sınırı diske yazılır.
@@ -2907,8 +2943,11 @@ class GroupChatActivity : AppCompatActivity() {
         // Spec dışı, kullanıcı isteği: Ayarlar'dan duvarkağıdı/renk
         // değiştirilip bu ekrana geri dönüldüğünde HEMEN yansısın.
         com.p2p.messenger.util.ThemePrefs.applyChatBackground(this)
-        P2PService.addMessageListener(messageListener)
+        // The conversation id FIRST: a message that lands between the
+        // listener registration and this line would post a notification for
+        // the group that is already open on the screen.
         P2PService.activeConversationId = "group:$groupId"
+        P2PService.addMessageListener(messageListener)
         ownStatusPollHandler.post(ownStatusPollRunnable)
         // While paused (e.g. the file picker or MediaViewerActivity was on
         // top of this screen), the live listener above was detached — any
@@ -2926,6 +2965,7 @@ class GroupChatActivity : AppCompatActivity() {
         try { P2PLib.syncReadState("", groupId, System.currentTimeMillis()) } catch (e: Exception) {}
     }
     private fun scheduleGroupReadWatermark() {
+        if (!AppLock.isUnlocked()) return
         groupReadWatermarkHandler.removeCallbacks(groupReadWatermarkRunnable)
         groupReadWatermarkHandler.postDelayed(groupReadWatermarkRunnable, 700L)
     }
@@ -3019,5 +3059,22 @@ class GroupChatActivity : AppCompatActivity() {
         // devam eden bir kayıt/oynatma varsa temiz bir şekilde durdurulur.
         if (mediaRecorder != null) finishVoiceRecording(send = false)
         stopVoicePlayback()
+    }
+
+    /**
+     * The pending callbacks of the handlers hold the adapter (and with it
+     * this activity) alive: the reply highlight (2 s), the typing cleaners,
+     * the voice tick, the recording timer, the status poll and the read
+     * watermark. `onPause` only removes SOME of them — a pending callback
+     * survived the pause and kept the whole screen alive.
+     */
+    override fun onDestroy() {
+        typingHandler.removeCallbacksAndMessages(null)
+        replyHighlightHandler.removeCallbacksAndMessages(null)
+        recordingHandler.removeCallbacksAndMessages(null)
+        voicePlaybackHandler.removeCallbacksAndMessages(null)
+        ownStatusPollHandler.removeCallbacksAndMessages(null)
+        groupReadWatermarkHandler.removeCallbacksAndMessages(null)
+        super.onDestroy()
     }
 }

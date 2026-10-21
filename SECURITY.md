@@ -144,7 +144,7 @@ itself. Three checks tie it down (2026-10-07):
 - A device that already has contacts of another identity is **never** moved
   to a new identity by a grant.
 
-Before the nonce, the only tie was the time window (24 hours): a device that
+Before the nonce, the only tie was the time window (now 30 minutes): a device that
 showed its code and backed out could be claimed by any paired device until
 the window ran out.
 
@@ -270,11 +270,11 @@ turns them on.
 - **Local network discovery — mDNS.** On the same Wi-Fi/LAN, devices
   broadcast their presence and find each other automatically, no internet
   needed.
-- **Wide-area discovery — Kademlia DHT.** Devices can also announce
-  themselves and look each other up over the internet via a distributed hash
-  table. Nodes can run in `Server` mode (participate in routing for others)
-  or `Client` mode (look things up without helping route), toggleable as
-  "Node Mode" in settings.
+- **Wide-area discovery — Kademlia (client only).** The DHT runs in
+  `Client` mode only: it looks things up but never joins anyone's routing
+  table and publishes no records (no `put_record`). "Node Mode" in settings
+  only enables the blind Circuit Relay v2 service; it does not contribute to
+  DHT routing.
 - **Transport security — Noise protocol.** The underlying TCP connection
   between two peers is wrapped in a Noise handshake (via `libp2p-noise`),
   giving every connection transport-layer encryption and authentication
@@ -486,6 +486,7 @@ pre-authorization. This is now implemented, in a **reachability-only v1**:
   libp2p `identify` exchange to a peer you connect to. Full IP anonymity
   (suppressing identify's address advertisement and routing *all* outbound
   dials through Tor) is a deliberately scoped-out **v2**.
+- **Tor is mandatory (fix pass 2026-10-20).** With Tor off the core refuses to start the network (`start_network` returns an error); the clearnet libp2p transport is dial-rejected, and `get_node_address` is onion-only (empty until the onion service is up).
 - **Both peers need Tor enabled** to use a `.onion` — a non-Tor device
   cannot reach it (the connectivity layer must be on both ends, same rule as
   any overlay).
@@ -709,14 +710,11 @@ anything, so the honest reading is "we asked", not "it is gone".
   membership, file names). Backup is now fully disabled (`allowBackup=false`,
   `fullBackupContent=false`, and a `data_extraction_rules.xml` that excludes
   everything from both cloud-backup and device-transfer on API 31+).
-- **Screenshot and screen-recording prevention (user request).** Every
-  Activity's window carries `FLAG_SECURE` (applied once, globally, from an
-  `Application.ActivityLifecycleCallbacks.onActivityPreCreated` hook in
-  `P2PApplication.kt` — not per-Activity, so no future screen can be added
-  without it). This blocks screenshots and screen recording of any part of
-  the app (chats, attachments, QR codes, group info), and as a side effect
-  the Android "Recent Apps" task switcher shows a blank/default thumbnail
-  instead of a live preview of on-screen content.
+- **Screenshot and screen-recording prevention: owner rule.** The *client*
+  app deliberately sets **no** `FLAG_SECURE` (screenshots, recording and
+  recents thumbnails are allowed; an earlier version of this document claimed
+  otherwise). The *server app* (`ServerActivity`) sets it in non-debug builds
+  because its join code is a bearer token for unlimited enrollments.
 - **Recovery file uses Argon2id (fourth audit round fix).** The recovery
   export (which contains *all* long-term secret keys — Ed25519, ML-DSA,
   X25519, ML-KEM) previously derived its file-encryption key with
@@ -754,3 +752,17 @@ anything, so the honest reading is "we asked", not "it is gone".
 | Zero-config guarantee that any two strangers can always connect | Not fully achievable without *some* reachable point in the network (structural to decentralized P2P, not fixable by protocol changes alone) — mitigated, not eliminated, by the manual relay-address field |
 | No connectivity when both peers are behind CGNAT | **Fixed (v1)** — Tor onion-service hosting + `.onion` dialing (arti/rustls), reachable across CGNAT; both peers must enable Tor. IP still visible via `identify` (anonymity is a scoped v2) |
 | Complete/absolute untraceability (IP-level, against a global adversary) | Not achievable by design — same limitation Tor itself has; even full Tor routing only raises the bar, doesn't reach "complete" |
+
+---
+
+## 8. 2026-10-20/21 fix pass: changed facts and standing decisions
+
+- **Pairing window:** QR/manual code nonces are bearer secrets valid for **30 minutes** (was 24 h), unlimited scans within it, at most 6 live nonces (5-minute reuse step). Anyone who sees the code in that time can start a pairing; tell the user.
+- **Metadata scrub fails closed, but only covers JPEG and PNG.** If the metadata of a JPEG/PNG cannot be parsed the file is refused. HEIC/WebP/GIF/video are not scrubbed by the Rust core (Android re-encodes/remuxes in `OutgoingMedia.kt`; the Linux client has no scrub layer), so GPS can remain in those formats.
+- **Tor is mandatory** (see above). No Tor, no network.
+- **Server revoke = block.** Revoking an enrolled device puts its enroll key on the server's block list; it cannot re-enroll with that key. A reinstall (new PeerId + new enroll key) with a still-valid join code gets past it, so a real ban means **rotating the join code**.
+- **Uninstalling the server app wipes** its onion identity and every enrolled device's token; all devices must re-enroll against the new address.
+- **Server history off** purges the server archive.
+- **Protocol breaks** (server protocol v3, tagged/framed packet and device-auth signatures, keyed archive record ids): all devices must be re-linked and contacts re-paired. Details in `TECHNICAL_HANDOFF.md` section 19.
+- **Server rate limits:** mail from the server 600/10 s, unknown peers 300/10 s total, global Enroll/Rebind verify budget, `ArchivePut` <= 256 records.
+- **Open by decision:** server `sent_at_ms` stays in clear.

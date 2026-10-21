@@ -103,6 +103,16 @@ class P2PService : Service() {
          *  Bu, mesaj kaybı DEĞİL gecikme: gönderen 7 gün boyunca yeniden
          *  deniyor, sunucu varsa 30 gün tutuyor. */
         private const val DOZE_WAKE_INTERVAL_MS = 3 * 60 * 1000L
+        /** En uzun süreli kısmi wake lock (bkz. `acquireWakeLock`): çekirdek
+         *  "meşgul" kalıp kalsa bile cihazın uyumasına izin verilir. */
+        private const val WAKE_LOCK_MAX_MS = 10 * 60 * 1000L
+        /** Ağ başlatma denemeleri arasındaki ilk bekleme (bkz. `startNet`).
+         *  Sonrası üstel olarak büyür, tavan `START_NET_RETRY_MAX_MS`. */
+        private const val START_NET_RETRY_INITIAL_MS = 30_000L
+        private const val START_NET_RETRY_MAX_MS = 10 * 60 * 1000L
+        /** Ağ değişikliği olaylarının birleştirilmesi (bkz.
+         *  `notifyNetworkChangedInBackground`). */
+        private const val NETWORK_CHANGE_DEBOUNCE_MS = 2000L
         const val ACTION_WAKE_POLL = "com.p2p.messenger.action.WAKE_POLL"
 
         /** Registered by UI components (e.g. ChatActivity) that want to be
@@ -281,6 +291,10 @@ class P2PService : Service() {
     @Volatile
     private var screenOn = true
 
+    /** `startNet` yeniden deneme aralığı (bkz. `startNet`): üstel büyür,
+     *  tavan `START_NET_RETRY_MAX_MS`. */
+    private var startNetRetryDelayMs = START_NET_RETRY_INITIAL_MS
+
     /** Çekirdekte gerçekten iş var mı (bkz. Rust `has_pending_work`).
      *  Her turda sormuyoruz: sorgunun kendisi de bir JNI çağrısı ve global
      *  kilit alıyor. Yalnızca boş turlarda, seyrek olarak tazeleniyor. */
@@ -305,7 +319,8 @@ class P2PService : Service() {
      * bkz. `SettingsFragment` — ama o kullanıcının onayına bağlı, bu değil).
      */
     private var wakeLock: android.os.PowerManager.WakeLock? = null
-    @Volatile private var wakeTimed = false
+    /** The timeout the held lock was taken with (0 = none). */
+    @Volatile private var heldWakeTimeoutMs = 0L
     private var wifiNetworkCallback: ConnectivityManager.NetworkCallback? = null
     /** bkz. `observeNetworkChangesForReconnect` — `wifiNetworkCallback`'ten
      *  (WiFi'ye ÖZEL, sadece süreç bağlama amaçlı) AYRI, HERHANGİ bir
@@ -363,7 +378,10 @@ class P2PService : Service() {
                 // An uncaught exception here (pollNetwork, a listener, or
                 // notify) would skip postDelayed below and permanently stop
                 // all polling for the life of the process, so it must not
-                // escape this loop.
+                // escape this loop. `Throwable`, not `Exception`: an `Error`
+                // (OutOfMemoryError, a StackOverflowError from a malformed
+                // payload) must not take the poll thread — and with it the
+                // whole service — down either.
                 try {
                     val messages = P2PLib.pollNetwork()
                     if (messages.any { it.isNotEmpty() }) {
@@ -377,15 +395,15 @@ class P2PService : Service() {
                     for (msg in messages) {
                         if (msg.isEmpty()) continue
                         for (listener in listeners) {
-                            try { listener(msg) } catch (e: Exception) {
+                            try { listener(msg) } catch (e: Throwable) {
                                 android.util.Log.e("P2PService", "Listener failed", e)
                             }
                         }
-                        try { maybeNotify(msg) } catch (e: Exception) {
+                        try { maybeNotify(msg) } catch (e: Throwable) {
                             android.util.Log.e("P2PService", "Notify failed", e)
                         }
                     }
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
                     android.util.Log.e("P2PService", "Poll cycle failed", e)
                 } finally {
                     // Pil düzeltmesi: her turdan sonra hangi kademede
@@ -527,6 +545,11 @@ class P2PService : Service() {
             )
         } catch (e: Exception) {
             Log.w(TAG, "Ekran durumu izlenemedi: ${e.message}")
+            // Kayıt başarısız olursa `screenOn` hep true kalır ve derin
+            // boşta modu HİÇ devreye girmez: süreç boyunca (kilit + 1-2 sn
+            // yoklama) uyanık kalırdı. Ekran durumu bilinmiyorsa en kötü
+            // varsayım "kapalı" — derin boşta modu o zaman devreye girer.
+            screenOn = false
         }
     }
 
@@ -556,7 +579,11 @@ class P2PService : Service() {
         try {
             val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
             val intent = Intent(this, P2PService::class.java).setAction(ACTION_WAKE_POLL)
-            val pending = android.app.PendingIntent.getService(
+            // `getService` = `Context.startService()`: since Android 8 a
+            // background app may NOT start a service that way — the alarm
+            // fired, the start was refused and the wake-up chain died
+            // silently. `getForegroundService` is the sanctioned way.
+            val pending = android.app.PendingIntent.getForegroundService(
                 this, 0, intent,
                 android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
             )
@@ -578,7 +605,7 @@ class P2PService : Service() {
         try {
             val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
             val intent = Intent(this, P2PService::class.java).setAction(ACTION_WAKE_POLL)
-            val pending = android.app.PendingIntent.getService(
+            val pending = android.app.PendingIntent.getForegroundService(
                 this, 0, intent,
                 android.app.PendingIntent.FLAG_NO_CREATE or android.app.PendingIntent.FLAG_IMMUTABLE
             )
@@ -601,10 +628,22 @@ class P2PService : Service() {
         val obj = try {
             JSONObject(json)
         } catch (e: Exception) {
+            // Sessizce yutulursa bir olay biçimi değişikliği bildirimleri
+            // sessizce kapatır ve kimse nedenini bilmez.
+            Log.w(TAG, "Olay JSON'u okunamadı: ${e.message}")
             return
         }
         when (obj.optString("type")) {
             "sync", "device_linked" -> com.p2p.messenger.util.ArchiveKeyManager.persistIfNew(applicationContext)
+            // M-180: the core caught a panic (also a single bad packet): log
+            // it only; restarting the service per event would be a DoS lever.
+            "pairing_failed" -> {
+                Log.w(TAG, "pairing_failed: ${obj.optString("reason")}")
+                if (obj.optString("reason") == "contact_limit") android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    android.widget.Toast.makeText(applicationContext, R.string.msg_pairing_contact_limit, android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
+            "core_panic" -> Log.e(TAG, "Çekirdek bir panik yakaladı (bkz. logcat 'PANIC yakalandı')")
             // The restore button already said "loading": say that it stopped short.
             "history_restore_incomplete" -> android.os.Handler(android.os.Looper.getMainLooper()).post {
                 android.widget.Toast.makeText(applicationContext, R.string.msg_restore_incomplete, android.widget.Toast.LENGTH_LONG).show()
@@ -795,12 +834,14 @@ class P2PService : Service() {
             // Microphone type refused (started from the background), or the
             // start itself is not allowed: keep running with what we get.
             Log.w(TAG, "startForeground failed: ${e.message}")
-            if (micType != 0) {
-                try {
-                    androidx.core.app.ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, baseType)
-                } catch (e2: Exception) {
-                    Log.w(TAG, "startForeground failed: ${e2.message}")
-                }
+            // The retry must NOT depend on the microphone type: a refused
+            // start leaves the service without a foreground state, the 5 s
+            // contract is missed and the process is killed (RemoteService-
+            // Exception) — with the plain type there is still a chance.
+            try {
+                androidx.core.app.ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, baseType)
+            } catch (e2: Exception) {
+                Log.w(TAG, "startForeground failed: ${e2.message}")
             }
         }
 
@@ -902,15 +943,22 @@ class P2PService : Service() {
                 val nodeMode = isNodeModeEnabled(applicationContext)
                 val torEnabled = isTorEnabled(applicationContext)
                 // The core returns an error when Tor cannot start (it no longer
-                // runs a swarm that can dial nothing): try again.
+                // runs a swarm that can dial nothing): try again — with a
+                // BACKOFF: a fixed 30 s retry ran for the whole life of the
+                // service (measurable CPU + cellular burn while Tor could not
+                // bootstrap, with no escalation and no user signal).
                 fun startNet() {
                     // The core refuses to start without its storage keys; a
                     // keystore that failed at boot is tried again here.
                     com.p2p.messenger.util.SkippedKeyManager.ensureLoaded(applicationContext)
                     com.p2p.messenger.util.MessageHistoryManager.ensureHistoryKeyLoaded(applicationContext)
                     if (P2PLib.startNetwork(nodeMode, torEnabled).startsWith("Error")) {
-                        handler.postDelayed({ if (isRunning) startNet() }, 30_000)
+                        val delay = startNetRetryDelayMs
+                        // Üstel büyüme, tavan 10 dk.
+                        startNetRetryDelayMs = (startNetRetryDelayMs * 2).coerceAtMost(START_NET_RETRY_MAX_MS)
+                        handler.postDelayed({ if (isRunning) startNet() }, delay)
                     } else {
+                        startNetRetryDelayMs = START_NET_RETRY_INITIAL_MS
                         applyMeteredToTor()
                     }
                 }
@@ -962,6 +1010,7 @@ class P2PService : Service() {
             }
         }
         defaultNetworkCallback = null
+        networkChangeExecutor.shutdownNow()
     }
 
     /** bkz. `wakeLock` alan notu.
@@ -971,21 +1020,31 @@ class P2PService : Service() {
      * receiver, onStartCommand). Creating a new lock per call let a race or an
      * overwrite drop a held lock that nothing ever released again (9S,
      * 2026-09-30: three 'Typeon:network' locks held at once, one for 1h42m,
-     * CPU never slept, ~180 mA all night with the screen off). */
+     * CPU never slept, ~180 mA all night with the screen off).
+     *
+     * SÜRESİZ KİLİT YOK: çekirdek "meşgul" dediğinde (süren indirme, taze
+     * eşleşme, kuyruktaki zarf) kilit süresiz tutuluyordu — karşı taraf
+     * takılıp kalırsa indirme hiç bitmiyor ve kilit SÜRESİZ kalıyordu
+     * (cihazın uyumasına izin vermeyen partial wake lock). Artık en fazla
+     * WAKE_LOCK_MAX_MS tutulur: kilit kendi penceresini doldurunca kendiliğinden
+     * biter, yoklama döngüsü bir sonraki turda yeniden alır. */
     @Synchronized
     private fun acquireWakeLock(timeoutMs: Long = 0L) {
         try {
             val lock = wakeLock ?: (getSystemService(Context.POWER_SERVICE) as android.os.PowerManager)
                 .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "Typeon:network")
                 .also { it.setReferenceCounted(false); wakeLock = it }
+            // 0 = "süresiz" isteniyordu: tavan uygulanır.
+            val wanted = if (timeoutMs > 0L) timeoutMs else WAKE_LOCK_MAX_MS
             if (lock.isHeld) {
-                // Zamanlı (kısa) kilit varsa ve süresiz istendiyse yükselt.
-                if (timeoutMs != 0L || !wakeTimed) return
+                // Daha uzun kilit kazanır; daha kısası tutulan kiliti
+                // KISALTMAZ ve süresini UZATMAZ.
+                if (wanted <= heldWakeTimeoutMs) return
                 lock.release()
             }
-            wakeTimed = timeoutMs != 0L
-            if (timeoutMs > 0) lock.acquire(timeoutMs) else lock.acquire()
-            BatteryLog.wakeAcquired(timeoutMs)
+            heldWakeTimeoutMs = wanted
+            lock.acquire(wanted)
+            BatteryLog.wakeAcquired(wanted)
         } catch (e: Exception) {
             Log.w(TAG, "Wake lock alınamadı: ${e.message}")
         }
@@ -998,6 +1057,7 @@ class P2PService : Service() {
         } catch (e: Exception) {
             // Zaten bırakılmışsa yok say.
         }
+        heldWakeTimeoutMs = 0L
     }
 
     /**
@@ -1090,15 +1150,36 @@ class P2PService : Service() {
         }
     }
 
+    /** Ağ değişikliği olayları TEK bir iş parçacığında sıraya girer: her
+     *  olay kendi thread'ini açıyordu ve hepsi çekirdek kilidinde
+     *  bekliyordu (WiFi/hücresel arası salınımda yığılma). */
+    private val networkChangeExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    /** Bir tur zaten kuyruğa alınmışsa yenisi eklenmez: Android bir ağ
+     *  değişikliğini birkaç callback ile bildirir, çekirdek TÜM eşleri
+     *  yeniden bağlamak istiyorsa bir tur yeter. */
+    @Volatile private var networkChangePending = false
+
     private fun notifyNetworkChangedInBackground() {
-        Thread {
+        if (networkChangePending) return
+        networkChangePending = true
+        networkChangeExecutor.execute {
+            try {
+                // Debounce: olamların oturması için beklenir, sonra TEK bir
+                // yeniden bağlanma turu çalışır.
+                Thread.sleep(NETWORK_CHANGE_DEBOUNCE_MS)
+            } catch (e: InterruptedException) {
+                networkChangePending = false
+                return@execute
+            }
+            networkChangePending = false
             applyMeteredToTor()
             try {
                 P2PLib.notifyNetworkChanged()
             } catch (e: Exception) {
                 // yoksay — periyodik sweep zaten yedek.
             }
-        }.start()
+        }
     }
 
     /**

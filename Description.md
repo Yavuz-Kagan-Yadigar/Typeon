@@ -49,8 +49,8 @@ Her **cihaz** (Device) iki ayrı amaç için iki anahtar çifti tutar:
 
 | Amaç | Algoritma | Kullanım |
 |---|---|---|
-| İmzalama (kimlik doğrulama) | Ed25519 + ML-DSA-65 (hibrit) | Mesaj/paket imzalama, fingerprint temeli |
-| Anahtar değişimi (KEM) | X25519 + ML-KEM-768 (hibrit) | Oturum anahtarı türetme, forward secrecy |
+| İmzalama (kimlik doğrulama) | Ed25519 + ML-DSA-87 (hibrit) | Mesaj/paket imzalama, fingerprint temeli |
+| Anahtar değişimi (KEM) | X25519 + ML-KEM-1024 (hibrit) | Oturum anahtarı türetme, forward secrecy |
 
 **Neden hibrit (klasik + PQ birlikte)?**
 - Saf PQ algoritmalar (ML-DSA, ML-KEM) nispeten yeni; olası bir kriptanaliz
@@ -68,8 +68,8 @@ fingerprint = SHA3-256( sign_pubkey_ed25519 || sign_pubkey_mldsa || kem_pubkey_x
 - Ham fingerprint: 32 byte.
 - Kullanıcıya gösterilen biçim: **Base32, 5'li gruplar halinde, büyük harf**
   Örnek: `XJ4K2-9QWRT-7YHBM-3ZPLC-VN8DF-...` (tamamı ~52 karakter, 8 grup)
-- Kısa doğrulama kodu (sesli okuma için): fingerprint'in ilk 8 baytından türetilen
-  **5 haneli sayı grupları x 4** (Signal'ın "safety number" formatına benzer,
+- Kısa doğrulama kodu (sesli okuma için): fingerprint'in ilk 16 baytından türetilen
+  **5 haneli sayı grupları x 8** (`format_short_code`; 8 bayt ile çakışma araması erişilebilirdi) (Signal'ın "safety number" formatına benzer,
   insan gözüyle karşılaştırmayı kolaylaştırır).
 - **Identity kodu** (kullanıcıya gösterilen "benim kişi kodum"): `identity_id`
   aynı formatta gösterilir — TOFU eşleşmesinde artık bu kod paylaşılır,
@@ -84,9 +84,9 @@ EshlesmePaketi {
   version: u8,
   device_name: string,           // kullanıcı dostu isim, örn "Ahmet'in telefonu"
   sign_pubkey_ed25519: bytes[32],
-  sign_pubkey_mldsa: bytes[~1952],
+  sign_pubkey_mldsa: bytes[~2592],
   kem_pubkey_x25519: bytes[32],
-  kem_pubkey_mlkem: bytes[~1184],
+  kem_pubkey_mlkem: bytes[~1568],
   fingerprint: bytes[32],        // yukarıdakilerden türetilmiş, doğrulama için
   known_nodes: [Multiaddr],      // bu cihazın bildiği node listesi (max ~10)
   timestamp: u64,
@@ -94,7 +94,7 @@ EshlesmePaketi {
 ```
 
 QR kapasitesi gerçek bir kısıt — ML-DSA/ML-KEM public key'leri klasik anahtarlardan
-çok daha büyük (Kyber-768 ~1184 byte, Dilithium ~1952 byte). Ham haliyle bu tek
+çok daha büyük (ML-KEM-1024 ~1568 byte, ML-DSA-87 ~2592 byte). Ham haliyle bu tek
 QR'a sığmayabilir.
 
 **Karar (v0.1): fingerprint-only QR.**
@@ -118,11 +118,15 @@ QRPaketi {
 ### 1.4 Manuel giriş formatı
 
 ```
-node-adresi:  /ip4/1.2.3.4/tcp/4001/p2p/<peer_id>
-kisi-kodu:    XJ4K2-9QWRT-7YHBM-3ZPLC-VN8DF  (identity_id, kısaltılmış gösterim)
+identity_id|device_fingerprint|nonce|device_name|rendezvous_node
 ```
+Tek satırlık, `|` ile ayrılmış 5 alanlı eşleşme kodu (`process_manual_entry`);
+`nonce` hex'tir (eşleşme kodu taşıyıcı sırrı, aşağıya bakın). Eski
+"node-adresi + kişi kodu Base32" ikilisi artık yok.
 
-Node kendi ayarlar ekranında hem QR hem bu iki metni gösterir (kopyalanabilir).
+Cihaz kendi ayarlar ekranında hem QR hem bu metni gösterir (kopyalanabilir).
+
+**Eşleşme kodu ömrü (spec boşluğu kapatıldı):** QR/manuel kodun `nonce`'u bir taşıyıcı (bearer) sırdır; **30 dakika** (`PAIRING_WINDOW_MS`) geçerlidir ve süre içinde **sınırsız sayıda taramaya** izin verir (en fazla 30 dk / 5 dk = 6 nonce aynı anda geçerli, `PAIRING_NONCE_REUSE_MS`). Kodu gören herkes süre dolana dek eşleşme başlatabilir; kullanıcıya bu açıkça söylenmelidir.
 
 ### 1.5 Cihaz ekleme (yeni Device, var olan Identity'ye)
 
@@ -175,11 +179,16 @@ tutarlılığı sağlanırken şu veriler senkronize edilir:
 
 ```
 SyncPayload {
-  contacts: [Contact],           // bkz. bölüm 2.1
-  groups: [Group],               // bkz. bölüm 5.2
-  ratchet_states: [RatchetState],// bkz. 1.7.1 — özel ele alınır
-  message_history: [Message]?,   // opsiyonel, kullanıcı tercih eder
+  contacts: [SyncedContact],     // bkz. bölüm 2.1
+  groups: [Group],               // bkz. bölüm 5.2 (serileştirilmiş Group kayıtları)
+  siblings: [SyncedDevice],      // aynı kimliğin diğer cihazları
+  sibling_proofs: [DeviceAddProof], // ilk cihaz dışındaki her sibling için kanıt
+  archive_root_key: bytes?,      // sunucu arşivi kök anahtarı (kimliğe ait)
+  name_changed_at_ms: u64,       // hesap adı son değişim damgası
 }
+// Not: ratchet durumu ve mesaj geçmişi SyncPayload'da TAŞINMAZ; cihazlar
+// kendi cihaz-çifti ratchet'lerini kurar (1.7.1), geçmiş `SiblingHistoryRequest/
+// Response` ile ayrı istenir. Kod tarafında "geçmişi aç/kapat" ayarı yoktur.
 ```
 
 - Senkron, cihazlar arasında kurulan kendi 1:1 ratchet oturumu üzerinden
@@ -187,9 +196,9 @@ SyncPayload {
   aynı şifreleme/imza mekanizmasını kullanır, ayrı bir kanal icat edilmez).
 - İlk senkron tam kopya; sonrasında sadece **delta** (değişiklikler)
   gönderilir (yeni kişi, yeni grup, ratchet ilerlemesi).
-- Mesaj geçmişi senkronu **opsiyonel** — bant genişliği/depolama maliyeti
-  yüksek olabileceğinden kullanıcı bunu açık/kapalı seçebilir. Kapalıysa
-  yeni cihaz sadece o andan sonraki mesajları görür.
+- Mesaj geçmişi `SyncPayload` içinde gitmez; ayrı `SiblingHistoryRequest/
+  Response` ile istenir. (Eski taslaktaki kullanıcı "açık/kapalı" geçmiş
+  senkron ayarı uygulanmadı.)
 
 #### 1.7.1 Ratchet state senkronu ve çakışma çözümü
 
@@ -232,7 +241,7 @@ ReadReceipt {
 }
 ```
 Bu, diğer `MessagePacket`'ler gibi şifrelenip imzalanarak gönderilir —
-ayrı bir kanal icat edilmiyor. **Hangi cihazdan okunduğu taşınmaz/gösterilmez**
+ayrı bir kanal icat edilmiyor. **Hangi cihazdan okunduğu arayüzde gösterilmez** (ancak her `MessagePacketHeader` açıkta `sender_device_fingerprint` taşır, bölüm 3.3 — bir `Seen` paketi hangi cihazın gördüğünü ağ/sunucu düzeyinde ele verir)
 — kişinin Active cihazlarından **herhangi biri** mesajı okuduğu an, o kişi
 için tek bir "görüldü" durumu tetiklenir.
 
@@ -256,10 +265,9 @@ Ahmet  görüldü  14:32
 **Kendi cihazların arasında "okundu" senkronu**
 (bölüm 1.7'deki `SyncPayload`'a küçük bir ek):
 ```
-SyncPayload {
-  ...
-  read_states: [{ message_id, read_at }],
-}
+// Kodda: ayrı `ReadStateSync` mesajı (SyncPayload alanı değil) — kalıcı
+// "okundu" watermark'ı; kardeş cihazlara ve karşı tarafa store-and-forward gider.
+ReadStateSync { ... }
 ```
 Bir cihaz mesajı ilk okuyan cihaz olduğunda: `ReadReceipt` karşı tarafa
 gönderilir, aynı zamanda "bu mesaj okundu" bilgisi kendi `SyncPayload`
@@ -273,18 +281,17 @@ Kullanıcının **son cihazını** kaybetmesi durumuna karşı (bölüm 1.6'nın
 "en az bir Active cihaz kalmalı" kuralının istisnası):
 
 ```
-RecoveryFile (kullanıcı tarafından .txt olarak indirilip güvenli saklanır) {
-  identity_id: bytes[32],
-  master_seed: bytes[32],        // tüm cihaz anahtarlarının türetildiği kök
-                                   // (ilk cihaz kurulumunda üretilir)
-  created_at: timestamp,
+RecoveryFile (CBOR; kullanıcı tarafından indirilip güvenli saklanır) {
+  kdf: "argon2id", m/t/p (Argon2 parametreleri),
+  salt, nonce,
+  ciphertext,                    // ChaCha20-Poly1305 ile şifreli kimlik gizli
+                                   // anahtarları (identity_id + cihaz anahtarları)
 }
 ```
 
-- Bu dosya, tüm cihazların anahtarlarının türetilebileceği bir **kök seed**
-  içerir (HKDF ile her cihaz için ayrı anahtar türetilir, ama hepsi bu
-  köke bağlıdır).
-- Kullanıcı bu dosyayı ilk kurulumda indirip (parola ile şifreli, AES-256-GCM)
+- Bu dosya kimliğin gizli anahtarlarını + `RecoveryData`'yı içerir (kodda
+  `master_seed` kavramı yoktur; anahtarlar doğrudan şifrelenir).
+- Kullanıcı bu dosyayı ilk kurulumda indirip (parola ile şifreli: Argon2id + ChaCha20-Poly1305)
   offline bir yerde saklar (USB, kağıda yazılan kurtarma cümlesi, vs.).
 - Kaybolma durumunda: yeni cihaza bu dosya + parola girilir → `identity_id`
   ile aynı kimlik altında yeni bir Device olarak devam edilir → tüm eski
@@ -385,8 +392,9 @@ doğrulamasının cihazlara yayılmasını sağlar).
 
 ```
 1. X25519 ECDH  → shared_secret_classic
-2. ML-KEM-768   → shared_secret_pq (encapsulate/decapsulate)
-3. root_key = HKDF( shared_secret_classic || shared_secret_pq, salt="p2pmsg-v0.1" )
+2. ML-KEM-1024  → shared_secret_pq (encapsulate/decapsulate)
+3. root_key = HKDF( shared_secret_classic || shared_secret_pq, salt=yok (None) )
+   (kod: `Hkdf::new(None, ikm)`; etiketler `p2pmsg-v0.2-root/a-to-b/b-to-a`, mesaj/zincir anahtarı `p2pmsg-v0.1-msgkey/chainkey`, KEM mühürleme `p2pmsg-v0.5-*` — transcript'e bağlı)
 ```
 
 ### 3.2 Double Ratchet (forward secrecy + break-in recovery)
@@ -445,43 +453,33 @@ Her cihaz bildiği node adreslerinin küçük bir alt kümesini (~10, en son
 görülen/en güvenilir) QR eşleşme paketinde taşır. Yeni kullanıcı bu listeyi
 alıp kendi DHT bootstrap listesine ekler.
 
-### 4.2 DHT kaydı (WAN keşfi)
+### 4.2 Keşif (WAN) — DHT kaydı YOK
+
+**Uygulanan durum (kod kazanır):** İmzalı DHT kaydı (`put_record`) yoktur.
+Kademlia her zaman `Mode::Client`'tır: yalnızca bootstrap/sorgu yapar, kimsenin
+yönlendirme tablosuna girmez ve hiçbir kayıt yayımlamaz. Adres keşfi QR'daki
+`rendezvous_node`, `device_addrs`/`device_onion_addrs`, `AddressAnnounce`,
+röleler ve (varsa) sunucu üzerinden yürür; ağ onion-only'dir (clearnet dial
+`DialReject` ile reddedilir). Aşağıdaki eski taslak hedeftir, uygulanmamıştır:
 
 ```
-DHT_Entry {
-  key: device_fingerprint,       // v0.2: DHT hâlâ cihaz bazlı adreslenir
-                                   // (IP:port bir cihaza ait, bir Identity'nin
-                                   //  soyut kavramına değil)
-  value: {
-    multiaddrs: [Multiaddr],     // o an bilinen IP:port'lar
-    last_updated: timestamp,
-    signature: bytes,             // kaydın gerçekten o cihaz fingerprint'ine
-                                   // ait cihaz tarafından imzalandığını kanıtlar
-  }
-}
+DHT_Entry { key: device_fingerprint, value: { multiaddrs, last_updated, signature } }
 ```
-Bir Identity'nin birden fazla cihazına ulaşmak isteyen taraf, `known_devices`
-listesindeki her `device_fingerprint` için ayrı DHT sorgusu yapar.
-
-- Cihaz IP/port değiştirdiğinde DHT kaydını günceller (imzalı, sahte
-  güncelleme engellenir).
-- Bu kayıt sadece "kim nerede" bilgisi taşır, mesaj içeriği asla DHT'ye
-  yazılmaz.
 
 ### 4.3 Node modu (opsiyonel)
 
-- **Peer modu** (varsayılan): DHT'yi sorgular, kayıt günceller, çoğunlukla
-  arka planda pasif.
-- **Node modu** (kullanıcı açar): Kademlia routing tablosuna aktif katkı +
-  isteğe bağlı Circuit Relay v2 hizmeti (simetrik NAT arkasındaki iki
-  peer arasında şifreli trafiği kör taşır).
+- **Peer modu** (varsayılan): şifreli trafik yalnızca kendi bağlantıları içindir.
+- **Node modu** (kullanıcı açar): yalnızca **Circuit Relay v2 hizmeti** —
+  simetrik NAT arkasındaki iki peer arasında şifreli trafiği kör taşır.
+  Kademlia routing tablosuna katkı **yoktur** (DHT istemci modunda; `set_node_mode`
+  sadece röle/otomatik-indirme davranışını açar).
 
 ### 4.4 Sunucu modu (opsiyonel, spec dışı — sonradan eklendi)
 
 Node modu ve röle, adı üstünde, **hiçbir şey saklamaz**: Circuit Relay v2
 sadece iki taraf da O ANDA bağlıyken canlı bir devre kurar. Dolayısıyla
 alıcı çevrimdışıyken dayanıklılığın tamamı gönderen tarafta kalıyor
-(`awaiting_confirmation`, 2 güne kadar yeniden deneme). Telefonu bir hafta
+(`awaiting_confirmation`, 7 güne kadar yeniden deneme (`TEXT_RETRY_GIVE_UP_MS`; sunucuda ek 14 gün TTL)). Telefonu bir hafta
 kapalı kalan, ya da yeni kurulmuş bir cihaz için bu yetmiyor.
 
 Bunun için ayrı bir **sunucu** seçeneği var (bkz. depo kökündeki
@@ -616,11 +614,9 @@ Bir üye gruptan çıkarıldığında:
 
 ### 5.4 Grup keşfi / davet akışı
 
-- Kurucu, grup oluşturduğunda `group_id` + kendi `identity_id`'sini içeren bir
-  "grup daveti" üretir (QR veya manuel paylaşım, bölüm 1.3/1.4 ile aynı
-  mekanizma kullanılır).
-- Davet edilen kişi, kurucuyla zaten var olan (veya o anda kurulan) 1:1
-  bağlantı üzerinden `GroupUpdate(Add)` paketini alır, grubu yerel olarak
+- Ayrı bir grup-daveti QR/manuel artefaktı **yoktur**. Kurucu (`invite_to_group`)
+  zaten var olan 1:1 bağlantı üzerinden pairwise `GroupUpdate(Add)` gönderir.
+- Davet edilen kişi bu 1:1 bağlantı üzerinden `GroupUpdate(Add)` paketini alır, grubu yerel olarak
   oluşturur/günceller.
 
 ### 5.5 Çoklu cihazlı üyelerle grup etkileşimi
@@ -672,25 +668,31 @@ Bir üye gruptan çıkarıldığında:
 çalışan sürüme ulaşmak gereksiz yere gecikir. Protokol tek parça, kod
 teslimatı iki aşama:
 
+**Durum (2026-10-20): aşağıdaki kutuların tamamı uygulandı; yalnızca Kademlia DHT
+kaydı/Node-modu DHT katkısı (bölüm 4.2/4.3) bilerek yapılmadı. Dosya transferi,
+sesli/görüntülü arama, beyaz tahta, düzenle/sil, tepki/yanıt, yazıyor, profil de
+SHIP edildi ve bu spec'in tehdit modeli kapsamı DIŞINDA kalıyor — kendi şifreleme
+yolları var, gereksinimleri bu belgede tanımlı değil.**
+
 **Aşama A — temel (tek cihaz varsayımıyla test edilir, ama kod
 Identity/Device ayrımına göre yazılır, sadece "1 Identity = 1 Device"
 özel durumuyla çalıştırılır):**
 - [x] Identity/Device modeli, fingerprint üretimi ve gösterimi
-- [ ] QR eşleşme (identity_id + device_fingerprint + tek node adresi)
-- [ ] Manuel node/kişi ekleme
-- [ ] libp2p + Kademlia DHT üzerinden iki cihazın birbirini bulması
-- [ ] Hibrit KEM ile oturum kurulumu
-- [ ] Double Ratchet ile 1:1 mesajlaşma (metin, tek satır)
-- [ ] Cihaz/kimlik değişikliği tespiti ve uyarı ekranı (bölüm 2.2)
-- [ ] Node modu aç/kapa (Linux masaüstünde önce, Android sonra)
-- [ ] Grup oluşturma, davet, pairwise grup mesajlaşma (bölüm 5)
+- [x] QR eşleşme (identity_id + device_fingerprint + tek node adresi)
+- [x] Manuel node/kişi ekleme
+- [ ] libp2p + Kademlia DHT üzerinden iki cihazın birbirini bulması (yapılmadı: keşif QR/adres/röle/sunucu ile)
+- [x] Hibrit KEM ile oturum kurulumu
+- [x] Double Ratchet ile 1:1 mesajlaşma (metin, tek satır)
+- [x] Cihaz/kimlik değişikliği tespiti ve uyarı ekranı (bölüm 2.2)
+- [x] Node modu aç/kapa (Linux masaüstünde önce, Android sonra)
+- [x] Grup oluşturma, davet, pairwise grup mesajlaşma (bölüm 5)
 
 **Aşama B — çoklu cihaz (Aşama A'nın üzerine eklenir):**
-- [ ] DeviceAdd/DeviceRevoke akışı (bölüm 1.5/1.6)
-- [ ] Cihazlar arası SyncPayload (kişiler, gruplar) (bölüm 1.7)
-- [ ] Cihaz-çifti bazlı DeviceRatchetState ve pairwise çoklu-cihaz gönderimi (bölüm 1.7.1)
-- [ ] Kimlik kurtarma dosyası (.txt, parola korumalı) (bölüm 1.8)
-- [ ] Mesaj geçmişi senkronu (opsiyonel, kullanıcı tercihi)
-- [ ] Okundu bilgisi (ReadReceipt + SyncPayload read_states) (bölüm 1.7.1)
+- [x] DeviceAdd/DeviceRevoke akışı (bölüm 1.5/1.6)
+- [x] Cihazlar arası SyncPayload (kişiler, gruplar) (bölüm 1.7)
+- [x] Cihaz-çifti bazlı DeviceRatchetState ve pairwise çoklu-cihaz gönderimi (bölüm 1.7.1)
+- [x] Kimlik kurtarma dosyası (.txt, parola korumalı) (bölüm 1.8)
+- [ ] Mesaj geçmişi senkronu (opsiyonel, kullanıcı tercihi) (SyncPayload'da yok; `SiblingHistoryRequest/Response` var, ayar yok)
+- [x] Okundu bilgisi (ReadReceipt + ayrı `ReadStateSync` mesajı) (bölüm 1.7.1)
 
-Dosya transferi, sesli/görüntülü arama v0.1/v0.2 kapsamı DIŞINDA.
+Dosya transferi, sesli/görüntülü arama v0.1/v0.2 kapsamı DIŞINDA (sonradan eklendi; bkz. yukarıdaki durum notu).

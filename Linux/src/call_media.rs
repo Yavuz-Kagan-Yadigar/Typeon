@@ -80,7 +80,32 @@ const OPUS_FRAME_MS: u64 = 20;
 const PACKETS_PER_BUNDLE: usize = 3;
 const STATE_EVERY: Duration = Duration::from_secs(1);
 
+/// Voice-activity proxy, same as Android `AudioSink.trackLevel`: a strided
+/// peak against a min-tracking noise floor. Speaking = clearly above the floor
+/// and above an absolute minimum; held 400 ms so the tile frame does not flicker.
+struct Level {
+    noise: Mutex<f32>,
+    speaking_until_ms: std::sync::atomic::AtomicU64,
+}
+
+impl Level {
+    fn track(&self, pcm: &[u8]) {
+        // Every 16th S16LE sample.
+        let peak = pcm
+            .chunks_exact(2)
+            .step_by(16)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs() as f32)
+            .fold(0.0f32, f32::max);
+        let mut noise = self.noise.lock().unwrap();
+        *noise = if peak < *noise { peak.max(60.0) } else { *noise + (peak - *noise) * 0.002 };
+        if peak > 1500.0 && peak > *noise * 3.2 {
+            self.speaking_until_ms.store(crate::util::now_ms() + 400, Ordering::Relaxed);
+        }
+    }
+}
+
 struct AudioLane {
+    level: Arc<Level>,
     bin: gst::Bin,
     src: gst_app::AppSrc,
     mixer_pad: gst::Pad,
@@ -180,6 +205,16 @@ impl CallMedia {
         }
     }
 
+    /// True while `slot`'s voice stands clear of its noise floor.
+    pub fn is_speaking(&self, slot: u8) -> bool {
+        self.shared
+            .audio
+            .lock()
+            .unwrap()
+            .get(&slot)
+            .is_some_and(|lane| lane.level.speaking_until_ms.load(Ordering::Relaxed) > crate::util::now_ms())
+    }
+
     /// A participant left: free its decoders.
     pub fn drop_slot(&self, slot: u8) {
         if let Some(lane) = self.shared.audio.lock().unwrap().remove(&slot) {
@@ -203,12 +238,19 @@ impl Drop for CallMedia {
         for (_, mut lane) in self.shared.video.lock().unwrap().drain() {
             lane.teardown();
         }
-        self.shared.audio.lock().unwrap().clear();
+        // Not `clear()`: lanes must leave the pipeline and release their mixer pads.
+        let lanes: Vec<AudioLane> = self.shared.audio.lock().unwrap().drain().map(|(_, lane)| lane).collect();
+        for lane in lanes {
+            remove_audio_lane(&self.shared, lane);
+        }
         if let Some(p) = &self.shared.playback {
             let _ = p.set_state(gst::State::Null);
         }
     }
 }
+
+/// Most live audio / video lanes per call; a group call has far fewer slots.
+const MAX_LANES: usize = 16;
 
 fn launch(desc: &str) -> Result<gst::Pipeline, String> {
     gst::parse::launch(desc)
@@ -388,7 +430,19 @@ fn add_audio_lane(shared: &Shared, slot: u8) -> Option<AudioLane> {
     let mixer_pad = mixer.request_pad_simple("sink_%u")?;
     bin.static_pad("src")?.link(&mixer_pad).ok()?;
     bin.sync_state_with_parent().ok()?;
-    Some(AudioLane { bin: bin.upcast(), src, mixer_pad, next_pts_ns: 0 })
+    let level = Arc::new(Level { noise: Mutex::new(400.0), speaking_until_ms: std::sync::atomic::AtomicU64::new(0) });
+    {
+        let level = level.clone();
+        bin.static_pad("src")?.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            if let Some(gst::PadProbeData::Buffer(buffer)) = &info.data {
+                if let Ok(map) = buffer.map_readable() {
+                    level.track(map.as_slice());
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+    }
+    Some(AudioLane { level, bin: bin.upcast(), src, mixer_pad, next_pts_ns: 0 })
 }
 
 fn remove_audio_lane(shared: &Shared, lane: AudioLane) {
@@ -410,6 +464,10 @@ fn play_audio(shared: &Shared, slot: u8, payload: &[u8]) {
     let now = now.nseconds();
     let mut lanes = shared.audio.lock().unwrap();
     if !lanes.contains_key(&slot) {
+        // A peer cycling the slot byte must not fan out decoder pipelines.
+        if lanes.len() >= MAX_LANES {
+            return;
+        }
         match add_audio_lane(shared, slot) {
             Some(l) => {
                 log::info!("call: audio lane {slot} playing");
@@ -451,6 +509,9 @@ fn receive(shared: Arc<Shared>) {
             KIND_AUDIO => play_audio(&shared, slot, payload),
             KIND_VIDEO => {
                 let mut lanes = shared.video.lock().unwrap();
+                if !lanes.contains_key(&slot) && lanes.len() >= MAX_LANES {
+                    continue;
+                }
                 let lane = lanes.entry(slot).or_insert_with(VideoLane::new);
                 lane.feed(&shared, slot, payload);
             }
@@ -576,12 +637,17 @@ fn attach_frame_sink(sink: &gst_app::AppSink, slot: Option<u8>, frames: FrameSen
                 let Ok(info) = gst_video::VideoInfo::from_caps(caps) else { return Ok(gst::FlowSuccess::Ok) };
                 let Ok(map) = buffer.map_readable() else { return Ok(gst::FlowSuccess::Ok) };
                 let stride = info.stride()[0] as usize;
+                // Caps and buffer can disagree (renegotiation, truncated frame):
+                // a panic here would unwind through the C callback and abort.
+                let Some(pixels) = map.as_slice().get(..stride * info.height() as usize) else {
+                    return Ok(gst::FlowSuccess::Ok);
+                };
                 let _ = frames.try_send(Frame {
                     slot,
                     width: info.width(),
                     height: info.height(),
                     stride,
-                    rgba: map.as_slice()[..stride * info.height() as usize].to_vec(),
+                    rgba: pixels.to_vec(),
                 });
                 Ok(gst::FlowSuccess::Ok)
             })

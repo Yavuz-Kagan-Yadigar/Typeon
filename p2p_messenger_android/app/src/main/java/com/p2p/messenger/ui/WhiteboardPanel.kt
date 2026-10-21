@@ -30,6 +30,7 @@ import com.google.android.material.slider.Slider
 import com.p2p.messenger.P2PLib
 import com.p2p.messenger.R
 import com.p2p.messenger.service.P2PService
+import com.p2p.messenger.util.hexToBytesOrNull
 import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -193,6 +194,20 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         }
     }
 
+    /** A burst of incoming `whiteboard` events (each triggers one in the core)
+     *  used to run one full page fetch + main-thread rebuild per event; queued
+     *  events collapse to one fetch per main-loop turn. */
+    private fun loadPageCoalesced() {
+        if (reloadQueued) return
+        reloadQueued = true
+        ui.post {
+            reloadQueued = false
+            loadPage()
+        }
+    }
+
+    private var reloadQueued = false
+
     private fun onBoardChanged(event: JSONObject) {
         val pages = event.optJSONArray("pages")
         var changedHere = false
@@ -202,7 +217,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
             if (p == page) changedHere = true
         }
         setUnread(event.optInt("unread"))
-        if (isOpen && changedHere) loadPage() else updatePageLabel()
+        if (isOpen && changedHere) loadPageCoalesced() else updatePageLabel()
     }
 
     private fun setUnread(mask: Int) {
@@ -228,7 +243,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         return bytes.array()
     }
 
-    private fun hexToBytes(hex: String) = ByteArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+    private fun hexToBytes(hex: String): ByteArray? = hexToBytesOrNull(hex)
 
     private fun remember(step: Step) {
         undoStack.addLast(step)
@@ -244,10 +259,13 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         remember(step)
         io.execute {
             val result = P2PLib.whiteboardAddStroke(peer, groupId, shown, stroke.shade, stroke.width, pointBytes(stroke))
-            val failed = result.startsWith("Error")
+            // Invalid input from the core takes the error path as well, not a
+            // NumberFormatException (bkz. hexToBytesOrNull above).
+            val ids = if (result.startsWith("Error")) null else hexToBytes(result)
+            val failed = ids == null
             // The stroke disappears from the board without a word otherwise.
-            if (failed || result.length != 16) android.util.Log.w("Whiteboard", "addStroke: '$result' peer=${peer.take(8)} page=$shown points=${stroke.points.size}")
-            if (!failed) step.ids = hexToBytes(result)
+            if (failed || result.length != 16) android.util.Log.w("Whiteboard", "addStroke: '$result' page=$shown points=${stroke.points.size}")
+            if (ids != null) step.ids = ids
             ui.post {
                 board.pending.remove(stroke)
                 if (shown == page && peer == this.peer && groupId == this.groupId) {
@@ -293,12 +311,31 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         io.execute {
             if (step.live) {
                 P2PLib.whiteboardErase(peer, groupId, step.ids)
+                step.live = !step.live
             } else {
-                step.ids = hexToBytes(step.strokes.joinToString("") {
-                    P2PLib.whiteboardAddStroke(peer, groupId, step.page, it.shade, it.width, pointBytes(it)).takeUnless { r -> r.startsWith("Error") } ?: ""
-                })
+                // Redo draws every erased stroke again under a new id. Each
+                // reply is validated and the step stays erased on any failure:
+                // it used to join the replies verbatim, so one page-full error
+                // collapsed to "" — an id array shorter than the stroke list,
+                // and the next undo removed only the successful prefix.
+                val ids = ByteArray(step.strokes.size * 8)
+                var ok = true
+                step.strokes.forEachIndexed { i, s ->
+                    val r = P2PLib.whiteboardAddStroke(peer, groupId, step.page, s.shade, s.width, pointBytes(s))
+                    val b = if (r.startsWith("Error")) null else hexToBytes(r)
+                    if (b == null || b.size != 8) ok = false else b.copyInto(ids, i * 8)
+                }
+                if (ok) {
+                    step.ids = ids
+                    step.live = !step.live
+                } else {
+                    // Roll the partially re-added strokes back so the core is
+                    // not left half-redone, and the redo can be tried again.
+                    android.util.Log.w("Whiteboard", "redo: page ${step.page} full or malformed id")
+                    P2PLib.whiteboardErase(peer, groupId, ids)
+                    ui.post { Toast.makeText(activity, R.string.whiteboard_page_full, Toast.LENGTH_SHORT).show() }
+                }
             }
-            step.live = !step.live
             ui.post { if (step.page == page) loadPage() else goToPage(step.page) }
         }
         scheduleTicks()

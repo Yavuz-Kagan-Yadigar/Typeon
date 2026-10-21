@@ -254,22 +254,33 @@ fn start_fresh_identity(
 
     let mut vault = Vault::new(bundle);
     vault.skipped_key = storage_key;
-    if let Err(error) = secrets::save(&app.data_dir, &vault, passphrase) {
-        // Without a persisted vault the identity would be lost on exit, so this
-        // is fatal rather than a warning.
-        button.set_sensitive(true);
-        app.toast(&format!("Could not write the vault: {}", error));
-        return;
-    }
-
-    {
-        let mut prefs = app.prefs.borrow_mut();
-        prefs.device_name = device_name.to_string();
-        prefs.awaiting_link = awaiting_link;
-        prefs.save();
-    }
-
-    finish_boot(app, host, vault);
+    // Sealing the vault runs Argon2id: off the main thread.
+    let (app, host, button) = (app.clone(), host.clone(), button.clone());
+    let data_dir = app.data_dir.clone();
+    let passphrase = passphrase.to_string();
+    let device_name = device_name.to_string();
+    app::run_in_background(
+        move || secrets::save(&data_dir, &vault, &passphrase).map(|()| vault),
+        move |result| {
+            let vault = match result {
+                Ok(vault) => vault,
+                Err(error) => {
+                    // Without a persisted vault the identity would be lost on exit, so this
+                    // is fatal rather than a warning.
+                    button.set_sensitive(true);
+                    app.toast(&format!("Could not write the vault: {}", error));
+                    return;
+                }
+            };
+            {
+                let mut prefs = app.prefs.borrow_mut();
+                prefs.device_name = device_name;
+                prefs.awaiting_link = awaiting_link;
+                prefs.save();
+            }
+            finish_boot(&app, &host, vault);
+        },
+    );
 }
 
 /// Recovery restore: pick the file, then ask for its passphrase.
@@ -338,10 +349,6 @@ fn ask_recovery_passphrase(
             return;
         }
 
-        let Ok(bytes) = std::fs::read(&path) else {
-            app.toast("Could not read that file.");
-            return;
-        };
         let Some(storage_key) = open_fresh_database(&app) else {
             app.toast("Could not open the database.");
             return;
@@ -358,31 +365,38 @@ fn ask_recovery_passphrase(
         let name = device_name.clone();
         let vault_passphrase = vault_passphrase.clone();
         app.toast("Restoring…");
-        // Argon2id makes this deliberately slow; on the main thread it would
-        // freeze the window for seconds.
+        // Argon2id (import, and sealing the vault) is deliberately slow; the
+        // file read is unbounded too — all of it runs off the main thread.
+        let path = path.clone();
+        let data_dir = app.data_dir.clone();
         app::run_in_background(
-            move || core::import_recovery(&bytes, &passphrase, &name),
+            move || -> Result<Vault, String> {
+                // Same 64 MB cap as the Android client.
+                match std::fs::metadata(&path) {
+                    Ok(meta) if meta.len() <= 64 * 1024 * 1024 => {}
+                    Ok(_) => return Err("that file is too large to be a recovery file".to_string()),
+                    Err(_) => return Err("could not read that file".to_string()),
+                }
+                let bytes = std::fs::read(&path).map_err(|_| "could not read that file".to_string())?;
+                core::import_recovery(&bytes, &passphrase, &name)?;
+                let bundle = core::take_pending_secret_bundle();
+                if bundle.is_empty() {
+                    return Err("Restore produced no keys.".to_string());
+                }
+                let mut vault = vault;
+                vault.identity_bundle = bundle;
+                secrets::save(&data_dir, &vault, &vault_passphrase)
+                    .map_err(|error| format!("Could not write the vault: {}", error))?;
+                Ok(vault)
+            },
             move |result| {
-                match result {
-                    Ok(_) => {}
+                let vault = match result {
+                    Ok(vault) => vault,
                     Err(error) => {
                         app_inner.toast(&format!("Restore failed: {}", error));
                         return;
                     }
-                }
-                let bundle = core::take_pending_secret_bundle();
-                if bundle.is_empty() {
-                    app_inner.toast("Restore produced no keys.");
-                    return;
-                }
-                let mut vault = vault;
-                vault.identity_bundle = bundle;
-                if let Err(error) =
-                    secrets::save(&app_inner.data_dir, &vault, &vault_passphrase)
-                {
-                    app_inner.toast(&format!("Could not write the vault: {}", error));
-                    return;
-                }
+                };
                 {
                     let mut prefs = app_inner.prefs.borrow_mut();
                     // A restored identity is a full account, not a pending link.
@@ -509,17 +523,24 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
             app::start_poll_loop(&app);
             // Anything queued from a previous run should go out as soon as the
             // swarm is up, rather than waiting for the first backoff tick.
-            core::retry_all_pending_now();
-
             // The link QR is only for a device that asked to be adopted and
             // has not been yet. A standalone or restored account goes straight
             // in, and so does an already-adopted secondary.
+            // Both core calls take the lock the poll thread now holds: off main.
             let awaiting = app.prefs.borrow().awaiting_link;
-            if awaiting && !core::is_secondary_device() {
-                host.set_child(Some(&link_page(&app, &host)));
-            } else {
-                ui::window::build_main(&app, &host);
-            }
+            app::run_in_background(
+                move || {
+                    core::retry_all_pending_now();
+                    awaiting && !core::is_secondary_device()
+                },
+                move |show_link| {
+                    if show_link {
+                        host.set_child(Some(&link_page(&app, &host)));
+                    } else {
+                        ui::window::build_main(&app, &host);
+                    }
+                },
+            );
         },
     );
 }
@@ -566,38 +587,63 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
     // The QR cannot be built until the swarm reports a listen address, so this
     // retries rather than failing outright (same pattern as the Android
     // LinkDeviceActivity and the contact QR).
+    // Core calls below run off the GTK thread (shared core lock); one in
+    // flight at a time.
     {
         let qr_slot = qr_slot.clone();
         let status = status.clone();
-        let attempts = std::cell::Cell::new(0u32);
+        let attempts = Rc::new(std::cell::Cell::new(0u32));
+        let in_flight = Rc::new(std::cell::Cell::new(false));
+        let page = page.downgrade();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-            if qr_slot.first_child().is_some() {
+            if qr_slot.first_child().is_some() || page.upgrade().map_or(true, |p| p.root().is_none()) {
                 return glib::ControlFlow::Break;
             }
-            let payload = core::build_device_link_request();
-            if payload.is_empty() {
-                attempts.set(attempts.get() + 1);
-                if attempts.get() >= 60 {
-                    status.set_label(
-                        "The network is not reachable yet — no listening address was \
-                         established. Check your connection, then restart Typeon.",
-                    );
-                    return glib::ControlFlow::Break;
-                }
+            if in_flight.replace(true) {
                 return glib::ControlFlow::Continue;
             }
-            match qr::qr_widget(&payload) {
-                Some(widget) => {
-                    qr_slot.append(&widget);
-                    // The phone shows the same code in its confirm dialog.
-                    status.set_label(&format!(
-                        "Waiting for your phone to scan this…\n\nCompare code: {}\nYour phone shows the same code before you approve.",
-                        core::device_link_code(&payload)
-                    ));
-                }
-                None => status.set_label("Could not render the link code."),
+            let (qr_slot, status, attempts, in_flight) =
+                (qr_slot.clone(), status.clone(), attempts.clone(), in_flight.clone());
+            app::run_in_background(
+                || {
+                    let payload = core::build_device_link_request();
+                    let code = if payload.is_empty() { String::new() } else { core::device_link_code(&payload) };
+                    (payload, code)
+                },
+                move |(payload, code)| {
+                    in_flight.set(false);
+                    if qr_slot.first_child().is_some() {
+                        return;
+                    }
+                    if payload.is_empty() {
+                        attempts.set(attempts.get() + 1);
+                        if attempts.get() >= 60 {
+                            status.set_label(
+                                "The network is not reachable yet — no listening address was \
+                                 established. Check your connection, then restart Typeon.",
+                            );
+                            // Stops the timer: `attempts` past the cap never retries.
+                        }
+                        return;
+                    }
+                    match qr::qr_widget(&payload) {
+                        Some(widget) => {
+                            qr_slot.append(&widget);
+                            // The phone shows the same code in its confirm dialog.
+                            status.set_label(&format!(
+                                "Waiting for your phone to scan this…\n\nCompare code: {}\nYour phone shows the same code before you approve.",
+                                code
+                            ));
+                        }
+                        None => status.set_label("Could not render the link code."),
+                    }
+                },
+            );
+            if attempts.get() >= 60 {
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
             }
-            glib::ControlFlow::Break
         });
     }
 
@@ -606,22 +652,35 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
     {
         let app = app.clone();
         let host = host.clone();
+        let in_flight = Rc::new(std::cell::Cell::new(false));
+        let page = page.downgrade();
         glib::timeout_add_seconds_local(2, move || {
-            if !core::is_secondary_device() {
+            // Page replaced/destroyed: nothing left to adopt into.
+            if page.upgrade().map_or(true, |p| p.root().is_none()) {
+                return glib::ControlFlow::Break;
+            }
+            if in_flight.replace(true) {
                 return glib::ControlFlow::Continue;
             }
-            if let Ok(identity_id) = core::own_identity_id() {
-                *app.own_identity_id.borrow_mut() = identity_id;
-            }
-            {
-                let mut prefs = app.prefs.borrow_mut();
-                prefs.awaiting_link = false;
-                prefs.save();
-            }
-            app.refresh_caches();
-            app.toast("This computer is now linked to your account.");
-            ui::window::build_main(&app, &host);
-            glib::ControlFlow::Break
+            let (app, host, in_flight) = (app.clone(), host.clone(), in_flight.clone());
+            app::run_in_background(core::is_secondary_device, move |secondary| {
+                in_flight.set(false);
+                if !secondary {
+                    return;
+                }
+                if let Ok(identity_id) = core::own_identity_id() {
+                    *app.own_identity_id.borrow_mut() = identity_id;
+                }
+                {
+                    let mut prefs = app.prefs.borrow_mut();
+                    prefs.awaiting_link = false;
+                    prefs.save();
+                }
+                app.refresh_caches();
+                app.toast("This computer is now linked to your account.");
+                ui::window::build_main(&app, &host);
+            });
+            glib::ControlFlow::Continue
         });
     }
 

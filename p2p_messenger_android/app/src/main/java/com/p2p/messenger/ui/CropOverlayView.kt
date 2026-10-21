@@ -103,7 +103,9 @@ class CropOverlayView @JvmOverloads constructor(
         return try {
             Bitmap.createBitmap(source, left, top, right - left, bottom - top)
         } catch (e: Exception) {
-            source
+            null // L-190: the caller reports it, no silent uncropped send
+        } catch (e: OutOfMemoryError) {
+            null
         }
     }
 

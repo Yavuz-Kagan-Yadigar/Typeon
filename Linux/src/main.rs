@@ -37,12 +37,28 @@ fn main() -> glib::ExitCode {
     // Varsayılan `warn`: normal çalışmada sessiz, `RUST_LOG=info` ile açılır.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
+    // GTK closures unwind into C and abort; leave a trace before that happens.
+    // (Message text is never in a panic payload we write: location + type only.)
+    std::panic::set_hook(Box::new(|info| {
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("typeon: panic at {location}");
+        let log = glib::user_data_dir().join("typeon").join("crash.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+            use std::io::Write;
+            let _ = writeln!(file, "{} panic at {location}", util::now_ms());
+        }
+    }));
+
     let mut builder = adw::Application::builder().application_id(APP_ID);
     // Typeon is single-instance by default: launching it again raises the
     // window you already have. `TYPEON_ALLOW_MULTIPLE=1` opts out, which is
     // what you want when running a second profile via `XDG_DATA_HOME` — two
     // identities, two data directories, two windows.
-    if std::env::var("TYPEON_ALLOW_MULTIPLE").as_deref() == Ok("1") {
+    // Only with an explicit `XDG_DATA_HOME`: two processes on the SAME data
+    // directory would corrupt the archive.
+    if std::env::var("TYPEON_ALLOW_MULTIPLE").as_deref() == Ok("1")
+        && std::env::var_os("XDG_DATA_HOME").is_some()
+    {
         builder = builder.flags(gtk::gio::ApplicationFlags::NON_UNIQUE);
     }
     let application = builder.build();
@@ -116,7 +132,15 @@ fn activate(application: &adw::Application) {
     // feels like.
     window.connect_is_active_notify(|window| {
         if window.is_active() {
-            core::retry_all_pending_now();
+            // Takes the core lock (a poll round can hold it for seconds):
+            // never on the GTK thread, and one at a time.
+            static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !BUSY.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                std::thread::spawn(|| {
+                    core::retry_all_pending_now();
+                    BUSY.store(false, std::sync::atomic::Ordering::Release);
+                });
+            }
         }
     });
 
@@ -143,6 +167,7 @@ fn activate(application: &adw::Application) {
     // needing a linked device and a real peer. Bubble sizing is fiddly enough
     // (see `chat::BUBBLE_MAX_WIDTH`) to be worth being able to look at directly.
     //   TYPEON_UI_TEST=bubbles TYPEON_ALLOW_MULTIPLE=1 typeon
+    #[cfg(debug_assertions)]
     match std::env::var("TYPEON_UI_TEST").as_deref() {
         Ok("bubbles") => {
             toasts.set_child(Some(&ui::chat::demo_bubbles()));

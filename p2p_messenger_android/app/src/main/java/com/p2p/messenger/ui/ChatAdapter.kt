@@ -28,10 +28,8 @@ class ChatAdapter(
         val displayName: String,
         val lastMessage: String,
         val timestamp: Long,
-        val unreadCount: Int = 0,
         /** True if this conversation has activity since it was last opened
-         *  (see ReadStatePrefs) — drives the row's accent-tinted background.
-         *  Independent of `unreadCount`, which has no real backing signal. */
+         *  (see ReadStatePrefs) — drives the row's accent-tinted background. */
         val hasUnread: Boolean = false,
         /** See PinnedChatsPrefs — pinned rows always sort above unpinned
          *  ones (ChatsFragment.refreshList) and get a 📌 prefix on the name. */
@@ -67,7 +65,7 @@ class ChatAdapter(
             if (other !is ChatMessage) return false
             return contactId == other.contactId && displayName == other.displayName &&
                 lastMessage == other.lastMessage && timestamp == other.timestamp &&
-                unreadCount == other.unreadCount && hasUnread == other.hasUnread &&
+                hasUnread == other.hasUnread &&
                 isPinned == other.isPinned &&
                 realContactId == other.realContactId && identityId == other.identityId &&
                 isGroup == other.isGroup &&
@@ -89,7 +87,6 @@ class ChatAdapter(
             result = 31 * result + displayName.hashCode()
             result = 31 * result + lastMessage.hashCode()
             result = 31 * result + timestamp.hashCode()
-            result = 31 * result + unreadCount
             result = 31 * result + hasUnread.hashCode()
             result = 31 * result + isPinned.hashCode()
             result = 31 * result + realContactId.hashCode()
@@ -119,8 +116,12 @@ class ChatAdapter(
         private val txtName: TextView = itemView.findViewById(R.id.txtContactName)
         private val txtLastMessage: TextView = itemView.findViewById(R.id.txtLastMessage)
         private val txtTimestamp: TextView = itemView.findViewById(R.id.txtTimestamp)
-        private val txtUnread: TextView = itemView.findViewById(R.id.txtUnreadCount)
         private val imgAvatar: ImageView = itemView.findViewById(R.id.imgAvatar)
+
+        /** L-92: only the relative time label (no avatar decode, no rebind). */
+        fun bindTime(message: ChatMessage) {
+            txtTimestamp.text = if (message.timestamp > 0) formatTimestamp(message.timestamp) else ""
+        }
 
         fun bind(message: ChatMessage) {
             // Grup üzerinden (kurucu kefaletiyle) eklenmiş kişiler yüz yüze
@@ -130,8 +131,6 @@ class ChatAdapter(
             txtName.text = "$pinPrefix$warnPrefix${message.displayName}"
             txtLastMessage.text = message.lastMessage
             txtTimestamp.text = if (message.timestamp > 0) formatTimestamp(message.timestamp) else ""
-            txtUnread.visibility = if (message.unreadCount > 0) View.VISIBLE else View.GONE
-            txtUnread.text = message.unreadCount.toString()
             AvatarUtil.renderInto(imgAvatar, message.avatarJpeg, message.displayName)
 
             // Unread rows get a 20%-alpha accent color overlay on top of the
@@ -188,6 +187,11 @@ class ChatAdapter(
         holder.bind(getItem(position))
     }
 
+    override fun onBindViewHolder(holder: ChatViewHolder, position: Int, payloads: MutableList<Any>) {
+        if (payloads.contains(TIME_PAYLOAD)) holder.bindTime(getItem(position)) else super.onBindViewHolder(holder, position, payloads)
+    }
+
+    private val TIME_PAYLOAD = Any()
     private var labelsMinute = 0L
 
     /** "Just now" is computed when a row is bound, and an unchanged row is
@@ -196,6 +200,6 @@ class ChatAdapter(
         val minute = System.currentTimeMillis() / 60_000
         if (minute == labelsMinute) return
         labelsMinute = minute
-        notifyItemRangeChanged(0, itemCount)
+        notifyItemRangeChanged(0, itemCount, TIME_PAYLOAD)
     }
 }

@@ -6,5 +6,6 @@ pub mod dialogs;
 pub mod media;
 pub mod onboarding;
 pub mod settings;
+pub mod whiteboard;
 pub mod widgets;
 pub mod window;

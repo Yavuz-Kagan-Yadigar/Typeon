@@ -397,6 +397,9 @@ class MediaViewerActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        // The tick used to keep hitting duration/currentPosition and the slider
+        // 3.3×/s after Home or screen-off; it is re-armed in `onResume`.
+        videoHandler.removeCallbacks(videoProgressRunnable)
         // VideoView releases the player when its surface goes away (screen
         // off): `isPlaying` then throws IllegalStateException.
         try {
@@ -405,6 +408,13 @@ class MediaViewerActivity : AppCompatActivity() {
                 if (it.isPlaying) it.pause()
             }
         } catch (e: IllegalStateException) { }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (videoMediaPlayer == null) return
+        videoHandler.removeCallbacks(videoProgressRunnable)
+        videoHandler.post(videoProgressRunnable)
     }
 
     override fun onDestroy() {

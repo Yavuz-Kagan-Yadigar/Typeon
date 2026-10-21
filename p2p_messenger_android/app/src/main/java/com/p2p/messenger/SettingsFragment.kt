@@ -148,7 +148,10 @@ class SettingsFragment : Fragment() {
     private var ownAvatarBytes: ByteArray? = null
     private var displayNameValue: TextView? = null
 
-    /** Spec dışı, kullanıcı isteği (Tor): durum etiketi + periyodik yoklama. */
+    /** Spec dışı, kullanıcı isteği (Tor): durum etiketi + periyodik yoklama.
+     *  Yoklama `onResume`da başlar, `onPause`'da BİTER: view yaratıldığı andan
+     *  itibaren 2 sn'de bir çalışan bir JNI yoklaması, uygulama arka
+     *  plandayken de sürüyordu (pilde ve çekirdek kilidinde gereksiz iş). */
     private var torStatusView: TextView? = null
     private val torStatusHandler = Handler(Looper.getMainLooper())
     private val torStatusRunnable = object : Runnable {
@@ -331,8 +334,10 @@ class SettingsFragment : Fragment() {
         torSwitch.setOnCheckedChangeListener { _, isChecked ->
             P2PService.setTorEnabled(requireContext(), isChecked)
             Toast.makeText(requireContext(), R.string.tor_restart_needed, Toast.LENGTH_LONG).show()
+            if (!isChecked) Toast.makeText(requireContext(), R.string.tor_off_no_network, Toast.LENGTH_LONG).show()
         }
-        startTorStatusPolling()
+        // Yoklama `onResume`'da başlar (aşağıda) — view yaratılırken değil:
+        // uygulama arka plandayken de sürmesin.
 
         // Spec dışı, güvenlik denetimi devamı: bkz. SECURITY.md
         // "Cross-network connectivity" notu — organik olarak keşfedilen bir
@@ -856,9 +861,14 @@ class SettingsFragment : Fragment() {
                     }
                     val current = currentField.text.toString()
                     lifecycleScope.launch(Dispatchers.IO) {
-                        val currentOk = !hasExisting || AppLock.verify(context, current)
+                        val waitSec = if (hasExisting) AppLock.retryWaitSeconds(context) else 0
+                        val currentOk = !hasExisting || AppLock.verifyThrottled(context, current)
                         if (currentOk) AppLock.setPassword(context, newPassword)
                         withContext(Dispatchers.Main) {
+                            if (waitSec > 0) {
+                                Toast.makeText(context, getString(R.string.error_app_lock_wait, waitSec), Toast.LENGTH_LONG).show()
+                                return@withContext
+                            }
                             val messageRes = if (currentOk) {
                                 R.string.msg_app_lock_changed
                             } else {
@@ -1378,23 +1388,41 @@ class SettingsFragment : Fragment() {
         torStatusHandler.post(torStatusRunnable)
     }
 
+    /** bkz. `torStatusRunnable` — yoklama yalnızca ekran öndeyken çalışır. */
+    override fun onResume() {
+        super.onResume()
+        startTorStatusPolling()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        torStatusHandler.removeCallbacks(torStatusRunnable)
+    }
+
     private fun updateTorStatusLabel() {
         val label = torStatusView ?: return
-        val raw = try {
-            P2PLib.torStatus()
-        } catch (e: Exception) {
-            "failed"
-        }
-        val state = raw.substringBefore('|')
-        label.text = when (state) {
-            "bootstrapping" -> getString(R.string.tor_status_bootstrapping)
-            "ready" -> {
-                val host = raw.substringAfter('|', "")
-                if (host.isNotEmpty()) getString(R.string.tor_status_ready) + "\n" + host
-                else getString(R.string.tor_status_ready)
+        // `torStatus()` bir JNI çağrısı ve çekirdek kilidi alıyor: ana
+        // thread'de yapılmaz.
+        lifecycleScope.launch {
+            val raw = withContext(Dispatchers.IO) {
+                try {
+                    P2PLib.torStatus()
+                } catch (e: Exception) {
+                    "failed"
+                }
             }
-            "failed" -> getString(R.string.tor_status_failed)
-            else -> getString(R.string.tor_status_disabled)
+            if (torStatusView !== label) return@launch
+            val state = raw.substringBefore('|')
+            label.text = when (state) {
+                "bootstrapping" -> getString(R.string.tor_status_bootstrapping)
+                "ready" -> {
+                    val host = raw.substringAfter('|', "")
+                    if (host.isNotEmpty()) getString(R.string.tor_status_ready) + "\n" + host
+                    else getString(R.string.tor_status_ready)
+                }
+                "failed" -> getString(R.string.tor_status_failed)
+                else -> getString(R.string.tor_status_disabled)
+            }
         }
     }
 

@@ -26,8 +26,9 @@ object P2PLib {
      *  key'ler sadece bellekte kalır ve süreç öldüğünde kaybolur. */
     external fun createIdentity(deviceName: String): String
     /** createIdentity sonrası bir kereliğine: az önce üretilen secret key
-     *  bundle'ını (CBOR, plaintext) döner. Rust tarafında bu çağrıdan sonra
-     *  bellekten silinir — tekrar çağrılırsa boş dizi döner. */
+     *  bundle'ını (CBOR, plaintext) döner. Rust tarafında bellekte KALIR
+     *  (diske yazma başarısız olursa yeniden denenebilsin diye) ve ancak
+     *  loadSecretBundle ya da yerel silme ile temizlenir (M-100). */
     external fun getPendingSecretBundle(): ByteArray
     /** Keystore ile şifresi çözülmüş bir secret bundle'ı belleğe yükler —
      *  uygulama açılışında, initDatabase + hasStoredIdentity=true sonrası

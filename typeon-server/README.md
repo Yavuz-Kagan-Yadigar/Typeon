@@ -80,10 +80,13 @@ there is no bespoke config file format:
 | Variable | Default | Meaning |
 |---|---|---|
 | `TYPEON_SERVER_DIR` | `~/.local/share/typeon-server` | data directory |
-| `TYPEON_SERVER_TOR` | `1` | host an onion service |
-| `TYPEON_SERVER_PORT` | `0` | TCP port (ignored when Tor is on) |
+| `TYPEON_SERVER_BUDGET_BYTES` | 16 GiB | total disk the server may use (mail + archive + blobs) |
+| `TYPEON_SERVER_MAX_DEVICES` | `64` | most enrolled devices |
 | `TYPEON_SERVER_NODE` | `0` | also act as a Kademlia server + Circuit Relay v2 |
 | `TYPEON_SERVER_NAME` | `Typeon Server` | shown to clients on connect |
+
+Tor is always on: the server listens on 127.0.0.1 only and is reached through
+its own onion service. There is no clearnet mode.
 
 `data/typeon-server.service` is a ready systemd unit.
 
@@ -92,7 +95,8 @@ there is no bespoke config file format:
     typeon-server join-code                    # the permanent code — publish once
     typeon-server join-code rotate             # invalidate it and print a new one
     typeon-server devices list
-    typeon-server devices revoke <enrollment_id>
+    typeon-server devices revoke <enrollment_id>   # revoke = block the device's key
+    typeon-server devices unblock <enrollment_id>
     typeon-server address
 
 `join-code` prints a single line like
@@ -109,6 +113,11 @@ at most 60 new enrollments per hour are accepted through a public code, and
 `join-code rotate` shuts the door instantly if the code leaks (already-enrolled
 devices keep working — enrollment does not depend on the token).
 
+`devices revoke` blocks the device's enrollment key and PeerId until
+`devices unblock`. The key is made by the device, so a reinstall (new key, new
+PeerId) can enroll again with any live code: rotate the join code as well when
+you want someone out. The Android server app's *Block* does that rotation.
+
 Because the code has to stay printable, the public token is stored in the
 clear. Hashing only ever protected *unused* invites against someone who stole
 the database; a code published on a poster has no such secret to protect.
@@ -121,14 +130,14 @@ the database; a code published on a poster has no such secret to protect.
 Still there for the narrower case: a code you want to burn after a fixed number
 of uses or a fixed number of days. These tokens are stored hashed.
 
-These commands start their own instance to learn the listen address, so stop
-the service first if it is running against the same data directory.
+These commands open only the database, so they work while the server runs:
+the address in a code is the one the running server last advertised.
 
-## With Tor on, the address takes a minute
+## The address takes a minute
 
 The onion address only appears after Arti finishes bootstrapping — usually
-30–60 seconds on first run. `join-code`, `invite new` and `address` wait for it rather than
-printing a code with no address in it, which would be useless.
+30–60 seconds on first run. Until the server has advertised one, `join-code`,
+`invite new` and `address` say so and print nothing; run them again.
 
 ## Android
 

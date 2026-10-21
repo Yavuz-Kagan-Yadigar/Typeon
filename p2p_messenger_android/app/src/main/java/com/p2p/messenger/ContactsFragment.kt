@@ -33,27 +33,67 @@ import org.json.JSONObject
 
 class ContactsFragment : Fragment() {
 
+    companion object {
+        /** Olay geldiğinde listenin yenilenmesi için beklenen süre (bkz.
+         *  `eventListener`): bir olay patlaması TEK yenileme olsun. */
+        private const val EVENT_REFRESH_DEBOUNCE_MS = 1000L
+    }
+
     private lateinit var adapter: ChatAdapter
     private lateinit var placeholder: View
     private lateinit var recycler: RecyclerView
     private lateinit var imgOwnQr: ImageView
     private lateinit var txtOwnIdentityCode: TextView
-    /** bkz. `loadNodeAddressAndGenerateQr` — `getNodeAddress()` swarm
+    /** bkz. `startQrChain` — `getNodeAddress()` swarm
      *  gerçekten dinlemeye başlayana kadar boş dönebilir, bu yüzden ayrı
      *  bir handler ile birkaç kez yeniden denenir (bkz. eski
      *  QrDisplayActivity — bu mantık buraya taşındı). */
     private val qrRetryHandler = Handler(Looper.getMainLooper())
-    /** bkz. `loadNodeAddressAndGenerateQr` — QR ile aynı kaynaktan, "Kodumu/
+    /** bkz. `startQrChain` — QR ile aynı kaynaktan, "Kodumu/
      *  Adresimi kopyala" düğmeleri için ayrıca saklanır. QR üretilene kadar
      *  boş kalabilir (bkz. o fonksiyonun yeniden deneme notu). */
     private var ownNodeAddress: String = ""
     private val refreshHandler = Handler(Looper.getMainLooper())
-    private val refreshRunnable = object : Runnable {
-        override fun run() {
-            refreshList()
-            refreshHandler.postDelayed(this, 5000)
+    /** 5 saniyelik tam yeniden kurma yerine: ekrana dönüşte ve servisten
+     *  bir olay geldiğinde yenilenir (`listContacts` her çağrıda her kişinin
+     *  avatarını hex olarak taşır — 5 saniyede bir bunu yapmak pahalıydı). */
+    /** A refresh is queued (`Handler.hasCallbacks` is API 29, minSdk 26). */
+    @Volatile private var eventRefreshQueued = false
+    private val eventRefreshRunnable = Runnable { eventRefreshQueued = false; refreshList() }
+    private val eventListener: (String) -> Unit = { _ ->
+        if (!eventRefreshQueued) {
+            eventRefreshQueued = true
+            refreshHandler.postDelayed(eventRefreshRunnable, EVENT_REFRESH_DEBOUNCE_MS)
         }
     }
+    /** QR üretim zinciri çalışıyor mu (tek zincir). */
+    @Volatile private var qrChainRunning = false
+
+    /** JNI calls that take the core lock, off the main thread; [done] runs on
+     *  the main thread while the fragment is still attached. */
+    private val worker = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    /** Runs [work] on the worker thread; the executor is gone after
+     *  `onDestroy` (a late callback must not crash the app). */
+    private fun runOnWorker(work: () -> Unit) {
+        try {
+            worker.execute(work)
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // Fragment yok — sonuç zaten gösterecek bir ekran da yok.
+        }
+    }
+
+    private fun <T> offMain(work: () -> T, done: (T) -> Unit) {
+        runOnWorker {
+            val result = try { work() } catch (e: Exception) { return@runOnWorker }
+            refreshHandler.post { if (isAdded && view != null) done(result) }
+        }
+    }
+
+    /** Çekirdek bir hatayı "Error: ..." metniyle döner; kullanıcıya
+     *  gösterilen metin kaynaktan gelir (sabit İngilizce değil). */
+    private fun errorText(result: String): String =
+        getString(R.string.error_with_message, result.removePrefix("Error:").trim())
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
         val view = inflater.inflate(R.layout.fragment_contacts, container, false)
@@ -96,12 +136,20 @@ class ContactsFragment : Fragment() {
             }
         }
         txtOwnIdentityCode = view.findViewById(R.id.txtOwnIdentityCode)
-        txtOwnIdentityCode.text = try {
-            P2PLib.getIdentityCode()
-        } catch (e: Exception) {
-            ""
+        // `getIdentityCode` bir JNI çağrısı: ana thread'de yapılmaz.
+        runOnWorker {
+            val code = try {
+                P2PLib.getIdentityCode()
+            } catch (e: Exception) {
+                ""
+            }
+            refreshHandler.post {
+                if (!isAdded || view == null) return@post
+                txtOwnIdentityCode.text = code
+            }
         }
-        loadNodeAddressAndGenerateQr(attemptsLeft = 10)
+        // The QR chain starts in `onResume` (only while this screen is in
+        // front).
 
         view.findViewById<Button>(R.id.btn_copy_manual_code).setOnClickListener { copyManualAddCode() }
         view.findViewById<Button>(R.id.btn_copy_own_address).setOnClickListener { copyOwnAddress() }
@@ -130,36 +178,87 @@ class ContactsFragment : Fragment() {
     }
 
     /** bkz. dosya başı notu — `getNodeAddress()` boşsa kısa aralıklarla
-     *  yeniden dener (sabit bir 0.0.0.0/tcp/0 asla dial edilemez). */
-    private fun loadNodeAddressAndGenerateQr(attemptsLeft: Int) {
-        if (!isAdded) return
-        // Two JNI calls and a 1200x1200 QR bitmap: off the main thread.
-        Thread {
+     *  yeniden dener (sabit bir 0.0.0.0/tcp/0 asla dial edilemez).
+     *  Zincir TEK'tir: `qrChainRunning` ikinci bir zinciri başlatmayı
+     *  engeller (her yeniden denemede ayrı bir thread açılıyordu). */
+    private fun startQrChain(attemptsLeft: Int) {
+        if (!isAdded || qrChainRunning) return
+        qrChainRunning = true
+        qrChainStep(attemptsLeft)
+    }
+
+    /** Zincirin bir adımı; sonraki adım ana thread'den planlanır. */
+    private fun qrChainStep(attemptsLeft: Int) {
+        // Two JNI calls and a 1200x1200 QR bitmap: off the main thread (and
+        // on the ONE worker thread — a new thread per attempt was spawning
+        // every 500 ms while the node address was unknown).
+        runOnWorker {
             val nodeAddress = try {
                 P2PLib.getNodeAddress()
             } catch (e: Exception) {
                 ""
             }
             val retryFast = nodeAddress.isEmpty() && attemptsLeft > 0
-            val bitmap = if (retryFast) null else try {
-                P2PLib.generateQrPacket(nodeAddress).takeIf { it.isNotEmpty() }?.let { encodeBinaryAsQrBitmap(it, 1200, 1200) }
+            val packet = if (retryFast) ByteArray(0) else try {
+                P2PLib.generateQrPacket(nodeAddress)
+            } catch (e: Exception) {
+                ByteArray(0)
+            }
+            val bitmap = if (packet.isEmpty()) null else try {
+                encodeBinaryAsQrBitmap(packet, 1200, 1200)
             } catch (e: Exception) {
                 null
             }
             qrRetryHandler.post {
-                if (!isAdded || view == null) return@post
+                // Paused meanwhile: the chain stops (`onResume` restarts it).
+                if (!isAdded || view == null || !isResumed) {
+                    qrChainRunning = false
+                    return@post
+                }
                 if (retryFast) {
-                    qrRetryHandler.postDelayed({ loadNodeAddressAndGenerateQr(attemptsLeft - 1) }, 500)
+                    qrRetryHandler.postDelayed({ qrChainStep(attemptsLeft - 1) }, 500)
                     return@post
                 }
                 // Tor not ready after the fast retries: show what we have, but keep
                 // trying. A code without the rendezvous address was never refreshed
                 // and pairing from it hung.
-                if (nodeAddress.isEmpty()) qrRetryHandler.postDelayed({ loadNodeAddressAndGenerateQr(0) }, 3000)
+                if (nodeAddress.isEmpty()) {
+                    qrRetryHandler.postDelayed({ qrChainStep(0) }, 3000)
+                    return@post
+                }
+                qrChainRunning = false
                 ownNodeAddress = nodeAddress
                 bitmap?.let { imgOwnQr.setImageBitmap(it) }
             }
-        }.start()
+        }
+    }
+
+    /**
+     * Taze bir eşleşme paketi (ve QR bitmap'i): çekirdeğin kabul ettiği
+     * eşleşme kodu yalnızca bir gün geçerliydi ve ekrandaki kod, çekirdekte
+     * kayıtlı olan pakete UYMUYORDU — önceki `onResume` çağrısı yeni paketi
+     * ÜRETİP sonucu atıyordu. Artık paket kullanılıyor ve ekrana konuyor.
+     * JNI çağrıları ana thread'de yapılmaz.
+     */
+    private fun refreshOwnQrCode() {
+        val address = ownNodeAddress
+        if (address.isEmpty()) return
+        runOnWorker {
+            val packet = try {
+                P2PLib.generateQrPacket(address)
+            } catch (e: Exception) {
+                ByteArray(0)
+            }
+            val bitmap = if (packet.isEmpty()) null else try {
+                encodeBinaryAsQrBitmap(packet, 1200, 1200)
+            } catch (e: Exception) {
+                null
+            }
+            qrRetryHandler.post {
+                if (!isAdded || view == null) return@post
+                bitmap?.let { imgOwnQr.setImageBitmap(it) }
+            }
+        }
     }
 
     /** bkz. eski QrDisplayActivity.encodeBinaryAsQrBitmap — birebir aynı. */
@@ -215,13 +314,18 @@ class ContactsFragment : Fragment() {
 
     /** The code of any contact, not only of one that came through a group. */
     private fun showSafetyCode(message: ChatAdapter.ChatMessage) {
-        val code = try { P2PLib.contactSafetyCode(message.identityId) } catch (e: Exception) { "" }
-        if (code.isEmpty()) return
-        AlertDialog.Builder(requireContext())
-            .setTitle(message.displayName)
-            .setMessage(getString(R.string.lbl_safety_code, code))
-            .setPositiveButton(android.R.string.ok, null)
-            .show()
+        // A JNI call that takes the core lock: off the main thread.
+        offMain({
+            try { P2PLib.contactSafetyCode(message.identityId) } catch (e: Exception) { "" }
+        }) { code ->
+            if (code.isNotEmpty()) {
+                AlertDialog.Builder(requireContext())
+                    .setTitle(message.displayName)
+                    .setMessage(getString(R.string.lbl_safety_code, code))
+                    .setPositiveButton(android.R.string.ok, null)
+                    .show()
+            }
+        }
     }
 
     /**
@@ -235,16 +339,15 @@ class ContactsFragment : Fragment() {
             .setTitle(R.string.confirm_block_title)
             .setMessage(getString(R.string.confirm_block_body, message.displayName))
             .setPositiveButton(R.string.action_block) { _, _ ->
-                val result = try {
-                    P2PLib.blockIdentity(identityId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
-                } else {
-                    Toast.makeText(requireContext(), R.string.msg_identity_blocked, Toast.LENGTH_LONG).show()
-                    refreshList()
+                offMain({
+                    try { P2PLib.blockIdentity(identityId) } catch (e: Exception) { "Error: ${e.message}" }
+                }) { result ->
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(requireContext(), errorText(result), Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(requireContext(), R.string.msg_identity_blocked, Toast.LENGTH_LONG).show()
+                        refreshList()
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -252,12 +355,20 @@ class ContactsFragment : Fragment() {
     }
 
     private fun unblockIdentity(message: ChatAdapter.ChatMessage) {
-        try {
-            P2PLib.unblockIdentity(message.identityId)
-            Toast.makeText(requireContext(), R.string.msg_identity_unblocked, Toast.LENGTH_SHORT).show()
-            refreshList()
-        } catch (e: Exception) {
-            Toast.makeText(requireContext(), "Error: ${e.message}", Toast.LENGTH_LONG).show()
+        offMain({
+            try {
+                P2PLib.unblockIdentity(message.identityId)
+                null
+            } catch (e: Exception) {
+                "Error: ${e.message}"
+            }
+        }) { error ->
+            if (error != null) {
+                Toast.makeText(requireContext(), errorText(error), Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(requireContext(), R.string.msg_identity_unblocked, Toast.LENGTH_SHORT).show()
+                refreshList()
+            }
         }
     }
 
@@ -289,16 +400,15 @@ class ContactsFragment : Fragment() {
             .setTitle(R.string.confirm_trust_title)
             .setMessage(body)
             .setPositiveButton(R.string.action_trust_contact) { _, _ ->
-                val result = try {
-                    P2PLib.trustContact(message.realContactId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
-                } else {
-                    Toast.makeText(requireContext(), R.string.msg_contact_trusted, Toast.LENGTH_SHORT).show()
-                    refreshList()
+                offMain({
+                    try { P2PLib.trustContact(message.realContactId) } catch (e: Exception) { "Error: ${e.message}" }
+                }) { result ->
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(requireContext(), errorText(result), Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(requireContext(), R.string.msg_contact_trusted, Toast.LENGTH_SHORT).show()
+                        refreshList()
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -311,16 +421,16 @@ class ContactsFragment : Fragment() {
         AlertDialog.Builder(requireContext())
             .setMessage(R.string.confirm_revoke_device)
             .setPositiveButton(R.string.action_revoke_device) { _, _ ->
-                val result = try {
-                    P2PLib.revokeContactDevice(message.realContactId, message.contactId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(requireContext(), R.string.msg_device_revoked, Toast.LENGTH_SHORT).show()
-                    refreshList()
+                offMain({
+                    try { P2PLib.revokeContactDevice(message.realContactId, message.contactId) }
+                    catch (e: Exception) { "Error: ${e.message}" }
+                }) { result ->
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(requireContext(), errorText(result), Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(requireContext(), R.string.msg_device_revoked, Toast.LENGTH_SHORT).show()
+                        refreshList()
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -331,16 +441,16 @@ class ContactsFragment : Fragment() {
         AlertDialog.Builder(requireContext())
             .setMessage(R.string.confirm_clear_chat_history)
             .setPositiveButton(R.string.action_clear_chat_history) { _, _ ->
-                val result = try {
-                    P2PLib.clearChatHistory(message.realContactId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(requireContext(), R.string.msg_chat_history_cleared, Toast.LENGTH_SHORT).show()
-                    refreshList()
+                offMain({
+                    try { P2PLib.clearChatHistory(message.realContactId) }
+                    catch (e: Exception) { "Error: ${e.message}" }
+                }) { result ->
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(requireContext(), errorText(result), Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(requireContext(), R.string.msg_chat_history_cleared, Toast.LENGTH_SHORT).show()
+                        refreshList()
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -359,16 +469,16 @@ class ContactsFragment : Fragment() {
         AlertDialog.Builder(requireContext())
             .setMessage(R.string.confirm_delete_contact_step2)
             .setPositiveButton(R.string.action_delete_contact) { _, _ ->
-                val result = try {
-                    P2PLib.deleteContact(message.realContactId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(requireContext(), result, Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(requireContext(), R.string.msg_contact_deleted, Toast.LENGTH_SHORT).show()
-                    refreshList()
+                offMain({
+                    try { P2PLib.deleteContact(message.realContactId) }
+                    catch (e: Exception) { "Error: ${e.message}" }
+                }) { result ->
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(requireContext(), errorText(result), Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(requireContext(), R.string.msg_contact_deleted, Toast.LENGTH_SHORT).show()
+                        refreshList()
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -378,14 +488,25 @@ class ContactsFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         // The core accepts a stranger's pairing only for a day after the code
-        // was produced; this view can live longer than that.
-        if (ownNodeAddress.isNotEmpty()) runCatching { P2PLib.generateQrPacket(ownNodeAddress) }
-        refreshHandler.post(refreshRunnable)
+        // was produced; this view can live longer than that — refresh the
+        // code (and the QR that shows it) when the screen comes back.
+        refreshOwnQrCode()
+        // The QR is produced when the node address is known; the chain only
+        // runs while this screen is in front (bkz. `onPause`).
+        if (ownNodeAddress.isEmpty()) startQrChain(attemptsLeft = 10)
+        refreshList()
+        com.p2p.messenger.service.P2PService.addMessageListener(eventListener)
     }
 
     override fun onPause() {
         super.onPause()
-        refreshHandler.removeCallbacks(refreshRunnable)
+        com.p2p.messenger.service.P2PService.removeMessageListener(eventListener)
+        refreshHandler.removeCallbacks(eventRefreshRunnable)
+        eventRefreshQueued = false
+        // The QR retry chain must not keep the core busy while the app is in
+        // the background.
+        qrRetryHandler.removeCallbacksAndMessages(null)
+        qrChainRunning = false
     }
 
     override fun onDestroyView() {
@@ -393,6 +514,17 @@ class ContactsFragment : Fragment() {
         // The next view starts with an empty adapter.
         lastContactsJson = null
         qrRetryHandler.removeCallbacksAndMessages(null)
+        // The adapter holds EVERY contact's avatar bytes and the QR bitmap is
+        // ~2.9 MB: they must not stay alive while another tab is shown.
+        if (::adapter.isInitialized) adapter.submitList(emptyList())
+        if (::imgOwnQr.isInitialized) imgOwnQr.setImageDrawable(null)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // The worker is a live non-daemon thread: shut it down with the
+        // fragment.
+        worker.shutdownNow()
     }
 
     private var lastContactsJson: String? = null
@@ -401,20 +533,26 @@ class ContactsFragment : Fragment() {
      *  pin...): run once more, the running one may have read the old state. */
     private var refreshAgain = false
 
-    /** Every 5 s: off the main thread (the JNI call takes the core lock), and
-     *  an unchanged list is not parsed and its avatars not decoded again. */
+    /** Ekrana dönüşte ve servisten olay geldiğinde (5 saniyede bir değil):
+     *  ana thread dışında (JNI çağrısı çekirdek kilidini alır) ve
+     *  değişmemiş bir liste yeniden ayrıştırılmaz, avatarları yeniden
+     *  çözülmez. */
     private fun refreshList() {
         if (refreshing) { refreshAgain = true; return }
-        val viaGroupLabel = context?.getString(R.string.contact_added_via_group) ?: return
+        val ctx = context ?: return
+        val viaGroupLabel = ctx.getString(R.string.contact_added_via_group)
+        // The fallback for a contact without a name — the same text in both
+        // tabs, and it comes from the resources.
+        val unknownLabel = ctx.getString(R.string.lbl_unknown)
         refreshing = true
-        Thread {
+        runOnWorker {
             val json = try {
                 P2PLib.listContacts()
             } catch (e: Exception) {
                 "[]"
             }
             val items = if (json == lastContactsJson) null else try {
-                parseContacts(json, viaGroupLabel)
+                parseContacts(json, viaGroupLabel, unknownLabel)
             } catch (e: Exception) {
                 null
             }
@@ -427,18 +565,19 @@ class ContactsFragment : Fragment() {
                 recycler.visibility = if (items.isEmpty()) View.GONE else View.VISIBLE
                 adapter.submitList(items)
             }
-        }.start()
+        }
     }
 
-    private fun parseContacts(json: String, viaGroupLabel: String): List<ChatAdapter.ChatMessage> {
+    private fun parseContacts(json: String, viaGroupLabel: String, unknownLabel: String): List<ChatAdapter.ChatMessage> {
         val array = try {
             JSONArray(json)
         } catch (e: Exception) {
             JSONArray()
         }
-
+        // The fallback is the same in both tabs (it used to be "Unknown" here
+        // and "Bilinmeyen" in the chats tab).
         val duplicateNames = com.p2p.messenger.util.ContactNames.duplicates(
-            (0 until array.length()).map { array.getJSONObject(it).optString("display_name", "Unknown") }
+            (0 until array.length()).map { array.getJSONObject(it).optString("display_name", unknownLabel) }
         )
         val items = (0 until array.length()).map { i ->
             val obj = array.getJSONObject(i)
@@ -453,7 +592,7 @@ class ContactsFragment : Fragment() {
             ChatAdapter.ChatMessage(
                 contactId = fingerprint,
                 displayName = com.p2p.messenger.util.ContactNames.label(
-                    obj.optString("display_name", "Unknown"), obj.optString("identity_id"), duplicateNames
+                    obj.optString("display_name", unknownLabel), obj.optString("identity_id"), duplicateNames
                 ),
                 lastMessage = if (addedViaGroup) viaGroupLabel else "",
                 timestamp = 0L,
@@ -482,17 +621,15 @@ class ContactsFragment : Fragment() {
             .setPositiveButton(R.string.action_add) { _, _ ->
                 val text = input.text.toString()
                 // Rust el sıkışması uzun sürebilir: ana thread'i bloklama.
-                Thread {
-                    val result = try { P2PLib.processManualEntry(text) } catch (e: Throwable) { "Error: ${e.message}" }
-                    activity?.runOnUiThread {
-                        if (!isAdded) return@runOnUiThread
-                        if (result.startsWith("Error:")) {
-                            Toast.makeText(requireContext(), result, Toast.LENGTH_LONG).show()
-                        } else {
-                            openChatForPairingResult(result)
-                        }
+                offMain({
+                    try { P2PLib.processManualEntry(text) } catch (e: Throwable) { "Error: ${e.message}" }
+                }) { result ->
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(requireContext(), errorText(result), Toast.LENGTH_LONG).show()
+                    } else {
+                        openChatForPairingResult(result)
                     }
-                }.start()
+                }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -519,7 +656,10 @@ class ContactsFragment : Fragment() {
         val intent = Intent(requireContext(), ChatActivity::class.java)
         intent.putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, deviceFingerprint)
         intent.putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, deviceName.ifEmpty { deviceFingerprint.take(8) })
-        startActivity(intent)
+        // Bekleyen paylaşımı da bu sohbete bağla (her açılış yolunda olduğu
+        // gibi): paylaşılan içerik, tarayıcı/manuel ekleme yolundan sonra
+        // kaybolup daha sonra ilgisiz bir sohbete yapışıyordu.
+        startActivity(com.p2p.messenger.util.ShareIntake.attachTo(intent))
     }
 
     /** bkz. `btn_copy_manual_code` — karşı taraf QR tarayamıyorsa (ör.
@@ -541,7 +681,7 @@ class ContactsFragment : Fragment() {
             Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
             return
         }
-        com.p2p.messenger.util.copySensitive(requireContext(), "Typeon pairing code", code)
+        com.p2p.messenger.util.copySensitive(requireContext(), getString(R.string.lbl_clipboard_pairing_code), code)
         Toast.makeText(requireContext(), R.string.msg_manual_code_copied, Toast.LENGTH_LONG).show()
     }
 
@@ -565,7 +705,7 @@ class ContactsFragment : Fragment() {
             Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
             return
         }
-        com.p2p.messenger.util.copySensitive(requireContext(), "Typeon pairing code", code)
+        com.p2p.messenger.util.copySensitive(requireContext(), getString(R.string.lbl_clipboard_pairing_code), code)
         Toast.makeText(requireContext(), R.string.msg_own_address_copied, Toast.LENGTH_LONG).show()
     }
 }

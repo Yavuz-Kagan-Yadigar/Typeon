@@ -240,6 +240,8 @@ class MergedBubbleDecoration(
      * drawable'larıyla aynı geometri (üç köşe yuvarlak, "kuyruk" köşesi
      * küçük), ama gradyanla doldurulabilmesi için `Path` olarak.
      */
+    private val singleRadii = FloatArray(8)
+
     private fun buildSinglePath(isMine: Boolean, outer: Float) {
         path.reset()
         val top = tops[0]
@@ -250,11 +252,11 @@ class MergedBubbleDecoration(
         // Kuyruk köşesi: kendi mesajlarımızda alt-sağ, gelenlerde alt-sol.
         val tail = r * 0.22f
         scratch.set(left, top, right, bottom)
-        val radii = if (isMine) {
-            floatArrayOf(r, r, r, r, tail, tail, r, r)
-        } else {
-            floatArrayOf(r, r, r, r, r, r, tail, tail)
-        }
+        // L-191: reused array, no allocation per frame.
+        val radii = singleRadii
+        radii[0] = r; radii[1] = r; radii[2] = r; radii[3] = r
+        radii[4] = if (isMine) tail else r; radii[5] = radii[4]
+        radii[6] = if (isMine) r else tail; radii[7] = radii[6]
         path.addRoundRect(scratch, radii, Path.Direction.CW)
     }
 

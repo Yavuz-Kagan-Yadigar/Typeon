@@ -31,7 +31,7 @@ key.properties
 
 # Rust build artifacts
 target/
-Cargo.lock
+# Cargo.lock is tracked: reproducible builds (MERGED_REVIEWS M-151)
 
 # CMake
 CMakeFiles/
@@ -80,3 +80,10 @@ coverage.xml
 # Flatpak build output (source in Linux/ is tracked separately)
 /Linux/packaging/repo/
 /Linux/packaging/.flatpak-builder/
+
+# Release artifacts (copied by hand, see HANDOFF release rule)
+dist/
+*.flatpak
+
+# Fix-pass backups of pre-edit files (local only)
+reviews/fixpass-2026-10-20/backups/

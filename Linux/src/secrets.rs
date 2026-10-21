@@ -293,12 +293,13 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .mode(0o600)
         .open(&tmp)
         .map_err(|e| e.to_string())?;
+    // A leftover temp file keeps its old mode through `open`: chmod BEFORE
+    // any secret byte is written, so the renamed vault is never not-0600.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
     file.write_all(bytes).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
-    // An existing file keeps its old mode through `open`, so re-assert it.
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     Ok(())
 }
 

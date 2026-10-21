@@ -43,7 +43,7 @@
          Node modu şimdiye kadar sadece DHT routing'e katkı sağlıyordu,
          gerçek bir röle görevi görmüyordu (bkz. SECURITY.md "Cross-network
          connectivity" notu). Artık gerçekten doğru. -->
-    <string name="lbl_node_mode_desc">Contributes to DHT routing AND blindly relays (encrypted) traffic for others on the network — it can never see your content, but it uses the bandwidth of whoever you relay for, and can see who they connect to.</string>
+    <string name="lbl_node_mode_desc">Blindly relays (encrypted) traffic for others on the network (Circuit Relay v2 only; no DHT contribution) — it can never see your content, but it uses the bandwidth of whoever you relay for, and can see who they connect to.</string>
     <string name="lbl_history_storage_limit">Attachment storage limit</string>
     <string name="lbl_history_storage_limit_desc">Node Mode auto-downloads every file offered to it, which can grow without bound. Once total attachment storage passes this limit, the oldest files are deleted first to make room.</string>
     <string name="lbl_relay_address">Known relay address</string>
@@ -247,6 +247,8 @@
     <string name="msg_attachment_downloading">Downloading…</string>
     <string name="msg_attachment_failed">Download failed</string>
     <string name="error_attachment_open_failed">Couldn\'t open file</string>
+    <!-- %1$s = error detail from the core/system. -->
+    <string name="error_with_message">Error: %1$s</string>
 
     <string name="action_save_to_downloads">Save to Downloads</string>
     <string name="action_copy_image">Copy image</string>
@@ -291,6 +293,7 @@
     <string name="msg_enter_username">Enter a username to create your identity.</string>
     <string name="action_create">Create</string>
     <string name="msg_identity_read_failed">Couldn\'t read identity keys. If you have a recovery file, you may need to use it.</string>
+    <string name="error_identity_persist_failed">Couldn\'t save the identity keys. The setup will start over — if you have a recovery file, you may need to use it.</string>
     <!-- %s = first 8 chars of the new identity id. -->
     <string name="lbl_id_short">ID: %s…</string>
     <!-- %s = short identity code. -->
@@ -317,6 +320,8 @@
     <!-- %s = file name. -->
     <string name="error_file_too_large_named">%s: exceeds the 4GB limit</string>
     <string name="action_add_contact_qr">Add Contact via QR</string>
+    <!-- Clipboard label of the pairing code. -->
+    <string name="lbl_clipboard_pairing_code">Typeon pairing code</string>
     <string name="lbl_scan_qr_instructions">Scan QR Code to Connect</string>
     <string name="lbl_initializing">Initializing…</string>
 
@@ -488,4 +493,7 @@
     <string name="link_device_code_shown">Compare code: %1$s\nYour other device shows the same code before you approve.</string>
     <string name="link_device_code_check">Compare code: %1$s\nApprove only if the new device shows the same code.</string>
     <string name="notif_new_message">New message</string>
+    <string name="title_scan_qr">Scan QR</string>
+    <string name="tor_off_no_network">Tor is off: the network will not start without Tor.</string>
+    <string name="msg_pairing_contact_limit">Pairing failed: your contact list is full.</string>
 </resources>

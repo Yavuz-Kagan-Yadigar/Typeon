@@ -786,7 +786,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                 replyTarget.isDeleted -> null
                 else -> replyTarget.attachment
                     ?.let { holder.itemView.context.getString(R.string.lbl_attachment_reply_preview, it.fileName) }
-                    ?: replyTarget.text.take(120)
+                    ?: replyTarget.text.takeWholeChars(120)
             }
             holder.txtReplyQuoteText.text = quoteText ?: holder.itemView.context.getString(R.string.msg_deleted)
             // Kullanıcı raporu ("alıntı mesajlar beyaz görünüyor").
@@ -1000,9 +1000,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             // Sender-controlled bytes: bounded decode (see ImagePreview.decodeBytes).
             // ponytail: the first bind still decodes on the main thread;
             // decode on a worker if one preview alone ever janks.
-            val bitmap = previewCache.get(attachment.fileId)
+            // L-84: keyed by the bytes too, a re-sent file with the same id gets its new preview.
+            val cacheKey = attachment.fileId + ":" + preview.contentHashCode()
+            val bitmap = previewCache.get(cacheKey)
                 ?: com.p2p.messenger.util.ImagePreview.decodeBytes(preview, 1024)
-                    ?.also { previewCache.put(attachment.fileId, it) }
+                    ?.also { previewCache.put(cacheKey, it) }
             if (bitmap != null) {
                 holder.imgAttachmentThumbnail.visibility = View.VISIBLE
                 holder.imgAttachmentThumbnail.setImageBitmap(bitmap)
@@ -1217,3 +1219,7 @@ private class ConfirmUrlSpan(url: String) : android.text.style.URLSpan(url) {
         }
     }
 }
+
+/** `take(n)` on UTF-16 can cut a surrogate pair (emoji) in half; back off one unit then. */
+fun String.takeWholeChars(n: Int): String =
+    if (length <= n) this else substring(0, if (n > 0 && Character.isHighSurrogate(this[n - 1])) n - 1 else n)

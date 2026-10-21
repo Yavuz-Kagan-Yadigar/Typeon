@@ -38,7 +38,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use ml_dsa::{
     EncodedSignature, EncodedVerifyingKey, MlDsa87, Signature as MlDsaSignature,
     Verifier as MlDsaVerifier, VerifyingKey as MlDsaVerifyingKey,
@@ -85,8 +85,10 @@ const NOTIFY_RESEND_MS: u64 = 20_000;
 /// ANLIK bir sınır: amaç, tek bir eşin sunucunun disk/CPU'sunu tek başına
 /// tüketmesini engellemek.
 const RATE_WINDOW_MS: u64 = 60_000;
-/// File-chunk requests per connection per `RATE_WINDOW_MS` (see `serve_chunk`).
-const CHUNKS_PER_MINUTE: u32 = 6_000;
+/// File-chunk requests per peer per `RATE_WINDOW_MS` (see `serve_chunk`).
+/// Tor carries about one 256 KiB chunk a second; 10/s is far above a real
+/// download and caps one peer at ~2.5 MiB/s of disk reads.
+const CHUNKS_PER_MINUTE: u32 = 600;
 
 /// Call-media relay budget per client: bytes per `RELAY_WINDOW_MS`. ~6.7
 /// Mbit/s — several times a 480p video call, so it only stops a flood. Relay
@@ -131,6 +133,22 @@ const MAX_CONNECTIONS_PER_PEER: u32 = 8;
 const UNENROLLED_GRACE_MS: u64 = 60_000;
 /// `BlobFinish` hashes running at once; each reads a whole blob from disk.
 const MAX_HASH_JOBS: usize = 4;
+/// Repeated `BlobFinish` requests waiting on one running hash.
+const MAX_HASH_WAITERS: usize = 8;
+/// Call-relay streams open at once, server-wide. A stream of a peer that is
+/// not enrolled ends at once; an enrolled peer holds one.
+const MAX_RELAY_STREAMS: usize = 256;
+/// Of those, one peer at once (a call holds one; the rest wait out a replace).
+const MAX_RELAY_STREAMS_PER_PEER: usize = 4;
+/// `Enroll`/`Rebind` hybrid signature checks per `RATE_WINDOW_MS`,
+/// server-wide: ML-DSA-87 is the expensive step and PeerIds are free, so a
+/// per-peer limit bounds nothing.
+/// ponytail: a flood also starves real enrollments for the window (mail and
+/// enrolled devices are not affected); per-invite budgets if that matters.
+const ENROLL_VERIFIES_PER_MINUTE: u32 = 120;
+/// 2026-01-01 UTC. A wall clock before this is wrong (phone booted with a
+/// 1970/2020 RTC): no TTL sweep runs on it.
+const SANE_WALL_FLOOR_MS: i64 = 1_767_225_600_000;
 
 /// `meta` key: the addresses the running server last advertised, one per
 /// line. Management commands read it instead of starting a second server.
@@ -156,7 +174,7 @@ pub fn create_invite(store: &Store, label: &str, uses: i64, ttl_ms: i64) -> Resu
     // Jeton HASH'lenmiş saklanır: sunucu diski ele geçse bile henüz
     // kullanılmamış davetler kullanılamaz.
     let now = now_ms();
-    let expires = if ttl_ms <= 0 { 0 } else { now + ttl_ms };
+    let expires = if ttl_ms <= 0 { 0 } else { now.saturating_add(ttl_ms) };
     store.create_invite(Sha256::digest(token).as_slice(), label, uses, expires, now)?;
     Ok(server_proto::format_server_invite(&addrs, &hex::encode(token)))
 }
@@ -311,43 +329,75 @@ enum RelayEvent {
 /// `events` is bounded and awaited: a peer that floods frames is slowed down
 /// by its own stream instead of growing a queue in memory.
 async fn accept_relay_streams(mut incoming: libp2p_stream::IncomingStreams, events: tokio::sync::mpsc::Sender<RelayEvent>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let live = std::sync::Arc::new(AtomicUsize::new(0));
+    let per_peer = std::sync::Arc::new(std::sync::Mutex::new(HashMap::<PeerId, usize>::new()));
     let mut next_id = 0u64;
     while let Some((peer, stream)) = incoming.next().await {
+        // Dropping the stream closes it: no task, no queue for it.
+        if live.load(Ordering::Relaxed) >= MAX_RELAY_STREAMS {
+            continue;
+        }
+        {
+            let mut m = per_peer.lock().unwrap_or_else(|e| e.into_inner());
+            let n = m.entry(peer).or_insert(0);
+            if *n >= MAX_RELAY_STREAMS_PER_PEER {
+                continue;
+            }
+            *n += 1;
+        }
+        live.fetch_add(1, Ordering::Relaxed);
         next_id += 1;
         let id = next_id;
         let events = events.clone();
+        let live = live.clone();
+        let per_peer = per_peer.clone();
         tokio::spawn(async move {
-            let (mut rd, wr) = futures::AsyncReadExt::split(stream);
-            let (tx, rx) = tokio::sync::mpsc::channel(LINK_QUEUE);
-            if events.send(RelayEvent::Open { peer, id, tx }).await.is_err() {
-                return;
-            }
-            let mut pump = tokio::spawn(pump_writes(wr, rx));
-            loop {
-                let frame = tokio::select! {
-                    // The loop dropped `tx` (not enrolled, revoked, replaced):
-                    // stop reading, or the peer keeps feeding `events`.
-                    _ = &mut pump => break,
-                    frame = read_frame(&mut rd) => frame,
-                };
-                let Ok((mailbox, data)) = frame else { break };
-                let Ok(mailbox) = String::from_utf8(mailbox) else { break };
-                if events.send(RelayEvent::Frame { peer, mailbox, data }).await.is_err() {
-                    break;
+            relay_stream(peer, id, stream, events).await;
+            live.fetch_sub(1, Ordering::Relaxed);
+            let mut m = per_peer.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(n) = m.get_mut(&peer) {
+                *n -= 1;
+                if *n == 0 {
+                    m.remove(&peer);
                 }
             }
-            let _ = events.send(RelayEvent::Closed { peer, id }).await;
         });
     }
+}
+
+/// One relay stream: frames in -> `RelayEvent::Frame`, writer queue out.
+async fn relay_stream(peer: PeerId, id: u64, stream: libp2p::Stream, events: tokio::sync::mpsc::Sender<RelayEvent>) {
+    let (mut rd, wr) = futures::AsyncReadExt::split(stream);
+    let (tx, rx) = tokio::sync::mpsc::channel(LINK_QUEUE);
+    if events.send(RelayEvent::Open { peer, id, tx }).await.is_err() {
+        return;
+    }
+    let mut pump = tokio::spawn(pump_writes(wr, rx));
+    loop {
+        let frame = tokio::select! {
+            // The loop dropped `tx` (not enrolled, revoked, replaced):
+            // stop reading, or the peer keeps feeding `events`.
+            _ = &mut pump => break,
+            frame = read_frame(&mut rd) => frame,
+        };
+        let Ok((mailbox, data)) = frame else { break };
+        let Ok(mailbox) = String::from_utf8(mailbox) else { break };
+        if events.send(RelayEvent::Frame { peer, mailbox, data }).await.is_err() {
+            break;
+        }
+    }
+    let _ = events.send(RelayEvent::Closed { peer, id }).await;
 }
 
 // ---------------------------------------------------------------------------
 // Çekirdek
 // ---------------------------------------------------------------------------
 
-/// Bağlantı başına anlık durum.
+/// PeerId başına anlık durum (bir PeerId'nin bütün bağlantıları paylaşır;
+/// challenge son bağlantı kapanınca silinir).
 struct ConnState {
-    /// Bu bağlantıya verilmiş, henüz kullanılmamış `Enroll` challenge'ı.
+    /// Bu PeerId'ye verilmiş, henüz kullanılmamış `Enroll` challenge'ı.
     challenge: Option<Vec<u8>>,
     /// `mono_ms`.
     window_start: u64,
@@ -404,6 +454,8 @@ pub struct ServerCore {
     mail_recount_due: bool,
     /// (`mono_ms` of the read, bytes) for `total_budget_exceeded`.
     total_cache: std::cell::Cell<(u64, u64)>,
+    /// (window start `mono_ms`, checks) for `ENROLL_VERIFIES_PER_MINUTE`.
+    verify_window: (u64, u32),
 }
 
 /// What the embedding app tells the running loop (Android JNI).
@@ -471,6 +523,11 @@ impl ServerCore {
         std::fs::create_dir_all(&config.blob_dir).map_err(|e| format!("Blob dizini: {e}"))?;
 
         let store = Store::open(&config.data_dir.join("typeon_server.db"))?;
+        // Rows dated by a wrong clock before a restart (see `clock_jumped`
+        // for the same within one run).
+        if now_ms() >= SANE_WALL_FLOOR_MS {
+            store.restamp_before(SANE_WALL_FLOOR_MS, now_ms());
+        }
         let keypair = load_or_generate_keypair(&store)?;
 
         // Tor: sunucunun kendi onion service'i, ulaşılabilir olmasının TEK
@@ -592,6 +649,7 @@ impl ServerCore {
             relay_pairs: HashMap::new(),
             mail_recount_due: false,
             total_cache: std::cell::Cell::new((0, 0)),
+            verify_window: (0, 0),
         })
     }
 
@@ -811,7 +869,7 @@ impl ServerCore {
     // -----------------------------------------------------------------
 
     fn handle_request(&mut self, peer: PeerId, req: ServerRequest) -> ServerResponse {
-        if !self.check_rate(peer, false) {
+        if !self.check_rate(peer, false, request_cost(&req)) {
             self.stats.rejected += 1;
             return ServerResponse::Err(ServerErrorCode::RateLimited);
         }
@@ -854,14 +912,14 @@ impl ServerCore {
         // `authenticate` → `state == Revoked` yolundan `Revoked` dönüyordu.
         // Kullanıcıya görünen hâli, taze bir davet koduyla eklediği anda
         // "Operatör kaydı iptal etti" yazısıydı ve hiçbir zaman düzelmiyordu.
-        // İptal, o kimlik bilgisini geçersiz kılar — kişiyi sonsuza dek
-        // yasaklamaz; operatör yeni bir davet verdiyse yeniden kaydolabilmeli
-        // (`handle_enroll` zaten `INSERT OR REPLACE` ile eski satırı değiştirir).
-        let enrolled = self
+        // İptal anahtarı da engeller (bkz. `Store::revoke_enrollment`): istemci
+        // `Enroll`'a gider ve operatör engeli kaldırana kadar `Revoked` alır.
+        let enrollment_id = self
             .store
             .enrollment_by_peer(&peer.to_string())
-            .map(|e| e.state == EnrollmentState::Active)
-            .unwrap_or(false);
+            .filter(|e| e.state == EnrollmentState::Active)
+            .map(|e| e.enrollment_id);
+        let enrolled = enrollment_id.is_some();
         if let Some(c) = self.conns.get_mut(&peer) {
             c.challenge = Some(challenge.clone());
         }
@@ -869,6 +927,7 @@ impl ServerCore {
             version: SERVER_PROTOCOL_VERSION,
             challenge,
             enrolled,
+            enrollment_id,
             limits: self.config.limits.clone(),
             server_name: self.config.server_name.clone(),
         }
@@ -910,11 +969,18 @@ impl ServerCore {
         if client_challenge != challenge {
             return ServerResponse::Err(ServerErrorCode::BadSignature);
         }
+        if !self.verify_budget() {
+            self.stats.rejected += 1;
+            return ServerResponse::Err(ServerErrorCode::RateLimited);
+        }
 
         let signing_input = server_proto::enroll_signing_input(
             version,
             &self.local_peer_id().to_string(),
+            &peer.to_string(),
             &invite_token,
+            &enroll_pk,
+            &enroll_pk_pq,
             &challenge,
             ts_ms,
         );
@@ -922,12 +988,16 @@ impl ServerCore {
         // hasat-şimdi-kır-sonra bir saldırgana ileride sahte kayıt üretme
         // imkânı verirdi.
         if !verify_hybrid(&enroll_pk, &enroll_pk_pq, &signing_input, &sig, &sig_pq) {
+            // A failed attempt costs a counted invite one use: a leaked code
+            // otherwise stayed a free verify oracle. The unlimited join code
+            // has no uses to spend (`verify_budget` bounds it).
+            let _ = self.store.consume_invite(hash.as_slice(), now);
             return ServerResponse::Err(ServerErrorCode::BadSignature);
         }
-        // Kullanıcı kararı: ENGEL, iptalden farklı. `revoke` yalnızca mevcut
-        // kaydı kapatır ve taze bir davetle geri dönüşe izin verir; engel
-        // ise kayıt ANAHTARINA konur, yani aynı cihaz yeni bir davetle bile
-        // kaydolamaz. Kontrol imza doğrulandıktan SONRA: anahtarın gerçekten
+        // Sahip kararı: iptal = engel. İkisi de kayıt ANAHTARINI engeller,
+        // yani aynı cihaz yeni bir davetle bile kaydolamaz; yalnızca yeni bir
+        // PeerId + yeni anahtar (yeniden kurulum) geçer — kesin bir yasak
+        // değil, operatör kontrolü. Kontrol imza doğrulandıktan SONRA: anahtarın gerçekten
         // bu cihaza ait olduğu kanıtlanmadan engel uygulamak, başkasının
         // anahtarını yazarak onu engelletmeye yol açardı.
         // The key this PeerId enrolled with before counts too: the device
@@ -954,7 +1024,7 @@ impl ServerCore {
         // davetin kullanım hakkını hiç harcamamalı.
         if self.store.invite_uses_left(hash.as_slice(), now) == Some(-1) {
             let since = now - 60 * 60 * 1000;
-            if self.store.count_enrollments_since(since) >= MAX_PUBLIC_ENROLLMENTS_PER_HOUR {
+            if self.store.count_enrollments_since(since, now) >= MAX_PUBLIC_ENROLLMENTS_PER_HOUR {
                 warn!("Herkese açık katılım kodu saatlik tavanı aştı, kayıt reddedildi");
                 self.stats.rejected += 1;
                 return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
@@ -1034,6 +1104,10 @@ impl ServerCore {
         if self.store.is_key_blocked(&existing.enroll_pk) {
             return ServerResponse::Err(ServerErrorCode::Revoked);
         }
+        if !self.verify_budget() {
+            self.stats.rejected += 1;
+            return ServerResponse::Err(ServerErrorCode::RateLimited);
+        }
         let input = server_proto::rebind_signing_input(
             &enrollment_id,
             &self.local_peer_id().to_string(),
@@ -1084,14 +1158,17 @@ impl ServerCore {
         // `TOTAL_CACHE_MS`, with what was let in since added on top (a
         // refused write is counted too, which only errs on the full side).
         let mono = mono_ms();
-        let (at, mut total) = self.total_cache.get();
+        let (mut at, mut total) = self.total_cache.get();
         if at == 0 || mono.saturating_sub(at) > TOTAL_CACHE_MS {
             total = self.store.total_stored_bytes().max(0) as u64;
-            self.total_cache.set((mono.max(1), total));
+            at = mono.max(1);
         }
-        let (at, _) = self.total_cache.get();
-        self.total_cache.set((at, total + incoming as u64));
-        total + incoming as u64 > total_budget
+        let after = total.saturating_add(incoming as u64);
+        let exceeded = after > total_budget;
+        // Only what is let in counts: refused writes inflated the cache and
+        // bounced everyone else near the ceiling.
+        self.total_cache.set((at, if exceeded { total } else { after }));
+        exceeded
     }
 
     fn handle_authenticated(&mut self, peer: PeerId, e: &Enrollment, req: ServerRequest) -> ServerResponse {
@@ -1111,20 +1188,35 @@ impl ServerCore {
             ServerRequest::Fetch { cursors, .. } => cursors.len() > boxes,
             ServerRequest::Ack { acks } => acks.len() > boxes,
             ServerRequest::ArchiveProbe { buckets } | ServerRequest::ArchivePurge { buckets } => buckets.len() > boxes,
-            ServerRequest::Cancel { seqs, .. } => seqs.len() > limits.max_items_per_mailbox as usize,
+            ServerRequest::Cancel { seqs, .. } => seqs.len() > boxes,
+            ServerRequest::ArchivePut { records, .. } => records.len() > server_proto::MAX_ARCHIVE_PUT_RECORDS,
             _ => false,
         };
         if too_long {
             return ServerResponse::Err(ServerErrorCode::TooLarge);
         }
+        // Every mailbox/bucket id the server stores or looks up: client ids
+        // always pass, so a failing one is a hostile request.
+        let bad_id = match &req {
+            ServerRequest::Register { add, drop, .. } => add.iter().chain(drop.iter()).any(|id| !is_safe_id(id)),
+            ServerRequest::Fetch { cursors: list, .. } | ServerRequest::Ack { acks: list } => {
+                list.iter().any(|(id, _)| !is_safe_id(id))
+            }
+            ServerRequest::ArchiveProbe { buckets } | ServerRequest::ArchivePurge { buckets } => {
+                buckets.iter().any(|id| !is_safe_id(id))
+            }
+            ServerRequest::Deposit { mailbox: id, .. }
+            | ServerRequest::Cancel { mailbox: id, .. }
+            | ServerRequest::ArchivePut { bucket: id, .. }
+            | ServerRequest::ArchiveFetch { bucket: id, .. } => !is_safe_id(id),
+            _ => false,
+        };
+        if bad_id {
+            return ServerResponse::Err(ServerErrorCode::BadDirection);
+        }
 
         match req {
             ServerRequest::Register { add, drop, proofs } => {
-                // Ids are stored: without a bound, megabyte ids filled the
-                // disk outside every quota.
-                if !add.iter().all(|id| is_safe_id(id)) {
-                    return ServerResponse::Err(ServerErrorCode::BadDirection);
-                }
                 // Only a proof for an id of `add` is verified, and only one
                 // with a valid signature reaches the store.
                 let me = self.swarm.local_peer_id().to_string();
@@ -1137,9 +1229,9 @@ impl ServerCore {
                     })
                     .map(|p| (p.mailbox.clone(), mailbox_key_hash(&p.pk, &p.pk_pq)))
                     .collect();
-                // A proof that did not verify is a refusal, not `ProofNeeded`:
+                // A proof that did not verify is a refusal, not `proof_needed`:
                 // the client would send the same bytes again.
-                let bad_proof = proofs.len() - proved.len();
+                let bad_proof = proofs.iter().filter(|p| add.contains(&p.mailbox)).count().saturating_sub(proved.len());
                 let registered = self.store.register_mailboxes_proved(&e.enrollment_id, &add, &drop, &proved, now, limits.max_mailboxes);
                 let (refused, unproven) = match registered {
                     Ok((refused, unproven)) => {
@@ -1161,19 +1253,15 @@ impl ServerCore {
                 for id in &drop {
                     interest.remove(id);
                 }
-                // The registered ids stay registered and get their pushes;
-                // the error only tells the client that some id was refused.
-                // The refused ids go with them: the client takes every id this
-                // answer does not name as registered. Sent again with a proof,
-                // a refused id gets the error below.
-                if !unproven.is_empty() {
-                    return ServerResponse::ProofNeeded(unproven.into_iter().chain(refused).collect());
+                // Every id not named is registered; each named one says why
+                // (see `ServerResponse::Registered`).
+                if unproven.is_empty() && refused.is_empty() {
+                    return ServerResponse::Ok;
                 }
                 if !refused.is_empty() {
-                    warn!("Register: {} kutu reddedildi (kota, okuyucu sınırı ya da kanıt; geçersiz imza: {})", refused.len(), bad_proof);
-                    return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
+                    warn!("Register: {} kutu reddedildi (kota, okuyucu sınırı ya da anahtar), {} kanıt doğrulanmadı", refused.len(), bad_proof);
                 }
-                ServerResponse::Ok
+                ServerResponse::Registered { proof_needed: unproven, refused }
             }
 
             ServerRequest::Deposit { mailbox, sealed } => {
@@ -1220,8 +1308,9 @@ impl ServerCore {
                 let (items, more) = self.store.fetch(
                     &e.enrollment_id,
                     &cursors,
-                    max_items.min(MAX_FETCH_BATCH_ITEMS),
-                    max_bytes.min(MAX_FETCH_BATCH_BYTES),
+                    // 0 answered an empty batch with `more` forever.
+                    max_items.clamp(1, MAX_FETCH_BATCH_ITEMS),
+                    max_bytes.clamp(1, MAX_FETCH_BATCH_BYTES),
                 );
                 self.stats.fetches += 1;
                 ServerResponse::Batch { items, more }
@@ -1253,9 +1342,6 @@ impl ServerCore {
             }
 
             ServerRequest::ArchivePut { bucket, records } => {
-                if !is_safe_id(&bucket) {
-                    return ServerResponse::Err(ServerErrorCode::BadDirection);
-                }
                 if records.iter().any(|r| r.sealed.len() > MAX_DEPOSIT_BYTES) {
                     return ServerResponse::Err(ServerErrorCode::TooLarge);
                 }
@@ -1265,7 +1351,7 @@ impl ServerCore {
                 // bkz. `total_budget_exceeded` — arşiv, postanın aksine
                 // TTL'siz: bir kez yazıldı mı `ArchivePurge` gelene kadar
                 // durur, yani toplam tavana en çok yaklaştıran taraf.
-                let incoming: usize = records.iter().map(|r| r.sealed.len() + r.record_id.len()).sum();
+                let incoming: usize = records.iter().map(store::archive_row_bytes).sum();
                 if self.total_budget_exceeded(incoming) {
                     warn!("Toplam disk bütçesi doldu, arşiv yazımı reddedildi");
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
@@ -1291,7 +1377,7 @@ impl ServerCore {
                     &bucket,
                     before_ms,
                     max_items.clamp(1, MAX_FETCH_BATCH_ITEMS),
-                    max_bytes.min(MAX_FETCH_BATCH_BYTES),
+                    max_bytes.clamp(1, MAX_FETCH_BATCH_BYTES),
                 );
                 ServerResponse::ArchiveBatch { records, more }
             }
@@ -1310,8 +1396,8 @@ impl ServerCore {
             }
 
             ServerRequest::BlobDelete { blob_id } => {
-                if self.store.blob_delete(&blob_id, &e.enrollment_id) {
-                    let _ = std::fs::remove_file(self.blob_path(&blob_id));
+                if self.store.blob_state(&blob_id).map_or(false, |s| s.owner == e.enrollment_id) {
+                    self.drop_blob(&blob_id);
                 }
                 ServerResponse::Ok
             }
@@ -1352,9 +1438,13 @@ impl ServerCore {
             return ServerResponse::Err(ServerErrorCode::BadDirection);
         }
         if data.len() > server_proto::MAX_BLOB_CHUNK_BYTES
-            || chunk_size as usize + 16 > server_proto::MAX_BLOB_CHUNK_BYTES
+            || chunk_size as u64 + 16 > server_proto::MAX_BLOB_CHUNK_BYTES as u64
         {
             return ServerResponse::Err(ServerErrorCode::TooLarge);
+        }
+        // Before any row exists: `total_chunks: 0` minted a free row per request.
+        if chunk_index >= total_chunks {
+            return ServerResponse::Err(ServerErrorCode::BadDirection);
         }
         // Ofset istemcinin `chunk_index`/`chunk_size`'ından geliyor: sınırsız
         // bırakılırsa 1 baytlık bir parça dosyayı terabaytlarca ileriye
@@ -1383,23 +1473,33 @@ impl ServerCore {
             warn!("Toplam disk bütçesi doldu, blob parçası reddedildi");
             return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
         }
-        if let Err(msg) = self.store.blob_begin(&blob_id, &e.enrollment_id, total_chunks, now) {
-            error!("blob_begin: {msg}");
-            return ServerResponse::Err(ServerErrorCode::Internal);
+        // Sahiplik: bir blob'a SADECE onu başlatan kayıt yazabilir. A row is
+        // made only for an id nobody holds; the second read also covers a
+        // first one that failed (busy DB), which used to skip this check.
+        if self.store.blob_state(&blob_id).is_none() {
+            if let Err(msg) = self.store.blob_begin(&blob_id, &e.enrollment_id, total_chunks, now) {
+                error!("blob_begin: {msg}");
+                return ServerResponse::Err(ServerErrorCode::Internal);
+            }
         }
-        // Sahiplik: bir blob'a SADECE onu başlatan kayıt yazabilir.
-        if let Some(state) = self.store.blob_state(&blob_id) {
-            if state.owner != e.enrollment_id {
-                return ServerResponse::Err(ServerErrorCode::BadDirection);
-            }
-            // A verified blob is final: another chunk (or a new stride)
-            // would make `serve_chunk` hand out bytes the hash never covered.
-            if state.complete {
-                return ServerResponse::Ok;
-            }
-            if chunk_index >= total_chunks.max(state.total_chunks) {
-                return ServerResponse::Err(ServerErrorCode::BadDirection);
-            }
+        let Some(state) = self.store.blob_state(&blob_id) else {
+            return ServerResponse::Err(ServerErrorCode::Internal);
+        };
+        if state.owner != e.enrollment_id {
+            return ServerResponse::Err(ServerErrorCode::BadDirection);
+        }
+        // A verified blob is final: another chunk (or a new stride)
+        // would make `serve_chunk` hand out bytes the hash never covered.
+        if state.complete {
+            return ServerResponse::Ok;
+        }
+        if chunk_index >= state.total_chunks {
+            return ServerResponse::Err(ServerErrorCode::BadDirection);
+        }
+        // The stride is fixed by the first chunk (`blob_set_chunk_size`):
+        // another one would write where `serve_chunk` does not read.
+        if (state.chunk_size != 0 || state.received_chunks > 0) && state.chunk_size != chunk_size {
+            return ServerResponse::Err(ServerErrorCode::BadDirection);
         }
         // Same reason while `BlobFinish` is hashing the file.
         if self.blob_hashing.contains_key(&blob_id) {
@@ -1417,11 +1517,8 @@ impl ServerCore {
         // `.enc` formatı sabit adımlı olduğundan (bkz.
         // `attachments::read_chunk_from_disk`) konuma yazmak güvenli.
         use std::io::{Seek, SeekFrom, Write};
-        // Adim ISTEMCIDEN gelir (bkz. `ServerRequest::BlobPut.chunk_size`);
-        // sunucunun kendi sabitinden tahmin etmesi dosyayi bozuyordu.
         // Adım blob'la birlikte SAKLANIR (defter #06) — `serve_chunk` aynı
-        // değerle okumak zorunda, yoksa dosya yanlış ofsetlerden servis
-        // edilir.
+        // değerle okumak zorunda.
         self.store.blob_set_chunk_size(&blob_id, chunk_size);
         let write = std::fs::OpenOptions::new()
             .create(true)
@@ -1435,10 +1532,17 @@ impl ServerCore {
             error!("Blob yazılamadı: {err}");
             return ServerResponse::Err(ServerErrorCode::Internal);
         }
-        let _ = self.store.blob_record_chunk(&blob_id, chunk_index, growth as usize);
+        // The bytes are on disk: charged even if the bookkeeping below fails
+        // (the resent chunk then grows nothing and is never charged).
+        // ponytail: such a failure over-charges the owner by `growth` until
+        // the blob goes; a blob recount would fix it.
+        self.store.add_blob_bytes(&e.enrollment_id, growth as i64);
         // An upload in progress is not garbage (see `Store::blobs_to_gc`).
         self.store.blob_touch(&blob_id, now);
-        self.store.add_blob_bytes(&e.enrollment_id, growth as i64);
+        if let Err(msg) = self.store.blob_record_chunk(&blob_id, chunk_index, growth as usize) {
+            error!("blob_record_chunk: {msg}");
+            return ServerResponse::Err(ServerErrorCode::Internal);
+        }
         ServerResponse::Ok
     }
 
@@ -1478,6 +1582,11 @@ impl ServerCore {
     /// (GiBs): inside the event loop it stalled every client for the duration.
     fn start_blob_hash(&mut self, blob_id: String, enc_sha256: Vec<u8>, channel: ResponseChannel<ServerResponse>) {
         let waiters = self.blob_hashing.entry(blob_id.clone()).or_default();
+        if waiters.len() >= MAX_HASH_WAITERS {
+            let busy = ServerResponse::Err(ServerErrorCode::RateLimited);
+            let _ = self.swarm.behaviour_mut().server_rpc.send_response(channel, busy);
+            return;
+        }
         waiters.push(channel);
         // A repeated `BlobFinish` waits for the running hash, it starts none.
         if waiters.len() > 1 {
@@ -1493,20 +1602,34 @@ impl ServerCore {
 
     fn finish_blob_hash(&mut self, (blob_id, enc_sha256, hashed): HashDone) {
         let response = match hashed {
-            Some(actual) if actual == enc_sha256 => {
-                let _ = self.store.blob_finish(&blob_id, &enc_sha256, now_ms());
-                ServerResponse::Ok
-            }
+            Some(actual) if actual == enc_sha256 => match self.store.blob_finish(&blob_id, &enc_sha256, now_ms()) {
+                Ok(()) => ServerResponse::Ok,
+                Err(msg) => {
+                    error!("blob_finish: {msg}");
+                    ServerResponse::Err(ServerErrorCode::Internal)
+                }
+            },
             Some(_) => {
                 warn!("Blob hash uyuşmuyor, reddedildi: {blob_id}");
-                let _ = std::fs::remove_file(self.blob_path(&blob_id));
-                self.store.blob_forget(&blob_id);
+                self.drop_blob(&blob_id);
                 ServerResponse::Err(ServerErrorCode::Internal)
             }
             None => ServerResponse::Err(ServerErrorCode::Internal),
         };
         for channel in self.blob_hashing.remove(&blob_id).unwrap_or_default() {
             let _ = self.swarm.behaviour_mut().server_rpc.send_response(channel, response.clone());
+        }
+    }
+
+    /// Removes a blob file, then its row and charge. A file that would not go
+    /// keeps its row and its charge (the next GC tries again): refunding it
+    /// let files outside every budget grow.
+    fn drop_blob(&self, blob_id: &str) {
+        match std::fs::remove_file(self.blob_path(blob_id)) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                warn!("Blob dosyası silinemedi ({blob_id}): {err}");
+            }
+            _ => self.store.blob_forget(blob_id),
         }
     }
 
@@ -1550,7 +1673,7 @@ impl ServerCore {
         // Far above any real download (Tor carries about one chunk a second),
         // so only a request loop reaches it. `NotFound` is the only refusal
         // the protocol has; the client then tries another source.
-        if self.active(peer).is_none() || !self.check_rate(peer, true) {
+        if self.active(peer).is_none() || !self.check_rate(peer, true, 1) {
             warn!("Dosya parçası isteği reddedildi (kayıtsız eş ya da hız sınırı)");
             self.stats.rejected += 1;
             let _ = self
@@ -1715,8 +1838,8 @@ impl ServerCore {
     }
 
     /// `chunk`: a file-chunk request, counted against `CHUNKS_PER_MINUTE`
-    /// instead of the RPC limit.
-    fn check_rate(&mut self, peer: PeerId, chunk: bool) -> bool {
+    /// instead of the RPC limit. `cost`: see `request_cost`.
+    fn check_rate(&mut self, peer: PeerId, chunk: bool, cost: u32) -> bool {
         let limit = self.config.limits.requests_per_minute;
         let now = mono_ms();
         let entry = self.conns.entry(peer).or_insert(ConnState {
@@ -1735,8 +1858,18 @@ impl ServerCore {
             entry.chunks_in_window += 1;
             return entry.chunks_in_window <= CHUNKS_PER_MINUTE;
         }
-        entry.requests_in_window += 1;
+        entry.requests_in_window = entry.requests_in_window.saturating_add(cost);
         entry.requests_in_window <= limit
+    }
+
+    /// See `ENROLL_VERIFIES_PER_MINUTE`.
+    fn verify_budget(&mut self) -> bool {
+        let now = mono_ms();
+        if self.verify_window.0 == 0 || now.saturating_sub(self.verify_window.0) > RATE_WINDOW_MS {
+            self.verify_window = (now.max(1), 0);
+        }
+        self.verify_window.1 += 1;
+        self.verify_window.1 <= ENROLL_VERIFIES_PER_MINUTE
     }
 
     /// Yapılandırılmış blob dizini — Android sunucu uygulaması bunu harici
@@ -1753,15 +1886,23 @@ impl ServerCore {
 
     /// `true` while the wall clock sits more than `CLOCK_JUMP_MS` away from
     /// where the monotonic clock says it should be. After
-    /// `CLOCK_JUMP_HOLD_MS` the new time is accepted as the real one.
+    /// `CLOCK_JUMP_HOLD_MS` the new time is accepted as the real one, and a
+    /// forward step moves the stored deadlines with it
+    /// (`Store::shift_deadlines`): either clock may have been the wrong one,
+    /// so nothing expires because of the step itself.
     fn clock_jumped(&mut self, now: i64, mono: u64) -> bool {
         let (wall0, mono0) = *self.clock_anchor.get_or_insert((now, mono));
-        if (now - (wall0 + (mono - mono0) as i64)).abs() <= CLOCK_JUMP_MS {
+        let expected = wall0 + (mono - mono0) as i64;
+        if (now - expected).abs() <= CLOCK_JUMP_MS {
             self.clock_off_since = None;
             return false;
         }
         if mono - *self.clock_off_since.get_or_insert(mono) < CLOCK_JUMP_HOLD_MS {
             return true;
+        }
+        if now > expected {
+            warn!("Sistem saati {} sn ileri alındı — süreler kaydırıldı", (now - expected) / 1000);
+            self.store.shift_deadlines(now - expected, expected);
         }
         self.clock_anchor = Some((now, mono));
         self.clock_off_since = None;
@@ -1825,6 +1966,12 @@ impl ServerCore {
             warn!("Sistem saati sıçradı — TTL süpürmesi bekletiliyor");
             return;
         }
+        // Tracked above even while wrong, so the step to the right time is
+        // seen and the deadlines move with it.
+        if now < SANE_WALL_FLOOR_MS {
+            warn!("Sistem saati geçersiz — TTL süpürmesi atlandı");
+            return;
+        }
         let slept = self.store.sleep_idle_enrollments(now - ENROLLMENT_IDLE_MS);
         let removed = self.store.sweep_expired_mail(now) + slept;
         if removed > 0 {
@@ -1832,8 +1979,7 @@ impl ServerCore {
             self.store.recount_mail_bytes();
         }
         for blob_id in self.store.blobs_to_gc(now, self.config.limits.blob_ttl_ms as i64) {
-            let _ = std::fs::remove_file(self.blob_path(&blob_id));
-            self.store.blob_forget(&blob_id);
+            self.drop_blob(&blob_id);
         }
         self.store.incremental_vacuum();
     }
@@ -1896,6 +2042,22 @@ fn verify_hybrid(pk: &[u8], pk_pq: &[u8], message: &[u8], sig: &[u8], sig_pq: &[
     vk.verify(message, &parsed).is_ok()
 }
 
+/// What a request costs against `ServerLimits.requests_per_minute`: one, plus
+/// one per 8 list elements (each is a query on the event loop). A
+/// `MailboxProof` is a hybrid verify, an `Enroll`/`Rebind` one too.
+fn request_cost(req: &ServerRequest) -> u32 {
+    let n = match req {
+        ServerRequest::Enroll { .. } | ServerRequest::Rebind { .. } => return 30,
+        ServerRequest::Register { add, drop, proofs } => add.len() + drop.len() + 64 * proofs.len(),
+        ServerRequest::Fetch { cursors: list, .. } | ServerRequest::Ack { acks: list } => list.len(),
+        ServerRequest::Cancel { seqs, .. } => seqs.len(),
+        ServerRequest::ArchivePut { records, .. } => records.len(),
+        ServerRequest::ArchiveProbe { buckets } | ServerRequest::ArchivePurge { buckets } => buckets.len(),
+        _ => 0,
+    };
+    1u32.saturating_add(u32::try_from(n / 8).unwrap_or(u32::MAX))
+}
+
 /// What `mailbox_keys` stores for the key of a `MailboxProof`.
 fn mailbox_key_hash(pk: &[u8], pk_pq: &[u8]) -> Vec<u8> {
     let mut h = Sha256::new();
@@ -1908,7 +2070,9 @@ fn verify_ed25519(pubkey: &[u8], message: &[u8], sig: &[u8]) -> bool {
     let Ok(pk_bytes): Result<[u8; 32], _> = pubkey.try_into() else { return false };
     let Ok(sig_bytes): Result<[u8; 64], _> = sig.try_into() else { return false };
     let Ok(vk) = VerifyingKey::from_bytes(&pk_bytes) else { return false };
-    vk.verify(message, &Signature::from_bytes(&sig_bytes)).is_ok()
+    // Strict, as the client verifies: a non-canonical signature passed here
+    // and failed there.
+    vk.verify_strict(message, &Signature::from_bytes(&sig_bytes)).is_ok()
 }
 
 /// Kimliklerin dosya yolu olarak kullanılmadan önceki kontrolü.

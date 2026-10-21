@@ -117,14 +117,20 @@ class LinkDeviceActivity : AppCompatActivity() {
     private val pollAdopted = object : Runnable {
         override fun run() {
             if (done) return
-            val linked = try { P2PLib.isSecondaryDevice() } catch (e: Exception) { false }
-            if (linked) {
-                done = true
-                Toast.makeText(this@LinkDeviceActivity, R.string.link_device_success, Toast.LENGTH_LONG).show()
-                finish()
-                return
-            }
-            handler.postDelayed(this, 2000)
+            // L-197: the JNI call runs off the main thread.
+            Thread {
+                val linked = try { P2PLib.isSecondaryDevice() } catch (e: Exception) { false }
+                handler.post {
+                    if (done || isDestroyed) return@post
+                    if (linked) {
+                        done = true
+                        Toast.makeText(this@LinkDeviceActivity, R.string.link_device_success, Toast.LENGTH_LONG).show()
+                        finish()
+                    } else {
+                        handler.postDelayed(this, 2000)
+                    }
+                }
+            }.start()
         }
     }
 

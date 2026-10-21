@@ -25,6 +25,15 @@ pub fn present(app: &Rc<App>) {
 pub fn present_page(app: &Rc<App>, page: Option<&str>) {
     let Some(window) = app.window() else { return };
 
+    // One Settings window: a server add/remove re-presents the page, so
+    // close the previous one instead of stacking another.
+    thread_local! {
+        static CURRENT: RefCell<Option<adw::PreferencesWindow>> = const { RefCell::new(None) };
+    }
+    if let Some(previous) = CURRENT.with(|c| c.borrow_mut().take()) {
+        previous.close();
+    }
+
     let preferences = adw::PreferencesWindow::builder()
         .modal(true)
         .transient_for(&window)
@@ -40,6 +49,7 @@ pub fn present_page(app: &Rc<App>, page: Option<&str>) {
         preferences.set_visible_page_name(page);
     }
     preferences.present();
+    CURRENT.with(|c| *c.borrow_mut() = Some(preferences));
 }
 
 fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
@@ -87,7 +97,7 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
             prefs.save();
             drop(prefs);
             // Unlike Tor this one is live — the core takes it immediately.
-            core::set_node_mode(enabled);
+            std::thread::spawn(move || core::set_node_mode(enabled));
         });
     }
     connectivity.add(&node);
@@ -110,7 +120,7 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
             prefs.history_storage_limit_bytes = bytes;
             prefs.save();
             drop(prefs);
-            core::set_history_storage_limit_bytes(bytes);
+            std::thread::spawn(move || core::set_history_storage_limit_bytes(bytes));
         });
     }
     storage.add(&limit);
@@ -135,13 +145,18 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
             if address.trim().is_empty() {
                 return;
             }
-            match core::add_known_relay_address(address.trim()) {
-                Ok(()) => {
-                    app.toast("Relay added.");
-                    row.set_text("");
-                }
-                Err(error) => app.toast(&format!("Rejected: {}", error)),
-            }
+            let (app, row) = (app.clone(), row.clone());
+            let address = address.trim().to_string();
+            app::run_in_background(
+                move || core::add_known_relay_address(&address),
+                move |result| match result {
+                    Ok(()) => {
+                        app.toast("Relay added.");
+                        row.set_text("");
+                    }
+                    Err(error) => app.toast(&format!("Rejected: {}", error)),
+                },
+            );
         });
     }
     relays.add(&relay_row);
@@ -157,8 +172,10 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
     {
         let app = app.clone();
         reconnect_button.connect_clicked(move |_| {
-            core::notify_network_changed();
-            core::retry_all_pending_now();
+            std::thread::spawn(|| {
+                core::notify_network_changed();
+                core::retry_all_pending_now();
+            });
             app.toast("Reconnecting.");
         });
     }
@@ -204,15 +221,20 @@ fn servers_group(app: &Rc<App>) -> adw::PreferencesGroup {
             if code.trim().is_empty() {
                 return;
             }
-            match core::add_server(code.trim()) {
-                Ok(()) => {
-                    app.toast("Server added. Connecting…");
-                    row.set_text("");
-                    // Satır listesi yeniden çizilsin diye pencereyi tazele.
-                    present_page(&app, Some("Network"));
-                }
-                Err(error) => app.toast(&format!("Rejected: {}", error)),
-            }
+            let (app, row) = (app.clone(), row.clone());
+            let code = code.trim().to_string();
+            app::run_in_background(
+                move || core::add_server(&code),
+                move |result| match result {
+                    Ok(()) => {
+                        app.toast("Server added. Connecting…");
+                        row.set_text("");
+                        // Satır listesi yeniden çizilsin diye pencereyi tazele.
+                        present_page(&app, Some("Network"));
+                    }
+                    Err(error) => app.toast(&format!("Rejected: {}", error)),
+                },
+            );
         });
     }
     group.add(&add_row);
@@ -243,9 +265,15 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
         let app = app.clone();
         let id = entry.server_id.clone();
         route.connect_active_notify(move |row| {
-            if let Err(e) = core::set_server_routing(&id, row.is_active()) {
-                app.toast(&format!("Failed: {}", e));
-            }
+            let (app, id, on) = (app.clone(), id.clone(), row.is_active());
+            app::run_in_background(
+                move || core::set_server_routing(&id, on),
+                move |result| {
+                    if let Err(e) = result {
+                        app.toast(&format!("Failed: {}", e));
+                    }
+                },
+            );
         });
     }
     row.add_row(&route);
@@ -278,9 +306,15 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
                     }
                 }
             }
-            if let Err(e) = core::set_server_history(&id, row.is_active()) {
-                app.toast(&format!("Failed: {}", e));
-            }
+            let (app, id, on) = (app.clone(), id.clone(), row.is_active());
+            app::run_in_background(
+                move || core::set_server_history(&id, on),
+                move |result| {
+                    if let Err(e) = result {
+                        app.toast(&format!("Failed: {}", e));
+                    }
+                },
+            );
         });
     }
     row.add_row(&history);
@@ -296,10 +330,11 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
     {
         let app = app.clone();
         restore_button.connect_clicked(move |_| {
-            match core::restore_server_history() {
+            let app = app.clone();
+            app::run_in_background(core::restore_server_history, move |result| match result {
                 Ok(n) => app.toast(&format!("Loading history for {} conversations.", n)),
                 Err(e) => app.toast(&format!("Failed: {}", e)),
-            }
+            });
         });
     }
     restore.add_suffix(&restore_button);
@@ -315,13 +350,17 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
         let app = app.clone();
         let id = entry.server_id.clone();
         remove_button.connect_clicked(move |_| {
-            match core::remove_server(&id) {
-                Ok(()) => {
-                    app.toast("Server removed.");
-                    present_page(&app, Some("Network"));
-                }
-                Err(e) => app.toast(&format!("Failed: {}", e)),
-            }
+            let (app, id) = (app.clone(), id.clone());
+            app::run_in_background(
+                move || core::remove_server(&id),
+                move |result| match result {
+                    Ok(()) => {
+                        app.toast("Server removed.");
+                        present_page(&app, Some("Network"));
+                    }
+                    Err(e) => app.toast(&format!("Failed: {}", e)),
+                },
+            );
         });
     }
     remove.add_suffix(&remove_button);
@@ -505,12 +544,14 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
 
     {
         let app = app.clone();
-        let font_for_closure = font.clone();
         font.connect_selected_notify(move |row| {
+            // `row` itself, not a captured clone: a self-capture would be a
+            // reference cycle that leaks the row.
+            let font_for_closure = row;
             let idx = row.selected() as usize;
             if idx == 0 {
                 // "Load a custom font…" — open file picker.
-                pick_font(&app, &font_for_closure);
+                pick_font(&app, font_for_closure);
             } else if idx <= BUILT_IN_FONTS.len() {
                 // Built-in font selected (idx 1..=5 → index 0..4).
                 let choice = BUILT_IN_FONTS
@@ -522,7 +563,7 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
                     prefs.active_custom_font_id = None;
                     prefs.save();
                 }
-                rebuild_font_model(&app, None, &font_for_closure);
+                rebuild_font_model(&app, None, font_for_closure);
                 apply_theme(&app);
             } else {
                 // Custom font selected (idx > BUILT_IN_FONTS.len() + 1).
@@ -530,7 +571,7 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
                 let custom_idx = idx - 1 - BUILT_IN_FONTS.len();
                 if let Some(cf) = custom_fonts.get(custom_idx) {
                     app.set_active_custom_font(Some(&cf.id));
-                    rebuild_font_model(&app, Some(&cf.id), &font_for_closure);
+                    rebuild_font_model(&app, Some(&cf.id), font_for_closure);
                     apply_theme(&app);
                 }
             }
@@ -544,8 +585,12 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
         .build();
     {
         let app = app.clone();
-        let font_for_button = font.clone();
-        load_button.connect_clicked(move |_| pick_font(&app, &font_for_button));
+        let font_for_button = font.downgrade();
+        load_button.connect_clicked(move |_| {
+            if let Some(font) = font_for_button.upgrade() {
+                pick_font(&app, &font);
+            }
+        });
     }
     font.add_suffix(&load_button);
 
@@ -574,8 +619,13 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
         .build();
     {
         let app = app.clone();
-        let wallpaper = wallpaper.clone();
-        choose_wallpaper.connect_clicked(move |_| pick_wallpaper(&app, &wallpaper));
+        // Weak: the button is a suffix of this row.
+        let wallpaper = wallpaper.downgrade();
+        choose_wallpaper.connect_clicked(move |_| {
+            if let Some(wallpaper) = wallpaper.upgrade() {
+                pick_wallpaper(&app, &wallpaper);
+            }
+        });
     }
     wallpaper.add_suffix(&choose_wallpaper);
     let clear_wallpaper = gtk::Button::builder()
@@ -586,14 +636,16 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
     clear_wallpaper.add_css_class("flat");
     {
         let app = app.clone();
-        let wallpaper = wallpaper.clone();
+        let wallpaper = wallpaper.downgrade();
         clear_wallpaper.connect_clicked(move |_| {
             {
                 let mut prefs = app.prefs.borrow_mut();
                 prefs.chat_wallpaper = None;
                 prefs.save();
             }
-            wallpaper.set_subtitle("None");
+            if let Some(wallpaper) = wallpaper.upgrade() {
+                wallpaper.set_subtitle("None");
+            }
             apply_theme(&app);
         });
     }
@@ -970,6 +1022,14 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
 /// contact and sibling device, we wait (bounded) for the acks so offline
 /// contacts at least get it deposited on a server, then erase like logout.
 fn confirm_delete_account(app: &Rc<App>) {
+    // The core refuses it on a linked device; say why instead of failing late.
+    let root = core::own_identity_id().ok().is_some_and(|id| {
+        core::list_linked_devices().iter().any(|d| d.is_this_device && d.device_fingerprint == id)
+    });
+    if !root {
+        app.toast("Only the primary device can delete the account.");
+        return;
+    }
     let app_for_action = app.clone();
     dialogs::confirm(
         app,
@@ -1035,13 +1095,13 @@ fn pick_profile_picture(app: &Rc<App>) {
         let Some(path) = file.path() else { return };
         // 720p/85% — the same budget the phone uses, so the bytes that reach
         // a contact look the same whichever device sent them.
-        let Some(jpeg) = util::scaled_jpeg(&path.to_string_lossy(), 720, 85) else {
-            app.toast("That file is not an image Typeon can read.");
-            return;
-        };
+        let source = path.to_string_lossy().to_string();
         let app_inner = app.clone();
         app::run_in_background(
-            move || core::set_own_profile_picture(Some(jpeg)),
+            move || match util::scaled_jpeg(&source, 720, 85) {
+                Some(jpeg) => core::set_own_profile_picture(Some(jpeg)),
+                None => Err("That file is not an image Typeon can read.".to_string()),
+            },
             move |result| match result {
                 Ok(()) => app_inner.toast("Profile picture updated."),
                 Err(error) => app_inner.toast(&error),
@@ -1093,14 +1153,18 @@ fn change_passphrase(app: &Rc<App>, currently_protected: bool) {
         } else {
             String::new()
         };
-        match onboarding::reseal_vault(&app.data_dir, &old, &next.text()) {
-            Ok(()) => app.toast(if next.text().is_empty() {
-                "Passphrase removed."
-            } else {
-                "Passphrase updated."
-            }),
-            Err(error) => app.toast(&error),
-        }
+        // Two Argon2id derivations: off the main thread.
+        let data_dir = app.data_dir.clone();
+        let new = next.text().to_string();
+        let removing = new.is_empty();
+        let app = app.clone();
+        app::run_in_background(
+            move || onboarding::reseal_vault(&data_dir, &old, &new),
+            move |result| match result {
+                Ok(()) => app.toast(if removing { "Passphrase removed." } else { "Passphrase updated." }),
+                Err(error) => app.toast(&error),
+            },
+        );
     });
     dialog.present();
 }
@@ -1166,21 +1230,38 @@ fn save_recovery_bytes(app: &Rc<App>, bytes: Vec<u8>) {
         let Ok(file) = result else { return };
         let Some(path) = file.path() else { return };
         // Every long-term key is in this file: owner-only from the first byte.
+        // Fresh temp file (`create_new` => the 0600 mode really applies), checked
+        // chmod, fsync, then rename over the target.
         use std::io::Write;
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut tmp_name = path.as_os_str().to_owned();
+        tmp_name.push(".tmp");
+        let tmp = std::path::PathBuf::from(tmp_name);
+        let _ = std::fs::remove_file(&tmp);
+        // A USB stick (FAT/exFAT) has no Unix permissions: the file is still
+        // written (it is passphrase-encrypted), but the user is told.
+        let mut private = true;
         let written = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
-            .open(&path)
+            .open(&tmp)
             .and_then(|mut file| {
-                // An existing file keeps its old mode through `open`.
                 let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
-                file.write_all(&bytes)
-            });
+                private = file.metadata()?.permissions().mode() & 0o077 == 0;
+                file.write_all(&bytes)?;
+                file.sync_all()
+            })
+            .and_then(|()| std::fs::rename(&tmp, &path));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
         match written {
-            Ok(()) => app.toast(&format!("Recovery file written to {}", path.display())),
+            Ok(()) if private => app.toast(&format!("Recovery file written to {}", path.display())),
+            Ok(()) => app.toast(&format!(
+                "Recovery file written to {}. This drive cannot make it private: anyone with access can copy it (it stays passphrase-protected)",
+                path.display()
+            )),
             Err(error) => app.toast(&format!("Could not write the file: {}", error)),
         }
     });

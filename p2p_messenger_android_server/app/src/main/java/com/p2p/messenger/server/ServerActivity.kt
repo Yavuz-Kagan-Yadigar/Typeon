@@ -412,6 +412,17 @@ class ServerActivity : AppCompatActivity() {
             putBoolean("android.content.extra.IS_SENSITIVE", true)
         }
         clipboard.setPrimaryClip(clip)
+        // The join code is a permanent bearer token: drop it from the
+        // clipboard after a minute, if it is still ours.
+        Handler(Looper.getMainLooper()).postDelayed({
+            try {
+                val cur = clipboard.primaryClip
+                if (cur != null && cur.itemCount > 0 && cur.getItemAt(0).text?.toString() == code) {
+                    if (Build.VERSION.SDK_INT >= 28) clipboard.clearPrimaryClip()
+                    else clipboard.setPrimaryClip(android.content.ClipData.newPlainText("", ""))
+                }
+            } catch (_: Exception) {}
+        }, 60_000L)
         Toast.makeText(this, R.string.msg_invite_copied, Toast.LENGTH_SHORT).show()
     }
 
@@ -511,7 +522,8 @@ class ServerActivity : AppCompatActivity() {
                 // Queued behind a start that is still initialising, and back
                 // only once the native loop has ended: nothing writes to the
                 // blob files while they are copied and deleted.
-                ServerService.core.submit(Runnable { ServerLib.stopServer() }).get()
+                val stopped = ServerService.core.submit(java.util.concurrent.Callable { ServerLib.stopServer() }).get()
+                if (stopped.startsWith("Error:")) throw java.io.IOException(stopped)
                 val needed = from.listFiles()?.sumOf { it.length() } ?: 0L
                 if (android.os.StatFs(to.parentFile!!.absolutePath).availableBytes < needed) {
                     throw java.io.IOException("hedefte yeterli boş alan yok")

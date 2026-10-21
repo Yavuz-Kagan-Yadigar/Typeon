@@ -255,6 +255,7 @@ class CameraCaptureActivity : AppCompatActivity() {
     private fun finishWithCroppedPhoto() {
         val cropped = cropOverlay.buildCroppedBitmap()
         if (cropped == null) {
+            Toast.makeText(this, R.string.error_send_failed, Toast.LENGTH_SHORT).show()
             finish()
             return
         }

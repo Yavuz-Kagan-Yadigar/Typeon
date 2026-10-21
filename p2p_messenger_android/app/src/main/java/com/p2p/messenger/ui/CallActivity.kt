@@ -102,8 +102,16 @@ class CallActivity : AppCompatActivity() {
                 NotificationChannel(CHANNEL_ID, context.getString(R.string.call_channel_name), NotificationManager.IMPORTANCE_HIGH)
             )
             val text = context.getString(if (video) R.string.call_incoming_video else R.string.call_incoming_voice)
+            // Lock screen: no caller name (same as message notifications).
+            val publicVersion = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(context.getString(R.string.app_name))
+                .setContentText(text)
+                .build()
             val n = NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_notification)
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                .setPublicVersion(publicVersion)
                 .setContentTitle(name)
                 .setContentText(text)
                 .setCategory(NotificationCompat.CATEGORY_CALL)
@@ -123,7 +131,14 @@ class CallActivity : AppCompatActivity() {
     }
 
     private val ui = Handler(Looper.getMainLooper())
-    private val io = Executors.newSingleThreadExecutor()
+    /** Discards after shutdown: `poll()` can re-arm itself from a task that
+     *  was still in flight when `onDestroy` shut the executor down — a plain
+     *  `AbortPolicy` threw RejectedExecutionException on the UI thread
+     *  (same deliberate pattern as WhiteboardPanel's `DiscardPolicy`). */
+    private val io = java.util.concurrent.ThreadPoolExecutor(
+        1, 1, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
+        java.util.concurrent.LinkedBlockingQueue(), java.util.concurrent.ThreadPoolExecutor.DiscardPolicy()
+    )
     private lateinit var txtName: TextView
     private lateinit var txtStatus: TextView
     private lateinit var grid: LinearLayout
@@ -588,20 +603,34 @@ class CallActivity : AppCompatActivity() {
         return tile
     }
 
+    /** Fingerprint -> avatar jpeg; an EMPTY array means "no avatar" (the full
+     *  `listContacts()` dump was scanned by a fresh Thread per tile, per
+     *  participant, while a call screen re-renders twice a second). */
+    private val peerAvatars = HashMap<String, ByteArray>()
+
     /** Placeholder now; the real picture once the contact list is read (off the UI thread). */
     private fun loadAvatar(tile: Tile, peer: String, name: String) {
         com.p2p.messenger.util.AvatarUtil.renderInto(tile.avatar!!, null, name)
-        Thread {
+        val cached = synchronized(peerAvatars) { peerAvatars[peer] }
+        if (cached != null) {
+            // One scan per distinct peer, not one Thread + listContacts() per
+            // tile: re-renders, PiP round-trips and rejoining participants
+            // all hit this path.
+            if (cached.isNotEmpty()) com.p2p.messenger.util.AvatarUtil.renderInto(tile.avatar!!, cached, name)
+            return
+        }
+        io.execute {
             val jpeg = try {
                 val a = org.json.JSONArray(P2PLib.listContacts())
                 (0 until a.length()).map { a.getJSONObject(it) }
                     .firstOrNull { it.optString("active_device_fingerprint") == peer }
                     ?.optString("avatar_hex")?.ifEmpty { null }?.let { com.p2p.messenger.util.hexToBytes(it) }
             } catch (e: Exception) { null }
+            synchronized(peerAvatars) { peerAvatars[peer] = jpeg ?: ByteArray(0) }
             if (jpeg != null) ui.post {
                 if (!isDestroyed && tile.peer == peer) com.p2p.messenger.util.AvatarUtil.renderInto(tile.avatar!!, jpeg, name)
             }
-        }.start()
+        }
     }
 
     /** Accent frame around a tile while its participant speaks. */

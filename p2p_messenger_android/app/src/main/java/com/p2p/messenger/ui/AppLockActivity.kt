@@ -119,32 +119,9 @@ class AppLockActivity : AppCompatActivity() {
         // tamamen çıkılır (arkadaki Activity yığını görünür kalmamalı).
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                AppLock.promptClosed()
                 finishAffinity()
             }
         })
-    }
-
-    /**
-     * Emniyet ağı: `AppLock.guard` kilit ekranını başlatırken "zaten
-     * gösteriliyor" bayrağını kaldırır ve o bayrak normalde ya kilit
-     * açılınca ya geri tuşuyla temizlenir. Sistem bu Activity'yi başka bir
-     * yolla yok ederse (bellek baskısı, `finish()` dışı bir yol) bayrak
-     * asılı kalır ve `guard` bir daha ASLA kilit ekranı açmazdı. Kilit
-     * hâlâ kapalıysa burada temizliyoruz; açıldıysa `markUnlocked` zaten
-     * temizlemiş olur ve bu çağrı zararsız bir no-op'tur.
-     */
-    override fun onDestroy() {
-        super.onDestroy()
-        AppLock.promptClosed()
-    }
-
-    /** A stopped lock screen (Home pressed) guards nothing that starts
-     *  later: an activity launched by a share, a link or a notification
-     *  saw the flag still set and opened unlocked. */
-    override fun onStop() {
-        super.onStop()
-        if (!isChangingConfigurations) AppLock.promptClosed()
     }
 
     /** A second lock screen may have unlocked the app meanwhile. */

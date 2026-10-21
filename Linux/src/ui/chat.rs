@@ -264,6 +264,12 @@ struct ChatView {
     /// loaded rather than firing a network request — scrolling up loads more.
     search_matches: RefCell<Vec<String>>,
     search_index: Cell<usize>,
+    /// Group read receipts waiting for the 700 ms flush (device, message id).
+    seen_batch: RefCell<Vec<(String, String)>>,
+    /// Lower-cased bubble text per id for `run_search`; cleared whenever a
+    /// bubble's text can change (edit, delete, refresh, reload).
+    search_lower: RefCell<HashMap<String, String>>,
+    whiteboard: crate::ui::whiteboard::Board,
 }
 
 impl Drop for ChatView {
@@ -382,6 +388,12 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         recording: RefCell::new(None),
         search_matches: RefCell::new(Vec::new()),
         search_index: Cell::new(0),
+        search_lower: RefCell::new(HashMap::new()),
+        seen_batch: RefCell::new(Vec::new()),
+        whiteboard: match conversation {
+            Conversation::Direct { fingerprint, .. } => crate::ui::whiteboard::Board::new(&main.app, fingerprint, ""),
+            Conversation::Group { group_id, .. } => crate::ui::whiteboard::Board::new(&main.app, "", group_id),
+        },
     });
 
     // reply bar content
@@ -438,6 +450,7 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         .orientation(gtk::Orientation::Vertical)
         .build();
     page_content.append(&search_bar);
+    page_content.append(view.whiteboard.panel());
     page_content.append(&scroller);
     page_content.append(&typing_indicator);
     reply_island.append(&reply_bar);
@@ -470,7 +483,11 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         let view = view.clone();
         page.connect_hidden(move |_| {
             view.mark_read_and_sync();
-            *view.app().active_conversation.borrow_mut() = None;
+            // A newer page may already have claimed it; only clear our own.
+            let mut active = view.app().active_conversation.borrow_mut();
+            if active.as_deref() == Some(view.conversation.key().as_str()) {
+                *active = None;
+            }
         });
     }
 
@@ -502,6 +519,10 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         glib::timeout_add_seconds_local(3, move || {
             if page_content.root().is_none() {
                 return glib::ControlFlow::Break;
+            }
+            // Hidden/minimized: skip the thread + core round-trip.
+            if !page_content.is_mapped() {
+                return glib::ControlFlow::Continue;
             }
             view.refresh_subtitle();
             glib::ControlFlow::Continue
@@ -604,6 +625,7 @@ fn build_header(
             .popover(&popover)
             .build(),
     );
+    header.pack_end(view.whiteboard.toggle_button());
     for (icon, tip, video) in [("camera-video-symbolic", "Video call", true), ("call-start-symbolic", "Voice call", false)] {
         let button = gtk::Button::builder().icon_name(icon).tooltip_text(tip).build();
         let view = view.clone();
@@ -760,11 +782,19 @@ impl ChatView {
                 if view.load_gen.get() != generation {
                     return;
                 }
+                // Keep a reader of old messages where they are; only a view
+                // already at the bottom follows to the newest.
+                let adjustment = view.scroller.vadjustment();
+                let distance_from_bottom = adjustment.upper() - adjustment.page_size() - adjustment.value();
+                let at_bottom = distance_from_bottom < 80.0;
                 while let Some(child) = view.messages.first_child() {
                     view.messages.remove(&child);
                 }
                 view.bubbles.borrow_mut().clear();
                 view.order.borrow_mut().clear();
+                view.search_lower.borrow_mut().clear();
+                view.search_matches.borrow_mut().clear();
+                view.search_index.set(0);
                 view.exhausted_locally.set(false);
                 view.oldest_timestamp.set(oldest);
 
@@ -777,8 +807,13 @@ impl ChatView {
                     previous_day = entry.order_key;
                     view.insert_entry(entry, false);
                 }
-                view.scroll_to_bottom();
-
+                if at_bottom {
+                    view.scroll_to_bottom();
+                } else {
+                    glib::idle_add_local_once(move || {
+                        adjustment.set_value(adjustment.upper() - adjustment.page_size() - distance_from_bottom);
+                    });
+                }
             },
         );
     }
@@ -991,6 +1026,7 @@ impl ChatView {
             // Already on screen — a duplicate can legitimately arrive when a
             // reload races an event. Refresh in place instead of doubling it.
             existing.text.set_label(&display_text(&entry));
+            self.search_lower.borrow_mut().clear();
             existing.edited.set(entry.edited);
             *existing.status.borrow_mut() = entry.status.clone();
             existing.meta.set_label(&meta_text(&entry, existing.seen.get()));
@@ -1025,24 +1061,6 @@ impl ChatView {
                 && entry.attachment.is_none()
                 && entry.order_key.saturating_sub(previous.order_key) < BUBBLE_GROUP_WINDOW_MS
         });
-        // Spec dışı, hata ayıklama (kullanıcı: "linux hala olmamış" — gerçek
-        // sohbette hiç birleşmiyordu, statik test harness'ta ise ÇALIŞTI —
-        // bkz. `demo_bubbles`): geçici tanı çıktısı, sorunun `insert_entry`'nin
-        // KARAR mantığında mı yoksa CSS/render tarafında mı olduğunu kesin
-        // olarak ayırt etmek için.
-        eprintln!(
-            "typeon[debug]: insert_entry id={:?} mine={} sender={:?} position={} has_previous={} grouped={}",
-            entry.id, entry.mine, entry.sender_identity, position, previous_bubble.is_some(), grouped_with_previous
-        );
-        if let Some(previous) = &previous_bubble {
-            eprintln!(
-                "typeon[debug]:   previous mine={} sender={:?} order_key={} attachment_none={} | entry order_key={} attachment_none={} delta={}",
-                previous.mine, previous.sender_identity, previous.order_key, previous.attachment.is_none(),
-                entry.order_key, entry.attachment.is_none(),
-                entry.order_key.saturating_sub(previous.order_key)
-            );
-        }
-
         let bubble = self.build_bubble(&entry, grouped_with_previous);
         if grouped_with_previous {
             if let Some(previous) = &previous_bubble {
@@ -1726,76 +1744,73 @@ impl ChatView {
         let own_identity = self.app().own_identity_id.borrow().clone();
         let now = util::now_ms();
 
-        match &self.conversation {
-            Conversation::Direct { fingerprint, .. } => {
-                match core::send_message(fingerprint, &text, reply_id, reply_preview.clone()) {
-                    Ok(receipt) => self.insert_entry(
-                        Entry {
-                            id: receipt.message_id,
-                            mine: true,
-                            sender_identity: own_identity,
-                            text,
-                            order_key: now,
-                            status: Some(receipt.status),
-                            reply_preview,
-                            reply_sender,
-                            deleted: false,
-                            edited: false,
-                            attachment: None,
-                            seen: false,
-                            reactions: String::new(),
-                        },
-                        true,
-                    ),
-                    Err(error) => {
-                        self.app().toast(&format!("Could not send: {}", error));
-                        return;
-                    }
-                }
-            }
-            Conversation::Group { group_id, .. } => {
-                match core::send_group_message(
-                    group_id,
-                    &text,
-                    reply_id,
-                    reply_preview.clone(),
-                    reply_sender.clone(),
-                ) {
-                    Ok(local_id) => self.insert_entry(
-                        Entry {
-                            id: local_id,
-                            mine: true,
-                            sender_identity: own_identity,
-                            text,
-                            order_key: now,
-                            // A group send fans out to every member; the core
-                            // reports no single status, so this shows as sent
-                            // and the pending queue owns the retries.
-                            status: Some("sent".to_string()),
-                            reply_preview,
-                            reply_sender,
-                            deleted: false,
-                            edited: false,
-                            attachment: None,
-                            seen: false,
-                            reactions: String::new(),
-                        },
-                        true,
-                    ),
-                    Err(error) => {
-                        self.app().toast(&format!("Could not send: {}", error));
-                        return;
-                    }
-                }
-            }
-        }
-
+        // Composer clears first; the core call runs off the GTK thread and the
+        // bubble appears on its result. A failed send puts the text back.
         buffer.set_text("");
         self.clear_reply();
         self.set_typing(false);
+
+        let view = self.clone();
+        let restore = text.clone();
+        let preview_for_core = reply_preview.clone();
+        let reply_sender_for_core = reply_sender.clone();
+        let make_entry = move |id: String, status: String| Entry {
+            id,
+            mine: true,
+            sender_identity: own_identity,
+            text: restore.clone(),
+            order_key: now,
+            status: Some(status),
+            reply_preview: reply_preview.clone(),
+            reply_sender: reply_sender.clone(),
+            deleted: false,
+            edited: false,
+            attachment: None,
+            seen: false,
+            reactions: String::new(),
+        };
+        let done = move |view: Rc<Self>, result: Result<Entry, String>, text: String| match result {
+            Ok(entry) => view.insert_entry(entry, true),
+            Err(error) => {
+                view.app().toast(&format!("Could not send: {}", error));
+                let buffer = view.composer.buffer();
+                let (start, end) = buffer.bounds();
+                if buffer.text(&start, &end, false).is_empty() {
+                    buffer.set_text(&text);
+                }
+            }
+        };
+        match &self.conversation {
+            Conversation::Direct { fingerprint, .. } => {
+                let fingerprint = fingerprint.clone();
+                let sent_text = text.clone();
+                crate::app::run_in_background(
+                    move || core::send_message(&fingerprint, &sent_text, reply_id, preview_for_core).map(|r| (r.message_id, r.status)),
+                    move |result| {
+                        let result = result.map(|(id, status)| make_entry(id, status));
+                        done(view, result, text);
+                    },
+                );
+            }
+            Conversation::Group { group_id, .. } => {
+                let group_id = group_id.clone();
+                let sent_text = text.clone();
+                crate::app::run_in_background(
+                    move || {
+                        core::send_group_message(&group_id, &sent_text, reply_id, preview_for_core, reply_sender_for_core)
+                    },
+                    move |result| {
+                        // A group send fans out to every member; the core reports
+                        // no single status, so it shows as sent and the pending
+                        // queue owns the retries.
+                        let result = result.map(|id| make_entry(id, "sent".to_string()));
+                        done(view, result, text);
+                    },
+                );
+            }
+        }
     }
 
-    /// Starts or finishes a voice message.
     /// Restores the composer to its idle look. Shared so stop, discard and
     /// failure paths cannot drift apart and leave the bar stuck mid-recording.
     fn reset_recording_ui(button: &gtk::Button, timer: &gtk::Label, cancel: &gtk::Button) {
@@ -1821,6 +1836,7 @@ impl ChatView {
         Self::reset_recording_ui(button, timer, cancel);
     }
 
+    /// Starts or finishes a voice message.
     fn toggle_recording(
         self: &Rc<Self>,
         button: &gtk::Button,
@@ -1845,6 +1861,14 @@ impl ChatView {
                     let view = self.clone();
                     let timer = timer.clone();
                     glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+                        // Chat page gone (switched/closed): this timer keeps the
+                        // view alive, so `Drop` never runs — stop the mic here.
+                        if timer.root().is_none() {
+                            if let Some(recording) = view.recording.borrow_mut().take() {
+                                recording.cancel();
+                            }
+                            return glib::ControlFlow::Break;
+                        }
                         let elapsed = match view.recording.borrow().as_ref() {
                             Some(recording) => recording.elapsed_ms(),
                             None => return glib::ControlFlow::Break,
@@ -1951,18 +1975,21 @@ impl ChatView {
         }
 
         let bubbles = self.bubbles.borrow();
+        let mut cache = self.search_lower.borrow_mut();
         let matches: Vec<String> = self
             .order
             .borrow()
             .iter()
             .filter(|(_, id)| {
-                bubbles
-                    .get(id)
-                    .map(|bubble| bubble.text.label().to_lowercase().contains(&needle))
-                    .unwrap_or(false)
+                let Some(bubble) = bubbles.get(id) else { return false };
+                cache
+                    .entry(id.clone())
+                    .or_insert_with(|| bubble.text.label().to_lowercase())
+                    .contains(&needle)
             })
             .map(|(_, id)| id.clone())
             .collect();
+        drop(cache);
         drop(bubbles);
 
         let found = matches.len();
@@ -2101,11 +2128,8 @@ impl ChatView {
         // Photos travel with a small cover so the receiver sees something
         // before downloading. Video previews would need a decoder we do not
         // ship, so those go without — the receiver still gets a file card.
-        let preview = if util::is_image(&mime) {
-            util::scaled_jpeg(&path.to_string_lossy(), 480, 85)
-        } else {
-            None
-        };
+        // Decoded in the worker below, never on the GTK thread.
+        let want_preview = util::is_image(&mime);
 
         // bkz. `prompt_attachment_caption` dosya başı notu — ekran zaten
         // aktif bir yanıt tutuyorsa (metin mesajıyla AYNI mantık, bkz.
@@ -2125,6 +2149,11 @@ impl ChatView {
         // much not instant.
         app::run_in_background(
             move || {
+                let preview = if want_preview {
+                    util::scaled_jpeg(&source.to_string_lossy(), 480, 85)
+                } else {
+                    None
+                };
                 let tmp_dir = crate::data_directory().join("attachments/plain_cache");
                 let (sent, file_name, mime) = util::prepare_outgoing(&source, &file_name, &mime, hi_res, &tmp_dir);
                 let sent_path = sent.to_string_lossy().to_string();
@@ -2184,18 +2213,25 @@ impl ChatView {
             if new_text.is_empty() || new_text == entry.text {
                 return;
             }
-            let outcome = match &view.conversation {
-                Conversation::Direct { fingerprint, .. } => {
-                    core::edit_message(fingerprint, &entry.id, &new_text).map(|_| ())
-                }
-                Conversation::Group { group_id, .. } => {
-                    core::edit_group_message(group_id, &entry.id, &new_text)
-                }
+            let (direct, target) = match &view.conversation {
+                Conversation::Direct { fingerprint, .. } => (true, fingerprint.clone()),
+                Conversation::Group { group_id, .. } => (false, group_id.clone()),
             };
-            match outcome {
-                Ok(()) => view.apply_edit(&entry.id, &new_text),
-                Err(error) => view.app().toast(&format!("Edit failed: {}", error)),
-            }
+            let (id, text) = (entry.id.clone(), new_text.clone());
+            let (view, done_id) = (view.clone(), entry.id.clone());
+            crate::app::run_in_background(
+                move || {
+                    if direct {
+                        core::edit_message(&target, &id, &text).map(|_| ())
+                    } else {
+                        core::edit_group_message(&target, &id, &text)
+                    }
+                },
+                move |outcome| match outcome {
+                    Ok(()) => view.apply_edit(&done_id, &new_text),
+                    Err(error) => view.app().toast(&format!("Edit failed: {}", error)),
+                },
+            );
         });
         dialog.present();
     }
@@ -2210,18 +2246,25 @@ impl ChatView {
             "Delete",
             true,
             move || {
-                let outcome = match &view.conversation {
-                    Conversation::Direct { fingerprint, .. } => {
-                        core::delete_message(fingerprint, &entry.id).map(|_| ())
-                    }
-                    Conversation::Group { group_id, .. } => {
-                        core::delete_group_message(group_id, &entry.id)
-                    }
+                let (direct, target) = match &view.conversation {
+                    Conversation::Direct { fingerprint, .. } => (true, fingerprint.clone()),
+                    Conversation::Group { group_id, .. } => (false, group_id.clone()),
                 };
-                match outcome {
-                    Ok(()) => view.apply_delete(&entry.id),
-                    Err(error) => view.app().toast(&format!("Delete failed: {}", error)),
-                }
+                let id = entry.id.clone();
+                let (view, done_id) = (view.clone(), entry.id.clone());
+                crate::app::run_in_background(
+                    move || {
+                        if direct {
+                            core::delete_message(&target, &id).map(|_| ())
+                        } else {
+                            core::delete_group_message(&target, &id)
+                        }
+                    },
+                    move |outcome| match outcome {
+                        Ok(()) => view.apply_delete(&done_id),
+                        Err(error) => view.app().toast(&format!("Delete failed: {}", error)),
+                    },
+                );
             },
         );
     }
@@ -2260,11 +2303,11 @@ impl ChatView {
         match &self.conversation {
             Conversation::Direct { fingerprint, .. } => {
                 let fingerprint = fingerprint.clone();
-                std::thread::spawn(move || core::send_typing_indicator(&fingerprint, typing));
+                bg_serial(move || core::send_typing_indicator(&fingerprint, typing));
             }
             Conversation::Group { group_id, .. } => {
                 let group_id = group_id.clone();
-                std::thread::spawn(move || core::send_group_typing_indicator(&group_id, typing));
+                bg_serial(move || core::send_group_typing_indicator(&group_id, typing));
             }
         }
     }
@@ -2284,15 +2327,29 @@ impl ChatView {
                 glib::timeout_add_local_once(std::time::Duration::from_millis(700), move || {
                     view.watermark_pending.set(false);
                     let now = util::now_ms();
-                    std::thread::spawn(move || core::sync_read_state(&fingerprint, "", now));
+                    bg_serial(move || core::sync_read_state(&fingerprint, "", now));
                 });
             }
             Conversation::Group { .. } => {
                 // A group receipt goes back to the original sender's device
                 // with the local id they can map to their own bubble.
+                // Collected and sent from ONE worker per 700 ms burst, not a
+                // thread per bubble.
                 if let Some(sender) = self.sender_device(&entry.sender_identity) {
-                    let id = entry.id.clone();
-                    std::thread::spawn(move || core::send_seen_receipt(&sender, &id, Some(id.clone())));
+                    self.seen_batch.borrow_mut().push((sender, entry.id.clone()));
+                    if self.watermark_pending.replace(true) {
+                        return;
+                    }
+                    let view = self.clone();
+                    glib::timeout_add_local_once(std::time::Duration::from_millis(700), move || {
+                        view.watermark_pending.set(false);
+                        let batch = std::mem::take(&mut *view.seen_batch.borrow_mut());
+                        bg_serial(move || {
+                            for (sender, id) in batch {
+                                core::send_seen_receipt(&sender, &id, Some(id.clone()));
+                            }
+                        });
+                    });
                 }
             }
         }
@@ -2325,15 +2382,37 @@ impl ChatView {
             Conversation::Direct { fingerprint, .. } => (fingerprint.clone(), String::new()),
             Conversation::Group { group_id, .. } => (String::new(), group_id.clone()),
         };
-        std::thread::spawn(move || core::sync_read_state(&fingerprint, &group_id, now));
+        bg_serial(move || core::sync_read_state(&fingerprint, &group_id, now));
     }
 }
 
 // --- live updates ---
 
+/// One worker runs the fire-and-forget core calls (typing, read sync, seen
+/// receipts) in order: no thread per transition, and a typing "false" can no
+/// longer overtake its "true".
+fn bg_serial(job: impl FnOnce() + Send + 'static) {
+    type Job = Box<dyn FnOnce() + Send>;
+    static TX: std::sync::OnceLock<std::sync::mpsc::Sender<Job>> = std::sync::OnceLock::new();
+    let tx = TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        std::thread::spawn(move || {
+            while let Ok(job) = rx.recv() {
+                job();
+            }
+        });
+        tx
+    });
+    let _ = tx.send(Box::new(job));
+}
+
 impl ChatView {
     fn handle_event(self: &Rc<Self>, event: &Event) {
         let own_identity = self.app().own_identity_id.borrow().clone();
+        if event.kind == "whiteboard" {
+            self.whiteboard.handle_event(event);
+            return;
+        }
 
         match (&self.conversation, event.kind.as_str()) {
             (Conversation::Direct { fingerprint, .. }, "account_deleted")
@@ -2586,6 +2665,7 @@ impl ChatView {
     fn apply_edit(&self, id: &str, new_text: &str) {
         if let Some(bubble) = self.bubbles.borrow().get(id) {
             bubble.text.set_label(new_text);
+            self.search_lower.borrow_mut().clear();
             bubble.edited.set(true);
             bubble.meta.set_label(&format_meta(
                 bubble.order_key,
@@ -2599,6 +2679,7 @@ impl ChatView {
     fn apply_delete(&self, id: &str) {
         if let Some(bubble) = self.bubbles.borrow().get(id) {
             bubble.text.set_label("Message deleted");
+            self.search_lower.borrow_mut().clear();
             bubble.text.add_css_class("dim-label");
             bubble.text.set_visible(true);
             // An attachment bubble's card is a separate widget from `text` —
@@ -2636,14 +2717,27 @@ impl ChatView {
         let view = self.clone();
         let id = entry.id.clone();
         chooser.connect_emoji_picked(move |_, emoji| {
-            let result = match &view.conversation {
-                Conversation::Direct { fingerprint, .. } => core::react_to_message(fingerprint, &id, emoji),
-                Conversation::Group { group_id, .. } => core::react_to_group_message(group_id, &id, emoji),
+            let (direct, target) = match &view.conversation {
+                Conversation::Direct { fingerprint, .. } => (true, fingerprint.clone()),
+                Conversation::Group { group_id, .. } => (false, group_id.clone()),
             };
-            match result {
-                Ok(summary) => view.apply_reactions(&id, &summary),
-                Err(error) => view.app().toast(&format!("Reaction failed: {}", error)),
-            }
+            let (view, id, emoji) = (view.clone(), id.clone(), emoji.to_string());
+            crate::app::run_in_background(
+                {
+                    let id = id.clone();
+                    move || {
+                        if direct {
+                            core::react_to_message(&target, &id, &emoji)
+                        } else {
+                            core::react_to_group_message(&target, &id, &emoji)
+                        }
+                    }
+                },
+                move |result| match result {
+                    Ok(summary) => view.apply_reactions(&id, &summary),
+                    Err(error) => view.app().toast(&format!("Reaction failed: {}", error)),
+                },
+            );
         });
         chooser.popup();
     }
@@ -2864,12 +2958,18 @@ fn group_members(view: &Rc<ChatView>) {
             let group_id = group_id.clone();
             let identity = identity.clone();
             remove.connect_clicked(move |_| {
-                if core::remove_from_group(&group_id, &identity) {
-                    view.app().toast("Member removed.");
-                    view.app().refresh_caches();
-                } else {
-                    view.app().toast("Could not remove that member.");
-                }
+                let (group_id, identity, view) = (group_id.clone(), identity.clone(), view.clone());
+                crate::app::run_in_background(
+                    move || core::remove_from_group(&group_id, &identity),
+                    move |removed| {
+                        if removed {
+                            view.app().toast("Member removed.");
+                            view.app().refresh_caches();
+                        } else {
+                            view.app().toast("Could not remove that member.");
+                        }
+                    },
+                );
             });
             row.add_suffix(&remove);
         }
@@ -2977,18 +3077,23 @@ fn group_picture(view: &Rc<ChatView>) {
     dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
         let Ok(file) = result else { return };
         let Some(path) = file.path() else { return };
-        let Some(jpeg) = util::scaled_jpeg(&path.to_string_lossy(), 720, 85) else {
-            view.app().toast("That file is not an image Typeon can read.");
-            return;
-        };
-        match core::set_group_profile_picture(&group_id, Some(jpeg)) {
-            // Only the founder may set it; the core enforces that.
-            Ok(()) => {
-                view.app().toast("Group picture updated.");
-                view.app().refresh_caches();
-            }
-            Err(error) => view.app().toast(&error),
-        }
+        let source = path.to_string_lossy().to_string();
+        let view = view.clone();
+        let group_id = group_id.clone();
+        app::run_in_background(
+            move || match util::scaled_jpeg(&source, 720, 85) {
+                Some(jpeg) => core::set_group_profile_picture(&group_id, Some(jpeg)),
+                None => Err("That file is not an image Typeon can read.".to_string()),
+            },
+            move |result| match result {
+                // Only the founder may set it; the core enforces that.
+                Ok(()) => {
+                    view.app().toast("Group picture updated.");
+                    view.app().refresh_caches();
+                }
+                Err(error) => view.app().toast(&error),
+            },
+        );
     });
 }
 
@@ -3192,6 +3297,7 @@ fn place_bubble(column: &gtk::Box, mine: bool) -> (gtk::Overlay, gtk::Box) {
 /// Visual harness for bubble layout — see `TYPEON_UI_TEST=bubbles`. Exercises
 /// the same `bubble_text_label`/`bubble_row` the real conversation uses, so
 /// what it shows is what a chat shows.
+#[cfg(debug_assertions)] // dev harness only, not in release binaries
 pub fn demo_bubbles() -> gtk::Widget {
     let messages = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -3355,7 +3461,8 @@ fn render_voice_state(state: &AttachmentState) {
     let status = state.status.borrow().clone();
     if status == "complete" {
         voice.slider.set_sensitive(true);
-        let duration = voice.duration_ms.get().max(1) as f64;
+        // Slider unit is microseconds, like `GtkMediaFile` timestamps/seek.
+        let duration = voice.duration_ms.get().max(1) as f64 * 1000.0;
         voice.slider.set_range(0.0, duration);
         voice.slider.set_value(0.0);
         voice.play_button.set_icon_name("media-playback-start-symbolic");

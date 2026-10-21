@@ -1331,6 +1331,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private fun markSeen(messageId: String) {
+        if (!AppLock.isUnlocked()) return
         try {
             P2PLib.sendSeenReceipt(peerDeviceFingerprint, messageId, null)
         } catch (e: Exception) {
@@ -1539,7 +1540,16 @@ class ChatActivity : AppCompatActivity() {
             .trim()
             .trimStart('.')
             .trim()
-        return cleaned.ifEmpty { "file" }.take(120)
+        val base = cleaned.ifEmpty { "file" }
+        // Cap by UTF-8 bytes (200) at a char boundary; keep the extension.
+        if (base.toByteArray().size <= 200) return base
+        val dot = base.lastIndexOf('.')
+        val ext = if (dot > 0 && base.length - dot <= 16) base.substring(dot) else ""
+        var stem = if (ext.isEmpty()) base else base.substring(0, dot)
+        while (stem.isNotEmpty() && (stem + ext).toByteArray().size > 200) {
+            stem = stem.dropLast(if (stem.length > 1 && Character.isLowSurrogate(stem.last())) 2 else 1)
+        }
+        return stem.ifEmpty { "file" } + ext
     }
 
     private fun saveToPublicDownloads(source: File, displayName: String, mimeType: String): Boolean {
@@ -1860,7 +1870,18 @@ class ChatActivity : AppCompatActivity() {
             var sent = tempFile
             try {
                 contentResolver.openInputStream(uri)?.use { input ->
-                    tempFile.outputStream().use { output -> input.copyTo(output, bufferSize = 64 * 1024) }
+                    tempFile.outputStream().use { output ->
+                        // SIZE column can lie: hard cap on bytes actually copied.
+                        val buf = ByteArray(64 * 1024)
+                        var total = 0L
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            total += n
+                            if (total > MAX_ATTACHMENT_SIZE) throw IllegalStateException("too_large")
+                            output.write(buf, 0, n)
+                        }
+                    }
                 } ?: throw java.io.IOException("Dosya açılamadı")
 
                 val previewJpeg = try {
@@ -1908,7 +1929,7 @@ class ChatActivity : AppCompatActivity() {
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@ChatActivity, getString(R.string.error_send_failed), Toast.LENGTH_SHORT).show()
+                    if (e.message == "too_large") Toast.makeText(this@ChatActivity, getString(R.string.error_file_too_large_named, fileName), Toast.LENGTH_LONG).show() else Toast.makeText(this@ChatActivity, getString(R.string.error_send_failed), Toast.LENGTH_SHORT).show()
                 }
             } finally {
                 tempFile.delete()
@@ -2257,7 +2278,7 @@ class ChatActivity : AppCompatActivity() {
         return if (attachment != null) {
             getString(R.string.lbl_attachment_reply_preview, attachment.fileName)
         } else {
-            item.text.take(REPLY_PREVIEW_MAX_CHARS)
+            item.text.takeWholeChars(REPLY_PREVIEW_MAX_CHARS)
         }
     }
 
@@ -2707,8 +2728,11 @@ class ChatActivity : AppCompatActivity() {
         resumedUnlocked = AppLock.isUnlocked()
         if (resumedUnlocked) NotificationHelper.clearForPeer(this, peerDeviceFingerprint)
         ThemePrefs.applyChatBackground(this)
-        P2PService.addMessageListener(messageListener)
+        // The conversation id FIRST: a message that lands between the
+        // listener registration and this line would post a notification for
+        // the conversation that is already open on the screen.
         P2PService.activeConversationId = peerDeviceFingerprint
+        P2PService.addMessageListener(messageListener)
         sessionPollHandler.post(sessionPollRunnable)
         ownStatusPollHandler.post(ownStatusPollRunnable)
         syncMissedMessages()
@@ -2732,6 +2756,7 @@ class ChatActivity : AppCompatActivity() {
      *  bkz. `sync_read_state`). Sohbet açılışı / `onResume` / canlı gelen
      *  mesaj sonrası çağrılır. */
     private fun scheduleReadWatermark() {
+        if (!AppLock.isUnlocked()) return
         readWatermarkHandler.removeCallbacks(readWatermarkRunnable)
         readWatermarkHandler.postDelayed(readWatermarkRunnable, 700L)
     }
@@ -2877,5 +2902,23 @@ class ChatActivity : AppCompatActivity() {
         sendTypingState(false)
         if (mediaRecorder != null) finishVoiceRecording(send = false)
         stopVoicePlayback()
+    }
+
+    /**
+     * The pending callbacks of the handlers hold the adapter (and with it
+     * this activity) alive: the reply highlight (2 s), the typing cleaner
+     * (6 s), the voice tick, the recording timer, the two poll loops and the
+     * read watermark. `onPause` only removes SOME of them — a pending
+     * callback survived the pause and kept the whole screen alive.
+     */
+    override fun onDestroy() {
+        typingHandler.removeCallbacksAndMessages(null)
+        replyHighlightHandler.removeCallbacksAndMessages(null)
+        recordingHandler.removeCallbacksAndMessages(null)
+        voicePlaybackHandler.removeCallbacksAndMessages(null)
+        sessionPollHandler.removeCallbacksAndMessages(null)
+        ownStatusPollHandler.removeCallbacksAndMessages(null)
+        readWatermarkHandler.removeCallbacksAndMessages(null)
+        super.onDestroy()
     }
 }

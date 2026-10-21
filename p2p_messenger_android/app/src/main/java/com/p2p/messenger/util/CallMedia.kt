@@ -266,7 +266,7 @@ object CallMedia {
             val kind = f[0].toInt()
             val slot = f[1].toInt() and 0xff
             if (kind != KIND_AUDIO && kind != KIND_VIDEO) continue
-            val lane = lanes.getOrPut(slot * 4 + kind) { Lane(slot, kind) }
+            val lane = lanes.getOrPut(slot * 4 + kind) { Lane(slot, kind, gen) }
             if (!lane.queue.offer(f)) {
                 // Lane behind: shed the oldest; a video hole needs a keyframe.
                 lane.queue.poll()
@@ -278,7 +278,7 @@ object CallMedia {
 
     private val lanes = ConcurrentHashMap<Int, Lane>()
 
-    private class Lane(val slot: Int, val kind: Int) {
+    private class Lane(val slot: Int, val kind: Int, val gen: Int) {
         val queue = java.util.concurrent.ArrayBlockingQueue<ByteArray>(LANE_QUEUE)
         @Volatile var alive = true
         private val thread = Thread({
@@ -300,6 +300,12 @@ object CallMedia {
                 KIND_AUDIO -> try {
                     // Not on every 60 ms packet after a failure.
                     if (android.os.SystemClock.elapsedRealtime() < audioRetryAt) return
+                    // `stop()` cleared audioSinks on another thread and waits
+                    // for this lane on its own: a lane still running its last
+                    // frame must not build a fresh, untracked sink here. A
+                    // sink that outlives stop() is exactly the leak this
+                    // guards (see `generation`).
+                    if (!running || generation != gen) return
                     audioSinks.getOrPut(slot) { AudioSink() }.feed(f, 2)
                 } catch (e: Exception) {
                     Log.w(TAG, "Audio decode failed (slot $slot), resetting", e)

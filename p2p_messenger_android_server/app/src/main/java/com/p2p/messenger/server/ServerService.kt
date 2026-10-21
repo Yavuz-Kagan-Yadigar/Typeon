@@ -64,6 +64,11 @@ class ServerService : Service() {
         val moving = AtomicBoolean(false)
 
         private const val WATCHDOG_MS = 60_000L
+        private const val WATCHDOG_MAX_MS = 30 * 60_000L
+
+        /** Network pokes run here, coalesced: a flapping network used to spawn a thread per callback. */
+        private val poker: ExecutorService = Executors.newSingleThreadExecutor()
+        private val pokePending = AtomicBoolean(false)
 
         @Volatile
         private var instance: ServerService? = null
@@ -157,6 +162,39 @@ class ServerService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var netCallback: ConnectivityManager.NetworkCallback? = null
 
+    /**
+     * Wake lock + Wi-Fi lock. A server that is up needs both (screen-off Wi-Fi
+     * power save dropped the Tor circuits in the 2026-09-06 test;
+     * `WIFI_MODE_FULL_LOW_LATENCY` only works in the foreground), so they are
+     * held while it runs. Released while the core is failing to start.
+     */
+    @Synchronized
+    private fun setLocks(on: Boolean) {
+        if (!on) {
+            wakeLock?.let { if (it.isHeld) it.release() }
+            wakeLock = null
+            wifiLock?.let { if (it.isHeld) it.release() }
+            wifiLock = null
+            return
+        }
+        if (wakeLock == null) {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Typeon:server").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+        if (wifiLock == null) {
+            @Suppress("DEPRECATION")
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            @Suppress("DEPRECATION")
+            wifiLock = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Typeon:server-wifi")?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -188,29 +226,7 @@ class ServerService : Service() {
         // Ekran kapalıyken de teslim yapabilmek için. Sunucu tanım gereği
         // "her zaman açık" olmalı; kullanıcı pil optimizasyonu muafiyetini
         // reddederse bu wakelock tek başına yeterli olmayabilir.
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Typeon:server").apply {
-            setReferenceCounted(false)
-            acquire()
-        }
-
-        // İKİ CİHAZLI TESTTE (2026-09-06) görüldü: telefonda çalışan onion
-        // sunucusuna istemciler aralıklarla ulaşamıyor ("Failed to obtain
-        // hidden service circuit", enrollment/deposit zaman aşımı). Sebep:
-        // `PARTIAL_WAKE_LOCK` CPU'yu açık tutuyor ama Wi-Fi radyosunu DEĞİL —
-        // ekran kapanınca Wi-Fi güç tasarrufuna geçip (ya da tamamen düşüp)
-        // Tor devrelerini/onion descriptor yayınını koparıyor. `WifiLock`
-        // (yüksek performans / düşük gecikme modu) radyoyu tam güçte tutar.
-        // `WIFI_MODE_FULL_HIGH_PERF` API 29'da deprecated ama kaldırılmadı;
-        // `WIFI_MODE_FULL_LOW_LATENCY` yalnızca uygulama ön planda + ekran
-        // açıkken devreye girer — bir arka plan sunucusu için işe yaramaz.
-        @Suppress("DEPRECATION")
-        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-        @Suppress("DEPRECATION")
-        wifiLock = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Typeon:server-wifi")?.apply {
-            setReferenceCounted(false)
-            acquire()
-        }
+        setLocks(true)
 
         // Ağ değişikliği (Wi-Fi kopup gelme, hücresele geçiş) güçlü bir
         // sinyal — arti'nin devreleri yeniden kurup onion descriptor'ı
@@ -246,6 +262,9 @@ class ServerService : Service() {
      * notices with the screen off: the service kept the wake lock and the
      * Wi-Fi lock for a server that was gone. Start it again.
      */
+    // Doubles while the core stays down (failed start included), capped.
+    private var watchdogDelay = WATCHDOG_MS
+
     private val watchdogTick = object : Runnable {
         override fun run() {
             core.execute {
@@ -254,12 +273,15 @@ class ServerService : Service() {
                     if (isRunning && dead && !moving.get()) {
                         Log.w(TAG, "Sunucu döngüsü ölmüş, yeniden başlatılıyor")
                         startCore()
+                        watchdogDelay = (watchdogDelay * 2).coerceAtMost(WATCHDOG_MAX_MS)
+                    } else {
+                        watchdogDelay = WATCHDOG_MS
                     }
                 } catch (e: Throwable) {
                     Log.w(TAG, "Durum okunamadı: ${e.message}")
                 }
+                if (isRunning) watchdog.postDelayed(this, watchdogDelay)
             }
-            watchdog.postDelayed(this, WATCHDOG_MS)
         }
     }
 
@@ -290,13 +312,15 @@ class ServerService : Service() {
             if (!isRunning) return@execute
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             if (failed) {
-                // Not running: do not hold the foreground slot, the wake lock
-                // and the Wi-Fi lock for it (`onDestroy` releases them). The
-                // error stays as an ordinary notification.
+                // Storage or Tor can come back (SD card, "old loop still
+                // closing"): stay in the foreground and let the watchdog retry
+                // with backoff, but do not hold the locks meanwhile.
                 lastError = result
-                nm.notify(ERROR_NOTIFICATION_ID, buildNotification(result, ongoing = false))
-                stopSelf()
+                setLocks(false)
+                nm.notify(NOTIFICATION_ID, buildNotification(result))
             } else {
+                lastError = null
+                setLocks(true)
                 nm.cancel(ERROR_NOTIFICATION_ID)
                 nm.notify(NOTIFICATION_ID, buildNotification(getString(R.string.notif_running)))
             }
@@ -310,15 +334,13 @@ class ServerService : Service() {
         // etmeyi sürdürüyordu.
         core.execute {
             try {
-                ServerLib.stopServer()
+                val r = ServerLib.stopServer()
+                if (r.startsWith("Error:")) Log.w(TAG, "stopServer: $r")
             } catch (e: Throwable) {
                 Log.w(TAG, "Sunucu durdurulamadı: ${e.message}")
             }
         }
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
-        wifiLock?.let { if (it.isHeld) it.release() }
-        wifiLock = null
+        setLocks(false)
         netCallback?.let {
             try {
                 (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager)
@@ -335,14 +357,16 @@ class ServerService : Service() {
     /** Ağ değişikliğinde çekirdeği dürt — arti devrelerini/onion yayınını
      *  tazelesin. `ServerLib.notifyNetworkChanged` yoksa (eski .so) sessizce geç. */
     private fun pokeCore(reason: String) {
-        Thread {
+        if (!pokePending.compareAndSet(false, true)) return
+        poker.execute {
+            pokePending.set(false)
             try {
                 ServerLib.notifyNetworkChanged()
                 Log.i(TAG, "notifyNetworkChanged ($reason)")
             } catch (e: Throwable) {
                 Log.w(TAG, "notifyNetworkChanged başarısız: ${e.message}")
             }
-        }.start()
+        }
     }
 
     private fun createChannel() {

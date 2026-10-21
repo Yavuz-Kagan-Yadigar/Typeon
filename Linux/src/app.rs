@@ -181,8 +181,15 @@ impl App {
 
     /// Get all custom fonts sorted by id (oldest first).
     pub fn list_custom_fonts(&self) -> Vec<font::CustomFont> {
-        let mut fm = self.font_manager.borrow_mut();
-        fm.discover()
+        let mut fonts = self.font_manager.borrow_mut().discover();
+        // `discover` only knows file ids; the names the user saw live in prefs.
+        let prefs = self.prefs.borrow();
+        for font in &mut fonts {
+            if let Some(name) = prefs.custom_fonts.get(&font.id) {
+                font.display_name = name.clone();
+            }
+        }
+        fonts
     }
 
     /// Get the active custom font's id.
@@ -222,6 +229,12 @@ impl App {
             .unwrap_or_default()
             .to_string();
         if kind.is_empty() || kind == "noop" {
+            return;
+        }
+        // M-180: the core caught a panic (a single bad packet does it too):
+        // logged only, nothing restarts on it.
+        if kind == "core_panic" {
+            log::error!("core caught a panic (see the core log)");
             return;
         }
         let event = Event { kind, value };
@@ -378,6 +391,11 @@ impl App {
                     "Unverified device",
                     &format!("{who} is writing from a device you have not verified ({code})."),
                 );
+            }
+            "pairing_failed" => {
+                if event.string("reason") == "contact_limit" {
+                    self.toast("Pairing failed: your contact list is full.");
+                }
             }
             "history_restore_incomplete" => {
                 self.toast("The server did not send all of the history. Try again later.");
@@ -594,6 +612,35 @@ pub fn start_poll_loop(app: &Rc<App>) {
         glib::ControlFlow::Continue
     });
 
+    // R-06: power-save for the core's keepalive ladder (20 s -> 60 s) and its
+    // radio-window coalescing — the state Android feeds from the app lifecycle
+    // (`P2PLib.setPowerSave`), which the desktop client never reported. The
+    // window hookup lives in `main.rs` (`connect_is_active_notify`); this
+    // watcher is what carries the "gone for a minute" part, reading the very
+    // same `is_active` state the notification path already uses. Active again
+    // => off at once, inactive for `POWER_SAVE_AFTER_IDLE_MS` => on. Every
+    // core call goes to a worker thread — never the GTK thread.
+    const POWER_SAVE_AFTER_IDLE_MS: u64 = 60_000;
+    let power_saving = Cell::new(false);
+    let inactive_since = Cell::new(0u64);
+    let saver = app.clone();
+    glib::timeout_add_seconds_local(10, move || {
+        let active = saver.window().map(|window| window.is_active()).unwrap_or(false);
+        let now = util::now_ms();
+        if active {
+            inactive_since.set(0);
+            if power_saving.replace(false) {
+                set_power_save(false);
+            }
+        } else if inactive_since.get() == 0 {
+            inactive_since.set(now);
+        } else if !power_saving.get() && now.saturating_sub(inactive_since.get()) >= POWER_SAVE_AFTER_IDLE_MS {
+            power_saving.set(true);
+            set_power_save(true);
+        }
+        glib::ControlFlow::Continue
+    });
+
     // The Android client force-reconnects immediately on a network change
     // (Wi-Fi <-> cellular, VPN toggling) instead of waiting for the ~15s
     // periodic reconnect sweep or a ping failure to notice a dead connection
@@ -604,6 +651,14 @@ pub fn start_poll_loop(app: &Rc<App>) {
     // longer to recover than on Android. `gio::NetworkMonitor` is GLib's
     // idiomatic source for exactly this signal.
     let monitor = gio::NetworkMonitor::default();
+    // R-06: the same monitor reports whether the link is metered — the state
+    // Android feeds from ConnectivityManager (`P2PLib.setMeteredNetwork`).
+    // Once at startup, then every time the flag flips. The core call takes the
+    // lock, so `set_metered` moves it to a worker thread.
+    set_metered(monitor.is_network_metered());
+    monitor.connect_network_metered_notify(|monitor| {
+        set_metered(monitor.is_network_metered());
+    });
     monitor.connect_network_changed(|_monitor, available| {
         if available {
             // Off the GTK main loop: this takes the core's global lock and
@@ -611,7 +666,26 @@ pub fn start_poll_loop(app: &Rc<App>) {
             // on a background thread (`notifyNetworkChangedInBackground`).
             // Inline it would freeze the UI whenever a poll round holds the
             // lock at the same moment.
-            std::thread::spawn(core::notify_network_changed);
+            // One worker at a time; events arriving meanwhile coalesce into
+            // one more run (a flapping link no longer stacks lock waiters).
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static BUSY: AtomicBool = AtomicBool::new(false);
+            static AGAIN: AtomicBool = AtomicBool::new(false);
+            if BUSY.swap(true, Ordering::AcqRel) {
+                AGAIN.store(true, Ordering::Release);
+            } else {
+                std::thread::spawn(|| loop {
+                    core::notify_network_changed();
+                    if !AGAIN.swap(false, Ordering::AcqRel) {
+                        BUSY.store(false, Ordering::Release);
+                        // An event landing right after the check above.
+                        if AGAIN.load(Ordering::Acquire) && !BUSY.swap(true, Ordering::AcqRel) {
+                            continue;
+                        }
+                        break;
+                    }
+                });
+            }
         }
     });
     // Leaked deliberately: this connection must outlive `start_poll_loop`
@@ -620,6 +694,20 @@ pub fn start_poll_loop(app: &Rc<App>) {
     // other owner were guaranteed to keep the underlying GObject singleton
     // alive, which the API does not promise.
     std::mem::forget(monitor);
+}
+
+/// R-06: power-save on/off for the core (see `core::set_power_save`) —
+/// driven by the window watcher in `start_poll_loop`, and cheap enough for a
+/// signal handler (`main.rs` `connect_is_active_notify`) to call directly.
+/// Takes the core lock, so it never runs on the GTK thread itself.
+pub fn set_power_save(enabled: bool) {
+    std::thread::spawn(move || core::set_power_save(enabled));
+}
+
+/// R-06: metered link or not (see `core::set_metered`) — worker thread for
+/// the same reason as `set_power_save`.
+pub fn set_metered(metered: bool) {
+    std::thread::spawn(move || core::set_metered(metered));
 }
 
 /// Runs `work` off the main thread and hands the result back on it. Used for

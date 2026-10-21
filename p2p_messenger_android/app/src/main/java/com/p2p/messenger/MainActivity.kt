@@ -43,9 +43,18 @@ class MainActivity : AppCompatActivity() {
      *  dakikalar içinde onlarca kapatılamaz modal dialog birikebilir, hatta
      *  kötü niyetli bir kişi tekrar tekrar yeni-cihaz olayı tetikleyerek bu
      *  ekranı kasıtlı spam'leyebilir (tam da bu güvenlik kontrolüne olan
-     *  güveni zedeler). Şimdi hâlâ gösterilmekte olan uyarının parmak izini
-     *  takip ediyoruz; aynı uyarı için ikinci bir dialog AÇILMAZ. */
-    private var shownAlertFingerprint: String? = null
+     *  güveni zedeler).
+     *
+     *  Bekleyen uyarılar bir KÜME ile takip edilir, TEK bir slotla değil:
+     *  çekirdek listeyi bir HashMap'te tutuyor, sıra her yoklamada
+     *  değişebiliyor — iki uyarı beklerken "ilk uyarı" A,B,A şeklinde
+     *  değişiyor ve her turda yeni bir kapatılamaz dialog üstüste biniyordu.
+     *  Artık: aynı uyarı için ikinci bir dialog AÇILMAZ ve aynı anda yalnızca
+     *  TEK dialog açık olur; sıradaki uyarı ancak önceki kapanınca gösterilir. */
+    private val shownAlertFingerprints = HashSet<String>()
+    /** Aynı anda açık olan tek güvenlik dialog'u (üste binen ikinci bir
+     *  dialog, altındakinin cevaplanmasını engelliyordu). */
+    private var alertDialog: androidx.appcompat.app.AlertDialog? = null
     private val alertPollRunnable = object : Runnable {
         override fun run() {
             checkPendingDeviceAlerts()
@@ -153,6 +162,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         if (isFinishing) com.p2p.messenger.util.ShareIntake.pending = null
+        // The security dialog is a window of this activity: leaving it open
+        // leaks it (and the answer buttons would act on a dead activity).
+        alertDialog?.dismiss()
+        alertDialog = null
         super.onDestroy()
     }
 
@@ -208,7 +221,7 @@ class MainActivity : AppCompatActivity() {
         // gelmesin: tüketildiği anda intent'ten düşürülür.
         intent.data = null
 
-        val code = data.toString()
+        val code = data.toString().take(300)
         if (!P2PLib.hasStoredIdentity()) {
             // No account, no server. Not put on the clipboard: any web page
             // could overwrite what the user had copied.
@@ -341,60 +354,89 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 "Error: ${e.message}"
             }
-            withContext(Dispatchers.Main) {
-                if (identityId.startsWith("Error:")) {
+            if (identityId.startsWith("Error:")) {
+                withContext(Dispatchers.Main) {
                     Toast.makeText(this@MainActivity, identityId, Toast.LENGTH_LONG).show()
                     showDeviceNameDialog()
-                } else {
-                    try {
-                        IdentityManager.persistNewIdentity(applicationContext)
-                    } catch (e: Exception) {
-                        // Keystore or disk failure, as in `createIdentityAndStart`.
-                        Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_LONG).show()
-                        com.p2p.messenger.util.LocalWipe.wipe(applicationContext)
-                        com.p2p.messenger.util.AppRestarter.restart(applicationContext)
-                        return@withContext
-                    }
-                    // The archive root key came back with the recovery file
-                    // but lived only in the core's memory: after a restart it
-                    // was gone and a new random one split the server archive.
-                    com.p2p.messenger.util.ArchiveKeyManager.persistIfNew(applicationContext)
-                    statusText.text = getString(R.string.lbl_id_short, identityId.take(8))
-                    startNetworkService()
-                    ensureBatteryOptimizationExemption()
-                    Toast.makeText(this@MainActivity, R.string.msg_recovery_import_success, Toast.LENGTH_LONG).show()
                 }
+                return@launch
+            }
+            // Keystore + disk: this coroutine already runs on the IO
+            // dispatcher. `false` = çekirdekte bekleyen bundle yoktu, yani
+            // secret key'ler hiç yazılmadı.
+            val persistError = try {
+                if (IdentityManager.persistNewIdentity(applicationContext)) null else "no pending secret bundle"
+            } catch (e: Exception) {
+                e.message ?: e.toString()
+            }
+            if (persistError != null) {
+                // Keystore or disk failure, as in `createIdentityAndStart`.
+                android.util.Log.w("MainActivity", "Kimlik secret bundle'ı kaydedilemedi: $persistError")
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, R.string.error_identity_persist_failed, Toast.LENGTH_LONG).show()
+                    com.p2p.messenger.util.LocalWipe.wipe(applicationContext)
+                    com.p2p.messenger.util.AppRestarter.restart(applicationContext)
+                }
+                return@launch
+            }
+            withContext(Dispatchers.Main) {
+                // The archive root key came back with the recovery file
+                // but lived only in the core's memory: after a restart it
+                // was gone and a new random one split the server archive.
+                com.p2p.messenger.util.ArchiveKeyManager.persistIfNew(applicationContext)
+                statusText.text = getString(R.string.lbl_id_short, identityId.take(8))
+                startNetworkService()
+                ensureBatteryOptimizationExemption()
+                Toast.makeText(this@MainActivity, R.string.msg_recovery_import_success, Toast.LENGTH_LONG).show()
             }
         }
     }
 
+    /**
+     * Yeni kimlik oluşturur ve ağı başlatır. Anahtar üretimi ve
+     * Keystore/diske yazma JNI + dosya I/O'su olduğu için ANA THREAD'de
+     * yapılmaz (bkz. `importRecoveryFrom` AYNI desen).
+     */
     private fun createIdentityAndStart(deviceName: String, linkAsSecondary: Boolean) {
-        val identityId = P2PLib.createIdentity(deviceName)
-        if (identityId.startsWith("Error:")) {
-            Toast.makeText(this, identityId, Toast.LENGTH_LONG).show()
-            showDeviceNameDialog()
-            return
-        }
-        // Secret key bundle'ını HEMEN Keystore ile şifreleyip diske yaz —
-        // aksi halde süreç öldüğünde kaybolur. (İkincil cihaz da KENDİ
-        // anahtarlarını böyle saklar; benimseme sadece identity_id'yi değiştirir.)
-        try {
-            IdentityManager.persistNewIdentity(applicationContext)
-        } catch (e: Exception) {
-            // Keystore or disk failure: without this the identity exists in
-            // the database but its secret keys are lost at the next restart,
-            // and the install is stuck at "identity read failed". The identity
-            // is seconds old: remove it and start the setup again.
-            Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_LONG).show()
-            com.p2p.messenger.util.LocalWipe.wipe(applicationContext)
-            com.p2p.messenger.util.AppRestarter.restart(applicationContext)
-            return
-        }
-        statusText.text = getString(R.string.lbl_id_short, identityId.take(8))
-        startNetworkService()
-        ensureBatteryOptimizationExemption()
-        if (linkAsSecondary) {
-            startActivity(Intent(this, com.p2p.messenger.ui.LinkDeviceActivity::class.java))
+        lifecycleScope.launch {
+            val identityId = withContext(Dispatchers.IO) {
+                try { P2PLib.createIdentity(deviceName) } catch (e: Exception) { "Error: ${e.message}" }
+            }
+            if (identityId.startsWith("Error:")) {
+                Toast.makeText(this@MainActivity, identityId, Toast.LENGTH_LONG).show()
+                showDeviceNameDialog()
+                return@launch
+            }
+            // Secret key bundle'ını HEMEN Keystore ile şifreleyip diske yaz —
+            // aksi halde süreç öldüğünde kaybolur. (İkincil cihaz da KENDİ
+            // anahtarlarını böyle saklar; benimseme sadece identity_id'yi değiştirir.)
+            val persistError = withContext(Dispatchers.IO) {
+                try {
+                    // `false` = çekirdekte bekleyen bundle yoktu: kimliğin
+                    // secret key'leri hiç yazılmadı, bir sonraki açılışta
+                    // yüklenemez.
+                    if (IdentityManager.persistNewIdentity(applicationContext)) null else "no pending secret bundle"
+                } catch (e: Exception) {
+                    e.message ?: e.toString()
+                }
+            }
+            if (persistError != null) {
+                // Keystore or disk failure: without this the identity exists in
+                // the database but its secret keys are lost at the next restart,
+                // and the install is stuck at "identity read failed". The identity
+                // is seconds old: remove it and start the setup again.
+                android.util.Log.w("MainActivity", "Kimlik secret bundle'ı kaydedilemedi: $persistError")
+                Toast.makeText(this@MainActivity, R.string.error_identity_persist_failed, Toast.LENGTH_LONG).show()
+                com.p2p.messenger.util.LocalWipe.wipe(applicationContext)
+                com.p2p.messenger.util.AppRestarter.restart(applicationContext)
+                return@launch
+            }
+            statusText.text = getString(R.string.lbl_id_short, identityId.take(8))
+            startNetworkService()
+            ensureBatteryOptimizationExemption()
+            if (linkAsSecondary) {
+                startActivity(Intent(this@MainActivity, com.p2p.messenger.ui.LinkDeviceActivity::class.java))
+            }
         }
     }
 
@@ -538,7 +580,12 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         // Spec dışı, kullanıcı isteği: uygulamaya girildiğinde bildirim
         // çubuğundaki TÜM mesaj bildirimleri temizlensin.
-        com.p2p.messenger.util.NotificationHelper.clearAll(this)
+        // AMA kilit ekranı bu ekranın üstüne geldiğinde bildirim çubuğu
+        // okunmamış mesajların TEK izi: kilitliyken temizlenirse kullanıcı
+        // şifreyi girip geri çıktığında bildirim çubuğu bomboş kalıyordu.
+        if (com.p2p.messenger.util.AppLock.isUnlocked()) {
+            com.p2p.messenger.util.NotificationHelper.clearAll(this)
+        }
         alertPollHandler.post(alertPollRunnable)
         // Spec dışı, kullanıcı isteği: uygulama ön plana her alındığında
         // gönderilemeyen mesajlar/emirler için bir yeniden deneme
@@ -579,30 +626,39 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (array.length() == 0) {
-            shownAlertFingerprint = null
+            shownAlertFingerprints.clear()
             return
         }
+        // Aynı anda tek dialog: altındaki kapatılamaz dialog cevaplanmadan
+        // üstüne ikinci biri açılırsa ekran kilitlenir.
+        if (alertDialog?.isShowing == true) return
+        // Sıra kararlı değil (çekirdek HashMap): henüz gösterilmemiş ilk
+        // uyarıyı seç.
+        for (i in 0 until array.length()) {
+            val alert = array.optJSONObject(i) ?: continue
+            val fingerprint = alert.optString("new_device_fingerprint", "")
+            if (fingerprint.isEmpty() || shownAlertFingerprints.contains(fingerprint)) continue
+            showDeviceAlertDialog(alert, fingerprint)
+            return
+        }
+    }
 
-        val alert = array.getJSONObject(0)
+    /** bkz. `shownAlertFingerprints` dokümantasyonu. */
+    private fun showDeviceAlertDialog(alert: org.json.JSONObject, fingerprint: String) {
         val contactName = alert.optString("contact_display_name", getString(R.string.lbl_unknown))
         val newCode = alert.optString("new_device_short_code", "")
-        val fingerprint = alert.optString("new_device_fingerprint", "")
+        shownAlertFingerprints.add(fingerprint)
 
-        // bkz. `shownAlertFingerprint` dokümantasyonu — bu tam olarak AYNI
-        // uyarı için zaten bir dialog açıksa, ikinci bir tane AÇMA.
-        if (fingerprint.isNotEmpty() && fingerprint == shownAlertFingerprint) return
-        shownAlertFingerprint = fingerprint
-
-        AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setTitle(R.string.title_security_warning_dialog)
             .setMessage(getString(R.string.msg_new_device_warning, contactName, newCode))
             .setPositiveButton(R.string.action_verified_accept) { _, _ ->
-                P2PLib.acceptDeviceAlert(fingerprint)
-                shownAlertFingerprint = null
+                answerDeviceAlert(fingerprint, accept = true)
+                shownAlertFingerprints.remove(fingerprint)
             }
             .setNegativeButton(R.string.action_reject) { _, _ ->
-                P2PLib.rejectDeviceAlert(fingerprint)
-                shownAlertFingerprint = null
+                answerDeviceAlert(fingerprint, accept = false)
+                shownAlertFingerprints.remove(fingerprint)
             }
             // Kullanıcı kararı (2026-08-27): reddetmek yalnızca BU uyarıyı
             // kapatır — aynı cihaz tekrar paket yollarsa uyarı geri gelir.
@@ -610,19 +666,40 @@ class MainActivity : AppCompatActivity() {
             // paket kabul edilmez ve yalnızca yüz yüze yeniden eşleşmeyle
             // geri açılır.
             .setNeutralButton(R.string.action_block) { _, _ ->
-                P2PLib.rejectDeviceAlert(fingerprint)
+                answerDeviceAlert(fingerprint, accept = false)
                 val identityId = alert.optString("identity_id", "")
-                if (identityId.isNotEmpty()) {
-                    val result = try { P2PLib.blockIdentity(identityId) } catch (e: Exception) { "Error: ${e.message}" }
-                    if (result.startsWith("Error:")) {
-                        Toast.makeText(this, result, Toast.LENGTH_LONG).show()
-                    } else {
-                        Toast.makeText(this, R.string.msg_identity_blocked, Toast.LENGTH_SHORT).show()
-                    }
-                }
-                shownAlertFingerprint = null
+                if (identityId.isNotEmpty()) blockIdentityInBackground(identityId)
+                shownAlertFingerprints.remove(fingerprint)
             }
             .setCancelable(false)
-            .show()
+            .create()
+        dialog.setOnDismissListener { if (alertDialog === dialog) alertDialog = null }
+        alertDialog = dialog
+        dialog.show()
+    }
+
+    /** The core calls take the global lock: not on the main thread. */
+    private fun answerDeviceAlert(fingerprint: String, accept: Boolean) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                if (accept) P2PLib.acceptDeviceAlert(fingerprint) else P2PLib.rejectDeviceAlert(fingerprint)
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "Cihaz uyarısı yanıtlanamadı: ${e.message}")
+            }
+        }
+    }
+
+    /** bkz. `answerDeviceAlert` — aynı nedenle arka planda. */
+    private fun blockIdentityInBackground(identityId: String) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val result = try { P2PLib.blockIdentity(identityId) } catch (e: Exception) { "Error: ${e.message}" }
+            withContext(Dispatchers.Main) {
+                if (result.startsWith("Error:")) {
+                    Toast.makeText(this@MainActivity, result, Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this@MainActivity, R.string.msg_identity_blocked, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
     }
 }

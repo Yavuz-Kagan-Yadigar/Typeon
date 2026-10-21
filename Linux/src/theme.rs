@@ -240,7 +240,10 @@ pub fn stylesheet(appearance: &Appearance) -> String {
 
     // Build the CSS font-family stack: custom font first (loaded at runtime),
     // then the user's chosen generic family, falling back to system default.
-    let font_family_css = match (&appearance.custom_font_family, &appearance.font_family) {
+    // User-chosen values go inside CSS strings: escape `\` and `"`, drop newlines.
+    let css_str = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"").replace(['\n', '\r'], " ");
+    let custom_font_escaped = appearance.custom_font_family.as_deref().map(css_str);
+    let font_family_css = match (&custom_font_escaped, &appearance.font_family) {
         (Some(custom), Some(generic)) => format!(
             "    font-family: \"{custom}\", {generic};\n"
         ),
@@ -256,13 +259,16 @@ pub fn stylesheet(appearance: &Appearance) -> String {
     // string-loaded provider is nowhere — so the path has to be absolute and
     // fully qualified.
     let wallpaper = match &appearance.wallpaper {
-        Some(path) => format!(
+        Some(path) => {
+            let path = css_str(path);
+            format!(
             // Braces are doubled ONCE, not twice: this inner `format!` emits the
             // final text, which the outer one then inserts verbatim without a
             // second round of brace processing.
             ".chat-messages {{\n    background-image: url(\"file://{path}\");\n    \
              background-size: cover;\n    background-position: center;\n}}\n"
-        ),
+            )
+        }
         None => String::new(),
     };
 

@@ -101,6 +101,10 @@ const REPORT_EVERY_MS: u64 = 500;
 const KIND_STATE: u8 = 4;
 /// A report older than this no longer counts as congestion.
 const REPORT_TTL_MS: u64 = 3_000;
+/// Keyframe requests honoured at most this often, whoever asks: a
+/// participant setting the flag on every report would otherwise keep our
+/// encoder in keyframe-per-frame mode.
+const KEYFRAME_MIN_MS: u64 = 1_000;
 
 const HEADER_LEN: usize = 17;
 const TAG_LEN: usize = 16;
@@ -231,6 +235,9 @@ struct Remote {
     /// a switch) can deliver the same packet, and a replay must not play twice.
     seen: u64,
     last_rx_ms: u64,
+    /// Monotonic twin of `last_rx_ms` for the lost-call timeout: a wall-clock
+    /// step must not end a call.
+    last_rx: Option<Instant>,
     /// One-way delay samples (receive time - sender's `sent_ms`). Absolute
     /// values carry the clock difference between the phones; `ewma - min` does
     /// not, and is the queue building up somewhere on the path.
@@ -249,7 +256,7 @@ struct Remote {
 impl Remote {
     fn new(fp: &str, slot: u8, key: [u8; 32], sid: [u8; 8]) -> Self {
         Remote {
-            fp: fp.to_string(), slot, key: Zeroizing::new(key), sid, max_seq: 0, seen: 0, last_rx_ms: 0,
+            fp: fp.to_string(), slot, key: Zeroizing::new(key), sid, max_seq: 0, seen: 0, last_rx_ms: 0, last_rx: None,
             delay_ewma: 0.0, delay_min: 0.0, samples: 0, last_report_ms: 0, want_keyframe: false,
             muted: false, video_off: false,
         }
@@ -279,6 +286,7 @@ impl Remote {
             self.seen |= 1 << (self.max_seq - seq);
         }
         self.last_rx_ms = current_time_ms();
+        self.last_rx = Some(Instant::now());
     }
 }
 
@@ -292,6 +300,9 @@ struct Target {
     /// Its audio copy held back, see [`AUDIO_HOLD_ABOVE_MS`]: decided by
     /// this device's own report, so one slow receiver mutes nobody else.
     audio_hold: bool,
+    /// A server its frames reached us through: both are connected there, so
+    /// our copy goes to that one server instead of to every one we use.
+    relay_via: Option<PeerId>,
 }
 
 struct Link {
@@ -338,6 +349,8 @@ struct Media {
     reports: HashMap<String, (u32, u64)>,
     /// A receiver asked us for a keyframe; Kotlin takes it via `media_take_keyframe_request`.
     keyframe_asked: bool,
+    /// When `keyframe_asked` was last set (`KEYFRAME_MIN_MS`).
+    keyframe_at: u64,
     /// Encrypted media bytes queued out (per copy) / accepted in.
     bytes_out: u64,
     bytes_in: u64,
@@ -346,6 +359,10 @@ struct Media {
 lazy_static::lazy_static! {
     static ref MEDIA: Mutex<Media> = Mutex::new(Media::default());
     static ref INBOX_READY: Condvar = Condvar::new();
+    /// `(call id, sender)` of the last Hangup for a call we did not have:
+    /// only that sender's Invite for it is then dropped (a Hangup that
+    /// overtook its Invite), not one from another group member.
+    static ref EARLY_HANGUP: Mutex<Option<(String, String)>> = Mutex::new(None);
 }
 
 fn media() -> MutexGuard<'static, Media> {
@@ -395,10 +412,17 @@ fn media_add_remote(fp: &str, key: &[u8], sid: &[u8]) {
             s
         }
     };
-    m.remotes.insert(fp.to_string(), Remote::new(fp, slot, key, sid));
+    let mut remote = Remote::new(fp, slot, key, sid);
+    // Same key again (a repeated Accept with another stream id): keep the
+    // replay window, or `seq` would count from 1 again under that key.
+    if let Some(old) = m.remotes.get(fp).filter(|r| *r.key == key) {
+        remote.max_seq = old.max_seq;
+        remote.seen = old.seen;
+    }
+    m.remotes.insert(fp.to_string(), remote);
     let send_key = pair_key(&m.key, fp);
     let mailbox = server_seal::relay_mailbox_id(&send_key[..]).into_bytes();
-    m.targets.insert(fp.to_string(), Target { peer: None, mailbox, key: send_key, audio_hold: false });
+    m.targets.insert(fp.to_string(), Target { peer: None, mailbox, key: send_key, audio_hold: false, relay_via: None });
 }
 
 /// The keys the call's remotes seal our media with. Each gives the relay
@@ -425,6 +449,11 @@ fn media_flags_of(fp: &str) -> (bool, bool) {
 
 fn media_last_rx(fp: &str) -> u64 {
     media().remotes.get(fp).map(|r| r.last_rx_ms).unwrap_or(0)
+}
+
+/// Time since the last packet from `fp`, on the monotonic clock.
+fn media_rx_age(fp: &str) -> Option<Duration> {
+    media().remotes.get(fp).and_then(|r| r.last_rx).map(|t| t.elapsed())
 }
 
 fn media_stats() -> serde_json::Value {
@@ -464,6 +493,12 @@ fn depth_max(kind: u8) -> usize {
 /// Encrypts one frame and queues it for every call participant. Never blocks:
 /// a full link queue drops the frame (live media, late = useless).
 pub fn media_send(kind: u8, payload: &[u8]) -> bool {
+    media_send_to(kind, payload, None)
+}
+
+/// `media_send`, to the one device `only` when given (a report is about
+/// that sender's stream only).
+fn media_send_to(kind: u8, payload: &[u8], only: Option<&str>) -> bool {
     use tokio::sync::mpsc::error::TrySendError;
     let mut m = media();
     if !m.active || m.targets.is_empty() || payload.len() > MAX_FRAME - 64 {
@@ -487,14 +522,14 @@ pub fn media_send(kind: u8, payload: &[u8]) -> bool {
         }
     }
     m.seq += 1;
-    let targets: Vec<(Option<PeerId>, Vec<u8>, Vec<u8>)> = m
+    let targets: Vec<(Option<PeerId>, Option<PeerId>, Vec<u8>, Vec<u8>)> = m
         .targets
-        .values()
-        .filter(|t| kind != KIND_AUDIO || !t.audio_hold)
-        .map(|t| (t.peer, t.mailbox.clone(), seal_packet(&t.key, &m.sid, m.seq, kind, payload)))
+        .iter()
+        .filter(|(fp, t)| (kind != KIND_AUDIO || !t.audio_hold) && only.map_or(true, |o| o == fp.as_str()))
+        .map(|(_, t)| (t.peer, t.relay_via, t.mailbox.clone(), seal_packet(&t.key, &m.sid, m.seq, kind, payload)))
         .collect();
     let mut any = false;
-    for (peer, mailbox, packet) in targets {
+    for (peer, relay_via, mailbox, packet) in targets {
         if let Some(p) = peer {
             let res = m.direct.get(&p).map(|l| {
                 if LINK_QUEUE - l.tx.capacity() >= depth_max(kind) { Err(TrySendError::Full(Vec::new())) }
@@ -507,13 +542,13 @@ pub fn media_send(kind: u8, payload: &[u8]) -> bool {
                 None => {}
             }
         }
-        // Every relay link: we cannot tell which of our servers the target
-        // is connected to, and a server without a listener for the mailbox
-        // drops the frame while `try_send` still succeeds.
-        // ponytail: a target on two of our servers gets each frame twice (the
-        // replay window drops the copy); learn its server from inbound frames
-        // if the upstream cost shows.
-        let servers: Vec<PeerId> = m.relays.keys().copied().collect();
+        // The server its frames came through, else every relay link: a
+        // server without a listener for the mailbox drops the frame while
+        // `try_send` still succeeds.
+        let servers: Vec<PeerId> = match relay_via.filter(|s| m.relays.contains_key(s)) {
+            Some(s) => vec![s],
+            None => m.relays.keys().copied().collect(),
+        };
         let frame = encode_frame(&mailbox, &packet);
         let mut relayed = false;
         for s in servers {
@@ -541,8 +576,13 @@ pub fn media_backlog() -> usize {
     backlog_of(&media())
 }
 
-/// Any packet from any link (direct, inbound, relay) ends up here.
 fn media_on_packet(packet: &[u8]) {
+    media_on_packet_via(packet, None)
+}
+
+/// Any packet from any link (direct, inbound, relay) ends up here. `via`:
+/// the server of a relay link.
+fn media_on_packet_via(packet: &[u8], via: Option<PeerId>) {
     let Some((sid, seq)) = packet_header(packet) else { return };
     let mut m = media();
     if !m.active {
@@ -560,6 +600,11 @@ fn media_on_packet(packet: &[u8]) {
     let now = current_time_ms();
     let sent_ms = u32::from_be_bytes([pt[1], pt[2], pt[3], pt[4]]);
     let delay = (now as u32).wrapping_sub(sent_ms) as i32 as f64;
+    if let Some(server) = via {
+        if let Some(t) = m.targets.get_mut(&fp) {
+            t.relay_via = Some(server);
+        }
+    }
     let Some(r) = m.remotes.get_mut(&fp) else { return };
     let slot = r.slot;
     r.record(seq);
@@ -575,8 +620,9 @@ fn media_on_packet(packet: &[u8]) {
         if pt.len() >= 5 + 10 && pt[5..13] == m.sid {
             let q = u16::from_be_bytes([pt[13], pt[14]]) as u32;
             m.reports.insert(fp.clone(), (q, now));
-            if pt.len() >= 16 && pt[15] & 1 != 0 {
+            if pt.len() >= 16 && pt[15] & 1 != 0 && now.saturating_sub(m.keyframe_at) >= KEYFRAME_MIN_MS {
                 m.keyframe_asked = true;
+                m.keyframe_at = now;
             }
         }
         return;
@@ -598,7 +644,14 @@ fn media_on_packet(packet: &[u8]) {
     if m.inbox.len() >= INBOX_MAX {
         // After a Tor stall frames arrive in a burst: shed the oldest video
         // first (costs a frozen picture until the next keyframe), audio last.
-        let victim = m.inbox.iter().position(|f| f[0] == KIND_VIDEO).unwrap_or(0);
+        // Without video, the oldest frame of the same sender: one flooding
+        // participant must not push out the others' audio.
+        let victim = m
+            .inbox
+            .iter()
+            .position(|f| f[0] == KIND_VIDEO)
+            .or_else(|| m.inbox.iter().position(|f| f[1] == slot))
+            .unwrap_or(0);
         if let Some(f) = m.inbox.remove(victim) {
             if f[0] == KIND_VIDEO {
                 // The decoder now has a hole; get it a fresh keyframe.
@@ -611,7 +664,7 @@ fn media_on_packet(packet: &[u8]) {
     drop(m);
     INBOX_READY.notify_one();
     if let Some(p) = report {
-        media_send(KIND_REPORT, &p);
+        media_send_to(KIND_REPORT, &p, Some(fp.as_str()));
     }
 }
 
@@ -713,16 +766,35 @@ async fn open_link(mut control: libp2p_stream::Control, peer: PeerId, relay: boo
     tokio::spawn(pump_writes(wr, rx));
     // Relay links carry the server's pushes back to us; on a direct outbound
     // link the read only notices the peer closing it.
-    while let Ok((_, data)) = read_frame(&mut rd).await {
-        if media().generation != generation {
-            break;
+    // Bounded wait: after the call ends a silent link (a direct one never
+    // carries anything back) must not keep this task and the stream until
+    // the far end closes it. A wait that times out has read nothing, unless
+    // one frame took that long, which a live link does not.
+    let via = relay.then_some(peer);
+    loop {
+        match tokio::time::timeout(Duration::from_millis(MEDIA_LOST_MS), read_frame(&mut rd)).await {
+            Ok(Ok((_, data))) => {
+                if media().generation != generation {
+                    break;
+                }
+                media_on_packet_via(&data, via);
+            }
+            Ok(Err(_)) => break,
+            Err(_) => {
+                if media().generation != generation {
+                    break;
+                }
+            }
         }
-        media_on_packet(&data);
     }
     let mut m = media();
     let map = if relay { &mut m.relays } else { &mut m.direct };
     if map.get(&peer).map(|l| l.id) == Some(id) {
         map.remove(&peer);
+    }
+    // A link that opened and closed is not reopened on the very next sweep.
+    if m.generation == generation {
+        m.opening.insert(peer, current_time_ms() + REOPEN_BACKOFF_MS);
     }
     info!("Arama akışı kapandı ({}, {})", what, crate::log_id(&peer));
 }
@@ -822,6 +894,12 @@ pub(crate) struct CallSession {
     my_sid: [u8; 8],
     started_at: u64,
     connected_at: u64,
+    /// Monotonic twins of the two above, for the timeouts.
+    started: Instant,
+    connected: Option<Instant>,
+    /// Stream ids of participants that left: a replayed Accept must not add
+    /// them back with a fresh replay window.
+    retired: HashSet<Vec<u8>>,
 }
 
 impl CallSession {
@@ -834,6 +912,7 @@ impl CallSession {
             call_id, group_id, video, phase, peer_fp, invited,
             keys: HashMap::new(), joined: HashSet::new(),
             my_key, my_sid, started_at: current_time_ms(), connected_at: 0,
+            started: Instant::now(), connected: None, retired: HashSet::new(),
         }
     }
 }
@@ -888,6 +967,7 @@ impl P2PCore {
         }
         s.phase = CallPhase::Active;
         s.connected_at = current_time_ms();
+        s.connected = Some(Instant::now());
         media_start(*s.my_key, s.my_sid);
         for fp in &s.joined {
             if let Some((k, sid)) = s.keys.get(fp) {
@@ -902,6 +982,11 @@ impl P2PCore {
 
     /// Reject while ringing, hang up otherwise.
     pub(crate) fn end_call(&mut self) {
+        self.end_call_with("local");
+    }
+
+    /// `end_call`, with the reason `call_state_json` reports afterwards.
+    fn end_call_with(&mut self, reason: &str) {
         let Some(s) = self.call.take() else { return };
         let (action, to) = if s.phase == CallPhase::Incoming {
             (CallAction::Reject, vec![s.peer_fp.clone()])
@@ -912,7 +997,7 @@ impl P2PCore {
             self.call_signal(&fp, &s, action);
         }
         media_stop();
-        self.last_call_end = Some((s.call_id, "local".to_string()));
+        self.last_call_end = Some((s.call_id, reason.to_string()));
     }
 
     fn group_call_devices(&self, group_id: &str) -> Result<Vec<String>, String> {
@@ -999,7 +1084,17 @@ impl P2PCore {
                 }
                 // The call already ended here; also a Hangup that overtook its
                 // Invite (two envelopes, two paths).
-                if self.last_call_end.as_ref().map_or(false, |(id, _)| *id == call_id) {
+                let early_hangup = EARLY_HANGUP
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .as_ref()
+                    .map_or(false, |(id, fp)| *id == call_id && fp == peer_fp);
+                if early_hangup || self.last_call_end.as_ref().map_or(false, |(id, _)| *id == call_id) {
+                    return noop();
+                }
+                // 1:1 rings only from a contact (a group co-member with a
+                // pairwise session is not one).
+                if group_id.is_none() && !self.identity_to_contact.contains_key(sender_identity_id) {
                     return noop();
                 }
                 if let Some(gid) = &group_id {
@@ -1012,24 +1107,31 @@ impl P2PCore {
                         && s.group_id.is_none()
                         && group_id.is_none()
                         && s.invited.iter().any(|f| f == peer_fp);
-                    (s.call_id.clone(), glare)
+                    // The device ringing us called again: it cancelled the old
+                    // call and that Hangup is late or lost.
+                    let redial = s.phase == CallPhase::Incoming && s.peer_fp == peer_fp;
+                    (s.call_id.clone(), glare, redial)
                 });
-                if let Some((ours, glare)) = current {
+                if let Some((ours, glare, redial)) = current {
                     if ours == call_id {
                         return noop();
                     }
-                    if !glare {
+                    if redial {
+                        self.call = None;
+                        self.last_call_end = Some((ours, "remote".to_string()));
+                    } else if !glare {
                         self.send_call_signal(peer_fp, &call_id, group_id, video, CallAction::Busy, None);
                         return noop();
+                    } else {
+                        // Both called each other at once. Busy from both ended
+                        // both calls; instead the lower call id wins on both
+                        // sides: its caller ignores the other Invite, the other
+                        // side drops its own call and rings for this one.
+                        if ours < call_id {
+                            return noop();
+                        }
+                        self.end_call();
                     }
-                    // Both called each other at once. Busy from both ended
-                    // both calls; instead the lower call id wins on both
-                    // sides: its caller ignores the other Invite, the other
-                    // side drops its own call and rings for this one.
-                    if ours < call_id {
-                        return noop();
-                    }
-                    self.end_call();
                 }
                 let mut invited = match &group_id {
                     Some(gid) => self.group_call_devices(gid).unwrap_or_default(),
@@ -1056,7 +1158,7 @@ impl P2PCore {
                 let group = self.call.as_ref().and_then(|s| s.group_id.clone());
                 let member = group.as_deref().map_or(false, |gid| is_member(self, gid));
                 let Some(s) = self.call.as_mut() else { return noop() };
-                if s.call_id != call_id {
+                if s.call_id != call_id || s.retired.contains(&stream_id) {
                     return noop();
                 }
                 if !s.invited.iter().any(|f| f == peer_fp) {
@@ -1079,6 +1181,7 @@ impl P2PCore {
                 if s.phase == CallPhase::Outgoing {
                     s.phase = CallPhase::Active;
                     s.connected_at = now;
+                    s.connected = Some(Instant::now());
                     // 1:1 rang several devices of one person: answered on
                     // this one, silence the others.
                     if s.group_id.is_none() {
@@ -1106,7 +1209,7 @@ impl P2PCore {
                 let Some(s) = self.call.as_mut() else {
                     // Cancelled before its Invite got here: see the Invite arm.
                     if action == CallAction::Hangup {
-                        self.last_call_end = Some((call_id, "remote".to_string()));
+                        *EARLY_HANGUP.lock().unwrap_or_else(|p| p.into_inner()) = Some((call_id, peer_fp.to_string()));
                     }
                     return noop();
                 };
@@ -1114,6 +1217,9 @@ impl P2PCore {
                     return noop();
                 }
                 let was_invited = s.invited.iter().any(|f| f == peer_fp);
+                if let Some((_, sid)) = s.keys.remove(peer_fp) {
+                    s.retired.insert(sid);
+                }
                 s.joined.remove(peer_fp);
                 media_remove_remote(peer_fp);
                 if action != CallAction::Hangup {
@@ -1127,7 +1233,8 @@ impl P2PCore {
                     // not another device of the same contact.
                     (None, _) => s.peer_fp == peer_fp,
                     // The ring ends when the caller gives up before we answer.
-                    (Some(_), CallPhase::Incoming) => s.peer_fp == peer_fp,
+                    // Others already talking: keep ringing, we can still join.
+                    (Some(_), CallPhase::Incoming) => s.peer_fp == peer_fp && s.joined.is_empty(),
                     (Some(_), CallPhase::Outgoing) => s.invited.is_empty(),
                     (Some(_), CallPhase::Active) => s.joined.is_empty(),
                 };
@@ -1169,14 +1276,11 @@ impl P2PCore {
     pub(crate) fn call_sweep(&mut self) {
         let Some(s) = &self.call else { return };
         let now = current_time_ms();
-        let ringing_too_long = now.saturating_sub(s.started_at) > RING_TIMEOUT_MS;
+        let ringing_too_long = s.started.elapsed() > Duration::from_millis(RING_TIMEOUT_MS);
         match s.phase {
             CallPhase::Outgoing if ringing_too_long => {
                 info!("Arama cevapsız kaldı");
-                self.end_call();
-                if let Some((_, r)) = self.last_call_end.as_mut() {
-                    *r = "no_answer".to_string();
-                }
+                self.end_call_with("no_answer");
                 return;
             }
             CallPhase::Incoming if ringing_too_long => {
@@ -1186,22 +1290,23 @@ impl P2PCore {
             }
             CallPhase::Incoming => return,
             CallPhase::Active => {
-                let last = s.joined.iter().map(|fp| media_last_rx(fp)).max().unwrap_or(0).max(s.connected_at);
-                if s.connected_at > 0 && now.saturating_sub(last) > MEDIA_LOST_MS {
+                let quiet = s.connected.map(|c| {
+                    s.joined.iter().filter_map(|fp| media_rx_age(fp)).chain([c.elapsed()]).min().unwrap_or_default()
+                });
+                if quiet.map_or(false, |q| q > Duration::from_millis(MEDIA_LOST_MS)) {
                     info!("Arama koptu: {} sn boyunca kimseden medya gelmedi", MEDIA_LOST_MS / 1000);
-                    self.end_call();
-                    if let Some((_, r)) = self.last_call_end.as_mut() {
-                        *r = "lost".to_string();
-                    }
+                    self.end_call_with("lost");
                     return;
                 }
             }
             _ => {}
         }
         let Some(control) = &self.stream_control else { return };
-        // Test knob: an empty `call_force_relay` file in the app files dir
-        // sends all media through the server even when a direct link exists.
-        let force_relay = self
+        // Test knob, debug builds only: an empty `call_force_relay` file in
+        // the app files dir sends all media through the server even when a
+        // direct link exists.
+        let force_relay = cfg!(debug_assertions)
+            && self
             .app_files_dir
             .as_ref()
             .map_or(false, |d| std::path::Path::new(d).join("call_force_relay").exists());

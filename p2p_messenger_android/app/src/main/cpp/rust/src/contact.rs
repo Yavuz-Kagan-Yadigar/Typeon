@@ -3,6 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Live device entries kept per contact; a contact with a signed DeviceAdd
+/// chain could otherwise grow the list without bound.
+pub const MAX_KNOWN_DEVICES: usize = 64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KnownDeviceStatus {
     Active,
@@ -48,7 +52,7 @@ pub struct Contact {
     /// Spec dışı: bu kişinin bize `MessageContent::ProfileUpdate` ile
     /// gönderdiği en güncel profil fotoğrafı (720p/%85 JPEG). `None` =
     /// hiç göndermedi ya da fotoğrafını kaldırdı.
-    #[serde(default)]
+    #[serde(default, with = "serde_bytes")]
     pub avatar_jpeg: Option<Vec<u8>>,
     /// Spec dışı, kullanıcı kararı: bu kişi DOĞRUDAN (QR/manuel eşleşme,
     /// yüz yüze TOFU) mi eklendi — `false`; yoksa bir grup üzerinden
@@ -120,9 +124,18 @@ impl Contact {
             if d.owner_revoked {
                 return;
             }
+            // An unverified re-add of a live device does not undo its chain proof.
+            if d.status == KnownDeviceStatus::Revoked {
+                d.via_signed_chain = via_signed_chain;
+            } else {
+                d.via_signed_chain |= via_signed_chain;
+            }
             d.status = KnownDeviceStatus::Active;
-            d.via_signed_chain = via_signed_chain;
         } else {
+            // Owner-revoked tombstones have their own cap (32).
+            if self.known_devices.iter().filter(|d| !d.owner_revoked).count() >= MAX_KNOWN_DEVICES {
+                return;
+            }
             self.known_devices.push(KnownDevice {
                 device_fingerprint: fingerprint,
                 first_seen: now,
@@ -247,11 +260,20 @@ mod tests {
         c.add_device_via_signed_chain("dev2".into(), 6000);
         assert!(!c.is_known_active("dev2"));
         // Many live devices do not use up the room for revoked ones.
-        for i in 0..40 {
+        for i in 0..MAX_KNOWN_DEVICES + 5 {
             c.add_device_unverified(format!("live{i}"), 7000);
         }
         c.revoke_device_by_owner("dev3", 8000);
         assert!(c.find_device("dev3").is_some());
+        assert!(c.find_device(&format!("live{}", MAX_KNOWN_DEVICES + 4)).is_none(), "live list is capped");
+    }
+
+    #[test]
+    fn unverified_re_add_keeps_chain_proof() {
+        let mut c = Contact::new("c1".into(), "Alice".into(), "id1".into());
+        c.add_device_via_signed_chain("dev1".into(), 1000);
+        c.add_device_unverified("dev1".into(), 2000);
+        assert!(c.find_device("dev1").unwrap().via_signed_chain);
     }
 
     #[test]

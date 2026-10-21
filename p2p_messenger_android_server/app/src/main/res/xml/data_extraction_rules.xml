@@ -1,12 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- İstemcideki aynı gerekçe: sunucunun veri dizini başkalarının şifreli
-     zarflarını, onion servis anahtarını ve kayıt defterini tutuyor. Ne
-     buluta yedeklenmeli ne de cihaz aktarımına girmeli. -->
+<!-- Sunucunun veri dizini başkalarının şifreli zarflarını, onion servis
+     anahtarını ve kayıt defterini tutuyor. Hiçbir alan (root, file, database,
+     sharedpref, external) ne buluta yedeklenmeli ne de cihaz aktarımına girmeli. -->
 <data-extraction-rules>
     <cloud-backup>
-        <exclude domain="root" />
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
     </cloud-backup>
     <device-transfer>
-        <exclude domain="root" />
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
     </device-transfer>
 </data-extraction-rules>

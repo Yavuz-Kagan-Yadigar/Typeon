@@ -30,6 +30,9 @@ adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
 # replacement.
 async-channel = "2"
 
+# PdfSurface for the whiteboard's "save page as PDF" (gtk4 re-exports cairo).
+cairo-rs = { version = "0.20", features = ["pdf"] }
+
 # Çekirdek `log` makrolarıyla epey teşhis bilgisi yayıyor (bağlantı
 # durumu, ratchet olayları, sunucu kayıt/teslim akışı). Android tarafında
 # bunu `android_logger` logcat'e veriyor; masaüstünde ise HİÇBİR logger
@@ -89,7 +92,8 @@ gstreamer-video = "0.23"
 opt-level = 2
 lto = "thin"
 
-# Same TypeOn patch of tor-hsservice as the core crate; cargo ignores the
+# Same TypeOn patches (tor-hsservice, tor-netdir) as the core crate; cargo ignores the
 # [patch] section of a path dependency, so every root manifest repeats it.
 [patch.crates-io]
 tor-hsservice = { path = "../p2p_messenger_android/app/src/main/cpp/rust/vendor/tor-hsservice" }
+tor-netdir = { path = "../p2p_messenger_android/app/src/main/cpp/rust/vendor/tor-netdir" }

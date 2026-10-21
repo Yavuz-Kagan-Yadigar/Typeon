@@ -75,7 +75,7 @@ class QrScanActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_qr_scan)
-        supportActionBar?.title = "Scan QR"
+        supportActionBar?.title = getString(R.string.title_scan_qr)
         cameraExecutor = Executors.newSingleThreadExecutor()
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
@@ -153,22 +153,27 @@ class QrScanActivity : AppCompatActivity() {
             return
         }
 
-        val bytes = imageProxy.planes[0].buffer.toByteArray()
-        // The plane's row stride is the data width: with padded rows (stride
-        // wider than the image) the picture was sheared and never decoded.
-        val source = PlanarYUVLuminanceSource(
-            bytes, imageProxy.planes[0].rowStride, imageProxy.height,
-            0, 0, imageProxy.width, imageProxy.height, false
-        )
-        val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
-
         try {
+            val bytes = imageProxy.planes[0].buffer.toByteArray()
+            // The plane's row stride is the data width: with padded rows (stride
+            // wider than the image) the picture was sheared and never decoded.
+            val source = PlanarYUVLuminanceSource(
+                bytes, imageProxy.planes[0].rowStride, imageProxy.height,
+                0, 0, imageProxy.width, imageProxy.height, false
+            )
+            val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
             val result = reader.decodeWithState(binaryBitmap)
             if (alreadyHandled.compareAndSet(false, true)) {
                 handleScannedText(result.text)
             }
         } catch (e: NotFoundException) {
             // Bu karede QR bulunamadı — normal, bir sonraki kareyi bekle.
+        } catch (e: Exception) {
+            // Kısa bozuk Y düzlemi, ZXing'in kendi ArrayIndexOutOfBounds/
+            // IllegalArgumentException'ı... bu kare çöpe: bir hata buradan
+            // analiz thread'ine kaçtığında süreç ölüyordu ve kapatılmayan
+            // ImageProxy KEEP_ONLY_LATEST akışını kalıcı olarak tıkıyordu.
+            android.util.Log.w("QrScan", "Frame analysis failed, skipping frame", e)
         } finally {
             reader.reset()
             imageProxy.close()
@@ -302,7 +307,7 @@ class QrScanActivity : AppCompatActivity() {
             putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, deviceFingerprint)
             putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, deviceName.ifEmpty { deviceFingerprint.take(8) })
         }
-        startActivity(intent)
+        startActivity(com.p2p.messenger.util.ShareIntake.attachTo(intent))
         finish()
     }
 

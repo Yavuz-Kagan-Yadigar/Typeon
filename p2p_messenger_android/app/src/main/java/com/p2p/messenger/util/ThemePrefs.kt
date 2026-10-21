@@ -2,6 +2,7 @@ package com.p2p.messenger.util
 
 import android.app.Activity
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.view.View
 import android.widget.ImageView
@@ -279,7 +280,12 @@ object ThemePrefs {
         return getCustomFonts(context).find { it.id == id }?.displayName
     }
 
+    /** `clearChatWallpaper` — dosya silindiğinde bellekteki son decoded
+     *  örneği de düşer (dialog'dan döndüğünde silinmiş duvarkağıdı, eski
+     *  bitmap'le bir kez daha görünmesin). */
     fun clearChatWallpaper(context: Context) {
+        chatWallpaperCache = null
+        chatWallpaperKey = ""
         chatWallpaperFile(context).delete()
     }
 
@@ -294,12 +300,21 @@ object ThemePrefs {
         val wallpaperView = activity.findViewById<ImageView>(R.id.imgChatWallpaper) ?: return
         val wallpaperFile = chatWallpaperFile(activity)
         if (wallpaperFile.exists()) {
-            val bitmap = try {
-                BitmapFactory.decodeFile(wallpaperFile.absolutePath)
+            val key = "${wallpaperFile.absolutePath}:${wallpaperFile.length()}:${wallpaperFile.lastModified()}"
+            val cached = chatWallpaperCache
+            val bitmap = if (cached != null && key == chatWallpaperKey) cached else try {
+                decodeWallpaper(wallpaperFile.absolutePath, activity.resources.displayMetrics.widthPixels,
+                    activity.resources.displayMetrics.heightPixels)
             } catch (e: Exception) {
                 null
             }
             if (bitmap != null) {
+                // Before the screen-sampled decode: the FULL-resolution file
+                // was re-decoded on the UI thread at every onCreate/onResume
+                // (both chat screens). One bitmap, refreshed only when the
+                // wallpaper file itself changed, is all this view needs.
+                chatWallpaperCache = bitmap
+                chatWallpaperKey = key
                 wallpaperView.setImageBitmap(bitmap)
                 wallpaperView.visibility = View.VISIBLE
             } else {
@@ -315,6 +330,24 @@ object ThemePrefs {
         } else {
             rootView?.background = null
         }
+    }
+
+    /** Önbellek: SADECE son decoded örneği tek bitmap; eski girdisi GC'ye kalır. */
+    private var chatWallpaperCache: Bitmap? = null
+    private var chatWallpaperKey = ""
+
+    /** Bounds sorgusu + `inSampleSize`: boyutu ekrana yeten çözünürlük yeter,
+     *  dosyanın megapikseli belleğe girmiyor (bkz. MediaViewerActivity'deki
+     *  aynı desen). */
+    private fun decodeWallpaper(path: String, screenW: Int, screenH: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sampleSize = 1
+        while (bounds.outWidth / (sampleSize * 2) >= screenW && bounds.outHeight / (sampleSize * 2) >= screenH) {
+            sampleSize *= 2
+        }
+        return BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sampleSize })
     }
 
     /**

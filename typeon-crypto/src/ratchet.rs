@@ -50,6 +50,11 @@ const MAX_SKIPPED_KEYS: usize = 1000;
 // one chain stays undecryptable until the next rotation or handshake redo.
 const MAX_SKIP_AHEAD: u32 = 10_000;
 
+/// The chain a rotation replaced is dropped this long after that rotation,
+/// even if no newer one came: a late packet older than this stays unread,
+/// and its key no longer waits in memory and on disk.
+pub const OLD_RECV_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
 /// Bir ratchet adımının hibrit (X25519 + ML-KEM) public key'i, serileştirilmiş
 /// halde `MessagePacket.header.ratchet_pubkey` içinde taşınır.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,8 +93,18 @@ impl RatchetPublicKeys {
         Ok(buf)
     }
 
+    /// Parses a peer's header field: bounded in size and nesting, and both
+    /// keys checked for their exact length.
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
-        ciborium::from_reader(data).map_err(|e| e.to_string())
+        // 32 + 1568 key bytes and a few bytes of CBOR framing.
+        if data.len() > 2048 {
+            return Err("Ratchet public key too long".to_string());
+        }
+        let keys: Self = ciborium::de::from_reader_with_recursion_limit(data, 4).map_err(|e| e.to_string())?;
+        if keys.x25519_pubkey.len() != 32 || keys.kyber_pubkey.len() != 1568 {
+            return Err("Bad ratchet public key length".to_string());
+        }
+        Ok(keys)
     }
 }
 
@@ -744,8 +759,10 @@ impl DeviceRatchetState {
         // gitti, ya da başka bir cihazda ileri saatle üretilmiş kalıcı bir
         // state) — çıplak çıkarma release'de sarar (spurious rotasyon),
         // debug'da panikler. Doygun çıkarma her iki durumu da güvenli kılar.
+        // `abs_diff`: a clock set back more than a period also rotates,
+        // instead of stalling until it passes `last_rotation` again.
         !self.has_responded_to_peer_key
-            && (self.is_fresh_responder() || now_ms.saturating_sub(self.last_rotation) > RATCHET_ROTATION_MS)
+            && (self.is_fresh_responder() || now_ms.abs_diff(self.last_rotation) > RATCHET_ROTATION_MS)
     }
 
     /// Still on the chains `respond` derived: no rotation in either direction.
@@ -770,6 +787,11 @@ impl DeviceRatchetState {
     /// (aynı chain key altında iki farklı mesaj numarası asla aynı nonce'u
     /// üretmez, bu da AEAD güvenliği için yeterlidir).
     pub fn encrypt_next(&mut self, plaintext: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+        // The handshake chain of a responder is a function of the
+        // HandshakeInit alone (see `respond`): never sent on.
+        if self.is_fresh_responder() {
+            return Err("Responder must rotate before its first send".to_string());
+        }
         let message_number = self.send_message_number;
         // A wrapped counter would repeat a nonce under a live chain key.
         let next_number = message_number.checked_add(1).ok_or("Send chain exhausted")?;
@@ -809,6 +831,9 @@ impl DeviceRatchetState {
         rotation: Option<(&RatchetPublicKeys, &[u8])>,
         now_ms: u64,
     ) -> Result<(Vec<u8>, SkippedKeyChanges), String> {
+        if self.old_recv.is_some() && now_ms.abs_diff(self.last_rotation) > OLD_RECV_MAX_AGE_MS {
+            self.old_recv = None;
+        }
         if let Some((new_peer_keys, kyber_ct)) = rotation {
             // Checked before the copy: the announcement is repeated on every
             // packet until we answer on the new chain.
@@ -1049,8 +1074,9 @@ mod tests {
 
         let (ciphertext, number, _) = initiator.encrypt_next(b"merhaba").unwrap();
         assert_eq!(responder.decrypt(&ciphertext, number, None, T0).unwrap().0, b"merhaba");
-        let (ciphertext, number, _) = responder.encrypt_next(b"selam").unwrap();
-        assert_eq!(initiator.decrypt(&ciphertext, number, None, T0).unwrap().0, b"selam");
+        assert!(responder.encrypt_next(b"x").is_err(), "a fresh responder must rotate first");
+        let (keys, kyber_ct, ciphertext, number) = rotate_and_send(&mut responder, b"selam");
+        assert_eq!(initiator.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0).unwrap().0, b"selam");
     }
 
     /// Findings 1 and 2: packets of the chain a rotation replaced still
@@ -1058,7 +1084,10 @@ mod tests {
     /// any order.
     #[test]
     fn old_chain_packets_survive_a_rotation() {
-        let (mut a, mut b) = session();
+        let (mut b, mut a) = session();
+        // A, the responder, leaves the handshake chain first.
+        let (keys0, ct0, hello, n_hello) = rotate_and_send(&mut a, b"hello");
+        b.decrypt(&hello, n_hello, Some((&keys0, &ct0)), T0).unwrap();
         // Sent by A before it knows of B's rotation.
         let (late_a0, n_a0, _) = a.encrypt_next(b"a0").unwrap();
         let (late_a1, n_a1, _) = a.encrypt_next(b"a1").unwrap();
@@ -1094,7 +1123,7 @@ mod tests {
     /// rotation made for another session) leaves it untouched.
     #[test]
     fn foreign_rotation_does_not_commit() {
-        let (mut a, mut b) = session();
+        let (mut b, mut a) = session();
         let (_, mut stranger) = session();
         let (keys, kyber_ct, ciphertext, number) = rotate_and_send(&mut stranger, b"x");
         let root_before = a.root_key.clone();
@@ -1222,6 +1251,21 @@ mod tests {
 
         let (ciphertext, number, _) = b.encrypt_next(b"after restart").unwrap();
         assert_eq!(restored.decrypt(&ciphertext, number, None, T0).unwrap().0, b"after restart");
+    }
+
+    #[test]
+    fn old_chain_expires_and_header_keys_are_bounded() {
+        let (mut b, mut a) = session();
+        let (keys, kyber_ct, ciphertext, number) = rotate_and_send(&mut a, b"x");
+        b.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0).unwrap();
+        assert!(b.old_recv.is_some());
+        let (ciphertext, number, _) = a.encrypt_next(b"y").unwrap();
+        b.decrypt(&ciphertext, number, None, T0 + OLD_RECV_MAX_AGE_MS + 1).unwrap();
+        assert!(b.old_recv.is_none());
+        assert!(RatchetPublicKeys::from_bytes(&keys.to_bytes().unwrap()).is_ok());
+        let short = RatchetPublicKeys { x25519_pubkey: vec![0; 31], kyber_pubkey: keys.kyber_pubkey.clone() };
+        assert!(RatchetPublicKeys::from_bytes(&short.to_bytes().unwrap()).is_err());
+        assert!(RatchetPublicKeys::from_bytes(&vec![0u8; 4096]).is_err());
     }
 
     #[test]

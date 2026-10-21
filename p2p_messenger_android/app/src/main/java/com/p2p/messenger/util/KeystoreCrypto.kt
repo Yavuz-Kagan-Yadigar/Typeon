@@ -189,10 +189,16 @@ object KeystoreCrypto {
 /** Geçici dosyaya yaz + `rename`: şifreli anahtar dosyaları yazılırken
  *  çökme/güç kesintisi yarım (açılamaz) bir dosya bırakmasın. */
 fun java.io.File.writeBytesAtomic(bytes: ByteArray) {
-    val tmp = java.io.File(parentFile, "$name.tmp")
-    java.io.FileOutputStream(tmp).use { out ->
-        out.write(bytes)
-        out.fd.sync()
+    // L-88: unique tmp per call, two writers never share one.
+    val tmp = java.io.File(parentFile, "$name.${System.nanoTime()}.tmp")
+    try {
+        java.io.FileOutputStream(tmp).use { out ->
+            out.write(bytes)
+            out.fd.sync()
+        }
+        if (!tmp.renameTo(this)) throw java.io.IOException("rename failed: $tmp")
+    } catch (e: Exception) {
+        tmp.delete()
+        throw e
     }
-    if (!tmp.renameTo(this)) throw java.io.IOException("rename failed: $tmp")
 }

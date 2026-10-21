@@ -60,7 +60,7 @@ pub fn init_database(files_dir: &str, storage_key: &[u8]) -> bool {
 }
 
 pub fn has_stored_identity() -> bool {
-    catch_panic(|| core_lock().identity.is_some()).unwrap_or(false)
+    catch_panic(|| crate::core_lock_read().identity.is_some()).unwrap_or(false)
 }
 
 pub fn create_identity(device_name: &str) -> String {
@@ -73,7 +73,7 @@ pub fn create_identity(device_name: &str) -> String {
 
 /// Not a destructive read, see JNI `getPendingSecretBundle`.
 pub fn get_pending_secret_bundle() -> Vec<u8> {
-    catch_panic(|| core_lock().pending_secret_bundle.clone().unwrap_or_default()).unwrap_or_default()
+    catch_panic(|| crate::core_lock_read().pending_secret_bundle.clone().unwrap_or_default()).unwrap_or_default()
 }
 
 pub fn load_secret_bundle(bundle_bytes: &[u8]) -> bool {
@@ -92,15 +92,15 @@ pub fn load_secret_bundle(bundle_bytes: &[u8]) -> bool {
 }
 
 pub fn get_identity_code() -> String {
-    string_result(catch_panic(|| core_lock().identity_code()))
+    string_result(catch_panic(|| crate::core_lock_read().identity_code()))
 }
 
 pub fn get_identity_short_code() -> String {
-    string_result(catch_panic(|| core_lock().identity_short_code()))
+    string_result(catch_panic(|| crate::core_lock_read().identity_short_code()))
 }
 
 pub fn get_own_identity_id() -> String {
-    string_result(catch_panic(|| core_lock().own_identity_id()))
+    string_result(catch_panic(|| crate::core_lock_read().own_identity_id()))
 }
 
 /// bkz. Kotlin `setHistoryKey` — 32 bayt olmayan anahtar sessizce reddedilir.
@@ -144,18 +144,42 @@ pub fn set_node_mode(enabled: bool) {
 }
 
 pub fn set_history_storage_limit_bytes(bytes: u64) {
+    // bkz. JNI `setHistoryStorageLimitBytes`: 0 = a failed pref read, never a
+    // choice — as a limit it would delete every stored attachment. `u64`'de
+    // "negatif" yok, tek zararlı değer 0.
+    if bytes == 0 {
+        return;
+    }
     let _ = catch_panic(move || {
         let _guard = RUNTIME.enter();
         core_lock().set_history_storage_limit_bytes(bytes);
     });
 }
 
+/// bkz. JNI `setPowerSave` — ekran kapalı/uygulama arka planda iken açılır
+/// (bkz. `P2PCore::set_power_save`).
+pub fn set_power_save(enabled: bool) {
+    let _ = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().set_power_save(enabled);
+    });
+}
+
+/// bkz. JNI `setMeteredNetwork` — ölçülü (hücresel) ağ, radyo-penceresi
+/// birleştirmesi için (bkz. `P2PCore::set_metered`).
+pub fn set_metered(metered: bool) {
+    let _ = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().set_metered(metered);
+    });
+}
+
 pub fn get_node_address() -> String {
-    catch_panic(|| core_lock().get_node_address().unwrap_or_default()).unwrap_or_default()
+    catch_panic(|| crate::core_lock_read().get_node_address().unwrap_or_default()).unwrap_or_default()
 }
 
 pub fn own_connection_status() -> String {
-    catch_panic(|| core_lock().own_connection_status().to_string())
+    catch_panic(|| crate::core_lock_read().own_connection_status().to_string())
         .unwrap_or_else(|_| "{}".to_string())
 }
 
@@ -279,12 +303,12 @@ pub fn approve_device_link(data: &[u8]) -> String {
 }
 
 pub fn list_linked_devices() -> String {
-    catch_panic(|| serde_json::Value::Array(core_lock().list_linked_devices()).to_string())
+    catch_panic(|| serde_json::Value::Array(crate::core_lock_read().list_linked_devices()).to_string())
         .unwrap_or_else(|_| "[]".to_string())
 }
 
 pub fn is_secondary_device() -> bool {
-    catch_panic(|| core_lock().own_device_add.is_some()).unwrap_or(false)
+    catch_panic(|| crate::core_lock_read().own_device_add.is_some()).unwrap_or(false)
 }
 
 pub fn revoke_linked_device(device_fingerprint: &str) -> String {
@@ -308,7 +332,7 @@ pub fn sync_read_state(peer_device_fingerprint: &str, group_id: &str, read_at_ms
 
 pub fn list_pending_device_alerts() -> String {
     json_list(catch_panic(|| {
-        serde_json::to_string(&core_lock().list_pending_device_alerts())
+        serde_json::to_string(&crate::core_lock_read().list_pending_device_alerts())
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }
@@ -328,13 +352,13 @@ pub fn unblock_identity(identity_id: &str) {
 
 /// Engellenen kimlikler, JSON dizisi.
 pub fn list_blocked_identities() -> String {
-    catch_panic(|| serde_json::to_string(&core_lock().list_blocked_identities()).unwrap_or_else(|_| "[]".to_string()))
+    catch_panic(|| serde_json::to_string(&crate::core_lock_read().list_blocked_identities()).unwrap_or_else(|_| "[]".to_string()))
         .unwrap_or_else(|_| "[]".to_string())
 }
 
 /// bkz. `P2PCore::contact_safety_code` — karşılaştırılacak güvenlik kodu.
 pub fn contact_safety_code(identity_id: &str) -> String {
-    catch_panic(|| core_lock().contact_safety_code(identity_id).unwrap_or_default())
+    catch_panic(|| crate::core_lock_read().contact_safety_code(identity_id).unwrap_or_default())
         .unwrap_or_default()
 }
 
@@ -378,7 +402,7 @@ pub fn retry_all_pending_now() {
 
 pub fn list_pending_messages() -> String {
     json_list(catch_panic(|| {
-        serde_json::to_string(&core_lock().list_pending_messages())
+        serde_json::to_string(&crate::core_lock_read().list_pending_messages())
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }
@@ -462,12 +486,12 @@ pub fn delete_message(target_device_fingerprint: &str, target_message_id: &str) 
 
 pub fn has_active_session(peer_device_fingerprint: &str) -> bool {
     let fp = peer_device_fingerprint.to_string();
-    catch_panic(move || core_lock().has_active_session(&fp)).unwrap_or(false)
+    catch_panic(move || crate::core_lock_read().has_active_session(&fp)).unwrap_or(false)
 }
 
 pub fn is_peer_connected(peer_device_fingerprint: &str) -> bool {
     let fp = peer_device_fingerprint.to_string();
-    catch_panic(move || core_lock().is_peer_connected(&fp)).unwrap_or(false)
+    catch_panic(move || crate::core_lock_read().is_peer_connected(&fp)).unwrap_or(false)
 }
 
 pub fn ensure_handshake(peer_device_fingerprint: &str) {
@@ -507,16 +531,17 @@ pub fn send_seen_receipt(
 ) -> bool {
     let target = target_device_fingerprint.to_string();
     let target_id = target_message_id.to_string();
+    // M-179: the send's own result, not only "did not panic".
     catch_panic(move || {
         let _guard = RUNTIME.enter();
-        core_lock().send_seen(&target, &target_id, group_message_local_id);
+        core_lock().send_seen(&target, &target_id, group_message_local_id)
     })
-    .is_ok()
+    .unwrap_or(false)
 }
 
 pub fn list_contacts() -> String {
     json_list(catch_panic(|| {
-        serde_json::to_string(&core_lock().list_contacts()).unwrap_or_else(|_| "[]".to_string())
+        serde_json::to_string(&crate::core_lock_read().list_contacts()).unwrap_or_else(|_| "[]".to_string())
     }))
 }
 
@@ -525,7 +550,7 @@ pub fn list_contacts() -> String {
 pub fn get_message_history(peer_device_fingerprint: &str, limit: u32) -> String {
     let fp = peer_device_fingerprint.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&core_lock().load_message_history(&fp, limit.min(crate::MAX_HISTORY_PAGE as u32), None))
+        serde_json::to_string(&crate::core_lock_read().load_message_history(&fp, limit.min(crate::MAX_HISTORY_PAGE as u32), None))
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }
@@ -537,7 +562,7 @@ pub fn get_message_history_before(
 ) -> String {
     let fp = peer_device_fingerprint.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&core_lock().load_message_history(&fp, limit.min(crate::MAX_HISTORY_PAGE as u32), Some(before_timestamp)))
+        serde_json::to_string(&crate::core_lock_read().load_message_history(&fp, limit.min(crate::MAX_HISTORY_PAGE as u32), Some(before_timestamp)))
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }
@@ -545,7 +570,7 @@ pub fn get_message_history_before(
 pub fn get_group_message_history(group_id: &str, limit: u32) -> String {
     let gid = group_id.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&core_lock().load_group_message_history(&gid, limit.min(crate::MAX_HISTORY_PAGE as u32), None))
+        serde_json::to_string(&crate::core_lock_read().load_group_message_history(&gid, limit.min(crate::MAX_HISTORY_PAGE as u32), None))
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }
@@ -557,7 +582,7 @@ pub fn get_group_message_history_before(
 ) -> String {
     let gid = group_id.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&core_lock().load_group_message_history(
+        serde_json::to_string(&crate::core_lock_read().load_group_message_history(
             &gid,
             limit.min(crate::MAX_HISTORY_PAGE as u32),
             Some(before_timestamp),
@@ -570,7 +595,7 @@ pub fn request_history_sync(peer_device_fingerprint: &str, limit: u32) {
     let fp = peer_device_fingerprint.to_string();
     let _ = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let _ = core_lock().request_history_sync(fp, limit);
+        let _ = core_lock().request_history_sync(fp, limit.min(crate::MAX_HISTORY_PAGE as u32));
     });
 }
 
@@ -582,7 +607,7 @@ pub fn request_older_message_history(
     let fp = peer_device_fingerprint.to_string();
     let _ = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let _ = core_lock().request_older_history(&fp, before_timestamp, limit);
+        let _ = core_lock().request_older_history(&fp, before_timestamp, limit.min(crate::MAX_HISTORY_PAGE as u32));
     });
 }
 
@@ -590,7 +615,7 @@ pub fn request_older_group_message_history(group_id: &str, before_timestamp: i64
     let gid = group_id.to_string();
     let _ = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let _ = core_lock().request_older_group_history(&gid, before_timestamp, limit);
+        let _ = core_lock().request_older_group_history(&gid, before_timestamp, limit.min(crate::MAX_HISTORY_PAGE as u32));
     });
 }
 
@@ -604,7 +629,7 @@ pub fn request_older_sibling_history(peer_device_fingerprint: &str, before_times
     let fp = peer_device_fingerprint.to_string();
     let _ = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let _ = core_lock().request_older_sibling_history(Some(&fp), None, before_timestamp, limit);
+        let _ = core_lock().request_older_sibling_history(Some(&fp), None, before_timestamp, limit.min(crate::MAX_HISTORY_PAGE as u32));
     });
 }
 
@@ -613,7 +638,7 @@ pub fn request_older_sibling_group_history(group_id: &str, before_timestamp: i64
     let gid = group_id.to_string();
     let _ = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        let _ = core_lock().request_older_sibling_history(None, Some(&gid), before_timestamp, limit);
+        let _ = core_lock().request_older_sibling_history(None, Some(&gid), before_timestamp, limit.min(crate::MAX_HISTORY_PAGE as u32));
     });
 }
 
@@ -682,7 +707,7 @@ pub fn download_file(file_id: &str, peer_device_fingerprint: &str) -> String {
 pub fn list_attachments(peer_device_fingerprint: &str) -> String {
     let fp = peer_device_fingerprint.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&core_lock().list_attachments(&fp))
+        serde_json::to_string(&crate::core_lock_read().list_attachments(&fp))
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }
@@ -708,7 +733,7 @@ pub fn list_group_attachments_brief(group_id: &str) -> String {
 pub fn list_group_attachments(group_id: &str) -> String {
     let gid = group_id.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&core_lock().list_group_attachments(&gid))
+        serde_json::to_string(&crate::core_lock_read().list_group_attachments(&gid))
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }
@@ -731,7 +756,7 @@ pub fn get_attachment_plaintext_path(file_id: &str) -> String {
 
 pub fn list_groups() -> String {
     json_list(catch_panic(|| {
-        serde_json::to_string(&core_lock().list_groups()).unwrap_or_else(|_| "[]".to_string())
+        serde_json::to_string(&crate::core_lock_read().list_groups()).unwrap_or_else(|_| "[]".to_string())
     }))
 }
 
@@ -841,7 +866,7 @@ pub fn send_group_message(
 // --- Profil fotoğrafı / sohbet-kişi silme ---
 
 pub fn get_own_profile_picture() -> Vec<u8> {
-    catch_panic(|| core_lock().get_own_avatar().unwrap_or_default()).unwrap_or_default()
+    catch_panic(|| crate::core_lock_read().get_own_avatar().unwrap_or_default()).unwrap_or_default()
 }
 
 pub fn set_own_profile_picture(avatar_jpeg: Option<Vec<u8>>) -> String {
@@ -853,7 +878,7 @@ pub fn set_own_profile_picture(avatar_jpeg: Option<Vec<u8>>) -> String {
 
 /// Hesap adı — bkz. `P2PCore::own_display_name`.
 pub fn get_display_name() -> String {
-    catch_panic(|| core_lock().own_display_name().unwrap_or_default()).unwrap_or_default()
+    catch_panic(|| crate::core_lock_read().own_display_name().unwrap_or_default()).unwrap_or_default()
 }
 
 /// `P2PCore::delete_account` — bildirim giden cihaz sayısı, hata için `-1`.
@@ -872,7 +897,7 @@ pub fn delete_account() -> i64 {
 /// -1 on a panic, NOT 0: 0 means "every notice was delivered" and the caller
 /// goes on to wipe the device.
 pub fn account_deletion_pending() -> i64 {
-    catch_panic(|| core_lock().account_deletion_pending()).map(|n| n as i64).unwrap_or(-1)
+    catch_panic(|| crate::core_lock_read().account_deletion_pending()).map(|n| n as i64).unwrap_or(-1)
 }
 
 /// `P2PCore::set_display_name`.
@@ -905,26 +930,33 @@ pub fn revoke_contact_device(contact_id: &str, device_fingerprint: &str) -> Stri
 // --- Bölüm 1.8: Kurtarma dosyası ---
 
 pub fn export_recovery(passphrase: &str) -> Vec<u8> {
-    let pass = passphrase.to_string();
-    match catch_panic(move || core_lock().export_recovery(pass)) {
-        Ok(Ok(bytes)) => bytes,
+    // bkz. M-23: uzun ömürlü TÜM anahtarları koruyan parola serbest
+    // heap'te kalmasın — kopyamız drop'ta siliniyor (çekirdeğin kendi
+    // kopyası ayrı bir konu, bkz. lib.rs `export_recovery`).
+    let pass = zeroize::Zeroizing::new(passphrase.to_string());
+    // M-21: only the plaintext is built under the core lock; Argon2 runs
+    // after the lock is released (it froze every other caller).
+    let staged = catch_panic(move || crate::core_lock_read().recovery_plaintext((*pass).clone()));
+    match staged {
+        Ok(Ok((plaintext, pass))) => crate::seal_recovery_file(&plaintext, &pass).unwrap_or_default(),
         _ => Vec::new(),
     }
 }
 
 pub fn import_recovery(file_bytes: &[u8], passphrase: &str, device_name: &str) -> String {
     let raw = file_bytes.to_vec();
-    let pass = passphrase.to_string();
+    // bkz. M-23 aynı notu — bu fonksiyonun parola kopyası da siliniyor.
+    let pass = zeroize::Zeroizing::new(passphrase.to_string());
     let name = device_name.to_string();
-    string_result(catch_panic(move || {
+    // M-21: precheck under the lock, Argon2 + decrypt without it, then the
+    // import under the lock again (it repeats the precheck).
+    string_result(catch_panic(move || -> Result<String, String> {
+        crate::core_lock_read().import_recovery_precheck()?;
+        let plaintext = crate::open_recovery_file(&raw, &pass)?;
         let mut core = core_lock();
-        match core.import_recovery(&raw, &pass, name) {
-            Ok((id, bundle_bytes)) => {
-                core.pending_secret_bundle = Some(bundle_bytes);
-                Ok(id)
-            }
-            Err(e) => Err(e),
-        }
+        let (id, bundle_bytes) = core.import_recovery_plaintext(&plaintext, name)?;
+        core.pending_secret_bundle = Some(bundle_bytes);
+        Ok(id)
     }))
 }
 
@@ -934,7 +966,7 @@ pub fn import_recovery(file_bytes: &[u8], passphrase: &str, device_name: &str) -
 /// opened again.
 pub fn list_reactions(target_message_id: &str) -> String {
     let id = target_message_id.to_string();
-    json_list(catch_panic(move || core_lock().list_reactions(&id)))
+    json_list(catch_panic(move || crate::core_lock_read().list_reactions(&id)))
 }
 
 fn json_list(result: Result<String, String>) -> String {
@@ -971,7 +1003,7 @@ pub fn remove_server(server_id: &str) -> String {
 /// `[{server_id, address, name, route_messages, store_history, connected,
 /// enrolled, last_error}]`
 pub fn list_servers() -> String {
-    json_list(catch_panic(|| core_lock().list_servers_json()))
+    json_list(catch_panic(|| crate::core_lock_read().list_servers_json()))
 }
 
 pub fn set_server_routing(server_id: &str, enabled: bool) -> String {
@@ -1029,7 +1061,7 @@ pub fn restore_server_history() -> String {
 /// elinde vault parolası olmuyor. Android'de buna gerek yok — anahtar zaten
 /// Keystore sarmalı bir dosyada üretiliyor.
 pub fn archive_root_key() -> Vec<u8> {
-    catch_panic(|| core_lock().archive_root_key_bytes().unwrap_or_default()).unwrap_or_default()
+    catch_panic(|| crate::core_lock_read().archive_root_key_bytes().unwrap_or_default()).unwrap_or_default()
 }
 
 // --- Calls (see `call.rs`; mirrors the `P2PLib.startCall`.. JNI exports) ---
@@ -1095,4 +1127,56 @@ pub fn call_take_keyframe_request() -> bool {
 /// Send queue depth in 100 ms units — the congestion signal.
 pub fn call_backlog() -> usize {
     catch_panic(crate::call::media_backlog).unwrap_or(0)
+}
+
+// --- Shared whiteboard (see whiteboard.rs; JNI twins are in its `jni_exports`) ---
+
+/// Returns the new stroke ids as hex (16 digits each) or `"Error: ..."`.
+pub fn whiteboard_add_stroke(peer: &str, group_id: &str, page: u8, shade: u8, width: u8, points: &[u8]) -> String {
+    let (peer, gid, points) = (peer.to_string(), group_id.to_string(), points.to_vec());
+    string_result(catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().wb_add_stroke(&peer, &gid, page, shade, width, &points)
+    }))
+}
+
+/// `ids`: 8 bytes per erased stroke.
+pub fn whiteboard_erase(peer: &str, group_id: &str, ids: &[u8]) -> String {
+    let (peer, gid, ids) = (peer.to_string(), group_id.to_string(), ids.to_vec());
+    ok_result(catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().wb_erase_strokes(&peer, &gid, &ids)
+    }))
+}
+
+pub fn whiteboard_open(peer: &str, group_id: &str) {
+    let (peer, gid) = (peer.to_string(), group_id.to_string());
+    let _ = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().wb_open(&peer, &gid)
+    });
+}
+
+pub fn whiteboard_mark_read(peer: &str, group_id: &str, page: u8) {
+    let (peer, gid) = (peer.to_string(), group_id.to_string());
+    let _ = catch_panic(move || core_lock().wb_mark_read(&peer, &gid, page));
+}
+
+/// JSON `{"pages","unread","me","participants":[{"id","name"}]}` or `"Error: ..."`.
+pub fn whiteboard_info(peer: &str, group_id: &str) -> String {
+    let (peer, gid) = (peer.to_string(), group_id.to_string());
+    string_result(catch_panic(move || core_lock().wb_info(&peer, &gid)))
+}
+
+/// Per stroke: id(8) shade(1) author index(1, 255 = left) width(1) count(u16 LE) points.
+pub fn whiteboard_page(peer: &str, group_id: &str, page: u8) -> Vec<u8> {
+    let (peer, gid) = (peer.to_string(), group_id.to_string());
+    catch_panic(move || core_lock().wb_page_blob(&peer, &gid, page)).unwrap_or_default()
+}
+
+pub fn whiteboard_tick() {
+    let _ = catch_panic(|| {
+        let _guard = RUNTIME.enter();
+        core_lock().wb_sweep();
+    });
 }

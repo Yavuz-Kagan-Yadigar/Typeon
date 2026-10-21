@@ -59,11 +59,6 @@ object AppLock {
      *  şifre yeniden sorulur. */
     @Volatile private var unlocked = false
 
-    /** Kilit ekranı zaten açık/açılmak üzereyken ikinci bir tane
-     *  başlatmayı engeller (bkz. `guard` — HER Activity'nin `onStart`'ında
-     *  çağrılıyor, art arda birkaç Activity başlarsa üst üste binerdi). */
-    @Volatile private var promptShowing = false
-
     /** bkz. `beginTrustedExcursion` — bu ana kadar (elapsedRealtime) gelen
      *  İLK arka plan geçişi kilitlemeden geçer. Zaman damgası, düz bir
      *  bayrak DEĞİL: bkz. `TRUSTED_EXCURSION_WINDOW_MS`. */
@@ -88,7 +83,7 @@ object AppLock {
      * hiç açılmayan bir ekranın işareti ise kendiliğinden geçersizleşir.
      */
     private const val TRUSTED_EXCURSION_WINDOW_MS = 5_000L
-    private const val MAX_EXCURSION_MS = 3 * 60_000L
+    private const val MAX_EXCURSION_MS = 60_000L  // M-33: was 3 min; same as BACKGROUND_LOCK_MS
     @Volatile private var excursionLeftAt = 0L
 
     /** Kullanıcı isteği: arka planda bu süreden uzun kalırsa şifre sorulur
@@ -153,7 +148,6 @@ object AppLock {
 
     fun markUnlocked() {
         unlocked = true
-        promptShowing = false
     }
 
     /** Stored, so a force stop does not hand out fresh attempts. Time since
@@ -162,6 +156,7 @@ object AppLock {
     private const val KEY_FAILED_ATTEMPTS = "app_lock_failed_attempts"
     private const val KEY_WAIT_FROM = "app_lock_wait_from_elapsed"
     private const val KEY_WAIT_MS = "app_lock_wait_ms"
+    private const val KEY_WAIT_WALL = "app_lock_wait_wall"
 
     /** Seconds until the next attempt is allowed, 0 = now. */
     fun retryWaitSeconds(context: Context): Int {
@@ -171,9 +166,11 @@ object AppLock {
         val now = SystemClock.elapsedRealtime()
         var from = prefs.getLong(KEY_WAIT_FROM, 0L)
         if (now < from) {
-            // Rebooted: the time since boot started over, so does the wait.
-            from = now
-            prefs.edit().putLong(KEY_WAIT_FROM, now).commit()
+            // Rebooted: time since boot restarted. Re-anchor from the wall
+            // clock saved at the failure so the reboot does not refund the wait.
+            val wallPassed = (System.currentTimeMillis() - prefs.getLong(KEY_WAIT_WALL, 0L)).coerceIn(0L, waitMs)
+            from = now - wallPassed
+            prefs.edit().putLong(KEY_WAIT_FROM, from).apply()
         }
         return ((from + waitMs - now).coerceAtLeast(0L) + 999).div(1000).toInt()
     }
@@ -186,14 +183,24 @@ object AppLock {
         val edit = prefs.edit().putInt(KEY_FAILED_ATTEMPTS, failed)
         if (over >= 0) {
             edit.putLong(KEY_WAIT_FROM, SystemClock.elapsedRealtime())
+                .putLong(KEY_WAIT_WALL, System.currentTimeMillis())
                 .putLong(KEY_WAIT_MS, 30_000L shl over.coerceAtMost(5))
         }
-        edit.commit()
+        edit.apply()
+    }
+
+    /** Password check for flows outside the lock screen (password change):
+     *  same wait + failure counting as the prompt. False while waiting. */
+    fun verifyThrottled(context: Context, password: String): Boolean {
+        if (retryWaitSeconds(context) > 0) return false
+        val ok = verify(context, password)
+        if (ok) clearFailedAttempts(context) else noteFailedAttempt(context)
+        return ok
     }
 
     fun clearFailedAttempts(context: Context) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-            .remove(KEY_FAILED_ATTEMPTS).remove(KEY_WAIT_FROM).remove(KEY_WAIT_MS).apply()
+            .remove(KEY_FAILED_ATTEMPTS).remove(KEY_WAIT_FROM).remove(KEY_WAIT_MS).remove(KEY_WAIT_WALL).apply()
     }
 
     /**
@@ -298,12 +305,8 @@ object AppLock {
     private fun purgePlainCache(context: Context) {
         if (!hasPassword(context)) return
         java.io.File(context.filesDir, "attachments/plain_cache").listFiles()?.forEach { it.deleteRecursively() }
-    }
-
-    /** Kilit ekranı kullanıcı tarafından kapatıldığında (geri tuşu →
-     *  uygulamadan çıkış) bayrağın asılı kalmaması için. */
-    fun promptClosed() {
-        promptShowing = false
+        // M-40: decrypted full-screen avatar copies (AvatarUtil.openFullscreen)
+        java.io.File(context.cacheDir, "avatar_view").listFiles()?.forEach { it.deleteRecursively() }
     }
 
     /**
@@ -346,10 +349,9 @@ object AppLock {
         activity.findViewById<android.view.View>(android.R.id.content)?.visibility =
             if (unlocked) android.view.View.VISIBLE else android.view.View.INVISIBLE
         if (unlocked) return
-        // No `promptShowing` short-circuit: an activity started over the prompt
+        // No "already showing" short-circuit: an activity started over the prompt
         // (a notification with CLEAR_TOP) finished it and stayed open unlocked.
         // SINGLE_TOP keeps a prompt that is already on top from stacking.
-        promptShowing = true
         activity.startActivity(
             Intent(activity, AppLockActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_NO_ANIMATION)

@@ -39,23 +39,37 @@ object AvatarUtil {
      * listesi, kişi listesi, HER mesaj balonu) sıfırdan çalışıyordu; aynı
      * kişinin/grubun avatarı bir liste kaydırılırken defalarca yeniden
      * çözülüyordu, gözle görülür kasılmaya (jank) yol açabiliyordu. Basit
-     * bir bellek-içi önbellek — anahtar olarak baytların `contentHashCode`'u
-     * (tam bir kripto hash'ten çok daha ucuz, çakışma riski teorik olarak
-     * var ama sonucu SADECE bir avatar görselinin geçici olarak yanlış
-     * gösterilmesi, güvenlik/doğruluk açısından kritik bir değer değil) —
-     * aynı fotoğrafı tekrar tekrar decode etmeyi önler. `LruCache`
+     * bir bellek-içi önbellek — anahtar olarak baytların 64 bitlik parmak
+     * izi (contentHashCode + bağımsız FNV-1a geçişi; salt 32 bitlik hash'te
+     * kişi taraflı bir JPEG başka bir kişinin girdisiyle çakışıp YANLIŞ
+     * yüzü gösterebiliyordu) — aynı fotoğrafı tekrar tekrar decode
+     * etmeyi önler. `LruCache`
      * dahili olarak senkronize, birden fazla RecyclerView/thread'den
      * güvenle çağrılabilir. 100 giriş × ~36 KB (96x96 ARGB_8888) ≈ 3.6 MB
      * üst sınır — makul bir bellek/performans dengesi.
      */
-    private val avatarBitmapCache = android.util.LruCache<Int, Bitmap>(100)
+    private val avatarBitmapCache = android.util.LruCache<Long, Bitmap>(100)
+
+    /** 64-bit content fingerprint for the cache key. A single 32-bit
+     *  `contentHashCode` let a peer-supplied JPEG collide with another
+     *  contact's entry and render the WRONG face (however briefly): the
+     *  combination with an independent FNV-1a pass keeps the per-bind cost
+     *  O(n) as before but makes an accidental collision implausible. */
+    private fun cacheKey(bytes: ByteArray): Long {
+        var fnv = 2166136261L.toInt()
+        for (b in bytes) {
+            fnv = fnv xor (b.toInt() and 0xff)
+            fnv *= 16777619
+        }
+        return (bytes.contentHashCode().toLong() shl 32) or (fnv.toLong() and 0xffffffffL)
+    }
 
     /** `avatarBytes` doluysa gerçek fotoğraf (kare kırpılıp daireye
      *  maskelenir) gösterilir, yoksa `displayName`'in baş harfinden
      *  deterministik renkli bir rozet üretilir. */
     fun renderInto(imageView: ImageView, avatarBytes: ByteArray?, displayName: String) {
         val bitmap = avatarBytes?.let { bytes ->
-            val key = bytes.contentHashCode()
+            val key = cacheKey(bytes)
             avatarBitmapCache.get(key) ?: decodeCircularSquare(bytes)?.also { avatarBitmapCache.put(key, it) }
         } ?: placeholderCircle(displayName)
         imageView.setImageBitmap(bitmap)

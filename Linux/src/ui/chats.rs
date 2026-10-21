@@ -29,7 +29,6 @@ struct Row {
     unread: bool,
     pinned: bool,
     avatar_hex: Option<String>,
-    is_group: bool,
     is_founder: bool,
     /// Empty until the pairing handshake completes; such a contact cannot be
     /// messaged yet and the row says so instead of opening a dead chat.
@@ -88,42 +87,51 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
         let query = query.clone();
         let refresh_cell = refresh_cell.clone();
         let generation = Rc::new(std::cell::Cell::new(0u64));
+        // A burst of events (16 kinds) collapses into one rebuild.
+        let pending = Rc::new(std::cell::Cell::new(false));
         Rc::new(move || {
+            if pending.replace(true) {
+                return;
+            }
+            let pending = pending.clone();
             let main = main.clone();
             let list = list.clone();
             let stack = stack.clone();
             let query = query.clone();
             let refresh_cell = refresh_cell.clone();
-            // Only the newest request may paint: a slow older one finishing
-            // late would put stale rows on screen.
-            let mine = generation.get() + 1;
-            generation.set(mine);
             let generation = generation.clone();
-            crate::app::run_in_background(collect_rows, move |mut rows| {
-                if generation.get() != mine {
-                    return;
-                }
-                apply_prefs(&main, &mut rows);
-                let needle = query.borrow().to_lowercase();
-                let visible: Vec<&Row> = rows
-                    .iter()
-                    .filter(|row| {
-                        needle.is_empty()
-                            || row.conversation.title().to_lowercase().contains(&needle)
-                    })
-                    .collect();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
+                pending.set(false);
+                // Only the newest request may paint: a slow older one finishing
+                // late would put stale rows on screen.
+                let mine = generation.get() + 1;
+                generation.set(mine);
+                crate::app::run_in_background(collect_rows, move |mut rows| {
+                    if generation.get() != mine {
+                        return;
+                    }
+                    apply_prefs(&main, &mut rows);
+                    let needle = query.borrow().to_lowercase();
+                    let visible: Vec<&Row> = rows
+                        .iter()
+                        .filter(|row| {
+                            needle.is_empty()
+                                || row.conversation.title().to_lowercase().contains(&needle)
+                        })
+                        .collect();
 
-                while let Some(child) = list.first_child() {
-                    list.remove(&child);
-                }
-                let self_refresh = refresh_cell
-                    .borrow()
-                    .clone()
-                    .expect("refresh_cell is filled in immediately after this closure is created");
-                for row in &visible {
-                    list.append(&build_row(&main, row, self_refresh.clone()));
-                }
-                stack.set_visible_child_name(if visible.is_empty() { "empty" } else { "list" });
+                    while let Some(child) = list.first_child() {
+                        list.remove(&child);
+                    }
+                    let self_refresh = refresh_cell
+                        .borrow()
+                        .clone()
+                        .expect("refresh_cell is filled in immediately after this closure is created");
+                    for row in &visible {
+                        list.append(&build_row(&main, row, self_refresh.clone()));
+                    }
+                    stack.set_visible_child_name(if visible.is_empty() { "empty" } else { "list" });
+                });
             });
         })
     };
@@ -147,8 +155,13 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
     // lock the poll thread holds.
     {
         let refresh = refresh.clone();
+        let container = container.downgrade();
         glib::timeout_add_seconds_local(30, move || {
-            refresh();
+            // Torn down -> stop; hidden (other tab / minimized) -> skip.
+            let Some(container) = container.upgrade() else { return glib::ControlFlow::Break };
+            if container.is_mapped() {
+                refresh();
+            }
             glib::ControlFlow::Continue
         });
     }
@@ -210,7 +223,6 @@ fn collect_rows() -> Vec<Row> {
             subtitle,
             timestamp,
             avatar_hex: contact.avatar_hex,
-            is_group: false,
             is_founder: false,
             ready,
         });
@@ -242,7 +254,6 @@ fn collect_rows() -> Vec<Row> {
             subtitle,
             timestamp,
             avatar_hex: group.avatar_hex,
-            is_group: true,
             is_founder: group.is_founder,
             ready: true,
         });
@@ -404,21 +415,22 @@ fn build_row(main: &Rc<MainUi>, row: &Row, refresh: Rc<dyn Fn()>) -> gtk::ListBo
     gesture.set_button(3);
     {
         let main = main.clone();
-        let anchor = action_row.clone();
+        // Weak: the controller lives on the row, a strong ref would be a cycle
+        // that leaks every rebuilt row (and its avatar texture).
+        let anchor = action_row.downgrade();
         let conversation = row.conversation.clone();
         let pin_key = row.pin_key.clone();
         let pinned = row.pinned;
-        let is_group = row.is_group;
         let is_founder = row.is_founder;
         let refresh = refresh.clone();
         gesture.connect_pressed(move |_, _, x, y| {
+            let Some(anchor) = anchor.upgrade() else { return };
             dialogs::chat_context_menu(
                 &main,
                 &anchor,
                 &conversation,
                 &pin_key,
                 pinned,
-                is_group,
                 is_founder,
                 x,
                 y,

@@ -25,6 +25,9 @@ struct Tile {
     picture: gtk::Picture,
     name: gtk::Label,
     mic_off: gtk::Image,
+    /// Shown instead of the picture while the camera is off (and in voice calls).
+    avatar: adw::Avatar,
+    peer: RefCell<String>,
 }
 
 struct CallUi {
@@ -88,7 +91,9 @@ pub fn on_event(app: &Rc<App>, event: &Event) {
     let name = event.string("name");
     ui.title.set_text(&name);
     ui.status.set_text(if video { "Incoming video call" } else { "Incoming voice call" });
-    let notification = gio::Notification::new(&name);
+    // Same setting as message notifications: no caller name on a lock screen.
+    let hide = app.prefs.borrow().hide_notification_content;
+    let notification = gio::Notification::new(if hide { "Typeon" } else { name.as_str() });
     notification.set_body(Some(if video { "Incoming video call" } else { "Incoming voice call" }));
     notification.set_priority(gio::NotificationPriority::Urgent);
     app.application.send_notification(Some("call"), &notification);
@@ -415,7 +420,27 @@ impl CallUi {
             tile.name.set_text(&p.name);
             // Muted participants get a mic-off icon before their name.
             tile.mic_off.set_visible(p.muted);
-            tile.picture.set_visible(self.video.get() && !p.video_off);
+            let showing_video = self.video.get() && !p.video_off;
+            tile.picture.set_visible(showing_video);
+            tile.avatar.set_visible(!showing_video);
+            if *tile.peer.borrow() != p.peer {
+                *tile.peer.borrow_mut() = p.peer.clone();
+                tile.avatar.set_text(Some(&p.name));
+                let picture = self.app.contacts.borrow().iter()
+                    .find(|c| c.active_device_fingerprint.as_deref().is_some_and(|f| f == p.peer || f == p.fp))
+                    .and_then(|c| c.avatar_hex.as_deref().and_then(crate::util::texture_from_hex));
+                tile.avatar.set_custom_image(picture.as_ref());
+            }
+        }
+        // Accent frame around whoever is speaking.
+        if let Some(m) = self.media.borrow().as_ref() {
+            for (slot, tile) in tiles.iter() {
+                if m.is_speaking(*slot) {
+                    tile.root.add_css_class("call-speaking");
+                } else {
+                    tile.root.remove_css_class("call-speaking");
+                }
+            }
         }
         // Two or more remote people: a 2-wide grid rather than a tall column.
         self.grid.set_min_children_per_line(if tiles.len() >= 2 { 2 } else { 1 });
@@ -460,17 +485,24 @@ fn new_tile(video: bool) -> Tile {
         label.set_margin_start(10);
         label.set_margin_bottom(10);
     } else {
+        // Below the profile picture, which sits in the middle of the tile.
         label.set_halign(gtk::Align::Center);
-        label.set_valign(gtk::Align::Center);
+        label.set_valign(gtk::Align::End);
+        label.set_margin_bottom(10);
     }
     let backdrop = gtk::Box::new(gtk::Orientation::Vertical, 0);
     backdrop.append(&picture);
+    let avatar = adw::Avatar::new(112, None, true);
+    avatar.set_halign(gtk::Align::Center);
+    avatar.set_valign(gtk::Align::Center);
+    avatar.set_visible(!video);
     let root = gtk::Overlay::new();
     root.set_child(Some(&backdrop));
+    root.add_overlay(&avatar);
     root.add_overlay(&label);
     root.add_css_class("call-tile");
     root.set_size_request(240, 180);
-    Tile { root, picture, name, mic_off }
+    Tile { root, picture, name, mic_off, avatar, peer: RefCell::new(String::new()) }
 }
 
 fn install_css() {
@@ -481,6 +513,7 @@ fn install_css() {
     let css = gtk::CssProvider::new();
     css.load_from_data(
         ".call-tile { background: #18181c; border-radius: 12px; }
+         .call-tile.call-speaking { box-shadow: inset 0 0 0 3px @accent_bg_color; }
          .call-self { border-radius: 10px; }
          .call-label { color: white; background: alpha(black, 0.45); border-radius: 8px; padding: 4px 10px; }
          .call-button { min-width: 56px; min-height: 56px; }

@@ -67,6 +67,8 @@ impl TorStatus {
 
 /// Inbound onion streams bridged at once. A peer needs one per connection.
 const MAX_INBOUND_ONION_STREAMS: usize = 64;
+/// Inbound streams one rendezvous circuit may hold open.
+const MAX_STREAMS_PER_CIRCUIT: u32 = 8;
 
 /// Çalışan Tor katmanının paylaşılan tutamacı. `TorClient` dial transport'u
 /// tarafından da kullanılır (bkz. `ArtiDialTransport`), bu yüzden `Arc`.
@@ -83,7 +85,7 @@ pub struct TorHandle {
 impl TorHandle {
     /// Şu anki durum.
     pub fn status(&self) -> TorStatus {
-        *self.status.lock().unwrap()
+        *self.status.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Yayındaki .onion host adı (ör. "abcd...xyz.onion") — henüz
@@ -91,7 +93,7 @@ impl TorHandle {
     /// multiaddr'ı lib.rs `get_node_address` oluşturur
     /// (`/dns/<host>/tcp/<port>/p2p/<peer_id>` biçiminde).
     pub fn onion_host(&self) -> Option<String> {
-        self.onion_addr.lock().unwrap().clone()
+        self.onion_addr.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Ağ arayüzü değiştiğinde (Wi-Fi kopup gelme, hücresele geçiş) çağrılır.
@@ -118,7 +120,8 @@ impl TorHandle {
         if self.rebootstrapping.swap(true, Ordering::SeqCst) {
             return;
         }
-        let client = self.client.clone();
+        // Weak: the loop ends once the handle (and the swarm) drop the client.
+        let client = Arc::downgrade(&self.client);
         let status = self.status.clone();
         let running = self.rebootstrapping.clone();
         tokio::spawn(async move {
@@ -127,14 +130,15 @@ impl TorHandle {
             // arti recovered by itself.
             let mut delay = std::time::Duration::from_secs(2);
             loop {
+                let Some(client) = client.upgrade() else { break };
                 match client.bootstrap().await {
                     Ok(()) => {
-                        *status.lock().unwrap() = TorStatus::Ready;
+                        *status.lock().unwrap_or_else(|p| p.into_inner()) = TorStatus::Ready;
                         log::info!("Tor: ağ değişikliği sonrası bootstrap teyit edildi");
                         break;
                     }
                     Err(e) => {
-                        *status.lock().unwrap() = TorStatus::Bootstrapping;
+                        *status.lock().unwrap_or_else(|p| p.into_inner()) = TorStatus::Bootstrapping;
                         log::warn!("Tor: ağ değişikliği sonrası bootstrap henüz tamam değil ({delay:?} sonra yeniden): {e}");
                         tokio::time::sleep(delay).await;
                         delay = (delay * 2).min(std::time::Duration::from_secs(60));
@@ -172,8 +176,12 @@ impl TorHandle {
             let nickname: tor_hsservice::HsNickname = ONION_NICKNAME
                 .parse()
                 .map_err(|e| format!("Onion nickname: {e}"))?;
+            // One libp2p connection = one stream; a peer redialing needs a
+            // few. Without this one rendezvous circuit could take all
+            // `MAX_INBOUND_ONION_STREAMS` slots (arti default 65535).
             let svc_config = OnionServiceConfigBuilder::default()
                 .nickname(nickname)
+                .max_concurrent_streams_per_circuit(MAX_STREAMS_PER_CIRCUIT)
                 .build()
                 .map_err(|e| format!("Onion config: {e}"))?;
             let (service, rend_requests) = client
@@ -181,24 +189,30 @@ impl TorHandle {
                 .map_err(|e| format!("Onion service başlatılamadı: {e}"))?;
             Ok((client, service, rend_requests))
         };
+        // Any start error, not only arti's "corrupted data in persistent
+        // state" text: a wording change or another corruption kind would
+        // otherwise skip the recovery and fail every start forever.
         let (client, service, rend_requests) = match start() {
-            Err(e) if e.contains("corrupted data in persistent state") => {
-                log::warn!("Tor: persistent state corrupted, cleared ({e})");
+            Err(e) => {
+                log::warn!("Tor: start failed, state cleared, retrying once ({e})");
                 for dir in ["state", "hss"] {
                     let _ = std::fs::remove_dir_all(std::path::Path::new(state_dir).join(dir));
                 }
                 start()?
             }
-            other => other?,
+            Ok(v) => v,
         };
         let client = Arc::new(client);
 
         let status = Arc::new(Mutex::new(TorStatus::Bootstrapping));
         let onion_addr = Arc::new(Mutex::new(None::<String>));
+        // Held by the launch loop too, so a network change does not start a
+        // second loop next to it.
+        let rebootstrapping = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
         // .onion adını (varsa) hemen yakala.
         if let Some(hsid) = service.onion_name() {
-            *onion_addr.lock().unwrap() = Some(hsid.to_string());
+            *onion_addr.lock().unwrap_or_else(|p| p.into_inner()) = Some(hsid.to_string());
         }
 
         // Arka plan: bootstrap — spec dışı, kullanıcı isteği ("Tor
@@ -212,36 +226,44 @@ impl TorHandle {
         // önceden bootstrap edilmişse no-op) — bu yüzden birden çok kez
         // çağırmak zararsız.
         {
-            let client_bg = client.clone();
+            // Weak: dropping the handle ends the loop instead of retrying
+            // every 60 s forever with a dead client.
+            let client_bg = Arc::downgrade(&client);
             let status_bg = status.clone();
-            let service_bg = service.clone();
+            let service_bg = Arc::downgrade(&service);
             let onion_bg = onion_addr.clone();
+            let running = rebootstrapping.clone();
             tokio::spawn(async move {
                 let mut delay = std::time::Duration::from_secs(2);
                 loop {
+                    let (Some(client_bg), Some(service_bg)) = (client_bg.upgrade(), service_bg.upgrade()) else { break };
                     match client_bg.bootstrap().await {
                         Ok(()) => {
                             // Bootstrap sonrası .onion adı kesinlikle var.
                             if let Some(hsid) = service_bg.onion_name() {
-                                *onion_bg.lock().unwrap() = Some(hsid.to_string());
+                                *onion_bg.lock().unwrap_or_else(|p| p.into_inner()) = Some(hsid.to_string());
                             }
-                            *status_bg.lock().unwrap() = TorStatus::Ready;
+                            *status_bg.lock().unwrap_or_else(|p| p.into_inner()) = TorStatus::Ready;
                             log::info!("Tor: bootstrap tamam, onion service yayında");
                             break;
                         }
                         Err(e) => {
-                            *status_bg.lock().unwrap() = TorStatus::Failed;
+                            // Still retrying: same status as the notify loop.
+                            *status_bg.lock().unwrap_or_else(|p| p.into_inner()) = TorStatus::Bootstrapping;
                             log::error!("Tor bootstrap başarısız ({delay:?} sonra yeniden denenecek): {e}");
+                            drop((client_bg, service_bg));
                             tokio::time::sleep(delay).await;
                             delay = (delay * 2).min(std::time::Duration::from_secs(60));
                         }
                     }
                 }
+                running.store(false, std::sync::atomic::Ordering::SeqCst);
             });
         }
 
         // Arka plan: gelen onion akışlarını yerel libp2p TCP portuna köprüle.
         {
+            let status_br = status.clone();
             tokio::spawn(async move {
                 // Anyone who knows the .onion can open streams, and each one
                 // costs a task, a socket and a libp2p upgrade that the swarm
@@ -258,6 +280,8 @@ impl TorHandle {
                         drop(slot);
                     });
                 }
+                // No inbound path any more: do not keep reporting Ready.
+                *status_br.lock().unwrap_or_else(|p| p.into_inner()) = TorStatus::Failed;
                 log::info!("Tor: gelen akış köprüsü sonlandı");
             });
         }
@@ -267,7 +291,7 @@ impl TorHandle {
             status,
             onion_addr,
             _service: service,
-            rebootstrapping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rebootstrapping,
         })
     }
 }
@@ -281,29 +305,45 @@ impl TorHandle {
 /// 92 %, 35 mAh; Reduced (9-14 s) 87 %, 33.5 mAh; None — the carrier NAT
 /// dropped the idle guard channel, every peer link died within a minute and
 /// the redials (onion circuit builds) kept the radio up anyway (37 mAh).
-/// So: Reduced, with its idle timeout stretched to 45-55 s — just under the
-/// 60 s cap arti allows and still inside typical netflow record windows.
+/// So: Reduced, with its idle timeout stretched to 225-245 s (see
+/// `client_config`; the vendored tor-netdir lifts arti's 60 s cap).
+///
 /// arti keeps every hourly consensus (~3.3 MB) until 4 days past expiry, so
 /// dir_blobs grows to ~150-330 MB. The retention is a private constant in
 /// tor-dirmgr, so before arti opens the cache keep only the two newest
 /// consensuses per flavour (the latest plus one diff base). Best effort.
 fn trim_dir_cache(cache_dir: &str) {
     let dir = std::path::Path::new(cache_dir);
-    let Ok(conn) = rusqlite::Connection::open(dir.join("dir.sqlite3")) else { return };
-    let files: Vec<String> = (|| -> rusqlite::Result<Vec<String>> {
+    // READ_WRITE without CREATE: no cache yet = nothing to trim, and arti
+    // must create its own schema.
+    let Ok(conn) = rusqlite::Connection::open_with_flags(dir.join("dir.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE) else {
+        return;
+    };
+    let files = (|| -> rusqlite::Result<Vec<String>> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let q = "SELECT filename FROM ExtDocs e WHERE type LIKE 'con%' AND \
                  (SELECT COUNT(*) FROM ExtDocs n WHERE n.type = e.type AND n.created > e.created) >= 2";
         let names: Vec<String> = conn.prepare(q)?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        // A bare file name only: the name comes from a database file, and
+        // `..` or an absolute path would delete outside `dir_blobs`. Rows
+        // with other names stay, so row and file go together.
+        let names: Vec<String> =
+            names.into_iter().filter(|f| std::path::Path::new(f).file_name() == Some(std::ffi::OsStr::new(f))).collect();
+        let tx = conn.unchecked_transaction()?;
         for n in &names {
-            conn.execute("DELETE FROM ExtDocs WHERE filename = ?", [n])?;
+            tx.execute("DELETE FROM ExtDocs WHERE filename = ?", [n])?;
         }
+        tx.commit()?;
         Ok(names)
-    })()
-    .unwrap_or_default();
-    // A bare file name only: the name comes from a database file, and `..` or
-    // an absolute path would delete outside `dir_blobs`.
-    for f in files.iter().filter(|f| std::path::Path::new(f).file_name() == Some(std::ffi::OsStr::new(f))) {
+    })();
+    let files = match files {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("Tor dizin önbelleği budanamadı: {e}");
+            return;
+        }
+    };
+    for f in &files {
         let _ = std::fs::remove_file(dir.join("dir_blobs").join(f));
     }
     if !files.is_empty() {

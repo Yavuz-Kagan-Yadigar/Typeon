@@ -111,10 +111,21 @@ impl Default for Prefs {
 impl Prefs {
     pub fn load(dir: &Path) -> Self {
         let path = dir.join("settings.json");
-        let mut prefs: Prefs = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
+        let mut prefs: Prefs = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
+                // Keep the unreadable file for inspection; defaults would
+                // otherwise overwrite it on the next save.
+                log::warn!("settings.json unparsable ({e}); using defaults");
+                let _ = std::fs::rename(&path, dir.join("settings.json.bad"));
+                Prefs::default()
+            }),
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!("settings.json unreadable ({e}); using defaults");
+                }
+                Prefs::default()
+            }
+        };
         prefs.path = path;
         prefs
     }
@@ -125,8 +136,20 @@ impl Prefs {
         }
         if let Ok(text) = serde_json::to_string_pretty(self) {
             // A failed write must not take the app down: the worst case is a
-            // setting that does not survive a restart.
-            let _ = std::fs::write(&self.path, text);
+            // setting that does not survive a restart. tmp + fsync + rename so
+            // a crash cannot leave a torn file (= silent reset to defaults).
+            let tmp = self.path.with_extension("json.tmp");
+            let result = (|| {
+                use std::io::Write;
+                let mut file = std::fs::File::create(&tmp)?;
+                file.write_all(text.as_bytes())?;
+                file.sync_all()?;
+                std::fs::rename(&tmp, &self.path)
+            })();
+            if let Err(e) = result {
+                log::warn!("settings.json not saved: {e}");
+                let _ = std::fs::remove_file(&tmp);
+            }
         }
     }
 

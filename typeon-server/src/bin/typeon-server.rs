@@ -26,13 +26,18 @@
 //! - `TYPEON_SERVER_NODE`  (`1` ile Kad Server + Circuit Relay v2 hizmeti)
 //! - `TYPEON_SERVER_NAME`
 //! - `TYPEON_SERVER_BUDGET_BYTES` (total disk the server may use; default
-//!   336 GiB = 64 devices x the per-device quotas)
+//!   `DEFAULT_BUDGET_BYTES`, 16 GiB)
 //! - `TYPEON_SERVER_MAX_DEVICES` (most enrolled devices; default 64)
 
 use std::path::PathBuf;
 
 use typeon_server::store::Store;
 use typeon_server::{now_ms, ServerConfig, ServerCore};
+
+/// Total disk budget when `TYPEON_SERVER_BUDGET_BYTES` is not set. The
+/// library default (64 devices x per-device quotas = 336 GiB) let enrolled
+/// clients fill a small VPS disk.
+const DEFAULT_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 fn data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("TYPEON_SERVER_DIR") {
@@ -62,13 +67,17 @@ fn build_config() -> ServerConfig {
     // Bu denetimde bulundu: `total_storage_budget_bytes` okunuyor ama hiçbir
     // yerde set edilmiyordu, yani sunucunun TOPLAM disk tavanı (defter #23)
     // ölü koddu — yalnızca kayıt başına kotalar uygulanıyordu ve N kayıtla
-    // gerçek kullanım N × kota'ya çıkabiliyordu. The default is
-    // `ServerConfig::new`'s 336 GiB; a small disk needs a lower one.
-    if let Ok(v) = std::env::var("TYPEON_SERVER_BUDGET_BYTES") {
-        match v.trim().parse::<u64>() {
+    // gerçek kullanım N × kota'ya çıkabiliyordu.
+    cfg.total_storage_budget_bytes = Some(DEFAULT_BUDGET_BYTES);
+    match std::env::var("TYPEON_SERVER_BUDGET_BYTES") {
+        Ok(v) => match v.trim().parse::<u64>() {
             Ok(bytes) if bytes > 0 => cfg.total_storage_budget_bytes = Some(bytes),
             _ => eprintln!("TYPEON_SERVER_BUDGET_BYTES yok sayıldı (pozitif bir bayt sayısı bekleniyor): {v}"),
-        }
+        },
+        Err(_) => eprintln!(
+            "TYPEON_SERVER_BUDGET_BYTES yok: disk bütçesi {} GiB. Diskinize göre ayarlayın.",
+            DEFAULT_BUDGET_BYTES >> 30
+        ),
     }
     if let Ok(v) = std::env::var("TYPEON_SERVER_MAX_DEVICES") {
         match v.trim().parse::<u32>() {
