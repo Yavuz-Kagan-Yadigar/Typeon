@@ -536,17 +536,8 @@ pub fn request_older_sibling_group_history(group_id: &str, before_timestamp: i64
 
 // --- attachments ---
 
-// bkz. Android `ChatActivity`/`GroupChatActivity` "fotoğraf/eklenti/ses
-// atarken de bir mesaj yanıtlanabilmeli ve altına bir yazı yazılabilmeli"
-// notu — çekirdek (`api::prepare_and_send_file`/`_group_file`) bu alanları
-// bu session'da kazandı, ama Linux tarafındaki sarmalayıcı hiç güncellenmedi
-// (derleme bunu YAKALAMADI çünkü Linux ayrı bir build hedefi — `cargo
-// check`/`gradlew` Android'i doğruluyor, Linux'u değil). `flatpak-builder`
-// derlemesinde ortaya çıktı: `api::` imzası 6 değil 9/10 argüman istiyordu.
-// Linux tarafında henüz bir yanıt/açıklama arayüzü YOK (bkz.
-// `ui::chat::send_attachment`/`toggle_voice_recording` çağrı noktaları) —
-// o yüzden burada sadece boş/`None` geçiriliyor, ESKİ davranışla BİREBİR
-// aynı; ileride Linux'a da o arayüz eklenince bu parametreler zaten hazır.
+// Caption and reply are wired in the UI (`ui::chat` attachment send paths);
+// the core takes them as optional arguments.
 pub fn prepare_and_send_file(
     target: &str,
     source_path: &str,

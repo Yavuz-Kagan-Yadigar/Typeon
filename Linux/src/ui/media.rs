@@ -468,6 +468,17 @@ fn save_copy(app: &Rc<App>, path: &str, suggested_name: &str) {
         }
         _ => suggested_name,
     };
+    // M163: the name is peer-supplied; a path separator must not reach the
+    // dialog as a directory component.
+    let suggested_name: String = suggested_name
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\' | '\0') { '_' } else { c })
+        .collect();
+    let suggested_name = if suggested_name.trim_matches('.').trim().is_empty() {
+        "file"
+    } else {
+        suggested_name.as_str()
+    };
     let dialog = gtk::FileDialog::builder()
         .title("Save a copy")
         .initial_name(suggested_name)
@@ -483,7 +494,16 @@ fn save_copy(app: &Rc<App>, path: &str, suggested_name: &str) {
         let shown = target.display().to_string();
         let app = app.clone();
         crate::app::run_in_background(
-            move || std::fs::copy(&source, &target),
+            move || {
+                let copied = std::fs::copy(&source, &target);
+                // A decrypted private photo: owner-only whenever the
+                // destination filesystem supports Unix permissions (best
+                // effort on a FAT/exFAT stick).
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600));
+                copied
+            },
             move |result| match result {
                 Ok(_) => app.toast(&format!("Saved to {shown}")),
                 Err(error) => app.toast(&format!("Could not save: {error}")),

@@ -206,7 +206,7 @@ class ServerActivity : AppCompatActivity() {
             // (20+ s): "Stopped" there invited a second toggle.
             val state = when {
                 !ServerService.isEnabled(this) -> getString(R.string.state_stopped)
-                else -> ServerService.lastError ?: getString(R.string.notif_starting)
+                else -> ServerService.lastError?.let { serverErrorText(this, it) } ?: getString(R.string.notif_starting)
             }
             lastStatus = setTextIfChanged(statusText, state, lastStatus)
             lastAddresses = setTextIfChanged(addressText, "", lastAddresses)
@@ -327,7 +327,7 @@ class ServerActivity : AppCompatActivity() {
     private fun deviceAction(call: () -> String) {
         bg(call, { "Error: ${it.message}" }) { res ->
             if (res.startsWith("Error:")) {
-                Toast.makeText(this, res, Toast.LENGTH_LONG).show()
+                Toast.makeText(this, serverErrorText(this, res), Toast.LENGTH_LONG).show()
             }
             lastDevicesJson = null
             refreshStatus()
@@ -372,7 +372,7 @@ class ServerActivity : AppCompatActivity() {
             if (code.startsWith("Error:")) {
                 // Adres henüz yokken (Tor açılıyor) hata NORMAL; yalnızca
                 // kullanıcı kodu KENDİSİ yenilemek istediğinde söylüyoruz.
-                if (rotate) Toast.makeText(this, code, Toast.LENGTH_LONG).show()
+                if (rotate) Toast.makeText(this, serverErrorText(this, code), Toast.LENGTH_LONG).show()
                 // Retry on the next poll: a failed read on the poll where the
                 // address changed otherwise left the old QR up for good.
                 lastInvite = null
@@ -508,7 +508,10 @@ class ServerActivity : AppCompatActivity() {
     private fun moveStorage(from: java.io.File, to: java.io.File) {
         // One move at a time: after a rotation the progress dialog is gone
         // and the storage button could start a second one on the same tree.
-        if (!ServerService.moving.compareAndSet(false, true)) return
+        if (!ServerService.moving.compareAndSet(false, true)) {
+            Toast.makeText(this, R.string.msg_storage_busy, Toast.LENGTH_SHORT).show()
+            return
+        }
         val app = applicationContext
         val progress = AlertDialog.Builder(this)
             .setMessage(R.string.dlg_storage_moving)
@@ -517,6 +520,8 @@ class ServerActivity : AppCompatActivity() {
         // The service is NOT stopped, only the native core: it stays in the
         // foreground through the copy (the process is not killable half-way)
         // and can bring the core back with the app in the background.
+        // M139: files this move created; a failure removes only those, not what was in the target before.
+        val created = java.util.concurrent.CopyOnWriteArrayList<java.io.File>()
         Thread {
             val error = try {
                 // Queued behind a start that is still initialising, and back
@@ -526,9 +531,9 @@ class ServerActivity : AppCompatActivity() {
                 if (stopped.startsWith("Error:")) throw java.io.IOException(stopped)
                 val needed = from.listFiles()?.sumOf { it.length() } ?: 0L
                 if (android.os.StatFs(to.parentFile!!.absolutePath).availableBytes < needed) {
-                    throw java.io.IOException("hedefte yeterli boş alan yok")
+                    throw java.io.IOException(getString(R.string.err_storage_no_space))
                 }
-                copyTree(from, to)
+                copyTree(from, to, created)
                 // Saved HERE, between copy and delete, and not in the UI
                 // callback: if the activity is gone by then, the setting would
                 // still point at the directory that was just emptied.
@@ -537,8 +542,8 @@ class ServerActivity : AppCompatActivity() {
                 null
             } catch (e: Throwable) {
                 // Do not leave a partial copy filling the target.
-                if (ServerService.blobDir(app).absolutePath != to.absolutePath) deleteTree(to, keepRoot = true)
-                e.message ?: "bilinmeyen hata"
+                if (ServerService.blobDir(app).absolutePath != to.absolutePath) created.reversed().forEach { it.delete() }
+                e.message ?: getString(R.string.err_unknown)
             } finally {
                 ServerService.moving.set(false)
             }
@@ -554,13 +559,14 @@ class ServerActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun copyTree(from: java.io.File, to: java.io.File) {
-        if (!to.exists() && !to.mkdirs()) throw java.io.IOException("hedef dizin oluşturulamadı")
+    private fun copyTree(from: java.io.File, to: java.io.File, created: MutableList<java.io.File>) {
+        if (!to.exists() && !to.mkdirs()) throw java.io.IOException(getString(R.string.err_storage_mkdir))
         from.listFiles()?.forEach { child ->
             val dest = java.io.File(to, child.name)
             if (child.isDirectory) {
-                copyTree(child, dest)
+                copyTree(child, dest, created)
             } else {
+                if (!dest.exists()) created.add(dest)
                 java.io.FileOutputStream(dest).use { output ->
                     child.inputStream().use { input -> input.copyTo(output, 1 shl 16) }
                     // On disk before the original is deleted.

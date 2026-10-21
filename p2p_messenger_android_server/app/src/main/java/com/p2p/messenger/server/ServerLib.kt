@@ -8,6 +8,21 @@ package com.p2p.messenger.server
  * (`libtypeon_server.so`) — istemcinin `libp2p_messenger.so`'suyla aynı
  * protokol tiplerini paylaşır ama ayrı bir crate'tir.
  */
+/** M142: the native side answers in English; show it in the user's language. */
+fun serverErrorText(ctx: android.content.Context, raw: String): String {
+    val id = when {
+        raw.startsWith("Error: internal error") -> R.string.err_internal
+        raw.startsWith("Error: previous server still") -> R.string.err_server_closing
+        raw.startsWith("Error: server loop did not stop") -> R.string.err_server_loop_stuck
+        raw == "Error: server not running" -> R.string.err_server_not_running
+        raw.startsWith("Error: server has no reachable address") -> R.string.err_no_address
+        raw == "Error: invalid id" -> R.string.err_invalid_id
+        raw == "Error: record not found" -> R.string.err_record_not_found
+        else -> return raw
+    }
+    return ctx.getString(id)
+}
+
 object ServerLib {
     init {
         System.loadLibrary("typeon_server")

@@ -335,7 +335,15 @@ fn audio_tx(shared: Arc<Shared>) {
         Err(e) => return state_only(&shared, &e),
     };
     drain_bus(&pipeline, "microphone");
-    let sink = pipeline.by_name("out").and_then(|e| e.downcast::<gst_app::AppSink>().ok()).expect("appsink");
+    // M168: a pipeline missing its appsink (element changed, factory renamed)
+    // would turn this worker thread into a live-strip-and-return: the whole
+    // microphone silently died with the call still running. Degrade instead —
+    // release and hand the loop to `state_only`, which keeps the presence
+    // beacon going so the peers still see "me, muted".
+    let Some(sink) = pipeline.by_name("out").and_then(|e| e.downcast::<gst_app::AppSink>().ok()) else {
+        let _ = pipeline.set_state(gst::State::Null);
+        return state_only(&shared, "microphone pipeline has no appsink element");
+    };
     let mut bundle: Vec<Vec<u8>> = Vec::with_capacity(PACKETS_PER_BUNDLE);
     let mut state_at = Instant::now() - STATE_EVERY;
     let mut last_flags = u8::MAX;
@@ -356,7 +364,10 @@ fn audio_tx(shared: Arc<Shared>) {
         let Ok(map) = buffer.map_readable() else { continue };
         bundle.push(map.as_slice().to_vec());
         if bundle.len() >= PACKETS_PER_BUNDLE {
-            if !shared.muted.load(Ordering::Relaxed) && core::call_send(KIND_AUDIO, &pack_bundle(&bundle)) {
+            // Overflowed bundles (impossible today, see `pack_bundle`) come
+            // back empty — skip rather than send a header-less frame.
+            let frame = pack_bundle(&bundle);
+            if !frame.is_empty() && !shared.muted.load(Ordering::Relaxed) && core::call_send(KIND_AUDIO, &frame) {
                 sent += 1;
             }
             bundle.clear();
@@ -383,6 +394,14 @@ fn state_flags(shared: &Shared) -> u8 {
 
 /// `[n][len u16 BE]*n [packet]*n`
 pub fn pack_bundle(packets: &[Vec<u8>]) -> Vec<u8> {
+    // M169: the count lives in one header byte, so `as u8` used to truncate
+    // silently at >255 packets (impossible for the 3-packet caller, but a
+    // header/payload disagreement is still a corrupt frame if that ever
+    // changes) — refuse loudly instead.
+    if packets.len() > u8::MAX as usize {
+        log::warn!("call: {} packets exceed the one-byte bundle header", packets.len());
+        return Vec::new();
+    }
     let mut out = Vec::with_capacity(1 + packets.len() * 2 + packets.iter().map(Vec::len).sum::<usize>());
     out.push(packets.len() as u8);
     for p in packets {

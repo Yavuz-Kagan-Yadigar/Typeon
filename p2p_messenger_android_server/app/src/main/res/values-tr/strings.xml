@@ -55,4 +55,16 @@
     <string name="action_unblock">Engeli kaldir</string>
     <string name="dlg_block_title">Bu cihaz engellensin mi?</string>
     <string name="dlg_block_body">Engellenen cihaz taze bir davet koduyla bile geri dönemez ve herkese açık katılım kodu yenilenir. Engel yalnızca bu kayıt anahtarını durdurur: uygulamayı yeniden kuran yeni kimlik alır; gerçekten yasaklamak için katılım kodunu yenileyin ve yeni kodu paylaşmayın. Engeli daha sonra kaldırabilirsiniz.</string>
+    <string name="err_storage_no_space">Hedefte yeterli boş alan yok</string>
+    <string name="err_storage_mkdir">Hedef klasör oluşturulamadı</string>
+    <string name="err_unknown">Bilinmeyen hata</string>
+    <string name="err_storage_unavailable">Depolama konumu kullanılamıyor</string>
+    <string name="msg_storage_busy">Bir depolama taşıma işlemi zaten sürüyor</string>
+    <string name="err_internal">Hata: iç hata</string>
+    <string name="err_server_closing">Hata: önceki sunucu hâlâ kapanıyor, biraz sonra tekrar deneyin</string>
+    <string name="err_server_loop_stuck">Hata: sunucu 20 saniye içinde kapanmadı</string>
+    <string name="err_server_not_running">Hata: sunucu çalışmıyor</string>
+    <string name="err_no_address">Hata: sunucunun henüz ulaşılabilir bir adresi yok (Tor açılıyor olabilir)</string>
+    <string name="err_invalid_id">Hata: geçersiz kimlik</string>
+    <string name="err_record_not_found">Hata: kayıt bulunamadı</string>
 </resources>

@@ -89,6 +89,11 @@ const RATE_WINDOW_MS: u64 = 60_000;
 /// Tor carries about one 256 KiB chunk a second; 10/s is far above a real
 /// download and caps one peer at ~2.5 MiB/s of disk reads.
 const CHUNKS_PER_MINUTE: u32 = 600;
+/// Blobs (files on disk) one enrollment may hold; bytes have their own quota.
+/// A heavy month of attachments (`blob_ttl_ms`) stays far below it.
+const MAX_BLOBS_PER_ENROLLMENT: i64 = 10_000;
+/// Least quota a `BlobPut` chunk is charged: its row, even with no new bytes.
+const BLOB_CHUNK_MIN_CHARGE: u64 = 64;
 
 /// Call-media relay budget per client: bytes per `RELAY_WINDOW_MS`. ~6.7
 /// Mbit/s — several times a 480p video call, so it only stops a flood. Relay
@@ -140,11 +145,11 @@ const MAX_HASH_WAITERS: usize = 8;
 const MAX_RELAY_STREAMS: usize = 256;
 /// Of those, one peer at once (a call holds one; the rest wait out a replace).
 const MAX_RELAY_STREAMS_PER_PEER: usize = 4;
-/// `Enroll`/`Rebind` hybrid signature checks per `RATE_WINDOW_MS`,
+/// `Enroll`/`Rebind` and `Register` proof hybrid signature checks per `RATE_WINDOW_MS`,
 /// server-wide: ML-DSA-87 is the expensive step and PeerIds are free, so a
 /// per-peer limit bounds nothing.
-/// ponytail: a flood also starves real enrollments for the window (mail and
-/// enrolled devices are not affected); per-invite budgets if that matters.
+/// ponytail: a flood also starves real enrollments and new-mailbox proofs for
+/// the window (mail is not affected); per-invite budgets if that matters.
 const ENROLL_VERIFIES_PER_MINUTE: u32 = 120;
 /// 2026-01-01 UTC. A wall clock before this is wrong (phone booted with a
 /// 1970/2020 RTC): no TTL sweep runs on it.
@@ -521,6 +526,12 @@ impl ServerCore {
             let _ = std::fs::set_permissions(&config.data_dir, std::fs::Permissions::from_mode(0o700));
         }
         std::fs::create_dir_all(&config.blob_dir).map_err(|e| format!("Blob dizini: {e}"))?;
+        // Same as `data_dir` (a no-op on FAT/exFAT, which has no modes).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&config.blob_dir, std::fs::Permissions::from_mode(0o700));
+        }
 
         let store = Store::open(&config.data_dir.join("typeon_server.db"))?;
         // Rows dated by a wrong clock before a restart (see `clock_jumped`
@@ -748,7 +759,8 @@ impl ServerCore {
         mut self,
         shutdown: impl std::future::Future<Output = ()>,
     ) -> Result<(), String> {
-        info!("Typeon sunucusu başladı: peer_id={}", self.local_peer_id());
+        info!("Typeon sunucusu başladı");
+        debug!("peer_id={}", self.local_peer_id());
         // Zamanlayıcı ve sinyal AYRI yerel değişkenler olmak ZORUNDA:
         // `tokio::select!` bütün dalların future'larını AYNI kapsamda
         // oluşturur, swarm dalı da `self`i ödünç alıyor — bunlar satır içi
@@ -966,10 +978,10 @@ impl ServerCore {
             return ServerResponse::Err(ServerErrorCode::BadSignature);
         };
         // İstemcinin imzaladığı challenge, BİZİM verdiğimiz olmalı.
-        if client_challenge != challenge {
+        if !ct_eq(&client_challenge, &challenge) {
             return ServerResponse::Err(ServerErrorCode::BadSignature);
         }
-        if !self.verify_budget() {
+        if !self.verify_budget(1) {
             self.stats.rejected += 1;
             return ServerResponse::Err(ServerErrorCode::RateLimited);
         }
@@ -1104,7 +1116,7 @@ impl ServerCore {
         if self.store.is_key_blocked(&existing.enroll_pk) {
             return ServerResponse::Err(ServerErrorCode::Revoked);
         }
-        if !self.verify_budget() {
+        if !self.verify_budget(1) {
             self.stats.rejected += 1;
             return ServerResponse::Err(ServerErrorCode::RateLimited);
         }
@@ -1219,6 +1231,12 @@ impl ServerCore {
             ServerRequest::Register { add, drop, proofs } => {
                 // Only a proof for an id of `add` is verified, and only one
                 // with a valid signature reaches the store.
+                // Each proof is a hybrid verify: same server-wide budget as
+                // Enroll/Rebind, or 64 enrollments x 64 proofs pin the CPU.
+                let checks = proofs.iter().filter(|p| add.contains(&p.mailbox)).count() as u32;
+                if checks > 0 && !self.verify_budget(checks) {
+                    return ServerResponse::Err(ServerErrorCode::RateLimited);
+                }
                 let me = self.swarm.local_peer_id().to_string();
                 let proved: Vec<(String, Vec<u8>)> = proofs
                     .iter()
@@ -1286,7 +1304,9 @@ impl ServerCore {
                     warn!("Toplam disk bütçesi doldu, teslim reddedildi");
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
-                if self.store.mailbox_item_count(&mailbox) >= limits.max_items_per_mailbox as i64 {
+                // Per depositor (see `depositor_item_count`): a box full of
+                // someone else's deposits must not refuse ours.
+                if self.store.depositor_item_count(&mailbox, &e.enrollment_id) >= limits.max_items_per_mailbox as i64 {
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
                 match self.store.deposit(&mailbox, &sealed, &e.enrollment_id, now, limits.mailbox_ttl_ms as i64) {
@@ -1460,7 +1480,9 @@ impl ServerCore {
         // without sparse files (SD card) and cost 1 byte of quota.
         let path = self.blob_path(&blob_id);
         let file_len = std::fs::metadata(&path).map_or(0, |m| m.len());
-        let growth = (offset + data.len() as u64).saturating_sub(file_len);
+        // At least a row's worth: a 0-byte chunk still costs a DB row (and,
+        // for a new blob, a file).
+        let growth = (offset + data.len() as u64).saturating_sub(file_len).max(BLOB_CHUNK_MIN_CHARGE);
         if e.bytes_blob.max(0) as u64 + growth > limits.max_blob_bytes {
             return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
         }
@@ -1477,6 +1499,10 @@ impl ServerCore {
         // made only for an id nobody holds; the second read also covers a
         // first one that failed (busy DB), which used to skip this check.
         if self.store.blob_state(&blob_id).is_none() {
+            // Bytes are capped above; this caps files (inodes) and rows.
+            if self.store.blob_count(&e.enrollment_id) >= MAX_BLOBS_PER_ENROLLMENT {
+                return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
+            }
             if let Err(msg) = self.store.blob_begin(&blob_id, &e.enrollment_id, total_chunks, now) {
                 error!("blob_begin: {msg}");
                 return ServerResponse::Err(ServerErrorCode::Internal);
@@ -1533,9 +1559,9 @@ impl ServerCore {
             return ServerResponse::Err(ServerErrorCode::Internal);
         }
         // The bytes are on disk: charged even if the bookkeeping below fails
-        // (the resent chunk then grows nothing and is never charged).
-        // ponytail: such a failure over-charges the owner by `growth` until
-        // the blob goes; a blob recount would fix it.
+        // (the resent chunk then grows nothing and pays only the minimum).
+        // Such a failure over-charges the owner by `growth` until the next
+        // sweep's `recount_blob_bytes`.
         self.store.add_blob_bytes(&e.enrollment_id, growth as i64);
         // An upload in progress is not garbage (see `Store::blobs_to_gc`).
         self.store.blob_touch(&blob_id, now);
@@ -1565,7 +1591,12 @@ impl ServerCore {
         if state.complete {
             return ServerResponse::Ok;
         }
-        if state.received_chunks < total_chunks {
+        // The stored count is the upload's; the client's own number only has
+        // to agree with it.
+        if total_chunks != state.total_chunks {
+            return ServerResponse::Err(ServerErrorCode::BadDirection);
+        }
+        if state.received_chunks < state.total_chunks {
             return ServerResponse::Err(ServerErrorCode::Internal);
         }
         if !self.blob_hashing.contains_key(&blob_id) && self.blob_hashing.len() >= MAX_HASH_JOBS {
@@ -1612,9 +1643,14 @@ impl ServerCore {
             Some(_) => {
                 warn!("Blob hash uyuşmuyor, reddedildi: {blob_id}");
                 self.drop_blob(&blob_id);
-                ServerResponse::Err(ServerErrorCode::Internal)
+                ServerResponse::Err(ServerErrorCode::BadHash)
             }
-            None => ServerResponse::Err(ServerErrorCode::Internal),
+            // Unreadable file: the same finish fails the same way.
+            None => {
+                warn!("Blob okunamadı, reddedildi: {blob_id}");
+                self.drop_blob(&blob_id);
+                ServerResponse::Err(ServerErrorCode::BadHash)
+            }
         };
         for channel in self.blob_hashing.remove(&blob_id).unwrap_or_default() {
             let _ = self.swarm.behaviour_mut().server_rpc.send_response(channel, response.clone());
@@ -1663,24 +1699,16 @@ impl ServerCore {
         // kullanıyor, yani bir indirme buraya her zaman kayıtlı bir
         // `PeerId` ile gelir.
         //
-        // Hız sınırı (`check_rate`) burada KASITLI olarak uygulanmıyor:
-        // `FileChunkResponse`'ın "rate limited" hâli yok ve istemci
-        // `NotFound`'u KALICI bir cevap sayıp başka bir kaynağa geçiyor
-        // (bkz. `handle_chunk_response`) — dakikalık RPC bütçesini büyük bir
-        // indirmenin binlerce parça isteğiyle paylaştırmak, meşru
-        // indirmeleri sessizce böler. Yük koruması kayıt kapısı + kota
-        // tarafında.
-        // Far above any real download (Tor carries about one chunk a second),
-        // so only a request loop reaches it. `NotFound` is the only refusal
-        // the protocol has; the client then tries another source.
-        if self.active(peer).is_none() || !self.check_rate(peer, true, 1) {
+        // Rate limit: its own budget (`CHUNKS_PER_MINUTE`, 10/s), apart from
+        // the RPC budget. Tor carries about one chunk a second, so only a
+        // request loop reaches it. An enrolled peer over budget gets `Busy`
+        // (back off, same source); an unenrolled one `NotFound`.
+        let enrolled = self.active(peer).is_some();
+        if !enrolled || !self.check_rate(peer, true, 1) {
             warn!("Dosya parçası isteği reddedildi (kayıtsız eş ya da hız sınırı)");
             self.stats.rejected += 1;
-            let _ = self
-                .swarm
-                .behaviour_mut()
-                .file_chunks
-                .send_response(channel, FileChunkResponse::NotFound);
+            let reply = if enrolled { FileChunkResponse::Busy } else { FileChunkResponse::NotFound };
+            let _ = self.swarm.behaviour_mut().file_chunks.send_response(channel, reply);
             return;
         }
         let response = if !is_safe_id(&req.file_id) {
@@ -1863,12 +1891,12 @@ impl ServerCore {
     }
 
     /// See `ENROLL_VERIFIES_PER_MINUTE`.
-    fn verify_budget(&mut self) -> bool {
+    fn verify_budget(&mut self, checks: u32) -> bool {
         let now = mono_ms();
         if self.verify_window.0 == 0 || now.saturating_sub(self.verify_window.0) > RATE_WINDOW_MS {
             self.verify_window = (now.max(1), 0);
         }
-        self.verify_window.1 += 1;
+        self.verify_window.1 = self.verify_window.1.saturating_add(checks);
         self.verify_window.1 <= ENROLL_VERIFIES_PER_MINUTE
     }
 
@@ -1981,6 +2009,7 @@ impl ServerCore {
         for blob_id in self.store.blobs_to_gc(now, self.config.limits.blob_ttl_ms as i64) {
             self.drop_blob(&blob_id);
         }
+        self.store.recount_blob_bytes();
         self.store.incremental_vacuum();
     }
 }
@@ -2056,6 +2085,11 @@ fn request_cost(req: &ServerRequest) -> u32 {
         _ => 0,
     };
     1u32.saturating_add(u32::try_from(n / 8).unwrap_or(u32::MAX))
+}
+
+/// Constant-time byte compare (the challenge is a per-connection secret).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// What `mailbox_keys` stores for the key of a `MailboxProof`.

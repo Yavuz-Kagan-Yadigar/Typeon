@@ -48,6 +48,9 @@ object AvatarUtil {
      * güvenle çağrılabilir. 100 giriş × ~36 KB (96x96 ARGB_8888) ≈ 3.6 MB
      * üst sınır — makul bir bellek/performans dengesi.
      */
+    // H138: the letter placeholder was drawn anew on every bind.
+    private val placeholderCache = android.util.LruCache<String, Bitmap>(64)
+
     private val avatarBitmapCache = android.util.LruCache<Long, Bitmap>(100)
 
     /** 64-bit content fingerprint for the cache key. A single 32-bit
@@ -71,7 +74,7 @@ object AvatarUtil {
         val bitmap = avatarBytes?.let { bytes ->
             val key = cacheKey(bytes)
             avatarBitmapCache.get(key) ?: decodeCircularSquare(bytes)?.also { avatarBitmapCache.put(key, it) }
-        } ?: placeholderCircle(displayName)
+        } ?: placeholderCache.get(displayName) ?: placeholderCircle(displayName).also { placeholderCache.put(displayName, it) }
         imageView.setImageBitmap(bitmap)
     }
 

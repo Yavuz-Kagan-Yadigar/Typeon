@@ -52,8 +52,14 @@ fn data_dir() -> PathBuf {
 }
 
 fn env_flag(key: &str, default: bool) -> bool {
-    match std::env::var(key) {
-        Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("no")),
+    // Only a known word counts; "" or a typo keeps the default (and says so).
+    match std::env::var(key).map(|v| v.trim().to_ascii_lowercase()) {
+        Ok(v) if ["1", "true", "yes", "on"].contains(&v.as_str()) => true,
+        Ok(v) if ["0", "false", "no", "off"].contains(&v.as_str()) => false,
+        Ok(v) => {
+            eprintln!("{key}={v:?} anlaşılmadı, varsayılan ({default}) kullanılıyor");
+            default
+        }
         Err(_) => default,
     }
 }

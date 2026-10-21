@@ -17,8 +17,8 @@ correct and what remains a known, accepted limitation.
   post-quantum algorithm (ML-KEM / ML-DSA). An attacker has to break **both**
   to read your messages or forge your identity, including a future attacker
   with a working quantum computer.
-- There is **no central server**. Devices find each other over the local
-  network (mDNS) and the internet (a Kademlia DHT + gossipsub), and talk
+- There is **no central server**. Devices find each other over Tor onion
+  services (a Kademlia DHT in client mode + gossipsub), and talk
   directly, peer-to-peer.
 - Trust in a contact is established once, on first contact ("Trust On First
   Use" / TOFU) — normally by scanning their QR code in person — and then
@@ -267,9 +267,8 @@ or someone you trust operates** (see "Optional store-and-forward server"
 below). Neither is operated by this project, and both are off until a user
 turns them on.
 
-- **Local network discovery — mDNS.** On the same Wi-Fi/LAN, devices
-  broadcast their presence and find each other automatically, no internet
-  needed.
+- **Local network discovery — removed.** mDNS was removed (M-201): it
+  beaconed the PeerId on the LAN, and the transport is onion-only.
 - **Wide-area discovery — Kademlia (client only).** The DHT runs in
   `Client` mode only: it looks things up but never joins anyone's routing
   table and publishes no records (no `put_record`). "Node Mode" in settings
@@ -377,36 +376,9 @@ box (e.g. a cheap VPS) becomes a bootstrap point the rest of their contacts
 can plug in, rather than the app silently failing or overpromising
 "always works, zero setup."
 
-### Serverless cross-network reachability via UPnP — fourth audit round fix
+### UPnP port mapping — removed
 
-The manual-relay/VPS approach above requires *someone* to operate
-infrastructure — even a cheap always-on box is a real ask. This round adds
-a fully automatic, zero-infrastructure alternative: **UPnP IGD** (Internet
-Gateway Device protocol). Most consumer home routers implement it, and it
-lets a device on the LAN ask the router directly — no logging into the
-router's admin panel, no DDNS, no VPS — to report its current external IP
-and forward a port to itself. libp2p ships an official `upnp` behaviour
-that automates this against the swarm's own listen addresses.
-
-When a mapping succeeds, `get_node_address()` (the address embedded in the
-QR code, the manual-add code, and "Adresimi kopyala") now prefers that
-UPnP-confirmed external address over the private LAN address it used
-before — a private LAN address is useless once shared with someone on a
-different network, so this is the one change that actually lets it work.
-
-**Honest limits:** not universal. Some routers ship with UPnP disabled by
-default (a reasonable security posture), some ISPs block it, and it cannot
-work at all behind CGNAT (carrier-grade NAT — common on mobile data and
-some ISPs), because there's no single home-router boundary to ask; the NAT
-happens further upstream, entirely outside the user's control. This is the
-same fundamental case where DCUtR hole-punching and consumer VPN tools
-(Tailscale, WireGuard) fall back to relaying. The saving grace: a pairing
-only needs **one** side's mapping to succeed for a direct connection to
-work — it only fails outright when both parties are simultaneously
-UPnP-incapable. When that happens, the relay/DCUtR path above (still
-present, unchanged) and the manual relay-address field remain the
-fallback. Silent and safe either way: if UPnP mapping fails, nothing about
-today's behavior changes.
+An earlier round added automatic UPnP port mapping. It was **removed** (M-201): mDNS and UPnP are off in the swarm, so the router is never asked to open a port and no LAN or mapped external address is advertised. Cross-network reachability is Tor onion services only (next section); outgoing plain TCP is refused (`DialReject`).
 
 ### Self-healing reconnection (fourth audit round fix)
 
@@ -438,18 +410,18 @@ Now the app is self-healing:
   the next sweep, so the common case feels immediate.
 
 Structural limitation (unchanged, and honestly noted): if a peer's address
-changes completely (new public IP, no UPnP mapping, no shared relay), direct
+changes completely (new public IP, no shared relay), direct
 reconnection still can't find them until the address is refreshed some other
-way (mDNS on a shared LAN, a new QR, or relay discovery) — this is inherent
+way (a new QR or relay discovery) — this is inherent
 to P2P without a central rendezvous server. The sweep keeps trying, so
 recovery is automatic the moment any working path reappears.
 
 ### Tor onion services — reachability across CGNAT (fifth round, v1: reachability only)
 
-The relay/UPnP work above still fails for the hardest case: **both peers
+The relay work above still fails for the hardest case: **both peers
 behind carrier-grade NAT (CGNAT)** — common on mobile data and, increasingly,
 home ISPs. When the ISP itself NATs you (WAN IP in `100.64.0.0/10`), no port
-forwarding, DMZ, UPnP, or static IP can make you reachable, because your
+forwarding, DMZ, or static IP can make you reachable, because your
 whole router is behind the carrier's NAT. This isn't fixable at the app or
 router level.
 
@@ -510,7 +482,8 @@ substantially different transport/anonymity layer (e.g. onion routing over
 Tor/I2P, see above), which is a separate, much larger undertaking than
 hardening the existing protocol:
 
-- **mDNS PeerId is persistent on the local network.** A device's libp2p
+- **PeerId is persistent** (mDNS, which broadcast it on the LAN, is
+  removed; the point below now applies to peers that connect). A device's libp2p
   `PeerId` stays the same across restarts (this is itself a deliberate,
   previously-fixed tradeoff — an earlier bug caused a *new random* PeerId
   every launch, which broke reconnection entirely). The tradeoff: something
@@ -553,7 +526,7 @@ certificate.
 **What it cannot see.**
 
 - *Message content.* Envelopes arrive already end-to-end encrypted, and are
-  then sealed a **second** time under `HKDF(root_key, "…server-seal")` before
+  then sealed a **second** time under `HKDF(root_key, "…server-seal")` (the key comes from the ratchet root; the mailbox id does not, see below) before
   being deposited. Without that second layer the server's database would hold
   `MessagePacketHeader.sender_device_fingerprint` in cleartext — that field is
   openly readable, which is acceptable on a pseudonymous gossipsub topic but
@@ -578,12 +551,10 @@ certificate.
 **What it can see, and can do.** The honest accounting:
 
 - Sizes, timing and volume of everything that passes through.
-- Which `PeerId` registers and polls which mailbox ids. A ratchet mailbox is
-  shared by exactly two devices, so those registrations **join into a pairwise
+- Which `PeerId` registers and polls which mailbox ids. A session mailbox is
+  shared by exactly two devices (its id is a HKDF of a static X25519 DH of both devices' long-term KEM keys plus the sorted fingerprints, so it is **stable** across ratchet rotations and the server cannot compute it), so those registrations **join into a pairwise
   social graph of its own enrolled users**. Connecting over the server's
-  `.onion` hides network location; it does not hide this linkage, and the
-  30-minute mailbox rotation does not help either, because the same device
-  registers both the old and the new id. Hiding it properly needs anonymous
+  `.onion` hides network location; it does not hide this linkage, and, since the id no longer rotates, the pair stays linkable for as long as both devices are enrolled. Hiding it properly needs anonymous
   per-mailbox credentials and a separate circuit per mailbox. That is not
   implemented, and this document does not pretend otherwise.
 - **Who made first contact with whom, by device fingerprint.** `Handshake` and
@@ -722,7 +693,7 @@ anything, so the honest reading is "we asked", not "it is gone".
   guess — so if that file ever leaked, a user-chosen passphrase could be
   brute-forced offline at enormous speed, undoing all the post-quantum work
   for the one artifact holding the raw keys. It now uses **Argon2id**
-  (memory-hard, OWASP baseline parameters: 19 MiB / 2 iterations / 1 lane),
+  (memory-hard, OWASP baseline parameters: 64 MiB / 2 iterations / 1 lane),
   with the algorithm and parameters stored in the file so a future import
   path can reproduce the key. (Import isn't wired up yet — export is
   currently the only recovery path.)
@@ -738,16 +709,16 @@ anything, so the honest reading is "we asked", not "it is gone".
 | Device revocation flag existed but was never enforced | **Fixed** — real revocation + enforcement added |
 | IdentityExchange skipped the TOFU decision tree | **Fixed** — now runs `evaluate_sender_device` |
 | Category 3 PQ parameters (ML-KEM-768/ML-DSA-65) | **Upgraded** to Category 5 (ML-KEM-1024/ML-DSA-87) |
-| Gossipsub topic-per-fingerprint metadata leakage | **Fixed** — topic now derived from ratchet `root_key`, rotates every 30 min; first-contact pairing still uses fingerprint (unavoidable bootstrap) |
+| Gossipsub topic-per-fingerprint metadata leakage | **Fixed** — topic now derived from ratchet `root_key`, rotates every 30 min (the server mailbox id is separate and stable per device pair, see §5); first-contact pairing still uses fingerprint (unavoidable bootstrap) |
 | `zeroize` dependency unused (in-memory key erasure) | **Fixed** — upstream crate features + explicit zeroize-on-drop for ratchet/session/message keys and the JNI secret-key bundle |
 | No cross-network (NAT) connectivity — spec called for it, never implemented | **Fixed** — Circuit Relay v2 (open, Node-mode devices) + DCUtR hole-punching + organic/QR/manual relay discovery |
-| Cross-network pairing required someone to operate a relay/VPS | **Fixed** — automatic, serverless UPnP port mapping preferred in `get_node_address()` when available; falls back to relay/manual address otherwise |
+| Cross-network pairing required someone to operate a relay/VPS | **Superseded** — UPnP was tried and removed (M-201); reachability is Tor onion services only |
 | Message header `sender_identity_id` was never bound to the authenticated device — a paired contact could spoof another identity's group messages / overwrite another contact's avatar | **Fixed** — `receive_message`/`process_handshake_init` now reject any packet whose header identity doesn't match the device's TOFU-recorded identity |
 | Handshake had no replay protection; a replayed `HandshakeInit` could reset a live ratchet (conversation-DoS) | **Fixed** — freshness window (±10 min) + content-based dedup of exact replays; genuine re-pairing (fresh keys) still accepted regardless of clock skew |
 | `allowBackup=true` exposed private data to cloud/adb backup | **Fixed** — backup fully disabled |
 | Recovery file protected only by fast HKDF | **Fixed** — Argon2id (memory-hard) |
 | No reconnection after a drop (network-type change / app restart / peer briefly offline) — only mDNS (same-LAN) recovered; `ConnectionClosed`/dial errors were only logged | **Fixed** — persistent per-device address hints + a self-healing reconnect sweep (≤15 s) + immediate reconnect on chat-open/send; see §5 |
-| mDNS persistent PeerId on LAN | Known limitation, deliberately not changed (would reintroduce a previously-fixed reconnection bug) |
+| mDNS persistent PeerId on LAN | Superseded — mDNS removed (M-201); PeerId stays persistent by design |
 | Kademlia DHT participation reveals IP to other DHT peers | Known limitation, structural to any DHT-based P2P design; relaying mitigates it for message traffic but not DHT participation itself |
 | Zero-config guarantee that any two strangers can always connect | Not fully achievable without *some* reachable point in the network (structural to decentralized P2P, not fixable by protocol changes alone) — mitigated, not eliminated, by the manual relay-address field |
 | No connectivity when both peers are behind CGNAT | **Fixed (v1)** — Tor onion-service hosting + `.onion` dialing (arti/rustls), reachable across CGNAT; both peers must enable Tor. IP still visible via `identify` (anonymity is a scoped v2) |
@@ -766,3 +737,6 @@ anything, so the honest reading is "we asked", not "it is gone".
 - **Protocol breaks** (server protocol v3, tagged/framed packet and device-auth signatures, keyed archive record ids): all devices must be re-linked and contacts re-paired. Details in `TECHNICAL_HANDOFF.md` section 19.
 - **Server rate limits:** mail from the server 600/10 s, unknown peers 300/10 s total, global Enroll/Rebind verify budget, `ArchivePut` <= 256 records.
 - **Open by decision:** server `sent_at_ms` stays in clear.
+- **Server metadata is unencrypted at rest.** The server's SQLite database (enrollments, mailbox ids, depositor/reader `PeerId`s, sizes, timestamps) is not encrypted; only envelope bodies are sealed. Protect the phone/disk itself (full-disk encryption, device lock).
+- **2nd round protocol breaks (2026-10-21):** stable session mailbox id, `ServerErrorCode::BadHash`, `FileChunkResponse::Busy`, length-prefixed pairing nonce proof, mandatory `signature_pq` on `DeviceAdd`/`DeviceRevoke`. Bump the version; every device must update.
+- **Unopenable server mail is not acked:** the mailbox cursor stays before it for 5 minutes, then it is passed over (details in `TECHNICAL_HANDOFF.md` section 13.4).

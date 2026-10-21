@@ -96,7 +96,21 @@ fn activate(application: &adw::Application) {
     // Keyring. With neither available there is no safe place to put that key,
     // so Typeon says so and stops rather than quietly degrading to a file
     // anyone running as this user could read.
-    let backend = match keyring::ensure_available() {
+    // H134: the probe can block for many seconds on a locked wallet, so it
+    // runs off the GTK thread; `hold` keeps the app alive until the window
+    // exists, and STARTING stops a second `activate` building a second stack.
+    static STARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let hold = application.hold();
+    let application_owned = application.clone();
+    app::run_in_background(keyring::ensure_available, move |probe| {
+    // Only the probe is guarded: a later activate (window closed) builds again.
+    STARTING.store(false, std::sync::atomic::Ordering::Release);
+    let _hold = hold;
+    let application = &application_owned;
+    let backend = match probe {
         Ok(backend) => backend,
         Err(reason) => {
             eprintln!("typeon: {} — {}", reason.heading(), reason.detail());
@@ -193,6 +207,7 @@ fn activate(application: &adw::Application) {
     // Decides between first-run linking, resuming an unfinished pairing, and
     // going straight to the main window.
     ui::onboarding::start(&app, &toasts);
+    });
 }
 
 /// `$XDG_DATA_HOME/typeon`. The core is handed this directory and puts its

@@ -96,6 +96,8 @@ pub enum FileChunkResponse {
     /// `file_id` bilinmiyor (hiç sunulmuyor/tamamlanmamış) veya
     /// `chunk_index` aralık dışı.
     NotFound,
+    /// Rate limited: retry later from the same source.
+    Busy,
 }
 
 /// `total_size` baytlık bir dosyanın kaç `FILE_CHUNK_SIZE`'lık parçaya
@@ -407,6 +409,7 @@ pub fn encrypt_file_to_disk_with(
             break;
         }
     }
+    dest.sync_data().map_err(|e| e.to_string())?;
     Ok((total, hex::encode(hasher.finalize())))
 }
 

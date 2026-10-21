@@ -283,9 +283,19 @@ fn status_indicator(app: &Rc<App>) -> gtk::Box {
     };
     // Off the GTK thread: the core lock is shared with the poll thread.
     let paint = Rc::new(paint);
+    // H130: one query in flight at a time — a poll round holding the core lock
+    // for seconds no longer stacks a waiting thread every 2 s.
+    let in_flight = Rc::new(std::cell::Cell::new(false));
     let refresh = move || {
+        if in_flight.replace(true) {
+            return;
+        }
         let paint = paint.clone();
-        crate::app::run_in_background(core::own_status, move |status| paint(status));
+        let in_flight = in_flight.clone();
+        crate::app::run_in_background(core::own_status, move |status| {
+            in_flight.set(false);
+            paint(status)
+        });
     };
 
     refresh();

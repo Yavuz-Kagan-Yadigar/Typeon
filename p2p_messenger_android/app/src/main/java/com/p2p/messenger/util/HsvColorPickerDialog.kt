@@ -208,7 +208,7 @@ object HsvColorPickerDialog {
             val c = currentColor()
             preview.setBackgroundColor(c)
             suppressHexWatcher = true
-            hexInput.setText(String.format("#%06X", 0xFFFFFF and c))
+            hexInput.setText(String.format(java.util.Locale.US, "#%06X", 0xFFFFFF and c))
             suppressHexWatcher = false
         }
         refreshPreview()

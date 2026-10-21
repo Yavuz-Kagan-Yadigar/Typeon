@@ -30,6 +30,26 @@ use crate::core;
 use crate::qr;
 use crate::secrets::{self, Vault};
 use crate::ui;
+use zeroize::Zeroize;
+
+/// A passphrase String that zeroizes itself when dropped — including on the
+/// `?` early returns of the restore/unlock flows, where a manual
+/// `passphrase.zeroize()` before every exit would be easy to forget.
+struct WipeOnDrop(String);
+
+impl std::ops::Deref for WipeOnDrop {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for WipeOnDrop {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 /// Entry point from `main`. Decides which of the three routes above applies and
 /// drives it to the main window.
@@ -371,14 +391,22 @@ fn ask_recovery_passphrase(
         let data_dir = app.data_dir.clone();
         app::run_in_background(
             move || -> Result<Vault, String> {
+                // Both passphrases wipe themselves whenever this closure ends
+                // — normal return, `?`, or `return` alike.
+                let passphrase = WipeOnDrop(passphrase);
+                let vault_passphrase = WipeOnDrop(vault_passphrase);
                 // Same 64 MB cap as the Android client.
                 match std::fs::metadata(&path) {
                     Ok(meta) if meta.len() <= 64 * 1024 * 1024 => {}
                     Ok(_) => return Err("that file is too large to be a recovery file".to_string()),
                     Err(_) => return Err("could not read that file".to_string()),
                 }
-                let bytes = std::fs::read(&path).map_err(|_| "could not read that file".to_string())?;
-                core::import_recovery(&bytes, &passphrase, &name)?;
+                let mut bytes = std::fs::read(&path).map_err(|_| "could not read that file".to_string())?;
+                let import = core::import_recovery(&bytes, &passphrase, &name);
+                // The recovery file's plaintext leaves the heap as soon as it
+                // has been handed to the core, success or not.
+                bytes.zeroize();
+                import?;
                 let bundle = core::take_pending_secret_bundle();
                 if bundle.is_empty() {
                     return Err("Restore produced no keys.".to_string());
@@ -414,10 +442,16 @@ fn ask_recovery_passphrase(
 
 fn unlock(app: &Rc<App>, host: &adw::ToastOverlay, on_open: impl FnOnce(Vault) + 'static) {
     if !secrets::is_passphrase_protected(&app.data_dir) {
-        match secrets::load(&app.data_dir, "") {
-            Ok(vault) => on_open(vault),
-            Err(error) => fatal(app, host, "Could not read the vault", &error),
-        }
+        // H133: wallet round-trip, off the GTK thread.
+        let data_dir = app.data_dir.clone();
+        let (app, host) = (app.clone(), host.clone());
+        app::run_in_background(
+            move || secrets::load(&data_dir, ""),
+            move |result| match result {
+                Ok(vault) => on_open(vault),
+                Err(error) => fatal(&app, &host, "Could not read the vault", &error),
+            },
+        );
         return;
     }
     prompt_passphrase(app, on_open);
@@ -445,29 +479,39 @@ fn prompt_passphrase(app: &Rc<App>, on_open: impl FnOnce(Vault) + 'static) {
     // `connect_response` takes an `Fn`, but the continuation is `FnOnce`, and a
     // wrong passphrase has to leave the dialog up for another try. The RefCell
     // lets us move the continuation out on the one response that consumes it.
-    let on_open = std::cell::RefCell::new(Some(on_open));
+    let on_open = std::rc::Rc::new(std::cell::RefCell::new(Some(on_open)));
     let app = app.clone();
     dialog.connect_response(None, move |dialog, response| {
         if response != "unlock" {
             app.application.quit();
             return;
         }
-        let passphrase = entry.text().to_string();
-        match secrets::load(&app.data_dir, &passphrase) {
-            Ok(vault) => {
-                dialog.set_visible(false);
-                let continuation = on_open.borrow_mut().take();
-                if let Some(continuation) = continuation {
-                    continuation(vault);
+        // H133: Argon2id (64 MiB x 3) + the wallet round-trip froze the GTK
+        // thread for up to seconds, so the check runs on a worker.
+        let passphrase = WipeOnDrop(entry.text().to_string());
+        let data_dir = app.data_dir.clone();
+        dialog.set_sensitive(false);
+        let (dialog, entry, app, on_open) =
+            (dialog.clone(), entry.clone(), app.clone(), on_open.clone());
+        app::run_in_background(
+            move || secrets::load(&data_dir, &passphrase),
+            move |result| match result {
+                Ok(vault) => {
+                    dialog.set_visible(false);
+                    let continuation = on_open.borrow_mut().take();
+                    if let Some(continuation) = continuation {
+                        continuation(vault);
+                    }
                 }
-            }
-            Err(error) => {
-                // Keep the dialog up so a typo costs one keystroke, not a
-                // relaunch.
-                app.toast(&error);
-                entry.set_text("");
-            }
-        }
+                Err(error) => {
+                    // Keep the dialog up so a typo costs one keystroke, not a
+                    // relaunch.
+                    dialog.set_sensitive(true);
+                    app.toast(&error);
+                    entry.set_text("");
+                }
+            },
+        );
     });
     dialog.present();
 }
@@ -663,12 +707,17 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
                 return glib::ControlFlow::Continue;
             }
             let (app, host, in_flight) = (app.clone(), host.clone(), in_flight.clone());
-            app::run_in_background(core::is_secondary_device, move |secondary| {
+            app::run_in_background(
+                || {
+                    let secondary = core::is_secondary_device();
+                    (secondary, if secondary { core::own_identity_id().ok() } else { None })
+                },
+                move |(secondary, identity_id)| {
                 in_flight.set(false);
                 if !secondary {
                     return;
                 }
-                if let Ok(identity_id) = core::own_identity_id() {
+                if let Some(identity_id) = identity_id {
                     *app.own_identity_id.borrow_mut() = identity_id;
                 }
                 {
@@ -679,7 +728,8 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
                 app.refresh_caches();
                 app.toast("This computer is now linked to your account.");
                 ui::window::build_main(&app, &host);
-            });
+                },
+            );
             glib::ControlFlow::Continue
         });
     }

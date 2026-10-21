@@ -54,7 +54,7 @@ import java.util.concurrent.Executors
 /**
  * The one call screen: outgoing ring, incoming ring, in call — 1:1 and group,
  * voice and video. All call state lives in Rust (`call.rs`); this screen polls
- * `P2PLib.callState()` twice a second and renders it, so there is no second
+ * `P2PLib.callState()` (twice a second in a call, plus `call_state` events) and renders it, so there is no second
  * state machine here to drift out of sync.
  */
 class CallActivity : AppCompatActivity() {
@@ -167,7 +167,15 @@ class CallActivity : AppCompatActivity() {
     private val analysisExecutor = Executors.newSingleThreadExecutor()
     /** slot -> tile */
     private val tiles = HashMap<Int, Tile>()
-    private val keepPollFast: (String) -> Unit = {}
+    /** H140: phase/participant changes arrive as `call_state` events (same
+     *  JSON as `callState()`); the poll below only keeps the timer and media
+     *  stats moving. */
+    private val keepPollFast: (String) -> Unit = { msg ->
+        if (msg.contains("call_state")) {
+            val json = try { JSONObject(msg) } catch (e: Exception) { null }
+            if (json != null && json.optString("type") == "call_state") ui.post { if (!isDestroyed && !isFinishing) render(json) }
+        }
+    }
 
     private class Tile(val root: FrameLayout, val label: TextView, var texture: TextureView?) {
         var mutedShown = false
@@ -362,7 +370,9 @@ class CallActivity : AppCompatActivity() {
                 if (json != null && !isFinishing) render(json)
                 // After the answer, not on a fixed clock: with the core lock
                 // busy the queries piled up behind each other.
-                ui.postDelayed(::poll, 500)
+                // Timer/media stats need 2 Hz in a call; otherwise the
+                // `call_state` event drives the screen, this is a fallback.
+                ui.postDelayed(::poll, if (state == "active") 500 else 5000)
             }
         }
     }

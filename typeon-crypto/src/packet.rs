@@ -95,6 +95,8 @@ pub fn pairing_nonce_proof(nonce: &[u8], sender_device_fingerprint: &str) -> Vec
     use sha3::Digest;
     sha3::Sha3_256::new()
         .chain_update(b"typeon-pairing-nonce")
+        // Length-prefixed: the nonce/fingerprint boundary cannot shift.
+        .chain_update((nonce.len() as u32).to_be_bytes())
         .chain_update(nonce)
         .chain_update(sender_device_fingerprint.as_bytes())
         .finalize()
@@ -128,9 +130,8 @@ pub struct DeviceAdd {
     #[serde(with = "serde_bytes")]
     pub signature: Vec<u8>,
     /// ML-DSA (post-kuantum) imza — MessagePacket/GroupUpdate ile AYNI hibrit
-    /// model (bkz. `verify_hybrid_signature`). `#[serde(default)]`: bu alan
-    /// olmadan üretilmiş olası eski/boş paketlerle uyum için.
-    #[serde(default)]
+    /// model (bkz. `verify_hybrid_signature`). Mandatory: the field must be
+    /// on the wire, and the verifier rejects an empty one.
     #[serde(with = "serde_bytes")]
     pub signature_pq: Vec<u8>,
     /// Hybrid signature of the ADDED device over the same bytes plus a tag
@@ -153,7 +154,7 @@ pub struct DeviceRevoke {
     /// || revoked_by` üzerinde klasik imza.
     #[serde(with = "serde_bytes")]
     pub signature: Vec<u8>,
-    #[serde(default)]
+    /// Mandatory, as in `DeviceAdd`.
     #[serde(with = "serde_bytes")]
     pub signature_pq: Vec<u8>,
 }
@@ -209,7 +210,7 @@ pub struct DeviceAddProof {
 /// kefil olunan cihaz kaydı (bkz. `GroupUpdate.member_devices`). Alıcı,
 /// `device_fingerprint`'in bu anahtarların SHA3-256'sı olduğunu ayrıca
 /// doğrular (kendi içinde tutarlı olmayan kayıtlar reddedilir).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GroupMemberDevice {
     pub identity_id: String,
     pub device_fingerprint: String,
@@ -435,7 +436,7 @@ impl DeviceLinkRequest {
 /// public anahtarları — alıcı bunları kendi `known_remote_devices`'ına
 /// yazar, böylece ilk senkrondan hemen sonra o kişiyle ratchet kurup
 /// mesajlaşabilir (kişiyi ayrıca QR ile eşleştirmesine gerek kalmaz).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SyncedDevice {
     pub device_fingerprint: String,
     pub device_name: String,
@@ -456,6 +457,30 @@ pub struct SyncedDevice {
     /// reaches, and is reached by, the devices its siblings paired with.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mailbox_secrets: Vec<String>,
+}
+
+// Hand-written Debug for the two device records: they carry mailbox
+// capabilities (`first_contact_secret`, `mailbox_secrets`), and every type
+// that holds them (`GroupUpdate`, `DeviceAddProof`, `SyncedContact`) derives
+// Debug through these. Name and fingerprint only.
+impl std::fmt::Debug for GroupMemberDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GroupMemberDevice")
+            .field("identity_id", &self.identity_id)
+            .field("device_fingerprint", &self.device_fingerprint)
+            .field("device_name", &self.device_name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for SyncedDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncedDevice")
+            .field("device_fingerprint", &self.device_fingerprint)
+            .field("device_name", &self.device_name)
+            .field("is_active", &self.is_active)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Bir kişinin, cihazlar arası senkron için serileştirilmiş biçimi

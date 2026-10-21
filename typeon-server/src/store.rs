@@ -96,6 +96,9 @@ const MAX_READERS_PER_MAILBOX: i64 = 2;
 /// `record_id` let a 2-byte record cost 2 bytes against a ~150-byte row.
 const ARCHIVE_ROW_OVERHEAD: usize = 128;
 
+/// Bump on every change to `init_schema`, or existing DBs skip it.
+const SCHEMA_VERSION: i64 = 2;
+
 /// Bytes an archive record is charged: quota and the server-wide budget.
 pub fn archive_row_bytes(rec: &ArchiveRecord) -> usize {
     rec.sealed.len() + rec.record_id.len() + ARCHIVE_ROW_OVERHEAD
@@ -115,7 +118,13 @@ impl Store {
         }
         // WAL: sunucu tek süreç ama okuma/yazma iç içe geçiyor; ayrıca ani
         // güç kesintisinde rollback journal'a göre çok daha dayanıklı.
-        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        // A volume without WAL support (some SD/exFAT mounts) silently stays
+        // in rollback mode, where the JNI/CLI connection blocks the server.
+        match conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0)) {
+            Ok(mode) if mode.eq_ignore_ascii_case("wal") => {}
+            Ok(mode) => log::warn!("SQLite WAL açılamadı, journal_mode={mode}: ikinci bağlantı yazarken sunucu bekler"),
+            Err(e) => log::warn!("SQLite WAL açılamadı: {e}"),
+        }
         // FULL: a `Deposited` answer lets the sender drop its copy, so the
         // mail row must be on disk before it, not only in the WAL.
         let _ = conn.pragma_update(None, "synchronous", "FULL");
@@ -142,7 +151,14 @@ impl Store {
 
     /// Şema. Çekirdeğin `init_db`'siyle aynı sözleşme: `CREATE TABLE IF NOT
     /// EXISTS` + ileride eklenecek kolonlar için hatası yutulan `ALTER TABLE`.
+    ///
+    /// Runs once per `SCHEMA_VERSION`: every CLI/JNI open re-ran the batch,
+    /// writes included, against the DB the daemon serves.
     fn init_schema(&self) -> Result<(), String> {
+        let version: i64 = self.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap_or(0);
+        if version == SCHEMA_VERSION {
+            return Ok(());
+        }
         self.conn
             .execute_batch(
                 r#"
@@ -267,6 +283,8 @@ impl Store {
                     last_served_at  INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_blob_gc ON blobs(complete, last_served_at);
+                -- `blob_count` and `recount_blob_bytes` per owner.
+                CREATE INDEX IF NOT EXISTS idx_blob_owner ON blobs(owner, byte_len);
                 -- Defter #06: parça adımı DOSYA BAŞINA ve istemciden geliyor
                 -- (`BlobPut.chunk_size`). Yazarken kullanılıp okurken
                 -- unutulursa blob yanlış ofsetlerden servis edilir, o yüzden
@@ -305,6 +323,9 @@ impl Store {
         // `deposit` finds a repeated item through this index alone.
         self.conn
             .execute_batch("CREATE INDEX IF NOT EXISTS idx_mail_hash ON mail(mailbox_id, depositor, sealed_hash)")
+            .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
+        self.conn
+            .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
         Ok(())
     }
@@ -586,6 +607,9 @@ impl Store {
     /// Revoke is a block: the enroll key goes on the block list, and the row
     /// stays, so `handle_enroll` finds the blocked key for this PeerId too.
     pub fn revoke_enrollment(&self, enrollment_id: &[u8]) -> Result<(), String> {
+        // One transaction: a blocked key with the row still 'active' left the
+        // device fully served.
+        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO blocked_keys (enroll_pk, blocked_at)
@@ -596,7 +620,8 @@ impl Store {
         self.conn
             .execute("UPDATE enrollments SET state = 'revoked' WHERE enrollment_id = ?1", params![enrollment_id])
             .map_err(|e| e.to_string())
-            .and_then(|n| if n == 0 { Err("Kayıt bulunamadı".to_string()) } else { Ok(()) })
+            .and_then(|n| if n == 0 { Err("Kayıt bulunamadı".to_string()) } else { Ok(()) })?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
     pub fn list_enrollments(&self) -> Vec<Enrollment> {
@@ -651,11 +676,13 @@ impl Store {
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let mut refused = Vec::new();
         let mut unproven = Vec::new();
+        // Counted once, then kept up to date below: a query per id was a
+        // scan of the owner's rows per id.
+        let mut count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM mailbox_readers WHERE owner = ?1", params![owner], |r| r.get(0))
+            .unwrap_or(0);
         for id in add {
-            let count: i64 = self
-                .conn
-                .query_row("SELECT COUNT(*) FROM mailbox_readers WHERE owner = ?1", params![owner], |r| r.get(0))
-                .unwrap_or(0);
             // Zaten kayıtlıysa sayaç kontrolünü atla — idempotent olmalı.
             //
             // Bu denetimde bulundu: sorgu `owner`'ı FİLTRELEMİYORDU, oysa
@@ -725,6 +752,9 @@ impl Store {
                     params![id, owner, now],
                 )
                 .map_err(|e| e.to_string())?;
+            if !exists {
+                count += 1;
+            }
         }
         for id in drop {
             // SADECE sahibi kaldırabilir. Not a reader: nothing changed, and
@@ -762,6 +792,7 @@ impl Store {
     /// okuyucu kutuyu doldurup yeni teslimleri kilitlerdi.
     /// ponytail: bu satırlar bayt kotasına (`recount_mail_bytes`) hâlâ sayılır;
     /// kötü niyetli okuyucular diski TTL boyunca yalnızca kota kadar tutabilir.
+    #[cfg(test)]
     pub fn mailbox_item_count(&self, mailbox_id: &str) -> i64 {
         self.conn
             .query_row(
@@ -773,6 +804,23 @@ impl Store {
                 |r| r.get(0),
             )
             .unwrap_or(0)
+    }
+
+    /// As `mailbox_item_count`, for one depositor's rows only. The capacity
+    /// is per depositor: one sender (that cannot read the box) filling it
+    /// stops nobody else's mail. Walks `idx_mail_hash` (mailbox, depositor),
+    /// not the whole box.
+    pub fn depositor_item_count(&self, mailbox_id: &str, depositor: &[u8]) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM mail m WHERE m.mailbox_id = ?1 AND m.depositor = ?2
+                   AND NOT EXISTS (SELECT 1 FROM mail_acks a
+                                   WHERE a.mailbox_id = m.mailbox_id AND a.owner != m.depositor
+                                     AND a.through_seq >= m.seq)",
+                params![mailbox_id, depositor],
+                |r| r.get(0),
+            )
+            .unwrap_or(i64::MAX)
     }
 
     /// Aynı kutuda, aynı bırakanın AYNI baytları zaten duruyorsa yeni satır
@@ -949,7 +997,8 @@ impl Store {
                                  AND a.through_seq >= mail.seq)
                    AND NOT EXISTS (SELECT 1 FROM mailbox_readers r
                                    WHERE r.mailbox_id = mail.mailbox_id AND r.owner != mail.depositor
-                                     AND r.owner IN (SELECT enrollment_id FROM enrollments WHERE state = 'active')
+                                     AND EXISTS (SELECT 1 FROM enrollments e
+                                                 WHERE e.enrollment_id = r.owner AND e.state = 'active')
                                      AND COALESCE((SELECT a.through_seq FROM mail_acks a
                                                    WHERE a.mailbox_id = r.mailbox_id AND a.owner = r.owner), 0) < mail.seq)",
                 params![mailbox_id],
@@ -1331,7 +1380,8 @@ impl Store {
         let mut stmt = match self.conn.prepare(
             "SELECT blob_id FROM blobs
              WHERE (complete = 1 AND last_served_at + ?1 <= ?2)
-                OR (complete = 0 AND last_served_at + 86400000 <= ?2)",
+                OR (complete = 0 AND last_served_at + 86400000 <= ?2)
+             LIMIT 512",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -1354,9 +1404,25 @@ impl Store {
         let _ = self.conn.execute("DELETE FROM blob_chunks WHERE blob_id = ?1", params![blob_id]);
     }
 
+    /// Blob rows (= files on disk) `owner` holds.
+    pub fn blob_count(&self, owner: &[u8]) -> i64 {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM blobs WHERE owner = ?1", params![owner], |r| r.get(0))
+            .unwrap_or(i64::MAX)
+    }
+
     // -----------------------------------------------------------------
     // Kota
     // -----------------------------------------------------------------
+
+    /// Blob charge = what the rows record. Undoes a charge whose chunk row
+    /// failed to write (see `handle_blob_put`).
+    pub fn recount_blob_bytes(&self) {
+        let _ = self.conn.execute_batch(
+            "UPDATE enrollments SET bytes_blob =
+                COALESCE((SELECT SUM(byte_len) FROM blobs WHERE blobs.owner = enrollments.enrollment_id), 0);",
+        );
+    }
 
     pub fn add_blob_bytes(&self, owner: &[u8], delta: i64) {
         let _ = self.conn.execute(
@@ -1688,6 +1754,19 @@ mod tests {
         let (mine, _) = s.fetch(&victim, &[("mb_1".into(), 0)], 10, 4096);
         assert_eq!(mine.len(), 1, "gercek alici hala okuyabilmeli");
         assert_eq!(s.ack("mb_1", seq, &victim).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_full_box_is_counted_per_depositor() {
+        let s = Store::open_in_memory().unwrap();
+        let spam = enroll(&s, b"spam", "peerX");
+        let real = enroll(&s, b"real", "peerR");
+        let reader = enroll(&s, b"read", "peerD");
+        register(&s, &reader, "mb_1");
+        s.deposit("mb_1", b"a", &spam, 1, 1000).unwrap();
+        s.deposit("mb_1", b"b", &spam, 1, 1000).unwrap();
+        assert_eq!(s.depositor_item_count("mb_1", &spam), 2);
+        assert_eq!(s.depositor_item_count("mb_1", &real), 0, "spam does not count against another sender");
     }
 
     /// İlk-temas kutusunun kimliği parmak izinden türüyor, yani kayıtlı

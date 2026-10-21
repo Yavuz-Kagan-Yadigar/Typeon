@@ -42,9 +42,9 @@ class P2PApplication : Application() {
         java.io.File(cacheDir, "voice").deleteRecursively()
         java.io.File(cacheDir, "outgoing").deleteRecursively()
         java.io.File(filesDir, "attachments/plain_cache").listFiles()?.forEach { it.deleteRecursively() }
-        registerReceiver(object : android.content.BroadcastReceiver() {
+        androidx.core.content.ContextCompat.registerReceiver(this, object : android.content.BroadcastReceiver() {
             override fun onReceive(c: android.content.Context?, i: Intent?) = AppLock.lockNow(c)
-        }, android.content.IntentFilter(Intent.ACTION_SCREEN_OFF))
+        }, android.content.IntentFilter(Intent.ACTION_SCREEN_OFF), androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
 
         // Spec dışı, kullanıcı isteği ("break material, doesn't matter,
         // force font on all UI"): Android'in kendi varsayılan Typeface

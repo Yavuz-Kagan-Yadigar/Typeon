@@ -92,6 +92,10 @@ pub struct App {
 
     listeners: RefCell<Vec<(u64, Listener)>>,
     next_listener_id: Cell<u64>,
+    /// One `core_panic` banner per process: the core reports a caught panic
+    /// with a fresh event every time one happens, which would otherwise stack
+    /// notifications for a single dead core (H132).
+    core_panic_reported: Cell<bool>,
 
     /// The conversation currently on screen (peer fingerprint, or
     /// `"group:<id>"`). Notifications are suppressed for it, exactly as
@@ -128,6 +132,7 @@ impl App {
             own_identity_id: RefCell::new(String::new()),
             listeners: RefCell::new(Vec::new()),
             next_listener_id: Cell::new(1),
+            core_panic_reported: Cell::new(false),
             active_conversation: RefCell::new(None),
             window: RefCell::new(None),
             toasts: RefCell::new(None),
@@ -235,6 +240,24 @@ impl App {
         // logged only, nothing restarts on it.
         if kind == "core_panic" {
             log::error!("core caught a panic (see the core log)");
+            // H132/M146: on Android the service restarts a dead core; here the
+            // window just kept looking alive while sends, receives and
+            // downloads were silently dead until a manual restart. Say so —
+            // once per process, prominently.
+            if !self.core_panic_reported.replace(true) {
+                let notification = gio::Notification::new("Typeon");
+                notification.set_body(Some(
+                    "The messaging core hit an internal error and stopped working. \
+                     Please restart Typeon.",
+                ));
+                notification.set_priority(gio::NotificationPriority::Urgent);
+                self.application
+                    .send_notification(Some("core-panic"), &notification);
+                self.toast(
+                    "The messaging core hit an internal error and stopped working. \
+                     Please restart Typeon.",
+                );
+            }
             return;
         }
         let event = Event { kind, value };
@@ -441,16 +464,26 @@ impl App {
     /// re-learned on every launch — and a restart before the next sync would
     /// leave the server-side archive unreadable on this machine.
     fn persist_archive_key_if_new(self: &Rc<Self>) {
-        // Also when the key changed: the primary device replaces it when it
-        // revokes a device.
-        if let Some(ark) = core::archive_root_key() {
-            if crate::secrets::load_archive_key(&self.data_dir).as_ref() == Some(&ark) {
-                return;
-            }
-            if let Err(e) = crate::secrets::store_archive_key(&self.data_dir, &ark) {
-                eprintln!("could not store the archive root key: {e}");
-            }
-        }
+        // H125: this runs inside the event dispatcher, so `core::archive_root_key()`
+        // used to take the shared core lock on the GTK thread on every affected
+        // event — a poll round holding the lock stalled the whole UI. The key
+        // comparison and the file write are just as safe off-thread.
+        let data_dir = self.data_dir.clone();
+        run_in_background(
+            || core::archive_root_key(),
+            move |ark| {
+                // Also when the key changed: the primary device replaces it
+                // when it revokes a device.
+                if let Some(ark) = ark {
+                    if crate::secrets::load_archive_key(&data_dir).as_ref() == Some(&ark) {
+                        return;
+                    }
+                    if let Err(e) = crate::secrets::store_archive_key(&data_dir, &ark) {
+                        eprintln!("could not store the archive root key: {e}");
+                    }
+                }
+            },
+        );
     }
 
     /// Sohbet açık olsa bile gösterilen bildirim — güvenlik uyarıları

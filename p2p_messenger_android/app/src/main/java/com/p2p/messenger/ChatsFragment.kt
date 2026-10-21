@@ -22,6 +22,7 @@ import com.p2p.messenger.util.PinnedChatsPrefs
 import com.p2p.messenger.util.ReadStatePrefs
 import com.p2p.messenger.util.hexToBytes
 import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Spec 3 minimum kapsamı: bilinen kişilerin + grupların TEK bir listesi,
@@ -496,6 +497,7 @@ class ChatsFragment : Fragment() {
     private fun buildChatItems(ctx: android.content.Context): List<ChatAdapter.ChatMessage> {
         val contacts = loadContacts(ctx)
         val groups = loadGroups()
+        val previews = try { JSONObject(P2PLib.chatListPreviews()) } catch (e: Exception) { null }
 
         val duplicateNames = com.p2p.messenger.util.ContactNames.duplicates(contacts.map { it.displayName })
         val contactItems = contacts.map { contact ->
@@ -504,7 +506,7 @@ class ChatsFragment : Fragment() {
             // değil, EK de olabilir — ikisinden hangisi daha yeniyse o
             // gösterilir (ekler `messages` tablosunda değil `files`
             // tablosunda tutulduğu için ayrı sorgulanır).
-            val lastMessage = if (fingerprint.isNotEmpty()) newestPreview(fingerprint) else null
+            val lastMessage = if (fingerprint.isNotEmpty()) previewOf(previews?.optJSONObject("contacts")?.optJSONObject(contact.identityId)) else null
             ChatAdapter.ChatMessage(
                 contactId = fingerprint,
                 displayName = com.p2p.messenger.util.ContactNames.label(contact.displayName, contact.identityId, duplicateNames),
@@ -526,7 +528,7 @@ class ChatsFragment : Fragment() {
             // "en güncel mesaj atılan en üstte" sıralanabilmesi için gerçek
             // bir zaman damgası gerektiğinden, hem de sabit "N üye" metninin
             // hiçbir zaman değişmeyen, bilgi vermeyen bir önizleme olmasından.
-            val lastMessage = newestGroupPreview(group.groupId)
+            val lastMessage = previewOf(previews?.optJSONObject("groups")?.optJSONObject(group.groupId))
             ChatAdapter.ChatMessage(
                 contactId = group.groupId,
                 displayName = group.name,
@@ -575,45 +577,28 @@ class ChatsFragment : Fragment() {
     private data class GroupRow(val groupId: String, val name: String, val memberCount: Int, val avatarHex: String?, val isFounder: Boolean)
     private data class LastMessagePreview(val text: String, val timestamp: Long)
 
-    /** Spec dışı, kullanıcı isteği: son metin mesajı ile son EK'ten hangisi
-     *  daha yeniyse onu döner — böylece sohbet listesinde ekler de
-     *  "son mesaj" olarak görünür (önceden sadece metin mesajları
-     *  gösteriliyordu, ek gönderilen bir sohbet boş görünüyordu). */
-    private fun newestPreview(peerDeviceFingerprint: String): LastMessagePreview? {
-        val msg = loadLastMessagePreview(peerDeviceFingerprint)
-        val att = loadLastAttachmentPreview(peerDeviceFingerprint)
+    /** H137: the newer of the last text row and the last attachment (one
+     *  `chatListPreviews` call for the whole list instead of two per chat). */
+    private fun previewOf(entry: JSONObject?): LastMessagePreview? {
+        if (entry == null) return null
+        val m = entry.optJSONObject("message")
+        val a = entry.optJSONObject("attachment")
+        val msg = m?.let {
+            // A deleted row shows the placeholder, as the bubble does.
+            LastMessagePreview(
+                if (it.optBoolean("is_deleted", false)) getString(R.string.msg_deleted) else it.optString("text", ""),
+                it.optLong("timestamp", 0L)
+            )
+        }
+        val att = a?.let {
+            LastMessagePreview(attachmentPreviewLabel(it.optString("mime_type", ""), it.optString("file_name", "")), it.optLong("created_at", 0L))
+        }
         return when {
             msg == null -> att
             att == null -> msg
             att.timestamp > msg.timestamp -> att
             else -> msg
         }
-    }
-
-    /** En yeni eki, türüne göre etiketlenmiş bir önizleme olarak döner
-     *  (bkz. `newestPreview`). */
-    private fun loadLastAttachmentPreview(peerDeviceFingerprint: String): LastMessagePreview? {
-        val json = try {
-            P2PLib.listAttachmentsBrief(peerDeviceFingerprint)
-        } catch (e: Exception) {
-            return null
-        }
-        val array = try {
-            JSONArray(json)
-        } catch (e: Exception) {
-            return null
-        }
-        var best: LastMessagePreview? = null
-        for (i in 0 until array.length()) {
-            val obj = array.getJSONObject(i)
-            val createdAt = obj.optLong("created_at", 0L)
-            if (best != null && createdAt <= best.timestamp) continue
-            best = LastMessagePreview(
-                text = attachmentPreviewLabel(obj.optString("mime_type", ""), obj.optString("file_name", "")),
-                timestamp = createdAt
-            )
-        }
-        return best
     }
 
     /** Ek türüne göre kısa etiket — bilinmeyen türlerde dosya adı. */
@@ -623,72 +608,6 @@ class ChatsFragment : Fragment() {
         mimeType.startsWith("audio/") -> getString(R.string.lbl_last_voice)
         fileName.isNotEmpty() -> "📎 $fileName"
         else -> getString(R.string.lbl_last_file)
-    }
-
-    /** bkz. `newestPreview` AYNI desen — grup için, metin mesajı ile ek
-     *  önizlemesinden hangisi daha yeniyse onu döner. */
-    private fun newestGroupPreview(groupId: String): LastMessagePreview? {
-        val msg = loadLastGroupMessagePreview(groupId)
-        val att = loadLastGroupAttachmentPreview(groupId)
-        return when {
-            msg == null -> att
-            att == null -> msg
-            att.timestamp > msg.timestamp -> att
-            else -> msg
-        }
-    }
-
-    private fun loadLastGroupMessagePreview(groupId: String): LastMessagePreview? {
-        val json = try {
-            P2PLib.getGroupMessageHistory(groupId, 1)
-        } catch (e: Exception) {
-            return null
-        }
-        val array = try {
-            JSONArray(json)
-        } catch (e: Exception) {
-            return null
-        }
-        if (array.length() == 0) return null
-        val obj = array.getJSONObject(0)
-        // Spec dışı, hata düzeltmesi ("sohbet listesi silinen son mesajı
-        // sonsuza dek gösteriyor"): bu satır silinmişse (`is_deleted`)
-        // sohbet listesindeki önizleme de balon gibi yer tutucu göstermeli
-        // — önceden bu JSON alanı hiç okunmuyordu.
-        val text = if (obj.optBoolean("is_deleted", false)) {
-            getString(R.string.msg_deleted)
-        } else {
-            obj.optString("text", "")
-        }
-        return LastMessagePreview(
-            text = text,
-            timestamp = obj.optLong("timestamp", 0L)
-        )
-    }
-
-    /** bkz. `loadLastAttachmentPreview` AYNI desen — grup ekleri için. */
-    private fun loadLastGroupAttachmentPreview(groupId: String): LastMessagePreview? {
-        val json = try {
-            P2PLib.listGroupAttachmentsBrief(groupId)
-        } catch (e: Exception) {
-            return null
-        }
-        val array = try {
-            JSONArray(json)
-        } catch (e: Exception) {
-            return null
-        }
-        var best: LastMessagePreview? = null
-        for (i in 0 until array.length()) {
-            val obj = array.getJSONObject(i)
-            val createdAt = obj.optLong("created_at", 0L)
-            if (best != null && createdAt <= best.timestamp) continue
-            best = LastMessagePreview(
-                text = attachmentPreviewLabel(obj.optString("mime_type", ""), obj.optString("file_name", "")),
-                timestamp = createdAt
-            )
-        }
-        return best
     }
 
     private fun loadContacts(ctx: android.content.Context): List<ContactRow> {
@@ -742,32 +661,5 @@ class ChatsFragment : Fragment() {
                 isFounder = obj.optBoolean("is_founder", false)
             )
         }
-    }
-
-    /** Node modu kapalıyken (history key yüklenmemişken) bu her zaman
-     *  null döner — P2PLib.getMessageHistory boş dizi döndürür. */
-    private fun loadLastMessagePreview(peerDeviceFingerprint: String): LastMessagePreview? {
-        val json = try {
-            P2PLib.getMessageHistory(peerDeviceFingerprint, 1)
-        } catch (e: Exception) {
-            return null
-        }
-        val array = try {
-            JSONArray(json)
-        } catch (e: Exception) {
-            return null
-        }
-        if (array.length() == 0) return null
-        val obj = array.getJSONObject(0)
-        // bkz. `loadLastGroupMessagePreview` aynı düzeltme notu.
-        val text = if (obj.optBoolean("is_deleted", false)) {
-            getString(R.string.msg_deleted)
-        } else {
-            obj.optString("text", "")
-        }
-        return LastMessagePreview(
-            text = text,
-            timestamp = obj.optLong("timestamp", 0L)
-        )
     }
 }

@@ -87,3 +87,4 @@ dist/
 
 # Fix-pass backups of pre-edit files (local only)
 reviews/fixpass-2026-10-20/backups/
+Linux/packaging/build-dir/

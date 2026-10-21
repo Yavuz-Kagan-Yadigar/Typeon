@@ -6460,8 +6460,6 @@ dependencies = [
 [[package]]
 name = "tor-netdir"
 version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68a99ad35659954aa280e678c3af2ab68934caaf55b94b947e2fb6f850598b5a"
 dependencies = [
  "bitflags 2.13.1",
  "derive_more 1.0.0",

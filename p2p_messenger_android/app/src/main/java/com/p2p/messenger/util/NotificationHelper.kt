@@ -29,7 +29,7 @@ object NotificationHelper {
     fun createChannel(context: Context) {
         val channel = NotificationChannel(
             MESSAGE_CHANNEL_ID,
-            "Messages",
+            context.getString(R.string.channel_messages_name),
             NotificationManager.IMPORTANCE_HIGH
         )
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -195,11 +195,13 @@ object NotificationHelper {
      *  AYNI kimlik hesaplaması — `clearAll`'dan daha dar kapsamlı, ChatActivity
      *  onResume'dan çağrılır). */
     fun clearForPeer(context: Context, peerDeviceFingerprint: String) {
+        shownMessageId.remove(peerDeviceFingerprint.hashCode()) // M118: no stale mapping
         context.getSystemService(NotificationManager::class.java).cancel(peerDeviceFingerprint.hashCode())
     }
 
     /** bkz. `clearForPeer` aynı notu — grup sohbeti için. */
     fun clearForGroup(context: Context, groupId: String) {
+        shownMessageId.remove(("group:$groupId").hashCode())
         context.getSystemService(NotificationManager::class.java).cancel(("group:$groupId").hashCode())
     }
 

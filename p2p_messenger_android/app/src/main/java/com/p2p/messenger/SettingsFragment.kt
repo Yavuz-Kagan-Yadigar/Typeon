@@ -218,12 +218,17 @@ class SettingsFragment : Fragment() {
      *  back, so it never shows ON while nothing is stored or routed. */
     private fun applyServerToggle(switch: android.widget.CompoundButton, checked: Boolean, change: () -> String) {
         if (revertingServerToggle) return
-        val result = try { change() } catch (e: Exception) { "Error: ${e.message}" }
-        if (!result.startsWith("Error")) return
-        Toast.makeText(switch.context, result, Toast.LENGTH_LONG).show()
-        revertingServerToggle = true
-        switch.isChecked = !checked
-        revertingServerToggle = false
+        // H56: the core call (key creation, DB) must not run on the main thread.
+        lifecycleScope.launch(Dispatchers.IO) {
+            val result = try { change() } catch (e: Exception) { "Error: ${e.message}" }
+            if (!result.startsWith("Error")) return@launch
+            withContext(Dispatchers.Main) {
+                Toast.makeText(switch.context, result, Toast.LENGTH_LONG).show()
+                revertingServerToggle = true
+                switch.isChecked = !checked
+                revertingServerToggle = false
+            }
+        }
     }
 
     /** Each card's header folds/unfolds its body; the chevron shows the state. */
@@ -492,21 +497,25 @@ class SettingsFragment : Fragment() {
             } catch (e: Exception) {
                 false
             }
+            if (announced) com.p2p.messenger.util.LocalWipe.wipe(ctx)
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 try { progress.dismiss() } catch (e: Exception) {}
                 if (!announced) {
                     Toast.makeText(ctx, R.string.error_delete_account_failed, Toast.LENGTH_LONG).show()
                     return@post
                 }
-                com.p2p.messenger.util.LocalWipe.wipe(ctx)
                 AppRestarter.restart(ctx)
             }
         }.start()
     }
 
     private fun performLogout() {
-        com.p2p.messenger.util.LocalWipe.wipe(requireContext())
-        AppRestarter.restart(requireContext())
+        // Disk I/O off the UI thread (H144); the restart hops back to main.
+        val app = requireContext().applicationContext
+        Thread {
+            com.p2p.messenger.util.LocalWipe.wipe(app)
+            android.os.Handler(android.os.Looper.getMainLooper()).post { AppRestarter.restart(app) }
+        }.start()
     }
 
     /**

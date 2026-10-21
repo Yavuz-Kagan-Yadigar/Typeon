@@ -932,18 +932,24 @@ class GroupChatActivity : AppCompatActivity() {
         // past all the texts between it and the oldest loaded one.
         val beforeTimestamp = localMessages.filter { it.attachment == null }.minOfOrNull { it.timestamp }
             ?: localMessages.minOf { it.timestamp }
-        val localOlder = try {
-            val json = P2PLib.getGroupMessageHistoryBefore(groupId, beforeTimestamp, OLDER_HISTORY_PAGE_SIZE)
-            val array = JSONArray(json)
-            (0 until array.length()).map { itemFromGroupHistoryJson(array.getJSONObject(it)) }
-        } catch (e: Exception) {
-            emptyList()
+        val gid = groupId
+        // H121: off the main thread (core lock); M115: empty page = end of archive.
+        lifecycleScope.launch {
+            val localOlder = withContext(Dispatchers.IO) {
+                try {
+                    val json = P2PLib.getGroupMessageHistoryBefore(gid, beforeTimestamp, OLDER_HISTORY_PAGE_SIZE)
+                    val array = JSONArray(json)
+                    (0 until array.length()).map { itemFromGroupHistoryJson(array.getJSONObject(it)) }
+                } catch (e: Exception) {
+                    null
+                }
+            }
+            if (gid == groupId) {
+                if (!localOlder.isNullOrEmpty()) prependOlderMessages(localOlder)
+                else if (localOlder != null) noMoreOlderHistory = true
+            }
+            isLoadingOlderHistory = false
         }
-        if (localOlder.isNotEmpty()) {
-            prependOlderMessages(localOlder)
-        }
-        // Local archive only: scrolling sends nothing to the network.
-        isLoadingOlderHistory = false
     }
 
     /** bkz. `loadOlderGroupHistory` — bir üyeden gelen "older_group_history"
@@ -1132,17 +1138,19 @@ class GroupChatActivity : AppCompatActivity() {
             .setTitle(R.string.action_transfer_founder)
             .setMessage(getString(R.string.confirm_transfer_founder, displayName))
             .setPositiveButton(R.string.action_transfer_founder) { _, _ ->
-                val result = try {
-                    P2PLib.transferGroupFounder(groupId, identityId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(this, result, Toast.LENGTH_LONG).show()
-                } else {
-                    Toast.makeText(this, R.string.msg_founder_transferred, Toast.LENGTH_LONG).show()
-                    refreshGroupInfo()
-                    onDone()
+                val gid = groupId
+                lifecycleScope.launch {
+                    // H121: signs and fans out to every member; not on the main thread.
+                    val result = withContext(Dispatchers.IO) {
+                        try { P2PLib.transferGroupFounder(gid, identityId) } catch (e: Throwable) { "Error: ${e.message}" }
+                    }
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(this@GroupChatActivity, result, Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(this@GroupChatActivity, R.string.msg_founder_transferred, Toast.LENGTH_LONG).show()
+                        refreshGroupInfo()
+                        onDone()
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -1153,19 +1161,21 @@ class GroupChatActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setMessage(getString(R.string.confirm_remove_member, displayName))
             .setPositiveButton(R.string.action_remove_member) { _, _ ->
-                val ok = try {
-                    P2PLib.removeFromGroup(groupId, identityId)
-                } catch (e: Exception) {
-                    false
-                }
-                if (ok) {
-                    Toast.makeText(this, R.string.msg_member_removed, Toast.LENGTH_SHORT).show()
-                    // `refreshGroupInfo` is asynchronous; the dialog redraws now.
-                    memberIdentityIds = memberIdentityIds - identityId
-                    refreshGroupInfo()
-                    onRemoved()
-                } else {
-                    Toast.makeText(this, R.string.error_network, Toast.LENGTH_SHORT).show()
+                val gid = groupId
+                lifecycleScope.launch {
+                    // H121: signed fan-out to every member; not on the main thread.
+                    val ok = withContext(Dispatchers.IO) {
+                        try { P2PLib.removeFromGroup(gid, identityId) } catch (e: Throwable) { false }
+                    }
+                    if (ok) {
+                        Toast.makeText(this@GroupChatActivity, R.string.msg_member_removed, Toast.LENGTH_SHORT).show()
+                        // `refreshGroupInfo` is asynchronous; the dialog redraws now.
+                        if (gid == groupId) memberIdentityIds = memberIdentityIds - identityId
+                        refreshGroupInfo()
+                        onRemoved()
+                    } else {
+                        Toast.makeText(this@GroupChatActivity, R.string.error_network, Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -1346,24 +1356,29 @@ class GroupChatActivity : AppCompatActivity() {
         // Some members got it: send only the copies that failed, under the
         // same id (see Rust `retry_group_message_copies`). 0 = the message
         // never left this device, so it is sent as a new one below.
-        when (try { P2PLib.retryGroupMessageCopies(groupId, item.messageId) } catch (e: Exception) { 0 }) {
-            1 -> { adapter.applyStatus(item.messageId, SimpleChatAdapter.Status.SENT); return }
-            -1 -> { Toast.makeText(this, R.string.error_send_failed, Toast.LENGTH_SHORT).show(); return }
+        val gid = groupId
+        lifecycleScope.launch {
+            val partial = withContext(Dispatchers.IO) { try { P2PLib.retryGroupMessageCopies(gid, item.messageId) } catch (e: Exception) { 0 } }
+            when (partial) {
+                1 -> { adapter.applyStatus(item.messageId, SimpleChatAdapter.Status.SENT); return@launch }
+                -1 -> { Toast.makeText(this@GroupChatActivity, R.string.error_send_failed, Toast.LENGTH_SHORT).show(); return@launch }
+            }
+            // bkz. ChatActivity.retryFailedMessage AYNI notu — bir yanıtsa AYNI
+            // yanıt korunmalı.
+            val result = withContext(Dispatchers.IO) {
+                try {
+                    P2PLib.sendGroupMessage(gid, item.text, item.replyToMessageId, item.replyToPreview, item.replyToSenderIdentityId)
+                } catch (e: Exception) {
+                    "Error: ${e.message}"
+                }
+            }
+            if (result.startsWith("Error:")) {
+                Toast.makeText(this@GroupChatActivity, R.string.error_send_failed, Toast.LENGTH_SHORT).show()
+                adapter.applyStatus(item.messageId, SimpleChatAdapter.Status.ERROR)
+                return@launch
+            }
+            adapter.retryMessage(item.messageId, result, SimpleChatAdapter.Status.SENT)
         }
-        // bkz. ChatActivity.retryFailedMessage AYNI notu — bir yanıtsa AYNI
-        // yanıt korunmalı.
-        val result = try {
-            P2PLib.sendGroupMessage(groupId, item.text, item.replyToMessageId, item.replyToPreview, item.replyToSenderIdentityId)
-        } catch (e: Exception) {
-            "Error: ${e.message}"
-        }
-        val ok = !result.startsWith("Error:")
-        if (!ok) {
-            Toast.makeText(this, R.string.error_send_failed, Toast.LENGTH_SHORT).show()
-            adapter.applyStatus(item.messageId, SimpleChatAdapter.Status.ERROR)
-            return
-        }
-        adapter.retryMessage(item.messageId, result, SimpleChatAdapter.Status.SENT)
     }
 
     /** bkz. ChatActivity.showEditDeleteDialog AYNI desen — kullanıcı
@@ -1940,15 +1955,16 @@ class GroupChatActivity : AppCompatActivity() {
             .setPositiveButton(R.string.action_edit_message) { _, _ ->
                 val newText = input.text.toString()
                 if (newText.isBlank()) return@setPositiveButton
-                val result = try {
-                    P2PLib.editGroupMessage(groupId, item.messageId, newText)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(this, result, Toast.LENGTH_SHORT).show()
-                } else {
-                    adapter.applyEdit(item.messageId, newText)
+                val gid = groupId
+                lifecycleScope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        try { P2PLib.editGroupMessage(gid, item.messageId, newText) } catch (e: Throwable) { "Error: ${e.message}" }
+                    }
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(this@GroupChatActivity, R.string.error_edit_failed, Toast.LENGTH_SHORT).show()
+                    } else {
+                        adapter.applyEdit(item.messageId, newText)
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -1959,15 +1975,16 @@ class GroupChatActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setMessage(R.string.confirm_delete_message)
             .setPositiveButton(R.string.action_delete_message) { _, _ ->
-                val result = try {
-                    P2PLib.deleteGroupMessage(groupId, item.messageId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(this, result, Toast.LENGTH_SHORT).show()
-                } else {
-                    adapter.applyDelete(item.messageId)
+                val gid = groupId
+                lifecycleScope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        try { P2PLib.deleteGroupMessage(gid, item.messageId) } catch (e: Throwable) { "Error: ${e.message}" }
+                    }
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(this@GroupChatActivity, R.string.error_delete_failed, Toast.LENGTH_SHORT).show()
+                    } else {
+                        adapter.applyDelete(item.messageId)
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -2962,7 +2979,13 @@ class GroupChatActivity : AppCompatActivity() {
 
     private val groupReadWatermarkHandler = Handler(Looper.getMainLooper())
     private val groupReadWatermarkRunnable = Runnable {
-        try { P2PLib.syncReadState("", groupId, System.currentTimeMillis()) } catch (e: Exception) {}
+        syncGroupReadStateAsync()
+    }
+    // H121: the core lock is not taken on the main thread.
+    private fun syncGroupReadStateAsync() {
+        val gid = groupId
+        val now = System.currentTimeMillis()
+        Thread { try { P2PLib.syncReadState("", gid, now) } catch (e: Exception) {} }.start()
     }
     private fun scheduleGroupReadWatermark() {
         if (!AppLock.isUnlocked()) return
@@ -3032,6 +3055,7 @@ class GroupChatActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        if (!::groupId.isInitialized) return // H63
         P2PService.removeMessageListener(messageListener)
         if (P2PService.activeConversationId == "group:$groupId") {
             P2PService.activeConversationId = null
@@ -3041,7 +3065,7 @@ class GroupChatActivity : AppCompatActivity() {
         groupReadWatermarkHandler.removeCallbacks(groupReadWatermarkRunnable)
         if (resumedUnlocked) {
             com.p2p.messenger.util.ReadStatePrefs.markRead(this, "group:$groupId")
-            try { P2PLib.syncReadState("", groupId, System.currentTimeMillis()) } catch (e: Exception) {}
+            syncGroupReadStateAsync()
         }
         resumedUnlocked = false
         fabBlinkAnimator?.cancel()
@@ -3057,7 +3081,10 @@ class GroupChatActivity : AppCompatActivity() {
         sendTypingState(false)
         // bkz. ChatActivity onPause AYNI notu — kullanıcı ekranı kapatırken
         // devam eden bir kayıt/oynatma varsa temiz bir şekilde durdurulur.
-        if (mediaRecorder != null) finishVoiceRecording(send = false)
+        if (mediaRecorder != null) {
+            Toast.makeText(this, R.string.msg_recording_cancelled, Toast.LENGTH_SHORT).show() // H150
+            finishVoiceRecording(send = false)
+        }
         stopVoicePlayback()
     }
 

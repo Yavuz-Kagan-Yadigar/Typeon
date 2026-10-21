@@ -297,15 +297,18 @@ impl DeviceRatchetState {
     /// `load_skipped_keys_from_db`) — bu fonksiyon kendisi o tabloya
     /// erişmez (ratchet.rs kripto-only katman, dosya başı notuyla tutarlı).
     pub fn from_persistable(mut s: SerializableRatchetState, skipped_keys: HashMap<u32, [u8; 32]>) -> Result<Self, String> {
-        let own_kyber_encoded: ml_kem::Encoded<MlKem1024DecapsulationKey> = s.own_kyber_secret.as_slice()
+        let mut own_kyber_encoded: ml_kem::Encoded<MlKem1024DecapsulationKey> = s.own_kyber_secret.as_slice()
             .try_into().map_err(|_| "Bozuk kayıtlı Kyber secret key")?;
+        let own_kyber_secret = MlKem1024DecapsulationKey::from_bytes(&own_kyber_encoded);
+        // The stack copy of the secret key is wiped like `s` itself.
+        own_kyber_encoded.as_mut_slice().zeroize();
         Ok(DeviceRatchetState {
             root_key: std::mem::take(&mut s.root_key),
             prev_root_key: s.prev_root_key.take(),
             ck_send: std::mem::take(&mut s.ck_send),
             ck_recv: std::mem::take(&mut s.ck_recv),
             own_x25519_secret: StaticSecret::from(s.own_x25519_secret),
-            own_kyber_secret: MlKem1024DecapsulationKey::from_bytes(&own_kyber_encoded),
+            own_kyber_secret,
             peer_x25519_pubkey: X25519PublicKey::from(s.peer_x25519_pubkey),
             peer_kyber_pubkey: kyber_pubkey_from_bytes(&s.peer_kyber_pubkey)?,
             send_message_number: s.send_message_number,

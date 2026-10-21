@@ -102,11 +102,15 @@ pub fn format_fingerprint_base32(raw: &[u8]) -> String {
 /// grup, her biri 5 haneli ondalık (00000-65535). The full fingerprint is
 /// `format_fingerprint_base32`.
 ///
-/// 16 bytes, 8 groups. At 8 bytes a key set with a victim's code took about
-/// 2^64 cheap trials (only the X25519 key has to vary), divided by the number
-/// of targets: within reach of a funded attacker.
+/// 16 bytes = 128 bits, 8 groups. Do NOT shorten it: the old 8-byte code
+/// (64 bits) let a key set matching a victim's code be found in about 2^64
+/// cheap trials (only the X25519 key has to vary), divided by the number of
+/// targets. An input under 16 bytes gives "" (no code) rather than a weaker one.
 pub fn format_short_code(raw: &[u8]) -> String {
-    raw[..16.min(raw.len())]
+    if raw.len() < 16 {
+        return String::new();
+    }
+    raw[..16]
         .chunks(2)
         .map(|chunk| format!("{:05}", chunk.iter().fold(0u32, |v, b| (v << 8) | *b as u32)))
         .collect::<Vec<_>>()
@@ -138,7 +142,10 @@ mod tests {
         let raw = vec![1u8; 32];
         let code = format_short_code(&raw);
         assert_eq!(code.split(' ').count(), 8);
-        assert_eq!(format_short_code(&[0xff, 0xff, 0, 1, 0x12, 0x34, 0, 0]), "65535 00001 04660 00000");
+        let mut raw = [0u8; 16];
+        raw[..6].copy_from_slice(&[0xff, 0xff, 0, 1, 0x12, 0x34]);
+        assert_eq!(format_short_code(&raw), "65535 00001 04660 00000 00000 00000 00000 00000");
+        assert_eq!(format_short_code(&raw[..15]), "", "a short input gives no code, not a weaker one");
     }
 
     /// Finding 15: the same bytes split at other key boundaries must not

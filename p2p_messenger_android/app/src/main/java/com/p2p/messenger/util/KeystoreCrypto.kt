@@ -10,25 +10,6 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Yerel identity/device secret key'lerini diskte şifreli tutmak için
- * kullanılan zarf şifreleme (envelope encryption) katmanı.
- *
- * Android Keystore'da (mümkünse StrongBox donanımında) bir AES-256 anahtarı
- * üretilir ve tutulur — bu anahtar HİÇBİR ZAMAN dışarı çıkmaz, sadece
- * Cipher nesnesi Keystore içinde çalıştırılır. Rust/JNI tarafına asla
- * Keystore anahtarının kendisi geçirilmez; sadece bu anahtarla
- * şifrelenmiş/çözülmüş VERİ (identity secret key'leri) geçirilir.
- *
- * NOT: Post-quantum (Kyber, Dilithium) ve X25519/Ed25519 anahtarları
- * Android Keystore'un desteklediği algoritmalar DEĞİL (Keystore sadece
- * EC/RSA/AES destekler), bu yüzden bu anahtarların kendisini doğrudan
- * Keystore'da üretip işlemleri orada yaptırmak mümkün değil. Bunun yerine
- * "envelope encryption" kullanılır: gerçek secret key'ler Rust tarafında
- * normal şekilde üretilir, ama diske yazılmadan önce bu AES anahtarıyla
- * şifrelenir. Diskte hiçbir zaman çıplak secret key bulunmaz; sadece bu
- * AES anahtarının şifrelediği ciphertext bulunur.
- */
-/**
  * Yerel identity/device secret key'lerini VE mesaj geçmişi arşivini
  * diskte şifreli tutmak için kullanılan zarf şifreleme (envelope
  * encryption) katmanı.
@@ -86,6 +67,9 @@ object KeystoreCrypto {
     @Synchronized
     private fun getOrCreateKey(alias: String): SecretKey {
         (keyStore.getKey(alias, null) as? SecretKey)?.let { return it }
+        // M143: an existing alias that is unusable must not be silently replaced
+        // (everything wrapped under it would become unreadable).
+        if (keyStore.containsAlias(alias)) throw java.security.GeneralSecurityException("keystore key unusable: $alias")
 
         val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
         val baseSpec = KeyGenParameterSpec.Builder(
@@ -197,6 +181,11 @@ fun java.io.File.writeBytesAtomic(bytes: ByteArray) {
             out.fd.sync()
         }
         if (!tmp.renameTo(this)) throw java.io.IOException("rename failed: $tmp")
+        // H47: the rename is on disk only once the directory is synced.
+        try {
+            val dir = android.system.Os.open(parentFile!!.path, android.system.OsConstants.O_RDONLY, 0)
+            try { android.system.Os.fsync(dir) } finally { android.system.Os.close(dir) }
+        } catch (e: Exception) {}
     } catch (e: Exception) {
         tmp.delete()
         throw e

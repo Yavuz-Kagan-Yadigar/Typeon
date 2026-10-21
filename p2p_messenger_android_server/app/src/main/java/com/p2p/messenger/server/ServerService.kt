@@ -96,7 +96,7 @@ class ServerService : Service() {
 
         fun setEnabled(context: Context, enabled: Boolean) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit().putBoolean(KEY_ENABLED, enabled).apply()
+                .edit().putBoolean(KEY_ENABLED, enabled).commit() // M136: apply() could lose an "off" across process death
         }
 
         /**
@@ -291,7 +291,7 @@ class ServerService : Service() {
             if (!isRunning || moving.get()) return@execute
             val result = try {
                 val blobs = awaitBlobDir()
-                    ?: throw java.io.IOException("depolama konumu kullanılamıyor: ${blobDir(this).absolutePath}")
+                    ?: throw java.io.IOException(getString(R.string.err_storage_unavailable))
                 // Tor parametresi yok — onion service her zaman açık
                 // (bkz. ServerLib.startServer notu).
                 ServerLib.startServer(
@@ -317,7 +317,7 @@ class ServerService : Service() {
                 // with backoff, but do not hold the locks meanwhile.
                 lastError = result
                 setLocks(false)
-                nm.notify(NOTIFICATION_ID, buildNotification(result))
+                nm.notify(NOTIFICATION_ID, buildNotification(serverErrorText(this, result)))
             } else {
                 lastError = null
                 setLocks(true)

@@ -47,7 +47,7 @@ Sunucusuz çalışabilen, uçtan uca şifreli mesajlaşma uygulaması. Klasik + 
 | `typeon-crypto/src/packet.rs` | `MessagePacket`, `MessageContent` (mesaj türleri), imza girdisi |
 | `typeon-crypto/src/server_proto.rs` | Sunucu mesaj türleri + varsayılan limitler (`mailbox_ttl_ms` = 14 gün) |
 | `typeon-crypto/src/server_seal.rs` | Sunucuya giden zarfı ikinci kez mühürleme |
-| `p2p_messenger_android/app/src/main/cpp/rust/src/lib.rs` | **Ana çekirdek, ~23.800 satır.** `P2PCore` yapısı ~satır 3190. Tüm iş mantığı + en sonda JNI fonksiyonları (`Java_com_p2p_messenger_P2PLib_*`). Testler (`mod ..._tests`) aynı dosyada |
+| `p2p_messenger_android/app/src/main/cpp/rust/src/lib.rs` | **Ana çekirdek, ~24.750 satır.** `P2PCore` yapısı ~satır 3250. Tüm iş mantığı + en sonda JNI fonksiyonları (`Java_com_p2p_messenger_P2PLib_*`). Testler (`mod ..._tests`) aynı dosyada |
 | aynı klasör `api.rs` | JNI'siz saf Rust arayüzü. Linux bunu çağırır |
 | aynı klasör `server_client.rs` | İstemcinin sunucu tarafı: kayıt, bırakma, çekme, arşiv |
 | aynı klasör `call.rs` | Arama medya taşıma (şifreli paketler, libp2p stream) |
@@ -58,11 +58,12 @@ Sunucusuz çalışabilen, uçtan uca şifreli mesajlaşma uygulaması. Klasik + 
 | `p2p_messenger_android/app/src/main/java/com/p2p/messenger/` | Android Kotlin kodu |
 | ↳ `P2PLib.kt` | JNI `external` fonksiyon tanımları (Rust'taki adlarla birebir) |
 | ↳ `service/P2PService.kt` | Arka plan servisi. Çekirdekten JSON olay alır (`poll_events`), bildirim gösterir |
-| ↳ `ui/` | Ekranlar: `ChatActivity`, `GroupChatActivity`, `CallActivity`, `AppLockActivity`, `MediaViewerActivity`, `LinkDeviceActivity`, `QrScanActivity` |
-| ↳ `util/` | Yardımcılar: `AppLock`, `OutgoingMedia` (medya temizleme), `KeystoreCrypto`, `IdentityManager`, `NotificationHelper` |
+| ↳ `ui/` | Ekranlar (18 dosya; başlıcaları): `ChatActivity`, `GroupChatActivity`, `CallActivity`, `AppLockActivity`, `MediaViewerActivity`, `LinkDeviceActivity`, `QrScanActivity` |
+| ↳ `util/` | Yardımcılar (33 dosya; başlıcaları): `AppLock`, `OutgoingMedia` (medya temizleme), `KeystoreCrypto`, `IdentityManager`, `NotificationHelper` |
+| `trafficvis/` | Trafik görselleştirme simülatörü (`traffic_visualization.html`, `selftest.js`) |
 | `p2p_messenger_android_server/` | Sunucunun Android uygulaması. Ekran: `ServerActivity` |
-| `typeon-server/src/` | Sunucu mantığı: `lib.rs` (protokol), `store.rs` (SQLite), `jni.rs` |
-| `Linux/src/` | Linux istemci. `core.rs` çekirdek köprüsü, `ui/*.rs` ekranlar, `call_media.rs` arama (GStreamer), `keyring.rs`+`secrets.rs` anahtar saklama (KDE Wallet) |
+| `typeon-server/src/` | Sunucu mantığı: `lib.rs` (protokol), `store.rs` (SQLite), `jni.rs`, `bin/typeon-server.rs` (CLI) |
+| `Linux/src/` | Linux istemci. `core.rs` çekirdek köprüsü, `ui/*.rs` ekranlar, `prefs.rs`/`theme.rs`/`font.rs`/`audio.rs`/`qr.rs`/`util.rs` yardımcılar, `call_media.rs` arama (GStreamer), `keyring.rs`+`secrets.rs` anahtar saklama (KDE Wallet) |
 | `Linux/packaging/` | Flatpak paketleme |
 | `reviews/` | Eski kod inceleme notları. `ALL_OPEN_FINDINGS.md` = bilerek açık bırakılan maddeler, tekrar tartışma |
 | `Description.md` | Protokol şartnamesi (Türkçe). Bölümler: 1 kimlik, 2 güven, 3 şifreleme, 4 keşif+sunucu, 5 grup, 6 açık kararlar |
@@ -100,7 +101,7 @@ JNI fonksiyonunu değiştirirsen hem `lib.rs` hem `P2PLib.kt` (gerekirse `api.rs
 2. **Önce arşive yazar** (`archive_message`). Başarılıysa Ack yollar. Başarısızsa Ack'i geciktirir.
 3. Aynı `message_id` ikinci kez gelirse atılır.
 4. Hız sınırı: 10 sn'de en çok 60 paket (`RATE_LIMIT_MAX_PER_WINDOW`); kurulu bağlantıda 600.
-5. Ack **almayan** türler (bilerek): `Ack`, `Seen`, `TypingIndicator`, `AddressAnnounce`, `HistorySyncResponse`, `SiblingHistoryResponse`.
+5. Ack **almayan** türler (bilerek): `Ack`, `Seen`, `TypingIndicator`, `AddressAnnounce`, `SiblingHistoryResponse`. (`HistorySyncResponse` Ack'lenir.)
 6. Düzenle/Sil mesajı hedef mesajdan önce gelirse tamponda bekler.
 
 ### 3.4 Çoklu cihaz
@@ -133,16 +134,17 @@ JNI fonksiyonunu değiştirirsen hem `lib.rs` hem `P2PLib.kt` (gerekirse `api.rs
 - Ne yapar: alıcı çevrimdışıyken şifreli zarfı **diske yazar**, alıcı gelince verir.
 - Üç işlem: `Deposit` (bırak), `Fetch` (çek), `Ack` (silinebilir de).
 - Varsayılan saklama: **14 gün** (`mailbox_ttl_ms`, `server_proto.rs`). Kayıtlı cihaz 30 gün boşta kalırsa düşer (`ENROLLMENT_IDLE_MS`). Varsayılan en çok 64 kayıt. Saatte en çok 60 herkese açık kayıt.
-- Sunucu içeriği göremez: zarf zaten uçtan uca şifreli, üstüne ikinci mühür var. Mailbox adı topic'in karıştırılmış hali.
+- Sunucu içeriği göremez: zarf zaten uçtan uca şifreli, üstüne ikinci mühür var. Oturum kutusu adı, iki cihazın uzun ömürlü KEM X25519 anahtarlarının statik DH'sinden türer (çift başına sabit, rotasyonda değişmez; `server_seal::session_mailbox`); mühür anahtarı ratchet root'tan gelir.
 - Sunucu şunları görebilir: boyut, zaman, hangi PeerId hangi kutuyu okuyor. Bu bilinen ve kabul edilen sınır.
 - Sunucu mesajı geciktirebilir/atabilir ama sahteleyemez. Bu yüzden: sıradan mesaj ilk 30 sn yalnız sunucuya gider (`SERVER_ONLY_GRACE_MS`), sonra her yeniden deneme gossipsub'a da gider. El sıkışma (`Handshake`, `IdentityExchange`) ve ratchet yenileme duyurusu hep ikisine birden gider.
+- Açılamayan/işlenemeyen sunucu öğesi Ack'lenmez; kutu imleci onun önünde 5 dk kalır, 45 sn'de bir yeniden çekilir, sonra atlanır (`SERVER_HOLD_GRACE_MS`; ayrıntı TECHNICAL_HANDOFF §13.4).
 - Sunucudan çekilen zarflar `source = None` ile gelen mesaj yoluna girer (sunucunun adresi kişi adres defterine yazılmasın diye).
 - Sunucunun **onion adresi onun kimliğidir.** Güncellemede korunmalı. Uygulamayı kaldırıp kurma onion adresini siler.
 - "Geçmişi sunucuda sakla" ayrı ve varsayılan kapalı seçenek. Arşiv kök anahtarla şifrelenir (ileri-gizli değil, kabul edilmiş bedel).
 - SQLite tabloları (`store.rs`): `enrollments, invites, mailboxes, mailbox_readers, mailbox_keys, mail, mail_acks, archive, blobs, blob_chunks, blocked_keys, meta`.
 
 ### 3.8 Yerel veri
-- Veritabanı: SQLCipher, dosya `p2p_messenger.db`. Şema `init_db` içinde (lib.rs ~satır 4030).
+- Veritabanı: SQLCipher, dosya `p2p_messenger.db`. Şema `init_db` içinde (lib.rs ~satır 4070).
 - Ana tablolar: `identities, own_devices, contacts, groups, messages, message_reactions, message_seen, ratchet_states, skipped_message_keys, remote_devices, files, device_addrs, device_onion_addrs, pending_durable_retries, pending_group_messages, blocked_identities, deleted_identities, removed_contacts, removed_groups, app_meta, acked_packets, own_prekeys, peer_prekeys, pending_sibling_ops`.
 - Sonradan eklenen sütunlar `ALTER TABLE` ile eklenir; `CREATE TABLE IF NOT EXISTS` eski tabloyu değiştirmez.
 - AppLock: parola PBKDF2-HMAC-SHA256 ile türetilir (`util/AppLock.kt`).
@@ -156,7 +158,7 @@ JNI fonksiyonunu değiştirirsen hem `lib.rs` hem `P2PLib.kt` (gerekirse `api.rs
 - Android olayı: `type = "call"`, `action = "invite"` ise zil çalar.
 
 ### 3.10 Android olay türleri (`P2PService.maybeNotify`)
-`sync`, `device_linked`, `history_restore_incomplete`, `account_deleted`, `self_revoked`, `read_state_sync`, `call`, `invite`, `message`, `group_message`, `delete`, `device_alert`, `group_delete`, `edit`, `group_edit`, `file_offer`.
+`sync`, `device_linked`, `history_restore_incomplete`, `account_deleted`, `self_revoked`, `read_state_sync`, `call` (`action="invite"` zil), `message`, `group_message`, `delete`, `device_alert`, `group_delete`, `edit`, `group_edit`, `file_offer`, `pairing_failed`, `core_panic`.
 
 ---
 

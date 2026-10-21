@@ -45,6 +45,7 @@
             android:name=".BootReceiver"
             android:enabled="true"
             android:exported="true"
+            android:permission="android.permission.RECEIVE_BOOT_COMPLETED"
             android:directBootAware="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

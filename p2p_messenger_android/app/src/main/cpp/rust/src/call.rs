@@ -155,7 +155,9 @@ pub async fn read_frame<R: futures::AsyncRead + Unpin>(r: &mut R) -> std::io::Re
 /// audio packet leaves as one Tor cell instead of three.
 pub async fn pump_writes<W: futures::AsyncWrite + Unpin>(mut w: W, mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>) {
     while let Some(buf) = rx.recv().await {
-        if w.write_all(&buf).await.is_err() || w.flush().await.is_err() {
+        // A peer that stopped reading must not park this task (and the substream) forever.
+        let sent = tokio::time::timeout(Duration::from_secs(5), async { w.write_all(&buf).await?; w.flush().await }).await;
+        if !matches!(sent, Ok(Ok(()))) {
             break;
         }
     }
@@ -516,7 +518,6 @@ fn media_send_to(kind: u8, payload: &[u8], only: Option<&str>) -> bool {
             }
         }
         let held = m.targets.values().filter(|t| t.audio_hold).count();
-        m.dropped += held as u64;
         if held == m.targets.len() {
             return false;
         }
@@ -599,7 +600,8 @@ fn media_on_packet_via(packet: &[u8], via: Option<PeerId>) {
     };
     let now = current_time_ms();
     let sent_ms = u32::from_be_bytes([pt[1], pt[2], pt[3], pt[4]]);
-    let delay = (now as u32).wrapping_sub(sent_ms) as i32 as f64;
+    // A hostile `sent_ms` must not skew the EWMA beyond +-10 min.
+    let delay = ((now as u32).wrapping_sub(sent_ms) as i32 as f64).clamp(-600_000.0, 600_000.0);
     if let Some(server) = via {
         if let Some(t) = m.targets.get_mut(&fp) {
             t.relay_via = Some(server);
@@ -771,21 +773,22 @@ async fn open_link(mut control: libp2p_stream::Control, peer: PeerId, relay: boo
     // the far end closes it. A wait that times out has read nothing, unless
     // one frame took that long, which a live link does not.
     let via = relay.then_some(peer);
-    loop {
-        match tokio::time::timeout(Duration::from_millis(MEDIA_LOST_MS), read_frame(&mut rd)).await {
-            Ok(Ok((_, data))) => {
-                if media().generation != generation {
-                    break;
-                }
-                media_on_packet_via(&data, via);
+    'link: loop {
+        // The same future survives a timeout: dropping it mid-frame would eat
+        // part of a header and desync the next read.
+        let mut next = Box::pin(read_frame(&mut rd));
+        let frame = loop {
+            match tokio::time::timeout(Duration::from_millis(MEDIA_LOST_MS), &mut next).await {
+                Ok(r) => break r,
+                Err(_) if media().generation != generation => break 'link,
+                Err(_) => {}
             }
-            Ok(Err(_)) => break,
-            Err(_) => {
-                if media().generation != generation {
-                    break;
-                }
-            }
+        };
+        let Ok((_, data)) = frame else { break };
+        if media().generation != generation {
+            break;
         }
+        media_on_packet_via(&data, via);
     }
     let mut m = media();
     let map = if relay { &mut m.relays } else { &mut m.direct };
@@ -920,6 +923,8 @@ impl CallSession {
 fn noop() -> serde_json::Value {
     serde_json::json!({"type": "noop"})
 }
+
+static LAST_CALL_SIG: Mutex<String> = Mutex::new(String::new());
 
 impl P2PCore {
     pub(crate) fn start_call(&mut self, peer_fp: String, video: bool) -> Result<String, String> {
@@ -1069,7 +1074,7 @@ impl P2PCore {
         if call_id.len() > 64 {
             return noop();
         }
-        info!("Arama sinyali: {:?} arama={} kimden={}", action, call_id.chars().take(8).collect::<String>(), &peer_fp[..8.min(peer_fp.len())]);
+        info!("Arama sinyali: {:?} arama={} kimden={}", action, call_id.chars().take(8).collect::<String>(), peer_fp.chars().take(8).collect::<String>());
         match action {
             CallAction::Invite => {
                 // ponytail: the age compares two devices' clocks, so a caller
@@ -1274,6 +1279,29 @@ impl P2PCore {
 
     /// Ring timeouts + link upkeep. Every poll turn; cheap when idle.
     pub(crate) fn call_sweep(&mut self) {
+        self.call_sweep_inner();
+        // H140: a `call_state` event whenever phase/participants change, so
+        // the UI need not poll for transitions (the timer/media stats still
+        // come from `callState`).
+        let sig = match &self.call {
+            Some(s) => {
+                let mut j: Vec<&String> = s.joined.iter().collect();
+                j.sort();
+                format!("{}|{:?}|{:?}|{}", s.call_id, s.phase, j, s.invited.len())
+            }
+            None => format!("idle|{:?}", self.last_call_end),
+        };
+        let mut last = LAST_CALL_SIG.lock().unwrap_or_else(|p| p.into_inner());
+        if *last != sig {
+            *last = sig;
+            drop(last);
+            let mut v: serde_json::Value = serde_json::from_str(&self.call_state_json()).unwrap_or_default();
+            v["type"] = serde_json::json!("call_state");
+            self.attachment_events.push(v.to_string());
+        }
+    }
+
+    fn call_sweep_inner(&mut self) {
         let Some(s) = &self.call else { return };
         let now = current_time_ms();
         let ringing_too_long = s.started.elapsed() > Duration::from_millis(RING_TIMEOUT_MS);
@@ -1387,7 +1415,10 @@ impl P2PCore {
 // ---------------------------------------------------------------------------
 
 fn jstr(env: &mut JNIEnv, s: &JString) -> String {
-    env.get_string(s).map(|s| s.into()).unwrap_or_default()
+    env.get_string(s).map(|s| s.into()).unwrap_or_else(|_| {
+        let _ = env.exception_clear();
+        String::new()
+    })
 }
 
 #[no_mangle]
@@ -1446,7 +1477,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_callState<'local>(mut env: 
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_callSend<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, kind: jint, data: JByteArray<'local>) -> jboolean {
     let bytes = crate::jbytearray_to_vec(&mut env, &data);
-    crate::catch_panic(move || media_send(kind as u8, &bytes)).unwrap_or(false) as jboolean
+    crate::catch_panic(move || media_send(kind.clamp(0, 255) as u8, &bytes)).unwrap_or(false) as jboolean
 }
 
 /// `[kind][slot][payload]` or null on timeout. No core lock.
@@ -1460,7 +1491,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_callRecv<'local>(mut env: J
 
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_callRequestKeyframe<'local>(_env: JNIEnv<'local>, _class: JClass<'local>, slot: jint) {
-    let _ = crate::catch_panic(move || media_request_keyframe(slot as u8));
+    let _ = crate::catch_panic(move || media_request_keyframe(slot.clamp(0, 255) as u8));
 }
 
 #[no_mangle]

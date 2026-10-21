@@ -72,20 +72,22 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
 
     let query = Rc::new(RefCell::new(String::new()));
 
-    // `build_row` needs a way to ask for a rebuild (a pinned/unpinned chat has
-    // to reorder immediately, not wait for the next event or the 30s
-    // backstop tick), which means passing `refresh` down into the very
-    // closure that constructs it — a plain `Rc<dyn Fn()>` cannot capture
-    // itself by name before it exists, so it is boxed behind a cell that gets
-    // filled in right after.
+    // M164: `refresh_cell` owns `refresh` (set below), and `refresh` hands
+    // itself to newly built rows through it — a strong `refresh_cell` capture
+    // inside the closure would close the cycle `refresh` → `refresh_cell` →
+    // `refresh` and leak one closure graph per app run. So the closure only
+    // carries a Weak; the strong owner at page lifetime is the event
+    // subscription further down (`subscribe` keeps its handler until the
+    // container widget is destroyed), which is exactly as long as rows can
+    // still ask to be rebuilt.
     let refresh_cell: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let refresh_cell_weak = std::rc::Rc::downgrade(&refresh_cell);
 
     let refresh: Rc<dyn Fn()> = {
         let main = main.clone();
         let list = list.clone();
         let stack = stack.clone();
         let query = query.clone();
-        let refresh_cell = refresh_cell.clone();
         let generation = Rc::new(std::cell::Cell::new(0u64));
         // A burst of events (16 kinds) collapses into one rebuild.
         let pending = Rc::new(std::cell::Cell::new(false));
@@ -98,7 +100,7 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
             let list = list.clone();
             let stack = stack.clone();
             let query = query.clone();
-            let refresh_cell = refresh_cell.clone();
+            let refresh_cell = refresh_cell_weak.clone();
             let generation = generation.clone();
             glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
                 pending.set(false);
@@ -123,10 +125,16 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
                     while let Some(child) = list.first_child() {
                         list.remove(&child);
                     }
-                    let self_refresh = refresh_cell
-                        .borrow()
-                        .clone()
-                        .expect("refresh_cell is filled in immediately after this closure is created");
+                    // M167: filled in immediately after this closure is
+                    // created, so the old `expect` was fine in practice — but
+                    // a panic inside a GTK callback unwinds into C and aborts
+                    // the process, so fall back to a no-op refresh instead
+                    // (a pin toggle then only moves prefs; the next event or
+                    // 30s tick repaints the list).
+                    let self_refresh: Rc<dyn Fn()> = refresh_cell
+                        .upgrade()
+                        .and_then(|cell| cell.borrow().clone())
+                        .unwrap_or_else(|| Rc::new(|| {}));
                     for row in &visible {
                         list.append(&build_row(&main, row, self_refresh.clone()));
                     }
@@ -167,7 +175,13 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
     }
     {
         let refresh = refresh.clone();
+        // M164: page-lifetime owner of `refresh_cell` (see the comment above).
+        // Without it the last strong reference dies with `build()`'s local,
+        // `upgrade()` in the refresh callback returns None, and rows would be
+        // built without a way to rebuild themselves (pin toggles).
+        let refresh_cell = refresh_cell.clone();
         main.app.subscribe(&container, move |event| {
+            let _ = &refresh_cell;
             if matches!(
                 event.kind.as_str(),
                 "message"

@@ -315,6 +315,12 @@ object P2PLib {
     external fun getMessageHistoryBefore(peerDeviceFingerprint: String, beforeTimestamp: Long, limit: Int): String
     /** bkz. `getMessageHistoryBefore` aynı notu — grup arşivi için. */
     external fun getGroupMessageHistoryBefore(groupId: String, beforeTimestamp: Long, limit: Int): String
+    /** H122: only rows archived after `afterTimestamp`, oldest first; same JSON as `getMessageHistory`. */
+    external fun getMessageHistorySince(peerDeviceFingerprint: String, afterTimestamp: Long, limit: Int): String
+    external fun getGroupMessageHistorySince(groupId: String, afterTimestamp: Long, limit: Int): String
+    /** H137: `{"contacts":{identity_id:{"peer","message","attachment"}},"groups":{gid:{"message","attachment"}}}`;
+     *  message / attachment may be null (message.timestamp, attachment.created_at). */
+    external fun chatListPreviews(): String
     /** Spec dışı, kullanıcı isteği (sonsuz kaydırma): `getMessageHistoryBefore`
      *  boş/yetersiz döndüğünde çağrılmalı — karşı taraftan bu zaman
      *  damgasından eski mesajları ağdan ister. Yanıt asenkron gelir — bkz.

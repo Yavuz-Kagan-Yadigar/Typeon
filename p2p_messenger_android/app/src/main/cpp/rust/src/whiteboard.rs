@@ -797,6 +797,10 @@ impl P2PCore {
     /// has, so anything missed on either side is pulled now.
     pub(crate) fn wb_open(&mut self, peer_fp: &str, group_id: &str) -> Result<(), String> {
         let board = self.wb_board(peer_fp, group_id)?;
+        // A UI reopen loop must not spam digests: a burst, then one per PULL_COST_MS.
+        if !self.wb_pull_allowed("open", &board.key, "self", 1) {
+            return Ok(());
+        }
         let targets: Vec<String> = self.wb_targets(&board).into_iter().filter(|fp| self.is_connected_to_device(fp)).collect();
         self.wb_send_digest(&board, targets);
         Ok(())
@@ -960,7 +964,9 @@ impl P2PCore {
         let theirs: HashMap<u8, (u32, u64)> = pages.iter().map(|d| (d.page, (d.count, d.hash))).collect();
         let mine: HashMap<u8, (u32, u64)> = self.wb_digest(&board.key).iter().map(|d| (d.page, (d.count, d.hash))).collect();
         let differing: Vec<u8> = (0..MAX_PAGES).filter(|p| mine.get(p) != theirs.get(p)).collect();
-        if !differing.is_empty() {
+        // Each pulled page costs a full unseal+verify under the core lock: bound
+        // what one peer can make me pull (a board per burst, then a page per PULL_COST_MS).
+        if !differing.is_empty() && self.wb_pull_allowed("pulls", &board.key, peer_fp, differing.len() as u64) {
             let request = MessageContent::WbPageRequest {
                 group_id: board.group_id.clone(),
                 conversation_identity_id: board.conversation_identity_id.clone(),
@@ -1107,7 +1113,10 @@ mod jni_exports {
     use crate::{bytes_to_jbytearray, catch_panic, core_lock, jbytearray_to_vec, safe_new_jstring, RUNTIME};
 
     fn jstr(env: &mut JNIEnv, s: &JString) -> String {
-        env.get_string(s).map(|s| s.into()).unwrap_or_default()
+        env.get_string(s).map(|s| s.into()).unwrap_or_else(|_| {
+            let _ = env.exception_clear();
+            String::new()
+        })
     }
 
     /// "OK" or "Error: ...", like the other `P2PLib` calls.

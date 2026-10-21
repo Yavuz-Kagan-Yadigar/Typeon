@@ -29,6 +29,11 @@ use crate::util;
 
 /// How many messages a page of history holds, matching the Android chat.
 const PAGE_SIZE: u32 = 50;
+/// H128: hard cap on bubbles kept alive in one open chat. ~8 GTK widgets per
+/// bubble; past this the oldest page is dropped from the view (the archive
+/// still has everything — scrolling up again, or reopening the chat, brings
+/// it back). 600 ≈ 12 pages of history on screen at once.
+const MAX_BUBBLES: usize = 600;
 const FETCH_HISTORY_LABEL: &str = "Fetch older history";
 /// Hard cap on bubble width, in pixels.
 ///
@@ -250,6 +255,9 @@ struct ChatView {
     /// Bumped per `reload`; a page fetched off-thread is dropped if a newer
     /// reload started meanwhile.
     load_gen: Cell<u64>,
+    /// M165: live entries (fresh events) can arrive without a message id —
+    /// they still need a unique map/order key. `fresh_local_id` mints one.
+    live_serial: Cell<u64>,
     loading_older: Cell<bool>,
     exhausted_locally: Cell<bool>,
     last_typing_sent: Cell<u64>,
@@ -380,6 +388,7 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         reply_to: RefCell::new(None),
         oldest_timestamp: Cell::new(0),
         load_gen: Cell::new(0),
+        live_serial: Cell::new(0),
         loading_older: Cell::new(false),
         exhausted_locally: Cell::new(false),
         last_typing_sent: Cell::new(0),
@@ -891,11 +900,70 @@ impl ChatView {
                 for entry in older {
                     view.insert_entry(entry, false);
                 }
+                // H128: a full page of 50 above the cap drops the oldest
+                // page's worth of bubbles immediately, so the view settles at
+                // ~MAX_BUBBLES instead of growing for as long as the user
+                // keeps scrolling.
+                view.evict_oldest();
                 glib::idle_add_local_once(move || {
                     adjustment.set_value(adjustment.upper() - distance_from_bottom);
                 });
             },
         );
+    }
+
+    /// H128: drops the oldest bubbles once more than `MAX_BUBBLES` are alive,
+    /// then prunes any day-day separator left stranded by the evictions.
+    /// Removing the widgets is safe from the GTK thread (that is where the
+    /// rest of timeline surgery happens too).
+    ///
+    /// Note the reload cursor: refetching after an eviction still pages from
+    /// `oldest_timestamp` (strictly older receive time), so evicted rows stay
+    /// gone until a full `reload()` or the chat is reopened — by design, the
+    /// user scrolled past them into the archive anyway.
+    fn evict_oldest(self: &Rc<Self>) {
+        let evicted: Vec<String> = {
+            let mut order = self.order.borrow_mut();
+            let excess = order.len().saturating_sub(MAX_BUBBLES);
+            if excess == 0 {
+                return;
+            }
+            order.drain(..excess).map(|(_, id)| id).collect()
+        };
+
+        {
+            let mut bubbles = self.bubbles.borrow_mut();
+            for id in &evicted {
+                if let Some(bubble) = bubbles.remove(id) {
+                    self.messages.remove(&bubble.root);
+                }
+            }
+        }
+        // The search index refers to bubble ids; keep only what survived, so
+        // a match jump can never land on a removed bubble.
+        self.search_matches.borrow_mut().retain(|id| {
+            !evicted.iter().any(|gone| gone == id)
+        });
+        self.search_lower.borrow_mut().retain(|id, _| {
+            !evicted.iter().any(|gone| gone == id)
+        });
+
+        // Two leading day separators (the bubble between them was evicted) or
+        // a separator with nothing after it are leftovers; a separator still
+        // followed by a bubble is legitimate and stays.
+        while let Some(first) = self.messages.first_child() {
+            if !first.has_css_class("day-separator") {
+                break;
+            }
+            let stranded = first
+                .next_sibling()
+                .map(|next| next.has_css_class("day-separator"))
+                .unwrap_or(true); // nothing after it at all
+            if !stranded {
+                break;
+            }
+            self.messages.remove(&first);
+        }
     }
 }
 
@@ -1017,6 +1085,19 @@ fn fetch_page(
 // --- rendering ---
 
 impl ChatView {
+    /// M165: a live event without any id would key an empty-string bubble —
+    /// two such messages then collide on `""` and the second silently
+    /// overwrites the first's text in place. Mint a unique view-local key
+    /// instead. It is not derivable again after a `reload()` (where the
+    /// archive rebuilds bubbles under its own ids), but by then the core has
+    /// stored the message anyway, so nothing is lost — the key only has to be
+    /// unique for as long as this view lives.
+    fn fresh_local_id(&self) -> String {
+        let serial = self.live_serial.get() + 1;
+        self.live_serial.set(serial);
+        format!("live:{serial}")
+    }
+
     /// Inserts a bubble at its `order_key` position. Scanning from the end is
     /// right for the common case (a new message is the newest) and still
     /// correct for a message delayed in transit, which slots into the spot it
@@ -1462,9 +1543,7 @@ impl ChatView {
             self.open_attachment(state);
             return;
         }
-        if self.start_download(state) {
-            button.set_visible(false);
-        }
+        self.start_download(state, Some(button.clone()));
     }
 
     fn open_attachment(self: &Rc<Self>, state: &Rc<AttachmentState>) {
@@ -1487,36 +1566,52 @@ impl ChatView {
         );
     }
 
-    /// A failed start emits no events at all, so the caller must reflect that
-    /// immediately or the row spins forever. Returns whether the download
-    /// actually started, so a caller that also hides an action button (the
-    /// generic attachment's "Download") only does so on success — otherwise
-    /// there would be no way left to retry after a failed start.
-    fn start_download(self: &Rc<Self>, state: &Rc<AttachmentState>) -> bool {
+    /// Kicks a download off the core. H125 straggler: `core::download_file`
+    /// takes the global core mutex the poll thread can hold for seconds, so
+    /// the inline call used to freeze the whole window (and every voice
+    /// player with it) whenever the poller was mid-round. The work closure
+    /// carries only Send data; the widget state is touched exclusively in
+    /// `then`, which `run_in_background` runs back on the GTK thread.
+    ///
+    /// `hide_on_start` (the generic card's "Download" button) is hidden only
+    /// on a confirmed start — exactly the old success/failure split: a failed
+    /// start leaves the button up so there is still a way to retry.
+    fn start_download(self: &Rc<Self>, state: &Rc<AttachmentState>, hide_on_start: Option<gtk::Button>) {
         state.download_started_at.set(util::now_ms());
-        match core::download_file(&state.file_id, &state.source_fingerprint) {
-            Ok(()) => {
-                *state.status.borrow_mut() = "downloading".to_string();
-                if let Some(status) = &state.status_label {
-                    status.set_label("Downloading…");
+        let file_id = state.file_id.clone();
+        let source_fingerprint = state.source_fingerprint.clone();
+        let view = self.clone();
+        let state = state.clone();
+        crate::app::run_in_background(
+            move || core::download_file(&file_id, &source_fingerprint),
+            move |result| match result {
+                Ok(()) => {
+                    if let Some(button) = &hide_on_start {
+                        button.set_visible(false);
+                    }
+                    *state.status.borrow_mut() = "downloading".to_string();
+                    if let Some(status) = &state.status_label {
+                        status.set_label("Downloading…");
+                    }
+                    if let Some(progress) = &state.progress {
+                        progress.set_visible(true);
+                    }
+                    render_voice_state(&state);
                 }
-                if let Some(progress) = &state.progress {
-                    progress.set_visible(true);
+                // A failed start emits no events at all, so the caller must
+                // reflect that immediately or the row spins forever.
+                Err(error) => {
+                    state.download_started_at.set(0);
+                    view.app().toast(&format!("Download failed: {}", error));
                 }
-                render_voice_state(state);
-                true
-            }
-            Err(error) => {
-                self.app().toast(&format!("Download failed: {}", error));
-                false
-            }
-        }
+            },
+        );
     }
 
     /// Play/pause a voice message, downloading it first if it is not here yet.
     fn voice_play_clicked(self: &Rc<Self>, state: &Rc<AttachmentState>) {
         if *state.status.borrow() != "complete" {
-            self.start_download(state);
+            self.start_download(state, None);
             return;
         }
         let Some(voice) = &state.voice else { return };
@@ -2426,7 +2521,9 @@ impl ChatView {
             {
                 self.insert_entry(
                     Entry {
-                        id: event.string("message_id"),
+                        // M165: `""` here would collide with every other
+                        // id-less event on the empty key (see `fresh_local_id`).
+                        id: nonempty_or(event.optional("message_id"), self.fresh_local_id()),
                         mine: false,
                         sender_identity: String::new(),
                         text: event.string("text"),
@@ -2450,9 +2547,10 @@ impl ChatView {
                 let sender = event.string("sender_identity_id");
                 self.insert_entry(
                     Entry {
+                        // M165: see `fresh_local_id`.
                         id: nonempty_or(
                             event.optional("group_message_local_id"),
-                            event.string("message_id"),
+                            nonempty_or(event.optional("message_id"), self.fresh_local_id()),
                         ),
                         mine: sender == own_identity,
                         sender_identity: sender,
@@ -2478,7 +2576,8 @@ impl ChatView {
             {
                 self.insert_entry(
                     Entry {
-                        id: event.string("message_id"),
+                        // M165: see `fresh_local_id`.
+                        id: nonempty_or(event.optional("message_id"), self.fresh_local_id()),
                         mine: true,
                         sender_identity: own_identity,
                         text: event.string("text"),
@@ -2500,9 +2599,10 @@ impl ChatView {
             {
                 self.insert_entry(
                     Entry {
+                        // M165: see `fresh_local_id`.
                         id: nonempty_or(
                             event.optional("group_message_local_id"),
-                            event.string("message_id"),
+                            nonempty_or(event.optional("message_id"), self.fresh_local_id()),
                         ),
                         mine: true,
                         sender_identity: own_identity,
@@ -2588,8 +2688,57 @@ impl ChatView {
             }
 
             // --- attachments ---
+            // H129: a full `reload()` per offer — every core round-trip it
+            // implies, run for each file in a burst — is gone; the attachment
+            // bubble is built in place instead, with exactly the fields the
+            // reload's `fetch_page` merge would have produced (it merges
+            // attachments on the first page from the very row the core just
+            // wrote for this event, so pre-`reload()` this insert already
+            // matches). `file_progress`/`file_complete` then drive the card
+            // by `file_id` as before.
+            // Ticks: attachment bubbles carry no delivery status (same as the
+            // archive merge, which sets `status: None`) — see `fetch_page`.
             (_, "file_offer" | "sibling_file") if self.event_belongs_here(event) => {
-                self.reload();
+                let attachment = Some(Attachment {
+                    file_id: event.string("file_id"),
+                    file_name: event.string("file_name"),
+                    mime: event.string("mime_type"),
+                    total_size: event.number("total_size"),
+                    // The peer column: the canonical chat key for 1:1, the
+                    // sending member's device in a group — matches
+                    // `list_attachments`' `peer_device_fingerprint`.
+                    source_fingerprint: event.string("peer"),
+                    status: if event.flag("auto_downloading") {
+                        "downloading".to_string()
+                    } else {
+                        "offered".to_string()
+                    },
+                    preview_hex: event.optional("preview_hex"),
+                    bytes_done: 0,
+                    duration_ms: u32::try_from(event.number("duration_ms"))
+                        .ok()
+                        .filter(|ms| *ms > 0),
+                });
+                self.insert_entry(
+                    Entry {
+                        id: event.string("file_id"),
+                        // A sibling echo is my own outgoing file, arrived via
+                        // another of my devices.
+                        mine: event.kind == "sibling_file",
+                        sender_identity: event.string("sender_identity_id"),
+                        text: event.string("caption"),
+                        order_key: util::now_ms(),
+                        status: None,
+                        reply_preview: event.optional("reply_to_preview"),
+                        reply_sender: event.optional("reply_to_sender_identity_id"),
+                        deleted: false,
+                        edited: false,
+                        attachment,
+                        seen: false,
+                        reactions: String::new(),
+                    },
+                    true,
+                );
             }
             (_, "file_progress") => {
                 self.apply_progress(
@@ -3012,29 +3161,48 @@ fn group_invite(view: &Rc<ChatView>) {
         .find(|group| group.group_id == *group_id)
         .map(|group| group.member_identity_ids.clone())
         .unwrap_or_default();
+    let group_id = group_id.clone();
+    let view = view.clone();
+    let rows_list = list.clone();
 
-    for contact in core::list_contacts() {
-        if already.contains(&contact.identity_id) {
-            continue;
-        }
-        let row = adw::ActionRow::builder()
-            .title(glib::markup_escape_text(&contact.display_name).as_str())
-            .activatable(true)
-            .build();
-        let view = view.clone();
-        let group_id = group_id.clone();
-        let identity = contact.identity_id.clone();
-        row.connect_activated(move |row| {
-            if core::invite_to_group(&group_id, &identity) {
-                view.app().toast("Invitation sent.");
-                view.app().refresh_caches();
-                row.set_sensitive(false);
-            } else {
-                view.app().toast("Could not invite that contact.");
+    app::run_in_background(
+        core::list_contacts,
+        move |contacts| {
+            for contact in contacts {
+                if already.contains(&contact.identity_id) {
+                    continue;
+                }
+                let row = adw::ActionRow::builder()
+                    .title(glib::markup_escape_text(&contact.display_name).as_str())
+                    .activatable(true)
+                    .build();
+                let view = view.clone();
+                let group_id = group_id.clone();
+                let identity = contact.identity_id.clone();
+                row.connect_activated(move |row| {
+                    let view = view.clone();
+                    let group_id = group_id.clone();
+                    let identity = identity.clone();
+                    let row = row.clone();
+                    // Sending the invitation takes the shared core lock — off
+                    // the GTK thread, so a slow poll round cannot stall it.
+                    crate::app::run_in_background(
+                        move || core::invite_to_group(&group_id, &identity),
+                        move |invited| {
+                            if invited {
+                                view.app().toast("Invitation sent.");
+                                view.app().refresh_caches();
+                                row.set_sensitive(false);
+                            } else {
+                                view.app().toast("Could not invite that contact.");
+                            }
+                        },
+                    );
+                });
+                rows_list.append(&row);
             }
-        });
-        list.append(&row);
-    }
+        },
+    );
 
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -3099,47 +3267,55 @@ fn group_picture(view: &Rc<ChatView>) {
 
 fn attachments_overview(view: &Rc<ChatView>) {
     let Some(window) = view.app().window() else { return };
-    let attachments = match &view.conversation {
-        Conversation::Direct { fingerprint, .. } => core::list_attachments(fingerprint),
-        Conversation::Group { group_id, .. } => core::list_group_attachments(group_id),
-    };
+    let conversation = view.conversation.clone();
+    let window = window.clone();
 
-    let group = adw::PreferencesGroup::builder()
-        .title("Files in this conversation")
-        .build();
-    if attachments.is_empty() {
-        group.add(&adw::ActionRow::builder().title("Nothing shared yet").build());
-    }
-    for attachment in attachments {
-        let subtitle = format!(
-            "{} · {} · {}",
-            util::human_size(attachment.total_size),
-            attachment.status,
-            util::format_list_time(attachment.created_at)
-        );
-        group.add(
-            &adw::ActionRow::builder()
-                .title(glib::markup_escape_text(&attachment.file_name).as_str())
-                .subtitle(subtitle.as_str())
-                .build(),
-        );
-    }
+    // The attachment listing is a core query — off the GTK thread, like every
+    // core call here. The window itself is built when the rows come back.
+    app::run_in_background(
+        move || match &conversation {
+            Conversation::Direct { fingerprint, .. } => core::list_attachments(fingerprint),
+            Conversation::Group { group_id, .. } => core::list_group_attachments(group_id),
+        },
+        move |attachments| {
+            let group = adw::PreferencesGroup::builder()
+                .title("Files in this conversation")
+                .build();
+            if attachments.is_empty() {
+                group.add(&adw::ActionRow::builder().title("Nothing shared yet").build());
+            }
+            for attachment in attachments {
+                let subtitle = format!(
+                    "{} · {} · {}",
+                    util::human_size(attachment.total_size),
+                    attachment.status,
+                    util::format_list_time(attachment.created_at)
+                );
+                group.add(
+                    &adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&attachment.file_name).as_str())
+                        .subtitle(subtitle.as_str())
+                        .build(),
+                );
+            }
 
-    let page = adw::PreferencesPage::new();
-    page.add(&group);
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&adw::HeaderBar::new());
-    toolbar.set_content(Some(&page));
+            let page = adw::PreferencesPage::new();
+            page.add(&group);
+            let toolbar = adw::ToolbarView::new();
+            toolbar.add_top_bar(&adw::HeaderBar::new());
+            toolbar.set_content(Some(&page));
 
-    adw::Window::builder()
-        .modal(true)
-        .transient_for(&window)
-        .title("Attachments")
-        .default_width(480)
-        .default_height(480)
-        .content(&toolbar)
-        .build()
-        .present();
+            adw::Window::builder()
+                .modal(true)
+                .transient_for(&window)
+                .title("Attachments")
+                .default_width(480)
+                .default_height(480)
+                .content(&toolbar)
+                .build()
+                .present();
+        },
+    );
 }
 
 // --- small helpers ---
@@ -3495,6 +3671,10 @@ fn day_separator(timestamp: u64) -> gtk::Widget {
     let label = gtk::Label::new(Some(&util::format_day_separator(timestamp)));
     label.add_css_class("caption");
     label.add_css_class("dim-label");
+    // H128: `evict_oldest` identifies separators by class when it prunes the
+    // ones left stranded by evicted bubbles (they are not tracked in
+    // `order`, which only mirrors bubbles).
+    label.add_css_class("day-separator");
     label.set_margin_top(8);
     label.set_halign(gtk::Align::Center);
     label.upcast()

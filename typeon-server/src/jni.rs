@@ -56,7 +56,14 @@ lazy_static::lazy_static! {
 }
 
 fn jstr(env: &mut JNIEnv, s: &JString) -> String {
-    env.get_string(s).map(|v| v.into()).unwrap_or_default()
+    // An empty string falls back to a default (e.g. `blob_dir`): a failed
+    // read must at least show up in the log.
+    env.get_string(s).map(|v| v.into()).unwrap_or_else(|e| {
+        log::warn!("JNI dizesi okunamadı, boş sayıldı: {e}");
+        // A pending Java exception aborts the next JNI call (M6).
+        let _ = env.exception_clear();
+        String::new()
+    })
 }
 
 fn out(env: &mut JNIEnv, s: String) -> jstring {
@@ -72,7 +79,11 @@ fn guarded<'local>(env: &mut JNIEnv<'local>, body: impl FnOnce(JNIEnv<'local>) -
     // `body` runs.
     let inner = unsafe { env.unsafe_clone() };
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(inner)))
-        .unwrap_or_else(|_| out(env, "Error: iç hata (panic)".to_string()))
+        .unwrap_or_else(|p| {
+            let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned());
+            log::error!("JNI çağrısında panic: {}", msg.as_deref().unwrap_or("?"));
+            out(env, "Error: internal error (panic)".to_string())
+        })
 }
 
 /// Sunucuyu başlatır. Yeniden çağrılırsa no-op (foreground service
@@ -167,7 +178,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
                 // Starting anyway ran a second core on the same DB and Tor state.
                 log::warn!("Önceki sunucu döngüsü 20 sn içinde kapanmadı, başlatılmadı");
                 *LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
-                return out(&mut env, "Error: önceki sunucu hâlâ kapanıyor, biraz sonra tekrar deneyin".to_string());
+                return out(&mut env, "Error: previous server still shutting down, retry shortly".to_string());
             }
         }
         let mut core = match ServerCore::new(config.clone()) {
@@ -250,7 +261,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_stopServer<'local
             if RUNTIME.block_on(async { tokio::time::timeout(std::time::Duration::from_secs(20), &mut handle).await }).is_err() {
                 log::warn!("Sunucu döngüsü 20 sn içinde kapanmadı");
                 *LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
-                return out(&mut env, "Error: sunucu döngüsü 20 sn içinde kapanmadı".to_string());
+                return out(&mut env, "Error: server loop did not stop within 20 s".to_string());
             }
         }
         info!("Sunucu durduruldu (JNI).");
@@ -324,7 +335,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_joinCode<'local>(
     guarded(&mut env, |mut env| {
         let guard = CONTROL.lock().unwrap_or_else(|p| p.into_inner());
         let Some(control) = guard.as_ref() else {
-            return out(&mut env, "Error: sunucu çalışmıyor".to_string());
+            return out(&mut env, "Error: server not running".to_string());
         };
         let addrs: Vec<String> = control
             .shared
@@ -335,7 +346,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_joinCode<'local>(
         if addrs.is_empty() {
             return out(
                 &mut env,
-                "Error: sunucunun henüz ulaşılabilir bir adresi yok (Tor açılıyor olabilir)".to_string(),
+                "Error: server has no reachable address yet (Tor may be starting)".to_string(),
             );
         }
         match crate::public_join_token(&control.store, rotate != 0) {
@@ -392,10 +403,10 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_revokeDevice<'loc
         let id_hex = jstr(&mut env, &enrollment_id);
         let guard = CONTROL.lock().unwrap_or_else(|p| p.into_inner());
         let Some(control) = guard.as_ref() else {
-            return out(&mut env, "Error: sunucu çalışmıyor".to_string());
+            return out(&mut env, "Error: server not running".to_string());
         };
         let Ok(id) = hex::decode(&id_hex) else {
-            return out(&mut env, "Error: geçersiz kimlik".to_string());
+            return out(&mut env, "Error: invalid id".to_string());
         };
         let res = control.store.revoke_enrollment(&id);
         let _ = control.net_changed.send(CoreSignal::EnrollmentsChanged);
@@ -420,13 +431,13 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_blockDevice<'loca
         let id_hex = jstr(&mut env, &enrollment_id);
         let guard = CONTROL.lock().unwrap_or_else(|p| p.into_inner());
         let Some(control) = guard.as_ref() else {
-            return out(&mut env, "Error: sunucu çalışmıyor".to_string());
+            return out(&mut env, "Error: server not running".to_string());
         };
         let Ok(id) = hex::decode(&id_hex) else {
-            return out(&mut env, "Error: geçersiz kimlik".to_string());
+            return out(&mut env, "Error: invalid id".to_string());
         };
         let Some(existing) = control.store.enrollment_by_id(&id) else {
-            return out(&mut env, "Error: kayıt bulunamadı".to_string());
+            return out(&mut env, "Error: record not found".to_string());
         };
         let blocked = control.store.block_enrollment_key(&existing.enroll_pk, now_ms());
         let revoked = control.store.revoke_enrollment(&id);
@@ -453,13 +464,13 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_unblockDevice<'lo
         let id_hex = jstr(&mut env, &enrollment_id);
         let guard = CONTROL.lock().unwrap_or_else(|p| p.into_inner());
         let Some(control) = guard.as_ref() else {
-            return out(&mut env, "Error: sunucu çalışmıyor".to_string());
+            return out(&mut env, "Error: server not running".to_string());
         };
         let Ok(id) = hex::decode(&id_hex) else {
-            return out(&mut env, "Error: geçersiz kimlik".to_string());
+            return out(&mut env, "Error: invalid id".to_string());
         };
         let Some(existing) = control.store.enrollment_by_id(&id) else {
-            return out(&mut env, "Error: kayıt bulunamadı".to_string());
+            return out(&mut env, "Error: record not found".to_string());
         };
         control.store.unblock_enrollment_key(&existing.enroll_pk);
         drop(guard);
@@ -485,19 +496,24 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_diskUsage<'local>
         // kullanım neredeyse sıfır görünüyordu.
         let blobs = control.blob_dir.clone();
         drop(guard);
-        let mut total = 0u64;
-        let mut sum_dir = |d: &PathBuf| {
-            if let Ok(entries) = std::fs::read_dir(d) {
-                for e in entries.flatten() {
-                    if let Ok(m) = e.metadata() {
-                        total += m.len();
-                    }
-                }
-            }
-        };
-        sum_dir(&dir);
+        // Whole trees (Tor state, WAL, ...); the blob dir once, also when it
+        // sits inside the data dir.
+        fn tree_bytes(d: &std::path::Path, skip: &std::path::Path) -> u64 {
+            let Ok(entries) = std::fs::read_dir(d) else { return 0 };
+            entries
+                .flatten()
+                .filter(|e| e.path() != skip)
+                // `file_type` does not follow symlinks: no loop.
+                .map(|e| match e.file_type() {
+                    Ok(t) if t.is_dir() => tree_bytes(&e.path(), skip),
+                    Ok(_) => e.metadata().map_or(0, |m| m.len()),
+                    Err(_) => 0,
+                })
+                .sum()
+        }
+        let mut total = tree_bytes(&dir, &blobs);
         if blobs != dir {
-            sum_dir(&blobs);
+            total += tree_bytes(&blobs, &dir);
         }
         out(&mut env, total.to_string())
     })

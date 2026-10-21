@@ -496,4 +496,9 @@
     <string name="title_scan_qr">Scan QR</string>
     <string name="tor_off_no_network">Tor is off: the network will not start without Tor.</string>
     <string name="msg_pairing_contact_limit">Pairing failed: your contact list is full.</string>
+    <string name="notif_fg_text">Secure P2P connection active</string>
+    <string name="channel_service_name">Background service</string>
+    <string name="channel_messages_name">Messages</string>
+    <string name="error_edit_failed">Couldn\'t edit the message</string>
+    <string name="error_delete_failed">Couldn\'t delete the message</string>
 </resources>

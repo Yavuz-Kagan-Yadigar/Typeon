@@ -150,9 +150,18 @@ pub fn chat_context_menu(
                             ),
                             "Clear",
                             true,
-                            move || match core::clear_chat_history(&contact_id) {
-                                Ok(()) => main.app.toast("Chat history cleared."),
-                                Err(error) => main.app.toast(&error),
+                            move || {
+                                let main = main.clone();
+                                let contact_id = contact_id.clone();
+                                // Core calls take the shared core lock the poll
+                                // thread can hold for seconds — off the GTK thread.
+                                crate::app::run_in_background(
+                                    move || core::clear_chat_history(&contact_id),
+                                    move |result| match result {
+                                        Ok(()) => main.app.toast("Chat history cleared."),
+                                        Err(error) => main.app.toast(&error),
+                                    },
+                                );
                             },
                         );
                     }),
@@ -179,12 +188,19 @@ pub fn chat_context_menu(
                             ),
                             "Delete",
                             true,
-                            move || match core::delete_contact(&contact_id) {
-                                Ok(()) => {
-                                    main.close_conversation();
-                                    main.app.toast("Contact deleted.");
-                                }
-                                Err(error) => main.app.toast(&error),
+                            move || {
+                                let main = main.clone();
+                                let contact_id = contact_id.clone();
+                                crate::app::run_in_background(
+                                    move || core::delete_contact(&contact_id),
+                                    move |result| match result {
+                                        Ok(()) => {
+                                            main.close_conversation();
+                                            main.app.toast("Contact deleted.");
+                                        }
+                                        Err(error) => main.app.toast(&error),
+                                    },
+                                );
                             },
                         );
                     }),
@@ -225,18 +241,22 @@ pub fn chat_context_menu(
                         if is_founder { "Delete" } else { "Leave" },
                         true,
                         move || {
-                            let outcome = if is_founder {
-                                core::delete_group(&group_id)
-                            } else {
-                                core::leave_group(&group_id)
-                            };
-                            match outcome {
-                                Ok(()) => {
-                                    main.close_conversation();
-                                    main.app.toast("Done.");
-                                }
-                                Err(error) => main.app.toast(&error),
-                            }
+                            let main = main.clone();
+                            let group_id = group_id.clone();
+                            crate::app::run_in_background(
+                                move || if is_founder {
+                                    core::delete_group(&group_id)
+                                } else {
+                                    core::leave_group(&group_id)
+                                },
+                                move |result| match result {
+                                    Ok(()) => {
+                                        main.close_conversation();
+                                        main.app.toast("Done.");
+                                    }
+                                    Err(error) => main.app.toast(&error),
+                                },
+                            );
                         },
                     );
                 }),
@@ -317,7 +337,6 @@ pub fn show_own_code(app: &Rc<App>) {
         .build();
     copy.add_css_class("pill");
 
-    let short_code = core::identity_short_code().unwrap_or_default();
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
@@ -327,11 +346,20 @@ pub fn show_own_code(app: &Rc<App>) {
         .margin_end(18)
         .build();
     content.append(&qr_slot);
-    if !short_code.is_empty() {
-        let safety = gtk::Label::new(Some(&format!("Safety number: {}", short_code)));
-        safety.add_css_class("dim-label");
-        content.append(&safety);
-    }
+    // Core lock: filled in from a worker, hidden until it arrives.
+    let safety = gtk::Label::new(None);
+    safety.add_css_class("dim-label");
+    safety.set_visible(false);
+    content.append(&safety);
+    crate::app::run_in_background(
+        || core::identity_short_code().unwrap_or_default(),
+        move |short_code| {
+            if !short_code.is_empty() {
+                safety.set_label(&format!("Safety number: {}", short_code));
+                safety.set_visible(true);
+            }
+        },
+    );
     content.append(&code_label);
     content.append(&copy);
 
@@ -360,40 +388,60 @@ pub fn show_own_code(app: &Rc<App>) {
         let copy = copy.clone();
         let dialog = dialog.clone();
         let attempts = std::cell::Cell::new(0u32);
+        let in_flight = Rc::new(std::cell::Cell::new(false));
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             if !dialog.is_visible() {
                 return glib::ControlFlow::Break;
             }
-            let address = core::node_address();
-            if address.is_empty() {
-                attempts.set(attempts.get() + 1);
-                if attempts.get() >= 40 {
-                    code_label.set_label("No listening address yet — check your connection.");
-                    return glib::ControlFlow::Break;
-                }
+            // The core lock can be held for seconds: query off the GTK thread.
+            if in_flight.replace(true) {
                 return glib::ControlFlow::Continue;
             }
-            let manual = core::manual_add_code(&address);
-            if !manual.is_empty() {
-                code_label.set_label(&manual);
-                copy.set_sensitive(true);
-                let manual_for_copy = manual.clone();
-                // Take the button from the callback argument rather than
-                // capturing a clone — capturing would make the button own a
-                // closure that owns the button.
-                copy.connect_clicked(move |button| {
-                    // The pairing code is a 24 h bearer secret: mark it so
-                    // clipboard managers do not record/preview it.
-                    let text = gtk::gdk::ContentProvider::for_value(&manual_for_copy.to_value());
-                    let hint = gtk::gdk::ContentProvider::for_bytes("x-kde-passwordManagerHint", &glib::Bytes::from_static(b"secret"));
-                    let _ = button.clipboard().set_content(Some(&gtk::gdk::ContentProvider::new_union(&[text, hint])));
-                });
-            }
-            let payload = core::generate_qr_packet(&address);
-            if let Some(widget) = qr::qr_widget(&payload) {
-                qr_slot.append(&widget);
-            }
-            glib::ControlFlow::Break
+            let (qr_slot, code_label, copy, in_flight) =
+                (qr_slot.clone(), code_label.clone(), copy.clone(), in_flight.clone());
+            let attempts_now = attempts.get() + 1;
+            attempts.set(attempts_now);
+            crate::app::run_in_background(
+                || {
+                    let address = core::node_address();
+                    if address.is_empty() {
+                        return None;
+                    }
+                    let manual = core::manual_add_code(&address);
+                    let payload = core::generate_qr_packet(&address);
+                    Some((manual, payload))
+                },
+                move |found| {
+                    in_flight.set(false);
+                    let Some((manual, payload)) = found else {
+                        if attempts_now >= 40 {
+                            code_label.set_label("No listening address yet — check your connection.");
+                            // give up: the flag stays set, later ticks are no-ops.
+                            in_flight.set(true);
+                        }
+                        return;
+                    };
+                    in_flight.set(true); // done: no more queries
+                    if !manual.is_empty() {
+                        code_label.set_label(&manual);
+                        copy.set_sensitive(true);
+                        // Take the button from the callback argument rather
+                        // than capturing a clone — capturing would make the
+                        // button own a closure that owns the button.
+                        copy.connect_clicked(move |button| {
+                            // The pairing code is a 24 h bearer secret: mark it
+                            // so clipboard managers do not record/preview it.
+                            let text = gtk::gdk::ContentProvider::for_value(&manual.to_value());
+                            let hint = gtk::gdk::ContentProvider::for_bytes("x-kde-passwordManagerHint", &glib::Bytes::from_static(b"secret"));
+                            let _ = button.clipboard().set_content(Some(&gtk::gdk::ContentProvider::new_union(&[text, hint])));
+                        });
+                    }
+                    if let Some(widget) = qr::qr_widget(&payload) {
+                        qr_slot.append(&widget);
+                    }
+                },
+            );
+            glib::ControlFlow::Continue
         });
     }
 
@@ -411,12 +459,20 @@ pub fn create_group(main: &Rc<MainUi>) {
         "Group name",
         "",
         "Create",
-        move |name| match core::create_group(&name) {
-            Ok(group_id) => {
-                main.app.refresh_caches();
-                main.open_conversation(Conversation::Group { group_id, name });
-            }
-            Err(error) => main.app.toast(&format!("Could not create the group: {}", error)),
+        move |name| {
+            // Core lock: off the GTK thread.
+            let main = main.clone();
+            let work_name = name.clone();
+            crate::app::run_in_background(
+                move || core::create_group(&work_name),
+                move |result| match result {
+                    Ok(group_id) => {
+                        main.app.refresh_caches();
+                        main.open_conversation(Conversation::Group { group_id, name });
+                    }
+                    Err(error) => main.app.toast(&format!("Could not create the group: {}", error)),
+                },
+            );
         },
     );
 }
@@ -457,55 +513,69 @@ pub fn linked_devices(app: &Rc<App>) {
         let group = group.clone();
         let rows = rows.clone();
         Rc::new(move || {
-            for row in rows.borrow_mut().drain(..) {
-                group.remove(&row);
-            }
-            for device in core::list_linked_devices() {
-                let subtitle = format!(
-                    "{}{}{}",
-                    util::short_fingerprint(&device.device_fingerprint),
-                    if device.is_this_device { " · this computer" } else { "" },
-                    if device.is_active { "" } else { " · revoked" },
-                );
-                let row = adw::ActionRow::builder()
-                    .title(glib::markup_escape_text(&device.device_name).as_str())
-                    .subtitle(subtitle.as_str())
-                    .build();
-
-                if device.is_active && !device.is_this_device {
-                    let revoke = gtk::Button::builder()
-                        .label("Revoke")
-                        .valign(gtk::Align::Center)
-                        .build();
-                    revoke.add_css_class("destructive-action");
-                    let app = app.clone();
-                    let fingerprint = device.device_fingerprint.clone();
-                    let name = device.device_name.clone();
-                    revoke.connect_clicked(move |_| {
-                        let app_inner = app.clone();
-                        let fingerprint = fingerprint.clone();
-                        confirm(
-                            &app,
-                            "Revoke this device?",
-                            &format!(
-                                "\"{}\" can no longer send or receive on your account. A signed \
-                                 revocation goes out to every contact.",
-                                name
-                            ),
-                            "Revoke",
-                            true,
-                            move || match core::revoke_linked_device(&fingerprint) {
-                                Ok(()) => app_inner.toast("Device revoked."),
-                                Err(error) => app_inner.toast(&error),
-                            },
-                        );
-                    });
-                    row.add_suffix(&revoke);
+            let app = app.clone();
+            let group = group.clone();
+            let rows = rows.clone();
+            // The core read takes the shared core lock; a poll round can hold
+            // it for seconds, so it never runs on the GTK thread — not even
+            // from this 3-second timer (see `watch_device_alerts`).
+            crate::app::run_in_background(core::list_linked_devices, move |devices| {
+                for row in rows.borrow_mut().drain(..) {
+                    group.remove(&row);
                 }
+                for device in devices {
+                    let subtitle = format!(
+                        "{}{}{}",
+                        util::short_fingerprint(&device.device_fingerprint),
+                        if device.is_this_device { " · this computer" } else { "" },
+                        if device.is_active { "" } else { " · revoked" },
+                    );
+                    let row = adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&device.device_name).as_str())
+                        .subtitle(subtitle.as_str())
+                        .build();
 
-                group.add(&row);
-                rows.borrow_mut().push(row);
-            }
+                    if device.is_active && !device.is_this_device {
+                        let revoke = gtk::Button::builder()
+                            .label("Revoke")
+                            .valign(gtk::Align::Center)
+                            .build();
+                        revoke.add_css_class("destructive-action");
+                        let app = app.clone();
+                        let fingerprint = device.device_fingerprint.clone();
+                        let name = device.device_name.clone();
+                        revoke.connect_clicked(move |_| {
+                            let app_inner = app.clone();
+                            let fingerprint = fingerprint.clone();
+                            confirm(
+                                &app,
+                                "Revoke this device?",
+                                &format!(
+                                    "\"{}\" can no longer send or receive on your account. A signed \
+                                     revocation goes out to every contact.",
+                                    name
+                                ),
+                                "Revoke",
+                                true,
+                                move || {
+                                    let app_inner = app_inner.clone();
+                                    let fingerprint = fingerprint.clone();
+                                    crate::app::run_in_background(
+                                        move || core::revoke_linked_device(&fingerprint),
+                                        move |result| match result {
+                                            Ok(()) => app_inner.toast("Device revoked."),
+                                            Err(error) => app_inner.toast(&error),
+                                        },
+                                    );
+                                },
+                            );
+                        });
+                        row.add_suffix(&revoke);
+                    }
+
+                    group.add(&row);
+                    rows.borrow_mut().push(row);
+                }
         })
     };
 
@@ -571,61 +641,75 @@ pub fn pending_messages(app: &Rc<App>) {
         let rows = rows.clone();
         let placeholder = placeholder.clone();
         Rc::new(move || {
-            for row in rows.borrow_mut().drain(..) {
-                group.remove(&row);
-            }
-            let pending = core::list_pending_messages();
-            placeholder.set_visible(pending.is_empty());
-
-            for message in pending {
-                let target = if message.device_name.is_empty() {
-                    util::short_fingerprint(&message.peer_device_fingerprint)
-                } else {
-                    message.device_name.clone()
-                };
-                let subtitle = format!(
-                    "to {} · sent {}",
-                    target,
-                    util::format_list_time(message.original_sent_at)
-                );
-                let row = adw::ActionRow::builder()
-                    .title(glib::markup_escape_text(&util::preview_text(&message.text, 70)).as_str())
-                    .subtitle(glib::markup_escape_text(&subtitle).as_str())
-                    .build();
-
-                let buttons = gtk::Box::builder()
-                    .orientation(gtk::Orientation::Horizontal)
-                    .spacing(6)
-                    .valign(gtk::Align::Center)
-                    .build();
-
-                let retry = gtk::Button::builder().label("Retry now").build();
-                {
-                    let app = app.clone();
-                    let message_id = message.message_id.clone();
-                    retry.connect_clicked(move |_| {
-                        core::retry_pending_message_now(&message_id);
-                        app.toast("Retrying now.");
-                    });
+            let app = app.clone();
+            let group = group.clone();
+            let rows = rows.clone();
+            let placeholder = placeholder.clone();
+            // Same core-lock rule as `linked_devices` above: the read runs off
+            // the GTK thread, the row rebuild comes back on it.
+            crate::app::run_in_background(core::list_pending_messages, move |pending| {
+                for row in rows.borrow_mut().drain(..) {
+                    group.remove(&row);
                 }
-                buttons.append(&retry);
+                placeholder.set_visible(pending.is_empty());
 
-                let cancel = gtk::Button::builder().label("Give up").build();
-                cancel.add_css_class("destructive-action");
-                {
-                    let app = app.clone();
-                    let message_id = message.message_id.clone();
-                    cancel.connect_clicked(move |_| {
-                        core::cancel_pending_message(&message_id);
-                        app.toast("Message abandoned.");
-                    });
+                for message in pending {
+                    let target = if message.device_name.is_empty() {
+                        util::short_fingerprint(&message.peer_device_fingerprint)
+                    } else {
+                        message.device_name.clone()
+                    };
+                    let subtitle = format!(
+                        "to {} · sent {}",
+                        target,
+                        util::format_list_time(message.original_sent_at)
+                    );
+                    let row = adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&util::preview_text(&message.text, 70)).as_str())
+                        .subtitle(glib::markup_escape_text(&subtitle).as_str())
+                        .build();
+
+                    let buttons = gtk::Box::builder()
+                        .orientation(gtk::Orientation::Horizontal)
+                        .spacing(6)
+                        .valign(gtk::Align::Center)
+                        .build();
+
+                    let retry = gtk::Button::builder().label("Retry now").build();
+                    {
+                        let app = app.clone();
+                        let message_id = message.message_id.clone();
+                        retry.connect_clicked(move |_| {
+                            let app = app.clone();
+                            let message_id = message_id.clone();
+                            crate::app::run_in_background(
+                                move || core::retry_pending_message_now(&message_id),
+                                move |_| app.toast("Retrying now."),
+                            );
+                        });
+                    }
+                    buttons.append(&retry);
+
+                    let cancel = gtk::Button::builder().label("Give up").build();
+                    cancel.add_css_class("destructive-action");
+                    {
+                        let app = app.clone();
+                        let message_id = message.message_id.clone();
+                        cancel.connect_clicked(move |_| {
+                            let app = app.clone();
+                            let message_id = message_id.clone();
+                            crate::app::run_in_background(
+                                move || core::cancel_pending_message(&message_id),
+                                move |_| app.toast("Message abandoned."),
+                            );
+                        });
+                    }
+                    buttons.append(&cancel);
+
+                    row.add_suffix(&buttons);
+                    group.add(&row);
+                    rows.borrow_mut().push(row);
                 }
-                buttons.append(&cancel);
-
-                row.add_suffix(&buttons);
-                group.add(&row);
-                rows.borrow_mut().push(row);
-            }
         })
     };
 
@@ -633,9 +717,16 @@ pub fn pending_messages(app: &Rc<App>) {
         let app = app.clone();
         let rebuild = rebuild.clone();
         retry_all.connect_clicked(move |_| {
-            core::retry_all_pending_now();
-            app.toast("Retrying everything now.");
-            rebuild();
+            // The core fan-out takes the shared core lock — off the GTK thread.
+            let app = app.clone();
+            let rebuild = rebuild.clone();
+            crate::app::run_in_background(
+                core::retry_all_pending_now,
+                move |()| {
+                    app.toast("Retrying everything now.");
+                    rebuild();
+                },
+            );
         });
     }
 
@@ -711,15 +802,31 @@ pub fn watch_device_alerts(app: &Rc<App>) {
         let showing_for_response = showing.clone();
         let fingerprint = alert.new_device_fingerprint.clone();
         dialog.connect_response(None, move |_, response| {
-            if response == "accept" {
-                core::accept_device_alert(&fingerprint);
-                app_for_response.toast("New device accepted.");
-            } else {
-                core::reject_device_alert(&fingerprint);
-                app_for_response.toast("New device rejected.");
-            }
-            app_for_response.refresh_caches();
-            *showing_for_response.borrow_mut() = None;
+            // A security decision must not take the core lock on the GTK
+            // thread: the same poll round the watcher above worries about
+            // would freeze exactly this dialog.
+            let accepting = response == "accept";
+            let fingerprint = fingerprint.clone();
+            let app_for_response = app_for_response.clone();
+            let showing_for_response = showing_for_response.clone();
+            crate::app::run_in_background(
+                move || {
+                    if accepting {
+                        core::accept_device_alert(&fingerprint);
+                    } else {
+                        core::reject_device_alert(&fingerprint);
+                    }
+                },
+                move |()| {
+                    app_for_response.toast(if accepting {
+                        "New device accepted."
+                    } else {
+                        "New device rejected."
+                    });
+                    app_for_response.refresh_caches();
+                    *showing_for_response.borrow_mut() = None;
+                },
+            );
         });
         dialog.present();
         });

@@ -85,7 +85,7 @@ pub const MAX_ARCHIVE_PUT_RECORDS: usize = 256;
 /// reddedilir (`ServerErrorCode::Stale`).
 pub const ENROLL_MAX_SKEW_MS: u64 = 5 * 60 * 1000;
 
-/// Opak posta kutusu adresi — `server_seal::server_mailbox_id` çıktısı
+/// Opak posta kutusu adresi — `server_seal::session_mailbox` (or `first_contact_mailbox_id`) çıktısı
 /// (`mb_<hex16>`) ya da arşiv kovası (`ar_<hex16>`). Sunucu bunu ASLA
 /// ayrıştırmaz; kendisi için anlamsız bir dizedir.
 pub type MailboxId = String;
@@ -247,6 +247,11 @@ pub enum ServerRequest {
     ArchiveProbe { buckets: Vec<MailboxId> },
 
     /// Bir kovadan sayfa (yeniden eskiye). `before_ms: None` = en yeni sayfa.
+    ///
+    /// Server trust: the server can answer with an OLDER revision of a
+    /// record (or leave records out). The seal stops forgery, not rollback;
+    /// only a device that keeps its own `record_id`/`rev` state notices
+    /// (see `server_seal` KNOWN LIMIT).
     ArchiveFetch {
         bucket: MailboxId,
         before_ms: Option<u64>,
@@ -419,6 +424,9 @@ pub enum ServerErrorCode {
     BadDirection,
     Unsupported,
     Internal,
+    /// `BlobFinish`: the stored bytes do not hash to `enc_sha256` (or cannot
+    /// be read). Deterministic — sending the same finish again never works.
+    BadHash,
 }
 
 impl ServerErrorCode {
@@ -432,7 +440,7 @@ impl ServerErrorCode {
     pub fn is_permanent(self) -> bool {
         matches!(
             self,
-            ServerErrorCode::TooLarge | ServerErrorCode::Unsupported | ServerErrorCode::BadDirection
+            ServerErrorCode::TooLarge | ServerErrorCode::Unsupported | ServerErrorCode::BadDirection | ServerErrorCode::BadHash
         )
     }
 
@@ -726,6 +734,7 @@ mod tests {
         // Kalıcı: aynı baytlarla asla başaramaz.
         assert!(ServerErrorCode::TooLarge.is_permanent());
         assert!(ServerErrorCode::Unsupported.is_permanent());
+        assert!(ServerErrorCode::BadHash.is_permanent());
         // Geçici: kullanıcı yer açabilir / sınır sıfırlanır / kayıt yenilenir.
         assert!(!ServerErrorCode::QuotaExceeded.is_permanent());
         assert!(!ServerErrorCode::RateLimited.is_permanent());

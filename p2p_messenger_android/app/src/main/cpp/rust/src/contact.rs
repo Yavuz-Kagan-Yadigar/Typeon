@@ -134,7 +134,20 @@ impl Contact {
         } else {
             // Owner-revoked tombstones have their own cap (32).
             if self.known_devices.iter().filter(|d| !d.owner_revoked).count() >= MAX_KNOWN_DEVICES {
-                return;
+                // Full: make room by dropping the oldest device the local
+                // user revoked. With 64 live devices the new one is refused
+                // (logged: it used to vanish without a trace).
+                match self.known_devices.iter().enumerate()
+                    .filter(|(_, d)| !d.owner_revoked && d.status == KnownDeviceStatus::Revoked)
+                    .min_by_key(|(_, d)| d.first_seen)
+                    .map(|(i, _)| i)
+                {
+                    Some(i) => { self.known_devices.remove(i); }
+                    None => {
+                        log::warn!("Contact {}: device list full ({}), new device not added", self.contact_id, MAX_KNOWN_DEVICES);
+                        return;
+                    }
+                }
             }
             self.known_devices.push(KnownDevice {
                 device_fingerprint: fingerprint,
@@ -151,9 +164,20 @@ impl Contact {
     /// A device this side never saw gets an entry too: its old `DeviceAdd`
     /// must not introduce it later.
     pub fn revoke_device_by_owner(&mut self, fingerprint: &str, now: u64) {
-        // ponytail: 32 never-seen revoked entries. The owner signs each one,
-        // so only the contact itself can fill the list.
-        if self.find_device(fingerprint).is_none() && self.known_devices.iter().filter(|d| d.owner_revoked).count() < 32 {
+        // ponytail: 32 owner-revoked entries. The owner signs each one, so
+        // only the contact itself can fill the list. At the cap the OLDEST
+        // tombstone goes: dropping the new one forgot the latest (most
+        // likely stolen) device's revoke.
+        if self.find_device(fingerprint).is_none() {
+            if self.known_devices.iter().filter(|d| d.owner_revoked).count() >= 32 {
+                if let Some(i) = self.known_devices.iter().enumerate()
+                    .filter(|(_, d)| d.owner_revoked)
+                    .min_by_key(|(_, d)| d.first_seen)
+                    .map(|(i, _)| i)
+                {
+                    self.known_devices.remove(i);
+                }
+            }
             self.known_devices.push(KnownDevice {
                 device_fingerprint: fingerprint.to_string(),
                 first_seen: now,

@@ -421,6 +421,8 @@ class MediaViewerActivity : AppCompatActivity() {
         super.onDestroy()
         videoHandler.removeCallbacksAndMessages(null)
         videoMediaPlayer = null
+        // M119: release the codec now, not when the view is collected.
+        try { findViewById<VideoView>(R.id.videoViewer)?.stopPlayback() } catch (e: Exception) { }
         // The full-size avatar copy of `AvatarUtil.openFullscreen` is plaintext
         // on disk and has no other use.
         if (isFinishing) {

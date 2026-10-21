@@ -129,8 +129,11 @@ pub fn exists(dir: &Path) -> bool {
 /// alone, so the launch flow knows whether to prompt before holding anything
 /// secret.
 pub fn is_passphrase_protected(dir: &Path) -> bool {
-    match std::fs::read(vault_path(dir)) {
-        Ok(raw) => raw.len() > MAGIC.len() && raw[MAGIC.len()] == MODE_WALLET_PASSPHRASE,
+    // M155: only the magic + mode byte, not the whole vault.
+    use std::io::Read;
+    let mut head = vec![0u8; MAGIC.len() + 1];
+    match std::fs::File::open(vault_path(dir)).and_then(|mut f| f.read_exact(&mut head)) {
+        Ok(()) => head[MAGIC.len()] == MODE_WALLET_PASSPHRASE,
         Err(_) => false,
     }
 }
@@ -331,6 +334,8 @@ fn archive_path(dir: &Path) -> PathBuf {
 /// Key that seals the archive file, derived from a secret inside the vault
 /// and held for the session. The wallet key alone must not open the archive
 /// key: with a passphrase set, that would bypass the passphrase.
+/// M154: deliberately never zeroized — it lives for the process, like the
+/// core's own keys; wiping it at exit would buy nothing.
 static ARCHIVE_SEAL: std::sync::Mutex<Option<[u8; 32]>> = std::sync::Mutex::new(None);
 
 fn remember_archive_seal(vault: &Vault) {

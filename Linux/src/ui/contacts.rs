@@ -230,9 +230,17 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
                 ),
                 "Revoke",
                 true,
-                move || match core::revoke_contact_device(&contact_id, &device) {
-                    Ok(()) => app_inner.toast("Device revoked."),
-                    Err(error) => app_inner.toast(&error),
+                move || {
+                    let app_inner = app_inner.clone();
+                    let contact_id = contact_id.clone();
+                    let device = device.clone();
+                    crate::app::run_in_background(
+                        move || core::revoke_contact_device(&contact_id, &device),
+                        move |result| match result {
+                            Ok(()) => app_inner.toast("Device revoked."),
+                            Err(error) => app_inner.toast(&error),
+                        },
+                    );
                 },
             );
         });
@@ -251,8 +259,12 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
         let app = main.app.clone();
         let identity_id = contact.identity_id.clone();
         unblock.connect_clicked(move |_| {
-            core::unblock_identity(&identity_id);
-            app.toast("Unblocked.");
+            let app = app.clone();
+            let identity_id = identity_id.clone();
+            crate::app::run_in_background(
+                move || core::unblock_identity(&identity_id),
+                move |()| app.toast("Unblocked."),
+            );
         });
         row.add_suffix(&unblock);
     } else {
@@ -278,9 +290,16 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
                 ),
                 "Block",
                 true,
-                move || match core::block_identity(&identity_id) {
-                    Ok(()) => app_inner.toast("Blocked."),
-                    Err(error) => app_inner.toast(&error),
+                move || {
+                    let app_inner = app_inner.clone();
+                    let identity_id = identity_id.clone();
+                    crate::app::run_in_background(
+                        move || core::block_identity(&identity_id),
+                        move |result| match result {
+                            Ok(()) => app_inner.toast("Blocked."),
+                            Err(error) => app_inner.toast(&error),
+                        },
+                    );
                 },
             );
         });
@@ -328,9 +347,16 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
                 &body,
                 "Mark verified",
                 false,
-                move || match core::trust_contact(&contact_id) {
-                    Ok(()) => app_inner.toast("Marked as verified."),
-                    Err(error) => app_inner.toast(&error),
+                move || {
+                    let app_inner = app_inner.clone();
+                    let contact_id = contact_id.clone();
+                    crate::app::run_in_background(
+                        move || core::trust_contact(&contact_id),
+                        move |result| match result {
+                            Ok(()) => app_inner.toast("Marked as verified."),
+                            Err(error) => app_inner.toast(&error),
+                        },
+                    );
                 },
             );
         });

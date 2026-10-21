@@ -34,8 +34,10 @@ object AppRestarter {
         val intent = packageManager.getLaunchIntentForPackage(context.packageName) ?: return
         val component = intent.component ?: return
         val restartIntent = Intent.makeRestartActivityTask(component)
-        context.startActivity(restartIntent)
-        Runtime.getRuntime().exit(0)
+        // A background start (service path) can be blocked on API 29+; it must
+        // not crash the restart, and the exit waits so the task can start (H146).
+        try { context.startActivity(restartIntent) } catch (e: Exception) { android.util.Log.w("AppRestarter", "startActivity: ${e.message}") }
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ Runtime.getRuntime().exit(0) }, 400)
     }
 
     /**

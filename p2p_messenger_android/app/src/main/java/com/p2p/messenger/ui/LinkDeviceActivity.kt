@@ -80,7 +80,14 @@ class LinkDeviceActivity : AppCompatActivity() {
 
     /** Ağ adresi hazır olana kadar QR üretimini yeniden dener. */
     private fun tryBuildQr(attemptsLeft: Int) {
-        val bytes = try { P2PLib.buildDeviceLinkRequest() } catch (e: Exception) { ByteArray(0) }
+        // H141: the JNI call (core lock) runs off the main thread.
+        Thread {
+            val bytes = try { P2PLib.buildDeviceLinkRequest() } catch (e: Exception) { ByteArray(0) }
+            handler.post { if (!isDestroyed) showQr(bytes, attemptsLeft) }
+        }.start()
+    }
+
+    private fun showQr(bytes: ByteArray, attemptsLeft: Int) {
         if (bytes.isEmpty()) {
             if (attemptsLeft > 0) {
                 handler.postDelayed({ tryBuildQr(attemptsLeft - 1) }, 500)

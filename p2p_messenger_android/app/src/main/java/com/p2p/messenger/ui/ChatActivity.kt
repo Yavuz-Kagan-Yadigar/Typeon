@@ -1051,10 +1051,14 @@ class ChatActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
-                P2PLib.sendMessage(peerDeviceFingerprint, text, replyToMessageId, replyToPreview)
+                try {
+                    P2PLib.sendMessage(peerDeviceFingerprint, text, replyToMessageId, replyToPreview)
+                } catch (e: Throwable) {
+                    "Error: ${e.message}" // H64: a JNI throw must not kill the process
+                }
             }
             val (messageId, status) = if (result.startsWith("Error:")) {
-                Toast.makeText(this@ChatActivity, result, Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@ChatActivity, R.string.error_send_failed, Toast.LENGTH_SHORT).show()
                 UUID.randomUUID().toString() to SimpleChatAdapter.Status.ERROR
             } else {
                 try {
@@ -2307,21 +2311,28 @@ class ChatActivity : AppCompatActivity() {
      *  yeniden gönder — ikinci bir balon oluşturmaz (bkz.
      *  SimpleChatAdapter.retryMessage). */
     private fun retryFailedMessage(item: SimpleChatAdapter.Item) {
-        val result = P2PLib.sendMessage(
-            peerDeviceFingerprint, item.text, item.replyToMessageId, item.replyToPreview
-        )
-        if (result.startsWith("Error:")) {
-            Toast.makeText(this, result, Toast.LENGTH_SHORT).show()
-            adapter.applyStatus(item.messageId, SimpleChatAdapter.Status.ERROR)
-            return
+        val peer = peerDeviceFingerprint
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                try {
+                    P2PLib.sendMessage(peer, item.text, item.replyToMessageId, item.replyToPreview)
+                } catch (e: Throwable) {
+                    "Error: ${e.message}"
+                }
+            }
+            if (result.startsWith("Error:")) {
+                Toast.makeText(this@ChatActivity, R.string.error_send_failed, Toast.LENGTH_SHORT).show()
+                adapter.applyStatus(item.messageId, SimpleChatAdapter.Status.ERROR)
+                return@launch
+            }
+            val (newMessageId, status) = try {
+                val obj = JSONObject(result)
+                obj.optString("message_id") to parseStatus(obj.optString("status"))
+            } catch (e: Exception) {
+                item.messageId to SimpleChatAdapter.Status.ERROR
+            }
+            adapter.retryMessage(item.messageId, newMessageId, status)
         }
-        val (newMessageId, status) = try {
-            val obj = JSONObject(result)
-            obj.optString("message_id") to parseStatus(obj.optString("status"))
-        } catch (e: Exception) {
-            item.messageId to SimpleChatAdapter.Status.ERROR
-        }
-        adapter.retryMessage(item.messageId, newMessageId, status)
     }
 
     private fun showEditMessageDialog(item: SimpleChatAdapter.Item) {
@@ -2334,11 +2345,16 @@ class ChatActivity : AppCompatActivity() {
             .setPositiveButton(R.string.action_edit_message) { _, _ ->
                 val newText = input.text.toString()
                 if (newText.isBlank()) return@setPositiveButton
-                val result = P2PLib.editMessage(peerDeviceFingerprint, item.messageId, newText)
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(this, result, Toast.LENGTH_SHORT).show()
-                } else {
-                    adapter.applyEdit(item.messageId, newText)
+                val peer = peerDeviceFingerprint
+                lifecycleScope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        try { P2PLib.editMessage(peer, item.messageId, newText) } catch (e: Throwable) { "Error: ${e.message}" }
+                    }
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(this@ChatActivity, R.string.error_edit_failed, Toast.LENGTH_SHORT).show()
+                    } else {
+                        adapter.applyEdit(item.messageId, newText)
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -2349,11 +2365,16 @@ class ChatActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setMessage(R.string.confirm_delete_message)
             .setPositiveButton(R.string.action_delete_message) { _, _ ->
-                val result = P2PLib.deleteMessage(peerDeviceFingerprint, item.messageId)
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(this, result, Toast.LENGTH_SHORT).show()
-                } else {
-                    adapter.applyDelete(item.messageId)
+                val peer = peerDeviceFingerprint
+                lifecycleScope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        try { P2PLib.deleteMessage(peer, item.messageId) } catch (e: Throwable) { "Error: ${e.message}" }
+                    }
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(this@ChatActivity, R.string.error_delete_failed, Toast.LENGTH_SHORT).show()
+                    } else {
+                        adapter.applyDelete(item.messageId)
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -2547,18 +2568,26 @@ class ChatActivity : AppCompatActivity() {
         // past all the texts between it and the oldest loaded one.
         val beforeTimestamp = localMessages.filter { it.attachment == null }.minOfOrNull { it.timestamp }
             ?: localMessages.minOf { it.timestamp }
-        val localOlder = try {
-            val json = P2PLib.getMessageHistoryBefore(peerDeviceFingerprint, beforeTimestamp, OLDER_HISTORY_PAGE_SIZE)
-            val array = JSONArray(json)
-            (0 until array.length()).map { itemFromHistoryJson(array.getJSONObject(it)) }
-        } catch (e: Exception) {
-            emptyList()
+        val peer = peerDeviceFingerprint
+        // H121: the archive query takes the core lock; scrolling must not wait for it.
+        lifecycleScope.launch {
+            val localOlder = withContext(Dispatchers.IO) {
+                try {
+                    val json = P2PLib.getMessageHistoryBefore(peer, beforeTimestamp, OLDER_HISTORY_PAGE_SIZE)
+                    val array = JSONArray(json)
+                    (0 until array.length()).map { itemFromHistoryJson(array.getJSONObject(it)) }
+                } catch (e: Exception) {
+                    null
+                }
+            }
+            if (peer == peerDeviceFingerprint) {
+                if (!localOlder.isNullOrEmpty()) prependOlderMessages(localOlder)
+                // M115: an empty page from the local archive is the end of it.
+                else if (localOlder != null) noMoreOlderHistory = true
+            }
+            // Local archive only: scrolling sends nothing to the network.
+            isLoadingOlderHistory = false
         }
-        if (localOlder.isNotEmpty()) {
-            prependOlderMessages(localOlder)
-        }
-        // Local archive only: scrolling sends nothing to the network.
-        isLoadingOlderHistory = false
     }
 
     /** bkz. `loadOlderHistory` — karşı taraftan gelen "older_history" ağ
@@ -2745,10 +2774,13 @@ class ChatActivity : AppCompatActivity() {
 
     private val readWatermarkHandler = Handler(Looper.getMainLooper())
     private val readWatermarkRunnable = Runnable {
-        try {
-            P2PLib.syncReadState(peerDeviceFingerprint, "", System.currentTimeMillis())
-        } catch (e: Exception) {
-        }
+        syncReadStateAsync()
+    }
+    // H121: the core lock is not taken on the main thread.
+    private fun syncReadStateAsync() {
+        val peer = peerDeviceFingerprint
+        val now = System.currentTimeMillis()
+        Thread { try { P2PLib.syncReadState(peer, "", now) } catch (e: Exception) { } }.start()
     }
 
     /** Karşı tarafa "buraya kadar okudum" sınırını yollar — debounce'lu
@@ -2769,8 +2801,6 @@ class ChatActivity : AppCompatActivity() {
         val targetPeer = peerDeviceFingerprint
         // Runs on every resume: rows already on screen keep their decoded
         // preview (see `refreshFrom`) instead of decoding it from hex again.
-        // ponytail: the archive is still fetched whole; fetch only rows after
-        // the newest loaded one if a media-heavy chat still stutters here.
         val knownIds = localMessages.mapTo(HashSet()) { it.messageId }
         lifecycleScope.launch {
             val missed = withContext(Dispatchers.IO) {
@@ -2873,6 +2903,8 @@ class ChatActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        // H63: finish() in onCreate (no peer in the intent) still delivers onPause.
+        if (!::peerDeviceFingerprint.isInitialized) return
         P2PService.removeMessageListener(messageListener)
         if (P2PService.activeConversationId == peerDeviceFingerprint) {
             P2PService.activeConversationId = null
@@ -2883,10 +2915,7 @@ class ChatActivity : AppCompatActivity() {
         readWatermarkHandler.removeCallbacks(readWatermarkRunnable)
         if (resumedUnlocked) {
             ReadStatePrefs.markRead(this, peerDeviceFingerprint)
-            try {
-                P2PLib.syncReadState(peerDeviceFingerprint, "", System.currentTimeMillis())
-            } catch (e: Exception) {
-            }
+            syncReadStateAsync()
         }
         resumedUnlocked = false
         fabBlinkAnimator?.cancel()
@@ -2900,7 +2929,11 @@ class ChatActivity : AppCompatActivity() {
         // event is missed while paused.
         layoutTypingIndicator.visibility = View.GONE
         sendTypingState(false)
-        if (mediaRecorder != null) finishVoiceRecording(send = false)
+        if (mediaRecorder != null) {
+            // H150: a discard on backgrounding is not silent.
+            Toast.makeText(this, R.string.msg_recording_cancelled, Toast.LENGTH_SHORT).show()
+            finishVoiceRecording(send = false)
+        }
         stopVoicePlayback()
     }
 

@@ -53,6 +53,11 @@ struct State {
     strokes: Vec<Stroke>,
     /// Drawn here, not echoed back by the core yet.
     pending: Vec<Stroke>,
+    /// M148: pending strokes erased while their add is still in flight. The
+    /// core does not know them yet — they cannot be erased by id until the
+    /// add is acked, and `add_stroke`'s callback then finishes the job (and
+    /// must not resurrect the stroke on screen meanwhile).
+    erased_pending: Vec<Stroke>,
     current: Vec<(f64, f64)>,
     drag_origin: (f64, f64),
     shade: u8,
@@ -251,6 +256,7 @@ impl Board {
             state: RefCell::new(State {
                 strokes: Vec::new(),
                 pending: Vec::new(),
+                erased_pending: Vec::new(),
                 current: Vec::new(),
                 drag_origin: (0.0, 0.0),
                 shade: 1,
@@ -308,7 +314,11 @@ impl Board {
             let mut st = me.state.borrow_mut();
             if let Some(pages) = event.value.get("pages").and_then(|v| v.as_array()) {
                 for p in pages.iter().filter_map(|p| p.as_u64()) {
-                    st.page_count = st.page_count.max(p as u32 + 1);
+                    // M149: a remote (or core-bumped) page count past the UI
+                    // cap must not grow `page_count` beyond it — the pager
+                    // (and `1u32 << page` below) would go out of range.
+                    let reached = u32::try_from(p).unwrap_or(0) + 1;
+                    st.page_count = st.page_count.max(reached.min(MAX_PAGES));
                     changed_here |= p == st.page as u64;
                 }
             }
@@ -582,7 +592,35 @@ impl Inner {
                     }
                     match &result {
                         Ok(ids) => {
-                            if let Some(step) = st
+                            // M148: erased while the add was still in flight?
+                            // Do not resurrect it — record the id in the
+                            // erase step and send the erase now.
+                            let erased = st
+                                .erased_pending
+                                .iter()
+                                .position(|p| p.points == stroke.points)
+                                .is_some();
+                            if erased {
+                                st.erased_pending
+                                    .retain(|p| p.points != stroke.points);
+                                if !ids.is_empty() {
+                                    if let Some(step) = st.undo.iter_mut().rev().find(|s| {
+                                        !s.live
+                                            && s.ids.is_empty()
+                                            && s.page == page
+                                            && s.strokes
+                                                .iter()
+                                                .any(|added| added.points == stroke.points)
+                                    }) {
+                                        step.ids = ids.clone();
+                                    }
+                                    let (peer, gid) = (me.peer.clone(), me.group_id.clone());
+                                    let ids = ids.clone();
+                                    std::thread::spawn(move || {
+                                        let _ = core::whiteboard_erase(&peer, &gid, &ids);
+                                    });
+                                }
+                            } else if let Some(step) = st
                                 .undo
                                 .iter_mut()
                                 .rev()
@@ -590,7 +628,7 @@ impl Inner {
                             {
                                 step.ids = ids.clone();
                             }
-                            if st.page == page {
+                            if !erased && st.page == page {
                                 if ids.len() == 8 {
                                     // The call returned the new id: keep the stroke instead of
                                     // fetching a snapshot that could bring back a stroke erased
@@ -622,22 +660,41 @@ impl Inner {
     }
 
     fn erase_at(self: &Rc<Self>, p: (f64, f64)) {
-        let hit: Vec<Stroke> = {
+        let (hit, pending_hit): (Vec<Stroke>, Vec<Stroke>) = {
             let mut st = self.state.borrow_mut();
-            // Nothing under the eraser (the common mouse-move): no rebuild.
-            if !st.strokes.iter().any(|s| near(s, p)) {
+            // M148: pending strokes are drawn too, so "nothing under the
+            // eraser" (the common mouse-move) means neither list has a hit.
+            if !st
+                .strokes
+                .iter()
+                .chain(st.pending.iter())
+                .any(|s| near(s, p))
+            {
                 return;
             }
             let (hit, keep): (Vec<Stroke>, Vec<Stroke>) = st.strokes.drain(..).partition(|s| near(s, p));
             st.strokes = keep;
-            hit
+            // M148: a pending stroke has no id yet (the add is still in
+            // flight), so it cannot be erased by id now. Remember it and
+            // finish the erase the moment the add is acked (`add_stroke`),
+            // which also keeps the view from drawing the ack tombstone.
+            let (pending_hit, keep): (Vec<Stroke>, Vec<Stroke>) =
+                st.pending.drain(..).partition(|s| near(s, p));
+            st.pending = keep;
+            st.erased_pending.extend(pending_hit.iter().cloned());
+            (hit, pending_hit)
         };
-        if hit.is_empty() {
+        if hit.is_empty() && pending_hit.is_empty() {
             return;
         }
         let ids: Vec<u8> = hit.iter().flat_map(|s| s.id.clone()).collect();
         let page = self.state.borrow().page;
-        self.remember(Step { page, strokes: hit, ids: ids.clone(), live: false });
+        // One step covers both kinds: flipping it restores every erased
+        // stroke (a pending one goes back as a re-added copy with fresh ids,
+        // like any erased stroke) — see `flip`.
+        let mut all = hit;
+        all.extend(pending_hit);
+        self.remember(Step { page, strokes: all, ids: ids.clone(), live: false });
         let (peer, gid) = (self.peer.clone(), self.group_id.clone());
         std::thread::spawn(move || {
             let _ = core::whiteboard_erase(&peer, &gid, &ids);
@@ -663,6 +720,14 @@ impl Inner {
         let Some(Step { page, strokes, ids, live }) = copy else { return };
         let (peer, gid) = (self.peer.clone(), self.group_id.clone());
         let me = self.clone();
+        // M148: a restored step that re-adds strokes cancels any erase-in-flight
+        // for the same shapes — otherwise the still-un-acked add's callback
+        // would "finish" the erase and wipe the stroke the user just restored.
+        let restored_points = if live {
+            Vec::new()
+        } else {
+            strokes.iter().map(|s| s.points.clone()).collect::<Vec<_>>()
+        };
         // The step is identified by its ids: an undo/redo/draw that interleaved
         // with this request may have changed what sits at the back.
         let expect_ids = ids.clone();
@@ -684,6 +749,13 @@ impl Inner {
             move |new_ids| {
                 {
                     let mut st = me.state.borrow_mut();
+                    // M148: the restore went out, so the erase remembered
+                    // for those shapes must not fire on the ack.
+                    if !restored_points.is_empty() {
+                        st.erased_pending.retain(|p| {
+                            !restored_points.iter().any(|pts| *pts == p.points)
+                        });
+                    }
                     // The step now sits at the back of the opposite stack.
                     let other = if undo { st.redo.back_mut() } else { st.undo.back_mut() };
                     if let Some(s) = other.filter(|s| s.ids == expect_ids) {
@@ -770,7 +842,12 @@ impl Inner {
                 let Ok(info) = info else { return };
                 {
                     let mut st = me.state.borrow_mut();
-                    st.page_count = st.page_count.max(info.pages).max(st.page as u32 + 1);
+                    // M149: see `handle_event` — the core can report pages
+                    // past the UI cap; the pager stays inside it.
+                    st.page_count = st
+                        .page_count
+                        .max(info.pages.min(MAX_PAGES))
+                        .max(st.page as u32 + 1);
                     st.me = info.me.unwrap_or(0);
                     st.names = info.participants.iter().map(|p| p.name.clone()).collect();
                     st.unread = info.unread;
@@ -854,6 +931,11 @@ impl Inner {
             let Some(path) = file.path() else { return };
             let ok = (|| -> Result<(), gtk::cairo::Error> {
                 let surface = gtk::cairo::PdfSurface::new(WIDTH, HEIGHT, &path)?;
+                // Cairo created the file world-readable; a whiteboard page is
+                // private conversation content, so clamp it to owner-only as
+                // soon as it exists. Best effort: FAT/exFAT cannot do chmod.
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
                 let cr = gtk::cairo::Context::new(&surface)?;
                 cr.set_source_rgb(0.0, 0.0, 0.0);
                 cr.paint()?;

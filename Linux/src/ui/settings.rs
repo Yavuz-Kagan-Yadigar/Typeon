@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::gio;
+use zeroize::Zeroize;
 
 use crate::app::{self, App};
 use crate::core;
@@ -206,8 +207,16 @@ fn servers_group(app: &Rc<App>) -> adw::PreferencesGroup {
         )
         .build();
 
-    for entry in core::list_servers() {
-        group.add(&server_row(app, &entry));
+    {
+        // The server listing is a core query: fetch it off the GTK thread and
+        // add the rows when it comes back.
+        let app = app.clone();
+        let group = group.clone();
+        app::run_in_background(core::list_servers, move |entries| {
+            for entry in &entries {
+                group.add(&server_row(&app, entry));
+            }
+        });
     }
 
     let add_row = adw::EntryRow::builder()
@@ -831,12 +840,18 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
         .build();
 
     let identity = adw::PreferencesGroup::builder().title("This device").build();
-    identity.add(
-        &adw::ActionRow::builder()
-            .title("Safety number")
-            .subtitle(core::identity_short_code().unwrap_or_default().as_str())
-            .build(),
-    );
+    let safety_number = adw::ActionRow::builder()
+        .title("Safety number")
+        .build();
+    {
+        // The code comes from the core — fetched off the GTK thread, set on
+        // the row when it arrives.
+        let safety_number = safety_number.clone();
+        app::run_in_background(core::identity_short_code, move |code| {
+            safety_number.set_subtitle(code.unwrap_or_default().as_str());
+        });
+    }
+    identity.add(&safety_number);
     let devices = adw::ActionRow::builder()
         .title("Linked devices")
         .subtitle("Every device on your account, and which one this is.")
@@ -873,7 +888,12 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
         .title("Account name")
         .show_apply_button(true)
         .build();
-    name_row.set_text(&core::display_name());
+    {
+        let name_row = name_row.clone();
+        app::run_in_background(core::display_name, move |name| {
+            name_row.set_text(&name);
+        });
+    }
     {
         let app = app.clone();
         name_row.connect_apply(move |row| {
@@ -1023,52 +1043,75 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
 /// contacts at least get it deposited on a server, then erase like logout.
 fn confirm_delete_account(app: &Rc<App>) {
     // The core refuses it on a linked device; say why instead of failing late.
-    let root = core::own_identity_id().ok().is_some_and(|id| {
-        core::list_linked_devices().iter().any(|d| d.is_this_device && d.device_fingerprint == id)
-    });
-    if !root {
-        app.toast("Only the primary device can delete the account.");
-        return;
-    }
-    let app_for_action = app.clone();
-    dialogs::confirm(
-        app,
-        "Delete your account?",
-        "All your contacts and groups are told this account was deleted, and they can no longer message you. Your linked devices are wiped too. This cannot be undone.",
-        "Delete account",
-        true,
-        move || {
-            app_for_action.toast("Notifying your contacts…");
-            let app_done = app_for_action.clone();
-            app::run_in_background(
-                || {
-                    if core::delete_account() >= 0 {
-                        let deadline = util::now_ms() + 15_000;
-                        while util::now_ms() < deadline && core::account_deletion_pending() != 0 {
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                        }
-                    }
+    // Both checks take the shared core lock — run them off the GTK thread.
+    let app = app.clone();
+    app::run_in_background(
+        || {
+            core::own_identity_id().ok().is_some_and(|id| {
+                core::list_linked_devices()
+                    .iter()
+                    .any(|d| d.is_this_device && d.device_fingerprint == id)
+            })
+        },
+        move |root| {
+            if !root {
+                app.toast("Only the primary device can delete the account.");
+                return;
+            }
+            let app_for_action = app.clone();
+            dialogs::confirm(
+                &app,
+                "Delete your account?",
+                "All your contacts and groups are told this account was deleted, and they can no longer message you. Your linked devices are wiped too. This cannot be undone.",
+                "Delete account",
+                true,
+                move || {
+                    app_for_action.toast("Notifying your contacts…");
+                    let app_done = app_for_action.clone();
+                    app::run_in_background(
+                        || {
+                            if core::delete_account() >= 0 {
+                                let deadline = util::now_ms() + 15_000;
+                                while util::now_ms() < deadline
+                                    && core::account_deletion_pending() != 0
+                                {
+                                    std::thread::sleep(std::time::Duration::from_millis(500));
+                                }
+                            }
+                        },
+                        move |()| erase_profile_and_quit(&app_done),
+                    );
                 },
-                move |()| erase_profile_and_quit(&app_done),
             );
         },
     );
 }
 
 fn erase_profile_and_quit(app: &Rc<App>) {
+    // Stop the poll thread before erasing the files it works on, exactly like
+    // the `self_revoked` path in `app.rs`: it would otherwise keep polling a
+    // deleted database until the process exits.
+    app::stop_poll_loop();
     // Keyring first: if the data directory went but the key stayed, a later
-    // profile in the same directory would find a key that opens nothing.
-    let profile = app.data_dir.to_string_lossy().to_string();
-    if let Err(error) = crate::keyring::delete_key(&profile) {
-        eprintln!("typeon: could not remove the vault key: {error}");
-    }
-    if let Err(error) = std::fs::remove_dir_all(&app.data_dir) {
-        app.toast(&format!("Could not erase the data directory: {error}"));
-        return;
-    }
-    // The core still holds the identity in memory and the poll thread is still
-    // running against a database that no longer exists, so stop the process.
-    app.application.quit();
+    // profile in the same directory would find a key that opens nothing. The
+    // D-Bus round trip and the recursive delete are both unbounded blocking —
+    // off the GTK thread they go.
+    let data_dir = app.data_dir.clone();
+    let app = app.clone();
+    app::run_in_background(
+        move || (crate::keyring::delete_key(&data_dir.to_string_lossy()), data_dir),
+        move |(keyring_result, data_dir)| {
+            if let Err(error) = keyring_result {
+                eprintln!("typeon: could not remove the vault key: {error}");
+            }
+            if let Err(error) = std::fs::remove_dir_all(&data_dir) {
+                app.toast(&format!("Could not erase the data directory: {error}"));
+                return;
+            }
+            // The core still holds the identity in memory, so stop the process.
+            app.application.quit();
+        },
+    );
 }
 
 /// Wipes the profile. Deliberately two-step and explicit about what survives.
@@ -1153,13 +1196,20 @@ fn change_passphrase(app: &Rc<App>, currently_protected: bool) {
         } else {
             String::new()
         };
-        // Two Argon2id derivations: off the main thread.
+        // Two Argon2id derivations: off the main thread. The passphrases are
+        // zeroized as soon as the reseal is done, on every code path.
         let data_dir = app.data_dir.clone();
         let new = next.text().to_string();
         let removing = new.is_empty();
         let app = app.clone();
         app::run_in_background(
-            move || onboarding::reseal_vault(&data_dir, &old, &new),
+            move || {
+                let (mut old, mut new) = (old, new);
+                let result = onboarding::reseal_vault(&data_dir, &old, &new);
+                old.zeroize();
+                new.zeroize();
+                result
+            },
             move |result| match result {
                 Ok(()) => app.toast(if removing { "Passphrase removed." } else { "Passphrase updated." }),
                 Err(error) => app.toast(&error),
@@ -1204,9 +1254,15 @@ fn export_recovery(app: &Rc<App>) {
             return;
         }
         let app = app_for_prompt.clone();
-        // Argon2id is deliberately slow — off the main thread it goes.
+        // Argon2id is deliberately slow — off the main thread it goes. The
+        // passphrase is zeroized as soon as the export bytes exist.
         app::run_in_background(
-            move || core::export_recovery(&passphrase),
+            move || {
+                let mut passphrase = passphrase;
+                let bytes = core::export_recovery(&passphrase);
+                passphrase.zeroize();
+                bytes
+            },
             move |bytes| {
                 if bytes.is_empty() {
                     app.toast("Export failed.");
@@ -1219,7 +1275,7 @@ fn export_recovery(app: &Rc<App>) {
     dialog.present();
 }
 
-fn save_recovery_bytes(app: &Rc<App>, bytes: Vec<u8>) {
+fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
     let Some(window) = app.window() else { return };
     let dialog = gtk::FileDialog::builder()
         .title("Save recovery file")
@@ -1234,26 +1290,44 @@ fn save_recovery_bytes(app: &Rc<App>, bytes: Vec<u8>) {
         // chmod, fsync, then rename over the target.
         use std::io::Write;
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut tmp_name = path.as_os_str().to_owned();
-        tmp_name.push(".tmp");
-        let tmp = std::path::PathBuf::from(tmp_name);
-        let _ = std::fs::remove_file(&tmp);
+        // A UNIQUE temp name in the target's directory: the old fixed
+        // "<target>.tmp" was unlinked unconditionally before the write, so
+        // saving over, say, /home/me/important.txt destroyed any unrelated
+        // important.txt.tmp that happened to exist.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let target_name =
+            path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let tmp = path.with_file_name(format!(
+            ".{target_name}.{}.{}.tmp",
+            std::process::id(),
+            nanos
+        ));
         // A USB stick (FAT/exFAT) has no Unix permissions: the file is still
         // written (it is passphrase-encrypted), but the user is told.
         let mut private = true;
+        // Only a file this `create_new` call actually created may ever be
+        // deleted again.
+        let mut created = false;
         let written = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&tmp)
             .and_then(|mut file| {
+                created = true;
                 let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
                 private = file.metadata()?.permissions().mode() & 0o077 == 0;
                 file.write_all(&bytes)?;
                 file.sync_all()
             })
             .and_then(|()| std::fs::rename(&tmp, &path));
-        if written.is_err() {
+        // The plaintext has left the heap's useful life either way: it is on
+        // disk (or the write failed). Do not leave a copy in memory.
+        bytes.zeroize();
+        if written.is_err() && created {
             let _ = std::fs::remove_file(&tmp);
         }
         match written {

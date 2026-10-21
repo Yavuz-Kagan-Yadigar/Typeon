@@ -15,8 +15,10 @@ pub fn now_ms() -> u64 {
 
 /// Decodes JPEG/PNG bytes (avatars, attachment previews) into something a GTK
 /// widget can paint. `PixbufLoader` rather than `Texture::from_bytes` so this
-/// keeps working on the GTK 4.6 baseline the bindings target.
-pub fn texture_from_bytes(bytes: &[u8]) -> Option<gdk::Texture> {
+/// keeps working on the GTK 4.6 baseline the bindings target. Returns the
+/// texture plus its decoded pixel cost (`width × height × channels`) — the
+/// hex-image cache budgets by it (see `texture_from_hex`).
+fn decoded_texture(bytes: &[u8]) -> Option<(gdk::Texture, usize)> {
     if bytes.is_empty() {
         return None;
     }
@@ -44,7 +46,12 @@ pub fn texture_from_bytes(bytes: &[u8]) -> Option<gdk::Texture> {
         return None;
     }
     let pixbuf = loader.pixbuf()?;
-    Some(gdk::Texture::for_pixbuf(&pixbuf))
+    let cost = pixbuf.width() as usize * pixbuf.height() as usize * pixbuf.n_channels() as usize;
+    Some((gdk::Texture::for_pixbuf(&pixbuf), cost))
+}
+
+pub fn texture_from_bytes(bytes: &[u8]) -> Option<gdk::Texture> {
+    decoded_texture(bytes).map(|(texture, _)| texture)
 }
 
 /// Hex-encoded image bytes as the core sends them (`avatar_hex`,
@@ -53,25 +60,35 @@ pub fn texture_from_hex(hex_string: &str) -> Option<gdk::Texture> {
     use std::hash::{Hash, Hasher};
     // Lists rebuild on every event; decode each distinct image once.
     // GTK main thread only (the textures are not Send), hence thread_local.
+    // H126: an entry-count cap alone let 256 distinct large previews pin
+    // ~17 GB of decoded GdkTexture, so the cache also tracks a byte budget —
+    // both caps are checked before every insert and evict everything at once
+    // (the same wholesale-evict policy the count cap always used).
+    const CACHE_MAX_ENTRIES: usize = 256;
+    /// The largest texture the decoder above can produce is a 4096² frame
+    /// (~67 MB RGBA); the budget still fits two of those.
+    const CACHE_BYTE_BUDGET: usize = 128 * 1024 * 1024;
     thread_local! {
-        static CACHE: std::cell::RefCell<std::collections::HashMap<u64, Option<gdk::Texture>>> =
+        static CACHE: std::cell::RefCell<std::collections::HashMap<u64, (Option<gdk::Texture>, usize)>> =
             std::cell::RefCell::new(std::collections::HashMap::new());
     }
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     hex_string.hash(&mut hasher);
     let key = hasher.finish();
-    if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+    if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).map(|(texture, _)| texture.clone())) {
         return hit;
     }
-    let texture = hex::decode(hex_string).ok().and_then(|bytes| texture_from_bytes(&bytes));
+    let texture = hex::decode(hex_string).ok().and_then(|bytes| decoded_texture(&bytes));
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
-        if c.len() >= 256 {
+        let total: usize = c.values().map(|(_, cost)| *cost).sum();
+        let new_cost = texture.as_ref().map(|(_, cost)| *cost).unwrap_or(0);
+        if c.len() >= CACHE_MAX_ENTRIES || total + new_cost > CACHE_BYTE_BUDGET {
             c.clear();
         }
         c.insert(key, texture.clone());
     });
-    texture
+    texture.map(|(t, _)| t)
 }
 
 /// Re-encodes an image file as a JPEG no larger than `max_dimension` on its
@@ -79,8 +96,14 @@ pub fn texture_from_hex(hex_string: &str) -> Option<gdk::Texture> {
 /// messages (480p) and profile pictures (720p).
 pub fn scaled_jpeg(path: &str, max_dimension: i32, quality: u8) -> Option<Vec<u8>> {
     // Header first, then decode at the target size: a 100 MP photo is never
-    // fully materialised.
+    // fully materialised. M161/H147: profile pictures and outgoing previews
+    // also cap the canvas at the same 64 MP `send` path enforces — a 500 MP
+    // image would otherwise be ~2 GB of RGBA in `Pixbuf::from_file`.
     let (_, width, height) = gdk_pixbuf::Pixbuf::file_info(path)?;
+    if i64::from(width) * i64::from(height) > 64_000_000 {
+        log::warn!("scaled_jpeg: refusing a {width}x{height} image (over the 64 MP cap)");
+        return None;
+    }
     let longest = width.max(height);
     let scaled = if longest > max_dimension && longest > 0 {
         gdk_pixbuf::Pixbuf::from_file_at_scale(path, max_dimension, max_dimension, true).ok()?
@@ -389,6 +412,13 @@ fn image_for_sending(
     }
     let stride = pixbuf.rowstride() as usize;
     let bytes = pixbuf.read_pixel_bytes();
+    // M170: gdk-pixbuf promises rowstride >= width * channels and a buffer
+    // long enough for every row, so the per-row slice cannot go out of
+    // bounds — checking instead of trusting keeps a malformed pixbuf from
+    // panicking inside this worker.
+    if height > 0 && bytes.len() < (height - 1) * stride + width * channels {
+        return None;
+    }
     let mut rgba = Vec::with_capacity(width * height * 4);
     for y in 0..height {
         for px in bytes[y * stride..y * stride + width * channels].chunks_exact(channels) {

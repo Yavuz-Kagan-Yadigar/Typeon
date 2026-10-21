@@ -455,4 +455,9 @@
     <string name="title_scan_qr">QR Tara</string>
     <string name="tor_off_no_network">Tor kapalı: Tor olmadan ağ başlamaz.</string>
     <string name="msg_pairing_contact_limit">Eşleşme başarısız: kişi listeniz dolu.</string>
+    <string name="notif_fg_text">Güvenli P2P bağlantısı etkin</string>
+    <string name="channel_service_name">Arka plan servisi</string>
+    <string name="channel_messages_name">Mesajlar</string>
+    <string name="error_edit_failed">Mesaj düzenlenemedi</string>
+    <string name="error_delete_failed">Mesaj silinemedi</string>
 </resources>

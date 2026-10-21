@@ -97,28 +97,34 @@ fn open(mut key: [u8; 32], aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>, String>
 // Kimlik körleştirme
 // ---------------------------------------------------------------------------
 
-/// Bir gossipsub topic adını sunucu posta kutusu kimliğine çevirir.
+/// The server mailbox of the session between two devices (`mb_<hex>`), and the
+/// secret its `Register` proof is made from (`mailbox_proof_seeds`).
 ///
-/// Girdi, `try_publish_raw`'ın ZATEN hesapladığı topic dizesidir —
-/// `p2p_rt_<hex>` (ratchet oturumu var) veya `p2p_msg_<fingerprint>`
-/// (ilk temas). Körleştirme İKİ nedenle şart:
-///
-/// 1. `p2p_msg_<fingerprint>` adı, alıcının device fingerprint'ini
-///    DOĞRUDAN içerir — sunucu veritabanındaki tablo adlarından kimin
-///    posta kutusu olduğu okunabilirdi.
-/// 2. `p2p_rt_<hex>` zaten sözde-anonim, ama iki farklı sunucuda AYNI
-///    değeri kullanmak, iki sunucunun kayıtlarını birleştirmeyi
-///    kolaylaştırırdı. HKDF ayrıca bunları da ayırmaz — ama tek tip bir
-///    isimlendirme, sunucunun "bu bir ilk temas kutusu mu, kurulmuş bir
-///    oturum kutusu mu" ayrımını YAPAMAMASINI sağlar (uzunluk/önek
-///    farkı kalmaz), ki bu tek başına faydalı bir gizlemedir.
-///
-/// Only for session topics (`p2p_rt_`, from the root key). A first-contact
-/// box has no topic id: see `first_contact_mailbox_id`.
-pub fn server_mailbox_id(topic: &str) -> String {
-    let id: [u8; 16] = derive(topic.as_bytes(), b"p2pmsg-v0.1-server-mailbox")
-        .expect("HKDF expand 16 bayt için asla başarısız olmaz");
-    format!("mb_{}", hex::encode(id))
+/// From the static X25519 agreement of the two devices' long-term KEM keys, so
+/// it does not change with the ratchet (C2: a mailbox made from the rotating
+/// root key left mail sealed two rotations back in a mailbox nobody fetched
+/// any more). Both ends get the same pair: the fingerprints go in sorted. The
+/// seal key still comes from the root key (`seal_envelope`).
+// ponytail: X25519 only (there is no static ML-KEM agreement). A quantum
+// attacker holding both devices' public KEM keys (not given to the server)
+// could compute the id and register as a reader; the seal key is from the
+// hybrid root key, so it still reads nothing.
+pub fn session_mailbox(
+    own_x25519_secret: &x25519_dalek::StaticSecret,
+    peer_x25519_pubkey: &[u8],
+    own_fp: &str,
+    peer_fp: &str,
+) -> Result<(String, [u8; 32]), String> {
+    let pk: [u8; 32] = peer_x25519_pubkey.try_into().map_err(|_| "Bad X25519 public key".to_string())?;
+    let shared = own_x25519_secret.diffie_hellman(&x25519_dalek::PublicKey::from(pk));
+    if !shared.was_contributory() {
+        return Err("Non-contributory X25519 key".to_string());
+    }
+    let (a, b) = if own_fp <= peer_fp { (own_fp, peer_fp) } else { (peer_fp, own_fp) };
+    let info = [&b"p2pmsg-v0.6-session-mailbox:"[..], a.as_bytes(), b"\0", b.as_bytes()].concat();
+    let secret: [u8; 32] = derive(shared.as_bytes(), &info)?;
+    let id: [u8; 16] = derive(&secret, b"p2pmsg-v0.6-session-mailbox-id")?;
+    Ok((format!("mb_{}", hex::encode(id)), secret))
 }
 
 /// The first-contact mailbox of `device_fingerprint` for the holders of
@@ -388,14 +394,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mailbox_id_is_stable_and_hides_fingerprint() {
-        let fp = "a".repeat(64);
-        let topic = format!("p2p_msg_{}", fp);
-        let id = server_mailbox_id(&topic);
-        assert_eq!(id, server_mailbox_id(&topic), "aynı topic aynı kimliği vermeli");
-        assert!(id.starts_with("mb_"));
-        assert!(!id.contains(&fp), "fingerprint kutu adında görünmemeli");
-        assert_ne!(id, server_mailbox_id("p2p_msg_other"));
+    fn session_mailbox_is_the_same_at_both_ends_and_per_pair() {
+        let a = x25519_dalek::StaticSecret::random_from_rng(&mut OsRng);
+        let b = x25519_dalek::StaticSecret::random_from_rng(&mut OsRng);
+        let c = x25519_dalek::StaticSecret::random_from_rng(&mut OsRng);
+        let pk = |s: &x25519_dalek::StaticSecret| x25519_dalek::PublicKey::from(s).as_bytes().to_vec();
+        let (fa, fb) = ("a".repeat(64), "b".repeat(64));
+        let ab = session_mailbox(&a, &pk(&b), &fa, &fb).unwrap();
+        assert_eq!(ab, session_mailbox(&b, &pk(&a), &fb, &fa).unwrap(), "iki uc ayni kutuyu bulmali");
+        assert_ne!(ab.0, session_mailbox(&a, &pk(&c), &fa, &fb).unwrap().0);
+        assert!(ab.0.starts_with("mb_") && !ab.0.contains(&fa));
+        assert!(session_mailbox(&a, &[0u8; 32], &fa, &fb).is_err(), "sifir nokta reddedilmeli");
+        assert!(session_mailbox(&a, &[1u8; 31], &fa, &fb).is_err());
     }
 
     #[test]
@@ -405,7 +415,6 @@ mod tests {
         assert_eq!(id, first_contact_mailbox_id(&[7; 16], &fp));
         assert_ne!(id, first_contact_mailbox_id(&[8; 16], &fp));
         assert_ne!(id, first_contact_mailbox_id(&[7; 16], &"b".repeat(64)));
-        assert_ne!(id, server_mailbox_id(&format!("p2p_msg_{}", fp)));
         assert_ne!(mailbox_proof_seeds(&[7; 16], &id).unwrap(), mailbox_proof_seeds(&[8; 16], &id).unwrap());
     }
 

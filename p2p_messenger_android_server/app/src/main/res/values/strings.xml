@@ -55,4 +55,16 @@
     <string name="action_unblock">Unblock</string>
     <string name="dlg_block_title">Block this device?</string>
     <string name="dlg_block_body">A blocked device cannot come back even with a fresh invite code, and the public join code is replaced. Blocking only stops this enrollment key: someone who reinstalls gets a new identity, so to really ban someone rotate the join code and do not hand out the new one. You can undo the block later.</string>
+    <string name="err_storage_no_space">Not enough free space at the destination</string>
+    <string name="err_storage_mkdir">Could not create the destination folder</string>
+    <string name="err_unknown">Unknown error</string>
+    <string name="err_storage_unavailable">Storage location is not available</string>
+    <string name="msg_storage_busy">A storage move is already running</string>
+    <string name="err_internal">Error: internal error</string>
+    <string name="err_server_closing">Error: the previous server is still shutting down, try again shortly</string>
+    <string name="err_server_loop_stuck">Error: the server did not stop within 20 seconds</string>
+    <string name="err_server_not_running">Error: the server is not running</string>
+    <string name="err_no_address">Error: the server has no reachable address yet (Tor may be starting)</string>
+    <string name="err_invalid_id">Error: invalid id</string>
+    <string name="err_record_not_found">Error: record not found</string>
 </resources>

@@ -811,8 +811,8 @@ class P2PService : Service() {
         // atlanmıştı — ve bu, uygulama çalışırken HER ZAMAN görünen bildirim
         // olduğundan en görünür olanıydı.
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Typeon")
-            .setContentText("Secure P2P Connection Active")
+            .setContentTitle(getString(R.string.app_name))
+            .setContentText(getString(R.string.notif_fg_text))
             .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
             .build()
@@ -910,6 +910,8 @@ class P2PService : Service() {
             // kendiliğinden garanti eder. `startForeground` ANA THREAD'de
             // kaldı — Android onu 5 sn içinde orada bekliyor.
             handler.post {
+              // C4: init must never throw out of the HandlerThread (START_STICKY crash loop).
+              try {
                 P2PLib.initDatabase(applicationContext.filesDir.absolutePath)
                 if (!P2PLib.hasStoredIdentity()) {
                     // START_STICKY brought the service back after a logout or
@@ -964,6 +966,9 @@ class P2PService : Service() {
                 }
                 startNet()
                 P2PLib.setHistoryStorageLimitBytes(getHistoryStorageLimitBytes(applicationContext))
+              } catch (t: Throwable) {
+                Log.e(TAG, "Servis başlatma hatası: ${t.message}")
+              }
             }
             listenerRemoved = { applyPowerSave() }
             wakePollNow = {
@@ -1248,7 +1253,7 @@ class P2PService : Service() {
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "P2P Background Service",
+            getString(R.string.channel_service_name),
             NotificationManager.IMPORTANCE_LOW
         )
         val manager = getSystemService(NotificationManager::class.java)

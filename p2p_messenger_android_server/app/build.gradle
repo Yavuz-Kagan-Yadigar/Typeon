@@ -84,7 +84,9 @@ android {
             // `if-watch` bağımlılığının ürettiği, hizalama denetimini geçemeyen
             // yan cdylib (istemcide de dışlanıyor). Under `jniLibs`: under
             // `resources` it matched nothing and 9 copies shipped.
-            excludes += ["**/libif_watch*.so"]
+            // The client core (libp2p_messenger.so) is a build dependency only:
+            // the server never loads it (H111).
+            excludes += ["**/libif_watch*.so", "**/libp2p_messenger.so"]
         }
     }
 }
@@ -132,7 +134,16 @@ def resolveNdkHome() {
             if (ndkRoot.isDirectory()) {
                 def versions = ndkRoot.listFiles({ f -> f.isDirectory() } as FileFilter)
                 if (versions != null && versions.length > 0) {
-                    return versions.sort { it.name }.last().absolutePath
+                    // Numeric, not lexicographic: "9.0.0" sorted after "30.0.x" (H110).
+                    def num = { f -> f.name.tokenize(".").collect { it.isInteger() ? it.toInteger() : 0 } }
+                    return versions.max { a, b ->
+                        def pa = num(a), pb = num(b)
+                        for (int i = 0; i < Math.max(pa.size(), pb.size()); i++) {
+                            int c = (i < pa.size() ? pa[i] : 0) <=> (i < pb.size() ? pb[i] : 0)
+                            if (c != 0) return c
+                        }
+                        0
+                    }.absolutePath
                 }
             }
         }

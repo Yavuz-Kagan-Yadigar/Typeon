@@ -27,7 +27,7 @@ fn string_result(result: Result<Result<String, String>, String>) -> String {
     match result {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => format!("Error: {}", e),
-        Err(e) => format!("Error: {}", e),
+        Err(e) => format!("Error: panic: {}", e), // M21: told apart from a declared failure
     }
 }
 
@@ -36,7 +36,7 @@ fn ok_result(result: Result<Result<(), String>, String>) -> String {
     match result {
         Ok(Ok(())) => "OK".to_string(),
         Ok(Err(e)) => format!("Error: {}", e),
-        Err(e) => format!("Error: {}", e),
+        Err(e) => format!("Error: panic: {}", e), // M21: told apart from a declared failure
     }
 }
 
@@ -83,6 +83,8 @@ pub fn load_secret_bundle(bundle_bytes: &[u8]) -> bool {
             let mut core = core_lock();
             let loaded = core.load_secret_bundle(&raw);
             if loaded.is_ok() {
+                // Wiped like the JNI twin, not only dropped.
+                zeroize::Zeroize::zeroize(&mut core.pending_secret_bundle);
                 core.pending_secret_bundle = None;
             }
             loaded
@@ -550,7 +552,9 @@ pub fn list_contacts() -> String {
 pub fn get_message_history(peer_device_fingerprint: &str, limit: u32) -> String {
     let fp = peer_device_fingerprint.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&crate::core_lock_read().load_message_history(&fp, limit.min(crate::MAX_HISTORY_PAGE as u32), None))
+        // H57: lock dropped before the JSON is built.
+        let h = crate::core_lock_read().load_message_history(&fp, limit.min(crate::MAX_HISTORY_PAGE as u32), None);
+        serde_json::to_string(&h)
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }
@@ -562,7 +566,8 @@ pub fn get_message_history_before(
 ) -> String {
     let fp = peer_device_fingerprint.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&crate::core_lock_read().load_message_history(&fp, limit.min(crate::MAX_HISTORY_PAGE as u32), Some(before_timestamp)))
+        let h = crate::core_lock_read().load_message_history(&fp, limit.min(crate::MAX_HISTORY_PAGE as u32), Some(before_timestamp));
+        serde_json::to_string(&h)
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }
@@ -570,7 +575,8 @@ pub fn get_message_history_before(
 pub fn get_group_message_history(group_id: &str, limit: u32) -> String {
     let gid = group_id.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&crate::core_lock_read().load_group_message_history(&gid, limit.min(crate::MAX_HISTORY_PAGE as u32), None))
+        let h = crate::core_lock_read().load_group_message_history(&gid, limit.min(crate::MAX_HISTORY_PAGE as u32), None);
+        serde_json::to_string(&h)
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }
@@ -582,13 +588,40 @@ pub fn get_group_message_history_before(
 ) -> String {
     let gid = group_id.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&crate::core_lock_read().load_group_message_history(
+        let h = crate::core_lock_read().load_group_message_history(
             &gid,
             limit.min(crate::MAX_HISTORY_PAGE as u32),
             Some(before_timestamp),
-        ))
+        );
+        serde_json::to_string(&h)
         .unwrap_or_else(|_| "[]".to_string())
     }))
+}
+
+/// H122: rows archived after `after_timestamp` only (bkz. JNI `getMessageHistorySince`).
+pub fn get_message_history_since(peer_device_fingerprint: &str, after_timestamp: i64, limit: u32) -> String {
+    let fp = peer_device_fingerprint.to_string();
+    json_list(catch_panic(move || {
+        let h = crate::core_lock_read().load_message_history_since(&fp, after_timestamp, limit.min(crate::MAX_HISTORY_PAGE as u32));
+        serde_json::to_string(&h).unwrap_or_else(|_| "[]".to_string())
+    }))
+}
+
+pub fn get_group_message_history_since(group_id: &str, after_timestamp: i64, limit: u32) -> String {
+    let gid = group_id.to_string();
+    json_list(catch_panic(move || {
+        let h = crate::core_lock_read().load_group_message_history_since(&gid, after_timestamp, limit.min(crate::MAX_HISTORY_PAGE as u32));
+        serde_json::to_string(&h).unwrap_or_else(|_| "[]".to_string())
+    }))
+}
+
+/// H137: bkz. JNI `chatListPreviews`.
+pub fn chat_list_previews() -> String {
+    catch_panic(|| {
+        let previews = crate::core_lock_read().chat_list_previews();
+        previews.to_string()
+    })
+    .unwrap_or_else(|_| r#"{"contacts":{},"groups":{}}"#.to_string())
 }
 
 pub fn request_history_sync(peer_device_fingerprint: &str, limit: u32) {
@@ -937,9 +970,13 @@ pub fn export_recovery(passphrase: &str) -> Vec<u8> {
     // M-21: only the plaintext is built under the core lock; Argon2 runs
     // after the lock is released (it froze every other caller).
     let staged = catch_panic(move || crate::core_lock_read().recovery_plaintext((*pass).clone()));
-    match staged {
-        Ok(Ok((plaintext, pass))) => crate::seal_recovery_file(&plaintext, &pass).unwrap_or_default(),
-        _ => Vec::new(),
+    // M20: empty on failure (the Linux UI checks that), but logged.
+    match staged.and_then(|r| r).and_then(|(plaintext, pass)| crate::seal_recovery_file(&plaintext, &pass)) {
+        Ok(file) => file,
+        Err(e) => {
+            log::error!("export_recovery failed: {e}");
+            Vec::new()
+        }
     }
 }
 
