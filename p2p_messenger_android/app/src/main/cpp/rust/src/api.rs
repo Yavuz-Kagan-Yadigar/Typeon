@@ -247,6 +247,12 @@ pub fn process_qr_packet(data: &[u8]) -> String {
     pairing_result(result)
 }
 
+/// bkz. JNI `peekContactQr` — the confirm step's data; changes nothing.
+pub fn peek_contact_qr(data: &[u8]) -> String {
+    let raw = data.to_vec();
+    string_result(catch_panic(move || crate::core_lock_read().peek_qr_packet(&raw).map(|v| v.to_string())))
+}
+
 pub fn process_manual_entry(text: &str) -> String {
     let text = text.to_string();
     let result = catch_panic(move || {
@@ -792,6 +798,16 @@ pub fn list_group_attachments(group_id: &str) -> String {
 /// pixels, not premultiplied; the buffer is changed) to `out_path`.
 pub fn encode_jxl_lossless(rgba: &mut [u8], width: u32, height: u32, has_alpha: bool, out_path: &str) -> Result<(), String> {
     catch_panic(move || crate::attachments::encode_jxl_lossless(rgba, width, height, has_alpha, std::path::Path::new(out_path)))?
+}
+
+/// H26: animated lossless JPEG XL; see JNI `encodeJxlAnimated` (RGBA frames).
+pub fn encode_jxl_animated(frames: &mut [Vec<u8>], width: u32, height: u32, delays_ms: &[u32], has_alpha: bool, out_path: &str) -> Result<(), String> {
+    catch_panic(move || crate::attachments::encode_jxl_animated(frames, width, height, delays_ms, has_alpha, std::path::Path::new(out_path)))?
+}
+
+/// H26: see JNI `jxlToGif`.
+pub fn jxl_to_gif(in_path: &str, out_path: &str) -> Result<(), String> {
+    catch_panic(move || crate::attachments::jxl_to_gif(std::path::Path::new(in_path), std::path::Path::new(out_path)))?
 }
 
 pub fn get_attachment_plaintext_path(file_id: &str) -> String {

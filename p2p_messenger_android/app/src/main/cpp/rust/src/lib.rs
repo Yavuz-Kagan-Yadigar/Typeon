@@ -420,6 +420,11 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
     // A JPEG XL ("hi-res" image) is handed out as PNG: no viewer of ours
     // reads JPEG XL. Lossless both ways.
     let jxl = decrypted_path.extension().map_or(false, |e| e.eq_ignore_ascii_case("jxl"));
+    // H26: an animated one as GIF instead.
+    let gif_path = decrypted_path.with_extension("gif");
+    if jxl && gif_path.exists() {
+        return Ok(gif_path.to_string_lossy().to_string());
+    }
     let plain_path = if jxl { decrypted_path.with_extension("png") } else { decrypted_path.clone() };
     // A JPEG XL that would not convert is kept as it came.
     if jxl && !plain_path.exists() && decrypted_path.exists() {
@@ -442,19 +447,25 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
             return Err(e);
         }
         if jxl {
-            let mut png_tmp = tmp_path.clone().into_os_string();
-            png_tmp.push(".png");
-            let png_tmp = std::path::PathBuf::from(png_tmp);
-            if let Err(e) = attachments::jxl_to_png(&tmp_path, &png_tmp) {
+            let animated = attachments::jxl_is_animated(&tmp_path);
+            let (ext, out_path) = if animated { ("gif", &gif_path) } else { ("png", &plain_path) };
+            let mut conv_tmp = tmp_path.clone().into_os_string();
+            conv_tmp.push(format!(".{ext}"));
+            let conv_tmp = std::path::PathBuf::from(conv_tmp);
+            let converted = if animated { attachments::jxl_to_gif(&tmp_path, &conv_tmp) } else { attachments::jxl_to_png(&tmp_path, &conv_tmp) };
+            if let Err(e) = converted {
                 warn!("JPEG XL not converted, kept as it is ({}): {}", file_id, e);
-                let _ = std::fs::remove_file(&png_tmp);
+                let _ = std::fs::remove_file(&conv_tmp);
                 std::fs::rename(&tmp_path, &decrypted_path).map_err(|e| e.to_string())?;
                 return Ok(decrypted_path.to_string_lossy().to_string());
             }
             let _ = std::fs::remove_file(&tmp_path);
-            if let Err(e) = std::fs::rename(&png_tmp, &plain_path) {
-                let _ = std::fs::remove_file(&png_tmp);
+            if let Err(e) = std::fs::rename(&conv_tmp, out_path) {
+                let _ = std::fs::remove_file(&conv_tmp);
                 return Err(e.to_string());
+            }
+            if animated {
+                return Ok(gif_path.to_string_lossy().to_string());
             }
         } else if let Err(e) = std::fs::rename(&tmp_path, &plain_path) {
             let _ = std::fs::remove_file(&tmp_path);
@@ -5563,6 +5574,32 @@ impl P2PCore {
     fn process_qr_packet(&mut self, cbor_data: &[u8]) -> Result<(String, String, String), String> {
         let packet = QrPacket::from_cbor(cbor_data)?;
         self.pair_with_code(packet.identity_id, packet.device_fingerprint, &packet.device_name, &packet.rendezvous_node, &packet.known_relays, &packet.pairing_nonce)
+    }
+
+    /// M129: what a scanned contact code names, for the confirm step before
+    /// `process_qr_packet`. The same checks as `pair_with_code` and
+    /// `register_contact_from_pairing`; changes nothing, no network.
+    /// `short_code` is the one the peer's own main screen shows, `safety_code`
+    /// the one `contact_safety_code` shows after pairing.
+    fn peek_qr_packet(&self, cbor_data: &[u8]) -> Result<serde_json::Value, String> {
+        let packet = QrPacket::from_cbor(cbor_data)?;
+        if packet.pairing_nonce.len() != 16 {
+            return Err("Geçersiz kişi kodu (nonce)".to_string());
+        }
+        if !is_fingerprint_hex(&packet.identity_id) || !is_fingerprint_hex(&packet.device_fingerprint) {
+            return Err("Geçersiz kişi kodu".to_string());
+        }
+        if self.my_identity_id().as_deref() == Some(packet.identity_id.as_str()) || self.own_devices.contains_key(&packet.device_fingerprint) {
+            return Err("Kendi kodunuzu kişi olarak ekleyemezsiniz".to_string());
+        }
+        let short = |id: &str| hex::decode(id).map(|raw| identity::format_short_code(&raw)).unwrap_or_default();
+        Ok(serde_json::json!({
+            "name": sanitize_display_name(&packet.device_name).unwrap_or_default(),
+            "short_code": short(&packet.identity_id),
+            "safety_code": short(&packet.device_fingerprint),
+            "identity_id": packet.identity_id,
+            "device_fingerprint": packet.device_fingerprint,
+        }))
     }
 
     /// Shared tail of `process_qr_packet` and `process_manual_entry`: the
@@ -16644,8 +16681,10 @@ impl P2PCore {
             if is_safe_file_id(file_id) {
                 if let Ok(dir) = self.attachments_dir() {
                     let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("{}{}", file_id, ext)));
-                    // A JPEG XL is opened as PNG (`attachment_plaintext_path_unlocked`).
+                    // A JPEG XL is opened as PNG, an animated one as GIF
+                    // (`attachment_plaintext_path_unlocked`).
                     let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("{}.png", file_id)));
+                    let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("{}.gif", file_id)));
                 }
             }
         }
@@ -23448,8 +23487,8 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_prepareAndSendFile<'local>(
     });
     match result {
         Ok(Ok((file_id, status))) => safe_new_jstring(&mut env, serde_json::json!({"message_id": file_id, "status": status}).to_string()),
-        Ok(Err(e)) => { error!("prepare_and_send_file failed: {}", e); safe_new_jstring(&mut env, format!("Error: {}", e)) }
-        Err(e) => { error!("prepare_and_send_file panicked: {}", e); safe_new_jstring(&mut env, format!("Error: {}", e)) }
+        Ok(Err(e)) => { error!("prepare_and_send_file failed: {}", e); safe_new_jstring(&mut env, coded_error(&e)) }
+        Err(e) => { error!("prepare_and_send_file panicked: {}", e); safe_new_jstring(&mut env, coded_error(&format!("panic: {}", e))) }
     }
 }
 
@@ -23474,8 +23513,8 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_downloadFile<'local>(mut en
     });
     let out = match result {
         Ok(Ok(())) => "OK".to_string(),
-        Ok(Err(e)) => { error!("download_file failed: {}", e); format!("Error: {}", e) }
-        Err(e) => { error!("download_file panicked: {}", e); format!("Error: {}", e) }
+        Ok(Err(e)) => { error!("download_file failed: {}", e); coded_error(&e) }
+        Err(e) => { error!("download_file panicked: {}", e); coded_error(&format!("panic: {}", e)) }
     };
     safe_new_jstring(&mut env, out)
 }
@@ -23552,8 +23591,8 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_prepareAndSendGroupFile<'lo
     });
     match result {
         Ok(Ok(file_id)) => safe_new_jstring(&mut env, file_id),
-        Ok(Err(e)) => { error!("prepare_and_send_group_file failed: {}", e); safe_new_jstring(&mut env, format!("Error: {}", e)) }
-        Err(e) => { error!("prepare_and_send_group_file panicked: {}", e); safe_new_jstring(&mut env, format!("Error: {}", e)) }
+        Ok(Err(e)) => { error!("prepare_and_send_group_file failed: {}", e); safe_new_jstring(&mut env, coded_error(&e)) }
+        Err(e) => { error!("prepare_and_send_group_file panicked: {}", e); safe_new_jstring(&mut env, coded_error(&format!("panic: {}", e))) }
     }
 }
 
@@ -23612,6 +23651,65 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_encodeJxlLossless<'local>(
         Ok(Ok(())) => "OK".to_string(),
         Ok(Err(e)) | Err(e) => format!("Error: {}", e),
     };
+    safe_new_jstring(&mut env, out)
+}
+
+/// H26: an animated image as a lossless animated JPEG XL. `frames`: one
+/// `byte[]` per frame of `width * height` RGBA pixels, not premultiplied (what
+/// `Bitmap.copyPixelsToBuffer` gives for `ARGB_8888`); `delays_ms` one per
+/// frame. At most `MAX_ANIMATION_FRAMES` frames and `MAX_IMAGE_PIXELS` in all.
+/// "OK" or "Error: CODE: ...".
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_encodeJxlAnimated<'local>(
+    mut env: JNIEnv<'local>, _class: JClass<'local>, frames: jni::objects::JObjectArray<'local>,
+    width: jni::sys::jint, height: jni::sys::jint, delays_ms: jni::objects::JIntArray<'local>,
+    has_alpha: jboolean, out_path: JString<'local>,
+) -> jstring {
+    let out: String = jstr(&mut env, &out_path).unwrap_or_default();
+    let count = env.get_array_length(&frames).unwrap_or(0).max(0) as usize;
+    let mut delays = vec![0i32; env.get_array_length(&delays_ms).unwrap_or(0).max(0) as usize];
+    let mut pixels: Vec<Vec<u8>> = Vec::new();
+    let result = if width < 2 || height < 2 || count > attachments::MAX_ANIMATION_FRAMES || delays.len() != count
+        || env.get_int_array_region(&delays_ms, 0, &mut delays).is_err()
+    {
+        let _ = env.exception_clear();
+        Ok(Err("Too many frames or bad sizes".to_string()))
+    } else {
+        // The Java arrays are copied one by one; the total is capped first.
+        let frame_len = width as u64 * height as u64 * 4;
+        let mut bad = frame_len * count as u64 > attachments::MAX_IMAGE_PIXELS * 4;
+        for i in 0..count {
+            if bad {
+                break;
+            }
+            let Ok(element) = env.get_object_array_element(&frames, i as i32) else { bad = true; break };
+            let array = JByteArray::from(element);
+            let bytes = jbytearray_to_vec(&mut env, &array);
+            let _ = env.delete_local_ref(array);
+            bad = bytes.len() as u64 != frame_len;
+            pixels.push(bytes);
+        }
+        if bad {
+            let _ = env.exception_clear();
+            Ok(Err("Too many frames or bad sizes".to_string()))
+        } else {
+            let delays: Vec<u32> = delays.iter().map(|&d| d.max(0) as u32).collect();
+            catch_panic(move || attachments::encode_jxl_animated(&mut pixels, width as u32, height as u32, &delays, has_alpha != 0, std::path::Path::new(&out)))
+        }
+    };
+    let out = coded(result).map_or_else(|e| e, |()| "OK".to_string());
+    safe_new_jstring(&mut env, out)
+}
+
+/// H26: an animated JPEG XL as an animated GIF (see `attachments::jxl_to_gif`).
+/// `getAttachmentPlaintextPath` already does this for a received one.
+/// "OK" or "Error: CODE: ...".
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_jxlToGif<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, in_path: JString<'local>, out_path: JString<'local>) -> jstring {
+    let src: String = jstr(&mut env, &in_path).unwrap_or_default();
+    let dst: String = jstr(&mut env, &out_path).unwrap_or_default();
+    let result = catch_panic(move || attachments::jxl_to_gif(std::path::Path::new(&src), std::path::Path::new(&dst)));
+    let out = coded(result).map_or_else(|e| e, |()| "OK".to_string());
     safe_new_jstring(&mut env, out)
 }
 
@@ -23899,13 +23997,25 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_processQrPacket<'local>(mut
     // JSON'u — Kotlin tarafı `device_fingerprint`'i kullanarak yeni kişinin
     // sohbet ekranını DOĞRUDAN açabilsin diye (bkz. `process_qr_packet`
     // dokümantasyonu, ChatActivity "Bağlanılıyor..." göstergesi).
-    match result {
-        Ok(Ok((identity_id, device_fingerprint, device_name))) => safe_new_jstring(&mut env, serde_json::json!({
+    match coded(result) {
+        Ok((identity_id, device_fingerprint, device_name)) => safe_new_jstring(&mut env, serde_json::json!({
             "identity_id": identity_id, "device_fingerprint": device_fingerprint, "device_name": device_name
         }).to_string()),
-        Ok(Err(e)) => safe_new_jstring(&mut env, format!("Error: {}", e)),
-        Err(e) => safe_new_jstring(&mut env, format!("Error: {}", e)),
+        Err(e) => safe_new_jstring(&mut env, e),
     }
+}
+
+/// M129: what a scanned contact QR names, for the confirm step before
+/// `processQrPacket`. `{"name","short_code","safety_code","identity_id",
+/// "device_fingerprint"}` or "Error: CODE: ..."; changes nothing.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_peekContactQr<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, data: JByteArray<'local>) -> jstring {
+    let raw = jbytearray_to_vec(&mut env, &data);
+    let out = match coded(catch_panic(move || core_lock_read().peek_qr_packet(&raw))) {
+        Ok(v) => v.to_string(),
+        Err(e) => e,
+    };
+    safe_new_jstring(&mut env, out)
 }
 
 // ---------------------------------------------------------------------------
@@ -23937,9 +24047,9 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_peekDeviceLink<'local>(mut 
             "device_fingerprint": req.device_fingerprint,
             "device_name": sanitize_display_name(&req.device_name).unwrap_or_default(),
         }).to_string(),
-        Ok(Ok(_)) => "Error: Geçersiz cihaz kodu".to_string(),
-        Ok(Err(e)) => format!("Error: {}", e),
-        Err(e) => format!("Error: {}", e),
+        Ok(Ok(_)) => coded_error("Geçersiz cihaz kodu"),
+        Ok(Err(e)) => coded_error(&e),
+        Err(e) => coded_error(&format!("panic: {}", e)),
     };
     safe_new_jstring(&mut env, out)
 }
@@ -24004,12 +24114,11 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_approveDeviceLink<'local>(m
         let mut core = core_lock();
         core.approve_device_link(&raw)
     });
-    match result {
-        Ok(Ok((fp, name))) => safe_new_jstring(&mut env, serde_json::json!({
+    match coded(result) {
+        Ok((fp, name)) => safe_new_jstring(&mut env, serde_json::json!({
             "device_fingerprint": fp, "device_name": name
         }).to_string()),
-        Ok(Err(e)) => safe_new_jstring(&mut env, format!("Error: {}", e)),
-        Err(e) => safe_new_jstring(&mut env, format!("Error: {}", e)),
+        Err(e) => safe_new_jstring(&mut env, e),
     }
 }
 
@@ -24044,11 +24153,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_revokeLinkedDevice<'local>(
         let mut core = core_lock();
         core.revoke_own_linked_device(&fp)
     });
-    let out = match result {
-        Ok(Ok(())) => "OK".to_string(),
-        Ok(Err(e)) => format!("Error: {}", e),
-        Err(e) => format!("Error: {}", e),
-    };
+    let out = coded(result).map_or_else(|e| e, |()| "OK".to_string());
     safe_new_jstring(&mut env, out)
 }
 
@@ -24075,12 +24180,11 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_processManualEntry<'local>(
         core.process_manual_entry(&text_str)
     });
     // bkz. `processQrPacket` aynı notu.
-    match result {
-        Ok(Ok((identity_id, device_fingerprint, device_name))) => safe_new_jstring(&mut env, serde_json::json!({
+    match coded(result) {
+        Ok((identity_id, device_fingerprint, device_name)) => safe_new_jstring(&mut env, serde_json::json!({
             "identity_id": identity_id, "device_fingerprint": device_fingerprint, "device_name": device_name
         }).to_string()),
-        Ok(Err(e)) => safe_new_jstring(&mut env, format!("Error: {}", e)),
-        Err(e) => safe_new_jstring(&mut env, format!("Error: {}", e)),
+        Err(e) => safe_new_jstring(&mut env, e),
     }
 }
 
@@ -24103,8 +24207,8 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendMessage<'local>(mut env
     });
     match result {
         Ok(Ok((message_id, status))) => safe_new_jstring(&mut env, serde_json::json!({"message_id": message_id, "status": status}).to_string()),
-        Ok(Err(e)) => { error!("send_message failed: {}", e); safe_new_jstring(&mut env, format!("Error: {}", e)) }
-        Err(e) => { error!("send_message panicked: {}", e); safe_new_jstring(&mut env, format!("Error: {}", e)) }
+        Ok(Err(e)) => { error!("send_message failed: {}", e); safe_new_jstring(&mut env, coded_error(&e)) }
+        Err(e) => { error!("send_message panicked: {}", e); safe_new_jstring(&mut env, coded_error(&format!("panic: {}", e))) }
     }
 }
 
@@ -24124,8 +24228,8 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_editMessage<'local>(mut env
     });
     match result {
         Ok(Ok((message_id, status))) => safe_new_jstring(&mut env, serde_json::json!({"message_id": message_id, "status": status}).to_string()),
-        Ok(Err(e)) => { error!("edit_message failed: {}", e); safe_new_jstring(&mut env, format!("Error: {}", e)) }
-        Err(e) => { error!("edit_message panicked: {}", e); safe_new_jstring(&mut env, format!("Error: {}", e)) }
+        Ok(Err(e)) => { error!("edit_message failed: {}", e); safe_new_jstring(&mut env, coded_error(&e)) }
+        Err(e) => { error!("edit_message panicked: {}", e); safe_new_jstring(&mut env, coded_error(&format!("panic: {}", e))) }
     }
 }
 
@@ -24193,8 +24297,8 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteMessage<'local>(mut e
     });
     match result {
         Ok(Ok((message_id, status))) => safe_new_jstring(&mut env, serde_json::json!({"message_id": message_id, "status": status}).to_string()),
-        Ok(Err(e)) => { error!("delete_message failed: {}", e); safe_new_jstring(&mut env, format!("Error: {}", e)) }
-        Err(e) => { error!("delete_message panicked: {}", e); safe_new_jstring(&mut env, format!("Error: {}", e)) }
+        Ok(Err(e)) => { error!("delete_message failed: {}", e); safe_new_jstring(&mut env, coded_error(&e)) }
+        Err(e) => { error!("delete_message panicked: {}", e); safe_new_jstring(&mut env, coded_error(&format!("panic: {}", e))) }
     }
 }
 
@@ -24214,8 +24318,8 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_editGroupMessage<'local>(mu
     });
     let out = match result {
         Ok(Ok(())) => "OK".to_string(),
-        Ok(Err(e)) => { error!("edit_group_message failed: {}", e); format!("Error: {}", e) }
-        Err(e) => { error!("edit_group_message panicked: {}", e); format!("Error: {}", e) }
+        Ok(Err(e)) => { error!("edit_group_message failed: {}", e); coded_error(&e) }
+        Err(e) => { error!("edit_group_message panicked: {}", e); coded_error(&format!("panic: {}", e)) }
     };
     safe_new_jstring(&mut env, out)
 }
@@ -24233,8 +24337,8 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteGroupMessage<'local>(
     });
     let out = match result {
         Ok(Ok(())) => "OK".to_string(),
-        Ok(Err(e)) => { error!("delete_group_message failed: {}", e); format!("Error: {}", e) }
-        Err(e) => { error!("delete_group_message panicked: {}", e); format!("Error: {}", e) }
+        Ok(Err(e)) => { error!("delete_group_message failed: {}", e); coded_error(&e) }
+        Err(e) => { error!("delete_group_message panicked: {}", e); coded_error(&format!("panic: {}", e)) }
     };
     safe_new_jstring(&mut env, out)
 }
@@ -24445,8 +24549,8 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_revokeContactDevice<'local>
     });
     let out = match result {
         Ok(Ok(())) => "OK".to_string(),
-        Ok(Err(e)) => { error!("revoke_contact_device failed: {}", e); format!("Error: {}", e) }
-        Err(e) => { error!("revoke_contact_device panicked: {}", e); format!("Error: {}", e) }
+        Ok(Err(e)) => { error!("revoke_contact_device failed: {}", e); coded_error(&e) }
+        Err(e) => { error!("revoke_contact_device panicked: {}", e); coded_error(&format!("panic: {}", e)) }
     };
     safe_new_jstring(&mut env, out)
 }
@@ -24478,11 +24582,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_addServer<'local>(mut env: 
         let _guard = RUNTIME.enter();
         core_lock().add_server(&code)
     });
-    let out = match result {
-        Ok(Ok(json)) => json,
-        Ok(Err(e)) => format!("Error: {}", e),
-        Err(e) => format!("Error: {}", e),
-    };
+    let out = coded(result).unwrap_or_else(|e| e);
     safe_new_jstring(&mut env, out)
 }
 
@@ -24686,11 +24786,8 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_transferGroupFounder<'local
     let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
     let nf: String = jstr(&mut env, &new_founder).unwrap_or_default();
     let result = catch_panic(move || core_lock().transfer_group_founder(&gid, &nf));
-    match result {
-        Ok(Ok(())) => safe_new_jstring(&mut env, "OK"),
-        Ok(Err(e)) => safe_new_jstring(&mut env, format!("Error: {}", e)),
-        Err(e) => safe_new_jstring(&mut env, format!("Error: {}", e)),
-    }
+    let out = coded(result).map_or_else(|e| e, |()| "OK".to_string());
+    safe_new_jstring(&mut env, out)
 }
 
 /// Spec dışı, kullanıcı isteği: uygulama ön plana geldiğinde Kotlin
@@ -24797,11 +24894,8 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_createGroup<'local>(mut env
         let mut core = core_lock();
         core.create_group(name_str)
     });
-    match result {
-        Ok(Ok(id)) => safe_new_jstring(&mut env, id),
-        Ok(Err(e)) => safe_new_jstring(&mut env, format!("Error: {}", e)),
-        Err(e) => safe_new_jstring(&mut env, format!("Error: {}", e)),
-    }
+    let out = coded(result).unwrap_or_else(|e| e);
+    safe_new_jstring(&mut env, out)
 }
 
 /// 1 = the failed copies went out again, 0 = nothing recorded for this id
@@ -24822,36 +24916,32 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_retryGroupMessageCopies<'lo
     }
 }
 
+/// "OK" or "Error: CODE: ..." (M112; was a Boolean).
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_inviteToGroup<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, identity_id: JString<'local>) -> jboolean {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_inviteToGroup<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, identity_id: JString<'local>) -> jstring {
     let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
     let iid: String = jstr(&mut env, &identity_id).unwrap_or_default();
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
         let mut core = core_lock();
-        core.invite_to_group(&gid, &iid)
+        core.invite_to_group(&gid, &iid).map(|_| ())
     });
-    match result {
-        Ok(Ok(_)) => true as jboolean,
-        Ok(Err(e)) => { error!("invite_to_group failed: {}", e); false as jboolean }
-        Err(e) => { error!("invite_to_group panicked: {}", e); false as jboolean }
-    }
+    let out = coded(result).map_or_else(|e| { error!("invite_to_group failed: {}", e); e }, |()| "OK".to_string());
+    safe_new_jstring(&mut env, out)
 }
 
+/// "OK" or "Error: CODE: ..." (M112; was a Boolean).
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_removeFromGroup<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, identity_id: JString<'local>) -> jboolean {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_removeFromGroup<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, identity_id: JString<'local>) -> jstring {
     let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
     let iid: String = jstr(&mut env, &identity_id).unwrap_or_default();
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
         let mut core = core_lock();
-        core.remove_from_group(&gid, &iid, true)
+        core.remove_from_group(&gid, &iid, true).map(|_| ())
     });
-    match result {
-        Ok(Ok(_)) => true as jboolean,
-        Ok(Err(e)) => { error!("remove_from_group failed: {}", e); false as jboolean }
-        Err(e) => { error!("remove_from_group panicked: {}", e); false as jboolean }
-    }
+    let out = coded(result).map_or_else(|e| { error!("remove_from_group failed: {}", e); e }, |()| "OK".to_string());
+    safe_new_jstring(&mut env, out)
 }
 
 /// Spec dışı, kullanıcı isteği: grubu TÜM üyeler için siler (yalnızca
@@ -24953,8 +25043,8 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mu
     });
     let out = match result {
         Ok(Ok(local_id)) => local_id,
-        Ok(Err(e)) => { error!("send_group_message failed: {}", e); format!("Error: {}", e) }
-        Err(e) => { error!("send_group_message panicked: {}", e); format!("Error: {}", e) }
+        Ok(Err(e)) => { error!("send_group_message failed: {}", e); coded_error(&e) }
+        Err(e) => { error!("send_group_message panicked: {}", e); coded_error(&format!("panic: {}", e)) }
     };
     safe_new_jstring(&mut env, out)
 }
@@ -25045,6 +25135,71 @@ fn catch_panic<T>(f: impl FnOnce() -> T) -> Result<T, String> {
             "internal panic (bkz. logcat 'PANIC yakalandı')".to_string()
         }
     })
+}
+
+/// M112: the stable code of a core error message, for the UI to pick a
+/// localized text. First match wins; the order matters (e.g. "zaten" before
+/// "kişi bulunamadı"-style lookups). ponytail: keyed on the message text, so a
+/// reworded message can move to INTERNAL; `error_code_tests` pins the main ones.
+pub(crate) fn error_code(detail: &str) -> &'static str {
+    const TABLE: &[(&str, &[&str])] = &[
+        ("INTERNAL", &["panic"]),
+        ("LOCKED", &["henüz yüklenmedi", "anahtarları yüklenmedi", "not loaded", "initdatabase", "db not open", "veritabanı açık değil", "no identity", "kimlik yok", "önce bir kimlik"]),
+        ("NOT_FOUNDER", &["sadece kurucu", "only the founder"]),
+        ("ALREADY", &["zaten", "already"]),
+        ("BLOCKED", &["engellenmiş", "engelli", "iptal edilmiş", "revoked", "hesabını sildi"]),
+        ("TOO_LARGE", &["too large", "too long", "çok büyük", "çok uzun", "sınırından büyük", "sınırını aşıyor", "sınırına ulaşıldı", "en fazla"]),
+        ("NO_SESSION", &["no ratchet session", "oturum anahtarı yok", "key exchange", "unknown peer device", "aktif cihazı çözülemedi", "bilinmeyen karşı taraf"]),
+        ("INVALID", &["geçersiz", "invalid", "bad ", "boş olamaz", "olmalı", "içermeli", "mismatch", "tutarsız", "unsupported", "desteklenmeyen", "bozuk", "kodunda", "kodundaki", "not an rgba"]),
+        ("NOT_ALLOWED", &["only the primary", "edemezsiniz", "ekleyemezsiniz", "engelleyemezsiniz", "edilemez", "çıkaramaz", "ayrılamaz", "değilsiniz"]),
+        ("NETWORK", &["tor kapalı", "tor başlatılamadı", "ulaşılamıyor", "ulaşılabilir", "bağlı değil", "ağ henüz", "ağ adresi", "could not be sent", "gönderilemedi", "network"]),
+        ("NOT_FOUND", &["bulunamadı", "not found", "unknown", "bilinmeyen", "bilinmiyor", "no pending", "üyesi değil", "yok"]),
+    ];
+    let lower = detail.to_lowercase();
+    TABLE.iter()
+        .find(|(_, keys)| keys.iter().any(|k| lower.contains(k)))
+        .map_or("INTERNAL", |(code, _)| *code)
+}
+
+/// "Error: <CODE>: <detail>" (see `error_code`).
+pub(crate) fn coded_error(detail: &str) -> String {
+    format!("Error: {}: {}", error_code(detail), detail)
+}
+
+/// Both error arms of a JNI call's `catch_panic` result as `coded_error`.
+fn coded<T>(result: Result<Result<T, String>, String>) -> Result<T, String> {
+    match result {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(coded_error(&e)),
+        Err(e) => Err(coded_error(&format!("panic: {}", e))),
+    }
+}
+
+#[cfg(test)]
+mod error_code_tests {
+    use super::*;
+
+    #[test]
+    fn main_messages_get_their_codes() {
+        for (msg, code) in [
+            ("Sadece kurucu üye çıkarabilir", "NOT_FOUNDER"),
+            ("Bu kişi zaten grubun üyesi", "ALREADY"),
+            ("Bu kişi engellenmiş", "BLOCKED"),
+            ("File too large", "TOO_LARGE"),
+            ("Unknown peer device; complete key exchange first", "NO_SESSION"),
+            ("Geçersiz kişi kodu", "INVALID"),
+            ("Kendi kodunuzu kişi olarak ekleyemezsiniz", "NOT_ALLOWED"),
+            ("Tor kapalı: ağ yalnızca Tor üzerinden çalışır", "NETWORK"),
+            ("Grup bulunamadı", "NOT_FOUND"),
+            ("Unknown file_id", "NOT_FOUND"),
+            ("Şifreleme anahtarı henüz yüklenmedi", "LOCKED"),
+            ("panic: boom", "INTERNAL"),
+            ("Grup sürümü tükendi", "INTERNAL"),
+        ] {
+            assert_eq!(error_code(msg), code, "{msg}");
+        }
+        assert_eq!(coded_error("Grup bulunamadı"), "Error: NOT_FOUND: Grup bulunamadı");
+    }
 }
 
 /// Spec dışı, güvenlik/kararlılık denetimi düzeltmesi: bu yardımcılar

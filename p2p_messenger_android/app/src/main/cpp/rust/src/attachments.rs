@@ -559,6 +559,10 @@ pub const MAX_IMAGE_PIXELS: u64 = 24_000_000;
 /// after row, not premultiplied. With `has_alpha` false the alpha bytes are
 /// dropped first, in place: `rgba` is the caller's buffer and is changed.
 pub fn encode_jxl_lossless(rgba: &mut [u8], width: u32, height: u32, has_alpha: bool, out: &Path) -> Result<(), String> {
+    std::fs::write(out, jxl_codestream(rgba, width, height, has_alpha)?).map_err(|e| e.to_string())
+}
+
+fn jxl_codestream(rgba: &mut [u8], width: u32, height: u32, has_alpha: bool) -> Result<Vec<u8>, String> {
     use zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions};
     let pixels = width as u64 * height as u64;
     if width < 2 || height < 2 || pixels > MAX_IMAGE_PIXELS || rgba.len() as u64 != pixels * 4 {
@@ -578,7 +582,335 @@ pub fn encode_jxl_lossless(rgba: &mut [u8], width: u32, height: u32, has_alpha: 
     zune_jpegxl::JxlSimpleEncoder::new(data, options)
         .encode(&mut encoded)
         .map_err(|e| format!("JPEG XL: {e:?}"))?;
+    Ok(encoded)
+}
+
+/// Most frames an animated image keeps; all frames together stay within
+/// `MAX_IMAGE_PIXELS` too.
+pub const MAX_ANIMATION_FRAMES: usize = 300;
+
+/// LSB-first bit writer: the JPEG XL codestream and GIF's LZW codes both
+/// pack bits this way.
+#[derive(Default)]
+struct Bits { out: Vec<u8>, acc: u64, n: u32 }
+
+impl Bits {
+    fn put(&mut self, nbits: u32, value: u64) {
+        self.acc |= value << self.n;
+        self.n += nbits;
+        while self.n >= 8 {
+            self.out.push(self.acc as u8);
+            self.acc >>= 8;
+            self.n -= 8;
+        }
+    }
+    fn pad(&mut self) {
+        if self.n > 0 {
+            self.out.push(self.acc as u8);
+            (self.acc, self.n) = (0, 0);
+        }
+    }
+}
+
+/// The image header zune-jpegxl writes (8-bit sRGB, RGB or RGBA), with
+/// `animated` adding an animation of 1000 ticks per second, looping forever.
+fn jxl_image_header(width: u32, height: u32, alpha: bool, animated: bool) -> Vec<u8> {
+    let mut b = Bits::default();
+    b.put(16, 0x0AFF);
+    b.put(1, 0); // not small
+    let size = |b: &mut Bits, v: u32| {
+        let v = u64::from(v - 1);
+        let (sel, bits) = if v < 1 << 9 { (0, 9) } else if v < 1 << 13 { (1, 13) } else if v < 1 << 18 { (2, 18) } else { (3, 30) };
+        b.put(2, sel);
+        b.put(bits, v);
+    };
+    size(&mut b, height);
+    b.put(3, 0); // no ratio: width follows
+    size(&mut b, width);
+    b.put(1, 0); // metadata not all_default
+    b.put(1, u64::from(animated)); // extra_fields
+    if animated {
+        b.put(3, 0); // orientation 1
+        b.put(1, 0); // no intrinsic size
+        b.put(1, 0); // no preview
+        b.put(1, 1); // animation:
+        b.put(2, 1); // tps_numerator 1000
+        b.put(2, 0); // tps_denominator 1
+        b.put(2, 0); // num_loops 0 = forever
+        b.put(1, 0); // no timecodes
+    }
+    b.put(1, 0); // integer samples
+    b.put(2, 0); // 8 bits
+    b.put(1, 1); // 16-bit buffers suffice
+    if alpha {
+        b.put(2, 1); // one extra channel
+        b.put(1, 1); // default: 8-bit alpha
+    } else {
+        b.put(2, 0);
+    }
+    b.put(1, 0); // not XYB
+    b.put(1, 1); // sRGB
+    if animated {
+        b.put(1, 1); // tone mapping all_default
+    }
+    b.put(2, 0); // no extensions
+    b.put(1, 1); // default transform data
+    b.pad();
+    b.out
+}
+
+/// zune-jpegxl's frame header (one modular pass, kReplace) and its TOC.
+/// `duration` (ticks) only in an animated image; a frame that is not the
+/// last one is not kept as a reference.
+fn jxl_frame_header(alpha: bool, duration: Option<u32>, is_last: bool, toc: &[u64]) -> Vec<u8> {
+    let mut b = Bits::default();
+    b.put(1, 0); // not all_default
+    b.put(2, 0); // regular frame
+    b.put(1, 1); // modular
+    b.put(2, 0); // no flags
+    b.put(1, 0); // not YCbCr
+    b.put(2, 0); // no upsampling
+    if alpha {
+        b.put(2, 0);
+    }
+    b.put(2, 1); // group size 256
+    b.put(2, 0); // one pass
+    b.put(1, 0); // no crop
+    b.put(2, 0); // kReplace
+    if alpha {
+        b.put(2, 0);
+    }
+    if let Some(d) = duration {
+        match d {
+            0 => b.put(2, 0),
+            1 => b.put(2, 1),
+            2..=255 => { b.put(2, 2); b.put(8, u64::from(d)); }
+            _ => { b.put(2, 3); b.put(32, u64::from(d)); }
+        }
+    }
+    b.put(1, u64::from(is_last));
+    if !is_last {
+        b.put(2, 0); // save_as_reference 0
+    }
+    b.put(2, 0); // no name
+    b.put(1, 0); // restoration filter not all_default
+    b.put(1, 0); // no gaborish
+    b.put(2, 0); // no EPF
+    b.put(2, 0); // no LF extensions
+    b.put(2, 0); // no FH extensions
+    b.put(1, 0); // no TOC permutation
+    b.pad();
+    for &size in toc {
+        if size < 1 << 10 {
+            b.put(2, 0); b.put(10, size);
+        } else if size - 1024 < 1 << 14 {
+            b.put(2, 1); b.put(14, size - 1024);
+        } else if size - 17408 < 1 << 22 {
+            b.put(2, 2); b.put(22, size - 17408);
+        } else {
+            b.put(2, 3); b.put(30, size - 4211712);
+        }
+    }
+    b.pad();
+    b.out
+}
+
+/// H26: an animated image as a lossless animated JPEG XL, no metadata.
+/// `frames`: RGBA bytes each (as `encode_jxl_lossless`, changed in place),
+/// `delays_ms` one per frame. zune-jpegxl writes single frames only: each is
+/// encoded alone and its frame data is re-framed under an animated header.
+/// The headers zune wrote are compared bit for bit with ours first, so a
+/// zune update that changes them is an error, not a broken file.
+pub fn encode_jxl_animated(frames: &mut [Vec<u8>], width: u32, height: u32, delays_ms: &[u32], has_alpha: bool, out: &Path) -> Result<(), String> {
+    let pixels = width as u64 * height as u64;
+    if frames.is_empty() || frames.len() > MAX_ANIMATION_FRAMES || frames.len() != delays_ms.len()
+        || pixels * frames.len() as u64 > MAX_IMAGE_PIXELS
+    {
+        return Err("Too many frames or too large".to_string());
+    }
+    let plain_image = jxl_image_header(width, height, has_alpha, false);
+    let plain_frame = jxl_frame_header(has_alpha, None, true, &[]);
+    let (gx, gy) = ((width as u64).div_ceil(256), (height as u64).div_ceil(256));
+    let toc_len = (if gx * gy == 1 { 1 } else { 2 + (width as u64).div_ceil(2048) * (height as u64).div_ceil(2048) + gx * gy }) as usize;
+    let mut encoded = jxl_image_header(width, height, has_alpha, true);
+    let count = frames.len();
+    for (i, frame) in frames.iter_mut().enumerate() {
+        let single = jxl_codestream(frame, width, height, has_alpha)?;
+        let toc_at = plain_image.len() + plain_frame.len();
+        if !single.starts_with(&plain_image) || single.get(plain_image.len()..toc_at) != Some(&plain_frame[..]) {
+            return Err("JPEG XL: unexpected encoder header".to_string());
+        }
+        // Read the TOC back (same codes as `jxl_frame_header` writes).
+        let (mut pos, mut toc) = (toc_at * 8, Vec::with_capacity(toc_len));
+        let mut read = |n: usize| -> Option<u64> {
+            let mut v = 0u64;
+            for k in 0..n {
+                let bit = (single.get((pos + k) / 8)? >> ((pos + k) % 8)) & 1;
+                v |= u64::from(bit) << k;
+            }
+            pos += n;
+            Some(v)
+        };
+        for _ in 0..toc_len {
+            let size = match read(2) {
+                Some(0) => read(10),
+                Some(1) => read(14).map(|v| v + 1024),
+                Some(2) => read(22).map(|v| v + 17408),
+                Some(_) => read(30).map(|v| v + 4211712),
+                None => None,
+            };
+            toc.push(size.ok_or("JPEG XL: short frame")?);
+        }
+        let data = &single[pos.div_ceil(8)..];
+        if toc.iter().sum::<u64>() != data.len() as u64 {
+            return Err("JPEG XL: unexpected encoder output".to_string());
+        }
+        let is_last = i + 1 == count;
+        // Duration 0 would make the frame a hidden layer of the next one.
+        encoded.extend(jxl_frame_header(has_alpha, Some(delays_ms[i].max(1)), is_last, &toc));
+        encoded.extend_from_slice(data);
+    }
     std::fs::write(out, encoded).map_err(|e| e.to_string())
+}
+
+/// Whether a JPEG XL file says it is animated, from its headers only (the
+/// first 64 KiB; a longer ICC profile reads as "not animated").
+pub fn jxl_is_animated(src: &Path) -> bool {
+    use jxl_oxide::{InitializeResult, JxlImage};
+    let mut head = Vec::new();
+    if File::open(src).and_then(|f| f.take(64 << 10).read_to_end(&mut head)).is_err() {
+        return false;
+    }
+    let mut image = JxlImage::builder().build_uninit();
+    if image.feed_bytes(&head).is_err() {
+        return false;
+    }
+    matches!(image.try_init(), Ok(InitializeResult::Initialized(i)) if i.image_header().metadata.animation.is_some())
+}
+
+/// GIF LZW image data of palette indices (8-bit minimum code size), as
+/// sub-blocks. Code width and table reset follow gifenc.
+fn gif_lzw(indices: &[u8], out: &mut Vec<u8>) {
+    const CLEAR: u64 = 256;
+    out.push(8);
+    let mut dict: std::collections::HashMap<(u16, u8), u16> = std::collections::HashMap::new();
+    let (mut next, mut size) = (258u16, 9u32);
+    let mut b = Bits::default();
+    b.put(size, CLEAR);
+    let mut cur: Option<u16> = None;
+    for &px in indices {
+        let Some(c) = cur else {
+            cur = Some(u16::from(px));
+            continue;
+        };
+        if let Some(&code) = dict.get(&(c, px)) {
+            cur = Some(code);
+            continue;
+        }
+        b.put(size, u64::from(c));
+        if next < 4096 {
+            if u32::from(next) == 1 << size {
+                size += 1;
+            }
+            dict.insert((c, px), next);
+            next += 1;
+        } else {
+            b.put(size, CLEAR);
+            dict.clear();
+            (next, size) = (258, 9);
+        }
+        cur = Some(u16::from(px));
+    }
+    if let Some(c) = cur {
+        b.put(size, u64::from(c));
+    }
+    b.put(size, 257); // end of information
+    b.pad();
+    for block in b.out.chunks(255) {
+        out.push(block.len() as u8);
+        out.extend_from_slice(block);
+    }
+    out.push(0);
+}
+
+/// H26: a received animated JPEG XL as an animated GIF for the viewers
+/// (neither Android nor GTK plays JPEG XL). One fixed 6x7x6 colour cube for
+/// all frames, alpha below half is transparent. ponytail: no dithering, banding
+/// on gradients; a per-frame median-cut palette if that shows.
+pub fn jxl_to_gif(src: &Path, out: &Path) -> Result<(), String> {
+    use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, RenderingIntent};
+    let mut image = JxlImage::builder()
+        .alloc_tracker(AllocTracker::with_limit(512 << 20))
+        .open(src)
+        .map_err(|e| format!("JPEG XL: {e}"))?;
+    image.request_color_encoding(EnumColourEncoding::srgb(RenderingIntent::Relative));
+    let (width, height) = (image.width(), image.height());
+    let frames = image.num_loaded_keyframes();
+    if width > u16::MAX as u32 || height > u16::MAX as u32 || frames > MAX_ANIMATION_FRAMES
+        || width as u64 * height as u64 * frames as u64 > MAX_IMAGE_PIXELS
+    {
+        return Err("Image too large".to_string());
+    }
+    if frames == 0 {
+        return Err("JPEG XL: no frame".to_string());
+    }
+    // Ticks to centiseconds; a still image gets no delay.
+    let (tps_num, tps_den) = image.image_header().metadata.animation.as_ref()
+        .map_or((1, 0), |a| (u64::from(a.tps_numerator).max(1), u64::from(a.tps_denominator)));
+    const TRANSPARENT: u8 = 255;
+    let mut gif = b"GIF89a".to_vec();
+    gif.extend_from_slice(&(width as u16).to_le_bytes());
+    gif.extend_from_slice(&(height as u16).to_le_bytes());
+    gif.extend_from_slice(&[0xF7, 0, 0]); // global table of 256 colours
+    for i in 0..256u32 {
+        let rgb = if i < 252 { [i / 42 * 51, i / 6 % 7 * 255 / 6, i % 6 * 51] } else { [0; 3] };
+        gif.extend(rgb.map(|c| c as u8));
+    }
+    gif.extend_from_slice(b"\x21\xFF\x0BNETSCAPE2.0\x03\x01\0\0\0"); // loop forever
+    let mut row = Vec::new();
+    let mut indices = Vec::with_capacity(width as usize * height as usize);
+    for k in 0..frames {
+        let render = image.render_frame(k).map_err(|e| format!("JPEG XL: {e}"))?;
+        let mut stream = render.stream();
+        let ch = stream.channels() as usize;
+        if !(1..=4).contains(&ch) || (stream.width(), stream.height()) != (width, height) {
+            return Err("JPEG XL: unexpected frame layout".to_string());
+        }
+        let has_alpha = ch == 2 || ch == 4;
+        row.resize(width as usize * ch, 0);
+        indices.clear();
+        for _ in 0..height {
+            let mut filled = 0;
+            while filled < row.len() {
+                let n = stream.write_to_buffer(&mut row[filled..]);
+                if n == 0 {
+                    return Err("JPEG XL: frame ended early".to_string());
+                }
+                filled += n;
+            }
+            for p in row.chunks(ch) {
+                let (r, g, b) = if ch >= 3 { (p[0], p[1], p[2]) } else { (p[0], p[0], p[0]) };
+                indices.push(if has_alpha && p[ch - 1] < 128 {
+                    TRANSPARENT
+                } else {
+                    let q = |v: u8, levels: u32| (u32::from(v) * (levels - 1) + 127) / 255;
+                    (q(r, 6) * 42 + q(g, 7) * 6 + q(b, 6)) as u8
+                });
+            }
+        }
+        let delay = (u64::from(render.duration()) * tps_den * 100 / tps_num).min(u16::MAX as u64) as u16;
+        // Disposal 2 (clear) under transparency, else 1 (keep).
+        let packed = if has_alpha { 2 << 2 | 1 } else { 1 << 2 };
+        gif.extend_from_slice(&[0x21, 0xF9, 4, packed]);
+        gif.extend_from_slice(&delay.to_le_bytes());
+        gif.extend_from_slice(&[TRANSPARENT, 0, 0x2C, 0, 0, 0, 0]);
+        gif.extend_from_slice(&(width as u16).to_le_bytes());
+        gif.extend_from_slice(&(height as u16).to_le_bytes());
+        gif.push(0);
+        gif_lzw(&indices, &mut gif);
+    }
+    gif.push(0x3B);
+    std::fs::write(out, gif).map_err(|e| e.to_string())
 }
 
 /// A received JPEG XL as PNG: no Android version decodes JPEG XL, and the
@@ -709,6 +1041,36 @@ mod tests {
         assert!(encode_jxl_lossless(&mut vec![0; 8], 2, 2, true, &jxl).is_err(), "short buffer");
         let _ = std::fs::remove_file(&jxl);
         let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn animated_jpeg_xl_keeps_every_frame_and_delay() {
+        use jxl_oxide::JxlImage;
+        let base = std::env::temp_dir().join(format!("typeon-anim-{}", std::process::id()));
+        let (jxl, gif) = (base.with_extension("jxl"), base.with_extension("gif"));
+        // 300 wide: two groups, so the multi-entry TOC path runs too; 600x400
+        // runs the GIF LZW table resets.
+        for (w, h, has_alpha) in [(7u32, 5u32, true), (300, 3, false), (600, 400, true)] {
+            let frames: Vec<Vec<u8>> = (0..3u32).map(|f| (0..w * h * 4).map(|i| ((i + f * 11) * 37 % 251) as u8).collect()).collect();
+            encode_jxl_animated(&mut frames.clone(), w, h, &[40, 300, 1000], has_alpha, &jxl).unwrap();
+            let image = JxlImage::builder().open(&jxl).unwrap();
+            assert_eq!(image.num_loaded_keyframes(), 3);
+            for (k, want_ms) in [40u32, 300, 1000].into_iter().enumerate() {
+                let render = image.render_frame(k).unwrap();
+                assert_eq!(render.duration(), want_ms);
+                let mut stream = render.stream();
+                let mut got = vec![0u8; (w * h) as usize * stream.channels() as usize];
+                stream.write_to_buffer(&mut got);
+                let want: Vec<u8> = if has_alpha { frames[k].clone() } else { frames[k].chunks(4).flat_map(|p| p[..3].to_vec()).collect() };
+                assert_eq!(got, want, "frame {k} {w}x{h}");
+            }
+            jxl_to_gif(&jxl, &gif).unwrap();
+            let out = std::fs::read(&gif).unwrap();
+            assert!(out.starts_with(b"GIF89a") && out.ends_with(&[0x3B]));
+        }
+        assert!(encode_jxl_animated(&mut [vec![0; 16]], 2, 2, &[], true, &jxl).is_err(), "delay count");
+        let _ = std::fs::remove_file(&jxl);
+        let _ = std::fs::remove_file(&gif);
     }
 
     #[test]
