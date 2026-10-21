@@ -508,4 +508,6 @@
     <string name="title_confirm_contact">Add this contact?</string>
     <string name="msg_confirm_contact">Add the contact from this QR code?</string>
     <string name="msg_loading">Loading…</string>
+    <string name="action_resend_group">Resend group to everyone</string>
+    <string name="msg_group_resent">Group sent to everyone again</string>
 </resources>

@@ -190,6 +190,9 @@ object P2PLib {
      */
     external fun transferGroupFounder(groupId: String, newFounderIdentityId: String): String
 
+    /** Kurucu: güncel imzalı grup durumunu her üye cihazına yeniden gönderir; "OK" veya "Error: …". */
+    external fun resendGroupToAll(groupId: String): String
+
     // --- Spec dışı, kullanıcı isteği: bekleyen (henüz ack alınmamış)
     //     mesajlar — bkz. lib.rs `awaiting_confirmation`/`regen_content`
     //     genişletmesi, SettingsFragment "Pending Messages" ekranı. ---

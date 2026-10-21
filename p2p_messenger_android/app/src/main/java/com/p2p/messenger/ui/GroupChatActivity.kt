@@ -22,6 +22,7 @@ import android.view.Menu
 import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageButton
@@ -1133,6 +1134,24 @@ class GroupChatActivity : AppCompatActivity() {
         btnAddMember.setOnClickListener {
             dialog.dismiss()
             showAddMembersDialog()
+        }
+        if (isFounder) {
+            // Founder-only: re-send the signed group state to every member device.
+            val parent = btnAddMember.parent as ViewGroup
+            parent.addView(Button(this).apply {
+                setText(R.string.action_resend_group)
+                setOnClickListener {
+                    val gid = groupId
+                    lifecycleScope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            try { P2PLib.resendGroupToAll(gid) } catch (e: Throwable) { "Error: ${e.message}" }
+                        }
+                        Toast.makeText(this@GroupChatActivity,
+                            if (result.startsWith("Error:")) R.string.error_network else R.string.msg_group_resent,
+                            Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }, parent.indexOfChild(btnAddMember) + 1)
         }
         dialog.show()
     }

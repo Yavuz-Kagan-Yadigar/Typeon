@@ -467,4 +467,6 @@
     <string name="title_confirm_contact">Bu kişi eklensin mi?</string>
     <string name="msg_confirm_contact">Bu QR kodundaki kişi eklensin mi?</string>
     <string name="msg_loading">Yükleniyor…</string>
+    <string name="action_resend_group">Grubu herkese yeniden gönder</string>
+    <string name="msg_group_resent">Grup herkese yeniden gönderildi</string>
 </resources>
