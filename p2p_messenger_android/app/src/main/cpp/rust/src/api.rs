@@ -750,7 +750,24 @@ pub fn list_attachments(peer_device_fingerprint: &str) -> String {
 pub fn list_attachments_brief(peer_device_fingerprint: &str) -> String {
     let fp = peer_device_fingerprint.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&crate::core_lock_read().list_attachments_opt(&fp, false))
+        serde_json::to_string(&crate::core_lock_read().list_attachments_opt(&fp, false, None, crate::MAX_LISTED_ATTACHMENTS))
+            .unwrap_or_else(|_| "[]".to_string())
+    }))
+}
+
+/// #80: the `limit` newest attachments older than `before_ms`, oldest first.
+pub fn list_attachments_before(peer_device_fingerprint: &str, before_ms: u64, limit: usize) -> String {
+    let fp = peer_device_fingerprint.to_string();
+    json_list(catch_panic(move || {
+        serde_json::to_string(&crate::core_lock_read().list_attachments_page(&fp, before_ms, limit))
+            .unwrap_or_else(|_| "[]".to_string())
+    }))
+}
+
+pub fn list_group_attachments_before(group_id: &str, before_ms: u64, limit: usize) -> String {
+    let gid = group_id.to_string();
+    json_list(catch_panic(move || {
+        serde_json::to_string(&crate::core_lock_read().list_group_attachments_page(&gid, before_ms, limit))
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }
@@ -758,7 +775,7 @@ pub fn list_attachments_brief(peer_device_fingerprint: &str) -> String {
 pub fn list_group_attachments_brief(group_id: &str) -> String {
     let gid = group_id.to_string();
     json_list(catch_panic(move || {
-        serde_json::to_string(&crate::core_lock_read().list_group_attachments_opt(&gid, false))
+        serde_json::to_string(&crate::core_lock_read().list_group_attachments_opt(&gid, false, None, crate::MAX_LISTED_ATTACHMENTS))
             .unwrap_or_else(|_| "[]".to_string())
     }))
 }

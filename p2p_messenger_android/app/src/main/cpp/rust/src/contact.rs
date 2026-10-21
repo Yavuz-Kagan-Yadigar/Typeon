@@ -35,6 +35,10 @@ pub struct KnownDevice {
     /// shows its code and still holds its old `DeviceAdd`.
     #[serde(default)]
     pub owner_revoked: bool,
+    /// When it was revoked (local clock): its author proofs on group rows
+    /// dated after this are refused (M-81). `None` while Active.
+    #[serde(default)]
+    pub revoked_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +135,7 @@ impl Contact {
                 d.via_signed_chain |= via_signed_chain;
             }
             d.status = KnownDeviceStatus::Active;
+            d.revoked_at = None;
         } else {
             // Owner-revoked tombstones have their own cap (32).
             if self.known_devices.iter().filter(|d| !d.owner_revoked).count() >= MAX_KNOWN_DEVICES {
@@ -155,6 +160,7 @@ impl Contact {
                 status: KnownDeviceStatus::Active,
                 via_signed_chain,
                 owner_revoked: false,
+                revoked_at: None,
             });
         }
         self.last_device_change = Some(now);
@@ -184,6 +190,7 @@ impl Contact {
                 status: KnownDeviceStatus::Revoked,
                 via_signed_chain: true,
                 owner_revoked: true,
+                revoked_at: None,
             });
         }
         self.revoke_device(fingerprint, now);
@@ -192,9 +199,14 @@ impl Contact {
         }
     }
 
+    pub fn revoked_at(&self, fingerprint: &str) -> Option<u64> {
+        self.find_device(fingerprint).and_then(|d| d.revoked_at)
+    }
+
     pub fn revoke_device(&mut self, fingerprint: &str, now: u64) {
         if let Some(d) = self.known_devices.iter_mut().find(|d| d.device_fingerprint == fingerprint) {
             d.status = KnownDeviceStatus::Revoked;
+            d.revoked_at.get_or_insert(now);
             self.last_device_change = Some(now);
         }
     }
@@ -298,6 +310,17 @@ mod tests {
         c.add_device_via_signed_chain("dev1".into(), 1000);
         c.add_device_unverified("dev1".into(), 2000);
         assert!(c.find_device("dev1").unwrap().via_signed_chain);
+    }
+
+    #[test]
+    fn revoked_at_is_kept_and_cleared_on_readd() {
+        let mut c = Contact::new("c".into(), "n".into(), "id".into());
+        c.add_device_unverified("dev1".into(), 1000);
+        c.revoke_device("dev1", 2000);
+        c.revoke_device("dev1", 3000);
+        assert_eq!(c.revoked_at("dev1"), Some(2000));
+        c.add_device_unverified("dev1".into(), 4000);
+        assert_eq!(c.revoked_at("dev1"), None);
     }
 
     #[test]

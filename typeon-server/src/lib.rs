@@ -1409,10 +1409,10 @@ impl ServerCore {
                 ServerResponse::ArchiveProbed { present: self.store.archive_probe(&buckets) }
             }
 
-            ServerRequest::ArchiveFetch { bucket, before_ms, max_items, max_bytes } => {
+            ServerRequest::ArchiveFetch { bucket, before_ms, before_id, max_items, max_bytes } => {
                 let (records, more) = self.store.archive_fetch(
                     &bucket,
-                    before_ms,
+                    before_ms.map(|ms| (ms, before_id.as_deref().unwrap_or(""))),
                     max_items.clamp(1, MAX_FETCH_BATCH_ITEMS),
                     max_bytes.clamp(1, MAX_FETCH_BATCH_BYTES),
                 );

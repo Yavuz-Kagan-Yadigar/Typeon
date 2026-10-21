@@ -87,22 +87,22 @@ impl Drop for OldRecvChain {
 }
 
 impl RatchetPublicKeys {
-    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, RatchetError> {
         let mut buf = Vec::new();
-        ciborium::into_writer(self, &mut buf).map_err(|e| e.to_string())?;
+        ciborium::into_writer(self, &mut buf).map_err(|e| RatchetError::Encoding(e.to_string()))?;
         Ok(buf)
     }
 
     /// Parses a peer's header field: bounded in size and nesting, and both
     /// keys checked for their exact length.
-    pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, RatchetError> {
         // 32 + 1568 key bytes and a few bytes of CBOR framing.
         if data.len() > 2048 {
-            return Err("Ratchet public key too long".to_string());
+            return Err(RatchetError::Invalid("Ratchet public key too long"));
         }
-        let keys: Self = ciborium::de::from_reader_with_recursion_limit(data, 4).map_err(|e| e.to_string())?;
+        let keys: Self = ciborium::de::from_reader_with_recursion_limit(data, 4).map_err(|e| RatchetError::Encoding(e.to_string()))?;
         if keys.x25519_pubkey.len() != 32 || keys.kyber_pubkey.len() != 1568 {
-            return Err("Bad ratchet public key length".to_string());
+            return Err(RatchetError::Invalid("Bad ratchet public key length"));
         }
         Ok(keys)
     }
@@ -296,7 +296,7 @@ impl DeviceRatchetState {
     /// yüklenip buraya geçirilmelidir (bkz. lib.rs
     /// `load_skipped_keys_from_db`) — bu fonksiyon kendisi o tabloya
     /// erişmez (ratchet.rs kripto-only katman, dosya başı notuyla tutarlı).
-    pub fn from_persistable(mut s: SerializableRatchetState, skipped_keys: HashMap<u32, [u8; 32]>) -> Result<Self, String> {
+    pub fn from_persistable(mut s: SerializableRatchetState, skipped_keys: HashMap<u32, [u8; 32]>) -> Result<Self, RatchetError> {
         let mut own_kyber_encoded: ml_kem::Encoded<MlKem1024DecapsulationKey> = s.own_kyber_secret.as_slice()
             .try_into().map_err(|_| "Bozuk kayıtlı Kyber secret key")?;
         let own_kyber_secret = MlKem1024DecapsulationKey::from_bytes(&own_kyber_encoded);
@@ -364,12 +364,56 @@ fn transcript(init_x25519: &[u8; 32], init_kyber: &[u8], kyber_ct: &[u8], resp_x
     h.finalize().into()
 }
 
+/// M-198: ratchet failures as values, so callers branch on the kind, not the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RatchetError {
+    /// Behind the chain and no skipped key: already decrypted, or evicted.
+    KeyNotFound(u32),
+    TooManySkipped { gap: u32, limit: u32 },
+    /// AEAD tag did not verify.
+    DecryptFailed,
+    ResponderMustRotate,
+    ChainExhausted,
+    /// Malformed key, ciphertext or state, or a failed primitive.
+    Invalid(&'static str),
+    Encoding(String),
+}
+
+impl std::fmt::Display for RatchetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RatchetError::KeyNotFound(n) => write!(f, "Message {} not found in skipped-key cache (already decrypted, or evicted)", n),
+            RatchetError::TooManySkipped { gap, limit } => write!(f, "Too many skipped messages (gap {}, limit {})", gap, limit),
+            RatchetError::DecryptFailed => f.write_str("Decryption failed"),
+            RatchetError::ResponderMustRotate => f.write_str("Responder must rotate before its first send"),
+            RatchetError::ChainExhausted => f.write_str("Chain exhausted"),
+            RatchetError::Invalid(m) => f.write_str(m),
+            RatchetError::Encoding(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for RatchetError {}
+
+impl From<&'static str> for RatchetError {
+    fn from(m: &'static str) -> Self {
+        RatchetError::Invalid(m)
+    }
+}
+
+/// `?` into the many `Result<_, String>` callers.
+impl From<RatchetError> for String {
+    fn from(e: RatchetError) -> Self {
+        e.to_string()
+    }
+}
+
 /// X25519 with a small-order public key gives the same output for every
 /// secret: the classical half of the hybrid would silently be a constant.
-fn x25519(secret: &StaticSecret, public: &X25519PublicKey) -> Result<x25519_dalek::SharedSecret, String> {
+fn x25519(secret: &StaticSecret, public: &X25519PublicKey) -> Result<x25519_dalek::SharedSecret, RatchetError> {
     let shared = secret.diffie_hellman(public);
     if !shared.was_contributory() {
-        return Err("Bad peer X25519 key (small order)".to_string());
+        return Err(RatchetError::Invalid("Bad peer X25519 key (small order)"));
     }
     Ok(shared)
 }
@@ -378,7 +422,7 @@ fn x25519(secret: &StaticSecret, public: &X25519PublicKey) -> Result<x25519_dale
 /// simetrisini garanti eder: initiator'ın send-key'i responder'ın
 /// recv-key'ine eşit olur. `transcript` is part of every label (v0.2): the
 /// keys depend on who exchanged what, not only on the shared secrets.
-fn derive_keys(mut ikm: Vec<u8>, transcript: &[u8; 32], we_initiated: bool) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
+fn derive_keys(mut ikm: Vec<u8>, transcript: &[u8; 32], we_initiated: bool) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), RatchetError> {
     let hk = Hkdf::<Sha256>::new(None, &ikm);
     ikm.zeroize();
     let mut keys = [[0u8; 32]; 3];
@@ -401,7 +445,7 @@ pub const KEM_HEADER_LEN: usize = 32 + 1568;
 /// ML-KEM encapsulation, both shared secrets and the transcript into HKDF),
 /// with no ML-KEM key of the sender. Returns the key and the header the
 /// recipient needs: `x25519 public (32) || ML-KEM ciphertext`.
-pub fn kem_key_to(peer_x25519_pubkey: &[u8], peer_kyber_pubkey: &[u8]) -> Result<([u8; 32], Vec<u8>), String> {
+pub fn kem_key_to(peer_x25519_pubkey: &[u8], peer_kyber_pubkey: &[u8]) -> Result<([u8; 32], Vec<u8>), RatchetError> {
     let mut csprng = OsRng;
     let own_x25519_secret = StaticSecret::random_from_rng(&mut csprng);
     let own_x25519_bytes = *X25519PublicKey::from(&own_x25519_secret).as_bytes();
@@ -417,9 +461,9 @@ pub fn kem_key_to(peer_x25519_pubkey: &[u8], peer_kyber_pubkey: &[u8]) -> Result
 }
 
 /// The recipient half of `kem_key_to` (as `DeviceRatchetState::respond`).
-pub fn kem_key_from(own_x25519_secret: &StaticSecret, own_kyber_secret: &MlKem1024DecapsulationKey, header: &[u8]) -> Result<[u8; 32], String> {
+pub fn kem_key_from(own_x25519_secret: &StaticSecret, own_kyber_secret: &MlKem1024DecapsulationKey, header: &[u8]) -> Result<[u8; 32], RatchetError> {
     if header.len() != KEM_HEADER_LEN {
-        return Err("Bad KEM header length".to_string());
+        return Err(RatchetError::Invalid("Bad KEM header length"));
     }
     let (sender_x25519, kyber_ciphertext) = header.split_at(32);
     let sender_x25519_bytes: [u8; 32] = sender_x25519.try_into().map_err(|_| "Bad sender X25519 key length")?;
@@ -436,7 +480,7 @@ pub fn kem_key_from(own_x25519_secret: &StaticSecret, own_kyber_secret: &MlKem10
 }
 
 /// `derive_keys` for one key, under a label of its own.
-fn kem_key(mut ikm: Vec<u8>, transcript: &[u8; 32]) -> Result<[u8; 32], String> {
+fn kem_key(mut ikm: Vec<u8>, transcript: &[u8; 32]) -> Result<[u8; 32], RatchetError> {
     let hk = Hkdf::<Sha256>::new(None, &ikm);
     ikm.zeroize();
     let mut key = [0u8; 32];
@@ -447,7 +491,7 @@ fn kem_key(mut ikm: Vec<u8>, transcript: &[u8; 32]) -> Result<[u8; 32], String> 
 /// One symmetric ratchet step (spec 3.2): the key of this message and the
 /// chain key of the next. The send and the receive side share it, so the two
 /// HKDF labels cannot drift apart.
-fn chain_step(chain_key: &[u8]) -> Result<([u8; 32], [u8; 32]), String> {
+fn chain_step(chain_key: &[u8]) -> Result<([u8; 32], [u8; 32]), RatchetError> {
     let hk = Hkdf::<Sha256>::new(None, chain_key);
     let mut message_key = [0u8; 32];
     let mut next_chain_key = [0u8; 32];
@@ -468,7 +512,7 @@ impl DeviceRatchetState {
         peer_x25519_pubkey: &[u8],
         peer_kyber_pubkey: &[u8],
         now_ms: u64,
-    ) -> Result<(Self, Vec<u8>, Vec<u8>), String> {
+    ) -> Result<(Self, Vec<u8>, Vec<u8>), RatchetError> {
         // X25519 (x25519-dalek, rand_core 0.6 üzerinden rand 0.8) ve ML-KEM
         // (ml-kem crate'i, rand_core 0.6.4) aynı rand_core majör sürümünü
         // kullanıyor — aynı `OsRng`'u ikisine de geçirebiliriz.
@@ -536,7 +580,7 @@ impl DeviceRatchetState {
         initiator_kyber_pubkey: &[u8],
         kyber_ciphertext: &[u8],
         now_ms: u64,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, RatchetError> {
         let initiator_x25519_bytes: [u8; 32] = initiator_x25519_pubkey.try_into().map_err(|_| "Bad initiator X25519 key length")?;
         let initiator_x25519_pk = X25519PublicKey::from(initiator_x25519_bytes);
         let dh_shared = x25519(&own_x25519_secret, &initiator_x25519_pk)?;
@@ -605,7 +649,7 @@ impl DeviceRatchetState {
     /// karşı tarafa gönderilmelidir (`RatchetPublicKeys` + bu ciphertext).
     /// Karşı taraf bunu aldığında `respond_to_rotation` ile senkronize
     /// olmalıdır.
-    pub fn perform_dh_ratchet(&mut self, now_ms: u64) -> Result<Vec<u8>, String> {
+    pub fn perform_dh_ratchet(&mut self, now_ms: u64) -> Result<Vec<u8>, RatchetError> {
         let mut csprng = OsRng;
         let new_x25519_secret = StaticSecret::random_from_rng(&mut csprng);
         let (new_kyber_secret, new_kyber_ek) = MlKem1024::generate(&mut csprng);
@@ -694,7 +738,7 @@ impl DeviceRatchetState {
     /// announcement of an older rotation would overwrite root and chains with
     /// garbage. `decrypt` runs this on a copy and keeps the result only when
     /// the packet then decrypts on the new chain.
-    fn respond_to_rotation(&mut self, new_peer_keys: &RatchetPublicKeys, rotation_kyber_ciphertext: &[u8], now_ms: u64) -> Result<bool, String> {
+    fn respond_to_rotation(&mut self, new_peer_keys: &RatchetPublicKeys, rotation_kyber_ciphertext: &[u8], now_ms: u64) -> Result<bool, RatchetError> {
         let x25519_bytes: [u8; 32] = new_peer_keys.x25519_pubkey.as_slice().try_into().map_err(|_| "Bad peer X25519 key length")?;
         if x25519_bytes == *self.peer_x25519_pubkey.as_bytes() {
             return Ok(false);
@@ -793,15 +837,15 @@ impl DeviceRatchetState {
     /// `aad`: the packet's raw header bytes (M-89): the tag binds them, so
     /// the header the receiver acts on is the one the sender encrypted under.
     /// `next_send_numbers` gives the numbers to put in that header first.
-    pub fn encrypt_next(&mut self, plaintext: &[u8], aad: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    pub fn encrypt_next(&mut self, plaintext: &[u8], aad: &[u8]) -> Result<(Vec<u8>, u32, u32), RatchetError> {
         // The handshake chain of a responder is a function of the
         // HandshakeInit alone (see `respond`): never sent on.
         if self.is_fresh_responder() {
-            return Err("Responder must rotate before its first send".to_string());
+            return Err(RatchetError::ResponderMustRotate);
         }
         let message_number = self.send_message_number;
         // A wrapped counter would repeat a nonce under a live chain key.
-        let next_number = message_number.checked_add(1).ok_or("Send chain exhausted")?;
+        let next_number = message_number.checked_add(1).ok_or(RatchetError::ChainExhausted)?;
         let (mut message_key, mut next_chain_key) = chain_step(&self.ck_send)?;
         set_secret(&mut self.ck_send, next_chain_key.to_vec());
         next_chain_key.zeroize();
@@ -843,7 +887,7 @@ impl DeviceRatchetState {
         rotation: Option<(&RatchetPublicKeys, &[u8])>,
         now_ms: u64,
         aad: &[u8],
-    ) -> Result<(Vec<u8>, SkippedKeyChanges), String> {
+    ) -> Result<(Vec<u8>, SkippedKeyChanges), RatchetError> {
         if self.old_recv.is_some() && now_ms.abs_diff(self.last_rotation) > OLD_RECV_MAX_AGE_MS {
             self.old_recv = None;
         }
@@ -874,8 +918,8 @@ impl DeviceRatchetState {
                 return Ok((plaintext, changes));
             }
         }
-        // The current chain's error: the caller tells a duplicate ("not found
-        // in skipped-key cache") from a diverged session by it.
+        // The current chain's error: the caller tells a duplicate
+        // (`RatchetError::KeyNotFound`) from a diverged session by it.
         Err(current_err)
     }
 }
@@ -900,19 +944,17 @@ fn chain_decrypt(
     ciphertext: &[u8],
     message_number: u32,
     aad: &[u8],
-) -> Result<(Vec<u8>, SkippedKeyChanges), String> {
+) -> Result<(Vec<u8>, SkippedKeyChanges), RatchetError> {
     let mut changes = SkippedKeyChanges::default();
     // The message key and, when the chain advances, (new chain key, new `next`).
     let (mut message_key, mut advance) = if message_number < *next {
-        let key = *skipped.get(&message_number).ok_or_else(|| {
-            format!("Message {} not found in skipped-key cache (already decrypted, or evicted)", message_number)
-        })?;
+        let key = *skipped.get(&message_number).ok_or(RatchetError::KeyNotFound(message_number))?;
         (key, None)
     } else {
-        let after = message_number.checked_add(1).ok_or("Receive chain exhausted")?;
+        let after = message_number.checked_add(1).ok_or(RatchetError::ChainExhausted)?;
         let gap = message_number - *next;
         if gap > MAX_SKIP_AHEAD {
-            return Err(format!("Too many skipped messages (gap {}, limit {})", gap, MAX_SKIP_AHEAD));
+            return Err(RatchetError::TooManySkipped { gap, limit: MAX_SKIP_AHEAD });
         }
         let mut cursor = chain_key.clone();
         for number in *next..message_number {
@@ -931,9 +973,9 @@ fn chain_decrypt(
     };
 
     let opened = ChaCha20Poly1305::new_from_slice(&message_key)
-        .map_err(|_| "Invalid key".to_string())
+        .map_err(|_| RatchetError::Invalid("Invalid key"))
         .and_then(|cipher| {
-            cipher.decrypt(&nonce_from_message_number(message_number), Payload { msg: ciphertext, aad }).map_err(|_| "Decryption failed".to_string())
+            cipher.decrypt(&nonce_from_message_number(message_number), Payload { msg: ciphertext, aad }).map_err(|_| RatchetError::DecryptFailed)
         });
     message_key.zeroize();
     let plaintext = match opened {
@@ -990,16 +1032,16 @@ fn nonce_from_message_number(n: u32) -> Nonce {
 /// public key noktası doğrulaması yapmaz, sadece boy kontrolü `try_into()`
 /// ile burada yapılır). `hybrid_array::Array<T,N>` doğrudan `TryFrom<&[u8]>`
 /// implement ediyor, bu yüzden `bytes.try_into()` derlenir.
-fn kyber_pubkey_from_bytes(bytes: &[u8]) -> Result<MlKem1024EncapsulationKey, String> {
+fn kyber_pubkey_from_bytes(bytes: &[u8]) -> Result<MlKem1024EncapsulationKey, RatchetError> {
     let encoded: ml_kem::Encoded<MlKem1024EncapsulationKey> = bytes
         .try_into()
-        .map_err(|_| "Bad Kyber public key length".to_string())?;
+        .map_err(|_| RatchetError::Invalid("Bad Kyber public key length"))?;
     Ok(MlKem1024EncapsulationKey::from_bytes(&encoded))
 }
 
 /// Ham bayt dizisinden bir ML-KEM-1024 Ciphertext ayrıştırır.
-fn kyber_ciphertext_from_bytes(bytes: &[u8]) -> Result<MlKemCiphertext<MlKem1024>, String> {
-    bytes.try_into().map_err(|_| "Bad Kyber ciphertext length".to_string())
+fn kyber_ciphertext_from_bytes(bytes: &[u8]) -> Result<MlKemCiphertext<MlKem1024>, RatchetError> {
+    bytes.try_into().map_err(|_| RatchetError::Invalid("Bad Kyber ciphertext length"))
 }
 
 // NOTE: Sıra dışı gelen mesajlar için "skipped message keys" cache'i var

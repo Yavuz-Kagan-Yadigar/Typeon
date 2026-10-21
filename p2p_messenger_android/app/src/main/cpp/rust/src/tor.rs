@@ -30,7 +30,8 @@ use libp2p::core::multiaddr::Protocol;
 use libp2p::core::transport::{ListenerId, TransportError, TransportEvent};
 use libp2p::{Multiaddr, Transport};
 use tokio::io::{AsyncRead as TokioAsyncRead, AsyncWrite as TokioAsyncWrite, ReadBuf};
-use tor_cell::relaycell::msg::Connected;
+use tor_cell::relaycell::msg::{Connected, End, EndReason};
+use tor_proto::stream::IncomingStreamRequest;
 use tor_hsservice::config::OnionServiceConfigBuilder;
 use tor_hsservice::handle_rend_requests;
 use tor_rtcompat::tokio::TokioRustlsRuntime;
@@ -382,11 +383,12 @@ fn client_config(state_dir: &str, cache_dir: &str) -> Result<arti_client::TorCli
 /// hem futures AsyncRead/Write implement ettiğinden `tokio::io::
 /// copy_bidirectional` doğrudan kullanılabilir.
 async fn bridge_incoming_stream(stream_request: tor_hsservice::StreamRequest, local_port: u16) {
-    // Gelen her akışı kabul ediyoruz — onion service'imiz tek amaçlı (yalnızca
-    // libp2p trafiği), gelen her istek yerel libp2p portuna köprülenir. (arti
-    // "yalnızca BEGIN kabul et" önerir ama bu sadece diğer onion
-    // servisleriyle ayırt-edilemezlik içindir; bizim özel protokolümüzde
-    // anlamı yok.)
+    // M-11: only BEGIN to our virtual port (the one we publish, = `local_port`).
+    // DONE, as arti advises, so the rejection looks like any onion service's.
+    if !matches!(stream_request.request(), IncomingStreamRequest::Begin(b) if b.port() == local_port) {
+        let _ = stream_request.reject(End::new_with_reason(EndReason::DONE)).await;
+        return;
+    }
     let mut tor_stream = match stream_request.accept(Connected::new_empty()).await {
         Ok(s) => s,
         Err(e) => {
@@ -559,7 +561,7 @@ impl Transport for ArtiDialTransport {
 /// `MultiaddrNotSupported` döner. Böylece çıkışın tamamı `ArtiDialTransport`
 /// (onion) veya röle (onion üzerinden) üzerinden gider; libp2p asla bir eşin
 /// clearnet adresine doğrudan bağlanamaz — kim `swarm.dial()` çağırırsa
-/// çağırsın (mDNS keşfi, kad, identify, dcutr hole-punch dahil).
+/// çağırsın (kad, identify dahil).
 #[derive(Clone)]
 pub struct DialReject<T>(pub T);
 

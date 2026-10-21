@@ -1259,24 +1259,25 @@ impl Store {
         out
     }
 
-    /// Yeniden eskiye bir sayfa. `before_ms: None` = en yeni sayfa.
+    /// Yeniden eskiye bir sayfa. `before: None` = en yeni sayfa.
     ///
-    /// The client continues with `before_ms` = the oldest `sent_at_ms` it got,
-    /// so a page never ends inside a group of records that share a timestamp:
-    /// the rest of that group would be skipped.
-    /// ponytail: a group that fills a page alone is cut at 4x `max_items` /
-    /// 2x `max_bytes` and the client never sees its rest; add a
-    /// `(sent_at_ms, record_id)` cursor to the protocol if that ever matters.
-    pub fn archive_fetch(&self, bucket: &str, before_ms: Option<u64>, max_items: u32, max_bytes: u32) -> (Vec<ArchiveRecord>, bool) {
-        let before = before_ms.map(|v| v.min(i64::MAX as u64) as i64).unwrap_or(i64::MAX);
+    /// The cursor is the last record the client got, `(sent_at_ms,
+    /// record_id)`: clients send `sent_at_ms` coarsened to the hour (M-30), so
+    /// many records share one and a page may end inside such a group.
+    pub fn archive_fetch(&self, bucket: &str, before: Option<(u64, &str)>, max_items: u32, max_bytes: u32) -> (Vec<ArchiveRecord>, bool) {
+        let (before_ms, before_id) = match before {
+            Some((ms, id)) => (ms.min(i64::MAX as u64) as i64, id),
+            None => (i64::MAX, ""),
+        };
         let mut stmt = match self.conn.prepare(
             "SELECT record_id, rev, sent_at_ms, sealed FROM archive
-             WHERE bucket = ?1 AND sent_at_ms < ?2 ORDER BY sent_at_ms DESC",
+             WHERE bucket = ?1 AND (sent_at_ms < ?2 OR (sent_at_ms = ?2 AND record_id < ?3))
+             ORDER BY sent_at_ms DESC, record_id DESC",
         ) {
             Ok(s) => s,
             Err(_) => return (Vec::new(), false),
         };
-        let rows = stmt.query_map(params![bucket, before], |r| {
+        let rows = stmt.query_map(params![bucket, before_ms, before_id], |r| {
             Ok(ArchiveRecord {
                 record_id: r.get(0)?,
                 rev: r.get::<_, i64>(1)? as u64,
@@ -1291,20 +1292,7 @@ impl Store {
         for rec in rows.flatten() {
             // `!out.is_empty()`: the first record always goes out, or one
             // record over `max_bytes` hides everything older in its bucket.
-            let full = !out.is_empty()
-                && (out.len() as u32 >= max_items || total + rec.sealed.len() > max_bytes as usize);
-            if full && out[0].sent_at_ms != rec.sent_at_ms {
-                // Hand the split timestamp group to the next page as a whole.
-                out.retain(|r| r.sent_at_ms != rec.sent_at_ms);
-                return (out, true);
-            }
-            // The page is one timestamp group. Without a hard stop a client
-            // that put its whole quota under one `sent_at_ms` got it back in
-            // one response, all of it in memory.
-            if full
-                && (out.len() as u32 >= max_items.saturating_mul(4)
-                    || total + rec.sealed.len() > (max_bytes as usize).saturating_mul(2))
-            {
+            if !out.is_empty() && (out.len() as u32 >= max_items || total + rec.sealed.len() > max_bytes as usize) {
                 return (out, true);
             }
             total += rec.sealed.len();
@@ -2048,7 +2036,7 @@ mod tests {
         assert!(more);
         assert_eq!(page[0].sent_at_ms, 104, "en yeni once");
         // Sayfalama: son gorulenden eskiye.
-        let (older, _) = s.archive_fetch("ar_1", Some(page[1].sent_at_ms), 10, 65536);
+        let (older, _) = s.archive_fetch("ar_1", Some((page[1].sent_at_ms, page[1].record_id.as_str())), 10, 65536);
         assert_eq!(older.len(), 3);
         assert!(older.iter().all(|r| r.sent_at_ms < page[1].sent_at_ms));
     }
@@ -2134,23 +2122,23 @@ mod tests {
     }
 
     #[test]
-    fn archive_paging_never_splits_a_timestamp_and_never_stalls() {
+    fn archive_paging_walks_shared_timestamps_and_never_stalls() {
         let s = Store::open_in_memory().unwrap();
         let a = enroll(&s, b"aaaa", "peerA");
-        s.archive_put("ar_1", &[rec("m1", 1, 100, b"a"), rec("m2", 1, 200, b"b"), rec("m3", 1, 200, b"c"), rec("m4", 1, 300, b"d")], &a, 0).unwrap();
+        s.archive_put("ar_1", &[rec("m1", 1, 100, b"a"), rec("m2", 1, 200, b"b"), rec("m3", 1, 200, b"c"), rec("m5", 1, 200, b"e"), rec("m4", 1, 300, b"d")], &a, 0).unwrap();
         // Walk the bucket two at a time, the way the client does.
         let mut seen = Vec::new();
-        let mut before = None;
+        let mut before: Option<(u64, String)> = None;
         loop {
-            let (page, more) = s.archive_fetch("ar_1", before, 2, 65536);
-            before = page.iter().map(|r| r.sent_at_ms).min();
+            let (page, more) = s.archive_fetch("ar_1", before.as_ref().map(|(ms, id)| (*ms, id.as_str())), 2, 65536);
+            before = page.last().map(|r| (r.sent_at_ms, r.record_id.clone()));
             seen.extend(page.into_iter().map(|r| r.record_id));
             if !more {
                 break;
             }
         }
         seen.sort();
-        assert_eq!(seen, ["m1", "m2", "m3", "m4"], "the two records at ts=200 share a page");
+        assert_eq!(seen, ["m1", "m2", "m3", "m4", "m5"], "a page may end inside the ts=200 group");
         // A record over the byte cap is still returned.
         let (page, _) = s.archive_fetch("ar_1", None, 10, 0);
         assert_eq!(page.len(), 1);

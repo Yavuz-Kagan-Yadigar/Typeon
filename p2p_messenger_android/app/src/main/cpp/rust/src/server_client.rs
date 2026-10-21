@@ -40,7 +40,7 @@ use crate::server_proto::{
     MAX_FETCH_BATCH_BYTES, MAX_FETCH_BATCH_ITEMS, SERVER_PROTOCOL_VERSION,
 };
 use crate::server_seal;
-use crate::{current_time_ms, extract_peer_id, P2PCore};
+use crate::{current_time_ms, extract_peer_id, mono_ms, P2PCore};
 
 /// Sunucudan hiçbir haber gelmese bile emniyet amaçlı tam tarama aralığı.
 ///
@@ -997,7 +997,7 @@ impl P2PCore {
     /// A queued blob upload that a server can take now: a routing server,
     /// connected, enrolled and not in deposit backoff.
     pub(crate) fn blob_upload_can_run(&self) -> bool {
-        let now = current_time_ms();
+        let now = mono_ms();
         !self.server_blob_uploads.is_empty()
             && self.servers.iter().any(|s| {
                 s.route_messages
@@ -1273,7 +1273,7 @@ impl P2PCore {
         // bkz. `SERVER_DEPOSIT_BACKOFF_MS` — kota/hız hatası veren sunucuya
         // bir süre YENİ yatırma denenmez (aksi halde her poll turunda aynı
         // hatayı alan bir meşgul döngüsü oluşuyor).
-        let now_ms = current_time_ms();
+        let now_ms = mono_ms();
         let candidates: Vec<String> = self
             .servers
             .iter()
@@ -1470,7 +1470,7 @@ impl P2PCore {
         if !self.radio_window_open && self.server_sweep_at != 0 {
             return;
         }
-        let now = current_time_ms();
+        let now = mono_ms();
         if now < self.server_sweep_at {
             return;
         }
@@ -1708,7 +1708,7 @@ impl P2PCore {
             return;
         }
         if let Some(rt) = self.server_rt.get_mut(server_id) {
-            rt.fetch_due_at = current_time_ms() + SERVER_FETCH_SWEEP_INTERVAL_MS;
+            rt.fetch_due_at = mono_ms() + SERVER_FETCH_SWEEP_INTERVAL_MS;
         }
         let req = ServerRequest::Fetch {
             cursors,
@@ -1741,7 +1741,7 @@ impl P2PCore {
         if self.server_mail_deferred() {
             return;
         }
-        let now = current_time_ms();
+        let now = mono_ms();
         // This turn's items were processed: failures were reported
         // (`server_item_failed`). Held and passed items the cursor went past
         // are done.
@@ -1789,7 +1789,7 @@ impl P2PCore {
             let e = rt.unacked.entry(mailbox).or_insert(0);
             *e = (*e).max(seq);
         }
-        rt.ack_retry_at = current_time_ms() + SERVER_SWEEP_INTERVAL_MS;
+        rt.ack_retry_at = mono_ms() + SERVER_SWEEP_INTERVAL_MS;
     }
 
     /// C1: `seq` of `mailbox` did not open or failed to process. `true`: it
@@ -1813,7 +1813,7 @@ impl P2PCore {
     /// Battery #3: 5 min doubling to 30 min while the server keeps refusing or
     /// not answering deposits; a `Deposited` resets it.
     fn back_off_deposits(rt: &mut ServerRuntime) {
-        rt.deposit_backoff_until = current_time_ms()
+        rt.deposit_backoff_until = mono_ms()
             + (SERVER_DEPOSIT_BACKOFF_MS << rt.deposit_failures.min(3)).min(SERVER_DEPOSIT_BACKOFF_MAX_MS);
         rt.deposit_failures = rt.deposit_failures.saturating_add(1);
     }
@@ -1834,7 +1834,7 @@ impl P2PCore {
         let digest: [u8; 32] = Sha256::digest(raw).into();
         let found = self.server_rt.iter_mut().find_map(|(sid, rt)| rt.taken.remove(&digest).map(|t| (sid.clone(), t)));
         let Some((server_id, (mailbox, seq))) = found else { return };
-        let now = current_time_ms();
+        let now = mono_ms();
         if !self.hold_server_item(&server_id, &mailbox, seq, now) {
             return;
         }
@@ -1922,7 +1922,7 @@ impl P2PCore {
                 // 30 per 5 s. Each Push costs an open, the processing and an
                 // Ack. Over that the item is left on the server and the Push
                 // counts as a `Notify` (one fetch per 5 s).
-                let now = current_time_ms();
+                let now = mono_ms();
                 let over = self.server_rt.get_mut(&server_id).map_or(true, |rt| {
                     if now.saturating_sub(rt.push_window_at) >= 5_000 {
                         rt.push_window_at = now;
@@ -1969,7 +1969,7 @@ impl P2PCore {
                 // sweep, so a server sending them in a row kept the phone
                 // fetching without end. A second one inside that time is
                 // covered by the fetch the first one started.
-                let now = current_time_ms();
+                let now = mono_ms();
                 let sid = sid.filter(|sid| {
                     self.server_rt.get_mut(sid).map_or(false, |rt| {
                         let ok = now.saturating_sub(rt.notified_at) >= 5_000;
@@ -2115,6 +2115,8 @@ impl P2PCore {
                 }
                 info!("Sunucuya kaydolundu: {}", crate::log_id(&server_id));
                 self.server_sweep_at = 0;
+                // #76: partial downloads can go on from the server's copy.
+                self.resume_incomplete_downloads_for(&std::collections::HashSet::new(), true);
             }
 
             // --- Register ---
@@ -2149,7 +2151,7 @@ impl P2PCore {
                         warn!("Sunucu {} kutuyu reddetti ({})", refused.len(), crate::log_id(&server_id));
                         rt.last_error = Some(format!("{TOO_MANY_MAILBOXES}: the server refused some, those chats use the direct path only"));
                         rt.refused.extend(refused);
-                        rt.refused_retry_at = current_time_ms() + SERVER_REFUSED_RETRY_MS;
+                        rt.refused_retry_at = mono_ms() + SERVER_REFUSED_RETRY_MS;
                     }
                 }
                 if let Some(peer_id) = peer_id.filter(|_| !prove.is_empty()) {
@@ -2217,7 +2219,7 @@ impl P2PCore {
                 let mut seen: HashSet<String> = HashSet::new();
                 let mut blocked: HashSet<String> = HashSet::new();
                 let mut held_any = false;
-                let now = current_time_ms();
+                let now = mono_ms();
 
                 for item in items {
                     let Some(key) = index.get(&item.mailbox_id) else {
@@ -2350,7 +2352,7 @@ impl P2PCore {
                     self.probe_next_conversation(peer_id, server_id, next);
                 } else {
                     let bucket = wanted.remove(0);
-                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, before_ms, wanted, before_ms.is_some(), next);
+                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, before_ms.map(|ms| (ms, String::new())), wanted, before_ms.is_some(), next);
                 }
             }
             (
@@ -2361,7 +2363,8 @@ impl P2PCore {
                 // damgasından geriye devam et. Bu olmadan bir kovadan
                 // yalnızca ilk sayfa alınır ve daha eski mesajlar sunucuda
                 // erişilemez kalırdı.
-                let oldest = records.iter().map(|r| r.sent_at_ms).min();
+                // Cursor = the page's last record (server order: time, id desc).
+                let oldest = records.last().map(|r| (r.sent_at_ms, r.record_id.clone()));
                 let got = !records.is_empty();
                 self.merge_server_archive(&conv_key, group, bucket_more.as_deref().unwrap_or(""), records);
                 // "Fetch older": one page per request; the next one starts
@@ -2370,8 +2373,8 @@ impl P2PCore {
                     return;
                 }
                 let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { return };
-                if let (true, Some(bucket), Some(before_ms)) = (more, bucket_more, oldest) {
-                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, Some(before_ms), rest, paging, next);
+                if let (true, Some(bucket), Some(before)) = (more, bucket_more, oldest) {
+                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, Some(before), rest, paging, next);
                 } else if !rest.is_empty() {
                     let bucket = rest.remove(0);
                     self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, None, rest, paging, next);
@@ -2387,7 +2390,7 @@ impl P2PCore {
                 // Gecikme sınırlıysa pencereyi büyütmek doğrudan hız verir;
                 // bant genişliği sınırlıysa hiçbir şey vermez ve asıl çare
                 // başka yerdedir (bkz. tek Tor devresi tavanı).
-                let rtt = current_time_ms().saturating_sub(sent_at);
+                let rtt = mono_ms().saturating_sub(sent_at);
                 self.blob_rtt_sum += rtt;
                 self.blob_rtt_count += 1;
                 // Pencereyi SADECE kuyruk gecikmesi düşükken büyüt. Yol hızlı
@@ -2487,7 +2490,7 @@ impl P2PCore {
         if let ServerInflight::Register { .. } = &inflight {
             // Refused (too many mailboxes, a taken id): not again each sweep.
             if let Some(rt) = self.server_rt.get_mut(&server_id) {
-                rt.register_backoff_until = current_time_ms() + SERVER_DEPOSIT_BACKOFF_MS;
+                rt.register_backoff_until = mono_ms() + SERVER_DEPOSIT_BACKOFF_MS;
             }
         }
         match &inflight {
@@ -2539,7 +2542,7 @@ impl P2PCore {
                 warn!("Sunucu kutuyu tanımıyor (alıcı bu sunucuda değil)");
                 if let ServerInflight::Deposit { mailbox, .. } = &inflight {
                     self.server_unknown_mailboxes
-                        .insert((server_id.clone(), mailbox.clone()), current_time_ms() + SERVER_UNKNOWN_MAILBOX_TTL_MS);
+                        .insert((server_id.clone(), mailbox.clone()), mono_ms() + SERVER_UNKNOWN_MAILBOX_TTL_MS);
                 }
                 // Alıcı bu sunucuda yok — ANINDA P2P'ye (gossipsub) düş.
                 //
@@ -2618,7 +2621,7 @@ impl P2PCore {
                 if let ServerInflight::Deposit { mailbox, .. } = &inflight {
                     warn!("Sunucu kutusu dolu, bu kutuya yatırma {} sn durduruldu: {}", SERVER_DEPOSIT_BACKOFF_MS / 1000, mailbox_log_id(mailbox));
                     self.server_unknown_mailboxes
-                        .insert((server_id.clone(), mailbox.clone()), current_time_ms() + SERVER_DEPOSIT_BACKOFF_MS);
+                        .insert((server_id.clone(), mailbox.clone()), mono_ms() + SERVER_DEPOSIT_BACKOFF_MS);
                 }
                 self.retry_deposit_over_gossipsub(&inflight);
             }
@@ -2700,14 +2703,15 @@ impl P2PCore {
         conv_key: String,
         group: bool,
         bucket: String,
-        before_ms: Option<u64>,
+        before: Option<(u64, String)>,
         rest: Vec<String>,
         paging: bool,
         next: Vec<(String, bool)>,
     ) {
         let req = ServerRequest::ArchiveFetch {
             bucket: bucket.clone(),
-            before_ms,
+            before_ms: before.as_ref().map(|b| b.0),
+            before_id: before.and_then(|b| (!b.1.is_empty()).then_some(b.1)),
             max_items: MAX_FETCH_BATCH_ITEMS,
             max_bytes: MAX_FETCH_BATCH_BYTES,
         };
@@ -3074,14 +3078,14 @@ impl P2PCore {
     fn purge_retired_archive(&mut self, server_id: &str, peer_id: PeerId) {
         let Some(keys) = self.meta_str("ark_purge") else { return };
         let now = current_time_ms();
-        if self.server_rt.get(server_id).map_or(false, |r| now < r.purge_retry_at)
+        if self.server_rt.get(server_id).map_or(false, |r| mono_ms() < r.purge_retry_at)
             || self.server_inflight.values().any(|i| matches!(i, ServerInflight::ArchivePurge { .. }))
         {
             return;
         }
         // No answer or an error: again after this, not each sweep.
         if let Some(rt) = self.server_rt.get_mut(server_id) {
-            rt.purge_retry_at = now + SERVER_DEPOSIT_BACKOFF_MS;
+            rt.purge_retry_at = mono_ms() + SERVER_DEPOSIT_BACKOFF_MS;
         }
         let conv_keys = self.archive_conv_keys();
         let mut rest = Vec::new();
@@ -3243,7 +3247,7 @@ impl P2PCore {
         }
         let Some(ark) = self.archive_root_key else { return };
         // Quota/rate error: wait like `Deposit` does, not once per sweep.
-        if self.server_rt.get(server_id).map_or(false, |r| current_time_ms() < r.deposit_backoff_until) {
+        if self.server_rt.get(server_id).map_or(false, |r| mono_ms() < r.deposit_backoff_until) {
             return;
         }
         // Havada zaten bir ArchivePut varsa bekle — sıralı gitmesi, sunucu
@@ -3281,7 +3285,7 @@ impl P2PCore {
                 &wire_id,
                 entry.rev,
                 &bucket,
-                entry.sent_at_ms,
+                archive_wire_ms(entry.sent_at_ms),
                 &entry.plaintext,
             ) {
                 // A record that alone breaks the budget never goes: it leaves
@@ -3296,7 +3300,7 @@ impl P2PCore {
                     records.push(ArchiveRecord {
                         record_id: wire_id,
                         rev: entry.rev,
-                        sent_at_ms: entry.sent_at_ms,
+                        sent_at_ms: archive_wire_ms(entry.sent_at_ms),
                         sealed,
                     })
                 }
@@ -3619,7 +3623,7 @@ impl P2PCore {
     /// Uploads the next chunks of the head upload, up to its window in flight.
     fn server_flush_blobs(&mut self, server_id: &str, peer_id: PeerId) {
         // Quota/rate error on a chunk: wait like `Deposit` does.
-        if self.server_rt.get(server_id).map_or(false, |r| current_time_ms() < r.deposit_backoff_until) {
+        if self.server_rt.get(server_id).map_or(false, |r| mono_ms() < r.deposit_backoff_until) {
             return;
         }
         // Progress counts for one server only (see `PendingBlobUpload.server_id`).
@@ -3682,7 +3686,7 @@ impl P2PCore {
                             blob_id: up.file_id.clone(),
                             chunk_index: idx,
                             total_chunks: up.total_chunks,
-                            sent_at: current_time_ms(),
+                            sent_at: mono_ms(),
                         },
                     );
                     sent += 1;
@@ -3816,6 +3820,12 @@ fn archive_buckets(ark: &[u8; 32], conv_key: &str, newest_ms: u64) -> Vec<String
         .rev()
         .filter_map(|epoch| server_seal::server_archive_bucket(ark, conv_key, epoch).ok())
         .collect()
+}
+
+/// M-30: the `sent_at_ms` the server sees, floored to the hour (same epoch
+/// as the exact time). Restore orders by the time inside the sealed record.
+fn archive_wire_ms(sent_at_ms: u64) -> u64 {
+    sent_at_ms - sent_at_ms % 3_600_000
 }
 
 /// The record id the server sees: keyed with the archive key, so the two

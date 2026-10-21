@@ -11,6 +11,10 @@ edition = "2021"
 crate-type = ["cdylib", "staticlib", "rlib"]
 name = "p2p_messenger"
 
+[features]
+# M-168: debug-only JNI exports (DebugDbKey). Off by default; debug variant only.
+debug-hooks = []
+
 [dependencies]
 # Paylaşılan kripto çekirdeği (identity/ratchet/packet/server_proto/server_seal).
 # Bu modüller buradan `typeon-crypto`'ya taşındı; `lib.rs` onları `pub use` ile
@@ -85,7 +89,7 @@ zeroize = "1.7"
 uuid = { version = "1.6", features = ["v4", "serde"] }
 
 # Networking (libp2p)
-# Spec dışı, güvenlik denetimi devamı: "relay"/"dcutr"/"autonat" eklendi —
+# Spec dışı, güvenlik denetimi devamı: "relay" eklendi (dcutr/autonat sonra kaldırıldı, M-201: yalnız onion) —
 # farklı ağlardaki (NAT arkasındaki) iki cihazın birbirine ulaşabilmesi için
 # (bkz. SECURITY.md "Cross-network connectivity" notu). Spec §4.3 zaten Node
 # modu için "isteğe bağlı Circuit Relay v2 hizmeti" öngörmüştü, ama hiçbir
@@ -107,7 +111,7 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 # bir bağlantı stabilize olunca aralık genişletilebilsin istendi, stok ping
 # bunu desteklemiyor). "ping" feature'ı artık kullanılmadığından kaldırıldı,
 # "request-response"/"cbor" zaten `file_chunks` için buradaydı.
-libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "tokio", "macros", "dns", "request-response", "cbor", "relay", "dcutr"] }
+libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "tokio", "macros", "dns", "request-response", "cbor", "relay"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 # Call media: one long-lived stream per peer instead of a request/response
 # substream (and multistream round trip) per 60 ms audio packet. See call.rs.
@@ -135,6 +139,8 @@ rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"]
 arti-client = { version = "0.24", default-features = false, features = ["tokio", "rustls", "onion-service-client", "onion-service-service", "compression", "keymgr"] }
 tor-hsservice = "0.24"
 tor-cell = "0.24"
+# M-11: inbound BEGIN port check (`IncomingStreamRequest`); same version arti pulls in.
+tor-proto = { version = "0.24", features = ["hs-service"] }
 tor-config = "0.24"
 tor-rtcompat = { version = "0.24", features = ["tokio", "rustls"] }
 
@@ -143,6 +149,8 @@ jni = "0.21"
 android_logger = "0.13"
 log = "0.4"
 lazy_static = "1.4"
+# M-65: CLOCK_BOOTTIME for `mono_ms` (timers that keep counting through suspend).
+libc = "0.2"
 
 [profile.release]
 # M-172: "s" (speed over the last bytes of size: crypto, Tor and media are

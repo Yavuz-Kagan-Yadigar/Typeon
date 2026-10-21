@@ -227,7 +227,11 @@ task cargoNdkBuild(type: Exec) {
     commandLine resolveCargoExecutable(), 'ndk',
             '-t', 'armeabi-v7a', '-t', 'arm64-v8a', '-t', 'x86_64',
             '-o', "${projectDir}/src/main/jniLibs",
-            'build', '--release', '--locked'
+            'build', '--release', '--locked',
+            // M-168: the DebugDbKey JNI export exists only in a debug build
+            // (one .so is built per Gradle run, for the variant asked for).
+            *(gradle.startParameter.taskNames.any { it.toLowerCase().contains('release') }
+                ? [] : ['--features', 'debug-hooks'])
 }
 
 preBuild.dependsOn cargoNdkBuild

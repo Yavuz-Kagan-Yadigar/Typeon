@@ -254,7 +254,11 @@ pub enum ServerRequest {
     /// (see `server_seal` KNOWN LIMIT).
     ArchiveFetch {
         bucket: MailboxId,
+        /// Cursor: the last record of the previous page, `(before_ms,
+        /// before_id)`; many records share an (hour-coarsened) `sent_at_ms`.
         before_ms: Option<u64>,
+        #[serde(default)]
+        before_id: Option<String>,
         max_items: u32,
         max_bytes: u32,
     },
@@ -502,9 +506,9 @@ pub struct ArchiveRecord {
     /// Bu, mevcut `HistorySyncResponse` mekanizmasının YAPAMADIĞI bir şey:
     /// geç gelen bir Edit'i geçmişte düzeltmek.
     pub rev: u64,
-    /// Sunucunun ÇÖZMEDEN yeniden-eskiye sayfalayabilmesi için. Mesajın
-    /// duvar saati zamanını sunucuya sızdırır — kabul edilmiş bir bedel,
-    /// sunucu zaten `deposited_at_ms`'i görüyor.
+    /// Sunucunun ÇÖZMEDEN yeniden-eskiye sayfalayabilmesi için. M-30: the
+    /// client sends it floored to the hour (the exact time is inside
+    /// `sealed`), so both ends' buckets are not joinable by time.
     pub sent_at_ms: u64,
     /// `server_seal::seal_archive_record` çıktısı.
     #[serde(with = "serde_bytes")]

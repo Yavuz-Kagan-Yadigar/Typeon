@@ -43,7 +43,7 @@ use rand::RngCore as _;
 use zeroize::Zeroizing;
 
 use crate::packet::{CallAction, MessageContent};
-use crate::{current_time_ms, server_seal, P2PCore, OptionGroupExt as _, RUNTIME};
+use crate::{current_time_ms, mono_ms, server_seal, P2PCore, OptionGroupExt as _, RUNTIME};
 
 const KIND_AUDIO: u8 = 1;
 const KIND_VIDEO: u8 = 2;
@@ -69,6 +69,9 @@ const AUDIO_QUEUE_MAX: usize = 16;
 /// only not sending drains it. State and report packets keep flowing.
 const AUDIO_HOLD_ABOVE_MS: u32 = 400;
 const AUDIO_HOLD_BELOW_MS: u32 = 150;
+/// #83: a hold lasts at most this long; it re-arms only once the report drops
+/// below `AUDIO_HOLD_BELOW_MS` (a stale baseline must not mute a call).
+const AUDIO_HOLD_MAX_MS: u64 = 5_000;
 /// Received frames waiting for Kotlin. ~1 s of a 3-way video call: a slow
 /// decoder must shed old frames, never let them pile up (256 here once meant
 /// 4-5 s of delay on a phone decoding two videos).
@@ -248,6 +251,9 @@ struct Remote {
     delay_ewma: f64,
     delay_min: f64,
     samples: u64,
+    /// Link the last frame came over (`None` direct, else the relay server):
+    /// a route change re-baselines `delay_min` (#83).
+    via: Option<PeerId>,
     last_report_ms: u64,
     /// Our decoder for this sender lost sync (dropped frame, late join):
     /// ask for a keyframe in the next report.
@@ -261,7 +267,7 @@ impl Remote {
     fn new(fp: &str, slot: u8, key: [u8; 32], sid: [u8; 8]) -> Self {
         Remote {
             fp: fp.to_string(), slot, key: Zeroizing::new(key), sid, max_seq: 0, seen: 0, last_rx_ms: 0, last_rx: None,
-            delay_ewma: 0.0, delay_min: 0.0, samples: 0, last_report_ms: 0, want_keyframe: false,
+            delay_ewma: 0.0, delay_min: 0.0, samples: 0, via: None, last_report_ms: 0, want_keyframe: false,
             muted: false, video_off: false,
         }
     }
@@ -304,6 +310,9 @@ struct Target {
     /// Its audio copy held back, see [`AUDIO_HOLD_ABOVE_MS`]: decided by
     /// this device's own report, so one slow receiver mutes nobody else.
     audio_hold: bool,
+    /// `mono_ms` the hold began; `hold_disarmed`: released by `AUDIO_HOLD_MAX_MS`.
+    hold_at: u64,
+    hold_disarmed: bool,
     /// A server its frames reached us through: both are connected there, so
     /// our copy goes to that one server instead of to every one we use.
     relay_via: Option<PeerId>,
@@ -426,7 +435,7 @@ fn media_add_remote(fp: &str, key: &[u8], sid: &[u8]) {
     m.remotes.insert(fp.to_string(), remote);
     let send_key = pair_key(&m.key, fp);
     let mailbox = server_seal::relay_mailbox_id(&send_key[..]).into_bytes();
-    m.targets.insert(fp.to_string(), Target { peer: None, mailbox, key: send_key, audio_hold: false, relay_via: None });
+    m.targets.insert(fp.to_string(), Target { peer: None, mailbox, key: send_key, audio_hold: false, hold_at: 0, hold_disarmed: false, relay_via: None });
 }
 
 /// The keys the call's remotes seal our media with. Each gives the relay
@@ -510,13 +519,19 @@ fn media_send_to(kind: u8, payload: &[u8], only: Option<&str>) -> bool {
     }
     if kind == KIND_AUDIO {
         let now = current_time_ms();
+        let mono = mono_ms();
         let Media { targets, reports, .. } = &mut *m;
         for (fp, t) in targets.iter_mut() {
             let q = reports.get(fp).filter(|(_, at)| now.saturating_sub(*at) < REPORT_TTL_MS).map_or(0, |(q, _)| *q);
-            if t.audio_hold && q < AUDIO_HOLD_BELOW_MS {
+            if q < AUDIO_HOLD_BELOW_MS {
+                t.hold_disarmed = false;
+            }
+            if t.audio_hold && (q < AUDIO_HOLD_BELOW_MS || mono.saturating_sub(t.hold_at) >= AUDIO_HOLD_MAX_MS) {
                 t.audio_hold = false;
-            } else if !t.audio_hold && q > AUDIO_HOLD_ABOVE_MS {
+                t.hold_disarmed = q >= AUDIO_HOLD_BELOW_MS;
+            } else if !t.audio_hold && !t.hold_disarmed && q > AUDIO_HOLD_ABOVE_MS {
                 t.audio_hold = true;
+                t.hold_at = mono;
             }
         }
         let held = m.targets.values().filter(|t| t.audio_hold).count();
@@ -612,6 +627,10 @@ fn media_on_packet_via(packet: &[u8], via: Option<PeerId>) {
     let Some(r) = m.remotes.get_mut(&fp) else { return };
     let slot = r.slot;
     r.record(seq);
+    if r.via != via {
+        r.via = via;
+        r.samples = 0;
+    }
     r.record_delay(delay);
     if pt[0] == KIND_STATE {
         if let Some(&flags) = pt.get(5) {
@@ -704,7 +723,7 @@ pub fn media_recv(timeout_ms: u64) -> Option<Vec<u8>> {
 /// Opens the links the call needs and is missing. Called from the poll loop;
 /// the opening itself happens on tokio.
 fn media_supervise(control: &libp2p_stream::Control, peers: Vec<(String, Option<PeerId>)>, servers: Vec<PeerId>) {
-    let now = current_time_ms();
+    let now = mono_ms();
     let mut m = media();
     if !m.active {
         return;
@@ -747,7 +766,7 @@ async fn open_link(mut control: libp2p_stream::Control, peer: PeerId, relay: boo
             warn!("Arama akışı açılamadı ({}, {}): {}", what, crate::log_id(&peer), e);
             let mut m = media();
             if m.generation == generation {
-                m.opening.insert(peer, current_time_ms() + REOPEN_BACKOFF_MS);
+                m.opening.insert(peer, mono_ms() + REOPEN_BACKOFF_MS);
             }
             return;
         }
@@ -799,7 +818,7 @@ async fn open_link(mut control: libp2p_stream::Control, peer: PeerId, relay: boo
     }
     // A link that opened and closed is not reopened on the very next sweep.
     if m.generation == generation {
-        m.opening.insert(peer, current_time_ms() + REOPEN_BACKOFF_MS);
+        m.opening.insert(peer, mono_ms() + REOPEN_BACKOFF_MS);
     }
     info!("Arama akışı kapandı ({}, {})", what, crate::log_id(&peer));
 }
