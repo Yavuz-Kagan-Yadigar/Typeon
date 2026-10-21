@@ -833,6 +833,15 @@ pub fn delete_group(group_id: &str) -> String {
     }))
 }
 
+/// #81: the founder re-sends the current group state to every member.
+pub fn resend_group_to_all(group_id: &str) -> String {
+    let gid = group_id.to_string();
+    ok_result(catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().resend_group_to_all(&gid)
+    }))
+}
+
 pub fn leave_group(group_id: &str) -> String {
     let gid = group_id.to_string();
     ok_result(catch_panic(move || {

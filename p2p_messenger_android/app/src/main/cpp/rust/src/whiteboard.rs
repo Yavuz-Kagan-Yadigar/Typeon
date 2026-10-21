@@ -167,8 +167,10 @@ fn wb_stroke_signed(signed: &Signed, stroke: &WbStroke, author: &str) -> bool {
         .map_or(false, |(identity, hashes)| identity == author && hashes.contains(&wb_stroke_hash(stroke)))
 }
 
-fn id_u64(id: &[u8]) -> u64 {
-    id.try_into().map(u64::from_le_bytes).unwrap_or(0)
+/// One stroke's share of the page digest hash.
+fn wb_digest_item(s: &WbStroke, author: &str) -> u64 {
+    let full: [u8; 32] = Sha256::digest(length_prefixed(b"typeon-wb-digest-v1", &[&wb_stroke_hash(s), author.as_bytes(), s.sig.as_slice()])).into();
+    u64::from_le_bytes(full[..8].try_into().unwrap_or_default())
 }
 
 fn noop() -> serde_json::Value {
@@ -431,16 +433,25 @@ impl P2PCore {
         live
     }
 
-    /// Pages that hold strokes: stroke count and XOR of the stroke ids.
+    /// Pages that hold strokes: stroke count and XOR of a per-stroke content
+    /// hash (id, page, shade, width, points, author, signing device), so two
+    /// copies with the same ids but different content do not compare equal.
     fn wb_digest(&self, board: &str) -> Vec<WbPageDigest> {
         let mut pages: BTreeMap<u8, (u32, u64)> = BTreeMap::new();
         if let Some(conn) = &self.db {
-            if let Ok(mut stmt) = conn.prepare("SELECT page, stroke_id FROM wb_strokes WHERE board = ?1") {
-                if let Ok(rows) = stmt.query_map(params![board], |r| Ok((r.get::<_, u8>(0)?, r.get::<_, Vec<u8>>(1)?))) {
-                    for (page, id) in rows.flatten() {
+            if let Ok(mut stmt) = conn.prepare("SELECT page, stroke_id, shade, points, author, width, sig FROM wb_strokes WHERE board = ?1") {
+                let rows = stmt.query_map(params![board], |r| {
+                    Ok((r.get::<_, u8>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, u8>(2)?, r.get::<_, Vec<u8>>(3)?, r.get::<_, String>(4)?, r.get::<_, u8>(5)?, r.get::<_, Vec<u8>>(6)?))
+                });
+                if let Ok(rows) = rows {
+                    for (page, id, shade, points, author, width, sig) in rows.flatten() {
+                        // A row that does not open counts with empty points:
+                        // it still differs from a peer's good copy.
+                        let points = self.wb_unseal(points).unwrap_or_default();
+                        let stroke = WbStroke { id, page, shade, author: 0, width, points, sig };
                         let entry = pages.entry(page).or_insert((0, 0));
                         entry.0 += 1;
-                        entry.1 ^= id_u64(&id);
+                        entry.1 ^= wb_digest_item(&stroke, &author);
                     }
                 }
             }
@@ -448,7 +459,6 @@ impl P2PCore {
         pages.into_iter().map(|(page, (count, hash))| WbPageDigest { page, count, hash }).collect()
     }
 
-    /// Strokes of one page with their author, in drawing order.
     fn wb_page_strokes(&self, board: &str, page: u8) -> Vec<(WbStroke, String)> {
         let mut out = Vec::new();
         if let Some(conn) = &self.db {
@@ -1286,7 +1296,13 @@ mod tests {
         assert!(b.wb_insert("g:x", &stroke(2, 0), "alice"));
         assert!(!b.wb_insert("g:x", &stroke(2, 0), "alice"), "duplicate");
         assert_eq!(a.wb_digest("g:x"), b.wb_digest("g:x"));
-        assert_eq!(a.wb_digest("g:x"), vec![WbPageDigest { page: 0, count: 1, hash: id_u64(&[2; 8]) }]);
+        assert_eq!(a.wb_digest("g:x"), vec![WbPageDigest { page: 0, count: 1, hash: wb_digest_item(&stroke(2, 0), "alice") }]);
+        // Same id and count, different content: the digests must differ.
+        let c = core();
+        let mut other = stroke(2, 0);
+        other.points[0] = 11;
+        assert!(c.wb_insert("g:x", &other, "alice"));
+        assert_ne!(a.wb_digest("g:x"), c.wb_digest("g:x"));
         assert_eq!(a.wb_page_tombstones("g:x", 0), vec![1; 8]);
     }
 

@@ -81,6 +81,8 @@ const RING_TIMEOUT_MS: u64 = 45_000;
 const MEDIA_LOST_MS: u64 = 30_000;
 /// An Invite older than this (store-and-forward delivered it late) no longer rings.
 const INVITE_MAX_AGE_MS: u64 = 60_000;
+/// Bound on a group invite's participant list (C10).
+const MAX_INVITE_PARTICIPANTS: usize = 1024;
 const REOPEN_BACKOFF_MS: u64 = 3_000;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(20);
 /// Inbound media streams one peer may hold at once (one is normal, a second
@@ -1028,10 +1030,14 @@ impl P2PCore {
     fn call_signal(&mut self, fp: &str, s: &CallSession, action: CallAction) {
         let with_keys = matches!(action, CallAction::Invite | CallAction::Accept);
         let keys = with_keys.then(|| (pair_key(&s.my_key, fp).to_vec(), s.my_sid.to_vec()));
-        self.send_call_signal(fp, &s.call_id, s.group_id.clone(), s.video, action, keys);
+        // C10: a group invite names everyone rung, so callees connect to each
+        // other even when each thinks the other is stale.
+        let participants = if action == CallAction::Invite && s.group_id.is_some() { s.invited.clone() } else { Vec::new() };
+        self.send_call_signal(fp, &s.call_id, s.group_id.clone(), s.video, action, keys, participants);
     }
 
-    fn send_call_signal(&mut self, fp: &str, call_id: &str, group_id: Option<String>, video: bool, action: CallAction, keys: Option<(Vec<u8>, Vec<u8>)>) {
+    #[allow(clippy::too_many_arguments)]
+    fn send_call_signal(&mut self, fp: &str, call_id: &str, group_id: Option<String>, video: bool, action: CallAction, keys: Option<(Vec<u8>, Vec<u8>)>, participants: Vec<String>) {
         let (media_key, stream_id) = keys.unwrap_or_default();
         let content = MessageContent::Call {
             call_id: call_id.to_string(),
@@ -1041,6 +1047,7 @@ impl P2PCore {
             media_key,
             stream_id,
             sent_at_ms: current_time_ms(),
+            participants,
         };
         self.call_signal_sending = true;
         let sent = self.send_message_content(fp.to_string(), &content, None);
@@ -1063,6 +1070,7 @@ impl P2PCore {
         media_key: Vec<u8>,
         stream_id: Vec<u8>,
         sent_at_ms: u64,
+        participants: Vec<String>,
     ) -> serde_json::Value {
         let now = current_time_ms();
         let keys_ok = media_key.len() == 32 && stream_id.len() == 8;
@@ -1125,7 +1133,7 @@ impl P2PCore {
                         self.call = None;
                         self.last_call_end = Some((ours, "remote".to_string()));
                     } else if !glare {
-                        self.send_call_signal(peer_fp, &call_id, group_id, video, CallAction::Busy, None);
+                        self.send_call_signal(peer_fp, &call_id, group_id, video, CallAction::Busy, None, Vec::new());
                         return noop();
                     } else {
                         // Both called each other at once. Busy from both ended
@@ -1142,6 +1150,20 @@ impl P2PCore {
                     Some(gid) => self.group_call_devices(gid).unwrap_or_default(),
                     None => Vec::new(),
                 };
+                // C10: also every device the caller rang that is an active
+                // device of a member here (stale or not); never mine.
+                if let Some(gid) = &group_id {
+                    let own = self.get_active_own_device_fingerprint().unwrap_or_default();
+                    let me = self.my_identity_id().unwrap_or_default();
+                    let member_devices: HashSet<String> = self.groups.get(gid)
+                        .map(|g| g.other_members(&me).iter().flat_map(|id| self.active_devices_for_identity(id)).collect())
+                        .unwrap_or_default();
+                    for fp in participants.into_iter().take(MAX_INVITE_PARTICIPANTS) {
+                        if fp != own && member_devices.contains(&fp) && !invited.contains(&fp) {
+                            invited.push(fp);
+                        }
+                    }
+                }
                 if !invited.iter().any(|f| f == peer_fp) {
                     invited.push(peer_fp.to_string());
                 }
@@ -1202,11 +1224,11 @@ impl P2PCore {
                 if !stop_ringing.is_empty() {
                     let (cid, video) = (s.call_id.clone(), s.video);
                     for fp in stop_ringing {
-                        self.send_call_signal(&fp, &cid, None, video, CallAction::Hangup, None);
+                        self.send_call_signal(&fp, &cid, None, video, CallAction::Hangup, None, Vec::new());
                     }
                 }
                 if let Some((cid, gid, video, keys)) = reply {
-                    self.send_call_signal(peer_fp, &cid, gid, video, CallAction::Accept, Some(keys));
+                    self.send_call_signal(peer_fp, &cid, gid, video, CallAction::Accept, Some(keys), Vec::new());
                 }
                 serde_json::json!({"type": "call", "action": "accept", "call_id": call_id, "peer": self.canonical_peer_key(peer_fp)})
             }

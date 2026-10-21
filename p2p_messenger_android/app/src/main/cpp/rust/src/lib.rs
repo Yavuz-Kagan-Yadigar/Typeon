@@ -1257,6 +1257,56 @@ mod review_oct2026_tests {
         assert!(cores[3].groups[&gid].founder_chain.iter().all(|t| t.from_identity == ids[0]));
     }
 
+    /// H78 + M90 + H28: two updates of one version end the same on every
+    /// member; an update carries only new devices; secrets are per group.
+    #[test]
+    fn same_version_updates_converge_and_carry_only_new_devices() {
+        let base = std::env::temp_dir().join(format!("typeon-tie-{}", std::process::id()));
+        let mut cores: Vec<P2PCore> = (0..4).map(|i| {
+            let d = base.join(i.to_string());
+            std::fs::create_dir_all(&d).unwrap();
+            let mut c = P2PCore::new();
+            c.init_db(d.to_str().unwrap(), &[1u8; 32]).unwrap();
+            c
+        }).collect();
+        let ids: Vec<String> = cores.iter_mut().enumerate()
+            .map(|(i, c)| c.generate_identity(format!("d{i}")).unwrap().0).collect();
+        let recs: Vec<DeviceRecord> = cores.iter().zip(&ids).map(|(c, id)| c.own_devices[id].clone()).collect();
+        for (i, c) in cores.iter_mut().enumerate() {
+            for (j, r) in recs.iter().enumerate() {
+                if i != j { c.known_remote_devices.insert(r.device_fingerprint.clone(), r.clone()); }
+            }
+        }
+        let gid = "group-0123456789abcdef".to_string();
+        let mut g = Group::new(gid.clone(), "g".into(), ids[0].clone(), 1);
+        g.sync_members(&ids, 1);
+        g.version = 1;
+        for c in cores.iter_mut() { c.groups.insert(gid.clone(), g.clone()); }
+
+        // Two version-2 updates of the founder identity (two founder devices).
+        let u1 = cores[0].sign_group_change(&g, &GroupChange::Remove(ids[3].clone())).unwrap();
+        let u2 = cores[0].sign_group_change(&g, &GroupChange::AvatarUpdate(None)).unwrap();
+        assert_eq!(u1.member_devices.len(), 3, "first update: every device");
+        assert_eq!(u2.member_devices.len(), 1, "then only the one not sent yet");
+        assert!(cores[0].sign_group_change(&g, &GroupChange::AvatarUpdate(None)).unwrap().member_devices.is_empty());
+        assert_eq!(cores[0].sign_group_resync(&g).unwrap().member_devices.len(), 4, "a resync carries all");
+        for (i, order) in [(1, [&u1, &u2]), (2, [&u2, &u1])] {
+            for u in order { cores[i].process_group_update(u).unwrap(); }
+            cores[i].process_group_update(order[0]).unwrap();
+        }
+        let members = |c: &P2PCore| { let mut m = c.groups[&gid].member_identity_ids(); m.sort(); m };
+        assert_eq!(members(&cores[1]), members(&cores[2]));
+        assert_eq!(cores[1].groups[&gid].version, 2);
+        assert_eq!(cores[2].groups[&gid].version, 2);
+
+        // H28: one first-contact secret per group, registered while in it.
+        let other = "group-fedcba9876543210";
+        assert_ne!(cores[1].own_group_contact_secret(&gid), cores[1].own_group_contact_secret(other));
+        assert!(cores[1].first_contact_secrets().contains(&cores[1].own_group_contact_secret(&gid)));
+        assert!(!cores[1].first_contact_secrets().contains(&cores[1].own_group_contact_secret(other)));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn deleting_a_contact_keeps_the_keys_of_a_group_member() {
         let mut cores: Vec<P2PCore> = (0..3).map(|_| P2PCore::new()).collect();
@@ -5241,7 +5291,17 @@ impl P2PCore {
     /// old. The server refuses a whole `Register`/`Fetch` above 512 ids.
     pub(crate) fn first_contact_secrets(&self) -> Vec<Vec<u8>> {
         let mut out: Vec<Vec<u8>> = self.pairing_nonces().into_iter().map(|(n, _)| n).collect();
-        out.push(self.own_group_contact_secret());
+        // #73: one secret per group I am in, while a member device of it has
+        // no session with me; leaving drops its mailbox.
+        let me = self.my_identity_id().unwrap_or_default();
+        let mut gids: Vec<&Group> = self.groups.values()
+            .filter(|g| g.other_members(&me).iter().any(|m| {
+                let devices = self.active_devices_for_identity(m);
+                devices.is_empty() || devices.iter().any(|fp| !self.ratchets.contains_key(fp))
+            }))
+            .collect();
+        gids.sort_by(|a, b| a.group_id.cmp(&b.group_id));
+        out.extend(gids.into_iter().map(|g| self.own_group_contact_secret(&g.group_id)));
         out.push(self.link_request_nonce.clone());
         out.push(self.pending_link_nonce.clone());
         if let Some(conn) = &self.db {
@@ -5302,7 +5362,18 @@ impl P2PCore {
             .collect();
         others.sort();
         others.into_iter().find_map(|fp| self.stored_pairing_secrets(fp).into_iter().next())
-            .or_else(|| self.meta_str(&format!("gf:{}", target_fp)).and_then(|v| hex::decode(v).ok()).filter(|s| s.len() == 16))
+            .or_else(|| {
+                // #73: the target's secret for a group we are both in.
+                let mut gids: Vec<&Group> = self.groups.values().filter(|g| g.is_member(identity)).collect();
+                gids.sort_by(|a, b| a.group_id.cmp(&b.group_id));
+                gids.into_iter().find_map(|g| self.member_group_secret(target_fp, &g.group_id))
+            })
+    }
+
+    /// The group first-contact secret `fp` gave for `group_id` (via the
+    /// founder, bkz. `GroupMemberDevice.first_contact_secret`).
+    fn member_group_secret(&self, fp: &str, group_id: &str) -> Option<Vec<u8>> {
+        self.meta_str(&format!("gf:{}:{}", fp, group_id)).and_then(|v| hex::decode(v).ok()).filter(|s| s.len() == 16)
     }
 
     /// Gives the founder device that sent a group update our group
@@ -5315,33 +5386,41 @@ impl P2PCore {
         if g.founder_identity_id != sender_identity_id || self.my_identity_id().as_deref() == Some(sender_identity_id) {
             return;
         }
-        let secret = self.own_group_contact_secret();
-        let sent = format!("gfs:{}", peer_fp);
+        let secret = self.own_group_contact_secret(&update.group_id);
+        let sent = format!("gfs:{}:{}", peer_fp, update.group_id);
         let listed = update.member_devices.iter()
             .find(|d| Some(&d.device_fingerprint) == self.own_mailbox_topic_fp.as_ref())
             .map(|d| d.first_contact_secret == secret);
         if listed == Some(true) || (listed.is_none() && self.meta_str(&sent).is_some()) {
             return;
         }
-        if secret.len() == 16 && self.send_message_content(peer_fp.to_string(), &MessageContent::FirstContactSecret { secret }, None).is_ok() {
+        if secret.len() == 16 && self.send_message_content(peer_fp.to_string(), &MessageContent::FirstContactSecret { secret, group_id: update.group_id.clone() }, None).is_ok() {
             self.meta_put(&sent, "1");
         }
     }
 
-    /// This device's group first-contact secret (bkz.
-    /// `GroupMemberDevice.first_contact_secret`), made on first use. Its
-    /// mailbox is always registered.
-    fn own_group_contact_secret(&self) -> Vec<u8> {
-        if let Some(s) = self.meta_str("own_gfc").and_then(|v| hex::decode(v).ok()).filter(|s| s.len() == 16) {
-            return s;
-        }
-        if self.db.is_none() {
-            return Vec::new();
-        }
-        let mut s = vec![0u8; 16];
-        rand::RngCore::fill_bytes(&mut OsRng, &mut s);
-        self.meta_put("own_gfc", &hex::encode(&s));
-        s
+    /// This device's first-contact secret for one group (bkz.
+    /// `GroupMemberDevice.first_contact_secret`), derived from a device
+    /// master made on first use. #73: per group, so a member of one group
+    /// cannot reach the mailbox of another, and its mailbox is registered
+    /// only while the group is here.
+    fn own_group_contact_secret(&self, group_id: &str) -> Vec<u8> {
+        let master = match self.meta_str("own_gfc").and_then(|v| hex::decode(v).ok()).filter(|s| s.len() == 16) {
+            Some(m) => m,
+            None if self.db.is_none() => return Vec::new(),
+            None => {
+                let mut m = vec![0u8; 16];
+                rand::RngCore::fill_bytes(&mut OsRng, &mut m);
+                self.meta_put("own_gfc", &hex::encode(&m));
+                m
+            }
+        };
+        use sha2::Digest as _;
+        let mut h = sha2::Sha256::new();
+        h.update(b"typeon-group-first-contact-v1");
+        h.update(&master);
+        h.update(group_id.as_bytes());
+        h.finalize()[..16].to_vec()
     }
 
     /// The signed revokes of my own identity, oldest first (bkz.
@@ -8552,7 +8631,7 @@ impl P2PCore {
                     // Its first-contact mailbox secrets: the mailbox made
                     // only from them is no longer registered.
                     // Also its kept DeviceAdd and handshake replay marks.
-                    "DELETE FROM app_meta WHERE k = 'pn:' || ?1 OR k = 'pk:' || ?1 OR k = 'pt:' || ?1 OR k = 'gf:' || ?1 OR k = 'gfs:' || ?1 OR k = 'da:' || ?1 OR k = 'hs:' || ?1",
+                    "DELETE FROM app_meta WHERE k = 'pn:' || ?1 OR k = 'pk:' || ?1 OR k = 'pt:' || ?1 OR k LIKE 'gf:' || ?1 || ':%' OR k LIKE 'gfs:' || ?1 || ':%' OR k = 'da:' || ?1 OR k = 'hs:' || ?1",
                 ] {
                     tx.execute(sql, params![fp]).map_err(|e| e.to_string())?;
                 }
@@ -9798,6 +9877,7 @@ impl P2PCore {
                 | MessageContent::FileOffer { .. }
                 | MessageContent::GroupUpdate(_)
                 | MessageContent::LeaveGroupRequest { .. }
+                | MessageContent::GroupSyncRequest { .. }
                 | MessageContent::ProfileUpdate { .. }
                 | MessageContent::DeviceLinkGrant { .. }
                 | MessageContent::DeviceAddNotice { .. }
@@ -10092,6 +10172,7 @@ impl P2PCore {
                 | MessageContent::FileOffer { .. }
                 | MessageContent::HistorySyncRequest { .. }
                 | MessageContent::LeaveGroupRequest { .. }
+                | MessageContent::GroupSyncRequest { .. }
                 | MessageContent::AccountDeleted { .. }
                 | MessageContent::WbDigest { .. }
         ).then(|| content.clone());
@@ -11402,8 +11483,8 @@ impl P2PCore {
                     "group_message_local_id": group_message_local_id
                 })
             }
-            MessageContent::Call { call_id, action, group_id, video, media_key, stream_id, sent_at_ms } => {
-                self.handle_call_signal(&peer_fp, &sender_identity_id, call_id, action, group_id, video, media_key, stream_id, sent_at_ms)
+            MessageContent::Call { call_id, action, group_id, video, media_key, stream_id, sent_at_ms, participants } => {
+                self.handle_call_signal(&peer_fp, &sender_identity_id, call_id, action, group_id, video, media_key, stream_id, sent_at_ms, participants)
             }
             // Whiteboard — see `whiteboard`. Only the digest is acked (it is
             // the one reliable packet); the handlers check who may touch
@@ -11533,6 +11614,30 @@ impl P2PCore {
                         serde_json::json!({"type": "group_update_failed", "peer": peer_fp, "group_id": group_id, "error": e})
                     }
                 }
+            }
+            MessageContent::GroupSyncRequest { group_id } => {
+                // #77: a member (or my own other device) lacks devices of the
+                // group: the founder re-sends the whole state to it, at most
+                // every 10 minutes per member.
+                self.send_ack(&peer_fp, &message_id);
+                let me = self.my_identity_id().unwrap_or_default();
+                let group = self.groups.get(&group_id)
+                    .filter(|g| g.founder_identity_id == me && g.is_member(&sender_identity_id))
+                    .cloned();
+                let key = format!("gsq:{}:{}", group_id, sender_identity_id);
+                let now = current_time_ms();
+                if let Some(g) = group {
+                    if now.saturating_sub(self.meta_u64(&key)) >= 10 * 60 * 1000 {
+                        match self.sign_group_resync(&g) {
+                            Ok(update) => {
+                                self.meta_put(&key, &now.to_string());
+                                self.send_group_update_to_member(&group_id, &sender_identity_id, &update);
+                            }
+                            Err(e) => warn!("GroupSyncRequest yanıtlanamadı: {}", e),
+                        }
+                    }
+                }
+                serde_json::json!({"type": "noop"})
             }
             MessageContent::LeaveGroupRequest { group_id } => {
                 // bkz. `leave_group` dokümantasyonu — bu isteği yalnızca
@@ -11901,14 +12006,14 @@ impl P2PCore {
                 }
             }
             // Çoklu-cihaz (spec 1.7): kardeşten geçmiş geri-doldurma isteği.
-            MessageContent::FirstContactSecret { secret } => {
+            MessageContent::FirstContactSecret { secret, group_id } => {
                 self.send_ack(&peer_fp, &message_id);
-                // Kept only by a founder: only it forwards the secret.
+                // Kept only by the founder of that group: only it forwards the secret.
                 let me = self.my_identity_id().unwrap_or_default();
-                let founder_of_shared = self.groups.values()
-                    .any(|g| g.founder_identity_id == me && g.members.iter().any(|m| m.identity_id == sender_identity_id));
-                if secret.len() == 16 && founder_of_shared {
-                    self.meta_put(&format!("gf:{}", peer_fp), &hex::encode(&secret));
+                let founder_of = self.groups.get(&group_id)
+                    .map_or(false, |g| g.founder_identity_id == me && g.is_member(&sender_identity_id));
+                if secret.len() == 16 && founder_of {
+                    self.meta_put(&format!("gf:{}:{}", peer_fp, group_id), &hex::encode(&secret));
                 }
                 serde_json::json!({"type": "noop"})
             }
@@ -14518,10 +14623,9 @@ impl P2PCore {
     /// zaten kendi YENİ satırını `publish_with_ack_tracking` üzerinden
     /// baştan yazacaktır.
     /// `pending_group_syncs` is memory only. After a restart, sign the current
-    /// state again for each member of a group we founded whose device is still
-    /// unknown; `group_sync_sweep` delivers it when the device resolves. It is
-    /// the same version with an `Add` of that member, so a member that already
-    /// has the group drops it as stale.
+    /// state again (`sign_group_resync`) for each member of a group we founded
+    /// whose device is still unknown; `group_sync_sweep` delivers it when the
+    /// device resolves.
     fn requeue_unresolved_group_syncs(&mut self) {
         let (Ok(own_fp), Some(own_identity_id)) = (self.get_active_own_device_fingerprint(), self.my_identity_id()) else { return };
         // H4: checked once, and said, instead of a silent return inside the loop.
@@ -14534,19 +14638,11 @@ impl P2PCore {
             .cloned()
             .collect();
         for group in founded {
-            let members = group.member_identity_ids();
             for member in group.other_members(&own_identity_id) {
                 if !self.active_devices_for_identity(&member).is_empty() || self.deleted_identities.contains(&member) {
                     continue;
                 }
-                let vouched = self.collect_vouched_member_devices(&members);
-                let proofs = self.vouch_proofs(&vouched);
-                let Some(own_keys) = self.own_device_keys.get(&own_fp) else { continue };
-                let signed = sign_group_update(
-                    &group.group_id, group.version, &GroupChange::Add(member.clone()), &group.name,
-                    &members, &vouched, &proofs, &own_identity_id, &own_fp, own_keys, &group.founder_chain,
-                );
-                if let Ok(update) = signed {
+                if let Ok(update) = self.sign_group_resync(&group) {
                     self.pending_group_syncs.insert((group.group_id.clone(), member), update);
                 }
             }
@@ -14784,14 +14880,32 @@ impl P2PCore {
     /// and the member list and vouched devices as they are AFTER the change
     /// (a new member must get the full list, a removed one must not be in it).
     /// Shared by every founder action; the caller applies and fans out.
+    ///
+    /// M90/H6: `member_devices` holds only the devices new or changed since
+    /// the previous update of this device (`gvd:` in app_meta); `full` puts
+    /// every one in (for a member just added). See `GroupSyncRequest`.
     fn sign_group_change(&self, group: &Group, change: &GroupChange) -> Result<GroupUpdate, String> {
+        self.sign_group_change_with(group, change, false)
+    }
+
+    fn sign_group_change_with(&self, group: &Group, change: &GroupChange, full: bool) -> Result<GroupUpdate, String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let new_version = group.version.checked_add(1).ok_or("Grup sürümü tükendi")?;
         let mut projected = group.clone();
         apply_change(&mut projected, change, new_version, current_time_ms());
         let members_after = projected.member_identity_ids();
-        let vouched = self.collect_vouched_member_devices(&members_after);
+        let mut vouched = self.collect_vouched_member_devices(&group.group_id, &members_after);
+        let sent_key = format!("gvd:{}", group.group_id);
+        let mut sent_map: HashMap<String, String> = HashMap::new();
+        if !full {
+            sent_map = self.meta_str(&sent_key).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default();
+            let now_map: HashMap<String, String> = vouched.iter()
+                .filter_map(|d| ciborium_bytes(d).ok().map(|b| (d.device_fingerprint.clone(), hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&b)))))
+                .collect();
+            vouched.retain(|d| now_map.get(&d.device_fingerprint) != sent_map.get(&d.device_fingerprint));
+            sent_map = now_map;
+        }
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
         let update = sign_group_update(
             &group.group_id, new_version, change, &group.name, &members_after, &vouched,
@@ -14805,7 +14919,95 @@ impl P2PCore {
         if matches!(change, GroupChange::Add(_)) && ciborium_bytes(&update)?.len() + 64 * 1024 > MAX_ENVELOPE_BYTES {
             return Err("Grup güncellemesi çok büyük (çok fazla üye/cihaz)".to_string());
         }
+        if !full {
+            self.meta_put(&sent_key, &serde_json::to_string(&sent_map).unwrap_or_default());
+        }
+        // H78: what this device applies now, for the same-version tie-break.
+        self.set_group_tie(&group.group_id, &group_tie_hash(&update)?);
         Ok(update)
+    }
+
+    /// The current state of a group we found, signed again at its current
+    /// version with every vouched device: a reply to `GroupSyncRequest`,
+    /// `requeue_unresolved_group_syncs`, `resend_group_to_all`. The change
+    /// re-states the avatar (or the name): a member behind gets the whole
+    /// state, one at this version takes it as the same state (bkz.
+    /// `process_group_update`, tie-break).
+    fn sign_group_resync(&self, group: &Group) -> Result<GroupUpdate, String> {
+        let own_fp = self.get_active_own_device_fingerprint()?;
+        let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
+        if group.version == 0 {
+            return Err("Grup henüz yayınlanmadı".to_string());
+        }
+        let change = match &group.avatar_jpeg {
+            Some(a) => GroupChange::AvatarUpdate(Some(a.clone())),
+            None => GroupChange::Rename(group.name.clone()),
+        };
+        let members = group.member_identity_ids();
+        let vouched = self.collect_vouched_member_devices(&group.group_id, &members);
+        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
+        sign_group_update(
+            &group.group_id, group.version, &change, &group.name, &members, &vouched,
+            &self.vouch_proofs(&vouched), &own_identity_id, &own_fp, own_keys, &group.founder_chain,
+        )
+    }
+
+    /// #81 (H103): the founder signs the current group state again and sends
+    /// it to every member device (and to its own other devices).
+    pub(crate) fn resend_group_to_all(&mut self, group_id: &str) -> Result<(), String> {
+        let own_identity_id = self.my_identity_id().ok_or("No identity")?;
+        let group = self.groups.get(group_id).cloned_group()?;
+        if group.founder_identity_id != own_identity_id {
+            return Err("Sadece kurucu grubu yeniden gönderebilir".to_string());
+        }
+        let update = self.sign_group_resync(&group)?;
+        for member in group.other_members(&own_identity_id) {
+            self.send_group_update_to_member(group_id, &member, &update);
+        }
+        self.send_group_update_to_siblings(&update);
+        Ok(())
+    }
+
+    /// H78: a founder's other devices get each update it signs, so they
+    /// never sign the same version themselves (they apply it like a member).
+    fn send_group_update_to_siblings(&mut self, update: &GroupUpdate) {
+        let content = MessageContent::GroupUpdate(update.clone());
+        for fp in self.sibling_active_devices() {
+            if let Err(e) = self.send_message_content(fp, &content, None) {
+                warn!("GroupUpdate kardeş cihaza gönderilemedi: {}", e);
+            }
+        }
+    }
+
+    /// H78: hash of the update this device applied at the group's current
+    /// version (`gvh:` in app_meta).
+    fn group_tie(&self, group_id: &str) -> Vec<u8> {
+        self.meta_str(&format!("gvh:{}", group_id)).and_then(|v| hex::decode(v).ok()).unwrap_or_default()
+    }
+
+    fn set_group_tie(&self, group_id: &str, hash: &[u8]) {
+        self.meta_put(&format!("gvh:{}", group_id), &hex::encode(hash));
+    }
+
+    /// #77: ask the founder for the whole group state, at most hourly per group.
+    fn request_group_sync(&mut self, group_id: &str) {
+        const EVERY_MS: u64 = 60 * 60 * 1000;
+        let key = format!("gsr:{}", group_id);
+        let now = current_time_ms();
+        if now.saturating_sub(self.meta_u64(&key)) < EVERY_MS {
+            return;
+        }
+        let Some(founder) = self.groups.get(group_id).map(|g| g.founder_identity_id.clone()) else { return };
+        let me = self.my_identity_id();
+        let targets = if me.as_deref() == Some(founder.as_str()) { self.sibling_active_devices() } else { self.active_devices_for_identity(&founder) };
+        let content = MessageContent::GroupSyncRequest { group_id: group_id.to_string() };
+        let mut sent = false;
+        for fp in targets {
+            sent |= self.send_message_content(fp, &content, None).is_ok();
+        }
+        if sent {
+            self.meta_put(&key, &now.to_string());
+        }
     }
 
     /// Spec 5.4: kurucu, grup daveti üretir; davet edilen kişi zaten var
@@ -14828,6 +15030,8 @@ impl P2PCore {
         }
         let new_version = group.version.checked_add(1).ok_or("Grup sürümü tükendi")?;
         let change = GroupChange::Add(new_member_identity_id.to_string());
+        // The new member gets every vouched device, the others only the new ones.
+        let full = self.sign_group_change_with(&group, &change, true)?;
         let update = self.sign_group_change(&group, &change)?;
 
         // Yerel state'i güncelle.
@@ -14854,8 +15058,10 @@ impl P2PCore {
             if member_identity_id == own_identity_id {
                 continue;
             }
-            self.send_group_update_to_member(group_id, &member_identity_id, &update);
+            let u = if member_identity_id == new_member_identity_id { &full } else { &update };
+            self.send_group_update_to_member(group_id, &member_identity_id, u);
         }
+        self.send_group_update_to_siblings(&update);
         Ok(())
     }
 
@@ -14923,6 +15129,7 @@ impl P2PCore {
         if let Some(notice) = removal_notice {
             self.send_group_update_to_member(group_id, member_identity_id, &notice);
         }
+        self.send_group_update_to_siblings(&update);
         Ok(())
     }
 
@@ -14965,6 +15172,7 @@ impl P2PCore {
         for member_identity_id in targets {
             self.send_group_update_to_member(group_id, &member_identity_id, &update);
         }
+        self.send_group_update_to_siblings(&update);
         Ok(())
     }
 
@@ -15026,6 +15234,7 @@ impl P2PCore {
         for member_identity_id in group.other_members(&own_identity_id) {
             self.send_group_update_to_member(group_id, &member_identity_id, &update);
         }
+        self.send_group_update_to_siblings(&update);
         info!("Grup kurucu yetkisi devredildi: {} -> {}", group_id, crate::log_id(&new_founder_identity_id));
         Ok(())
     }
@@ -15049,6 +15258,7 @@ impl P2PCore {
         for member_identity_id in group.other_members(&own_identity_id) {
             self.send_group_update_to_member(group_id, &member_identity_id, &update);
         }
+        self.send_group_update_to_siblings(&update);
 
         // `remove_group_locally` KASITLI olarak bu grup için bekleyen TÜM
         // senkronları temizler ("artık var olmayan bir grup için sonsuza
@@ -15582,7 +15792,32 @@ impl P2PCore {
             group_ref.founder_identity_id = last.to_identity.clone();
         }
 
-        if let Err(e) = validate_group_update(&group_ref, &update.signed_by, signer_is_active, update.new_version) {
+        // H78: two founder devices can sign the same version. At the version
+        // we hold, an update is taken again if it is a Delete, re-states the
+        // same members and name (a resend, a full copy), or its tie hash is
+        // larger than that of the update we applied: every member ends on the
+        // same one. The losing founder device takes it too (it gets its
+        // siblings' updates), so its next change is max(seen) + 1.
+        let tie = group_tie_hash(update)?;
+        let old_tie = self.group_tie(&update.group_id);
+        let same_version = group_exists && update.new_version == group_ref.version && update.new_version > 0;
+        let same_state = update.group_name == group_ref.name && {
+            let mut a = update.members.clone();
+            let mut b = group_ref.member_identity_ids();
+            a.sort();
+            b.sort();
+            a == b
+        };
+        let retake = same_version
+            && (matches!(update.change, GroupChange::Delete)
+                || (same_state && !matches!(update.change, GroupChange::AvatarUpdate(_) | GroupChange::TransferFounder(_)))
+                || tie > old_tie);
+        let mut check = group_ref.clone();
+        if retake {
+            check.version -= 1;
+        }
+        let gap = group_exists && update.new_version > group_ref.version.saturating_add(1);
+        if let Err(e) = validate_group_update(&check, &update.signed_by, signer_is_active, update.new_version) {
             // Spec dışı, hata düzeltmesi (bkz. `PendingConfirmation.regen_content`
             // / "6 saat çevrimdışı" senaryosu): `StaleOrOutOfOrderVersion`,
             // saldırı/bozulma DEĞİL — alıcı bu (veya daha yeni bir)
@@ -15598,6 +15833,11 @@ impl P2PCore {
             // device": the same update can never pass later. A missed
             // founder handover is healed by the carried `founder_chain`.)
             if matches!(e, GroupUpdateError::StaleOrOutOfOrderVersion) {
+                // #77: an older update (late, or a full copy) still vouches
+                // for devices: founder-signed, and only of current members.
+                if group_exists {
+                    self.adopt_group_update_devices(update, &group_ref.member_identity_ids());
+                }
                 // An AvatarUpdate that arrives after a newer update: members
                 // and name ride every update, the avatar does not, so it was
                 // lost. Taken if it is newer than the last avatar change.
@@ -15626,7 +15866,7 @@ impl P2PCore {
         // (ör. Add/Remove) yerel üyelik listesi güncelin gerisinde olabilir —
         // artık kilitlenmiyoruz (bkz. group.rs StaleOrOutOfOrderVersion notu)
         // ama bunu görünür kılıyoruz.
-        if group_exists && update.new_version > group_ref.version.saturating_add(1) {
+        if gap {
             error!(
                 "GroupUpdate gap (group={}): yerel version {} -> gelen {} (aradaki {} güncelleme kaçırıldı; üyelik listesi eksik olabilir)",
                 update.group_id, group_ref.version, update.new_version,
@@ -15758,26 +15998,9 @@ impl P2PCore {
         // anahtarlarını benimse — böylece hiç eşleşmediğimiz üyelerle de
         // ratchet kurup mesajlaşabiliriz (bkz. adopt_vouched_member_devices;
         // güvenlik kuralları orada).
-        if !update.member_devices.is_empty() {
-            // Only devices of identities that are members: the founder of a
-            // two-person group could otherwise fill our contact list with
-            // hundreds of identities it chose.
-            let devices: Vec<GroupMemberDevice> = update.member_devices.iter()
-                .filter(|d| update.members.contains(&d.identity_id))
-                .cloned()
-                .collect();
-            self.adopt_vouched_member_devices(&devices, &update.member_device_proofs);
-            // Only for a device we hold with these keys (adopted above or
-            // known before), and the first one given wins: a founder of
-            // another group cannot redirect our first contact with it.
-            for d in devices.iter().filter(|d| d.first_contact_secret.len() == 16) {
-                let known = self.known_remote_devices.get(&d.device_fingerprint)
-                    .map_or(false, |k| k.sign_pubkey_ed25519 == d.sign_pubkey_ed25519 && k.sign_pubkey_mldsa == d.sign_pubkey_mldsa);
-                let key = format!("gf:{}", d.device_fingerprint);
-                if known && self.meta_str(&key).is_none() {
-                    self.meta_put(&key, &hex::encode(&d.first_contact_secret));
-                }
-            }
+        self.adopt_group_update_devices(update, &update.members);
+        if !same_version || tie > old_tie {
+            self.set_group_tie(&update.group_id, &tie);
         }
         // The founder removed us (see `remove_from_group`'s removal notice):
         // close the group here, exactly like a founder delete.
@@ -15790,7 +16013,40 @@ impl P2PCore {
         if let Some(g) = self.groups.get(&update.group_id) {
             self.persist_group(g);
         }
+        // #77: updates carry only new devices. Missed one (a gap), or a
+        // member we hold no device of: ask the founder for the whole state.
+        let missing = self.groups.get(&update.group_id).map_or(false, |g| {
+            g.other_members(&me).iter().any(|m| self.active_devices_for_identity(m).is_empty() && !self.deleted_identities.contains(m))
+        });
+        if gap || missing {
+            self.request_group_sync(&update.group_id);
+        }
         Ok(())
+    }
+
+    /// The vouched member devices of a founder-checked update: only devices
+    /// of identities in `members` (the founder of a two-person group could
+    /// otherwise fill our contact list with hundreds of identities it chose).
+    fn adopt_group_update_devices(&mut self, update: &GroupUpdate, members: &[String]) {
+        if update.member_devices.is_empty() {
+            return;
+        }
+        let devices: Vec<GroupMemberDevice> = update.member_devices.iter()
+            .filter(|d| members.contains(&d.identity_id))
+            .cloned()
+            .collect();
+        self.adopt_vouched_member_devices(&devices, &update.member_device_proofs);
+        // Only for a device we hold with these keys (adopted above or
+        // known before), and the first one given wins: a founder of
+        // another group cannot redirect our first contact with it.
+        for d in devices.iter().filter(|d| d.first_contact_secret.len() == 16) {
+            let known = self.known_remote_devices.get(&d.device_fingerprint)
+                .map_or(false, |k| k.sign_pubkey_ed25519 == d.sign_pubkey_ed25519 && k.sign_pubkey_mldsa == d.sign_pubkey_mldsa);
+            let key = format!("gf:{}:{}", d.device_fingerprint, update.group_id);
+            if known && self.meta_str(&key).is_none() {
+                self.meta_put(&key, &hex::encode(&d.first_contact_secret));
+            }
+        }
     }
 
     /// Bir Identity için bilinen (ve Aşama A'da tek olan) Active cihaz
@@ -15801,7 +16057,7 @@ impl P2PCore {
     /// cihazımız `own_devices`'tan, diğerleri `known_remote_devices`'tan
     /// gelir; bilinmeyen üyeler atlanır (kurucu onları da tanımıyorsa
     /// kefil olamaz).
-    fn collect_vouched_member_devices(&self, member_ids: &[String]) -> Vec<GroupMemberDevice> {
+    fn collect_vouched_member_devices(&self, group_id: &str, member_ids: &[String]) -> Vec<GroupMemberDevice> {
         let own_identity_id = self.identity.as_ref().map(|i| i.identity_id.clone()).unwrap_or_default();
         let mut out = Vec::new();
         for id in member_ids {
@@ -15843,9 +16099,9 @@ impl P2PCore {
                         self.device_onion_addr.get(&d.device_fingerprint).cloned()
                     },
                     first_contact_secret: if Some(&d.device_fingerprint) == self.own_mailbox_topic_fp.as_ref() {
-                        self.own_group_contact_secret()
+                        self.own_group_contact_secret(group_id)
                     } else {
-                        self.meta_str(&format!("gf:{}", d.device_fingerprint)).and_then(|v| hex::decode(v).ok()).unwrap_or_default()
+                        self.member_group_secret(&d.device_fingerprint, group_id).unwrap_or_default()
                     },
                 });
             }
@@ -22515,6 +22771,14 @@ fn group_update_signing_input(
     ))
 }
 
+/// H78: what decides between two updates of the same group version (the
+/// larger wins on every member). Covers the state, not `member_devices`:
+/// a full and a delta copy of one update are the same update.
+fn group_tie_hash(u: &GroupUpdate) -> Result<Vec<u8>, String> {
+    let bytes = ciborium_bytes(&("typeon-group-tie-v1", &u.group_id, u.new_version, &u.change, &u.group_name, &u.members, &u.signed_by))?;
+    Ok(<sha2::Sha256 as sha2::Digest>::digest(&bytes).to_vec())
+}
+
 fn sign_group_update(
     group_id: &str,
     new_version: u32,
@@ -24453,6 +24717,23 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteGroup<'local>(mut env
     safe_new_jstring(&mut env, out)
 }
 
+/// #81 (H103): the founder re-sends the current group state to every
+/// member device — bkz. `P2PCore::resend_group_to_all`. "OK" / "Error: …".
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_resendGroupToAll<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>) -> jstring {
+    let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().resend_group_to_all(&gid)
+    });
+    let out = match result {
+        Ok(Ok(())) => "OK".to_string(),
+        Ok(Err(e)) => { error!("resend_group_to_all failed: {}", e); format!("Error: {}", e) }
+        Err(e) => { error!("resend_group_to_all panicked: {}", e); format!("Error: {}", e) }
+    };
+    safe_new_jstring(&mut env, out)
+}
+
 /// Spec dışı, kullanıcı isteği: kurucu OLMAYAN bir üye gruptan kendi
 /// isteğiyle ayrılır — bkz. `P2PCore::leave_group`.
 #[no_mangle]
@@ -24788,11 +25069,10 @@ fn strings_to_jobjectarray<'local>(env: &mut JNIEnv<'local>, texts: &[String]) -
 //    modu orada da çalışır. TEK sınır: o istemci yalnızca İKİNCİL cihaz
 //    olabilir (spec 1.5 bağlama akışı) — kendi başına yeni bir kimlik
 //    oluşturmaz.
-// 3. Grup üyelik senkronu "self-healing" değil: bir üye ara güncellemeleri
-//    kaçırırsa artık KİLİTLENMİYOR (ileri sıçramalara izin verilir, bkz.
-//    validate_group_update) ama kaçırılan Add/Remove'lar için tam durum
-//    yeniden-senkronu (founder'dan tüm üyelik listesini çekme) yok —
-//    yerel üyelik listesi geçici olarak eksik kalabilir (loglanır).
+// 3. (ÇÖZÜLDÜ) Her güncelleme tam üye listesini taşır; sürüm boşluğunda
+//    ya da cihazı bilinmeyen bir üyede üye kurucudan tam durumu ister
+//    (`GroupSyncRequest`), kurucu da tümünü yeniden gönderebilir
+//    (`resend_group_to_all`).
 // =====================================================================
 
 #[cfg(test)]

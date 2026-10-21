@@ -227,10 +227,12 @@ pub struct GroupMemberDevice {
     /// clearnet/UPnP address). Yoksa alıcı röle/sunucuya güvenir.
     #[serde(default)]
     pub last_addr: Option<String>,
-    /// The device's group first-contact secret (16 bytes), which it gave the
-    /// founder in `MessageContent::FirstContactSecret`: a member that never
-    /// paired with the device reaches it through its first-contact mailbox on
-    /// the server. Every member can fill that mailbox.
+    /// The device's first-contact secret for THIS group (16 bytes), which it
+    /// gave the founder in `MessageContent::FirstContactSecret`: a member that
+    /// never paired with the device reaches it through that group's
+    /// first-contact mailbox on the server. Only this group's members can
+    /// fill that mailbox, and it is registered only while the device is in
+    /// the group.
     #[serde(default, with = "serde_bytes", skip_serializing_if = "Vec::is_empty")]
     pub first_contact_secret: Vec<u8>,
 }
@@ -336,6 +338,10 @@ pub struct GroupUpdate {
     /// EZMEZ (bkz. process_group_update), (c) böyle eklenen kişiler
     /// `verified=false` olarak işaretlenir ve UI'de "grup üzerinden eklendi,
     /// doğrulanmadı" olarak gösterilir.
+    ///
+    /// M90/H6: only the devices new or changed since the founder's previous
+    /// update (all of them for a member just added, and in a reply to
+    /// `MessageContent::GroupSyncRequest`).
     #[serde(default)]
     pub member_devices: Vec<GroupMemberDevice>,
     /// For each vouched device that is not its identity's first device: the
@@ -1096,12 +1102,19 @@ pub enum MessageContent {
     /// Çoklu-cihaz (spec 1.6): imzalı cihaz iptali — kişilere ve kardeş
     /// cihazlara yayılır. Alıcı imzayı doğrulayıp o cihazı `Revoked` yapar.
     DeviceRevokeNotice(DeviceRevoke),
-    /// To a group's founder: the sender device's group first-contact secret,
-    /// forwarded to the members in `GroupMemberDevice.first_contact_secret`.
+    /// To a group's founder: the sender device's first-contact secret for
+    /// that group, forwarded to its members in
+    /// `GroupMemberDevice.first_contact_secret`.
     FirstContactSecret {
         #[serde(with = "serde_bytes")]
         secret: Vec<u8>,
+        group_id: String,
     },
+    /// To a group's founder: "send me the whole group state" (all vouched
+    /// member devices and proofs). A `GroupUpdate` carries only the devices
+    /// new or changed since the founder's previous update; a member that
+    /// missed one (version gap, or a member with no known device) asks.
+    GroupSyncRequest { group_id: String },
     /// Çoklu-cihaz (spec 1.7 delta senkron): var olan bir cihaz, kendi
     /// kimliğinin DİĞER (kardeş) cihazlarına güncel kişi/grup durumunu
     /// yeniden gönderir — ör. yeni bir kişi eklendiğinde. Alıcı idempotent
@@ -1179,6 +1192,10 @@ pub enum MessageContent {
         stream_id: Vec<u8>,
         #[serde(default)]
         sent_at_ms: u64,
+        /// Group `Invite` only: the device fingerprints the caller rang, so
+        /// callees also exchange keys with members they think are stale.
+        #[serde(default)]
+        participants: Vec<String>,
     },
     /// Shared whiteboard (one board per 1:1 chat or group). `group_id` /
     /// `conversation_identity_id` name the board the same way `ReadStateSync`
@@ -1290,6 +1307,7 @@ impl MessageContent {
             Self::ReadStateSync { .. } => "ReadStateSync",
             Self::DeviceRevokeNotice(_) => "DeviceRevokeNotice",
             Self::FirstContactSecret { .. } => "FirstContactSecret",
+            Self::GroupSyncRequest { .. } => "GroupSyncRequest",
             Self::DeviceSync(_) => "DeviceSync",
             Self::SiblingEcho { .. } => "SiblingEcho",
             Self::SiblingHistoryRequest { .. } => "SiblingHistoryRequest",
