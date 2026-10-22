@@ -78,6 +78,9 @@ const AUDIO_HOLD_MAX_MS: u64 = 5_000;
 const INBOX_MAX: usize = 64;
 /// Ring timeout, both directions.
 const RING_TIMEOUT_MS: u64 = 45_000;
+/// F2: how long and how often a running group call rings absent members again.
+const REINVITE_FOR_MS: u64 = 5 * 60_000;
+const REINVITE_EVERY_MS: u64 = 30_000;
 /// Every participant sends a state packet each second, even muted with the
 /// camera off: this long with nothing from anyone means the others are gone
 /// (app killed, device off, network lost) and never got to send a Hangup.
@@ -924,6 +927,8 @@ pub(crate) struct CallSession {
     /// Stream ids of participants that left: a replayed Accept must not add
     /// them back with a fresh replay window.
     retired: HashSet<Vec<u8>>,
+    /// Last group Invite we sent, see `call_sweep_inner`.
+    last_invite: Instant,
 }
 
 impl CallSession {
@@ -936,7 +941,7 @@ impl CallSession {
             call_id, group_id, video, phase, peer_fp, invited,
             keys: HashMap::new(), joined: HashSet::new(),
             my_key, my_sid, started_at: current_time_ms(), connected_at: 0,
-            started: Instant::now(), connected: None, retired: HashSet::new(),
+            started: Instant::now(), connected: None, retired: HashSet::new(), last_invite: Instant::now(),
         }
     }
 }
@@ -1268,7 +1273,8 @@ impl P2PCore {
                 }
                 s.joined.remove(peer_fp);
                 media_remove_remote(peer_fp);
-                if action != CallAction::Hangup {
+                // A group member that left is not rung again (`call_sweep_inner`).
+                if action != CallAction::Hangup || s.group_id.is_some() {
                     s.invited.retain(|f| f != peer_fp);
                 }
                 let over = match (&s.group_id, s.phase) {
@@ -1343,6 +1349,22 @@ impl P2PCore {
     }
 
     fn call_sweep_inner(&mut self) {
+        if let Some(s) = &self.call {
+            // F2: the group caller rings members not in the call again, so a
+            // device that comes online late still rings (the first Invite
+            // is too old by then). Ringing devices drop the repeat (same id).
+            let reinvite = s.phase == CallPhase::Active && s.group_id.is_some() && s.peer_fp.is_empty()
+                && s.started.elapsed() < Duration::from_millis(REINVITE_FOR_MS)
+                && s.last_invite.elapsed() > Duration::from_millis(REINVITE_EVERY_MS);
+            if reinvite {
+                let mut s = self.call.take().expect("checked above");
+                s.last_invite = Instant::now();
+                for fp in s.invited.iter().filter(|f| !s.joined.contains(*f)) {
+                    self.call_signal(fp, &s, CallAction::Invite);
+                }
+                self.call = Some(s);
+            }
+        }
         let Some(s) = &self.call else { return };
         let now = current_time_ms();
         let ringing_too_long = s.started.elapsed() > Duration::from_millis(RING_TIMEOUT_MS);

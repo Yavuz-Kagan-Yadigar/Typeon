@@ -692,6 +692,9 @@ pub struct SyncedMessage {
     /// responder did not write itself.
     #[serde(default)]
     pub author_proof: Option<String>,
+    /// Reactions on this row: (reactor identity, emoji, reacted_at_ms).
+    #[serde(default)]
+    pub reactions: Vec<(String, String, u64)>,
 }
 
 /// `MessagePacket.ciphertext`'in çözüldükten sonraki gerçek içeriği — spec

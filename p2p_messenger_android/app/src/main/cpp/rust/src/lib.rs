@@ -10469,6 +10469,13 @@ impl P2PCore {
     /// sırada ulaşabilir — DAHA ESKİ olan, daha yeninin üzerine YAZMAMALI.
     /// Damgası olmayan (eski sürüm) paketler koşulsuz uygulanır.
     /// `false`: the row could not be written (a received reaction is then not acked).
+    fn reactions_of(&self, message_id: &str) -> Vec<(String, String, u64)> {
+        let Some(conn) = &self.db else { return Vec::new() };
+        conn.prepare("SELECT reactor_identity_id, emoji, reacted_at_ms FROM message_reactions WHERE message_id = ?1 LIMIT 64")
+            .and_then(|mut stmt| stmt.query_map(params![message_id], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)?.max(0) as u64)))?.collect())
+            .unwrap_or_default()
+    }
+
     fn apply_reaction(&self, target_message_id: &str, reactor_identity_id: &str, emoji: &str, reacted_at_ms: u64) -> bool {
         // M101: no DB is not "applied".
         let Some(conn) = &self.db else { return false };
@@ -11356,6 +11363,7 @@ impl P2PCore {
                 kept.reverse();
                 let messages: Vec<SyncedMessage> = kept.into_iter()
                     .map(|m| SyncedMessage {
+                        reactions: m.message_id.as_deref().map(|id| self.reactions_of(id)).unwrap_or_default(),
                         direction: m.direction, text: m.text, timestamp: m.timestamp,
                         sender_identity_id: m.sender_identity_id, message_id: m.message_id,
                         sent_at_ms: m.sent_at_ms, is_deleted: m.is_deleted, is_edited: m.is_edited,
@@ -11407,6 +11415,20 @@ impl P2PCore {
                 // back from a sibling or from our server archive.
                 let mut messages = messages;
                 messages.truncate(HISTORY_SYNC_MAX_MESSAGES as usize);
+                // F3: reactions ride along. Only the responder's own and ours are
+                // taken: nothing proves who else reacted.
+                let own_id = self.my_identity_id();
+                for m in &messages {
+                    let Some(mid) = m.message_id.as_deref() else { continue };
+                    for (reactor, emoji, at) in m.reactions.iter().take(64) {
+                        if (*reactor == sender_identity_id || Some(reactor) == own_id.as_ref())
+                            && emoji.len() <= 64
+                            && self.reaction_fits_chat(mid, group_id.as_deref(), &sender_identity_id)
+                        {
+                            self.apply_reaction(mid, reactor, emoji, *at);
+                        }
+                    }
+                }
                 if group_id.is_none() {
                     // Nothing from before the user deleted this contact (or
                     // its chat with a group member): the peer still has those
@@ -14261,6 +14283,11 @@ impl P2PCore {
     /// H137: the chat list's previews under one lock: per contact (key:
     /// identity id) and per group, the newest message and newest attachment.
     fn chat_list_previews(&self) -> serde_json::Value {
+        // F1: the chat orders by sent time, so the preview must too; rows come by
+        // arrival. ponytail: a message sent more than 50 arrivals ago cannot win.
+        fn newest_sent(rows: Vec<ArchivedMessage>) -> Option<ArchivedMessage> {
+            rows.into_iter().max_by_key(|m| if m.sent_at_ms > 0 { m.sent_at_ms } else { m.timestamp })
+        }
         let my_id = self.my_identity_id();
         let mut contacts = serde_json::Map::new();
         for c in self.contacts.values() {
@@ -14268,7 +14295,7 @@ impl P2PCore {
             let Some(fp) = self.canonical_device_for_identity(&c.trusted_identity_id) else { continue };
             contacts.insert(c.trusted_identity_id.clone(), serde_json::json!({
                 "peer": fp,
-                "message": self.load_message_history_opt(&fp, 1, None, false).pop(),
+                "message": newest_sent(self.load_message_history_opt(&fp, 50, None, false)),
                 // Limit 1: the rows come oldest first, so `next()` of 500 was the oldest.
                 "attachment": self.list_attachments_opt(&fp, false, None, 1).into_iter().next(),
             }));
@@ -14276,7 +14303,7 @@ impl P2PCore {
         let mut groups = serde_json::Map::new();
         for gid in self.groups.keys() {
             groups.insert(gid.clone(), serde_json::json!({
-                "message": self.load_group_message_history_opt(gid, 1, None, false).pop(),
+                "message": newest_sent(self.load_group_message_history_opt(gid, 50, None, false)),
                 "attachment": self.list_group_attachments_opt(gid, false, None, 1).into_iter().next(),
             }));
         }
@@ -23001,7 +23028,7 @@ impl P2PCore {
                     direction: m.direction.clone(), text: m.text.clone(), timestamp: m.timestamp,
                     sender_identity_id: m.sender_identity_id.clone(), message_id: m.message_id.clone(),
                     sent_at_ms: m.sent_at_ms, is_deleted: m.is_deleted, is_edited: m.is_edited,
-                    author_proof: m.author_proof.clone(),
+                    author_proof: m.author_proof.clone(), reactions: Vec::new(),
                 };
                 self.apply_synced_message_flags(gid.as_deref(), &key, &synced);
             }
