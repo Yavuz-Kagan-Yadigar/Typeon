@@ -773,6 +773,25 @@ pub fn encode_jxl_animated(frames: &mut [Vec<u8>], width: u32, height: u32, dela
     std::fs::write(out, encoded).map_err(|e| e.to_string())
 }
 
+/// Longest side of a sticker, in pixels.
+pub const STICKER_MAX_SIDE: u32 = 600;
+/// Largest sticker file. Lossless 600 px stills are well under; long
+/// animations can pass it and are refused.
+pub const MAX_STICKER_BYTES: u64 = 4 << 20;
+
+/// A sticker file as it must be: a JPEG XL of at most `STICKER_MAX_SIDE`
+/// pixels a side and `MAX_STICKER_BYTES`. Ok(animated).
+pub fn sticker_check(src: &Path) -> Result<bool, String> {
+    if std::fs::metadata(src).map_err(|e| e.to_string())?.len() > MAX_STICKER_BYTES {
+        return Err("Sticker too large".to_string());
+    }
+    let image = jxl_oxide::JxlImage::builder().open(src).map_err(|e| format!("JPEG XL: {e}"))?;
+    if image.width() > STICKER_MAX_SIDE || image.height() > STICKER_MAX_SIDE {
+        return Err("Sticker larger than 600 px".to_string());
+    }
+    Ok(image.image_header().metadata.animation.is_some())
+}
+
 /// Whether a JPEG XL file says it is animated, from its headers only (the
 /// first 64 KiB; a longer ICC profile reads as "not animated").
 pub fn jxl_is_animated(src: &Path) -> bool {
@@ -1067,7 +1086,14 @@ mod tests {
             jxl_to_gif(&jxl, &gif).unwrap();
             let out = std::fs::read(&gif).unwrap();
             assert!(out.starts_with(b"GIF89a") && out.ends_with(&[0x3B]));
+            assert_eq!(sticker_check(&jxl), Ok(true), "{w}x{h} is a sticker");
         }
+        encode_jxl_lossless(&mut vec![9; 600 * 2 * 4], 600, 2, true, &jxl).unwrap();
+        assert_eq!(sticker_check(&jxl), Ok(false), "still sticker");
+        encode_jxl_lossless(&mut vec![9; 601 * 2 * 4], 601, 2, true, &jxl).unwrap();
+        assert!(sticker_check(&jxl).is_err(), "601 px is too wide");
+        std::fs::write(&jxl, b"not a jxl").unwrap();
+        assert!(sticker_check(&jxl).is_err(), "not a JPEG XL");
         assert!(encode_jxl_animated(&mut [vec![0; 16]], 2, 2, &[], true, &jxl).is_err(), "delay count");
         let _ = std::fs::remove_file(&jxl);
         let _ = std::fs::remove_file(&gif);

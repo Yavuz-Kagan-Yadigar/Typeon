@@ -959,6 +959,10 @@ pub enum MessageContent {
         /// gelen teklifte bu alan yok ve o aktarim miras boyutla yurur.
         #[serde(default)]
         chunk_size: Option<u32>,
+        /// A sticker (JPEG XL, at most 600 px a side): shown without a
+        /// bubble frame and downloaded at once, whatever the node mode.
+        #[serde(default)]
+        sticker: bool,
     },
     /// Spec disi: yaziyor... gostergesi. Kasitli olarak Ack gibi
     /// arsivlenmez ve teslim-onayi kuyruguna (`awaiting_confirmation`)
@@ -1280,6 +1284,8 @@ impl std::fmt::Debug for SiblingEchoBody {
             SiblingEchoBody::GroupLeft => "GroupLeft",
             SiblingEchoBody::Reaction { .. } => "Reaction",
             SiblingEchoBody::File { .. } => "File",
+            SiblingEchoBody::Sticker { .. } => "Sticker",
+            SiblingEchoBody::StickerRemoved { .. } => "StickerRemoved",
         })
     }
 }
@@ -1608,6 +1614,14 @@ pub enum SiblingEchoBody {
     /// indirir. Önceden ekler hiç yankılanmıyordu — telefondan atılan foto
     /// laptopta hiç görünmüyordu.
     File { offer: Box<MessageContent> },
+    /// A sticker added to my sticker store (imported or saved): the JPEG XL
+    /// itself. Its id is the SHA-256 of these bytes.
+    Sticker {
+        #[serde(with = "serde_bytes")]
+        jxl: Vec<u8>,
+    },
+    /// A sticker removed from my sticker store.
+    StickerRemoved { id: String },
 }
 
 /// Çoklu-cihaz (spec 1.7 mesaj geçmişi senkronu — kardeşten geri-doldurma):
@@ -1748,7 +1762,7 @@ mod parse_limit_tests {
             group_id: None, file_id: "f".into(), file_name: "n".into(), mime_type: "m".into(), total_size: 1,
             file_key: [0; 32], sha256_hex: String::new(), preview_jpeg: None, duration_ms: None,
             caption: String::new(), reply_to_message_id: None, reply_to_preview: None,
-            reply_to_sender_identity_id: None, chunk_size: None,
+            reply_to_sender_identity_id: None, chunk_size: None, sticker: false,
         };
         let echo = |inner| MessageContent::SiblingEcho {
             conversation_identity_id: None, group_id: None,
