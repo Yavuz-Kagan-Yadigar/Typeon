@@ -164,9 +164,29 @@ class StickerPicker(
 
     /** Imports the pictures [list] gives (it runs off the main thread). */
     private fun importAll(list: () -> List<Uri>) {
+        val bar = android.widget.ProgressBar(activity, null, android.R.attr.progressBarStyleHorizontal)
+        val label = android.widget.TextView(activity).apply { text = activity.getString(R.string.msg_sticker_importing, 0, 0) }
+        val pad = (24 * activity.resources.displayMetrics.density).toInt()
+        val box = android.widget.LinearLayout(activity).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, pad / 2)
+            addView(label)
+            addView(bar)
+        }
+        val progress = AlertDialog.Builder(activity).setView(box).setCancelable(false).show()
         scope.launch(Dispatchers.IO) {
-            val ok = (try { list() } catch (e: Exception) { emptyList() }).count { importUri(it) }
+            val uris = try { list() } catch (e: Exception) { emptyList() }
+            var ok = 0
+            uris.forEachIndexed { i, uri ->
+                withContext(Dispatchers.Main) {
+                    bar.max = uris.size
+                    bar.progress = i
+                    label.text = activity.getString(R.string.msg_sticker_importing, i + 1, uris.size)
+                }
+                if (importUri(uri)) ok++
+            }
             withContext(Dispatchers.Main) {
+                progress.dismiss()
                 toast(
                     if (ok > 0) activity.getString(R.string.msg_sticker_imported, ok)
                     else activity.getString(R.string.msg_sticker_import_failed)

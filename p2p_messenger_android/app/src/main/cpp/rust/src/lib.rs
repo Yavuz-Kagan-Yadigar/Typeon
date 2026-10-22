@@ -11642,10 +11642,14 @@ impl P2PCore {
                 }
                 self.awaiting_confirmation.remove(&request_id);
                 self.remove_durable_retry(&request_id);
-                // One answer per request (each request id goes to one device).
-                // The entry used to stay for 7 days and the same peer could
-                // answer it again and again, each time importing rows.
-                self.forget_history_request(&request_id);
+                // 1:1: one answer per request. The entry used to stay for 7
+                // days and the same peer could answer it again and again.
+                // Group: the same request goes to every member, so it stays
+                // open for the others (rows dedup by id; the stale sweep in
+                // `send_message_content` drops it after TEXT_RETRY_GIVE_UP_MS).
+                if group_id.is_none() {
+                    self.forget_history_request(&request_id);
+                }
                 // The responder's `HistorySyncResponse` is in
                 // `needs_delivery_confirmation`: it retries until this Ack.
                 self.send_ack(&peer_fp, &message_id);

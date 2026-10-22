@@ -556,6 +556,7 @@
     <string name="msg_confirm_delete_sticker">Delete this sticker?</string>
     <string name="msg_sticker_saved">Added to your stickers</string>
     <string name="msg_sticker_import_failed">The sticker could not be added</string>
+    <string name="msg_sticker_importing">Importing stickers… %1$d/%2$d</string>
     <string name="msg_sticker_imported">Added %1$d sticker(s)</string>
     <string name="storage_voice">Voice messages</string>
     <string name="storage_stickers">Stickers</string>
