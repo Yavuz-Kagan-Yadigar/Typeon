@@ -53,6 +53,12 @@ class StickerPicker(
     private val scope = activity.lifecycleScope
     private var dialog: BottomSheetDialog? = null
     private val ids = mutableListOf<String>()
+    private val favorites = mutableSetOf<String>()
+    /** Long-press starts a selection; while it is not empty a tap selects too. */
+    private val selected = mutableSetOf<String>()
+    private var selectAllButton: View? = null
+    private var deleteSelectedButton: View? = null
+    private var favoriteButton: View? = null
     private val gridAdapter = StickerGridAdapter()
 
     private val pickImages = activity.registerForActivityResult(
@@ -78,8 +84,27 @@ class StickerPicker(
             AppLock.beginTrustedExcursion()
             pickTree.launch(whatsAppStickersUri())
         }
+        selected.clear()
+        selectAllButton = sheet.findViewById<View>(R.id.btnStickerSelectAll).apply {
+            setOnClickListener {
+                selected.addAll(ids)
+                selectionChanged()
+            }
+        }
+        deleteSelectedButton = sheet.findViewById<View>(R.id.btnStickerDeleteSelected).apply {
+            setOnClickListener { confirmDeleteSelected() }
+        }
+        favoriteButton = sheet.findViewById<View>(R.id.btnStickerFavorite).apply {
+            setOnClickListener { favoriteSelected() }
+        }
+        // 75 % of the screen, opened fully: the grid takes what the buttons leave.
+        val height = (activity.resources.displayMetrics.heightPixels * 0.75f).toInt()
+        grid.layoutParams.height = height - (64 * activity.resources.displayMetrics.density).toInt()
         dialog = BottomSheetDialog(activity).apply {
             setContentView(sheet)
+            behavior.peekHeight = height
+            behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
+            behavior.skipCollapsed = true
             show()
         }
         refresh()
@@ -112,16 +137,20 @@ class StickerPicker(
 
     private fun refresh() {
         scope.launch(Dispatchers.IO) {
-            val list = try {
+            val rows = try {
                 val array = JSONArray(P2PLib.listStickers())
-                (0 until array.length()).mapNotNull { array.optJSONObject(it)?.optString("id")?.ifEmpty { null } }
+                (0 until array.length()).mapNotNull { array.optJSONObject(it)?.takeIf { o -> o.optString("id").isNotEmpty() } }
             } catch (e: Exception) {
                 emptyList()
             }
+            val list = rows.map { it.optString("id") }
             withContext(Dispatchers.Main) {
                 ids.clear()
                 ids.addAll(list)
-                gridAdapter.notifyDataSetChanged()
+                favorites.clear()
+                rows.filter { it.optBoolean("favorite") }.mapTo(favorites) { it.optString("id") }
+                selected.retainAll(list.toSet())
+                selectionChanged()
             }
         }
     }
@@ -151,14 +180,49 @@ class StickerPicker(
         )
     )
 
-    private fun confirmDelete(id: String) {
+    private fun toggle(id: String) {
+        if (!selected.remove(id)) selected.add(id)
+        selectionChanged()
+    }
+
+    private fun selectionChanged() {
+        val any = selected.isNotEmpty()
+        selectAllButton?.visibility = if (any) View.VISIBLE else View.GONE
+        deleteSelectedButton?.visibility = if (any) View.VISIBLE else View.GONE
+        favoriteButton?.visibility = if (any) View.VISIBLE else View.GONE
+        (favoriteButton as? android.widget.Button)?.setText(
+            if (any && favorites.containsAll(selected)) R.string.action_sticker_unfavorite else R.string.action_sticker_favorite
+        )
+        (deleteSelectedButton as? android.widget.Button)?.text =
+            "${activity.getString(R.string.action_delete_selected)} (${selected.size})"
+        gridAdapter.notifyDataSetChanged()
+    }
+
+    /** All selected are favorites: unfavorite them, else favorite them. Favorites list first. */
+    private fun favoriteSelected() {
+        val chosen = selected.toList()
+        val favorite = !favorites.containsAll(chosen)
+        scope.launch(Dispatchers.IO) {
+            val failed = chosen.map { call { P2PLib.setStickerFavorite(it, favorite) } }.firstOrNull { it.startsWith("Error:") }
+            withContext(Dispatchers.Main) {
+                if (failed != null) toast(coreErrorText(activity, failed))
+                selected.clear()
+                refresh()
+            }
+        }
+    }
+
+    private fun confirmDeleteSelected() {
+        val doomed = selected.toList()
         AlertDialog.Builder(activity)
             .setMessage(R.string.msg_confirm_delete_sticker)
             .setPositiveButton(R.string.action_delete_sticker) { _, _ ->
                 scope.launch(Dispatchers.IO) {
-                    val result = call { P2PLib.deleteSticker(id) }
+                    val failed = doomed.map { call { P2PLib.deleteSticker(it) } }.firstOrNull { it.startsWith("Error:") }
                     withContext(Dispatchers.Main) {
-                        if (result.startsWith("Error:")) toast(coreErrorText(activity, result)) else refresh()
+                        if (failed != null) toast(coreErrorText(activity, failed))
+                        selected.clear()
+                        refresh()
                     }
                 }
             }
@@ -279,6 +343,7 @@ class StickerPicker(
 
         inner class Holder(view: View) : RecyclerView.ViewHolder(view) {
             val image: ImageView = view.findViewById(R.id.imgStickerCell)
+            val star: View = view.findViewById(R.id.txtStickerFavorite)
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder =
@@ -290,9 +355,11 @@ class StickerPicker(
             val id = ids[position]
             val cached = cache.get(id)
             holder.image.setImageDrawable(cached)
-            holder.itemView.setOnClickListener { sendSticker(id) }
+            holder.image.alpha = if (id in selected) 0.35f else 1f
+            holder.star.visibility = if (id in favorites) View.VISIBLE else View.GONE
+            holder.itemView.setOnClickListener { if (selected.isEmpty()) sendSticker(id) else toggle(id) }
             holder.itemView.setOnLongClickListener {
-                confirmDelete(id)
+                toggle(id)
                 true
             }
             if (cached != null || !pending.add(id)) return

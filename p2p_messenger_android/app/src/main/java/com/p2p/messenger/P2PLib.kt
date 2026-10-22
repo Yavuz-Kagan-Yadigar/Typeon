@@ -398,6 +398,7 @@ object P2PLib {
     external fun stickerPlainPath(id: String): String
     /** Çıkartmayı kendi deposundan siler. "OK" ya da "Error: ...". */
     external fun deleteSticker(id: String): String
+    external fun setStickerFavorite(id: String, favorite: Boolean): String
     /** Bir çıkartmayı bir kişinin cihazına gönderir. Dönüş: ekin `file_id`'si
      *  ya da "Error: ...". */
     external fun sendSticker(peerFp: String, stickerId: String): String

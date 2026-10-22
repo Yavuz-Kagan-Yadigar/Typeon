@@ -8,8 +8,13 @@
     android:paddingEnd="12dp"
     android:paddingBottom="12dp">
 
-    <LinearLayout
+    <HorizontalScrollView
         android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:scrollbars="none">
+
+    <LinearLayout
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:gravity="center_vertical">
@@ -29,7 +34,36 @@
             android:layout_marginStart="8dp"
             android:text="@string/action_sticker_import_whatsapp" />
 
+        <Button
+            android:id="@+id/btnStickerSelectAll"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="@string/action_select_all"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/btnStickerFavorite"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="@string/action_sticker_favorite"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/btnStickerDeleteSelected"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="@string/action_delete_selected"
+            android:visibility="gone" />
+
     </LinearLayout>
+
+    </HorizontalScrollView>
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/recyclerStickers"

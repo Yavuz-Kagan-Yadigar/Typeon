@@ -4690,6 +4690,7 @@ impl P2PCore {
         migrate("ALTER TABLE files ADD COLUMN sticker INTEGER NOT NULL DEFAULT 0");
         // My sticker store: `stickers/<id>.enc`, keyed like attachments.
         migrate("CREATE TABLE IF NOT EXISTS stickers (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, animated INTEGER NOT NULL, encrypted_key BLOB NOT NULL, key_nonce BLOB NOT NULL)");
+        migrate("ALTER TABLE stickers ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0");
         // L-135: the group row id of a queued copy (its own ids are per member).
         migrate("ALTER TABLE pending_group_messages ADD COLUMN local_message_id TEXT");
         migrate("ALTER TABLE pending_durable_retries ADD COLUMN local_message_id TEXT");
@@ -11477,9 +11478,12 @@ impl P2PCore {
                             && self.reaction_fits_chat(mid, group_id.as_deref(), &sender_identity_id)
                         {
                             self.apply_reaction(mid, reactor, emoji, *at);
+                        } else {
+                            debug!("Geçmiş tepkisi alınmadı (mesaj={}, tepkiyen={})", mid, crate::log_id(reactor));
                         }
                     }
                 }
+                info!("Geçmiş yanıtı: {} satır, {} tepki (group={})", messages.len(), messages.iter().map(|m| m.reactions.len()).sum::<usize>(), group_id.is_some());
                 if group_id.is_none() {
                     // Nothing from before the user deleted this contact (or
                     // its chat with a group member): the peer still has those
@@ -16837,11 +16841,19 @@ impl P2PCore {
     }
 
     /// JSON `[{id, animated, created_at}]`, newest first.
+    /// ponytail: favorites stay on this device (not synced to siblings).
+    fn set_sticker_favorite(&self, id: &str, favorite: bool) -> Result<(), String> {
+        let conn = self.db.as_ref().ok_or("DB not open")?;
+        conn.execute("UPDATE stickers SET favorite = ?2 WHERE id = ?1", params![id, favorite]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     fn list_stickers(&self) -> String {
         let Some(conn) = &self.db else { return "[]".to_string() };
-        let rows: Vec<serde_json::Value> = conn.prepare("SELECT id, animated, created_at FROM stickers ORDER BY created_at DESC")
+        let rows: Vec<serde_json::Value> = conn.prepare("SELECT id, animated, created_at, favorite FROM stickers ORDER BY favorite DESC, created_at DESC")
             .and_then(|mut stmt| stmt.query_map([], |r| Ok(serde_json::json!({
                 "id": r.get::<_, String>(0)?, "animated": r.get::<_, bool>(1)?, "created_at": r.get::<_, i64>(2)?,
+                "favorite": r.get::<_, bool>(3)?,
             })))?.collect())
             .unwrap_or_default();
         serde_json::Value::from(rows).to_string()
@@ -24225,6 +24237,13 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteSticker<'local>(mut e
         let _guard = RUNTIME.enter();
         core_lock().delete_sticker(&id, true).map(|()| "OK".to_string())
     });
+    sticker_reply(&mut env, result)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_setStickerFavorite<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, id: JString<'local>, favorite: jni::sys::jboolean) -> jstring {
+    let id: String = jstr(&mut env, &id).unwrap_or_default();
+    let result = catch_panic(move || core_lock().set_sticker_favorite(&id, favorite != 0).map(|()| "OK".to_string()));
     sticker_reply(&mut env, result)
 }
 
