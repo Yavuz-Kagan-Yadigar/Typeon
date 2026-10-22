@@ -89,6 +89,8 @@ struct Attachment {
     bytes_done: u64,
     /// Voice message length, in milliseconds — `None` for anything else.
     duration_ms: Option<u32>,
+    /// A sticker: shown without a bubble frame.
+    sticker: bool,
 }
 
 #[derive(Clone)]
@@ -196,6 +198,8 @@ struct AttachmentState {
     action: Option<gtk::Button>,
     // Voice-message widgets, mutually exclusive with the above.
     voice: Option<VoicePlayer>,
+    /// Sticker picture, filled once the file is here.
+    sticker: Option<gtk::Picture>,
 }
 
 /// The inline voice-message player embedded in a bubble — a play/pause
@@ -1138,6 +1142,7 @@ fn attachment_entry(attachment: &core::AttachmentSummary, peer_fingerprint: &str
             preview_hex: attachment.preview_hex.clone(),
             bytes_done: attachment.bytes_transferred,
             duration_ms: attachment.duration_ms,
+            sticker: attachment.sticker,
         }),
         // Ekler için kalıcı bir "görüldü" kaynağı yok (bkz. `Entry.seen`
         // notu — `message_seen` tablosu `files`'a değil
@@ -1331,6 +1336,10 @@ impl ChatView {
         column.append(&reactions);
 
         let (overlay, skin) = place_bubble(&column, entry.mine);
+        if entry.attachment.as_ref().is_some_and(|a| a.sticker) {
+            skin.remove_css_class("bubble");
+            skin.remove_css_class(if entry.mine { "bubble-mine" } else { "bubble-theirs" });
+        }
         // bkz. `BUBBLE_GROUP_WINDOW_MS` dosya başı notu — `insert_entry`
         // önceki balonla aynı grupta olduğuna karar verdiyse üst köşeler
         // küçülür ve boşluk daralır (aynı sınıf `.bubble-mine`'ın tek başına
@@ -1431,11 +1440,44 @@ impl ChatView {
         // was. The sender puts `duration_ms` in the FileOffer for real voice
         // notes, so this still shows the player for one that has not been
         // downloaded yet.
-        if util::is_audio(&attachment.mime) && attachment.duration_ms.unwrap_or(0) > 0 {
+        if attachment.sticker {
+            self.build_sticker(attachment)
+        } else if util::is_audio(&attachment.mime) && attachment.duration_ms.unwrap_or(0) > 0 {
             self.build_voice_player(attachment)
         } else {
             self.build_generic_attachment(attachment)
         }
+    }
+
+    /// A sticker: just the picture, no name, size or button (it downloads
+    /// on its own). ponytail: an animated sticker shows its first frame.
+    fn build_sticker(self: &Rc<Self>, attachment: &Attachment) -> (gtk::Box, Rc<AttachmentState>) {
+        let block = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let picture = gtk::Picture::new();
+        picture.set_size_request(160, 160);
+        picture.set_content_fit(gtk::ContentFit::Contain);
+        picture.add_css_class("sticker");
+        block.append(&picture);
+        let state = Rc::new(AttachmentState {
+            file_id: attachment.file_id.clone(),
+            file_name: attachment.file_name.clone(),
+            mime: attachment.mime.clone(),
+            total_size: attachment.total_size,
+            source_fingerprint: attachment.source_fingerprint.clone(),
+            status: RefCell::new(attachment.status.clone()),
+            bytes_done: Cell::new(attachment.bytes_done),
+            download_started_at: Cell::new(0),
+            status_label: None,
+            progress: None,
+            eta: None,
+            action: None,
+            voice: None,
+            sticker: Some(picture),
+        });
+        if attachment.status == "complete" {
+            load_sticker(&state);
+        }
+        (block, state)
     }
 
     fn build_generic_attachment(self: &Rc<Self>, attachment: &Attachment) -> (gtk::Box, Rc<AttachmentState>) {
@@ -1514,6 +1556,7 @@ impl ChatView {
             eta: Some(eta),
             action: Some(action.clone()),
             voice: None,
+            sticker: None,
         });
 
         {
@@ -1592,6 +1635,7 @@ impl ChatView {
                 media: RefCell::new(None),
                 duration_ms: Cell::new(attachment.duration_ms.unwrap_or(0)),
             }),
+            sticker: None,
         });
         render_voice_state(&state);
 
@@ -2795,6 +2839,7 @@ impl ChatView {
                     duration_ms: u32::try_from(event.number("duration_ms"))
                         .ok()
                         .filter(|ms| *ms > 0),
+                    sticker: event.flag("sticker"),
                 });
                 self.insert_entry(
                     Entry {
@@ -3050,6 +3095,12 @@ impl ChatView {
 
         if state.voice.is_some() {
             render_voice_state(state);
+            return;
+        }
+        if state.sticker.is_some() {
+            if new_status == "complete" {
+                load_sticker(state);
+            }
             return;
         }
 
@@ -3828,4 +3879,19 @@ fn nonzero_or(value: u64, fallback: u64) -> u64 {
 
 fn nonempty_or(value: Option<String>, fallback: String) -> String {
     value.filter(|s| !s.is_empty()).unwrap_or(fallback)
+}
+
+/// Shows a downloaded sticker: the core decrypts it (JPEG XL to PNG/GIF) off
+/// the main thread.
+fn load_sticker(state: &Rc<AttachmentState>) {
+    let Some(picture) = state.sticker.clone() else { return };
+    let file_id = state.file_id.clone();
+    app::run_in_background(
+        move || core::attachment_plaintext_path(&file_id),
+        move |result| {
+            if let Ok(path) = result {
+                picture.set_filename(Some(&path));
+            }
+        },
+    );
 }

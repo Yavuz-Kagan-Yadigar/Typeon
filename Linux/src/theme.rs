@@ -622,6 +622,7 @@ avatar {{ border-radius: 9999px; }}
     border-radius: 14px;
     border: 1px solid @m3_outline_variant;
 }}
+.sticker {{ border-radius: 8px; }}
 /* Current in-chat search hit. */
 .bubble-match {{ outline: 2px solid @m3_primary; outline-offset: 2px; }}
 "#

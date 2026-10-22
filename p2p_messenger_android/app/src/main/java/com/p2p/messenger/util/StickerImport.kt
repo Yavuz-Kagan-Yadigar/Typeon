@@ -89,8 +89,8 @@ object StickerImport {
             try {
                 ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, info, _ ->
                     decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                    // The core wants straight (not premultiplied) alpha.
-                    decoder.isUnpremultipliedRequired = true
+                    // No isUnpremultipliedRequired: it throws with setTargetSize,
+                    // and getPixels (toRgba) un-premultiplies anyway.
                     val w = info.size.width
                     val h = info.size.height
                     val longest = maxOf(w, h)
