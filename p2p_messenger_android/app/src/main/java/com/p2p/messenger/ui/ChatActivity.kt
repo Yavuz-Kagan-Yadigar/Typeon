@@ -191,8 +191,6 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var btnAttach: ImageButton
     private lateinit var btnCamera: ImageButton
     private lateinit var btnVoice: ImageButton
-    /** Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): çıkartma
-     *  seçicinin düğmesi (ses düğmesinin yanında). */
     private lateinit var btnSticker: ImageButton
     private lateinit var txtConnectingBanner: TextView
     /** `sessionPollRunnable` günceller — `hasActiveSession` (bir ratchet
@@ -288,13 +286,10 @@ class ChatActivity : AppCompatActivity() {
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let { picked -> promptAttachmentCaption(offerHiRes = contentResolver.getType(picked)?.startsWith("image/") == true) { caption, hiRes -> onFilePicked(picked, caption, hiRes) } } }
 
-    /**
-     * Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): çıkartma
-     * seçici — alt sayfa (bkz. ui.StickerPicker). Sistem dosya seçicileri
-     * Activity'nin kendi launcher'ları olmalı (ActivityResult, Activity
-     * olmadan kaydedilemez), bu yüzden seçici onları kendi kuruyor.
-     */
-    private val stickerPicker = StickerPicker(this) { stickerId -> sendSticker(stickerId) }
+    private val stickerPicker = StickerPicker(this, { P2PLib.sendSticker(peerDeviceFingerprint, it) }) { item ->
+        adapter.addMessage(item)
+        scrollToBottomNow()
+    }
 
     /**
      * Spec dışı, kullanıcı isteği: giriş çubuğundaki kamera düğmesi —
@@ -473,8 +468,7 @@ class ChatActivity : AppCompatActivity() {
             val isForThisPeer = obj.optString("peer") == peerDeviceFingerprint
             val isGroupScoped = !obj.isNull("group_id") || !obj.isNull("group_message_local_id")
             // "history_backfilled" covers several chats and carries no peer.
-            // "stickers_changed" (başka bir cihazım çıkartma ekledi/çıkardı)
-            // de bir sohbete ait DEĞİL — her ekranda ilgilidir.
+            // Nor does "stickers_changed" (my sticker store, any chat).
             if ((isForThisPeer && !isGroupScoped) || obj.optString("type") == "history_backfilled"
                 || obj.optString("type") == "stickers_changed"
             ) {
@@ -514,15 +508,7 @@ class ChatActivity : AppCompatActivity() {
         adapter.onAttachmentLongClick = { item -> onAttachmentLongClicked(item) }
         adapter.onReactionsClick = { item -> showReactionsDialog(item) }
         adapter.onReplyPreviewClick = { targetMessageId -> scrollToMessage(targetMessageId) }
-        // Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): çıkartma
-        // balonunun görseli — JNI çözme + decode ARKA PLANDA (ana thread'de
-        // yapılmaz), bkz. SimpleChatAdapter.bindSticker.
-        adapter.stickerImageProvider = { fileId, done ->
-            lifecycleScope.launch(Dispatchers.IO) {
-                val drawable = resolveStickerDrawable(fileId)
-                withContext(Dispatchers.Main) { done(drawable) }
-            }
-        }
+        stickerPicker.provideBubbleImages(adapter)
 
         val chatLayoutManager = LinearLayoutManager(this)
         recycler.layoutManager = chatLayoutManager
@@ -629,8 +615,6 @@ class ChatActivity : AppCompatActivity() {
             takePhotoLauncher.launch(Intent(this, CameraCaptureActivity::class.java))
         }
 
-        // Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): ses
-        // düğmesinin yanındaki çıkartma düğmesi.
         btnSticker.setOnClickListener {
             if (!ensureHandshakeReadyOrWarn()) return@setOnClickListener
             stickerPicker.show()
@@ -1181,9 +1165,6 @@ class ChatActivity : AppCompatActivity() {
 
     private fun handleIncomingEvent(obj: JSONObject) {
         when (obj.optString("type")) {
-            // Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): başka
-            // bir cihazım çıkartma ekledi/çıkardı — seçici AÇIKSA listeyi
-            // tazele, kapalıysa yok say.
             "stickers_changed" -> stickerPicker.reload()
             "message" -> {
                 val messageId = obj.optString("message_id")
@@ -1286,8 +1267,6 @@ class ChatActivity : AppCompatActivity() {
                                       else SimpleChatAdapter.AttachmentStatus.OFFERED,
                             previewJpeg = previewJpeg,
                             durationMs = durationMs,
-                            // Spec dışı, kullanıcı isteği (WhatsApp tarzı
-                            // çıkartmalar): çıkartma ÇERÇEVESİZ gösterilir.
                             isSticker = obj.optBoolean("sticker", false)
                         ),
                         // Spec dışı, kullanıcı isteği: ek + açıklama + yanıt.
@@ -1683,9 +1662,7 @@ class ChatActivity : AppCompatActivity() {
             add(getString(R.string.action_open_with))
             add(getString(R.string.action_save_to_downloads))
             if (attachment.mimeType.startsWith("image/")) add(getString(R.string.action_copy_image))
-            // Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar):
-            // alınmış bir çıkartma kendi çıkartma deposuna kopyalanabilir.
-            if (attachment.isSticker) add(getString(R.string.action_add_to_my_stickers))
+            if (attachment.isSticker && !item.isMine) add(getString(R.string.action_add_to_my_stickers))
             if (item.isMine) add(getString(R.string.action_delete_message))
         }
         AlertDialog.Builder(this)
@@ -1694,87 +1671,11 @@ class ChatActivity : AppCompatActivity() {
                     getString(R.string.action_open_with) -> openAttachmentWithChooser(attachment)
                     getString(R.string.action_save_to_downloads) -> saveAttachmentToDownloads(attachment)
                     getString(R.string.action_copy_image) -> OutgoingMedia.copyImage(this, attachment.fileId)
-                    getString(R.string.action_add_to_my_stickers) -> saveStickerToMyStore(attachment)
+                    getString(R.string.action_add_to_my_stickers) -> stickerPicker.saveReceived(attachment.fileId)
                     getString(R.string.action_delete_message) -> confirmDeleteMessage(item)
                 }
             }
             .show()
-    }
-
-    /**
-     * Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): seçicideki
-     * bir çıkartmaya dokununca gönderilir — dosya ekleri gibi, sohbet
-     * hemen tazelenir.
-     */
-    private fun sendSticker(stickerId: String) {
-        lifecycleScope.launch(Dispatchers.IO) {
-            val result = try {
-                P2PLib.sendSticker(peerDeviceFingerprint, stickerId)
-            } catch (e: Exception) {
-                "Error: ${e.message}"
-            }
-            withContext(Dispatchers.Main) {
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(
-                        this@ChatActivity,
-                        com.p2p.messenger.util.coreErrorText(this@ChatActivity, result),
-                        Toast.LENGTH_SHORT
-                    ).show()
-                } else {
-                    adapter.addMessage(stickerItem(result))
-                    scrollToBottomNow()
-                }
-            }
-        }
-    }
-
-    /** A sent sticker bubble — the same shape as a file send. */
-    private fun stickerItem(fileId: String) = SimpleChatAdapter.Item(
-        messageId = fileId,
-        text = "",
-        isMine = true,
-        attachment = SimpleChatAdapter.AttachmentInfo(
-            fileId = fileId,
-            fileName = "sticker.jxl",
-            mimeType = "image/jxl",
-            totalSize = 0,
-            status = SimpleChatAdapter.AttachmentStatus.COMPLETE,
-            isSticker = true
-        )
-    )
-
-    /** The sticker's picture: its decrypted copy (`.png`/`.gif`) — the JNI
-     *  call and the decode are both off the main thread. */
-    private fun resolveStickerDrawable(fileId: String): android.graphics.drawable.Drawable? {
-        val path = try {
-            P2PLib.getAttachmentPlaintextPath(fileId)
-        } catch (e: Exception) {
-            return null
-        }
-        if (path.startsWith("Error:")) return null
-        return loadStickerDrawable(this, File(path))
-    }
-
-    /**
-     * Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): alınmış bir
-     * çıkartmayı kendi çıkartma deposuma kopyalar.
-     */
-    private fun saveStickerToMyStore(attachment: SimpleChatAdapter.AttachmentInfo) {
-        lifecycleScope.launch(Dispatchers.IO) {
-            val result = try {
-                P2PLib.saveReceivedSticker(attachment.fileId)
-            } catch (e: Exception) {
-                "Error: ${e.message}"
-            }
-            withContext(Dispatchers.Main) {
-                Toast.makeText(
-                    this@ChatActivity,
-                    if (result.startsWith("Error:")) com.p2p.messenger.util.coreErrorText(this@ChatActivity, result)
-                    else getString(R.string.msg_sticker_saved),
-                    Toast.LENGTH_SHORT
-                ).show()
-            }
-        }
     }
 
     private fun openAttachmentWithChooser(attachment: SimpleChatAdapter.AttachmentInfo) {
@@ -2585,8 +2486,6 @@ class ChatActivity : AppCompatActivity() {
                                     bytesDone = obj.optLong("bytes_transferred"),
                                     previewJpeg = previewJpeg,
                                     durationMs = obj.optInt("duration_ms", -1).let { if (it < 0) null else it },
-                                    // Spec dışı, kullanıcı isteği (WhatsApp
-                                    // tarzı çıkartmalar): çıkartma ÇERÇEVESİZ.
                                     isSticker = obj.optBoolean("sticker", false)
                                 ),
                                 // Spec dışı, kullanıcı isteği: arşivden geri
@@ -2759,8 +2658,6 @@ class ChatActivity : AppCompatActivity() {
                 bytesDone = obj.optLong("bytes_transferred"),
                 previewJpeg = if (previewHex.isNotEmpty() && previewHex != "null") hexToBytes(previewHex) else null,
                 durationMs = obj.optInt("duration_ms", -1).let { if (it < 0) null else it },
-                // Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar):
-                // çıkartma ÇERÇEVESİZ gösterilir.
                 isSticker = obj.optBoolean("sticker", false)
             ),
             caption = obj.optString("caption", ""),
@@ -3044,8 +2941,6 @@ class ChatActivity : AppCompatActivity() {
                                     bytesDone = obj.optLong("bytes_transferred"),
                                     previewJpeg = previewJpeg,
                                     durationMs = obj.optInt("duration_ms", -1).let { if (it < 0) null else it },
-                                    // Spec dışı, kullanıcı isteği (WhatsApp
-                                    // tarzı çıkartmalar): çıkartma ÇERÇEVESİZ.
                                     isSticker = obj.optBoolean("sticker", false)
                                 ),
                                 // Spec dışı, kullanıcı isteği: arşivden geri

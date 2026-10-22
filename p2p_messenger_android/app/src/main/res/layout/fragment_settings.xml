@@ -515,8 +515,6 @@
 
                 <View style="@style/Settings.Divider" />
 
-                <!-- Spec dışı, kullanıcı isteği: depolama yönetimi (toplam
-                     kullanım, sohbet başına ek boyutu, tek tek ek silme). -->
                 <LinearLayout style="@style/Settings.Row">
                     <TextView
                         style="@style/Settings.Title"

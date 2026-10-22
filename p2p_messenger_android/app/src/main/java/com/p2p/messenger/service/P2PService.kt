@@ -781,7 +781,7 @@ class P2PService : Service() {
             "file_offer" -> {
                 val groupId = if (obj.isNull("group_id")) "" else obj.optString("group_id")
                 val label = attachmentNotificationLabel(
-                    obj.optString("mime_type", ""), obj.optString("file_name", "")
+                    obj.optString("mime_type", ""), obj.optString("file_name", ""), obj.optBoolean("sticker")
                 )
                 if (groupId.isNotEmpty()) {
                     if (activeConversationId != "group:$groupId") {
@@ -801,7 +801,8 @@ class P2PService : Service() {
     }
 
     /** Ek bildirimi için kısa etiket (bkz. `maybeNotify` "file_offer"). */
-    private fun attachmentNotificationLabel(mimeType: String, fileName: String): String = when {
+    private fun attachmentNotificationLabel(mimeType: String, fileName: String, sticker: Boolean): String = when {
+        sticker -> getString(R.string.lbl_last_sticker)
         mimeType.startsWith("image/") -> getString(R.string.lbl_last_photo)
         mimeType.startsWith("video/") -> getString(R.string.lbl_last_video)
         mimeType.startsWith("audio/") -> getString(R.string.lbl_last_voice)

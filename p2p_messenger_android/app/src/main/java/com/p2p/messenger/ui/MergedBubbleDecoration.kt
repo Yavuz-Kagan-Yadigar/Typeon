@@ -116,8 +116,7 @@ class MergedBubbleDecoration(
                 index++
                 continue
             }
-            // Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): bir
-            // çıkartma ÇERÇEVESİZ gösterilir — arkasına balon çizilmez.
+            // A sticker has no bubble.
             if (adapter.isStickerAt(position)) {
                 index++
                 continue

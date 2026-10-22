@@ -93,6 +93,7 @@
     <string name="status_reconnecting">Yeniden bağlanılıyor…</string>
 
     <string name="lbl_last_photo">📷 Fotoğraf</string>
+    <string name="lbl_last_sticker">🙂 Çıkartma</string>
     <string name="lbl_last_video">🎬 Video</string>
     <string name="lbl_last_voice">🎤 Sesli mesaj</string>
     <string name="lbl_last_file">📎 Dosya</string>
@@ -214,7 +215,6 @@
     <string name="msg_attachments_removed">%1$d ek bu cihazdan silindi</string>
     <string name="storage_attachment_type">%1$s · %2$s</string>
     <string name="msg_storage_load_failed">Depolama bilgisi okunamadı</string>
-    <string name="msg_storage_nothing_selected">En az bir ek seçin</string>
     <string name="content_desc_attachment_preview">Ek önizlemesi</string>
     <string name="msg_deleted">Bu mesaj silindi</string>
     <string name="msg_connecting">Bağlanılıyor…</string>
@@ -506,7 +506,7 @@
     <string name="err_core_not_found">Bulunamadı.</string>
     <string name="err_core_internal">Uygulamada bir şeyler ters gitti.</string>
     <string name="msg_confirm_contact_named">%1$s eklensin mi?\n\nGüvenlik kodu: %2$s\n\nKabul etmeden önce bu kodu kişiyle karşılaştırın.</string>
-    <!-- Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar). -->
+    <!-- Stickers. -->
     <string name="content_desc_stickers">Çıkartmalar</string>
     <string name="action_sticker_add">Ekle</string>
     <string name="action_sticker_import_whatsapp">WhatsApp\'tan aktar</string>
@@ -516,4 +516,6 @@
     <string name="msg_sticker_saved">Çıkartmalarına eklendi</string>
     <string name="msg_sticker_import_failed">Çıkartma eklenemedi</string>
     <string name="msg_sticker_imported">%1$d çıkartma eklendi</string>
+    <string name="storage_voice">Sesli mesajlar</string>
+    <string name="storage_stickers">Çıkartmalar</string>
 </resources>

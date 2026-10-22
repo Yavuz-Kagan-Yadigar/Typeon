@@ -1588,6 +1588,33 @@ mod recovery_tests {
         assert_eq!(kept, ["hi back", "third"]);
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    #[test]
+    fn storage_usage_counts_local_copies_and_removal_keeps_the_row() {
+        let dir = std::env::temp_dir().join(format!("typeon-storage-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("attachments")).unwrap();
+        std::fs::create_dir_all(dir.join("stickers")).unwrap();
+        let mut core = core_on_disk(&dir);
+        core.db.as_ref().unwrap().execute_batch(
+            "INSERT INTO files (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size, sha256_hex, encrypted_file_key, key_nonce, status, created_at, duration_ms, group_id)
+             VALUES ('img', 'p', 'received', 'a.jpg', 'image/jpeg', 9, '', x'00', x'00', 'complete', 1, NULL, 'g'),
+                    ('voc', 'p', 'received', 'v.ogg', 'audio/ogg', 9, '', x'00', x'00', 'complete', 2, 500, 'g'),
+                    ('gone', 'p', 'received', 'b.jpg', 'image/jpeg', 9, '', x'00', x'00', 'offered', 3, NULL, 'g');").unwrap();
+        std::fs::write(dir.join("attachments/img.enc"), [0u8; 100]).unwrap();
+        std::fs::write(dir.join("attachments/voc.enc"), [0u8; 30]).unwrap();
+        std::fs::write(dir.join("stickers/s.enc"), [0u8; 7]).unwrap();
+        let u = core.storage_usage();
+        assert_eq!((u["attachments_bytes"].as_u64(), u["voice_bytes"].as_u64(), u["stickers_bytes"].as_u64()), (Some(100), Some(30), Some(7)));
+        assert_eq!((u["chats"][0]["bytes"].as_u64(), u["chats"][0]["count"].as_u64()), (Some(130), Some(2)), "no local copy, not counted");
+
+        core.remove_local_attachment("img").unwrap();
+        assert!(!dir.join("attachments/img.enc").exists());
+        let status: String = core.db.as_ref().unwrap().query_row("SELECT status FROM files WHERE file_id = 'img'", [], |r| r.get(0)).unwrap();
+        assert_eq!(status, "offered");
+        assert_eq!(core.storage_usage()["chats"][0]["bytes"].as_u64(), Some(30));
+        assert!(core.remove_local_attachment("nope").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -16941,6 +16968,17 @@ impl P2PCore {
     /// Bir eki (DB satırı + diskteki `.enc` blob + varsa `plain_cache`
     /// kopyası) tamamen kaldırır — bkz. `enforce_history_storage_limit`.
     fn delete_attachment_file(&mut self, file_id: &str) {
+        self.remove_attachment_copy(file_id);
+        if let Some(conn) = &self.db {
+            let _ = conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id]);
+        }
+        self.finish_blob_upload(file_id);
+        self.attachment_events.push(serde_json::json!({"type": "file_evicted", "file_id": file_id}).to_string());
+    }
+
+    /// Removes this device's copy of an attachment (`.enc`, decrypted cache,
+    /// running transfer); the `files` row is the caller's business.
+    fn remove_attachment_copy(&mut self, file_id: &str) {
         let file_name: Option<String> = self.db.as_ref().and_then(|conn| {
             conn.query_row("SELECT file_name FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0)).ok()
         });
@@ -16961,65 +16999,43 @@ impl P2PCore {
                 }
             }
         }
-        if let Some(conn) = &self.db {
-            let _ = conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id]);
-        }
         // A transfer still running for this file: left alone it kept
         // `has_pending_work` (and the wake lock) up and wrote the file again.
         self.active_downloads.remove(file_id);
         self.download_request_ids.retain(|_, (fid, _)| fid != file_id);
-        self.finish_blob_upload(file_id);
-        self.attachment_events.push(serde_json::json!({"type": "file_evicted", "file_id": file_id}).to_string());
     }
 
-    /// Spec dışı, kullanıcı isteği (Settings → "Storage"): bu cihazın
-    /// depolama kullanımı. JSON:
-    /// `{"db_bytes", "attachments_bytes", "cache_bytes",
-    ///   "chats":[{"kind":"contact"|"group","id","name","bytes","count"}]}`
-    /// — `chats` bayta göre BÜYÜKTEN KÜÇÜĞE sıralıdır.
-    ///
-    /// Boyutlar DISKTEKİ gerçek dosyaların boyutlarıdır: `files`
-    /// tablosundaki `total_size` gönderenin beyanıdır (indirilmemiş
-    /// tekliflerde yanlıştır), bu yüzden `.enc` dosyasına bakılır.
+    /// Settings → Storage. Sizes are the files on disk (`total_size` is the
+    /// sender's claim). JSON: `{"db_bytes", "attachments_bytes",
+    /// "voice_bytes", "stickers_bytes", "cache_bytes", "chats":[{"kind":
+    /// "contact"|"group", "id", "name", "bytes", "count"}]}`; `chats` holds
+    /// only chats with local attachments, biggest first.
     fn storage_usage(&self) -> serde_json::Value {
-        let base = match self.app_files_dir.as_deref() {
-            Some(b) => b,
-            None => return serde_json::json!({"db_bytes": 0, "attachments_bytes": 0, "cache_bytes": 0, "chats": []}),
+        let Some(base) = self.app_files_dir.as_deref() else {
+            return serde_json::json!({"chats": []});
         };
         let base_path = std::path::Path::new(base);
-        // WAL/SHM yan dosyaları da DB'nin diskteki yeridir (WAL, açık DB'nin
-        // parçasıdır — silinirse son yazımlar kaybolur).
+        // The WAL is part of the open DB.
         let db_bytes = ["", "-wal", "-shm"]
             .iter()
             .map(|suffix| disk_size(&base_path.join(format!("{}{}", DB_NAME, suffix))))
             .sum::<u64>();
         let attachments_dir = base_path.join("attachments");
-        let attachments_bytes = dir_size(&attachments_dir, Some("enc"));
+        let enc_bytes = dir_size(&attachments_dir, Some("enc"));
         let cache_bytes = dir_size(&attachments_dir.join("plain_cache"), None);
+        let stickers_bytes = dir_size(&base_path.join("stickers"), None);
 
-        // Sohbet başına ekler: `files` tablosu. 1:1 satırlar KİŞİYE göre
-        // gruplanır (bir kişinin TÜM cihazları tek bir sohbettir — bkz.
-        // `contact_fingerprints_all`), grup satırları `group_id` ile.
-        let rows: Vec<(String, Option<String>, String)> = {
-            let mut rows: Vec<(String, Option<String>, String)> = Vec::new();
-            if let Some(conn) = &self.db {
-                if let Ok(mut stmt) = conn.prepare("SELECT file_id, group_id, peer_device_fingerprint FROM files") {
-                    if let Ok(mut iter) = stmt.query_map([], |r| {
-                        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?))
-                    }) {
-                        while let Some(row) = iter.next() {
-                            match row {
-                                Ok(v) => rows.push(v),
-                                Err(e) => warn!("Depolama hesabı: dosya satırı okunamadı: {}", e),
-                            }
-                        }
-                    }
-                }
-            }
-            rows
-        };
-        // Cihaz fingerprint'i → kişinin kimliği (multi-device: bir kişinin
-        // ekleri birden çok cihazdan gelebilir, hepsi TEK sohbette).
+        // (file_id, group_id, peer fingerprint, is a voice message)
+        let rows: Vec<(String, Option<String>, String, bool)> = self.db.as_ref().and_then(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT file_id, group_id, peer_device_fingerprint, mime_type LIKE 'audio/%' AND duration_ms IS NOT NULL FROM files",
+            ).ok()?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).ok()?
+                .flatten()
+                .collect();
+            Some(rows)
+        }).unwrap_or_default();
+        // A contact's attachments from all its devices are one chat.
         let mut fp_identity: HashMap<String, String> = HashMap::new();
         let mut identity_name: HashMap<String, String> = HashMap::new();
         for contact in self.contacts.values() {
@@ -17028,100 +17044,69 @@ impl P2PCore {
                 fp_identity.insert(fp, contact.trusted_identity_id.clone());
             }
         }
-        let mut usage: HashMap<(String, String), (String, String, u64, u64)> = HashMap::new();
-        for (file_id, group_id, peer_fp) in rows {
+        let mut voice_bytes = 0u64;
+        // (kind, id) -> (name, bytes, count)
+        let mut usage: HashMap<(&str, String), (String, u64, u64)> = HashMap::new();
+        for (file_id, group_id, peer_fp, voice) in rows {
+            let bytes = self.enc_path_for(&file_id).map(|p| disk_size(&p)).unwrap_or(0);
+            if bytes == 0 {
+                continue;
+            }
+            if voice {
+                voice_bytes += bytes;
+            }
             let (kind, id, name) = match group_id {
                 Some(gid) => {
                     let name = self.groups.get(&gid).map(|g| g.name.clone()).unwrap_or_else(|| gid.clone());
                     ("group", gid, name)
                 }
                 None => {
-                    let identity = fp_identity.get(&peer_fp).cloned();
-                    // Kanonik cihaz: kişinin sohbetinin kimliği olarak UI'ın
-                    // kullandığı parmak izi (bkz. `canonical_peer_key`).
-                    let id = match &identity {
-                        Some(identity_id) => self.canonical_device_for_identity(identity_id)
-                            .unwrap_or_else(|| self.canonical_peer_key(&peer_fp)),
-                        None => self.canonical_peer_key(&peer_fp),
-                    };
+                    let identity = fp_identity.get(&peer_fp);
+                    // The fingerprint the chat screen is opened with.
+                    let id = identity
+                        .and_then(|i| self.canonical_device_for_identity(i))
+                        .unwrap_or_else(|| self.canonical_peer_key(&peer_fp));
                     let name = identity
-                        .as_ref()
                         .and_then(|i| identity_name.get(i).cloned())
                         .unwrap_or_else(|| peer_fp.chars().take(8).collect());
                     ("contact", id, name)
                 }
             };
-            let bytes = self.enc_path_for(&file_id).map(|p| disk_size(&p)).unwrap_or(0);
-            let entry = usage
-                .entry((kind.to_string(), id.clone()))
-                .or_insert((name, id, 0, 0));
-            entry.2 += bytes;
-            entry.3 += 1;
+            let entry = usage.entry((kind, id)).or_insert((name, 0, 0));
+            entry.1 += bytes;
+            entry.2 += 1;
         }
-        let mut chats: Vec<(String, String, String, u64, u64)> = usage
-            .into_iter()
-            .map(|((kind, id), (name, _, bytes, count))| (kind, id, name, bytes, count))
-            .collect();
-        chats.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.2.cmp(&b.2)));
+        let mut chats: Vec<_> = usage.into_iter().collect();
+        chats.sort_by(|a, b| b.1.1.cmp(&a.1.1).then_with(|| a.1.0.cmp(&b.1.0)));
         let chats = chats
             .into_iter()
-            .map(|(kind, id, name, bytes, count)| {
+            .map(|((kind, id), (name, bytes, count))| {
                 serde_json::json!({"kind": kind, "id": id, "name": name, "bytes": bytes, "count": count})
             })
             .collect::<Vec<_>>();
         serde_json::json!({
             "db_bytes": db_bytes,
-            "attachments_bytes": attachments_bytes,
+            "attachments_bytes": enc_bytes.saturating_sub(voice_bytes),
+            "voice_bytes": voice_bytes,
+            "stickers_bytes": stickers_bytes,
             "cache_bytes": cache_bytes,
             "chats": chats,
         })
     }
 
-    /// Spec dışı, kullanıcı isteği (Settings → "Storage"): bir ekin YALNIZCA
-    /// BU CİHAZDAN kopyasını siler — `.enc` dosyası, varsa çözülmüş
-    /// `plain_cache` kopyası ve süren indirme. `files` satırı KALIR ama
-    /// durumu 'offered' olur (`bytes_transferred` = 0): sohbette "İndir"
-    /// düğmesi yeniden görünür, dosya karşı taraftan tekrar istenebilir.
-    /// Karşı tarafa HİÇBİR ŞEY bildirilmez — bu cihazın yerel depolama
-    /// kararıdır.
+    /// Settings → Storage: drops only this device's copy of an attachment.
+    /// The row stays, back to 'offered' (the bubble offers the download
+    /// again); the peer is not told.
     fn remove_local_attachment(&mut self, file_id: &str) -> Result<(), String> {
-        if !is_safe_file_id(file_id) {
-            return Err(format!("Geçersiz file_id (yol olarak kullanılamaz): {}", file_id));
-        }
-        let exists: bool = self.db.as_ref().map(|conn| {
-            conn.query_row("SELECT 1 FROM files WHERE file_id = ?1", params![file_id], |_| Ok(()))
-                .is_ok()
-        }).unwrap_or(false);
-        if !exists {
+        let conn = self.db.as_ref().ok_or("DB yok")?;
+        let changed = conn.execute(
+            "UPDATE files SET status = 'offered', bytes_transferred = 0 WHERE file_id = ?1",
+            params![file_id],
+        ).map_err(|e| e.to_string())?;
+        if changed == 0 {
             return Err(format!("Bilinmeyen file_id: {}", file_id));
         }
-        if let Ok(enc_path) = self.enc_path_for(file_id) {
-            let _ = std::fs::remove_file(enc_path);
-        }
-        // Çözülmüş kopya: uzantı dosya adından gelir (bkz. `safe_extension`).
-        let file_name: Option<String> = self.db.as_ref().and_then(|conn| {
-            conn.query_row("SELECT file_name FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0)).ok()
-        });
-        if let Some(name) = file_name {
-            let ext = safe_extension(&name);
-            if let Ok(dir) = self.attachments_dir() {
-                let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("{}{}", file_id, ext)));
-                let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("{}.png", file_id)));
-                let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("{}.gif", file_id)));
-            }
-        }
-        // Süren indirme: bırakılırsa bitince dosyayı YENİDEN yazar.
-        self.active_downloads.remove(file_id);
-        self.download_request_ids.retain(|_, (fid, _)| fid != file_id);
-        // Satır kalır, durum 'offered' olur (bkz. `receive_file_offer` —
-        // "İndir" düğmesi gösteren durum) — `bytes_transferred` sıfırlanır.
-        if let Some(conn) = &self.db {
-            conn.execute(
-                "UPDATE files SET status = 'offered', bytes_transferred = 0 WHERE file_id = ?1",
-                params![file_id],
-            ).map_err(|e| e.to_string())?;
-        }
-        // Sohbet ekranındaki balon da "yeniden indirilebilir" olsun.
+        self.remove_attachment_copy(file_id);
         self.attachment_events.push(serde_json::json!({"type": "file_evicted", "file_id": file_id}).to_string());
         Ok(())
     }
@@ -25424,44 +25409,34 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_listGroups<'local>(mut env:
     safe_new_jstring(&mut env, json)
 }
 
-/// Spec dışı, kullanıcı isteği (Settings → "Storage"): bu cihazın
-/// depolama kullanımı — JSON:
-/// `{"db_bytes","attachments_bytes","cache_bytes",
-///   "chats":[{"kind":"contact"|"group","id","name","bytes","count"}]}`
-/// (`chats` bayta göre büyükten küçüğe sıralı).
+/// See `P2PCore::storage_usage`.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_storageUsage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
-    let result = catch_panic(|| {
-        let core = core_lock_read();
-        serde_json::to_string(&core.storage_usage()).unwrap_or_else(|_| "{}".to_string())
-    });
-    let json = result.unwrap_or_else(|e| { error!("storageUsage panicked: {}", e); "{}".to_string() });
+    let json = catch_panic(|| core_lock_read().storage_usage().to_string())
+        .unwrap_or_else(|e| { error!("storageUsage panicked: {}", e); "{}".to_string() });
     safe_new_jstring(&mut env, json)
 }
 
-/// Spec dışı, kullanıcı isteği (Settings → "Storage"): verilen eki
-/// dosyalarının (`file_id` listesi — JSON dizi) YALNIZCA bu cihazdaki
-/// kopyası silinir: `.enc` dosyası, çözülmüş önbellek kopyası ve süren
-/// indirme. `files` satırı kalır, durumu 'offered' olur (sohbette "İndir"
-/// düğmesi geri gelir). Karşı tarafa HİÇBİR ŞEY bildirilmez.
-/// Dönüş: "OK" veya "Error: ...".
+/// Drops this device's copy of each attachment in `file_ids_json` (a JSON
+/// array), see `P2PCore::remove_local_attachment`. "OK" or the first "Error: ...".
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_removeLocalAttachments<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, file_ids_json: JString<'local>) -> jstring {
     let ids_json: String = jstr(&mut env, &file_ids_json).unwrap_or_default();
     let result = catch_panic(move || {
-        let _guard = RUNTIME.enter();
+        let ids: Vec<String> = serde_json::from_str(&ids_json).map_err(|e| e.to_string())?;
         let mut core = core_lock();
-        let ids: Vec<String> = serde_json::from_str(&ids_json)
-            .map_err(|e| format!("Geçersiz dosya listesi: {}", e))?;
+        // One bad id does not stop the rest.
+        let mut first_err = None;
         for id in &ids {
-            core.remove_local_attachment(id)?;
+            if let Err(e) = core.remove_local_attachment(id) {
+                first_err.get_or_insert(e);
+            }
         }
-        Ok::<(), String>(())
+        first_err.map_or(Ok(()), Err)
     });
     let out = match result {
         Ok(Ok(())) => "OK".to_string(),
-        Ok(Err(e)) => { error!("remove_local_attachments failed: {}", e); format!("Error: {}", e) }
-        Err(e) => { error!("remove_local_attachments panicked: {}", e); format!("Error: {}", e) }
+        Ok(Err(e)) | Err(e) => { error!("removeLocalAttachments: {}", e); format!("Error: {}", e) }
     };
     safe_new_jstring(&mut env, out)
 }

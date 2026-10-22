@@ -407,18 +407,13 @@ object P2PLib {
      *  Dönüş: çıkartma id'si ya da "Error: ...". */
     external fun saveReceivedSticker(fileId: String): String
 
-    // --- Depolama yönetimi (Ayarlar → "Storage") ---
-    /** Bu cihazın diskteki kullanımı. JSON:
-     *  `{"db_bytes":Int,"attachments_bytes":Int,"cache_bytes":Int,
-     *    "chats":[{"kind":"contact"|"group","id":String,"name":String,
-     *              "bytes":Int,"count":Int}]}` — `chats` bayta göre
-     *  büyükten küçüğe sıralıdır. */
+    // --- Settings → Storage ---
+    /** JSON: `{"db_bytes","attachments_bytes","voice_bytes","stickers_bytes",
+     *  "cache_bytes","chats":[{"kind":"contact"|"group","id","name","bytes","count"}]}`;
+     *  `chats`: only chats with local attachments, biggest first. */
     external fun storageUsage(): String
-    /** Verilen `file_id` listesinin (JSON dizi) YALNIZCA bu cihazdaki
-     *  kopyasını siler: `.enc` dosyası, çözülmüş önbellek kopyası ve süren
-     *  indirme. `files` satırı kalır ama durumu 'offered' olur (sohbette
-     *  "İndir" düğmesi geri gelir). Karşı tarafa HİÇBİR ŞEY bildirilmez.
-     *  Dönüş: "OK" veya "Error: ...". */
+    /** Drops only this device's copy of each `file_id` (JSON array); the row
+     *  stays, downloadable again; the peer is not told. "OK" or "Error: ...". */
     external fun removeLocalAttachments(fileIdsJson: String): String
     /** Tamamlanmış bir ekin çözülmüş (plaintext) kopyasının mutlak yolu,
      *  ya da hata varsa "Error: ...". BÜYÜK dosyalar için ANA THREAD'DE

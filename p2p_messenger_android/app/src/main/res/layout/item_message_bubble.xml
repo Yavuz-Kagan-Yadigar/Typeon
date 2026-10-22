@@ -140,9 +140,7 @@
         android:orientation="vertical"
         android:visibility="gone">
 
-        <!-- Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): bir
-             çıkartma balonu — çerçevesiz, köşeleri hafif yuvarlatılmış
-             (bkz. SimpleChatAdapter.bindSticker). -->
+        <!-- Sticker, frameless (SimpleChatAdapter.bindSticker). -->
         <ImageView
             android:id="@+id/imgSticker"
             android:layout_width="160dp"

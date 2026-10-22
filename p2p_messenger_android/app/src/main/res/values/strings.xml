@@ -104,6 +104,7 @@
 
     <!-- Spec dışı, kullanıcı isteği: sohbet listesinde ek önizlemesi -->
     <string name="lbl_last_photo">📷 Photo</string>
+    <string name="lbl_last_sticker">🙂 Sticker</string>
     <string name="lbl_last_video">🎬 Video</string>
     <string name="lbl_last_voice">🎤 Voice message</string>
     <string name="lbl_last_file">📎 File</string>
@@ -233,7 +234,6 @@
     <string name="msg_attachments_removed">%1$d attachment(s) removed from this device</string>
     <string name="storage_attachment_type">%1$s · %2$s</string>
     <string name="msg_storage_load_failed">Storage info could not be read</string>
-    <string name="msg_storage_nothing_selected">Select at least one attachment</string>
     <string name="content_desc_attachment_preview">Attachment preview</string>
     <string name="msg_deleted">This message was deleted</string>
     <string name="msg_connecting">Connecting…</string>
@@ -547,7 +547,7 @@
     <string name="err_core_not_found">Not found.</string>
     <string name="err_core_internal">Something went wrong inside the app.</string>
     <string name="msg_confirm_contact_named">Add %1$s?\n\nSafety code: %2$s\n\nCompare this code with your contact before you accept.</string>
-    <!-- Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar). -->
+    <!-- Stickers. -->
     <string name="content_desc_stickers">Stickers</string>
     <string name="action_sticker_add">Add</string>
     <string name="action_sticker_import_whatsapp">Import from WhatsApp</string>
@@ -557,4 +557,6 @@
     <string name="msg_sticker_saved">Added to your stickers</string>
     <string name="msg_sticker_import_failed">The sticker could not be added</string>
     <string name="msg_sticker_imported">Added %1$d sticker(s)</string>
+    <string name="storage_voice">Voice messages</string>
+    <string name="storage_stickers">Stickers</string>
 </resources>

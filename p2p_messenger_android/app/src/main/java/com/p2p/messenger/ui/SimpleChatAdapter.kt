@@ -84,9 +84,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
          *  (1:1'de bu her zaman tek bir sabit peer olduğundan gerek yok,
          *  ChatActivity kendi `peerDeviceFingerprint` alanını kullanır). */
         var peerDeviceFingerprint: String = "",
-        /** Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): bu ek
-         *  bir çıkartma mı? Çıkartmalar çerçevesiz gösterilir (bkz.
-         *  `bindSticker`) — Rust `FileOffer.sticker` bayrağı. */
+        /** Rust `FileOffer.sticker`: shown frameless, see `bindSticker`. */
         var isSticker: Boolean = false
     )
 
@@ -227,15 +225,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     private val boundVoiceHolders = mutableMapOf<String, BubbleViewHolder>()
     private val userSeekingFileIds = mutableSetOf<String>()
 
-    /** Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): çıkartma
-     *  balonunun görseli. Çözme (JNI) + decode ana thread'de yapılmaz —
-     *  çağıran taraf (ChatActivity/GroupChatActivity) arka planda çözer,
-     *  `done` ile hazır çizimi verir. */
+    /** A sticker bubble's picture, resolved off the main thread (see StickerPicker.provideBubbleImages). */
     var stickerImageProvider: ((fileId: String, done: (android.graphics.drawable.Drawable?) -> Unit) -> Unit)? = null
 
-    /** Çözülmüş çıkartma çizimleri (dosya id -> çizim). */
     private val stickerImages = android.util.LruCache<String, android.graphics.drawable.Drawable>(16)
-    /** Çözülmekte olan çıkartmalar — aynı dosya için ikinci istek atılmasın. */
+    /** Being decoded: no second request for the same file. */
     private val stickerPending = mutableSetOf<String>()
 
     /** Consecutive same-sender messages within this window merge visually
@@ -251,8 +245,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val prev = items[position - 1]
         val cur = items[position]
         if (prev.isDeleted || cur.isDeleted) return false
-        // Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): bir
-        // çıkartma ÇERÇEVESİZ gösterilir — komşusuyla birleşmez.
+        // A frameless sticker never merges with a neighbour.
         if (isSticker(cur) || isSticker(prev)) return false
         // Spec dışı, hata düzeltmesi (kullanıcı: "alıntılar bozuk"): bir
         // alıntı kutusu balonun İÇİNDE değil, ÜSTÜNDE ayrı bir blok olarak
@@ -274,18 +267,17 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
     fun isMineAt(position: Int): Boolean = items.getOrNull(position)?.isMine ?: false
 
-    /** Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): bu satır
-     *  bir çıkartma mı (çerçevesiz gösterilir)? */
     fun isStickerAt(position: Int): Boolean = isSticker(items.getOrNull(position))
 
-    private fun isSticker(item: Item?): Boolean = item?.attachment?.isSticker == true
+    /** Drawn as a sticker: frameless. Until downloaded it is a normal attachment bubble. */
+    private fun isSticker(item: Item?): Boolean =
+        item?.attachment?.let { it.isSticker && it.status == AttachmentStatus.COMPLETE && !item.isDeleted } == true
 
     private fun isGroupedWithNext(position: Int): Boolean {
         if (position >= items.size - 1) return false
         val cur = items[position]
         val next = items[position + 1]
         if (cur.isDeleted || next.isDeleted) return false
-        // bkz. `isGroupedWithPrevious` — bir çıkartma komşusuyla birleşmez.
         if (isSticker(cur) || isSticker(next)) return false
         // Same break as `isGroupedWithPrevious`: a bubble followed by a
         // reply ends its group, otherwise it never showed its time.
@@ -345,8 +337,6 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val status: ImageView = itemView.findViewById(R.id.imgStatus)
         val layoutAttachment: LinearLayout = itemView.findViewById(R.id.layoutAttachment)
         val imgAttachmentThumbnail: ImageView = itemView.findViewById(R.id.imgAttachmentThumbnail)
-        /** Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): çıkartma
-         *  balonunun görseli (çerçevesiz). */
         val imgSticker: ImageView = itemView.findViewById(R.id.imgSticker)
         val rowGenericAttachment: View = itemView.findViewById(R.id.rowGenericAttachment)
         val txtAttachmentName: TextView = itemView.findViewById(R.id.txtAttachmentName)
@@ -664,8 +654,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         holder.textView.maxWidth = textMax
         holder.txtAttachmentCaption.maxWidth = textMax
         holder.txtReplyQuoteText.maxWidth = (minOf(300f, screenDp - 80f) * d.density).toInt()
-        // Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): çıkartma
-        // balonunun köşeleri hafif yuvarlatılmış (çerçeve YOK).
+        // Sticker: no frame, slightly rounded corners.
         val radius = 8 * d.density
         holder.imgSticker.outlineProvider = object : android.view.ViewOutlineProvider() {
             override fun getOutline(view: View, outline: android.graphics.Outline) {
@@ -708,9 +697,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         // Tepki pill'i — balonun yanında, ilk satır hizasında (bkz.
         // item_message_bubble.xml `colBubbleSide`).
         // Açıklama SADECE ek balonlarında (metin mesajının kendi metni
-        // zaten `txtBubbleText`). Spec dışı, kullanıcı isteği (WhatsApp
-        // tarzı çıkartmalar): bir çıkartmanın altında açıklama/ dosya adı
-        // satırı YOK.
+        // zaten `txtBubbleText`). A sticker has no caption.
         val attachmentInfo = item.attachment
         if (attachmentInfo != null && item.caption.isNotBlank() && !item.isDeleted
             && !attachmentInfo.isSticker
@@ -800,6 +787,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.container, com.google.android.material.R.attr.colorOnSurfaceVariant
         )
         holder.status.imageTintList = android.content.res.ColorStateList.valueOf(sideColor)
+        // No bubble behind a sticker: its time is on the chat background too.
+        if (isSticker(item)) holder.timestamp.setTextColor(sideColor)
         holder.txtSeenByMore.setTextColor(sideColor)
 
         if (!item.isMine && item.senderName != null && !groupedWithPrevious) {
@@ -1008,10 +997,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
      */
     private fun bindAttachment(holder: BubbleViewHolder, item: Item, attachment: AttachmentInfo) {
         holder.layoutAttachment.visibility = View.VISIBLE
-        // Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): bir
-        // çıkartma çerçevesiz gösterilir — indirilene kadar normal ek
-        // balonu (indirme düğmesi) görünür.
-        if (attachment.isSticker && attachment.status == AttachmentStatus.COMPLETE) {
+        if (isSticker(item)) {
             bindSticker(holder, item, attachment)
             return
         }
@@ -1124,15 +1110,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         }
     }
 
-    /**
-     * Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): bir çıkartma
-     * balonu — ÇERÇEVESİZ (balon arka planı çizilmez, bkz.
-     * MergedBubbleDecoration), dosya adı/açıklama satırı yok; görsel 160
-     * dp'lik bir kutuya sığdırılır (en-boy oranı korunur).
-     *
-     * Görsel ana thread'de çözülmez: JNI çağrısı + decode arka planda
-     * yapılır (bkz. `stickerImageProvider`).
-     */
+    /** A sticker: the picture fitted into 160 dp, no frame (MergedBubbleDecoration skips it), no name row. */
     private fun bindSticker(holder: BubbleViewHolder, item: Item, attachment: AttachmentInfo) {
         holder.rowGenericAttachment.visibility = View.GONE
         holder.layoutVoiceMessage.visibility = View.GONE
@@ -1151,8 +1129,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         } else {
             holder.imgSticker.setImageDrawable(null)
             val provider = stickerImageProvider
-            if (provider != null && attachment.fileId !in stickerPending) {
-                stickerPending.add(attachment.fileId)
+            if (provider != null && stickerPending.add(attachment.fileId)) {
                 provider(attachment.fileId) { drawable ->
                     stickerPending.remove(attachment.fileId)
                     if (drawable != null) {
@@ -1164,16 +1141,10 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             }
         }
 
-        holder.layoutAttachment.setOnClickListener {
-            if (attachment.status != AttachmentStatus.DOWNLOADING) onAttachmentClick?.invoke(item)
-        }
+        holder.layoutAttachment.setOnClickListener { onAttachmentClick?.invoke(item) }
         holder.layoutAttachment.setOnLongClickListener {
-            if (attachment.status == AttachmentStatus.COMPLETE) {
-                onAttachmentLongClick?.invoke(item)
-                true
-            } else {
-                false
-            }
+            onAttachmentLongClick?.invoke(item)
+            true
         }
     }
 

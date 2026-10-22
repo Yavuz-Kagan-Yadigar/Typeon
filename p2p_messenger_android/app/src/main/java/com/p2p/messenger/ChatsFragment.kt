@@ -592,7 +592,7 @@ class ChatsFragment : Fragment() {
             )
         }
         val att = a?.let {
-            LastMessagePreview(attachmentPreviewLabel(it.optString("mime_type", ""), it.optString("file_name", "")), it.optLong("created_at", 0L))
+            LastMessagePreview(attachmentPreviewLabel(it.optString("mime_type", ""), it.optString("file_name", ""), it.optBoolean("sticker")), it.optLong("created_at", 0L))
         }
         return when {
             msg == null -> att
@@ -603,7 +603,8 @@ class ChatsFragment : Fragment() {
     }
 
     /** Ek türüne göre kısa etiket — bilinmeyen türlerde dosya adı. */
-    private fun attachmentPreviewLabel(mimeType: String, fileName: String): String = when {
+    private fun attachmentPreviewLabel(mimeType: String, fileName: String, sticker: Boolean): String = when {
+        sticker -> getString(R.string.lbl_last_sticker)
         mimeType.startsWith("image/") -> getString(R.string.lbl_last_photo)
         mimeType.startsWith("video/") -> getString(R.string.lbl_last_video)
         mimeType.startsWith("audio/") -> getString(R.string.lbl_last_voice)

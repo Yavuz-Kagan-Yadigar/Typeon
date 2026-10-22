@@ -2,22 +2,19 @@ package com.p2p.messenger.util
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.ImageDecoder
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.os.Build
 import com.p2p.messenger.P2PLib
 import java.io.File
-import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
- * Bir görsel dosyasını çıkartmaya (sticker) çevirir.
- *
- * GIF'ler kendi kodlayıcımızla (bkz. `GifFrames`) kare kare çözülür; diğer
- * formatlar (PNG/JPEG/WebP) TEK kare olarak alınır.
- * ponytail: animasyonlu bir WebP'nin kareleri çıkarılmaz — `ImageDecoder`
- * kare vermez, yalnızca bir `Drawable` (ilk kare yeterli).
- *
- * Sonuç: çıkartma id'si, ya da "Error: ...".
+ * A picture file as a sticker. GIF ([GifFrames]) and animated WebP
+ * ([animatedWebp]) keep their frames; anything else is one still frame.
  */
 object StickerImport {
     /** The core's own cap (attachments::STICKER_MAX_SIDE). */
@@ -31,19 +28,15 @@ object StickerImport {
     fun importFile(file: File): String {
         if (!file.exists() || file.length() == 0L) return "Error: dosya okunamadı"
         val head = ByteArray(4)
-        var read = 0
-        try {
-            file.inputStream().use { s ->
-                while (read < 4) {
-                    val n = s.read(head, read, 4 - read)
-                    if (n <= 0) break
-                    read += n
-                }
-            }
-        } catch (e: Exception) {
-            return "Error: ${e.message}"
+        val read = try { file.inputStream().use { it.read(head) } } catch (e: Exception) { return "Error: ${e.message}" }
+        val magic = String(head, 0, read.coerceAtLeast(0), Charsets.ISO_8859_1)
+        // A still GIF/WebP (or one over the caps) is imported as its first frame.
+        val animation = when (magic) {
+            "GIF8" -> GifFrames.decode(file, MAX_FRAMES, MAX_PIXELS)
+            "RIFF" -> try { animatedWebp(file.readBytes()) } catch (e: Exception) { null }
+            else -> null
         }
-        return if (String(head, 0, read, Charsets.ISO_8859_1) == "GIF8") importGif(file) else importStill(file)
+        return if (animation != null) importAnimated(animation) else importStill(file)
     }
 
     /** A still picture: one frame, no delay. */
@@ -58,11 +51,8 @@ object StickerImport {
         }
     }
 
-    /** An animated picture: the GIF frames, scaled to the sticker's cap. */
-    private fun importGif(file: File): String {
-        // A still GIF (or one over the caps) goes the normal way: its first
-        // frame as a still sticker.
-        val gif = GifFrames.decode(file, MAX_FRAMES, MAX_PIXELS) ?: return importStill(file)
+    /** An animation, scaled to the sticker's cap. */
+    private fun importAnimated(gif: GifFrames): String {
         var w = gif.width
         var h = gif.height
         var frames = gif.frames
@@ -81,6 +71,70 @@ object StickerImport {
         return P2PLib.importStickerFrames(
             frames.copyOfRange(0, count), w, h, gif.delaysMs.copyOfRange(0, count)
         )
+    }
+
+    /**
+     * The composited frames of an animated WebP (RIFF/VP8X/ANMF), or null when
+     * it is not animated. Each ANMF frame is re-wrapped as a still WebP for
+     * BitmapFactory, then drawn onto the canvas with its blend/dispose flags.
+     * Frames past [MAX_FRAMES] or [MAX_PIXELS] are cut.
+     */
+    private fun animatedWebp(d: ByteArray): GifFrames? {
+        fun u24(i: Int) = (d[i].toInt() and 0xFF) or ((d[i + 1].toInt() and 0xFF) shl 8) or ((d[i + 2].toInt() and 0xFF) shl 16)
+        fun u32(i: Int) = u24(i) or ((d[i + 3].toInt() and 0xFF) shl 24)
+        fun fourcc(i: Int) = String(d, i, 4, Charsets.ISO_8859_1)
+        if (d.size < 30 || fourcc(8) != "WEBP" || fourcc(12) != "VP8X" || d[20].toInt() and 0x02 == 0) return null
+        val w = u24(24) + 1
+        val h = u24(27) + 1
+        if (w.toLong() * h > MAX_PIXELS) return null
+        val canvasBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(canvasBitmap)
+        val replace = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC) }
+        val clear = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR) }
+        val frames = ArrayList<ByteArray>()
+        val delays = ArrayList<Int>()
+        try {
+            var pos = 12
+            while (pos + 8 <= d.size && frames.size < MAX_FRAMES && (frames.size + 1L) * w * h <= MAX_PIXELS) {
+                val size = u32(pos + 4)
+                val body = pos + 8
+                if (size < 0 || body + size > d.size) break
+                if (fourcc(pos) == "ANMF" && size > 16) {
+                    val x = u24(body) * 2f
+                    val y = u24(body + 3) * 2f
+                    val fw = u24(body + 6) + 1
+                    val fh = u24(body + 9) + 1
+                    val flags = d[body + 15].toInt()
+                    val data = d.copyOfRange(body + 16, body + size)
+                    // A still WebP: RIFF + VP8X (alpha flag, frame size) + the frame's own chunks.
+                    // The flag is always set: without it the decoder drops a VP8L frame's alpha.
+                    val vp8x = ByteArray(18).also {
+                        "VP8X".toByteArray(Charsets.ISO_8859_1).copyInto(it)
+                        it[4] = 10
+                        it[8] = 0x10
+                        for (k in 0 until 3) {
+                            it[12 + k] = ((fw - 1) shr (8 * k)).toByte()
+                            it[15 + k] = ((fh - 1) shr (8 * k)).toByte()
+                        }
+                    }
+                    val riffSize = 4 + vp8x.size + data.size
+                    val still = "RIFF".toByteArray(Charsets.ISO_8859_1) +
+                        byteArrayOf(riffSize.toByte(), (riffSize shr 8).toByte(), (riffSize shr 16).toByte(), (riffSize shr 24).toByte()) +
+                        "WEBP".toByteArray(Charsets.ISO_8859_1) + vp8x + data
+                    val frame = BitmapFactory.decodeByteArray(still, 0, still.size) ?: return null
+                    canvas.drawBitmap(frame, x, y, if (flags and 0x02 != 0) replace else null)
+                    frame.recycle()
+                    frames.add(toRgba(canvasBitmap))
+                    delays.add(u24(body + 12).let { if (it <= 10) 100 else it })
+                    if (flags and 0x01 != 0) canvas.drawRect(x, y, x + fw, y + fh, clear)
+                }
+                pos = body + size + (size and 1)
+            }
+        } finally {
+            canvasBitmap.recycle()
+        }
+        if (frames.size < 2) return null
+        return GifFrames(w, h, frames.toTypedArray(), delays.toIntArray(), true)
     }
 
     /** The picture, at most [MAX_SIDE] a side (the aspect ratio is kept). */

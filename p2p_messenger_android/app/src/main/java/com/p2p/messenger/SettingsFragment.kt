@@ -397,8 +397,6 @@ class SettingsFragment : Fragment() {
             startActivity(Intent(requireContext(), PendingMessagesActivity::class.java))
         }
 
-        // Spec dışı, kullanıcı isteği: depolama yönetimi (toplam kullanım,
-        // sohbet başına ek boyutu, tek tek ek silme) — bkz. ui.StorageActivity.
         view.findViewById<Button>(R.id.btn_storage).setOnClickListener {
             startActivity(Intent(requireContext(), StorageActivity::class.java))
         }

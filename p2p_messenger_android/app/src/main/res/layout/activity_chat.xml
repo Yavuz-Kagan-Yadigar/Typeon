@@ -439,9 +439,7 @@
                 android:contentDescription="@string/content_desc_record_voice"
                 android:src="@drawable/ic_mic" />
 
-            <!-- Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar):
-                 ses düğmesinin YANINDA — çıkartma seçici (bkz.
-                 ui.StickerPicker). -->
+            <!-- Sticker picker (ui.StickerPicker). -->
             <ImageButton
                 android:id="@+id/btnSticker"
                 android:layout_width="44dp"

@@ -1,5 +1,6 @@
 package com.p2p.messenger.ui
 
+import android.graphics.Bitmap
 import android.os.Bundle
 import android.text.format.Formatter
 import android.view.LayoutInflater
@@ -14,6 +15,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.p2p.messenger.P2PLib
@@ -31,24 +33,16 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Spec dışı, kullanıcı isteği: depolama yönetimi ekranı (Ayarlar →
- * "Storage"). Üstte toplam kullanım özeti (veritabanı / ekler / çözülmüş
- * önbellek) ve "Çözülmüş önbelleği temizle" düğmesi; altta sohbet başına
- * ek boyutu (büyükten küçüğe). Bir sohbete dokunulunca o sohbetin ekleri
- * açılır: onay kutuları, "Tümünü seç" ve "Seçilenleri sil".
- *
- * Silme YALNIZCA bu cihazdaki kopyayı kaldırır (bkz.
- * `P2PLib.removeLocalAttachments`): karşı taraf BİLMEZ, `files` satırı
- * kalır ve ek sohbette yeniden indirilebilir görünür.
+ * Settings → Storage: usage totals, per-chat attachment size, and a chat's
+ * local attachments (media grid + file list) to bulk-delete. Deleting drops
+ * only this device's copy (`P2PLib.removeLocalAttachments`).
  */
 class StorageActivity : AppCompatActivity() {
 
     private lateinit var layoutChats: View
     private lateinit var layoutAttachments: View
     private lateinit var txtTotal: TextView
-    private lateinit var txtDatabase: TextView
-    private lateinit var txtAttachments: TextView
-    private lateinit var txtCache: TextView
+    private lateinit var txtBreakdown: TextView
     private lateinit var txtNoChats: View
     private lateinit var txtNoAttachments: View
     private lateinit var txtAttachmentsTitle: TextView
@@ -56,7 +50,7 @@ class StorageActivity : AppCompatActivity() {
 
     private val chatAdapter = StorageChatsAdapter { chat -> openChat(chat) }
     private val selected = mutableSetOf<String>()
-    private val attachmentAdapter = StorageAttachmentsAdapter(selected) { _, _ -> refreshDeleteButton() }
+    private val attachmentAdapter = StorageAttachmentsAdapter(selected) { refreshDeleteButton() }
     private var currentChat: StorageChat? = null
     private lateinit var backToChats: OnBackPressedCallback
 
@@ -68,9 +62,7 @@ class StorageActivity : AppCompatActivity() {
         layoutChats = findViewById(R.id.layoutStorageChats)
         layoutAttachments = findViewById(R.id.layoutStorageAttachments)
         txtTotal = findViewById(R.id.txtStorageTotal)
-        txtDatabase = findViewById(R.id.txtStorageDatabase)
-        txtAttachments = findViewById(R.id.txtStorageAttachments)
-        txtCache = findViewById(R.id.txtStorageCache)
+        txtBreakdown = findViewById(R.id.txtStorageBreakdown)
         txtNoChats = findViewById(R.id.txtStorageNoChats)
         txtNoAttachments = findViewById(R.id.txtStorageNoAttachments)
         txtAttachmentsTitle = findViewById(R.id.txtStorageAttachmentsTitle)
@@ -81,18 +73,22 @@ class StorageActivity : AppCompatActivity() {
             adapter = chatAdapter
         }
         findViewById<RecyclerView>(R.id.recyclerStorageAttachments).apply {
-            layoutManager = LinearLayoutManager(this@StorageActivity)
+            // Media: three to a row; a file: a full-width row.
+            layoutManager = GridLayoutManager(this@StorageActivity, 3).apply {
+                spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+                    override fun getSpanSize(position: Int) =
+                        if (attachmentAdapter.items[position].preview != null) 1 else 3
+                }
+            }
             adapter = attachmentAdapter
         }
 
-        // Çözülmüş (düz metin) kopyalar: uygulama zaten birkaç yerde bunları
-        // siliyor (bkz. P2PApplication.onCreate / util.AppLock) — aynı desen.
         findViewById<Button>(R.id.btnClearCache).setOnClickListener { clearDecryptedCache() }
         findViewById<Button>(R.id.btnSelectAll).setOnClickListener { toggleSelectAll() }
         btnDeleteSelected.setOnClickListener { confirmDeleteSelected() }
         refreshDeleteButton()
 
-        // Sistem "geri" tuşu ekranı kapatmak yerine sohbet listesine dönsün.
+        // Back from a chat's attachments returns to the chat list.
         backToChats = object : OnBackPressedCallback(false) {
             override fun handleOnBackPressed() { showChats() }
         }
@@ -101,65 +97,57 @@ class StorageActivity : AppCompatActivity() {
         loadUsage()
     }
 
-    /** Depolama özeti + sohbet listesi. */
     private fun loadUsage() {
         lifecycleScope.launch {
-            val json = withContext(Dispatchers.IO) {
-                try { P2PLib.storageUsage() } catch (e: Exception) { "" }
+            val obj = withContext(Dispatchers.IO) {
+                try { JSONObject(P2PLib.storageUsage()) } catch (e: Exception) { null }
             }
-            val obj = try { JSONObject(json) } catch (e: Exception) { null }
             if (obj == null) {
                 Toast.makeText(this@StorageActivity, R.string.msg_storage_load_failed, Toast.LENGTH_SHORT).show()
                 return@launch
             }
-            val dbBytes = obj.optLong("db_bytes")
-            val attachmentBytes = obj.optLong("attachments_bytes")
-            val cacheBytes = obj.optLong("cache_bytes")
-            txtTotal.text = getString(R.string.storage_total) + ": " + formatSize(dbBytes + attachmentBytes + cacheBytes)
-            txtDatabase.text = getString(R.string.storage_database) + ": " + formatSize(dbBytes)
-            txtAttachments.text = getString(R.string.storage_attachments) + ": " + formatSize(attachmentBytes)
-            txtCache.text = getString(R.string.storage_decrypted_cache) + ": " + formatSize(cacheBytes)
+            val parts = listOf(
+                R.string.storage_database to obj.optLong("db_bytes"),
+                R.string.storage_attachments to obj.optLong("attachments_bytes"),
+                R.string.storage_voice to obj.optLong("voice_bytes"),
+                R.string.storage_stickers to obj.optLong("stickers_bytes"),
+                R.string.storage_decrypted_cache to obj.optLong("cache_bytes"),
+            )
+            txtTotal.text = getString(R.string.storage_total) + ": " + formatSize(parts.sumOf { it.second })
+            txtBreakdown.text = parts.joinToString("\n") { (label, bytes) -> getString(label) + ": " + formatSize(bytes) }
 
-            val chats = mutableListOf<StorageChat>()
             val arr = obj.optJSONArray("chats") ?: JSONArray()
-            for (i in 0 until arr.length()) {
-                val c = arr.optJSONObject(i) ?: continue
-                chats.add(StorageChat(
-                    kind = c.optString("kind"),
-                    id = c.optString("id"),
-                    name = c.optString("name"),
-                    bytes = c.optLong("bytes"),
-                    count = c.optInt("count")
-                ))
+            val chats = (0 until arr.length()).mapNotNull { i ->
+                arr.optJSONObject(i)?.let { c ->
+                    StorageChat(c.optString("kind"), c.optString("id"), c.optString("name"), c.optLong("bytes"), c.optInt("count"))
+                }
             }
             chatAdapter.submitList(chats)
             txtNoChats.visibility = if (chats.isEmpty()) View.VISIBLE else View.GONE
         }
     }
 
-    /** Seçili sohbetin ek listesi (1:1 → `listAttachments`, grup →
-     *  `listGroupAttachments`). */
+    /** The chat's attachments that have a copy here, media first. */
     private fun loadAttachments(chat: StorageChat) {
         lifecycleScope.launch {
-            val json = withContext(Dispatchers.IO) {
-                try {
-                    if (chat.kind == "group") P2PLib.listGroupAttachments(chat.id)
-                    else P2PLib.listAttachments(chat.id)
-                } catch (e: Exception) { "[]" }
-            }
-            val items = mutableListOf<StorageAttachment>()
-            val arr = try { JSONArray(json) } catch (e: Exception) { JSONArray() }
-            for (i in 0 until arr.length()) {
-                val a = arr.optJSONObject(i) ?: continue
-                val previewHex = a.optString("preview_hex")
-                items.add(StorageAttachment(
-                    fileId = a.optString("file_id"),
-                    name = a.optString("file_name"),
-                    mimeType = a.optString("mime_type"),
-                    size = a.optLong("total_size"),
-                    createdAt = a.optLong("created_at"),
-                    preview = if (previewHex.isEmpty()) null else hexToBytesOrNull(previewHex)
-                ))
+            val items = withContext(Dispatchers.IO) {
+                val arr = try {
+                    JSONArray(if (chat.kind == "group") P2PLib.listGroupAttachments(chat.id) else P2PLib.listAttachments(chat.id))
+                } catch (e: Exception) { JSONArray() }
+                (0 until arr.length()).mapNotNull { i ->
+                    val a = arr.optJSONObject(i) ?: return@mapNotNull null
+                    // 'offered': nothing on this device.
+                    if (a.optString("status") == "offered") return@mapNotNull null
+                    StorageAttachment(
+                        fileId = a.optString("file_id"),
+                        name = a.optString("file_name"),
+                        mimeType = a.optString("mime_type"),
+                        size = a.optLong("total_size"),
+                        createdAt = a.optLong("created_at"),
+                        preview = if (a.isNull("preview_hex")) null
+                            else hexToBytesOrNull(a.optString("preview_hex"))?.let { ImagePreview.decodeBytes(it, 256) }
+                    )
+                }.sortedBy { it.preview == null }
             }
             attachmentAdapter.submitList(items)
             txtNoAttachments.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
@@ -187,8 +175,7 @@ class StorageActivity : AppCompatActivity() {
         loadUsage()
     }
 
-    /** Çözülmüş (düz metin) kopyaları siler — uygulamanın zaten yaptığı
-     *  temizlik (bkz. P2PApplication.onCreate / util.AppLock). */
+    /** Same clean-up the app does at start (P2PApplication.onCreate). */
     private fun clearDecryptedCache() {
         lifecycleScope.launch {
             withContext(Dispatchers.IO) {
@@ -201,12 +188,7 @@ class StorageActivity : AppCompatActivity() {
 
     private fun toggleSelectAll() {
         val all = attachmentAdapter.items
-        if (all.isEmpty()) return
-        if (selected.size >= all.size) {
-            selected.clear()
-        } else {
-            all.forEach { selected.add(it.fileId) }
-        }
+        if (selected.size >= all.size) selected.clear() else all.forEach { selected.add(it.fileId) }
         attachmentAdapter.notifyDataSetChanged()
         refreshDeleteButton()
     }
@@ -216,10 +198,6 @@ class StorageActivity : AppCompatActivity() {
     }
 
     private fun confirmDeleteSelected() {
-        if (selected.isEmpty()) {
-            Toast.makeText(this, R.string.msg_storage_nothing_selected, Toast.LENGTH_SHORT).show()
-            return
-        }
         AlertDialog.Builder(this)
             .setTitle(R.string.storage_delete_confirm_title)
             .setMessage(R.string.storage_delete_confirm_message)
@@ -230,72 +208,52 @@ class StorageActivity : AppCompatActivity() {
 
     private fun deleteSelected() {
         val ids = selected.toList()
-        val payload = JSONArray().apply { ids.forEach { put(it) } }.toString()
+        val payload = JSONArray(ids).toString()
         lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
                 try { P2PLib.removeLocalAttachments(payload) } catch (e: Exception) { "Error: ${e.message}" }
             }
-            if (result.startsWith("Error:")) {
-                Toast.makeText(
-                    this@StorageActivity,
-                    coreErrorText(this@StorageActivity, result),
-                    Toast.LENGTH_SHORT
-                ).show()
-            } else {
-                Toast.makeText(
-                    this@StorageActivity,
-                    getString(R.string.msg_attachments_removed, ids.size),
-                    Toast.LENGTH_SHORT
-                ).show()
-            }
+            Toast.makeText(
+                this@StorageActivity,
+                if (result.startsWith("Error:")) coreErrorText(this@StorageActivity, result)
+                else getString(R.string.msg_attachments_removed, ids.size),
+                Toast.LENGTH_SHORT
+            ).show()
             selected.clear()
             refreshDeleteButton()
             currentChat?.let { loadAttachments(it) }
-            loadUsage()
         }
     }
 
     private fun formatSize(bytes: Long): String = Formatter.formatShortFileSize(this, bytes)
 }
 
-/** Bir sohbetin depolama satırı (bkz. Rust `storage_usage`). */
-data class StorageChat(
-    /** "contact" | "group" */
-    val kind: String,
-    /** 1:1 → kişinin kanonik cihaz parmak izi, grup → `group_id`. */
-    val id: String,
-    val name: String,
-    val bytes: Long,
-    val count: Int
-)
+/** A chat row of Rust `storage_usage`; `id` is the contact's canonical device or the group id. */
+data class StorageChat(val kind: String, val id: String, val name: String, val bytes: Long, val count: Int)
 
-/** Bir ekin satırı (bkz. Rust `AttachmentSummary`). */
-data class StorageAttachment(
+/** An attachment with a local copy; `preview` set for media. */
+class StorageAttachment(
     val fileId: String,
     val name: String,
     val mimeType: String,
     val size: Long,
     val createdAt: Long,
-    /** Küçük JPEG önizleme (hex'ten çözülmüş) — dosya/klasör değil, görsel. */
-    val preview: ByteArray?
+    val preview: Bitmap?
 )
 
-/** Sohbet listesi: ad + ek boyutu/dosya sayısı. */
 class StorageChatsAdapter(
     private val onClick: (StorageChat) -> Unit
 ) : RecyclerView.Adapter<StorageChatsAdapter.ViewHolder>() {
 
-    val items = mutableListOf<StorageChat>()
+    private val items = mutableListOf<StorageChat>()
 
     class ViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         val name: TextView = itemView.findViewById(R.id.txtStorageChatName)
         val size: TextView = itemView.findViewById(R.id.txtStorageChatSize)
     }
 
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
-        val view = LayoutInflater.from(parent.context).inflate(R.layout.item_storage_chat, parent, false)
-        return ViewHolder(view)
-    }
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder =
+        ViewHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_storage_chat, parent, false))
 
     override fun getItemCount(): Int = items.size
 
@@ -317,24 +275,26 @@ class StorageChatsAdapter(
     }
 }
 
-/** Bir sohbetin ekleri: onay kutusu, küçük önizleme, ad, tür/boyut/tarih. */
+/** Media as grid cells (thumbnail + check box), files as rows. */
 class StorageAttachmentsAdapter(
     private val selected: MutableSet<String>,
-    private val onToggle: (StorageAttachment, Boolean) -> Unit
+    private val onToggle: () -> Unit
 ) : RecyclerView.Adapter<StorageAttachmentsAdapter.ViewHolder>() {
 
     val items = mutableListOf<StorageAttachment>()
 
     class ViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         val check: CheckBox = itemView.findViewById(R.id.checkStorageAttachment)
-        val image: ImageView = itemView.findViewById(R.id.imgStorageAttachment)
-        val name: TextView = itemView.findViewById(R.id.txtStorageAttachmentName)
-        val info: TextView = itemView.findViewById(R.id.txtStorageAttachmentInfo)
+        val image: ImageView? = itemView.findViewById(R.id.imgStorageAttachment)
+        val name: TextView? = itemView.findViewById(R.id.txtStorageAttachmentName)
+        val info: TextView? = itemView.findViewById(R.id.txtStorageAttachmentInfo)
     }
 
+    override fun getItemViewType(position: Int): Int = if (items[position].preview != null) 1 else 0
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
-        val view = LayoutInflater.from(parent.context).inflate(R.layout.item_storage_attachment, parent, false)
-        return ViewHolder(view)
+        val layout = if (viewType == 1) R.layout.item_storage_media else R.layout.item_storage_attachment
+        return ViewHolder(LayoutInflater.from(parent.context).inflate(layout, parent, false))
     }
 
     override fun getItemCount(): Int = items.size
@@ -342,29 +302,20 @@ class StorageAttachmentsAdapter(
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         val item = items[position]
         val context = holder.itemView.context
-        holder.name.text = item.name
-        holder.info.text = context.getString(
+        holder.image?.setImageBitmap(item.preview)
+        holder.name?.text = item.name
+        holder.info?.text = context.getString(
             R.string.storage_attachment_type,
             item.mimeType.ifEmpty { "—" }.substringAfter('/').uppercase(),
             formatStorageDate(item.createdAt)
         ) + " · " + Formatter.formatShortFileSize(context, item.size)
 
-        // Görsel önizleme: dosya/klasör eklerinde yoktur.
-        val preview = item.preview
-        val bitmap = preview?.let { ImagePreview.decodeBytes(it, 256) }
-        if (bitmap != null) {
-            holder.image.visibility = View.VISIBLE
-            holder.image.setImageBitmap(bitmap)
-        } else {
-            holder.image.visibility = View.GONE
-        }
-
-        // Geri dönüştürülmüş satır: eski dinleyici tetiklenmesin.
+        // A recycled row: the old listener must not fire.
         holder.check.setOnCheckedChangeListener(null)
         holder.check.isChecked = selected.contains(item.fileId)
         holder.check.setOnCheckedChangeListener { _, checked ->
             if (checked) selected.add(item.fileId) else selected.remove(item.fileId)
-            onToggle(item, checked)
+            onToggle()
         }
         holder.itemView.setOnClickListener { holder.check.isChecked = !holder.check.isChecked }
     }
@@ -376,7 +327,6 @@ class StorageAttachmentsAdapter(
     }
 }
 
-/** Ek tarihi (gün/ay/yıl + saat) — sohbet balonundaki kısa biçimden uzun. */
 private fun formatStorageDate(timestampMs: Long): String {
     if (timestampMs <= 0) return ""
     return SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault()).format(Date(timestampMs))

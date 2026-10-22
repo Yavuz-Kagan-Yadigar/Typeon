@@ -14,9 +14,9 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -34,45 +34,39 @@ import java.io.File
 import java.util.UUID
 
 /**
- * Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): sohbet giriş
- * çubuğundaki çıkartma düğmesiyle açılan alt sayfa — kendi
- * çıkartmalarımızın ızgarası, "Ekle" (galeri) ve "WhatsApp'tan aktar"
- * (klasör) düğmeleri.
- *
- * Bir çıkartmaya dokunmak [onSend] ile gönderir; uzun basmak silmeyi
- * sorar. Başka bir cihazım çıkartma eklediyse/çıkardıysa ("stickers_changed"
- * olayı) [reload] listeyi tazeler.
+ * Stickers in a chat screen (1:1 and group): the picker sheet (my stickers,
+ * import from gallery / WhatsApp folder), sending, sticker bubble images and
+ * "Add to my stickers". Built as a field: it registers activity-result
+ * launchers.
  */
 class StickerPicker(
     private val activity: AppCompatActivity,
-    /** Sticker id -> gönder (1:1 veya grup — çağıran taraf bilir). */
-    private val onSend: (String) -> Unit,
+    /** Sends a sticker id (off the main thread): the attachment's file id or "Error: ...". */
+    private val send: (String) -> String,
+    /** The sent sticker's bubble, on the main thread. */
+    private val onSent: (SimpleChatAdapter.Item) -> Unit,
 ) {
     private val scope = activity.lifecycleScope
     private var dialog: BottomSheetDialog? = null
-    private val items = mutableListOf<Sticker>()
+    private val ids = mutableListOf<String>()
     private val gridAdapter = StickerGridAdapter()
 
-    /** Galeriden ekle (birden çok). */
     private val pickImages = activity.registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris -> if (uris.isNotEmpty()) importUris(uris) }
+    ) { uris -> if (uris.isNotEmpty()) importAll { uris } }
 
-    /** WhatsApp'ın çıkartma klasörü. */
     private val pickTree = activity.registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
-    ) { uri -> uri?.let { importTree(it) } }
+    ) { uri -> uri?.let { tree -> importAll { webpFilesIn(tree) } } }
 
     fun show() {
         if (dialog?.isShowing == true) return
         val sheet = LayoutInflater.from(activity).inflate(R.layout.sheet_sticker_picker, null)
-        val bottom = BottomSheetDialog(activity)
-        bottom.setContentView(sheet)
         val grid = sheet.findViewById<RecyclerView>(R.id.recyclerStickers)
-        grid.layoutManager = GridLayoutManager(activity, GRID_COLUMNS)
+        grid.layoutManager = GridLayoutManager(activity, 3)
         grid.adapter = gridAdapter
         sheet.findViewById<View>(R.id.btnStickerAdd).setOnClickListener {
-            // Sistem dosya seçicisi BAŞKA bir süreçte açılır.
+            // The system picker runs in another process.
             AppLock.beginTrustedExcursion()
             pickImages.launch(arrayOf("image/*"))
         }
@@ -80,126 +74,109 @@ class StickerPicker(
             AppLock.beginTrustedExcursion()
             pickTree.launch(whatsAppStickersUri())
         }
-        dialog = bottom
-        bottom.show()
+        dialog = BottomSheetDialog(activity).apply {
+            setContentView(sheet)
+            show()
+        }
         refresh()
     }
 
-    /** The sticker store changed (another device): reload, but only if the
-     *  sheet is open — otherwise there is nothing to show. */
+    /** "stickers_changed" (another device of mine): reload an open sheet. */
     fun reload() {
         if (dialog?.isShowing == true) refresh()
     }
 
+    /** Sticker bubbles get their picture from the decrypted attachment, decoded off the main thread. */
+    fun provideBubbleImages(adapter: SimpleChatAdapter) {
+        adapter.stickerImageProvider = { fileId, done ->
+            scope.launch(Dispatchers.IO) {
+                val drawable = drawableAt { P2PLib.getAttachmentPlaintextPath(fileId) }
+                withContext(Dispatchers.Main) { done(drawable) }
+            }
+        }
+    }
+
+    /** "Add to my stickers" on a received sticker. */
+    fun saveReceived(fileId: String) {
+        scope.launch(Dispatchers.IO) {
+            val result = call { P2PLib.saveReceivedSticker(fileId) }
+            withContext(Dispatchers.Main) {
+                toast(if (result.startsWith("Error:")) coreErrorText(activity, result) else activity.getString(R.string.msg_sticker_saved))
+            }
+        }
+    }
+
     private fun refresh() {
         scope.launch(Dispatchers.IO) {
-            val list = loadStickers()
+            val list = try {
+                val array = JSONArray(P2PLib.listStickers())
+                (0 until array.length()).mapNotNull { array.optJSONObject(it)?.optString("id")?.ifEmpty { null } }
+            } catch (e: Exception) {
+                emptyList()
+            }
             withContext(Dispatchers.Main) {
-                items.clear()
-                items.addAll(list)
+                ids.clear()
+                ids.addAll(list)
                 gridAdapter.notifyDataSetChanged()
             }
         }
     }
 
-    private fun loadStickers(): List<Sticker> {
-        val json = try {
-            P2PLib.listStickers()
-        } catch (e: Exception) {
-            return emptyList()
-        }
-        val array = try {
-            JSONArray(json)
-        } catch (e: Exception) {
-            return emptyList()
-        }
-        val out = mutableListOf<Sticker>()
-        for (i in 0 until array.length()) {
-            val o = array.optJSONObject(i) ?: continue
-            val id = o.optString("id")
-            if (id.isEmpty()) continue
-            out.add(Sticker(id))
-        }
-        return out
-    }
-
-    private fun send(sticker: Sticker) {
+    private fun sendSticker(id: String) {
         dialog?.dismiss()
-        onSend(sticker.id)
+        scope.launch(Dispatchers.IO) {
+            val fileId = call { send(id) }
+            withContext(Dispatchers.Main) {
+                if (fileId.startsWith("Error:")) toast(coreErrorText(activity, fileId)) else onSent(sentBubble(fileId))
+            }
+        }
     }
 
-    private fun confirmDelete(sticker: Sticker) {
+    /** A sent sticker's bubble, the same shape as a file send. */
+    private fun sentBubble(fileId: String) = SimpleChatAdapter.Item(
+        messageId = fileId,
+        text = "",
+        isMine = true,
+        attachment = SimpleChatAdapter.AttachmentInfo(
+            fileId = fileId,
+            fileName = "sticker.jxl",
+            mimeType = "image/jxl",
+            totalSize = 0,
+            status = SimpleChatAdapter.AttachmentStatus.COMPLETE,
+            isSticker = true
+        )
+    )
+
+    private fun confirmDelete(id: String) {
         AlertDialog.Builder(activity)
             .setMessage(R.string.msg_confirm_delete_sticker)
-            .setPositiveButton(R.string.action_delete_sticker) { _, _ -> deleteSticker(sticker) }
+            .setPositiveButton(R.string.action_delete_sticker) { _, _ ->
+                scope.launch(Dispatchers.IO) {
+                    val result = call { P2PLib.deleteSticker(id) }
+                    withContext(Dispatchers.Main) {
+                        if (result.startsWith("Error:")) toast(coreErrorText(activity, result)) else refresh()
+                    }
+                }
+            }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
 
-    private fun deleteSticker(sticker: Sticker) {
+    /** Imports the pictures [list] gives (it runs off the main thread). */
+    private fun importAll(list: () -> List<Uri>) {
         scope.launch(Dispatchers.IO) {
-            val result = try {
-                P2PLib.deleteSticker(sticker.id)
-            } catch (e: Exception) {
-                "Error: ${e.message}"
-            }
+            val ok = (try { list() } catch (e: Exception) { emptyList() }).count { importUri(it) }
             withContext(Dispatchers.Main) {
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(
-                        activity, coreErrorText(activity, result), Toast.LENGTH_SHORT
-                    ).show()
-                } else {
-                    refresh()
-                }
-            }
-        }
-    }
-
-    // ---------------------------------------------------------------
-    // İçe aktarma
-    // ---------------------------------------------------------------
-
-    private fun importUris(uris: List<Uri>) {
-        scope.launch(Dispatchers.IO) {
-            var ok = 0
-            for (uri in uris) if (importUri(uri)) ok++
-            withContext(Dispatchers.Main) {
-                Toast.makeText(
-                    activity,
+                toast(
                     if (ok > 0) activity.getString(R.string.msg_sticker_imported, ok)
-                    else activity.getString(R.string.msg_sticker_import_failed),
-                    Toast.LENGTH_SHORT
-                ).show()
+                    else activity.getString(R.string.msg_sticker_import_failed)
+                )
                 refresh()
             }
         }
     }
 
-    /** Every `.webp` in the chosen tree (recursively) is imported. */
-    private fun importTree(treeUri: Uri) {
-        scope.launch(Dispatchers.IO) {
-            val files = mutableListOf<Uri>()
-            try {
-                collectWebp(treeUri, DocumentsContract.getTreeDocumentId(treeUri), files)
-            } catch (e: Exception) {
-                // A tree that cannot be listed: nothing to import.
-            }
-            var ok = 0
-            for (uri in files) if (importUri(uri)) ok++
-            withContext(Dispatchers.Main) {
-                Toast.makeText(
-                    activity,
-                    if (ok > 0) activity.getString(R.string.msg_sticker_imported, ok)
-                    else activity.getString(R.string.msg_sticker_import_failed),
-                    Toast.LENGTH_SHORT
-                ).show()
-                refresh()
-            }
-        }
-    }
-
-    /** One picture as a sticker. The bytes are copied to a cache file first:
-     *  the core reads a sticker from a real file. */
+    /** One picture as a sticker, through a cache file (the import reads a file). */
     private fun importUri(uri: Uri): Boolean {
         val tmp = File(File(activity.cacheDir, "sticker_import").apply { mkdirs() }, UUID.randomUUID().toString())
         return try {
@@ -214,48 +191,50 @@ class StickerPicker(
         }
     }
 
-    /** The `.webp` files under [parentId] (and its subfolders). */
-    private fun collectWebp(treeUri: Uri, parentId: String, out: MutableList<Uri>) {
-        val children = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentId)
-        activity.contentResolver.query(
-            children,
-            arrayOf(
-                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE
-            ),
-            null, null, null
-        )?.use { cursor ->
-            while (cursor.moveToNext()) {
-                val id = cursor.getString(0) ?: continue
-                val name = cursor.getString(1) ?: ""
-                val mime = cursor.getString(2) ?: ""
-                if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-                    collectWebp(treeUri, id, out)
-                } else if (name.endsWith(".webp", true)) {
-                    out.add(DocumentsContract.buildDocumentUriUsingTree(treeUri, id))
+    /** Every `.webp` under [treeUri], subfolders included. */
+    private fun webpFilesIn(treeUri: Uri): List<Uri> {
+        val out = mutableListOf<Uri>()
+        fun walk(parentId: String) {
+            activity.contentResolver.query(
+                DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentId),
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE
+                ),
+                null, null, null
+            )?.use { cursor ->
+                while (cursor.moveToNext()) {
+                    val id = cursor.getString(0) ?: continue
+                    if (cursor.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR) walk(id)
+                    else if (cursor.getString(1)?.endsWith(".webp", true) == true) {
+                        out.add(DocumentsContract.buildDocumentUriUsingTree(treeUri, id))
+                    }
                 }
             }
         }
+        walk(DocumentsContract.getTreeDocumentId(treeUri))
+        return out
     }
 
-    /** WhatsApp's sticker folder, as the tree picker wants it. */
     private fun whatsAppStickersUri(): Uri = DocumentsContract.buildDocumentUri(
         "com.android.externalstorage.documents",
         "primary:Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Stickers"
     )
 
-    // ---------------------------------------------------------------
-    // Izgara
-    // ---------------------------------------------------------------
+    private fun toast(text: String) = Toast.makeText(activity, text, Toast.LENGTH_SHORT).show()
 
-    /** One sticker in the grid. */
-    private data class Sticker(val id: String)
+    private fun call(f: () -> String): String = try { f() } catch (e: Exception) { "Error: ${e.message}" }
+
+    /** The picture at the path [path] returns (a `.png`, or a `.gif` that plays). */
+    private fun drawableAt(path: () -> String): Drawable? {
+        val p = call(path)
+        return if (p.startsWith("Error:")) null else loadStickerDrawable(activity, File(p))
+    }
 
     private inner class StickerGridAdapter : RecyclerView.Adapter<StickerGridAdapter.Holder>() {
-        /** Çözülmüş çıkartma çizimleri (çıkartma id -> çizim). */
         private val cache = android.util.LruCache<String, Drawable>(16)
-        /** Çözülmekte olanlar — aynı çıkartma için ikinci istek atılmasın. */
+        /** Being decoded: no second request for the same sticker. */
         private val pending = mutableSetOf<String>()
 
         inner class Holder(view: View) : RecyclerView.ViewHolder(view) {
@@ -265,67 +244,45 @@ class StickerPicker(
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder =
             Holder(LayoutInflater.from(parent.context).inflate(R.layout.item_sticker, parent, false))
 
-        override fun getItemCount(): Int = items.size
+        override fun getItemCount(): Int = ids.size
 
         override fun onBindViewHolder(holder: Holder, position: Int) {
-            val sticker = items[position]
-            val cached = cache.get(sticker.id)
+            val id = ids[position]
+            val cached = cache.get(id)
             holder.image.setImageDrawable(cached)
-            holder.itemView.setOnClickListener { send(sticker) }
+            holder.itemView.setOnClickListener { sendSticker(id) }
             holder.itemView.setOnLongClickListener {
-                confirmDelete(sticker)
+                confirmDelete(id)
                 true
             }
-            if (cached != null || sticker.id in pending) return
-            pending.add(sticker.id)
-            // The core's viewable copy (`.png`/`.gif`) + the decode: both off
-            // the main thread — the cell fills in when it is ready.
+            if (cached != null || !pending.add(id)) return
             scope.launch(Dispatchers.IO) {
-                val drawable = stickerDrawable(sticker.id)
+                val drawable = drawableAt { P2PLib.stickerPlainPath(id) }
                 withContext(Dispatchers.Main) {
-                    pending.remove(sticker.id)
+                    pending.remove(id)
                     if (drawable == null) return@withContext
-                    cache.put(sticker.id, drawable)
-                    val idx = items.indexOfFirst { it.id == sticker.id }
+                    cache.put(id, drawable)
+                    val idx = ids.indexOf(id)
                     if (idx >= 0) notifyItemChanged(idx)
                 }
             }
         }
     }
-
-    /** The sticker's picture: the core's viewable copy of it. */
-    private fun stickerDrawable(id: String): Drawable? {
-        val path = try {
-            P2PLib.stickerPlainPath(id)
-        } catch (e: Exception) {
-            return null
-        }
-        if (path.startsWith("Error:")) return null
-        return loadStickerDrawable(activity, File(path))
-    }
-
-    private companion object {
-        const val GRID_COLUMNS = 3
-    }
 }
 
-/**
- * A sticker's picture: a `.gif` plays (like the app's GIF viewer, bkz.
- * MediaViewerActivity), a `.png` is a still.
- */
-fun loadStickerDrawable(context: Context, file: File): Drawable? {
+/** A sticker picture: a `.gif` plays (API 28+), anything else is a still. */
+private fun loadStickerDrawable(context: Context, file: File): Drawable? {
     if (!file.exists()) return null
     return try {
         if (file.extension.equals("gif", true) && Build.VERSION.SDK_INT >= 28) {
-            val drawable = ImageDecoder.decodeDrawable(ImageDecoder.createSource(file))
-            (drawable as? AnimatedImageDrawable)?.apply {
-                repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
-                start()
+            ImageDecoder.decodeDrawable(ImageDecoder.createSource(file)).also {
+                (it as? AnimatedImageDrawable)?.apply {
+                    repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
+                    start()
+                }
             }
-            drawable
         } else {
-            val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return null
-            BitmapDrawable(context.resources, bitmap)
+            BitmapDrawable(context.resources, BitmapFactory.decodeFile(file.absolutePath) ?: return null)
         }
     } catch (e: Throwable) {
         null
