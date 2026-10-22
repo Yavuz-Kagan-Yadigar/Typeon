@@ -294,7 +294,10 @@ class StorageAttachmentsAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
         val layout = if (viewType == 1) R.layout.item_storage_media else R.layout.item_storage_attachment
-        return ViewHolder(LayoutInflater.from(parent.context).inflate(layout, parent, false))
+        val view = LayoutInflater.from(parent.context).inflate(layout, parent, false)
+        // Square cells: the grid has 3 columns.
+        if (viewType == 1 && parent.width > 0) view.layoutParams.height = parent.width / 3
+        return ViewHolder(view)
     }
 
     override fun getItemCount(): Int = items.size
