@@ -140,6 +140,17 @@
         android:orientation="vertical"
         android:visibility="gone">
 
+        <!-- Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): bir
+             çıkartma balonu — çerçevesiz, köşeleri hafif yuvarlatılmış
+             (bkz. SimpleChatAdapter.bindSticker). -->
+        <ImageView
+            android:id="@+id/imgSticker"
+            android:layout_width="160dp"
+            android:layout_height="160dp"
+            android:scaleType="fitCenter"
+            android:visibility="gone"
+            android:contentDescription="@null" />
+
         <!-- Spec dışı, kullanıcı isteği: gönderilen resim/videolar sohbette
              yuvarlatılmış köşeli ve ince kenarlıklı görünsün. Düz bir
              `ImageView` bunu yapamaz (kırpma yok, kenarlık yok);

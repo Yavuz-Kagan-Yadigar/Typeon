@@ -386,6 +386,27 @@ object P2PLib {
      *  isim/avatar göstermek için) alanları vardır. */
     external fun listGroupAttachments(groupId: String): String
 
+    // --- Çıkartmalar (stickers) ---
+    /** RGBA (premultiplied DEĞİL) karelerden bir çıkartma üretir ve depolar.
+     *  En uzun kenar 600 px olmalı — ölçekleme Kotlin tarafında yapılır.
+     *  Bir kare = duruk çıkartma. Dönüş: çıkartma id'si veya "Error: ...". */
+    external fun importStickerFrames(frames: Array<ByteArray>, width: Int, height: Int, delaysMs: IntArray): String
+    /** JSON: `[{"id","animated","created_at"}]`, en yeni başta. */
+    external fun listStickers(): String
+    /** Bir çıkartmanın görüntülenebilir kopyası: `.png` (duruk) ya da `.gif`
+     *  (animasyonlu) dosyasının MUTLAK yolu, ya da "Error: ...". */
+    external fun stickerPlainPath(id: String): String
+    /** Çıkartmayı kendi deposundan siler. "OK" ya da "Error: ...". */
+    external fun deleteSticker(id: String): String
+    /** Bir çıkartmayı bir kişinin cihazına gönderir. Dönüş: ekin `file_id`'si
+     *  ya da "Error: ...". */
+    external fun sendSticker(peerFp: String, stickerId: String): String
+    /** bkz. `sendSticker` — grup karşılığı. */
+    external fun sendGroupSticker(groupId: String, stickerId: String): String
+    /** Alınmış (indirilmiş) bir çıkartmayı kendi çıkartma deposuna kopyalar.
+     *  Dönüş: çıkartma id'si ya da "Error: ...". */
+    external fun saveReceivedSticker(fileId: String): String
+
     // --- Depolama yönetimi (Ayarlar → "Storage") ---
     /** Bu cihazın diskteki kullanımı. JSON:
      *  `{"db_bytes":Int,"attachments_bytes":Int,"cache_bytes":Int,

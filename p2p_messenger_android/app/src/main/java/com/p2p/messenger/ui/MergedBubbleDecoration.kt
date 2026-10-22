@@ -116,6 +116,12 @@ class MergedBubbleDecoration(
                 index++
                 continue
             }
+            // Spec dışı, kullanıcı isteği (WhatsApp tarzı çıkartmalar): bir
+            // çıkartma ÇERÇEVESİZ gösterilir — arkasına balon çizilmez.
+            if (adapter.isStickerAt(position)) {
+                index++
+                continue
+            }
             memberCount = 0
             var cursor = index
             var cursorPosition = position
