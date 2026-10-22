@@ -998,9 +998,15 @@ class GroupChatActivity : AppCompatActivity() {
     /** bkz. `loadOlderGroupHistory` — bir üyeden gelen "older_group_history"
      *  ağ yanıtı. Boş dizi dönerse artık bu grup için tekrar denenmez. */
     private fun applyOlderGroupHistory(obj: JSONObject) {
+        val array = obj.optJSONArray("messages") ?: return
+        // Every member answers; a later answer may carry reactions the first lacked.
+        for (i in 0 until array.length()) {
+            val m = array.getJSONObject(i)
+            val reactions = m.optString("reactions")
+            if (reactions.isNotEmpty()) adapter.applyReactions(m.optString("message_id"), reactions)
+        }
         // Only what the "Fetch older history" button asked for.
         if (!fetchHistoryButton.acceptsReply()) return
-        val array = obj.optJSONArray("messages") ?: return
         // Empty: another source (peer, own device, server) may still answer.
         if (array.length() == 0) return
         fetchHistoryButton.onBackfilled()
