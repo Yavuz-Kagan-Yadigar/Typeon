@@ -195,10 +195,11 @@ class ChatsFragment : Fragment() {
             )
             AlertDialog.Builder(requireContext())
                 .setTitle(message.displayName)
-                .setItems(arrayOf(pinLabel, destructiveLabel)) { _, which ->
+                .setItems(arrayOf(pinLabel, getString(R.string.action_clear_chat_history), destructiveLabel)) { _, which ->
                     when (which) {
                         0 -> togglePin(message)
-                        1 -> if (message.isGroupFounder) confirmDeleteGroup(message) else confirmLeaveGroup(message)
+                        1 -> confirmClearChatHistory(message, message.contactId)
+                        2 -> if (message.isGroupFounder) confirmDeleteGroup(message) else confirmLeaveGroup(message)
                     }
                 }
                 .show()
@@ -294,12 +295,12 @@ class ChatsFragment : Fragment() {
             .show()
     }
 
-    private fun confirmClearChatHistory(message: ChatAdapter.ChatMessage) {
+    private fun confirmClearChatHistory(message: ChatAdapter.ChatMessage, chatId: String = message.realContactId) {
         AlertDialog.Builder(requireContext())
             .setMessage(R.string.confirm_clear_chat_history)
             .setPositiveButton(R.string.action_clear_chat_history) { _, _ ->
                 offMain({
-                    try { P2PLib.clearChatHistory(message.realContactId) }
+                    try { P2PLib.clearChatHistory(chatId) }
                     catch (e: Exception) { "Error: ${e.message}" }
                 }) { result ->
                     if (result.startsWith("Error:")) {

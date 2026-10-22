@@ -773,6 +773,49 @@ pub fn encode_jxl_animated(frames: &mut [Vec<u8>], width: u32, height: u32, dela
     std::fs::write(out, encoded).map_err(|e| e.to_string())
 }
 
+/// A sticker: lossy JPEG XL (libjxl, quality 85), still or animated.
+/// `frames` and `delays_ms` as `encode_jxl_animated` (one frame = a still;
+/// the frames are changed in place when `has_alpha` is false).
+pub fn encode_jxl_sticker(frames: &mut [Vec<u8>], width: u32, height: u32, delays_ms: &[u32], has_alpha: bool, out: &Path) -> Result<(), String> {
+    use jpegxl_rs::encode::{Animation, EncoderFrame, ImageInfo};
+    let pixels = width as u64 * height as u64;
+    if width < 2 || height < 2 || frames.is_empty() || frames.len() > MAX_ANIMATION_FRAMES
+        || (frames.len() > 1 && frames.len() != delays_ms.len())
+        || pixels * frames.len() as u64 > MAX_IMAGE_PIXELS
+        || frames.iter().any(|f| f.len() as u64 != pixels * 4)
+    {
+        return Err("Bad image size".to_string());
+    }
+    let animated = frames.len() > 1;
+    let mut encoder = jpegxl_rs::encoder_builder().jpeg_quality(85.0).has_alpha(has_alpha).build().map_err(|e| format!("JPEG XL: {e}"))?;
+    let info = ImageInfo::builder().width(width).height(height).has_alpha(has_alpha)
+        .maybe_animation(animated.then(|| Animation::builder().tps_numerator(1000).build()))
+        .build();
+    let mut session = encoder.session(&info).map_err(|e| format!("JPEG XL: {e}"))?;
+    let channels = if has_alpha { 4 } else { 3 };
+    let (frames_len, mut encoded) = (frames.len(), Vec::new());
+    for (i, rgba) in frames.iter_mut().enumerate() {
+        if !has_alpha {
+            for p in 0..pixels as usize {
+                rgba.copy_within(p * 4..p * 4 + 3, p * 3);
+            }
+        }
+        let mut frame = EncoderFrame::new(&rgba[..pixels as usize * channels]).num_channels(channels as u32);
+        if animated {
+            // Duration 0 would make the frame a hidden layer of the next one.
+            frame = frame.duration(delays_ms[i].max(1));
+        }
+        session.add_frame(&frame).map_err(|e| format!("JPEG XL: {e}"))?;
+        // Encode each frame as it comes: libjxl would otherwise hold every
+        // frame (as floats) until `finish`.
+        if i + 1 < frames_len {
+            encoded.extend(session.take_output().map_err(|e| format!("JPEG XL: {e}"))?);
+        }
+    }
+    encoded.extend(session.finish().map_err(|e| format!("JPEG XL: {e}"))?);
+    std::fs::write(out, encoded).map_err(|e| e.to_string())
+}
+
 /// Longest side of a sticker, in pixels.
 pub const STICKER_MAX_SIDE: u32 = 600;
 /// Largest sticker file. Lossless 600 px stills are well under; long
@@ -1097,6 +1140,45 @@ mod tests {
         assert!(encode_jxl_animated(&mut [vec![0; 16]], 2, 2, &[], true, &jxl).is_err(), "delay count");
         let _ = std::fs::remove_file(&jxl);
         let _ = std::fs::remove_file(&gif);
+    }
+
+    #[test]
+    fn lossy_sticker_keeps_frames_and_is_smaller() {
+        use jxl_oxide::JxlImage;
+        let base = std::env::temp_dir().join(format!("typeon-lossy-{}", std::process::id()));
+        let (lossy, lossless) = (base.with_extension("jxl"), base.with_extension("ll.jxl"));
+        let (w, h) = (512u32, 512u32);
+        // Noisy gradient: lossless cannot shrink the noise, lossy can.
+        let mut seed = 1u32;
+        let frames: Vec<Vec<u8>> = (0..3u32).map(|f| (0..w * h * 4).map(|i| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            if i % 4 == 3 { 255 } else { ((i / 4 % w + f * 20) / 3 + (seed >> 28)) as u8 }
+        }).collect()).collect();
+        for has_alpha in [true, false] {
+            encode_jxl_sticker(&mut frames[..1].to_vec(), w, h, &[], has_alpha, &lossy).unwrap();
+            encode_jxl_lossless(&mut frames[0].clone(), w, h, has_alpha, &lossless).unwrap();
+            let (a, b) = (std::fs::metadata(&lossy).unwrap().len(), std::fs::metadata(&lossless).unwrap().len());
+            println!("still alpha={has_alpha}: lossy {a} B, lossless {b} B");
+            assert!(a * 2 < b, "lossy {a} vs lossless {b}");
+            assert_eq!(sticker_check(&lossy), Ok(false));
+            let image = JxlImage::builder().open(&lossy).unwrap();
+            assert_eq!((image.width(), image.height()), (w, h));
+            image.render_frame(0).unwrap();
+        }
+        encode_jxl_sticker(&mut frames.clone(), w, h, &[40, 300, 1000], true, &lossy).unwrap();
+        encode_jxl_animated(&mut frames.clone(), w, h, &[40, 300, 1000], true, &lossless).unwrap();
+        let (a, b) = (std::fs::metadata(&lossy).unwrap().len(), std::fs::metadata(&lossless).unwrap().len());
+        println!("animated: lossy {a} B, lossless {b} B");
+        assert!(a * 2 < b, "lossy {a} vs lossless {b}");
+        assert_eq!(sticker_check(&lossy), Ok(true));
+        let image = JxlImage::builder().open(&lossy).unwrap();
+        assert_eq!(image.num_loaded_keyframes(), 3);
+        for (k, want_ms) in [40u32, 300, 1000].into_iter().enumerate() {
+            assert_eq!(image.render_frame(k).unwrap().duration(), want_ms);
+        }
+        assert!(encode_jxl_sticker(&mut frames.clone(), w, h, &[40], true, &lossy).is_err(), "delay count");
+        let _ = std::fs::remove_file(&lossy);
+        let _ = std::fs::remove_file(&lossless);
     }
 
     #[test]

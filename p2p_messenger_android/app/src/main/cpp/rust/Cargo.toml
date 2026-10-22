@@ -70,6 +70,9 @@ zune-jpegxl = "0.5"
 zune-core = "0.5"
 jxl-oxide = { version = "0.12", default-features = false }
 png = "0.18"
+# Stickers: lossy JPEG XL (libjxl, built from source by the "vendored" feature;
+# needs cmake + a C++ toolchain, cargo-ndk provides it for Android).
+jpegxl-rs = { version = "0.16", default-features = false, features = ["vendored"] }
 # Spec dışı, güvenlik denetimi düzeltmesi: kurtarma dosyası (tüm uzun-vadeli
 # secret key'leri taşır) parola-tabanlı anahtar türetmesi için ARTIK
 # Argon2id kullanıyor — önceden HKDF-SHA256 (tek bir HMAC, çevrimdışı

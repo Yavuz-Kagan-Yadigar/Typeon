@@ -27,11 +27,15 @@ import com.p2p.messenger.util.AppLock
 import com.p2p.messenger.util.StickerImport
 import com.p2p.messenger.util.coreErrorText
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Stickers in a chat screen (1:1 and group): the picker sheet (my stickers,
@@ -176,15 +180,27 @@ class StickerPicker(
         val progress = AlertDialog.Builder(activity).setView(box).setCancelable(false).show()
         scope.launch(Dispatchers.IO) {
             val uris = try { list() } catch (e: Exception) { emptyList() }
-            var ok = 0
-            uris.forEachIndexed { i, uri ->
-                withContext(Dispatchers.Main) {
-                    bar.max = uris.size
-                    bar.progress = i
-                    label.text = activity.getString(R.string.msg_sticker_importing, i + 1, uris.size)
-                }
-                if (importUri(uri)) ok++
+            val imported = AtomicInteger()
+            val done = AtomicInteger()
+            // A few at a time: each encode is single-threaded, and an animation's
+            // frames are large, so the worker count also caps the memory.
+            val workers = Semaphore((Runtime.getRuntime().availableProcessors() / 2).coerceIn(1, 4))
+            withContext(Dispatchers.Main) {
+                bar.max = uris.size
+                label.text = activity.getString(R.string.msg_sticker_importing, 0, uris.size)
             }
+            coroutineScope {
+                for (uri in uris) launch {
+                    workers.withPermit { if (importUri(uri)) imported.incrementAndGet() }
+                    done.incrementAndGet()
+                    withContext(Dispatchers.Main) {
+                        val n = done.get()
+                        bar.progress = n
+                        label.text = activity.getString(R.string.msg_sticker_importing, n, uris.size)
+                    }
+                }
+            }
+            val ok = imported.get()
             withContext(Dispatchers.Main) {
                 progress.dismiss()
                 toast(
@@ -205,6 +221,10 @@ class StickerPicker(
             } ?: return false
             !StickerImport.importFile(tmp).startsWith("Error:")
         } catch (e: Exception) {
+            false
+        } catch (e: OutOfMemoryError) {
+            // ponytail: workers are counted, not their bytes; several huge
+            // animations at once can run out. One fails; weigh by size if it matters.
             false
         } finally {
             tmp.delete()

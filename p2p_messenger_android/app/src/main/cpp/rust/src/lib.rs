@@ -437,11 +437,7 @@ pub(crate) fn import_sticker_frames_unlocked(mut frames: Vec<Vec<u8>>, width: u3
     }
     let has_alpha = frames.iter().any(|f| f.chunks_exact(4).any(|p| p[3] != 255));
     let tmp = core_lock_read().attachments_dir()?.join("plain_cache").join(format!(".sticker-{}.jxl", uuid::Uuid::new_v4()));
-    let encoded = if frames.len() == 1 {
-        attachments::encode_jxl_lossless(&mut frames[0], width, height, has_alpha, &tmp)
-    } else {
-        attachments::encode_jxl_animated(&mut frames, width, height, delays_ms, has_alpha, &tmp)
-    };
+    let encoded = attachments::encode_jxl_sticker(&mut frames, width, height, delays_ms, has_alpha, &tmp);
     let result = encoded.and_then(|()| core_lock().store_sticker(&tmp, true));
     let _ = std::fs::remove_file(&tmp);
     result
@@ -8757,6 +8753,9 @@ impl P2PCore {
     /// dahil) siler — eşleşme/ratchet oturumu KORUNUR, kişi listede kalır,
     /// sohbet boş başlar. bkz. `delete_contact` (sert seçenek).
     fn clear_chat_history(&mut self, contact_id: &str) -> Result<(), String> {
+        if self.groups.contains_key(contact_id) {
+            return self.clear_group_history(contact_id);
+        }
         let contact = self.contacts.get(contact_id).ok_or("Kişi bulunamadı")?.clone();
         // M104: same device set as `delete_contact` (inactive records too).
         let fingerprints = self.contact_fingerprints_all(&contact);
@@ -8779,6 +8778,31 @@ impl P2PCore {
             tx.commit().map_err(|e| e.to_string())?;
         }
         self.wb_delete_board(None, Some(&contact.trusted_identity_id));
+        Ok(())
+    }
+
+    /// `clear_chat_history` for a group: this device's copy only, the group
+    /// and its members stay.
+    fn clear_group_history(&mut self, group_id: &str) -> Result<(), String> {
+        let file_ids: Vec<String> = self.db.as_ref().and_then(|conn| {
+            let mut stmt = conn.prepare("SELECT file_id FROM files WHERE group_id = ?1").ok()?;
+            let rows = stmt.query_map(params![group_id], |r| r.get(0)).ok()?.flatten().collect();
+            Some(rows)
+        }).unwrap_or_default();
+        for file_id in &file_ids {
+            self.delete_attachment_file(file_id);
+        }
+        if let Some(conn) = &self.db {
+            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            for sql in [
+                "DELETE FROM message_reactions WHERE message_id IN (SELECT message_id FROM messages WHERE group_id = ?1)",
+                "DELETE FROM message_seen WHERE message_id IN (SELECT message_id FROM messages WHERE group_id = ?1)",
+                "DELETE FROM messages WHERE group_id = ?1",
+            ] {
+                tx.execute(sql, params![group_id]).map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
@@ -11541,7 +11565,7 @@ impl P2PCore {
                                 }
                                 Some(serde_json::json!({
                                     "direction": our_direction, "text": m.text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms,
-                                    "sender_identity_id": actual_sender, "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited
+                                    "sender_identity_id": actual_sender, "reactions": m.message_id.as_deref().map(|id| self.reactions_summary(id)).unwrap_or_default(), "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited
                                 }))
                             }).collect();
                             serde_json::json!({"type": "older_group_history", "group_id": gid, "messages": merged})
@@ -11570,7 +11594,7 @@ impl P2PCore {
                                     // arşivlemede de yansıt.
                                     self.apply_synced_message_flags(None, &chat_key, &m);
                                 }
-                                Some(serde_json::json!({"direction": our_direction, "text": m.text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms, "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited}))
+                                Some(serde_json::json!({"direction": our_direction, "text": m.text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms, "reactions": m.message_id.as_deref().map(|id| self.reactions_summary(id)).unwrap_or_default(), "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited}))
                             }).collect();
                             serde_json::json!({"type": "older_history", "peer": chat_key, "messages": merged})
                         }
@@ -11632,7 +11656,7 @@ impl P2PCore {
                             // de öyle işaretlenmeli.
                             self.apply_synced_message_flags(None, &chat_key, &m);
                         }
-                        Some(serde_json::json!({"direction": our_direction, "text": m.text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms, "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited}))
+                        Some(serde_json::json!({"direction": our_direction, "text": m.text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms, "reactions": m.message_id.as_deref().map(|id| self.reactions_summary(id)).unwrap_or_default(), "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited}))
                     }).collect();
                     serde_json::json!({"type": "history_sync", "peer": chat_key, "messages": flipped})
                 };
