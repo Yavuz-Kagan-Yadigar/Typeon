@@ -146,6 +146,10 @@
              mesajlar" listesi — bkz. PendingMessagesActivity, lib.rs
              list_pending_messages/cancel_pending_message. -->
         <activity android:name=".ui.PendingMessagesActivity" />
+        <!-- Spec dışı, kullanıcı isteği: depolama yönetimi ekranı (Ayarlar →
+             "Storage") — bkz. StorageActivity, lib.rs storage_usage/
+             remove_local_attachment. -->
+        <activity android:name=".ui.StorageActivity" />
         <!-- Spec dışı: foto/video ekleri için basit, tam boyut/kalitede
              uygulama içi görüntüleyici — bkz. ChatActivity.onAttachmentClicked
              notu (önceden HER zaman sistem varsayılan uygulamasına

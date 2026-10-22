@@ -385,6 +385,20 @@ object P2PLib {
      *  göndericiden isteneceği) ve `sender_identity_id` (kimin gönderdiği,
      *  isim/avatar göstermek için) alanları vardır. */
     external fun listGroupAttachments(groupId: String): String
+
+    // --- Depolama yönetimi (Ayarlar → "Storage") ---
+    /** Bu cihazın diskteki kullanımı. JSON:
+     *  `{"db_bytes":Int,"attachments_bytes":Int,"cache_bytes":Int,
+     *    "chats":[{"kind":"contact"|"group","id":String,"name":String,
+     *              "bytes":Int,"count":Int}]}` — `chats` bayta göre
+     *  büyükten küçüğe sıralıdır. */
+    external fun storageUsage(): String
+    /** Verilen `file_id` listesinin (JSON dizi) YALNIZCA bu cihazdaki
+     *  kopyasını siler: `.enc` dosyası, çözülmüş önbellek kopyası ve süren
+     *  indirme. `files` satırı kalır ama durumu 'offered' olur (sohbette
+     *  "İndir" düğmesi geri gelir). Karşı tarafa HİÇBİR ŞEY bildirilmez.
+     *  Dönüş: "OK" veya "Error: ...". */
+    external fun removeLocalAttachments(fileIdsJson: String): String
     /** Tamamlanmış bir ekin çözülmüş (plaintext) kopyasının mutlak yolu,
      *  ya da hata varsa "Error: ...". BÜYÜK dosyalar için ANA THREAD'DE
      *  ÇAĞIRMAYIN. */

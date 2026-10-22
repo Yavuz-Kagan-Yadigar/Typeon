@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spec dışı, kullanıcı isteği: depolama yönetimi ekranı (Ayarlar →
+     "Storage") — toplam kullanım özeti, sohbet başına ek boyutu ve tek
+     tek ek silme (bkz. ui/StorageActivity). İki "sayfa" aynı Activity'de
+     durur: sohbet listesi ve seçili sohbetin ek listesi. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <!-- ===================== Sohbet listesi ===================== -->
+    <LinearLayout
+        android:id="@+id/layoutStorageChats"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:id="@+id/txtStorageTotal"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/txtStorageDatabase"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/txtStorageAttachments"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/txtStorageCache"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/btnClearCache"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="@string/action_clear_decrypted_cache" />
+        </LinearLayout>
+
+        <View style="@style/Settings.Divider" />
+
+        <TextView
+            android:id="@+id/txtStorageChatsHeader"
+            style="@style/Settings.Subheader"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:text="@string/storage_chats_header" />
+
+        <TextView
+            android:id="@+id/txtStorageNoChats"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:alpha="0.7"
+            android:padding="16dp"
+            android:text="@string/storage_no_chats"
+            android:visibility="gone" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/recyclerStorageChats"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+    </LinearLayout>
+
+    <!-- ===================== Sohbetin ekleri ===================== -->
+    <LinearLayout
+        android:id="@+id/layoutStorageAttachments"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="12dp">
+
+            <TextView
+                android:id="@+id/txtStorageAttachmentsTitle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:textSize="17sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/btnSelectAll"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/action_select_all" />
+
+            <Button
+                android:id="@+id/btnDeleteSelected"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/action_delete_selected" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/txtStorageNoAttachments"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:alpha="0.7"
+            android:padding="16dp"
+            android:text="@string/storage_no_attachments"
+            android:visibility="gone" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/recyclerStorageAttachments"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+    </LinearLayout>
+
+</FrameLayout>

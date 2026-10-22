@@ -32,6 +32,7 @@ import com.p2p.messenger.ui.QrScanActivity
 import com.p2p.messenger.util.ArchiveKeyManager
 import com.p2p.messenger.service.P2PService
 import com.p2p.messenger.ui.PendingMessagesActivity
+import com.p2p.messenger.ui.StorageActivity
 import com.p2p.messenger.util.AppLock
 import com.p2p.messenger.util.AppRestarter
 import com.p2p.messenger.util.AvatarUtil
@@ -394,6 +395,12 @@ class SettingsFragment : Fragment() {
         // mesajlar listesi — bkz. ui.PendingMessagesActivity.
         view.findViewById<Button>(R.id.btn_pending_messages).setOnClickListener {
             startActivity(Intent(requireContext(), PendingMessagesActivity::class.java))
+        }
+
+        // Spec dışı, kullanıcı isteği: depolama yönetimi (toplam kullanım,
+        // sohbet başına ek boyutu, tek tek ek silme) — bkz. ui.StorageActivity.
+        view.findViewById<Button>(R.id.btn_storage).setOnClickListener {
+            startActivity(Intent(requireContext(), StorageActivity::class.java))
         }
 
         // Çoklu-cihaz (spec 1.5): bağlı cihazları yönet / yeni cihaz ekle.

@@ -192,6 +192,30 @@
     <string name="msg_pending_message_retrying">Yeniden deneniyor…</string>
     <string name="lbl_pending_last_attempt">Son deneme: %s</string>
     <string name="msg_pending_message_cancelled">İptal edildi — artık yeniden denenmiyor</string>
+    <!-- Spec dışı, kullanıcı isteği: depolama yönetimi ekranı (Ayarlar →
+         "Storage") — toplam kullanım, sohbet başına ek boyutu ve tek tek
+         ek silme. -->
+    <string name="title_storage">Depolama</string>
+    <string name="action_view_storage">Depolama</string>
+    <string name="storage_total">Toplam</string>
+    <string name="storage_database">Veritabanı</string>
+    <string name="storage_attachments">Ekler</string>
+    <string name="storage_decrypted_cache">Çözülmüş önbellek</string>
+    <string name="action_clear_decrypted_cache">Çözülmüş önbelleği temizle</string>
+    <string name="msg_decrypted_cache_cleared">Çözülmüş önbellek temizlendi</string>
+    <string name="storage_chats_header">Sohbetler</string>
+    <string name="storage_no_chats">Henüz ek yok</string>
+    <string name="storage_files_count">%1$d dosya · %2$s</string>
+    <string name="storage_no_attachments">Bu sohbette ek yok</string>
+    <string name="action_select_all">Tümünü seç</string>
+    <string name="action_delete_selected">Seçilenleri sil</string>
+    <string name="storage_delete_confirm_title">Seçilen ekler silinsin mi?</string>
+    <string name="storage_delete_confirm_message">Yalnızca bu cihazdaki kopya silinir. Gönderene bildirilmez — ekler yeniden indirilebilir.</string>
+    <string name="msg_attachments_removed">%1$d ek bu cihazdan silindi</string>
+    <string name="storage_attachment_type">%1$s · %2$s</string>
+    <string name="msg_storage_load_failed">Depolama bilgisi okunamadı</string>
+    <string name="msg_storage_nothing_selected">En az bir ek seçin</string>
+    <string name="content_desc_attachment_preview">Ek önizlemesi</string>
     <string name="msg_deleted">Bu mesaj silindi</string>
     <string name="msg_connecting">Bağlanılıyor…</string>
     <string name="msg_securing_no_send">Bu kişiyle güvenli bağlantı kuruluyor — hazır olunca mesaj gönderebilirsiniz.</string>

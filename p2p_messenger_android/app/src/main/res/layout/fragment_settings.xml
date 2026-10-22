@@ -512,6 +512,22 @@
                         style="@style/Settings.Button"
                         android:text="@string/action_open" />
                 </LinearLayout>
+
+                <View style="@style/Settings.Divider" />
+
+                <!-- Spec dışı, kullanıcı isteği: depolama yönetimi (toplam
+                     kullanım, sohbet başına ek boyutu, tek tek ek silme). -->
+                <LinearLayout style="@style/Settings.Row">
+                    <TextView
+                        style="@style/Settings.Title"
+                        android:layout_width="0dp"
+                        android:layout_weight="1"
+                        android:text="@string/action_view_storage" />
+                    <Button
+                        android:id="@+id/btn_storage"
+                        style="@style/Settings.Button"
+                        android:text="@string/action_open" />
+                </LinearLayout>
             </LinearLayout>
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>

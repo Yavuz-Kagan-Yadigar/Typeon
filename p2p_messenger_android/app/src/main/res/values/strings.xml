@@ -211,6 +211,30 @@
     <string name="msg_pending_message_retrying">Retrying…</string>
     <string name="lbl_pending_last_attempt">Last tried: %s</string>
     <string name="msg_pending_message_cancelled">Cancelled — no longer retrying</string>
+    <!-- Spec dışı, kullanıcı isteği: depolama yönetimi ekranı (Ayarlar →
+         "Storage") — toplam kullanım, sohbet başına ek boyutu ve tek tek
+         ek silme. -->
+    <string name="title_storage">Storage</string>
+    <string name="action_view_storage">Storage</string>
+    <string name="storage_total">Total</string>
+    <string name="storage_database">Database</string>
+    <string name="storage_attachments">Attachments</string>
+    <string name="storage_decrypted_cache">Decrypted cache</string>
+    <string name="action_clear_decrypted_cache">Clear decrypted cache</string>
+    <string name="msg_decrypted_cache_cleared">Decrypted cache cleared</string>
+    <string name="storage_chats_header">Chats</string>
+    <string name="storage_no_chats">No attachments yet</string>
+    <string name="storage_files_count">%1$d files · %2$s</string>
+    <string name="storage_no_attachments">No attachments in this chat</string>
+    <string name="action_select_all">Select all</string>
+    <string name="action_delete_selected">Delete selected</string>
+    <string name="storage_delete_confirm_title">Delete the selected attachments?</string>
+    <string name="storage_delete_confirm_message">Only this device\'s copy is deleted. The sender is not notified — the attachments can be downloaded again.</string>
+    <string name="msg_attachments_removed">%1$d attachment(s) removed from this device</string>
+    <string name="storage_attachment_type">%1$s · %2$s</string>
+    <string name="msg_storage_load_failed">Storage info could not be read</string>
+    <string name="msg_storage_nothing_selected">Select at least one attachment</string>
+    <string name="content_desc_attachment_preview">Attachment preview</string>
     <string name="msg_deleted">This message was deleted</string>
     <string name="msg_connecting">Connecting…</string>
     <string name="msg_securing_no_send">Securing the connection with this contact — you\'ll be able to send messages once it\'s ready.</string>
