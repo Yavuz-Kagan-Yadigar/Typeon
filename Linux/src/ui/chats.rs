@@ -325,7 +325,7 @@ fn newest_direct(fingerprint: &str) -> Option<(String, u64)> {
     {
         let later = newest.as_ref().map(|(_, at)| attachment.created_at > *at).unwrap_or(true);
         if later {
-            let label = util::attachment_label(&attachment.mime_type, &attachment.file_name);
+            let label = util::attachment_label(&attachment.mime_type, &attachment.file_name, attachment.sticker);
             let label = if attachment.direction == "sent" {
                 format!("You: {}", label)
             } else {
@@ -357,7 +357,7 @@ fn newest_group(group_id: &str) -> Option<(String, u64)> {
         let later = newest.as_ref().map(|(_, at)| attachment.created_at > *at).unwrap_or(true);
         if later {
             newest = Some((
-                util::attachment_label(&attachment.mime_type, &attachment.file_name),
+                util::attachment_label(&attachment.mime_type, &attachment.file_name, attachment.sticker),
                 attachment.created_at,
             ));
         }

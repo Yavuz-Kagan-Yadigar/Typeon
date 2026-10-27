@@ -396,6 +396,8 @@ object P2PLib {
     /** Bir çıkartmanın görüntülenebilir kopyası: `.png` (duruk) ya da `.gif`
      *  (animasyonlu) dosyasının MUTLAK yolu, ya da "Error: ...". */
     external fun stickerPlainPath(id: String): String
+    /** Depoda bu kaynak kimlikli (`wa:`/`jxl:`) çıkartma var mı. */
+    external fun hasStickerOrigin(origin: String): Boolean
     /** Çıkartmayı kendi deposundan siler. "OK" ya da "Error: ...". */
     external fun deleteSticker(id: String): String
     external fun setStickerFavorite(id: String, favorite: Boolean): String

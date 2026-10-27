@@ -289,8 +289,10 @@ pub fn is_audio(mime: &str) -> bool {
 
 /// Short label for an attachment in a chat-list preview or a notification —
 /// mirrors `P2PService.attachmentNotificationLabel`.
-pub fn attachment_label(mime: &str, file_name: &str) -> String {
-    if is_image(mime) {
+pub fn attachment_label(mime: &str, file_name: &str, sticker: bool) -> String {
+    if sticker {
+        "🙂 Sticker".to_string()
+    } else if is_image(mime) {
         "📷 Photo".to_string()
     } else if is_video(mime) {
         "🎬 Video".to_string()

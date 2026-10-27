@@ -384,6 +384,7 @@ impl App {
                 let label = util::attachment_label(
                     &event.string("mime_type"),
                     &event.string("file_name"),
+                    event.flag("sticker"),
                 );
                 match event.optional("group_id") {
                     Some(group_id) => {

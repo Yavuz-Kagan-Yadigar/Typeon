@@ -11539,12 +11539,9 @@ impl P2PCore {
                             && self.reaction_fits_chat(mid, group_id.as_deref(), &sender_identity_id)
                         {
                             self.apply_reaction(mid, reactor, emoji, *at);
-                        } else {
-                            debug!("Geçmiş tepkisi alınmadı (mesaj={}, tepkiyen={})", mid, crate::log_id(reactor));
                         }
                     }
                 }
-                info!("Geçmiş yanıtı: {} satır, {} tepki (group={})", messages.len(), messages.iter().map(|m| m.reactions.len()).sum::<usize>(), group_id.is_some());
                 if group_id.is_none() {
                     // Nothing from before the user deleted this contact (or
                     // its chat with a group member): the peer still has those
@@ -16888,6 +16885,11 @@ impl P2PCore {
         attachments::decrypt_file_from_disk_with(&enc_path, &tmp, &file_key, id, attachments::FILE_CHUNK_SIZE_V2)
             .inspect_err(|_| { let _ = std::fs::remove_file(&tmp); })?;
         Ok(tmp)
+    }
+
+    fn has_sticker_origin(&self, origin: &str) -> bool {
+        valid_sticker_origin(origin)
+            && self.db.as_ref().is_some_and(|c| c.query_row("SELECT 1 FROM stickers WHERE origin_id = ?1", params![origin], |_| Ok(())).is_ok())
     }
 
     /// Stores a plain sticker JPEG XL at `src` in my sticker store (encrypted
@@ -24350,6 +24352,13 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_stickerPlainPath<'local>(mu
     let id: String = jstr(&mut env, &id).unwrap_or_default();
     let result = catch_panic(move || sticker_plain_path_unlocked(&id));
     sticker_reply(&mut env, result)
+}
+
+/// True when my store already has a sticker with this origin id.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_hasStickerOrigin<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, origin: JString<'local>) -> jboolean {
+    let origin: String = jstr(&mut env, &origin).unwrap_or_default();
+    catch_panic(move || core_lock_read().has_sticker_origin(&origin)).unwrap_or(false) as jboolean
 }
 
 /// Removes a sticker from my store (and from my other devices). "OK".

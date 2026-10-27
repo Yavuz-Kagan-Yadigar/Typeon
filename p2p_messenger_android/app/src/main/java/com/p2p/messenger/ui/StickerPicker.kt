@@ -17,6 +17,8 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -52,6 +54,7 @@ class StickerPicker(
 ) {
     private val scope = activity.lifecycleScope
     private var dialog: BottomSheetDialog? = null
+    private var progressDialog: AlertDialog? = null
     private val ids = mutableListOf<String>()
     private val favorites = mutableSetOf<String>()
     /** Long-press starts a selection; while it is not empty a tap selects too. */
@@ -68,6 +71,15 @@ class StickerPicker(
     private val pickTree = activity.registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri -> uri?.let { tree -> importAll(whatsapp = true) { webpFilesIn(tree) } } }
+
+    init {
+        activity.lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onDestroy(owner: LifecycleOwner) {
+                dialog?.dismiss()
+                progressDialog?.dismiss()
+            }
+        })
+    }
 
     fun show() {
         if (dialog?.isShowing == true) return
@@ -216,7 +228,7 @@ class StickerPicker(
         val doomed = selected.toList()
         AlertDialog.Builder(activity)
             .setMessage(R.string.msg_confirm_delete_sticker)
-            .setPositiveButton(R.string.action_delete_sticker) { _, _ ->
+            .setPositiveButton(R.string.action_delete_selected) { _, _ ->
                 scope.launch(Dispatchers.IO) {
                     val failed = doomed.map { call { P2PLib.deleteSticker(it) } }.firstOrNull { it.startsWith("Error:") }
                     withContext(Dispatchers.Main) {
@@ -242,6 +254,7 @@ class StickerPicker(
             addView(bar)
         }
         val progress = AlertDialog.Builder(activity).setView(box).setCancelable(false).show()
+        progressDialog = progress
         scope.launch(Dispatchers.IO) {
             val uris = try { list() } catch (e: Exception) { emptyList() }
             val imported = AtomicInteger()
@@ -267,6 +280,7 @@ class StickerPicker(
             val ok = imported.get()
             withContext(Dispatchers.Main) {
                 progress.dismiss()
+                progressDialog = null
                 toast(
                     if (ok > 0) activity.getString(R.string.msg_sticker_imported, ok)
                     else activity.getString(R.string.msg_sticker_import_failed)
@@ -286,6 +300,8 @@ class StickerPicker(
             // WhatsApp ships identical bytes to everyone: their hash names the sticker across devices.
             val origin = if (whatsapp) "wa:" + java.security.MessageDigest.getInstance("SHA-256")
                 .digest(tmp.readBytes()).joinToString("") { "%02x".format(it) } else null
+            // Already in the store: skip the decode + encode.
+            if (origin != null && P2PLib.hasStickerOrigin(origin)) return true
             !StickerImport.importFile(tmp, origin).startsWith("Error:")
         } catch (e: Exception) {
             false

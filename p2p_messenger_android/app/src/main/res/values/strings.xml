@@ -553,7 +553,6 @@
     <string name="action_sticker_add">Add</string>
     <string name="action_sticker_import_whatsapp">Import from WhatsApp</string>
     <string name="action_add_to_my_stickers">Add to my stickers</string>
-    <string name="action_delete_sticker">Delete sticker</string>
     <string name="msg_confirm_delete_sticker">Delete the selected stickers?</string>
     <string name="msg_sticker_saved">Added to your stickers</string>
     <string name="msg_sticker_import_failed">The sticker could not be added</string>

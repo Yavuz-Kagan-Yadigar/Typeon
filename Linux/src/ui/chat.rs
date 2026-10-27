@@ -1501,7 +1501,7 @@ impl ChatView {
         }
 
         let display_name = if attachment.file_name.is_empty() {
-            util::attachment_label(&attachment.mime, "")
+            util::attachment_label(&attachment.mime, "", false)
         } else {
             attachment.file_name.clone()
         };
@@ -1672,7 +1672,7 @@ impl ChatView {
         let file_id = state.file_id.clone();
         let mime = state.mime.clone();
         let name = if state.file_name.is_empty() {
-            util::attachment_label(&state.mime, "")
+            util::attachment_label(&state.mime, "", false)
         } else {
             state.file_name.clone()
         };
