@@ -552,6 +552,9 @@ class ChatActivity : AppCompatActivity() {
         peerStatusDot = PulsingStatusDot(dotPeerStatus)
         ownStatusDot = PulsingStatusDot(dotOwnStatus)
         imgToolbarAvatar.setOnClickListener { AvatarUtil.openFullscreen(this, toolbarAvatarBytes) }
+        // Üst çubuğa dokununca kişi bilgisi + "Dosyalar ve medya" (grup
+        // sohbetindeki menünün 1:1 karşılığı, bkz. showGroupInfoDialog).
+        toolbarTitleView.setOnClickListener { showContactInfoDialog() }
         supportActionBar?.apply {
             setDisplayShowCustomEnabled(true)
             setDisplayShowTitleEnabled(false)
@@ -1069,6 +1072,27 @@ class ChatActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         if (!bindToIntent(intent)) finish() else consumeShare(intent)
+    }
+
+    /** Kişi bilgisi + bu sohbetin yerel ekleri (`StorageActivity`). */
+    private fun showContactInfoDialog() {
+        val view = layoutInflater.inflate(R.layout.dialog_contact_info, null)
+        val name = txtToolbarTitle.text.toString()
+        view.findViewById<TextView>(R.id.txtContactName).text = name
+        AvatarUtil.renderInto(view.findViewById(R.id.imgContactAvatarLarge), peerAvatar(), name)
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(name)
+            .setView(view)
+            .setNegativeButton(android.R.string.ok, null)
+            .create()
+        view.findViewById<View>(R.id.btnContactFilesMedia).setOnClickListener {
+            dialog.dismiss()
+            startActivity(Intent(this, StorageActivity::class.java)
+                .putExtra(StorageActivity.EXTRA_CHAT_KIND, "contact")
+                .putExtra(StorageActivity.EXTRA_CHAT_ID, peerDeviceFingerprint)
+                .putExtra(StorageActivity.EXTRA_CHAT_NAME, name))
+        }
+        dialog.show()
     }
 
     private fun sendNewMessage(text: String) {

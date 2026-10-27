@@ -787,7 +787,9 @@ pub fn encode_jxl_sticker(frames: &mut [Vec<u8>], width: u32, height: u32, delay
         return Err("Bad image size".to_string());
     }
     let animated = frames.len() > 1;
-    let mut encoder = jpegxl_rs::encoder_builder().jpeg_quality(85.0).has_alpha(has_alpha).build().map_err(|e| format!("JPEG XL: {e}"))?;
+    // Effort 3: the default 7 took ~0.7 s per sticker on a phone; 3 is several
+    // times faster for slightly larger files.
+    let mut encoder = jpegxl_rs::encoder_builder().jpeg_quality(85.0).speed(jpegxl_rs::encode::EncoderSpeed::Falcon).has_alpha(has_alpha).build().map_err(|e| format!("JPEG XL: {e}"))?;
     let info = ImageInfo::builder().width(width).height(height).has_alpha(has_alpha)
         .maybe_animation(animated.then(|| Animation::builder().tps_numerator(1000).build()))
         .build();

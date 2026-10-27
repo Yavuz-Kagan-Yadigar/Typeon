@@ -210,6 +210,7 @@
     <string name="storage_no_attachments">Bu sohbette ek yok</string>
     <string name="action_select_all">Tümünü seç</string>
     <string name="action_delete_selected">Seçilenleri sil</string>
+    <string name="action_files_media">Dosyalar ve medya</string>
     <string name="storage_delete_confirm_title">Seçilen ekler silinsin mi?</string>
     <string name="storage_delete_confirm_message">Yalnızca bu cihazdaki kopya silinir. Gönderene bildirilmez — ekler yeniden indirilebilir.</string>
     <string name="msg_attachments_removed">%1$d ek bu cihazdan silindi</string>

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 1:1 sohbet üst çubuğuna dokununca açılır: kişi avatarı/adı + "Dosyalar
+     ve medya" (bkz. ChatActivity.showContactInfoDialog). Grup menüsüyle
+     (dialog_group_info.xml) aynı görünüm. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <ImageView
+        android:id="@+id/imgContactAvatarLarge"
+        android:layout_width="96dp"
+        android:layout_height="96dp"
+        android:layout_gravity="center_horizontal"
+        android:contentDescription="@null" />
+
+    <TextView
+        android:id="@+id/txtContactName"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:gravity="center_horizontal"
+        android:textSize="17sp"
+        android:textStyle="bold" />
+
+    <Button
+        android:id="@+id/btnContactFilesMedia"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginTop="16dp"
+        android:text="@string/action_files_media" />
+
+</LinearLayout>

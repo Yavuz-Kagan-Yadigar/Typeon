@@ -1170,6 +1170,13 @@ class GroupChatActivity : AppCompatActivity() {
             dialog.dismiss()
             showAddMembersDialog()
         }
+        view.findViewById<Button>(R.id.btnGroupFilesMedia).setOnClickListener {
+            dialog.dismiss()
+            startActivity(Intent(this, StorageActivity::class.java)
+                .putExtra(StorageActivity.EXTRA_CHAT_KIND, "group")
+                .putExtra(StorageActivity.EXTRA_CHAT_ID, groupId)
+                .putExtra(StorageActivity.EXTRA_CHAT_NAME, txtToolbarTitle.text.toString()))
+        }
         if (isFounder) {
             // Founder-only: re-send the signed group state to every member device.
             val parent = btnAddMember.parent as ViewGroup

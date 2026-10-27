@@ -46,6 +46,17 @@
 
         </LinearLayout>
 
+        <!-- Sohbet ekranındaki 1:1 menüsüyle aynı: bu grubun yerel ekleri
+             (bkz. GroupChatActivity.showGroupInfoDialog). -->
+        <Button
+            android:id="@+id/btnGroupFilesMedia"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_files_media" />
+
         <!-- Spec dışı, kullanıcı isteği: kurucu için "Üyeleri Yönet" başlığı
              (sadece "Üye Ekle" değil) — diğer üyeler için mevcut üye sayısı. -->
         <TextView

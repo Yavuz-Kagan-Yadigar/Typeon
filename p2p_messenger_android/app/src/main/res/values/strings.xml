@@ -229,6 +229,7 @@
     <string name="storage_no_attachments">No attachments in this chat</string>
     <string name="action_select_all">Select all</string>
     <string name="action_delete_selected">Delete selected</string>
+    <string name="action_files_media">Files &amp; media</string>
     <string name="storage_delete_confirm_title">Delete the selected attachments?</string>
     <string name="storage_delete_confirm_message">Only this device\'s copy is deleted. The sender is not notified — the attachments can be downloaded again.</string>
     <string name="msg_attachments_removed">%1$d attachment(s) removed from this device</string>

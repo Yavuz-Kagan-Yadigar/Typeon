@@ -39,6 +39,13 @@ import java.util.Locale
  */
 class StorageActivity : AppCompatActivity() {
 
+    companion object {
+        /** Set these three to open one chat's attachments directly (from the chat screen). */
+        const val EXTRA_CHAT_KIND = "chat_kind"
+        const val EXTRA_CHAT_ID = "chat_id"
+        const val EXTRA_CHAT_NAME = "chat_name"
+    }
+
     private lateinit var layoutChats: View
     private lateinit var layoutAttachments: View
     private lateinit var txtTotal: TextView
@@ -94,7 +101,21 @@ class StorageActivity : AppCompatActivity() {
         }
         onBackPressedDispatcher.addCallback(this, backToChats)
 
-        loadUsage()
+        val directChatId = intent.getStringExtra(EXTRA_CHAT_ID)
+        if (directChatId != null) {
+            // Straight to the chat; the list stays hidden and back finishes.
+            layoutChats.visibility = View.GONE
+            openChat(
+                StorageChat(
+                    intent.getStringExtra(EXTRA_CHAT_KIND) ?: "contact",
+                    directChatId,
+                    intent.getStringExtra(EXTRA_CHAT_NAME) ?: directChatId.take(8),
+                    0, 0
+                )
+            )
+        } else {
+            loadUsage()
+        }
     }
 
     private fun loadUsage() {
@@ -159,9 +180,10 @@ class StorageActivity : AppCompatActivity() {
         selected.clear()
         refreshDeleteButton()
         txtAttachmentsTitle.text = chat.name
+        // Direct per-chat mode: the list was never shown, so back leaves the screen.
+        backToChats.isEnabled = layoutChats.visibility == View.VISIBLE
         layoutChats.visibility = View.GONE
         layoutAttachments.visibility = View.VISIBLE
-        backToChats.isEnabled = true
         loadAttachments(chat)
     }
 

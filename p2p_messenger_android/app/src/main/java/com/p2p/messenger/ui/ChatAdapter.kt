@@ -1,5 +1,7 @@
 package com.p2p.messenger.ui
 
+import android.app.Dialog
+import android.content.Context
 import android.graphics.BitmapFactory
 import android.view.LayoutInflater
 import android.view.View
@@ -133,6 +135,15 @@ class ChatAdapter(
             txtTimestamp.text = if (message.timestamp > 0) formatTimestamp(message.timestamp) else ""
             AvatarUtil.renderInto(imgAvatar, message.avatarJpeg, message.displayName)
 
+            // Avatar tap shows the photo full screen; with no photo (letter
+            // badge) it still opens the chat. Long-press stays on the row.
+            imgAvatar.setOnClickListener {
+                val bytes = message.avatarJpeg
+                if (bytes == null || bytes.isEmpty()) onItemClick(message)
+                else showAvatarFullscreen(itemView.context, bytes)
+            }
+            imgAvatar.setOnLongClickListener { itemView.performLongClick() }
+
             // Unread rows get a 20%-alpha accent color overlay on top of the
             // normal background; cleared once ReadStatePrefs marks it read.
             itemView.setBackgroundColor(
@@ -202,4 +213,20 @@ class ChatAdapter(
         labelsMinute = minute
         notifyItemRangeChanged(0, itemCount, TIME_PAYLOAD)
     }
+}
+
+/** Full-screen raw avatar JPEG in a plain Dialog — no temp file on disk
+ *  (unlike AvatarUtil.openFullscreen, which needs a URI for MediaViewer). */
+private fun showAvatarFullscreen(context: Context, bytes: ByteArray) {
+    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
+    val dialog = Dialog(context, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+    val image = ImageView(context).apply {
+        setImageBitmap(bitmap)
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        setOnClickListener { dialog.dismiss() }
+    }
+    dialog.setContentView(image, ViewGroup.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+    ))
+    dialog.show()
 }
