@@ -521,4 +521,9 @@
     <string name="msg_sticker_imported">%1$d çıkartma eklendi</string>
     <string name="storage_voice">Sesli mesajlar</string>
     <string name="storage_stickers">Çıkartmalar</string>
+    <string name="storage_prune_button">Eski mesajları sil</string>
+    <string name="storage_prune_sizes">Mesajlar (%1$d): %2$s → %3$s · Ekler: %4$s → %5$s</string>
+    <string name="storage_prune_confirm_title">Eski mesajlar silinsin mi?</string>
+    <string name="storage_prune_confirm_message">Bu sohbetteki %1$s tarihinden önceki tüm mesajlar ve ekler bu cihazdan silinir. Karşı taraf etkilenmez. Geri alınamaz.</string>
+    <string name="storage_prune_done">Silindi</string>
 </resources>

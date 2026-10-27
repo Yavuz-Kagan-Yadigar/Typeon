@@ -106,6 +106,13 @@
                 android:text="@string/action_delete_selected" />
         </LinearLayout>
 
+        <include
+            android:id="@+id/pruneAttachments"
+            layout="@layout/include_storage_prune"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingHorizontal="12dp" />
+
         <TextView
             android:id="@+id/txtStorageNoAttachments"
             android:layout_width="match_parent"

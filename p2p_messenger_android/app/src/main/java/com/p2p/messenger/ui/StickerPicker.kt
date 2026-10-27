@@ -270,7 +270,9 @@ class StickerPicker(
             }
             coroutineScope {
                 for (uri in uris) launch {
-                    workers.withPermit { if (importUri(uri, whatsapp)) imported.incrementAndGet() }
+                    // An OOM must fail this one picture, never the app.
+                    val ok = try { workers.withPermit { importUri(uri, whatsapp) } } catch (e: OutOfMemoryError) { false }
+                    if (ok) imported.incrementAndGet()
                     done.incrementAndGet()
                     withContext(Dispatchers.Main) {
                         val n = done.get()
@@ -292,19 +294,32 @@ class StickerPicker(
         }
     }
 
+    private val animatedImports = Semaphore(1)
+
     /** One picture as a sticker, through a cache file (the import reads a file). */
-    private fun importUri(uri: Uri, whatsapp: Boolean): Boolean {
+    private suspend fun importUri(uri: Uri, whatsapp: Boolean): Boolean {
         val tmp = File(File(activity.cacheDir, "sticker_import").apply { mkdirs() }, UUID.randomUUID().toString())
         return try {
             activity.contentResolver.openInputStream(uri)?.use { input ->
                 tmp.outputStream().use { output -> input.copyTo(output) }
             } ?: return false
             // WhatsApp ships identical bytes to everyone: their hash names the sticker across devices.
-            val origin = if (whatsapp) "wa:" + java.security.MessageDigest.getInstance("SHA-256")
-                .digest(tmp.readBytes()).joinToString("") { "%02x".format(it) } else null
+            val origin = if (whatsapp) "wa:" + java.security.MessageDigest.getInstance("SHA-256").let { md ->
+                tmp.inputStream().use { input ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) { val n = input.read(buf); if (n < 0) break; md.update(buf, 0, n) }
+                }
+                md.digest().joinToString("") { "%02x".format(it) }
+            } else null
             // Already in the store: skip the decode + encode.
             if (origin != null && P2PLib.hasStickerOrigin(origin)) return true
-            !StickerImport.importFile(tmp, origin).startsWith("Error:")
+            // Animations hold all frames (~100 MB + temps): one at a time.
+            val animated = tmp.inputStream().use { i -> ByteArray(4).also { i.read(it) } }.let {
+                val m = String(it, Charsets.ISO_8859_1); m == "GIF8" || m == "RIFF"
+            }
+            val result = if (animated) animatedImports.withPermit { StickerImport.importFile(tmp, origin) }
+                else StickerImport.importFile(tmp, origin)
+            !result.startsWith("Error:")
         } catch (e: Exception) {
             false
         } catch (e: OutOfMemoryError) {

@@ -897,6 +897,9 @@ fn gif_lzw(indices: &[u8], out: &mut Vec<u8>) {
     out.push(0);
 }
 
+/// See `jxl_to_gif`.
+pub const GIF_MAX_FRAMES: usize = 100;
+
 /// Median-cut palette of up to 255 colours from a sample of the opaque pixels.
 fn median_cut_palette(pixels: &[[u8; 3]], opaque: &[bool]) -> Vec<[u8; 3]> {
     let step = (pixels.len() / 16384).max(1);
@@ -904,23 +907,24 @@ fn median_cut_palette(pixels: &[[u8; 3]], opaque: &[bool]) -> Vec<[u8; 3]> {
     if sample.is_empty() {
         return vec![[0; 3]];
     }
-    let mut boxes = vec![(0, sample.len())];
     let spread = |s: &[[u8; 3]]| -> (u8, usize) {
         (0..3).map(|c| {
             let (lo, hi) = s.iter().fold((255u8, 0u8), |(l, h), p| (l.min(p[c]), h.max(p[c])));
             (hi - lo, c)
         }).max().unwrap()
     };
+    // (lo, hi, spread): a box's spread is computed once, when it is made.
+    let mut boxes = vec![(0, sample.len(), spread(&sample))];
     while boxes.len() < 255 {
-        let Some((bi, (_, c))) = boxes.iter().enumerate().filter(|(_, b)| b.1 - b.0 > 1)
-            .map(|(i, b)| (i, spread(&sample[b.0..b.1]))).max_by_key(|x| x.1.0).filter(|x| x.1.0 > 0) else { break };
-        let (lo, hi) = boxes[bi];
+        let Some(bi) = (0..boxes.len()).filter(|&i| boxes[i].1 - boxes[i].0 > 1 && boxes[i].2.0 > 0)
+            .max_by_key(|&i| boxes[i].2.0) else { break };
+        let (lo, hi, (_, c)) = boxes[bi];
         sample[lo..hi].sort_unstable_by_key(|p| p[c]);
         let mid = (lo + hi) / 2;
-        boxes[bi] = (lo, mid);
-        boxes.push((mid, hi));
+        boxes[bi] = (lo, mid, spread(&sample[lo..mid]));
+        boxes.push((mid, hi, spread(&sample[mid..hi])));
     }
-    boxes.iter().map(|&(lo, hi)| {
+    boxes.iter().map(|&(lo, hi, _)| {
         let n = (hi - lo) as u32;
         [0, 1, 2].map(|c| (sample[lo..hi].iter().map(|p| u32::from(p[c])).sum::<u32>() / n) as u8)
     }).collect()
@@ -931,6 +935,8 @@ fn median_cut_palette(pixels: &[[u8; 3]], opaque: &[bool]) -> Vec<[u8; 3]> {
 /// local palette (255 colours + index 255 transparent; alpha below half is
 /// transparent). ponytail: no dithering; palette from ~16k sampled pixels, pixels
 /// map through a 15-bit nearest-colour cache.
+/// At most `GIF_MAX_FRAMES` frames are written (evenly picked, each kept frame
+/// lasting the frames it stands for): the per-frame palette work is the cost.
 pub fn jxl_to_gif(src: &Path, out: &Path) -> Result<(), String> {
     use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, RenderingIntent};
     let mut image = JxlImage::builder()
@@ -961,7 +967,10 @@ pub fn jxl_to_gif(src: &Path, out: &Path) -> Result<(), String> {
     let mut indices = Vec::with_capacity(width as usize * height as usize);
     let mut pixels: Vec<[u8; 3]> = Vec::with_capacity(width as usize * height as usize);
     let mut opaque: Vec<bool> = Vec::with_capacity(width as usize * height as usize);
-    for k in 0..frames {
+    let out_frames = frames.min(GIF_MAX_FRAMES);
+    for j in 0..out_frames {
+        let k = j * frames / out_frames;
+        let span = ((j + 1) * frames / out_frames - k) as u64;
         let render = image.render_frame(k).map_err(|e| format!("JPEG XL: {e}"))?;
         let mut stream = render.stream();
         let ch = stream.channels() as usize;
@@ -1002,7 +1011,7 @@ pub fn jxl_to_gif(src: &Path, out: &Path) -> Result<(), String> {
                 cache[key]
             });
         }
-        let delay = (u64::from(render.duration()) * tps_den * 100 / tps_num).min(u16::MAX as u64) as u16;
+        let delay = (u64::from(render.duration()) * span * tps_den * 100 / tps_num).min(u16::MAX as u64) as u16;
         // Disposal 2 (clear) under transparency, else 1 (keep).
         let packed = if has_alpha { 2 << 2 | 1 } else { 1 << 2 };
         gif.extend_from_slice(&[0x21, 0xF9, 4, packed]);
@@ -1230,6 +1239,24 @@ mod tests {
         // Every pixel is close to some palette colour (red channel spans 0..255).
         let err: u32 = (0..w).map(|x| pal.iter().map(|p| (i32::from(p[0]) - x as i32).unsigned_abs()).min().unwrap()).sum();
         assert!(err / w < 6, "mean red error {}", err / w);
+        // More frames than `GIF_MAX_FRAMES`: capped, total duration kept.
+        let many = 150;
+        let tiny: Vec<Vec<u8>> = (0..many).map(|f| vec![f as u8; 2 * 2 * 4]).collect();
+        encode_jxl_animated(&mut tiny.clone(), 2, 2, &vec![20; many], false, &jxl).unwrap();
+        jxl_to_gif(&jxl, &gif).unwrap();
+        let g = std::fs::read(&gif).unwrap();
+        let (mut at, mut count, mut total_cs) = (13 + 19, 0usize, 0u32);
+        while g[at] == 0x21 {
+            total_cs += u32::from(u16::from_le_bytes([g[at + 4], g[at + 5]]));
+            at += 8 + 10 + 768 + 1; // GCE, descriptor, local table, LZW code size
+            while g[at] != 0 {
+                at += 1 + g[at] as usize;
+            }
+            at += 1;
+            count += 1;
+        }
+        assert_eq!(g[at], 0x3B);
+        assert_eq!((count, total_cs), (GIF_MAX_FRAMES, 150 * 2));
         encode_jxl_lossless(&mut vec![9; 600 * 2 * 4], 600, 2, true, &jxl).unwrap();
         assert_eq!(sticker_check(&jxl), Ok(false), "still sticker");
         encode_jxl_lossless(&mut vec![9; 601 * 2 * 4], 601, 2, true, &jxl).unwrap();

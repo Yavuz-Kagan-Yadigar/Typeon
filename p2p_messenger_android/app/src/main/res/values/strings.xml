@@ -562,4 +562,9 @@
     <string name="msg_sticker_imported">Added %1$d sticker(s)</string>
     <string name="storage_voice">Voice messages</string>
     <string name="storage_stickers">Stickers</string>
+    <string name="storage_prune_button">Delete older messages</string>
+    <string name="storage_prune_sizes">Messages (%1$d): %2$s → %3$s · Attachments: %4$s → %5$s</string>
+    <string name="storage_prune_confirm_title">Delete older messages?</string>
+    <string name="storage_prune_confirm_message">All messages and attachments in this chat before %1$s are deleted from this device. The other side is not affected. This cannot be undone.</string>
+    <string name="storage_prune_done">Deleted</string>
 </resources>

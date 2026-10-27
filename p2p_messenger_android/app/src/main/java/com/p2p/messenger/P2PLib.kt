@@ -419,6 +419,11 @@ object P2PLib {
      *  "cache_bytes","chats":[{"kind":"contact"|"group","id","name","bytes","count"}]}`;
      *  `chats`: only chats with local attachments, biggest first. */
     external fun storageUsage(): String
+    /** JSON `{"oldest_ms","msg_count","msg_bytes","del_msg_count","del_msg_bytes",
+     *  "att_bytes","del_att_bytes"}` for deleting a chat's items older than [beforeMs]. */
+    external fun chatPruneStats(kind: String, id: String, beforeMs: Long): String
+    /** Deletes a chat's messages and attachments older than [beforeMs] (this device only). "OK" or "Error: ...". */
+    external fun pruneChatBefore(kind: String, id: String, beforeMs: Long): String
     /** Drops only this device's copy of each `file_id` (JSON array); the row
      *  stays, downloadable again; the peer is not told. "OK" or "Error: ...". */
     external fun removeLocalAttachments(fileIdsJson: String): String

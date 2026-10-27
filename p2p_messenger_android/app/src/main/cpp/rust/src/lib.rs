@@ -420,11 +420,10 @@ fn valid_sticker_origin(o: &str) -> bool {
 /// fingerprint) or a group (`group_id`), as an attachment with `sticker` set.
 /// Returns the attachment's file id.
 pub(crate) fn send_sticker_unlocked(peer: Option<String>, group_id: Option<String>, sticker_id: &str) -> Result<String, String> {
-    let (tmp, origin) = {
-        let core = core_lock_read();
-        (core.decrypt_sticker_to_tmp(sticker_id)?, core.sticker_origin(sticker_id)?)
-    };
-    let origin = Some(origin);
+    // The wire origin is the content id only (`jxl:<sha256>`, which the
+    // receiver checks against the offer's hash); a `wa:` id stays local.
+    let tmp = core_lock_read().decrypt_sticker_to_tmp(sticker_id)?;
+    let origin = Some(format!("jxl:{sticker_id}"));
     let source = tmp.to_string_lossy().to_string();
     let result = match (peer, group_id) {
         (Some(peer), None) => encrypt_then_finish(&source, None, |core, file_id, file_key, total_size, sha256_hex| {
@@ -458,9 +457,9 @@ pub(crate) fn save_received_sticker_unlocked(file_id: &str) -> Result<String, St
     let (file_key, sha256_hex, enc_path, decrypted_path) = core_lock().begin_attachment_decrypt(file_id)?;
     let tmp = decrypted_path.with_file_name(format!(".sticker-{}.jxl", uuid::Uuid::new_v4()));
     let chunk_size = core_lock().file_chunk_size(file_id);
-    let origin = core_lock().file_sticker_origin(file_id);
+    // A peer's origin is not trusted: the saved copy is keyed by its content.
     let result = attachments::decrypt_file_from_disk_with(&enc_path, &tmp, &file_key, &sha256_hex, chunk_size)
-        .and_then(|()| core_lock().store_sticker(&tmp, true, origin.as_deref()));
+        .and_then(|()| core_lock().store_sticker(&tmp, true, None));
     let _ = std::fs::remove_file(&tmp);
     result
 }
@@ -1629,6 +1628,93 @@ mod recovery_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// F3: a history page may not forge, freeze or erase my reactions, nor
+    /// react on rows the filters dropped.
+    #[test]
+    fn synced_reactions_only_for_kept_rows_and_mine_only_restored() {
+        let dir = std::env::temp_dir().join(format!("typeon-syncreact-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut core = core_on_disk(&dir);
+        let me = core.generate_identity("me".into()).unwrap().0;
+        let gid = "group-0123456789abcdef".to_string();
+        core.groups.insert(gid.clone(), Group::new(gid.clone(), "g".into(), me.clone(), 1));
+        for id in ["m1", "m2", "m3", "m4"] {
+            core.archive_group_message(&gid, "peer", "received", b"x", Some(id), None, None, None, 1, None).unwrap();
+        }
+        assert!(core.apply_reaction("m3", &me, "A", 10));
+        let r = |who: &str, emoji: &str, at: u64| (who.to_string(), emoji.to_string(), at);
+        let reactions: HashMap<String, Vec<(String, String, u64)>> = [
+            ("m1".to_string(), vec![r("peer", "P", 5), r("other", "Q", 5), r(&me, "", 5)]),
+            ("m2".to_string(), vec![r(&me, "B", u64::MAX)]),
+            ("m3".to_string(), vec![r(&me, "C", 20)]),
+            ("m4".to_string(), vec![r("peer", "D", 5)]),
+        ].into_iter().collect();
+        let mut event = serde_json::json!({"messages": [{"message_id": "m1"}, {"message_id": "m2"}, {"message_id": "m3"}]});
+        core.apply_synced_reactions(&mut event, &reactions, Some(gid.as_str()), "peer");
+        let all = |id: &str| -> Vec<(String, String)> {
+            let c = core.db.as_ref().unwrap();
+            let mut st = c.prepare("SELECT reactor_identity_id, emoji FROM message_reactions WHERE message_id = ?1 ORDER BY reactor_identity_id").unwrap();
+            st.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().flatten().collect()
+        };
+        assert_eq!(all("m1"), vec![("peer".to_string(), "P".to_string())], "responder's own only; my erase refused");
+        assert!(all("m2").is_empty(), "stamp in the future");
+        assert_eq!(all("m3"), vec![(me.clone(), "A".to_string())], "mine only restored, never replaced");
+        assert!(all("m4").is_empty(), "row not kept by the filters");
+        assert_eq!(event["messages"][0]["reactions"], "P");
+        let mut event = serde_json::json!({"messages": [{"message_id": "m2"}]});
+        let ok: HashMap<String, Vec<(String, String, u64)>> = [("m2".to_string(), vec![r(&me, "B", 5)])].into_iter().collect();
+        core.apply_synced_reactions(&mut event, &ok, Some(gid.as_str()), "peer");
+        assert_eq!(all("m2"), vec![(me, "B".to_string())], "a missing one of mine is restored");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cleared group's rows (and the reactions on its files) stay gone:
+    /// a sibling's backfill of older rows is refused by the floor.
+    #[test]
+    fn cleared_group_history_does_not_come_back() {
+        let dir = std::env::temp_dir().join(format!("typeon-gclear-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("attachments")).unwrap();
+        let mut core = core_on_disk(&dir);
+        let gid = "group-0123456789abcdef".to_string();
+        core.groups.insert(gid.clone(), Group::new(gid.clone(), "g".into(), "me".into(), 1));
+        core.archive_group_message(&gid, "x", "received", b"old", Some("m1"), None, None, None, 1, None).unwrap();
+        core.db.as_ref().unwrap().execute_batch(&format!(
+            "INSERT INTO files (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size, sha256_hex, encrypted_file_key, key_nonce, status, created_at, group_id)
+             VALUES ('f1', 'p', 'received', 'a.jpg', 'image/jpeg', 9, '', x'00', x'00', 'complete', 1, '{gid}');")).unwrap();
+        assert!(core.apply_reaction("f1", "x", "A", 1));
+        core.clear_group_history(&gid).unwrap();
+        let reactions: i64 = core.db.as_ref().unwrap().query_row("SELECT COUNT(*) FROM message_reactions", [], |r| r.get(0)).unwrap();
+        assert_eq!(reactions, 0, "file reactions go too");
+        let entry = |id: &str, at: u64| SiblingHistoryEntry {
+            conversation_identity_id: None, group_id: Some(gid.clone()), direction: "received".into(), text: "t".into(),
+            message_id: id.into(), sender_identity_id: Some("x".into()), reply_to_message_id: None, reply_to_preview: None,
+            reply_to_sender_identity_id: None, sent_at_ms: at, author_proof: None,
+        };
+        core.apply_sibling_history(vec![entry("m1", 1), entry("m2", current_time_ms() + 1_000)]);
+        assert!(!core.message_exists_in_chat("m1", Some(gid.as_str()), ""), "cleared row stays gone");
+        assert!(core.message_exists_in_chat("m2", Some(gid.as_str()), ""), "a newer row still arrives");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F1: the preview is the newest by sent time even when 60 older-sent
+    /// rows arrived after it (history sync).
+    #[test]
+    fn chat_preview_is_newest_sent_however_far_back_it_arrived() {
+        let dir = std::env::temp_dir().join(format!("typeon-preview-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut core = core_on_disk(&dir);
+        let gid = "group-0123456789abcdef".to_string();
+        core.groups.insert(gid.clone(), Group::new(gid.clone(), "g".into(), "me".into(), 1));
+        core.archive_group_message(&gid, "x", "received", b"new", Some("n"), None, None, None, 5_000, None).unwrap();
+        for i in 0..60 {
+            core.archive_group_message(&gid, "x", "received", b"old", Some(&format!("o{i}")), None, None, None, 10 + i, None).unwrap();
+        }
+        core.db.as_ref().unwrap().execute("UPDATE messages SET timestamp = id", []).unwrap();
+        let p = core.chat_list_previews();
+        assert_eq!(p["groups"][&gid]["message"]["text"], "new");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn storage_usage_counts_local_copies_and_removal_keeps_the_row() {
         let dir = std::env::temp_dir().join(format!("typeon-storage-{}", std::process::id()));
@@ -1637,15 +1723,24 @@ mod recovery_tests {
         let mut core = core_on_disk(&dir);
         core.db.as_ref().unwrap().execute_batch(
             "INSERT INTO files (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size, sha256_hex, encrypted_file_key, key_nonce, status, created_at, duration_ms, group_id)
-             VALUES ('img', 'p', 'received', 'a.jpg', 'image/jpeg', 9, '', x'00', x'00', 'complete', 1, NULL, 'g'),
-                    ('voc', 'p', 'received', 'v.ogg', 'audio/ogg', 9, '', x'00', x'00', 'complete', 2, 500, 'g'),
-                    ('gone', 'p', 'received', 'b.jpg', 'image/jpeg', 9, '', x'00', x'00', 'offered', 3, NULL, 'g');").unwrap();
+             VALUES ('img', 'p', 'received', 'a.jpg', 'image/jpeg', 9, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', x'00', x'00', 'complete', 1, NULL, 'g'),
+                    ('voc', 'p', 'received', 'v.ogg', 'audio/ogg', 9, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', x'00', x'00', 'complete', 2, 500, 'g'),
+                    ('gone', 'p', 'received', 'b.jpg', 'image/jpeg', 9, '', x'00', x'00', 'offered', 3, NULL, 'g'),
+                    ('mine', 'p', 'sent', 'c.jpg', 'image/jpeg', 9, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', x'00', x'00', 'complete', 4, NULL, 'g');").unwrap();
+        std::fs::create_dir_all(dir.join("attachments/plain_cache")).unwrap();
+        for h in ["a", "b"] {
+            std::fs::write(dir.join(format!("attachments/plain_cache/anim-{}.gif", h.repeat(64))), [0u8; 1]).unwrap();
+            std::fs::write(dir.join(format!("attachments/plain_cache/first-{}.png", h.repeat(64))), [0u8; 1]).unwrap();
+        }
+        std::fs::write(dir.join("attachments/mine.enc"), [0u8; 50]).unwrap();
         std::fs::write(dir.join("attachments/img.enc"), [0u8; 100]).unwrap();
         std::fs::write(dir.join("attachments/voc.enc"), [0u8; 30]).unwrap();
         std::fs::write(dir.join("stickers/s.enc"), [0u8; 7]).unwrap();
         let u = core.storage_usage();
-        assert_eq!((u["attachments_bytes"].as_u64(), u["voice_bytes"].as_u64(), u["stickers_bytes"].as_u64()), (Some(100), Some(30), Some(7)));
-        assert_eq!((u["chats"][0]["bytes"].as_u64(), u["chats"][0]["count"].as_u64()), (Some(130), Some(2)), "no local copy, not counted");
+        assert_eq!((u["attachments_bytes"].as_u64(), u["voice_bytes"].as_u64(), u["stickers_bytes"].as_u64()), (Some(150), Some(30), Some(7)));
+        assert_eq!((u["chats"][0]["bytes"].as_u64(), u["chats"][0]["count"].as_u64()), (Some(130), Some(2)), "no local copy / sent: not counted");
+        assert!(core.remove_local_attachment("mine").is_err(), "my sent file is the only source");
+        assert!(dir.join("attachments/mine.enc").exists());
 
         core.remove_local_attachment("img").unwrap();
         assert!(!dir.join("attachments/img.enc").exists());
@@ -1653,6 +1748,11 @@ mod recovery_tests {
         assert_eq!(status, "offered");
         assert_eq!(core.storage_usage()["chats"][0]["bytes"].as_u64(), Some(30));
         assert!(core.remove_local_attachment("nope").is_err());
+        // Hash-named conversions: gone with the last copy, kept while shared.
+        let cache = |h: &str| dir.join(format!("attachments/plain_cache/anim-{}.gif", h.repeat(64)));
+        assert!(!cache("a").exists() && !dir.join(format!("attachments/plain_cache/first-{}.png", "a".repeat(64))).exists());
+        core.remove_local_attachment("voc").unwrap();
+        assert!(cache("b").exists(), "'mine' has the same content");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1668,16 +1768,21 @@ mod recovery_tests {
         let id = core.store_sticker(&jxl, false, Some(&wa)).unwrap();
         assert_eq!(core.store_sticker(&jxl, false, Some(&wa)).unwrap(), id, "same origin kept once");
         let plain = std::fs::read(&jxl).unwrap();
+        assert_eq!(id, hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&plain)));
 
         let key = [9u8; 32];
-        let offer = |core: &mut P2PCore, fid: &str, origin: &str| {
-            core.receive_file_offer("peer", "ident", None, fid, "s.jxl", "image/jxl", 5, &key, &"0".repeat(64), &None, None, Some(attachments::FILE_CHUNK_SIZE_V2 as u32), "", None, None, None, true, Some(origin));
+        let offer = |core: &mut P2PCore, fid: &str, sha: &str, origin: &str| {
+            core.receive_file_offer("peer", "ident", None, fid, "s.jxl", "image/jxl", 5, &key, sha, &None, None, Some(attachments::FILE_CHUNK_SIZE_V2 as u32), "", None, None, None, true, Some(origin));
         };
-        offer(&mut core, "known", &wa);
-        let (status, sha, total, origin): (String, String, i64, Option<String>) = core.db.as_ref().unwrap().query_row(
+        let status = |core: &P2PCore, fid: &str| -> String {
+            core.db.as_ref().unwrap().query_row("SELECT status FROM files WHERE file_id = ?1", params![fid], |r| r.get(0)).unwrap()
+        };
+        let jid = format!("jxl:{id}");
+        offer(&mut core, "known", &id, &jid);
+        let (status_known, sha, total, origin): (String, String, i64, Option<String>) = core.db.as_ref().unwrap().query_row(
             "SELECT status, sha256_hex, total_size, sticker_origin FROM files WHERE file_id = 'known'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
-        assert_eq!((status.as_str(), total as usize, origin.as_deref()), ("complete", plain.len(), Some(wa.as_str())));
-        assert_eq!(sha, hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&plain)));
+        assert_eq!((status_known.as_str(), total as usize, origin.as_deref()), ("complete", plain.len(), Some(jid.as_str())));
+        assert_eq!(sha, id);
         assert!(core.active_downloads.is_empty());
         assert!(core.attachment_events.iter().any(|e| e.contains("file_complete") && e.contains("known")));
         let (k, sha, enc, _) = core.begin_attachment_decrypt("known").unwrap();
@@ -1685,18 +1790,16 @@ mod recovery_tests {
         attachments::decrypt_file_from_disk_with(&enc, &out, &k, &sha, attachments::FILE_CHUNK_SIZE_V2).unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), plain);
 
-        // An earlier complete attachment counts too.
-        let wb = format!("wa:{}", "cd".repeat(32));
-        core.db.as_ref().unwrap().execute("UPDATE files SET sticker_origin = ?1 WHERE file_id = 'known'", params![wb]).unwrap();
-        offer(&mut core, "again", &wb);
-        let status: String = core.db.as_ref().unwrap().query_row("SELECT status FROM files WHERE file_id = 'again'", [], |r| r.get(0)).unwrap();
-        assert_eq!(status, "complete");
-
-        // Unknown origin: normal path, nothing made locally.
-        offer(&mut core, "unknown", &format!("wa:{}", "ef".repeat(32)));
-        let status: String = core.db.as_ref().unwrap().query_row("SELECT status FROM files WHERE file_id = 'unknown'", [], |r| r.get(0)).unwrap();
-        assert_ne!(status, "complete");
-        assert!(!dir.join("attachments/unknown.enc").exists());
+        // A peer-claimed `wa:` id, or a `jxl:` id not matching the offer's
+        // hash, is not trusted: no local copy is made.
+        offer(&mut core, "wa", &"0".repeat(64), &wa);
+        assert_ne!(status(&core, "wa"), "complete");
+        offer(&mut core, "lie", &"0".repeat(64), &jid);
+        assert_ne!(status(&core, "lie"), "complete");
+        assert!(!dir.join("attachments/lie.enc").exists());
+        // An earlier received attachment is not a source either.
+        offer(&mut core, "other", &"1".repeat(64), &format!("jxl:{}", "1".repeat(64)));
+        assert_ne!(status(&core, "other"), "complete");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -2087,6 +2190,7 @@ mod authz_coverage_tests {
         let cases: &[(&[&str], usize, &str)] = &[
             (&["MessageContent::HistorySyncRequest { limit,", " before_timestamp, group_id } =>"], 5000, "is_member(&sender_identity_id)"),
             (&["MessageContent::HistorySyncResponse { request_id,", " messages, group_id, before_timestamp } =>"], 4000, "outstanding_history_requests.get("),
+            (&["MessageContent::HistorySyncResponse { request_id,", " messages, group_id, before_timestamp } =>"], 4000, "history_answered_by.get("),
             (&["fn adopt_device_link", "(&mut self"], 5000, "link_request_open_until"),
             (&["fn process_identity_exchange", "(&mut self"], 20000, "imzalı DeviceAdd olmadan iddia"),
             (&["MessageContent::Seen { target_message_id,", " group_message_local_id } =>"], 5000, "may_mark_seen("),
@@ -3967,6 +4071,9 @@ struct P2PCore {
     last_unconfirmed_retry_at: u64,
     /// Device -> when its last HistorySyncRequest was answered (rate limit).
     history_answered_at: HashMap<String, u64>,
+    /// Group `HistorySyncRequest` id -> members that already answered it (one
+    /// answer each). Dropped with the request (`forget_history_request`).
+    history_answered_by: HashMap<String, std::collections::HashSet<String>>,
     /// bkz. `SIBLING_ROSTER_SYNC_INTERVAL_MS`.
     last_sibling_roster_sync_at: u64,
     /// Spec dışı, performans/pil denetimi düzeltmesi: `reconnect_sweep`
@@ -4367,6 +4474,7 @@ impl P2PCore {
             pending_group_messages: HashMap::new(),
             group_failed_copies: HashMap::new(),
             history_answered_at: HashMap::new(),
+            history_answered_by: HashMap::new(),
             wb_outbox: HashMap::new(),
             wb_reply_at: HashMap::new(),
             last_group_sync_sweep_at: 0,
@@ -7931,6 +8039,8 @@ impl P2PCore {
                 // A group this device left (or never had): a sibling's
                 // backfill must not write its messages back.
                 if !self.groups.contains_key(gid) { continue; }
+                // Cleared by the user (`clear_group_history`).
+                if e.sent_at_ms < self.history_floor(gid) { continue; }
                 if self.message_exists_in_chat(&e.message_id, Some(gid.as_str()), "") { continue; }
                 let sender = e.sender_identity_id.clone()
                     .unwrap_or_else(|| self.my_identity_id().unwrap_or_default());
@@ -8879,25 +8989,32 @@ impl P2PCore {
     /// `clear_chat_history` for a group: this device's copy only, the group
     /// and its members stay.
     fn clear_group_history(&mut self, group_id: &str) -> Result<(), String> {
+        // No history answer or sibling backfill may bring the rows back
+        // (see `history_floor`; a group id never collides with an identity id).
+        self.meta_put(&format!("hfloor:{}", group_id), &current_time_ms().to_string());
         let file_ids: Vec<String> = self.db.as_ref().and_then(|conn| {
             let mut stmt = conn.prepare("SELECT file_id FROM files WHERE group_id = ?1").ok()?;
             let rows = stmt.query_map(params![group_id], |r| r.get(0)).ok()?.flatten().collect();
             Some(rows)
         }).unwrap_or_default();
-        for file_id in &file_ids {
-            self.delete_attachment_file(file_id);
-        }
         if let Some(conn) = &self.db {
             let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
             for sql in [
                 "DELETE FROM message_reactions WHERE message_id IN (SELECT message_id FROM messages WHERE group_id = ?1)",
                 "DELETE FROM message_seen WHERE message_id IN (SELECT message_id FROM messages WHERE group_id = ?1)",
+                // Reactions and seen marks on attachments, before their rows go.
+                "DELETE FROM message_reactions WHERE message_id IN (SELECT file_id FROM files WHERE group_id = ?1)",
+                "DELETE FROM message_seen WHERE message_id IN (SELECT file_id FROM files WHERE group_id = ?1)",
                 "DELETE FROM messages WHERE group_id = ?1",
             ] {
                 tx.execute(sql, params![group_id]).map_err(|e| e.to_string())?;
             }
             tx.commit().map_err(|e| e.to_string())?;
         }
+        for file_id in &file_ids {
+            self.delete_attachment_file(file_id);
+        }
+        self.wb_delete_board(Some(group_id), None);
         Ok(())
     }
 
@@ -10605,6 +10722,48 @@ impl P2PCore {
         }
     }
 
+    /// The reactions of `reactors` (at most one row each) on `message_id`.
+    fn reactions_of(&self, message_id: &str, reactors: [&str; 2]) -> Vec<(String, String, u64)> {
+        let Some(conn) = &self.db else { return Vec::new() };
+        conn.prepare("SELECT reactor_identity_id, emoji, reacted_at_ms FROM message_reactions WHERE message_id = ?1 AND reactor_identity_id IN (?2, ?3)")
+            .and_then(|mut stmt| stmt.query_map(params![message_id, reactors[0], reactors[1]], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)?.max(0) as u64)))?.collect())
+            .unwrap_or_default()
+    }
+
+    /// F3: a history page's reactions, for the rows `event["messages"]` kept
+    /// (after the floor, direction and author checks). The responder's own
+    /// are taken. Mine only to restore one I have no row for (a new device),
+    /// on a row I have, stamped in the past: the responder could otherwise
+    /// forge, freeze (huge stamp) or erase (empty emoji) my reactions.
+    fn apply_synced_reactions(&self, event: &mut serde_json::Value, reactions: &HashMap<String, Vec<(String, String, u64)>>, group_id: Option<&str>, sender_identity_id: &str) {
+        let own_id = self.my_identity_id();
+        let now = current_time_ms();
+        let Some(rows) = event["messages"].as_array_mut() else { return };
+        for row in rows {
+            let Some(mid) = row["message_id"].as_str().map(str::to_string) else { continue };
+            let Some(list) = reactions.get(&mid) else { continue };
+            let mut changed = false;
+            for (reactor, emoji, at) in list {
+                if emoji.len() > 64 || !self.reaction_fits_chat(&mid, group_id, sender_identity_id) {
+                    continue;
+                }
+                let take = reactor == sender_identity_id
+                    || (Some(reactor) == own_id.as_ref() && !emoji.is_empty() && *at > 0 && *at <= now + 60_000
+                        && self.db.as_ref().is_some_and(|c| c.query_row(
+                            "SELECT (EXISTS(SELECT 1 FROM messages WHERE message_id = ?1) OR EXISTS(SELECT 1 FROM files WHERE file_id = ?1))
+                               AND NOT EXISTS(SELECT 1 FROM message_reactions WHERE message_id = ?1 AND reactor_identity_id = ?2)",
+                            params![mid, reactor], |r| r.get::<_, bool>(0),
+                        ).unwrap_or(false)));
+                if take {
+                    changed |= self.apply_reaction(&mid, reactor, emoji, *at);
+                }
+            }
+            if changed {
+                row["reactions"] = self.reactions_summary(&mid).into();
+            }
+        }
+    }
+
     /// Spec dışı, kullanıcı isteği (WhatsApp tarzı tepkiler): bir kişinin
     /// bir mesaja bıraktığı emojiyi yerel arşive yazar.
     ///
@@ -10615,13 +10774,6 @@ impl P2PCore {
     /// sırada ulaşabilir — DAHA ESKİ olan, daha yeninin üzerine YAZMAMALI.
     /// Damgası olmayan (eski sürüm) paketler koşulsuz uygulanır.
     /// `false`: the row could not be written (a received reaction is then not acked).
-    fn reactions_of(&self, message_id: &str) -> Vec<(String, String, u64)> {
-        let Some(conn) = &self.db else { return Vec::new() };
-        conn.prepare("SELECT reactor_identity_id, emoji, reacted_at_ms FROM message_reactions WHERE message_id = ?1 LIMIT 64")
-            .and_then(|mut stmt| stmt.query_map(params![message_id], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)?.max(0) as u64)))?.collect())
-            .unwrap_or_default()
-    }
-
     fn apply_reaction(&self, target_message_id: &str, reactor_identity_id: &str, emoji: &str, reacted_at_ms: u64) -> bool {
         // M101: no DB is not "applied".
         let Some(conn) = &self.db else { return false };
@@ -11495,9 +11647,17 @@ impl P2PCore {
                         m.author_proof = m.message_id.as_deref().and_then(|id| self.group_author_proof(gid, id));
                     }
                 }
-                let mut kept: Vec<ArchivedMessage> = history.into_iter().rev()
-                    .take_while(|m| {
-                        let cost = m.text.len() + m.author_proof.as_ref().map_or(0, |p| p.len());
+                // Reactions: only the requester's and mine (the only ones it
+                // takes), and they count toward the budget too.
+                let own_id = self.my_identity_id().unwrap_or_default();
+                let mut kept: Vec<(ArchivedMessage, Vec<(String, String, u64)>)> = history.into_iter().rev()
+                    .map(|m| {
+                        let r = m.message_id.as_deref().map(|id| self.reactions_of(id, [sender_identity_id.as_str(), own_id.as_str()])).unwrap_or_default();
+                        (m, r)
+                    })
+                    .take_while(|(m, r)| {
+                        let cost = m.text.len() + m.author_proof.as_ref().map_or(0, |p| p.len())
+                            + r.iter().map(|(who, emoji, _)| who.len() + emoji.len() + 16).sum::<usize>();
                         let is_first = std::mem::take(&mut first);
                         if cost > text_budget && !is_first {
                             return false;
@@ -11508,8 +11668,8 @@ impl P2PCore {
                     .collect();
                 kept.reverse();
                 let messages: Vec<SyncedMessage> = kept.into_iter()
-                    .map(|m| SyncedMessage {
-                        reactions: m.message_id.as_deref().map(|id| self.reactions_of(id)).unwrap_or_default(),
+                    .map(|(m, reactions)| SyncedMessage {
+                        reactions,
                         direction: m.direction, text: m.text, timestamp: m.timestamp,
                         sender_identity_id: m.sender_identity_id, message_id: m.message_id,
                         sent_at_ms: m.sent_at_ms, is_deleted: m.is_deleted, is_edited: m.is_edited,
@@ -11536,7 +11696,9 @@ impl P2PCore {
                 serde_json::json!({"type": "noop"})
             }
             MessageContent::HistorySyncResponse { request_id, messages, group_id, before_timestamp } => {
-                let solicited = match self.outstanding_history_requests.get(&request_id) {
+                // A group request is open to every member, but each answers once.
+                let answered_before = self.history_answered_by.get(&request_id).is_some_and(|s| s.contains(&sender_identity_id));
+                let solicited = !answered_before && match self.outstanding_history_requests.get(&request_id) {
                     Some((target_identity, req_group, _)) if *req_group == group_id => match &group_id {
                         Some(gid) => self.groups.get(gid).map_or(false, |g| g.is_member(&sender_identity_id)),
                         None => target_identity.as_deref() == Some(sender_identity_id.as_str()),
@@ -11561,21 +11723,21 @@ impl P2PCore {
                 // back from a sibling or from our server archive.
                 let mut messages = messages;
                 messages.truncate(HISTORY_SYNC_MAX_MESSAGES as usize);
-                // F3: reactions ride along. Only the responder's own and ours are
-                // taken: nothing proves who else reacted.
-                let own_id = self.my_identity_id();
-                for m in &messages {
-                    let Some(mid) = m.message_id.as_deref() else { continue };
-                    for (reactor, emoji, at) in m.reactions.iter().take(64) {
-                        if (*reactor == sender_identity_id || Some(reactor) == own_id.as_ref())
-                            && emoji.len() <= 64
-                            && self.reaction_fits_chat(mid, group_id.as_deref(), &sender_identity_id)
-                        {
-                            self.apply_reaction(mid, reactor, emoji, *at);
-                        }
+                // F3: reactions ride along; applied at the end, only on the rows
+                // that passed the filters below (see `apply_synced_reactions`).
+                let mut reactions: HashMap<String, Vec<(String, String, u64)>> = HashMap::new();
+                for m in messages.iter_mut() {
+                    if let Some(mid) = m.message_id.clone() {
+                        let mut r = std::mem::take(&mut m.reactions);
+                        r.truncate(64);
+                        reactions.insert(mid, r);
                     }
                 }
-                if group_id.is_none() {
+                if let Some(gid) = &group_id {
+                    // Nothing from before the user cleared this group's history.
+                    let floor = self.history_floor(gid);
+                    messages.retain(|m| (if m.sent_at_ms != 0 { m.sent_at_ms } else { m.timestamp }) >= floor);
+                } else {
                     // Nothing from before the user deleted this contact (or
                     // its chat with a group member): the peer still has those
                     // rows and they came back on the next pairing.
@@ -11586,7 +11748,7 @@ impl P2PCore {
                 // `before_timestamp` is the responder's word. A group answer
                 // with it left out went down the 1:1 arm below: unfiltered,
                 // unsigned rows, archived into our 1:1 chat as sent by us.
-                let event = if group_id.is_some() || before_timestamp.is_some() {
+                let mut event = if group_id.is_some() || before_timestamp.is_some() {
                     // Spec dışı, kullanıcı isteği (sonsuz kaydırma): ESKİ
                     // SAYFA yanıtı — mevcut "en yeniden daha yeni" zaman
                     // damgası eşiği burada YANLIŞ yönde çalışırdı (bu
@@ -11755,6 +11917,7 @@ impl P2PCore {
                     }).collect();
                     serde_json::json!({"type": "history_sync", "peer": chat_key, "messages": flipped})
                 };
+                self.apply_synced_reactions(&mut event, &reactions, group_id.as_deref(), &sender_identity_id);
                 if write_failed {
                     // No Ack: the responder retries; rows already written dedup by id.
                     return Ok(event.to_string());
@@ -11768,6 +11931,8 @@ impl P2PCore {
                 // `send_message_content` drops it after TEXT_RETRY_GIVE_UP_MS).
                 if group_id.is_none() {
                     self.forget_history_request(&request_id);
+                } else {
+                    self.history_answered_by.entry(request_id.clone()).or_default().insert(sender_identity_id.clone());
                 }
                 // The responder's `HistorySyncResponse` is in
                 // `needs_delivery_confirmation`: it retries until this Ack.
@@ -12873,6 +13038,7 @@ impl P2PCore {
         self.early_handshakes.clear();
         self.group_failed_copies.clear();
         self.history_answered_at.clear();
+        self.history_answered_by.clear();
         self.chunk_rate_limiter.clear();
         self.recent_inbound_digests.clear();
         self.sibling_backfill_since.clear();
@@ -13468,6 +13634,7 @@ impl P2PCore {
     /// bkz. `outstanding_history_requests` — bir isteği kayıttan düşürür.
     fn forget_history_request(&mut self, request_id: &str) {
         self.outstanding_history_requests.remove(request_id);
+        self.history_answered_by.remove(request_id);
         if let Some(conn) = &self.db {
             let _ = conn.execute("DELETE FROM app_meta WHERE k = ?1", params![format!("hsr:{}", request_id)]);
         }
@@ -14433,11 +14600,20 @@ impl P2PCore {
     /// H137: the chat list's previews under one lock: per contact (key:
     /// identity id) and per group, the newest message and newest attachment.
     fn chat_list_previews(&self) -> serde_json::Value {
-        // F1: the chat orders by sent time, so the preview must too; rows come by
-        // arrival. ponytail: a message sent more than 50 arrivals ago cannot win.
+        // F1: the chat orders by sent time, so the preview must too. SQL picks
+        // the row (no decryption); only its arrival millisecond is loaded.
+        // ponytail: rows sharing that millisecond (a history-sync batch) are all
+        // decrypted; a (timestamp, id) cursor is the upgrade if that matters.
         fn newest_sent(rows: Vec<ArchivedMessage>) -> Option<ArchivedMessage> {
             rows.into_iter().max_by_key(|m| if m.sent_at_ms > 0 { m.sent_at_ms } else { m.timestamp })
         }
+        let preview_arrival = |column: &str, id: &str| -> Option<i64> {
+            self.db.as_ref()?.query_row(
+                &format!("SELECT timestamp FROM messages WHERE {column} = ?1
+                          ORDER BY COALESCE(NULLIF(sent_at_ms,0), timestamp) DESC, timestamp DESC, id DESC LIMIT 1"),
+                params![id], |r| r.get(0),
+            ).ok()
+        };
         let my_id = self.my_identity_id();
         let mut contacts = serde_json::Map::new();
         for c in self.contacts.values() {
@@ -14445,7 +14621,8 @@ impl P2PCore {
             let Some(fp) = self.canonical_device_for_identity(&c.trusted_identity_id) else { continue };
             contacts.insert(c.trusted_identity_id.clone(), serde_json::json!({
                 "peer": fp,
-                "message": newest_sent(self.load_message_history_opt(&fp, 50, None, false)),
+                "message": preview_arrival("peer_device_fingerprint", &fp)
+                    .and_then(|t| newest_sent(self.load_message_history_opt(&fp, 1, Some(t + 1), false))),
                 // Limit 1: the rows come oldest first, so `next()` of 500 was the oldest.
                 "attachment": self.list_attachments_opt(&fp, false, None, 1).into_iter().next(),
             }));
@@ -14453,7 +14630,8 @@ impl P2PCore {
         let mut groups = serde_json::Map::new();
         for gid in self.groups.keys() {
             groups.insert(gid.clone(), serde_json::json!({
-                "message": newest_sent(self.load_group_message_history_opt(gid, 50, None, false)),
+                "message": preview_arrival("group_id", gid)
+                    .and_then(|t| newest_sent(self.load_group_message_history_opt(gid, 1, Some(t + 1), false))),
                 "attachment": self.list_group_attachments_opt(gid, false, None, 1).into_iter().next(),
             }));
         }
@@ -16844,25 +17022,14 @@ impl P2PCore {
         Ok(self.attachments_dir()?.join(format!("{}.enc", file_id)))
     }
 
-    /// Writes the sticker with `origin` (my store, else an earlier complete
-    /// attachment) as `file_id`'s `.enc` under the offer's key and marks the row complete.
-    fn reuse_local_sticker(&mut self, file_id: &str, file_key: &[u8; 32], chunk_size: usize, origin: &str) -> Result<(), String> {
+    /// Writes my stored sticker whose content hash is `sha256_hex` (the
+    /// offer's) as `file_id`'s `.enc` under the offer's key and marks the row
+    /// complete. Only my own store: its id is the hash the decrypt checks.
+    fn reuse_local_sticker(&mut self, file_id: &str, file_key: &[u8; 32], chunk_size: usize, sha256_hex: &str) -> Result<(), String> {
         let conn = self.db.as_ref().ok_or("DB not open")?;
-        let own: Option<String> = conn.query_row("SELECT id FROM stickers WHERE origin_id = ?1", params![origin], |r| r.get(0)).ok();
-        let plain = match own {
-            Some(id) => self.decrypt_sticker_to_tmp(&id)?,
-            None => {
-                let prior: String = conn.query_row(
-                    "SELECT file_id FROM files WHERE sticker_origin = ?1 AND status = 'complete' AND file_id != ?2 LIMIT 1",
-                    params![origin, file_id], |r| r.get(0),
-                ).map_err(|_| "No local copy".to_string())?;
-                let (key, sha, enc, _) = self.begin_attachment_decrypt(&prior)?;
-                let tmp = self.attachments_dir()?.join("plain_cache").join(format!(".sticker-{}.jxl", uuid::Uuid::new_v4()));
-                attachments::decrypt_file_from_disk_with(&enc, &tmp, &key, &sha, self.file_chunk_size(&prior))
-                    .inspect_err(|_| { let _ = std::fs::remove_file(&tmp); })?;
-                tmp
-            }
-        };
+        let id: String = conn.query_row("SELECT id FROM stickers WHERE id = ?1", params![sha256_hex], |r| r.get(0))
+            .map_err(|_| "No local copy".to_string())?;
+        let plain = self.decrypt_sticker_to_tmp(&id)?;
         let dest = self.enc_path_for(file_id)?;
         let enc = attachments::encrypt_file_to_disk_with(&plain, &dest, file_key, chunk_size);
         let _ = std::fs::remove_file(&plain);
@@ -16873,16 +17040,6 @@ impl P2PCore {
             params![file_id, sha, total as i64],
         ).map_err(|e| e.to_string())?;
         Ok(())
-    }
-
-    fn sticker_origin(&self, id: &str) -> Result<String, String> {
-        let conn = self.db.as_ref().ok_or("DB not open")?;
-        conn.query_row("SELECT origin_id FROM stickers WHERE id = ?1", params![id], |r| r.get(0)).map_err(|_| "Unknown sticker".to_string())
-    }
-
-    fn file_sticker_origin(&self, file_id: &str) -> Option<String> {
-        let conn = self.db.as_ref()?;
-        conn.query_row("SELECT sticker_origin FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0)).ok().flatten()
     }
 
     fn stickers_dir(&self) -> Result<std::path::PathBuf, String> {
@@ -17159,9 +17316,21 @@ impl P2PCore {
     /// Removes this device's copy of an attachment (`.enc`, decrypted cache,
     /// running transfer); the `files` row is the caller's business.
     fn remove_attachment_copy(&mut self, file_id: &str) {
-        let file_name: Option<String> = self.db.as_ref().and_then(|conn| {
-            conn.query_row("SELECT file_name FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0)).ok()
-        });
+        let (file_name, sha): (Option<String>, Option<String>) = self.db.as_ref().and_then(|conn| {
+            conn.query_row("SELECT file_name, sha256_hex FROM files WHERE file_id = ?1", params![file_id], |r| Ok((r.get(0)?, r.get(1)?))).ok()
+        }).unwrap_or_default();
+        // Conversions named by content hash (`anim-<sha>.gif`, `first-<sha>.png`)
+        // are shared: removed only when no other copy or sticker uses them.
+        let sha = sha.filter(|h| h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        let shared = sha.as_deref().is_some_and(|h| self.db.as_ref().is_some_and(|conn| conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE sha256_hex = ?1 AND file_id != ?2 AND status = 'complete')
+                 OR EXISTS(SELECT 1 FROM stickers WHERE id = ?1)",
+            params![h, file_id], |r| r.get::<_, bool>(0),
+        ).unwrap_or(true)));
+        if let (Some(h), false, Ok(dir)) = (sha.as_deref(), shared, self.attachments_dir()) {
+            let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("anim-{h}.gif")));
+            let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("first-{h}.png")));
+        }
         if let Ok(enc_path) = self.enc_path_for(file_id) {
             let _ = std::fs::remove_file(enc_path);
         }
@@ -17189,7 +17358,7 @@ impl P2PCore {
     /// sender's claim). JSON: `{"db_bytes", "attachments_bytes",
     /// "voice_bytes", "stickers_bytes", "cache_bytes", "chats":[{"kind":
     /// "contact"|"group", "id", "name", "bytes", "count"}]}`; `chats` holds
-    /// only chats with local attachments, biggest first.
+    /// every chat, biggest attachment usage first.
     fn storage_usage(&self) -> serde_json::Value {
         let Some(base) = self.app_files_dir.as_deref() else {
             return serde_json::json!({"chats": []});
@@ -17205,12 +17374,12 @@ impl P2PCore {
         let cache_bytes = dir_size(&attachments_dir.join("plain_cache"), None);
         let stickers_bytes = dir_size(&base_path.join("stickers"), None);
 
-        // (file_id, group_id, peer fingerprint, is a voice message)
-        let rows: Vec<(String, Option<String>, String, bool)> = self.db.as_ref().and_then(|conn| {
+        // (file_id, group_id, peer fingerprint, is a voice message, sent by me)
+        let rows: Vec<(String, Option<String>, String, bool, bool)> = self.db.as_ref().and_then(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT file_id, group_id, peer_device_fingerprint, mime_type LIKE 'audio/%' AND duration_ms IS NOT NULL FROM files",
+                "SELECT file_id, group_id, peer_device_fingerprint, mime_type LIKE 'audio/%' AND duration_ms IS NOT NULL, direction = 'sent' FROM files",
             ).ok()?;
-            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).ok()?
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).ok()?
                 .flatten()
                 .collect();
             Some(rows)
@@ -17227,13 +17396,18 @@ impl P2PCore {
         let mut voice_bytes = 0u64;
         // (kind, id) -> (name, bytes, count)
         let mut usage: HashMap<(&str, String), (String, u64, u64)> = HashMap::new();
-        for (file_id, group_id, peer_fp, voice) in rows {
+        for (file_id, group_id, peer_fp, voice, sent) in rows {
             let bytes = self.enc_path_for(&file_id).map(|p| disk_size(&p)).unwrap_or(0);
             if bytes == 0 {
                 continue;
             }
             if voice {
                 voice_bytes += bytes;
+            }
+            // My own outgoing file: the only source, not removable (see
+            // `remove_local_attachment`), so not listed per chat.
+            if sent {
+                continue;
             }
             let (kind, id, name) = match group_id {
                 Some(gid) => {
@@ -17256,6 +17430,15 @@ impl P2PCore {
             entry.1 += bytes;
             entry.2 += 1;
         }
+        // Chats without a local attachment too: their messages can be pruned.
+        for contact in self.contacts.values() {
+            if let Some(id) = self.canonical_device_for_identity(&contact.trusted_identity_id) {
+                usage.entry(("contact", id)).or_insert((contact.display_name.clone(), 0, 0));
+            }
+        }
+        for (gid, g) in &self.groups {
+            usage.entry(("group", gid.clone())).or_insert((g.name.clone(), 0, 0));
+        }
         let mut chats: Vec<_> = usage.into_iter().collect();
         chats.sort_by(|a, b| b.1.1.cmp(&a.1.1).then_with(|| a.1.0.cmp(&b.1.0)));
         let chats = chats
@@ -17274,17 +17457,117 @@ impl P2PCore {
         })
     }
 
+    /// The devices (1:1) or group a storage chat id (`storage_usage`) names:
+    /// `(fingerprints, group_id)`.
+    fn chat_prune_scope(&self, kind: &str, id: &str) -> Option<(Vec<String>, Option<String>)> {
+        if kind == "group" {
+            return self.groups.contains_key(id).then(|| (Vec::new(), Some(id.to_string())));
+        }
+        let contact = self.contacts.values().find(|c| self.contact_fingerprints_all(c).iter().any(|f| f == id))?;
+        Some((self.contact_fingerprints_all(contact), None))
+    }
+
+    /// Storage → "delete older than": what `prune_chat_before` would remove.
+    /// `{"oldest_ms", "msg_count", "msg_bytes", "del_msg_count", "del_msg_bytes",
+    /// "att_bytes", "del_att_bytes"}`; message bytes are the sealed blobs,
+    /// attachment bytes the local copies. `before_ms` 0: nothing deleted.
+    fn chat_prune_stats(&self, kind: &str, id: &str, before_ms: i64) -> serde_json::Value {
+        let (Some((fps, group)), Some(conn)) = (self.chat_prune_scope(kind, id), self.db.as_ref()) else {
+            return serde_json::json!({});
+        };
+        const T: &str = "COALESCE(NULLIF(sent_at_ms,0), timestamp)";
+        let (mut oldest, mut mc, mut mb, mut dmc, mut dmb) = (i64::MAX, 0u64, 0u64, 0u64, 0u64);
+        let mut msg_sql = |where_: &str, p: &str| {
+            let sql = format!("SELECT {T}, length(encrypted_blob) FROM messages WHERE {where_}");
+            let Ok(mut stmt) = conn.prepare(&sql) else { return };
+            let Ok(rows) = stmt.query_map(params![p], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))) else { return };
+            for (t, len) in rows.flatten() {
+                oldest = oldest.min(t);
+                mc += 1;
+                mb += len as u64;
+                if t < before_ms {
+                    dmc += 1;
+                    dmb += len as u64;
+                }
+            }
+        };
+        match &group {
+            Some(g) => msg_sql("group_id = ?1", g),
+            None => fps.iter().for_each(|f| msg_sql("peer_device_fingerprint = ?1 AND group_id IS NULL", f)),
+        }
+        let (mut ab, mut dab) = (0u64, 0u64);
+        for (file_id, created) in self.chat_prune_files(&fps, group.as_deref()) {
+            let bytes = self.enc_path_for(&file_id).map(|p| disk_size(&p)).unwrap_or(0);
+            ab += bytes;
+            if created < before_ms {
+                dab += bytes;
+            }
+        }
+        serde_json::json!({
+            "oldest_ms": if oldest == i64::MAX { 0 } else { oldest },
+            "msg_count": mc, "msg_bytes": mb, "del_msg_count": dmc, "del_msg_bytes": dmb,
+            "att_bytes": ab, "del_att_bytes": dab,
+        })
+    }
+
+    /// `(file_id, created_at)` of a chat's attachment rows.
+    fn chat_prune_files(&self, fps: &[String], group: Option<&str>) -> Vec<(String, i64)> {
+        let Some(conn) = &self.db else { return Vec::new() };
+        let mut out = Vec::new();
+        let mut q = |sql: &str, p: &str| {
+            if let Ok(mut stmt) = conn.prepare(sql) {
+                if let Ok(rows) = stmt.query_map(params![p], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) {
+                    out.extend(rows.flatten());
+                }
+            }
+        };
+        match group {
+            Some(g) => q("SELECT file_id, created_at FROM files WHERE group_id = ?1", g),
+            None => fps.iter().for_each(|f| q("SELECT file_id, created_at FROM files WHERE peer_device_fingerprint = ?1 AND group_id IS NULL", f)),
+        }
+        out
+    }
+
+    /// Storage → "delete older than": this device's messages and attachments
+    /// of one chat older than `before_ms`; the pairing and newer history stay.
+    fn prune_chat_before(&mut self, kind: &str, id: &str, before_ms: i64) -> Result<(), String> {
+        let (fps, group) = self.chat_prune_scope(kind, id).ok_or("Sohbet bulunamadı")?;
+        for (file_id, created) in self.chat_prune_files(&fps, group.as_deref()) {
+            if created < before_ms {
+                self.delete_attachment_file(&file_id);
+            }
+        }
+        let conn = self.db.as_ref().ok_or("DB yok")?;
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let (cond, keys): (&str, Vec<&String>) = match &group {
+            Some(g) => ("group_id = ?1", vec![g]),
+            None => ("peer_device_fingerprint = ?1 AND group_id IS NULL", fps.iter().collect()),
+        };
+        for k in keys {
+            let old = format!("{cond} AND COALESCE(NULLIF(sent_at_ms,0), timestamp) < ?2");
+            for sql in [
+                format!("DELETE FROM message_reactions WHERE message_id IN (SELECT message_id FROM messages WHERE {old})"),
+                format!("DELETE FROM message_seen WHERE message_id IN (SELECT message_id FROM messages WHERE {old})"),
+                format!("DELETE FROM messages WHERE {old}"),
+            ] {
+                tx.execute(&sql, params![k, before_ms]).map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
+
     /// Settings → Storage: drops only this device's copy of an attachment.
     /// The row stays, back to 'offered' (the bubble offers the download
     /// again); the peer is not told.
     fn remove_local_attachment(&mut self, file_id: &str) -> Result<(), String> {
         let conn = self.db.as_ref().ok_or("DB yok")?;
         let changed = conn.execute(
-            "UPDATE files SET status = 'offered', bytes_transferred = 0 WHERE file_id = ?1",
+            "UPDATE files SET status = 'offered', bytes_transferred = 0 WHERE file_id = ?1 AND direction != 'sent'",
             params![file_id],
         ).map_err(|e| e.to_string())?;
+        // A sent row's copy is what the peers download from: kept.
         if changed == 0 {
-            return Err(format!("Bilinmeyen file_id: {}", file_id));
+            return Err(format!("Bilinmeyen veya gönderilmiş file_id: {}", file_id));
         }
         self.remove_attachment_copy(file_id);
         self.attachment_events.push(serde_json::json!({"type": "file_evicted", "file_id": file_id}).to_string());
@@ -17743,8 +18026,12 @@ impl P2PCore {
         // 8 running downloads, at most 4 from one sender (H99: one contact
         // took the whole budget). The rest stay "offered".
         // Stickers are small and shown at once: fetched in any node mode.
-        let sticker = sticker && total_size <= attachments::MAX_STICKER_BYTES;
-        let sticker_origin = sticker_origin.filter(|o| sticker && valid_sticker_origin(o));
+        // A peer's `sticker` flag forces a download: only for a real sticker file.
+        let sticker = sticker && total_size <= attachments::MAX_STICKER_BYTES
+            && mime_type == "image/jxl" && file_name.to_ascii_lowercase().ends_with(".jxl");
+        // Only the content id (`jxl:<offer sha>`) is kept: a reuse below is
+        // checked against that hash; a peer-claimed `wa:` id is not checkable.
+        let sticker_origin = sticker_origin.filter(|o| sticker && valid_sticker_origin(o) && o.strip_prefix("jxl:") == Some(sha256_hex));
         let auto_download_requested = (sticker || self.node_mode_enabled && total_size <= self.history_storage_limit_bytes)
             && self.active_downloads.len() < 8
             && self.active_downloads.values().filter(|d| d.peer_device_fingerprint == peer_fp).count() < 4;
@@ -17797,11 +18084,11 @@ impl P2PCore {
         if !row_written {
             return serde_json::json!({"type": "noop"});
         }
-        // A sticker I already have (own store or an earlier copy): made here, no transfer.
+        // A sticker already in my store (same content hash): made here, no transfer.
         let reused = match sticker_origin {
-            Some(origin) => {
+            Some(_) => {
                 let chunk = chunk_size.map_or(attachments::FILE_CHUNK_SIZE, |c| c as usize);
-                let r = self.reuse_local_sticker(file_id, file_key, chunk, origin);
+                let r = self.reuse_local_sticker(file_id, file_key, chunk, sha256_hex);
                 if r.is_ok() {
                     self.attachment_events.push(serde_json::json!({"type": "file_complete", "peer": peer_fp, "file_id": file_id}).to_string());
                 }
@@ -24351,6 +24638,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_importStickerFrames<'local>
     let mut pixels: Vec<Vec<u8>> = Vec::new();
     let mut bad = width < 1 || height < 1 || width > side || height > side || count == 0
         || count > attachments::MAX_ANIMATION_FRAMES || delays.len() != count
+        || (frame_len / 4) as u64 * count as u64 > attachments::MAX_IMAGE_PIXELS
         || env.get_int_array_region(&delays_ms, 0, &mut delays).is_err();
     for i in 0..count {
         if bad {
@@ -25644,6 +25932,29 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_storageUsage<'local>(mut en
     let json = catch_panic(|| core_lock_read().storage_usage().to_string())
         .unwrap_or_else(|e| { error!("storageUsage panicked: {}", e); "{}".to_string() });
     safe_new_jstring(&mut env, json)
+}
+
+/// See `P2PCore::chat_prune_stats`.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_chatPruneStats<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, kind: JString<'local>, id: JString<'local>, before_ms: jlong) -> jstring {
+    let kind: String = jstr(&mut env, &kind).unwrap_or_default();
+    let id: String = jstr(&mut env, &id).unwrap_or_default();
+    let json = catch_panic(move || core_lock_read().chat_prune_stats(&kind, &id, before_ms).to_string())
+        .unwrap_or_else(|e| { error!("chatPruneStats panicked: {}", e); "{}".to_string() });
+    safe_new_jstring(&mut env, json)
+}
+
+/// See `P2PCore::prune_chat_before`. "OK" or "Error: ...".
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_pruneChatBefore<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, kind: JString<'local>, id: JString<'local>, before_ms: jlong) -> jstring {
+    let kind: String = jstr(&mut env, &kind).unwrap_or_default();
+    let id: String = jstr(&mut env, &id).unwrap_or_default();
+    let result = catch_panic(move || core_lock().prune_chat_before(&kind, &id, before_ms));
+    let out = match result {
+        Ok(Ok(())) => "OK".to_string(),
+        Ok(Err(e)) | Err(e) => { error!("pruneChatBefore: {}", e); format!("Error: {}", e) }
+    };
+    safe_new_jstring(&mut env, out)
 }
 
 /// Drops this device's copy of each attachment in `file_ids_json` (a JSON

@@ -1477,6 +1477,18 @@ impl ChatView {
         if attachment.status == "complete" {
             load_sticker(&state);
         }
+        // An offered or failed sticker (download cap, failure, eviction)
+        // downloads on click; otherwise it would stay blank forever.
+        let click = gtk::GestureClick::new();
+        let view = self.clone();
+        let click_state = state.clone();
+        click.connect_released(move |_, _, _, _| {
+            let status = click_state.status.borrow().clone();
+            if status != "complete" && status != "downloading" {
+                view.start_download(&click_state, None);
+            }
+        });
+        block.add_controller(click);
         (block, state)
     }
 
@@ -3100,6 +3112,11 @@ impl ChatView {
         if state.sticker.is_some() {
             if new_status == "complete" {
                 load_sticker(state);
+            } else if new_status == "offered" || new_status == "failed" {
+                // Evicted or failed: no stale picture.
+                if let Some(picture) = &state.sticker {
+                    picture.set_filename(None::<&str>);
+                }
             }
             return;
         }

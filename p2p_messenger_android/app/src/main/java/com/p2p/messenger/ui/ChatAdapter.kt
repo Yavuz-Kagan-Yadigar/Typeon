@@ -13,6 +13,7 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.p2p.messenger.R
 import com.p2p.messenger.util.AvatarUtil
+import com.p2p.messenger.util.ImagePreview
 
 /**
  * Sohbet/kişi listesi adapter'ı. `ListAdapter` + `DiffUtil` kullanır ki
@@ -218,7 +219,7 @@ class ChatAdapter(
 /** Full-screen raw avatar JPEG in a plain Dialog — no temp file on disk
  *  (unlike AvatarUtil.openFullscreen, which needs a URI for MediaViewer). */
 private fun showAvatarFullscreen(context: Context, bytes: ByteArray) {
-    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
+    val bitmap = ImagePreview.decodeBytes(bytes, 2048) ?: return
     val dialog = Dialog(context, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
     val image = ImageView(context).apply {
         setImageBitmap(bitmap)
@@ -228,5 +229,9 @@ private fun showAvatarFullscreen(context: Context, bytes: ByteArray) {
     dialog.setContentView(image, ViewGroup.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
     ))
+    // Bound to the screen: a recreate must not leak the window.
+    (context as? androidx.lifecycle.LifecycleOwner)?.lifecycle?.addObserver(object : androidx.lifecycle.DefaultLifecycleObserver {
+        override fun onDestroy(owner: androidx.lifecycle.LifecycleOwner) { dialog.dismiss() }
+    })
     dialog.show()
 }

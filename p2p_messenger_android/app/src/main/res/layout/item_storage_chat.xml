@@ -26,4 +26,8 @@
         android:alpha="0.7"
         android:textSize="13sp" />
 
+    <include
+        android:id="@+id/pruneChat"
+        layout="@layout/include_storage_prune" />
+
 </LinearLayout>
