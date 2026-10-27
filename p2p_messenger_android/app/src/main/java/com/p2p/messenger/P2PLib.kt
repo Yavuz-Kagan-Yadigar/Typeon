@@ -390,7 +390,7 @@ object P2PLib {
     /** RGBA (premultiplied DEĞİL) karelerden bir çıkartma üretir ve depolar.
      *  En uzun kenar 600 px olmalı — ölçekleme Kotlin tarafında yapılır.
      *  Bir kare = duruk çıkartma. Dönüş: çıkartma id'si veya "Error: ...". */
-    external fun importStickerFrames(frames: Array<ByteArray>, width: Int, height: Int, delaysMs: IntArray): String
+    external fun importStickerFrames(frames: Array<ByteArray>, width: Int, height: Int, delaysMs: IntArray, origin: String?): String
     /** JSON: `[{"id","animated","created_at"}]`, en yeni başta. */
     external fun listStickers(): String
     /** Bir çıkartmanın görüntülenebilir kopyası: `.png` (duruk) ya da `.gif`

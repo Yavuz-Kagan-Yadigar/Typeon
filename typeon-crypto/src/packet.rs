@@ -966,6 +966,10 @@ pub enum MessageContent {
         /// bubble frame and downloaded at once, whatever the node mode.
         #[serde(default)]
         sticker: bool,
+        /// Stable sticker identity (`wa:`/`jxl:` + SHA-256 hex): the receiver
+        /// reuses a local copy instead of downloading.
+        #[serde(default)]
+        sticker_origin: Option<String>,
     },
     /// Spec disi: yaziyor... gostergesi. Kasitli olarak Ack gibi
     /// arsivlenmez ve teslim-onayi kuyruguna (`awaiting_confirmation`)
@@ -1622,6 +1626,8 @@ pub enum SiblingEchoBody {
     Sticker {
         #[serde(with = "serde_bytes")]
         jxl: Vec<u8>,
+        #[serde(default)]
+        origin: Option<String>,
     },
     /// A sticker removed from my sticker store.
     StickerRemoved { id: String },
@@ -1765,7 +1771,7 @@ mod parse_limit_tests {
             group_id: None, file_id: "f".into(), file_name: "n".into(), mime_type: "m".into(), total_size: 1,
             file_key: [0; 32], sha256_hex: String::new(), preview_jpeg: None, duration_ms: None,
             caption: String::new(), reply_to_message_id: None, reply_to_preview: None,
-            reply_to_sender_identity_id: None, chunk_size: None, sticker: false,
+            reply_to_sender_identity_id: None, chunk_size: None, sticker: false, sticker_origin: None,
         };
         let echo = |inner| MessageContent::SiblingEcho {
             conversation_identity_id: None, group_id: None,

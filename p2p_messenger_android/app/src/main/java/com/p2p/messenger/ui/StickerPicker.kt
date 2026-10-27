@@ -67,7 +67,7 @@ class StickerPicker(
 
     private val pickTree = activity.registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
-    ) { uri -> uri?.let { tree -> importAll { webpFilesIn(tree) } } }
+    ) { uri -> uri?.let { tree -> importAll(whatsapp = true) { webpFilesIn(tree) } } }
 
     fun show() {
         if (dialog?.isShowing == true) return
@@ -231,7 +231,7 @@ class StickerPicker(
     }
 
     /** Imports the pictures [list] gives (it runs off the main thread). */
-    private fun importAll(list: () -> List<Uri>) {
+    private fun importAll(whatsapp: Boolean = false, list: () -> List<Uri>) {
         val bar = android.widget.ProgressBar(activity, null, android.R.attr.progressBarStyleHorizontal)
         val label = android.widget.TextView(activity).apply { text = activity.getString(R.string.msg_sticker_importing, 0, 0) }
         val pad = (24 * activity.resources.displayMetrics.density).toInt()
@@ -255,7 +255,7 @@ class StickerPicker(
             }
             coroutineScope {
                 for (uri in uris) launch {
-                    workers.withPermit { if (importUri(uri)) imported.incrementAndGet() }
+                    workers.withPermit { if (importUri(uri, whatsapp)) imported.incrementAndGet() }
                     done.incrementAndGet()
                     withContext(Dispatchers.Main) {
                         val n = done.get()
@@ -277,13 +277,16 @@ class StickerPicker(
     }
 
     /** One picture as a sticker, through a cache file (the import reads a file). */
-    private fun importUri(uri: Uri): Boolean {
+    private fun importUri(uri: Uri, whatsapp: Boolean): Boolean {
         val tmp = File(File(activity.cacheDir, "sticker_import").apply { mkdirs() }, UUID.randomUUID().toString())
         return try {
             activity.contentResolver.openInputStream(uri)?.use { input ->
                 tmp.outputStream().use { output -> input.copyTo(output) }
             } ?: return false
-            !StickerImport.importFile(tmp).startsWith("Error:")
+            // WhatsApp ships identical bytes to everyone: their hash names the sticker across devices.
+            val origin = if (whatsapp) "wa:" + java.security.MessageDigest.getInstance("SHA-256")
+                .digest(tmp.readBytes()).joinToString("") { "%02x".format(it) } else null
+            !StickerImport.importFile(tmp, origin).startsWith("Error:")
         } catch (e: Exception) {
             false
         } catch (e: OutOfMemoryError) {

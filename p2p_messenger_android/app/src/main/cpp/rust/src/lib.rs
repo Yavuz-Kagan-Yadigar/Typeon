@@ -397,7 +397,7 @@ fn encrypt_then_finish<T>(source_path: &str, group_id: Option<&str>, finish: imp
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_and_send_file_unlocked(peer_device_fingerprint: String, source_path: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>) -> Result<(String, String), String> {
     encrypt_then_finish(&source_path, None, |core, file_id, file_key, total_size, sha256_hex| {
-        core.finish_outgoing_file(peer_device_fingerprint, file_id, file_key, total_size, sha256_hex, file_name, mime_type, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, false)
+        core.finish_outgoing_file(peer_device_fingerprint, file_id, file_key, total_size, sha256_hex, file_name, mime_type, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, None)
     })
 }
 
@@ -406,22 +406,32 @@ pub(crate) fn prepare_and_send_file_unlocked(peer_device_fingerprint: String, so
 pub(crate) fn prepare_and_send_group_file_unlocked(group_id: String, source_path: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>) -> Result<String, String> {
     let gid = group_id.clone();
     encrypt_then_finish(&source_path, Some(&gid), |core, file_id, file_key, total_size, sha256_hex| {
-        core.finish_outgoing_group_file(group_id, file_id, file_key, total_size, sha256_hex, file_name, mime_type, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, false)
+        core.finish_outgoing_group_file(group_id, file_id, file_key, total_size, sha256_hex, file_name, mime_type, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, None)
     })
+}
+
+/// `wa:` / `jxl:` + 64 lowercase hex: the only origin ids kept or matched.
+fn valid_sticker_origin(o: &str) -> bool {
+    o.strip_prefix("wa:").or_else(|| o.strip_prefix("jxl:"))
+        .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
 }
 
 /// Sends sticker `sticker_id` from my store to a contact (`peer` = device
 /// fingerprint) or a group (`group_id`), as an attachment with `sticker` set.
 /// Returns the attachment's file id.
 pub(crate) fn send_sticker_unlocked(peer: Option<String>, group_id: Option<String>, sticker_id: &str) -> Result<String, String> {
-    let tmp = core_lock_read().decrypt_sticker_to_tmp(sticker_id)?;
+    let (tmp, origin) = {
+        let core = core_lock_read();
+        (core.decrypt_sticker_to_tmp(sticker_id)?, core.sticker_origin(sticker_id)?)
+    };
+    let origin = Some(origin);
     let source = tmp.to_string_lossy().to_string();
     let result = match (peer, group_id) {
         (Some(peer), None) => encrypt_then_finish(&source, None, |core, file_id, file_key, total_size, sha256_hex| {
-            core.finish_outgoing_file(peer, file_id, file_key, total_size, sha256_hex, "sticker.jxl".into(), "image/jxl".into(), None, None, String::new(), None, None, true).map(|r| r.0)
+            core.finish_outgoing_file(peer, file_id, file_key, total_size, sha256_hex, "sticker.jxl".into(), "image/jxl".into(), None, None, String::new(), None, None, origin).map(|r| r.0)
         }),
         (None, Some(gid)) => encrypt_then_finish(&source, Some(&gid.clone()), |core, file_id, file_key, total_size, sha256_hex| {
-            core.finish_outgoing_group_file(gid, file_id, file_key, total_size, sha256_hex, "sticker.jxl".into(), "image/jxl".into(), None, None, String::new(), None, None, None, true)
+            core.finish_outgoing_group_file(gid, file_id, file_key, total_size, sha256_hex, "sticker.jxl".into(), "image/jxl".into(), None, None, String::new(), None, None, None, origin)
         }),
         _ => Err("peer or group".to_string()),
     };
@@ -431,14 +441,14 @@ pub(crate) fn send_sticker_unlocked(peer: Option<String>, group_id: Option<Strin
 
 /// Encodes RGBA frames (`width` x `height`, at most 600 px a side, already
 /// scaled by the caller) as a sticker and stores it. Returns the sticker id.
-pub(crate) fn import_sticker_frames_unlocked(mut frames: Vec<Vec<u8>>, width: u32, height: u32, delays_ms: &[u32]) -> Result<String, String> {
+pub(crate) fn import_sticker_frames_unlocked(mut frames: Vec<Vec<u8>>, width: u32, height: u32, delays_ms: &[u32], origin: Option<String>) -> Result<String, String> {
     if width == 0 || height == 0 || width > attachments::STICKER_MAX_SIDE || height > attachments::STICKER_MAX_SIDE {
         return Err("Sticker must be at most 600 px a side".to_string());
     }
     let has_alpha = frames.iter().any(|f| f.chunks_exact(4).any(|p| p[3] != 255));
     let tmp = core_lock_read().attachments_dir()?.join("plain_cache").join(format!(".sticker-{}.jxl", uuid::Uuid::new_v4()));
     let encoded = attachments::encode_jxl_sticker(&mut frames, width, height, delays_ms, has_alpha, &tmp);
-    let result = encoded.and_then(|()| core_lock().store_sticker(&tmp, true));
+    let result = encoded.and_then(|()| core_lock().store_sticker(&tmp, true, origin.as_deref()));
     let _ = std::fs::remove_file(&tmp);
     result
 }
@@ -448,8 +458,9 @@ pub(crate) fn save_received_sticker_unlocked(file_id: &str) -> Result<String, St
     let (file_key, sha256_hex, enc_path, decrypted_path) = core_lock().begin_attachment_decrypt(file_id)?;
     let tmp = decrypted_path.with_file_name(format!(".sticker-{}.jxl", uuid::Uuid::new_v4()));
     let chunk_size = core_lock().file_chunk_size(file_id);
+    let origin = core_lock().file_sticker_origin(file_id);
     let result = attachments::decrypt_file_from_disk_with(&enc_path, &tmp, &file_key, &sha256_hex, chunk_size)
-        .and_then(|()| core_lock().store_sticker(&tmp, true));
+        .and_then(|()| core_lock().store_sticker(&tmp, true, origin.as_deref()));
     let _ = std::fs::remove_file(&tmp);
     result
 }
@@ -1609,6 +1620,50 @@ mod recovery_tests {
         assert_eq!(status, "offered");
         assert_eq!(core.storage_usage()["chats"][0]["bytes"].as_u64(), Some(30));
         assert!(core.remove_local_attachment("nope").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sticker_offer_with_known_origin_completes_locally() {
+        let dir = std::env::temp_dir().join(format!("typeon-stk-origin-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("attachments/plain_cache")).unwrap();
+        let mut core = core_on_disk(&dir);
+        let jxl = dir.join("s.jxl");
+        let mut frame = vec![200u8; 8 * 8 * 4];
+        attachments::encode_jxl_sticker(std::slice::from_mut(&mut frame), 8, 8, &[], false, &jxl).unwrap();
+        let wa = format!("wa:{}", "ab".repeat(32));
+        let id = core.store_sticker(&jxl, false, Some(&wa)).unwrap();
+        assert_eq!(core.store_sticker(&jxl, false, Some(&wa)).unwrap(), id, "same origin kept once");
+        let plain = std::fs::read(&jxl).unwrap();
+
+        let key = [9u8; 32];
+        let offer = |core: &mut P2PCore, fid: &str, origin: &str| {
+            core.receive_file_offer("peer", "ident", None, fid, "s.jxl", "image/jxl", 5, &key, &"0".repeat(64), &None, None, Some(attachments::FILE_CHUNK_SIZE_V2 as u32), "", None, None, None, true, Some(origin));
+        };
+        offer(&mut core, "known", &wa);
+        let (status, sha, total, origin): (String, String, i64, Option<String>) = core.db.as_ref().unwrap().query_row(
+            "SELECT status, sha256_hex, total_size, sticker_origin FROM files WHERE file_id = 'known'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+        assert_eq!((status.as_str(), total as usize, origin.as_deref()), ("complete", plain.len(), Some(wa.as_str())));
+        assert_eq!(sha, hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&plain)));
+        assert!(core.active_downloads.is_empty());
+        assert!(core.attachment_events.iter().any(|e| e.contains("file_complete") && e.contains("known")));
+        let (k, sha, enc, _) = core.begin_attachment_decrypt("known").unwrap();
+        let out = dir.join("out.jxl");
+        attachments::decrypt_file_from_disk_with(&enc, &out, &k, &sha, attachments::FILE_CHUNK_SIZE_V2).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), plain);
+
+        // An earlier complete attachment counts too.
+        let wb = format!("wa:{}", "cd".repeat(32));
+        core.db.as_ref().unwrap().execute("UPDATE files SET sticker_origin = ?1 WHERE file_id = 'known'", params![wb]).unwrap();
+        offer(&mut core, "again", &wb);
+        let status: String = core.db.as_ref().unwrap().query_row("SELECT status FROM files WHERE file_id = 'again'", [], |r| r.get(0)).unwrap();
+        assert_eq!(status, "complete");
+
+        // Unknown origin: normal path, nothing made locally.
+        offer(&mut core, "unknown", &format!("wa:{}", "ef".repeat(32)));
+        let status: String = core.db.as_ref().unwrap().query_row("SELECT status FROM files WHERE file_id = 'unknown'", [], |r| r.get(0)).unwrap();
+        assert_ne!(status, "complete");
+        assert!(!dir.join("attachments/unknown.enc").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -4691,6 +4746,12 @@ impl P2PCore {
         // My sticker store: `stickers/<id>.enc`, keyed like attachments.
         migrate("CREATE TABLE IF NOT EXISTS stickers (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, animated INTEGER NOT NULL, encrypted_key BLOB NOT NULL, key_nonce BLOB NOT NULL)");
         migrate("ALTER TABLE stickers ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0");
+        // Stable identity across devices, see `FileOffer.sticker_origin`.
+        migrate("ALTER TABLE stickers ADD COLUMN origin_id TEXT");
+        migrate("UPDATE stickers SET origin_id = 'jxl:' || id WHERE origin_id IS NULL");
+        migrate("CREATE UNIQUE INDEX IF NOT EXISTS idx_stickers_origin ON stickers(origin_id)");
+        migrate("ALTER TABLE files ADD COLUMN sticker_origin TEXT");
+        migrate("CREATE INDEX IF NOT EXISTS idx_files_sticker_origin ON files(sticker_origin)");
         // L-135: the group row id of a queued copy (its own ids are per member).
         migrate("ALTER TABLE pending_group_messages ADD COLUMN local_message_id TEXT");
         migrate("ALTER TABLE pending_durable_retries ADD COLUMN local_message_id TEXT");
@@ -11686,7 +11747,7 @@ impl P2PCore {
             MessageContent::FileOffer {
                 group_id, file_id, file_name, mime_type, total_size, file_key, sha256_hex,
                 preview_jpeg, duration_ms, chunk_size,
-                caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker,
+                caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin,
             } => {
                 // bkz. `sender_may_post_to_group` — grup Text koluyla AYNI
                 // boşluk, ve burada daha ağır: kabul edilen bir teklif node
@@ -11706,7 +11767,7 @@ impl P2PCore {
                     &peer_fp, &sender_identity_id, group_id, &file_id, &file_name, &mime_type,
                     total_size, &file_key, &sha256_hex, &preview_jpeg, duration_ms, chunk_size,
                     &caption, reply_to_message_id.as_deref(), reply_to_preview.as_deref(),
-                    reply_to_sender_identity_id.as_deref(), sticker,
+                    reply_to_sender_identity_id.as_deref(), sticker, sticker_origin.as_deref(),
                 );
                 // "noop" with no row = the row could not be written (key or DB
                 // not ready): no Ack, the sender offers again. Every other
@@ -12209,7 +12270,7 @@ impl P2PCore {
                             MessageContent::FileOffer {
                                 file_id, file_name, mime_type, total_size, file_key, sha256_hex,
                                 preview_jpeg, duration_ms, chunk_size,
-                                caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, ..
+                                caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, ..
                             } => {
                                 // Aynı yankı ikinci kez (regen/restart): satır varsa
                                 // dokunma — `receive_file_offer`'ın INSERT OR REPLACE'i
@@ -12227,7 +12288,7 @@ impl P2PCore {
                                         &peer_fp, &own_id, group_id.clone(), &file_id, &file_name, &mime_type,
                                         total_size, &file_key, &sha256_hex, &preview_jpeg, duration_ms, chunk_size,
                                         &caption, reply_to_message_id.as_deref(), reply_to_preview.as_deref(),
-                                        reply_to_sender_identity_id.as_deref(), sticker,
+                                        reply_to_sender_identity_id.as_deref(), sticker, sticker_origin.as_deref(),
                                     );
                                     if ev["type"] == "file_offer" {
                                         // Satır benim giden ekim. Grupta kaynak kardeş
@@ -12251,10 +12312,10 @@ impl P2PCore {
                             }
                             _ => serde_json::json!({"type": "noop"}),
                         },
-                        SiblingEchoBody::Sticker { jxl } => {
+                        SiblingEchoBody::Sticker { jxl, origin } => {
                             let stored = self.attachments_dir().and_then(|dir| {
                                 let tmp = dir.join("plain_cache").join(format!(".sticker-{}.jxl", uuid::Uuid::new_v4()));
-                                let r = std::fs::write(&tmp, &jxl).map_err(|e| e.to_string()).and_then(|()| self.store_sticker(&tmp, false));
+                                let r = std::fs::write(&tmp, &jxl).map_err(|e| e.to_string()).and_then(|()| self.store_sticker(&tmp, false, origin.as_deref()));
                                 let _ = std::fs::remove_file(&tmp);
                                 r
                             });
@@ -16753,6 +16814,47 @@ impl P2PCore {
         Ok(self.attachments_dir()?.join(format!("{}.enc", file_id)))
     }
 
+    /// Writes the sticker with `origin` (my store, else an earlier complete
+    /// attachment) as `file_id`'s `.enc` under the offer's key and marks the row complete.
+    fn reuse_local_sticker(&mut self, file_id: &str, file_key: &[u8; 32], chunk_size: usize, origin: &str) -> Result<(), String> {
+        let conn = self.db.as_ref().ok_or("DB not open")?;
+        let own: Option<String> = conn.query_row("SELECT id FROM stickers WHERE origin_id = ?1", params![origin], |r| r.get(0)).ok();
+        let plain = match own {
+            Some(id) => self.decrypt_sticker_to_tmp(&id)?,
+            None => {
+                let prior: String = conn.query_row(
+                    "SELECT file_id FROM files WHERE sticker_origin = ?1 AND status = 'complete' AND file_id != ?2 LIMIT 1",
+                    params![origin, file_id], |r| r.get(0),
+                ).map_err(|_| "No local copy".to_string())?;
+                let (key, sha, enc, _) = self.begin_attachment_decrypt(&prior)?;
+                let tmp = self.attachments_dir()?.join("plain_cache").join(format!(".sticker-{}.jxl", uuid::Uuid::new_v4()));
+                attachments::decrypt_file_from_disk_with(&enc, &tmp, &key, &sha, self.file_chunk_size(&prior))
+                    .inspect_err(|_| { let _ = std::fs::remove_file(&tmp); })?;
+                tmp
+            }
+        };
+        let dest = self.enc_path_for(file_id)?;
+        let enc = attachments::encrypt_file_to_disk_with(&plain, &dest, file_key, chunk_size);
+        let _ = std::fs::remove_file(&plain);
+        let (total, sha) = enc.inspect_err(|_| { let _ = std::fs::remove_file(&dest); })?;
+        let conn = self.db.as_ref().ok_or("DB not open")?;
+        conn.execute(
+            "UPDATE files SET sha256_hex = ?2, total_size = ?3, status = 'complete', bytes_transferred = ?3 WHERE file_id = ?1",
+            params![file_id, sha, total as i64],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn sticker_origin(&self, id: &str) -> Result<String, String> {
+        let conn = self.db.as_ref().ok_or("DB not open")?;
+        conn.query_row("SELECT origin_id FROM stickers WHERE id = ?1", params![id], |r| r.get(0)).map_err(|_| "Unknown sticker".to_string())
+    }
+
+    fn file_sticker_origin(&self, file_id: &str) -> Option<String> {
+        let conn = self.db.as_ref()?;
+        conn.query_row("SELECT sticker_origin FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0)).ok().flatten()
+    }
+
     fn stickers_dir(&self) -> Result<std::path::PathBuf, String> {
         let base = self.app_files_dir.as_ref().ok_or("initDatabase henüz çağrılmadı")?;
         Ok(std::path::Path::new(base).join("stickers"))
@@ -16791,7 +16893,7 @@ impl P2PCore {
     /// Stores a plain sticker JPEG XL at `src` in my sticker store (encrypted
     /// at rest, like attachments); id = SHA-256 hex of the bytes, so the same
     /// sticker is kept once. `sync`: also send it to my other devices.
-    fn store_sticker(&mut self, src: &std::path::Path, sync: bool) -> Result<String, String> {
+    fn store_sticker(&mut self, src: &std::path::Path, sync: bool, origin: Option<&str>) -> Result<String, String> {
         let animated = attachments::sticker_check(src)?;
         let dir = self.stickers_dir()?;
         let _ = std::fs::create_dir_all(&dir);
@@ -16805,20 +16907,22 @@ impl P2PCore {
         let (_, id) = attachments::encrypt_file_to_disk_with(src, &tmp, &file_key, attachments::FILE_CHUNK_SIZE_V2)
             .inspect_err(|_| { let _ = std::fs::remove_file(&tmp); })?;
         let conn = self.db.as_ref().ok_or("DB not open")?;
-        if conn.query_row("SELECT 1 FROM stickers WHERE id = ?1", params![id], |_| Ok(())).is_ok() {
+        let origin = origin.filter(|o| valid_sticker_origin(o)).map_or_else(|| format!("jxl:{id}"), str::to_string);
+        // Same bytes, or the same origin (a WhatsApp sticker encoded twice): kept once.
+        if let Ok(have) = conn.query_row("SELECT id FROM stickers WHERE id = ?1 OR origin_id = ?2", params![id, origin], |r| r.get::<_, String>(0)) {
             let _ = std::fs::remove_file(&tmp);
-            return Ok(id);
+            return Ok(have);
         }
         std::fs::rename(&tmp, dir.join(format!("{id}.enc"))).map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT INTO stickers (id, created_at, animated, encrypted_key, key_nonce) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, current_time_ms() as i64, animated, encrypted_key, key_nonce],
+            "INSERT INTO stickers (id, created_at, animated, encrypted_key, key_nonce, origin_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, current_time_ms() as i64, animated, encrypted_key, key_nonce, origin],
         ).map_err(|e| e.to_string())?;
         if sync {
             match std::fs::read(src) {
                 // ponytail: one envelope per sticker; a bigger one stays on this
                 // device. Send it as a file transfer if that turns out to matter.
-                Ok(jxl) if jxl.len() <= STICKER_SYNC_MAX_BYTES => self.send_to_siblings(SiblingEchoBody::Sticker { jxl }),
+                Ok(jxl) if jxl.len() <= STICKER_SYNC_MAX_BYTES => self.send_to_siblings(SiblingEchoBody::Sticker { jxl, origin: Some(origin) }),
                 Ok(jxl) => warn!("Sticker {} not synced: {} bytes", id, jxl.len()),
                 Err(e) => warn!("Sticker {} not synced: {}", id, e),
             }
@@ -17324,7 +17428,8 @@ impl P2PCore {
     /// kilitsiz fazda zaten bitti; burada anahtar sarmalanır, DB kaydı
     /// yazılır ve `FileOffer` gönderilir.
     #[allow(clippy::too_many_arguments)]
-    fn finish_outgoing_file(&mut self, peer_device_fingerprint: String, file_id: String, file_key: [u8; 32], total_size: u64, sha256_hex: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, sticker: bool) -> Result<(String, String), String> {
+    fn finish_outgoing_file(&mut self, peer_device_fingerprint: String, file_id: String, file_key: [u8; 32], total_size: u64, sha256_hex: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, sticker_origin: Option<String>) -> Result<(String, String), String> {
+        let sticker = sticker_origin.is_some();
         let (encrypted_key, key_nonce) = self.wrap_file_key(&file_key)?;
         if let Some(conn) = &self.db {
             // İKİ CİHAZLI GERÇEK TESTTE BULUNDU (2026-09-06): kolon listesi
@@ -17342,13 +17447,13 @@ impl P2PCore {
                 "INSERT OR REPLACE INTO files
                  (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
                   sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg, duration_ms, chunk_size,
-                  caption, reply_to_message_id, reply_to_preview, sticker)
-                 VALUES (?1, ?2, 'sent', ?3, ?4, ?5, ?6, ?7, ?8, 'complete', ?5, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                  caption, reply_to_message_id, reply_to_preview, sticker, sticker_origin)
+                 VALUES (?1, ?2, 'sent', ?3, ?4, ?5, ?6, ?7, ?8, 'complete', ?5, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     file_id, peer_device_fingerprint, file_name, mime_type, total_size as i64,
                     sha256_hex, encrypted_key, key_nonce, current_time_ms() as i64, preview_jpeg, duration_ms,
                     attachments::FILE_CHUNK_SIZE_V2 as i64,
-                    caption, reply_to_message_id, reply_to_preview, sticker,
+                    caption, reply_to_message_id, reply_to_preview, sticker, sticker_origin.clone(),
                 ],
             );
             // bkz. yukarıdaki not — bu INSERT sessizce başarısız oluyordu.
@@ -17383,6 +17488,7 @@ impl P2PCore {
             // AYNI kural).
             reply_to_sender_identity_id: None,
             sticker,
+            sticker_origin,
         };
         // Sunucu (bkz. `server_client`) varsa şifreli dosyayı oraya da
         // yükle — sunucu, istemcilerin ZATEN konuştuğu filexfer protokolünü
@@ -17421,7 +17527,8 @@ impl P2PCore {
     /// bakılır (kilitsiz şifreleme sırasında silinmiş olabilir — bu durumda
     /// temiz bir hata döner, `.enc` çağıran serbest fonksiyonda temizlenir).
     #[allow(clippy::too_many_arguments)]
-    fn finish_outgoing_group_file(&mut self, group_id: String, file_id: String, file_key: [u8; 32], total_size: u64, sha256_hex: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>, sticker: bool) -> Result<String, String> {
+    fn finish_outgoing_group_file(&mut self, group_id: String, file_id: String, file_key: [u8; 32], total_size: u64, sha256_hex: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>, sticker_origin: Option<String>) -> Result<String, String> {
+        let sticker = sticker_origin.is_some();
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(&group_id).cloned_group()?;
         let (encrypted_key, key_nonce) = self.wrap_file_key(&file_key)?;
@@ -17435,13 +17542,13 @@ impl P2PCore {
                 "INSERT OR REPLACE INTO files
                  (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
                   sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg, duration_ms, group_id, sender_identity_id, chunk_size,
-                  caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker)
-                 VALUES (?1, '', 'sent', ?2, ?3, ?4, ?5, ?6, ?7, 'complete', ?4, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                  caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin)
+                 VALUES (?1, '', 'sent', ?2, ?3, ?4, ?5, ?6, ?7, 'complete', ?4, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 params![
                     file_id, file_name, mime_type, total_size as i64,
                     sha256_hex, encrypted_key, key_nonce, current_time_ms() as i64, preview_jpeg, duration_ms,
                     group_id, own_identity_id, attachments::FILE_CHUNK_SIZE_V2 as i64,
-                    caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker,
+                    caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin.clone(),
                 ],
             );
             if let Err(e) = res {
@@ -17467,6 +17574,7 @@ impl P2PCore {
             reply_to_preview: reply_to_preview.clone(),
             reply_to_sender_identity_id: reply_to_sender_identity_id.clone(),
             sticker,
+            sticker_origin,
         };
         for member_identity_id in group.other_members(&own_identity_id) {
             // Like every other group send: all active devices, queued when no
@@ -17483,7 +17591,7 @@ impl P2PCore {
     /// ekler (node modu açıksa hemen indirmeyi başlatır — kapalıysa sadece
     /// meta veri görünür kalır, kullanıcı "İndir" demeli).
     #[allow(clippy::too_many_arguments)]
-    fn receive_file_offer(&mut self, peer_fp: &str, sender_identity_id: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str, preview_jpeg: &Option<Vec<u8>>, duration_ms: Option<u32>, chunk_size: Option<u32>, caption: &str, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sticker: bool) -> serde_json::Value {
+    fn receive_file_offer(&mut self, peer_fp: &str, sender_identity_id: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str, preview_jpeg: &Option<Vec<u8>>, duration_ms: Option<u32>, chunk_size: Option<u32>, caption: &str, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sticker: bool, sticker_origin: Option<&str>) -> serde_json::Value {
         // Spec dışı, güvenlik denetimi düzeltmesi: `MAX_ATTACHMENT_SIZE`
         // önceden SADECE gönderim tarafında (`prepare_and_send_file`/
         // `prepare_and_send_group_file`, bkz. o fonksiyonların kontrolü)
@@ -17600,6 +17708,7 @@ impl P2PCore {
         // took the whole budget). The rest stay "offered".
         // Stickers are small and shown at once: fetched in any node mode.
         let sticker = sticker && total_size <= attachments::MAX_STICKER_BYTES;
+        let sticker_origin = sticker_origin.filter(|o| sticker && valid_sticker_origin(o));
         let auto_download_requested = (sticker || self.node_mode_enabled && total_size <= self.history_storage_limit_bytes)
             && self.active_downloads.len() < 8
             && self.active_downloads.values().filter(|d| d.peer_device_fingerprint == peer_fp).count() < 4;
@@ -17616,8 +17725,8 @@ impl P2PCore {
                         "INSERT OR REPLACE INTO files
                          (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
                           sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg, duration_ms, group_id, sender_identity_id, chunk_size,
-                          caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker)
-                         VALUES (?1, ?2, 'received', ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                          caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin)
+                         VALUES (?1, ?2, 'received', ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                         params![
                             file_id, peer_fp, file_name, mime_type, total_size as i64,
                             sha256_hex, encrypted_key, key_nonce, status, current_time_ms() as i64, preview_jpeg, duration_ms,
@@ -17625,7 +17734,7 @@ impl P2PCore {
                             // `None` = guncellenmemis bir esten gelen teklif:
                             // miras 256 KiB (bkz. `FileOffer.chunk_size`).
                             chunk_size.map(|v| v as i64).unwrap_or(attachments::FILE_CHUNK_SIZE as i64),
-                            caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker,
+                            caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin,
                         ],
                     ).is_ok()
                 } else {
@@ -17652,7 +17761,19 @@ impl P2PCore {
         if !row_written {
             return serde_json::json!({"type": "noop"});
         }
-        let auto_downloading = auto_download_requested && {
+        // A sticker I already have (own store or an earlier copy): made here, no transfer.
+        let reused = match sticker_origin {
+            Some(origin) => {
+                let chunk = chunk_size.map_or(attachments::FILE_CHUNK_SIZE, |c| c as usize);
+                let r = self.reuse_local_sticker(file_id, file_key, chunk, origin);
+                if r.is_ok() {
+                    self.attachment_events.push(serde_json::json!({"type": "file_complete", "peer": peer_fp, "file_id": file_id}).to_string());
+                }
+                r.is_ok()
+            }
+            None => false,
+        };
+        let auto_downloading = !reused && auto_download_requested && {
             match self.download_file(file_id.to_string(), peer_fp.to_string()) {
                 Ok(()) => true,
                 Err(e) => {
@@ -24184,7 +24305,9 @@ fn sticker_reply(env: &mut JNIEnv, result: Result<Result<String, String>, String
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_importStickerFrames<'local>(
     mut env: JNIEnv<'local>, _class: JClass<'local>, frames: jni::objects::JObjectArray<'local>,
     width: jni::sys::jint, height: jni::sys::jint, delays_ms: jni::objects::JIntArray<'local>,
+    origin: JString<'local>,
 ) -> jstring {
+    let origin = jstr(&mut env, &origin);
     let count = env.get_array_length(&frames).unwrap_or(0).max(0) as usize;
     let mut delays = vec![0i32; env.get_array_length(&delays_ms).unwrap_or(0).max(0) as usize];
     let side = attachments::STICKER_MAX_SIDE as i32;
@@ -24209,7 +24332,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_importStickerFrames<'local>
         Ok(Err("Too many frames or bad sizes".to_string()))
     } else {
         let delays: Vec<u32> = delays.iter().map(|&d| d.max(0) as u32).collect();
-        catch_panic(move || import_sticker_frames_unlocked(pixels, width as u32, height as u32, &delays))
+        catch_panic(move || import_sticker_frames_unlocked(pixels, width as u32, height as u32, &delays, origin))
     };
     sticker_reply(&mut env, result)
 }

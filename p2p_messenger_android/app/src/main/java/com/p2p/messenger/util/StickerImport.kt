@@ -25,7 +25,7 @@ object StickerImport {
     private const val MAX_PIXELS = 24_000_000L
 
     /** [file] is a GIF, PNG, JPEG or WebP. Returns the sticker id or "Error: ...". */
-    fun importFile(file: File): String {
+    fun importFile(file: File, origin: String? = null): String {
         if (!file.exists() || file.length() == 0L) return "Error: dosya okunamadı"
         val head = ByteArray(4)
         val read = try { file.inputStream().use { it.read(head) } } catch (e: Exception) { return "Error: ${e.message}" }
@@ -36,15 +36,15 @@ object StickerImport {
             "RIFF" -> try { animatedWebp(file.readBytes()) } catch (e: Exception) { null }
             else -> null
         }
-        return if (animation != null) importAnimated(animation) else importStill(file)
+        return if (animation != null) importAnimated(animation, origin) else importStill(file, origin)
     }
 
     /** A still picture: one frame, no delay. */
-    private fun importStill(file: File): String {
+    private fun importStill(file: File, origin: String?): String {
         val bitmap = fit(decodeStill(file)) ?: return "Error: görsel çözülemedi"
         try {
             return P2PLib.importStickerFrames(
-                arrayOf(toRgba(bitmap)), bitmap.width, bitmap.height, intArrayOf(0)
+                arrayOf(toRgba(bitmap)), bitmap.width, bitmap.height, intArrayOf(0), origin
             )
         } finally {
             bitmap.recycle()
@@ -52,7 +52,7 @@ object StickerImport {
     }
 
     /** An animation, scaled to the sticker's cap. */
-    private fun importAnimated(gif: GifFrames): String {
+    private fun importAnimated(gif: GifFrames, origin: String?): String {
         var w = gif.width
         var h = gif.height
         var frames = gif.frames
@@ -69,7 +69,7 @@ object StickerImport {
         val budget = (MAX_PIXELS / (w.toLong() * h)).toInt().coerceAtLeast(1)
         val count = minOf(frames.size, budget)
         return P2PLib.importStickerFrames(
-            frames.copyOfRange(0, count), w, h, gif.delaysMs.copyOfRange(0, count)
+            frames.copyOfRange(0, count), w, h, gif.delaysMs.copyOfRange(0, count), origin
         )
     }
 
