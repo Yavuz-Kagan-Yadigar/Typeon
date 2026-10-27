@@ -897,10 +897,40 @@ fn gif_lzw(indices: &[u8], out: &mut Vec<u8>) {
     out.push(0);
 }
 
+/// Median-cut palette of up to 255 colours from a sample of the opaque pixels.
+fn median_cut_palette(pixels: &[[u8; 3]], opaque: &[bool]) -> Vec<[u8; 3]> {
+    let step = (pixels.len() / 16384).max(1);
+    let mut sample: Vec<[u8; 3]> = pixels.iter().zip(opaque).step_by(step).filter(|x| *x.1).map(|x| *x.0).collect();
+    if sample.is_empty() {
+        return vec![[0; 3]];
+    }
+    let mut boxes = vec![(0, sample.len())];
+    let spread = |s: &[[u8; 3]]| -> (u8, usize) {
+        (0..3).map(|c| {
+            let (lo, hi) = s.iter().fold((255u8, 0u8), |(l, h), p| (l.min(p[c]), h.max(p[c])));
+            (hi - lo, c)
+        }).max().unwrap()
+    };
+    while boxes.len() < 255 {
+        let Some((bi, (_, c))) = boxes.iter().enumerate().filter(|(_, b)| b.1 - b.0 > 1)
+            .map(|(i, b)| (i, spread(&sample[b.0..b.1]))).max_by_key(|x| x.1.0).filter(|x| x.1.0 > 0) else { break };
+        let (lo, hi) = boxes[bi];
+        sample[lo..hi].sort_unstable_by_key(|p| p[c]);
+        let mid = (lo + hi) / 2;
+        boxes[bi] = (lo, mid);
+        boxes.push((mid, hi));
+    }
+    boxes.iter().map(|&(lo, hi)| {
+        let n = (hi - lo) as u32;
+        [0, 1, 2].map(|c| (sample[lo..hi].iter().map(|p| u32::from(p[c])).sum::<u32>() / n) as u8)
+    }).collect()
+}
+
 /// H26: a received animated JPEG XL as an animated GIF for the viewers
-/// (neither Android nor GTK plays JPEG XL). One fixed 6x7x6 colour cube for
-/// all frames, alpha below half is transparent. ponytail: no dithering, banding
-/// on gradients; a per-frame median-cut palette if that shows.
+/// (neither Android nor GTK plays JPEG XL). Each frame gets its own median-cut
+/// local palette (255 colours + index 255 transparent; alpha below half is
+/// transparent). ponytail: no dithering; palette from ~16k sampled pixels, pixels
+/// map through a 15-bit nearest-colour cache.
 pub fn jxl_to_gif(src: &Path, out: &Path) -> Result<(), String> {
     use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, RenderingIntent};
     let mut image = JxlImage::builder()
@@ -925,14 +955,12 @@ pub fn jxl_to_gif(src: &Path, out: &Path) -> Result<(), String> {
     let mut gif = b"GIF89a".to_vec();
     gif.extend_from_slice(&(width as u16).to_le_bytes());
     gif.extend_from_slice(&(height as u16).to_le_bytes());
-    gif.extend_from_slice(&[0xF7, 0, 0]); // global table of 256 colours
-    for i in 0..256u32 {
-        let rgb = if i < 252 { [i / 42 * 51, i / 6 % 7 * 255 / 6, i % 6 * 51] } else { [0; 3] };
-        gif.extend(rgb.map(|c| c as u8));
-    }
+    gif.extend_from_slice(&[0, 0, 0]); // no global table: every frame has its own
     gif.extend_from_slice(b"\x21\xFF\x0BNETSCAPE2.0\x03\x01\0\0\0"); // loop forever
     let mut row = Vec::new();
     let mut indices = Vec::with_capacity(width as usize * height as usize);
+    let mut pixels: Vec<[u8; 3]> = Vec::with_capacity(width as usize * height as usize);
+    let mut opaque: Vec<bool> = Vec::with_capacity(width as usize * height as usize);
     for k in 0..frames {
         let render = image.render_frame(k).map_err(|e| format!("JPEG XL: {e}"))?;
         let mut stream = render.stream();
@@ -942,7 +970,8 @@ pub fn jxl_to_gif(src: &Path, out: &Path) -> Result<(), String> {
         }
         let has_alpha = ch == 2 || ch == 4;
         row.resize(width as usize * ch, 0);
-        indices.clear();
+        pixels.clear();
+        opaque.clear();
         for _ in 0..height {
             let mut filled = 0;
             while filled < row.len() {
@@ -953,14 +982,25 @@ pub fn jxl_to_gif(src: &Path, out: &Path) -> Result<(), String> {
                 filled += n;
             }
             for p in row.chunks(ch) {
-                let (r, g, b) = if ch >= 3 { (p[0], p[1], p[2]) } else { (p[0], p[0], p[0]) };
-                indices.push(if has_alpha && p[ch - 1] < 128 {
-                    TRANSPARENT
-                } else {
-                    let q = |v: u8, levels: u32| (u32::from(v) * (levels - 1) + 127) / 255;
-                    (q(r, 6) * 42 + q(g, 7) * 6 + q(b, 6)) as u8
-                });
+                pixels.push(if ch >= 3 { [p[0], p[1], p[2]] } else { [p[0]; 3] });
+                opaque.push(!(has_alpha && p[ch - 1] < 128));
             }
+        }
+        let palette = median_cut_palette(&pixels, &opaque);
+        let mut cache = vec![u8::MAX; 1 << 15]; // 5 bits a channel; 255 = unfilled (never a real index)
+        indices.clear();
+        for (p, &o) in pixels.iter().zip(&opaque) {
+            indices.push(if !o {
+                TRANSPARENT
+            } else {
+                let key = (usize::from(p[0] >> 3) << 10) | (usize::from(p[1] >> 3) << 5) | usize::from(p[2] >> 3);
+                if cache[key] == u8::MAX {
+                    cache[key] = (0..palette.len()).min_by_key(|&i| {
+                        (0..3).map(|c| (i32::from(palette[i][c]) - i32::from(p[c])).pow(2)).sum::<i32>()
+                    }).unwrap_or(0) as u8;
+                }
+                cache[key]
+            });
         }
         let delay = (u64::from(render.duration()) * tps_den * 100 / tps_num).min(u16::MAX as u64) as u16;
         // Disposal 2 (clear) under transparency, else 1 (keep).
@@ -970,7 +1010,10 @@ pub fn jxl_to_gif(src: &Path, out: &Path) -> Result<(), String> {
         gif.extend_from_slice(&[TRANSPARENT, 0, 0x2C, 0, 0, 0, 0]);
         gif.extend_from_slice(&(width as u16).to_le_bytes());
         gif.extend_from_slice(&(height as u16).to_le_bytes());
-        gif.push(0);
+        gif.push(0x87); // local table of 256 colours
+        for i in 0..256 {
+            gif.extend_from_slice(&palette.get(i).copied().unwrap_or([0; 3]));
+        }
         gif_lzw(&indices, &mut gif);
     }
     gif.push(0x3B);
@@ -1133,6 +1176,21 @@ mod tests {
             assert!(out.starts_with(b"GIF89a") && out.ends_with(&[0x3B]));
             assert_eq!(sticker_check(&jxl), Ok(true), "{w}x{h} is a sticker");
         }
+        // Smooth gradient: first frame's local palette must be rich, not a 6x7x6 cube.
+        let (w, h) = (256u32, 64u32);
+        let grad: Vec<u8> = (0..w * h).flat_map(|i| { let x = (i % w) as u8; [x, x / 2 + 40, 255 - x, 255] }).collect();
+        encode_jxl_animated(&mut vec![grad.clone(), grad.clone()], w, h, &[40, 40], false, &jxl).unwrap();
+        jxl_to_gif(&jxl, &gif).unwrap();
+        let g = std::fs::read(&gif).unwrap();
+        let d = 13 + 19 + 8; // header, loop ext, GCE
+        assert_eq!(g[d], 0x2C);
+        assert_eq!(g[d + 9], 0x87);
+        let pal: Vec<[u8; 3]> = g[d + 10..d + 10 + 768].chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
+        let distinct: std::collections::HashSet<_> = pal.iter().collect();
+        assert!(distinct.len() > 64, "{} palette colours", distinct.len());
+        // Every pixel is close to some palette colour (red channel spans 0..255).
+        let err: u32 = (0..w).map(|x| pal.iter().map(|p| (i32::from(p[0]) - x as i32).unsigned_abs()).min().unwrap()).sum();
+        assert!(err / w < 6, "mean red error {}", err / w);
         encode_jxl_lossless(&mut vec![9; 600 * 2 * 4], 600, 2, true, &jxl).unwrap();
         assert_eq!(sticker_check(&jxl), Ok(false), "still sticker");
         encode_jxl_lossless(&mut vec![9; 601 * 2 * 4], 601, 2, true, &jxl).unwrap();
