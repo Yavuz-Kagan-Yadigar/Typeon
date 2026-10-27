@@ -2366,7 +2366,7 @@ impl P2PCore {
                 // Cursor = the page's last record (server order: time, id desc).
                 let oldest = records.last().map(|r| (r.sent_at_ms, r.record_id.clone()));
                 let got = !records.is_empty();
-                self.merge_server_archive(&conv_key, group, bucket_more.as_deref().unwrap_or(""), records);
+                self.merge_server_archive(&conv_key, group, bucket_more.as_deref().unwrap_or(""), records, paging);
                 // "Fetch older": one page per request; the next one starts
                 // from the new oldest message.
                 if paging && got {
@@ -3406,7 +3406,19 @@ impl P2PCore {
         } else {
             self.identity_id_for_device(chat_key).ok_or("Bu cihazın kimliği bilinmiyor")?
         };
-        let before = if before_ms == 0 { current_time_ms() } else { before_ms } as i64;
+        // One press = one month older than the oldest row the chat has
+        // locally (now for an empty chat), whatever the screen shows.
+        let local_oldest = if is_group {
+            self.oldest_local_sent_ms("", Some(chat_key))
+        } else {
+            self.oldest_local_sent_ms(&self.canonical_peer_key(chat_key), None)
+        };
+        let before_ms = match (before_ms, local_oldest) {
+            (0, None) => current_time_ms(),
+            (0, Some(o)) => o,
+            (b, o) => o.map_or(b, |o| o.min(b)),
+        };
+        let before = before_ms as i64;
         // No reachable peer or sibling is not an error: the other sources remain.
         if is_group {
             let _ = self.request_older_group_history(chat_key, before, crate::HISTORY_SYNC_MAX_MESSAGES);
@@ -3462,9 +3474,14 @@ impl P2PCore {
     /// Mevcut `HistorySyncResponse` birleştirme kuralının aynısı:
     /// `message_id` bazlı var-olma kontrolü (zaman damgası eşiği DEĞİL —
     /// sayfalama isteklerinde o yanlış yönde çalışır).
-    fn merge_server_archive(&mut self, conv_key: &str, group: bool, bucket: &str, records: Vec<ArchiveRecord>) {
+    /// `user_fetch`: a page of the user's "Fetch older history" press. It
+    /// takes one month (`month_window` from the page's newest record; the
+    /// rest comes with the next press) and may bring back rows below the
+    /// history floor, which then goes down to that month's start.
+    fn merge_server_archive(&mut self, conv_key: &str, group: bool, bucket: &str, records: Vec<ArchiveRecord>, user_fetch: bool) {
         let Some(ark) = self.archive_root_key else { return };
         let mut merged = 0usize;
+        let mut opened: Vec<(ArchiveRecord, crate::ArchivedMessage)> = Vec::new();
         for rec in records {
             let plaintext = match server_seal::open_archive_record(
                 &ark,
@@ -3488,6 +3505,15 @@ impl P2PCore {
                     continue;
                 }
             };
+            opened.push((rec, archived));
+        }
+        let sent_at = |(_, a): &(ArchiveRecord, crate::ArchivedMessage)| if a.sent_at_ms != 0 { a.sent_at_ms } else { a.timestamp };
+        // The server's cursor is the hour-floored wire time, so the page can
+        // start a little after the cursor: no upper cut here, ids dedup.
+        let window_start = user_fetch.then(|| crate::month_window(&mut opened, u64::MAX, sent_at));
+        let floor = if user_fetch { 0 } else { self.history_floor(conv_key) };
+        let fetched = !opened.is_empty();
+        for (rec, archived) in opened {
             // The wire id is keyed (`archive_wire_id`); the real one is inside
             // the sealed record and must be the one the wire id was made from.
             let Some(record_id) = archived.message_id.clone()
@@ -3507,7 +3533,7 @@ impl P2PCore {
             // Cleared or pruned by the user (`history_floor`; `conv_key` is
             // the identity id or group id the floor is kept under).
             let at = if archived.sent_at_ms != 0 { archived.sent_at_ms } else { archived.timestamp };
-            if at < self.history_floor(conv_key) {
+            if at < floor {
                 continue;
             }
             let result = if group {
@@ -3545,6 +3571,10 @@ impl P2PCore {
                 Ok(()) => merged += 1,
                 Err(e) => warn!("Sunucu arşiv satırı yazılamadı: {}", e),
             }
+        }
+        // The user fetched this month back: it is not "cleared" any more.
+        if let (Some(start), true) = (window_start, fetched) {
+            self.lower_history_floor(conv_key, start);
         }
         if merged > 0 {
             // Bu olay HİÇBİR istemciye ulaşmıyordu (bu denetimde bulundu).
