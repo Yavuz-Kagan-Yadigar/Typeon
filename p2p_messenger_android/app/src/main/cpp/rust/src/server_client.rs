@@ -345,21 +345,22 @@ pub(crate) enum ServerInflight {
     /// daha eskisini istemek için kovanın kimliği.
     ///
     /// `rest`: buckets of the same conversation still to fetch, one at a time.
-    /// `paging`: a "fetch older" request: it stops at the first page that
-    /// brought records. `next`: conversations of a full restore still to
-    /// probe, one after the other.
+    /// `window`: a "Fetch older history" press `(before, after)` by send
+    /// time: pages run until they pass `after`. `next`: conversations of a
+    /// full restore still to probe, one after the other.
     ArchiveFetch {
         server_id: String,
         conv_key: String,
         group: bool,
         bucket_more: Option<String>,
         rest: Vec<String>,
-        paging: bool,
+        window: Option<(u64, u64)>,
         next: Vec<(String, bool)>,
     },
-    /// `before_ms`: "fetch older history" page older than this, from the
-    /// newest present bucket back; `None`: full restore, every present bucket.
-    ArchiveProbe { server_id: String, conv_key: String, group: bool, before_ms: Option<u64>, next: Vec<(String, bool)> },
+    /// `window`: a "Fetch older history" press `(before, after)`, the
+    /// present buckets that reach it, newest first; `None`: full restore,
+    /// every present bucket.
+    ArchiveProbe { server_id: String, conv_key: String, group: bool, window: Option<(u64, u64)>, next: Vec<(String, bool)> },
     /// The buckets of replaced archive keys, bkz. `purge_retired_archive`.
     /// `keys`: the `ark_purge` value this run covers; `rest`: buckets not sent yet.
     ArchivePurge { server_id: String, keys: String, rest: Vec<String> },
@@ -2337,11 +2338,12 @@ impl P2PCore {
                 let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { return };
                 self.send_archive_purge(peer_id, server_id, keys, rest);
             }
-            (ServerInflight::ArchiveProbe { server_id, conv_key, group, before_ms, next }, ServerResponse::ArchiveProbed { mut present }) => {
+            (ServerInflight::ArchiveProbe { server_id, conv_key, group, window, next }, ServerResponse::ArchiveProbed { mut present }) => {
                 let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { return };
-                // Older history: newest present bucket first, read from
-                // `before_ms` back, then the older buckets in turn.
-                if before_ms.is_some() {
+                // A press: the buckets that reach its window, newest first,
+                // each read from `before` back.
+                if let Some((_, after)) = window {
+                    present.retain(|b| b.newest_ms >= archive_wire_ms(after));
                     present.sort_by(|a, b| b.newest_ms.cmp(&a.newest_ms));
                 }
                 let mut wanted: Vec<String> = present.into_iter().map(|b| b.bucket).collect();
@@ -2352,11 +2354,11 @@ impl P2PCore {
                     self.probe_next_conversation(peer_id, server_id, next);
                 } else {
                     let bucket = wanted.remove(0);
-                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, before_ms.map(|ms| (ms, String::new())), wanted, before_ms.is_some(), next);
+                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, window.map(|(before, _)| (before, String::new())), wanted, window, next);
                 }
             }
             (
-                ServerInflight::ArchiveFetch { server_id, conv_key, group, bucket_more, mut rest, paging, next },
+                ServerInflight::ArchiveFetch { server_id, conv_key, group, bucket_more, mut rest, window, next },
                 ServerResponse::ArchiveBatch { records, more },
             ) => {
                 // Sayfa yeniden eskiye geliyor; devamı için son kaydın
@@ -2365,19 +2367,20 @@ impl P2PCore {
                 // erişilemez kalırdı.
                 // Cursor = the page's last record (server order: time, id desc).
                 let oldest = records.last().map(|r| (r.sent_at_ms, r.record_id.clone()));
-                let got = !records.is_empty();
-                self.merge_server_archive(&conv_key, group, bucket_more.as_deref().unwrap_or(""), records, paging);
-                // "Fetch older": one page per request; the next one starts
-                // from the new oldest message.
-                if paging && got {
-                    return;
+                self.merge_server_archive(&conv_key, group, bucket_more.as_deref().unwrap_or(""), records, window);
+                // A press: this page went past the window's start, so this
+                // bucket and the older ones hold nothing more of it.
+                if let (Some((_, after)), Some((oldest_ms, _))) = (window, &oldest) {
+                    if *oldest_ms < archive_wire_ms(after) {
+                        return;
+                    }
                 }
                 let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { return };
                 if let (true, Some(bucket), Some(before)) = (more, bucket_more, oldest) {
-                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, Some(before), rest, paging, next);
+                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, Some(before), rest, window, next);
                 } else if !rest.is_empty() {
                     let bucket = rest.remove(0);
-                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, None, rest, paging, next);
+                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, None, rest, window, next);
                 } else {
                     self.probe_next_conversation(peer_id, server_id, next);
                 }
@@ -2534,6 +2537,7 @@ impl P2PCore {
         // "OK", and the rest of this conversation's buckets is not asked for.
         if let ServerInflight::ArchiveFetch { .. } | ServerInflight::ArchiveProbe { .. } = &inflight {
             warn!("Sunucu geçmiş isteğini reddetti ({:?}), geri yükleme eksik", code);
+            self.reopen_fetch_window(&inflight);
             self.attachment_events.push(serde_json::json!({"type": "history_restore_incomplete"}).to_string());
         }
 
@@ -2691,6 +2695,7 @@ impl P2PCore {
         // The caller of a restore already got "OK": tell the UI it is partial.
         if let ServerInflight::ArchiveFetch { .. } | ServerInflight::ArchiveProbe { .. } = &inflight {
             warn!("Sunucu geçmiş isteği yanıtsız kaldı, geri yükleme eksik");
+            self.reopen_fetch_window(&inflight);
             self.attachment_events.push(serde_json::json!({"type": "history_restore_incomplete"}).to_string());
         }
         self.retry_deposit_over_gossipsub(&inflight);
@@ -2705,7 +2710,7 @@ impl P2PCore {
         bucket: String,
         before: Option<(u64, String)>,
         rest: Vec<String>,
-        paging: bool,
+        window: Option<(u64, u64)>,
         next: Vec<(String, bool)>,
     ) {
         let req = ServerRequest::ArchiveFetch {
@@ -2718,7 +2723,7 @@ impl P2PCore {
         if let Some(id) = self.send_server_request(peer_id, req) {
             self.server_inflight.insert(
                 id,
-                ServerInflight::ArchiveFetch { server_id, conv_key, group, bucket_more: Some(bucket), rest, paging, next },
+                ServerInflight::ArchiveFetch { server_id, conv_key, group, bucket_more: Some(bucket), rest, window, next },
             );
         }
     }
@@ -2733,7 +2738,7 @@ impl P2PCore {
         let (conv_key, group) = next.remove(0);
         let req = ServerRequest::ArchiveProbe { buckets: archive_buckets(&ark, &conv_key, current_time_ms()) };
         if let Some(id) = self.send_server_request(peer_id, req) {
-            self.server_inflight.insert(id, ServerInflight::ArchiveProbe { server_id, conv_key, group, before_ms: None, next });
+            self.server_inflight.insert(id, ServerInflight::ArchiveProbe { server_id, conv_key, group, window: None, next });
         }
     }
 
@@ -3358,23 +3363,17 @@ impl P2PCore {
     /// soruyor; bu da sunucuya soruyor. Üçü paralel gider, yanıtlar
     /// `message_id` bazında dedup edilir, hangisi önce dönerse boşluğu o
     /// doldurur.
-    fn request_older_server_history(&mut self, conv_key: &str, group: bool, before_ms: u64) {
+    ///
+    /// The window `[after, before)` of a "Fetch older history" press: every
+    /// page of it, from the buckets that reach it. A full restore of the
+    /// same conversation may run beside it; it respects the history floor,
+    /// this chain does not, inside its window.
+    fn request_older_server_history(&mut self, conv_key: &str, group: bool, before: u64, after: u64) {
         let Some(ark) = self.archive_root_key else { return };
         let Some(server_id) = self.history_server() else { return };
         let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { return };
-        // A chain for this conversation is running: it already walks every
-        // older bucket.
-        if self.server_inflight.values().any(|f| matches!(f,
-            ServerInflight::ArchiveProbe { conv_key: c, .. } | ServerInflight::ArchiveFetch { conv_key: c, .. } if c == conv_key))
-        {
-            return;
-        }
-
-        // Hangi kovalar var? Sabit bir sohbet kimliği yerine aylık kovalar
-        // kullanıldığından (bkz. `server_archive_bucket`), önce son ~36 ayı
-        // TEK istekte yokluyoruz.
-        let before_ms = if before_ms == 0 { current_time_ms() } else { before_ms };
-        let buckets = archive_buckets(&ark, conv_key, before_ms);
+        // Aylık kovalar (bkz. `server_archive_bucket`): `before`'ın ayı ve öncesi.
+        let buckets = archive_buckets(&ark, conv_key, before);
         let req = ServerRequest::ArchiveProbe { buckets };
         if let Some(id) = self.send_server_request(peer_id, req) {
             self.server_inflight.insert(
@@ -3383,21 +3382,47 @@ impl P2PCore {
                     server_id,
                     conv_key: conv_key.to_string(),
                     group,
-                    before_ms: Some(before_ms),
+                    window: Some((before, after)),
                     next: Vec::new(),
                 },
             );
         }
     }
 
+    /// A press's server chain failed: the cursor goes back up to its window's
+    /// end, so the next press asks every source for that window again (rows
+    /// dedup by id) instead of skipping the server's part of it for good.
+    fn reopen_fetch_window(&self, inflight: &ServerInflight) {
+        if let ServerInflight::ArchiveProbe { conv_key, window: Some((before, _)), .. }
+        | ServerInflight::ArchiveFetch { conv_key, window: Some((before, _)), .. } = inflight
+        {
+            let k = format!("hfetch:{}", conv_key);
+            if self.meta_str(&k).and_then(|v| v.parse::<u64>().ok()).is_some_and(|c| c < *before) {
+                self.meta_put(&k, &before.to_string());
+            }
+        }
+    }
+
+    /// Drops the running "Fetch older history" chains of a conversation
+    /// (`forget_history_fetch`): their late pages are then unexpected and
+    /// dropped. A full restore chain stays; it respects the history floor.
+    pub(crate) fn drop_archive_page_chains(&mut self, conv_key: &str) {
+        self.server_inflight.retain(|_, f| !matches!(f,
+            ServerInflight::ArchiveProbe { conv_key: c, window: Some(_), .. }
+            | ServerInflight::ArchiveFetch { conv_key: c, window: Some(_), .. } if c == conv_key));
+    }
 
     /// The single "fetch older history" action, on a user action only:
-    /// scrolling up reads the local archive and never comes here. Asks the
-    /// chat peer(s) and the own connected devices for the page older than
-    /// `before_ms` (0 = from the newest), and the server archive when a
-    /// history server and the archive key exist. `chat_key`: the peer device
-    /// fingerprint, or the group id.
-    pub(crate) fn fetch_server_history(&mut self, chat_key: &str, is_group: bool, before_ms: u64) -> Result<(), String> {
+    /// scrolling up reads the local archive and never comes here. One press
+    /// asks every source (the chat peer(s), the own connected devices, the
+    /// server archive when a history server and the archive key exist) for
+    /// the same window: one `HISTORY_FETCH_WINDOW_MS` older than the chat's
+    /// cursor (`history_fetch_cursor`), which then moves to the window's
+    /// start. The cursor never comes from the rows that arrive, so an empty
+    /// month still moves it and a backdated row cannot pin it. `chat_key`:
+    /// the peer device fingerprint, or the group id. `_before_ms` (the
+    /// oldest row on screen) is not used: the cursor is kept here.
+    pub(crate) fn fetch_server_history(&mut self, chat_key: &str, is_group: bool, _before_ms: u64) -> Result<(), String> {
         let conv_key = if is_group {
             if !self.groups.contains_key(chat_key) {
                 return Err("Grup bulunamadı".to_string());
@@ -3406,29 +3431,25 @@ impl P2PCore {
         } else {
             self.identity_id_for_device(chat_key).ok_or("Bu cihazın kimliği bilinmiyor")?
         };
-        // One press = one month older than the oldest row the chat has
-        // locally (now for an empty chat), whatever the screen shows.
-        let local_oldest = if is_group {
-            self.oldest_local_sent_ms("", Some(chat_key))
+        let before = if is_group {
+            self.history_fetch_cursor(&conv_key, "", Some(chat_key))
         } else {
-            self.oldest_local_sent_ms(&self.canonical_peer_key(chat_key), None)
+            self.history_fetch_cursor(&conv_key, &self.canonical_peer_key(chat_key), None)
         };
-        let before_ms = match (before_ms, local_oldest) {
-            (0, None) => current_time_ms(),
-            (0, Some(o)) => o,
-            (b, o) => o.map_or(b, |o| o.min(b)),
-        };
-        let before = before_ms as i64;
+        let after = before.saturating_sub(crate::HISTORY_FETCH_WINDOW_MS);
+        self.meta_put(&format!("hfetch:{}", conv_key), &after.to_string());
+        self.history_fetch_pages.insert(conv_key.clone(), crate::HISTORY_FETCH_MAX_PAGES);
+        let (b, a) = (before as i64, after as i64);
         // No reachable peer or sibling is not an error: the other sources remain.
         if is_group {
-            let _ = self.request_older_group_history(chat_key, before, crate::HISTORY_SYNC_MAX_MESSAGES);
-            let _ = self.request_older_sibling_history(None, Some(chat_key), before, crate::HISTORY_SYNC_MAX_MESSAGES);
+            let _ = self.request_older_group_history(chat_key, b, a);
+            let _ = self.request_older_sibling_history(None, Some(chat_key), b, a, None);
         } else {
-            let _ = self.request_older_history(chat_key, before, crate::HISTORY_SYNC_MAX_MESSAGES);
-            let _ = self.request_older_sibling_history(Some(chat_key), None, before, crate::HISTORY_SYNC_MAX_MESSAGES);
+            let _ = self.request_older_history(chat_key, b, a);
+            let _ = self.request_older_sibling_history(Some(&conv_key), None, b, a, None);
         }
         // Returns at once without the archive key or a history server.
-        self.request_older_server_history(&conv_key, is_group, before_ms);
+        self.request_older_server_history(&conv_key, is_group, before, after);
         Ok(())
     }
 
@@ -3474,11 +3495,11 @@ impl P2PCore {
     /// Mevcut `HistorySyncResponse` birleştirme kuralının aynısı:
     /// `message_id` bazlı var-olma kontrolü (zaman damgası eşiği DEĞİL —
     /// sayfalama isteklerinde o yanlış yönde çalışır).
-    /// `user_fetch`: a page of the user's "Fetch older history" press. It
-    /// takes one month (`month_window` from the page's newest record; the
-    /// rest comes with the next press) and may bring back rows below the
-    /// history floor, which then goes down to that month's start.
-    fn merge_server_archive(&mut self, conv_key: &str, group: bool, bucket: &str, records: Vec<ArchiveRecord>, user_fetch: bool) {
+    /// `window`: a page of the user's "Fetch older history" press
+    /// `(before, after)`. Only its rows sent inside the window are kept; they
+    /// may come back below the history floor, which then goes down to the
+    /// oldest row written.
+    fn merge_server_archive(&mut self, conv_key: &str, group: bool, bucket: &str, records: Vec<ArchiveRecord>, window: Option<(u64, u64)>) {
         let Some(ark) = self.archive_root_key else { return };
         let mut merged = 0usize;
         let mut opened: Vec<(ArchiveRecord, crate::ArchivedMessage)> = Vec::new();
@@ -3507,12 +3528,21 @@ impl P2PCore {
             };
             opened.push((rec, archived));
         }
-        let sent_at = |(_, a): &(ArchiveRecord, crate::ArchivedMessage)| if a.sent_at_ms != 0 { a.sent_at_ms } else { a.timestamp };
-        // The server's cursor is the hour-floored wire time, so the page can
-        // start a little after the cursor: no upper cut here, ids dedup.
-        let window_start = user_fetch.then(|| crate::month_window(&mut opened, u64::MAX, sent_at));
-        let floor = if user_fetch { 0 } else { self.history_floor(conv_key) };
-        let fetched = !opened.is_empty();
+        // A press keeps only rows sent inside its window (the server pages by
+        // the hour-floored wire time, so a page reaches a little past both
+        // ends; those rows belong to the neighbouring windows) and only
+        // those may come back below the history floor.
+        let floor = match window {
+            Some((before, after)) => {
+                opened.retain(|(_, a)| {
+                    let at = if a.sent_at_ms != 0 { a.sent_at_ms } else { a.timestamp };
+                    (after..before).contains(&at)
+                });
+                0
+            }
+            None => self.history_floor(conv_key),
+        };
+        let mut oldest_written: Option<u64> = None;
         for (rec, archived) in opened {
             // The wire id is keyed (`archive_wire_id`); the real one is inside
             // the sealed record and must be the one the wire id was made from.
@@ -3568,13 +3598,17 @@ impl P2PCore {
                 }
             };
             match result {
-                Ok(()) => merged += 1,
+                Ok(()) => {
+                    merged += 1;
+                    oldest_written = Some(oldest_written.map_or(at, |o| o.min(at)));
+                }
                 Err(e) => warn!("Sunucu arşiv satırı yazılamadı: {}", e),
             }
         }
-        // The user fetched this month back: it is not "cleared" any more.
-        if let (Some(start), true) = (window_start, fetched) {
-            self.lower_history_floor(conv_key, start);
+        // The user fetched rows back: from the oldest one written on they
+        // are not "cleared" any more.
+        if let (Some(_), Some(o)) = (window, oldest_written) {
+            self.lower_history_floor(conv_key, o);
         }
         if merged > 0 {
             // Bu olay HİÇBİR istemciye ulaşmıyordu (bu denetimde bulundu).

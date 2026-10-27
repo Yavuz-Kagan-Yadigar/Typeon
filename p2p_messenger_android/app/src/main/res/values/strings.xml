@@ -277,6 +277,7 @@
     <string name="error_with_message">Error: %1$s</string>
 
     <string name="action_save_to_downloads">Save to Downloads</string>
+    <string name="action_save_as_jxl">Save as JPEG XL</string>
     <string name="action_copy_image">Copy image</string>
     <string name="msg_saved_to_downloads">Saved to Downloads/P2P</string>
     <string name="action_open_with">Open with…</string>

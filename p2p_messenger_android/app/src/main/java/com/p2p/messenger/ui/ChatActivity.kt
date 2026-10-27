@@ -1686,6 +1686,8 @@ class ChatActivity : AppCompatActivity() {
         val options = mutableListOf<String>().apply {
             add(getString(R.string.action_open_with))
             add(getString(R.string.action_save_to_downloads))
+            // Save to Downloads hands out a JPEG XL as PNG/GIF; this keeps the original.
+            if (attachment.fileName.endsWith(".jxl", true) || attachment.mimeType == "image/jxl") add(getString(R.string.action_save_as_jxl))
             if (attachment.mimeType.startsWith("image/")) add(getString(R.string.action_copy_image))
             if (attachment.isSticker && !item.isMine) add(getString(R.string.action_add_to_my_stickers))
             if (item.isMine) add(getString(R.string.action_delete_message))
@@ -1695,6 +1697,7 @@ class ChatActivity : AppCompatActivity() {
                 when (options[which]) {
                     getString(R.string.action_open_with) -> openAttachmentWithChooser(attachment)
                     getString(R.string.action_save_to_downloads) -> saveAttachmentToDownloads(attachment)
+                    getString(R.string.action_save_as_jxl) -> saveAttachmentToDownloads(attachment, original = true)
                     getString(R.string.action_copy_image) -> OutgoingMedia.copyImage(this, attachment.fileId)
                     getString(R.string.action_add_to_my_stickers) -> stickerPicker.saveReceived(attachment.fileId)
                     getString(R.string.action_delete_message) -> confirmDeleteMessage(item)
@@ -1735,10 +1738,12 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    private fun saveAttachmentToDownloads(attachment: SimpleChatAdapter.AttachmentInfo) {
+    /** `original`: a JPEG XL as it came (`image/jxl`), not converted. */
+    private fun saveAttachmentToDownloads(attachment: SimpleChatAdapter.AttachmentInfo, original: Boolean = false) {
         lifecycleScope.launch(Dispatchers.IO) {
             val plainPath = try {
-                P2PLib.getAttachmentPlaintextPath(attachment.fileId)
+                if (original) P2PLib.getAttachmentOriginalPath(attachment.fileId)
+                else P2PLib.getAttachmentPlaintextPath(attachment.fileId)
             } catch (e: Exception) {
                 "Error: ${e.message}"
             }
@@ -1748,7 +1753,8 @@ class ChatActivity : AppCompatActivity() {
                 }
                 return@launch
             }
-            val (name, mime) = OutgoingMedia.savedAs(File(plainPath), attachment.fileName, attachment.mimeType)
+            val (name, mime) = if (original) attachment.fileName to "image/jxl"
+                else OutgoingMedia.savedAs(File(plainPath), attachment.fileName, attachment.mimeType)
             val saved = saveToPublicDownloads(File(plainPath), name, mime)
             withContext(Dispatchers.Main) {
                 Toast.makeText(

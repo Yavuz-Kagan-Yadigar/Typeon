@@ -430,21 +430,6 @@ pub fn request_history_sync(fingerprint: &str, limit: u32) {
     api::request_history_sync(fingerprint, limit);
 }
 
-pub fn request_older_message_history(fingerprint: &str, before_timestamp: i64, limit: u32) {
-    api::request_older_message_history(fingerprint, before_timestamp, limit);
-}
-
-/// External-review fix: the contact might be unreachable right now, so this
-/// should be called alongside `request_older_message_history` as an
-/// additional source — this device's own sibling devices (if any) are asked
-/// for the same page. Both dedupe by `message_id`, so calling both is safe.
-/// Particularly relevant here: this desktop client is always a secondary
-/// device (see module doc), so the primary phone is often the more reliably
-/// reachable source anyway.
-pub fn request_older_sibling_history(fingerprint: &str, before_timestamp: i64, limit: u32) {
-    api::request_older_sibling_history(fingerprint, before_timestamp, limit);
-}
-
 // --- groups ---
 
 pub fn list_groups() -> Vec<GroupSummary> {
@@ -532,15 +517,6 @@ pub fn group_message_history_before(
         before_timestamp,
         limit,
     ))
-}
-
-pub fn request_older_group_message_history(group_id: &str, before_timestamp: i64, limit: u32) {
-    api::request_older_group_message_history(group_id, before_timestamp, limit);
-}
-
-/// bkz. `request_older_sibling_history` aynı notu — grup için.
-pub fn request_older_sibling_group_history(group_id: &str, before_timestamp: i64, limit: u32) {
-    api::request_older_sibling_group_history(group_id, before_timestamp, limit);
 }
 
 // --- attachments ---

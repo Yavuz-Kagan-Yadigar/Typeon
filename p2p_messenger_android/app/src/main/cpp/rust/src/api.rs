@@ -638,49 +638,6 @@ pub fn request_history_sync(peer_device_fingerprint: &str, limit: u32) {
     });
 }
 
-pub fn request_older_message_history(
-    peer_device_fingerprint: &str,
-    before_timestamp: i64,
-    limit: u32,
-) {
-    let fp = peer_device_fingerprint.to_string();
-    let _ = catch_panic(move || {
-        let _guard = RUNTIME.enter();
-        let _ = core_lock().request_older_history(&fp, before_timestamp, limit.min(crate::MAX_HISTORY_PAGE as u32));
-    });
-}
-
-pub fn request_older_group_message_history(group_id: &str, before_timestamp: i64, limit: u32) {
-    let gid = group_id.to_string();
-    let _ = catch_panic(move || {
-        let _guard = RUNTIME.enter();
-        let _ = core_lock().request_older_group_history(&gid, before_timestamp, limit.min(crate::MAX_HISTORY_PAGE as u32));
-    });
-}
-
-/// bkz. `request_older_message_history` aynı notu — EK olarak, karşı taraf
-/// (contact) o an ulaşılamıyorsa bile bu cihazın KENDİ kardeş cihazlarından
-/// aynı sayfayı ister (dış inceleme düzeltmesi: "sibling backfill sayfalama
-/// desteklemiyordu"). Linux masaüstü istemcisi her zaman İKİNCİL bir cihaz
-/// olduğundan (bkz. modül başı notu), bu özellikle önemli bir kaynak —
-/// birincil telefon genelde ulaşılabilir olur.
-pub fn request_older_sibling_history(peer_device_fingerprint: &str, before_timestamp: i64, limit: u32) {
-    let fp = peer_device_fingerprint.to_string();
-    let _ = catch_panic(move || {
-        let _guard = RUNTIME.enter();
-        let _ = core_lock().request_older_sibling_history(Some(&fp), None, before_timestamp, limit.min(crate::MAX_HISTORY_PAGE as u32));
-    });
-}
-
-/// bkz. `request_older_sibling_history` aynı notu — grup için.
-pub fn request_older_sibling_group_history(group_id: &str, before_timestamp: i64, limit: u32) {
-    let gid = group_id.to_string();
-    let _ = catch_panic(move || {
-        let _guard = RUNTIME.enter();
-        let _ = core_lock().request_older_sibling_history(None, Some(&gid), before_timestamp, limit.min(crate::MAX_HISTORY_PAGE as u32));
-    });
-}
-
 // --- Dosya ekleri ---
 
 pub fn prepare_and_send_file(

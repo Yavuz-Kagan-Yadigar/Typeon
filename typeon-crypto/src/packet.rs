@@ -871,6 +871,11 @@ pub enum MessageContent {
         /// gönderilir, ilk yanıt veren boşluğu doldurur).
         #[serde(default)]
         group_id: Option<String>,
+        /// With `before_timestamp`: the start of the "Fetch older history"
+        /// window `[after_timestamp, before_timestamp)`, by send time. The
+        /// responder sends only rows inside it.
+        #[serde(default)]
+        after_timestamp: Option<i64>,
     },
     /// `request_id`: karşılık geldiği `HistorySyncRequest` paketinin
     /// `MessagePacketHeader.message_id`'si — isteyen tarafın, bu yanıtı
@@ -888,13 +893,10 @@ pub enum MessageContent {
         /// için.
         #[serde(default)]
         group_id: Option<String>,
-        /// bkz. `HistorySyncRequest.before_timestamp` — dolu ise bu bir
-        /// ESKİ SAYFA yanıtıdır: birleştirme mantığı mevcut "en yeniden
-        /// daha yeni" eşiği yerine `message_id` bazlı var-olma kontrolü
-        /// kullanır (bkz. lib.rs notu — sayfalama isteklerinde zaman
-        /// damgası eşiği YANLIŞ yönde çalışırdı).
+        /// The responder cut rows of the requested window (row or byte
+        /// limit): the requester asks for the older rest of that window.
         #[serde(default)]
-        before_timestamp: Option<i64>,
+        more: bool,
     },
     /// Spec dışı: güvenilir teslim onayı — gossipsub'un `publish()`
     /// başarısı SADECE yerel düğümün paketi ağa yayınladığını garanti
@@ -1176,9 +1178,22 @@ pub enum MessageContent {
         /// archived (its local `timestamp`, ms) at or after this.
         #[serde(default)]
         since_timestamp: Option<i64>,
+        /// Scoped, with `before_timestamp`: the start of the "Fetch older
+        /// history" window `[after_timestamp, before_timestamp)`.
+        #[serde(default)]
+        after_timestamp: Option<i64>,
     },
     /// bkz. `SiblingHistoryRequest` — kardeşin arşivinden son mesajlar.
-    SiblingHistoryResponse { entries: Vec<SiblingHistoryEntry> },
+    SiblingHistoryResponse {
+        entries: Vec<SiblingHistoryEntry>,
+        /// The request's window `(before_timestamp, after_timestamp)`,
+        /// echoed: the requester matches it to its open press.
+        #[serde(default)]
+        window: Option<(i64, i64)>,
+        /// As `HistorySyncResponse.more`.
+        #[serde(default)]
+        more: bool,
+    },
     /// Gönderen HESABINI sildi (son cihazından). Kişiler: sohbeti "hesap
     /// silindi" olarak işaretler, artık mesaj göndermez; kurucusu olduğum
     /// gruplardan üyeyi çıkarırım. Kardeş cihazlar: kendi yerel durumunu siler.

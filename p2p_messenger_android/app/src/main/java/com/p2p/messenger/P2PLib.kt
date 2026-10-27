@@ -324,24 +324,6 @@ object P2PLib {
     /** H137: `{"contacts":{identity_id:{"peer","message","attachment"}},"groups":{gid:{"message","attachment"}}}`;
      *  message / attachment may be null (message.timestamp, attachment.created_at). */
     external fun chatListPreviews(): String
-    /** Spec dışı, kullanıcı isteği (sonsuz kaydırma): `getMessageHistoryBefore`
-     *  boş/yetersiz döndüğünde çağrılmalı — karşı taraftan bu zaman
-     *  damgasından eski mesajları ağdan ister. Yanıt asenkron gelir — bkz.
-     *  pollNetwork "older_history" olayı. */
-    external fun requestOlderMessageHistory(peerDeviceFingerprint: String, beforeTimestamp: Long, limit: Int)
-    /** bkz. `requestOlderMessageHistory` aynı notu — grup için, ulaşılabilir
-     *  TÜM diğer üyelere gönderilir. Yanıt: pollNetwork "older_group_history". */
-    external fun requestOlderGroupMessageHistory(groupId: String, beforeTimestamp: Long, limit: Int)
-    /** Spec dışı, dış inceleme düzeltmesi ("sibling backfill sayfalama
-     *  desteklemiyordu — karşı taraf ulaşılamazken bu cihazın KENDİ diğer
-     *  cihazından eski geçmiş istemesinin yolu yoktu"): `requestOlderMessageHistory`
-     *  ile AYNI ANDA, EK bir kaynak olarak çağrılmalı — ikisi de `message_id`
-     *  bazlı dedup ettiğinden çift kayıt oluşturmaz. Yanıt da AYNI
-     *  "older_history" olayı olarak gelir. */
-    external fun requestOlderSiblingHistory(peerDeviceFingerprint: String, beforeTimestamp: Long, limit: Int)
-    /** bkz. `requestOlderSiblingHistory` aynı notu — grup için,
-     *  `requestOlderGroupMessageHistory` ile birlikte EK kaynak. */
-    external fun requestOlderSiblingGroupHistory(groupId: String, beforeTimestamp: Long, limit: Int)
 
     // --- Spec dışı: dosya/foto/video/ses ekleri (azami 4GB) ---
     /** `sourcePath` zaten yerel bir dosya yolu olmalı (content:// URI
@@ -431,6 +413,8 @@ object P2PLib {
      *  ya da hata varsa "Error: ...". BÜYÜK dosyalar için ANA THREAD'DE
      *  ÇAĞIRMAYIN. */
     external fun getAttachmentPlaintextPath(fileId: String): String
+    /** A JPEG XL attachment as it came (no PNG/GIF conversion), for "Save as JPEG XL". Path or "Error: ...". */
+    external fun getAttachmentOriginalPath(fileId: String): String
     /** Lossless JPEG XL of [pixels] (direct buffer, `width * height` RGBA,
      *  not premultiplied; changed by the call) to [outPath]. "OK" or "Error: ...". */
     external fun encodeJxlLossless(bitmap: android.graphics.Bitmap, hasAlpha: Boolean, outPath: String): String

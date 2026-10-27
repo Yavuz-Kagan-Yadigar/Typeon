@@ -517,6 +517,29 @@ pub(crate) fn attachment_first_frame_unlocked(file_id: &str) -> Result<String, S
     r.map(|()| out.to_string_lossy().to_string())
 }
 
+/// A JPEG XL attachment as it came, for "Save as JPEG XL":
+/// `plain_cache/orig-{file_id}.jxl`. Not `{file_id}.jxl`, which
+/// `attachment_plaintext_path_unlocked` reads as "would not convert".
+/// Same tmp + atomic rename; `remove_attachment_copy` removes it.
+pub(crate) fn attachment_original_path_unlocked(file_id: &str) -> Result<String, String> {
+    let (file_key, sha256_hex, enc_path, decrypted_path) = core_lock().begin_attachment_decrypt(file_id)?;
+    if !decrypted_path.extension().map_or(false, |e| e.eq_ignore_ascii_case("jxl")) {
+        return Err("not a JPEG XL".to_string());
+    }
+    let out = decrypted_path.with_file_name(format!("orig-{}.jxl", file_id));
+    if !out.exists() {
+        let tmp = out.with_file_name(format!(".orig-{}.jxl", uuid::Uuid::new_v4()));
+        let chunk_size = core_lock().file_chunk_size(file_id);
+        let r = attachments::decrypt_file_from_disk_with(&enc_path, &tmp, &file_key, &sha256_hex, chunk_size)
+            .and_then(|()| std::fs::rename(&tmp, &out).map_err(|e| e.to_string()));
+        if r.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        r?;
+    }
+    Ok(out.to_string_lossy().to_string())
+}
+
 /// bkz. `P2PCore::begin_attachment_decrypt` — AYNI kilit-bölme deseni,
 /// indirme sonrası tam-dosya çözme tarafı. Eşzamanlılık: aynı dosya için
 /// iki eşzamanlı çağrı aynı önbellek yoluna yazmasın diye önce benzersiz
@@ -1702,8 +1725,8 @@ mod recovery_tests {
 
     /// A cleared group's rows (and the reactions on its files) stay gone:
     /// a sibling's automatic backfill of older rows is refused by the floor.
-    /// The user's "Fetch older history" press brings them back and lowers
-    /// the floor to the fetched month's start.
+    /// Only the sibling's answer that echoes an open press window brings
+    /// them back, once, and the floor goes down to the oldest row written.
     #[test]
     fn cleared_group_history_does_not_come_back() {
         let dir = std::env::temp_dir().join(format!("typeon-gclear-{}", std::process::id()));
@@ -1727,22 +1750,33 @@ mod recovery_tests {
         core.apply_sibling_history(vec![entry("m1", 1), entry("m2", current_time_ms() + 1_000)], false);
         assert!(!core.message_exists_in_chat("m1", Some(gid.as_str()), ""), "cleared row stays gone");
         assert!(core.message_exists_in_chat("m2", Some(gid.as_str()), ""), "a newer row still arrives");
-        // An answer with no press behind it is still automatic.
-        core.apply_sibling_reply(Some(gid.as_str()), vec![entry("m1", 1)]);
-        assert!(!core.message_exists_in_chat("m1", Some(gid.as_str()), ""), "no press, floor holds");
-        // The press: m1 comes back, the floor goes down to its month.
-        core.sibling_user_fetch.insert(gid.clone(), (1_000, current_time_ms()));
-        let rows = core.apply_sibling_reply(Some(gid.as_str()), vec![entry("m1", 1), entry("m3", 1_000)]);
-        assert_eq!(rows.len(), 1, "a row at the cursor is not older than it");
+        // No window, or a window no press of ours opened to this sibling: automatic.
+        core.sibling_fetch_open.insert(("sib".into(), 1_000, 0), (gid.clone(), current_time_ms()));
+        for (from, window) in [("sib", None), ("sib", Some((2_000, 0))), ("other", Some((1_000, 0)))] {
+            let (_, chat) = core.apply_sibling_reply(from, window, false, vec![entry("m1", 1)]);
+            assert!(chat.is_none());
+            assert!(!core.message_exists_in_chat("m1", Some(gid.as_str()), ""), "{from} {window:?}: floor holds");
+        }
+        // The echo of the open press: rows inside its window come back.
+        let (rows, chat) = core.apply_sibling_reply("sib", Some((1_000, 0)), false, vec![entry("m1", 1), entry("m3", 1_000)]);
+        assert_eq!(chat.as_deref(), Some(gid.as_str()));
+        assert_eq!(rows.len(), 1, "a row at the window's end is outside it");
         assert!(core.message_exists_in_chat("m1", Some(gid.as_str()), ""), "fetched back by the user");
-        assert_eq!(core.history_floor(&gid), 0, "floor lowered to the window start");
+        assert_eq!(core.history_floor(&gid), 1, "floor lowered to the oldest row written");
+        // Consumed: the same echo again is automatic.
+        assert!(core.sibling_fetch_open.is_empty());
+        core.apply_sibling_reply("sib", Some((1_000, 0)), false, vec![entry("m4", 2)]);
+        assert!(core.message_exists_in_chat("m4", Some(gid.as_str()), ""), "above the lowered floor anyway");
+        core.apply_sibling_reply("sib", Some((1_000, 0)), false, vec![entry("m5", 0)]);
+        assert!(!core.message_exists_in_chat("m5", Some(gid.as_str()), ""), "no open press, floor holds");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A cleared 1:1 chat's rows stay gone: a sibling's automatic backfill
     /// and the peer's chat-open sync are refused by the floor. The peer's
-    /// answer to the user's "Fetch older history" press brings them back
-    /// and lowers the floor.
+    /// answer to the user's "Fetch older history" press keeps exactly its
+    /// window, below the floor too; a clear forgets the press, so its late
+    /// answer is refused.
     #[test]
     fn cleared_chat_history_does_not_come_back() {
         let dir = std::env::temp_dir().join(format!("typeon-cclear-{}", std::process::id()));
@@ -1780,18 +1814,25 @@ mod recovery_tests {
             let ids: Vec<_> = rows.iter().map(|m| m.message_id.clone().unwrap()).collect();
             assert_eq!(ids, ["new"], "{id}: only rows above the floor");
         }
-        // The press, cursor at the floor: one month ending at the newest older
-        // row; rows at or after the cursor and older than the month are refused.
-        core.outstanding_history_requests.insert("press".into(), (Some("id1".into()), None, current_time_ms(), Some(floor as i64)));
+        // The press [floor - 30d, floor): only rows sent inside the window.
+        let (before, after) = (floor as i64, (floor - 30 * day) as i64);
+        core.outstanding_history_requests.insert("press".into(), (Some("id1".into()), None, current_time_ms(), Some((before, after))));
         let mut rows = page();
-        let start = core.filter_history_reply("press", None, "id1", &mut rows);
+        let press = core.filter_history_reply("press", None, "id1", &mut rows);
         let ids: Vec<_> = rows.iter().map(|m| m.message_id.clone().unwrap()).collect();
-        assert_eq!(ids, ["a", "b"]);
-        assert_eq!(start, Some(floor - 50 * day));
-        core.lower_history_floor("id1", start.unwrap());
-        assert_eq!(core.history_floor("id1"), floor - 50 * day, "fetched rows are not cleared any more");
+        assert_eq!(ids, ["b"]);
+        assert_eq!(press, Some(((before, after), Some((floor - 20 * day) as i64))));
+        core.lower_history_floor("id1", floor - 20 * day);
+        assert_eq!(core.history_floor("id1"), floor - 20 * day, "fetched rows are not cleared any more");
         core.lower_history_floor("id1", floor);
-        assert_eq!(core.history_floor("id1"), floor - 50 * day, "lowering never raises");
+        assert_eq!(core.history_floor("id1"), floor - 20 * day, "lowering never raises");
+        // A clear forgets the open press: its late answer is unsolicited.
+        core.clear_chat_history("c1").unwrap();
+        assert!(!core.outstanding_history_requests.contains_key("press"));
+        assert!(core.outstanding_history_requests.contains_key("auto"), "a chat-open sync stays");
+        let mut rows = page();
+        assert_eq!(core.filter_history_reply("press", None, "id1", &mut rows), None);
+        assert!(rows.is_empty(), "nothing below the new floor");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1827,17 +1868,22 @@ mod recovery_tests {
         };
         core.apply_sibling_history(vec![entry.clone()], false);
         assert!(!core.message_exists_in_chat("m1", Some(gid.as_str()), ""));
-        core.sibling_user_fetch.insert(gid.clone(), (200, current_time_ms()));
-        core.apply_sibling_reply(Some(gid.as_str()), vec![entry]);
+        // A prune forgets the press opened before it.
+        core.sibling_fetch_open.insert(("sib".into(), 200, 0), (gid.clone(), current_time_ms()));
+        core.prune_chat_before("group", &gid, 150).unwrap();
+        core.apply_sibling_reply("sib", Some((200, 0)), false, vec![entry.clone()]);
+        assert!(!core.message_exists_in_chat("m1", Some(gid.as_str()), ""), "late answer after the prune");
+        core.sibling_fetch_open.insert(("sib".into(), 200, 0), (gid.clone(), current_time_ms()));
+        core.apply_sibling_reply("sib", Some((200, 0)), false, vec![entry]);
         assert!(core.message_exists_in_chat("m1", Some(gid.as_str()), ""), "pruned row fetched back");
-        assert_eq!(core.history_floor(&gid), 0, "floor below the fetched month");
+        assert_eq!(core.history_floor(&gid), 100, "floor down to the row written, not the window start");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The responder's "Fetch older history" page: one month ending at the
-    /// newest row older than the cursor, an empty gap skipped, by send time.
+    /// The responder's "Fetch older history" page: the rows sent inside the
+    /// requested window, by send time, not by arrival.
     #[test]
-    fn history_fetch_page_is_one_month_and_skips_gaps() {
+    fn history_fetch_page_is_the_requested_window() {
         let dir = std::env::temp_dir().join(format!("typeon-fetchpage-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut core = core_on_disk(&dir);
@@ -1845,7 +1891,6 @@ mod recovery_tests {
         core.groups.insert(gid.clone(), Group::new(gid.clone(), "g".into(), "me".into(), 1));
         let day: u64 = 24 * 60 * 60 * 1000;
         let now = 1_000 * day;
-        // Days 300..365: old rows; a gap; days 930..950: new rows.
         for (id, d) in [("o1", 300u64), ("o2", 330), ("o3", 340), ("o4", 365), ("n1", 930), ("n2", 950)] {
             core.archive_group_message(&gid, "x", "received", b"t", Some(id), None, None, None, d * day, None).unwrap();
             core.archive_message("p", "received", b"t", Some(&format!("p{id}")), None, None, None, d * day).unwrap();
@@ -1853,12 +1898,50 @@ mod recovery_tests {
         // Arrival is later than sending: the page goes by send time.
         core.db.as_ref().unwrap().execute("UPDATE messages SET timestamp = ?1", params![now as i64]).unwrap();
         let ids = |rows: Vec<ArchivedMessage>| rows.into_iter().map(|m| m.message_id.unwrap()).collect::<Vec<_>>();
-        let g = |before: u64| ids(core.load_history_fetch_page("", Some(&gid), 200, before as i64));
-        assert_eq!(g(now), ["n1", "n2"]);
-        assert_eq!(g(930 * day), ["o3", "o4"], "gap skipped, 30 days back from o4");
-        assert_eq!(g(340 * day), ["o1", "o2"]);
-        assert!(g(300 * day).is_empty());
-        assert_eq!(ids(core.load_history_fetch_page("p", None, 200, (930 * day) as i64)), ["po3", "po4"]);
+        let g = |before: u64, after: u64| ids(core.load_history_fetch_page("", Some(&gid), 200, before as i64, after as i64));
+        assert_eq!(g(now, now - 70 * day), ["n1", "n2"]);
+        assert!(g(930 * day, 900 * day).is_empty(), "an empty month is empty, no gap skipping");
+        assert_eq!(g(366 * day, 336 * day), ["o3", "o4"]);
+        assert_eq!(g(340 * day, 330 * day), ["o2"], "start inclusive, end exclusive");
+        assert_eq!(ids(core.load_history_fetch_page("p", None, 1, 366 * day as i64, 300 * day as i64)), ["po4"], "the newest rows of a capped window");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One press = one fixed window back from the chat's cursor, which then
+    /// moves to the window's start: an empty month moves it too, a backdated
+    /// row cannot pin it, and the first cursor ignores 1970 and bad-clock
+    /// rows. A clear resets it.
+    #[test]
+    fn history_fetch_cursor_moves_one_window_per_press() {
+        let dir = std::env::temp_dir().join(format!("typeon-fetchcursor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut core = core_on_disk(&dir);
+        let gid = "group-0123456789abcdef".to_string();
+        core.groups.insert(gid.clone(), Group::new(gid.clone(), "g".into(), "me".into(), 1));
+        let day: u64 = 24 * 60 * 60 * 1000;
+        let w = HISTORY_FETCH_WINDOW_MS;
+        let now = current_time_ms();
+        let cursor = |core: &P2PCore| core.meta_str(&format!("hfetch:{gid}")).and_then(|v| v.parse::<u64>().ok());
+        // An empty chat starts at now.
+        core.fetch_server_history(&gid, true, 0).unwrap();
+        assert!(cursor(&core).unwrap().abs_diff(now - w) < 60_000);
+        core.clear_group_history(&gid).unwrap();
+        assert_eq!(cursor(&core), None, "a clear resets the cursor");
+        // Rows: the oldest real one 10 days back; a 1970 row and a bad-clock
+        // row 400 days back (both arrived now) do not count.
+        for (id, sent) in [("a", now - 10 * day), ("b", now - 2 * day), ("z", 1), ("bad", now - 400 * day)] {
+            core.archive_group_message(&gid, "x", "received", b"t", Some(id), None, None, None, sent, None).unwrap();
+        }
+        core.fetch_server_history(&gid, true, 0).unwrap();
+        let first = now - 10 * day - w;
+        assert_eq!(cursor(&core), Some(first));
+        // The window went nowhere (no source answered): the next press is the
+        // month before anyway, whatever rows arrive meanwhile.
+        core.archive_group_message(&gid, "x", "received", b"t", Some("backdated"), None, None, None, 5, None).unwrap();
+        core.fetch_server_history(&gid, true, now).unwrap();
+        assert_eq!(cursor(&core), Some(first - w));
+        core.prune_chat_before("group", &gid, (now - 5 * day) as i64).unwrap();
+        assert_eq!(cursor(&core), None, "a prune resets the cursor");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2354,9 +2437,9 @@ mod authz_coverage_tests {
     fn sensitive_arms_keep_their_guards() {
         let src = include_str!("lib.rs");
         let cases: &[(&[&str], usize, &str)] = &[
-            (&["MessageContent::HistorySyncRequest { limit,", " before_timestamp, group_id } =>"], 5000, "is_member(&sender_identity_id)"),
-            (&["MessageContent::HistorySyncResponse { request_id,", " messages, group_id, before_timestamp: _ } =>"], 4000, "outstanding_history_requests.get("),
-            (&["MessageContent::HistorySyncResponse { request_id,", " messages, group_id, before_timestamp: _ } =>"], 4000, "history_answered_by.get("),
+            (&["MessageContent::HistorySyncRequest { limit,", " before_timestamp, group_id, after_timestamp } =>"], 5000, "is_member(&sender_identity_id)"),
+            (&["MessageContent::HistorySyncResponse { request_id,", " messages, group_id, more } =>"], 4000, "outstanding_history_requests.get("),
+            (&["MessageContent::HistorySyncResponse { request_id,", " messages, group_id, more } =>"], 4000, "history_answered_by.get("),
             (&["fn adopt_device_link", "(&mut self"], 5000, "link_request_open_until"),
             (&["fn process_identity_exchange", "(&mut self"], 20000, "imzalı DeviceAdd olmadan iddia"),
             (&["MessageContent::Seen { target_message_id,", " group_message_local_id } =>"], 5000, "may_mark_seen("),
@@ -3459,22 +3542,18 @@ const HISTORY_SYNC_MAX_TEXT_BYTES: usize = 512 * 1024;
 /// kontrolünde olduğundan satır sayısı da ayrıca sınırlanır.
 const HISTORY_SYNC_MAX_MESSAGES: u32 = 200;
 
-/// One "Fetch older history" press brings at most this span of history.
+/// One "Fetch older history" press asks every source for this span: the
+/// window `[cursor - HISTORY_FETCH_WINDOW_MS, cursor)` by send time.
 const HISTORY_FETCH_WINDOW_MS: u64 = 30 * 24 * 60 * 60 * 1000;
-
-/// The page of one "Fetch older history" press: rows older than `before`,
-/// within `HISTORY_FETCH_WINDOW_MS` of the newest of them (so an empty gap
-/// is skipped). `at` is the row's send time, falling back to arrival
-/// (`COALESCE(NULLIF(sent_at_ms,0), timestamp)`). Responder and requester
-/// both apply it: the responder to cap what it sends, the requester to
-/// reject more than it asked for. Returns the window start.
-fn month_window<T>(rows: &mut Vec<T>, before: u64, at: impl Fn(&T) -> u64) -> u64 {
-    rows.retain(|r| at(r) < before);
-    let Some(newest) = rows.iter().map(&at).max() else { return before };
-    let start = newest.saturating_sub(HISTORY_FETCH_WINDOW_MS);
-    rows.retain(|r| at(r) >= start);
-    start
-}
+/// Follow-up pages one press may ask for when a source cut its answer
+/// (`more`), over all sources of the chat: the rest of the window comes
+/// within the same press, and a peer cannot keep us asking for ever.
+/// ponytail: shared by all sources; a busy group month with many capped
+/// members can run out. Per-source budgets if that ever shows.
+const HISTORY_FETCH_MAX_PAGES: u32 = 20;
+/// No message is older (2025-01-01 UTC): the first cursor of a chat ignores
+/// rows stamped before it (a 1970 device clock, a backdated row).
+const HISTORY_FETCH_EPOCH_MS: i64 = 1_735_689_600_000;
 
 /// Spec dışı, kaynak sızıntısı düzeltmesi: `reconnect_sweep`, bekleyen bir
 /// cihaz bağlama hedefi (`pending_link_target`) için her taramada (≤15sn)
@@ -4477,15 +4556,17 @@ struct P2PCore {
     /// aitse işlenir: aksi halde herhangi bir kişi istenmemiş bir "yanıtla"
     /// arşive sahte mesaj yazabilir ya da `request_id` üzerinden başka bir
     /// mesajımızın yeniden denemesini iptal edebilirdi.
-    /// The fourth field is the request's `before_timestamp`: `Some` only for
-    /// a user's "Fetch older history" press, the one answer that may bring
-    /// back rows below the history floor (the response's own field is the
-    /// peer's word and is not trusted for that).
-    outstanding_history_requests: HashMap<String, (Option<String>, Option<String>, u64, Option<i64>)>,
-    /// Chat (identity id or group id) -> (cursor, sent at) of the user's last
-    /// "Fetch older history" press to own devices: their answer carries no
-    /// request id, so this is what marks it as a user fetch.
-    sibling_user_fetch: HashMap<String, (u64, u64)>,
+    /// The fourth field is the request's window `(before, after)`: `Some`
+    /// only for a user's "Fetch older history" press, the one answer that
+    /// may bring back rows below the history floor, and only inside it.
+    outstanding_history_requests: HashMap<String, (Option<String>, Option<String>, u64, Option<(i64, i64)>)>,
+    /// Open "Fetch older history" requests to own devices: (sibling device,
+    /// before, after) -> (chat: identity id or group id, sent at). The
+    /// answer echoes its window; a match is a user fetch and is consumed.
+    sibling_fetch_open: HashMap<(String, i64, i64), (String, u64)>,
+    /// Chat -> follow-up pages its presses may still ask for
+    /// (`HISTORY_FETCH_MAX_PAGES`).
+    history_fetch_pages: HashMap<String, u32>,
     /// Kullanıcı kararı (2026-08-27): ENGELLENEN kimlikler.
     ///
     /// `revoke`'tan farkı kasıtlı ve keskin: iptal, bir cihazın artık
@@ -4692,7 +4773,8 @@ impl P2PCore {
             last_handshake_redo: HashMap::new(),
             undecryptable_from: HashMap::new(),
             outstanding_history_requests: HashMap::new(),
-            sibling_user_fetch: HashMap::new(),
+            sibling_fetch_open: HashMap::new(),
+            history_fetch_pages: HashMap::new(),
             blocked_identities: std::collections::HashSet::new(),
             deleted_identities: std::collections::HashSet::new(),
             power_save: false,
@@ -5170,7 +5252,7 @@ impl P2PCore {
         if let Ok(mut stmt) = conn.prepare("SELECT k, v FROM app_meta WHERE k LIKE 'hsr:%'") {
             if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
                 for (k, v) in rows.flatten() {
-                    if let Ok(entry) = serde_json::from_str::<(Option<String>, Option<String>, u64, Option<i64>)>(&v) {
+                    if let Ok(entry) = serde_json::from_str::<(Option<String>, Option<String>, u64, Option<(i64, i64)>)>(&v) {
                         self.outstanding_history_requests.insert(k["hsr:".len()..].to_string(), entry);
                     }
                 }
@@ -5246,36 +5328,68 @@ impl P2PCore {
     }
 
     /// Raises the history floor of a chat (identity id or group id) to `ms`;
-    /// never lowers it.
-    fn raise_history_floor(&self, chat_id: &str, ms: u64) {
+    /// never lowers it. Every clear, prune and contact delete comes here, so
+    /// it also drops the chat's "Fetch older history" state
+    /// (`forget_history_fetch`).
+    fn raise_history_floor(&mut self, chat_id: &str, ms: u64) {
         if ms > self.history_floor(chat_id) {
             self.meta_put(&format!("hfloor:{}", chat_id), &ms.to_string());
         }
+        self.forget_history_fetch(chat_id);
     }
 
-    /// After a user's "Fetch older history" brought rows back: the floor goes
-    /// down to `ms` (the fetched window's start), so those rows are no longer
-    /// "cleared". Only that path calls this; it never raises the floor.
+    /// A user's "Fetch older history" wrote rows back: the floor goes down to
+    /// `ms`, the oldest row written, so those rows are no longer "cleared".
+    /// Only that path calls this; it never raises the floor.
     fn lower_history_floor(&self, chat_id: &str, ms: u64) {
         if ms < self.history_floor(chat_id) {
             self.meta_put(&format!("hfloor:{}", chat_id), &ms.to_string());
         }
     }
 
-    /// Oldest send time (falling back to arrival) of a chat's local rows:
-    /// the cursor of "Fetch older history". `peer_device_fingerprint` is the
-    /// canonical 1:1 chat key, or `group_id` the group.
-    fn oldest_local_sent_ms(&self, peer_device_fingerprint: &str, group_id: Option<&str>) -> Option<u64> {
-        let conn = self.db.as_ref()?;
-        let r = match group_id {
-            Some(g) => conn.query_row(
-                "SELECT MIN(COALESCE(NULLIF(sent_at_ms,0), timestamp)) FROM messages WHERE group_id = ?1",
-                params![g], |r| r.get::<_, Option<i64>>(0)),
-            None => conn.query_row(
-                "SELECT MIN(COALESCE(NULLIF(sent_at_ms,0), timestamp)) FROM messages WHERE peer_device_fingerprint = ?1 AND group_id IS NULL",
-                params![peer_device_fingerprint], |r| r.get::<_, Option<i64>>(0)),
+    /// Forgets the "Fetch older history" state of a chat (identity id or
+    /// group id): its cursor, its open press requests to peers and own
+    /// devices, its follow-up budget and a running server page chain. A
+    /// late answer is then unsolicited and cannot bring cleared rows back.
+    fn forget_history_fetch(&mut self, chat_id: &str) {
+        self.meta_del(&format!("hfetch:{}", chat_id));
+        let ids: Vec<String> = self.outstanding_history_requests.iter()
+            .filter(|(_, (target, group, _, window))| window.is_some() && group.as_deref().or(target.as_deref()) == Some(chat_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.awaiting_confirmation.remove(&id);
+            self.remove_durable_retry(&id);
+            self.forget_history_request(&id);
+        }
+        self.sibling_fetch_open.retain(|_, (chat, _)| chat != chat_id);
+        self.history_fetch_pages.remove(chat_id);
+        self.drop_archive_page_chains(chat_id);
+    }
+
+    /// Where the next "Fetch older history" press of a chat ends its window:
+    /// the stored cursor (`hfetch:`, moved one window back by every press),
+    /// else the oldest local row's send time, else now. For that first value
+    /// rows sent before `HISTORY_FETCH_EPOCH_MS`, or more than one window
+    /// before the oldest arrival time, are ignored: one row with a bad clock
+    /// must not send every press to 1970. `conv_key` is the identity id or
+    /// group id, `peer_device_fingerprint` the canonical 1:1 chat key.
+    fn history_fetch_cursor(&self, conv_key: &str, peer_device_fingerprint: &str, group_id: Option<&str>) -> u64 {
+        if let Some(c) = self.meta_str(&format!("hfetch:{}", conv_key)).and_then(|v| v.parse::<u64>().ok()) {
+            return c;
+        }
+        let (cond, key) = match group_id {
+            Some(g) => ("group_id = ?1", g),
+            None => ("peer_device_fingerprint = ?1 AND group_id IS NULL", peer_device_fingerprint),
         };
-        r.ok().flatten().map(|v| v.max(0) as u64)
+        let at = "COALESCE(NULLIF(sent_at_ms,0), timestamp)";
+        let oldest = self.db.as_ref().and_then(|conn| conn.query_row(
+            &format!("SELECT MIN({at}) FROM messages WHERE {cond} AND {at} >= ?2
+                        AND {at} >= COALESCE((SELECT MIN(timestamp) FROM messages WHERE {cond} AND timestamp >= ?2), 0) - ?3"),
+            params![key, HISTORY_FETCH_EPOCH_MS, HISTORY_FETCH_WINDOW_MS as i64],
+            |r| r.get::<_, Option<i64>>(0),
+        ).ok().flatten());
+        oldest.map_or_else(current_time_ms, |v| v.max(0) as u64)
     }
 
     fn meta_del(&self, k: &str) {
@@ -8090,6 +8204,7 @@ impl P2PCore {
                 group_id: None,
                 before_timestamp: None,
                 since_timestamp: since,
+                after_timestamp: None,
             };
             let _ = self.send_message_content(fp, &content, None);
         }
@@ -8104,35 +8219,34 @@ impl P2PCore {
     /// tarafı (bu cihazdaki kanonik cihaz fp'si — `conversation_identity_id`
     /// buradan çözülür); `group_id`: grup sohbeti. İkisi birden dolu
     /// olamaz, çağıran taraf (JNI) hangisi doluysa onu kullanır.
-    fn request_older_sibling_history(&mut self, peer_device_fingerprint: Option<&str>, group_id: Option<&str>, before_timestamp: i64, limit: u32) -> Result<(), String> {
+    ///
+    /// The window `[after, before)` of a "Fetch older history" press, sent
+    /// to every connected sibling (or only `to`, a follow-up page). Each
+    /// request is recorded in `sibling_fetch_open`: only the answer that
+    /// echoes it is a user fetch.
+    fn request_older_sibling_history(&mut self, conversation_identity_id: Option<&str>, group_id: Option<&str>, before: i64, after: i64, to: Option<&str>) -> Result<(), String> {
         // Connected siblings only, as in `request_sibling_backfill`: each
         // scroll-up queued one more request for an offline one.
         let siblings: Vec<String> = self.sibling_active_devices().into_iter()
-            .filter(|fp| self.is_connected_to_device(fp)).collect();
+            .filter(|fp| self.is_connected_to_device(fp) && to.map_or(true, |t| t == fp.as_str())).collect();
         if siblings.is_empty() {
             return Err("Kardeş cihaz yok".to_string());
         }
-        let limit = limit.min(HISTORY_SYNC_MAX_MESSAGES);
-        let conversation_identity_id = match peer_device_fingerprint {
-            Some(fp) => Some(self.known_remote_devices.get(fp)
-                .map(|d| d.identity_id.clone())
-                .ok_or("Bilinmeyen karşı taraf cihazı")?),
-            None => None,
-        };
-        // Marks the answer as a user fetch (`apply_sibling_history`).
-        if let Some(chat) = conversation_identity_id.clone().or_else(|| group_id.map(|s| s.to_string())) {
-            self.sibling_user_fetch.insert(chat, (before_timestamp.max(0) as u64, current_time_ms()));
-        }
+        let chat = conversation_identity_id.or(group_id).ok_or("Sohbet yok")?.to_string();
         let content = MessageContent::SiblingHistoryRequest {
-            per_conversation_limit: limit,
-            conversation_identity_id,
+            per_conversation_limit: HISTORY_SYNC_MAX_MESSAGES,
+            conversation_identity_id: conversation_identity_id.map(|s| s.to_string()),
             group_id: group_id.map(|s| s.to_string()),
-            before_timestamp: Some(before_timestamp),
+            before_timestamp: Some(before),
             since_timestamp: None,
+            after_timestamp: Some(after),
         };
+        let now = current_time_ms();
+        self.sibling_fetch_open.retain(|_, (_, at)| now.saturating_sub(*at) < TEXT_RETRY_GIVE_UP_MS);
         let mut sent_to_any = false;
         for fp in siblings {
-            if self.send_message_content(fp, &content, None).is_ok() {
+            if self.send_message_content(fp.clone(), &content, None).is_ok() {
+                self.sibling_fetch_open.insert((fp, before, after), (chat.clone(), now));
                 sent_to_any = true;
             }
         }
@@ -8149,7 +8263,10 @@ impl P2PCore {
     /// Biri doluysa istek TEK bir sohbete daralır ve `before_timestamp`
     /// (doluysa) o sohbetin sayfalamasında kullanılır (bkz.
     /// `request_older_sibling_history`).
-    fn build_sibling_history_response(&self, limit: u32, scope_identity_id: Option<&str>, scope_group_id: Option<&str>, before_timestamp: Option<i64>, since_timestamp: Option<i64>) -> Vec<SiblingHistoryEntry> {
+    /// `window`: a scoped "Fetch older history" request's `(before, after)`;
+    /// only rows sent inside it. The second value is `more`: rows of the
+    /// scoped request were cut (row or byte limit).
+    fn build_sibling_history_response(&self, limit: u32, scope_identity_id: Option<&str>, scope_group_id: Option<&str>, before_timestamp: Option<i64>, since_timestamp: Option<i64>, window: Option<(i64, i64)>) -> (Vec<SiblingHistoryEntry>, bool) {
         // M-68: rows come newest first (local `timestamp`), so stop at the first older one.
         let too_old = |m: &ArchivedMessage| since_timestamp.is_some_and(|s| (m.timestamp as i64) < s);
         let mut entries = Vec::new();
@@ -8164,6 +8281,7 @@ impl P2PCore {
         // get nothing. Rotate the start if that ever matters.
         let unscoped = scope_identity_id.is_none() && scope_group_id.is_none();
         let mut limit = limit;
+        let mut more = false;
         if scope_group_id.is_none() {
             // 1:1 sohbetler — TEK bir kişiye daralmışsa o kişinin bilinen
             // TÜM cihazları (arşiv hangi fp altında tutuluyorsa), aksi
@@ -8176,7 +8294,7 @@ impl P2PCore {
             } else if let Some(conn) = &self.db {
                 let mut stmt = match conn.prepare("SELECT DISTINCT peer_device_fingerprint FROM messages WHERE group_id IS NULL") {
                     Ok(s) => s,
-                    Err(_) => return entries,
+                    Err(_) => return (entries, false),
                 };
                 let rows = stmt.query_map([], |r| r.get::<_, String>(0));
                 rows.map(|it| it.flatten().collect()).unwrap_or_default()
@@ -8195,11 +8313,11 @@ impl P2PCore {
                 // Newest first. A scoped request pages backwards from its
                 // oldest row: a row skipped for the budget while older ones
                 // were sent was a hole for good, so that reply ends there.
-                let rows = match before_timestamp {
-                    // A "Fetch older history" press: one month (`month_window`).
-                    Some(before) if !unscoped => self.load_history_fetch_page(&peer_fp, None, limit, before),
+                let rows = match window {
+                    Some((before, after)) if !unscoped => self.load_history_fetch_page(&peer_fp, None, limit, before, after),
                     _ => self.load_message_history(&peer_fp, limit, before_timestamp),
                 };
+                if !unscoped && rows.len() as u32 >= limit { more = true; }
                 for m in rows.into_iter().rev() {
                     if too_old(&m) { break; }
                     if m.is_deleted { continue; }
@@ -8207,7 +8325,7 @@ impl P2PCore {
                     // Unscoped: skip, do not stop: one long early message used
                     // to cut off every later conversation, on every backfill.
                     if m.text.len() > text_budget {
-                        if !unscoped && !entries.is_empty() { return entries; }
+                        if !unscoped && !entries.is_empty() { return (entries, true); }
                         continue;
                     }
                     text_budget -= m.text.len();
@@ -8224,7 +8342,7 @@ impl P2PCore {
                         sent_at_ms: m.sent_at_ms,
                         author_proof: None,
                     });
-                    if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return entries; }
+                    if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
                 }
             }
         }
@@ -8235,10 +8353,11 @@ impl P2PCore {
                 None => self.groups.keys().cloned().collect(),
             };
             for gid in gids {
-                let rows = match before_timestamp {
-                    Some(before) if !unscoped => self.load_history_fetch_page("", Some(&gid), limit, before),
+                let rows = match window {
+                    Some((before, after)) if !unscoped => self.load_history_fetch_page("", Some(&gid), limit, before, after),
                     _ => self.load_group_message_history(&gid, limit, before_timestamp),
                 };
+                if !unscoped && rows.len() as u32 >= limit { more = true; }
                 for m in rows.into_iter().rev() {
                     if too_old(&m) { break; }
                     if m.is_deleted { continue; }
@@ -8247,7 +8366,7 @@ impl P2PCore {
                     let cost = m.text.len() + author_proof.as_ref().map_or(0, |p| p.len());
                     // bkz. the 1:1 loop above.
                     if cost > text_budget {
-                        if !unscoped && !entries.is_empty() { return entries; }
+                        if !unscoped && !entries.is_empty() { return (entries, true); }
                         continue;
                     }
                     text_budget -= cost;
@@ -8264,46 +8383,70 @@ impl P2PCore {
                         sent_at_ms: m.sent_at_ms,
                         author_proof,
                     });
-                    if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return entries; }
+                    if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
                 }
             }
         }
-        entries
+        (entries, more)
     }
 
     /// Bir kardeşten gelen geçmiş kayıtlarını yerel arşive işler — `message_id`
     /// (1:1 `conv_id` / grup `local_id`) ile tekrar eleme. Zaten olan atlanır.
-    /// A sibling's history answer, `fetched_chat` the one chat it covers (if
-    /// so). The answer to the user's "Fetch older history" press for that
-    /// chat (`sibling_user_fetch`, 10 min) keeps one month older than its
-    /// cursor and may bring back rows below the history floor, which then
-    /// goes down to that month's start. Returns the rows as event JSON.
-    fn apply_sibling_reply(&mut self, fetched_chat: Option<&str>, mut entries: Vec<SiblingHistoryEntry>) -> Vec<serde_json::Value> {
-        let user_before = fetched_chat
-            .and_then(|c| self.sibling_user_fetch.get(c))
-            .filter(|(_, at)| current_time_ms().saturating_sub(*at) < 10 * 60 * 1000)
-            .map(|(before, _)| *before);
-        let window_start = user_before.map(|b| month_window(&mut entries, b, |e| e.sent_at_ms));
+    /// A sibling's history answer. `window` is its echo of our request: when
+    /// it matches an open press to this sibling (`sibling_fetch_open`,
+    /// consumed here), only that chat's rows sent inside the window are kept,
+    /// they may bring back rows below the history floor, and the floor goes
+    /// down to the oldest row written. Any other answer is automatic and the
+    /// floor holds. `more`: the sibling cut its page, so the older rest of
+    /// the window is asked for. Returns the rows as event JSON and, for a
+    /// press, its chat.
+    fn apply_sibling_reply(&mut self, peer_fp: &str, window: Option<(i64, i64)>, more: bool, mut entries: Vec<SiblingHistoryEntry>) -> (Vec<serde_json::Value>, Option<String>) {
+        let press = window.and_then(|(before, after)| {
+            self.sibling_fetch_open.remove(&(peer_fp.to_string(), before, after)).map(|(chat, _)| (chat, before, after))
+        });
+        if let Some((chat, before, after)) = &press {
+            entries.retain(|e| e.group_id.as_deref().or(e.conversation_identity_id.as_deref()) == Some(chat.as_str())
+                && (*after..*before).contains(&(e.sent_at_ms as i64)));
+        }
+        let oldest = entries.iter().map(|e| e.sent_at_ms as i64).min();
         let merged: Vec<serde_json::Value> = entries.iter().map(|e| serde_json::json!({
             "direction": e.direction, "text": e.text, "timestamp": e.sent_at_ms,
             "sent_at_ms": e.sent_at_ms, "message_id": e.message_id,
         })).collect();
-        self.apply_sibling_history(entries, user_before.is_some());
-        if let (Some(start), Some(chat), false) = (window_start, fetched_chat, merged.is_empty()) {
-            self.lower_history_floor(chat, start);
+        let written = self.apply_sibling_history(entries, press.is_some());
+        let Some((chat, _, after)) = press else { return (merged, None) };
+        if let Some(o) = written {
+            self.lower_history_floor(&chat, o);
         }
-        merged
+        if let (true, Some(o)) = (more, oldest) {
+            if o > after && self.take_fetch_page(&chat) {
+                let group = self.groups.contains_key(&chat);
+                let (cid, gid) = if group { (None, Some(chat.as_str())) } else { (Some(chat.as_str()), None) };
+                let _ = self.request_older_sibling_history(cid, gid, o, after, Some(peer_fp));
+            }
+        }
+        (merged, Some(chat))
+    }
+
+    /// One follow-up page of a press for `chat` (`HISTORY_FETCH_MAX_PAGES`).
+    fn take_fetch_page(&mut self, chat: &str) -> bool {
+        match self.history_fetch_pages.get_mut(chat) {
+            Some(n) if *n > 0 => { *n -= 1; true }
+            _ => false,
+        }
     }
 
     /// `user_fetch`: the answer to the user's "Fetch older history" press,
-    /// which may bring back rows below the history floor.
-    fn apply_sibling_history(&mut self, entries: Vec<SiblingHistoryEntry>, user_fetch: bool) {
+    /// which may bring back rows below the history floor. Returns the send
+    /// time of the oldest row written.
+    fn apply_sibling_history(&mut self, entries: Vec<SiblingHistoryEntry>, user_fetch: bool) -> Option<u64> {
+        let mut oldest_written: Option<u64> = None;
         for e in entries {
             if e.message_id.is_empty() { continue; }
             if !matches!(e.direction.as_str(), "sent" | "received") { continue; }
             // Dedup per chat (below): ids are the sender's choice, and a
             // global lookup let a row of another chat suppress this one.
-            if let Some(gid) = &e.group_id {
+            let written = if let Some(gid) = &e.group_id {
                 // A group this device left (or never had): a sibling's
                 // backfill must not write its messages back.
                 if !self.groups.contains_key(gid) { continue; }
@@ -8312,20 +8455,25 @@ impl P2PCore {
                 if self.message_exists_in_chat(&e.message_id, Some(gid.as_str()), "") { continue; }
                 let sender = e.sender_identity_id.clone()
                     .unwrap_or_else(|| self.my_identity_id().unwrap_or_default());
-                let _ = self.archive_group_message(gid, &sender, &e.direction, e.text.as_bytes(), Some(&e.message_id),
-                    e.reply_to_message_id.as_deref(), e.reply_to_preview.as_deref(), e.reply_to_sender_identity_id.as_deref(), e.sent_at_ms, e.author_proof.as_deref());
+                self.archive_group_message(gid, &sender, &e.direction, e.text.as_bytes(), Some(&e.message_id),
+                    e.reply_to_message_id.as_deref(), e.reply_to_preview.as_deref(), e.reply_to_sender_identity_id.as_deref(), e.sent_at_ms, e.author_proof.as_deref()).is_ok()
             } else if let Some(id) = &e.conversation_identity_id {
                 // Same floor as the peer's history answer: a sibling still holds
                 // the chat the user cleared (a contact kept as a group member).
                 if !user_fetch && e.sent_at_ms < self.history_floor(id) { continue; }
-                if let Some(ck) = self.canonical_device_for_identity(id) {
-                    if self.message_exists_in_chat(&e.message_id, None, &ck) { continue; }
-                    let status = if e.direction == "sent" { Some(MessageSendStatus::Sent.as_str()) } else { None };
-                    let _ = self.archive_message(&ck, &e.direction, e.text.as_bytes(), Some(&e.message_id), status,
-                        e.reply_to_message_id.as_deref(), e.reply_to_preview.as_deref(), e.sent_at_ms);
-                }
+                let Some(ck) = self.canonical_device_for_identity(id) else { continue };
+                if self.message_exists_in_chat(&e.message_id, None, &ck) { continue; }
+                let status = if e.direction == "sent" { Some(MessageSendStatus::Sent.as_str()) } else { None };
+                self.archive_message(&ck, &e.direction, e.text.as_bytes(), Some(&e.message_id), status,
+                    e.reply_to_message_id.as_deref(), e.reply_to_preview.as_deref(), e.sent_at_ms).is_ok()
+            } else {
+                false
+            };
+            if written {
+                oldest_written = Some(oldest_written.map_or(e.sent_at_ms, |o| o.min(e.sent_at_ms)));
             }
         }
+        oldest_written
     }
 
     /// Ayarlar ekranı için kimliğimin cihazları — BU cihaz + kardeş cihazlar.
@@ -10719,7 +10867,7 @@ impl P2PCore {
         }
         drop(snapshot);
 
-        if let MessageContent::HistorySyncRequest { group_id, before_timestamp, .. } = content {
+        if let MessageContent::HistorySyncRequest { group_id, before_timestamp, after_timestamp, .. } = content {
             let now = current_time_ms();
             // Yanıt, isteğin yeniden deneme ömrü içinde gelir; daha eskisi atılır.
             let stale: Vec<String> = self.outstanding_history_requests.iter()
@@ -10734,7 +10882,7 @@ impl P2PCore {
             } else {
                 None
             };
-            let entry = (target_identity, group_id.clone(), now, *before_timestamp);
+            let entry = (target_identity, group_id.clone(), now, before_timestamp.zip(*after_timestamp));
             // Diske de yazılır: yanıt sunucu posta kutusunda beklerken süreç
             // ölürse, açılışta istenmemiş sayılıp reddedilmesin.
             if let Some(conn) = &self.db {
@@ -11859,7 +12007,7 @@ impl P2PCore {
                     }),
                 }
             }
-            MessageContent::HistorySyncRequest { limit, before_timestamp, group_id } => {
+            MessageContent::HistorySyncRequest { limit, before_timestamp, group_id, after_timestamp } => {
                 // `load_message_history`/`load_group_message_history` zaten
                 // `history_key` yüklenmemişse (node modu hiç açılmadıysa)
                 // veya arşiv yoksa boş liste döner — burada ayrıca
@@ -11906,15 +12054,19 @@ impl P2PCore {
                 // anahtarı altında (bkz. `canonical_peer_key`/Text kolu) —
                 // isteyen kişinin kanonik-olmayan bir cihazından gelen istek
                 // de aynı sohbet geçmişini bulabilmeli.
-                // A "Fetch older history" press (`before_timestamp`) gets one
-                // month at most, ending at the newest row older than the
-                // cursor (`month_window`); the chat-open sync is unchanged.
-                let history = match (&group_id, before_timestamp) {
-                    (Some(gid), Some(before)) => self.load_history_fetch_page(&chat_key, Some(gid), limit, before),
-                    (None, Some(before)) => self.load_history_fetch_page(&chat_key, None, limit, before),
+                // A "Fetch older history" press gets only rows sent in its
+                // window `[after, before)`, at most one window long; the
+                // chat-open sync (no `before_timestamp`) is unchanged.
+                let window = before_timestamp.map(|b| {
+                    let min_after = b.saturating_sub(HISTORY_FETCH_WINDOW_MS as i64);
+                    (b, after_timestamp.map_or(min_after, |a| a.max(min_after)))
+                });
+                let history = match (&group_id, window) {
+                    (gid, Some((before, after))) => self.load_history_fetch_page(&chat_key, gid.as_deref(), limit, before, after),
                     (Some(gid), None) => self.load_group_message_history_opt(gid, limit, None, false),
                     (None, None) => self.load_message_history_opt(&chat_key, limit, None, false),
                 };
+                let loaded = history.len();
                 // `history` is oldest first and the requester pages backwards
                 // from the oldest row it gets, so the budget must cut the OLD
                 // end: walk from the newest. The newest row is always sent, or
@@ -11949,6 +12101,8 @@ impl P2PCore {
                     })
                     .collect();
                 kept.reverse();
+                // Rows of the window were cut: the requester asks for the rest.
+                let more = window.is_some() && (loaded as u32 >= limit || kept.len() < loaded);
                 let messages: Vec<SyncedMessage> = kept.into_iter()
                     .map(|(m, reactions)| SyncedMessage {
                         reactions,
@@ -11963,7 +12117,7 @@ impl P2PCore {
                 // deneme kuyruğundan çıkarabilmesi için isteğin KENDİ
                 // `message_id`'sini taşır (bkz. packet.rs notu).
                 let response = MessageContent::HistorySyncResponse {
-                    request_id: message_id.clone(), messages, group_id: group_id.clone(), before_timestamp,
+                    request_id: message_id.clone(), messages, group_id: group_id.clone(), more,
                 };
                 if let Err(e) = self.send_message_content(peer_fp.clone(), &response, None) {
                     error!("HistorySyncResponse gönderilemedi: {}", e);
@@ -11977,7 +12131,7 @@ impl P2PCore {
                 info!("Geçmiş senkronu istendi (peer={}, group={:?})", crate::log_id(&peer_fp), group_id);
                 serde_json::json!({"type": "noop"})
             }
-            MessageContent::HistorySyncResponse { request_id, messages, group_id, before_timestamp: _ } => {
+            MessageContent::HistorySyncResponse { request_id, messages, group_id, more } => {
                 // A group request is open to every member, but each answers once.
                 let answered_before = self.history_answered_by.get(&request_id).is_some_and(|s| s.contains(&sender_identity_id));
                 let solicited = !answered_before && match self.outstanding_history_requests.get(&request_id) {
@@ -12016,14 +12170,15 @@ impl P2PCore {
                     }
                 }
                 let floor_key = group_id.clone().unwrap_or_else(|| sender_identity_id.clone());
-                let window_start = self.filter_history_reply(&request_id, group_id.as_deref(), &sender_identity_id, &mut messages);
-                let user_before = window_start.is_some();
-                // `group_id` is the one we asked with (`solicited`);
-                // `before_timestamp` is the responder's word, so the page
-                // kind comes from our request (`user_before`). A group answer
-                // went down the 1:1 arm below: unfiltered, unsigned rows,
-                // archived into our 1:1 chat as sent by us.
-                let mut event = if group_id.is_some() || user_before {
+                let press = self.filter_history_reply(&request_id, group_id.as_deref(), &sender_identity_id, &mut messages);
+                // Send time of the oldest row written (a press lowers the floor to it).
+                let mut oldest_written: Option<u64> = None;
+                // `group_id` is the one we asked with (`solicited`); the page
+                // kind comes from our request (`press`), never the
+                // responder's word. A group answer went down the 1:1 arm
+                // below: unfiltered, unsigned rows, archived into our 1:1
+                // chat as sent by us.
+                let mut event = if group_id.is_some() || press.is_some() {
                     // Spec dışı, kullanıcı isteği (sonsuz kaydırma): ESKİ
                     // SAYFA yanıtı — mevcut "en yeniden daha yeni" zaman
                     // damgası eşiği burada YANLIŞ yönde çalışırdı (bu
@@ -12081,6 +12236,8 @@ impl P2PCore {
                                         return None;
                                     }
                                     self.backdate_archived(Some(gid.as_str()), "", m.message_id.as_deref(), m.timestamp);
+                                    let at = if m.sent_at_ms != 0 { m.sent_at_ms } else { m.timestamp };
+                                    oldest_written = Some(oldest_written.map_or(at, |o| o.min(at)));
                                     // Spec dışı, hata düzeltmesi: bu satırı hiç
                                     // sahip olmadığımız için taze arşivliyoruz —
                                     // yanıtlayan tarafta silinmiş olarak
@@ -12121,6 +12278,8 @@ impl P2PCore {
                                         return None;
                                     }
                                     self.backdate_archived(None, &chat_key, Some(mid), m.timestamp);
+                                    let at = if m.sent_at_ms != 0 { m.sent_at_ms } else { m.timestamp };
+                                    oldest_written = Some(oldest_written.map_or(at, |o| o.min(at)));
                                     // bkz. yukarıdaki grup koluyla aynı düzeltme —
                                     // yanıtlayanın silinmiş işaretini bu ilk
                                     // arşivlemede de yansıt.
@@ -12193,11 +12352,21 @@ impl P2PCore {
                     serde_json::json!({"type": "history_sync", "peer": chat_key, "messages": flipped})
                 };
                 self.apply_synced_reactions(&mut event, &reactions, group_id.as_deref(), &sender_identity_id);
-                // The user fetched rows back (past every filter above): they
-                // are not "cleared" any more, nor is the rest of that window.
-                if let Some(start) = window_start {
-                    if event["messages"].as_array().is_some_and(|a| !a.is_empty()) {
-                        self.lower_history_floor(&floor_key, start);
+                if let Some(((_, after), oldest)) = press {
+                    // The user fetched rows back: from the oldest one written
+                    // on they are not "cleared" any more.
+                    if let Some(o) = oldest_written {
+                        self.lower_history_floor(&floor_key, o);
+                    }
+                    // The responder cut its page: ask it for the older rest of
+                    // the window (`HISTORY_FETCH_MAX_PAGES`).
+                    if let (true, Some(o), false) = (more, oldest, write_failed) {
+                        if o > after && self.take_fetch_page(&floor_key) {
+                            let content = MessageContent::HistorySyncRequest {
+                                limit: HISTORY_SYNC_MAX_MESSAGES, before_timestamp: Some(o), group_id: group_id.clone(), after_timestamp: Some(after),
+                            };
+                            let _ = self.send_message_content(peer_fp.clone(), &content, None);
+                        }
                     }
                 }
                 if write_failed {
@@ -12895,7 +13064,7 @@ impl P2PCore {
                     })
                 }
             }
-            MessageContent::SiblingHistoryRequest { per_conversation_limit, conversation_identity_id, group_id, before_timestamp, since_timestamp } => {
+            MessageContent::SiblingHistoryRequest { per_conversation_limit, conversation_identity_id, group_id, before_timestamp, since_timestamp, after_timestamp } => {
                 // Spec dışı, ağ sağlamlığı düzeltmesi ("ack kullanımını
                 // genişlet"): önceden bu paket hiç Ack'lenmiyordu — tek
                 // güvence 5 dakikalık debounce'lu periyodik yeniden
@@ -12912,9 +13081,13 @@ impl P2PCore {
                     .map(|d| my_id_now.as_deref() == Some(d.identity_id.as_str()))
                     .unwrap_or(false);
                 if from_sibling {
-                    let limit = per_conversation_limit.min(SIBLING_BACKFILL_PER_CONVERSATION);
-                    let entries = self.build_sibling_history_response(limit, conversation_identity_id.as_deref(), group_id.as_deref(), before_timestamp, since_timestamp);
-                    let resp = MessageContent::SiblingHistoryResponse { entries };
+                    // A "Fetch older history" window: one window, at most 30 days.
+                    let window = before_timestamp.zip(after_timestamp)
+                        .map(|(b, a)| (b, a.max(b.saturating_sub(HISTORY_FETCH_WINDOW_MS as i64))));
+                    let limit = per_conversation_limit.min(if window.is_some() { HISTORY_SYNC_MAX_MESSAGES } else { SIBLING_BACKFILL_PER_CONVERSATION });
+                    let (entries, more) = self.build_sibling_history_response(limit, conversation_identity_id.as_deref(), group_id.as_deref(), before_timestamp, since_timestamp, window);
+                    // The echo is the request's own window, not the clamped one.
+                    let resp = MessageContent::SiblingHistoryResponse { entries, window: before_timestamp.zip(after_timestamp), more };
                     if let Err(e) = self.send_message_content(peer_fp.clone(), &resp, None) {
                         error!("SiblingHistoryResponse gönderilemedi: {}", e);
                     }
@@ -12922,7 +13095,7 @@ impl P2PCore {
                 serde_json::json!({"type": "noop"})
             }
             // Çoklu-cihaz (spec 1.7): kardeşin gönderdiği geçmiş — arşive işle.
-            MessageContent::SiblingHistoryResponse { entries } => {
+            MessageContent::SiblingHistoryResponse { entries, window, more } => {
                 let my_id_now = self.my_identity_id();
                 let from_sibling = self.known_remote_devices.get(&peer_fp)
                     .map(|d| my_id_now.as_deref() == Some(d.identity_id.as_str()))
@@ -12965,11 +13138,16 @@ impl P2PCore {
                     // `COALESCE(NULLIF(sent_at_ms,0), timestamp)` ile ürettiği
                     // "etkin" değer, bu yüzden `timestamp` alanı için de
                     // güvenle kullanılabilir.
-                    let fetched_chat = single_group.clone().or_else(|| single_conversation.clone());
-                    let merged = self.apply_sibling_reply(fetched_chat.as_deref(), entries);
+                    let (merged, press_chat) = self.apply_sibling_reply(&peer_fp, window, more, entries);
+                    // A press answer is about its chat, empty or not.
+                    let (single_group, single_conversation) = match press_chat {
+                        Some(c) if self.groups.contains_key(&c) => (Some(c), None),
+                        Some(c) => (None, Some(c)),
+                        None => (single_group, single_conversation),
+                    };
                     // M-68: an answer to the unscoped backfill (no single chat;
                     // an empty one too) moves this sibling's watermark.
-                    if single_group.is_none() && single_conversation.is_none() {
+                    if window.is_none() && single_group.is_none() && single_conversation.is_none() {
                         if let Some(state) = self.sibling_backfill_since.get_mut(&peer_fp) {
                             if state.0 > 0 {
                                 *state = (0, state.0);
@@ -13344,7 +13522,8 @@ impl P2PCore {
         self.peer_prekeys.clear();
         self.id0_inits.clear();
         self.outstanding_history_requests.clear();
-        self.sibling_user_fetch.clear();
+        self.sibling_fetch_open.clear();
+        self.history_fetch_pages.clear();
         self.handshake_failure_notified.clear();
         // Defter #13 (bellek tarafı): sunucu durumu ve kök arşiv anahtarı da
         // temizlenmeli — aksi halde iptal edilmiş bir cihaz, süreç yaşadığı
@@ -13658,15 +13837,16 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Drops the unanswered `HistorySyncRequest`s to one device for one chat
-    /// (`group_id`: None = the 1:1 chat): the newest request does the same
-    /// work, and each one is retried and deposited until it is answered.
+    /// Drops the unanswered chat-open `HistorySyncRequest`s (no window) to
+    /// one device for one chat (`group_id`: None = the 1:1 chat): the newest
+    /// request does the same work, and each one is retried and deposited
+    /// until it is answered. A press window is never dropped here.
     fn cancel_pending_history_requests(&mut self, peer_device_fingerprint: &str, group_id: Option<&str>) {
         let stale: Vec<String> = self.awaiting_confirmation.iter()
             .filter(|(_, p)| p.peer_device_fingerprint == peer_device_fingerprint)
             .filter(|(_, p)| matches!(
                 &p.regen_content,
-                Some(MessageContent::HistorySyncRequest { group_id: g, .. }) if g.as_deref() == group_id
+                Some(MessageContent::HistorySyncRequest { group_id: g, before_timestamp: None, .. }) if g.as_deref() == group_id
             ))
             .map(|(id, _)| id.clone())
             .collect();
@@ -13696,7 +13876,7 @@ impl P2PCore {
         // (`before_timestamp: None`) isteğini iptal et — en yenisi zaten
         // aynı işi yapar.
         self.cancel_pending_history_requests(&peer_device_fingerprint, None);
-        let content = MessageContent::HistorySyncRequest { limit, before_timestamp: None, group_id: None };
+        let content = MessageContent::HistorySyncRequest { limit, before_timestamp: None, group_id: None, after_timestamp: None };
         self.send_message_content(peer_device_fingerprint, &content, None).map(|_| ())
     }
 
@@ -13706,10 +13886,13 @@ impl P2PCore {
     /// `before_timestamp`'ten eski mesajları ister. Yanıt asenkron gelir
     /// (bkz. `HistorySyncResponse` kolu — `before_timestamp` dolu ise
     /// "older_history" olayı üretir).
-    fn request_older_history(&mut self, peer_device_fingerprint: &str, before_timestamp: i64, limit: u32) -> Result<(), String> {
-        // Sent on a user action only, bkz. `server_client::fetch_server_history`.
-        self.cancel_pending_history_requests(peer_device_fingerprint, None);
-        let content = MessageContent::HistorySyncRequest { limit, before_timestamp: Some(before_timestamp), group_id: None };
+    ///
+    /// The window `[after, before)` of a "Fetch older history" press. Older
+    /// presses are not cancelled: each asks for its own window.
+    fn request_older_history(&mut self, peer_device_fingerprint: &str, before: i64, after: i64) -> Result<(), String> {
+        let content = MessageContent::HistorySyncRequest {
+            limit: HISTORY_SYNC_MAX_MESSAGES, before_timestamp: Some(before), group_id: None, after_timestamp: Some(after),
+        };
         self.send_message_content(peer_device_fingerprint.to_string(), &content, None).map(|_| ())
     }
 
@@ -13719,14 +13902,15 @@ impl P2PCore {
     /// aynı fan-out deseni) — ilk yanıt veren boşluğu doldurur, sonraki
     /// yanıtlar `message_id` var-olma kontrolüyle (bkz.
     /// `message_exists_with_id`) sessizce yok sayılır.
-    fn request_older_group_history(&mut self, group_id: &str, before_timestamp: i64, limit: u32) -> Result<(), String> {
+    fn request_older_group_history(&mut self, group_id: &str, before: i64, after: i64) -> Result<(), String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
-        let content = MessageContent::HistorySyncRequest { limit, before_timestamp: Some(before_timestamp), group_id: Some(group_id.to_string()) };
+        let content = MessageContent::HistorySyncRequest {
+            limit: HISTORY_SYNC_MAX_MESSAGES, before_timestamp: Some(before), group_id: Some(group_id.to_string()), after_timestamp: Some(after),
+        };
         let mut sent_to_any = false;
         for member_identity_id in group.other_members(&own_identity_id) {
             if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id) {
-                self.cancel_pending_history_requests(&peer_fp, Some(group_id));
                 if self.send_message_content(peer_fp, &content, None).is_ok() {
                     sent_to_any = true;
                 }
@@ -14886,33 +15070,40 @@ impl P2PCore {
 
     /// The rows of a `HistorySyncResponse` we keep, before any is written.
     /// In 1:1 only the peer's own ("sent") rows. A reply to the user's
-    /// "Fetch older history" press, known by OUR request's cursor (the
-    /// response's `before_timestamp` is the peer's word), keeps one month
-    /// older than that cursor (`month_window`, the responder's own cut) and
-    /// is the only one that may bring back rows below the history floor:
-    /// any other reply (the chat-open sync) drops what the user cleared,
-    /// pruned or deleted with the contact. Returns the window start for a
-    /// user fetch, `None` otherwise.
-    fn filter_history_reply(&self, request_id: &str, group_id: Option<&str>, sender_identity_id: &str, messages: &mut Vec<SyncedMessage>) -> Option<u64> {
-        let user_before = self.outstanding_history_requests.get(request_id).and_then(|e| e.3);
+    /// "Fetch older history" press, known by OUR request's window (never the
+    /// response's word), keeps only rows sent inside that window and is the
+    /// only one that may bring back rows below the history floor: any other
+    /// reply (the chat-open sync) drops what the user cleared, pruned or
+    /// deleted with the contact. For a press returns its window
+    /// `(before, after)` and the oldest row inside it before the 1:1
+    /// direction cut (where a follow-up page continues).
+    fn filter_history_reply(&self, request_id: &str, group_id: Option<&str>, sender_identity_id: &str, messages: &mut Vec<SyncedMessage>) -> Option<((i64, i64), Option<i64>)> {
+        let window = self.outstanding_history_requests.get(request_id).and_then(|e| e.3);
         // Same clock as `prune_chat_before`.
-        let sent_at = |m: &SyncedMessage| if m.sent_at_ms != 0 { m.sent_at_ms } else { m.timestamp };
-        let window_start = user_before.map(|b| month_window(messages, b.max(0) as u64, sent_at));
-        let floor = if user_before.is_some() { 0 } else { self.history_floor(group_id.unwrap_or(sender_identity_id)) };
+        let sent_at = |m: &SyncedMessage| (if m.sent_at_ms != 0 { m.sent_at_ms } else { m.timestamp }) as i64;
+        let mut oldest = None;
+        let floor = match window {
+            Some((before, after)) => {
+                messages.retain(|m| (after..before).contains(&sent_at(m)));
+                oldest = messages.iter().map(sent_at).min();
+                0
+            }
+            None => self.history_floor(group_id.unwrap_or(sender_identity_id)) as i64,
+        };
         messages.retain(|m| (group_id.is_some() || m.direction == "sent") && sent_at(m) >= floor);
-        window_start
+        window.map(|w| (w, oldest))
     }
 
     /// One "Fetch older history" page of a chat (`group_id`, else the 1:1
-    /// chat under `peer_device_fingerprint`): rows sent before `before`,
-    /// cut to `month_window`, oldest first, without marks.
-    fn load_history_fetch_page(&self, peer_device_fingerprint: &str, group_id: Option<&str>, limit: u32, before: i64) -> Vec<ArchivedMessage> {
-        let mut rows = match group_id {
-            Some(g) => self.load_group_message_history_q(g, limit, Some(before), None, false, true),
-            None => self.load_message_history_q(peer_device_fingerprint, limit, Some(before), None, false, true),
-        };
-        month_window(&mut rows, before.max(0) as u64, |m| m.sent_at_ms);
-        rows
+    /// chat under `peer_device_fingerprint`): the newest `limit` rows sent in
+    /// `[after, before)`, oldest first, without marks.
+    fn load_history_fetch_page(&self, peer_device_fingerprint: &str, group_id: Option<&str>, limit: u32, before: i64, after: i64) -> Vec<ArchivedMessage> {
+        // `after_timestamp` of the queries is exclusive.
+        let after = Some(after.saturating_sub(1));
+        match group_id {
+            Some(g) => self.load_group_message_history_q(g, limit, Some(before), after, false, true),
+            None => self.load_message_history_q(peer_device_fingerprint, limit, Some(before), after, false, true),
+        }
     }
 
     /// H137: the chat list's previews under one lock: per contact (key:
@@ -17674,6 +17865,8 @@ impl P2PCore {
                     // (`attachment_plaintext_path_unlocked`).
                     let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("{}.png", file_id)));
                     let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("{}.gif", file_id)));
+                    // "Save as JPEG XL" (`attachment_original_path_unlocked`).
+                    let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("orig-{}.jxl", file_id)));
                 }
             }
         }
@@ -24610,71 +24803,6 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getGroupMessageHistoryBefor
     safe_new_jstring(&mut env, json)
 }
 
-/// Spec dışı, kullanıcı isteği (sonsuz kaydırma): yerel arşiv tükendiğinde
-/// (bkz. `getMessageHistoryBefore`), karşı taraftan (chat peer) bu zaman
-/// damgasından eski mesajları ister — bkz. `request_older_history`. Yanıt
-/// asenkron gelir (`pollNetwork` "older_history" olayı).
-#[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_requestOlderMessageHistory<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>, before_timestamp: jlong, limit: jni::sys::jint) {
-    let fp: String = jstr(&mut env, &peer_device_fingerprint).unwrap_or_default();
-    let _ = catch_panic(move || {
-        let _guard = RUNTIME.enter();
-        let mut core = core_lock();
-        if let Err(e) = core.request_older_history(&fp, before_timestamp, limit.clamp(0, MAX_HISTORY_PAGE) as u32) {
-            error!("requestOlderMessageHistory başarısız: {}", e);
-        }
-    });
-}
-
-/// bkz. `requestOlderMessageHistory` aynı notu — grup için, ulaşılabilir
-/// TÜM diğer üyelere gönderilir (bkz. `request_older_group_history`).
-#[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_requestOlderGroupMessageHistory<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, before_timestamp: jlong, limit: jni::sys::jint) {
-    let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
-    let _ = catch_panic(move || {
-        let _guard = RUNTIME.enter();
-        let mut core = core_lock();
-        if let Err(e) = core.request_older_group_history(&gid, before_timestamp, limit.clamp(0, MAX_HISTORY_PAGE) as u32) {
-            error!("requestOlderGroupMessageHistory başarısız: {}", e);
-        }
-    });
-}
-
-/// Spec dışı, dış inceleme düzeltmesi ("sibling backfill sayfalama
-/// desteklemiyor — karşı taraf ulaşılamazken bu cihazın KENDİ diğer
-/// cihazından eski geçmiş istemesinin yolu yoktu"): `requestOlderMessageHistory`
-/// ile AYNI anda, EK bir kaynak olarak çağrılmalı — karşı taraf (contact)
-/// o an ulaşılamasa bile kendi kardeş cihazlarından aynı sayfayı ister.
-/// İkisi de `message_id` bazlı dedup ettiğinden (bkz. `message_exists_with_id`)
-/// aynı anda sorulmaları güvenli, çift kayıt oluşturmaz — hangisi önce
-/// yanıt verirse boşluğu o doldurur. Yanıt asenkron gelir (`pollNetwork`
-/// "older_history" olayı — `requestOlderMessageHistory` ile AYNI şekilde).
-#[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_requestOlderSiblingHistory<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>, before_timestamp: jlong, limit: jni::sys::jint) {
-    let fp: String = jstr(&mut env, &peer_device_fingerprint).unwrap_or_default();
-    let _ = catch_panic(move || {
-        let _guard = RUNTIME.enter();
-        let mut core = core_lock();
-        if let Err(e) = core.request_older_sibling_history(Some(&fp), None, before_timestamp, limit.clamp(0, MAX_HISTORY_PAGE) as u32) {
-            warn!("requestOlderSiblingHistory (1:1) başarısız (muhtemelen kardeş cihaz yok): {}", e);
-        }
-    });
-}
-
-/// bkz. `requestOlderSiblingHistory` aynı notu — grup için, `requestOlderGroupMessageHistory`
-/// ile birlikte EK bir kaynak olarak çağrılmalı.
-#[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_requestOlderSiblingGroupHistory<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, before_timestamp: jlong, limit: jni::sys::jint) {
-    let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
-    let _ = catch_panic(move || {
-        let _guard = RUNTIME.enter();
-        let mut core = core_lock();
-        if let Err(e) = core.request_older_sibling_history(None, Some(&gid), before_timestamp, limit.clamp(0, MAX_HISTORY_PAGE) as u32) {
-            warn!("requestOlderSiblingHistory (grup) başarısız (muhtemelen kardeş cihaz yok): {}", e);
-        }
-    });
-}
-
 /// Spec dışı, hata düzeltmesi (grup geçmişi kalıcılığı): `getMessageHistory`'nin
 /// grup karşılığı — `GroupChatActivity` açılışında çağrılmalı, aksi halde
 /// (önceki davranış) ekran her açılışta boştan başlar ve sadece o an
@@ -24869,6 +24997,16 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getAttachmentPlaintextPath<
         Ok(Ok(path)) => safe_new_jstring(&mut env, path),
         Ok(Err(e)) => safe_new_jstring(&mut env, format!("Error: {}", e)),
         Err(e) => safe_new_jstring(&mut env, format!("Error: {}", e)),
+    }
+}
+
+/// See `attachment_original_path_unlocked`. Path or `"Error: ..."`.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_getAttachmentOriginalPath<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, file_id: JString<'local>) -> jstring {
+    let file_id_str: String = jstr(&mut env, &file_id).unwrap_or_default();
+    match catch_panic(move || attachment_original_path_unlocked(&file_id_str)) {
+        Ok(Ok(path)) => safe_new_jstring(&mut env, path),
+        Ok(Err(e)) | Err(e) => safe_new_jstring(&mut env, format!("Error: {}", e)),
     }
 }
 
