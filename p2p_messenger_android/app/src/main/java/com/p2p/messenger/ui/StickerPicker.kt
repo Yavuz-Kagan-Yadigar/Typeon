@@ -131,6 +131,8 @@ class StickerPicker(
     fun provideBubbleImages(adapter: SimpleChatAdapter) {
         adapter.stickerImageProvider = { fileId, done ->
             scope.launch(Dispatchers.IO) {
+                // First frame at once, the (maybe slow) animation after it.
+                drawableAt { P2PLib.getAttachmentFirstFrame(fileId) }?.let { p -> withContext(Dispatchers.Main) { done(p) } }
                 val drawable = drawableAt { P2PLib.getAttachmentPlaintextPath(fileId) }
                 withContext(Dispatchers.Main) { done(drawable) }
             }
@@ -383,6 +385,13 @@ class StickerPicker(
             }
             if (cached != null || !pending.add(id)) return
             scope.launch(Dispatchers.IO) {
+                drawableAt { P2PLib.stickerFirstFrame(id) }?.let { p ->
+                    withContext(Dispatchers.Main) {
+                        cache.put(id, p)
+                        val idx = ids.indexOf(id)
+                        if (idx >= 0) notifyItemChanged(idx)
+                    }
+                }
                 val drawable = drawableAt { P2PLib.stickerPlainPath(id) }
                 withContext(Dispatchers.Main) {
                     pending.remove(id)

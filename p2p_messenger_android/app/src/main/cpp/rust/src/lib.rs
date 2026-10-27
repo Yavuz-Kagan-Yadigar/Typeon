@@ -470,7 +470,7 @@ pub(crate) fn save_received_sticker_unlocked(file_id: &str) -> Result<String, St
 pub(crate) fn sticker_plain_path_unlocked(id: &str) -> Result<String, String> {
     let core = core_lock_read();
     let animated = core.sticker_animated(id)?;
-    let out = core.attachments_dir()?.join("plain_cache").join(format!("sticker-{}.{}", id, if animated { "gif" } else { "png" }));
+    let out = core.attachments_dir()?.join("plain_cache").join(if animated { format!("anim-{id}.gif") } else { format!("sticker-{id}.png") });
     if out.exists() {
         return Ok(out.to_string_lossy().to_string());
     }
@@ -486,6 +486,38 @@ pub(crate) fn sticker_plain_path_unlocked(id: &str) -> Result<String, String> {
     result.map(|()| out.to_string_lossy().to_string())
 }
 
+/// A sticker's first frame as PNG (fast placeholder while the GIF converts).
+pub(crate) fn sticker_first_frame_unlocked(id: &str) -> Result<String, String> {
+    let core = core_lock_read();
+    let out = core.attachments_dir()?.join("plain_cache").join(format!("first-{id}.png"));
+    if out.exists() {
+        return Ok(out.to_string_lossy().to_string());
+    }
+    let tmp = core.decrypt_sticker_to_tmp(id)?;
+    drop(core);
+    let r = attachments::convert_cached(&tmp, &out, attachments::jxl_to_png);
+    let _ = std::fs::remove_file(&tmp);
+    r.map(|()| out.to_string_lossy().to_string())
+}
+
+/// A JPEG XL attachment's first frame as PNG (`first-<sha256>.png`).
+pub(crate) fn attachment_first_frame_unlocked(file_id: &str) -> Result<String, String> {
+    let (file_key, sha256_hex, enc_path, decrypted_path) = core_lock().begin_attachment_decrypt(file_id)?;
+    if !decrypted_path.extension().map_or(false, |e| e.eq_ignore_ascii_case("jxl")) {
+        return Err("not a JPEG XL".to_string());
+    }
+    let out = decrypted_path.with_file_name(format!("first-{sha256_hex}.png"));
+    if out.exists() {
+        return Ok(out.to_string_lossy().to_string());
+    }
+    let tmp = decrypted_path.with_file_name(format!(".first-{}.jxl", uuid::Uuid::new_v4()));
+    let chunk_size = core_lock().file_chunk_size(file_id);
+    let r = attachments::decrypt_file_from_disk_with(&enc_path, &tmp, &file_key, &sha256_hex, chunk_size)
+        .and_then(|()| attachments::convert_cached(&tmp, &out, attachments::jxl_to_png));
+    let _ = std::fs::remove_file(&tmp);
+    r.map(|()| out.to_string_lossy().to_string())
+}
+
 /// bkz. `P2PCore::begin_attachment_decrypt` — AYNI kilit-bölme deseni,
 /// indirme sonrası tam-dosya çözme tarafı. Eşzamanlılık: aynı dosya için
 /// iki eşzamanlı çağrı aynı önbellek yoluna yazmasın diye önce benzersiz
@@ -497,7 +529,8 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
     // reads JPEG XL. Lossless both ways.
     let jxl = decrypted_path.extension().map_or(false, |e| e.eq_ignore_ascii_case("jxl"));
     // H26: an animated one as GIF instead.
-    let gif_path = decrypted_path.with_extension("gif");
+    // Named by content hash: identical animations share one conversion.
+    let gif_path = decrypted_path.with_file_name(format!("anim-{sha256_hex}.gif"));
     if jxl && gif_path.exists() {
         return Ok(gif_path.to_string_lossy().to_string());
     }
@@ -16939,7 +16972,8 @@ impl P2PCore {
         let _ = std::fs::remove_file(enc_path);
         let cache = self.attachments_dir()?.join("plain_cache");
         let _ = std::fs::remove_file(cache.join(format!("sticker-{id}.png")));
-        let _ = std::fs::remove_file(cache.join(format!("sticker-{id}.gif")));
+        let _ = std::fs::remove_file(cache.join(format!("anim-{id}.gif")));
+        let _ = std::fs::remove_file(cache.join(format!("first-{id}.png")));
         if sync {
             self.send_to_siblings(SiblingEchoBody::StickerRemoved { id: id.to_string() });
         }
@@ -24344,6 +24378,22 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_importStickerFrames<'local>
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_listStickers<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
     let json = catch_panic(|| core_lock_read().list_stickers()).unwrap_or_else(|_| "[]".to_string());
     safe_new_jstring(&mut env, json)
+}
+
+/// First frame of a sticker as PNG path, or "Error: ...".
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_stickerFirstFrame<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, id: JString<'local>) -> jstring {
+    let id: String = jstr(&mut env, &id).unwrap_or_default();
+    let result = catch_panic(move || sticker_first_frame_unlocked(&id));
+    sticker_reply(&mut env, result)
+}
+
+/// First frame of a JPEG XL attachment as PNG path, or "Error: ...".
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_getAttachmentFirstFrame<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, file_id: JString<'local>) -> jstring {
+    let file_id: String = jstr(&mut env, &file_id).unwrap_or_default();
+    let result = catch_panic(move || attachment_first_frame_unlocked(&file_id));
+    sticker_reply(&mut env, result)
 }
 
 /// A viewable copy of a sticker: `.png`, or `.gif` when animated.

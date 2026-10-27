@@ -396,6 +396,10 @@ object P2PLib {
     /** Bir çıkartmanın görüntülenebilir kopyası: `.png` (duruk) ya da `.gif`
      *  (animasyonlu) dosyasının MUTLAK yolu, ya da "Error: ...". */
     external fun stickerPlainPath(id: String): String
+    /** First frame of a sticker as a PNG path (fast placeholder), or "Error: ...". */
+    external fun stickerFirstFrame(id: String): String
+    /** First frame of a JPEG XL attachment as a PNG path, or "Error: ...". */
+    external fun getAttachmentFirstFrame(fileId: String): String
     /** Depoda bu kaynak kimlikli (`wa:`/`jxl:`) çıkartma var mı. */
     external fun hasStickerOrigin(origin: String): Boolean
     /** Çıkartmayı kendi deposundan siler. "OK" ya da "Error: ...". */

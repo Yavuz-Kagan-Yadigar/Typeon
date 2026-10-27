@@ -1020,6 +1020,21 @@ pub fn jxl_to_gif(src: &Path, out: &Path) -> Result<(), String> {
     std::fs::write(out, gif).map_err(|e| e.to_string())
 }
 
+/// `conv(src, out)` unless `out` exists; written to a temp name and renamed, so
+/// a half-written `out` is never reused. `out` named by content hash = one
+/// conversion for identical files.
+pub fn convert_cached(src: &Path, out: &Path, conv: fn(&Path, &Path) -> Result<(), String>) -> Result<(), String> {
+    if out.exists() {
+        return Ok(());
+    }
+    let tmp = out.with_file_name(format!(".{}.tmp", uuid::Uuid::new_v4()));
+    let r = conv(src, &tmp).and_then(|()| std::fs::rename(&tmp, out).map_err(|e| e.to_string()));
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
+}
+
 /// A received JPEG XL as PNG: no Android version decodes JPEG XL, and the
 /// Linux viewer takes the common formats only. The file is the sender's: its
 /// size is checked before the frame is rendered, and the decoder's
@@ -1148,6 +1163,30 @@ mod tests {
         assert!(encode_jxl_lossless(&mut vec![0; 8], 2, 2, true, &jxl).is_err(), "short buffer");
         let _ = std::fs::remove_file(&jxl);
         let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn same_animation_one_gif_and_first_frame_png() {
+        let dir = std::env::temp_dir().join(format!("typeon-animdedupe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (w, h) = (9u32, 6u32);
+        let frames: Vec<Vec<u8>> = (0..2u32).map(|f| (0..w * h * 4).map(|i| ((i + f * 5) * 31 % 251) as u8).collect()).collect();
+        let (a, b) = (dir.join("a.jxl"), dir.join("b.jxl"));
+        encode_jxl_animated(&mut frames.clone(), w, h, &[40, 40], true, &a).unwrap();
+        std::fs::copy(&a, &b).unwrap();
+        let gif = dir.join("anim-abc.gif");
+        convert_cached(&a, &gif, jxl_to_gif).unwrap();
+        let t = std::fs::metadata(&gif).unwrap().modified().unwrap();
+        convert_cached(&b, &gif, jxl_to_gif).unwrap();
+        assert_eq!(std::fs::metadata(&gif).unwrap().modified().unwrap(), t);
+        let png = dir.join("first-abc.png");
+        convert_cached(&a, &png, jxl_to_png).unwrap();
+        let dec = png::Decoder::new(std::io::BufReader::new(File::open(&png).unwrap())).read_info().unwrap();
+        assert_eq!((dec.info().width, dec.info().height), (w, h));
+        let n = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(n, 4, "a, b, one gif, one png: no temp left");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
