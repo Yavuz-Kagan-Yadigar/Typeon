@@ -3504,6 +3504,12 @@ impl P2PCore {
             if self.message_exists_with_id(&record_id) {
                 continue;
             }
+            // Cleared or pruned by the user (`history_floor`; `conv_key` is
+            // the identity id or group id the floor is kept under).
+            let at = if archived.sent_at_ms != 0 { archived.sent_at_ms } else { archived.timestamp };
+            if at < self.history_floor(conv_key) {
+                continue;
+            }
             let result = if group {
                 self.archive_group_message(
                     conv_key,

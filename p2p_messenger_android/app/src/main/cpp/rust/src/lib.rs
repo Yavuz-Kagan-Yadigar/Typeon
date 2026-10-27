@@ -1696,6 +1696,58 @@ mod recovery_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A cleared 1:1 chat's rows stay gone: a sibling's backfill of older
+    /// rows is refused by the floor.
+    #[test]
+    fn cleared_chat_history_does_not_come_back() {
+        let dir = std::env::temp_dir().join(format!("typeon-cclear-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("attachments")).unwrap();
+        let mut core = core_on_disk(&dir);
+        let mut c = Contact::new("c1".into(), "Alice".into(), "id1".into());
+        c.add_device_unverified("dev1".into(), 1);
+        core.contacts.insert("c1".into(), c);
+        core.identity_to_contact.insert("id1".into(), "c1".into());
+        core.archive_message("dev1", "received", b"old", Some("m1"), None, None, None, 1).unwrap();
+        core.clear_chat_history("c1").unwrap();
+        assert!(!core.message_exists_in_chat("m1", None, "dev1"));
+        let entry = |id: &str, at: u64| SiblingHistoryEntry {
+            conversation_identity_id: Some("id1".into()), group_id: None, direction: "received".into(), text: "t".into(),
+            message_id: id.into(), sender_identity_id: None, reply_to_message_id: None, reply_to_preview: None,
+            reply_to_sender_identity_id: None, sent_at_ms: at, author_proof: None,
+        };
+        core.apply_sibling_history(vec![entry("m1", 1), entry("m2", current_time_ms() + 1_000)]);
+        assert!(!core.message_exists_in_chat("m1", None, "dev1"), "cleared row stays gone");
+        assert!(core.message_exists_in_chat("m2", None, "dev1"), "a newer row still arrives");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "Delete older than" removes old rows and the reactions on old files,
+    /// and raises (never lowers) the history floor to the cut-off.
+    #[test]
+    fn pruned_chat_rows_go_and_raise_the_floor() {
+        let dir = std::env::temp_dir().join(format!("typeon-prune-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("attachments")).unwrap();
+        let mut core = core_on_disk(&dir);
+        let gid = "group-0123456789abcdef".to_string();
+        core.groups.insert(gid.clone(), Group::new(gid.clone(), "g".into(), "me".into(), 1));
+        core.archive_group_message(&gid, "x", "received", b"old", Some("m1"), None, None, None, 100, None).unwrap();
+        core.archive_group_message(&gid, "x", "received", b"new", Some("m2"), None, None, None, 300, None).unwrap();
+        core.db.as_ref().unwrap().execute_batch(&format!(
+            "INSERT INTO files (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size, sha256_hex, encrypted_file_key, key_nonce, status, created_at, group_id)
+             VALUES ('f1', 'p', 'received', 'a.jpg', 'image/jpeg', 9, '', x'00', x'00', 'complete', 100, '{gid}');")).unwrap();
+        assert!(core.apply_reaction("f1", "x", "A", 1));
+        core.prune_chat_before("group", &gid, 200).unwrap();
+        assert!(!core.message_exists_in_chat("m1", Some(gid.as_str()), ""));
+        assert!(core.message_exists_in_chat("m2", Some(gid.as_str()), ""));
+        let left: i64 = core.db.as_ref().unwrap().query_row(
+            "SELECT (SELECT COUNT(*) FROM message_reactions) + (SELECT COUNT(*) FROM files)", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0, "old file and its reactions go");
+        assert_eq!(core.history_floor(&gid), 200);
+        core.prune_chat_before("group", &gid, 150).unwrap();
+        assert_eq!(core.history_floor(&gid), 200, "never lowered");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// F1: the preview is the newest by sent time even when 60 older-sent
     /// rows arrived after it (history sync).
     #[test]
@@ -5045,6 +5097,14 @@ impl P2PCore {
         self.meta_str(&format!("hfloor:{}", identity_id))
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0)
+    }
+
+    /// Raises the history floor of a chat (identity id or group id) to `ms`;
+    /// never lowers it.
+    fn raise_history_floor(&self, chat_id: &str, ms: u64) {
+        if ms > self.history_floor(chat_id) {
+            self.meta_put(&format!("hfloor:{}", chat_id), &ms.to_string());
+        }
     }
 
     fn meta_del(&self, k: &str) {
@@ -8962,6 +9022,8 @@ impl P2PCore {
             return self.clear_group_history(contact_id);
         }
         let contact = self.contacts.get(contact_id).ok_or("Kişi bulunamadı")?.clone();
+        // No history answer or sibling backfill may bring the rows back.
+        self.raise_history_floor(&contact.trusted_identity_id, current_time_ms());
         // M104: same device set as `delete_contact` (inactive records too).
         let fingerprints = self.contact_fingerprints_all(&contact);
         self.delete_chat_attachments(&fingerprints);
@@ -8991,7 +9053,7 @@ impl P2PCore {
     fn clear_group_history(&mut self, group_id: &str) -> Result<(), String> {
         // No history answer or sibling backfill may bring the rows back
         // (see `history_floor`; a group id never collides with an identity id).
-        self.meta_put(&format!("hfloor:{}", group_id), &current_time_ms().to_string());
+        self.raise_history_floor(group_id, current_time_ms());
         let file_ids: Vec<String> = self.db.as_ref().and_then(|conn| {
             let mut stmt = conn.prepare("SELECT file_id FROM files WHERE group_id = ?1").ok()?;
             let rows = stmt.query_map(params![group_id], |r| r.get(0)).ok()?.flatten().collect();
@@ -9057,7 +9119,7 @@ impl P2PCore {
     fn delete_contact(&mut self, contact_id: &str) -> Result<(), String> {
         let contact = self.contacts.get(contact_id).ok_or("Kişi bulunamadı")?.clone();
         // bkz. the `hfloor:` filter in the HistorySyncResponse arm.
-        self.meta_put(&format!("hfloor:{}", contact.trusted_identity_id), &current_time_ms().to_string());
+        self.raise_history_floor(&contact.trusted_identity_id, current_time_ms());
         // Still a member of one of our groups: the device records, keys and
         // sessions stay. Without them group messages to and from this member
         // were dropped ("Unknown sender device") and a founder handover it
@@ -11742,7 +11804,8 @@ impl P2PCore {
                     // its chat with a group member): the peer still has those
                     // rows and they came back on the next pairing.
                     let floor = self.history_floor(&sender_identity_id);
-                    messages.retain(|m| m.direction == "sent" && m.timestamp >= floor);
+                    // Same clock as the group arm and `prune_chat_before`.
+                    messages.retain(|m| m.direction == "sent" && (if m.sent_at_ms != 0 { m.sent_at_ms } else { m.timestamp }) >= floor);
                 }
                 // `group_id` is the one we asked with (`solicited`);
                 // `before_timestamp` is the responder's word. A group answer
@@ -17458,13 +17521,13 @@ impl P2PCore {
     }
 
     /// The devices (1:1) or group a storage chat id (`storage_usage`) names:
-    /// `(fingerprints, group_id)`.
-    fn chat_prune_scope(&self, kind: &str, id: &str) -> Option<(Vec<String>, Option<String>)> {
+    /// `(fingerprints, group_id, history floor key)`.
+    fn chat_prune_scope(&self, kind: &str, id: &str) -> Option<(Vec<String>, Option<String>, String)> {
         if kind == "group" {
-            return self.groups.contains_key(id).then(|| (Vec::new(), Some(id.to_string())));
+            return self.groups.contains_key(id).then(|| (Vec::new(), Some(id.to_string()), id.to_string()));
         }
         let contact = self.contacts.values().find(|c| self.contact_fingerprints_all(c).iter().any(|f| f == id))?;
-        Some((self.contact_fingerprints_all(contact), None))
+        Some((self.contact_fingerprints_all(contact), None, contact.trusted_identity_id.clone()))
     }
 
     /// Storage → "delete older than": what `prune_chat_before` would remove.
@@ -17472,7 +17535,7 @@ impl P2PCore {
     /// "att_bytes", "del_att_bytes"}`; message bytes are the sealed blobs,
     /// attachment bytes the local copies. `before_ms` 0: nothing deleted.
     fn chat_prune_stats(&self, kind: &str, id: &str, before_ms: i64) -> serde_json::Value {
-        let (Some((fps, group)), Some(conn)) = (self.chat_prune_scope(kind, id), self.db.as_ref()) else {
+        let (Some((fps, group, _)), Some(conn)) = (self.chat_prune_scope(kind, id), self.db.as_ref()) else {
             return serde_json::json!({});
         };
         const T: &str = "COALESCE(NULLIF(sent_at_ms,0), timestamp)";
@@ -17531,14 +17594,23 @@ impl P2PCore {
     /// Storage → "delete older than": this device's messages and attachments
     /// of one chat older than `before_ms`; the pairing and newer history stay.
     fn prune_chat_before(&mut self, kind: &str, id: &str, before_ms: i64) -> Result<(), String> {
-        let (fps, group) = self.chat_prune_scope(kind, id).ok_or("Sohbet bulunamadı")?;
-        for (file_id, created) in self.chat_prune_files(&fps, group.as_deref()) {
-            if created < before_ms {
-                self.delete_attachment_file(&file_id);
-            }
+        let (fps, group, floor_key) = self.chat_prune_scope(kind, id).ok_or("Sohbet bulunamadı")?;
+        if before_ms <= 0 {
+            return Ok(());
         }
+        // No history answer or sibling backfill may bring the rows back.
+        self.raise_history_floor(&floor_key, before_ms as u64);
+        let old_files: Vec<String> = self.chat_prune_files(&fps, group.as_deref()).into_iter()
+            .filter(|(_, created)| *created < before_ms)
+            .map(|(file_id, _)| file_id)
+            .collect();
         let conn = self.db.as_ref().ok_or("DB yok")?;
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        // Reactions and seen marks on the attachments, before their rows go.
+        for file_id in &old_files {
+            tx.execute("DELETE FROM message_reactions WHERE message_id = ?1", params![file_id]).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM message_seen WHERE message_id = ?1", params![file_id]).map_err(|e| e.to_string())?;
+        }
         let (cond, keys): (&str, Vec<&String>) = match &group {
             Some(g) => ("group_id = ?1", vec![g]),
             None => ("peer_device_fingerprint = ?1 AND group_id IS NULL", fps.iter().collect()),
@@ -17553,7 +17625,11 @@ impl P2PCore {
                 tx.execute(&sql, params![k, before_ms]).map_err(|e| e.to_string())?;
             }
         }
-        tx.commit().map_err(|e| e.to_string())
+        tx.commit().map_err(|e| e.to_string())?;
+        for file_id in &old_files {
+            self.delete_attachment_file(file_id);
+        }
+        Ok(())
     }
 
     /// Settings → Storage: drops only this device's copy of an attachment.

@@ -27,6 +27,7 @@ import com.p2p.messenger.util.hexToBytesOrNull
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -422,6 +423,10 @@ class PrunePanel(root: View, private val scope: CoroutineScope, private val onDo
         this.id = id
         oldest = 0
         seek.progress = 0
+        // No stale range / sizes of the chat that used this row before.
+        seek.isEnabled = false
+        button.isEnabled = false
+        sizes.text = ""
         refresh()
     }
 
@@ -438,6 +443,8 @@ class PrunePanel(root: View, private val scope: CoroutineScope, private val onDo
         date.text = if (before == 0L) "—" else SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(Date(before))
         job?.cancel()
         job = scope.launch {
+            // Debounce a dragged slider: only the last position asks the core.
+            delay(150)
             val st = withContext(Dispatchers.IO) {
                 try { JSONObject(P2PLib.chatPruneStats(k, i, before)) } catch (e: Exception) { JSONObject() }
             }
@@ -462,10 +469,10 @@ class PrunePanel(root: View, private val scope: CoroutineScope, private val onDo
         val before = beforeMs()
         if (before == 0L) return
         val day = SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(Date(before))
-        AlertDialog.Builder(context)
+        val dialog = AlertDialog.Builder(context)
             .setTitle(R.string.storage_prune_confirm_title)
             .setMessage(context.getString(R.string.storage_prune_confirm_message, day))
-            .setPositiveButton(R.string.action_delete_selected) { _, _ ->
+            .setPositiveButton(R.string.storage_prune_button) { _, _ ->
                 val (k, i) = kind to id
                 scope.launch {
                     val r = withContext(Dispatchers.IO) {
@@ -476,12 +483,17 @@ class PrunePanel(root: View, private val scope: CoroutineScope, private val onDo
                         if (r.startsWith("Error:")) coreErrorText(context, r) else context.getString(R.string.storage_prune_done),
                         Toast.LENGTH_SHORT
                     ).show()
-                    bind(k, i)
+                    if (k == kind && i == id) bind(k, i)
                     onDone()
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
-            .show()
+            .create()
+        // Bound to the screen: a recreate must not leak the window.
+        (context as? androidx.lifecycle.LifecycleOwner)?.lifecycle?.addObserver(object : androidx.lifecycle.DefaultLifecycleObserver {
+            override fun onDestroy(owner: androidx.lifecycle.LifecycleOwner) { dialog.dismiss() }
+        })
+        dialog.show()
     }
 
     private fun fmt(bytes: Long) = Formatter.formatShortFileSize(context, bytes)
