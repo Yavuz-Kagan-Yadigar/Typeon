@@ -2021,11 +2021,23 @@ impl ChatView {
                 );
             }
             Conversation::Group { group_id, .. } => {
+                // @mentions: members (not me) whose "@Name" is in the text.
+                let app = self.app();
+                let mentions: Vec<String> = app
+                    .groups
+                    .borrow()
+                    .iter()
+                    .find(|group| group.group_id == *group_id)
+                    .map(|group| group.member_identity_ids.clone())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|id| *app.own_identity_id.borrow() != *id && text.contains(&format!("@{}", app.identity_name(id))))
+                    .collect();
                 let group_id = group_id.clone();
                 let sent_text = text.clone();
                 crate::app::run_in_background(
                     move || {
-                        core::send_group_message(&group_id, &sent_text, reply_id, preview_for_core, reply_sender_for_core)
+                        core::send_group_message(&group_id, &sent_text, reply_id, preview_for_core, reply_sender_for_core, mentions)
                     },
                     move |result| {
                         // A group send fans out to every member; the core reports

@@ -20,7 +20,6 @@
     <string name="hint_search_chats">Search chats and groups</string>
     <string name="hint_search_messages">Search messages</string>
     <string name="action_search_messages">Search</string>
-    <string name="action_open_chat_list">Chat list</string>
     <string name="action_search_prev">Previous match</string>
     <string name="action_search_next">Next match</string>
     <string name="lbl_search_no_matches">No matches</string>
@@ -525,6 +524,9 @@
     <string name="notif_fg_text">Secure P2P connection active</string>
     <string name="channel_service_name">Background service</string>
     <string name="channel_messages_name">Messages</string>
+    <string name="channel_mentions_name">Mentions</string>
+    <string name="notif_mention_title">%1$s mentioned you in %2$s</string>
+    <string name="notif_mention_hidden">You were mentioned in a group</string>
     <string name="error_edit_failed">Couldn\'t edit the message</string>
     <string name="error_delete_failed">Couldn\'t delete the message</string>
     <string name="action_discard">Discard</string>

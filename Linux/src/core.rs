@@ -490,6 +490,7 @@ pub fn send_group_message(
     reply_to_id: Option<String>,
     reply_preview: Option<String>,
     reply_sender_identity_id: Option<String>,
+    mentions: Vec<String>,
 ) -> Result<String, String> {
     parse(api::send_group_message(
         group_id,
@@ -497,6 +498,7 @@ pub fn send_group_message(
         reply_to_id,
         reply_preview,
         reply_sender_identity_id,
+        mentions,
     ))
 }
 

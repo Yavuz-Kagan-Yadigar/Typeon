@@ -727,7 +727,7 @@ class P2PService : Service() {
                 if (groupId.isNotEmpty() && activeConversationId != "group:$groupId") {
                     NotificationHelper.showGroupMessageNotification(
                         applicationContext, groupId, obj.optString("sender_identity_id"), obj.optString("text"),
-                        obj.optString("message_id")
+                        obj.optString("message_id"), mention = obj.optBoolean("mentions_me")
                     )
                 }
             }

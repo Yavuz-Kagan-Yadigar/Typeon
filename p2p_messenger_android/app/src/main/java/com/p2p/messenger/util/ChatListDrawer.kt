@@ -48,11 +48,4 @@ object ChatListDrawer {
         })
         return drawer
     }
-
-    /** bkz. `menu_chat_search.xml` `action_open_chat_list` — araç çubuğu
-     *  simgesiyle açma (kenardan kaydırma jestine ek, keşfedilebilirlik
-     *  için). */
-    fun open(activity: AppCompatActivity) {
-        activity.findViewById<DrawerLayout>(R.id.chatDrawerLayout)?.openDrawer(GravityCompat.START)
-    }
 }

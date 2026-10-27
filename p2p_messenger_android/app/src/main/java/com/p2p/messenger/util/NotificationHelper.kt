@@ -25,15 +25,21 @@ import org.json.JSONArray
  */
 object NotificationHelper {
     const val MESSAGE_CHANNEL_ID = "P2PMessagesChannel"
+    /** Group @mentions of me, so the user can give them their own sound. */
+    const val MENTION_CHANNEL_ID = "P2PMentionsChannel"
 
     fun createChannel(context: Context) {
-        val channel = NotificationChannel(
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(NotificationChannel(
             MESSAGE_CHANNEL_ID,
             context.getString(R.string.channel_messages_name),
             NotificationManager.IMPORTANCE_HIGH
-        )
-        val manager = context.getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(channel)
+        ))
+        manager.createNotificationChannel(NotificationChannel(
+            MENTION_CHANNEL_ID,
+            context.getString(R.string.channel_mentions_name),
+            NotificationManager.IMPORTANCE_HIGH
+        ))
     }
 
     /** Message each chat's single slot shows now, see `clearIfShowing`. */
@@ -138,7 +144,7 @@ object NotificationHelper {
             context.getString(R.string.msg_contact_deleted_account, name), intent)
     }
 
-    fun showGroupMessageNotification(context: Context, groupId: String, senderIdentityId: String, text: String, messageId: String = "") {
+    fun showGroupMessageNotification(context: Context, groupId: String, senderIdentityId: String, text: String, messageId: String = "", mention: Boolean = false) {
         val groupName = resolveGroupName(groupId) ?: groupId.take(8)
         val senderName = resolveContactNameByIdentity(senderIdentityId) ?: senderIdentityId.take(8)
         val intent = Intent(context, GroupChatActivity::class.java).apply {
@@ -155,6 +161,16 @@ object NotificationHelper {
             context.getString(R.string.notif_new_message)
         }
         if (messageId.isNotEmpty()) shownMessageId[("group:$groupId").hashCode()] = messageId
+        if (mention) {
+            // Same slot as the group's messages (so opening/reading the group
+            // clears it), on the mentions channel. Hidden text hides who and
+            // where too, like the plain group notification.
+            val shown = NotificationPrefs.showMessageText(context)
+            val title = if (shown) context.getString(R.string.notif_mention_title, senderName, groupName) else context.getString(R.string.app_name)
+            val mentionBody = if (shown) text else context.getString(R.string.notif_mention_hidden)
+            show(context, ("group:$groupId").hashCode(), title, mentionBody, intent, channel = MENTION_CHANNEL_ID)
+            return
+        }
         show(context, ("group:$groupId").hashCode(), context.getString(R.string.app_name), body, intent)
     }
 
@@ -242,7 +258,7 @@ object NotificationHelper {
     /** Aynı sohbetten gelen ardışık mesajlar aynı bildirim ID'sini paylaşır
      *  (conversationId'nin hash'i) — bu yüzden yığılıp bildirim çubuğunu
      *  doldurmak yerine tek bildirim güncellenir. */
-    private fun show(context: Context, notificationId: Int, title: String, text: String, contentIntent: Intent, alert: Boolean = true) {
+    private fun show(context: Context, notificationId: Int, title: String, text: String, contentIntent: Intent, alert: Boolean = true, channel: String = MESSAGE_CHANNEL_ID) {
         // Kullanıcı isteği: bildirime dokunmak belirli sohbeti değil uygulamayı
         // normal (launcher) şekilde açsın — geri tuşu da tek seferde çıkar.
         val isChat = contentIntent.component?.className.let {
@@ -273,13 +289,13 @@ object NotificationHelper {
         // kalır (tam önizleme hâlâ gösterilir) — hiçbir özellik kaldırılmadı,
         // sadece kilitli+hassas-gizli durumunda ek bir koruma katmanı eklendi.
         // The lock screen shows neither the sender nor the text.
-        val publicVersion = NotificationCompat.Builder(context, MESSAGE_CHANNEL_ID)
+        val publicVersion = NotificationCompat.Builder(context, channel)
             .setContentTitle(context.getString(R.string.app_name))
             .setContentText(context.getString(R.string.notif_new_message))
             .setSmallIcon(R.drawable.ic_notification)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
-        val notification = NotificationCompat.Builder(context, MESSAGE_CHANNEL_ID)
+        val notification = NotificationCompat.Builder(context, channel)
             .setContentTitle(title)
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_notification)

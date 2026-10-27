@@ -19,7 +19,6 @@
     <string name="hint_search_chats">Sohbet ve gruplarda ara</string>
     <string name="hint_search_messages">Mesajlarda ara</string>
     <string name="action_search_messages">Ara</string>
-    <string name="action_open_chat_list">Sohbet listesi</string>
     <string name="action_search_prev">Önceki eşleşme</string>
     <string name="action_search_next">Sonraki eşleşme</string>
     <string name="lbl_search_no_matches">Eşleşme yok</string>
@@ -484,6 +483,9 @@
     <string name="notif_fg_text">Güvenli P2P bağlantısı etkin</string>
     <string name="channel_service_name">Arka plan servisi</string>
     <string name="channel_messages_name">Mesajlar</string>
+    <string name="channel_mentions_name">Bahsetmeler</string>
+    <string name="notif_mention_title">%1$s, %2$s grubunda senden bahsetti</string>
+    <string name="notif_mention_hidden">Bir grupta senden bahsedildi</string>
     <string name="error_edit_failed">Mesaj düzenlenemedi</string>
     <string name="error_delete_failed">Mesaj silinemedi</string>
     <string name="action_discard">At</string>

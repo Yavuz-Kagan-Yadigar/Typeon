@@ -468,8 +468,9 @@ object P2PLib {
      *  birleştirir, "görüldü" bildirimlerini doğru balona eşlemek için
      *  gerekli) veya "Error: ...". `replyTo*`: bkz. `sendMessage` AYNI
      *  notu — grup için ARTI `replyToSenderIdentityId` (yanıtlanan mesajı
-     *  gönderenin kimliği, "Ahmet'e yanıt" gösterebilmek için). */
-    external fun sendGroupMessage(groupId: String, message: String, replyToMessageId: String?, replyToPreview: String?, replyToSenderIdentityId: String?): String
+     *  gönderenin kimliği, "Ahmet'e yanıt" gösterebilmek için).
+     *  `mentionIdsJson`: JSON array of the @mentioned members' identity ids, or null. */
+    external fun sendGroupMessage(groupId: String, message: String, replyToMessageId: String?, replyToPreview: String?, replyToSenderIdentityId: String?, mentionIdsJson: String?): String
     /** Spec dışı: grup profil fotoğrafı — SADECE kurucu için başarılı olur
      *  (bkz. Rust set_group_avatar). `avatarJpeg` null ise kaldırılır. Her
      *  iki durumda da TÜM üyelere bir GroupUpdate yayılır. */

@@ -374,8 +374,13 @@ impl App {
                 if !group_id.is_empty() {
                     let title = self.group_name(&group_id);
                     let sender = self.identity_name(&event.string("sender_identity_id"));
-                    let body = format!("{}: {}", sender, event.string("text"));
-                    self.notify_if_away(&format!("group:{}", group_id), &title, &body);
+                    if event.value.get("mentions_me").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        let title = format!("{} mentioned you in {}", sender, title);
+                        self.notify_if_away_as(&format!("group:{}", group_id), &title, &event.string("text"), true);
+                    } else {
+                        let body = format!("{}: {}", sender, event.string("text"));
+                        self.notify_if_away(&format!("group:{}", group_id), &title, &body);
+                    }
                 }
             }
             // Attachments notify too — a photo arriving with no alert at all
@@ -504,6 +509,11 @@ impl App {
     }
 
     fn notify_if_away(self: &Rc<Self>, conversation_id: &str, title: &str, body: &str) {
+        self.notify_if_away_as(conversation_id, title, body, false);
+    }
+
+    /// `mention`: a group message that @mentions me, shown at high priority.
+    fn notify_if_away_as(self: &Rc<Self>, conversation_id: &str, title: &str, body: &str, mention: bool) {
         let is_open = self
             .active_conversation
             .borrow()
@@ -526,13 +536,13 @@ impl App {
         // The setting hides who wrote and what: the title is a contact or
         // group name.
         let (title, body) = if self.prefs.borrow().hide_notification_content {
-            ("Typeon", "New message")
+            ("Typeon", if mention { "You were mentioned in a group" } else { "New message" })
         } else {
             (title, body)
         };
         let notification = gio::Notification::new(title);
         notification.set_body(Some(body));
-        notification.set_priority(gio::NotificationPriority::Normal);
+        notification.set_priority(if mention { gio::NotificationPriority::High } else { gio::NotificationPriority::Normal });
         // One notification id per conversation, so a burst of messages
         // replaces itself instead of stacking up a wall of popups.
         self.application

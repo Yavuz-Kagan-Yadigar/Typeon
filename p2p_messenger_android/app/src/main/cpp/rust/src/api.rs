@@ -923,6 +923,7 @@ pub fn send_group_message(
     reply_to_message_id: Option<String>,
     reply_to_preview: Option<String>,
     reply_to_sender_identity_id: Option<String>,
+    mentions: Vec<String>,
 ) -> String {
     let gid = group_id.to_string();
     let msg = message.to_string();
@@ -934,6 +935,7 @@ pub fn send_group_message(
             reply_to_message_id,
             reply_to_preview,
             reply_to_sender_identity_id,
+            mentions,
         )
     }))
 }

@@ -2824,10 +2824,6 @@ class ChatActivity : AppCompatActivity() {
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
-            R.id.action_open_chat_list -> {
-                com.p2p.messenger.util.ChatListDrawer.open(this)
-                true
-            }
             R.id.action_search_messages -> {
                 toggleMessageSearch()
                 true

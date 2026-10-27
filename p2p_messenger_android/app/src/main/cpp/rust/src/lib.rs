@@ -959,6 +959,16 @@ fn sanitize_display_name(name: &str) -> Option<String> {
     if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
 }
 
+/// @mention ids of a group text: current members only (minus `skip`, the
+/// sender), deduplicated, at most 32.
+fn filter_mentions(group: &Group, skip: Option<&str>, mut ids: Vec<String>) -> Vec<String> {
+    ids.retain(|id| Some(id.as_str()) != skip && group.is_member(id));
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(id.clone()));
+    ids.truncate(32);
+    ids
+}
+
 /// `create_group` makes `group-<16 hex>`; 16..=48 hex accepted.
 fn is_group_id(id: &str) -> bool {
     id.strip_prefix("group-").map_or(false, |t| (16..=48).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -1124,7 +1134,7 @@ mod review_oct2026_tests {
     fn a_received_time_is_never_in_the_future() {
         let mut content = MessageContent::Text {
             text: "t".into(), group_id: None, group_message_local_id: None, sent_at_ms: 5_000,
-            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None,
+            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(),
         };
         clamp_received_times(&mut content, 1_000);
         assert!(matches!(content, MessageContent::Text { sent_at_ms: 1_000, .. }));
@@ -1665,6 +1675,28 @@ mod recovery_tests {
         let ok: HashMap<String, Vec<(String, String, u64)>> = [("m2".to_string(), vec![r(&me, "B", 5)])].into_iter().collect();
         core.apply_synced_reactions(&mut event, &ok, Some(gid.as_str()), "peer");
         assert_eq!(all("m2"), vec![(me, "B".to_string())], "a missing one of mine is restored");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// @mentions: only my own id flags the message, and ids of non-members
+    /// are dropped.
+    #[test]
+    fn mentions_me_only_for_own_id_and_members() {
+        let dir = std::env::temp_dir().join(format!("typeon-mention-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut core = core_on_disk(&dir);
+        let me = core.generate_identity("me".into()).unwrap().0;
+        let gid = "group-0123456789abcdef".to_string();
+        let mut g = Group::new(gid.clone(), "g".into(), "peer".into(), 1);
+        g.members.push(group::GroupMember { identity_id: me.clone(), added_at: 1, added_by: "peer".into() });
+        assert_eq!(filter_mentions(&g, None, vec!["stranger".into(), me.clone(), me.clone(), "peer".into()]), vec![me.clone(), "peer".to_string()]);
+        assert_eq!(filter_mentions(&g, Some("peer"), vec!["peer".into()]), Vec::<String>::new(), "sender dropped");
+        core.groups.insert(gid.clone(), g);
+        assert!(core.group_mentions_me(&gid, vec!["peer".into(), me.clone()]));
+        assert!(!core.group_mentions_me(&gid, vec!["peer".into(), "stranger".into()]));
+        assert!(!core.group_mentions_me("group-ffffffffffffffff", vec![me.clone()]), "unknown group");
+        core.groups.get_mut(&gid).unwrap().members.retain(|m| m.identity_id != me);
+        assert!(!core.group_mentions_me(&gid, vec![me]), "not a member any more");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2251,7 +2283,7 @@ mod at_rest_tests {
         core.skipped_key_encryption_key = Some([5u8; 32]);
         let plain = ciborium_bytes(&MessageContent::Text {
             text: "secret-marker".into(), group_id: None, group_message_local_id: None, sent_at_ms: 1,
-            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None,
+            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(),
         }).unwrap();
         let sealed = core.seal_local_blob(&plain).unwrap();
         assert!(!sealed.windows(13).any(|w| w == b"secret-marker"));
@@ -2722,6 +2754,10 @@ pub struct ArchivedMessage {
     /// the row on with the group history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_proof: Option<String>,
+    /// Group rows: this message @mentions me (local only, see `mentions_me`
+    /// column).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mentions_me: bool,
 }
 
 /// Groups tab GUI'sinin liste/detay göstermesi için özet (spec dışı —
@@ -5008,6 +5044,8 @@ impl P2PCore {
         migrate("ALTER TABLE messages ADD COLUMN edit_ts INTEGER NOT NULL DEFAULT 0");
         // See `group_author_statement`.
         migrate("ALTER TABLE messages ADD COLUMN author_proof TEXT");
+        // Group rows: my identity id was in the sender's @mention list.
+        migrate("ALTER TABLE messages ADD COLUMN mentions_me INTEGER NOT NULL DEFAULT 0");
         // L-32: one row per message id (per group; 1:1 rows share the scope
         // ''). Once, before the index: a deleted copy wins (the user's delete),
         // then an edited one, one with an author proof, then the earliest.
@@ -10920,7 +10958,7 @@ impl P2PCore {
         let content = MessageContent::Text {
             group_id: None, text: plaintext.clone(), group_message_local_id: Some(conv_id.clone()), sent_at_ms,
             reply_to_message_id: reply_to_message_id.clone(), reply_to_preview: reply_to_preview.clone(),
-            reply_to_sender_identity_id: None, author_proof: None,
+            reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(),
         };
         info!("Metin gönderiliyor: id={} peer={}", &conv_id[..8], &peer_device_fingerprint[..8.min(peer_device_fingerprint.len())]);
         let result = self.send_message_content_inner(
@@ -11644,7 +11682,7 @@ impl P2PCore {
                     "reply_to_message_id": reply_to_message_id, "reply_to_preview": reply_to_preview
                 })
             }
-            MessageContent::Text { group_id: Some(gid), text, group_message_local_id, sent_at_ms, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, author_proof } => {
+            MessageContent::Text { group_id: Some(gid), text, group_message_local_id, sent_at_ms, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, author_proof, mentions } => {
                 // Gerçek grup entegrasyonu: bu, bir grup mesajının pairwise
                 // fan-out kopyası — GroupChatActivity'nin doğru sohbete
                 // yönlendirebilmesi için `group_id` VE göndericinin
@@ -11696,6 +11734,12 @@ impl P2PCore {
                     group_message_local_id.as_deref().map_or(false, |mid| self.group_author_proof_valid(&gid, mid, &sender_identity_id, &text, sent_at_ms, Some(p.as_str())))
                 });
                 let archived_ok = self.archive_group_message(&gid, &sender_identity_id, "received", text.as_bytes(), group_message_local_id.as_deref(), reply_to_message_id.as_deref(), reply_to_preview.as_deref(), reply_to_sender_identity_id.as_deref(), sent_at_ms, author_proof.as_deref()).is_ok();
+                let mentions_me = self.group_mentions_me(&gid, mentions);
+                if archived_ok && mentions_me {
+                    if let (Some(conn), Some(mid)) = (&self.db, group_message_local_id.as_deref()) {
+                        let _ = conn.execute("UPDATE messages SET mentions_me = 1 WHERE group_id = ?1 AND message_id = ?2", params![gid, mid]);
+                    }
+                }
                 // Spec dışı, hata düzeltmesi ("bir grup üyesi bazı mesajları
                 // kaçırıyor"): önceden grup metin mesajları için HİÇ Ack
                 // gönderilmiyordu (bkz. `needs_delivery_confirmation`
@@ -11738,7 +11782,8 @@ impl P2PCore {
                     "group_message_local_id": group_message_local_id,
                     "sent_at_ms": sent_at_ms,
                     "reply_to_message_id": reply_to_message_id, "reply_to_preview": reply_to_preview,
-                    "reply_to_sender_identity_id": reply_to_sender_identity_id
+                    "reply_to_sender_identity_id": reply_to_sender_identity_id,
+                    "mentions_me": mentions_me
                 })
             }
             MessageContent::Edit { target_message_id, new_text, group_id, edited_at_ms, author_proof } => {
@@ -13986,6 +14031,7 @@ impl P2PCore {
                     reactions: String::new(),
                     seen_by: String::new(),
                     author_proof: None,
+                    mentions_me: false,
                 };
                 if let Ok(cbor) = ciborium_bytes(&archived) {
                     // `rev` from our clock, as every later revision: with the
@@ -14168,6 +14214,7 @@ impl P2PCore {
                 reactions: String::new(),
                 seen_by: String::new(),
                 author_proof: author_proof.map(|p| p.to_string()),
+                mentions_me: false,
             };
             if let Ok(cbor) = ciborium_bytes(&archived) {
                 // bkz. `archive_message`.
@@ -14575,6 +14622,7 @@ impl P2PCore {
             reactions: self.reactions_summary(target_message_id),
             seen_by: self.seen_by_json(target_message_id),
             author_proof: group_id.and_then(|gid| self.group_author_proof(gid, target_message_id)),
+            mentions_me: false,
         };
         let Ok(cbor) = ciborium_bytes(&archived) else { return };
 
@@ -14791,6 +14839,7 @@ impl P2PCore {
                             reactions: reactions_for_row,
                             seen_by: seen_by_for_row,
                             author_proof: None,
+                            mentions_me: false,
                         });
                     }
                 }
@@ -14931,7 +14980,7 @@ impl P2PCore {
         }
         let t = if sent_clock { "COALESCE(NULLIF(sent_at_ms,0), timestamp)" } else { "timestamp" };
         let mut stmt = match conn.prepare(&format!(
-            "SELECT direction, encrypted_blob, nonce, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, COALESCE(NULLIF(sent_at_ms,0), timestamp) FROM messages
+            "SELECT direction, encrypted_blob, nonce, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, COALESCE(NULLIF(sent_at_ms,0), timestamp), mentions_me FROM messages
              WHERE group_id = ?1 AND (?3 IS NULL OR {t} < ?3) AND (?4 IS NULL OR {t} > ?4)
                AND {t} >= COALESCE((SELECT {t} FROM messages
                     WHERE group_id = ?1 AND (?3 IS NULL OR {t} < ?3) AND (?4 IS NULL OR {t} > ?4)
@@ -14956,13 +15005,14 @@ impl P2PCore {
                 row.get::<_, i64>(9)?,
                 row.get::<_, i64>(10)?,
                 row.get::<_, i64>(11)?,
+                row.get::<_, i64>(12)?,
             ))
         });
 
         let mut results = Vec::new();
         if let Ok(rows) = rows {
             for row in rows.flatten() {
-                let (direction, encrypted_blob, nonce_bytes, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, eff_sent) = row;
+                let (direction, encrypted_blob, nonce_bytes, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, eff_sent, mentions_me) = row;
                 if nonce_bytes.len() != 12 {
                     continue;
                 }
@@ -14992,6 +15042,7 @@ impl P2PCore {
                             reactions: reactions_for_row,
                             seen_by: seen_by_for_row,
                             author_proof: None,
+                            mentions_me: mentions_me != 0,
                         });
                     }
                 }
@@ -16593,6 +16644,13 @@ impl P2PCore {
     /// meşru bir gönderen (üyelik güncellemesi bize henüz gelmemiş) yeniden
     /// dener ve `GroupUpdate` ulaştığı anda kabul edilir — yani yarış
     /// kendiliğinden onarılır.
+    /// Whether a received group text @mentions me: my own identity id in its
+    /// list after dropping non-members (the text itself is not trusted).
+    fn group_mentions_me(&self, group_id: &str, mentions: Vec<String>) -> bool {
+        let (Some(me), Some(group)) = (self.identity.as_ref(), self.groups.get(group_id)) else { return false };
+        filter_mentions(group, None, mentions).iter().any(|id| *id == me.identity_id)
+    }
+
     fn sender_may_post_to_group(&self, group_id: &str, sender_identity_id: &str) -> bool {
         match self.groups.get(group_id) {
             Some(group) => group.is_member(sender_identity_id),
@@ -17204,7 +17262,7 @@ impl P2PCore {
         if sent { Ok(true) } else { Err("No copy could be sent".to_string()) }
     }
 
-    fn send_group_message(&mut self, group_id: &str, plaintext: &str, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>) -> Result<String, String> {
+    fn send_group_message(&mut self, group_id: &str, plaintext: &str, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>, mentions: Vec<String>) -> Result<String, String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
         if !group.is_member(&own_identity_id) {
@@ -17229,6 +17287,7 @@ impl P2PCore {
             sent_at_ms,
             reply_to_message_id, reply_to_preview, reply_to_sender_identity_id,
             author_proof: Some(author_proof.clone()),
+            mentions: filter_mentions(&group, Some(&own_identity_id), mentions),
         };
         // Spec dışı, hata düzeltmesi (grup geçmişi kalıcılığı): ÖNCE, TEK
         // bir satır olarak arşivle — fan-out döngüsünün İÇİNDE değil,
@@ -26407,9 +26466,12 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setGroupProfilePicture<'loc
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, msg: JString<'local>, reply_to_message_id: JString<'local>, reply_to_preview: JString<'local>, reply_to_sender_identity_id: JString<'local>) -> jstring {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, msg: JString<'local>, reply_to_message_id: JString<'local>, reply_to_preview: JString<'local>, reply_to_sender_identity_id: JString<'local>, mentions_json: JString<'local>) -> jstring {
     let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
     let msg_str: String = jstr(&mut env, &msg).unwrap_or_default();
+    // JSON array of mentioned identity ids; anything else means none.
+    let mentions: Vec<String> = optional_jstring(&mut env, &mentions_json)
+        .and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
     // bkz. `optional_jstring`/`sendMessage` AYNI desen.
     let reply_id_opt = optional_jstring(&mut env, &reply_to_message_id);
     let reply_preview_opt = optional_jstring(&mut env, &reply_to_preview);
@@ -26417,7 +26479,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mu
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
         let mut core = core_lock();
-        core.send_group_message(&gid, &msg_str, reply_id_opt, reply_preview_opt, reply_sender_opt)
+        core.send_group_message(&gid, &msg_str, reply_id_opt, reply_preview_opt, reply_sender_opt, mentions)
     });
     let out = match result {
         Ok(Ok(local_id)) => local_id,

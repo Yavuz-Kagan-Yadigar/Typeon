@@ -40,6 +40,29 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
     enum class Status { PENDING, SENT, DELIVERED, ERROR }
 
+    /** Group chats: member names whose "@Name" is shown bold in bubbles. */
+    var mentionNames: List<String> = emptyList()
+
+    /** Bolds "@Name" of known members; on a message that mentions me also
+     *  every "@word" (my name as the sender wrote it is not known here). */
+    private fun markMentions(text: android.text.Spannable, mentionsMe: Boolean): Boolean {
+        var any = false
+        fun mark(start: Int, end: Int, highlight: Boolean) {
+            text.setSpan(android.text.style.StyleSpan(Typeface.BOLD), start, end, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            if (highlight) text.setSpan(android.text.style.BackgroundColorSpan(0x55FFC107), start, end, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            any = true
+        }
+        for (name in mentionNames) {
+            var i = text.indexOf("@$name")
+            while (i >= 0) {
+                mark(i, i + name.length + 1, false)
+                i = text.indexOf("@$name", i + 1)
+            }
+        }
+        if (mentionsMe) Regex("@\\S+").findAll(text).forEach { mark(it.range.first, it.range.last + 1, true) }
+        return any
+    }
+
     /** Decoded attachment previews by file id: a rebind does not decode again. */
     private val previewCache = object : android.util.LruCache<String, android.graphics.Bitmap>(24 * 1024 * 1024) {
         override fun sizeOf(key: String, value: android.graphics.Bitmap): Int = value.byteCount
@@ -139,6 +162,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
          *  aynen geliyor (bkz. `reactions_summary`) — burada ayrıca bir
          *  toplama/sayma YAPILMAZ, böylece her cihaz aynı dizeyi gösterir. */
         var reactions: String = "",
+        /** Group text that @mentions me (see Rust `mentions_me`). */
+        val mentionsMe: Boolean = false,
         /** Spec dışı, kullanıcı isteği: ek balonunun ALTINDA gösterilen
          *  açıklama metni (boş = yok). Metin mesajlarında kullanılmaz —
          *  onların metni zaten `text`. */
@@ -905,6 +930,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                 // aşağısı) `holder.textView`'a da AYRICA atanıyor, hangisi
                 // dokunuşu yakalarsa yakalasın menü yine açılır.
                 val linked = android.text.SpannableString(item.text)
+                if (markMentions(linked, item.mentionsMe)) holder.textView.text = linked
                 if (android.text.util.Linkify.addLinks(linked, android.text.util.Linkify.WEB_URLS)) {
                     // A tap leaves Tor for the system browser: ask first.
                     for (span in linked.getSpans(0, linked.length, android.text.style.URLSpan::class.java)) {

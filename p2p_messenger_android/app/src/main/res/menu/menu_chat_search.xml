@@ -2,19 +2,6 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
 
-    <!-- Spec dışı, kullanıcı isteği: "soldan bir drag barla sürüklenebilir
-         açılıp kapanan chat list" — sohbet ekranından ayrılmadan diğer
-         sohbetlere geçiş için soldan açılan bir çekmece (bkz.
-         `activity_chat.xml` DrawerLayout, ChatActivity/GroupChatActivity
-         `openChatListDrawer`). Çekmece kenardan kaydırarak da açılır
-         (DrawerLayout'un kendi jesti) — bu simge SADECE keşfedilebilirlik
-         için, kaydırma tek başına yeterince belirgin değil. -->
-    <item
-        android:id="@+id/action_open_chat_list"
-        android:icon="@drawable/ic_chat_list"
-        android:title="@string/action_open_chat_list"
-        app:showAsAction="ifRoom" />
-
     <!-- Voice / video call (1:1 and group — this menu is shared). -->
     <item
         android:id="@+id/action_voice_call"

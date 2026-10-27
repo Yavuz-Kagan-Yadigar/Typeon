@@ -772,6 +772,11 @@ pub enum MessageContent {
         /// "Ahmet'e yanıt" gibi bir isim gösterebilmesi için.
         #[serde(default)]
         reply_to_sender_identity_id: Option<String>,
+        /// Group messages only: identity ids of the members this message
+        /// @mentions. The receiver keeps only current members and flags the
+        /// row when its own identity id is listed (the text is not parsed).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mentions: Vec<String>,
     },
     /// Spec dışı, kullanıcı isteği (grup düzenle/sil): `group_id` doluysa
     /// `target_message_id` aslında `Text.group_message_local_id`'dir —

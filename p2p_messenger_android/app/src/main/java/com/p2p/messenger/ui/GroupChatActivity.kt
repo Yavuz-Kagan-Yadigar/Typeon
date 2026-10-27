@@ -28,6 +28,7 @@ import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ListPopupWindow
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
@@ -612,6 +613,7 @@ class GroupChatActivity : AppCompatActivity() {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
+                updateMentionPopup(input)
                 typingHandler.removeCallbacks(stopTypingRunnable)
                 if (s.isNullOrBlank()) {
                     sendTypingState(false)
@@ -887,6 +889,7 @@ class GroupChatActivity : AppCompatActivity() {
             // etiketi SADECE canlı edit olayından geliyordu, sohbet yeniden
             // açılınca kayboluyordu.
             isEdited = obj.optBoolean("is_edited", false),
+            mentionsMe = obj.optBoolean("mentions_me", false),
             reactions = obj.optString("reactions", "")
         )
     }
@@ -1072,6 +1075,8 @@ class GroupChatActivity : AppCompatActivity() {
                 currentGroupAvatar = avatarHex?.let { hexToBytes(it) }
                 val members = obj.optJSONArray("member_identity_ids")
                 memberIdentityIds = (0 until (members?.length() ?: 0)).map { members!!.getString(it) }
+                adapter.mentionNames = mentionCandidates().map { it.second }
+                adapter.notifyDataSetChanged()
                 AvatarUtil.renderInto(imgToolbarAvatar, currentGroupAvatar, txtToolbarTitle.text.toString())
                 return@launch
             }
@@ -1363,6 +1368,42 @@ class GroupChatActivity : AppCompatActivity() {
      * `btnSend` bu sırada devre dışı + yerine `progressSending` gösteriliyor
      * (bkz. ChatActivity aynı desen).
      */
+    /** Other members as (identity id, display name), for @mentions. */
+    private fun mentionCandidates(): List<Pair<String, String>> =
+        memberIdentityIds.filter { it != ownIdentityId }
+            .map { it to (resolveContactByIdentity(it)?.displayName ?: it.take(8)) }
+
+    /** Ids of the members whose "@Name" is in [text], as a JSON array (null: none). */
+    private fun mentionIdsJson(text: String): String? {
+        val ids = mentionCandidates().filter { "@${it.second}" in text }.map { it.first }
+        return if (ids.isEmpty()) null else JSONArray(ids).toString()
+    }
+
+    private var mentionPopup: ListPopupWindow? = null
+
+    /** "@" + what follows it up to the cursor opens a member picker; a pick
+     *  writes "@Name " in its place. */
+    private fun updateMentionPopup(input: EditText) {
+        val text = input.text ?: return
+        val cursor = input.selectionStart
+        val at = if (cursor > 0) text.lastIndexOf('@', cursor - 1) else -1
+        val query = if (at >= 0 && (at == 0 || text[at - 1].isWhitespace())) text.substring(at + 1, cursor) else null
+        val matches = if (query == null || query.length > 32 || '\n' in query) emptyList()
+            else mentionCandidates().filter { it.second.contains(query, ignoreCase = true) && it.second != query.trimEnd() }
+        if (matches.isEmpty()) { mentionPopup?.dismiss(); return }
+        val popup = mentionPopup ?: ListPopupWindow(this).also {
+            it.anchorView = input
+            it.inputMethodMode = ListPopupWindow.INPUT_METHOD_NEEDED
+            mentionPopup = it
+        }
+        popup.setAdapter(android.widget.ArrayAdapter(this, android.R.layout.simple_list_item_1, matches.map { it.second }))
+        popup.setOnItemClickListener { _, _, pos, _ ->
+            popup.dismiss()
+            text.replace(at, cursor, "@${matches[pos].second} ")
+        }
+        popup.show()
+    }
+
     private fun sendNewMessage(text: String) {
         btnSend.isEnabled = false
         btnSend.visibility = View.INVISIBLE
@@ -1380,7 +1421,7 @@ class GroupChatActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
                 try {
-                    P2PLib.sendGroupMessage(targetGroupId, text, replyToMessageId, replyToPreview, replyToSenderIdentityId)
+                    P2PLib.sendGroupMessage(targetGroupId, text, replyToMessageId, replyToPreview, replyToSenderIdentityId, mentionIdsJson(text))
                 } catch (e: Exception) {
                     "Error: ${e.message}"
                 }
@@ -1441,7 +1482,7 @@ class GroupChatActivity : AppCompatActivity() {
             // yanıt korunmalı.
             val result = withContext(Dispatchers.IO) {
                 try {
-                    P2PLib.sendGroupMessage(gid, item.text, item.replyToMessageId, item.replyToPreview, item.replyToSenderIdentityId)
+                    P2PLib.sendGroupMessage(gid, item.text, item.replyToMessageId, item.replyToPreview, item.replyToSenderIdentityId, mentionIdsJson(item.text))
                 } catch (e: Exception) {
                     "Error: ${e.message}"
                 }
@@ -2641,7 +2682,8 @@ class GroupChatActivity : AppCompatActivity() {
                 replyToMessageId = replyToMessageId,
                 replyToPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null },
                 replyToSenderIdentityId = replyToSenderIdentityId,
-                replyToSenderLabel = resolveReplyLabel(replyToMessageId, replyToSenderIdentityId)
+                replyToSenderLabel = resolveReplyLabel(replyToMessageId, replyToSenderIdentityId),
+                mentionsMe = obj.optBoolean("mentions_me")
             )
         )
         maybePlayTyphoonEffect()
@@ -3012,10 +3054,6 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        if (item.itemId == R.id.action_open_chat_list) {
-            com.p2p.messenger.util.ChatListDrawer.open(this)
-            return true
-        }
         if (item.itemId == R.id.action_search_messages) {
             toggleMessageSearch()
             return true
