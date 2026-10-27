@@ -262,7 +262,10 @@ class StorageActivity : AppCompatActivity() {
             ).show()
             selected.clear()
             refreshDeleteButton()
-            currentChat?.let { loadAttachments(it) }
+            currentChat?.let {
+                attachmentsPrune.bind(it.kind, it.id)
+                loadAttachments(it)
+            }
         }
     }
 

@@ -18197,7 +18197,7 @@ impl P2PCore {
             "type": "file_offer", "peer": chat_peer, "sender_identity_id": sender_identity_id,
             "group_id": group_id, "file_id": file_id,
             "file_name": file_name, "mime_type": mime_type, "total_size": total_size,
-            "auto_downloading": auto_downloading, "sticker": sticker,
+            "auto_downloading": auto_downloading, "complete": reused, "sticker": sticker,
             // Hex-encoded — JSON ham ikili veri taşıyamaz. Küçük bir
             // önizleme (tipik birkaç on KB) için hex'in base64'e göre ~%37
             // daha büyük olması önemsiz; yeni bir bağımlılık eklemekten

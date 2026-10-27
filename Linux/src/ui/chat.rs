@@ -2841,7 +2841,9 @@ impl ChatView {
                     // sending member's device in a group — matches
                     // `list_attachments`' `peer_device_fingerprint`.
                     source_fingerprint: event.string("peer"),
-                    status: if event.flag("auto_downloading") {
+                    status: if event.flag("complete") {
+                        "complete".to_string()
+                    } else if event.flag("auto_downloading") {
                         "downloading".to_string()
                     } else {
                         "offered".to_string()

@@ -1287,7 +1287,8 @@ class ChatActivity : AppCompatActivity() {
                             fileName = obj.optString("file_name"),
                             mimeType = obj.optString("mime_type"),
                             totalSize = obj.optLong("total_size"),
-                            status = if (autoDownloading) SimpleChatAdapter.AttachmentStatus.DOWNLOADING
+                            status = if (obj.optBoolean("complete", false)) SimpleChatAdapter.AttachmentStatus.COMPLETE
+                                      else if (autoDownloading) SimpleChatAdapter.AttachmentStatus.DOWNLOADING
                                       else SimpleChatAdapter.AttachmentStatus.OFFERED,
                             previewJpeg = previewJpeg,
                             durationMs = durationMs,
