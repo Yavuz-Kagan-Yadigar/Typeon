@@ -159,6 +159,7 @@ object ServerLock {
                 val curPin = cur.text.toString()
                 cpu.execute {
                     val curOk = !has || tryPin(a, curPin)
+                    if (curOk && !erase && n.length >= MIN_LEN) setPin(a, n)
                     a.runOnUiThread {
                         btn.isEnabled = true
                         if (!curOk) {
@@ -172,7 +173,6 @@ object ServerLock {
                             Toast.makeText(a, a.getString(R.string.pin_too_short_fmt, MIN_LEN), Toast.LENGTH_SHORT).show()
                             return@runOnUiThread
                         } else {
-                            setPin(a, n)
                             unlocked = true
                             Toast.makeText(a, R.string.pin_saved, Toast.LENGTH_SHORT).show()
                         }
