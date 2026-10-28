@@ -1295,6 +1295,9 @@ mod review_oct2026_tests {
         assert!(!me.pairing_proof_valid(&with(packet::pairing_nonce_proof(&[7; 16], &"c".repeat(64)))));
         let good = with(packet::pairing_nonce_proof(&[7; 16], &peer_fp));
         assert!(me.pairing_proof_valid(&good));
+        // A device with a contact already: the link code makes no further one.
+        assert_eq!(me.evaluate_sender_device(&"d".repeat(64), &"e".repeat(64), false, "x", true), DeviceCheckOutcome::NewContactTofu);
+        assert!(!me.pairing_proof_valid(&good));
         // The code is no longer shown.
         me.link_request_open_until = 0;
         assert!(!me.pairing_proof_valid(&good));
@@ -6087,7 +6090,11 @@ impl P2PCore {
     /// a nonce this device issued and that is still valid.
     fn pairing_proof_valid(&self, exchange: &IdentityExchange) -> bool {
         let made_from = |nonce: &[u8]| packet::pairing_nonce_proof(nonce, &exchange.device_fingerprint) == exchange.pairing_proof;
-        self.link_proof_valid(exchange) || self.pairing_nonces().iter().any(|(nonce, _)| made_from(nonce))
+        // The link code makes a contact only of the first device to read it,
+        // on a device with no contacts yet (the only kind a grant can move,
+        // `adopt_device_link`). Anyone else who saw that code does not
+        // become a contact of an identity in use.
+        (self.contacts.is_empty() && self.link_proof_valid(exchange)) || self.pairing_nonces().iter().any(|(nonce, _)| made_from(nonce))
     }
 
     /// As `pairing_proof_valid`, for the link code this device shows now.
