@@ -532,6 +532,7 @@
     <string name="error_delete_failed">Couldn\'t delete the message</string>
     <string name="action_discard">Discard</string>
     <string name="msg_recording_in_background">A voice recording is still running. Send it or discard it?</string>
+    <string name="notif_fg_server_down">Server unreachable — messages go direct only</string>
     <string name="notif_fg_recording">Recording a voice message</string>
     <string name="msg_media_scrub_failed">Location/device data could not be removed from this video. Send anyway?</string>
     <string name="action_send_anyway">Send anyway</string>

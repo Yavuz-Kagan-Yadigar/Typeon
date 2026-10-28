@@ -417,6 +417,9 @@ class P2PService : Service() {
                             android.util.Log.e("P2PService", "Notify failed", e)
                         }
                     }
+                    try { refreshForegroundStatus() } catch (e: Throwable) {
+                        android.util.Log.e("P2PService", "Status refresh failed", e)
+                    }
                 } catch (e: Throwable) {
                     android.util.Log.e("P2PService", "Poll cycle failed", e)
                 } finally {
@@ -810,6 +813,48 @@ class P2PService : Service() {
         else -> getString(R.string.lbl_last_file)
     }
 
+    private fun foregroundNotification(text: String) = NotificationCompat.Builder(this, CHANNEL_ID)
+        .setContentTitle(getString(R.string.app_name))
+        .setContentText(text)
+        .setSmallIcon(R.drawable.ic_notification)
+        .setOngoing(true)
+        .setOnlyAlertOnce(true)
+        .build()
+
+    /** Last connection text shown in the ongoing notification; null = not checked yet. */
+    private var fgStatusText: String? = null
+    private var fgStatusCheckedAt = 0L
+
+    /**
+     * The ongoing notification follows the real connection state (internet,
+     * Tor, store-and-forward server). Piggybacks on a poll turn that runs
+     * anyway, at most every 30 s, and re-posts only when the text changed:
+     * no extra wakeups.
+     */
+    private fun refreshForegroundStatus() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (fgStatusText != null && now - fgStatusCheckedAt < 30_000L) return
+        fgStatusCheckedAt = now
+        val status = com.p2p.messenger.util.ConnectionStatus.current(this)
+        val text = if (status.level != com.p2p.messenger.util.ConnectionStatus.Level.CONNECTED) {
+            status.text
+        } else {
+            val servers = try { org.json.JSONArray(P2PLib.listServers()) } catch (e: Exception) { org.json.JSONArray() }
+            val enrolled = (0 until servers.length()).mapNotNull { servers.optJSONObject(it) }.filter { it.optBoolean("enrolled") }
+            if (enrolled.isNotEmpty() && enrolled.none { it.optBoolean("connected") }) getString(R.string.notif_fg_server_down)
+            else getString(R.string.notif_fg_text)
+        }
+        if (text == fgStatusText) return
+        fgStatusText = text
+        if (recordingActive) return
+        try {
+            (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
+                .notify(NOTIFICATION_ID, foregroundNotification(text))
+        } catch (e: Exception) {
+            Log.w(TAG, "Status notification not updated: ${e.message}")
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -825,12 +870,9 @@ class P2PService : Service() {
         // `ic_notification`'a geçilerek düzeltilmişti, ama BU çağrı noktası
         // atlanmıştı — ve bu, uygulama çalışırken HER ZAMAN görünen bildirim
         // olduğundan en görünür olanıydı.
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.app_name))
-            .setContentText(getString(if (recordingActive) R.string.notif_fg_recording else R.string.notif_fg_text))
-            .setSmallIcon(R.drawable.ic_notification)
-            .setOngoing(true)
-            .build()
+        val notification = foregroundNotification(
+            if (recordingActive) getString(R.string.notif_fg_recording) else fgStatusText ?: getString(R.string.notif_fg_text)
+        )
 
         // See the manifest note: remoteMessaging on API 34+ (no daily cap).
         val baseType =

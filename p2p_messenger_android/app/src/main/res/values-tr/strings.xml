@@ -491,6 +491,7 @@
     <string name="error_delete_failed">Mesaj silinemedi</string>
     <string name="action_discard">At</string>
     <string name="msg_recording_in_background">Sesli kayıt hâlâ sürüyor. Gönderilsin mi, atılsın mı?</string>
+    <string name="notif_fg_server_down">Sunucuya ulaşılamıyor — mesajlar yalnız doğrudan gider</string>
     <string name="notif_fg_recording">Sesli mesaj kaydediliyor</string>
     <string name="msg_media_scrub_failed">Bu videodan konum/cihaz verisi temizlenemedi. Yine de gönderilsin mi?</string>
     <string name="action_send_anyway">Yine de gönder</string>
