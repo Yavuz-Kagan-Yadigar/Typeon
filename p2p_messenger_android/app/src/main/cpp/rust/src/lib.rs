@@ -4422,9 +4422,9 @@ struct P2PCore {
     /// tüketimi ve ağ trafiği. key = device_fingerprint, value =
     /// (bir sonraki denemeye izin verilen an (ms), ardışık başarısız
     /// deneme sayısı). Sadece `reconnect_sweep`'in OTOMATİK/periyodik
-    /// taramasını yavaşlatır — kullanıcının kendi eylemiyle tetiklediği
-    /// yeniden bağlanma (sohbet açma/mesaj gönderme, `dial_with_relay_fallback`'in
-    /// diğer çağıranları) bundan ETKİLENMEZ, her zaman anında dener.
+    /// taramasını ve gönderim yolunu (`ensure_connected`, otomatik yeniden
+    /// denemeler de oradan geçer) yavaşlatır. Opening a chat
+    /// (`ensure_handshake`) and a network change ignore it.
     /// Bağlantı kurulduğunda (bkz. `reconnect_sweep` "zaten bağlı" kolu)
     /// ilgili girdi silinir — bir sonraki kopmada geri çekilme sıfırdan
     /// başlar.
@@ -9847,7 +9847,10 @@ impl P2PCore {
         // bağlantı yoksa hemen yeniden bağlanmayı dene — reconnect_sweep'in
         // bir sonraki turunu (≤15 sn) beklemeden. Sohbet açılışında/mesaj
         // öncesinde en hızlı iyileşme yolu.
-        self.ensure_connected(peer_device_fingerprint);
+        // Forced: the chat is on screen (or was just unblocked), a wait left
+        // by a failed sweep must not hold it back. The send path stays gated:
+        // automatic retries go through it too.
+        self.try_reconnect_device(peer_device_fingerprint, true);
         if self.has_active_session(peer_device_fingerprint) {
             return Ok(());
         }
@@ -9887,8 +9890,8 @@ impl P2PCore {
     /// ipucu var mı + o an bağlı mı + geri çekilme penceresi doldu mu"
     /// sorularına bakıp gerçek dial'i yapar.
     ///
-    /// `force=true` (SADECE ağ değişikliği bildirimi — bkz.
-    /// `reconnect_all_known_now`) `reconnect_backoff`'u YOK SAYAR: bir ağ
+    /// `force=true` (ağ değişikliği bildirimi — bkz.
+    /// `reconnect_all_known_now` — and `ensure_handshake`) `reconnect_backoff`'u YOK SAYAR: bir ağ
     /// arayüzü değişikliği (Wi-Fi<->hücresel) ESKİ ağ üzerinden birikmiş
     /// geri çekilme geçmişini ANLAMSIZ kılar — yeni arayüz üzerinden ilk
     /// deneme her zaman hemen yapılmalı.
