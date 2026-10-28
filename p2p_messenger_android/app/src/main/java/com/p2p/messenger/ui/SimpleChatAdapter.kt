@@ -36,6 +36,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     companion object {
         private const val GROUP_WINDOW_MS = 2 * 60 * 1000L
         private const val ORDER_MAX_AGE_MS = 31L * 24 * 60 * 60 * 1000
+        /** Attachment preview decodes run here, not on the main thread. One
+         *  shared thread: a per-adapter one leaked a thread per chat opened. */
+        private val previewDecoder = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "preview-decode").apply { isDaemon = true }
+        }
     }
 
     enum class Status { PENDING, SENT, DELIVERED, ERROR }
@@ -62,9 +67,6 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (mentionsMe) Regex("@\\S+").findAll(text).forEach { mark(it.range.first, it.range.last + 1, true) }
         return any
     }
-
-    /** Attachment preview decodes run here, not on the main thread. */
-    private val previewDecoder = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     /** Decoded attachment previews by file id: a rebind does not decode again. */
     private val previewCache = object : android.util.LruCache<String, android.graphics.Bitmap>(24 * 1024 * 1024) {
