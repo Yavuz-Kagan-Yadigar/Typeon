@@ -12992,9 +12992,15 @@ impl P2PCore {
                             // Yankı KENDİ tepkim — bu yüzden tepki veren
                             // kendi kimliğim (`own_id`), kardeş cihazın
                             // kimliği değil (ikisi zaten aynı identity).
-                            self.apply_reaction(&target_message_id, &own_id, &emoji, reacted_at_ms);
+                            // Same bounds as the contact path (acked below, never stored).
+                            let oversized = emoji.len() > 64 || target_message_id.len() > 128;
+                            if !oversized {
+                                self.apply_reaction(&target_message_id, &own_id, &emoji, reacted_at_ms);
+                            }
                             let summary = self.reactions_summary(&target_message_id);
-                            if let Some(gid) = &group_id {
+                            if oversized {
+                                serde_json::json!({"type": "noop"})
+                            } else if let Some(gid) = &group_id {
                                 serde_json::json!({"type": "reaction", "group_id": gid, "message_id": target_message_id, "reactions": summary})
                             } else if let Some(ck) = &chat_key {
                                 serde_json::json!({"type": "reaction", "peer": ck, "message_id": target_message_id, "reactions": summary})
