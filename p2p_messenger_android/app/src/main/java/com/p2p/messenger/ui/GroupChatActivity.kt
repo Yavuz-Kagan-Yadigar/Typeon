@@ -223,6 +223,14 @@ class GroupChatActivity : AppCompatActivity() {
     private lateinit var imgTypingAvatar: ImageView
     private lateinit var txtTypingIndicator: TextView
     private val typingHandler = Handler(Looper.getMainLooper())
+    /** fixpass (glm A2): `sendGroupTypingIndicator` / `sendSeenReceipt` JNI
+     *  çağrıları çekirdek kilidinde sıraya durabildiğinden ana iş parçacığında
+     *  ÇALIŞMAZ — tek iş parçacıklı sıra (CallActivity'deki `DiscardPolicy`
+     *  deseni; kapanış sonrası gönderimler sessizce atılır). */
+    private val netPack = java.util.concurrent.ThreadPoolExecutor(
+        1, 1, 10L, java.util.concurrent.TimeUnit.SECONDS,
+        java.util.concurrent.LinkedBlockingQueue(), java.util.concurrent.ThreadPoolExecutor.DiscardPolicy()
+    )
     private val typingMembers = LinkedHashMap<String, Runnable>()
     /** Our own last-reported typing state to other members. */
     private var isTypingSent = false
@@ -2582,7 +2590,9 @@ class GroupChatActivity : AppCompatActivity() {
             // The watermark covers text rows only: the sender gets "seen" for
             // an attachment from this receipt, as on the 1:1 screen.
             val fileId = obj.optString("file_id")
-            if (AppLock.isUnlocked()) try { P2PLib.sendSeenReceipt(obj.optString("peer"), fileId, fileId) } catch (e: Exception) { }
+            if (AppLock.isUnlocked()) netPack.execute {
+                try { P2PLib.sendSeenReceipt(obj.optString("peer"), fileId, fileId) } catch (e: Exception) { }
+            }
             scheduleGroupReadWatermark()
         }
     }
@@ -2711,9 +2721,9 @@ class GroupChatActivity : AppCompatActivity() {
         // canlı grup mesajı için otomatik gönderilir (bkz. ChatActivity
         // 1:1 karşılığı AYNI gerekçe). `peer`, bu kopyanın geldiği 1:1
         // kanalın (göndericinin) fingerprint'i.
-        if (AppLock.isUnlocked()) try {
-            P2PLib.sendSeenReceipt(obj.optString("peer"), messageId, localId)
-        } catch (e: Exception) { /* yoksay */ }
+        if (AppLock.isUnlocked()) netPack.execute {
+            try { P2PLib.sendSeenReceipt(obj.optString("peer"), messageId, localId) } catch (e: Exception) { /* yoksay */ }
+        }
         // Güvenilir yol: tekil `Seen` kaybolsa bile okuma sınırı diske yazılır.
         scheduleGroupReadWatermark()
     }
@@ -2819,10 +2829,13 @@ class GroupChatActivity : AppCompatActivity() {
     private fun sendTypingState(isTyping: Boolean) {
         if (isTypingSent == isTyping) return
         isTypingSent = isTyping
-        try {
-            P2PLib.sendGroupTypingIndicator(groupId, isTyping)
-        } catch (e: Exception) {
-            // Fire-and-forget.
+        // fixpass (glm A2): bkz. `netPack` (dosya başı).
+        netPack.execute {
+            try {
+                P2PLib.sendGroupTypingIndicator(groupId, isTyping)
+            } catch (e: Exception) {
+                // Fire-and-forget.
+            }
         }
     }
 
@@ -3244,6 +3257,7 @@ class GroupChatActivity : AppCompatActivity() {
         ownStatusPollHandler.removeCallbacksAndMessages(null)
         groupReadWatermarkHandler.removeCallbacksAndMessages(null)
         mentionPopup?.dismiss()
+        netPack.shutdownNow()
         super.onDestroy()
     }
 }

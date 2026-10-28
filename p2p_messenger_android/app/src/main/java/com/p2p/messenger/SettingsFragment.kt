@@ -290,10 +290,14 @@ class SettingsFragment : Fragment() {
         }
 
         val identityCodeValue = view.findViewById<android.widget.TextView>(R.id.identity_code_value)
-        identityCodeValue.text = try {
-            P2PLib.getIdentityCode()
-        } catch (e: Exception) {
-            ""
+        // fixpass (glm A3): JNI çağrısı (`getIdentityCode` → çekirdek kilidi)
+        // ana iş parçacığından ÇALIŞMAZ; sonuç ana iş parçacığına yazılır.
+        identityCodeValue.text = ""
+        lifecycleScope.launch(Dispatchers.IO) {
+            val code = try { P2PLib.getIdentityCode() } catch (e: Exception) { "" }
+            withContext(Dispatchers.Main) {
+                if (identityCodeValue.isAttachedToWindow) identityCodeValue.text = code
+            }
         }
 
         val nodeModeSwitch = view.findViewById<SwitchMaterial>(R.id.node_mode_switch)
@@ -467,18 +471,26 @@ class SettingsFragment : Fragment() {
     } catch (e: Exception) { true }
 
     private fun confirmDeleteAccount() {
-        // The core refuses it on a linked device; the generic "couldn't
-        // notify your contacts" was shown for that.
-        if (!isRootDevice()) {
-            Toast.makeText(requireContext(), R.string.msg_primary_device_only_delete, Toast.LENGTH_LONG).show()
-            return
+        // fixpass (glm A3): `isRootDevice()` iki JNI çağrısı yapar — ana iş
+        // parçacığından ÇALIŞMAZ; iletişim kutusu sonuç ana iş parçacığında
+        // açılır.
+        lifecycleScope.launch(Dispatchers.IO) {
+            val root = isRootDevice()
+            withContext(Dispatchers.Main) {
+                // The core refuses it on a linked device; the generic "couldn't
+                // notify your contacts" was shown for that.
+                if (!root) {
+                    Toast.makeText(requireContext(), R.string.msg_primary_device_only_delete, Toast.LENGTH_LONG).show()
+                    return@withContext
+                }
+                AlertDialog.Builder(requireContext())
+                    .setTitle(R.string.delete_account_confirm_title)
+                    .setMessage(R.string.delete_account_confirm_message)
+                    .setPositiveButton(R.string.action_delete_account) { _, _ -> performDeleteAccount() }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
         }
-        AlertDialog.Builder(requireContext())
-            .setTitle(R.string.delete_account_confirm_title)
-            .setMessage(R.string.delete_account_confirm_message)
-            .setPositiveButton(R.string.action_delete_account) { _, _ -> performDeleteAccount() }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
     }
 
     private fun performDeleteAccount() {
@@ -558,17 +570,24 @@ class SettingsFragment : Fragment() {
             .setPositiveButton(R.string.linked_devices_add) { _, _ ->
                 // Only the root device may add one (the core refuses the grant):
                 // say so before the camera opens, not after a scan.
-                if (!isRootDevice()) {
-                    Toast.makeText(requireContext(), R.string.msg_primary_device_only, Toast.LENGTH_LONG).show()
-                    return@setPositiveButton
-                }
-                withAppPassword {
-                    startActivity(
-                        Intent(requireContext(), com.p2p.messenger.ui.QrScanActivity::class.java).apply {
-                            putExtra(com.p2p.messenger.ui.QrScanActivity.EXTRA_MODE,
-                                com.p2p.messenger.ui.QrScanActivity.MODE_LINK_APPROVE)
+                // fixpass (glm A3): `isRootDevice()` JNI — off the main thread.
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val root = isRootDevice()
+                    withContext(Dispatchers.Main) {
+                        if (!isAdded) return@withContext
+                        if (!root) {
+                            Toast.makeText(requireContext(), R.string.msg_primary_device_only, Toast.LENGTH_LONG).show()
+                            return@withContext
                         }
-                    )
+                        withAppPassword {
+                            startActivity(
+                                Intent(requireContext(), com.p2p.messenger.ui.QrScanActivity::class.java).apply {
+                                    putExtra(com.p2p.messenger.ui.QrScanActivity.EXTRA_MODE,
+                                        com.p2p.messenger.ui.QrScanActivity.MODE_LINK_APPROVE)
+                                }
+                            )
+                        }
+                    }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -1529,19 +1548,24 @@ class SettingsFragment : Fragment() {
         val container = serversContainer ?: return
         container.removeAllViews()
 
-        val json = try {
-            P2PLib.listServers()
-        } catch (e: Exception) {
-            "[]"
-        }
-        val arr = try {
-            org.json.JSONArray(json)
-        } catch (e: Exception) {
-            org.json.JSONArray()
-        }
-        for (i in 0 until arr.length()) {
-            val obj = arr.optJSONObject(i) ?: continue
-            container.addView(buildServerRow(obj))
+        // fixpass (glm A3): `listServers()` JNI — off the main thread; rows are
+        // built back on the main thread.
+        lifecycleScope.launch(Dispatchers.IO) {
+            val json = try {
+                P2PLib.listServers()
+            } catch (e: Exception) {
+                "[]"
+            }
+            val arr = try {
+                org.json.JSONArray(json)
+            } catch (e: Exception) {
+                org.json.JSONArray()
+            }
+            val rows = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+            withContext(Dispatchers.Main) {
+                val fresh = serversContainer ?: return@withContext
+                for (obj in rows) fresh.addView(buildServerRow(obj))
+            }
         }
     }
 
@@ -1646,13 +1670,18 @@ class SettingsFragment : Fragment() {
             text = getString(R.string.action_remove_server)
             setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorError))
             setOnClickListener {
-                try {
-                    P2PLib.removeServer(serverId)
-                } catch (e: Exception) {
-                    // yok sayılır — liste zaten yenilenecek
+                // fixpass (glm A3): `removeServer` JNI — off the main thread.
+                lifecycleScope.launch(Dispatchers.IO) {
+                    try {
+                        P2PLib.removeServer(serverId)
+                    } catch (e: Exception) {
+                        // yok sayılır — liste zaten yenilenecek
+                    }
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(ctx, R.string.msg_server_removed, Toast.LENGTH_SHORT).show()
+                        refreshServers()
+                    }
                 }
-                Toast.makeText(ctx, R.string.msg_server_removed, Toast.LENGTH_SHORT).show()
-                refreshServers()
             }
         })
 

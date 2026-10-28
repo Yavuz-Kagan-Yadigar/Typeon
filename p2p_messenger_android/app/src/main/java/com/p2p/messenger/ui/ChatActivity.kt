@@ -253,6 +253,14 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var txtRecordingTimer: TextView
     private lateinit var txtCancelPill: TextView
     private val recordingHandler = Handler(Looper.getMainLooper())
+    /** fixpass (glm A2): `sendSeenReceipt` / `sendTypingIndicator` JNI çağrıları
+     *  paylaşılan çekirdek kilidinde sıraya durabildiğinden ana iş parçacığında
+     *  ÇALIŞMAZ — tek iş parçacıklı sıra (CallActivity'deki `DiscardPolicy`
+     *  deseni; kapanış sonrası gönderimler sessizce atılır). */
+    private val netPack = java.util.concurrent.ThreadPoolExecutor(
+        1, 1, 10L, java.util.concurrent.TimeUnit.SECONDS,
+        java.util.concurrent.LinkedBlockingQueue(), java.util.concurrent.ThreadPoolExecutor.DiscardPolicy()
+    )
     private val recordingTimerRunnable = object : Runnable {
         override fun run() {
             val elapsed = android.os.SystemClock.elapsedRealtime() - recordingStartTime
@@ -1396,9 +1404,14 @@ class ChatActivity : AppCompatActivity() {
 
     private fun markSeen(messageId: String) {
         if (!AppLock.isUnlocked()) return
-        try {
-            P2PLib.sendSeenReceipt(peerDeviceFingerprint, messageId, null)
-        } catch (e: Exception) {
+        // fixpass (glm A2): `sendSeenReceipt` JNI çağrısı çekirdek kilidinde
+        // sıraya durur — ana iş parçacığından çağrılmaz (arayüz takılması
+        // / ANR). Sıra korunur: tek iş parçacıklı kuyruk.
+        netPack.execute {
+            try {
+                P2PLib.sendSeenReceipt(peerDeviceFingerprint, messageId, null)
+            } catch (e: Exception) {
+            }
         }
     }
 
@@ -1407,9 +1420,12 @@ class ChatActivity : AppCompatActivity() {
     private fun sendTypingState(isTyping: Boolean) {
         if (isTypingSent == isTyping) return
         isTypingSent = isTyping
-        try {
-            P2PLib.sendTypingIndicator(peerDeviceFingerprint, isTyping)
-        } catch (e: Exception) {
+        // fixpass (glm A2): bkz. `markSeen`.
+        netPack.execute {
+            try {
+                P2PLib.sendTypingIndicator(peerDeviceFingerprint, isTyping)
+            } catch (e: Exception) {
+            }
         }
     }
 
@@ -3056,6 +3072,7 @@ class ChatActivity : AppCompatActivity() {
         sessionPollHandler.removeCallbacksAndMessages(null)
         ownStatusPollHandler.removeCallbacksAndMessages(null)
         readWatermarkHandler.removeCallbacksAndMessages(null)
+        netPack.shutdownNow()
         super.onDestroy()
     }
 }

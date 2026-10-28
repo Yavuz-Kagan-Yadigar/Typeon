@@ -13,6 +13,7 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
+import java.util.concurrent.Executors
 
 /**
  * PIN lock of the server app (same approach as the client's AppLock: PBKDF2
@@ -31,6 +32,8 @@ object ServerLock {
 
     @Volatile private var unlocked = false
     @Volatile private var leftAt = 0L
+    /** Single worker: PBKDF2 verify (+set) is ~0.3 s of CPU that blocks. */
+    private val cpu = Executors.newSingleThreadExecutor()
 
     private fun prefs(c: Context) = c.getSharedPreferences(ServerService.PREFS_NAME, Context.MODE_PRIVATE)
 
@@ -70,7 +73,7 @@ object ServerLock {
     private fun waitSeconds(c: Context): Int =
         ((prefs(c).getLong(KEY_WAIT_UNTIL, 0L) - System.currentTimeMillis() + 999) / 1000).coerceAtLeast(0).toInt()
 
-    /** PBKDF2 at 300k iterations: callers run this off the UI thread or accept ~0.3 s. */
+    /** PBKDF2 at 300k iterations: always run on [cpu], never the UI thread. */
     private fun tryPin(c: Context, pin: String): Boolean {
         if (waitSeconds(c) > 0) return false
         val p = prefs(c)
@@ -103,12 +106,25 @@ object ServerLock {
             .setNegativeButton(R.string.pin_exit) { _, _ -> a.finish() }
             .create()
         dlg.setOnShowListener {
-            dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { btn ->
                 val wait = waitSeconds(a)
-                when {
-                    wait > 0 -> Toast.makeText(a, a.getString(R.string.pin_wait_fmt, wait), Toast.LENGTH_SHORT).show()
-                    tryPin(a, input.text.toString()) -> { unlocked = true; dlg.dismiss(); onOk() }
-                    else -> { input.text.clear(); Toast.makeText(a, R.string.pin_wrong, Toast.LENGTH_SHORT).show() }
+                if (wait > 0) {
+                    Toast.makeText(a, a.getString(R.string.pin_wait_fmt, wait), Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                // PBKDF2 off the UI thread; the button waits for the result.
+                btn.isEnabled = false
+                val pin = input.text.toString()
+                cpu.execute {
+                    val ok = tryPin(a, pin)
+                    a.runOnUiThread {
+                        btn.isEnabled = true
+                        if (ok) { unlocked = true; dlg.dismiss(); onOk() }
+                        else {
+                            input.text.clear()
+                            Toast.makeText(a, R.string.pin_wrong, Toast.LENGTH_SHORT).show()
+                        }
+                    }
                 }
             }
         }
@@ -135,24 +151,34 @@ object ServerLock {
             .setNegativeButton(android.R.string.cancel, null)
             .create()
         dlg.setOnShowListener {
-            dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { btn ->
                 val n = new.text.toString()
-                if (has && !tryPin(a, cur.text.toString())) {
-                    Toast.makeText(a, R.string.pin_wrong, Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
+                val erase = n.isEmpty() && has
+                // PBKDF2 off the UI thread (same worker as showUnlock).
+                btn.isEnabled = false
+                val curPin = cur.text.toString()
+                cpu.execute {
+                    val curOk = !has || tryPin(a, curPin)
+                    a.runOnUiThread {
+                        btn.isEnabled = true
+                        if (!curOk) {
+                            Toast.makeText(a, R.string.pin_wrong, Toast.LENGTH_SHORT).show()
+                            return@runOnUiThread
+                        }
+                        if (erase) {
+                            prefs(a).edit().remove(KEY_HASH).remove(KEY_SALT).commit()
+                            Toast.makeText(a, R.string.pin_removed, Toast.LENGTH_SHORT).show()
+                        } else if (n.length < MIN_LEN) {
+                            Toast.makeText(a, a.getString(R.string.pin_too_short_fmt, MIN_LEN), Toast.LENGTH_SHORT).show()
+                            return@runOnUiThread
+                        } else {
+                            setPin(a, n)
+                            unlocked = true
+                            Toast.makeText(a, R.string.pin_saved, Toast.LENGTH_SHORT).show()
+                        }
+                        dlg.dismiss()
+                    }
                 }
-                if (n.isEmpty() && has) {
-                    prefs(a).edit().remove(KEY_HASH).remove(KEY_SALT).commit()
-                    Toast.makeText(a, R.string.pin_removed, Toast.LENGTH_SHORT).show()
-                } else if (n.length < MIN_LEN) {
-                    Toast.makeText(a, a.getString(R.string.pin_too_short_fmt, MIN_LEN), Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                } else {
-                    setPin(a, n)
-                    unlocked = true
-                    Toast.makeText(a, R.string.pin_saved, Toast.LENGTH_SHORT).show()
-                }
-                dlg.dismiss()
             }
         }
         dlg.show()

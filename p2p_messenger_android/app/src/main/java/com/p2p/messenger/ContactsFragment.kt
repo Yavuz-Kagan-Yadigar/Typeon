@@ -385,34 +385,41 @@ class ContactsFragment : Fragment() {
         // olduğunun DOĞRULANMASI. Bunu ancak kullanıcı, kodu başka bir
         // kanaldan karşılaştırarak yapabilir; o yüzden kod artık burada,
         // onay penceresinin içinde gösteriliyor.
-        val safetyCode = try {
-            P2PLib.contactSafetyCode(message.identityId)
-        } catch (e: Exception) {
-            ""
-        }
-        val body = if (safetyCode.isNotEmpty()) {
-            getString(R.string.confirm_trust_body, message.displayName) +
-                "\n\n" + getString(R.string.lbl_safety_code, safetyCode)
-        } else {
-            getString(R.string.confirm_trust_body, message.displayName)
-        }
-        AlertDialog.Builder(requireContext())
-            .setTitle(R.string.confirm_trust_title)
-            .setMessage(body)
-            .setPositiveButton(R.string.action_trust_contact) { _, _ ->
-                offMain({
-                    try { P2PLib.trustContact(message.realContactId) } catch (e: Exception) { "Error: ${e.message}" }
-                }) { result ->
-                    if (result.startsWith("Error:")) {
-                        Toast.makeText(requireContext(), errorText(result), Toast.LENGTH_LONG).show()
-                    } else {
-                        Toast.makeText(requireContext(), R.string.msg_contact_trusted, Toast.LENGTH_SHORT).show()
-                        refreshList()
-                    }
-                }
+        // Ekran kaydırması: kod JNI çağrısıyla üretilir — fixpass (glm A3)
+        // gereği ana iş parçacığından ÇALIŞMAZ (`offMain` deseni).
+        runOnWorker {
+            val safetyCode = try {
+                P2PLib.contactSafetyCode(message.identityId)
+            } catch (e: Exception) {
+                ""
             }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+            refreshHandler.post {
+                if (!isAdded || view == null) return@post
+                val body = if (safetyCode.isNotEmpty()) {
+                    getString(R.string.confirm_trust_body, message.displayName) +
+                        "\n\n" + getString(R.string.lbl_safety_code, safetyCode)
+                } else {
+                    getString(R.string.confirm_trust_body, message.displayName)
+                }
+                AlertDialog.Builder(requireContext())
+                    .setTitle(R.string.confirm_trust_title)
+                    .setMessage(body)
+                    .setPositiveButton(R.string.action_trust_contact) { _, _ ->
+                        offMain({
+                            try { P2PLib.trustContact(message.realContactId) } catch (e: Exception) { "Error: ${e.message}" }
+                        }) { result ->
+                            if (result.startsWith("Error:")) {
+                                Toast.makeText(requireContext(), errorText(result), Toast.LENGTH_LONG).show()
+                            } else {
+                                Toast.makeText(requireContext(), R.string.msg_contact_trusted, Toast.LENGTH_SHORT).show()
+                                refreshList()
+                            }
+                        }
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
+        }
     }
 
     /** bkz. ChatsFragment.confirmRevokeDevice aynı notu. */
