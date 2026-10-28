@@ -12661,10 +12661,12 @@ impl P2PCore {
                 // (`set_own_profile_picture`). The name travels by DeviceSync.
                 if self.my_identity_id().as_deref() == Some(sender_identity_id.as_str()) {
                     if let (Some(conn), false) = (&self.db, avatar_too_big) {
-                        let _ = conn.execute(
+                        if let Err(e) = conn.execute(
                             "UPDATE identities SET avatar_jpeg = ?1 WHERE id = ?2",
                             params![avatar_jpeg, sender_identity_id],
-                        );
+                        ) {
+                            error!("Profil fotoğrafı kaydedilemedi: {}", e);
+                        }
                     }
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
@@ -12798,7 +12800,15 @@ impl P2PCore {
                         self.send_ack(&peer_fp, &message_id);
                         if linked { serde_json::json!({"type": "device_linked", "identity_id": identity_id}) } else { serde_json::json!({"type": "noop"}) }
                     }
-                    Err(e) => { error!("DeviceLinkGrant benimsenemedi: {}", e); serde_json::json!({"type": "noop"}) }
+                    Err(e) => {
+                        error!("DeviceLinkGrant benimsenemedi: {}", e);
+                        // Past the link window no retry can be adopted (a new
+                        // QR has a new nonce): acked, or it came for 7 days.
+                        if current_time_ms() > self.link_request_open_until {
+                            self.send_ack(&peer_fp, &message_id);
+                        }
+                        serde_json::json!({"type": "noop"})
+                    }
                 }
             }
             // Çoklu-cihaz (spec 1.5 adım 5, kişi tarafı): bir kimliğe yeni cihaz
@@ -13024,11 +13034,20 @@ impl P2PCore {
                             // Yankı KENDİ tepkim — bu yüzden tepki veren
                             // kendi kimliğim (`own_id`), kardeş cihazın
                             // kimliği değil (ikisi zaten aynı identity).
-                            self.apply_reaction(&target_message_id, &own_id, &emoji, reacted_at_ms);
-                            let summary = self.reactions_summary(&target_message_id);
-                            if let Some(gid) = &group_id {
+                            // The contact arm's checks; a 1:1 row's chat is the
+                            // conversation identity, not mine.
+                            let chat_identity = if group_id.is_some() { own_id.as_str() } else { conversation_identity_id.as_deref().unwrap_or("") };
+                            if emoji.len() > 64 || !self.reaction_fits_chat(&target_message_id, group_id.as_deref(), chat_identity) {
+                                warn!("Kardeş tepkisi yok sayıldı: hedef bu sohbete ait değil ya da emoji çok uzun");
+                                serde_json::json!({"type": "noop"})
+                            } else if !self.apply_reaction(&target_message_id, &own_id, &emoji, reacted_at_ms) {
+                                ack = false; // write failed: the sibling sends it again
+                                serde_json::json!({"type": "noop"})
+                            } else if let Some(gid) = &group_id {
+                                let summary = self.reactions_summary(&target_message_id);
                                 serde_json::json!({"type": "reaction", "group_id": gid, "message_id": target_message_id, "reactions": summary})
                             } else if let Some(ck) = &chat_key {
+                                let summary = self.reactions_summary(&target_message_id);
                                 serde_json::json!({"type": "reaction", "peer": ck, "message_id": target_message_id, "reactions": summary})
                             } else {
                                 serde_json::json!({"type": "noop"})
@@ -13081,9 +13100,16 @@ impl P2PCore {
                             _ => serde_json::json!({"type": "noop"}),
                         },
                         SiblingEchoBody::Sticker { jxl, origin } => {
+                            // Not a sticker at all: final (acked). Anything else
+                            // (keys not loaded, disk, DB): sent again.
+                            let mut not_a_sticker = false;
                             let stored = self.attachments_dir().and_then(|dir| {
                                 let tmp = dir.join("plain_cache").join(format!(".sticker-{}.jxl", uuid::Uuid::new_v4()));
-                                let r = std::fs::write(&tmp, &jxl).map_err(|e| e.to_string()).and_then(|()| self.store_sticker(&tmp, false, origin.as_deref()));
+                                let r = std::fs::write(&tmp, &jxl).map_err(|e| e.to_string()).and_then(|()| {
+                                    let r = self.store_sticker(&tmp, false, origin.as_deref());
+                                    not_a_sticker = r.is_err() && attachments::sticker_check(&tmp).is_err();
+                                    r
+                                });
                                 let _ = std::fs::remove_file(&tmp);
                                 r
                             });
@@ -13092,14 +13118,19 @@ impl P2PCore {
                                 Err(e) => {
                                     warn!("Kardeş sticker saklanamadı: {}", e);
                                     // Not a sticker at all: final. Keys not loaded yet: sent again.
-                                    ack = self.skipped_key_encryption_key.is_some();
+                                    ack = not_a_sticker;
                                     serde_json::json!({"type": "noop"})
                                 }
                             }
                         }
                         SiblingEchoBody::StickerRemoved { id } => match self.delete_sticker(&id, false) {
                             Ok(()) => serde_json::json!({"type": "stickers_changed", "removed": id}),
-                            Err(_) => serde_json::json!({"type": "noop"}),
+                            Err(e) => {
+                                warn!("Kardeş sticker silinemedi: {}", e);
+                                // A bad id is final; a DB error is sent again.
+                                ack = self.sticker_enc_path(&id).is_err();
+                                serde_json::json!({"type": "noop"})
+                            }
                         },
                         SiblingEchoBody::GroupLeft => match &group_id {
                             Some(gid) if self.groups.contains_key(gid) => {
