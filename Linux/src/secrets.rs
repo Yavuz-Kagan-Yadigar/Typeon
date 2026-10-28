@@ -31,7 +31,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::keyring;
 
@@ -144,11 +144,11 @@ pub fn is_passphrase_protected(dir: &Path) -> bool {
 /// `passphrase` empty means "wallet only".
 pub fn save(dir: &Path, vault: &Vault, passphrase: &str) -> Result<(), String> {
     let profile = dir.to_string_lossy().to_string();
-    let mut wallet_key = match keyring::load_key(&profile)? {
-        Some(key) => key,
+    let wallet_key = match keyring::load_key(&profile)? {
+        Some(key) => Zeroizing::new(key),
         None => {
-            let mut fresh = [0u8; 32];
-            OsRng.fill_bytes(&mut fresh);
+            let mut fresh = Zeroizing::new([0u8; 32]);
+            OsRng.fill_bytes(&mut *fresh);
             keyring::store_key(&profile, &fresh)?;
             fresh
         }
@@ -176,7 +176,6 @@ pub fn save(dir: &Path, vault: &Vault, passphrase: &str) -> Result<(), String> {
         key.zeroize();
         result?
     };
-    wallet_key.zeroize();
 
     let mut out = Vec::with_capacity(HEADER_LEN + sealed.len());
     out.extend_from_slice(MAGIC);
@@ -204,7 +203,7 @@ pub fn load(dir: &Path, passphrase: &str) -> Result<Vault, String> {
     let payload = &raw[HEADER_LEN..];
 
     let profile = dir.to_string_lossy().to_string();
-    let mut wallet_key = keyring::load_key(&profile)?.ok_or_else(|| {
+    let wallet_key = keyring::load_key(&profile)?.map(Zeroizing::new).ok_or_else(|| {
         format!(
             "{} no longer holds this device's vault key. Without it the vault cannot be opened \
              — link this computer to your account again.",
@@ -229,7 +228,6 @@ pub fn load(dir: &Path, passphrase: &str) -> Result<Vault, String> {
         key.zeroize();
         result?
     };
-    wallet_key.zeroize();
 
     let vault = Vault::decode(&body);
     body.zeroize();
@@ -289,20 +287,32 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     // Write a temp file and rename it over: truncating in place means a crash
     // or power loss mid-write leaves a half vault and the identity is gone.
     let tmp = path.with_extension("tmp");
+    // Unlink (never follows a symlink) then `create_new` (O_EXCL, refuses a
+    // symlink planted in the gap): a fixed temp name must not be a way to
+    // overwrite some other file.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.to_string()),
+    }
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(&tmp)
         .map_err(|e| e.to_string())?;
-    // A leftover temp file keeps its old mode through `open`: chmod BEFORE
-    // any secret byte is written, so the renamed vault is never not-0600.
+    // The umask can only strip bits, but chmod BEFORE any secret byte anyway.
     file.set_permissions(std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
     file.write_all(bytes).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    // Persist the rename itself, or a power loss can bring the old file back.
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)
+            .and_then(|d| d.sync_all())
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -352,18 +362,28 @@ fn archive_cipher() -> Result<ChaCha20Poly1305, String> {
     ChaCha20Poly1305::new_from_slice(&key).map_err(|_| "bad archive key".to_string())
 }
 
-/// Reads the stored archive root key, if there is one.
-pub fn load_archive_key(dir: &Path) -> Option<[u8; 32]> {
-    let raw = std::fs::read(archive_path(dir)).ok()?;
+/// Reads the stored archive root key. `Ok(None)` only when no file exists;
+/// a file that cannot be read or opened is an `Err`, never "no key".
+pub fn load_archive_key(dir: &Path) -> Result<Option<[u8; 32]>, String> {
+    let raw = match std::fs::read(archive_path(dir)) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
     if raw.len() < ARCHIVE_MAGIC.len() + NONCE_LEN + 32 || !raw.starts_with(ARCHIVE_MAGIC) {
-        return None;
+        return Err("the archive key file is damaged".into());
     }
-    let cipher = archive_cipher().ok()?;
+    let cipher = archive_cipher()?;
     let nonce_start = ARCHIVE_MAGIC.len();
     let body_start = nonce_start + NONCE_LEN;
     let nonce = Nonce::from_slice(&raw[nonce_start..body_start]);
-    let plain = cipher.decrypt(nonce, &raw[body_start..]).ok()?;
-    plain.try_into().ok()
+    let plain = cipher
+        .decrypt(nonce, &raw[body_start..])
+        .map_err(|_| "the archive key file cannot be opened".to_string())?;
+    plain
+        .try_into()
+        .map(Some)
+        .map_err(|_| "the archive key file is damaged".to_string())
 }
 
 pub fn store_archive_key(dir: &Path, key: &[u8; 32]) -> Result<(), String> {
@@ -387,7 +407,9 @@ pub fn store_archive_key(dir: &Path, key: &[u8; 32]) -> Result<(), String> {
 /// launch — a device that invented its own key before hearing from a sibling
 /// would upload an archive its other devices could not read.
 pub fn ensure_archive_key(dir: &Path) -> Result<[u8; 32], String> {
-    if let Some(existing) = load_archive_key(dir) {
+    // An unreadable key is an error: replacing it would make the server
+    // archive unreadable for every other device of this identity.
+    if let Some(existing) = load_archive_key(dir)? {
         return Ok(existing);
     }
     let mut key = [0u8; 32];

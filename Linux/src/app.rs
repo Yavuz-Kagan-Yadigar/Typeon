@@ -487,7 +487,7 @@ impl App {
                 // Also when the key changed: the primary device replaces it
                 // when it revokes a device.
                 if let Some(ark) = ark {
-                    if crate::secrets::load_archive_key(&data_dir).as_ref() == Some(&ark) {
+                    if matches!(crate::secrets::load_archive_key(&data_dir), Ok(Some(k)) if k == ark) {
                         return;
                     }
                     if let Err(e) = crate::secrets::store_archive_key(&data_dir, &ark) {

@@ -531,8 +531,12 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
     // invented its own key before hearing from a sibling would upload an
     // archive its other devices could not read. It arrives either from a
     // sibling over the encrypted sync channel or from a recovery file.
-    if let Some(ark) = secrets::load_archive_key(&app.data_dir) {
-        core::set_archive_root_key(&ark);
+    match secrets::load_archive_key(&app.data_dir) {
+        Ok(Some(ark)) => {
+            core::set_archive_root_key(&ark);
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("could not read the archive root key: {e}"),
     }
     // The vault has done its job; the core holds what it needs now.
     drop(vault);
