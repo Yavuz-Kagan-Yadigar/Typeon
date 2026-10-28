@@ -43,7 +43,8 @@ fn main() -> glib::ExitCode {
         let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
         eprintln!("typeon: panic at {location}");
         let log = glib::user_data_dir().join("typeon").join("crash.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(log) {
             use std::io::Write;
             let _ = writeln!(file, "{} panic at {location}", util::now_ms());
         }
@@ -65,6 +66,16 @@ fn main() -> glib::ExitCode {
 
     application.connect_activate(activate);
     application.run()
+}
+
+/// Decrypted attachment copies do not outlive the session. The directory
+/// itself stays: the core writes into it.
+fn sweep_plain_cache(data_dir: &std::path::Path) {
+    if let Ok(entries) = std::fs::read_dir(data_dir.join("attachments/plain_cache")) {
+        for entry in entries.flatten() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn activate(application: &adw::Application) {
@@ -90,6 +101,8 @@ fn activate(application: &adw::Application) {
         eprintln!("typeon: cannot create {}: {error}", data_dir.display());
         return;
     }
+    // A crash or kill skips the close-time sweep below; clear what it left.
+    sweep_plain_cache(&data_dir);
 
     // Hard requirement, checked before the database is even opened: this
     // device's secret keys are sealed with a key held in KDE Wallet or GNOME
@@ -186,13 +199,7 @@ fn activate(application: &adw::Application) {
         let app = app.clone();
         window.connect_close_request(move |_| {
             app.prefs.borrow_mut().flush();
-            // Decrypted attachment copies do not outlive the session. The
-            // directory itself stays: the core writes into it.
-            if let Ok(entries) = std::fs::read_dir(app.data_dir.join("attachments/plain_cache")) {
-                for entry in entries.flatten() {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
+            sweep_plain_cache(&app.data_dir);
             glib::Propagation::Proceed
         });
     }
