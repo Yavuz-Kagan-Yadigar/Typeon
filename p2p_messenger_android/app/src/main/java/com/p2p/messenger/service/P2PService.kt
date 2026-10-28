@@ -840,8 +840,9 @@ class P2PService : Service() {
             status.text
         } else {
             val servers = try { org.json.JSONArray(P2PLib.listServers()) } catch (e: Exception) { org.json.JSONArray() }
-            val enrolled = (0 until servers.length()).mapNotNull { servers.optJSONObject(it) }.filter { it.optBoolean("enrolled") }
-            if (enrolled.isNotEmpty() && enrolled.none { it.optBoolean("connected") }) getString(R.string.notif_fg_server_down)
+            // Routing servers, not enrolled ones: the core clears `enrolled` when the link drops.
+            val routing = (0 until servers.length()).mapNotNull { servers.optJSONObject(it) }.filter { it.optBoolean("route_messages") }
+            if (routing.isNotEmpty() && routing.none { it.optBoolean("connected") && it.optBoolean("enrolled") }) getString(R.string.notif_fg_server_down)
             else getString(R.string.notif_fg_text)
         }
         if (text == fgStatusText) return
