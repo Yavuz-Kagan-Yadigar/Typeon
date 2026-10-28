@@ -9754,6 +9754,10 @@ impl P2PCore {
         self.undecryptable_from.remove(fp);
         self.last_handshake_redo.remove(fp);
         self.reconnect_backoff.remove(fp);
+        // "Retry" on a group bubble must not send to it again.
+        for (_, devices) in self.group_failed_copies.values_mut() {
+            devices.retain(|d| d != fp);
+        }
         if let Some(conn) = &self.db {
             for table_key in [
                 "ratchet_states WHERE peer_device_fingerprint", "skipped_message_keys WHERE peer_device_fingerprint",
@@ -17631,6 +17635,8 @@ impl P2PCore {
     /// recorded for this id, the caller sends the message as a new one.
     fn retry_group_message_copies(&mut self, group_id: &str, local_id: &str) -> Result<bool, String> {
         let Some((content, devices)) = self.group_failed_copies.remove(local_id) else { return Ok(false) };
+        // Every device that missed it was revoked since: nobody waits for it.
+        if devices.is_empty() { return Ok(true) }
         let group = self.groups.get(group_id).cloned_group()?;
         let mut sent = false;
         for device in devices {
