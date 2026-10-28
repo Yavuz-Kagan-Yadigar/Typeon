@@ -5767,8 +5767,14 @@ impl P2PCore {
         if self.identity.is_some() {
             return Err("Identity already exists".to_string());
         }
-        if self.db.is_none() {
-            return Err("DB not open".to_string());
+        let row_on_disk = match &self.db {
+            None => return Err("DB not open".to_string()),
+            Some(c) => c.query_row("SELECT 1 FROM identities LIMIT 1", [], |_| Ok(())).is_ok(),
+        };
+        // An identity row whose devices did not load: a new identity would
+        // wipe it all (`wipe_other_identity`).
+        if row_on_disk {
+            return Err("Identity already exists".to_string());
         }
         let (id, bundle_bytes) = self.generate_identity(device_name)?;
         // Held until `load_secret_bundle` or a wipe: the frontend reads it
