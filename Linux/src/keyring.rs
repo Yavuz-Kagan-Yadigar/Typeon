@@ -119,6 +119,13 @@ impl Unavailable {
     }
 }
 
+static DETECTED: std::sync::OnceLock<Backend> = std::sync::OnceLock::new();
+
+/// The backend found by the startup probe, without any D-Bus traffic.
+pub fn detected() -> Option<Backend> {
+    DETECTED.get().copied()
+}
+
 /// Checks for a usable Secret Service, activating whichever wallet is
 /// installed, and proves we can actually talk to it. Blocking; called once
 /// before any window is built.
@@ -144,6 +151,7 @@ pub fn ensure_available() -> Result<Backend, Unavailable> {
         detail: error.to_string(),
     })?;
 
+    let _ = DETECTED.set(backend);
     Ok(backend)
 }
 

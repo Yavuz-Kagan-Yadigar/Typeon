@@ -246,10 +246,8 @@ pub fn change_passphrase(dir: &Path, vault: &Vault, new_passphrase: &str) -> Res
 /// mesajı hiçbir zaman "KDE Wallet"/"GNOME Keyring" diyemiyordu. Artık
 /// gerçekten tespit edilen arka uç adlandırılıyor.
 fn keyring_name() -> &'static str {
-    match keyring::ensure_available() {
-        Ok(backend) => backend.display_name(),
-        Err(_) => keyring::Backend::Unknown.display_name(),
-    }
+    // Cached by the startup probe: this only formats an error message.
+    keyring::detected().unwrap_or(keyring::Backend::Unknown).display_name()
 }
 
 /// Folds the wallet key and the optional passphrase into one AEAD key. The
