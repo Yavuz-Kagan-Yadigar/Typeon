@@ -6858,9 +6858,8 @@ impl P2PCore {
                         if let Err(e) = self.send_message_content(fp.clone(), &grant, None) {
                             error!("DeviceLinkGrant gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
                         }
-                        for part in parts {
-                            let _ = self.send_message_content(fp.clone(), &MessageContent::DeviceSync(part), None);
-                        }
+                        // The other parts: `sync_to_siblings` below sends every
+                        // part to every sibling, this device included.
                         // Tüm kişilere yeni cihazı duyur (spec 1.5 adım 5).
                         self.broadcast_device_add_to_contacts(&device_add);
                         // Var olan kardeş cihazlar da yeni cihazı öğrensin (3+ cihaz).
@@ -7141,8 +7140,9 @@ impl P2PCore {
         // `device_name` is the peer's own claim; it becomes the display name.
         let mut contact = Contact::new(contact_id.clone(), sanitize_display_name(&device_name).unwrap_or_default(), identity_id.clone());
         contact.add_device_unverified(device_fingerprint, now);
+        // On disk first: a contact only in memory was lost on restart.
+        self.try_persist_contact(&contact)?;
         self.identity_to_contact.insert(identity_id.clone(), contact_id.clone());
-        self.persist_contact(&contact);
         self.contacts.insert(contact_id, contact);
         self.rekey_archive_to_canonical(&identity_id);
         Ok(())
@@ -9059,10 +9059,15 @@ impl P2PCore {
     /// ve kullanıcının açık isteğiyle çağrılır — uzaktan gelen hiçbir paket
     /// bu fonksiyona erişemez.
     fn unblock_identity(&mut self, identity_id: &str) {
-        if self.blocked_identities.remove(identity_id) {
+        if self.blocked_identities.contains(identity_id) {
+            // Disk first: lifted only in memory, the block came back on restart.
             if let Some(conn) = &self.db {
-                let _ = conn.execute("DELETE FROM blocked_identities WHERE identity_id = ?1", params![identity_id]);
+                if let Err(e) = conn.execute("DELETE FROM blocked_identities WHERE identity_id = ?1", params![identity_id]) {
+                    error!("Kimlik engeli kaldırılamadı: {}", e);
+                    return;
+                }
             }
+            self.blocked_identities.remove(identity_id);
             info!("Kimlik engeli kaldırıldı: {}", crate::log_id(&identity_id));
             // The block dropped the sessions. Without a new handshake here
             // the peer's packets were only buffered until the user opened
