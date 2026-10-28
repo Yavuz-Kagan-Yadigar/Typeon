@@ -2093,7 +2093,8 @@ fn verify_hybrid(pk: &[u8], pk_pq: &[u8], message: &[u8], sig: &[u8], sig_pq: &[
 }
 
 /// What a request costs against `ServerLimits.requests_per_minute`: one, plus
-/// one per 8 list elements (each is a query on the event loop). A
+/// one per 8 list elements (each is a query on the event loop; an
+/// `ArchivePut` also pays one per 64 KiB of record bytes). A
 /// `MailboxProof` is a hybrid verify, an `Enroll`/`Rebind` one too.
 fn request_cost(req: &ServerRequest) -> u32 {
     let n = match req {
@@ -2101,7 +2102,11 @@ fn request_cost(req: &ServerRequest) -> u32 {
         ServerRequest::Register { add, drop, proofs } => add.len() + drop.len() + 64 * proofs.len(),
         ServerRequest::Fetch { cursors: list, .. } | ServerRequest::Ack { acks: list } => list.len(),
         ServerRequest::Cancel { seqs, .. } => seqs.len(),
-        ServerRequest::ArchivePut { records, .. } => records.len(),
+        // Bytes count too: the codec caps a request at 1 MiB, so 16 extra
+        // units per full request keeps count-only cheating (few big records) priced.
+        ServerRequest::ArchivePut { records, .. } => {
+            records.len() + records.iter().map(|r| r.sealed.len()).sum::<usize>() / (64 * 1024) * 8
+        }
         ServerRequest::ArchiveProbe { buckets } | ServerRequest::ArchivePurge { buckets } => buckets.len(),
         _ => 0,
     };
