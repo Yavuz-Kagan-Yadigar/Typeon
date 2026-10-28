@@ -494,6 +494,8 @@ class ContactsFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
+        // The own pairing QR is on screen.
+        P2PApplication.setSecure(requireActivity(), true)
         // The core accepts a stranger's pairing only for a day after the code
         // was produced; this view can live longer than that — refresh the
         // code (and the QR that shows it) when the screen comes back.
@@ -507,6 +509,7 @@ class ContactsFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
+        P2PApplication.setSecure(requireActivity(), false)
         com.p2p.messenger.service.P2PService.removeMessageListener(eventListener)
         refreshHandler.removeCallbacks(eventRefreshRunnable)
         eventRefreshQueued = false

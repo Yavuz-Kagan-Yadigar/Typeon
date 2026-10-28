@@ -63,6 +63,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         return any
     }
 
+    /** Attachment preview decodes run here, not on the main thread. */
+    private val previewDecoder = java.util.concurrent.Executors.newSingleThreadExecutor()
+
     /** Decoded attachment previews by file id: a rebind does not decode again. */
     private val previewCache = object : android.util.LruCache<String, android.graphics.Bitmap>(24 * 1024 * 1024) {
         override fun sizeOf(key: String, value: android.graphics.Bitmap): Int = value.byteCount
@@ -1059,28 +1062,35 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         holder.txtAttachmentName.text = attachment.fileName
         val context = holder.itemView.context
 
-        // Spec dışı: küçük (birkaç on KB) bir JPEG olduğundan senkron
-        // decode burada kabul edilebilir — ayrı bir yükleme thread'i/
-        // görsel yükleme kütüphanesi gerektirmiyor. Doluysa TAM dosya hiç
-        // indirilmeden bir önizleme gösterilir.
+        // Doluysa TAM dosya hiç indirilmeden bir önizleme gösterilir.
         val preview = attachment.previewJpeg
+        val thumb = holder.imgAttachmentThumbnail
         if (preview != null) {
             // Sender-controlled bytes: bounded decode (see ImagePreview.decodeBytes).
-            // ponytail: the first bind still decodes on the main thread;
-            // decode on a worker if one preview alone ever janks.
             // L-84: keyed by the bytes too, a re-sent file with the same id gets its new preview.
             val cacheKey = attachment.fileId + ":" + preview.contentHashCode()
-            val bitmap = previewCache.get(cacheKey)
-                ?: com.p2p.messenger.util.ImagePreview.decodeBytes(preview, 1024)
-                    ?.also { previewCache.put(cacheKey, it) }
-            if (bitmap != null) {
-                holder.imgAttachmentThumbnail.visibility = View.VISIBLE
-                holder.imgAttachmentThumbnail.setImageBitmap(bitmap)
+            val cached = previewCache.get(cacheKey)
+            thumb.tag = cacheKey
+            if (cached != null) {
+                thumb.visibility = View.VISIBLE
+                thumb.setImageBitmap(cached)
             } else {
-                holder.imgAttachmentThumbnail.visibility = View.GONE
+                // A cache miss decodes on a worker; the recycled holder is checked by tag.
+                thumb.visibility = View.GONE
+                previewDecoder.execute {
+                    val bmp = com.p2p.messenger.util.ImagePreview.decodeBytes(preview, 1024) ?: return@execute
+                    previewCache.put(cacheKey, bmp)
+                    thumb.post {
+                        if (thumb.tag == cacheKey) {
+                            thumb.visibility = View.VISIBLE
+                            thumb.setImageBitmap(bmp)
+                        }
+                    }
+                }
             }
         } else {
-            holder.imgAttachmentThumbnail.visibility = View.GONE
+            thumb.tag = null
+            thumb.visibility = View.GONE
         }
 
         holder.txtAttachmentSize.text = when (attachment.status) {
