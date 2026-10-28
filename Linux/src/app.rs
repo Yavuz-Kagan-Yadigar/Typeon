@@ -632,7 +632,7 @@ impl App {
 /// Starts the once-a-second poll on a worker thread and pumps its output into
 /// the main loop. Also drives the periodic name-cache refresh.
 pub fn start_poll_loop(app: &Rc<App>) {
-    let (sender, receiver) = async_channel::unbounded::<Vec<String>>();
+    let (sender, receiver) = async_channel::bounded::<Vec<String>>(64);
 
     std::thread::spawn(move || loop {
         // A remote unlink (`self_revoked`) deletes the whole data directory;
