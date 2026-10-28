@@ -3325,6 +3325,9 @@ const SWARM_CONNECTION_TIMEOUT_SECS: u64 = 60;
 const ENVELOPE_PROTOCOL: &str = "/p2pmessenger/envelope/1.0.0";
 /// Largest serialized envelope any path carries.
 const MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
+
+/// Swarm events one `poll_events` turn handles in its main drain.
+const MAX_SWARM_EVENTS_PER_TURN: u32 = 256;
 /// Largest sticker sent to my other devices inside one `SiblingEcho`
 /// (well under `MAX_ENVELOPE_BYTES` and the server's deposit limit).
 const STICKER_SYNC_MAX_BYTES: usize = 768 * 1024;
@@ -13117,7 +13120,6 @@ impl P2PCore {
                                 Ok(id) => serde_json::json!({"type": "stickers_changed", "added": id}),
                                 Err(e) => {
                                     warn!("Kardeş sticker saklanamadı: {}", e);
-                                    // Not a sticker at all: final. Keys not loaded yet: sent again.
                                     ack = not_a_sticker;
                                     serde_json::json!({"type": "noop"})
                                 }
@@ -22025,7 +22027,15 @@ impl P2PCore {
                         state.outstanding = Some(request_id);
                     }
                 }
+                // A bounded drain: a peer that never lets the swarm go idle
+                // kept the core lock in this loop. The rest waits in the
+                // swarm (or `deferred`) for the next turn, which starts at once.
+                let mut budget = MAX_SWARM_EVENTS_PER_TURN;
                 loop {
+                    if budget == 0 {
+                        break;
+                    }
+                    budget -= 1;
                     let event = match deferred.pop() {
                         Some(e) => e,
                         None => match swarm.next().now_or_never().flatten() {
@@ -22438,6 +22448,10 @@ impl P2PCore {
                 }
             });
         }
+        // Left over past the budget: first in line next turn.
+        deferred.reverse();
+        deferred.append(&mut self.deferred_swarm_events);
+        self.deferred_swarm_events = deferred;
         // bkz. `keepalive_state` alanı dokümantasyonu — döngü boyunca
         // üzerinde çalışılan yerel kopya geri konuyor.
         self.keepalive_state = keepalive_state;
