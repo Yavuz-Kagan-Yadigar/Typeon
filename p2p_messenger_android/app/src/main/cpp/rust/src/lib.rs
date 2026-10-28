@@ -17231,10 +17231,7 @@ impl P2PCore {
                 warn!("GroupUpdate yok sayıldı: ayrıldığımız grubu geri getirmiyor (group={}, version={})", update.group_id, update.new_version);
                 return Ok(());
             }
-            // The founder added us (again): a sibling's sync may carry the group from now on.
-            if let Some(conn) = &self.db {
-                let _ = conn.execute("DELETE FROM removed_groups WHERE group_id = ?1", params![update.group_id]);
-            }
+            // The `removed_groups` row goes once the group is persisted (below).
             self.groups.insert(update.group_id.clone(), Group::new(update.group_id.clone(), update.group_name.clone(), group_ref.founder_identity_id.clone(), current_time_ms()));
         }
         // bkz. `MAX_AVATAR_BYTES` — gelen yönde sınır yoktu. Kurucu
@@ -17311,6 +17308,17 @@ impl P2PCore {
         }
         if let Some(g) = self.groups.get(&update.group_id) {
             self.persist_group(g);
+        }
+        // The founder added us (again): a sibling's sync may carry the group
+        // from now on. Only with the group row on disk: if persisting failed,
+        // the next start would have neither and a stale add brought it back.
+        if removed.is_some() {
+            if let Some(conn) = &self.db {
+                let _ = conn.execute(
+                    "DELETE FROM removed_groups WHERE group_id = ?1 AND EXISTS (SELECT 1 FROM groups WHERE group_id = ?1)",
+                    params![update.group_id],
+                );
+            }
         }
         // #77: updates carry only new devices. Missed one (a gap), or a
         // member we hold no device of: ask the founder for the whole state.
@@ -17517,11 +17525,13 @@ impl P2PCore {
             self.known_remote_devices.insert(d.device_fingerprint.clone(), record);
             // Kişi listesine ekle ve "grup üzerinden eklendi" olarak
             // işaretle (bkz. Contact.added_via_group / güvenlik notu).
-            let _ = self.register_contact_from_pairing(
+            if let Err(e) = self.register_contact_from_pairing(
                 d.identity_id.clone(),
                 d.device_fingerprint.clone(),
                 d.device_name.clone(),
-            );
+            ) {
+                warn!("Group member device {} known, contact not registered: {}", crate::log_id(&d.device_fingerprint), e);
+            }
             if is_new_contact {
                 if let Some(cid) = self.identity_to_contact.get(&d.identity_id).cloned() {
                     if let Some(c) = self.contacts.get_mut(&cid) {
@@ -17584,8 +17594,8 @@ impl P2PCore {
     /// id, only to the devices whose copy failed. `Ok(false)`: nothing is
     /// recorded for this id, the caller sends the message as a new one.
     fn retry_group_message_copies(&mut self, group_id: &str, local_id: &str) -> Result<bool, String> {
-        let Some((content, devices)) = self.group_failed_copies.remove(local_id) else { return Ok(false) };
         let group = self.groups.get(group_id).cloned_group()?;
+        let Some((content, devices)) = self.group_failed_copies.remove(local_id) else { return Ok(false) };
         let mut sent = false;
         for device in devices {
             // Removed from the group since: no copy.
@@ -17776,11 +17786,13 @@ impl P2PCore {
             let _ = std::fs::remove_file(&tmp);
             return Ok(have);
         }
-        std::fs::rename(&tmp, dir.join(format!("{id}.enc"))).map_err(|e| e.to_string())?;
+        let enc = dir.join(format!("{id}.enc"));
+        std::fs::rename(&tmp, &enc).inspect_err(|_| { let _ = std::fs::remove_file(&tmp); }).map_err(|e| e.to_string())?;
+        // No row, no file: an orphan was never listed nor cleaned.
         conn.execute(
             "INSERT INTO stickers (id, created_at, animated, encrypted_key, key_nonce, origin_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![id, current_time_ms() as i64, animated, encrypted_key, key_nonce, origin],
-        ).map_err(|e| e.to_string())?;
+        ).inspect_err(|_| { let _ = std::fs::remove_file(&enc); }).map_err(|e| e.to_string())?;
         if sync {
             match std::fs::read(src) {
                 // ponytail: one envelope per sticker; a bigger one stays on this
@@ -17872,11 +17884,12 @@ impl P2PCore {
         if total < 0 || (total as u64) <= limit {
             return;
         }
-        // Evicting complete files cannot free what downloads hold.
-        let limit = limit.saturating_sub(partial.max(0) as u64).max(1);
-        let total = complete;
+        // Evicting complete files cannot free what downloads hold, and
+        // charging them here let a few running downloads empty the store:
+        // in-flight bytes are bounded at offer time (`receive_file_offer`).
+        // Our own sent originals are never evicted.
         let mut stmt = match conn.prepare(
-            "SELECT file_id, total_size, created_at FROM files WHERE status = 'complete' ORDER BY created_at ASC"
+            "SELECT file_id, total_size, created_at FROM files WHERE status = 'complete' AND direction != 'sent' ORDER BY created_at ASC"
         ) {
             Ok(s) => s,
             Err(_) => return,
@@ -17898,7 +17911,7 @@ impl P2PCore {
         // korumalı satırdan sonrakilerin TAMAMI da (aynı veya daha yeni)
         // korumalıdır, o noktada ilk geçiş durur.
         let now = current_time_ms();
-        let mut remaining = total as u64;
+        let mut remaining = rows.iter().map(|r| r.1.max(0) as u64).sum::<u64>();
         let mut to_delete = Vec::new();
         let mut protected_from_idx = rows.len();
         for (i, (file_id, size, created_at)) in rows.iter().enumerate() {
@@ -18208,8 +18221,6 @@ impl P2PCore {
         if before_ms <= 0 {
             return Ok(());
         }
-        // No history answer or sibling backfill may bring the rows back.
-        self.raise_history_floor(&floor_key, before_ms as u64);
         let old_files: Vec<String> = self.chat_prune_files(&fps, group.as_deref()).into_iter()
             .filter(|(_, created)| *created < before_ms)
             .map(|(file_id, _)| file_id)
@@ -18236,6 +18247,9 @@ impl P2PCore {
             }
         }
         tx.commit().map_err(|e| e.to_string())?;
+        // No history answer or sibling backfill may bring the rows back.
+        // After the commit: a failed delete left the rows hidden for good.
+        self.raise_history_floor(&floor_key, before_ms as u64);
         for file_id in &old_files {
             self.delete_attachment_file(file_id);
         }
@@ -18718,7 +18732,11 @@ impl P2PCore {
         // Only the content id (`jxl:<offer sha>`) is kept: a reuse below is
         // checked against that hash; a peer-claimed `wa:` id is not checkable.
         let sticker_origin = sticker_origin.filter(|o| sticker && valid_sticker_origin(o) && o.strip_prefix("jxl:") == Some(sha256_hex));
-        let auto_download_requested = (sticker || self.node_mode_enabled && total_size <= self.history_storage_limit_bytes)
+        // Running downloads are charged at their declared size: each offer
+        // alone fitting the limit let 8 of them overshoot it together.
+        let in_flight: u64 = self.active_downloads.values().map(|d| d.total_size).sum();
+        let auto_download_requested = (sticker
+                || self.node_mode_enabled && in_flight.saturating_add(total_size) <= self.history_storage_limit_bytes)
             && self.active_downloads.len() < 8
             && self.active_downloads.values().filter(|d| d.peer_device_fingerprint == peer_fp).count() < 4;
         // Satır YAZILAMADIYSA (ör. şifreleme anahtarı henüz yüklenmedi),
@@ -19674,11 +19692,20 @@ impl P2PCore {
                 .collect::<Vec<_>>())
             .unwrap_or_default();
         if device_fps.is_empty() { device_fps.push(peer_device_fingerprint.to_string()); }
-        let placeholders = device_fps.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let placeholders = (1..=device_fps.len()).map(|i| format!("?{}", i)).collect::<Vec<_>>().join(",");
+        // The page never splits a millisecond: every row sharing the oldest
+        // row's `created_at` comes with it, or the next `< before_ms` page
+        // skipped the rest of them.
+        let filter = format!(
+            "peer_device_fingerprint IN ({}) AND group_id IS NULL AND created_at < {}",
+            placeholders, before_ms.map_or(i64::MAX, |b| b.min(i64::MAX as u64) as i64)
+        );
         let sql = format!(
             "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred, created_at, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker
-             FROM files WHERE peer_device_fingerprint IN ({}) AND group_id IS NULL AND created_at < {} ORDER BY created_at DESC LIMIT {}",
-            placeholders, before_ms.map_or(i64::MAX, |b| b.min(i64::MAX as u64) as i64), limit
+             FROM files WHERE {f} AND created_at >= COALESCE(
+                 (SELECT created_at FROM files WHERE {f} ORDER BY created_at DESC LIMIT 1 OFFSET {o}), {min})
+             ORDER BY created_at DESC",
+            f = filter, o = limit.max(1) - 1, min = -1
         );
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
@@ -19751,7 +19778,9 @@ impl P2PCore {
         };
         let mut stmt = match conn.prepare(
             "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred, created_at, preview_jpeg, duration_ms, peer_device_fingerprint, sender_identity_id, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker
-             FROM files WHERE group_id = ?1 AND created_at < ?2 ORDER BY created_at DESC LIMIT ?3"
+             FROM files WHERE group_id = ?1 AND created_at < ?2 AND created_at >= COALESCE(
+                 (SELECT created_at FROM files WHERE group_id = ?1 AND created_at < ?2 ORDER BY created_at DESC LIMIT 1 OFFSET ?3), ?4)
+             ORDER BY created_at DESC"
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -19760,7 +19789,8 @@ impl P2PCore {
             }
         };
         let before = before_ms.map_or(i64::MAX, |b| b.min(i64::MAX as u64) as i64);
-        let rows = stmt.query_map(params![group_id, before, limit as i64], |r| {
+        // See `list_attachments_opt`: the oldest millisecond is never split.
+        let rows = stmt.query_map(params![group_id, before, limit.max(1) as i64 - 1, -1i64], |r| {
             let preview: Option<Vec<u8>> = if with_preview { r.get(8)? } else { None };
             let duration: Option<i64> = r.get(9)?;
             let file_id: String = r.get(0)?;
@@ -21484,6 +21514,8 @@ impl P2PCore {
                 }
                 self.awaiting_confirmation.remove(&message_id);
                 self.remove_durable_retry(&message_id);
+                // Marked failed: the relay copy must not deliver it later.
+                self.cancel_server_deposit(&message_id);
                 // Types without `regen_content` (e.g. HistorySyncResponse) OR
                 // anything past `TEXT_RETRY_GIVE_UP_MS`: "Failed" olarak
                 // işaretle (kullanıcı isterse manuel olarak yeniden
@@ -21525,15 +21557,33 @@ impl P2PCore {
             match self.try_publish_raw(&peer_fp, &envelope, current_time_ms()) {
                 Ok(()) => {
                     if let NetworkEnvelope::Message(m) = &envelope {
+                        // A group bubble is keyed by the group-wide id, as in
+                        // the give-up arm above; the packet id matched no row.
+                        let (row_id, row_group) = match &regen_content {
+                            Some(MessageContent::Text { group_id: Some(gid), group_message_local_id: Some(local), .. }) =>
+                                (local.clone(), Some(gid.clone())),
+                            _ => (m.header.message_id.clone(), None),
+                        };
                         // The bubble shows the error mark until told otherwise.
                         let was_failed = self.db.as_ref().map_or(false, |c| c.query_row(
-                            "SELECT 1 FROM messages WHERE message_id = ?1 AND status = ?2",
-                            params![m.header.message_id, MessageSendStatus::Failed.as_str()], |_| Ok(())).is_ok());
+                            "SELECT 1 FROM messages WHERE message_id = ?1 AND status = ?2 AND direction = 'sent'
+                               AND (?3 IS NULL OR group_id = ?3)",
+                            params![row_id, MessageSendStatus::Failed.as_str(), row_group], |_| Ok(())).is_ok());
                         if was_failed {
-                            self.attachment_events.push(serde_json::json!({
+                            let mut ev = serde_json::json!({
                                 "type": "status", "peer": peer_fp,
-                                "message_id": m.header.message_id, "status": "sent"
-                            }).to_string());
+                                "message_id": row_id, "status": "sent"
+                            });
+                            if let Some(gid) = &row_group {
+                                ev["group_id"] = serde_json::Value::String(gid.clone());
+                                if let Some(conn) = &self.db {
+                                    let _ = conn.execute(
+                                        "UPDATE messages SET status = 'sent' WHERE message_id = ?1 AND group_id = ?2 AND direction = 'sent' AND status = ?3",
+                                        params![row_id, gid, MessageSendStatus::Failed.as_str()],
+                                    );
+                                }
+                            }
+                            self.attachment_events.push(ev.to_string());
                         }
                         self.set_message_status(&m.header.message_id, MessageSendStatus::Sent);
                     }
@@ -22977,13 +23027,29 @@ impl P2PCore {
                         }
                     }
                     warn!("Doğrudan zarf gönderimi başarısız ({}), gossipsub/sunucuya düşülüyor: {}", error, &fp[..fp.len().min(8)]);
-                    if let Err(PublishFailure::Transient(_)) = self.try_publish_raw_via(&fp, &envelope, first_attempt_at, false) {
-                        // Tracked messages are resent by `retry_unconfirmed_messages`;
-                        // queue the rest like `publish_envelope_at` does.
-                        let tracked = matches!(&envelope, NetworkEnvelope::Message(m) if self.awaiting_confirmation.contains_key(&m.header.message_id));
-                        if !tracked {
-                            self.enqueue_pending(QueuedEnvelope::new(fp, envelope, first_attempt_at));
+                    match self.try_publish_raw_via(&fp, &envelope, first_attempt_at, false) {
+                        Err(PublishFailure::Transient(_)) => {
+                            // Tracked messages are resent by `retry_unconfirmed_messages`;
+                            // queue the rest like `publish_envelope_at` does.
+                            let tracked = matches!(&envelope, NetworkEnvelope::Message(m) if self.awaiting_confirmation.contains_key(&m.header.message_id));
+                            if !tracked {
+                                self.enqueue_pending(QueuedEnvelope::new(fp, envelope, first_attempt_at));
+                            }
                         }
+                        // Like `publish_with_ack_tracking`: no retry can work.
+                        Err(PublishFailure::Permanent(e)) => {
+                            error!("Envelope failed permanently after the direct path: {}", e);
+                            if let NetworkEnvelope::Message(m) = &envelope {
+                                let id = m.header.message_id.clone();
+                                self.awaiting_confirmation.remove(&id);
+                                self.remove_durable_retry(&id);
+                                self.set_message_status(&id, MessageSendStatus::Failed);
+                                self.attachment_events.push(serde_json::json!({
+                                    "type": "status", "peer": fp, "message_id": id, "status": "error"
+                                }).to_string());
+                            }
+                        }
+                        Ok(()) => {}
                     }
                 }
             }
@@ -23565,10 +23631,12 @@ impl P2PCore {
             if self.recent_inbound_digests.len() > INBOUND_DEDUP_MAX_ENTRIES {
                 // Still over the cap: the older half goes. Clearing it all
                 // let a flood make every retried packet be verified again.
-                let mut times: Vec<u64> = self.recent_inbound_digests.values().copied().collect();
-                let mid = times.len() / 2;
-                let cutoff = *times.select_nth_unstable(mid).1;
-                self.recent_inbound_digests.retain(|_, seen_at| *seen_at > cutoff);
+                // By count, not by a time cutoff: under a flood the entries
+                // share a millisecond and a `> median` test kept none.
+                let mut entries: Vec<(u64, u64)> = self.recent_inbound_digests.drain().collect();
+                entries.sort_unstable_by_key(|e| std::cmp::Reverse(e.1));
+                entries.truncate(INBOUND_DEDUP_MAX_ENTRIES / 2);
+                self.recent_inbound_digests.extend(entries);
             }
         }
         let seen_at = self.recent_inbound_digests.get(&digest).copied();
