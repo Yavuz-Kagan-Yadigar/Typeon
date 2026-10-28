@@ -1117,7 +1117,7 @@ fn confirm_delete_account(app: &Rc<App>) {
     );
 }
 
-fn erase_profile_and_quit(app: &Rc<App>) {
+pub fn erase_profile_and_quit(app: &Rc<App>) {
     // Stop the poll thread before erasing the files it works on, exactly like
     // the `self_revoked` path in `app.rs`: it would otherwise keep polling a
     // deleted database until the process exits.
