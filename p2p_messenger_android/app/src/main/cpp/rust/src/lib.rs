@@ -10193,6 +10193,25 @@ impl P2PCore {
         self.peer_prekeys.insert(fp.to_string(), prekey.clone());
     }
 
+    /// Puts a fresh session in place and stores it. A failed write puts the
+    /// previous session back (memory and disk then agree) and is an error.
+    fn install_ratchet(&mut self, fp: &str, state: DeviceRatchetState) -> Result<(), String> {
+        let root = state.root_key.clone();
+        self.resubscribe_ratchet_topic(None, Some(&root));
+        let previous = self.ratchets.insert(fp.to_string(), state);
+        if self.persist_ratchet_state(fp) {
+            // Keys of the replaced session must not be loaded onto the new one.
+            self.clear_persisted_skipped_keys(fp);
+            return Ok(());
+        }
+        self.resubscribe_ratchet_topic(Some(&root), None);
+        match previous {
+            Some(p) => { self.ratchets.insert(fp.to_string(), p); }
+            None => { self.ratchets.remove(fp); }
+        }
+        Err("Oturum durumu yazılamadı, el sıkışma yapılmadı".to_string())
+    }
+
     fn initiate_handshake_with(&mut self, peer_device_fingerprint: &str) -> Result<(), String> {
         // Found on device (2026-09-18): at app start something sent a message
         // before `setSkippedKeyEncryptionKey` had loaded the sessions. No session
@@ -10297,16 +10316,14 @@ impl P2PCore {
             signature_pq: sig_pq.encode().to_vec(),
         };
 
-        self.resubscribe_ratchet_topic(None, Some(&state.root_key));
-        self.ratchets.insert(peer_device_fingerprint.to_string(), state);
+        // Not published unless stored: after a restart the old state would
+        // come back while the peer runs the new one.
+        self.install_ratchet(peer_device_fingerprint, state)?;
         if recipient_prekey_id == 0 {
             self.id0_inits.insert(peer_device_fingerprint.to_string());
         } else {
             self.id0_inits.remove(peer_device_fingerprint);
         }
-        // Keys of the replaced session must not be loaded onto the new one.
-        self.clear_persisted_skipped_keys(peer_device_fingerprint);
-        self.persist_ratchet_state(peer_device_fingerprint);
         let r = self.publish_envelope(peer_device_fingerprint, &NetworkEnvelope::Handshake(handshake));
         // bkz. `pairing_mailbox_subs` — el sıkışma YAYINLANDIKTAN sonra
         // (Handshake karşı tarafın posta kutusu topic'ine gider) eşleşme
@@ -10735,12 +10752,9 @@ impl P2PCore {
             now,
         )?;
 
-        self.resubscribe_ratchet_topic(None, Some(&state.root_key));
+        self.install_ratchet(&handshake.sender_device_fingerprint, state)?;
         self.id0_inits.remove(&handshake.sender_device_fingerprint);
-        self.ratchets.insert(handshake.sender_device_fingerprint.clone(), state);
         self.record_peer_id_if_known(source, &handshake.sender_device_fingerprint);
-        self.clear_persisted_skipped_keys(&handshake.sender_device_fingerprint);
-        self.persist_ratchet_state(&handshake.sender_device_fingerprint);
         // bkz. `pairing_mailbox_subs` — ratchet kuruldu, eşleşme-dönemi
         // aboneliği artık gereksiz.
         self.drop_pairing_mailbox(&handshake.sender_device_fingerprint);
