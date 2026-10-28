@@ -1295,6 +1295,9 @@ mod review_oct2026_tests {
         assert!(!me.pairing_proof_valid(&with(packet::pairing_nonce_proof(&[7; 16], &"c".repeat(64)))));
         let good = with(packet::pairing_nonce_proof(&[7; 16], &peer_fp));
         assert!(me.pairing_proof_valid(&good));
+        // A device with a contact already: the link code makes no further one.
+        assert_eq!(me.evaluate_sender_device(&"d".repeat(64), &"e".repeat(64), false, "x", true), DeviceCheckOutcome::NewContactTofu);
+        assert!(!me.pairing_proof_valid(&good));
         // The code is no longer shown.
         me.link_request_open_until = 0;
         assert!(!me.pairing_proof_valid(&good));
@@ -4422,9 +4425,9 @@ struct P2PCore {
     /// tüketimi ve ağ trafiği. key = device_fingerprint, value =
     /// (bir sonraki denemeye izin verilen an (ms), ardışık başarısız
     /// deneme sayısı). Sadece `reconnect_sweep`'in OTOMATİK/periyodik
-    /// taramasını yavaşlatır — kullanıcının kendi eylemiyle tetiklediği
-    /// yeniden bağlanma (sohbet açma/mesaj gönderme, `dial_with_relay_fallback`'in
-    /// diğer çağıranları) bundan ETKİLENMEZ, her zaman anında dener.
+    /// taramasını ve gönderim yolunu (`ensure_connected`, otomatik yeniden
+    /// denemeler de oradan geçer) yavaşlatır. Opening a chat
+    /// (`ensure_handshake`) and a network change ignore it.
     /// Bağlantı kurulduğunda (bkz. `reconnect_sweep` "zaten bağlı" kolu)
     /// ilgili girdi silinir — bir sonraki kopmada geri çekilme sıfırdan
     /// başlar.
@@ -5764,8 +5767,14 @@ impl P2PCore {
         if self.identity.is_some() {
             return Err("Identity already exists".to_string());
         }
-        if self.db.is_none() {
-            return Err("DB not open".to_string());
+        let row_on_disk = match &self.db {
+            None => return Err("DB not open".to_string()),
+            Some(c) => c.query_row("SELECT 1 FROM identities LIMIT 1", [], |_| Ok(())).is_ok(),
+        };
+        // An identity row whose devices did not load: a new identity would
+        // wipe it all (`wipe_other_identity`).
+        if row_on_disk {
+            return Err("Identity already exists".to_string());
         }
         let (id, bundle_bytes) = self.generate_identity(device_name)?;
         // Held until `load_secret_bundle` or a wipe: the frontend reads it
@@ -6087,7 +6096,11 @@ impl P2PCore {
     /// a nonce this device issued and that is still valid.
     fn pairing_proof_valid(&self, exchange: &IdentityExchange) -> bool {
         let made_from = |nonce: &[u8]| packet::pairing_nonce_proof(nonce, &exchange.device_fingerprint) == exchange.pairing_proof;
-        self.link_proof_valid(exchange) || self.pairing_nonces().iter().any(|(nonce, _)| made_from(nonce))
+        // The link code makes a contact only of the first device to read it,
+        // on a device with no contacts yet (the only kind a grant can move,
+        // `adopt_device_link`). Anyone else who saw that code does not
+        // become a contact of an identity in use.
+        (self.contacts.is_empty() && self.link_proof_valid(exchange)) || self.pairing_nonces().iter().any(|(nonce, _)| made_from(nonce))
     }
 
     /// As `pairing_proof_valid`, for the link code this device shows now.
@@ -9741,6 +9754,10 @@ impl P2PCore {
         self.undecryptable_from.remove(fp);
         self.last_handshake_redo.remove(fp);
         self.reconnect_backoff.remove(fp);
+        // "Retry" on a group bubble must not send to it again.
+        for (_, devices) in self.group_failed_copies.values_mut() {
+            devices.retain(|d| d != fp);
+        }
         if let Some(conn) = &self.db {
             for table_key in [
                 "ratchet_states WHERE peer_device_fingerprint", "skipped_message_keys WHERE peer_device_fingerprint",
@@ -9847,7 +9864,10 @@ impl P2PCore {
         // bağlantı yoksa hemen yeniden bağlanmayı dene — reconnect_sweep'in
         // bir sonraki turunu (≤15 sn) beklemeden. Sohbet açılışında/mesaj
         // öncesinde en hızlı iyileşme yolu.
-        self.ensure_connected(peer_device_fingerprint);
+        // Forced: the chat is on screen (or was just unblocked), a wait left
+        // by a failed sweep must not hold it back. The send path stays gated:
+        // automatic retries go through it too.
+        self.try_reconnect_device(peer_device_fingerprint, true);
         if self.has_active_session(peer_device_fingerprint) {
             return Ok(());
         }
@@ -9887,8 +9907,8 @@ impl P2PCore {
     /// ipucu var mı + o an bağlı mı + geri çekilme penceresi doldu mu"
     /// sorularına bakıp gerçek dial'i yapar.
     ///
-    /// `force=true` (SADECE ağ değişikliği bildirimi — bkz.
-    /// `reconnect_all_known_now`) `reconnect_backoff`'u YOK SAYAR: bir ağ
+    /// `force=true` (ağ değişikliği bildirimi — bkz.
+    /// `reconnect_all_known_now` — and `ensure_handshake`) `reconnect_backoff`'u YOK SAYAR: bir ağ
     /// arayüzü değişikliği (Wi-Fi<->hücresel) ESKİ ağ üzerinden birikmiş
     /// geri çekilme geçmişini ANLAMSIZ kılar — yeni arayüz üzerinden ilk
     /// deneme her zaman hemen yapılmalı.
@@ -10193,6 +10213,25 @@ impl P2PCore {
         self.peer_prekeys.insert(fp.to_string(), prekey.clone());
     }
 
+    /// Puts a fresh session in place and stores it. A failed write puts the
+    /// previous session back (memory and disk then agree) and is an error.
+    fn install_ratchet(&mut self, fp: &str, state: DeviceRatchetState) -> Result<(), String> {
+        let root = state.root_key.clone();
+        self.resubscribe_ratchet_topic(None, Some(&root));
+        let previous = self.ratchets.insert(fp.to_string(), state);
+        if self.persist_ratchet_state(fp) {
+            // Keys of the replaced session must not be loaded onto the new one.
+            self.clear_persisted_skipped_keys(fp);
+            return Ok(());
+        }
+        self.resubscribe_ratchet_topic(Some(&root), None);
+        match previous {
+            Some(p) => { self.ratchets.insert(fp.to_string(), p); }
+            None => { self.ratchets.remove(fp); }
+        }
+        Err("Oturum durumu yazılamadı, el sıkışma yapılmadı".to_string())
+    }
+
     fn initiate_handshake_with(&mut self, peer_device_fingerprint: &str) -> Result<(), String> {
         // Found on device (2026-09-18): at app start something sent a message
         // before `setSkippedKeyEncryptionKey` had loaded the sessions. No session
@@ -10297,16 +10336,14 @@ impl P2PCore {
             signature_pq: sig_pq.encode().to_vec(),
         };
 
-        self.resubscribe_ratchet_topic(None, Some(&state.root_key));
-        self.ratchets.insert(peer_device_fingerprint.to_string(), state);
+        // Not published unless stored: after a restart the old state would
+        // come back while the peer runs the new one.
+        self.install_ratchet(peer_device_fingerprint, state)?;
         if recipient_prekey_id == 0 {
             self.id0_inits.insert(peer_device_fingerprint.to_string());
         } else {
             self.id0_inits.remove(peer_device_fingerprint);
         }
-        // Keys of the replaced session must not be loaded onto the new one.
-        self.clear_persisted_skipped_keys(peer_device_fingerprint);
-        self.persist_ratchet_state(peer_device_fingerprint);
         let r = self.publish_envelope(peer_device_fingerprint, &NetworkEnvelope::Handshake(handshake));
         // bkz. `pairing_mailbox_subs` — el sıkışma YAYINLANDIKTAN sonra
         // (Handshake karşı tarafın posta kutusu topic'ine gider) eşleşme
@@ -10735,12 +10772,9 @@ impl P2PCore {
             now,
         )?;
 
-        self.resubscribe_ratchet_topic(None, Some(&state.root_key));
+        self.install_ratchet(&handshake.sender_device_fingerprint, state)?;
         self.id0_inits.remove(&handshake.sender_device_fingerprint);
-        self.ratchets.insert(handshake.sender_device_fingerprint.clone(), state);
         self.record_peer_id_if_known(source, &handshake.sender_device_fingerprint);
-        self.clear_persisted_skipped_keys(&handshake.sender_device_fingerprint);
-        self.persist_ratchet_state(&handshake.sender_device_fingerprint);
         // bkz. `pairing_mailbox_subs` — ratchet kuruldu, eşleşme-dönemi
         // aboneliği artık gereksiz.
         self.drop_pairing_mailbox(&handshake.sender_device_fingerprint);
@@ -13745,6 +13779,17 @@ impl P2PCore {
         self.attachment_events.clear();
         self.blocked_identities.clear();
         self.deleted_identities.clear();
+        // The swarm outlives the wipe: drop every gossip topic (own mailbox,
+        // session and pairing topics) so the erased identity's traffic stops
+        // arriving. `ensure_own_mailbox_subscription` subscribes a later
+        // identity's mailbox again, since `own_mailbox_topic_fp` is reset.
+        if let Some(swarm) = self.swarm.as_mut() {
+            let gs = &mut swarm.behaviour_mut().gossipsub;
+            let topics: Vec<gossipsub::IdentTopic> = gs.topics().map(|h| gossipsub::IdentTopic::new(h.as_str())).collect();
+            for topic in &topics {
+                let _ = gs.unsubscribe(topic);
+            }
+        }
         self.own_mailbox_topic_fp = None;
         self.pending_link_target = None;
         self.pending_link_started_at = 0;
@@ -13839,7 +13884,8 @@ impl P2PCore {
         };
         Some(match event_group_id {
             Some(gid) => serde_json::json!({"type": "ack", "peer": peer_fp, "group_id": gid, "message_id": event_message_id}),
-            None => serde_json::json!({"type": "ack", "peer": peer_fp, "message_id": event_message_id}),
+            // 1:1: keyed like the chat screen, see the `status` event above.
+            None => serde_json::json!({"type": "ack", "peer": self.canonical_peer_key(peer_fp), "message_id": event_message_id}),
         })
     }
 
@@ -17589,6 +17635,8 @@ impl P2PCore {
     /// recorded for this id, the caller sends the message as a new one.
     fn retry_group_message_copies(&mut self, group_id: &str, local_id: &str) -> Result<bool, String> {
         let Some((content, devices)) = self.group_failed_copies.remove(local_id) else { return Ok(false) };
+        // Every device that missed it was revoked since: nobody waits for it.
+        if devices.is_empty() { return Ok(true) }
         let group = self.groups.get(group_id).cloned_group()?;
         let mut sent = false;
         for device in devices {
