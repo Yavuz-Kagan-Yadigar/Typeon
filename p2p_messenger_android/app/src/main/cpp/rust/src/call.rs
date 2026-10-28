@@ -375,10 +375,11 @@ struct Media {
 lazy_static::lazy_static! {
     static ref MEDIA: Mutex<Media> = Mutex::new(Media::default());
     static ref INBOX_READY: Condvar = Condvar::new();
-    /// `(call id, sender)` of the last Hangup for a call we did not have:
+    /// `(call id, sender)` of the last Hangups for calls we did not have:
     /// only that sender's Invite for it is then dropped (a Hangup that
-    /// overtook its Invite), not one from another group member.
-    static ref EARLY_HANGUP: Mutex<Option<(String, String)>> = Mutex::new(None);
+    /// overtook its Invite), not one from another group member. A few, not
+    /// one: two overtaken Hangups in a group let the first Invite ring.
+    static ref EARLY_HANGUP: Mutex<VecDeque<(String, String)>> = Mutex::new(VecDeque::new());
 }
 
 fn media() -> MutexGuard<'static, Media> {
@@ -1124,8 +1125,8 @@ impl P2PCore {
                 let early_hangup = EARLY_HANGUP
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .as_ref()
-                    .map_or(false, |(id, fp)| *id == call_id && fp == peer_fp);
+                    .iter()
+                    .any(|(id, fp)| *id == call_id && fp == peer_fp);
                 if early_hangup || self.last_call_end.as_ref().map_or(false, |(id, _)| *id == call_id) {
                     return noop();
                 }
@@ -1260,7 +1261,11 @@ impl P2PCore {
                 let Some(s) = self.call.as_mut() else {
                     // Cancelled before its Invite got here: see the Invite arm.
                     if action == CallAction::Hangup {
-                        *EARLY_HANGUP.lock().unwrap_or_else(|p| p.into_inner()) = Some((call_id, peer_fp.to_string()));
+                        let mut early = EARLY_HANGUP.lock().unwrap_or_else(|p| p.into_inner());
+                        if early.len() >= 16 {
+                            early.pop_front();
+                        }
+                        early.push_back((call_id, peer_fp.to_string()));
                     }
                     return noop();
                 };
