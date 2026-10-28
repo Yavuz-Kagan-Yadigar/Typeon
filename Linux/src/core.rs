@@ -43,6 +43,15 @@ fn parse_list<T: for<'de> Deserialize<'de>>(json: String) -> Vec<T> {
     })
 }
 
+/// Single-object replies: a bad shape is logged, then shown as the default.
+fn parse_or_default<T: for<'de> Deserialize<'de> + Default>(json: String, what: &str) -> T {
+    serde_json::from_str(&json).unwrap_or_else(|e| {
+        let head: String = json.chars().take(120).collect();
+        log::warn!("core {what} reply unparsable ({e}) {head}");
+        T::default()
+    })
+}
+
 /// Result of a send/edit/delete: the stable message id plus the immediate
 /// send state (`"sent"` or `"pending"` — pending is retried in the background
 /// and later corrected by a `status` event).
@@ -161,7 +170,7 @@ pub fn node_address() -> String {
 }
 
 pub fn own_status() -> OwnStatus {
-    serde_json::from_str(&api::own_connection_status()).unwrap_or_default()
+    parse_or_default(api::own_connection_status(), "own status")
 }
 
 pub fn wait_for_network_activity(timeout_ms: u64) {
@@ -678,7 +687,7 @@ pub fn remove_server(server_id: &str) -> Result<(), String> {
 }
 
 pub fn list_servers() -> Vec<ServerEntry> {
-    serde_json::from_str(&api::list_servers()).unwrap_or_default()
+    parse_list(api::list_servers())
 }
 
 pub fn set_server_routing(server_id: &str, enabled: bool) -> Result<(), String> {
@@ -807,7 +816,7 @@ pub fn end_call() {
 }
 
 pub fn call_state() -> CallState {
-    serde_json::from_str(&api::call_state()).unwrap_or_default()
+    parse_or_default(api::call_state(), "call state")
 }
 
 pub fn call_send(kind: u8, payload: &[u8]) -> bool {
