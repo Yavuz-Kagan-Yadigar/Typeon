@@ -232,6 +232,7 @@ impl App {
 
     fn dispatch(self: &Rc<Self>, raw: &str) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            eprintln!("typeon: dropped an unparsable event: {}", raw.chars().take(120).collect::<String>());
             return;
         };
         let kind = value
@@ -318,10 +319,16 @@ impl App {
                 let data_dir = self.data_dir.clone();
                 let app_quit = self.application.clone();
                 let erase_and_quit = move || {
-                    if let Err(error) = std::fs::remove_dir_all(&data_dir) {
-                        eprintln!("typeon: could not erase data dir after remote unlink: {error}");
-                    }
-                    app_quit.quit();
+                    // Recursive delete is unbounded blocking: off the GTK thread.
+                    run_in_background(
+                        move || std::fs::remove_dir_all(&data_dir),
+                        move |result| {
+                            if let Err(error) = result {
+                                eprintln!("typeon: could not erase data dir after remote unlink: {error}");
+                            }
+                            app_quit.quit();
+                        },
+                    );
                 };
                 if let Some(window) = self.window() {
                     let dialog = adw::MessageDialog::new(
@@ -423,6 +430,7 @@ impl App {
                 let who = event.string("contact_display_name");
                 let code = event.string("device_short_code");
                 self.notify_always(
+                    &format!("device-alert:{who}:{code}"),
                     "Unverified device",
                     &format!("{who} is writing from a device you have not verified ({code})."),
                 );
@@ -440,7 +448,7 @@ impl App {
                 let name = if name.is_empty() { self.contact_name(&event.string("peer")) } else { name };
                 let body = format!("{name} deleted their account");
                 self.toast(&body);
-                self.notify_always("Typeon", &body);
+                self.notify_always(&format!("account-deleted:{}", event.string("peer")), "Typeon", &body);
             }
             "handshake_failed" => {
                 let who = self.contact_name(&event.string("peer"));
@@ -487,7 +495,7 @@ impl App {
                 // Also when the key changed: the primary device replaces it
                 // when it revokes a device.
                 if let Some(ark) = ark {
-                    if crate::secrets::load_archive_key(&data_dir).as_ref() == Some(&ark) {
+                    if matches!(crate::secrets::load_archive_key(&data_dir), Ok(Some(k)) if k == ark) {
                         return;
                     }
                     if let Err(e) = crate::secrets::store_archive_key(&data_dir, &ark) {
@@ -501,11 +509,11 @@ impl App {
     /// Sohbet açık olsa bile gösterilen bildirim — güvenlik uyarıları
     /// (bkz. `device_alert`) kullanıcının nerede olduğuna bakmadan
     /// görünmeli.
-    fn notify_always(self: &Rc<Self>, title: &str, body: &str) {
+    fn notify_always(self: &Rc<Self>, id: &str, title: &str, body: &str) {
         let notification = gio::Notification::new(title);
         notification.set_body(Some(body));
         notification.set_priority(gio::NotificationPriority::High);
-        self.application.send_notification(Some("device-alert"), &notification);
+        self.application.send_notification(Some(id), &notification);
     }
 
     fn notify_if_away(self: &Rc<Self>, conversation_id: &str, title: &str, body: &str) {
@@ -624,7 +632,7 @@ impl App {
 /// Starts the once-a-second poll on a worker thread and pumps its output into
 /// the main loop. Also drives the periodic name-cache refresh.
 pub fn start_poll_loop(app: &Rc<App>) {
-    let (sender, receiver) = async_channel::unbounded::<Vec<String>>();
+    let (sender, receiver) = async_channel::bounded::<Vec<String>>(64);
 
     std::thread::spawn(move || loop {
         // A remote unlink (`self_revoked`) deletes the whole data directory;

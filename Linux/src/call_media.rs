@@ -96,7 +96,7 @@ impl Level {
             .step_by(16)
             .map(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs() as f32)
             .fold(0.0f32, f32::max);
-        let mut noise = self.noise.lock().unwrap();
+        let mut noise = self.noise.lock().unwrap_or_else(|p| p.into_inner());
         *noise = if peak < *noise { peak.max(60.0) } else { *noise + (peak - *noise) * 0.002 };
         if peak > 1500.0 && peak > *noise * 3.2 {
             self.speaking_until_ms.store(crate::util::now_ms() + 400, Ordering::Relaxed);
@@ -190,7 +190,7 @@ impl CallMedia {
     pub fn set_camera(&self, on: bool) {
         log::info!("call: camera {}", if on { "on" } else { "off" });
         self.shared.camera_on.store(on, Ordering::Relaxed);
-        let mut cam = self.shared.camera.lock().unwrap();
+        let mut cam = self.shared.camera.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(tx) = cam.take() {
             tx.stop();
         }
@@ -210,17 +210,17 @@ impl CallMedia {
         self.shared
             .audio
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .get(&slot)
             .is_some_and(|lane| lane.level.speaking_until_ms.load(Ordering::Relaxed) > crate::util::now_ms())
     }
 
     /// A participant left: free its decoders.
     pub fn drop_slot(&self, slot: u8) {
-        if let Some(lane) = self.shared.audio.lock().unwrap().remove(&slot) {
+        if let Some(lane) = self.shared.audio.lock().unwrap_or_else(|p| p.into_inner()).remove(&slot) {
             remove_audio_lane(&self.shared, lane);
         }
-        if let Some(mut lane) = self.shared.video.lock().unwrap().remove(&slot) {
+        if let Some(mut lane) = self.shared.video.lock().unwrap_or_else(|p| p.into_inner()).remove(&slot) {
             lane.teardown();
         }
     }
@@ -232,14 +232,14 @@ impl Drop for CallMedia {
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
-        if let Some(tx) = self.shared.camera.lock().unwrap().take() {
+        if let Some(tx) = self.shared.camera.lock().unwrap_or_else(|p| p.into_inner()).take() {
             tx.stop();
         }
-        for (_, mut lane) in self.shared.video.lock().unwrap().drain() {
+        for (_, mut lane) in self.shared.video.lock().unwrap_or_else(|p| p.into_inner()).drain() {
             lane.teardown();
         }
         // Not `clear()`: lanes must leave the pipeline and release their mixer pads.
-        let lanes: Vec<AudioLane> = self.shared.audio.lock().unwrap().drain().map(|(_, lane)| lane).collect();
+        let lanes: Vec<AudioLane> = self.shared.audio.lock().unwrap_or_else(|p| p.into_inner()).drain().map(|(_, lane)| lane).collect();
         for lane in lanes {
             remove_audio_lane(&self.shared, lane);
         }
@@ -481,7 +481,7 @@ fn play_audio(shared: &Shared, slot: u8, payload: &[u8]) {
     let Some(playback) = &shared.playback else { return };
     let Some(now) = playback.current_running_time() else { return };
     let now = now.nseconds();
-    let mut lanes = shared.audio.lock().unwrap();
+    let mut lanes = shared.audio.lock().unwrap_or_else(|p| p.into_inner());
     if !lanes.contains_key(&slot) {
         // A peer cycling the slot byte must not fan out decoder pipelines.
         if lanes.len() >= MAX_LANES {
@@ -527,7 +527,7 @@ fn receive(shared: Arc<Shared>) {
         match kind {
             KIND_AUDIO => play_audio(&shared, slot, payload),
             KIND_VIDEO => {
-                let mut lanes = shared.video.lock().unwrap();
+                let mut lanes = shared.video.lock().unwrap_or_else(|p| p.into_inner());
                 if !lanes.contains_key(&slot) && lanes.len() >= MAX_LANES {
                     continue;
                 }
@@ -783,7 +783,7 @@ impl VideoTx {
             let pad = encoder.static_pad("sink").ok_or("encoder pad")?;
             pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
                 let Some(gst::PadProbeData::Buffer(buffer)) = &info.data else { return gst::PadProbeReturn::Ok };
-                let mut g = gate.lock().unwrap();
+                let mut g = gate.lock().unwrap_or_else(|p| p.into_inner());
                 if admit(&mut g, pad, buffer) { gst::PadProbeReturn::Ok } else { gst::PadProbeReturn::Drop }
             });
         }
@@ -817,13 +817,13 @@ impl VideoTx {
                             && key_at.map_or(true, |t| t.elapsed() >= Duration::from_millis(tuning::KEYFRAME_MIN_GAP_MS))
                         {
                             key_at = Some(Instant::now());
-                            gate.lock().unwrap().force = true;
+                            gate.lock().unwrap_or_else(|p| p.into_inner()).force = true;
                             out.send_event(gst_video::UpstreamForceKeyUnitEvent::builder().all_headers(true).build());
                         }
                         if adapt_at.elapsed() >= Duration::from_millis(tuning::ADAPT_MS) {
                             adapt_at = Instant::now();
                             let backlog = core::call_backlog();
-                            let mut g = gate.lock().unwrap();
+                            let mut g = gate.lock().unwrap_or_else(|p| p.into_inner());
                             if backlog >= tuning::PAUSE_AT {
                                 g.paused = true;
                             } else if backlog <= tuning::RESUME_AT {

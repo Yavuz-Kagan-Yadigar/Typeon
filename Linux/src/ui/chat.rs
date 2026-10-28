@@ -1193,6 +1193,16 @@ impl ChatView {
                 existing.seen.get(),
                 entry.edited,
             ));
+            // Shared borrows only, so these are safe under the lookup above.
+            if entry.deleted {
+                self.apply_delete(&entry.id);
+            }
+            if entry.seen {
+                self.apply_seen(&entry.id);
+            }
+            if !entry.reactions.is_empty() {
+                self.apply_reactions(&entry.id, &entry.reactions);
+            }
             return;
         }
 

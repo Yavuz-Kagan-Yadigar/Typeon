@@ -275,10 +275,18 @@ fn start_fresh_identity(
     let mut vault = Vault::new(bundle);
     vault.skipped_key = storage_key;
     // Sealing the vault runs Argon2id: off the main thread.
+    // The flag goes to disk BEFORE the vault: a kill in between would otherwise
+    // leave a vault with `awaiting_link` false, i.e. a pending link silently
+    // turned into a standalone account. Without a vault the flag is unused.
+    {
+        let mut prefs = app.prefs.borrow_mut();
+        prefs.device_name = device_name.to_string();
+        prefs.awaiting_link = awaiting_link;
+        prefs.save();
+    }
     let (app, host, button) = (app.clone(), host.clone(), button.clone());
     let data_dir = app.data_dir.clone();
     let passphrase = passphrase.to_string();
-    let device_name = device_name.to_string();
     app::run_in_background(
         move || secrets::save(&data_dir, &vault, &passphrase).map(|()| vault),
         move |result| {
@@ -292,12 +300,6 @@ fn start_fresh_identity(
                     return;
                 }
             };
-            {
-                let mut prefs = app.prefs.borrow_mut();
-                prefs.device_name = device_name;
-                prefs.awaiting_link = awaiting_link;
-                prefs.save();
-            }
             finish_boot(&app, &host, vault);
         },
     );
@@ -531,8 +533,12 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
     // invented its own key before hearing from a sibling would upload an
     // archive its other devices could not read. It arrives either from a
     // sibling over the encrypted sync channel or from a recovery file.
-    if let Some(ark) = secrets::load_archive_key(&app.data_dir) {
-        core::set_archive_root_key(&ark);
+    match secrets::load_archive_key(&app.data_dir) {
+        Ok(Some(ark)) => {
+            core::set_archive_root_key(&ark);
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("could not read the archive root key: {e}"),
     }
     // The vault has done its job; the core holds what it needs now.
     drop(vault);
@@ -560,7 +566,7 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
         move || core::start_network(node_mode, tor_enabled),
         move |result| {
             if let Err(error) = result {
-                app.toast(&format!("Network start failed: {}", error));
+                app.toast(&format!("Network start failed: {}. Restart Typeon to try again.", error));
             }
             core::set_history_storage_limit_bytes(storage_limit);
             app.refresh_caches();
@@ -796,16 +802,7 @@ fn fatal(app: &Rc<App>, host: &adw::ToastOverlay, title: &str, detail: &str) {
                     // `on_accept` parametresi `Fn` istiyor (`FnOnce` değil)
                     // — kendi ortamından bir şey TAŞIYAMAZ, sadece ödünç
                     // alabilir/klonlayabilir.
-                    let app = on_confirm_app.clone();
-                    let profile = app.data_dir.to_string_lossy().to_string();
-                    if let Err(error) = crate::keyring::delete_key(&profile) {
-                        eprintln!("typeon: could not remove the vault key: {error}");
-                    }
-                    if let Err(error) = std::fs::remove_dir_all(&app.data_dir) {
-                        app.toast(&format!("Could not erase the data directory: {error}"));
-                        return;
-                    }
-                    app.application.quit();
+                    crate::ui::settings::erase_profile_and_quit(&on_confirm_app);
                 },
             );
         });
