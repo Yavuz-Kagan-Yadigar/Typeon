@@ -1373,10 +1373,23 @@ class GroupChatActivity : AppCompatActivity() {
         memberIdentityIds.filter { it != ownIdentityId }
             .map { it to (resolveContactByIdentity(it)?.displayName ?: it.take(8)) }
 
-    /** Ids of the members whose "@Name" is in [text], as a JSON array (null: none). */
+    /** Ids of the members whose "@Name" is in [text], as a JSON array (null: none).
+     *  The name must end at a non-letter/digit or the end of the text ("@Alice"
+     *  does not mention "Al"); at each '@' only the longest matching name counts. */
     private fun mentionIdsJson(text: String): String? {
-        val ids = mentionCandidates().filter { "@${it.second}" in text }.map { it.first }
-        return if (ids.isEmpty()) null else JSONArray(ids).toString()
+        val candidates = mentionCandidates()
+        val ids = LinkedHashSet<String>()
+        var at = text.indexOf('@')
+        while (at >= 0) {
+            val hits = candidates.filter { (_, name) ->
+                val end = at + 1 + name.length
+                name.isNotEmpty() && text.startsWith(name, at + 1) && (end == text.length || !text[end].isLetterOrDigit())
+            }
+            val longest = hits.maxOfOrNull { it.second.length }
+            hits.filter { it.second.length == longest }.mapTo(ids) { it.first }
+            at = text.indexOf('@', at + 1)
+        }
+        return if (ids.isEmpty()) null else JSONArray(ids.toList()).toString()
     }
 
     private var mentionPopup: ListPopupWindow? = null
@@ -2436,7 +2449,7 @@ class GroupChatActivity : AppCompatActivity() {
                 }
                 return@launch
             }
-            val (name, mime) = if (original) attachment.fileName to "image/jxl"
+            val (name, mime) = if (original) attachment.fileName.let { if (it.endsWith(".jxl", true)) it else "$it.jxl" } to "image/jxl"
                 else OutgoingMedia.savedAs(File(plainPath), attachment.fileName, attachment.mimeType)
             val saved = saveToPublicDownloads(File(plainPath), name, mime)
             withContext(Dispatchers.Main) {
@@ -3230,6 +3243,7 @@ class GroupChatActivity : AppCompatActivity() {
         voicePlaybackHandler.removeCallbacksAndMessages(null)
         ownStatusPollHandler.removeCallbacksAndMessages(null)
         groupReadWatermarkHandler.removeCallbacksAndMessages(null)
+        mentionPopup?.dismiss()
         super.onDestroy()
     }
 }

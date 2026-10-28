@@ -62,12 +62,22 @@ object NotificationHelper {
      *  that message (or we do not know what it shows): deleting an old, read
      *  message used to remove the notification of the unread ones. */
     fun clearIfShowing(context: Context, conversationId: String, messageId: String) {
-        val id = conversationId.hashCode()
-        val shown = shownMessageId[id]
-        if (shown != null && shown != messageId) return
-        shownMessageId.remove(id)
-        context.getSystemService(NotificationManager::class.java).cancel(id)
+        for (id in slotIds(conversationId)) {
+            val shown = shownMessageId[id]
+            if (shown != null && shown != messageId) continue
+            shownMessageId.remove(id)
+            context.getSystemService(NotificationManager::class.java).cancel(id)
+        }
     }
+
+    /** A group has two slots: its messages and its @mentions (`"mention:$groupId"`),
+     *  so a plain message does not replace a mention alert. */
+    private fun slotIds(conversationId: String): List<Int> =
+        if (conversationId.startsWith("group:")) {
+            listOf(conversationId.hashCode(), ("mention:" + conversationId.removePrefix("group:")).hashCode())
+        } else {
+            listOf(conversationId.hashCode())
+        }
 
     fun showMessageNotification(context: Context, peerDeviceFingerprint: String, text: String, messageId: String = "", alert: Boolean = true) {
         val displayName = resolveContactNameByFingerprint(peerDeviceFingerprint) ?: peerDeviceFingerprint.take(8)
@@ -160,17 +170,19 @@ object NotificationHelper {
         } else {
             context.getString(R.string.notif_new_message)
         }
-        if (messageId.isNotEmpty()) shownMessageId[("group:$groupId").hashCode()] = messageId
         if (mention) {
-            // Same slot as the group's messages (so opening/reading the group
-            // clears it), on the mentions channel. Hidden text hides who and
-            // where too, like the plain group notification.
+            // Its own slot (see `slotIds`): a later plain message must not
+            // replace it. Opening/reading the group clears both. Hidden text
+            // hides who and where too, like the plain group notification.
+            val id = ("mention:$groupId").hashCode()
+            if (messageId.isNotEmpty()) shownMessageId[id] = messageId
             val shown = NotificationPrefs.showMessageText(context)
             val title = if (shown) context.getString(R.string.notif_mention_title, senderName, groupName) else context.getString(R.string.app_name)
             val mentionBody = if (shown) text else context.getString(R.string.notif_mention_hidden)
-            show(context, ("group:$groupId").hashCode(), title, mentionBody, intent, channel = MENTION_CHANNEL_ID)
+            show(context, id, title, mentionBody, intent, channel = MENTION_CHANNEL_ID)
             return
         }
+        if (messageId.isNotEmpty()) shownMessageId[("group:$groupId").hashCode()] = messageId
         show(context, ("group:$groupId").hashCode(), context.getString(R.string.app_name), body, intent)
     }
 
@@ -201,9 +213,10 @@ object NotificationHelper {
      *  notification unless a newer message posted it after that. */
     fun clearIfReadUpTo(context: Context, conversationId: String, readAt: Long) {
         val manager = context.getSystemService(NotificationManager::class.java)
-        val id = conversationId.hashCode()
-        val shown = manager.activeNotifications.firstOrNull { it.id == id } ?: return
-        if (shown.postTime <= readAt) manager.cancel(id)
+        for (id in slotIds(conversationId)) {
+            val shown = manager.activeNotifications.firstOrNull { it.id == id } ?: continue
+            if (shown.postTime <= readAt) manager.cancel(id)
+        }
     }
 
     /** Spec dışı, kullanıcı isteği: belirli bir 1:1 sohbet açıldığında
@@ -217,8 +230,10 @@ object NotificationHelper {
 
     /** bkz. `clearForPeer` aynı notu — grup sohbeti için. */
     fun clearForGroup(context: Context, groupId: String) {
-        shownMessageId.remove(("group:$groupId").hashCode())
-        context.getSystemService(NotificationManager::class.java).cancel(("group:$groupId").hashCode())
+        for (id in slotIds("group:$groupId")) {
+            shownMessageId.remove(id)
+            context.getSystemService(NotificationManager::class.java).cancel(id)
+        }
     }
 
     /** Spec dışı, hata düzeltmesi (bkz. P2PService.maybeNotify "edit" kolu):

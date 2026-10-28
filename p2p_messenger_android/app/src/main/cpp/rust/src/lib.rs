@@ -1907,10 +1907,10 @@ mod recovery_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// One press = one fixed window back from the chat's cursor, which then
-    /// moves to the window's start: an empty month moves it too, a backdated
-    /// row cannot pin it, and the first cursor ignores 1970 and bad-clock
-    /// rows. A clear resets it.
+    /// One press = one fixed window back from the chat's cursor. The first
+    /// cursor ignores 1970 and bad-clock rows, a stored one wins over rows
+    /// that arrive later. A press that reaches no source returns an error and
+    /// keeps the cursor. A clear or prune resets it.
     #[test]
     fn history_fetch_cursor_moves_one_window_per_press() {
         let dir = std::env::temp_dir().join(format!("typeon-fetchcursor-{}", std::process::id()));
@@ -1921,27 +1921,82 @@ mod recovery_tests {
         let day: u64 = 24 * 60 * 60 * 1000;
         let w = HISTORY_FETCH_WINDOW_MS;
         let now = current_time_ms();
-        let cursor = |core: &P2PCore| core.meta_str(&format!("hfetch:{gid}")).and_then(|v| v.parse::<u64>().ok());
-        // An empty chat starts at now.
-        core.fetch_server_history(&gid, true, 0).unwrap();
-        assert!(cursor(&core).unwrap().abs_diff(now - w) < 60_000);
-        core.clear_group_history(&gid).unwrap();
-        assert_eq!(cursor(&core), None, "a clear resets the cursor");
+        let key = format!("hfetch:{gid}");
+        let cursor = |core: &P2PCore| core.meta_str(&key).and_then(|v| v.parse::<u64>().ok());
+        let next = |core: &P2PCore| core.history_fetch_cursor(&gid, "", Some(&gid));
+        // An empty chat starts at now. No member, sibling or server: nothing
+        // goes out, so the month is not consumed.
+        assert!(next(&core).abs_diff(now) < 60_000);
+        assert_eq!(error_code(&core.fetch_server_history(&gid, true, 0).unwrap_err()), "NETWORK");
+        assert_eq!(cursor(&core), None);
+        assert!(!core.history_fetch_pages.contains_key(&gid));
         // Rows: the oldest real one 10 days back; a 1970 row and a bad-clock
         // row 400 days back (both arrived now) do not count.
         for (id, sent) in [("a", now - 10 * day), ("b", now - 2 * day), ("z", 1), ("bad", now - 400 * day)] {
             core.archive_group_message(&gid, "x", "received", b"t", Some(id), None, None, None, sent, None).unwrap();
         }
-        core.fetch_server_history(&gid, true, 0).unwrap();
+        assert_eq!(next(&core), now - 10 * day);
+        // A press that went out stored its window start; a backdated row
+        // arriving later cannot pin it.
         let first = now - 10 * day - w;
-        assert_eq!(cursor(&core), Some(first));
-        // The window went nowhere (no source answered): the next press is the
-        // month before anyway, whatever rows arrive meanwhile.
+        core.meta_put(&key, &first.to_string());
         core.archive_group_message(&gid, "x", "received", b"t", Some("backdated"), None, None, None, 5, None).unwrap();
-        core.fetch_server_history(&gid, true, now).unwrap();
-        assert_eq!(cursor(&core), Some(first - w));
+        assert_eq!(next(&core), first);
+        assert!(core.fetch_server_history(&gid, true, now).is_err());
+        assert_eq!(cursor(&core), Some(first), "nothing sent: cursor kept");
+        core.clear_group_history(&gid).unwrap();
+        assert_eq!(cursor(&core), None, "a clear resets the cursor");
+        core.meta_put(&key, &first.to_string());
         core.prune_chat_before("group", &gid, (now - 5 * day) as i64).unwrap();
         assert_eq!(cursor(&core), None, "a prune resets the cursor");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sibling's cut press page whose follow-up cannot be sent (no
+    /// connected sibling, budget out, or the press was lost in a restart)
+    /// puts the cursor back up, so the next press asks for the rest. The
+    /// follow-up window ends at `o + 1`: rows in the same ms as `o` count.
+    #[test]
+    fn unsent_follow_up_reopens_the_fetch_cursor() {
+        let dir = std::env::temp_dir().join(format!("typeon-fetchreopen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut core = core_on_disk(&dir);
+        let gid = "group-0123456789abcdef".to_string();
+        core.groups.insert(gid.clone(), Group::new(gid.clone(), "g".into(), "me".into(), 1));
+        let key = format!("hfetch:{gid}");
+        let cursor = |core: &P2PCore| core.meta_str(&key).and_then(|v| v.parse::<u64>().ok());
+        let entry = |id: &str, at: u64| SiblingHistoryEntry {
+            conversation_identity_id: None, group_id: Some(gid.clone()), direction: "received".into(), text: "t".into(),
+            message_id: id.into(), sender_identity_id: Some("x".into()), reply_to_message_id: None, reply_to_preview: None,
+            reply_to_sender_identity_id: None, sent_at_ms: at, author_proof: None,
+        };
+        // Press [100, 1000), cursor at 100. A cut page down to 500, budget
+        // left but no sibling connected: cursor back up to 501.
+        core.meta_put(&key, "100");
+        core.history_fetch_pages.insert(gid.clone(), HISTORY_FETCH_MAX_PAGES);
+        core.sibling_fetch_open.insert(("sib".into(), 1_000, 100), (gid.clone(), current_time_ms()));
+        core.apply_sibling_reply("sib", Some((1_000, 100)), true, vec![entry("m1", 500), entry("m2", 900)]);
+        assert_eq!(cursor(&core), Some(501));
+        // Budget out (or lost in a restart): the same.
+        core.meta_put(&key, "100");
+        core.history_fetch_pages.clear();
+        core.sibling_fetch_open.insert(("sib".into(), 1_000, 100), (gid.clone(), current_time_ms()));
+        core.apply_sibling_reply("sib", Some((1_000, 100)), true, vec![entry("m3", 400)]);
+        assert_eq!(cursor(&core), Some(401));
+        // The page reached the window start: nothing left, cursor stays.
+        core.meta_put(&key, "100");
+        core.sibling_fetch_open.insert(("sib".into(), 1_000, 100), (gid.clone(), current_time_ms()));
+        core.apply_sibling_reply("sib", Some((1_000, 100)), true, vec![entry("m4", 100)]);
+        assert_eq!(cursor(&core), Some(100));
+        // The echo of a press this device forgot (restart): the whole window again.
+        core.apply_sibling_reply("sib", Some((1_000, 100)), false, vec![entry("m5", 300)]);
+        assert_eq!(cursor(&core), Some(1_000));
+        // Never lowered, and no cursor (cleared chat) stays none.
+        core.apply_sibling_reply("sib", Some((600, 100)), false, vec![entry("m6", 300)]);
+        assert_eq!(cursor(&core), Some(1_000));
+        core.meta_del(&key);
+        core.apply_sibling_reply("sib", Some((600, 100)), false, vec![entry("m7", 300)]);
+        assert_eq!(cursor(&core), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5347,6 +5402,17 @@ impl P2PCore {
         }
     }
 
+    /// A press's window was not fully asked for (a source went away, a
+    /// follow-up page was not sent): the cursor `hfetch:` goes back up to
+    /// `to`, so the next press asks for the rest again (rows dedup by id).
+    /// Without a cursor (none yet, or a clear) nothing changes.
+    fn reopen_fetch_cursor(&self, conv_key: &str, to: u64) {
+        let k = format!("hfetch:{}", conv_key);
+        if self.meta_str(&k).and_then(|v| v.parse::<u64>().ok()).is_some_and(|c| c < to) {
+            self.meta_put(&k, &to.to_string());
+        }
+    }
+
     /// Forgets the "Fetch older history" state of a chat (identity id or
     /// group id): its cursor, its open press requests to peers and own
     /// devices, its follow-up budget and a running server page chain. A
@@ -8404,6 +8470,15 @@ impl P2PCore {
         let press = window.and_then(|(before, after)| {
             self.sibling_fetch_open.remove(&(peer_fp.to_string(), before, after)).map(|(chat, _)| (chat, before, after))
         });
+        // The echo of a press this device no longer knows (a restart clears
+        // `sibling_fetch_open`): the floor keeps its rows out, so the next
+        // press asks for that window again.
+        let lost_press = match (window, &press) {
+            (Some((before, _)), None) => entries.first()
+                .and_then(|e| e.group_id.clone().or_else(|| e.conversation_identity_id.clone()))
+                .map(|chat| (chat, before.max(0) as u64)),
+            _ => None,
+        };
         if let Some((chat, before, after)) = &press {
             entries.retain(|e| e.group_id.as_deref().or(e.conversation_identity_id.as_deref()) == Some(chat.as_str())
                 && (*after..*before).contains(&(e.sent_at_ms as i64)));
@@ -8414,15 +8489,23 @@ impl P2PCore {
             "sent_at_ms": e.sent_at_ms, "message_id": e.message_id,
         })).collect();
         let written = self.apply_sibling_history(entries, press.is_some());
-        let Some((chat, _, after)) = press else { return (merged, None) };
+        let Some((chat, _, after)) = press else {
+            if let Some((chat, before)) = lost_press { self.reopen_fetch_cursor(&chat, before) }
+            return (merged, None);
+        };
         if let Some(o) = written {
             self.lower_history_floor(&chat, o);
         }
+        // `o + 1`: the window end is exclusive, and rows sent in the same ms
+        // as `o` may be the ones cut. Rows asked for twice dedup by id.
         if let (true, Some(o)) = (more, oldest) {
-            if o > after && self.take_fetch_page(&chat) {
-                let group = self.groups.contains_key(&chat);
-                let (cid, gid) = if group { (None, Some(chat.as_str())) } else { (Some(chat.as_str()), None) };
-                let _ = self.request_older_sibling_history(cid, gid, o, after, Some(peer_fp));
+            if o > after {
+                let sent = self.take_fetch_page(&chat) && {
+                    let group = self.groups.contains_key(&chat);
+                    let (cid, gid) = if group { (None, Some(chat.as_str())) } else { (Some(chat.as_str()), None) };
+                    self.request_older_sibling_history(cid, gid, o + 1, after, Some(peer_fp)).is_ok()
+                };
+                if !sent { self.reopen_fetch_cursor(&chat, o as u64 + 1) }
             }
         }
         (merged, Some(chat))
@@ -12360,12 +12443,19 @@ impl P2PCore {
                     }
                     // The responder cut its page: ask it for the older rest of
                     // the window (`HISTORY_FETCH_MAX_PAGES`).
+                    // `o + 1`: rows sent in the same ms as `o` may be the
+                    // ones cut; rows asked for twice dedup by id. Not sent
+                    // (budget out, or the budget was lost in a restart): the
+                    // next press asks for the rest.
                     if let (true, Some(o), false) = (more, oldest, write_failed) {
-                        if o > after && self.take_fetch_page(&floor_key) {
-                            let content = MessageContent::HistorySyncRequest {
-                                limit: HISTORY_SYNC_MAX_MESSAGES, before_timestamp: Some(o), group_id: group_id.clone(), after_timestamp: Some(after),
+                        if o > after {
+                            let sent = self.take_fetch_page(&floor_key) && {
+                                let content = MessageContent::HistorySyncRequest {
+                                    limit: HISTORY_SYNC_MAX_MESSAGES, before_timestamp: Some(o + 1), group_id: group_id.clone(), after_timestamp: Some(after),
+                                };
+                                self.send_message_content(peer_fp.clone(), &content, None).is_ok()
                             };
-                            let _ = self.send_message_content(peer_fp.clone(), &content, None);
+                            if !sent { self.reopen_fetch_cursor(&floor_key, o as u64 + 1) }
                         }
                     }
                 }
@@ -26170,10 +26260,9 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_fetchServerHistory<'local>(
     let key: String = jstr(&mut env, &chat_key).unwrap_or_default();
     let group = is_group != 0;
     let result = catch_panic(move || core_lock().fetch_server_history(&key, group, before_timestamp.max(0) as u64));
-    let out = match result {
-        Ok(Ok(())) => "OK".to_string(),
-        Ok(Err(e)) => format!("Error: {}", e),
-        Err(e) => format!("Error: {}", e),
+    let out = match coded(result) {
+        Ok(()) => "OK".to_string(),
+        Err(e) => e,
     };
     safe_new_jstring(&mut env, out)
 }

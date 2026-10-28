@@ -2023,7 +2023,7 @@ impl ChatView {
             Conversation::Group { group_id, .. } => {
                 // @mentions: members (not me) whose "@Name" is in the text.
                 let app = self.app();
-                let mentions: Vec<String> = app
+                let candidates: Vec<(String, String)> = app
                     .groups
                     .borrow()
                     .iter()
@@ -2031,8 +2031,13 @@ impl ChatView {
                     .map(|group| group.member_identity_ids.clone())
                     .unwrap_or_default()
                     .into_iter()
-                    .filter(|id| *app.own_identity_id.borrow() != *id && text.contains(&format!("@{}", app.identity_name(id))))
+                    .filter(|id| *app.own_identity_id.borrow() != *id)
+                    .map(|id| {
+                        let name = app.identity_name(&id);
+                        (id, name)
+                    })
                     .collect();
+                let mentions = mentioned_ids(&text, &candidates);
                 let group_id = group_id.clone();
                 let sent_text = text.clone();
                 crate::app::run_in_background(
@@ -3925,4 +3930,29 @@ fn load_sticker(state: &Rc<AttachmentState>) {
             }
         },
     );
+}
+
+/// Ids of the members whose "@Name" is in `text`. The name must end at a
+/// non-letter/digit or the end of the text ("@Alice" does not mention "Al");
+/// at each '@' only the longest matching name counts.
+fn mentioned_ids(text: &str, candidates: &[(String, String)]) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for (at, _) in text.match_indices('@') {
+        let rest = &text[at + 1..];
+        let hits: Vec<&(String, String)> = candidates
+            .iter()
+            .filter(|(_, name)| {
+                !name.is_empty()
+                    && rest.starts_with(name.as_str())
+                    && !rest[name.len()..].chars().next().is_some_and(char::is_alphanumeric)
+            })
+            .collect();
+        let longest = hits.iter().map(|(_, name)| name.len()).max();
+        for (id, name) in hits {
+            if Some(name.len()) == longest && !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+    }
+    ids
 }

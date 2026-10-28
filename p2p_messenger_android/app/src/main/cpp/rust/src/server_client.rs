@@ -2339,7 +2339,10 @@ impl P2PCore {
                 self.send_archive_purge(peer_id, server_id, keys, rest);
             }
             (ServerInflight::ArchiveProbe { server_id, conv_key, group, window, next }, ServerResponse::ArchiveProbed { mut present }) => {
-                let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { return };
+                let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else {
+                    if let Some((before, _)) = window { self.reopen_fetch_cursor(&conv_key, before) }
+                    return;
+                };
                 // A press: the buckets that reach its window, newest first,
                 // each read from `before` back.
                 if let Some((_, after)) = window {
@@ -2375,7 +2378,11 @@ impl P2PCore {
                         return;
                     }
                 }
-                let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { return };
+                // The server went mid-chain: the next press asks for this window again.
+                let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else {
+                    if let Some((before, _)) = window { self.reopen_fetch_cursor(&conv_key, before) }
+                    return;
+                };
                 if let (true, Some(bucket), Some(before)) = (more, bucket_more, oldest) {
                     self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, Some(before), rest, window, next);
                 } else if !rest.is_empty() {
@@ -2725,6 +2732,8 @@ impl P2PCore {
                 id,
                 ServerInflight::ArchiveFetch { server_id, conv_key, group, bucket_more: Some(bucket), rest, window, next },
             );
+        } else if let Some((before, _)) = window {
+            self.reopen_fetch_cursor(&conv_key, before);
         }
     }
 
@@ -3368,10 +3377,11 @@ impl P2PCore {
     /// page of it, from the buckets that reach it. A full restore of the
     /// same conversation may run beside it; it respects the history floor,
     /// this chain does not, inside its window.
-    fn request_older_server_history(&mut self, conv_key: &str, group: bool, before: u64, after: u64) {
-        let Some(ark) = self.archive_root_key else { return };
-        let Some(server_id) = self.history_server() else { return };
-        let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { return };
+    /// Returns whether the request went out.
+    fn request_older_server_history(&mut self, conv_key: &str, group: bool, before: u64, after: u64) -> bool {
+        let Some(ark) = self.archive_root_key else { return false };
+        let Some(server_id) = self.history_server() else { return false };
+        let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { return false };
         // Aylık kovalar (bkz. `server_archive_bucket`): `before`'ın ayı ve öncesi.
         let buckets = archive_buckets(&ark, conv_key, before);
         let req = ServerRequest::ArchiveProbe { buckets };
@@ -3386,7 +3396,9 @@ impl P2PCore {
                     next: Vec::new(),
                 },
             );
+            return true;
         }
+        false
     }
 
     /// A press's server chain failed: the cursor goes back up to its window's
@@ -3396,10 +3408,7 @@ impl P2PCore {
         if let ServerInflight::ArchiveProbe { conv_key, window: Some((before, _)), .. }
         | ServerInflight::ArchiveFetch { conv_key, window: Some((before, _)), .. } = inflight
         {
-            let k = format!("hfetch:{}", conv_key);
-            if self.meta_str(&k).and_then(|v| v.parse::<u64>().ok()).is_some_and(|c| c < *before) {
-                self.meta_put(&k, &before.to_string());
-            }
+            self.reopen_fetch_cursor(conv_key, *before);
         }
     }
 
@@ -3437,19 +3446,25 @@ impl P2PCore {
             self.history_fetch_cursor(&conv_key, &self.canonical_peer_key(chat_key), None)
         };
         let after = before.saturating_sub(crate::HISTORY_FETCH_WINDOW_MS);
-        self.meta_put(&format!("hfetch:{}", conv_key), &after.to_string());
+        // Budget before the requests: a fast answer may already want a follow-up.
         self.history_fetch_pages.insert(conv_key.clone(), crate::HISTORY_FETCH_MAX_PAGES);
         let (b, a) = (before as i64, after as i64);
-        // No reachable peer or sibling is not an error: the other sources remain.
-        if is_group {
-            let _ = self.request_older_group_history(chat_key, b, a);
-            let _ = self.request_older_sibling_history(None, Some(chat_key), b, a, None);
+        // One unreachable source is not an error: the others remain.
+        let sent = if is_group {
+            let peers = self.request_older_group_history(chat_key, b, a).is_ok();
+            self.request_older_sibling_history(None, Some(chat_key), b, a, None).is_ok() | peers
         } else {
-            let _ = self.request_older_history(chat_key, b, a);
-            let _ = self.request_older_sibling_history(Some(&conv_key), None, b, a, None);
+            let peer = self.request_older_history(chat_key, b, a).is_ok();
+            self.request_older_sibling_history(Some(&conv_key), None, b, a, None).is_ok() | peer
+        };
+        // Returns false at once without the archive key or a history server.
+        let sent = self.request_older_server_history(&conv_key, is_group, before, after) | sent;
+        if !sent {
+            // Nothing went out: the month stays for the next press.
+            self.history_fetch_pages.remove(&conv_key);
+            return Err("Geçmiş istenecek kaynağa ulaşılamıyor".to_string());
         }
-        // Returns at once without the archive key or a history server.
-        self.request_older_server_history(&conv_key, is_group, before, after);
+        self.meta_put(&format!("hfetch:{}", conv_key), &after.to_string());
         Ok(())
     }
 

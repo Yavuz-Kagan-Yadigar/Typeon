@@ -1753,7 +1753,7 @@ class ChatActivity : AppCompatActivity() {
                 }
                 return@launch
             }
-            val (name, mime) = if (original) attachment.fileName to "image/jxl"
+            val (name, mime) = if (original) attachment.fileName.let { if (it.endsWith(".jxl", true)) it else "$it.jxl" } to "image/jxl"
                 else OutgoingMedia.savedAs(File(plainPath), attachment.fileName, attachment.mimeType)
             val saved = saveToPublicDownloads(File(plainPath), name, mime)
             withContext(Dispatchers.Main) {
