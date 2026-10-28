@@ -13850,7 +13850,8 @@ impl P2PCore {
         };
         Some(match event_group_id {
             Some(gid) => serde_json::json!({"type": "ack", "peer": peer_fp, "group_id": gid, "message_id": event_message_id}),
-            None => serde_json::json!({"type": "ack", "peer": peer_fp, "message_id": event_message_id}),
+            // 1:1: keyed like the chat screen, see the `status` event above.
+            None => serde_json::json!({"type": "ack", "peer": self.canonical_peer_key(peer_fp), "message_id": event_message_id}),
         })
     }
 
