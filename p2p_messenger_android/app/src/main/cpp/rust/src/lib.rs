@@ -18034,9 +18034,9 @@ impl P2PCore {
         // Evicting complete files cannot free what downloads hold, and
         // charging them here let a few running downloads empty the store:
         // in-flight bytes are bounded at offer time (`receive_file_offer`).
-        // Our own sent originals are never evicted.
+        // Sent files count and are evicted like received ones.
         let mut stmt = match conn.prepare(
-            "SELECT file_id, total_size, created_at FROM files WHERE status = 'complete' AND direction != 'sent' ORDER BY created_at ASC"
+            "SELECT file_id, total_size, created_at FROM files WHERE status = 'complete' ORDER BY created_at ASC"
         ) {
             Ok(s) => s,
             Err(_) => return,
@@ -24237,10 +24237,9 @@ impl P2PCore {
             archive_root_key: Option<Vec<u8>>,
             #[serde(default, with = "serde_bytes")]
             data: Vec<u8>,
-            // Default: a backup the user already holds must still open.
-            #[serde(default)]
+            // Required: a file from before these fields restored a secondary
+            // that no peer accepts (owner: old backups are not supported).
             own_device_add: Option<DeviceAdd>,
-            #[serde(default)]
             own_revokes: Vec<DeviceRevoke>,
         }
         let exported: ExportedIdentity = ciborium::from_reader(plaintext)
