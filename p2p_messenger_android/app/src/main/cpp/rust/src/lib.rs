@@ -6002,10 +6002,7 @@ impl P2PCore {
         // değerleri zaten TAM adres (`.../p2p/<röle_peer_id>` dahil, bkz.
         // `record_known_relay` çağrı noktaları) — burada tekrar eklemeye
         // gerek yok.
-        let known_relays: Vec<String> = self.known_relay_peers.values()
-            .take(5)
-            .map(|(addr, _)| addr.to_string())
-            .collect();
+        let known_relays = self.freshest_relays();
 
         let nonce = self.issue_pairing_nonce()?;
         // The mailbox made from this nonce is registered now, not at the
@@ -6097,6 +6094,13 @@ impl P2PCore {
             && packet::pairing_nonce_proof(&self.link_request_nonce, &exchange.device_fingerprint) == exchange.pairing_proof
     }
 
+    /// The 5 relays seen last, for a pairing or link code.
+    fn freshest_relays(&self) -> Vec<String> {
+        let mut relays: Vec<&(Multiaddr, u64)> = self.known_relay_peers.values().collect();
+        relays.sort_by(|a, b| b.1.cmp(&a.1));
+        relays.into_iter().take(5).map(|(a, _)| a.to_string()).collect()
+    }
+
     /// The nonces kept for the first-contact mailbox of `fp`: of the code we
     /// read from it (`pn:`), then of the code of ours it read (`pk:`).
     fn stored_pairing_secrets(&self, fp: &str) -> Vec<Vec<u8>> {
@@ -6131,7 +6135,11 @@ impl P2PCore {
         gids.sort_by(|a, b| a.group_id.cmp(&b.group_id));
         out.extend(gids.into_iter().map(|g| self.own_group_contact_secret(&g.group_id)));
         out.push(self.link_request_nonce.clone());
-        out.push(self.pending_link_nonce.clone());
+        // Past the link horizon the link is dead; its `pn:` row below keeps
+        // the mailbox as long as a paired code would.
+        if current_time_ms().saturating_sub(self.pending_link_started_at) <= PENDING_LINK_RETRY_HORIZON_MS {
+            out.push(self.pending_link_nonce.clone());
+        }
         if let Some(conn) = &self.db {
             if let Ok(mut st) = conn.prepare("SELECT k, v FROM app_meta WHERE (k >= 'pn:' AND k < 'pn;') OR (k >= 'pk:' AND k < 'pk;')") {
                 if let Ok(rows) = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
@@ -6239,8 +6247,16 @@ impl P2PCore {
             None => {
                 let mut m = vec![0u8; 16];
                 rand::RngCore::fill_bytes(&mut OsRng, &mut m);
-                self.meta_put("own_gfc", &hex::encode(&m));
-                m
+                // OR IGNORE + read back: a failed read must not replace the
+                // stored master, and an unsaved one must not be handed out
+                // (each call would make another).
+                let saved = self.db.as_ref().map_or(false, |c| {
+                    c.execute("INSERT OR IGNORE INTO app_meta (k, v) VALUES ('own_gfc', ?1)", params![hex::encode(&m)]).is_ok()
+                });
+                match saved.then(|| self.meta_str("own_gfc")).flatten().and_then(|v| hex::decode(v).ok()).filter(|s| s.len() == 16) {
+                    Some(m) => m,
+                    None => return Vec::new(),
+                }
             }
         };
         use sha2::Digest as _;
@@ -6297,10 +6313,10 @@ impl P2PCore {
         if !self.own_revokes().iter().any(|r| r.revoked_device_fingerprint == fp) {
             return;
         }
-        self.last_identity_exchange_reply.insert(key, now);
         info!("İptal edilmiş kardeş cihaz hâlâ gönderiyor, iptal yeniden iletiliyor: {}", crate::log_id(fp));
-        if let Err(e) = self.send_identity_exchange_fresh(fp) {
-            warn!("İptal yeniden iletilemedi: {}", e);
+        match self.send_identity_exchange_fresh(fp) {
+            Ok(()) => { self.last_identity_exchange_reply.insert(key, now); }
+            Err(e) => warn!("İptal yeniden iletilemedi: {}", e),
         }
     }
 
@@ -7469,7 +7485,7 @@ impl P2PCore {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let rec = self.own_devices.get(&own_fp).ok_or("Missing own device record")?.clone();
         let rendezvous = self.get_node_address().ok_or("Ağ adresi henüz hazır değil")?;
-        let known_relays: Vec<String> = self.known_relay_peers.values().take(5).map(|(a, _)| a.to_string()).collect();
+        let known_relays = self.freshest_relays();
         // One nonce per open window: a QR drawn again (the screen retries
         // until the address is ready) must not void the code already scanned.
         if self.link_request_nonce.len() != 16 || current_time_ms() > self.link_request_open_until {
