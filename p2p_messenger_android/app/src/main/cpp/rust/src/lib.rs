@@ -198,14 +198,22 @@ fn core_lock() -> CoreGuard {
 /// has to end the idle wait to get the lock, but leaves `CORE_DIRTY` alone,
 /// so the poll loop does not run a second turn for a caller that changed nothing.
 #[track_caller]
-fn core_lock_read() -> PollGuard {
+fn core_lock_read() -> ReadGuard {
     use std::sync::atomic::Ordering;
     LOCK_WANTED.fetch_add(1, Ordering::SeqCst);
     NET_WAKE.notify_waiters();
     let guard = CORE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     LOCK_WANTED.fetch_sub(1, Ordering::SeqCst);
     lock_watch::acquired(std::panic::Location::caller());
-    PollGuard(guard)
+    ReadGuard(PollGuard(guard))
+}
+
+/// `core_lock_read` return value: shared access only, so a caller cannot
+/// change state without `CORE_DIRTY` being set.
+pub(crate) struct ReadGuard(PollGuard);
+impl std::ops::Deref for ReadGuard {
+    type Target = P2PCore;
+    fn deref(&self) -> &P2PCore { &self.0 }
 }
 
 /// Poll döngüsünün kendi kilidi — `CORE_DIRTY`'yi işaretlemez, yoksa her
@@ -587,7 +595,10 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
             if let Err(e) = converted {
                 warn!("JPEG XL not converted, kept as it is ({}): {}", file_id, e);
                 let _ = std::fs::remove_file(&conv_tmp);
-                std::fs::rename(&tmp_path, &decrypted_path).map_err(|e| e.to_string())?;
+                if let Err(e) = std::fs::rename(&tmp_path, &decrypted_path) {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(e.to_string());
+                }
                 return Ok(decrypted_path.to_string_lossy().to_string());
             }
             let _ = std::fs::remove_file(&tmp_path);
@@ -887,8 +898,8 @@ fn dir_size(dir: &std::path::Path, ext_filter: Option<&str>) -> u64 {
 /// another contact's.
 fn is_invisible_char(c: char) -> bool {
     matches!(c as u32,
-        0x00AD | 0x061C | 0x115F | 0x1160 | 0x3164 | 0xFFA0 | 0xFEFF
-        | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x2069 | 0xE0000..=0xE007F)
+        0x00AD | 0x061C | 0x115F | 0x1160 | 0x180E | 0x3164 | 0xFFA0 | 0xFEFF
+        | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x2069 | 0xE0000..=0xE007F | 0xE0100..=0xE01EF)
 }
 
 fn safe_file_name(name: &str) -> String {
@@ -994,7 +1005,7 @@ fn filter_mentions(group: &Group, skip: Option<&str>, mut ids: Vec<String>) -> V
 
 /// `create_group` makes `group-<16 hex>`; 16..=48 hex accepted.
 fn is_group_id(id: &str) -> bool {
-    id.strip_prefix("group-").map_or(false, |t| (16..=48).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_hexdigit()))
+    id.strip_prefix("group-").map_or(false, |t| (16..=48).contains(&t.len()) && t.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
 }
 
 /// A device fingerprint (and an identity id, which is the first device's
