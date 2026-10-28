@@ -13745,6 +13745,17 @@ impl P2PCore {
         self.attachment_events.clear();
         self.blocked_identities.clear();
         self.deleted_identities.clear();
+        // The swarm outlives the wipe: drop every gossip topic (own mailbox,
+        // session and pairing topics) so the erased identity's traffic stops
+        // arriving. `ensure_own_mailbox_subscription` subscribes a later
+        // identity's mailbox again, since `own_mailbox_topic_fp` is reset.
+        if let Some(swarm) = self.swarm.as_mut() {
+            let gs = &mut swarm.behaviour_mut().gossipsub;
+            let topics: Vec<gossipsub::IdentTopic> = gs.topics().map(|h| gossipsub::IdentTopic::new(h.as_str())).collect();
+            for topic in &topics {
+                let _ = gs.unsubscribe(topic);
+            }
+        }
         self.own_mailbox_topic_fp = None;
         self.pending_link_target = None;
         self.pending_link_started_at = 0;
