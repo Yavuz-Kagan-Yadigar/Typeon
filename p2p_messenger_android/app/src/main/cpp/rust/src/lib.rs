@@ -21348,7 +21348,9 @@ impl P2PCore {
             // Server copy only (`allow_direct = false`): the direct copy is in
             // flight, and `try_publish_raw` sent the envelope a second time.
             if self.is_connected_to_device(&fp) && !self.ready_server_peers().is_empty() {
-                let _ = self.try_publish_raw_via(&fp, &envelope, now, false);
+                if let Err(PublishFailure::Transient(e) | PublishFailure::Permanent(e)) = self.try_publish_raw_via(&fp, &envelope, now, false) {
+                    warn!("Early server copy for suspect peer {} failed: {}", crate::log_id(&fp), e);
+                }
             }
         }
         // KRİTİK: `awaiting_confirmation` bir `HashMap` — Rust'ın std
@@ -22388,7 +22390,9 @@ impl P2PCore {
                                 request_response::Event::Message { peer, message: request_response::Message::Request { channel, .. }, .. } => {
                                     let capable = keepalive_state.get(&peer).is_some_and(|s| s.quiet_capable);
                                     let quiet_ms = (saver && capable).then_some(window_ms);
-                                    let _ = swarm.behaviour_mut().keepalive.send_response(channel, KeepAliveResponse { quiet_ms });
+                                    if swarm.behaviour_mut().keepalive.send_response(channel, KeepAliveResponse { quiet_ms }).is_err() {
+                                        debug!("Keepalive answer to {} not sent (channel closed)", peer);
+                                    }
                                     if let Some(state) = keepalive_state.get_mut(&peer) {
                                         if !saver && state.outstanding.is_none() && !state.suspect && state.interval_ms > 0 {
                                             state.consecutive_failures = 0;
@@ -24126,7 +24130,7 @@ impl P2PCore {
                 // deleted and none in its place.
                 let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
                 // bkz. `generate_identity` — one identity per database.
-                let _ = tx.execute("DELETE FROM identities WHERE id != ?1", params![exported.identity_id]);
+                tx.execute("DELETE FROM identities WHERE id != ?1", params![exported.identity_id]).map_err(|e| e.to_string())?;
                 tx.execute(
                     "INSERT OR REPLACE INTO identities (id, primary_device) VALUES (?1, ?2)",
                     params![exported.identity_id, computed_fp],
