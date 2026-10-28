@@ -14100,28 +14100,25 @@ impl P2PCore {
     /// bkz. `remember_sibling_op`. Called when one of OUR messages is archived.
     /// Edits first, by stamp; a delete last.
     fn apply_pending_sibling_ops(&mut self, group_id: Option<&str>, chat_key: &str, target_message_id: &str) {
-        let ops: Vec<(Option<Vec<u8>>, i64)> = {
+        let ops: Vec<(i64, Option<Vec<u8>>, i64)> = {
             let Some(conn) = &self.db else { return };
             let Ok(mut stmt) = conn.prepare(
-                "SELECT new_text, edited_at_ms FROM pending_sibling_ops
+                "SELECT id, new_text, edited_at_ms FROM pending_sibling_ops
                  WHERE target_message_id = ?1 ORDER BY new_text IS NULL, edited_at_ms"
             ) else { return };
-            let rows: Vec<(Option<Vec<u8>>, i64)> = stmt
-                .query_map(params![target_message_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            let rows: Vec<(i64, Option<Vec<u8>>, i64)> = stmt
+                .query_map(params![target_message_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .map(|it| it.flatten().collect())
                 .unwrap_or_default();
             rows
         };
-        if ops.is_empty() {
-            return;
-        }
-        if let Some(conn) = &self.db {
-            let _ = conn.execute("DELETE FROM pending_sibling_ops WHERE target_message_id = ?1", params![target_message_id]);
-        }
-        for (sealed, edited_at_ms) in ops {
+        for (row_id, sealed, edited_at_ms) in ops {
+            // Each row goes once it applies: one that cannot be opened now
+            // (key not loaded) stays until its `KEEP_MS` expiry.
             let event = match sealed {
                 Some(blob) => {
                     let Some(text) = self.open_local_blob(&blob).and_then(|p| String::from_utf8(p).ok()) else { continue };
+                    self.delete_pending_sibling_op(row_id);
                     self.apply_edit_to_archive(group_id, chat_key, target_message_id, &text, edited_at_ms.max(0) as u64);
                     match group_id {
                         Some(gid) => serde_json::json!({"type": "group_edit", "group_id": gid, "message_id": target_message_id, "text": text}),
@@ -14129,6 +14126,7 @@ impl P2PCore {
                     }
                 }
                 None => {
+                    self.delete_pending_sibling_op(row_id);
                     self.apply_delete_to_archive(group_id, chat_key, target_message_id);
                     if let Some(gid) = group_id {
                         self.sign_own_group_tombstone(gid, target_message_id);
@@ -14140,6 +14138,12 @@ impl P2PCore {
                 }
             };
             self.attachment_events.push(event.to_string());
+        }
+    }
+
+    fn delete_pending_sibling_op(&self, row_id: i64) {
+        if let Some(conn) = &self.db {
+            let _ = conn.execute("DELETE FROM pending_sibling_ops WHERE id = ?1", params![row_id]);
         }
     }
 
@@ -14424,11 +14428,13 @@ impl P2PCore {
         if !self.group_author_proof_valid(group_id, message_id, &author, &text, sent_at.max(0) as u64, Some(proof)) {
             return;
         }
-        if let Some(conn) = &self.db {
-            let _ = conn.execute(
-                "UPDATE messages SET author_proof = ?1 WHERE message_id = ?2 AND group_id = ?3",
-                params![proof, message_id, group_id],
-            );
+        let Some(conn) = &self.db else { return };
+        if let Err(e) = conn.execute(
+            "UPDATE messages SET author_proof = ?1 WHERE message_id = ?2 AND group_id = ?3",
+            params![proof, message_id, group_id],
+        ) {
+            warn!("author_proof could not be stored ({}): {}", message_id, e);
+            return;
         }
         self.requeue_archive_row(Some(group_id), "", message_id);
     }
@@ -14436,8 +14442,9 @@ impl P2PCore {
     /// A sibling deleted our group message: this device signs the deletion
     /// too, so the row it hands on with history is taken.
     fn sign_own_group_tombstone(&mut self, group_id: &str, message_id: &str) {
-        if let Ok(proof) = self.sign_group_author(group_id, message_id, GROUP_TOMBSTONE) {
-            self.adopt_group_author_proof(group_id, message_id, Some(&proof));
+        match self.sign_group_author(group_id, message_id, GROUP_TOMBSTONE) {
+            Ok(proof) => self.adopt_group_author_proof(group_id, message_id, Some(&proof)),
+            Err(e) => warn!("Group tombstone could not be signed ({}): {}", message_id, e),
         }
     }
 
@@ -14556,7 +14563,21 @@ impl P2PCore {
     /// chat made the edit "rejected" and acked instead of buffered.
     fn edit_target_in_chat(&self, target_message_id: &str, group_id: Option<&str>, peer_fp: &str) -> bool {
         let chat_key = self.canonical_peer_key(peer_fp);
-        self.message_exists_in_chat(target_message_id, group_id, &chat_key) || self.file_row_exists(target_message_id)
+        if self.message_exists_in_chat(target_message_id, group_id, &chat_key) {
+            return true;
+        }
+        let Some(conn) = &self.db else { return false };
+        match group_id {
+            Some(gid) => conn.query_row(
+                "SELECT 1 FROM files WHERE file_id = ?1 AND group_id = ?2 LIMIT 1",
+                params![target_message_id, gid], |_| Ok(()),
+            ).is_ok(),
+            // A 1:1 file row keeps the device it came from or went to.
+            None => conn.query_row(
+                "SELECT peer_device_fingerprint FROM files WHERE file_id = ?1 AND group_id IS NULL",
+                params![target_message_id], |r| r.get::<_, String>(0),
+            ).map_or(false, |fp| self.canonical_peer_key(&fp) == chat_key),
+        }
     }
 
     /// Hedefi HENÜZ arşivde olmayan bir Edit/Delete'i tamponlar — bkz.
@@ -14597,8 +14618,13 @@ impl P2PCore {
             return;
         }
         if buf.len() >= MAX_EARLY_EDITS_DELETES_PER_TARGET {
-            // The sender's own oldest first, not another member's.
-            buf.remove(buf.iter().position(|e| e.1 == peer_fp).unwrap_or(0));
+            // The sender's own oldest goes, never another member's. With none
+            // of its own buffered it is not taken: unacked, it comes again.
+            let Some(i) = buf.iter().position(|e| e.1 == peer_fp) else {
+                warn!("Early Edit buffer full for target {}, not buffered", target_message_id);
+                return;
+            };
+            buf.remove(i);
         }
         buf.push((now, peer_fp.to_string(), sender_identity_id.to_string(), packet_message_id.to_string(), content));
         info!(
@@ -15980,7 +16006,13 @@ impl P2PCore {
             if !self.device_recently_seen(&peer_fp) {
                 continue;
             }
-            let content: MessageContent = match ciborium::from_reader(self.open_local_blob(&content_cbor).unwrap_or_default().as_slice()) {
+            // A decrypt failure (a wrong key passed once, keychain hiccup) is
+            // not a corrupt row: keep it for the next load.
+            let Some(plain) = self.open_local_blob(&content_cbor) else {
+                warn!("Durable retry row {} could not be decrypted, kept", message_id);
+                continue;
+            };
+            let content: MessageContent = match ciborium::from_reader(plain.as_slice()) {
                 Ok(c) => c,
                 Err(e) => {
                     // Bozuk satır YENİDEN DENENEMEZ (her açılışta aynı
@@ -15990,6 +16022,24 @@ impl P2PCore {
                     continue;
                 }
             };
+            // A parked group copy (H8) is resent only while the device's
+            // identity is still a member: a removed member got it forever.
+            let group_id = match &content {
+                MessageContent::Text { group_id: Some(g), .. }
+                | MessageContent::Edit { group_id: Some(g), .. }
+                | MessageContent::Delete { group_id: Some(g), .. }
+                | MessageContent::Reaction { group_id: Some(g), .. } => Some(g.clone()),
+                _ => None,
+            };
+            if let Some(gid) = group_id {
+                let member = self.known_remote_devices.get(&peer_fp)
+                    .map_or(true, |d| self.groups.get(&gid).map_or(false, |g| g.is_member(&d.identity_id)));
+                if !member {
+                    info!("Durable retry row {} dropped: device left group {}", message_id, gid);
+                    self.remove_durable_retry(&message_id);
+                    continue;
+                }
+            }
             // Güvenilirlik düzeltmesi ("restart sonrası balon sonsuza dek
             // 'error' kalıyor"): önceden buradan `send_message_content` (yeni
             // rastgele message_id) çağrılıyordu — arşivdeki balon ESKİ id'yi
@@ -16751,6 +16801,10 @@ impl P2PCore {
         }
         self.last_group_sync_sweep_at = now;
         if !self.pending_group_syncs.is_empty() {
+            // An identity that deleted its account never takes it: every
+            // publish to it is refused, so the entry stayed for good.
+            let deleted = &self.deleted_identities;
+            self.pending_group_syncs.retain(|(_, id), _| !deleted.contains(id));
             let pending: Vec<(String, String, GroupUpdate)> = self.pending_group_syncs.iter()
                 .map(|((gid, id), update)| (gid.clone(), id.clone(), update.clone()))
                 .collect();
@@ -16804,13 +16858,20 @@ impl P2PCore {
                 for content in queued {
                     if unsent.is_empty() {
                         let mut ok = false;
+                        let mut refused: Vec<String> = Vec::new();
                         for peer_fp in &devices {
                             match self.send_message_content(peer_fp.clone(), &content, None) {
                                 Ok(_) => ok = true,
-                                Err(e) => error!("group_sync_sweep: grup mesajı yine gönderilemedi: {}", e),
+                                Err(e) => {
+                                    error!("group_sync_sweep: grup mesajı yine gönderilemedi: {}", e);
+                                    refused.push(peer_fp.clone());
+                                }
                             }
                         }
                         if ok {
+                            // Same as `send_group_message_to_member`: the
+                            // devices that refused get a durable copy.
+                            self.park_device_copies(&refused, &content);
                             continue;
                         }
                     }
