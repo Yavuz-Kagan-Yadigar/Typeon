@@ -9,7 +9,8 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::gio;
-use zeroize::Zeroize;
+use gtk::glib;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::app::{self, App};
 use crate::core;
@@ -80,13 +81,13 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
             // M177: the notice is a toast, like the Android client's — the
             // transport can only be added when the network starts, so the
             // change lands at the next launch.
-            app.toast("Tor setting applies after a restart.");
-            if !enabled {
-                // Tor is the only transport this client has: without it the
-                // device cannot reach anybody, and the user should know that
-                // before they wait for a connection that never comes.
-                app.toast("Tor is off: the network will not start without Tor.");
-            }
+            // One toast: a second one replaces the first. Tor is the only
+            // transport, so off means no network at all.
+            app.toast(if enabled {
+                "Tor setting applies after a restart."
+            } else {
+                "Tor setting applies after a restart. With Tor off the network will not start."
+            });
         });
     }
     connectivity.add(&tor);
@@ -125,13 +126,23 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
     limit.set_value(limit_mb);
     {
         let app = app.clone();
+        let latest = Rc::new(std::cell::Cell::new(0u32));
         limit.connect_value_notify(move |row| {
             let bytes = (row.value() as u64) * 1024 * 1024;
             let mut prefs = app.prefs.borrow_mut();
             prefs.history_storage_limit_bytes = bytes;
             prefs.save();
             drop(prefs);
-            std::thread::spawn(move || core::set_history_storage_limit_bytes(bytes));
+            // Debounce: a held spin button emits many steps, and each core call
+            // can delete files. Only the value the user settled on is applied.
+            let ticket = latest.get().wrapping_add(1);
+            latest.set(ticket);
+            let latest = latest.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(600), move || {
+                if latest.get() == ticket {
+                    std::thread::spawn(move || core::set_history_storage_limit_bytes(bytes));
+                }
+            });
         });
     }
     storage.add(&limit);
@@ -309,28 +320,27 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
         let app = app.clone();
         let id = entry.server_id.clone();
         history.connect_active_notify(move |row| {
-            if row.is_active() {
-                // The archive root key is generated ONLY here — see
-                // `secrets::ensure_archive_key`. Generating it at first launch
-                // would mean a device that had not yet heard from its sibling
-                // uploads an archive the others cannot read.
-                match crate::secrets::ensure_archive_key(&app.data_dir) {
-                    Ok(ark) => {
+            let (app, id, on, row) = (app.clone(), id.clone(), row.is_active(), row.clone());
+            let data_dir = app.data_dir.clone();
+            app::run_in_background(
+                move || {
+                    if on {
+                        // The archive root key is generated ONLY here — see
+                        // `secrets::ensure_archive_key`. Generating it at first launch
+                        // would mean a device that had not yet heard from its sibling
+                        // uploads an archive the others cannot read.
+                        let ark = crate::secrets::ensure_archive_key(&data_dir)
+                            .map_err(|e| format!("Could not prepare the archive key: {e}"))?;
                         core::set_archive_root_key(&ark);
                     }
-                    Err(e) => {
-                        app.toast(&format!("Could not prepare the archive key: {}", e));
-                        row.set_active(false);
-                        return;
-                    }
-                }
-            }
-            let (app, id, on) = (app.clone(), id.clone(), row.is_active());
-            app::run_in_background(
-                move || core::set_server_history(&id, on),
+                    core::set_server_history(&id, on).map_err(|e| format!("Failed: {e}"))
+                },
                 move |result| {
                     if let Err(e) = result {
-                        app.toast(&format!("Failed: {}", e));
+                        app.toast(&e);
+                        if on {
+                            row.set_active(false);
+                        }
                     }
                 },
             );
@@ -997,7 +1007,9 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
         .build();
     {
         let app = app.clone();
-        passphrase.connect_activated(move |_| change_passphrase(&app, protected));
+        passphrase.connect_activated(move |_| {
+            change_passphrase(&app, secrets::is_passphrase_protected(&app.data_dir))
+        });
     }
     vault.add(&passphrase);
 
@@ -1080,16 +1092,24 @@ fn confirm_delete_account(app: &Rc<App>) {
                     let app_done = app_for_action.clone();
                     app::run_in_background(
                         || {
-                            if core::delete_account() >= 0 {
-                                let deadline = util::now_ms() + 15_000;
-                                while util::now_ms() < deadline
-                                    && core::account_deletion_pending() != 0
-                                {
-                                    std::thread::sleep(std::time::Duration::from_millis(500));
-                                }
+                            // A refused delete must not erase the device: the
+                            // notification never went out and could not be retried.
+                            if core::delete_account() < 0 {
+                                return false;
+                            }
+                            let deadline = util::now_ms() + 15_000;
+                            while util::now_ms() < deadline && core::account_deletion_pending() != 0 {
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                            }
+                            true
+                        },
+                        move |sent| {
+                            if sent {
+                                erase_profile_and_quit(&app_done);
+                            } else {
+                                app_done.toast("Could not delete the account. Nothing was erased.");
                             }
                         },
-                        move |()| erase_profile_and_quit(&app_done),
                     );
                 },
             );
@@ -1109,12 +1129,15 @@ fn erase_profile_and_quit(app: &Rc<App>) {
     let data_dir = app.data_dir.clone();
     let app = app.clone();
     app::run_in_background(
-        move || (crate::keyring::delete_key(&data_dir.to_string_lossy()), data_dir),
-        move |(keyring_result, data_dir)| {
+        move || {
+            let keyring_result = crate::keyring::delete_key(&data_dir.to_string_lossy());
+            (keyring_result, std::fs::remove_dir_all(&data_dir))
+        },
+        move |(keyring_result, removed)| {
             if let Err(error) = keyring_result {
                 eprintln!("typeon: could not remove the vault key: {error}");
             }
-            if let Err(error) = std::fs::remove_dir_all(&data_dir) {
+            if let Err(error) = removed {
                 app.toast(&format!("Could not erase the data directory: {error}"));
                 return;
             }
@@ -1201,25 +1224,19 @@ fn change_passphrase(app: &Rc<App>, currently_protected: bool) {
         if response != "apply" {
             return;
         }
-        let old = if currently_protected {
+        let old = Zeroizing::new(if currently_protected {
             current.text().to_string()
         } else {
             String::new()
-        };
+        });
         // Two Argon2id derivations: off the main thread. The passphrases are
         // zeroized as soon as the reseal is done, on every code path.
         let data_dir = app.data_dir.clone();
-        let new = next.text().to_string();
+        let new = Zeroizing::new(next.text().to_string());
         let removing = new.is_empty();
         let app = app.clone();
         app::run_in_background(
-            move || {
-                let (mut old, mut new) = (old, new);
-                let result = onboarding::reseal_vault(&data_dir, &old, &new);
-                old.zeroize();
-                new.zeroize();
-                result
-            },
+            move || onboarding::reseal_vault(&data_dir, &old, &new),
             move |result| match result {
                 Ok(()) => app.toast(if removing { "Passphrase removed." } else { "Passphrase updated." }),
                 Err(error) => app.toast(&error),
@@ -1253,7 +1270,7 @@ fn export_recovery(app: &Rc<App>) {
         if response != "export" {
             return;
         }
-        let passphrase = entry.text().to_string();
+        let passphrase = Zeroizing::new(entry.text().to_string());
         if passphrase.is_empty() {
             app_for_prompt.toast("A recovery file without a passphrase would protect nothing.");
             return;
@@ -1267,12 +1284,7 @@ fn export_recovery(app: &Rc<App>) {
         // Argon2id is deliberately slow — off the main thread it goes. The
         // passphrase is zeroized as soon as the export bytes exist.
         app::run_in_background(
-            move || {
-                let mut passphrase = passphrase;
-                let bytes = core::export_recovery(&passphrase);
-                passphrase.zeroize();
-                bytes
-            },
+            move || core::export_recovery(&passphrase),
             move |bytes| {
                 if bytes.is_empty() {
                     app.toast("Export failed.");
@@ -1369,9 +1381,10 @@ fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
                 // The rename keeps the mode, but the file is checked once
                 // more where it ended up: a location that cannot make it
                 // private must not keep the key set either.
+                // A failed stat proves nothing about the mode: keep the file.
                 let private = std::fs::metadata(&path)
                     .map(|meta| meta.permissions().mode() & 0o077 == 0)
-                    .unwrap_or(false);
+                    .unwrap_or(true);
                 if private {
                     app.toast(&format!("Recovery file written to {}", path.display()));
                 } else {
