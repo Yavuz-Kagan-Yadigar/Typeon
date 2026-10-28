@@ -35,6 +35,15 @@ class P2PApplication : Application() {
      */
     private var startedActivityCount = 0
 
+    companion object {
+        /** FLAG_SECURE on release builds only: debuggable builds stay capturable (adb screenshots in device tests). */
+        fun setSecure(activity: Activity, on: Boolean) {
+            if ((activity.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) return
+            if (on) activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+            else activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         // Plaintext a killed process left behind: a recording or an
@@ -106,6 +115,15 @@ class P2PApplication : Application() {
             override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) {
                 // The Recents card showed the last chat without the app password.
                 if (android.os.Build.VERSION.SDK_INT >= 33) activity.setRecentsScreenshotEnabled(false)
+                // No recents opt-out before API 33: chat screens get FLAG_SECURE there.
+                // Link QR, QR scan, camera and lock screens always.
+                if (activity is com.p2p.messenger.ui.LinkDeviceActivity ||
+                    activity is com.p2p.messenger.ui.QrScanActivity ||
+                    activity is com.p2p.messenger.ui.CameraCaptureActivity ||
+                    activity is com.p2p.messenger.ui.AppLockActivity ||
+                    (android.os.Build.VERSION.SDK_INT < 33 &&
+                        (activity is com.p2p.messenger.ui.ChatActivity || activity is com.p2p.messenger.ui.GroupChatActivity))
+                ) setSecure(activity, true)
                 // Spec dışı, kullanıcı isteği: Ayarlar'daki vurgu (accent)
                 // rengi — bkz. ThemePrefs.applyAccentColor dokümantasyonu.
                 ThemePrefs.applyAccentColor(activity)
