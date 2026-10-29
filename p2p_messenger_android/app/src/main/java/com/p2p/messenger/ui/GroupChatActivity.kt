@@ -2958,7 +2958,8 @@ class GroupChatActivity : AppCompatActivity() {
         if (fabBlinkAnimator?.isRunning == true) return
         fabBlinkAnimator = android.animation.ObjectAnimator.ofFloat(fabScrollToBottom, View.ALPHA, 1f, 0.25f).apply {
             duration = 500
-            repeatCount = android.animation.ValueAnimator.INFINITE
+            // Three blinks, ending opaque: an endless blink redrew the screen until scrolled down.
+            repeatCount = 5
             repeatMode = android.animation.ValueAnimator.REVERSE
             start()
         }

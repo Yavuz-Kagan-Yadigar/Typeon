@@ -1163,7 +1163,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val cached = stickerImages.get(attachment.fileId)
         if (cached != null) {
             holder.imgSticker.setImageDrawable(cached)
-            (cached as? android.graphics.drawable.AnimatedImageDrawable)?.start()
+            // A few loops, then the last frame: a looping sticker on screen kept
+            // the whole chat redrawing at ~35 fps (half a core on a 9S).
+            (cached as? android.graphics.drawable.AnimatedImageDrawable)?.apply { repeatCount = 2; start() }
         } else {
             holder.imgSticker.setImageDrawable(null)
             val provider = stickerImageProvider

@@ -1579,7 +1579,8 @@ class ChatActivity : AppCompatActivity() {
         if (fabBlinkAnimator?.isRunning == true) return
         fabBlinkAnimator = ObjectAnimator.ofFloat(fabScrollToBottom, View.ALPHA, 1f, 0.25f).apply {
             duration = 500L
-            repeatCount = ValueAnimator.INFINITE
+            // Three blinks, ending opaque: an endless blink redrew the screen until scrolled down.
+            repeatCount = 5
             repeatMode = ValueAnimator.REVERSE
             start()
         }
