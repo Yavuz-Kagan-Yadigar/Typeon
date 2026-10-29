@@ -1078,6 +1078,9 @@ pub fn jxl_to_png(src: &Path, out: &Path) -> Result<(), String> {
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(File::create(out).map_err(|e| e.to_string())?), width, height);
     encoder.set_color(color);
     encoder.set_depth(png::BitDepth::Eight);
+    // The default level spent ~4/5 of a hi-res open on zlib (13.8 MP: 1.86 s
+    // against 0.08 s on a desktop); the file is ~50 % larger.
+    encoder.set_compression(png::Compression::Fast);
     let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
     // Row by row: no second full-size buffer next to the rendered frame.
     let mut rows = writer.stream_writer().map_err(|e| e.to_string())?;

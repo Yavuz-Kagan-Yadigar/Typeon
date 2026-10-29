@@ -238,7 +238,6 @@ class GroupChatActivity : AppCompatActivity() {
 
     // Scroll-to-bottom FAB (see ChatActivity for the same fields/pattern).
     private lateinit var fabScrollToBottom: FloatingActionButton
-    private var fabBlinkAnimator: android.animation.ObjectAnimator? = null
 
     // --- Spec dışı, kullanıcı isteği: basılı tut/kaydet sesli mesaj (grup) —
     // bkz. ChatActivity AYNI alanlar/desen, tek fark gönderim
@@ -2947,28 +2946,18 @@ class GroupChatActivity : AppCompatActivity() {
         if (isRecyclerNearBottom()) {
             hideScrollToBottomFab()
         } else if (fabScrollToBottom.visibility != View.VISIBLE) {
+            com.p2p.messenger.util.ScrollDownFab.style(fabScrollToBottom, newMessage = false)
             fabScrollToBottom.visibility = View.VISIBLE
-            fabScrollToBottom.alpha = 1f
         }
     }
 
-    /** New message arrived while scrolled away — ensure visible and blinking. */
+    /** New message arrived while scrolled away: steady accent. */
     private fun blinkScrollToBottomFab() {
+        com.p2p.messenger.util.ScrollDownFab.style(fabScrollToBottom, newMessage = true)
         fabScrollToBottom.visibility = View.VISIBLE
-        if (fabBlinkAnimator?.isRunning == true) return
-        fabBlinkAnimator = android.animation.ObjectAnimator.ofFloat(fabScrollToBottom, View.ALPHA, 1f, 0.25f).apply {
-            duration = 500
-            // Three blinks, ending opaque: an endless blink redrew the screen until scrolled down.
-            repeatCount = 5
-            repeatMode = android.animation.ValueAnimator.REVERSE
-            start()
-        }
     }
 
     private fun hideScrollToBottomFab() {
-        fabBlinkAnimator?.cancel()
-        fabBlinkAnimator = null
-        fabScrollToBottom.alpha = 1f
         fabScrollToBottom.visibility = View.GONE
     }
 
@@ -3225,8 +3214,6 @@ class GroupChatActivity : AppCompatActivity() {
             syncGroupReadStateAsync()
         }
         resumedUnlocked = false
-        fabBlinkAnimator?.cancel()
-        fabBlinkAnimator = null
         ownStatusPollHandler.removeCallbacks(ownStatusPollRunnable)
         // bkz. ChatActivity onPause aynı notu — Activity görünür değilken
         // bir pulse animasyonunun arka planda vsync'e kayıtlı kalmaması için.

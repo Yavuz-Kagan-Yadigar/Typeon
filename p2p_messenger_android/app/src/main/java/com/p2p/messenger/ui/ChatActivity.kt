@@ -1,7 +1,5 @@
 package com.p2p.messenger.ui
 
-import android.animation.ObjectAnimator
-import android.animation.ValueAnimator
 import android.app.AlertDialog
 import android.content.ContentValues
 import android.content.Intent
@@ -219,7 +217,6 @@ class ChatActivity : AppCompatActivity() {
     private val stopTypingRunnable = Runnable { sendTypingState(false) }
 
     private lateinit var fabScrollToBottom: FloatingActionButton
-    private var fabBlinkAnimator: ObjectAnimator? = null
 
     private lateinit var layoutReplyPreview: View
     private lateinit var swipeHelper: ItemTouchHelper
@@ -1569,27 +1566,17 @@ class ChatActivity : AppCompatActivity() {
         if (isRecyclerNearBottom()) {
             hideScrollToBottomFab()
         } else if (fabScrollToBottom.visibility != View.VISIBLE) {
+            com.p2p.messenger.util.ScrollDownFab.style(fabScrollToBottom, newMessage = false)
             fabScrollToBottom.visibility = View.VISIBLE
-            fabScrollToBottom.alpha = 1f
         }
     }
 
     private fun blinkScrollToBottomFab() {
+        com.p2p.messenger.util.ScrollDownFab.style(fabScrollToBottom, newMessage = true)
         fabScrollToBottom.visibility = View.VISIBLE
-        if (fabBlinkAnimator?.isRunning == true) return
-        fabBlinkAnimator = ObjectAnimator.ofFloat(fabScrollToBottom, View.ALPHA, 1f, 0.25f).apply {
-            duration = 500L
-            // Three blinks, ending opaque: an endless blink redrew the screen until scrolled down.
-            repeatCount = 5
-            repeatMode = ValueAnimator.REVERSE
-            start()
-        }
     }
 
     private fun hideScrollToBottomFab() {
-        fabBlinkAnimator?.cancel()
-        fabBlinkAnimator = null
-        fabScrollToBottom.alpha = 1f
         fabScrollToBottom.visibility = View.GONE
     }
 
@@ -3042,8 +3029,6 @@ class ChatActivity : AppCompatActivity() {
             syncReadStateAsync()
         }
         resumedUnlocked = false
-        fabBlinkAnimator?.cancel()
-        fabBlinkAnimator = null
         sessionPollHandler.removeCallbacks(sessionPollRunnable)
         ownStatusPollHandler.removeCallbacks(ownStatusPollRunnable)
         peerStatusDot.cancelPulse()
