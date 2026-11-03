@@ -582,7 +582,7 @@ impl TrackingInstantNow {
     /// also,
     /// when working with checked time arithmetic,
     /// this can helpfully centralise the out-of-bounds error handling site.
-    pub fn checked_sub(&self, offset: Duration) -> Option<TrackingInstantOffsetNow> {
+    pub fn checked_sub(&self, offset: Duration) -> Option<TrackingInstantOffsetNow<'_>> {
         let threshold = self.now.checked_sub(offset)?;
         Some(TrackingInstantOffsetNow {
             threshold,
@@ -606,7 +606,7 @@ impl TrackingNow {
     ///
     /// For the same reason there is no
     /// `.checked_sub()` method on [`TrackingSystemTimeNow`].
-    pub fn checked_sub(&self, offset: Duration) -> Option<TrackingInstantOffsetNow> {
+    pub fn checked_sub(&self, offset: Duration) -> Option<TrackingInstantOffsetNow<'_>> {
         self.instant.checked_sub(offset)
     }
 }

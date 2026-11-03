@@ -449,7 +449,8 @@ pub fn decrypt_file_from_disk_with(
         }
     }
     let actual = hex::encode(hasher.finalize());
-    if actual != expected_sha256_hex {
+    // Offers carry the hex as the sender wrote it; the download check ignores case too.
+    if !actual.eq_ignore_ascii_case(expected_sha256_hex) {
         let _ = std::fs::remove_file(dest_plain_path);
         return Err(format!("SHA-256 mismatch: expected {}, got {}", expected_sha256_hex, actual));
     }
@@ -1011,7 +1012,10 @@ pub fn jxl_to_gif(src: &Path, out: &Path) -> Result<(), String> {
                 cache[key]
             });
         }
-        let delay = (u64::from(render.duration()) * span * tps_den * 100 / tps_num).min(u16::MAX as u64) as u16;
+        // u128: `tps_den` and the duration come from the file, their product
+        // overflowed u64.
+        let delay = (u128::from(render.duration()) * u128::from(span) * u128::from(tps_den) * 100 / u128::from(tps_num))
+            .min(u16::MAX as u128) as u16;
         // Disposal 2 (clear) under transparency, else 1 (keep).
         let packed = if has_alpha { 2 << 2 | 1 } else { 1 << 2 };
         gif.extend_from_slice(&[0x21, 0xF9, 4, packed]);

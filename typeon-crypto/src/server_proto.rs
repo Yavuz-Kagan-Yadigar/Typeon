@@ -64,7 +64,8 @@ pub const RELAY_PROTOCOL: &str = "/typeon/relay/1.0.0";
 
 /// Kablo formatı sürümü — `Hello`/`Welcome` içinde takas edilir.
 /// 2: `Register` answers `Registered { proof_needed, refused }`.
-pub const SERVER_PROTOCOL_VERSION: u16 = 3;
+/// 4: blob requests carry `upload_secret` instead of `blob_id`.
+pub const SERVER_PROTOCOL_VERSION: u16 = 4;
 
 /// Tek bir `Deposit`in azami yükü. Modül başındaki "Boyut tavanı" notuna
 /// bakın: codec'in sert sınırı 1 MiB, buradaki pay CBOR enum/alan
@@ -283,7 +284,12 @@ pub enum ServerRequest {
     /// `attachments.rs`'in "disk formatı = kablo formatı" özelliği sayesinde
     /// yeniden şifreleme YOK (bkz. `read_chunk_from_disk`).
     BlobPut {
-        blob_id: String,
+        /// The uploader's secret; the server stores the blob under
+        /// `blob_id_for_upload_secret(upload_secret)`, which is the file id
+        /// recipients download by. A recipient knows only that id, so it
+        /// cannot claim the blob before the sender uploads it.
+        #[serde(with = "serde_bytes")]
+        upload_secret: Vec<u8>,
         chunk_index: u32,
         total_chunks: u32,
         /// Bu blob'un parca ADIMI (bayt, AEAD etiketi HARIC).
@@ -309,13 +315,17 @@ pub enum ServerRequest {
     /// `enc_sha256` ŞİFRELİ baytlar üzerindedir — sunucu bunu doğrulayabilir
     /// (içeriği çözemese de) ve kırpılmış bir yüklemeyi asla servis etmez.
     BlobFinish {
-        blob_id: String,
+        #[serde(with = "serde_bytes")]
+        upload_secret: Vec<u8>,
         total_chunks: u32,
         #[serde(with = "serde_bytes")]
         enc_sha256: Vec<u8>,
     },
 
-    BlobDelete { blob_id: String },
+    BlobDelete {
+        #[serde(with = "serde_bytes")]
+        upload_secret: Vec<u8>,
+    },
 
     // --- sunucu -> istemci (yönü TERS olan tek istek) ---
     /// "Posta var." Yükün KENDİSİ burada taşınmaz ve kutu kimlikleri de
@@ -431,6 +441,10 @@ pub enum ServerErrorCode {
     /// `BlobFinish`: the stored bytes do not hash to `enc_sha256` (or cannot
     /// be read). Deterministic — sending the same finish again never works.
     BadHash,
+    /// `BlobFinish`: the server has no complete upload under this id (the
+    /// half-done blob was swept, or chunks are missing). Not permanent: the
+    /// client uploads again from chunk 0.
+    BlobIncomplete,
 }
 
 impl ServerErrorCode {
@@ -696,6 +710,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn blob_id_is_a_safe_hash_of_the_upload_secret() {
+        let id = blob_id_for_upload_secret(&[7u8; BLOB_UPLOAD_SECRET_LEN]).unwrap();
+        assert_eq!(id.len(), 32);
+        assert!(id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        assert_ne!(id, blob_id_for_upload_secret(&[8u8; BLOB_UPLOAD_SECRET_LEN]).unwrap());
+        // The id itself is no secret: sent back as one it names another blob.
+        assert!(blob_id_for_upload_secret(id.as_bytes()).is_none());
+        assert!(blob_id_for_upload_secret(&[7u8; 15]).is_none());
+    }
+
+    #[test]
     fn register_proof_is_bound_to_mailbox_enrollment_and_server() {
         let base = register_signing_input("mb_a", b"eid", "peer");
         assert_ne!(base, register_signing_input("mb_b", b"eid", "peer"));
@@ -743,6 +768,7 @@ mod tests {
         assert!(!ServerErrorCode::QuotaExceeded.is_permanent());
         assert!(!ServerErrorCode::RateLimited.is_permanent());
         assert!(!ServerErrorCode::UnknownMailbox.is_permanent());
+        assert!(!ServerErrorCode::BlobIncomplete.is_permanent());
         assert!(ServerErrorCode::NotEnrolled.needs_reenroll());
     }
 
@@ -832,6 +858,22 @@ where
 /// etiketine + CBOR çerçevelemesine rahatça yer bırakıyor hem de sınırın
 /// belirgin biçimde altında kalıyor.
 pub const MAX_BLOB_CHUNK_BYTES: usize = 768 * 1024;
+
+/// Length of a blob upload secret (`BlobPut.upload_secret`).
+pub const BLOB_UPLOAD_SECRET_LEN: usize = 16;
+
+/// The blob (= file) id an upload secret stands for: 32 lower-case hex
+/// characters. The sender picks the secret, names only this id in its
+/// `FileOffer`, and proves ownership on the server with the secret itself.
+/// `None` for a secret of the wrong length.
+pub fn blob_id_for_upload_secret(upload_secret: &[u8]) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    if upload_secret.len() != BLOB_UPLOAD_SECRET_LEN {
+        return None;
+    }
+    let hash = Sha256::new_with_prefix(b"typeon-blob-id-v1").chain_update(upload_secret).finalize();
+    Some(hex::encode(&hash[..16]))
+}
 
 #[cfg(test)]
 mod onion_addr_tests {

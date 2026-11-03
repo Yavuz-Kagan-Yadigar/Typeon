@@ -146,8 +146,11 @@ pub fn relay_mailbox_id(pair_key: &[u8]) -> String {
 
 /// Seeds (Ed25519, ML-DSA-87) of the key that signs `Register` for `mailbox`
 /// (`server_proto::MailboxProof`). `secret` is what the readers of the box
-/// hold and nobody else: the root key of a session box, the pair key of a
-/// relay box, a device-only secret for a first-contact box.
+/// hold and nobody else: the `session_mailbox` secret of a session box (both
+/// devices of the pair), the pair key of a relay box, and for a first-contact
+/// box the reading device's own Ed25519 signing key (whoever holds the code
+/// computes the id, but cannot make its proof). It is never the key that
+/// opens the box's envelopes.
 pub fn mailbox_proof_seeds(secret: &[u8], mailbox: &str) -> Result<([u8; 32], [u8; 32]), String> {
     let info = |tag: &[u8]| [tag, mailbox.as_bytes()].concat();
     Ok((

@@ -414,6 +414,9 @@ pub(crate) struct PendingArchive {
 #[derive(Debug, Clone)]
 pub(crate) struct PendingBlobUpload {
     pub file_id: String,
+    /// Proves on the server that this device uploads `file_id`
+    /// (`server_proto::blob_id_for_upload_secret`).
+    pub upload_secret: Vec<u8>,
     pub next_chunk: u32,
     pub total_chunks: u32,
     /// Şifreli dosyanın tamamının SHA-256'sı — `BlobFinish` ile gönderilir,
@@ -443,6 +446,9 @@ pub(crate) struct PendingBlobUpload {
     /// The hash running on its own thread (up to 4 GiB, not on the poll
     /// thread); `None` inside = the file could not be read.
     pub hashing: Option<std::sync::Arc<std::sync::OnceLock<Option<Vec<u8>>>>>,
+    /// Times a `BlobIncomplete` finish sent this upload back to chunk 0.
+    /// ponytail: in memory only, a process restart resets it.
+    pub restarts: u8,
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +513,10 @@ impl P2PCore {
         // The server an upload goes to: without it a restart started every
         // upload over from chunk 0 (see `server_flush_blobs`).
         let _ = conn.execute("ALTER TABLE server_blob_uploads ADD COLUMN server_id TEXT", []);
+        // Rows from before upload secrets cannot prove their blob any more.
+        if conn.execute("ALTER TABLE server_blob_uploads ADD COLUMN upload_secret BLOB", []).is_ok() {
+            let _ = conn.execute("DELETE FROM server_blob_uploads", []);
+        }
     }
 
     pub(crate) fn load_servers_from_db(&mut self) {
@@ -637,13 +647,14 @@ impl P2PCore {
             }
         }
         if let Ok(mut stmt) =
-            conn.prepare("SELECT file_id, next_chunk, total_chunks, server_id, enc_sha256 FROM server_blob_uploads")
+            conn.prepare("SELECT file_id, next_chunk, total_chunks, server_id, enc_sha256, upload_secret FROM server_blob_uploads")
         {
             if let Ok(rows) = stmt.query_map([], |r| {
                 let next_chunk = r.get::<_, i64>(1)? as u32;
                 let enc_sha256: Vec<u8> = r.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default();
                 Ok(PendingBlobUpload {
                     file_id: r.get(0)?,
+                    upload_secret: r.get::<_, Option<Vec<u8>>>(5)?.unwrap_or_default(),
                     next_chunk,
                     total_chunks: r.get::<_, i64>(2)? as u32,
                     inflight: HashSet::new(),
@@ -665,6 +676,7 @@ impl P2PCore {
                     server_id: r.get(3)?,
                     enc_sha256: (enc_sha256.len() == 32).then_some(enc_sha256),
                     hashing: None,
+                    restarts: 0,
                 })
             }) {
                 self.server_blob_uploads = rows.flatten().collect();
@@ -1462,6 +1474,17 @@ impl P2PCore {
     pub(crate) fn server_sweep(&mut self) {
         if self.servers.is_empty() {
             return;
+        }
+        // The head upload's `.enc` hash finished on its thread: only the blob
+        // path goes on (a forced full sweep every turn did a Register diff,
+        // fetch and archive checks for the whole wait).
+        let hashed = self.server_blob_uploads.first()
+            .filter(|u| u.hashing.as_ref().is_some_and(|c| c.get().is_some()))
+            .and_then(|u| u.server_id.clone());
+        if let Some(sid) = hashed {
+            if let Some(peer_id) = self.server_rt.get(&sid).and_then(|r| r.peer_id) {
+                self.server_flush_blobs(&sid, peer_id);
+            }
         }
         // Radio saver (see `RADIO_WINDOW_MS`): inside the window only. New
         // mail still arrives at once as server push over the open connection.
@@ -2430,6 +2453,9 @@ impl P2PCore {
             }
             (ServerInflight::BlobFinish { blob_id, .. }, ServerResponse::Ok) => {
                 self.forget_blob_upload(&blob_id);
+            }
+            (ServerInflight::BlobFinish { server_id, blob_id }, ServerResponse::Err(ServerErrorCode::BlobIncomplete)) => {
+                self.restart_blob_upload(&blob_id, &server_id);
             }
             // A refused finish never succeeds with the same bytes: drop the
             // upload (the direct peer path still serves the file) so it does
@@ -3597,8 +3623,10 @@ impl P2PCore {
             } else {
                 // Sunucu arşivi KİMLİK bazlı (`conv_key` = identity_id) ama
                 // yerel arşiv CİHAZ fingerprint'i bazlı — karşı tarafın
-                // güncel aktif cihazına yazıyoruz.
-                match self.resolve_active_device_for_identity(conv_key) {
+                // güncel aktif cihazına yazıyoruz. The chat key, as everywhere
+                // else (`canonical_device_for_identity`): under another device
+                // the rows were stored where the chat never looks.
+                match self.canonical_device_for_identity(conv_key) {
                     Some(fp) => self.archive_message(
                         &fp,
                         &archived.direction,
@@ -3648,7 +3676,7 @@ impl P2PCore {
             });
             if group {
                 event["group_id"] = serde_json::json!(conv_key);
-            } else if let Some(fp) = self.resolve_active_device_for_identity(conv_key) {
+            } else if let Some(fp) = self.canonical_device_for_identity(conv_key) {
                 event["peer"] = serde_json::json!(fp);
             }
             self.attachment_events.push(event.to_string());
@@ -3669,16 +3697,33 @@ impl P2PCore {
 // yükleme fiili yok.
 
 impl P2PCore {
+    /// The secret a file's server blob is uploaded with; its hash
+    /// (`server_proto::blob_id_for_upload_secret`) is the file id. Derived
+    /// from the local history key and `file_key`: recipients hold `file_key`
+    /// but not the history key, so they cannot claim the blob first.
+    pub(crate) fn blob_upload_secret(&self, file_key: &[u8; 32]) -> Option<Vec<u8>> {
+        let key = self.history_key.as_ref()?;
+        let hash = Sha256::new_with_prefix(b"typeon-blob-upload-v1").chain_update(key).chain_update(file_key).finalize();
+        Some(hash[..server_proto::BLOB_UPLOAD_SECRET_LEN].to_vec())
+    }
+
     /// Şifrelenmiş bir dosyayı sunucuya yüklemek üzere kuyruğa alır.
-    pub(crate) fn queue_blob_upload(&mut self, file_id: &str, total_chunks: u32) {
+    pub(crate) fn queue_blob_upload(&mut self, file_id: &str, file_key: &[u8; 32], total_chunks: u32) {
         if !self.servers.iter().any(|s| s.route_messages) {
             return;
         }
         if self.server_blob_uploads.iter().any(|u| u.file_id == file_id) {
             return;
         }
+        let Some(upload_secret) = self.blob_upload_secret(file_key) else { return };
+        // A file id that is not the hash of this secret (one not made by
+        // `begin_outgoing_file`) cannot be uploaded under its own name.
+        if server_proto::blob_id_for_upload_secret(&upload_secret).as_deref() != Some(file_id) {
+            return;
+        }
         let up = PendingBlobUpload {
             file_id: file_id.to_string(),
+            upload_secret,
             next_chunk: 0,
             total_chunks,
             // Şifreli baytların hash'i `BlobFinish` anında `sha256_file` ile
@@ -3694,12 +3739,13 @@ impl P2PCore {
             server_id: None,
             enc_sha256: None,
             hashing: None,
+            restarts: 0,
         };
         if let Some(conn) = &self.db {
             let _ = conn.execute(
-                "INSERT OR REPLACE INTO server_blob_uploads (file_id, next_chunk, total_chunks, enc_sha256, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![up.file_id, up.next_chunk as i64, up.total_chunks as i64, Vec::<u8>::new(), current_time_ms() as i64],
+                "INSERT OR REPLACE INTO server_blob_uploads (file_id, next_chunk, total_chunks, enc_sha256, created_at, upload_secret)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![up.file_id, up.next_chunk as i64, up.total_chunks as i64, Vec::<u8>::new(), current_time_ms() as i64, up.upload_secret],
             );
         }
         self.server_blob_uploads.push(up);
@@ -3754,7 +3800,7 @@ impl P2PCore {
                     }
                 };
                 let req = ServerRequest::BlobPut {
-                    blob_id: up.file_id.clone(),
+                    upload_secret: up.upload_secret.clone(),
                     chunk_index: idx,
                     chunk_size: chunk_size as u32,
                     total_chunks: up.total_chunks,
@@ -3813,11 +3859,8 @@ impl P2PCore {
                     self.finish_blob_upload(&up.file_id);
                     return;
                 }
-                // Still hashing: look again next turn.
-                None => {
-                    self.server_sweep_at = 0;
-                    return;
-                }
+                // Still hashing: `server_sweep` looks again each turn.
+                None => return,
             };
             if let Some(u) = self.server_blob_uploads.first_mut() {
                 u.enc_sha256 = Some(enc_sha256.clone());
@@ -3830,7 +3873,7 @@ impl P2PCore {
                 );
             }
             let req = ServerRequest::BlobFinish {
-                blob_id: up.file_id.clone(),
+                upload_secret: up.upload_secret.clone(),
                 total_chunks: up.total_chunks,
                 enc_sha256,
             };
@@ -3870,20 +3913,52 @@ impl P2PCore {
                 );
             }
         }
-        // Pencereyi beklemeden yeniden doldur.
+        // Pencereyi beklemeden yeniden doldur: the blob path only, not a
+        // full sweep per acked chunk. Only for the server the head upload
+        // goes to (`server_flush_blobs` would move it to this one).
+        let head_here = self.server_blob_uploads.first().is_some_and(|u| u.server_id.as_deref() == Some(server_id));
+        if let Some(peer_id) = self.server_rt.get(server_id).and_then(|r| r.peer_id).filter(|_| head_here) {
+            self.server_flush_blobs(server_id, peer_id);
+        }
+    }
+
+    /// The server lost the upload (swept while we were offline, or chunks
+    /// missing): send every chunk again. Gives up after a few rounds so a
+    /// server that keeps losing it cannot loop the upload for ever.
+    fn restart_blob_upload(&mut self, file_id: &str, server_id: &str) {
+        const MAX_BLOB_RESTARTS: u8 = 3;
+        let Some(up) = self
+            .server_blob_uploads
+            .iter_mut()
+            .find(|u| u.file_id == file_id && u.server_id.as_deref() == Some(server_id))
+        else {
+            return;
+        };
+        if up.restarts >= MAX_BLOB_RESTARTS {
+            warn!("Sunucu blob'u tekrar tekrar kaybetti, yükleme bırakıldı: {}", file_id);
+            self.finish_blob_upload(file_id);
+            return;
+        }
+        up.restarts += 1;
+        up.inflight.clear();
+        up.done.clear();
+        up.next_chunk = 0;
+        if let Some(conn) = &self.db {
+            let _ = conn.execute("UPDATE server_blob_uploads SET next_chunk = 0 WHERE file_id = ?1", params![file_id]);
+        }
         self.server_sweep_at = 0;
     }
 
     /// Gives an upload up. Chunks already on a server are deleted there
     /// (`BlobDelete`), or they held its quota until the 24 h sweep.
     pub(crate) fn finish_blob_upload(&mut self, file_id: &str) {
-        let started = self
-            .server_blob_uploads
-            .iter()
-            .find(|u| u.file_id == file_id)
-            .and_then(|u| u.server_id.clone().filter(|_| !u.done.is_empty() || !u.inflight.is_empty()));
-        if let Some(peer_id) = started.and_then(|sid| self.server_rt.get(&sid).and_then(|r| r.peer_id)) {
-            let _ = self.send_server_request(peer_id, ServerRequest::BlobDelete { blob_id: file_id.to_string() });
+        let started = self.server_blob_uploads.iter().find(|u| u.file_id == file_id).and_then(|u| {
+            u.server_id.clone().filter(|_| !u.done.is_empty() || !u.inflight.is_empty()).map(|sid| (sid, u.upload_secret.clone()))
+        });
+        if let Some((peer_id, upload_secret)) =
+            started.and_then(|(sid, secret)| self.server_rt.get(&sid).and_then(|r| r.peer_id).map(|p| (p, secret)))
+        {
+            let _ = self.send_server_request(peer_id, ServerRequest::BlobDelete { upload_secret });
         }
         self.forget_blob_upload(file_id);
     }

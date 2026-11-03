@@ -235,7 +235,7 @@ pub(crate) fn ipts_channel(
 /// Lock the shared state and obtain a lock guard
 ///
 /// Does not do any notification.
-fn lock_shared(shared: &Shared) -> MutexGuard<PublishIptSet> {
+fn lock_shared(shared: &Shared) -> MutexGuard<'_, PublishIptSet> {
     // Propagating panics is fine since if either the manager or the publisher crashes,
     // the other one cannot survive.
     shared.lock().expect("IPT set shared state poisoned")

@@ -209,6 +209,10 @@ fn invite(args: &[String]) {
             // 0 (ya da negatif) = SINIRSIZ — bkz. `Store::create_invite`.
             let uses = arg_num(args, 2, 1);
             let days = arg_num(args, 3, 7);
+            if days < 1 {
+                eprintln!("Gün sayısı en az 1 olmalı: {days}");
+                std::process::exit(2);
+            }
             // An overflow wrapped negative, which means "never expires".
             let Some(ttl_ms) = days.checked_mul(24 * 60 * 60 * 1000) else {
                 eprintln!("Gün sayısı çok büyük: {days}");

@@ -261,6 +261,8 @@ struct Remote {
     /// Our decoder for this sender lost sync (dropped frame, late join):
     /// ask for a keyframe in the next report.
     want_keyframe: bool,
+    /// Our decoder cannot take this sender's HEVC: every report asks for H.264.
+    want_avc: bool,
     /// Last `KIND_STATE` flags from this sender.
     muted: bool,
     video_off: bool,
@@ -270,7 +272,7 @@ impl Remote {
     fn new(fp: &str, slot: u8, key: [u8; 32], sid: [u8; 8]) -> Self {
         Remote {
             fp: fp.to_string(), slot, key: Zeroizing::new(key), sid, max_seq: 0, seen: 0, last_rx_ms: 0, last_rx: None,
-            delay_ewma: 0.0, delay_min: 0.0, samples: 0, via: None, last_report_ms: 0, want_keyframe: false,
+            delay_ewma: 0.0, delay_min: 0.0, samples: 0, via: None, last_report_ms: 0, want_keyframe: false, want_avc: false,
             muted: false, video_off: false,
         }
     }
@@ -365,6 +367,8 @@ struct Media {
     reports: HashMap<String, (u32, u64)>,
     /// A receiver asked us for a keyframe; Kotlin takes it via `media_take_keyframe_request`.
     keyframe_asked: bool,
+    /// A receiver cannot decode our HEVC; Kotlin takes it via `media_take_avc_request`.
+    avc_asked: bool,
     /// When `keyframe_asked` was last set (`KEYFRAME_MIN_MS`).
     keyframe_at: u64,
     /// Encrypted media bytes queued out (per copy) / accepted in.
@@ -647,6 +651,9 @@ fn media_on_packet_via(packet: &[u8], via: Option<PeerId>) {
         if pt.len() >= 5 + 10 && pt[5..13] == m.sid {
             let q = u16::from_be_bytes([pt[13], pt[14]]) as u32;
             m.reports.insert(fp.clone(), (q, now));
+            if pt.len() >= 16 && pt[15] & 2 != 0 {
+                m.avc_asked = true;
+            }
             if pt.len() >= 16 && pt[15] & 1 != 0 && now.saturating_sub(m.keyframe_at) >= KEYFRAME_MIN_MS {
                 m.keyframe_asked = true;
                 m.keyframe_at = now;
@@ -658,7 +665,7 @@ fn media_on_packet_via(packet: &[u8], via: Option<PeerId>) {
         r.last_report_ms = now;
         let mut p = sid.to_vec();
         p.extend_from_slice(&(r.queue_ms().min(u16::MAX as u32) as u16).to_be_bytes());
-        p.push(r.want_keyframe as u8);
+        p.push(r.want_keyframe as u8 | (r.want_avc as u8) << 1);
         r.want_keyframe = false;
         p
     });
@@ -698,6 +705,20 @@ fn media_on_packet_via(packet: &[u8], via: Option<PeerId>) {
 /// Kotlin's decoder for `slot` cannot decode until the next keyframe.
 pub fn media_request_keyframe(slot: u8) {
     media().remotes.values_mut().filter(|r| r.slot == slot).for_each(|r| r.want_keyframe = true);
+}
+
+/// Kotlin's HEVC decoder for `slot` failed before its first frame: ask that
+/// sender for H.264 (and a keyframe) in every report from now on.
+pub fn media_request_avc(slot: u8) {
+    media().remotes.values_mut().filter(|r| r.slot == slot).for_each(|r| {
+        r.want_avc = true;
+        r.want_keyframe = true;
+    });
+}
+
+/// Some receiver asked for H.264 since the last call.
+pub fn media_take_avc_request() -> bool {
+    std::mem::take(&mut media().avc_asked)
 }
 
 /// Some receiver asked for a keyframe since the last call.
@@ -1370,6 +1391,18 @@ impl P2PCore {
                 self.call = Some(s);
             }
         }
+        // Group call: a participant silent that long (phone died, no Hangup)
+        // leaves, or every frame went on being sealed and sent to it for the
+        // rest of the call. Its state packets alone arrive every second.
+        if let Some(s) = self.call.as_mut().filter(|s| s.phase == CallPhase::Active && s.group_id.is_some()) {
+            let lost = Duration::from_millis(MEDIA_LOST_MS);
+            let gone: Vec<String> = s.joined.iter().filter(|fp| media_rx_age(fp).map_or(false, |a| a > lost)).cloned().collect();
+            for fp in gone {
+                info!("Arama: {} sn sessiz kalan katılımcı çıkarıldı", MEDIA_LOST_MS / 1000);
+                s.joined.remove(&fp);
+                media_remove_remote(&fp);
+            }
+        }
         let Some(s) = &self.call else { return };
         let now = current_time_ms();
         let ringing_too_long = s.started.elapsed() > Duration::from_millis(RING_TIMEOUT_MS);
@@ -1537,7 +1570,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_endCall<'local>(_env: JNIEn
 
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_callState<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
-    let out = crate::catch_panic(|| crate::core_lock().call_state_json()).unwrap_or_else(|_| "{\"state\":\"idle\"}".to_string());
+    let out = crate::catch_panic(|| crate::core_lock_read().call_state_json()).unwrap_or_else(|_| "{\"state\":\"idle\"}".to_string());
     crate::safe_new_jstring(&mut env, out)
 }
 
@@ -1560,6 +1593,16 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_callRecv<'local>(mut env: J
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_callRequestKeyframe<'local>(_env: JNIEnv<'local>, _class: JClass<'local>, slot: jint) {
     let _ = crate::catch_panic(move || media_request_keyframe(slot.clamp(0, 255) as u8));
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_callRequestAvc<'local>(_env: JNIEnv<'local>, _class: JClass<'local>, slot: jint) {
+    let _ = crate::catch_panic(move || media_request_avc(slot.clamp(0, 255) as u8));
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_callTakeAvcRequest<'local>(_env: JNIEnv<'local>, _class: JClass<'local>) -> jboolean {
+    crate::catch_panic(media_take_avc_request).unwrap_or(false) as jboolean
 }
 
 #[no_mangle]

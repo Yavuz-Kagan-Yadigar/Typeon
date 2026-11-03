@@ -48,7 +48,7 @@ const MAX_SKIPPED_KEYS: usize = 1000;
 /// `MAX_SKIPPED_KEYS` keys are kept.
 // ponytail: a peer that sent more than this many never-delivered packets on
 // one chain stays undecryptable until the next rotation or handshake redo.
-const MAX_SKIP_AHEAD: u32 = 10_000;
+const MAX_SKIP_AHEAD: u32 = 2_000;
 
 /// The chain a rotation replaced is dropped this long after that rotation,
 /// even if no newer one came: a late packet older than this stays unread,

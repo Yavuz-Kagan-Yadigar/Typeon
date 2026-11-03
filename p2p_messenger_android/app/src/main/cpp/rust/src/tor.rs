@@ -66,6 +66,15 @@ impl TorStatus {
     }
 }
 
+/// Sets a bootstrap result, except over `Failed`: that one means the inbound
+/// bridge ended, and a later bootstrap does not bring it back.
+fn set_status(status: &Mutex<TorStatus>, new: TorStatus) {
+    let mut s = status.lock().unwrap_or_else(|p| p.into_inner());
+    if *s != TorStatus::Failed {
+        *s = new;
+    }
+}
+
 /// Inbound onion streams bridged at once. A peer needs one per connection.
 const MAX_INBOUND_ONION_STREAMS: usize = 64;
 /// Inbound streams one rendezvous circuit may hold open.
@@ -134,12 +143,12 @@ impl TorHandle {
                 let Some(client) = client.upgrade() else { break };
                 match client.bootstrap().await {
                     Ok(()) => {
-                        *status.lock().unwrap_or_else(|p| p.into_inner()) = TorStatus::Ready;
+                        set_status(&status, TorStatus::Ready);
                         log::info!("Tor: ağ değişikliği sonrası bootstrap teyit edildi");
                         break;
                     }
                     Err(e) => {
-                        *status.lock().unwrap_or_else(|p| p.into_inner()) = TorStatus::Bootstrapping;
+                        set_status(&status, TorStatus::Bootstrapping);
                         log::warn!("Tor: ağ değişikliği sonrası bootstrap henüz tamam değil ({delay:?} sonra yeniden): {e}");
                         tokio::time::sleep(delay).await;
                         delay = (delay * 2).min(std::time::Duration::from_secs(60));
@@ -168,15 +177,22 @@ impl TorHandle {
         // A power loss mid-write leaves a state file (guards, intro points)
         // that arti refuses on every start: the server never came back. That
         // state is a network cache; the onion identity is in `keystore/`,
-        // which stays. Cleared once, then one more try.
-        let start = || -> Result<_, String> {
+        // which stays. Set aside once, then one more try.
+        // The error says whether the state may be at fault: an I/O error, a
+        // lock still held or a permission problem is not, and clearing the
+        // state for it only threw the chosen guards away.
+        use arti_client::{ErrorKind, HasKind};
+        let state_suspect = |e: &arti_client::Error| {
+            !matches!(e.kind(), ErrorKind::PersistentStateAccessFailed | ErrorKind::LocalResourceAlreadyInUse | ErrorKind::FsPermissions)
+        };
+        let start = || -> Result<_, (String, bool)> {
             let client = TorClient::with_runtime(runtime.clone())
-                .config(client_config(state_dir, cache_dir)?)
+                .config(client_config(state_dir, cache_dir).map_err(|e| (e, false))?)
                 .create_unbootstrapped()
-                .map_err(|e| format!("Arti client: {e}"))?;
+                .map_err(|e| (format!("Arti client: {e}"), state_suspect(&e)))?;
             let nickname: tor_hsservice::HsNickname = ONION_NICKNAME
                 .parse()
-                .map_err(|e| format!("Onion nickname: {e}"))?;
+                .map_err(|e| (format!("Onion nickname: {e}"), false))?;
             // One libp2p connection = one stream; a peer redialing needs a
             // few. Without this one rendezvous circuit could take all
             // `MAX_INBOUND_ONION_STREAMS` slots (arti default 65535).
@@ -184,22 +200,36 @@ impl TorHandle {
                 .nickname(nickname)
                 .max_concurrent_streams_per_circuit(MAX_STREAMS_PER_CIRCUIT)
                 .build()
-                .map_err(|e| format!("Onion config: {e}"))?;
+                .map_err(|e| (format!("Onion config: {e}"), false))?;
             let (service, rend_requests) = client
                 .launch_onion_service(svc_config)
-                .map_err(|e| format!("Onion service başlatılamadı: {e}"))?;
+                .map_err(|e| (format!("Onion service başlatılamadı: {e}"), state_suspect(&e)))?;
             Ok((client, service, rend_requests))
         };
-        // Any start error, not only arti's "corrupted data in persistent
-        // state" text: a wording change or another corruption kind would
-        // otherwise skip the recovery and fail every start forever.
+        // Every other error kind, not only "corrupted data in persistent
+        // state": another corruption kind would otherwise skip the recovery
+        // and fail every start forever. The old state is kept aside and put
+        // back when the clean start fails too.
         let (client, service, rend_requests) = match start() {
-            Err(e) => {
-                log::warn!("Tor: start failed, state cleared, retrying once ({e})");
-                for dir in ["state", "hss"] {
-                    let _ = std::fs::remove_dir_all(std::path::Path::new(state_dir).join(dir));
+            Err((e, false)) => return Err(e),
+            Err((e, true)) => {
+                log::warn!("Tor: start failed, state set aside, retrying once ({e})");
+                let dirs = ["state", "hss"].map(|d| std::path::Path::new(state_dir).join(d));
+                for dir in &dirs {
+                    let bak = dir.with_extension("bak");
+                    let _ = std::fs::remove_dir_all(&bak);
+                    let _ = std::fs::rename(dir, &bak);
                 }
-                start()?
+                match start() {
+                    Ok(v) => v,
+                    Err((e, _)) => {
+                        for dir in &dirs {
+                            let _ = std::fs::remove_dir_all(dir);
+                            let _ = std::fs::rename(dir.with_extension("bak"), dir);
+                        }
+                        return Err(e);
+                    }
+                }
             }
             Ok(v) => v,
         };
@@ -244,13 +274,13 @@ impl TorHandle {
                             if let Some(hsid) = service_bg.onion_name() {
                                 *onion_bg.lock().unwrap_or_else(|p| p.into_inner()) = Some(hsid.to_string());
                             }
-                            *status_bg.lock().unwrap_or_else(|p| p.into_inner()) = TorStatus::Ready;
+                            set_status(&status_bg, TorStatus::Ready);
                             log::info!("Tor: bootstrap tamam, onion service yayında");
                             break;
                         }
                         Err(e) => {
                             // Still retrying: same status as the notify loop.
-                            *status_bg.lock().unwrap_or_else(|p| p.into_inner()) = TorStatus::Bootstrapping;
+                            set_status(&status_bg, TorStatus::Bootstrapping);
                             log::error!("Tor bootstrap başarısız ({delay:?} sonra yeniden denenecek): {e}");
                             drop((client_bg, service_bg));
                             tokio::time::sleep(delay).await;

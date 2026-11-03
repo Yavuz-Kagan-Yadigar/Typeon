@@ -145,12 +145,21 @@ const MAX_HASH_WAITERS: usize = 8;
 const MAX_RELAY_STREAMS: usize = 256;
 /// Of those, one peer at once (a call holds one; the rest wait out a replace).
 const MAX_RELAY_STREAMS_PER_PEER: usize = 4;
-/// `Enroll`/`Rebind` and `Register` proof hybrid signature checks per `RATE_WINDOW_MS`,
-/// server-wide: ML-DSA-87 is the expensive step and PeerIds are free, so a
-/// per-peer limit bounds nothing.
-/// ponytail: a flood also starves real enrollments and new-mailbox proofs for
-/// the window (mail is not affected); per-invite budgets if that matters.
+/// `Enroll`/`Rebind` hybrid signature checks per `RATE_WINDOW_MS`, server-wide:
+/// ML-DSA-87 is the expensive step and PeerIds are free, so only a global pool
+/// bounds the CPU. Each peer gets `ENROLL_VERIFIES_PER_PEER` of it.
+/// ponytail: many fresh PeerIds still drain the pool for the window (mail is
+/// not affected); per-invite budgets if that matters.
 const ENROLL_VERIFIES_PER_MINUTE: u32 = 120;
+/// One peer's share of `ENROLL_VERIFIES_PER_MINUTE`: a device enrolls or
+/// rebinds once, so a few retries cover it.
+const ENROLL_VERIFIES_PER_PEER: u32 = 4;
+/// `Register` proof checks per `RATE_WINDOW_MS`, server-wide. A pool of its
+/// own: a proof flood from enrolled peers cannot starve `Enroll`/`Rebind`.
+const REGISTER_VERIFIES_PER_MINUTE: u32 = 256;
+/// One enrolled peer's share of `REGISTER_VERIFIES_PER_MINUTE`: one full
+/// `Register`, so no single peer holds more than a quarter of the pool.
+const REGISTER_VERIFIES_PER_PEER: u32 = server_proto::MAX_REGISTER_PROOFS as u32;
 /// 2026-01-01 UTC. A wall clock before this is wrong (phone booted with a
 /// 1970/2020 RTC): no TTL sweep runs on it.
 const SANE_WALL_FLOOR_MS: i64 = 1_767_225_600_000;
@@ -410,6 +419,10 @@ struct ConnState {
     chunks_in_window: u32,
     /// `mono_ms` of the peer's first open connection, see `UNENROLLED_GRACE_MS`.
     connected_at: u64,
+    /// (window start `mono_ms`, checks): this peer's share of the
+    /// `Enroll`/`Rebind` and the `Register` verify pools.
+    enroll_verifies: (u64, u32),
+    register_verifies: (u64, u32),
 }
 
 pub struct ServerCore {
@@ -459,10 +472,14 @@ pub struct ServerCore {
     relay_pairs: HashMap<(PeerId, PeerId), u64>,
     /// An Ack or Cancel removed mail: `maybe_sweep` recounts the quotas.
     mail_recount_due: bool,
+    /// `Store::data_version` at the last revoke scan (see `maybe_sweep`).
+    revoke_scan_version: i64,
     /// (`mono_ms` of the read, bytes) for `total_budget_exceeded`.
     total_cache: std::cell::Cell<(u64, u64)>,
     /// (window start `mono_ms`, checks) for `ENROLL_VERIFIES_PER_MINUTE`.
     verify_window: (u64, u32),
+    /// The same for `REGISTER_VERIFIES_PER_MINUTE`.
+    register_verify_window: (u64, u32),
 }
 
 /// What the embedding app tells the running loop (Android JNI).
@@ -676,8 +693,10 @@ impl ServerCore {
             relay_budget: HashMap::new(),
             relay_pairs: HashMap::new(),
             mail_recount_due: false,
+            revoke_scan_version: -1,
             total_cache: std::cell::Cell::new((0, 0)),
             verify_window: (0, 0),
+            register_verify_window: (0, 0),
         })
     }
 
@@ -844,6 +863,8 @@ impl ServerCore {
                     requests_in_window: 0,
                     chunks_in_window: 0,
                     connected_at: now,
+                    enroll_verifies: (0, 0),
+                    register_verifies: (0, 0),
                 });
                 if num_established.get() == 1 {
                     conn.connected_at = now;
@@ -998,7 +1019,7 @@ impl ServerCore {
         if !ct_eq(&client_challenge, &challenge) {
             return ServerResponse::Err(ServerErrorCode::BadSignature);
         }
-        if !self.verify_budget(1) {
+        if !self.verify_budget(peer, false, 1) {
             self.stats.rejected += 1;
             return ServerResponse::Err(ServerErrorCode::RateLimited);
         }
@@ -1133,7 +1154,7 @@ impl ServerCore {
         if self.store.is_key_blocked(&existing.enroll_pk) {
             return ServerResponse::Err(ServerErrorCode::Revoked);
         }
-        if !self.verify_budget(1) {
+        if !self.verify_budget(peer, false, 1) {
             self.stats.rejected += 1;
             return ServerResponse::Err(ServerErrorCode::RateLimited);
         }
@@ -1248,10 +1269,10 @@ impl ServerCore {
             ServerRequest::Register { add, drop, proofs } => {
                 // Only a proof for an id of `add` is verified, and only one
                 // with a valid signature reaches the store.
-                // Each proof is a hybrid verify: same server-wide budget as
-                // Enroll/Rebind, or 64 enrollments x 64 proofs pin the CPU.
+                // Each proof is a hybrid verify: a server-wide budget, or 64
+                // enrollments x 64 proofs pin the CPU.
                 let checks = proofs.iter().filter(|p| add.contains(&p.mailbox)).count() as u32;
-                if checks > 0 && !self.verify_budget(checks) {
+                if checks > 0 && !self.verify_budget(peer, true, checks) {
                     return ServerResponse::Err(ServerErrorCode::RateLimited);
                 }
                 let me = self.swarm.local_peer_id().to_string();
@@ -1307,7 +1328,7 @@ impl ServerCore {
                 // benim sunucumda değil" demek — o da trafiği doğrudan
                 // gossipsub'a yollar ve her mesajda boşuna gidiş-dönüş
                 // ödemez.
-                if !self.store.mailbox_is_registered(&mailbox) {
+                if !self.store.mailbox_has_other_reader(&mailbox, &e.enrollment_id) {
                     return ServerResponse::Err(ServerErrorCode::UnknownMailbox);
                 }
                 // Only this request's own counter: a full blob quota must not
@@ -1424,17 +1445,28 @@ impl ServerCore {
                 ServerResponse::Ok
             }
 
-            ServerRequest::BlobPut { blob_id, chunk_index, total_chunks, chunk_size, data } => {
+            // The id is the hash of the uploader's secret (see
+            // `server_proto::blob_id_for_upload_secret`): a FileOffer recipient
+            // knows the id only, so it cannot claim the blob first.
+            ServerRequest::BlobPut { upload_secret, chunk_index, total_chunks, chunk_size, data } => {
+                let Some(blob_id) = server_proto::blob_id_for_upload_secret(&upload_secret) else {
+                    return ServerResponse::Err(ServerErrorCode::BadDirection);
+                };
                 self.handle_blob_put(e, &limits, blob_id, chunk_index, total_chunks, chunk_size, data, now)
             }
 
-            ServerRequest::BlobFinish { blob_id, total_chunks, enc_sha256 } => {
+            ServerRequest::BlobFinish { upload_secret, total_chunks, enc_sha256 } => {
+                let Some(blob_id) = server_proto::blob_id_for_upload_secret(&upload_secret) else {
+                    return ServerResponse::Err(ServerErrorCode::BadDirection);
+                };
                 self.handle_blob_finish(e, blob_id, total_chunks, enc_sha256)
             }
 
-            ServerRequest::BlobDelete { blob_id } => {
-                if self.store.blob_state(&blob_id).map_or(false, |s| s.owner == e.enrollment_id) {
-                    self.drop_blob(&blob_id);
+            ServerRequest::BlobDelete { upload_secret } => {
+                if let Some(blob_id) = server_proto::blob_id_for_upload_secret(&upload_secret) {
+                    if self.store.blob_state(&blob_id).map_or(false, |s| s.owner == e.enrollment_id) {
+                        self.drop_blob(&blob_id);
+                    }
                 }
                 ServerResponse::Ok
             }
@@ -1599,8 +1631,9 @@ impl ServerCore {
         if !is_safe_id(&blob_id) {
             return ServerResponse::Err(ServerErrorCode::BadDirection);
         }
+        // Row gone (swept after a long offline spell): the client starts over.
         let Some(state) = self.store.blob_state(&blob_id) else {
-            return ServerResponse::Err(ServerErrorCode::Internal);
+            return ServerResponse::Err(ServerErrorCode::BlobIncomplete);
         };
         if state.owner != e.enrollment_id {
             return ServerResponse::Err(ServerErrorCode::BadDirection);
@@ -1614,7 +1647,7 @@ impl ServerCore {
             return ServerResponse::Err(ServerErrorCode::BadDirection);
         }
         if state.received_chunks < state.total_chunks {
-            return ServerResponse::Err(ServerErrorCode::Internal);
+            return ServerResponse::Err(ServerErrorCode::BlobIncomplete);
         }
         if !self.blob_hashing.contains_key(&blob_id) && self.blob_hashing.len() >= MAX_HASH_JOBS {
             return ServerResponse::Err(ServerErrorCode::RateLimited);
@@ -1893,6 +1926,8 @@ impl ServerCore {
             requests_in_window: 0,
             chunks_in_window: 0,
             connected_at: now,
+            enroll_verifies: (0, 0),
+            register_verifies: (0, 0),
         });
         if now.saturating_sub(entry.window_start) > RATE_WINDOW_MS {
             entry.window_start = now;
@@ -1907,14 +1942,24 @@ impl ServerCore {
         entry.requests_in_window <= limit
     }
 
-    /// See `ENROLL_VERIFIES_PER_MINUTE`.
-    fn verify_budget(&mut self, checks: u32) -> bool {
+    /// `register`: `Register` proofs (`REGISTER_VERIFIES_PER_MINUTE`), else
+    /// `Enroll`/`Rebind` (`ENROLL_VERIFIES_PER_MINUTE`).
+    fn verify_budget(&mut self, peer: PeerId, register: bool, checks: u32) -> bool {
         let now = mono_ms();
-        if self.verify_window.0 == 0 || now.saturating_sub(self.verify_window.0) > RATE_WINDOW_MS {
-            self.verify_window = (now.max(1), 0);
+        let conn = self.conns.entry(peer).or_insert(ConnState {
+            challenge: None,
+            window_start: now,
+            requests_in_window: 0,
+            chunks_in_window: 0,
+            connected_at: now,
+            enroll_verifies: (0, 0),
+            register_verifies: (0, 0),
+        });
+        if register {
+            charge_verify(&mut conn.register_verifies, &mut self.register_verify_window, now, checks, REGISTER_VERIFIES_PER_PEER, REGISTER_VERIFIES_PER_MINUTE)
+        } else {
+            charge_verify(&mut conn.enroll_verifies, &mut self.verify_window, now, checks, ENROLL_VERIFIES_PER_PEER, ENROLL_VERIFIES_PER_MINUTE)
         }
-        self.verify_window.1 = self.verify_window.1.saturating_add(checks);
-        self.verify_window.1 <= ENROLL_VERIFIES_PER_MINUTE
     }
 
     /// Yapılandırılmış blob dizini — Android sunucu uygulaması bunu harici
@@ -1959,13 +2004,8 @@ impl ServerCore {
     /// `CoreSignal::EnrollmentsChanged` (Android) and on every 5 s tick, which
     /// is what covers a revoke from the CLI, a separate process.
     fn drop_revoked_peers(&mut self) {
-        let gone: Vec<PeerId> = self
-            .live_interest
-            .keys()
-            .chain(self.relay_links.keys())
-            .copied()
-            .filter(|p| self.active(*p).is_none())
-            .collect();
+        let peers: HashSet<PeerId> = self.live_interest.keys().chain(self.relay_links.keys()).copied().collect();
+        let gone: Vec<PeerId> = peers.into_iter().filter(|p| self.active(*p).is_none()).collect();
         for peer in gone {
             self.live_interest.remove(&peer);
             self.relay_links.remove(&peer);
@@ -1973,7 +2013,13 @@ impl ServerCore {
     }
 
     fn maybe_sweep(&mut self) {
-        self.drop_revoked_peers();
+        // Another connection (the CLI) committed since the last scan, or this
+        // is the first tick.
+        let version = self.store.data_version();
+        if version != self.revoke_scan_version {
+            self.revoke_scan_version = version;
+            self.drop_revoked_peers();
+        }
         // Once per tick, not once per Ack: the recount rewrites every enrollment.
         if std::mem::take(&mut self.mail_recount_due) {
             self.store.recount_mail_bytes();
@@ -2156,9 +2202,52 @@ fn sanitize_id(id: &str) -> String {
         .collect()
 }
 
+/// Charges `checks` to a peer's share and to the server-wide pool, each a
+/// (window start `mono_ms`, checks) over `RATE_WINDOW_MS`. A refused charge
+/// costs nothing, so a peer over its share cannot drain the pool for others.
+fn charge_verify(peer: &mut (u64, u32), pool: &mut (u64, u32), now: u64, checks: u32, peer_limit: u32, pool_limit: u32) -> bool {
+    for w in [&mut *peer, &mut *pool] {
+        if w.0 == 0 || now.saturating_sub(w.0) > RATE_WINDOW_MS {
+            *w = (now.max(1), 0);
+        }
+    }
+    if peer.1.saturating_add(checks) > peer_limit || pool.1.saturating_add(checks) > pool_limit {
+        return false;
+    }
+    peer.1 += checks;
+    pool.1 += checks;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_peer_cannot_drain_the_verify_pool() {
+        let mut pool = (0, 0);
+        let (mut a, mut b) = ((0, 0), (0, 0));
+        let now = 1_000;
+        // Peer A hammers with full Registers: only its share passes.
+        assert!(charge_verify(&mut a, &mut pool, now, 64, REGISTER_VERIFIES_PER_PEER, REGISTER_VERIFIES_PER_MINUTE));
+        for _ in 0..100 {
+            assert!(!charge_verify(&mut a, &mut pool, now, 64, REGISTER_VERIFIES_PER_PEER, REGISTER_VERIFIES_PER_MINUTE));
+        }
+        // Peer B still gets its own full share.
+        assert!(charge_verify(&mut b, &mut pool, now, 64, REGISTER_VERIFIES_PER_PEER, REGISTER_VERIFIES_PER_MINUTE));
+        // The window rolls over: A is served again.
+        assert!(charge_verify(&mut a, &mut pool, now + RATE_WINDOW_MS + 1, 64, REGISTER_VERIFIES_PER_PEER, REGISTER_VERIFIES_PER_MINUTE));
+        // Enroll pool: an unknown peer gets only a small share.
+        let (mut epool, mut u, mut v) = ((0, 0), (0, 0), (0, 0));
+        for _ in 0..ENROLL_VERIFIES_PER_PEER {
+            assert!(charge_verify(&mut u, &mut epool, now, 1, ENROLL_VERIFIES_PER_PEER, ENROLL_VERIFIES_PER_MINUTE));
+        }
+        assert!(!charge_verify(&mut u, &mut epool, now, 1, ENROLL_VERIFIES_PER_PEER, ENROLL_VERIFIES_PER_MINUTE));
+        assert!(charge_verify(&mut v, &mut epool, now, 1, ENROLL_VERIFIES_PER_PEER, ENROLL_VERIFIES_PER_MINUTE));
+        // The pool itself still caps the total.
+        let mut full = (now, ENROLL_VERIFIES_PER_MINUTE);
+        assert!(!charge_verify(&mut (0, 0), &mut full, now, 1, ENROLL_VERIFIES_PER_PEER, ENROLL_VERIFIES_PER_MINUTE));
+    }
 
     #[test]
     fn unsafe_ids_are_rejected_before_touching_the_filesystem() {

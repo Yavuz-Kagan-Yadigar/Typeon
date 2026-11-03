@@ -28,7 +28,7 @@ use rusqlite::params;
 use sha2::{Digest as _, Sha256};
 
 use crate::packet::{MessageContent, WbPageDigest, WbPageSig, WbStroke};
-use crate::{current_time_ms, P2PCore, STALE_PEER_RETRY_HORIZON_MS};
+use crate::{current_time_ms, P2PCore};
 
 /// Virtual canvas, 16:10. Every device scales this to its own screen.
 pub const WIDTH: u16 = 1600;
@@ -587,7 +587,6 @@ impl P2PCore {
     fn wb_targets(&self, board: &Board) -> Vec<String> {
         let participants = self.wb_participants(board);
         let own_fp = self.get_active_own_device_fingerprint().ok();
-        let now = current_time_ms();
         let mut targets: Vec<String> = self.known_remote_devices.values()
             .filter(|d| d.is_active && participants.contains(&d.identity_id))
             .filter(|d| !self.deleted_identities.contains(&d.identity_id))
@@ -595,7 +594,8 @@ impl P2PCore {
             // start a handshake of its own (it raced the chat screen's and the
             // two sessions diverged — two-device test, 2026-10-01).
             .filter(|d| self.ratchets.contains_key(&d.device_fingerprint))
-            .filter(|d| now.saturating_sub(d.last_seen) < STALE_PEER_RETRY_HORIZON_MS)
+            // Never stamped (0) counts as recent, as in `sibling_active_devices`.
+            .filter(|d| self.device_recently_seen(&d.device_fingerprint))
             .map(|d| d.device_fingerprint.clone())
             .filter(|fp| own_fp.as_deref() != Some(fp.as_str()))
             .collect();
@@ -840,7 +840,11 @@ impl P2PCore {
             };
             serde_json::json!({"id": id, "name": name.unwrap_or_else(|| id.chars().take(8).collect())})
         }).collect();
-        let pages = self.wb_digest(&board.key).last().map_or(1, |d| d.page as u32 + 1);
+        // The highest page in use: `wb_digest` unsealed every stroke for it.
+        let pages = self.db.as_ref()
+            .and_then(|c| c.query_row("SELECT MAX(page) FROM wb_strokes WHERE board = ?1", params![board.key], |r| r.get::<_, Option<u32>>(0)).ok())
+            .flatten()
+            .map_or(1, |p| p + 1);
         Ok(serde_json::json!({
             "pages": pages,
             "unread": self.wb_unread(&board.key),
@@ -1181,7 +1185,7 @@ mod jni_exports {
     #[no_mangle]
     pub extern "system" fn Java_com_p2p_messenger_P2PLib_whiteboardInfo<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer: JString<'local>, group_id: JString<'local>) -> jstring {
         let (peer, gid) = (jstr(&mut env, &peer), jstr(&mut env, &group_id));
-        let out = match catch_panic(move || core_lock().wb_info(&peer, &gid)) {
+        let out = match catch_panic(move || crate::core_lock_read().wb_info(&peer, &gid)) {
             Ok(Ok(json)) => json,
             Ok(Err(e)) | Err(e) => format!("Error: {}", e),
         };
@@ -1191,7 +1195,7 @@ mod jni_exports {
     #[no_mangle]
     pub extern "system" fn Java_com_p2p_messenger_P2PLib_whiteboardPage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer: JString<'local>, group_id: JString<'local>, page: jint) -> jbyteArray {
         let (peer, gid) = (jstr(&mut env, &peer), jstr(&mut env, &group_id));
-        let bytes = catch_panic(move || core_lock().wb_page_blob(&peer, &gid, page.clamp(0, 255) as u8)).unwrap_or_default();
+        let bytes = catch_panic(move || crate::core_lock_read().wb_page_blob(&peer, &gid, page.clamp(0, 255) as u8)).unwrap_or_default();
         bytes_to_jbytearray(&mut env, &bytes)
     }
 

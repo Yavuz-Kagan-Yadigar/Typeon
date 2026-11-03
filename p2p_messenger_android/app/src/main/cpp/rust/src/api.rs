@@ -319,6 +319,15 @@ pub fn is_secondary_device() -> bool {
     catch_panic(|| crate::core_lock_read().own_device_add.is_some()).unwrap_or(false)
 }
 
+/// See `P2PCore::forget_revoked_linked_device`.
+pub fn forget_revoked_linked_device(device_fingerprint: &str) -> String {
+    let fp = device_fingerprint.to_string();
+    ok_result(catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().forget_revoked_linked_device(&fp)
+    }))
+}
+
 pub fn revoke_linked_device(device_fingerprint: &str) -> String {
     let fp = device_fingerprint.to_string();
     ok_result(catch_panic(move || {
@@ -970,7 +979,10 @@ pub fn export_recovery(passphrase: &str) -> Vec<u8> {
     let pass = zeroize::Zeroizing::new(passphrase.to_string());
     // M-21: only the plaintext is built under the core lock; Argon2 runs
     // after the lock is released (it froze every other caller).
-    let staged = catch_panic(move || crate::core_lock_read().recovery_plaintext((*pass).clone()));
+    let staged = catch_panic(move || {
+        let chats = crate::recovery_chats_unlocked();
+        crate::core_lock_read().recovery_plaintext((*pass).clone(), Some(chats))
+    });
     // M20: empty on failure (the Linux UI checks that), but logged.
     match staged.and_then(|r| r).and_then(|(plaintext, pass)| crate::seal_recovery_file(&plaintext, &pass)) {
         Ok(file) => file,
@@ -993,6 +1005,7 @@ pub fn import_recovery(file_bytes: &[u8], passphrase: &str, device_name: &str) -
         let plaintext = crate::open_recovery_file(&raw, &pass)?;
         let mut core = core_lock();
         let (id, bundle_bytes) = core.import_recovery_plaintext(&plaintext, name)?;
+        zeroize::Zeroize::zeroize(&mut core.pending_secret_bundle);
         core.pending_secret_bundle = Some(bundle_bytes);
         Ok(id)
     }))
@@ -1140,7 +1153,7 @@ pub fn end_call() {
 
 /// `{"state": "idle"|"outgoing"|"incoming"|"active", ...}`.
 pub fn call_state() -> String {
-    catch_panic(|| core_lock().call_state_json()).unwrap_or_else(|_| "{\"state\":\"idle\"}".to_string())
+    catch_panic(|| crate::core_lock_read().call_state_json()).unwrap_or_else(|_| "{\"state\":\"idle\"}".to_string())
 }
 
 /// Media calls take no core lock: the audio/video threads call them often.
@@ -1203,13 +1216,13 @@ pub fn whiteboard_mark_read(peer: &str, group_id: &str, page: u8) {
 /// JSON `{"pages","unread","me","participants":[{"id","name"}]}` or `"Error: ..."`.
 pub fn whiteboard_info(peer: &str, group_id: &str) -> String {
     let (peer, gid) = (peer.to_string(), group_id.to_string());
-    string_result(catch_panic(move || core_lock().wb_info(&peer, &gid)))
+    string_result(catch_panic(move || crate::core_lock_read().wb_info(&peer, &gid)))
 }
 
 /// Per stroke: id(8) shade(1) author index(1, 255 = left) width(1) count(u16 LE) points.
 pub fn whiteboard_page(peer: &str, group_id: &str, page: u8) -> Vec<u8> {
     let (peer, gid) = (peer.to_string(), group_id.to_string());
-    catch_panic(move || core_lock().wb_page_blob(&peer, &gid, page)).unwrap_or_default()
+    catch_panic(move || crate::core_lock_read().wb_page_blob(&peer, &gid, page)).unwrap_or_default()
 }
 
 pub fn whiteboard_tick() {

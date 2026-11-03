@@ -91,6 +91,13 @@ pub struct Store {
 
 const MAX_READERS_PER_MAILBOX: i64 = 2;
 
+/// A full mailbox gives up a reader to a newcomer with the bound key (a
+/// restored device) only when that reader has not been seen for this long:
+/// the mailbox proof rests on classical X25519 alone, and with it a quantum
+/// attacker could displace a device still in use. Same horizon as the
+/// client's stale-device fan-out filter (`STALE_PEER_RETRY_HORIZON_MS`).
+const READER_EVICT_IDLE_MS: i64 = 7 * 24 * 3600 * 1000;
+
 /// What an archive row costs beyond its two peer-sized columns (bucket,
 /// ints, owner, primary key, two index entries). Charging only `sealed` +
 /// `record_id` let a 2-byte record cost 2 bytes against a ~150-byte row.
@@ -776,12 +783,12 @@ impl Store {
                     .conn
                     .query_row("SELECT COUNT(*) FROM mailbox_readers WHERE mailbox_id = ?1", params![id], |r| r.get(0))
                     .unwrap_or(0);
-                if readers >= MAX_READERS_PER_MAILBOX {
-                    refused.push(id.clone());
-                    continue;
-                }
                 let Some((_, key_hash)) = proofs.iter().find(|(m, _)| m == id) else {
-                    unproven.push(id.clone());
+                    if readers >= MAX_READERS_PER_MAILBOX {
+                        refused.push(id.clone());
+                    } else {
+                        unproven.push(id.clone());
+                    }
                     continue;
                 };
                 let bound: Option<Vec<u8>> = self
@@ -800,6 +807,40 @@ impl Store {
                             .execute("INSERT INTO mailbox_keys (mailbox_id, key_hash) VALUES (?1, ?2)", params![id, key_hash])
                             .map_err(|e| e.to_string())?;
                     }
+                }
+                // A full box plus a valid proof by the bound key: the newcomer
+                // holds the pair secret, so it is one of the two ends (a
+                // restored device under a new enrollment). The reader seen
+                // longest ago makes room, but only once it has been idle for
+                // `READER_EVICT_IDLE_MS` (its own requests or its last
+                // Register); a reader in use is never displaced.
+                if readers >= MAX_READERS_PER_MAILBOX {
+                    if bound.is_none() {
+                        refused.push(id.clone());
+                        continue;
+                    }
+                    let stale: Option<(Vec<u8>, i64)> = self
+                        .conn
+                        .query_row(
+                            "SELECT r.owner, MAX(r.last_seen_at, COALESCE(e.last_seen_at, 0)) AS seen
+                               FROM mailbox_readers r LEFT JOIN enrollments e ON e.enrollment_id = r.owner
+                              WHERE r.mailbox_id = ?1 ORDER BY seen ASC LIMIT 1",
+                            params![id],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )
+                        .optional()
+                        .map_err(|e| e.to_string())?;
+                    let Some((stale, _)) = stale.filter(|(_, seen)| now - seen >= READER_EVICT_IDLE_MS) else {
+                        refused.push(id.clone());
+                        continue;
+                    };
+                    let _ = self
+                        .conn
+                        .execute("DELETE FROM mailbox_readers WHERE mailbox_id = ?1 AND owner = ?2", params![id, stale]);
+                    let _ = self
+                        .conn
+                        .execute("DELETE FROM mail_acks WHERE mailbox_id = ?1 AND owner = ?2", params![id, stale]);
+                    let _ = self.delete_fully_acked(id);
                 }
             }
             // Defter #03: kayıt artık ÇOK-OKUYUCULU (bkz. `mailbox_readers`
@@ -836,6 +877,22 @@ impl Store {
         }
         tx.commit().map_err(|e| e.to_string())?;
         Ok((refused, unproven))
+    }
+
+    /// A deposit only makes sense when someone other than the depositor, on
+    /// an active enrollment, reads the box; otherwise it can only expire.
+    pub fn mailbox_has_other_reader(&self, mailbox_id: &str, depositor: &[u8]) -> bool {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM mailbox_readers r JOIN enrollments e ON e.enrollment_id = r.owner
+                 WHERE r.mailbox_id = ?1 AND r.owner != ?2 AND e.state = 'active' LIMIT 1",
+                params![mailbox_id, depositor],
+                |_| Ok(true),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .unwrap_or(false)
     }
 
     pub fn mailbox_is_registered(&self, mailbox_id: &str) -> bool {
@@ -1524,6 +1581,10 @@ impl Store {
             "UPDATE enrollments SET last_seen_at = last_seen_at + ?1 WHERE last_seen_at <= ?2",
             params![shift, upto],
         );
+        let _ = self.conn.execute(
+            "UPDATE archive SET updated_at = updated_at + ?1 WHERE updated_at <= ?2",
+            params![shift, upto],
+        );
         let _ = tx.commit();
     }
 
@@ -1539,7 +1600,13 @@ impl Store {
         );
         let _ = self.conn.execute("UPDATE blobs SET last_served_at = ?2 WHERE last_served_at < ?1", params![floor, now]);
         let _ = self.conn.execute("UPDATE enrollments SET last_seen_at = ?2 WHERE last_seen_at < ?1", params![floor, now]);
+        let _ = self.conn.execute("UPDATE archive SET updated_at = ?2 WHERE updated_at < ?1", params![floor, now]);
         let _ = tx.commit();
+    }
+
+    /// Changes whenever ANOTHER connection (the CLI, the JNI side) commits.
+    pub fn data_version(&self) -> i64 {
+        self.conn.query_row("PRAGMA data_version", [], |r| r.get(0)).unwrap_or(-1)
     }
 
     /// Returns freed pages to the filesystem (see `open`).
@@ -1736,7 +1803,21 @@ mod tests {
         register(&s, &a, "mb_1");
         register(&s, &b, "mb_1");
         register(&s, &a, "mb_1");
-        assert_eq!(s.register_mailboxes(&c, &["mb_1".to_string()], &[], 0, 100).unwrap().len(), 1);
+        let id = vec!["mb_1".to_string()];
+        let wrong = vec![("mb_1".to_string(), b"other-key".to_vec())];
+        assert_eq!(s.register_mailboxes_proved(&c, &id, &[], &wrong, 0, 100).unwrap().0.len(), 1);
+        // The bound key from a new enrollment (restored device) takes the place
+        // of the reader seen longest ago, once that one has been idle long enough.
+        let week = READER_EVICT_IDLE_MS;
+        s.register_mailboxes(&b, &id, &[], week, 100).unwrap();
+        assert_eq!(s.register_mailboxes(&c, &id, &[], week - 1, 100).unwrap(), id, "a, seen at 0, is not idle yet");
+        // Its own requests keep a reader alive, not only its Register.
+        s.touch_enrollment(&a, 10);
+        assert_eq!(s.register_mailboxes(&c, &id, &[], week + 5, 100).unwrap(), id, "a was seen at 10");
+        assert!(s.register_mailboxes(&c, &id, &[], week + 10, 100).unwrap().is_empty());
+        assert!(s.mailbox_has_other_reader("mb_1", &a), "b and c read it");
+        let aa = s.conn.query_row("SELECT COUNT(*) FROM mailbox_readers WHERE owner = ?1", params![&a], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(aa, 0, "a was the stalest reader");
     }
 
     #[test]
@@ -1861,7 +1942,8 @@ mod tests {
         let seq2 = s.deposit("mb_fp", b"handshake-2", &sender, 2, 1000).unwrap();
         // A third reader is refused: two per mailbox (2026-10-07).
         let third = enroll(&s, b"sile", "peerQ");
-        assert_eq!(s.register_mailboxes(&third, &["mb_fp".to_string()], &[], 0, 100).unwrap().len(), 1);
+        let wrong = vec![("mb_fp".to_string(), b"other-key".to_vec())];
+        assert_eq!(s.register_mailboxes_proved(&third, &["mb_fp".to_string()], &[], &wrong, 0, 100).unwrap().0.len(), 1);
         // The lurker is the silent reader here: it has not acked seq2.
         assert_eq!(s.ack("mb_fp", seq2, &victim).unwrap(), 0, "sessiz okuyucu varken silinmez");
         assert_eq!(s.mailbox_item_count("mb_fp"), 0, "alicinin onayladigi satir kapasiteye sayilmaz");
