@@ -436,19 +436,30 @@ class ServerActivity : AppCompatActivity() {
             Toast.makeText(this, R.string.msg_no_invite_yet, Toast.LENGTH_SHORT).show()
             return
         }
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        // The application's manager: the delayed clear below outlives this
+        // activity and must not hold it.
+        val clipboard = applicationContext.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
         val clip = android.content.ClipData.newPlainText("Typeon server invite", code)
         // ClipDescription.EXTRA_IS_SENSITIVE (API 33): no clipboard preview.
         clip.description.extras = android.os.PersistableBundle().apply {
             putBoolean("android.content.extra.IS_SENSITIVE", true)
         }
+        // The clip cannot be read back from the background or a locked screen
+        // (API 29+), so "still ours" is tracked by listening for the next
+        // change; the first event is our own set.
+        var ownEventPending = true
+        var foreignCopy = false
+        val listener = android.content.ClipboardManager.OnPrimaryClipChangedListener {
+            if (ownEventPending) ownEventPending = false else foreignCopy = true
+        }
+        clipboard.addPrimaryClipChangedListener(listener)
         clipboard.setPrimaryClip(clip)
         // The join code is a permanent bearer token: drop it from the
-        // clipboard after a minute, if it is still ours.
+        // clipboard after a minute, if nothing else was copied since.
         Handler(Looper.getMainLooper()).postDelayed({
             try {
-                val cur = clipboard.primaryClip
-                if (cur != null && cur.itemCount > 0 && cur.getItemAt(0).text?.toString() == code) {
+                clipboard.removePrimaryClipChangedListener(listener)
+                if (!foreignCopy) {
                     if (Build.VERSION.SDK_INT >= 28) clipboard.clearPrimaryClip()
                     else clipboard.setPrimaryClip(android.content.ClipData.newPlainText("", ""))
                 }

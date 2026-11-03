@@ -1145,8 +1145,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private fun parseStatus(status: String): SimpleChatAdapter.Status = when (status) {
-        "sent" -> SimpleChatAdapter.Status.SENT
-        "delivered" -> SimpleChatAdapter.Status.DELIVERED
+        "sent", "delivered" -> SimpleChatAdapter.Status.SENT
         "error" -> SimpleChatAdapter.Status.ERROR
         else -> SimpleChatAdapter.Status.PENDING
     }
@@ -1174,7 +1173,7 @@ class ChatActivity : AppCompatActivity() {
     /** The avatar loaded when the chat opened. Every "seen" event used to
      *  parse the whole contact list on the UI thread to find it again. */
     private fun peerAvatar(): ByteArray? =
-        if (toolbarAvatarLoaded) toolbarAvatarBytes else resolveContactAvatar(peerDeviceFingerprint)
+        if (toolbarAvatarLoaded) toolbarAvatarBytes else null // loaded off-main in the chat-open path; no JNI here
 
     private fun resolveContactAvatar(deviceFingerprint: String): ByteArray? {
         return try {
@@ -1404,9 +1403,12 @@ class ChatActivity : AppCompatActivity() {
         // fixpass (glm A2): `sendSeenReceipt` JNI çağrısı çekirdek kilidinde
         // sıraya durur — ana iş parçacığından çağrılmaz (arayüz takılması
         // / ANR). Sıra korunur: tek iş parçacıklı kuyruk.
+        // The peer of THIS message: the screen may switch chats before the
+        // queued task runs, and the receipt must not go to the next peer.
+        val peer = peerDeviceFingerprint
         netPack.execute {
             try {
-                P2PLib.sendSeenReceipt(peerDeviceFingerprint, messageId, null)
+                P2PLib.sendSeenReceipt(peer, messageId, null)
             } catch (e: Exception) {
             }
         }
@@ -1418,9 +1420,10 @@ class ChatActivity : AppCompatActivity() {
         if (isTypingSent == isTyping) return
         isTypingSent = isTyping
         // fixpass (glm A2): bkz. `markSeen`.
+        val peer = peerDeviceFingerprint
         netPack.execute {
             try {
-                P2PLib.sendTypingIndicator(peerDeviceFingerprint, isTyping)
+                P2PLib.sendTypingIndicator(peer, isTyping)
             } catch (e: Exception) {
             }
         }

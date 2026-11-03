@@ -123,6 +123,8 @@ object P2PLib {
     /** Bir kardeş cihazı iptal eder (spec 1.6) — tüm kişilere/kardeşlere imzalı
      *  iptal yayılır. Dönüş: "OK" veya "Error: ...". */
     external fun revokeLinkedDevice(deviceFingerprint: String): String
+    /** Hides a revoked sibling from [listLinkedDevices]. */
+    external fun forgetRevokedLinkedDevice(deviceFingerprint: String): String
     /** Çoklu-cihaz (spec 1.7.1): bir sohbet BU cihazda okununca kardeş
      *  cihazlara "okundu" bildir (onlar da okunmuş saysın). 1:1 için
      *  `peerDeviceFingerprint` dolu + `groupId` boş; grup için tersi.
@@ -603,6 +605,10 @@ object P2PLib {
     external fun setMeteredNetwork(metered: Boolean)
     /** Our decoder for [slot] needs a keyframe; asks that sender in the next report. */
     external fun callRequestKeyframe(slot: Int)
+    /** Our HEVC decoder for [slot] failed before its first frame; asks that sender for H.264. */
+    external fun callRequestAvc(slot: Int)
+    /** True once after a participant asked us to send H.264. */
+    external fun callTakeAvcRequest(): Boolean
     /** True once after a participant asked us for a keyframe. */
     external fun callTakeKeyframeRequest(): Boolean
 

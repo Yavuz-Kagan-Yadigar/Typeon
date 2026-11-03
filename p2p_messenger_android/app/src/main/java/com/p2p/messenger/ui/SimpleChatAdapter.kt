@@ -43,7 +43,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         }
     }
 
-    enum class Status { PENDING, SENT, DELIVERED, ERROR }
+    enum class Status { PENDING, SENT, ERROR }
 
     /** Group chats: member names whose "@Name" is shown bold in bubbles. */
     var mentionNames: List<String> = emptyList()
@@ -355,6 +355,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val senderAvatar: ImageView = itemView.findViewById(R.id.imgSenderAvatar)
         val senderName: TextView = itemView.findViewById(R.id.txtSenderName)
         val bubble: LinearLayout = itemView.findViewById(R.id.layoutBubble)
+        val bubbleLine: LinearLayout = itemView.findViewById(R.id.rowBubbleLine)
+        val sideColumn: LinearLayout = itemView.findViewById(R.id.colBubbleSide)
         val pillReactions: TextView = itemView.findViewById(R.id.pillReactions)
         val txtAttachmentCaption: TextView = itemView.findViewById(R.id.txtAttachmentCaption)
         val textView: TextView = itemView.findViewById(R.id.txtBubbleText)
@@ -617,8 +619,6 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     fun applyStatus(targetMessageId: String, status: Status) {
         val idx = indexOfMessageId(targetMessageId)
         if (idx < 0) return
-        // delivered never goes back to sent/pending (events can arrive out of order)
-        if (items[idx].status == Status.DELIVERED && (status == Status.SENT || status == Status.PENDING)) return
         items[idx].status = status
         notifyItemChanged(idx)
     }
@@ -700,6 +700,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val groupedWithPrevious = isGroupedWithPrevious(position)
         val groupedWithNext = isGroupedWithNext(position)
         holder.container.gravity = if (item.isMine) Gravity.END else Gravity.START
+        placeSideColumn(holder, item.isMine)
         // Spec dışı, kullanıcı isteği (saat/tikler balonun İÇİNE taşındı):
         // balon arka planı artık metnin/ek düzeninin KENDİSİNE değil,
         // ikisini de meta satırıyla birlikte saran kapsayıcıya uygulanıyor
@@ -947,6 +948,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                     }
                     holder.textView.text = linked
                     holder.textView.movementMethod = android.text.method.LinkMovementMethod.getInstance()
+                } else {
+                    // A recycled row that showed a link kept consuming taps.
+                    holder.textView.movementMethod = null
                 }
             }
         }
@@ -974,18 +978,16 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         // Only the last bubble in a grouped run shows a timestamp.
         holder.timestamp.visibility = if (groupedWithNext) View.GONE else View.VISIBLE
 
-        if (item.isMine && !item.isDeleted) {
+        // Only a message that is not out yet (or failed) carries a mark; a
+        // sent one shows nothing — read state is the seen-by avatars below.
+        val statusIcon = if (!item.isMine || item.isDeleted) 0 else when (item.status) {
+            Status.PENDING -> R.drawable.ic_status_pending
+            Status.ERROR -> R.drawable.ic_status_error
+            Status.SENT -> 0
+        }
+        if (statusIcon != 0) {
             holder.status.visibility = View.VISIBLE
-            holder.status.contentDescription =
-                if (item.status == Status.DELIVERED) holder.itemView.context.getString(R.string.cd_status_delivered) else null
-            holder.status.setImageResource(
-                when (item.status) {
-                    Status.PENDING -> R.drawable.ic_status_pending
-                    Status.SENT -> R.drawable.ic_status_sent
-                    Status.DELIVERED -> R.drawable.ic_status_delivered
-                    Status.ERROR -> R.drawable.ic_status_error
-                }
-            )
+            holder.status.setImageResource(statusIcon)
         } else {
             holder.status.visibility = View.GONE
         }
@@ -1016,6 +1018,34 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         // `holder.textView` kendi `LinkMovementMethod`'u yüzünden dokunuşu
         // tüketebilir, bu yüzden AYNI dinleyici ona da atanıyor.
         holder.textView.setOnLongClickListener(longPressListener)
+    }
+
+    /**
+     * The side column (reactions, pending/error mark, seen-by avatars) goes
+     * on the OUTER side of the bubble: right of a received one, LEFT of my
+     * own. Right of my own it pushed the bubble in by its width, so my
+     * bubbles no longer shared their right edge; MergedBubbleDecoration draws
+     * a run from that shared edge and so painted the bubble under the
+     * neighbours' avatars and pills, and the avatars sat in the screen-edge
+     * column of the scroll-to-bottom button.
+     */
+    private fun placeSideColumn(holder: BubbleViewHolder, isMine: Boolean) {
+        val line = holder.bubbleLine
+        val first = if (isMine) holder.sideColumn else holder.bubble
+        if (line.getChildAt(0) !== first) {
+            line.removeView(first)
+            line.addView(first, 0)
+        }
+        val gap = (4 * holder.itemView.resources.displayMetrics.density).toInt()
+        val params = holder.sideColumn.layoutParams as ViewGroup.MarginLayoutParams
+        val start = if (isMine) 0 else gap
+        val end = if (isMine) gap else 0
+        if (params.marginStart != start || params.marginEnd != end) {
+            params.marginStart = start
+            params.marginEnd = end
+            holder.sideColumn.layoutParams = params
+        }
+        holder.sideColumn.gravity = Gravity.TOP or (if (isMine) Gravity.END else Gravity.START)
     }
 
     /** Bir ek balonunu doldurur: OFFERED/FAILED -> "İndir" düğmesi,

@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Debug builds only: this source set is not part of a release build. -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <application>
         <!-- adb workflow: writes the database key to the app's private files
              dir (see DebugDbKeyReceiver). DUMP is held by the adb shell and
@@ -9,5 +10,14 @@
             android:name=".DebugDbKeyReceiver"
             android:exported="true"
             android:permission="android.permission.DUMP" />
+        <!-- adb workflow: the scanner can be started with a decoded QR
+             (`debug_qr_hex`) instead of the camera, so device linking and
+             pairing can be tested without a second screen in front of the
+             lens. DUMP is held by the adb shell and by no ordinary app. -->
+        <activity
+            android:name=".ui.QrScanActivity"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            tools:replace="android:exported" />
     </application>
 </manifest>

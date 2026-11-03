@@ -24,7 +24,11 @@ object ServerLock {
     private const val KEY_SALT = "lock_salt"
     private const val KEY_HASH = "lock_hash"
     private const val KEY_FAILED = "lock_failed"
-    private const val KEY_WAIT_UNTIL = "lock_wait_until_wall"
+    // Wait anchored to time since boot (the user can set the wall clock
+    // forward); the wall clock only re-anchors it after a reboot.
+    private const val KEY_WAIT_FROM = "lock_wait_from_elapsed"
+    private const val KEY_WAIT_MS = "lock_wait_ms"
+    private const val KEY_WAIT_WALL = "lock_wait_wall"
     private const val ITERATIONS = 300_000
     private const val MIN_LEN = 6
     private const val FREE_ATTEMPTS = 5
@@ -70,21 +74,36 @@ object ServerLock {
             .commit()
     }
 
-    private fun waitSeconds(c: Context): Int =
-        ((prefs(c).getLong(KEY_WAIT_UNTIL, 0L) - System.currentTimeMillis() + 999) / 1000).coerceAtLeast(0).toInt()
+    private fun waitSeconds(c: Context): Int {
+        val p = prefs(c)
+        val waitMs = p.getLong(KEY_WAIT_MS, 0L)
+        if (waitMs <= 0L) return 0
+        val now = SystemClock.elapsedRealtime()
+        var from = p.getLong(KEY_WAIT_FROM, 0L)
+        if (now < from) {
+            // Rebooted: credit the wall time since the failure, but never more
+            // than the uptime since boot, so a clock set forward refunds nothing.
+            val passed = (System.currentTimeMillis() - p.getLong(KEY_WAIT_WALL, 0L)).coerceIn(0L, minOf(waitMs, now))
+            from = now - passed
+            p.edit().putLong(KEY_WAIT_FROM, from).commit()
+        }
+        return ((from + waitMs - now).coerceAtLeast(0L) + 999).div(1000).toInt()
+    }
 
     /** PBKDF2 at 300k iterations: always run on [cpu], never the UI thread. */
     private fun tryPin(c: Context, pin: String): Boolean {
         if (waitSeconds(c) > 0) return false
         val p = prefs(c)
         if (verify(c, pin)) {
-            p.edit().remove(KEY_FAILED).remove(KEY_WAIT_UNTIL).commit()
+            p.edit().remove(KEY_FAILED).remove(KEY_WAIT_FROM).remove(KEY_WAIT_MS).remove(KEY_WAIT_WALL).commit()
             return true
         }
         val failed = p.getInt(KEY_FAILED, 0) + 1
         val e = p.edit().putInt(KEY_FAILED, failed)
         if (failed >= FREE_ATTEMPTS) {
-            e.putLong(KEY_WAIT_UNTIL, System.currentTimeMillis() + (30_000L shl (failed - FREE_ATTEMPTS).coerceAtMost(5)))
+            e.putLong(KEY_WAIT_FROM, SystemClock.elapsedRealtime())
+                .putLong(KEY_WAIT_WALL, System.currentTimeMillis())
+                .putLong(KEY_WAIT_MS, 30_000L shl (failed - FREE_ATTEMPTS).coerceAtMost(5))
         }
         e.commit()
         return false

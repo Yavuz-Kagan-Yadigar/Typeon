@@ -429,9 +429,10 @@ class GroupChatActivity : AppCompatActivity() {
                 type == "status" && obj.optString("group_id") == groupId && obj.optString("status") == "error" -> runOnUiThread {
                     adapter.applyStatus(obj.optString("message_id"), SimpleChatAdapter.Status.ERROR)
                 }
-                // End-to-end Ack from a member: bubble gets the double tick.
+                // End-to-end Ack from a member: a copy got through, a failure
+                // mark set by another member's copy goes away.
                 type == "status" && obj.optString("group_id") == groupId && obj.optString("status") == "delivered" -> runOnUiThread {
-                    adapter.applyStatus(obj.optString("message_id"), SimpleChatAdapter.Status.DELIVERED)
+                    adapter.applyStatus(obj.optString("message_id"), SimpleChatAdapter.Status.SENT)
                 }
                 type == "file_failed" -> runOnUiThread {
                     adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.FAILED)
@@ -876,7 +877,7 @@ class GroupChatActivity : AppCompatActivity() {
             messageId = messageId ?: UUID.randomUUID().toString(),
             text = obj.optString("text"),
             isMine = isMine,
-            status = if (isMine && obj.optString("status") == "delivered") SimpleChatAdapter.Status.DELIVERED else SimpleChatAdapter.Status.SENT,
+            status = SimpleChatAdapter.Status.SENT,
             timestamp = obj.optLong("timestamp", System.currentTimeMillis()),
             // Gönderim-sırası: göndericinin gönderim anı (bkz. ChatActivity aynı not).
             sentAtMs = obj.optLong("sent_at_ms", 0L).takeIf { it > 0 },
@@ -1311,11 +1312,16 @@ class GroupChatActivity : AppCompatActivity() {
 
     /** bkz. eski GroupsFragment.showAddMembersDialog — buraya taşındı. */
     private fun showAddMembersDialog() {
-        val contactsJson = try {
-            P2PLib.listContacts()
-        } catch (e: Exception) {
-            "[]"
+        // listContacts takes the core lock: off the main thread.
+        lifecycleScope.launch {
+            val contactsJson = withContext(Dispatchers.IO) {
+                try { P2PLib.listContacts() } catch (e: Exception) { "[]" }
+            }
+            showAddMembersDialog(contactsJson)
         }
+    }
+
+    private fun showAddMembersDialog(contactsJson: String) {
         val array = try {
             JSONArray(contactsJson)
         } catch (e: Exception) {
@@ -1340,15 +1346,21 @@ class GroupChatActivity : AppCompatActivity() {
             .setTitle(R.string.lbl_add_member_to_group)
             .setMultiChoiceItems(names, checked) { _, which, isChecked -> checked[which] = isChecked }
             .setPositiveButton(R.string.lbl_add_member_to_group) { _, _ ->
-                for (i in identityIds.indices) {
-                    if (checked[i]) {
-                        val ok = P2PLib.inviteToGroup(groupId, identityIds[i])
+                // Each invite signs, stores and sends under the core lock: off
+                // the main thread (several at once froze the screen).
+                val gid = groupId
+                val picked = identityIds.indices.filter { checked[it] }
+                lifecycleScope.launch {
+                    for (i in picked) {
+                        val ok = withContext(Dispatchers.IO) {
+                            try { P2PLib.inviteToGroup(gid, identityIds[i]) } catch (e: Throwable) { "Error: ${e.message}" }
+                        }
                         if (ok != "OK") {
-                            Toast.makeText(this, "${names[i]}: ${coreErrorText(this, ok)}", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@GroupChatActivity, "${names[i]}: ${coreErrorText(this@GroupChatActivity, ok)}", Toast.LENGTH_SHORT).show()
                         }
                     }
+                    refreshGroupInfo()
                 }
-                refreshGroupInfo()
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -2803,6 +2815,12 @@ class GroupChatActivity : AppCompatActivity() {
             val cached = contactListCache
             val array = if (cached != null && now - contactListCacheAt < CONTACT_CACHE_TTL_MS) {
                 cached
+            } else if (cached != null && Looper.myLooper() == Looper.getMainLooper()) {
+                // Every incoming message and every keystroke (mention popup)
+                // resolves names on the main thread: a stale list is shown
+                // once more and refreshed off it, not read under the core lock.
+                refreshContactCacheAsync()
+                cached
             } else {
                 JSONArray(P2PLib.listContacts()).also {
                     contactListCache = it
@@ -2824,14 +2842,31 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
+    @Volatile private var contactCacheRefreshing = false
+
+    private fun refreshContactCacheAsync() {
+        if (contactCacheRefreshing) return
+        contactCacheRefreshing = true
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                contactListCache = JSONArray(P2PLib.listContacts())
+                contactListCacheAt = System.currentTimeMillis()
+            } catch (e: Exception) {
+            } finally {
+                contactCacheRefreshing = false
+            }
+        }
+    }
+
     /** Called on state transitions only, by the EditText watcher and `stopTypingRunnable`. */
     private fun sendTypingState(isTyping: Boolean) {
         if (isTypingSent == isTyping) return
         isTypingSent = isTyping
         // fixpass (glm A2): bkz. `netPack` (dosya başı).
+        val gid = groupId
         netPack.execute {
             try {
-                P2PLib.sendGroupTypingIndicator(groupId, isTyping)
+                P2PLib.sendGroupTypingIndicator(gid, isTyping)
             } catch (e: Exception) {
                 // Fire-and-forget.
             }

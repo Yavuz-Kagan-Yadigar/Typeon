@@ -91,6 +91,9 @@ object IdentityManager {
         try {
             val encrypted = KeystoreCrypto.encrypt(plaintext)
             secretBundleFile(context).writeBytesAtomic(encrypted)
+        } catch (e: Exception) {
+            // Keystore or disk failure: "not written", as documented.
+            return false
         } finally {
             plaintext.fill(0)
         }

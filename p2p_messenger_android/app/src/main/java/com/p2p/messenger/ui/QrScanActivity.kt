@@ -77,6 +77,15 @@ class QrScanActivity : AppCompatActivity() {
         setContentView(R.layout.activity_qr_scan)
         supportActionBar?.title = getString(R.string.title_scan_qr)
         cameraExecutor = Executors.newSingleThreadExecutor()
+        // Debug builds only (see the debug manifest): a decoded QR from adb
+        // goes through the same confirm-and-run path as a camera frame.
+        val injected = intent.getStringExtra("debug_qr_hex")
+        if (injected != null && applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            val bytes = injected.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            alreadyHandled.set(true)
+            Thread { handleScannedText(if (addServerMode) String(bytes) else String(bytes, Charsets.ISO_8859_1)) }.start()
+            return
+        }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()

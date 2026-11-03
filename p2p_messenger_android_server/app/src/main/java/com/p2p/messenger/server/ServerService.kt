@@ -170,6 +170,8 @@ class ServerService : Service() {
      */
     @Synchronized
     private fun setLocks(on: Boolean) {
+        retryLock?.let { if (it.isHeld) it.release() }
+        retryLock = null
         if (!on) {
             wakeLock?.let { if (it.isHeld) it.release() }
             wakeLock = null
@@ -192,6 +194,22 @@ class ServerService : Service() {
                 setReferenceCounted(false)
                 acquire()
             }
+        }
+    }
+
+    private var retryLock: PowerManager.WakeLock? = null
+
+    /** The watchdog runs on the uptime clock: without a lock the CPU suspends
+     *  and a failed start stays down until something else wakes the phone.
+     *  Timed, so a core that never starts does not hold the CPU for good. */
+    @Synchronized
+    private fun holdForRetry() {
+        // One object: a second failed start must not leave the first lock held.
+        retryLock?.let { if (it.isHeld) it.release() }
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        retryLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Typeon:server-retry").apply {
+            setReferenceCounted(false)
+            acquire(watchdogDelay + 15_000L)
         }
     }
 
@@ -320,6 +338,7 @@ class ServerService : Service() {
                 // with backoff, but do not hold the locks meanwhile.
                 lastError = result
                 setLocks(false)
+                holdForRetry()
                 nm.notify(NOTIFICATION_ID, buildNotification(serverErrorText(this, result)))
             } else {
                 lastError = null

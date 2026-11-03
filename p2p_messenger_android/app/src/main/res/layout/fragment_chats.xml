@@ -63,6 +63,7 @@
         android:layout_gravity="bottom|end"
         android:layout_margin="24dp"
         android:contentDescription="@string/action_create_group"
-        app:srcCompat="@android:drawable/ic_menu_agenda" />
+        app:srcCompat="@drawable/creategroup"
+        app:tint="@android:color/white" />
 
 </FrameLayout>

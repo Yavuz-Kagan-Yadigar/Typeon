@@ -167,8 +167,10 @@ object AppLock {
         var from = prefs.getLong(KEY_WAIT_FROM, 0L)
         if (now < from) {
             // Rebooted: time since boot restarted. Re-anchor from the wall
-            // clock saved at the failure so the reboot does not refund the wait.
-            val wallPassed = (System.currentTimeMillis() - prefs.getLong(KEY_WAIT_WALL, 0L)).coerceIn(0L, waitMs)
+            // clock saved at the failure so the reboot does not refund the wait,
+            // but credit no more than the uptime since boot: a clock set
+            // forward before opening the app must not skip the wait.
+            val wallPassed = (System.currentTimeMillis() - prefs.getLong(KEY_WAIT_WALL, 0L)).coerceIn(0L, minOf(waitMs, now))
             from = now - wallPassed
             prefs.edit().putLong(KEY_WAIT_FROM, from).apply()
         }

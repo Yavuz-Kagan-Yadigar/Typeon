@@ -280,13 +280,19 @@ class ContactsFragment : Fragment() {
         // anlami cok farkli: iptal tek bir cihazi kapatir ve kisi yeni bir
         // cihazla geri gelebilir; engel ise kimligi hedefler ve yalnizca
         // yuz yuze yeniden eslesmeyle kalkar.
-        val isBlocked = message.identityId.isNotEmpty() && try {
-            org.json.JSONArray(P2PLib.listBlockedIdentities()).let { arr ->
-                (0 until arr.length()).any { arr.optString(it) == message.identityId }
+        // A JNI call that takes the core lock: off the main thread.
+        offMain({
+            message.identityId.isNotEmpty() && try {
+                org.json.JSONArray(P2PLib.listBlockedIdentities()).let { arr ->
+                    (0 until arr.length()).any { arr.optString(it) == message.identityId }
+                }
+            } catch (e: Exception) {
+                false
             }
-        } catch (e: Exception) {
-            false
-        }
+        }) { isBlocked -> showChatLongPressDialog(message, isBlocked) }
+    }
+
+    private fun showChatLongPressDialog(message: ChatAdapter.ChatMessage, isBlocked: Boolean) {
         val options = mutableListOf(
             getString(R.string.action_clear_chat_history),
             getString(R.string.action_revoke_device),

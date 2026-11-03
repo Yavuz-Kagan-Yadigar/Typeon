@@ -155,6 +155,8 @@
     <string name="action_choose">Seç</string>
     <string name="action_reset">Sıfırla</string>
     <string name="action_choose_wallpaper">Resim seç</string>
+    <string name="lbl_wallpaper_blur">Duvar kağıdı bulanıklığı</string>
+    <string name="lbl_wallpaper_darkness">Duvar kağıdı karartması</string>
     <string name="action_remove_wallpaper">Kaldır</string>
     <string name="title_pick_bg_color">Bir arka plan rengi seçin</string>
     <string name="title_pick_accent_color">Bir vurgu rengi seçin</string>
@@ -180,7 +182,6 @@
     <string name="lbl_you">Siz</string>
     <string name="action_cancel_reply">Yanıtı iptal et</string>
     <string name="msg_reply_target_not_loaded">Orijinal mesaj yüklenmedi — bulmak için yukarı kaydırın</string>
-    <string name="cd_status_delivered">Teslim edildi</string>
     <string name="action_resume_download">Devam et</string>
     <string name="lbl_sent_at">(gönderim: %s)</string>
     <string name="lbl_received_sent_at">%1$s (gönderim: %2$s)</string>
@@ -327,6 +328,8 @@
     <string name="linked_devices_add">Cihaz ekle (tara)</string>
     <string name="linked_devices_this_device">bu cihaz</string>
     <string name="linked_devices_revoked">iptal edildi</string>
+    <string name="linked_devices_confirm_forget">İptal edilmiş bu cihaz listeden kaldırılsın mı? İptal edilmiş olarak kalır.</string>
+    <string name="action_remove_from_list">Listeden kaldır</string>
     <string name="linked_devices_confirm_revoke">Bu bağlı cihaz iptal edilsin mi? Artık bu hesap adına mesaj gönderip alamaz.</string>
 
     <!-- Spec dışı, kullanıcı isteği: hesaptan çıkış (yerel verileri sil). -->
@@ -493,7 +496,7 @@
     <string name="msg_recording_in_background">Sesli kayıt hâlâ sürüyor. Gönderilsin mi, atılsın mı?</string>
     <string name="notif_fg_server_down">Sunucuya ulaşılamıyor — mesajlar yalnız doğrudan gider</string>
     <string name="notif_fg_recording">Sesli mesaj kaydediliyor</string>
-    <string name="msg_media_scrub_failed">Bu videodan konum/cihaz verisi temizlenemedi. Yine de gönderilsin mi?</string>
+    <string name="msg_media_scrub_failed">Bu dosyadan konum/cihaz verisi temizlenemedi. Yine de gönderilsin mi?</string>
     <string name="action_send_anyway">Yine de gönder</string>
     <string name="title_confirm_contact">Bu kişi eklensin mi?</string>
     <string name="msg_confirm_contact">Bu QR kodundaki kişi eklensin mi?</string>

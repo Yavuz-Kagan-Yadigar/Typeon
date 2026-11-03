@@ -24,8 +24,10 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.graphics.ColorUtils
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
+import com.google.android.material.color.MaterialColors
 import com.google.android.material.slider.Slider
 import com.p2p.messenger.P2PLib
 import com.p2p.messenger.R
@@ -56,7 +58,6 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
          *  phone is turned while the file picker is open. */
         private var pdfPage = 0
         private const val TICK_DIGEST_MS = 6_000L
-        private val PANEL_COLOR = Color.rgb(18, 18, 20)
     }
 
     private val ui = Handler(Looper.getMainLooper())
@@ -82,7 +83,15 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
     private lateinit var undoButton: View
     private lateinit var redoButton: View
 
-    private val tab = TabDrawable()
+    /** Theme colours. Only the drawing surface itself stays black (see
+     *  WhiteboardView); the bars and the tab look like the top bar they
+     *  hang from: Material3's action bar is `colorSurfaceContainer`. */
+    private val chromeColor = MaterialColors.getColor(activity, com.google.android.material.R.attr.colorSurfaceContainer, Color.DKGRAY)
+    private val onChromeColor = MaterialColors.getColor(activity, com.google.android.material.R.attr.colorOnSurface, Color.BLACK)
+    private val accentColor = MaterialColors.getColor(activity, com.google.android.material.R.attr.colorPrimary, onChromeColor)
+    private val alertColor = MaterialColors.getColor(activity, com.google.android.material.R.attr.colorError, Color.RED)
+
+    private val tab = TabDrawable(chromeColor, onChromeColor, alertColor)
     private val isOpen: Boolean get() = host.visibility == View.VISIBLE
 
     private val savePdf = activity.registerForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
@@ -386,7 +395,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         val root = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setBackgroundColor(PANEL_COLOR)
+            setBackgroundColor(chromeColor)
         }
         legend.orientation = LinearLayout.HORIZONTAL
         legend.setPadding((8 * dp).toInt(), (4 * dp).toInt(), (8 * dp).toInt(), (4 * dp).toInt())
@@ -411,7 +420,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         })
         fun icon(bar: LinearLayout, drawable: Int, description: Int, onClick: () -> Unit) = ImageButton(activity).apply {
             setImageResource(drawable)
-            setColorFilter(Color.WHITE)
+            setColorFilter(onChromeColor)
             background = pill(false)
             contentDescription = activity.getString(description)
             setOnClickListener { onClick() }
@@ -419,7 +428,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         }
         fun text(bar: LinearLayout, label: String, description: Int, onClick: () -> Unit) = TextView(activity).apply {
             text = label
-            setTextColor(Color.WHITE)
+            setTextColor(onChromeColor)
             textSize = 18f
             gravity = Gravity.CENTER
             background = pill(false)
@@ -429,23 +438,23 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         }
         val pages = row()
         text(pages, "‹", R.string.whiteboard_prev_page) { goToPage(page - 1) }
-        pageLabel.setTextColor(Color.WHITE)
+        pageLabel.setTextColor(onChromeColor)
         pageLabel.textSize = 14f
         pageLabel.gravity = Gravity.CENTER
         pages.addView(pageLabel, LinearLayout.LayoutParams((48 * dp).toInt(), height))
         text(pages, "›", R.string.whiteboard_next_page) { goToPage(page + 1) }
         pages.addView(View(activity), LinearLayout.LayoutParams(0, 1, 1f))
         // Pen size: 1..MAX_PEN_WIDTH board units. Only finished strokes carry it.
-        val white = ColorStateList.valueOf(Color.WHITE)
+        val accent = ColorStateList.valueOf(accentColor)
         val sizeBar = Slider(activity).apply {
             valueFrom = 1f
             valueTo = WhiteboardView.MAX_PEN_WIDTH.toFloat()
             stepSize = 1f
             value = board.penWidth.toFloat()
             isTickVisible = false
-            trackActiveTintList = white
-            thumbTintList = white
-            trackInactiveTintList = ColorStateList.valueOf(Color.argb(70, 255, 255, 255))
+            trackActiveTintList = accent
+            thumbTintList = accent
+            trackInactiveTintList = ColorStateList.valueOf(ColorUtils.setAlphaComponent(onChromeColor, 70))
             contentDescription = activity.getString(R.string.whiteboard_pen_size)
             addOnChangeListener { _, value, _ -> board.penWidth = value.toInt() }
         }
@@ -485,7 +494,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
             }
             legend.addView(TextView(activity).apply {
                 text = name
-                setTextColor(Color.WHITE)
+                setTextColor(onChromeColor)
                 textSize = 12f
                 setPadding((3 * dp).toInt(), 0, (14 * dp).toInt(), 0)
             })
@@ -510,21 +519,26 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         }
     }
 
-    /** The light rounded background every button of the bars sits on. */
+    /** The rounded background every button of the bars sits on: a tint of
+     *  the bar's text colour, so it reads on light and dark bars alike. */
     private fun pill(selected: Boolean) = GradientDrawable().apply {
         cornerRadius = 100 * dp
-        setColor(Color.argb(if (selected) 95 else 28, 255, 255, 255))
+        setColor(ColorUtils.setAlphaComponent(onChromeColor, if (selected) 70 else 22))
     }
 
     private fun dot(color: Int, ring: Boolean) = GradientDrawable().apply {
         shape = GradientDrawable.OVAL
         setColor(color)
-        if (ring) setStroke((3 * dp).toInt(), Color.WHITE)
+        if (ring) setStroke((3 * dp).toInt(), onChromeColor)
     }
 
     /** The pull tab under the top bar: a chevron (down = open the board, up =
      *  close it) and a dot while someone else's drawing is unseen. */
-    private class TabDrawable : Drawable() {
+    private class TabDrawable(
+        private val fillColor: Int,
+        private val chevronColor: Int,
+        private val unreadColor: Int,
+    ) : Drawable() {
         var open = false
             set(value) { field = value; invalidateSelf() }
         var unread = false
@@ -548,7 +562,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
             path.quadTo(w - shoulder, 0f, w, 0f)
             path.close()
             paint.style = Paint.Style.FILL
-            paint.color = PANEL_COLOR
+            paint.color = fillColor
             canvas.drawPath(path, paint)
 
             val cx = w / 2
@@ -563,12 +577,12 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
             paint.strokeWidth = h * 0.14f
             paint.strokeCap = Paint.Cap.ROUND
             paint.strokeJoin = Paint.Join.ROUND
-            paint.color = Color.WHITE
+            paint.color = chevronColor
             canvas.drawPath(path, paint)
 
             if (unread) {
                 paint.style = Paint.Style.FILL
-                paint.color = Color.rgb(229, 57, 53)
+                paint.color = unreadColor
                 canvas.drawCircle(cx + half + h * 0.5f, cy, h * 0.14f, paint)
             }
         }

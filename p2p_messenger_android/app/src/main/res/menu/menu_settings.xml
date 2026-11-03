@@ -10,7 +10,7 @@
 
     <item
         android:id="@+id/action_tor_reconnect"
-        android:icon="@drawable/ic_tor_reconnect"
+        android:icon="@drawable/reconnect"
         android:title="@string/action_tor_reconnect"
         app:showAsAction="ifRoom" />
 </menu>

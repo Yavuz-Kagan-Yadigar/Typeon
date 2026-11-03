@@ -967,67 +967,7 @@ class P2PService : Service() {
             // post etmek, yoklamanın init'ten önce çalışmamasını da
             // kendiliğinden garanti eder. `startForeground` ANA THREAD'de
             // kaldı — Android onu 5 sn içinde orada bekliyor.
-            handler.post {
-              // C4: init must never throw out of the HandlerThread (START_STICKY crash loop).
-              try {
-                P2PLib.initDatabase(applicationContext.filesDir.absolutePath)
-                if (!P2PLib.hasStoredIdentity()) {
-                    // START_STICKY brought the service back after a logout or
-                    // a remote wipe: no account, nothing to run.
-                    isRunning = false
-                    alive = false
-                    stopSelf()
-                    return@post
-                }
-                com.p2p.messenger.util.IdentityManager.loadIfPresent(applicationContext)
-            // Node modundan BAĞIMSIZ her zaman yüklenir — mesajlaşmanın
-            // güvenilirliği için gerekli (sıra dışı/gecikmeli mesajlar).
-                com.p2p.messenger.util.SkippedKeyManager.ensureLoaded(applicationContext)
-            // Spec dışı düzeltme: önceden SADECE node modu açıkken
-            // yükleniyordu ("canlı mesaj trafiğini arşivleme" kuralı hâlâ
-            // node moduna bağlı, bkz. Rust archive_message çağıranları) —
-            // ama artık node modu KAPALI cihazlar da `HistorySyncResponse`
-            // ile öğrendikleri geçmişi yerelde kalıcı kılmak için bu
-            // anahtara ihtiyaç duyuyor (aksi halde uygulama her
-            // kapatılıp açıldığında geçmiş "kayboluyormuş" gibi
-            // görünüyordu — aslında her seferinde ağdan yeniden
-            // çekilmesi gerekiyordu, karşı taraf o an erişilemezse bu
-            // başarısız oluyordu).
-                com.p2p.messenger.util.MessageHistoryManager.ensureHistoryKeyLoaded(applicationContext)
-            // bkz. ArchiveKeyManager — sunucudaki geçmişi çözen kök arşiv
-            // anahtarı (ARK). Yoksa burada ÜRETİLMEZ: sonradan bağlanan bir
-            // cihaz kendi rastgele anahtarını üretirse yüklediği arşiv diğer
-            // cihazlarda okunamaz olurdu; üretim sadece kullanıcı sunucuda
-            // geçmiş saklamayı AÇTIĞINDA yapılır (bkz. SettingsFragment).
-                com.p2p.messenger.util.ArchiveKeyManager.loadIfPresent(applicationContext)
-                val nodeMode = isNodeModeEnabled(applicationContext)
-                val torEnabled = isTorEnabled(applicationContext)
-                // The core returns an error when Tor cannot start (it no longer
-                // runs a swarm that can dial nothing): try again — with a
-                // BACKOFF: a fixed 30 s retry ran for the whole life of the
-                // service (measurable CPU + cellular burn while Tor could not
-                // bootstrap, with no escalation and no user signal).
-                fun startNet() {
-                    // The core refuses to start without its storage keys; a
-                    // keystore that failed at boot is tried again here.
-                    com.p2p.messenger.util.SkippedKeyManager.ensureLoaded(applicationContext)
-                    com.p2p.messenger.util.MessageHistoryManager.ensureHistoryKeyLoaded(applicationContext)
-                    if (P2PLib.startNetwork(nodeMode, torEnabled).startsWith("Error")) {
-                        val delay = startNetRetryDelayMs
-                        // Üstel büyüme, tavan 10 dk.
-                        startNetRetryDelayMs = (startNetRetryDelayMs * 2).coerceAtMost(START_NET_RETRY_MAX_MS)
-                        handler.postDelayed({ if (isRunning) startNet() }, delay)
-                    } else {
-                        startNetRetryDelayMs = START_NET_RETRY_INITIAL_MS
-                        applyMeteredToTor()
-                    }
-                }
-                startNet()
-                P2PLib.setHistoryStorageLimitBytes(getHistoryStorageLimitBytes(applicationContext))
-              } catch (t: Throwable) {
-                Log.e(TAG, "Servis başlatma hatası: ${t.message}")
-              }
-            }
+            handler.post { initAndStart() }
             listenerRemoved = { applyPowerSave() }
             wakePollNow = {
                 handler.removeCallbacks(pollRunnable)
@@ -1037,6 +977,73 @@ class P2PService : Service() {
         }
 
         return START_STICKY
+    }
+
+    /** Same backoff for every start step that depends on the Keystore or
+     *  the database: a transient failure must not end the service. */
+    private fun retryStart(step: () -> Unit) {
+        val delay = startNetRetryDelayMs
+        startNetRetryDelayMs = (startNetRetryDelayMs * 2).coerceAtMost(START_NET_RETRY_MAX_MS)
+        handler.postDelayed({ if (isRunning) step() }, delay)
+    }
+
+    /** Runs on the poll thread (see `onStartCommand`). */
+    private fun initAndStart() {
+        // C4: init must never throw out of the HandlerThread (START_STICKY crash loop).
+        try {
+            if (!P2PLib.initDatabase(applicationContext.filesDir.absolutePath)) {
+                // Database not open (Keystore failure): not the same as
+                // "no account", the service stays and tries again.
+                com.p2p.messenger.util.KeystoreCrypto.reportKeyFailure(applicationContext)
+                retryStart { initAndStart() }
+                return
+            }
+            if (!P2PLib.hasStoredIdentity()) {
+                // START_STICKY brought the service back after a logout or
+                // a remote wipe: no account, nothing to run. `onDestroy`
+                // clears the flags.
+                stopSelf()
+                return
+            }
+            com.p2p.messenger.util.SkippedKeyManager.ensureLoaded(applicationContext)
+            com.p2p.messenger.util.MessageHistoryManager.ensureHistoryKeyLoaded(applicationContext)
+            // The archive root key is never generated here (see ArchiveKeyManager).
+            com.p2p.messenger.util.ArchiveKeyManager.loadIfPresent(applicationContext)
+            startNet()
+            P2PLib.setHistoryStorageLimitBytes(getHistoryStorageLimitBytes(applicationContext))
+        } catch (t: Throwable) {
+            Log.e(TAG, "Servis başlatma hatası: ${t.message}")
+        }
+    }
+
+    /** The core returns an error when Tor cannot start: try again with a
+     *  backoff (see `retryStart`). Runs on the poll thread. */
+    private fun startNet() {
+        try {
+            // The core refuses to start without its storage keys; a
+            // keystore that failed at boot is tried again here.
+            com.p2p.messenger.util.SkippedKeyManager.ensureLoaded(applicationContext)
+            com.p2p.messenger.util.MessageHistoryManager.ensureHistoryKeyLoaded(applicationContext)
+            // The core does not check for its own device keys: without
+            // them the network would run but could not sign or decrypt.
+            if (!com.p2p.messenger.util.IdentityManager.loadIfPresent(applicationContext)) {
+                com.p2p.messenger.util.KeystoreCrypto.reportKeyFailure(applicationContext)
+                retryStart { startNet() }
+                return
+            }
+            val nodeMode = isNodeModeEnabled(applicationContext)
+            val torEnabled = isTorEnabled(applicationContext)
+            if (P2PLib.startNetwork(nodeMode, torEnabled).startsWith("Error")) {
+                retryStart { startNet() }
+            } else {
+                startNetRetryDelayMs = START_NET_RETRY_INITIAL_MS
+                applyMeteredToTor()
+            }
+        } catch (t: Throwable) {
+            // A throw from a retried step would otherwise end the retry chain.
+            Log.e(TAG, "Ağ başlatma hatası: ${t.message}")
+            retryStart { startNet() }
+        }
     }
 
     override fun onDestroy() {

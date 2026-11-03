@@ -16,6 +16,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.withStarted
 import androidx.navigation.fragment.NavHostFragment
 import androidx.navigation.ui.setupWithNavController
 import com.google.android.material.bottomnavigation.BottomNavigationView
@@ -111,7 +112,9 @@ class MainActivity : AppCompatActivity() {
                 else if (P2PLib.hasStoredIdentity()) (if (IdentityManager.loadIfPresent(applicationContext)) 1 else 3)
                 else 2
             }
-            continueStartup(savedInstanceState, state)
+            // The app lock may sit on top meanwhile: inflating the fragments
+            // after onSaveInstanceState throws, so wait until we are started.
+            lifecycle.withStarted { continueStartup(savedInstanceState, state) }
         }
     }
 
@@ -564,11 +567,13 @@ class MainActivity : AppCompatActivity() {
             // after the user left the app (e.g. during a recovery import).
             android.util.Log.w("MainActivity", "Service not started: ${e.message}")
         }
-        try {
-            statusText.text = getString(R.string.lbl_id_code, P2PLib.getIdentityShortCode())
-        } catch (e: Exception) {
-            // identity henüz okunamadı, önemli değil — status metni ikinci
-            // planda.
+        // Off the main thread: the call waits for the core lock, which a
+        // long poll turn holds (every onResume came through here).
+        lifecycleScope.launch {
+            val code = withContext(Dispatchers.IO) {
+                try { P2PLib.getIdentityShortCode() } catch (e: Exception) { null }
+            } ?: return@launch
+            statusText.text = getString(R.string.lbl_id_code, code)
         }
     }
 
@@ -595,8 +600,11 @@ class MainActivity : AppCompatActivity() {
         // başlatılması, kalıcı yeniden deneme kuyruğunun (bkz. lib.rs
         // `load_pending_durable_retries_from_db`) diskten geri
         // yüklenmesini de otomatik tetikler.
-        if (P2PLib.hasStoredIdentity()) {
-            startNetworkService()
+        lifecycleScope.launch {
+            val hasIdentity = withContext(Dispatchers.IO) {
+                try { P2PLib.hasStoredIdentity() } catch (e: Exception) { false }
+            }
+            if (hasIdentity) startNetworkService()
         }
     }
 

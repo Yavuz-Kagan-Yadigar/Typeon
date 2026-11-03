@@ -99,8 +99,9 @@ class StickerPicker(
         selected.clear()
         selectAllButton = sheet.findViewById<View>(R.id.btnStickerSelectAll).apply {
             setOnClickListener {
+                val added = ids.filter { it !in selected }
                 selected.addAll(ids)
-                selectionChanged()
+                selectionChanged(added)
             }
         }
         deleteSelectedButton = sheet.findViewById<View>(R.id.btnStickerDeleteSelected).apply {
@@ -196,10 +197,15 @@ class StickerPicker(
 
     private fun toggle(id: String) {
         if (!selected.remove(id)) selected.add(id)
-        selectionChanged()
+        selectionChanged(listOf(id))
     }
 
-    private fun selectionChanged() {
+    /**
+     * Buttons + grid. [changed] = ids whose selected state flipped: only those
+     * cells are rebound (payload, so no re-decode and no change animation).
+     * null = the list itself changed: full rebind.
+     */
+    private fun selectionChanged(changed: List<String>? = null) {
         val any = selected.isNotEmpty()
         selectAllButton?.visibility = if (any) View.VISIBLE else View.GONE
         deleteSelectedButton?.visibility = if (any) View.VISIBLE else View.GONE
@@ -209,7 +215,14 @@ class StickerPicker(
         )
         (deleteSelectedButton as? android.widget.Button)?.text =
             "${activity.getString(R.string.action_delete_selected)} (${selected.size})"
-        gridAdapter.notifyDataSetChanged()
+        if (changed == null) {
+            gridAdapter.notifyDataSetChanged()
+        } else {
+            for (id in changed) {
+                val idx = ids.indexOf(id)
+                if (idx >= 0) gridAdapter.notifyItemChanged(idx, SELECTION_PAYLOAD)
+            }
+        }
     }
 
     /** All selected are favorites: unfavorite them, else favorite them. Favorites list first. */
@@ -387,11 +400,34 @@ class StickerPicker(
 
         override fun getItemCount(): Int = ids.size
 
+        override fun onBindViewHolder(holder: Holder, position: Int, payloads: MutableList<Any>) {
+            if (payloads.isEmpty()) onBindViewHolder(holder, position) else bindSelection(holder, ids[position])
+        }
+
+        private fun bindSelection(holder: Holder, id: String) {
+            val on = id in selected
+            // Dim + accent frame: dimming alone is easy to miss on busy stickers.
+            holder.image.alpha = if (on) 0.5f else 1f
+            holder.itemView.foreground = if (on) selectionFrame else null
+        }
+
+        private val selectionFrame: Drawable by lazy {
+            val d = activity.resources.displayMetrics.density
+            val accent = com.p2p.messenger.util.ThemePrefs.getAccentColor(activity)
+                ?: com.google.android.material.color.MaterialColors.getColor(
+                    activity, androidx.appcompat.R.attr.colorPrimary, android.graphics.Color.BLUE
+                )
+            android.graphics.drawable.GradientDrawable().apply {
+                setStroke((3 * d).toInt(), accent)
+                cornerRadius = 8 * d
+            }
+        }
+
         override fun onBindViewHolder(holder: Holder, position: Int) {
             val id = ids[position]
             val cached = cache.get(id)
             holder.image.setImageDrawable(cached)
-            holder.image.alpha = if (id in selected) 0.35f else 1f
+            bindSelection(holder, id)
             holder.star.visibility = if (id in favorites) View.VISIBLE else View.GONE
             holder.itemView.setOnClickListener { if (selected.isEmpty()) sendSticker(id) else toggle(id) }
             holder.itemView.setOnLongClickListener {
@@ -419,6 +455,8 @@ class StickerPicker(
         }
     }
 }
+
+private const val SELECTION_PAYLOAD = "selection"
 
 /** A sticker picture: a `.gif` plays (API 28+), anything else is a still. */
 private fun loadStickerDrawable(context: Context, file: File): Drawable? {

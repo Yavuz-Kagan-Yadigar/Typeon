@@ -598,11 +598,15 @@ class CallActivity : AppCompatActivity() {
             }
             root.addView(texture)
         }
+        val size = (112 * resources.displayMetrics.density).toInt()
         root.addView(label, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             if (video) Gravity.BOTTOM or Gravity.START else Gravity.CENTER
-        ))
-        val size = (112 * resources.displayMetrics.density).toInt()
+        ).apply {
+            // Centred with the avatar: a top margin of one avatar plus a gap
+            // moves the name just below the circle instead of across it.
+            if (!video) topMargin = size + (16 * resources.displayMetrics.density).toInt()
+        })
         val avatar = ImageView(this).apply { visibility = View.GONE }
         root.addView(avatar, 0, FrameLayout.LayoutParams(size, size, Gravity.CENTER))
         val tile = Tile(root, label, texture).also { it.avatar = avatar }

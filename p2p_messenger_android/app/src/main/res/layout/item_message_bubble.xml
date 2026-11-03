@@ -367,7 +367,9 @@
 
     </LinearLayout>
 
-        <!-- Yan sütun: tepkiler + durum tiki + "gören" avatarları. `top`
+        <!-- Yan sütun: tepkiler + bekleyen/hata işareti + "gören" avatarları
+             (gelen balonun sağında, kendi balonumuzun SOLUNDA — bkz.
+             SimpleChatAdapter.placeSideColumn). `top`
              hizası, kullanıcının "bırakılan emojiler mesajın İLK SATIRININ
              yanında görünsün" isteği için — çok satırlı bir balonda pill
              aşağı kaymaz. -->

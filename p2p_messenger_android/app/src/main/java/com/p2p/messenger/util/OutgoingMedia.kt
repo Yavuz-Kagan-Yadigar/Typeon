@@ -28,8 +28,10 @@ import kotlinx.coroutines.launch
  * - Video: MP4, 3GP and WebM are copied into a new container without
  *   metadata (location, device, dates); nothing is re-encoded.
  *
- * A JPEG/PNG that cannot be decoded fails the send; a video that cannot be
- * remuxed goes out unchanged only after the user confirms.
+ * A JPEG/PNG that cannot be decoded fails the send (the core strips one that
+ * goes as it is). Any other image left as it is (HEIC that cannot be decoded,
+ * animated WebP, a GIF over the caps, alpha below Android 9) and a video that
+ * cannot be remuxed go out unchanged only after the user confirms.
  */
 object OutgoingMedia {
     private const val TAG = "OutgoingMedia"
@@ -51,7 +53,9 @@ object OutgoingMedia {
         val unchanged = Prepared(src, fileName, mimeType)
         return try {
             when {
-                mimeType.startsWith("image/") -> prepareImage(src, fileName, hiRes) ?: unchanged
+                // The core strips only JPEG/PNG metadata: anything else left as it is asks first.
+                mimeType.startsWith("image/") -> prepareImage(src, fileName, hiRes)
+                    ?: if (isJpegOrPng(src) || confirmUnscrubbed()) unchanged else throw java.util.concurrent.CancellationException("send cancelled")
                 mimeType.startsWith("video/") -> remuxVideo(src, fileName, mimeType)
                     ?: if (confirmUnscrubbed()) unchanged else throw java.util.concurrent.CancellationException("send cancelled")
                 else -> unchanged
@@ -62,9 +66,11 @@ object OutgoingMedia {
             Log.w(TAG, "left unchanged: ${e.message}")
             // H-07: a JPEG/PNG that failed to decode goes out NOT as it is (GPS
             // in its EXIF): the caller shows the send-failed error.
-            // ponytail: GIF/HEIC/video keep the unchanged fallback (owner decision).
+            // Any other image or video goes as it is only after the user confirms.
             if (mimeType.startsWith("image/") && isJpegOrPng(src)) throw java.io.IOException("image scrub failed", e)
-            if (mimeType.startsWith("video/") && !confirmUnscrubbed()) throw java.util.concurrent.CancellationException("send cancelled")
+            if ((mimeType.startsWith("image/") || mimeType.startsWith("video/")) && !confirmUnscrubbed()) {
+                throw java.util.concurrent.CancellationException("send cancelled")
+            }
             unchanged
         }
     }
@@ -146,7 +152,8 @@ object OutgoingMedia {
         try {
             val opaque = isOpaque(bitmap)
             // Below Android 9 the alpha is premultiplied: not lossless. The
-            // file goes as it is (the core drops its metadata chunks).
+            // file goes as it is (a PNG: the core drops its metadata chunks;
+            // anything else: `prepare` asks first).
             if (!opaque && bitmap.isPremultiplied) return null
             val base = fileName.substringBeforeLast('.', fileName)
             return if (!hiRes && opaque) {

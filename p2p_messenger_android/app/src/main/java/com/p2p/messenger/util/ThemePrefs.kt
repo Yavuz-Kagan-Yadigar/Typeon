@@ -26,6 +26,18 @@ object ThemePrefs {
     private const val KEY_MATERIAL_YOU = "material_you"
     private const val KEY_TEXT_COLOR = "text_color"
     private const val WALLPAPER_FILE_NAME = "chat_wallpaper.jpg"
+    private const val WALLPAPER_PROCESSED_FILE_NAME = "chat_wallpaper_processed"
+    private const val KEY_WALLPAPER_BLUR = "chat_wallpaper_blur_x10"
+    private const val KEY_WALLPAPER_DARKNESS = "chat_wallpaper_darkness"
+    private const val TAG = "ThemePrefs"
+
+    /** Slider ranges: blur in tenths of a box radius on the downscaled work bitmap
+     *  (50 = radius 5.0, the old integer value 5), darkness in percent. */
+    const val WALLPAPER_BLUR_MAX = 50
+    const val WALLPAPER_DARKNESS_MAX = 90
+    /** Longest side of the bitmap the blur runs on; the result is scaled back up. */
+    private const val BLUR_WORK_SIDE = 256
+    private const val PROCESSED_JPEG_QUALITY = 90
 
     /** bkz. `getTextScale`/`SettingsFragment` metin boyutu kaydırıcısı —
      *  sistemin kendi "Yazı tipi boyutu" ayarına EK, uygulamaya özel bir
@@ -166,8 +178,8 @@ object ThemePrefs {
      * Below Android 12 there is no dynamic theme for `applyAccentColor` to
      * recolor: the chosen text color is painted onto the TextViews that use a
      * default theme text color (buttons, errors and bubble colors untouched).
-     * ponytail: walks the tree on every layout pass; per-adapter painting if
-     * that is ever measurably slow.
+     * ponytail: walks the tree once per burst of layout passes (50 ms
+     * debounce); per-adapter painting if that is ever measurably slow.
      */
     fun applyTextColorLegacy(activity: Activity) {
         if (DynamicColors.isDynamicColorAvailable()) return
@@ -191,7 +203,13 @@ object ThemePrefs {
             }
             if (v is android.view.ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
         }
-        decor.viewTreeObserver.addOnGlobalLayoutListener { walk(decor) }
+        // Layout passes come in bursts (scrolling, typing): one walk after
+        // they settle instead of one per pass.
+        val walkNow = Runnable { walk(decor) }
+        decor.viewTreeObserver.addOnGlobalLayoutListener {
+            decor.removeCallbacks(walkNow)
+            decor.postDelayed(walkNow, 50)
+        }
     }
 
     /**
@@ -203,6 +221,144 @@ object ThemePrefs {
      * gerek yok.
      */
     fun chatWallpaperFile(context: Context): File = File(context.filesDir, WALLPAPER_FILE_NAME)
+
+    /** Blurred + darkened copy of [chatWallpaperFile], next to it. Exists only
+     *  while at least one slider is above 0; see [regenerateProcessedWallpaper]. */
+    fun chatWallpaperProcessedFile(context: Context): File = File(context.filesDir, WALLPAPER_PROCESSED_FILE_NAME)
+
+    /** Blur in tenths (0..[WALLPAPER_BLUR_MAX]). */
+    fun getWallpaperBlur(context: Context): Int {
+        val sp = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return sp.getInt(KEY_WALLPAPER_BLUR, 0).coerceIn(0, WALLPAPER_BLUR_MAX)
+    }
+
+    fun getWallpaperDarkness(context: Context): Int =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_WALLPAPER_DARKNESS, 0).coerceIn(0, WALLPAPER_DARKNESS_MAX)
+
+    fun setWallpaperEffects(context: Context, blur: Int, darkness: Int) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_WALLPAPER_BLUR, blur.coerceIn(0, WALLPAPER_BLUR_MAX))
+            .putInt(KEY_WALLPAPER_DARKNESS, darkness.coerceIn(0, WALLPAPER_DARKNESS_MAX))
+            .apply()
+    }
+
+    /**
+     * Computes the processed wallpaper ONCE from the stored sliders and writes it
+     * (or deletes it when both are 0). Blocking: call from a background thread,
+     * only when a slider is released or a new image is picked. Chats never call
+     * this, they just load whatever file this left behind.
+     */
+    @Synchronized
+    fun regenerateProcessedWallpaper(context: Context) {
+        val original = chatWallpaperFile(context)
+        val processed = chatWallpaperProcessedFile(context)
+        val blur = getWallpaperBlur(context)
+        val dark = getWallpaperDarkness(context)
+        if (!original.exists() || (blur == 0 && dark == 0)) {
+            processed.delete()
+            return
+        }
+        val dm = context.resources.displayMetrics
+        val src = decodeWallpaper(original.absolutePath, dm.widthPixels, dm.heightPixels) ?: return
+        val out = applyWallpaperEffects(src, blur, dark)
+        val tmp = File(context.filesDir, "$WALLPAPER_PROCESSED_FILE_NAME.tmp")
+        try {
+            tmp.outputStream().use { out.compress(Bitmap.CompressFormat.JPEG, PROCESSED_JPEG_QUALITY, it) }
+            if (!tmp.renameTo(processed)) throw java.io.IOException("rename failed")
+            android.util.Log.i(TAG, "wallpaper processed file computed blur=$blur darkness=$dark ${out.width}x${out.height}")
+        } finally {
+            tmp.delete()
+            if (out !== src) out.recycle()
+            src.recycle()
+        }
+    }
+
+    /** Cheap bitmap for the live preview while a slider is dragged (not stored). */
+    fun wallpaperPreview(context: Context, blur: Int, darkness: Int, side: Int): Bitmap? {
+        val original = chatWallpaperFile(context)
+        if (!original.exists()) return null
+        val src = decodeWallpaper(original.absolutePath, side, side) ?: return null
+        return applyWallpaperEffects(src, blur, darkness)
+    }
+
+    /** Blur on a downscaled copy, scaled back to [src] size, then a black alpha overlay. */
+    private fun applyWallpaperEffects(src: Bitmap, blur: Int, darkness: Int): Bitmap {
+        if (blur == 0 && darkness == 0) return src
+        var result = src
+        if (blur > 0) {
+            val k = BLUR_WORK_SIDE.toFloat() / maxOf(src.width, src.height)
+            val w = maxOf(1, (src.width * k).toInt())
+            val h = maxOf(1, (src.height * k).toInt())
+            val small = Bitmap.createScaledBitmap(src, w, h, true)
+            val px = IntArray(w * h)
+            small.getPixels(px, 0, w, 0, 0, w, h)
+            // Fractional radius: blend the blur at floor(r) and floor(r)+1.
+            val r = blur / 10f
+            val r0 = r.toInt()
+            val f = r - r0
+            val lo = px.copyOf()
+            if (r0 > 0) blur3(lo, w, h, r0)
+            if (f > 0f) {
+                val hi = px.copyOf()
+                blur3(hi, w, h, r0 + 1)
+                for (i in px.indices) {
+                    var o = 0
+                    for (sh in intArrayOf(24, 16, 8, 0)) {
+                        val a = (lo[i] ushr sh) and 255
+                        val b = (hi[i] ushr sh) and 255
+                        o = o or ((a + ((b - a) * f).toInt()) shl sh)
+                    }
+                    px[i] = o
+                }
+            } else {
+                System.arraycopy(lo, 0, px, 0, px.size)
+            }
+            small.setPixels(px, 0, w, 0, 0, w, h)
+            result = Bitmap.createScaledBitmap(small, src.width, src.height, true)
+            if (small !== src && small !== result) small.recycle()
+        }
+        val canvasBmp = if (result.isMutable) result else result.copy(Bitmap.Config.ARGB_8888, true)
+        if (canvasBmp !== result && result !== src) result.recycle()
+        if (darkness > 0) {
+            android.graphics.Canvas(canvasBmp).drawColor(android.graphics.Color.argb(darkness * 255 / 100, 0, 0, 0))
+        }
+        return canvasBmp
+    }
+
+    private fun blur3(px: IntArray, w: Int, h: Int, r: Int) {
+        repeat(3) { // 3 box passes approximate a gaussian
+            boxBlur(px, w, h, r, true)
+            boxBlur(px, w, h, r, false)
+        }
+    }
+
+    /** Running-sum box blur of radius [r] along rows ([horizontal]) or columns, edges clamped. */
+    private fun boxBlur(px: IntArray, w: Int, h: Int, r: Int, horizontal: Boolean) {
+        val len = if (horizontal) w else h
+        val lines = if (horizontal) h else w
+        val step = if (horizontal) 1 else w
+        val line = IntArray(len)
+        val div = 2 * r + 1
+        for (l in 0 until lines) {
+            val base = if (horizontal) l * w else l
+            for (i in 0 until len) line[i] = px[base + i * step]
+            var a = 0; var rr = 0; var g = 0; var b = 0
+            for (i in -r..r) {
+                val c = line[i.coerceIn(0, len - 1)]
+                a += c ushr 24; rr += (c shr 16) and 255; g += (c shr 8) and 255; b += c and 255
+            }
+            for (i in 0 until len) {
+                px[base + i * step] = ((a / div) shl 24) or ((rr / div) shl 16) or ((g / div) shl 8) or (b / div)
+                val add = line[(i + r + 1).coerceAtMost(len - 1)]
+                val sub = line[(i - r).coerceAtLeast(0)]
+                a += (add ushr 24) - (sub ushr 24)
+                rr += ((add shr 16) and 255) - ((sub shr 16) and 255)
+                g += ((add shr 8) and 255) - ((sub shr 8) and 255)
+                b += (add and 255) - (sub and 255)
+            }
+        }
+    }
 
     /** Spec dışı, kullanıcı isteği ("birden fazla font içe aktarabilmeli,
      *  her biri kendi adıyla listede görünmeli"): tek sabit dosya yerine
@@ -287,6 +443,7 @@ object ThemePrefs {
         chatWallpaperCache = null
         chatWallpaperKey = ""
         chatWallpaperFile(context).delete()
+        chatWallpaperProcessedFile(context).delete()
     }
 
     /**
@@ -298,7 +455,10 @@ object ThemePrefs {
      */
     fun applyChatBackground(activity: Activity) {
         val wallpaperView = activity.findViewById<ImageView>(R.id.imgChatWallpaper) ?: return
-        val wallpaperFile = chatWallpaperFile(activity)
+        // The processed file (if any) is the only thing loaded here; the
+        // size+mtime key below makes a new one invalidate the memory cache.
+        val wallpaperFile = chatWallpaperProcessedFile(activity).takeIf { it.exists() && chatWallpaperFile(activity).exists() }
+            ?: chatWallpaperFile(activity)
         if (wallpaperFile.exists()) {
             val key = "${wallpaperFile.absolutePath}:${wallpaperFile.length()}:${wallpaperFile.lastModified()}"
             val cached = chatWallpaperCache

@@ -338,6 +338,11 @@ class StorageAttachmentsAdapter(
         override fun sizeOf(key: String, value: Bitmap) = value.byteCount
     }
 
+    // One worker that exits when idle (core 0; the queue is unbounded, so max 1 is the real size).
+    private val decoder = java.util.concurrent.ThreadPoolExecutor(
+        0, 1, 5, java.util.concurrent.TimeUnit.SECONDS, java.util.concurrent.LinkedBlockingQueue()
+    )
+
     class ViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         val check: CheckBox = itemView.findViewById(R.id.checkStorageAttachment)
         val image: ImageView? = itemView.findViewById(R.id.imgStorageAttachment)
@@ -360,9 +365,21 @@ class StorageAttachmentsAdapter(
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         val item = items[position]
         val context = holder.itemView.context
-        holder.image?.setImageBitmap(item.preview?.let { bytes ->
-            thumbs.get(item.fileId) ?: ImagePreview.decodeBytes(bytes, 256)?.also { thumbs.put(item.fileId, it) }
-        })
+        val fileId = item.fileId
+        holder.image?.tag = fileId
+        val cached = thumbs.get(fileId)
+        holder.image?.setImageBitmap(cached)
+        val bytes = item.preview
+        if (cached == null && bytes != null && holder.image != null) {
+            // Decode off the main thread; a recycled cell (tag changed) drops the result.
+            decoder.execute {
+                val bmp = ImagePreview.decodeBytes(bytes, 256) ?: return@execute
+                holder.image.post {
+                    thumbs.put(fileId, bmp)
+                    if (holder.image.tag == fileId) holder.image.setImageBitmap(bmp)
+                }
+            }
+        }
         holder.name?.text = item.name
         holder.info?.text = context.getString(
             R.string.storage_attachment_type,

@@ -34,6 +34,9 @@ class P2PApplication : Application() {
      * yanlışlıkla tetiklemez).
      */
     private var startedActivityCount = 0
+    /** Set once the core reported a stored identity: later checks skip the
+     *  core mutex on the main thread. */
+    @Volatile private var identityKnown = false
 
     companion object {
         /** FLAG_SECURE on release builds only: debuggable builds stay capturable (adb screenshots in device tests). */
@@ -234,10 +237,15 @@ class P2PApplication : Application() {
              */
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
                 // #48: MainActivity opens the core itself, off the main thread.
-                if (activity is MainActivity || P2PLib.hasStoredIdentity()) return
+                if (activity is MainActivity || identityKnown) return
+                if (P2PLib.hasStoredIdentity()) {
+                    identityKnown = true
+                    return
+                }
                 try {
                     P2PLib.initDatabase(filesDir.absolutePath)
                     if (P2PLib.hasStoredIdentity()) {
+                        identityKnown = true
                         com.p2p.messenger.util.IdentityManager.loadIfPresent(this@P2PApplication)
                         com.p2p.messenger.util.MessageHistoryManager.ensureHistoryKeyLoaded(this@P2PApplication)
                     }
@@ -255,7 +263,10 @@ class P2PApplication : Application() {
                 AppLock.guard(activity)
                 // bkz. `startedActivityCount` dokümantasyonu.
                 if (startedActivityCount == 0) {
-                    if (P2PLib.hasStoredIdentity()) {
+                    // The check takes the core mutex, which a long poll turn
+                    // can hold: not on the UI thread once identity was seen.
+                    if (identityKnown || P2PLib.hasStoredIdentity()) {
+                        identityKnown = true
                         // Ana thread'i JNI çağrısıyla meşgul etmemek için
                         // (bkz. genel JNI-ana-thread hijyeni bu projede) —
                         // `retry_all_pending_now` kendisi hafif olsa da

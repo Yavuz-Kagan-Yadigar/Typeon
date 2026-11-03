@@ -36,7 +36,8 @@ class P2PRetryWorker(context: Context, params: WorkerParameters) : Worker(contex
         // The service is polling: nothing to restart, and `initDatabase` plus a
         // service start every hour only woke the core.
         if (P2PService.alive) return Result.success()
-        P2PLib.initDatabase(applicationContext.filesDir.absolutePath)
+        // Database not open is not "no account": try again later.
+        if (!P2PLib.initDatabase(applicationContext.filesDir.absolutePath)) return Result.retry()
         if (P2PLib.hasStoredIdentity()) {
             val serviceIntent = Intent(applicationContext, P2PService::class.java)
             // Bu denetimde bulundu: bu çağrı korumasızdı. Android 12+ (API 31)

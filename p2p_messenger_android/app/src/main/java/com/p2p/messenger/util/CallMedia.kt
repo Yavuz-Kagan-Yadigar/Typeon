@@ -80,6 +80,10 @@ object CallMedia {
     fun start(video: Boolean) {
         if (running) return
         val gen = ++generation
+        // A lane left by a frame that raced the last `stop()` would swallow the
+        // same slot of this call.
+        lanes.values.forEach { it.alive = false }
+        lanes.clear()
         running = true
         muted = false
         if (video) videoEncoder = VideoEncoder()
@@ -262,6 +266,8 @@ object CallMedia {
     private fun receiveLoop(gen: Int) {
         while (running && generation == gen) {
             val f = P2PLib.callRecv(200) ?: continue
+            // `stop()` may have cleared the lanes while this call blocked.
+            if (!running || generation != gen) break
             if (f.size < 3) continue
             val kind = f[0].toInt()
             val slot = f[1].toInt() and 0xff
@@ -316,6 +322,12 @@ object CallMedia {
                     videoSinks[slot]?.feed(f, 2)
                 } catch (e: Exception) {
                     Log.w(TAG, "Video decode failed (slot $slot), waiting for next keyframe", e)
+                    // A decoder that cannot take this sender's HEVC at all (the
+                    // MTK one on the Note 8 with the tablet's stream): ask for H.264.
+                    if (videoSinks[slot]?.hevcNeverRendered() == true) {
+                        Log.i(TAG, "HEVC from slot $slot never decoded, asking for H.264")
+                        P2PLib.callRequestAvc(slot)
+                    }
                     videoSinks[slot]?.resync()
                 }
             }
@@ -647,6 +659,8 @@ object CallMedia {
         private var failed = false
         /** A keyframe was asked for inside the minimum gap: send it when the gap ends. */
         private var keyPending = false
+        /** A receiver could not decode our HEVC. */
+        private var forceAvc = false
 
         /** Called on the analyzer thread; the caller closes [image]. */
         @Synchronized
@@ -661,6 +675,13 @@ object CallMedia {
             // At most one on-demand keyframe per KEYFRAME_MIN_GAP_MS: a
             // receiver stuck in a decode loop must not turn the stream into
             // all-keyframes (seen: ~2 Mbps).
+            // A receiver cannot decode our HEVC: H.264 for the rest of the call.
+            if (P2PLib.callTakeAvcRequest() && hevc) {
+                Log.i(TAG, "Receiver asked for H.264, switching encoder")
+                forceAvc = true
+                release()
+                return
+            }
             if (P2PLib.callTakeKeyframeRequest()) keyPending = true
             val keyAsked = keyPending && now - lastKeyNs > VideoTuning.KEYFRAME_MIN_GAP_MS * 1_000_000
             if (keyAsked) {
@@ -696,6 +717,7 @@ object CallMedia {
         private fun pickEncoder(w: Int, h: Int): Pair<String, String?> {
             val infos = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS).codecInfos
             for (mime in VideoTuning.MIME_PREFERENCE) {
+                if (forceAvc && mime == MediaFormat.MIMETYPE_VIDEO_HEVC) continue
                 val hw = infos.firstOrNull { ci ->
                     ci.isEncoder && ci.supportedTypes.any { it.equals(mime, true) } &&
                         !ci.name.startsWith("c2.android.") && !ci.name.startsWith("OMX.google.") &&
@@ -748,7 +770,11 @@ object CallMedia {
                 setInteger(MediaFormat.KEY_OPERATING_RATE, VideoTuning.MAX_FPS)
                 setInteger(MediaFormat.KEY_PRIORITY, 0) // real time
                 setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-                setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
+                // No KEY_PREPEND_HEADER_TO_SYNC_FRAMES: `drain` already puts the
+                // codec config in front of every keyframe, and an encoder that
+                // honoured the key sent it twice. The Note 8's MTK HEVC decoder
+                // rejects such a keyframe (OMX 0x80001005) and never decoded the
+                // tablet's stream.
                 if (android.os.Build.VERSION.SDK_INT >= 30) setInteger(MediaFormat.KEY_LATENCY, 1)
                 if (android.os.Build.VERSION.SDK_INT >= 31) {
                     setInteger(MediaFormat.KEY_VIDEO_QP_MIN, VideoTuning.QP_MIN)
@@ -923,6 +949,8 @@ object CallMedia {
         private var pts = 0L
         private var askedAt = 0L
         private var createdAt = -1000L
+        /** Frames the current decoder has rendered. */
+        private var rendered = 0
         private val info = MediaCodec.BufferInfo()
 
         /** feed() runs on the receive thread, release() on the UI thread. */
@@ -967,6 +995,7 @@ object CallMedia {
                     }
                 } else newDecoder(fmt)
                 codec = c
+                rendered = 0
                 Log.i(TAG, "Video decoder ${c.name} $mime ${w}x$h (slot $slot)")
                 if (rot % 180 == 0) onSize(w, h) else onSize(h, w)
             }
@@ -1007,7 +1036,7 @@ object CallMedia {
             while (true) {
                 val o = c.dequeueOutputBuffer(info, 0)
                 if (o == MediaCodec.INFO_TRY_AGAIN_LATER) break
-                if (o >= 0) c.releaseOutputBuffer(o, true)
+                if (o >= 0) { c.releaseOutputBuffer(o, true); rendered++ }
             }
         }
 
@@ -1019,6 +1048,9 @@ object CallMedia {
             codec = null
             w = 0
         }
+
+        @Synchronized
+        fun hevcNeverRendered() = mime == MediaFormat.MIMETYPE_VIDEO_HEVC && rendered == 0
 
         /** After a decode error: start over from the next keyframe. */
         @Synchronized

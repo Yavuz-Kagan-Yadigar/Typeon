@@ -169,6 +169,8 @@
     <string name="action_choose">Choose</string>
     <string name="action_reset">Reset</string>
     <string name="action_choose_wallpaper">Choose image</string>
+    <string name="lbl_wallpaper_blur">Wallpaper blur</string>
+    <string name="lbl_wallpaper_darkness">Wallpaper darkness</string>
     <string name="action_remove_wallpaper">Remove</string>
     <string name="title_pick_bg_color">Pick a background color</string>
     <string name="title_pick_accent_color">Pick an accent color</string>
@@ -244,7 +246,6 @@
     <!-- Spec dışı, kullanıcı isteği: başarısız (ERROR ikonlu) bir mesajı
          yeniden gönderme — uzun basma menüsünde SADECE başarısız mesajlarda
          görünür. -->
-    <string name="cd_status_delivered">Delivered</string>
     <string name="action_resume_download">Resume</string>
     <string name="action_retry_message">Retry</string>
     <string name="msg_retrying_message">Retrying…</string>
@@ -367,6 +368,8 @@
     <string name="linked_devices_add">Add a device (scan)</string>
     <string name="linked_devices_this_device">this device</string>
     <string name="linked_devices_revoked">revoked</string>
+    <string name="linked_devices_confirm_forget">Remove this revoked device from the list? It stays revoked.</string>
+    <string name="action_remove_from_list">Remove from list</string>
     <string name="linked_devices_confirm_revoke">Revoke this linked device? It will no longer be able to send or receive as this account.</string>
 
     <!-- Spec dışı, kullanıcı isteği: hesaptan çıkış (yerel verileri sil). -->
@@ -534,7 +537,7 @@
     <string name="msg_recording_in_background">A voice recording is still running. Send it or discard it?</string>
     <string name="notif_fg_server_down">Server unreachable — messages go direct only</string>
     <string name="notif_fg_recording">Recording a voice message</string>
-    <string name="msg_media_scrub_failed">Location/device data could not be removed from this video. Send anyway?</string>
+    <string name="msg_media_scrub_failed">Location/device data could not be removed from this file. Send anyway?</string>
     <string name="action_send_anyway">Send anyway</string>
     <string name="title_confirm_contact">Add this contact?</string>
     <string name="msg_confirm_contact">Add the contact from this QR code?</string>

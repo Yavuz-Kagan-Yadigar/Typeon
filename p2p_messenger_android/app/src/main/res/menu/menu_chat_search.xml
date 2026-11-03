@@ -5,19 +5,19 @@
     <!-- Voice / video call (1:1 and group — this menu is shared). -->
     <item
         android:id="@+id/action_voice_call"
-        android:icon="@drawable/ic_call"
+        android:icon="@drawable/voicecall"
         android:title="@string/action_voice_call"
         app:showAsAction="ifRoom" />
     <item
         android:id="@+id/action_video_call"
-        android:icon="@drawable/ic_videocam"
+        android:icon="@drawable/videocall"
         android:title="@string/action_video_call"
         app:showAsAction="ifRoom" />
 
     <!-- Spec dışı, kullanıcı isteği: sohbet içi mesaj arama. -->
     <item
         android:id="@+id/action_search_messages"
-        android:icon="@android:drawable/ic_menu_search"
+        android:icon="@drawable/search"
         android:title="@string/action_search_messages"
         app:showAsAction="always" />
 
@@ -27,7 +27,7 @@
          gerektiği). Bu menü dosyası ikisi arasında paylaşılır. -->
     <item
         android:id="@+id/action_tor_reconnect"
-        android:icon="@drawable/ic_tor_reconnect"
+        android:icon="@drawable/reconnect"
         android:title="@string/action_tor_reconnect"
         app:showAsAction="ifRoom" />
 </menu>

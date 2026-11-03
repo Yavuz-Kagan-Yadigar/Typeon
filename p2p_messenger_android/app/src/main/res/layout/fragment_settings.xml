@@ -136,10 +136,11 @@
                         android:textSize="13sp"
                         android:alpha="0.7" />
                 </LinearLayout>
-                <com.google.android.material.slider.Slider
+                <SeekBar
                     android:id="@+id/text_scale_slider"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content" />
+                    android:layout_height="wrap_content"
+                    android:max="0" />
 
                 <LinearLayout style="@style/Settings.Row" android:minHeight="0dp">
                     <TextView
@@ -154,10 +155,11 @@
                         android:textSize="13sp"
                         android:alpha="0.7" />
                 </LinearLayout>
-                <com.google.android.material.slider.Slider
+                <SeekBar
                     android:id="@+id/ui_scale_slider"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content" />
+                    android:layout_height="wrap_content"
+                    android:max="0" />
 
                 <View style="@style/Settings.Divider" />
 
@@ -282,6 +284,56 @@
                         style="@style/Settings.Button"
                         android:text="@string/action_choose" />
                 </LinearLayout>
+                <LinearLayout
+                    android:id="@+id/wallpaper_blur_row"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+                    <LinearLayout style="@style/Settings.Row" android:minHeight="0dp">
+                        <TextView
+                            style="@style/Settings.Title"
+                            android:layout_width="0dp"
+                            android:layout_weight="1"
+                            android:text="@string/lbl_wallpaper_blur" />
+                        <TextView
+                            android:id="@+id/wallpaper_blur_value"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:textSize="13sp"
+                            android:alpha="0.7" />
+                    </LinearLayout>
+                    <SeekBar
+                    android:id="@+id/wallpaper_blur_slider"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:max="50" />
+                </LinearLayout>
+                <LinearLayout
+                    android:id="@+id/wallpaper_darkness_row"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+                    <LinearLayout style="@style/Settings.Row" android:minHeight="0dp">
+                        <TextView
+                            style="@style/Settings.Title"
+                            android:layout_width="0dp"
+                            android:layout_weight="1"
+                            android:text="@string/lbl_wallpaper_darkness" />
+                        <TextView
+                            android:id="@+id/wallpaper_darkness_value"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:textSize="13sp"
+                            android:alpha="0.7" />
+                    </LinearLayout>
+                    <SeekBar
+                    android:id="@+id/wallpaper_darkness_slider"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:max="90" />
+                </LinearLayout>
             </LinearLayout>
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
@@ -402,13 +454,11 @@
                     android:id="@+id/history_storage_limit_desc"
                     style="@style/Settings.Desc"
                     android:text="@string/lbl_history_storage_limit_desc" />
-                <com.google.android.material.slider.Slider
+                <SeekBar
                     android:id="@+id/history_storage_limit_slider"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:valueFrom="0"
-                    android:valueTo="8"
-                    android:stepSize="1" />
+                    android:max="8" />
 
                 <View style="@style/Settings.Divider" />
 

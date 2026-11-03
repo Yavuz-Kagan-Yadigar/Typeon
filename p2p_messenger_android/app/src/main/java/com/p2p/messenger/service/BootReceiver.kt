@@ -42,8 +42,9 @@ class BootReceiver : BroadcastReceiver() {
                 // bkz. P2PRetryWorker aynı notu: süreç yeni doğmuş olabilir,
                 // `hasStoredIdentity` DB açılmadan yanlış (false) döner.
                 // `initDatabase` idempotent.
-                P2PLib.initDatabase(app.filesDir.absolutePath)
-                if (P2PLib.hasStoredIdentity()) {
+                // A database that did not open (Keystore not ready) is not
+                // "no account": the service retries the open itself.
+                if (!P2PLib.initDatabase(app.filesDir.absolutePath) || P2PLib.hasStoredIdentity()) {
                     ContextCompat.startForegroundService(app, Intent(app, P2PService::class.java))
                 }
             } catch (e: Throwable) {

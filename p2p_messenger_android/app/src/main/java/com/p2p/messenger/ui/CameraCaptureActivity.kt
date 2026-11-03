@@ -160,25 +160,34 @@ class CameraCaptureActivity : AppCompatActivity() {
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
-                    val bitmap = try {
-                        decodeRotated(image)
-                    } catch (e: Exception) {
-                        null
-                    } catch (e: OutOfMemoryError) {
-                        null
-                    } finally {
-                        image.close()
+                    // The JPEG decode + rotate of a full-size frame: off the
+                    // main thread; the shutter stays disabled meanwhile.
+                    lifecycleScope.launch {
+                        val bitmap = try {
+                            withContext(Dispatchers.Default) {
+                                try {
+                                    decodeRotated(image)
+                                } catch (e: Exception) {
+                                    null
+                                } catch (e: OutOfMemoryError) {
+                                    null
+                                }
+                            }
+                        } finally {
+                            // Also when the activity went away first.
+                            image.close()
+                        }
+                        shutter.isEnabled = true
+                        if (bitmap == null) {
+                            Toast.makeText(
+                                this@CameraCaptureActivity,
+                                getString(R.string.error_camera_start_failed, ""),
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            return@launch
+                        }
+                        showCropStage(bitmap)
                     }
-                    shutter.isEnabled = true
-                    if (bitmap == null) {
-                        Toast.makeText(
-                            this@CameraCaptureActivity,
-                            getString(R.string.error_camera_start_failed, ""),
-                            Toast.LENGTH_SHORT
-                        ).show()
-                        return
-                    }
-                    showCropStage(bitmap)
                 }
 
                 override fun onError(exception: ImageCaptureException) {

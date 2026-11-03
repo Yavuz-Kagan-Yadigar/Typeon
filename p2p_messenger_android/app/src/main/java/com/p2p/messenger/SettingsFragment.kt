@@ -306,7 +306,7 @@ class SettingsFragment : Fragment() {
         val historyStorageLimitLabel = view.findViewById<TextView>(R.id.history_storage_limit_label)
         val historyStorageLimitDesc = view.findViewById<TextView>(R.id.history_storage_limit_desc)
         val historyStorageLimitValue = view.findViewById<TextView>(R.id.history_storage_limit_value)
-        val historyStorageLimitSlider = view.findViewById<com.google.android.material.slider.Slider>(R.id.history_storage_limit_slider)
+        val historyStorageLimitSlider = view.findViewById<android.widget.SeekBar>(R.id.history_storage_limit_slider)
 
         fun setHistoryStorageLimitVisible(visible: Boolean) {
             val v = if (visible) View.VISIBLE else View.GONE
@@ -317,16 +317,21 @@ class SettingsFragment : Fragment() {
         }
 
         val currentLimitBytes = P2PService.getHistoryStorageLimitBytes(requireContext())
-        historyStorageLimitSlider.value = closestStepIndex(currentLimitBytes).toFloat()
+        historyStorageLimitSlider.max = HISTORY_STORAGE_LIMIT_STEPS_BYTES.size - 1
+        historyStorageLimitSlider.progress = closestStepIndex(currentLimitBytes)
         historyStorageLimitValue.text = formatStorageLimit(HISTORY_STORAGE_LIMIT_STEPS_BYTES[closestStepIndex(currentLimitBytes)])
         setHistoryStorageLimitVisible(nodeModeSwitch.isChecked)
-        historyStorageLimitSlider.addOnChangeListener { _, value, fromUser ->
-            val bytes = HISTORY_STORAGE_LIMIT_STEPS_BYTES[value.toInt()]
-            historyStorageLimitValue.text = formatStorageLimit(bytes)
-            if (fromUser) {
-                P2PService.setHistoryStorageLimitBytes(requireContext(), bytes)
+        historyStorageLimitSlider.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: android.widget.SeekBar, progress: Int, fromUser: Boolean) {
+                val bytes = HISTORY_STORAGE_LIMIT_STEPS_BYTES[progress]
+                historyStorageLimitValue.text = formatStorageLimit(bytes)
+                if (fromUser) {
+                    P2PService.setHistoryStorageLimitBytes(requireContext(), bytes)
+                }
             }
-        }
+            override fun onStartTrackingTouch(bar: android.widget.SeekBar) {}
+            override fun onStopTrackingTouch(bar: android.widget.SeekBar) {}
+        })
 
         nodeModeSwitch.setOnCheckedChangeListener { _, isChecked ->
             P2PService.setNodeModeEnabled(requireContext(), isChecked)
@@ -546,6 +551,7 @@ class SettingsFragment : Fragment() {
         val arr = try { org.json.JSONArray(json) } catch (e: Exception) { org.json.JSONArray() }
         val labels = ArrayList<String>()
         val fingerprints = ArrayList<String?>()
+        val revokedFps = ArrayList<String?>()
         val thisDevice = getString(R.string.linked_devices_this_device)
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
@@ -559,6 +565,7 @@ class SettingsFragment : Fragment() {
             }
             labels.add(name + suffix)
             fingerprints.add(if (isThis || !isActive) null else o.optString("device_fingerprint"))
+            revokedFps.add(if (!isThis && !isActive) o.optString("device_fingerprint") else null)
         }
 
         AlertDialog.Builder(requireContext())
@@ -566,6 +573,7 @@ class SettingsFragment : Fragment() {
             .setItems(labels.toTypedArray()) { _, which ->
                 val fp = fingerprints.getOrNull(which)
                 if (fp != null) withAppPassword { confirmRevokeLinkedDevice(fp) }
+                revokedFps.getOrNull(which)?.let { confirmForgetRevokedDevice(it) }
             }
             .setPositiveButton(R.string.linked_devices_add) { _, _ ->
                 // Only the root device may add one (the core refuses the grant):
@@ -637,6 +645,28 @@ class SettingsFragment : Fragment() {
             .show()
     }
 
+    /** A revoked device only clutters the list; the core keeps its record
+     *  and the revoke (it is told again if it ever writes), so no password. */
+    private fun confirmForgetRevokedDevice(fingerprint: String) {
+        AlertDialog.Builder(requireContext())
+            .setMessage(R.string.linked_devices_confirm_forget)
+            .setPositiveButton(R.string.action_remove_from_list) { _, _ ->
+                val ctx = requireContext().applicationContext
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val result = try { P2PLib.forgetRevokedLinkedDevice(fingerprint) } catch (e: Exception) { "Error: ${e.message}" }
+                    withContext(Dispatchers.Main) {
+                        if (result.startsWith("Error:")) {
+                            Toast.makeText(ctx, com.p2p.messenger.util.coreErrorText(ctx, result), Toast.LENGTH_SHORT).show()
+                        } else if (isAdded) {
+                            showLinkedDevicesDialog()
+                        }
+                    }
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun confirmRevokeLinkedDevice(fingerprint: String) {
         AlertDialog.Builder(requireContext())
             .setMessage(R.string.linked_devices_confirm_revoke)
@@ -670,42 +700,38 @@ class SettingsFragment : Fragment() {
      */
     private fun setupAppearanceControls(view: View) {
         val textScaleValue = view.findViewById<TextView>(R.id.text_scale_value)
-        val textScaleSlider = view.findViewById<com.google.android.material.slider.Slider>(R.id.text_scale_slider)
+        val textScaleSlider = view.findViewById<android.widget.SeekBar>(R.id.text_scale_slider)
         // bkz. `TEXT_SCALE_STEPS`/`closestStepIndex` dokümantasyonu — TAM
         // SAYI indeks (kayan nokta `stepSize` DEĞİL), gerçek Material
         // Slider çökmesini (bkz. o notun ayrıntısı) kökünden önler.
-        textScaleSlider.valueFrom = 0f
-        textScaleSlider.valueTo = (TEXT_SCALE_STEPS.size - 1).toFloat()
-        textScaleSlider.stepSize = 1f
+        textScaleSlider.max = TEXT_SCALE_STEPS.size - 1
         val currentTextScale = ThemePrefs.getTextScale(requireContext())
-        textScaleSlider.value = closestStepIndex(TEXT_SCALE_STEPS, currentTextScale).toFloat()
+        textScaleSlider.progress = closestStepIndex(TEXT_SCALE_STEPS, currentTextScale)
         textScaleValue.text = formatScalePercent(TEXT_SCALE_STEPS[closestStepIndex(TEXT_SCALE_STEPS, currentTextScale)])
-        textScaleSlider.addOnChangeListener { _, value, _ ->
-            textScaleValue.text = formatScalePercent(TEXT_SCALE_STEPS[value.toInt()])
-        }
-        textScaleSlider.addOnSliderTouchListener(object : com.google.android.material.slider.Slider.OnSliderTouchListener {
-            override fun onStartTrackingTouch(slider: com.google.android.material.slider.Slider) {}
-            override fun onStopTrackingTouch(slider: com.google.android.material.slider.Slider) {
-                ThemePrefs.setTextScale(requireContext(), TEXT_SCALE_STEPS[slider.value.toInt()])
+        textScaleSlider.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: android.widget.SeekBar, progress: Int, fromUser: Boolean) {
+                textScaleValue.text = formatScalePercent(TEXT_SCALE_STEPS[progress])
+            }
+            override fun onStartTrackingTouch(bar: android.widget.SeekBar) {}
+            override fun onStopTrackingTouch(bar: android.widget.SeekBar) {
+                ThemePrefs.setTextScale(requireContext(), TEXT_SCALE_STEPS[bar.progress])
                 requireActivity().recreate()
             }
         })
 
         val uiScaleValue = view.findViewById<TextView>(R.id.ui_scale_value)
-        val uiScaleSlider = view.findViewById<com.google.android.material.slider.Slider>(R.id.ui_scale_slider)
-        uiScaleSlider.valueFrom = 0f
-        uiScaleSlider.valueTo = (UI_SCALE_STEPS.size - 1).toFloat()
-        uiScaleSlider.stepSize = 1f
+        val uiScaleSlider = view.findViewById<android.widget.SeekBar>(R.id.ui_scale_slider)
+        uiScaleSlider.max = UI_SCALE_STEPS.size - 1
         val currentUiScale = ThemePrefs.getUiScale(requireContext())
-        uiScaleSlider.value = closestStepIndex(UI_SCALE_STEPS, currentUiScale).toFloat()
+        uiScaleSlider.progress = closestStepIndex(UI_SCALE_STEPS, currentUiScale)
         uiScaleValue.text = formatScalePercent(UI_SCALE_STEPS[closestStepIndex(UI_SCALE_STEPS, currentUiScale)])
-        uiScaleSlider.addOnChangeListener { _, value, _ ->
-            uiScaleValue.text = formatScalePercent(UI_SCALE_STEPS[value.toInt()])
-        }
-        uiScaleSlider.addOnSliderTouchListener(object : com.google.android.material.slider.Slider.OnSliderTouchListener {
-            override fun onStartTrackingTouch(slider: com.google.android.material.slider.Slider) {}
-            override fun onStopTrackingTouch(slider: com.google.android.material.slider.Slider) {
-                ThemePrefs.setUiScale(requireContext(), UI_SCALE_STEPS[slider.value.toInt()])
+        uiScaleSlider.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: android.widget.SeekBar, progress: Int, fromUser: Boolean) {
+                uiScaleValue.text = formatScalePercent(UI_SCALE_STEPS[progress])
+            }
+            override fun onStartTrackingTouch(bar: android.widget.SeekBar) {}
+            override fun onStopTrackingTouch(bar: android.widget.SeekBar) {
+                ThemePrefs.setUiScale(requireContext(), UI_SCALE_STEPS[bar.progress])
                 requireActivity().recreate()
             }
         })
@@ -784,6 +810,7 @@ class SettingsFragment : Fragment() {
                             // "Import a .ttf file…" — font seçmez, dialog'u
                             // kapatıp dosya seçiciyi açar.
                             dialog.dismiss()
+                            AppLock.beginTrustedExcursion()
                             pickFontLauncher.launch(arrayOf("font/ttf", "font/otf", "application/x-font-ttf", "application/octet-stream", "*/*"))
                         }
                         position <= fontChoices.size -> {
@@ -979,17 +1006,72 @@ class SettingsFragment : Fragment() {
             textSwatch.background = swatchDrawable(ThemePrefs.getTextColor(requireContext()))
         }
 
+        val blurRow = view.findViewById<View>(R.id.wallpaper_blur_row)
+        val darknessRow = view.findViewById<View>(R.id.wallpaper_darkness_row)
+        val blurSlider = view.findViewById<android.widget.SeekBar>(R.id.wallpaper_blur_slider)
+        val darknessSlider = view.findViewById<android.widget.SeekBar>(R.id.wallpaper_darkness_slider)
+        val blurValue = view.findViewById<TextView>(R.id.wallpaper_blur_value)
+        val darknessValue = view.findViewById<TextView>(R.id.wallpaper_darkness_value)
+
+        // Cheap downscaled preview while dragging (off the main thread, newest wins).
+        var previewJob: kotlinx.coroutines.Job? = null
+        fun previewEffects() {
+            val app = requireContext().applicationContext
+            val blur = blurSlider.progress
+            val dark = darknessSlider.progress
+            previewJob?.cancel()
+            previewJob = viewLifecycleOwner.lifecycleScope.launch(Dispatchers.Default) {
+                val bmp = ThemePrefs.wallpaperPreview(app, blur, dark, 160) ?: return@launch
+                withContext(Dispatchers.Main) { wallpaperThumb.setImageBitmap(bmp) }
+            }
+        }
+
         fun refreshWallpaperPreview() {
             val file = ThemePrefs.chatWallpaperFile(requireContext())
             if (file.exists()) {
+                blurSlider.progress = ThemePrefs.getWallpaperBlur(requireContext())
+                darknessSlider.progress = ThemePrefs.getWallpaperDarkness(requireContext())
+                blurValue.text = "%.1f".format(blurSlider.progress / 10f)
+                darknessValue.text = "${darknessSlider.progress}%"
                 wallpaperThumb.setImageBitmap(android.graphics.BitmapFactory.decodeFile(file.absolutePath))
+                previewEffects()
                 wallpaperThumb.visibility = View.VISIBLE
                 btnRemoveWallpaper.visibility = View.VISIBLE
+                blurRow.visibility = View.VISIBLE
+                darknessRow.visibility = View.VISIBLE
             } else {
                 wallpaperThumb.visibility = View.GONE
                 btnRemoveWallpaper.visibility = View.GONE
+                blurRow.visibility = View.GONE
+                darknessRow.visibility = View.GONE
             }
         }
+
+        // On release: store values, compute the processed file once, off the main thread.
+        // On release: store values, compute the processed file once, off the main thread.
+        fun seekListener(onProgress: (Int, Boolean) -> Unit) = object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: android.widget.SeekBar, progress: Int, fromUser: Boolean) = onProgress(progress, fromUser)
+            override fun onStartTrackingTouch(bar: android.widget.SeekBar) {}
+            override fun onStopTrackingTouch(bar: android.widget.SeekBar) {
+                val app = requireContext().applicationContext
+                ThemePrefs.setWallpaperEffects(app, blurSlider.progress, darknessSlider.progress)
+                lifecycleScope.launch(Dispatchers.IO) {
+                    try {
+                        ThemePrefs.regenerateProcessedWallpaper(app)
+                    } catch (e: Exception) {
+                        android.util.Log.w("SettingsFragment", "wallpaper effects failed", e)
+                    }
+                }
+            }
+        }
+        blurSlider.setOnSeekBarChangeListener(seekListener { value, fromUser ->
+            blurValue.text = "%.1f".format(value / 10f)
+            if (fromUser) previewEffects()
+        })
+        darknessSlider.setOnSeekBarChangeListener(seekListener { value, fromUser ->
+            darknessValue.text = "${value}%"
+            if (fromUser) previewEffects()
+        })
 
         refreshSwatches()
         refreshWallpaperPreview()
@@ -1063,31 +1145,38 @@ class SettingsFragment : Fragment() {
      * yüzden Rust'a hiç dokunmuyor.
      */
     private fun onChatWallpaperPicked(uri: Uri) {
+        // Off the fragment: `requireContext()` on the worker threw once the
+        // screen was gone.
+        val app = requireContext().applicationContext
         lifecycleScope.launch(Dispatchers.IO) {
-            val tempFile = File(File(requireContext().cacheDir, "wallpaper").apply { mkdirs() }, UUID.randomUUID().toString())
+            val tempFile = File(File(app.cacheDir, "wallpaper").apply { mkdirs() }, UUID.randomUUID().toString())
             try {
-                requireContext().contentResolver.openInputStream(uri)?.use { input ->
+                app.contentResolver.openInputStream(uri)?.use { input ->
                     tempFile.outputStream().use { output -> input.copyTo(output, bufferSize = 64 * 1024) }
                 } ?: throw java.io.IOException("Dosya açılamadı")
                 val compressed = ImagePreview.compressFile(tempFile, WALLPAPER_MAX_DIMENSION, WALLPAPER_JPEG_QUALITY)
                 if (compressed != null) {
-                    ThemePrefs.chatWallpaperFile(requireContext()).writeBytes(compressed)
+                    ThemePrefs.chatWallpaperFile(app).writeBytes(compressed)
+                    // New image: rebuild the processed copy with the current slider values.
+                    ThemePrefs.regenerateProcessedWallpaper(app)
                 }
                 withContext(Dispatchers.Main) {
                     view?.let { v ->
                         val thumb = v.findViewById<ImageView>(R.id.chat_wallpaper_thumb)
                         val btnRemove = v.findViewById<Button>(R.id.btn_remove_chat_wallpaper)
-                        val file = ThemePrefs.chatWallpaperFile(requireContext())
+                        val file = ThemePrefs.chatWallpaperFile(app)
                         if (file.exists()) {
                             thumb.setImageBitmap(android.graphics.BitmapFactory.decodeFile(file.absolutePath))
                             thumb.visibility = View.VISIBLE
                             btnRemove.visibility = View.VISIBLE
+                            v.findViewById<View>(R.id.wallpaper_blur_row).visibility = View.VISIBLE
+                            v.findViewById<View>(R.id.wallpaper_darkness_row).visibility = View.VISIBLE
                         }
                     }
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(requireContext(), R.string.error_attachment_open_failed, Toast.LENGTH_SHORT).show()
+                    Toast.makeText(app, R.string.error_attachment_open_failed, Toast.LENGTH_SHORT).show()
                 }
             } finally {
                 tempFile.delete()
@@ -1110,10 +1199,28 @@ class SettingsFragment : Fragment() {
      * eklenmez/seçilmez — yetim bir liste girdisi kalmaz.
      */
     private fun onFontPicked(uri: Uri) {
+        // Copies up to 32 MB: off the main thread.
+        val ctx = requireContext().applicationContext
+        lifecycleScope.launch {
+            val displayName = withContext(Dispatchers.IO) { copyPickedFont(ctx, uri) } ?: return@launch
+            val id = displayName.first
+            val file = ThemePrefs.customFontFile(ctx, id)
+            val name = displayName.second
+            ThemePrefs.registerCustomFont(ctx, id, name)
+            ThemePrefs.setFontChoice(ctx, ThemePrefs.FontChoice.CUSTOM)
+            ThemePrefs.setActiveCustomFontId(ctx, id)
+            view?.findViewById<TextView>(R.id.font_family_value)?.text = name
+            com.p2p.messenger.util.FontOverride.applyFile(file)
+            activity?.recreate()
+        }
+    }
+
+    /** Blocking part of [onFontPicked]: (font id, display name), or null on failure. */
+    private fun copyPickedFont(context: android.content.Context, uri: Uri): Pair<String, String>? {
         val id = ThemePrefs.newCustomFontId()
-        val file = ThemePrefs.customFontFile(requireContext(), id)
+        val file = ThemePrefs.customFontFile(context, id)
         try {
-            requireContext().contentResolver.openInputStream(uri)?.use { input ->
+            context.contentResolver.openInputStream(uri)?.use { input ->
                 // "*/*" seçici her dosyayı kabul ediyor: yalnızca font imzası
                 // (TrueType/OpenType/koleksiyon) olan ve makul boyuttaki
                 // dosyalar kopyalanır — yanlışlıkla seçilen bir video
@@ -1136,19 +1243,14 @@ class SettingsFragment : Fragment() {
                         out.write(buf, 0, n)
                     }
                 }
-            } ?: return
-            val displayName = queryDisplayName(uri) ?: file.name
-            ThemePrefs.registerCustomFont(requireContext(), id, displayName)
-            ThemePrefs.setFontChoice(requireContext(), ThemePrefs.FontChoice.CUSTOM)
-            ThemePrefs.setActiveCustomFontId(requireContext(), id)
-            view?.findViewById<TextView>(R.id.font_family_value)?.text = displayName
-            com.p2p.messenger.util.FontOverride.applyFile(file)
-            requireActivity().recreate()
+            } ?: return null
+            return id to (queryDisplayName(context, uri) ?: file.name)
         } catch (e: Exception) {
             // bkz. `onChatWallpaperPicked` — çökmemeli, sessizce geç; yarım
             // kalmış dosyayı da bırakma (listeye hiç eklenmediği için zaten
             // seçilemez, ama diskte yetim kalmasın).
             file.delete()
+            return null
         }
     }
 
@@ -1156,9 +1258,9 @@ class SettingsFragment : Fragment() {
      *  `onFontPicked` — font listesinde "Custom" yerine bu ad gösterilir).
      *  Bazı sağlayıcılar bu sütunu doldurmayabilir; `null` dönerse çağıran
      *  taraf kendi dosya adına düşer. */
-    private fun queryDisplayName(uri: Uri): String? {
+    private fun queryDisplayName(context: android.content.Context, uri: Uri): String? {
         return try {
-            requireContext().contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
                 val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
                 if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
             }
@@ -1258,6 +1360,9 @@ class SettingsFragment : Fragment() {
      */
     private fun exportRecoveryTo(uri: Uri, passphrase: String) {
         Toast.makeText(requireContext(), R.string.msg_recovery_exporting, Toast.LENGTH_SHORT).show()
+        // Taken now: the export runs for seconds and `requireContext()` on the
+        // worker threw once the user had left the screen meanwhile.
+        val resolver = requireContext().applicationContext.contentResolver
         lifecycleScope.launch(Dispatchers.IO) {
             val bytes = try {
                 P2PLib.exportRecovery(passphrase)
@@ -1266,7 +1371,7 @@ class SettingsFragment : Fragment() {
             }
             val ok = try {
                 if (bytes != null && bytes.isNotEmpty()) {
-                    requireContext().contentResolver.openOutputStream(uri)?.use { out -> out.write(bytes); true } ?: false
+                    resolver.openOutputStream(uri)?.use { out -> out.write(bytes); true } ?: false
                 } else {
                     false
                 }
@@ -1374,10 +1479,11 @@ class SettingsFragment : Fragment() {
      * DIŞINDA yapılır.
      */
     private fun onAvatarPicked(uri: Uri) {
+        val app = requireContext().applicationContext
         lifecycleScope.launch(Dispatchers.IO) {
-            val tempFile = File(File(requireContext().cacheDir, "avatar").apply { mkdirs() }, UUID.randomUUID().toString())
+            val tempFile = File(File(app.cacheDir, "avatar").apply { mkdirs() }, UUID.randomUUID().toString())
             try {
-                requireContext().contentResolver.openInputStream(uri)?.use { input ->
+                app.contentResolver.openInputStream(uri)?.use { input ->
                     tempFile.outputStream().use { output -> input.copyTo(output, bufferSize = 64 * 1024) }
                 } ?: throw java.io.IOException("Dosya açılamadı")
                 // null = not an image. `setOwnAvatar(null)` means "remove" and
@@ -1387,7 +1493,7 @@ class SettingsFragment : Fragment() {
                 withContext(Dispatchers.Main) { setOwnAvatar(compressed) }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(requireContext(), R.string.error_attachment_open_failed, Toast.LENGTH_SHORT).show()
+                    Toast.makeText(app, R.string.error_attachment_open_failed, Toast.LENGTH_SHORT).show()
                 }
             } finally {
                 tempFile.delete()
@@ -1545,8 +1651,7 @@ class SettingsFragment : Fragment() {
      * `SwitchMaterial`).
      */
     private fun refreshServers() {
-        val container = serversContainer ?: return
-        container.removeAllViews()
+        if (serversContainer == null) return
 
         // fixpass (glm A3): `listServers()` JNI — off the main thread; rows are
         // built back on the main thread.
@@ -1564,6 +1669,9 @@ class SettingsFragment : Fragment() {
             val rows = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
             withContext(Dispatchers.Main) {
                 val fresh = serversContainer ?: return@withContext
+                // Cleared here, not before the read: two refreshes in flight
+                // (screen opened + scan result) both appended their rows.
+                fresh.removeAllViews()
                 for (obj in rows) fresh.addView(buildServerRow(obj))
             }
         }
