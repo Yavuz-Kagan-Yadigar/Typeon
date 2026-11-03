@@ -796,17 +796,9 @@ impl Store {
                     .query_row("SELECT key_hash FROM mailbox_keys WHERE mailbox_id = ?1", params![id], |r| r.get(0))
                     .optional()
                     .map_err(|e| e.to_string())?;
-                match bound {
-                    Some(k) if &k != key_hash => {
-                        refused.push(id.clone());
-                        continue;
-                    }
-                    Some(_) => {}
-                    None => {
-                        self.conn
-                            .execute("INSERT INTO mailbox_keys (mailbox_id, key_hash) VALUES (?1, ?2)", params![id, key_hash])
-                            .map_err(|e| e.to_string())?;
-                    }
+                if bound.as_ref().is_some_and(|k| k != key_hash) {
+                    refused.push(id.clone());
+                    continue;
                 }
                 // A full box plus a valid proof by the bound key: the newcomer
                 // holds the pair secret, so it is one of the two ends (a
@@ -841,6 +833,14 @@ impl Store {
                         .conn
                         .execute("DELETE FROM mail_acks WHERE mailbox_id = ?1 AND owner = ?2", params![id, stale]);
                     let _ = self.delete_fully_acked(id);
+                }
+                // Bound only once the reader row goes in: a refused newcomer
+                // binding its own key to a full, unbound box locked the real
+                // ends out of it for good.
+                if bound.is_none() {
+                    self.conn
+                        .execute("INSERT INTO mailbox_keys (mailbox_id, key_hash) VALUES (?1, ?2)", params![id, key_hash])
+                        .map_err(|e| e.to_string())?;
                 }
             }
             // Defter #03: kayıt artık ÇOK-OKUYUCULU (bkz. `mailbox_readers`
@@ -1818,6 +1818,23 @@ mod tests {
         assert!(s.mailbox_has_other_reader("mb_1", &a), "b and c read it");
         let aa = s.conn.query_row("SELECT COUNT(*) FROM mailbox_readers WHERE owner = ?1", params![&a], |r| r.get::<_, i64>(0)).unwrap();
         assert_eq!(aa, 0, "a was the stalest reader");
+    }
+
+    #[test]
+    fn refused_newcomer_does_not_bind_a_full_unbound_box() {
+        let s = Store::open_in_memory().unwrap();
+        let a = enroll(&s, b"aaaa", "peerA");
+        let b = enroll(&s, b"bbbb", "peerB");
+        let c = enroll(&s, b"cccc", "peerC");
+        let id = vec!["mb_old".to_string()];
+        // A box from before proofs: two readers, no key binding.
+        for o in [&a, &b] {
+            s.conn.execute("INSERT INTO mailbox_readers (mailbox_id, owner, created_at, last_seen_at) VALUES ('mb_old', ?1, 0, 0)", params![o]).unwrap();
+        }
+        let lurker = vec![("mb_old".to_string(), b"lurker-key".to_vec())];
+        assert_eq!(s.register_mailboxes_proved(&c, &id, &[], &lurker, 0, 100).unwrap().0, id);
+        let bound: i64 = s.conn.query_row("SELECT COUNT(*) FROM mailbox_keys WHERE mailbox_id = 'mb_old'", [], |r| r.get(0)).unwrap();
+        assert_eq!(bound, 0, "a refused register binds nothing");
     }
 
     #[test]

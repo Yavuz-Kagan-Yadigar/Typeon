@@ -2121,9 +2121,13 @@ class ChatActivity : AppCompatActivity() {
             // Karşı tarafın mesajını düzenleyemeyiz/silemeyiz (karşı taraf
             // zaten reddederdi, bkz. Rust `message_owned_by_sender`) — ama
             // tepki bırakabiliriz.
-            val theirOptions = arrayOf(getString(R.string.action_react), getString(R.string.lbl_copy), getString(R.string.action_forward))
+            val theirOptions = listOfNotNull(
+                getString(R.string.action_react),
+                getString(R.string.lbl_copy),
+                getString(R.string.action_forward).takeIf { com.p2p.messenger.util.Forward.canForward(item) },
+            )
             AlertDialog.Builder(this)
-                .setItems(theirOptions) { _, which ->
+                .setItems(theirOptions.toTypedArray()) { _, which ->
                     when (which) {
                         0 -> showReactionPicker(item)
                         1 -> copyMessageText(item)

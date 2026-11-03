@@ -1554,9 +1554,13 @@ class GroupChatActivity : AppCompatActivity() {
         if (!item.isMine) {
             // bkz. ChatActivity AYNI desen — başkasının mesajını
             // düzenleyemeyiz ama tepki bırakabiliriz.
-            val theirOptions = arrayOf(getString(R.string.action_react), getString(R.string.lbl_copy), getString(R.string.action_forward))
+            val theirOptions = listOfNotNull(
+                getString(R.string.action_react),
+                getString(R.string.lbl_copy),
+                getString(R.string.action_forward).takeIf { com.p2p.messenger.util.Forward.canForward(item) },
+            )
             AlertDialog.Builder(this)
-                .setItems(theirOptions) { _, which ->
+                .setItems(theirOptions.toTypedArray()) { _, which ->
                     when (which) {
                         0 -> showReactionPicker(item)
                         1 -> copyMessageText(item)
@@ -1573,7 +1577,7 @@ class GroupChatActivity : AppCompatActivity() {
             add(getString(R.string.action_edit_message))
             add(getString(R.string.action_delete_message))
             add(getString(R.string.lbl_copy))
-            add(getString(R.string.action_forward))
+            if (com.p2p.messenger.util.Forward.canForward(item)) add(getString(R.string.action_forward))
         }
         AlertDialog.Builder(this)
             .setItems(options.toTypedArray()) { _, which ->

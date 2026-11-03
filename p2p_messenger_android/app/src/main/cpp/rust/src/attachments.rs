@@ -295,7 +295,10 @@ fn png_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
 }
 
 /// JPEG XL container boxes that carry EXIF, XMP or JUMBF (also Brotli-
-/// compressed as `brob` of those types). The codestream boxes stay. A bare
+/// compressed as `brob` of those types), and `jbrd`: the JPEG reconstruction
+/// data keeps the source JPEG's other APP markers and comments (IPTC, COM).
+/// Without it the image still decodes, only not back to the exact JPEG
+/// bytes. The codestream boxes stay. A bare
 /// codestream has no metadata. None for other files, and on any doubt.
 fn jxl_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
     {
@@ -336,13 +339,13 @@ fn jxl_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
                 return None;
             }
             let dropped = match &h[4..8] {
-                b"Exif" | b"xml " | b"jumb" => true,
+                b"Exif" | b"xml " | b"jumb" | b"jbrd" => true,
                 b"brob" => {
                     let mut inner = [0u8; 4];
                     file.seek(SeekFrom::Start(at + header)).ok()?;
                     size >= header + 4
                         && read_full(file, &mut inner).ok()? == 4
-                        && matches!(&inner, b"Exif" | b"xml " | b"jumb")
+                        && matches!(&inner, b"Exif" | b"xml " | b"jumb" | b"jbrd")
                 }
                 _ => false,
             };
@@ -1216,10 +1219,11 @@ mod tests {
         let exif_at = jxl.len() as u64;
         jxl.extend(boxed(b"Exif", b"\0\0\0\0GPS!"));
         jxl.extend(boxed(b"xml ", b"<x/>"));
+        jxl.extend(boxed(b"jbrd", b"IPTC"));
         let xml_end = jxl.len() as u64;
         jxl.extend(boxed(b"jxlc", &[0xFF, 0x0A, 1, 2]));
         std::fs::write(&path, &jxl).unwrap();
-        assert_eq!(jxl_metadata_ranges(&mut File::open(&path).unwrap()), Some(vec![(exif_at, exif_at + 16), (exif_at + 16, xml_end)]));
+        assert_eq!(jxl_metadata_ranges(&mut File::open(&path).unwrap()), Some(vec![(exif_at, exif_at + 16), (exif_at + 16, exif_at + 28), (exif_at + 28, xml_end)]));
 
         std::fs::write(&path, [0xFF, 0x0A, 1, 2, 3]).unwrap();
         assert_eq!(jxl_metadata_ranges(&mut File::open(&path).unwrap()), Some(vec![]));

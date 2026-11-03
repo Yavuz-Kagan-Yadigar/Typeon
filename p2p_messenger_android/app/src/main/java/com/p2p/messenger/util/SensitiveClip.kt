@@ -19,17 +19,23 @@ fun copySensitive(context: Context, label: String, text: String) {
     val clipboard = context.applicationContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.watchForForeignCopy()
     clipboard.setPrimaryClip(clip)
-    clipboard.scheduleSelfClear()
+    clipboard.scheduleSelfClear(label)
 }
 
 /** Sensitive copies survived AppLock, logout, anything (preview is hidden;
  *  the text itself was not): a pairing code or a message body stayed on the
  *  clipboard indefinitely. 60 s after the copy the clipboard is emptied —
  *  ONLY while it is still ours: anything the user copies in the meantime
- *  is left exactly where it is. The clip itself cannot be read back from the
- *  background or a locked screen (API 29+), so "still ours" is tracked by
- *  listening for the next change instead. */
+ *  is left exactly where it is. Two checks: a change seen by the listener
+ *  (it fires only while we have focus), and the label of the clip on the
+ *  board. From the background (API 29+) the label cannot be read, and a
+ *  copy made in another app then reached no listener either: the clear
+ *  waits until the label is readable again (the app back in front). */
 private const val SELF_CLEAR_DELAY_MS = 60_000L
+private const val SELF_CLEAR_RETRY_MS = 30_000L
+// ponytail: gives up after ~2 h in the background (or on an empty board,
+// which reads the same as no access); the clip then stays as before.
+private const val SELF_CLEAR_MAX_RETRIES = 240
 private val clipClearHandler = Handler(Looper.getMainLooper())
 private var ownEventPending = false
 @Volatile private var foreignCopy = false
@@ -45,16 +51,31 @@ private fun ClipboardManager.watchForForeignCopy() {
     addPrimaryClipChangedListener(foreignCopyListener)
 }
 
-private fun ClipboardManager.scheduleSelfClear() {
+private fun ClipboardManager.scheduleSelfClear(label: String) {
     clipClearHandler.removeCallbacksAndMessages(null)
-    clipClearHandler.postDelayed({
-        try {
+    clipClearHandler.postDelayed({ trySelfClear(label, 0) }, SELF_CLEAR_DELAY_MS)
+}
+
+private fun ClipboardManager.trySelfClear(label: String, retries: Int) {
+    try {
+        if (foreignCopy) {
             removePrimaryClipChangedListener(foreignCopyListener)
-            if (!foreignCopy) {
-                // `clearPrimaryClip` is API 28; minSdk is 26.
-                if (android.os.Build.VERSION.SDK_INT >= 28) clearPrimaryClip()
-                else setPrimaryClip(ClipData.newPlainText("", ""))
+            return
+        }
+        val desc = primaryClipDescription
+        if (desc == null) {
+            if (retries < SELF_CLEAR_MAX_RETRIES) {
+                clipClearHandler.postDelayed({ trySelfClear(label, retries + 1) }, SELF_CLEAR_RETRY_MS)
+            } else {
+                removePrimaryClipChangedListener(foreignCopyListener)
             }
-        } catch (e: Exception) { }
-    }, SELF_CLEAR_DELAY_MS)
+            return
+        }
+        removePrimaryClipChangedListener(foreignCopyListener)
+        if (desc.label?.toString() == label) {
+            // `clearPrimaryClip` is API 28; minSdk is 26.
+            if (android.os.Build.VERSION.SDK_INT >= 28) clearPrimaryClip()
+            else setPrimaryClip(ClipData.newPlainText("", ""))
+        }
+    } catch (e: Exception) { }
 }

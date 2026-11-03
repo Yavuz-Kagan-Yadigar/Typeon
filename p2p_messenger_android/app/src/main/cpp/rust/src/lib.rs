@@ -25225,9 +25225,6 @@ pub const RECOVERY_PASSPHRASE_MIN_CHARS: usize = 12;
 /// deletion is not the signature of an empty text.
 const GROUP_TOMBSTONE: &str = "\u{0}typeon-group-deleted";
 
-/// What the author of a group message signs (`sign_group_author`). Length
-/// prefixes keep two different field splits from giving the same bytes.
-/// The send time is not in it: receivers store their own.
 /// The pending packet id an incoming payload answers (a history answer or an
 /// Ack), so a rotation it carries does not resend that packet.
 fn answered_pending_id(payload: &[u8]) -> Option<String> {
@@ -25246,6 +25243,9 @@ fn group_row_id(content: &MessageContent) -> Option<&str> {
     }
 }
 
+/// What the author of a group message signs (`sign_group_author`). Length
+/// prefixes keep two different field splits from giving the same bytes.
+/// The send time is not in it: receivers store their own.
 fn group_author_statement(group_id: &str, message_id: &str, author_identity_id: &str, device_fp: &str, text: &str) -> Vec<u8> {
     let mut out = b"typeon-group-author-v1".to_vec();
     for part in [group_id, message_id, author_identity_id, device_fp, text] {
@@ -25255,9 +25255,6 @@ fn group_author_statement(group_id: &str, message_id: &str, author_identity_id: 
     out
 }
 
-/// The source with the most entries in a full buffer (the one to evict from).
-/// Server mail (`None`) is not one source but many senders, and it is already
-/// acked at the server: it goes only when no peer-sourced entry is left.
 /// Fixed-window counter: counts and allows unless `cap` was reached in the
 /// current `RATE_LIMIT_WINDOW_MS` window.
 fn window_allow(slot: &mut (u64, u32), cap: u32) -> bool {
@@ -25272,6 +25269,9 @@ fn window_allow(slot: &mut (u64, u32), cap: u32) -> bool {
     true
 }
 
+/// The source with the most entries in a full buffer (the one to evict from).
+/// Server mail (`None`) is not one source but many senders, and it is already
+/// acked at the server: it goes only when no peer-sourced entry is left.
 fn busiest_source(sources: impl Iterator<Item = Option<PeerId>>) -> Option<PeerId> {
     let mut counts: HashMap<PeerId, usize> = HashMap::new();
     for s in sources.flatten() {
