@@ -25,10 +25,11 @@ import kotlinx.coroutines.launch
  *   they are (no frame decoder).
  * - Image, "hi-res": a JPEG goes as it is (the core strips its EXIF); any
  *   other format becomes lossless JPEG XL.
+ * - A JPEG XL file goes as it is (the core strips its Exif/xml/jumb boxes).
  * - Video: MP4, 3GP and WebM are copied into a new container without
  *   metadata (location, device, dates); nothing is re-encoded.
  *
- * A JPEG/PNG that cannot be decoded fails the send (the core strips one that
+ * A JPEG/PNG/JPEG XL that cannot be decoded fails the send (the core strips one that
  * goes as it is). Any other image left as it is (HEIC that cannot be decoded,
  * animated WebP, a GIF over the caps, alpha below Android 9) and a video that
  * cannot be remuxed go out unchanged only after the user confirms.
@@ -53,9 +54,9 @@ object OutgoingMedia {
         val unchanged = Prepared(src, fileName, mimeType)
         return try {
             when {
-                // The core strips only JPEG/PNG metadata: anything else left as it is asks first.
+                // The core strips only JPEG/PNG/JPEG XL metadata: anything else left as it is asks first.
                 mimeType.startsWith("image/") -> prepareImage(src, fileName, hiRes)
-                    ?: if (isJpegOrPng(src) || confirmUnscrubbed()) unchanged else throw java.util.concurrent.CancellationException("send cancelled")
+                    ?: if (coreScrubs(src) || confirmUnscrubbed()) unchanged else throw java.util.concurrent.CancellationException("send cancelled")
                 mimeType.startsWith("video/") -> remuxVideo(src, fileName, mimeType)
                     ?: if (confirmUnscrubbed()) unchanged else throw java.util.concurrent.CancellationException("send cancelled")
                 else -> unchanged
@@ -64,10 +65,10 @@ object OutgoingMedia {
             throw e
         } catch (e: Throwable) {
             Log.w(TAG, "left unchanged: ${e.message}")
-            // H-07: a JPEG/PNG that failed to decode goes out NOT as it is (GPS
+            // H-07: a JPEG/PNG/JPEG XL that failed to decode goes out NOT as it is (GPS
             // in its EXIF): the caller shows the send-failed error.
             // Any other image or video goes as it is only after the user confirms.
-            if (mimeType.startsWith("image/") && isJpegOrPng(src)) throw java.io.IOException("image scrub failed", e)
+            if (mimeType.startsWith("image/") && coreScrubs(src)) throw java.io.IOException("image scrub failed", e)
             if ((mimeType.startsWith("image/") || mimeType.startsWith("video/")) && !confirmUnscrubbed()) {
                 throw java.util.concurrent.CancellationException("send cancelled")
             }
@@ -136,6 +137,8 @@ object OutgoingMedia {
         val head = ByteArray(256).also { b -> src.inputStream().use { it.read(b) } }
         // #46d: GIF -> animated JPEG XL (own decoder). Animated WebP/APNG have no frame
         // decoder on API 26+ here: they, and GIFs over the caps, go unchanged.
+        // JPEG XL has no Android decoder: it goes as it is (the core strips its metadata boxes).
+        if (ImagePreview.isJxl(head)) return null
         if (isGif(head)) return animatedGif(src, fileName)
         if (isAnimatedWebp(head) || isImageSequence(head) || isAnimatedPng(head, src)) return null
         if (hiRes && isJpeg(head)) return null
@@ -216,10 +219,11 @@ object OutgoingMedia {
         return true
     }
 
-    private fun isJpegOrPng(src: File): Boolean = try {
-        val h = ByteArray(8)
+    /** JPEG, PNG or JPEG XL: the core strips their metadata. */
+    private fun coreScrubs(src: File): Boolean = try {
+        val h = ByteArray(12)
         val n = src.inputStream().use { it.read(h) }
-        n >= 4 && (isJpeg(h) || (h[0] == 0x89.toByte() && h[1] == 'P'.code.toByte() && h[2] == 'N'.code.toByte() && h[3] == 'G'.code.toByte()))
+        n >= 4 && (isJpeg(h) || ImagePreview.isJxl(h) || (h[0] == 0x89.toByte() && h[1] == 'P'.code.toByte() && h[2] == 'N'.code.toByte() && h[3] == 'G'.code.toByte()))
     } catch (e: Exception) { false }
 
     private fun isJpeg(h: ByteArray) = h[0] == 0xFF.toByte() && h[1] == 0xD8.toByte() && h[2] == 0xFF.toByte()

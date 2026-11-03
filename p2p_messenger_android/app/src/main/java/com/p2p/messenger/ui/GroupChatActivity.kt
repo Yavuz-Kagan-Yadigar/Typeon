@@ -2902,24 +2902,7 @@ class GroupChatActivity : AppCompatActivity() {
     /** Auto-scroll only if already near the bottom; otherwise blink the FAB. */
     private fun onNewIncomingItemAdded() {
         if (isRecyclerNearBottom()) {
-            // Spec dışı, hata düzeltmesi (kullanıcı: "en alttaysak yeni
-            // mesajla otomatik aşağı kaysın"): `scrollToPosition` DOĞRUDAN
-            // çağrılınca güvenilmez — yeni eklenen satır o anda henüz
-            // ölçülmemiş oluyor ve kaydırma ya hiç olmuyor ya da eksik
-            // kalıyordu. `post`: yerleşim bittikten sonra; ikinci `post`:
-            // uzun bir balonun alt kenarı hâlâ ekranın altında kalıyorsa
-            // kalan farkı kapatır (aynı iki geçişli düzeltme klavye
-            // telafisinde de kullanılıyor, bkz. util.KeyboardInsets).
-            val last = localMessages.size - 1
-            recycler.post {
-                recycler.scrollToPosition(last)
-                recycler.post {
-                    val lm = recycler.layoutManager as? LinearLayoutManager ?: return@post
-                    val view = lm.findViewByPosition(last) ?: return@post
-                    val overshoot = view.bottom - (recycler.height - recycler.paddingBottom)
-                    if (overshoot > 0) recycler.scrollBy(0, overshoot)
-                }
-            }
+            scrollToLastSettled()
         } else {
             blinkScrollToBottomFab()
         }
@@ -2988,8 +2971,29 @@ class GroupChatActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun scrollToLastSettled() {
+        // Spec dışı, hata düzeltmesi (kullanıcı: "en alttaysak yeni
+        // mesajla otomatik aşağı kaysın"): `scrollToPosition` DOĞRUDAN
+        // çağrılınca güvenilmez — yeni eklenen satır o anda henüz
+        // ölçülmemiş oluyor ve kaydırma ya hiç olmuyor ya da eksik
+        // kalıyordu. `post`: yerleşim bittikten sonra; ikinci `post`:
+        // uzun bir balonun alt kenarı hâlâ ekranın altında kalıyorsa
+        // kalan farkı kapatır (aynı iki geçişli düzeltme klavye
+        // telafisinde de kullanılıyor, bkz. util.KeyboardInsets).
+        val last = localMessages.size - 1
+        recycler.post {
+            recycler.scrollToPosition(last)
+            recycler.post {
+                val lm = recycler.layoutManager as? LinearLayoutManager ?: return@post
+                val view = lm.findViewByPosition(last) ?: return@post
+                val overshoot = view.bottom - (recycler.height - recycler.paddingBottom)
+                if (overshoot > 0) recycler.scrollBy(0, overshoot)
+            }
+        }
+    }
+
     private fun scrollToBottomNow() {
-        recycler.scrollToPosition(localMessages.size - 1)
+        scrollToLastSettled()
         hideScrollToBottomFab()
     }
 

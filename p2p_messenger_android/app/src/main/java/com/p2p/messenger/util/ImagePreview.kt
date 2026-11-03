@@ -2,6 +2,7 @@ package com.p2p.messenger.util
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import com.p2p.messenger.P2PLib
 import java.io.ByteArrayOutputStream
 import java.io.File
 
@@ -17,6 +18,34 @@ object ImagePreview {
      *  sınırları (`inJustDecodeBounds`) okuyup uygun bir `inSampleSize`
      *  hesaplar, sonra `compressBitmap` ile tam hassas boyuta iner. */
     fun compressFile(file: File, maxDimension: Int, quality: Int): ByteArray? {
+        if (isJxl(file)) {
+            // BitmapFactory cannot read JPEG XL: its first frame as a temp GIF.
+            val tmp = File(file.parentFile, "${file.name}.${System.nanoTime()}.tmp")
+            return try {
+                if (P2PLib.jxlToGif(file.absolutePath, tmp.absolutePath) == "OK") compressDecoded(tmp, maxDimension, quality) else null
+            } catch (e: Throwable) {
+                null
+            } finally {
+                tmp.delete()
+            }
+        }
+        return compressDecoded(file, maxDimension, quality)
+    }
+
+    /** JPEG XL: bare codestream (FF 0A) or ISO container signature. */
+    fun isJxl(h: ByteArray): Boolean =
+        (h.size >= 2 && h[0] == 0xFF.toByte() && h[1] == 0x0A.toByte()) ||
+            (h.size >= 12 && h.copyOf(12).contentEquals(JXL_CONTAINER))
+
+    fun isJxl(file: File): Boolean = try {
+        val h = ByteArray(12)
+        val n = file.inputStream().use { it.read(h) }
+        isJxl(h.copyOf(maxOf(n, 0)))
+    } catch (e: Exception) { false }
+
+    private val JXL_CONTAINER = byteArrayOf(0, 0, 0, 0x0C, 0x4A, 0x58, 0x4C, 0x20, 0x0D, 0x0A, 0x87.toByte(), 0x0A)
+
+    private fun compressDecoded(file: File, maxDimension: Int, quality: Int): ByteArray? {
         val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(file.absolutePath, boundsOptions)
         if (boundsOptions.outWidth <= 0 || boundsOptions.outHeight <= 0) return null

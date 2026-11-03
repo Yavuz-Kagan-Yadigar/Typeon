@@ -118,6 +118,11 @@ class StickerPicker(
             behavior.peekHeight = height
             behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
             behavior.skipCollapsed = true
+            // The shared adapter would keep every dismissed sheet's grid and bitmaps alive.
+            setOnDismissListener {
+                grid.adapter = null
+                if (dialog === this) dialog = null
+            }
             show()
         }
         refresh()

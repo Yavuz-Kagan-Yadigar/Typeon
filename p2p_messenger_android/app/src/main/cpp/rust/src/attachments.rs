@@ -294,6 +294,67 @@ fn png_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
     }
 }
 
+/// JPEG XL container boxes that carry EXIF, XMP or JUMBF (also Brotli-
+/// compressed as `brob` of those types). The codestream boxes stay. A bare
+/// codestream has no metadata. None for other files, and on any doubt.
+fn jxl_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
+    {
+        let len = file.metadata().ok()?.len();
+        let mut head = [0u8; 12];
+        file.seek(SeekFrom::Start(0)).ok()?;
+        let got = read_full(file, &mut head).ok()?;
+        if got >= 2 && head[..2] == [0xFF, 0x0A] {
+            return Some(Vec::new());
+        }
+        if got != 12 || head != *b"\0\0\0\x0CJXL \r\n\x87\n" {
+            return None;
+        }
+        let mut ranges = Vec::new();
+        let mut at = 12u64;
+        // ponytail: 1 << 16 boxes; real files have a handful (jxlp parts at most).
+        for _ in 0..1 << 16 {
+            if at == len {
+                return Some(ranges);
+            }
+            let mut h = [0u8; 16];
+            file.seek(SeekFrom::Start(at)).ok()?;
+            if read_full(file, &mut h[..8]).ok()? != 8 {
+                return None;
+            }
+            let (header, size) = match u32::from_be_bytes(h[..4].try_into().ok()?) {
+                1 => {
+                    if read_full(file, &mut h[8..]).ok()? != 8 {
+                        return None;
+                    }
+                    (16, u64::from_be_bytes(h[8..].try_into().ok()?))
+                }
+                0 => (8, len - at),
+                s => (8, s as u64),
+            };
+            let end = at.checked_add(size)?;
+            if size < header || end > len {
+                return None;
+            }
+            let dropped = match &h[4..8] {
+                b"Exif" | b"xml " | b"jumb" => true,
+                b"brob" => {
+                    let mut inner = [0u8; 4];
+                    file.seek(SeekFrom::Start(at + header)).ok()?;
+                    size >= header + 4
+                        && read_full(file, &mut inner).ok()? == 4
+                        && matches!(&inner, b"Exif" | b"xml " | b"jumb")
+                }
+                _ => false,
+            };
+            if dropped {
+                ranges.push((at, end));
+            }
+            at = end;
+        }
+        None
+    }
+}
+
 /// The orientation (2..=8, not the upright 1) in the body of an EXIF APP1
 /// segment: tag 0x0112 of the first image directory.
 fn exif_orientation(body: &[u8]) -> Option<u8> {
@@ -366,8 +427,8 @@ pub fn encrypt_file_to_disk_with(
     let cipher = ChaCha20Poly1305::new_from_slice(file_key).map_err(|_| "Invalid file key")?;
     let mut src = File::open(source_path).map_err(|e| e.to_string())?;
     // A photo goes out without its EXIF/XMP: size and hash below are those
-    // of the bytes that are sent. A JPEG/PNG the scanner cannot follow is
-    // refused, not sent with its metadata.
+    // of the bytes that are sent. A JPEG/PNG/JPEG XL the scanner cannot follow
+    // is refused, not sent with its metadata.
     let mut magic = [0u8; 8];
     let got = read_full(&mut src, &mut magic).map_err(|e| e.to_string())?;
     const DOUBT: &str = "Photo metadata could not be removed; file not sent";
@@ -375,6 +436,8 @@ pub fn encrypt_file_to_disk_with(
         jpeg_metadata_ranges(&mut src).ok_or(DOUBT)?
     } else if got == 8 && magic == *b"\x89PNG\r\n\x1a\n" {
         (png_metadata_ranges(&mut src).ok_or(DOUBT)?, None)
+    } else if got >= 2 && (magic[..2] == [0xFF, 0x0A] || (got == 8 && magic == *b"\0\0\0\x0CJXL ")) {
+        (jxl_metadata_ranges(&mut src).ok_or(DOUBT)?, None)
     } else {
         (Vec::new(), None)
     };
@@ -1136,6 +1199,34 @@ mod tests {
         png.extend(chunk(b"IEND", &[]));
         std::fs::write(&path, &png).unwrap();
         assert_eq!(png_metadata_ranges(&mut File::open(&path).unwrap()), Some(vec![(text_at, text_end)]));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn jxl_exif_and_xml_boxes_are_dropped() {
+        let path = std::env::temp_dir().join(format!("typeon-jxl-{}", std::process::id()));
+        let boxed = |kind: &[u8; 4], body: &[u8]| {
+            let mut b = (body.len() as u32 + 8).to_be_bytes().to_vec();
+            b.extend_from_slice(kind);
+            b.extend_from_slice(body);
+            b
+        };
+        let mut jxl = b"\0\0\0\x0CJXL \r\n\x87\n".to_vec();
+        jxl.extend(boxed(b"ftyp", b"jxl \0\0\0\0jxl "));
+        let exif_at = jxl.len() as u64;
+        jxl.extend(boxed(b"Exif", b"\0\0\0\0GPS!"));
+        jxl.extend(boxed(b"xml ", b"<x/>"));
+        let xml_end = jxl.len() as u64;
+        jxl.extend(boxed(b"jxlc", &[0xFF, 0x0A, 1, 2]));
+        std::fs::write(&path, &jxl).unwrap();
+        assert_eq!(jxl_metadata_ranges(&mut File::open(&path).unwrap()), Some(vec![(exif_at, exif_at + 16), (exif_at + 16, xml_end)]));
+
+        std::fs::write(&path, [0xFF, 0x0A, 1, 2, 3]).unwrap();
+        assert_eq!(jxl_metadata_ranges(&mut File::open(&path).unwrap()), Some(vec![]));
+
+        jxl.truncate(jxl.len() - 2);
+        std::fs::write(&path, &jxl).unwrap();
+        assert_eq!(jxl_metadata_ranges(&mut File::open(&path).unwrap()), None);
         let _ = std::fs::remove_file(&path);
     }
 
