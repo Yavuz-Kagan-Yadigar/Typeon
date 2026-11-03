@@ -65,7 +65,7 @@ class MessageSelection(
         val items = adapter.selectedItems()
         when (menuItem.itemId) {
             R.string.lbl_copy -> {
-                com.p2p.messenger.util.copySensitive(activity, "message", items.joinToString("\n") { Forward.strip(it.text) })
+                com.p2p.messenger.util.copySensitive(activity, "message", items.joinToString("\n") { com.p2p.messenger.util.Quote.plain(Forward.strip(it.text)) })
                 Toast.makeText(activity, R.string.lbl_copied, Toast.LENGTH_SHORT).show()
             }
             R.string.action_forward -> Forward.start(activity, items)

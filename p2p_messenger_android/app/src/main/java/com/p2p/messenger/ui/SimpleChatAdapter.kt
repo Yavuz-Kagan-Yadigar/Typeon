@@ -68,6 +68,23 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         return any
     }
 
+    /** 1:1 chats: the label of the peer's quoted messages. */
+    var peerName: () -> String? = { null }
+
+    /** An inline quote (see util.Quote): the quoted message's own text when
+     *  it is here, else the sender's preview with no label, so nobody can
+     *  put words under "You". */
+    private fun quoteOf(ctx: android.content.Context, id: String, preview: String): Pair<String?, String> {
+        val t = items.firstOrNull { it.messageId == id } ?: return null to preview
+        val label = if (t.isMine) ctx.getString(R.string.lbl_you) else t.senderName?.takeIf { it.isNotEmpty() } ?: peerName() ?: ""
+        val text = when {
+            t.isDeleted -> ctx.getString(R.string.msg_deleted)
+            t.attachment != null -> ctx.getString(R.string.lbl_attachment_reply_preview, t.attachment!!.fileName)
+            else -> com.p2p.messenger.util.Quote.plain(com.p2p.messenger.util.Forward.strip(t.text)).takeWholeChars(120)
+        }
+        return label to text
+    }
+
     /** Decoded attachment previews by file id: a rebind does not decode again. */
     private val previewCache = object : android.util.LruCache<String, android.graphics.Bitmap>(24 * 1024 * 1024) {
         override fun sizeOf(key: String, value: android.graphics.Bitmap): Int = value.byteCount
@@ -1021,7 +1038,13 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                 // dokunuşu yakalarsa yakalasın menü yine açılır.
                 val linked = android.text.SpannableString(shownText)
                 if (markMentions(linked, item.mentionsMe)) holder.textView.text = linked
-                if (android.text.util.Linkify.addLinks(linked, android.text.util.Linkify.WEB_URLS)) {
+                val quoted = com.p2p.messenger.util.Quote.decorate(
+                    linked, holder.textView.maxWidth - holder.textView.totalPaddingLeft - holder.textView.totalPaddingRight,
+                    { id, preview -> quoteOf(holder.itemView.context, id, preview) },
+                    { id -> onReplyPreviewClick?.invoke(id) }
+                )
+                if (quoted) holder.textView.text = linked
+                if (android.text.util.Linkify.addLinks(linked, android.text.util.Linkify.WEB_URLS) || quoted) {
                     // A tap leaves Tor for the system browser: ask first.
                     for (span in linked.getSpans(0, linked.length, android.text.style.URLSpan::class.java)) {
                         val start = linked.getSpanStart(span)

@@ -603,6 +603,7 @@ class GroupChatActivity : AppCompatActivity() {
         }
 
         val input = findViewById<EditText>(R.id.edtMessage)
+        com.p2p.messenger.util.Quote.attach(input)
         typhoonEffect = findViewById(R.id.typhoonEffect)
         // Spec dışı, kullanıcı isteği (açıkça yeniden istendi): klavye
         // açılınca sohbet onun yüksekliğini telafi etsin ve son mesaj
@@ -1709,7 +1710,7 @@ class GroupChatActivity : AppCompatActivity() {
 
     /** bkz. ChatActivity.copyMessageText AYNI desen. */
     private fun copyMessageText(item: SimpleChatAdapter.Item) {
-        com.p2p.messenger.util.copySensitive(this, "message", com.p2p.messenger.util.Forward.strip(item.text))
+        com.p2p.messenger.util.copySensitive(this, "message", com.p2p.messenger.util.Quote.plain(com.p2p.messenger.util.Forward.strip(item.text)))
         Toast.makeText(this, R.string.lbl_copied, Toast.LENGTH_SHORT).show()
     }
 
@@ -1789,19 +1790,7 @@ class GroupChatActivity : AppCompatActivity() {
     /** bkz. ChatActivity.startReply AYNI desen — grupta `item.isMine`
      *  değilse etiket, o mesajın zaten çözülmüş `senderName`'i. */
     private fun startReply(item: SimpleChatAdapter.Item) {
-        activeReplyToMessageId = item.messageId
-        val preview = replyPreviewFor(item)
-        activeReplyToPreview = preview
-        // bkz. `activeReplyToSenderIdentityId` dokümantasyonu — `item.isMine`
-        // ise BİZİM kimliğimiz (kendi mesajımıza yanıt), değilse `item`
-        // üzerinde zaten saklı olan göndericinin kimliği (bkz.
-        // `itemFromGroupHistoryJson`/`handleIncomingGroupMessage`
-        // `senderIdentityId` doldurma noktaları).
-        activeReplyToSenderIdentityId = if (item.isMine) ownIdentityId else item.senderIdentityId
-        txtReplyPreviewSender.text = if (item.isMine) getString(R.string.lbl_you) else item.senderName
-        txtReplyPreviewText.text = preview
-        layoutReplyPreview.visibility = View.VISIBLE
-        ReplyIsland.set(this, true)
+        com.p2p.messenger.util.Quote.insert(findViewById(R.id.edtMessage), item.messageId, replyPreviewFor(item))
     }
 
     /** bkz. `ChatActivity.replyPreviewFor` AYNI desen. */
@@ -1810,7 +1799,7 @@ class GroupChatActivity : AppCompatActivity() {
         return if (attachment != null) {
             getString(R.string.lbl_attachment_reply_preview, attachment.fileName)
         } else {
-            item.text.takeWholeChars(REPLY_PREVIEW_MAX_CHARS)
+            com.p2p.messenger.util.Quote.plain(com.p2p.messenger.util.Forward.strip(item.text)).takeWholeChars(REPLY_PREVIEW_MAX_CHARS)
         }
     }
 
@@ -2128,6 +2117,7 @@ class GroupChatActivity : AppCompatActivity() {
      *  değil, bkz. P2PLib.kt notu). */
     private fun showEditGroupMessageDialog(item: SimpleChatAdapter.Item) {
         val input = EditText(this)
+        com.p2p.messenger.util.Quote.attach(input)
         input.setText(com.p2p.messenger.util.Forward.strip(item.text))
         input.hint = getString(R.string.lbl_edit_message_hint)
         AlertDialog.Builder(this)

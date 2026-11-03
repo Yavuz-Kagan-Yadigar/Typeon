@@ -518,6 +518,7 @@ class ChatActivity : AppCompatActivity() {
         adapter.onAttachmentLongClick = { item -> onAttachmentLongClicked(item) }
         adapter.onReactionsClick = { item -> showReactionsDialog(item) }
         adapter.onReplyPreviewClick = { targetMessageId -> scrollToMessage(targetMessageId) }
+        adapter.peerName = { txtToolbarTitle.text?.toString() }
         stickerPicker.provideBubbleImages(adapter)
 
         val chatLayoutManager = LinearLayoutManager(this)
@@ -575,6 +576,7 @@ class ChatActivity : AppCompatActivity() {
         }
 
         val input = findViewById<EditText>(R.id.edtMessage)
+        com.p2p.messenger.util.Quote.attach(input)
         typhoonEffect = findViewById(R.id.typhoonEffect)
         // Spec dışı, kullanıcı isteği (açıkça yeniden istendi): klavye
         // açılınca sohbet onun yüksekliğini telafi etsin ve son mesaj
@@ -2265,7 +2267,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private fun copyMessageText(item: SimpleChatAdapter.Item) {
-        com.p2p.messenger.util.copySensitive(this, "message", com.p2p.messenger.util.Forward.strip(item.text))
+        com.p2p.messenger.util.copySensitive(this, "message", com.p2p.messenger.util.Quote.plain(com.p2p.messenger.util.Forward.strip(item.text)))
         Toast.makeText(this, R.string.lbl_copied, Toast.LENGTH_SHORT).show()
     }
 
@@ -2359,13 +2361,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private fun startReply(item: SimpleChatAdapter.Item) {
-        activeReplyToMessageId = item.messageId
-        val preview = replyPreviewFor(item)
-        activeReplyToPreview = preview
-        txtReplyPreviewSender.text = if (item.isMine) getString(R.string.lbl_you) else txtToolbarTitle.text
-        txtReplyPreviewText.text = preview
-        layoutReplyPreview.visibility = View.VISIBLE
-        ReplyIsland.set(this, true)
+        com.p2p.messenger.util.Quote.insert(findViewById(R.id.edtMessage), item.messageId, replyPreviewFor(item))
     }
 
     /** Ek balonlarında metin yok — dosya adı gösterilir. */
@@ -2374,7 +2370,7 @@ class ChatActivity : AppCompatActivity() {
         return if (attachment != null) {
             getString(R.string.lbl_attachment_reply_preview, attachment.fileName)
         } else {
-            item.text.takeWholeChars(REPLY_PREVIEW_MAX_CHARS)
+            com.p2p.messenger.util.Quote.plain(com.p2p.messenger.util.Forward.strip(item.text)).takeWholeChars(REPLY_PREVIEW_MAX_CHARS)
         }
     }
 
@@ -2429,6 +2425,7 @@ class ChatActivity : AppCompatActivity() {
 
     private fun showEditMessageDialog(item: SimpleChatAdapter.Item) {
         val input = EditText(this)
+        com.p2p.messenger.util.Quote.attach(input)
         input.setText(com.p2p.messenger.util.Forward.strip(item.text))
         input.hint = getString(R.string.lbl_edit_message_hint)
         AlertDialog.Builder(this)

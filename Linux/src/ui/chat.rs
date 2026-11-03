@@ -3825,7 +3825,35 @@ fn display_text(entry: &Entry) -> String {
     if entry.deleted {
         "Message deleted".to_string()
     } else {
-        entry.text.clone()
+        quote_plain(&entry.text)
+    }
+}
+
+/// Android inline quotes (util/Quote.kt) travel in the text as
+/// `\u{2062}\u{2064} id \u{2063} preview \u{2064}\u{2062}`: shown as "> preview".
+fn quote_plain(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(a) = rest.find("\u{2062}\u{2064}") {
+        let body = &rest[a + 6..];
+        let (Some(sep), Some(end)) = (body.find('\u{2063}'), body.find("\u{2064}\u{2062}")) else { break };
+        if sep > end { break }
+        out.push_str(&rest[..a]);
+        out.push_str("> ");
+        out.push_str(&body[sep + 3..end].replace('\n', " "));
+        rest = &body[end + 6..];
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod quote_tests {
+    #[test]
+    fn plain() {
+        let t = "\u{2062}\u{2064}m1\u{2063}Alıntı1\u{2064}\u{2062}\nCevap1";
+        assert_eq!(super::quote_plain(t), "> Alıntı1\nCevap1");
+        assert_eq!(super::quote_plain("plain"), "plain");
     }
 }
 

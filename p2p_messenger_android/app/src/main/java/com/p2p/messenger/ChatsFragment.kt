@@ -588,7 +588,7 @@ class ChatsFragment : Fragment() {
         val msg = m?.let {
             // A deleted row shows the placeholder, as the bubble does.
             LastMessagePreview(
-                if (it.optBoolean("is_deleted", false)) getString(R.string.msg_deleted) else it.optString("text", ""),
+                if (it.optBoolean("is_deleted", false)) getString(R.string.msg_deleted) else com.p2p.messenger.util.Quote.plain(it.optString("text", "")),
                 it.optLong("timestamp", 0L)
             )
         }

@@ -312,7 +312,7 @@ object NotificationHelper {
             .build()
         val notification = NotificationCompat.Builder(context, channel)
             .setContentTitle(title)
-            .setContentText(text)
+            .setContentText(Quote.plain(text))
             .setSmallIcon(R.drawable.ic_notification)
             .setAutoCancel(true)
             // An edit updates the slot silently instead of ringing again.
