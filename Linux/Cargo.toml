@@ -1,6 +1,6 @@
 [package]
 name = "typeon-linux"
-version = "4.1.0"
+version = "5.0.0"
 edition = "2021"
 description = "Typeon — native Linux desktop client (secondary device)"
 license = "GPL-3.0-or-later"
