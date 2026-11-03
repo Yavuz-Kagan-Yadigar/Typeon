@@ -51,6 +51,7 @@ import com.p2p.messenger.util.AppLock
 import com.p2p.messenger.util.AppRestarter
 import com.p2p.messenger.util.AvatarUtil
 import com.p2p.messenger.util.CapturedImage
+import com.p2p.messenger.util.promptAttachmentCaption
 import com.p2p.messenger.util.ReactionPicker
 import com.p2p.messenger.util.ConnectionStatus
 import com.p2p.messenger.util.ImagePreview
@@ -288,8 +289,10 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private val pickFileLauncher = registerForActivityResult(
-        com.p2p.messenger.util.OpenDocumentAtHome()
-    ) { uri -> uri?.let { picked -> promptAttachmentCaption(offerHiRes = contentResolver.getType(picked)?.startsWith("image/") == true) { caption, hiRes -> onFilePicked(picked, caption, hiRes) } } }
+        com.p2p.messenger.util.OpenMultipleDocumentsAtHome()
+    ) { uris -> if (uris.isNotEmpty()) promptAttachmentCaption(uris = uris) { caption, picked ->
+        sendPickedFiles(picked.map { uris[it.index] to it.hiRes }, caption)
+    } }
 
     private val stickerPicker = StickerPicker(this, { P2PLib.sendSticker(peerDeviceFingerprint, it) }) { item ->
         adapter.addMessage(item)
@@ -306,7 +309,7 @@ class ChatActivity : AppCompatActivity() {
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
-            CapturedImage.take()?.let { jpeg -> promptAttachmentCaption(offerHiRes = true) { caption, hiRes -> onPhotoCaptured(jpeg, caption, hiRes) } }
+            CapturedImage.take()?.let { jpeg -> promptAttachmentCaption(jpeg = jpeg) { caption, picked -> picked.firstOrNull()?.let { onPhotoCaptured(jpeg, caption, it.hiRes) } } }
         }
     }
 
@@ -691,7 +694,7 @@ class ChatActivity : AppCompatActivity() {
         // The chat was picked with one tap in a list that reorders itself.
         AlertDialog.Builder(this)
             .setMessage(getString(R.string.confirm_send_shared, uris.size, txtToolbarTitle.text))
-            .setPositiveButton(R.string.btn_send) { _, _ -> uris.forEach { onFilePicked(it) } }
+            .setPositiveButton(R.string.btn_send) { _, _ -> sendPickedFiles(uris.map { it to false }) }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
@@ -1524,43 +1527,6 @@ class ChatActivity : AppCompatActivity() {
         recycler.setPadding(recycler.paddingLeft, recycler.paddingTop, recycler.paddingRight, inset)
     }
 
-    /**
-     * Spec dışı, kullanıcı isteği: "fotoğraf/eklenti/ses atarken de bir
-     * mesaj yanıtlanabilmeli ve altına bir yazı yazılabilmeli."
-     *
-     * Yanıt için ayrı bir adım YOK — ekran zaten aktif bir yanıt tutuyorsa
-     * (sağa kaydırıp yanıtla, bkz. `activeReplyToMessageId`) ek onunla
-     * birlikte gidiyor. Bu pencere yalnızca açıklamayı soruyor; boş
-     * bırakılabilir.
-     */
-    private fun promptAttachmentCaption(onCancel: () -> Unit = {}, offerHiRes: Boolean = false, onConfirm: (caption: String, hiRes: Boolean) -> Unit) {
-        val input = EditText(this).apply {
-            hint = getString(R.string.hint_attachment_caption)
-            setSingleLine(false)
-            maxLines = 4
-        }
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            val pad = (20 * resources.displayMetrics.density).toInt()
-            setPadding(pad, pad / 2, pad, 0)
-            addView(input)
-        }
-        // Images: lossless (a JPEG as it is, other formats as JPEG XL)
-        // instead of JPEG quality 90. See util.OutgoingMedia.
-        val hiRes = android.widget.CheckBox(this).apply {
-            setText(R.string.attachment_hi_res)
-            visibility = if (offerHiRes) View.VISIBLE else View.GONE
-        }
-        container.addView(hiRes)
-        AlertDialog.Builder(this)
-            .setTitle(R.string.title_attachment_caption)
-            .setView(container)
-            .setPositiveButton(R.string.btn_send) { _, _ -> onConfirm(input.text.toString(), hiRes.isChecked) }
-            .setNegativeButton(android.R.string.cancel) { _, _ -> onCancel() }
-            .setOnCancelListener { onCancel() }
-            .show()
-    }
-
     private fun scrollToLastSettled() {
         // Spec dışı, hata düzeltmesi (kullanıcı: "en alttaysak yeni
         // mesajla otomatik aşağı kaysın"): `scrollToPosition` DOĞRUDAN
@@ -1945,18 +1911,24 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
+    /** One send at a time so the files arrive in the order they were
+     *  picked; the caption goes with the last one, under the batch. */
+    private fun sendPickedFiles(files: List<Pair<Uri, Boolean>>, caption: String = "") {
+        lifecycleScope.launch { files.forEachIndexed { i, (u, hiRes) -> onFilePicked(u, if (i == files.lastIndex) caption else "", hiRes).join() } }
+    }
+
     /**
      * SAF (`OpenDocument`) ile seçilen dosya önce uygulamanın kendi
      * önbelleğine kopyalanır (`content://` bir yol değildir, Rust tarafı
      * gerçek bir dosya yolu ister), sonra `prepareAndSendFile` ile
      * şifrelenip teklif edilir.
      */
-    private fun onFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null) {
+    private fun onFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null): kotlinx.coroutines.Job {
         // bkz. grup karşılığı — yanıt bağlamı coroutine BAŞLAMADAN yakalanır.
         val replyId = activeReplyToMessageId ?: ""
         val replyPreview = activeReplyToPreview ?: ""
         cancelReply()
-        lifecycleScope.launch(Dispatchers.IO) {
+        return lifecycleScope.launch(Dispatchers.IO) {
             // Provider queries are IPC to another app: not on the main thread.
             val fileName = name ?: queryDisplayName(uri) ?: "file"
             val mimeType = mime ?: contentResolver.getType(uri) ?: "application/octet-stream"

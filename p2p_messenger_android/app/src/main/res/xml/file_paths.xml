@@ -10,4 +10,8 @@
          taşınırken geçici olarak buraya yazılır. Sadece bu alt dizin
          paylaşılır. -->
     <cache-path name="avatar_view" path="avatar_view/" />
+    <!-- Context.getCacheDir()/attachment_preview/ — util.AttachmentPrompt:
+         the camera shot or a JPEG XL (as GIF) shown full screen from the
+         caption dialog; deleted when the dialog closes. -->
+    <cache-path name="attachment_preview" path="attachment_preview/" />
 </paths>

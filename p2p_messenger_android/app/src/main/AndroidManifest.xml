@@ -154,6 +154,7 @@
              devrediliyordu). -->
         <activity
             android:name=".ui.MediaViewerActivity"
+            android:launchMode="singleTop"
             android:theme="@style/Theme.P2PMessenger" />
 
         <!-- bkz. BootReceiver — ACTION_BOOT_COMPLETED, ön plan servisi

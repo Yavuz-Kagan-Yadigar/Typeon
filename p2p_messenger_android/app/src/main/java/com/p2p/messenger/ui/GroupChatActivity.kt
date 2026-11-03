@@ -51,6 +51,7 @@ import com.p2p.messenger.util.coreErrorText
 import com.p2p.messenger.util.AppRestarter
 import com.p2p.messenger.util.AvatarUtil
 import com.p2p.messenger.util.CapturedImage
+import com.p2p.messenger.util.promptAttachmentCaption
 import com.p2p.messenger.util.ReactionPicker
 import com.p2p.messenger.util.ConnectionStatus
 import com.p2p.messenger.util.ImagePreview
@@ -331,8 +332,10 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /** bkz. ChatActivity `pickFileLauncher` aynı notu (grup ekleri). */
-    private val pickGroupFileLauncher = registerForActivityResult(com.p2p.messenger.util.OpenDocumentAtHome()) { uri ->
-        uri?.let { picked -> promptAttachmentCaption(offerHiRes = contentResolver.getType(picked)?.startsWith("image/") == true) { caption, hiRes -> onGroupFilePicked(picked, caption, hiRes) } }
+    private val pickGroupFileLauncher = registerForActivityResult(com.p2p.messenger.util.OpenMultipleDocumentsAtHome()) { uris ->
+        if (uris.isNotEmpty()) promptAttachmentCaption(uris = uris) { caption, picked ->
+        sendPickedFiles(picked.map { uris[it.index] to it.hiRes }, caption)
+    }
     }
 
     /** bkz. ChatActivity `takePhotoLauncher` aynı notu — anlık çekim +
@@ -341,7 +344,7 @@ class GroupChatActivity : AppCompatActivity() {
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
-            CapturedImage.take()?.let { jpeg -> promptAttachmentCaption(offerHiRes = true) { caption, hiRes -> onGroupPhotoCaptured(jpeg, caption, hiRes) } }
+            CapturedImage.take()?.let { jpeg -> promptAttachmentCaption(jpeg = jpeg) { caption, picked -> picked.firstOrNull()?.let { onGroupPhotoCaptured(jpeg, caption, it.hiRes) } } }
         }
     }
 
@@ -673,7 +676,7 @@ class GroupChatActivity : AppCompatActivity() {
         // The chat was picked with one tap in a list that reorders itself.
         AlertDialog.Builder(this)
             .setMessage(getString(R.string.confirm_send_shared, uris.size, txtToolbarTitle.text))
-            .setPositiveButton(R.string.btn_send) { _, _ -> uris.forEach { onGroupFilePicked(it) } }
+            .setPositiveButton(R.string.btn_send) { _, _ -> sendPickedFiles(uris.map { it to false }) }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
@@ -2229,12 +2232,18 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
+    /** One send at a time so the files arrive in the order they were
+     *  picked; the caption goes with the last one, under the batch. */
+    private fun sendPickedFiles(files: List<Pair<Uri, Boolean>>, caption: String = "") {
+        lifecycleScope.launch { files.forEachIndexed { i, (u, hiRes) -> onGroupFilePicked(u, if (i == files.lastIndex) caption else "", hiRes).join() } }
+    }
+
     /**
      * Spec dışı, kullanıcı isteği (grup ekleri): bkz. ChatActivity.onFilePicked
      * AYNI desen — SAF ile seçilen dosya önce önbelleğe kopyalanır, sonra
      * `prepareAndSendGroupFile` ile TÜM üyelere sunulur.
      */
-    private fun onGroupFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null) {
+    private fun onGroupFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null): kotlinx.coroutines.Job {
         // Ekle birlikte gidecek yanıt bağlamı, coroutine BAŞLAMADAN
         // yakalanıyor: `cancelReply()` aşağıda hemen çağrılıyor (kullanıcı
         // arayüzde yanıtın tüketildiğini anında görmeli) ve arka planda
@@ -2246,7 +2255,7 @@ class GroupChatActivity : AppCompatActivity() {
         // The group is captured BEFORE the coroutine (bkz.
         // `onGroupPhotoCaptured` aynı not).
         val targetGroupId = groupId
-        lifecycleScope.launch(Dispatchers.IO) {
+        return lifecycleScope.launch(Dispatchers.IO) {
             // Provider queries are IPC to another app: not on the main thread.
             val fileName = name ?: queryDisplayName(uri) ?: "file"
             val mimeType = mime ?: contentResolver.getType(uri) ?: "application/octet-stream"
@@ -2932,43 +2941,6 @@ class GroupChatActivity : AppCompatActivity() {
         val inset = layoutMessageInput.height + replyHeight + gap
         if (recycler.paddingBottom == inset) return
         recycler.setPadding(recycler.paddingLeft, recycler.paddingTop, recycler.paddingRight, inset)
-    }
-
-    /**
-     * Spec dışı, kullanıcı isteği: "fotoğraf/eklenti/ses atarken de bir
-     * mesaj yanıtlanabilmeli ve altına bir yazı yazılabilmeli."
-     *
-     * Yanıt için ayrı bir adım YOK — ekran zaten aktif bir yanıt tutuyorsa
-     * (sağa kaydırıp yanıtla, bkz. `activeReplyToMessageId`) ek onunla
-     * birlikte gidiyor. Bu pencere yalnızca açıklamayı soruyor; boş
-     * bırakılabilir.
-     */
-    private fun promptAttachmentCaption(onCancel: () -> Unit = {}, offerHiRes: Boolean = false, onConfirm: (caption: String, hiRes: Boolean) -> Unit) {
-        val input = EditText(this).apply {
-            hint = getString(R.string.hint_attachment_caption)
-            setSingleLine(false)
-            maxLines = 4
-        }
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            val pad = (20 * resources.displayMetrics.density).toInt()
-            setPadding(pad, pad / 2, pad, 0)
-            addView(input)
-        }
-        // Images: lossless (a JPEG as it is, other formats as JPEG XL)
-        // instead of JPEG quality 90. See util.OutgoingMedia.
-        val hiRes = android.widget.CheckBox(this).apply {
-            setText(R.string.attachment_hi_res)
-            visibility = if (offerHiRes) View.VISIBLE else View.GONE
-        }
-        container.addView(hiRes)
-        AlertDialog.Builder(this)
-            .setTitle(R.string.title_attachment_caption)
-            .setView(container)
-            .setPositiveButton(R.string.btn_send) { _, _ -> onConfirm(input.text.toString(), hiRes.isChecked) }
-            .setNegativeButton(android.R.string.cancel) { _, _ -> onCancel() }
-            .setOnCancelListener { onCancel() }
-            .show()
     }
 
     private fun scrollToLastSettled() {
