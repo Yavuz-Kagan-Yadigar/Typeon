@@ -50,10 +50,6 @@ fn decoded_texture(bytes: &[u8]) -> Option<(gdk::Texture, usize)> {
     Some((gdk::Texture::for_pixbuf(&pixbuf), cost))
 }
 
-pub fn texture_from_bytes(bytes: &[u8]) -> Option<gdk::Texture> {
-    decoded_texture(bytes).map(|(texture, _)| texture)
-}
-
 /// Hex-encoded image bytes as the core sends them (`avatar_hex`,
 /// `preview_hex`) — JSON cannot carry raw binary.
 pub fn texture_from_hex(hex_string: &str) -> Option<gdk::Texture> {

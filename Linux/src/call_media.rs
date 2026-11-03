@@ -178,10 +178,6 @@ impl CallMedia {
         self.shared.muted.store(muted, Ordering::Relaxed);
     }
 
-    pub fn muted(&self) -> bool {
-        self.shared.muted.load(Ordering::Relaxed)
-    }
-
     pub fn camera_on(&self) -> bool {
         self.shared.camera_on.load(Ordering::Relaxed)
     }
@@ -798,6 +794,7 @@ impl VideoTx {
             let running = running.clone();
             let hevc = enc.hevc;
             let bus = pipeline.bus();
+            let pipe = pipeline.clone();
             std::thread::Builder::new()
                 .name("call-video-tx".into())
                 .spawn(move || {
@@ -810,6 +807,10 @@ impl VideoTx {
                             if let gst::MessageView::Error(e) = m.view() {
                                 log::warn!("call: camera/encoder: {}", e.error());
                             }
+                            // Release the device and tell the UI: left Playing,
+                            // the LED stayed on and peers saw a frozen tile.
+                            shared.camera_on.store(false, Ordering::Relaxed);
+                            let _ = pipe.set_state(gst::State::Null);
                             break;
                         }
                         // On request, at most one keyframe per KEYFRAME_MIN_GAP_MS.

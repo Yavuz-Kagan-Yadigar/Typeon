@@ -337,7 +337,11 @@ fn transport_bar(media: &gtk::MediaFile) -> gtk::Widget {
         .build();
     seek.set_range(0.0, 1.0);
 
-    let volume = gtk::VolumeButton::new();
+    // VolumeButton is deprecated since GTK 4.10; this is what it was.
+    let volume = gtk::ScaleButton::new(0.0, 1.0, 0.02, &[
+        "audio-volume-muted-symbolic", "audio-volume-high-symbolic",
+        "audio-volume-low-symbolic", "audio-volume-medium-symbolic",
+    ]);
     volume.set_value(media.volume());
 
     {

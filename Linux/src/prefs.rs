@@ -101,7 +101,7 @@ impl Default for Prefs {
             font_family: None,
             custom_fonts: HashMap::new(),
             active_custom_font_id: None,
-            hide_notification_content: false,
+            hide_notification_content: true,
             path: PathBuf::new(),
             dirty: false,
         }

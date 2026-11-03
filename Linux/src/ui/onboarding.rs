@@ -660,6 +660,12 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
                 || {
                     let payload = core::build_device_link_request();
                     let code = if payload.is_empty() { String::new() } else { core::device_link_code(&payload) };
+                    // Debug builds only: lets a test approve the link from adb
+                    // (Android debug `debug_qr_hex`) without a camera.
+                    #[cfg(debug_assertions)]
+                    if !payload.is_empty() && std::env::var_os("TYPEON_DEBUG_LINK").is_some() {
+                        eprintln!("LINK_QR_HEX={}", payload.iter().map(|b| format!("{b:02x}")).collect::<String>());
+                    }
                     (payload, code)
                 },
                 move |(payload, code)| {

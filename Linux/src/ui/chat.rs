@@ -2411,35 +2411,65 @@ impl ChatView {
                 };
                 let tmp_dir = crate::data_directory().join("attachments/plain_cache");
                 let (sent, file_name, mime) = util::prepare_outgoing(&source, &file_name, &mime, hi_res, &tmp_dir);
-                let sent_path = sent.to_string_lossy().to_string();
-                let outcome = match &conversation {
-                    Conversation::Direct { fingerprint, .. } => core::prepare_and_send_file(
-                        fingerprint, &sent_path, &file_name, &mime, preview, None,
-                        caption, reply_id, reply_preview,
-                    )
-                    .map(|receipt| receipt.message_id),
-                    Conversation::Group { group_id, .. } => core::prepare_and_send_group_file(
-                        group_id, &sent_path, &file_name, &mime, preview, None,
-                        caption, reply_id, reply_preview, reply_sender,
-                    ),
-                };
-                let unscrubbed = sent == source && util::is_video(&mime);
-                if sent != source {
-                    let _ = std::fs::remove_file(&sent);
-                }
-                (outcome, unscrubbed)
+                // Core scrubs JPEG/PNG itself; a video the remux failed on and
+                // an image nothing could re-encode go out with their metadata.
+                let unscrubbed = sent == source
+                    && (util::is_video(&mime)
+                        || (util::is_image(&mime) && !matches!(mime.as_str(), "image/jpeg" | "image/png" | "image/svg+xml")));
+                (preview, sent, source, file_name, mime, unscrubbed)
             },
-            move |(result, unscrubbed)| match result {
-                // The attachment row comes from the archive, so a reload is the
-                // simplest way to show it exactly as a restart would.
-                Ok(_) => {
-                    if unscrubbed {
-                        app.toast("Sent without removing metadata");
-                    }
-                    view.clear_reply();
-                    view.reload();
+            move |(preview, sent, source, file_name, mime, unscrubbed)| {
+                let app_for_send = app.clone();
+                let send = move || {
+                    app::run_in_background(
+                        move || {
+                            let sent_path = sent.to_string_lossy().to_string();
+                            let outcome = match &conversation {
+                                Conversation::Direct { fingerprint, .. } => core::prepare_and_send_file(
+                                    fingerprint, &sent_path, &file_name, &mime, preview, None,
+                                    caption, reply_id, reply_preview,
+                                )
+                                .map(|receipt| receipt.message_id),
+                                Conversation::Group { group_id, .. } => core::prepare_and_send_group_file(
+                                    group_id, &sent_path, &file_name, &mime, preview, None,
+                                    caption, reply_id, reply_preview, reply_sender,
+                                ),
+                            };
+                            if sent != source {
+                                let _ = std::fs::remove_file(&sent);
+                            }
+                            outcome
+                        },
+                        move |result| match result {
+                            // The attachment row comes from the archive, so a reload is the
+                            // simplest way to show it exactly as a restart would.
+                            Ok(_) => {
+                                view.clear_reply();
+                                view.reload();
+                            }
+                            Err(error) => app_for_send.toast(&format!("Could not send the file: {}", error)),
+                        },
+                    );
+                };
+                if unscrubbed {
+                    // Same contract as Android: never send location and device
+                    // metadata without asking.
+                    let send = std::cell::RefCell::new(Some(send));
+                    dialogs::confirm(
+                        &app,
+                        "Send with metadata?",
+                        "The metadata (location, device, time) of this file could not be removed. Send it anyway?",
+                        "Send anyway",
+                        true,
+                        move || {
+                            if let Some(send) = send.borrow_mut().take() {
+                                send();
+                            }
+                        },
+                    );
+                } else {
+                    send();
                 }
-                Err(error) => app.toast(&format!("Could not send the file: {}", error)),
             },
         );
     }

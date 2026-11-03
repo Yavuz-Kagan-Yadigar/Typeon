@@ -71,6 +71,9 @@ type Listener = Rc<dyn Fn(&Event)>;
 /// stops driving the core against deleted files. Never cleared — the only
 /// safe continuation after an unlink is quitting the process.
 static POLL_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set while the window has been in the background for a minute (see
+/// `start_poll_loop`): the poll loop then waits longer between turns.
+static POWER_SAVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Ask the poll thread to exit before its next round. The current round (if
 /// one is mid-flight) still finishes — on Linux deleting files under an open
@@ -651,7 +654,8 @@ pub fn start_poll_loop(app: &Rc<App>) {
         }
         // Returns early on swarm activity or when the UI touches the core
         // (e.g. a sent message), so traffic is not held back to the next tick.
-        core::wait_for_network_activity(1000);
+        let wait_ms = if POWER_SAVING.load(std::sync::atomic::Ordering::Relaxed) { 10_000 } else { 1000 };
+        core::wait_for_network_activity(wait_ms);
     });
 
     let dispatcher = app.clone();
@@ -761,6 +765,7 @@ pub fn start_poll_loop(app: &Rc<App>) {
 /// signal handler (`main.rs` `connect_is_active_notify`) to call directly.
 /// Takes the core lock, so it never runs on the GTK thread itself.
 pub fn set_power_save(enabled: bool) {
+    POWER_SAVING.store(enabled, std::sync::atomic::Ordering::Relaxed);
     std::thread::spawn(move || core::set_power_save(enabled));
 }
 
