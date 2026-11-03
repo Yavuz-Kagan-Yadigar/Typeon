@@ -258,7 +258,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     /** A sticker bubble's picture, resolved off the main thread (see StickerPicker.provideBubbleImages). */
     var stickerImageProvider: ((fileId: String, done: (android.graphics.drawable.Drawable?) -> Unit) -> Unit)? = null
 
-    private val stickerImages = android.util.LruCache<String, android.graphics.drawable.Drawable>(16)
+    private val stickerImages = object : android.util.LruCache<String, android.graphics.drawable.Drawable>(STICKER_CACHE_BYTES) {
+        override fun sizeOf(key: String, value: android.graphics.drawable.Drawable): Int = stickerDrawableBytes(value)
+    }
     /** Being decoded: no second request for the same file. */
     private val stickerPending = mutableSetOf<String>()
 

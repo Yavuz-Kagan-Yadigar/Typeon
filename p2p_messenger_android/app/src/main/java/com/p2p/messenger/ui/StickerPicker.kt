@@ -391,7 +391,9 @@ class StickerPicker(
     }
 
     private inner class StickerGridAdapter : RecyclerView.Adapter<StickerGridAdapter.Holder>() {
-        private val cache = android.util.LruCache<String, Drawable>(16)
+        private val cache = object : android.util.LruCache<String, Drawable>(STICKER_CACHE_BYTES) {
+            override fun sizeOf(key: String, value: Drawable): Int = stickerDrawableBytes(value)
+        }
         /** Being decoded: no second request for the same sticker. */
         private val pending = mutableSetOf<String>()
 
@@ -462,6 +464,19 @@ class StickerPicker(
 }
 
 private const val SELECTION_PAYLOAD = "selection"
+
+/** Byte budget of a sticker drawable cache. */
+internal const val STICKER_CACHE_BYTES = 32 * 1024 * 1024
+
+/** Approximate pixel bytes of a cached sticker (animated ones keep ~2 frame buffers). */
+internal fun stickerDrawableBytes(d: Drawable): Int {
+    val n = if (d is android.graphics.drawable.BitmapDrawable && d.bitmap != null) {
+        d.bitmap.allocationByteCount.toLong()
+    } else {
+        maxOf(d.intrinsicWidth, 0).toLong() * maxOf(d.intrinsicHeight, 0) * 8
+    }
+    return n.coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
+}
 
 /** A sticker picture: a `.gif` plays (API 28+), anything else is a still. */
 private fun loadStickerDrawable(context: Context, file: File): Drawable? {

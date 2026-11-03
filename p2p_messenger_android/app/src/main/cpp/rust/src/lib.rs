@@ -472,13 +472,109 @@ pub(crate) fn save_received_sticker_unlocked(file_id: &str) -> Result<String, St
     result
 }
 
+/// Conversions (sticker PNG/GIF, JPEG XL first frames and pictures) are kept
+/// encrypted in `attachments/sticker_cache/<kind>.<owner>.<salt>.<sha256>.cache`:
+/// AppLock empties `plain_cache` at every lock, and without this copy each
+/// unlock converted every sticker again. `owner` is the sticker id or the
+/// attachment's file id; `out` is the conversion's path in `plain_cache`.
+fn conversion_cache_dir(out: &std::path::Path) -> Option<std::path::PathBuf> {
+    Some(out.parent()?.parent()?.join("sticker_cache"))
+}
+
+/// Derived from the source's file key, never the key itself: its chunk
+/// nonces are already used for the source. A random salt per cache file means
+/// no two cache files share a key either.
+fn conversion_cache_key(file_key: &[u8; 32], salt: &[u8], kind: &str) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    Hkdf::<sha2::Sha256>::new(Some(salt), file_key)
+        .expand(format!("typeon sticker cache {kind}").as_bytes(), &mut key)
+        .expect("32 bytes is a valid HKDF-SHA256 output");
+    key
+}
+
+/// The cache files of `owner` whose kind passes `kind_ok`.
+fn conversion_cache_files(dir: &std::path::Path, owner: &str, kind_ok: impl Fn(&str) -> bool) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries.flatten().map(|e| e.path()).filter(|p| {
+        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let parts: Vec<&str> = name.split('.').collect();
+        parts.len() == 5 && kind_ok(parts[0]) && parts[1] == owner && parts[4] == "cache"
+    }).collect()
+}
+
+/// Puts `out` back from its cache copy; false when there is none. A copy that
+/// does not decrypt is removed.
+fn restore_conversion(out: &std::path::Path, kind: &str, owner: &str, file_key: &[u8; 32]) -> bool {
+    let Some(dir) = conversion_cache_dir(out) else { return false };
+    for path in conversion_cache_files(&dir, owner, |k| k == kind) {
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let parts: Vec<&str> = name.split('.').collect();
+        let tmp = out.with_file_name(format!(".{}.tmp", uuid::Uuid::new_v4()));
+        let decrypted = hex::decode(parts[2]).map_err(|e| e.to_string()).and_then(|salt| {
+            attachments::decrypt_file_from_disk_with(&path, &tmp, &conversion_cache_key(file_key, &salt, kind), parts[3], attachments::FILE_CHUNK_SIZE_V2)
+        });
+        if decrypted.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        if std::fs::rename(&tmp, out).is_ok() {
+            return true;
+        }
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    false
+}
+
+/// Keeps an encrypted copy of the conversion `out`, replacing an older one.
+/// A failure only costs a conversion after the next lock.
+fn keep_conversion(out: &std::path::Path, kind: &str, owner: &str, file_key: &[u8; 32]) {
+    // ponytail: size cap instead of a sticker flag; a hi-res photo's PNG would
+    // be a second full-size copy the Storage screen does not show.
+    if std::fs::metadata(out).map_or(true, |m| m.len() > 4 << 20) {
+        return;
+    }
+    let Some(dir) = conversion_cache_dir(out) else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    for old in conversion_cache_files(&dir, owner, |k| k == kind) {
+        let _ = std::fs::remove_file(old);
+    }
+    let mut salt = [0u8; 16];
+    {
+        use rand::RngCore;
+        OsRng.fill_bytes(&mut salt);
+    }
+    let tmp = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+    let r = attachments::encrypt_file_to_disk_with(out, &tmp, &conversion_cache_key(file_key, &salt, kind), attachments::FILE_CHUNK_SIZE_V2)
+        .and_then(|(_, sha)| std::fs::rename(&tmp, dir.join(format!("{kind}.{owner}.{}.{sha}.cache", hex::encode(salt)))).map_err(|e| e.to_string()));
+    if let Err(e) = r {
+        warn!("Conversion not cached ({kind}): {e}");
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Removes `owner`'s cache files whose kind starts with `family`
+/// (`"sticker-"` or `"att-"`).
+fn remove_cached_conversions(attachments_dir: &std::path::Path, family: &str, owner: &str) {
+    for path in conversion_cache_files(&attachments_dir.join("sticker_cache"), owner, |k| k.starts_with(family)) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// A sticker as a viewable file: PNG, or GIF when animated. Cached in the
-/// attachments' `plain_cache` (wiped at start, like theirs).
+/// attachments' `plain_cache` (wiped at start, like theirs) and, encrypted,
+/// in `sticker_cache`.
 pub(crate) fn sticker_plain_path_unlocked(id: &str) -> Result<String, String> {
     let core = core_lock_read();
     let animated = core.sticker_animated(id)?;
     let out = core.attachments_dir()?.join("plain_cache").join(if animated { format!("anim-{id}.gif") } else { format!("sticker-{id}.png") });
     if out.exists() {
+        return Ok(out.to_string_lossy().to_string());
+    }
+    let kind = if animated { "sticker-gif" } else { "sticker-png" };
+    let file_key = core.sticker_file_key(id)?;
+    if restore_conversion(&out, kind, id, &file_key) {
         return Ok(out.to_string_lossy().to_string());
     }
     let tmp = core.decrypt_sticker_to_tmp(id)?;
@@ -489,6 +585,8 @@ pub(crate) fn sticker_plain_path_unlocked(id: &str) -> Result<String, String> {
     let result = converted.and_then(|()| std::fs::rename(&conv, &out).map_err(|e| e.to_string()));
     if result.is_err() {
         let _ = std::fs::remove_file(&conv);
+    } else {
+        keep_conversion(&out, kind, id, &file_key);
     }
     result.map(|()| out.to_string_lossy().to_string())
 }
@@ -500,10 +598,17 @@ pub(crate) fn sticker_first_frame_unlocked(id: &str) -> Result<String, String> {
     if out.exists() {
         return Ok(out.to_string_lossy().to_string());
     }
+    let file_key = core.sticker_file_key(id)?;
+    if restore_conversion(&out, "sticker-first", id, &file_key) {
+        return Ok(out.to_string_lossy().to_string());
+    }
     let tmp = core.decrypt_sticker_to_tmp(id)?;
     drop(core);
     let r = attachments::convert_cached(&tmp, &out, attachments::jxl_to_png);
     let _ = std::fs::remove_file(&tmp);
+    if r.is_ok() {
+        keep_conversion(&out, "sticker-first", id, &file_key);
+    }
     r.map(|()| out.to_string_lossy().to_string())
 }
 
@@ -514,7 +619,7 @@ pub(crate) fn attachment_first_frame_unlocked(file_id: &str) -> Result<String, S
         return Err("not a JPEG XL".to_string());
     }
     let out = decrypted_path.with_file_name(format!("first-{sha256_hex}.png"));
-    if out.exists() {
+    if out.exists() || restore_conversion(&out, "att-first", file_id, &file_key) {
         return Ok(out.to_string_lossy().to_string());
     }
     let tmp = decrypted_path.with_file_name(format!(".first-{}.jxl", uuid::Uuid::new_v4()));
@@ -522,6 +627,9 @@ pub(crate) fn attachment_first_frame_unlocked(file_id: &str) -> Result<String, S
     let r = attachments::decrypt_file_from_disk_with(&enc_path, &tmp, &file_key, &sha256_hex, chunk_size)
         .and_then(|()| attachments::convert_cached(&tmp, &out, attachments::jxl_to_png));
     let _ = std::fs::remove_file(&tmp);
+    if r.is_ok() {
+        keep_conversion(&out, "att-first", file_id, &file_key);
+    }
     r.map(|()| out.to_string_lossy().to_string())
 }
 
@@ -569,6 +677,13 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
     if jxl && !plain_path.exists() && decrypted_path.exists() {
         return Ok(decrypted_path.to_string_lossy().to_string());
     }
+    // After an AppLock purge: the conversion from its encrypted cache copy.
+    if jxl && !plain_path.exists() {
+        if restore_conversion(&gif_path, "att-gif", file_id, &file_key) {
+            return Ok(gif_path.to_string_lossy().to_string());
+        }
+        restore_conversion(&plain_path, "att-png", file_id, &file_key);
+    }
     if !plain_path.exists() {
         info!(
             "get_attachment_plaintext_path: {} önbellekte yok, {} adresinden çözülüyor",
@@ -606,6 +721,7 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
                 let _ = std::fs::remove_file(&conv_tmp);
                 return Err(e.to_string());
             }
+            keep_conversion(out_path, if animated { "att-gif" } else { "att-png" }, file_id, &file_key);
             if animated {
                 return Ok(gif_path.to_string_lossy().to_string());
             }
@@ -2122,6 +2238,53 @@ mod recovery_tests {
         // An earlier received attachment is not a source either.
         offer(&mut core, "other", &"1".repeat(64), &format!("jxl:{}", "1".repeat(64)));
         assert_ne!(status(&core, "other"), "complete");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sticker_conversion_survives_plain_cache_purge_encrypted() {
+        let dir = std::env::temp_dir().join(format!("typeon-stk-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut core = core_on_disk(&dir);
+        let jxl = dir.join("s.jxl");
+        let mut frame = vec![120u8; 8 * 8 * 4];
+        attachments::encode_jxl_sticker(std::slice::from_mut(&mut frame), 8, 8, &[], false, &jxl).unwrap();
+        let id = core.store_sticker(&jxl, false, None).unwrap();
+        let key = core.sticker_file_key(&id).unwrap();
+        let plain = dir.join("attachments/plain_cache");
+        let out = plain.join(format!("first-{id}.png"));
+        let cache = dir.join("attachments/sticker_cache");
+
+        // Convert once (as `sticker_first_frame_unlocked` does) and keep it.
+        assert!(!restore_conversion(&out, "sticker-first", &id, &key));
+        let tmp = core.decrypt_sticker_to_tmp(&id).unwrap();
+        attachments::convert_cached(&tmp, &out, attachments::jxl_to_png).unwrap();
+        std::fs::remove_file(&tmp).unwrap();
+        keep_conversion(&out, "sticker-first", &id, &key);
+        let png = std::fs::read(&out).unwrap();
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 1);
+        let stored = std::fs::read(&conversion_cache_files(&cache, &id, |_| true)[0]).unwrap();
+        assert!(!stored.starts_with(b"\x89PNG"), "stored encrypted");
+
+        // AppLock purge: served from the encrypted copy, same bytes.
+        std::fs::remove_dir_all(&plain).unwrap();
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(!restore_conversion(&out, "sticker-png", &id, &key), "per kind");
+        assert!(restore_conversion(&out, "sticker-first", &id, &key));
+        assert_eq!(std::fs::read(&out).unwrap(), png);
+
+        // Deleting the sticker removes its cache; a wipe removes the directory.
+        std::fs::remove_file(&out).unwrap();
+        assert!(!restore_conversion(&out, "sticker-first", &id, &[7u8; 32]), "another key does not open it");
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0, "an unreadable copy is dropped");
+        std::fs::write(&out, &png).unwrap();
+        keep_conversion(&out, "sticker-first", &id, &key);
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 1);
+        core.delete_sticker(&id, false).unwrap();
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+        core.wipe_all_local_state();
+        assert!(!cache.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -5422,6 +5585,13 @@ impl P2PCore {
             // Plaintext: not for the other users of a desktop.
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(format!("{}/attachments/plain_cache", app_files_dir), std::fs::Permissions::from_mode(0o700));
+        }
+        // Encrypted conversions (`keep_conversion`): kept across starts and locks.
+        let _ = std::fs::create_dir_all(format!("{}/attachments/sticker_cache", app_files_dir));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(format!("{}/attachments/sticker_cache", app_files_dir), std::fs::Permissions::from_mode(0o700));
         }
         self.load_identity_from_db();
         // Spec dışı düzeltme: `contacts`/`groups` tabloları önceden
@@ -18299,14 +18469,18 @@ impl P2PCore {
             .map_err(|_| "Unknown sticker".to_string())
     }
 
-    /// Sticker `id` decrypted to a fresh temporary `.jxl`; the caller removes it.
-    fn decrypt_sticker_to_tmp(&self, id: &str) -> Result<std::path::PathBuf, String> {
-        let enc_path = self.sticker_enc_path(id)?;
+    fn sticker_file_key(&self, id: &str) -> Result<[u8; 32], String> {
         let conn = self.db.as_ref().ok_or("DB not open")?;
         let (encrypted_key, key_nonce): (Vec<u8>, Vec<u8>) = conn.query_row(
             "SELECT encrypted_key, key_nonce FROM stickers WHERE id = ?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)),
         ).map_err(|_| "Unknown sticker".to_string())?;
-        let file_key = self.unwrap_file_key(&encrypted_key, &key_nonce)?;
+        self.unwrap_file_key(&encrypted_key, &key_nonce)
+    }
+
+    /// Sticker `id` decrypted to a fresh temporary `.jxl`; the caller removes it.
+    fn decrypt_sticker_to_tmp(&self, id: &str) -> Result<std::path::PathBuf, String> {
+        let enc_path = self.sticker_enc_path(id)?;
+        let file_key = self.sticker_file_key(id)?;
         let dir = self.attachments_dir()?.join("plain_cache");
         let _ = std::fs::create_dir_all(&dir);
         let tmp = dir.join(format!(".sticker-{}.jxl", uuid::Uuid::new_v4()));
@@ -18371,6 +18545,7 @@ impl P2PCore {
         let _ = std::fs::remove_file(cache.join(format!("sticker-{id}.png")));
         let _ = std::fs::remove_file(cache.join(format!("anim-{id}.gif")));
         let _ = std::fs::remove_file(cache.join(format!("first-{id}.png")));
+        remove_cached_conversions(&self.attachments_dir()?, "sticker-", id);
         if sync {
             self.send_to_siblings(SiblingEchoBody::StickerRemoved { id: id.to_string() });
         }
@@ -18588,6 +18763,7 @@ impl P2PCore {
                     let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("{}.gif", file_id)));
                     // "Save as JPEG XL" (`attachment_original_path_unlocked`).
                     let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("orig-{}.jxl", file_id)));
+                    remove_cached_conversions(&dir, "att-", file_id);
                 }
             }
         }
