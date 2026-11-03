@@ -139,6 +139,7 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var whiteboard: WhiteboardPanel
     private val localMessages = mutableListOf<SimpleChatAdapter.Item>()
     private lateinit var adapter: SimpleChatAdapter
+    private lateinit var selection: MessageSelection
     private lateinit var recycler: RecyclerView
     private lateinit var connectingBanner: View
 
@@ -512,6 +513,7 @@ class ChatActivity : AppCompatActivity() {
 
         adapter = SimpleChatAdapter(localMessages)
         adapter.onItemLongPress = { item -> showEditDeleteDialog(item) }
+        selection = MessageSelection(this, adapter, { saveAttachmentToDownloads(it) }) { P2PLib.deleteMessage(peerDeviceFingerprint, it) }
         adapter.onAttachmentClick = { item -> onAttachmentClicked(item) }
         adapter.onAttachmentLongClick = { item -> onAttachmentLongClicked(item) }
         adapter.onReactionsClick = { item -> showReactionsDialog(item) }
@@ -673,7 +675,7 @@ class ChatActivity : AppCompatActivity() {
     /** Shared files go out under the same lock as every send button: the
      *  chat has just opened and the handshake is not proven yet. */
     private var pendingShare: List<Uri> = emptyList()
-    private var pendingForward: com.p2p.messenger.util.Forward.Pending? = null
+    private var pendingForward: List<com.p2p.messenger.util.Forward.Pending>? = null
 
     private fun flushPendingShare() {
         if (!handshakeReady || peerAccountDeleted) return
@@ -682,8 +684,12 @@ class ChatActivity : AppCompatActivity() {
             AlertDialog.Builder(this)
                 .setMessage(getString(R.string.confirm_forward, txtToolbarTitle.text))
                 .setPositiveButton(R.string.btn_send) { _, _ ->
-                    if (f.file != null) onFilePicked(Uri.fromFile(f.file), f.caption, hiRes = true, name = f.fileName, mime = f.mimeType)
-                    else sendNewMessage(f.text ?: return@setPositiveButton)
+                    lifecycleScope.launch {
+                        for (p in f) {
+                            if (p.file != null) onFilePicked(Uri.fromFile(p.file), p.caption, hiRes = true, name = p.fileName, mime = p.mimeType).join()
+                            else p.text?.let { sendNewMessage(it).join() }
+                        }
+                    }
                 }
                 .setNegativeButton(android.R.string.cancel, null)
                 .show()
@@ -1121,7 +1127,7 @@ class ChatActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    private fun sendNewMessage(text: String) {
+    private fun sendNewMessage(text: String): kotlinx.coroutines.Job {
         btnSend.isEnabled = false
         btnSend.visibility = View.INVISIBLE
         progressSending.visibility = View.VISIBLE
@@ -1131,7 +1137,7 @@ class ChatActivity : AppCompatActivity() {
         val replyToSenderLabel = if (replyToMessageId != null) txtReplyPreviewSender.text?.toString() else null
         cancelReply()
 
-        lifecycleScope.launch {
+        return lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
                 try {
                     P2PLib.sendMessage(peerDeviceFingerprint, text, replyToMessageId, replyToPreview)
@@ -1687,11 +1693,13 @@ class ChatActivity : AppCompatActivity() {
             if (attachment.isSticker && !item.isMine) add(getString(R.string.action_add_to_my_stickers))
             if (com.p2p.messenger.util.Forward.canForward(item)) add(getString(R.string.action_forward))
             if (item.isMine) add(getString(R.string.action_delete_message))
+            add(getString(R.string.action_select))
         }
         AlertDialog.Builder(this)
             .setItems(options.toTypedArray()) { _, which ->
                 when (options[which]) {
                     getString(R.string.action_forward) -> com.p2p.messenger.util.Forward.start(this, item)
+                    getString(R.string.action_select) -> selection.start(item)
                     getString(R.string.action_open_with) -> openAttachmentWithChooser(attachment)
                     getString(R.string.action_save_to_downloads) -> saveAttachmentToDownloads(attachment)
                     getString(R.string.action_save_as_jxl) -> saveAttachmentToDownloads(attachment, original = true)
@@ -2125,13 +2133,15 @@ class ChatActivity : AppCompatActivity() {
                 getString(R.string.action_react),
                 getString(R.string.lbl_copy),
                 getString(R.string.action_forward).takeIf { com.p2p.messenger.util.Forward.canForward(item) },
+                getString(R.string.action_select),
             )
             AlertDialog.Builder(this)
                 .setItems(theirOptions.toTypedArray()) { _, which ->
-                    when (which) {
-                        0 -> showReactionPicker(item)
-                        1 -> copyMessageText(item)
-                        else -> com.p2p.messenger.util.Forward.start(this, item)
+                    when (theirOptions[which]) {
+                        getString(R.string.action_react) -> showReactionPicker(item)
+                        getString(R.string.lbl_copy) -> copyMessageText(item)
+                        getString(R.string.action_forward) -> com.p2p.messenger.util.Forward.start(this, item)
+                        getString(R.string.action_select) -> selection.start(item)
                     }
                 }
                 .show()
@@ -2145,11 +2155,13 @@ class ChatActivity : AppCompatActivity() {
             add(getString(R.string.action_delete_message))
             add(getString(R.string.lbl_copy))
             add(getString(R.string.action_forward))
+            add(getString(R.string.action_select))
         }
         AlertDialog.Builder(this)
             .setItems(options.toTypedArray()) { _, which ->
                 when (options[which]) {
                     getString(R.string.action_forward) -> com.p2p.messenger.util.Forward.start(this, item)
+                    getString(R.string.action_select) -> selection.start(item)
                     getString(R.string.action_retry_message) -> retryFailedMessage(item)
                     getString(R.string.action_react) -> showReactionPicker(item)
                     getString(R.string.action_edit_message) -> showEditMessageDialog(item)

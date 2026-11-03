@@ -578,4 +578,10 @@
     <string name="lbl_forwarded">Forwarded</string>
     <string name="msg_forward_pick_chat">Choose a chat to forward to</string>
     <string name="confirm_forward">Forward to %1$s?</string>
+    <string name="action_select">Select</string>
+    <string name="msg_select_same_kind">Only messages of the same type can be selected together</string>
+    <plurals name="confirm_delete_messages">
+        <item quantity="one">Delete this message?</item>
+        <item quantity="other">Delete these %d messages?</item>
+    </plurals>
 </resources>

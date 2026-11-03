@@ -31,14 +31,14 @@ object ShareIntake {
     /** A message being forwarded (see [Forward]). Kept here, not in an
      *  Intent: a share from another app must not be able to name a file. */
     @Volatile
-    var forward: Forward.Pending? = null
+    var forward: List<Forward.Pending>? = null
         set(value) {
             field = value
             if (value != null) pendingAt = android.os.SystemClock.elapsedRealtime()
         }
 
     /** The forward handed to the chat screen picked last. */
-    private var armed: Forward.Pending? = null
+    private var armed: List<Forward.Pending>? = null
     private const val EXTRA_FORWARD = "typeon_forward"
 
     fun isShare(intent: Intent?): Boolean =
@@ -77,7 +77,7 @@ object ShareIntake {
     }
 
     /** The forward [attachTo] put on `target`, once. */
-    fun takeForward(target: Intent): Forward.Pending? {
+    fun takeForward(target: Intent): List<Forward.Pending>? {
         if (!target.getBooleanExtra(EXTRA_FORWARD, false)) return null
         target.removeExtra(EXTRA_FORWARD)
         return armed.also { armed = null }

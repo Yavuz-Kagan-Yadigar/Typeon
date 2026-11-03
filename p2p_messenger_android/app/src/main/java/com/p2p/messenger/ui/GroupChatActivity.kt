@@ -135,6 +135,7 @@ class GroupChatActivity : AppCompatActivity() {
     private lateinit var whiteboard: WhiteboardPanel
     private val localMessages = mutableListOf<SimpleChatAdapter.Item>()
     private lateinit var adapter: SimpleChatAdapter
+    private lateinit var selection: MessageSelection
     private lateinit var recycler: RecyclerView
     private lateinit var txtToolbarTitle: TextView
     private lateinit var imgToolbarAvatar: ImageView
@@ -525,6 +526,7 @@ class GroupChatActivity : AppCompatActivity() {
         // (+ başarısızsa Yeniden Gönder) — bkz. ChatActivity.showEditDeleteDialog
         // AYNI desen.
         adapter.onItemLongPress = { item -> showGroupEditDeleteDialog(item) }
+        selection = MessageSelection(this, adapter, { saveGroupAttachmentToDownloads(it) }) { P2PLib.deleteGroupMessage(groupId, it) }
         adapter.onAttachmentClick = { item -> onGroupAttachmentClicked(item) }
         // Spec dışı, hata düzeltmesi + kullanıcı isteği: bu ekranda ek
         // balonuna uzun basmak ÖNCEDEN hiç kablolanmamıştı (bkz.
@@ -660,8 +662,12 @@ class GroupChatActivity : AppCompatActivity() {
             AlertDialog.Builder(this)
                 .setMessage(getString(R.string.confirm_forward, txtToolbarTitle.text))
                 .setPositiveButton(R.string.btn_send) { _, _ ->
-                    if (f.file != null) onGroupFilePicked(Uri.fromFile(f.file), f.caption, hiRes = true, name = f.fileName, mime = f.mimeType)
-                    else sendNewMessage(f.text ?: return@setPositiveButton)
+                    lifecycleScope.launch {
+                        for (p in f) {
+                            if (p.file != null) onGroupFilePicked(Uri.fromFile(p.file), p.caption, hiRes = true, name = p.fileName, mime = p.mimeType).join()
+                            else p.text?.let { sendNewMessage(it).join() }
+                        }
+                    }
                 }
                 .setNegativeButton(android.R.string.cancel, null)
                 .show()
@@ -1450,7 +1456,7 @@ class GroupChatActivity : AppCompatActivity() {
         popup.show()
     }
 
-    private fun sendNewMessage(text: String) {
+    private fun sendNewMessage(text: String): kotlinx.coroutines.Job {
         btnSend.isEnabled = false
         btnSend.visibility = View.INVISIBLE
         progressSending.visibility = View.VISIBLE
@@ -1464,7 +1470,7 @@ class GroupChatActivity : AppCompatActivity() {
         val replyToSenderIdentityId = activeReplyToSenderIdentityId
         val targetGroupId = groupId
         cancelReply()
-        lifecycleScope.launch {
+        return lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
                 try {
                     P2PLib.sendGroupMessage(targetGroupId, text, replyToMessageId, replyToPreview, replyToSenderIdentityId, mentionIdsJson(text))
@@ -1558,13 +1564,15 @@ class GroupChatActivity : AppCompatActivity() {
                 getString(R.string.action_react),
                 getString(R.string.lbl_copy),
                 getString(R.string.action_forward).takeIf { com.p2p.messenger.util.Forward.canForward(item) },
+                getString(R.string.action_select),
             )
             AlertDialog.Builder(this)
                 .setItems(theirOptions.toTypedArray()) { _, which ->
-                    when (which) {
-                        0 -> showReactionPicker(item)
-                        1 -> copyMessageText(item)
-                        else -> com.p2p.messenger.util.Forward.start(this, item)
+                    when (theirOptions[which]) {
+                        getString(R.string.action_react) -> showReactionPicker(item)
+                        getString(R.string.lbl_copy) -> copyMessageText(item)
+                        getString(R.string.action_forward) -> com.p2p.messenger.util.Forward.start(this, item)
+                        getString(R.string.action_select) -> selection.start(item)
                     }
                 }
                 .show()
@@ -1578,11 +1586,13 @@ class GroupChatActivity : AppCompatActivity() {
             add(getString(R.string.action_delete_message))
             add(getString(R.string.lbl_copy))
             if (com.p2p.messenger.util.Forward.canForward(item)) add(getString(R.string.action_forward))
+            add(getString(R.string.action_select))
         }
         AlertDialog.Builder(this)
             .setItems(options.toTypedArray()) { _, which ->
                 when (options[which]) {
                     getString(R.string.action_forward) -> com.p2p.messenger.util.Forward.start(this, item)
+                    getString(R.string.action_select) -> selection.start(item)
                     getString(R.string.action_retry_message) -> retryFailedGroupMessage(item)
                     getString(R.string.action_react) -> showReactionPicker(item)
                     getString(R.string.action_edit_message) -> showEditGroupMessageDialog(item)
@@ -2433,11 +2443,13 @@ class GroupChatActivity : AppCompatActivity() {
             if (attachment.isSticker && !item.isMine) add(getString(R.string.action_add_to_my_stickers))
             if (com.p2p.messenger.util.Forward.canForward(item)) add(getString(R.string.action_forward))
             if (item.isMine) add(getString(R.string.action_delete_message))
+            add(getString(R.string.action_select))
         }
         AlertDialog.Builder(this)
             .setItems(options.toTypedArray()) { _, which ->
                 when (options[which]) {
                     getString(R.string.action_forward) -> com.p2p.messenger.util.Forward.start(this, item)
+                    getString(R.string.action_select) -> selection.start(item)
                     getString(R.string.action_open_with) -> openGroupAttachmentWithChooser(attachment)
                     getString(R.string.action_save_to_downloads) -> saveGroupAttachmentToDownloads(attachment)
                     getString(R.string.action_save_as_jxl) -> saveGroupAttachmentToDownloads(attachment, original = true)

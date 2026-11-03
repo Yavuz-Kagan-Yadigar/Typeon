@@ -35,25 +35,27 @@ object Forward {
     fun canForward(item: SimpleChatAdapter.Item) =
         !item.isDeleted && item.attachment?.isSticker != true
 
-    fun start(activity: ComponentActivity, item: SimpleChatAdapter.Item) {
-        val attachment = item.attachment
-        if (attachment == null) {
-            open(activity, Pending(mark(item.text), null))
-            return
-        }
+    fun start(activity: ComponentActivity, item: SimpleChatAdapter.Item) = start(activity, listOf(item))
+
+    /** Several messages, sent in this order to the chat picked. */
+    fun start(activity: ComponentActivity, items: List<SimpleChatAdapter.Item>) {
         activity.lifecycleScope.launch {
-            val path = withContext(Dispatchers.IO) {
-                try { P2PLib.getAttachmentPlaintextPath(attachment.fileId) } catch (e: Exception) { "Error: ${e.message}" }
+            val pending = items.map { item ->
+                val attachment = item.attachment ?: return@map Pending(mark(item.text), null)
+                val path = withContext(Dispatchers.IO) {
+                    try { P2PLib.getAttachmentPlaintextPath(attachment.fileId) } catch (e: Exception) { "Error: ${e.message}" }
+                }
+                if (path.startsWith("Error:")) {
+                    Toast.makeText(activity, coreErrorText(activity, path), Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                Pending(null, File(path), attachment.fileName, attachment.mimeType, mark(item.caption))
             }
-            if (path.startsWith("Error:")) {
-                Toast.makeText(activity, coreErrorText(activity, path), Toast.LENGTH_SHORT).show()
-                return@launch
-            }
-            open(activity, Pending(null, File(path), attachment.fileName, attachment.mimeType, mark(item.caption)))
+            open(activity, pending)
         }
     }
 
-    private fun open(activity: ComponentActivity, pending: Pending) {
+    private fun open(activity: ComponentActivity, pending: List<Pending>) {
         ShareIntake.forward = pending
         activity.startActivity(
             Intent(activity, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)

@@ -246,6 +246,78 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
      *  GroupChatActivity) sohbeti o mesaja kaydırır. */
     var onReplyPreviewClick: ((String) -> Unit)? = null
 
+    /** Multi-select (see [MessageSelection]): message ids. One [Kind] at a
+     *  time, set by the first pick: the actions differ per kind. While
+     *  anything is selected a tap or long press toggles instead of acting. */
+    enum class Kind { TEXT, IMAGE, VIDEO, VOICE, STICKER, FILE }
+    val selectedIds = LinkedHashSet<String>()
+    private var selectedKind: Kind? = null
+    var onSelectionChanged: (() -> Unit)? = null
+    val selecting get() = selectedIds.isNotEmpty()
+    private var recyclerView: RecyclerView? = null
+
+    fun kindOf(item: Item): Kind {
+        val a = item.attachment ?: return Kind.TEXT
+        return when {
+            a.isSticker -> Kind.STICKER
+            a.mimeType.startsWith("audio/") && (a.durationMs ?: 0) > 0 -> Kind.VOICE
+            a.mimeType.startsWith("image/") -> Kind.IMAGE
+            a.mimeType.startsWith("video/") -> Kind.VIDEO
+            else -> Kind.FILE
+        }
+    }
+
+    /** Selected items in chat order. */
+    fun selectedItems(): List<Item> = items.filter { it.messageId in selectedIds && !it.isDeleted }
+
+    fun toggleSelection(item: Item) {
+        if (item.isDeleted) return
+        if (!selectedIds.remove(item.messageId)) {
+            val kind = kindOf(item)
+            if (selectedKind != null && selectedKind != kind) {
+                recyclerView?.let { android.widget.Toast.makeText(it.context, R.string.msg_select_same_kind, android.widget.Toast.LENGTH_SHORT).show() }
+                return
+            }
+            selectedKind = kind
+            selectedIds.add(item.messageId)
+        }
+        if (selectedIds.isEmpty()) selectedKind = null
+        val i = indexOfMessageId(item.messageId)
+        if (i >= 0) notifyItemChanged(i)
+        onSelectionChanged?.invoke()
+    }
+
+    fun clearSelection() {
+        if (selectedIds.isEmpty()) return
+        val was = selectedIds.toList()
+        selectedIds.clear()
+        selectedKind = null
+        was.forEach { id -> indexOfMessageId(id).takeIf { it >= 0 }?.let { notifyItemChanged(it) } }
+        onSelectionChanged?.invoke()
+    }
+
+    private fun longPress(item: Item, menu: ((Item) -> Unit)?) {
+        if (selecting) toggleSelection(item) else menu?.invoke(item)
+    }
+
+    /** While selecting, a tap anywhere on a row toggles it. Taken on UP:
+     *  scrolling still works and the row's own click gets a CANCEL. */
+    override fun onAttachedToRecyclerView(rv: RecyclerView) {
+        recyclerView = rv
+        val taps = android.view.GestureDetector(rv.context, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            override fun onSingleTapUp(e: android.view.MotionEvent) = true
+        })
+        rv.addOnItemTouchListener(object : RecyclerView.SimpleOnItemTouchListener() {
+            override fun onInterceptTouchEvent(rv: RecyclerView, e: android.view.MotionEvent): Boolean {
+                val tap = taps.onTouchEvent(e) && e.actionMasked == android.view.MotionEvent.ACTION_UP
+                if (!tap || !selecting) return false
+                val child = rv.findChildViewUnder(e.x, e.y) ?: return true
+                items.getOrNull(rv.getChildAdapterPosition(child))?.let { toggleSelection(it) }
+                return true
+            }
+        })
+    }
+
     /** bkz. `tickVoicePlayback` — çalma sırasında HER karede tam
      *  `notifyItemChanged` (yeniden bind) yapmak yerine, o an ekranda
      *  bağlı olan ViewHolder'a doğrudan yazmak için. Sürükleniyorken
@@ -401,6 +473,10 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     }
 
     fun indexOfMessageId(messageId: String): Int = items.indexOfFirst { it.messageId == messageId }
+
+    private fun selectionTint(v: View) = android.graphics.drawable.ColorDrawable(
+        androidx.core.graphics.ColorUtils.setAlphaComponent(MaterialColors.getColor(v, androidx.appcompat.R.attr.colorPrimary), 0x40)
+    )
 
     /**
      * Applies freshly loaded history to rows that are ALREADY on screen.
@@ -700,6 +776,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
     override fun onBindViewHolder(holder: BubbleViewHolder, position: Int) {
         val item = items[position]
+        holder.itemView.foreground = if (item.messageId in selectedIds) selectionTint(holder.itemView) else null
         val groupedWithPrevious = isGroupedWithPrevious(position)
         val groupedWithNext = isGroupedWithNext(position)
         holder.container.gravity = if (item.isMine) Gravity.END else Gravity.START
@@ -1014,7 +1091,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             // taraf (bkz. ChatActivity/GroupChatActivity) `isMine`'a göre
             // ya sadece "Kopyala" ya da tam menüyü gösterir.
             if (!item.isDeleted && item.attachment == null) {
-                onItemLongPress?.invoke(item)
+                longPress(item, onItemLongPress)
                 true
             } else {
                 false
@@ -1177,7 +1254,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         holder.layoutAttachment.setOnClickListener(clickListener)
         holder.layoutAttachment.setOnLongClickListener {
             if (attachment.status == AttachmentStatus.COMPLETE) {
-                onAttachmentLongClick?.invoke(item)
+                longPress(item, onAttachmentLongClick)
                 true
             } else {
                 false
@@ -1220,7 +1297,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
         holder.layoutAttachment.setOnClickListener { onAttachmentClick?.invoke(item) }
         holder.layoutAttachment.setOnLongClickListener {
-            onAttachmentLongClick?.invoke(item)
+            longPress(item, onAttachmentLongClick)
             true
         }
     }
@@ -1257,7 +1334,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.btnVoicePlayPause.setOnClickListener { onVoicePlayClick?.invoke(item) }
             holder.btnVoiceSpeed.setOnClickListener { onVoiceSpeedClick?.invoke(item) }
             holder.layoutVoiceMessage.setOnLongClickListener {
-                onAttachmentLongClick?.invoke(item)
+                longPress(item, onAttachmentLongClick)
                 true
             }
             slider.clearOnSliderTouchListeners()
