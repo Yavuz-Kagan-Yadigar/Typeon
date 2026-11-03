@@ -834,11 +834,17 @@ impl P2PCore {
             enrollment_id: None,
             token: invite.token,
             route_messages: true,
-            store_history: false,
+            // History on by default, on the first server only: one history
+            // server (see `set_server_history`).
+            store_history: !self.servers.iter().any(|s| s.store_history),
             added_at: current_time_ms(),
         };
+        let history = rec.store_history;
         self.persist_server(&rec);
         self.servers.push(rec);
+        if history {
+            self.backfill_server_archive();
+        }
         self.server_rt.insert(server_id.clone(), ServerRuntime { peer_id: Some(peer_id), ..Default::default() });
 
         // Hemen bağlan — kullanıcı Ayarlar ekranında sonucu görsün. HEPSİ

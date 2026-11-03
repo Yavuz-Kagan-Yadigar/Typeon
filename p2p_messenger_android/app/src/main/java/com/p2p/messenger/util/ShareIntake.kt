@@ -24,13 +24,37 @@ object ShareIntake {
         set(value) {
             field = value
             pendingAt = android.os.SystemClock.elapsedRealtime()
+            // Cleared together: one "left without picking a chat" rule.
+            if (value == null) forward = null
         }
+
+    /** A message being forwarded (see [Forward]). Kept here, not in an
+     *  Intent: a share from another app must not be able to name a file. */
+    @Volatile
+    var forward: Forward.Pending? = null
+        set(value) {
+            field = value
+            if (value != null) pendingAt = android.os.SystemClock.elapsedRealtime()
+        }
+
+    /** The forward handed to the chat screen picked last. */
+    private var armed: Forward.Pending? = null
+    private const val EXTRA_FORWARD = "typeon_forward"
 
     fun isShare(intent: Intent?): Boolean =
         intent?.action == Intent.ACTION_SEND || intent?.action == Intent.ACTION_SEND_MULTIPLE
 
     /** Bekleyen paylaşımı (varsa) `target`a ekler ve bekleyeni temizler. */
     fun attachTo(target: Intent): Intent {
+        forward?.let { f ->
+            val expired = android.os.SystemClock.elapsedRealtime() - pendingAt > PENDING_TTL_MS
+            forward = null
+            if (!expired) {
+                armed = f
+                target.putExtra(EXTRA_FORWARD, true)
+            }
+            return target
+        }
         val share = pending ?: return target
         val expired = android.os.SystemClock.elapsedRealtime() - pendingAt > PENDING_TTL_MS
         pending = null
@@ -50,6 +74,13 @@ object ShareIntake {
         val share = IntentCompat.getParcelableExtra(target, EXTRA_SHARE, Intent::class.java) ?: return null
         target.removeExtra(EXTRA_SHARE)
         return share
+    }
+
+    /** The forward [attachTo] put on `target`, once. */
+    fun takeForward(target: Intent): Forward.Pending? {
+        if (!target.getBooleanExtra(EXTRA_FORWARD, false)) return null
+        target.removeExtra(EXTRA_FORWARD)
+        return armed.also { armed = null }
     }
 
     fun text(share: Intent): String? =

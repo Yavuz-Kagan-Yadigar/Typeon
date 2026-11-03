@@ -360,6 +360,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val pillReactions: TextView = itemView.findViewById(R.id.pillReactions)
         val txtAttachmentCaption: TextView = itemView.findViewById(R.id.txtAttachmentCaption)
         val textView: TextView = itemView.findViewById(R.id.txtBubbleText)
+        val txtForwarded: TextView = itemView.findViewById(R.id.txtForwarded)
         val layoutReplyQuote: View = itemView.findViewById(R.id.layoutReplyQuote)
         val viewReplyQuoteBar: View = itemView.findViewById(R.id.viewReplyQuoteBar)
         val txtReplyQuoteSender: TextView = itemView.findViewById(R.id.txtReplyQuoteSender)
@@ -734,7 +735,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             && !attachmentInfo.isSticker
         ) {
             holder.txtAttachmentCaption.visibility = View.VISIBLE
-            holder.txtAttachmentCaption.text = item.caption
+            holder.txtAttachmentCaption.text = com.p2p.messenger.util.Forward.strip(item.caption)
         } else {
             holder.txtAttachmentCaption.visibility = View.GONE
         }
@@ -791,6 +792,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         holder.textView.setTextColor(onColor)
         holder.txtAttachmentName.setTextColor(onColor)
         holder.txtAttachmentCaption.setTextColor(onColor)
+        holder.txtForwarded.setTextColor(onColor)
+        val forwarded = !item.isDeleted && com.p2p.messenger.util.Forward.isForwarded(if (item.attachment != null) item.caption else item.text)
+        holder.txtForwarded.visibility = if (forwarded) View.VISIBLE else View.GONE
         // Saat/"düzenlendi"/durum tiki artık balonun İÇİNDE — sabit bir
         // `?attr/colorOnSurfaceVariant` (XML'deki eski değer) giden balonun
         // vurgu renkli zemininde okunmuyordu. Balonun kendi metin renginin
@@ -921,7 +925,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                 holder.textView.alpha = 0.6f
                 holder.editedLabel.visibility = View.GONE
             } else {
-                holder.textView.text = item.text
+                val shownText = com.p2p.messenger.util.Forward.strip(item.text)
+                holder.textView.text = shownText
                 holder.textView.setTypeface(Typeface.DEFAULT, Typeface.NORMAL)
                 holder.textView.alpha = 1f
                 holder.editedLabel.visibility = if (item.isEdited) View.VISIBLE else View.GONE
@@ -935,7 +940,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                 // ulaşmaz) — bu yüzden AYNI uzun-basma dinleyicisi (bkz.
                 // aşağısı) `holder.textView`'a da AYRICA atanıyor, hangisi
                 // dokunuşu yakalarsa yakalasın menü yine açılır.
-                val linked = android.text.SpannableString(item.text)
+                val linked = android.text.SpannableString(shownText)
                 if (markMentions(linked, item.mentionsMe)) holder.textView.text = linked
                 if (android.text.util.Linkify.addLinks(linked, android.text.util.Linkify.WEB_URLS)) {
                     // A tap leaves Tor for the system browser: ask first.

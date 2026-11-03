@@ -574,4 +574,8 @@
     <string name="storage_prune_confirm_title">Delete older messages?</string>
     <string name="storage_prune_confirm_message">All messages and attachments in this chat before %1$s are deleted from this device. The other side is not affected. This cannot be undone.</string>
     <string name="storage_prune_done">Deleted</string>
+    <string name="action_forward">Forward</string>
+    <string name="lbl_forwarded">Forwarded</string>
+    <string name="msg_forward_pick_chat">Choose a chat to forward to</string>
+    <string name="confirm_forward">Forward to %1$s?</string>
 </resources>

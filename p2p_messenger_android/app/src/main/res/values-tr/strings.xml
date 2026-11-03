@@ -533,4 +533,8 @@
     <string name="storage_prune_confirm_title">Eski mesajlar silinsin mi?</string>
     <string name="storage_prune_confirm_message">Bu sohbetteki %1$s tarihinden önceki tüm mesajlar ve ekler bu cihazdan silinir. Karşı taraf etkilenmez. Geri alınamaz.</string>
     <string name="storage_prune_done">Silindi</string>
+    <string name="action_forward">İlet</string>
+    <string name="lbl_forwarded">İletildi</string>
+    <string name="msg_forward_pick_chat">İletmek için bir sohbet seçin</string>
+    <string name="confirm_forward">%1$s sohbetine iletilsin mi?</string>
 </resources>

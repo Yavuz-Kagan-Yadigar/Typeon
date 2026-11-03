@@ -65,7 +65,7 @@ class StickerPicker(
     private val gridAdapter = StickerGridAdapter()
 
     private val pickImages = activity.registerForActivityResult(
-        ActivityResultContracts.OpenMultipleDocuments()
+        com.p2p.messenger.util.OpenMultipleDocumentsAtHome()
     ) { uris -> if (uris.isNotEmpty()) importAll { uris } }
 
     private val pickTree = activity.registerForActivityResult(

@@ -120,6 +120,17 @@
         android:paddingTop="8dp"
         android:paddingBottom="5dp">
 
+    <!-- "Forwarded" (see util.Forward), WhatsApp pattern. -->
+    <TextView
+        android:id="@+id/txtForwarded"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/lbl_forwarded"
+        android:textSize="12sp"
+        android:textStyle="italic"
+        android:alpha="0.7"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/txtBubbleText"
         android:layout_width="wrap_content"

@@ -288,7 +288,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private val pickFileLauncher = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
+        com.p2p.messenger.util.OpenDocumentAtHome()
     ) { uri -> uri?.let { picked -> promptAttachmentCaption(offerHiRes = contentResolver.getType(picked)?.startsWith("image/") == true) { caption, hiRes -> onFilePicked(picked, caption, hiRes) } } }
 
     private val stickerPicker = StickerPicker(this, { P2PLib.sendSticker(peerDeviceFingerprint, it) }) { item ->
@@ -654,6 +654,11 @@ class ChatActivity : AppCompatActivity() {
 
     /** Paylaşım ekranından seçilen içerik (bkz. util.ShareIntake). */
     private fun consumeShare(intent: Intent) {
+        com.p2p.messenger.util.ShareIntake.takeForward(intent)?.let {
+            pendingForward = it
+            flushPendingShare()
+            return
+        }
         val share = com.p2p.messenger.util.ShareIntake.take(intent) ?: return
         com.p2p.messenger.util.ShareIntake.text(share)?.let {
             findViewById<EditText>(R.id.edtMessage).apply { setText(it); setSelection(text.length) }
@@ -665,9 +670,22 @@ class ChatActivity : AppCompatActivity() {
     /** Shared files go out under the same lock as every send button: the
      *  chat has just opened and the handshake is not proven yet. */
     private var pendingShare: List<Uri> = emptyList()
+    private var pendingForward: com.p2p.messenger.util.Forward.Pending? = null
 
     private fun flushPendingShare() {
-        if (!handshakeReady || peerAccountDeleted || pendingShare.isEmpty()) return
+        if (!handshakeReady || peerAccountDeleted) return
+        pendingForward?.let { f ->
+            pendingForward = null
+            AlertDialog.Builder(this)
+                .setMessage(getString(R.string.confirm_forward, txtToolbarTitle.text))
+                .setPositiveButton(R.string.btn_send) { _, _ ->
+                    if (f.file != null) onFilePicked(Uri.fromFile(f.file), f.caption, hiRes = true, name = f.fileName, mime = f.mimeType)
+                    else sendNewMessage(f.text ?: return@setPositiveButton)
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+        if (pendingShare.isEmpty()) return
         val uris = pendingShare
         pendingShare = emptyList()
         // The chat was picked with one tap in a list that reorders itself.
@@ -1697,11 +1715,13 @@ class ChatActivity : AppCompatActivity() {
             if (attachment.fileName.endsWith(".jxl", true) || attachment.mimeType == "image/jxl") add(getString(R.string.action_save_as_jxl))
             if (attachment.mimeType.startsWith("image/")) add(getString(R.string.action_copy_image))
             if (attachment.isSticker && !item.isMine) add(getString(R.string.action_add_to_my_stickers))
+            if (com.p2p.messenger.util.Forward.canForward(item)) add(getString(R.string.action_forward))
             if (item.isMine) add(getString(R.string.action_delete_message))
         }
         AlertDialog.Builder(this)
             .setItems(options.toTypedArray()) { _, which ->
                 when (options[which]) {
+                    getString(R.string.action_forward) -> com.p2p.messenger.util.Forward.start(this, item)
                     getString(R.string.action_open_with) -> openAttachmentWithChooser(attachment)
                     getString(R.string.action_save_to_downloads) -> saveAttachmentToDownloads(attachment)
                     getString(R.string.action_save_as_jxl) -> saveAttachmentToDownloads(attachment, original = true)
@@ -1927,15 +1947,15 @@ class ChatActivity : AppCompatActivity() {
      * gerçek bir dosya yolu ister), sonra `prepareAndSendFile` ile
      * şifrelenip teklif edilir.
      */
-    private fun onFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false) {
+    private fun onFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null) {
         // bkz. grup karşılığı — yanıt bağlamı coroutine BAŞLAMADAN yakalanır.
         val replyId = activeReplyToMessageId ?: ""
         val replyPreview = activeReplyToPreview ?: ""
         cancelReply()
         lifecycleScope.launch(Dispatchers.IO) {
             // Provider queries are IPC to another app: not on the main thread.
-            val fileName = queryDisplayName(uri) ?: "file"
-            val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+            val fileName = name ?: queryDisplayName(uri) ?: "file"
+            val mimeType = mime ?: contentResolver.getType(uri) ?: "application/octet-stream"
             val size = querySize(uri)
             val tooLarge = size != null && size > MAX_ATTACHMENT_SIZE
             withContext(Dispatchers.Main) {
@@ -2125,12 +2145,13 @@ class ChatActivity : AppCompatActivity() {
             // Karşı tarafın mesajını düzenleyemeyiz/silemeyiz (karşı taraf
             // zaten reddederdi, bkz. Rust `message_owned_by_sender`) — ama
             // tepki bırakabiliriz.
-            val theirOptions = arrayOf(getString(R.string.action_react), getString(R.string.lbl_copy))
+            val theirOptions = arrayOf(getString(R.string.action_react), getString(R.string.lbl_copy), getString(R.string.action_forward))
             AlertDialog.Builder(this)
                 .setItems(theirOptions) { _, which ->
                     when (which) {
                         0 -> showReactionPicker(item)
-                        else -> copyMessageText(item)
+                        1 -> copyMessageText(item)
+                        else -> com.p2p.messenger.util.Forward.start(this, item)
                     }
                 }
                 .show()
@@ -2143,10 +2164,12 @@ class ChatActivity : AppCompatActivity() {
             add(getString(R.string.action_edit_message))
             add(getString(R.string.action_delete_message))
             add(getString(R.string.lbl_copy))
+            add(getString(R.string.action_forward))
         }
         AlertDialog.Builder(this)
             .setItems(options.toTypedArray()) { _, which ->
                 when (options[which]) {
+                    getString(R.string.action_forward) -> com.p2p.messenger.util.Forward.start(this, item)
                     getString(R.string.action_retry_message) -> retryFailedMessage(item)
                     getString(R.string.action_react) -> showReactionPicker(item)
                     getString(R.string.action_edit_message) -> showEditMessageDialog(item)
@@ -2250,7 +2273,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private fun copyMessageText(item: SimpleChatAdapter.Item) {
-        com.p2p.messenger.util.copySensitive(this, "message", item.text)
+        com.p2p.messenger.util.copySensitive(this, "message", com.p2p.messenger.util.Forward.strip(item.text))
         Toast.makeText(this, R.string.lbl_copied, Toast.LENGTH_SHORT).show()
     }
 
@@ -2414,14 +2437,15 @@ class ChatActivity : AppCompatActivity() {
 
     private fun showEditMessageDialog(item: SimpleChatAdapter.Item) {
         val input = EditText(this)
-        input.setText(item.text)
+        input.setText(com.p2p.messenger.util.Forward.strip(item.text))
         input.hint = getString(R.string.lbl_edit_message_hint)
         AlertDialog.Builder(this)
             .setTitle(R.string.action_edit_message)
             .setView(input)
             .setPositiveButton(R.string.action_edit_message) { _, _ ->
-                val newText = input.text.toString()
-                if (newText.isBlank()) return@setPositiveButton
+                if (input.text.isBlank()) return@setPositiveButton
+                // An edit keeps the "Forwarded" label.
+                val newText = input.text.toString().let { if (com.p2p.messenger.util.Forward.isForwarded(item.text)) com.p2p.messenger.util.Forward.mark(it) else it }
                 val peer = peerDeviceFingerprint
                 lifecycleScope.launch {
                     val result = withContext(Dispatchers.IO) {

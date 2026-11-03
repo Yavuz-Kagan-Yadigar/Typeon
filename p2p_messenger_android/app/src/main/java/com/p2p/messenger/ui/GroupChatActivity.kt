@@ -326,12 +326,12 @@ class GroupChatActivity : AppCompatActivity() {
 
     /** `registerForActivityResult` Activity STARTED olmadan ÖNCE
      *  çağrılmalı — bkz. ChatActivity/SettingsFragment aynı notu. */
-    private val pickGroupAvatarLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    private val pickGroupAvatarLauncher = registerForActivityResult(com.p2p.messenger.util.OpenDocumentAtHome()) { uri ->
         uri?.let { onGroupAvatarPicked(it) }
     }
 
     /** bkz. ChatActivity `pickFileLauncher` aynı notu (grup ekleri). */
-    private val pickGroupFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    private val pickGroupFileLauncher = registerForActivityResult(com.p2p.messenger.util.OpenDocumentAtHome()) { uri ->
         uri?.let { picked -> promptAttachmentCaption(offerHiRes = contentResolver.getType(picked)?.startsWith("image/") == true) { caption, hiRes -> onGroupFilePicked(picked, caption, hiRes) } }
     }
 
@@ -653,6 +653,17 @@ class GroupChatActivity : AppCompatActivity() {
 
     /** Paylaşım ekranından seçilen içerik (bkz. util.ShareIntake). */
     private fun consumeShare(intent: Intent) {
+        com.p2p.messenger.util.ShareIntake.takeForward(intent)?.let { f ->
+            AlertDialog.Builder(this)
+                .setMessage(getString(R.string.confirm_forward, txtToolbarTitle.text))
+                .setPositiveButton(R.string.btn_send) { _, _ ->
+                    if (f.file != null) onGroupFilePicked(Uri.fromFile(f.file), f.caption, hiRes = true, name = f.fileName, mime = f.mimeType)
+                    else sendNewMessage(f.text ?: return@setPositiveButton)
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+            return
+        }
         val share = com.p2p.messenger.util.ShareIntake.take(intent) ?: return
         com.p2p.messenger.util.ShareIntake.text(share)?.let {
             findViewById<EditText>(R.id.edtMessage).apply { setText(it); setSelection(text.length) }
@@ -1540,12 +1551,13 @@ class GroupChatActivity : AppCompatActivity() {
         if (!item.isMine) {
             // bkz. ChatActivity AYNI desen — başkasının mesajını
             // düzenleyemeyiz ama tepki bırakabiliriz.
-            val theirOptions = arrayOf(getString(R.string.action_react), getString(R.string.lbl_copy))
+            val theirOptions = arrayOf(getString(R.string.action_react), getString(R.string.lbl_copy), getString(R.string.action_forward))
             AlertDialog.Builder(this)
                 .setItems(theirOptions) { _, which ->
                     when (which) {
                         0 -> showReactionPicker(item)
-                        else -> copyMessageText(item)
+                        1 -> copyMessageText(item)
+                        else -> com.p2p.messenger.util.Forward.start(this, item)
                     }
                 }
                 .show()
@@ -1558,10 +1570,12 @@ class GroupChatActivity : AppCompatActivity() {
             add(getString(R.string.action_edit_message))
             add(getString(R.string.action_delete_message))
             add(getString(R.string.lbl_copy))
+            add(getString(R.string.action_forward))
         }
         AlertDialog.Builder(this)
             .setItems(options.toTypedArray()) { _, which ->
                 when (options[which]) {
+                    getString(R.string.action_forward) -> com.p2p.messenger.util.Forward.start(this, item)
                     getString(R.string.action_retry_message) -> retryFailedGroupMessage(item)
                     getString(R.string.action_react) -> showReactionPicker(item)
                     getString(R.string.action_edit_message) -> showEditGroupMessageDialog(item)
@@ -1678,7 +1692,7 @@ class GroupChatActivity : AppCompatActivity() {
 
     /** bkz. ChatActivity.copyMessageText AYNI desen. */
     private fun copyMessageText(item: SimpleChatAdapter.Item) {
-        com.p2p.messenger.util.copySensitive(this, "message", item.text)
+        com.p2p.messenger.util.copySensitive(this, "message", com.p2p.messenger.util.Forward.strip(item.text))
         Toast.makeText(this, R.string.lbl_copied, Toast.LENGTH_SHORT).show()
     }
 
@@ -2097,14 +2111,15 @@ class GroupChatActivity : AppCompatActivity() {
      *  değil, bkz. P2PLib.kt notu). */
     private fun showEditGroupMessageDialog(item: SimpleChatAdapter.Item) {
         val input = EditText(this)
-        input.setText(item.text)
+        input.setText(com.p2p.messenger.util.Forward.strip(item.text))
         input.hint = getString(R.string.lbl_edit_message_hint)
         AlertDialog.Builder(this)
             .setTitle(R.string.action_edit_message)
             .setView(input)
             .setPositiveButton(R.string.action_edit_message) { _, _ ->
-                val newText = input.text.toString()
-                if (newText.isBlank()) return@setPositiveButton
+                if (input.text.isBlank()) return@setPositiveButton
+                // bkz. ChatActivity.showEditMessageDialog — the label stays.
+                val newText = input.text.toString().let { if (com.p2p.messenger.util.Forward.isForwarded(item.text)) com.p2p.messenger.util.Forward.mark(it) else it }
                 val gid = groupId
                 lifecycleScope.launch {
                     val result = withContext(Dispatchers.IO) {
@@ -2219,7 +2234,7 @@ class GroupChatActivity : AppCompatActivity() {
      * AYNI desen — SAF ile seçilen dosya önce önbelleğe kopyalanır, sonra
      * `prepareAndSendGroupFile` ile TÜM üyelere sunulur.
      */
-    private fun onGroupFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false) {
+    private fun onGroupFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null) {
         // Ekle birlikte gidecek yanıt bağlamı, coroutine BAŞLAMADAN
         // yakalanıyor: `cancelReply()` aşağıda hemen çağrılıyor (kullanıcı
         // arayüzde yanıtın tüketildiğini anında görmeli) ve arka planda
@@ -2233,8 +2248,8 @@ class GroupChatActivity : AppCompatActivity() {
         val targetGroupId = groupId
         lifecycleScope.launch(Dispatchers.IO) {
             // Provider queries are IPC to another app: not on the main thread.
-            val fileName = queryDisplayName(uri) ?: "file"
-            val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+            val fileName = name ?: queryDisplayName(uri) ?: "file"
+            val mimeType = mime ?: contentResolver.getType(uri) ?: "application/octet-stream"
             val size = querySize(uri)
             val tooLarge = size != null && size > MAX_ATTACHMENT_SIZE
             withContext(Dispatchers.Main) {
@@ -2403,11 +2418,13 @@ class GroupChatActivity : AppCompatActivity() {
             if (attachment.fileName.endsWith(".jxl", true) || attachment.mimeType == "image/jxl") add(getString(R.string.action_save_as_jxl))
             if (attachment.mimeType.startsWith("image/")) add(getString(R.string.action_copy_image))
             if (attachment.isSticker && !item.isMine) add(getString(R.string.action_add_to_my_stickers))
+            if (com.p2p.messenger.util.Forward.canForward(item)) add(getString(R.string.action_forward))
             if (item.isMine) add(getString(R.string.action_delete_message))
         }
         AlertDialog.Builder(this)
             .setItems(options.toTypedArray()) { _, which ->
                 when (options[which]) {
+                    getString(R.string.action_forward) -> com.p2p.messenger.util.Forward.start(this, item)
                     getString(R.string.action_open_with) -> openGroupAttachmentWithChooser(attachment)
                     getString(R.string.action_save_to_downloads) -> saveGroupAttachmentToDownloads(attachment)
                     getString(R.string.action_save_as_jxl) -> saveGroupAttachmentToDownloads(attachment, original = true)

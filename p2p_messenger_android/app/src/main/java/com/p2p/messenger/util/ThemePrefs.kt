@@ -476,6 +476,11 @@ object ThemePrefs {
                 chatWallpaperCache = bitmap
                 chatWallpaperKey = key
                 wallpaperView.setImageBitmap(bitmap)
+                // Fixed full-display height: the keyboard shrinks the root, not
+                // the picture (the overflow under the keyboard is clipped).
+                @Suppress("DEPRECATION")
+                wallpaperView.layoutParams.height = android.util.DisplayMetrics()
+                    .also { activity.windowManager.defaultDisplay.getRealMetrics(it) }.heightPixels
                 wallpaperView.visibility = View.VISIBLE
             } else {
                 wallpaperView.visibility = View.GONE

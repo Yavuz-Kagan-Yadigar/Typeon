@@ -31,6 +31,9 @@
          çizilir) — böylece diğer TÜM içeriğin ARKASINDA kalır. Duvarkağıdı
          yoksa GONE, tercih edilen arka plan rengi (varsa) doğrudan
          `rootChatLayout`'a uygulanır. -->
+    <!-- Top only, height = screen height (set in ThemePrefs.applyChatBackground):
+         pinned to the bottom too, it shrank with the keyboard and centerCrop
+         moved the picture up. -->
     <ImageView
         android:id="@+id/imgChatWallpaper"
         android:layout_width="0dp"
@@ -39,7 +42,6 @@
         android:visibility="gone"
         android:contentDescription="@null"
         app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 

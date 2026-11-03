@@ -166,18 +166,18 @@ class SettingsFragment : Fragment() {
 
     /** `registerForActivityResult` Fragment STARTED olmadan ÖNCE
      *  çağrılmalı — bkz. ChatActivity pickFileLauncher aynı notu. */
-    private val pickAvatarLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    private val pickAvatarLauncher = registerForActivityResult(com.p2p.messenger.util.OpenDocumentAtHome()) { uri ->
         uri?.let { onAvatarPicked(it) }
     }
 
     /** bkz. `onChatWallpaperPicked` — `pickAvatarLauncher` ile AYNI desen. */
-    private val pickWallpaperLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    private val pickWallpaperLauncher = registerForActivityResult(com.p2p.messenger.util.OpenDocumentAtHome()) { uri ->
         uri?.let { onChatWallpaperPicked(it) }
     }
 
     /** bkz. font seçim diyalogu — `.ttf`/`.otf` font dosyası seçmek için;
      *  `pickWallpaperLauncher` ile AYNI `OpenDocument` deseni. */
-    private val pickFontLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    private val pickFontLauncher = registerForActivityResult(com.p2p.messenger.util.OpenDocumentAtHome()) { uri ->
         uri?.let { onFontPicked(it) }
     }
 

@@ -86,7 +86,7 @@ class MainActivity : AppCompatActivity() {
      *  bkz. `showImportPassphraseDialog`/`importRecoveryFrom` — SettingsFragment'ın
      *  "Kurtarma Dosyasını Dışa Aktar"ının EKSİK karşılığı: dışa aktarılan bir
      *  dosyanın bu (veya başka) bir cihazda geri yüklenebileceği hiçbir yer yoktu. */
-    private val pickRecoveryFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    private val pickRecoveryFileLauncher = registerForActivityResult(com.p2p.messenger.util.OpenDocumentAtHome()) { uri ->
         uri?.let { showImportPassphraseDialog(it) }
     }
 
