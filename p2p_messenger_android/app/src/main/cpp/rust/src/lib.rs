@@ -1294,6 +1294,36 @@ mod review_oct2026_tests {
     }
 
     #[test]
+    fn deleting_a_queued_message_withdraws_its_unsent_copies() {
+        let mut core = P2PCore::new();
+        let packet = MessagePacket {
+            header: crate::packet::SignedHeader::new(MessagePacketHeader {
+                sender_identity_id: String::new(), sender_device_fingerprint: String::new(), message_id: String::new(),
+                ratchet_pubkey: Vec::new(), message_number: 0, prev_chain_length: 0, rotation_kyber_ciphertext: None, sent_at_ms: 0,
+            }).unwrap(),
+            ciphertext: Vec::new(), signature_classical: Vec::new(), signature_pq: Vec::new(),
+        };
+        let text = |conv: &str| MessageContent::Text {
+            text: "t".into(), group_id: None, group_message_local_id: Some(conv.into()), sent_at_ms: 0,
+            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(),
+        };
+        let echo = |mid: &str| MessageContent::SiblingEcho {
+            conversation_identity_id: None, group_id: None,
+            body: SiblingEchoBody::Text { message_id: mid.into(), text: "t".into(), sent_at_ms: 0, reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None },
+        };
+        for (id, content) in [("conv", text("conv")), ("copy", text("conv")), ("echo", echo("conv")), ("other", text("keep"))] {
+            core.awaiting_confirmation.insert(id.into(), PendingConfirmation {
+                suspect_probed: false, direct_delivered: false, chain_stamp: String::new(), peer_device_fingerprint: String::new(),
+                envelope: NetworkEnvelope::Message(packet.clone()), next_retry_at: 0, retry_interval_ms: 0,
+                first_sent_at: 0, original_sent_at: 0, last_attempt_at: 0, regen_content: Some(content),
+            });
+        }
+        core.withdraw_unsent("conv");
+        let left: Vec<&String> = core.awaiting_confirmation.keys().collect();
+        assert_eq!(left, vec!["other"]);
+    }
+
+    #[test]
     fn a_short_recovery_passphrase_is_refused() {
         let err = P2PCore::new().export_recovery("elevenchars".to_string()).unwrap_err();
         assert!(err.contains("12"), "{err}");
@@ -12059,11 +12089,33 @@ impl P2PCore {
 
     /// Spec dışı: bir mesajı siler (karşı tarafa "sil" bildirimi gönderir).
     /// Also purges the local attachment file, if any (see `purge_attachment_if_exists`).
+    /// Deleting a message that is still queued withdraws every copy that has
+    /// not been confirmed (peer devices, siblings, server deposits). Without
+    /// this the text was still delivered, notification and all, and only
+    /// then deleted. The Delete itself still goes out for copies that did
+    /// arrive.
+    fn withdraw_unsent(&mut self, target_message_id: &str) {
+        let ids: Vec<String> = self.awaiting_confirmation.iter()
+            .filter(|(id, p)| id.as_str() == target_message_id || match &p.regen_content {
+                Some(MessageContent::Text { group_message_local_id: Some(g), .. }) => g == target_message_id,
+                Some(MessageContent::SiblingEcho { body: SiblingEchoBody::Text { message_id, .. }, .. }) => message_id == target_message_id,
+                _ => false,
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.awaiting_confirmation.remove(&id);
+            self.remove_durable_retry(&id);
+            self.cancel_server_deposit(&id);
+        }
+    }
+
     fn delete_message(&mut self, peer_device_fingerprint: String, target_message_id: String) -> Result<(String, String), String> {
         let content = MessageContent::Delete { target_message_id: target_message_id.clone(), group_id: None, author_proof: None };
         // `?` first, like `edit_message`: nothing is deleted here unless the
         // delete could at least be queued for the peer.
         let result = Ok(self.send_message_content(peer_device_fingerprint.clone(), &content, None)?);
+        self.withdraw_unsent(&target_message_id);
         self.fanout_extra_copies(&peer_device_fingerprint, &content);
         self.purge_attachment_if_exists(&target_message_id);
         self.apply_delete_to_archive(None, &peer_device_fingerprint, &target_message_id);
@@ -12128,6 +12180,7 @@ impl P2PCore {
         if !sent_to_any {
             return Err("Ulaşılabilir grup üyesi yok".to_string());
         }
+        self.withdraw_unsent(&target_group_message_local_id);
         self.purge_attachment_if_exists(&target_group_message_local_id);
         self.apply_delete_to_archive(Some(&group_id), "", &target_group_message_local_id);
         self.adopt_group_author_proof(&group_id, &target_group_message_local_id, Some(&tombstone));

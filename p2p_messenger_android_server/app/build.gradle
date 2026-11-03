@@ -144,6 +144,8 @@ task cargoNdkBuild(type: Exec) {
     def ndkHome = resolveNdkHome()
     if (ndkHome != null) {
         environment "ANDROID_NDK_HOME", ndkHome
+        // libjxl (jpegxl-rs "vendored", via p2p_messenger_core) is built by CMake, which finds the NDK here.
+        environment "ANDROID_NDK_ROOT", ndkHome
     }
     // M-161/M-167: RUSTFLAGS env, config'teki rustflags'i tamamen ezer ve sunucu
     // crate'inde .cargo/config.toml bulunmaz => 16 KB bayragini + yol maskelemeyi
