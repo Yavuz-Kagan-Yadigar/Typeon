@@ -525,6 +525,8 @@ impl App {
 
     /// `mention`: a group message that @mentions me, shown at high priority.
     fn notify_if_away_as(self: &Rc<Self>, conversation_id: &str, title: &str, body: &str, mention: bool) {
+        let body = util::quote_plain(body);
+        let body = body.as_str();
         let is_open = self
             .active_conversation
             .borrow()

@@ -56,7 +56,6 @@ import com.p2p.messenger.util.ReactionPicker
 import com.p2p.messenger.util.ConnectionStatus
 import com.p2p.messenger.util.ImagePreview
 import com.p2p.messenger.util.KeyboardInsets
-import com.p2p.messenger.util.ReplyIsland
 import com.p2p.messenger.util.NotificationHelper
 import com.p2p.messenger.util.OutgoingMedia
 import com.p2p.messenger.util.PlaybackSpeed
@@ -220,13 +219,7 @@ class ChatActivity : AppCompatActivity() {
 
     private lateinit var fabScrollToBottom: FloatingActionButton
 
-    private lateinit var layoutReplyPreview: View
     private lateinit var swipeHelper: ItemTouchHelper
-    private lateinit var txtReplyPreviewSender: TextView
-    private lateinit var txtReplyPreviewText: TextView
-    /** Şu an yanıtlanmakta olan mesaj (bkz. `startReply`/`cancelReply`). */
-    private var activeReplyToMessageId: String? = null
-    private var activeReplyToPreview: String? = null
     private val replyHighlightHandler = Handler(Looper.getMainLooper())
 
     private var mediaRecorder: MediaRecorder? = null
@@ -534,11 +527,6 @@ class ChatActivity : AppCompatActivity() {
         recycler.addItemDecoration(MergedBubbleDecoration(adapter))
         setupSwipeToReply()
 
-        layoutReplyPreview = findViewById(R.id.layoutReplyPreview)
-        txtReplyPreviewSender = findViewById(R.id.txtReplyPreviewSender)
-        txtReplyPreviewText = findViewById(R.id.txtReplyPreviewText)
-        findViewById<ImageButton>(R.id.btnCancelReply).setOnClickListener { cancelReply() }
-
         // Sonsuz kaydırma: listenin başına yaklaşıldığında bir sonraki
         // "daha eski" sayfa istenir (bkz. `loadOlderHistory`).
         recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
@@ -586,7 +574,6 @@ class ChatActivity : AppCompatActivity() {
         // bkz. `syncRecyclerBottomInset` — çubuğun/alıntı pilinin yüksekliği
         // değiştikçe listenin alt dolgusu takip etmeli.
         layoutMessageInput.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> syncRecyclerBottomInset() }
-        layoutReplyPreview.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> syncRecyclerBottomInset() }
         btnSend = findViewById(R.id.btnSend)
         btnAttach = findViewById(R.id.btnAttach)
         btnCamera = findViewById(R.id.btnCamera)
@@ -687,9 +674,17 @@ class ChatActivity : AppCompatActivity() {
                 .setMessage(getString(R.string.confirm_forward, txtToolbarTitle.text))
                 .setPositiveButton(R.string.btn_send) { _, _ ->
                     lifecycleScope.launch {
-                        for (p in f) {
-                            if (p.file != null) onFilePicked(Uri.fromFile(p.file), p.caption, hiRes = true, name = p.fileName, mime = p.mimeType).join()
-                            else p.text?.let { sendNewMessage(it).join() }
+                        var done = 0
+                        try {
+                            for (p in f) {
+                                if (p.file != null) onFilePicked(Uri.fromFile(p.file), p.caption, hiRes = true, name = p.fileName, mime = p.mimeType).join()
+                                else p.text?.let { sendNewMessage(it).join() }
+                                done++
+                            }
+                        } finally {
+                            // Leaving the chat cancels the rest: say so.
+                            val left = f.size - done
+                            if (left > 0) Toast.makeText(applicationContext, applicationContext.resources.getQuantityString(R.plurals.forward_not_sent, left, left), Toast.LENGTH_LONG).show()
                         }
                     }
                 }
@@ -844,15 +839,11 @@ class ChatActivity : AppCompatActivity() {
      *  "audio/mp4") — tek fark `durationMs`'in taşınması, bkz. Rust
      *  `FileOffer.duration_ms`. */
     private fun sendVoiceMessage(file: File, durationMs: Long, caption: String = "") {
-        // Taken and cleared here: the next message was sent as a reply too.
-        val replyId = activeReplyToMessageId
-        val replyPreview = activeReplyToPreview
-        cancelReply()
         lifecycleScope.launch(Dispatchers.IO) {
             val result = try {
                 P2PLib.prepareAndSendFile(
                     peerDeviceFingerprint, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
-                    caption, replyId ?: "", replyPreview ?: ""
+                    caption, "", ""
                 )
             } catch (e: Exception) {
                 "Error: ${e.message}"
@@ -868,8 +859,6 @@ class ChatActivity : AppCompatActivity() {
                             text = "",
                             isMine = true,
                             caption = caption,
-                            replyToMessageId = replyId,
-                            replyToPreview = replyPreview,
                             attachment = SimpleChatAdapter.AttachmentInfo(
                                 fileId = obj.optString("message_id"),
                                 fileName = file.name,
@@ -1048,8 +1037,6 @@ class ChatActivity : AppCompatActivity() {
         whiteboard.bind(peerDeviceFingerprint, "")
         P2PService.activeConversationId = peerDeviceFingerprint
         localMessages.clear()
-        // Önceki sohbette açık kalan yanıt, yeni sohbetteki mesaja yapışmasın.
-        cancelReply()
         adapter.notifyDataSetChanged()
         historySyncPending = false
         isLoadingOlderHistory = false
@@ -1134,15 +1121,10 @@ class ChatActivity : AppCompatActivity() {
         btnSend.visibility = View.INVISIBLE
         progressSending.visibility = View.VISIBLE
 
-        val replyToMessageId = activeReplyToMessageId
-        val replyToPreview = activeReplyToPreview
-        val replyToSenderLabel = if (replyToMessageId != null) txtReplyPreviewSender.text?.toString() else null
-        cancelReply()
-
         return lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
                 try {
-                    P2PLib.sendMessage(peerDeviceFingerprint, text, replyToMessageId, replyToPreview)
+                    P2PLib.sendMessage(peerDeviceFingerprint, text, null, null)
                 } catch (e: Throwable) {
                     "Error: ${e.message}" // H64: a JNI throw must not kill the process
                 }
@@ -1160,9 +1142,7 @@ class ChatActivity : AppCompatActivity() {
             }
             adapter.addMessage(
                 SimpleChatAdapter.Item(
-                    messageId = messageId, text = text, isMine = true, status = status,
-                    replyToMessageId = replyToMessageId, replyToPreview = replyToPreview,
-                    replyToSenderLabel = replyToSenderLabel
+                    messageId = messageId, text = text, isMine = true, status = status
                 )
             )
             scrollToBottomNow()
@@ -1529,8 +1509,7 @@ class ChatActivity : AppCompatActivity() {
         // yüksekliğinin ~%10'u kadar boş alt boşluk bırakılıyor.
         val gap = (8 * resources.displayMetrics.density).toInt() +
             (resources.displayMetrics.heightPixels * 0.10f).toInt()
-        val replyHeight = if (layoutReplyPreview.visibility == View.VISIBLE) layoutReplyPreview.height else 0
-        val inset = layoutMessageInput.height + replyHeight + gap
+        val inset = layoutMessageInput.height + gap
         if (recycler.paddingBottom == inset) return
         recycler.setPadding(recycler.paddingLeft, recycler.paddingTop, recycler.paddingRight, inset)
     }
@@ -1861,10 +1840,6 @@ class ChatActivity : AppCompatActivity() {
      * depolamaya HİÇ yazılmıyor (kullanıcı isteği: "diske kaydedilmeden").
      */
     private fun onPhotoCaptured(jpeg: ByteArray, caption: String = "", hiRes: Boolean = false) {
-        // bkz. grup karşılığı — yanıt bağlamı coroutine BAŞLAMADAN yakalanır.
-        val replyId = activeReplyToMessageId ?: ""
-        val replyPreview = activeReplyToPreview ?: ""
-        cancelReply()
         val fileName = "IMG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
         lifecycleScope.launch(Dispatchers.IO) {
             val tempFile = File(File(cacheDir, "outgoing").apply { mkdirs() }, UUID.randomUUID().toString())
@@ -1880,7 +1855,7 @@ class ChatActivity : AppCompatActivity() {
                 sent = prepared.file
                 val result = P2PLib.prepareAndSendFile(
                     peerDeviceFingerprint, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
-                    caption, replyId, replyPreview
+                    caption, "", ""
                 )
                 withContext(Dispatchers.Main) {
                     if (result.startsWith("Error:")) {
@@ -1934,10 +1909,6 @@ class ChatActivity : AppCompatActivity() {
      * şifrelenip teklif edilir.
      */
     private fun onFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null): kotlinx.coroutines.Job {
-        // bkz. grup karşılığı — yanıt bağlamı coroutine BAŞLAMADAN yakalanır.
-        val replyId = activeReplyToMessageId ?: ""
-        val replyPreview = activeReplyToPreview ?: ""
-        cancelReply()
         return lifecycleScope.launch(Dispatchers.IO) {
             // Provider queries are IPC to another app: not on the main thread.
             val fileName = name ?: queryDisplayName(uri) ?: "file"
@@ -1984,7 +1955,7 @@ class ChatActivity : AppCompatActivity() {
                 sent = prepared.file
                 val result = P2PLib.prepareAndSendFile(
                     peerDeviceFingerprint, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
-                    caption, replyId, replyPreview
+                    caption, "", ""
                 )
                 withContext(Dispatchers.Main) {
                     if (result.startsWith("Error:")) {
@@ -2372,13 +2343,6 @@ class ChatActivity : AppCompatActivity() {
         } else {
             com.p2p.messenger.util.Quote.plain(com.p2p.messenger.util.Forward.strip(item.text)).takeWholeChars(REPLY_PREVIEW_MAX_CHARS)
         }
-    }
-
-    private fun cancelReply() {
-        activeReplyToMessageId = null
-        activeReplyToPreview = null
-        layoutReplyPreview.visibility = View.GONE
-        ReplyIsland.set(this, false)
     }
 
     /** Alıntı kutusuna dokunulunca yanıtlanan mesaja kaydırır ve kısa süre

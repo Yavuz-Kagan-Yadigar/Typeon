@@ -301,9 +301,57 @@ pub fn attachment_label(mime: &str, file_name: &str, sticker: bool) -> String {
     }
 }
 
+/// Android inline quotes (util/Quote.kt) travel in the text as
+/// `\u{2062}\u{2064} id \u{2063} preview \u{2064}\u{2062}`: shown as "> preview".
+/// A malformed marker stays as it is; later ones are still converted.
+/// Same rule as Quote.kt's MARKER: an id of 1..=128 non-space, non-delimiter
+/// chars and a preview with no delimiters.
+fn marker_ok(id: &str, preview: &str) -> bool {
+    let delim = |c: char| ('\u{2062}'..='\u{2064}').contains(&c);
+    let n = id.chars().count();
+    (1..=128).contains(&n) && !id.chars().any(|c| c.is_whitespace() || delim(c)) && !preview.chars().any(delim)
+}
+
+pub fn quote_plain(text: &str) -> String {
+    const START: &str = "\u{2062}\u{2064}";
+    const END: &str = "\u{2064}\u{2062}";
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(a) = rest.find(START) {
+        let body = &rest[a + START.len()..];
+        match (body.find('\u{2063}'), body.find(END)) {
+            (Some(sep), Some(end)) if sep < end && marker_ok(&body[..sep], &body[sep + '\u{2063}'.len_utf8()..end]) => {
+                out.push_str(&rest[..a]);
+                out.push_str("> ");
+                out.push_str(&body[sep + '\u{2063}'.len_utf8()..end].replace('\n', " "));
+                rest = &body[end + END.len()..];
+            }
+            _ => {
+                out.push_str(&rest[..a + START.len()]);
+                rest = body;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod quote_tests {
+    #[test]
+    fn plain() {
+        let q = "\u{2062}\u{2064}m1\u{2063}Alıntı1\u{2064}\u{2062}";
+        assert_eq!(super::quote_plain(&format!("{q}\nCevap1")), "> Alıntı1\nCevap1");
+        assert_eq!(super::quote_plain("plain"), "plain");
+        // A broken marker before a good one: the good one still converts.
+        let broken = "\u{2062}\u{2064}x";
+        assert_eq!(super::quote_plain(&format!("{broken} {q}")), format!("{broken} > Alıntı1"));
+    }
+}
+
 /// Trims a message down to a one-line preview for chat rows and reply chips.
 pub fn preview_text(text: &str, max_chars: usize) -> String {
-    let single_line = text.replace('\n', " ");
+    let single_line = quote_plain(text).replace('\n', " ");
     let trimmed = single_line.trim();
     if trimmed.chars().count() <= max_chars {
         return trimmed.to_string();

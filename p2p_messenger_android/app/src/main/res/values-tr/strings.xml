@@ -180,7 +180,6 @@
 
     <string name="lbl_edited">(düzenlendi)</string>
     <string name="lbl_you">Siz</string>
-    <string name="action_cancel_reply">Yanıtı iptal et</string>
     <string name="msg_reply_target_not_loaded">Orijinal mesaj yüklenmedi — bulmak için yukarı kaydırın</string>
     <string name="action_resume_download">Devam et</string>
     <string name="lbl_sent_at">(gönderim: %s)</string>
@@ -542,5 +541,9 @@
     <plurals name="confirm_delete_messages">
         <item quantity="one">Bu mesaj silinsin mi?</item>
         <item quantity="other">Bu %d mesaj silinsin mi?</item>
+    </plurals>
+    <plurals name="forward_not_sent">
+        <item quantity="one">İletilen 1 mesaj gönderilmedi</item>
+        <item quantity="other">İletilen %d mesaj gönderilmedi</item>
     </plurals>
 </resources>

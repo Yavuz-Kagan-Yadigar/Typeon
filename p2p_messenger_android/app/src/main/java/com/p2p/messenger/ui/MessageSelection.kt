@@ -63,6 +63,10 @@ class MessageSelection(
 
     override fun onActionItemClicked(mode: ActionMode, menuItem: MenuItem): Boolean {
         val items = adapter.selectedItems()
+        if (items.isEmpty()) {
+            mode.finish()
+            return true
+        }
         when (menuItem.itemId) {
             R.string.lbl_copy -> {
                 com.p2p.messenger.util.copySensitive(activity, "message", items.joinToString("\n") { com.p2p.messenger.util.Quote.plain(Forward.strip(it.text)) })

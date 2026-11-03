@@ -279,91 +279,6 @@
 
     </LinearLayout>
 
-    <!-- Spec dışı, kullanıcı isteği (WhatsApp tarzı "yanıtla"): bir mesajı
-         sağa kaydırınca (bkz. SimpleChatAdapter/ChatActivity.setupSwipeToReply)
-         gösterilir — hangi mesaja yanıt verildiğini gösterir, X ile iptal
-         edilebilir. `txtReplyPreviewSender`: 1:1'de sabit "Yanıtlanıyor"/
-         kişi adı, grup da yanıtlanan mesajın göndericisinin adı (bkz.
-         ChatActivity/GroupChatActivity `startReply`). -->
-    <!-- Kullanıcı isteği: alıntı artık ayrı bir pill DEĞİL; kendi arka planı
-         yok, alt çubukla birlikte `viewReplyIsland` adasının içinde duruyor
-         (adanın kenarlarından 12dp içeride, çubuğun hemen üstünde). -->
-    <!-- Kullanıcı isteği: alıntı + alt çubuk tek bir ADA içinde (bkz.
-         reply_island.xml). Ada çubuğun ETRAFINA taşar, çubuğu yeniden
-         boyutlandırmaz: yan/alt kenarları çubuğun gerçek konumundan kodda
-         hesaplanır (bkz. util.ReplyIsland; ConstraintLayout negatif kenar
-         boşluğu desteklemiyor). XML'de ikisinden ÖNCE: arkada çizilsin. -->
-    <View
-        android:id="@+id/viewReplyIsland"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:background="@drawable/reply_island"
-        android:visibility="gone"
-        app:layout_constraintTop_toTopOf="@id/layoutReplyPreview"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
-
-    <LinearLayout
-        android:id="@+id/layoutReplyPreview"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:paddingStart="10dp"
-        android:paddingEnd="4dp"
-        android:paddingTop="10dp"
-        android:paddingBottom="6dp"
-        android:layout_marginStart="12dp"
-        android:layout_marginEnd="12dp"
-        android:visibility="gone"
-        app:layout_constraintBottom_toTopOf="@id/layoutMessageInput"
-        app:layout_constraintStart_toStartOf="@id/guideInputStart"
-        app:layout_constraintEnd_toEndOf="@id/guideInputEnd">
-
-        <View
-            android:layout_width="3dp"
-            android:layout_height="match_parent"
-            android:layout_marginEnd="8dp"
-            android:background="?attr/colorPrimary" />
-
-        <LinearLayout
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:orientation="vertical">
-
-            <TextView
-                android:id="@+id/txtReplyPreviewSender"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textStyle="bold"
-                android:textSize="13sp"
-                android:textColor="?attr/colorPrimary" />
-
-            <TextView
-                android:id="@+id/txtReplyPreviewText"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:maxLines="1"
-                android:ellipsize="end"
-                android:textSize="13sp"
-                android:textColor="?attr/colorOnSurfaceVariant" />
-
-        </LinearLayout>
-
-        <ImageButton
-            android:id="@+id/btnCancelReply"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_marginStart="8dp"
-            android:padding="6dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:src="@drawable/ic_close"
-            android:contentDescription="@string/action_cancel_reply" />
-
-    </LinearLayout>
-
     <!-- Spec dışı, kullanıcı isteği: ek/kamera/ses düğmeleri, metin alanı ve
          gönder tuşu HEPSİ tek bir dış pill'in (bkz. message_bar_pill.xml)
          içinde; o pill'in İÇİNDE de düğme grubu SADECE ince çerçeveli bir
@@ -608,15 +523,14 @@
         app:layout_constraintBottom_toTopOf="@id/barrierAboveInput"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- "Aşağı kaydır" düğmesi hem alt çubuğun hem (varsa) alıntı adasının
-         ÜSTÜNDE dursun: görünmeyen (gone) ada hesaba katılmaz. -->
+    <!-- The scroll-down button sits above the input bar. -->
     <androidx.constraintlayout.widget.Barrier
         android:id="@+id/barrierAboveInput"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         app:barrierDirection="top"
         app:barrierAllowsGoneWidgets="false"
-        app:constraint_referenced_ids="viewReplyIsland,layoutMessageInput" />
+        app:constraint_referenced_ids="layoutMessageInput" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
 

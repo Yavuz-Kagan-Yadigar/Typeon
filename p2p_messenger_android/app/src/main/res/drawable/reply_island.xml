@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Kullanıcı isteği: alıntı artık ayrı bir pill değil — alıntı ile alt
-     çubuğu birlikte saran tek bir "ada". Rengi çubuğun kendisinden farklı
-     (colorOutlineVariant) ki çubuk adanın içinde ayrı bir parça gibi
-     okunsun. Yarıçap = çubuğun yarı yüksekliği + adanın iç boşluğu. -->
-<shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="?attr/colorOutlineVariant" />
-    <corners android:radius="30dp" />
-</shape>

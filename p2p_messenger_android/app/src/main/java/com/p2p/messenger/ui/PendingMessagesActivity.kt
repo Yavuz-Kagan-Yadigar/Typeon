@@ -128,7 +128,7 @@ class PendingMessagesActivity : AppCompatActivity() {
                     messageId = obj.optString("message_id"),
                     targetName = targetName,
                     deviceName = obj.optString("device_name"),
-                    text = obj.optString("text"),
+                    text = com.p2p.messenger.util.Quote.plain(obj.optString("text")),
                     lastAttemptAtMs = obj.optLong("last_attempt_at")
                 )
             )

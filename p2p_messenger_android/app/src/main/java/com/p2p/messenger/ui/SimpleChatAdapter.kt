@@ -696,6 +696,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (idx < 0) return
         items[idx].isDeleted = true
         notifyItemChanged(idx)
+        // A selected row deleted under the selection leaves it.
+        if (selectedIds.remove(targetMessageId)) {
+            if (selectedIds.isEmpty()) selectedKind = null
+            onSelectionChanged?.invoke()
+        }
         // A deleted message no longer groups with its neighbors — re-bind
         // them too, so they un-merge (restore spacing/timestamp/sender row).
         if (idx > 0) notifyItemChanged(idx - 1)
@@ -1051,6 +1056,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                         val end = linked.getSpanEnd(span)
                         val flags = linked.getSpanFlags(span)
                         linked.removeSpan(span)
+                        // A URL inside a quote box: the box's tap scrolls to the quoted message.
+                        if (linked.getSpans(start, end, com.p2p.messenger.util.Quote.Box::class.java)
+                                .any { linked.getSpanStart(it) < end && linked.getSpanEnd(it) > start }) continue
                         linked.setSpan(ConfirmUrlSpan(span.url), start, end, flags)
                     }
                     holder.textView.text = linked

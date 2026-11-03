@@ -30,6 +30,9 @@ object Quote {
 
     fun marker(messageId: String, preview: String) = START + clean(messageId) + SEP + clean(preview) + END
 
+    /** The text with every quote removed: the sender's own words only. */
+    fun withoutQuotes(text: String) = MARKER.replace(text, "")
+
     /** Text for places that cannot draw boxes: notifications, chat list, copy. */
     fun plain(text: String) = MARKER.replace(text) { "> " + it.groupValues[2].replace('\n', ' ') }
 
@@ -49,9 +52,20 @@ object Quote {
     fun attach(edit: EditText) {
         edit.addTextChangedListener(object : TextWatcher {
             private var cut = emptyList<Box>()
+            /** Typing with the cursor inside a box: moved to after the box. */
+            private var into: Box? = null
+            private var typedAt = 0
+            private var typedLen = 0
             private var busy = false
             override fun beforeTextChanged(s: CharSequence, start: Int, count: Int, after: Int) {
-                if (busy || count == 0 || s !is Spannable) return
+                if (busy || s !is Spannable) return
+                if (count == 0) {
+                    into = if (after == 0) null else s.getSpans(start, start, Box::class.java)
+                        .firstOrNull { s.getSpanStart(it) < start && s.getSpanEnd(it) > start }
+                    typedAt = start
+                    typedLen = after
+                    return
+                }
                 cut = s.getSpans(start, start + count, Box::class.java).filter {
                     s.getSpanStart(it) < start + count && s.getSpanEnd(it) > start
                 }
@@ -60,6 +74,16 @@ object Quote {
             override fun afterTextChanged(s: Editable) {
                 if (busy) return
                 busy = true
+                into?.let { box ->
+                    val typed = s.subSequence(typedAt, typedAt + typedLen).toString()
+                    s.delete(typedAt, typedAt + typedLen)
+                    val end = s.getSpanEnd(box)
+                    if (end >= 0) {
+                        s.insert(end, typed)
+                        edit.setSelection(end + typed.length)
+                    }
+                }
+                into = null
                 for (box in cut) {
                     val a = s.getSpanStart(box)
                     val b = s.getSpanEnd(box)

@@ -198,7 +198,6 @@
 
     <string name="lbl_edited">(edited)</string>
     <string name="lbl_you">You</string>
-    <string name="action_cancel_reply">Cancel reply</string>
     <string name="msg_reply_target_not_loaded">Original message isn\'t loaded — scroll up to find it</string>
     <string name="lbl_sent_at">(sent at: %s)</string>
     <!-- Spec dışı, kullanıcı isteği: alınan mesajlarda hem yerel ALINMA
@@ -583,5 +582,9 @@
     <plurals name="confirm_delete_messages">
         <item quantity="one">Delete this message?</item>
         <item quantity="other">Delete these %d messages?</item>
+    </plurals>
+    <plurals name="forward_not_sent">
+        <item quantity="one">1 forwarded message was not sent</item>
+        <item quantity="other">%d forwarded messages were not sent</item>
     </plurals>
 </resources>

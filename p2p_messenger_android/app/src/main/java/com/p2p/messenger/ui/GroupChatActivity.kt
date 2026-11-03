@@ -57,7 +57,6 @@ import com.p2p.messenger.util.ConnectionStatus
 import com.p2p.messenger.util.ImagePreview
 import com.p2p.messenger.util.KeyboardInsets
 import com.p2p.messenger.util.OutgoingMedia
-import com.p2p.messenger.util.ReplyIsland
 import com.p2p.messenger.util.PlaybackSpeed
 import com.p2p.messenger.util.PulsingStatusDot
 import com.p2p.messenger.util.hexToBytes
@@ -204,18 +203,7 @@ class GroupChatActivity : AppCompatActivity() {
 
     // --- Spec dışı, kullanıcı isteği (WhatsApp tarzı "sağa kaydırıp
     // yanıtla") — bkz. ChatActivity AYNI alanlar/desen. ---
-    private lateinit var layoutReplyPreview: View
     private lateinit var swipeHelper: ItemTouchHelper
-    private lateinit var txtReplyPreviewSender: TextView
-    private lateinit var txtReplyPreviewText: TextView
-    private var activeReplyToMessageId: String? = null
-    private var activeReplyToPreview: String? = null
-    /** bkz. `startReply`/`Item.senderIdentityId` — yanıtlanan mesajı
-     *  gönderenin ham kimliği, gönderim anında `sendGroupMessage`'a
-     *  `replyToSenderIdentityId` olarak geçirilir (bkz. `resolveReplyLabel`
-     *  yedek çözümleme mekanizması, alıcı taraf yanıtlanan mesajı yerelde
-     *  bulamazsa BUNU kullanır). */
-    private var activeReplyToSenderIdentityId: String? = null
     private val replyHighlightHandler = Handler(Looper.getMainLooper())
 
     // Typing indicator (group). Unlike 1:1, several members can type at
@@ -538,10 +526,6 @@ class GroupChatActivity : AppCompatActivity() {
         adapter.onReplyPreviewClick = { targetMessageId -> scrollToMessage(targetMessageId) }
         stickerPicker.provideBubbleImages(adapter)
         setupSwipeToReply()
-        layoutReplyPreview = findViewById(R.id.layoutReplyPreview)
-        txtReplyPreviewSender = findViewById(R.id.txtReplyPreviewSender)
-        txtReplyPreviewText = findViewById(R.id.txtReplyPreviewText)
-        findViewById<ImageButton>(R.id.btnCancelReply).setOnClickListener { cancelReply() }
         // Spec dışı, kullanıcı isteği: grup sohbetinde de sesli mesaj kaydı/
         // oynatımı — bkz. ChatActivity AYNI MediaRecorder/MediaPlayer
         // altyapısı, tek fark gönderimin `prepareAndSendGroupFile` ile TÜM
@@ -613,7 +597,6 @@ class GroupChatActivity : AppCompatActivity() {
         // bkz. `syncRecyclerBottomInset` — çubuğun/alıntı pilinin yüksekliği
         // değiştikçe listenin alt dolgusu takip etmeli.
         layoutMessageInput.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> syncRecyclerBottomInset() }
-        layoutReplyPreview.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> syncRecyclerBottomInset() }
         btnSend = findViewById(R.id.btnSend)
         progressSending = findViewById(R.id.progressSending)
         btnSend.setOnClickListener {
@@ -664,9 +647,17 @@ class GroupChatActivity : AppCompatActivity() {
                 .setMessage(getString(R.string.confirm_forward, txtToolbarTitle.text))
                 .setPositiveButton(R.string.btn_send) { _, _ ->
                     lifecycleScope.launch {
-                        for (p in f) {
-                            if (p.file != null) onGroupFilePicked(Uri.fromFile(p.file), p.caption, hiRes = true, name = p.fileName, mime = p.mimeType).join()
-                            else p.text?.let { sendNewMessage(it).join() }
+                        var done = 0
+                        try {
+                            for (p in f) {
+                                if (p.file != null) onGroupFilePicked(Uri.fromFile(p.file), p.caption, hiRes = true, name = p.fileName, mime = p.mimeType).join()
+                                else p.text?.let { sendNewMessage(it).join() }
+                                done++
+                            }
+                        } finally {
+                            // Leaving the chat cancels the rest: say so.
+                            val left = f.size - done
+                            if (left > 0) Toast.makeText(applicationContext, applicationContext.resources.getQuantityString(R.plurals.forward_not_sent, left, left), Toast.LENGTH_LONG).show()
                         }
                     }
                 }
@@ -709,8 +700,6 @@ class GroupChatActivity : AppCompatActivity() {
         whiteboard.bind("", groupId)
         P2PService.activeConversationId = "group:$groupId"
         localMessages.clear()
-        // Önceki sohbette açık kalan yanıt, yeni sohbetteki mesaja yapışmasın.
-        cancelReply()
         adapter.notifyDataSetChanged()
         seenByPerMessage.clear()
         isLoadingOlderHistory = false
@@ -1416,7 +1405,9 @@ class GroupChatActivity : AppCompatActivity() {
     /** Ids of the members whose "@Name" is in [text], as a JSON array (null: none).
      *  The name must end at a non-letter/digit or the end of the text ("@Alice"
      *  does not mention "Al"); at each '@' only the longest matching name counts. */
-    private fun mentionIdsJson(text: String): String? {
+    private fun mentionIdsJson(fullText: String): String? {
+        // A quoted message's @names are not mentions of this one.
+        val text = com.p2p.messenger.util.Quote.withoutQuotes(fullText)
         val candidates = mentionCandidates()
         val ids = LinkedHashSet<String>()
         var at = text.indexOf('@')
@@ -1461,20 +1452,11 @@ class GroupChatActivity : AppCompatActivity() {
         btnSend.isEnabled = false
         btnSend.visibility = View.INVISIBLE
         progressSending.visibility = View.VISIBLE
-        // bkz. ChatActivity.sendNewMessage AYNI notu (WhatsApp tarzı
-        // yanıt) — ANLIK olarak yakalanır. `replyToSenderIdentityId`:
-        // alıcı taraf, yanıtlanan mesajı yerelde bulamazsa bunu bir yedek
-        // olarak kullanır (bkz. `resolveReplyLabel` genişletilmiş notu).
-        val replyToMessageId = activeReplyToMessageId
-        val replyToPreview = activeReplyToPreview
-        val replyToSenderLabel = if (replyToMessageId != null) txtReplyPreviewSender.text?.toString() else null
-        val replyToSenderIdentityId = activeReplyToSenderIdentityId
         val targetGroupId = groupId
-        cancelReply()
         return lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
                 try {
-                    P2PLib.sendGroupMessage(targetGroupId, text, replyToMessageId, replyToPreview, replyToSenderIdentityId, mentionIdsJson(text))
+                    P2PLib.sendGroupMessage(targetGroupId, text, null, null, null, mentionIdsJson(text))
                 } catch (e: Exception) {
                     "Error: ${e.message}"
                 }
@@ -1502,10 +1484,7 @@ class GroupChatActivity : AppCompatActivity() {
                     text = text,
                     isMine = true,
                     status = if (ok) SimpleChatAdapter.Status.SENT else SimpleChatAdapter.Status.ERROR,
-                    senderIdentityId = ownIdentityId,
-                    replyToMessageId = replyToMessageId, replyToPreview = replyToPreview,
-                    replyToSenderIdentityId = replyToSenderIdentityId,
-                    replyToSenderLabel = replyToSenderLabel
+                    senderIdentityId = ownIdentityId
                 )
             )
             maybePlayTyphoonEffect()
@@ -1803,14 +1782,6 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    private fun cancelReply() {
-        activeReplyToMessageId = null
-        activeReplyToSenderIdentityId = null
-        activeReplyToPreview = null
-        layoutReplyPreview.visibility = View.GONE
-        ReplyIsland.set(this, false)
-    }
-
     /** bkz. ChatActivity.scrollToMessage AYNI desen. */
     private fun scrollToMessage(targetMessageId: String) {
         val position = localMessages.indexOfFirst { it.messageId == targetMessageId }
@@ -1944,18 +1915,12 @@ class GroupChatActivity : AppCompatActivity() {
      *  bir dosya kimliği string'i olması (bkz. `onGroupFilePicked` AYNI
      *  dönüş biçimi notu, 1:1'in JSON `{message_id, status}`'ından farklı). */
     private fun sendVoiceMessage(file: File, durationMs: Long, caption: String = "") {
-        // Taken and cleared here: the next message was sent as a reply too.
-        val replyId = activeReplyToMessageId
-        val replyPreview = activeReplyToPreview
-        val replySender = activeReplyToSenderIdentityId
-        cancelReply()
         val targetGroupId = groupId
         lifecycleScope.launch(Dispatchers.IO) {
             val result = try {
                 P2PLib.prepareAndSendGroupFile(
                     targetGroupId, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
-                    caption, replyId ?: "", replyPreview ?: "",
-                    replySender ?: ""
+                    caption, "", "", ""
                 )
             } catch (e: Exception) {
                 "Error: ${e.message}"
@@ -1970,9 +1935,6 @@ class GroupChatActivity : AppCompatActivity() {
                             text = "",
                             isMine = true,
                             caption = caption,
-                            replyToMessageId = replyId,
-                            replyToPreview = replyPreview,
-                            replyToSenderIdentityId = replySender,
                             attachment = SimpleChatAdapter.AttachmentInfo(
                                 fileId = result,
                                 fileName = file.name,
@@ -2168,14 +2130,6 @@ class GroupChatActivity : AppCompatActivity() {
      *  gönderilir ve dosya hemen silinir; galeriye/paylaşılan depolamaya
      *  hiçbir şey yazılmaz. */
     private fun onGroupPhotoCaptured(jpeg: ByteArray, caption: String = "", hiRes: Boolean = false) {
-        // Ekle birlikte gidecek yanıt bağlamı, coroutine BAŞLAMADAN
-        // yakalanıyor: `cancelReply()` aşağıda hemen çağrılıyor (kullanıcı
-        // arayüzde yanıtın tüketildiğini anında görmeli) ve arka planda
-        // okunsaydı çoktan temizlenmiş olurdu.
-        val replyId = activeReplyToMessageId ?: ""
-        val replyPreview = activeReplyToPreview ?: ""
-        val replySender = activeReplyToSenderIdentityId ?: ""
-        cancelReply()
         val fileName = "IMG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
         // The group is captured BEFORE the coroutine: `groupId` was read
         // INSIDE the IO block, and the user can switch to another group
@@ -2196,7 +2150,7 @@ class GroupChatActivity : AppCompatActivity() {
                 sent = prepared.file
                 val result = P2PLib.prepareAndSendGroupFile(
                     targetGroupId, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
-                    caption, replyId, replyPreview, replySender
+                    caption, "", "", ""
                 )
                 withContext(Dispatchers.Main) {
                     if (result.startsWith("Error:")) {
@@ -2248,14 +2202,6 @@ class GroupChatActivity : AppCompatActivity() {
      * `prepareAndSendGroupFile` ile TÜM üyelere sunulur.
      */
     private fun onGroupFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null): kotlinx.coroutines.Job {
-        // Ekle birlikte gidecek yanıt bağlamı, coroutine BAŞLAMADAN
-        // yakalanıyor: `cancelReply()` aşağıda hemen çağrılıyor (kullanıcı
-        // arayüzde yanıtın tüketildiğini anında görmeli) ve arka planda
-        // okunsaydı çoktan temizlenmiş olurdu.
-        val replyId = activeReplyToMessageId ?: ""
-        val replyPreview = activeReplyToPreview ?: ""
-        val replySender = activeReplyToSenderIdentityId ?: ""
-        cancelReply()
         // The group is captured BEFORE the coroutine (bkz.
         // `onGroupPhotoCaptured` aynı not).
         val targetGroupId = groupId
@@ -2305,7 +2251,7 @@ class GroupChatActivity : AppCompatActivity() {
                 sent = prepared.file
                 val result = P2PLib.prepareAndSendGroupFile(
                     targetGroupId, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
-                    caption, replyId, replyPreview, replySender
+                    caption, "", "", ""
                 )
                 withContext(Dispatchers.Main) {
                     if (result.startsWith("Error:")) {
@@ -2943,8 +2889,7 @@ class GroupChatActivity : AppCompatActivity() {
         // yüksekliğinin ~%10'u kadar boş alt boşluk bırakılıyor.
         val gap = (8 * resources.displayMetrics.density).toInt() +
             (resources.displayMetrics.heightPixels * 0.10f).toInt()
-        val replyHeight = if (layoutReplyPreview.visibility == View.VISIBLE) layoutReplyPreview.height else 0
-        val inset = layoutMessageInput.height + replyHeight + gap
+        val inset = layoutMessageInput.height + gap
         if (recycler.paddingBottom == inset) return
         recycler.setPadding(recycler.paddingLeft, recycler.paddingTop, recycler.paddingRight, inset)
     }
