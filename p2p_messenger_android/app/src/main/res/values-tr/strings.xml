@@ -421,6 +421,9 @@
     <string name="image_edit_blur">Bulanıklaştır</string>
     <string name="image_edit_color">Kalem rengi</string>
     <string name="image_edit_size">Boyut</string>
+    <string name="image_edit_no_memory">Bu düzenleme için bellek yetmedi</string>
+    <string name="image_edit_save_failed">Düzenleme kaydedilemedi</string>
+    <string name="image_edit_reduced">Belleğe sığması için %1$d × %2$d boyutunda düzenleniyor</string>
     <string name="settings_section_profile">Profil</string>
     <string name="settings_section_privacy">Gizlilik ve güvenlik</string>
     <string name="settings_section_network">Ağ ve bağlantı</string>

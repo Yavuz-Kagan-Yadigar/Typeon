@@ -4,6 +4,7 @@ import android.app.Dialog
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
@@ -16,12 +17,14 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.graphics.ColorUtils
 import androidx.lifecycle.lifecycleScope
@@ -32,11 +35,41 @@ import com.p2p.messenger.R
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
+import java.io.InputStream
 import kotlin.math.hypot
 
-/** Long edge the editor decodes to: a sampled decode lands in [EDIT_MAX, 2 * EDIT_MAX). */
-const val EDIT_MAX = 2048
+/** An image decoded for the editor; [reduced]: smaller than its source. */
+class EditImage(val bitmap: Bitmap, val reduced: Boolean)
+
+/** Full-size bitmaps the editor may hold at once (base, working image, an
+ *  undo replay, a rotate's temporaries): the decode budget is the heap / this. */
+private const val EDIT_COPIES = 6
+
+/**
+ * Decodes [open]'s image (EXIF rotation applied) as large as the heap allows
+ * for editing: sampled down by powers of two only when it would not fit.
+ * [open] is called up to three times, each stream is closed here.
+ */
+fun decodeForEdit(open: () -> InputStream?): EditImage? = try {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    open()?.use { BitmapFactory.decodeStream(it, null, bounds) }
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+        null
+    } else {
+        val budget = Runtime.getRuntime().maxMemory() / 4 / EDIT_COPIES
+        var sample = 1
+        while ((bounds.outWidth / sample).toLong() * (bounds.outHeight / sample) > budget) sample *= 2
+        val bmp = open()?.use { BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }) }
+        val exif = try {
+            open()?.use { android.media.ExifInterface(it) }
+        } catch (e: Exception) {
+            null
+        }
+        bmp?.let { EditImage(if (exif != null) ImagePreview.rotateForExif(it, exif) else it, sample > 1) }
+    }
+} catch (e: Throwable) {
+    null
+}
 
 /**
  * Full-screen editor the caption dialog opens on an image tile: rotate 90°
@@ -44,19 +77,20 @@ const val EDIT_MAX = 2048
  * Two fingers zoom and pan in every tool; one finger pans when no tool is on.
  *
  * [load] (run off the main thread) gives the image to start from, [original]
- * the untouched one Revert goes back to. OK (or Back) closes the editor:
- * [onDone] gets [out] holding the edit as PNG, or null when the image ended
- * up as the original. Nothing touched since opening: [onDone] is not called.
- * [onRetake] (the in-app camera's shot) adds Retake: it closes the editor
- * without [onDone] and calls it.
+ * the untouched one the Original button goes back to. OK (or Back) runs
+ * [save] off the main thread on the result and hands what it returns to
+ * [onDone] — null when the image ended up as the original — and only then
+ * closes; a failed save keeps the editor open. Nothing touched since opening:
+ * [onDone] is not called. [onRetake] (the in-app camera's shot) adds Retake:
+ * it closes the editor without [onDone] and calls it.
  */
-fun AppCompatActivity.openImageEditor(
-    load: () -> Bitmap?,
-    original: () -> Bitmap?,
+fun <T : Any> AppCompatActivity.openImageEditor(
+    load: () -> EditImage?,
+    original: () -> EditImage?,
     startEdited: Boolean,
-    out: File,
+    save: (Bitmap) -> T,
     onRetake: (() -> Unit)? = null,
-    onDone: (File?) -> Unit,
+    onDone: (T?) -> Unit,
 ) {
     val dp = resources.displayMetrics.density
     // Same palette as the rest of the app (see WhiteboardPanel): bars on the
@@ -71,22 +105,31 @@ fun AppCompatActivity.openImageEditor(
     val board = EditCanvas(this)
     var baseEdited = startEdited // the image undo goes back to is itself an edit
     var dirty = false // anything done since the editor opened
-    var busy = true
+    var busy = false
+    fun setBusy(value: Boolean) {
+        busy = value
+        board.isEnabled = !value // no stroke lands while a load, an undo or the save runs
+    }
+    fun toast(text: Int) = Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
     board.onEdit = { dirty = true }
+    board.onNoMemory = { toast(R.string.image_edit_no_memory) }
 
-    fun setImage(source: () -> Bitmap?, edited: Boolean) {
-        busy = true
+    fun setImage(source: () -> EditImage?, edited: Boolean) {
+        setBusy(true)
         lifecycleScope.launch(Dispatchers.IO) {
-            val bmp = try {
-                source()
-            } catch (e: Throwable) {
-                null
-            }
+            val image = source()
+            val working = try { image?.bitmap?.copy(Bitmap.Config.ARGB_8888, true) } catch (e: Throwable) { null }
             withContext(Dispatchers.Main) {
-                busy = false
-                if (bmp == null) return@withContext
-                board.load(bmp)
+                setBusy(false)
+                if (image == null || working == null) {
+                    toast(R.string.image_edit_no_memory)
+                    return@withContext
+                }
+                board.load(image.bitmap, working)
                 baseEdited = edited
+                if (image.reduced) {
+                    Toast.makeText(this@openImageEditor, getString(R.string.image_edit_reduced, working.width, working.height), Toast.LENGTH_LONG).show()
+                }
             }
         }
     }
@@ -99,19 +142,32 @@ fun AppCompatActivity.openImageEditor(
             bmp == null || !dirty -> dialog.dismiss()
             !baseEdited && !board.hasEdits -> { dialog.dismiss(); onDone(null) }
             else -> {
-                busy = true
+                setBusy(true)
                 lifecycleScope.launch(Dispatchers.IO) {
-                    val ok = try {
-                        out.parentFile?.mkdirs()
-                        out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                    } catch (e: Exception) {
-                        false
-                    }
+                    val result = try { save(bmp) } catch (e: Throwable) { null }
                     withContext(Dispatchers.Main) {
-                        dialog.dismiss()
-                        if (ok) onDone(out) else out.parentFile?.deleteRecursively()
+                        if (result == null) {
+                            setBusy(false)
+                            toast(R.string.image_edit_save_failed)
+                        } else {
+                            dialog.dismiss()
+                            onDone(result)
+                        }
                     }
                 }
+            }
+        }
+    }
+
+    fun undo() {
+        val (base, keep) = board.undoPlan() ?: return
+        setBusy(true)
+        // Replays the kept edits from the start: off the main thread.
+        lifecycleScope.launch(Dispatchers.Default) {
+            val result = EditCanvas.replay(base, keep)
+            withContext(Dispatchers.Main) {
+                setBusy(false)
+                if (result == null) toast(R.string.image_edit_no_memory) else board.undone(base, result)
             }
         }
     }
@@ -129,6 +185,16 @@ fun AppCompatActivity.openImageEditor(
         setOnClickListener { if (!busy) onClick() }
         parent.addView(this, LinearLayout.LayoutParams(if (weight > 0) 0 else (48 * dp).toInt(), (48 * dp).toInt(), weight).apply {
             if (weight > 0) setMargins((6 * dp).toInt(), (6 * dp).toInt(), (6 * dp).toInt(), (6 * dp).toInt())
+        })
+    }
+    fun textButton(parent: LinearLayout, text: Int, filled: Boolean = false, onClick: () -> Unit) = MaterialButton(
+        this, null,
+        if (filled) com.google.android.material.R.attr.materialButtonStyle else com.google.android.material.R.attr.materialButtonOutlinedStyle,
+    ).apply {
+        setText(text)
+        setOnClickListener { if (!busy) onClick() }
+        parent.addView(this, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            if (parent.childCount > 0) marginStart = (8 * dp).toInt()
         })
     }
     fun row() = LinearLayout(this).apply {
@@ -201,37 +267,21 @@ fun AppCompatActivity.openImageEditor(
     select(EditCanvas.Mode.NONE)
 
     val top = row()
-    top.addView(MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-        setText(R.string.image_edit_revert)
-        setOnClickListener {
-            if (busy) return@setOnClickListener
-            if (board.mode != EditCanvas.Mode.NONE) select(board.mode)
-            dirty = true
-            setImage(original, false)
-        }
-    })
-    if (onRetake != null) top.addView(MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-        setText(R.string.action_retake_photo)
-        setOnClickListener {
-            if (busy) return@setOnClickListener
-            dialog.dismiss()
-            onRetake()
-        }
-    }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = (8 * dp).toInt() })
+    textButton(top, R.string.image_edit_revert) {
+        if (board.mode != EditCanvas.Mode.NONE) select(board.mode)
+        dirty = true
+        setImage(original, false)
+    }
+    if (onRetake != null) textButton(top, R.string.action_retake_photo) {
+        dialog.dismiss()
+        onRetake()
+    }
     top.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-    top.addView(MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-        setText(R.string.image_edit_undo)
-        setIconResource(R.drawable.ic_undo)
-        setOnClickListener {
-            if (busy) return@setOnClickListener
-            if (board.mode == EditCanvas.Mode.CROP) select(EditCanvas.Mode.CROP) // drop the unapplied frame first
-            board.undo()
-        }
-    })
-    top.addView(MaterialButton(this).apply {
-        setText(android.R.string.ok)
-        setOnClickListener { finish() }
-    }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = (8 * dp).toInt() })
+    textButton(top, R.string.image_edit_undo) {
+        if (board.mode == EditCanvas.Mode.CROP) board.mode = EditCanvas.Mode.CROP // drops the unapplied frame
+        undo()
+    }.setIconResource(R.drawable.ic_undo)
+    textButton(top, android.R.string.ok, filled = true) { finish() }
 
     val bar = (56 * dp).toInt()
     val root = LinearLayout(this).apply {
@@ -243,8 +293,14 @@ fun AppCompatActivity.openImageEditor(
     }
     dialog.setContentView(root)
     dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-    // Back keeps the edit, like OK.
-    dialog.setOnCancelListener { finish() }
+    // Back = OK. Not a cancel: that would close the editor before the save
+    // finished, and the caption dialog could send the unedited image meanwhile.
+    dialog.setCancelable(false)
+    dialog.setOnKeyListener { _, code, event ->
+        if (code != KeyEvent.KEYCODE_BACK) return@setOnKeyListener false
+        if (event.action == KeyEvent.ACTION_UP) finish()
+        true
+    }
     dialog.show()
     setImage(load, startEdited)
 }
@@ -256,6 +312,13 @@ private val PEN_COLORS = intArrayOf(Color.WHITE, Color.BLACK, 0xFFE53935.toInt()
  *  lifts; a second finger turns it into a pinch instead. */
 private class EditCanvas(context: Context) : View(context) {
     enum class Mode { NONE, PEN, BLUR, CROP }
+
+    /** One edit; undo replays the rest from the base image. */
+    sealed class Op {
+        class Rotate(val degrees: Float) : Op()
+        class Crop(val rect: Rect) : Op()
+        class Stroke(val blur: Boolean, val color: Int, val width: Float, val points: FloatArray) : Op()
+    }
 
     var bitmap: Bitmap? = null
         private set
@@ -269,26 +332,22 @@ private class EditCanvas(context: Context) : View(context) {
     var penDp = 6f
     var blurDp = 30f
     var onEdit: () -> Unit = {}
+    var onNoMemory: () -> Unit = {}
 
     private val dp = resources.displayMetrics.density
     private val fitMatrix = Matrix()
     private val user = Matrix() // pinch zoom + pan on top of the fit
     private val toView = Matrix()
     private val toBitmap = Matrix()
-    private var bitmapCanvas: Canvas? = null
     private val crop = RectF()
     private val image = Paint(Paint.FILTER_BITMAP_FLAG)
-    private val stroke = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-    }
+    private var stroke = Paint() // the stroke being drawn; strokePaint() makes it
     private val frame = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 2 * dp }
     private val handle = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
     private val dim = Paint().apply { color = 0x99000000.toInt() }
     private var last: PointF? = null
     private var grab = -1 // crop: corner 0..3 (clockwise from top-left), 4 = move, -1 = nothing
-    private var base: Bitmap? = null
+    private var base: Bitmap? = null // never drawn on
     private val ops = mutableListOf<Op>()
     private var points = ArrayList<Float>() // the stroke being drawn, bitmap coordinates
     private var preview: Path? = null
@@ -296,19 +355,27 @@ private class EditCanvas(context: Context) : View(context) {
     private var lastFocus: PointF? = null
     private var lastSpan = 0f
 
-    /** Starts over from [b]: no edits to undo. [b] itself is never drawn on. */
-    fun load(b: Bitmap) {
-        base = b
+    /** Starts over: [working] is a drawable copy of [base]. */
+    fun load(base: Bitmap, working: Bitmap) {
+        this.base = base
         ops.clear()
-        rebuild()
+        show(working)
     }
 
     val hasEdits get() = ops.isNotEmpty()
 
-    fun undo() {
-        if (ops.isEmpty()) return
+    /** What undo replays: the base and every edit but the last; null: nothing to undo. */
+    fun undoPlan(): Pair<Bitmap, List<Op>>? {
+        val b = base ?: return null
+        if (ops.isEmpty()) return null
+        return b to ops.dropLast(1)
+    }
+
+    /** [replay]'s result for [undoPlan]; ignored if the image was replaced meanwhile. */
+    fun undone(forBase: Bitmap, result: Bitmap) {
+        if (forBase !== base || ops.isEmpty()) return
         ops.removeAt(ops.lastIndex)
-        rebuild()
+        show(result)
         onEdit()
     }
 
@@ -322,77 +389,27 @@ private class EditCanvas(context: Context) : View(context) {
         commit(Op.Crop(r))
     }
 
-    /** One edit; undo replays the rest from [base]. */
-    private sealed class Op {
-        class Rotate(val degrees: Float) : Op()
-        class Crop(val rect: Rect) : Op()
-        class Stroke(val blur: Boolean, val color: Int, val width: Float, val points: FloatArray) : Op()
-    }
-
     private fun commit(op: Op) {
-        if (!run(op)) return
-        ops.add(op)
-        onEdit()
-    }
-
-    // ponytail: undo replays every edit from the start on the main thread; snapshots if it gets slow.
-    private fun rebuild() {
-        val b = base ?: return
-        show(b.copy(Bitmap.Config.ARGB_8888, true) ?: return)
-        for (op in ops) run(op)
-    }
-
-    /** Out of memory: the edit is skipped, the image stays as it was. */
-    private fun run(op: Op): Boolean {
-        val b = bitmap ?: return false
-        return try {
-            when (op) {
-                is Op.Rotate -> show(mutable(Bitmap.createBitmap(b, 0, 0, b.width, b.height, Matrix().apply { setRotate(op.degrees) }, true)))
-                is Op.Crop -> show(mutable(Bitmap.createBitmap(b, op.rect.left, op.rect.top, op.rect.width(), op.rect.height())))
-                is Op.Stroke -> {
-                    startStroke(op.blur, op.color, op.width, b)
-                    bitmapCanvas?.drawPath(pathOf(op.points), stroke)
-                    stroke.shader = null
-                    invalidate()
-                }
-            }
-            true
-        } catch (e: Throwable) {
-            stroke.shader = null
-            false
+        val b = bitmap ?: return
+        val next = apply(op, b)
+        if (next == null) {
+            onNoMemory()
+            return
         }
-    }
-
-    private fun pathOf(p: FloatArray) = Path().apply {
-        moveTo(p[0], p[1])
-        lineTo(p[0], p[1]) // a tap: the round cap draws a dot
-        for (i in 2 until p.size step 2) lineTo(p[i], p[i + 1])
+        ops.add(op)
+        if (next !== b) show(next) else invalidate()
+        onEdit()
     }
 
     /** A new size (rotate, crop) refits the view; the same size keeps the zoom. */
     private fun show(b: Bitmap) {
         val old = bitmap
         bitmap = b
-        bitmapCanvas = Canvas(b)
         crop.set(0f, 0f, b.width.toFloat(), b.height.toFloat())
         if (old == null || old.width != b.width || old.height != b.height) user.reset()
         fit()
         invalidate()
     }
-
-    private fun startStroke(blur: Boolean, color: Int, width: Float, b: Bitmap) {
-        stroke.strokeWidth = width
-        if (blur) {
-            stroke.color = Color.BLACK // opaque: the shader gives the colour
-            stroke.shader = blurShader(b)
-        } else {
-            stroke.shader = null
-            stroke.color = color
-        }
-    }
-
-    private fun mutable(b: Bitmap): Bitmap =
-        if (b.isMutable && b.config == Bitmap.Config.ARGB_8888) b else b.copy(Bitmap.Config.ARGB_8888, true)
 
     private fun fit() {
         val b = bitmap ?: return
@@ -427,6 +444,11 @@ private class EditCanvas(context: Context) : View(context) {
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) = fit()
 
+    override fun setEnabled(enabled: Boolean) {
+        super.setEnabled(enabled)
+        if (!enabled) cancelTouch()
+    }
+
     /** View pixels per bitmap pixel. */
     private val scale get() = toView.mapRadius(1f)
 
@@ -451,17 +473,23 @@ private class EditCanvas(context: Context) : View(context) {
         for ((x, y) in listOf(r.left to r.top, r.right to r.top, r.right to r.bottom, r.left to r.bottom)) canvas.drawCircle(x, y, 8 * dp, handle)
     }
 
+    /** Drops what a finger started: the unlifted stroke, a crop drag. */
+    private fun cancelTouch() {
+        preview = null
+        grab = -1
+        last = null
+        lastFocus = null
+        invalidate()
+    }
+
     override fun onTouchEvent(e: MotionEvent): Boolean {
+        if (!isEnabled) return false
         val b = bitmap ?: return false
         val action = e.actionMasked
         if (e.pointerCount > 1 && !gesture) {
             // Second finger: whatever the first one started is dropped.
             gesture = true
-            preview = null
-            stroke.shader = null
-            grab = -1
-            last = null
-            lastFocus = null
+            cancelTouch()
         }
         if (gesture || mode == Mode.NONE) {
             pinch(e)
@@ -506,7 +534,12 @@ private class EditCanvas(context: Context) : View(context) {
         when (action) {
             MotionEvent.ACTION_DOWN -> {
                 val width = (if (mode == Mode.PEN) penDp else blurDp) * dp / scale
-                try { startStroke(mode == Mode.BLUR, color, width, b) } catch (e: Throwable) { return }
+                stroke = try {
+                    strokePaint(mode == Mode.BLUR, color, width, b)
+                } catch (e: Throwable) {
+                    onNoMemory()
+                    return
+                }
                 points = arrayListOf(x, y)
                 preview = pathOf(points.toFloatArray())
             }
@@ -521,24 +554,7 @@ private class EditCanvas(context: Context) : View(context) {
                 preview = null
                 commit(Op.Stroke(mode == Mode.BLUR, color, stroke.strokeWidth, points.toFloatArray()))
             }
-            else -> {
-                preview = null
-                stroke.shader = null
-            }
-        }
-    }
-
-    /** Blur source: the image halved down to ~64 px on its long edge (each
-     *  halving averages), drawn back up with bilinear filtering. */
-    private fun blurShader(b: Bitmap): Shader {
-        var s = b
-        do {
-            val next = Bitmap.createScaledBitmap(s, maxOf(1, s.width / 2), maxOf(1, s.height / 2), true)
-            if (s !== b) s.recycle()
-            s = next
-        } while (maxOf(s.width, s.height) > 64)
-        return BitmapShader(s, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).apply {
-            setLocalMatrix(Matrix().apply { setScale(b.width.toFloat() / s.width, b.height.toFloat() / s.height) })
+            else -> preview = null
         }
     }
 
@@ -560,7 +576,10 @@ private class EditCanvas(context: Context) : View(context) {
             }
             MotionEvent.ACTION_MOVE -> {
                 val l = last ?: return
-                val min = minOf(48 * dp / scale, w / 4, h / 4)
+                // The smallest frame depends on the zoom: never more than the
+                // frame already is (a frame made at 8x, then zoomed out), else
+                // the ranges below would be empty.
+                val min = minOf(48 * dp / scale, w / 4, h / 4, crop.width(), crop.height())
                 when (grab) {
                     0 -> { crop.left = x.coerceIn(0f, crop.right - min); crop.top = y.coerceIn(0f, crop.bottom - min) }
                     1 -> { crop.right = x.coerceIn(crop.left + min, w); crop.top = y.coerceIn(0f, crop.bottom - min) }
@@ -574,7 +593,67 @@ private class EditCanvas(context: Context) : View(context) {
         }
     }
 
-    private companion object {
+    companion object {
         const val MAX_ZOOM = 8f
+
+        /** [ops] on a fresh copy of [base]; null when memory runs out (nothing half-done is kept). */
+        fun replay(base: Bitmap, ops: List<Op>): Bitmap? {
+            var b = try { base.copy(Bitmap.Config.ARGB_8888, true) } catch (e: Throwable) { null } ?: return null
+            for (op in ops) b = apply(op, b) ?: return null
+            return b
+        }
+
+        /** [op] on [b]: a stroke draws into it, rotate/crop return a new bitmap.
+         *  Null when memory runs out; [b] is then unchanged. */
+        fun apply(op: Op, b: Bitmap): Bitmap? = try {
+            when (op) {
+                is Op.Rotate -> mutable(Bitmap.createBitmap(b, 0, 0, b.width, b.height, Matrix().apply { setRotate(op.degrees) }, true))
+                is Op.Crop -> mutable(Bitmap.createBitmap(b, op.rect.left, op.rect.top, op.rect.width(), op.rect.height()))
+                is Op.Stroke -> {
+                    val paint = strokePaint(op.blur, op.color, op.width, b)
+                    Canvas(b).drawPath(pathOf(op.points), paint)
+                    b
+                }
+            }
+        } catch (e: Throwable) {
+            null
+        }
+
+        private fun mutable(b: Bitmap): Bitmap =
+            if (b.isMutable && b.config == Bitmap.Config.ARGB_8888) b
+            else b.copy(Bitmap.Config.ARGB_8888, true) ?: throw OutOfMemoryError()
+
+        fun pathOf(p: FloatArray) = Path().apply {
+            moveTo(p[0], p[1])
+            lineTo(p[0], p[1]) // a tap: the round cap draws a dot
+            for (i in 2 until p.size step 2) lineTo(p[i], p[i + 1])
+        }
+
+        fun strokePaint(blur: Boolean, color: Int, width: Float, b: Bitmap) = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+            strokeWidth = width
+            if (blur) {
+                this.color = Color.BLACK // opaque: the shader gives the colour
+                shader = blurShader(b)
+            } else {
+                this.color = color
+            }
+        }
+
+        /** Blur source: the image halved down to ~64 px on its long edge (each
+         *  halving averages), drawn back up with bilinear filtering. */
+        private fun blurShader(b: Bitmap): Shader {
+            var s = b
+            do {
+                val next = Bitmap.createScaledBitmap(s, maxOf(1, s.width / 2), maxOf(1, s.height / 2), true)
+                if (s !== b) s.recycle()
+                s = next
+            } while (maxOf(s.width, s.height) > 64)
+            return BitmapShader(s, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).apply {
+                setLocalMatrix(Matrix().apply { setScale(b.width.toFloat() / s.width, b.height.toFloat() / s.height) })
+            }
+        }
     }
 }

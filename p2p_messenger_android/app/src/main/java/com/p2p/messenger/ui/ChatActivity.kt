@@ -285,7 +285,7 @@ class ChatActivity : AppCompatActivity() {
     private val pickFileLauncher = registerForActivityResult(
         com.p2p.messenger.util.OpenMultipleDocumentsAtHome()
     ) { uris -> if (uris.isNotEmpty()) promptAttachmentCaption(uris = uris) { caption, picked ->
-        sendPickedFiles(picked.map { it.uri!! to it.hiRes }, caption)
+        sendPickedFiles(picked.map { it.uri!! to it.hiRes }, caption).invokeOnCompletion { picked.forEach { it.release() } }
     } }
 
     private val stickerPicker = StickerPicker(this, { P2PLib.sendSticker(peerDeviceFingerprint, it) }) { item ->
@@ -1899,9 +1899,8 @@ class ChatActivity : AppCompatActivity() {
 
     /** One send at a time so the files arrive in the order they were
      *  picked; the caption goes with the last one, under the batch. */
-    private fun sendPickedFiles(files: List<Pair<Uri, Boolean>>, caption: String = "") {
+    private fun sendPickedFiles(files: List<Pair<Uri, Boolean>>, caption: String = "") =
         lifecycleScope.launch { files.forEachIndexed { i, (u, hiRes) -> onFilePicked(u, if (i == files.lastIndex) caption else "", hiRes).join() } }
-    }
 
     /**
      * SAF (`OpenDocument`) ile seçilen dosya önce uygulamanın kendi

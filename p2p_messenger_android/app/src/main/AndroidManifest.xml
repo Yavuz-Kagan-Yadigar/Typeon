@@ -107,12 +107,17 @@
              işlevi, bildirilmediğinde devreye giren varsayılan davranışı
              (`adjustPan`) KAPATMAK: pan, pencerenin tamamını yukarı
              kaydırıyor ve bizim eklediğimiz dolguyla üst üste binip
-             düzeni bozuyordu. İlk denemede eksik olan buydu. -->
+             düzeni bozuyordu. İlk denemede eksik olan buydu.
+             `configChanges`: a rotation must not recreate the chat while the
+             caption dialog / image editor is open (the edit and the camera
+             shot live only there). -->
         <activity
             android:name=".ui.ChatActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
             android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".ui.GroupChatActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
             android:windowSoftInputMode="adjustResize" />
         <activity android:name=".ui.QrScanActivity" />
         <!-- Spec dışı, kullanıcı isteği: sohbetten doğrudan anlık çekim +

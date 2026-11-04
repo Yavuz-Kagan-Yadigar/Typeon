@@ -462,6 +462,9 @@
     <string name="image_edit_blur">Blur</string>
     <string name="image_edit_color">Pen colour</string>
     <string name="image_edit_size">Size</string>
+    <string name="image_edit_no_memory">Not enough memory for this edit</string>
+    <string name="image_edit_save_failed">Could not save the edit</string>
+    <string name="image_edit_reduced">Editing at %1$d × %2$d to fit in memory</string>
     <string name="settings_section_profile">Profile</string>
     <string name="settings_section_privacy">Privacy &amp; security</string>
     <string name="settings_section_network">Network &amp; connection</string>

@@ -323,7 +323,7 @@ class GroupChatActivity : AppCompatActivity() {
     /** bkz. ChatActivity `pickFileLauncher` aynı notu (grup ekleri). */
     private val pickGroupFileLauncher = registerForActivityResult(com.p2p.messenger.util.OpenMultipleDocumentsAtHome()) { uris ->
         if (uris.isNotEmpty()) promptAttachmentCaption(uris = uris) { caption, picked ->
-        sendPickedFiles(picked.map { it.uri!! to it.hiRes }, caption)
+        sendPickedFiles(picked.map { it.uri!! to it.hiRes }, caption).invokeOnCompletion { picked.forEach { it.release() } }
     }
     }
 
@@ -2193,7 +2193,7 @@ class GroupChatActivity : AppCompatActivity() {
 
     /** One send at a time so the files arrive in the order they were
      *  picked; the caption goes with the last one, under the batch. */
-    private fun sendPickedFiles(files: List<Pair<Uri, Boolean>>, caption: String = "") {
+    private fun sendPickedFiles(files: List<Pair<Uri, Boolean>>, caption: String = "") =
         lifecycleScope.launch { files.forEachIndexed { i, (u, hiRes) -> onGroupFilePicked(u, if (i == files.lastIndex) caption else "", hiRes).join() } }
     }
 

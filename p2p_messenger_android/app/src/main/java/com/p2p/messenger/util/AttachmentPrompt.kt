@@ -34,8 +34,13 @@ import java.util.UUID
 /** One attachment the user kept in the caption dialog: its position in the
  *  `uris` list (0 for the camera's `jpeg`), its own lossless choice and what
  *  to send — the picked [uri] or camera [jpeg], or the editor's PNG in their
- *  place (as our own FileProvider URI, or its bytes for the camera). */
-class PickedAttachment(val index: Int, val hiRes: Boolean, val uri: Uri?, val jpeg: ByteArray?)
+ *  place (as our own FileProvider URI, or its bytes for the camera). Call
+ *  [release] once the send has copied it: an edited file is then deleted. */
+class PickedAttachment(val index: Int, val hiRes: Boolean, val uri: Uri?, val jpeg: ByteArray?, private val editedFile: File? = null) {
+    fun release() {
+        editedFile?.parentFile?.deleteRecursively()
+    }
+}
 
 /**
  * Caption dialog shown before an attachment goes out (shared by the 1:1 and
@@ -76,17 +81,18 @@ fun AppCompatActivity.promptAttachmentCaption(
     val hiRes = BooleanArray(count)
     val kept = (0 until count).toMutableList()
     val previewDir = File(cacheDir, "attachment_preview")
-    // Edited images: still read by the send after the dialog closes, so not
-    // in `previewDir`. Kept when sent, deleted otherwise.
+    // Edited picked files: still read by the send after the dialog closes, so
+    // not in `previewDir`; the send deletes them (`release`), a cancel here.
+    // An edited camera shot stays in memory, like the shot itself.
     val editDir = File(cacheDir, "attachment_edit")
-    val edited = arrayOfNulls<File>(count)
+    val edited = arrayOfNulls<Any>(count) // File (picked) or PNG ByteArray (camera)
     val names = arrayOfNulls<String>(count)
     val thumbs = arrayOfNulls<Bitmap>(count)
     var sent = false
-    fun picked(i: Int): PickedAttachment {
-        val e = edited[i]
-        return if (jpeg != null) PickedAttachment(i, hiRes[i], null, e?.readBytes() ?: jpeg)
-        else PickedAttachment(i, hiRes[i], e?.let { FileProvider.getUriForFile(this, "$packageName.fileprovider", it) } ?: uris[i], null)
+    fun picked(i: Int): PickedAttachment = when (val e = edited[i]) {
+        is ByteArray -> PickedAttachment(i, hiRes[i], null, e)
+        is File -> PickedAttachment(i, hiRes[i], FileProvider.getUriForFile(this, "$packageName.fileprovider", e), null, e)
+        else -> PickedAttachment(i, hiRes[i], uris.getOrNull(i), jpeg)
     }
     val dialog = AlertDialog.Builder(this)
         .setTitle(titleFor(count))
@@ -97,7 +103,7 @@ fun AppCompatActivity.promptAttachmentCaption(
         .create()
     dialog.setOnDismissListener {
         previewDir.deleteRecursively()
-        if (!sent) edited.forEach { it?.parentFile?.deleteRecursively() }
+        if (!sent) edited.forEach { (it as? File)?.parentFile?.deleteRecursively() }
     }
 
     val gap = (4 * density).toInt()
@@ -142,7 +148,7 @@ fun AppCompatActivity.promptAttachmentCaption(
 
     if (count == 0) return
     lifecycleScope.launch(Dispatchers.IO) {
-        // ponytail: sent edits are swept an hour later, long after the send copied them.
+        // Left over by a send the process did not live to finish.
         val stale = System.currentTimeMillis() - 3_600_000
         editDir.listFiles()?.forEach { if (it.lastModified() < stale) it.deleteRecursively() }
         for (i in 0 until count) {
@@ -168,11 +174,14 @@ fun AppCompatActivity.promptAttachmentCaption(
                 if (!jxl) lossless.visibility = View.VISIBLE
                 image.setOnClickListener {
                     // JPEG XL: no Android decoder to edit with, the viewer only.
-                    if (jxl) openPreview(uri, jpeg, jxl, previewDir) else editTile(i, uri, jpeg, names, edited, editDir, onRetake?.let { retake -> { dialog.dismiss(); retake() } }) { file ->
-                        if (file == null) image.setImageBitmap(thumbs[i])
+                    if (jxl) openPreview(uri, jpeg, jxl, previewDir) else editTile(i, uri, jpeg, names, edited, editDir, onRetake?.let { retake -> { dialog.dismiss(); retake() } }) { result ->
+                        if (result == null) image.setImageBitmap(thumbs[i])
                         else lifecycleScope.launch(Dispatchers.IO) {
-                            val t = decodeBitmapThumb(Uri.fromFile(file), tileSize)
-                            withContext(Dispatchers.Main) { if (edited[i] == file) image.setImageBitmap(t) }
+                            val t = when (result) {
+                                is ByteArray -> ImagePreview.decodeBytes(result, tileSize)
+                                else -> decodeBitmapThumb(Uri.fromFile(result as File), tileSize)
+                            }
+                            withContext(Dispatchers.Main) { if (edited[i] === result) image.setImageBitmap(t) }
                         }
                     }
                 }
@@ -183,27 +192,48 @@ fun AppCompatActivity.promptAttachmentCaption(
     }
 }
 
-/** Opens tile [i] in the editor: from its last edit if any, Revert goes
- *  back to the picked file. [edited] gets the new PNG (null: the original). */
+/** Opens tile [i] in the editor: from its last edit if any, Original goes
+ *  back to the picked file. [edited] gets the new PNG — bytes for the camera
+ *  (never on disk, like the shot), a file for a picked one — or null. */
 private fun AppCompatActivity.editTile(
-    i: Int, uri: Uri?, jpeg: ByteArray?, names: Array<String?>, edited: Array<File?>, editDir: File,
+    i: Int, uri: Uri?, jpeg: ByteArray?, names: Array<String?>, edited: Array<Any?>, editDir: File,
     onRetake: (() -> Unit)?,
-    onChanged: (File?) -> Unit,
+    onChanged: (Any?) -> Unit,
 ) {
-    val original = { if (jpeg != null) ImagePreview.decodeBytes(jpeg, EDIT_MAX) else decodeBitmapThumbOrThrow(uri!!, EDIT_MAX) }
+    val original = { decodeForEdit { jpeg?.inputStream() ?: contentResolver.openInputStream(uri!!) } }
     val current = edited[i]
     // A provider's display name may hold anything: no path separators in ours.
     val base = names[i]?.substringBeforeLast('.')?.replace('/', '_')?.replace('\u0000', '_')?.take(80)?.takeIf { it.isNotBlank() } ?: "IMG"
     openImageEditor(
-        load = { current?.let { decodeBitmapThumbOrThrow(Uri.fromFile(it), EDIT_MAX) } ?: original() },
+        load = {
+            when (current) {
+                is ByteArray -> decodeForEdit { current.inputStream() }
+                is File -> decodeForEdit { current.inputStream() }
+                else -> original()
+            }
+        },
         original = original,
         startEdited = current != null,
-        out = File(editDir, "${UUID.randomUUID()}/$base.png"),
+        save = { bmp ->
+            if (jpeg != null) {
+                java.io.ByteArrayOutputStream().also { if (!bmp.compress(Bitmap.CompressFormat.PNG, 100, it)) throw java.io.IOException("png") }.toByteArray()
+            } else {
+                val out = File(editDir, "${UUID.randomUUID()}/$base.png")
+                try {
+                    out.parentFile!!.mkdirs()
+                    if (!out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }) throw java.io.IOException("png")
+                } catch (e: Throwable) {
+                    out.parentFile?.deleteRecursively()
+                    throw e
+                }
+                out
+            }
+        },
         onRetake = onRetake,
-    ) { file ->
-        edited[i]?.parentFile?.deleteRecursively()
-        edited[i] = file
-        onChanged(file)
+    ) { result ->
+        (edited[i] as? File)?.parentFile?.deleteRecursively()
+        edited[i] = result
+        onChanged(result)
     }
 }
 
