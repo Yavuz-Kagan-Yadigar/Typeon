@@ -773,6 +773,21 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         notifyItemChanged(idx)
     }
 
+    /** The pool keeps 5 rows by default; a screen of short text rows needs ~20,
+     *  and each inflate is slow (ROM font lookup per TextView), so the first
+     *  scroll from tall media rows into text stuttered. Pre-inflate on idle. */
+    fun warmPool(rv: RecyclerView, count: Int = 24) {
+        val pool = rv.recycledViewPool
+        pool.setMaxRecycledViews(0, count + 8)
+        rv.setItemViewCacheSize(8)
+        var left = count
+        android.os.Looper.myQueue().addIdleHandler {
+            if (!rv.isAttachedToWindow) return@addIdleHandler false
+            pool.putRecycledView(createViewHolder(rv, 0))
+            --left > 0
+        }
+    }
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): BubbleViewHolder {
         val view = LayoutInflater.from(parent.context)
             .inflate(R.layout.item_message_bubble, parent, false)

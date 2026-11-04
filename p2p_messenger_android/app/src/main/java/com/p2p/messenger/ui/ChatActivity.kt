@@ -517,6 +517,7 @@ class ChatActivity : AppCompatActivity() {
         val chatLayoutManager = LinearLayoutManager(this)
         recycler.layoutManager = chatLayoutManager
         recycler.adapter = adapter
+        adapter.warmPool(recycler)
         // Kullanıcı: "mesaj balonları bazen titriyor". Tik/görüldü/tepki
         // güncellemeleri `notifyItemChanged` ile geliyor ve varsayılan
         // animatör her birinde balonun eski ve yeni hâli arasında çapraz

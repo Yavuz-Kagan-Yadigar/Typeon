@@ -492,6 +492,7 @@ class GroupChatActivity : AppCompatActivity() {
         recycler.adapter = adapter
         // Kullanıcı: "mesaj balonları bazen titriyor". Tik/görüldü/tepki
         // güncellemeleri `notifyItemChanged` ile geliyor ve varsayılan
+        adapter.warmPool(recycler)
         // animatör her birinde balonun eski ve yeni hâli arasında çapraz
         // geçiş (crossfade) oynatıyordu. Ekleme/silme animasyonları kalıyor.
         (recycler.itemAnimator as? androidx.recyclerview.widget.SimpleItemAnimator)?.supportsChangeAnimations = false
