@@ -6,10 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.os.Bundle
-import android.view.View
-import android.widget.Button
 import android.widget.ImageButton
-import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -31,7 +28,8 @@ import kotlinx.coroutines.withContext
 
 /**
  * Spec dışı, kullanıcı isteği: sohbet giriş çubuğundaki kamera düğmesinin
- * açtığı "anlık çekim + kırp + gönder" ekranı.
+ * açtığı anlık çekim ekranı. The shot goes straight to the caption dialog,
+ * which opens it in the image editor (crop, rotate, retake are there).
  *
  * Kullanıcı isteğinin can alıcı kısmı "diske kaydedilmeden": bu yüzden
  * `ImageCapture.OnImageCapturedCallback` (BELLEĞE çeken overload)
@@ -62,9 +60,6 @@ class CameraCaptureActivity : AppCompatActivity() {
     private var lensFacing = CameraSelector.LENS_FACING_BACK
 
     private lateinit var previewView: PreviewView
-    private lateinit var cropOverlay: CropOverlayView
-    private lateinit var rowCaptureControls: LinearLayout
-    private lateinit var rowCropControls: LinearLayout
 
     private val requestCameraPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -83,9 +78,6 @@ class CameraCaptureActivity : AppCompatActivity() {
         supportActionBar?.hide()
 
         previewView = findViewById(R.id.cameraPreview)
-        cropOverlay = findViewById(R.id.cropOverlay)
-        rowCaptureControls = findViewById(R.id.rowCaptureControls)
-        rowCropControls = findViewById(R.id.rowCropControls)
 
         findViewById<ImageButton>(R.id.btnCloseCamera).setOnClickListener { finish() }
         findViewById<ImageButton>(R.id.btnShutter).setOnClickListener { capture() }
@@ -97,9 +89,6 @@ class CameraCaptureActivity : AppCompatActivity() {
             }
             startCamera()
         }
-        findViewById<Button>(R.id.btnRetake).setOnClickListener { showCaptureStage() }
-        findViewById<ImageButton>(R.id.btnRotate).setOnClickListener { cropOverlay.rotate90() }
-        findViewById<Button>(R.id.btnUsePhoto).setOnClickListener { finishWithCroppedPhoto() }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -177,8 +166,8 @@ class CameraCaptureActivity : AppCompatActivity() {
                             // Also when the activity went away first.
                             image.close()
                         }
-                        shutter.isEnabled = true
                         if (bitmap == null) {
+                            shutter.isEnabled = true
                             Toast.makeText(
                                 this@CameraCaptureActivity,
                                 getString(R.string.error_camera_start_failed, ""),
@@ -186,7 +175,7 @@ class CameraCaptureActivity : AppCompatActivity() {
                             ).show()
                             return@launch
                         }
-                        showCropStage(bitmap)
+                        finishWithPhoto(bitmap)
                     }
                 }
 
@@ -241,45 +230,12 @@ class CameraCaptureActivity : AppCompatActivity() {
         return rotated
     }
 
-    private fun showCropStage(bitmap: Bitmap) {
-        cropOverlay.setBitmap(bitmap)
-        cropOverlay.visibility = View.VISIBLE
-        previewView.visibility = View.GONE
-        rowCaptureControls.visibility = View.GONE
-        rowCropControls.visibility = View.VISIBLE
-        // Kırpma aşamasında kamerayı boşuna açık tutmuyoruz (pil + bazı
-        // cihazlarda "kamera kullanılıyor" göstergesi).
+    /** The shutter stays disabled: the photo is on its way. */
+    private fun finishWithPhoto(bitmap: Bitmap) {
         cameraProvider?.unbindAll()
-    }
-
-    private fun showCaptureStage() {
-        cropOverlay.setBitmap(null)
-        cropOverlay.visibility = View.GONE
-        previewView.visibility = View.VISIBLE
-        rowCaptureControls.visibility = View.VISIBLE
-        rowCropControls.visibility = View.GONE
-        startCamera()
-    }
-
-    private fun finishWithCroppedPhoto() {
-        val cropped = cropOverlay.buildCroppedBitmap()
-        if (cropped == null) {
-            Toast.makeText(this, R.string.error_send_failed, Toast.LENGTH_SHORT).show()
-            finish()
-            return
-        }
-        // `ImagePreview.compressBitmap` girdisini `recycle()` eder ve kırpma
-        // dörtgeni hiç oynatılmamışsa dönen bitmap KAYNAĞIN TA KENDİSİDİR —
-        // bu yüzden görünümün ona olan referansını sıkıştırmadan ÖNCE
-        // bırakıyoruz, aksi halde arka planda geri dönüştürülmüş bir
-        // bitmap çizilmeye çalışılabilirdi.
-        cropOverlay.setBitmap(null)
-        findViewById<Button>(R.id.btnUsePhoto).isEnabled = false
-        // The photo is on its way: "Retake" now would still send it.
-        findViewById<Button>(R.id.btnRetake).isEnabled = false
         lifecycleScope.launch(Dispatchers.IO) {
             val jpeg = try {
-                ImagePreview.compressBitmap(cropped, CAPTURE_MAX_DIMENSION, CAPTURE_JPEG_QUALITY)
+                ImagePreview.compressBitmap(bitmap, CAPTURE_MAX_DIMENSION, CAPTURE_JPEG_QUALITY)
             } catch (e: Exception) {
                 null
             } catch (e: OutOfMemoryError) {

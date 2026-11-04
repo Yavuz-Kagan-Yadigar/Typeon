@@ -14,4 +14,7 @@
          the camera shot or a JPEG XL (as GIF) shown full screen from the
          caption dialog; deleted when the dialog closes. -->
     <cache-path name="attachment_preview" path="attachment_preview/" />
+    <!-- Context.getCacheDir()/attachment_edit/ — util.AttachmentPrompt: an
+         image edited from the caption dialog, sent through this URI. -->
+    <cache-path name="attachment_edit" path="attachment_edit/" />
 </paths>

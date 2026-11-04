@@ -377,7 +377,6 @@
     <string name="action_capture_photo">Fotoğraf çek</string>
     <string name="action_flip_camera">Kamerayı değiştir</string>
     <string name="action_retake_photo">Yeniden çek</string>
-    <string name="action_rotate_photo">Döndür</string>
 
     <!-- Spec dışı, kullanıcı isteği: bildirimlerde mesaj metnini göster/gizle. -->
     <string name="lbl_notif_show_message">Bildirimlerde mesajları göster</string>
@@ -412,6 +411,16 @@
     <string name="hint_attachment_caption">Açıklama (isteğe bağlı)</string>
     <string name="attachment_hi_res">Kayıpsız</string>
     <!-- Settings screen section headers -->
+    <string name="image_edit_revert">Orijinal</string>
+    <string name="image_edit_undo">Geri al</string>
+    <string name="image_edit_rotate_left">Sola döndür</string>
+    <string name="image_edit_rotate_right">Sağa döndür</string>
+    <string name="image_edit_crop">Kırp</string>
+    <string name="image_edit_apply_crop">Kırpmayı uygula</string>
+    <string name="image_edit_pen">Kalem</string>
+    <string name="image_edit_blur">Bulanıklaştır</string>
+    <string name="image_edit_color">Kalem rengi</string>
+    <string name="image_edit_size">Boyut</string>
     <string name="settings_section_profile">Profil</string>
     <string name="settings_section_privacy">Gizlilik ve güvenlik</string>
     <string name="settings_section_network">Ağ ve bağlantı</string>

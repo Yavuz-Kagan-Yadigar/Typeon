@@ -323,7 +323,7 @@ class GroupChatActivity : AppCompatActivity() {
     /** bkz. ChatActivity `pickFileLauncher` aynı notu (grup ekleri). */
     private val pickGroupFileLauncher = registerForActivityResult(com.p2p.messenger.util.OpenMultipleDocumentsAtHome()) { uris ->
         if (uris.isNotEmpty()) promptAttachmentCaption(uris = uris) { caption, picked ->
-        sendPickedFiles(picked.map { uris[it.index] to it.hiRes }, caption)
+        sendPickedFiles(picked.map { it.uri!! to it.hiRes }, caption)
     }
     }
 
@@ -333,7 +333,7 @@ class GroupChatActivity : AppCompatActivity() {
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
-            CapturedImage.take()?.let { jpeg -> promptAttachmentCaption(jpeg = jpeg) { caption, picked -> picked.firstOrNull()?.let { onGroupPhotoCaptured(jpeg, caption, it.hiRes) } } }
+            CapturedImage.take()?.let { jpeg -> promptAttachmentCaption(jpeg = jpeg, onRetake = { findViewById<View>(R.id.btnCamera).performClick() }) { caption, picked -> picked.firstOrNull()?.let { onGroupPhotoCaptured(it.jpeg!!, caption, it.hiRes) } } }
         }
     }
 

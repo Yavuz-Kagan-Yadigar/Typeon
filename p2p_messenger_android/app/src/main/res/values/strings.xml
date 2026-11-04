@@ -418,7 +418,6 @@
     <string name="action_capture_photo">Take photo</string>
     <string name="action_flip_camera">Switch camera</string>
     <string name="action_retake_photo">Retake</string>
-    <string name="action_rotate_photo">Rotate</string>
 
     <!-- Spec dışı, kullanıcı isteği: bildirimlerde mesaj metnini göster/gizle. -->
     <string name="lbl_notif_show_message">Show messages in notifications</string>
@@ -453,6 +452,16 @@
     <string name="hint_attachment_caption">Caption (optional)</string>
     <string name="attachment_hi_res">Lossless</string>
     <!-- Settings screen section headers -->
+    <string name="image_edit_revert">Original</string>
+    <string name="image_edit_undo">Revert</string>
+    <string name="image_edit_rotate_left">Rotate left</string>
+    <string name="image_edit_rotate_right">Rotate right</string>
+    <string name="image_edit_crop">Crop</string>
+    <string name="image_edit_apply_crop">Apply crop</string>
+    <string name="image_edit_pen">Pen</string>
+    <string name="image_edit_blur">Blur</string>
+    <string name="image_edit_color">Pen colour</string>
+    <string name="image_edit_size">Size</string>
     <string name="settings_section_profile">Profile</string>
     <string name="settings_section_privacy">Privacy &amp; security</string>
     <string name="settings_section_network">Network &amp; connection</string>
