@@ -2080,10 +2080,10 @@ mod tests {
 
         // Hiç onaylamayan yabancı: satır kalır ama kapasiteye sayılmaz.
         let seq2 = s.deposit("mb_fp", b"handshake-2", &sender, 2, 1000).unwrap();
-        // A third reader is refused: two per mailbox (2026-10-07).
+        // A third reader of the same key is refused: two per key, both in use.
         let third = enroll(&s, b"sile", "peerQ");
-        let wrong = vec![("mb_fp".to_string(), b"other-key".to_vec())];
-        assert_eq!(s.register_mailboxes_proved(&third, &["mb_fp".to_string()], &[], &wrong, 0, 100).unwrap().0.len(), 1);
+        let same_key = vec![("mb_fp".to_string(), b"test-key".to_vec())];
+        assert_eq!(s.register_mailboxes_proved(&third, &["mb_fp".to_string()], &[], &same_key, 0, 100).unwrap().0.len(), 1);
         // The lurker is the silent reader here: it has not acked seq2.
         assert_eq!(s.ack("mb_fp", seq2, &victim).unwrap(), 0, "sessiz okuyucu varken silinmez");
         assert_eq!(s.mailbox_item_count("mb_fp"), 0, "alicinin onayladigi satir kapasiteye sayilmaz");

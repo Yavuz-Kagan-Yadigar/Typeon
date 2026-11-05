@@ -1626,9 +1626,10 @@ mod tests {
         let exif = [0xFF, 0xE1, 0, 6, b'E', b'x', b'i', b'f'];
         let icc = [0xFF, 0xE2, 0, 4, b'I', b'C'];
         let iptc = [0xFF, 0xED, 0, 4, b'P', b'S'];
-        // Image data may hold anything, a marker of a metadata segment too.
-        let scan = [0xFF, 0xDA, 0, 2, 1, 2, 0xFF, 0xE1, 0, 2, 0xFF, 0xD9];
-        let photo = [&soi[..], &jfif, &exif, &icc, &iptc, &scan].concat();
+        // An APP1 segment between scans is metadata too (E-05): cut as well.
+        let scan = [0xFF, 0xDA, 0, 2, 1, 2, 0xFF, 0xD9];
+        let scan_app1 = [0xFF, 0xDA, 0, 2, 1, 2, 0xFF, 0xE1, 0, 2, 0xFF, 0xD9];
+        let photo = [&soi[..], &jfif, &exif, &icc, &iptc, &scan_app1].concat();
         assert_eq!(sent(&photo), [&soi[..], &jfif, &icc, &scan].concat());
         // A rotated photo keeps its orientation, and only that.
         let rotated = b"\xFF\xE1\0\x32Exif\0\0II*\0\x08\0\0\0\x02\0\x0F\x01\x02\0\x01\0\0\0A\0\0\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0GPS!";
