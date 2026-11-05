@@ -630,7 +630,7 @@ fn build_decoder(shared: &Shared, slot: u8, hevc: bool, rotation: u8) -> Result<
     };
     let p = launch(&format!(
         "appsrc name=src is-live=true format=time do-timestamp=true \
-         caps=\"video/x-{codec},stream-format=byte-stream,alignment=au\" ! {parse} ! {decoder} ! \
+         caps=\"video/x-{codec},stream-format=byte-stream,alignment=au\" ! {parse} ! video/x-{codec},width=(int)[16,4096],height=(int)[16,4096] ! {decoder} ! \
          videoconvert ! video/x-raw,format=RGBA ! {flip}appsink name=out sync=false max-buffers=2 drop=true \
          caps=\"video/x-raw,format=RGBA\""
     ))?;

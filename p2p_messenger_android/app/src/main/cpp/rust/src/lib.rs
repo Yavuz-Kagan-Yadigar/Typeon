@@ -382,10 +382,17 @@ pub(crate) fn wait_for_network_activity(timeout_ms: u64) {
 /// behind: neither the `.enc` nor the `files` row / queued server upload that
 /// `finish` may already have written (a row marked 'complete' for a deleted
 /// `.enc` made the attachment undownloadable forever).
-fn encrypt_then_finish<T>(source_path: &str, group_id: Option<&str>, finish: impl FnOnce(&mut P2PCore, String, [u8; 32], u64, String) -> Result<T, String>) -> Result<T, String> {
+fn encrypt_then_finish<T>(source_path: &str, group_id: Option<&str>, finish: impl FnOnce(&mut P2PCore, String, [u8; 32], u64, String, Vec<u8>) -> Result<T, String>) -> Result<T, String> {
     let (file_id, file_key, dest_path) = core_lock().begin_outgoing_file(source_path, group_id)?;
-    let encrypted = attachments::encrypt_file_to_disk_with(std::path::Path::new(source_path), &dest_path, &file_key, attachments::FILE_CHUNK_SIZE_V2);
-    let (total_size, sha256_hex) = match encrypted {
+    // The chunk hashes for the offer are read back from the `.enc` here, still
+    // without the lock (see `FileOffer.chunk_hashes`).
+    let encrypted = attachments::encrypt_file_to_disk_with(std::path::Path::new(source_path), &dest_path, &file_key, attachments::FILE_CHUNK_SIZE_V2)
+        .and_then(|(total_size, sha256_hex)| {
+            let total_chunks = attachments::total_chunks_with(total_size, attachments::FILE_CHUNK_SIZE_V2);
+            let hashes = attachments::chunk_hashes_of(&dest_path, total_chunks, attachments::FILE_CHUNK_SIZE_V2)?;
+            Ok((total_size, sha256_hex, hashes))
+        });
+    let (total_size, sha256_hex, chunk_hashes) = match encrypted {
         Ok(v) => v,
         Err(e) => {
             // Yarım kalmış `.enc` öksüz kalmasın (hiçbir DB kaydı yok).
@@ -394,7 +401,7 @@ fn encrypt_then_finish<T>(source_path: &str, group_id: Option<&str>, finish: imp
         }
     };
     let mut core = core_lock();
-    let result = finish(&mut *core, file_id.clone(), file_key, total_size, sha256_hex);
+    let result = finish(&mut *core, file_id.clone(), file_key, total_size, sha256_hex, chunk_hashes);
     if result.is_err() {
         core.discard_outgoing_file(&file_id);
         let _ = std::fs::remove_file(&dest_path);
@@ -404,8 +411,8 @@ fn encrypt_then_finish<T>(source_path: &str, group_id: Option<&str>, finish: imp
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_and_send_file_unlocked(peer_device_fingerprint: String, source_path: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>) -> Result<(String, String), String> {
-    encrypt_then_finish(&source_path, None, |core, file_id, file_key, total_size, sha256_hex| {
-        core.finish_outgoing_file(peer_device_fingerprint, file_id, file_key, total_size, sha256_hex, file_name, mime_type, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, None)
+    encrypt_then_finish(&source_path, None, |core, file_id, file_key, total_size, sha256_hex, chunk_hashes| {
+        core.finish_outgoing_file(peer_device_fingerprint, file_id, file_key, total_size, sha256_hex, chunk_hashes, file_name, mime_type, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, None)
     })
 }
 
@@ -413,8 +420,8 @@ pub(crate) fn prepare_and_send_file_unlocked(peer_device_fingerprint: String, so
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_and_send_group_file_unlocked(group_id: String, source_path: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>) -> Result<String, String> {
     let gid = group_id.clone();
-    encrypt_then_finish(&source_path, Some(&gid), |core, file_id, file_key, total_size, sha256_hex| {
-        core.finish_outgoing_group_file(group_id, file_id, file_key, total_size, sha256_hex, file_name, mime_type, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, None)
+    encrypt_then_finish(&source_path, Some(&gid), |core, file_id, file_key, total_size, sha256_hex, chunk_hashes| {
+        core.finish_outgoing_group_file(group_id, file_id, file_key, total_size, sha256_hex, chunk_hashes, file_name, mime_type, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, None)
     })
 }
 
@@ -434,11 +441,11 @@ pub(crate) fn send_sticker_unlocked(peer: Option<String>, group_id: Option<Strin
     let origin = Some(format!("jxl:{sticker_id}"));
     let source = tmp.to_string_lossy().to_string();
     let result = match (peer, group_id) {
-        (Some(peer), None) => encrypt_then_finish(&source, None, |core, file_id, file_key, total_size, sha256_hex| {
-            core.finish_outgoing_file(peer, file_id, file_key, total_size, sha256_hex, "sticker.jxl".into(), "image/jxl".into(), None, None, String::new(), None, None, origin).map(|r| r.0)
+        (Some(peer), None) => encrypt_then_finish(&source, None, |core, file_id, file_key, total_size, sha256_hex, chunk_hashes| {
+            core.finish_outgoing_file(peer, file_id, file_key, total_size, sha256_hex, chunk_hashes, "sticker.jxl".into(), "image/jxl".into(), None, None, String::new(), None, None, origin).map(|r| r.0)
         }),
-        (None, Some(gid)) => encrypt_then_finish(&source, Some(&gid.clone()), |core, file_id, file_key, total_size, sha256_hex| {
-            core.finish_outgoing_group_file(gid, file_id, file_key, total_size, sha256_hex, "sticker.jxl".into(), "image/jxl".into(), None, None, String::new(), None, None, None, origin)
+        (None, Some(gid)) => encrypt_then_finish(&source, Some(&gid.clone()), |core, file_id, file_key, total_size, sha256_hex, chunk_hashes| {
+            core.finish_outgoing_group_file(gid, file_id, file_key, total_size, sha256_hex, chunk_hashes, "sticker.jxl".into(), "image/jxl".into(), None, None, String::new(), None, None, None, origin)
         }),
         _ => Err("peer or group".to_string()),
     };
@@ -936,6 +943,39 @@ fn is_safe_file_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// The 8-byte author tag every group message id starts with (as 16 hex
+/// characters): a hash of the group and the author's identity id. Text ids
+/// are `<tag>-<uuid>`; file ids carry it through the blob upload secret (see
+/// `blob_upload_secret`). A receiver recomputes it from the authenticated
+/// sender, or from a history row's author, so no member can make an id that
+/// collides with another member's message (C-02).
+fn group_msg_tag(group_id: &str, author_identity_id: &str) -> [u8; 8] {
+    use sha2::Digest as _;
+    let h = sha2::Sha256::new_with_prefix(b"typeon-group-msg-id-v1")
+        .chain_update(group_id.as_bytes())
+        .chain_update([0u8])
+        .chain_update(author_identity_id.as_bytes())
+        .finalize();
+    let mut tag = [0u8; 8];
+    tag.copy_from_slice(&h[..8]);
+    tag
+}
+
+/// Whether group message id `id` was made by `author_identity_id` in
+/// `group_id` (it starts with that author's `group_msg_tag`).
+fn group_msg_id_bound(group_id: &str, author_identity_id: &str, id: &str) -> bool {
+    id.len() > 16 && id.starts_with(&hex::encode(group_msg_tag(group_id, author_identity_id)))
+}
+
+/// A group reply that names the quoted author must quote an id of that
+/// author; otherwise it shows the wrong name and the reply is dropped.
+fn group_reply_bound(group_id: &str, reply_to_message_id: Option<&str>, reply_to_sender_identity_id: Option<&str>) -> bool {
+    match (reply_to_message_id, reply_to_sender_identity_id) {
+        (Some(id), Some(author)) => group_msg_id_bound(group_id, author, id),
+        _ => true,
+    }
 }
 
 /// `file_name`'den türetilen uzantının yol ayırıcı taşımadığını garanti eder
@@ -2240,7 +2280,7 @@ mod recovery_tests {
 
         let key = [9u8; 32];
         let offer = |core: &mut P2PCore, fid: &str, sha: &str, origin: &str| {
-            core.receive_file_offer("peer", "ident", None, fid, "s.jxl", "image/jxl", 5, &key, sha, &None, None, Some(attachments::FILE_CHUNK_SIZE_V2 as u32), "", None, None, None, true, Some(origin));
+            core.receive_file_offer("peer", "ident", None, fid, "s.jxl", "image/jxl", 5, &key, sha, &None, None, Some(attachments::FILE_CHUNK_SIZE_V2 as u32), &[0u8; 32], "", None, None, None, true, Some(origin));
         };
         let status = |core: &P2PCore, fid: &str| -> String {
             core.db.as_ref().unwrap().query_row("SELECT status FROM files WHERE file_id = ?1", params![fid], |r| r.get(0)).unwrap()
@@ -2794,13 +2834,32 @@ mod review5_tests {
         let (mut core, dir) = core_on_disk("edit");
         let gid = "group-0123456789abcdef";
         let author = "ab".repeat(32);
-        core.archive_group_message(gid, &author, "received", b"old", Some("m1"), None, None, None, 5, None).unwrap();
-        let edit = MessageContent::Edit { target_message_id: "m1".into(), new_text: "new".into(), group_id: Some(gid.into()), edited_at_ms: 10, author_proof: None };
+        let m1 = format!("{}-1", hex::encode(group_msg_tag(gid, &author)));
+        core.archive_group_message(gid, &author, "received", b"old", Some(&m1), None, None, None, 5, None).unwrap();
+        // Another member may not edit it: the id carries the author's tag.
+        let other = MessageContent::Edit { target_message_id: m1.clone(), new_text: "x".into(), group_id: Some(gid.into()), edited_at_ms: 9, author_proof: None };
+        assert_eq!(core.apply_edit_or_delete_content("fp", &"cd".repeat(32), "p0", other)["type"], "noop");
+        let edit = MessageContent::Edit { target_message_id: m1.clone(), new_text: "new".into(), group_id: Some(gid.into()), edited_at_ms: 10, author_proof: None };
         assert_eq!(core.apply_edit_or_delete_content("fp", &author, "p1", edit)["type"], "group_edit");
         core.remove_group_locally(gid);
-        let delete = MessageContent::Delete { target_message_id: "m1".into(), group_id: Some(gid.into()), author_proof: None };
+        let delete = MessageContent::Delete { target_message_id: m1, group_id: Some(gid.into()), author_proof: None };
         assert_eq!(core.apply_edit_or_delete_content("fp", &author, "p2", delete)["type"], "noop");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A group file id (the server blob id) carries its author's tag, so
+    /// members can check who may offer it (C-02).
+    #[test]
+    fn group_file_id_carries_the_author_tag() {
+        let mut secret = group_msg_tag("g", "a").to_vec();
+        secret.extend_from_slice(&[1u8; 16]);
+        let id = server_proto::blob_id_for_upload_secret(&secret).unwrap();
+        assert!(group_msg_id_bound("g", "a", &id));
+        assert!(!group_msg_id_bound("g", "b", &id));
+        assert!(!group_msg_id_bound("h", "a", &id));
+        assert!(!group_msg_id_bound("g", "a", &hex::encode(group_msg_tag("g", "a"))), "tag alone is no id");
+        assert!(!group_reply_bound("g", Some(&id), Some("b")));
+        assert!(group_reply_bound("g", Some(&id), None));
     }
 
     /// A 1:1 row is owned by the identity whose chat it is in, not by any
@@ -3280,8 +3339,18 @@ pub struct AttachmentSummary {
 /// sırayla (0, 1, 2, ...) istenir, bu yüzden `.enc` dosyasına sadece
 /// EKLEME (append) yapılır, seek gerekmez).
 struct DownloadState {
-    /// SHA-256 of the plaintext up to `next_chunk_index`, see `finalize_download`.
-    hasher: sha2::Sha256,
+    /// `FileOffer.chunk_hashes` of this file (from the `files` row): one
+    /// SHA-256 per group of `per_hash` chunks, over their ciphertext.
+    chunk_hashes: Vec<u8>,
+    /// `attachments::chunks_per_hash` of this file.
+    per_hash: u32,
+    /// Chunks on disk whose group is not complete yet (only when `per_hash`
+    /// > 1): the source that served each and its plaintext length. They move
+    /// to `received_chunks` once the group hash matches.
+    pending_chunks: std::collections::HashMap<u32, (PeerId, usize)>,
+    /// Sources that served a chunk which did not match `chunk_hashes`: not
+    /// asked again in this attempt.
+    bad_sources: std::collections::HashSet<PeerId>,
     peer_id: PeerId,
     /// Bkz. `P2PCore::peer_for_file` — `file_progress`/`file_complete`/
     /// `file_failed` olaylarının `"peer"` alanını doldurmak için gerekli
@@ -3342,6 +3411,7 @@ struct DownloadState {
     inflight_chunks: std::collections::HashSet<u32>,
     /// Diske YAZILMIŞ parçalar. Boru hattında parçalar sırasız geldiği için
     /// bir sayaç yetmez — hangi indeksin tamamlandığı tek tek tutulmalı.
+    /// Only chunks whose group matched `chunk_hashes` are in it.
     received_chunks: std::collections::HashSet<u32>,
     /// Uyarlanır boru hattı penceresi (bkz. `DOWNLOAD_WINDOW_START`) — aynı
     /// anda kaç parçanın havada olabileceği. Başarıda büyür, hatada yarılanır.
@@ -3998,6 +4068,11 @@ const HISTORY_STORAGE_SWEEP_INTERVAL_MS: u64 = 30_000;
 /// için mesajlar düşüyordu. BELLEK TAVANI DEĞİŞMİYOR — sınır zaten
 /// süreden değil `MAX_EARLY_PACKETS_PER_PEER` sayısından geliyor.
 const EARLY_PACKET_TTL_MS: u64 = MAX_UNCONFIRMED_AGE_MS;
+/// bkz. `P2PCore.unknown_group_held`: how long, for how many groups, and how
+/// many packets per group content for a group we do not hold is kept.
+const UNKNOWN_GROUP_HOLD_TTL_MS: u64 = 30 * 60_000;
+const UNKNOWN_GROUP_HOLD_GROUPS: usize = 16;
+const UNKNOWN_GROUP_HOLD_PER_GROUP: usize = 64;
 /// Teslim garantisi düzeltmesi (2026-08-28): 20'den 200'e çıkarıldı.
 ///
 /// Bu tampon, el sıkışmadan ÖNCE gelen paketleri tutuyor. 20, tam da en
@@ -4396,8 +4471,10 @@ struct P2PCore {
     /// üretiyor, A'nınki de INITIATOR — iki uyumsuz initiator, hiçbir mesaj
     /// çözülemiyor. Artık böyle bir `HandshakeInit` tamponlanır ve
     /// `process_identity_exchange` gönderen cihazı öğrenir öğrenmez oynatılır.
-    /// key = gönderen device_fingerprint.
-    early_handshakes: HashMap<String, (u64, Option<PeerId>, HandshakeInit)>,
+    /// key = gönderen device_fingerprint. Up to 3 inits per fingerprint,
+    /// never replaced: the claim is unverified until replay, so a later junk
+    /// init must not push out the genuine one (its digest stays deduped).
+    early_handshakes: HashMap<String, Vec<(u64, Option<PeerId>, HandshakeInit)>>,
     /// bkz. `INBOUND_DEDUP_WINDOW_MS` — başarıyla işlenmiş gelen zarfların
     /// `ham bayt hash'i -> son görülme (ms)` haritası. Çok yollu teslimin
     /// ürettiği bayt-aynısı tekrarları, imza doğrulama/ratchet decrypt gibi
@@ -4418,6 +4495,11 @@ struct P2PCore {
     /// paketin KENDİ message_id'si (Ack için), içerik). Hedef `Text`
     /// arşivlenince `replay_buffered_edits_deletes` ile uygulanır.
     pending_edits_deletes: HashMap<String, Vec<(u64, String, String, String, MessageContent)>>,
+    /// Text/FileOffer/Reaction for a group we do not hold yet, by group id:
+    /// (held at, source, peer_fp, sender identity, packet id, content,
+    /// signed send time). Archived, a removed member's or any contact's rows
+    /// for a made-up id stayed for good and showed once the group was known.
+    unknown_group_held: HashMap<String, Vec<(u64, Option<PeerId>, String, String, String, MessageContent, u64)>>,
     groups: HashMap<String, Group>,
     /// Kullanıcının onay beklediği, henüz kabul/red edilmemiş cihaz
     /// değişikliği uyarıları (spec 2.2). key = new_device_fingerprint.
@@ -4722,6 +4804,8 @@ struct P2PCore {
     last_unconfirmed_retry_at: u64,
     /// Device -> when its last HistorySyncRequest was answered (rate limit).
     history_answered_at: HashMap<String, u64>,
+    /// Device -> (window start, row bytes sent in HistorySyncResponses since).
+    history_sent_bytes: HashMap<String, (u64, usize)>,
     /// Group `HistorySyncRequest` id -> members that already answered it (one
     /// answer each). Dropped with the request (`forget_history_request`).
     history_answered_by: HashMap<String, std::collections::HashSet<String>>,
@@ -5074,6 +5158,7 @@ impl P2PCore {
             ack_batches_inflight: HashMap::new(),
             last_inbound_dedup_prune_at: 0,
             pending_edits_deletes: HashMap::new(),
+            unknown_group_held: HashMap::new(),
             groups: HashMap::new(),
             pending_device_alerts: HashMap::new(),
             swarm: None,
@@ -5149,6 +5234,7 @@ impl P2PCore {
             pending_group_messages: HashMap::new(),
             group_failed_copies: HashMap::new(),
             history_answered_at: HashMap::new(),
+            history_sent_bytes: HashMap::new(),
             history_answered_by: HashMap::new(),
             wb_outbox: HashMap::new(),
             wb_reply_at: HashMap::new(),
@@ -5576,6 +5662,8 @@ impl P2PCore {
         migrate("CREATE UNIQUE INDEX IF NOT EXISTS idx_stickers_origin ON stickers(origin_id)");
         migrate("ALTER TABLE files ADD COLUMN sticker_origin TEXT");
         migrate("CREATE INDEX IF NOT EXISTS idx_files_sticker_origin ON files(sticker_origin)");
+        // `FileOffer.chunk_hashes`: each received chunk is checked against it.
+        migrate("ALTER TABLE files ADD COLUMN chunk_hashes BLOB");
         // L-135: the group row id of a queued copy (its own ids are per member).
         migrate("ALTER TABLE pending_group_messages ADD COLUMN local_message_id TEXT");
         migrate("ALTER TABLE pending_durable_retries ADD COLUMN local_message_id TEXT");
@@ -6725,6 +6813,12 @@ impl P2PCore {
             .map_or(false, |d| d.owner_revoked)
             // L-22: a non-contact identity's (group member's) revoke.
             || self.non_contact_revoke(device_fingerprint).map_or(false, |(id, _)| id == identity_id)
+            // A device of my own identity that I revoked: siblings that never
+            // held its record have only `own_revokes` to go by. A device
+            // linked again since is an active record and is not refused.
+            || (self.my_identity_id().as_deref() == Some(identity_id)
+                && !self.known_remote_devices.get(device_fingerprint).map_or(false, |d| d.is_active)
+                && self.own_revokes().iter().any(|r| r.revoked_device_fingerprint == device_fingerprint))
     }
 
     /// A non-contact identity's revoke of `device_fingerprint` (`orv:` row,
@@ -7055,7 +7149,8 @@ impl P2PCore {
         // Revoked by its owner, perhaps before we ever saw it (the revoke came
         // with another device's IdentityExchange): its DeviceAdd still
         // verifies, and would make it a device of the contact again.
-        if self.owner_revoked(&exchange.identity_id, &fp) {
+        // (The link the user is making now may bring back a device revoked earlier.)
+        if !is_pending_link && self.owner_revoked(&exchange.identity_id, &fp) {
             return Err("IdentityExchange sahibinin iptal ettiği bir cihazdan geldi, yok sayıldı".to_string());
         }
         // Checked before `as_sibling` is computed: a sibling that introduces
@@ -7065,11 +7160,16 @@ impl P2PCore {
                 let consistent = da.new_device_fingerprint == fp && da.identity_id == exchange.identity_id;
                 // For my own identity this device counts too (it is not in
                 // `known_remote_devices`), as in `approve_device_link`.
+                // Revoked records count too, against a wider cap: they are
+                // kept for good (they stop a revival), and add+revoke cycles
+                // grew them without end.
                 let under_cap = self.known_remote_devices.contains_key(&fp) || {
                     self.known_remote_devices.values()
                         .filter(|d| d.identity_id == da.identity_id && d.is_active)
                         .count() + usize::from(my_id.as_deref() == Some(da.identity_id.as_str()))
                         < identity::MAX_ACTIVE_DEVICES
+                    && self.known_remote_devices.values().filter(|d| d.identity_id == da.identity_id).count()
+                        < 4 * identity::MAX_ACTIVE_DEVICES
                 };
                 if consistent
                     && under_cap
@@ -8144,6 +8244,7 @@ impl P2PCore {
             contacts, groups, siblings, sibling_proofs,
             archive_root_key: self.archive_root_key_bytes(),
             name_changed_at_ms: self.meta_u64("name_changed_at"),
+            own_revokes: self.own_revokes(),
         }
     }
 
@@ -8182,6 +8283,7 @@ impl P2PCore {
                     contacts: rest, groups: Vec::new(), siblings: Vec::new(), sibling_proofs: Vec::new(),
                     archive_root_key: first.archive_root_key.clone(),
                     name_changed_at_ms: first.name_changed_at_ms,
+                    own_revokes: Vec::new(),
                 }
             });
             rest = tail;
@@ -8197,6 +8299,7 @@ impl P2PCore {
             contacts: Vec::new(), groups, siblings: Vec::new(), sibling_proofs: Vec::new(),
             archive_root_key: first.archive_root_key.clone(),
             name_changed_at_ms: first.name_changed_at_ms,
+            own_revokes: Vec::new(),
         };
         let (mut chunk, mut bytes) = (Vec::new(), 0usize);
         for g in groups {
@@ -8396,6 +8499,24 @@ impl P2PCore {
                 self.known_remote_devices.insert(sd.device_fingerprint.clone(), rec);
                 self.import_mailbox_secrets(sd);
                 if let Some(addr) = &sd.last_addr { self.remember_device_addr(&sd.device_fingerprint, addr); }
+            }
+        }
+        // The revokes of my own devices, for a sibling linked after them.
+        // Each is checked against the root's signature; our own revoke is
+        // left to the paths that may wipe this device.
+        if let Some(my) = &my_id {
+            let own_fp = self.get_active_own_device_fingerprint().ok();
+            let held: Vec<String> = self.own_revokes().into_iter().map(|r| r.revoked_device_fingerprint).collect();
+            for r in &sync.own_revokes {
+                if &r.identity_id != my
+                    || own_fp.as_deref() == Some(r.revoked_device_fingerprint.as_str())
+                    || held.contains(&r.revoked_device_fingerprint)
+                {
+                    continue;
+                }
+                if let Err(e) = self.apply_device_revoke_notice(r, "") {
+                    warn!("Senkronla gelen kendi iptalimiz uygulanmadı: {}", e);
+                }
             }
         }
         learned
@@ -9762,6 +9883,13 @@ impl P2PCore {
             }
         }
 
+        // Sealed history would otherwise stay on the servers until its TTL.
+        // Best effort: an unreachable server keeps it, deletion goes on.
+        let server_ids: Vec<String> = self.servers.iter().map(|s| s.server_id.clone()).collect();
+        for sid in server_ids {
+            self.purge_server_archive(&sid);
+        }
+
         let content = MessageContent::AccountDeleted { deleted_at_ms: current_time_ms() };
         let mut targets: Vec<String> = self.contact_device_targets().into_iter()
             .filter(|fp| self.known_remote_devices.get(fp).map_or(true, |d| !self.deleted_identities.contains(&d.identity_id)))
@@ -10066,6 +10194,7 @@ impl P2PCore {
         // back to what any group member is: vouched by the group, unverified.
         if self.groups.values().any(|g| g.is_member(&contact.trusted_identity_id)) {
             self.clear_chat_history(contact_id)?;
+            self.purge_conv_archive(&contact.trusted_identity_id);
             if let Some(c) = self.contacts.get_mut(contact_id) {
                 c.added_via_group = true;
             }
@@ -10109,6 +10238,9 @@ impl P2PCore {
             tx.execute("DELETE FROM contacts WHERE contact_id = ?1", params![contact_id]).map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())?;
         }
+        // K-35: the sealed 1:1 archive would otherwise stay on the history
+        // server for its TTL.
+        self.purge_conv_archive(&contact.trusted_identity_id);
 
         self.contacts.remove(contact_id);
         self.identity_to_contact.remove(&contact.trusted_identity_id);
@@ -10213,6 +10345,9 @@ impl P2PCore {
         self.pending_envelopes.retain(|q| q.target != fp);
         self.early_packets.remove(fp);
         self.early_handshakes.remove(fp);
+        // Its buffered edits/deletes too: they would apply once their target arrives.
+        self.pending_edits_deletes.retain(|_, b| { b.retain(|e| e.1 != fp); !b.is_empty() });
+        self.unknown_group_held.retain(|_, b| { b.retain(|e| e.2 != fp); !b.is_empty() });
         self.undecryptable_from.remove(fp);
         self.last_handshake_redo.remove(fp);
         self.reconnect_backoff.remove(fp);
@@ -12108,6 +12243,18 @@ impl P2PCore {
             self.remove_durable_retry(&id);
             self.cancel_server_deposit(&id);
         }
+        // Copies still waiting for an unresolved member device. Only the
+        // Text row itself (`group_row_id`); queued Edit/Delete entries stay.
+        for queue in self.pending_group_messages.values_mut() {
+            queue.retain(|c| group_row_id(c) != Some(target_message_id));
+        }
+        self.pending_group_messages.retain(|_, q| !q.is_empty());
+        if let Some(conn) = &self.db {
+            let _ = conn.execute(
+                "DELETE FROM pending_group_messages WHERE local_message_id = ?1",
+                params![target_message_id],
+            );
+        }
     }
 
     fn delete_message(&mut self, peer_device_fingerprint: String, target_message_id: String) -> Result<(String, String), String> {
@@ -12412,6 +12559,62 @@ impl P2PCore {
         // later than now read as "sent before the revoke".
         let signed_sent_at_ms = match &content { MessageContent::Text { sent_at_ms, .. } => *sent_at_ms, _ => 0 };
         clamp_received_times(&mut content, current_time_ms());
+        self.dispatch_received_content(source, peer_fp, sender_identity_id, message_id, content, signed_sent_at_ms)
+    }
+
+    /// The decrypted content of a received packet, acted on. Content for a
+    /// group we do not hold yet (its GroupUpdate may still be on the way) is
+    /// held in memory (`unknown_group_held`) instead of being archived, and
+    /// goes through here again, membership checked, once the group is known.
+    fn dispatch_received_content(&mut self, source: Option<PeerId>, peer_fp: String, sender_identity_id: String, message_id: String, content: MessageContent, signed_sent_at_ms: u64) -> Result<String, String> {
+        let held_gid = match &content {
+            MessageContent::Text { group_id: Some(g), .. }
+            | MessageContent::FileOffer { group_id: Some(g), .. }
+            | MessageContent::Reaction { group_id: Some(g), .. } => Some(g.clone()),
+            _ => None,
+        };
+        if let Some(gid) = held_gid.filter(|g| !self.groups.contains_key(g)) {
+            if is_group_id(&gid) && !self.group_removed_locally(&gid) {
+                // No Ack: dropped here (cap, age, restart), the sender's retry
+                // brings it again.
+                let now = current_time_ms();
+                self.unknown_group_held.retain(|_, b| {
+                    b.retain(|e| now.saturating_sub(e.0) <= UNKNOWN_GROUP_HOLD_TTL_MS);
+                    !b.is_empty()
+                });
+                let room = self.unknown_group_held.contains_key(&gid) || self.unknown_group_held.len() < UNKNOWN_GROUP_HOLD_GROUPS;
+                let buf = self.unknown_group_held.get(&gid);
+                let dup = buf.map_or(false, |b| b.iter().any(|e| e.4 == message_id));
+                let full = buf.map_or(false, |b| b.len() >= UNKNOWN_GROUP_HOLD_PER_GROUP);
+                if room && !dup && !full {
+                    self.unknown_group_held.entry(gid).or_default()
+                        .push((now, source, peer_fp, sender_identity_id, message_id, content, signed_sent_at_ms));
+                }
+            }
+            return Ok(serde_json::json!({"type": "noop"}).to_string());
+        }
+        let result = self.dispatch_received_content_inner(source, peer_fp, sender_identity_id, message_id, content, signed_sent_at_ms);
+        self.replay_unknown_group_held();
+        result
+    }
+
+    /// Replays the held content of every group that is known now (bkz.
+    /// `dispatch_received_content`). Each entry is checked like a live one:
+    /// a sender that is not a member is refused.
+    fn replay_unknown_group_held(&mut self) {
+        let ready: Vec<String> = self.unknown_group_held.keys().filter(|g| self.groups.contains_key(*g)).cloned().collect();
+        for gid in ready {
+            let Some(buf) = self.unknown_group_held.remove(&gid) else { continue };
+            for (_, source, peer_fp, sender_identity_id, message_id, content, signed_sent_at_ms) in buf {
+                match self.dispatch_received_content(source, peer_fp, sender_identity_id, message_id, content, signed_sent_at_ms) {
+                    Ok(event) => self.attachment_events.push(event),
+                    Err(e) => warn!("Tutulan grup paketi işlenemedi (group={}): {}", gid, e),
+                }
+            }
+        }
+    }
+
+    fn dispatch_received_content_inner(&mut self, source: Option<PeerId>, peer_fp: String, sender_identity_id: String, message_id: String, content: MessageContent, signed_sent_at_ms: u64) -> Result<String, String> {
         // Çoklu-cihaz: gönderen kişi birden fazla cihaza sahip olabilir —
         // yerel sohbet/arşiv, o kişinin KARARLI kanonik cihazı altında
         // birleşsin (bkz. `canonical_peer_key`). ACK/Seen gibi geri
@@ -12532,6 +12735,22 @@ impl P2PCore {
                     );
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
+                // The id must carry the sender's author tag (`group_msg_tag`):
+                // then no other member can hold it, and a row already under
+                // it is this sender's own copy (a duplicate).
+                if !group_message_local_id.as_deref().map_or(false, |id| group_msg_id_bound(&gid, &sender_identity_id, id)) {
+                    warn!(
+                        "Group message refused: id not bound to its author (group={}, sender={})",
+                        gid, crate::log_id(&sender_identity_id)
+                    );
+                    return Ok(serde_json::json!({"type": "noop"}).to_string());
+                }
+                let (reply_to_message_id, reply_to_preview, reply_to_sender_identity_id) =
+                    if group_reply_bound(&gid, reply_to_message_id.as_deref(), reply_to_sender_identity_id.as_deref()) {
+                        (reply_to_message_id, reply_to_preview, reply_to_sender_identity_id)
+                    } else {
+                        (None, None, None)
+                    };
                 let already_archived = group_message_local_id.as_deref()
                     .map(|id| self.message_exists_in_chat(id, Some(gid.as_str()), ""))
                     .unwrap_or(false);
@@ -12711,6 +12930,16 @@ impl P2PCore {
                 if self.history_answered_at.get(&peer_fp).map_or(false, |t| now.saturating_sub(*t) < 2_000) {
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
+                // K-11: and at most HISTORY_SYNC_BYTES_PER_WINDOW of rows per
+                // device per minute, shed the same way.
+                const HISTORY_SYNC_WINDOW_MS: u64 = 60_000;
+                const HISTORY_SYNC_BYTES_PER_WINDOW: usize = 2 * 1024 * 1024;
+                if self.history_sent_bytes.len() > 1000 {
+                    self.history_sent_bytes.retain(|_, (start, _)| now.saturating_sub(*start) < HISTORY_SYNC_WINDOW_MS);
+                }
+                if self.history_sent_bytes.get(&peer_fp).map_or(false, |(start, sent)| now.saturating_sub(*start) < HISTORY_SYNC_WINDOW_MS && *sent >= HISTORY_SYNC_BYTES_PER_WINDOW) {
+                    return Ok(serde_json::json!({"type": "noop"}).to_string());
+                }
                 self.history_answered_at.insert(peer_fp.clone(), now);
                 let limit = limit.min(HISTORY_SYNC_MAX_MESSAGES);
                 // Çoklu-cihaz düzeltmesi: 1:1 arşivimiz KANONİK cihaz
@@ -12720,15 +12949,40 @@ impl P2PCore {
                 // A "Fetch older history" press gets only rows sent in its
                 // window `[after, before)`, at most one window long; the
                 // chat-open sync (no `before_timestamp`) is unchanged.
+                // C-06: a group member gets history from at most one day
+                // before it was added (its latest add, `GroupMember.added_at`,
+                // our local time of that update), never older. Our own other
+                // devices get everything. A missing or zero `added_at` counts
+                // as now.
+                const GROUP_HISTORY_BEFORE_JOIN_MS: u64 = 24 * 60 * 60 * 1000;
+                let history_floor: Option<u64> = group_id.as_ref().and_then(|gid| {
+                    if self.my_identity_id().as_deref() == Some(sender_identity_id.as_str()) {
+                        return None;
+                    }
+                    let added = self.groups.get(gid)
+                        .and_then(|g| g.members.iter().find(|m| m.identity_id == sender_identity_id))
+                        .map(|m| m.added_at)
+                        .filter(|t| *t > 0)
+                        .unwrap_or(now);
+                    Some(added.saturating_sub(GROUP_HISTORY_BEFORE_JOIN_MS))
+                });
                 let window = before_timestamp.map(|b| {
                     let min_after = b.saturating_sub(HISTORY_FETCH_WINDOW_MS as i64);
-                    (b, after_timestamp.map_or(min_after, |a| a.max(min_after)))
+                    let after = after_timestamp.map_or(min_after, |a| a.max(min_after));
+                    (b, history_floor.map_or(after, |f| after.max(f as i64)))
                 });
-                let history = match (&group_id, window) {
+                let mut history = match (&group_id, window) {
+                    (_, Some((before, after))) if before <= after => Vec::new(),
                     (gid, Some((before, after))) => self.load_history_fetch_page(&chat_key, gid.as_deref(), limit, before, after),
                     (Some(gid), None) => self.load_group_message_history_opt(gid, limit, None, false),
                     (None, None) => self.load_message_history_opt(&chat_key, limit, None, false),
                 };
+                // Rows count as pre-join if we got them before the floor OR
+                // their author sent them before it (a row we fetched late).
+                let raw_loaded = history.len();
+                if let Some(f) = history_floor {
+                    history.retain(|m| m.timestamp >= f && (m.sent_at_ms == 0 || m.sent_at_ms >= f));
+                }
                 let loaded = history.len();
                 // `history` is oldest first and the requester pages backwards
                 // from the oldest row it gets, so the budget must cut the OLD
@@ -12738,7 +12992,6 @@ impl P2PCore {
                 let mut first = true;
                 // Group rows go out with their author's signature. It is far
                 // larger than most texts, so it counts toward the budget.
-                let mut history = history;
                 if let Some(gid) = &group_id {
                     for m in history.iter_mut() {
                         m.author_proof = m.message_id.as_deref().and_then(|id| self.group_author_proof(gid, id));
@@ -12765,7 +13018,9 @@ impl P2PCore {
                     .collect();
                 kept.reverse();
                 // Rows of the window were cut: the requester asks for the rest.
-                let more = window.is_some() && (loaded as u32 >= limit || kept.len() < loaded);
+                // `raw_loaded`: a full page before the C-06 filter may still
+                // have more; a page the filter emptied has no row to page from.
+                let more = window.is_some() && !kept.is_empty() && (raw_loaded as u32 >= limit || kept.len() < loaded);
                 let messages: Vec<SyncedMessage> = kept.into_iter()
                     .map(|(m, reactions)| SyncedMessage {
                         reactions,
@@ -12786,6 +13041,13 @@ impl P2PCore {
                     error!("HistorySyncResponse gönderilemedi: {}", e);
                     // H90: nothing went out, the window is not used up.
                     self.history_answered_at.remove(&peer_fp);
+                } else {
+                    let used = HISTORY_SYNC_MAX_TEXT_BYTES - text_budget;
+                    let entry = self.history_sent_bytes.entry(peer_fp.clone()).or_insert((now, 0));
+                    if now.saturating_sub(entry.0) >= HISTORY_SYNC_WINDOW_MS {
+                        *entry = (now, 0);
+                    }
+                    entry.1 += used;
                 }
                 // Defter #16: bu olay hiçbir istemcide işlenmiyordu ve
                 // işlenmesi de gerekmiyor (karşı tarafın bizden geçmiş
@@ -12893,6 +13155,14 @@ impl P2PCore {
                                 // A row without an id cannot be deduped: it was
                                 // never archived, but shown again on every page.
                                 let Some(mid) = m.message_id.clone() else { return None };
+                                // The id must carry its author's tag
+                                // (`group_msg_tag`): no other member can then
+                                // have taken it, so a row already under it is
+                                // this author's and a duplicate.
+                                if !group_msg_id_bound(gid, &author, &mid) {
+                                    warn!("Grup geçmişi satırı atlandı: kimlik yazarına bağlı değil (group={}, yazar={})", gid, crate::log_id(&author));
+                                    return None;
+                                }
                                 if !self.message_exists_in_chat(&mid, Some(gid.as_str()), "") {
                                     // NOT: `SyncedMessage` (bkz. packet.rs) henüz yanıt
                                     // bilgisi taşımıyor — geçmiş senkronuyla gelen eski
@@ -13068,7 +13338,7 @@ impl P2PCore {
             }
             MessageContent::FileOffer {
                 group_id, file_id, file_name, mime_type, total_size, file_key, sha256_hex,
-                preview_jpeg, duration_ms, chunk_size,
+                preview_jpeg, duration_ms, chunk_size, chunk_hashes,
                 caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin,
             } => {
                 // bkz. `sender_may_post_to_group` — grup Text koluyla AYNI
@@ -13084,10 +13354,22 @@ impl P2PCore {
                         );
                         return Ok(serde_json::json!({"type": "noop"}).to_string());
                     }
+                    // The file id is the group message id: it must carry the
+                    // sender's author tag, as a Text id does (`group_msg_tag`).
+                    if !group_msg_id_bound(gid, &sender_identity_id, &file_id) {
+                        warn!(
+                            "Group file offer refused: id not bound to its author (group={}, sender={})",
+                            gid, crate::log_id(&sender_identity_id)
+                        );
+                        return Ok(serde_json::json!({"type": "noop"}).to_string());
+                    }
                 }
+                let reply_ok = group_id.as_deref().map_or(true, |g| group_reply_bound(g, reply_to_message_id.as_deref(), reply_to_sender_identity_id.as_deref()));
+                let (reply_to_message_id, reply_to_preview, reply_to_sender_identity_id) =
+                    if reply_ok { (reply_to_message_id, reply_to_preview, reply_to_sender_identity_id) } else { (None, None, None) };
                 let ev = self.receive_file_offer(
                     &peer_fp, &sender_identity_id, group_id, &file_id, &file_name, &mime_type,
-                    total_size, &file_key, &sha256_hex, &preview_jpeg, duration_ms, chunk_size,
+                    total_size, &file_key, &sha256_hex, &preview_jpeg, duration_ms, chunk_size, &chunk_hashes,
                     &caption, reply_to_message_id.as_deref(), reply_to_preview.as_deref(),
                     reply_to_sender_identity_id.as_deref(), sticker, sticker_origin.as_deref(),
                 );
@@ -13343,14 +13625,14 @@ impl P2PCore {
                 // hiçbir değeri yok.
                 // Only the sender's own onion address: a contact must not
                 // point us at a stranger to dial again and again. A PeerId
-                // other than the one we know for the device counts only when
-                // the device delivered this itself over that PeerId's
-                // connection (a restored device has a new one).
+                // other than the one we know for the device (or any, when none
+                // is known) counts only when the device delivered this itself
+                // over that PeerId's connection (a restored device has a new one).
                 let announced = multiaddr.parse::<Multiaddr>().ok()
                     .filter(is_onion_multiaddr)
                     .and_then(|m| extract_peer_id(&m));
                 let own_pid = announced.filter(|pid| {
-                    self.device_to_peer_id.get(&peer_fp).map_or(true, |known| known == pid) || source == Some(*pid)
+                    self.device_to_peer_id.get(&peer_fp).map_or(false, |known| known == pid) || source == Some(*pid)
                 });
                 if own_pid.is_some() {
                     self.remember_device_addr(&peer_fp, &multiaddr);
@@ -13626,7 +13908,7 @@ impl P2PCore {
                         SiblingEchoBody::File { offer } => match *offer {
                             MessageContent::FileOffer {
                                 file_id, file_name, mime_type, total_size, file_key, sha256_hex,
-                                preview_jpeg, duration_ms, chunk_size,
+                                preview_jpeg, duration_ms, chunk_size, chunk_hashes,
                                 caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, ..
                             } => {
                                 // Aynı yankı ikinci kez (regen/restart): satır varsa
@@ -13643,7 +13925,7 @@ impl P2PCore {
                                 } else {
                                     let mut ev = self.receive_file_offer(
                                         &peer_fp, &own_id, group_id.clone(), &file_id, &file_name, &mime_type,
-                                        total_size, &file_key, &sha256_hex, &preview_jpeg, duration_ms, chunk_size,
+                                        total_size, &file_key, &sha256_hex, &preview_jpeg, duration_ms, chunk_size, &chunk_hashes,
                                         &caption, reply_to_message_id.as_deref(), reply_to_preview.as_deref(),
                                         reply_to_sender_identity_id.as_deref(), sticker, sticker_origin.as_deref(),
                                     );
@@ -14034,6 +14316,14 @@ impl P2PCore {
                     device_add.identity_id, identity::MAX_ACTIVE_DEVICES
                 ));
             }
+            // Revoked records are kept for good (they stop a revival): a
+            // contact cycling add+revoke must not grow them without end.
+            let all_for_identity = self.known_remote_devices.values()
+                .filter(|d| d.identity_id == device_add.identity_id)
+                .count();
+            if all_for_identity >= 4 * identity::MAX_ACTIVE_DEVICES {
+                return Err(format!("DeviceAddNotice reddedildi: {} için cihaz kaydı üst sınırı", device_add.identity_id));
+            }
         }
         let now = current_time_ms();
         self.verified_device_adds.insert(device_add.new_device_fingerprint.clone(), device_add.identity_id.clone());
@@ -14221,11 +14511,13 @@ impl P2PCore {
         self.wb_reply_at.clear();
         self.pending_group_syncs.clear();
         self.pending_edits_deletes.clear();
+        self.unknown_group_held.clear();
         self.pending_envelopes.clear();
         self.early_packets.clear();
         self.early_handshakes.clear();
         self.group_failed_copies.clear();
         self.history_answered_at.clear();
+        self.history_sent_bytes.clear();
         self.history_answered_by.clear();
         self.chunk_rate_limiter.clear();
         self.recent_inbound_digests.clear();
@@ -15358,14 +15650,16 @@ impl P2PCore {
         // could still rewrite or delete its old messages for everyone. A group
         // not held yet follows the Text rule: its row was taken under it, so
         // the edit of that row is taken too (its GroupUpdate may be on its way).
+        // A group target must also carry the sender's author tag
+        // (`group_msg_tag`): only the author can edit or delete it.
         let ex_member = match &content {
-            MessageContent::Edit { group_id: Some(gid), .. } | MessageContent::Delete { group_id: Some(gid), .. } =>
-                !self.sender_may_post_to_group(gid, sender_identity_id),
+            MessageContent::Edit { group_id: Some(gid), target_message_id, .. } | MessageContent::Delete { group_id: Some(gid), target_message_id, .. } =>
+                !self.sender_may_post_to_group(gid, sender_identity_id) || !group_msg_id_bound(gid, sender_identity_id, target_message_id),
             _ => false,
         };
         if ex_member {
             self.send_ack(peer_fp, packet_message_id);
-            warn!("Grup Edit/Delete reddedildi (gönderen üye değil): {}", packet_message_id);
+            warn!("Grup Edit/Delete reddedildi (gönderen üye değil ya da hedef onun değil): {}", packet_message_id);
             return serde_json::json!({"type": "noop"});
         }
         match content {
@@ -16896,8 +17190,8 @@ impl P2PCore {
         // for the packet around it (header, hybrid signatures, encryption).
         // Any change that carries the lists (a Rename or an avatar too); a
         // Remove/Delete must always go out.
-        if !matches!(change, GroupChange::Remove(_) | GroupChange::Delete) && ciborium_bytes(&update)?.len() + 64 * 1024 > MAX_ENVELOPE_BYTES {
-            return Err("Grup güncellemesi çok büyük (çok fazla üye/cihaz)".to_string());
+        if !matches!(change, GroupChange::Remove(_) | GroupChange::Delete) {
+            check_group_update_size(&update)?;
         }
         if !full {
             self.meta_put(&sent_key, &serde_json::to_string(&sent_map).unwrap_or_default());
@@ -16926,10 +17220,14 @@ impl P2PCore {
         let members = group.member_identity_ids();
         let vouched = self.collect_vouched_member_devices(&group.group_id, &members);
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
-        sign_group_update(
+        let update = sign_group_update(
             &group.group_id, group.version, &change, &group.name, &members, &vouched,
             &self.vouch_proofs(&vouched), &own_identity_id, &own_fp, own_keys, &group.founder_chain,
-        )
+        )?;
+        // Refused here, never queued: an oversize resync in
+        // `pending_group_syncs` failed every `group_sync_sweep` for good.
+        check_group_update_size(&update)?;
+        Ok(update)
     }
 
     /// #81 (H103): the founder signs the current group state again and sends
@@ -18404,7 +18702,8 @@ impl P2PCore {
         // `group_id: Some(...)` — gerçek grup entegrasyonu: alıcı tarafın
         // bunu sıradan bir 1:1 mesajdan ayırt edip GroupChatActivity'ye
         // yönlendirebilmesi için (bkz. receive_message notu).
-        let local_id = uuid::Uuid::new_v4().to_string();
+        // Starts with our author tag: receivers refuse an id without it.
+        let local_id = format!("{}-{}", hex::encode(group_msg_tag(group_id, &own_identity_id)), uuid::Uuid::new_v4());
         let sent_at_ms = current_time_ms();
         // Kardeş cihaz yankısı için kopyala (aşağıda content'e taşınıyor).
         let echo_reply_id = reply_to_message_id.clone();
@@ -19100,16 +19399,41 @@ impl P2PCore {
             // replaced its onion address. A device that really changed its
             // key says so in its (signed, encrypted) AddressAnnounce, which
             // replaces the stored address.
+            let mut unproven = false;
             if self.device_to_peer_id.get(device_fingerprint) != Some(&pid) {
-                let mut known = [self.device_last_addr.get(device_fingerprint), self.device_onion_addr.get(device_fingerprint)]
+                let known: Vec<PeerId> = [self.device_last_addr.get(device_fingerprint), self.device_onion_addr.get(device_fingerprint)]
                     .into_iter().flatten()
                     .filter_map(|a| a.parse::<Multiaddr>().ok().and_then(|m| extract_peer_id(&m)))
-                    .peekable();
-                if known.peek().is_some() && !known.any(|p| p == pid) {
+                    .collect();
+                if !known.is_empty() && !known.contains(&pid) {
+                    return;
+                }
+                unproven = known.is_empty();
+            }
+            // Nothing names this PeerId for the device: the carrier is
+            // unproven. A gossip author is a key the publisher picks, so a
+            // contact could republish the device's packet under its own key
+            // and become the device. Bound only over a live connection from
+            // that PeerId, never to a server or to another identity's device,
+            // and no address is stored from it: the device's own
+            // AddressAnnounce supplies that.
+            if unproven {
+                let my_identity = self.known_remote_devices.get(device_fingerprint).map(|d| d.identity_id.clone());
+                let other_identity = self.device_to_peer_id.iter().any(|(f, p)| {
+                    *p == pid && f != device_fingerprint
+                        && self.known_remote_devices.get(f).map(|d| d.identity_id.clone()) != my_identity
+                });
+                if self.is_server_peer(&pid)
+                    || other_identity
+                    || !self.swarm.as_ref().map_or(false, |s| s.is_connected(&pid))
+                {
                     return;
                 }
             }
             self.device_to_peer_id.insert(device_fingerprint.to_string(), pid);
+            if unproven {
+                return;
+            }
             if let Some(onion) = self.peer_onion_addr.get(&pid).cloned() {
                 self.remember_onion_addr(device_fingerprint, &onion);
             }
@@ -19224,8 +19548,14 @@ impl P2PCore {
         }
         // The id is the hash of the server upload secret (see
         // `blob_upload_secret`), so no recipient can claim the server blob.
+        // In a group it starts with our author tag, which members check
+        // (`group_msg_tag`); a 1:1 file gets a random one.
+        let tag: [u8; 8] = match group_id {
+            Some(gid) => group_msg_tag(gid, &self.my_identity_id().ok_or("No identity")?),
+            None => { use rand::RngCore; let mut t = [0u8; 8]; OsRng.fill_bytes(&mut t); t }
+        };
         let file_id = self
-            .blob_upload_secret(&file_key)
+            .blob_upload_secret(&file_key, &tag)
             .and_then(|secret| server_proto::blob_id_for_upload_secret(&secret))
             .ok_or_else(|| "History key not loaded".to_string())?;
 
@@ -19238,7 +19568,7 @@ impl P2PCore {
     /// kilitsiz fazda zaten bitti; burada anahtar sarmalanır, DB kaydı
     /// yazılır ve `FileOffer` gönderilir.
     #[allow(clippy::too_many_arguments)]
-    fn finish_outgoing_file(&mut self, peer_device_fingerprint: String, file_id: String, file_key: [u8; 32], total_size: u64, sha256_hex: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, sticker_origin: Option<String>) -> Result<(String, String), String> {
+    fn finish_outgoing_file(&mut self, peer_device_fingerprint: String, file_id: String, file_key: [u8; 32], total_size: u64, sha256_hex: String, chunk_hashes: Vec<u8>, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, sticker_origin: Option<String>) -> Result<(String, String), String> {
         let sticker = sticker_origin.is_some();
         let (encrypted_key, key_nonce) = self.wrap_file_key(&file_key)?;
         if let Some(conn) = &self.db {
@@ -19257,13 +19587,13 @@ impl P2PCore {
                 "INSERT OR REPLACE INTO files
                  (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
                   sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg, duration_ms, chunk_size,
-                  caption, reply_to_message_id, reply_to_preview, sticker, sticker_origin)
-                 VALUES (?1, ?2, 'sent', ?3, ?4, ?5, ?6, ?7, ?8, 'complete', ?5, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                  caption, reply_to_message_id, reply_to_preview, sticker, sticker_origin, chunk_hashes)
+                 VALUES (?1, ?2, 'sent', ?3, ?4, ?5, ?6, ?7, ?8, 'complete', ?5, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     file_id, peer_device_fingerprint, file_name, mime_type, total_size as i64,
                     sha256_hex, encrypted_key, key_nonce, current_time_ms() as i64, preview_jpeg, duration_ms,
                     attachments::FILE_CHUNK_SIZE_V2 as i64,
-                    caption, reply_to_message_id, reply_to_preview, sticker, sticker_origin.clone(),
+                    caption, reply_to_message_id, reply_to_preview, sticker, sticker_origin.clone(), chunk_hashes,
                 ],
             );
             // bkz. yukarıdaki not — bu INSERT sessizce başarısız oluyordu.
@@ -19290,6 +19620,7 @@ impl P2PCore {
             preview_jpeg,
             duration_ms,
             chunk_size: Some(attachments::FILE_CHUNK_SIZE_V2 as u32),
+            chunk_hashes,
             caption: caption.clone(),
             reply_to_message_id: reply_to_message_id.clone(),
             reply_to_preview: reply_to_preview.clone(),
@@ -19337,7 +19668,7 @@ impl P2PCore {
     /// bakılır (kilitsiz şifreleme sırasında silinmiş olabilir — bu durumda
     /// temiz bir hata döner, `.enc` çağıran serbest fonksiyonda temizlenir).
     #[allow(clippy::too_many_arguments)]
-    fn finish_outgoing_group_file(&mut self, group_id: String, file_id: String, file_key: [u8; 32], total_size: u64, sha256_hex: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>, sticker_origin: Option<String>) -> Result<String, String> {
+    fn finish_outgoing_group_file(&mut self, group_id: String, file_id: String, file_key: [u8; 32], total_size: u64, sha256_hex: String, chunk_hashes: Vec<u8>, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>, sticker_origin: Option<String>) -> Result<String, String> {
         let sticker = sticker_origin.is_some();
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(&group_id).cloned_group()?;
@@ -19352,13 +19683,13 @@ impl P2PCore {
                 "INSERT OR REPLACE INTO files
                  (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
                   sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg, duration_ms, group_id, sender_identity_id, chunk_size,
-                  caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin)
-                 VALUES (?1, '', 'sent', ?2, ?3, ?4, ?5, ?6, ?7, 'complete', ?4, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                  caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, chunk_hashes)
+                 VALUES (?1, '', 'sent', ?2, ?3, ?4, ?5, ?6, ?7, 'complete', ?4, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 params![
                     file_id, file_name, mime_type, total_size as i64,
                     sha256_hex, encrypted_key, key_nonce, current_time_ms() as i64, preview_jpeg, duration_ms,
                     group_id, own_identity_id, attachments::FILE_CHUNK_SIZE_V2 as i64,
-                    caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin.clone(),
+                    caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin.clone(), chunk_hashes,
                 ],
             );
             if let Err(e) = res {
@@ -19379,6 +19710,7 @@ impl P2PCore {
             preview_jpeg,
             duration_ms,
             chunk_size: Some(attachments::FILE_CHUNK_SIZE_V2 as u32),
+            chunk_hashes,
             caption: caption.clone(),
             reply_to_message_id: reply_to_message_id.clone(),
             reply_to_preview: reply_to_preview.clone(),
@@ -19401,7 +19733,7 @@ impl P2PCore {
     /// ekler (node modu açıksa hemen indirmeyi başlatır — kapalıysa sadece
     /// meta veri görünür kalır, kullanıcı "İndir" demeli).
     #[allow(clippy::too_many_arguments)]
-    fn receive_file_offer(&mut self, peer_fp: &str, sender_identity_id: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str, preview_jpeg: &Option<Vec<u8>>, duration_ms: Option<u32>, chunk_size: Option<u32>, caption: &str, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sticker: bool, sticker_origin: Option<&str>) -> serde_json::Value {
+    fn receive_file_offer(&mut self, peer_fp: &str, sender_identity_id: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str, preview_jpeg: &Option<Vec<u8>>, duration_ms: Option<u32>, chunk_size: Option<u32>, chunk_hashes: &[u8], caption: &str, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sticker: bool, sticker_origin: Option<&str>) -> serde_json::Value {
         // Spec dışı, güvenlik denetimi düzeltmesi: `MAX_ATTACHMENT_SIZE`
         // önceden SADECE gönderim tarafında (`prepare_and_send_file`/
         // `prepare_and_send_group_file`, bkz. o fonksiyonların kontrolü)
@@ -19507,6 +19839,17 @@ impl P2PCore {
                 "error": "Dosya boyutu izin verilen üst sınırı aşıyor"
             });
         }
+        // One hash per chunk group, signed with the offer: every chunk is
+        // checked against it (`handle_chunk_response`). No list, no download.
+        let offer_chunks = attachments::total_chunks_with(total_size, chunk_size.map_or(attachments::FILE_CHUNK_SIZE, |c| c as usize));
+        if chunk_hashes.len() != attachments::chunk_hashes_len(offer_chunks) {
+            warn!("FileOffer REDDEDİLDİ: parça hash listesi yok ya da boyu yanlış (gönderen: {})", crate::log_id(&peer_fp));
+            return serde_json::json!({
+                "type": "file_failed", "peer": peer_fp, "sender_identity_id": sender_identity_id,
+                "group_id": group_id, "file_id": file_id,
+                "error": "Geçersiz dosya teklifi"
+            });
+        }
         // Güvenlik düzeltmesi (bu denetim): `file_name` uzaktan kontrollü ve
         // hem bir dosya adı olarak kullanılıyor hem ekranda gösteriliyor —
         // TEK giriş kapısı burası, bkz. `safe_file_name`. Temizlenmiş hâli
@@ -19543,8 +19886,8 @@ impl P2PCore {
                         "INSERT OR REPLACE INTO files
                          (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
                           sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg, duration_ms, group_id, sender_identity_id, chunk_size,
-                          caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin)
-                         VALUES (?1, ?2, 'received', ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                          caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, chunk_hashes)
+                         VALUES (?1, ?2, 'received', ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                         params![
                             file_id, peer_fp, file_name, mime_type, total_size as i64,
                             sha256_hex, encrypted_key, key_nonce, status, current_time_ms() as i64, preview_jpeg, duration_ms,
@@ -19552,7 +19895,7 @@ impl P2PCore {
                             // `None` = guncellenmemis bir esten gelen teklif:
                             // miras 256 KiB (bkz. `FileOffer.chunk_size`).
                             chunk_size.map(|v| v as i64).unwrap_or(attachments::FILE_CHUNK_SIZE as i64),
-                            caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin,
+                            caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, chunk_hashes,
                         ],
                     ).is_ok()
                 } else {
@@ -19651,21 +19994,27 @@ impl P2PCore {
     /// its blob there, so every row is a candidate.
     fn resume_incomplete_downloads_for(&mut self, reconnected: &std::collections::HashSet<String>, server_back: bool) {
         if reconnected.is_empty() && !server_back { return; }
-        let candidates: Vec<(String, String)> = {
+        let candidates: Vec<(String, String, u64)> = {
             let conn = match &self.db { Some(c) => c, None => return };
             let mut stmt = match conn.prepare(
-                "SELECT file_id, peer_device_fingerprint FROM files \
+                "SELECT file_id, peer_device_fingerprint, total_size FROM files \
                  WHERE status IN ('downloading','failed') AND direction = 'received'"
             ) { Ok(s) => s, Err(_) => return };
-            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? as u64)))
                 .map(|it| it.flatten().collect())
                 .unwrap_or_default()
         };
-        for (file_id, owner_fp) in candidates {
+        for (file_id, owner_fp, total_size) in candidates {
             // Kaynak (satırda kayıtlı gönderen cihaz) az önce bağlanmadıysa
             // dokunma — hâlâ ulaşılamaz, boşuna bir dial denemesi olur.
             if !server_back && !reconnected.contains(&owner_fp) { continue; }
             if self.active_downloads.contains_key(&file_id) { continue; }
+            // The caps of `receive_file_offer`: 8 running, 4 per sender, and
+            // the storage limit. The rest waits for a later reconnect or a tap.
+            if self.active_downloads.len() >= 8 { break; }
+            if self.active_downloads.values().filter(|d| d.peer_device_fingerprint == owner_fp).count() >= 4 { continue; }
+            let in_flight: u64 = self.active_downloads.values().map(|d| d.total_size).sum();
+            if in_flight.saturating_add(total_size) > self.history_storage_limit_bytes { continue; }
             // Once per process run unless it made progress since (#76,
             // `handle_chunk_response`): a file that fails each time restarted
             // on every reconnect of its owner. After that it waits for a tap.
@@ -19692,12 +20041,13 @@ impl P2PCore {
             return Err("Ağ henüz başlatılmadı".to_string());
         }
         let conn = self.db.as_ref().ok_or("DB not open")?;
-        let row: Option<(u64, Vec<u8>, Vec<u8>, String, String, Option<String>)> = conn.query_row(
-            "SELECT total_size, encrypted_file_key, key_nonce, status, peer_device_fingerprint, group_id FROM files WHERE file_id = ?1",
+        let row: Option<(u64, Vec<u8>, Vec<u8>, String, String, Option<String>, Option<Vec<u8>>)> = conn.query_row(
+            "SELECT total_size, encrypted_file_key, key_nonce, status, peer_device_fingerprint, group_id, chunk_hashes FROM files WHERE file_id = ?1",
             params![file_id],
-            |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, String>(4)?, r.get(5)?)),
+            |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, String>(4)?, r.get(5)?, r.get(6)?)),
         ).ok();
-        let (total_size, encrypted_key, key_nonce, status, owner_fp, group_id) = row.ok_or("Unknown file_id")?;
+        let (total_size, encrypted_key, key_nonce, status, owner_fp, group_id, chunk_hashes) = row.ok_or("Unknown file_id")?;
+        let chunk_hashes = chunk_hashes.unwrap_or_default();
         // Çoklu-cihaz (spec 1.7.1): dosyayı GERÇEK sahibinden (satırda kayıtlı
         // gönderen cihaz) indir. Çağıran, sohbetin KANONİK cihazını geçmiş
         // olabilir (dosya, o kişinin BAŞKA bir cihazından gelmişse kanonik
@@ -19755,28 +20105,36 @@ impl P2PCore {
         // gonderenle AYNI adimi kullanmak zorundayiz (bkz. `file_chunk_size`).
         let chunk_size = self.file_chunk_size(&file_id);
         let total_chunks = attachments::total_chunks_with(total_size, chunk_size);
+        // A row without the offer's chunk hashes (an offer from before they
+        // existed) cannot be checked chunk by chunk: not downloaded.
+        if chunk_hashes.len() != attachments::chunk_hashes_len(total_chunks) {
+            return Err("Bu dosyanın parça hash listesi yok, gönderenden yeniden istenmeli".to_string());
+        }
+        let per_hash = attachments::chunks_per_hash(total_chunks);
         let enc_path = self.enc_path_for(&file_id)?;
         let _ = std::fs::create_dir_all(self.attachments_dir()?);
-        // #76 resume: the chunks a previous attempt left on disk that still
-        // decrypt, from chunk 0 up to the first gap, are kept (the file hash
-        // needs them in order anyway). Past the gap everything is fetched again.
-        // ponytail: decrypts the whole kept prefix on this thread; persist the
-        // hasher state if multi-GB resumes show up as a stall.
-        let mut hasher: sha2::Sha256 = sha2::Digest::new();
-        let mut resumed: u32 = 0;
+        // #76 resume: every chunk group a previous attempt left on disk that
+        // matches its hash in the offer is kept, wherever it is in the file;
+        // the rest is fetched again.
+        // ponytail: hashes the whole partial file on this thread; move it off
+        // the lock if multi-GB resumes show up as a stall.
+        let mut received_chunks: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut resumed_bytes: u64 = 0;
-        while resumed < total_chunks {
-            match attachments::read_plain_chunk_with(&enc_path, resumed, &file_key, chunk_size) {
-                Ok(plain) => {
-                    sha2::Digest::update(&mut hasher, &plain);
-                    resumed_bytes += plain.len() as u64;
-                    resumed += 1;
+        if enc_path.exists() {
+            for (entry, want) in chunk_hashes.chunks_exact(32).enumerate() {
+                let first = entry as u32 * per_hash;
+                let count = per_hash.min(total_chunks - first);
+                if attachments::enc_range_hash(&enc_path, first, count, chunk_size).is_ok_and(|h| h[..] == *want) {
+                    for i in first..first + count {
+                        received_chunks.insert(i);
+                        resumed_bytes += attachments::chunk_plain_len(total_size, chunk_size, i);
+                    }
                 }
-                Err(_) => break,
             }
         }
-        if resumed > 0 {
-            info!("download_file: {} kaldığı yerden sürüyor, {}/{} parça diskte", file_id, resumed, total_chunks);
+        let resumed = (0..total_chunks).find(|i| !received_chunks.contains(i)).unwrap_or(total_chunks);
+        if !received_chunks.is_empty() {
+            info!("download_file: {} kaldığı yerden sürüyor, {}/{} parça diskte", file_id, received_chunks.len(), total_chunks);
         }
 
         if let Some(conn) = &self.db {
@@ -19818,7 +20176,10 @@ impl P2PCore {
         }
 
         self.active_downloads.insert(file_id.clone(), DownloadState {
-            hasher,
+            chunk_hashes,
+            per_hash,
+            pending_chunks: std::collections::HashMap::new(),
+            bad_sources: std::collections::HashSet::new(),
             peer_id,
             peer_device_fingerprint: peer_device_fingerprint.clone(),
             total_size,
@@ -19832,7 +20193,7 @@ impl P2PCore {
             alt_source_peer_ids,
             retries_on_current_source: 0,
             inflight_chunks: std::collections::HashSet::new(),
-            received_chunks: (0..resumed).collect(),
+            received_chunks,
             window: DOWNLOAD_WINDOW_START,
             chunk_sent_at: std::collections::HashMap::new(),
             rtt_min: u64::MAX,
@@ -19874,7 +20235,7 @@ impl P2PCore {
                     if v.len() + s.inflight_chunks.len() >= s.window {
                         break;
                     }
-                    if s.received_chunks.contains(&idx) || s.inflight_chunks.contains(&idx) {
+                    if s.received_chunks.contains(&idx) || s.inflight_chunks.contains(&idx) || s.pending_chunks.contains_key(&idx) {
                         continue;
                     }
                     v.push(idx);
@@ -19916,9 +20277,16 @@ impl P2PCore {
         let ready = self.ready_server_peers();
         let s = self.active_downloads.get_mut(file_id)?;
         if s.alt_source_peer_ids.is_empty() {
-            s.alt_source_peer_ids.extend(ready.into_iter().filter(|p| *p != s.peer_id));
+            s.alt_source_peer_ids.extend(ready.into_iter().filter(|p| *p != s.peer_id && !s.bad_sources.contains(p)));
         }
-        let next_peer = s.alt_source_peer_ids.pop_front()?;
+        // A source that served a chunk not matching the offer's hashes is
+        // never picked again in this attempt.
+        let next_peer = loop {
+            let p = s.alt_source_peer_ids.pop_front()?;
+            if !s.bad_sources.contains(&p) {
+                break p;
+            }
+        };
         s.peer_id = next_peer;
         s.retries_on_current_source = 0;
         // Eski kaynağa gönderilmiş istekler artık gelmeyecek; temizlenmezse o
@@ -20045,20 +20413,11 @@ impl P2PCore {
                 );
             }
         }
-        let Some(state) = self.active_downloads.remove(file_id) else { return };
-        // Every holder of the file key (each group member) can make chunks
-        // that pass the per-chunk check. Only the hash of the whole file, from
-        // the signed offer, says the file is the sender's: without this a
-        // forged file was 'complete', never fetched again and served on.
-        let expected: Option<String> = self.db.as_ref().and_then(|conn| {
-            conn.query_row("SELECT sha256_hex FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0)).ok()
-        });
-        let actual = hex::encode(sha2::Digest::finalize(state.hasher));
-        if !expected.map_or(false, |e| e.eq_ignore_ascii_case(&actual)) {
-            let _ = std::fs::remove_file(&state.enc_path);
-            self.fail_download(file_id, "SHA-256 mismatch");
-            return;
-        }
+        // Every chunk already matched the signed offer's `chunk_hashes`, so the
+        // file is the sender's; its plaintext SHA-256 is checked again on
+        // every open (`decrypt_file_from_disk_with`).
+        let Some(mut state) = self.active_downloads.remove(file_id) else { return };
+        zeroize::Zeroize::zeroize(&mut state.file_key);
         if let Some(conn) = &self.db {
             let _ = conn.execute("UPDATE files SET status = 'complete' WHERE file_id = ?1", params![file_id]);
         }
@@ -20114,6 +20473,26 @@ impl P2PCore {
             .collect();
         for file_id in stalled {
             self.retry_or_give_up_download(&file_id, "Bağlantı zaman aşımına uğradı — karşı taraf yanıt vermedi");
+        }
+    }
+
+    /// A chunk `peer` served did not match the offer's `chunk_hashes` (or its
+    /// AEAD): `peer` is not asked again in this attempt. When it is the
+    /// current source the download moves to the next one, or fails when none
+    /// is left; the chunks that matched stay on disk for the next attempt.
+    fn drop_bad_source(&mut self, file_id: &str, peer: PeerId, reason: &str) {
+        let Some(s) = self.active_downloads.get_mut(file_id) else { return };
+        s.bad_sources.insert(peer);
+        if s.peer_id != peer {
+            self.request_next_chunk(file_id);
+            return;
+        }
+        match self.switch_to_alt_source(file_id) {
+            Some(next) => {
+                warn!("Parça doğrulanamadı ({}), kaynak bırakıldı, ALTERNATİF bir kaynağa geçiliyor: file_id={} yeni_peer={}", reason, file_id, crate::log_id(&next));
+                self.request_next_chunk(file_id);
+            }
+            None => self.fail_download(file_id, reason),
         }
     }
 
@@ -20205,13 +20584,20 @@ impl P2PCore {
                 return;
             }
         };
-        let (enc_path, file_key, total_chunks, chunk_size) = match self.active_downloads.get(file_id) {
-            Some(s) => (s.enc_path.clone(), s.file_key, s.total_chunks, s.chunk_size),
+        let (enc_path, file_key, total_chunks, chunk_size, total_size, per_hash, peer, expected) = match self.active_downloads.get(file_id) {
+            Some(s) => {
+                let entry = (chunk_index / s.per_hash) as usize * 32;
+                let expected: [u8; 32] = match s.chunk_hashes.get(entry..entry + 32) {
+                    Some(h) => h.try_into().unwrap_or([0; 32]),
+                    None => return, // index past the file: not one we asked for
+                };
+                (s.enc_path.clone(), s.file_key, s.total_chunks, s.chunk_size, s.total_size, s.per_hash, s.peer_id, expected)
+            }
             None => return, // İptal edilmiş/başka nedenle düşmüş bir indirme — sessizce yok say.
         };
-        // A chunk that is already here is not written again: its bytes are in
-        // the file hash, a second copy could differ.
-        if self.active_downloads.get(file_id).map_or(false, |s| s.received_chunks.contains(&chunk_index)) {
+        // A chunk that is already here (or waits for the rest of its group) is
+        // not written again: a second copy could differ.
+        if self.active_downloads.get(file_id).map_or(false, |s| s.received_chunks.contains(&chunk_index) || s.pending_chunks.contains_key(&chunk_index)) {
             if let Some(s) = self.active_downloads.get_mut(file_id) {
                 s.inflight_chunks.remove(&chunk_index);
                 s.chunk_sent_at.remove(&chunk_index);
@@ -20222,56 +20608,72 @@ impl P2PCore {
         // Parçayı KENDİ konumuna yaz (sona ekleme DEĞİL) — boru hattında
         // parçalar sırasız geliyor. AEAD doğrulaması yazmadan önce yapılır,
         // yani `Auth` hatasında diske hiçbir şey yazılmaz.
-        // L-108: only the last chunk may be short; a short one elsewhere
-        // leaves a hole in the file that only the final hash would catch.
-        let full_len = if chunk_size == 0 { attachments::FILE_CHUNK_SIZE } else { chunk_size } + 16;
-        let written = if chunk_index.saturating_add(1) < total_chunks && data.len() != full_len {
-            Err(attachments::ChunkAppendError::Auth(format!("Chunk {} is shorter than the chunk size", chunk_index)))
+        // L-108: every chunk has its exact length (only the last one is
+        // short). A longer last chunk would also leave bytes past the end
+        // that a correct copy written later does not overwrite.
+        let exact_len = attachments::chunk_plain_len(total_size, chunk_size, chunk_index) as usize + 16;
+        // With one chunk per hash entry the chunk is checked against the
+        // signed offer before anything is written. Every group member holds
+        // the file key, so the AEAD alone does not say the sender made it.
+        let written = if data.len() != exact_len {
+            Err(attachments::ChunkAppendError::Auth(format!("Chunk {} does not have its length", chunk_index)))
+        } else if per_hash == 1 && <sha2::Sha256 as sha2::Digest>::digest(&data)[..] != expected[..] {
+            Err(attachments::ChunkAppendError::Auth(format!("Chunk {} does not match the offer's hash", chunk_index)))
         } else {
             attachments::write_verified_chunk_at_with(&enc_path, chunk_index, &data, &file_key, chunk_size)
         };
         let plaintext_len = match written {
             Ok(n) => n,
-            // Spec dışı, dış AI incelemesi düzeltmesi (çoklu-kaynak indirmede
-            // bütünlük): iki başarısızlık türü artık AYRI ele alınıyor.
-            //
-            // AEAD kimlik doğrulaması başarısız — parça bozuk/sahte (ör. kötü
-            // niyetli bir alternatif kaynak çöp gönderdi). `append_verified_chunk`
-            // çözmeyi diske yazmadan ÖNCE yaptığından `.enc`'e HİÇBİR ŞEY
-            // yazılmadı; `next_chunk_index` değişmedi. Bu yüzden AYNI parçayı
-            // BAŞKA bir kaynaktan güvenle yeniden isteyebiliriz — tek bir
-            // bozuk kaynak tüm indirmeyi öldürmemeli. Alternatif kaynak yoksa
-            // gerçekten pes edilir. (Önceki davranış: her zaman tüm indirmeyi
-            // başarısız sayardı — yanlış bir yorumla "parça zaten diske
-            // yazılmış olabilir" gerekçesine dayanıyordu, oysa çözme yazmadan
-            // önce olduğu için bu mümkün değil.)
+            // A forged or broken chunk: nothing was written. Its source is not
+            // asked again in this attempt; the chunk comes from the next one.
             Err(attachments::ChunkAppendError::Auth(e)) => {
-                let next_peer = self.switch_to_alt_source(file_id);
-                match next_peer {
-                    Some(peer) => {
-                        warn!("Parça doğrulanamadı ({}), ALTERNATİF bir kaynağa geçiliyor: file_id={} yeni_peer={}", e, file_id, crate::log_id(&peer));
-                        self.request_next_chunk(file_id);
-                    }
-                    None => {
-                        // M-188: no other source — ask for this chunk again
-                        // later instead of failing the whole file on one bad
-                        // chunk; `DOWNLOAD_GIVE_UP_TIMEOUT_MS` still ends it.
-                        warn!("Parça doğrulanamadı ({}), alternatif kaynak yok, sonra yeniden istenecek: file_id={}", e, file_id);
-                        if let Some(s) = self.active_downloads.get_mut(file_id) {
-                            s.inflight_chunks.remove(&chunk_index);
-                            s.chunk_sent_at.remove(&chunk_index);
-                            s.window = DOWNLOAD_WINDOW_MIN;
-                            s.retry_at = current_time_ms() + DOWNLOAD_RETRY_DELAY_MS;
-                        }
-                    }
-                }
+                self.drop_bad_source(file_id, peer, &e);
                 return;
             }
             // Disk yazma hatası — `.enc` kısmen yazılmış olabilir, tutarlılık
-            // garanti değil. Retry resumes only from chunks that still decrypt
-            // (`download_file`).
+            // garanti değil. Retry resumes only from chunk groups that match
+            // their hash (`download_file`).
             Err(attachments::ChunkAppendError::Io(e)) => { self.fail_download(file_id, &e); return; }
         };
+        // The chunks this answer makes good, with their plaintext length.
+        let mut verified: Vec<(u32, u64)> = vec![(chunk_index, plaintext_len as u64)];
+        if per_hash > 1 {
+            // A file with more chunks than hash entries: the chunk waits on
+            // disk until its whole group is here, then the group is checked.
+            let first = chunk_index - chunk_index % per_hash;
+            let count = per_hash.min(total_chunks - first);
+            let group_in = {
+                let Some(s) = self.active_downloads.get_mut(file_id) else { return };
+                s.pending_chunks.insert(chunk_index, (peer, plaintext_len));
+                (first..first + count).all(|i| s.pending_chunks.contains_key(&i))
+            };
+            verified.clear();
+            if group_in {
+                let ok = attachments::enc_range_hash(&enc_path, first, count, chunk_size).is_ok_and(|h| h == expected);
+                let Some(s) = self.active_downloads.get_mut(file_id) else { return };
+                let group: Vec<(u32, PeerId, usize)> = (first..first + count)
+                    .filter_map(|i| s.pending_chunks.remove(&i).map(|(p, n)| (i, p, n)))
+                    .collect();
+                if ok {
+                    verified = group.iter().map(|&(i, _, n)| (i, n as u64)).collect();
+                } else {
+                    // The group is fetched again. Its source is known only when
+                    // one source served all of it; a mixed group is just
+                    // fetched again (from the current source alone, so a
+                    // forger that is the current source is caught next time).
+                    s.inflight_chunks.remove(&chunk_index);
+                    s.chunk_sent_at.remove(&chunk_index);
+                    let reason = format!("Chunks {}..{} do not match the offer's hash", first, first + count);
+                    if group.iter().all(|&(_, p, _)| p == group[0].1) {
+                        self.drop_bad_source(file_id, group[0].1, &reason);
+                    } else {
+                        warn!("{} (several sources), fetched again: file_id={}", reason, file_id);
+                        self.request_next_chunk(file_id);
+                    }
+                    return;
+                }
+            }
+        }
 
         let mut emit_progress = false;
         let mut all_done = false;
@@ -20299,20 +20701,19 @@ impl P2PCore {
             // pencere boşalıyor ve indirme, 105 sn'lik takılma zamanlayıcısı
             // (`DOWNLOAD_STALL_TIMEOUT_MS`) devreye girene kadar duruyordu.
             // Artık muhasebe atlanıyor ama akış devam ediyor.
-            let duplicate = !state.received_chunks.insert(chunk_index);
-            if !duplicate {
-                state.bytes_done += plaintext_len as u64;
+            // A chunk in a group still waiting for the rest is progress too,
+            // but only checked chunks are counted as received.
+            let mut duplicate = true;
+            for &(i, n) in &verified {
+                if state.received_chunks.insert(i) {
+                    duplicate = false;
+                    state.bytes_done += n;
+                }
+            }
+            if !duplicate || (per_hash > 1 && verified.is_empty()) {
                 // `next_chunk_index` artık BİTİŞİK su seviyesi: sırasız gelen
                 // parçalarda "en yüksek + 1" bir boşluğu sessizce atlardı.
                 while state.received_chunks.contains(&state.next_chunk_index) {
-                    // The file hash needs the chunks in order, they arrive in
-                    // any order: read back from disk. A chunk that cannot be
-                    // read leaves the hash wrong and the download fails.
-                    // ponytail: every chunk is decrypted twice; keep the first
-                    // plaintext for the in-order case if this shows in a profile.
-                    if let Ok(plain) = attachments::read_plain_chunk_with(&enc_path, state.next_chunk_index, &file_key, chunk_size) {
-                        sha2::Digest::update(&mut state.hasher, &plain);
-                    }
                     state.next_chunk_index += 1;
                 }
                 state.last_progress_at = current_time_ms();
@@ -24263,6 +24664,22 @@ impl P2PCore {
     /// atılır) — kötü niyetli bir peer sınırsız bellek tüketemesin.
     fn buffer_early_packet(&mut self, sender_fp: String, source: Option<PeerId>, packet: MessagePacket) {
         let now = current_time_ms();
+        // K-06: the header fingerprint is not verified yet, so the per-peer
+        // caps alone let one peer fill memory under many names. Cap the total
+        // too, evicting from the largest buffer.
+        const MAX_EARLY_PACKET_BYTES_TOTAL: usize = 32 * 1024 * 1024;
+        let buf_bytes = |b: &std::collections::VecDeque<(u64, Option<PeerId>, MessagePacket)>| b.iter().map(|(_, _, p)| p.ciphertext.len()).sum::<usize>();
+        let mut total = packet.ciphertext.len() + self.early_packets.values().map(buf_bytes).sum::<usize>();
+        while total > MAX_EARLY_PACKET_BYTES_TOTAL {
+            let Some(fp) = self.early_packets.iter().max_by_key(|(_, b)| buf_bytes(*b)).map(|(k, _)| k.clone()) else { break };
+            let Some(b) = self.early_packets.get_mut(&fp) else { break };
+            let top = busiest_source(b.iter().map(|(_, s, _)| *s));
+            let i = b.iter().position(|(_, s, _)| *s == top).unwrap_or(0);
+            total -= b.remove(i).map_or(0, |p| p.2.ciphertext.len());
+            if b.is_empty() {
+                self.early_packets.remove(&fp);
+            }
+        }
         let buf = self.early_packets.entry(sender_fp.clone()).or_default();
         // Count and bytes: one packet may be close to 1 MiB.
         const MAX_EARLY_PACKET_BYTES_PER_PEER: usize = 8 * 1024 * 1024;
@@ -24311,19 +24728,27 @@ impl P2PCore {
         });
         // bkz. `early_handshakes` — IdentityExchange hiç gelmezse tampondaki
         // el sıkışma da eskir.
-        self.early_handshakes
-            .retain(|_, (t, _, _)| now.saturating_sub(*t) <= EARLY_PACKET_TTL_MS);
+        self.early_handshakes.retain(|_, buf| {
+            buf.retain(|(t, _, _)| now.saturating_sub(*t) <= EARLY_PACKET_TTL_MS);
+            !buf.is_empty()
+        });
     }
 
     /// bkz. `early_handshakes` — `process_identity_exchange` gönderen cihazı
     /// `known_remote_devices`'a ekler eklemez çağrılır; tamponlanmış bir
     /// `HandshakeInit` varsa şimdi işlenebilir (artık imzası doğrulanabilir).
     fn replay_early_handshake(&mut self, sender_fp: &str) {
-        let Some((_, source, handshake)) = self.early_handshakes.remove(sender_fp) else { return };
-        info!("Tamponlanmış HandshakeInit oynatılıyor (peer={})", crate::log_id(&sender_fp));
-        match self.process_handshake_init(source, &handshake) {
-            Ok(()) => self.replay_early_packets(sender_fp),
-            Err(e) => error!("Tamponlanmış HandshakeInit işlenemedi (peer={}): {}", crate::log_id(&sender_fp), e),
+        let Some(buf) = self.early_handshakes.remove(sender_fp) else { return };
+        // Each buffered init in turn: the first one that verifies wins.
+        for (_, source, handshake) in buf {
+            info!("Tamponlanmış HandshakeInit oynatılıyor (peer={})", crate::log_id(&sender_fp));
+            match self.process_handshake_init(source, &handshake) {
+                Ok(()) => {
+                    self.replay_early_packets(sender_fp);
+                    return;
+                }
+                Err(e) => error!("Tamponlanmış HandshakeInit işlenemedi (peer={}): {}", crate::log_id(&sender_fp), e),
+            }
         }
     }
 
@@ -24370,11 +24795,6 @@ impl P2PCore {
     /// bkz. `RATE_LIMIT_MAX_ESTABLISHED` — hız sınırının üç sonuçlu hâli.
     fn rate_verdict(&mut self, peer: PeerId) -> RateVerdict {
         let established = self.is_established_peer(peer);
-        // M-190: peer ids cost nothing, so all non-established peers also
-        // share one budget, checked before the packet is decoded.
-        if !established && !window_allow(&mut self.unknown_peer_rate, RATE_LIMIT_MAX_UNKNOWN_TOTAL) {
-            return RateVerdict::Drop;
-        }
         let max_per_window = if established {
             RATE_LIMIT_MAX_ESTABLISHED
         } else {
@@ -24382,12 +24802,21 @@ impl P2PCore {
         };
         let now = mono_ms();
         let entry = self.message_rate_limiter.entry(peer).or_insert((now, 0));
-        if now.saturating_sub(entry.0) > RATE_LIMIT_WINDOW_MS {
+        let within = if now.saturating_sub(entry.0) > RATE_LIMIT_WINDOW_MS {
             *entry = (now, 1);
-            return RateVerdict::Allow;
-        }
-        entry.1 += 1;
-        if entry.1 <= max_per_window {
+            true
+        } else {
+            entry.1 += 1;
+            entry.1 <= max_per_window
+        };
+        if within {
+            // M-190: peer ids cost nothing, so all non-established peers also
+            // share one budget, checked before the packet is decoded. Charged
+            // only for packets within the peer's own cap: one peer then takes
+            // at most its share, not the whole budget.
+            if !established && !window_allow(&mut self.unknown_peer_rate, RATE_LIMIT_MAX_UNKNOWN_TOTAL) {
+                return RateVerdict::Drop;
+            }
             RateVerdict::Allow
         } else if established {
             // Tanıdık eş: ASLA atma, sıraya al. Not counted: the deferred
@@ -24600,7 +25029,7 @@ impl P2PCore {
                         // init is several KB: capped.
                         // And 4 per claimed identity: one known identity id
                         // was enough to take all 64 slots.
-                        let same_identity = self.early_handshakes.values().filter(|(_, _, e)| e.sender_identity_id == h.sender_identity_id).count();
+                        let same_identity = self.early_handshakes.values().flatten().filter(|(_, _, e)| e.sender_identity_id == h.sender_identity_id).count();
                         // M100: a claim not backed by a pairing in progress or
                         // a device the contact already lists gets 16 of the 64
                         // slots: ~16 known identity ids filled them all and a
@@ -24610,13 +25039,15 @@ impl P2PCore {
                             .map_or(false, |c| c.find_device(fp).is_some());
                         let vouched = self.pairing_mailbox_subs.contains_key(&sender_fp) || listed(&sender_fp, &h.sender_identity_id);
                         let unvouched = self.early_handshakes.iter()
-                            .filter(|(fp, (_, _, e))| !self.pairing_mailbox_subs.contains_key(*fp) && !listed(fp, &e.sender_identity_id))
+                            .filter(|(fp, buf)| !self.pairing_mailbox_subs.contains_key(*fp)
+                                && !buf.iter().any(|(_, _, e)| listed(fp, &e.sender_identity_id)))
                             .count();
-                        if expected && same_identity < 4 && (vouched || unvouched < 16)
-                            && (self.early_handshakes.len() < 64 || self.early_handshakes.contains_key(&sender_fp))
+                        let held = self.early_handshakes.get(&sender_fp).map_or(0, |b| b.len());
+                        if expected && same_identity < 4 && (vouched || unvouched < 16) && held < 3
+                            && (self.early_handshakes.len() < 64 || held > 0)
                         {
                             info!("HandshakeInit erken geldi (peer={}) — IdentityExchange bekleniyor, tamponlandı", crate::log_id(&sender_fp));
-                            self.early_handshakes.insert(sender_fp.clone(), (current_time_ms(), source, h));
+                            self.early_handshakes.entry(sender_fp.clone()).or_default().push((current_time_ms(), source, h));
                             return Ok(None);
                         }
                         // Not buffered: an Err, so the dedup forgets it soon (bkz.
@@ -25289,6 +25720,16 @@ fn answered_pending_id(payload: &[u8]) -> Option<String> {
 }
 
 /// L-135: the archive row id of a group text copy (`None` for anything else).
+/// H6: every member device carries ~4 KB of keys (+ a proof); past the 1 MiB
+/// envelope cap the update fails `MessageTooLarge` per member. 64 KiB for
+/// the packet around it (header, hybrid signatures, encryption).
+fn check_group_update_size(update: &GroupUpdate) -> Result<(), String> {
+    if ciborium_bytes(update)?.len() + 64 * 1024 > MAX_ENVELOPE_BYTES {
+        return Err("Grup güncellemesi çok büyük (çok fazla üye/cihaz)".to_string());
+    }
+    Ok(())
+}
+
 fn group_row_id(content: &MessageContent) -> Option<&str> {
     match content {
         MessageContent::Text { group_id: Some(_), group_message_local_id: Some(l), .. } => Some(l.as_str()),

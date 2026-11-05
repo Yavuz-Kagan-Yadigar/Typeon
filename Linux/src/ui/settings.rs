@@ -1131,7 +1131,14 @@ pub fn erase_profile_and_quit(app: &Rc<App>) {
     app::run_in_background(
         move || {
             let keyring_result = crate::keyring::delete_key(&data_dir.to_string_lossy());
-            (keyring_result, std::fs::remove_dir_all(&data_dir))
+            // Close the DB and stop the swarm first, so nothing writes while
+            // the tree is removed; retry once if a file closed mid-walk.
+            crate::core::shutdown();
+            let removed = std::fs::remove_dir_all(&data_dir).or_else(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                std::fs::remove_dir_all(&data_dir)
+            });
+            (keyring_result, removed)
         },
         move |(keyring_result, removed)| {
             if let Err(error) = keyring_result {

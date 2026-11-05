@@ -25,8 +25,9 @@ import androidx.core.content.ContextCompat
  * kurarken gerçek cihazda gözlemlendi — sunucu kurulumdan sonra kapalı kaldı).
  *
  * Not direct-boot aware (the data is in credential-protected storage): after
- * a reboot the server returns only once the phone has been unlocked. An
- * unattended server phone should have no lock screen.
+ * a reboot the server returns only once the phone has been unlocked — keep
+ * the lock screen. Removing it makes the DB key and the enrolment keys
+ * readable on a cold-booted device.
  */
 class BootReceiver : BroadcastReceiver() {
 

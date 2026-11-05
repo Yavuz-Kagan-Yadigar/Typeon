@@ -115,6 +115,58 @@ pub fn total_chunks_with(total_size: u64, chunk_size: usize) -> u32 {
     ((total_size.saturating_add(cs - 1)) / cs) as u32
 }
 
+/// Most entries in `FileOffer.chunk_hashes` (32 bytes each, so at most
+/// 128 KiB in the offer). A full list for a 4 GiB file would be 16384 entries
+/// (512 KiB), too large next to the preview for the server's deposit limit.
+pub const MAX_CHUNK_HASHES: u32 = 4096;
+
+/// How many chunks one `FileOffer.chunk_hashes` entry covers: 1 up to
+/// `MAX_CHUNK_HASHES` chunks (1 GiB at 256 KiB), more for a larger file.
+/// ponytail: a bad chunk of a file over 1 GiB is caught only when its whole
+/// group (at most 4 chunks at 256 KiB) is in; a Merkle proof per chunk would
+/// need proofs in every chunk response and on the server.
+pub fn chunks_per_hash(total_chunks: u32) -> u32 {
+    total_chunks.div_ceil(MAX_CHUNK_HASHES).max(1)
+}
+
+/// Byte length of `FileOffer.chunk_hashes` for a file of `total_chunks`.
+pub fn chunk_hashes_len(total_chunks: u32) -> usize {
+    total_chunks.div_ceil(chunks_per_hash(total_chunks)) as usize * 32
+}
+
+/// Plaintext length of chunk `index` of a `total_size` byte file: the chunk
+/// size, less for the last chunk.
+pub fn chunk_plain_len(total_size: u64, chunk_size: usize, index: u32) -> u64 {
+    let cs = chunk_or_default(chunk_size) as u64;
+    total_size.saturating_sub(index as u64 * cs).min(cs)
+}
+
+/// SHA-256 over the ciphertext of chunks `first..first + count` of a `.enc`
+/// file, in order: one `FileOffer.chunk_hashes` entry. A missing chunk is an
+/// error.
+pub fn enc_range_hash(enc_path: &Path, first: u32, count: u32, chunk_size: usize) -> Result<[u8; 32], String> {
+    let mut hasher = Sha256::new();
+    for i in first..first.saturating_add(count) {
+        hasher.update(read_chunk_from_disk_with(enc_path, i, chunk_size)?.ok_or("Chunk missing")?);
+    }
+    Ok(hasher.finalize().into())
+}
+
+/// The `FileOffer.chunk_hashes` of a finished `.enc` file (the sender's side):
+/// each chunk group's `enc_range_hash`, one after the other. The receiver
+/// checks every chunk against it, so a group member who also holds the file
+/// key cannot slip in chunks of its own.
+pub fn chunk_hashes_of(enc_path: &Path, total_chunks: u32, chunk_size: usize) -> Result<Vec<u8>, String> {
+    let per = chunks_per_hash(total_chunks);
+    let mut out = Vec::with_capacity(chunk_hashes_len(total_chunks));
+    let mut first = 0;
+    while first < total_chunks {
+        out.extend_from_slice(&enc_range_hash(enc_path, first, per.min(total_chunks - first), chunk_size)?);
+        first += per;
+    }
+    Ok(out)
+}
+
 /// `chunk_size` 0 = the legacy fixed size (files from before per-file sizes).
 fn chunk_or_default(chunk_size: usize) -> usize {
     if chunk_size == 0 { FILE_CHUNK_SIZE } else { chunk_size }
@@ -168,7 +220,7 @@ fn jpeg_metadata_ranges(file: &mut File) -> Option<(Vec<(u64, u64)>, Option<u8>)
             // the end-of-image marker. What follows it (a motion-photo video,
             // a second "multi-picture" JPEG with its own EXIF) is dropped.
             if marker == 0xDA {
-                let eoi = jpeg_image_end(file, at)?;
+                let eoi = jpeg_image_end(file, at, &mut ranges)?;
                 if eoi < len {
                     ranges.push((eoi, len));
                 }
@@ -207,8 +259,9 @@ fn jpeg_metadata_ranges(file: &mut File) -> Option<(Vec<(u64, u64)>, Option<u8>)
 
 /// The offset just past the end-of-image marker, scanning from the start-of-
 /// scan segment at `sos`: entropy-coded data, and between progressive scans
-/// further marker segments with a length.
-fn jpeg_image_end(file: &mut File, sos: u64) -> Option<u64> {
+/// further marker segments with a length. APP1/APP13 segments met between
+/// scans go into `ranges` too (E-05): they can hold EXIF/XMP/IPTC as well.
+fn jpeg_image_end(file: &mut File, sos: u64, ranges: &mut Vec<(u64, u64)>) -> Option<u64> {
     let mut reader = std::io::BufReader::with_capacity(1 << 16, &mut *file);
     reader.seek(SeekFrom::Start(sos + 1)).ok()?;
     let mut at = sos + 1;
@@ -222,6 +275,8 @@ fn jpeg_image_end(file: &mut File, sos: u64) -> Option<u64> {
     let mut marker_segment = true;
     loop {
         if marker_segment {
+            // The 0xFF before the code.
+            let start = at - 1;
             let code = next(&mut reader, &mut at)?;
             let mut len = [0u8; 2];
             len[0] = next(&mut reader, &mut at)?;
@@ -232,6 +287,9 @@ fn jpeg_image_end(file: &mut File, sos: u64) -> Option<u64> {
             }
             reader.seek_relative(size - 2).ok()?;
             at += size as u64 - 2;
+            if code == 0xE1 || code == 0xED {
+                ranges.push((start, at));
+            }
             marker_segment = false;
         }
         if next(&mut reader, &mut at)? != 0xFF {
@@ -358,6 +416,74 @@ fn jxl_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
     }
 }
 
+/// WebP `EXIF` and `XMP ` chunks, and anything after the RIFF data (E-06).
+/// The second value is the patched start of the file that replaces the same
+/// number of bytes: the RIFF size less the dropped chunks, and in a leading
+/// `VP8X` chunk the EXIF/XMP flags cleared (a decoder may refuse a file whose
+/// size or flags do not match). Empty when nothing is dropped, and for a RIFF
+/// file that is not a WebP. None on any doubt about the structure.
+fn webp_metadata_ranges(file: &mut File) -> Option<(Vec<(u64, u64)>, Vec<u8>)> {
+    let len = file.metadata().ok()?.len();
+    let mut head = [0u8; 21];
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let got = read_full(file, &mut head).ok()?;
+    if got < 12 || &head[..4] != b"RIFF" {
+        return None;
+    }
+    if &head[8..12] != b"WEBP" {
+        return Some((Vec::new(), Vec::new()));
+    }
+    let riff_size = u32::from_le_bytes(head[4..8].try_into().ok()?);
+    let riff_end = 8 + riff_size as u64;
+    if riff_end < 12 || riff_end > len {
+        return None;
+    }
+    let mut ranges = Vec::new();
+    let mut dropped: u64 = 0;
+    let mut vp8x = false;
+    let mut at = 12u64;
+    // ponytail: 1 << 16 chunks; real files have a handful (animations: one per frame).
+    for _ in 0..1 << 16 {
+        if at == riff_end {
+            if riff_end < len {
+                ranges.push((riff_end, len));
+            }
+            if dropped == 0 {
+                return Some((ranges, Vec::new()));
+            }
+            // `dropped` is part of `riff_size`, so this cannot underflow.
+            let mut patched = head[..if vp8x { 21 } else { 12 }].to_vec();
+            patched[4..8].copy_from_slice(&(riff_size - dropped as u32).to_le_bytes());
+            if vp8x {
+                // Bit 3: EXIF present, bit 2: XMP present.
+                patched[20] &= !0x0C;
+            }
+            return Some((ranges, patched));
+        }
+        let mut h = [0u8; 8];
+        file.seek(SeekFrom::Start(at)).ok()?;
+        if read_full(file, &mut h).ok()? != 8 {
+            return None;
+        }
+        let size = u32::from_le_bytes(h[4..8].try_into().ok()?) as u64;
+        // Chunks are padded to an even size.
+        let end = at.checked_add(8 + size + (size & 1))?;
+        if end > riff_end {
+            return None;
+        }
+        match &h[..4] {
+            b"EXIF" | b"XMP " => {
+                ranges.push((at, end));
+                dropped += end - at;
+            }
+            b"VP8X" if at == 12 && size >= 10 && got == 21 => vp8x = true,
+            _ => {}
+        }
+        at = end;
+    }
+    None
+}
+
 /// The orientation (2..=8, not the upright 1) in the body of an EXIF APP1
 /// segment: tag 0x0112 of the first image directory.
 fn exif_orientation(body: &[u8]) -> Option<u8> {
@@ -435,24 +561,35 @@ pub fn encrypt_file_to_disk_with(
     let mut magic = [0u8; 8];
     let got = read_full(&mut src, &mut magic).map_err(|e| e.to_string())?;
     const DOUBT: &str = "Photo metadata could not be removed; file not sent";
+    // The patched start of the file and how many bytes of it it replaces.
+    let mut head = Vec::new();
+    let mut skip: u64 = 0;
     let (ranges, orientation) = if got >= 2 && magic[..2] == [0xFF, 0xD8] {
         jpeg_metadata_ranges(&mut src).ok_or(DOUBT)?
     } else if got == 8 && magic == *b"\x89PNG\r\n\x1a\n" {
         (png_metadata_ranges(&mut src).ok_or(DOUBT)?, None)
     } else if got >= 2 && (magic[..2] == [0xFF, 0x0A] || (got == 8 && magic == *b"\0\0\0\x0CJXL ")) {
         (jxl_metadata_ranges(&mut src).ok_or(DOUBT)?, None)
+    } else if got == 8 && magic[..4] == *b"RIFF" {
+        let (ranges, patched) = webp_metadata_ranges(&mut src).ok_or(DOUBT)?;
+        skip = patched.len() as u64;
+        head = patched;
+        (ranges, None)
     } else {
+        // HEIC/AVIF (ISO-BMFF) and TIFF keep their EXIF/XMP here: their
+        // metadata sits behind item offsets (`iloc`) or IFD offsets that a
+        // byte cut would break, and a broken photo is worse. Only a
+        // re-encode by the client removes it.
         (Vec::new(), None)
     };
-    src.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     // The one tag that goes back in, right after the start-of-image marker.
-    let mut head = Vec::new();
     if let Some(orientation) = orientation {
         head.extend_from_slice(&[0xFF, 0xD8]);
         head.extend_from_slice(&orientation_segment(orientation));
-        src.seek(SeekFrom::Start(2)).map_err(|e| e.to_string())?;
+        skip = 2;
     }
-    let pos = if head.is_empty() { 0 } else { 2 };
+    src.seek(SeekFrom::Start(skip)).map_err(|e| e.to_string())?;
+    let pos = skip;
     let mut src = std::io::Cursor::new(head).chain(SkipRanges { file: src, pos, ranges: ranges.into() });
     let mut dest = File::create(dest_enc_path).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
@@ -1235,6 +1372,41 @@ mod tests {
     }
 
     #[test]
+    fn webp_exif_and_xmp_chunks_are_dropped() {
+        let path = std::env::temp_dir().join(format!("typeon-webp-{}", std::process::id()));
+        let chunk = |kind: &[u8; 4], body: &[u8]| {
+            let mut c = kind.to_vec();
+            c.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            c.extend_from_slice(body);
+            if body.len() % 2 == 1 {
+                c.push(0);
+            }
+            c
+        };
+        let mut body = b"WEBP".to_vec();
+        body.extend(chunk(b"VP8X", &[0x0C, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+        body.extend(chunk(b"VP8L", &[1, 2, 3, 4]));
+        let exif_at = 8 + body.len() as u64;
+        body.extend(chunk(b"EXIF", b"GPS"));
+        body.extend(chunk(b"XMP ", b"<x/>"));
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        webp.extend(body);
+        std::fs::write(&path, &webp).unwrap();
+        let (ranges, patched) = webp_metadata_ranges(&mut File::open(&path).unwrap()).unwrap();
+        // EXIF: 8 + 3 + 1 pad, XMP: 8 + 4.
+        assert_eq!(ranges, vec![(exif_at, exif_at + 12), (exif_at + 12, exif_at + 24)]);
+        assert_eq!(u32::from_le_bytes(patched[4..8].try_into().unwrap()) as u64, exif_at - 8);
+        assert_eq!(patched[20], 0);
+        // A RIFF that is not a WebP is left alone; a cut WebP is refused.
+        std::fs::write(&path, b"RIFF\x04\0\0\0WAVE").unwrap();
+        assert_eq!(webp_metadata_ranges(&mut File::open(&path).unwrap()), Some((vec![], vec![])));
+        std::fs::write(&path, &webp[..webp.len() - 2]).unwrap();
+        assert_eq!(webp_metadata_ranges(&mut File::open(&path).unwrap()), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn plain_chunks_read_back_give_the_file_hash() {
         let base = std::env::temp_dir().join(format!("typeon-att-{}", std::process::id()));
         let (src, enc) = (base.with_extension("src"), base.with_extension("enc"));
@@ -1249,6 +1421,34 @@ mod tests {
         assert!(read_plain_chunk_with(&enc, 0, &[2u8; 32], 16).is_err());
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&enc);
+    }
+
+    #[test]
+    fn chunk_hashes_cover_each_chunk_group() {
+        assert_eq!((chunks_per_hash(0), chunk_hashes_len(0)), (1, 0));
+        assert_eq!((chunks_per_hash(4096), chunk_hashes_len(4096)), (1, 4096 * 32));
+        // 4 GiB at 256 KiB: groups of 4 chunks, 4096 entries.
+        assert_eq!((chunks_per_hash(16384), chunk_hashes_len(16384)), (4, 4096 * 32));
+        assert_eq!(chunk_hashes_len(4097), 2049 * 32);
+        let base = std::env::temp_dir().join(format!("typeon-hashes-{}", std::process::id()));
+        let (src, enc) = (base.with_extension("src"), base.with_extension("enc"));
+        std::fs::write(&src, vec![7u8; 40]).unwrap();
+        let (total, _) = encrypt_file_to_disk_with(&src, &enc, &[1u8; 32], 16).unwrap();
+        let n = total_chunks_with(total, 16);
+        let hashes = chunk_hashes_of(&enc, n, 16).unwrap();
+        assert_eq!(hashes.len(), chunk_hashes_len(n));
+        // One chunk per entry here: each entry is the hash of that chunk's ciphertext.
+        for i in 0..n {
+            let ct = read_chunk_from_disk_with(&enc, i, 16).unwrap().unwrap();
+            assert_eq!(&hashes[i as usize * 32..][..32], Sha256::digest(&ct).as_slice());
+        }
+        // Another file key gives other chunks: they do not match.
+        let other = base.with_extension("enc2");
+        encrypt_file_to_disk_with(&src, &other, &[2u8; 32], 16).unwrap();
+        assert_ne!(chunk_hashes_of(&other, n, 16).unwrap(), hashes);
+        for p in [&src, &enc, &other] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     #[test]

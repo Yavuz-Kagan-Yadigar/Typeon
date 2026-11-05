@@ -379,7 +379,12 @@ object ThemePrefs {
      *  karmaşasına hiç girmeden ham font baytlarını tutuyoruz. Her içe
      *  aktarılan font KENDİ dosyasını alır (`id` bazlı ad) — tek dosyanın
      *  üzerine yazmak öncekini sessizce kaybederdi. */
-    fun customFontFile(context: Context, id: String): File = File(context.filesDir, "custom_font_$id.ttf")
+    fun customFontFile(context: Context, id: String): File {
+        // Ids come from `newCustomFontId` (digits only); refuse anything else
+        // so a stored id can never point outside filesDir.
+        require(id.isNotEmpty() && id.all { it in '0'..'9' }) { "bad font id" }
+        return File(context.filesDir, "custom_font_$id.ttf")
+    }
 
     /** Yeni bir içe aktarma için kararlı, kronolojik sıralanabilir bir
      *  kimlik üretir — dosya adı VE listedeki sıralama anahtarı olarak
@@ -426,7 +431,7 @@ object ThemePrefs {
      *  `null` (çağıran taraf sessizce no-op yapar, bkz. `FontOverride.
      *  applyFile`'ın kendi dosya-yok kontrolü). */
     fun activeCustomFontFile(context: Context): File? =
-        getActiveCustomFontId(context)?.let { customFontFile(context, it) }
+        getActiveCustomFontId(context)?.let { runCatching { customFontFile(context, it) }.getOrNull() }
 
     /** bkz. `getCustomFonts`/`getActiveCustomFontId` — o an seçili içe
      *  aktarılmış fontun görünen adı; kayıt bulunamazsa `null` (çağıran

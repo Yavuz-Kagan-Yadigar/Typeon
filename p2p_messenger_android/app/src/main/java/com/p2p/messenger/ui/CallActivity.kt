@@ -391,7 +391,9 @@ class CallActivity : AppCompatActivity() {
             return
         }
 
-        txtName.text = s.optString("name")
+        // Over the lock screen the caller stays hidden, same as the ring notification.
+        val locked = (getSystemService(android.content.Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager)?.isKeyguardLocked == true
+        txtName.text = if (locked) getString(R.string.app_name) else s.optString("name")
         val participants = s.optJSONArray("participants")
         when (newState) {
             "outgoing" -> txtStatus.setText(R.string.call_calling)

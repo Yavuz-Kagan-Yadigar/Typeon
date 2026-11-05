@@ -935,6 +935,19 @@ pub fn delete_account() -> i64 {
     }
 }
 
+/// Drops the swarm, the Tor handle and the database connection, so the data
+/// directory can be erased under a quiet core. The core stays unusable until
+/// the process exits.
+pub fn shutdown() {
+    let _ = catch_panic(|| {
+        let _guard = RUNTIME.enter();
+        let mut core = core_lock();
+        core.swarm = None;
+        core.tor = None;
+        core.db = None;
+    });
+}
+
 /// `P2PCore::account_deletion_pending`.
 ///
 /// -1 on a panic, NOT 0: 0 means "every notice was delivered" and the caller

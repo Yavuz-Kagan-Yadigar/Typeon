@@ -1810,6 +1810,10 @@ impl ChatView {
     /// the in-app video/audio viewer's transport bar uses.
     fn start_voice_playback(self: &Rc<Self>, state: &Rc<AttachmentState>, path: &str) {
         let Some(voice) = &state.voice else { return };
+        if !crate::ui::media::playable_media(path) {
+            self.app().toast("This voice message is not a playable audio file");
+            return;
+        }
         let media = gtk::MediaFile::for_filename(path);
 
         {

@@ -26,7 +26,9 @@ import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.p2p.messenger.P2PLib
 import com.p2p.messenger.R
 import com.p2p.messenger.util.AppLock
+import com.p2p.messenger.util.MAX_FOREIGN_URI_BYTES
 import com.p2p.messenger.util.StickerImport
+import com.p2p.messenger.util.copyToCapped
 import com.p2p.messenger.util.coreErrorText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
@@ -318,9 +320,10 @@ class StickerPicker(
     private suspend fun importUri(uri: Uri, whatsapp: Boolean): Boolean {
         val tmp = File(File(activity.cacheDir, "sticker_import").apply { mkdirs() }, UUID.randomUUID().toString())
         return try {
-            activity.contentResolver.openInputStream(uri)?.use { input ->
-                tmp.outputStream().use { output -> input.copyTo(output) }
-            } ?: return false
+            // Foreign `content://` bytes: capped, else this one picture fails
+            // (tmp deleted in `finally`), the import toast counts it as failed.
+            val copied = activity.contentResolver.openInputStream(uri)?.use { it.copyToCapped(tmp, MAX_FOREIGN_URI_BYTES) } ?: false
+            if (!copied) return false
             // WhatsApp ships identical bytes to everyone: their hash names the sticker across devices.
             val origin = if (whatsapp) "wa:" + java.security.MessageDigest.getInstance("SHA-256").let { md ->
                 tmp.inputStream().use { input ->

@@ -51,8 +51,12 @@ class P2PApplication : Application() {
         super.onCreate()
         // Plaintext a killed process left behind: a recording or an
         // outgoing copy that was never sent.
+        // On this thread, before any activity runs: a background delete could
+        // remove a file a cold-start share or recording has just written there.
         java.io.File(cacheDir, "voice").deleteRecursively()
         java.io.File(cacheDir, "outgoing").deleteRecursively()
+        java.io.File(cacheDir, "attachment_edit").deleteRecursively()
+        java.io.File(cacheDir, "attachment_preview").deleteRecursively()
         java.io.File(filesDir, "attachments/plain_cache").listFiles()?.forEach { it.deleteRecursively() }
         androidx.core.content.ContextCompat.registerReceiver(this, object : android.content.BroadcastReceiver() {
             override fun onReceive(c: android.content.Context?, i: Intent?) = AppLock.lockNow(c)
@@ -118,14 +122,13 @@ class P2PApplication : Application() {
             override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) {
                 // The Recents card showed the last chat without the app password.
                 if (android.os.Build.VERSION.SDK_INT >= 33) activity.setRecentsScreenshotEnabled(false)
-                // No recents opt-out before API 33: chat screens get FLAG_SECURE there.
+                // No recents opt-out before API 33: every screen gets FLAG_SECURE there.
                 // Link QR, QR scan, camera and lock screens always.
                 if (activity is com.p2p.messenger.ui.LinkDeviceActivity ||
                     activity is com.p2p.messenger.ui.QrScanActivity ||
                     activity is com.p2p.messenger.ui.CameraCaptureActivity ||
                     activity is com.p2p.messenger.ui.AppLockActivity ||
-                    (android.os.Build.VERSION.SDK_INT < 33 &&
-                        (activity is com.p2p.messenger.ui.ChatActivity || activity is com.p2p.messenger.ui.GroupChatActivity))
+                    android.os.Build.VERSION.SDK_INT < 33
                 ) setSecure(activity, true)
                 // Spec dışı, kullanıcı isteği: Ayarlar'daki vurgu (accent)
                 // rengi — bkz. ThemePrefs.applyAccentColor dokümantasyonu.

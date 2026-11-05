@@ -55,6 +55,8 @@ import com.p2p.messenger.util.promptAttachmentCaption
 import com.p2p.messenger.util.ReactionPicker
 import com.p2p.messenger.util.ConnectionStatus
 import com.p2p.messenger.util.ImagePreview
+import com.p2p.messenger.util.MAX_FOREIGN_URI_BYTES
+import com.p2p.messenger.util.copyToCapped
 import com.p2p.messenger.util.KeyboardInsets
 import com.p2p.messenger.util.OutgoingMedia
 import com.p2p.messenger.util.PlaybackSpeed
@@ -466,6 +468,9 @@ class GroupChatActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_chat)
+        // Fill the lazy own id and the contact cache off the main thread, so the first main-thread use does not take the core lock.
+        lifecycleScope.launch(Dispatchers.IO) { ownIdentityId }
+        refreshContactCacheAsync()
         whiteboard = WhiteboardPanel(this, findViewById(R.id.whiteboardHost), findViewById(R.id.whiteboardHandle))
         com.p2p.messenger.util.ThemePrefs.applyChatBackground(this)
         // bkz. util.ChatListDrawer dokümantasyonu.
@@ -490,9 +495,9 @@ class GroupChatActivity : AppCompatActivity() {
         val groupLayoutManager = LinearLayoutManager(this)
         recycler.layoutManager = groupLayoutManager
         recycler.adapter = adapter
+        adapter.warmPool(recycler)
         // Kullanıcı: "mesaj balonları bazen titriyor". Tik/görüldü/tepki
         // güncellemeleri `notifyItemChanged` ile geliyor ve varsayılan
-        adapter.warmPool(recycler)
         // animatör her birinde balonun eski ve yeni hâli arasında çapraz
         // geçiş (crossfade) oynatıyordu. Ekleme/silme animasyonları kalıyor.
         (recycler.itemAnimator as? androidx.recyclerview.widget.SimpleItemAnimator)?.supportsChangeAnimations = false
@@ -950,16 +955,10 @@ class GroupChatActivity : AppCompatActivity() {
         if (target != null) {
             return if (target.isMine) getString(R.string.lbl_you) else target.senderName
         }
-        // The quoted message is not here: the name the sender claims for it
-        // is not shown ("You" or a member over words they never wrote).
-        // bkz. `Item.replyToSenderIdentityId` dokümantasyonu — gönderenin
-        // kimliği yedek olarak taşınır ve kişi listesinden ADA çevrilebilir
-        // (yerel arşive bakmaya gerek kalmadan). Önceden bu yedek
-        // KULLANILMIYORDU: alıntı kutusu boş gönderici etiketi gösteriyordu.
-        val identityId = replyToSenderIdentityId
-        if (identityId.isNullOrEmpty()) return null
-        val name = resolveContactByIdentity(identityId)?.displayName
-        return name?.takeIf { it.isNotBlank() }
+        // The quoted message is not here: the sender-claimed author id is
+        // not trusted, so no name is shown (a member could forge a quote
+        // attributed to someone else).
+        return null
     }
 
     /** bkz. ChatActivity.resolveReplyLabels AYNI desen. */
@@ -1284,9 +1283,9 @@ class GroupChatActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             val tempFile = File(File(cacheDir, "group_avatar").apply { mkdirs() }, UUID.randomUUID().toString())
             try {
-                contentResolver.openInputStream(uri)?.use { input ->
-                    tempFile.outputStream().use { output -> input.copyTo(output, bufferSize = 64 * 1024) }
-                } ?: throw java.io.IOException("Dosya açılamadı")
+                // Foreign `content://` bytes: capped, else the avatar fails (same toast).
+                val copied = contentResolver.openInputStream(uri)?.use { it.copyToCapped(tempFile, MAX_FOREIGN_URI_BYTES) } ?: false
+                if (!copied) throw java.io.IOException("Dosya açılamadı")
                 val compressed = ImagePreview.compressFile(tempFile, AVATAR_MAX_DIMENSION, AVATAR_JPEG_QUALITY)
                 withContext(Dispatchers.Main) { setGroupAvatar(compressed) }
             } catch (e: Exception) {
@@ -1864,6 +1863,18 @@ class GroupChatActivity : AppCompatActivity() {
             recorder.setAudioEncodingBitRate(64000)
             recorder.setAudioSamplingRate(44100)
             recorder.setOutputFile(file.absolutePath)
+            // Tavan: 10 dakika. Kayıt kendiliğinden biter ve uygulama, kaydın
+            // bittiği anda (ACTION_UP) ZATEN aldığı aynı gönder/at kararını alır.
+            recorder.setMaxDuration(10 * 60 * 1000)
+            recorder.setOnInfoListener { _, what, _ ->
+                if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) {
+                    // Olay ana thread'de gelmeyebilir: karar (ve ekran işleri)
+                    // ana thread'de verilir.
+                    recordingHandler.post {
+                        if (mediaRecorder === recorder) finishVoiceRecording(send = !recordingCancelled)
+                    }
+                }
+            }
             recorder.prepare()
             recorder.start()
         } catch (e: Exception) {
@@ -1918,40 +1929,44 @@ class GroupChatActivity : AppCompatActivity() {
     private fun sendVoiceMessage(file: File, durationMs: Long, caption: String = "") {
         val targetGroupId = groupId
         lifecycleScope.launch(Dispatchers.IO) {
-            val result = try {
-                P2PLib.prepareAndSendGroupFile(
-                    targetGroupId, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
-                    caption, "", "", ""
-                )
-            } catch (e: Exception) {
-                "Error: ${e.message}"
-            }
-            withContext(Dispatchers.Main) {
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(this@GroupChatActivity, com.p2p.messenger.util.coreErrorText(this@GroupChatActivity, result), Toast.LENGTH_SHORT).show()
-                } else {
-                    adapter.addMessage(
-                        SimpleChatAdapter.Item(
-                            messageId = result,
-                            text = "",
-                            isMine = true,
-                            caption = caption,
-                            attachment = SimpleChatAdapter.AttachmentInfo(
-                                fileId = result,
-                                fileName = file.name,
-                                mimeType = "audio/mp4",
-                                totalSize = file.length(),
-                                status = SimpleChatAdapter.AttachmentStatus.COMPLETE,
-                                bytesDone = file.length(),
-                                durationMs = durationMs.toInt()
+            // The copy is deleted even if the screen closes while sending.
+            try {
+                val result = try {
+                    P2PLib.prepareAndSendGroupFile(
+                        targetGroupId, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
+                        caption, "", "", ""
+                    )
+                } catch (e: Exception) {
+                    "Error: ${e.message}"
+                }
+                withContext(Dispatchers.Main) {
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(this@GroupChatActivity, com.p2p.messenger.util.coreErrorText(this@GroupChatActivity, result), Toast.LENGTH_SHORT).show()
+                    } else {
+                        adapter.addMessage(
+                            SimpleChatAdapter.Item(
+                                messageId = result,
+                                text = "",
+                                isMine = true,
+                                caption = caption,
+                                attachment = SimpleChatAdapter.AttachmentInfo(
+                                    fileId = result,
+                                    fileName = file.name,
+                                    mimeType = "audio/mp4",
+                                    totalSize = file.length(),
+                                    status = SimpleChatAdapter.AttachmentStatus.COMPLETE,
+                                    bytesDone = file.length(),
+                                    durationMs = durationMs.toInt()
+                                )
                             )
                         )
-                    )
-                    resolveReplyLabels()
-                    scrollToBottomNow()
+                        resolveReplyLabels()
+                        scrollToBottomNow()
+                    }
                 }
+            } finally {
+                file.delete()
             }
-            file.delete()
         }
     }
 
@@ -2016,8 +2031,10 @@ class GroupChatActivity : AppCompatActivity() {
                     Toast.makeText(this@GroupChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
                     return@withContext
                 }
+                var created: MediaPlayer? = null
                 try {
                     val player = MediaPlayer()
+                    created = player
                     player.setDataSource(path)
                     player.setOnCompletionListener {
                         voicePlaybackHandler.removeCallbacks(voicePlaybackTickRunnable)
@@ -2035,6 +2052,8 @@ class GroupChatActivity : AppCompatActivity() {
                     voicePlaybackHandler.post(voicePlaybackTickRunnable)
                     adapter.updateVoicePlayback(attachment.fileId, true, startPositionMs, voicePlaybackSpeed)
                 } catch (e: Exception) {
+                    // A corrupt file: free the native decoder, it was never stored.
+                    created?.release()
                     Toast.makeText(this@GroupChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
                 }
             }
@@ -2195,7 +2214,6 @@ class GroupChatActivity : AppCompatActivity() {
      *  picked; the caption goes with the last one, under the batch. */
     private fun sendPickedFiles(files: List<Pair<Uri, Boolean>>, caption: String = "") =
         lifecycleScope.launch { files.forEachIndexed { i, (u, hiRes) -> onGroupFilePicked(u, if (i == files.lastIndex) caption else "", hiRes).join() } }
-    }
 
     /**
      * Spec dışı, kullanıcı isteği (grup ekleri): bkz. ChatActivity.onFilePicked
@@ -2358,8 +2376,12 @@ class GroupChatActivity : AppCompatActivity() {
                 setDataAndType(uri, mimeType)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            AppLock.beginTrustedExcursion()
-            startActivity(intent)
+            com.p2p.messenger.util.confirmExternalOpen(this, intent.type) {
+                AppLock.beginTrustedExcursion()
+                try { startActivity(intent) } catch (e: Exception) {
+                    Toast.makeText(this, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
+                }
+            }
         } catch (e: Exception) {
             Toast.makeText(this, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
         }
@@ -2422,8 +2444,12 @@ class GroupChatActivity : AppCompatActivity() {
                         )
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
-                    AppLock.beginTrustedExcursion()
-                    startActivity(Intent.createChooser(intent, getString(R.string.lbl_open_with_chooser)))
+                    com.p2p.messenger.util.confirmExternalOpen(this@GroupChatActivity, intent.type) {
+                        AppLock.beginTrustedExcursion()
+                        try { startActivity(Intent.createChooser(intent, getString(R.string.lbl_open_with_chooser))) } catch (e: Exception) {
+                            Toast.makeText(this@GroupChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
+                        }
+                    }
                 } catch (e: Exception) {
                     Toast.makeText(this@GroupChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
                 }
@@ -2800,6 +2826,10 @@ class GroupChatActivity : AppCompatActivity() {
                 // once more and refreshed off it, not read under the core lock.
                 refreshContactCacheAsync()
                 cached
+            } else if (Looper.myLooper() == Looper.getMainLooper()) {
+                // First lookup on the main thread: do not read under the core lock; fill the cache off-thread.
+                refreshContactCacheAsync()
+                return null
             } else {
                 JSONArray(P2PLib.listContacts()).also {
                     contactListCache = it

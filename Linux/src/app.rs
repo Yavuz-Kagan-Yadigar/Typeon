@@ -324,7 +324,16 @@ impl App {
                 let erase_and_quit = move || {
                     // Recursive delete is unbounded blocking: off the GTK thread.
                     run_in_background(
-                        move || std::fs::remove_dir_all(&data_dir),
+                        move || {
+                            // Close the DB and stop the swarm first, so no
+                            // file is written while the tree is removed.
+                            crate::core::shutdown();
+                            std::fs::remove_dir_all(&data_dir).or_else(|_| {
+                                // A file closed during shutdown can land mid-walk.
+                                std::thread::sleep(std::time::Duration::from_millis(200));
+                                std::fs::remove_dir_all(&data_dir)
+                            })
+                        },
                         move |result| {
                             if let Err(error) = result {
                                 eprintln!("typeon: could not erase data dir after remote unlink: {error}");
@@ -513,8 +522,15 @@ impl App {
     /// (bkz. `device_alert`) kullanıcının nerede olduğuna bakmadan
     /// görünmeli.
     fn notify_always(self: &Rc<Self>, id: &str, title: &str, body: &str) {
-        let notification = gio::Notification::new(title);
-        notification.set_body(Some(body));
+        // Same setting as message notifications: no names on a lock screen.
+        // The body carries a peer-chosen name, so it is markup-escaped too.
+        let hide = self.prefs.borrow().hide_notification_content;
+        let notification = gio::Notification::new(if hide { "Typeon" } else { title });
+        if hide {
+            notification.set_body(Some("Security notice"));
+        } else {
+            notification.set_body(Some(glib::markup_escape_text(body).as_str()));
+        }
         notification.set_priority(gio::NotificationPriority::High);
         self.application.send_notification(Some(id), &notification);
     }

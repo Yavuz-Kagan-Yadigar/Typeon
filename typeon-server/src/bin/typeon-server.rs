@@ -127,9 +127,15 @@ async fn main() {
 
     // Optional SQLCipher key (64 hex chars); a plain DB is migrated on first use.
     if let Ok(k) = std::env::var("TYPEON_SERVER_DB_KEY") {
-        if let Err(e) = typeon_server::store::set_db_key(Some(k.trim().to_string())) {
-            eprintln!("TYPEON_SERVER_DB_KEY: {e}");
-            std::process::exit(1);
+        let k = zeroize::Zeroizing::new(k);
+        // Keep the key out of any child process environment.
+        std::env::remove_var("TYPEON_SERVER_DB_KEY");
+        match typeon_server::store::parse_hex_db_key(k.trim()) {
+            Ok(key) => typeon_server::store::set_db_key(Some(key)),
+            Err(e) => {
+                eprintln!("TYPEON_SERVER_DB_KEY: {e}");
+                std::process::exit(1);
+            }
         }
     }
 

@@ -88,6 +88,10 @@ pub fn on_event(app: &Rc<App>, event: &Event) {
     }
     let video = event.value.get("video").and_then(|v| v.as_bool()).unwrap_or(false);
     let ui = CallUi::open(app, video);
+    // Start as "incoming" so a caller who cancels before the first poll still
+    // takes the normal end-and-close path instead of idle == idle.
+    ui.state.replace("incoming".into());
+    ui.seen.set(true);
     let name = event.string("name");
     ui.title.set_text(&name);
     ui.status.set_text(if video { "Incoming video call" } else { "Incoming voice call" });

@@ -14,7 +14,7 @@
 //!   multistream round trip per 60 ms audio packet — over Tor that is +1 RTT.
 //! - **Path** per target device: a direct stream when we hold a live
 //!   connection to it, otherwise the server relay stream (`RELAY_PROTOCOL`)
-//!   addressed to `relay_mailbox_id(pair_key)`: an id only the sender and
+//!   addressed to `key_bound_mailbox_id(pair_key)`: an id only the sender and
 //!   that receiver compute, which the receiver registers for the call
 //!   (`relay_listen_keys`). The server pushes it to the target only if the
 //!   target is connected at that moment; nothing is stored.
@@ -43,7 +43,7 @@ use rand::RngCore as _;
 use zeroize::Zeroizing;
 
 use crate::packet::{CallAction, MessageContent};
-use crate::{current_time_ms, mono_ms, server_seal, P2PCore, OptionGroupExt as _, RUNTIME};
+use crate::{current_time_ms, mono_ms, P2PCore, OptionGroupExt as _, RUNTIME};
 
 const KIND_AUDIO: u8 = 1;
 const KIND_VIDEO: u8 = 2;
@@ -308,7 +308,7 @@ impl Remote {
 struct Target {
     /// Live connection to this device, refreshed every poll by `media_supervise`.
     peer: Option<PeerId>,
-    /// `relay_mailbox_id(key)` — the relay address.
+    /// `server_client::key_bound_mailbox_id(key)` — the relay address.
     mailbox: Vec<u8>,
     /// `pair_key` for this device: what we seal its copy of a frame with.
     key: Zeroizing<[u8; 32]>,
@@ -442,12 +442,13 @@ fn media_add_remote(fp: &str, key: &[u8], sid: &[u8]) {
     }
     m.remotes.insert(fp.to_string(), remote);
     let send_key = pair_key(&m.key, fp);
-    let mailbox = server_seal::relay_mailbox_id(&send_key[..]).into_bytes();
+    // Never fails (fixed-size seeds); an empty id is refused by the server.
+    let mailbox = crate::server_client::key_bound_mailbox_id(&send_key[..]).unwrap_or_default().into_bytes();
     m.targets.insert(fp.to_string(), Target { peer: None, mailbox, key: send_key, audio_hold: false, hold_at: 0, hold_disarmed: false, relay_via: None });
 }
 
 /// The keys the call's remotes seal our media with. Each gives the relay
-/// address its sender writes to (`server_seal::relay_mailbox_id`), which this
+/// address its sender writes to (`server_client::key_bound_mailbox_id`), which this
 /// device registers at its servers while the call runs.
 pub(crate) fn relay_listen_keys() -> Vec<Vec<u8>> {
     media().remotes.values().map(|r| r.key.to_vec()).collect()
@@ -1701,7 +1702,7 @@ mod tests {
         // The relay address of a direction comes from that direction's key.
         assert!(relay_listen_keys().contains(&vec![3u8; 32]));
         let m = media();
-        assert_eq!(m.targets["self"].mailbox, server_seal::relay_mailbox_id(&pair_key(&m.key, "self")[..]).into_bytes());
+        assert_eq!(m.targets["self"].mailbox, crate::server_client::key_bound_mailbox_id(&pair_key(&m.key, "self")[..]).unwrap().into_bytes());
         assert_ne!(m.targets["self"].mailbox, m.targets["thief"].mailbox);
         drop(m);
         media_on_packet(&seal_packet(&[3u8; 32], &[9u8; 8], 7, 1, b"mine"));

@@ -42,23 +42,23 @@
          Node modu şimdiye kadar sadece DHT routing'e katkı sağlıyordu,
          gerçek bir röle görevi görmüyordu (bkz. SECURITY.md "Cross-network
          connectivity" notu). Artık gerçekten doğru. -->
-    <string name="lbl_node_mode_desc">Blindly relays (encrypted) traffic for others on the network (Circuit Relay v2 only; no DHT contribution) — it can never see your content, but it uses the bandwidth of whoever you relay for, and can see who they connect to.</string>
+    <string name="lbl_node_mode_desc">Helps others connect by passing their encrypted traffic along. It cannot read any content. But it uses your internet data and bandwidth, and it can see who connects through you.</string>
     <string name="lbl_history_storage_limit">Attachment storage limit</string>
-    <string name="lbl_history_storage_limit_desc">Node Mode auto-downloads every file offered to it, which can grow without bound. Once total attachment storage passes this limit, the oldest files are deleted first to make room.</string>
+    <string name="lbl_history_storage_limit_desc">With Node Mode on, your device saves every file sent through it. When the total goes over this limit, the oldest files are deleted first.</string>
     <string name="lbl_relay_address">Known relay address</string>
-    <string name="lbl_relay_address_desc">So two people on different networks (both behind NAT) with no shared relay history can pair for the first time — if you have a relay you trust or run yourself (a reachable device with Node Mode on), add its address here.</string>
+    <string name="lbl_relay_address_desc">Only needed when two people on different networks connect for the first time. Paste the address of a device you trust, with Node Mode on, or your own.</string>
     <string name="lbl_relay_address_hint">/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo…</string>
     <string name="action_add_relay_address">Add</string>
     <string name="msg_relay_address_added">Relay address added</string>
     <!-- Sunucular (store-and-forward) -->
     <string name="lbl_servers">Servers</string>
-    <string name="lbl_servers_desc">A server holds your messages while the other person is offline, and delivers them when they come back. It never sees your messages: they stay end-to-end encrypted and are sealed a second time before being stored. Unlike a relay, a server does store — a relay only forwards while both sides are online.</string>
+    <string name="lbl_servers_desc">A server holds your messages while the other person is offline, then delivers them when they come back online. It cannot read them, because they stay encrypted.</string>
     <string name="action_add_server">Scan server QR</string>
     <string name="action_add_server_paste">Paste code</string>
     <string name="dlg_add_server_title">Add server</string>
     <string name="dlg_add_server_hint">typeon-server:/dns/…onion/tcp/…/p2p/…#token</string>
     <string name="lbl_display_name">Account name</string>
-    <string name="lbl_display_name_desc">The name your contacts see. Changing it notifies every contact automatically; anyone offline gets it when they come back.</string>
+    <string name="lbl_display_name_desc">The name your contacts see. Change it and your contacts are updated automatically. Anyone offline gets it when they come back online.</string>
     <string name="action_change_display_name">Change name</string>
     <string name="dlg_change_display_name_title">Account name</string>
     <string name="msg_display_name_changed">Name changed. Contacts are being notified.</string>
@@ -70,6 +70,7 @@
     <string name="lbl_server_route">Route messages through this server</string>
     <string name="lbl_server_history">Store history on this server</string>
     <string name="lbl_server_history_warn">Lets a new device load your old messages. Unlike live messages, this backup is not forward-secret: whoever gets the archive key can read everything uploaded so far.</string>
+    <string name="msg_server_history_upload">Your recent messages will be uploaded to it, sealed so the server cannot read them.</string>
     <string name="action_remove_server">Remove</string>
     <string name="state_server_connected">Connected</string>
     <string name="state_server_connecting">Connecting…</string>
@@ -112,7 +113,7 @@
     <string name="lbl_eta_minutes">~%1$d min %2$d sec left</string>
 
     <string name="lbl_tor">Reachability via Tor</string>
-    <string name="lbl_tor_desc">Lets devices on different networks connect despite CGNAT (Tor onion service). Connecting takes seconds on first launch and uses battery. The other side must also have Tor enabled. Changes take effect after restarting the app.</string>
+    <string name="lbl_tor_desc">Most mobile and home networks do not give you a fixed (static) IP. Turn this on to reach people on other networks. It uses some battery, and the first connection takes a few seconds. The other person must have it on too. Restart the app after changing this.</string>
     <string name="tor_status_disabled">Tor: off</string>
     <string name="tor_status_bootstrapping">Tor: connecting…</string>
     <string name="tor_status_ready">Tor: ready — .onion address is live</string>
@@ -134,7 +135,7 @@
     <string name="lbl_keys_hardware_backed">✓ Your keys are protected by the device\'s security hardware (StrongBox/TEE)</string>
     <string name="lbl_keys_software_backed">⚠ Your keys are protected in software only (this device doesn\'t support a hardware security module)</string>
     <string name="lbl_recovery_export">Identity Recovery</string>
-    <string name="lbl_recovery_export_desc">Export a password-protected recovery file containing all your identity keys. Keep it somewhere safe and offline (e.g. USB drive) — anyone who gets both this file and the password can impersonate you. This is your only way to recover your identity if you lose this device.</string>
+    <string name="lbl_recovery_export_desc">Save a password-protected file with all your keys. It is the only way to get your account back if you lose this phone. Store it offline, for example on a USB drive. Anyone with this file and its password can impersonate you. A very large history keeps only the newest messages.</string>
     <string name="action_export_recovery">Export Recovery File…</string>
     <string name="lbl_recovery_password">Password</string>
     <string name="lbl_recovery_password_confirm">Confirm password</string>
@@ -362,7 +363,7 @@
 
     <!-- Çoklu-cihaz (spec 1.5/1.6/1.7): ikincil cihaz bağlama -->
     <string name="linked_devices_section_title">Linked devices</string>
-    <string name="linked_devices_section_desc">Use this account on more than one device. Each device keeps its own keys; contacts deliver messages to all of your active devices.</string>
+    <string name="linked_devices_section_desc">Use this account on several devices. Each device has its own keys. Messages are sent to all your active devices.</string>
     <string name="linked_devices_manage">Manage devices / Add a device</string>
     <string name="linked_devices_add">Add a device (scan)</string>
     <string name="linked_devices_this_device">this device</string>
@@ -373,7 +374,7 @@
 
     <!-- Spec dışı, kullanıcı isteği: hesaptan çıkış (yerel verileri sil). -->
     <string name="logout_section_title">Log out</string>
-    <string name="logout_section_desc">Remove this identity from this device: messages, contacts, and keys stored here are permanently deleted. Other devices linked to this account, and other people\'s copies of your messages, are not affected.</string>
+    <string name="logout_section_desc">Removes this account from this device. Messages, contacts and keys stored here are permanently deleted. Your other devices and other people\'s copies of your messages are not affected.</string>
     <string name="action_logout">Log out</string>
     <string name="logout_confirm_title">Log out?</string>
     <string name="logout_confirm_message">This deletes all local messages, contacts, and keys on this device. If you have not exported a recovery file, this account cannot be recovered on this device. This cannot be undone.</string>
@@ -383,6 +384,12 @@
     <string name="delete_account_confirm_message">All your contacts and groups are told that this account was deleted, and they can no longer message you. Your linked devices are wiped too. Local messages, contacts, and keys are deleted. This cannot be undone.</string>
     <string name="msg_deleting_account">Notifying your contacts…</string>
     <string name="error_delete_account_failed">Couldn\'t notify your contacts. Account not deleted, try again when connected.</string>
+    <string name="external_open_title">Open outside Typeon?</string>
+    <string name="external_open_message">The app that opens this file is outside Typeon and Tor. It may load content from the internet and reveal your IP address.</string>
+    <string name="external_open_continue">Open anyway</string>
+    <string name="delete_account_pending_message">%1$d deletion notice(s) have not reached your contacts yet. Keep waiting, or delete anyway?</string>
+    <string name="delete_account_keep_waiting">Keep waiting</string>
+    <string name="delete_account_anyway">Delete anyway</string>
     <string name="msg_contact_deleted_account">%1$s deleted their account</string>
     <string name="msg_account_deleted_no_send">This person deleted their account. Messages can no longer be sent.</string>
     <string name="device_unlinked_notification">This device was unlinked from your account. Its local data has been erased.</string>
@@ -421,11 +428,11 @@
 
     <!-- Spec dışı, kullanıcı isteği: bildirimlerde mesaj metnini göster/gizle. -->
     <string name="lbl_notif_show_message">Show messages in notifications</string>
-    <string name="lbl_notif_show_message_desc">When off, a notification only says "New message" — no sender, no text.</string>
+    <string name="lbl_notif_show_message_desc">When off, notifications only say "New message". The sender and text stay hidden.</string>
 
     <!-- Spec dışı, kullanıcı isteği: uygulama açılış şifresi. -->
     <string name="lbl_app_lock_section">App password</string>
-    <string name="lbl_app_lock_section_desc">Asked every time the app comes back to the foreground. It can be changed but never removed.</string>
+    <string name="lbl_app_lock_section_desc">Asked every time you open the app. You can change the password, but you cannot remove it.</string>
     <string name="action_change_app_password">Change password</string>
     <string name="title_app_lock_create">Set a password</string>
     <string name="msg_app_lock_create">This password unlocks the app. It cannot be recovered if you forget it, and it cannot be left empty.</string>
@@ -451,7 +458,6 @@
     <string name="title_attachment_caption">Add a caption</string>
     <string name="hint_attachment_caption">Caption (optional)</string>
     <string name="attachment_hi_res">Lossless</string>
-    <!-- Settings screen section headers -->
     <string name="image_edit_revert">Original</string>
     <string name="image_edit_undo">Revert</string>
     <string name="image_edit_rotate_left">Rotate left</string>
@@ -465,6 +471,7 @@
     <string name="image_edit_no_memory">Not enough memory for this edit</string>
     <string name="image_edit_save_failed">Could not save the edit</string>
     <string name="image_edit_reduced">Editing at %1$d × %2$d to fit in memory</string>
+    <!-- Settings screen section headers -->
     <string name="settings_section_profile">Profile</string>
     <string name="settings_section_privacy">Privacy &amp; security</string>
     <string name="settings_section_network">Network &amp; connection</string>

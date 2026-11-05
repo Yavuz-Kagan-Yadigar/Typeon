@@ -25,7 +25,7 @@ use std::path::Path;
 // NOT: paket adı `p2p_messenger_core`, ama crate `p2p_messenger` adıyla
 // linkleniyor (bkz. o crate'in `[lib] name`'i) — `use` yolu bu yüzden
 // paket adından farklı.
-use p2p_messenger::server_proto::{ArchiveRecord, BucketStat, MailItem};
+use p2p_messenger::server_proto::{self, ArchiveRecord, BucketStat, MailItem};
 
 /// Bir kaydın (enrollment) durumu.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,9 +89,21 @@ pub struct Store {
     conn: Connection,
 }
 
-const MAX_READERS_PER_MAILBOX: i64 = 2;
+/// Readers of one mailbox that registered with the same proof key: both ends
+/// of a session, or the one device of a first-contact box.
+///
+/// A key-bound box (`server_proto::KEY_BOUND_MAILBOX_PREFIX`: session and
+/// relay boxes) takes only the key its id is made from, so there this is a
+/// per-box cap. A first-contact box cannot be bound that way (its sender holds
+/// the pairing code, not the reader's key), so it is counted per key, not per
+/// box: whoever knows a first-contact id (every co-member of the group) can
+/// make a proof by a key of its own, and a per-box cap or a first-key binding
+/// let it take the box before its device did and lock that device out. A
+/// reader with another key adds a reader; it can never delete a copy another
+/// active reader has not acknowledged (`delete_fully_acked`).
+const MAX_READERS_PER_KEY: i64 = 2;
 
-/// A full mailbox gives up a reader to a newcomer with the bound key (a
+/// A key's full reader slots give up a reader to a newcomer with that key (a
 /// restored device) only when that reader has not been seen for this long:
 /// the mailbox proof rests on classical X25519 alone, and with it a quantum
 /// attacker could displace a device still in use. Same horizon as the
@@ -104,7 +116,7 @@ const READER_EVICT_IDLE_MS: i64 = 7 * 24 * 3600 * 1000;
 const ARCHIVE_ROW_OVERHEAD: usize = 128;
 
 /// Bump on every change to `init_schema`, or existing DBs skip it.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Bytes an archive record is charged: quota and the server-wide budget.
 pub fn archive_row_bytes(rec: &ArchiveRecord) -> usize {
@@ -114,61 +126,96 @@ pub fn archive_row_bytes(rec: &ArchiveRecord) -> usize {
 /// Archive rows older than this (since last write) are swept: 13 months.
 pub const ARCHIVE_TTL_MS: i64 = 13 * 30 * 24 * 3600 * 1000;
 
-/// SQLCipher key (64 hex chars) for every later `Store::open`. Unset = plain
-/// SQLite (Linux CLI default). The Android app sets it from a Keystore-wrapped
+/// SQLCipher raw key for every later `Store::open`. Unset = plain SQLite
+/// (Linux CLI default). The Android app sets it from a Keystore-wrapped
 /// random key before `startServer`.
-static DB_KEY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static DB_KEY: std::sync::Mutex<Option<zeroize::Zeroizing<[u8; 32]>>> = std::sync::Mutex::new(None);
 
-pub fn set_db_key(hex_key: Option<String>) -> Result<(), String> {
-    if let Some(k) = &hex_key {
-        if k.len() != 64 || !k.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err("DB anahtarı 64 hex karakter olmalı".into());
-        }
-    }
-    *DB_KEY.lock().unwrap_or_else(|p| p.into_inner()) = hex_key;
-    Ok(())
+pub fn set_db_key(key: Option<zeroize::Zeroizing<[u8; 32]>>) {
+    *DB_KEY.lock().unwrap_or_else(|p| p.into_inner()) = key;
 }
 
-/// Opens `path` with the raw key; Err if the key does not match.
+/// Parses a 64-hex-character key (CLI `TYPEON_SERVER_DB_KEY`).
+pub fn parse_hex_db_key(hex_key: &str) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+    let mut key = zeroize::Zeroizing::new([0u8; 32]);
+    hex::decode_to_slice(hex_key, &mut key[..]).map_err(|_| "DB anahtarı 64 hex karakter olmalı".to_string())?;
+    Ok(key)
+}
+
+/// Opens `path` with the raw key; Err if the key does not match or the
+/// linked SQLite has no SQLCipher (a plain build would ignore `PRAGMA key`
+/// and silently write plaintext).
 fn open_keyed(path: &Path, key: &str) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("DB açılamadı: {e}"))?;
-    conn.execute_batch(&format!("PRAGMA key = \"x'{key}'\";")).map_err(|e| format!("DB anahtarı: {e}"))?;
+    let cipher: Option<String> = conn
+        .query_row("PRAGMA cipher_version", [], |r| r.get(0))
+        .optional()
+        .map_err(|e| format!("DB anahtarı: {e}"))?;
+    if cipher.map_or(true, |v| v.is_empty()) {
+        return Err("DB anahtarı: SQLite SQLCipher olmadan derlenmiş".into());
+    }
+    conn.execute_batch(&zeroize::Zeroizing::new(format!("PRAGMA key = \"x'{key}'\";")))
+        .map_err(|e| format!("DB anahtarı: {e}"))?;
     conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
         .map_err(|e| format!("DB şifre çözülemedi: {e}"))?;
     Ok(conn)
 }
 
 /// One-time migration of a plain DB to SQLCipher (sqlcipher_export into a new
-/// file, then rename over the old one). No-op when the file is absent or
-/// already opens with the key.
+/// file, verified, then renamed over the old one). No-op when the file is
+/// absent or already opens with the key. Any failure leaves the plain DB in
+/// place and the next open retries.
 fn migrate_plain_to_keyed(path: &Path, key: &str) -> Result<(), String> {
     if !path.exists() || open_keyed(path, key).is_ok() {
         return Ok(());
     }
-    let plain = Connection::open(path).map_err(|e| format!("DB açılamadı: {e}"))?;
-    plain
-        .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
-        .map_err(|_| "DB ne düz ne de bu anahtarla açılıyor (yanlış anahtar?)".to_string())?;
-    let _ = plain.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    let err = |e: rusqlite::Error| format!("DB şifreleme geçişi: {e}");
+    let objects = |c: &Connection| c.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0));
     let tmp = path.with_extension("db.enc");
-    let _ = std::fs::remove_file(&tmp);
+    for suffix in ["", "-journal", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", tmp.display()));
+    }
+    let plain = Connection::open(path).map_err(|e| format!("DB açılamadı: {e}"))?;
+    let expected = objects(&plain).map_err(|_| "DB ne düz ne de bu anahtarla açılıyor (yanlış anahtar?)".to_string())?;
+    // Fold the WAL into the main file and leave WAL mode: a plain `-wal`
+    // next to the encrypted file would be replayed into it.
+    let mode: String = plain.query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0)).map_err(err)?;
+    if !mode.eq_ignore_ascii_case("delete") {
+        return Err("DB şifreleme geçişi: plain database is still in WAL mode".into());
+    }
+    let user_version: i64 = plain.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(err)?;
     let tmp_s = tmp.to_string_lossy().replace('\'', "''");
     plain
-        .execute_batch(&format!(
-            "ATTACH DATABASE '{tmp_s}' AS enc KEY \"x'{key}'\"; SELECT sqlcipher_export('enc'); DETACH DATABASE enc;"
-        ))
-        .map_err(|e| format!("DB şifreleme geçişi: {e}"))?;
+        .execute_batch(&zeroize::Zeroizing::new(format!("ATTACH DATABASE '{tmp_s}' AS enc KEY \"x'{key}'\";")))
+        .map_err(err)?;
+    plain.query_row("SELECT sqlcipher_export('enc')", [], |_| Ok(())).map_err(err)?;
+    plain
+        .execute_batch(&format!("PRAGMA enc.user_version = {user_version}; DETACH DATABASE enc;"))
+        .map_err(err)?;
     drop(plain);
-    for ext in ["db-wal", "db-shm"] {
+
+    let encrypted = open_keyed(&tmp, key)?;
+    if objects(&encrypted).map_err(err)? != expected {
+        return Err("DB şifreleme geçişi: encrypted copy is incomplete".into());
+    }
+    drop(encrypted);
+
+    std::fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(|e| format!("DB şifreleme geçişi: {e}"))?;
+    for ext in ["db-wal", "db-shm", "db-journal"] {
         let _ = std::fs::remove_file(path.with_extension(ext));
     }
-    std::fs::rename(&tmp, path).map_err(|e| format!("DB şifreleme geçişi: {e}"))
+    std::fs::rename(&tmp, path).map_err(|e| format!("DB şifreleme geçişi: {e}"))?;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
+    Ok(())
 }
 
 impl Store {
     pub fn open(db_path: &Path) -> Result<Store, String> {
         let key = DB_KEY.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let conn = match &key {
+        let key_hex = key.as_ref().map(|k| zeroize::Zeroizing::new(hex::encode(&k[..])));
+        let conn = match &key_hex {
             Some(k) => {
                 migrate_plain_to_keyed(db_path, k)?;
                 open_keyed(db_path, k)?
@@ -279,22 +326,20 @@ impl Store {
                     owner        BLOB NOT NULL,
                     created_at   INTEGER NOT NULL,
                     last_seen_at INTEGER NOT NULL,
+                    -- Hash of the public keys of the `MailboxProof` this
+                    -- reader registered with (see `MAX_READERS_PER_KEY`).
+                    key_hash     BLOB,
                     PRIMARY KEY (mailbox_id, owner)
                 );
                 CREATE INDEX IF NOT EXISTS idx_reader_owner ON mailbox_readers(owner);
-
-                -- The key a mailbox is bound to: hash of the public keys of
-                -- the first `MailboxProof` registered for it.
-                CREATE TABLE IF NOT EXISTS mailbox_keys (
-                    mailbox_id TEXT PRIMARY KEY,
-                    key_hash   BLOB NOT NULL
-                );
 
                 -- Mevcut kurulumlardan tek seferlik taşıma (idempotent).
                 INSERT OR IGNORE INTO mailbox_readers (mailbox_id, owner, created_at, last_seen_at)
                     SELECT mailbox_id, owner, created_at, last_seen_at FROM mailboxes;
                 DELETE FROM mailboxes;
 
+                -- `seq` is server-global: an enrolled reader can estimate
+                -- the server-wide intake rate from its gaps (accepted).
                 CREATE TABLE IF NOT EXISTS mail (
                     seq             INTEGER PRIMARY KEY AUTOINCREMENT,
                     mailbox_id      TEXT NOT NULL,
@@ -388,6 +433,16 @@ impl Store {
         // Mevcut kurulumlar için (kolon yoksa ekle; varsa hata yutulur).
         let _ = self.conn.execute("ALTER TABLE blobs ADD COLUMN chunk_size INTEGER NOT NULL DEFAULT 0", []);
         let _ = self.conn.execute("ALTER TABLE mail ADD COLUMN sealed_hash BLOB", []);
+        // The per-box key binding becomes a per-reader key: each reader keeps
+        // the key its box was bound to, then the binding table goes.
+        let _ = self.conn.execute("ALTER TABLE mailbox_readers ADD COLUMN key_hash BLOB", []);
+        let _ = self.conn.execute(
+            "UPDATE mailbox_readers SET key_hash = (SELECT k.key_hash FROM mailbox_keys k
+                                                    WHERE k.mailbox_id = mailbox_readers.mailbox_id)
+             WHERE key_hash IS NULL",
+            [],
+        );
+        let _ = self.conn.execute("DROP TABLE IF EXISTS mailbox_keys", []);
         // `deposit` finds a repeated item through this index alone.
         self.conn
             .execute_batch("CREATE INDEX IF NOT EXISTS idx_mail_hash ON mail(mailbox_id, depositor, sealed_hash)")
@@ -722,14 +777,14 @@ impl Store {
         self.register_mailboxes_proved(owner, add, drop, &proofs, now, max).map(|(refused, _)| refused)
     }
 
-    /// `Ok`: the ids of `add` that were refused (mailbox quota, reader cap,
-    /// a proof by another key than the mailbox is bound to), then the ids
+    /// `Ok`: the ids of `add` that were refused (mailbox quota, the proof
+    /// key's reader slots full and in use), then the ids
     /// that need a proof and came without one. The other ids are registered:
     /// one refused id does not cost the batch.
     ///
     /// `proofs`: (mailbox id, hash of the mailbox key) of each `MailboxProof`
     /// whose signature the caller verified. An id `owner` reads already needs
-    /// none. The first proof binds the mailbox to its key (`mailbox_keys`).
+    /// none. A new reader row keeps its proof key (`MAX_READERS_PER_KEY`).
     pub fn register_mailboxes_proved(
         &self,
         owner: &[u8],
@@ -739,8 +794,7 @@ impl Store {
         now: i64,
         max: u32,
     ) -> Result<(Vec<String>, Vec<String>), String> {
-        // One transaction: a key binding without its reader row locked the
-        // mailbox for every other key until the sweep.
+        // One transaction: an eviction without the newcomer's row lost a reader.
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let mut refused = Vec::new();
         let mut unproven = Vec::new();
@@ -775,49 +829,43 @@ impl Store {
                 refused.push(id.clone());
                 continue;
             }
-            // A mailbox has at most two readers: both ends of a session, or
-            // the one device of a first-contact box. Without the cap any number
-            // of enrolled clients could lurk on a box whose id they computed.
+            // A new reader needs a proof; at most `MAX_READERS_PER_KEY`
+            // readers per proof key, so one key cannot fill another's slots.
+            let mut reader_key: Option<&Vec<u8>> = None;
             if !exists {
-                let readers: i64 = self
-                    .conn
-                    .query_row("SELECT COUNT(*) FROM mailbox_readers WHERE mailbox_id = ?1", params![id], |r| r.get(0))
-                    .unwrap_or(0);
                 let Some((_, key_hash)) = proofs.iter().find(|(m, _)| m == id) else {
-                    if readers >= MAX_READERS_PER_MAILBOX {
-                        refused.push(id.clone());
-                    } else {
-                        unproven.push(id.clone());
-                    }
+                    unproven.push(id.clone());
                     continue;
                 };
-                let bound: Option<Vec<u8>> = self
-                    .conn
-                    .query_row("SELECT key_hash FROM mailbox_keys WHERE mailbox_id = ?1", params![id], |r| r.get(0))
-                    .optional()
-                    .map_err(|e| e.to_string())?;
-                if bound.as_ref().is_some_and(|k| k != key_hash) {
+                // A key-bound id has exactly one key, the one it is made
+                // from: knowing the id is not enough to read the box.
+                if id.starts_with(server_proto::KEY_BOUND_MAILBOX_PREFIX) && *id != server_proto::key_bound_mailbox_id(key_hash) {
                     refused.push(id.clone());
                     continue;
                 }
-                // A full box plus a valid proof by the bound key: the newcomer
-                // holds the pair secret, so it is one of the two ends (a
-                // restored device under a new enrollment). The reader seen
-                // longest ago makes room, but only once it has been idle for
+                reader_key = Some(key_hash);
+                let readers: i64 = self
+                    .conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM mailbox_readers WHERE mailbox_id = ?1 AND key_hash = ?2",
+                        params![id, key_hash],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                // Full slots of this key: the newcomer holds the same secret,
+                // so it is one of those ends (a restored device under a new
+                // enrollment). The same-key reader seen longest ago makes
+                // room, but only once it has been idle for
                 // `READER_EVICT_IDLE_MS` (its own requests or its last
                 // Register); a reader in use is never displaced.
-                if readers >= MAX_READERS_PER_MAILBOX {
-                    if bound.is_none() {
-                        refused.push(id.clone());
-                        continue;
-                    }
+                if readers >= MAX_READERS_PER_KEY {
                     let stale: Option<(Vec<u8>, i64)> = self
                         .conn
                         .query_row(
                             "SELECT r.owner, MAX(r.last_seen_at, COALESCE(e.last_seen_at, 0)) AS seen
                                FROM mailbox_readers r LEFT JOIN enrollments e ON e.enrollment_id = r.owner
-                              WHERE r.mailbox_id = ?1 ORDER BY seen ASC LIMIT 1",
-                            params![id],
+                              WHERE r.mailbox_id = ?1 AND r.key_hash = ?2 ORDER BY seen ASC LIMIT 1",
+                            params![id, key_hash],
                             |r| Ok((r.get(0)?, r.get(1)?)),
                         )
                         .optional()
@@ -834,24 +882,16 @@ impl Store {
                         .execute("DELETE FROM mail_acks WHERE mailbox_id = ?1 AND owner = ?2", params![id, stale]);
                     let _ = self.delete_fully_acked(id);
                 }
-                // Bound only once the reader row goes in: a refused newcomer
-                // binding its own key to a full, unbound box locked the real
-                // ends out of it for good.
-                if bound.is_none() {
-                    self.conn
-                        .execute("INSERT INTO mailbox_keys (mailbox_id, key_hash) VALUES (?1, ?2)", params![id, key_hash])
-                        .map_err(|e| e.to_string())?;
-                }
             }
             // Defter #03: kayıt artık ÇOK-OKUYUCULU (bkz. `mailbox_readers`
             // şema notu). Aynı ratchet kutusunu iki taraf da kaydeder;
-            // birinin kaydı diğerininkini EZMEZ.
+            // birinin kaydı diğerininkini EZMEZ. A reader keeps its key.
             self.conn
                 .execute(
-                    "INSERT INTO mailbox_readers (mailbox_id, owner, created_at, last_seen_at)
-                     VALUES (?1, ?2, ?3, ?3)
+                    "INSERT INTO mailbox_readers (mailbox_id, owner, created_at, last_seen_at, key_hash)
+                     VALUES (?1, ?2, ?3, ?3, ?4)
                      ON CONFLICT(mailbox_id, owner) DO UPDATE SET last_seen_at = ?3",
-                    params![id, owner, now],
+                    params![id, owner, now, reader_key],
                 )
                 .map_err(|e| e.to_string())?;
             if !exists {
@@ -1195,11 +1235,6 @@ impl Store {
         let _ = self.conn.execute(
             "DELETE FROM mail_acks WHERE NOT EXISTS (SELECT 1 FROM mailbox_readers r
                 WHERE r.mailbox_id = mail_acks.mailbox_id AND r.owner = mail_acks.owner)",
-            [],
-        );
-        // A mailbox nobody reads is free again: its key binding goes.
-        let _ = self.conn.execute(
-            "DELETE FROM mailbox_keys WHERE mailbox_id NOT IN (SELECT mailbox_id FROM mailbox_readers)",
             [],
         );
         removed
@@ -1777,36 +1812,69 @@ mod tests {
     }
 
     #[test]
-    fn register_needs_a_proof_by_the_key_the_mailbox_is_bound_to() {
+    fn a_new_reader_needs_a_proof() {
+        // A session box: its id is made from the one key both ends derive.
         let s = Store::open_in_memory().unwrap();
         let owner = enroll(&s, b"aaaa", "peerA");
-        let squatter = enroll(&s, b"bbbb", "peerB");
-        let id = vec!["mb_1".to_string()];
-        let proof = |key: &[u8]| vec![("mb_1".to_string(), key.to_vec())];
+        let peer = enroll(&s, b"bbbb", "peerB");
+        let squatter = enroll(&s, b"cccc", "peerC");
+        let key = [1u8; 32].to_vec();
+        let mb = server_proto::key_bound_mailbox_id(&key);
+        let id = vec![mb.clone()];
+        let proof = |key: &[u8]| vec![(mb.clone(), key.to_vec())];
         // No proof: not registered, reported as unproven.
         assert_eq!(s.register_mailboxes_proved(&owner, &id, &[], &[], 0, 10).unwrap(), (vec![], id.clone()));
-        assert!(!s.mailbox_is_registered("mb_1"));
-        assert_eq!(s.register_mailboxes_proved(&owner, &id, &[], &proof(b"k1"), 0, 10).unwrap(), (vec![], vec![]));
-        // Another key is refused, the bound key is taken (second end of a session).
-        assert_eq!(s.register_mailboxes_proved(&squatter, &id, &[], &proof(b"k2"), 0, 10).unwrap(), (id.clone(), vec![]));
-        assert_eq!(s.register_mailboxes_proved(&squatter, &id, &[], &proof(b"k1"), 0, 10).unwrap(), (vec![], vec![]));
+        assert!(!s.mailbox_is_registered(&mb));
+        assert_eq!(s.register_mailboxes_proved(&owner, &id, &[], &proof(&key), 0, 10).unwrap(), (vec![], vec![]));
+        // The same key is taken (second end of a session).
+        assert_eq!(s.register_mailboxes_proved(&peer, &id, &[], &proof(&key), 0, 10).unwrap(), (vec![], vec![]));
+        // A-01: whoever knows only the id proves it with a key of its own: refused.
+        assert_eq!(s.register_mailboxes_proved(&squatter, &id, &[], &proof(&[2u8; 32]), 0, 10).unwrap(), (id.clone(), vec![]));
+        let rows = s.conn.query_row("SELECT COUNT(*) FROM mailbox_readers WHERE owner = ?1", params![&squatter], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(rows, 0);
         // A reader registers again without a proof.
         assert_eq!(s.register_mailboxes_proved(&owner, &id, &[], &[], 1, 10).unwrap(), (vec![], vec![]));
     }
 
     #[test]
-    fn a_mailbox_takes_no_third_reader() {
+    fn a_squatter_key_neither_locks_out_nor_deletes_for_the_real_reader() {
+        // K-36: a co-member knows a first-contact id (not key-bound) and proves
+        // it with a key of its own, on two enrollments, before the device does.
+        let s = Store::open_in_memory().unwrap();
+        let sq1 = enroll(&s, b"aaaa", "peerA");
+        let sq2 = enroll(&s, b"bbbb", "peerB");
+        let device = enroll(&s, b"cccc", "peerC");
+        let sender = enroll(&s, b"dddd", "peerD");
+        let id = vec!["mb_1".to_string()];
+        let proof = |key: &[u8]| vec![("mb_1".to_string(), key.to_vec())];
+        for sq in [&sq1, &sq2] {
+            assert_eq!(s.register_mailboxes_proved(sq, &id, &[], &proof(b"squat"), 0, 10).unwrap(), (vec![], vec![]));
+        }
+        assert_eq!(s.register_mailboxes_proved(&device, &id, &[], &proof(b"device"), 1, 10).unwrap(), (vec![], vec![]));
+        let seq = s.deposit("mb_1", b"to-device", &sender, 2, 1000).unwrap();
+        s.ack("mb_1", seq, &sq1).unwrap();
+        s.ack("mb_1", seq, &sq2).unwrap();
+        let (got, _) = s.fetch(&device, &[("mb_1".into(), 0)], 10, 4096);
+        assert_eq!(got.len(), 1, "the squatters' acks do not delete the device's copy");
+        s.ack("mb_1", seq, &device).unwrap();
+        assert!(s.fetch(&device, &[("mb_1".into(), 0)], 10, 4096).0.is_empty());
+    }
+
+    #[test]
+    fn a_key_takes_no_third_reader() {
         let s = Store::open_in_memory().unwrap();
         let a = enroll(&s, b"aaaa", "peerA");
         let b = enroll(&s, b"bbbb", "peerB");
         let c = enroll(&s, b"cccc", "peerC");
+        let d = enroll(&s, b"eeee", "peerE");
         register(&s, &a, "mb_1");
         register(&s, &b, "mb_1");
         register(&s, &a, "mb_1");
         let id = vec!["mb_1".to_string()];
-        let wrong = vec![("mb_1".to_string(), b"other-key".to_vec())];
-        assert_eq!(s.register_mailboxes_proved(&c, &id, &[], &wrong, 0, 100).unwrap().0.len(), 1);
-        // The bound key from a new enrollment (restored device) takes the place
+        // Another key takes its own slots, not those of "test-key".
+        let other = vec![("mb_1".to_string(), b"other-key".to_vec())];
+        assert!(s.register_mailboxes_proved(&d, &id, &[], &other, 0, 100).unwrap().0.is_empty());
+        // The same key from a new enrollment (restored device) takes the place
         // of the reader seen longest ago, once that one has been idle long enough.
         let week = READER_EVICT_IDLE_MS;
         s.register_mailboxes(&b, &id, &[], week, 100).unwrap();
@@ -1818,23 +1886,6 @@ mod tests {
         assert!(s.mailbox_has_other_reader("mb_1", &a), "b and c read it");
         let aa = s.conn.query_row("SELECT COUNT(*) FROM mailbox_readers WHERE owner = ?1", params![&a], |r| r.get::<_, i64>(0)).unwrap();
         assert_eq!(aa, 0, "a was the stalest reader");
-    }
-
-    #[test]
-    fn refused_newcomer_does_not_bind_a_full_unbound_box() {
-        let s = Store::open_in_memory().unwrap();
-        let a = enroll(&s, b"aaaa", "peerA");
-        let b = enroll(&s, b"bbbb", "peerB");
-        let c = enroll(&s, b"cccc", "peerC");
-        let id = vec!["mb_old".to_string()];
-        // A box from before proofs: two readers, no key binding.
-        for o in [&a, &b] {
-            s.conn.execute("INSERT INTO mailbox_readers (mailbox_id, owner, created_at, last_seen_at) VALUES ('mb_old', ?1, 0, 0)", params![o]).unwrap();
-        }
-        let lurker = vec![("mb_old".to_string(), b"lurker-key".to_vec())];
-        assert_eq!(s.register_mailboxes_proved(&c, &id, &[], &lurker, 0, 100).unwrap().0, id);
-        let bound: i64 = s.conn.query_row("SELECT COUNT(*) FROM mailbox_keys WHERE mailbox_id = 'mb_old'", [], |r| r.get(0)).unwrap();
-        assert_eq!(bound, 0, "a refused register binds nothing");
     }
 
     #[test]
@@ -2095,14 +2146,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("typeon_server.db");
-        set_db_key(None).unwrap();
+        set_db_key(None);
         { let s = Store::open(&p).unwrap(); s.meta_set("k", b"v").unwrap(); }
-        let key = "ab".repeat(32);
-        set_db_key(Some(key)).unwrap();
+        set_db_key(Some(parse_hex_db_key(&"ab".repeat(32)).unwrap()));
         let s = Store::open(&p).unwrap();
         assert_eq!(s.meta_get("k").as_deref(), Some(&b"v"[..]));
         drop(s);
-        set_db_key(None).unwrap();
+        set_db_key(None);
         assert!(Store::open(&p).is_err(), "plain open of an encrypted DB must fail");
         let _ = std::fs::remove_dir_all(&dir);
     }

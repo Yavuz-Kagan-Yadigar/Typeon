@@ -43,7 +43,22 @@ impl Recording {
             .join("attachments/plain_cache")
             .join(format!("voice-{}.ogg", crate::util::now_ms()));
 
-        let child = Command::new("ffmpeg")
+        let mut command = Command::new("ffmpeg");
+        // If this process dies without dropping the recording, ffmpeg gets
+        // SIGTERM instead of keeping the microphone open.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(|| {
+                extern "C" {
+                    fn prctl(option: i32, ...) -> i32;
+                }
+                const PR_SET_PDEATHSIG: i32 = 1;
+                const SIGTERM: u64 = 15;
+                prctl(PR_SET_PDEATHSIG, SIGTERM);
+                Ok(())
+            });
+        }
+        let child = command
             .args([
                 "-hide_banner",
                 "-loglevel", "error",

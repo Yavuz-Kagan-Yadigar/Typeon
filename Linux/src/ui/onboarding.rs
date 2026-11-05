@@ -239,6 +239,15 @@ fn open_fresh_database(app: &Rc<App>) -> Option<[u8; 32]> {
     core::init_database(&dir, &key).then_some(key)
 }
 
+/// Enables or disables all three start buttons at once (they share a parent box),
+/// so no second create, link or restore can run while the vault is being saved.
+fn set_actions_sensitive(button: &gtk::Button, on: bool) {
+    match button.parent() {
+        Some(parent) => parent.set_sensitive(on),
+        None => button.set_sensitive(on),
+    }
+}
+
 /// Generates a brand-new identity and persists it. `awaiting_link` decides
 /// whether this computer is its own account or is about to be adopted by one.
 fn start_fresh_identity(
@@ -251,23 +260,23 @@ fn start_fresh_identity(
 ) {
     // Quick, but the button must not be clickable twice — a second identity
     // would orphan the first.
-    button.set_sensitive(false);
+    set_actions_sensitive(&button, false);
 
     let Some(storage_key) = open_fresh_database(app) else {
-        button.set_sensitive(true);
+        set_actions_sensitive(&button, true);
         app.toast("Could not open the database.");
         return;
     };
 
     if let Err(error) = core::create_identity(device_name) {
-        button.set_sensitive(true);
+        set_actions_sensitive(&button, true);
         app.toast(&format!("Could not create device keys: {}", error));
         return;
     }
 
     let bundle = core::take_pending_secret_bundle();
     if bundle.is_empty() {
-        button.set_sensitive(true);
+        set_actions_sensitive(&button, true);
         app.toast("The core returned no key bundle — nothing was saved.");
         return;
     }
@@ -295,7 +304,7 @@ fn start_fresh_identity(
                 Err(error) => {
                     // Without a persisted vault the identity would be lost on exit, so this
                     // is fatal rather than a warning.
-                    button.set_sensitive(true);
+                    set_actions_sensitive(&button, true);
                     app.toast(&format!("Could not write the vault: {}", error));
                     return;
                 }

@@ -545,13 +545,35 @@ object P2PLib {
 
     /**
      * Geçmişi sunucuda saklama — mesaj yönlendirmeden AYRI ve varsayılan
-     * KAPALI. Arşiv gerçek bir yedektir ve ratchet'in aksine ileri-gizli
-     * DEĞİLDİR: kök arşiv anahtarı bir gün sızarsa o ana kadar yüklenmiş TÜM
-     * geçmiş okunur. "Yeni cihazımda geçmişimi göreyim" ile ileri-gizlilik
-     * matematiksel olarak uzlaşmaz, bu yüzden takas kullanıcının açık
-     * tercihi olmalı.
+     * AÇIK: ilk sunucuya eklenirken kendiliğinden açılır (bkz. Rust
+     * `server_client::add_server`). Arşiv gerçek bir yedektir ve ratchet'in
+     * aksine ileri-gizli DEĞİLDİR: kök arşiv anahtarı bir gün sızarsa o ana
+     * kadar yüklenmiş TÜM geçmiş okunur. "Yeni cihazımda geçmişimi göreyim"
+     * ile ileri-gizlilik matematiksel olarak uzlaşmaz, bu yüzden takas
+     * kullanıcının açık tercihi olmalı.
      */
     external fun setServerHistory(serverId: String, enabled: Boolean): String
+
+    /**
+     * Will the server in [inviteCode] become THE history server? The core
+     * turns `store_history` on only while no server stores history yet, and
+     * a server already on the list keeps the record it has (Rust
+     * `server_client::add_server`) — so the confirm dialogs show the history
+     * warning (and the upload notice) only then.
+     *
+     * JNI + SQLite: call it off the main thread (see SettingsFragment
+     * `refreshServers`). On a read failure the answer stays "yes": when the
+     * dialog cannot tell, it warns rather than stays silent.
+     */
+    fun nextServerStoresHistory(inviteCode: String): Boolean = try {
+        val arr = org.json.JSONArray(listServers())
+        val rows = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+        // The invite ends in `/p2p/<peer_id>`; that string is the `server_id`.
+        val mine = inviteCode.substringAfter("/p2p/", "").substringBefore("#")
+        rows.none { it.optBoolean("store_history") || (mine.isNotEmpty() && it.optString("server_id") == mine) }
+    } catch (e: Exception) {
+        true
+    }
 
     /**
      * Kök arşiv anahtarı (ARK). `setHistoryKey` ile aynı desen ama bu anahtar

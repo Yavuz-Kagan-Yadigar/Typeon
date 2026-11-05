@@ -136,7 +136,8 @@ fun <T : Any> AppCompatActivity.openImageEditor(
 
     fun finish() {
         if (busy) return
-        board.applyCrop()
+        // A crop that ran out of memory must not send the uncropped image.
+        if (!board.applyCrop()) return
         val bmp = board.bitmap
         when {
             bmp == null || !dirty -> dialog.dismiss()
@@ -301,6 +302,17 @@ fun <T : Any> AppCompatActivity.openImageEditor(
         if (event.action == KeyEvent.ACTION_UP) finish()
         true
     }
+    // Its own window: the activity's FLAG_SECURE does not cover it (Recents
+    // and screen capture before API 33, as for every other screen).
+    if (android.os.Build.VERSION.SDK_INT < 33) {
+        dialog.window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+    }
+    // The activity going away takes the editor with it (no leaked window).
+    val closeOnDestroy = androidx.lifecycle.LifecycleEventObserver { _, e ->
+        if (e == androidx.lifecycle.Lifecycle.Event.ON_DESTROY && dialog.isShowing) dialog.dismiss()
+    }
+    lifecycle.addObserver(closeOnDestroy)
+    dialog.setOnDismissListener { lifecycle.removeObserver(closeOnDestroy) }
     dialog.show()
     setImage(load, startEdited)
 }
@@ -381,24 +393,26 @@ private class EditCanvas(context: Context) : View(context) {
 
     fun rotate(degrees: Float) = commit(Op.Rotate(degrees))
 
-    fun applyCrop() {
-        val b = bitmap ?: return
-        if (mode != Mode.CROP) return
+    /** False only when a pending crop could not be applied (out of memory). */
+    fun applyCrop(): Boolean {
+        val b = bitmap ?: return true
+        if (mode != Mode.CROP) return true
         val r = Rect().also { crop.round(it) }
-        if (!r.intersect(0, 0, b.width, b.height) || (r.width() == b.width && r.height() == b.height)) return
-        commit(Op.Crop(r))
+        if (!r.intersect(0, 0, b.width, b.height) || (r.width() == b.width && r.height() == b.height)) return true
+        return commit(Op.Crop(r))
     }
 
-    private fun commit(op: Op) {
-        val b = bitmap ?: return
+    private fun commit(op: Op): Boolean {
+        val b = bitmap ?: return false
         val next = apply(op, b)
         if (next == null) {
             onNoMemory()
-            return
+            return false
         }
         ops.add(op)
         if (next !== b) show(next) else invalidate()
         onEdit()
+        return true
     }
 
     /** A new size (rotate, crop) refits the view; the same size keeps the zoom. */
@@ -446,7 +460,9 @@ private class EditCanvas(context: Context) : View(context) {
 
     override fun setEnabled(enabled: Boolean) {
         super.setEnabled(enabled)
-        if (!enabled) cancelTouch()
+        // Disabled mid-pinch the last finger-up never arrives here: end the
+        // gesture too, or the next stroke would pan.
+        if (!enabled) { cancelTouch(); gesture = false }
     }
 
     /** View pixels per bitmap pixel. */

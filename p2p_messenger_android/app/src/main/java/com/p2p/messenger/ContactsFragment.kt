@@ -37,6 +37,9 @@ class ContactsFragment : Fragment() {
         /** Olay geldiğinde listenin yenilenmesi için beklenen süre (bkz.
          *  `eventListener`): bir olay patlaması TEK yenileme olsun. */
         private const val EVENT_REFRESH_DEBOUNCE_MS = 1000L
+        /** Ekrandaki eşleşme QR'ı ne sıklıkla tazelenir (bkz.
+         *  `qrRefreshRunnable`): çekirdeğin penceresi 30 dakikadır. */
+        private const val QR_REFRESH_INTERVAL_MS = 5 * 60 * 1000L
     }
 
     private lateinit var adapter: ChatAdapter
@@ -68,6 +71,18 @@ class ContactsFragment : Fragment() {
     }
     /** QR üretim zinciri çalışıyor mu (tek zincir). */
     @Volatile private var qrChainRunning = false
+    /** Çekirdeğin eşleşme kodu penceresi 30 dakikadır (`PAIRING_WINDOW_MS`);
+     *  ekranda unutulmuş bir QR sessizce bayatlamasın diye, fragment önde
+     *  kaldığı sürece aynı `refreshOwnQrCode()` 5 dakikada bir yinelenir
+     *  (bkz. `onResume` / `onPause`). */
+    private val qrRefreshHandler = Handler(Looper.getMainLooper())
+    private val qrRefreshRunnable = object : Runnable {
+        override fun run() {
+            if (!isAdded || view == null || !isResumed) return
+            refreshOwnQrCode()
+            qrRefreshHandler.postDelayed(this, QR_REFRESH_INTERVAL_MS)
+        }
+    }
 
     /** JNI calls that take the core lock, off the main thread; [done] runs on
      *  the main thread while the fragment is still attached. */
@@ -85,7 +100,10 @@ class ContactsFragment : Fragment() {
 
     private fun <T> offMain(work: () -> T, done: (T) -> Unit) {
         runOnWorker {
-            val result = try { work() } catch (e: Exception) { return@runOnWorker }
+            val result = try { work() } catch (e: Exception) {
+                android.util.Log.w("ContactsFragment", "background call failed", e)
+                return@runOnWorker
+            }
             refreshHandler.post { if (isAdded && view != null) done(result) }
         }
     }
@@ -502,10 +520,12 @@ class ContactsFragment : Fragment() {
         super.onResume()
         // The own pairing QR is on screen.
         P2PApplication.setSecure(requireActivity(), true)
-        // The core accepts a stranger's pairing only for a day after the code
-        // was produced; this view can live longer than that — refresh the
-        // code (and the QR that shows it) when the screen comes back.
+        // The core accepts a stranger's pairing only for 30 minutes after the
+        // code was produced (PAIRING_WINDOW_MS); this view can live longer than
+        // that — refresh the code (and the QR that shows it) when the screen
+        // comes back, and while it stays on screen.
         refreshOwnQrCode()
+        qrRefreshHandler.postDelayed(qrRefreshRunnable, QR_REFRESH_INTERVAL_MS)
         // The QR is produced when the node address is known; the chain only
         // runs while this screen is in front (bkz. `onPause`).
         if (ownNodeAddress.isEmpty()) startQrChain(attemptsLeft = 10)
@@ -515,7 +535,8 @@ class ContactsFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
-        P2PApplication.setSecure(requireActivity(), false)
+        // Before API 33 the whole app stays FLAG_SECURE (no recents opt-out).
+        if (android.os.Build.VERSION.SDK_INT >= 33) P2PApplication.setSecure(requireActivity(), false)
         com.p2p.messenger.service.P2PService.removeMessageListener(eventListener)
         refreshHandler.removeCallbacks(eventRefreshRunnable)
         eventRefreshQueued = false
@@ -523,6 +544,7 @@ class ContactsFragment : Fragment() {
         // the background.
         qrRetryHandler.removeCallbacksAndMessages(null)
         qrChainRunning = false
+        qrRefreshHandler.removeCallbacks(qrRefreshRunnable)
     }
 
     override fun onDestroyView() {

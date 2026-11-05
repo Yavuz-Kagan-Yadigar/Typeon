@@ -73,7 +73,8 @@ object AvatarUtil {
     fun renderInto(imageView: ImageView, avatarBytes: ByteArray?, displayName: String) {
         val bitmap = avatarBytes?.let { bytes ->
             val key = cacheKey(bytes)
-            avatarBitmapCache.get(key) ?: decodeCircularSquare(bytes)?.also { avatarBitmapCache.put(key, it) }
+            // A failed decode is cached too (as the placeholder), so a bad image is not re-decoded on every bind.
+            avatarBitmapCache.get(key) ?: (decodeCircularSquare(bytes) ?: placeholderCircle(displayName)).also { avatarBitmapCache.put(key, it) }
         } ?: placeholderCache.get(displayName) ?: placeholderCircle(displayName).also { placeholderCache.put(displayName, it) }
         imageView.setImageBitmap(bitmap)
     }
@@ -153,7 +154,7 @@ object AvatarUtil {
             // A whole code point: an emoji is two UTF-16 units.
             if (n.isEmpty()) "?" else n.substring(0, n.offsetByCodePoints(0, 1)).uppercase()
         }
-        val bgColor = PALETTE[Math.abs(displayName.hashCode()) % PALETTE.size]
+        val bgColor = PALETTE[Math.floorMod(displayName.hashCode(), PALETTE.size)]
         val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = bgColor }
         canvas.drawCircle(SIZE_PX / 2f, SIZE_PX / 2f, SIZE_PX / 2f, bgPaint)
         val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {

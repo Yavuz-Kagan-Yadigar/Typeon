@@ -103,7 +103,8 @@ fun AppCompatActivity.promptAttachmentCaption(
         .create()
     dialog.setOnDismissListener {
         previewDir.deleteRecursively()
-        if (!sent) edited.forEach { (it as? File)?.parentFile?.deleteRecursively() }
+        // Unsent, or removed from the strip before sending: nobody will read these.
+        edited.forEachIndexed { i, e -> if (!sent || i !in kept) (e as? File)?.parentFile?.deleteRecursively() }
     }
 
     val gap = (4 * density).toInt()
@@ -251,7 +252,9 @@ private fun AppCompatActivity.openPreview(uri: Uri?, jpeg: ByteArray?, jxl: Bool
                 jxl -> shareable(dir, "gif") { out ->
                     val src = File(dir.apply { mkdirs() }, "src-${UUID.randomUUID()}")
                     try {
-                        contentResolver.openInputStream(uri!!)?.use { input -> src.outputStream().use { input.copyTo(it) } }
+                        // Foreign `content://` bytes: capped, else the preview fails.
+                        val copied = contentResolver.openInputStream(uri!!)?.use { it.copyToCapped(src, MAX_FOREIGN_URI_BYTES) } ?: false
+                        if (!copied) throw java.io.IOException("jxl")
                         if (P2PLib.jxlToGif(src.absolutePath, out.absolutePath) != "OK") throw java.io.IOException("jxl")
                     } finally {
                         src.delete()
@@ -298,7 +301,9 @@ private fun AppCompatActivity.queryName(uri: Uri): String? = try {
 private fun AppCompatActivity.decodeJxlThumb(uri: Uri, maxDimension: Int): Bitmap? {
     val tmp = File(File(cacheDir, "outgoing").apply { mkdirs() }, "thumb-${UUID.randomUUID()}")
     return try {
-        contentResolver.openInputStream(uri)?.use { input -> tmp.outputStream().use { input.copyTo(it) } } ?: return null
+        // Foreign `content://` bytes: capped, else no thumbnail (tmp deleted in `finally`).
+        val copied = contentResolver.openInputStream(uri)?.use { it.copyToCapped(tmp, MAX_FOREIGN_URI_BYTES) } ?: false
+        if (!copied) return null
         ImagePreview.compressFile(tmp, maxDimension, 85)?.let { ImagePreview.decodeBytes(it, maxDimension) }
     } catch (e: Throwable) {
         null

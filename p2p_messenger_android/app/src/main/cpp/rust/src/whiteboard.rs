@@ -128,6 +128,9 @@ pub fn stroke_ok(s: &WbStroke) -> bool {
 
 /// Most devices with a signature in one `WbPage`.
 const MAX_PAGE_SIGS: usize = 512;
+/// Signatures verified per packet at most, after one per (page, device): a
+/// board's known devices are far fewer.
+const MAX_SIG_VERIFIES: usize = 256;
 
 /// The signed stroke hashes of a packet: (page, device) -> the identity that
 /// device belongs to, and the hashes its signature covers.
@@ -273,12 +276,27 @@ impl P2PCore {
     fn wb_verified_sigs(&self, board: &Board, sigs: &[WbPageSig]) -> Signed {
         let signed_board = self.wb_signed_board(board);
         let mut out = Signed::new();
+        // E-04: each verify is a full hybrid check under the core lock. Only
+        // the newest signature per (page, device) can count, so verify just
+        // that one, and never more than `MAX_SIG_VERIFIES` per packet.
+        let mut newest: std::collections::BTreeMap<(u8, &[u8]), &WbPageSig> = std::collections::BTreeMap::new();
         for sig in sigs {
+            let slot = newest.entry((sig.page, sig.device.as_slice())).or_insert(sig);
+            if sig.at > slot.at {
+                *slot = sig;
+            }
+        }
+        let mut verifies = 0;
+        for sig in newest.into_values() {
             if sig.page >= MAX_PAGES || sig.device.len() != 32 || sig.hashes.len() % 32 != 0 || sig.hashes.len() > MAX_PAGE_BYTES / 16 * 32 {
                 continue;
             }
             let fp = hex::encode(&sig.device);
             let Some(device) = self.own_devices.get(&fp).or_else(|| self.known_remote_devices.get(&fp)) else { continue };
+            if verifies == MAX_SIG_VERIFIES {
+                break;
+            }
+            verifies += 1;
             let statement = wb_page_statement(&signed_board, &device.identity_id, sig);
             if crate::verify_hybrid_signature(&statement, &sig.sig, &sig.sig_pq, device).is_err() {
                 continue;
@@ -1082,6 +1100,8 @@ impl P2PCore {
         if !tombstones.is_empty() {
             self.wb_trim_tombstones(&board.key);
         }
+        // E-04: a page answer speaks for this page only.
+        let sigs: Vec<WbPageSig> = sigs.into_iter().filter(|s| s.page == page).collect();
         let signed = self.wb_verified_sigs(&board, &sigs);
         let mut used = self.wb_page_used(&board.key, page);
         let mut they_lack = false;

@@ -146,7 +146,11 @@ class MediaViewerActivity : AppCompatActivity() {
             // Animated (a received animated JPEG XL arrives as .gif). No pinch-zoom: fit-center.
             lifecycleScope.launch(Dispatchers.IO) {
                 val drawable = try {
-                    android.graphics.ImageDecoder.decodeDrawable(android.graphics.ImageDecoder.createSource(contentResolver, uri))
+                    android.graphics.ImageDecoder.decodeDrawable(android.graphics.ImageDecoder.createSource(contentResolver, uri)) { decoder, info, _ ->
+                        // A huge canvas would crash the renderer: sample it down.
+                        val edge = maxOf(info.size.width, info.size.height)
+                        if (edge > MAX_BITMAP_EDGE) decoder.setTargetSampleSize((edge + MAX_BITMAP_EDGE - 1) / MAX_BITMAP_EDGE)
+                    }
                 } catch (e: Throwable) { null }
                 withContext(Dispatchers.Main) {
                     progress.visibility = View.GONE

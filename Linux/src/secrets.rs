@@ -284,15 +284,12 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
     // Write a temp file and rename it over: truncating in place means a crash
     // or power loss mid-write leaves a half vault and the identity is gone.
-    let tmp = path.with_extension("tmp");
-    // Unlink (never follows a symlink) then `create_new` (O_EXCL, refuses a
-    // symlink planted in the gap): a fixed temp name must not be a way to
-    // overwrite some other file.
-    match std::fs::remove_file(&tmp) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.to_string()),
-    }
+    // H-09: a temp name of its own per write (pid + random): two threads
+    // writing the same file (the archive key) used to share one ".tmp" and
+    // could rename the other's half-written file in. `create_new` (O_EXCL)
+    // still refuses a planted symlink.
+    let name = path.file_name().and_then(|n| n.to_str()).ok_or("bad file name")?;
+    let tmp = path.with_file_name(format!("{name}.{}.{:016x}.tmp", std::process::id(), OsRng.next_u64()));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -321,9 +318,11 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
 // Kept in its own small file rather than inside `vault.bin`, for two reasons.
 // The vault needs the user's passphrase to rewrite, and it is dropped right
 // after boot — but this key can arrive *later*, from a sibling device over the
-// encrypted sync channel, at a moment when no passphrase is on hand. The
-// wallet key from the secret store is available at any time, so a standalone
-// file sealed under it can be written whenever the key turns up. This also
+// encrypted sync channel, at a moment when no passphrase is on hand. A
+// standalone file sealed with a key derived from `vault.history_key`
+// (SHA-256 of "typeon-archive-key-v2" || history_key, held for the session in
+// `ARCHIVE_SEAL`) can be written whenever the key turns up, but only once the
+// vault is open. This also
 // mirrors the Android side exactly (`ArchiveKeyManager`, a Keystore-wrapped
 // `archive_root_key.enc`), which keeps the two clients easy to compare.
 //
@@ -409,6 +408,17 @@ pub fn ensure_archive_key(dir: &Path) -> Result<[u8; 32], String> {
     // archive unreadable for every other device of this identity.
     if let Some(existing) = load_archive_key(dir)? {
         return Ok(existing);
+    }
+    // H-09, as Android's `ArchiveKeyManager.ensureCreated`: a key a sibling
+    // sent may be in the core but not on disk yet: keep that one. A linked
+    // device never makes its own: it would replace the sibling's key and
+    // split the archive between the devices.
+    if let Some(key) = crate::core::archive_root_key() {
+        store_archive_key(dir, &key)?;
+        return Ok(key);
+    }
+    if crate::core::is_secondary_device() {
+        return Err("waiting for the archive key from your other device; try again once it has synced".to_string());
     }
     let mut key = [0u8; 32];
     OsRng.fill_bytes(&mut key);

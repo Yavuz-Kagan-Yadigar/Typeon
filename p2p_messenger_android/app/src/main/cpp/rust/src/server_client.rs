@@ -94,6 +94,9 @@ pub(crate) const SERVER_UNKNOWN_MAILBOX_TTL_MS: u64 = 60 * 1000;
 pub(crate) const SERVER_DEPOSIT_BACKOFF_MS: u64 = 5 * 60 * 1000;
 /// Each further refused or unanswered deposit doubles the backoff up to this.
 pub(crate) const SERVER_DEPOSIT_BACKOFF_MAX_MS: u64 = 30 * 60 * 1000;
+/// Pages asked of one archive bucket at most (64 records each), see
+/// `ServerInflight::ArchiveFetch`: a server that never ends a bucket stops here.
+const ARCHIVE_FETCH_MAX_PAGES: u32 = 1024;
 
 /// Ids the server refused (`Registered.refused`) are offered again after this:
 /// a reader cap or a full mailbox can clear.
@@ -221,7 +224,8 @@ pub(crate) struct ServerRecord {
     /// Kayıt tamamlanınca boşaltılır — tek kullanımlık.
     pub token: String,
     pub route_messages: bool,
-    /// Geçmişi sunucuda saklama. VARSAYILAN KAPALI ve yönlendirmeden AYRI:
+    /// Geçmişi sunucuda saklama. Default ON for a newly added server, and
+    /// separate from routing:
     /// arşiv gerçek bir yedek ve ileri-gizli DEĞİL (bkz.
     /// `server_seal::seal_archive_record`).
     pub store_history: bool,
@@ -272,6 +276,12 @@ pub(crate) struct ServerRuntime {
     pub deposit_backoff_until: u64,
     /// Deposits refused or unanswered in a row (exponential backoff).
     pub deposit_failures: u32,
+    /// E-01: a refused `ArchivePut` (full quota, rate, server error): no new
+    /// archive batch before this (ms). Kept apart from the deposit backoff so
+    /// a full archive never stops message deposits.
+    pub archive_backoff_until: u64,
+    /// `ArchivePut`s refused in a row (exponential backoff).
+    pub archive_failures: u32,
     /// Unreachable server: no new dial before this (ms), see `server_sweep`.
     pub dial_backoff_until: u64,
     /// Dials since the last successful connection.
@@ -356,6 +366,11 @@ pub(crate) enum ServerInflight {
         rest: Vec<String>,
         window: Option<(u64, u64)>,
         next: Vec<(String, bool)>,
+        /// E-03: the cursor this page was asked from, and the pages of this
+        /// bucket so far: the next page is asked only if the server moved
+        /// strictly past it, and never past `ARCHIVE_FETCH_MAX_PAGES`.
+        cursor: Option<(u64, String)>,
+        pages: u32,
     },
     /// `window`: a "Fetch older history" press `(before, after)`, the
     /// present buckets that reach it, newest first; `None`: full restore,
@@ -936,6 +951,16 @@ impl P2PCore {
             self.server_archive_queue.clear();
             self.server_blob_uploads.clear();
         }
+        // E-07: no history server left (another server without history may
+        // remain): the queue would never drain and a later history switch
+        // would upload stale copies, edits and deletes included. Same as
+        // `set_server_history`.
+        if !self.servers.iter().any(|s| s.store_history) {
+            self.server_archive_queue.clear();
+            if let Some(conn) = &self.db {
+                let _ = conn.execute("DELETE FROM server_archive_queue", []);
+            }
+        }
         self.server_deposited.retain(|(sid, _), _| sid != server_id);
         Ok(())
     }
@@ -971,12 +996,33 @@ impl P2PCore {
     /// kovayı silmek sunucuda no-op — bu yüzden fazladan kimlik üretmenin
     /// bir maliyeti yok, eksik üretmenin ise arşiv artığı bırakma maliyeti
     /// var.
-    fn purge_server_archive(&mut self, server_id: &str) {
+    pub(crate) fn purge_server_archive(&mut self, server_id: &str) {
+        let conv_keys = self.archive_conv_keys();
+        self.purge_archive_convs(server_id, &conv_keys);
+    }
+
+    /// K-35: one conversation's archive on every server (a deleted contact),
+    /// and its queued uploads, which would otherwise put it back. Best effort:
+    /// an unreachable server keeps it until its TTL. The
+    /// `server_archived_convs` row stays, so a later whole-server purge still
+    /// covers it.
+    pub(crate) fn purge_conv_archive(&mut self, conv_key: &str) {
+        self.server_archive_queue.retain(|e| e.conv_key != conv_key);
+        if let Some(conn) = &self.db {
+            let _ = conn.execute("DELETE FROM server_archive_queue WHERE conv_key = ?1", params![conv_key]);
+        }
+        let server_ids: Vec<String> = self.servers.iter().map(|s| s.server_id.clone()).collect();
+        for sid in server_ids {
+            self.purge_archive_convs(&sid, &[conv_key.to_string()]);
+        }
+    }
+
+    fn purge_archive_convs(&mut self, server_id: &str, conv_keys: &[String]) {
         let Some(ark) = self.archive_root_key else { return };
         let Some(peer_id) = self.server_rt.get(server_id).and_then(|r| r.peer_id) else { return };
 
         let now = current_time_ms();
-        let buckets: Vec<String> = self.archive_conv_keys().iter().flat_map(|c| archive_buckets(&ark, c, now)).collect();
+        let buckets: Vec<String> = conv_keys.iter().flat_map(|c| archive_buckets(&ark, c, now)).collect();
         if buckets.is_empty() {
             return;
         }
@@ -1060,24 +1106,13 @@ impl P2PCore {
         Ok(())
     }
 
-    /// History written while no server stored it was never queued: queue the
-    /// newest rows now, or a restored device shows a gap up to today.
-    // ponytail: newest 2000 rows only; page through `messages` if a full
-    // backfill is wanted.
+    /// History written while no server stored it was never queued: queue all
+    /// local rows, or a restored device shows a gap up to today. Restarts the
+    /// paged `maybe_archive_backfill` from the newest row; it runs one slice
+    /// per sweep until it reaches the oldest.
     pub(crate) fn backfill_server_archive(&mut self) {
-        let Some(conn) = &self.db else { return };
-        let Ok(mut stmt) = conn.prepare(
-            "SELECT message_id, group_id, peer_device_fingerprint FROM messages \
-             WHERE message_id IS NOT NULL ORDER BY id DESC LIMIT 2000",
-        ) else { return };
-        let rows: Vec<(String, Option<String>, String)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .map(|it| it.flatten().collect())
-            .unwrap_or_default();
-        drop(stmt);
-        for (mid, gid, fp) in rows.into_iter().rev() {
-            self.requeue_archive_row(gid.as_deref(), &fp, &mid);
-        }
+        self.meta_put("ark_backfill", "1");
+        self.server_sweep_at = 0;
     }
 
     pub(crate) fn list_servers_json(&self) -> String {
@@ -1138,21 +1173,20 @@ impl P2PCore {
 
     /// The server mailbox of the session with `peer_fp` and its proof secret:
     /// stable, from the two devices' long-term KEM keys
-    /// (`server_seal::session_mailbox`), not from the rotating root key (C2).
+    /// (`server_seal::session_mailbox_secret`), not from the rotating root
+    /// key (C2). The id is made from the proof key (`key_bound_mailbox_id`).
     /// PROTOCOL BREAK: older clients use another id.
     fn session_mailbox(&self, peer_fp: &str) -> Option<(String, [u8; 32])> {
         let own_fp = self.own_mailbox_topic_fp.as_ref()?;
         let own = self.own_device_keys.get(own_fp)?;
         let peer = self.known_remote_devices.get(peer_fp).or_else(|| self.own_devices.get(peer_fp))?;
-        server_seal::session_mailbox(&own.kem_sk_x25519, &peer.kem_pubkey_x25519, own_fp, peer_fp).ok()
+        let secret = server_seal::session_mailbox_secret(&own.kem_sk_x25519, &peer.kem_pubkey_x25519, own_fp, peer_fp).ok()?;
+        Some((key_bound_mailbox_id(&secret)?, secret))
     }
 
     /// The `MailboxProof` of `mailbox` for this enrollment at `server_id`.
     fn mailbox_proof(secret: &[u8], mailbox: &str, enrollment_id: &[u8], server_id: &str) -> Option<server_proto::MailboxProof> {
-        let (seed, seed_pq) = server_seal::mailbox_proof_seeds(secret, mailbox).ok()?;
-        let signing = SigningKey::from_bytes(&seed);
-        let seed_pq: ml_dsa::Seed = seed_pq.as_slice().try_into().ok()?;
-        let signing_pq = MlDsaSigningKey::<MlDsa87>::from_seed(&seed_pq);
+        let (signing, signing_pq) = mailbox_proof_keys(secret, mailbox)?;
         let input = server_proto::register_signing_input(mailbox, enrollment_id, server_id);
         let sig_pq: MlDsaSignature<MlDsa87> = signing_pq.sign(&input);
         Some(server_proto::MailboxProof {
@@ -1173,7 +1207,7 @@ impl P2PCore {
             Some(eid) if !prove.is_empty() => {
                 let mut secrets: HashMap<String, Vec<u8>> =
                     self.own_server_mailboxes().into_iter().map(|(id, (secret, _))| (id, secret)).collect();
-                secrets.extend(crate::call::relay_listen_keys().into_iter().map(|k| (server_seal::relay_mailbox_id(&k), k)));
+                secrets.extend(crate::call::relay_listen_keys().into_iter().filter_map(|k| Some((key_bound_mailbox_id(&k)?, k))));
                 prove.iter()
                     .take(server_proto::MAX_REGISTER_PROOFS)
                     .filter_map(|id| Self::mailbox_proof(secrets.get(id)?, id, eid, server_id))
@@ -1628,7 +1662,7 @@ impl P2PCore {
             // The relay addresses of a running call go to every server: any
             // of them may carry the media, and nothing is stored under them.
             let relay_ids: Vec<String> =
-                crate::call::relay_listen_keys().iter().map(|k| server_seal::relay_mailbox_id(k)).collect();
+                crate::call::relay_listen_keys().iter().filter_map(|k| key_bound_mailbox_id(k)).collect();
             let mut wanted: HashSet<String> = if rec.route_messages { own_ids.clone() } else { HashSet::new() };
             wanted.extend(relay_ids.iter().cloned());
             if let Some(rt) = self.server_rt.get_mut(&rec.server_id) {
@@ -2354,7 +2388,11 @@ impl P2PCore {
             }
 
             // --- Arşiv ---
-            (ServerInflight::ArchivePut { records, .. }, ServerResponse::Ok) => {
+            (ServerInflight::ArchivePut { server_id, records }, ServerResponse::Ok) => {
+                if let Some(rt) = self.server_rt.get_mut(&server_id) {
+                    rt.archive_failures = 0;
+                    rt.archive_backoff_until = 0;
+                }
                 self.drop_archive_records(&records);
                 // The next batch now, as for mail and chunks (bkz.
                 // `server_sweep`): one batch per radio window took the
@@ -2386,11 +2424,11 @@ impl P2PCore {
                     self.probe_next_conversation(peer_id, server_id, next);
                 } else {
                     let bucket = wanted.remove(0);
-                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, window.map(|(before, _)| (before, String::new())), wanted, window, next);
+                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, window.map(|(before, _)| (before, String::new())), wanted, window, next, 0);
                 }
             }
             (
-                ServerInflight::ArchiveFetch { server_id, conv_key, group, bucket_more, mut rest, window, next },
+                ServerInflight::ArchiveFetch { server_id, conv_key, group, bucket_more, mut rest, window, next, cursor, pages },
                 ServerResponse::ArchiveBatch { records, more },
             ) => {
                 // Sayfa yeniden eskiye geliyor; devamı için son kaydın
@@ -2412,11 +2450,23 @@ impl P2PCore {
                     if let Some((before, _)) = window { self.reopen_fetch_cursor(&conv_key, before) }
                     return;
                 };
-                if let (true, Some(bucket), Some(before)) = (more, bucket_more, oldest) {
-                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, Some(before), rest, window, next);
+                // E-03: a server repeating a page (or never ending one bucket)
+                // looped here at round-trip speed: go on only when the cursor
+                // moved strictly older (server order is time, then id, both
+                // descending), and for a bounded number of pages.
+                let moved = match (&oldest, &cursor) {
+                    (Some(o), Some(c)) => o < c,
+                    (Some(_), None) => true,
+                    (None, _) => false,
+                };
+                if more && !moved {
+                    warn!("Sunucu arşiv sayfası ilerlemedi, bu kova bırakıldı");
+                }
+                if let (true, true, Some(bucket), Some(before)) = (more && moved, pages + 1 < ARCHIVE_FETCH_MAX_PAGES, bucket_more, oldest) {
+                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, Some(before), rest, window, next, pages + 1);
                 } else if !rest.is_empty() {
                     let bucket = rest.remove(0);
-                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, None, rest, window, next);
+                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, None, rest, window, next, 0);
                 } else {
                     self.probe_next_conversation(peer_id, server_id, next);
                 }
@@ -2693,6 +2743,16 @@ impl P2PCore {
                     if backs_off {
                         Self::back_off_deposits(rt);
                     }
+                    // E-01: a full archive quota (or a rate/server error) gets
+                    // the same answer for a while: without this the same head
+                    // batch went out again every sweep. Its own backoff, so
+                    // message deposits keep going. A permanent refusal already
+                    // dropped the head record above, so the next try is new.
+                    if matches!(inflight, ServerInflight::ArchivePut { .. }) && !permanent {
+                        rt.archive_backoff_until = mono_ms()
+                            + (SERVER_DEPOSIT_BACKOFF_MS << rt.archive_failures.min(3)).min(SERVER_DEPOSIT_BACKOFF_MAX_MS);
+                        rt.archive_failures = rt.archive_failures.saturating_add(1);
+                    }
                 }
                 // Kota/hız/boyut — hepsinde doğru davranış aynı: bu zarfı
                 // gossipsub'a ver, mesajı kaybetme.
@@ -2751,18 +2811,19 @@ impl P2PCore {
         rest: Vec<String>,
         window: Option<(u64, u64)>,
         next: Vec<(String, bool)>,
+        pages: u32,
     ) {
         let req = ServerRequest::ArchiveFetch {
             bucket: bucket.clone(),
             before_ms: before.as_ref().map(|b| b.0),
-            before_id: before.and_then(|b| (!b.1.is_empty()).then_some(b.1)),
+            before_id: before.as_ref().and_then(|b| (!b.1.is_empty()).then(|| b.1.clone())),
             max_items: MAX_FETCH_BATCH_ITEMS,
             max_bytes: MAX_FETCH_BATCH_BYTES,
         };
         if let Some(id) = self.send_server_request(peer_id, req) {
             self.server_inflight.insert(
                 id,
-                ServerInflight::ArchiveFetch { server_id, conv_key, group, bucket_more: Some(bucket), rest, window, next },
+                ServerInflight::ArchiveFetch { server_id, conv_key, group, bucket_more: Some(bucket), rest, window, next, cursor: before, pages },
             );
         } else if let Some((before, _)) = window {
             self.reopen_fetch_cursor(&conv_key, before);
@@ -2991,12 +3052,16 @@ impl P2PCore {
 
     /// L-137: history written while a history server was set but no archive
     /// key was loaded was never queued; queue it once the key is here.
-    /// One slice (200 rows) per sweep; the `ark_backfill` marker holds
-    /// "<next id bound>,<rows done>" ("1" = not started), 2000 rows in all.
+    /// One slice (200 rows) per sweep, newest first, down to the oldest row;
+    /// the `ark_backfill` marker holds "<next id bound>,<rows done>"
+    /// ("1" = not started) so it resumes across sweeps and restarts.
     pub(crate) fn maybe_archive_backfill(&mut self) {
         const SLICE: i64 = 200;
-        const TOTAL: i64 = 2000;
         if self.archive_root_key.is_none() || !self.servers.iter().any(|s| s.store_history) {
+            return;
+        }
+        // Wait for the upload to drain: a full queue drops its oldest entries.
+        if self.server_archive_queue.len() >= MAX_SERVER_ARCHIVE_QUEUE / 2 {
             return;
         }
         let Some(marker) = self.meta_str("ark_backfill") else { return };
@@ -3010,7 +3075,7 @@ impl P2PCore {
              WHERE message_id IS NOT NULL AND id < ?1 ORDER BY id DESC LIMIT ?2",
         ) else { return };
         let rows: Vec<(i64, String, Option<String>, String)> = stmt
-            .query_map(params![bound, SLICE.min(TOTAL - done)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .query_map(params![bound, SLICE], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .map(|it| it.flatten().collect())
             .unwrap_or_default();
         drop(stmt);
@@ -3020,7 +3085,7 @@ impl P2PCore {
             self.requeue_archive_row(gid.as_deref(), &fp, &mid);
         }
         done += n;
-        if n < SLICE || done >= TOTAL {
+        if n < SLICE {
             self.meta_del("ark_backfill");
         } else {
             self.meta_put("ark_backfill", &format!("{bound},{done}"));
@@ -3292,8 +3357,9 @@ impl P2PCore {
             return;
         }
         let Some(ark) = self.archive_root_key else { return };
-        // Quota/rate error: wait like `Deposit` does, not once per sweep.
-        if self.server_rt.get(server_id).map_or(false, |r| mono_ms() < r.deposit_backoff_until) {
+        // Quota/rate error: wait (own backoff, see `archive_backoff_until`),
+        // not once per sweep.
+        if self.server_rt.get(server_id).map_or(false, |r| mono_ms() < r.archive_backoff_until) {
             return;
         }
         // Havada zaten bir ArchivePut varsa bekle — sıralı gitmesi, sunucu
@@ -3706,11 +3772,18 @@ impl P2PCore {
     /// The secret a file's server blob is uploaded with; its hash
     /// (`server_proto::blob_id_for_upload_secret`) is the file id. Derived
     /// from the local history key and `file_key`: recipients hold `file_key`
-    /// but not the history key, so they cannot claim the blob first.
-    pub(crate) fn blob_upload_secret(&self, file_key: &[u8; 32]) -> Option<Vec<u8>> {
+    /// but not the history key, so they cannot claim the blob first. It
+    /// starts with `tag` (the author tag, `group_msg_tag`), which the id
+    /// shows in the clear.
+    pub(crate) fn blob_upload_secret(&self, file_key: &[u8; 32], tag: &[u8]) -> Option<Vec<u8>> {
+        if tag.len() != server_proto::BLOB_TAG_LEN {
+            return None;
+        }
         let key = self.history_key.as_ref()?;
         let hash = Sha256::new_with_prefix(b"typeon-blob-upload-v1").chain_update(key).chain_update(file_key).finalize();
-        Some(hash[..server_proto::BLOB_UPLOAD_SECRET_LEN].to_vec())
+        let mut secret = tag.to_vec();
+        secret.extend_from_slice(&hash[..server_proto::BLOB_UPLOAD_SECRET_LEN - server_proto::BLOB_TAG_LEN]);
+        Some(secret)
     }
 
     /// Şifrelenmiş bir dosyayı sunucuya yüklemek üzere kuyruğa alır.
@@ -3721,7 +3794,9 @@ impl P2PCore {
         if self.server_blob_uploads.iter().any(|u| u.file_id == file_id) {
             return;
         }
-        let Some(upload_secret) = self.blob_upload_secret(file_key) else { return };
+        // The tag is the id's first 16 hex characters (`blob_id_for_upload_secret`).
+        let Some(tag) = file_id.get(..server_proto::BLOB_TAG_LEN * 2).and_then(|t| hex::decode(t).ok()) else { return };
+        let Some(upload_secret) = self.blob_upload_secret(file_key, &tag) else { return };
         // A file id that is not the hash of this secret (one not made by
         // `begin_outgoing_file`) cannot be uploaded under its own name.
         if server_proto::blob_id_for_upload_secret(&upload_secret).as_deref() != Some(file_id) {
@@ -4008,6 +4083,42 @@ fn archive_wire_id(ark: &[u8; 32], conv_key: &str, record_id: &str) -> String {
 
 /// M38: a mailbox id is a read capability: logs show 24 bits of its hash,
 /// never a part of the id itself.
+/// The signing keys of a mailbox's `Register` proof
+/// (`server_seal::mailbox_proof_seeds`).
+fn mailbox_proof_keys(secret: &[u8], mailbox: &str) -> Option<(SigningKey, MlDsaSigningKey<MlDsa87>)> {
+    let (seed, seed_pq) = server_seal::mailbox_proof_seeds(secret, mailbox).ok()?;
+    let seed_pq: ml_dsa::Seed = seed_pq.as_slice().try_into().ok()?;
+    Some((SigningKey::from_bytes(&seed), MlDsaSigningKey::<MlDsa87>::from_seed(&seed_pq)))
+}
+
+/// The server id of a mailbox whose readers all hold `secret` (a session
+/// box: the session secret; a call relay box: the pair key). It is a hash of
+/// the box's proof key (`server_proto::key_bound_mailbox_id`): the sender,
+/// who holds the same secret, computes it too, and the server refuses a
+/// `Register` by any other key, so knowing the id does not make a reader.
+///
+/// Remembered per secret: an ML-DSA-87 key is made for each, and this runs
+/// for every session on each sweep, fetch and deposit.
+// ponytail: the memo is dropped whole past 4096 entries; an LRU if a device
+// ever holds that many live sessions.
+pub(crate) fn key_bound_mailbox_id(secret: &[u8]) -> Option<String> {
+    static MEMO: std::sync::Mutex<Option<HashMap<[u8; 32], String>>> = std::sync::Mutex::new(None);
+    let tag: [u8; 32] = Sha256::digest(secret).into();
+    if let Some(id) = MEMO.lock().ok()?.get_or_insert_with(HashMap::new).get(&tag) {
+        return Some(id.clone());
+    }
+    let (signing, signing_pq) = mailbox_proof_keys(secret, server_proto::KEY_BOUND_MAILBOX_PREFIX)?;
+    let hash = server_proto::mailbox_key_hash(&signing.verifying_key().to_bytes(), &signing_pq.verifying_key().encode());
+    let id = server_proto::key_bound_mailbox_id(&hash);
+    let mut memo = MEMO.lock().ok()?;
+    let memo = memo.get_or_insert_with(HashMap::new);
+    if memo.len() >= 4096 {
+        memo.clear();
+    }
+    memo.insert(tag, id.clone());
+    Some(id)
+}
+
 fn mailbox_log_id(id: &str) -> String {
     hex::encode(&Sha256::digest(id.as_bytes())[..3])
 }

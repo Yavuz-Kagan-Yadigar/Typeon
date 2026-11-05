@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import com.p2p.messenger.P2PLib
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.InputStream
 
 /**
  * Spec dışı: görsel küçültme/sıkıştırma — hem sohbet eki önizlemeleri
@@ -135,4 +136,35 @@ object ImagePreview {
         scaled.recycle()
         return out.toByteArray()
     }
+}
+
+/** 64 MiB: what a foreign `content://` URI may stream into our cache. */
+const val MAX_FOREIGN_URI_BYTES = 64L * 1024 * 1024
+
+/**
+ * A foreign provider can hand over far more than its `SIZE` column claims
+ * (the send path caps the bytes actually copied, see ChatActivity "SIZE
+ * column can lie"): copy at most [maxBytes] into [out] and stop. Returns
+ * false — with the partial [out] deleted — once more than [maxBytes] was
+ * read; a read/write error propagates instead and the caller's `finally`
+ * deletes the file (every call site has one).
+ */
+fun InputStream.copyToCapped(out: File, maxBytes: Long): Boolean {
+    var ok = true
+    out.outputStream().use { dst ->
+        val buf = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val n = read(buf)
+            if (n < 0) break
+            total += n
+            if (total > maxBytes) {
+                ok = false
+                break
+            }
+            dst.write(buf, 0, n)
+        }
+    }
+    if (!ok) out.delete()
+    return ok
 }

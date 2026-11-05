@@ -771,6 +771,10 @@ pub fn watch_device_alerts(app: &Rc<App>) {
     glib::timeout_add_seconds_local(5, move || {
         // The core read runs off the GTK thread (shared core lock); one at a
         // time, and none while an alert is on screen.
+        // Nothing about contacts may show over the lock page.
+        if app.locked.get() {
+            return glib::ControlFlow::Continue;
+        }
         if showing.borrow().is_some() || in_flight.replace(true) {
             return glib::ControlFlow::Continue;
         }

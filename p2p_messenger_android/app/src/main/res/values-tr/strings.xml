@@ -37,23 +37,23 @@
     <string name="lbl_verify_identity">Kimliği Doğrula</string>
     <string name="lbl_safety_number">Güvenlik Numarası</string>
     <string name="lbl_node_mode">Düğüm Modu</string>
-    <string name="lbl_node_mode_desc">Ağdaki başkaları için (şifreli) trafiği körü körüne aktarır (yalnızca Circuit Relay v2; DHT katkısı yok) — içeriğinizi asla göremez, ama aktardığınız kişinin bant genişliğini kullanır ve o kişinin kimlerle bağlandığını görebilir.</string>
+    <string name="lbl_node_mode_desc">Diğer kişilerin şifreli trafiğini sizden geçirerek bağlantılarına yardımcı olur. İçeriği okuyamaz. Ancak internet verinizi ve bant genişliğinizi kullanır, sizin üzerinden kimlerin bağlandığını görebilir.</string>
     <string name="lbl_history_storage_limit">Ek depolama sınırı</string>
-    <string name="lbl_history_storage_limit_desc">Düğüm Modu kendisine sunulan her dosyayı otomatik indirir; bu sınırsız büyüyebilir. Toplam ek depolama bu sınırı aştığında, yer açmak için önce en eski dosyalar silinir.</string>
+    <string name="lbl_history_storage_limit_desc">Düğüm Modu açıkken cihazınız, kendisinden geçen her dosyayı kaydeder. Toplam boyut bu sınırı aşarsa en eski dosyalar önce silinir.</string>
     <string name="lbl_relay_address">Bilinen aktarıcı adresi</string>
-    <string name="lbl_relay_address_desc">Farklı ağlardaki (ikisi de NAT arkasında), ortak bir aktarıcı geçmişi olmayan iki kişinin ilk kez eşleşebilmesi için — güvendiğiniz ya da kendiniz çalıştırdığınız bir aktarıcı varsa (Düğüm Modu açık, ulaşılabilir bir cihaz), adresini buraya ekleyin.</string>
+    <string name="lbl_relay_address_desc">Yalnızca farklı ağlardaki iki kişi ilk kez bağlanacaksa gerekir. Güvendiğiniz, Düğüm Modu açık bir cihazın ya da kendi cihazınızın adresini buraya yapıştırın.</string>
     <string name="lbl_relay_address_hint">/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo…</string>
     <string name="action_add_relay_address">Ekle</string>
     <string name="msg_relay_address_added">Röle adresi eklendi</string>
     <!-- Sunucular (store-and-forward) -->
     <string name="lbl_servers">Sunucular</string>
-    <string name="lbl_servers_desc">Sunucu, karşı taraf çevrimdışıyken mesajlarınızı saklar ve geri döndüğünde teslim eder. Mesajlarınızı asla göremez: uçtan uca şifreli kalır ve saklanmadan önce ikinci kez mühürlenir. Röleden farkı: röle sadece iki taraf da çevrimiçiyken aktarır, hiçbir şey saklamaz.</string>
+    <string name="lbl_servers_desc">Sunucu, karşı taraf çevrimdışıyken mesajlarınızı tutar, o çevrimiçi olunca iletir. Mesajları okuyamaz, çünkü mesajlar şifreli kalır.</string>
     <string name="action_add_server">Sunucu QR\'ı tara</string>
     <string name="action_add_server_paste">Kod yapıştır</string>
     <string name="dlg_add_server_title">Sunucu ekle</string>
     <string name="dlg_add_server_hint">typeon-server:/dns/…onion/tcp/…/p2p/…#jeton</string>
     <string name="lbl_display_name">Hesap adı</string>
-    <string name="lbl_display_name_desc">Kişilerinizin sizi gördüğü ad. Değiştirdiğinizde tüm kişilere otomatik bildirilir; o an çevrimdışı olanlar geri döndüklerinde alır.</string>
+    <string name="lbl_display_name_desc">Kişilerinizin gördüğü ad. Değiştirdiğinizde kişileriniz otomatik güncellenir. Çevrimdışı olanlar tekrar çevrimiçi olunca alır.</string>
     <string name="action_change_display_name">Adı değiştir</string>
     <string name="dlg_change_display_name_title">Hesap adı</string>
     <string name="msg_display_name_changed">Ad değişti. Kişilere bildiriliyor.</string>
@@ -65,6 +65,7 @@
     <string name="lbl_server_route">Mesajları bu sunucu üzerinden gönder</string>
     <string name="lbl_server_history">Geçmişi bu sunucuda sakla</string>
     <string name="lbl_server_history_warn">Yeni bir cihazın eski mesajlarınızı yüklemesini sağlar. Canlı mesajların aksine bu yedek ileri-gizli değildir: arşiv anahtarını ele geçiren, o ana kadar yüklenmiş her şeyi okur.</string>
+    <string name="msg_server_history_upload">Son mesajlarınız ona, sunucunun okuyamayacağı şekilde mühürlenmiş olarak yüklenecek.</string>
     <string name="action_remove_server">Kaldır</string>
     <string name="state_server_connected">Bağlı</string>
     <string name="state_server_connecting">Bağlanılıyor…</string>
@@ -100,7 +101,7 @@
     <string name="lbl_eta_minutes">~%1$d dk %2$d sn kaldı</string>
 
     <string name="lbl_tor">Tor ile erişilebilirlik</string>
-    <string name="lbl_tor_desc">CGNAT\'a rağmen farklı ağlardaki cihazların bağlanmasını sağlar (Tor onion servisi). İlk açılışta bağlanmak birkaç saniye sürer ve pil kullanır. Karşı tarafın da Tor\'u açık olması gerekir. Değişiklikler uygulama yeniden başlatılınca etkin olur.</string>
+    <string name="lbl_tor_desc">Çoğu mobil ve ev ağı size sabit (statik) IP vermez. Farklı ağlardaki kişilere ulaşmak için bunu açın. Biraz pil kullanır, ilk bağlantı birkaç saniye sürer. Karşı tarafın da açık olması gerekir. Değiştirdikten sonra uygulamayı yeniden başlatın.</string>
     <string name="tor_status_disabled">Tor: kapalı</string>
     <string name="tor_status_bootstrapping">Tor: bağlanılıyor…</string>
     <string name="tor_status_ready">Tor: hazır — .onion adresi aktif</string>
@@ -120,7 +121,7 @@
     <string name="lbl_keys_hardware_backed">✓ Anahtarlarınız cihazın güvenlik donanımı (StrongBox/TEE) tarafından korunuyor</string>
     <string name="lbl_keys_software_backed">⚠ Anahtarlarınız yalnızca yazılımla korunuyor (bu cihaz bir donanım güvenlik modülü desteklemiyor)</string>
     <string name="lbl_recovery_export">Kimlik Kurtarma</string>
-    <string name="lbl_recovery_export_desc">Tüm kimlik anahtarlarınızı içeren, parola korumalı bir kurtarma dosyası dışa aktarın. Güvenli ve çevrimdışı bir yerde saklayın (ör. USB bellek) — hem bu dosyaya hem parolaya sahip olan biri sizin yerinize geçebilir. Bu cihazı kaybederseniz kimliğinizi kurtarmanın tek yolu budur.</string>
+    <string name="lbl_recovery_export_desc">Tüm anahtarlarınızı içeren, parola korumalı bir dosya kaydedin. Bu telefonu kaybederseniz hesabınızı geri almanın tek yolu budur. Çevrimdışı bir yerde saklayın, ör. USB bellek. Bu dosyaya ve parolaya sahip olan biri sizin yerinize geçebilir. Çok büyük bir geçmişte yalnızca en yeni mesajlar tutulur.</string>
     <string name="action_export_recovery">Kurtarma Dosyasını Dışa Aktar…</string>
     <string name="lbl_recovery_password">Parola</string>
     <string name="lbl_recovery_password_confirm">Parolayı onayla</string>
@@ -322,7 +323,7 @@
 
     <!-- Çoklu-cihaz (spec 1.5/1.6/1.7): ikincil cihaz bağlama -->
     <string name="linked_devices_section_title">Bağlı cihazlar</string>
-    <string name="linked_devices_section_desc">Bu hesabı birden fazla cihazda kullanın. Her cihaz kendi anahtarlarını tutar; kişiler mesajları aktif tüm cihazlarınıza iletir.</string>
+    <string name="linked_devices_section_desc">Bu hesabı birden çok cihazda kullanın. Her cihazın kendi anahtarları vardır. Mesajlar tüm aktif cihazlarınıza gönderilir.</string>
     <string name="linked_devices_manage">Cihazları yönet / Cihaz ekle</string>
     <string name="linked_devices_add">Cihaz ekle (tara)</string>
     <string name="linked_devices_this_device">bu cihaz</string>
@@ -333,7 +334,7 @@
 
     <!-- Spec dışı, kullanıcı isteği: hesaptan çıkış (yerel verileri sil). -->
     <string name="logout_section_title">Çıkış yap</string>
-    <string name="logout_section_desc">Bu kimliği bu cihazdan kaldırır: burada saklanan mesajlar, kişiler ve anahtarlar kalıcı olarak silinir. Bu hesaba bağlı diğer cihazlar ve karşı tarafların mesaj kopyaları bundan etkilenmez.</string>
+    <string name="logout_section_desc">Bu hesabı bu cihazdan kaldırır. Burada saklanan mesajlar, kişiler ve anahtarlar kalıcı olarak silinir. Diğer cihazlarınız ve karşı tarafların mesaj kopyaları etkilenmez.</string>
     <string name="action_logout">Çıkış yap</string>
     <string name="logout_confirm_title">Çıkış yapılsın mı?</string>
     <string name="logout_confirm_message">Bu, bu cihazdaki tüm yerel mesajları, kişileri ve anahtarları siler. Bir kurtarma dosyası dışa aktarmadıysanız, bu hesap bu cihazda geri kurtarılamaz. Bu işlem geri alınamaz.</string>
@@ -343,6 +344,12 @@
     <string name="delete_account_confirm_message">Tüm kişilerine ve gruplarına bu hesabın silindiği bildirilir; artık sana mesaj gönderemezler. Bağlı cihazların da silinir. Yerel mesajlar, kişiler ve anahtarlar silinir. Bu işlem geri alınamaz.</string>
     <string name="msg_deleting_account">Kişilerine bildiriliyor…</string>
     <string name="error_delete_account_failed">Kişilerine bildirilemedi. Hesap silinmedi, bağlantı varken yeniden dene.</string>
+    <string name="external_open_title">Typeon dışında açılsın mı?</string>
+    <string name="external_open_message">Bu dosyayı açacak uygulama Typeon ve Tor dışındadır. İnternetten içerik yükleyip IP adresinizi açığa çıkarabilir.</string>
+    <string name="external_open_continue">Yine de aç</string>
+    <string name="delete_account_pending_message">%1$d silme bildirimi kişilerinize henüz ulaşmadı. Beklemeye devam edilsin mi, yoksa yine de silinsin mi?</string>
+    <string name="delete_account_keep_waiting">Beklemeye devam et</string>
+    <string name="delete_account_anyway">Yine de sil</string>
     <string name="msg_contact_deleted_account">%1$s hesabını sildi</string>
     <string name="msg_account_deleted_no_send">Bu kişi hesabını sildi. Artık mesaj gönderilemez.</string>
     <string name="device_unlinked_notification">Bu cihazın hesabınızla bağlantısı kaldırıldı. Yerel verileri silindi.</string>
@@ -380,11 +387,11 @@
 
     <!-- Spec dışı, kullanıcı isteği: bildirimlerde mesaj metnini göster/gizle. -->
     <string name="lbl_notif_show_message">Bildirimlerde mesajları göster</string>
-    <string name="lbl_notif_show_message_desc">Kapalıyken bildirim yalnızca "Yeni mesaj" der; ne gönderen ne metin görünür.</string>
+    <string name="lbl_notif_show_message_desc">Kapalıyken bildirimde yalnızca "Yeni mesaj" yazar. Gönderen ve metin gizli kalır.</string>
 
     <!-- Spec dışı, kullanıcı isteği: uygulama açılış şifresi. -->
     <string name="lbl_app_lock_section">Uygulama şifresi</string>
-    <string name="lbl_app_lock_section_desc">Uygulama her ön plana geldiğinde sorulur. Değiştirilebilir ama kaldırılamaz.</string>
+    <string name="lbl_app_lock_section_desc">Uygulamayı her açtığınızda sorulur. Parola değiştirilebilir ama kaldırılamaz.</string>
     <string name="action_change_app_password">Şifreyi değiştir</string>
     <string name="title_app_lock_create">Bir şifre belirleyin</string>
     <string name="msg_app_lock_create">Bu şifre uygulamanın kilidini açar. Unutulursa geri getirilemez ve boş bırakılamaz.</string>
@@ -410,7 +417,6 @@
     <string name="title_attachment_caption">Açıklama ekle</string>
     <string name="hint_attachment_caption">Açıklama (isteğe bağlı)</string>
     <string name="attachment_hi_res">Kayıpsız</string>
-    <!-- Settings screen section headers -->
     <string name="image_edit_revert">Orijinal</string>
     <string name="image_edit_undo">Geri al</string>
     <string name="image_edit_rotate_left">Sola döndür</string>
@@ -424,6 +430,7 @@
     <string name="image_edit_no_memory">Bu düzenleme için bellek yetmedi</string>
     <string name="image_edit_save_failed">Düzenleme kaydedilemedi</string>
     <string name="image_edit_reduced">Belleğe sığması için %1$d × %2$d boyutunda düzenleniyor</string>
+    <!-- Settings screen section headers -->
     <string name="settings_section_profile">Profil</string>
     <string name="settings_section_privacy">Gizlilik ve güvenlik</string>
     <string name="settings_section_network">Ağ ve bağlantı</string>

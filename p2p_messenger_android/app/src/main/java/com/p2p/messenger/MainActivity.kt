@@ -150,16 +150,19 @@ class MainActivity : AppCompatActivity() {
             com.p2p.messenger.util.KeystoreCrypto.reportKeyFailure(this)
         } else if (state != 2) {
             if (state == 3) {
-                // identity_secret.enc kayıp/bozuk — Keystore anahtarı
-                // muhtemelen kaybolmuş (ör. cihaz sıfırlandı). Kurtarma
-                // dosyasından geri yükleme akışı burada tetiklenmeli
-                // (spec 1.8) — Aşama A kapsamında henüz UI'ı yok, şimdilik
-                // kullanıcıyı bilgilendiriyoruz.
-                Toast.makeText(
-                    this,
-                    R.string.msg_identity_read_failed,
-                    Toast.LENGTH_LONG
-                ).show()
+                // identity_secret.enc lost/corrupt — the Keystore key is
+                // probably gone (e.g. device reset). The core's
+                // import_recovery accepts exactly this state (public keys
+                // loaded, no secret keys): offer the same recovery-file flow
+                // the first-start dialog uses.
+                AlertDialog.Builder(this)
+                    .setMessage(R.string.msg_identity_read_failed)
+                    .setPositiveButton(R.string.action_restore_from_recovery) { _, _ ->
+                        AppLock.beginTrustedExcursion()
+                        pickRecoveryFileLauncher.launch(arrayOf("*/*"))
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
             }
             startNetworkService()
         } else {
@@ -206,7 +209,10 @@ class MainActivity : AppCompatActivity() {
         // chat screen) throw SecurityException and kill the app.
         if (com.p2p.messenger.util.ShareIntake.uris(intent!!).any {
                 checkCallingOrSelfUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) != android.content.pm.PackageManager.PERMISSION_GRANTED
-            }) return
+            }) {
+            android.widget.Toast.makeText(this, R.string.error_attachment_open_failed, android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
         com.p2p.messenger.util.ShareIntake.pending = intent
         android.widget.Toast.makeText(this, R.string.msg_share_pick_chat, android.widget.Toast.LENGTH_LONG).show()
     }
@@ -248,13 +254,28 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        AlertDialog.Builder(this)
-            .setTitle(R.string.dlg_add_server_title)
-            .setMessage(getString(R.string.msg_join_link_confirm, code))
-            .setPositiveButton(android.R.string.ok) { _, _ -> addServerFromLink(code) }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+        // Whether THIS server would become the history server is a JNI/SQLite
+        // read (off the main thread, see SettingsFragment `refreshServers`):
+        // the history warning is appended only for the server that would be it.
+        lifecycleScope.launch {
+            val historyServer = withContext(Dispatchers.IO) { P2PLib.nextServerStoresHistory(code) }
+            if (isFinishing || isDestroyed) return@launch
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle(R.string.dlg_add_server_title)
+                .setMessage(addServerQuestion(code, historyServer))
+                .setPositiveButton(android.R.string.ok) { _, _ -> addServerFromLink(code) }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
     }
+
+    /** The add-server question; the history warning (and what joining it
+     *  uploads) only when this server would become the history server. */
+    private fun addServerQuestion(code: String, historyServer: Boolean): String =
+        getString(R.string.msg_join_link_confirm, code) +
+            if (historyServer) {
+                "\n\n" + getString(R.string.lbl_server_history_warn) + " " + getString(R.string.msg_server_history_upload)
+            } else ""
 
     private fun addServerFromLink(code: String) {
         lifecycleScope.launch(Dispatchers.IO) {
@@ -418,26 +439,30 @@ class MainActivity : AppCompatActivity() {
      */
     private fun createIdentityAndStart(deviceName: String, linkAsSecondary: Boolean) {
         lifecycleScope.launch {
-            val identityId = withContext(Dispatchers.IO) {
-                try { P2PLib.createIdentity(deviceName) } catch (e: Exception) { "Error: ${e.message}" }
+            // One block that a rotation cannot cancel: if the activity dies between
+            // creating the identity and saving its secret keys, the keys are lost.
+            var persistError: String? = null
+            val identityId = withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
+                val id = try { P2PLib.createIdentity(deviceName) } catch (e: Exception) { "Error: ${e.message}" }
+                if (!id.startsWith("Error:")) {
+                    // Secret key bundle'ını HEMEN Keystore ile şifreleyip diske yaz —
+                    // aksi halde süreç öldüğünde kaybolur. (İkincil cihaz da KENDİ
+                    // anahtarlarını böyle saklar; benimseme sadece identity_id'yi değiştirir.)
+                    persistError = try {
+                        // `false` = çekirdekte bekleyen bundle yoktu: kimliğin
+                        // secret key'leri hiç yazılmadı, bir sonraki açılışta
+                        // yüklenemez.
+                        if (IdentityManager.persistNewIdentity(applicationContext)) null else "no pending secret bundle"
+                    } catch (e: Exception) {
+                        e.message ?: e.toString()
+                    }
+                }
+                id
             }
             if (identityId.startsWith("Error:")) {
                 Toast.makeText(this@MainActivity, com.p2p.messenger.util.coreErrorText(this@MainActivity, identityId), Toast.LENGTH_LONG).show()
                 showDeviceNameDialog()
                 return@launch
-            }
-            // Secret key bundle'ını HEMEN Keystore ile şifreleyip diske yaz —
-            // aksi halde süreç öldüğünde kaybolur. (İkincil cihaz da KENDİ
-            // anahtarlarını böyle saklar; benimseme sadece identity_id'yi değiştirir.)
-            val persistError = withContext(Dispatchers.IO) {
-                try {
-                    // `false` = çekirdekte bekleyen bundle yoktu: kimliğin
-                    // secret key'leri hiç yazılmadı, bir sonraki açılışta
-                    // yüklenemez.
-                    if (IdentityManager.persistNewIdentity(applicationContext)) null else "no pending secret bundle"
-                } catch (e: Exception) {
-                    e.message ?: e.toString()
-                }
             }
             if (persistError != null) {
                 // Keystore or disk failure: without this the identity exists in

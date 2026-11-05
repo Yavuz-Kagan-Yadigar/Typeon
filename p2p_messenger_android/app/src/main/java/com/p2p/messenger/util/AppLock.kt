@@ -306,9 +306,14 @@ object AppLock {
      *  viewer) keeps `unlocked`, so the file it has open stays. */
     private fun purgePlainCache(context: Context) {
         if (!hasPassword(context)) return
-        java.io.File(context.filesDir, "attachments/plain_cache").listFiles()?.forEach { it.deleteRecursively() }
-        // M-40: decrypted full-screen avatar copies (AvatarUtil.openFullscreen)
-        java.io.File(context.cacheDir, "avatar_view").listFiles()?.forEach { it.deleteRecursively() }
+        // Off the main thread: deleting large decrypted videos takes time. File names are unique, so order does not matter.
+        val files = context.filesDir
+        val cache = context.cacheDir
+        Thread {
+            java.io.File(files, "attachments/plain_cache").listFiles()?.forEach { it.deleteRecursively() }
+            // M-40: decrypted full-screen avatar copies (AvatarUtil.openFullscreen)
+            java.io.File(cache, "avatar_view").listFiles()?.forEach { it.deleteRecursively() }
+        }.start()
     }
 
     /**

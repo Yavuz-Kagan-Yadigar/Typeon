@@ -221,7 +221,10 @@ class QrScanActivity : AppCompatActivity() {
         // Not at once: any code caught in the frame added a server, or linked
         // a device with the whole account. The user sees what it is first.
         val question = if (addServerMode) {
-            getString(R.string.msg_join_link_confirm, text.trim().take(300))
+            val invite = text.trim()
+            // Already off the main thread (camera analyzer): the same
+            // history-server read MainActivity does before its confirm dialog.
+            addServerQuestion(invite.take(300), P2PLib.nextServerStoresHistory(invite))
         } else {
             val peek = try { P2PLib.peekDeviceLink(cborBytes) } catch (e: Throwable) { "Error: ${e.message}" }
             val obj = if (peek.startsWith("Error:")) null else try { JSONObject(peek) } catch (e: Exception) { null }
@@ -243,6 +246,14 @@ class QrScanActivity : AppCompatActivity() {
                 .show()
         }
     }
+
+    /** The add-server question; the history warning (and what joining it
+     *  uploads) only when this server would become the history server. */
+    private fun addServerQuestion(code: String, historyServer: Boolean): String =
+        getString(R.string.msg_join_link_confirm, code) +
+            if (historyServer) {
+                "\n\n" + getString(R.string.lbl_server_history_warn) + " " + getString(R.string.msg_server_history_upload)
+            } else ""
 
     private fun runScanned(text: String, cborBytes: ByteArray) {
         Thread {

@@ -14,14 +14,15 @@ import javax.crypto.spec.GCMParameterSpec
 /**
  * SQLCipher key of the server DB: 32 random bytes, stored only wrapped by a
  * non-exportable Android Keystore AES-GCM key (same envelope scheme as the
- * client's KeystoreCrypto). Returned as 64 hex chars for `ServerLib.setDbKey`.
+ * client's KeystoreCrypto). Returned as raw bytes for `ServerLib.setDbKey`;
+ * the caller zeroes the array after the call.
  */
 object DbKey {
     private const val ALIAS = "typeon_server_db_wrap_key"
     private const val PREF = "db_key_wrapped"
 
     @Synchronized
-    fun get(context: Context): String {
+    fun get(context: Context): ByteArray {
         val prefs = context.getSharedPreferences(ServerService.PREFS_NAME, Context.MODE_PRIVATE)
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         val wrapped = prefs.getString(PREF, null)
@@ -32,7 +33,7 @@ object DbKey {
             val raw = Base64.decode(wrapped, Base64.NO_WRAP)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, raw.copyOfRange(0, 12)))
-            return toHex(cipher.doFinal(raw, 12, raw.size - 12))
+            return cipher.doFinal(raw, 12, raw.size - 12)
         }
         // An alias without a saved blob: a crash before the commit below. No DB
         // was ever keyed with it, so it is replaced (refusing would block the server for good).
@@ -54,8 +55,6 @@ object DbKey {
         if (!prefs.edit().putString(PREF, Base64.encodeToString(blob, Base64.NO_WRAP)).commit()) {
             throw java.io.IOException("db key not saved")
         }
-        return toHex(dbKey)
+        return dbKey
     }
-
-    private fun toHex(b: ByteArray) = b.joinToString("") { "%02x".format(it) }
 }

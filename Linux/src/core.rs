@@ -97,6 +97,11 @@ pub fn init_database(dir: &str, storage_key: &[u8; 32]) -> bool {
     api::init_database(dir, storage_key)
 }
 
+/// Closes the database and stops the network; see `api::shutdown`.
+pub fn shutdown() {
+    api::shutdown()
+}
+
 pub fn has_stored_identity() -> bool {
     api::has_stored_identity()
 }

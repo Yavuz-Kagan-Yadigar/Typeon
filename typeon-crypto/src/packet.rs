@@ -41,7 +41,11 @@ fn pairing_code_from_cbor<T: serde::de::DeserializeOwned>(
     if data.len() > MAX_PAIRING_CODE_BYTES {
         return Err("Kod çok uzun".to_string());
     }
-    let parsed: T = ciborium::from_reader(data).map_err(|e| e.to_string())?;
+    let mut rest = data;
+    let parsed: T = ciborium::from_reader(&mut rest).map_err(|e| e.to_string())?;
+    if !rest.is_empty() {
+        return Err("Invalid code: trailing bytes".to_string());
+    }
     let v = version(&parsed);
     if v > *versions.end() {
         return Err(format!("Bu kod daha yeni bir sürümle üretilmiş (v{}): uygulamayı güncelleyin", v));
@@ -551,6 +555,11 @@ pub struct SyncPayload {
     /// the stamp.
     #[serde(default)]
     pub name_changed_at_ms: u64,
+    /// The signed revokes of this identity's own devices: a device linked
+    /// after a revoke learns it here, and refuses the revoked device's
+    /// still-valid `DeviceAdd`. Left out when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub own_revokes: Vec<DeviceRevoke>,
 }
 
 /// Ağ üzerinde taşınan üst-seviye paket zarfı. `MessagePacket` header'ı
@@ -969,6 +978,14 @@ pub enum MessageContent {
         /// gelen teklifte bu alan yok ve o aktarim miras boyutla yurur.
         #[serde(default)]
         chunk_size: Option<u32>,
+        /// The sender's hashes of the encrypted chunks, 32 bytes per entry
+        /// (see `attachments::chunk_hashes_of`): SHA-256 over the ciphertext
+        /// of each group of `attachments::chunks_per_hash` chunks. Every group
+        /// member holds `file_key`, so the chunk AEAD alone does not stop a
+        /// member serving the file from forging chunks; this signed list
+        /// does, chunk by chunk. An offer without the right length is refused.
+        #[serde(default, with = "serde_bytes")]
+        chunk_hashes: Vec<u8>,
         /// A sticker (JPEG XL, at most 600 px a side): shown without a
         /// bubble frame and downloaded at once, whatever the node mode.
         #[serde(default)]
@@ -1791,7 +1808,7 @@ mod parse_limit_tests {
             group_id: None, file_id: "f".into(), file_name: "n".into(), mime_type: "m".into(), total_size: 1,
             file_key: [0; 32], sha256_hex: String::new(), preview_jpeg: None, duration_ms: None,
             caption: String::new(), reply_to_message_id: None, reply_to_preview: None,
-            reply_to_sender_identity_id: None, chunk_size: None, sticker: false, sticker_origin: None,
+            reply_to_sender_identity_id: None, chunk_size: None, chunk_hashes: Vec::new(), sticker: false, sticker_origin: None,
         };
         let echo = |inner| MessageContent::SiblingEcho {
             conversation_identity_id: None, group_id: None,
@@ -1826,6 +1843,7 @@ mod parse_limit_tests {
                 sibling_proofs: Vec::new(),
                 archive_root_key: Some(vec![0; 32]),
                 name_changed_at_ms: 0,
+                own_revokes: Vec::new(),
             },
         };
         assert!(MessageContent::from_cbor(&bytes(&grant)).is_ok());

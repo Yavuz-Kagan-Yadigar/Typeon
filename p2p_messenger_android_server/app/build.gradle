@@ -19,7 +19,8 @@ android {
 
     defaultConfig {
         applicationId "com.p2p.messenger.server"
-        minSdk 26
+        // minSdk 28: v3 signing-key rotation (--rotation-min-sdk-version 28) requires it; Android 8.0/8.1 only check v1/v2 signatures made with the old key.
+        minSdk 28
         targetSdk 34
         versionCode 42
         versionName "5.0.1"

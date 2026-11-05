@@ -11,6 +11,7 @@ import android.text.TextUtils
 import android.text.TextWatcher
 import android.text.style.ClickableSpan
 import android.text.style.ReplacementSpan
+import android.view.MotionEvent
 import android.view.View
 import android.widget.EditText
 
@@ -48,8 +49,40 @@ object Quote {
         edit.requestFocus()
     }
 
-    /** Input field: draws markers as boxes and deletes a box whole. */
+    /** The box under a touch on its X, or null. */
+    private fun closeHit(edit: EditText, e: MotionEvent): Box? {
+        val s = edit.text ?: return null
+        val x = e.x - edit.totalPaddingLeft + edit.scrollX
+        val y = e.y - edit.totalPaddingTop + edit.scrollY
+        return s.getSpans(0, s.length, Box::class.java).firstOrNull { it.closeRect.contains(x, y) }
+    }
+
+    /** Input field: draws markers as boxes with an X, and deletes a box whole. */
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
     fun attach(edit: EditText) {
+        var pressed: Box? = null
+        edit.setOnTouchListener { _, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { pressed = closeHit(edit, e); pressed != null }
+                MotionEvent.ACTION_MOVE -> pressed != null
+                MotionEvent.ACTION_UP -> {
+                    val box = pressed
+                    pressed = null
+                    if (box == null) false else {
+                        val s = edit.text
+                        val a = s.getSpanStart(box)
+                        var b = s.getSpanEnd(box)
+                        if (closeHit(edit, e) === box && a in 0 until b) {
+                            if (b < s.length && s[b] == '\n') b++
+                            s.delete(a, b)
+                        }
+                        true
+                    }
+                }
+                MotionEvent.ACTION_CANCEL -> { val had = pressed != null; pressed = null; had }
+                else -> false
+            }
+        }
         edit.addTextChangedListener(object : TextWatcher {
             private var cut = emptyList<Box>()
             /** Typing with the cursor inside a box: moved to after the box. */
@@ -94,7 +127,7 @@ object Quote {
                 val width = edit.width - edit.totalPaddingLeft - edit.totalPaddingRight
                 val max = if (width > 0) width else edit.resources.displayMetrics.widthPixels / 2
                 for (m in MARKER.findAll(s)) {
-                    s.setSpan(Box(null, m.groupValues[2], max), m.range.first, m.range.last + 1, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    s.setSpan(Box(null, m.groupValues[2], max, closable = true), m.range.first, m.range.last + 1, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
                 }
                 busy = false
             }
@@ -127,9 +160,16 @@ object Quote {
         return any
     }
 
-    /** The quote box: optional bold label over one ellipsized line. */
-    class Box(private val label: String?, text: String, private val maxWidth: Int) : ReplacementSpan() {
+    /** The quote box: optional bold label over one ellipsized line; in the input an X removes it. */
+    class Box(
+        private val label: String?, text: String, private val maxWidth: Int,
+        private val closable: Boolean = false
+    ) : ReplacementSpan() {
         private val text = text.replace('\n', ' ')
+        /** Where the X was last drawn, in layout coordinates. */
+        val closeRect = RectF()
+
+        private fun closeWidth(paint: Paint) = if (closable) paint.textSize * 1.6f else 0f
 
         private fun dp(paint: Paint, v: Float) = v * paint.textSize / 15f
         /** The owner name: bold, smaller and faded. */
@@ -144,7 +184,7 @@ object Quote {
         private fun width(paint: Paint): Int {
             val pad = dp(paint, 10f)
             val content = maxOf(label?.let { bold(paint).measureText(it) } ?: 0f, paint.measureText(text))
-            return minOf(maxWidth, kotlin.math.ceil(content + pad * 2).toInt() + 1)
+            return minOf(maxWidth, kotlin.math.ceil(content + pad * 2 + closeWidth(paint)).toInt() + 1)
         }
 
         private fun boxHeight(paint: Paint): Int {
@@ -174,7 +214,21 @@ object Quote {
             val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = (color and 0xFFFFFF) or 0x26000000 }
             val radius = dp(paint, 8f)
             canvas.drawRoundRect(RectF(x, topY, x + w, bottomY), radius, radius, fill)
-            val avail = w - pad * 2
+            val cw = closeWidth(paint)
+            val avail = w - pad * 2 - cw
+            if (closable) {
+                closeRect.set(x + w - cw - pad / 2, topY, x + w, bottomY)
+                val xp = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    this.color = (color and 0xFFFFFF) or 0x99000000.toInt()
+                    strokeWidth = dp(paint, 1.6f)
+                    strokeCap = Paint.Cap.ROUND
+                }
+                val cx = x + w - pad / 2 - cw / 2
+                val cy = (topY + bottomY) / 2
+                val h = paint.textSize * 0.3f
+                canvas.drawLine(cx - h, cy - h, cx + h, cy + h, xp)
+                canvas.drawLine(cx - h, cy + h, cx + h, cy - h, xp)
+            }
             val textX = x + pad
             if (label != null) {
                 val bp = bold(paint)

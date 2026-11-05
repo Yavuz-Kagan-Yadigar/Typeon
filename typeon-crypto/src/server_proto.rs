@@ -53,7 +53,7 @@ pub const SERVER_PROTOCOL: &str = "/typeon/server/1.0.0";
 /// the client while it is in a call. Frames are `[u16 mailbox len][mailbox]
 /// [u32 len][data]` (core `call::encode_frame`). Client -> server: "push
 /// `data` to whoever is connected and listening on `mailbox`" (the target's
-/// `server_seal::relay_mailbox_id`, registered for the call). The sender is
+/// `key_bound_mailbox_id` of the pair key, registered for the call). The sender is
 /// not checked against the readers of `mailbox`: the id is its capability,
 /// and the receiver registers it, not the sender. Server -> client: the same frame with an empty
 /// mailbox. Nothing is stored: a target that is not connected right now
@@ -65,7 +65,11 @@ pub const RELAY_PROTOCOL: &str = "/typeon/relay/1.0.0";
 /// Kablo formatı sürümü — `Hello`/`Welcome` içinde takas edilir.
 /// 2: `Register` answers `Registered { proof_needed, refused }`.
 /// 4: blob requests carry `upload_secret` instead of `blob_id`.
-pub const SERVER_PROTOCOL_VERSION: u16 = 4;
+/// 5: session and relay mailbox ids are made from their proof key
+///    (`key_bound_mailbox_id`); the server refuses any other key for them.
+/// 6: upload secrets are 24 bytes and start with the file's author tag
+///    (`blob_id_for_upload_secret`).
+pub const SERVER_PROTOCOL_VERSION: u16 = 6;
 
 /// Tek bir `Deposit`in azami yükü. Modül başındaki "Boyut tavanı" notuna
 /// bakın: codec'in sert sınırı 1 MiB, buradaki pay CBOR enum/alan
@@ -86,9 +90,10 @@ pub const MAX_ARCHIVE_PUT_RECORDS: usize = 256;
 /// reddedilir (`ServerErrorCode::Stale`).
 pub const ENROLL_MAX_SKEW_MS: u64 = 5 * 60 * 1000;
 
-/// Opak posta kutusu adresi — `server_seal::session_mailbox` (or `first_contact_mailbox_id`) çıktısı
-/// (`mb_<hex16>`) ya da arşiv kovası (`ar_<hex16>`). Sunucu bunu ASLA
-/// ayrıştırmaz; kendisi için anlamsız bir dizedir.
+/// A mailbox address: `key_bound_mailbox_id` of a session or relay box
+/// (`mk_<hex16>`), `server_seal::first_contact_mailbox_id` (`mb_<hex16>`),
+/// or an archive bucket (`ar_<hex16>`). The server reads nothing from it
+/// except the `mk_` prefix, which makes it check the `Register` proof key.
 pub type MailboxId = String;
 
 // ---------------------------------------------------------------------------
@@ -389,10 +394,17 @@ pub enum ServerResponse {
 }
 
 /// Proof that the sender of a `Register` owns `mailbox`: a hybrid signature
-/// over `register_signing_input` by the mailbox key. The server binds a
-/// mailbox to the first key that registers it and takes no other key for it
-/// while it has a reader. The readers derive the key from a secret only they
-/// hold (`server_seal::mailbox_proof_seeds`).
+/// over `register_signing_input` by the mailbox key. The readers derive the
+/// key from a secret only they hold (`server_seal::mailbox_proof_seeds`).
+///
+/// A session or relay mailbox has an id made from that key
+/// (`key_bound_mailbox_id`), so the server takes no other key for it: knowing
+/// the id is not enough to read it. A first-contact mailbox cannot work that
+/// way (its proof key is the reading device's alone, and the sender, who only
+/// holds the pairing code, must still compute the id), so there the server
+/// keeps each reader's key and takes at most two readers per key; another key
+/// gets slots of its own (a first-come binding let anyone who knew a
+/// first-contact id lock its device out).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailboxProof {
     pub mailbox: MailboxId,
@@ -482,6 +494,8 @@ pub struct MailItem {
     /// Sunucunun atadığı, KESİN OLARAK ARTAN sıra numarası (SQLite
     /// AUTOINCREMENT rowid — sunucu genelinde global, dolayısıyla her tek
     /// kutu içinde de artan, ki imlecin ihtiyacı olan tam da bu).
+    /// Because it is global, an enrolled reader can estimate the server-wide
+    /// intake rate from seq gaps (accepted leak).
     ///
     /// İstemci imlecini (`server_cursors` tablosu) ancak öğeyi İŞLEDİKTEN
     /// SONRA ilerletir. Yani garanti "en az bir kez"dir, "en fazla bir kez"
@@ -705,6 +719,30 @@ pub fn register_signing_input(mailbox: &str, enrollment_id: &[u8], server_peer_i
     signing_input(b"p2pmsg-v0.5-server-register", &[mailbox.as_bytes(), enrollment_id, server_peer_id.as_bytes()])
 }
 
+/// Start of every id made by `key_bound_mailbox_id`. The server checks the
+/// key of a `Register` proof for these ids only.
+pub const KEY_BOUND_MAILBOX_PREFIX: &str = "mk_";
+
+/// The hash of a `MailboxProof` key pair that the server keeps per reader.
+/// Both keys have a fixed length once the signature verifies, so the plain
+/// concatenation is unambiguous.
+pub fn mailbox_key_hash(pk: &[u8], pk_pq: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"p2pmsg-v0.7-mailbox-key");
+    h.update(pk);
+    h.update(pk_pq);
+    h.finalize().into()
+}
+
+/// The id of a mailbox whose one proof key hashes to `key_hash`
+/// (`mailbox_key_hash`). Both ends of a session (or of a call relay) derive
+/// the key from the secret they share, so the sender computes the id too,
+/// and the server can check that a proof is by the mailbox's own key.
+pub fn key_bound_mailbox_id(key_hash: &[u8]) -> String {
+    format!("{}{}", KEY_BOUND_MAILBOX_PREFIX, hex::encode(&key_hash[..key_hash.len().min(16)]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,7 +750,8 @@ mod tests {
     #[test]
     fn blob_id_is_a_safe_hash_of_the_upload_secret() {
         let id = blob_id_for_upload_secret(&[7u8; BLOB_UPLOAD_SECRET_LEN]).unwrap();
-        assert_eq!(id.len(), 32);
+        assert_eq!(id.len(), 48);
+        assert!(id.starts_with(&"07".repeat(BLOB_TAG_LEN)));
         assert!(id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
         assert_ne!(id, blob_id_for_upload_secret(&[8u8; BLOB_UPLOAD_SECRET_LEN]).unwrap());
         // The id itself is no secret: sent back as one it names another blob.
@@ -859,20 +898,27 @@ where
 /// belirgin biçimde altında kalıyor.
 pub const MAX_BLOB_CHUNK_BYTES: usize = 768 * 1024;
 
-/// Length of a blob upload secret (`BlobPut.upload_secret`).
-pub const BLOB_UPLOAD_SECRET_LEN: usize = 16;
+/// Length of a blob upload secret (`BlobPut.upload_secret`): an 8-byte
+/// author tag, shown in the id, then 16 secret bytes.
+pub const BLOB_UPLOAD_SECRET_LEN: usize = 24;
 
-/// The blob (= file) id an upload secret stands for: 32 lower-case hex
-/// characters. The sender picks the secret, names only this id in its
+/// Length of the author tag at the start of an upload secret.
+pub const BLOB_TAG_LEN: usize = 8;
+
+/// The blob (= file) id an upload secret stands for: 48 lower-case hex
+/// characters, the secret's author tag in the clear and then a hash of the
+/// whole secret. The sender picks the secret, names only this id in its
 /// `FileOffer`, and proves ownership on the server with the secret itself.
+/// The tag lets a group member check that a file id belongs to the member
+/// who offers it (core `group_msg_tag`); the server does not look at it.
 /// `None` for a secret of the wrong length.
 pub fn blob_id_for_upload_secret(upload_secret: &[u8]) -> Option<String> {
     use sha2::{Digest, Sha256};
     if upload_secret.len() != BLOB_UPLOAD_SECRET_LEN {
         return None;
     }
-    let hash = Sha256::new_with_prefix(b"typeon-blob-id-v1").chain_update(upload_secret).finalize();
-    Some(hex::encode(&hash[..16]))
+    let hash = Sha256::new_with_prefix(b"typeon-blob-id-v2").chain_update(upload_secret).finalize();
+    Some(format!("{}{}", hex::encode(&upload_secret[..BLOB_TAG_LEN]), hex::encode(&hash[..16])))
 }
 
 #[cfg(test)]

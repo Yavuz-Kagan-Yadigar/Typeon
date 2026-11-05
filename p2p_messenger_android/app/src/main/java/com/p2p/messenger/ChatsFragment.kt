@@ -463,7 +463,10 @@ class ChatsFragment : Fragment() {
     private fun <T> offMain(work: () -> T, done: (T) -> Unit) {
         runOnWorker {
             // A detached fragment throws from getString: drop the result.
-            val result = try { work() } catch (e: Exception) { return@runOnWorker }
+            val result = try { work() } catch (e: Exception) {
+                android.util.Log.w("ChatsFragment", "background call failed", e)
+                return@runOnWorker
+            }
             refreshHandler.post { if (isAdded && view != null) done(result) }
         }
     }

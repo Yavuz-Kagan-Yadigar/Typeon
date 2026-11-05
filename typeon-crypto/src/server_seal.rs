@@ -97,24 +97,26 @@ fn open(mut key: [u8; 32], aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>, String>
 // Kimlik körleştirme
 // ---------------------------------------------------------------------------
 
-/// The server mailbox of the session between two devices (`mb_<hex>`), and the
-/// secret its `Register` proof is made from (`mailbox_proof_seeds`).
+/// The secret of the server mailbox of the session between two devices:
+/// both ends derive that mailbox's proof key from it
+/// (`mailbox_proof_seeds`), and its id is made from that key
+/// (`server_proto::key_bound_mailbox_id`), so the server takes no other key.
 ///
 /// From the static X25519 agreement of the two devices' long-term KEM keys, so
 /// it does not change with the ratchet (C2: a mailbox made from the rotating
 /// root key left mail sealed two rotations back in a mailbox nobody fetched
-/// any more). Both ends get the same pair: the fingerprints go in sorted. The
-/// seal key still comes from the root key (`seal_envelope`).
+/// any more). Both ends get the same secret: the fingerprints go in sorted.
+/// The seal key still comes from the root key (`seal_envelope`).
 // ponytail: X25519 only (there is no static ML-KEM agreement). A quantum
 // attacker holding both devices' public KEM keys (not given to the server)
-// could compute the id and register as a reader; the seal key is from the
-// hybrid root key, so it still reads nothing.
-pub fn session_mailbox(
+// could compute the secret and register as a reader; the seal key is from
+// the hybrid root key, so it still reads nothing.
+pub fn session_mailbox_secret(
     own_x25519_secret: &x25519_dalek::StaticSecret,
     peer_x25519_pubkey: &[u8],
     own_fp: &str,
     peer_fp: &str,
-) -> Result<(String, [u8; 32]), String> {
+) -> Result<[u8; 32], String> {
     let pk: [u8; 32] = peer_x25519_pubkey.try_into().map_err(|_| "Bad X25519 public key".to_string())?;
     let shared = own_x25519_secret.diffie_hellman(&x25519_dalek::PublicKey::from(pk));
     if !shared.was_contributory() {
@@ -122,9 +124,7 @@ pub fn session_mailbox(
     }
     let (a, b) = if own_fp <= peer_fp { (own_fp, peer_fp) } else { (peer_fp, own_fp) };
     let info = [&b"p2pmsg-v0.6-session-mailbox:"[..], a.as_bytes(), b"\0", b.as_bytes()].concat();
-    let secret: [u8; 32] = derive(shared.as_bytes(), &info)?;
-    let id: [u8; 16] = derive(&secret, b"p2pmsg-v0.6-session-mailbox-id")?;
-    Ok((format!("mb_{}", hex::encode(id)), secret))
+    derive(shared.as_bytes(), &info)
 }
 
 /// The first-contact mailbox of `device_fingerprint` for the holders of
@@ -136,23 +136,21 @@ pub fn first_contact_mailbox_id(secret: &[u8], device_fingerprint: &str) -> Stri
     format!("mb_{}", hex::encode(id))
 }
 
-/// The relay address of one direction of a call: from the key the sender
-/// seals that receiver's media with, which only those two devices hold.
-pub fn relay_mailbox_id(pair_key: &[u8]) -> String {
-    let id: [u8; 16] = derive(pair_key, b"p2pmsg-v0.5-call-relay-mailbox")
-        .expect("HKDF expand 16 bayt için asla başarısız olmaz");
-    format!("mb_{}", hex::encode(id))
-}
-
 /// Seeds (Ed25519, ML-DSA-87) of the key that signs `Register` for `mailbox`
 /// (`server_proto::MailboxProof`). `secret` is what the readers of the box
-/// hold and nobody else: the `session_mailbox` secret of a session box (both
+/// hold and nobody else: the `session_mailbox_secret` of a session box (both
 /// devices of the pair), the pair key of a relay box, and for a first-contact
 /// box the reading device's own Ed25519 signing key (whoever holds the code
 /// computes the id, but cannot make its proof). It is never the key that
 /// opens the box's envelopes.
+///
+/// A key-bound id (`server_proto::KEY_BOUND_MAILBOX_PREFIX`, session and
+/// relay boxes) is made from these seeds, so it is not mixed into them: its
+/// secret already belongs to that one box. Pass the prefix alone to get the
+/// seeds before the id is known.
 pub fn mailbox_proof_seeds(secret: &[u8], mailbox: &str) -> Result<([u8; 32], [u8; 32]), String> {
-    let info = |tag: &[u8]| [tag, mailbox.as_bytes()].concat();
+    let label = if mailbox.starts_with(crate::server_proto::KEY_BOUND_MAILBOX_PREFIX) { "" } else { mailbox };
+    let info = |tag: &[u8]| [tag, label.as_bytes()].concat();
     Ok((
         derive(secret, &info(b"p2pmsg-v0.5-mailbox-proof-ed25519:"))?,
         derive(secret, &info(b"p2pmsg-v0.5-mailbox-proof-mldsa:"))?,
@@ -403,12 +401,14 @@ mod tests {
         let c = x25519_dalek::StaticSecret::random_from_rng(&mut OsRng);
         let pk = |s: &x25519_dalek::StaticSecret| x25519_dalek::PublicKey::from(s).as_bytes().to_vec();
         let (fa, fb) = ("a".repeat(64), "b".repeat(64));
-        let ab = session_mailbox(&a, &pk(&b), &fa, &fb).unwrap();
-        assert_eq!(ab, session_mailbox(&b, &pk(&a), &fb, &fa).unwrap(), "iki uc ayni kutuyu bulmali");
-        assert_ne!(ab.0, session_mailbox(&a, &pk(&c), &fa, &fb).unwrap().0);
-        assert!(ab.0.starts_with("mb_") && !ab.0.contains(&fa));
-        assert!(session_mailbox(&a, &[0u8; 32], &fa, &fb).is_err(), "sifir nokta reddedilmeli");
-        assert!(session_mailbox(&a, &[1u8; 31], &fa, &fb).is_err());
+        let ab = session_mailbox_secret(&a, &pk(&b), &fa, &fb).unwrap();
+        assert_eq!(ab, session_mailbox_secret(&b, &pk(&a), &fb, &fa).unwrap(), "iki uc ayni kutuyu bulmali");
+        assert_ne!(ab, session_mailbox_secret(&a, &pk(&c), &fa, &fb).unwrap());
+        // The seeds of a key-bound id do not depend on the id itself.
+        assert_eq!(mailbox_proof_seeds(&ab, "mk_").unwrap(), mailbox_proof_seeds(&ab, "mk_0123").unwrap());
+        assert_ne!(mailbox_proof_seeds(&ab, "mk_").unwrap(), mailbox_proof_seeds(&ab, "mb_0123").unwrap());
+        assert!(session_mailbox_secret(&a, &[0u8; 32], &fa, &fb).is_err(), "sifir nokta reddedilmeli");
+        assert!(session_mailbox_secret(&a, &[1u8; 31], &fa, &fb).is_err());
     }
 
     #[test]

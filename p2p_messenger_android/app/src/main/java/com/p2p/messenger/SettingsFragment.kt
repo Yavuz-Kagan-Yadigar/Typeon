@@ -508,27 +508,61 @@ class SettingsFragment : Fragment() {
             // -1 or an exception: nothing was announced. Wiping now would
             // destroy the only keys that can ever announce it, and contacts,
             // groups and sibling devices would never learn of the deletion.
-            val announced = try {
-                val sent = P2PLib.deleteAccount()
+            val sent = try { P2PLib.deleteAccount() } catch (e: Exception) { -1 }
+            waitAndWipeAccount(ctx, progress, sent)
+        }.start()
+    }
+
+    /** Runs on a background thread. Waits for the deletion notices to be
+     *  acknowledged; if some are still unacknowledged at the deadline, asks the
+     *  user whether to keep waiting or delete anyway (the wipe drops the resend queue). */
+    private fun waitAndWipeAccount(ctx: android.content.Context, progress: AlertDialog, sent: Int) {
+        var pending = 0
+        if (sent >= 0) {
+            try {
                 val deadline = android.os.SystemClock.elapsedRealtime() + ACCOUNT_DELETE_WAIT_MS
-                while (sent >= 0 && android.os.SystemClock.elapsedRealtime() < deadline) {
-                    if (P2PLib.accountDeletionPending() == 0) break
+                while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                    pending = P2PLib.accountDeletionPending()
+                    if (pending == 0) break
                     Thread.sleep(500)
                 }
-                sent >= 0
             } catch (e: Exception) {
-                false
             }
-            if (announced) com.p2p.messenger.util.LocalWipe.wipe(ctx)
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                try { progress.dismiss() } catch (e: Exception) {}
-                if (!announced) {
-                    Toast.makeText(ctx, R.string.error_delete_account_failed, Toast.LENGTH_LONG).show()
+        }
+        val main = android.os.Handler(android.os.Looper.getMainLooper())
+        if (sent >= 0 && pending > 0) {
+            main.post {
+                val act = activity
+                if (act == null || !isAdded) {
+                    Thread { finishAccountWipe(ctx, progress, true) }.start()
                     return@post
                 }
-                AppRestarter.restart(ctx)
+                AlertDialog.Builder(act)
+                    .setMessage(getString(R.string.delete_account_pending_message, pending))
+                    .setCancelable(false)
+                    .setPositiveButton(R.string.delete_account_keep_waiting) { _, _ ->
+                        Thread { waitAndWipeAccount(ctx, progress, sent) }.start()
+                    }
+                    .setNegativeButton(R.string.delete_account_anyway) { _, _ ->
+                        Thread { finishAccountWipe(ctx, progress, true) }.start()
+                    }
+                    .show()
             }
-        }.start()
+            return
+        }
+        finishAccountWipe(ctx, progress, sent >= 0)
+    }
+
+    private fun finishAccountWipe(ctx: android.content.Context, progress: AlertDialog, announced: Boolean) {
+        if (announced) com.p2p.messenger.util.LocalWipe.wipe(ctx)
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            try { progress.dismiss() } catch (e: Exception) {}
+            if (!announced) {
+                Toast.makeText(ctx, R.string.error_delete_account_failed, Toast.LENGTH_LONG).show()
+                return@post
+            }
+            AppRestarter.restart(ctx)
+        }
     }
 
     private fun performLogout() {
@@ -1154,12 +1188,12 @@ class SettingsFragment : Fragment() {
                 app.contentResolver.openInputStream(uri)?.use { input ->
                     tempFile.outputStream().use { output -> input.copyTo(output, bufferSize = 64 * 1024) }
                 } ?: throw java.io.IOException("Dosya açılamadı")
+                // Not a readable image: the catch below shows the error toast.
                 val compressed = ImagePreview.compressFile(tempFile, WALLPAPER_MAX_DIMENSION, WALLPAPER_JPEG_QUALITY)
-                if (compressed != null) {
-                    ThemePrefs.chatWallpaperFile(app).writeBytes(compressed)
-                    // New image: rebuild the processed copy with the current slider values.
-                    ThemePrefs.regenerateProcessedWallpaper(app)
-                }
+                    ?: throw java.io.IOException("not an image")
+                ThemePrefs.chatWallpaperFile(app).writeBytes(compressed)
+                // New image: rebuild the processed copy with the current slider values.
+                ThemePrefs.regenerateProcessedWallpaper(app)
                 withContext(Dispatchers.Main) {
                     view?.let { v ->
                         val thumb = v.findViewById<ImageView>(R.id.chat_wallpaper_thumb)
@@ -1202,7 +1236,11 @@ class SettingsFragment : Fragment() {
         // Copies up to 32 MB: off the main thread.
         val ctx = requireContext().applicationContext
         lifecycleScope.launch {
-            val displayName = withContext(Dispatchers.IO) { copyPickedFont(ctx, uri) } ?: return@launch
+            val displayName = withContext(Dispatchers.IO) { copyPickedFont(ctx, uri) }
+            if (displayName == null) {
+                Toast.makeText(ctx, R.string.error_attachment_open_failed, Toast.LENGTH_SHORT).show()
+                return@launch
+            }
             val id = displayName.first
             val file = ThemePrefs.customFontFile(ctx, id)
             val name = displayName.second

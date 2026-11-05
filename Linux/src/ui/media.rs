@@ -42,6 +42,13 @@ pub fn open(app: &Rc<App>, path: &str, mime: &str, title: &str) {
         return;
     }
 
+    // The claimed type is the sender's word. A playlist posing as a video would
+    // make GStreamer fetch its URLs over the clearnet, so sniff the content.
+    if !util::is_image(mime) && !playable_media(path) {
+        save_copy(app, path, title);
+        return;
+    }
+
     let Some(parent) = app.window() else { return };
 
     let header = adw::HeaderBar::new();
@@ -68,7 +75,7 @@ pub fn open(app: &Rc<App>, path: &str, mime: &str, title: &str) {
     }
     header.pack_end(&save);
 
-    if util::is_image(mime) {
+    if util::is_image(mime) && image_ok(path).is_some() {
         let copy = gtk::Button::builder()
             .icon_name("edit-copy-symbolic")
             .tooltip_text("Copy image")
@@ -111,6 +118,34 @@ pub fn open(app: &Rc<App>, path: &str, mime: &str, title: &str) {
         .present();
 }
 
+/// Image size if the file is a common format within the pixel limit. Reads the
+/// header only; used by both the viewer and the Copy button.
+fn image_ok(path: &str) -> Option<(i32, i32)> {
+    gdk_pixbuf::Pixbuf::file_info(path).and_then(|(format, width, height)| {
+        let known = matches!(format.name().as_deref(), Some("jpeg" | "png" | "gif" | "webp"));
+        (known && width as i64 * height as i64 <= MAX_IMAGE_PIXELS).then_some((width, height))
+    })
+}
+
+/// True only for plain container formats (MP4/MOV/M4A, WebM/MKV, Ogg, WAV,
+/// FLAC, MP3). Anything else, such as an HLS playlist, must not reach GStreamer.
+pub fn playable_media(path: &str) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 12];
+    let n = match std::fs::File::open(path).and_then(|mut f| f.read(&mut head)) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    let h = &head[..n];
+    (n >= 8 && &h[4..8] == b"ftyp")
+        || h.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
+        || h.starts_with(b"OggS")
+        || (n >= 12 && h.starts_with(b"RIFF") && &h[8..12] == b"WAVE")
+        || h.starts_with(b"fLaC")
+        || h.starts_with(b"ID3")
+        || (n >= 2 && h[0] == 0xFF && h[1] & 0xE0 == 0xE0)
+}
+
 /// A photo, scrollable to pan and mouse-wheel-scrollable to zoom.
 ///
 /// The picture is given an explicit size in image pixels scaled by the
@@ -123,11 +158,7 @@ fn image_pane(path: &str) -> gtk::Widget {
     // Header only, nothing is decoded here. The file is the sender's: the
     // decoder is picked from its content, so only the common formats are let
     // through, and a canvas large enough to exhaust memory is refused.
-    let natural_size = gdk_pixbuf::Pixbuf::file_info(path).and_then(|(format, width, height)| {
-        let known = matches!(format.name().as_deref(), Some("jpeg" | "png" | "gif" | "webp"));
-        (known && width as i64 * height as i64 <= MAX_IMAGE_PIXELS).then_some((width, height))
-    });
-    let Some((natural_w, natural_h)) = natural_size else {
+    let Some((natural_w, natural_h)) = image_ok(path) else {
         return adw::StatusPage::builder()
             .icon_name("dialog-warning-symbolic")
             .title("Cannot show this image here")

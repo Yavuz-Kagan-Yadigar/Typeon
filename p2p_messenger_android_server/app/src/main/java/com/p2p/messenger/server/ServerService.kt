@@ -313,7 +313,8 @@ class ServerService : Service() {
                 // Tor parametresi yok — onion service her zaman açık
                 // (bkz. ServerLib.startServer notu).
                 // DB encryption at rest: fail closed, never fall back to a plain DB.
-                val keyRes = ServerLib.setDbKey(DbKey.get(this))
+                val dbKey = DbKey.get(this)
+                val keyRes = try { ServerLib.setDbKey(dbKey) } finally { dbKey.fill(0) }
                 if (keyRes.startsWith("Error:")) throw java.io.IOException(keyRes)
                 ServerLib.startServer(
                     dataDir(this).absolutePath,
@@ -438,12 +439,15 @@ class ServerService : Service() {
      * bırakmak için. What the server already stores is added back: half of
      * the free space alone shrank on every start as the server filled, fell
      * below current usage, and then every deposit was refused with space left.
-     * ponytail: counts the blob dir only; mail and archive live in the
-     * database on internal storage and are small next to blobs.
+     * Free space is the smaller of the blob dir's and the internal data
+     * dir's volume: mail and archive live in the database on internal storage.
      */
     private fun storageBudgetBytes(blobs: java.io.File): Long {
         return try {
-            val free = android.os.StatFs(blobs.absolutePath).availableBytes
+            val free = minOf(
+                android.os.StatFs(blobs.absolutePath).availableBytes,
+                android.os.StatFs(dataDir(this).absolutePath).availableBytes
+            )
             val used = blobs.listFiles()?.sumOf { it.length() } ?: 0L
             // At least 1: 0 means "no budget" to the native side.
             (used + free / 2).coerceAtMost(8L * 1024 * 1024 * 1024).coerceAtLeast(1L)

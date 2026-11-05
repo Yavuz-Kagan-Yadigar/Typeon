@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use jni::objects::{JClass, JString};
+use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jboolean, jstring};
 use jni::JNIEnv;
 use log::info;
@@ -86,18 +86,36 @@ fn guarded<'local>(env: &mut JNIEnv<'local>, body: impl FnOnce(JNIEnv<'local>) -
         })
 }
 
-/// SQLCipher key (64 hex) for the server DB; call before `startServer`.
-/// Empty string = plain DB. Returns "ok" or "Error: ...".
+/// SQLCipher raw key (32 bytes) for the server DB; call before `startServer`.
+/// Empty array = plain DB. Returns "ok" or "Error: ...".
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_setDbKey<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
-    key: JString<'local>,
+    key: JByteArray<'local>,
 ) -> jstring {
     guarded(&mut env, |mut env| {
-        let k = jstr(&mut env, &key);
-        let r = crate::store::set_db_key(if k.is_empty() { None } else { Some(k) });
-        out(&mut env, r.map(|_| "ok".to_string()).unwrap_or_else(|e| format!("Error: {e}")))
+        // A failed read is an error, never "empty = plain DB".
+        let raw = match env.convert_byte_array(&key) {
+            Ok(v) => zeroize::Zeroizing::new(v),
+            Err(e) => {
+                let _ = env.exception_clear();
+                return out(&mut env, format!("Error: DB key: {e}"));
+            }
+        };
+        let r = if raw.is_empty() {
+            crate::store::set_db_key(None);
+            "ok".to_string()
+        } else {
+            match <[u8; 32]>::try_from(raw.as_slice()) {
+                Ok(k) => {
+                    crate::store::set_db_key(Some(zeroize::Zeroizing::new(k)));
+                    "ok".to_string()
+                }
+                Err(_) => "Error: DB key must be 32 bytes".to_string(),
+            }
+        };
+        out(&mut env, r)
     })
 }
 

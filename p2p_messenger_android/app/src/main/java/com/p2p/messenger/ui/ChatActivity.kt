@@ -782,6 +782,19 @@ class ChatActivity : AppCompatActivity() {
             recorder.setAudioEncodingBitRate(64_000)
             recorder.setAudioSamplingRate(44_100)
             recorder.setOutputFile(file.absolutePath)
+            // Ceiling: 10 minutes. The recorder stops itself at the ceiling and
+            // the app then takes the SAME send/discard decision it already takes
+            // when a recording ends (ACTION_UP).
+            recorder.setMaxDuration(10 * 60 * 1000)
+            recorder.setOnInfoListener { _, what, _ ->
+                if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) {
+                    // The info callback is not guaranteed to arrive on the main
+                    // thread: the decision (and its UI work) runs there.
+                    recordingHandler.post {
+                        if (mediaRecorder === recorder) finishVoiceRecording(send = !recordingCancelled)
+                    }
+                }
+            }
             recorder.prepare()
             recorder.start()
         } catch (e: Exception) {
@@ -841,41 +854,45 @@ class ChatActivity : AppCompatActivity() {
      *  `FileOffer.duration_ms`. */
     private fun sendVoiceMessage(file: File, durationMs: Long, caption: String = "") {
         lifecycleScope.launch(Dispatchers.IO) {
-            val result = try {
-                P2PLib.prepareAndSendFile(
-                    peerDeviceFingerprint, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
-                    caption, "", ""
-                )
-            } catch (e: Exception) {
-                "Error: ${e.message}"
-            }
-            withContext(Dispatchers.Main) {
-                if (result.startsWith("Error:")) {
-                    Toast.makeText(this@ChatActivity, com.p2p.messenger.util.coreErrorText(this@ChatActivity, result), Toast.LENGTH_SHORT).show()
-                } else {
-                    val obj = JSONObject(result)
-                    adapter.addMessage(
-                        SimpleChatAdapter.Item(
-                            messageId = obj.optString("message_id"),
-                            text = "",
-                            isMine = true,
-                            caption = caption,
-                            attachment = SimpleChatAdapter.AttachmentInfo(
-                                fileId = obj.optString("message_id"),
-                                fileName = file.name,
-                                mimeType = "audio/mp4",
-                                totalSize = file.length(),
-                                status = SimpleChatAdapter.AttachmentStatus.COMPLETE,
-                                bytesDone = file.length(),
-                                durationMs = durationMs.toInt()
+            // The copy is deleted even if the screen closes while sending.
+            try {
+                val result = try {
+                    P2PLib.prepareAndSendFile(
+                        peerDeviceFingerprint, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
+                        caption, "", ""
+                    )
+                } catch (e: Exception) {
+                    "Error: ${e.message}"
+                }
+                withContext(Dispatchers.Main) {
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(this@ChatActivity, com.p2p.messenger.util.coreErrorText(this@ChatActivity, result), Toast.LENGTH_SHORT).show()
+                    } else {
+                        val obj = JSONObject(result)
+                        adapter.addMessage(
+                            SimpleChatAdapter.Item(
+                                messageId = obj.optString("message_id"),
+                                text = "",
+                                isMine = true,
+                                caption = caption,
+                                attachment = SimpleChatAdapter.AttachmentInfo(
+                                    fileId = obj.optString("message_id"),
+                                    fileName = file.name,
+                                    mimeType = "audio/mp4",
+                                    totalSize = file.length(),
+                                    status = SimpleChatAdapter.AttachmentStatus.COMPLETE,
+                                    bytesDone = file.length(),
+                                    durationMs = durationMs.toInt()
+                                )
                             )
                         )
-                    )
-                    resolveReplyLabels()
-                    scrollToBottomNow()
+                        resolveReplyLabels()
+                        scrollToBottomNow()
+                    }
                 }
+            } finally {
+                file.delete()
             }
-            file.delete()
         }
     }
 
@@ -945,8 +962,10 @@ class ChatActivity : AppCompatActivity() {
                     Toast.makeText(this@ChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
                     return@withContext
                 }
+                var created: MediaPlayer? = null
                 try {
                     val player = MediaPlayer()
+                    created = player
                     player.setDataSource(path)
                     player.setOnCompletionListener {
                         voicePlaybackHandler.removeCallbacks(voicePlaybackTickRunnable)
@@ -966,6 +985,8 @@ class ChatActivity : AppCompatActivity() {
                     voicePlaybackHandler.post(voicePlaybackTickRunnable)
                     adapter.updateVoicePlayback(attachment.fileId, true, startPositionMs, voicePlaybackSpeed)
                 } catch (e: Exception) {
+                    // A corrupt file: free the native decoder, it was never stored.
+                    created?.release()
                     Toast.makeText(this@ChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
                 }
             }
@@ -1716,8 +1737,12 @@ class ChatActivity : AppCompatActivity() {
                         )
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
-                    AppLock.beginTrustedExcursion()
-                    startActivity(Intent.createChooser(intent, getString(R.string.lbl_open_with_chooser)))
+                    com.p2p.messenger.util.confirmExternalOpen(this@ChatActivity, intent.type) {
+                        AppLock.beginTrustedExcursion()
+                        try { startActivity(Intent.createChooser(intent, getString(R.string.lbl_open_with_chooser))) } catch (e: Exception) {
+                            Toast.makeText(this@ChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
+                        }
+                    }
                 } catch (e: Exception) {
                     Toast.makeText(this@ChatActivity, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
                 }
@@ -1821,8 +1846,12 @@ class ChatActivity : AppCompatActivity() {
                 setDataAndType(uri, mimeType)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            AppLock.beginTrustedExcursion()
-            startActivity(intent)
+            com.p2p.messenger.util.confirmExternalOpen(this, intent.type) {
+                AppLock.beginTrustedExcursion()
+                try { startActivity(intent) } catch (e: Exception) {
+                    Toast.makeText(this, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
+                }
+            }
         } catch (e: Exception) {
             Toast.makeText(this, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
         }

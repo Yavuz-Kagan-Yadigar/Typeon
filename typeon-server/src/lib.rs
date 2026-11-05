@@ -47,8 +47,7 @@ use futures::StreamExt as _;
 use libp2p::request_response::{self, ProtocolSupport, ResponseChannel};
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
-use libp2p::{identify, kad, noise, relay, tcp, yamux, PeerId, StreamProtocol, Swarm};
-use libp2p::kad::store::MemoryStore;
+use libp2p::{identify, noise, relay, tcp, yamux, PeerId, StreamProtocol, Swarm};
 use log::{debug, error, info, warn};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -102,6 +101,8 @@ const BLOB_CHUNK_MIN_CHARGE: u64 = 64;
 const RELAY_BYTES_PER_WINDOW: usize = 8 * 1024 * 1024;
 const RELAY_WINDOW_MS: u64 = 10_000;
 /// How long the summed store size is reused, see `total_budget_exceeded`.
+/// The total budget is therefore a soft ceiling: it can overshoot by what
+/// arrives within one 5 s cache window.
 const TOTAL_CACHE_MS: u64 = 5_000;
 /// What a sender may relay per window to a listener that sends nothing back:
 /// enough for the once-a-second state packets that start a call.
@@ -154,6 +155,11 @@ const ENROLL_VERIFIES_PER_MINUTE: u32 = 120;
 /// One peer's share of `ENROLL_VERIFIES_PER_MINUTE`: a device enrolls or
 /// rebinds once, so a few retries cover it.
 const ENROLL_VERIFIES_PER_PEER: u32 = 4;
+/// `Rebind` checks per `RATE_WINDOW_MS`, server-wide, apart from `Enroll`'s
+/// pool: a bad-signature `Enroll` flood (the join code is public) must not
+/// lock enrolled devices out of rebinding. `Rebind` needs a live enrollment
+/// first, so fresh PeerIds cannot drain this one.
+const REBIND_VERIFIES_PER_MINUTE: u32 = 120;
 /// `Register` proof checks per `RATE_WINDOW_MS`, server-wide. A pool of its
 /// own: a proof flood from enrolled peers cannot starve `Enroll`/`Rebind`.
 const REGISTER_VERIFIES_PER_MINUTE: u32 = 256;
@@ -276,12 +282,13 @@ pub struct ServerConfig {
     /// kimlik/Tor durumu HER ZAMAN dahili depolamada kalır, yalnızca
     /// bloblar taşınır.
     pub blob_dir: PathBuf,
-    /// Kad'a Server modunda katıl + Circuit Relay v2 hizmeti ver. Kapalıysa
+    /// Serve Circuit Relay v2 (the server never runs Kademlia). Kapalıysa
     /// sunucu SADECE posta kutusu işi yapar.
     pub node_mode: bool,
     pub server_name: String,
     pub limits: ServerLimits,
     /// Sunucunun kullanabileceği TOPLAM disk bütçesi (bkz. defter #23).
+    /// Soft ceiling: it can overshoot by one 5 s cache window (`TOTAL_CACHE_MS`).
     /// `None` = sınırsız; the default is 64 x the per-device quotas. Android
     /// sunucu uygulaması bunu cihazın gerçek boş alanından türetip veriyor.
     pub total_storage_budget_bytes: Option<u64>,
@@ -319,7 +326,6 @@ pub struct ServerBehaviour {
     /// Dosya parçaları. `Inbound`: sunucu sadece SERVİS eder, hiç istemez.
     file_chunks: request_response::cbor::Behaviour<FileChunkRequest, FileChunkResponse>,
     identify: identify::Behaviour,
-    kad: kad::Behaviour<MemoryStore>,
     limits: libp2p::connection_limits::Behaviour,
     /// Node modu açıkken röle hizmeti. `Toggle::from(None)` KASITLI:
     /// libp2p-relay'in HOP handler'ı `Config`'e bakmadan protokolü her zaman
@@ -480,6 +486,16 @@ pub struct ServerCore {
     verify_window: (u64, u32),
     /// The same for `REGISTER_VERIFIES_PER_MINUTE`.
     register_verify_window: (u64, u32),
+    /// The same for `REBIND_VERIFIES_PER_MINUTE`.
+    rebind_verify_window: (u64, u32),
+}
+
+/// The server-wide signature check pools, see `verify_budget`.
+#[derive(Clone, Copy)]
+enum VerifyPool {
+    Enroll,
+    Rebind,
+    Register,
 }
 
 /// What the embedding app tells the running loop (Android JNI).
@@ -630,7 +646,6 @@ impl ServerCore {
                 )
                 // Default 5 min per client wakes every idle phone's LTE radio.
                 .with_interval(Duration::from_secs(3600)));
-                let kad = kad::Behaviour::new(peer_id, MemoryStore::new(peer_id));
                 let limits = libp2p::connection_limits::Behaviour::new(
                     libp2p::connection_limits::ConnectionLimits::default()
                         .with_max_pending_incoming(Some(MAX_INBOUND_CONNECTIONS))
@@ -643,18 +658,13 @@ impl ServerCore {
                 } else {
                     None.into()
                 };
-                ServerBehaviour { server_rpc, file_chunks, identify, kad, limits, relay, stream: libp2p_stream::Behaviour::new() }
+                ServerBehaviour { server_rpc, file_chunks, identify, limits, relay, stream: libp2p_stream::Behaviour::new() }
             })
             .map_err(|e| e.to_string())?
             // Çekirdekteki 600 sn ile aynı gerekçe: sessiz dönemlerde
             // bağlantıyı canlı tut, Tor devrelerini boşuna yeniden kurma.
             .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(600)))
             .build();
-
-        swarm
-            .behaviour_mut()
-            .kad
-            .set_mode(Some(if node_mode { kad::Mode::Server } else { kad::Mode::Client }));
 
         // Onion-only (deanon fix, istemciyle AYNI, bkz. p2p_messenger::tor
         // `DialReject`): `0.0.0.0` DEĞİL `127.0.0.1` — dinleyici yalnızca
@@ -697,6 +707,7 @@ impl ServerCore {
             total_cache: std::cell::Cell::new((0, 0)),
             verify_window: (0, 0),
             register_verify_window: (0, 0),
+            rebind_verify_window: (0, 0),
         })
     }
 
@@ -1019,7 +1030,7 @@ impl ServerCore {
         if !ct_eq(&client_challenge, &challenge) {
             return ServerResponse::Err(ServerErrorCode::BadSignature);
         }
-        if !self.verify_budget(peer, false, 1) {
+        if !self.verify_budget(peer, VerifyPool::Enroll, 1) {
             self.stats.rejected += 1;
             return ServerResponse::Err(ServerErrorCode::RateLimited);
         }
@@ -1154,7 +1165,7 @@ impl ServerCore {
         if self.store.is_key_blocked(&existing.enroll_pk) {
             return ServerResponse::Err(ServerErrorCode::Revoked);
         }
-        if !self.verify_budget(peer, false, 1) {
+        if !self.verify_budget(peer, VerifyPool::Rebind, 1) {
             self.stats.rejected += 1;
             return ServerResponse::Err(ServerErrorCode::RateLimited);
         }
@@ -1272,7 +1283,7 @@ impl ServerCore {
                 // Each proof is a hybrid verify: a server-wide budget, or 64
                 // enrollments x 64 proofs pin the CPU.
                 let checks = proofs.iter().filter(|p| add.contains(&p.mailbox)).count() as u32;
-                if checks > 0 && !self.verify_budget(peer, true, checks) {
+                if checks > 0 && !self.verify_budget(peer, VerifyPool::Register, checks) {
                     return ServerResponse::Err(ServerErrorCode::RateLimited);
                 }
                 let me = self.swarm.local_peer_id().to_string();
@@ -1283,7 +1294,7 @@ impl ServerCore {
                         let input = server_proto::register_signing_input(&p.mailbox, &e.enrollment_id, &me);
                         verify_hybrid(&p.pk, &p.pk_pq, &input, &p.sig, &p.sig_pq)
                     })
-                    .map(|p| (p.mailbox.clone(), mailbox_key_hash(&p.pk, &p.pk_pq)))
+                    .map(|p| (p.mailbox.clone(), server_proto::mailbox_key_hash(&p.pk, &p.pk_pq).to_vec()))
                     .collect();
                 // A proof that did not verify is a refusal, not `proof_needed`:
                 // the client would send the same bytes again.
@@ -1942,9 +1953,9 @@ impl ServerCore {
         entry.requests_in_window <= limit
     }
 
-    /// `register`: `Register` proofs (`REGISTER_VERIFIES_PER_MINUTE`), else
-    /// `Enroll`/`Rebind` (`ENROLL_VERIFIES_PER_MINUTE`).
-    fn verify_budget(&mut self, peer: PeerId, register: bool, checks: u32) -> bool {
+    /// Charges `checks` to the peer's share and to `pool`'s server-wide
+    /// window. `Enroll` and `Rebind` share the per-peer share, not the pool.
+    fn verify_budget(&mut self, peer: PeerId, pool: VerifyPool, checks: u32) -> bool {
         let now = mono_ms();
         let conn = self.conns.entry(peer).or_insert(ConnState {
             challenge: None,
@@ -1955,10 +1966,10 @@ impl ServerCore {
             enroll_verifies: (0, 0),
             register_verifies: (0, 0),
         });
-        if register {
-            charge_verify(&mut conn.register_verifies, &mut self.register_verify_window, now, checks, REGISTER_VERIFIES_PER_PEER, REGISTER_VERIFIES_PER_MINUTE)
-        } else {
-            charge_verify(&mut conn.enroll_verifies, &mut self.verify_window, now, checks, ENROLL_VERIFIES_PER_PEER, ENROLL_VERIFIES_PER_MINUTE)
+        match pool {
+            VerifyPool::Register => charge_verify(&mut conn.register_verifies, &mut self.register_verify_window, now, checks, REGISTER_VERIFIES_PER_PEER, REGISTER_VERIFIES_PER_MINUTE),
+            VerifyPool::Enroll => charge_verify(&mut conn.enroll_verifies, &mut self.verify_window, now, checks, ENROLL_VERIFIES_PER_PEER, ENROLL_VERIFIES_PER_MINUTE),
+            VerifyPool::Rebind => charge_verify(&mut conn.enroll_verifies, &mut self.rebind_verify_window, now, checks, ENROLL_VERIFIES_PER_PEER, REBIND_VERIFIES_PER_MINUTE),
         }
     }
 
@@ -2162,14 +2173,6 @@ fn request_cost(req: &ServerRequest) -> u32 {
 /// Constant-time byte compare (the challenge is a per-connection secret).
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-/// What `mailbox_keys` stores for the key of a `MailboxProof`.
-fn mailbox_key_hash(pk: &[u8], pk_pq: &[u8]) -> Vec<u8> {
-    let mut h = Sha256::new();
-    h.update(pk);
-    h.update(pk_pq);
-    h.finalize().to_vec()
 }
 
 fn verify_ed25519(pubkey: &[u8], message: &[u8], sig: &[u8]) -> bool {

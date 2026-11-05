@@ -194,12 +194,16 @@ pub fn validate_group_update(
 pub fn apply_change(group: &mut Group, change: &GroupChange, new_version: u32, now: u64) {
     match change {
         GroupChange::Add(identity_id) => {
-            if !group.is_member(identity_id) {
-                group.members.push(GroupMember {
+            // `added_at` is when the latest add reached us: a member removed
+            // and added again (even when we missed the removal) starts over.
+            // It limits the group history this member may get from us (C-06).
+            match group.members.iter_mut().find(|m| m.identity_id == *identity_id) {
+                Some(m) => m.added_at = now,
+                None => group.members.push(GroupMember {
                     identity_id: identity_id.clone(),
                     added_at: now,
                     added_by: group.founder_identity_id.clone(),
-                });
+                }),
             }
         }
         GroupChange::Remove(identity_id) => {
@@ -252,6 +256,15 @@ mod tests {
         g.sync_members(&["founder1".to_string(), "b".to_string()], 1001);
         apply_change(&mut g, &GroupChange::TransferFounder("b".into()), 1, 1001);
         assert_eq!(g.founder_identity_id, "b");
+    }
+
+    /// C-06: the latest add counts, also when the removal was missed.
+    #[test]
+    fn re_add_restarts_added_at() {
+        let mut g = Group::new("g1".into(), "Test".into(), "founder1".into(), 1000);
+        apply_change(&mut g, &GroupChange::Add("x".into()), 1, 2000);
+        apply_change(&mut g, &GroupChange::Add("x".into()), 3, 5000);
+        assert_eq!(g.members.iter().find(|m| m.identity_id == "x").unwrap().added_at, 5000);
     }
 
     #[test]
