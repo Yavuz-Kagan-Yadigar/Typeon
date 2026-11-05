@@ -295,7 +295,8 @@ fn start_fresh_identity(
     }
     let (app, host, button) = (app.clone(), host.clone(), button.clone());
     let data_dir = app.data_dir.clone();
-    let passphrase = passphrase.to_string();
+    // Wiped when the worker closure ends, not left on the heap after it.
+    let passphrase = WipeOnDrop(passphrase.to_string());
     app::run_in_background(
         move || secrets::save(&data_dir, &vault, &passphrase).map(|()| vault),
         move |result| {
@@ -333,7 +334,7 @@ fn pick_recovery_file(
     let app = app.clone();
     let host = host.clone();
     let device_name = device_name.to_string();
-    let vault_passphrase = vault_passphrase.to_string();
+    let vault_passphrase = WipeOnDrop(vault_passphrase.to_string());
     dialog.open(Some(&window), gtk::gio::Cancellable::NONE, move |result| {
         let Ok(file) = result else { return };
         let Some(path) = file.path() else { return };
@@ -369,12 +370,12 @@ fn ask_recovery_passphrase(
     let app = app.clone();
     let host = host.clone();
     let device_name = device_name.to_string();
-    let vault_passphrase = vault_passphrase.to_string();
+    let vault_passphrase = WipeOnDrop(vault_passphrase.to_string());
     dialog.connect_response(None, move |_, response| {
         if response != "restore" {
             return;
         }
-        let passphrase = entry.text().to_string();
+        let passphrase = WipeOnDrop(entry.text().to_string());
         if passphrase.is_empty() {
             app.toast("That file cannot be opened without its passphrase.");
             return;
@@ -394,7 +395,9 @@ fn ask_recovery_passphrase(
         let app_inner = app.clone();
         let host_inner = host.clone();
         let name = device_name.clone();
-        let vault_passphrase = vault_passphrase.clone();
+        // `connect_response` is `Fn`, so the worker gets its own copy — wrapped
+        // here rather than left plain until the thread starts.
+        let vault_passphrase = WipeOnDrop(vault_passphrase.to_string());
         app.toast("Restoring…");
         // Argon2id (import, and sealing the vault) is deliberately slow; the
         // file read is unbounded too — all of it runs off the main thread.
@@ -402,10 +405,9 @@ fn ask_recovery_passphrase(
         let data_dir = app.data_dir.clone();
         app::run_in_background(
             move || -> Result<Vault, String> {
-                // Both passphrases wipe themselves whenever this closure ends
-                // — normal return, `?`, or `return` alike.
-                let passphrase = WipeOnDrop(passphrase);
-                let vault_passphrase = WipeOnDrop(vault_passphrase);
+                // Both passphrases arrive as WipeOnDrop, so they wipe
+                // themselves whenever this closure ends — normal return, `?`,
+                // or `return` alike.
                 // Same 64 MB cap as the Android client.
                 match std::fs::metadata(&path) {
                     Ok(meta) if meta.len() <= 64 * 1024 * 1024 => {}

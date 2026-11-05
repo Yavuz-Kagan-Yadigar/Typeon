@@ -116,7 +116,7 @@ const READER_EVICT_IDLE_MS: i64 = 7 * 24 * 3600 * 1000;
 const ARCHIVE_ROW_OVERHEAD: usize = 128;
 
 /// Bump on every change to `init_schema`, or existing DBs skip it.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Bytes an archive record is charged: quota and the server-wide budget.
 pub fn archive_row_bytes(rec: &ArchiveRecord) -> usize {
@@ -338,25 +338,27 @@ impl Store {
                     SELECT mailbox_id, owner, created_at, last_seen_at FROM mailboxes;
                 DELETE FROM mailboxes;
 
-                -- `seq` is server-global: an enrolled reader can estimate
-                -- the server-wide intake rate from its gaps (accepted).
+                -- `seq` counts per mailbox (`mail_seq`): a server-global one
+                -- let any reader measure the server-wide intake rate.
                 CREATE TABLE IF NOT EXISTS mail (
-                    seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id              INTEGER PRIMARY KEY,
+                    seq             INTEGER NOT NULL,
                     mailbox_id      TEXT NOT NULL,
                     sealed          BLOB NOT NULL,
                     byte_len        INTEGER NOT NULL,
                     deposited_at_ms INTEGER NOT NULL,
                     expires_at_ms   INTEGER NOT NULL,
                     depositor       BLOB NOT NULL,
-                    sealed_hash     BLOB
+                    sealed_hash     BLOB,
+                    UNIQUE (mailbox_id, seq)
                 );
-                CREATE INDEX IF NOT EXISTS idx_mail_fetch ON mail(mailbox_id, seq);
+                -- Last seq handed out per mailbox. Never pruned: a reset
+                -- counter would put new mail below a reader's cursor.
+                -- ponytail: one small row per mailbox id ever written to.
+                CREATE TABLE IF NOT EXISTS mail_seq (mailbox_id TEXT PRIMARY KEY, last INTEGER NOT NULL);
                 -- Replaced by `idx_mail_hash` (created below, after the column).
                 DROP INDEX IF EXISTS idx_mail_dedup;
-                CREATE INDEX IF NOT EXISTS idx_mail_expiry ON mail(expires_at_ms);
-                -- Covering: `recount_mail_bytes` and `total_stored_bytes` sum
-                -- from the index and never touch the `sealed` blobs.
-                CREATE INDEX IF NOT EXISTS idx_mail_depositor ON mail(depositor, byte_len);
+                DROP INDEX IF EXISTS idx_mail_fetch;
 
                 -- Okuyucu başına onay imleci. Kayıt herkese açık olduğundan
                 -- (ilk-temas kutusunun kimliği cihaz parmak izinden türüyor),
@@ -433,6 +435,33 @@ impl Store {
         // Mevcut kurulumlar için (kolon yoksa ekle; varsa hata yutulur).
         let _ = self.conn.execute("ALTER TABLE blobs ADD COLUMN chunk_size INTEGER NOT NULL DEFAULT 0", []);
         let _ = self.conn.execute("ALTER TABLE mail ADD COLUMN sealed_hash BLOB", []);
+        // The global AUTOINCREMENT `seq` becomes per mailbox. Old rows keep
+        // their seq; new ones start above the old high-water mark
+        // (`mail_seq_base`), so no client cursor ends up above new mail.
+        let old_mail: bool = self
+            .conn
+            .query_row("SELECT sql LIKE '%AUTOINCREMENT%' FROM sqlite_master WHERE type = 'table' AND name = 'mail'", [], |r| r.get(0))
+            .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
+        if old_mail {
+            self.conn
+                .execute_batch(
+                    "BEGIN;
+                     INSERT OR REPLACE INTO meta (k, v) VALUES ('mail_seq_base',
+                         MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'mail'), 0),
+                             COALESCE((SELECT MAX(seq) FROM mail), 0)));
+                     CREATE TABLE mail_new (
+                         id INTEGER PRIMARY KEY, seq INTEGER NOT NULL, mailbox_id TEXT NOT NULL,
+                         sealed BLOB NOT NULL, byte_len INTEGER NOT NULL, deposited_at_ms INTEGER NOT NULL,
+                         expires_at_ms INTEGER NOT NULL, depositor BLOB NOT NULL, sealed_hash BLOB,
+                         UNIQUE (mailbox_id, seq));
+                     INSERT INTO mail_new (id, seq, mailbox_id, sealed, byte_len, deposited_at_ms, expires_at_ms, depositor, sealed_hash)
+                         SELECT seq, seq, mailbox_id, sealed, byte_len, deposited_at_ms, expires_at_ms, depositor, sealed_hash FROM mail;
+                     DROP TABLE mail;
+                     ALTER TABLE mail_new RENAME TO mail;
+                     COMMIT;",
+                )
+                .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
+        }
         // The per-box key binding becomes a per-reader key: each reader keeps
         // the key its box was bound to, then the binding table goes.
         let _ = self.conn.execute("ALTER TABLE mailbox_readers ADD COLUMN key_hash BLOB", []);
@@ -445,7 +474,13 @@ impl Store {
         let _ = self.conn.execute("DROP TABLE IF EXISTS mailbox_keys", []);
         // `deposit` finds a repeated item through this index alone.
         self.conn
-            .execute_batch("CREATE INDEX IF NOT EXISTS idx_mail_hash ON mail(mailbox_id, depositor, sealed_hash)")
+            .execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_mail_hash ON mail(mailbox_id, depositor, sealed_hash);
+                 CREATE INDEX IF NOT EXISTS idx_mail_expiry ON mail(expires_at_ms);
+                 -- Covering: `recount_mail_bytes` and `total_stored_bytes` sum
+                 -- from the index and never touch the `sealed` blobs.
+                 CREATE INDEX IF NOT EXISTS idx_mail_depositor ON mail(depositor, byte_len);",
+            )
             .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
         self.conn
             .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -1006,21 +1041,32 @@ impl Store {
             // TTL'i tazele — gönderen hâlâ ısrar ediyorsa alıcı henüz almamış
             // demektir, kopyanın erken düşmesini istemeyiz.
             let _ = self.conn.execute(
-                "UPDATE mail SET expires_at_ms = ?1 WHERE seq = ?2",
-                params![now + ttl_ms, existing],
+                "UPDATE mail SET expires_at_ms = ?1 WHERE mailbox_id = ?2 AND seq = ?3",
+                params![now + ttl_ms, mailbox_id, existing],
             );
             return Ok(existing as u64);
         }
         // Row and charge together: a swallowed charge under-counted the quota.
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
-        self.conn
-            .execute(
-                "INSERT INTO mail (mailbox_id, sealed, byte_len, deposited_at_ms, expires_at_ms, depositor, sealed_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![mailbox_id, sealed, sealed.len() as i64, now, now + ttl_ms, depositor, hash.as_slice()],
+        let seq: i64 = self
+            .conn
+            .query_row(
+                "INSERT INTO mail_seq (mailbox_id, last)
+                 VALUES (?1, COALESCE((SELECT v FROM meta WHERE k = 'mail_seq_base'), 0) + 1)
+                 ON CONFLICT(mailbox_id) DO UPDATE SET last = last + 1
+                 RETURNING last",
+                params![mailbox_id],
+                |r| r.get(0),
             )
             .map_err(|e| e.to_string())?;
-        let seq = self.conn.last_insert_rowid() as u64;
+        self.conn
+            .execute(
+                "INSERT INTO mail (seq, mailbox_id, sealed, byte_len, deposited_at_ms, expires_at_ms, depositor, sealed_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![seq, mailbox_id, sealed, sealed.len() as i64, now, now + ttl_ms, depositor, hash.as_slice()],
+            )
+            .map_err(|e| e.to_string())?;
+        let seq = seq as u64;
         // Kota BIRAKANA yazılır, kutunun SAHİBİNE değil — bir spam gönderici
         // kendi kotasını yakar; kimse bir kurbanın kutusunu doldurup ona
         // hizmet reddi uygulayamaz.
@@ -1727,6 +1773,32 @@ mod tests {
         s.rebind_enrollment(&a, "peerA2", 2_000).unwrap();
         assert_eq!(s.enrollment_by_peer("peerA2").unwrap().enrollment_id, a);
         assert_eq!(s.count_active_enrollments(500), 2, "back awake");
+    }
+
+    #[test]
+    fn mail_seq_counts_per_mailbox_and_never_resets() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.deposit("mb_1", b"x", b"e", 1, 1000).unwrap(), 1);
+        assert_eq!(s.deposit("mb_2", b"y", b"e", 1, 1000).unwrap(), 1, "another box does not move this one");
+        assert_eq!(s.deposit("mb_1", b"z", b"e", 1, 1000).unwrap(), 2);
+        s.conn.execute("DELETE FROM mail", []).unwrap();
+        assert_eq!(s.deposit("mb_1", b"w", b"e", 1, 1000).unwrap(), 3, "an emptied box keeps counting");
+    }
+
+    #[test]
+    fn old_global_mail_seq_migrates_above_old_cursors() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mail (seq INTEGER PRIMARY KEY AUTOINCREMENT, mailbox_id TEXT NOT NULL, sealed BLOB NOT NULL,
+                 byte_len INTEGER NOT NULL, deposited_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL, depositor BLOB NOT NULL);
+             INSERT INTO mail VALUES (41, 'mb_1', x'00', 1, 1, 9999, x'01');",
+        )
+        .unwrap();
+        let s = Store { conn };
+        s.init_schema().unwrap();
+        assert_eq!(s.deposit("mb_2", b"y", b"e", 1, 1000).unwrap(), 42);
+        assert_eq!(s.deposit("mb_1", b"y", b"e", 1, 1000).unwrap(), 42);
+        assert_eq!(s.depositor_item_count("mb_1", b"\x01"), 1, "the old row survives");
     }
 
     #[test]

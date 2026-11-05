@@ -37,8 +37,10 @@ import com.p2p.messenger.util.AppLock
 import com.p2p.messenger.util.AppRestarter
 import com.p2p.messenger.util.AvatarUtil
 import com.p2p.messenger.util.ImagePreview
+import com.p2p.messenger.util.MAX_FOREIGN_URI_BYTES
 import com.p2p.messenger.util.NotificationPrefs
 import com.p2p.messenger.util.ThemePrefs
+import com.p2p.messenger.util.copyToCapped
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -581,59 +583,67 @@ class SettingsFragment : Fragment() {
      * bağlan" seçilip bir QR gösterilir; BU (var olan) cihaz o QR'ı tarar.
      */
     private fun showLinkedDevicesDialog() {
-        val json = try { P2PLib.listLinkedDevices() } catch (e: Exception) { "[]" }
-        val arr = try { org.json.JSONArray(json) } catch (e: Exception) { org.json.JSONArray() }
-        val labels = ArrayList<String>()
-        val fingerprints = ArrayList<String?>()
-        val revokedFps = ArrayList<String?>()
-        val thisDevice = getString(R.string.linked_devices_this_device)
-        for (i in 0 until arr.length()) {
-            val o = arr.getJSONObject(i)
-            val name = o.optString("device_name").ifEmpty { o.optString("device_fingerprint").take(8) }
-            val isThis = o.optBoolean("is_this_device", false)
-            val isActive = o.optBoolean("is_active", true)
-            val suffix = when {
-                isThis -> " ($thisDevice)"
-                !isActive -> " (${getString(R.string.linked_devices_revoked)})"
-                else -> ""
-            }
-            labels.add(name + suffix)
-            fingerprints.add(if (isThis || !isActive) null else o.optString("device_fingerprint"))
-            revokedFps.add(if (!isThis && !isActive) o.optString("device_fingerprint") else null)
-        }
+        // fixpass: JNI çağrısı (`listLinkedDevices` → çekirdek kilidi) ana
+        // iş parçacığından ÇALIŞMAZ; diyalog ana iş parçacığında kurulur
+        // (identityCode deseni).
+        lifecycleScope.launch(Dispatchers.IO) {
+            val json = try { P2PLib.listLinkedDevices() } catch (e: Exception) { "[]" }
+            withContext(Dispatchers.Main) {
+                if (!isAdded) return@withContext
+                val arr = try { org.json.JSONArray(json) } catch (e: Exception) { org.json.JSONArray() }
+                val labels = ArrayList<String>()
+                val fingerprints = ArrayList<String?>()
+                val revokedFps = ArrayList<String?>()
+                val thisDevice = getString(R.string.linked_devices_this_device)
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    val name = o.optString("device_name").ifEmpty { o.optString("device_fingerprint").take(8) }
+                    val isThis = o.optBoolean("is_this_device", false)
+                    val isActive = o.optBoolean("is_active", true)
+                    val suffix = when {
+                        isThis -> " ($thisDevice)"
+                        !isActive -> " (${getString(R.string.linked_devices_revoked)})"
+                        else -> ""
+                    }
+                    labels.add(name + suffix)
+                    fingerprints.add(if (isThis || !isActive) null else o.optString("device_fingerprint"))
+                    revokedFps.add(if (!isThis && !isActive) o.optString("device_fingerprint") else null)
+                }
 
-        AlertDialog.Builder(requireContext())
-            .setTitle(R.string.linked_devices_section_title)
-            .setItems(labels.toTypedArray()) { _, which ->
-                val fp = fingerprints.getOrNull(which)
-                if (fp != null) withAppPassword { confirmRevokeLinkedDevice(fp) }
-                revokedFps.getOrNull(which)?.let { confirmForgetRevokedDevice(it) }
-            }
-            .setPositiveButton(R.string.linked_devices_add) { _, _ ->
-                // Only the root device may add one (the core refuses the grant):
-                // say so before the camera opens, not after a scan.
-                // fixpass (glm A3): `isRootDevice()` JNI — off the main thread.
-                lifecycleScope.launch(Dispatchers.IO) {
-                    val root = isRootDevice()
-                    withContext(Dispatchers.Main) {
-                        if (!isAdded) return@withContext
-                        if (!root) {
-                            Toast.makeText(requireContext(), R.string.msg_primary_device_only, Toast.LENGTH_LONG).show()
-                            return@withContext
-                        }
-                        withAppPassword {
-                            startActivity(
-                                Intent(requireContext(), com.p2p.messenger.ui.QrScanActivity::class.java).apply {
-                                    putExtra(com.p2p.messenger.ui.QrScanActivity.EXTRA_MODE,
-                                        com.p2p.messenger.ui.QrScanActivity.MODE_LINK_APPROVE)
+                AlertDialog.Builder(requireContext())
+                    .setTitle(R.string.linked_devices_section_title)
+                    .setItems(labels.toTypedArray()) { _, which ->
+                        val fp = fingerprints.getOrNull(which)
+                        if (fp != null) withAppPassword { confirmRevokeLinkedDevice(fp) }
+                        revokedFps.getOrNull(which)?.let { confirmForgetRevokedDevice(it) }
+                    }
+                    .setPositiveButton(R.string.linked_devices_add) { _, _ ->
+                        // Only the root device may add one (the core refuses the grant):
+                        // say so before the camera opens, not after a scan.
+                        // fixpass (glm A3): `isRootDevice()` JNI — off the main thread.
+                        lifecycleScope.launch(Dispatchers.IO) {
+                            val root = isRootDevice()
+                            withContext(Dispatchers.Main) {
+                                if (!isAdded) return@withContext
+                                if (!root) {
+                                    Toast.makeText(requireContext(), R.string.msg_primary_device_only, Toast.LENGTH_LONG).show()
+                                    return@withContext
                                 }
-                            )
+                                withAppPassword {
+                                    startActivity(
+                                        Intent(requireContext(), com.p2p.messenger.ui.QrScanActivity::class.java).apply {
+                                            putExtra(com.p2p.messenger.ui.QrScanActivity.EXTRA_MODE,
+                                                com.p2p.messenger.ui.QrScanActivity.MODE_LINK_APPROVE)
+                                        }
+                                    )
+                                }
+                            }
                         }
                     }
-                }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
             }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+        }
     }
 
     /** Asks for the app password before [action]: whoever holds the unlocked
@@ -1185,9 +1195,12 @@ class SettingsFragment : Fragment() {
         lifecycleScope.launch(Dispatchers.IO) {
             val tempFile = File(File(app.cacheDir, "wallpaper").apply { mkdirs() }, UUID.randomUUID().toString())
             try {
-                app.contentResolver.openInputStream(uri)?.use { input ->
-                    tempFile.outputStream().use { output -> input.copyTo(output, bufferSize = 64 * 1024) }
-                } ?: throw java.io.IOException("Dosya açılamadı")
+                // Foreign `content://` URI: cap the bytes actually streamed
+                // into the cache (bkz. ImagePreview.copyToCapped / GroupChatActivity).
+                val copied = app.contentResolver.openInputStream(uri)?.use { input ->
+                    input.copyToCapped(tempFile, MAX_FOREIGN_URI_BYTES)
+                } ?: false
+                if (!copied) throw java.io.IOException("Dosya açılamadı")
                 // Not a readable image: the catch below shows the error toast.
                 val compressed = ImagePreview.compressFile(tempFile, WALLPAPER_MAX_DIMENSION, WALLPAPER_JPEG_QUALITY)
                     ?: throw java.io.IOException("not an image")
@@ -1429,12 +1442,19 @@ class SettingsFragment : Fragment() {
     }
 
     private fun refreshDisplayName() {
-        val name = try {
-            P2PLib.getDisplayName()
-        } catch (e: Exception) {
-            ""
+        // fixpass: JNI çağrısı (`getDisplayName` → çekirdek kilidi) ana
+        // iş parçacığından ÇALIŞMAZ; sonuç ana iş parçacığına yazılır.
+        lifecycleScope.launch(Dispatchers.IO) {
+            val name = try {
+                P2PLib.getDisplayName()
+            } catch (e: Exception) {
+                ""
+            }
+            withContext(Dispatchers.Main) {
+                val v = displayNameValue
+                if (v != null && v.isAttachedToWindow) v.text = name
+            }
         }
-        displayNameValue?.text = name
     }
 
     /**
@@ -1448,64 +1468,81 @@ class SettingsFragment : Fragment() {
      * sürer, kullanıcının bunu beklemesi gerekmez.
      */
     private fun showChangeDisplayNameDialog() {
-        val current = try {
-            P2PLib.getDisplayName()
-        } catch (e: Exception) {
-            ""
-        }
-        val input = EditText(requireContext()).apply {
-            setText(current)
-            setSingleLine(true)
-            // Rust tarafı da kırpıyor (`MAX_DISPLAY_NAME_CHARS`); buradaki
-            // sınır yalnızca kullanıcının sessizce kesilen bir ad
-            // yazmasını engellemek için.
-            filters = arrayOf(android.text.InputFilter.LengthFilter(48))
-        }
-        AlertDialog.Builder(requireContext())
-            .setTitle(R.string.dlg_change_display_name_title)
-            .setMessage(R.string.lbl_display_name_desc)
-            .setView(input)
-            .setPositiveButton(android.R.string.ok) { _, _ ->
-                val name = input.text.toString().trim()
-                if (name.isEmpty()) return@setPositiveButton
-                displayNameValue?.text = name
-                lifecycleScope.launch(Dispatchers.IO) {
-                    val result = try {
-                        P2PLib.setDisplayName(name)
-                    } catch (e: Exception) {
-                        "Error: ${e.message}"
-                    }
-                    withContext(Dispatchers.Main) {
-                        if (!isAdded) return@withContext
-                        if (result.startsWith("Error:")) {
-                            Toast.makeText(requireContext(), com.p2p.messenger.util.coreErrorText(requireContext(), result), Toast.LENGTH_LONG).show()
-                            refreshDisplayName()
-                        } else {
-                            Toast.makeText(requireContext(), R.string.msg_display_name_changed, Toast.LENGTH_SHORT).show()
+        // fixpass: JNI çağrısı (`getDisplayName` → çekirdek kilidi) ana
+        // iş parçacığından ÇALIŞMAZ; diyalog ana iş parçacığında açılır.
+        lifecycleScope.launch(Dispatchers.IO) {
+            val current = try {
+                P2PLib.getDisplayName()
+            } catch (e: Exception) {
+                ""
+            }
+            withContext(Dispatchers.Main) {
+                if (!isAdded) return@withContext
+                val input = EditText(requireContext()).apply {
+                    setText(current)
+                    setSingleLine(true)
+                    // Rust tarafı da kırpıyor (`MAX_DISPLAY_NAME_CHARS`); buradaki
+                    // sınır yalnızca kullanıcının sessizce kesilen bir ad
+                    // yazmasını engellemek için.
+                    filters = arrayOf(android.text.InputFilter.LengthFilter(48))
+                }
+                AlertDialog.Builder(requireContext())
+                    .setTitle(R.string.dlg_change_display_name_title)
+                    .setMessage(R.string.lbl_display_name_desc)
+                    .setView(input)
+                    .setPositiveButton(android.R.string.ok) { _, _ ->
+                        val name = input.text.toString().trim()
+                        if (name.isEmpty()) return@setPositiveButton
+                        displayNameValue?.text = name
+                        lifecycleScope.launch(Dispatchers.IO) {
+                            val result = try {
+                                P2PLib.setDisplayName(name)
+                            } catch (e: Exception) {
+                                "Error: ${e.message}"
+                            }
+                            withContext(Dispatchers.Main) {
+                                if (!isAdded) return@withContext
+                                if (result.startsWith("Error:")) {
+                                    Toast.makeText(requireContext(), com.p2p.messenger.util.coreErrorText(requireContext(), result), Toast.LENGTH_LONG).show()
+                                    refreshDisplayName()
+                                } else {
+                                    Toast.makeText(requireContext(), R.string.msg_display_name_changed, Toast.LENGTH_SHORT).show()
+                                }
+                            }
                         }
                     }
-                }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
             }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+        }
     }
 
     private fun refreshOwnAvatar() {
-        val bytes = try {
-            P2PLib.getOwnProfilePicture().takeIf { it.isNotEmpty() }
-        } catch (e: Exception) {
-            null
+        // fixpass: JNI çağrıları (`getOwnProfilePicture`/`getDisplayName`/
+        // `getIdentityShortCode` → çekirdek kilidi) ana iş parçacığından
+        // ÇALIŞMAZ; çizim ana iş parçacığına yazılır (identityCode deseni).
+        lifecycleScope.launch(Dispatchers.IO) {
+            val bytes = try {
+                P2PLib.getOwnProfilePicture().takeIf { it.isNotEmpty() }
+            } catch (e: Exception) {
+                null
+            }
+            // Fotoğraf yoksa baş harf gösteriliyor (bkz. AvatarUtil) — hesap
+            // adının baş harfi, kimlik kodunun ilk karakterinden ("a3f…")
+            // anlamlı: kişiler bizi zaten o adla görüyor.
+            val name = try {
+                P2PLib.getDisplayName().ifEmpty { P2PLib.getIdentityShortCode() }
+            } catch (e: Exception) {
+                "?"
+            }
+            withContext(Dispatchers.Main) {
+                val v = imgOwnAvatar
+                if (isAdded && v.isAttachedToWindow) {
+                    ownAvatarBytes = bytes
+                    AvatarUtil.renderInto(v, bytes, name)
+                }
+            }
         }
-        // Fotoğraf yoksa baş harf gösteriliyor (bkz. AvatarUtil) — hesap
-        // adının baş harfi, kimlik kodunun ilk karakterinden ("a3f…")
-        // anlamlı: kişiler bizi zaten o adla görüyor.
-        val name = try {
-            P2PLib.getDisplayName().ifEmpty { P2PLib.getIdentityShortCode() }
-        } catch (e: Exception) {
-            "?"
-        }
-        ownAvatarBytes = bytes
-        AvatarUtil.renderInto(imgOwnAvatar, bytes, name)
     }
 
     /**
@@ -1521,9 +1558,12 @@ class SettingsFragment : Fragment() {
         lifecycleScope.launch(Dispatchers.IO) {
             val tempFile = File(File(app.cacheDir, "avatar").apply { mkdirs() }, UUID.randomUUID().toString())
             try {
-                app.contentResolver.openInputStream(uri)?.use { input ->
-                    tempFile.outputStream().use { output -> input.copyTo(output, bufferSize = 64 * 1024) }
-                } ?: throw java.io.IOException("Dosya açılamadı")
+                // Foreign `content://` URI: cap the bytes actually streamed
+                // into the cache (bkz. ImagePreview.copyToCapped / AttachmentPrompt).
+                val copied = app.contentResolver.openInputStream(uri)?.use { input ->
+                    input.copyToCapped(tempFile, MAX_FOREIGN_URI_BYTES)
+                } ?: false
+                if (!copied) throw java.io.IOException("Dosya açılamadı")
                 // null = not an image. `setOwnAvatar(null)` means "remove" and
                 // would publish the removal to every contact.
                 val compressed = ImagePreview.compressFile(tempFile, AVATAR_MAX_DIMENSION, AVATAR_JPEG_QUALITY)
@@ -1540,11 +1580,23 @@ class SettingsFragment : Fragment() {
     }
 
     private fun setOwnAvatar(avatarJpeg: ByteArray?) {
-        ownAvatarBytes = avatarJpeg
-        AvatarUtil.renderInto(imgOwnAvatar, avatarJpeg, try {
-            P2PLib.getDisplayName().ifEmpty { P2PLib.getIdentityShortCode() }
-        } catch (e: Exception) { "?" })
+        // fixpass: JNI çağrıları (`getDisplayName`/`getIdentityShortCode` →
+        // çekirdek kilidi) ana iş parçacığından ÇALIŞMAZ; çizim ana iş
+        // parçacığına yazılır, gönderim arka planda sürer (bkz. identityCode
+        // deseni, `onCreateView`).
         lifecycleScope.launch(Dispatchers.IO) {
+            val name = try {
+                P2PLib.getDisplayName().ifEmpty { P2PLib.getIdentityShortCode() }
+            } catch (e: Exception) {
+                "?"
+            }
+            withContext(Dispatchers.Main) {
+                val v = imgOwnAvatar
+                if (isAdded && v.isAttachedToWindow) {
+                    ownAvatarBytes = avatarJpeg
+                    AvatarUtil.renderInto(v, avatarJpeg, name)
+                }
+            }
             val result = try {
                 P2PLib.setOwnProfilePicture(avatarJpeg)
             } catch (e: Exception) {

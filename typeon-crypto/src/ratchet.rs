@@ -100,7 +100,11 @@ impl RatchetPublicKeys {
         if data.len() > 2048 {
             return Err(RatchetError::Invalid("Ratchet public key too long"));
         }
-        let keys: Self = ciborium::de::from_reader_with_recursion_limit(data, 4).map_err(|e| RatchetError::Encoding(e.to_string()))?;
+        let mut rest = data;
+        let keys: Self = ciborium::de::from_reader_with_recursion_limit(&mut rest, 4).map_err(|e| RatchetError::Encoding(e.to_string()))?;
+        if !rest.is_empty() {
+            return Err(RatchetError::Invalid("Ratchet public key: trailing bytes"));
+        }
         if keys.x25519_pubkey.len() != 32 || keys.kyber_pubkey.len() != 1568 {
             return Err(RatchetError::Invalid("Bad ratchet public key length"));
         }

@@ -496,6 +496,42 @@ fn image_for_sending(
     Some((out.to_path_buf(), format!("{base}.jxl"), "image/jxl".to_string()))
 }
 
+fn file_head(path: &std::path::Path) -> Vec<u8> {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(16);
+    if let Ok(file) = std::fs::File::open(path) {
+        let _ = file.take(16).read_to_end(&mut head);
+    }
+    head
+}
+
+/// JPEG, PNG, JPEG XL or WebP: the core strips their metadata itself (same magics as
+/// `attachments::encrypt_file_to_disk_with`).
+fn scrubbed_by_core(h: &[u8]) -> bool {
+    h.starts_with(&[0xFF, 0xD8])
+        || h.starts_with(b"\x89PNG\r\n\x1a\n")
+        || h.starts_with(&[0xFF, 0x0A])
+        || h.starts_with(b"\0\0\0\x0CJXL ")
+        || (h.len() >= 12 && &h[..4] == b"RIFF" && &h[8..12] == b"WEBP")
+}
+
+/// ISO-BMFF (MP4/MOV/3GP/HEIC/AVIF), TIFF, Matroska/WebM or AVI, whatever the extension.
+fn is_media_magic(h: &[u8]) -> bool {
+    (h.len() >= 8 && &h[4..8] == b"ftyp")
+        || h.starts_with(b"II*\0")
+        || h.starts_with(b"MM\0*")
+        || h.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
+        || (h.len() >= 12 && &h[..4] == b"RIFF" && &h[8..12] == b"AVI ")
+}
+
+pub fn core_scrubs_magic(path: &std::path::Path) -> bool {
+    scrubbed_by_core(&file_head(path))
+}
+
+pub fn media_magic(path: &std::path::Path) -> bool {
+    is_media_magic(&file_head(path))
+}
+
 /// HEIF/AVIF image sequence: an `ftyp` brand msf1, hevs or avis.
 fn is_image_sequence(head: &[u8]) -> bool {
     if head.len() < 12 || &head[4..8] != b"ftyp" {
@@ -527,6 +563,18 @@ fn is_animated_png(head: &[u8], source: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn magic_is_by_content() {
+        assert!(scrubbed_by_core(&[0xFF, 0xD8, 0xFF, 0xE1]));
+        assert!(scrubbed_by_core(b"RIFF\0\0\0\0WEBPVP8 "));
+        assert!(!scrubbed_by_core(b"RIFF\0\0\0\0AVI LIST"));
+        assert!(is_media_magic(b"RIFF\0\0\0\0AVI LIST"));
+        assert!(is_media_magic(b"\0\0\0\x18ftypheic"));
+        assert!(is_media_magic(b"II*\0\x08\0\0\0"));
+        assert!(is_media_magic(&[0x1A, 0x45, 0xDF, 0xA3, 0x9F]));
+        assert!(!is_media_magic(b"%PDF-1.7"));
+    }
 
     #[test]
     fn animation_is_detected() {

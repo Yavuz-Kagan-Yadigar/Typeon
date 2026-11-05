@@ -634,8 +634,12 @@ impl Serialize for SignedHeader {
 impl<'de> Deserialize<'de> for SignedHeader {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = serde_bytes::ByteBuf::deserialize(deserializer)?.into_vec();
-        let parsed = ciborium::de::from_reader_with_recursion_limit(raw.as_slice(), 4)
+        let mut rest = raw.as_slice();
+        let parsed = ciborium::de::from_reader_with_recursion_limit(&mut rest, 4)
             .map_err(|e| serde::de::Error::custom(e.to_string()))?;
+        if !rest.is_empty() {
+            return Err(serde::de::Error::custom("header: trailing bytes"));
+        }
         Ok(Self { raw, parsed })
     }
 }
@@ -1381,7 +1385,12 @@ impl MessageContent {
     /// each level several large visitor frames on the receiving thread's
     /// stack, before any check of who sent it.
     pub fn from_cbor(data: &[u8]) -> Result<Self, String> {
-        ciborium::de::from_reader_with_recursion_limit(data, Self::MAX_NESTING).map_err(|e| e.to_string())
+        let mut rest = data;
+        let content = ciborium::de::from_reader_with_recursion_limit(&mut rest, Self::MAX_NESTING).map_err(|e| e.to_string())?;
+        if !rest.is_empty() {
+            return Err("content: trailing bytes".to_string());
+        }
+        Ok(content)
     }
 }
 
@@ -1852,5 +1861,13 @@ mod parse_limit_tests {
             nested = echo(nested);
         }
         assert!(MessageContent::from_cbor(&bytes(&nested)).is_err());
+    }
+
+    #[test]
+    fn content_with_trailing_bytes_is_refused() {
+        let mut data = to_cbor(&MessageContent::Ack { target_message_id: "m".into() }).unwrap();
+        assert!(MessageContent::from_cbor(&data).is_ok());
+        data.push(0);
+        assert!(MessageContent::from_cbor(&data).is_err());
     }
 }

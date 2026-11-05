@@ -150,7 +150,11 @@ class ServerActivity : AppCompatActivity() {
         }
         content.visibility = android.view.View.INVISIBLE
         if (lockDialog?.isShowing == true) return
-        lockDialog = ServerLock.showUnlock(this) { content.visibility = android.view.View.VISIBLE }
+        lockDialog = ServerLock.showUnlock(this) {
+            content.visibility = android.view.View.VISIBLE
+            // The dialog is gone now, so one poll repaints the hidden screen.
+            refreshStatus()
+        }
     }
 
     override fun onResume() {
@@ -216,6 +220,8 @@ class ServerActivity : AppCompatActivity() {
 
     /** One poll: status, device list and (every fifth time) disk usage. */
     private fun refreshStatus() {
+        // PIN lock covers the screen: no polling behind it.
+        if (lockDialog?.isShowing == true) return
         if (refreshing) return
         refreshing = true
         val withDisk = tick++ % 5 == 0

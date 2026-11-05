@@ -79,9 +79,12 @@ class QrScanActivity : AppCompatActivity() {
         cameraExecutor = Executors.newSingleThreadExecutor()
         // Debug builds only (see the debug manifest): a decoded QR from adb
         // goes through the same confirm-and-run path as a camera frame.
+        // Malformed hex (bad adb input) is ignored and the camera opens as usual.
         val injected = intent.getStringExtra("debug_qr_hex")
-        if (injected != null && applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
-            val bytes = injected.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            ?.takeIf { applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0 }
+            ?.let { hex -> runCatching { hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray() }.getOrNull() }
+        if (injected != null) {
+            val bytes = injected
             alreadyHandled.set(true)
             Thread { handleScannedText(if (addServerMode) String(bytes) else String(bytes, Charsets.ISO_8859_1)) }.start()
             return

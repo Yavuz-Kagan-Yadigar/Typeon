@@ -134,7 +134,9 @@ pub fn is_passphrase_protected(dir: &Path) -> bool {
     let mut head = vec![0u8; MAGIC.len() + 1];
     match std::fs::File::open(vault_path(dir)).and_then(|mut f| f.read_exact(&mut head)) {
         Ok(()) => head[MAGIC.len()] == MODE_WALLET_PASSPHRASE,
-        Err(_) => false,
+        // Only "no vault yet" means unprotected; a read error must not unlock
+        // the prompt away.
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
     }
 }
 

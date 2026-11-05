@@ -2415,11 +2415,13 @@ impl ChatView {
                 };
                 let tmp_dir = crate::data_directory().join("attachments/plain_cache");
                 let (sent, file_name, mime) = util::prepare_outgoing(&source, &file_name, &mime, hi_res, &tmp_dir);
-                // Core scrubs JPEG/PNG itself; a video the remux failed on and
-                // an image nothing could re-encode go out with their metadata.
+                // Judged by content, not the extension: the core strips only
+                // JPEG/PNG/JPEG XL/WebP; any other media left as it is asks first.
                 let unscrubbed = sent == source
+                    && !util::core_scrubs_magic(&source)
                     && (util::is_video(&mime)
-                        || (util::is_image(&mime) && !matches!(mime.as_str(), "image/jpeg" | "image/png" | "image/svg+xml")));
+                        || (util::is_image(&mime) && mime != "image/svg+xml")
+                        || util::media_magic(&source));
                 (preview, sent, source, file_name, mime, unscrubbed)
             },
             move |(preview, sent, source, file_name, mime, unscrubbed)| {

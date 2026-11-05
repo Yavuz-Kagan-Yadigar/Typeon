@@ -1798,6 +1798,18 @@ mod recovery_tests {
         core
     }
 
+    #[test]
+    fn unknown_group_room_fails_closed() {
+        let gid = "group-0123456789abcdef";
+        assert!(!P2PCore::new().unknown_group_has_room(gid), "no DB: no room");
+        let dir = std::env::temp_dir().join(format!("typeon-gidroom-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let core = core_on_disk(&dir);
+        assert!(core.unknown_group_has_room(gid));
+        core.db.as_ref().unwrap().execute_batch("DROP TABLE groups").unwrap();
+        assert!(!core.unknown_group_has_room(gid), "query error: no room");
+    }
+
     /// L-32: duplicates from an older build are merged at start, then the
     /// UNIQUE index makes a second archive of one id a no-op.
     #[test]
@@ -5517,25 +5529,30 @@ impl P2PCore {
         Self::init_server_tables(&conn);
         conn.execute_batch(whiteboard::SCHEMA)?;
         // SQLite has no `ADD COLUMN IF NOT EXISTS`: only "duplicate column name"
-        // means the column is there. Any other failure (disk full, locked) is
-        // logged: a missing column made later INSERTs fail silently.
-        let migrate = |sql: &str| {
-            if let Err(e) = conn.execute(sql, []) {
-                if !e.to_string().contains("duplicate column name") {
+        // means the column is there. Any other failure (disk full, locked)
+        // fails init: a missing column made later INSERTs fail silently.
+        let migrate = |sql: &str| -> Result<(), rusqlite::Error> {
+            match conn.execute(sql, []) {
+                Err(e) if !e.to_string().contains("duplicate column name") => {
                     error!("DB geçişi başarısız ({}): {}", sql, e);
+                    // Only a missing column breaks later writes. An index or
+                    // backfill that fails on data (e.g. duplicate rows) would
+                    // fail every start, so it stays best-effort.
+                    if sql.starts_with("ALTER TABLE") { Err(e) } else { Ok(()) }
                 }
+                _ => Ok(()),
             }
         };
-        migrate("ALTER TABLE removed_groups ADD COLUMN version INTEGER NOT NULL DEFAULT 0");
-        migrate("ALTER TABLE removed_groups ADD COLUMN founder TEXT NOT NULL DEFAULT ''");
+        migrate("ALTER TABLE removed_groups ADD COLUMN version INTEGER NOT NULL DEFAULT 0")?;
+        migrate("ALTER TABLE removed_groups ADD COLUMN founder TEXT NOT NULL DEFAULT ''")?;
         // Added later; fails harmlessly when the column is there.
-        migrate("ALTER TABLE wb_tombstones ADD COLUMN seen INTEGER NOT NULL DEFAULT 1");
+        migrate("ALTER TABLE wb_tombstones ADD COLUMN seen INTEGER NOT NULL DEFAULT 1")?;
         // Pen width came after the first builds; same ALTER pattern as below.
-        migrate("ALTER TABLE wb_strokes ADD COLUMN width INTEGER NOT NULL DEFAULT 0");
-        migrate("ALTER TABLE wb_strokes ADD COLUMN sig BLOB NOT NULL DEFAULT x''");
+        migrate("ALTER TABLE wb_strokes ADD COLUMN width INTEGER NOT NULL DEFAULT 0")?;
+        migrate("ALTER TABLE wb_strokes ADD COLUMN sig BLOB NOT NULL DEFAULT x''")?;
         // M-93: skipped keys expire by age. Rows from before the column count
         // from now.
-        migrate("ALTER TABLE skipped_message_keys ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0");
+        migrate("ALTER TABLE skipped_message_keys ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")?;
         let _ = conn.execute("UPDATE skipped_message_keys SET created_at = ?1 WHERE created_at = 0", params![current_time_ms() as i64]);
 
         // Spec dışı geçiş (migration): `preview_jpeg` kolonu bu tabloya
@@ -5544,26 +5561,26 @@ impl P2PCore {
         // sürümü çalıştırmış cihazlarda elle eklenmesi gerekir. SQLite
         // `ADD COLUMN IF NOT EXISTS` desteklemediğinden, kolon zaten
         // varsa oluşacak hatayı (duplicate column) sessizce yok sayıyoruz.
-        migrate("ALTER TABLE files ADD COLUMN preview_jpeg BLOB");
+        migrate("ALTER TABLE files ADD COLUMN preview_jpeg BLOB")?;
         // Aynı geçiş deseni: sesli mesaj süresi, kendi profil fotoğrafımız
         // ve kişilerin bize gönderdiği profil fotoğrafları — hepsi sonradan
         // eklendi.
-        migrate("ALTER TABLE files ADD COLUMN duration_ms INTEGER");
+        migrate("ALTER TABLE files ADD COLUMN duration_ms INTEGER")?;
         // Parca boyutu artik dosya basina (bkz. `attachments::FILE_CHUNK_SIZE_V2`).
         // NULL = miras 256 KiB, yani mevcut satirlar oldugu gibi calisir.
-        migrate("ALTER TABLE files ADD COLUMN chunk_size INTEGER");
-        migrate("ALTER TABLE identities ADD COLUMN avatar_jpeg BLOB");
-        migrate("ALTER TABLE contacts ADD COLUMN avatar_jpeg BLOB");
+        migrate("ALTER TABLE files ADD COLUMN chunk_size INTEGER")?;
+        migrate("ALTER TABLE identities ADD COLUMN avatar_jpeg BLOB")?;
+        migrate("ALTER TABLE contacts ADD COLUMN avatar_jpeg BLOB")?;
         // Spec dışı, kullanıcı kararı: kişi grup üzerinden (kurucu
         // kefaletiyle) mi eklendi — bkz. Contact.added_via_group.
-        migrate("ALTER TABLE contacts ADD COLUMN added_via_group INTEGER");
+        migrate("ALTER TABLE contacts ADD COLUMN added_via_group INTEGER")?;
         if let Err(e) = conn.execute_batch(CONTACTS_ONE_ROW_PER_IDENTITY_SQL) {
             error!("contacts tekillik indeksi kurulamadı: {}", e);
         }
-        migrate("ALTER TABLE groups ADD COLUMN avatar_jpeg BLOB");
+        migrate("ALTER TABLE groups ADD COLUMN avatar_jpeg BLOB")?;
         // bkz. `packet::FounderTransfer` — kurucu devir zinciri, kaçırılmış
         // bir devrin üyeyi gruptan kalıcı olarak koparmasını engelliyor.
-        migrate("ALTER TABLE groups ADD COLUMN founder_chain_json TEXT");
+        migrate("ALTER TABLE groups ADD COLUMN founder_chain_json TEXT")?;
         // Spec dışı, hata düzeltmesi (grup geçmişi kalıcılığı + mesaj
         // durumu): `messages` tablosu önceden sadece 1:1 (peer_device_
         // fingerprint) sohbetler içindi — grup mesajları hiç
@@ -5583,40 +5600,40 @@ impl P2PCore {
         // `getMessageHistory` okuması) bu bilgi kaybolup HER satır varsayılan
         // olarak "gönderildi" gösteriliyordu, hâlâ bekleyen/başarısız
         // mesajlar dahil.
-        migrate("ALTER TABLE messages ADD COLUMN group_id TEXT");
-        migrate("ALTER TABLE messages ADD COLUMN sender_identity_id TEXT");
+        migrate("ALTER TABLE messages ADD COLUMN group_id TEXT")?;
+        migrate("ALTER TABLE messages ADD COLUMN sender_identity_id TEXT")?;
         // bkz. messages tablosu `sent_at_ms` notu — gönderim-sırası gösterimi.
-        migrate("ALTER TABLE messages ADD COLUMN sent_at_ms INTEGER");
-        migrate("ALTER TABLE messages ADD COLUMN message_id TEXT");
-        migrate("ALTER TABLE messages ADD COLUMN status TEXT");
-        migrate("CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id, timestamp)");
-        migrate("CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)");
+        migrate("ALTER TABLE messages ADD COLUMN sent_at_ms INTEGER")?;
+        migrate("ALTER TABLE messages ADD COLUMN message_id TEXT")?;
+        migrate("ALTER TABLE messages ADD COLUMN status TEXT")?;
+        migrate("CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id, timestamp)")?;
+        migrate("CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)")?;
         // Spec dışı, kullanıcı isteği (WhatsApp tarzı "sağa kaydırıp
         // yanıtla"): bkz. packet.rs `MessageContent::Text.reply_to_*`
         // dokümantasyonu — bu satırlar arşive de kalıcılaştırılmazsa, bir
         // sohbet geçmişi yeniden yüklendiğinde (uygulama/ekran yeniden
         // açılışı) yanıt önizlemesi kaybolurdu.
-        migrate("ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT");
-        migrate("ALTER TABLE messages ADD COLUMN reply_to_preview TEXT");
-        migrate("ALTER TABLE messages ADD COLUMN reply_to_sender_identity_id TEXT");
+        migrate("ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT")?;
+        migrate("ALTER TABLE messages ADD COLUMN reply_to_preview TEXT")?;
+        migrate("ALTER TABLE messages ADD COLUMN reply_to_sender_identity_id TEXT")?;
         // Edit/Delete previously only updated the live in-memory adapter —
         // the archived copy kept the original text and reappeared on
         // reopen/reload. `is_deleted` marks a soft delete; an edit
         // re-encrypts and overwrites encrypted_blob/nonce in place (see
         // apply_edit_to_archive/apply_delete_to_archive).
-        migrate("ALTER TABLE messages ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0");
+        migrate("ALTER TABLE messages ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")?;
         // bkz. `ArchivedMessage.is_edited` — düzenleme işareti de kalıcı.
-        migrate("ALTER TABLE messages ADD COLUMN is_edited INTEGER NOT NULL DEFAULT 0");
+        migrate("ALTER TABLE messages ADD COLUMN is_edited INTEGER NOT NULL DEFAULT 0")?;
         // Spec dışı (dış AI incelemesi düzeltmesi — sıra-dışı Edit koruması):
         // uygulanan son düzenlemenin gönderici damgası (`MessageContent::Edit
         // .edited_at_ms`). `apply_edit_to_archive`, DAHA ESKİ damgalı bir
         // düzenlemenin DAHA YENİ olanın üzerine yazmasını bununla engeller
         // (0 = hiç düzenlenmedi / sıralama bilgisi olmayan eski paket).
-        migrate("ALTER TABLE messages ADD COLUMN edit_ts INTEGER NOT NULL DEFAULT 0");
+        migrate("ALTER TABLE messages ADD COLUMN edit_ts INTEGER NOT NULL DEFAULT 0")?;
         // See `group_author_statement`.
-        migrate("ALTER TABLE messages ADD COLUMN author_proof TEXT");
+        migrate("ALTER TABLE messages ADD COLUMN author_proof TEXT")?;
         // Group rows: my identity id was in the sender's @mention list.
-        migrate("ALTER TABLE messages ADD COLUMN mentions_me INTEGER NOT NULL DEFAULT 0");
+        migrate("ALTER TABLE messages ADD COLUMN mentions_me INTEGER NOT NULL DEFAULT 0")?;
         // L-32: one row per message id (per group; 1:1 rows share the scope
         // ''). Once, before the index: a deleted copy wins (the user's delete),
         // then an edited one, one with an author proof, then the earliest.
@@ -5635,7 +5652,7 @@ impl P2PCore {
             ) {
                 error!("DB geçişi başarısız (message_id dedupe): {}", e);
             }
-            migrate("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_msgid_unique ON messages(COALESCE(group_id, ''), message_id) WHERE message_id IS NOT NULL AND message_id != ''");
+            migrate("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_msgid_unique ON messages(COALESCE(group_id, ''), message_id) WHERE message_id IS NOT NULL AND message_id != ''")?;
         }
         // Spec dışı, kullanıcı isteği (grup ekleri): `messages` tablosundaki
         // AYNI desen — grup ekleri `peer_device_fingerprint = ''` +
@@ -5645,28 +5662,28 @@ impl P2PCore {
         // Spec dışı, kullanıcı isteği (ek + açıklama + yanıt): canlı olayda
         // taşımak yetmez — sohbet yeniden açıldığında arşivden okunuyorlar,
         // yoksa açıklama ve yanıt bağlamı kaybolurdu.
-        migrate("ALTER TABLE files ADD COLUMN caption TEXT");
-        migrate("ALTER TABLE files ADD COLUMN reply_to_message_id TEXT");
-        migrate("ALTER TABLE files ADD COLUMN reply_to_preview TEXT");
-        migrate("ALTER TABLE files ADD COLUMN reply_to_sender_identity_id TEXT");
-        migrate("ALTER TABLE files ADD COLUMN group_id TEXT");
-        migrate("ALTER TABLE files ADD COLUMN sender_identity_id TEXT");
-        migrate("CREATE INDEX IF NOT EXISTS idx_files_group ON files(group_id, created_at)");
-        migrate("ALTER TABLE files ADD COLUMN sticker INTEGER NOT NULL DEFAULT 0");
+        migrate("ALTER TABLE files ADD COLUMN caption TEXT")?;
+        migrate("ALTER TABLE files ADD COLUMN reply_to_message_id TEXT")?;
+        migrate("ALTER TABLE files ADD COLUMN reply_to_preview TEXT")?;
+        migrate("ALTER TABLE files ADD COLUMN reply_to_sender_identity_id TEXT")?;
+        migrate("ALTER TABLE files ADD COLUMN group_id TEXT")?;
+        migrate("ALTER TABLE files ADD COLUMN sender_identity_id TEXT")?;
+        migrate("CREATE INDEX IF NOT EXISTS idx_files_group ON files(group_id, created_at)")?;
+        migrate("ALTER TABLE files ADD COLUMN sticker INTEGER NOT NULL DEFAULT 0")?;
         // My sticker store: `stickers/<id>.enc`, keyed like attachments.
-        migrate("CREATE TABLE IF NOT EXISTS stickers (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, animated INTEGER NOT NULL, encrypted_key BLOB NOT NULL, key_nonce BLOB NOT NULL)");
-        migrate("ALTER TABLE stickers ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0");
+        migrate("CREATE TABLE IF NOT EXISTS stickers (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, animated INTEGER NOT NULL, encrypted_key BLOB NOT NULL, key_nonce BLOB NOT NULL)")?;
+        migrate("ALTER TABLE stickers ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")?;
         // Stable identity across devices, see `FileOffer.sticker_origin`.
-        migrate("ALTER TABLE stickers ADD COLUMN origin_id TEXT");
-        migrate("UPDATE stickers SET origin_id = 'jxl:' || id WHERE origin_id IS NULL");
-        migrate("CREATE UNIQUE INDEX IF NOT EXISTS idx_stickers_origin ON stickers(origin_id)");
-        migrate("ALTER TABLE files ADD COLUMN sticker_origin TEXT");
-        migrate("CREATE INDEX IF NOT EXISTS idx_files_sticker_origin ON files(sticker_origin)");
+        migrate("ALTER TABLE stickers ADD COLUMN origin_id TEXT")?;
+        migrate("UPDATE stickers SET origin_id = 'jxl:' || id WHERE origin_id IS NULL")?;
+        migrate("CREATE UNIQUE INDEX IF NOT EXISTS idx_stickers_origin ON stickers(origin_id)")?;
+        migrate("ALTER TABLE files ADD COLUMN sticker_origin TEXT")?;
+        migrate("CREATE INDEX IF NOT EXISTS idx_files_sticker_origin ON files(sticker_origin)")?;
         // `FileOffer.chunk_hashes`: each received chunk is checked against it.
-        migrate("ALTER TABLE files ADD COLUMN chunk_hashes BLOB");
+        migrate("ALTER TABLE files ADD COLUMN chunk_hashes BLOB")?;
         // L-135: the group row id of a queued copy (its own ids are per member).
-        migrate("ALTER TABLE pending_group_messages ADD COLUMN local_message_id TEXT");
-        migrate("ALTER TABLE pending_durable_retries ADD COLUMN local_message_id TEXT");
+        migrate("ALTER TABLE pending_group_messages ADD COLUMN local_message_id TEXT")?;
+        migrate("ALTER TABLE pending_durable_retries ADD COLUMN local_message_id TEXT")?;
         // A 'pending' row left by the previous run with no retry behind it
         // would show the clock icon forever: mark it failed. Rows whose send
         // is restored by `load_pending_durable_retries_from_db` stay pending,
@@ -18065,13 +18082,13 @@ impl P2PCore {
     /// ponytail: one COUNT over messages per message of an unknown group;
     /// keep a set in memory if that path gets hot.
     fn unknown_group_has_room(&self, group_id: &str) -> bool {
-        let Some(conn) = &self.db else { return true };
+        let Some(conn) = &self.db else { return false };
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM messages WHERE group_id = ?1)
                  OR (SELECT COUNT(DISTINCT group_id) FROM messages
                      WHERE group_id IS NOT NULL AND group_id != '' AND group_id NOT IN (SELECT group_id FROM groups)) < 16",
             params![group_id], |r| r.get::<_, bool>(0),
-        ).unwrap_or(true)
+        ).unwrap_or(false)
     }
 
     fn process_group_update(&mut self, update: &GroupUpdate) -> Result<(), String> {
@@ -26652,7 +26669,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_encodeJxlAnimated<'local>(
     } else {
         // The Java arrays are copied one by one; the total is capped first.
         let frame_len = width as u64 * height as u64 * 4;
-        let mut bad = frame_len * count as u64 > attachments::MAX_IMAGE_PIXELS * 4;
+        let mut bad = frame_len.saturating_mul(count as u64) > attachments::MAX_IMAGE_PIXELS * 4;
         for i in 0..count {
             if bad {
                 break;
@@ -26707,11 +26724,12 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_importStickerFrames<'local>
     let count = env.get_array_length(&frames).unwrap_or(0).max(0) as usize;
     let mut delays = vec![0i32; env.get_array_length(&delays_ms).unwrap_or(0).max(0) as usize];
     let side = attachments::STICKER_MAX_SIDE as i32;
-    let frame_len = width.max(0) as usize * height.max(0) as usize * 4;
+    // u64: i32 * i32 * 4 cannot overflow it, so no panic before the range checks.
+    let frame_len = width.max(0) as u64 * height.max(0) as u64 * 4;
     let mut pixels: Vec<Vec<u8>> = Vec::new();
     let mut bad = width < 1 || height < 1 || width > side || height > side || count == 0
         || count > attachments::MAX_ANIMATION_FRAMES || delays.len() != count
-        || (frame_len / 4) as u64 * count as u64 > attachments::MAX_IMAGE_PIXELS
+        || (frame_len / 4).saturating_mul(count as u64) > attachments::MAX_IMAGE_PIXELS
         || env.get_int_array_region(&delays_ms, 0, &mut delays).is_err();
     for i in 0..count {
         if bad {
@@ -26721,7 +26739,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_importStickerFrames<'local>
         let array = JByteArray::from(element);
         let bytes = jbytearray_to_vec(&mut env, &array);
         let _ = env.delete_local_ref(array);
-        bad = bytes.len() != frame_len;
+        bad = bytes.len() as u64 != frame_len;
         pixels.push(bytes);
     }
     let result = if bad {

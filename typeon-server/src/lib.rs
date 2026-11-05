@@ -1158,13 +1158,6 @@ impl ServerCore {
         let Some(existing) = self.store.enrollment_by_id(&enrollment_id) else {
             return ServerResponse::Err(ServerErrorCode::NotEnrolled);
         };
-        if existing.state == EnrollmentState::Revoked {
-            return ServerResponse::Err(ServerErrorCode::Revoked);
-        }
-        // Engelli anahtar yeniden bağlanamaz da (bkz. `handle_enroll`).
-        if self.store.is_key_blocked(&existing.enroll_pk) {
-            return ServerResponse::Err(ServerErrorCode::Revoked);
-        }
         if !self.verify_budget(peer, VerifyPool::Rebind, 1) {
             self.stats.rejected += 1;
             return ServerResponse::Err(ServerErrorCode::RateLimited);
@@ -1178,6 +1171,14 @@ impl ServerCore {
         );
         if !verify_hybrid(&existing.enroll_pk, &existing.enroll_pk_pq, &input, &sig, &sig_pq) {
             return ServerResponse::Err(ServerErrorCode::BadSignature);
+        }
+        // After the signature: only the key holder learns the id is revoked.
+        if existing.state == EnrollmentState::Revoked {
+            return ServerResponse::Err(ServerErrorCode::Revoked);
+        }
+        // Engelli anahtar yeniden bağlanamaz da (bkz. `handle_enroll`).
+        if self.store.is_key_blocked(&existing.enroll_pk) {
+            return ServerResponse::Err(ServerErrorCode::Revoked);
         }
         if let Err(msg) = self.store.rebind_enrollment(&enrollment_id, &peer.to_string(), now) {
             error!("Rebind yazılamadı: {msg}");

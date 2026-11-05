@@ -59,7 +59,14 @@ object OutgoingMedia {
                     ?: if (coreScrubs(src) || confirmUnscrubbed()) unchanged else throw java.util.concurrent.CancellationException("send cancelled")
                 mimeType.startsWith("video/") -> remuxVideo(src, fileName, mimeType)
                     ?: if (confirmUnscrubbed()) unchanged else throw java.util.concurrent.CancellationException("send cancelled")
-                else -> unchanged
+                mimeType.startsWith("audio/") -> unchanged
+                // A mislabeled container (ISO-BMFF, Matroska, TIFF, AVI): the core
+                // does not strip it, so remux it as a video or ask first.
+                else -> when (val kind = mediaMagic(src)) {
+                    null -> unchanged
+                    else -> (if (kind.startsWith("video/")) remuxVideo(src, fileName, kind) else null)
+                        ?: if (confirmUnscrubbed()) unchanged else throw java.util.concurrent.CancellationException("send cancelled")
+                }
             }
         } catch (e: java.util.concurrent.CancellationException) {
             throw e
@@ -225,6 +232,27 @@ object OutgoingMedia {
         val n = src.inputStream().use { it.read(h) }
         n >= 4 && (isJpeg(h) || ImagePreview.isJxl(h) || (h[0] == 0x89.toByte() && h[1] == 'P'.code.toByte() && h[2] == 'N'.code.toByte() && h[3] == 'G'.code.toByte()))
     } catch (e: Exception) { false }
+
+    /**
+     * Media by content, whatever the label: "video/mp4" (ISO-BMFF video),
+     * "video/webm" (EBML), "media" (HEIF/AVIF, TIFF, AVI: not remuxed here)
+     * or null.
+     */
+    private fun mediaMagic(src: File): String? {
+        val h = ByteArray(16)
+        if (src.inputStream().use { it.read(h) } < 12) return null
+        val s = String(h, Charsets.ISO_8859_1)
+        return when {
+            s.substring(4, 8) == "ftyp" ->
+                if (s.substring(8, 12) in IMAGE_BRANDS) "media" else "video/mp4"
+            h[0] == 0x1A.toByte() && h[1] == 0x45.toByte() && h[2] == 0xDF.toByte() && h[3] == 0xA3.toByte() -> "video/webm"
+            s.startsWith("II*\u0000") || s.startsWith("MM\u0000*") -> "media"
+            s.startsWith("RIFF") && s.substring(8, 12) == "AVI " -> "media"
+            else -> null
+        }
+    }
+
+    private val IMAGE_BRANDS = setOf("heic", "heix", "heim", "heis", "hevc", "hevx", "mif1", "msf1", "avif", "avis")
 
     private fun isJpeg(h: ByteArray) = h[0] == 0xFF.toByte() && h[1] == 0xD8.toByte() && h[2] == 0xFF.toByte()
 

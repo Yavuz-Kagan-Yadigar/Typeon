@@ -710,17 +710,21 @@ class ContactsFragment : Fragment() {
             Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
             return
         }
-        val code = try {
-            P2PLib.getManualAddCode(ownNodeAddress)
-        } catch (e: Exception) {
-            ""
+        // `getManualAddCode` takes the core lock: off the main thread (`offMain`).
+        offMain({
+            try {
+                P2PLib.getManualAddCode(ownNodeAddress)
+            } catch (e: Exception) {
+                ""
+            }
+        }) { code ->
+            if (code.isEmpty()) {
+                Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
+            } else {
+                com.p2p.messenger.util.copySensitive(requireContext(), getString(R.string.lbl_clipboard_pairing_code), code)
+                Toast.makeText(requireContext(), R.string.msg_manual_code_copied, Toast.LENGTH_LONG).show()
+            }
         }
-        if (code.isEmpty()) {
-            Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
-            return
-        }
-        com.p2p.messenger.util.copySensitive(requireContext(), getString(R.string.lbl_clipboard_pairing_code), code)
-        Toast.makeText(requireContext(), R.string.msg_manual_code_copied, Toast.LENGTH_LONG).show()
     }
 
     /** bkz. `btn_copy_own_address` — spec dışı, kullanıcı isteği: bu da
@@ -734,16 +738,20 @@ class ContactsFragment : Fragment() {
             Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
             return
         }
-        val code = try {
-            P2PLib.getManualAddCode(ownNodeAddress)
-        } catch (e: Exception) {
-            ""
+        // `getManualAddCode` takes the core lock: off the main thread (`offMain`).
+        offMain({
+            try {
+                P2PLib.getManualAddCode(ownNodeAddress)
+            } catch (e: Exception) {
+                ""
+            }
+        }) { code ->
+            if (code.isEmpty()) {
+                Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
+            } else {
+                com.p2p.messenger.util.copySensitive(requireContext(), getString(R.string.lbl_clipboard_pairing_code), code)
+                Toast.makeText(requireContext(), R.string.msg_own_address_copied, Toast.LENGTH_LONG).show()
+            }
         }
-        if (code.isEmpty()) {
-            Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
-            return
-        }
-        com.p2p.messenger.util.copySensitive(requireContext(), getString(R.string.lbl_clipboard_pairing_code), code)
-        Toast.makeText(requireContext(), R.string.msg_own_address_copied, Toast.LENGTH_LONG).show()
     }
 }
