@@ -66,6 +66,7 @@
     <string name="msg_server_added">Server added. Connecting…</string>
     <string name="msg_join_link_confirm">Add this server?\n\n%1$s</string>
     <string name="msg_join_link_needs_identity">Create your account first, then open the link again.</string>
+    <string name="lbl_app_version">Version %1$s</string>
     <string name="msg_server_removed">Server removed</string>
     <string name="lbl_server_route">Route messages through this server</string>
     <string name="lbl_server_history">Store history on this server</string>

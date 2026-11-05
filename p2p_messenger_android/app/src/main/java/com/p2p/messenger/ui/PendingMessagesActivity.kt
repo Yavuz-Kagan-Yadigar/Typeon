@@ -115,7 +115,7 @@ class PendingMessagesActivity : AppCompatActivity() {
 
         val result = mutableListOf<PendingMessagesAdapter.Item>()
         for (i in 0 until pendingJson.length()) {
-            val obj = pendingJson.getJSONObject(i)
+            val obj = pendingJson.optJSONObject(i) ?: continue
             val groupId = if (obj.isNull("group_id")) null else obj.optString("group_id").ifEmpty { null }
             val fp = obj.optString("peer_device_fingerprint")
             val targetName = if (groupId != null) {

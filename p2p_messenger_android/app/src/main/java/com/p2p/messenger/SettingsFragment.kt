@@ -379,6 +379,10 @@ class SettingsFragment : Fragment() {
         }
 
         setupServers(view)
+        view.findViewById<TextView>(R.id.txt_app_version)?.text = getString(
+            R.string.lbl_app_version,
+            try { requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionName } catch (e: Exception) { "?" }
+        )
 
         setupAppearanceControls(view)
         setupLanguageControl(view)
@@ -596,7 +600,7 @@ class SettingsFragment : Fragment() {
                 val revokedFps = ArrayList<String?>()
                 val thisDevice = getString(R.string.linked_devices_this_device)
                 for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
+                    val o = arr.optJSONObject(i) ?: continue
                     val name = o.optString("device_name").ifEmpty { o.optString("device_fingerprint").take(8) }
                     val isThis = o.optBoolean("is_this_device", false)
                     val isActive = o.optBoolean("is_active", true)
@@ -1705,7 +1709,23 @@ class SettingsFragment : Fragment() {
             .setTitle(R.string.dlg_add_server_title)
             .setView(input)
             .setPositiveButton(android.R.string.ok) { _, _ ->
-                addServer(input.text.toString().trim())
+                val code = input.text.toString().trim()
+                if (code.isEmpty()) return@setPositiveButton
+                // Same disclosure as the other add-server doors: the history
+                // warning only when this server would become the history server.
+                lifecycleScope.launch {
+                    val historyServer = withContext(Dispatchers.IO) { P2PLib.nextServerStoresHistory(code) }
+                    if (!isAdded) return@launch
+                    AlertDialog.Builder(requireContext())
+                        .setTitle(R.string.dlg_add_server_title)
+                        .setMessage(
+                            getString(R.string.msg_join_link_confirm, code) +
+                                if (historyServer) "\n\n" + getString(R.string.lbl_server_history_warn) + " " + getString(R.string.msg_server_history_upload) else ""
+                        )
+                        .setPositiveButton(android.R.string.ok) { _, _ -> addServer(code) }
+                        .setNegativeButton(android.R.string.cancel, null)
+                        .show()
+                }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -1870,13 +1890,17 @@ class SettingsFragment : Fragment() {
             setOnClickListener {
                 // fixpass (glm A3): `removeServer` JNI — off the main thread.
                 lifecycleScope.launch(Dispatchers.IO) {
-                    try {
+                    val res = try {
                         P2PLib.removeServer(serverId)
                     } catch (e: Exception) {
-                        // yok sayılır — liste zaten yenilenecek
+                        "Error: ${e.message}"
                     }
                     withContext(Dispatchers.Main) {
-                        Toast.makeText(ctx, R.string.msg_server_removed, Toast.LENGTH_SHORT).show()
+                        if (res.startsWith("Error:")) {
+                            Toast.makeText(ctx, com.p2p.messenger.util.coreErrorText(ctx, res), Toast.LENGTH_LONG).show()
+                        } else {
+                            Toast.makeText(ctx, R.string.msg_server_removed, Toast.LENGTH_SHORT).show()
+                        }
                         refreshServers()
                     }
                 }

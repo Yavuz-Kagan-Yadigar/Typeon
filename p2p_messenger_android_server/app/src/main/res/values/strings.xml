@@ -28,8 +28,8 @@
 
     <string name="lbl_options">Options</string>
     <string name="lbl_tor_always">This server always hosts an onion service. That is the only way a phone behind carrier NAT is reachable at all — no port forwarding, no domain, no certificate — so it is not something to switch off.</string>
-    <string name="lbl_node">Also act as a relay and DHT node</string>
-    <string name="lbl_node_desc">Helps unrelated users find each other and connect. Independent of the mailbox: it carries live traffic blindly and stores nothing.</string>
+    <string name="lbl_node">Also act as a relay</string>
+    <string name="lbl_node_desc">Helps unrelated users connect to each other. Independent of the mailbox: it carries live traffic blindly and stores nothing.</string>
     <string name="action_battery">Exempt from battery optimisation</string>
     <string name="msg_battery_already">Already exempt</string>
     <string name="msg_battery_manual">Not available on this device — set it manually in Settings → Battery.</string>

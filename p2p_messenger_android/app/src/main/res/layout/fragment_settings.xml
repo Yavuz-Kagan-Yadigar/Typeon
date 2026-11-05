@@ -624,6 +624,14 @@
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
+    <TextView
+        android:id="@+id/txt_app_version"
+        style="@style/Settings.Desc"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="center_horizontal" />
+
 </LinearLayout>
 
 </androidx.core.widget.NestedScrollView>

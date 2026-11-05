@@ -50,6 +50,7 @@
     <string name="lbl_servers_desc">Sunucu, karşı taraf çevrimdışıyken mesajlarınızı tutar, o çevrimiçi olunca iletir. Mesajları okuyamaz, çünkü mesajlar şifreli kalır.</string>
     <string name="action_add_server">Sunucu QR\'ı tara</string>
     <string name="action_add_server_paste">Kod yapıştır</string>
+    <string name="lbl_app_version">Sürüm %1$s</string>
     <string name="dlg_add_server_title">Sunucu ekle</string>
     <string name="dlg_add_server_hint">typeon-server:/dns/…onion/tcp/…/p2p/…#jeton</string>
     <string name="lbl_display_name">Hesap adı</string>

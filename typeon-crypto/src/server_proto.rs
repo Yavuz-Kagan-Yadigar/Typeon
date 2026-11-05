@@ -69,7 +69,9 @@ pub const RELAY_PROTOCOL: &str = "/typeon/relay/1.0.0";
 ///    (`key_bound_mailbox_id`); the server refuses any other key for them.
 /// 6: upload secrets are 24 bytes and start with the file's author tag
 ///    (`blob_id_for_upload_secret`).
-pub const SERVER_PROTOCOL_VERSION: u16 = 6;
+/// 7: the id hashes only the secret's bytes after the tag (I-42: a group
+///    file's tag is then made per file, see core `group_msg_tag`).
+pub const SERVER_PROTOCOL_VERSION: u16 = 7;
 
 /// Tek bir `Deposit`in azami yükü. Modül başındaki "Boyut tavanı" notuna
 /// bakın: codec'in sert sınırı 1 MiB, buradaki pay CBOR enum/alan
@@ -491,11 +493,10 @@ pub struct MailItem {
     /// ilerletebilsin diye. Tek bir `Fetch` birden çok kutuyu sorduğundan
     /// bu alan olmadan yanıt ayrıştırılamaz.
     pub mailbox_id: MailboxId,
-    /// Sunucunun atadığı, KESİN OLARAK ARTAN sıra numarası (SQLite
-    /// AUTOINCREMENT rowid — sunucu genelinde global, dolayısıyla her tek
-    /// kutu içinde de artan, ki imlecin ihtiyacı olan tam da bu).
-    /// Because it is global, an enrolled reader can estimate the server-wide
-    /// intake rate from seq gaps (accepted leak).
+    /// Sunucunun atadığı, kutu içinde KESİN OLARAK ARTAN sıra numarası
+    /// (imlecin ihtiyacı olan tam da bu). It counts per mailbox (the server's
+    /// `mail_seq` table): a server-global seq let any reader estimate the
+    /// server-wide intake rate from gaps, so it must not become global again.
     ///
     /// İstemci imlecini (`server_cursors` tablosu) ancak öğeyi İŞLEDİKTEN
     /// SONRA ilerletir. Yani garanti "en az bir kez"dir, "en fazla bir kez"
@@ -757,6 +758,7 @@ mod tests {
         // The id itself is no secret: sent back as one it names another blob.
         assert!(blob_id_for_upload_secret(id.as_bytes()).is_none());
         assert!(blob_id_for_upload_secret(&[7u8; 15]).is_none());
+        assert!(id.ends_with(&blob_id_hash_hex(&[7u8; BLOB_UPLOAD_SECRET_LEN - BLOB_TAG_LEN])));
     }
 
     #[test]
@@ -906,19 +908,27 @@ pub const BLOB_UPLOAD_SECRET_LEN: usize = 24;
 pub const BLOB_TAG_LEN: usize = 8;
 
 /// The blob (= file) id an upload secret stands for: 48 lower-case hex
-/// characters, the secret's author tag in the clear and then a hash of the
-/// whole secret. The sender picks the secret, names only this id in its
-/// `FileOffer`, and proves ownership on the server with the secret itself.
-/// The tag lets a group member check that a file id belongs to the member
-/// who offers it (core `group_msg_tag`); the server does not look at it.
-/// `None` for a secret of the wrong length.
+/// characters, the secret's author tag in the clear and then
+/// `blob_id_hash_hex` of the secret's other bytes. The sender picks the
+/// secret, names only this id in its `FileOffer`, and proves ownership on
+/// the server with the secret itself. The tag lets a group member check that
+/// a file id belongs to the member who offers it (core `group_msg_tag`, made
+/// from the hash part, so it differs per file); the server does not look at
+/// it. `None` for a secret of the wrong length.
 pub fn blob_id_for_upload_secret(upload_secret: &[u8]) -> Option<String> {
-    use sha2::{Digest, Sha256};
     if upload_secret.len() != BLOB_UPLOAD_SECRET_LEN {
         return None;
     }
-    let hash = Sha256::new_with_prefix(b"typeon-blob-id-v2").chain_update(upload_secret).finalize();
-    Some(format!("{}{}", hex::encode(&upload_secret[..BLOB_TAG_LEN]), hex::encode(&hash[..16])))
+    let (tag, rest) = upload_secret.split_at(BLOB_TAG_LEN);
+    Some(format!("{}{}", hex::encode(tag), blob_id_hash_hex(rest)))
+}
+
+/// The id's part after the tag: a hash of the upload secret's bytes after
+/// the tag (32 hex characters). Separate so the tag can be made from it.
+pub fn blob_id_hash_hex(secret_after_tag: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::new_with_prefix(b"typeon-blob-id-v3").chain_update(secret_after_tag).finalize();
+    hex::encode(&hash[..16])
 }
 
 #[cfg(test)]

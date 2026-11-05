@@ -59,7 +59,12 @@ object OutgoingMedia {
                     ?: if (coreScrubs(src) || confirmUnscrubbed()) unchanged else throw java.util.concurrent.CancellationException("send cancelled")
                 mimeType.startsWith("video/") -> remuxVideo(src, fileName, mimeType)
                     ?: if (confirmUnscrubbed()) unchanged else throw java.util.concurrent.CancellationException("send cancelled")
-                mimeType.startsWith("audio/") -> unchanged
+                // m4a/ISO-BMFF audio can carry location atoms: remux without them, else ask. Other audio is untouched.
+                mimeType.startsWith("audio/") ->
+                    if (mediaMagic(src) == "video/mp4") {
+                        remuxVideo(src, fileName, "video/mp4")?.let { Prepared(it.file, fileName, mimeType) }
+                            ?: if (confirmUnscrubbed()) unchanged else throw java.util.concurrent.CancellationException("send cancelled")
+                    } else unchanged
                 // A mislabeled container (ISO-BMFF, Matroska, TIFF, AVI): the core
                 // does not strip it, so remux it as a video or ask first.
                 else -> when (val kind = mediaMagic(src)) {

@@ -946,17 +946,22 @@ fn is_safe_file_id(id: &str) -> bool {
 }
 
 /// The 8-byte author tag every group message id starts with (as 16 hex
-/// characters): a hash of the group and the author's identity id. Text ids
-/// are `<tag>-<uuid>`; file ids carry it through the blob upload secret (see
-/// `blob_upload_secret`). A receiver recomputes it from the authenticated
-/// sender, or from a history row's author, so no member can make an id that
-/// collides with another member's message (C-02).
-fn group_msg_tag(group_id: &str, author_identity_id: &str) -> [u8; 8] {
+/// characters): a hash of the group, the author's identity id and the rest
+/// of the id. Text ids are `<tag>-<uuid>`; file ids carry it through the
+/// blob upload secret (`<tag><blob_id_hash_hex>`, see `blob_upload_secret`).
+/// A receiver recomputes it from the authenticated sender, or from a history
+/// row's author, so no member can make an id that collides with another
+/// member's message (C-02). The rest is hashed in so a file's tag, which a
+/// server sees in the blob id, differs per file and links no two of an
+/// author's files (I-42).
+fn group_msg_tag(group_id: &str, author_identity_id: &str, rest: &str) -> [u8; 8] {
     use sha2::Digest as _;
-    let h = sha2::Sha256::new_with_prefix(b"typeon-group-msg-id-v1")
+    let h = sha2::Sha256::new_with_prefix(b"typeon-group-msg-id-v2")
         .chain_update(group_id.as_bytes())
         .chain_update([0u8])
         .chain_update(author_identity_id.as_bytes())
+        .chain_update([0u8])
+        .chain_update(rest.as_bytes())
         .finalize();
     let mut tag = [0u8; 8];
     tag.copy_from_slice(&h[..8]);
@@ -964,9 +969,12 @@ fn group_msg_tag(group_id: &str, author_identity_id: &str) -> [u8; 8] {
 }
 
 /// Whether group message id `id` was made by `author_identity_id` in
-/// `group_id` (it starts with that author's `group_msg_tag`).
+/// `group_id` (it starts with that author's `group_msg_tag` of the rest).
 fn group_msg_id_bound(group_id: &str, author_identity_id: &str, id: &str) -> bool {
-    id.len() > 16 && id.starts_with(&hex::encode(group_msg_tag(group_id, author_identity_id)))
+    match (id.get(..16), id.get(16..)) {
+        (Some(tag), Some(rest)) if !rest.is_empty() => tag == hex::encode(group_msg_tag(group_id, author_identity_id, rest)),
+        _ => false,
+    }
 }
 
 /// A group reply that names the quoted author must quote an id of that
@@ -2846,7 +2854,7 @@ mod review5_tests {
         let (mut core, dir) = core_on_disk("edit");
         let gid = "group-0123456789abcdef";
         let author = "ab".repeat(32);
-        let m1 = format!("{}-1", hex::encode(group_msg_tag(gid, &author)));
+        let m1 = format!("{}-1", hex::encode(group_msg_tag(gid, &author, "-1")));
         core.archive_group_message(gid, &author, "received", b"old", Some(&m1), None, None, None, 5, None).unwrap();
         // Another member may not edit it: the id carries the author's tag.
         let other = MessageContent::Edit { target_message_id: m1.clone(), new_text: "x".into(), group_id: Some(gid.into()), edited_at_ms: 9, author_proof: None };
@@ -2863,13 +2871,16 @@ mod review5_tests {
     /// members can check who may offer it (C-02).
     #[test]
     fn group_file_id_carries_the_author_tag() {
-        let mut secret = group_msg_tag("g", "a").to_vec();
+        let rest = server_proto::blob_id_hash_hex(&[1u8; 16]);
+        let mut secret = group_msg_tag("g", "a", &rest).to_vec();
         secret.extend_from_slice(&[1u8; 16]);
         let id = server_proto::blob_id_for_upload_secret(&secret).unwrap();
+        // I-42: another file of the same author shows another tag.
+        assert_ne!(group_msg_tag("g", "a", &rest), group_msg_tag("g", "a", &server_proto::blob_id_hash_hex(&[2u8; 16])));
         assert!(group_msg_id_bound("g", "a", &id));
         assert!(!group_msg_id_bound("g", "b", &id));
         assert!(!group_msg_id_bound("h", "a", &id));
-        assert!(!group_msg_id_bound("g", "a", &hex::encode(group_msg_tag("g", "a"))), "tag alone is no id");
+        assert!(!group_msg_id_bound("g", "a", &hex::encode(group_msg_tag("g", "a", ""))), "tag alone is no id");
         assert!(!group_reply_bound("g", Some(&id), Some("b")));
         assert!(group_reply_bound("g", Some(&id), None));
     }
@@ -18720,7 +18731,8 @@ impl P2PCore {
         // bunu sıradan bir 1:1 mesajdan ayırt edip GroupChatActivity'ye
         // yönlendirebilmesi için (bkz. receive_message notu).
         // Starts with our author tag: receivers refuse an id without it.
-        let local_id = format!("{}-{}", hex::encode(group_msg_tag(group_id, &own_identity_id)), uuid::Uuid::new_v4());
+        let id_rest = format!("-{}", uuid::Uuid::new_v4());
+        let local_id = format!("{}{}", hex::encode(group_msg_tag(group_id, &own_identity_id, &id_rest)), id_rest);
         let sent_at_ms = current_time_ms();
         // Kardeş cihaz yankısı için kopyala (aşağıda content'e taşınıyor).
         let echo_reply_id = reply_to_message_id.clone();
@@ -19567,8 +19579,12 @@ impl P2PCore {
         // `blob_upload_secret`), so no recipient can claim the server blob.
         // In a group it starts with our author tag, which members check
         // (`group_msg_tag`); a 1:1 file gets a random one.
+        // The group tag is made from the id's hash part, so it differs per
+        // file (I-42).
+        let secret_rest = self.blob_upload_secret(&file_key, &[0u8; 8]).ok_or_else(|| "History key not loaded".to_string())?;
+        let hash_hex = server_proto::blob_id_hash_hex(&secret_rest[server_proto::BLOB_TAG_LEN..]);
         let tag: [u8; 8] = match group_id {
-            Some(gid) => group_msg_tag(gid, &self.my_identity_id().ok_or("No identity")?),
+            Some(gid) => group_msg_tag(gid, &self.my_identity_id().ok_or("No identity")?, &hash_hex),
             None => { use rand::RngCore; let mut t = [0u8; 8]; OsRng.fill_bytes(&mut t); t }
         };
         let file_id = self
@@ -20009,13 +20025,16 @@ impl P2PCore {
     /// otomatik indirme olmaz).
     /// `server_back`: a server just enrolled — any partial download may have
     /// its blob there, so every row is a candidate.
+    /// A row without chunk hashes (an offer from before them, I-41) is never
+    /// a candidate: `download_file` refuses it every time.
     fn resume_incomplete_downloads_for(&mut self, reconnected: &std::collections::HashSet<String>, server_back: bool) {
         if reconnected.is_empty() && !server_back { return; }
         let candidates: Vec<(String, String, u64)> = {
             let conn = match &self.db { Some(c) => c, None => return };
             let mut stmt = match conn.prepare(
                 "SELECT file_id, peer_device_fingerprint, total_size FROM files \
-                 WHERE status IN ('downloading','failed') AND direction = 'received'"
+                 WHERE status IN ('downloading','failed') AND direction = 'received' \
+                 AND length(chunk_hashes) > 0"
             ) { Ok(s) => s, Err(_) => return };
             stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? as u64)))
                 .map(|it| it.flatten().collect())

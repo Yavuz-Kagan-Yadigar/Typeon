@@ -28,8 +28,8 @@
 
     <string name="lbl_options">Seçenekler</string>
     <string name="lbl_tor_always">Bu sunucu her zaman bir onion service barındırır. Operatör NAT\'ı arkasındaki bir telefonun ulaşılabilir olmasının tek yolu bu — port yönlendirme, alan adı, sertifika gerekmez — bu yüzden kapatılabilir bir seçenek değil.</string>
-    <string name="lbl_node">Ayrıca röle ve DHT düğümü ol</string>
-    <string name="lbl_node_desc">Birbirini tanımayan kullanıcıların bulunup bağlanmasına yardım eder. Posta kutusundan bağımsızdır: canlı trafiği kör taşır, hiçbir şey saklamaz.</string>
+    <string name="lbl_node">Ayrıca röle ol</string>
+    <string name="lbl_node_desc">Birbirini tanımayan kullanıcıların birbirine bağlanmasına yardım eder. Posta kutusundan bağımsızdır: canlı trafiği kör taşır, hiçbir şey saklamaz.</string>
     <string name="action_battery">Pil optimizasyonundan muaf tut</string>
     <string name="msg_battery_already">Zaten muaf</string>
     <string name="msg_battery_manual">Bu cihazda mevcut değil — Ayarlar → Pil bölümünden elle yapın.</string>

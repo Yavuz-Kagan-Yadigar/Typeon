@@ -265,7 +265,8 @@ impl Store {
     }
 
     /// Şema. Çekirdeğin `init_db`'siyle aynı sözleşme: `CREATE TABLE IF NOT
-    /// EXISTS` + ileride eklenecek kolonlar için hatası yutulan `ALTER TABLE`.
+    /// EXISTS` + ileride eklenecek kolonlar için `ALTER TABLE` (yalnız
+    /// "duplicate column name" yutulur).
     ///
     /// Runs once per `SCHEMA_VERSION`: every CLI/JNI open re-ran the batch,
     /// writes included, against the DB the daemon serves.
@@ -432,9 +433,17 @@ impl Store {
                 "#,
             )
             .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
-        // Mevcut kurulumlar için (kolon yoksa ekle; varsa hata yutulur).
-        let _ = self.conn.execute("ALTER TABLE blobs ADD COLUMN chunk_size INTEGER NOT NULL DEFAULT 0", []);
-        let _ = self.conn.execute("ALTER TABLE mail ADD COLUMN sealed_hash BLOB", []);
+        // K-41: SQLite has no `ADD COLUMN IF NOT EXISTS`. Only "duplicate
+        // column name" means the column is there; any other failure fails
+        // init before `user_version` is stamped, so the next start retries.
+        let add_column = |sql: &str| -> Result<(), String> {
+            match self.conn.execute(sql, []) {
+                Err(e) if !e.to_string().contains("duplicate column name") => Err(format!("Şema oluşturulamadı ({sql}): {e}")),
+                _ => Ok(()),
+            }
+        };
+        add_column("ALTER TABLE blobs ADD COLUMN chunk_size INTEGER NOT NULL DEFAULT 0")?;
+        add_column("ALTER TABLE mail ADD COLUMN sealed_hash BLOB")?;
         // The global AUTOINCREMENT `seq` becomes per mailbox. Old rows keep
         // their seq; new ones start above the old high-water mark
         // (`mail_seq_base`), so no client cursor ends up above new mail.
@@ -464,7 +473,7 @@ impl Store {
         }
         // The per-box key binding becomes a per-reader key: each reader keeps
         // the key its box was bound to, then the binding table goes.
-        let _ = self.conn.execute("ALTER TABLE mailbox_readers ADD COLUMN key_hash BLOB", []);
+        add_column("ALTER TABLE mailbox_readers ADD COLUMN key_hash BLOB")?;
         let _ = self.conn.execute(
             "UPDATE mailbox_readers SET key_hash = (SELECT k.key_hash FROM mailbox_keys k
                                                     WHERE k.mailbox_id = mailbox_readers.mailbox_id)
@@ -2227,6 +2236,65 @@ mod tests {
         set_db_key(None);
         assert!(Store::open(&p).is_err(), "plain open of an encrypted DB must fail");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// I-48 / K-41: an on-disk DB stamped at an older version and missing a
+    /// later column gets it; a failing `ALTER` fails init and leaves the old
+    /// stamp, so the next start retries. Opened without `Store::open` so the
+    /// global `DB_KEY` of the SQLCipher test cannot race this one.
+    #[test]
+    fn old_schema_gets_missing_column_or_stays_unstamped() {
+        let dir = std::env::temp_dir().join(format!("typeon_schema_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("old.db");
+        let open = || Store { conn: Connection::open(&p).unwrap() };
+        let version = |s: &Store| s.conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap();
+        let has_chunk_size = |s: &Store| {
+            s.conn.query_row("SELECT COUNT(*) FROM pragma_table_info('blobs') WHERE name = 'chunk_size'", [], |r| r.get::<_, i64>(0)).unwrap() == 1
+        };
+        {
+            let s = open();
+            s.init_schema().unwrap();
+            s.conn.execute_batch("ALTER TABLE blobs DROP COLUMN chunk_size; PRAGMA user_version = 3;").unwrap();
+            assert!(!has_chunk_size(&s));
+        }
+        {
+            let s = open();
+            s.init_schema().unwrap();
+            assert!(has_chunk_size(&s), "the missing column is added");
+            assert_eq!(version(&s), SCHEMA_VERSION);
+        }
+        {
+            // `ALTER TABLE mail ADD COLUMN` fails for a reason other than a
+            // duplicate column (a view cannot take one).
+            let s = open();
+            s.conn
+                .execute_batch("DROP INDEX IF EXISTS idx_mail_hash; DROP TABLE mail; CREATE VIEW mail AS SELECT 1 AS seq; PRAGMA user_version = 3;")
+                .unwrap();
+            assert!(s.init_schema().is_err());
+            assert_eq!(version(&s), 3, "a failed ALTER does not stamp the schema version");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// I-48: the reader cap is per proof key. Two different keys on one
+    /// first-contact box each get `MAX_READERS_PER_KEY` slots; a third reader
+    /// of either key is refused while the two are in use.
+    #[test]
+    fn two_keys_on_one_box_each_take_two_readers() {
+        let s = Store::open_in_memory().unwrap();
+        let id = vec!["mb_1".to_string()];
+        let proof = |key: &[u8]| vec![("mb_1".to_string(), key.to_vec())];
+        let owners: Vec<Vec<u8>> = (0..6u8).map(|i| enroll(&s, &[b'a' + i; 4], &format!("peer{i}"))).collect();
+        for (i, key) in [&b"key-1"[..], &b"key-2"[..]].into_iter().enumerate() {
+            for o in &owners[i * 3..i * 3 + 2] {
+                assert_eq!(s.register_mailboxes_proved(o, &id, &[], &proof(key), 0, 10).unwrap(), (vec![], vec![]));
+            }
+            assert_eq!(s.register_mailboxes_proved(&owners[i * 3 + 2], &id, &[], &proof(key), 0, 10).unwrap().0, id);
+        }
+        let readers = s.conn.query_row("SELECT COUNT(*) FROM mailbox_readers WHERE mailbox_id = 'mb_1'", [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(readers, 4);
     }
 
     #[test]

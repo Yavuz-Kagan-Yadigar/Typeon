@@ -227,7 +227,7 @@ class QrScanActivity : AppCompatActivity() {
             val invite = text.trim()
             // Already off the main thread (camera analyzer): the same
             // history-server read MainActivity does before its confirm dialog.
-            addServerQuestion(invite.take(300), P2PLib.nextServerStoresHistory(invite))
+            addServerQuestion(invite, P2PLib.nextServerStoresHistory(invite))
         } else {
             val peek = try { P2PLib.peekDeviceLink(cborBytes) } catch (e: Throwable) { "Error: ${e.message}" }
             val obj = if (peek.startsWith("Error:")) null else try { JSONObject(peek) } catch (e: Exception) { null }
