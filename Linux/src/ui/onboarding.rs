@@ -634,6 +634,9 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
     content.append(&qr_slot);
     content.append(&spinner);
     content.append(&status);
+    // A pending link can be months old (the phone side long gone): without
+    // this the only way back to the setup choices was deleting files by hand.
+    content.append(&erase_button(app, "Cancel linking and start over"));
 
     let page = adw::StatusPage::builder()
         .title("Scan this from your phone")
@@ -783,6 +786,29 @@ fn fatal(app: &Rc<App>, host: &adw::ToastOverlay, title: &str, detail: &str) {
         quit.connect_clicked(move |_| application.quit());
     }
 
+    let logout = erase_button(app, "Log out and erase this device");
+
+    let actions = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(10)
+        .halign(gtk::Align::Center)
+        .build();
+    actions.append(&quit);
+    actions.append(&logout);
+
+    host.set_child(Some(
+        &adw::StatusPage::builder()
+            .icon_name("dialog-error-symbolic")
+            .title(title)
+            .description(detail)
+            .child(&actions)
+            .build(),
+    ));
+}
+
+/// The one escape hatch out of onboarding: confirm, then the same wipe as
+/// `settings::confirm_logout`. A fresh launch lands on the welcome page.
+fn erase_button(app: &Rc<App>, label: &str) -> gtk::Button {
     // Every fatal state here is an unreadable or rejected vault, and the only
     // way forward is the one the message spells out: erase this device's data
     // and set it up again. The welcome screen has no way back to this — there
@@ -791,9 +817,7 @@ fn fatal(app: &Rc<App>, host: &adw::ToastOverlay, title: &str, detail: &str) {
     // keyring key first, then the whole data directory, then quit (the core
     // still holds the identity in memory and the poll thread, if it started,
     // is running against files that are about to vanish).
-    let logout = gtk::Button::builder()
-        .label("Log out and erase this device")
-        .build();
+    let logout = gtk::Button::builder().label(label).build();
     logout.add_css_class("pill");
     logout.add_css_class("destructive-action");
     {
@@ -824,23 +848,7 @@ fn fatal(app: &Rc<App>, host: &adw::ToastOverlay, title: &str, detail: &str) {
             );
         });
     }
-
-    let actions = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(10)
-        .halign(gtk::Align::Center)
-        .build();
-    actions.append(&quit);
-    actions.append(&logout);
-
-    host.set_child(Some(
-        &adw::StatusPage::builder()
-            .icon_name("dialog-error-symbolic")
-            .title(title)
-            .description(detail)
-            .child(&actions)
-            .build(),
-    ));
+    logout
 }
 
 /// A sensible default device name — this is what the phone will list under
