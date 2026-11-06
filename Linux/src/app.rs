@@ -300,7 +300,11 @@ impl App {
             // included), tell the user, then stop the process. The poll thread
             // is still running against a now-deleted database, so quitting is
             // the only safe finish; a fresh launch lands on onboarding.
-            "sync" => self.persist_archive_key_if_new(),
+            "sync" => {
+                self.persist_archive_key_if_new();
+                // A sibling's sync may bring contacts and their avatars.
+                self.refresh_caches();
+            }
             "call" => crate::ui::call::on_event(self, event),
             "self_revoked" => {
                 // Stop the poll thread before erasing the files it works on

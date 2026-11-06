@@ -1966,9 +1966,9 @@ mod recovery_tests {
         let entry = |id: &str, at: u64| SiblingHistoryEntry {
             conversation_identity_id: None, group_id: Some(gid.clone()), direction: "received".into(), text: "t".into(),
             message_id: id.into(), sender_identity_id: Some("x".into()), reply_to_message_id: None, reply_to_preview: None,
-            reply_to_sender_identity_id: None, sent_at_ms: at, author_proof: None,
+            reply_to_sender_identity_id: None, sent_at_ms: at, author_proof: None, file: None, reactions: Vec::new(),
         };
-        core.apply_sibling_history(vec![entry("m1", 1), entry("m2", current_time_ms() + 1_000)], false);
+        core.apply_sibling_history("", vec![entry("m1", 1), entry("m2", current_time_ms() + 1_000)], false);
         assert!(!core.message_exists_in_chat("m1", Some(gid.as_str()), ""), "cleared row stays gone");
         assert!(core.message_exists_in_chat("m2", Some(gid.as_str()), ""), "a newer row still arrives");
         // No window, or a window no press of ours opened to this sibling: automatic.
@@ -1993,6 +1993,42 @@ mod recovery_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A sibling's history answer carries attachments and reactions: the
+    /// file row arrives with its date and voice length, and a reaction lands
+    /// on a text row the requester already had.
+    #[test]
+    fn sibling_history_carries_files_and_reactions() {
+        let gid = "group-0123456789abcdef".to_string();
+        let mk = |name: &str| {
+            let dir = std::env::temp_dir().join(format!("typeon-sibfile-{}-{}", name, std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("attachments")).unwrap();
+            let mut core = core_on_disk(&dir);
+            core.groups.insert(gid.clone(), Group::new(gid.clone(), "g".into(), "me".into(), 1));
+            core.archive_group_message(&gid, "x", "received", b"hi", Some("m1"), None, None, None, 5, None).unwrap();
+            core
+        };
+        let (a, mut b) = (mk("a"), mk("b"));
+        let (key, nonce) = a.wrap_file_key(&[7u8; 32]).unwrap();
+        a.db.as_ref().unwrap().execute(
+            "INSERT INTO files (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size, sha256_hex,
+               encrypted_file_key, key_nonce, status, created_at, group_id, sender_identity_id, chunk_hashes, duration_ms)
+             VALUES ('f1', 'p', 'received', 'v.ogg', 'audio/ogg', 9, ?1, ?2, ?3, 'complete', 42, ?4, 'x', ?5, 9000)",
+            params!["ab".repeat(32), key, nonce, gid, vec![0u8; attachments::chunk_hashes_len(1)]],
+        ).unwrap();
+        assert!(a.apply_reaction("m1", "x", "A", 3));
+        assert!(a.apply_reaction("f1", "x", "B", 4));
+        let (entries, _) = a.build_sibling_history_response(50, None, Some(&gid), None, None, None);
+        b.apply_sibling_history("sib", entries, false);
+        let row: (String, i64, Option<i64>) = b.db.as_ref().unwrap().query_row(
+            "SELECT direction, created_at, duration_ms FROM files WHERE file_id = 'f1'", [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(row, ("received".to_string(), 42, Some(9000)));
+        assert_eq!(b.reactions_summary("m1"), "A");
+        assert_eq!(b.reactions_summary("f1"), "B");
+    }
+
     /// A cleared 1:1 chat's rows stay gone: a sibling's automatic backfill
     /// and the peer's chat-open sync are refused by the floor. The peer's
     /// answer to the user's "Fetch older history" press keeps exactly its
@@ -2013,9 +2049,9 @@ mod recovery_tests {
         let entry = |id: &str, at: u64| SiblingHistoryEntry {
             conversation_identity_id: Some("id1".into()), group_id: None, direction: "received".into(), text: "t".into(),
             message_id: id.into(), sender_identity_id: None, reply_to_message_id: None, reply_to_preview: None,
-            reply_to_sender_identity_id: None, sent_at_ms: at, author_proof: None,
+            reply_to_sender_identity_id: None, sent_at_ms: at, author_proof: None, file: None, reactions: Vec::new(),
         };
-        core.apply_sibling_history(vec![entry("m1", 1), entry("m2", current_time_ms() + 1_000)], false);
+        core.apply_sibling_history("", vec![entry("m1", 1), entry("m2", current_time_ms() + 1_000)], false);
         assert!(!core.message_exists_in_chat("m1", None, "dev1"), "cleared row stays gone");
         assert!(core.message_exists_in_chat("m2", None, "dev1"), "a newer row still arrives");
 
@@ -2088,9 +2124,9 @@ mod recovery_tests {
         let entry = SiblingHistoryEntry {
             conversation_identity_id: None, group_id: Some(gid.clone()), direction: "received".into(), text: "old".into(),
             message_id: "m1".into(), sender_identity_id: Some("x".into()), reply_to_message_id: None, reply_to_preview: None,
-            reply_to_sender_identity_id: None, sent_at_ms: 100, author_proof: None,
+            reply_to_sender_identity_id: None, sent_at_ms: 100, author_proof: None, file: None, reactions: Vec::new(),
         };
-        core.apply_sibling_history(vec![entry.clone()], false);
+        core.apply_sibling_history("", vec![entry.clone()], false);
         assert!(!core.message_exists_in_chat("m1", Some(gid.as_str()), ""));
         // A prune forgets the press opened before it.
         core.sibling_fetch_open.insert(("sib".into(), 200, 0), (gid.clone(), current_time_ms()));
@@ -2192,7 +2228,7 @@ mod recovery_tests {
         let entry = |id: &str, at: u64| SiblingHistoryEntry {
             conversation_identity_id: None, group_id: Some(gid.clone()), direction: "received".into(), text: "t".into(),
             message_id: id.into(), sender_identity_id: Some("x".into()), reply_to_message_id: None, reply_to_preview: None,
-            reply_to_sender_identity_id: None, sent_at_ms: at, author_proof: None,
+            reply_to_sender_identity_id: None, sent_at_ms: at, author_proof: None, file: None, reactions: Vec::new(),
         };
         // Press [100, 1000), cursor at 100. A cut page down to 500, budget
         // left but no sibling connected: cursor back up to 501.
@@ -8342,6 +8378,26 @@ impl P2PCore {
         if !chunk.is_empty() {
             parts.push(groups_part(chunk));
         }
+        // Contact avatars, one per part (up to ~250 KB each): left out of the
+        // contact parts above, a linked device only got one when the contact
+        // itself sent a `ProfileUpdate`. No devices: an unknown contact is
+        // not created from such a part.
+        let my_id = self.my_identity_id();
+        for c in self.contacts.values() {
+            let Some(avatar) = c.avatar_jpeg.clone() else { continue };
+            if my_id.as_deref() == Some(c.trusted_identity_id.as_str()) { continue; }
+            parts.push(SyncPayload {
+                contacts: vec![SyncedContact {
+                    identity_id: c.trusted_identity_id.clone(),
+                    display_name: c.display_name.clone(),
+                    added_via_group: c.added_via_group,
+                    avatar_jpeg: Some(avatar),
+                    devices: Vec::new(),
+                    device_proofs: Vec::new(),
+                }],
+                ..groups_part(Vec::new())
+            });
+        }
         parts
     }
 
@@ -8423,6 +8479,13 @@ impl P2PCore {
                 // this side revoked has an entry and is left alone.
                 let mut changed = false;
                 if let Some(contact) = self.contacts.get_mut(&cid) {
+                    // Avatars come in parts of their own (`build_sync_payloads`).
+                    // Only where this device has none: the contact's own
+                    // `ProfileUpdate` is newer than a sibling's copy.
+                    if contact.avatar_jpeg.is_none() && sc.avatar_jpeg.is_some() {
+                        contact.avatar_jpeg = sc.avatar_jpeg.clone();
+                        changed = true;
+                    }
                     for fp in &usable {
                         if contact.find_device(fp).is_none() {
                             contact.add_device_via_signed_chain(fp.clone(), now);
@@ -8960,6 +9023,11 @@ impl P2PCore {
         // ponytail: with more conversations than the cap, the last ones still
         // get nothing. Rotate the start if that ever matters.
         let unscoped = scope_identity_id.is_none() && scope_group_id.is_none();
+        // Attachment rows have only their local `created_at`.
+        let file_bounds = match window {
+            Some((before, after)) if !unscoped => (after, before),
+            _ => (since_timestamp.unwrap_or(0), before_timestamp.unwrap_or(i64::MAX)),
+        };
         let mut limit = limit;
         let mut more = false;
         if scope_group_id.is_none() {
@@ -8984,12 +9052,25 @@ impl P2PCore {
             if unscoped {
                 limit = limit.min((SIBLING_BACKFILL_MAX_ENTRIES / (peers.len() + self.groups.len()).max(1)).max(1) as u32);
             }
+            let (lo, hi) = file_bounds;
+            let mut files_done: std::collections::HashSet<String> = std::collections::HashSet::new();
             for peer_fp in peers {
                 let identity_id = match self.known_remote_devices.get(&peer_fp) {
                     Some(d) => d.identity_id.clone(),
                     None => continue,
                 };
                 if own_id.as_ref() == Some(&identity_id) { continue; }
+                // Attachments, once per contact (they live under any of its devices).
+                if files_done.insert(identity_id.clone()) {
+                    let fps: Vec<String> = self.known_remote_devices.values()
+                        .filter(|d| d.identity_id == identity_id)
+                        .map(|d| d.device_fingerprint.clone())
+                        .collect();
+                    for e in self.sibling_file_entries(&fps, None, Some(&identity_id), lo, hi, limit, &mut text_budget) {
+                        entries.push(e);
+                        if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
+                    }
+                }
                 // Newest first. A scoped request pages backwards from its
                 // oldest row: a row skipped for the budget while older ones
                 // were sent was a hole for good, so that reply ends there.
@@ -9014,13 +9095,15 @@ impl P2PCore {
                         group_id: None,
                         direction: m.direction,
                         text: m.text,
-                        message_id: mid,
+                        message_id: mid.clone(),
                         sender_identity_id: None,
                         reply_to_message_id: m.reply_to_message_id,
                         reply_to_preview: m.reply_to_preview,
                         reply_to_sender_identity_id: None,
                         sent_at_ms: m.sent_at_ms,
                         author_proof: None,
+                        file: None,
+                        reactions: self.reaction_rows(&mid),
                     });
                     if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
                 }
@@ -9033,6 +9116,11 @@ impl P2PCore {
                 None => self.groups.keys().cloned().collect(),
             };
             for gid in gids {
+                let (lo, hi) = file_bounds;
+                for e in self.sibling_file_entries(&[], Some(&gid), None, lo, hi, limit, &mut text_budget) {
+                    entries.push(e);
+                    if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
+                }
                 let rows = match window {
                     Some((before, after)) if !unscoped => self.load_history_fetch_page("", Some(&gid), limit, before, after),
                     _ => self.load_group_message_history_opt(&gid, limit, before_timestamp, false),
@@ -9055,19 +9143,133 @@ impl P2PCore {
                         group_id: Some(gid.clone()),
                         direction: m.direction,
                         text: m.text,
-                        message_id: mid,
+                        message_id: mid.clone(),
                         sender_identity_id: m.sender_identity_id,
                         reply_to_message_id: m.reply_to_message_id,
                         reply_to_preview: m.reply_to_preview,
                         reply_to_sender_identity_id: m.reply_to_sender_identity_id,
                         sent_at_ms: m.sent_at_ms,
                         author_proof,
+                        file: None,
+                        reactions: self.reaction_rows(&mid),
                     });
                     if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
                 }
             }
         }
         (entries, more)
+    }
+
+    /// The reactions of one message, as a sibling history entry carries them.
+    fn reaction_rows(&self, message_id: &str) -> Vec<(String, String, u64)> {
+        let Some(conn) = &self.db else { return Vec::new() };
+        let Ok(mut stmt) = conn.prepare("SELECT reactor_identity_id, emoji, reacted_at_ms FROM message_reactions WHERE message_id = ?1") else { return Vec::new() };
+        stmt.query_map(params![message_id], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)?.max(0) as u64)))
+            .map(|it| it.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// The finished attachments of one chat for a sibling's history request:
+    /// a 1:1 chat (`fps`, the contact's devices; `identity_id`, the contact)
+    /// or `group_id`. The `limit` newest created in `[lo, hi)`, each with the
+    /// offer the sibling downloads it from us with. Charged to `budget` like
+    /// text rows; a row that does not fit is skipped.
+    fn sibling_file_entries(&self, fps: &[String], group_id: Option<&str>, identity_id: Option<&str>, lo: i64, hi: i64, limit: u32, budget: &mut usize) -> Vec<SiblingHistoryEntry> {
+        let Some(conn) = &self.db else { return Vec::new() };
+        if group_id.is_none() && fps.is_empty() { return Vec::new(); }
+        let chat = match group_id {
+            Some(_) => "group_id = ?1".to_string(),
+            None => format!("group_id IS NULL AND peer_device_fingerprint IN ({})",
+                (1..=fps.len()).map(|i| format!("?{}", i)).collect::<Vec<_>>().join(",")),
+        };
+        let sql = format!(
+            "SELECT file_id, direction, file_name, mime_type, total_size, sha256_hex, encrypted_file_key, key_nonce,
+                    preview_jpeg, duration_ms, chunk_size, caption, reply_to_message_id, reply_to_preview,
+                    reply_to_sender_identity_id, sticker, sticker_origin, chunk_hashes, created_at, sender_identity_id
+             FROM files WHERE status = 'complete' AND {} AND created_at >= {} AND created_at < {}
+             ORDER BY created_at DESC LIMIT {}",
+            chat, lo, hi, limit
+        );
+        let args: Vec<String> = match group_id { Some(g) => vec![g.to_string()], None => fps.to_vec() };
+        type Row = (String, String, String, String, i64, String, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<u32>, Option<i64>,
+                    Option<String>, Option<String>, Option<String>, Option<String>, Option<bool>, Option<String>, Option<Vec<u8>>, i64, Option<String>);
+        let rows: Vec<Row> = match conn.prepare(&sql) {
+            Ok(mut stmt) => stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?,
+                r.get(10)?, r.get(11)?, r.get(12)?, r.get(13)?, r.get(14)?, r.get(15)?, r.get(16)?, r.get(17)?, r.get(18)?, r.get(19)?,
+            ))).map(|it| it.flatten().collect()).unwrap_or_default(),
+            Err(e) => { warn!("sibling_file_entries: {}", e); return Vec::new(); }
+        };
+        let mut out = Vec::new();
+        for (file_id, direction, file_name, mime_type, total_size, sha256_hex, enc_key, key_nonce, preview_jpeg, duration_ms, chunk_size,
+             caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, chunk_hashes, created_at, sender) in rows
+        {
+            let Ok(file_key) = self.unwrap_file_key(&enc_key, &key_nonce) else { continue };
+            let caption = caption.unwrap_or_default();
+            let chunk_hashes = chunk_hashes.unwrap_or_default();
+            let cost = 512 + caption.len() + chunk_hashes.len() + preview_jpeg.as_ref().map_or(0, |p| p.len());
+            if cost > *budget { continue; }
+            *budget -= cost;
+            let reactions = self.reaction_rows(&file_id);
+            out.push(SiblingHistoryEntry {
+                conversation_identity_id: identity_id.map(str::to_string),
+                group_id: group_id.map(str::to_string),
+                direction,
+                text: String::new(),
+                message_id: file_id.clone(),
+                sender_identity_id: sender,
+                reply_to_message_id: reply_to_message_id.clone(),
+                reply_to_preview: reply_to_preview.clone(),
+                reply_to_sender_identity_id: reply_to_sender_identity_id.clone(),
+                sent_at_ms: created_at.max(0) as u64,
+                author_proof: None,
+                file: Some(Box::new(MessageContent::FileOffer {
+                    group_id: group_id.map(str::to_string),
+                    file_id,
+                    file_name,
+                    mime_type,
+                    total_size: total_size.max(0) as u64,
+                    file_key,
+                    sha256_hex,
+                    preview_jpeg,
+                    duration_ms,
+                    chunk_size: chunk_size.map(|c| c as u32),
+                    chunk_hashes,
+                    caption,
+                    reply_to_message_id,
+                    reply_to_preview,
+                    reply_to_sender_identity_id,
+                    sticker: sticker.unwrap_or(false),
+                    sticker_origin,
+                })),
+                reactions,
+            });
+        }
+        out
+    }
+
+    /// An attachment from a sibling's history answer: stored as if its offer
+    /// came now, then given the sibling's direction, chat and date. The file
+    /// comes from that sibling (`download_file` takes siblings as sources).
+    fn apply_sibling_file(&mut self, peer_fp: &str, sender: &str, group_id: Option<&str>, chat_key: Option<&str>, direction: &str, created_at: u64, offer: MessageContent) -> bool {
+        let MessageContent::FileOffer {
+            file_id, file_name, mime_type, total_size, file_key, sha256_hex, preview_jpeg, duration_ms, chunk_size,
+            chunk_hashes, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, ..
+        } = offer else { return false };
+        let ev = self.receive_file_offer(
+            peer_fp, sender, group_id.map(str::to_string), &file_id, &file_name, &mime_type,
+            total_size, &file_key, &sha256_hex, &preview_jpeg, duration_ms, chunk_size, &chunk_hashes,
+            &caption, reply_to_message_id.as_deref(), reply_to_preview.as_deref(),
+            reply_to_sender_identity_id.as_deref(), sticker, sticker_origin.as_deref(),
+        );
+        if ev["type"] != "file_offer" { return false; }
+        if let Some(conn) = &self.db {
+            let _ = conn.execute(
+                "UPDATE files SET direction = ?1, peer_device_fingerprint = ?2, created_at = ?3 WHERE file_id = ?4",
+                params![direction, chat_key.unwrap_or(peer_fp), created_at.min(i64::MAX as u64) as i64, file_id],
+            );
+        }
+        true
     }
 
     /// Bir kardeşten gelen geçmiş kayıtlarını yerel arşive işler — `message_id`
@@ -9098,11 +9300,12 @@ impl P2PCore {
                 && (*after..*before).contains(&(e.sent_at_ms as i64)));
         }
         let oldest = entries.iter().map(|e| e.sent_at_ms as i64).min();
-        let merged: Vec<serde_json::Value> = entries.iter().map(|e| serde_json::json!({
+        // Attachment rows are not text bubbles: the chat reloads them.
+        let merged: Vec<serde_json::Value> = entries.iter().filter(|e| e.file.is_none()).map(|e| serde_json::json!({
             "direction": e.direction, "text": e.text, "timestamp": e.sent_at_ms,
             "sent_at_ms": e.sent_at_ms, "message_id": e.message_id,
         })).collect();
-        let written = self.apply_sibling_history(entries, press.is_some());
+        let written = self.apply_sibling_history(peer_fp, entries, press.is_some());
         let Some((chat, _, after)) = press else {
             if let Some((chat, before)) = lost_press { self.reopen_fetch_cursor(&chat, before) }
             return (merged, None);
@@ -9136,36 +9339,64 @@ impl P2PCore {
     /// `user_fetch`: the answer to the user's "Fetch older history" press,
     /// which may bring back rows below the history floor. Returns the send
     /// time of the oldest row written.
-    fn apply_sibling_history(&mut self, entries: Vec<SiblingHistoryEntry>, user_fetch: bool) -> Option<u64> {
+    fn apply_sibling_history(&mut self, peer_fp: &str, entries: Vec<SiblingHistoryEntry>, user_fetch: bool) -> Option<u64> {
         let mut oldest_written: Option<u64> = None;
-        for e in entries {
+        let own_id = self.my_identity_id().unwrap_or_default();
+        for mut e in entries {
             if e.message_id.is_empty() { continue; }
             if !matches!(e.direction.as_str(), "sent" | "received") { continue; }
+            let file = e.file.take().filter(|f| matches!(&**f, MessageContent::FileOffer { file_id, .. } if *file_id == e.message_id));
+            let file_present = |core: &Self| file.is_some() && core.db.as_ref().map_or(false, |c| {
+                c.query_row("SELECT 1 FROM files WHERE file_id = ?1", params![e.message_id], |_| Ok(())).is_ok()
+            });
             // Dedup per chat (below): ids are the sender's choice, and a
             // global lookup let a row of another chat suppress this one.
-            let written = if let Some(gid) = &e.group_id {
+            // `present`: the row is here now (written or already), so its
+            // reactions apply.
+            let (present, written) = if let Some(gid) = e.group_id.clone() {
                 // A group this device left (or never had): a sibling's
                 // backfill must not write its messages back.
-                if !self.groups.contains_key(gid) { continue; }
+                if !self.groups.contains_key(&gid) { continue; }
                 // Cleared by the user (`clear_group_history`).
-                if !user_fetch && e.sent_at_ms < self.history_floor(gid) { continue; }
-                if self.message_exists_in_chat(&e.message_id, Some(gid.as_str()), "") { continue; }
-                let sender = e.sender_identity_id.clone()
-                    .unwrap_or_else(|| self.my_identity_id().unwrap_or_default());
-                self.archive_group_message(gid, &sender, &e.direction, e.text.as_bytes(), Some(&e.message_id),
-                    e.reply_to_message_id.as_deref(), e.reply_to_preview.as_deref(), e.reply_to_sender_identity_id.as_deref(), e.sent_at_ms, e.author_proof.as_deref()).is_ok()
-            } else if let Some(id) = &e.conversation_identity_id {
+                if !user_fetch && e.sent_at_ms < self.history_floor(&gid) { continue; }
+                let sender = e.sender_identity_id.clone().unwrap_or_else(|| own_id.clone());
+                if file_present(self) || (file.is_none() && self.message_exists_in_chat(&e.message_id, Some(gid.as_str()), "")) {
+                    (true, false)
+                } else if let Some(f) = file {
+                    let w = self.apply_sibling_file(peer_fp, &sender, Some(&gid), None, &e.direction, e.sent_at_ms, *f);
+                    (w, w)
+                } else {
+                    let w = self.archive_group_message(&gid, &sender, &e.direction, e.text.as_bytes(), Some(&e.message_id),
+                        e.reply_to_message_id.as_deref(), e.reply_to_preview.as_deref(), e.reply_to_sender_identity_id.as_deref(), e.sent_at_ms, e.author_proof.as_deref()).is_ok();
+                    (w, w)
+                }
+            } else if let Some(id) = e.conversation_identity_id.clone() {
                 // Same floor as the peer's history answer: a sibling still holds
                 // the chat the user cleared (a contact kept as a group member).
-                if !user_fetch && e.sent_at_ms < self.history_floor(id) { continue; }
-                let Some(ck) = self.canonical_device_for_identity(id) else { continue };
-                if self.message_exists_in_chat(&e.message_id, None, &ck) { continue; }
-                let status = if e.direction == "sent" { Some(MessageSendStatus::Sent.as_str()) } else { None };
-                self.archive_message(&ck, &e.direction, e.text.as_bytes(), Some(&e.message_id), status,
-                    e.reply_to_message_id.as_deref(), e.reply_to_preview.as_deref(), e.sent_at_ms).is_ok()
+                if !user_fetch && e.sent_at_ms < self.history_floor(&id) { continue; }
+                let Some(ck) = self.canonical_device_for_identity(&id) else { continue };
+                if file_present(self) || (file.is_none() && self.message_exists_in_chat(&e.message_id, None, &ck)) {
+                    (true, false)
+                } else if let Some(f) = file {
+                    let sender = if e.direction == "sent" { own_id.clone() } else { id.clone() };
+                    let w = self.apply_sibling_file(peer_fp, &sender, None, Some(&ck), &e.direction, e.sent_at_ms, *f);
+                    (w, w)
+                } else {
+                    let status = if e.direction == "sent" { Some(MessageSendStatus::Sent.as_str()) } else { None };
+                    let w = self.archive_message(&ck, &e.direction, e.text.as_bytes(), Some(&e.message_id), status,
+                        e.reply_to_message_id.as_deref(), e.reply_to_preview.as_deref(), e.sent_at_ms).is_ok();
+                    (w, w)
+                }
             } else {
-                false
+                (false, false)
             };
+            if present {
+                for (reactor, emoji, at) in e.reactions.iter().take(256) {
+                    if emoji.len() <= 64 && reactor.len() <= 128 {
+                        self.apply_reaction(&e.message_id, reactor, emoji, *at);
+                    }
+                }
+            }
             if written {
                 oldest_written = Some(oldest_written.map_or(e.sent_at_ms, |o| o.min(e.sent_at_ms)));
             }

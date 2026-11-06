@@ -1710,6 +1710,15 @@ pub struct SiblingHistoryEntry {
     /// See `MessageContent::Text.author_proof`.
     #[serde(default)]
     pub author_proof: Option<String>,
+    /// An attachment row instead of a text row: always a
+    /// `MessageContent::FileOffer` (its `file_id` is `message_id`). The
+    /// receiver downloads the file from the sibling that sent this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<Box<MessageContent>>,
+    /// The message's reactions: (reactor identity, emoji, reacted_at_ms).
+    /// An empty emoji is a removal, kept for its stamp.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<(String, String, u64)>,
 }
 
 /// Ağdan gelen her şeyi taşıyan zarf — hangi varyant olduğunu ayırt etmek

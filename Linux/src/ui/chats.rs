@@ -200,6 +200,7 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
                     | "profile_update"
                     | "device_linked"
                     | "history_backfilled"
+                    | "sync"
             ) {
                 refresh();
             }
