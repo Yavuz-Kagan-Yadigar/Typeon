@@ -9207,7 +9207,12 @@ impl P2PCore {
             let Ok(file_key) = self.unwrap_file_key(&enc_key, &key_nonce) else { continue };
             let caption = caption.unwrap_or_default();
             let chunk_hashes = chunk_hashes.unwrap_or_default();
-            let cost = 512 + caption.len() + chunk_hashes.len() + preview_jpeg.as_ref().map_or(0, |p| p.len());
+            // Over the budget, the preview goes first: the file still comes,
+            // shown with a generic icon until it is downloaded.
+            let bare = 512 + caption.len() + chunk_hashes.len();
+            let preview_len = preview_jpeg.as_ref().map_or(0, |p| p.len());
+            let preview_jpeg = if bare + preview_len <= *budget { preview_jpeg } else { None };
+            let cost = bare + preview_jpeg.as_ref().map_or(0, |p| p.len());
             if cost > *budget { continue; }
             *budget -= cost;
             let reactions = self.reaction_rows(&file_id);
