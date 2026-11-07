@@ -40,6 +40,30 @@ import java.lang.reflect.Modifier
  * hiç fontlanmamış değil.
  */
 object FontOverride {
+    /** The font every TextView must carry; null = system font. */
+    @Volatile private var current: Typeface? = null
+
+    /** Last resort for views that bypass the theme and the statics (adapter rows, toolbar
+     *  subtitles): keep the whole window's TextViews on [current], bold/italic preserved. */
+    fun forceOnWindow(activity: android.app.Activity) {
+        if (hooked.put(activity, true) != null) return
+        val root = activity.window.decorView
+        root.viewTreeObserver.addOnGlobalLayoutListener { forceTree(root) }
+    }
+
+    private val hooked = java.util.WeakHashMap<android.app.Activity, Boolean>()
+
+    private fun forceTree(v: android.view.View) {
+        val base = current ?: return
+        if (v is android.widget.TextView) {
+            val style = v.typeface?.style ?: 0
+            val want = Typeface.create(base, style)
+            if (v.typeface !== want) v.typeface = want
+        } else if (v is android.view.ViewGroup) {
+            for (i in 0 until v.childCount) forceTree(v.getChildAt(i))
+        }
+    }
+
     private var cachedFile: Pair<Pair<String, Long>, Typeface>? = null
 
     /** `familyName`: `null`/boş ise no-op (varsayılan sistem fontuna
@@ -99,6 +123,7 @@ object FontOverride {
      *  yüklenen fontla değiştirilir; `null` asıllarını geri koyar (sistem
      *  fontuna geçişte). `monospace`/`serif` girdilerine dokunulmaz. */
     private var originalSansEntries: Map<String, Typeface>? = null
+    private var originalDefaultTypeface: Typeface? = null
 
     private fun remapSansSerif(typeface: Typeface?) {
         try {
@@ -107,9 +132,20 @@ object FontOverride {
             @Suppress("UNCHECKED_CAST")
             val map = field.get(null) as? MutableMap<String, Typeface> ?: return
             val originals = originalSansEntries
-                ?: map.filterKeys { it.startsWith("sans-serif") }.toMap().also { originalSansEntries = it }
+                ?: map.filterKeys { !it.startsWith("monospace") && !it.startsWith("serif") }.toMap().also { originalSansEntries = it }
             for ((name, original) in originals) {
                 map[name] = typeface?.let { Typeface.create(it, original.style) } ?: original
+            }
+            // Unknown family names (themes.xml `p2p-imported-font`) fall back to the
+            // private `sDefaultTypeface`, not `Typeface.DEFAULT`: dialogs and
+            // EditTexts that resolve the theme's fontFamily by name kept the system font.
+            if (typeface != null) map["p2p-imported-font"] = typeface else map.remove("p2p-imported-font")
+            try {
+                val f = Typeface::class.java.getDeclaredField("sDefaultTypeface")
+                makeAccessibleAndNonFinal(f)
+                if (originalDefaultTypeface == null) originalDefaultTypeface = f.get(null) as? Typeface
+                (typeface ?: originalDefaultTypeface)?.let { f.set(null, it) }
+            } catch (e: Exception) {
             }
         } catch (e: Exception) {
             // bkz. `replaceStaticField` — gizli API engelliyse sessizce vazgeç.
@@ -146,6 +182,7 @@ object FontOverride {
     /** Back to the system font without a process restart: every view with
      *  no explicit `fontFamily` kept the old custom font until then. */
     private fun restoreOriginals() {
+        current = null
         for ((name, typeface) in originalStatics ?: return) replaceStaticField(name, typeface)
         try {
             val field = Typeface::class.java.getDeclaredField("sDefaults").apply { isAccessible = true }
@@ -158,6 +195,7 @@ object FontOverride {
 
     private fun applyTypeface(newTypeface: Typeface, newBoldTypeface: Typeface) {
         captureOriginals()
+        current = newTypeface
         replaceStaticField("DEFAULT", newTypeface)
         replaceStaticField("DEFAULT_BOLD", newBoldTypeface)
         replaceStaticField("SANS_SERIF", newTypeface)

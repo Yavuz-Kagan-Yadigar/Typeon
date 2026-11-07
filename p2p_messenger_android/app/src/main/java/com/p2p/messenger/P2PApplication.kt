@@ -258,6 +258,7 @@ class P2PApplication : Application() {
             }
 
             override fun onActivityStarted(activity: Activity) {
+                com.p2p.messenger.util.FontOverride.forceOnWindow(activity)
                 // Spec dışı, kullanıcı isteği: uygulamayı açmak için şifre.
                 // Kilit ekranı HER Activity başlangıcında kontrol edilir
                 // (sadece MainActivity'de değil) — bir bildirimden doğrudan
