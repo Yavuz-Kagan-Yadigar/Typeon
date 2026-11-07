@@ -2029,6 +2029,44 @@ mod recovery_tests {
         assert_eq!(b.reactions_summary("f1"), "B");
     }
 
+    /// A press pages back from its cursor. Attachments and reactions of rows
+    /// already here (an earlier press brought their text) still come.
+    #[test]
+    fn sibling_press_brings_newer_files_and_reactions() {
+        let gid = "group-0123456789abcdef".to_string();
+        let mk = |name: &str| {
+            let dir = std::env::temp_dir().join(format!("typeon-sibnewer-{}-{}", name, std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("attachments")).unwrap();
+            let mut core = core_on_disk(&dir);
+            core.groups.insert(gid.clone(), Group::new(gid.clone(), "g".into(), "me".into(), 1));
+            core.archive_group_message(&gid, "x", "received", b"hi", Some("m1"), None, None, None, 5_000, None).unwrap();
+            core
+        };
+        let (a, mut b) = (mk("a"), mk("b"));
+        let (key, nonce) = a.wrap_file_key(&[7u8; 32]).unwrap();
+        a.db.as_ref().unwrap().execute(
+            "INSERT INTO files (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size, sha256_hex,
+               encrypted_file_key, key_nonce, status, created_at, group_id, sender_identity_id, chunk_hashes, duration_ms)
+             VALUES ('f1', 'p', 'received', 'v.ogg', 'audio/ogg', 9, ?1, ?2, ?3, 'complete', 6000, ?4, 'x', ?5, 9000)",
+            params!["ab".repeat(32), key, nonce, gid, vec![0u8; attachments::chunk_hashes_len(1)]],
+        ).unwrap();
+        assert!(a.apply_reaction("m1", "x", "A", 3));
+        // B's cursor is already below both rows: the window [0, 1000).
+        let (before, after) = (1_000i64, 0i64);
+        let (entries, more) = a.build_sibling_history_response(200, None, Some(&gid), Some(before), None, Some((before, after)));
+        assert!(entries.iter().all(|e| e.text.is_empty()), "no text past the window");
+        b.sibling_fetch_open.insert(("sib".into(), before, after), (gid.clone(), current_time_ms()));
+        let (merged, chat) = b.apply_sibling_reply("sib", Some((before, after)), more, entries);
+        assert_eq!(chat.as_deref(), Some(gid.as_str()));
+        assert!(merged.is_empty(), "no empty bubbles");
+        assert_eq!(b.reactions_summary("m1"), "A");
+        let n: i64 = b.db.as_ref().unwrap().query_row("SELECT COUNT(*) FROM files WHERE file_id = 'f1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+        let n: i64 = b.db.as_ref().unwrap().query_row("SELECT COUNT(*) FROM messages WHERE group_id = ?1", params![gid], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "a reaction carrier writes no row");
+    }
+
     /// A cleared 1:1 chat's rows stay gone: a sibling's automatic backfill
     /// and the peer's chat-open sync are refused by the floor. The peer's
     /// answer to the user's "Fetch older history" press keeps exactly its
@@ -9030,6 +9068,11 @@ impl P2PCore {
         };
         let mut limit = limit;
         let mut more = false;
+        // A press pages back from the oldest local row, so attachments and
+        // reactions among the rows already here were never in any window.
+        // They go after the window's rows, with what budget is left.
+        let newer_lo = match window { Some((before, _)) if !unscoped => Some(before), _ => None };
+        let mut newer: Vec<(Vec<String>, Option<String>, Option<String>)> = Vec::new();
         if scope_group_id.is_none() {
             // 1:1 sohbetler — TEK bir kişiye daralmışsa o kişinin bilinen
             // TÜM cihazları (arşiv hangi fp altında tutuluyorsa), aksi
@@ -9070,6 +9113,7 @@ impl P2PCore {
                         entries.push(e);
                         if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
                     }
+                    if newer_lo.is_some() { newer.push((fps, None, Some(identity_id.clone()))); }
                 }
                 // Newest first. A scoped request pages backwards from its
                 // oldest row: a row skipped for the budget while older ones
@@ -9121,6 +9165,7 @@ impl P2PCore {
                     entries.push(e);
                     if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
                 }
+                if newer_lo.is_some() { newer.push((Vec::new(), Some(gid.clone()), None)); }
                 let rows = match window {
                     Some((before, after)) if !unscoped => self.load_history_fetch_page("", Some(&gid), limit, before, after),
                     _ => self.load_group_message_history_opt(&gid, limit, before_timestamp, false),
@@ -9157,7 +9202,64 @@ impl P2PCore {
                 }
             }
         }
+        if let Some(lo) = newer_lo {
+            for (fps, gid, identity_id) in newer {
+                let mut extra = self.sibling_file_entries(&fps, gid.as_deref(), identity_id.as_deref(), lo, i64::MAX, limit, &mut text_budget);
+                extra.extend(self.sibling_reaction_entries(&fps, gid.as_deref(), identity_id.as_deref(), lo, limit, &mut text_budget));
+                for e in extra {
+                    if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, more); }
+                    entries.push(e);
+                }
+            }
+        }
         (entries, more)
+    }
+
+    /// Text rows sent at or after `lo` that have reactions, without their
+    /// text: the receiver only applies the reactions to a row it holds.
+    fn sibling_reaction_entries(&self, fps: &[String], group_id: Option<&str>, identity_id: Option<&str>, lo: i64, limit: u32, budget: &mut usize) -> Vec<SiblingHistoryEntry> {
+        let Some(conn) = &self.db else { return Vec::new() };
+        if group_id.is_none() && fps.is_empty() { return Vec::new(); }
+        let chat = match group_id {
+            Some(_) => "group_id = ?1".to_string(),
+            None => format!("group_id IS NULL AND peer_device_fingerprint IN ({})",
+                (1..=fps.len()).map(|i| format!("?{}", i)).collect::<Vec<_>>().join(",")),
+        };
+        let at = "COALESCE(NULLIF(sent_at_ms,0), timestamp)";
+        let sql = format!(
+            "SELECT message_id, direction, sender_identity_id, {at} FROM messages
+             WHERE {chat} AND {at} >= {lo} AND is_deleted = 0
+               AND message_id IN (SELECT message_id FROM message_reactions)
+             ORDER BY {at} DESC LIMIT {limit}");
+        let args: Vec<String> = match group_id { Some(g) => vec![g.to_string()], None => fps.to_vec() };
+        let rows: Vec<(String, String, Option<String>, i64)> = match conn.prepare(&sql) {
+            Ok(mut stmt) => stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .map(|it| it.flatten().collect()).unwrap_or_default(),
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for (mid, direction, sender, at) in rows {
+            let reactions = self.reaction_rows(&mid);
+            let cost = 128 + mid.len() + reactions.iter().map(|(r, e, _)| 16 + r.len() + e.len()).sum::<usize>();
+            if cost > *budget { continue; }
+            *budget -= cost;
+            out.push(SiblingHistoryEntry {
+                conversation_identity_id: identity_id.map(str::to_string),
+                group_id: group_id.map(str::to_string),
+                direction,
+                text: String::new(),
+                message_id: mid,
+                sender_identity_id: sender,
+                reply_to_message_id: None,
+                reply_to_preview: None,
+                reply_to_sender_identity_id: None,
+                sent_at_ms: at.max(0) as u64,
+                author_proof: None,
+                file: None,
+                reactions,
+            });
+        }
+        out
     }
 
     /// The reactions of one message, as a sibling history entry carries them.
@@ -9300,13 +9402,16 @@ impl P2PCore {
                 .map(|chat| (chat, before.max(0) as u64)),
             _ => None,
         };
-        if let Some((chat, before, after)) = &press {
+        // Past the window end only attachments and reaction carriers (see
+        // `build_sibling_history_response`); text rows stay in the window.
+        let in_window = |e: &SiblingHistoryEntry| press.as_ref().map_or(true, |(_, before, after)| (*after..*before).contains(&(e.sent_at_ms as i64)));
+        if let Some((chat, before, _)) = &press {
             entries.retain(|e| e.group_id.as_deref().or(e.conversation_identity_id.as_deref()) == Some(chat.as_str())
-                && (*after..*before).contains(&(e.sent_at_ms as i64)));
+                && (in_window(e) || (e.sent_at_ms as i64 >= *before && (e.file.is_some() || e.text.is_empty()))));
         }
-        let oldest = entries.iter().map(|e| e.sent_at_ms as i64).min();
+        let oldest = entries.iter().filter(|e| in_window(e)).map(|e| e.sent_at_ms as i64).min();
         // Attachment rows are not text bubbles: the chat reloads them.
-        let merged: Vec<serde_json::Value> = entries.iter().filter(|e| e.file.is_none()).map(|e| serde_json::json!({
+        let merged: Vec<serde_json::Value> = entries.iter().filter(|e| e.file.is_none() && !e.text.is_empty()).map(|e| serde_json::json!({
             "direction": e.direction, "text": e.text, "timestamp": e.sent_at_ms,
             "sent_at_ms": e.sent_at_ms, "message_id": e.message_id,
         })).collect();
@@ -9370,6 +9475,8 @@ impl P2PCore {
                 } else if let Some(f) = file {
                     let w = self.apply_sibling_file(peer_fp, &sender, Some(&gid), None, &e.direction, e.sent_at_ms, *f);
                     (w, w)
+                } else if e.text.is_empty() {
+                    (false, false) // reactions of a row this device lacks
                 } else {
                     let w = self.archive_group_message(&gid, &sender, &e.direction, e.text.as_bytes(), Some(&e.message_id),
                         e.reply_to_message_id.as_deref(), e.reply_to_preview.as_deref(), e.reply_to_sender_identity_id.as_deref(), e.sent_at_ms, e.author_proof.as_deref()).is_ok();
@@ -9386,6 +9493,8 @@ impl P2PCore {
                     let sender = if e.direction == "sent" { own_id.clone() } else { id.clone() };
                     let w = self.apply_sibling_file(peer_fp, &sender, None, Some(&ck), &e.direction, e.sent_at_ms, *f);
                     (w, w)
+                } else if e.text.is_empty() {
+                    (false, false) // reactions of a row this device lacks
                 } else {
                     let status = if e.direction == "sent" { Some(MessageSendStatus::Sent.as_str()) } else { None };
                     let w = self.archive_message(&ck, &e.direction, e.text.as_bytes(), Some(&e.message_id), status,
