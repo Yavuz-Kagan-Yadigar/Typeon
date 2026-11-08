@@ -82,6 +82,11 @@ pub(crate) const SERVER_ONLY_GRACE_MS: u64 = 30_000;
 // (ör. ağ değişiminde sunucudan kopuk) gelen tek bir `UnknownMailbox`, o eşe
 // sunucu yolunu 10 dk kapatıyordu — cihazda tam da gerektiği anda görüldü.
 pub(crate) const SERVER_UNKNOWN_MAILBOX_TTL_MS: u64 = 60 * 1000;
+/// Each further `UnknownMailbox` for the same mailbox doubles the pause up to
+/// this. Measured on the 9S (2026-11-08): a device never enrolled on my server
+/// had six unconfirmed messages; every 2 min retry deposited them again over
+/// Tor and kept the LTE radio up 60-75 % of the night.
+pub(crate) const SERVER_UNKNOWN_MAILBOX_MAX_TTL_MS: u64 = 60 * 60 * 1000;
 
 /// Kota/hız sınırı hatası veren bir sunucuya ne kadar süre YENİ yatırma
 /// denenmez.
@@ -2242,6 +2247,7 @@ impl P2PCore {
                 if let Some(rt) = self.server_rt.get_mut(&server_id) {
                     rt.deposit_failures = 0;
                 }
+                self.server_unknown_streak.remove(&(server_id.clone(), mailbox.clone()));
                 info!("Sunucu zarfı sakladı: kutu={} seq={}", mailbox_log_id(&mailbox), seq);
                 if cancelled {
                     if let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) {
@@ -2634,8 +2640,15 @@ impl P2PCore {
             ServerErrorCode::UnknownMailbox => {
                 warn!("Sunucu kutuyu tanımıyor (alıcı bu sunucuda değil)");
                 if let ServerInflight::Deposit { mailbox, .. } = &inflight {
-                    self.server_unknown_mailboxes
-                        .insert((server_id.clone(), mailbox.clone()), mono_ms() + SERVER_UNKNOWN_MAILBOX_TTL_MS);
+                    // Deposits in flight together all answer this: one step per pause.
+                    let key = (server_id.clone(), mailbox.clone());
+                    let now = mono_ms();
+                    if self.server_unknown_mailboxes.get(&key).map_or(true, |until| now >= *until) {
+                        let streak = self.server_unknown_streak.entry(key.clone()).or_insert(0);
+                        let ttl = (SERVER_UNKNOWN_MAILBOX_TTL_MS << (*streak).min(6)).min(SERVER_UNKNOWN_MAILBOX_MAX_TTL_MS);
+                        *streak += 1;
+                        self.server_unknown_mailboxes.insert(key, now + ttl);
+                    }
                 }
                 // Alıcı bu sunucuda yok — ANINDA P2P'ye (gossipsub) düş.
                 //

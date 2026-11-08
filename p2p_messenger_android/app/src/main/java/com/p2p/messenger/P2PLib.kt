@@ -391,9 +391,9 @@ object P2PLib {
     external fun setStickerFavorite(id: String, favorite: Boolean): String
     /** Bir çıkartmayı bir kişinin cihazına gönderir. Dönüş: ekin `file_id`'si
      *  ya da "Error: ...". */
-    external fun sendSticker(peerFp: String, stickerId: String): String
+    external fun sendSticker(peerFp: String, stickerId: String, replyToMessageId: String, replyToPreview: String): String
     /** bkz. `sendSticker` — grup karşılığı. */
-    external fun sendGroupSticker(groupId: String, stickerId: String): String
+    external fun sendGroupSticker(groupId: String, stickerId: String, replyToMessageId: String, replyToPreview: String, replyToSenderIdentityId: String): String
     /** Alınmış (indirilmiş) bir çıkartmayı kendi çıkartma deposuna kopyalar.
      *  Dönüş: çıkartma id'si ya da "Error: ...". */
     external fun saveReceivedSticker(fileId: String): String

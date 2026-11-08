@@ -80,7 +80,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val text = when {
             t.isDeleted -> ctx.getString(R.string.msg_deleted)
             t.attachment != null -> ctx.getString(R.string.lbl_attachment_reply_preview, t.attachment!!.fileName)
-            else -> com.p2p.messenger.util.Quote.plain(com.p2p.messenger.util.Forward.strip(t.text)).takeWholeChars(120)
+            else -> com.p2p.messenger.util.Quote.ownText(com.p2p.messenger.util.Forward.strip(t.text)).takeWholeChars(120)
         }
         return label to text
     }
@@ -971,7 +971,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                 replyTarget.isDeleted -> null
                 else -> replyTarget.attachment
                     ?.let { holder.itemView.context.getString(R.string.lbl_attachment_reply_preview, it.fileName) }
-                    ?: replyTarget.text.takeWholeChars(120)
+                    ?: com.p2p.messenger.util.Quote.ownText(com.p2p.messenger.util.Forward.strip(replyTarget.text)).takeWholeChars(120)
             }
             holder.txtReplyQuoteText.text = quoteText ?: holder.itemView.context.getString(R.string.msg_deleted)
             // Kullanıcı raporu ("alıntı mesajlar beyaz görünüyor").

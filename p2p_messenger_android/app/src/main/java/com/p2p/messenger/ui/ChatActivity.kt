@@ -285,10 +285,11 @@ class ChatActivity : AppCompatActivity() {
     private val pickFileLauncher = registerForActivityResult(
         com.p2p.messenger.util.OpenMultipleDocumentsAtHome()
     ) { uris -> if (uris.isNotEmpty()) promptAttachmentCaption(uris = uris) { caption, picked ->
-        sendPickedFiles(picked.map { it.uri!! to it.hiRes }, caption).invokeOnCompletion { picked.forEach { it.release() } }
+        sendPickedFiles(picked.map { it.uri!! to it.hiRes }, caption, takeQuote()).invokeOnCompletion { picked.forEach { it.release() } }
     } }
 
-    private val stickerPicker = StickerPicker(this, { P2PLib.sendSticker(peerDeviceFingerprint, it) }) { item ->
+    private val stickerPicker = StickerPicker(this, { id, quote -> P2PLib.sendSticker(peerDeviceFingerprint, id, quote?.id ?: "", quote?.preview ?: "") }, ::takeQuote) { item ->
+        item.replyToSenderLabel = resolveReplyLabel(item.replyToMessageId)
         adapter.addMessage(item)
         scrollToBottomNow()
     }
@@ -303,7 +304,7 @@ class ChatActivity : AppCompatActivity() {
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
-            CapturedImage.take()?.let { jpeg -> promptAttachmentCaption(jpeg = jpeg, onRetake = { findViewById<View>(R.id.btnCamera).performClick() }) { caption, picked -> picked.firstOrNull()?.let { onPhotoCaptured(it.jpeg!!, caption, it.hiRes) } } }
+            CapturedImage.take()?.let { jpeg -> promptAttachmentCaption(jpeg = jpeg, onRetake = { findViewById<View>(R.id.btnCamera).performClick() }) { caption, picked -> picked.firstOrNull()?.let { onPhotoCaptured(it.jpeg!!, caption, it.hiRes, takeQuote()) } } }
         }
     }
 
@@ -840,7 +841,7 @@ class ChatActivity : AppCompatActivity() {
             // yazılabilsin. Kayıt bırakılır bırakılmaz gönderilmiyor, önce
             // açıklama soruluyor — kullanıcı boş bırakırsa davranış eskisiyle
             // aynı.
-            promptAttachmentCaption(onCancel = { file.delete() }) { caption, _ -> sendVoiceMessage(file, durationMs, caption) }
+            promptAttachmentCaption(onCancel = { file.delete() }) { caption, _ -> sendVoiceMessage(file, durationMs, caption, takeQuote()) }
         } else {
             file?.delete()
             if (send) {
@@ -852,14 +853,14 @@ class ChatActivity : AppCompatActivity() {
     /** Sesli mesaj, normal bir dosya eki olarak gönderilir (mime
      *  "audio/mp4") — tek fark `durationMs`'in taşınması, bkz. Rust
      *  `FileOffer.duration_ms`. */
-    private fun sendVoiceMessage(file: File, durationMs: Long, caption: String = "") {
+    private fun sendVoiceMessage(file: File, durationMs: Long, caption: String = "", quote: com.p2p.messenger.util.Quote.Ref? = null) {
         lifecycleScope.launch(Dispatchers.IO) {
             // The copy is deleted even if the screen closes while sending.
             try {
                 val result = try {
                     P2PLib.prepareAndSendFile(
                         peerDeviceFingerprint, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
-                        caption, "", ""
+                        caption, quote?.id ?: "", quote?.preview ?: ""
                     )
                 } catch (e: Exception) {
                     "Error: ${e.message}"
@@ -875,6 +876,9 @@ class ChatActivity : AppCompatActivity() {
                                 text = "",
                                 isMine = true,
                                 caption = caption,
+                                replyToMessageId = quote?.id,
+                                replyToPreview = quote?.preview,
+                                replyToSenderLabel = resolveReplyLabel(quote?.id),
                                 attachment = SimpleChatAdapter.AttachmentInfo(
                                     fileId = obj.optString("message_id"),
                                     fileName = file.name,
@@ -1526,12 +1530,13 @@ class ChatActivity : AppCompatActivity() {
      * yeniden hesaplanıyor.
      */
     private fun syncRecyclerBottomInset() {
-        // Spec dışı, kullanıcı isteği: son mesajlar alt çubuğun altında
-        // kalıyordu — çubuğun gerçek yüksekliğine ek olarak ekran
-        // yüksekliğinin ~%10'u kadar boş alt boşluk bırakılıyor.
-        val gap = (8 * resources.displayMetrics.density).toInt() +
-            (resources.displayMetrics.heightPixels * 0.10f).toInt()
-        val inset = layoutMessageInput.height + gap
+        // The list runs under the bar: its padding reaches the top of the
+        // bar plus room for the typing indicator (its height, the 4 dp
+        // spacer under it, 2 dp over it), so it never covers the last message.
+        val typing = layoutTypingIndicator
+        if (typing.height == 0) typing.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        val gap = maxOf(typing.height, typing.measuredHeight) + (6 * resources.displayMetrics.density).toInt()
+        val inset = recycler.bottom - layoutMessageInput.top + gap
         if (recycler.paddingBottom == inset) return
         recycler.setPadding(recycler.paddingLeft, recycler.paddingTop, recycler.paddingRight, inset)
     }
@@ -1869,7 +1874,7 @@ class ChatActivity : AppCompatActivity() {
      * `finally`'de siliniyor — fotoğraf sistem galerisine/paylaşılan
      * depolamaya HİÇ yazılmıyor (kullanıcı isteği: "diske kaydedilmeden").
      */
-    private fun onPhotoCaptured(jpeg: ByteArray, caption: String = "", hiRes: Boolean = false) {
+    private fun onPhotoCaptured(jpeg: ByteArray, caption: String = "", hiRes: Boolean = false, quote: com.p2p.messenger.util.Quote.Ref? = null) {
         val fileName = "IMG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
         lifecycleScope.launch(Dispatchers.IO) {
             val tempFile = File(File(cacheDir, "outgoing").apply { mkdirs() }, UUID.randomUUID().toString())
@@ -1885,7 +1890,7 @@ class ChatActivity : AppCompatActivity() {
                 sent = prepared.file
                 val result = P2PLib.prepareAndSendFile(
                     peerDeviceFingerprint, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
-                    caption, "", ""
+                    caption, quote?.id ?: "", quote?.preview ?: ""
                 )
                 withContext(Dispatchers.Main) {
                     if (result.startsWith("Error:")) {
@@ -1908,7 +1913,10 @@ class ChatActivity : AppCompatActivity() {
                                 
                                 ),
                                 // Spec dışı: gönderirken yazılan açıklama hemen görünsün.
-                                caption = caption
+                                caption = caption,
+                                replyToMessageId = quote?.id,
+                                replyToPreview = quote?.preview,
+                                replyToSenderLabel = resolveReplyLabel(quote?.id)
                             )
                         )
                         scrollToBottomNow()
@@ -1928,8 +1936,11 @@ class ChatActivity : AppCompatActivity() {
 
     /** One send at a time so the files arrive in the order they were
      *  picked; the caption goes with the last one, under the batch. */
-    private fun sendPickedFiles(files: List<Pair<Uri, Boolean>>, caption: String = "") =
-        lifecycleScope.launch { files.forEachIndexed { i, (u, hiRes) -> onFilePicked(u, if (i == files.lastIndex) caption else "", hiRes).join() } }
+    private fun sendPickedFiles(files: List<Pair<Uri, Boolean>>, caption: String = "", quote: com.p2p.messenger.util.Quote.Ref? = null) =
+        lifecycleScope.launch { files.forEachIndexed { i, (u, hiRes) -> val last = i == files.lastIndex; onFilePicked(u, if (last) caption else "", hiRes, quote = if (last) quote else null).join() } }
+
+    /** The first quote in the input: the attachment or sticker being sent answers it. */
+    private fun takeQuote() = com.p2p.messenger.util.Quote.takeFirst(findViewById(R.id.edtMessage))
 
     /**
      * SAF (`OpenDocument`) ile seçilen dosya önce uygulamanın kendi
@@ -1937,7 +1948,7 @@ class ChatActivity : AppCompatActivity() {
      * gerçek bir dosya yolu ister), sonra `prepareAndSendFile` ile
      * şifrelenip teklif edilir.
      */
-    private fun onFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null): kotlinx.coroutines.Job {
+    private fun onFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null, quote: com.p2p.messenger.util.Quote.Ref? = null): kotlinx.coroutines.Job {
         return lifecycleScope.launch(Dispatchers.IO) {
             // Provider queries are IPC to another app: not on the main thread.
             val fileName = name ?: queryDisplayName(uri) ?: "file"
@@ -1984,7 +1995,7 @@ class ChatActivity : AppCompatActivity() {
                 sent = prepared.file
                 val result = P2PLib.prepareAndSendFile(
                     peerDeviceFingerprint, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
-                    caption, "", ""
+                    caption, quote?.id ?: "", quote?.preview ?: ""
                 )
                 withContext(Dispatchers.Main) {
                     if (result.startsWith("Error:")) {
@@ -2007,7 +2018,10 @@ class ChatActivity : AppCompatActivity() {
                                 
                                 ),
                                 // Spec dışı: gönderirken yazılan açıklama hemen görünsün.
-                                caption = caption
+                                caption = caption,
+                                replyToMessageId = quote?.id,
+                                replyToPreview = quote?.preview,
+                                replyToSenderLabel = resolveReplyLabel(quote?.id)
                             )
                         )
                         scrollToBottomNow()
@@ -2370,7 +2384,7 @@ class ChatActivity : AppCompatActivity() {
         return if (attachment != null) {
             getString(R.string.lbl_attachment_reply_preview, attachment.fileName)
         } else {
-            com.p2p.messenger.util.Quote.plain(com.p2p.messenger.util.Forward.strip(item.text)).takeWholeChars(REPLY_PREVIEW_MAX_CHARS)
+            com.p2p.messenger.util.Quote.ownText(com.p2p.messenger.util.Forward.strip(item.text)).takeWholeChars(REPLY_PREVIEW_MAX_CHARS)
         }
     }
 

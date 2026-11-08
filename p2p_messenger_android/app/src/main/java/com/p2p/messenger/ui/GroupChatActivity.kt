@@ -325,7 +325,7 @@ class GroupChatActivity : AppCompatActivity() {
     /** bkz. ChatActivity `pickFileLauncher` aynı notu (grup ekleri). */
     private val pickGroupFileLauncher = registerForActivityResult(com.p2p.messenger.util.OpenMultipleDocumentsAtHome()) { uris ->
         if (uris.isNotEmpty()) promptAttachmentCaption(uris = uris) { caption, picked ->
-        sendPickedFiles(picked.map { it.uri!! to it.hiRes }, caption).invokeOnCompletion { picked.forEach { it.release() } }
+        sendPickedFiles(picked.map { it.uri!! to it.hiRes }, caption, takeQuote()).invokeOnCompletion { picked.forEach { it.release() } }
     }
     }
 
@@ -335,11 +335,12 @@ class GroupChatActivity : AppCompatActivity() {
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
-            CapturedImage.take()?.let { jpeg -> promptAttachmentCaption(jpeg = jpeg, onRetake = { findViewById<View>(R.id.btnCamera).performClick() }) { caption, picked -> picked.firstOrNull()?.let { onGroupPhotoCaptured(it.jpeg!!, caption, it.hiRes) } } }
+            CapturedImage.take()?.let { jpeg -> promptAttachmentCaption(jpeg = jpeg, onRetake = { findViewById<View>(R.id.btnCamera).performClick() }) { caption, picked -> picked.firstOrNull()?.let { onGroupPhotoCaptured(it.jpeg!!, caption, it.hiRes, takeQuote()) } } }
         }
     }
 
-    private val stickerPicker = StickerPicker(this, { P2PLib.sendGroupSticker(groupId, it) }) { item ->
+    private val stickerPicker = StickerPicker(this, { id, quote -> P2PLib.sendGroupSticker(groupId, id, quote?.id ?: "", quote?.preview ?: "", quote?.sender ?: "") }, ::takeQuote) { item ->
+        item.replyToSenderLabel = resolveReplyLabel(item.replyToMessageId)
         adapter.addMessage(item)
         scrollToBottomNow()
     }
@@ -1778,7 +1779,7 @@ class GroupChatActivity : AppCompatActivity() {
         return if (attachment != null) {
             getString(R.string.lbl_attachment_reply_preview, attachment.fileName)
         } else {
-            com.p2p.messenger.util.Quote.plain(com.p2p.messenger.util.Forward.strip(item.text)).takeWholeChars(REPLY_PREVIEW_MAX_CHARS)
+            com.p2p.messenger.util.Quote.ownText(com.p2p.messenger.util.Forward.strip(item.text)).takeWholeChars(REPLY_PREVIEW_MAX_CHARS)
         }
     }
 
@@ -1919,14 +1920,14 @@ class GroupChatActivity : AppCompatActivity() {
             return
         }
         // bkz. ChatActivity aynı notu — sesli mesajın altına da yazı.
-        promptAttachmentCaption(onCancel = { file.delete() }) { caption, _ -> sendVoiceMessage(file, durationMs, caption) }
+        promptAttachmentCaption(onCancel = { file.delete() }) { caption, _ -> sendVoiceMessage(file, durationMs, caption, takeQuote()) }
     }
 
     /** bkz. ChatActivity.sendVoiceMessage AYNI desen — tek fark
      *  `prepareAndSendGroupFile` (TÜM üyelere sunulur) ve dönüşün sadece
      *  bir dosya kimliği string'i olması (bkz. `onGroupFilePicked` AYNI
      *  dönüş biçimi notu, 1:1'in JSON `{message_id, status}`'ından farklı). */
-    private fun sendVoiceMessage(file: File, durationMs: Long, caption: String = "") {
+    private fun sendVoiceMessage(file: File, durationMs: Long, caption: String = "", quote: com.p2p.messenger.util.Quote.Ref? = null) {
         val targetGroupId = groupId
         lifecycleScope.launch(Dispatchers.IO) {
             // The copy is deleted even if the screen closes while sending.
@@ -1934,7 +1935,7 @@ class GroupChatActivity : AppCompatActivity() {
                 val result = try {
                     P2PLib.prepareAndSendGroupFile(
                         targetGroupId, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
-                        caption, "", "", ""
+                        caption, quote?.id ?: "", quote?.preview ?: "", quote?.sender ?: ""
                     )
                 } catch (e: Exception) {
                     "Error: ${e.message}"
@@ -1949,6 +1950,9 @@ class GroupChatActivity : AppCompatActivity() {
                                 text = "",
                                 isMine = true,
                                 caption = caption,
+                                replyToMessageId = quote?.id,
+                                replyToPreview = quote?.preview,
+                                replyToSenderLabel = resolveReplyLabel(quote?.id),
                                 attachment = SimpleChatAdapter.AttachmentInfo(
                                     fileId = result,
                                     fileName = file.name,
@@ -2149,7 +2153,7 @@ class GroupChatActivity : AppCompatActivity() {
      *  gelen kare bellekten geçici bir önbellek dosyasına yazılıp
      *  gönderilir ve dosya hemen silinir; galeriye/paylaşılan depolamaya
      *  hiçbir şey yazılmaz. */
-    private fun onGroupPhotoCaptured(jpeg: ByteArray, caption: String = "", hiRes: Boolean = false) {
+    private fun onGroupPhotoCaptured(jpeg: ByteArray, caption: String = "", hiRes: Boolean = false, quote: com.p2p.messenger.util.Quote.Ref? = null) {
         val fileName = "IMG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
         // The group is captured BEFORE the coroutine: `groupId` was read
         // INSIDE the IO block, and the user can switch to another group
@@ -2170,7 +2174,7 @@ class GroupChatActivity : AppCompatActivity() {
                 sent = prepared.file
                 val result = P2PLib.prepareAndSendGroupFile(
                     targetGroupId, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
-                    caption, "", "", ""
+                    caption, quote?.id ?: "", quote?.preview ?: "", quote?.sender ?: ""
                 )
                 withContext(Dispatchers.Main) {
                     if (result.startsWith("Error:")) {
@@ -2192,7 +2196,11 @@ class GroupChatActivity : AppCompatActivity() {
                                 
                                 ),
                                 // Spec dışı: gönderirken yazılan açıklama hemen görünsün.
-                                caption = caption
+                                caption = caption,
+                                replyToMessageId = quote?.id,
+                                replyToPreview = quote?.preview,
+                                replyToSenderLabel = resolveReplyLabel(quote?.id),
+                                replyToSenderIdentityId = quote?.sender
                             )
                         )
                         scrollToBottomNow()
@@ -2212,15 +2220,22 @@ class GroupChatActivity : AppCompatActivity() {
 
     /** One send at a time so the files arrive in the order they were
      *  picked; the caption goes with the last one, under the batch. */
-    private fun sendPickedFiles(files: List<Pair<Uri, Boolean>>, caption: String = "") =
-        lifecycleScope.launch { files.forEachIndexed { i, (u, hiRes) -> onGroupFilePicked(u, if (i == files.lastIndex) caption else "", hiRes).join() } }
+    private fun sendPickedFiles(files: List<Pair<Uri, Boolean>>, caption: String = "", quote: com.p2p.messenger.util.Quote.Ref? = null) =
+        lifecycleScope.launch { files.forEachIndexed { i, (u, hiRes) -> val last = i == files.lastIndex; onGroupFilePicked(u, if (last) caption else "", hiRes, quote = if (last) quote else null).join() } }
+
+    /** The first quote in the input with its sender: the attachment or
+     *  sticker being sent answers it. */
+    private fun takeQuote() = com.p2p.messenger.util.Quote.takeFirst(findViewById(R.id.edtMessage))?.let { q ->
+        val target = localMessages.firstOrNull { it.messageId == q.id }
+        q.copy(sender = target?.senderIdentityId ?: if (target?.isMine == true) ownIdentityId else null)
+    }
 
     /**
      * Spec dışı, kullanıcı isteği (grup ekleri): bkz. ChatActivity.onFilePicked
      * AYNI desen — SAF ile seçilen dosya önce önbelleğe kopyalanır, sonra
      * `prepareAndSendGroupFile` ile TÜM üyelere sunulur.
      */
-    private fun onGroupFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null): kotlinx.coroutines.Job {
+    private fun onGroupFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null, quote: com.p2p.messenger.util.Quote.Ref? = null): kotlinx.coroutines.Job {
         // The group is captured BEFORE the coroutine (bkz.
         // `onGroupPhotoCaptured` aynı not).
         val targetGroupId = groupId
@@ -2270,7 +2285,7 @@ class GroupChatActivity : AppCompatActivity() {
                 sent = prepared.file
                 val result = P2PLib.prepareAndSendGroupFile(
                     targetGroupId, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
-                    caption, "", "", ""
+                    caption, quote?.id ?: "", quote?.preview ?: "", quote?.sender ?: ""
                 )
                 withContext(Dispatchers.Main) {
                     if (result.startsWith("Error:")) {
@@ -2292,7 +2307,11 @@ class GroupChatActivity : AppCompatActivity() {
                                 
                                 ),
                                 // Spec dışı: gönderirken yazılan açıklama hemen görünsün.
-                                caption = caption
+                                caption = caption,
+                                replyToMessageId = quote?.id,
+                                replyToPreview = quote?.preview,
+                                replyToSenderLabel = resolveReplyLabel(quote?.id),
+                                replyToSenderIdentityId = quote?.sender
                             )
                         )
                         scrollToBottomNow()
@@ -2915,12 +2934,13 @@ class GroupChatActivity : AppCompatActivity() {
      * yeniden hesaplanıyor.
      */
     private fun syncRecyclerBottomInset() {
-        // Spec dışı, kullanıcı isteği: son mesajlar alt çubuğun altında
-        // kalıyordu — çubuğun gerçek yüksekliğine ek olarak ekran
-        // yüksekliğinin ~%10'u kadar boş alt boşluk bırakılıyor.
-        val gap = (8 * resources.displayMetrics.density).toInt() +
-            (resources.displayMetrics.heightPixels * 0.10f).toInt()
-        val inset = layoutMessageInput.height + gap
+        // The list runs under the bar: its padding reaches the top of the
+        // bar plus room for the typing indicator (its height, the 4 dp
+        // spacer under it, 2 dp over it), so it never covers the last message.
+        val typing = layoutTypingIndicator
+        if (typing.height == 0) typing.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        val gap = maxOf(typing.height, typing.measuredHeight) + (6 * resources.displayMetrics.density).toInt()
+        val inset = recycler.bottom - layoutMessageInput.top + gap
         if (recycler.paddingBottom == inset) return
         recycler.setPadding(recycler.paddingLeft, recycler.paddingTop, recycler.paddingRight, inset)
     }

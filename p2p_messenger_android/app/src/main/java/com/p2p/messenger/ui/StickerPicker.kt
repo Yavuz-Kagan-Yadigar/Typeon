@@ -49,8 +49,10 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class StickerPicker(
     private val activity: AppCompatActivity,
-    /** Sends a sticker id (off the main thread): the attachment's file id or "Error: ...". */
-    private val send: (String) -> String,
+    /** Sends a sticker id as an answer to the quote (off the main thread): the attachment's file id or "Error: ...". */
+    private val send: (String, com.p2p.messenger.util.Quote.Ref?) -> String,
+    /** The quote the sticker answers, taken from the input on the main thread. */
+    private val takeQuote: () -> com.p2p.messenger.util.Quote.Ref?,
     /** The sent sticker's bubble, on the main thread. */
     private val onSent: (SimpleChatAdapter.Item) -> Unit,
 ) {
@@ -179,19 +181,22 @@ class StickerPicker(
 
     private fun sendSticker(id: String) {
         dialog?.dismiss()
+        val quote = takeQuote()
         scope.launch(Dispatchers.IO) {
-            val fileId = call { send(id) }
+            val fileId = call { send(id, quote) }
             withContext(Dispatchers.Main) {
-                if (fileId.startsWith("Error:")) toast(coreErrorText(activity, fileId)) else onSent(sentBubble(fileId))
+                if (fileId.startsWith("Error:")) toast(coreErrorText(activity, fileId)) else onSent(sentBubble(fileId, quote))
             }
         }
     }
 
     /** A sent sticker's bubble, the same shape as a file send. */
-    private fun sentBubble(fileId: String) = SimpleChatAdapter.Item(
+    private fun sentBubble(fileId: String, quote: com.p2p.messenger.util.Quote.Ref?) = SimpleChatAdapter.Item(
         messageId = fileId,
         text = "",
         isMine = true,
+        replyToMessageId = quote?.id,
+        replyToPreview = quote?.preview,
         attachment = SimpleChatAdapter.AttachmentInfo(
             fileId = fileId,
             fileName = "sticker.jxl",

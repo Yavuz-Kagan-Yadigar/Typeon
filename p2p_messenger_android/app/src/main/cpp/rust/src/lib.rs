@@ -433,19 +433,24 @@ fn valid_sticker_origin(o: &str) -> bool {
 
 /// Sends sticker `sticker_id` from my store to a contact (`peer` = device
 /// fingerprint) or a group (`group_id`), as an attachment with `sticker` set.
-/// Returns the attachment's file id.
-pub(crate) fn send_sticker_unlocked(peer: Option<String>, group_id: Option<String>, sticker_id: &str) -> Result<String, String> {
+/// `reply_to` = (quoted message id, preview, quoted sender identity id for a
+/// group). Returns the attachment's file id.
+pub(crate) fn send_sticker_unlocked(peer: Option<String>, group_id: Option<String>, sticker_id: &str, reply_to: Option<(String, String, Option<String>)>) -> Result<String, String> {
     // The wire origin is the content id only (`jxl:<sha256>`, which the
     // receiver checks against the offer's hash); a `wa:` id stays local.
     let tmp = core_lock_read().decrypt_sticker_to_tmp(sticker_id)?;
     let origin = Some(format!("jxl:{sticker_id}"));
     let source = tmp.to_string_lossy().to_string();
+    let (reply_id, reply_preview, reply_sender) = match reply_to {
+        Some((id, preview, sender)) => (Some(id), Some(preview), sender),
+        None => (None, None, None),
+    };
     let result = match (peer, group_id) {
         (Some(peer), None) => encrypt_then_finish(&source, None, |core, file_id, file_key, total_size, sha256_hex, chunk_hashes| {
-            core.finish_outgoing_file(peer, file_id, file_key, total_size, sha256_hex, chunk_hashes, "sticker.jxl".into(), "image/jxl".into(), None, None, String::new(), None, None, origin).map(|r| r.0)
+            core.finish_outgoing_file(peer, file_id, file_key, total_size, sha256_hex, chunk_hashes, "sticker.jxl".into(), "image/jxl".into(), None, None, String::new(), reply_id, reply_preview, origin).map(|r| r.0)
         }),
         (None, Some(gid)) => encrypt_then_finish(&source, Some(&gid.clone()), |core, file_id, file_key, total_size, sha256_hex, chunk_hashes| {
-            core.finish_outgoing_group_file(gid, file_id, file_key, total_size, sha256_hex, chunk_hashes, "sticker.jxl".into(), "image/jxl".into(), None, None, String::new(), None, None, None, origin)
+            core.finish_outgoing_group_file(gid, file_id, file_key, total_size, sha256_hex, chunk_hashes, "sticker.jxl".into(), "image/jxl".into(), None, None, String::new(), reply_id, reply_preview, reply_sender, origin)
         }),
         _ => Err("peer or group".to_string()),
     };
@@ -4773,6 +4778,9 @@ struct P2PCore {
     /// "bu alıcı sunucumda değil" bilgisi mesaj başına bir gidiş-dönüşe mal
     /// olmasın diye.
     server_unknown_mailboxes: HashMap<(String, String), u64>,
+    /// `UnknownMailbox` answers in a row per mailbox: the next pause doubles
+    /// (see `SERVER_UNKNOWN_MAILBOX_MAX_TTL_MS`); a stored deposit resets it.
+    server_unknown_streak: HashMap<(String, String), u32>,
     /// Sunucuya yüklenmeyi bekleyen arşiv kayıtları (kalıcı).
     server_archive_queue: Vec<server_client::PendingArchive>,
     /// Sunucuya yüklenmeyi bekleyen dosyalar (kalıcı).
@@ -5290,6 +5298,7 @@ impl P2PCore {
             server_inflight: HashMap::new(),
             server_cursors: HashMap::new(),
             server_unknown_mailboxes: HashMap::new(),
+            server_unknown_streak: HashMap::new(),
             server_archive_queue: Vec::new(),
             server_blob_uploads: Vec::new(),
             server_sweep_at: 0,
@@ -14929,6 +14938,7 @@ impl P2PCore {
         self.server_inflight.clear();
         self.server_cursors.clear();
         self.server_unknown_mailboxes.clear();
+        self.server_unknown_streak.clear();
         self.server_archive_queue.clear();
         self.server_blob_uploads.clear();
         self.server_deposited.clear();
@@ -27174,26 +27184,37 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setStickerFavorite<'local>(
 
 /// Sends a sticker to a contact device. Returns the attachment's file id.
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendSticker<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer: JString<'local>, sticker_id: JString<'local>) -> jstring {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendSticker<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer: JString<'local>, sticker_id: JString<'local>, reply_to_message_id: JString<'local>, reply_to_preview: JString<'local>) -> jstring {
     let peer: String = jstr(&mut env, &peer).unwrap_or_default();
     let id: String = jstr(&mut env, &sticker_id).unwrap_or_default();
+    let reply = sticker_reply_to(&mut env, &reply_to_message_id, &reply_to_preview, None);
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        send_sticker_unlocked(Some(peer), None, &id)
+        send_sticker_unlocked(Some(peer), None, &id, reply)
     });
     sticker_reply(&mut env, result)
 }
 
 /// Sends a sticker to a group. Returns the attachment's file id.
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupSticker<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, sticker_id: JString<'local>) -> jstring {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupSticker<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, sticker_id: JString<'local>, reply_to_message_id: JString<'local>, reply_to_preview: JString<'local>, reply_to_sender_identity_id: JString<'local>) -> jstring {
     let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
     let id: String = jstr(&mut env, &sticker_id).unwrap_or_default();
+    let reply = sticker_reply_to(&mut env, &reply_to_message_id, &reply_to_preview, Some(&reply_to_sender_identity_id));
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
-        send_sticker_unlocked(None, Some(gid), &id)
+        send_sticker_unlocked(None, Some(gid), &id, reply)
     });
     sticker_reply(&mut env, result)
+}
+
+/// The quote a sticker answers; an empty message id means none.
+fn sticker_reply_to(env: &mut JNIEnv, id: &JString, preview: &JString, sender: Option<&JString>) -> Option<(String, String, Option<String>)> {
+    let id: String = jstr(env, id).unwrap_or_default();
+    if id.is_empty() { return None; }
+    let preview: String = jstr(env, preview).unwrap_or_default();
+    let sender = sender.and_then(|s| jstr(env, s)).filter(|s: &String| !s.is_empty());
+    Some((id, preview, sender))
 }
 
 /// Copies a received (downloaded) sticker attachment into my store.

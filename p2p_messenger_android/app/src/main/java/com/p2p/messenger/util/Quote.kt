@@ -34,6 +34,25 @@ object Quote {
     /** The text with every quote removed: the sender's own words only. */
     fun withoutQuotes(text: String) = MARKER.replace(text, "")
 
+    /** A message's text for a quote of it: its own words, not the quotes it
+     *  holds (no quote in a quote); all quotes when it has nothing else. */
+    fun ownText(text: String) = withoutQuotes(text).trim().ifEmpty { plain(text).trim() }
+
+    /** A quoted message: its id, the preview the sender shows and, in a
+     *  group, the quoted sender's identity id. */
+    data class Ref(val id: String, val preview: String, val sender: String? = null)
+
+    /** The first quote in the input, removed from it: an attachment or a
+     *  sticker answers it through the reply field, which holds one quote. */
+    fun takeFirst(edit: EditText): Ref? {
+        val s = edit.text ?: return null
+        val m = MARKER.find(s) ?: return null
+        var end = m.range.last + 1
+        if (end < s.length && s[end] == '\n') end++
+        s.delete(m.range.first, end)
+        return Ref(m.groupValues[1], m.groupValues[2])
+    }
+
     /** Text for places that cannot draw boxes: notifications, chat list, copy. */
     fun plain(text: String) = MARKER.replace(text) { "> " + it.groupValues[2].replace('\n', ' ') }
 
