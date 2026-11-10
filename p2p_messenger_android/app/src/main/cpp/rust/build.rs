@@ -7,4 +7,10 @@ fn main() {
         println!("cargo:rustc-link-arg-cdylib=-lc++_static");
         println!("cargo:rustc-link-arg-cdylib=-lc++abi");
     }
+    // Windows cross-build (Linux/packaging/windows/build.sh): libjxl's cmake
+    // finds the sysroot's lcms2 and builds jxl_cms against it, but jpegxl-src
+    // does not link it. Static, so no extra DLL ships.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rustc-link-lib=static=lcms2");
+    }
 }

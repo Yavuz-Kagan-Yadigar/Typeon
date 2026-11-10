@@ -1,0 +1,982 @@
+//! Connections, prekeys, handshakes and ratchet rotation.
+
+use super::*;
+
+impl P2PCore {
+
+    /// Spec dışı sağlamlaştırma: kullanıcı bir sohbeti AÇAR açmaz (henüz
+    /// mesaj yazmadan) el sıkışmayı proaktif olarak başlatır — önceden
+    /// handshake sadece İLK `sendMessage` çağrısında (lazily) tetikleniyordu,
+    /// bu da "sohbeti aç, hemen yaz, mesaj git(mesin)" senaryosunda
+    /// kullanıcıya hiçbir bağlanma göstergesi olmadan mesaj kaybı riski
+    /// yaratıyordu. Zaten bir oturum varsa no-op.
+    pub(crate) fn ensure_handshake(&mut self, peer_device_fingerprint: &str) -> Result<(), String> {
+        // Spec dışı, ağ sağlamlığı: oturum olsun olmasın, o an CANLI bir
+        // bağlantı yoksa hemen yeniden bağlanmayı dene — reconnect_sweep'in
+        // bir sonraki turunu (≤15 sn) beklemeden. Sohbet açılışında/mesaj
+        // öncesinde en hızlı iyileşme yolu.
+        // Forced: the chat is on screen (or was just unblocked), a wait left
+        // by a failed sweep must not hold it back. The send path stays gated:
+        // automatic retries go through it too.
+        self.try_reconnect_device(peer_device_fingerprint, true);
+        if self.has_active_session(peer_device_fingerprint) {
+            return Ok(());
+        }
+        self.initiate_handshake_with(peer_device_fingerprint)
+    }
+
+    /// Spec dışı, ağ sağlamlığı düzeltmesi: belirtilen cihaza o an CANLI bir
+    /// libp2p bağlantısı yoksa VE kalıcı bir adres ipucumuz varsa hemen
+    /// (senkron, sweep'i beklemeden) yeniden bağlanmayı başlatır. Bağlıysa
+    /// veya adres yoksa no-op. `ensure_handshake` ve mesaj gönderme yolundan
+    /// çağrılır — kopmuş bir kişiye anında yeniden bağlanma için.
+    ///
+    /// bkz. `try_reconnect_device` dokümantasyonu: burada KASITLI OLARAK
+    /// `known_remote_devices`/Aktif filtresi YOK — bu, TAZE eşleşmiş (henüz
+    /// hiç IdentityExchange tamamlanmamış) bir cihaz için de çalışabilmeli,
+    /// aksi halde ilk eşleşmenin kendisi hiçbir zaman gerçek bir bağlantı
+    /// kuramazdı (bkz. QrScanActivity/ContactsFragment "eşleşme WIP"
+    /// düzeltmesi — kullanıcı DOĞRUDAN bu fonksiyonun tetiklediği bağlantının
+    /// tamamlanmasını beklediği ChatActivity'ye yönlendiriliyor).
+    pub(crate) fn ensure_connected(&mut self, device_fingerprint: &str) {
+        self.try_reconnect_device(device_fingerprint, false);
+    }
+
+    /// Spec dışı, ağ sağlamlığı düzeltmesi: `ensure_connected`,
+    /// `reconnect_sweep` (periyodik, TÜM bilinen cihazlar) VE artık
+    /// `ping`/`ConnectionClosed` olaylarının (bkz. `poll_events`) tetiklediği
+    /// ANINDA tek-cihaz yeniden bağlanmasının ORTAK, backoff-farkında dial
+    /// mantığı — pil dostu (bkz. `RECONNECT_BACKOFF_*`) VE dial fırtınası
+    /// önleyici (aynı cihaza kısa aralıklarla BİRDEN FAZLA tetikleyiciden
+    /// [mesaj gönderme + periyodik tarama + ping-hatası] gelen çağrılar
+    /// artık HEPSİ aynı geri-çekilme durumunu paylaşır, birbirinden
+    /// habersiz üst üste dial YAPMAZLAR).
+    ///
+    /// "Bu cihaz bilinen/aktif mi" filtrelemesi KASITLI OLARAK burada
+    /// YAPILMAZ — çağıranların farklı gereksinimleri var (bkz.
+    /// `ensure_connected` dokümantasyonu); bu fonksiyon SADECE "adres
+    /// ipucu var mı + o an bağlı mı + geri çekilme penceresi doldu mu"
+    /// sorularına bakıp gerçek dial'i yapar.
+    ///
+    /// `force=true` (ağ değişikliği bildirimi — bkz.
+    /// `reconnect_all_known_now` — and `ensure_handshake`) `reconnect_backoff`'u YOK SAYAR: bir ağ
+    /// arayüzü değişikliği (Wi-Fi<->hücresel) ESKİ ağ üzerinden birikmiş
+    /// geri çekilme geçmişini ANLAMSIZ kılar — yeni arayüz üzerinden ilk
+    /// deneme her zaman hemen yapılmalı.
+    ///
+    /// Dönüş: bir dial GERÇEKTEN denendiyse `true` (zaten bağlıysa, adres
+    /// yoksa veya backoff nedeniyle atlandıysa `false`).
+    pub(crate) fn try_reconnect_device(&mut self, fp: &str, force: bool) -> bool {
+        // bkz. `blocked_identities` — engelli kişiye ASLA bağlanılmaz.
+        if self.is_blocked_device(fp) {
+            return false;
+        }
+        let now = current_time_ms();
+        // Spec dışı, ağ sağlamlığı düzeltmesi (bkz. `device_onion_addr` alanı
+        // dokümantasyonu, "aynı LAN'da + Tor'la eşleşmiş bir cihaz mobil
+        // veriye geçince diğer telefonla artık konuşamıyor" hatası): önceden
+        // burada SADECE `device_last_addr` (en son işe yarayan HERHANGİ bir
+        // adres — bir LAN bağlantısı kurulduysa bu ÜZERİNE yazılmış bir LAN
+        // adresi olabilir) kullanılıyordu. Artık `.onion` adresi AYRI ve asla
+        // üzerine yazılmayan `device_onion_addr`'dan da okunup, ikisi de
+        // (farklıysa) EŞ ZAMANLI denenir — hangisi ağ değişikliğinden sonra
+        // hâlâ geçerliyse o başarılı olur.
+        let primary_str = self.device_last_addr.get(fp).cloned();
+        let onion_str = self.device_onion_addr.get(fp).cloned().filter(|o| Some(o) != primary_str.as_ref());
+        // A group founder's hint (`vah:`), only while nothing better is known.
+        let primary_str = match (primary_str, &onion_str) {
+            (None, None) => self.meta_str(&format!("vah:{}", fp)),
+            (p, _) => p,
+        };
+        if primary_str.is_none() && onion_str.is_none() {
+            return false;
+        }
+        let primary_addr = primary_str.as_deref().and_then(|s| s.parse::<Multiaddr>().ok());
+        let onion_addr = onion_str.as_deref().and_then(|s| s.parse::<Multiaddr>().ok());
+        // PeerId, hangi adresten çıkarılırsa çıkarılsın AYNI olmalı (ikisi de
+        // aynı cihaza ait) — hangisi mevcut/ayrıştırılabilirse ondan alınır.
+        let peer_id = match primary_addr.as_ref().or(onion_addr.as_ref()).and_then(extract_peer_id) {
+            Some(p) => p,
+            None => return false,
+        };
+        let connected = self.swarm.as_ref().map(|s| s.is_connected(&peer_id)).unwrap_or(false);
+        if connected {
+            // bkz. `reconnect_backoff` dokümantasyonu — bağlantı bir
+            // şekilde zaten kurulduysa geri çekilme geçmişini sıfırla, bir
+            // sonraki kopmada sıfırdan (hızlı) başlasın.
+            self.reconnect_backoff.remove(fp);
+            return false;
+        }
+        if !force {
+            if let Some(&(next_allowed_at, _)) = self.reconnect_backoff.get(fp) {
+                // A wait set in saver mode can be hours long; once the app is
+                // on screen again it must not outlast the normal cap.
+                let wait_cap = if self.radio_saver() { RECONNECT_BACKOFF_SAVER_MAX_MS } else { RECONNECT_BACKOFF_MAX_MS };
+                if now < next_allowed_at && next_allowed_at - now <= wait_cap {
+                    return false;
+                }
+            }
+        }
+        // Spec dışı, hata düzeltmesi ("ağ değişikliğinden sonra yeniden
+        // bağlanma dakikalarca gecikiyor"): `force=true` yukarıdaki GATE'i
+        // (satır ~3688) atlıyordu ama `attempts` sayacı yine de ESKİ ağdan
+        // BİRİKMİŞ değerden devam ediyordu — yani tek bir zorlanmış deneme
+        // başarısız olursa (arayüz değişiminin hemen ardından, ya da karşı
+        // tarafın adresi de değiştiyse gayet olası), `reconnect_backoff`'a
+        // önceki değerden bir kademe DAHA YÜKSEK (azami `RECONNECT_BACKOFF_MAX_MS`,
+        // 10 dakika) bir giriş yazılıyordu — bu da sonraki TÜM otomatik
+        // yeniden bağlanma yollarını (periyodik `reconnect_sweep`, ping
+        // başarısızlığı) dakikalarca engelliyordu; tam olarak `force`'un
+        // önlemeye çalıştığı senaryonun kendisi. `force` iken sayaç HER ZAMAN
+        // 1'den başlar — "eski ağ üzerinden birikmiş geri çekilme geçmişi
+        // ANLAMSIZ" yorumunun (yukarıdaki fonksiyon dokümantasyonu) sadece
+        // GATE'i değil, SONRAKİ bekleme süresini de kapsaması gerekir.
+        let attempts = if force {
+            1
+        } else {
+            self.reconnect_backoff.get(fp).map(|&(_, n)| n).unwrap_or(0) + 1
+        };
+        // attempts=1 -> base*2^0 (=RECONNECT_SWEEP_INTERVAL_MS, normal
+        // tarama hızıyla aynı, ekstra bekleme yok), attempts=2 -> 2x,
+        // attempts=3 -> 4x, ... `RECONNECT_BACKOFF_MAX_MS`'te tavan yapar.
+        let delay = RECONNECT_BACKOFF_BASE_MS
+            .saturating_mul(1u64 << attempts.saturating_sub(1).min(16))
+            .min(if self.radio_saver() { RECONNECT_BACKOFF_SAVER_MAX_MS } else { RECONNECT_BACKOFF_MAX_MS });
+        self.reconnect_backoff.insert(fp.to_string(), (now + delay, attempts));
+        info!(
+            "try_reconnect_device: kopmuş peer'a yeniden bağlanılıyor (deneme #{}, force={}, onion adayı={}): {}",
+            attempts, force, onion_addr.is_some(), crate::log_id(&peer_id)
+        );
+        // `dial_with_relay_fallback` zaten `primary_addr`'ı VE bilinen tüm
+        // röle adaylarını dener — `.onion` adayı varsa AYRICA (relay-fallback
+        // mantığına girmeden, doğrudan) deniyoruz, o da zaten kendi başına
+        // ağ-bağımsız bir "doğrudan" adres.
+        if let Some(onion) = onion_addr.clone() {
+            if let Some(swarm) = &mut self.swarm {
+                // M-191: with the peer condition, a dial still in flight from
+                // the previous backoff step is not started a second time.
+                let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
+                    .addresses(vec![onion])
+                    .condition(libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing)
+                    .build();
+                if let Err(e) = swarm.dial(opts) {
+                    error!("Onion adresine yeniden bağlanma denemesi başarısız: {}", e);
+                }
+            }
+        }
+        self.dial_with_relay_fallback(peer_id, primary_addr);
+        // Also every address the behaviours know for this peer. No direct (IP)
+        // addresses are added: the node is onion-only since the 2026-09-23
+        // deanon fix (`DialReject` refuses clearnet dials anyway).
+        if let Some(swarm) = &mut self.swarm {
+            let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
+                // Only if none of the dials above started. With `Always` this
+                // was one more Tor circuit to the same onion on each attempt.
+                .condition(libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing)
+                .build();
+            let _ = swarm.dial(opts);
+        }
+        true
+    }
+
+    /// Spec dışı, kullanıcı isteği (ağ değişikliği anında tam yeniden
+    /// bağlanma): Kotlin tarafından (bkz. P2PService genel ağ değişikliği
+    /// algılama, `notifyNetworkChanged` JNI) bir ağ arayüzü değişikliği
+    /// (Wi-Fi<->hücresel, ya da herhangi bir "varsayılan ağ değişti"
+    /// olayı) bildirildiğinde çağrılır — TÜM bilinen Aktif cihazlar için,
+    /// `reconnect_backoff`'u YOK SAYARAK (bkz. `try_reconnect_device`
+    /// `force` notu), ANINDA yeniden bağlanmayı dener. Eski ağ üzerinden
+    /// kurulmuş TÜM bağlantılar yeni arayüzde artık geçersiz soketlerdir
+    /// (IP değişti) — periyodik `reconnect_sweep`'in (≤15sn) VEYA
+    /// `ping`'in bunu fark etmesini beklemek yerine, ağ değişikliğinin
+    /// KENDİSİ zaten kesin bir sinyal olduğundan hemen harekete geçilir.
+    pub(crate) fn reconnect_all_known_now(&mut self) {
+        let now = mono_ms();
+        if now.saturating_sub(self.last_network_change_at) < NETWORK_CHANGE_DEBOUNCE_MS {
+            // Trailing edge: `poll_events` runs it once the window ends.
+            self.network_change_pending = true;
+            return;
+        }
+        self.last_network_change_at = now;
+        self.network_change_pending = false;
+        // İKİ CİHAZLI TESTTE (2026-09-06): ağ değişikliğinden sonra Tor
+        // devreleri/onion descriptor'ı dakikalarca toparlanmıyordu. arti'yi
+        // de dürt — `bootstrap()` idempotent, ucuz (bkz. `notify_network_changed`).
+        if let Some(tor) = &self.tor {
+            tor.notify_network_changed();
+        }
+        // Eski arayüzdeki bağlantılar ölü olabilir: hepsini hemen yokla, ölen
+        // tek zaman aşımında kapanır (yaşayanlara dokunulmaz — mobil→Wi-Fi
+        // geçişinde mobil bağlantılar çalışmaya devam eder).
+        let peers: Vec<PeerId> = self.keepalive_state.keys().copied().collect();
+        for p in peers {
+            self.mark_connection_suspect(p);
+        }
+        self.fast_reconnect_until = mono_ms() + FAST_RECONNECT_WINDOW_MS;
+        // Saver: the forced dial and the fast window are for the peers that
+        // were connected before the change. The others keep their backoff: a
+        // device that has been offline for long was dialed again on every
+        // network callback.
+        let saver = self.radio_saver();
+        let connected_before: std::collections::HashSet<String> = self.device_to_peer_id.iter()
+            .filter(|(_, p)| self.keepalive_state.contains_key(p))
+            .map(|(fp, _)| fp.clone())
+            .collect();
+        self.fast_reconnect_fps = if saver { connected_before.clone() } else { std::collections::HashSet::new() };
+        // Outside saver too, only the devices that were connected or were
+        // heard from lately are dialed at once: forcing every known device
+        // redialed peers offline for weeks on each network callback.
+        let wall = current_time_ms();
+        let fps: Vec<(String, bool)> = self.known_remote_devices.values()
+            .filter(|d| d.is_active)
+            .map(|d| (d.device_fingerprint.clone(), wall.saturating_sub(d.last_seen) < NETWORK_CHANGE_FORCE_SEEN_MS))
+            .collect();
+        for (fp, seen_lately) in fps {
+            let force = connected_before.contains(&fp) || (!saver && seen_lately);
+            self.try_reconnect_device(&fp, force);
+        }
+        // Spec dışı, ağ sağlamlığı düzeltmesi (bkz. `announce_address_to_all_contacts`
+        // dokümantasyonu): ağ arayüzü değiştiğinde bizim de o anki en iyi
+        // adresimiz değişmiş olabilir (yeni LAN IP'si, yeni UPnP eşlemesi) —
+        // bilinen herkese proaktif olarak bildiriyoruz, sadece kendi
+        // taraflarımızdan yeniden bağlanmayı beklemek yerine.
+        self.announce_address_to_all_contacts();
+        // Çoklu-cihaz (spec 1.7): ağ değişikliği güçlü bir sinyal — debounce'u
+        // yok sayıp kardeşlerden geçmiş geri-doldurmayı HEMEN dene (bir süre
+        // çevrimdışıydıysam kaçırdığım kişi mesajlarını yakalamak için).
+        // At most one extra round per 5 minutes: every LTE/Wi-Fi flap asked
+        // every sibling for the newest rows of every conversation again.
+        self.last_sibling_backfill_at = self.last_sibling_backfill_at
+            .min(current_time_ms().saturating_sub(SIBLING_BACKFILL_INTERVAL_MS - 5 * 60_000));
+        self.last_sibling_roster_sync_at = 0;
+        self.request_sibling_backfill();
+    }
+
+    /// This device's prekey to hand out, made or rotated when due. `None`
+    /// while the local storage key or the database is missing: a prekey whose
+    /// secret cannot be stored would be gone at the next start, and every
+    /// handshake made with it lost.
+    pub(crate) fn current_own_prekey(&mut self) -> Option<SignedPrekey> {
+        use zeroize::Zeroize;
+        self.skipped_key_encryption_key?;
+        self.db.as_ref()?;
+        let own_fp = self.get_active_own_device_fingerprint().ok()?;
+        let now = current_time_ms();
+        if !self.own_prekeys_loaded {
+            self.own_prekeys_loaded = true;
+            let rows: Vec<Vec<u8>> = self.db.as_ref().and_then(|conn| {
+                let mut stmt = conn.prepare("SELECT sealed FROM own_prekeys ORDER BY id").ok()?;
+                let rows: Vec<Vec<u8>> = stmt.query_map([], |r| r.get(0)).ok()?.flatten().collect();
+                Some(rows)
+            }).unwrap_or_default();
+            for sealed in rows {
+                let Some(mut plain) = self.open_local_blob(&sealed) else { continue };
+                if let Ok(mut stored) = ciborium::from_reader::<StoredPrekey, _>(plain.as_slice()) {
+                    let sk_x = <[u8; 32]>::try_from(stored.sk_x25519.as_slice()).ok().map(StaticSecret::from);
+                    let sk_m = <ml_kem::Encoded<MlKem1024DecapsulationKey>>::try_from(stored.sk_mlkem.as_slice())
+                        .ok().map(|e| MlKem1024DecapsulationKey::from_bytes(&e));
+                    // L-63: an id the table cannot hold is not a row we wrote.
+                    if let (Some(sk_x25519), Some(sk_mlkem), true) = (sk_x, sk_m, stored.signed.id <= i64::MAX as u64) {
+                        self.own_prekeys.push(OwnPrekey { signed: stored.signed.clone(), sk_x25519, sk_mlkem });
+                    }
+                    stored.sk_x25519.zeroize();
+                    stored.sk_mlkem.zeroize();
+                }
+                plain.zeroize();
+            }
+        }
+        // The point of a prekey: its secret does not outlive its use.
+        if self.own_prekeys.iter().any(|k| now.saturating_sub(k.signed.id) > PREKEY_KEEP_MS) {
+            self.own_prekeys.retain(|k| now.saturating_sub(k.signed.id) <= PREKEY_KEEP_MS);
+            if let Some(conn) = &self.db {
+                let _ = conn.execute("DELETE FROM own_prekeys WHERE id < ?1", params![now.saturating_sub(PREKEY_KEEP_MS) as i64]);
+            }
+        }
+        let due = self.own_prekeys.last().map_or(true, |k| now.saturating_sub(k.signed.id) >= PREKEY_ROTATE_MS);
+        if due {
+            let mut csprng = OsRng;
+            let sk_x25519 = StaticSecret::random_from_rng(&mut csprng);
+            let (sk_mlkem, _) = MlKem1024::generate(&mut csprng);
+            let kem_pubkey_x25519 = X25519PublicKey::from(&sk_x25519).as_bytes().to_vec();
+            let kem_pubkey_mlkem = sk_mlkem.encapsulation_key().as_bytes().to_vec();
+            // Larger than every earlier id, also after a clock set back.
+            let id = now.max(self.own_prekeys.last().map_or(0, |k| k.signed.id.saturating_add(1))).clamp(1, i64::MAX as u64);
+            let keys = self.own_device_keys.get(&own_fp)?;
+            let to_sign = packet::prekey_signing_input(&own_fp, id, &kem_pubkey_x25519, &kem_pubkey_mlkem);
+            let sig_c: Ed25519Signature = keys.sign_sk_ed25519.sign(&to_sign);
+            let sig_pq: MlDsaSignature<MlDsa87> = keys.sign_sk_mldsa.sign(&to_sign);
+            let signed = SignedPrekey {
+                id, kem_pubkey_x25519, kem_pubkey_mlkem,
+                signature: sig_c.to_bytes().to_vec(),
+                signature_pq: sig_pq.encode().to_vec(),
+            };
+            let mut stored = StoredPrekey {
+                signed: signed.clone(),
+                sk_x25519: sk_x25519.to_bytes().to_vec(),
+                sk_mlkem: sk_mlkem.as_bytes().to_vec(),
+            };
+            let mut plain = ciborium_bytes(&stored).ok();
+            stored.sk_x25519.zeroize();
+            stored.sk_mlkem.zeroize();
+            let sealed = plain.as_deref().and_then(|p| self.seal_local_blob(p));
+            if let Some(p) = plain.as_mut() {
+                p.zeroize();
+            }
+            let written = match (&self.db, sealed) {
+                (Some(conn), Some(sealed)) => conn.execute(
+                    "INSERT OR REPLACE INTO own_prekeys (id, sealed) VALUES (?1, ?2)", params![id as i64, sealed],
+                ).is_ok(),
+                _ => false,
+            };
+            if written {
+                info!("Yeni prekey üretildi (id={})", id);
+                self.own_prekeys.push(OwnPrekey { signed, sk_x25519, sk_mlkem });
+            } else {
+                // Not handed out: see the function note.
+                warn!("Prekey saklanamadı, bu turda kullanılmıyor");
+            }
+        }
+        self.own_prekeys.last().map(|k| k.signed.clone())
+    }
+
+    /// Keeps a device's prekey for the next handshake to it, when it carries
+    /// that device's hybrid signature. A lower id than the stored one is a
+    /// replay of an older packet and is ignored, unless `authoritative`: the
+    /// prekey came in a HandshakeInit that passed the replay checks and whose
+    /// signature covers the prekey id (a device that lost its prekeys starts
+    /// again with lower ids).
+    pub(crate) fn store_peer_prekey(&mut self, fp: &str, prekey: &SignedPrekey, device: &DeviceRecord, authoritative: bool) {
+        if prekey.id == 0
+            || prekey.kem_pubkey_x25519.len() != 32
+            || prekey.kem_pubkey_mlkem.len() != device.kem_pubkey_mlkem.len()
+        {
+            return;
+        }
+        match self.peer_prekeys.get(fp) {
+            Some(old) if old.id == prekey.id => return,
+            Some(old) if old.id > prekey.id && !authoritative => return,
+            _ => {}
+        }
+        let signed = packet::prekey_signing_input(fp, prekey.id, &prekey.kem_pubkey_x25519, &prekey.kem_pubkey_mlkem);
+        if let Err(e) = verify_hybrid_signature(&signed, &prekey.signature, &prekey.signature_pq, device) {
+            warn!("Prekey reddedildi (peer={}): {}", &fp[..fp.len().min(8)], e);
+            return;
+        }
+        if let (Some(conn), Ok(cbor)) = (&self.db, ciborium_bytes(prekey)) {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO peer_prekeys (device_fingerprint, prekey) VALUES (?1, ?2)", params![fp, cbor],
+            );
+        }
+        self.peer_prekeys.insert(fp.to_string(), prekey.clone());
+    }
+
+    /// Puts a fresh session in place and stores it. A failed write puts the
+    /// previous session back (memory and disk then agree) and is an error.
+    pub(crate) fn install_ratchet(&mut self, fp: &str, state: DeviceRatchetState) -> Result<(), String> {
+        let root = state.root_key.clone();
+        self.resubscribe_ratchet_topic(None, Some(&root));
+        let previous = self.ratchets.insert(fp.to_string(), state);
+        if self.persist_ratchet_state(fp) {
+            // Keys of the replaced session must not be loaded onto the new one.
+            self.clear_persisted_skipped_keys(fp);
+            return Ok(());
+        }
+        self.resubscribe_ratchet_topic(Some(&root), None);
+        match previous {
+            Some(p) => { self.ratchets.insert(fp.to_string(), p); }
+            None => { self.ratchets.remove(fp); }
+        }
+        Err("Oturum durumu yazılamadı, el sıkışma yapılmadı".to_string())
+    }
+
+    pub(crate) fn initiate_handshake_with(&mut self, peer_device_fingerprint: &str) -> Result<(), String> {
+        // Found on device (2026-09-18): at app start something sent a message
+        // before `setSkippedKeyEncryptionKey` had loaded the sessions. No session
+        // was in memory, so a NEW init was created and persisted over the real
+        // session the peer still used. Every restart diverged the two devices
+        // (siblings too) until a re-handshake.
+        if !self.ratchets_loaded {
+            return Err("Oturum durumu henüz yüklenmedi".to_string());
+        }
+        // Engellenen biriyle oturum KURULMAZ bile — aksi halde arayüzden
+        // sohbet açmak ya da `ensure_handshake` çağrısı taze bir ratchet
+        // yaratır ve karşı tarafa el sıkışma yollardı (bkz. `try_publish_raw`
+        // aynı gerekçe).
+        if self.is_blocked_device(peer_device_fingerprint) {
+            return Err("Bu kişi engellenmiş".to_string());
+        }
+        let own_fp = self.get_active_own_device_fingerprint()?;
+        let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
+        let peer = self.known_remote_devices.get(peer_device_fingerprint).cloned()
+            .ok_or("Unknown peer device; complete key exchange first")?;
+        if !peer.is_active {
+            return Err("Peer device has been revoked".to_string());
+        }
+
+        // Spec dışı, hata ayıklama düzeltmesi: `DeviceRatchetState::initiate`
+        // burada "Bad Kyber/X25519 public key length" ile başarısız olursa
+        // bu KALICI bir hatadır (bozuk/uyumsuz anahtar verisi — ör. bu kayıt
+        // Category 3->5 (ML-KEM-768->1024) geçişinden ÖNCE, ya da karşı
+        // taraf hâlâ eski bir uygulama sürümüyle eşleşmişken oluşmuş) —
+        // network sorunlarının aksine yeniden denemekle ASLA düzelmez.
+        // Önceden bu, `send_message_content`'in HER çağrısında (mesaj,
+        // typing indicator, profil güncellemesi, geçmiş senkronu — hepsi
+        // aynı yoldan geçiyor) sessizce logcat'e yazılıyor, kullanıcı
+        // arayüzüne HİÇ yansımıyordu — "bağlanamıyorum" şikayetine hiçbir
+        // ipucu vermiyordu. Artık bu peer için İLK KEZ görülüyorsa (veya
+        // hata metni değiştiyse) `attachment_events` üzerinden bir kerelik
+        // bir olay olarak bildiriliyor (bkz. `handshake_failure_notified`).
+        // To the peer's prekey when one is known: its secret is deleted
+        // within weeks, the long-term KEM secret never. Without one (first
+        // contact before any packet of the peer) the long-term keys, id 0.
+        let peer_prekey = self.peer_prekeys.get(peer_device_fingerprint).cloned();
+        let (peer_kem_x25519, peer_kem_mlkem, recipient_prekey_id) = match &peer_prekey {
+            Some(p) => (p.kem_pubkey_x25519.as_slice(), p.kem_pubkey_mlkem.as_slice(), p.id),
+            None => (peer.kem_pubkey_x25519.as_slice(), peer.kem_pubkey_mlkem.as_slice(), 0),
+        };
+        let sender_prekey = self.current_own_prekey();
+        let (state, kyber_ct, own_kyber_pub) = match DeviceRatchetState::initiate(
+            peer_kem_x25519,
+            peer_kem_mlkem,
+            current_time_ms(),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let e = e.to_string();
+                if self.handshake_failure_notified.get(peer_device_fingerprint) != Some(&e) {
+                    self.handshake_failure_notified.insert(peer_device_fingerprint.to_string(), e.clone());
+                    self.attachment_events.push(serde_json::json!({
+                        "type": "handshake_failed", "peer": peer_device_fingerprint, "error": e
+                    }).to_string());
+                }
+                return Err(e);
+            }
+        };
+        // El sıkışma bu turda başarıyla kuruldu — daha önce bu peer için
+        // bildirilmiş kalıcı bir hata varsa artık geçersiz, temizle (ör.
+        // kişi silinip yeniden eşleştirildi ve bu sefer anahtar uzunluğu
+        // doğru).
+        self.handshake_failure_notified.remove(peer_device_fingerprint);
+
+        // KRİTİK: `state.own_x25519_secret`, `DeviceRatchetState::initiate()`
+        // içinde ÜRETİLEN TAZE EPHEMERAL secret'tir ve DH hesaplaması zaten
+        // BUNUNLA yapıldı (ratchet.rs). Karşı tarafa (HandshakeInit'te)
+        // gönderilecek "initiator_x25519_pubkey" da AYNI ephemeral secret'ten
+        // türetilmeli — önceden yanlışlıkla `own_keys.kem_sk_x25519`
+        // (cihazın UZUN VADELİ kimlik anahtarı, tamamen farklı bir keypair)
+        // kullanılıyordu. Bu durumda responder tarafı `respond()` içinde
+        // initiator'ın gönderdiği (yanlış/uzun-vadeli) public key'e karşı DH
+        // yapıyor, initiator ise kendi tarafında EPHEMERAL secret'le DH
+        // yapmış oluyordu — iki taraf asla aynı paylaşılan sırra ulaşamıyor,
+        // bu da HER mesajda "Decryption failed" ile sonuçlanıyordu.
+        let initiator_x25519_pub = X25519PublicKey::from(&state.own_x25519_secret).as_bytes().to_vec();
+        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
+
+        let timestamp = current_time_ms();
+        let to_sign = handshake_signing_input(
+            &initiator_x25519_pub, &own_kyber_pub, &kyber_ct, timestamp, peer_device_fingerprint,
+            recipient_prekey_id, sender_prekey.as_ref().map_or(0, |p| p.id),
+        );
+        let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
+        let sig_pq: MlDsaSignature<MlDsa87> = own_keys.sign_sk_mldsa.sign(&to_sign);
+
+        let handshake = HandshakeInit {
+            sender_identity_id: own_identity_id,
+            sender_device_fingerprint: own_fp,
+            initiator_x25519_pubkey: initiator_x25519_pub,
+            initiator_kyber_pubkey: own_kyber_pub,
+            kyber_ciphertext: kyber_ct,
+            timestamp,
+            recipient_prekey_id,
+            sender_prekey,
+            signature_classical: sig_classical.to_bytes().to_vec(),
+            signature_pq: sig_pq.encode().to_vec(),
+        };
+
+        // Not published unless stored: after a restart the old state would
+        // come back while the peer runs the new one.
+        self.install_ratchet(peer_device_fingerprint, state)?;
+        if recipient_prekey_id == 0 {
+            self.id0_inits.insert(peer_device_fingerprint.to_string());
+        } else {
+            self.id0_inits.remove(peer_device_fingerprint);
+        }
+        let r = self.publish_envelope(peer_device_fingerprint, &NetworkEnvelope::Handshake(handshake));
+        // bkz. `pairing_mailbox_subs` — el sıkışma YAYINLANDIKTAN sonra
+        // (Handshake karşı tarafın posta kutusu topic'ine gider) eşleşme
+        // aboneliğini bırak: bundan sonra karşı taraf rotasyonlu topic'ten
+        // yazacak, biz de zaten ona abone olduk.
+        self.drop_pairing_mailbox(peer_device_fingerprint);
+        r
+    }
+
+    /// Spec dışı, teslim garantisi düzeltmesi ("karşı taraf kapalıyken
+    /// yazılan ilk mesaj HİÇ ulaşmıyor"): kaybolmuş bir `HandshakeInit`'ten
+    /// tek çıkış yolu.
+    ///
+    /// Arıza deseni: kapalı bir cihaza ilk kez mesaj yazıldığında
+    /// `send_message_content_inner` önce `initiate_handshake_with`'i
+    /// çağırır — o da ratchet'i ANINDA kurup `HandshakeInit`'i yayınlamayı
+    /// dener. Karşı taraf kapalıysa `gossipsub.publish` başarısız olur ve
+    /// zarf `pending_envelopes`'e düşer. Zarf orada eskirse (ya da uygulama
+    /// bu arada kapanırsa) BİR DAHA HİÇ gönderilmez: `initiate_handshake_with`
+    /// yalnızca ratchet YOKKEN çağrılıyor, oysa gönderen tarafta ratchet
+    /// ARTIK VAR. Alıcı ise gelen paketleri `early_packets`'e tamponlayıp
+    /// hiç gelmeyecek el sıkışmayı bekler. İki uçta da hiçbir hata
+    /// görünmez; mesajlar 7 gün boyunca boşuna yeniden denenir.
+    ///
+    /// Çözüm: karşı taraf `MAX_UNCONFIRMED_AGE_MS` boyunca HİÇBİR ŞEYİ
+    /// onaylamadıysa (tek bir Ack bile yok), oturumun karşı tarafta hiç
+    /// kurulmamış olduğunu varsayıp TAZE bir el sıkışma gönderiyoruz.
+    /// Tetikleyiciler: (1) tazeleme turu — bkz. `send_message_content_inner`
+    /// `message_id_override` kolu; (2) o eşe yeniden bağlanma — bkz.
+    /// `poll_events` `connections_established` bloğu.
+    ///
+    /// Oturum sıfırlandığı için bekleyen paketler eski zincirle şifreli
+    /// kalır — bu yüzden `regen_pending_for_peer` ile hepsi taze zincirle
+    /// yeniden üretilir (rotasyon sonrası kullanılan AYNI yol, aynı
+    /// geçersizleşme anlamı). `initiate_handshake_with`'in dönüşü değil,
+    /// kök anahtarın GERÇEKTEN değişip değişmediği ölçüt: yayın geçici
+    /// olarak başarısız olsa bile (zarf kuyruğa alınır) ratchet zaten
+    /// değişmiştir ve bekleyenler mutlaka yenilenmelidir.
+    /// Bir oturumun o anki zincir kuşağının kimliği — bkz.
+    /// `PendingConfirmation.chain_stamp`. Oturum yoksa boş string.
+    pub(crate) fn chain_stamp_for(&self, peer_device_fingerprint: &str) -> String {
+        self.ratchets
+            .get(peer_device_fingerprint)
+            .map(|r| Self::topic_for_root_key(&r.root_key).to_string())
+            .unwrap_or_default()
+    }
+
+    /// A signed packet from a known device that our session cannot decrypt (and
+    /// that is not a duplicate: `reack_if_already_handled` ran first). A few in a
+    /// row mean the two sides hold different sessions. Both still look online,
+    /// and nothing gets through until the 25 min redo (device, 2026-09-18). After
+    /// `UNDECRYPTABLE_BEFORE_REHANDSHAKE` failures with no good packet in between,
+    /// start a fresh handshake. If both sides do it at once, the collision rule
+    /// in `process_handshake_init` picks one.
+    pub(crate) fn note_undecryptable(&mut self, fp: &str) {
+        let now = current_time_ms();
+        // A session installed moments ago (by us or from the peer's init): packets
+        // still in flight from the old session are expected to fail. Re-initiating
+        // here overwrote a freshly adopted session, and the peer then ignored our
+        // init under the collision rule → diverged again (device, 2026-09-18).
+        if self.ratchets.get(fp).map_or(false, |s| now.saturating_sub(s.last_rotation) < HANDSHAKE_COLLISION_WINDOW_MS) {
+            self.undecryptable_from.remove(fp);
+            return;
+        }
+        let entry = self.undecryptable_from.entry(fp.to_string()).or_insert((now, 0));
+        if now.saturating_sub(entry.0) > UNDECRYPTABLE_WINDOW_MS {
+            *entry = (now, 0);
+        }
+        entry.1 += 1;
+        if entry.1 < UNDECRYPTABLE_BEFORE_REHANDSHAKE {
+            return;
+        }
+        self.undecryptable_from.remove(fp);
+        if self.last_handshake_redo.get(fp).map_or(false, |(t, _)| now.saturating_sub(*t) < UNDECRYPTABLE_REDO_MIN_INTERVAL_MS) {
+            return;
+        }
+        warn!("Karşı taraftan {} paket çözülemedi, oturumlar ayrışmış — el sıkışma yenileniyor: {}", UNDECRYPTABLE_BEFORE_REHANDSHAKE, &fp[..fp.len().min(8)]);
+        let stale = self.ratchets.get(fp).map(|s| s.root_key.clone());
+        self.last_handshake_redo.insert(fp.to_string(), (now, stale));
+        if let Err(e) = self.initiate_handshake_with(fp) {
+            warn!("El sıkışma yenilenemedi: {}", e);
+            return;
+        }
+        // Pending packets were encrypted for the dead session: re-encrypt them now.
+        self.regen_pending_for_peer(fp);
+    }
+
+    pub(crate) fn maybe_redo_handshake(&mut self, peer_device_fingerprint: &str) {
+        // Oturum hiç yoksa normal yol zaten el sıkışmayı başlatıyor.
+        // KESİN ölçüt: bu oturumda karşı taraftan HİÇ bir şey çözemedik mi
+        // (bkz. ratchet.rs `never_heard` — bir rotasyon alma sayacını
+        // sıfırlar, o yüzden önceki zincir de sayılır)? Öyleyse karşı taraf
+        // el sıkışmamızı işlememiş olabilir. Karşı taraf BİR KEZ bile cevap
+        // verdiyse (recv > 0) burası bir daha ASLA tetiklenmez — sağlıklı,
+        // sadece sessiz bir oturum hiçbir koşulda sıfırlanmaz.
+        let never_heard = match self.ratchets.get(peer_device_fingerprint) {
+            Some(s) => s.never_heard(),
+            None => return,
+        };
+        if !never_heard {
+            return;
+        }
+        let now = current_time_ms();
+        // Every redo makes a session that is again `never_heard`, so against an
+        // offline peer this fired every 10 min for 7 days. The wait now grows
+        // with the age of the oldest stuck message (half of it, at most 6 h).
+        let oldest_stuck_age = self.awaiting_confirmation.values()
+            .filter(|p| p.peer_device_fingerprint == peer_device_fingerprint)
+            .map(|p| now.saturating_sub(p.original_sent_at))
+            .max()
+            .unwrap_or(0);
+        let min_interval = (oldest_stuck_age / 2).clamp(HANDSHAKE_REDO_MIN_INTERVAL_MS, 6 * 60 * 60 * 1000);
+        let stale_root = match self.last_handshake_redo.get(peer_device_fingerprint) {
+            Some((last, stale)) => {
+                if now.saturating_sub(*last) < min_interval {
+                    return;
+                }
+                stale.clone()
+            }
+            None => None,
+        };
+        // İkinci ölçüt: gerçekten teslim edilmeyi bekleyen bir şey olsun.
+        // `original_sent_at` (mesajın İLK kuyruğa girdiği an) kullanılıyor,
+        // `first_sent_at` (son tazeleme anı) değil — aksi halde her tazeleme
+        // sayacı sıfırlar ve yeniden bağlanma tetikleyicisi hiç ateşlemezdi.
+        let stuck = self.awaiting_confirmation.values().any(|p| {
+            p.peer_device_fingerprint == peer_device_fingerprint
+                && now.saturating_sub(p.original_sent_at) > MAX_UNCONFIRMED_AGE_MS
+        });
+        if !stuck {
+            return;
+        }
+        warn!(
+            "El sıkışma tazeleniyor (peer={}) — bu oturumda karşı taraftan hiç paket alınmadı ve bekleyen mesaj {} ms'i aştı; HandshakeInit'imiz hiç ulaşmamış olabilir",
+            crate::log_id(&peer_device_fingerprint), MAX_UNCONFIRMED_AGE_MS
+        );
+        // Bir ÖNCEKİ tazelemede terk edilen topic'in aboneliğini ANCAK ŞİMDİ
+        // bırak (bkz. `last_handshake_redo` alan notu / `maybe_rotate_ratchet`
+        // aynı gerekçe: karşı taraf o topic'ten hâlâ yayın yapıyor olabilir).
+        if let Some(stale) = &stale_root {
+            self.resubscribe_ratchet_topic(Some(stale.as_slice()), None);
+        }
+        let before = self.ratchets.get(peer_device_fingerprint).map(|s| s.root_key.clone());
+        let result = self.initiate_handshake_with(peer_device_fingerprint);
+        let after = self.ratchets.get(peer_device_fingerprint).map(|s| s.root_key.clone());
+        let replaced = before != after;
+        // Terk edilen kök anahtar bir SONRAKİ tazelemede bırakılmak üzere
+        // saklanır; oturum değişmediyse eldeki bayat kayıt korunur.
+        self.last_handshake_redo.insert(
+            peer_device_fingerprint.to_string(),
+            (now, if replaced { before } else { stale_root }),
+        );
+        if replaced {
+            self.regen_pending_for_peer(peer_device_fingerprint);
+        }
+        if let Err(e) = result {
+            warn!("Tazelenen el sıkışma hemen yayınlanamadı (kuyruğa alındı, yeniden denenecek): {}", e);
+        }
+    }
+
+    // NOT: Skipped-key'ler burada (yeni oturum kurulurken) diskten
+    // yüklenmiyor çünkü bu YENİ bir el sıkışma — DB'de bu cihaz-çifti için
+    // henüz hiçbir skipped-key kaydı olamaz (yeni oturumda mesaj numarası
+    // sıfırdan başlar). Skipped-key diske yazma/silme, sadece bir oturum
+    // İÇİNDEYKEN (receive_message'ta) gerçekleşir.
+    //
+    // Ratchet state'in TAMAMI (root_key/ck_send/ck_recv/own+peer anahtarlar/
+    // sayaçlar) artık `ratchet_states` tablosuna (skipped_key_encryption_key
+    // ile şifreli) kalıcı hale getiriliyor — bkz. `persist_ratchet_state`/
+    // `load_ratchet_states_from_db`. Süreç yeniden başladığında (uygulama
+    // güncellemesi, arka plan öldürme vb.) `init_db` sonrası
+    // `setSkippedKeyEncryptionKey` çağrıldığı an bu oturumlar geri yüklenir
+    // — yeniden el sıkışma gerekmez, geçmişte alınan gecikmeli/atlanmış
+    // mesaj anahtarları da (skipped_message_keys tablosundan) hâlâ geçerli
+    // kalır.
+
+    pub(crate) fn process_handshake_init(&mut self, source: Option<PeerId>, handshake: &HandshakeInit) -> Result<(), String> {
+        // See `initiate_handshake_with`: a session made before the load is
+        // overwritten by the stored one, and the two sides diverge.
+        if !self.ratchets_loaded {
+            return Err("Oturum durumu henüz yüklenmedi".to_string());
+        }
+        let sender =self.known_remote_devices.get(&handshake.sender_device_fingerprint).cloned()
+            .ok_or("Unknown sender device; cannot verify signatures")?;
+        // Spec dışı, güvenlik denetimi düzeltmesi: önceden `is_active`
+        // hiçbir yerde kontrol edilmiyordu — bu alanı hiçbir zaman false
+        // yapan bir çağrı yolu da olmadığından pratikte etkisizdi. Artık
+        // `revoke_contact_device` gerçekten `false` yapabiliyor VE burada
+        // gerçekten uygulanıyor: iptal edilmiş bir cihazdan gelen bir el
+        // sıkışma reddedilir.
+        if !sender.is_active {
+            self.answer_revoked_sibling(&sender.device_fingerprint);
+            return Err("Sender device has been revoked".to_string());
+        }
+
+        // bkz. receive_message'teki aynı kimlik-bağı düzeltmesi: imza sadece
+        // cihazın imzaladığını kanıtlar, header'daki identity_id'nin o cihaza
+        // ait olduğunu değil — kayıtlı (TOFU) bağla eşleşmeyi zorunlu kıl.
+        if handshake.sender_identity_id != sender.identity_id {
+            return Err("HandshakeInit sender_identity_id, kayıtlı cihaz kimliğiyle eşleşmiyor".to_string());
+        }
+
+        // İmza ALICIYI (bizim fingerprint'imizi) kapsar: A'nın B'ye gönderdiği
+        // handshake C'ye tekrar oynatılıp C'nin A oturumunu bozamaz.
+        let recipient_fp = self.get_active_own_device_fingerprint()?;
+        let to_verify = handshake_signing_input(
+            &handshake.initiator_x25519_pubkey, &handshake.initiator_kyber_pubkey,
+            &handshake.kyber_ciphertext, handshake.timestamp, &recipient_fp,
+            handshake.recipient_prekey_id, handshake.sender_prekey.as_ref().map_or(0, |p| p.id),
+        );
+        verify_hybrid_signature(&to_verify, &handshake.signature_classical, &handshake.signature_pq, &sender)?;
+
+        // Spec dışı, güvenlik denetimi düzeltmesi (bkz. `record_peer_id_if_known`
+        // dokümantasyonu / `process_identity_exchange` AYNI notu): imza bu
+        // noktada BAŞARIYLA doğrulandı — gönderenin gerçekten bu fingerprint'in
+        // (`known_remote_devices`'ta zaten kayıtlı) özel anahtarına sahip
+        // olduğu kanıtlanmış oldu. Artık bu fingerprint'i, paketi GERÇEKTEN
+        // yayınlayan `PeerId` ile ilişkilendirmek güvenli (önceden bu,
+        // imza doğrulamadan ÖNCE koşulsuz yapılıyordu).
+        // The call itself is further down, after the freshness and replay
+        // checks: a replayed old init has a valid signature too.
+
+        // Spec dışı, güvenlik denetimi düzeltmesi (el sıkışma tekrar oynatma
+        // → oturum sıfırlama DoS'u): gossipsub `Signed` modu, ağdaki bir
+        // gözlemcinin YAKALADIĞI geçerli bir `HandshakeInit`'i yeniden
+        // yayınlamasına izin verir. Bu fonksiyon (aşağıda) mevcut bir
+        // ratchet'i taze bir `respond` state'iyle EZDİĞİ için, böyle bir
+        // tekrar canlı bir konuşmayı koparabilirdi. İki katmanlı savunma
+        // (bkz. `recent_handshake_sigs` alan notu):
+        // (1) freshness penceresi — çok eski/çok ileri timestamp reddedilir
+        //     (yakalanmış eski el sıkışmaları eler, saat kaymasına tolerans);
+        // (2) içerik dedup — aynı imzalı (bayt-aynısı) el sıkışma pencerede
+        //     ikinci kez uygulanmaz. Gerçek bir yeniden-eşleşme taze efemeral
+        //     anahtarlar → farklı imza taşıdığından, saat kayması ne olursa
+        //     olsun kabul edilir (monoton-timestamp'in re-pair'i kırma riski
+        //     olmadan).
+        let now = current_time_ms();
+        let skew = now.abs_diff(handshake.timestamp);
+        // An init waits in the server mailbox while this device is off, so the
+        // past side of the window is the retry horizon, not the clock skew.
+        let stale = handshake.timestamp < now && skew > HANDSHAKE_MAX_SKEW_MS;
+        let window = if stale { HANDSHAKE_MAX_AGE_MS } else { HANDSHAKE_MAX_SKEW_MS };
+        if skew > window {
+            return Err(format!(
+                "HandshakeInit timestamp'i pencere dışında (sapma {} ms) — muhtemel tekrar oynatma, reddedildi",
+                skew
+            ));
+        }
+        {
+            let seen = self.recent_handshake_sigs.entry(handshake.sender_device_fingerprint.clone()).or_default();
+            // Pencereden eski girdileri buda (sınırsız büyümeyi önle).
+            seen.retain(|(ts, _)| now.abs_diff(*ts) <= HANDSHAKE_MAX_AGE_MS);
+            // A stored init older than one already accepted would put the
+            // session back on keys the sender has replaced. H37: any older
+            // one, not only one past the skew window (both on the sender's clock).
+            if seen.iter().any(|(ts, _)| *ts > handshake.timestamp) {
+                info!("HandshakeInit yok sayıldı (peer={}) — daha yenisi zaten kabul edildi", crate::log_id(&handshake.sender_device_fingerprint));
+                return Ok(());
+            }
+            if seen.iter().any(|(_, sig)| sig == &handshake.signature_classical) {
+                info!(
+                    "HandshakeInit yok sayıldı (peer={}) — aynı imza pencerede zaten görüldü (tekrar oynatma/çift paket)",
+                    crate::log_id(&handshake.sender_device_fingerprint)
+                );
+                return Ok(());
+            }
+            // Recorded now, whatever is decided below. Only an accepted init
+            // was: one we ignored (collision, unknown prekey) could be
+            // replayed for 7 days and then replaced the live session.
+            seen.push((handshake.timestamp, handshake.signature_classical.clone()));
+            // M110: the newest 256 (the peer signs each one, but a peer that
+            // keeps sending inits grew the list, and its app_meta copy, for 7 days).
+            if seen.len() > 256 {
+                seen.sort_by_key(|(ts, _)| *ts);
+                let excess = seen.len() - 256;
+                seen.drain(..excess);
+            }
+        }
+        self.persist_handshake_sigs(&handshake.sender_device_fingerprint);
+
+        // Past the replay checks, and the signature above covers its id: this
+        // is the sender's prekey now, whatever was stored before.
+        if let Some(prekey) = &handshake.sender_prekey {
+            self.store_peer_prekey(&handshake.sender_device_fingerprint, prekey, &sender, true);
+        }
+
+        let own_fp = self.get_active_own_device_fingerprint()?;
+
+        // A first contact (no session, or only our own init that carried no
+        // message yet) must come to a prekey: an init to the long-term KEM
+        // keys (id 0) is refused while this device hands prekeys out. The
+        // sender's prekey is stored above, so the session starts from our
+        // side, which also gives the sender our prekey. Our own pending init
+        // stays when it went to a prekey: the sender adopts it (below, its
+        // side of this rule). A session that carried messages still takes
+        // id 0 (a peer that lost our prekey).
+        if handshake.recipient_prekey_id == 0 && self.link_request_open_until <= now {
+            let sender_fp = handshake.sender_device_fingerprint.clone();
+            let own_pending = self.ratchets.get(&sender_fp).map(|e| {
+                e.has_responded_to_peer_key == e.prev_root_key.is_none() && e.send_message_number == 0 && e.recv_message_number == 0
+            });
+            if own_pending != Some(false) && self.current_own_prekey().is_some() {
+                let redo = own_pending.is_none() || self.id0_inits.contains(&sender_fp);
+                if redo && self.last_handshake_redo.get(&sender_fp).map_or(true, |(t, _)| now.saturating_sub(*t) >= UNDECRYPTABLE_REDO_MIN_INTERVAL_MS) {
+                    self.last_handshake_redo.insert(sender_fp.clone(), (now, None));
+                    if let Err(e) = self.initiate_handshake_with(&sender_fp) {
+                        warn!("Prekey'siz ilk temas sonrası el sıkışma başlatılamadı: {}", e);
+                    }
+                }
+                return Err("HandshakeInit ilk temasta prekey kullanmıyor (id 0), reddedildi".to_string());
+            }
+        }
+
+        // KRİTİK: eşzamanlı el sıkışma çakışması. İki cihaz da (ör. ikisi
+        // de uygulamayı yeniden başlatıp aynı sohbeti aynı anda açtığında,
+        // `ensure_handshake` ikisinde de `has_active_session == false`
+        // bulur) TAM AYNI ANDA birbirine `HandshakeInit` gönderirse: her
+        // iki taraf da KENDİ `initiate_handshake_with` çağrısında ÖNCE bir
+        // "initiator" ratchet state'i oluşturup `self.ratchets`'e yazar,
+        // SONRA karşı taraftan gelen HandshakeInit'i işlerken (burada) bu
+        // state'i bir "responder" state'iyle EZER. Sorun: responder modu,
+        // KENDİ uzun-vadeli kimlik KEM anahtarını (`own_keys.kem_sk_*`)
+        // karşı tarafın EPHEMERAL (geçici, o el sıkışmaya özel) public
+        // key'iyle DH/decapsulate eder — iki taraf da bunu yaparsa,
+        // türetilen paylaşımlı sırlar birbiriyle UYUŞMAZ (DH'nin simetri
+        // özelliği yalnızca "A'nın ephemeral'ı + B'nin kimliği" ile "B'nin
+        // kimliği + A'nın ephemeral'ı" ÇAPRAZ eşleştiğinde geçerlidir, iki
+        // tarafın da kendi kimliğini kullanması bu simetriyi bozar). Sonuç:
+        // TÜM sonraki mesajlar "Decryption failed"/"skipped-key cache'te
+        // yok" ile başarısız olur — QR yeniden tarama, çakışmayı kırıp
+        // tek taraflı bir el sıkışma zorladığı için "düzeltiyormuş" gibi
+        // görünür.
+        //
+        // Deterministik çözüm: fingerprint'i (hex string, karşılaştırılabilir)
+        // KÜÇÜK olan taraf "kanonik initiator" sayılır. Eğer az önce KENDİ
+        // (henüz hiç mesaj taşımamış — bkz. `send_message_number`/
+        // `recv_message_number` sıfır kontrolü) initiator state'imiz varsa
+        // VE bizim fingerprint'imiz karşı tarafınkinden KÜÇÜKSE, bu gelen
+        // HandshakeInit'i YOK SAYARIZ (kendi initiator state'imizi koruruz)
+        // — karşı taraf (fingerprint'i büyük olan), simetrik olarak BİZİM
+        // HandshakeInit'imizi kabul edip doğru responder state'ini üretecektir.
+        if let Some(existing) = self.ratchets.get(&handshake.sender_device_fingerprint) {
+            // Simultaneous handshake: both sides initiated. The smaller fingerprint's
+            // init wins, and the larger side adopts it (the `respond` below). This
+            // used to hold only while our session was still UNUSED. On a slow path
+            // the losing init arrives late: the peer's init came via the server 31 s
+            // after ours (device, re-pair on mobile data, 2026-09-18). By then the
+            // peer had adopted our session and messages were flowing, so we replaced
+            // a live session with the one the peer had already dropped. Both sides
+            // stayed "online" but could not decrypt each other until the 25 min
+            // redo. The winner now keeps its own young initiator session (not yet
+            // rotated, `!has_responded_to_peer_key`) against any init created
+            // within the collision window. A later init is a real re-handshake
+            // (the peer's `maybe_redo_handshake`) and is still accepted.
+            // The session we initiated, in its first generation: untouched
+            // (flag set, no rotation), or after the peer's first rotation,
+            // which a responder makes before its first send (flag clear, one
+            // rotation). `!has_responded_to_peer_key` alone was also true for
+            // a session we had only responded to, and false for our own
+            // untouched one.
+            let we_initiated = existing.has_responded_to_peer_key == existing.prev_root_key.is_none();
+            let same_round = handshake.timestamp.abs_diff(existing.last_rotation) <= HANDSHAKE_COLLISION_WINDOW_MS;
+            let existing_unused = existing.send_message_number == 0 && existing.recv_message_number == 0;
+            // A device waiting to be linked (showing its link QR) always adopts:
+            // its own init carries its pre-link identity, which the primary
+            // rejects ("sender_identity_id ... eşleşmiyor"). Keeping it (when this
+            // device's fingerprint happened to be the smaller one) left the two on
+            // different sessions, and the DeviceLinkGrant never decrypted
+            // (device, 2026-09-19).
+            let awaiting_link = self.link_request_open_until > now;
+            // An init older than the session we hold (H37: not only one that
+            // waited past the skew window): the sender has moved on from it.
+            // Inside the collision window the rule below decides instead.
+            if !same_round && handshake.timestamp < existing.last_rotation {
+                info!("HandshakeInit yok sayıldı (peer={}) — oturumdan eski", crate::log_id(&handshake.sender_device_fingerprint));
+                return Ok(());
+            }
+            // `we_initiated` for both: a session we only responded to is the
+            // peer's to replace.
+            // Our init went to id 0 and the peer hands prekeys out: it refused
+            // ours (the rule above, on its side), so its init is the session.
+            let ours_refused = handshake.sender_prekey.is_some() && self.id0_inits.contains(&handshake.sender_device_fingerprint);
+            if !awaiting_link && !ours_refused && we_initiated && (existing_unused || same_round) && own_fp < handshake.sender_device_fingerprint {
+                info!(
+                    "Eşzamanlı el sıkışma çakışması (peer={}) — kendi initiator state'imiz korunuyor (küçük fingerprint kuralı)",
+                    crate::log_id(&handshake.sender_device_fingerprint)
+                );
+                return Ok(());
+            }
+        }
+
+        // The secret the initiator encapsulated to: one of our prekeys, or the
+        // long-term keys (id 0) when it knew no prekey of ours.
+        let (own_kem_x25519, own_kem_mlkem) = if handshake.recipient_prekey_id == 0 {
+            let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
+            (own_keys.kem_sk_x25519.clone(), own_keys.kem_sk_mlkem.clone())
+        } else {
+            self.current_own_prekey(); // loads them on first use
+            match self.own_prekeys.iter().find(|k| k.signed.id == handshake.recipient_prekey_id) {
+                Some(k) => (k.sk_x25519.clone(), k.sk_mlkem.clone()),
+                None => {
+                    // Deleted by now (the peer held an old one) or never ours
+                    // (this install lost its prekeys). The session cannot be
+                    // set up from this packet: start it from our side, which
+                    // also hands the peer our current prekey.
+                    let fp = handshake.sender_device_fingerprint.clone();
+                    warn!("HandshakeInit bilinmeyen prekey kullanıyor (peer={}, id={}) — el sıkışma bizden yenileniyor", &fp[..fp.len().min(8)], handshake.recipient_prekey_id);
+                    if self.last_handshake_redo.get(&fp).map_or(true, |(t, _)| now.saturating_sub(*t) >= UNDECRYPTABLE_REDO_MIN_INTERVAL_MS) {
+                        let stale = self.ratchets.get(&fp).map(|s| s.root_key.clone());
+                        self.last_handshake_redo.insert(fp.clone(), (now, stale));
+                        if self.initiate_handshake_with(&fp).is_ok() {
+                            self.regen_pending_for_peer(&fp);
+                        }
+                    }
+                    return Err("HandshakeInit bilinmeyen bir prekey'e şifrelenmiş".to_string());
+                }
+            }
+        };
+
+        let state = DeviceRatchetState::respond(
+            own_kem_x25519,
+            own_kem_mlkem,
+            &handshake.initiator_x25519_pubkey,
+            &handshake.initiator_kyber_pubkey,
+            &handshake.kyber_ciphertext,
+            now,
+        )?;
+
+        self.install_ratchet(&handshake.sender_device_fingerprint, state)?;
+        self.id0_inits.remove(&handshake.sender_device_fingerprint);
+        self.record_peer_id_if_known(source, &handshake.sender_device_fingerprint);
+        // bkz. `pairing_mailbox_subs` — ratchet kuruldu, eşleşme-dönemi
+        // aboneliği artık gereksiz.
+        self.drop_pairing_mailbox(&handshake.sender_device_fingerprint);
+        Ok(())
+    }
+
+    /// Aktif sohbete girmeden önce/mesaj gönderirken çağrılır. `should_rotate()`
+    /// Signal'ın gerçek modelini uyguluyor (bkz. ratchet.rs): 30 dakika
+    /// dolmuş VE biz henüz karşı tarafın güncel public key'ine cevap
+    /// vermemişsek (`has_responded_to_peer_key == false`) rotasyonu BİZ
+    /// tetikleriz. Aksi halde (cevap zaten verilmişse, sıradaki rotasyon
+    /// hakkı karşı tarafta) hiçbir şey yapmayız — deterministik bir
+    /// "fingerprint küçük olan tetikler" kuralına gerek yok, çünkü
+    /// `has_responded_to_peer_key` bayrağı zaten hangi tarafın sırası
+    /// geldiğini doğal olarak belirliyor.
+    pub(crate) fn maybe_rotate_ratchet(&mut self, peer_device_fingerprint: &str) -> Result<Option<Vec<u8>>, String> {
+        let now = current_time_ms();
+        let should_rotate = self.ratchets.get(peer_device_fingerprint).map(|s| s.should_rotate(now)).unwrap_or(false);
+        if !should_rotate {
+            return Ok(None);
+        }
+        if let Some(state) = self.ratchets.get_mut(peer_device_fingerprint) {
+            // Bir ÖNCEKİ rotasyondan kalan (perform_dh_ratchet birazdan
+            // üzerine yazacak, artık iki nesil eski) topic — aboneliği
+            // ancak şimdi bırakılır (bkz. aşağıdaki resubscribe notu).
+            let dropped_prev = state.prev_root_key.clone();
+            let kyber_ct = state.perform_dh_ratchet(now)?;
+            let new_root_key = state.root_key.clone();
+            // bkz. `topic_for_root_key` dokümantasyonu — yeni root_key
+            // topic'ine abone ol. Güvenilirlik düzeltmesi: az önceki (bir
+            // önceki root'a ait) topic'in aboneliği HEMEN bırakılMIYOR —
+            // karşı taraf rotasyon duyurumuzu alana kadar bize hâlâ ESKİ
+            // topic'ten yayın yapar (kendi root'u değişmedi); erken
+            // abonelik iptali o pencerede gelen her paketi kaçırırdı.
+            // Eski topic bir SONRAKİ rotasyonda (dropped_prev) bırakılır.
+            self.resubscribe_ratchet_topic(dropped_prev.as_deref(), Some(&new_root_key));
+            // Biz rotasyonu tetikledik — eski zincirin skipped-key'leri
+            // state'in içine taşındı (`old_recv`), tablodaki kopyaları
+            // artık yeni zincirin numaralarıyla çakışırdı.
+            self.clear_persisted_skipped_keys(peer_device_fingerprint);
+            if !self.persist_ratchet_state(peer_device_fingerprint) {
+                return Err("Oturum durumu yazılamadı, rotasyon duyurulmadı".to_string());
+            }
+            return Ok(Some(kyber_ct));
+        }
+        Ok(None)
+    }
+}
