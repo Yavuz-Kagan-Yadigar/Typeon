@@ -122,7 +122,7 @@ struct Entry {
     attachment: Option<Attachment>,
     /// Spec dışı, hata düzeltmesi (kullanıcı: "flatpakda bu son ui
     /// düzeltmelerini hiçbirini görmüyorum" — Android tarafında aynı hata
-    /// zaten düzeltilmişti, bkz. lib.rs `message_seen` tablosu): önceden bu
+    /// zaten düzeltilmişti, bkz. db.rs `message_seen` tablosu): önceden bu
     /// alan hiç yoktu, `build_bubble` her zaman `false` ile başlıyordu —
     /// yani bir mesajın "görüldü" durumu SADECE o an sohbet ekranı açıkken
     /// gelen canlı bir olaydan geliyordu, sohbeti kapatıp yeniden açmak

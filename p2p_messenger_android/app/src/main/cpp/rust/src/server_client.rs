@@ -1,6 +1,6 @@
 //! Sunucu (store-and-forward) seçeneğinin İSTEMCİ tarafı.
 //!
-//! `lib.rs` zaten 12.8k satır; bu yüzden mantık ayrı bir alt modülde ama
+//! Mantık, çekirdeğin diğer konu modülleri gibi ayrı bir alt modülde ama
 //! `impl P2PCore` olarak — Rust'ta bir tipin inherent impl'i aynı crate'te
 //! HERHANGİ bir modülde olabilir ve alt modüller üst modülün private
 //! alanlarını görebilir. Yani `P2PCore`'un alanları burada da erişilebilir,

@@ -12,7 +12,7 @@ import com.p2p.messenger.util.formatAbsoluteTime
 /**
  * Spec dışı, kullanıcı isteği: Ayarlar'daki "bekleyen mesajlar" (henüz
  * karşı taraftan "ack" alınmamış, bkz. lib.rs `awaiting_confirmation`/
- * `regen_content`) listesi — bkz. `PendingMessagesActivity`. Beklenen
+ * types.rs `regen_content`) listesi — bkz. `PendingMessagesActivity`. Beklenen
  * boyut küçük (tipik kullanımda birkaç kalem) olduğundan `SimpleChatAdapter`
  * ile aynı basit desen: `ListAdapter`/`DiffUtil` yerine düz bir liste +
  * hedefli `notifyItemRemoved`.
@@ -27,7 +27,7 @@ class PendingMessagesAdapter(
         val messageId: String,
         val targetName: String,
         /** Spec dışı, kullanıcı isteği: hedef CİHAZIN adı — bkz.
-         *  lib.rs `PendingMessageSummary.device_name` dokümantasyonu (kişi/
+         *  types.rs `PendingMessageSummary.device_name` dokümantasyonu (kişi/
          *  grup adı tek başına hangi cihazın hâlâ onay vermediğini
          *  söylemez). Boşsa satırda gösterilmez. */
         val deviceName: String,

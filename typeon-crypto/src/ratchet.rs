@@ -123,11 +123,11 @@ pub struct DeviceRatchetState {
     /// `perform_dh_ratchet`'in üzerine yazmadan ÖNCEKİ `root_key` değeri.
     /// (Güvenilirlik düzeltmesi: artık `respond_to_rotation` da ayarlıyor —
     /// iki taraf da "bir önceki topic'i bir nesil daha dinle" defteri için
-    /// buna ihtiyaç duyuyor, bkz. lib.rs resubscribe çağıranları.)
+    /// buna ihtiyaç duyuyor, bkz. network.rs resubscribe çağıranları.)
     /// Yayın tarafı kullanımı `perform_dh_ratchet` çağıran (rotasyonu
     /// TETİKLEYEN) tarafta anlamlı — bu, o rotasyonu duyuran mesajın (`rotation_kyber_ciphertext`
     /// dolu olan) hangi gossipsub topic'inden gönderilmesi gerektiğini
-    /// belirlemek için lib.rs `try_publish_raw`'da kullanılır: karşı taraf bu
+    /// belirlemek için network.rs `try_publish_raw`'da kullanılır: karşı taraf bu
     /// mesajı ALANA kadar YENİ `root_key`'i (dolayısıyla yeni topic'i) bilemez
     /// — o yüzden rotasyonu duyuran mesaj hâlâ ESKİ (paylaşılan) topic'ten
     /// gönderilmeli, yoksa karşı taraf o topic'e hiç abone olmadığından mesaj
@@ -168,7 +168,7 @@ pub struct DeviceRatchetState {
     pub has_responded_to_peer_key: bool,
     /// Güvenilirlik düzeltmesi (rotasyon duyurusu kaybı): `perform_dh_ratchet`
     /// tarafından üretilen Kyber ciphertext'i, karşı tarafın rotasyonu
-    /// UYGULADIĞI DOĞRULANANA kadar burada saklanır — lib.rs
+    /// UYGULADIĞI DOĞRULANANA kadar burada saklanır — send.rs
     /// `send_message_content_inner` bu değer doluyken HER giden pakete
     /// rotasyon duyurusunu yeniden ekler. Önceden duyuru SADECE rotasyonu
     /// tetikleyen tek pakette taşınıyordu; o paket güvenilir teslimli
@@ -187,7 +187,7 @@ pub struct DeviceRatchetState {
     /// numarası. `MAX_SKIPPED_KEYS` ile sınırlanır (bellek/DoS koruması —
     /// kötü niyetli biri çok yüksek bir message_number göndererek sınırsız
     /// bellek tükettiremesin diye). Diske şifreli olarak kalıcılaştırılır
-    /// (bkz. lib.rs `persist_skipped_key`/`load_skipped_keys_from_db`) —
+    /// (bkz. archive.rs `persist_skipped_key`/`load_skipped_keys_from_db`) —
     /// süreç yeniden başlasa bile gecikmeli mesajlar çözülebilsin diye
     /// (kapsam sınırı için bkz. lib.rs ilgili not).
     pub skipped_keys: HashMap<u32, [u8; 32]>,
@@ -219,11 +219,11 @@ impl Drop for DeviceRatchetState {
 /// `DeviceRatchetState`'in diske (şifreli) yazılabilir hâli — secret key
 /// tipleri (`StaticSecret`/`MlKem1024DecapsulationKey`/...) doğrudan
 /// `Serialize` implement etmiyor, bu yüzden hepsi ham bayt dizisine
-/// dönüştürülür (aynen `lib.rs`'teki `SecretKeyBundle`'ın kendi cihaz
+/// dönüştürülür (aynen `types.rs`'teki `SecretKeyBundle`'ın kendi cihaz
 /// anahtarları için yaptığı gibi — bkz. `generate_identity`/
 /// `load_secret_bundle`). `skipped_keys` KASITLI OLARAK burada YOK: o
 /// zaten ayrı bir tabloda (`skipped_message_keys`) kendi başına kalıcı
-/// kılınıyor (bkz. lib.rs `persist_skipped_key`/`load_skipped_keys_from_db`)
+/// kılınıyor (bkz. archive.rs `persist_skipped_key`/`load_skipped_keys_from_db`)
 /// — burada tekrar taşımak, iki kopyanın birbirinden sapma riskini
 /// (data drift) gereksiz yere ekler.
 #[derive(Clone, Serialize, Deserialize)]
@@ -274,7 +274,7 @@ impl Drop for SerializableRatchetState {
 
 impl DeviceRatchetState {
     /// bkz. `SerializableRatchetState` dokümantasyonu. `skipped_keys`
-    /// hariç tutulur — çağıran taraf (lib.rs) onu ayrıca yükleyip
+    /// hariç tutulur — çağıran taraf (persist.rs) onu ayrıca yükleyip
     /// dönen değere atamalıdır (bkz. `from_persistable`).
     pub fn to_persistable(&self) -> SerializableRatchetState {
         SerializableRatchetState {
@@ -297,7 +297,7 @@ impl DeviceRatchetState {
     }
 
     /// `skipped_keys`: diskteki `skipped_message_keys` tablosundan ayrıca
-    /// yüklenip buraya geçirilmelidir (bkz. lib.rs
+    /// yüklenip buraya geçirilmelidir (bkz. archive.rs
     /// `load_skipped_keys_from_db`) — bu fonksiyon kendisi o tabloya
     /// erişmez (ratchet.rs kripto-only katman, dosya başı notuyla tutarlı).
     pub fn from_persistable(mut s: SerializableRatchetState, skipped_keys: HashMap<u32, [u8; 32]>) -> Result<Self, RatchetError> {
@@ -328,7 +328,7 @@ impl DeviceRatchetState {
 }
 
 /// `DeviceRatchetState::decrypt` çağrısı sırasında skipped-key
-/// önbelleğinde olan değişiklikleri raporlar — çağıran taraf (lib.rs) bu
+/// önbelleğinde olan değişiklikleri raporlar — çağıran taraf (persist.rs) bu
 /// bilgiyle diskteki şifreli kopyayı güncel tutar.
 #[derive(Default)]
 pub struct SkippedKeyChanges {
@@ -883,7 +883,7 @@ impl DeviceRatchetState {
     /// 3. the chain before the last rotation (`SkippedKeyChanges::old_chain`).
     ///
     /// Bu fonksiyon hiçbir disk I/O yapmaz: dönen `SkippedKeyChanges` ile
-    /// çağıran taraf (lib.rs) diskteki skipped-key tablosunu günceller.
+    /// çağıran taraf (archive.rs) diskteki skipped-key tablosunu günceller.
     pub fn decrypt(
         &mut self,
         ciphertext: &[u8],
@@ -1053,7 +1053,7 @@ fn kyber_ciphertext_from_bytes(bytes: &[u8]) -> Result<MlKemCiphertext<MlKem1024
 // zinciriyle birlikte `old_recv`'e taşınır ve bir nesil daha kullanılabilir.
 // Güncel zincirin önbelleği ayrı bir tabloda, state'in geri kalanı (eski
 // zincir dahil) `SerializableRatchetState` olarak diske yazılır — ikisi de
-// lib.rs tarafında şifreli (`persist_skipped_key`, `persist_ratchet_state`).
+// archive.rs/persist.rs tarafında şifreli (`persist_skipped_key`, `persist_ratchet_state`).
 //
 // NOTE / [SIGNAL MODELİ]: `perform_dh_ratchet`/`respond_to_rotation` çifti
 // Signal'ın GERÇEK asimetrik modelini uyguluyor — deterministik bir

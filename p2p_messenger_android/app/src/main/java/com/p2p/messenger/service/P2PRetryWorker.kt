@@ -20,7 +20,7 @@ import com.p2p.messenger.P2PLib
  * çalışıyorsa bu zararsız bir no-op'tur (bkz. `P2PService.onStartCommand`
  * `isRunning` koruması, sadece bildirimi tazeler). Ölmüşse yeniden başlatma
  * `setSkippedKeyEncryptionKey` üzerinden kalıcı yeniden deneme kuyruğunun
- * (bkz. lib.rs `load_pending_durable_retries_from_db`) diskten geri
+ * (bkz. persist.rs `load_pending_durable_retries_from_db`) diskten geri
  * yüklenip tazelenmesini de otomatik olarak tetikler — ayrı bir "şimdi
  * dene" JNI çağrısına gerek yok.
  */

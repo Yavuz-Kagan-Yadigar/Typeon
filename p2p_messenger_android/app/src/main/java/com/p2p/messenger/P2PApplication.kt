@@ -83,7 +83,7 @@ class P2PApplication : Application() {
         }
 
         // Spec dışı, kullanıcı isteği: gönderilemeyen mesajlar/emirler
-        // (Edit/Delete/GroupUpdate — bkz. lib.rs `pending_durable_retries`)
+        // (Edit/Delete/GroupUpdate — bkz. persist.rs `pending_durable_retries`)
         // arka planda da saatte bir denensin. `KEEP`: uygulama her
         // başlatıldığında yeniden enqueue edilse bile MEVCUT programı
         // (ve bir sonraki çalışma zamanını) bozmaz — sadece hiç

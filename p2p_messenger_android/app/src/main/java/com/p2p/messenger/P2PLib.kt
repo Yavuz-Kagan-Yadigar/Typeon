@@ -196,19 +196,19 @@ object P2PLib {
     external fun resendGroupToAll(groupId: String): String
 
     // --- Spec dışı, kullanıcı isteği: bekleyen (henüz ack alınmamış)
-    //     mesajlar — bkz. lib.rs `awaiting_confirmation`/`regen_content`
+    //     mesajlar — bkz. lib.rs `awaiting_confirmation`/types.rs `regen_content`
     //     genişletmesi, SettingsFragment "Pending Messages" ekranı. ---
     /** Uygulama ön plana geldiğinde çağrılır — bkz. P2PApplication foreground
-     *  algılama, lib.rs `retry_all_pending_now` dokümantasyonu (üstel geri
+     *  algılama, network.rs `retry_all_pending_now` dokümantasyonu (üstel geri
      *  çekilme aralığını beklemeden HEMEN yeniden dener). */
     external fun retryAllPendingNow()
     /** JSON-encoded List<PendingMessageSummary>. */
     external fun listPendingMessages(): String
-    /** Bir bekleyen mesajı kalıcı olarak (Failed) bırakır — bkz. lib.rs
+    /** Bir bekleyen mesajı kalıcı olarak (Failed) bırakır — bkz. network.rs
      *  `cancel_pending_message`. */
     external fun cancelPendingMessage(messageId: String): Boolean
     /** Spec dışı, kullanıcı isteği: bekleyen mesajlar listesindeki manuel
-     *  "Şimdi Dene" düğmesi — bkz. lib.rs `retry_pending_message_now`
+     *  "Şimdi Dene" düğmesi — bkz. network.rs `retry_pending_message_now`
      *  (SADECE bu mesajın bir sonraki deneme zamanını HEMEN'e çeker, ağ
      *  I/O'su burada YAPILMAZ). */
     external fun retryPendingMessageNow(messageId: String): Boolean
@@ -217,7 +217,7 @@ object P2PLib {
     //     re-connecting automatically should be better") ---
     /** Bir ağ arayüzü değişikliği (Wi-Fi<->hücresel, ya da ağ tamamen
      *  kaybolup tekrar kazanılması) bildirir — bkz. P2PService
-     *  `observeNetworkChangesForReconnect`, lib.rs `reconnect_all_known_now`.
+     *  `observeNetworkChangesForReconnect`, session.rs `reconnect_all_known_now`.
      *  Bilinen TÜM Aktif cihazlar için, geri çekilme geçmişini yok
      *  sayarak ANINDA yeniden bağlanmayı dener. */
     /** Poll thread'i: ağda olay olana, başka bir çağrı çekirdeği isteyene ya da

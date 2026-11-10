@@ -220,7 +220,7 @@ pub enum ServerRequest {
     ///
     /// KRİTİK: istemci bunu SADECE zarfı çözüp arşive YAZDIKTAN sonra
     /// gönderir — `send_ack`'in `archive_message` başarılıysa gönderilmesiyle
-    /// (bkz. lib.rs) BİREBİR aynı gerekçe: disk dolu/DB hatası gibi geçici
+    /// (bkz. receive.rs) BİREBİR aynı gerekçe: disk dolu/DB hatası gibi geçici
     /// bir arızada "aldım" demek, mesajın hiçbir yerde kalıcı olmadığı hâlde
     /// sunucudan silinmesi demek olurdu.
     Ack { acks: Vec<(MailboxId, u64)> },
@@ -380,7 +380,7 @@ pub enum ServerResponse {
     /// uca DEĞİL: uçtan uca teslimin tek kanıtı karşı tarafın
     /// `MessageContent::Ack`'idir (bkz. lib.rs `awaiting_confirmation`).
     /// Bu yüzden `Deposited`, gossipsub yolunu KALICI OLARAK susturmaz —
-    /// bkz. lib.rs `should_shadow_on_gossipsub` (kara delik kuralı).
+    /// bkz. server_client.rs `should_shadow_on_gossipsub` (kara delik kuralı).
     Deposited { seq: u64 },
     Batch { items: Vec<MailItem>, more: bool },
     ArchiveProbed { present: Vec<BucketStat> },
@@ -466,7 +466,7 @@ impl ServerErrorCode {
     ///
     /// Çağıran (`try_publish_raw`) bunu `PublishFailure::Permanent` /
     /// `Transient` ayrımına çevirir; yanlış sınıflandırma bu depoda daha önce
-    /// gerçek bir hataya yol açmış bir konu (bkz. lib.rs `PublishFailure`
+    /// gerçek bir hataya yol açmış bir konu (bkz. types.rs `PublishFailure`
     /// dokümantasyonu — kalıcı bir hatayı geçici saymak 2 gün boyunca boşuna
     /// yeniden denemek, tersi ise kurtarılabilir bir mesajı kaybetmek demek).
     pub fn is_permanent(self) -> bool {

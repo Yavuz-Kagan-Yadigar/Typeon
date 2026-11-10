@@ -3,7 +3,7 @@
 //! Model kararı (5.1): Sender Keys DEĞİL, pairwise. Grup mesajı gönderilirken
 //! her üye için ayrı ayrı mevcut 1:1 Double Ratchet oturumuyla şifrelenir.
 //! Bu modül grup ÜYELİK durumunu ve yetki kontrolünü taşır; asıl şifreleme
-//! `ratchet.rs`'teki mevcut 1:1 oturumları kullanır (bkz. lib.rs
+//! `ratchet.rs`'teki mevcut 1:1 oturumları kullanır (bkz. group_ops.rs
 //! `send_group_message`).
 
 use serde::{Deserialize, Serialize};
@@ -137,7 +137,7 @@ pub enum GroupUpdateError {
     /// güncellemeler "sıra dışı" diye reddediliyor ve üye asla yetişemiyordu.
     /// Artık ileri sıçramalara (gap) izin veriliyor (yalnızca stale/tekrar,
     /// yani `<= version`, reddedilir); bir gap tespit edildiğinde çağıran
-    /// taraf uyarı loglar (bkz. lib.rs process_group_update).
+    /// taraf uyarı loglar (bkz. group_ops.rs process_group_update).
     StaleOrOutOfOrderVersion,
     /// new_version is implausibly far ahead. One accepted update at
     /// `u32::MAX` would freeze the group for good: nothing can follow it.
@@ -160,7 +160,7 @@ pub use crate::packet::GroupChange;
 /// `GroupUpdate`'i reddeder [...] `signed_by_device`'ın kurucunun
 /// bilinen/Active bir cihazı olması da ayrıca doğrulanır."
 ///
-/// `is_signer_device_active_for_identity`: çağıran taraf (lib.rs), bu
+/// `is_signer_device_active_for_identity`: çağıran taraf (group_ops.rs), bu
 /// device_fingerprint'in gerçekten `signed_by` Identity'sinin Active bir
 /// cihazı olup olmadığını Contact/known_devices tablosuna bakarak
 /// belirler — bu modül kripto/ağ durumuna erişmediği için sonucu parametre
@@ -220,7 +220,7 @@ pub fn apply_change(group: &mut Group, change: &GroupChange, new_version: u32, n
             group.avatar_jpeg = avatar.clone();
         }
         // Grup silme, gruba uygulanan bir ALAN değişikliği değil — çağıran
-        // (lib.rs `process_group_update`) grup kaydını tamamen kaldırır.
+        // (group_ops.rs `process_group_update`) grup kaydını tamamen kaldırır.
         // Burada yapılacak bir şey yok (bkz. GroupChange::Delete notu).
         GroupChange::Delete => {}
         GroupChange::TransferFounder(new_founder) => {

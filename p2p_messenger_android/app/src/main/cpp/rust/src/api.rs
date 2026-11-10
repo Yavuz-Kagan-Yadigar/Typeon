@@ -201,7 +201,7 @@ pub fn poll_network() -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// bkz. lib.rs `wait_for_network_activity` — poll döngüsü sabit uyku yerine bunu çağırır.
+/// bkz. core_lock.rs `wait_for_network_activity` — poll döngüsü sabit uyku yerine bunu çağırır.
 pub fn wait_for_network_activity(timeout_ms: u64) {
     let _ = catch_panic(|| crate::wait_for_network_activity(timeout_ms));
 }
@@ -669,7 +669,7 @@ pub fn prepare_and_send_file(
     let mime = mime_type.to_string();
     send_result(catch_panic(move || {
         let _guard = RUNTIME.enter();
-        // Kilit-bölme düzeltmesi (bkz. lib.rs `prepare_and_send_file_unlocked`):
+        // Kilit-bölme düzeltmesi (bkz. media_unlocked.rs `prepare_and_send_file_unlocked`):
         // şifreleme global kilit TUTULMADAN çalışır — poll döngüsü/ağ bu
         // sırada bloklanmaz.
         crate::prepare_and_send_file_unlocked(target, source, name, mime, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview)
@@ -988,7 +988,7 @@ pub fn revoke_contact_device(contact_id: &str, device_fingerprint: &str) -> Stri
 pub fn export_recovery(passphrase: &str) -> Vec<u8> {
     // bkz. M-23: uzun ömürlü TÜM anahtarları koruyan parola serbest
     // heap'te kalmasın — kopyamız drop'ta siliniyor (çekirdeğin kendi
-    // kopyası ayrı bir konu, bkz. lib.rs `export_recovery`).
+    // kopyası ayrı bir konu, bkz. recovery.rs `export_recovery`).
     let pass = zeroize::Zeroizing::new(passphrase.to_string());
     // M-21: only the plaintext is built under the core lock; Argon2 runs
     // after the lock is released (it froze every other caller).
@@ -1042,7 +1042,7 @@ fn json_list(result: Result<String, String>) -> String {
 // ---------------------------------------------------------------------------
 //
 // bkz. çekirdeğin `server_client` modülü. Bu fonksiyonların JNI karşılıkları
-// `lib.rs`'in sonundadır; ikisi ELLE senkron tutulmalı (bu dosyanın modül
+// `jni_exports.rs`'in sonundadır; ikisi ELLE senkron tutulmalı (bu dosyanın modül
 // notundaki genel kural).
 
 /// Davet kodundan (`typeon-server:<multiaddr>#<jeton>`) bir sunucu ekler.

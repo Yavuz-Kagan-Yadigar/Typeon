@@ -370,7 +370,7 @@ class GroupChatActivity : AppCompatActivity() {
                     runOnUiThread { handleIncomingSeenBulk(obj) }
                 // Spec dışı, hata düzeltmesi ("grup fotoğrafı cihazlar
                 // arasında senkron olmuyor"): Rust, bir GroupUpdate
-                // işlendiğinde (isim/üyelik/AVATAR — bkz. lib.rs
+                // işlendiğinde (isim/üyelik/AVATAR — bkz. group_ops.rs
                 // process_group_update) bu olayı zaten yayınlıyordu, ama
                 // hiçbir Kotlin kodu onu dinlemiyordu. Bu ekran zaten
                 // açıkken (ör. kurucu fotoğrafı değiştirirken karşı üye bu

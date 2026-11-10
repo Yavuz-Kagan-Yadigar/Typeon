@@ -14,8 +14,8 @@ import java.security.SecureRandom
  * kullanıcı artık açıkça TÜM cihazlarda (node olsun olmasın) kendi
  * sohbet geçmişinin yerelde şifreli kalıcı kılınmasını istedi. Node modu
  * artık SADECE karşı taraflara `HistorySyncRequest` yanıtlarken yardımcı
- * olma (bkz. lib.rs receive_message) ve DHT routing katılımını
- * etkiliyor — kendi geçmişini saklama kararını değil (bkz. lib.rs
+ * olma (bkz. receive.rs receive_message) ve DHT routing katılımını
+ * etkiliyor — kendi geçmişini saklama kararını değil (bkz. archive.rs
  * `archive_message` çağıranları, `node_mode_enabled` kontrolü artık YOK).
  *
  * Anahtar hayat döngüsü, IdentityManager ile aynı desende:

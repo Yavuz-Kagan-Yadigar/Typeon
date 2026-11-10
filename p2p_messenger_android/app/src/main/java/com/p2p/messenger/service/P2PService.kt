@@ -255,7 +255,7 @@ class P2PService : Service() {
         /** Spec dışı, kullanıcı isteği (Tor onion) — node modu gibi kalıcı
          *  bir tercih. `setNodeMode`'un aksine CANLI toggle YOK: Tor transport'u
          *  ancak `startNetwork`'te eklenebildiğinden, değişiklik ağ katmanı
-         *  yeniden başlayınca geçerli olur (bkz. tor.rs / lib.rs start_network).
+         *  yeniden başlayınca geçerli olur (bkz. tor.rs / network.rs start_network).
          *
          *  Spec dışı, kullanıcı isteği: varsayılan olarak AÇIK — kutudan
          *  çıktığı gibi CGNAT arkasındaki iki cihaz bile hiçbir ayar
@@ -1136,7 +1136,7 @@ class P2PService : Service() {
      * WiFi'ye ÖZEL callback'inin aksine, bu HERHANGİ bir "varsayılan ağ"
      * değişikliğini (Wi-Fi<->hücresel geçiş, ağ tamamen kaybolup tekrar
      * kazanılması) yakalar ve Rust tarafına bildirir (bkz.
-     * `P2PLib.notifyNetworkChanged`/lib.rs `reconnect_all_known_now`) —
+     * `P2PLib.notifyNetworkChanged`/session.rs `reconnect_all_known_now`) —
      * ESKİ ağ üzerinden kurulmuş TÜM libp2p bağlantıları yeni arayüzde
      * artık geçersiz soketlerdir (yerel IP değişti), periyodik taramanın
      * (≤15sn) veya `ping`in (≤~25sn, aralık+zaman aşımı) bunu fark

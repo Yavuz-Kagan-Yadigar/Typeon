@@ -76,7 +76,7 @@ pub struct QrPacket {
     /// (Circuit Relay v2) protokolünü konuşan birkaç peer'in TAM adresi
     /// (`.../p2p/<peer_id>` dahil). `rendezvous_node` doğrudan erişilemezse
     /// (farklı ağ/NAT), tarayan taraf bunlardan biri üzerinden bağlanmayı
-    /// dener (bkz. lib.rs `dial_with_relay_fallback`). `#[serde(default)]`
+    /// dener (bkz. network.rs `dial_with_relay_fallback`). `#[serde(default)]`
     /// — v1 QR'lar (bu alan olmadan üretilmiş) hâlâ ayrıştırılabilsin diye;
     /// CURRENT_VERSION 2'ye yükseltildi ama eski taraf bunu görmezden
     /// gelebilir, alan sadece boş kalır.
@@ -139,7 +139,7 @@ pub struct DeviceAdd {
     #[serde(with = "serde_bytes")]
     pub signature_pq: Vec<u8>,
     /// Hybrid signature of the ADDED device over the same bytes plus a tag
-    /// (lib.rs `device_add_consent_bytes`). The first device's signature alone
+    /// (devices.rs `device_add_consent_bytes`). The first device's signature alone
     /// let any identity claim a device whose public keys it knew.
     #[serde(default, with = "serde_bytes")]
     pub consent: Vec<u8>,
@@ -176,7 +176,7 @@ pub enum GroupChange {
     AvatarUpdate(#[serde(with = "serde_bytes")] Option<Vec<u8>>),
     /// Spec dışı, kullanıcı isteği: grubu TÜM üyeler için siler. Diğer
     /// değişikliklerin aksine bu, gruba bir alan güncellemesi değil —
-    /// alıcı tarafta grup kaydı tamamen kaldırılır (bkz. lib.rs
+    /// alıcı tarafta grup kaydı tamamen kaldırılır (bkz. group_ops.rs
     /// `process_group_update` Delete kolu). Yetki, diğerleriyle AYNI
     /// kuraldan gelir: `validate_group_update` yalnızca kurucunun imzasını
     /// kabul eder (`NotFounder`), ayrı bir mekanizma icat edilmedi.
@@ -373,7 +373,7 @@ pub struct GroupUpdate {
     /// orada anlatılıyor). Kurucunun gönderdiği HER güncelleme, o gruba
     /// ait bilinen devirleri taşır; devri kaçırmış bir alıcı yerel
     /// kurucusunu bu zinciri yürüyerek ilerletir ve güncellemeyi kabul
-    /// eder (bkz. lib.rs `heal_founder_chain`). `#[serde(default)]` —
+    /// eder (bkz. group_ops.rs `heal_founder_chain`). `#[serde(default)]` —
     /// alanı hiç bilmeyen eski sürümlerle iki yönlü uyumlu; dış imzanın
     /// KAPSAMINDA DEĞİL (her girdi kendi imzasını taşıyor).
     #[serde(default)]
@@ -534,7 +534,7 @@ pub struct SyncPayload {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sibling_proofs: Vec<DeviceAddProof>,
     /// Kök arşiv anahtarı (ARK) — sunucuda saklanan geçmişi çözen anahtar
-    /// (bkz. lib.rs `set_archive_root_key`, `server_seal`).
+    /// (bkz. server_client.rs `set_archive_root_key`, `server_seal`).
     ///
     /// Neden BURADA taşınıyor: ARK cihaza değil KİMLİĞE ait; aynı kimliğin
     /// bütün cihazları sunucudaki arşivi okuyabilmeli. Bu paket zaten
@@ -588,13 +588,13 @@ pub struct MessagePacketHeader {
     /// `perform_dh_ratchet`'i (kendi inisiyatifiyle değil, bu ciphertext'e
     /// karşı decapsulate ederek) çalıştırıp aynı yeni anahtarları türetmeli
     /// — bkz. ratchet.rs `RatchetPublicKeys`/`perform_dh_ratchet`
-    /// dokümantasyonu ve lib.rs `maybe_rotate_ratchet`. Boşsa (None), bu
+    /// dokümantasyonu ve session.rs `maybe_rotate_ratchet`. Boşsa (None), bu
     /// mesaj normal bir simetrik-zincir ilerlemesidir, rotasyon yok.
     #[serde(with = "serde_bytes")]
     pub rotation_kyber_ciphertext: Option<Vec<u8>>,
     /// Sender's clock when the packet was made. Signed with the header, so a
     /// receiver can tell a replayed old packet from one its session should
-    /// decrypt (lib.rs `note_undecryptable`).
+    /// decrypt (session.rs `note_undecryptable`).
     pub sent_at_ms: u64,
 }
 
@@ -659,7 +659,7 @@ pub struct MessagePacket {
     pub signature_pq: Vec<u8>,
 }
 
-/// `HistorySyncResponse.messages`'ın tek bir elemanı — bkz. lib.rs
+/// `HistorySyncResponse.messages`'ın tek bir elemanı — bkz. types.rs
 /// `ArchivedMessage` (yerel karşılığı, ekstra `status` alanı hariç: bu ağdan
 /// geçtiği için gönderim durumu anlamsız/hassas, taşınmaz).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -674,7 +674,7 @@ pub struct SyncedMessage {
     #[serde(default)]
     pub sender_identity_id: Option<String>,
     /// Var-olma kontrolüyle (mesaj kimliği bazlı) tekrar birleştirmeyi
-    /// önlemek için — bkz. lib.rs `message_exists_with_id`, ESKİ SAYFA
+    /// önlemek için — bkz. archive.rs `message_exists_with_id`, ESKİ SAYFA
     /// (`before_timestamp.is_some()`) birleştirmesinde kullanılır.
     #[serde(default)]
     pub message_id: Option<String>,
@@ -724,7 +724,7 @@ pub enum MessageContent {
     /// `group_id`: doluysa bu mesaj bir grup mesajının pairwise
     /// (1:1 ratchet üzerinden) fan-out kopyasıdır — spec dışı, "gerçek grup
     /// entegrasyonu" için gerekli. Bu olmadan alıcı taraf, gelen bir grup
-    /// mesajını sıradan bir 1:1 mesajdan AYIRT EDEMİYORDU (bkz. lib.rs
+    /// mesajını sıradan bir 1:1 mesajdan AYIRT EDEMİYORDU (bkz. receive.rs
     /// receive_message/GroupChatActivity notu) — grup sohbeti diye ayrı bir
     /// yer yoktu, mesajlar göndericinin 1:1 sohbetine karışıyordu.
     Text {
@@ -752,7 +752,7 @@ pub enum MessageContent {
         /// "10:42 (sent at: 10:41)" gibi hem yerel ALINMA anını HEM DE
         /// göndericinin GERÇEK gönderim anını göstermesi için (bkz.
         /// ChatActivity/SimpleChatAdapter). ÖNEMLİ: bu, `awaiting_confirmation`'ın
-        /// `regen_content` mekanizmasıyla (bkz. lib.rs) tazelenip yeniden
+        /// `regen_content` mekanizmasıyla (bkz. network.rs) tazelenip yeniden
         /// gönderilse BİLE değişmez — `MessageContent` klonlanıp AYNEN
         /// yeniden şifreleniyor, bu alan İLK yazılma anını taşımaya devam
         /// eder (istenen tam olarak budur: "ne zaman yazıldı", "ne zaman
@@ -836,7 +836,7 @@ pub enum MessageContent {
         /// ayrı düzenlemesi (ör. kullanıcı saniyeler içinde iki kez düzeltir)
         /// alıcıya TERS sırada ulaşabilir; alıcı, DAHA ESKİ bir düzenlemeyi
         /// DAHA YENİ olanın üzerine yazmasın diye bu damgayı arşivde saklanan
-        /// son değerle karşılaştırır (bkz. lib.rs `apply_edit_to_archive`).
+        /// son değerle karşılaştırır (bkz. archive.rs `apply_edit_to_archive`).
         /// Not: ratchet zaten AĞDAN gelen bir REPLAY'i (tüketilmiş mesaj
         /// numarası) reddeder — bu alan farklı bir sorunu, aynı göndericiden
         /// gelen İKİ MEŞRU düzenlemenin sırasız tesliminde son metnin doğru
@@ -851,13 +851,13 @@ pub enum MessageContent {
         target_message_id: String,
         #[serde(default)]
         group_id: Option<String>,
-        /// Group only: the author's signature over the deletion (lib.rs
+        /// Group only: the author's signature over the deletion (util.rs
         /// `GROUP_TOMBSTONE`). Members hand it on with history.
         #[serde(default)]
         author_proof: Option<String>,
     },
     /// Spec dışı: node modu KAPALI cihazlarda sohbet geçmişi hiç
-    /// arşivlenmediği için (bkz. lib.rs `archive_message`), o cihazlar için
+    /// arşivlenmediği için (bkz. archive.rs `archive_message`), o cihazlar için
     /// sohbet ekranı her zaman boş başlıyordu. Karşı taraf (chat peer) node
     /// modu açıksa zaten kendi tarafında bu konuşmanın her iki yönünü de
     /// arşivlemiştir — bu istek, doğrudan o arşivden son `limit` mesajı
@@ -867,7 +867,7 @@ pub enum MessageContent {
         limit: u32,
         /// Spec dışı, kullanıcı isteği (sonsuz kaydırma — eski geçmiş
         /// sayfalama): doluysa, YEREL arşivi tükenen isteyen tarafın en
-        /// eski yüklü mesajından DAHA ESKİ mesajlar istenir (bkz. lib.rs
+        /// eski yüklü mesajından DAHA ESKİ mesajlar istenir (bkz. archive.rs
         /// `request_older_history`/`request_older_group_history`). `None`
         /// ise mevcut davranış: sohbet açılışında en YENİ `limit` mesaj
         /// istenir. Zaman damgaları her cihazın KENDİ arşivleme anını
@@ -896,7 +896,7 @@ pub enum MessageContent {
     /// (`awaiting_confirmation`) çıkarabilmesi için (bkz. lib.rs
     /// güvenilir teslim notu). `messages`: eskiden yeniye sıralı —
     /// `direction` YANITLAYANIN bakış açısıyla ("sent"/"received")
-    /// taşınır; isteyen taraf bunu ters çevirmeli (bkz. lib.rs
+    /// taşınır; isteyen taraf bunu ters çevirmeli (bkz. receive.rs
     /// receive_message HistorySyncResponse notu).
     HistorySyncResponse {
         request_id: String,
@@ -930,7 +930,7 @@ pub enum MessageContent {
     /// dosyaya özel taze bir AEAD anahtarı (`file_key`), normal
     /// ratchet-şifreli mesaj kanalıyla taşınır. Gerçek baytlar ayrı bir
     /// libp2p `request_response` protokolü üzerinden parça parça (chunk)
-    /// istenir/gönderilir (bkz. lib.rs/attachments.rs
+    /// istenir/gönderilir (bkz. file_transfer.rs/attachments.rs
     /// `FileChunkRequest`/`FileChunkResponse`).
     FileOffer {
         group_id: Option<String>,
@@ -1010,7 +1010,7 @@ pub enum MessageContent {
     /// event JSON carries `group_id` so GroupChatActivity can route it.
     TypingIndicator { is_typing: bool, #[serde(default)] group_id: Option<String> },
     /// Spec disi, kullanici tarafindan istenen "gorüldu" bildirimi --
-    /// `Ack` ile AYNI desen (bkz. lib.rs `send_seen`/`send_ack`): ratchet-
+    /// `Ack` ile AYNI desen (bkz. send.rs `send_seen`/`send_ack`): ratchet-
     /// sifreli kanaldan gider, kendisi ayrica onaylanmaz (sonsuz döngü
     /// riski), bir kez gönderilir (güvenilir yol `ReadStateSync`). `Ack`'ten
     /// FARKI: "paket basariyla COZULDU" (teslim) degil, "kullanici EKRANDA
@@ -1063,7 +1063,7 @@ pub enum MessageContent {
     /// `signature_pq` alanlari (kurucu yetkisini kanitlayan, tasima
     /// katmanindan BAGIMSIZ bir ikinci dogrulama) korunuyor.
     GroupUpdate(GroupUpdate),
-    /// Spec dışı, kullanıcı isteği: bir üyenin (kurucu HARİÇ, bkz. lib.rs
+    /// Spec dışı, kullanıcı isteği: bir üyenin (kurucu HARİÇ, bkz. group_ops.rs
     /// `leave_group`) gruptan kendi isteğiyle ayrılması. Sadece kurucunun
     /// üyelik değiştirebildiği yetki modeli (bkz. `validate_group_update`
     /// "NotFounder" kontrolü) BOZULMAZ — ayrılan üye bunu doğrudan bir
@@ -1080,17 +1080,17 @@ pub enum MessageContent {
     /// Spec dışı, ağ sağlamlığı düzeltmesi ("aynı LAN'da + Tor açık birden
     /// fazla cihazdan biri mobil veri+Tor'a geçince kimseye ulaşamıyor,
     /// hepsi offline görünüyor" hatası): göndericinin O ANKİ en iyi/güncel
-    /// adresini (bkz. lib.rs `get_node_address` — Tor açık/hazırsa HER ZAMAN
+    /// adresini (bkz. network.rs `get_node_address` — Tor açık/hazırsa HER ZAMAN
     /// `.onion`) bilinen HER kişiye proaktif olarak bildirir. Önceden bir
     /// kişinin `.onion` adresi SADECE gerçekten Tor üzerinden bir bağlantı
-    /// KURULURSA öğreniliyordu (`lib.rs` `record_peer_id_if_known`/
+    /// KURULURSA öğreniliyordu (`network.rs` `record_peer_id_if_known`/
     /// `remember_device_addr`) — ama iki cihaz AYNI LAN'dayken (Tor İKİSİNDE
     /// de açık olsa bile) mDNS/doğrudan bağlantı neredeyse her zaman Tor
     /// devresinden daha hızlı kurulduğundan, Tor bağlantısı ARADA HİÇ
     /// FİİLEN kullanılmıyordu — yani `.onion` adresi hiçbir zaman
     /// öğrenilmemiş oluyordu. Sonra biri ağ değiştirdiğinde geriye
     /// düşülecek bilinen bir `.onion` adresi olmadığından yeniden bağlanma
-    /// tamamen başarısız oluyordu. Bu paket, `lib.rs`
+    /// tamamen başarısız oluyordu. Bu paket, `contacts.rs`
     /// `announce_address_to_all_contacts` tarafından üç anda gönderilir:
     /// `start_network` sonrası, Tor durumu "Ready"e GEÇTİĞİNDE (bootstrap +
     /// onion servisi yayına girdiğinde — genelde eşleşmeden DAKİKALAR sonra),

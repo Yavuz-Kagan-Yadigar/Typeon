@@ -3,7 +3,7 @@
 //! v0.2 kapsamı DIŞINDA" notunu genişletir; azami 4GB).
 //!
 //! Model: meta veri (dosya adı, boyutu, MIME, taze rastgele bir AEAD
-//! anahtarı) normal ratchet-şifreli mesaj kanalıyla taşınır (bkz. lib.rs
+//! anahtarı) normal ratchet-şifreli mesaj kanalıyla taşınır (bkz. file_transfer.rs
 //! `MessageContent::FileOffer`) — bu, taze anahtarın da uçtan uca
 //! korunmasını sağlar, ayrı bir anahtar değişimi icat edilmez. Gerçek bayt
 //! içeriği BURADAKİ ayrı bir libp2p `request_response` protokolü ile,
@@ -106,8 +106,8 @@ pub enum FileChunkResponse {
 /// doğal olarak çalışır).
 pub fn total_chunks_with(total_size: u64, chunk_size: usize) -> u32 {
     // `saturating_add`: `total_size` çağıranlar tarafından zaten
-    // `MAX_ATTACHMENT_SIZE`'a karşı doğrulanmalı (bkz. lib.rs
-    // `receive_file_offer`/`prepare_and_send_file`), ama bu fonksiyon
+    // `MAX_ATTACHMENT_SIZE`'a karşı doğrulanmalı (bkz. file_transfer.rs
+    // `receive_file_offer`/api.rs `prepare_and_send_file`), ama bu fonksiyon
     // kendi başına da (savunma katmanı) `total_size` neredeyse `u64::MAX`
     // olsa bile taşmasın diye doygun toplama kullanıyor — çıplak `+`
     // release'de sessizce sarardı.
@@ -683,7 +683,7 @@ pub fn read_chunk_from_disk_with(enc_path: &Path, chunk_index: u32, chunk_size: 
     Ok(Some(buf))
 }
 
-/// One chunk of a `.enc` file, decrypted (bkz. lib.rs `handle_chunk_response`:
+/// One chunk of a `.enc` file, decrypted (bkz. file_transfer.rs `handle_chunk_response`:
 /// the whole-file hash of a download).
 pub fn read_plain_chunk_with(enc_path: &Path, chunk_index: u32, file_key: &[u8; 32], chunk_size: usize) -> Result<Vec<u8>, String> {
     let data = read_chunk_from_disk_with(enc_path, chunk_index, chunk_size)?.ok_or("Chunk missing")?;
@@ -691,7 +691,7 @@ pub fn read_plain_chunk_with(enc_path: &Path, chunk_index: u32, file_key: &[u8; 
     cipher.decrypt(&nonce_from_chunk_index(chunk_index), data.as_slice()).map_err(|_| format!("Chunk {} decryption failed", chunk_index))
 }
 
-/// `write_verified_chunk_at_with`'in başarısızlık türü — çağıranın (bkz. lib.rs
+/// `write_verified_chunk_at_with`'in başarısızlık türü — çağıranın (bkz. file_transfer.rs
 /// `handle_chunk_response`) kurtarma stratejisini seçebilmesi için KRİTİK
 /// ayrım (dış AI incelemesi düzeltmesi): AEAD hatası mı yoksa disk yazma
 /// hatası mı?

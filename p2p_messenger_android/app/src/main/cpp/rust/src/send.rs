@@ -428,7 +428,7 @@ impl P2PCore {
         }
         // bkz. packet.rs `MessageContent::Text.sent_at_ms` dokümantasyonu —
         // BURADA, İLK yazılma anında, bir kez damgalanır; `regen_content`
-        // tazelemeleri (bkz. lib.rs retry_unconfirmed_messages) bu değeri
+        // tazelemeleri (bkz. network.rs retry_unconfirmed_messages) bu değeri
         // İÇEREN `content`'i AYNEN klonlayıp yeniden şifreler, DEĞİŞTİRMEZ.
         let sent_at_ms = current_time_ms();
         // Çoklu-cihaz (spec 1.7.1): 1:1 mesajlara da grup mesajları gibi

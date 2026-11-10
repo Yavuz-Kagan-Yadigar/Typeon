@@ -622,7 +622,7 @@ class MainActivity : AppCompatActivity() {
         // tetiklensin. Servis zaten çalışıyorsa `startNetworkService`
         // zararsız bir no-op'tur (bkz. P2PService.onStartCommand
         // `isRunning` koruması); OS tarafından öldürülmüşse yeniden
-        // başlatılması, kalıcı yeniden deneme kuyruğunun (bkz. lib.rs
+        // başlatılması, kalıcı yeniden deneme kuyruğunun (bkz. persist.rs
         // `load_pending_durable_retries_from_db`) diskten geri
         // yüklenmesini de otomatik tetikler.
         lifecycleScope.launch {

@@ -2,7 +2,9 @@
 
 Bu doküman `HANDOFF.md`'nin (çalışma kuralları, dosya haritası) teknik tamamlayıcısıdır. Aşağıdaki her iddia kaynak kodda doğrulandı; dosya/fonksiyon adı verilmiştir. Çelişki halinde **kod** doğrudur (`SECURITY.md` ve `Description.md` kısmen eskidir).
 
-İçindekiler: 1 Katmanlar · 2 Kripto ilkelleri · 3 Kimlik ve güven · 4 Oturum kurulumu (handshake) · 5 Ratchet · 6 Mesaj paketi · 7 Gönderim yolu · 8 Alım yolu · 9 Teslim/yeniden deneme · 10 Çoklu cihaz · 11 Grup · 12 Ağ katmanı · 13 Sunucu · 14 Yerel depolama · 15 Dosya/medya · 16 Arama · 17 Tehdit modeli · 18 Sabitler tablosu
+**Son güncelleme: 2026-11-11 (HEAD `e916a13`).** Çekirdek (`p2p_messenger_core`) artık tek bir `lib.rs` değildir: 24 konu modülüne bölündü (§1.1). Bu belgede kod konumu `dosya.rs fonksiyon_adı` biçiminde verilir (çekirdek dosyaları: `p2p_messenger_android/app/src/main/cpp/rust/src/`); satır numarası verilmez, kayar. Bulmak için: `grep -n "fn ad" p2p_messenger_android/app/src/main/cpp/rust/src/*.rs`. Sürümler: istemci 6.0.7 (kod 51), sunucu uygulaması 6.0.1 (kod 44), Linux/Windows masaüstü 6.1.4, sunucu protokolü 7.
+
+İçindekiler: 1 Katmanlar (1.1 modül haritası, 1.2 masaüstü istemci) · 2 Kripto ilkelleri · 3 Kimlik ve güven · 4 Oturum kurulumu (handshake) · 5 Ratchet · 6 Mesaj paketi · 7 Gönderim yolu · 8 Alım yolu · 9 Teslim/yeniden deneme · 10 Çoklu cihaz · 11 Grup · 12 Ağ katmanı · 13 Sunucu · 14 Yerel depolama · 15 Dosya/medya · 16 Arama · 17 Tehdit modeli · 18 Sabitler tablosu · 19 2026-10-20/21 düzeltme turu · 20 2026-11-05..11 değişiklikleri
 
 ---
 
@@ -10,11 +12,14 @@ Bu doküman `HANDOFF.md`'nin (çalışma kuralları, dosya haritası) teknik tam
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│ UI:  Android Kotlin (ChatActivity, P2PService…)  | Linux GTK4   │
+│ UI:  Android Kotlin (ChatActivity, P2PService…)                 │
+│      | GTK4 + libadwaita (Linux ve Windows, aynı crate)         │
 ├────────────────────────────────────────────────────────────────┤
-│ Köprü: JNI (lib.rs sonu, P2PLib.kt)  | api.rs (Linux, JNI'siz)  │
+│ Köprü: JNI (jni_exports.rs, P2PLib.kt) | api.rs (masaüstü,      │
+│        JNI'siz)                                                 │
 ├────────────────────────────────────────────────────────────────┤
-│ Çekirdek (crate p2p_messenger): P2PCore  — lib.rs              │
+│ Çekirdek (crate p2p_messenger_core): P2PCore — struct lib.rs'te,│
+│   `impl P2PCore` 24 konu modülüne bölünmüş (§1.1)              │
 │   iş mantığı, DB, libp2p swarm, Tor, sunucu istemcisi, arama   │
 ├────────────────────────────────────────────────────────────────┤
 │ typeon-crypto: identity, ratchet, packet, server_proto, seal   │
@@ -25,9 +30,53 @@ Bu doküman `HANDOFF.md`'nin (çalışma kuralları, dosya haritası) teknik tam
           (isteğe bağlı) typeon-server: store-and-forward
 ```
 
-- **Tek `P2PCore` örneği**, global `core_lock()` mutex'i arkasında. Her JNI/api çağrısı `catch_panic` + `RUNTIME.enter()` + `core_lock()` sırasıyla girer. Yani çekirdek **tek kilitli, olay-sürümlü**: paralel iş yok, uzun işlem kilidi tutar (`lock_watch` modülü kilit süresini izler).
-- Ağ olayları **çekerek (poll)** işlenir: Kotlin `P2PService` döngüsü `poll_events()` çağırır; çekirdek swarm olaylarını `swarm.next().now_or_never()` ile bloklamadan boşaltır, JSON olay listesi döndürür.
-- Linux istemci aynı çekirdeği `api.rs` üzerinden çağırır; protokolün ikinci kopyası yoktur.
+- **Tek `P2PCore` örneği**, global `core_lock()` mutex'i arkasında (`core_lock.rs core_lock`; salt-okunur durum sorguları için `core_lock_read`). Her JNI/api çağrısı `catch_panic` (`jni_exports.rs catch_panic`, içinde `RUNTIME.enter()`) + `core_lock()` sırasıyla girer; `api.rs` aynı sırayı uygular. Yani çekirdek **tek kilitli, olay-sürümlü**: paralel iş yok, uzun işlem kilidi tutar (`core_lock.rs` içindeki `lock_watch` modülü kilit süresini izler; 10 sn'den uzun tutma loglanır). Kilit bırakılarak çalışan dosya/çıkartma işleri `media_unlocked.rs`'tedir.
+- Ağ olayları **çekerek (poll)** işlenir: Kotlin `P2PService` döngüsü `poll_events()` (`poll.rs poll_events`) çağırır; çekirdek swarm olaylarını `swarm.next().now_or_never()` ile bloklamadan boşaltır, JSON olay listesi döndürür.
+- Masaüstü istemci (Linux/Windows) aynı çekirdeği `api.rs` üzerinden rlib olarak çağırır; protokolün ikinci kopyası yoktur.
+
+### 1.1 Çekirdek modül haritası (`p2p_messenger_android/app/src/main/cpp/rust/src/`)
+
+`lib.rs` yalnız şunları tutar: `P2PCore` yapısı, global `RUNTIME`/`CORE`/`NET_WAKE`, `MAX_ATTACHMENT_SIZE`, modül listesi ve `CORE_SRC`. Her alt modül `use super::*;` ile crate kökünü görür; eskiden özel olan öğeler `pub(crate)` oldu; kök modülleri yeniden dışa aktarır, yani `crate::ad` yolları değişmedi. Kaynak metni tarayan testler `crate::CORE_SRC` okur (`lib.rs`'teki `concat!(include_str!(...))`; **yeni bir çekirdek dosyası açılırsa oraya da eklenmeli**).
+
+| Dosya | İçerik (başlıca) |
+|---|---|
+| `lib.rs` | `P2PCore` struct, `RUNTIME`/`CORE`/`NET_WAKE`, modül bildirimleri, `CORE_SRC` |
+| `core_lock.rs` | `core_lock`, `core_lock_read`, `core_lock_poll`, `lock_watch` (kilit izleme), `wait_for_network_activity` |
+| `media_unlocked.rs` | kilitsiz dosya/etiket (sticker) işleri: `prepare_and_send_file_unlocked`, `send_sticker_unlocked`, `import_sticker_frames_unlocked` |
+| `wire.rs` | libp2p kablo tipleri (keepalive, ack, envelope) ve birleşik `P2PBehaviour` |
+| `util.rs` | küçük serbest yardımcılar: `group_msg_tag`/`group_msg_id_bound`, `handshake_signing_input`, `group_update_signing_input`, `group_tie_hash`, `verify_hybrid_signature(_with)`, `seal_with`, `founder_transfer_floor`, `clamp_received_times`, `mono_ms` |
+| `types.rs` | anahtar paketleri, cihaz kayıtları, özetler, aktarım durumu, `PREKEY_ROTATE_MS` |
+| `tuning.rs` | zaman aşımı/limit/protokol sabitleri (§18'in çoğu) |
+| `db.rs` | `P2PCore::new`, `init_db` (şema + `migrate`), `meta_*`, SQLCipher anahtarı (`db_key_pragma`) ve göç |
+| `pairing.rs` | kendi kimliği, QR/kod ile eşleşme, ilk-temas sırları, `IdentityExchange` (`process_identity_exchange`) |
+| `devices.rs` | cihaz fan-out (`fanout_targets`), cihaz yetki imzaları, cihaz bağlama/bildirimleri |
+| `sibling_sync.rs` | kardeş cihaz eşitleme: roster/`DeviceSync` (`build_sync_payloads`), okundu (`sync_read_state`), geçmiş (`build_sibling_history_response`, `apply_sibling_reply`) |
+| `contacts.rs` | kişiler, engelleme, cihaz uyarıları (`evaluate_sender_device`), profil, hesap/kişi silme, `wipe_all_local_state` |
+| `session.rs` | bağlantılar, prekey'ler, handshake'ler, ratchet rotasyonu (`initiate_handshake_with`, `process_handshake_init`, `maybe_rotate_ratchet`, `note_undecryptable`) |
+| `send.rs` | gönderim (`send_message_content_inner`), tepki, görüldü, düzenle/sil, Ack, yazıyor |
+| `receive.rs` | `receive_message` ve çözülmüş içeriğin dağıtımı (`dispatch_received_content*`) |
+| `archive.rs` | geçmiş istekleri, mesaj arşivi (`archive_message`), arşivde düzenle/sil, `pending_sibling_ops`, grup yazar kanıtı |
+| `persist.rs` | mühürlü yerel blob (`seal_local_blob`), ratchet/atlanmış anahtar kalıcılığı, kalıcı yeniden denemeler |
+| `group_ops.rs` | grup oluştur/güncelle/üyelik, kurucu zinciri (`heal_founder_chain`), grup mesajı fan-out, `process_group_update` |
+| `storage.rs` | etiketler (sticker), depolama sınırları ve budama |
+| `network.rs` | swarm başlatma (`start_network`), radyo/güç modları, röleler, yeniden bağlanma, yeniden denemeli yayın (`try_publish_raw_via`, `retry_unconfirmed_messages`) |
+| `file_transfer.rs` | dosya teklifleri, parçalı indirme, parça servisi |
+| `poll.rs` | `poll_events`, erken paket tamponu, hız sınırı, `process_incoming_envelope` |
+| `recovery.rs` | kurtarma dosyası dışa/içe aktarma |
+| `jni_exports.rs` | Android JNI bağları (`Java_com_p2p_messenger_P2PLib_*`) ve yardımcıları (`catch_panic`) |
+| `core_tests.rs` | crate düzeyi testler (`#[cfg(test)]`) |
+
+Çekirdek crate'in modül-dışı dosyaları (bölünmeden önce de ayrıydı): `api.rs` (JNI'siz arayüz), `server_client.rs` (istemcinin sunucu tarafı + `ServerCore` ile konuşma, ~4300 satır), `call.rs`, `whiteboard.rs`, `attachments.rs`, `tor.rs` (arti + `DialReject`), `group.rs`, `contact.rs`.
+
+### 1.2 Masaüstü istemci (`Linux/`, crate `typeon-linux`) — Linux ve Windows
+
+Aynı GTK4 + libadwaita crate'i iki platformda derlenir; platform kodu `#[cfg(windows)]` / `#[cfg(unix)]` ile ayrılır (`main.rs`, `app.rs`, `font.rs`, `secrets.rs`, `util.rs`, `call_media.rs`, `ui/window.rs`, `ui/settings.rs`). Windows için `main.rs` `audio` ve `keyring` modüllerini `#[cfg_attr(windows, path = "audio_win.rs" / "keyring_win.rs")]` ile başka dosyaya yönlendirir.
+
+- **Yalnız ikincil cihaz, bağlama-only.** Karşılama sayfası (`ui/onboarding.rs welcome_page`) yalnız "Link to my phone" sunar; hesap oluşturma ve kurtarma-dosyası geri yükleme masaüstünden kaldırıldı (`core::create_identity` yalnız bağlama için kendi cihaz anahtar çiftini üretir). Birincil/yetki rolü yok: ulaşılamayan masaüstü diğer cihazları bozmasın diye (sahip kuralı, `AGENTS.md`). `1a180c3`: bekleyen bağlama (`awaiting_link`) sayfasından onaylı "sil ve çık" ile kurulum ekranına dönülebilir.
+- **Kasa anahtarı:** Linux'ta Secret Service (GNOME Keyring / KDE Wallet, `keyring.rs`+`secrets.rs`); Windows'ta DPAPI (`keyring_win.rs`: `CryptProtectData`/`CryptUnprotectData`, mühürlü anahtar veri dizininde `vault-key.dpapi`; veri dizini `main.rs data_directory` = `glib::user_data_dir()/typeon`, Windows'ta `%LOCALAPPDATA%\typeon` — dizin yolunu `AGENTS.md` verir, GLib'in Windows davranışına dayanır, kodda ayrıca doğrulanmadı).
+- **Windows'a özel:** `win.rs` — kendi `Shell_NotifyIconW` tepsi simgesi (`install_tray`: sol tık açar, sağ tık Open/Quit), balon bildirimleri (`win::notify`; `app::post_notification` Windows'ta bunu çağırır, gio `send_notification` çağrılmaz çünkü GLib'in ikinci, menüsüz simgesini yaratır), otomatik başlatma (`set_autostart`: HKCU `...\Run`, `--background` argümanı), özel yazı tipi (`register_font` → `pango_font_map_add_font_file`). Pencere kapatılınca tepsiye gizlenir (`set_hide_on_close`), ana menü "Quit" çıkar (`ui/window.rs`). Sesli mesaj: GStreamer `wasapi2src` (`audio_win.rs`); arama: `call_media.rs` içinde `wasapi2src`, `mfvideosrc`, kodlayıcı `mfh265enc`/`mfh264enc`/`openh264enc`, çözücü `d3d11h26{4,5}dec`/`openh264dec`.
+- **Çekirdek tarafında Windows farkı:** `util.rs mono_ms` Windows'ta `GetTickCount64` kullanır (CLOCK_BOOTTIME yok); `rust/build.rs` libjxl için sysroot'un statik lcms2'sini bağlar.
+- **Derleme (sahip "derle" derse):** Linux'ta `Linux/packaging/README.md` (Flatpak, GNOME SDK içinde); Windows'ta `Linux/packaging/windows/build.sh`/`package.sh` (llvm-mingw + MSYS2 CLANG64 sysroot ile Linux'ta çapraz derleme) veya `package-msys2.sh`; ayrıntı `AGENTS.md`.
 
 ---
 
@@ -35,7 +84,7 @@ Bu doküman `HANDOFF.md`'nin (çalışma kuralları, dosya haritası) teknik tam
 
 | Amaç | Algoritma | Yer |
 |---|---|---|
-| İmza | **Ed25519 + ML-DSA-87**, ikisi de üretilir ve ikisi de doğrulanır | `verify_hybrid_signature*` lib.rs ~21591 |
+| İmza | **Ed25519 + ML-DSA-87**, ikisi de üretilir ve ikisi de doğrulanır | `util.rs verify_hybrid_signature` / `verify_hybrid_signature_with` |
 | Anahtar anlaşma | **X25519 + ML-KEM-1024** (ikisinin çıktısı birleştirilir) | `ratchet.rs` |
 | KDF | HKDF-SHA256, etiketli (`p2pmsg-v0.x-…`) + transcript hash | `derive_keys`, `kem_key` |
 | AEAD | ChaCha20-Poly1305 (mesaj: nonce = mesaj numarası; yerel satırlar: rastgele 12 bayt nonce) | `encrypt_next`, `seal_with` |
@@ -139,12 +188,13 @@ imza girdisi = ham header baytları ‖ ciphertext ‖ alıcı_fp (uzunluk-önek
 - İmza **alıcıya bağlı**: A→M paketi B'de de geçerli olup oturumu bozamaz (bilinçli protokol kırılması).
 - `MessageContent` (CBOR enum): `Text, Reaction, Edit, Delete, HistorySyncRequest/Response, Ack, FileOffer, TypingIndicator, Seen, ProfileUpdate, GroupUpdate, GroupSyncRequest, LeaveGroupRequest, AddressAnnounce, DeviceLinkGrant, DeviceAddNotice, ReadStateSync, DeviceRevokeNotice, FirstContactSecret{secret, group_id}, DeviceSync, SiblingEcho, SiblingHistoryRequest/Response, AccountDeleted, Call{call_id, action, group_id, video, media_key, stream_id, sent_at_ms, participants}, WbOps/WbDigest/WbPageRequest/WbPage`.
 - Zarf üst sınırı `MAX_ENVELOPE_BYTES = 1 MiB`.
+- **Katı CBOR:** eş kaynaklı üç ayrıştırıcı sondaki baytları reddeder (6a603c7): `MessageContent::from_cbor` (`content: trailing bytes`; en çok `MAX_NESTING` = 32 iç içelik), `SignedHeader` deserialize (`header: trailing bytes`; özyineleme sınırı 4), `RatchetPublicKeys::from_bytes` (`Ratchet public key: trailing bytes`; ≤ 2048 bayt, anahtar uzunlukları tam 32 ve 1568). Aynı içeriğin iki farklı bayt dizisi olmaz.
 
 ---
 
 ## 7. Gönderim yolu (algoritma)
 
-`send_message` → `send_message_content_inner(peer_fp, content, …)` (lib.rs ~9382):
+`send_message` → `send_message_content_inner(peer_fp, content, …)` (`send.rs`):
 
 ```
 1. ratchets_loaded değilse hata.
@@ -183,7 +233,7 @@ Kaynaklar: gossipsub mesajı, doğrudan envelope isteği, sunucu `Push`/`Batch`.
 3. `IdentityExchange` → `process_identity_exchange`. `Handshake` → `process_handshake_init` (bilinmeyen gönderen → `early_handshakes`).
 4. `Message`: ratchet yoksa ama cihaz bilinen+aktifse imzayı doğrulayıp `early_packets`'e at; aksi halde `receive_message`.
 
-`receive_message` (lib.rs ~10157):
+`receive_message` (`receive.rs`):
 ```
 1. gönderen cihaz bilinmeli ve aktif; sender_identity_id kayıtla eşleşmeli
 2. hibrit imza doğrula (alıcı = kendi aktif fp)
@@ -205,7 +255,7 @@ Kaynaklar: gossipsub mesajı, doğrudan envelope isteği, sunucu `Push`/`Batch`.
 
 ## 9. Teslim güvenilirliği
 
-- **Ack alan türler** (`needs_delivery_confirmation`): `Text, Edit, Delete, Reaction, HistorySyncRequest/Response, FileOffer, GroupUpdate, LeaveGroupRequest, ProfileUpdate, DeviceLinkGrant, DeviceAddNotice, DeviceRevokeNotice, FirstContactSecret, DeviceSync, SiblingEcho, ReadStateSync, SiblingHistoryRequest, AccountDeleted, WbDigest`. Ack **almayanlar:** `Ack, Seen, TypingIndicator, AddressAnnounce, SiblingHistoryResponse`, arama/WbOps.
+- **Ack alan türler** (`needs_delivery_confirmation`): `Text, Edit, Delete, Reaction, HistorySyncRequest/Response, FileOffer, GroupUpdate, LeaveGroupRequest, GroupSyncRequest, ProfileUpdate, DeviceLinkGrant, DeviceAddNotice, DeviceRevokeNotice, FirstContactSecret, DeviceSync, SiblingEcho, ReadStateSync, SiblingHistoryRequest, AccountDeleted, WbDigest`. Ack **almayanlar:** `Ack, Seen, TypingIndicator, AddressAnnounce, SiblingHistoryResponse`, arama/WbOps.
 - `awaiting_confirmation[message_id]` = `PendingConfirmation{envelope, next_retry_at, retry_interval_ms, first_sent_at, original_sent_at, regen_content, chain_stamp…}`; ayrıca `pending_durable_retries` tablosuna yazılır (süreç ölse de yeniden başlar).
 - `retry_unconfirmed_messages` (periyodik):
   - ilk 1,5 sn'de Ack yoksa bağlantı "şüpheli" işaretlenir ve sunucuya erken bırakma denenir;
@@ -230,10 +280,20 @@ Kaynaklar: gossipsub mesajı, doğrudan envelope isteği, sunucu `Push`/`Batch`.
 **Çalışma anı:**
 - Kişiler her mesajı alıcı kimliğin **tüm aktif cihazlarına** ayrı paketle yollar (`fanout_targets`).
 - Kendi gönderdiklerim `SiblingEcho{Text|Edit|Delete|Reaction|File|GroupLeft}` ile kardeşlere iletilir; aynı `message_id` kullanıldığından düzenleme/silme aynı balonu hedefler.
-- Kardeş geçmişi: `SiblingHistoryRequest` (sohbet başına `before_timestamp` sayfalama). Okundu: `ReadStateSync` (kalıcı watermark).
+- Kardeş geçmişi (`sibling_sync.rs`): aşağıdaki **Kardeş geçmişi** bloğu. Okundu: `ReadStateSync` (kalıcı watermark, `sync_read_state` / `apply_incoming_read_watermark`).
 - `pending_sibling_ops` tablosu: hedef henüz yokken gelen kardeş işlemleri tamponlanır.
 - İptal: `DeviceRevoke` (imzalı); iptal edilen cihazdan gelen paket reddedilir ve `answer_revoked_sibling`.
 - Yetki: sadece kimliğin kök (birincil) cihazı ekler/çıkarır/siler.
+
+**Kardeş geçmişi (history backfill)** — iki tetikleyici, tek yanıt üreticisi `sibling_sync.rs build_sibling_history_response`:
+- *Otomatik* (`request_sibling_backfill`): `SIBLING_BACKFILL_INTERVAL_MS` (30 dk) debounce'lu; yalnız **bağlı** kardeşlere (çevrimdışına gönderilen istek sunucuda yeniden yatırılıp geceleri radyoyu açık tutuyordu); `since_timestamp` = o kardeşten son yanıtlanan istekten beri (`sibling_backfill_since`, `SIBLING_BACKFILL_SINCE_MARGIN_MS` = 10 dk saat farkı payı), sohbet başına `SIBLING_BACKFILL_PER_CONVERSATION` (30). Kapsamsız (tüm sohbetler) yanıtta satır sınırı `SIBLING_BACKFILL_MAX_ENTRIES` (300) sohbet/grup sayısına bölünür.
+- *Kullanıcı basışı* "Fetch older history" (`request_older_sibling_history`): tek sohbet, `[after_timestamp, before_timestamp)` penceresi, sayfa başına `HISTORY_SYNC_MAX_MESSAGES` (200); her bağlı kardeşe gider ve `sibling_fetch_open[(kardeş, before, after)]`'e yazılır; yanıt (`SiblingHistoryResponse{entries, window, more}`) pencereyi **yankılar**, yalnız yankısı açık bir basışla eşleşen yanıt kullanıcı fetch'i sayılır (eşleşme tüketilir; yeniden başlatma `sibling_fetch_open`'ı siler, o durumda kayıp basış yeniden açılır: `reopen_fetch_cursor`). `more` ise yanıtlayan sayfayı kesmiştir ve pencerenin eski kalanı aynı kardeşten tekrar istenir.
+- **Bütçe:** metin satırları `HISTORY_SYNC_MAX_TEXT_BYTES` (512 KiB) bütçesinden düşer (gossipsub 1 MiB sınırı için). Kapsamsız yanıtta sığmayan satır **atlanır** (bir uzun mesaj sonraki sohbetleri kesmesin); kapsamlı basışta, atlanan satırın altındaki eski satırlar kalıcı delik olacağı için yanıt orada biter (`more = true`).
+- **Ekler ve tepkiler** (dcd2cb6): `SiblingHistoryEntry` iki alan kazandı: `file: Option<Box<MessageContent>>` (her zaman bir `FileOffer`; `file_id` = `message_id`, alıcı dosyayı o kardeşten indirir) ve `reactions: Vec<(tepki_veren_identity, emoji, reacted_at_ms)>` (boş emoji = geri alma, damgası için saklanır). `sibling_file_entries` yalnız `status = 'complete'` dosyaları, `created_at` penceresinde, en yeni `limit` tanesini yollar; dosya anahtarı (`unwrap_file_key`), `chunk_hashes`, başlık/alıntı alanları ve etiket bilgisi teklifle gider. Alıcı `apply_sibling_file` ile satırı `receive_file_offer` gibi yazar, sonra yönünü/sohbetini/tarihini kardeşinkine çevirir. Ek satırları metin balonu değildir: `apply_sibling_reply` olay JSON'una yalnız `file.is_none()` ve boş olmayan metinler girer, sohbet yeniden yüklenir.
+- **Bütçe kuralı, ek** (670ab45): ek `512 + başlık + chunk_hashes` bayt + önizleme olarak ücretlendirilir; bütçe yetmezse **önizleme (preview_jpeg) önce atılır** — dosya yine gelir, indirilene dek genel simgeyle görünür; yalnız önizlemesiz hali de sığmazsa satır atlanır. Tepki taşıyıcı satır `128 + id + tepkiler` bayt.
+- **Basış önceki basışla kayan imleç sorunu** (926d724): önceki bir basış fetch imlecini metnini getirdiği satırların altına indirmişti; o satırların ekleri/tepkileri sonraki hiçbir pencerede olmuyordu. Şimdi yanıtlayan, pencere satırlarından **sonra** (bütçenin kalanıyla), pencere sonundan (`before`) beri gönderilmiş satırların biten eklerini (`sibling_file_entries`) ve tepkilerini (`sibling_reaction_entries`, metinsiz taşıyıcı satır) ekler. Alıcı (`apply_sibling_reply`) pencere dışı kayıtlardan yalnız ek ve tepki taşıyıcılarını (`file.is_some() || metin boş`) tutar, metin satırları pencerede kalır; tepki taşıyıcı için satır **yazılmaz** (yalnız elindeki satıra tepki uygulanır).
+- **Alıcı tarafı** (`apply_sibling_history`): `file` yalnız `FileOffer` ve `file_id == message_id` ise kabul edilir; dedup **sohbet başına** (başka sohbetin satırı bunu bastırmasın); tepkiler yalnız satır orada olduğunda (`present`) uygulanır (en çok 256 tepki, emoji ≤ 64, tepki veren ≤ 128 bayt, `apply_reaction`); kullanıcı basışı değilse, kullanıcının temizlediği sohbetin tabanının (`history_floor`) altındaki satırlar yazılmaz; ayrılınmış/bilinmeyen gruba geri yazılmaz. Pencere isteği yanıtlayanda en çok `HISTORY_FETCH_WINDOW_MS` = 30 gün'e kısılır (`receive.rs`, `SiblingHistoryRequest` kolu); istek yalnız kendi kimliğimizin cihazından geldiyse yanıtlanır, `SiblingHistoryRequest` her halükârda Ack'lenir.
+- **Kişi avatarları** (dcd2cb6): `build_sync_payloads` her avatarlı kişi için ayrı bir `SyncPayload` parçası ekler (≈250 KB'a kadar, `devices` boş: bilinmeyen kişi böyle bir parçadan yaratılmaz); önceden bağlı cihaz avatarı ancak kişi `ProfileUpdate` yollarsa alıyordu. Linux (`Linux/src/app.rs`, `ui/chats.rs`) sync olayında kişileri yeniler.
 
 ---
 
@@ -249,7 +309,7 @@ Kaynaklar: gossipsub mesajı, doğrudan envelope isteği, sunucu `Push`/`Batch`.
 
 **Eşit sürüm çakışması (H78):** iki kurucu cihazı aynı sürümü imzalayabilir. Alıcı, elinde tuttuğu sürümdeki bir güncelleme için `group_tie_hash` (SHA-256: grup id + sürüm + değişiklik + ad + üye listesi + imzalayan) **daha büyükse** güncellemeyi yeniden alır; `Delete` ve aynı üye/adı tekrarlayan bir "yeniden gönderim" de alınır. Böylece her üye aynı sürümde **aynı** durumda biter; kaybeden kurucu cihaz kardeşinin güncellemesini alır ve sonraki değişikliği `max(görülen sürüm)+1` olarak yapar.
 
-**Alım adımları** (`process_group_update`, lib.rs ~14806):
+**Alım adımları** (`group_ops.rs process_group_update`):
 1. `group_id` biçimi → imzalayan cihaz bilinen mi → `group_update_signing_input` (grup id, sürüm, değişiklik, ad, üyeler, üye cihazlar, imzalayan kimlik+cihaz) üzerinde hibrit imza.
 2. Ad ≤ 256 bayt; üye listesi ≤ sınır ve elemanlar fingerprint-hex olmalı.
 3. Grup yerelde yoksa: daha önce **ayrıldığımız** (`removed_groups`) bir grup yeni sürümle ve bizi `Add` ile eklemeden geri gelemez; bizi üye yapmayan bilinmeyen grup **reddedilir**.
@@ -259,7 +319,7 @@ Kaynaklar: gossipsub mesajı, doğrudan envelope isteği, sunucu `Push`/`Batch`.
 
 **Kurucu cihazları ve yeniden gönderme:** Kurucunun imzaladığı her güncelleme **kurucunun kendi kardeş cihazlarına** da gider (`send_group_update_to_siblings`); böylece iki kurucu cihazı aynı sürümü imzalamaz. Kurucu ayrıca grubu herkese yeniden gönderebilir (`resend_group_to_all`; Android `P2PLib.resendGroupToAll`): güncel imzalı durum **her üye cihazına** tekrar gönderilir.
 
-**Mesaj gönderme** (`send_group_message`): üye olduğunu kontrol et → `local_id` (UUID) üret → `sign_group_author`: cihaz imzası ile `author_proof = "cihaz_fp:imza_klasik_hex:imza_pq_hex"` (`group_author_statement(group_id, message_id, identity, device, text)`) → arşive yaz → **her diğer üye için** `send_group_message_to_member`: üyenin tüm aktif cihazlarına ayrı 1:1 paket (`send_message_content`). Üyenin aktif cihazı henüz bilinmiyorsa içerik `pending_group_messages` kuyruğuna (üye başına `MAX_PENDING_GROUP_MESSAGES_PER_MEMBER`, taşarsa en eski atılır, DB'de kalıcı) yazılır ve `group_sync_sweep` periyodik yeniden dener. Son olarak kardeş cihazlara `SiblingEcho` yansıtılır.
+**Mesaj gönderme** (`group_ops.rs send_group_message`): üye olduğunu kontrol et → `local_id` üret (`<8 bayt etiket hex><-uuid>`; etiket = `util.rs group_msg_tag(grup, yazar kimliği, "-<uuid>")`, alıcı `group_msg_id_bound` ile kimliğin yazara ait olduğunu doğrular: başka üye aynı kimlikle çakışan mesaj üretemez, düzenle/sil yalnız yazara bağlanır) → `sign_group_author`: cihaz imzası ile `author_proof = "cihaz_fp:imza_klasik_hex:imza_pq_hex"` (`group_author_statement(group_id, message_id, identity, device, text)`) → arşive yaz → **her diğer üye için** `send_group_message_to_member`: üyenin tüm aktif cihazlarına ayrı 1:1 paket (`send_message_content`). Üyenin aktif cihazı henüz bilinmiyorsa içerik `pending_group_messages` kuyruğuna (üye başına `MAX_PENDING_GROUP_MESSAGES_PER_MEMBER`, taşarsa en eski atılır, DB'de kalıcı) yazılır ve `group_sync_sweep` periyodik yeniden dener. Son olarak kardeş cihazlara `SiblingEcho` yansıtılır.
 
 **Alım** (`receive_message` Text kolu): `sender_may_post_to_group` (üye değilse reddet) → aynı `group_message_local_id` arşivde varsa yalnız Ack → `group_author_proof_valid` (cihaz o kimliğe ait mi + imza) geçerliyse `author_proof` saklanır → arşivle → Ack. Edit/Delete aynı `author_proof` ile yazara bağlanır.
 
@@ -269,9 +329,9 @@ Kaynaklar: gossipsub mesajı, doğrudan envelope isteği, sunucu `Push`/`Batch`.
 
 ## 12. Ağ katmanı
 
-**Swarm kurulumu** (`start_network`, lib.rs ~17084):
+**Swarm kurulumu** (`network.rs start_network`):
 - Kimlik: libp2p Ed25519 anahtarı `files/libp2p_identity.key` dosyasında (protobuf; bozuksa yenisi üretilir, okunamazsa o çalıştırma için geçici). Bu **Typeon cihaz kimliğinden ayrıdır**; PeerId bu anahtardan gelir ve sunucu kaydında görünür.
-- Taşıma: `tcp(nodelay)` → **`DialReject`** ile sarılı (dışarı dial her zaman `MultiaddrNotSupported`) → noise → yamux; ve `ArtiDialTransport` (Tor üzerinden `.onion` dial) → noise → yamux. Dinleme yalnızca `127.0.0.1:<listen_port>`'ta; Tor onion servisinin gelen akışları `bridge_incoming_stream` ile bu yerel porta köprülenir (`MAX_INBOUND_ONION_STREAMS = 64`). Yani clearnet'ten gelen/giden doğrudan bağlantı yoktur.
+- Taşıma: `tcp(nodelay)` → **`DialReject`** (`tor.rs`) ile sarılı (dışarı dial her zaman `MultiaddrNotSupported`) → noise → yamux; ve `ArtiDialTransport` (Tor üzerinden `.onion` dial) → noise → yamux. Dinleme yalnızca `127.0.0.1:<listen_port>`'ta; Tor onion servisinin gelen akışları `tor.rs bridge_incoming_stream` ile bu yerel porta köprülenir (`tor.rs MAX_INBOUND_ONION_STREAMS = 64`). Yani clearnet'ten gelen/giden doğrudan bağlantı yoktur.
 - gossipsub: `MessageAuthenticity::Signed(libp2p keypair)`, `ValidationMode::Strict`, heartbeat 10 sn, `max_transmit_size` 1 MiB. Başlangıçta kendi `p2p_msg_<aktif_fp>` topic'ine ve her ratchet için `p2p_rt_<hex>` (mevcut + `prev_root_key`) topic'ine abone olunur.
 - kad: `Mode::Client` (başkalarının yönlendirmesini yapmaz); node modu açıksa relay server davranışı eklenir (`relay::Behaviour` yalnız `node_mode`'da).
 - `mdns = None`, `upnp = None` (Toggle kapalı); `dcutr` ve relay client açık; `identify` açık.
@@ -294,19 +354,19 @@ Kaynaklar: gossipsub mesajı, doğrudan envelope isteği, sunucu `Push`/`Batch`.
 ### 13.1 Protokol
 `/typeon/server/1.0.0`, libp2p request-response CBOR. Kablo sınırı: istek ≤ 1 MiB (codec sert sınırı; aşan sessizce kırpılır), yanıt ≤ 10 MiB → bu yüzden `MAX_DEPOSIT_BYTES = 900 KiB`, aşan zarf sunucuya hiç denenmez (doğrudan gossipsub).
 
-`ServerRequest`: `Hello{version}` (sürüm 4), `Enroll{…}`, `Rebind{…}`, `Register{add, drop, proofs}`, `Deposit{mailbox, sealed}`, `Fetch{cursors, max_items, max_bytes}`, `Ack{acks:[(mailbox, seq)]}`, `Cancel{mailbox, seqs}`, `ArchivePut/Probe/Fetch/Purge`, `BlobPut/Finish/Delete`; sunucu→istemci: `Notify`, `Push{item}`.
-`ServerResponse`: `Welcome{version, challenge, enrolled, enrollment_id, limits, server_name}`, `Enrolled{enrollment_id, limits}`, `Deposited{seq}`, `Batch{items, more}`, `ArchiveProbed`, `ArchiveBatch`, `Registered{proof_needed, refused}` (`Register` yanıtı; eski `ProofNeeded` yok), `Ok`, `Err(code)`.
+`ServerRequest`: `Hello{version}` (sürüm **7**, `SERVER_PROTOCOL_VERSION`; sürüm geçmişi `server_proto.rs`: 2 `Registered`, 4 blob `upload_secret`, 5 oturum/röle kutu kimliği kanıt anahtarından (`key_bound_mailbox_id`), 6 24 baytlık yükleme sırrı + yazar etiketi, 7 blob kimliği yalnız etiketten sonraki baytları hash'ler), `Enroll{…}`, `Rebind{…}`, `Register{add, drop, proofs}`, `Deposit{mailbox, sealed}`, `Fetch{cursors, max_items, max_bytes}`, `Ack{acks:[(mailbox, seq)]}`, `Cancel{mailbox, seqs}`, `ArchivePut/Probe/Fetch/Purge`, `BlobPut/Finish/Delete`; sunucu→istemci: `Notify`, `Push{item}`.
+`ServerResponse`: `Welcome{version, challenge, enrolled, enrollment_id, limits, server_name}`, `Enrolled{enrollment_id, limits}`, `Deposited{seq}`, `Batch{items, more}`, `ArchiveProbed`, `ArchiveBatch`, `Registered{proof_needed, refused}` (`Register` yanıtı; her kutu kabulse düz `Ok`; eski `ProofNeeded` yok), `Ok`, `Err(code)`. Hata kodları (`ServerErrorCode`): `NotEnrolled, BadInvite, BadSignature, Stale, UnknownMailbox, TooLarge, QuotaExceeded, RateLimited, Revoked, BadDirection, Unsupported, Internal, BadHash, BlobIncomplete`. `MailItem.seq` **kutu başına** artar (aşağıda §13.3).
 
 ### 13.2 Kayıt (sunucu tarafı `handle_*`)
-- `Hello`: sürüm ≠ `SERVER_PROTOCOL_VERSION` (4) → `Unsupported`. v4 blob istekleri bir `upload_secret` taşır; blob kimliği bu sırrın hash'idir. Aksi halde 32 bayt rastgele `challenge` üretilip bağlantı durumuna yazılır; yanıt `Welcome` (+ `enrolled` = bu PeerId'nin kaydı `Active` mi, `enrollment_id` = o kaydın kimliği; `Enrolled` yanıtı kaybolan istemci geri alır).
+- `Hello`: sürüm ≠ `SERVER_PROTOCOL_VERSION` (7) → `Unsupported`. Blob istekleri 24 baytlık bir `upload_secret` taşır; blob kimliği = 8 baytlık yazar etiketi (açık) + `blob_id_hash_hex` (etiketten sonraki baytların SHA-256'sı, `typeon-blob-id-v3`, ilk 16 bayt) = 48 hex karakter (`blob_id_for_upload_secret`). Aksi halde 32 bayt rastgele `challenge` üretilip bağlantı durumuna yazılır; yanıt `Welcome` (+ `enrolled` = bu PeerId'nin kaydı `Active` mi, `enrollment_id` = o kaydın kimliği; `Enrolled` yanıtı kaybolan istemci geri alır).
 - `Enroll`: sırayla — sürüm; `|now − ts_ms| ≤ 5 dk` (`Stale`); davet jetonu hash'i geçerli ve kullanım hakkı var (`BadInvite`); bağlantının tek kullanımlık `challenge`'ı `take()` ile alınır ve istemcinin gönderdiğiyle eşit olmalı (`BadSignature`); hibrit imza `enroll_signing_input(version, server_peer_id, client_peer_id, token, enroll_pk, enroll_pk_pq, challenge, ts)` doğrulanır (istemci PeerId'si ve iki enroll anahtarı imzaya bağlı); `Enroll`/`Rebind` ortak bir **küresel doğrulama bütçesine** (`verify_budget`, dakikada 120, eş başına en çok 4) tabidir → aşılırsa `RateLimited`; `Register` kanıtlarının ayrı havuzu var (dakikada 256, eş başına 64 = bir tam `Register`), yani bir eş ne başkalarını ne de kayıtları aç bırakabilir; reddedilen istek bütçeden düşmez; anahtar `blocked_keys`'te ise `Revoked`; herkese açık davet (`uses_left == -1`) saatte 60 kayıt tavanı (`QuotaExceeded`); aktif kayıt sayısı `max_enrollments` (varsayılan 64, son 30 gündür boşta olmayanlar sayılır) → `QuotaExceeded`; sonra `enroll_with_invite` tek işlemde jeton tüketir + kaydı yazar. Aynı PeerId yeniden kayıt olursa önceki `enrollment_id` ve kota sayaçları korunur.
-- `Rebind`: `ts` penceresi, `challenge`, mevcut kaydın `enroll_pk` hibrit imzası `rebind_signing_input(enrollment_id, server_peer_id, yeni_peer_id, challenge, ts)`; `Revoked`/engelli anahtar reddedilir; kayıt yeni PeerId'ye taşınır, jeton tüketilmez.
+- `Rebind`: kayıt bilinmiyorsa `NotEnrolled`; `Rebind` doğrulama havuzu (`VerifyPool::Rebind`); `ts` penceresi, `challenge`, mevcut kaydın `enroll_pk` hibrit imzası `rebind_signing_input(enrollment_id, server_peer_id, yeni_peer_id, challenge, ts)`. **`Revoked` (iptal edilmiş kayıt ya da `blocked_keys`'teki anahtar) yalnız imza doğrulandıktan sonra** döner (6a603c7): kayıt kimliğini bilen ama anahtarı olmayan biri iptal durumunu öğrenemez. Sonra kayıt yeni PeerId'ye taşınır, jeton tüketilmez.
 - **İptal (revoke) = engelleme.** Sunucu tarafında iptal, kaydın `enroll_pk`'sini `blocked_keys`'e koyar (`store.rs`); "kaydı kapatıp taze davetle dönüşe izin ver" DEĞİLDİR. Aynı anahtar geri gelemez; ama uygulamayı yeniden kurup yeni PeerId + yeni enroll anahtarı üreten biri, kullanılabilir bir davet jetonuyla yeniden kaydolabilir. Gerçek yasak için **katılım kodunu (davet jetonunu) döndür**. Sunucu uygulamasını kaldırmak onion kimliğini ve kayıtlı her cihazın jetonunu siler.
 - Diğer tüm istekler `authenticate(peer)` ister; kayıt yoksa `NotEnrolled`, iptalse `Revoked`. Her istek önce `check_rate` (dakikada `requests_per_minute`=1800; dosya parçası için ayrı `CHUNKS_PER_MINUTE`=600) → `RateLimited`.
 
 ### 13.3 Posta kutusu semantiği (`store.rs`)
-- **`Register{add, drop, proofs}`:** `add` kimlikleri `is_safe_id` olmalı. Her kutu, o kutunun **kutu anahtarı** (`mailbox_proof_seeds`'ten türeyen hibrit anahtar) ile imzalı kanıt ister (`register_signing_input(mailbox, enrollment_id, server_peer_id)`). Kutu ilk kaydeden anahtara bağlanır (`mailbox_keys`, `mailbox_key_hash`); okuyucusu varken başka anahtar kabul edilmez. Kanıtsız kutular `ProofNeeded(ids)` ile istenir; istemci ≤64 kanıtlı yeniden `Register` yollar. Kota/okuyucu sınırı aşan → `QuotaExceeded`. Kutu başına en çok 2 okuyucu; dolu kutuya bağlı anahtarla kanıt getiren yeni okuyucu (geri yüklenmiş cihaz) en eski okuyucunun yerini **yalnız** o okuyucu 7 gündür (`READER_EVICT_IDLE_MS`; kendi istekleri ya da son `Register`'ı) görülmediyse alır, aksi halde reddedilir (kanıt yalnız klasik X25519'a dayanır). Kabul edilen kutular sunucuda `live_interest[peer]`'e yazılır (Push/Notify hedefi).
-- **`Deposit`:** `sealed ≤ min(max_item_bytes, 900 KiB)` (`TooLarge`); kutu kayıtlı değil → `UnknownMailbox`; yatıran kaydın `bytes_mail ≤ max_mail_bytes`, toplam disk bütçesi (`total_storage_budget_bytes`), kutuda ≤ `max_items_per_mailbox` (5000) → aksi `QuotaExceeded`. Aynı `(mailbox, depositor, sha256(sealed))` zaten varsa **yeni satır açılmaz**, TTL uzatılır ve eski `seq` döner (idempotent). Aksi halde `mail` satırı: `seq` (rowid), `expires_at = now + mailbox_ttl` (14 gün).
+- **`Register{add, drop, proofs}`:** `add`/`drop` ≤ `max_mailboxes`, `proofs` ≤ `MAX_REGISTER_PROOFS` (64); kimlikler `is_safe_id` olmalı (aksi `BadDirection`). Yeni okuyucu, kutunun **kutu anahtarı** (`mailbox_proof_seeds`'ten türeyen hibrit anahtar) ile imzalı kanıt ister (`register_signing_input(mailbox, enrollment_id, server_peer_id)`); kanıtlar kendi doğrulama havuzundan düşer. Sunucu kutuyu bir anahtara değil **okuyucu başına** anahtar karmasına (`mailbox_readers.key_hash`, `mailbox_key_hash`) bağlar; eski `mailbox_keys` tablosu kaldırıldı. `mk_` önekli (anahtara-bağlı) kutu kimliği, yalnız kendi kanıt anahtarından türeyen kimlik olabilir (`key_bound_mailbox_id`); başka anahtar `refused`. Kanıtı hiç gelmeyen kutular `Registered{proof_needed}`'de, doğrulanmayan/reddedilenler `refused`'ta döner (istemci ≤64 kanıtlı yeniden `Register` yollar; hepsi kabulse `Ok`). Okuyucu sınırı **anahtar başına** `MAX_READERS_PER_KEY` = 2 (I-48): iki farklı anahtar aynı ilk-temas kutusunda ayrı ayrı 2'şer okuyucu alabilir, biri ötekinin yerini dolduramaz. Aynı anahtarla dolu kutuya gelen yeni okuyucu (geri yüklenmiş cihaz) en uzun süredir görülmeyen aynı-anahtar okuyucunun yerini **yalnız** o okuyucu 7 gündür (`READER_EVICT_IDLE_MS`; kendi istekleri ya da son `Register`'ı) görülmediyse alır, aksi halde `refused`. Kayıt sayısı `max_mailboxes` aşılırsa da `refused`. Kabul edilen kutular sunucuda `live_interest[peer]`'e yazılır (Push/Notify hedefi).
+- **`Deposit`:** `sealed ≤ min(max_item_bytes, 900 KiB)` (`TooLarge`); yatıran dışında, aktif kayıtlı bir okuyucusu olmayan kutu (`mailbox_has_other_reader`) → `UnknownMailbox`; yatıran kaydın `bytes_mail ≤ max_mail_bytes`, toplam disk bütçesi (`total_budget_exceeded`) ve **yatıranın o kutudaki** öğe sayısı (`depositor_item_count`) < `max_items_per_mailbox` (5000) → aksi `QuotaExceeded`. Aynı `(mailbox, depositor, sha256(sealed))` zaten varsa **yeni satır açılmaz**, TTL uzatılır ve eski `seq` döner (idempotent). Aksi halde `mail` satırı: **`seq` kutu başına sayaçtır** (`mail_seq` tablosu: `INSERT ... ON CONFLICT DO UPDATE SET last = last + 1 RETURNING last`; satır kimliği ayrı `id`, `UNIQUE(mailbox_id, seq)`), böylece bir okuyucu `seq` boşluklarından sunucunun toplam alım hızını kestiremez. `mail_seq` satırı hiç silinmez (kutu boşalsa da sayaç sıfırlanmaz, yoksa yeni posta okuyucu imlecinin altına düşerdi). Eski küresel-AUTOINCREMENT şemadan göç (`init_schema`, `SCHEMA_VERSION` 4): eski satırlar `seq`'ini korur, yeni kutular eski en yüksek değerin (`meta.mail_seq_base`) üstünden başlar → hiçbir istemci imleci yeni postanın üstünde kalmaz. `expires_at = now + mailbox_ttl` (14 gün).
 - **`Fetch{cursors}`:** istemcinin bildirdiği her `(mailbox, after_seq)` için `seq > after_seq`, **`depositor != requester`** (kendi bıraktığını geri almaz) ve istekçi o kutunun `mailbox_readers`'ında olan satırlar `seq` sırasıyla, ≤64 öğe ve ≤512 KiB; sığmayan kalırsa `more = true`.
 - **`Ack{(mailbox, seq)}`:** yalnız o kutunun okuyucusu sayılır; `mail_acks(mailbox, owner)` için `through_seq = MIN(seq, MAX(seq mevcut))` ve yalnız **ilerliyorsa** yazılır. Sonra `delete_fully_acked`: bir satır, kendisi dışındaki **tüm aktif okuyucular** `through_seq ≥ seq` olunca silinir (okuyucu başına ack; çok cihazlı kimliğin her cihazı ayrı okur).
 - **`Cancel`:** yatıran kendi `seq`'lerini siler (gönderen mesajı geri çekerse).
@@ -322,14 +382,14 @@ Kaynaklar: gossipsub mesajı, doğrudan envelope isteği, sunucu `Push`/`Batch`.
 3. Açılırsa ham zarf `incoming.push((None, raw))` ile **normal `process_incoming_envelope` yoluna** girer (`source = None`). **Açılamayan öğe Ack'lenmez ve kutunun imleci onun önünde kalır; 5 dk (`SERVER_HOLD_GRACE_MS`) tutulur, 45 sn'de (`SERVER_HOLD_REFETCH_MS`) bir yeniden çekilir; süre dolunca atlanır. İmleç hiçbir zaman o öğenin `seq`'ine taşınmaz.** Çekilen öğenin işlenmesi başarısız olursa (`server_item_failed`) imleç aynı şekilde geri alınır.
 4. Her kutu için en yüksek (başarılı) `seq` imleç olarak kalıcı yazılır (`persist_cursor`) ve `Ack{acks}` yollanır; `more && ilerleme` ise hemen yeniden Fetch.
 **`Push`:** tek öğe sahte `Batch` olarak aynı yolla işlenir; sunucudan 5 sn'de >30 Push gelirse `Notify` gibi davranılıp toplu çekime düşülür.
-**Deposit tarafı** (`try_server_deposit`): bkz. §7. `Deposited{seq}` gelince `server_deposit_locations[(server, message_id)] = (mailbox, seq)` saklanır (iptal için `Cancel`). Zarf bırakılırken iptal edildiyse gelen `seq` hemen `Cancel` edilir.
+**Deposit tarafı** (`server_client.rs try_server_deposit`): bkz. §7. `Deposited{seq}` gelince `server_deposit_locations[(server, message_id)] = (mailbox, seq)` saklanır (iptal için `Cancel`). Zarf bırakılırken iptal edildiyse gelen `seq` hemen `Cancel` edilir.
 **Hata işleme** (`handle_server_error`):
 | Kod | Davranış |
 |---|---|
-| `UnknownMailbox` | O (sunucu, kutu) 60 sn "bilinmeyen" işaretlenir; zarf hemen gossipsub'a verilir |
+| `UnknownMailbox` | O (sunucu, kutu) "bilinmeyen" işaretlenir ve **duraklama ardışık her yanıtta ikiye katlanır**: 60 sn (`SERVER_UNKNOWN_MAILBOX_TTL_MS`) << `min(seri, 6)`, en çok 60 dk (`SERVER_UNKNOWN_MAILBOX_MAX_TTL_MS`); seri `server_unknown_streak[(sunucu, kutu)]`'da tutulur, **aynı anda uçuşan** yatırmalar duraklama bitmeden tek basamak sayar, o kutuya başarılı `Deposited` gelince seri silinir (fb5fecd; öncesinde sunucuya hiç kaydolmamış bir cihaz için her 2 dk'lık yeniden denemede onaysız paketler Tor üzerinden tekrar yatırılıp LTE radyosunu geceleri %60-75 açık tutuyordu). Zarf her seferinde hemen gossipsub'a verilir. Hesap silme/wipe (`contacts.rs wipe_all_local_state`) seriyi de temizler |
 | `NotEnrolled` | `enrolled=false`, yeniden `Hello`; `Rebind` sırasındaysa `enrollment_id` silinir ("yeni davet kodu ekleyin") |
 | `Revoked` | `enrollment_id` silinir, "operatör iptal etti" |
-| `QuotaExceeded` (Deposit) | O kutuya 5 dk bırakma durdurulur, gossipsub'a verilir |
+| `QuotaExceeded` (Deposit) | O kutuya 5 dk (`SERVER_DEPOSIT_BACKOFF_MS`) bırakma durdurulur (aynı `server_unknown_mailboxes` haritası, katlama yok), gossipsub'a verilir |
 | `RateLimited`, `Internal` | Geçici sayılır; bırakmada 5 dk geri çekilme (`SERVER_DEPOSIT_BACKOFF_MS`) |
 | `BadInvite` (Enroll) | Jeton silinir |
 | `BadHash` (BlobFinish) | Kalıcı: depolanan baytlar `enc_sha256` ile uyuşmuyor, aynı Finish tekrar işe yaramaz |
@@ -337,7 +397,7 @@ Kaynaklar: gossipsub mesajı, doğrudan envelope isteği, sunucu `Push`/`Batch`.
 Zaman aşımı/bağlantı hatası (`handle_server_failure`): bırakma geri çekilmesi + gossipsub'a düşme. **Her başarısız bırakma gossipsub'a düşer**; sunucu hiçbir zaman tek teslim yolu değildir.
 
 ### 13.5 Sunucu tarafı gizlilik ve mühür
-- Oturum kutusu `mb_<hex16>` (`server_seal::session_mailbox`) cihaz çifti başına **sabit**tir: iki cihazın uzun ömürlü KEM X25519 anahtarlarıyla statik DH + sıralı fingerprint'lerden HKDF (`p2pmsg-v0.6-session-mailbox`); rotasyonda değişmez, root_key/topic'ten türemez (yalnız X25519, statik ML-KEM yok). Mühür anahtarı yine ratchet root'tan gelir (alıcı mevcut + önceki root'u dener); ilk temas kutusu = HKDF(sır, `p2pmsg-v0.5-first-contact-mailbox:`‖fp) — sır eşleşme nonce'u, link nonce'u ya da **grup başına** ilk temas sırrı olabilir (bkz. §11); arama röle kutusu = HKDF(pair_key, `p2pmsg-v0.5-call-relay-mailbox`).
+- Oturum kutusu cihaz çifti başına **sabit**tir (`server_client.rs session_mailbox`): iki cihazın uzun ömürlü KEM X25519 anahtarlarıyla statik DH + sıralı fingerprint'lerden HKDF (`server_seal::session_mailbox_secret`, `p2pmsg-v0.6-session-mailbox:`); rotasyonda değişmez, root_key/topic'ten türemez (yalnız X25519, statik ML-KEM yok). Kutu kimliği bu sırdan türeyen **kanıt anahtarının karmasıdır**: `mk_<hex16>` (`server_client.rs key_bound_mailbox_id` → `server_proto::key_bound_mailbox_id(mailbox_key_hash(...))`); arama röle kutusu da aynı biçimde `pair_key`'den. Sunucu `mk_` kutusu için başka anahtarı kabul etmez (§13.3): kimliği bilmek okuyucu olmaya yetmez. Mühür anahtarı yine ratchet root'tan gelir (alıcı mevcut + önceki root'u dener); ilk temas kutusu = HKDF(sır, `p2pmsg-v0.5-first-contact-mailbox:`‖fp) — sır eşleşme nonce'u, link nonce'u ya da **grup başına** ilk temas sırrı olabilir (bkz. §11); ilk temas kutusu `mb_<hex16>` biçimindedir (anahtara bağlı değil); onun okuyucu kanıt anahtarı okuyan cihazın kendi Ed25519 imza anahtarından türer (`server_client.rs own_server_mailboxes`, `mailbox_proof_seeds`).
 - `seal_envelope`: ChaCha20-Poly1305(HKDF(root_key, `p2pmsg-v0.1-server-seal`), AAD = mailbox‖0‖sender_fp, CBOR(zarf)). Sunucu AAD'yi bilir ama anahtarı bilmez.
 - `seal_first_contact`: ortak sır (`p2pmsg-v0.5-first-contact-seal`) + varsa alıcının KEM anahtarı; açma `open_first_contact(secret, mailbox, kem_sk_x25519, kem_sk_mlkem, sealed)`.
 - Sunucu veritabanında kimlik/fingerprint/içerik yoktur; `enrollments` yalnızca `enroll_pk`, `enroll_pk_pq`, `peer_id`, durum, sayaçlar tutar.
@@ -346,7 +406,8 @@ Zaman aşımı/bağlantı hatası (`handle_server_failure`): bırakma geri çeki
 **Arşiv — sunucu:** `archive_put` kayıtları `(bucket, record_id)` anahtarıyla yazar; çakışmada **yalnız `rev` daha büyükse** üzerine yazar (`WHERE excluded.rev > archive.rev`), yani eski revizyon yeniyi ezemez. `record_id` ≤128 bayt, bucket `is_safe_id`, kayıt ≤900 KiB, `max_archive_bytes` (1 GiB) ve toplam disk bütçesi kontrol edilir; kayıt başına `owner` bayt sayacı yeniden hesaplanır.
 **Arşiv — istemci:** kayıtlar **yalnız `store_history` açık bir sunucu varsa ve kök arşiv anahtarı mevcutsa** `queue_archive_record` ile kuyruğa girer (düz metin yerelde `seal_local_blob` ile mühürlü bekler); `ArchivePut` partisi 50 kayıtta (`SERVER_ARCHIVE_BATCH`) ya da mühürlü bayt `MAX_DEPOSIT_BYTES/2`'yi aşınca kapanır. Geri yükleme: `ArchiveProbe(buckets)` → dolu kovalar (`before_ms` verilmişse en yeni önce) → `ArchiveFetch{bucket, before_ms}` sayfalama (`more` ise `before_ms` = sayfadaki en eski `sent_at_ms`) → `merge_server_archive`: kaydı `open_archive_record(ark, conv_key, record_id, rev, bucket, sent_at_ms, sealed)` ile aç (AAD bu alanları bağlar); `note_archive_rev` ile **görülenden eski `rev` reddedilir** (`server_archive_revs` tablosu); yerelde aynı `record_id`'li mesaj zaten varsa **atlanır** (yani sunucu arşivi mevcut mesajı değiştirmez, yalnız eksik olanı doldurur); grup değilse `resolve_active_device_for_identity(conv_key)` ile sohbete yazılır. Sonuç `history_backfilled{count, source:"server"}` olayı. Çözülemeyen/ayrıştırılamayan kayıt atlanır.
 **Blob — istemci** (`queue_blob_upload` / `server_flush_blobs`): yalnız `route_messages` açık bir sunucu varsa kuyruğa alınır; kuyrukta **aynı anda tek blob** (baştaki) yüklenir; durum `server_blob_uploads` tablosunda kalıcıdır. Parçalar diskte şifreli dosyadan `chunk_size` ile okunur, `window` kadarı havada tutulur (başlangıç 4, min 2, max 40; RTT tabanın 2 katını aşmadıkça ve 90 sn zaman aşımının %80'i altındaysa büyür, zaman aşımında yarıya iner). Tüm parçalar bitince şifreli dosyanın SHA-256'sı ile `BlobFinish`. Sunucu değişirse yükleme baştan başlar.
-**Blob — sunucu:** `BlobPut` parçayı dosyada `offset = chunk_index × (chunk_size + 16)` konumuna yazar (rastgele erişim; parça ≤768 KiB; sahip kontrolü; hem tek blob ofseti hem kayıt başına `bytes_blob` `max_blob_bytes` 4 GiB'ı aşamaz; aynı parça tekrar gelirse `Ok`, hash sürerken `RateLimited`); `BlobFinish`: sahip eşleşmeli, alınan parça sayısı `total_chunks`'tan az olmamalı, aynı anda en çok `MAX_HASH_JOBS` = 4 hash işi (aksi `RateLimited`); hash arka planda akışlı hesaplanır, yanıt hash bitince gider. **Uyuşmazsa dosya silinir ve `Internal` döner.** Tamamlanan blob `filexfer` protokolüyle servis edilir (`serve_chunk`, parça hız sınırı 600/dk, relay/cold bütçeleri ayrı); `blob_ttl` (30 gün) sonra GC.
+**Blob kimliği ve grup etiketi:** yükleme sırrı 24 bayttır = 8 bayt yazar etiketi + 16 bayt; `FileOffer`'a yalnız türetilmiş blob kimliği girer. Grup dosyasında etiket artık **dosya başına** farklıdır: `util.rs group_msg_tag(group_id, yazar_identity, rest)` = SHA-256(`typeon-group-msg-id-v2` ‖ grup ‖ 0 ‖ yazar ‖ 0 ‖ rest)'in ilk 8 baytı; dosyada `rest` = kimliğin hash kısmı (`blob_id_hash_hex`), metinde `-<uuid>`. Böylece sunucu bir yazarın iki dosyasını etiketten ilişkilendiremez (I-42). Alıcı `util.rs group_msg_id_bound` ile kimliğin o yazara ait olduğunu yeniden hesaplar. Sonuç: sunucu protokolü 6 → 7 (**protokol kırılması**).
+**Blob — sunucu:** `BlobPut` parçayı dosyada `offset = chunk_index × (chunk_size + 16)` konumuna yazar (rastgele erişim; parça ≤768 KiB; sahip kontrolü; hem tek blob ofseti hem kayıt başına `bytes_blob` `max_blob_bytes` 4 GiB'ı aşamaz; aynı parça tekrar gelirse `Ok`, hash sürerken `RateLimited`); `BlobFinish`: sahip eşleşmeli, alınan parça sayısı `total_chunks`'tan az olmamalı (aksi `BlobIncomplete`: kalıcı değil, istemci 0. parçadan yeniden yükler), aynı anda en çok `MAX_HASH_JOBS` = 4 hash işi (aksi `RateLimited`); hash arka planda akışlı hesaplanır, yanıt hash bitince gider. **Uyuşmazsa dosya silinir ve `Internal` döner.** Tamamlanan blob `filexfer` protokolüyle servis edilir (`serve_chunk`, parça hız sınırı 600/dk, relay/cold bütçeleri ayrı); `blob_ttl` (30 gün) sonra GC.
 
 ### 13.7 Veri dizini kilidi, DB şifreleme, arşiv ömrü
 - **Süreç kilidi:** veri dizininde `server.lock` dosyası `flock` ile kilitlenir (`ServerCore` ömrü boyunca tutulur, `_dir_lock`); ikinci bir sunucu aynı dizini açamaz ("bu veri dizini başka bir sunucu işlemi tarafından kullanılıyor").
@@ -360,9 +421,9 @@ Zaman aşımı/bağlantı hatası (`handle_server_failure`): bırakma geri çeki
 
 - **DB:** `p2p_messenger.db`, SQLCipher (`rusqlite` bundled-sqlcipher-vendored-openssl). `PRAGMA key = x'…'` (HKDF'den), `WAL`, `synchronous=NORMAL`, `secure_delete=ON`. Eski düz DB ilk açılışta şifrelenir (tek seferlik göç).
 - **Anahtar zinciri (Android):** `KeystoreCrypto` — Android Keystore'da (StrongBox → TEE) AES-256 anahtarı; Rust'ta üretilen gizli anahtar paketi (`SecretKeyBundle`) ve `storage_key` bu anahtarla sarılıp dosyaya yazılır (`IdentityManager`, `ArchiveKeyManager`). **AppLock parolası DB/anahtar türetmede KULLANILMAZ**; yalnızca UI kapısıdır (PBKDF2 hash saklanır, süreç ölünce kilit tekrar sorulur). Yani cihaz root/bellek erişimi ya da Keystore saldırısı AppLock'u aşar; bu bilinen sınırdır.
-- **Linux:** gizli anahtarlar KDE Wallet (+ isteğe bağlı parola) ile mühürlenir (`keyring.rs`, `secrets.rs`).
+- **Linux:** kasa anahtarı Secret Service'te (GNOME Keyring / KDE Wallet, `keyring.rs`; kasa `secrets.rs`, isteğe bağlı parola). **Windows:** kasa anahtarı DPAPI ile mühürlü dosyada (`keyring_win.rs`, `vault-key.dpapi`). İkisi de yalnız ikincil cihaz kasasıdır (§1.2).
 - **Satır şifreleme:** geçmiş/atlanmış anahtar/ratchet durumu/dosya anahtarı ayrıca `seal_with` (rastgele nonce ChaCha20-Poly1305) ile mühürlenir (`ratchet_states.sealed` vb.).
-- **Tablolar:** bkz. HANDOFF §3.8. Yeni sütun `ALTER TABLE` ile eklenir.
+- **Tablolar:** bkz. HANDOFF §3.8. Yeni sütun `ALTER TABLE` ile eklenir (`db.rs init_db` içindeki `migrate`): `duplicate column name` dışındaki **her `ALTER TABLE` hatası `init_db`'yi başarısız kılar** (eksik sütun sonradan INSERT'leri sessizce bozmasın; 6a603c7); veri yüzünden başarısız olabilen `CREATE INDEX`/dolgu adımları en-iyi-çaba kalır. Sunucu DB'si aynı sözleşmeyi uygular (`typeon-server/src/store.rs init_schema`, `add_column`; `user_version` yalnız başarıdan sonra damgalanır, bir sonraki açılış yeniden dener).
 - **Kurtarma dosyası:** `RecoveryFile{kdf:"argon2id", m/t/p, salt, nonce, ciphertext}`; parola ≥12 karakter; içerik: kimlik, tüm cihaz gizli anahtarları, kök arşiv anahtarı, veri (sınır 64 MiB; aşarsa en yeni 6500 mesaj). İçe aktarımda Argon2 bellek maliyeti ≤256 MiB sınırı.
 - **Yedekleme** kapalı (`allowBackup=false`); `FLAG_SECURE` **istemcide yok** (sunucu uygulamasında release derlemede var).
 
@@ -431,30 +492,45 @@ Kotlin kodlar (Opus ses; video H.264/HEVC — bayrak biti), çekirdek `media_sen
 | `RATCHET_ROTATION_MS` | 30 dk | ratchet.rs |
 | `MAX_SKIPPED_KEYS` / `MAX_SKIP_AHEAD` | 1000 / 2.000 | ratchet.rs |
 | `MAX_ACTIVE_DEVICES` | 5 | identity.rs |
-| `ACK_RETRY_INITIAL_MS` / `ACK_RETRY_MAX_MS` | 15 sn / 120 sn | lib.rs 2953 |
-| `ACK_SUSPECT_MS` | 1,5 sn | lib.rs 2480 |
-| `MAX_UNCONFIRMED_AGE_MS` | 25 dk | lib.rs 2980 |
-| `TEXT_RETRY_GIVE_UP_MS` | 7 gün | lib.rs 3003 |
-| `HANDSHAKE_MAX_SKEW_MS` / `HANDSHAKE_COLLISION_WINDOW_MS` | 10 dk / 90 sn | lib.rs 2905, 2913 |
-| `HANDSHAKE_REDO_MIN_INTERVAL_MS` (IdentityExchange zaman kovası) | 10 dk | lib.rs 2530 |
-| `UNDECRYPTABLE_BEFORE_REHANDSHAKE` / pencere / min aralık | 3 / 2 dk / 2 dk | lib.rs 2915-2917 |
-| `PREKEY_ROTATE_MS` | 7 gün | lib.rs 1897 |
-| `INBOUND_DEDUP_WINDOW_MS` / `_MAX_ENTRIES` | 10 dk / 8192 | lib.rs 2388 |
-| `RATE_LIMIT_WINDOW_MS` / `_MAX_PER_WINDOW` / `_MAX_ESTABLISHED` | 10 sn / 60 / 600 | lib.rs 2674-2693 |
-| `RECONNECT_SWEEP_INTERVAL_MS` | 15 sn | lib.rs 2730 |
-| `KEEPALIVE_*` | 2 / 20 / 60 sn | lib.rs 2426-2436 |
-| `MAX_ENVELOPE_BYTES` | 1 MiB | lib.rs 2515 |
-| `MAX_DEPOSIT_BYTES` | 900 KiB | server_proto.rs 71 |
-| `SERVER_ONLY_GRACE_MS` | 30 sn | server_client.rs 78 |
+| `ACK_RETRY_INITIAL_MS` / `ACK_RETRY_MAX_MS` | 15 sn / 120 sn | tuning.rs |
+| `ACK_SUSPECT_MS` | 1,5 sn | tuning.rs |
+| `MAX_UNCONFIRMED_AGE_MS` | 25 dk (= `RATCHET_ROTATION_MS` − 5 dk) | tuning.rs |
+| `TEXT_RETRY_GIVE_UP_MS` | 7 gün | tuning.rs |
+| `HANDSHAKE_MAX_SKEW_MS` / `HANDSHAKE_MAX_AGE_MS` / `HANDSHAKE_COLLISION_WINDOW_MS` | 10 dk / 7 gün (= `TEXT_RETRY_GIVE_UP_MS`) / 90 sn | tuning.rs |
+| `HANDSHAKE_REDO_MIN_INTERVAL_MS` (IdentityExchange zaman kovası) | 10 dk | tuning.rs |
+| `UNDECRYPTABLE_BEFORE_REHANDSHAKE` / `_WINDOW_MS` / `_REDO_MIN_INTERVAL_MS` | 3 / 2 dk / 2 dk | tuning.rs |
+| `PREKEY_ROTATE_MS` | 7 gün | types.rs |
+| `INBOUND_DEDUP_WINDOW_MS` / `_MAX_ENTRIES` | 10 dk / 8192 | tuning.rs |
+| `RATE_LIMIT_WINDOW_MS` / `_MAX_PER_WINDOW` / `_MAX_ESTABLISHED` | 10 sn / 60 / 600 | tuning.rs |
+| `RECONNECT_SWEEP_INTERVAL_MS` | 15 sn | tuning.rs |
+| `KEEPALIVE_FAST_INTERVAL_MS` / `_IDLE_` / `_POWER_SAVE_INTERVAL_MS` | 2 / 20 / 60 sn | tuning.rs |
+| `MAX_ENVELOPE_BYTES` | 1 MiB | tuning.rs |
+| `SERVER_PROTOCOL_VERSION` | 7 | typeon-crypto/src/server_proto.rs |
+| `MAX_DEPOSIT_BYTES` | 900 KiB | server_proto.rs |
+| `SERVER_ONLY_GRACE_MS` | 30 sn | server_client.rs |
+| `SERVER_DEPOSIT_BACKOFF_MS` | 5 dk | server_client.rs |
+| `SERVER_UNKNOWN_MAILBOX_TTL_MS` / `_MAX_TTL_MS` | 60 sn (her ardışık `UnknownMailbox`'ta ikiye katlanır, 6 basamak) / 60 dk | server_client.rs |
+| `SERVER_SWEEP_INTERVAL_MS` / `SERVER_FETCH_SWEEP_INTERVAL_MS` | 15 sn / 5 dk | server_client.rs |
+| `SERVER_HOLD_GRACE_MS` / `SERVER_HOLD_REFETCH_MS` | 5 dk / 45 sn | server_client.rs |
+| `SERVER_ARCHIVE_BATCH` | 50 kayıt | server_client.rs |
+| `SIBLING_BACKFILL_INTERVAL_MS` / `_SINCE_MARGIN_MS` | 30 dk / 10 dk | tuning.rs |
+| `SIBLING_BACKFILL_PER_CONVERSATION` / `_MAX_ENTRIES` | 30 / 300 | tuning.rs |
+| `HISTORY_SYNC_MAX_TEXT_BYTES` / `HISTORY_SYNC_MAX_MESSAGES` | 512 KiB / 200 | tuning.rs |
+| `HISTORY_FETCH_MAX_PAGES` | 20 | tuning.rs |
 | `mailbox_ttl_ms` | 14 gün | server_proto.rs ServerLimits |
-| `MAX_ATTACHMENT_SIZE` | 4 GiB | lib.rs 150 |
-| `MAX_CONTACTS` | 500 | lib.rs 2656 |
-| `PENDING_LINK_RETRY_HORIZON_MS` / `LINK_REQUEST_WINDOW_MS` | 1 saat / 24 saat | lib.rs 2795, 3012 |
-| `PAIRING_WINDOW_MS` / `PAIRING_NONCE_REUSE_MS` | 30 dk / 5 dk | lib.rs 3061, 3064 |
-| `RATE_LIMIT_MAX_UNKNOWN_TOTAL` (tanınmayan eşler, toplam) | 300 / 10 sn | lib.rs 2710 |
-| `MAX_ARCHIVE_PUT_RECORDS` | 256 | server_proto.rs 82 |
+| `MAX_ATTACHMENT_SIZE` | 4 GiB | lib.rs |
+| `MAX_CONTACTS` | 500 | tuning.rs |
+| `PENDING_LINK_RETRY_HORIZON_MS` / `LINK_REQUEST_WINDOW_MS` | 1 saat / 1 saat (ikincisi birincisine eşitlenmiş) | tuning.rs |
+| `PAIRING_WINDOW_MS` / `PAIRING_NONCE_REUSE_MS` | 30 dk / 5 dk | tuning.rs |
+| `RATE_LIMIT_MAX_UNKNOWN_TOTAL` (tanınmayan eşler, toplam) | 300 / 10 sn | tuning.rs |
+| `MAX_ARCHIVE_PUT_RECORDS` | 256 | server_proto.rs |
+| `MAX_FETCH_BATCH_ITEMS` / `MAX_FETCH_BATCH_BYTES` | 64 / 512 KiB | server_proto.rs |
+| `MAX_BLOB_CHUNK_BYTES` / `BLOB_UPLOAD_SECRET_LEN` / `BLOB_TAG_LEN` | 768 KiB / 24 / 8 | server_proto.rs |
+| `MAX_READERS_PER_KEY` / `READER_EVICT_IDLE_MS` | 2 / 7 gün | typeon-server/src/store.rs |
+| `SCHEMA_VERSION` (sunucu DB) | 4 | typeon-server/src/store.rs |
+| `NOTIFY_RESEND_MS` / `CHUNKS_PER_MINUTE` / `MAX_HASH_JOBS` | 20 sn / 600 / 4 | typeon-server/src/lib.rs |
 | `ARCHIVE_TTL_MS` (sunucu arşiv satırı) | 13 ay (13×30 gün) | typeon-server/src/store.rs |
-| `MAX_INVITE_PARTICIPANTS` | 1024 | call.rs |
+| `MAX_INVITE_PARTICIPANTS` / `RING_TIMEOUT_MS` / `MEDIA_LOST_MS` / `INVITE_MAX_AGE_MS` | 1024 / 45 sn / 30 sn / 60 sn | call.rs |
 | AppLock PBKDF2 | 300.000 it. | AppLock.kt |
 
 Not: Bu sabitler zamanla değişir. Bir sayıya güvenmeden önce `grep -n "SABIT_ADI"` ile doğrula.
@@ -462,6 +538,8 @@ Not: Bu sabitler zamanla değişir. Bir sayıya güvenmeden önce `grep -n "SABI
 ---
 
 ## 19. 2026-10-20/21 düzeltme turu (protokol ve davranış değişiklikleri)
+
+_Tarihsel bölüm: buradaki `SERVER_PROTOCOL_VERSION` v4 ve kod konumları o günün durumudur; güncel sürüm 7 (§13, §20) ve konumlar §1.1'deki modüllerdedir._
 
 Kaynak: `reviews/archive/MERGED_REVIEWS.md`, raporlar `reviews/fixpass-2026-10-20/report_*.md`. Derlenmedi/cihazda denenmedi. Eski sürümlerle uyum aranmaz.
 
@@ -491,3 +569,38 @@ Kaynak: `reviews/archive/MERGED_REVIEWS.md`, raporlar `reviews/fixpass-2026-10-2
 - **Release APK Gradle tarafından imzalanmaz** (`signingConfig` yok): imzayı yalnız `sign-release.sh` yapar (özel anahtar, v3 soy zinciri; en yeni build-tools; iki uygulama için de aynı betik).
 
 **Sahip kuralı (D-21):** istemcide `FLAG_SECURE` yoktur ve eklenmez; sunucu uygulaması (`ServerActivity`) release (debug olmayan) derlemelerde kullanır.
+
+---
+
+## 20. 2026-11-05..11 değişiklikleri (ef2f806 sonrası, HEAD e916a13)
+
+Kaynak: `git log ef2f806..HEAD`; inceleme kararları `reviews/glm5-2026-11-05/`, `reviews/qwen-2026-11-06/`. Sürümler: istemci 6.0.7 (kod 51), sunucu uygulaması 6.0.1 (kod 44), Linux/Windows 6.1.4. Eski sürümlerle uyum aranmaz.
+
+**PROTOKOL / KABLO KIRILMALARI**
+- **Sunucu protokolü 6 → 7** (6c9d437): blob kimliği artık yalnız etiketten sonraki yükleme-sırrı baytlarını hash'ler (`blob_id_hash_hex`, `typeon-blob-id-v3`); grup dosyasında yazar etiketi **dosya başına** farklıdır (`group_msg_tag(grup, yazar, rest)`, `typeon-group-msg-id-v2`; I-42). Grup mesaj kimliği `<etiket><-uuid>`; alıcı `group_msg_id_bound` ile yeniden hesaplar. Eski sürümle blob/grup kimliği uyuşmaz (§13.6).
+- **Kutu başına `seq`** (6a603c7): sunucu `mail.seq` artık küresel AUTOINCREMENT değil, `mail_seq` tablosunda kutu başına sayaç; sunucu DB `SCHEMA_VERSION` 3 → 4, eski satırlar için göç (`mail_seq_base`). Sunucu eski sürümde açılmış bir DB'yi göç ettirir; istemci imleçleri geçerli kalır (§13.3). `MailItem.seq` alan semantiği değişti.
+- **Katı CBOR** (6a603c7): `MessageContent`, `SignedHeader`, `RatchetPublicKeys` sondaki baytları reddeder (§6).
+- `SiblingHistoryEntry` iki yeni alan: `file`, `reactions` (§10). İkisi de `serde(default)` (boş ise `skip_serializing_if` ile yazılmaz): eski göndericiden gelen girdide boş okunur.
+- Sürüm yükselmesi gerekir; sahip kuralı: uyumluluk kodu yazılmaz.
+
+**ÇOKLU CİHAZ (kardeş geçmişi, §10)**
+- dcd2cb6 / 670ab45 / 926d724: bağlı cihazın geçmişi artık ekleri (ses, etiket, dosya), tüm tepkileri ve kişi avatarlarını taşır; bütçe yetmezse önizleme önce atılır; "geçmişi getir" basışı, önceki basışın imleci altına bıraktığı satırların ek/tepkilerini de getirir.
+- 1a180c3 (Linux): bekleyen bağlama sayfasında onaylı "sil ve çık" ile kurulum ekranına dönülebilir.
+
+**SUNUCU / AĞ**
+- fb5fecd: `UnknownMailbox` duraklaması ikiye katlanır (60 sn → en çok 60 dk), başarılı yatırma seriyi sıfırlar; sunucuya hiç kayıtlı olmayan bir bağlı cihaz yüzünden onaysız paketlerin 2 dk'da bir Tor'dan yeniden yatırılması engellendi (§13.4).
+- 6a603c7 (sunucu): `Rebind` `Revoked`'u yalnız imza doğrulandıktan sonra bildirir (§13.2). 6c9d437: `init_schema` `duplicate column name` dışındaki `ALTER` hatalarında başarısız olur ve `user_version` damgalamaz; okuyucu sınırı **anahtar başına** 2 (§13.3).
+- 6a603c7 (çekirdek): aynı ilke `db.rs init_db`'de (§14); `unknown_group_has_room` DB yoksa/sorgu hata verirse **kapalı** (yer yok) döner (`group_ops.rs`); sticker kare boyutu u64 + `saturating_mul`; 6c9d437: indirme-devam adayları `length(chunk_hashes) > 0` olan satırlarla sınırlı (parça özetsiz eski teklifler `download_file` tarafından her seferinde reddediliyordu; I-41).
+
+**ÇEKİRDEK YAPISI**
+- 447e83e: `lib.rs` (~29.000 satır) 24 konu modülüne bölündü (§1.1); `P2PCore` struct ve modül listesi `lib.rs`'te; alt modüller `use super::*`; özel öğeler `pub(crate)`; `lib.rs` artık ~930 satır. Kaynak tarayan testler `crate::CORE_SRC` okur. Yeni çekirdek dosyası `CORE_SRC`'ye eklenmeli. Windows için `mono_ms` `GetTickCount64` kullanır, `rust/build.rs` Windows hedefinde statik `lcms2` bağlar.
+
+**MASAÜSTÜ (Linux + Windows, §1.2)**
+- e916a13: aynı `Linux/` crate'inden Windows istemcisi (`x86_64-pc-windows-gnullvm`; DPAPI kasa anahtarı, `win.rs` tepsi/bildirim/otomatik başlatma/yazı tipi, WASAPI/Media Foundation/D3D11 arama öğeleri). **Masaüstleri yalnız bağlama (link-only) ikincil cihazdır**: hesap oluşturma ve kurtarma-dosyası geri yükleme kaldırıldı; karşılama sayfası yalnız "Link to my phone" sunar. `AGENTS.md` kurallar ve derleme tariflerini taşır.
+
+**ANDROID ARAYÜZ (çekirdek dışı)**
+- 8527802: özel yazı tipi (`util/FontOverride.kt`): sistem yazı tipi takma adları ve `p2p-imported-font` adı içe aktarılan yazı tipine eşlenir, `sDefaultTypeface` değiştirilir, her `Activity` penceresinde her yerleşim geçişinde TextView'lara yeniden uygulanır.
+- fb5fecd: etiket (`sendSticker`/`sendGroupSticker`), dosya, fotoğraf ve sesli mesaj, girişteki ilk alıntıyı `reply` alanıyla yanıtlar (JNI `sendSticker`/`sendGroupSticker` yeni `reply_to_*` parametreleri; `jni_exports.rs sticker_reply_to`, `media_unlocked.rs send_sticker_unlocked`; Kotlin `util/Quote.kt`); alıntı, alıntılanan mesajın kendi sözlerini gösterir (içindeki alıntıyı değil). Sohbet listesi alt boşluğu yalnız yazıyor göstergesine yer bırakır.
+- 6a603c7: ayarlar/kişiler JNI çağrıları ana iş parçacığı dışında; avatar ve duvar kâğıdı içe aktarımı boyut sınırlı; medya sihirli baytla (magic) tanınır: yanlış etiketli MP4/MOV/HEIC/TIFF/MKV/AVI remux edilir ya da "metadata ile gönder?" onayı ister; 6c9d437: m4a ses dosyasından metadata atılır, ayarlarda uygulama sürümü, sunucu kodu yapıştırma kapısı ekleme uyarısını gösterir.
+
+**DOĞRULANMADI:** bu turdaki değişikliklerin hepsi kaynak okumayla doğrulandı; derleme/cihaz sonuçları commit mesajlarından alındı (6c9d437: host testleri crypto 37, server 51, core 124; Linux check; iki debug APK derlendi — bu belgeyi yazarken yeniden çalıştırılmadı). Windows'ta gerçek cihazda bağlama sorunu teşhis edilmemiştir (`Linux/packaging/windows/TEST-NOTES.md`).

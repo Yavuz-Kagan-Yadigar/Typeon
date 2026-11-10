@@ -27,12 +27,12 @@ Yayın (release) kuralı: önce sürüm artır (3 yer: `p2p_messenger_android/ap
 
 Sunucusuz çalışabilen, uçtan uca şifreli mesajlaşma uygulaması. Klasik + post-kuantum şifreleme birlikte kullanılır.
 
-Üç ürün var:
+Dört ürün var:
 - **Android istemci** (Kotlin arayüz).
-- **Linux istemci** (Rust + GTK4 arayüz).
+- **Linux istemci** (Rust + GTK4 arayüz). **Windows istemci** de aynı `Linux/` crate'inden derlenir (`#[cfg(windows)]`). İkisi de yalnız **ikincil cihazdır**: telefona QR ile bağlanır, hesap oluşturmaz.
 - **Sunucu** (isteğe bağlı): çevrimdışı kişi için mesajı saklar. Linux programı veya Android uygulaması olarak çalışır.
 
-**Tüm asıl mantık tek bir Rust çekirdeğinde.** Android bu çekirdeği JNI ile çağırır. Linux aynı çekirdeği doğrudan (rlib) çağırır. Kotlin/GTK sadece arayüzdür.
+**Tüm asıl mantık tek bir Rust çekirdeğinde.** Android bu çekirdeği JNI ile çağırır. Linux ve Windows aynı çekirdeği doğrudan (rlib) çağırır. Kotlin/GTK sadece arayüzdür.
 
 Özellikler: 1:1 mesaj, grup, düzenleme, silme, tepki, okundu, dosya/medya, sesli/görüntülü arama, beyaz tahta, çoklu cihaz, uygulama kilidi (AppLock), kurtarma dosyası.
 
@@ -47,8 +47,9 @@ Sunucusuz çalışabilen, uçtan uca şifreli mesajlaşma uygulaması. Klasik + 
 | `typeon-crypto/src/packet.rs` | `MessagePacket`, `MessageContent` (mesaj türleri), imza girdisi |
 | `typeon-crypto/src/server_proto.rs` | Sunucu mesaj türleri + varsayılan limitler (`mailbox_ttl_ms` = 14 gün) |
 | `typeon-crypto/src/server_seal.rs` | Sunucuya giden zarfı ikinci kez mühürleme |
-| `p2p_messenger_android/app/src/main/cpp/rust/src/lib.rs` | **Ana çekirdek, ~24.750 satır.** `P2PCore` yapısı ~satır 3250. Tüm iş mantığı + en sonda JNI fonksiyonları (`Java_com_p2p_messenger_P2PLib_*`). Testler (`mod ..._tests`) aynı dosyada |
-| aynı klasör `api.rs` | JNI'siz saf Rust arayüzü. Linux bunu çağırır |
+| `p2p_messenger_android/app/src/main/cpp/rust/src/lib.rs` | Çekirdeğin kökü (~930 satır): `P2PCore` yapısı, global `RUNTIME`/`CORE`, modül listesi, `CORE_SRC`. Eskiden 29.000 satırlık tek dosyaydı; artık konu modüllerine bölünmüş (aşağıdaki satır) |
+| aynı klasör, çekirdek konu modülleri (hepsi `impl P2PCore` / `use super::*`) | `core_lock.rs` (çekirdek kilidi), `media_unlocked.rs` (kilitsiz dosya/etiket işi), `wire.rs` (libp2p kablo tipleri), `util.rs` (yardımcılar, imza girdileri, `mono_ms`), `types.rs` (tipler), `tuning.rs` (sabitler), `db.rs` (`init_db`, şema, SQLCipher), `pairing.rs` (QR/eşleşme, `IdentityExchange`), `devices.rs` (cihaz fan-out/yetki), `sibling_sync.rs` (kardeş cihaz: eşitleme, okundu, geçmiş), `contacts.rs` (kişiler, engel, silme/wipe), `session.rs` (handshake, ratchet rotasyonu), `send.rs` (gönderim, tepki, düzenle/sil, Ack), `receive.rs` (`receive_message`), `archive.rs` (mesaj arşivi, geçmiş istekleri), `persist.rs` (mühürlü blob, ratchet kalıcılığı), `group_ops.rs` (grup işlemleri), `storage.rs` (etiketler, depolama), `network.rs` (`start_network`, yeniden bağlanma, yeniden deneme), `file_transfer.rs` (dosya aktarımı), `poll.rs` (`poll_events`, `process_incoming_envelope`), `recovery.rs` (kurtarma dosyası), `jni_exports.rs` (JNI fonksiyonları `Java_com_p2p_messenger_P2PLib_*`), `core_tests.rs` (testler). Ayrıntı: TECHNICAL_HANDOFF §1.1 |
+| aynı klasör `api.rs` | JNI'siz saf Rust arayüzü. Linux/Windows bunu çağırır |
 | aynı klasör `server_client.rs` | İstemcinin sunucu tarafı: kayıt, bırakma, çekme, arşiv |
 | aynı klasör `call.rs` | Arama medya taşıma (şifreli paketler, libp2p stream) |
 | aynı klasör `whiteboard.rs` | Beyaz tahta |
@@ -58,13 +59,14 @@ Sunucusuz çalışabilen, uçtan uca şifreli mesajlaşma uygulaması. Klasik + 
 | `p2p_messenger_android/app/src/main/java/com/p2p/messenger/` | Android Kotlin kodu |
 | ↳ `P2PLib.kt` | JNI `external` fonksiyon tanımları (Rust'taki adlarla birebir) |
 | ↳ `service/P2PService.kt` | Arka plan servisi. Çekirdekten JSON olay alır (`poll_events`), bildirim gösterir |
-| ↳ `ui/` | Ekranlar (18 dosya; başlıcaları): `ChatActivity`, `GroupChatActivity`, `CallActivity`, `AppLockActivity`, `MediaViewerActivity`, `LinkDeviceActivity`, `QrScanActivity` |
-| ↳ `util/` | Yardımcılar (33 dosya; başlıcaları): `AppLock`, `OutgoingMedia` (medya temizleme), `KeystoreCrypto`, `IdentityManager`, `NotificationHelper` |
+| ↳ `ui/` | Ekranlar (20 dosya; başlıcaları): `ChatActivity`, `GroupChatActivity`, `CallActivity`, `AppLockActivity`, `MediaViewerActivity`, `LinkDeviceActivity`, `QrScanActivity` |
+| ↳ `util/` | Yardımcılar (42 dosya; başlıcaları): `AppLock`, `OutgoingMedia` (medya temizleme), `KeystoreCrypto`, `IdentityManager`, `NotificationHelper`, `FontOverride` (özel yazı tipi), `Quote` (alıntı) |
 | `trafficvis/` | Trafik görselleştirme simülatörü (`traffic_visualization.html`, `selftest.js`) |
 | `p2p_messenger_android_server/` | Sunucunun Android uygulaması. Ekran: `ServerActivity` |
-| `typeon-server/src/` | Sunucu mantığı: `lib.rs` (protokol), `store.rs` (SQLite), `jni.rs`, `bin/typeon-server.rs` (CLI) |
-| `Linux/src/` | Linux istemci. `core.rs` çekirdek köprüsü, `ui/*.rs` ekranlar, `prefs.rs`/`theme.rs`/`font.rs`/`audio.rs`/`qr.rs`/`util.rs` yardımcılar, `call_media.rs` arama (GStreamer), `keyring.rs`+`secrets.rs` anahtar saklama (KDE Wallet) |
-| `Linux/packaging/` | Flatpak paketleme |
+| `typeon-server/src/` | Sunucu mantığı: `lib.rs` (protokol), `store.rs` (SQLite; posta `seq`'i kutu başına, `mail_seq` tablosu), `jni.rs`, `bin/typeon-server.rs` (CLI) |
+| `Linux/src/` | Masaüstü istemci (Linux + Windows, aynı crate `typeon-linux`). `core.rs` çekirdek köprüsü, `ui/*.rs` ekranlar, `prefs.rs`/`theme.rs`/`font.rs`/`audio.rs`/`qr.rs`/`util.rs` yardımcılar, `call_media.rs` arama (GStreamer), `keyring.rs`+`secrets.rs` anahtar saklama (Secret Service: GNOME Keyring / KDE Wallet). **Windows dosyaları:** `win.rs` (tepsi simgesi, bildirim, otomatik başlatma, yazı tipi), `keyring_win.rs` (DPAPI kasa anahtarı), `audio_win.rs` (WASAPI ses kaydı); `main.rs` Windows'ta `audio`/`keyring` modüllerini bunlara yönlendirir |
+| `Linux/packaging/` | Flatpak paketleme (`README.md`). `Linux/packaging/windows/`: Windows çapraz derleme/paket betikleri (`build.sh`, `package.sh`, `package-msys2.sh`, `fetch-sysroot.py`) ve `TEST-NOTES.md` |
+| `AGENTS.md` | Ajanlar için ortak kurallar + derleme tarifleri (Linux, Windows çapraz derleme) |
 | `reviews/` | Eski kod inceleme notları. `ALL_OPEN_FINDINGS.md` = bilerek açık bırakılan maddeler, tekrar tartışma |
 | `Description.md` | Protokol şartnamesi (Türkçe). Bölümler: 1 kimlik, 2 güven, 3 şifreleme, 4 keşif+sunucu, 5 grup, 6 açık kararlar |
 | `SECURITY.md` | Güvenlik özeti (İngilizce). **Kısmen eski**, çelişirse koda inan |
@@ -73,8 +75,8 @@ Sunucusuz çalışabilen, uçtan uca şifreli mesajlaşma uygulaması. Klasik + 
 | `sign-release.sh` | APK yeniden imzalama |
 | `dist/` | Yayın dosyaları |
 
-Bir davranışı bulmak için: `grep -n "fonksiyon_adı" lib.rs`. Büyük dosyayı komple okuma, parça parça oku.
-JNI fonksiyonunu değiştirirsen hem `lib.rs` hem `P2PLib.kt` (gerekirse `api.rs`) aynı anda değişmeli.
+Bir davranışı bulmak için: `grep -n "fn fonksiyon_adı" p2p_messenger_android/app/src/main/cpp/rust/src/*.rs` (çekirdek tek dosya değil, modüllere bölünmüş). Büyük dosyayı komple okuma, parça parça oku.
+JNI fonksiyonunu değiştirirsen hem `jni_exports.rs` hem `P2PLib.kt` (gerekirse `api.rs`) aynı anda değişmeli. Yeni bir çekirdek `.rs` dosyası açarsan hem `lib.rs`'teki `mod` listesine hem `CORE_SRC`'ye (kaynak tarayan testler) ekle.
 
 ---
 
@@ -88,7 +90,7 @@ JNI fonksiyonunu değiştirirsen hem `lib.rs` hem `P2PLib.kt` (gerekirse `api.rs
 - Yeni kişi ilk kez QR veya elle girilen kodla eklenir (TOFU: ilk görüşte güven). Sonra her pakette cihazın bilinen cihaz olup olmadığı kontrol edilir (`check_incoming_device` in `contact.rs`). Yeni/şüpheli cihaz `device_alert` olayı üretir.
 
 ### 3.2 Mesaj gönderme (sırayla)
-1. `send_message` → `send_message_content_inner` (lib.rs).
+1. `send_message` → `send_message_content_inner` (`send.rs`).
 2. Bağlantı yoksa `ensure_connected` bağlanmayı dener.
 3. Ratchet yoksa el sıkışma yapılır (`initiate_handshake_with`).
 4. 30 dk geçtiyse ratchet yenilenir (`maybe_rotate_ratchet`).
@@ -141,10 +143,10 @@ JNI fonksiyonunu değiştirirsen hem `lib.rs` hem `P2PLib.kt` (gerekirse `api.rs
 - Sunucudan çekilen zarflar `source = None` ile gelen mesaj yoluna girer (sunucunun adresi kişi adres defterine yazılmasın diye).
 - Sunucunun **onion adresi onun kimliğidir.** Güncellemede korunmalı. Uygulamayı kaldırıp kurma onion adresini siler.
 - "Geçmişi sunucuda sakla" ayrı ve varsayılan kapalı seçenek. Arşiv kök anahtarla şifrelenir (ileri-gizli değil, kabul edilmiş bedel).
-- SQLite tabloları (`store.rs`): `enrollments, invites, mailboxes, mailbox_readers, mailbox_keys, mail, mail_acks, archive, blobs, blob_chunks, blocked_keys, meta`.
+- SQLite tabloları (`store.rs`, şema sürümü 4): `enrollments, invites, mailboxes, mailbox_readers, mail, mail_seq, mail_acks, archive, blobs, blob_chunks, blocked_keys, meta`.
 
 ### 3.8 Yerel veri
-- Veritabanı: SQLCipher, dosya `p2p_messenger.db`. Şema `init_db` içinde (lib.rs ~satır 4070).
+- Veritabanı: SQLCipher, dosya `p2p_messenger.db`. Şema `init_db` içinde (`db.rs`).
 - Ana tablolar: `identities, own_devices, contacts, groups, messages, message_reactions, message_seen, ratchet_states, skipped_message_keys, remote_devices, files, device_addrs, device_onion_addrs, pending_durable_retries, pending_group_messages, blocked_identities, deleted_identities, removed_contacts, removed_groups, app_meta, acked_packets, own_prekeys, peer_prekeys, pending_sibling_ops`.
 - Sonradan eklenen sütunlar `ALTER TABLE` ile eklenir; `CREATE TABLE IF NOT EXISTS` eski tabloyu değiştirmez.
 - AppLock: parola PBKDF2-HMAC-SHA256 ile türetilir (`util/AppLock.kt`).

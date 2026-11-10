@@ -41,7 +41,7 @@ use tor_rtcompat::tokio::TokioRustlsRuntime;
 /// (PeerId kalıcılığının Tor karşılığı).
 const ONION_NICKNAME: &str = "p2pmsg";
 
-/// Tor'un o anki durumu — UI'de gösterilir (bkz. lib.rs `tor_status`).
+/// Tor'un o anki durumu — UI'de gösterilir (bkz. network.rs `tor_status`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TorStatus {
     /// Kapalı (kullanıcı Tor'u açmadı).
@@ -100,7 +100,7 @@ impl TorHandle {
 
     /// Yayındaki .onion host adı (ör. "abcd...xyz.onion") — henüz
     /// hesaplanmadıysa None. Not: bu SADECE host adıdır, tam libp2p
-    /// multiaddr'ı lib.rs `get_node_address` oluşturur
+    /// multiaddr'ı network.rs `get_node_address` oluşturur
     /// (`/dns/<host>/tcp/<port>/p2p/<peer_id>` biçiminde).
     pub fn onion_host(&self) -> Option<String> {
         self.onion_addr.lock().unwrap_or_else(|p| p.into_inner()).clone()
@@ -167,7 +167,7 @@ impl TorHandle {
     ///
     /// `state_dir`/`cache_dir`: arti'nin anahtar deposu + konsensüs önbelleği
     /// (uygulamanın özel dizini altında). `local_port`: libp2p'nin dinlediği
-    /// sabit TCP portu (bkz. lib.rs sabit-port ayarı).
+    /// sabit TCP portu (bkz. network.rs sabit-port ayarı).
     pub fn launch(state_dir: &str, cache_dir: &str, local_port: u16) -> Result<TorHandle, String> {
         let runtime = TokioRustlsRuntime::current()
             .map_err(|e| format!("TokioRustlsRuntime alınamadı: {e}"))?;
@@ -449,7 +449,7 @@ async fn bridge_incoming_stream(stream_request: tor_hsservice::StreamRequest, lo
 /// `/dns/<host>.onion/tcp/<port>` biçimindeki bir multiaddr'dan (host, port)
 /// çıkarır — SADECE `.onion` ile bitiyorsa. Böylece bu transport yalnızca
 /// onion adreslerini üstlenir; diğer her şey için `MultiaddrNotSupported`
-/// döner ve `OrTransport` normal TCP yoluna düşer (bkz. lib.rs swarm kurulumu).
+/// döner ve `OrTransport` normal TCP yoluna düşer (bkz. network.rs swarm kurulumu).
 fn onion_host_port(addr: &Multiaddr) -> Option<(String, u16)> {
     let mut it = addr.iter();
     let host = match it.next()? {
@@ -499,7 +499,7 @@ impl AsyncWrite for TorStream {
 /// yerel TCP dinleyicisine gelir — bkz. `bridge_incoming_stream`).
 ///
 /// `client` KASITLI OLARAK `Option`: Tor kapalıyken de bu transport swarm'a
-/// EKLENİR (tek bir swarm kurulum yolu olsun diye — bkz. lib.rs
+/// EKLENİR (tek bir swarm kurulum yolu olsun diye — bkz. network.rs
 /// `start_network`), ama `None` olduğunda her dial `MultiaddrNotSupported`
 /// döner (zaten Tor kapalıyken hiç `.onion` adresi de olmaz). Böylece
 /// koşullu/çift build yoluna gerek kalmaz.

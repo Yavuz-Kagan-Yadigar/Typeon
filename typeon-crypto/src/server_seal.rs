@@ -183,7 +183,7 @@ pub fn archive_epoch_for(ts_ms: u64) -> u64 {
 /// cihazını değiştirdiğinde (spec §2.2) arşivin okunabilirliği kaybolmasın
 /// diye. The two kinds share this key space with no tag (a tag would orphan
 /// every stored archive): the caller keeps them apart by format, a group id
-/// is `group-<16 hex>` and an identity id 64 hex (lib.rs `process_group_update`).
+/// is `group-<16 hex>` and an identity id 64 hex (group_ops.rs `process_group_update`).
 fn conv_archive_key(archive_root_key: &[u8; 32], conv_key: &str) -> Result<[u8; 32], String> {
     let mut info = Vec::with_capacity(24 + conv_key.len());
     info.extend_from_slice(b"p2pmsg-v0.1-archive-conv");

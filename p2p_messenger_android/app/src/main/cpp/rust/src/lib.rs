@@ -33,8 +33,8 @@ pub mod tor;
 // yukarıdaki `pub use typeon_crypto::{…}` bunları eskisi gibi
 // `p2p_messenger::server_proto::…` / `crate::server_seal::…` olarak erişilebilir
 // tutar (`typeon-server/` crate'i AYNI tanımları kullanmaya devam eder).
-/// Sunucu seçeneğinin istemci tarafı — `impl P2PCore` blokları. `lib.rs`
-/// zaten 12.8k satır olduğu için ayrı dosyada; alt modül olduğundan
+/// Sunucu seçeneğinin istemci tarafı — `impl P2PCore` blokları. Diğer konu
+/// modülleri gibi ayrı dosyada; alt modül olduğundan
 /// `P2PCore`'un private alanlarını görebiliyor.
 pub mod server_client;
 /// Voice/video calls — signalling + media streams, see module docs.
