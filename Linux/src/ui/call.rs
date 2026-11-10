@@ -97,10 +97,13 @@ pub fn on_event(app: &Rc<App>, event: &Event) {
     ui.status.set_text(if video { "Incoming video call" } else { "Incoming voice call" });
     // Same setting as message notifications: no caller name on a lock screen.
     let hide = app.prefs.borrow().hide_notification_content;
-    let notification = gio::Notification::new(if hide { "Typeon" } else { name.as_str() });
-    notification.set_body(Some(if video { "Incoming video call" } else { "Incoming voice call" }));
-    notification.set_priority(gio::NotificationPriority::Urgent);
-    app.application.send_notification(Some("call"), &notification);
+    crate::app::post_notification(
+        &app.application,
+        "call",
+        if hide { "Typeon" } else { name.as_str() },
+        if video { "Incoming video call" } else { "Incoming voice call" },
+        gio::NotificationPriority::Urgent,
+    );
 }
 
 impl CallUi {
@@ -320,11 +323,11 @@ impl CallUi {
     fn on_state_changed(self: &Rc<Self>, new: &str, s: &CallState) {
         match new {
             "active" => {
-                self.app.application.withdraw_notification("call");
+                crate::app::withdraw_notification(&self.app.application, "call");
                 self.start_media();
             }
             "idle" => {
-                self.app.application.withdraw_notification("call");
+                crate::app::withdraw_notification(&self.app.application, "call");
                 self.stop_media();
                 if !self.seen.get() && self.starting.get() {
                     return; // our own call not created yet
@@ -468,7 +471,7 @@ impl CallUi {
         if self.closing.replace(true) {
             return;
         }
-        self.app.application.withdraw_notification("call");
+        crate::app::withdraw_notification(&self.app.application, "call");
         self.stop_media();
         self.window.close();
         CURRENT.with(|c| c.borrow_mut().take());

@@ -6,6 +6,50 @@ use gtk::gdk_pixbuf;
 use gtk::glib;
 use gtk::prelude::*;
 
+/// Creates the file owner-only (0600) on Unix. On Windows files under the
+/// user's profile already carry an owner-only ACL, so nothing is set.
+pub fn owner_only(options: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
+/// chmod on Unix, no-op on Windows (see `owner_only`).
+pub fn set_mode(path: &std::path::Path, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Ok(())
+    }
+}
+
+/// Whether the file at `path` is closed to other local users. Unix: no
+/// group/other bits. Windows: it lies inside the user's profile directory
+/// (inherited owner-only ACL); a USB stick or another drive is not private.
+/// A failed check proves nothing: `true`.
+pub fn is_private(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).map(|meta| meta.permissions().mode() & 0o077 == 0).unwrap_or(true)
+    }
+    #[cfg(windows)]
+    {
+        match (std::fs::canonicalize(path), std::fs::canonicalize(glib::home_dir())) {
+            (Ok(file), Ok(home)) => file.starts_with(home),
+            _ => true,
+        }
+    }
+}
+
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -313,6 +357,46 @@ fn marker_ok(id: &str, preview: &str) -> bool {
 }
 
 pub fn quote_plain(text: &str) -> String {
+    quote_render(text, |quote| format!("> {quote}"), |plain| plain.to_string())
+}
+
+/// Same walk as `quote_plain`, but as Pango markup for a bubble label: the
+/// quoted preview is a dimmed italic line behind a vertical bar, everything
+/// else is escaped plain text.
+pub fn quote_markup(text: &str) -> String {
+    quote_render(
+        text,
+        |quote| format!("<span alpha=\"70%\"><i>\u{258E} {}</i></span>", glib::markup_escape_text(&unquote_preview(quote))),
+        |plain| glib::markup_escape_text(plain).to_string(),
+    )
+}
+
+/// Preview on one line, without the "> " of a quote it was itself quoting
+/// (the phone puts the already-flattened text in the marker).
+fn unquote_preview(preview: &str) -> String {
+    preview.replace('\n', " ").trim_start_matches(|c| c == '>' || c == ' ').to_string()
+}
+
+/// A quote marker at the very start of the text, split off: the quoted preview
+/// (for a block of its own above the bubble text) and the rest of the text.
+/// `None` when the text does not begin with a well-formed marker.
+pub fn split_leading_quote(text: &str) -> (Option<String>, &str) {
+    const START: &str = "\u{2062}\u{2064}";
+    const END: &str = "\u{2064}\u{2062}";
+    // Whitespace before the marker (a newline typed first) must not hide it.
+    if let Some(body) = text.trim_start().strip_prefix(START) {
+        if let (Some(sep), Some(end)) = (body.find('\u{2063}'), body.find(END)) {
+            let (id, preview) = (&body[..sep], &body[sep + '\u{2063}'.len_utf8()..end]);
+            if sep < end && marker_ok(id, preview) {
+                let rest = &body[end + END.len()..];
+                return (Some(unquote_preview(preview)), rest.strip_prefix('\n').unwrap_or(rest));
+            }
+        }
+    }
+    (None, text)
+}
+
+fn quote_render(text: &str, quote: impl Fn(&str) -> String, plain: impl Fn(&str) -> String) -> String {
     const START: &str = "\u{2062}\u{2064}";
     const END: &str = "\u{2064}\u{2062}";
     let mut out = String::new();
@@ -321,18 +405,17 @@ pub fn quote_plain(text: &str) -> String {
         let body = &rest[a + START.len()..];
         match (body.find('\u{2063}'), body.find(END)) {
             (Some(sep), Some(end)) if sep < end && marker_ok(&body[..sep], &body[sep + '\u{2063}'.len_utf8()..end]) => {
-                out.push_str(&rest[..a]);
-                out.push_str("> ");
-                out.push_str(&body[sep + '\u{2063}'.len_utf8()..end].replace('\n', " "));
+                out.push_str(&plain(&rest[..a]));
+                out.push_str(&quote(&body[sep + '\u{2063}'.len_utf8()..end].replace('\n', " ")));
                 rest = &body[end + END.len()..];
             }
             _ => {
-                out.push_str(&rest[..a + START.len()]);
+                out.push_str(&plain(&rest[..a + START.len()]));
                 rest = body;
             }
         }
     }
-    out.push_str(rest);
+    out.push_str(&plain(rest));
     out
 }
 

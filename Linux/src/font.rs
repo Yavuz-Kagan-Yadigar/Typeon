@@ -66,13 +66,20 @@ impl FontManager {
                     "register_active: font family={name} path={}",
                     font.path.display()
                 );
+                #[cfg(windows)]
+                if !crate::win::register_font(&font.path) {
+                    log::warn!("could not register font {}", font.path.display());
+                }
                 // Make it visible to Pango: copy into the user font directory.
-                let fonts_dir = gtk::glib::user_data_dir().join("fonts");
-                let ext = font.path.extension().and_then(|e| e.to_str()).unwrap_or("ttf");
-                let target = fonts_dir.join(format!("typeon-{}.{ext}", font.id));
-                if !target.exists() && std::fs::create_dir_all(&fonts_dir).is_ok() {
-                    if let Err(e) = std::fs::copy(&font.path, &target) {
-                        log::warn!("could not install font: {e}");
+                #[cfg(not(windows))]
+                {
+                    let fonts_dir = gtk::glib::user_data_dir().join("fonts");
+                    let ext = font.path.extension().and_then(|e| e.to_str()).unwrap_or("ttf");
+                    let target = fonts_dir.join(format!("typeon-{}.{ext}", font.id));
+                    if !target.exists() && std::fs::create_dir_all(&fonts_dir).is_ok() {
+                        if let Err(e) = std::fs::copy(&font.path, &target) {
+                            log::warn!("could not install font: {e}");
+                        }
                     }
                 }
                 return Some(name.clone());

@@ -255,14 +255,14 @@ impl App {
             // downloads were silently dead until a manual restart. Say so —
             // once per process, prominently.
             if !self.core_panic_reported.replace(true) {
-                let notification = gio::Notification::new("Typeon");
-                notification.set_body(Some(
+                post_notification(
+                    &self.application,
+                    "core-panic",
+                    "Typeon",
                     "The messaging core hit an internal error and stopped working. \
                      Please restart Typeon.",
-                ));
-                notification.set_priority(gio::NotificationPriority::Urgent);
-                self.application
-                    .send_notification(Some("core-panic"), &notification);
+                    gio::NotificationPriority::Urgent,
+                );
                 self.toast(
                     "The messaging core hit an internal error and stopped working. \
                      Please restart Typeon.",
@@ -384,7 +384,7 @@ impl App {
                 // desktop still showing "you have a new message" for it.
                 // `notify_if_away` uses the conversation id as the
                 // notification id precisely so it can be addressed later.
-                self.application.withdraw_notification(&conversation);
+                withdraw_notification(&self.application, &conversation);
             }
             "message" => {
                 let peer = event.string("peer");
@@ -529,14 +529,10 @@ impl App {
         // Same setting as message notifications: no names on a lock screen.
         // The body carries a peer-chosen name, so it is markup-escaped too.
         let hide = self.prefs.borrow().hide_notification_content;
-        let notification = gio::Notification::new(if hide { "Typeon" } else { title });
-        if hide {
-            notification.set_body(Some("Security notice"));
-        } else {
-            notification.set_body(Some(glib::markup_escape_text(body).as_str()));
-        }
-        notification.set_priority(gio::NotificationPriority::High);
-        self.application.send_notification(Some(id), &notification);
+        // Windows balloons are plain text: no markup to escape there.
+        let escaped = if cfg!(windows) { body.to_string() } else { glib::markup_escape_text(body).to_string() };
+        let (title, body) = if hide { ("Typeon", "Security notice") } else { (title, escaped.as_str()) };
+        post_notification(&self.application, id, title, body, gio::NotificationPriority::High);
     }
 
     fn notify_if_away(self: &Rc<Self>, conversation_id: &str, title: &str, body: &str) {
@@ -573,13 +569,10 @@ impl App {
         } else {
             (title, body)
         };
-        let notification = gio::Notification::new(title);
-        notification.set_body(Some(body));
-        notification.set_priority(if mention { gio::NotificationPriority::High } else { gio::NotificationPriority::Normal });
         // One notification id per conversation, so a burst of messages
         // replaces itself instead of stacking up a wall of popups.
-        self.application
-            .send_notification(Some(conversation_id), &notification);
+        let priority = if mention { gio::NotificationPriority::High } else { gio::NotificationPriority::Normal };
+        post_notification(&self.application, conversation_id, title, body, priority);
     }
 
     // --- name resolution ---
@@ -800,6 +793,39 @@ pub fn set_metered(metered: bool) {
 /// Runs `work` off the main thread and hands the result back on it. Used for
 /// the handful of core calls that are genuinely slow — network start, file
 /// encryption, recovery export — so the window never freezes.
+/// One desktop notification, replacing any earlier one with the same `id`.
+/// Windows: a balloon on Typeon's own tray icon (`win::notify`); GLib's win32
+/// backend would put a second, menu-less icon in the tray.
+pub fn post_notification(
+    application: &adw::Application,
+    id: &str,
+    title: &str,
+    body: &str,
+    priority: gio::NotificationPriority,
+) {
+    #[cfg(windows)]
+    {
+        let _ = (application, id, priority);
+        crate::win::notify(title, body);
+    }
+    #[cfg(not(windows))]
+    {
+        let notification = gio::Notification::new(title);
+        notification.set_body(Some(body));
+        notification.set_priority(priority);
+        application.send_notification(Some(id), &notification);
+    }
+}
+
+/// Windows: no-op (a balloon dismisses itself; withdrawing through GLib would
+/// create its tray icon).
+pub fn withdraw_notification(application: &adw::Application, id: &str) {
+    #[cfg(not(windows))]
+    application.withdraw_notification(id);
+    #[cfg(windows)]
+    let _ = (application, id);
+}
+
 pub fn run_in_background<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
     then: impl FnOnce(T) + 'static,

@@ -92,6 +92,22 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
     }
     connectivity.add(&tor);
 
+    #[cfg(windows)]
+    {
+        let autostart = adw::SwitchRow::builder()
+            .title("Start with Windows")
+            .subtitle("Starts hidden in the tray when you sign in, so messages keep arriving.")
+            .active(crate::win::autostart_enabled())
+            .build();
+        let app = app.clone();
+        autostart.connect_active_notify(move |row| {
+            if let Err(error) = crate::win::set_autostart(row.is_active()) {
+                app.toast(&format!("Could not change autostart: {error}"));
+            }
+        });
+        connectivity.add(&autostart);
+    }
+
     let node = adw::SwitchRow::builder()
         .title("Node mode")
         .subtitle(
@@ -457,9 +473,23 @@ const BUILT_IN_FONTS: [(&str, Option<&str>); 5] = [
     ("Cantarell", Some("Cantarell")),
 ];
 
+thread_local!(static REBUILDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+
 /// Rebuild the font selector model (built-in fonts + custom fonts +
 /// "Import a font" at the top).
 fn rebuild_font_model(app: &Rc<App>, active_id: Option<&str>, font_row: &adw::ComboRow) {
+    // `set_model` / `set_selected` fire `selected-notify`. Called from inside
+    // that very handler this re-entered it with index 0 — "Load a custom
+    // font…" — which opened the file dialog (modal on Windows: the window
+    // stops responding) before the font had been applied.
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            REBUILDING.with(|r| r.set(false));
+        }
+    }
+    REBUILDING.with(|r| r.set(true));
+    let _reset = Reset;
     let custom_fonts = app.list_custom_fonts();
 
     // Build labels: [0]="Load a custom font …", [1..]=built-in fonts,
@@ -574,6 +604,9 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
     {
         let app = app.clone();
         font.connect_selected_notify(move |row| {
+            if REBUILDING.with(|r| r.get()) {
+                return;
+            }
             // `row` itself, not a captured clone: a self-capture would be a
             // reference cycle that leaks the row.
             let font_for_closure = row;
@@ -592,7 +625,9 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
                     prefs.active_custom_font_id = None;
                     prefs.save();
                 }
-                rebuild_font_model(&app, None, font_for_closure);
+                // No model rebuild here: the choices did not change, and replacing
+                // the model while the drop-down is still handling this very
+                // selection hangs GTK's list view (the window stops responding).
                 apply_theme(&app);
             } else {
                 // Custom font selected (idx > BUILT_IN_FONTS.len() + 1).
@@ -600,7 +635,6 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
                 let custom_idx = idx - 1 - BUILT_IN_FONTS.len();
                 if let Some(cf) = custom_fonts.get(custom_idx) {
                     app.set_active_custom_font(Some(&cf.id));
-                    rebuild_font_model(&app, Some(&cf.id), font_for_closure);
                     apply_theme(&app);
                 }
             }
@@ -734,8 +768,12 @@ fn pick_font(app: &Rc<App>, font_row: &adw::ComboRow) {
 
         // Reload the font list and select the newly imported font.
         app.font_manager.borrow_mut().discover();
-        rebuild_font_model(&app, app.active_custom_font_id().as_deref(), &font_row);
-        apply_theme(&app);
+        // Deferred: the new model must not replace the old one inside the
+        // drop-down's own signal handling (see the font selector handler).
+        glib::idle_add_local_once(move || {
+            rebuild_font_model(&app, app.active_custom_font_id().as_deref(), &font_row);
+            apply_theme(&app);
+        });
     });
 }
 
@@ -1318,7 +1356,6 @@ fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
         // Fresh temp file (`create_new` => the 0600 mode really applies), checked
         // chmod, fsync, then rename over the target.
         use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         // A UNIQUE temp name in the target's directory: the old fixed
         // "<target>.tmp" was unlinked unconditionally before the write, so
         // saving over, say, /home/me/important.txt destroyed any unrelated
@@ -1345,15 +1382,12 @@ fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
         // deleted again.
         let mut created = false;
         let mut refused_here = false;
-        let written = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
+        let written = crate::util::owner_only(std::fs::OpenOptions::new().write(true).create_new(true))
             .open(&tmp)
             .and_then(|mut file| {
                 created = true;
-                let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
-                let private = file.metadata()?.permissions().mode() & 0o077 == 0;
+                let _ = crate::util::set_mode(&tmp, 0o600);
+                let private = crate::util::is_private(&tmp);
                 if !private {
                     // The mode is checked BEFORE the first secret byte is
                     // written: the key set never reaches a location that
@@ -1389,9 +1423,7 @@ fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
                 // more where it ended up: a location that cannot make it
                 // private must not keep the key set either.
                 // A failed stat proves nothing about the mode: keep the file.
-                let private = std::fs::metadata(&path)
-                    .map(|meta| meta.permissions().mode() & 0o077 == 0)
-                    .unwrap_or(true);
+                let private = crate::util::is_private(&path);
                 if private {
                     app.toast(&format!("Recovery file written to {}", path.display()));
                 } else {

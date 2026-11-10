@@ -272,6 +272,39 @@ pub fn stylesheet(appearance: &Appearance) -> String {
         None => String::new(),
     };
 
+    // Concave fillets and the matching outer corners at a bubble-width step,
+    // in the even radii `chat::seam_radius` can return.
+    let mut rd_css = String::new();
+    let mut fillet_css = String::new();
+    for r in (2..=12).step_by(2) {
+        for (corner, prop, at) in [
+            ("tl", "top-left", "left top"),
+            ("tr", "top-right", "right top"),
+            ("bl", "bottom-left", "left bottom"),
+            ("br", "bottom-right", "right bottom"),
+        ] {
+            rd_css.push_str(&format!(".bubble.rd-{corner}-{r} {{ border-{prop}-radius: {r}px; }}\n"));
+            fillet_css.push_str(&format!(
+                ".fillet-{corner}-{r} {{ background-image: radial-gradient(circle at {at}, transparent {}px, currentColor {r}px); }}\n",
+                r - 1
+            ));
+        }
+    }
+    // Screen-space shade steps (see chat.rs `update_shading`): white tint at the
+    // top reaching well down the screen, black tint only near the bottom.
+    // Bubbles take `background-color`; fillets use `color` (currentColor fill).
+    for (role, base) in [("mine", "@m3_primary_container"), ("theirs", "@m3_surface_high")] {
+        for n in 0..24 {
+            let t = n as f64 / 23.0;
+            let colour = if t < 0.65 {
+                format!("mix({base}, white, {:.3})", 0.28 * (1.0 - t / 0.65))
+            } else {
+                format!("mix({base}, black, {:.3})", 0.45 * (t - 0.65) / 0.35)
+            };
+            fillet_css.push_str(&format!(".bubble-{role}.shade-{n} {{ background-color: {colour}; }}\n"));
+            fillet_css.push_str(&format!(".fshade-{role}-{n} {{ color: {colour}; }}\n"));
+        }
+    }
     format!(
         r#"
 /* ===================== Material 3 colour roles ===================== */
@@ -483,12 +516,16 @@ list, listview {{ background-color: transparent; }}
     color: @m3_on_secondary_container;
 }}
 
+/* No shadow: Windows draws popups on an opaque surface, so the shadow's
+   margin showed up as a black rectangle around every menu. */
 popover > contents {{
     border-radius: 20px;
     border: none;
     padding: 8px;
     background-color: @m3_surface_container;
+    box-shadow: none;
 }}
+popover.background > contents, popover.menu > contents {{ box-shadow: none; }}
 .m3-menu {{ min-width: 220px; }}
 .m3-menu button {{
     border-radius: 9999px;
@@ -574,21 +611,11 @@ avatar {{ border-radius: 9999px; }}
    çok daha ucuza veriyor. */
 .bubble {{ border-radius: 20px; }}
 .bubble-mine {{
-    background-image: linear-gradient(
-        to bottom,
-        alpha(@m3_on_primary_container, 0.08) 0%,
-        alpha(@m3_on_primary_container, 0.0) 60%
-    );
     background-color: @m3_primary_container;
     color: @m3_on_primary_container;
     border-bottom-right-radius: 6px;
 }}
 .bubble-theirs {{
-    background-image: linear-gradient(
-        to bottom,
-        alpha(@m3_on_surface, 0.06) 0%,
-        alpha(@m3_on_surface, 0.0) 60%
-    );
     background-color: @m3_surface_high;
     color: @m3_on_surface;
     border-bottom-left-radius: 6px;
@@ -602,25 +629,40 @@ avatar {{ border-radius: 9999px; }}
    AYNI yaklaşım) — `.bubble-mine`/`.bubble-theirs`'in TEK köşeyi küçülten
    "kuyruk" kuralından DAHA ÖZGÜL olduğundan, o kuralı gerektiğinde
    sorunsuzca ezer. */
-.bubble.continued-top {{ border-top-left-radius: 6px; border-top-right-radius: 6px; }}
-.bubble.continued-bottom {{ border-bottom-left-radius: 6px; border-bottom-right-radius: 6px; }}
+/* Joined corners of a run of bubbles: small on the straight (aligned) side,
+   square where a narrower bubble meets a wider one. */
+.bubble.seam-tl {{ border-top-left-radius: 4px; }}
+.bubble.seam-tr {{ border-top-right-radius: 4px; }}
+.bubble.seam-bl {{ border-bottom-left-radius: 4px; }}
+.bubble.seam-br {{ border-bottom-right-radius: 4px; }}
+{rd_css}.bubble.sq-tl {{ border-top-left-radius: 0; }}
+.bubble.sq-tr {{ border-top-right-radius: 0; }}
+.bubble.sq-bl {{ border-bottom-left-radius: 0; }}
+.bubble.sq-br {{ border-bottom-right-radius: 0; }}
 /* Aynı gruptaki balonlar arasındaki boşluğu daraltır — `.chat-messages`
    listesinin kendi (6px) `spacing`'inin üzerine binen negatif bir üst
    dolgu. */
-.bubble-row-continued {{ margin-top: -4px; }}
+/* (GTK CSS rejects negative margins; the gap is set in chat.rs.) */
+.bubble-row-continued {{ }}
 /* Genişlik farkı olan bir dikişteki "iç bükey" çentik — bkz. `mark_group_seam`
    dosya başı notu (GTK CSS'te web'deki `::before`/`::after` sözde-öğe
    karşılığı olmadığından bu gerçek, ayrı bir widget). Arka planla AYNI ton:
    duvarkağıdı ayarlıysa (bkz. `wallpaper` değişkeni) o dokunun üzerine düz
    bir yama gibi oturur — bilinen, kabul edilmiş küçük bir sınır (ucuz
    yöntemin bedeli, bkz. dosya başı notu). */
-.bubble-seam-notch {{ background-color: @m3_surface; border-radius: 9999px; }}
-/* Spec dışı, kullanıcı isteği ("gönderilen resim/videolar kenarları
+{fillet_css}/* Spec dışı, kullanıcı isteği ("gönderilen resim/videolar kenarları
    yuvarlatılmış ve ince bir border ile görünsün" — Android `ShapeableImageView
    strokeWidth`): burada sadece köşe yarıçapı vardı, çerçeve YOKTU. */
 .attachment-preview {{
     border-radius: 14px;
     border: 1px solid @m3_outline_variant;
+}}
+/* Inline quote at the top of a bubble: darker rounded box, as on the phone. */
+.quote-block {{
+    background-color: alpha(black, 0.25);
+    border-radius: 10px;
+    padding: 4px 10px;
+    opacity: 0.85;
 }}
 .sticker {{ border-radius: 8px; }}
 /* Current in-chat search hit. */

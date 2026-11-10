@@ -947,8 +947,7 @@ impl Inner {
                 // Cairo created the file world-readable; a whiteboard page is
                 // private conversation content, so clamp it to owner-only as
                 // soon as it exists. Best effort: FAT/exFAT cannot do chmod.
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                let _ = crate::util::set_mode(&path, 0o600);
                 let cr = gtk::cairo::Context::new(&surface)?;
                 cr.set_source_rgb(0.0, 0.0, 0.0);
                 cr.paint()?;

@@ -10,11 +10,17 @@
 //!
 //! It deliberately cannot create an account. See `ui::onboarding`.
 
+// Windows release: a GUI program, no console window next to it. The debug
+// build keeps its console so `RUST_LOG=info` output is visible.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
+#[cfg_attr(windows, path = "audio_win.rs")]
 mod audio;
 mod call_media;
 mod core;
 mod font;
+#[cfg_attr(windows, path = "keyring_win.rs")]
 mod keyring;
 mod prefs;
 mod qr;
@@ -22,6 +28,8 @@ mod secrets;
 mod theme;
 mod ui;
 mod util;
+#[cfg(windows)]
+mod win;
 
 use std::path::PathBuf;
 
@@ -43,8 +51,7 @@ fn main() -> glib::ExitCode {
         let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
         eprintln!("typeon: panic at {location}");
         let log = glib::user_data_dir().join("typeon").join("crash.log");
-        use std::os::unix::fs::OpenOptionsExt;
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(log) {
+        if let Ok(mut file) = util::owner_only(std::fs::OpenOptions::new().create(true).append(true)).open(log) {
             use std::io::Write;
             let _ = writeln!(file, "{} panic at {location}", util::now_ms());
         }
@@ -65,6 +72,17 @@ fn main() -> glib::ExitCode {
     let application = builder.build();
 
     application.connect_activate(activate);
+    // Windows: the autostart entry starts Typeon straight into the tray. The
+    // flag is ours, not GApplication's, so it is taken out of argv here.
+    #[cfg(windows)]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == win::BACKGROUND_ARG) {
+            START_HIDDEN.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        return application.run_with_args(&args[..1]);
+    }
+    #[cfg(not(windows))]
     application.run()
 }
 
@@ -77,6 +95,10 @@ fn sweep_plain_cache(data_dir: &std::path::Path) {
         }
     }
 }
+
+/// Windows `--background`: the first window stays hidden in the tray.
+#[cfg(windows)]
+static START_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn activate(application: &adw::Application) {
     // A second `activate` (someone launching Typeon again) should raise the
@@ -91,12 +113,7 @@ fn activate(application: &adw::Application) {
     // 0700 on the one directory everything lives under: settings, the
     // database and decrypted attachments are then closed to other local users
     // whatever mode the files inside were created with.
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    let created = std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&data_dir)
-        .and_then(|_| std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700)));
+    let created = std::fs::create_dir_all(&data_dir).and_then(|_| util::set_mode(&data_dir, 0o700));
     if let Err(error) = created {
         eprintln!("typeon: cannot create {}: {error}", data_dir.display());
         return;
@@ -195,6 +212,7 @@ fn activate(application: &adw::Application) {
     });
 
     // Deferred read-state must not be lost on exit.
+    #[cfg(not(windows))]
     {
         let app = app.clone();
         window.connect_close_request(move |_| {
@@ -203,9 +221,47 @@ fn activate(application: &adw::Application) {
             glib::Propagation::Proceed
         });
     }
+    // Windows: closing the window keeps Typeon running in the tray (GLib's
+    // notification backend owns the tray icon; a click on it re-activates,
+    // which presents this hidden window). Quit is in the main menu; the
+    // close-time work then runs at shutdown.
+    #[cfg(windows)]
+    {
+        window.set_hide_on_close(true);
+        std::mem::forget(application.hold());
+        {
+            let app = app.clone();
+            window.connect_close_request(move |_| {
+                app.prefs.borrow_mut().flush();
+                glib::Propagation::Proceed
+            });
+        }
+        let app = app.clone();
+        application.connect_shutdown(move |_| {
+            app.prefs.borrow_mut().flush();
+            sweep_plain_cache(&app.data_dir);
+            win::remove_tray();
+        });
+        // Our own tray icon (Open / Quit menu), there from the start. GLib's
+        // notification backend adds its icon only when a notification shows.
+        {
+            let window = window.clone();
+            let application = application.clone();
+            win::install_tray(move |action| match action {
+                win::TrayAction::Open => window.present(),
+                win::TrayAction::Quit => application.quit(),
+            });
+        }
+    }
 
     ui::settings::apply_theme(&app);
-    window.present();
+    #[cfg(windows)]
+    let hidden = START_HIDDEN.swap(false, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(windows))]
+    let hidden = false;
+    if !hidden {
+        window.present();
+    }
 
     // Development aid: render a conversation's worth of sample bubbles without
     // needing a linked device and a real peer. Bubble sizing is fiddly enough

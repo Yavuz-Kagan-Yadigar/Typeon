@@ -22,7 +22,6 @@
 //! the phone is for.
 
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -280,9 +279,8 @@ fn derive_key(wallet_key: &[u8; 32], passphrase: &str, salt: &[u8]) -> Result<[u
 /// Creates/truncates the file with `0600` **before** any secret reaches it —
 /// writing first and chmod'ing after would leave a window where the vault is
 /// world-readable.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
 
     // Write a temp file and rename it over: truncating in place means a crash
     // or power loss mid-write leaves a half vault and the identity is gone.
@@ -292,19 +290,22 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     // still refuses a planted symlink.
     let name = path.file_name().and_then(|n| n.to_str()).ok_or("bad file name")?;
     let tmp = path.with_file_name(format!("{name}.{}.{:016x}.tmp", std::process::id(), OsRng.next_u64()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
+    let mut file = crate::util::owner_only(OpenOptions::new().write(true).create_new(true))
         .open(&tmp)
         .map_err(|e| e.to_string())?;
     // The umask can only strip bits, but chmod BEFORE any secret byte anyway.
-    file.set_permissions(std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+    }
     file.write_all(bytes).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
     // Persist the rename itself, or a power loss can bring the old file back.
+    // (Windows cannot open a directory as a file; NTFS journals the rename.)
+    #[cfg(unix)]
     if let Some(parent) = path.parent() {
         std::fs::File::open(parent)
             .and_then(|d| d.sync_all())

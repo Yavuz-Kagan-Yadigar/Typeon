@@ -246,7 +246,13 @@ fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
     window.set_content(Some(&stack));
     stack.add_child(host);
     stack.set_visible_child(host);
-    stack.add_child(&lock_page);
+    // Its own header bar: the lock page covers the main UI's, and without one
+    // the window has no title, buttons or drag area (on Windows nothing else
+    // draws a frame).
+    let lock_view = adw::ToolbarView::new();
+    lock_view.add_top_bar(&adw::HeaderBar::new());
+    lock_view.set_content(Some(&lock_page));
+    stack.add_child(&lock_view);
 
     // --- activity ---
     // Any input event that reaches the window counts, watched in the capture
@@ -363,7 +369,7 @@ fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
         let activity = activity.clone();
         let locked = locked.clone();
         let stack = stack.clone();
-        let lock_page = lock_page.clone();
+        let lock_view = lock_view.clone();
         let hidden = hidden.clone();
         let main = main.clone();
         move || {
@@ -411,7 +417,7 @@ fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
             *hidden.borrow_mut() = away;
             app.locked.set(true);
             locked.set(true);
-            stack.set_visible_child(&lock_page);
+            stack.set_visible_child(&lock_view);
             glib::ControlFlow::Continue
         }
     };
@@ -572,7 +578,8 @@ fn status_indicator(app: &Rc<App>) -> gtk::Box {
 fn menu_button(main: &Rc<MainUi>) -> gtk::MenuButton {
     let (popover, items) = widgets::menu_popover();
 
-    let entries: Vec<(&str, &str, Box<dyn Fn(&Rc<MainUi>)>)> = vec![
+    #[allow(unused_mut)]
+    let mut entries: Vec<(&str, &str, Box<dyn Fn(&Rc<MainUi>)>)> = vec![
         (
             "list-add-symbolic",
             "New group",
@@ -604,6 +611,13 @@ fn menu_button(main: &Rc<MainUi>) -> gtk::MenuButton {
             Box::new(|main: &Rc<MainUi>| settings::present(&main.app)),
         ),
     ];
+    // Windows: closing the window only hides it to the tray.
+    #[cfg(windows)]
+    entries.push((
+        "application-exit-symbolic",
+        "Quit",
+        Box::new(|main: &Rc<MainUi>| main.app.application.quit()),
+    ));
 
     for (icon, label, action) in entries {
         let button = widgets::menu_item(icon, label);

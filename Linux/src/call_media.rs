@@ -248,6 +248,20 @@ impl Drop for CallMedia {
 /// Most live audio / video lanes per call; a group call has far fewer slots.
 const MAX_LANES: usize = 16;
 
+/// Microphone, speaker and camera elements of this OS.
+#[cfg(not(windows))]
+const MIC: &str = "pulsesrc stream-properties=\"props,media.role=phone\"";
+#[cfg(not(windows))]
+const SPEAKER: &str = "pulsesink name=spk stream-properties=\"props,media.role=phone\"";
+#[cfg(not(windows))]
+const CAMERA: &str = "v4l2src";
+#[cfg(windows)]
+const MIC: &str = "wasapi2src low-latency=true";
+#[cfg(windows)]
+const SPEAKER: &str = "wasapi2sink name=spk low-latency=true";
+#[cfg(windows)]
+const CAMERA: &str = "mfvideosrc";
+
 fn launch(desc: &str) -> Result<gst::Pipeline, String> {
     gst::parse::launch(desc)
         .map_err(|e| e.to_string())?
@@ -293,7 +307,7 @@ fn build_playback() -> Result<gst::Pipeline, String> {
     let p = launch(&format!(
         "audiomixer name=mix latency=60000000 ! audioconvert ! audioresample ! \
          audio/x-raw,format=S16LE,rate=48000,channels=1 ! {probe}audioconvert ! \
-         pulsesink name=spk stream-properties=\"props,media.role=phone\" \
+         {SPEAKER} \
          audiotestsrc wave=silence is-live=true samplesperbuffer=480 ! \
          audio/x-raw,format=S16LE,rate=48000,channels=1 ! queue max-size-time=1000000000 ! mix."
     ))?;
@@ -310,7 +324,7 @@ fn audio_tx(shared: Arc<Shared>) {
     };
     let desc = |dsp: &str| {
         format!(
-            "pulsesrc stream-properties=\"props,media.role=phone\" ! audioconvert ! audioresample ! \
+            "{MIC} ! audioconvert ! audioresample ! \
              audio/x-raw,format=S16LE,rate=48000,channels=1 ! {dsp}audioconvert ! audioresample ! \
              audio/x-raw,format=S16LE,rate=16000,channels=1 ! \
              opusenc bitrate=12000 frame-size=20 audio-type=voice bandwidth=wideband complexity=10 ! \
@@ -615,9 +629,9 @@ impl VideoLane {
 
 fn build_decoder(shared: &Shared, slot: u8, hevc: bool, rotation: u8) -> Result<(gst::Pipeline, gst_app::AppSrc), String> {
     let (codec, parse, decoders) = if hevc {
-        ("h265", "h265parse", ["vah265dec", "avdec_h265", "", ""])
+        ("h265", "h265parse", ["vah265dec", "d3d11h265dec", "avdec_h265", ""])
     } else {
-        ("h264", "h264parse", ["vah264dec", "avdec_h264", "openh264dec", ""])
+        ("h264", "h264parse", ["vah264dec", "d3d11h264dec", "avdec_h264", "openh264dec"])
     };
     let decoder = first_available(&decoders[..decoders.iter().position(|d| d.is_empty()).unwrap_or(decoders.len())])
         .ok_or("no decoder element")?;
@@ -682,11 +696,14 @@ struct Encoder {
 /// Hardware HEVC first (the phones decode it in hardware and it needs ~30 %
 /// fewer bits), hardware H.264 next, software H.264 last.
 fn pick_encoder() -> Option<Encoder> {
-    const LIST: [Encoder; 6] = [
+    const LIST: [Encoder; 8] = [
         Encoder { factory: "vah265enc", hevc: true, bps: false },
         Encoder { factory: "vah265lpenc", hevc: true, bps: false },
         Encoder { factory: "vah264enc", hevc: false, bps: false },
         Encoder { factory: "vah264lpenc", hevc: false, bps: false },
+        // Windows: Media Foundation (hardware where the GPU has it).
+        Encoder { factory: "mfh265enc", hevc: true, bps: false },
+        Encoder { factory: "mfh264enc", hevc: false, bps: false },
         Encoder { factory: "x264enc", hevc: false, bps: false },
         Encoder { factory: "openh264enc", hevc: false, bps: true },
     ];
@@ -715,12 +732,12 @@ impl VideoTx {
         let (codec, parse) = if enc.hevc { ("h265", "h265parse") } else { ("h264", "h264parse") };
         let (w, h) = (tuning::WIDTH, tuning::HEIGHT);
         // Development/testing: e.g. TYPEON_CAMERA_SRC="videotestsrc is-live=true pattern=ball".
-        let camera = std::env::var("TYPEON_CAMERA_SRC").unwrap_or_else(|_| "v4l2src".into());
+        let camera = std::env::var("TYPEON_CAMERA_SRC").unwrap_or_else(|_| CAMERA.into());
         // One source element and its properties, nothing more: a `!` would
         // splice arbitrary elements (file or network sinks) into the pipeline.
         let source = camera.split_whitespace().next();
-        if camera.contains('!') || !matches!(source, Some("v4l2src" | "videotestsrc" | "pipewiresrc")) {
-            return Err("TYPEON_CAMERA_SRC must be one v4l2src, videotestsrc or pipewiresrc element".into());
+        if camera.contains('!') || !matches!(source, Some("v4l2src" | "videotestsrc" | "pipewiresrc" | "mfvideosrc")) {
+            return Err("TYPEON_CAMERA_SRC must be one v4l2src, videotestsrc, pipewiresrc or mfvideosrc element".into());
         }
         let pipeline = launch(&format!(
             "{camera} ! videoconvert ! videoscale ! videorate max-rate={fps} drop-only=true ! \
@@ -758,6 +775,13 @@ impl VideoTx {
                 ("speed-preset", "veryfast"),
                 ("key-int-max", &gop),
                 ("bframes", "0"),
+                ("qp-min", &qp_min),
+                ("qp-max", &qp_max),
+            ],
+            f if f.starts_with("mf") => vec![
+                ("low-latency", "true"),
+                ("bframes", "0"),
+                ("gop-size", &gop),
                 ("qp-min", &qp_min),
                 ("qp-max", &qp_max),
             ],

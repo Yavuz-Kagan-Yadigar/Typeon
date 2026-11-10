@@ -61,11 +61,20 @@ const BUBBLE_MAX_WIDTH: i32 = 460;
 const BUBBLE_GROUP_WINDOW_MS: u64 = 2 * 60 * 1000;
 /// Bir dikişteki genişlik farkı bunun ALTINDAYSA çentik eklenmez — görünmez
 /// kadar küçük bir fark için fazladan bir widget/render maliyetine değmez.
+// Steps narrower than this are drawn as a plain, slightly rounded join.
 const SEAM_NOTCH_MIN_DELTA: i32 = 8;
+/// Largest fillet radius; smaller steps / shorter bubbles get a smaller one
+/// (see `seam_radius`), in the even sizes the stylesheet has classes for.
+const SEAM_RADIUS_MAX: i32 = 12;
+/// Number of screen-space shade steps; theme.rs generates `shade-0..N-1`.
+const SHADE_STEPS: i32 = 24;
+/// Dev harness only (`demo_bubbles`).
+#[cfg(debug_assertions)]
+const SEAM_NOTCH_SIZE: i32 = 12;
 /// Çentik dairesinin çapı (px) — SABİT, gerçek genişlik farkına göre
 /// büyümez (bkz. dosya başı notu — kesin geometri yerine ucuz bir görsel
 /// ipucu).
-const SEAM_NOTCH_SIZE: i32 = 14;
+
 /// Idle time after the last keystroke before we say we stopped typing.
 const TYPING_TIMEOUT_MS: u64 = 4_000;
 /// How long the peer's typing bubble stays up without a fresh `typing` event
@@ -139,6 +148,7 @@ struct Bubble {
     skin: gtk::Box,
     /// Natural width at build time (post max-width clamp) — used to place the
     /// seam notch without a second, possibly-stale `measure()` call later.
+    #[allow(dead_code)]
     content_width: i32,
     /// Empty for a 1:1 received message (there is only one possible sender);
     /// real in a group. Needed alongside `mine` to tell "same run" apart from
@@ -159,6 +169,11 @@ struct Bubble {
     /// Set once a `seen` receipt arrives, so a later `status` event cannot
     /// downgrade the tick back to "sent".
     seen: Cell<bool>,
+    /// Screen-space shade step currently applied (`shade-N`), -1 = none yet.
+    shade: Cell<i32>,
+    /// Concave fillets drawn in this bubble's row, with their colour role;
+    /// they take the bubble's shade so the join has no seam.
+    fillets: RefCell<Vec<(gtk::Box, &'static str)>>,
     /// Reaction pill under the bubble; hidden while there are none.
     reactions: gtk::Label,
     /// Last known delivery status ("pending"/"sent"/"delivered"/"error"), kept
@@ -227,6 +242,8 @@ struct ChatView {
     /// Ids we have already sent a read receipt for. Survives `reload()`, which
     /// clears `bubbles` — see `insert_entry`.
     seen_sent: RefCell<HashSet<String>>,
+    /// A shading pass is already scheduled (see `schedule_shading`).
+    shade_pending: Cell<bool>,
     /// bkz. `send_seen` — bekleyen debounce'lu okuma sınırı var mı.
     watermark_pending: Cell<bool>,
     /// Ascending by `order_key`; mirrors the widget order so an out-of-order
@@ -312,9 +329,12 @@ impl ChatView {
 // --- construction ---
 
 pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationPage {
+    // 0 px between rows (a run of bubbles touches); a bubble that starts a run adds 6 px of its own
+    // margin (see `build_bubble`). GTK CSS rejects negative margins, so the
+    // old "-4px" on grouped rows never took effect.
     let messages = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(6)
+        .spacing(0)
         .margin_top(12)
         .margin_bottom(12)
         .margin_start(12)
@@ -384,6 +404,7 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         bubbles: RefCell::new(HashMap::new()),
         seen_sent: RefCell::new(HashSet::new()),
         watermark_pending: Cell::new(false),
+        shade_pending: Cell::new(false),
         order: RefCell::new(Vec::new()),
         subtitle: subtitle.clone(),
         composer: composer.clone(),
@@ -518,6 +539,7 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
     {
         let view = view.clone();
         scroller.vadjustment().connect_value_changed(move |adjustment| {
+            view.update_shading();
             if adjustment.value() <= 8.0 && adjustment.upper() > adjustment.page_size() {
                 view.load_older();
             }
@@ -1177,7 +1199,7 @@ impl ChatView {
         if let Some(existing) = self.bubbles.borrow().get(&entry.id) {
             // Already on screen — a duplicate can legitimately arrive when a
             // reload races an event. Refresh in place instead of doubling it.
-            existing.text.set_label(&display_text(&entry));
+            existing.text.set_markup(&display_text(&entry));
             self.search_lower.borrow_mut().clear();
             existing.edited.set(entry.edited);
             // Never downgrade: a stale archive row must not pull a bubble that
@@ -1229,7 +1251,11 @@ impl ChatView {
 
         let grouped_with_previous = previous_bubble.as_ref().is_some_and(|previous| {
             previous.mine == entry.mine
-                && previous.sender_identity == entry.sender_identity
+                // Own messages carry an empty sender in some paths (history
+                // from the phone, sibling echoes) and the own identity id in
+                // others: for "mine" the sender is the same person by
+                // definition, so only other people's bubbles compare ids.
+                && (entry.mine || previous.sender_identity == entry.sender_identity)
                 && previous.attachment.is_none()
                 && entry.attachment.is_none()
                 && entry.order_key.saturating_sub(previous.order_key) < BUBBLE_GROUP_WINDOW_MS
@@ -1272,8 +1298,55 @@ impl ChatView {
             self.send_seen(&entry);
         }
 
+        self.schedule_shading();
         if scroll {
             self.scroll_to_bottom();
+        }
+    }
+
+    /// Re-shades soon, once the rows have been laid out; many inserts in a row
+    /// (a page load) collapse into one pass.
+    fn schedule_shading(self: &Rc<Self>) {
+        if self.shade_pending.replace(true) {
+            return;
+        }
+        let view = self.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(60), move || {
+            view.shade_pending.set(false);
+            view.update_shading();
+        });
+    }
+
+    /// Screen-space shading: each bubble takes the shade step of its vertical
+    /// position in the visible area (lighter at the top, darker at the bottom,
+    /// like the phone), so the gradient runs across the screen, not across
+    /// each message, and the background stays untouched.
+    fn update_shading(&self) {
+        let height = self.scroller.height() as f32;
+        if height <= 0.0 {
+            return;
+        }
+        for bubble in self.bubbles.borrow().values() {
+            let Some(bounds) = bubble.skin.compute_bounds(&self.scroller) else { continue };
+            let mid = bounds.y() + bounds.height() / 2.0;
+            if mid < -200.0 || mid > height + 200.0 {
+                continue;
+            }
+            let step = ((mid / height).clamp(0.0, 1.0) * (SHADE_STEPS - 1) as f32).round() as i32;
+            let old = bubble.shade.replace(step);
+            if old == step {
+                continue;
+            }
+            if old >= 0 {
+                bubble.skin.remove_css_class(&format!("shade-{old}"));
+            }
+            bubble.skin.add_css_class(&format!("shade-{step}"));
+            for (widget, colour) in bubble.fillets.borrow().iter() {
+                if old >= 0 {
+                    widget.remove_css_class(&format!("fshade-{colour}-{old}"));
+                }
+                widget.add_css_class(&format!("fshade-{colour}-{step}"));
+            }
         }
     }
 
@@ -1281,7 +1354,7 @@ impl ChatView {
         let column = bubble_content();
 
         // In a group, who said it matters; in a 1:1 it is obvious.
-        if self.is_group() && !entry.mine && !entry.sender_identity.is_empty() {
+        if self.is_group() && !entry.mine && !entry.sender_identity.is_empty() && !continued_top {
             let sender = gtk::Label::builder()
                 .label(self.app().identity_name(&entry.sender_identity).as_str())
                 .xalign(0.0)
@@ -1304,6 +1377,23 @@ impl ChatView {
             reply.add_css_class("caption");
             reply.add_css_class("dim-label");
             column.append(&reply);
+        }
+
+        // An inline (Android-style) quote at the start of the message is a
+        // block of its own, like on the phone: darker rounded box over the text.
+        if !entry.deleted {
+            if let (Some(preview), _) = crate::util::split_leading_quote(&entry.text) {
+                let quote = gtk::Label::builder()
+                    .label(util::preview_text(&preview, 120).as_str())
+                    .xalign(0.0)
+                    .wrap(true)
+                    .wrap_mode(gtk::pango::WrapMode::WordChar)
+                    .max_width_chars(40)
+                    .halign(gtk::Align::Start)
+                    .build();
+                quote.add_css_class("quote-block");
+                column.append(&quote);
+            }
         }
 
         let text = bubble_text_label(&display_text(entry));
@@ -1357,8 +1447,9 @@ impl ChatView {
         // özgüllükle ezer, o yüzden `continued-bottom` ayrıca bir şey
         // KALDIRMAK zorunda değil).
         if continued_top {
-            skin.add_css_class("continued-top");
             overlay.add_css_class("bubble-row-continued");
+        } else {
+            overlay.set_margin_top(6);
         }
         // Ölçüm burada (Clamp'ın üst sınırı hesaba katılmış hâliyle, ham
         // `skin` DEĞİL) yapılıyor ki `mark_group_seam` ikinci bir (ve o an
@@ -1392,6 +1483,8 @@ impl ChatView {
             order_key: entry.order_key,
             mine: entry.mine,
             seen: Cell::new(entry.seen),
+            shade: Cell::new(-1),
+            fillets: RefCell::new(Vec::new()),
             reactions,
             status: RefCell::new(entry.status.clone()),
             edited: Cell::new(entry.edited),
@@ -1403,39 +1496,76 @@ impl ChatView {
     /// olmadığını (bkz. `continued-bottom`) ve, genişlikleri belirgin
     /// şekilde farklıysa, aradaki dikişi yumuşatan küçük bir çentiği
     /// işaretler.
+    /// `current` just joined `previous`'s run. Draws the join like the phone:
+    /// the edge both bubbles are aligned to stays straight (square corners),
+    /// and where their widths differ the wider bubble keeps its outer
+    /// (convex) corner while the narrower one's corner becomes square, with a
+    /// concave fillet filling the inside corner between them. The widths are
+    /// read from the real allocation once the rows have been laid out — a
+    /// measure at build time was off by several pixels.
     fn mark_group_seam(&self, previous: &Rc<Bubble>, current: &Rc<Bubble>) {
-        previous.skin.add_css_class("continued-bottom");
+        // Time and ticks only on the last bubble of a run, like the phone.
+        previous.meta.set_visible(false);
 
-        let delta = (previous.content_width - current.content_width).abs();
-        if delta < SEAM_NOTCH_MIN_DELTA {
-            return;
-        }
-        // Çentik, İKİSİNDEN GENİŞ olanın "sarkan" köşesine gider — dikişte
-        // görünen basamak orada oluşuyor (bkz. dosya başı "ucuz yöntem"
-        // notu). `mine` her ikisinde de AYNI (bkz. `insert_entry` gruplama
-        // koşulu), o yüzden hangisinden okunduğu önemli değil.
-        let (host, valign, wider_width) = if previous.content_width > current.content_width {
-            (previous, gtk::Align::End, previous.content_width)
-        } else {
-            (current, gtk::Align::Start, current.content_width)
-        };
+        // `s` is the aligned (shared) side, `o` the open one.
+        let (s, o) = if current.mine { ("r", "l") } else { ("l", "r") };
+        previous.skin.add_css_class(&format!("sq-b{s}"));
+        current.skin.add_css_class(&format!("sq-t{s}"));
 
-        let notch = gtk::Box::builder()
-            .width_request(SEAM_NOTCH_SIZE)
-            .height_request(SEAM_NOTCH_SIZE)
-            .valign(valign)
-            .halign(if current.mine { gtk::Align::End } else { gtk::Align::Start })
-            .build();
-        notch.add_css_class("bubble-seam-notch");
-        // Çentiği köşenin TAM üstüne ortalar — dış hizalanan kenardan
-        // (mine=sağ/theirs=sol) uzaklık, geniş balonun genişliği kadar.
-        let margin = (wider_width - SEAM_NOTCH_SIZE / 2).max(0);
-        if current.mine {
-            notch.set_margin_end(margin);
-        } else {
-            notch.set_margin_start(margin);
-        }
-        host.overlay.add_overlay(&notch);
+        let (previous, current) = (previous.clone(), current.clone());
+        let tries = Cell::new(0u32);
+        glib::timeout_add_local(std::time::Duration::from_millis(40), move || {
+            let (wa, wb) = (previous.skin.width(), current.skin.width());
+            if wa == 0 || wb == 0 {
+                tries.set(tries.get() + 1);
+                return if tries.get() < 50 { glib::ControlFlow::Continue } else { glib::ControlFlow::Break };
+            }
+            if (wa - wb).abs() < SEAM_NOTCH_MIN_DELTA {
+                // Same width: the open side is only slightly rounded.
+                previous.skin.add_css_class(&format!("seam-b{o}"));
+                current.skin.add_css_class(&format!("seam-t{o}"));
+                return glib::ControlFlow::Break;
+            }
+            let colour: &'static str = if current.mine { "mine" } else { "theirs" };
+            // Fillet and the wider bubble's outer corner share one radius and
+            // sit side by side along the step, so both together must fit in
+            // the step (2r <= delta) and in the narrow bubble's height.
+            let narrow_height = if wa > wb { current.skin.height() } else { previous.skin.height() };
+            let r = seam_radius((wa - wb).abs(), narrow_height);
+            let (host, narrow, valign, corner) = if wa > wb {
+                // Upper is wider: the lower one's open top corner is square.
+                current.skin.add_css_class(&format!("sq-t{o}"));
+                previous.skin.add_css_class(&format!("rd-b{o}-{r}"));
+                (&current, &current, gtk::Align::Start, if current.mine { "bl" } else { "br" })
+            } else {
+                // Lower is wider: the upper one's open bottom corner is square.
+                previous.skin.add_css_class(&format!("sq-b{o}"));
+                current.skin.add_css_class(&format!("rd-t{o}-{r}"));
+                (&previous, &previous, gtk::Align::End, if current.mine { "tl" } else { "tr" })
+            };
+            let Some(bounds) = narrow.skin.compute_bounds(&host.overlay) else {
+                return glib::ControlFlow::Break;
+            };
+            let widget = gtk::Box::builder()
+                .width_request(r)
+                .height_request(r)
+                .valign(valign)
+                .halign(if current.mine { gtk::Align::End } else { gtk::Align::Start })
+                .can_target(false)
+                .build();
+            widget.add_css_class(&format!("fillet-{corner}-{r}"));
+            // Colour follows the host bubble's shade (see `update_shading`).
+            let step = if host.shade.get() >= 0 { host.shade.get() } else { SHADE_STEPS / 2 };
+            widget.add_css_class(&format!("fshade-{colour}-{step}"));
+            host.fillets.borrow_mut().push((widget.clone(), colour));
+            if current.mine {
+                widget.set_margin_end((host.overlay.width() as f32 - bounds.x()).round().max(0.0) as i32);
+            } else {
+                widget.set_margin_start((bounds.x() + bounds.width()).round().max(0.0) as i32);
+            }
+            host.overlay.add_overlay(&widget);
+            glib::ControlFlow::Break
+        });
     }
 
     /// Returns the attachment block plus the live state later `file_*`
@@ -2243,7 +2373,7 @@ impl ChatView {
                 let Some(bubble) = bubbles.get(id) else { return false };
                 cache
                     .entry(id.clone())
-                    .or_insert_with(|| bubble.text.label().to_lowercase())
+                    .or_insert_with(|| bubble.text.text().to_lowercase())
                     .contains(&needle)
             })
             .map(|(_, id)| id.clone())
@@ -3012,7 +3142,7 @@ impl ChatView {
 
     fn apply_edit(&self, id: &str, new_text: &str) {
         if let Some(bubble) = self.bubbles.borrow().get(id) {
-            bubble.text.set_label(new_text);
+            bubble.text.set_markup(&crate::util::quote_markup(crate::util::split_leading_quote(new_text).1));
             self.search_lower.borrow_mut().clear();
             bubble.edited.set(true);
             bubble.meta.set_markup(&format_meta(
@@ -3026,7 +3156,7 @@ impl ChatView {
 
     fn apply_delete(&self, id: &str) {
         if let Some(bubble) = self.bubbles.borrow().get(id) {
-            bubble.text.set_label("Message deleted");
+            bubble.text.set_markup("Message deleted");
             self.search_lower.borrow_mut().clear();
             bubble.text.add_css_class("dim-label");
             bubble.text.set_visible(true);
@@ -3042,7 +3172,7 @@ impl ChatView {
     fn apply_status(&self, id: &str, status: &str) {
         let bubbles = self.bubbles.borrow();
         let Some(bubble) = bubbles.get(id) else { return };
-        if !bubble.mine || bubble.seen.get() {
+        if !bubble.mine {
             return;
         }
         // Never downgrade: the end-to-end Ack ("delivered") is a stronger
@@ -3104,10 +3234,8 @@ impl ChatView {
         if !bubble.mine {
             return;
         }
+        // Remembered, but not shown: there is no "seen" tick.
         bubble.seen.set(true);
-        bubble
-            .meta
-            .set_markup(&format_meta(bubble.order_key, Some("sent"), true, bubble.edited.get()));
     }
 
     fn apply_progress(&self, file_id: &str, done: u64, total: u64) {
@@ -3662,10 +3790,10 @@ fn bubble_content() -> gtk::Box {
     gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(2)
-        .margin_top(8)
-        .margin_bottom(8)
-        .margin_start(14)
-        .margin_end(14)
+        .margin_top(5)
+        .margin_bottom(5)
+        .margin_start(11)
+        .margin_end(11)
         .build()
 }
 
@@ -3676,7 +3804,9 @@ fn bubble_content() -> gtk::Box {
 /// an unbroken run of characters (a URL, or someone mashing the keyboard) break
 /// mid-word rather than force the bubble wider than its parent.
 fn bubble_text_label(text: &str) -> gtk::Label {
+    // `text` is Pango markup (see `util::quote_markup`); callers escape.
     gtk::Label::builder()
+        .use_markup(true)
         .label(text)
         .xalign(0.0)
         .wrap(true)
@@ -3767,7 +3897,7 @@ pub fn demo_bubbles() -> gtk::Widget {
     let mut previous: Option<(bool, gtk::Box, i32)> = None;
     for (mine, sample) in samples {
         let column = bubble_content();
-        column.append(&bubble_text_label(sample));
+        column.append(&bubble_text_label(&gtk::glib::markup_escape_text(sample)));
 
         let meta = gtk::Label::builder().label("23:50 ✓").xalign(1.0).build();
         meta.add_css_class("caption");
@@ -3827,11 +3957,18 @@ pub fn demo_bubbles() -> gtk::Widget {
     scroller.upcast()
 }
 
+/// Radius (even px, 2..=`SEAM_RADIUS_MAX`) for a width step of `delta` px next
+/// to a bubble `height` px tall. Sizes match the generated classes in theme.rs.
+fn seam_radius(delta: i32, height: i32) -> i32 {
+    let r = (delta / 2).min(height / 3).min(SEAM_RADIUS_MAX);
+    (r / 2 * 2).max(2)
+}
+
 fn display_text(entry: &Entry) -> String {
     if entry.deleted {
         "Message deleted".to_string()
     } else {
-        crate::util::quote_plain(&entry.text)
+        crate::util::quote_markup(crate::util::split_leading_quote(&entry.text).1)
     }
 }
 
@@ -3852,15 +3989,14 @@ fn meta_text(entry: &Entry, seen: bool) -> String {
 /// timestamp and fixed glyphs), so there is no user text to escape.
 fn format_meta(timestamp: u64, status: Option<&str>, seen: bool, edited: bool) -> String {
     let time = util::format_bubble_time(timestamp);
-    let tick = match (status, seen) {
-        // Seen wins over delivered: it is the later, stronger promise.
-        (_, true) => " ✓✓",
-        (Some("pending"), _) => " ⏱",
-        (Some("error"), _) => " ⚠",
-        // The end-to-end Ack (the core's `delivered` status) — a double tick
-        // in grey, so it does not read as the "seen" tick.
-        (Some("delivered"), _) => "<span foreground=\"grey\"> ✓✓</span>",
-        (Some("sent"), _) => " ✓",
+    // No "seen" tick: the highest mark is the delivered double tick.
+    let _ = seen;
+    let tick = match status {
+        Some("pending") => " ⏱",
+        Some("error") => " ⚠",
+        // The end-to-end Ack (the core's `delivered` status).
+        Some("delivered") => "<span foreground=\"grey\"> ✓✓</span>",
+        Some("sent") => " ✓",
         _ => "",
     };
     if edited {
@@ -3946,7 +4082,7 @@ fn day_separator(timestamp: u64) -> gtk::Widget {
     // ones left stranded by evicted bubbles (they are not tracked in
     // `order`, which only mirrors bubbles).
     label.add_css_class("day-separator");
-    label.set_margin_top(8);
+    label.set_margin_top(12);
     label.set_halign(gtk::Align::Center);
     label.upcast()
 }

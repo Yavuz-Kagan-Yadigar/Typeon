@@ -99,3 +99,6 @@ Linux/packaging/build-dir/
 *.keystore
 !p2p_messenger_android/app/debug.keystore
 !p2p_messenger_android_server/app/debug.keystore
+
+# Linux client built inside the GNOME SDK (see AGENTS.md)
+Linux/target-sdk/

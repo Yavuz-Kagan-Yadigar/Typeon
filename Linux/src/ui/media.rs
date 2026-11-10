@@ -534,9 +534,7 @@ fn save_copy(app: &Rc<App>, path: &str, suggested_name: &str) {
                 // A decrypted private photo: owner-only whenever the
                 // destination filesystem supports Unix permissions (best
                 // effort on a FAT/exFAT stick).
-                use std::os::unix::fs::PermissionsExt;
-                let _ =
-                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600));
+                let _ = crate::util::set_mode(&target, 0o600);
                 copied
             },
             move |result| match result {

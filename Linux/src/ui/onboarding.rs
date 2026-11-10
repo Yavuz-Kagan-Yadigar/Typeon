@@ -55,7 +55,7 @@ impl Drop for WipeOnDrop {
 /// drives it to the main window.
 pub fn start(app: &Rc<App>, host: &adw::ToastOverlay) {
     if !secrets::exists(&app.data_dir) {
-        host.set_child(Some(&welcome_page(app, host)));
+        host.set_child(Some(&framed(&welcome_page(app, host))));
         return;
     }
 
@@ -117,27 +117,20 @@ fn welcome_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
     options.add(&name_row);
     options.add(&passphrase_row);
 
-    let create = gtk::Button::builder().label("Create a new account").build();
-    create.add_css_class("suggested-action");
-    create.add_css_class("pill");
-
+    // Desktops are secondary devices only (owner decision): no new account and
+    // no recovery-file restore here, both would make this computer a primary
+    // that the other devices then depend on while it is switched off.
     let link = gtk::Button::builder()
-        .label("Link to a device I already have")
+        .label("Link to my phone")
         .build();
+    link.add_css_class("suggested-action");
     link.add_css_class("pill");
-
-    let restore = gtk::Button::builder()
-        .label("Restore from a recovery file")
-        .build();
-    restore.add_css_class("pill");
 
     let actions = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
         .build();
-    actions.append(&create);
     actions.append(&link);
-    actions.append(&restore);
 
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -160,13 +153,12 @@ fn welcome_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
         .icon_name("system-users-symbolic")
         .title("Welcome to Typeon")
         .description(
-            "Start a new account on this computer, or join one you already have on another \
-             device.",
+            "This computer joins the account on your phone as a linked device. Create the \
+             account on the phone first.",
         )
         .child(&clamped)
         .build();
 
-    // Reading the two fields is identical for all three routes.
     let read_fields = {
         let name_row = name_row.clone();
         let passphrase_row = passphrase_row.clone();
@@ -184,27 +176,9 @@ fn welcome_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
     {
         let app = app.clone();
         let host = host.clone();
-        let read_fields = read_fields.clone();
-        create.connect_clicked(move |button| {
-            let (name, passphrase) = read_fields();
-            start_fresh_identity(&app, &host, button, &name, &passphrase, false);
-        });
-    }
-    {
-        let app = app.clone();
-        let host = host.clone();
-        let read_fields = read_fields.clone();
         link.connect_clicked(move |button| {
             let (name, passphrase) = read_fields();
-            start_fresh_identity(&app, &host, button, &name, &passphrase, true);
-        });
-    }
-    {
-        let app = app.clone();
-        let host = host.clone();
-        restore.connect_clicked(move |_| {
-            let (name, vault_passphrase) = read_fields();
-            pick_recovery_file(&app, &host, &name, &vault_passphrase);
+            start_fresh_identity(&app, &host, button, &name, &passphrase);
         });
     }
 
@@ -248,15 +222,14 @@ fn set_actions_sensitive(button: &gtk::Button, on: bool) {
     }
 }
 
-/// Generates a brand-new identity and persists it. `awaiting_link` decides
-/// whether this computer is its own account or is about to be adopted by one.
+/// Generates this device's own keys and persists them, waiting to be adopted
+/// by the phone's account (`awaiting_link`).
 fn start_fresh_identity(
     app: &Rc<App>,
     host: &adw::ToastOverlay,
     button: &gtk::Button,
     device_name: &str,
     passphrase: &str,
-    awaiting_link: bool,
 ) {
     // Quick, but the button must not be clickable twice — a second identity
     // would orphan the first.
@@ -290,7 +263,7 @@ fn start_fresh_identity(
     {
         let mut prefs = app.prefs.borrow_mut();
         prefs.device_name = device_name.to_string();
-        prefs.awaiting_link = awaiting_link;
+        prefs.awaiting_link = true;
         prefs.save();
     }
     let (app, host, button) = (app.clone(), host.clone(), button.clone());
@@ -313,142 +286,6 @@ fn start_fresh_identity(
             finish_boot(&app, &host, vault);
         },
     );
-}
-
-/// Recovery restore: pick the file, then ask for its passphrase.
-/// `vault_passphrase` is the *extra passphrase* from the welcome form — the one
-/// that seals the local vault. It is not the recovery file's own passphrase,
-/// which is asked for next; conflating the two silently ignored whatever the
-/// user typed on this route.
-fn pick_recovery_file(
-    app: &Rc<App>,
-    host: &adw::ToastOverlay,
-    device_name: &str,
-    vault_passphrase: &str,
-) {
-    let Some(window) = app.window() else { return };
-    let dialog = gtk::FileDialog::builder()
-        .title("Choose your recovery file")
-        .build();
-
-    let app = app.clone();
-    let host = host.clone();
-    let device_name = device_name.to_string();
-    let vault_passphrase = WipeOnDrop(vault_passphrase.to_string());
-    dialog.open(Some(&window), gtk::gio::Cancellable::NONE, move |result| {
-        let Ok(file) = result else { return };
-        let Some(path) = file.path() else { return };
-        ask_recovery_passphrase(&app, &host, &device_name, &vault_passphrase, path);
-    });
-}
-
-fn ask_recovery_passphrase(
-    app: &Rc<App>,
-    host: &adw::ToastOverlay,
-    device_name: &str,
-    vault_passphrase: &str,
-    path: std::path::PathBuf,
-) {
-    let Some(window) = app.window() else { return };
-    let entry = gtk::PasswordEntry::builder()
-        .show_peek_icon(true)
-        .activates_default(true)
-        .build();
-
-    let dialog = adw::MessageDialog::new(
-        Some(&window),
-        Some("Restore from recovery file"),
-        Some("Enter the passphrase this file was exported with."),
-    );
-    dialog.set_extra_child(Some(&ui::widgets::dialog_field(&entry)));
-    dialog.add_response("cancel", "Cancel");
-    dialog.add_response("restore", "Restore");
-    dialog.set_default_response(Some("restore"));
-    dialog.set_close_response("cancel");
-    dialog.set_response_appearance("restore", adw::ResponseAppearance::Suggested);
-
-    let app = app.clone();
-    let host = host.clone();
-    let device_name = device_name.to_string();
-    let vault_passphrase = WipeOnDrop(vault_passphrase.to_string());
-    dialog.connect_response(None, move |_, response| {
-        if response != "restore" {
-            return;
-        }
-        let passphrase = WipeOnDrop(entry.text().to_string());
-        if passphrase.is_empty() {
-            app.toast("That file cannot be opened without its passphrase.");
-            return;
-        }
-
-        let Some(storage_key) = open_fresh_database(&app) else {
-            app.toast("Could not open the database.");
-            return;
-        };
-
-        // The chats in the file are stored under the history key: without it
-        // in the core every message row failed and only the contacts came back.
-        let mut vault = Vault::new(Vec::new());
-        vault.skipped_key = storage_key;
-        core::set_history_key(&vault.history_key);
-
-        let app_inner = app.clone();
-        let host_inner = host.clone();
-        let name = device_name.clone();
-        // `connect_response` is `Fn`, so the worker gets its own copy — wrapped
-        // here rather than left plain until the thread starts.
-        let vault_passphrase = WipeOnDrop(vault_passphrase.to_string());
-        app.toast("Restoring…");
-        // Argon2id (import, and sealing the vault) is deliberately slow; the
-        // file read is unbounded too — all of it runs off the main thread.
-        let path = path.clone();
-        let data_dir = app.data_dir.clone();
-        app::run_in_background(
-            move || -> Result<Vault, String> {
-                // Both passphrases arrive as WipeOnDrop, so they wipe
-                // themselves whenever this closure ends — normal return, `?`,
-                // or `return` alike.
-                // Same 64 MB cap as the Android client.
-                match std::fs::metadata(&path) {
-                    Ok(meta) if meta.len() <= 64 * 1024 * 1024 => {}
-                    Ok(_) => return Err("that file is too large to be a recovery file".to_string()),
-                    Err(_) => return Err("could not read that file".to_string()),
-                }
-                let mut bytes = std::fs::read(&path).map_err(|_| "could not read that file".to_string())?;
-                let import = core::import_recovery(&bytes, &passphrase, &name);
-                // The recovery file's plaintext leaves the heap as soon as it
-                // has been handed to the core, success or not.
-                bytes.zeroize();
-                import?;
-                let bundle = core::take_pending_secret_bundle();
-                if bundle.is_empty() {
-                    return Err("Restore produced no keys.".to_string());
-                }
-                let mut vault = vault;
-                vault.identity_bundle = bundle;
-                secrets::save(&data_dir, &vault, &vault_passphrase)
-                    .map_err(|error| format!("Could not write the vault: {}", error))?;
-                Ok(vault)
-            },
-            move |result| {
-                let vault = match result {
-                    Ok(vault) => vault,
-                    Err(error) => {
-                        app_inner.toast(&format!("Restore failed: {}", error));
-                        return;
-                    }
-                };
-                {
-                    let mut prefs = app_inner.prefs.borrow_mut();
-                    // A restored identity is a full account, not a pending link.
-                    prefs.awaiting_link = false;
-                    prefs.save();
-                }
-                finish_boot(&app_inner, &host_inner, vault);
-            },
-        );
-    });
-    dialog.present();
 }
 
 // --- route 2: unlock an existing vault ---
@@ -558,7 +395,7 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
         *app.own_identity_id.borrow_mut() = identity_id;
     }
 
-    host.set_child(Some(&spinner_page("Starting the network…")));
+    host.set_child(Some(&framed(&spinner_page("Starting the network…"))));
 
     let (node_mode, tor_enabled, storage_limit) = {
         let prefs = app.prefs.borrow();
@@ -596,7 +433,7 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
                 },
                 move |show_link| {
                     if show_link {
-                        host.set_child(Some(&link_page(&app, &host)));
+                        host.set_child(Some(&framed(&link_page(&app, &host))));
                     } else {
                         ui::window::build_main(&app, &host);
                     }
@@ -767,6 +604,17 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
 
 // --- small shared pieces ---
 
+/// Onboarding pages sit directly in the window with no header bar of their
+/// own, and libadwaita windows draw their own frame: without this there is no
+/// title, no close/minimise button and nothing to drag (Windows has no
+/// server-side decoration to fall back on). The main UI brings its own header.
+fn framed(page: &impl IsA<gtk::Widget>) -> gtk::Widget {
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&adw::HeaderBar::new());
+    toolbar.set_content(Some(page));
+    toolbar.upcast()
+}
+
 fn spinner_page(message: &str) -> gtk::Widget {
     let spinner = gtk::Spinner::new();
     spinner.set_size_request(32, 32);
@@ -796,14 +644,14 @@ fn fatal(app: &Rc<App>, host: &adw::ToastOverlay, title: &str, detail: &str) {
     actions.append(&quit);
     actions.append(&logout);
 
-    host.set_child(Some(
+    host.set_child(Some(&framed(
         &adw::StatusPage::builder()
             .icon_name("dialog-error-symbolic")
             .title(title)
             .description(detail)
             .child(&actions)
             .build(),
-    ));
+    )));
 }
 
 /// The one escape hatch out of onboarding: confirm, then the same wipe as

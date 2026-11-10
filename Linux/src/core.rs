@@ -142,20 +142,6 @@ pub fn export_recovery(passphrase: &str) -> Vec<u8> {
     api::export_recovery(passphrase)
 }
 
-/// Restores an identity from a recovery file. Same contract as
-/// `create_identity`: on success the secret bundle is waiting in
-/// `take_pending_secret_bundle` and must be persisted immediately.
-///
-/// Deliberately slow — the core stretches the passphrase with Argon2id — so
-/// call it off the main thread.
-pub fn import_recovery(
-    file_bytes: &[u8],
-    passphrase: &str,
-    device_name: &str,
-) -> Result<String, String> {
-    parse(api::import_recovery(file_bytes, passphrase, device_name))
-}
-
 // --- network ---
 
 pub fn start_network(node_mode: bool, tor_enabled: bool) -> Result<String, String> {
