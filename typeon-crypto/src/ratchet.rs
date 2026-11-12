@@ -1,21 +1,17 @@
-//! Double Ratchet — Description.md bölüm 3.
+//! Double Ratchet with a hybrid KEM handshake.
 //!
-//! - 3.1: hibrit KEM oturum kurulumu (X25519 + ML-KEM-1024).
-//! - 3.2: simetrik ratchet (her mesajda ilerler) + DH/KEM ratchet
-//!   (30 dakikada bir yeni X25519+ML-KEM çifti üretilip yeniden anahtar
-//!   değişimi yapılır — break-in recovery).
-//! - 3.3: her mesaj paketinin taşıdığı `ratchet_pubkey`, `message_number`,
-//!   `prev_chain_length` alanları burada üretilir/tüketilir.
+//! - Hybrid KEM session setup (X25519 + ML-KEM-1024).
+//! - Symmetric ratchet (advances on every message) plus a DH/KEM ratchet: a fresh
+//!   X25519 + ML-KEM pair every 30 minutes, which restores secrecy after a key leak.
+//! - `ratchet_pubkey`, `message_number` and `prev_chain_length` (see `packet`) are produced
+//!   and consumed here.
 //!
-//! NOT (kriptografi kütüphanesi geçişi): Bu dosya önceden `pqcrypto-kyber`
-//! kullanıyordu — o crate artık bakımsız (RUSTSEC-2024-0381) VE PQClean'in
-//! round-3 taslak Kyber implementasyonuna dayanıyordu, gerçek NIST FIPS 203
-//! ML-KEM standardıyla bayt-uyumsuz. Şimdi RustCrypto'nun aktif bakımlı
-//! `ml-kem` crate'i (gerçek FIPS 203 ML-KEM-1024) kullanılıyor. ml-kem'in
-//! `Decapsulate`/`Encapsulate` trait'leri ayrı bir `kem` crate'inden geliyor
-//! (bkz. Cargo.toml notu) ve üretim/encapsulate her zaman elle bir
-//! `CryptoRngCore` ister — `rand::rngs::OsRng` (rand 0.8) bunun için zaten
-//! uyumlu, x25519-dalek ile aynı RNG paylaşılabilir.
+//! Note on the crypto library: this module used to depend on `pqcrypto-kyber`. That crate is
+//! unmaintained (RUSTSEC-2024-0381) and implemented the round-3 draft Kyber, which is not
+//! byte-compatible with the final FIPS 203 ML-KEM. It now uses the actively maintained
+//! RustCrypto `ml-kem` crate (FIPS 203 ML-KEM-1024). Its `Decapsulate` and `Encapsulate` traits
+//! come from the `kem` crate (see Cargo.toml). Encapsulation always takes a `CryptoRngCore`,
+//! and `rand::rngs::OsRng` (rand 0.8) satisfies it, so the same RNG serves x25519-dalek too.
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
@@ -32,31 +28,27 @@ use zeroize::Zeroize;
 pub type MlKem1024DecapsulationKey = ml_kem::kem::DecapsulationKey<ml_kem::MlKem1024Params>;
 pub type MlKem1024EncapsulationKey = ml_kem::kem::EncapsulationKey<ml_kem::MlKem1024Params>;
 
-/// Spec 3.2 kararı: DH/KEM ratchet adımı 30 dakikada bir (mesaj sayısından
-/// bağımsız, zaman bazlı).
+/// Ratchet policy: a DH/KEM ratchet step every 30 minutes (time-based, independent of message count).
 pub const RATCHET_ROTATION_MS: u64 = 30 * 60 * 1000;
 
-/// Bir alıcının, tek bir gönderenden aynı anda en fazla bu kadar "atlanmış"
-/// (henüz gelmemiş ama aradaki) mesaj anahtarını önbellekte tutması —
-/// bellek tüketimi saldırısına karşı üst sınır (Signal de benzer bir sınır
-/// kullanır, tipik değer 1000 civarındadır).
+/// Upper bound on skipped message keys one receiver caches for a single sender. This limits memory
+/// use under attack. Signal uses a similar limit, typically around 1000.
 const MAX_SKIPPED_KEYS: usize = 1000;
 
-/// How far one packet may move a receive chain forward. Every step is two
-/// HKDF expands done BEFORE the packet is authenticated, so this bounds the
-/// CPU a signed-but-bogus `message_number` costs. Of a jump, only the newest
-/// `MAX_SKIPPED_KEYS` keys are kept.
-// ponytail: a peer that sent more than this many never-delivered packets on
-// one chain stays undecryptable until the next rotation or handshake redo.
+/// How far one packet may advance a receive chain. Each step is two HKDF expansions, done BEFORE the
+/// packet is authenticated, so this bounds the CPU cost of a bogus but signed `message_number`. Of a
+/// jump, only the newest `MAX_SKIPPED_KEYS` keys are kept.
+// ponytail: a peer that sends more than this many undelivered packets on one chain stays
+// undecryptable until the next rotation or handshake.
 const MAX_SKIP_AHEAD: u32 = 2_000;
 
-/// The chain a rotation replaced is dropped this long after that rotation,
-/// even if no newer one came: a late packet older than this stays unread,
-/// and its key no longer waits in memory and on disk.
+/// The chain a rotation replaced is dropped this long after the rotation, even if no newer
+/// rotation came. A packet older than this stays unread, and its key is no longer kept in
+/// memory or on disk.
 pub const OLD_RECV_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
-/// Bir ratchet adımının hibrit (X25519 + ML-KEM) public key'i, serileştirilmiş
-/// halde `MessagePacket.header.ratchet_pubkey` içinde taşınır.
+/// A ratchet step's hybrid (X25519 + ML-KEM) public key, serialized, carried in
+/// `MessagePacket.header.ratchet_pubkey`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RatchetPublicKeys {
     #[serde(with = "serde_bytes")]
@@ -65,12 +57,11 @@ pub struct RatchetPublicKeys {
     pub kyber_pubkey: Vec<u8>,
 }
 
-/// The receive chain a rotation replaced. The peer keeps sending on it until
-/// it has seen the rotation, and packets of the two chains arrive in any
-/// order, so it stays usable (`decrypt` tries it second) until the next
-/// rotation replaces it.
-// ponytail: kept for a whole rotation period. To shorten it, cut the chain at
-// the peer's `prev_chain_length` once its first new-chain packet arrives.
+/// The receive chain a rotation replaced. The peer keeps sending on it until it has seen the
+/// rotation. Packets from the two chains can arrive in any order, so the old chain stays usable
+/// (`decrypt` tries it second) until the next rotation replaces it.
+// ponytail: kept for a full rotation period. To shorten it, cut the chain at the peer's
+// `prev_chain_length` once its first packet on the new chain arrives.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OldRecvChain {
     #[serde(with = "serde_bytes")]
@@ -93,10 +84,10 @@ impl RatchetPublicKeys {
         Ok(buf)
     }
 
-    /// Parses a peer's header field: bounded in size and nesting, and both
-    /// keys checked for their exact length.
+    /// Parses a peer's header field. Bounds the size and nesting, and checks both keys for their
+    /// exact length.
     pub fn from_bytes(data: &[u8]) -> Result<Self, RatchetError> {
-        // 32 + 1568 key bytes and a few bytes of CBOR framing.
+        // 32 bytes X25519 + 1568 bytes ML-KEM-1024 key, plus a few bytes of CBOR framing.
         if data.len() > 2048 {
             return Err(RatchetError::Invalid("Ratchet public key too long"));
         }
@@ -112,103 +103,73 @@ impl RatchetPublicKeys {
     }
 }
 
-/// Bir cihaz-çifti (device-pair) ratchet oturumunun tüm durumu (spec 1.7.1
-/// — Identity_A'nın her cihazı, Identity_B'nin her cihazıyla ayrı bir
-/// oturum tutar; bu struct tek bir cihaz-çifti oturumunu temsil eder).
+/// Full state of one device-pair ratchet session. Each device of identity A keeps a separate
+/// session with each device of identity B. This struct represents one device-pair session.
 #[derive(Clone)]
 pub struct DeviceRatchetState {
     pub root_key: Vec<u8>,
-    /// Spec dışı, hata ayıklama düzeltmesi (bkz. SECURITY.md "Cross-network
-    /// connectivity" bölümündeki gossipsub topic pseudonymization notu):
-    /// `perform_dh_ratchet`'in üzerine yazmadan ÖNCEKİ `root_key` değeri.
-    /// (Güvenilirlik düzeltmesi: artık `respond_to_rotation` da ayarlıyor —
-    /// iki taraf da "bir önceki topic'i bir nesil daha dinle" defteri için
-    /// buna ihtiyaç duyuyor, bkz. network.rs resubscribe çağıranları.)
-    /// Yayın tarafı kullanımı `perform_dh_ratchet` çağıran (rotasyonu
-    /// TETİKLEYEN) tarafta anlamlı — bu, o rotasyonu duyuran mesajın (`rotation_kyber_ciphertext`
-    /// dolu olan) hangi gossipsub topic'inden gönderilmesi gerektiğini
-    /// belirlemek için network.rs `try_publish_raw`'da kullanılır: karşı taraf bu
-    /// mesajı ALANA kadar YENİ `root_key`'i (dolayısıyla yeni topic'i) bilemez
-    /// — o yüzden rotasyonu duyuran mesaj hâlâ ESKİ (paylaşılan) topic'ten
-    /// gönderilmeli, yoksa karşı taraf o topic'e hiç abone olmadığından mesaj
-    /// asla ulaşmaz (gerçek bir üretim hatasıydı — bkz. commit notu).
+    /// The `root_key` as it was before `perform_dh_ratchet` overwrote it. Set by `respond_to_rotation`
+    /// too. Both sides keep it for one generation so that they can keep listening on the previous topic.
+    /// The sending side uses it in `perform_dh_ratchet`: the message that announces a rotation
+    /// (`rotation_kyber_ciphertext` set) must go out on the OLD shared topic. The peer does not know the
+    /// new root key, and so the new topic, until it has received this message. Sending on the new topic
+    /// would mean the peer never hears it. `try_publish_raw` in network.rs picks the topic from this.
     ///
-    /// holds `root_handle` of the previous root, never the root
-    /// itself. With the root, this side's unchanged ratchet secrets and the
-    /// announcement in the clear header re-derived the whole current epoch
-    /// from stored state.
+    /// Holds the `root_handle` of the previous root, never the root itself. With the root, the unchanged
+    /// ratchet secrets and the clear-text announcement would re-derive the whole current epoch from
+    /// stored state.
     pub prev_root_key: Option<Vec<u8>>,
     pub ck_send: Vec<u8>,
     pub ck_recv: Vec<u8>,
-    /// Bu tarafın kendi güncel DH/KEM ratchet anahtar çifti (bir sonraki
-    /// rotasyonda karşı tarafa gönderilecek yeni public key'in kaynağı).
+    /// This side's current DH/KEM ratchet key pair. The source of the next public key sent to the peer
+    /// at the next rotation.
     pub own_x25519_secret: StaticSecret,
     pub own_kyber_secret: MlKem1024DecapsulationKey,
-    /// Karşı taraftan en son alınan ratchet public key'i (rotasyon
-    /// tetiklendiğinde bunlara karşı yeni DH/KEM yapılır).
+    /// The latest ratchet public key received from the peer. A rotation is performed against these.
     pub peer_x25519_pubkey: X25519PublicKey,
     pub peer_kyber_pubkey: MlKem1024EncapsulationKey,
-    /// Bu yönde gönderilen mesaj sayacı (spec 3.3 `message_number`).
+    /// Message counter for this direction (spec 3.3 `message_number`).
     pub send_message_number: u32,
-    /// Karşı taraftan alınan mesaj sayacı — tekrar oynatma / sıra dışı
-    /// paket tespiti için.
+    /// Message counter for the receive direction. Used to detect replays and out-of-order packets.
     pub recv_message_number: u32,
-    /// Son DH/KEM ratchet adımından önceki zincir uzunluğu (spec 3.3
-    /// `prev_chain_length`).
+    /// Length of the chain before the last DH/KEM ratchet step (spec 3.3 `prev_chain_length`).
     pub prev_chain_length: u32,
     pub last_rotation: u64,
-    /// Signal'ın gerçek DH-ratchet modeli (bkz. dosya sonu notu): rotasyonu
-    /// SADECE "henüz karşı tarafın güncel public key'ine cevap vermemiş"
-    /// taraf tetikler — deterministik bir "kim tetikler" kuralı (ör.
-    /// fingerprint karşılaştırması) YOKTUR. Bu bayrak, "kendi tarafımda
-    /// karşı tarafın en son bildiğim public key'ine karşı zaten bir DH/KEM
-    /// adımı yaptım mı" sorusunu cevaplar:
-    /// - `true`: karşı tarafın güncel public key'ine karşı zaten yeni bir
-    ///   keypair ürettim (perform_dh_ratchet çağırdım veya bu oturum yeni
-    ///   kuruldu) — bu durumda BEN rotasyon tetiklemem, sıradaki rotasyon
-    ///   hakkı karşı tarafta (o da benim yeni public key'ime cevap vermeli).
-    /// - `false`: karşı taraf benden sonra rotasyon yaptı (respond_to_rotation
-    ///   çağrıldı) ve ben henüz ONUN yeni public key'ine cevap vermedim —
-    ///   30 dakika dolduğunda BEN tetiklerim (perform_dh_ratchet).
+    /// Signal's DH-ratchet model (see the note at the end of the file): only a side that has NOT yet
+    /// answered the peer's current public key triggers a rotation. There is no deterministic
+    /// "who triggers" rule (such as comparing fingerprints). This flag records whether this side has
+    /// already performed a DH/KEM step against the peer's latest known public key:
+    /// - `true`: this side already generated a new key pair against the peer's current key
+    ///   (`perform_dh_ratchet` ran, or the session was just created). This side does NOT trigger a
+    ///   rotation. The next rotation right belongs to the peer, which must answer this side's new key.
+    /// - `false`: the peer rotated after this side (`respond_to_rotation` ran) and this side has not yet
+    ///   answered its new key. When 30 minutes pass, this side triggers (`perform_dh_ratchet`).
     pub has_responded_to_peer_key: bool,
-    /// Güvenilirlik düzeltmesi (rotasyon duyurusu kaybı): `perform_dh_ratchet`
-    /// tarafından üretilen Kyber ciphertext'i, karşı tarafın rotasyonu
-    /// UYGULADIĞI DOĞRULANANA kadar burada saklanır — send.rs
-    /// `send_message_content_inner` bu değer doluyken HER giden pakete
-    /// rotasyon duyurusunu yeniden ekler. Önceden duyuru SADECE rotasyonu
-    /// tetikleyen tek pakette taşınıyordu; o paket güvenilir teslimli
-    /// olmayan bir türse (TypingIndicator/Ack) ve kaybolursa, karşı taraf
-    /// yeni kök anahtarı ASLA öğrenemiyor ve oturum kalıcı olarak
-    /// kopuyordu. Karşı taraftan yeni zincirde bir paket başarıyla
-    /// çözüldüğünde (rotasyonu uyguladığının kanıtı) temizlenir; tekrarlanan
-    /// duyurular alıcı tarafta idempotenttir (bkz. `respond_to_rotation`
-    /// içindeki çift-uygulama koruması).
+    /// Ciphertext of the last rotation announcement (Kyber ciphertext from `perform_dh_ratchet`). It is
+    /// kept until the peer is seen to have applied the rotation. `send.rs` re-attaches the announcement
+    /// to EVERY outgoing packet while this is set. The announcement used to travel only in the packet
+    /// that triggered the rotation. If that packet was not reliably delivered (TypingIndicator, Ack) and
+    /// it was lost, the peer never learned the new root key and the session broke for good. Cleared when
+    /// a packet on the new chain decrypts (proof the peer applied it). Repeated announcements are
+    /// idempotent on the receiving side (see the double-application guard in `respond_to_rotation`).
     pub pending_rotation_ct: Option<Vec<u8>>,
-    /// Sıra dışı/gecikmeli gelen mesajlar için "atlanmış mesaj anahtarları"
-    /// önbelleği (Signal Double Ratchet'teki standart mekanizma). Bir mesaj
-    /// beklenenden yüksek bir `message_number` ile gelirse, aradaki
-    /// mesajların anahtarları burada saklanır — böylece o mesajlar daha
-    /// sonra (gecikmeli/sırasız) gelirse hâlâ çözülebilir. key = mesaj
-    /// numarası. `MAX_SKIPPED_KEYS` ile sınırlanır (bellek/DoS koruması —
-    /// kötü niyetli biri çok yüksek bir message_number göndererek sınırsız
-    /// bellek tükettiremesin diye). Diske şifreli olarak kalıcılaştırılır
-    /// (bkz. archive.rs `persist_skipped_key`/`load_skipped_keys_from_db`) —
-    /// süreç yeniden başlasa bile gecikmeli mesajlar çözülebilsin diye
-    /// (kapsam sınırı için bkz. lib.rs ilgili not).
+    /// Cache of skipped message keys, for out-of-order and late packets. This is the standard Signal
+    /// Double Ratchet mechanism. If a packet arrives with a `message_number` higher than expected, the
+    /// keys of the messages in between are stored here, so those messages can still be decrypted when
+    /// they arrive late or out of order. Key = message number. Bounded by `MAX_SKIPPED_KEYS` (memory
+    /// and DoS limit, so a malicious sender cannot exhaust memory with a huge `message_number`). Persisted
+    /// to disk encrypted (see `persist_skipped_key` and `load_skipped_keys_from_db` in archive.rs), so
+    /// late messages still decrypt after a process restart. Scope limit: see the related note in lib.rs.
     pub skipped_keys: HashMap<u32, [u8; 32]>,
     /// See `OldRecvChain`.
     pub old_recv: Option<OldRecvChain>,
 }
 
-/// bu struct'ın (`own_x25519_secret`/
-/// `own_kyber_secret` HARİÇ, bkz. Cargo.toml "zeroize" feature notu — onlar
-/// zaten kendi crate'lerinin `ZeroizeOnDrop` implementasyonuyla sıfırlanıyor)
-/// düz `Vec<u8>` olarak tuttuğu simetrik sırlar (`root_key`/`ck_send`/
-/// `ck_recv`) ve atlanmış mesaj anahtarları (`skipped_keys`) önceden normal
-/// Rust `drop` ile (üzerine yazmadan) bellekten çıkıyordu — bir oturum
-/// rotasyon geçirdiğinde (eski root_key değeri atılır) veya kişi/cihaz
-/// silindiğinde/iptal edildiğinde (`self.ratchets.remove`) bu baytlar hâlâ
-/// bellekte kalabilirdi. Artık `Drop` ile açıkça sıfırlanıyor.
+/// Symmetric secrets (`root_key`, `ck_send`, `ck_recv`) and skipped message keys (`skipped_keys`) are
+/// held as plain `Vec<u8>`. Those bytes are wiped on drop. The secret key types (`own_x25519_secret`,
+/// `own_kyber_secret`) are wiped by their own crates' `ZeroizeOnDrop`. Previously these buffers were
+/// simply dropped, so the bytes could survive in memory after a rotation, or after a contact or device
+/// was removed (`self.ratchets.remove`). They are now zeroed explicitly in `Drop`.
 impl Drop for DeviceRatchetState {
     fn drop(&mut self) {
         self.root_key.zeroize();
@@ -221,25 +182,19 @@ impl Drop for DeviceRatchetState {
     }
 }
 
-/// `DeviceRatchetState`'in diske (şifreli) yazılabilir hâli — secret key
-/// tipleri (`StaticSecret`/`MlKem1024DecapsulationKey`/...) doğrudan
-/// `Serialize` implement etmiyor, bu yüzden hepsi ham bayt dizisine
-/// dönüştürülür (aynen `types.rs`'teki `SecretKeyBundle`'ın kendi cihaz
-/// anahtarları için yaptığı gibi — bkz. `generate_identity`/
-/// `load_secret_bundle`). `skipped_keys` KASITLI OLARAK burada YOK: o
-/// zaten ayrı bir tabloda (`skipped_message_keys`) kendi başına kalıcı
-/// kılınıyor (bkz. archive.rs `persist_skipped_key`/`load_skipped_keys_from_db`)
-/// — burada tekrar taşımak, iki kopyanın birbirinden sapma riskini
-/// (data drift) gereksiz yere ekler.
+/// Serializable form of `DeviceRatchetState` for encrypted storage. Secret key types (`StaticSecret`,
+/// `MlKem1024DecapsulationKey`, ...) do not implement `Serialize`, so each is converted to raw bytes
+/// (the same way `SecretKeyBundle` in types.rs stores the device keys; see `generate_identity` and
+/// `load_secret_bundle`). `skipped_keys` is deliberately NOT here. It has its own table
+/// (`skipped_message_keys`) and is persisted separately (see `persist_skipped_key` and
+/// `load_skipped_keys_from_db` in archive.rs). Carrying it twice would risk the two copies drifting apart.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SerializableRatchetState {
     #[serde(with = "serde_bytes")]
     pub root_key: Vec<u8>,
-    /// bkz. `DeviceRatchetState.prev_root_key` dokümantasyonu — süreç bir
-    /// rotasyon ANONS EDEN ama henüz karşı tarafça alınmamış bir mesajın
-    /// ortasında yeniden başlarsa, `pending_envelopes` kalıcı olmadığından
-    /// bu değer kaybolursa yeniden denemeler yanlış topic'e düşebilir; bu
-    /// yüzden burada da kalıcı kılınıyor.
+    /// See `DeviceRatchetState.prev_root_key`. If the process restarts in the middle of an announced
+    /// rotation that the peer has not yet received, `pending_envelopes` is not persisted. Retries then
+    /// could go to the wrong topic if this value were lost. That is why it is persisted here too.
     #[serde(with = "serde_bytes")]
     pub prev_root_key: Option<Vec<u8>>,
     #[serde(with = "serde_bytes")]
@@ -257,9 +212,8 @@ pub struct SerializableRatchetState {
     pub prev_chain_length: u32,
     pub last_rotation: u64,
     pub has_responded_to_peer_key: bool,
-    /// bkz. `DeviceRatchetState.pending_rotation_ct` — `#[serde(default)]`:
-    /// bu alan eklenmeden önce diske yazılmış eski state kayıtları alanı
-    /// içermez, `None` ile geriye dönük uyumlu şekilde yüklenir.
+    /// See `DeviceRatchetState.pending_rotation_ct`. `#[serde(default)]`: state written before this field
+    /// existed has no such key, and it loads as `None`.
     #[serde(default, with = "serde_bytes")]
     pub pending_rotation_ct: Option<Vec<u8>>,
     #[serde(default)]
@@ -278,9 +232,8 @@ impl Drop for SerializableRatchetState {
 }
 
 impl DeviceRatchetState {
-    /// bkz. `SerializableRatchetState` dokümantasyonu. `skipped_keys`
-    /// hariç tutulur — çağıran taraf (persist.rs) onu ayrıca yükleyip
-    /// dönen değere atamalıdır (bkz. `from_persistable`).
+    /// See `SerializableRatchetState`. `skipped_keys` is left out. The caller (persist.rs) loads it
+    /// separately and assigns it to the returned value (see `from_persistable`).
     pub fn to_persistable(&self) -> SerializableRatchetState {
         SerializableRatchetState {
             root_key: self.root_key.clone(),
@@ -301,10 +254,9 @@ impl DeviceRatchetState {
         }
     }
 
-    /// `skipped_keys`: diskteki `skipped_message_keys` tablosundan ayrıca
-    /// yüklenip buraya geçirilmelidir (bkz. archive.rs
-    /// `load_skipped_keys_from_db`) — bu fonksiyon kendisi o tabloya
-    /// erişmez (ratchet.rs kripto-only katman, dosya başı notuyla tutarlı).
+    /// `skipped_keys`: must be loaded separately from the `skipped_message_keys` table on disk and
+    /// passed in here (see `load_skipped_keys_from_db` in archive.rs). This function does not touch
+    /// that table itself. ratchet.rs is the crypto-only layer, consistent with the header note.
     pub fn from_persistable(mut s: SerializableRatchetState, skipped_keys: HashMap<u32, [u8; 32]>) -> Result<Self, RatchetError> {
         let mut own_kyber_encoded: ml_kem::Encoded<MlKem1024DecapsulationKey> = s.own_kyber_secret.as_slice()
             .try_into().map_err(|_| "Bozuk kayıtlı Kyber secret key")?;
@@ -332,22 +284,21 @@ impl DeviceRatchetState {
     }
 }
 
-/// `DeviceRatchetState::decrypt` çağrısı sırasında skipped-key
-/// önbelleğinde olan değişiklikleri raporlar — çağıran taraf (persist.rs) bu
-/// bilgiyle diskteki şifreli kopyayı güncel tutar.
+/// Reports changes to the skipped-key cache made during `DeviceRatchetState::decrypt`. The caller
+/// (persist.rs) uses this to keep the encrypted copy on disk up to date.
 #[derive(Default)]
 pub struct SkippedKeyChanges {
-    /// Yeni eklenen skipped-key'ler: (message_number, key).
+    /// Newly added skipped keys: (message_number, key).
     pub added: Vec<(u32, [u8; 32])>,
-    /// Kullanılıp (ya da yer açmak için atılıp) önbellekten ve diskten
-    /// silinmesi gereken message_number'lar.
+    /// Message numbers whose keys were used, or evicted to make room, and must be deleted from the
+    /// cache and from disk.
     pub used: Vec<u32>,
-    /// The packet's rotation was applied: root key, both chains and the peer
-    /// keys changed, and the skipped keys on disk belong to the old chain.
+    /// The packet's rotation was applied: root key, both chains and the peer keys changed, and the
+    /// skipped keys on disk belong to the old chain.
     pub rotated: bool,
-    /// The packet was on the chain before the last rotation (`OldRecvChain`).
-    /// It does not prove the peer applied our rotation, and `added`/`used`
-    /// are empty: that chain's skipped keys live inside the ratchet state.
+    /// The packet was on the chain before the last rotation (`OldRecvChain`). It does not prove the
+    /// peer applied our rotation. `added` and `used` are empty: that chain's skipped keys live inside
+    /// the ratchet state.
     pub old_chain: bool,
 }
 
@@ -362,9 +313,9 @@ fn set_secret(slot: &mut Vec<u8>, new: Vec<u8>) {
     *slot = new;
 }
 
-/// What a key derivation is bound to: both sides' ratchet public keys and the
-/// KEM ciphertext, initiator (of the handshake or of the rotation) first.
-/// Every part has a fixed length, so plain concatenation is unambiguous.
+/// What a key derivation is bound to: both sides' ratchet public keys and the KEM ciphertext, with the
+/// initiator (of the handshake or of the rotation) first. Every part has a fixed length, so plain
+/// concatenation is unambiguous.
 fn transcript(init_x25519: &[u8; 32], init_kyber: &[u8], kyber_ct: &[u8], resp_x25519: &[u8; 32], resp_kyber: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
     for part in [&init_x25519[..], init_kyber, kyber_ct, &resp_x25519[..], resp_kyber] {
@@ -373,7 +324,7 @@ fn transcript(init_x25519: &[u8; 32], init_kyber: &[u8], kyber_ct: &[u8], resp_x
     h.finalize().into()
 }
 
-/// ratchet failures as values, so callers branch on the kind, not the text.
+/// Ratchet failures as values, so callers branch on the kind, not on the message text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RatchetError {
     /// Behind the chain and no skipped key: already decrypted, or evicted.
@@ -410,15 +361,15 @@ impl From<&'static str> for RatchetError {
     }
 }
 
-/// `?` into the many `Result<_, String>` callers.
+/// Lets `?` convert these into the many `Result<_, String>` callers.
 impl From<RatchetError> for String {
     fn from(e: RatchetError) -> Self {
         e.to_string()
     }
 }
 
-/// X25519 with a small-order public key gives the same output for every
-/// secret: the classical half of the hybrid would silently be a constant.
+/// X25519 with a small-order public key gives the same output for every secret. The classical half of
+/// the hybrid would silently become a constant.
 fn x25519(secret: &StaticSecret, public: &X25519PublicKey) -> Result<x25519_dalek::SharedSecret, RatchetError> {
     let shared = secret.diffie_hellman(public);
     if !shared.was_contributory() {
@@ -427,10 +378,9 @@ fn x25519(secret: &StaticSecret, public: &X25519PublicKey) -> Result<x25519_dale
     Ok(shared)
 }
 
-/// Root/send/recv anahtarlarını HKDF ile türetir. `we_initiated` yön
-/// simetrisini garanti eder: initiator'ın send-key'i responder'ın
-/// recv-key'ine eşit olur. `transcript` is part of every label (v0.2): the
-/// keys depend on who exchanged what, not only on the shared secrets.
+/// Derives the root, send and receive keys with HKDF. `we_initiated` makes the direction symmetric: the
+/// initiator's send key equals the responder's receive key. `transcript` is part of every label (v0.2).
+/// The keys depend on who exchanged what, not only on the shared secrets.
 fn derive_keys(mut ikm: Vec<u8>, transcript: &[u8; 32], we_initiated: bool) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), RatchetError> {
     let hk = Hkdf::<Sha256>::new(None, &ikm);
     ikm.zeroize();
@@ -439,20 +389,18 @@ fn derive_keys(mut ikm: Vec<u8>, transcript: &[u8; 32], we_initiated: bool) -> R
     for (label, key) in labels.into_iter().zip(keys.iter_mut()) {
         hk.expand_multi_info(&[label, transcript], key).map_err(|_| "HKDF expand failed")?;
     }
-    // From slices: `keys.map` copied each key by value into a temporary that
-    // nothing wiped.
+    // Built from slices: `keys.map` would copy each key by value into a temporary that nothing wiped.
     let (root_key, key_a, key_b) = (keys[0].to_vec(), keys[1].to_vec(), keys[2].to_vec());
     keys.zeroize();
     Ok(if we_initiated { (root_key, key_a, key_b) } else { (root_key, key_b, key_a) })
 }
 
-/// `kem_key_to` header: X25519 public key + ML-KEM-1024 ciphertext.
+/// Header of `kem_key_to`: X25519 public key (32 bytes) + ML-KEM-1024 ciphertext.
 pub const KEM_HEADER_LEN: usize = 32 + 1568;
 
-/// The key of a hybrid KEM to a device's public KEM keys, without a session:
-/// the sender half of `DeviceRatchetState::initiate` (fresh X25519 secret,
-/// ML-KEM encapsulation, both shared secrets and the transcript into HKDF),
-/// with no ML-KEM key of the sender. Returns the key and the header the
+/// Key of a hybrid KEM to a device's public KEM keys, without a session. This is the sender half of
+/// `DeviceRatchetState::initiate`: fresh X25519 secret, ML-KEM encapsulation, both shared secrets and
+/// the transcript into HKDF, with no ML-KEM key of the sender. Returns the key and the header the
 /// recipient needs: `x25519 public (32) || ML-KEM ciphertext`.
 pub fn kem_key_to(peer_x25519_pubkey: &[u8], peer_kyber_pubkey: &[u8]) -> Result<([u8; 32], Vec<u8>), RatchetError> {
     let mut csprng = OsRng;
@@ -469,7 +417,7 @@ pub fn kem_key_to(peer_x25519_pubkey: &[u8], peer_kyber_pubkey: &[u8]) -> Result
     Ok((kem_key(ikm, &bound_to)?, [&own_x25519_bytes[..], &kyber_ct].concat()))
 }
 
-/// The recipient half of `kem_key_to` (as `DeviceRatchetState::respond`).
+/// Recipient half of `kem_key_to` (as in `DeviceRatchetState::respond`).
 pub fn kem_key_from(own_x25519_secret: &StaticSecret, own_kyber_secret: &MlKem1024DecapsulationKey, header: &[u8]) -> Result<[u8; 32], RatchetError> {
     if header.len() != KEM_HEADER_LEN {
         return Err(RatchetError::Invalid("Bad KEM header length"));
@@ -488,7 +436,7 @@ pub fn kem_key_from(own_x25519_secret: &StaticSecret, own_kyber_secret: &MlKem10
     kem_key(ikm, &bound_to)
 }
 
-/// `derive_keys` for one key, under a label of its own.
+/// `derive_keys` for one key, under its own label.
 fn kem_key(mut ikm: Vec<u8>, transcript: &[u8; 32]) -> Result<[u8; 32], RatchetError> {
     let hk = Hkdf::<Sha256>::new(None, &ikm);
     ikm.zeroize();
@@ -497,9 +445,8 @@ fn kem_key(mut ikm: Vec<u8>, transcript: &[u8; 32]) -> Result<[u8; 32], RatchetE
     Ok(key)
 }
 
-/// One symmetric ratchet step (spec 3.2): the key of this message and the
-/// chain key of the next. The send and the receive side share it, so the two
-/// HKDF labels cannot drift apart.
+/// One symmetric ratchet step (spec 3.2): the key of this message and the chain key of the next. Send
+/// and receive share it, so their two HKDF labels cannot drift apart.
 fn chain_step(chain_key: &[u8]) -> Result<([u8; 32], [u8; 32]), RatchetError> {
     let hk = Hkdf::<Sha256>::new(None, chain_key);
     let mut message_key = [0u8; 32];
@@ -510,21 +457,19 @@ fn chain_step(chain_key: &[u8]) -> Result<([u8; 32], [u8; 32]), RatchetError> {
 }
 
 impl DeviceRatchetState {
-    /// Spec 3.1: ilk bağlantıda çift taraflı hibrit el sıkışma.
-    /// `root_key = HKDF( shared_secret_classic || shared_secret_pq, salt="p2pmsg-v0.1" )`
+    /// Spec 3.1: hybrid, two-way handshake on first contact.
+    /// `root_key = HKDF(shared_secret_classic || shared_secret_pq, salt = "p2pmsg-v0.1")`
     ///
-    /// Initiator tarafı: kendi taze X25519+Kyber çiftini üretir, karşı
-    /// tarafın public key'lerine karşı DH+encapsulate yapar. Kyber
-    /// ciphertext, `HandshakeInit` paketiyle karşı tarafa taşınmalıdır
-    /// (bkz. `crate::packet::HandshakeInit`).
+    /// Initiator: generates a fresh X25519 + ML-KEM pair, then performs DH and encapsulation
+    /// against the peer's public keys. The ML-KEM ciphertext must reach the peer in the
+    /// `HandshakeInit` packet (see `crate::packet::HandshakeInit`).
     pub fn initiate(
         peer_x25519_pubkey: &[u8],
         peer_kyber_pubkey: &[u8],
         now_ms: u64,
     ) -> Result<(Self, Vec<u8>, Vec<u8>), RatchetError> {
-        // X25519 (x25519-dalek, rand_core 0.6 üzerinden rand 0.8) ve ML-KEM
-        // (ml-kem crate'i, rand_core 0.6.4) aynı rand_core majör sürümünü
-        // kullanıyor — aynı `OsRng`'u ikisine de geçirebiliriz.
+        // X25519 (x25519-dalek, via rand_core 0.6 and rand 0.8) and ML-KEM (ml-kem, rand_core 0.6.4) use
+        // the same major rand_core, so one `OsRng` can be passed to both.
         let mut csprng = OsRng;
         let own_x25519_secret = StaticSecret::random_from_rng(&mut csprng);
 
@@ -532,7 +477,7 @@ impl DeviceRatchetState {
         let peer_x25519_pk = X25519PublicKey::from(peer_x25519_bytes);
         let dh_shared = x25519(&own_x25519_secret, &peer_x25519_pk)?;
 
-        // Kendi taze Kyber çiftimizi üret.
+        // Generate a fresh ML-KEM pair for this side.
         let (own_kyber_secret, own_kyber_ek) = MlKem1024::generate(&mut csprng);
         let own_kyber_public_bytes = own_kyber_ek.as_bytes().to_vec();
 
@@ -561,9 +506,8 @@ impl DeviceRatchetState {
             recv_message_number: 0,
             prev_chain_length: 0,
             last_rotation: now_ms,
-            // Initiator, responder'ın İLK public key'ine karşı zaten
-            // DH+encapsulate yaptı — bu "cevap verdim" sayılır. Sıradaki
-            // rotasyon hakkı responder'da.
+            // The initiator already did DH and encapsulation against the responder's FIRST public key.
+            // That counts as having answered. The next rotation right belongs to the responder.
             has_responded_to_peer_key: true,
             pending_rotation_ct: None,
             skipped_keys: HashMap::new(),
@@ -572,16 +516,14 @@ impl DeviceRatchetState {
         Ok((state, kyber_ct, own_kyber_public_bytes))
     }
 
-    /// Responder tarafı: gelen `HandshakeInit`'teki initiator public key'i
-    /// ve Kyber ciphertext'i kullanarak aynı anahtarları türetir.
+    /// Responder: derives the same keys from the initiator's public key and ML-KEM ciphertext in the
+    /// incoming `HandshakeInit`.
     ///
-    /// Nothing here is random: the same `HandshakeInit` always gives the same
-    /// state, and the long-term keys are the only secrets in it. So a
-    /// responder never sends on this chain. `should_rotate` is true at once
-    /// (`is_fresh_responder`) and the caller rotates before its first send:
-    /// a replayed init cannot make it reuse a key and nonce, and only what
-    /// the initiator sent before that rotation depends on the long-term keys
-    /// alone (the price of a handshake without a round trip).
+    /// Nothing here is random. The same `HandshakeInit` always gives the same state, and the long-term
+    /// keys are the only secrets in it. So a responder never sends on this chain. `should_rotate` is true
+    /// at once (`is_fresh_responder`), and the caller rotates before its first send. A replayed init then
+    /// cannot make it reuse a key and nonce. Only what the initiator sent before that rotation depends on
+    /// the long-term keys alone. That is the cost of a handshake without a round trip.
     pub fn respond(
         own_x25519_secret: StaticSecret,
         own_kyber_secret: MlKem1024DecapsulationKey,
@@ -620,9 +562,9 @@ impl DeviceRatchetState {
             recv_message_number: 0,
             prev_chain_length: 0,
             last_rotation: now_ms,
-            // Responder henüz initiator'ın public key'ine cevap vermedi —
-            // rotasyonu TETİKLEME hakkı responder'da, ve ilk gönderiminden
-            // önce kullanır (bkz. fonksiyon notu, `is_fresh_responder`).
+            // The responder has not yet answered the initiator's public key. The right to trigger a
+            // rotation is the responder's, and it is used before its first send (see the function note,
+            // `is_fresh_responder`).
             has_responded_to_peer_key: false,
             pending_rotation_ct: None,
             skipped_keys: HashMap::new(),
@@ -630,8 +572,8 @@ impl DeviceRatchetState {
         })
     }
 
-    /// Bu tarafın güncel ratchet public key'lerini (karşı tarafa
-    /// `MessagePacket.header.ratchet_pubkey` içinde gönderilecek) döner.
+    /// Returns this side's current ratchet public keys (sent to the peer in
+    /// `MessagePacket.header.ratchet_pubkey`).
     pub fn own_ratchet_pubkeys(&self) -> RatchetPublicKeys {
         RatchetPublicKeys {
             x25519_pubkey: X25519PublicKey::from(&self.own_x25519_secret).as_bytes().to_vec(),
@@ -639,25 +581,19 @@ impl DeviceRatchetState {
         }
     }
 
-    /// DH/KEM ratchet adımı (spec 3.2): yeni bir X25519+ML-KEM çifti üretir,
-    /// karşı tarafın şu an bilinen (son alınan) public key'lerine karşı
-    /// yeniden anahtar değişimi yapar, root/send/recv anahtarlarını tazeler.
-    /// `prev_chain_length` bir önceki `send_message_number`'a ayarlanır,
-    /// `send_message_number` sıfırlanır — spec 3.3'teki alanların anlamı
-    /// budur (karşı taraf `prev_chain_length` ile "eski zincirdeki son
-    /// mesaj numarası" bilgisini alır).
+    /// DH/KEM ratchet step (spec 3.2): generates a new X25519 + ML-KEM pair, performs key exchange against
+    /// the peer's latest known public keys, and refreshes the root, send and receive keys.
+    /// `prev_chain_length` is set to the previous `send_message_number`, and `send_message_number` is reset.
+    /// This is the meaning of the spec 3.3 fields: the peer learns "last message number on the old chain"
+    /// from `prev_chain_length`.
     ///
-    /// Sadece `should_rotate()` true dönerse çağrılmalıdır — bu, Signal'ın
-    /// gerçek modeline uygun olarak "ben zaten karşı tarafın güncel
-    /// key'ine cevap verdim mi" (`has_responded_to_peer_key`) durumunu da
-    /// içerir; deterministik bir "kim tetikler" kuralı YOKTUR, sadece
-    /// henüz cevap vermemiş taraf tetikler (bkz. dosya sonu notu).
+    /// Call only when `should_rotate()` is true. That check includes Signal's rule: "have I already answered
+    /// the peer's current key" (`has_responded_to_peer_key`). There is no deterministic "who triggers" rule.
+    /// Only a side that has not yet answered triggers (see the note at the end of the file).
     ///
-    /// Döndürülen Kyber ciphertext, çağıran tarafça bir sonraki
-    /// `MessagePacket`'in header'ındaki `ratchet_pubkey` alanıyla BİRLİKTE
-    /// karşı tarafa gönderilmelidir (`RatchetPublicKeys` + bu ciphertext).
-    /// Karşı taraf bunu aldığında `respond_to_rotation` ile senkronize
-    /// olmalıdır.
+    /// The returned ML-KEM ciphertext must be sent to the peer with the next `MessagePacket`, in its header
+    /// `ratchet_pubkey` field (`RatchetPublicKeys` plus this ciphertext). The peer synchronizes with
+    /// `respond_to_rotation` when it receives it.
     pub fn perform_dh_ratchet(&mut self, now_ms: u64) -> Result<Vec<u8>, RatchetError> {
         let mut csprng = OsRng;
         let new_x25519_secret = StaticSecret::random_from_rng(&mut csprng);
@@ -673,33 +609,30 @@ impl DeviceRatchetState {
             X25519PublicKey::from(&new_x25519_secret).as_bytes(), &new_kyber_ek.as_bytes(), &kyber_ct,
             self.peer_x25519_pubkey.as_bytes(), &self.peer_kyber_pubkey.as_bytes(),
         );
-        // Bu fonksiyon her zaman "ben tetikliyorum" anlamına gelir —
-        // we_initiated=true.
+        // This function always means "this side triggers": we_initiated = true.
         let keys = derive_keys(ikm, &bound_to, true)?;
 
         self.rotate_chains(keys, now_ms);
         self.own_x25519_secret = new_x25519_secret;
         self.own_kyber_secret = new_kyber_secret;
-        // Karşı tarafın (rotasyon öncesi) bilinen public key'ine karşı
-        // encapsulate ettik — "cevap verdim" sayılır. Sıradaki rotasyon
-        // hakkı artık karşı tarafta.
+        // Encapsulated against the peer's previous (pre-rotation) public key. That counts as having answered.
+        // The next rotation right is now the peer's.
         self.has_responded_to_peer_key = true;
-        // bkz. `pending_rotation_ct` alanı — karşı taraf rotasyonu uyguladığı
-        // doğrulanana kadar bu duyuru her giden pakete yeniden eklenir.
+        // See `pending_rotation_ct`. The announcement is re-attached to every outgoing packet until the peer
+        // is seen to have applied the rotation.
         self.pending_rotation_ct = Some(kyber_ct.clone());
         Ok(kyber_ct)
     }
 
-    /// What the session topic and the server seal are derived from:
-    /// `root_handle(root_key)`, and `prev_root_key` one generation back.
+    /// What the session topic and the server seal are derived from: `root_handle(root_key)`, and
+    /// `prev_root_key` one generation back.
     pub fn root_handle_now(&self) -> Vec<u8> {
         root_handle(&self.root_key)
     }
 
-    /// The part both sides of a rotation share: new root and chains, counters
-    /// back to 0. The old root stays one generation (`prev_root_key`: the
-    /// announcement still travels on its topic), and so does the old receive
-    /// chain with its skipped keys (`OldRecvChain`).
+    /// The part both sides share in a rotation: new root and chains, counters back to 0. The old root stays
+    /// for one generation (`prev_root_key`: the announcement still travels on its topic). The old receive
+    /// chain stays too, with its skipped keys (`OldRecvChain`).
     fn rotate_chains(&mut self, (root_key, ck_send, ck_recv): (Vec<u8>, Vec<u8>, Vec<u8>), now_ms: u64) {
         self.prev_chain_length = self.send_message_number;
         self.send_message_number = 0;
@@ -717,44 +650,32 @@ impl DeviceRatchetState {
         self.last_rotation = now_ms;
     }
 
-    /// Alıcı tarafın rotasyona TEPKİ vermesi: karşı taraf `perform_dh_ratchet`
-    /// çağırıp bize (a) yeni `ratchet_pubkey`'ini (hem X25519 hem Kyber
-    /// public key) VE (b) o rotasyonun ürettiği Kyber ciphertext'ini
-    /// (`MessagePacketHeader.rotation_kyber_ciphertext`) gönderdiğinde
-    /// çağrılır. Bu, `perform_dh_ratchet`'in "encapsulate" ettiği tarafın
-    /// karşılığıdır: biz KENDİ yeni bir keypair üretmeyiz (rotasyonu biz
-    /// başlatmadık), sadece karşı tarafın gönderdiği ciphertext'i kendi
-    /// (ROTASYON ÖNCESİ, hâlâ geçerli) Kyber secret'ımızla decapsulate
-    /// ederiz — bu, spec 3.2'nin "iki taraf da aynı yeni kök anahtarı
-    /// türetir" gereksinimini karşılar.
+    /// Receive-side reaction to a rotation. Called when the peer ran `perform_dh_ratchet` and sent us (a) its
+    /// new `ratchet_pubkey` (both X25519 and Kyber) and (b) the ciphertext from that rotation
+    /// (`MessagePacketHeader.rotation_kyber_ciphertext`). This is the counterpart of the "encapsulate" side
+    /// of `perform_dh_ratchet`. We do NOT generate a new key pair (we did not start the rotation). We
+    /// decapsulate the peer's ciphertext with our own (PRE-rotation, still valid) Kyber secret. That meets
+    /// spec 3.2: both sides derive the same new root key.
     ///
-    /// `new_peer_keys`, karşı tarafın YENİ (rotasyon sonrası) X25519+Kyber
-    /// public key çiftidir — hem şimdiki decapsulate'te (X25519 kısmı) hem
-    /// de bizim GELECEKTEKİ rotasyonlarımızda (Kyber kısmı,
-    /// `perform_dh_ratchet`'in `self.peer_kyber_pubkey`'e karşı encapsulate
-    /// etmesi için) kullanılacağından ikisi birden burada güncellenir.
+    /// `new_peer_keys` is the peer's NEW (post-rotation) X25519 + Kyber public key pair. Both parts are
+    /// updated here: the X25519 part is used in this decapsulation, and the Kyber part is used by our future
+    /// rotations (`perform_dh_ratchet` encapsulates against `self.peer_kyber_pubkey`).
     ///
-    /// Dönüş: `Ok(true)` = rotasyon UYGULANDI; `Ok(false)` = bu duyuru
-    /// ZATEN uygulanmıştı, hiçbir durum değişmedi (aşağıdaki koruma).
+    /// Returns: `Ok(true)` = rotation APPLIED. `Ok(false)` = this announcement was ALREADY applied, and no state
+    /// changed (guard below).
     ///
-    /// KRİTİK (çift-uygulama koruması): bu fonksiyon KDF'e mevcut
-    /// `root_key`'i katar — AYNI duyuruyu iki kez uygulamak, gönderenin
-    /// hiç görmediği bir kök anahtar türetir ve oturumu KALICI olarak
-    /// koparırdı. Aynı duyurunun tekrar gelmesi ise kaçınılmaz: gönderenin
-    /// `awaiting_confirmation` mekanizması, Ack kaybolduğunda AYNI zarfı
-    /// (aynı rotation ciphertext'iyle) yeniden yayınlar; ayrıca
-    /// `pending_rotation_ct` yeniden-duyuru mekanizması da (bkz. o alan)
-    /// duyuruyu kasıtlı olarak tekrarlar. Karşı tarafın X25519 public
-    /// key'i her rotasyonda TAZE ÜRETİLDİĞİ için, gelen key'in kayıtlı
-    /// `peer_x25519_pubkey` ile AYNI olması "bu rotasyon zaten uygulandı"
-    /// demektir — güvenle yok sayılır.
+    /// Critical (double-application guard): this function mixes the current `root_key` into the KDF. Applying
+    /// the same announcement twice would derive a root key the sender never saw, and would break the session for
+    /// good. Repeats are unavoidable: the sender's `awaiting_confirmation` mechanism re-sends the SAME envelope
+    /// (with the same rotation ciphertext) if an Ack was lost, and `pending_rotation_ct` deliberately repeats the
+    /// announcement (see that field). The peer's X25519 public key is freshly generated at every rotation. So if
+    /// the incoming key equals the stored `peer_x25519_pubkey`, the rotation was already applied, and it is
+    /// safely ignored.
     ///
-    /// Private: nothing here is authenticated. ML-KEM decapsulation never
-    /// fails (a ciphertext made for another key gives pseudo-random bytes),
-    /// and the guard above only knows the current peer key, so a delayed
-    /// announcement of an older rotation would overwrite root and chains with
-    /// garbage. `decrypt` runs this on a copy and keeps the result only when
-    /// the packet then decrypts on the new chain.
+    /// Private: nothing here is authenticated. ML-KEM decapsulation never fails (a ciphertext made for another
+    /// key gives pseudo-random bytes). The guard above knows only the current peer key. So a delayed
+    /// announcement of an older rotation would overwrite the root and chains with garbage. `decrypt` runs this
+    /// on a copy and keeps the result only if the packet then decrypts on the new chain.
     fn respond_to_rotation(&mut self, new_peer_keys: &RatchetPublicKeys, rotation_kyber_ciphertext: &[u8], now_ms: u64) -> Result<bool, RatchetError> {
         let x25519_bytes: [u8; 32] = new_peer_keys.x25519_pubkey.as_slice().try_into().map_err(|_| "Bad peer X25519 key length")?;
         if x25519_bytes == *self.peer_x25519_pubkey.as_bytes() {
@@ -763,15 +684,12 @@ impl DeviceRatchetState {
         let new_peer_x25519_pk = X25519PublicKey::from(x25519_bytes);
         let new_peer_kyber_pk = kyber_pubkey_from_bytes(&new_peer_keys.kyber_pubkey)?;
 
-        // DH: KENDİ (rotasyon öncesi, hâlâ geçerli) X25519 secret'ımızla,
-        // karşı tarafın YENİ X25519 public key'ine karşı.
+        // DH: our OWN (pre-rotation, still valid) X25519 secret, against the peer's NEW X25519 public key.
         let dh_shared = x25519(&self.own_x25519_secret, &new_peer_x25519_pk)?;
 
-        // KEM: karşı tarafın bize gönderdiği ciphertext'i, KENDİ (rotasyon
-        // öncesi, hâlâ geçerli) Kyber secret'ımızla decapsulate ediyoruz —
-        // perform_dh_ratchet'teki `self.peer_kyber_pubkey.encapsulate(...)`
-        // çağrısının simetriği (karşı taraf BİZİM eski Kyber public
-        // key'imize karşı encapsulate etmişti).
+        // KEM: decapsulate the peer's ciphertext with our OWN (pre-rotation, still valid) Kyber secret. This
+        // mirrors the `self.peer_kyber_pubkey.encapsulate(...)` call in `perform_dh_ratchet`. The peer
+        // encapsulated against our OLD Kyber public key.
         let ct = kyber_ciphertext_from_bytes(rotation_kyber_ciphertext)?;
         let mut kyber_shared = self.own_kyber_secret.decapsulate(&ct).map_err(|_| "Kyber decapsulate failed")?;
 
@@ -781,50 +699,39 @@ impl DeviceRatchetState {
             &x25519_bytes, &new_peer_kyber_pk.as_bytes(), rotation_kyber_ciphertext,
             X25519PublicKey::from(&self.own_x25519_secret).as_bytes(), &self.own_kyber_secret.encapsulation_key().as_bytes(),
         );
-        // Rotasyonu BİZ başlatmadık, karşı taraf başlattı — we_initiated=false.
+        // We did not start this rotation, the peer did: we_initiated = false.
         let keys = derive_keys(ikm, &bound_to, false)?;
 
-        // `prev_chain_length` = BENİM önceki gönderme zincirimin uzunluğu
-        //`perform_dh_ratchet` ile aynı.
+        // `prev_chain_length` is MY previous send-chain length, as in `perform_dh_ratchet`.
         self.rotate_chains(keys, now_ms);
-        // Karşı taraf rotasyon yaptıysa bizim MEVCUT public key'imizi
-        // biliyor demektir — hâlâ tekrarlanan bir eski duyurumuz varsa
-        // artık gereksiz (bkz. `pending_rotation_ct`).
+        // If the peer rotated, it already knows our CURRENT public key. A lingering repeated announcement from
+        // an older rotation is no longer needed (see `pending_rotation_ct`).
         self.pending_rotation_ct = None;
-        // Kendi own_x25519_secret/own_kyber_secret'ımızı DEĞİŞTİRMİYORUZ —
-        // rotasyonu biz başlatmadık, kendi anahtar çiftimiz aynı kalır; bir
-        // sonraki rotasyonu BİZ başlatırsak (perform_dh_ratchet) o zaman
-        // yenileriz. Peer public key'lerinin ikisini de güncelliyoruz (bkz.
-        // fonksiyon dokümantasyonu — Kyber tarafı gelecekteki rotasyonlar
-        // için gerekli).
+        // We do NOT change our own `own_x25519_secret` / `own_kyber_secret`. We did not start the rotation, so
+        // our key pair stays the same. We regenerate it only when WE start a rotation (`perform_dh_ratchet`).
+        // The peer's public keys are updated in both parts (see the function documentation; the Kyber part is
+        // needed for future rotations).
         self.peer_x25519_pubkey = new_peer_x25519_pk;
         self.peer_kyber_pubkey = new_peer_kyber_pk;
-        // Karşı taraf yeni bir public key üretti, biz henüz BU yeni
-        // key'e karşı kendi tarafımızda bir DH/KEM adımı yapmadık —
-        // sıradaki rotasyon hakkı bizde (30 dakika dolduğunda BİZ
-        // perform_dh_ratchet çağırırız).
+        // The peer generated a new public key, and this side has not yet done a DH/KEM step against it. The
+        // next rotation right is ours: we call `perform_dh_ratchet` when 30 minutes have passed.
         self.has_responded_to_peer_key = false;
         Ok(true)
     }
 
-    /// Spec 3.2: 30 dakika kuralı + Signal'ın gerçek modeli — SADECE henüz
-    /// karşı tarafın güncel public key'ine cevap vermemiş taraf (
-    /// `has_responded_to_peer_key == false`) rotasyonu tetikleyebilir.
-    /// Cevap zaten verilmişse (sıradaki rotasyon hakkı karşı tarafta),
-    /// 30 dakika dolmuş olsa bile BİZ tetiklemeyiz — karşı tarafın kendi
-    /// mesajıyla (ya da rotasyonuyla) gelmesini bekleriz. Bu, deterministik
-    /// bir "kim tetikler" kuralı (ör. fingerprint karşılaştırması) yerine
-    /// Signal'ın asimetrik "sırası gelen tetikler" modelini uygular.
+    /// Spec 3.2: the 30-minute rule, following Signal's model. ONLY a side that has not yet answered the peer's
+    /// current public key (`has_responded_to_peer_key == false`) may trigger a rotation. If this side has
+    /// already answered (the next rotation right is the peer's), it does not trigger even after 30 minutes. It
+    /// waits for the peer's own message or rotation. This is Signal's asymmetric "whose turn it is" model, not a
+    /// deterministic rule like comparing fingerprints.
     ///
-    /// A responder that has not rotated yet does it before its first send,
-    /// whatever the clock says (see `respond`).
+    /// A responder that has not rotated yet does so before its first send, whatever the clock says (see `respond`).
     pub fn should_rotate(&self, now_ms: u64) -> bool {
-        // `saturating_sub`: `last_rotation` gelecekte olabilir (saat geriye
-        // gitti, ya da başka bir cihazda ileri saatle üretilmiş kalıcı bir
-        // state) — çıplak çıkarma release'de sarar (spurious rotasyon),
-        // debug'da panikler. Doygun çıkarma her iki durumu da güvenli kılar.
-        // `abs_diff`: a clock set back more than a period also rotates,
-        // instead of stalling until it passes `last_rotation` again.
+        // `saturating_sub`: `last_rotation` may be in the future (the clock went back, or a persisted state was
+        // produced on a device with a fast clock). A plain subtraction wraps in release builds (a spurious
+        // rotation) and panics in debug. Saturating subtraction is safe in both cases.
+        // `abs_diff`: a clock set back by more than one period also rotates, instead of stalling until it
+        // passes `last_rotation` again.
         !self.has_responded_to_peer_key
             && (self.is_fresh_responder() || now_ms.abs_diff(self.last_rotation) > RATCHET_ROTATION_MS)
     }
@@ -834,10 +741,9 @@ impl DeviceRatchetState {
         !self.has_responded_to_peer_key && self.prev_root_key.is_none()
     }
 
-    /// Nothing from the peer has decrypted in this session: it may never have
-    /// processed our handshake. A rotation resets `recv_message_number`, so
-    /// the chain before it counts too. (A state stored before `old_recv`
-    /// existed has none: there, any rotation is taken as "heard".)
+    /// Nothing from the peer has decrypted in this session yet, so it may never have processed our handshake. A
+    /// rotation resets `recv_message_number`, so the chain before it counts too. (A state stored before `old_recv`
+    /// existed has none. There, any rotation counts as "heard".)
     pub fn never_heard(&self) -> bool {
         self.recv_message_number == 0
             && match &self.old_recv {
@@ -846,17 +752,14 @@ impl DeviceRatchetState {
             }
     }
 
-    /// Bir sonraki gönderilecek mesajı şifreler (spec 3.3 `MessagePacket`
-    /// alanlarını üretir). Nonce, message_number'dan deterministik türetilir
-    /// (aynı chain key altında iki farklı mesaj numarası asla aynı nonce'u
-    /// üretmez, bu da AEAD güvenliği için yeterlidir).
+    /// Encrypts the next outgoing message (produces the spec 3.3 `MessagePacket` fields). The nonce is derived
+    /// deterministically from `message_number`. Under one chain key, two message numbers never produce the same
+    /// nonce, which is enough for AEAD security.
     ///
-    /// `aad`: the packet's raw header bytes: the tag binds them, so
-    /// the header the receiver acts on is the one the sender encrypted under.
-    /// `next_send_numbers` gives the numbers to put in that header first.
+    /// `aad` is the packet's raw header bytes. The tag binds them, so the header the receiver acts on is the one
+    /// the sender encrypted under. `next_send_numbers` gives the numbers to put in that header first.
     pub fn encrypt_next(&mut self, plaintext: &[u8], aad: &[u8]) -> Result<(Vec<u8>, u32, u32), RatchetError> {
-        // The handshake chain of a responder is a function of the
-        // HandshakeInit alone (see `respond`): never sent on.
+        // The responder's handshake chain is a function of `HandshakeInit` alone (see `respond`). It is never sent on.
         if self.is_fresh_responder() {
             return Err(RatchetError::ResponderMustRotate);
         }
@@ -871,32 +774,29 @@ impl DeviceRatchetState {
         let cipher = ChaCha20Poly1305::new_from_slice(&message_key).map_err(|_| "Invalid key")?;
         let nonce = nonce_from_message_number(message_number);
         let ciphertext = cipher.encrypt(&nonce, Payload { msg: plaintext, aad }).map_err(|_| "Encryption failed")?;
-        // bkz. `DeviceRatchetState`'in `Drop` notu — bu, tek bir mesaja özel
-        // anahtar, kullanıldıktan hemen sonra bellekten (üzerine yazılarak)
-        // temizleniyor; fonksiyon dönüşünü beklemiyor.
+        // See the `Drop` note on `DeviceRatchetState`. This key belongs to one message. It is wiped right after use
+        // (overwritten), and the function does not wait for the return.
         message_key.zeroize();
 
         Ok((ciphertext, message_number, self.prev_chain_length))
     }
 
-    /// `(message_number, prev_chain_length)` the next `encrypt_next` uses.
+    /// `(message_number, prev_chain_length)` that the next `encrypt_next` uses.
     pub fn next_send_numbers(&self) -> (u32, u32) {
         (self.send_message_number, self.prev_chain_length)
     }
 
-    /// Gelen bir mesajı çözer. `message_number` paketin header'ından gelir;
-    /// `rotation` is the header's `(ratchet_pubkey, rotation_kyber_ciphertext)`
-    /// when the packet announces a rotation.
+    /// Decrypts an incoming message. `message_number` comes from the packet header. `rotation` is the header's
+    /// `(ratchet_pubkey, rotation_kyber_ciphertext)` when the packet announces a rotation.
     ///
-    /// Three attempts, and the state changes only for the one whose AEAD tag
-    /// verifies (bkz. `chain_decrypt`):
-    /// 1. a rotation not applied yet: applied to a copy, kept if the packet
-    ///    decrypts on the new chain (`SkippedKeyChanges::rotated`);
-    /// 2. the current receive chain;
-    /// 3. the chain before the last rotation (`SkippedKeyChanges::old_chain`).
+    /// Three attempts. State changes only for the attempt whose AEAD tag verifies (see `chain_decrypt`):
+    /// 1. A rotation not yet applied: applied to a copy, kept if the packet decrypts on the new chain
+    ///    (`SkippedKeyChanges::rotated`).
+    /// 2. The current receive chain.
+    /// 3. The chain before the last rotation (`SkippedKeyChanges::old_chain`).
     ///
-    /// Bu fonksiyon hiçbir disk I/O yapmaz: dönen `SkippedKeyChanges` ile
-    /// çağıran taraf (archive.rs) diskteki skipped-key tablosunu günceller.
+    /// This function does no disk I/O. The caller (archive.rs) uses the returned `SkippedKeyChanges` to update
+    /// the skipped-key table on disk.
     pub fn decrypt(
         &mut self,
         ciphertext: &[u8],
@@ -909,8 +809,7 @@ impl DeviceRatchetState {
             self.old_recv = None;
         }
         if let Some((new_peer_keys, kyber_ct)) = rotation {
-            // Checked before the copy: the announcement is repeated on every
-            // packet until we answer on the new chain.
+            // Checked before the copy: the announcement is repeated on every packet until we answer on the new chain.
             if new_peer_keys.x25519_pubkey != self.peer_x25519_pubkey.as_bytes() {
                 let mut candidate = self.clone();
                 if let Ok(true) = candidate.respond_to_rotation(new_peer_keys, kyber_ct, now_ms) {
@@ -936,32 +835,29 @@ impl DeviceRatchetState {
                     changes.old_chain = true;
                     return Ok((plaintext, changes));
                 }
-                // A consumed packet of the old chain: a duplicate, not a
-                // diverged session. The current chain's
+                // A consumed packet of the old chain: a duplicate, not a diverged session. The current chain's
                 // DecryptFailed counted it toward the 3-strike reset.
                 Err(RatchetError::KeyNotFound(n)) if message_number < old_next => return Err(RatchetError::KeyNotFound(n)),
                 Err(_) => {}
             }
         }
-        // The current chain's error: the caller tells a duplicate
-        // (`RatchetError::KeyNotFound`) from a diverged session by it.
+        // The error of the current chain. The caller tells a duplicate (`RatchetError::KeyNotFound`) from a
+        // diverged session by it.
         Err(current_err)
     }
 }
 
-/// Decrypts on one receive chain (`chain_key`, `next` expected number, its
-/// `skipped` keys). Signal Double Ratchet'teki standart mekanizma:
+/// Decrypts on one receive chain (`chain_key`, the expected `next` number, and its `skipped` keys). The standard
+/// Signal Double Ratchet mechanism:
 ///
-/// - `message_number >= next`: zincir o mesaja kadar ilerletilir, aradaki
-///   mesajların anahtarları `skipped`'e kaydedilir (en fazla `MAX_SKIP_AHEAD`
-///   adım; önbellekte en yeni `MAX_SKIPPED_KEYS` anahtar kalır, daha eskileri
-///   atılır — a full cache used to refuse every later out-of-order packet).
-/// - `message_number < next`: geç gelen bir mesaj; anahtarı `skipped`'te
-///   varsa oradan alınıp silinir, yoksa hata.
+/// - `message_number >= next`: the chain is advanced to that message. The keys of the messages in between are
+///   stored in `skipped` (at most `MAX_SKIP_AHEAD` steps). The cache keeps the newest `MAX_SKIPPED_KEYS` keys and
+///   evicts older ones. A full cache used to refuse every later out-of-order packet.
+/// - `message_number < next`: a late message. Its key is taken from `skipped` and removed. If it is not there,
+///   this is an error.
 ///
-/// Candidate keys are computed locally and written back only after the AEAD
-/// tag verified: a signed packet with a made-up `message_number` and garbage
-/// ciphertext must not move the chain.
+/// Candidate keys are computed locally and written back only after the AEAD tag verifies. A signed packet with a
+/// made-up `message_number` and garbage ciphertext must not move the chain.
 fn chain_decrypt(
     chain_key: &mut Vec<u8>,
     next: &mut u32,
@@ -1020,7 +916,7 @@ fn chain_decrypt(
             for (number, key) in &changes.added {
                 skipped.insert(*number, *key);
             }
-            // One sort, not a scan of the whole map per evicted key.
+            // One sort, not a scan of the whole map for every evicted key.
             let excess = skipped.len().saturating_sub(MAX_SKIPPED_KEYS);
             if excess > 0 {
                 let mut numbers: Vec<u32> = skipped.keys().copied().collect();
@@ -1043,20 +939,18 @@ fn chain_decrypt(
     Ok((plaintext, changes))
 }
 
-/// Message number'dan deterministik 12-byte nonce türetir (ChaCha20-Poly1305
-/// için). Aynı chain key altında her message_number benzersiz olduğundan
-/// (spec 3.2 simetrik ratchet ilerlemesi) nonce çakışması oluşmaz.
+/// Derives a deterministic 12-byte nonce from the message number (for ChaCha20-Poly1305). Under one chain key,
+/// every message_number is unique (spec 3.2 symmetric ratchet progression), so nonces never collide.
 fn nonce_from_message_number(n: u32) -> Nonce {
     let mut bytes = [0u8; 12];
     bytes[8..12].copy_from_slice(&n.to_be_bytes());
     *Nonce::from_slice(&bytes)
 }
 
-/// Ham bayt dizisinden bir ML-KEM-1024 EncapsulationKey (public key) ayrıştırır.
-/// `EncodedSizeUser::from_bytes` bu implementasyonda infallible'dır (ml-kem
-/// public key noktası doğrulaması yapmaz, sadece boy kontrolü `try_into()`
-/// ile burada yapılır). `hybrid_array::Array<T,N>` doğrudan `TryFrom<&[u8]>`
-/// implement ediyor, bu yüzden `bytes.try_into()` derlenir.
+/// Parses a raw byte slice into an ML-KEM-1024 EncapsulationKey (public key). In this implementation
+/// `EncodedSizeUser::from_bytes` is infallible (ml-kem does not validate the public key point, only the
+/// length). The length check is done here with `try_into()`. `hybrid_array::Array<T, N>` implements
+/// `TryFrom<&[u8]>`, so `bytes.try_into()` compiles.
 fn kyber_pubkey_from_bytes(bytes: &[u8]) -> Result<MlKem1024EncapsulationKey, RatchetError> {
     let encoded: ml_kem::Encoded<MlKem1024EncapsulationKey> = bytes
         .try_into()
@@ -1064,37 +958,31 @@ fn kyber_pubkey_from_bytes(bytes: &[u8]) -> Result<MlKem1024EncapsulationKey, Ra
     Ok(MlKem1024EncapsulationKey::from_bytes(&encoded))
 }
 
-/// Ham bayt dizisinden bir ML-KEM-1024 Ciphertext ayrıştırır.
+/// Parses a raw byte slice into an ML-KEM-1024 ciphertext.
 fn kyber_ciphertext_from_bytes(bytes: &[u8]) -> Result<MlKemCiphertext<MlKem1024>, RatchetError> {
     bytes.try_into().map_err(|_| RatchetError::Invalid("Bad Kyber ciphertext length"))
 }
 
-// NOTE: Sıra dışı gelen mesajlar için "skipped message keys" cache'i var
-// (`skipped_keys`, bkz. `chain_decrypt`). Rotasyonda önbellek, eski alma
-// zinciriyle birlikte `old_recv`'e taşınır ve bir nesil daha kullanılabilir.
-// Güncel zincirin önbelleği ayrı bir tabloda, state'in geri kalanı (eski
-// zincir dahil) `SerializableRatchetState` olarak diske yazılır — ikisi de
-// archive.rs/persist.rs tarafında şifreli (`persist_skipped_key`, `persist_ratchet_state`).
+// NOTE: out-of-order messages use the skipped-message-key cache (`skipped_keys`, see `chain_decrypt`). On a
+// rotation, the cache moves with the old receive chain into `old_recv`, and stays usable for one more
+// generation. The current chain's cache lives in its own table. The rest of the state, including the old chain,
+// is written to disk as `SerializableRatchetState`. Both are encrypted in archive.rs and persist.rs
+// (`persist_skipped_key`, `persist_ratchet_state`).
 //
-// NOTE / [SIGNAL MODELİ]: `perform_dh_ratchet`/`respond_to_rotation` çifti
-// Signal'ın GERÇEK asimetrik modelini uyguluyor — deterministik bir
-// "fingerprint küçük olan tetikler" kuralı YOK. Bunun yerine her
-// `DeviceRatchetState`, `has_responded_to_peer_key` bayrağıyla "sıradaki
-// rotasyonu tetikleme hakkı bende mi karşı tarafta mı" bilgisini taşır:
-// - İlk el sıkışmada initiator=true (responder'a zaten cevap verdi),
-//   responder=false (henüz initiator'a cevap vermedi).
-// - `perform_dh_ratchet` çağıran taraf true'ya döner (karşı tarafın key'ine
-//   cevap verdi, sıra onda).
-// - `respond_to_rotation` çağıran taraf false'a döner (karşı taraf yeni key
-//   üretti, henüz ona cevap vermedi, sıra bizde).
-// `should_rotate()` = `!has_responded_to_peer_key && 30 dakika doldu`. Bu,
-// Signal'ın "sırası gelen taraf tetikler" modelinin doğrudan karşılığı;
-// iki taraf da aynı anda tetiklemeye çalışamaz çünkü her an sadece BİR
-// tarafın bayrağı `false`'tur.
+// NOTE [SIGNAL MODEL]: the `perform_dh_ratchet` / `respond_to_rotation` pair implements Signal's real asymmetric
+// model. There is no deterministic "the smaller fingerprint triggers" rule. Instead each `DeviceRatchetState`
+// carries `has_responded_to_peer_key` to record who holds the right to trigger the next rotation:
+// - In the first handshake, initiator = true (it already answered the responder), responder = false (it has not
+//   yet answered the initiator).
+// - The side that calls `perform_dh_ratchet` sets it to true (it answered the peer's key, and the turn is now the peer's).
+// - The side that calls `respond_to_rotation` sets it to false (the peer generated a new key, this side has not
+//   answered it yet, and the turn is ours).
+// `should_rotate()` = `!has_responded_to_peer_key && 30 minutes have passed`. This is the direct counterpart of
+// Signal's "whoever's turn it is triggers" model. Both sides cannot trigger at once, because at any moment only one
+// side's flag is `false`.
 
-/// One-way handle of a root key: the gossipsub topic and the server seal key
-/// are derived from it, so the previous generation can be kept for those
-/// without keeping its root.
+/// One-way handle of a root key. The gossipsub topic and the server seal key are derived from it, so the previous
+/// generation can be kept for those without keeping its root.
 pub fn root_handle(root_key: &[u8]) -> Vec<u8> {
     let hk = Hkdf::<Sha256>::new(None, root_key);
     let mut out = vec![0u8; 32];
@@ -1108,9 +996,8 @@ mod tests {
 
     const T0: u64 = 1_000_000;
 
-    /// A handshake as the core does it: the responder's long-term KEM keys,
-    /// the initiator's fresh ones (`state.own_x25519_secret`, not its identity
-    /// key — that mix-up once made every message fail to decrypt).
+    /// A handshake as the core performs it: the responder's long-term KEM keys, and the initiator's fresh ones
+    /// (`state.own_x25519_secret`, not its identity key; mixing these up once made every message fail to decrypt).
     /// Returns (initiator, responder).
     fn session() -> (DeviceRatchetState, DeviceRatchetState) {
         let (init, x_secret, kyber_secret) = handshake_init();
@@ -1148,8 +1035,7 @@ mod tests {
         ).expect("respond should succeed")
     }
 
-    /// `from` rotates and sends `text` with the announcement: (keys, kyber
-    /// ciphertext, message ciphertext, message number).
+    /// `from` rotates and sends `text` with the announcement: (keys, Kyber ciphertext, message ciphertext, message number).
     fn rotate_and_send(from: &mut DeviceRatchetState, text: &[u8]) -> (RatchetPublicKeys, Vec<u8>, Vec<u8>, u32) {
         let kyber_ct = from.perform_dh_ratchet(T0).unwrap();
         let (ciphertext, number, _) = from.encrypt_next(text, b"").unwrap();
@@ -1170,8 +1056,7 @@ mod tests {
         assert_eq!(initiator.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0, b"").unwrap().0, b"selam");
     }
 
-    /// the header is the AEAD's associated data; another header fails
-    /// the tag and leaves the chain where it was.
+    /// The header is the AEAD's associated data. Another header fails the tag and leaves the chain where it was.
     #[test]
     fn changed_header_does_not_decrypt() {
         let (mut initiator, mut responder) = session();
@@ -1181,9 +1066,8 @@ mod tests {
         assert_eq!(responder.decrypt(&ciphertext, number, None, T0, b"header").unwrap().0, b"m");
     }
 
-    /// Findings 1 and 2: packets of the chain a rotation replaced still
-    /// decrypt, on the side that rotated and on the side that followed, in
-    /// any order.
+    /// Packets of the chain that a rotation replaced still decrypt, on the side that rotated and on the side that
+    /// followed, in any order.
     #[test]
     fn old_chain_packets_survive_a_rotation() {
         let (mut b, mut a) = session();
@@ -1210,7 +1094,7 @@ mod tests {
         assert_eq!(b.decrypt(&late_a0, n_a0, None, T0, b"").unwrap().0, b"a0");
         assert!(b.decrypt(&late_a0, n_a0, None, T0, b"").is_err(), "a replay must not decrypt twice");
 
-        // The repeated announcement is a no-op, and the new chains work both ways.
+        // The repeated announcement is a no-op, and the new chains work in both directions.
         let (ciphertext, number, _) = b.encrypt_next(b"b2", b"").unwrap();
         let (plain, changes) = a.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0, b"").unwrap();
         assert_eq!(plain, b"b2");
@@ -1221,8 +1105,8 @@ mod tests {
         assert!(!changes.old_chain);
     }
 
-    /// after a rotation both sides keep only the handle of the
-    /// old root, and the two handles match (topic and server seal agree).
+    /// After a rotation, both sides keep only the handle of the old root, and the two handles match (topic and
+    /// server seal agree).
     #[test]
     fn rotation_keeps_only_a_handle_of_the_old_root() {
         let (mut b, mut a) = session();
@@ -1235,8 +1119,8 @@ mod tests {
         assert_eq!(a.root_handle_now(), b.root_handle_now());
     }
 
-    /// Finding 3: an announcement that does not belong to this state (here: a
-    /// rotation made for another session) leaves it untouched.
+    /// An announcement that does not belong to this state (here, a rotation made for another session) leaves
+    /// it untouched.
     #[test]
     fn foreign_rotation_does_not_commit() {
         let (mut b, mut a) = session();
@@ -1250,8 +1134,7 @@ mod tests {
         assert_eq!(a.decrypt(&ciphertext, number, None, T0, b"").unwrap().0, b"still fine");
     }
 
-    /// Finding 4: a long run of never-delivered packets does not kill the
-    /// receive direction; the cache keeps the newest keys.
+    /// A long run of undelivered packets does not kill the receive direction. The cache keeps the newest keys.
     #[test]
     fn skipped_key_cache_evicts_instead_of_refusing() {
         let (mut a, mut b) = session();
@@ -1276,9 +1159,8 @@ mod tests {
         assert_eq!(b.recv_message_number, 1403);
     }
 
-    /// Findings 12 and 13: a replayed HandshakeInit gives the responder the
-    /// same state again, so it must rotate before it sends; after that the
-    /// two replays share no send key.
+    /// A replayed HandshakeInit gives the responder the same state again, so it must rotate before it sends. After
+    /// that, the two replays share no send key.
     #[test]
     fn responder_rotates_before_its_first_send() {
         let (init, x_secret, kyber_secret) = handshake_init();
@@ -1296,8 +1178,8 @@ mod tests {
         assert!(first.never_heard() && init.0.never_heard());
     }
 
-    /// Finding 14: a small-order X25519 key is refused, and the derived keys
-    /// depend on the transcript, not only on the shared secrets.
+    /// A small-order X25519 key is refused, and the derived keys depend on the transcript, not only on the shared
+    /// secrets.
     #[test]
     fn key_derivation_checks_and_binds_its_inputs() {
         let (_, kyber_ek) = MlKem1024::generate(&mut OsRng);
@@ -1310,9 +1192,8 @@ mod tests {
         assert_eq!((&a.0, &a.1, &a.2), (&b.0, &b.2, &b.1));
     }
 
-    /// A state stored by a version before `serde_bytes` and `old_recv` (byte
-    /// fields as CBOR integer arrays) must still load: otherwise the update
-    /// drops every session.
+    /// A state stored by a version from before `serde_bytes` and `old_recv` (byte fields as CBOR integer arrays)
+    /// must still load. Otherwise the update would drop every session.
     #[test]
     fn stored_state_of_an_older_version_still_loads() {
         #[derive(Serialize)]

@@ -1,43 +1,39 @@
-//! Typeon sunucusu — headless Linux daemon'ı.
+//! Typeon server: headless Linux daemon.
 //!
-//! Gerçekçi dağıtım budur: her zaman açık, ulaşılabilir bir VPS. Android
-//! sunucu uygulaması (bkz. `p2p_messenger_android_server/`) aynı çekirdeği
-//! kullanır ama işletim sistemi onu bellek baskısı altında öldürebilir —
-//! oradaki senaryo "evde duran yedek bir telefon", "üretim" değil.
+//! This is the intended deployment: an always-on, reachable VPS. The Android server app (see
+//! `p2p_messenger_android_server/`) uses the same core, but the OS may kill it under memory pressure. That
+//! setup is "a spare phone at home", not production.
 //!
-//! Kullanım:
+//! Usage:
 //!
 //! ```text
-//! typeon-server run                          # sunucuyu çalıştır
-//! typeon-server join-code                    # KALICI katılım kodu (herkes)
-//! typeon-server join-code rotate             # kodu döndür, eskisini iptal et
-//! typeon-server invite new [etiket] [adet]   # tek/az kullanımlık davet kodu
+//! typeon-server run                          # run the server
+//! typeon-server join-code                    # permanent join code (for everyone)
+//! typeon-server join-code rotate             # rotate the code, invalidating the old one
+//! typeon-server invite new [label] [uses]    # single- or few-use invite code
 //! typeon-server invite list
 //! typeon-server devices list
 //! typeon-server devices revoke <enrollment_id_hex>
-//! typeon-server address                      # ilan edilen adresler
+//! typeon-server address                      # advertised addresses
 //! ```
 //!
-//! Yapılandırma ortam değişkenlerinden okunur — bir yapılandırma dosyası
-//! biçimi icat etmeye gerek yok, systemd zaten `Environment=` ile bunu
-//! doğal olarak yapıyor:
+//! Configuration comes from environment variables. No config file format is needed, because systemd already
+//! handles `Environment=` naturally:
 //!
-//! - `TYPEON_SERVER_DIR`   (varsayılan `~/.local/share/typeon-server`)
-//! - `TYPEON_SERVER_NODE`  (`1` ile Kad Server + Circuit Relay v2 hizmeti)
+//! - `TYPEON_SERVER_DIR`   (default `~/.local/share/typeon-server`)
+//! - `TYPEON_SERVER_NODE`  (`1` enables the Kademlia server and Circuit Relay v2 service)
 //! - `TYPEON_SERVER_NAME`
-//! - `TYPEON_SERVER_BUDGET_BYTES` (total disk the server may use; default
-//!   `DEFAULT_BUDGET_BYTES`, 16 GiB)
+//! - `TYPEON_SERVER_BUDGET_BYTES` (total disk the server may use; default `DEFAULT_BUDGET_BYTES`, 16 GiB)
 //! - `TYPEON_SERVER_DB_KEY` (optional 64-hex SQLCipher key; a plain DB is migrated)
-//! - `TYPEON_SERVER_MAX_DEVICES` (most enrolled devices; default 64)
+//! - `TYPEON_SERVER_MAX_DEVICES` (maximum enrolled devices; default 64)
 
 use std::path::PathBuf;
 
 use typeon_server::store::Store;
 use typeon_server::{now_ms, ServerConfig, ServerCore};
 
-/// Total disk budget when `TYPEON_SERVER_BUDGET_BYTES` is not set. The
-/// library default (64 devices x per-device quotas = 336 GiB) let enrolled
-/// clients fill a small VPS disk.
+/// Total disk budget when `TYPEON_SERVER_BUDGET_BYTES` is not set. The library default (64 devices times the
+/// per-device quotas, 336 GiB) would let enrolled clients fill a small VPS disk.
 const DEFAULT_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 fn data_dir() -> PathBuf {
@@ -53,7 +49,7 @@ fn data_dir() -> PathBuf {
 }
 
 fn env_flag(key: &str, default: bool) -> bool {
-    // Only a known word counts; "" or a typo keeps the default (and says so).
+    // Only a known word counts. An empty string or a typo keeps the default, and the daemon says so.
     match std::env::var(key).map(|v| v.trim().to_ascii_lowercase()) {
         Ok(v) if ["1", "true", "yes", "on"].contains(&v.as_str()) => true,
         Ok(v) if ["0", "false", "no", "off"].contains(&v.as_str()) => false,
@@ -71,10 +67,8 @@ fn build_config() -> ServerConfig {
     if let Ok(name) = std::env::var("TYPEON_SERVER_NAME") {
         cfg.server_name = name;
     }
-    // Bu denetimde bulundu: `total_storage_budget_bytes` okunuyor ama hiçbir
-    // yerde set edilmiyordu, yani sunucunun TOPLAM disk tavanı
-    // ölü koddu — yalnızca kayıt başına kotalar uygulanıyordu ve N kayıtla
-    // gerçek kullanım N × kota'ya çıkabiliyordu.
+    // Found in review: `total_storage_budget_bytes` was read but never set anywhere. The server's total disk ceiling was
+    // dead code. Only per-record quotas applied, so N records could grow real usage to N times the quota.
     cfg.total_storage_budget_bytes = Some(DEFAULT_BUDGET_BYTES);
     match std::env::var("TYPEON_SERVER_BUDGET_BYTES") {
         Ok(v) => match v.trim().parse::<u64>() {
@@ -95,9 +89,8 @@ fn build_config() -> ServerConfig {
     cfg
 }
 
-/// Management commands open ONLY the database. Building a `ServerCore` here
-/// started a second Tor client on the state dir the daemon holds locked: the
-/// command waited 90 s and failed while the server was running. The address a
+/// Management commands open ONLY the database. Building a `ServerCore` here started a second Tor client on the state
+/// directory the daemon holds locked. The command then waited 90 s and failed while the server was running. The address a
 /// code needs is the one the daemon last wrote to the DB.
 fn open_store() -> Store {
     match Store::open(&data_dir().join("typeon_server.db")) {
@@ -109,7 +102,7 @@ fn open_store() -> Store {
     }
 }
 
-/// A CLI number: absent = `default`, unparsable = usage error (not `default`).
+/// A CLI number: absent means `default`. Unparsable is a usage error, not `default`.
 fn arg_num(args: &[String], index: usize, default: i64) -> i64 {
     match args.get(index).map(|v| v.parse::<i64>()) {
         None => default,
@@ -125,10 +118,9 @@ fn arg_num(args: &[String], index: usize, default: i64) -> i64 {
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    // Optional SQLCipher key (64 hex chars); a plain DB is migrated on first use.
-    // `TYPEON_SERVER_DB_KEY_FILE` (a 0600 file, or systemd `LoadCredential`)
-    // is preferred: an environment variable stays readable in
-    // /proc/<pid>/environ and in a unit file.
+    // Optional SQLCipher key (64 hex characters). A plain DB is migrated on first use.
+    // `TYPEON_SERVER_DB_KEY_FILE` (a 0600 file, or systemd `LoadCredential`) is preferred: an environment variable stays
+    // readable in /proc/<pid>/environ and in a unit file.
     let from_file = std::env::var("TYPEON_SERVER_DB_KEY_FILE").ok().map(|path| {
         std::env::remove_var("TYPEON_SERVER_DB_KEY_FILE");
         match std::fs::read_to_string(&path) {
@@ -200,9 +192,8 @@ async fn run() {
     }
 }
 
-/// Kullanıcı isteği: tek bir kodun HERKESE dağıtılabilmesi. `invite new`
-/// her çağrıda YENİ bir kod üretir ve jetonu bir daha gösteremez; bu komut
-/// AYNI kalıcı kodu döner (bkz. `ServerCore::join_code`).
+/// Requirement: one code must be shareable with EVERYONE. `invite new` creates a NEW code on every call, and the token
+/// cannot be shown again. This command returns the SAME permanent code (see `ServerCore::join_code`).
 fn join_code(args: &[String]) {
     let rotate = matches!(args.first().map(String::as_str), Some("rotate") | Some("yenile"));
     match typeon_server::join_code(&open_store(), rotate) {
@@ -225,7 +216,7 @@ fn invite(args: &[String]) {
     match args.first().map(String::as_str) {
         Some("new") | None => {
             let label = args.get(1).cloned().unwrap_or_else(|| "davet".to_string());
-            // 0 (ya da negatif) = SINIRSIZ — bkz. `Store::create_invite`.
+            // 0 (or negative) means UNLIMITED. See `Store::create_invite`.
             let uses = arg_num(args, 2, 1);
             let days = arg_num(args, 3, 7);
             if days < 1 {
@@ -295,8 +286,7 @@ fn devices(args: &[String]) {
             };
             match store.revoke_enrollment(&id) {
                 Ok(()) => {
-                    // the public join code changes too, or the
-                    // revoked device enrolls again under a fresh key.
+                    // the public join code changes too, or the revoked device enrolls again under a fresh key.
                     let _ = typeon_server::public_join_token(&store, true);
                     println!("İptal edildi: {id_hex} (herkese açık katılım kodu yenilendi)");
                 }

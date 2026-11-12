@@ -1,33 +1,30 @@
-//! Sunucunun kalıcı deposu (SQLite).
+//! Persistent server store (SQLite, SQLCipher when keyed).
 //!
-//! ## İki AYRI depo, kasıtlı olarak birleştirilmedi
+//! ## Two separate stores, deliberately not merged
 //!
-//! - `mail`: TESLİM kuyruğu. Mühürlü zarflar; alıcı `Ack`'leyince silinir,
-//!   en fazla `mailbox_ttl_ms` yaşar.
-//! - `archive`: GEÇMİŞ. Teslim zarfları burada KULLANILAMAZ — ratchet mesaj
-//!   anahtarları ileri-gizli ve kullanıldıktan sonra siliniyor, yani geçen
-//!   haftanın zarfı bugün HİÇ KİMSE tarafından çözülemez. Arşiv, istemcinin
-//!   uzun ömürlü `archive_key`'iyle YENİDEN şifrelediği ayrı kayıtlardır.
+//! - `mail`: the delivery queue. Sealed envelopes, deleted when the recipient `Ack`s them, at most
+//!   `mailbox_ttl_ms` old.
+//! - `archive`: history. Mail envelopes cannot be used here. Ratchet message keys are forward-secret and
+//!   deleted after use, so last week's envelope cannot be decrypted by anyone today. The archive holds
+//!   separate records that the client re-encrypts with its long-lived `archive_key`.
 //!
-//! İkisini tek tabloda birleştirmek bu tasarımdaki en büyük hata olurdu:
-//! "geçmişi sunucudan çek" özelliği sessizce çözülemeyen baytlar döndürürdü.
+//! Merging the two into one table would be the biggest mistake in this design. A "fetch history from the
+//! server" feature would silently return bytes that cannot be decrypted.
 //!
-//! ## Sunucu HİÇBİR ŞEY çözemez
+//! ## The server cannot decrypt anything
 //!
-//! Buradaki her BLOB istemci tarafında şifrelenmiştir. Sunucunun gördüğü
-//! yapısal alanlar bilinçli olarak asgari: opak kutu/kova kimlikleri, boyut,
-//! zaman ve sıra numaraları. Bunların ne sızdırdığı SECURITY.md'de yazılı.
+//! Every blob here is encrypted on the client. The structural fields the server sees are kept to a minimum:
+//! opaque mailbox and bucket ids, sizes, times and sequence numbers. SECURITY.md documents what these leak.
 
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-// NOT: paket adı `p2p_messenger_core`, ama crate `p2p_messenger` adıyla
-// linkleniyor (bkz. o crate'in `[lib] name`'i) — `use` yolu bu yüzden
-// paket adından farklı.
+// Note: the package name is `p2p_messenger_core`, but the crate is linked as `p2p_messenger` (see the `[lib] name`
+// of that crate). That is why the `use` path differs from the package name.
 use p2p_messenger::server_proto::{self, ArchiveRecord, BucketStat, MailItem};
 
-/// Bir kaydın (enrollment) durumu.
+/// State of an enrollment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnrollmentState {
     Active,
@@ -50,19 +47,16 @@ impl EnrollmentState {
     }
 }
 
-/// Tek bir kayıtlı cihaz.
+/// One enrolled device.
 ///
-/// DİKKAT — burada bilerek OLMAYAN alanlar: `device_fingerprint`,
-/// `identity_id`, cihazın kimlik public key'leri. Sunucunun gerçekten
-/// ihtiyacı olan tek şey Sybil'e karşı bir kapı (davet jetonu) ve iptal
-/// edilebilir bir tutamak (`enroll_pk`); geri kalanını istemek, operatöre
-/// "bu sunucuyu tam olarak kimler kullanıyor" listesini kriptografik olarak
-/// kanıtlanabilir biçimde vermek olurdu.
+/// Fields deliberately NOT here: `device_fingerprint`, `identity_id`, and the device's identity public keys. The
+/// server needs only a gate against Sybil registrations (the invite token) and a revocable handle (`enroll_pk`).
+/// Asking for more would give the operator a provable list of who uses this server.
 #[derive(Debug, Clone)]
 pub struct Enrollment {
     pub enrollment_id: Vec<u8>,
     pub enroll_pk: Vec<u8>,
-    /// ML-DSA-87 public key — kayıt imzası hibrit doğrulanıyor.
+    /// ML-DSA-87 public key. The enrollment signature is verified as hybrid.
     pub enroll_pk_pq: Vec<u8>,
     pub peer_id: String,
     pub state: EnrollmentState,
@@ -81,7 +75,7 @@ pub struct BlobState {
     pub received_chunks: u32,
     pub byte_len: i64,
     pub complete: bool,
-    /// Stride the blob was written with; 0 = legacy 256 KiB.
+    /// Blob stride the blob was written with. 0 means the legacy 256 KiB.
     pub chunk_size: u32,
 }
 
@@ -89,56 +83,50 @@ pub struct Store {
     conn: Connection,
 }
 
-/// Readers of one mailbox that registered with the same proof key: both ends
-/// of a session, or the one device of a first-contact box.
+/// Readers of one mailbox that registered with the same proof key: both ends of a session, or the one device of a
+/// first-contact box.
 ///
-/// A key-bound box (`server_proto::KEY_BOUND_MAILBOX_PREFIX`: session and
-/// relay boxes) takes only the key its id is made from, so there this is a
-/// per-box cap. A first-contact box cannot be bound that way (its sender holds
-/// the pairing code, not the reader's key), so it is counted per key, not per
-/// box: whoever knows a first-contact id (every co-member of the group) can
-/// make a proof by a key of its own, and a per-box cap or a first-key binding
-/// let it take the box before its device did and lock that device out. A
-/// reader with another key adds a reader; it can never delete a copy another
-/// active reader has not acknowledged (`delete_fully_acked`).
+/// A key-bound box (`server_proto::KEY_BOUND_MAILBOX_PREFIX`: session and relay boxes) accepts only the key its id
+/// is derived from, so there the cap applies per box. A first-contact box cannot be bound that way, because its
+/// sender holds the pairing code, not the reader's key. So it is counted per key, not per box. Anyone who knows a
+/// first-contact id (every co-member of a group) can make a proof with a key of its own. A per-box cap, or binding
+/// to the first key, would let such a party take the box before the real device and lock that device out. A reader
+/// with another key adds a reader. It can never delete a copy that another active reader has not acknowledged
+/// (`delete_fully_acked`).
 const MAX_READERS_PER_KEY: i64 = 2;
 
-/// A key's full reader slots give up a reader to a newcomer with that key (a
-/// restored device) only when that reader has not been seen for this long:
-/// the mailbox proof rests on classical X25519 alone, and with it a quantum
-/// attacker could displace a device still in use. Same horizon as the
-/// client's stale-device fan-out filter (`STALE_PEER_RETRY_HORIZON_MS`).
+/// A key's full reader slots give up a reader to a newcomer with that key (a restored device) only when that reader
+/// has not been seen for this long. The mailbox proof rests on classical X25519 alone, so a quantum attacker could
+/// otherwise displace a device still in use. Same horizon as the client's stale-device fan-out filter
+/// (`STALE_PEER_RETRY_HORIZON_MS`).
 const READER_EVICT_IDLE_MS: i64 = 7 * 24 * 3600 * 1000;
 
-/// What an archive row costs beyond its two peer-sized columns (bucket,
-/// ints, owner, primary key, two index entries). Charging only `sealed` +
-/// `record_id` let a 2-byte record cost 2 bytes against a ~150-byte row.
+/// Overhead an archive row costs beyond its two peer-sized columns (bucket, ints, owner, primary key, two index
+/// entries). Charging only `sealed` and `record_id` let a 2-byte record cost 2 bytes against a row of about 150 bytes.
 const ARCHIVE_ROW_OVERHEAD: usize = 128;
 
-/// The same for a mail row (mailbox id, depositor, hash, three index
-/// entries): charging only `sealed` let 3-byte items cost 3 bytes against a
-/// ~250-byte row.
+/// The same for a mail row (mailbox id, depositor, hash, three index entries). Charging only `sealed` let 3-byte
+/// items cost 3 bytes against a row of about 250 bytes.
 const MAIL_ROW_OVERHEAD: usize = 128;
 
-/// Bytes a mail item is charged: quota and the server-wide budget.
+/// Bytes a mail item is charged against its quota and the server-wide budget.
 pub fn mail_row_bytes(mailbox_id: &str, sealed: &[u8]) -> usize {
     sealed.len() + mailbox_id.len() + MAIL_ROW_OVERHEAD
 }
 
-/// Bump on every change to `init_schema`, or existing DBs skip it.
+/// Bump on every change to `init_schema`, or existing databases skip the migration.
 const SCHEMA_VERSION: i64 = 5;
 
-/// Bytes an archive record is charged: quota and the server-wide budget.
+/// Bytes an archive record is charged against its quota and the server-wide budget.
 pub fn archive_row_bytes(rec: &ArchiveRecord) -> usize {
     rec.sealed.len() + rec.record_id.len() + ARCHIVE_ROW_OVERHEAD
 }
 
-/// Archive rows older than this (since last write) are swept: 13 months.
+/// Archive rows not written for this long are swept: 13 months.
 pub const ARCHIVE_TTL_MS: i64 = 13 * 30 * 24 * 3600 * 1000;
 
-/// SQLCipher raw key for every later `Store::open`. Unset = plain SQLite
-/// (Linux CLI default). The Android app sets it from a Keystore-wrapped
-/// random key before `startServer`.
+/// SQLCipher raw key for every later `Store::open`. Unset means plain SQLite (Linux CLI default). The Android app sets
+/// it from a random key wrapped by the Keystore, before `startServer`.
 static DB_KEY: std::sync::Mutex<Option<zeroize::Zeroizing<[u8; 32]>>> = std::sync::Mutex::new(None);
 
 pub fn set_db_key(key: Option<zeroize::Zeroizing<[u8; 32]>>) {
@@ -152,9 +140,8 @@ pub fn parse_hex_db_key(hex_key: &str) -> Result<zeroize::Zeroizing<[u8; 32]>, S
     Ok(key)
 }
 
-/// Opens `path` with the raw key; Err if the key does not match or the
-/// linked SQLite has no SQLCipher (a plain build would ignore `PRAGMA key`
-/// and silently write plaintext).
+/// Opens `path` with the raw key. Returns an error if the key does not match, or if the linked SQLite has no SQLCipher
+/// (a plain build would ignore `PRAGMA key` and silently write plaintext).
 fn open_keyed(path: &Path, key: &str) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("DB açılamadı: {e}"))?;
     let cipher: Option<String> = conn
@@ -171,10 +158,9 @@ fn open_keyed(path: &Path, key: &str) -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// One-time migration of a plain DB to SQLCipher (sqlcipher_export into a new
-/// file, verified, then renamed over the old one). No-op when the file is
-/// absent or already opens with the key. Any failure leaves the plain DB in
-/// place and the next open retries.
+/// One-time migration of a plain database to SQLCipher: `sqlcipher_export` into a new file, verified, then renamed over
+/// the old one. No-op when the file is absent or already opens with the key. On any failure the plain database stays
+/// in place, and the next open retries.
 fn migrate_plain_to_keyed(path: &Path, key: &str) -> Result<(), String> {
     if !path.exists() || open_keyed(path, key).is_ok() {
         return Ok(());
@@ -187,8 +173,8 @@ fn migrate_plain_to_keyed(path: &Path, key: &str) -> Result<(), String> {
     }
     let plain = Connection::open(path).map_err(|e| format!("DB açılamadı: {e}"))?;
     let expected = objects(&plain).map_err(|_| "DB ne düz ne de bu anahtarla açılıyor (yanlış anahtar?)".to_string())?;
-    // Fold the WAL into the main file and leave WAL mode: a plain `-wal`
-    // next to the encrypted file would be replayed into it.
+    // Fold the WAL into the main file and leave WAL mode. A leftover `-wal` next to the encrypted file would be
+    // replayed into it.
     let mode: String = plain.query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0)).map_err(err)?;
     if !mode.eq_ignore_ascii_case("delete") {
         return Err("DB şifreleme geçişi: plain database is still in WAL mode".into());
@@ -232,37 +218,31 @@ impl Store {
             }
             None => Connection::open(db_path).map_err(|e| format!("DB açılamadı: {e}"))?,
         };
-        // Incremental auto-vacuum, so the file shrinks after mail is acked
-        // (see `incremental_vacuum`). It only takes effect before the first
-        // table exists or through one VACUUM, hence the one-time VACUUM on
-        // a database created before this.
+        // Incremental auto-vacuum, so the file shrinks after mail is acked (see `incremental_vacuum`). It only takes
+        // effect before the first table exists, or through one VACUUM. Hence the one-time VACUUM on a database created
+        // before this.
         let auto_vacuum: i64 = conn.pragma_query_value(None, "auto_vacuum", |r| r.get(0)).unwrap_or(2);
         if auto_vacuum != 2 {
             let _ = conn.pragma_update(None, "auto_vacuum", 2);
             let _ = conn.execute_batch("VACUUM");
         }
-        // WAL: sunucu tek süreç ama okuma/yazma iç içe geçiyor; ayrıca ani
-        // güç kesintisinde rollback journal'a göre çok daha dayanıklı.
-        // A volume without WAL support (some SD/exFAT mounts) silently stays
-        // in rollback mode, where the JNI/CLI connection blocks the server.
+        // WAL: the server is one process, but reads and writes interleave. WAL is also much more durable than the
+        // rollback journal on sudden power loss. A volume without WAL support (some SD or exFAT mounts) silently stays
+        // in rollback mode, where the JNI or CLI connection blocks the server.
         match conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0)) {
             Ok(mode) if mode.eq_ignore_ascii_case("wal") => {}
             Ok(mode) => log::warn!("SQLite WAL açılamadı, journal_mode={mode}: ikinci bağlantı yazarken sunucu bekler"),
             Err(e) => log::warn!("SQLite WAL açılamadı: {e}"),
         }
-        // FULL: a `Deposited` answer lets the sender drop its copy, so the
-        // mail row must be on disk before it, not only in the WAL.
+        // FULL: a `Deposited` answer lets the sender drop its copy, so the mail row must be on disk before that answer,
+        // not only in the WAL.
         let _ = conn.pragma_update(None, "synchronous", "FULL");
-        // Deleted reader rows (who read which box), acks and mail are zeroed,
-        // not left in free pages.
+        // Deleted rows (reader rows, acks, mail) are overwritten with zeros, not left in free pages.
         let _ = conn.pragma_update(None, "secure_delete", "ON");
-        // JNI kontrol yüzeyi (`serverStatus`/`joinCode`/
-        // `listDevices`/`revokeDevice`) AYNI dosyaya İKİNCİ bir bağlantı
-        // açıyor. WAL çoğu durumu kurtarıyor ama `busy_timeout` olmadan
-        // çakışan yazmalar ANINDA `SQLITE_BUSY` dönüyordu — ve çağrı
-        // yerlerinin neredeyse hepsi `let _ =`/`unwrap_or(0)` olduğu için
-        // başarısız bir `deposit`/`ack`/`blob_record_chunk` SESSİZCE
-        // yutuluyordu.
+        // The JNI control surface (`serverStatus`, `joinCode`, `listDevices`, `revokeDevice`) opens a SECOND connection to
+        // the same file. WAL resolves most cases, but without `busy_timeout` conflicting writes returned `SQLITE_BUSY`
+        // at once. Nearly all call sites use `let _ =` or `unwrap_or(0)`, so a failed `deposit`, `ack` or
+        // `blob_record_chunk` was swallowed silently.
         let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         let store = Store { conn };
         store.init_schema()?;
@@ -277,12 +257,11 @@ impl Store {
         Ok(store)
     }
 
-    /// Şema. Çekirdeğin `init_db`'siyle aynı sözleşme: `CREATE TABLE IF NOT
-    /// EXISTS` + ileride eklenecek kolonlar için `ALTER TABLE` (yalnız
-    /// "duplicate column name" yutulur).
+    /// Schema. Same contract as `init_db` in the core: `CREATE TABLE IF NOT EXISTS`, plus `ALTER TABLE` for columns
+    /// added later (only "duplicate column name" is ignored).
     ///
-    /// Runs once per `SCHEMA_VERSION`: every CLI/JNI open re-ran the batch,
-    /// writes included, against the DB the daemon serves.
+    /// Runs once per `SCHEMA_VERSION`. Previously every CLI or JNI open re-ran the whole batch, writes included,
+    /// against the database the daemon was serving.
     fn init_schema(&self) -> Result<(), String> {
         let version: i64 = self.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap_or(0);
         if version == SCHEMA_VERSION {
@@ -446,9 +425,8 @@ impl Store {
                 "#,
             )
             .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
-        // SQLite has no `ADD COLUMN IF NOT EXISTS`. Only "duplicate
-        // column name" means the column is there; any other failure fails
-        // init before `user_version` is stamped, so the next start retries.
+        // SQLite has no `ADD COLUMN IF NOT EXISTS`. Only "duplicate column name" means the column is already there. Any
+        // other failure fails init before `user_version` is stamped, so the next start retries.
         let add_column = |sql: &str| -> Result<(), String> {
             match self.conn.execute(sql, []) {
                 Err(e) if !e.to_string().contains("duplicate column name") => Err(format!("Şema oluşturulamadı ({sql}): {e}")),
@@ -457,12 +435,11 @@ impl Store {
         };
         add_column("ALTER TABLE blobs ADD COLUMN chunk_size INTEGER NOT NULL DEFAULT 0")?;
         add_column("ALTER TABLE mail ADD COLUMN sealed_hash BLOB")?;
-        // Hash of the invite the enrollment came in with: the public join
-        // code gets a small allowance of active enrollments (see `handle_enroll`).
+        // Hash of the invite the enrollment came in with. The public join code gets a small allowance of active
+        // enrollments (see `handle_enroll`).
         add_column("ALTER TABLE enrollments ADD COLUMN invite_hash BLOB")?;
-        // The global AUTOINCREMENT `seq` becomes per mailbox. Old rows keep
-        // their seq; new ones start above the old high-water mark
-        // (`mail_seq_base`), so no client cursor ends up above new mail.
+        // The global AUTOINCREMENT `seq` becomes per mailbox. Old rows keep their seq. New rows start above the old
+        // high-water mark (`mail_seq_base`), so no client cursor ends up above new mail.
         let old_mail: bool = self
             .conn
             .query_row("SELECT sql LIKE '%AUTOINCREMENT%' FROM sqlite_master WHERE type = 'table' AND name = 'mail'", [], |r| r.get(0))
@@ -487,8 +464,8 @@ impl Store {
                 )
                 .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
         }
-        // The per-box key binding becomes a per-reader key: each reader keeps
-        // the key its box was bound to, then the binding table goes.
+        // The per-mailbox key binding becomes a per-reader key. Each reader keeps the key its box was bound to, then
+        // the binding table is dropped.
         add_column("ALTER TABLE mailbox_readers ADD COLUMN key_hash BLOB")?;
         let _ = self.conn.execute(
             "UPDATE mailbox_readers SET key_hash = (SELECT k.key_hash FROM mailbox_keys k
@@ -513,7 +490,7 @@ impl Store {
         Ok(())
     }
 
-    /// bkz. defter #06 — ilk parçayla birlikte adımı sabitler.
+    /// See the note on the upload stride: it is fixed by the first chunk.
     pub fn blob_set_chunk_size(&self, blob_id: &str, chunk_size: u32) {
         let _ = self.conn.execute(
             "UPDATE blobs SET chunk_size = ?2 WHERE blob_id = ?1 AND chunk_size = 0",
@@ -521,8 +498,8 @@ impl Store {
         );
     }
 
-    /// Sunucunun o an sakladığı TOPLAM bayt (posta + arşiv + blob) —
-    /// bkz. defter #23, kayıt başına kotanın üstündeki genel tavan.
+    /// Total bytes the server currently stores (mail, archive and blobs). This is the global ceiling on top of the
+    /// per-record quotas (see `total_budget_exceeded`).
     pub fn total_stored_bytes(&self) -> i64 {
         self.conn
             .query_row(
@@ -536,7 +513,7 @@ impl Store {
     }
 
     // -----------------------------------------------------------------
-    // meta
+    // Meta
     // -----------------------------------------------------------------
 
     pub fn meta_get(&self, key: &str) -> Option<Vec<u8>> {
@@ -555,21 +532,17 @@ impl Store {
     }
 
     // -----------------------------------------------------------------
-    // Davetler ve kayıt
+    // Invites and enrollment
     // -----------------------------------------------------------------
 
-    /// Bir davet üretir. `uses <= 0` = SINIRSIZ (`-1` olarak saklanır).
+    /// Creates an invite. `uses <= 0` means UNLIMITED (stored as `-1`).
     ///
-    /// Kullanıcı isteği ("tek QR/link ile birden çok kişi katılabilmeli"):
-    /// eskiden her yeni kişi için operatörün sunucuya gidip taze bir kod
-    /// üretmesi gerekiyordu — davet tek kullanımlıktı ve Android sunucu
-    /// arayüzü onu `uses=1` ile sabitliyordu. Sınırsız davet, kodun bir
-    /// kere yayımlanıp (afiş, mesaj, web sayfası) herkesin kendi başına
-    /// katılmasına izin verir. Sybil kapısı kaybolmaz, YER DEĞİŞTİRİR:
-    /// artık jetonun kendisi değil, `ServerCore::handle_enroll` içindeki
-    /// saatlik kayıt tavanı (`MAX_PUBLIC_ENROLLMENTS_PER_HOUR`) ve
-    /// operatörün kodu istediği an döndürebilmesi (`rotate_join_code`)
-    /// koruyor.
+    /// Requirement: several people must be able to join from one QR code or link. Before, each new person needed the
+    /// operator to send the server a fresh code. Invites were single-use, and the Android server UI pinned them to
+    /// `uses=1`. An unlimited invite can be published once (poster, message, web page) and then anyone can join on
+    /// their own. The Sybil gate is not lost, it MOVES: the token itself no longer gates, the hourly enrollment cap in
+    /// `ServerCore::handle_enroll` (`MAX_PUBLIC_ENROLLMENTS_PER_HOUR`) does, and the operator can rotate the code at
+    /// any time (`rotate_join_code`).
     pub fn create_invite(&self, token_hash: &[u8], label: &str, uses: i64, expires_at: i64, now: i64) -> Result<(), String> {
         let uses = if uses <= 0 { -1 } else { uses };
         self.conn
@@ -581,8 +554,7 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
-    /// Bir daveti siler — `rotate_join_code` eski herkese açık kodu
-    /// geçersiz kılarken kullanır.
+    /// Deletes an invite. `rotate_join_code` uses it to invalidate the old public code.
     pub fn delete_invite(&self, token_hash: &[u8]) -> Result<(), String> {
         self.conn
             .execute("DELETE FROM invites WHERE token_hash = ?1", params![token_hash])
@@ -590,8 +562,7 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
-    /// Kalan kullanım hakkı: `Some(-1)` sınırsız, `Some(0)` tükenmiş,
-    /// `None` böyle bir davet yok ya da süresi dolmuş.
+    /// Remaining uses: `Some(-1)` unlimited, `Some(0)` used up, `None` no such invite, or it has expired.
     pub fn invite_uses_left(&self, token_hash: &[u8], now: i64) -> Option<i64> {
         self.conn
             .query_row(
@@ -604,9 +575,8 @@ impl Store {
             .flatten()
     }
 
-    /// Enrollments opened in (`since`, `now`] — the public code's hourly cap.
-    /// Rows dated after `now` (clock stepped back) are not counted: they
-    /// froze the cap until the clock caught up.
+    /// Enrollments opened in (`since`, `now`]: the public code's hourly cap. Rows dated after `now` (the clock was
+    /// stepped back) are not counted. They once froze the cap until the clock caught up.
     pub fn count_enrollments_since(&self, since: i64, now: i64) -> i64 {
         self.conn
             .query_row(
@@ -617,8 +587,8 @@ impl Store {
             .unwrap_or(0)
     }
 
-    /// Active enrollments seen at or after `idle_before`: a sleeping one
-    /// (see `sleep_idle_enrollments`) holds no place under the cap.
+    /// Active enrollments seen at or after `idle_before`. A sleeping one (see `sleep_idle_enrollments`) holds no place
+    /// under the cap.
     pub fn count_active_enrollments(&self, idle_before: i64) -> i64 {
         self.conn
             .query_row(
@@ -674,8 +644,8 @@ impl Store {
         };
         let rows = stmt.query_map([], |r| {
             let label: String = r.get(0)?;
-            // `uses_left` artık İŞARETLİ: `-1` sınırsız (bkz.
-            // `create_invite`). `u32`'ye çevirmek onu 4 milyara döndürürdü.
+            // `uses_left` is now a signed value: `-1` means unlimited (see `create_invite`). Converting it to `u32`
+            // would turn it into about 4 billion.
             let uses: i64 = r.get(1)?;
             let exp: i64 = r.get(2)?;
             Ok((label, uses, exp, uses != 0 && (exp == 0 || exp > now)))
@@ -683,19 +653,17 @@ impl Store {
         rows.map(|it| it.filter_map(|r| r.ok()).collect()).unwrap_or_default()
     }
 
-    /// Bir daveti TÜKETİR (kullanım hakkını bir azaltır) — geçerliyse `true`.
+    /// Consumes one use of an invite. Returns `true` if it was valid.
     ///
-    /// Kullanım sayacının azaltılması ve kaydın oluşturulması AYNI çağrı
-    /// zincirinde olmalı; aksi halde eşzamanlı iki `Enroll` tek kullanımlık
-    /// bir jetonu iki kez harcayabilirdi. `UPDATE ... WHERE uses_left > 0`
-    /// tek bir atomik ifade olduğundan bu yarış SQLite seviyesinde kapanıyor.
+    /// Decrementing the use counter and creating the enrollment must happen in the SAME call chain. Otherwise two
+    /// concurrent `Enroll` requests could spend a single-use token twice. `UPDATE ... WHERE uses_left > 0` is one
+    /// atomic statement, so the race is closed at the SQLite level.
     pub fn consume_invite(&self, token_hash: &[u8], now: i64) -> Result<bool, String> {
         let changed = self
             .conn
             .execute(
-                // `uses_left = -1` SINIRSIZ: tüketilir ama azalmaz (bkz.
-                // `create_invite`). `<> 0` koşulu hem tükenmiş (0) hem de
-                // sınırsız (-1) daveti tek ifadede doğru ayırır.
+                // `uses_left = -1` is UNLIMITED: consumed but not decremented (see `create_invite`). The `<> 0` check
+                // separates used-up (0) from unlimited (-1) in one expression.
                 "UPDATE invites SET uses_left = CASE WHEN uses_left < 0 THEN uses_left ELSE uses_left - 1 END
                  WHERE token_hash = ?1 AND uses_left <> 0 AND (expires_at = 0 OR expires_at > ?2)",
                 params![token_hash, now],
@@ -704,8 +672,8 @@ impl Store {
         Ok(changed > 0)
     }
 
-    /// Consumes one invite use and writes the enrollment: both or neither.
-    /// `Ok(false)`: the invite is spent, expired or gone.
+    /// Consumes one invite use and writes the enrollment: both or neither. `Ok(false)`: the invite is spent, expired
+    /// or gone.
     pub fn enroll_with_invite(&self, token_hash: &[u8], now: i64, e: &Enrollment) -> Result<bool, String> {
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         if !self.consume_invite(token_hash, now)? {
@@ -774,13 +742,12 @@ impl Store {
         })
     }
 
-    /// `Rebind`: var olan bir kaydı yeni bir `PeerId`'ye taşı.
+    /// `Rebind`: moves an existing enrollment to a new `PeerId`.
     pub fn rebind_enrollment(&self, enrollment_id: &[u8], new_peer_id: &str, now: i64) -> Result<(), String> {
-        // Aynı PeerId'ye bağlı BAŞKA bir kayıt varsa önce onu çöz — `peer_id`
-        // UNIQUE, aksi halde INSERT çakışırdı (uygulamayı silip yeniden kuran
-        // bir cihaz aynı libp2p anahtarını yeniden üretebilir). The placeholder
-        // is unique per row: a shared '' broke the index on the second collision.
-        // One transaction: a failed second UPDATE left the device unbound.
+        // If ANOTHER enrollment is already bound to the same PeerId, release it first. `peer_id` is UNIQUE, and the
+        // INSERT would otherwise collide (a reinstalled device can regenerate the same libp2p key). The placeholder is
+        // unique per row: a shared '' broke the index on the second collision. One transaction: a failed second UPDATE
+        // would leave the device unbound.
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         self.conn
             .execute(
@@ -801,11 +768,10 @@ impl Store {
         tx.commit().map_err(|e| e.to_string())
     }
 
-    /// Revoke is a block: the enroll key goes on the block list, and the row
-    /// stays, so `handle_enroll` finds the blocked key for this PeerId too.
+    /// Revoke is a block: the enroll key goes on the block list, and the row stays. So `handle_enroll` finds the
+    /// blocked key for this PeerId too.
     pub fn revoke_enrollment(&self, enrollment_id: &[u8]) -> Result<(), String> {
-        // One transaction: a blocked key with the row still 'active' left the
-        // device fully served.
+        // One transaction: a blocked key with the row still 'active' would leave the device fully served.
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         self.conn
             .execute(
@@ -841,24 +807,22 @@ impl Store {
     }
 
     // -----------------------------------------------------------------
-    // Posta kutusu
+    // Mailbox
     // -----------------------------------------------------------------
 
-    /// Tests: every id comes with a proof by one shared key.
+    /// Tests: every id comes with a proof made by one shared key.
     #[cfg(test)]
     pub fn register_mailboxes(&self, owner: &[u8], add: &[String], drop: &[String], now: i64, max: u32) -> Result<Vec<String>, String> {
         let proofs: Vec<(String, Vec<u8>)> = add.iter().map(|id| (id.clone(), b"test-key".to_vec())).collect();
         self.register_mailboxes_proved(owner, add, drop, &proofs, now, max).map(|(refused, _)| refused)
     }
 
-    /// `Ok`: the ids of `add` that were refused (mailbox quota, the proof
-    /// key's reader slots full and in use), then the ids
-    /// that need a proof and came without one. The other ids are registered:
-    /// one refused id does not cost the batch.
+    /// Returns `Ok` with the ids of `add` that were refused (mailbox quota, or the proof key's reader slots full and
+    /// in use), and then the ids that need a proof but came without one. The other ids are registered. One refused id
+    /// does not cost the batch.
     ///
-    /// `proofs`: (mailbox id, hash of the mailbox key) of each `MailboxProof`
-    /// whose signature the caller verified. An id `owner` reads already needs
-    /// none. A new reader row keeps its proof key (`MAX_READERS_PER_KEY`).
+    /// `proofs`: (mailbox id, hash of the mailbox key) for each `MailboxProof` whose signature the caller verified. An
+    /// id the owner already reads needs none. A new reader row keeps its proof key (`MAX_READERS_PER_KEY`).
     pub fn register_mailboxes_proved(
         &self,
         owner: &[u8],
@@ -868,26 +832,22 @@ impl Store {
         now: i64,
         max: u32,
     ) -> Result<(Vec<String>, Vec<String>), String> {
-        // One transaction: an eviction without the newcomer's row lost a reader.
+        // One transaction: an eviction without the newcomer's row would lose a reader.
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let mut refused = Vec::new();
         let mut unproven = Vec::new();
-        // Counted once, then kept up to date below: a query per id was a
-        // scan of the owner's rows per id.
+        // Counted once, then kept up to date below. A query per id scanned the owner's rows for every id.
         let mut count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM mailbox_readers WHERE owner = ?1", params![owner], |r| r.get(0))
             .unwrap_or(0);
         for id in add {
-            // Zaten kayıtlıysa sayaç kontrolünü atla — idempotent olmalı.
+            // If already registered, skip the counter check. The call must be idempotent.
             //
-            // Bu denetimde bulundu: sorgu `owner`'ı FİLTRELEMİYORDU, oysa
-            // `mailbox_readers` çok-okuyuculu (bkz. şema notu) — yani
-            // BAŞKA birinin kaydettiği bir kutu bu istemci için de "zaten
-            // var" sayılıyor ve `max_mailboxes` kotası atlanıyordu. Bir
-            // ratchet kutusunu iki taraf da kaydettiğinden bu istisnai bir
-            // durum değil, NORMAL durum: pratikte kota, ikinci tarafta
-            // hiçbir zaman uygulanmıyordu.
+            // Found during review: the query did NOT filter by `owner`, but `mailbox_readers` is multi-reader (see the
+            // schema note). So a box another party registered counted as "already there" for this client too, and the
+            // `max_mailboxes` quota was skipped. Both sides of a ratchet box register it, so this is the NORMAL case,
+            // not an edge case. In practice the quota was never enforced on the second side.
             let exists: bool = self
                 .conn
                 .query_row(
@@ -903,16 +863,15 @@ impl Store {
                 refused.push(id.clone());
                 continue;
             }
-            // A new reader needs a proof; at most `MAX_READERS_PER_KEY`
-            // readers per proof key, so one key cannot fill another's slots.
+            // A new reader needs a proof. There is at most `MAX_READERS_PER_KEY` readers per proof key, so one key cannot
+            // fill another's slots.
             let mut reader_key: Option<&Vec<u8>> = None;
             if !exists {
                 let Some((_, key_hash)) = proofs.iter().find(|(m, _)| m == id) else {
                     unproven.push(id.clone());
                     continue;
                 };
-                // A key-bound id has exactly one key, the one it is made
-                // from: knowing the id is not enough to read the box.
+                // A key-bound id has exactly one key, the one it is derived from. Knowing the id is not enough to read the box.
                 if id.starts_with(server_proto::KEY_BOUND_MAILBOX_PREFIX) && *id != server_proto::key_bound_mailbox_id(key_hash) {
                     refused.push(id.clone());
                     continue;
@@ -926,12 +885,9 @@ impl Store {
                         |r| r.get(0),
                     )
                     .unwrap_or(0);
-                // Full slots of this key: the newcomer holds the same secret,
-                // so it is one of those ends (a restored device under a new
-                // enrollment). The same-key reader seen longest ago makes
-                // room, but only once it has been idle for
-                // `READER_EVICT_IDLE_MS` (its own requests or its last
-                // Register); a reader in use is never displaced.
+                // The slots of this key are full. The newcomer holds the same secret, so it is one of those ends (a restored
+                // device under a new enrollment). The same-key reader seen longest ago makes room, but only once it has been
+                // idle for `READER_EVICT_IDLE_MS` (its own requests or its last Register). A reader in use is never displaced.
                 if readers >= MAX_READERS_PER_KEY {
                     let stale: Option<(Vec<u8>, i64)> = self
                         .conn
@@ -957,9 +913,8 @@ impl Store {
                     let _ = self.delete_fully_acked(id);
                 }
             }
-            // kayıt artık ÇOK-OKUYUCULU (bkz. `mailbox_readers`
-            // şema notu). Aynı ratchet kutusunu iki taraf da kaydeder;
-            // birinin kaydı diğerininkini EZMEZ. A reader keeps its key.
+            // The record is now MULTI-READER (see the `mailbox_readers` schema note). Both sides of a ratchet box register
+            // it, and one registration does not overwrite the other. A reader keeps its key.
             self.conn
                 .execute(
                     "INSERT INTO mailbox_readers (mailbox_id, owner, created_at, last_seen_at, key_hash)
@@ -973,8 +928,7 @@ impl Store {
             }
         }
         for id in drop {
-            // SADECE sahibi kaldırabilir. Not a reader: nothing changed, and
-            // the cleanup below is a scan of the whole box.
+            // Only the OWNER can remove it. Not a reader: nothing changed, and the cleanup below scans the whole box.
             let left = self
                 .conn
                 .execute("DELETE FROM mailbox_readers WHERE mailbox_id = ?1 AND owner = ?2", params![id, owner])
@@ -982,8 +936,8 @@ impl Store {
             if left == 0 {
                 continue;
             }
-            // Ayrılan okuyucu artık silmeyi bekletmesin; kendi onayı bu
-            // temizlikte hâlâ sayılır, sonra imleci atılır.
+            // A departing reader must not keep items waiting. Its own ack still counts in this cleanup, and then its
+            // cursor is dropped.
             let _ = self.delete_fully_acked(id);
             let _ = self
                 .conn
@@ -993,8 +947,8 @@ impl Store {
         Ok((refused, unproven))
     }
 
-    /// A deposit only makes sense when someone other than the depositor, on
-    /// an active enrollment, reads the box; otherwise it can only expire.
+    /// A deposit only makes sense when someone other than the depositor reads the box on an active enrollment.
+    /// Otherwise the item can only expire.
     pub fn mailbox_has_other_reader(&self, mailbox_id: &str, depositor: &[u8]) -> bool {
         self.conn
             .query_row(
@@ -1018,12 +972,11 @@ impl Store {
             .unwrap_or(false)
     }
 
-    /// Kutu kapasitesi için: henüz HİÇBİR alıcı okuyucunun onaylamadığı
-    /// satırlar. Onaylanmış ama başka bir (ör. hiç onaylamayan yabancı)
-    /// okuyucu yüzünden TTL'e kadar duran satırlar sayılmaz — aksi halde o
-    /// okuyucu kutuyu doldurup yeni teslimleri kilitlerdi.
-    /// ponytail: bu satırlar bayt kotasına (`recount_mail_bytes`) hâlâ sayılır;
-    /// kötü niyetli okuyucular diski TTL boyunca yalnızca kota kadar tutabilir.
+    /// Row count for mailbox capacity: rows that NO reader has acknowledged yet. Rows that stay until the TTL because
+    /// another reader (for example a stranger that never acks) has not acknowledged them are not counted. Otherwise that
+    /// reader could fill the box and block all new deliveries.
+    /// ponytail: these rows still count toward the byte quota (`recount_mail_bytes`). Malicious readers can hold the
+    /// disk up to the quota for the TTL.
     #[cfg(test)]
     pub fn mailbox_item_count(&self, mailbox_id: &str) -> i64 {
         self.conn
@@ -1038,15 +991,12 @@ impl Store {
             .unwrap_or(0)
     }
 
-    /// As `mailbox_item_count`, for one depositor's rows only. The capacity
-    /// is per depositor: one sender (that cannot read the box) filling it
-    /// stops nobody else's mail. Walks `idx_mail_hash` (mailbox, depositor),
-    /// not the whole box.
+    /// Same as `mailbox_item_count`, for one depositor's rows only. Capacity is per depositor: one sender (who cannot
+    /// read the box) filling it stops nobody else's mail. Walks `idx_mail_hash` (mailbox, depositor), not the whole box.
     pub fn depositor_item_count(&self, mailbox_id: &str, depositor: &[u8]) -> i64 {
         self.conn
             .query_row(
-                // Every row still stored: one reader's ack does not delete a
-                // row while another reader has not acked it.
+                // Every row still stored: one reader's ack does not delete a row while another reader has not acked it.
                 "SELECT COUNT(*) FROM mail m WHERE m.mailbox_id = ?1 AND m.depositor = ?2",
                 params![mailbox_id, depositor],
                 |r| r.get(0),
@@ -1054,37 +1004,34 @@ impl Store {
             .unwrap_or(i64::MAX)
     }
 
-    /// Aynı kutuda, aynı bırakanın AYNI baytları zaten duruyorsa yeni satır
-    /// AÇILMAZ — mevcut `seq` döner.
+    /// If the SAME bytes from the same depositor are already in this box, no new row is opened. The existing `seq` is
+    /// returned.
     ///
-    /// Gerçek cihazda ölçülen çöküş (2026-08-29): istemci tarafındaki
-    /// tekilleştirme yalnızca `Message` zarflarını tanıyordu, bu yüzden bir
-    /// `Handshake` saniyede bir kez (~15 KB) yeniden yatırılıyor ve bırakanın
-    /// `bytes_mail` kotasını saatler içinde doldurup o cihazın TÜM
-    /// store-and-forward trafiğini kilitliyordu (bkz. istemci
-    /// `deposit_dedup_key`). İstemci düzeltildi; bu kontrol ikinci savunma
-    /// katmanı: eski/hatalı bir istemci de artık sunucuyu şişiremez.
+    /// Crash measured on a real device (2026-08-29): client-side de-duplication recognized only `Message` envelopes. A
+    /// `Handshake` was re-deposited about once a second (~15 KB each). That filled the depositor's `bytes_mail` quota
+    /// within hours and locked all store-and-forward traffic for that device (see `deposit_dedup_key` in the client).
+    /// The client is fixed. This check is the second defence: an old or buggy client can no longer inflate the server.
     ///
-    /// Tekrarı ATMAK güvenli: alıcı zaten `message_id` ile tekilleştiriyor ve
-    /// birebir aynı ciphertext'in ikinci kopyası hiçbir bilgi taşımıyor.
+    /// Dropping the repeat is safe: the recipient already de-duplicates by `message_id`, and an identical second copy
+    /// carries no information.
     pub fn deposit(&self, mailbox_id: &str, sealed: &[u8], depositor: &[u8], now: i64, ttl_ms: i64) -> Result<u64, String> {
-        // By hash, from the index: comparing `sealed` itself read every
-        // same-length blob of this depositor in the box on each deposit.
+        // Matched by hash, from the index. Comparing `sealed` itself read every same-length blob of this depositor in the
+        // box on each deposit.
         let hash = Sha256::digest(sealed);
         if let Ok(existing) = self.conn.query_row(
             "SELECT seq FROM mail WHERE mailbox_id = ?1 AND depositor = ?2 AND sealed_hash = ?3 LIMIT 1",
             params![mailbox_id, depositor, hash.as_slice()],
             |row| row.get::<_, i64>(0),
         ) {
-            // TTL'i tazele — gönderen hâlâ ısrar ediyorsa alıcı henüz almamış
-            // demektir, kopyanın erken düşmesini istemeyiz.
+            // Refresh the TTL. If the sender keeps re-sending, the recipient has not received it yet, so the copy must not
+            // expire early.
             let _ = self.conn.execute(
                 "UPDATE mail SET expires_at_ms = ?1 WHERE mailbox_id = ?2 AND seq = ?3",
                 params![now + ttl_ms, mailbox_id, existing],
             );
             return Ok(existing as u64);
         }
-        // Row and charge together: a swallowed charge under-counted the quota.
+        // Row and charge together. A swallowed charge would under-count the quota.
         let charge = mail_row_bytes(mailbox_id, sealed) as i64;
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let seq: i64 = self
@@ -1106,9 +1053,8 @@ impl Store {
             )
             .map_err(|e| e.to_string())?;
         let seq = seq as u64;
-        // Kota BIRAKANA yazılır, kutunun SAHİBİNE değil — bir spam gönderici
-        // kendi kotasını yakar; kimse bir kurbanın kutusunu doldurup ona
-        // hizmet reddi uygulayamaz.
+        // The quota is charged to the DEPOSITOR, not the box owner. A spam sender uses up its own quota. Nobody can fill
+        // a victim's box to deny it service.
         self.conn
             .execute(
                 "UPDATE enrollments SET bytes_mail = bytes_mail + ?1 WHERE enrollment_id = ?2",
@@ -1119,20 +1065,19 @@ impl Store {
         Ok(seq)
     }
 
-    /// İmleçten sonraki öğeleri çeker. `max_bytes`/`max_items` aşılmadan
-    /// önce durur; kalanı bir sonraki turda gelir (`more`).
+    /// Fetches the items after the cursor. Stops before `max_bytes` or `max_items` is exceeded. The rest comes in the
+    /// next round (`more`).
     ///
-    /// `requester`: isteyenin kayıt kimliği. KENDİ bıraktığı zarflar
-    /// DÖNDÜRÜLMEZ — bir ratchet kutusunu iki taraf da hem yazan hem okuyan
-    /// olarak kullanıyor, filtre olmadan herkes kendi giden trafiğini geri
-    /// indirir, çözemez (gönderme zinciriyle alma zinciri farklı), ve log'u
-    /// "çözülemedi" hatalarıyla doldurur. Bant genişliği ve CPU boşa gider.
+    /// `requester`: the requester's enrollment id. Envelopes the requester ITSELF deposited are NOT returned. Both sides
+    /// of a ratchet box write and read it, so without this filter each side would download its own outgoing traffic. It
+    /// cannot decrypt that (the send and receive chains differ), and the log fills with "cannot decrypt" errors. Bandwidth
+    /// and CPU are wasted.
     pub fn fetch(&self, requester: &[u8], cursors: &[(String, u64)], max_items: u32, max_bytes: u32) -> (Vec<MailItem>, bool) {
         let mut items = Vec::new();
         let mut total = 0usize;
         let mut more = false;
 
-        // yalnızca kutuyu KAYDETMİŞ bir okuyucu okuyabilir.
+        // Only a reader that REGISTERED the box can read it.
         let Ok(mut stmt) = self.conn.prepare(
             "SELECT m.seq, m.deposited_at_ms, m.sealed FROM mail m
              WHERE m.mailbox_id = ?1 AND m.seq > ?2 AND m.depositor != ?3
@@ -1152,9 +1097,8 @@ impl Store {
             });
             let Ok(rows) = rows else { continue };
             for (seq, deposited_at_ms, sealed) in rows.flatten() {
-                // The first item always goes out, even over `max_bytes`: an
-                // item larger than the batch cap otherwise blocks its mailbox
-                // (zero items, `more` forever) until the TTL.
+                // The first item always goes out, even over `max_bytes`. Otherwise an item larger than the batch cap blocks
+                // its mailbox (zero items, `more` forever) until the TTL.
                 if items.len() as u32 >= max_items || (!items.is_empty() && total + sealed.len() > max_bytes as usize) {
                     more = true;
                     break;
@@ -1171,15 +1115,14 @@ impl Store {
         (items, more)
     }
 
-    /// Kümülatif silme.
+    /// Cumulative delete.
     ///
-    /// SADECE zarfı BIRAKMAYAN taraf silebilir. Grup mesajlaşması pairwise
-    /// olduğundan bir `mb_*` kutusunun olası okuyucusu TAM OLARAK ikidir ve
-    /// biri bırakandır — dolayısıyla "bütün aboneler onayladı mı" gibi bir
-    /// muhasebeye hiç gerek yok. Bırakanın kendi `Ack`'i sessizce yok sayılır
-    /// (aksi halde gönderen, alıcı görmeden mesajı silebilirdi).
-    /// Items in `mailbox_id` that `reader` has not acknowledged (and did not
-    /// deposit itself) — see `ServerRequest::Push`.
+    /// ONLY the side that DEPOSITED the envelope can delete it. Group messaging is pairwise, so a `mb_*` box has exactly
+    /// two possible readers, and one of them is the depositor. There is no need for accounting of "have all subscribers
+    /// acknowledged". The depositor's own `Ack` is silently ignored. Otherwise a sender could delete a message before the
+    /// recipient saw it.
+    /// Deletes the items in `mailbox_id` that `reader` has not acknowledged (and did not deposit itself). See
+    /// `ServerRequest::Push`.
     pub fn unacked_for(&self, mailbox_id: &str, reader: &[u8]) -> i64 {
         self.conn
             .query_row(
@@ -1193,7 +1136,7 @@ impl Store {
     }
 
     pub fn ack(&self, mailbox_id: &str, through_seq: u64, acker: &[u8]) -> Result<usize, String> {
-        // yalnızca kutuyu KAYDETMİŞ bir okuyucu onaylayabilir.
+        // Only a reader that REGISTERED the box can acknowledge.
         let is_reader = self
             .conn
             .query_row(
@@ -1207,8 +1150,7 @@ impl Store {
         if !is_reader {
             return Ok(0);
         }
-        // Clamped to what the box holds: an ack of a future seq otherwise
-        // covered every later item too.
+        // Clamped to what the box holds. An ack of a future seq would otherwise cover every later item too.
         let moved = self
             .conn
             .execute(
@@ -1219,18 +1161,17 @@ impl Store {
                 params![mailbox_id, acker, through_seq.min(i64::MAX as u64) as i64],
             )
             .map_err(|e| e.to_string())?;
-        // The cursor did not move: nothing new to delete, and the delete is a
-        // scan of the whole box (a repeated ack ran it 512 times per request).
+        // The cursor did not move: nothing new to delete. The delete scans the whole box, and a repeated ack ran it 512
+        // times per request.
         if moved == 0 {
             return Ok(0);
         }
         self.delete_fully_acked(mailbox_id)
     }
 
-    /// Bırakan dışındaki BÜTÜN kayıtlı okuyucuların onayladığı (ve en az
-    /// birinin gerçekten onayladığı) satırları siler. Onaylamayan bir okuyucu
-    /// (ör. kutuya kaydolmuş bir yabancı) satırı TTL'e kadar tutar ama
-    /// başkasının postasını silemez.
+    /// Deletes the rows that every registered reader OTHER than the depositor has acknowledged (and at least one of them
+    /// really has). A reader that has not acknowledged (for example a stranger registered to the box) keeps the row until
+    /// the TTL, but cannot delete someone else's mail.
     fn delete_fully_acked(&self, mailbox_id: &str) -> Result<usize, String> {
         self.conn
             .execute(
@@ -1249,11 +1190,9 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
-    /// Süresi dolmuş teslim öğelerini siler. Onaya ek bir emniyet kemeri:
-    /// hiç geri dönmeyen bir alıcı yüzünden kutu sonsuza dek büyümesin.
-    /// bkz. `ServerRequest::Cancel` — gönderen, HENÜZ TESLİM EDİLMEMİŞ
-    /// kendi paketini geri çeker. `depositor = ?3` şartı kritik: yalnızca
-    /// kendi bıraktığınızı silebilirsiniz, başkasınınkini asla.
+    /// Deletes expired delivery items. A safety net on top of acks: a recipient that never comes back must not let the box
+    /// grow forever. See `ServerRequest::Cancel`: the sender withdraws its OWN undelivered packet. The `depositor = ?3`
+    /// condition is critical: you can delete only what you deposited, never someone else's.
     pub fn cancel_own_deposits(&self, mailbox_id: &str, seqs: &[u64], depositor: &[u8]) -> usize {
         let mut removed = 0usize;
         for seq in seqs {
@@ -1268,8 +1207,8 @@ impl Store {
         removed
     }
 
-    /// Puts an enroll key on the block list: no new enrollment with it (see
-    /// `revoke_enrollment`, which does the same for the enrollment's key).
+    /// Puts an enroll key on the block list: no new enrollment with it. See `revoke_enrollment`, which does the same for
+    /// the enrollment's key.
     pub fn block_enrollment_key(&self, enroll_pk: &[u8], now: i64) -> Result<(), String> {
         self.conn
             .execute(
@@ -1296,9 +1235,8 @@ impl Store {
     }
 
     pub fn sweep_expired_mail(&self, now: i64) -> usize {
-        // Kaydı silinmiş/iptal edilmiş sahiplerin okuyucu satırları: artık
-        // onaylayamazlar, `delete_fully_acked` onları zaten saymıyor; bekleyen
-        // postayı bırakmak için kutuları yeniden değerlendir.
+        // Reader rows of owners whose enrollment was deleted or revoked can no longer acknowledge. `delete_fully_acked` no
+        // longer counts them. Re-evaluate the boxes so that waiting mail is released.
         let mut orphaned: Vec<String> = Vec::new();
         if let Ok(mut st) = self.conn.prepare(
             "SELECT DISTINCT mailbox_id FROM mailbox_readers
@@ -1329,7 +1267,7 @@ impl Store {
                 .unwrap_or(0)
     }
 
-    /// Deletes archive rows not written for `ARCHIVE_TTL_MS`; quotas recounted.
+    /// Deletes archive rows not written for `ARCHIVE_TTL_MS`. Quotas are recounted.
     pub fn sweep_expired_archive(&self, now: i64) -> usize {
         let cutoff = now - ARCHIVE_TTL_MS;
         let mut owners: Vec<Vec<u8>> = Vec::new();
@@ -1346,29 +1284,25 @@ impl Store {
     }
 
     // -----------------------------------------------------------------
-    // Arşiv
+    // Archive
     // -----------------------------------------------------------------
 
-    /// Kayıtları yükler/üzerine yazar.
+    /// Stores or overwrites records.
     ///
-    /// `WHERE excluded.rev > archive.rev`: bir düzenleme/silme AYNI
-    /// `record_id`'yi taşır ve daha yüksek bir `rev` ile eskisinin üzerine
-    /// yazar. Bu, mevcut `HistorySyncResponse` mekanizmasının YAPAMADIĞI bir
-    /// şeydir (geç gelen bir Edit'i geçmişte düzeltmek). Aynı kural, N
-    /// cihazımın AYNI kaydı yüklemesini de tek satıra indirir.
+    /// `WHERE excluded.rev > archive.rev`: an edit or delete carries the SAME `record_id` and overwrites the old row with a
+    /// higher `rev`. The existing `HistorySyncResponse` cannot do this (it cannot correct a late Edit in history). The same
+    /// rule also collapses N devices uploading the same record into one row.
     ///
-    /// The last writer becomes `owner` and pays for the row: see
-    /// `archive_row_bytes`.
+    /// The last writer becomes `owner` and pays for the row (see `archive_row_bytes`).
     pub fn archive_put(&self, bucket: &str, records: &[ArchiveRecord], owner: &[u8], now: i64) -> Result<u64, String> {
         let mut newest = 0u64;
-        // One transaction: one WAL commit per batch, and all or nothing.
-        // The charge moves by the delta of each row written, in the same
-        // transaction: a `SUM` over all of the writer's rows per request was
-        // a full scan on the event loop. The sweep recounts.
+        // One transaction: one WAL commit per batch, all or nothing. The charge moves by the delta of each row written, in
+        // the same transaction. A `SUM` over all of the writer's rows on every request was a full scan on the event loop.
+        // The sweep recounts.
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         for rec in records {
-            // Skipped, not refused: the client drops what was answered `Ok`,
-            // and one over-long id must not block its archive queue.
+            // Skipped, not refused: the client drops what was answered `Ok`. One over-long id must not block its archive
+            // queue.
             if rec.record_id.len() > 128 {
                 continue;
             }
@@ -1412,9 +1346,8 @@ impl Store {
         Ok(newest)
     }
 
-    /// Only the owners whose rows changed (an overwrite or a purge changes
-    /// what another enrollment is charged for). Over every enrollment it was
-    /// a scan of the whole archive on each request.
+    /// Only the owners whose rows changed are recounted (an overwrite or purge changes what another enrollment is charged).
+    /// Recounting every enrollment scanned the whole archive on each request.
     fn recount_archive_bytes(&self, owners: &[Vec<u8>]) {
         for owner in owners {
             let _ = self.conn.execute(
@@ -1428,9 +1361,8 @@ impl Store {
 
     pub fn archive_probe(&self, buckets: &[String]) -> Vec<BucketStat> {
         let mut out = Vec::new();
-        // A repeated id is one scan, and the count stops at a cap: 512 full
-        // scans of a bucket of millions of rows held the event loop for
-        // seconds. MIN/MAX come from `idx_archive_page`.
+        // A repeated id is one scan, and the count stops at a cap. 512 full scans of a bucket of millions of rows held the
+        // event loop for seconds. MIN and MAX come from `idx_archive_page`.
         let mut seen = std::collections::HashSet::new();
         for b in buckets {
             if !seen.insert(b.as_str()) {
@@ -1457,11 +1389,10 @@ impl Store {
         out
     }
 
-    /// Yeniden eskiye bir sayfa. `before: None` = en yeni sayfa.
+    /// Pages backwards, newest first. `before: None` returns the newest page.
     ///
-    /// The cursor is the last record the client got, `(sent_at_ms,
-    /// record_id)`: clients send `sent_at_ms` coarsened to the hour, so
-    /// many records share one and a page may end inside such a group.
+    /// The cursor is the last record the client received, `(sent_at_ms, record_id)`. Clients send `sent_at_ms` rounded to
+    /// the hour, so many records share one value, and a page can end inside such a group.
     pub fn archive_fetch(&self, bucket: &str, before: Option<(u64, &str)>, max_items: u32, max_bytes: u32) -> (Vec<ArchiveRecord>, bool) {
         let (before_ms, before_id) = match before {
             Some((ms, id)) => (ms.min(i64::MAX as u64) as i64, id),
@@ -1488,8 +1419,8 @@ impl Store {
         let mut out: Vec<ArchiveRecord> = Vec::new();
         let mut total = 0usize;
         for rec in rows.flatten() {
-            // `!out.is_empty()`: the first record always goes out, or one
-            // record over `max_bytes` hides everything older in its bucket.
+            // `!out.is_empty()`: the first record always goes out. Otherwise one record over `max_bytes` would hide
+            // everything older in its bucket.
             if !out.is_empty() && (out.len() as u32 >= max_items || total + rec.sealed.len() > max_bytes as usize) {
                 return (out, true);
             }
@@ -1499,9 +1430,8 @@ impl Store {
         (out, false)
     }
 
-    /// Deletes whole buckets, whoever uploaded the rows. The bucket id is the
-    /// capability, as it is for `archive_fetch` and for overwriting a record:
-    /// a chat deleted on one linked device goes for all of them.
+    /// Deletes whole buckets, whoever uploaded the rows. The bucket id is the capability, as it is for `archive_fetch` and
+    /// for overwriting a record. A chat deleted on one linked device is deleted for all of them.
     pub fn archive_purge(&self, buckets: &[String]) -> usize {
         let mut n = 0;
         let mut owners: Vec<Vec<u8>> = Vec::new();
@@ -1522,7 +1452,7 @@ impl Store {
     }
 
     // -----------------------------------------------------------------
-    // Blob (dosya eki)
+    // Blob (file attachment)
     // -----------------------------------------------------------------
 
     pub fn blob_begin(&self, blob_id: &str, owner: &[u8], total_chunks: u32, now: i64) -> Result<(), String> {
@@ -1537,7 +1467,7 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
-    /// Bu parça daha önce geldi mi? (Boru hattında tekrar gönderim olabilir.)
+    /// Has this chunk arrived before? (Retransmission is possible in the pipeline.)
     pub fn blob_has_chunk(&self, blob_id: &str, chunk_index: u32) -> bool {
         self.conn
             .query_row(
@@ -1552,12 +1482,10 @@ impl Store {
     }
 
     pub fn blob_record_chunk(&self, blob_id: &str, chunk_index: u32, len: usize) -> Result<(), String> {
-        // `received_chunks` bir SAYAÇ değil, bir SU SEVİYESİ: parçalar sıralı
-        // yükleniyor (istemci tek seferde tek `BlobPut` tutuyor), bu yüzden
-        // "en yüksek görülen index + 1" doğru ve tekrar gönderilen bir parça
-        // sayacı yanlışlıkla ilerletmiyor.
-        // Parça kaydı İDEMPOTENT: aynı indeks tekrar gelirse (bağlantı
-        // koptu, istemci yeniden gönderdi) ne sayaç ne bayt iki kez artar.
+        // `received_chunks` is a COUNT of distinct chunks, not a high-water mark. Chunks may arrive out of order (the
+        // pipeline can have several `BlobPut`s in flight), and a re-sent chunk must not advance the count.
+        // Chunk recording is idempotent: if the same index arrives again (connection dropped, client re-sent), neither the
+        // count nor the bytes go up twice.
         let inserted = self
             .conn
             .execute(
@@ -1568,8 +1496,7 @@ impl Store {
         if inserted == 0 {
             return Ok(());
         }
-        // `received_chunks` artık GERÇEK bir sayım — su seviyesi değil, ki
-        // boru hattında parçalar sırasız geliyor.
+        // `received_chunks` is now a real count, not a high-water mark, because chunks can arrive out of order.
         self.conn
             .execute(
                 "UPDATE blobs SET byte_len = byte_len + ?2,
@@ -1581,8 +1508,8 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
-    /// `Err` also when no row matched (gone, or chunks missing): the caller
-    /// must not answer `Ok` for a blob that will never be served.
+    /// Returns `Err` also when no row matched (gone, or chunks missing). The caller must not answer `Ok` for a blob that
+    /// will never be served.
     pub fn blob_finish(&self, blob_id: &str, enc_sha256: &[u8], now: i64) -> Result<(), String> {
         let n = self
             .conn
@@ -1624,7 +1551,7 @@ impl Store {
         let _ = self.conn.execute("UPDATE blobs SET last_served_at = ?2 WHERE blob_id = ?1", params![blob_id, now]);
     }
 
-    /// `true` if `owner` owned the blob; the caller then removes the file.
+    /// `true` if `owner` owned the blob. The caller then removes the file.
     pub fn blob_delete(&self, blob_id: &str, owner: &[u8]) -> bool {
         let owned = self.blob_state(blob_id).map_or(false, |s| s.owner == owner);
         if owned {
@@ -1633,12 +1560,10 @@ impl Store {
         owned
     }
 
-    /// Silinmesi gereken blob kimliklerini döner (dosyaları çağıran siler).
+    /// Returns the blob ids to delete. The caller removes the files.
     ///
-    /// İki kural: tamamlanmışlar `blob_ttl_ms` boyunca SON SERVİSTEN sonra
-    /// yaşar (indirilmeye devam eden bir dosya yaşamaya devam eder — dış
-    /// incelemedeki #4 maddesinin istediği davranış), yarım kalmış
-    /// yüklemeler son parçadan 24 saat sonra atılır (`blob_touch` per chunk).
+    /// Two rules. Completed blobs live for `blob_ttl_ms` after their LAST SERVE, so a file still being downloaded keeps
+    /// living. Unfinished uploads are dropped 24 hours after their last chunk (`blob_touch` per chunk).
     pub fn blobs_to_gc(&self, now: i64, ttl_ms: i64) -> Vec<String> {
         let mut stmt = match self.conn.prepare(
             "SELECT blob_id FROM blobs
@@ -1654,9 +1579,8 @@ impl Store {
             .unwrap_or_default()
     }
 
-    /// The one way a blob leaves the DB: refunds the owner exactly the bytes
-    /// charged (`byte_len`, not the file length: a sparse file is far longer
-    /// than what was paid for) and drops the chunk rows with the blob row.
+    /// The one way a blob leaves the DB. It refunds the owner exactly the bytes charged (`byte_len`, not the file length:
+    /// a sparse file is far longer than what was paid for), and drops the chunk rows with the blob row.
     pub fn blob_forget(&self, blob_id: &str) {
         let _ = self.conn.execute(
             "UPDATE enrollments SET bytes_blob = MAX(0, bytes_blob - (SELECT byte_len FROM blobs WHERE blob_id = ?1))
@@ -1667,7 +1591,7 @@ impl Store {
         let _ = self.conn.execute("DELETE FROM blob_chunks WHERE blob_id = ?1", params![blob_id]);
     }
 
-    /// Blob rows (= files on disk) `owner` holds.
+    /// Blob rows (files on disk) that `owner` holds.
     pub fn blob_count(&self, owner: &[u8]) -> i64 {
         self.conn
             .query_row("SELECT COUNT(*) FROM blobs WHERE owner = ?1", params![owner], |r| r.get(0))
@@ -1675,11 +1599,10 @@ impl Store {
     }
 
     // -----------------------------------------------------------------
-    // Kota
+    // Quota
     // -----------------------------------------------------------------
 
-    /// Blob charge = what the rows record. Undoes a charge whose chunk row
-    /// failed to write (see `handle_blob_put`).
+    /// Blob charge = what the rows record. Undoes a charge whose chunk row failed to write (see `handle_blob_put`).
     pub fn recount_blob_bytes(&self) {
         let _ = self.conn.execute_batch(
             "UPDATE enrollments SET bytes_blob =
@@ -1694,9 +1617,9 @@ impl Store {
         );
     }
 
-    /// Silinen teslim öğelerinin baytını bırakanların kotasından düşer.
-    /// `ack`/`sweep_expired_mail` sonrası çağrılır — aksi halde kota tek
-    /// yönlü artar ve aktif bir kullanıcı birkaç ayda sunucudan kilitlenirdi.
+    /// Subtracts the bytes of deleted delivery items from their depositors' quotas. Called after `ack` and
+    /// `sweep_expired_mail`. Otherwise the quota only grows, and an active user would get locked out of the server within
+    /// a few months.
     pub fn recount_mail_bytes(&self) {
         let _ = self.conn.execute_batch(
             "UPDATE enrollments SET bytes_mail =
@@ -1764,9 +1687,8 @@ mod tests {
         ArchiveRecord { record_id: id.to_string(), rev, sent_at_ms: ts, sealed: body.to_vec() }
     }
 
-    /// Bir kutuyu okuyabilmek icin KAYIT sart (bkz. defter #03 /
-    /// `mailbox_readers`). Gercek akista `Register` her zaman `Fetch`ten
-    /// once gelir — testler bu adimi atliyordu.
+    /// Reading a mailbox requires a REGISTERED reader (see `mailbox_readers`). In the real flow `Register` always
+    /// comes before `Fetch`. The tests used to skip that step.
     fn register(store: &Store, owner: &[u8], mailbox: &str) {
         store
             .register_mailboxes(owner, &[mailbox.to_string()], &[], 0, 100)
@@ -1790,8 +1712,8 @@ mod tests {
         id.to_vec()
     }
 
-    /// Revoke = block: the key is refused until the operator unblocks it, and
-    /// the revoked row stays so the PeerId still leads to the blocked key.
+    /// Revoke is a block: the key is refused until the operator lifts the block. The revoked row stays, so the
+    /// PeerId still leads to the blocked key.
     #[test]
     fn a_revoked_device_is_blocked_until_unblocked() {
         let s = Store::open_in_memory().unwrap();
@@ -1808,7 +1730,7 @@ mod tests {
         assert!(!s.is_key_blocked(&revoked.enroll_pk));
     }
 
-    /// Owner decision K3: an idle enrollment sleeps, it is not removed.
+    /// Operator decision: an idle enrollment goes to sleep, it is not removed.
     #[test]
     fn an_idle_enrollment_sleeps_and_rebinds_without_an_invite() {
         let s = Store::open_in_memory().unwrap();
@@ -1875,10 +1797,10 @@ mod tests {
         register(&s, &b, "mb_1");
         let (items, _) = s.fetch(&b, &[("mb_1".into(), 0)], 10, 4096);
         assert_eq!(items.len(), 2);
-        // İmleci ilerlet — aynı öğeler bir daha gelmemeli.
+        // Advance the cursor. The same items must not arrive again.
         let (again, _) = s.fetch(&b, &[("mb_1".into(), s2)], 10, 4096);
         assert!(again.is_empty(), "islenmis ogeler tekrar gelmemeli");
-        // Ortadan devam — atlama olmamalı.
+        // Continue from the middle. No gap must appear.
         let (mid, _) = s.fetch(&b, &[("mb_1".into(), s1)], 10, 4096);
         assert_eq!(mid.len(), 1);
         assert_eq!(mid[0].sealed, b"two");
@@ -1905,9 +1827,8 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         let a = enroll(&s, b"aaaa", "peerA");
         for i in 0..10 {
-            // Baytlar TURA GÖRE farklı: `deposit` artık birebir aynı
-            // kopyayı tekilleştiriyor (bkz. orada) ve gerçek hayatta iki
-            // ayrı zarfın ciphertext'i asla aynı olmaz.
+            // The bytes differ per deposit: `deposit` now de-duplicates identical copies (see there), and in practice
+            // two separate envelopes never have the same ciphertext.
             let mut body = vec![b'x'; 100];
             body[0] = i as u8;
             s.deposit("mb_1", &body, &a, i, 1000).unwrap();
@@ -1923,12 +1844,12 @@ mod tests {
 
     #[test]
     fn fetch_does_not_return_the_requesters_own_deposits() {
-        // Bir ratchet kutusunu iki taraf da hem yazar hem okur. Filtre
-        // olmasa herkes kendi giden trafigini geri indirir ve cozemez.
+        // Both sides of a ratchet box write to it and read from it. Without a filter, each side downloads its own
+        // outgoing traffic and cannot decrypt it.
         let s = Store::open_in_memory().unwrap();
         let a = enroll(&s, b"aaaa", "peerA");
         let b = enroll(&s, b"bbbb", "peerB");
-        // Bir ratchet kutusunu iki taraf da kaydeder — bkz. `mailbox_readers`.
+        // Both sides of a ratchet box register it. See `mailbox_readers`.
         register(&s, &a, "mb_1");
         register(&s, &b, "mb_1");
         s.deposit("mb_1", b"a-dan", &a, 1, 1000).unwrap();
@@ -1945,7 +1866,7 @@ mod tests {
 
     #[test]
     fn a_new_reader_needs_a_proof() {
-        // A session box: its id is made from the one key both ends derive.
+        // A session box: its id is derived from the one key both ends derive.
         let s = Store::open_in_memory().unwrap();
         let owner = enroll(&s, b"aaaa", "peerA");
         let peer = enroll(&s, b"bbbb", "peerB");
@@ -1960,7 +1881,7 @@ mod tests {
         assert_eq!(s.register_mailboxes_proved(&owner, &id, &[], &proof(&key), 0, 10).unwrap(), (vec![], vec![]));
         // The same key is taken (second end of a session).
         assert_eq!(s.register_mailboxes_proved(&peer, &id, &[], &proof(&key), 0, 10).unwrap(), (vec![], vec![]));
-        // whoever knows only the id proves it with a key of its own: refused.
+        // Whoever knows only the id proves it with a key of its own: refused.
         assert_eq!(s.register_mailboxes_proved(&squatter, &id, &[], &proof(&[2u8; 32]), 0, 10).unwrap(), (id.clone(), vec![]));
         let rows = s.conn.query_row("SELECT COUNT(*) FROM mailbox_readers WHERE owner = ?1", params![&squatter], |r| r.get::<_, i64>(0)).unwrap();
         assert_eq!(rows, 0);
@@ -1970,8 +1891,8 @@ mod tests {
 
     #[test]
     fn a_squatter_key_neither_locks_out_nor_deletes_for_the_real_reader() {
-        // a co-member knows a first-contact id (not key-bound) and proves
-        // it with a key of its own, on two enrollments, before the device does.
+        // A co-member knows a first-contact id (not key-bound) and proves it with a key of its own, on two
+        // enrollments, before the device does.
         let s = Store::open_in_memory().unwrap();
         let sq1 = enroll(&s, b"aaaa", "peerA");
         let sq2 = enroll(&s, b"bbbb", "peerB");
@@ -2003,11 +1924,11 @@ mod tests {
         register(&s, &b, "mb_1");
         register(&s, &a, "mb_1");
         let id = vec!["mb_1".to_string()];
-        // Another key takes its own slots, not those of "test-key".
+        // Another key takes its own slots, not the slots of "test-key".
         let other = vec![("mb_1".to_string(), b"other-key".to_vec())];
         assert!(s.register_mailboxes_proved(&d, &id, &[], &other, 0, 100).unwrap().0.is_empty());
-        // The same key from a new enrollment (restored device) takes the place
-        // of the reader seen longest ago, once that one has been idle long enough.
+        // The same key from a new enrollment (restored device) takes the place of the reader seen longest ago, once
+        // that one has been idle long enough.
         let week = READER_EVICT_IDLE_MS;
         s.register_mailboxes(&b, &id, &[], week, 100).unwrap();
         assert_eq!(s.register_mailboxes(&c, &id, &[], week - 1, 100).unwrap(), id, "a, seen at 0, is not idle yet");
@@ -2022,7 +1943,7 @@ mod tests {
 
     #[test]
     fn depositor_cannot_delete_its_own_message() {
-        // Aksi halde gonderen, alici hic gormeden mesaji sunucudan silebilirdi.
+        // Otherwise a sender could delete a message before the recipient saw it.
         let s = Store::open_in_memory().unwrap();
         let sender = enroll(&s, b"send", "peerS");
         let recipient = enroll(&s, b"recv", "peerR");
@@ -2043,18 +1964,17 @@ mod tests {
         register(&s, &recipient, "mb_1");
         let mut last = 0;
         for i in 0..5 {
-            // bkz. `fetch_respects_byte_and_item_caps` aynı notu — yatırma
-            // birebir aynı baytları tekilleştirdiği için her tur farklı.
+            // See `fetch_respects_byte_and_item_caps`: the same note applies. Deposits de-duplicate identical bytes,
+            // so each round uses different bytes.
             last = s.deposit("mb_1", &[b'x', i as u8], &sender, i, 1000).unwrap();
         }
         assert_eq!(s.ack("mb_1", last, &recipient).unwrap(), 5);
-        // Tekrar ack: hata degil, sadece 0 satir.
+        // A repeated ack is not an error, just zero rows.
         assert_eq!(s.ack("mb_1", last, &recipient).unwrap(), 0);
     }
 
-    /// bkz. `Store::deposit` — istemcideki tekilleştirme boşluğu yüzünden
-    /// aynı el sıkışma saniyede bir yeniden yatırılıyor ve bırakanın kotasını
-    /// dolduruyordu. Sunucu artık birebir aynı kopyayı ikinci kez saklamaz.
+    /// See `Store::deposit`. Because of a gap in client-side de-duplication, the same handshake was re-deposited about
+    /// once a second and filled the depositor's quota. The server no longer stores a second identical copy.
     #[test]
     fn identical_redeposit_is_collapsed_and_does_not_grow_quota() {
         let s = Store::open_in_memory().unwrap();
@@ -2069,20 +1989,17 @@ mod tests {
         }
         assert_eq!(s.mailbox_item_count("mb_1"), 1);
 
-        // Kota da sadece BİR kopya kadar artmış olmalı — asıl çöküş buydu.
+        // The quota must grow by only ONE copy. That was the actual crash.
         let e = s.enrollment_by_peer("peerS").unwrap();
         assert_eq!(e.bytes_mail as usize, mail_row_bytes("mb_1", b"ayni-el-sikisma"));
 
-        // Farklı baytlar hâlâ ayrı satır.
+        // Different bytes still get separate rows.
         s.deposit("mb_1", b"baska-zarf", &sender, 60, 1000).unwrap();
         assert_eq!(s.mailbox_item_count("mb_1"), 2);
     }
 
-    /// kutuyu KAYDETMEMİŞ bir istemci ne okuyabilmeli ne de
-    /// silebilmeli. Kutu kimliği (ilk-temas kutusu için) tahmin
-    /// edilebilir olduğundan, erişim kontrolü olmadan kayıtlı herhangi
-    /// biri başkasının postasını çekebiliyor ve `Ack` ile yok
-    /// edebiliyordu.
+    /// A client that did NOT register the box must be able to neither read nor delete from it. A first-contact box id
+    /// is guessable, so without access control any enrolled party could fetch the mail and destroy it with `Ack`.
     #[test]
     fn unregistered_reader_can_neither_fetch_nor_ack() {
         let s = Store::open_in_memory().unwrap();
@@ -2115,10 +2032,8 @@ mod tests {
         assert_eq!(s.depositor_item_count("mb_1", &real), 0, "spam does not count against another sender");
     }
 
-    /// İlk-temas kutusunun kimliği parmak izinden türüyor, yani kayıtlı
-    /// herhangi biri kutuya okuyucu olarak kaydolabilir. O okuyucunun `Ack`'i
-    /// gerçek alıcının postasını silmemeli ve hiç onaylamaması kutuyu
-    /// doldurmamalı.
+    /// A first-contact box id is derived from the fingerprint, so any enrolled party can register as a reader of it. That
+    /// reader's `Ack` must not delete the real recipient's mail, and never acknowledging it must not fill the box.
     #[test]
     fn a_lurking_reader_can_neither_delete_nor_fill_anothers_mail() {
         let s = Store::open_in_memory().unwrap();
@@ -2133,12 +2048,12 @@ mod tests {
         let (mine, _) = s.fetch(&victim, &[("mb_fp".into(), 0)], 10, 4096);
         assert_eq!(mine.len(), 1, "alici postasini hala almali");
 
-        // Alıcı onaylar; yabancı onaylamamış olsaydı satır TTL'e kadar
-        // kalırdı ama kapasiteye sayılmazdı. Burada ikisi de onayladı.
+        // The recipient acks. If the stranger had not acked, the row would stay until the TTL but would not count toward
+        // capacity. Here both acked.
         assert_eq!(s.ack("mb_fp", seq, &victim).unwrap(), 1);
         assert_eq!(s.mailbox_item_count("mb_fp"), 0);
 
-        // Hiç onaylamayan yabancı: satır kalır ama kapasiteye sayılmaz.
+        // A stranger that never acks: the row stays, but does not count toward capacity.
         let seq2 = s.deposit("mb_fp", b"handshake-2", &sender, 2, 1000).unwrap();
         // A third reader of the same key is refused: two per key, both in use.
         let third = enroll(&s, b"sile", "peerQ");
@@ -2150,9 +2065,8 @@ mod tests {
         assert_eq!(s.ack("mb_fp", seq2, &lurker).unwrap(), 1);
     }
 
-    /// Eski sürümde yeniden kayıt yeni bir `enrollment_id` açıp eski okuyucu
-    /// satırlarını sahipsiz bırakıyordu; o sahip onaylayamaz, postayı TTL'e
-    /// kadar tutmamalı.
+    /// In the old version, re-enrolling opened a new `enrollment_id` and left the old reader rows ownerless. That owner
+    /// could never acknowledge, and the mail was held until the TTL.
     #[test]
     fn orphaned_reader_does_not_block_deletion() {
         let s = Store::open_in_memory().unwrap();
@@ -2164,8 +2078,8 @@ mod tests {
         assert_eq!(s.ack("mb_1", seq, &reader).unwrap(), 1);
     }
 
-    /// Bir ratchet kutusunun İKİ kayıtlı okuyucusu olur ve biri
-    /// diğerinin kaydını EZMEZ (tek-sahipli model bunu kırıyordu).
+    /// A ratchet box has TWO registered readers, and one does not overwrite the other's registration. The single-owner
+    /// model used to break this.
     #[test]
     fn a_ratchet_mailbox_supports_two_registered_readers() {
         let s = Store::open_in_memory().unwrap();
@@ -2184,8 +2098,7 @@ mod tests {
         assert_eq!(for_b[0].sealed, b"a->b");
     }
 
-    /// parça adımı blob'la birlikte saklanmalı, yoksa
-    /// `serve_chunk` yanlış ofsetlerden okur.
+    /// The stride must be stored with the blob, or `serve_chunk` would read from the wrong offsets.
     #[test]
     fn blob_remembers_the_chunk_stride_it_was_written_with() {
         let s = Store::open_in_memory().unwrap();
@@ -2194,12 +2107,12 @@ mod tests {
         assert_eq!(s.blob_state("bl_s").unwrap().chunk_size, 0, "baslangicta bilinmiyor");
         s.blob_set_chunk_size("bl_s", 512 * 1024);
         assert_eq!(s.blob_state("bl_s").unwrap().chunk_size, 512 * 1024);
-        // Ilk deger SABITLENIR — sonraki parcalar farkli bir adim iddia edemez.
+        // The first value is FIXED. Later chunks cannot claim a different stride.
         s.blob_set_chunk_size("bl_s", 256 * 1024);
         assert_eq!(s.blob_state("bl_s").unwrap().chunk_size, 512 * 1024);
     }
 
-    /// kayıt başına kotanın üstünde genel bir tavan da olmalı.
+    /// A global ceiling must also exist on top of the per-record quota.
     #[test]
     fn total_stored_bytes_counts_every_kind() {
         let s = Store::open_in_memory().unwrap();
@@ -2214,8 +2127,7 @@ mod tests {
         assert_eq!(s.total_stored_bytes(), 177 + (mail_row_bytes("mb_1", &[]) + ARCHIVE_ROW_OVERHEAD) as i64);
     }
 
-    /// Dış inceleme önerisi: gönderen KENDİ teslim edilmemiş paketini geri
-    /// çekebilmeli — ama yalnızca kendisininkini.
+    /// The sender must be able to withdraw its OWN undelivered packet, and only its own.
     #[test]
     fn sender_can_cancel_only_its_own_undelivered_deposit() {
         let s = Store::open_in_memory().unwrap();
@@ -2226,20 +2138,19 @@ mod tests {
         let mine = s.deposit("mb_1", b"benim", &sender, 1, 1000).unwrap();
         let theirs = s.deposit("mb_1", b"baskasinin", &other, 2, 1000).unwrap();
 
-        // Baskasinin paketini silemem.
+        // Cannot delete someone else's packet.
         assert_eq!(s.cancel_own_deposits("mb_1", &[theirs], &sender), 0);
         assert_eq!(s.mailbox_item_count("mb_1"), 2);
-        // Kendiminkini geri cekebilirim.
+        // Can withdraw my own.
         assert_eq!(s.cancel_own_deposits("mb_1", &[mine], &sender), 1);
         assert_eq!(s.mailbox_item_count("mb_1"), 1);
-        // Alici hala digerini gorur.
+        // The recipient still sees the other one.
         let (left, _) = s.fetch(&recipient, &[("mb_1".into(), 0)], 10, 4096);
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].sealed, b"baskasinin");
     }
 
-    /// Kullanıcı kararı: ENGEL, iptalden farklı — anahtar engellenirse taze
-    /// bir davet de işe yaramamalı.
+    /// Operator decision: a BLOCK differs from a revoke. If the key is blocked, a fresh invite must not work either.
     #[test]
     fn blocking_is_keyed_on_the_enrollment_key_not_the_row() {
         let s = Store::open_in_memory().unwrap();
@@ -2247,7 +2158,7 @@ mod tests {
         assert!(!s.is_key_blocked(&key));
         s.block_enrollment_key(&key, 0).unwrap();
         assert!(s.is_key_blocked(&key));
-        // Baska bir anahtar etkilenmez.
+        // Another key is not affected.
         assert!(!s.is_key_blocked(&vec![8u8; 32]));
         s.unblock_enrollment_key(&key);
         assert!(!s.is_key_blocked(&key));
@@ -2289,10 +2200,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// I-48 / K-41: an on-disk DB stamped at an older version and missing a
-    /// later column gets it; a failing `ALTER` fails init and leaves the old
-    /// stamp, so the next start retries. Opened without `Store::open` so the
-    /// global `DB_KEY` of the SQLCipher test cannot race this one.
+    /// Migration (I-48, K-41): an on-disk DB stamped at an older version and missing a later column gets it. A failing
+    /// `ALTER` fails init and leaves the old stamp, so the next start retries. Opened without `Store::open`, so the global
+    /// `DB_KEY` of the SQLCipher test cannot race this one.
     #[test]
     fn old_schema_gets_missing_column_or_stays_unstamped() {
         let dir = std::env::temp_dir().join(format!("typeon_schema_{}", std::process::id()));
@@ -2317,8 +2227,7 @@ mod tests {
             assert_eq!(version(&s), SCHEMA_VERSION);
         }
         {
-            // `ALTER TABLE mail ADD COLUMN` fails for a reason other than a
-            // duplicate column (a view cannot take one).
+            // `ALTER TABLE mail ADD COLUMN` fails for a reason other than a duplicate column (a view cannot take one).
             let s = open();
             s.conn
                 .execute_batch("DROP INDEX IF EXISTS idx_mail_hash; DROP TABLE mail; CREATE VIEW mail AS SELECT 1 AS seq; PRAGMA user_version = 3;")
@@ -2329,9 +2238,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// the reader cap is per proof key. Two different keys on one
-    /// first-contact box each get `MAX_READERS_PER_KEY` slots; a third reader
-    /// of either key is refused while the two are in use.
+    /// The reader cap is per proof key. Two different keys on one first-contact box each get `MAX_READERS_PER_KEY`
+    /// slots. A third reader of either key is refused while the two are in use.
     #[test]
     fn two_keys_on_one_box_each_take_two_readers() {
         let s = Store::open_in_memory().unwrap();
@@ -2358,7 +2266,7 @@ mod tests {
         assert_eq!(page.len(), 1, "ayni record_id tek satir olmali");
         assert_eq!(page[0].sealed, b"duzeltilmis");
 
-        // Daha DUSUK bir rev eskiyi geri getirmemeli (sirasiz teslim).
+        // A LOWER rev must not restore the old version (out-of-order delivery).
         s.archive_put("ar_1", &[rec("m1", 1, 100, b"ilk")], &a, 0).unwrap();
         let (page, _) = s.archive_fetch("ar_1", None, 10, 65536);
         assert_eq!(page[0].sealed, b"duzeltilmis");
@@ -2375,7 +2283,7 @@ mod tests {
         assert_eq!(page.len(), 2);
         assert!(more);
         assert_eq!(page[0].sent_at_ms, 104, "en yeni once");
-        // Sayfalama: son gorulenden eskiye.
+        // Paging: from the newest seen to older.
         let (older, _) = s.archive_fetch("ar_1", Some((page[1].sent_at_ms, page[1].record_id.as_str())), 10, 65536);
         assert_eq!(older.len(), 3);
         assert!(older.iter().all(|r| r.sent_at_ms < page[1].sent_at_ms));
@@ -2400,7 +2308,7 @@ mod tests {
             assert!(s.consume_invite(b"pub", 10).unwrap(), "sinirsiz davet tukenmemeli");
         }
         assert_eq!(s.invite_uses_left(b"pub", 0), Some(-1), "sayac azalmamali");
-        // Süre yine de bağlar: sınırsız DEMEK süresiz DEMEK değil.
+        // The time limit still applies. Unlimited does NOT mean never expiring.
         s.create_invite(b"pub2", "gecici", 0, 100, 0).unwrap();
         assert!(!s.consume_invite(b"pub2", 200).unwrap());
     }
@@ -2436,7 +2344,7 @@ mod tests {
         s.create_invite(b"h", "x", 1, 0, 0).unwrap();
         enroll(&s, b"aaaa", "peerA");
         let e = s.enrollment_by_peer("peerA").unwrap();
-        // Make the insert fail: no table to write to.
+        // Make the insert fail: there is no table to write to.
         s.conn.execute_batch("ALTER TABLE enrollments RENAME TO gone").unwrap();
         assert!(s.enroll_with_invite(b"h", 1, &e).is_err());
         s.conn.execute_batch("ALTER TABLE gone RENAME TO enrollments").unwrap();
@@ -2545,7 +2453,7 @@ mod tests {
         s.register_mailboxes(&a, &["mb_1".into(), "mb_2".into()], &[], 0, 2).unwrap();
         // The refused id does not cost the batch: `mb_2` stays registered.
         assert_eq!(s.register_mailboxes(&a, &["mb_3".into(), "mb_2".into()], &[], 0, 2).unwrap(), ["mb_3"]);
-        // Zaten kayitli olani tekrar kaydetmek kotaya takilmamali.
+        // Re-registering an id that is already registered must not hit the quota.
         assert!(s.register_mailboxes(&a, &["mb_1".into()], &[], 1, 2).unwrap().is_empty());
         s.register_mailboxes(&a, &[], &["mb_1".into()], 1, 2).unwrap();
         assert!(!s.mailbox_is_registered("mb_1"));
@@ -2553,7 +2461,7 @@ mod tests {
 
     #[test]
     fn mail_bytes_are_recounted_after_delivery() {
-        // Kota tek yonlu artsaydi aktif bir kullanici birkac ayda kilitlenirdi.
+        // If the quota grew one-way, an active user would get locked out within a few months.
         let s = Store::open_in_memory().unwrap();
         let sender = enroll(&s, b"send", "peerS");
         let recipient = enroll(&s, b"recv", "peerR");
@@ -2581,8 +2489,8 @@ mod tests {
 
     #[test]
     fn out_of_order_chunks_are_accepted_and_counted() {
-        // Boru hattinda parcalar sirasiz gelir; sunucu bunu kabul etmeli ve
-        // hepsi gelene kadar 'complete' dememeli.
+        // Chunks arrive out of order in the pipeline. The server must accept this and must not say 'complete' until all
+        // of them have arrived.
         let s = Store::open_in_memory().unwrap();
         let a = enroll(&s, b"aaaa", "peerA");
         s.blob_begin("bl_1", &a, 3, 0).unwrap();
@@ -2603,7 +2511,7 @@ mod tests {
         let a = enroll(&s, b"aaaa", "peerA");
         s.blob_begin("bl_1", &a, 2, 0).unwrap();
         s.blob_record_chunk("bl_1", 0, 100).unwrap();
-        s.blob_record_chunk("bl_1", 0, 100).unwrap(); // baglanti koptu, tekrar
+        s.blob_record_chunk("bl_1", 0, 100).unwrap();  // Connection dropped, retry.
         assert_eq!(s.blob_state("bl_1").unwrap().byte_len, 100, "tekrar gonderilen parca iki kez sayilmamali");
         s.blob_record_chunk("bl_1", 1, 100).unwrap();
         assert_eq!(s.blob_state("bl_1").unwrap().byte_len, 200);
@@ -2617,7 +2525,7 @@ mod tests {
         s.blob_record_chunk("bl_1", 0, 10).unwrap();
         s.blob_finish("bl_1", b"h", 0).unwrap();
         assert!(s.blobs_to_gc(500, 1000).is_empty(), "TTL dolmadan silinmemeli");
-        // Indirilmeye devam eden bir dosya yasamaya devam etmeli.
+        // A file still being downloaded must keep living.
         s.blob_touch("bl_1", 900);
         assert!(s.blobs_to_gc(1500, 1000).is_empty());
         assert_eq!(s.blobs_to_gc(2000, 1000), vec!["bl_1".to_string()]);

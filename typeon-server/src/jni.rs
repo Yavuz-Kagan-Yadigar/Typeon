@@ -1,19 +1,15 @@
-//! Android sunucu uygulamasının JNI kabuğu.
+//! JNI shell of the Android server app.
 //!
-//! Sadece `cfg(target_os = "android")` altında derlenir; Linux daemon'ı
-//! (`src/bin/typeon-server.rs`) bu dosyaya hiç dokunmaz.
+//! Compiled only under `cfg(target_os = "android")`. The Linux daemon (`src/bin/typeon-server.rs`) does not touch this
+//! file.
 //!
-//! ## Mimari
+//! ## Architecture
 //!
-//! `ServerCore` kendi tokio görevinde `run()` içinde döner. Arayüz saniyede
-//! bir durum sorar — `ServerCore`'a kilit koymak döngüyü durdururdu, bu
-//! yüzden döngü her turda ucuz bir anlık görüntü (`ServerShared`) tazeliyor
-//! ve arayüz onu okuyor.
+//! `ServerCore` runs `run()` in its own tokio task. The UI asks for status every second. A lock on `ServerCore` would
+//! stall the loop, so the loop refreshes a cheap snapshot (`ServerShared`) on every turn, and the UI reads that.
 //!
-//! Yönetim işlemleri (davet üret, cihaz listele/iptal et) veritabanına
-//! AYRI bir bağlantıyla erişir. SQLite WAL modunda birden fazla bağlantıyı
-//! sorunsuz destekliyor (bkz. `Store::open`), dolayısıyla ana döngüyü hiç
-//! bloklamadan çalışıyorlar.
+//! Management operations (create invites, list or revoke devices) use a SEPARATE database connection. SQLite WAL mode
+//! supports several connections safely (see `Store::open`), so they never block the main loop.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -28,15 +24,14 @@ use crate::store::{EnrollmentState, Store};
 
 struct Control {
     shared: Arc<ServerShared>,
-    /// Yönetim işlemleri için AYRI bağlantı — bkz. modül notu.
+    /// Separate connection for management operations. See the module note.
     store: Store,
     data_dir: PathBuf,
-    /// blob'lar harici bir birimde olabilir (`startServer`
-    /// `blobDir` parametresi) — disk kullanımı bu dizini de saymalı.
+    /// Blobs may sit on external storage (`startServer`'s `blobDir` parameter), so disk usage must count that directory too.
     blob_dir: PathBuf,
-    /// `stopServer` bunu tetikleyerek `run_until`'ı sonlandırır.
+    /// `stopServer` triggers this to end `run_until`.
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    /// bkz. `ServerCore::set_net_changed_rx` — `notifyNetworkChanged` bunu iter.
+    /// See `ServerCore::set_net_changed_rx`. `notifyNetworkChanged` pushes to it.
     net_changed: tokio::sync::mpsc::UnboundedSender<CoreSignal>,
 }
 
@@ -46,18 +41,15 @@ lazy_static::lazy_static! {
         .build()
         .expect("tokio runtime");
     static ref CONTROL: Mutex<Option<Control>> = Mutex::new(None);
-    /// Held for the whole of `startServer` and `stopServer`. Without it two
-    /// starts both passed the `CONTROL` check (the second one, Tor-less,
-    /// replaced the working server), and a stop during a start was a no-op.
+    /// Held for the whole of `startServer` and `stopServer`. Without it, two starts could both pass the `CONTROL` check
+    /// (the second one, without Tor, would replace the working server), and a stop during a start did nothing.
     static ref START_STOP: Mutex<()> = Mutex::new(());
-    /// The loop task of the last started server. `stopServer` only signals it;
-    /// the next `startServer` waits for it to end.
+    /// The loop task of the last started server. `stopServer` only signals it. The next `startServer` waits for it to end.
     static ref LAST_RUN: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
 }
 
 fn jstr(env: &mut JNIEnv, s: &JString) -> String {
-    // An empty string falls back to a default (e.g. `blob_dir`): a failed
-    // read must at least show up in the log.
+    // An empty string falls back to a default (for example `blob_dir`). A failed read must at least show up in the log.
     env.get_string(s).map(|v| v.into()).unwrap_or_else(|e| {
         log::warn!("JNI dizesi okunamadı, boş sayıldı: {e}");
         // A pending Java exception aborts the next JNI call.
@@ -67,16 +59,14 @@ fn jstr(env: &mut JNIEnv, s: &JString) -> String {
 }
 
 fn out(env: &mut JNIEnv, s: String) -> jstring {
-    // `null` only when the JVM is out of memory: the pending
-    // `OutOfMemoryError` is then thrown in Kotlin on return.
+    // `null` only when the JVM is out of memory. The pending `OutOfMemoryError` is then thrown in Kotlin on return.
     env.new_string(s).map(|v| v.into_raw()).unwrap_or(std::ptr::null_mut())
 }
 
-/// Runs an export's body: a panic becomes an `Error:` answer instead of
-/// unwinding into the JVM, which aborts the whole server app.
+/// Runs an export's body. A panic becomes an `Error:` answer instead of unwinding into the JVM, which would abort the
+/// whole server app.
 fn guarded<'local>(env: &mut JNIEnv<'local>, body: impl FnOnce(JNIEnv<'local>) -> jstring) -> jstring {
-    // SAFETY: the same thread and the same frame; `env` is not used while
-    // `body` runs.
+    // SAFETY: same thread and same frame. `env` is not used while `body` runs.
     let inner = unsafe { env.unsafe_clone() };
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(inner)))
         .unwrap_or_else(|p| {
@@ -86,8 +76,8 @@ fn guarded<'local>(env: &mut JNIEnv<'local>, body: impl FnOnce(JNIEnv<'local>) -
         })
 }
 
-/// SQLCipher raw key (32 bytes) for the server DB; call before `startServer`.
-/// Empty array = plain DB. Returns "ok" or "Error: ...".
+/// SQLCipher raw key (32 bytes) for the server DB. Call before `startServer`. An empty array means a plain DB. Returns
+/// "ok" or "Error: ...".
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_setDbKey<'local>(
     mut env: JNIEnv<'local>,
@@ -95,7 +85,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_setDbKey<'local>(
     key: JByteArray<'local>,
 ) -> jstring {
     guarded(&mut env, |mut env| {
-        // A failed read is an error, never "empty = plain DB".
+        // A failed read is an error, never "empty means plain DB".
         let raw = match env.convert_byte_array(&key) {
             Ok(v) => zeroize::Zeroizing::new(v),
             Err(e) => {
@@ -119,9 +109,8 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_setDbKey<'local>(
     })
 }
 
-/// Sunucuyu başlatır. Yeniden çağrılırsa no-op (foreground service
-/// `START_STICKY` ile yeniden başlatılabiliyor). Önceki döngü hâlâ
-/// kapanıyorsa `Error:` döner.
+/// Starts the server. Calling it again is a no-op (the foreground service can restart with `START_STICKY`). If the
+/// previous loop is still shutting down, returns `Error:`.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'local>(
     mut env: JNIEnv<'local>,
@@ -152,37 +141,29 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
 
         let mut config = ServerConfig::new(PathBuf::from(&dir));
         config.node_mode = node;
-        // Yalnızca BLOBLAR taşınabilir; kimlik ve Tor durumu dahilide kalır
-        // (bkz. `ServerConfig.blob_dir`).
+        // Only the BLOBS can be moved. Identity and Tor state stay internal (see `ServerConfig.blob_dir`).
         let blobs = jstr(&mut env, &blob_dir);
         if !blobs.is_empty() {
             config.blob_dir = PathBuf::from(&blobs);
         }
-        // Kotaları cihazın GERÇEK boş alanından türet.
+        // Derive the quotas from the device's REAL free space.
         //
-        // Varsayılanlar bir VPS için yazılmıştı: kayıt BAŞINA 256 MB posta +
-        // 1 GB arşiv + 4 GB blob. Beş cihazla 26 GB eder ve gerçekten oldu —
-        // testte tabletin 22 GB'lık diski doldu, sunucu 751 MB biriktirdi,
-        // yeni bir APK bile kurulamadı (`INSTALL_FAILED_INSUFFICIENT_STORAGE`).
-        // Telefonda sunucunun kendi diskini yiyip cihazı kullanılamaz hâle
-        // getirmesi kabul edilemez.
+        // The defaults were written for a VPS: per enrollment 256 MB of mail, 1 GB of archive and 4 GB of blobs. Five
+        // devices come to 26 GB, and that actually happened. In a test, a tablet's 22 GB disk filled up, the server
+        // had stored 751 MB, and not even a new APK could be installed (`INSTALL_FAILED_INSUFFICIENT_STORAGE`). A server
+        // that eats the phone's own disk and makes the device unusable is not acceptable.
         if storage_budget_bytes > 0 {
             let budget = storage_budget_bytes as u64;
-            // Bu denetimde bulundu: `ServerConfig.total_storage_budget_bytes`
-            // yazılmış, `handle_blob_put`/`handle_authenticated` tarafından
-            // okunuyor — ama HİÇBİR yerde SET EDİLMİYORDU (`ServerConfig::new`
-            // `None` bırakıyor, ne burası ne de headless daemon dolduruyordu).
-            // Yani defter #23'ün kurduğu TOPLAM tavan tamamen ölüydü ve
-            // yalnızca kayıt BAŞINA kotalar uygulanıyordu — yani tam olarak o
-            // maddenin düzeltmek için yazıldığı hata (8 yerine 20 cihaz
-            // kaydolduğunda gerçek tavan bütçenin 2,5 katına çıkıyor) hâlâ
-            // yürürlükteydi.
+            // Found in review: `ServerConfig.total_storage_budget_bytes` was written and read by `handle_blob_put` and
+            // `handle_authenticated`, but NEVER SET anywhere. `ServerConfig::new` leaves it `None`, and neither this file nor
+            // the headless daemon filled it in. So the total ceiling from the store-quota work was dead code, and only the
+            // per-record quotas applied. The bug that the work was written to fix stayed in force: with 20 enrolled devices
+            // instead of 8, the real ceiling was 2.5 times the budget.
             config.total_storage_budget_bytes = Some(budget);
-            // Bütçe, beklenen kayıt sayısına bölünür; biri diğerlerinin payını
-            // yiyemesin. Bölüşüm kabaca kullanım oranına göre: bloblar en
-            // hacimli, posta en küçük.
-            // The quota share and the enrollment cap are one number: more
-            // devices than shares would put the sum of quotas over the budget.
+            // The budget is divided by the expected enrollment count, so no single device takes everyone else's share. The
+            // split is roughly by usage: blobs are the largest, mail the smallest.
+            // The quota share and the enrollment cap are one number: more devices than shares would put the sum of the quotas
+            // over the budget.
             const EXPECTED_DEVICES: u64 = 16;
             config.max_enrollments = EXPECTED_DEVICES as u32;
             let per_device = (budget / EXPECTED_DEVICES).max(8 * 1024 * 1024);
@@ -202,16 +183,14 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
         }
 
         let _guard = RUNTIME.enter();
-        // Found on device (2026-09-18): toggling the relay/DHT switch restarts the
-        // server 600 ms after `stopServer`, which only signals the old loop. The old
-        // arti client still held its state lock, so the new one failed with "Onion
-        // service başlatılamadı: local resource (port, lockfile, etc.) already in use"
-        // and the server had no address until toggled again. Wait for the old loop
-        // (and the Tor client it owns) to be dropped first.
+        // Found on a device (2026-09-18): toggling the relay/DHT switch restarts the server 600 ms after `stopServer`, which
+        // only signals the old loop. The old arti client still held its state lock, so the new one failed with "Onion
+        // service could not start: local resource (port, lockfile, etc.) already in use", and the server had no address
+        // until toggled again. Wait for the old loop (and the Tor client it owns) to be dropped first.
         let previous = LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(mut handle) = previous {
             if RUNTIME.block_on(async { tokio::time::timeout(std::time::Duration::from_secs(20), &mut handle).await }).is_err() {
-                // Starting anyway ran a second core on the same DB and Tor state.
+                // Starting anyway would run a second core on the same DB and Tor state.
                 log::warn!("Önceki sunucu döngüsü 20 sn içinde kapanmadı, başlatılmadı");
                 *LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
                 return out(&mut env, "Error: previous server still shutting down, retry shortly".to_string());
@@ -234,10 +213,9 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
         let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel::<CoreSignal>();
         core.set_net_changed_rx(net_rx);
-        // `run_until` consumes the core: when it returns, the Tor client is dropped.
+        // `run_until` consumes the core. When it returns, the Tor client is dropped.
         let handle = RUNTIME.spawn(async move {
-            // `oneshot` gönderen düşerse de sonlanır — kanal hatası da bir
-            // kapatma sinyali sayılır.
+            // The `oneshot` also ends if the sender is dropped. A channel error counts as a shutdown signal.
             if let Err(e) = core.run_until(async { let _ = stop_rx.await; }).await {
                 log::error!("Sunucu döngüsü durdu: {e}");
             }
@@ -257,9 +235,8 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
     })
 }
 
-/// Ağ arayüzü değiştiğinde (Wi-Fi kopup gelme, hücresele geçiş) çağrılır —
-/// bkz. `ServerService` `ConnectivityManager` geri çağrısı. Çekirdek
-/// çalışmıyorsa no-op.
+/// Called when the network interface changes (Wi-Fi drops and returns, or a switch to cellular). See the
+/// `ServerService` `ConnectivityManager` callback. No-op if the core is not running.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_notifyNetworkChanged<'local>(
     _env: JNIEnv<'local>,
@@ -273,11 +250,9 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_notifyNetworkChan
     });
 }
 
-/// Sunucuyu GERÇEKTEN durdurur — `run_until`'ı sonlandırır ve
-/// `CONTROL`'ü boşaltır. Bundan sonraki `startServer` çağrısı TEMİZ bir
-/// kurulum yapar, yani node modu / blob dizini / disk bütçesi değişiklikleri
-/// nihayet uygulanabiliyor (önceden `startServer` çalışan bir çekirdek
-/// varken no-op olduğu için süreç öldürülmeden hiçbiri etkili olmuyordu).
+/// Really stops the server. Ends `run_until` and empties `CONTROL`. The next `startServer` does a CLEAN setup, so changes
+/// to node mode, the blob directory or the disk budget finally take effect. Before this, `startServer` was a no-op while a
+/// core was running, so none of those changes applied without killing the process.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_stopServer<'local>(
     mut env: JNIEnv<'local>,
@@ -289,9 +264,8 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_stopServer<'local
         if let Some(tx) = taken.and_then(|mut control| control.shutdown.take()) {
             let _ = tx.send(());
         }
-        // Wait until the loop has really ended: the caller may move or delete the
-        // blob files next. On a timeout the handle stays for `startServer`.
-        // `LAST_RUN` is not held across the wait: `serverStatus` locks it too.
+        // Wait until the loop has really ended. The caller may move or delete the blob files next. On a timeout the handle
+        // stays for `startServer`. `LAST_RUN` is not held across the wait, because `serverStatus` locks it too.
         let running = LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(mut handle) = running {
             if RUNTIME.block_on(async { tokio::time::timeout(std::time::Duration::from_secs(20), &mut handle).await }).is_err() {
@@ -305,15 +279,15 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_stopServer<'local
     })
 }
 
-/// Arayüzün saniyede bir çektiği durum. `{peer_id, tor, addresses, stats}`
+/// Status polled by the UI once a second. `{peer_id, tor, addresses, stats}`.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_serverStatus<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
     guarded(&mut env, |mut env| {
-        // The loop task ended on its own (a panic is swallowed by tokio): report
-        // it and clear the state, so the next `startServer` is not a no-op.
+        // The loop task ended on its own (tokio swallows a panic). Report it and clear the state, so the next
+        // `startServer` is not a no-op.
         let dead = LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map_or(false, |h| h.is_finished());
         let mut guard = CONTROL.lock().unwrap_or_else(|p| p.into_inner());
         if dead {
@@ -324,8 +298,8 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_serverStatus<'loc
         };
         let peer_id = control.shared.peer_id.lock().map(|p| p.clone()).unwrap_or_default();
         let tor = control.shared.tor_status.lock().map(|p| p.clone()).unwrap_or_default();
-        // Özel ağ adresleri koda GİRMEZ (bkz. `ServerCore::invite_addrs`) —
-        // başka bir ağdaki alıcı için ulaşılamazlar ve iç ağ yapısını sızdırırlar.
+        // Private-network addresses are NOT included (see `ServerCore::invite_addrs`). A recipient on another network
+        // cannot reach them, and they leak the internal network layout.
         let addrs: Vec<String> = control
             .shared
             .addrs
@@ -333,8 +307,8 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_serverStatus<'loc
             .map(|a| a.iter().filter(|x| p2p_messenger::server_proto::is_onion_server_addr(x)).cloned().collect())
             .unwrap_or_default();
         let stats = control.shared.stats.lock().map(|s| s.clone()).unwrap_or_default();
-        // Active ones: a revoked device stays in the list (dimmed, so it can
-        // still be blocked) but is not a device of this server any more.
+        // Active ones only. A revoked device stays in the list (dimmed, so it can still be blocked) but is no longer a
+        // device of this server.
         let devices = control.store.list_enrollments().iter().filter(|e| e.state != EnrollmentState::Revoked).count();
         let json = serde_json::json!({
             "running": true,
@@ -353,15 +327,13 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_serverStatus<'loc
     })
 }
 
-/// Sunucunun KALICI katılım kodu — bir kez yayımlanır, sınırsız kişi
-/// katılır (bkz. `ServerCore::join_code`). `rotate = true` ise eski kod
-/// geçersizleşir ve yenisi döner.
+/// The server's PERMANENT join code. Published once, and unlimited people can join with it (see
+/// `ServerCore::join_code`). With `rotate = true`, the old code becomes invalid and a new one is returned.
 ///
-/// Neden `ServerCore::join_code` doğrudan çağrılmıyor: `ServerCore` ağ
-/// görevinin İÇİNDE, JNI tarafında yalnızca `shared` + `store` görünür.
-/// Adres filtresi (`is_onion_server_addr`) bu yüzden burada TEKRARLANIYOR —
-/// bkz. `ServerCore::invite_addrs`: özel ağ adresleri koda girmez, çünkü
-/// başka bir ağdaki alıcı için ulaşılamazlar ve iç ağ yapısını sızdırırlar.
+/// Why `ServerCore::join_code` is not called directly: `ServerCore` lives INSIDE the network task. On the JNI side only
+/// `shared` and `store` are visible. So the address filter (`is_onion_server_addr`) is repeated here. See
+/// `ServerCore::invite_addrs`: private-network addresses are kept out of codes, because a recipient on another network
+/// cannot reach them and they leak the internal network layout.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_joinCode<'local>(
     mut env: JNIEnv<'local>,
@@ -445,8 +417,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_revokeDevice<'loc
             return out(&mut env, "Error: invalid id".to_string());
         };
         let res = control.store.revoke_enrollment(&id);
-        // As for a block: with the old public code the revoked
-        // device enrolls again at once under a fresh key and PeerId.
+        // As with a block: under the old public code the revoked device would enroll again at once under a fresh key and PeerId.
         if res.is_ok() {
             let _ = crate::public_join_token(&control.store, true);
         }
@@ -459,9 +430,9 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_revokeDevice<'loc
     })
 }
 
-/// Bir kaydı ENGELLER: iptal gibi kayıt ANAHTARINA konur (iptal de engeller,
-/// bkz. `Store::revoke_enrollment`); ek olarak katılım kodunu döndürür, çünkü
-/// yeni anahtar + PeerId üreten bir cihaz eski kodla yeniden kaydolabilirdi.
+/// Blocks an enrollment. Like a revoke, the block is put on the enrollment KEY (revoke also blocks; see
+/// `Store::revoke_enrollment`). It also returns the join code, because a device that makes a new key and PeerId could
+/// otherwise re-enroll with the old code.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_blockDevice<'local>(
     mut env: JNIEnv<'local>,
@@ -482,8 +453,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_blockDevice<'loca
         };
         let blocked = control.store.block_enrollment_key(&existing.enroll_pk, now_ms());
         let revoked = control.store.revoke_enrollment(&id);
-        // The block is keyed on a key the device makes itself: with the old
-        // public code it would enroll again under a new key.
+        // The block is keyed on a key the device makes itself. With the old public code it would enroll again under a new key.
         let _ = crate::public_join_token(&control.store, true);
         let _ = control.net_changed.send(CoreSignal::EnrollmentsChanged);
         drop(guard);
@@ -494,7 +464,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_blockDevice<'loca
     })
 }
 
-/// Engeli kaldırır — cihaz taze bir davetle yeniden kaydolabilir hâle gelir.
+/// Lifts a block, so the device can enroll again with a fresh invite.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_unblockDevice<'local>(
     mut env: JNIEnv<'local>,
@@ -519,7 +489,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_unblockDevice<'lo
     })
 }
 
-/// Disk kullanımı (bayt) — arayüzdeki depolama satırı için.
+/// Disk usage in bytes, for the storage row in the UI.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_diskUsage<'local>(
     mut env: JNIEnv<'local>,
@@ -531,20 +501,17 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_diskUsage<'local>
             return out(&mut env, "0".to_string());
         };
         let dir = control.data_dir.clone();
-        // burası `data_dir/blobs`'u sabit varsayıyordu, oysa
-        // `startServer` blob dizinini harici bir birime yönlendirebiliyor —
-        // kullanıcı SD kartı seçtiğinde blob'lar HİÇ sayılmıyor, arayüzdeki
-        // kullanım neredeyse sıfır görünüyordu.
+        // This used to assume `data_dir/blobs`. But `startServer` can point the blob directory at an external volume. When
+        // the user chose an SD card, blobs were NOT counted at all, and the UI showed almost zero usage.
         let blobs = control.blob_dir.clone();
         drop(guard);
-        // Whole trees (Tor state, WAL, ...); the blob dir once, also when it
-        // sits inside the data dir.
+        // Whole trees (Tor state, WAL and so on). The blob directory is counted once, even when it sits inside the data dir.
         fn tree_bytes(d: &std::path::Path, skip: &std::path::Path) -> u64 {
             let Ok(entries) = std::fs::read_dir(d) else { return 0 };
             entries
                 .flatten()
                 .filter(|e| e.path() != skip)
-                // `file_type` does not follow symlinks: no loop.
+                // `file_type` does not follow symlinks, so there is no loop.
                 .map(|e| match e.file_type() {
                     Ok(t) if t.is_dir() => tree_bytes(&e.path(), skip),
                     Ok(_) => e.metadata().map_or(0, |m| m.len()),
