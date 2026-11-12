@@ -12,7 +12,7 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 
 /**
- * Spec dışı, kullanıcı isteği: uygulamayı açmak için bir şifre.
+ * uygulamayı açmak için bir şifre.
  *
  * Şifrenin KENDİSİ hiçbir yerde saklanmaz — rastgele bir tuzla (salt)
  * birlikte PBKDF2-HMAC-SHA256 türevi saklanır. Bu, cihaz belleğine erişen
@@ -83,7 +83,7 @@ object AppLock {
      * hiç açılmayan bir ekranın işareti ise kendiliğinden geçersizleşir.
      */
     private const val TRUSTED_EXCURSION_WINDOW_MS = 5_000L
-    private const val MAX_EXCURSION_MS = 60_000L  // M-33: was 3 min; same as BACKGROUND_LOCK_MS
+    private const val MAX_EXCURSION_MS = 60_000L  // was 3 min; same as BACKGROUND_LOCK_MS
     @Volatile private var excursionLeftAt = 0L
 
     /** Kullanıcı isteği: arka planda bu süreden uzun kalırsa şifre sorulur
@@ -311,7 +311,7 @@ object AppLock {
         val cache = context.cacheDir
         Thread {
             java.io.File(files, "attachments/plain_cache").listFiles()?.forEach { it.deleteRecursively() }
-            // M-40: decrypted full-screen avatar copies (AvatarUtil.openFullscreen)
+            // decrypted full-screen avatar copies (AvatarUtil.openFullscreen)
             java.io.File(cache, "avatar_view").listFiles()?.forEach { it.deleteRecursively() }
         }.start()
     }

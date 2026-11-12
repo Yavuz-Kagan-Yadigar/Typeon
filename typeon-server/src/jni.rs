@@ -31,10 +31,10 @@ struct Control {
     /// Yönetim işlemleri için AYRI bağlantı — bkz. modül notu.
     store: Store,
     data_dir: PathBuf,
-    /// Defter #24: blob'lar harici bir birimde olabilir (`startServer`
+    /// blob'lar harici bir birimde olabilir (`startServer`
     /// `blobDir` parametresi) — disk kullanımı bu dizini de saymalı.
     blob_dir: PathBuf,
-    /// Defter #11: `stopServer` bunu tetikleyerek `run_until`'ı sonlandırır.
+    /// `stopServer` bunu tetikleyerek `run_until`'ı sonlandırır.
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     /// bkz. `ServerCore::set_net_changed_rx` — `notifyNetworkChanged` bunu iter.
     net_changed: tokio::sync::mpsc::UnboundedSender<CoreSignal>,
@@ -60,7 +60,7 @@ fn jstr(env: &mut JNIEnv, s: &JString) -> String {
     // read must at least show up in the log.
     env.get_string(s).map(|v| v.into()).unwrap_or_else(|e| {
         log::warn!("JNI dizesi okunamadı, boş sayıldı: {e}");
-        // A pending Java exception aborts the next JNI call (M6).
+        // A pending Java exception aborts the next JNI call.
         let _ = env.exception_clear();
         String::new()
     })
@@ -273,7 +273,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_notifyNetworkChan
     });
 }
 
-/// Sunucuyu GERÇEKTEN durdurur (defter #11) — `run_until`'ı sonlandırır ve
+/// Sunucuyu GERÇEKTEN durdurur — `run_until`'ı sonlandırır ve
 /// `CONTROL`'ü boşaltır. Bundan sonraki `startServer` çağrısı TEMİZ bir
 /// kurulum yapar, yani node modu / blob dizini / disk bütçesi değişiklikleri
 /// nihayet uygulanabiliyor (önceden `startServer` çalışan bir çekirdek
@@ -445,7 +445,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_revokeDevice<'loc
             return out(&mut env, "Error: invalid id".to_string());
         };
         let res = control.store.revoke_enrollment(&id);
-        // As for a block (fable I-09): with the old public code the revoked
+        // As for a block: with the old public code the revoked
         // device enrolls again at once under a fresh key and PeerId.
         if res.is_ok() {
             let _ = crate::public_join_token(&control.store, true);
@@ -531,7 +531,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_diskUsage<'local>
             return out(&mut env, "0".to_string());
         };
         let dir = control.data_dir.clone();
-        // Defter #24: burası `data_dir/blobs`'u sabit varsayıyordu, oysa
+        // burası `data_dir/blobs`'u sabit varsayıyordu, oysa
         // `startServer` blob dizinini harici bir birime yönlendirebiliyor —
         // kullanıcı SD kartı seçtiğinde blob'lar HİÇ sayılmıyor, arayüzdeki
         // kullanım neredeyse sıfır görünüyordu.

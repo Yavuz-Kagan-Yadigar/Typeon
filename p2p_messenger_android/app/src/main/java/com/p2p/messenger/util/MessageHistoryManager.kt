@@ -8,7 +8,7 @@ import java.security.SecureRandom
 /**
  * Mesaj geçmişi arşivinin şifreleme anahtarını yönetir. Node modundan
  * BAĞIMSIZ olarak her zaman yüklenir (bkz. P2PService onStartCommand
- * notu). Spec dışı düzeltme: önceden hem bu anahtarın yüklenmesi HEM DE
+ * notu). önceden hem bu anahtarın yüklenmesi HEM DE
  * canlı mesaj trafiğinin arşivlenmesi SADECE node modu açıkken
  * yapılıyordu ("server olmayı tercih eden cihaz" kullanıcı tercihi) —
  * kullanıcı artık açıkça TÜM cihazlarda (node olsun olmasın) kendi
@@ -27,7 +27,7 @@ import java.security.SecureRandom
  */
 object MessageHistoryManager {
     private const val TAG = "MessageHistoryManager"
-    // Defter #04: cozme HATASINDA anahtar YENIDEN URETILMEZ.
+    // cozme HATASINDA anahtar YENIDEN URETILMEZ.
     //
     // Burasi eskiden "dosya var ama decrypt istisna atti" durumunda
     // `generateAndPersist` cagiriyor, yani anahtar dosyasini taze rastgele

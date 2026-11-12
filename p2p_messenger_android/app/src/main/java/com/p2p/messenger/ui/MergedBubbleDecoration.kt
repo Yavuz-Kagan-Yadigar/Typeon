@@ -10,7 +10,7 @@ import com.google.android.material.color.MaterialColors
 import com.p2p.messenger.R
 
 /**
- * Spec dışı, kullanıcı isteği (kullanıcının çizimi): art arda gelen ve
+ * art arda gelen ve
  * gruplanan mesajlar TEK bir dış hat oluştursun.
  *
  * NEDEN HER BALONUN KENDİ ARKA PLANI YETMİYOR: ilk denemede balonların
@@ -46,7 +46,7 @@ class MergedBubbleDecoration(
     private val scratch = RectF()
     private val matrix = android.graphics.Matrix()
 
-    // Spec dışı, kullanıcı isteği: "ekranın en üstündeki balonlar daha açık
+    // "ekranın en üstündeki balonlar daha açık
     // renk, alttakiler şu anki renginde, arada gradient olsun." Renk artık
     // balonun KENDİ arka planından değil, listenin tamamına gerilmiş dikey
     // bir `LinearGradient`'ten geliyor — bu yüzden bir balonun tonu
@@ -257,7 +257,7 @@ class MergedBubbleDecoration(
         // Kuyruk köşesi: kendi mesajlarımızda alt-sağ, gelenlerde alt-sol.
         val tail = r * 0.22f
         scratch.set(left, top, right, bottom)
-        // L-191: reused array, no allocation per frame.
+        // reused array, no allocation per frame.
         val radii = singleRadii
         radii[0] = r; radii[1] = r; radii[2] = r; radii[3] = r
         radii[4] = if (isMine) tail else r; radii[5] = radii[4]

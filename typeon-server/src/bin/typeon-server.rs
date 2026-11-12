@@ -72,7 +72,7 @@ fn build_config() -> ServerConfig {
         cfg.server_name = name;
     }
     // Bu denetimde bulundu: `total_storage_budget_bytes` okunuyor ama hiçbir
-    // yerde set edilmiyordu, yani sunucunun TOPLAM disk tavanı (defter #23)
+    // yerde set edilmiyordu, yani sunucunun TOPLAM disk tavanı
     // ölü koddu — yalnızca kayıt başına kotalar uygulanıyordu ve N kayıtla
     // gerçek kullanım N × kota'ya çıkabiliyordu.
     cfg.total_storage_budget_bytes = Some(DEFAULT_BUDGET_BYTES);
@@ -128,7 +128,7 @@ async fn main() {
     // Optional SQLCipher key (64 hex chars); a plain DB is migrated on first use.
     // `TYPEON_SERVER_DB_KEY_FILE` (a 0600 file, or systemd `LoadCredential`)
     // is preferred: an environment variable stays readable in
-    // /proc/<pid>/environ and in a unit file (fable I-10).
+    // /proc/<pid>/environ and in a unit file.
     let from_file = std::env::var("TYPEON_SERVER_DB_KEY_FILE").ok().map(|path| {
         std::env::remove_var("TYPEON_SERVER_DB_KEY_FILE");
         match std::fs::read_to_string(&path) {
@@ -295,7 +295,7 @@ fn devices(args: &[String]) {
             };
             match store.revoke_enrollment(&id) {
                 Ok(()) => {
-                    // fable I-09: the public join code changes too, or the
+                    // the public join code changes too, or the
                     // revoked device enrolls again under a fresh key.
                     let _ = typeon_server::public_join_token(&store, true);
                     println!("İptal edildi: {id_hex} (herkese açık katılım kodu yenilendi)");

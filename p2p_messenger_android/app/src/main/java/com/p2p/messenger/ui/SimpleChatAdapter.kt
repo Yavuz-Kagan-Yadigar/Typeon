@@ -24,7 +24,7 @@ import java.util.Locale
  * Kalıcı depolama yok — bkz. ChatActivity dosya başı notu. GroupChatActivity
  * da aynı adapter'ı kullanır (`senderName` alanı sadece orada dolu olur).
  *
- * Spec dışı: mesaj düzenleme/silme desteği — her `Item` kararlı bir
+ * mesaj düzenleme/silme desteği — her `Item` kararlı bir
  * `messageId` taşır (bkz. Rust `MessagePacketHeader.message_id`), bu sayede
  * gelen bir edit/delete olayı doğru satırı bulup güncelleyebilir
  * (`applyEdit`/`applyDelete`). Silinen mesajlar listeden ÇIKARILMAZ —
@@ -95,7 +95,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
      *  AvatarUtil). */
     data class SeenByViewer(val avatarJpeg: ByteArray?, val displayName: String)
 
-    /** Spec dışı: dosya/foto/video/ses eki durumu (bkz. dosya başı notu —
+    /** dosya/foto/video/ses eki durumu (bkz. dosya başı notu —
      *  P2PLib.prepareAndSendFile/downloadFile/pollNetwork "file_*" olayları). */
     enum class AttachmentStatus { OFFERED, DOWNLOADING, COMPLETE, FAILED }
 
@@ -106,11 +106,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val totalSize: Long,
         var status: AttachmentStatus,
         var bytesDone: Long = 0,
-        /** Spec dışı, kullanıcı isteği (ETA sayacı): indirmenin başladığı
+        /** indirmenin başladığı
          *  an (ms). İlk `file_progress` olayında set edilir; kalan süre
          *  ortalama hızdan (bytesDone / geçen süre) hesaplanır. */
         var downloadStartedAt: Long = 0L,
-        /** Spec dışı: gönderen tarafın önceden oluşturduğu küçük bir 480p/
+        /** gönderen tarafın önceden oluşturduğu küçük bir 480p/
          *  %85 JPEG önizleme kapağı (foto/video için) — doluysa, TAM dosya
          *  hiç indirilmeden `bindAttachment`'ta küçük resim olarak
          *  gösterilir. */
@@ -124,7 +124,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         var isPlaying: Boolean = false,
         var playbackPositionMs: Int = 0,
         var playbackSpeed: Float = 1f,
-        /** Spec dışı, kullanıcı isteği (grup ekleri): SADECE grup sohbetinde
+        /** SADECE grup sohbetinde
          *  dolu — bu ekin `downloadFile` ile HANGİ göndericiden isteneceği
          *  (1:1'de bu her zaman tek bir sabit peer olduğundan gerek yok,
          *  ChatActivity kendi `peerDeviceFingerprint` alanını kullanır). */
@@ -142,7 +142,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         var text: String,
         val isMine: Boolean,
         val timestamp: Long = System.currentTimeMillis(),
-        /** Spec dışı, kullanıcı isteği: SADECE alınan (`!isMine`) mesajlar
+        /** SADECE alınan (`!isMine`) mesajlar
          *  için, göndericinin KENDİ cihazındaki gönderim anı (bkz. Rust
          *  `MessageContent::Text.sent_at_ms`) — `timestamp` (bu cihazın
          *  ALDIĞI an) ile birlikte "10:42 (sent at: 10:41)" gibi ikisini
@@ -180,7 +180,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
          *  dolu olması balonun içinde küçük bir alıntı kutusu gösterilmesini
          *  tetikler (bkz. `onBindViewHolder`/`onReplyPreviewClick`, ona
          *  dokununca sohbet bu id'ye kaydırılır). */
-        /** Spec dışı, kullanıcı isteği: bu mesaja bırakılmış tepkilerin
+        /** bu mesaja bırakılmış tepkilerin
          *  hazır özeti (ör. "👍2 ❤️"); boş = tepki yok. Rust tarafında
          *  hesaplanıp hem geçmiş JSON'unda hem canlı `reaction` olayında
          *  aynen geliyor (bkz. `reactions_summary`) — burada ayrıca bir
@@ -188,7 +188,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         var reactions: String = "",
         /** Group text that @mentions me (see Rust `mentions_me`). */
         val mentionsMe: Boolean = false,
-        /** Spec dışı, kullanıcı isteği: ek balonunun ALTINDA gösterilen
+        /** ek balonunun ALTINDA gösterilen
          *  açıklama metni (boş = yok). Metin mesajlarında kullanılmaz —
          *  onların metni zaten `text`. */
         var caption: String = "",
@@ -213,13 +213,13 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
          *  kalmadan. */
         var replyToSenderIdentityId: String? = null
     ) {
-        /** Spec dışı, kullanıcı isteği (gönderim-sırası): balonların SIRALAMA
+        /** balonların SIRALAMA
          *  anahtarı — göndericinin gönderim anı (`sentAtMs`), bilinmiyorsa
          *  bu cihazın aldığı/oluşturduğu an (`timestamp`). Gecikmeli teslim
          *  edilen bir mesaj, ALINMA değil GÖNDERİM sırasındaki yerine oturur
          *  (bkz. `addMessage` sıralı ekleme).
          *
-         *  BİLİNEN SINIR (dış inceleme, kasıtlı olarak düzeltilmedi): bu,
+         *  BİLİNEN SINIR  : bu,
          *  göndericinin HAM yerel saatidir — senkronize bir mantıksal
          *  (Lamport/vector clock) sayaç DEĞİLDİR. Aynı kişinin farklı
          *  cihazları (ör. Ahmet'in telefonu + laptop'u) neredeyse aynı anda
@@ -245,7 +245,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     /** Bir ek balonundaki "İndir" düğmesine (veya tamamlanmış bir eke)
      *  dokunulduğunda tetiklenir. */
     var onAttachmentClick: ((Item) -> Unit)? = null
-    /** Spec dışı: tamamlanmış bir ek balonuna basılı tutulunca (ör.
+    /** tamamlanmış bir ek balonuna basılı tutulunca (ör.
      *  "İndirilenler/P2P"ye kaydet menüsünü açmak için) tetiklenir —
      *  bkz. `bindAttachment`, SADECE `AttachmentStatus.COMPLETE` iken
      *  etkin. */
@@ -259,7 +259,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     /** Kullanıcı bir sesli mesajın kaydırıcısını sürükleyip bırakınca —
      *  hedef konum milisaniye olarak taşınır. */
     var onVoiceSeek: ((Item, Int) -> Unit)? = null
-    /** Spec dışı, kullanıcı isteği (WhatsApp tarzı yanıt): bir balonun
+    /** bir balonun
      *  içindeki küçük alıntı kutusuna dokunulduğunda — hedef
      *  `replyToMessageId` taşınır, çağıran taraf (bkz. ChatActivity/
      *  GroupChatActivity) sohbeti o mesaja kaydırır. */
@@ -370,7 +370,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (prev.isDeleted || cur.isDeleted) return false
         // A frameless sticker never merges with a neighbour.
         if (isSticker(cur) || isSticker(prev)) return false
-        // Spec dışı, hata düzeltmesi (kullanıcı: "alıntılar bozuk"): bir
+        // "alıntılar bozuk"): bir
         // alıntı kutusu balonun İÇİNDE değil, ÜSTÜNDE ayrı bir blok olarak
         // duruyor (bkz. item_message_bubble.xml `layoutReplyQuote`). Yani
         // iki balon arasına dikey bir boşluk giriyor ve birleşik dış hat
@@ -409,7 +409,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         return next.orderKey - cur.orderKey in 0 until GROUP_WINDOW_MS
     }
 
-    /** Spec dışı, kullanıcı isteği: "görüldü" bilgisi SADECE en son
+    /** "görüldü" bilgisi SADECE en son
      *  görülen (kendi gönderdiğimiz) mesajın altında gösterilir — önceki
      *  tüm mesajlar örtük olarak görülmüş sayılır (WhatsApp/Telegram
      *  deseni). `applySeen` bu ikisini günceller; `onBindViewHolder`
@@ -419,7 +419,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     private var lastSeenAvatars: List<SeenByViewer> = emptyList()
 
     /**
-     * Spec dışı, hata düzeltmesi (kullanıcı raporu: "görülmeyle chatte
+     * "görülmeyle chatte
      * hareket eden profil fotoğrafları geç ve yanlış oluyor bazen").
      *
      * `applySeen` hedef mesajı listede bulamazsa ESKİDEN olayı tamamen
@@ -437,7 +437,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     private var pendingSeenMessageId: String? = null
     private var pendingSeenAvatars: List<SeenByViewer> = emptyList()
 
-    /** Spec dışı, kullanıcı isteği: sohbet içi mesaj arama — o an
+    /** sohbet içi mesaj arama — o an
      *  "hedeflenen" eşleşmeyi geçici olarak vurgular (bkz. `setHighlighted`,
      *  ChatActivity/GroupChatActivity arama gezinme düğmeleri). */
     private var highlightedMessageId: String? = null
@@ -584,7 +584,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (item.messageId.isNotEmpty() && items.any { it.messageId == item.messageId }) {
             return
         }
-        // Spec dışı, kullanıcı isteği: GÖNDERİM sırasına göre ekle — mesajlar
+        // GÖNDERİM sırasına göre ekle — mesajlar
         // genelde sırayla gelir (sondan başa tarama O(1)'e yakın), ama
         // gecikmeli teslim edilen bir mesaj (ör. gönderen bir süre çevrimdışı
         // kaldıysa) ALINMA sırasına göre EN ALTA değil, GÖNDERİM anındaki
@@ -609,12 +609,12 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (idx < items.size - 1) notifyItemChanged(idx + 1)
     }
 
-    /** Spec dışı, kullanıcı isteği: bir mesajın tepki özetini günceller
+    /** bir mesajın tepki özetini günceller
      *  (bkz. Rust `reaction` olayı / `reactions_summary`). Hedef bu
      *  listede yoksa sessizce yok sayılır — tepki, kaybolduğunda sohbetin
      *  anlamını bozmayan bir süs; gönderen tarafta zaten yeniden deneme
      *  kuyruğunda. */
-    /** Spec dışı, kullanıcı isteği: tepki pill'ine dokununca "kim ne attı"
+    /** tepki pill'ine dokununca "kim ne attı"
      *  listesi açılır (bkz. ChatActivity/GroupChatActivity
      *  `showReactionsDialog`). */
     var onReactionsClick: ((Item) -> Unit)? = null
@@ -633,7 +633,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val idx = indexOfMessageId(fileId)
         if (idx < 0) return
         val attachment = items[idx].attachment ?: return
-        // Spec dışı, kullanıcı isteği (ETA): indirme başlangıcını ilk
+        // indirme başlangıcını ilk
         // DOWNLOADING geçişinde damgala; tamamlanınca/başarısız olunca
         // sıfırla ki olası bir yeniden denemede taze ölçüm yapılsın.
         if (status == AttachmentStatus.DOWNLOADING) {
@@ -727,7 +727,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: başarısız (ERROR) bir mesajı yeniden
+     * başarısız (ERROR) bir mesajı yeniden
      * gönderme — AYNI balonu tutar, ikinci bir kopya EKLEMEZ. Yeniden
      * gönderim yeni bir ağ paketi (yeni `message_id`/`local_id`, çünkü
      * eskisinin ratchet konumu artık geçersiz olabilir — bkz. Rust
@@ -825,7 +825,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         // ikisini de meta satırıyla birlikte saran kapsayıcıya uygulanıyor
         // — bkz. item_message_bubble.xml `layoutBubble`. Aksi halde saat,
         // balonun içinde değil altında/yanında ayrı bir kutuda kalırdı.
-        // Spec dışı, kullanıcı isteği (gönderilen görsel): art arda gelen
+        // art arda gelen
         // ve arası 2 dakikadan kısa olan mesajlar TEK bir yığın gibi
         // okunsun. Bunu, balonların BİRLEŞTİĞİ kenardaki köşe yarıçapını
         // küçülterek yapıyoruz — grubun ilki normal, sonrakiler "kaynamış"
@@ -866,7 +866,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.pillReactions.setOnClickListener { onReactionsClick?.invoke(item) }
         }
 
-        // Spec dışı, hata düzeltmesi (kullanıcı: "birleşen balonlar
+        // "birleşen balonlar
         // çalışmıyor"): köşe yarıçapları doğru seçiliyordu ama balonlar
         // birbirine HİÇ DEĞMİYORDU — önceki satırın ALT dolgusu 4dp olarak
         // kalıyor, yalnızca sonrakinin ÜST dolgusu 1dp'ye çekiliyordu, yani
@@ -882,7 +882,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             if (groupedWithNext) 0 else defaultPaddingPx
         )
 
-        // Spec dışı, kullanıcı isteği: arama sonucunda hedeflenen mesajı
+        // arama sonucunda hedeflenen mesajı
         // geçici olarak vurgular — bubble drawable'ını DEĞİŞTİRMEK yerine
         // (açık/koyu tema varyantı gerektirirdi) tüm satırın arkaplanına
         // yarı saydam bir renk uygulanır.
@@ -894,7 +894,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             }
         )
 
-        // Spec dışı, kullanıcı isteği: metin rengi HER ZAMAN tema rengiyle
+        // metin rengi HER ZAMAN tema rengiyle
         // (dolayısıyla — kendi balonlarımız için — Ayarlar'daki vurgu/accent
         // rengiyle, bkz. ThemePrefs.applyAccentColor) OTOMATİK belirlenir,
         // elle seçilebilir AYRI bir metin rengi tercihi YOK ("text alwasy
@@ -928,7 +928,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         holder.txtAttachmentSize.setTextColor(metaColor)
         holder.txtAttachmentEta.setTextColor(metaColor)
         holder.txtVoiceDuration.setTextColor(metaColor)
-        // Spec dışı, hata düzeltmesi (kullanıcı: "Redmi'de okunma tikleri
+        // "Redmi'de okunma tikleri
         // görünmüyor"): durum tiki ve "gören" göstergesi artık balonun
         // İÇİNDE değil, YANINDA — yani sohbetin arka planının üzerinde
         // duruyorlar. Balonun metin rengini (`onColor`) miras almaya devam
@@ -1052,7 +1052,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                     holder.itemView.context.getString(R.string.lbl_edited).takeIf { item.isEdited },
                     holder.itemView.context.getString(R.string.lbl_synced).takeIf { item.viaSync }
                 ).joinToString(" ")
-                // Spec dışı, kullanıcı isteği: mesaj metnindeki linkler
+                // mesaj metnindeki linkler
                 // (http/https/www) tıklanabilir olsun. `Linkify.addLinks`
                 // link bulursa TextView'a kendi `LinkMovementMethod`'unu
                 // atar — bu, ACTION_DOWN'ı tüketip üstteki `holder.itemView`
@@ -1091,7 +1091,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             }
         }
 
-        // Spec dışı, kullanıcı isteği: her mesajın altında salt "HH:mm"
+        // her mesajın altında salt "HH:mm"
         // yerine tam "(sent at: HH:MM day)" biçiminde, hangi GÜN
         // gönderildiğini de gösteren mutlak bir zaman damgası — bkz.
         // util.formatAbsoluteTime (Ayarlar'daki bekleyen mesajlar
@@ -1137,7 +1137,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val longPressListener = View.OnLongClickListener {
             // Ek balonları için düzenle/sil/kopyala desteklenmiyor (bkz.
             // dosya başı notu) — sadece düz metin mesajları uzun basmaya
-            // tepki verir. Spec dışı, kullanıcı isteği: önceden SADECE
+            // tepki verir. önceden SADECE
             // kendi mesajlarımız (`item.isMine`) tepki veriyordu (Düzenle/
             // Sil için) — artık alınan mesajlar da tepki verir, çağıran
             // taraf (bkz. ChatActivity/GroupChatActivity) `isMine`'a göre
@@ -1235,7 +1235,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val thumb = holder.imgAttachmentThumbnail
         if (preview != null) {
             // Sender-controlled bytes: bounded decode (see ImagePreview.decodeBytes).
-            // L-84: keyed by the bytes too, a re-sent file with the same id gets its new preview.
+            // keyed by the bytes too, a re-sent file with the same id gets its new preview.
             val cacheKey = attachment.fileId + ":" + preview.contentHashCode()
             val cached = previewCache.get(cacheKey)
             thumb.tag = cacheKey
@@ -1272,13 +1272,13 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (attachment.status == AttachmentStatus.DOWNLOADING) {
             holder.progressAttachment.visibility = View.VISIBLE
             val max = attachment.totalSize.coerceAtLeast(1L)
-            // Spec dışı Material You: `setProgressCompat(.., true)` yüzde
+            // `setProgressCompat(.., true)` yüzde
             // sıçramak yerine akıcı animasyonla ilerler — bkz. dosya başı
             // "gerçek belirlenimli ilerleme" notu.
             holder.progressAttachment.max = 1000
             val fraction = ((attachment.bytesDone.toDouble() / max.toDouble()) * 1000).toInt().coerceIn(0, 1000)
             holder.progressAttachment.setProgressCompat(fraction, true)
-            // Spec dışı, kullanıcı isteği: kalan süre (ETA) — ortalama hız
+            // kalan süre (ETA) — ortalama hız
             // (indirilen bayt / geçen süre) üzerinden. Henüz ölçecek kadar
             // veri yoksa gizli kalır (yanıltıcı bir tahmin göstermektense).
             val etaText = formatEta(context, attachment)
@@ -1355,7 +1355,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     }
 
     /**
-     * Spec dışı: sesli mesaj balonu. OFFERED/DOWNLOADING/FAILED durumunda
+     * sesli mesaj balonu. OFFERED/DOWNLOADING/FAILED durumunda
      * çubuk indirme ilerlemesini gösterir, oynat düğmesi indirmeyi tetikler
      * (bkz. `onAttachmentClick` — jenerik ekle AYNI tetikleyici). COMPLETE
      * olunca çubuk ÇALMA konumuna döner, oynat/duraklat + hız rozeti etkin
@@ -1445,7 +1445,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         }
     }
 
-    /** Spec dışı, kullanıcı isteği: kalan süre (ETA) metni. Ortalama hız
+    /** kalan süre (ETA) metni. Ortalama hız
      *  (indirilen bayt / geçen süre) üzerinden hesaplanır — anlık hız
      *  yerine ortalama, ağdaki dalgalanmalarda çok daha kararlı bir tahmin
      *  verir. Ölçüm için yeterli veri yoksa (henüz başlamadı, 1 sn'den az

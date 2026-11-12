@@ -8,7 +8,7 @@ package com.p2p.messenger.server
  * (`libtypeon_server.so`) — istemcinin `libp2p_messenger.so`'suyla aynı
  * protokol tiplerini paylaşır ama ayrı bir crate'tir.
  */
-/** M142: the native side answers in English; show it in the user's language. */
+/** the native side answers in English; show it in the user's language. */
 fun serverErrorText(ctx: android.content.Context, raw: String): String {
     val id = when {
         raw.startsWith("Error: internal error") -> R.string.err_internal
@@ -57,7 +57,7 @@ object ServerLib {
     ): String
 
     /**
-     * Sunucuyu GERÇEKTEN durdurur (defter #11).
+     * Sunucuyu GERÇEKTEN durdurur.
      *
      * Bu yoktu: `stopService(...)` yalnızca wake lock'u bırakıp ön plan
      * bildirimini kaldırıyordu, Rust çekirdeği süreçte çalışmaya devam

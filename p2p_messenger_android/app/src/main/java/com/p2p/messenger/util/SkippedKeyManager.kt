@@ -20,7 +20,7 @@ import java.security.SecureRandom
  */
 object SkippedKeyManager {
     private const val TAG = "SkippedKeyManager"
-    // Defter #04: cozme HATASINDA anahtar YENIDEN URETILMEZ.
+    // cozme HATASINDA anahtar YENIDEN URETILMEZ.
     //
     // Burasi eskiden "dosya var ama decrypt istisna atti" durumunda
     // `generateAndPersist` cagiriyor, yani anahtar dosyasini taze rastgele

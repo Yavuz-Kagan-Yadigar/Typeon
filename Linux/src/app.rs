@@ -97,7 +97,7 @@ pub struct App {
     next_listener_id: Cell<u64>,
     /// One `core_panic` banner per process: the core reports a caught panic
     /// with a fresh event every time one happens, which would otherwise stack
-    /// notifications for a single dead core (H132).
+    /// notifications for a single dead core.
     core_panic_reported: Cell<bool>,
 
     /// The conversation currently on screen (peer fingerprint, or
@@ -246,7 +246,7 @@ impl App {
         if kind.is_empty() || kind == "noop" {
             return;
         }
-        // M-180: the core caught a panic (a single bad packet does it too):
+        // the core caught a panic (a single bad packet does it too):
         // logged only, nothing restarts on it.
         if kind == "core_panic" {
             log::error!("core caught a panic (see the core log)");
@@ -292,7 +292,7 @@ impl App {
     /// any) is open — the counterpart of `P2PService.maybeNotify`.
     fn apply_side_effects(self: &Rc<Self>, event: &Event) {
         match event.kind.as_str() {
-            // External AI-review fix (AI2-G, self-revocation): the primary
+            // the primary
             // device revoked THIS device. The core already wiped its DB tables
             // + attachments and is now inert; here we finish the job the way
             // `confirm_logout` (ui/settings.rs) does — drop the keyring vault
@@ -315,7 +315,7 @@ impl App {
                 if let Err(error) = crate::keyring::delete_key(&profile) {
                     eprintln!("typeon: could not remove the vault key after remote unlink: {error}");
                 }
-                // Defter #27: dizin silme, uygulamanın kapanmasıyla AYNI
+                // dizin silme, uygulamanın kapanmasıyla AYNI
                 // ana alındı. `stop_poll_loop` yalnızca bir bayrak set
                 // ediyor (anket iş parçacığı 1 sn'ye kadar uyuyor olabilir)
                 // ve Rust çekirdeği — swarm, tokio görevleri, AÇIK SQLite
@@ -378,7 +378,7 @@ impl App {
                 self.prefs
                     .borrow_mut()
                     .mark_read_at(&conversation, read_at);
-                // Found in this audit: the chat list was corrected but a
+                // the chat list was corrected but a
                 // notification already on screen for that conversation was
                 // left standing, so reading a chat on the phone left the
                 // desktop still showing "you have a new message" for it.
@@ -434,7 +434,7 @@ impl App {
             }
             // Contact/group membership changed under us — keep the name caches
             // honest so the next event resolves correctly.
-            // Defter #17: Android bunu bir toast'a bağlıyordu, Linux hiç
+            // Android bunu bir toast'a bağlıyordu, Linux hiç
             // işlemiyordu — masaüstünde KALICI el sıkışma hatası tamamen
             // sessizdi (kullanıcı "mesaj gitmiyor" der, arayüzde hiçbir
             // ipucu yok).
@@ -472,7 +472,7 @@ impl App {
                     "{who}: secure session could not be set up — the other side may be on an incompatible version."
                 ));
             }
-            // Defter #16: reddedilen bir grup güncellemesi kullanıcıya
+            // reddedilen bir grup güncellemesi kullanıcıya
             // görünmeliydi; hiçbir istemci dinlemiyordu.
             "group_update_failed" => {
                 let name = self.group_name(&event.string("group_id"));
@@ -500,7 +500,7 @@ impl App {
     /// re-learned on every launch — and a restart before the next sync would
     /// leave the server-side archive unreadable on this machine.
     fn persist_archive_key_if_new(self: &Rc<Self>) {
-        // H125: this runs inside the event dispatcher, so `core::archive_root_key()`
+        // this runs inside the event dispatcher, so `core::archive_root_key()`
         // used to take the shared core lock on the GTK thread on every affected
         // event — a poll round holding the lock stalled the whole UI. The key
         // comparison and the file write are just as safe off-thread.
@@ -691,7 +691,7 @@ pub fn start_poll_loop(app: &Rc<App>) {
         glib::ControlFlow::Continue
     });
 
-    // R-06: power-save for the core's keepalive ladder (20 s -> 60 s) and its
+    // power-save for the core's keepalive ladder (20 s -> 60 s) and its
     // radio-window coalescing — the state Android feeds from the app lifecycle
     // (`P2PLib.setPowerSave`), which the desktop client never reported. The
     // window hookup lives in `main.rs` (`connect_is_active_notify`); this
@@ -730,7 +730,7 @@ pub fn start_poll_loop(app: &Rc<App>) {
     // longer to recover than on Android. `gio::NetworkMonitor` is GLib's
     // idiomatic source for exactly this signal.
     let monitor = gio::NetworkMonitor::default();
-    // R-06: the same monitor reports whether the link is metered — the state
+    // the same monitor reports whether the link is metered — the state
     // Android feeds from ConnectivityManager (`P2PLib.setMeteredNetwork`).
     // Once at startup, then every time the flag flips. The core call takes the
     // lock, so `set_metered` moves it to a worker thread.
@@ -775,7 +775,7 @@ pub fn start_poll_loop(app: &Rc<App>) {
     std::mem::forget(monitor);
 }
 
-/// R-06: power-save on/off for the core (see `core::set_power_save`) —
+/// power-save on/off for the core (see `core::set_power_save`) —
 /// driven by the window watcher in `start_poll_loop`, and cheap enough for a
 /// signal handler (`main.rs` `connect_is_active_notify`) to call directly.
 /// Takes the core lock, so it never runs on the GTK thread itself.
@@ -784,7 +784,7 @@ pub fn set_power_save(enabled: bool) {
     std::thread::spawn(move || core::set_power_save(enabled));
 }
 
-/// R-06: metered link or not (see `core::set_metered`) — worker thread for
+/// metered link or not (see `core::set_metered`) — worker thread for
 /// the same reason as `set_power_save`.
 pub fn set_metered(metered: bool) {
     std::thread::spawn(move || core::set_metered(metered));

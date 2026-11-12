@@ -17,7 +17,7 @@ impl P2PCore {
             ))
             .map(|(id, _)| id.clone())
             .collect();
-        // H10: only the retry stops. The request stays solicited, so an
+        // only the retry stops. The request stays solicited, so an
         // answer already on its way is still taken (it was discarded and
         // acked, a lost page); it ages out after 7 days (bkz. the
         // `HistorySyncRequest` arm of `send_message_content_inner`).
@@ -27,7 +27,7 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı: node modu kapalı bir cihazda sohbet ekranı hiç yerel
+    /// node modu kapalı bir cihazda sohbet ekranı hiç yerel
     /// geçmiş bulamadığında çağrılır (bkz. ChatActivity
     /// `loadHistoryIfAvailable`) — karşı tarafa (chat peer) şifreli bir
     /// `HistorySyncRequest` gönderir. Yanıt asenkron gelir (bir sonraki
@@ -47,7 +47,7 @@ impl P2PCore {
         self.send_message_content(peer_device_fingerprint, &content, None).map(|_| ())
     }
 
-    /// Spec dışı, kullanıcı isteği (sonsuz kaydırma): sohbet geçmişinin en
+    /// sohbet geçmişinin en
     /// üstüne kaydırıldığında, YEREL arşiv tükendiğinde çağrılır (bkz.
     /// `getMessageHistoryBefore`) — karşı taraftan (chat peer) doğrudan
     /// `before_timestamp`'ten eski mesajları ister. Yanıt asenkron gelir
@@ -294,7 +294,7 @@ impl P2PCore {
         }
     }
 
-    /// H9: `message_exists_with_id` among the 1:1 rows received from the
+    /// `message_exists_with_id` among the 1:1 rows received from the
     /// identity of `sender_fp` only. The id is the peer's choice: a global
     /// match let another chat's row re-ack a packet that was never stored.
     pub(crate) fn received_from_sender(&self, message_id: &str, sender_fp: &str) -> bool {
@@ -366,7 +366,7 @@ impl P2PCore {
         let (encrypted, nonce_bytes) = seal_with(&key, plaintext).ok_or("History encryption failed")?;
 
         let sent_col: Option<i64> = if sent_at_ms > 0 { Some(sent_at_ms as i64) } else { None };
-        // L-32: a row with this id is already there (UNIQUE index): nothing new.
+        // a row with this id is already there (UNIQUE index): nothing new.
         let inserted = conn.execute(
             "INSERT OR IGNORE INTO messages (peer_device_fingerprint, direction, encrypted_blob, nonce, timestamp, message_id, status, reply_to_message_id, reply_to_preview, sent_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -435,7 +435,7 @@ impl P2PCore {
             .map(|d| d.identity_id.clone())
     }
 
-    /// Spec dışı, hata düzeltmesi (grup geçmişi kalıcılığı): bir grup
+    /// bir grup
     /// mesajını yerel arşive ekler — `archive_message`'ın grup karşılığı.
     /// `peer_device_fingerprint` sütununa kasıtlı olarak boş string
     /// yazılır (NOT NULL kısıtını bozmadan "bu bir DM değil" işareti);
@@ -477,7 +477,7 @@ impl P2PCore {
     pub(crate) fn group_author_proof_valid(&self, group_id: &str, message_id: &str, author_identity_id: &str, text: &str, sent_at_ms: u64, proof: Option<&str>) -> bool {
         let mut parts = proof.unwrap_or("").splitn(3, ':');
         let (Some(device_fp), Some(sig_c), Some(sig_pq)) = (parts.next(), parts.next(), parts.next()) else { return false };
-        // M-81: a revoked device's proof only for a row dated before its revoke.
+        // a revoked device's proof only for a row dated before its revoke.
         // A group member that is not a contact keeps its revokes in `orv:`.
         let revoked_at = self.contacts.values()
             .filter(|c| c.trusted_identity_id == author_identity_id)
@@ -568,7 +568,7 @@ impl P2PCore {
         let (encrypted, nonce_bytes) = seal_with(&key, plaintext).ok_or("History encryption failed")?;
 
         let sent_col: Option<i64> = if sent_at_ms > 0 { Some(sent_at_ms as i64) } else { None };
-        // L-32: see `archive_message`.
+        // see `archive_message`.
         let inserted = conn.execute(
             "INSERT OR IGNORE INTO messages (peer_device_fingerprint, direction, encrypted_blob, nonce, timestamp, group_id, sender_identity_id, message_id, status, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sent_at_ms, author_proof)
              VALUES ('', ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'sent', ?8, ?9, ?10, ?11, ?12)",
@@ -668,7 +668,7 @@ impl P2PCore {
         }).unwrap_or(false)
     }
 
-    /// H9: `edit_or_delete_target_exists` in the chat the Edit/Delete is for
+    /// `edit_or_delete_target_exists` in the chat the Edit/Delete is for
     /// (the group, or the sender's 1:1 chat). A row with that id in another
     /// chat made the edit "rejected" and acked instead of buffered.
     pub(crate) fn edit_target_in_chat(&self, target_message_id: &str, group_id: Option<&str>, peer_fp: &str) -> bool {
@@ -702,7 +702,7 @@ impl P2PCore {
         let now = current_time_ms();
         // The per-target cap alone left the number of targets open: a peer
         // could park one edit per invented message id.
-        // H85: not acked, so the sender's retry tries again later.
+        // not acked, so the sender's retry tries again later.
         if self.pending_edits_deletes.len() >= 512 && !self.pending_edits_deletes.contains_key(target_message_id) {
             warn!("Erken Edit tamponu dolu (hedef sayısı) — atlandı (target={})", target_message_id);
             return;
@@ -756,7 +756,7 @@ impl P2PCore {
         };
         info!("Hedef mesaj artık arşivde (target={}) — {} tamponlanmış Edit/Delete yeniden deneniyor", target_message_id, buffered.len());
         for entry in buffered {
-            // The same chat check the live path makes (fable E-06): a Text
+            // The same chat check the live path makes: a Text
             // with this id in another chat consumed, failed and dropped the
             // entry. Put back until its own chat holds the target.
             let group_id = match &entry.4 {
@@ -923,7 +923,7 @@ impl P2PCore {
         // None: nothing could be stored (key, DB). Some(false): a stale edit.
         let key = self.history_key?;
         let conn = self.db.as_ref()?;
-        // Spec dışı (dış AI incelemesi düzeltmesi — sıra-dışı Edit koruması):
+        // Spec dışı  :
         // hedef satırın arşivde SAKLANAN son düzenleme damgasını oku; gelen
         // düzenleme DAHA ESKİ ise (ikisi de sıfırdan farklıysa) bu, gossipsub
         // sırasızlığı yüzünden DAHA YENİ bir düzenlemeden SONRA ulaşan bayat
@@ -946,7 +946,7 @@ impl P2PCore {
             row.map(|(ts, del)| (ts as u64, del != 0)).unwrap_or((0, false))
         };
         // An Edit that arrives after the Delete of the same message must not
-        // write the text back into the tombstone (fable E-05).
+        // write the text back into the tombstone.
         if deleted {
             info!("Silinmiş mesaja gelen Edit yok sayıldı (target={})", target_message_id);
             return Some(false);
@@ -1169,7 +1169,7 @@ impl P2PCore {
         self.load_message_history_q(peer_device_fingerprint, limit, before_timestamp, None, with_marks, false)
     }
 
-    /// H122: only rows archived after `after_timestamp` (the newest one the
+    /// only rows archived after `after_timestamp` (the newest one the
     /// UI holds), newest `limit` of them.
     pub(crate) fn load_message_history_since(&self, peer_device_fingerprint: &str, after_timestamp: i64, limit: u32) -> Vec<ArchivedMessage> {
         self.load_message_history_q(peer_device_fingerprint, limit, None, Some(after_timestamp), true, false)
@@ -1245,7 +1245,7 @@ impl P2PCore {
         if let Ok(rows) = rows {
             for row in rows.flatten() {
                 let (direction, encrypted_blob, nonce_bytes, timestamp, message_id, status, reply_to_message_id, reply_to_preview, is_deleted, is_edited, eff_sent, via_sync) = row;
-                // H3: bounded in bytes, not rows only (500 texts near 1 MiB
+                // bounded in bytes, not rows only (500 texts near 1 MiB
                 // each went into one JNI string); never mid-millisecond.
                 if page_bytes_full(&mut page_budget, &mut page_cut, if sent_clock { eff_sent } else { timestamp }, encrypted_blob.len()) {
                     break;
@@ -1305,7 +1305,7 @@ impl P2PCore {
         ).ok().flatten()
     }
 
-    /// Spec dışı, hata düzeltmesi (grup geçmişi kalıcılığı): bir grubun
+    /// bir grubun
     /// mesaj geçmişini çözüp döner — `load_message_history`'nin grup
     /// karşılığı, `group_id`'ye göre filtreler (bkz. `archive_group_message`
     /// notu — artık `peer_device_fingerprint`'e göre YANLIŞ filtrelenmiyor).
@@ -1319,7 +1319,7 @@ impl P2PCore {
         self.load_group_message_history_q(group_id, limit, before_timestamp, None, with_marks, false)
     }
 
-    /// H122: group twin of `load_message_history_since`.
+    /// group twin of `load_message_history_since`.
     pub(crate) fn load_group_message_history_since(&self, group_id: &str, after_timestamp: i64, limit: u32) -> Vec<ArchivedMessage> {
         self.load_group_message_history_q(group_id, limit, None, Some(after_timestamp), true, false)
     }
@@ -1362,10 +1362,10 @@ impl P2PCore {
         }
     }
 
-    /// H137: the chat list's previews under one lock: per contact (key:
+    /// the chat list's previews under one lock: per contact (key:
     /// identity id) and per group, the newest message and newest attachment.
     pub(crate) fn chat_list_previews(&self) -> serde_json::Value {
-        // F1: the chat orders by sent time, so the preview must too. SQL picks
+        // the chat orders by sent time, so the preview must too. SQL picks
         // the row (no decryption); only its arrival millisecond is loaded.
         // ponytail: rows sharing that millisecond (a history-sync batch) are all
         // decrypted; a (timestamp, id) cursor is the upgrade if that matters.
@@ -1462,7 +1462,7 @@ impl P2PCore {
         if let Ok(rows) = rows {
             for row in rows.flatten() {
                 let (direction, encrypted_blob, nonce_bytes, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, eff_sent, mentions_me, row_status) = row;
-                // H3: bounded in bytes, not rows only (500 texts near 1 MiB
+                // bounded in bytes, not rows only (500 texts near 1 MiB
                 // each went into one JNI string); never mid-millisecond.
                 if page_bytes_full(&mut page_budget, &mut page_cut, if sent_clock { eff_sent } else { timestamp }, encrypted_blob.len()) {
                     break;
@@ -1601,7 +1601,7 @@ impl P2PCore {
             Err(_) => return HashMap::new(),
         };
 
-        // M-93: a key older than the old-chain limit is dropped, not loaded.
+        // a key older than the old-chain limit is dropped, not loaded.
         let cutoff = current_time_ms().saturating_sub(ratchet::OLD_RECV_MAX_AGE_MS) as i64;
         let _ = conn.execute(
             "DELETE FROM skipped_message_keys WHERE peer_device_fingerprint = ?1 AND created_at < ?2",

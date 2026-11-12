@@ -78,7 +78,7 @@ fn set_status(status: &Mutex<TorStatus>, new: TorStatus) {
 /// Inbound onion streams bridged at once. A peer needs one per connection.
 const MAX_INBOUND_ONION_STREAMS: usize = 64;
 /// Inbound streams one rendezvous circuit may hold open. Our dialer opens a
-/// fresh circuit per connection; 8 let 8 circuits hold all 64 slots (fable B-08).
+/// fresh circuit per connection; 8 let 8 circuits hold all 64 slots.
 const MAX_STREAMS_PER_CIRCUIT: u32 = 3;
 /// A bridged stream that sends nothing for this long goes: libp2p's dialer
 /// speaks first, and a silent stream held its slot for the 60 s upgrade timeout.
@@ -417,7 +417,7 @@ fn client_config(state_dir: &str, cache_dir: &str) -> Result<arti_client::TorCli
 /// hem futures AsyncRead/Write implement ettiğinden `tokio::io::
 /// copy_bidirectional` doğrudan kullanılabilir.
 async fn bridge_incoming_stream(stream_request: tor_hsservice::StreamRequest, local_port: u16) {
-    // M-11: only BEGIN to our virtual port (the one we publish, = `local_port`).
+    // only BEGIN to our virtual port (the one we publish, = `local_port`).
     // DONE, as arti advises, so the rejection looks like any onion service's.
     if !matches!(stream_request.request(), IncomingStreamRequest::Begin(b) if b.port() == local_port) {
         let _ = stream_request.reject(End::new_with_reason(EndReason::DONE)).await;

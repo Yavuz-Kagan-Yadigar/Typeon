@@ -5,7 +5,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Spec dışı, kullanıcı isteği: "(sent at: HH:MM day)" biçiminde mutlak
+ * "(sent at: HH:MM day)" biçiminde mutlak
  * (göreli DEĞİL — bkz. ChatAdapter.formatTimestamp'in "5m ago"/"2h ago"
  * biçimi, o sohbet LİSTESİ satırları için ayrı bir amaca hizmet ediyor)
  * bir zaman damgası. Hem mesaj balonlarının (bkz. SimpleChatAdapter) HER

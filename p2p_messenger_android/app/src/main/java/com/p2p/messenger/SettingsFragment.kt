@@ -72,7 +72,7 @@ class SettingsFragment : Fragment() {
         private const val WALLPAPER_MAX_DIMENSION = 1080
         private const val WALLPAPER_JPEG_QUALITY = 80
 
-        /** Spec dışı, kullanıcı isteği: geçmiş/ek depolama sınırı slider'ı
+        /** geçmiş/ek depolama sınırı slider'ı
          *  — 100MB'dan 32GB'a, ayrık adımlarla (Slider valueFrom=0..8). */
         private val HISTORY_STORAGE_LIMIT_STEPS_BYTES = longArrayOf(
             100L * 1024 * 1024,
@@ -108,7 +108,7 @@ class SettingsFragment : Fragment() {
         }
 
         /**
-         * Spec dışı, hata düzeltmesi (gerçek cihaz çökmesi: "Value(1.24375)
+         * "Value(1.24375)
          * must be equal to valueFrom(0.85) plus a multiple of stepSize(0.05)"):
          * metin/arayüz boyutu kaydırıcıları önceden ÇIPLAK bir ondalık
          * `stepSize` (0.05f) kullanıyordu — 0.05 ikili kayan noktada TAM
@@ -151,7 +151,7 @@ class SettingsFragment : Fragment() {
     private var ownAvatarBytes: ByteArray? = null
     private var displayNameValue: TextView? = null
 
-    /** Spec dışı, kullanıcı isteği (Tor): durum etiketi + periyodik yoklama.
+    /** durum etiketi + periyodik yoklama.
      *  Yoklama `onResume`da başlar, `onPause`'da BİTER: view yaratıldığı andan
      *  itibaren 2 sn'de bir çalışan bir JNI yoklaması, uygulama arka
      *  plandayken de sürüyordu (pilde ve çekirdek kilidinde gereksiz iş). */
@@ -184,7 +184,7 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Spec dışı, güvenlik denetimi düzeltmesi: Rust tarafı (`export_recovery`,
+     * Rust tarafı (`export_recovery`,
      * Argon2id ile sertleştirilmiş — bkz. SECURITY.md §6) daha önce hiçbir
      * ekrandan tetiklenemiyordu. Kullanıcının parolayı SAF (Storage Access
      * Framework, `CreateDocument`) ile seçtiği hedefe yazmadan HEMEN önce
@@ -221,7 +221,7 @@ class SettingsFragment : Fragment() {
      *  back, so it never shows ON while nothing is stored or routed. */
     private fun applyServerToggle(switch: android.widget.CompoundButton, checked: Boolean, change: () -> String) {
         if (revertingServerToggle) return
-        // H56: the core call (key creation, DB) must not run on the main thread.
+        // the core call (key creation, DB) must not run on the main thread.
         lifecycleScope.launch(Dispatchers.IO) {
             val result = try { change() } catch (e: Exception) { "Error: ${e.message}" }
             if (!result.startsWith("Error")) return@launch
@@ -272,7 +272,7 @@ class SettingsFragment : Fragment() {
 
         imgOwnAvatar = view.findViewById(R.id.img_own_avatar)
         refreshOwnAvatar()
-        // Spec dışı, kullanıcı isteği: profil fotoğrafına dokununca tam
+        // profil fotoğrafına dokununca tam
         // ekran + pinch-to-zoom açar (bkz. AvatarUtil.openFullscreen).
         imgOwnAvatar.setOnClickListener { AvatarUtil.openFullscreen(requireContext(), ownAvatarBytes) }
         view.findViewById<Button>(R.id.btn_change_picture).setOnClickListener {
@@ -292,7 +292,7 @@ class SettingsFragment : Fragment() {
         }
 
         val identityCodeValue = view.findViewById<android.widget.TextView>(R.id.identity_code_value)
-        // fixpass (glm A3): JNI çağrısı (`getIdentityCode` → çekirdek kilidi)
+        // JNI çağrısı (`getIdentityCode` → çekirdek kilidi)
         // ana iş parçacığından ÇALIŞMAZ; sonuç ana iş parçacığına yazılır.
         identityCodeValue.text = ""
         lifecycleScope.launch(Dispatchers.IO) {
@@ -340,7 +340,7 @@ class SettingsFragment : Fragment() {
             setHistoryStorageLimitVisible(isChecked)
         }
 
-        // Spec dışı, kullanıcı isteği: Tor onion service — CGNAT arkasında da
+        // Tor onion service — CGNAT arkasında da
         // ulaşılabilirlik (bkz. tor.rs / SECURITY.md). Node modunun aksine
         // CANLI toggle YOK: değişiklik ancak ağ katmanı yeniden başlayınca
         // etkinleşir (transport ancak startNetwork'te eklenebiliyor), bu yüzden
@@ -356,7 +356,7 @@ class SettingsFragment : Fragment() {
         // Yoklama `onResume`'da başlar (aşağıda) — view yaratılırken değil:
         // uygulama arka plandayken de sürmesin.
 
-        // Spec dışı, güvenlik denetimi devamı: bkz. SECURITY.md
+        // bkz. SECURITY.md
         // "Cross-network connectivity" notu — organik olarak keşfedilen bir
         // röle yoksa (ör. hiç Node modu açık, erişilebilir bir kişiyle
         // karşılaşılmadıysa), farklı ağlardaki iki kişinin ilk eşleşmesi
@@ -406,7 +406,7 @@ class SettingsFragment : Fragment() {
             withAppPassword { showExportRecoveryDialog() }
         }
 
-        // Spec dışı, kullanıcı isteği: bekleyen (henüz ack alınmamış)
+        // bekleyen (henüz ack alınmamış)
         // mesajlar listesi — bkz. ui.PendingMessagesActivity.
         view.findViewById<Button>(R.id.btn_pending_messages).setOnClickListener {
             startActivity(Intent(requireContext(), PendingMessagesActivity::class.java))
@@ -421,7 +421,7 @@ class SettingsFragment : Fragment() {
             showLinkedDevicesDialog()
         }
 
-        // Spec dışı, kullanıcı isteği: hesaptan çıkış — bkz. `confirmLogout`.
+        // hesaptan çıkış — bkz. `confirmLogout`.
         view.findViewById<Button>(R.id.btn_logout).setOnClickListener {
             withAppPassword { confirmLogout() }
         }
@@ -434,7 +434,7 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: kullanıcı gerçek bir cihazda "İkincil
+     * kullanıcı gerçek bir cihazda "İkincil
      * cihaz olarak bağlan" akışında (`LinkDeviceActivity`) bir çökme
      * yaşadı — çökme ANINDAN önce kimlik zaten diske yazılmıştı
      * (`createIdentityAndStart` -> `IdentityManager.persistNewIdentity`
@@ -482,7 +482,7 @@ class SettingsFragment : Fragment() {
     } catch (e: Exception) { true }
 
     private fun confirmDeleteAccount() {
-        // fixpass (glm A3): `isRootDevice()` iki JNI çağrısı yapar — ana iş
+        // `isRootDevice()` iki JNI çağrısı yapar — ana iş
         // parçacığından ÇALIŞMAZ; iletişim kutusu sonuç ana iş parçacığında
         // açılır.
         lifecycleScope.launch(Dispatchers.IO) {
@@ -572,7 +572,7 @@ class SettingsFragment : Fragment() {
     }
 
     private fun performLogout() {
-        // Disk I/O off the UI thread (H144); the restart hops back to main.
+        // Disk I/O off the UI thread; the restart hops back to main.
         val app = requireContext().applicationContext
         Thread {
             com.p2p.messenger.util.LocalWipe.wipe(app)
@@ -587,7 +587,7 @@ class SettingsFragment : Fragment() {
      * bağlan" seçilip bir QR gösterilir; BU (var olan) cihaz o QR'ı tarar.
      */
     private fun showLinkedDevicesDialog() {
-        // fixpass: JNI çağrısı (`listLinkedDevices` → çekirdek kilidi) ana
+        // JNI çağrısı (`listLinkedDevices` → çekirdek kilidi) ana
         // iş parçacığından ÇALIŞMAZ; diyalog ana iş parçacığında kurulur
         // (identityCode deseni).
         lifecycleScope.launch(Dispatchers.IO) {
@@ -624,7 +624,7 @@ class SettingsFragment : Fragment() {
                     .setPositiveButton(R.string.linked_devices_add) { _, _ ->
                         // Only the root device may add one (the core refuses the grant):
                         // say so before the camera opens, not after a scan.
-                        // fixpass (glm A3): `isRootDevice()` JNI — off the main thread.
+                        // `isRootDevice()` JNI — off the main thread.
                         lifecycleScope.launch(Dispatchers.IO) {
                             val root = isRootDevice()
                             withContext(Dispatchers.Main) {
@@ -736,7 +736,7 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: metin boyutu/arayüz boyutu kaydırıcıları
+     * metin boyutu/arayüz boyutu kaydırıcıları
      * + sistem fontu seçici — bkz. `ThemePrefs`/`P2PApplication.applyScalePreferences`
      * (her ikisi de `onActivityPreCreated`'da, Activity daha `onCreate`
      * ÇALIŞMADAN önce uygulanır). OLED anahtarıyla AYNI sebep: değişiklik
@@ -903,7 +903,7 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: "bildirimlerde mesajları göster"
+     * "bildirimlerde mesajları göster"
      * anahtarı — varsayılan AÇIK. Kapalıyken bildirimde sadece gönderen
      * (grup mesajıysa gönderen + grup) görünür, metin görünmez. bkz.
      * util.NotificationPrefs / NotificationHelper.
@@ -917,7 +917,7 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: uygulama açılış şifresi — buradan
+     * uygulama açılış şifresi — buradan
      * yalnızca DEĞİŞTİRİLEBİLİR. Kaldırma seçeneği BİLEREK yok ("şifre asla
      * boş olmamalı"); boş bir yeni şifre de kabul edilmez.
      *
@@ -1020,7 +1020,7 @@ class SettingsFragment : Fragment() {
     private fun formatScalePercent(scale: Float): String = getString(R.string.lbl_scale_percent, (scale * 100).toInt())
 
     /**
-     * Spec dışı, kullanıcı isteği: TEK bir vurgu (accent) rengi — HER YERDE
+     * TEK bir vurgu (accent) rengi — HER YERDE
      * (düğmeler, anahtarlar, kaydırıcılar, KENDİ mesaj balonlarımız)
      * varyasyonlarıyla (bkz. `ThemePrefs.applyAccentColor` — Material'ın
      * content-based dynamic color motoru) kullanılır; metin rengi AYRICA
@@ -1325,7 +1325,7 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: üst çubukta hızlı Tor/ağ bağlantısını
+     * üst çubukta hızlı Tor/ağ bağlantısını
      * kes/yeniden kur menü öğesi — bkz. util/AppRestarter.kt (neden tam bir
      * uygulama yeniden başlatması gerektiği), menu_settings.xml. MainActivity
      * TEK bir Activity, üç bottom-nav sekmesi (Chats/Contacts/Settings)
@@ -1355,7 +1355,7 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Spec dışı, güvenlik denetimi düzeltmesi: parolayı (+ onayını) alır,
+     * parolayı (+ onayını) alır,
      * eşleşmiyorsa/boşsa kullanıcıyı uyarır, eşleşiyorsa SAF hedef seçici
      * ile devam eder (bkz. `createRecoveryFileLauncher`). Rust tarafı
      * (`export_recovery`) parolayı Argon2id ile sertleştirdiğinden burada
@@ -1446,7 +1446,7 @@ class SettingsFragment : Fragment() {
     }
 
     private fun refreshDisplayName() {
-        // fixpass: JNI çağrısı (`getDisplayName` → çekirdek kilidi) ana
+        // JNI çağrısı (`getDisplayName` → çekirdek kilidi) ana
         // iş parçacığından ÇALIŞMAZ; sonuç ana iş parçacığına yazılır.
         lifecycleScope.launch(Dispatchers.IO) {
             val name = try {
@@ -1472,7 +1472,7 @@ class SettingsFragment : Fragment() {
      * sürer, kullanıcının bunu beklemesi gerekmez.
      */
     private fun showChangeDisplayNameDialog() {
-        // fixpass: JNI çağrısı (`getDisplayName` → çekirdek kilidi) ana
+        // JNI çağrısı (`getDisplayName` → çekirdek kilidi) ana
         // iş parçacığından ÇALIŞMAZ; diyalog ana iş parçacığında açılır.
         lifecycleScope.launch(Dispatchers.IO) {
             val current = try {
@@ -1522,7 +1522,7 @@ class SettingsFragment : Fragment() {
     }
 
     private fun refreshOwnAvatar() {
-        // fixpass: JNI çağrıları (`getOwnProfilePicture`/`getDisplayName`/
+        // JNI çağrıları (`getOwnProfilePicture`/`getDisplayName`/
         // `getIdentityShortCode` → çekirdek kilidi) ana iş parçacığından
         // ÇALIŞMAZ; çizim ana iş parçacığına yazılır (identityCode deseni).
         lifecycleScope.launch(Dispatchers.IO) {
@@ -1584,7 +1584,7 @@ class SettingsFragment : Fragment() {
     }
 
     private fun setOwnAvatar(avatarJpeg: ByteArray?) {
-        // fixpass: JNI çağrıları (`getDisplayName`/`getIdentityShortCode` →
+        // JNI çağrıları (`getDisplayName`/`getIdentityShortCode` →
         // çekirdek kilidi) ana iş parçacığından ÇALIŞMAZ; çizim ana iş
         // parçacığına yazılır, gönderim arka planda sürer (bkz. identityCode
         // deseni, `onCreateView`).
@@ -1614,7 +1614,7 @@ class SettingsFragment : Fragment() {
         }
     }
 
-    /** Spec dışı, kullanıcı isteği (Tor): Rust `torStatus()`'u yoklar ve
+    /** Rust `torStatus()`'u yoklar ve
      *  etiketi günceller. Dönüş "ready|<host>.onion" ise host'u da gösterir. */
     private fun startTorStatusPolling() {
         torStatusHandler.removeCallbacks(torStatusRunnable)
@@ -1763,7 +1763,7 @@ class SettingsFragment : Fragment() {
     private fun refreshServers() {
         if (serversContainer == null) return
 
-        // fixpass (glm A3): `listServers()` JNI — off the main thread; rows are
+        // `listServers()` JNI — off the main thread; rows are
         // built back on the main thread.
         lifecycleScope.launch(Dispatchers.IO) {
             val json = try {
@@ -1888,7 +1888,7 @@ class SettingsFragment : Fragment() {
             text = getString(R.string.action_remove_server)
             setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorError))
             setOnClickListener {
-                // fixpass (glm A3): `removeServer` JNI — off the main thread.
+                // `removeServer` JNI — off the main thread.
                 lifecycleScope.launch(Dispatchers.IO) {
                     val res = try {
                         P2PLib.removeServer(serverId)

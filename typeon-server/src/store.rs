@@ -117,7 +117,7 @@ const ARCHIVE_ROW_OVERHEAD: usize = 128;
 
 /// The same for a mail row (mailbox id, depositor, hash, three index
 /// entries): charging only `sealed` let 3-byte items cost 3 bytes against a
-/// ~250-byte row (fable I-03).
+/// ~250-byte row.
 const MAIL_ROW_OVERHEAD: usize = 128;
 
 /// Bytes a mail item is charged: quota and the server-wide budget.
@@ -254,9 +254,9 @@ impl Store {
         // mail row must be on disk before it, not only in the WAL.
         let _ = conn.pragma_update(None, "synchronous", "FULL");
         // Deleted reader rows (who read which box), acks and mail are zeroed,
-        // not left in free pages (fable I-10).
+        // not left in free pages.
         let _ = conn.pragma_update(None, "secure_delete", "ON");
-        // Defter #22: JNI kontrol yüzeyi (`serverStatus`/`joinCode`/
+        // JNI kontrol yüzeyi (`serverStatus`/`joinCode`/
         // `listDevices`/`revokeDevice`) AYNI dosyaya İKİNCİ bir bağlantı
         // açıyor. WAL çoğu durumu kurtarıyor ama `busy_timeout` olmadan
         // çakışan yazmalar ANINDA `SQLITE_BUSY` dönüyordu — ve çağrı
@@ -446,7 +446,7 @@ impl Store {
                 "#,
             )
             .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
-        // K-41: SQLite has no `ADD COLUMN IF NOT EXISTS`. Only "duplicate
+        // SQLite has no `ADD COLUMN IF NOT EXISTS`. Only "duplicate
         // column name" means the column is there; any other failure fails
         // init before `user_version` is stamped, so the next start retries.
         let add_column = |sql: &str| -> Result<(), String> {
@@ -957,7 +957,7 @@ impl Store {
                     let _ = self.delete_fully_acked(id);
                 }
             }
-            // Defter #03: kayıt artık ÇOK-OKUYUCULU (bkz. `mailbox_readers`
+            // kayıt artık ÇOK-OKUYUCULU (bkz. `mailbox_readers`
             // şema notu). Aynı ratchet kutusunu iki taraf da kaydeder;
             // birinin kaydı diğerininkini EZMEZ. A reader keeps its key.
             self.conn
@@ -1046,7 +1046,7 @@ impl Store {
         self.conn
             .query_row(
                 // Every row still stored: one reader's ack does not delete a
-                // row while another reader has not acked it (fable I-03).
+                // row while another reader has not acked it.
                 "SELECT COUNT(*) FROM mail m WHERE m.mailbox_id = ?1 AND m.depositor = ?2",
                 params![mailbox_id, depositor],
                 |r| r.get(0),
@@ -1132,7 +1132,7 @@ impl Store {
         let mut total = 0usize;
         let mut more = false;
 
-        // Defter #03: yalnızca kutuyu KAYDETMİŞ bir okuyucu okuyabilir.
+        // yalnızca kutuyu KAYDETMİŞ bir okuyucu okuyabilir.
         let Ok(mut stmt) = self.conn.prepare(
             "SELECT m.seq, m.deposited_at_ms, m.sealed FROM mail m
              WHERE m.mailbox_id = ?1 AND m.seq > ?2 AND m.depositor != ?3
@@ -1193,7 +1193,7 @@ impl Store {
     }
 
     pub fn ack(&self, mailbox_id: &str, through_seq: u64, acker: &[u8]) -> Result<usize, String> {
-        // Defter #03: yalnızca kutuyu KAYDETMİŞ bir okuyucu onaylayabilir.
+        // yalnızca kutuyu KAYDETMİŞ bir okuyucu onaylayabilir.
         let is_reader = self
             .conn
             .query_row(
@@ -1364,7 +1364,7 @@ impl Store {
         // One transaction: one WAL commit per batch, and all or nothing.
         // The charge moves by the delta of each row written, in the same
         // transaction: a `SUM` over all of the writer's rows per request was
-        // a full scan on the event loop (fable I-05). The sweep recounts.
+        // a full scan on the event loop. The sweep recounts.
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         for rec in records {
             // Skipped, not refused: the client drops what was answered `Ok`,
@@ -1430,7 +1430,7 @@ impl Store {
         let mut out = Vec::new();
         // A repeated id is one scan, and the count stops at a cap: 512 full
         // scans of a bucket of millions of rows held the event loop for
-        // seconds (fable I-05). MIN/MAX come from `idx_archive_page`.
+        // seconds. MIN/MAX come from `idx_archive_page`.
         let mut seen = std::collections::HashSet::new();
         for b in buckets {
             if !seen.insert(b.as_str()) {
@@ -1460,7 +1460,7 @@ impl Store {
     /// Yeniden eskiye bir sayfa. `before: None` = en yeni sayfa.
     ///
     /// The cursor is the last record the client got, `(sent_at_ms,
-    /// record_id)`: clients send `sent_at_ms` coarsened to the hour (M-30), so
+    /// record_id)`: clients send `sent_at_ms` coarsened to the hour, so
     /// many records share one and a page may end inside such a group.
     pub fn archive_fetch(&self, bucket: &str, before: Option<(u64, &str)>, max_items: u32, max_bytes: u32) -> (Vec<ArchiveRecord>, bool) {
         let (before_ms, before_id) = match before {
@@ -1960,7 +1960,7 @@ mod tests {
         assert_eq!(s.register_mailboxes_proved(&owner, &id, &[], &proof(&key), 0, 10).unwrap(), (vec![], vec![]));
         // The same key is taken (second end of a session).
         assert_eq!(s.register_mailboxes_proved(&peer, &id, &[], &proof(&key), 0, 10).unwrap(), (vec![], vec![]));
-        // A-01: whoever knows only the id proves it with a key of its own: refused.
+        // whoever knows only the id proves it with a key of its own: refused.
         assert_eq!(s.register_mailboxes_proved(&squatter, &id, &[], &proof(&[2u8; 32]), 0, 10).unwrap(), (id.clone(), vec![]));
         let rows = s.conn.query_row("SELECT COUNT(*) FROM mailbox_readers WHERE owner = ?1", params![&squatter], |r| r.get::<_, i64>(0)).unwrap();
         assert_eq!(rows, 0);
@@ -1970,7 +1970,7 @@ mod tests {
 
     #[test]
     fn a_squatter_key_neither_locks_out_nor_deletes_for_the_real_reader() {
-        // K-36: a co-member knows a first-contact id (not key-bound) and proves
+        // a co-member knows a first-contact id (not key-bound) and proves
         // it with a key of its own, on two enrollments, before the device does.
         let s = Store::open_in_memory().unwrap();
         let sq1 = enroll(&s, b"aaaa", "peerA");
@@ -2078,7 +2078,7 @@ mod tests {
         assert_eq!(s.mailbox_item_count("mb_1"), 2);
     }
 
-    /// Defter #03: kutuyu KAYDETMEMİŞ bir istemci ne okuyabilmeli ne de
+    /// kutuyu KAYDETMEMİŞ bir istemci ne okuyabilmeli ne de
     /// silebilmeli. Kutu kimliği (ilk-temas kutusu için) tahmin
     /// edilebilir olduğundan, erişim kontrolü olmadan kayıtlı herhangi
     /// biri başkasının postasını çekebiliyor ve `Ack` ile yok
@@ -2184,7 +2184,7 @@ mod tests {
         assert_eq!(for_b[0].sealed, b"a->b");
     }
 
-    /// Defter #06: parça adımı blob'la birlikte saklanmalı, yoksa
+    /// parça adımı blob'la birlikte saklanmalı, yoksa
     /// `serve_chunk` yanlış ofsetlerden okur.
     #[test]
     fn blob_remembers_the_chunk_stride_it_was_written_with() {
@@ -2199,7 +2199,7 @@ mod tests {
         assert_eq!(s.blob_state("bl_s").unwrap().chunk_size, 512 * 1024);
     }
 
-    /// Defter #23: kayıt başına kotanın üstünde genel bir tavan da olmalı.
+    /// kayıt başına kotanın üstünde genel bir tavan da olmalı.
     #[test]
     fn total_stored_bytes_counts_every_kind() {
         let s = Store::open_in_memory().unwrap();
@@ -2329,7 +2329,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// I-48: the reader cap is per proof key. Two different keys on one
+    /// the reader cap is per proof key. Two different keys on one
     /// first-contact box each get `MAX_READERS_PER_KEY` slots; a third reader
     /// of either key is refused while the two are in use.
     #[test]

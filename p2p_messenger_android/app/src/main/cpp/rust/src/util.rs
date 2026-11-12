@@ -4,7 +4,7 @@ use super::*;
 
 
 /// Bir `file_id`'nin dosya yolu olarak kullanılmasının GÜVENLİ olduğunu
-/// doğrular (defter #01).
+/// doğrular.
 ///
 /// `FileOffer.file_id` tamamen KARŞI TARAFTAN geliyor ve `enc_path_for` onu
 /// doğrudan `<files>/attachments/{file_id}.enc` yoluna yapıştırıyordu —
@@ -39,9 +39,9 @@ pub(crate) fn is_safe_file_id(id: &str) -> bool {
 /// blob upload secret (`<tag><blob_id_hash_hex>`, see `blob_upload_secret`).
 /// A receiver recomputes it from the authenticated sender, or from a history
 /// row's author, so no member can make an id that collides with another
-/// member's message (C-02). The rest is hashed in so a file's tag, which a
+/// member's message. The rest is hashed in so a file's tag, which a
 /// server sees in the blob id, differs per file and links no two of an
-/// author's files (I-42).
+/// author's files.
 pub(crate) fn group_msg_tag(group_id: &str, author_identity_id: &str, rest: &str) -> [u8; 8] {
     use sha2::Digest as _;
     let h = sha2::Sha256::new_with_prefix(b"typeon-group-msg-id-v2")
@@ -166,7 +166,7 @@ pub(crate) fn safe_file_name(name: &str) -> String {
                 && !is_invisible_char(*c)
         })
         .collect();
-    // M60: dots and spaces stripped together (". .x" left ".x", a hidden file).
+    // dots and spaces stripped together (". .x" left ".x", a hidden file).
     let cleaned = cleaned.trim_start_matches(|c: char| c == '.' || c.is_whitespace()).trim_end().to_string();
     if cleaned.is_empty() {
         return "file".to_string();
@@ -294,10 +294,10 @@ pub(crate) fn handshake_signing_input(x25519_pub: &[u8], kyber_pub: &[u8], kyber
 /// with A (`note_undecryptable`). Versions before this one signed header and
 /// ciphertext only; the two cannot exchange messages. Deliberate break.
 ///
-/// L-36 (2026-10-21): tagged and length-framed, like `handshake_signing_input`.
+/// tagged and length-framed, like `handshake_signing_input`.
 /// Older versions do not verify.
 ///
-/// L-221 (2026-10-21): `header` is the raw header bytes as sent
+/// `header` is the raw header bytes as sent
 /// (`SignedHeader::raw`), not a re-encoding. Older versions do not verify.
 pub(crate) fn packet_signing_input(header: &[u8], ciphertext: &[u8], recipient_fp: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(32 + header.len() + ciphertext.len() + recipient_fp.len());
@@ -395,7 +395,7 @@ pub(crate) fn current_time_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
-/// M-65: milliseconds on CLOCK_BOOTTIME: keeps counting through suspend and
+/// milliseconds on CLOCK_BOOTTIME: keeps counting through suspend and
 /// never steps with the wall clock. Only for in-memory timers (backoffs,
 /// retry/rate windows, keepalive); never stored, never compared with a peer's
 /// clock or a `current_time_ms` value. +1 day so a `0` "never" reads as long ago.
@@ -484,8 +484,8 @@ pub(crate) fn answered_pending_id(payload: &[u8]) -> Option<String> {
     }
 }
 
-/// L-135: the archive row id of a group text copy (`None` for anything else).
-/// H6: every member device carries ~4 KB of keys (+ a proof); past the 1 MiB
+/// the archive row id of a group text copy (`None` for anything else).
+/// every member device carries ~4 KB of keys (+ a proof); past the 1 MiB
 /// envelope cap the update fails `MessageTooLarge` per member. 64 KiB for
 /// the packet around it (header, hybrid signatures, encryption).
 pub(crate) fn check_group_update_size(update: &GroupUpdate) -> Result<(), String> {
@@ -631,7 +631,7 @@ pub(crate) fn conn_path_rank(addr: &Multiaddr) -> u8 {
         Protocol::Onion(..) | Protocol::Onion3(_) => true,
         _ => false,
     });
-    // Onion-only (deanon fix): clearnet doğrudan yol ARTIK tercih edilmez.
+    // Onion-only: clearnet doğrudan yol ARTIK tercih edilmez.
     // Eskiden clearnet=2 onion=1 idi (hız için gerçek IP tercih ediliyordu);
     // artık yalnızca onion (ve kendi onion servisimize gelen loopback) tercih
     // edilir, clearnet röle ile aynı en düşük seviyeye (0) düşer. Zaten
@@ -690,7 +690,7 @@ pub(crate) fn is_onion_multiaddr(addr: &Multiaddr) -> bool {
     })
 }
 
-/// Spec dışı, güvenlik denetimi sertleştirmesi: ÖNCEDEN her iki imza alanı
+/// ÖNCEDEN her iki imza alanı
 /// da opsiyoneldi (boşsa o kısım sessizce ATLANIYORDU) — bu, klasik-sadece
 /// veya PQ-sadece imzalı bir paketin de kabul edilebilmesi anlamına
 /// geliyordu (o an hiçbir çağıran bunu istismar etmiyordu ama fonksiyonun
@@ -746,7 +746,7 @@ pub(crate) fn group_update_signing_input(
     ))
 }
 
-/// H78: what decides between two updates of the same group version (the
+/// what decides between two updates of the same group version (the
 /// larger wins on every member). Covers the state, not `member_devices`:
 /// a full and a delta copy of one update are the same update.
 pub(crate) fn group_tie_hash(u: &GroupUpdate) -> Result<Vec<u8>, String> {
@@ -770,7 +770,7 @@ pub(crate) fn sign_group_update(
     let to_sign = group_update_signing_input(
         group_id, new_version, change, group_name, members, member_devices, signed_by, signed_by_device,
     )?;
-    // Spec dışı, güvenlik denetimi düzeltmesi: GroupUpdate artık
+    // GroupUpdate artık
     // MessagePacket/HandshakeInit ile AYNI hibrit (Ed25519 + ML-DSA)
     // imza modelini kullanıyor — önceden SADECE klasik Ed25519 imzalıydı,
     // bu da kurucu yetkisinin (üye ekleme/çıkarma/yeniden adlandırma/

@@ -80,7 +80,7 @@ class LinkDeviceActivity : AppCompatActivity() {
 
     /** Ağ adresi hazır olana kadar QR üretimini yeniden dener. */
     private fun tryBuildQr(attemptsLeft: Int) {
-        // H141: the JNI call (core lock) runs off the main thread.
+        // the JNI call (core lock) runs off the main thread.
         Thread {
             val bytes = try { P2PLib.buildDeviceLinkRequest() } catch (e: Exception) { ByteArray(0) }
             handler.post { if (!isDestroyed) showQr(bytes, attemptsLeft) }
@@ -124,7 +124,7 @@ class LinkDeviceActivity : AppCompatActivity() {
     private val pollAdopted = object : Runnable {
         override fun run() {
             if (done) return
-            // L-197: the JNI call runs off the main thread.
+            // the JNI call runs off the main thread.
             Thread {
                 val linked = try { P2PLib.isSecondaryDevice() } catch (e: Exception) { false }
                 handler.post {

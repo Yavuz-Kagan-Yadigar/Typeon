@@ -72,7 +72,7 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
 
     let query = Rc::new(RefCell::new(String::new()));
 
-    // M164: `refresh_cell` owns `refresh` (set below), and `refresh` hands
+    // `refresh_cell` owns `refresh` (set below), and `refresh` hands
     // itself to newly built rows through it — a strong `refresh_cell` capture
     // inside the closure would close the cycle `refresh` → `refresh_cell` →
     // `refresh` and leak one closure graph per app run. So the closure only
@@ -125,7 +125,7 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
                     while let Some(child) = list.first_child() {
                         list.remove(&child);
                     }
-                    // M167: filled in immediately after this closure is
+                    // filled in immediately after this closure is
                     // created, so the old `expect` was fine in practice — but
                     // a panic inside a GTK callback unwinds into C and aborts
                     // the process, so fall back to a no-op refresh instead
@@ -175,7 +175,7 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
     }
     {
         let refresh = refresh.clone();
-        // M164: page-lifetime owner of `refresh_cell` (see the comment above).
+        // page-lifetime owner of `refresh_cell` (see the comment above).
         // Without it the last strong reference dies with `build()`'s local,
         // `upgrade()` in the refresh callback returns None, and rows would be
         // built without a way to rebuild themselves (pin toggles).

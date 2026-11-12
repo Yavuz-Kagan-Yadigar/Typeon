@@ -35,7 +35,7 @@ impl P2PCore {
                 device_proofs,
             });
         }
-        // Defter #19: kişi avatarları yukarıda KASITLI olarak dışarıda
+        // kişi avatarları yukarıda KASITLI olarak dışarıda
         // bırakılıyor (1 MiB `max_transmit_size` gerekçesiyle) ama gruplar
         // `serde_json::to_value(g)` ile OLDUĞU GİBİ gömülüyordu — ve
         // `Group.avatar_jpeg` de o yapının içinde. Avatarlar 720p/%85 JPEG
@@ -93,7 +93,7 @@ impl P2PCore {
             let mut devices = 0;
             // A proof (signature + signer keys) weighs about two devices.
             let weight = |c: &SyncedContact| c.devices.len() + 2 * c.device_proofs.len();
-            // H79: the first part (siblings, their proofs, archive key) gets
+            // the first part (siblings, their proofs, archive key) gets
             // half the budget and no "at least one" escape: one heavy
             // contact next to it passed the transmit limit, and that part
             // failing stopped the whole sibling sync. Such a contact goes
@@ -119,7 +119,7 @@ impl P2PCore {
                 break;
             }
         }
-        // L-15: groups in parts of their own, at most 256 KB of JSON each:
+        // groups in parts of their own, at most 256 KB of JSON each:
         // all in the first part, many groups pushed it over the transmit
         // limit and no part of the sync went.
         const SYNC_CHUNK_GROUP_BYTES: usize = 256 * 1024;
@@ -431,7 +431,7 @@ impl P2PCore {
     pub(crate) fn sync_roster_to(&mut self, siblings: Vec<String>) {
         if siblings.is_empty() { return; }
         let parts: Vec<MessageContent> = self.build_sync_payloads().into_iter().map(MessageContent::DeviceSync).collect();
-        // An avatar-only part goes to a sibling once per picture (fable D-05):
+        // An avatar-only part goes to a sibling once per picture:
         // every roster sync sent every contact avatar to every sibling, which
         // keeps the one it has anyway. `avs:<sibling>:<identity>` = its hash.
         let avatar_key = |fp: &str, content: &MessageContent| match content {
@@ -481,7 +481,7 @@ impl P2PCore {
     /// `group_id`: grup sohbeti (1:1 için boş).
     pub(crate) fn sync_read_state(&mut self, peer_fp: &str, group_id: &str, read_at_ms: u64) {
         let is_group = !group_id.is_empty();
-        // H82: the reader compares the boundary with the SENDER's clock
+        // the reader compares the boundary with the SENDER's clock
         // (`sent_at_ms` of its own messages). With our clock behind theirs
         // their newest messages never counted as seen; the newest
         // `sent_at_ms` we received here is on their clock and was read now.
@@ -628,7 +628,7 @@ impl P2PCore {
         // A read boundary only covers what actually reached the reader: a message
         // still waiting for its Ack was never displayed there, however old it is.
         if let Some(gid) = group_id {
-            // H81: a group copy waits under its per-device packet id; the
+            // a group copy waits under its per-device packet id; the
             // row id is its `group_message_local_id`. Copies still queued for
             // the reader (no device known yet) never reached it either.
             let mut waiting: std::collections::HashSet<String> = self.awaiting_confirmation.values()
@@ -661,7 +661,7 @@ impl P2PCore {
     pub(crate) fn echo_1to1_to_siblings(&mut self, peer_fp: &str, body: SiblingEchoBody) {
         let siblings = self.sibling_active_devices();
         if siblings.is_empty() {
-            // Spec dışı, hata ayıklama notu: bu sessizce hiçbir şey
+            // bu sessizce hiçbir şey
             // GÖNDERMEZ — "düzenleme/silme diğer cihaza ulaşmadı" şikayeti
             // burada mı yoksa gönderim hatasında mı (aşağıdaki `error!`)
             // olduğunu ayırt edebilmek için loglanıyor. Boş liste, ya hiç
@@ -723,7 +723,7 @@ impl P2PCore {
         if siblings.is_empty() { return; }
         self.last_sibling_backfill_at = now;
         for fp in siblings {
-            // M-68: only what the sibling archived since the last answered
+            // only what the sibling archived since the last answered
             // request (minus a clock-skew margin), not the newest rows again.
             let state = self.sibling_backfill_since.entry(fp.clone()).or_default();
             let since = (state.1 > 0).then(|| state.1.saturating_sub(SIBLING_BACKFILL_SINCE_MARGIN_MS) as i64);
@@ -787,7 +787,7 @@ impl P2PCore {
     /// geri-doldurma isteğine yanıt. Toplam kayıt `SIBLING_BACKFILL_MAX_ENTRIES`
     /// ile sınırlı (gossipsub 1MB).
     ///
-    /// Spec dışı, dış inceleme düzeltmesi: `scope_identity_id`/`scope_group_id`
+    /// `scope_identity_id`/`scope_group_id`
     /// İKİSİ DE `None` ise eski davranış (TÜM sohbetler, `before_timestamp`
     /// yok sayılır — otomatik `request_sibling_backfill` bunu kullanır).
     /// Biri doluysa istek TEK bir sohbete daralır ve `before_timestamp`
@@ -797,7 +797,7 @@ impl P2PCore {
     /// only rows sent inside it. The second value is `more`: rows of the
     /// scoped request were cut (row or byte limit).
     pub(crate) fn build_sibling_history_response(&self, limit: u32, scope_identity_id: Option<&str>, scope_group_id: Option<&str>, before_timestamp: Option<i64>, since_timestamp: Option<i64>, window: Option<(i64, i64)>) -> (Vec<SiblingHistoryEntry>, bool) {
-        // M-68: rows come newest first (local `timestamp`), so stop at the first older one.
+        // rows come newest first (local `timestamp`), so stop at the first older one.
         let too_old = |m: &ArchivedMessage| since_timestamp.is_some_and(|s| (m.timestamp as i64) < s);
         let mut entries = Vec::new();
         // bkz. `HISTORY_SYNC_MAX_TEXT_BYTES` — satır sayısı sınırı tek başına
@@ -900,7 +900,7 @@ impl P2PCore {
                     });
                     if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
                 }
-                // Attachments after the text rows (fable D-03): their previews
+                // Attachments after the text rows: their previews
                 // used the budget up before any text row of the chat.
                 // Once per contact (they live under any of its devices).
                 // A scoped press keeps them first: it ends at its first budget

@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit
 
 class P2PApplication : Application() {
     /**
-     * Spec dışı, kullanıcı isteği: uygulama ön plana geldiğinde (arka
+     * uygulama ön plana geldiğinde (arka
      * planda bekletildikten SONRA yeniden açıldığında — herhangi bir
      * Activity'nin sıradan `onResume`'u DEĞİL, ör. ChatActivity açıp
      * kapatmak/döndürmek bunu TETİKLEMEMELİ) bekleyen tüm mesajları HEMEN
@@ -82,7 +82,7 @@ class P2PApplication : Application() {
             com.p2p.messenger.util.FontOverride.apply(initialFontChoice.familyName)
         }
 
-        // Spec dışı, kullanıcı isteği: gönderilemeyen mesajlar/emirler
+        // gönderilemeyen mesajlar/emirler
         // (Edit/Delete/GroupUpdate — bkz. persist.rs `pending_durable_retries`)
         // arka planda da saatte bir denensin. `KEEP`: uygulama her
         // başlatıldığında yeniden enqueue edilse bile MEVCUT programı
@@ -96,7 +96,7 @@ class P2PApplication : Application() {
             .setConstraints(
                 Constraints.Builder()
                     .setRequiredNetworkType(NetworkType.CONNECTED)
-                    // Spec dışı, pil sağlamlığı düzeltmesi: bu, "ölmüşse
+                    // bu, "ölmüşse
                     // yeniden başlat" yedek mekanizması — asıl teslimat
                     // P2PService'in kendi sürekli döngüsünde. Pil kritik
                     // seviyedeyken bu saatlik yedek taramayı ertelemenin
@@ -130,13 +130,13 @@ class P2PApplication : Application() {
                     activity is com.p2p.messenger.ui.AppLockActivity ||
                     android.os.Build.VERSION.SDK_INT < 33
                 ) setSecure(activity, true)
-                // Spec dışı, kullanıcı isteği: Ayarlar'daki vurgu (accent)
+                // Ayarlar'daki vurgu (accent)
                 // rengi — bkz. ThemePrefs.applyAccentColor dokümantasyonu.
                 ThemePrefs.applyAccentColor(activity)
-                // Spec dışı, kullanıcı isteği: Ayarlar'daki metin/arayüz
+                // Ayarlar'daki metin/arayüz
                 // boyutu kaydırıcıları — bkz. ThemePrefs dokümantasyonu.
                 applyScalePreferences(activity)
-                // Spec dışı, kullanıcı isteği: Ayarlar'daki sistem fontu
+                // Ayarlar'daki sistem fontu
                 // seçici combobox'ı — bkz. ThemePrefs.FontChoice/themes.xml
                 // `appFontFamily` notu. Yukarıdakilerle SIRA ÖNEMLİ DEĞİL
                 // (hepsi ayrık özniteliklere dokunuyor).
@@ -172,7 +172,7 @@ class P2PApplication : Application() {
             }
 
             /**
-             * Spec dışı, kullanıcı isteği: Ayarlar'daki "Metin boyutu"/
+             * Ayarlar'daki "Metin boyutu"/
              * "Arayüz boyutu" kaydırıcıları — sistemin ERİŞİLEBİLİRLİK
              * ayarlarının (Configuration.fontScale/densityDpi) ÜZERİNE,
              * uygulamaya özel bir ek çarpan olarak bindirilir (sistem
@@ -259,7 +259,7 @@ class P2PApplication : Application() {
 
             override fun onActivityStarted(activity: Activity) {
                 com.p2p.messenger.util.FontOverride.forceOnWindow(activity)
-                // Spec dışı, kullanıcı isteği: uygulamayı açmak için şifre.
+                // uygulamayı açmak için şifre.
                 // Kilit ekranı HER Activity başlangıcında kontrol edilir
                 // (sadece MainActivity'de değil) — bir bildirimden doğrudan
                 // ChatActivity'ye girmek de kilidi atlamamalı. bkz.
@@ -322,7 +322,7 @@ class P2PApplication : Application() {
                 } else if (startedActivityCount == 1 && com.p2p.messenger.ui.CallActivity.inPip
                     && activity !is com.p2p.messenger.ui.CallActivity && !activity.isChangingConfigurations) {
                     // Only the call in picture-in-picture is left: the app is in
-                    // the background for the lock (fable J-02).
+                    // the background for the lock.
                     AppLock.lock()
                 }
             }

@@ -41,7 +41,6 @@ pub const MAX_PAGE_BYTES: usize = 48 * 1024;
 /// local drawing check stops at `MAX_PAGE_BYTES`, so two last strokes drawn
 /// at once on a nearly full page both fit everywhere. Without it each side
 /// dropped the other's and the pages differed, and were re-pulled, for good
-/// (fable G-01).
 const REMOTE_PAGE_SLACK: usize = MAX_PAGE_BYTES / 4;
 pub const MAX_OPS_STROKES: usize = 64;
 pub const MAX_PEN_WIDTH: u8 = 40;
@@ -282,7 +281,7 @@ impl P2PCore {
     fn wb_verified_sigs(&self, board: &Board, sigs: &[WbPageSig]) -> Signed {
         let signed_board = self.wb_signed_board(board);
         let mut out = Signed::new();
-        // E-04: each verify is a full hybrid check under the core lock. Only
+        // each verify is a full hybrid check under the core lock. Only
         // the newest signature per (page, device) can count, so verify just
         // that one, and never more than `MAX_SIG_VERIFIES` per packet.
         let mut newest: std::collections::BTreeMap<(u8, &[u8]), &WbPageSig> = std::collections::BTreeMap::new();
@@ -402,7 +401,7 @@ impl P2PCore {
     /// Enforces `MAX_TOMBSTONES` per page. Once per packet, not per erase.
     fn wb_trim_tombstones(&self, board: &str) {
         let Some(conn) = &self.db else { return };
-        // M-14: a count per page first; the sorted delete runs only for a
+        // a count per page first; the sorted delete runs only for a
         // page over the cap (the window function sorted every tombstone of
         // the board on every packet).
         let mut over: Vec<u8> = Vec::new();
@@ -956,7 +955,7 @@ impl P2PCore {
         // Each erase record is three statements under the core lock: one
         // budget unit per full 256 of them (clearing a full page is a few
         // units). A small erase is free: one unit per packet cut off a device
-        // that kept erasing after 20 packets (fable G-02). Over the budget
+        // that kept erasing after 20 packets. Over the budget
         // only the erase records are skipped; the signed strokes still count.
         let erase_units = (erased.len() / 9) as u64 / 256;
         let erased = if erase_units > 0 && !self.wb_pull_allowed("erase", &board.key, peer_fp, erase_units) {
@@ -1111,7 +1110,7 @@ impl P2PCore {
         if !tombstones.is_empty() {
             self.wb_trim_tombstones(&board.key);
         }
-        // E-04: a page answer speaks for this page only.
+        // a page answer speaks for this page only.
         let sigs: Vec<WbPageSig> = sigs.into_iter().filter(|s| s.page == page).collect();
         let signed = self.wb_verified_sigs(&board, &sigs);
         let mut used = self.wb_page_used(&board.key, page);
@@ -1120,7 +1119,7 @@ impl P2PCore {
         for stroke in strokes.iter().filter(|s| s.page == page) {
             theirs.insert(stroke.id.as_slice());
             let Some(author) = authors.get(stroke.author as usize) else { continue };
-            // Group boards too (fable G-04): a member relayed strokes signed by
+            // Group boards too: a member relayed strokes signed by
             // a removed member, shown under someone not in the group.
             if author.len() > 128 || !participants.contains(author) {
                 continue;

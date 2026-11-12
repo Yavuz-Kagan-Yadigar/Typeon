@@ -169,7 +169,7 @@ pub fn build_main(app: &Rc<App>, host: &adw::ToastOverlay) {
     // the same treatment MainActivity gives it.
     dialogs::watch_device_alerts(app);
 
-    // M172: a passphrase-sealed vault re-locks itself after 10 minutes
+    // a passphrase-sealed vault re-locks itself after 10 minutes
     // without input. The gate is installed either way: the passphrase can
     // be added or removed in Settings at any time, and the watcher checks
     // the vault before it locks.
@@ -199,7 +199,7 @@ const IDLE_TICK_SECONDS: u32 = 15;
 /// treats a locked window as "not looking at it"). The passphrase is
 /// re-verified with `secrets::load` off the GTK thread, exactly as
 /// `onboarding::prompt_passphrase` does — Argon2id (64 MiB x 3) plus the
-/// wallet round-trip froze the UI for seconds when it ran inline (H133).
+/// wallet round-trip froze the UI for seconds when it ran inline.
 fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
     let Some(window) = app.window() else { return };
     let main = window.clone();
@@ -545,7 +545,7 @@ fn status_indicator(app: &Rc<App>) -> gtk::Box {
     };
     // Off the GTK thread: the core lock is shared with the poll thread.
     let paint = Rc::new(paint);
-    // H130: one query in flight at a time — a poll round holding the core lock
+    // one query in flight at a time — a poll round holding the core lock
     // for seconds no longer stacks a waiting thread every 2 s.
     let in_flight = Rc::new(std::cell::Cell::new(false));
     let refresh = move || {

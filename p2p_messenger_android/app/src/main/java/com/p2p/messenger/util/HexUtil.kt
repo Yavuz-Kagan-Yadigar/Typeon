@@ -3,7 +3,7 @@ package com.p2p.messenger.util
 /** Rust `hex::encode` ile kodlanmış alanları geri çözer (bkz. "preview_hex"/
  *  "avatar_hex" — JSON ham ikili veri taşıyamadığı için bu kodlama gerekti).
  *
- *  Fail-closed (fixpass 2026-10-28): bozuk girdi (tek sayıda karakter veya
+ *  Fail-closed: bozuk girdi (tek sayıda karakter veya
  *  hex olmayan karakter) artık resmi olarak `ByteArray(0)` döndürür — eski
  *  davranış (StringIndexOutOfBoundsException fırlatması / sessiz çöp bayt)
  *  yerine. Çağıranlar zaten boş bayt dizisini yedek gösterimle işliyor

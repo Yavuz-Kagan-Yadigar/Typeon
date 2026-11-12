@@ -37,7 +37,7 @@ class P2PService : Service() {
         const val KEY_NODE_MODE = "node_mode_enabled"
         /** Spec dışı, kullanıcı isteği (Tor onion). */
         const val KEY_TOR_ENABLED = "tor_enabled"
-        /** Spec dışı, kullanıcı isteği: node modu için geçmiş/ek depolama
+        /** node modu için geçmiş/ek depolama
          *  sınırı (bayt) — bkz. Rust `history_storage_limit_bytes`. */
         const val KEY_HISTORY_STORAGE_LIMIT = "history_storage_limit_bytes"
         const val DEFAULT_HISTORY_STORAGE_LIMIT_BYTES = 2L * 1024 * 1024 * 1024
@@ -119,7 +119,7 @@ class P2PService : Service() {
          *  notified as decrypted messages arrive. Kept simple/static rather
          *  than a full pub-sub bus since this is a single-process app.
          *
-         *  Spec dışı, kararlılık denetimi düzeltmesi: `pollRunnable` artık
+         *  `pollRunnable` artık
          *  kendi arka plan `HandlerThread`'inde çalışıyor (bkz. o alanın
          *  dokümantasyonu), ama `addMessageListener`/`removeMessageListener`
          *  hâlâ Activity'lerin `onResume`/`onPause`'undan, yani ANA
@@ -218,14 +218,14 @@ class P2PService : Service() {
         }
 
         /**
-         * Spec dışı: şu an EKRANDA açık olan sohbetin kimliği — 1:1 için
+         * şu an EKRANDA açık olan sohbetin kimliği — 1:1 için
          * `peer_device_fingerprint`, grup için `"group:$group_id"`
          * (ChatActivity/GroupChatActivity onResume/onPause'da set/clear
          * eder). Bir mesaj bu konuşmaya aitse bildirim GÖSTERİLMEZ (zaten
          * ekranda canlı görünüyor) — başka HERHANGİ bir konuşmaya aitse
          * (veya hiçbir sohbet açık değilse) bildirim gösterilir.
          *
-         * Spec dışı, kararlılık denetimi düzeltmesi: `maybeNotify` artık
+         * `maybeNotify` artık
          * `pollRunnable`'ın arka plan `HandlerThread`'inden okunuyor
          * (bkz. o alanların dokümantasyonu), yazma ise Activity'lerin ANA
          * thread'inden geliyor. `@Volatile` olmadan bir thread'in yazdığı
@@ -257,7 +257,7 @@ class P2PService : Service() {
          *  ancak `startNetwork`'te eklenebildiğinden, değişiklik ağ katmanı
          *  yeniden başlayınca geçerli olur (bkz. tor.rs / network.rs start_network).
          *
-         *  Spec dışı, kullanıcı isteği: varsayılan olarak AÇIK — kutudan
+         *  varsayılan olarak AÇIK — kutudan
          *  çıktığı gibi CGNAT arkasındaki iki cihaz bile hiçbir ayar
          *  değiştirmeden birbirine ulaşabilsin diye (bkz. tor.rs/SECURITY.md
          *  "Tor onion" notu). Bu varsayılan SADECE anahtar hiç yazılmamışsa
@@ -273,7 +273,7 @@ class P2PService : Service() {
             prefs.edit().putBoolean(KEY_TOR_ENABLED, enabled).apply()
         }
 
-        /** Spec dışı, kullanıcı isteği: Ayarlar'daki geçmiş/ek depolama
+        /** Ayarlar'daki geçmiş/ek depolama
          *  sınırı slider'ı — sadece node modu açıkken anlamlı (bkz.
          *  Rust `enforce_history_storage_limit`), ama tercih her zaman
          *  kalıcılaştırılır. */
@@ -340,7 +340,7 @@ class P2PService : Service() {
      *  (WiFi'ye ÖZEL, sadece süreç bağlama amaçlı) AYRI, HERHANGİ bir
      *  varsayılan ağ değişikliğini izleyen callback. */
     private var defaultNetworkCallback: ConnectivityManager.NetworkCallback? = null
-    // Spec dışı, performans/kararlılık denetimi düzeltmesi: bu servis
+    // bu servis
     // süresiz olarak HER SANİYE `P2PLib.pollNetwork()` (JNI: mesaj çözme,
     // ratchet kriptografisi, DB arşivleme, gossipsub/dosya-teklifi olay
     // işleme) çalıştırıyor. Önceden ana (UI) thread'inin `Handler`'ıyla
@@ -358,7 +358,7 @@ class P2PService : Service() {
     // de herhangi bir thread'den güvenle çağrılabilir.
     private val pollThread = HandlerThread("P2PPollThread").apply { start() }
     private var handler: Handler = Handler(pollThread.looper)
-    /** Spec dışı, pil sağlamlığı düzeltmesi: `pollRunnable` önceden sabit
+    /** `pollRunnable` önceden sabit
      *  1sn'de, süresiz olarak çalışıyordu — bu, bir sohbet ekranı asla
      *  açılmasa bile arka planda süresiz her saniye bir JNI çağrısı (Rust
      *  tarafında `poll_events` — swarm taraması, `reconnect_sweep`,
@@ -652,7 +652,7 @@ class P2PService : Service() {
         }
         when (obj.optString("type")) {
             "sync", "device_linked" -> com.p2p.messenger.util.ArchiveKeyManager.persistIfNew(applicationContext)
-            // M-180: the core caught a panic (also a single bad packet): log
+            // the core caught a panic (also a single bad packet): log
             // it only; restarting the service per event would be a DoS lever.
             "pairing_failed" -> {
                 Log.w(TAG, "pairing_failed: ${obj.optString("reason")}")
@@ -668,7 +668,7 @@ class P2PService : Service() {
             "account_deleted" -> NotificationHelper.showAccountDeletedNotification(
                 applicationContext, obj.optString("peer"), obj.optString("display_name")
             )
-            // Spec dışı (dış AI incelemesi düzeltmesi — AI2-G, self-revocation):
+            // Spec dışı  :
             // bu cihaz KENDİ kimliği (birincil cihaz) tarafından iptal edildi.
             // Rust çekirdeği DB tablolarını + ekleri zaten sildi ve artık
             // inert; burada UI tarafındaki KALICI sırrı (Keystore-sarılı
@@ -778,7 +778,7 @@ class P2PService : Service() {
                     NotificationHelper.updateGroupMessageNotificationIfShowing(applicationContext, groupId, obj.optString("text"))
                 }
             }
-            // Spec dışı, kullanıcı isteği: EKLER de bildirim üretsin —
+            // EKLER de bildirim üretsin —
             // önceden sadece metin mesajları bildirim üretiyordu, biri
             // fotoğraf/dosya gönderdiğinde hiçbir uyarı gelmiyordu.
             "file_offer" -> {
@@ -863,7 +863,7 @@ class P2PService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Spec dışı, hata düzeltmesi (kullanıcı: "bildirimde Typeon değil
+        // "bildirimde Typeon değil
         // Android logosu görünüyor"): bu SÜREKLİ görünen (ön plan servisi)
         // bildirimi `ic_launcher_foreground` kullanıyordu — TAM RENKLİ bir
         // adaptive-icon katmanı, geçerli bir bildirim siluet DEĞİL. Aynı hata
@@ -989,7 +989,7 @@ class P2PService : Service() {
 
     /** Runs on the poll thread (see `onStartCommand`). */
     private fun initAndStart() {
-        // C4: init must never throw out of the HandlerThread (START_STICKY crash loop).
+        // init must never throw out of the HandlerThread (START_STICKY crash loop).
         try {
             if (!P2PLib.initDatabase(applicationContext.filesDir.absolutePath)) {
                 // Database not open (Keystore failure): not the same as
@@ -1253,7 +1253,7 @@ class P2PService : Service() {
     }
 
     /**
-     * Spec dışı, hata ayıklama düzeltmesi: gerçek bir cihazda, router'da
+     * gerçek bir cihazda, router'da
      * UPnP açık olmasına rağmen UPnP taraması hep "gateway bulunamadı"
      * döndürdüğü rapor edildi. Kök sebep muhtemelen şu: Android telefonlar
      * genelde WiFi'ye bağlıyken bile mobil veriyi arka planda AÇIK tutar —
@@ -1273,7 +1273,7 @@ class P2PService : Service() {
      */
     private fun bindToWifiIfAvailable() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        // Spec dışı, hata ayıklama düzeltmesi: SADECE WiFi transport'u
+        // SADECE WiFi transport'u
         // kontrol etmek YETERSİZ — bir cihazın WiFi radyosu açık ve
         // bilinen/kayıtlı bir ağa bağlı olabilir ama o ağın GERÇEK internet
         // erişimi olmayabilir (ör. boşta duran bir ev ağı, portal arkasında
@@ -1289,7 +1289,7 @@ class P2PService : Service() {
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
             .build()
-        // Defter #20: bu iki gövde eskiden KOŞULSUZ `bindProcessToNetwork`
+        // bu iki gövde eskiden KOŞULSUZ `bindProcessToNetwork`
         // çağırıyordu ve `defaultNetworkCallback`'in `refreshWifiBinding`
         // kararıyla yarışıyordu. Varsayılan ağ hücreselken bir Wi-Fi
         // belirirse süreç TÜM trafiği (Tor dahil) Wi-Fi'ye bağlanıyor; ya da

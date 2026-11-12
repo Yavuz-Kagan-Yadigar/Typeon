@@ -28,7 +28,7 @@ object P2PLib {
     /** createIdentity sonrası bir kereliğine: az önce üretilen secret key
      *  bundle'ını (CBOR, plaintext) döner. Rust tarafında bellekte KALIR
      *  (diske yazma başarısız olursa yeniden denenebilsin diye) ve ancak
-     *  loadSecretBundle ya da yerel silme ile temizlenir (M-100). */
+     *  loadSecretBundle ya da yerel silme ile temizlenir. */
     external fun getPendingSecretBundle(): ByteArray
     /** Keystore ile şifresi çözülmüş bir secret bundle'ı belleğe yükler —
      *  uygulama açılışında, initDatabase + hasStoredIdentity=true sonrası
@@ -51,15 +51,15 @@ object P2PLib {
      *  yeniden başlatılmasını gerektirir (canlı swarm'a transport eklenemez). */
     external fun startNetwork(nodeMode: Boolean, torEnabled: Boolean): String
     external fun setNodeMode(enabled: Boolean)
-    /** Spec dışı, kullanıcı isteği: Ayarlar'daki geçmiş/ek depolama sınırı
+    /** Ayarlar'daki geçmiş/ek depolama sınırı
      *  slider'ı (100MB-32GB). Sadece node modu açıkken uygulanır (bkz. Rust
      *  `enforce_history_storage_limit`) — sınırı düşürmek en eski dosyaları
      *  hemen siler. */
     external fun setHistoryStorageLimitBytes(bytes: Long)
-    /** Spec dışı, kullanıcı isteği (Tor): UI için Tor durumu. Dönüş:
+    /** UI için Tor durumu. Dönüş:
      *  "disabled" | "bootstrapping" | "ready" | "ready|<host>.onion" | "failed". */
     external fun torStatus(): String
-    /** Spec dışı, kullanıcı isteği: BU cihazın (karşı tarafınki DEĞİL, bkz.
+    /** BU cihazın (karşı tarafınki DEĞİL, bkz.
      *  `hasActiveSession`/`isPeerConnected`) genel ağ bağlantı durumu —
      *  JSON: `{"connected_peers": Int, "listening": Bool, "tor_enabled":
      *  Bool, "tor_status": String, "node_mode": Bool}`. Sohbet ekranının üst
@@ -76,7 +76,7 @@ object P2PLib {
 
     // --- Bölüm 1.3/1.4: QR + manuel eşleşme ---
     external fun generateQrPacket(rendezvousNode: String): ByteArray
-    /** Spec dışı, kullanıcı isteği: `processManualEntry`'nin beklediği
+    /** `processManualEntry`'nin beklediği
      *  `identity_id|device_fingerprint|nonce|device_name|rendezvous_node`
      *  formatını üretir — panoya kopyalayıp karşı tarafa (ör. farklı bir
      *  ağdaysa, ekran paylaşımı/mesajla) iletmek için. Hata durumunda "". */
@@ -195,7 +195,7 @@ object P2PLib {
     /** Kurucu: güncel imzalı grup durumunu her üye cihazına yeniden gönderir; "OK" veya "Error: …". */
     external fun resendGroupToAll(groupId: String): String
 
-    // --- Spec dışı, kullanıcı isteği: bekleyen (henüz ack alınmamış)
+    // --- bekleyen (henüz ack alınmamış)
     //     mesajlar — bkz. lib.rs `awaiting_confirmation`/types.rs `regen_content`
     //     genişletmesi, SettingsFragment "Pending Messages" ekranı. ---
     /** Uygulama ön plana geldiğinde çağrılır — bkz. P2PApplication foreground
@@ -207,7 +207,7 @@ object P2PLib {
     /** Bir bekleyen mesajı kalıcı olarak (Failed) bırakır — bkz. network.rs
      *  `cancel_pending_message`. */
     external fun cancelPendingMessage(messageId: String): Boolean
-    /** Spec dışı, kullanıcı isteği: bekleyen mesajlar listesindeki manuel
+    /** bekleyen mesajlar listesindeki manuel
      *  "Şimdi Dene" düğmesi — bkz. network.rs `retry_pending_message_now`
      *  (SADECE bu mesajın bir sonraki deneme zamanını HEMEN'e çeker, ağ
      *  I/O'su burada YAPILMAZ). */
@@ -248,7 +248,7 @@ object P2PLib {
     /** Dönüş: sendMessage ile aynı JSON biçimi. */
     external fun editMessage(targetDeviceFingerprint: String, targetMessageId: String, newText: String): String
     external fun deleteMessage(targetDeviceFingerprint: String, targetMessageId: String): String
-    /** Spec dışı, kullanıcı isteği (WhatsApp tarzı tepkiler): bir mesaja
+    /** bir mesaja
      *  emoji bırakır. `emoji` BOŞ dize ise kendi tepkim kaldırılır (ayrı
      *  bir "kaldır" çağrısı yok — kişi başına tek tepki, bkz. Rust
      *  `MessageContent::Reaction`). Dönüş: o mesajın GÜNCEL tepki özeti
@@ -256,13 +256,13 @@ object P2PLib {
     external fun reactToMessage(targetDeviceFingerprint: String, targetMessageId: String, emoji: String): String
     /** bkz. `reactToMessage` — grup karşılığı. */
     external fun reactToGroupMessage(groupId: String, targetMessageId: String, emoji: String): String
-    /** Spec dışı, kullanıcı isteği: tepki pill'ine dokunulduğunda "kim ne
+    /** tepki pill'ine dokunulduğunda "kim ne
      *  attı" listesi. JSON: `[{"identity_id":"...","emoji":"👍"}, ...]`,
      *  en yeni tepki başta. Pill'deki özet (bkz. `reactToMessage` dönüşü)
      *  yalnızca TOPLAMLARI taşır, kişi bilgisini taşımaz — bu yüzden ayrı
      *  bir çağrı. */
     external fun listReactions(targetMessageId: String): String
-    /** Spec dışı, kullanıcı isteği (grup düzenle/sil): `editMessage`/
+    /** `editMessage`/
      *  `deleteMessage`'ın grup karşılığı — ulaşılabilir TÜM diğer üyelere
      *  gönderilir (bkz. `sendGroupMessage` AYNI fan-out deseni).
      *  `targetGroupMessageLocalId`, düzenlenecek/silinecek grup mesajının
@@ -273,7 +273,7 @@ object P2PLib {
     /** Bir karşı tarafla aktif bir ratchet oturumu (el sıkışma tamamlanmış)
      *  var mı — ChatActivity'nin "bağlanılıyor..." göstergesi için. */
     external fun hasActiveSession(peerDeviceFingerprint: String): Boolean
-    /** Spec dışı: GERÇEK canlı bağlantı durumu — `hasActiveSession`'ın
+    /** GERÇEK canlı bağlantı durumu — `hasActiveSession`'ın
      *  aksine (o, bir ratchet oturumu kuruldu mu diye bakar ve bir kez
      *  kurulunca SÜRESİZ true kalır), bu, karşı taraf ŞU AN gerçekten
      *  bağlı mı diye Swarm'ın kendi bağlantı defterine bakar. Sohbet
@@ -309,25 +309,25 @@ object P2PLib {
      *  başlıyordu). Her öğede ayrıca `sender_identity_id` var (grupta
      *  birden çok gönderen olabildiğinden). */
     external fun getGroupMessageHistory(groupId: String, limit: Int): String
-    /** Spec dışı: node modu kapalı cihazlarda yerel geçmiş boşsa, karşı
+    /** node modu kapalı cihazlarda yerel geçmiş boşsa, karşı
      *  tarafa (node modu açıksa) şifreli bir geçmiş isteği gönderir. Yanıt
      *  asenkron gelir — bkz. pollNetwork "history_sync" olayı. */
     external fun requestHistorySync(peerDeviceFingerprint: String, limit: Int)
-    /** Spec dışı, kullanıcı isteği (sonsuz kaydırma): sohbet geçmişinin en
+    /** sohbet geçmişinin en
      *  üstüne kaydırıldığında ÖNCE bu çağrılmalı — YEREL arşivde
      *  `beforeTimestamp`'ten eski mesaj varsa (ağ gerekmeden) onları döner,
      *  `getMessageHistory` ile aynı JSON biçimi. */
     external fun getMessageHistoryBefore(peerDeviceFingerprint: String, beforeTimestamp: Long, limit: Int): String
     /** bkz. `getMessageHistoryBefore` aynı notu — grup arşivi için. */
     external fun getGroupMessageHistoryBefore(groupId: String, beforeTimestamp: Long, limit: Int): String
-    /** H122: only rows archived after `afterTimestamp`, oldest first; same JSON as `getMessageHistory`. */
+    /** only rows archived after `afterTimestamp`, oldest first; same JSON as `getMessageHistory`. */
     external fun getMessageHistorySince(peerDeviceFingerprint: String, afterTimestamp: Long, limit: Int): String
     external fun getGroupMessageHistorySince(groupId: String, afterTimestamp: Long, limit: Int): String
-    /** H137: `{"contacts":{identity_id:{"peer","message","attachment"}},"groups":{gid:{"message","attachment"}}}`;
+    /** `{"contacts":{identity_id:{"peer","message","attachment"}},"groups":{gid:{"message","attachment"}}}`;
      *  message / attachment may be null (message.timestamp, attachment.created_at). */
     external fun chatListPreviews(): String
 
-    // --- Spec dışı: dosya/foto/video/ses ekleri (azami 4GB) ---
+    // --- dosya/foto/video/ses ekleri (azami 4GB) ---
     /** `sourcePath` zaten yerel bir dosya yolu olmalı (content:// URI
      *  DEĞİL — çağıran taraf önce ContentResolver ile yerel bir önbellek
      *  dosyasına kopyalamalı). `previewJpeg`: foto/video ekleri için
@@ -357,7 +357,7 @@ object P2PLib {
     /** [listAttachments] / [listGroupAttachments] without the preview images. */
     external fun listAttachmentsBrief(peerDeviceFingerprint: String): String
     external fun listGroupAttachmentsBrief(groupId: String): String
-    /** Spec dışı, kullanıcı isteği (grup ekleri): `prepareAndSendFile`'ın
+    /** `prepareAndSendFile`'ın
      *  grup karşılığı — dosya TEK SEFERDE şifrelenir, ulaşılabilir TÜM diğer
      *  üyelere aynı `file_id`/anahtarla sunulur. Dönüş: başarılıysa
      *  `file_id`, aksi halde "Error: ...". İndirme için AYRI bir fonksiyon
@@ -439,11 +439,11 @@ object P2PLib {
     external fun retryGroupMessageCopies(groupId: String, localId: String): Int
     /** "OK" or "Error: CODE: detail". */
     external fun removeFromGroup(groupId: String, identityId: String): String
-    /** Spec dışı, kullanıcı isteği: grubu TÜM üyeler için siler (imzalı
+    /** grubu TÜM üyeler için siler (imzalı
      *  `GroupChange::Delete` herkese gönderilir). SADECE kurucu için
      *  başarılıdır; aksi halde "Error: ..." döner. */
     external fun deleteGroup(groupId: String): String
-    /** Spec dışı, kullanıcı isteği: kurucu OLMAYAN bir üye gruptan kendi
+    /** kurucu OLMAYAN bir üye gruptan kendi
      *  isteğiyle ayrılır — kurucuya bir ayrılma isteği gönderilir (kurucu
      *  o an erişilemez olsa bile güvenilir teslim ile beklemeye alınır) ve
      *  bu cihazdaki grup kaydı hemen kaldırılır. Kurucu için "Error: ..."
@@ -457,7 +457,7 @@ object P2PLib {
      *  gönderenin kimliği, "Ahmet'e yanıt" gösterebilmek için).
      *  `mentionIdsJson`: JSON array of the @mentioned members' identity ids, or null. */
     external fun sendGroupMessage(groupId: String, message: String, replyToMessageId: String?, replyToPreview: String?, replyToSenderIdentityId: String?, mentionIdsJson: String?): String
-    /** Spec dışı: grup profil fotoğrafı — SADECE kurucu için başarılı olur
+    /** grup profil fotoğrafı — SADECE kurucu için başarılı olur
      *  (bkz. Rust set_group_avatar). `avatarJpeg` null ise kaldırılır. Her
      *  iki durumda da TÜM üyelere bir GroupUpdate yayılır. */
     external fun setGroupProfilePicture(groupId: String, avatarJpeg: ByteArray?): String
@@ -472,7 +472,7 @@ object P2PLib {
      *  Başarısızsa "Error: ..." döner (yanlış parola/bozuk dosya). */
     external fun importRecovery(fileBytes: ByteArray, passphrase: String, deviceName: String): String
 
-    // --- Spec dışı: yazıyor... göstergesi ---
+    // --- yazıyor... göstergesi ---
     /** Fire-and-forget — arşivlenmez, güvenilir teslim kuyruğuna girmez.
      *  Kotlin tarafı sadece false->true/true->false GEÇİŞLERİNDE
      *  çağırmalı, her tuş vuruşunda DEĞİL. */
@@ -481,7 +481,7 @@ object P2PLib {
      *  TÜM diğer üyelere gönderilir. */
     external fun sendGroupTypingIndicator(groupId: String, isTyping: Boolean): Boolean
 
-    // --- Spec dışı: profil fotoğrafı (720p/%85 JPEG) ---
+    // --- profil fotoğrafı (720p/%85 JPEG) ---
     /** Şu an ayarlı olan kendi profil fotoğrafımız, yoksa boş dizi. */
     external fun getOwnProfilePicture(): ByteArray
     /** `avatarJpeg` null ise fotoğraf kaldırılır. Her iki durumda da
@@ -489,7 +489,7 @@ object P2PLib {
      *  dosya olabileceğinden (yüzlerce KB) ANA THREAD'DE ÇAĞIRMAYIN. */
     external fun setOwnProfilePicture(avatarJpeg: ByteArray?): String
 
-    // --- Spec dışı, kullanıcı isteği (2026-09-04): hesap adı ---
+    // --- hesap adı ---
     /** Şu anki hesap adımız (kişilerin bizi gördüğü ad), yoksa boş dize. */
     external fun getDisplayName(): String
     /** Hesap adını değiştirir ve değişikliği bilinen TÜM kişilere otomatik
@@ -505,14 +505,14 @@ object P2PLib {
     /** Henüz onaylanmamış hesap silme bildirimi sayısı. */
     external fun accountDeletionPending(): Int
 
-    // --- Spec dışı: sohbet/kişi silme (uzun basma menüsü) ---
+    // --- sohbet/kişi silme (uzun basma menüsü) ---
     /** Yumuşak seçenek: sadece yerel mesaj/ek geçmişini siler, eşleşme
      *  KORUNUR. */
     external fun clearChatHistory(contactId: String): String
     /** Sert seçenek: eşleşme/ratchet oturumu DAHİL kişiyi tamamen siler —
      *  yeniden mesajlaşmak için taze bir QR/manuel eşleşme gerekir. */
     external fun deleteContact(contactId: String): String
-    /** Spec dışı, güvenlik denetimi düzeltmesi: bu kişinin TEK bir cihazını
+    /** bu kişinin TEK bir cihazını
      *  iptal eder — kişiyi/geçmişi SİLMEZ, sadece o cihaz fingerprint'inden
      *  gelecek/giden her şeyi durdurur (bkz. Rust revoke_contact_device —
      *  is_active artık receive_message/handshake'te gerçekten kontrol

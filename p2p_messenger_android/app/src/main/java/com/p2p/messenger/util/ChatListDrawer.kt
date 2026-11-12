@@ -8,7 +8,7 @@ import com.p2p.messenger.ChatsFragment
 import com.p2p.messenger.R
 
 /**
- * Spec dışı, kullanıcı isteği: "soldan bir drag barla sürüklenebilir açılıp
+ * "soldan bir drag barla sürüklenebilir açılıp
  * kapanan chat list" — ChatActivity/GroupChatActivity'nin soldan açılan
  * sohbet listesi çekmecesi (bkz. activity_chat.xml `DrawerLayout` +
  * `chatListDrawerContainer`). İkisi arasında paylaşılan tek bir kurulum

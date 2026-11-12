@@ -29,7 +29,7 @@ impl P2PCore {
     }
 
     /// `seal_local_blob`'un tersi. `None` (no key, damaged, never sealed):
-    /// the caller drops the bytes — never uses them as plaintext (L-82).
+    /// the caller drops the bytes — never uses them as plaintext.
     pub(crate) fn open_local_blob(&self, sealed: &[u8]) -> Option<Vec<u8>> {
         use chacha20poly1305::aead::{Aead, KeyInit};
         use chacha20poly1305::{ChaCha20Poly1305, Nonce};
@@ -59,7 +59,7 @@ impl P2PCore {
         };
 
         let persistable = state.to_persistable();
-        // Root, chain and ratchet secret keys: wiped when dropped (fable A-11/H-05).
+        // Root, chain and ratchet secret keys: wiped when dropped.
         let plaintext = match ciborium_bytes(&persistable) {
             Ok(b) => zeroize::Zeroizing::new(b),
             Err(e) => { error!("Ratchet state serileştirilemedi: {}", e); return false; }
@@ -70,7 +70,7 @@ impl P2PCore {
             return false;
         };
 
-        // fable H-01: with WAL and synchronous=NORMAL a commit that returned
+        // with WAL and synchronous=NORMAL a commit that returned
         // can still be lost on power loss; the send chain then rolled back
         // and the next message reused a key and nonce. This commit is synced
         // (FULL: the WAL is synced at commit), the rest of the database
@@ -119,7 +119,7 @@ impl P2PCore {
 
     pub(crate) fn load_ratchet_states_from_db(&mut self) {
         let (rows, unopened) = self.load_ratchet_states_from_db_inner();
-        // fable A-05: when stored sessions exist and none opens, the key is
+        // when stored sessions exist and none opens, the key is
         // wrong: the gate stays shut, or the next send replaced them one by
         // one. One bad row among good ones is dropped as before.
         if rows > 0 && unopened == rows {
@@ -210,7 +210,7 @@ impl P2PCore {
     /// DeviceAddNotice/…) artık buraya yazılıyor — önceden bir yeniden
     /// başlatma kuyruktaki TÜM kardeş senkronunu sessizce siliyordu.
     /// `original_sent_at`: mesajın İLK kuyruğa girdiği an — `current_time_ms()`
-    /// DEĞİL. Spec dışı, teslim garantisi düzeltmesi: burası eskiden her
+    /// DEĞİL. burası eskiden her
     /// yazışta `current_time_ms()` damgalıyordu, ama bu kolon
     /// `load_pending_durable_retries_from_db` tarafından `original_sent_at`
     /// olarak geri okunuyor — yani `TEXT_RETRY_GIVE_UP_MS` (7 gün) penceresi
@@ -263,7 +263,7 @@ impl P2PCore {
             }
             let _ = conn.execute("DELETE FROM pending_durable_retries WHERE peer_device_fingerprint = ?1", params![peer_device_fingerprint]);
         }
-        // H93: nothing retries them any more.
+        // nothing retries them any more.
         self.fail_orphaned_sends(&ids);
     }
 
@@ -381,7 +381,6 @@ impl P2PCore {
         for (group_id, member_identity_id, content_cbor, row_id) in loaded {
             // A row that does not open (wrong or stale key) is kept, as in
             // the durable-retry twin; only opened bytes that do not parse go
-            // (fable A-06).
             let Some(plain) = self.open_local_blob(&content_cbor) else { continue };
             let content: MessageContent = match ciborium::from_reader(plain.as_slice()) {
                 Ok(c) => c,
@@ -435,7 +434,7 @@ impl P2PCore {
             }
         }
         let (Ok(own_fp), Some(own_identity_id)) = (self.get_active_own_device_fingerprint(), self.my_identity_id()) else { return };
-        // H4: checked once, and said, instead of a silent return inside the loop.
+        // checked once, and said, instead of a silent return inside the loop.
         if !self.own_device_keys.contains_key(&own_fp) {
             error!("Grup senkronları yeniden kuyruklanamadı: kendi cihaz anahtarları yok");
             return;
@@ -477,7 +476,7 @@ impl P2PCore {
             // Expired rows first: past the 7-day give-up nothing retries them,
             // and they were read again on every start.
             let cutoff = current_time_ms().saturating_sub(TEXT_RETRY_GIVE_UP_MS) as i64;
-            // C6: their messages are marked failed below.
+            // their messages are marked failed below.
             if let Ok(mut stmt) = conn.prepare("SELECT message_id FROM pending_durable_retries WHERE created_at < ?1") {
                 if let Ok(rows) = stmt.query_map(params![cutoff], |r| r.get::<_, String>(0)) {
                     expired.extend(rows.flatten());
@@ -486,7 +485,7 @@ impl P2PCore {
             if let Err(e) = conn.execute("DELETE FROM pending_durable_retries WHERE created_at < ?1", params![cutoff]) {
                 error!("Süresi dolmuş kalıcı yeniden deneme kayıtları silinemedi: {}", e);
             }
-            // H98: the keys of every row first (small), then the oldest 1000
+            // the keys of every row first (small), then the oldest 1000
             // that would really be sent now. A plain `LIMIT 1000` read rows
             // of stale devices or already in memory, and the rest never came.
             // ponytail: 1000 per load; the rest come on the next load.
@@ -572,7 +571,7 @@ impl P2PCore {
                     continue;
                 }
             };
-            // A parked group copy (H8) is resent only while the device's
+            // A parked group copy is resent only while the device's
             // identity is still a member: a removed member got it forever.
             let group_id = match &content {
                 MessageContent::Text { group_id: Some(g), .. }

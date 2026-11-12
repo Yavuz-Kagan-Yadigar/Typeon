@@ -128,7 +128,7 @@ pub fn exists(dir: &Path) -> bool {
 /// alone, so the launch flow knows whether to prompt before holding anything
 /// secret.
 pub fn is_passphrase_protected(dir: &Path) -> bool {
-    // M155: only the magic + mode byte, not the whole vault.
+    // only the magic + mode byte, not the whole vault.
     use std::io::Read;
     let mut head = vec![0u8; MAGIC.len() + 1];
     match std::fs::File::open(vault_path(dir)).and_then(|mut f| f.read_exact(&mut head)) {
@@ -243,7 +243,7 @@ pub fn change_passphrase(dir: &Path, vault: &Vault, new_passphrase: &str) -> Res
     save(dir, vault, new_passphrase)
 }
 
-/// Defter #39: burası her zaman `Backend::Unknown` kullanıyordu, yani hata
+/// burası her zaman `Backend::Unknown` kullanıyordu, yani hata
 /// mesajı hiçbir zaman "KDE Wallet"/"GNOME Keyring" diyemiyordu. Artık
 /// gerçekten tespit edilen arka uç adlandırılıyor.
 fn keyring_name() -> &'static str {
@@ -284,7 +284,7 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
     // Write a temp file and rename it over: truncating in place means a crash
     // or power loss mid-write leaves a half vault and the identity is gone.
-    // H-09: a temp name of its own per write (pid + random): two threads
+    // a temp name of its own per write (pid + random): two threads
     // writing the same file (the archive key) used to share one ".tmp" and
     // could rename the other's half-written file in. `create_new` (O_EXCL)
     // still refuses a planted symlink.
@@ -344,7 +344,7 @@ fn archive_path(dir: &Path) -> PathBuf {
 /// Key that seals the archive file, derived from a secret inside the vault
 /// and held for the session. The wallet key alone must not open the archive
 /// key: with a passphrase set, that would bypass the passphrase.
-/// M154: deliberately never zeroized — it lives for the process, like the
+/// deliberately never zeroized — it lives for the process, like the
 /// core's own keys; wiping it at exit would buy nothing.
 static ARCHIVE_SEAL: std::sync::Mutex<Option<[u8; 32]>> = std::sync::Mutex::new(None);
 

@@ -96,7 +96,7 @@ class ServerService : Service() {
 
         fun setEnabled(context: Context, enabled: Boolean) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit().putBoolean(KEY_ENABLED, enabled).commit() // M136: apply() could lose an "off" across process death
+                .edit().putBoolean(KEY_ENABLED, enabled).commit() // apply() could lose an "off" across process death
         }
 
         /**
@@ -351,7 +351,7 @@ class ServerService : Service() {
     }
 
     override fun onDestroy() {
-        // Defter #11: Rust çekirdeğini de GERÇEKTEN durdur. Önceden burada
+        // Rust çekirdeğini de GERÇEKTEN durdur. Önceden burada
         // yalnızca wake lock bırakılıyordu; sunucu süreçte çalışmaya devam
         // ediyor, arayüzdeki anahtar "kapalı" gösterse bile posta kabul
         // etmeyi sürdürüyordu.

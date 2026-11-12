@@ -354,7 +354,7 @@ fn audio_tx(shared: Arc<Shared>) {
         Err(e) => return state_only(&shared, &e),
     };
     drain_bus(&pipeline, "microphone");
-    // M168: a pipeline missing its appsink (element changed, factory renamed)
+    // a pipeline missing its appsink (element changed, factory renamed)
     // would turn this worker thread into a live-strip-and-return: the whole
     // microphone silently died with the call still running. Degrade instead —
     // release and hand the loop to `state_only`, which keeps the presence
@@ -413,7 +413,7 @@ fn state_flags(shared: &Shared) -> u8 {
 
 /// `[n][len u16 BE]*n [packet]*n`
 pub fn pack_bundle(packets: &[Vec<u8>]) -> Vec<u8> {
-    // M169: the count lives in one header byte, so `as u8` used to truncate
+    // the count lives in one header byte, so `as u8` used to truncate
     // silently at >255 packets (impossible for the 3-packet caller, but a
     // header/payload disagreement is still a corrupt frame if that ever
     // changes) — refuse loudly instead.

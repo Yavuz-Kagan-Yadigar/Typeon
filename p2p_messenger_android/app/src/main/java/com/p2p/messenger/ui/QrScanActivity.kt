@@ -310,7 +310,7 @@ class QrScanActivity : AppCompatActivity() {
                 Toast.makeText(this, com.p2p.messenger.util.coreErrorText(this, result), Toast.LENGTH_LONG).show()
                 rearmLater()
             } else {
-                // Spec dışı, kullanıcı isteği: ilk eşleşme (gerçek dial/
+                // ilk eşleşme (gerçek dial/
                 // Noise/IdentityExchange el sıkışması) UZUN sürebilir — bir
                 // toast gösterip bu ekranı kapatmak, kullanıcıyı hiçbir
                 // ilerleme göstergesi olmadan bırakıyordu. Artık kullanıcı

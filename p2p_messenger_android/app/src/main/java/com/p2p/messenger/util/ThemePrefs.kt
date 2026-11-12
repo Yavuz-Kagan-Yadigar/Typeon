@@ -106,7 +106,7 @@ object ThemePrefs {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: sohbet ekranının arka plan rengi — TEK
+     * sohbet ekranının arka plan rengi — TEK
      * (kişi/grup başına AYRI değil) tercih. `null` = "tercih yok, tema
      * varsayılanı kullan" (bkz. `applyChatBackground`). Metin rengiyle İLGİSİ YOK — bkz. `getAccentColor`
      * dokümantasyonu, o amaçla kullanıcı isteği üzerine kaldırıldı.
@@ -127,7 +127,7 @@ object ThemePrefs {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: TEK bir "vurgu" (accent) rengi — metin
+     * TEK bir "vurgu" (accent) rengi — metin
      * rengi AYRICA seçilmez, her zaman bu rengin (ve ondan türetilen ton
      * ailesinin) üzerinde okunaklı olacak şekilde OTOMATİK siyah/beyaz
      * hesaplanır (bkz. `applyAccentColor` — Material'ın "content-based
@@ -213,7 +213,7 @@ object ThemePrefs {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: duvarkağıdı resmi uygulamanın kendi
+     * duvarkağıdı resmi uygulamanın kendi
      * `filesDir`'inde SABİT bir dosya adıyla saklanır (bkz. profil fotoğrafı
      * deseni — `content://` URI'sini DEĞİL, kalıcı izin karmaşasına hiç
      * girmeden ham JPEG baytlarını tutuyoruz). Varlığı dosyanın kendisi

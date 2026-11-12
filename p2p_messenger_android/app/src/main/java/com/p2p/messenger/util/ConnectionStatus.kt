@@ -8,7 +8,7 @@ import com.p2p.messenger.R
 import org.json.JSONObject
 
 /**
- * Spec dışı, kullanıcı isteği: sohbet ekranının üst çubuğunda BU cihazın
+ * sohbet ekranının üst çubuğunda BU cihazın
  * (karşı tarafınki DEĞİL — bkz. ChatActivity `txtToolbarSubtitle`/
  * `hasActiveSession`) genel ağ bağlantı durumunu göstermek için. İki
  * kaynağı birleştirir: Android'in `ConnectivityManager`'ı (gerçekten
@@ -17,7 +17,7 @@ import org.json.JSONObject
  */
 object ConnectionStatus {
 
-    /** Spec dışı, kullanıcı isteği: sadece metin değil, ilk bakışta ayırt
+    /** sadece metin değil, ilk bakışta ayırt
      *  edilebilir bir renkli nokta da göstermek için (bkz.
      *  `util.PulsingStatusDot`) — `describe()`'un metin kararıyla AYNI
      *  karar ağacından türetilir (bkz. `current()`), iki AYRI mantık

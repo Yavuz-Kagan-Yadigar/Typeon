@@ -17,7 +17,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Spec dışı, kullanıcı isteği: uygulamayı açmak için şifre ekranı.
+ * uygulamayı açmak için şifre ekranı.
  *
  * İki modu var ve modu KENDİSİ seçer (çağıran tarafın bilmesi gerekmez,
  * bkz. `AppLock.guard`): henüz hiç şifre kurulmamışsa "oluştur" (iki alan,

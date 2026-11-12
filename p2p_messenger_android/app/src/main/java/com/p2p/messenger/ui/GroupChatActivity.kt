@@ -142,14 +142,14 @@ class GroupChatActivity : AppCompatActivity() {
     private lateinit var imgToolbarAvatar: ImageView
     /** bkz. util.ConnectionStatus — BU cihazın genel bağlantı durumu. */
     private lateinit var txtOwnConnectionStatus: TextView
-    /** Spec dışı, kullanıcı isteği: bu cihazın kendi bağlantı durumu için
+    /** bu cihazın kendi bağlantı durumu için
      *  renkli nokta — bkz. ChatActivity aynı desen, `util.PulsingStatusDot`.
      *  Grup sohbetinde tek bir "karşı taraf" kavramı olmadığından SADECE
      *  bu (kendi durumumuz), ChatActivity'deki `dotPeerStatus`'un karşılığı
      *  YOK (bkz. `layoutToolbarSubtitleRow` gizleme notu). */
     private lateinit var dotOwnStatus: View
     private lateinit var ownStatusDot: PulsingStatusDot
-    /** Spec dışı, kullanıcı isteği: gönderim sırasında düğmenin YERİNE
+    /** gönderim sırasında düğmenin YERİNE
      *  yükleniyor göstergesi + çift dokunuşu engellemek için devre dışı
      *  bırakma — bkz. ChatActivity aynı desen, `sendNewMessage`. */
     /** bkz. ChatActivity `btnSend` aynı notu — bulut logosu maskeli
@@ -215,7 +215,7 @@ class GroupChatActivity : AppCompatActivity() {
     private lateinit var imgTypingAvatar: ImageView
     private lateinit var txtTypingIndicator: TextView
     private val typingHandler = Handler(Looper.getMainLooper())
-    /** fixpass (glm A2): `sendGroupTypingIndicator` / `sendSeenReceipt` JNI
+    /** `sendGroupTypingIndicator` / `sendSeenReceipt` JNI
      *  çağrıları çekirdek kilidinde sıraya durabildiğinden ana iş parçacığında
      *  ÇALIŞMAZ — tek iş parçacıklı sıra (CallActivity'deki `DiscardPolicy`
      *  deseni; kapanış sonrası gönderimler sessizce atılır). */
@@ -231,7 +231,7 @@ class GroupChatActivity : AppCompatActivity() {
     // Scroll-to-bottom FAB (see ChatActivity for the same fields/pattern).
     private lateinit var fabScrollToBottom: FloatingActionButton
 
-    // --- Spec dışı, kullanıcı isteği: basılı tut/kaydet sesli mesaj (grup) —
+    // --- basılı tut/kaydet sesli mesaj (grup) —
     // bkz. ChatActivity AYNI alanlar/desen, tek fark gönderim
     // `prepareAndSendGroupFile` ile TÜM üyelere yapılır.
     private var mediaRecorder: MediaRecorder? = null
@@ -268,7 +268,7 @@ class GroupChatActivity : AppCompatActivity() {
         ActivityResultContracts.RequestPermission()
     ) { /* reddedilse bile devam — kullanıcı düğmeye tekrar basmalı */ }
 
-    // --- Spec dışı, kullanıcı isteği: sesli mesaj çalma (grup) — bkz.
+    // --- sesli mesaj çalma (grup) — bkz.
     // ChatActivity AYNI alanlar/desen (tek paylaşımlı MediaPlayer).
     private var voicePlayer: MediaPlayer? = null
     private var voicePlayingFileId: String? = null
@@ -379,11 +379,11 @@ class GroupChatActivity : AppCompatActivity() {
                 // dışında hiçbir yenileme yolu yoktu.
                 type == "group_updated" && obj.optString("group_id") == groupId ->
                     runOnUiThread { refreshGroupInfo() }
-                // Spec dışı, kullanıcı isteği (sonsuz kaydırma): karşı
+                // karşı
                 // üyeden gelen eski-sayfa yanıtı — bkz. `loadOlderGroupHistory`.
                 type == "older_group_history" && obj.optString("group_id") == groupId ->
                     runOnUiThread { applyOlderGroupHistory(obj) }
-                // Spec dışı, kullanıcı isteği: grup mesajı düzenle/sil —
+                // grup mesajı düzenle/sil —
                 // bkz. Rust receive_message Edit/Delete kolu, `group_id`
                 // ile taşınır (1:1'in aksine, "peer" outer filtreye gerek
                 // yok).
@@ -391,14 +391,14 @@ class GroupChatActivity : AppCompatActivity() {
                     runOnUiThread { adapter.applyEdit(obj.optString("message_id"), obj.optString("text")) }
                 type == "group_delete" && obj.optString("group_id") == groupId ->
                     runOnUiThread { adapter.applyDelete(obj.optString("message_id")) }
-                // Spec dışı, kullanıcı isteği: emoji tepkileri — Rust hazır
+                // emoji tepkileri — Rust hazır
                 // ÖZET dizesi gönderir (bkz. `reactions_summary`).
                 type == "reaction" && obj.optString("group_id") == groupId ->
                     runOnUiThread { adapter.applyReactions(obj.optString("message_id"), obj.optString("reactions")) }
                 // `isNull("group_id")` filters out 1:1 typing events too (they never carry it).
                 type == "typing" && !obj.isNull("group_id") && obj.optString("group_id") == groupId ->
                     runOnUiThread { handleIncomingGroupTyping(obj) }
-                // Spec dışı, kullanıcı isteği (grup ekleri): "file_offer"
+                // "file_offer"
                 // SADECE bu gruba aitse işlenir (`group_id` ile taşınır);
                 // "file_progress"/"file_complete"/"file_failed" `file_id`
                 // GLOBAL olarak benzersiz olduğundan koşulsuz işlenir —
@@ -432,12 +432,12 @@ class GroupChatActivity : AppCompatActivity() {
                 type == "file_failed" -> runOnUiThread {
                     adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.FAILED)
                 }
-                // Defter #16: dosya yerelden silindi — balon "tamamlandı"
+                // dosya yerelden silindi — balon "tamamlandı"
                 // görünmeye devam etmesin, tekrar indirilebilir olsun.
                 type == "file_evicted" -> runOnUiThread {
                     adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.OFFERED)
                 }
-                // Defter #17: bir üye gruptan ayrıldığında Linux önbelleği
+                // bir üye gruptan ayrıldığında Linux önbelleği
                 // tazeliyordu, Android hiçbir şey yapmıyordu — üye listesi
                 // ve alt başlık sekme değiştirilene kadar bayat kalıyordu.
                 // (`group_updated` yukarıda zaten karşılanıyor.)
@@ -451,7 +451,7 @@ class GroupChatActivity : AppCompatActivity() {
                         Toast.makeText(this, getString(R.string.msg_contact_deleted_account, name), Toast.LENGTH_LONG).show()
                         refreshGroupInfo()
                     }
-                // Defter #16: bir `GroupUpdate` imza/versiyon/kurucu
+                // bir `GroupUpdate` imza/versiyon/kurucu
                 // doğrulamasından geçemediğinde Rust bu olayı üretiyordu ama
                 // kimse dinlemiyordu — kullanıcı grubun sessizce
                 // güncellenmediğini hiç öğrenmiyordu.
@@ -517,13 +517,13 @@ class GroupChatActivity : AppCompatActivity() {
         })
         fetchHistoryButton = FetchHistoryButton(findViewById(R.id.btnFetchHistory), recycler, true,
             { groupId }, { localMessages.minOfOrNull { it.orderKey } ?: 0L })
-        // Spec dışı, kullanıcı isteği: grup mesajları için de Düzenle/Sil
+        // grup mesajları için de Düzenle/Sil
         // (+ başarısızsa Yeniden Gönder) — bkz. ChatActivity.showEditDeleteDialog
         // AYNI desen.
         adapter.onItemLongPress = { item -> showGroupEditDeleteDialog(item) }
         selection = MessageSelection(this, adapter, { saveGroupAttachmentToDownloads(it) }) { P2PLib.deleteGroupMessage(groupId, it) }
         adapter.onAttachmentClick = { item -> onGroupAttachmentClicked(item) }
-        // Spec dışı, hata düzeltmesi + kullanıcı isteği: bu ekranda ek
+        // bu ekranda ek
         // balonuna uzun basmak ÖNCEDEN hiç kablolanmamıştı (bkz.
         // ChatActivity.onAttachmentLongClicked AYNI desen — orada var,
         // burada eksikti) — artık "İndirilenler"e kaydet VE "Başka bir
@@ -533,7 +533,7 @@ class GroupChatActivity : AppCompatActivity() {
         adapter.onReplyPreviewClick = { targetMessageId -> scrollToMessage(targetMessageId) }
         stickerPicker.provideBubbleImages(adapter)
         setupSwipeToReply()
-        // Spec dışı, kullanıcı isteği: grup sohbetinde de sesli mesaj kaydı/
+        // grup sohbetinde de sesli mesaj kaydı/
         // oynatımı — bkz. ChatActivity AYNI MediaRecorder/MediaPlayer
         // altyapısı, tek fark gönderimin `prepareAndSendGroupFile` ile TÜM
         // üyelere yapılması (bkz. `sendVoiceMessage`).
@@ -546,7 +546,7 @@ class GroupChatActivity : AppCompatActivity() {
         adapter.onVoiceSpeedClick = { item -> onVoiceSpeedClicked(item) }
         adapter.onVoiceSeek = { item, positionMs -> onVoiceSeeked(item, positionMs) }
 
-        // Spec dışı, kullanıcı isteği (grup ekleri): dosya/foto/video eki
+        // dosya/foto/video eki
         // gönderme — bkz. ChatActivity.onFilePicked AYNI desen.
         findViewById<ImageButton>(R.id.btnAttach).setOnClickListener {
             // bkz. ChatActivity aynı notu — sistem seçicisi dış süreç.
@@ -577,10 +577,10 @@ class GroupChatActivity : AppCompatActivity() {
         // TAMAMI gizlenir (sadece metni gizlemek yetim/etiketsiz bir nokta
         // bırakırdı).
         toolbarTitleView.findViewById<View>(R.id.layoutToolbarSubtitleRow).visibility = View.GONE
-        // Spec dışı: üst çubuğa dokununca grup bilgisi (üye listesi + —
+        // üst çubuğa dokununca grup bilgisi (üye listesi + —
         // SADECE kurucu için — profil fotoğrafı değiştirme) açılır.
         toolbarTitleView.setOnClickListener { showGroupInfoDialog() }
-        // Spec dışı, kullanıcı isteği: avatarın kendisine dokununca (üstteki
+        // avatarın kendisine dokununca (üstteki
         // genel tıklamayı geçersiz kılarak) tam ekran + pinch-to-zoom açar —
         // bkz. AvatarUtil.openFullscreen.
         imgToolbarAvatar.setOnClickListener { AvatarUtil.openFullscreen(this, currentGroupAvatar) }
@@ -596,7 +596,7 @@ class GroupChatActivity : AppCompatActivity() {
         val input = findViewById<EditText>(R.id.edtMessage)
         com.p2p.messenger.util.Quote.attach(input)
         typhoonEffect = findViewById(R.id.typhoonEffect)
-        // Spec dışı, kullanıcı isteği (açıkça yeniden istendi): klavye
+        // klavye
         // açılınca sohbet onun yüksekliğini telafi etsin ve son mesaj
         // görünür kalsın — bkz. util.KeyboardInsets (neden `adjustResize`
         // yetmiyor, orada ölçümle birlikte yazılı).
@@ -776,7 +776,7 @@ class GroupChatActivity : AppCompatActivity() {
                     if (localId != null && viewers.isNotEmpty()) localId to viewers else null
                 } else emptyList()
 
-                // Spec dışı, kullanıcı isteği (grup ekleri): bkz.
+                // bkz.
                 // ChatActivity.loadHistoryIfAvailable AYNI desen — geçmişte
                 // gönderilmiş/alınmış ekler metin mesajlarıyla zaman damgasına
                 // göre ARAYA SERPİŞTİRİLİR.
@@ -920,7 +920,7 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Spec dışı, hata düzeltmesi (kullanıcı: "seen mekanizması ve seen pp
+     * "seen mekanizması ve seen pp
      * bubbles güvenilir değil, özellikle gruplarda"): önceden `seenByPerMessage`
      * SADECE ekran açıkken canlı gelen `handleIncomingSeen` olaylarıyla
      * dolduruluyordu — sohbet kapalıyken/uygulama arka plandayken görülen HER
@@ -972,7 +972,7 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği (sonsuz kaydırma): bkz.
+     * bkz.
      * ChatActivity.loadOlderHistory AYNI desen — grup geçmişinin en
      * üstüne kaydırıldığında ÖNCE yereldeki (ücretsiz) arşivi dener,
      * yetersiz kalırsa ulaşılabilir TÜM diğer üyelere ağ üzerinden istek
@@ -988,7 +988,7 @@ class GroupChatActivity : AppCompatActivity() {
             ?: localMessages.minOf { it.timestamp }
         val beforeAttachment = localMessages.filter { it.attachment != null }.minOfOrNull { it.timestamp } ?: Long.MAX_VALUE
         val gid = groupId
-        // H121: off the main thread (core lock); M115: empty page = end of archive.
+        // off the main thread (core lock); M115: empty page = end of archive.
         lifecycleScope.launch {
             val localOlder = withContext(Dispatchers.IO) {
                 try {
@@ -1106,7 +1106,7 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Spec dışı: üst çubuğa dokununca — üye listesi + (SADECE kurucu için)
+     * üst çubuğa dokununca — üye listesi + (SADECE kurucu için)
      * profil fotoğrafı değiştirme/kaldırma + üye ekleme. Önceden bu bilgi
      * (Gruplar sekmesindeki uzun basma menüsü) ayrı bir yerdeydi — kullanıcı
      * isteği üzerine buraya, üst çubuğa taşındı.
@@ -1124,14 +1124,14 @@ class GroupChatActivity : AppCompatActivity() {
         AvatarUtil.renderInto(imgAvatar, currentGroupAvatar, txtToolbarTitle.text.toString())
         imgAvatar.setOnClickListener { AvatarUtil.openFullscreen(this, currentGroupAvatar) }
         rowAvatarActions.visibility = if (isFounder) View.VISIBLE else View.GONE
-        // Spec dışı, kullanıcı isteği: kurucu için "Üyeleri Yönet" — sadece
+        // kurucu için "Üyeleri Yönet" — sadece
         // üye sayısı değil, bu bölümün artık kaldırma da yaptığını belirtir.
         txtMemberCount.text = if (isFounder) {
             getString(R.string.lbl_manage_members)
         } else {
             resources.getQuantityString(R.plurals.lbl_member_count, memberIdentityIds.size, memberIdentityIds.size)
         }
-        // Spec dışı, kullanıcı isteği: "Üye Ekle" listenin ÜZERİNDE.
+        // "Üye Ekle" listenin ÜZERİNDE.
         btnAddMember.visibility = if (isFounder) View.VISIBLE else View.GONE
 
         val dialog = AlertDialog.Builder(this)
@@ -1140,7 +1140,7 @@ class GroupChatActivity : AppCompatActivity() {
             .setNegativeButton(android.R.string.ok, null)
             .create()
 
-        // Spec dışı, kullanıcı isteği: her üyenin adı + (SADECE kurucu,
+        // her üyenin adı + (SADECE kurucu,
         // kendi satırı HARİÇ) doğrulamalı bir kaldırma düğmesi. Bir üye
         // kaldırıldıktan sonra listeyi YENİDEN ÇİZMEK için yerel fonksiyon
         // (dialog'u kapatıp yeniden açmadan).
@@ -1222,13 +1222,13 @@ class GroupChatActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    /** Spec dışı, kullanıcı isteği: bir üyeyi (kurucu HARİÇ, bkz. çağıran
+    /** bir üyeyi (kurucu HARİÇ, bkz. çağıran
      *  taraf) gruptan çıkarmadan önce onay ister — geri alınamaz (bkz. Rust
      *  `remove_from_group`, imzalı `GroupChange::Remove` tüm üyelere gider).
      *  `onRemoved`, başarılı çıkarma sonrası üye listesini yeniden
      *  çizebilmesi için çağıranın (dialog açıkken) verdiği geri çağırım. */
     /**
-     * Grup yoneticiligini baska bir uyeye devreder (dis inceleme onerisi).
+     * Grup yoneticiligini baska bir uyeye devreder  .
      * Devirden sonra BU cihaz artik grubu yonetemez.
      */
     private fun confirmTransferFounder(identityId: String, displayName: String, onDone: () -> Unit) {
@@ -1238,7 +1238,7 @@ class GroupChatActivity : AppCompatActivity() {
             .setPositiveButton(R.string.action_transfer_founder) { _, _ ->
                 val gid = groupId
                 lifecycleScope.launch {
-                    // H121: signs and fans out to every member; not on the main thread.
+                    // signs and fans out to every member; not on the main thread.
                     val result = withContext(Dispatchers.IO) {
                         try { P2PLib.transferGroupFounder(gid, identityId) } catch (e: Throwable) { "Error: ${e.message}" }
                     }
@@ -1261,7 +1261,7 @@ class GroupChatActivity : AppCompatActivity() {
             .setPositiveButton(R.string.action_remove_member) { _, _ ->
                 val gid = groupId
                 lifecycleScope.launch {
-                    // H121: signed fan-out to every member; not on the main thread.
+                    // signed fan-out to every member; not on the main thread.
                     val ok = withContext(Dispatchers.IO) {
                         try { P2PLib.removeFromGroup(gid, identityId) } catch (e: Throwable) { "Error: ${e.message}" }
                     }
@@ -1494,7 +1494,7 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: başarısız (ERROR) bir grup mesajını
+     * başarısız (ERROR) bir grup mesajını
      * yeniden gönderir — AYNI balonu tutar (bkz.
      * `SimpleChatAdapter.retryMessage`), ikinci bir kopya eklemez. Yeni bir
      * `group_message_local_id` ile yeniden fan-out edilir (bkz.
@@ -1533,7 +1533,7 @@ class GroupChatActivity : AppCompatActivity() {
      *  isteği üzerine grup mesajlarına da Düzenle/Sil eklendi. Ek
      *  balonları için desteklenmiyor (bkz. SimpleChatAdapter uzun basma
      *  guard'ı — `item.attachment == null`), bu yüzden burası SADECE düz
-     *  metin mesajları için tetiklenir. Spec dışı, kullanıcı isteği: alınan
+     *  metin mesajları için tetiklenir. alınan
      *  (kendimize ait olmayan) mesajlar da artık uzun basmaya tepki verir
      *  — onlar için SADECE Kopyala gösterilir, Düzenle/Sil/Yeniden Gönder
      *  sadece kendi mesajlarımızda anlamlı. */
@@ -1585,7 +1585,7 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: tepki pill'ine dokununca "kim ne attı"
+     * tepki pill'ine dokununca "kim ne attı"
      * listesi (WhatsApp deseni).
      *
      * Kimlikler ağdan `identity_id` olarak geliyor; isimler burada, cihazın
@@ -1797,7 +1797,7 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     // ---------------------------------------------------------------
-    // Spec dışı, kullanıcı isteği: grup sohbetinde sesli mesaj kaydı —
+    // grup sohbetinde sesli mesaj kaydı —
     // bkz. ChatActivity AYNI desen (basılı tut/kaydet, sağa kaydır iptal
     // et), tek fark gönderimin `prepareAndSendGroupFile` ile olması.
     // ---------------------------------------------------------------
@@ -1933,7 +1933,7 @@ class GroupChatActivity : AppCompatActivity() {
             // The copy is deleted even if the screen closes while sending.
             // The recorder's MP4 carries the Android version (on many phones
             // maker and model) and creation times: scrubbed like a picked
-            // m4a; a failed scrub cancels the send (fable J-01).
+            // m4a; a failed scrub cancels the send.
             val prepared = try {
                 com.p2p.messenger.util.OutgoingMedia.prepare(file, file.name, "audio/mp4", false) { false }
             } catch (e: Exception) {
@@ -1991,7 +1991,7 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     // ---------------------------------------------------------------
-    // Spec dışı, kullanıcı isteği: grup sohbetinde sesli mesaj oynatma —
+    // grup sohbetinde sesli mesaj oynatma —
     // bkz. ChatActivity AYNI desen (tek paylaşımlı MediaPlayer).
     // ---------------------------------------------------------------
 
@@ -2204,7 +2204,7 @@ class GroupChatActivity : AppCompatActivity() {
                                     previewJpeg = previewJpeg
                                 
                                 ),
-                                // Spec dışı: gönderirken yazılan açıklama hemen görünsün.
+                                // gönderirken yazılan açıklama hemen görünsün.
                                 caption = caption,
                                 replyToMessageId = quote?.id,
                                 replyToPreview = quote?.preview,
@@ -2240,7 +2240,7 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği (grup ekleri): bkz. ChatActivity.onFilePicked
+     * bkz. ChatActivity.onFilePicked
      * AYNI desen — SAF ile seçilen dosya önce önbelleğe kopyalanır, sonra
      * `prepareAndSendGroupFile` ile TÜM üyelere sunulur.
      */
@@ -2315,7 +2315,7 @@ class GroupChatActivity : AppCompatActivity() {
                                     previewJpeg = previewJpeg
                                 
                                 ),
-                                // Spec dışı: gönderirken yazılan açıklama hemen görünsün.
+                                // gönderirken yazılan açıklama hemen görünsün.
                                 caption = caption,
                                 replyToMessageId = quote?.id,
                                 replyToPreview = quote?.preview,
@@ -2583,7 +2583,7 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği (grup ekleri): canlı gelen bir grup
+     * canlı gelen bir grup
      * `FileOffer`'ı — bkz. ChatActivity handleIncomingEvent "file_offer"
      * kolu AYNI mantık, ARTI gönderen adı/avatarı (metin mesajlarıyla AYNI
      * `resolveContactByIdentity` çözümü) ve `peerDeviceFingerprint`
@@ -2596,7 +2596,7 @@ class GroupChatActivity : AppCompatActivity() {
         val previewHex = obj.optString("preview_hex", "")
         val previewJpeg = if (previewHex.isNotEmpty() && previewHex != "null") hexToBytes(previewHex) else null
         val durationMs = obj.optInt("duration_ms", -1).let { if (it < 0) null else it }
-        // Spec dışı, kullanıcı isteği: ekle gelen açıklama + yanıt bağlamı.
+        // ekle gelen açıklama + yanıt bağlamı.
         val attachmentCaption = obj.optString("caption", "")
         val attachmentReplyId = if (obj.isNull("reply_to_message_id")) null else obj.optString("reply_to_message_id").ifEmpty { null }
         val attachmentReplyPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null }
@@ -2620,7 +2620,7 @@ class GroupChatActivity : AppCompatActivity() {
                     peerDeviceFingerprint = obj.optString("peer"),
                     isSticker = obj.optBoolean("sticker", false)
                 ),
-                // Spec dışı, kullanıcı isteği: ek + açıklama + yanıt.
+                // ek + açıklama + yanıt.
                 caption = attachmentCaption,
                 replyToMessageId = attachmentReplyId,
                 replyToPreview = attachmentReplyPreview,
@@ -2719,7 +2719,7 @@ class GroupChatActivity : AppCompatActivity() {
         val sender = resolveContactByIdentity(senderIdentityId)
         val senderName = sender?.displayName ?: senderIdentityId.take(8)
         val messageId = obj.optString("message_id")
-        // Spec dışı, hata düzeltmesi: bu balonun `Item.messageId`'si ARTIK
+        // bu balonun `Item.messageId`'si ARTIK
         // per-paket `message_id` DEĞİL, `group_message_local_id` — kendi
         // gönderdiğimiz grup mesajlarıyla (bkz. `sendNewMessage` "KENDİ
         // balonumuzun messageId'si" notu) VE geçmişten yüklenen satırlarla
@@ -2761,7 +2761,7 @@ class GroupChatActivity : AppCompatActivity() {
         )
         maybePlayTyphoonEffect()
         onNewIncomingItemAdded()
-        // Spec dışı, kullanıcı isteği: "görüldü" — ekran açıkken gelen
+        // "görüldü" — ekran açıkken gelen
         // canlı grup mesajı için otomatik gönderilir (bkz. ChatActivity
         // 1:1 karşılığı AYNI gerekçe). `peer`, bu kopyanın geldiği 1:1
         // kanalın (göndericinin) fingerprint'i.
@@ -2899,7 +2899,7 @@ class GroupChatActivity : AppCompatActivity() {
     private fun sendTypingState(isTyping: Boolean) {
         if (isTypingSent == isTyping) return
         isTypingSent = isTyping
-        // fixpass (glm A2): bkz. `netPack` (dosya başı).
+        // bkz. `netPack` (dosya başı).
         val gid = groupId
         netPack.execute {
             try {
@@ -2955,7 +2955,7 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     private fun scrollToLastSettled() {
-        // Spec dışı, hata düzeltmesi (kullanıcı: "en alttaysak yeni
+        // "en alttaysak yeni
         // mesajla otomatik aşağı kaysın"): `scrollToPosition` DOĞRUDAN
         // çağrılınca güvenilmez — yeni eklenen satır o anda henüz
         // ölçülmemiş oluyor ve kaydırma ya hiç olmuyor ya da eksik
@@ -3135,14 +3135,14 @@ class GroupChatActivity : AppCompatActivity() {
         val wasBackgrounded = backgrounded
         backgrounded = false
         if (wasBackgrounded) promptRecordingDecision()
-        // Spec dışı, kullanıcı isteği: bu grup sohbeti açıldığında ona ait
+        // bu grup sohbeti açıldığında ona ait
         // bekleyen bildirim varsa temizlensin.
         // A locked app resumes this screen for a moment under the password
         // prompt: nothing was read, so no notification is cleared and no
         // "read up to now" goes out (see onPause too).
         resumedUnlocked = com.p2p.messenger.util.AppLock.isUnlocked()
         if (resumedUnlocked) com.p2p.messenger.util.NotificationHelper.clearForGroup(this, groupId)
-        // Spec dışı, kullanıcı isteği: Ayarlar'dan duvarkağıdı/renk
+        // Ayarlar'dan duvarkağıdı/renk
         // değiştirilip bu ekrana geri dönüldüğünde HEMEN yansısın.
         com.p2p.messenger.util.ThemePrefs.applyChatBackground(this)
         // The conversation id FIRST: a message that lands between the
@@ -3166,7 +3166,7 @@ class GroupChatActivity : AppCompatActivity() {
     private val groupReadWatermarkRunnable = Runnable {
         syncGroupReadStateAsync()
     }
-    // H121: the core lock is not taken on the main thread.
+    // the core lock is not taken on the main thread.
     private fun syncGroupReadStateAsync() {
         val gid = groupId
         val now = System.currentTimeMillis()

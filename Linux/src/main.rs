@@ -127,7 +127,7 @@ fn activate(application: &adw::Application) {
     // Keyring. With neither available there is no safe place to put that key,
     // so Typeon says so and stops rather than quietly degrading to a file
     // anyone running as this user could read.
-    // H134: the probe can block for many seconds on a locked wallet, so it
+    // the probe can block for many seconds on a locked wallet, so it
     // runs off the GTK thread; `hold` keeps the app alive until the window
     // exists, and STARTING stops a second `activate` building a second stack.
     static STARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -135,7 +135,7 @@ fn activate(application: &adw::Application) {
         return;
     }
     let hold = application.hold();
-    // H134: a window has to exist while the probe blocks — that wait is
+    // a window has to exist while the probe blocks — that wait is
     // exactly when the user is staring at the launcher. A bare spinner
     // splash is enough; the real boot (below, in the probe's completion
     // handler) replaces it.

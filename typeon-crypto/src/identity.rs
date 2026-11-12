@@ -1,12 +1,12 @@
-//! Identity/Device model — Description.md bölüm 1.
+//! Identity and device model.
 //!
-//! İki katmanlı kimlik: Identity (kişi) → 1..N Device (cihaz).
-//! `identity_id`, ilk cihazın fingerprint'i olarak sabitlenir ve değişmez.
+//! Two layers: an identity (a person) and one or more devices.
+//! `identity_id` is the fingerprint of the first device and never changes.
 
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
-/// Bir Identity'ye bağlı en fazla kaç Active cihaz olabilir (spec bölüm 1).
+/// Maximum number of active devices per identity.
 pub const MAX_ACTIVE_DEVICES: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,7 +17,7 @@ pub enum DeviceStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceInfo {
-    pub device_fingerprint: String, // hex-encoded 32 byte fingerprint
+    pub device_fingerprint: String,  // hex-encoded 32-byte fingerprint
     pub device_name: String,
     pub added_at: u64,
     pub status: DeviceStatus,
@@ -25,30 +25,27 @@ pub struct DeviceInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Identity {
-    /// İlk cihazın fingerprint'i, DEĞİŞMEZ (spec 1.).
+    /// Fingerprint of the first device. Fixed.
     pub identity_id: String,
     pub devices: Vec<DeviceInfo>,
-    /// Cihaz ekleme/çıkarma yetkisine sahip cihaz (spec 1.6 — herhangi bir
-    /// Active cihaz aslında bu yetkiye sahip, `primary_device` sadece
-    /// gösterim amaçlı ilk kurulan cihazı işaretler).
+    /// Device allowed to add and remove devices. Any active device has this
+    /// right; `primary_device` only marks the first device set up.
     pub primary_device: Option<String>,
 }
 
-/// Public key lengths of a device: Ed25519, ML-DSA-87, X25519, ML-KEM-1024.
+/// Public key sizes: Ed25519, ML-DSA-87, X25519, ML-KEM-1024.
 pub const DEVICE_KEY_LENS: [usize; 4] = [32, 2592, 32, 1568];
 
-/// Bir cihazın hibrit imza + KEM public key'lerinden fingerprint türetir.
-/// `fingerprint = SHA3-256( sign_ed25519 || sign_mldsa || kem_x25519 || kem_mlkem )`
-/// (spec 1.2). Ham fingerprint 32 byte, hex olarak döner; gösterim
-/// formatları için `format_fingerprint_base32` / `format_short_code`
-/// kullanılır.
+/// Derives a device fingerprint from its hybrid signing and KEM public keys:
+/// `SHA3-256(sign_ed25519 || sign_mldsa || kem_x25519 || kem_mlkem)`.
+/// Returns 32 bytes as hex. Use `format_fingerprint_base32` or
+/// `format_short_code` for display.
 ///
-/// The concatenation has no length prefixes (and cannot get them: every
-/// existing fingerprint and identity id would change). It is unambiguous only
-/// for keys of the right lengths, so any other input is hashed in a second,
-/// length-prefixed form whose outer hash input is never as long as a real
-/// one. A key set with the same bytes split at other boundaries therefore
-/// never has a real device's fingerprint, at every caller that compares.
+/// The concatenation has no length prefixes, and adding them would change
+/// every existing fingerprint and identity id. It is unambiguous only for keys
+/// of the right lengths. Any other input is hashed in a second, length-prefixed
+/// form, so a key set whose bytes are split at other boundaries never matches
+/// a real device's fingerprint.
 pub fn compute_fingerprint(
     sign_pubkey_ed25519: &[u8],
     sign_pubkey_mldsa: &[u8],
@@ -69,10 +66,9 @@ pub fn compute_fingerprint(
     Sha3_256::new().chain_update(b"p2pmsg-not-a-device-key-set").chain_update(inner).finalize().to_vec()
 }
 
-/// Do these four public keys make the device `fingerprint_hex` names? The one
-/// check every record that carries a device's keys goes through (see the
-/// `keys_match_fingerprint` methods in `packet`): the lengths are right and
-/// the keys hash to the fingerprint.
+/// Checks that four public keys match the device fingerprint they claim. Every
+/// record that carries a device's keys goes through this check (see
+/// `keys_match_fingerprint` in `packet`).
 pub fn keys_match_fingerprint(
     fingerprint_hex: &str,
     sign_pubkey_ed25519: &[u8],
@@ -85,8 +81,8 @@ pub fn keys_match_fingerprint(
         && hex::encode(compute_fingerprint(sign_pubkey_ed25519, sign_pubkey_mldsa, kem_pubkey_x25519, kem_pubkey_mlkem)) == fingerprint_hex
 }
 
-/// Kullanıcıya gösterilen biçim (spec 1.2): Base32, 5'li gruplar, büyük
-/// harf. Örnek: `XJ4K2-9QWRT-7YHBM-3ZPLC-VN8DF...` (~52 karakter, 8 grup).
+/// Display form: Base32 in groups of five, uppercase, e.g.
+/// `XJ4K2-9QWRT-7YHBM-3ZPLC-VN8DF...` (about 52 characters, 8 groups).
 pub fn format_fingerprint_base32(raw: &[u8]) -> String {
     let encoded = base32::encode(base32::Alphabet::Rfc4648 { padding: false }, raw);
     let upper = encoded.to_uppercase();
@@ -98,14 +94,13 @@ pub fn format_fingerprint_base32(raw: &[u8]) -> String {
         .join("-")
 }
 
-/// Kısa doğrulama kodu (spec 1.2): fingerprint'in ilk 16 baytı, 2 baytlık 8
-/// grup, her biri 5 haneli ondalık (00000-65535). The full fingerprint is
-/// `format_fingerprint_base32`.
+/// Short verification code: the first 16 bytes of the fingerprint as eight
+/// groups of two bytes, each shown as a five-digit decimal (00000-65535).
+/// The full fingerprint is `format_fingerprint_base32`.
 ///
-/// 16 bytes = 128 bits, 8 groups. Do NOT shorten it: the old 8-byte code
-/// (64 bits) let a key set matching a victim's code be found in about 2^64
-/// cheap trials (only the X25519 key has to vary), divided by the number of
-/// targets. An input under 16 bytes gives "" (no code) rather than a weaker one.
+/// 128 bits. Do not shorten it: a 64-bit code could be matched by about 2^64
+/// cheap key trials, since only the X25519 key has to vary. Inputs shorter than
+/// 16 bytes return "" rather than a weaker code.
 pub fn format_short_code(raw: &[u8]) -> String {
     if raw.len() < 16 {
         return String::new();
@@ -117,9 +112,8 @@ pub fn format_short_code(raw: &[u8]) -> String {
         .join(" ")
 }
 
-/// `identity_id` de aynı Base32 formatında gösterilir (spec 1.2, "Identity
-/// kodu" / kişi kodu). `identity_id` zaten hex string olarak saklandığı
-/// için burada ham bayta çevrilip yeniden formatlanır.
+/// Shows `identity_id` in the same Base32 format. The id is stored as hex, so
+/// it is converted back to bytes first.
 pub fn format_identity_code(identity_id_hex: &str) -> Result<String, String> {
     let raw = hex::decode(identity_id_hex).map_err(|_| "Bad identity_id hex")?;
     Ok(format_fingerprint_base32(&raw))
@@ -148,8 +142,8 @@ mod tests {
         assert_eq!(format_short_code(&raw[..15]), "", "a short input gives no code, not a weaker one");
     }
 
-    /// Finding 15: the same bytes split at other key boundaries must not
-    /// give the fingerprint of the real key set.
+    /// The same bytes split at other key boundaries must not produce the
+    /// fingerprint of the real key set.
     #[test]
     fn fingerprint_depends_on_the_key_boundaries() {
         let bytes: Vec<u8> = (0..DEVICE_KEY_LENS.iter().sum::<usize>()).map(|i| (i % 251) as u8).collect();

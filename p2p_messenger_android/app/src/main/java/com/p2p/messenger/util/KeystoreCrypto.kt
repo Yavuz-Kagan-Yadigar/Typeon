@@ -67,7 +67,7 @@ object KeystoreCrypto {
     @Synchronized
     private fun getOrCreateKey(alias: String): SecretKey {
         (keyStore.getKey(alias, null) as? SecretKey)?.let { return it }
-        // M143: an existing alias that is unusable must not be silently replaced
+        // an existing alias that is unusable must not be silently replaced
         // (everything wrapped under it would become unreadable).
         if (keyStore.containsAlias(alias)) throw java.security.GeneralSecurityException("keystore key unusable: $alias")
 
@@ -173,7 +173,7 @@ object KeystoreCrypto {
 /** Geçici dosyaya yaz + `rename`: şifreli anahtar dosyaları yazılırken
  *  çökme/güç kesintisi yarım (açılamaz) bir dosya bırakmasın. */
 fun java.io.File.writeBytesAtomic(bytes: ByteArray) {
-    // L-88: unique tmp per call, two writers never share one.
+    // unique tmp per call, two writers never share one.
     val tmp = java.io.File(parentFile, "$name.${System.nanoTime()}.tmp")
     try {
         java.io.FileOutputStream(tmp).use { out ->
@@ -181,7 +181,7 @@ fun java.io.File.writeBytesAtomic(bytes: ByteArray) {
             out.fd.sync()
         }
         if (!tmp.renameTo(this)) throw java.io.IOException("rename failed: $tmp")
-        // H47: the rename is on disk only once the directory is synced.
+        // the rename is on disk only once the directory is synced.
         try {
             val dir = android.system.Os.open(parentFile!!.path, android.system.OsConstants.O_RDONLY, 0)
             try { android.system.Os.fsync(dir) } finally { android.system.Os.close(dir) }

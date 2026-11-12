@@ -45,15 +45,15 @@ class ChatAdapter(
         /** Bu kişinin/grubun profil fotoğrafı (720p/%85 JPEG), yoksa
          *  `null` (baş harf rozeti gösterilir). */
         val avatarJpeg: ByteArray? = null,
-        /** Spec dışı: Gruplar sekmesi kaldırıldı, gruplar bu listeye
+        /** Gruplar sekmesi kaldırıldı, gruplar bu listeye
          *  karıştırıldı (bkz. kullanıcı isteği) — `true` ise `contactId`
          *  aslında bir `group_id`'dir, tıklama `GroupChatActivity` açmalı. */
         val isGroup: Boolean = false,
-        /** Spec dışı, kullanıcı kararı: bu kişi yüz yüze QR ile DEĞİL, bir
+        /** bu kişi yüz yüze QR ile DEĞİL, bir
          *  grup üzerinden kurucu kefaletiyle eklendiyse `true` — satırda
          *  uyarı işareti gösterilir (bkz. Rust `Contact.added_via_group`). */
         val addedViaGroup: Boolean = false,
-        /** Spec dışı, kullanıcı isteği: `isGroup` satırlarında, bu grubun
+        /** `isGroup` satırlarında, bu grubun
          *  kurucusu BİZ miyiz — uzun basma menüsünde "grubu herkes için
          *  sil" seçeneği yalnızca kurucuya gösterilir. */
         val isGroupFounder: Boolean = false,
@@ -72,7 +72,7 @@ class ChatAdapter(
                 isPinned == other.isPinned &&
                 realContactId == other.realContactId && identityId == other.identityId &&
                 isGroup == other.isGroup &&
-                // Spec dışı, güvenlik/kararlılık denetimi düzeltmesi: bu
+                // bu
                 // ikisi önceden eksikti — `DiffUtil.ItemCallback.areContentsTheSame`
                 // bu `equals`'ı kullandığından, GÜVENLİKLE İLGİLİ "⚠
                 // doğrulanmadı" rozetini süren `addedViaGroup` (bkz. `bind`
@@ -121,7 +121,7 @@ class ChatAdapter(
         private val txtTimestamp: TextView = itemView.findViewById(R.id.txtTimestamp)
         private val imgAvatar: ImageView = itemView.findViewById(R.id.imgAvatar)
 
-        /** L-92: only the relative time label (no avatar decode, no rebind). */
+        /** only the relative time label (no avatar decode, no rebind). */
         fun bindTime(message: ChatMessage) {
             txtTimestamp.text = if (message.timestamp > 0) formatTimestamp(message.timestamp) else ""
         }

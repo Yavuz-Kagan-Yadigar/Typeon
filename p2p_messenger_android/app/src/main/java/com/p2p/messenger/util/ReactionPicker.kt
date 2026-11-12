@@ -11,7 +11,7 @@ import androidx.appcompat.app.AlertDialog
 import com.p2p.messenger.R
 
 /**
- * Spec dışı, kullanıcı isteği: "mesajlara uzun basarak emoji bırakabilmeliyiz
+ * "mesajlara uzun basarak emoji bırakabilmeliyiz
  * WhatsApp'taki gibi" → sonra: "react kısmında TAM SİSTEM emoji seçici ile
  * açılsın."
  *

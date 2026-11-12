@@ -166,7 +166,7 @@ impl P2PCore {
     /// Seen within `STALE_PEER_RETRY_HORIZON_MS` (or never stamped: 0), or
     /// connected right now: a device that is connected is not stale, and
     /// two devices that both wrote each other off never sent the packet
-    /// that would stamp them again (fable D-01).
+    /// that would stamp them again.
     pub(crate) fn device_recently_seen(&self, fp: &str) -> bool {
         self.known_remote_devices.get(fp).map_or(true, |d| {
             d.last_seen == 0 || current_time_ms().saturating_sub(d.last_seen) < STALE_PEER_RETRY_HORIZON_MS
@@ -205,7 +205,7 @@ impl P2PCore {
     /// IdentityExchange) was also a valid DeviceRevoke of that secondary:
     /// any contact could send it back and wipe the device.
     ///
-    /// L-36 (2026-10-21): domain tag + length-framed fields (NUL joins were
+    /// domain tag + length-framed fields (NUL joins were
     /// ambiguous). Every DeviceAdd/DeviceRevoke signed before this no longer
     /// verifies: devices must be re-linked.
     pub(crate) fn device_auth_signing_bytes(identity_id: &str, subject_fp: &str, actor_fp: &str, revoke: bool) -> Vec<u8> {
@@ -380,7 +380,7 @@ impl P2PCore {
         }
         let my_id = self.my_identity_id().ok_or("Önce bir kimlik oluşturun")?;
         let own_fp = self.get_active_own_device_fingerprint()?;
-        // Before any side effect (fable D-09): on a secondary the link can
+        // Before any side effect: on a secondary the link can
         // never complete (`sign_device_add` refuses), and both devices waited
         // an hour with no error shown.
         if own_fp != my_id {
@@ -449,7 +449,7 @@ impl P2PCore {
             kem_pubkey_x25519: rec.kem_pubkey_x25519.clone(),
             kem_pubkey_mlkem: rec.kem_pubkey_mlkem.clone(),
             is_active: rec.is_active,
-            // M-28: onion only — never republish a clearnet/UPnP address.
+            // onion only — never republish a clearnet/UPnP address.
             last_addr: self.device_onion_addr.get(&rec.device_fingerprint).cloned(),
             // Only `synced_for_sibling` fills it: this record also travels
             // unsealed (`IdentityExchange.device_add_signer`) and to contacts.
@@ -727,7 +727,7 @@ impl P2PCore {
             }
             if let Some(contact) = self.contacts.get(&cid) { self.persist_contact(contact); }
         } else if my_id.as_deref() != Some(revoke.identity_id.as_str()) {
-            // L-22: no contact to hold the tombstone (a group member): its old
+            // no contact to hold the tombstone (a group member): its old
             // DeviceAdd must not bring the device back either.
             // ponytail: one app_meta row per such revoke, never pruned; each
             // is signed by the identity, so only group members can add them.

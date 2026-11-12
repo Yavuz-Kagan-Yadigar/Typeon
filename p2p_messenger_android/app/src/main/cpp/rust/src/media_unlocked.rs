@@ -308,7 +308,7 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
     // A JPEG XL ("hi-res" image) is handed out as PNG: no viewer of ours
     // reads JPEG XL. Lossless both ways.
     let jxl = decrypted_path.extension().map_or(false, |e| e.eq_ignore_ascii_case("jxl"));
-    // H26: an animated one as GIF instead.
+    // an animated one as GIF instead.
     // Named by content hash: identical animations share one conversion.
     let gif_path = decrypted_path.with_file_name(format!("anim-{sha256_hex}.gif"));
     if jxl && gif_path.exists() {
@@ -381,7 +381,7 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
     Ok(plain_path.to_string_lossy().to_string())
 }
 
-/// fable F-10: the decrypt ran without the lock. When the attachment was
+/// the decrypt ran without the lock. When the attachment was
 /// deleted (or evicted) meanwhile, the plaintext just written goes too, or
 /// it stayed in `plain_cache` with no row to remove it.
 fn attachment_gone(file_id: &str, written: &std::path::Path) -> bool {

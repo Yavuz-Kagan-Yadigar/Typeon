@@ -8,7 +8,7 @@ import java.io.File
 import java.io.InputStream
 
 /**
- * Spec dışı: görsel küçültme/sıkıştırma — hem sohbet eki önizlemeleri
+ * görsel küçültme/sıkıştırma — hem sohbet eki önizlemeleri
  * (480p/%85, bkz. ChatActivity) hem de profil fotoğrafları (720p/%85, bkz.
  * SettingsFragment) AYNI mantığı kullanır, sadece hedef boyut farklı.
  * Önceden bu mantık ChatActivity içinde private/tek kullanım yerine özeldi

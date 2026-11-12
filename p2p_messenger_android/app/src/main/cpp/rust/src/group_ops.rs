@@ -127,7 +127,7 @@ impl P2PCore {
             &group.group_id, new_version, change, &group.name, &members_after, &vouched,
             &self.vouch_proofs(&vouched), &own_identity_id, &own_fp, own_keys, &group.founder_chain,
         )?;
-        // H6: every member device carries ~4 KB of keys (+ a proof). Past the
+        // every member device carries ~4 KB of keys (+ a proof). Past the
         // 1 MiB envelope cap the update failed `MessageTooLarge` per member,
         // after the founder had applied it: refuse it here instead. 64 KiB
         // for the packet around it (header, hybrid signatures, encryption).
@@ -139,7 +139,7 @@ impl P2PCore {
         if !full {
             self.meta_put(&sent_key, &serde_json::to_string(&sent_map).unwrap_or_default());
         }
-        // H78: what this device applies now, for the same-version tie-break.
+        // what this device applies now, for the same-version tie-break.
         self.set_group_tie(&group.group_id, &group_tie_hash(&update)?);
         Ok(update)
     }
@@ -156,7 +156,7 @@ impl P2PCore {
         if group.version == 0 {
             return Err("Grup henüz yayınlanmadı".to_string());
         }
-        // "No avatar" is state too (fable E-11): a Rename left a member that
+        // "No avatar" is state too: a Rename left a member that
         // missed `AvatarUpdate(None)` with the old picture.
         let change = GroupChange::AvatarUpdate(group.avatar_jpeg.clone());
         let members = group.member_identity_ids();
@@ -172,7 +172,7 @@ impl P2PCore {
         Ok(update)
     }
 
-    /// #81 (H103): the founder signs the current group state again and sends
+    /// #81: the founder signs the current group state again and sends
     /// it to every member device (and to its own other devices).
     pub(crate) fn resend_group_to_all(&mut self, group_id: &str) -> Result<(), String> {
         let own_identity_id = self.my_identity_id().ok_or("No identity")?;
@@ -188,7 +188,7 @@ impl P2PCore {
         Ok(())
     }
 
-    /// H78: a founder's other devices get each update it signs, so they
+    /// a founder's other devices get each update it signs, so they
     /// never sign the same version themselves (they apply it like a member).
     pub(crate) fn send_group_update_to_siblings(&mut self, update: &GroupUpdate) {
         let content = MessageContent::GroupUpdate(update.clone());
@@ -199,7 +199,7 @@ impl P2PCore {
         }
     }
 
-    /// H78: hash of the update this device applied at the group's current
+    /// hash of the update this device applied at the group's current
     /// version (`gvh:` in app_meta).
     pub(crate) fn group_tie(&self, group_id: &str) -> Vec<u8> {
         self.meta_str(&format!("gvh:{}", group_id)).and_then(|v| hex::decode(v).ok()).unwrap_or_default()
@@ -267,7 +267,7 @@ impl P2PCore {
         }
 
         // Tüm üyelere (yeni eklenen dahil) pairwise gönder (spec 5.2).
-        // Spec dışı, güvenlik denetimi düzeltmesi: önceden bare/şifrelenmemiş
+        // önceden bare/şifrelenmemiş
         // bir NetworkEnvelope::GroupUpdate olarak gönderiliyordu (sadece
         // Ed25519 imzalı, gossipsub'a AÇIK METİN yayılıyordu) — artık diğer
         // her şeyle AYNI hibrit ratchet-şifreli kanaldan gidiyor (bkz.
@@ -357,7 +357,7 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Spec dışı: grup profil fotoğrafını ayarlar/kaldırır. `invite_to_group`/
+    /// grup profil fotoğrafını ayarlar/kaldırır. `invite_to_group`/
     /// `remove_from_group` ile AYNI imzalı `GroupUpdate` mekanizmasını
     /// kullanır (`GroupChange::AvatarUpdate`) — "sadece kurucu değiştirebilir"
     /// kısıtı zaten `validate_group_update`'in `NotFounder` kontrolünden
@@ -400,7 +400,7 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Spec dışı, kullanıcı isteği: grubu TÜM üyeler için siler. Yalnızca
+    /// grubu TÜM üyeler için siler. Yalnızca
     /// kurucu çağırabilir (aynı `validate_group_update` yetki kuralı karşı
     /// tarafta da uygulanır). İmzalı `GroupChange::Delete` güncellemesi tüm
     /// üyelere gönderilir, sonra grup yerelde kaldırılır.
@@ -471,7 +471,7 @@ impl P2PCore {
         }
         let update = self.sign_group_change(&group, &GroupChange::Delete)?;
 
-        // Spec dışı, hata düzeltmesi (kullanıcı raporu: "silinen grup tüm
+        // "silinen grup tüm
         // üyeler için silinmiyor"): önceden burada kendi basit döngüsü
         // vardı — bir üyenin aktif cihazı o anda çözülemiyorsa (ör.
         // çevrimdışıydı) bildirimi SESSİZCE kaybediyordu, `invite_to_group`/
@@ -509,14 +509,14 @@ impl P2PCore {
                 params![group_id, version, founder],
             );
         }
-        // Owner decision (fable E-02): a group deleted for everyone or one we
+        // Owner decision: a group deleted for everyone or one we
         // were removed from leaves no messages or files here. A voluntary
         // leave keeps them.
         let _ = self.clear_group_history(group_id);
         Ok(())
     }
 
-    /// Spec dışı, kullanıcı isteği: bir üyenin (kurucu HARİÇ — kurucu için
+    /// bir üyenin (kurucu HARİÇ — kurucu için
     /// "ayrılma" tanımsız, o SADECE `delete_group` ile TÜM üyeler için
     /// silebilir) gruptan kendi isteğiyle ayrılması. Sadece kurucunun
     /// üyelik değiştirebildiği yetki modeli (bkz. `validate_group_update`)
@@ -573,7 +573,7 @@ impl P2PCore {
     /// `process_group_update` Delete kolu).
     pub(crate) fn remove_group_locally(&mut self, group_id: &str) {
         let (version, founder) = self.groups.get(group_id).map_or((0, String::new()), |g| (g.version, g.founder_identity_id.clone()));
-        // One transaction (fable E-12): a kill between the two left the group
+        // One transaction: a kill between the two left the group
         // gone but not marked removed, and an old founder-signed update that
         // names us re-created it. On failure the group stays, in memory too.
         if let Some(conn) = &self.db {
@@ -721,7 +721,7 @@ impl P2PCore {
         let queue = self.pending_group_messages.entry(key).or_default();
         queue.push(content.clone());
         self.persist_pending_group_message(group_id, member_identity_id, content);
-        // Defter #26: burası eskiden `false` dönüyordu ve çağıranlar
+        // burası eskiden `false` dönüyordu ve çağıranlar
         // (`send_group_message`/`edit_group_message`/`delete_group_message`)
         // bunu "ulaşılabilir grup üyesi yok" HATASI sayıp arayüze hata
         // gösteriyordu — oysa içerik hem bellekte hem DİSKTE kuyruğa alındı
@@ -731,7 +731,7 @@ impl P2PCore {
         true
     }
 
-    /// H8: a device of a member refused a group packet (no session yet, ...)
+    /// a device of a member refused a group packet (no session yet, ...)
     /// while another device took it, so the member-level queue never sees it.
     /// A durable row of its own (fresh packet id) is sent again by
     /// `load_pending_durable_retries_from_db` (start, or the device seen again).
@@ -834,7 +834,7 @@ impl P2PCore {
         if !self.pending_group_messages.is_empty() {
             let keys: Vec<(String, String)> = self.pending_group_messages.keys().cloned().collect();
             for (group_id, member_identity_id) in keys {
-                // Spec dışı (dış AI incelemesi düzeltmesi — AI1-4): kuyruğu
+                // Spec dışı  : kuyruğu
                 // boşaltmadan ÖNCE üyenin HÂLÂ grupta olduğunu doğrula. Bir
                 // üye, mesajlar onun (o an çözülemeyen) cihazı için beklerken
                 // gruptan çıkarılmış/ayrılmış olabilir; cihazı sonradan
@@ -893,7 +893,6 @@ impl P2PCore {
                 }
                 // Nothing went out: the stored rows are still right. Rewriting
                 // them every sweep wrote ~2 MB per stuck member each 20 s
-                // (fable E-03).
                 if unsent.len() == total {
                     self.pending_group_messages.insert((group_id.clone(), member_identity_id.clone()), unsent);
                     continue;
@@ -1024,7 +1023,7 @@ impl P2PCore {
         }
     }
 
-    /// H2: rows of a group we do not hold are never shown nor cleaned, and
+    /// rows of a group we do not hold are never shown nor cleaned, and
     /// any contact can mint ids. An id that already has rows is taken; a new
     /// one only while fewer than 16 such groups exist.
     /// ponytail: one COUNT over messages per message of an unknown group;
@@ -1086,7 +1085,7 @@ impl P2PCore {
             })
         };
 
-        // Spec dışı düzeltme: önceden burada boş isimle ("") bir grup
+        // önceden burada boş isimle ("") bir grup
         // oluşturuluyordu — `GroupUpdate` artık her zaman güncel
         // `group_name`'i taşıdığı için (bkz. packet.rs notu), ilk kez
         // görülen bir grup da doğru adla oluşturulabiliyor.
@@ -1116,7 +1115,7 @@ impl P2PCore {
         // olarak `NotFounder` reddini önlemek için var. Zincirdeki her
         // girdi kendi imzasını taşıdığından bu, yetkiyi gevşetmiyor: uydurma
         // bir zincir doğrulamadan geçemez.
-        // fable E-01: for a group we left, the stored founder already holds
+        // for a group we left, the stored founder already holds
         // every transfer up to the version we left at; an older carried
         // transfer is a replay.
         let min_floor = removed.as_ref().map_or(0, |(v, _)| *v);
@@ -1131,7 +1130,7 @@ impl P2PCore {
             group_ref.founder_identity_id = last.to_identity.clone();
         }
 
-        // H78: two founder devices can sign the same version. At the version
+        // two founder devices can sign the same version. At the version
         // we hold, an update is taken again if it is a Delete, re-states the
         // same members and name (a resend, a full copy), or its tie hash is
         // larger than that of the update we applied: every member ends on the
@@ -1156,7 +1155,7 @@ impl P2PCore {
             check.version -= 1;
         }
         // The jump limit means something only against a version we hold
-        // (fable E-04): past 4096 a group could take no new member. A group
+        //past 4096 a group could take no new member. A group
         // we left keeps its own guard below (`removed`).
         if !group_exists {
             check.version = update.new_version.saturating_sub(1);
@@ -1203,7 +1202,7 @@ impl P2PCore {
                 }
                 // A late Add of a current member: it was removed and added
                 // again while we missed the removal; its join time restarts
-                // or it was handed the history of its absence (fable E-08).
+                // or it was handed the history of its absence.
                 if let GroupChange::Add(id) = &update.change {
                     let now = current_time_ms();
                     let mut changed = false;
@@ -1237,11 +1236,11 @@ impl P2PCore {
             );
         }
 
-        // Spec dışı, kullanıcı isteği: kurucu grubu TÜM üyeler için sildi —
+        // kurucu grubu TÜM üyeler için sildi —
         // yerel kaydı kaldır ve çık (aşağıdaki alan güncelleme yolu
         // uygulanmaz). Yetki zaten yukarıda `validate_group_update` ile
         // doğrulandı (yalnızca kurucu).
-        // A Delete for a group not held here (fable E-10): no row for an id
+        // A Delete for a group not held here: no row for an id
         // never held (any contact could add rows for ids bound to itself),
         // and for one we left only its version moves; its founder stays.
         if matches!(update.change, GroupChange::Delete) && !group_exists {
@@ -1282,7 +1281,7 @@ impl P2PCore {
             // yapıyorsa oluşturulur. `members` boş olan (eski sürüm)
             // göndericilerde tek dayanak `Add(biz)` olur.
             //
-            // H7: the caller acks this Err. A group we are really in but lost
+            // the caller acks this Err. A group we are really in but lost
             // locally is not refused here: every update carries `members`,
             // which names us.
             let me = self.identity.as_ref().map(|i| i.identity_id.clone()).unwrap_or_default();
@@ -1339,7 +1338,7 @@ impl P2PCore {
             // Her güncellemede ismi senkron tut (self-healing) — sadece
             // açık bir Rename değişikliğinde değil.
             g.name = update.group_name.clone();
-            // Spec dışı, hata düzeltmesi (üçüncü üye hatası): kurucudan gelen
+            // kurucudan gelen
             // TAM üyelik listesine eşitle — bkz. `GroupUpdate.members`. Bu
             // olmadan, sonradan eklenen bir üye kendisinden ÖNCE eklenmiş
             // üyeleri hiç öğrenemiyordu (grubu [kurucu, ben] sanıyordu).
@@ -1369,7 +1368,7 @@ impl P2PCore {
                 g.push_founder_transfer(t);
             }
         }
-        // Spec dışı, kullanıcı kararı: kurucunun kefil olduğu üye
+        // kurucunun kefil olduğu üye
         // anahtarlarını benimse — böylece hiç eşleşmediğimiz üyelerle de
         // ratchet kurup mesajlaşabiliriz (bkz. adopt_vouched_member_devices;
         // güvenlik kuralları orada).
@@ -1478,7 +1477,7 @@ impl P2PCore {
                     // bu düzeltmeyi hiç görmemişti. Artık asla bir LAN/röle
                     // adresi tarafından üzerine yazılmayan `device_onion_addr`
                     // kullanılır (M-28: `device_last_addr`'a düşülmez).
-                    // M-28: onion only — a clearnet/UPnP address must never
+                    // onion only — a clearnet/UPnP address must never
                     // travel inside a group update (the node dials onion only).
                     last_addr: if *id == own_identity_id {
                         self.get_node_address()
@@ -1730,7 +1729,7 @@ impl P2PCore {
             author_proof: Some(author_proof.clone()),
             mentions: filter_mentions(&group, Some(&own_identity_id), mentions),
         };
-        // Spec dışı, hata düzeltmesi (grup geçmişi kalıcılığı): ÖNCE, TEK
+        // ÖNCE, TEK
         // bir satır olarak arşivle — fan-out döngüsünün İÇİNDE değil,
         // çünkü aşağıdaki `send_message_content` her üye için AYRI
         // çağrılıyor; oraya `archive_plaintext: Some(...)` geçirmek N üye

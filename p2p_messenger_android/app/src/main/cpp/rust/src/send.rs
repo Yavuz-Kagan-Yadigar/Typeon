@@ -64,7 +64,7 @@ impl P2PCore {
             self.regen_skip_id = prev;
         }
 
-        // Spec dışı, ağ sağlamlığı: gönderim yolunda, karşı tarafa canlı bir
+        // gönderim yolunda, karşı tarafa canlı bir
         // bağlantı yoksa hemen yeniden bağlanmayı tetikle — böylece gossipsub
         // publish, bağlantı kurulur kurulmaz (pending_envelopes retry'siyle)
         // başarılı olur, reconnect_sweep'in bir sonraki turunu beklemeden.
@@ -131,7 +131,7 @@ impl P2PCore {
         // function of the HandshakeInit alone. The announcement is repeated
         // on every packet until confirmed, so it may ride an unreliable one.
         let fresh_responder = self.ratchets.get(&peer_device_fingerprint).map_or(false, |s| s.is_fresh_responder());
-        // M-94: a peer that only reads sends `Seen` (and `ReadStateSync`,
+        // a peer that only reads sends `Seen` (and `ReadStateSync`,
         // in the list above); it takes its rotation turn on them too, or it
         // never heals. The announcement repeats on every packet until confirmed.
         let rotation_turn = needs_delivery_confirmation || matches!(content, MessageContent::Seen { .. });
@@ -174,7 +174,7 @@ impl P2PCore {
         };
         let content_bytes = ciborium_bytes(content)?;
         let message_id = message_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        // M-89: the header is built first; its raw bytes are the AEAD's
+        // the header is built first; its raw bytes are the AEAD's
         // associated data and what the signature covers.
         let (message_number, prev_chain_length) = state.next_send_numbers();
         let header = packet::SignedHeader::new(MessagePacketHeader {
@@ -245,7 +245,7 @@ impl P2PCore {
             signature_pq: sig_pq.encode().to_vec(),
         };
 
-        // Spec dışı düzeltme: önceden SADECE node modu açık cihazlarda
+        // önceden SADECE node modu açık cihazlarda
         // arşivleniyordu (o zamanki kullanıcı tercihi) — kullanıcı artık
         // açıkça TÜM cihazlarda (node olsun olmasın) kendi sohbet
         // geçmişinin yerelde şifreli kalıcı kılınmasını istedi; node modu
@@ -318,7 +318,7 @@ impl P2PCore {
         // gözden kaçmış bir hariç tutma. Alıcı tarafı da artık Ack gönderiyor
         // (bkz. receive_message Text/group_id kolu).
         //
-        // Spec dışı, ağ sağlamlığı düzeltmesi (kullanıcı isteği: "her şey
+        // "her şey
         // onaylanana kadar denenmeli"): `ProfileUpdate` (alıcı zaten Ack
         // gönderiyordu, sadece bu listeye hiç eklenmemişti) ve
         // `HistorySyncResponse` (bkz. receive_message HistorySyncResponse
@@ -369,7 +369,7 @@ impl P2PCore {
         // (bkz. yukarıdaki notlar); `HistorySyncResponse` de dışarıda —
         // toplu bir yanıt, kaybolursa istek zaten yeniden sorulur ve
         // günlerce yeniden şifrelemeye değmez.
-        // Spec dışı, dayanıklılık düzeltmesi: `HistorySyncRequest` ve
+        // `HistorySyncRequest` ve
         // `LeaveGroupRequest` önceden bu listede DEĞİLDİ — `regen_content`
         // `None` olduğunda `publish_with_ack_tracking` bu girdiyi
         // `persist_durable_retry` ile diske YAZMIYOR (bkz. o fonksiyonun
@@ -486,7 +486,7 @@ impl P2PCore {
             .unwrap_or_default()
     }
 
-    /// F3: a history page's reactions, for the rows `event["messages"]` kept
+    /// a history page's reactions, for the rows `event["messages"]` kept
     /// (after the floor, direction and author checks). The responder's own
     /// are taken. Mine only to restore one I have no row for (a new device),
     /// on a row I have, stamped in the past: the responder could otherwise
@@ -520,7 +520,7 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı, kullanıcı isteği (WhatsApp tarzı tepkiler): bir kişinin
+    /// bir kişinin
     /// bir mesaja bıraktığı emojiyi yerel arşive yazar.
     ///
     /// KİŞİ BAŞINA TEK tepki: `INSERT OR REPLACE` yeni emojiyi eskinin
@@ -531,7 +531,7 @@ impl P2PCore {
     /// Damgası olmayan (eski sürüm) paketler koşulsuz uygulanır.
     /// `false`: the row could not be written (a received reaction is then not acked).
     pub(crate) fn apply_reaction(&self, target_message_id: &str, reactor_identity_id: &str, emoji: &str, reacted_at_ms: u64) -> bool {
-        // M101: no DB is not "applied".
+        // no DB is not "applied".
         let Some(conn) = &self.db else { return false };
         if reacted_at_ms > 0 {
             let previous: Option<i64> = conn
@@ -730,7 +730,7 @@ impl P2PCore {
         serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
     }
 
-    /// Spec dışı, kullanıcı isteği: 1:1 sohbette bir mesaja tepki bırakır
+    /// 1:1 sohbette bir mesaja tepki bırakır
     /// (boş `emoji` = kendi tepkimi kaldır). `edit_message` ile AYNI dört
     /// adımlı desen: karşı tarafa gönder, kişinin diğer cihazlarına fan-out,
     /// yerel arşive uygula, kendi kardeş cihazlarıma yankıla.
@@ -778,7 +778,7 @@ impl P2PCore {
         Ok(self.reactions_summary(&target_message_id))
     }
 
-    /// Spec dışı: bir mesajı düzenler. `target_message_id`, düzenlenecek
+    /// bir mesajı düzenler. `target_message_id`, düzenlenecek
     /// mesajın `MessagePacketHeader.message_id`'sidir (gönderirken dönen
     /// değer). Karşı taraf, bu `message_id`'ye sahip bir mesajı daha önce
     /// gördüyse UI'da güncellemelidir (bkz. ChatActivity).
@@ -800,7 +800,7 @@ impl P2PCore {
         result
     }
 
-    /// Spec dışı: bir mesajı siler (karşı tarafa "sil" bildirimi gönderir).
+    /// bir mesajı siler (karşı tarafa "sil" bildirimi gönderir).
     /// Also purges the local attachment file, if any (see `purge_attachment_if_exists`).
     /// Deleting a message that is still queued withdraws every copy that has
     /// not been confirmed (peer devices, siblings, server deposits). Without
@@ -850,7 +850,7 @@ impl P2PCore {
         result
     }
 
-    /// Spec dışı, kullanıcı isteği: `edit_message`'ın grup karşılığı — bkz.
+    /// `edit_message`'ın grup karşılığı — bkz.
     /// `send_group_message`/`request_older_group_history` AYNI fan-out
     /// deseni. `target_group_message_local_id`, düzenlenecek grup mesajının
     /// `Text.group_message_local_id`'sidir (Kotlin zaten kendi balonunun
@@ -1069,7 +1069,7 @@ impl P2PCore {
         }
         if let Some(conn) = &self.db {
             let now = current_time_ms() as i64;
-            // Pruned in `periodic_storage_sweep`, not per ack (fable A-14).
+            // Pruned in `periodic_storage_sweep`, not per ack.
             let _ = conn.execute("INSERT OR REPLACE INTO acked_packets (packet_id, acked_at) VALUES (?1, ?2)", params![packet_id, now]);
         }
     }
@@ -1088,7 +1088,7 @@ impl P2PCore {
         if !recent && !self.received_from_sender(&mid, &peer) && !self.packet_was_acked(&mid) {
             return false;
         }
-        // L-21: one re-ack per id per 5 s. The sender's retries are 15 s
+        // one re-ack per id per 5 s. The sender's retries are 15 s
         // apart or more; faster copies are replays (or the same packet over
         // another path), and each re-ack costs an encrypt + sign + send.
         let just_acked = self.recently_acked.get(&mid)
@@ -1118,7 +1118,7 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı: "yazıyor..." göstergesi. bkz. `MessageContent::TypingIndicator`
+    /// "yazıyor..." göstergesi. bkz. `MessageContent::TypingIndicator`
     /// dokümantasyonu (packet.rs) — arşivlenmez, güvenilir teslim
     /// kuyruğuna girmez, fire-and-forget.
     pub(crate) fn send_typing_indicator(&mut self, peer_device_fingerprint: String, is_typing: bool) -> Result<(), String> {

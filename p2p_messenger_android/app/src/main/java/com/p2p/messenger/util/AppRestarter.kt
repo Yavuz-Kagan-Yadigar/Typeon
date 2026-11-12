@@ -6,7 +6,7 @@ import androidx.appcompat.app.AlertDialog
 import com.p2p.messenger.R
 
 /**
- * Spec dışı, kullanıcı isteği: sohbet/ayarlar üst çubuğundaki hızlı "Tor
+ * sohbet/ayarlar üst çubuğundaki hızlı "Tor
  * bağlantısını kes/yeniden kur" düğmesi için.
  *
  * Bugün ağ katmanı (özellikle libp2p swarm'a eklenen Tor dial transport'u,
@@ -35,7 +35,7 @@ object AppRestarter {
         val component = intent.component ?: return
         val restartIntent = Intent.makeRestartActivityTask(component)
         // A background start (service path) can be blocked on API 29+; it must
-        // not crash the restart, and the exit waits so the task can start (H146).
+        // not crash the restart, and the exit waits so the task can start.
         try { context.startActivity(restartIntent) } catch (e: Exception) { android.util.Log.w("AppRestarter", "startActivity: ${e.message}") }
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ Runtime.getRuntime().exit(0) }, 400)
     }

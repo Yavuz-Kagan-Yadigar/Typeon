@@ -125,7 +125,7 @@ class ContactsFragment : Fragment() {
             showManualAddDialog()
         }
 
-        // Spec dışı, kullanıcı isteği: kendi QR kodumuz artık "My QR"
+        // kendi QR kodumuz artık "My QR"
         // adında ayrı bir düğme/ekrana gitmeden doğrudan bu sekmede
         // görünür — bkz. eski QrDisplayActivity (silindi), üretim mantığı
         // birebir buraya taşındı.
@@ -409,7 +409,7 @@ class ContactsFragment : Fragment() {
         // olduğunun DOĞRULANMASI. Bunu ancak kullanıcı, kodu başka bir
         // kanaldan karşılaştırarak yapabilir; o yüzden kod artık burada,
         // onay penceresinin içinde gösteriliyor.
-        // Ekran kaydırması: kod JNI çağrısıyla üretilir — fixpass (glm A3)
+        // Ekran kaydırması: kod JNI çağrısıyla üretilir — fixpass
         // gereği ana iş parçacığından ÇALIŞMAZ (`offMain` deseni).
         runOnWorker {
             val safetyCode = try {
@@ -622,7 +622,7 @@ class ContactsFragment : Fragment() {
             val fingerprint = if (obj.isNull("active_device_fingerprint")) ""
                 else obj.optString("active_device_fingerprint")
             val avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null }
-            // Spec dışı, kullanıcı kararı: grup üzerinden (kurucu
+            // grup üzerinden (kurucu
             // kefaletiyle) eklenen kişiler yüz yüze doğrulanmadı — kişi
             // satırında hem uyarı işareti (bkz. ChatAdapter.bind) hem de
             // açıklama gösterilir.

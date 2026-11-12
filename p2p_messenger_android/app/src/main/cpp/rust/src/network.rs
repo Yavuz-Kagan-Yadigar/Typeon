@@ -97,7 +97,7 @@ impl P2PCore {
             if let Some(onion) = self.peer_onion_addr.get(&pid).cloned() {
                 self.remember_onion_addr(device_fingerprint, &onion);
             }
-            // Spec dışı, ağ sağlamlığı düzeltmesi: bu cihazdan GERÇEKTEN
+            // bu cihazdan GERÇEKTEN
             // paket aldık — o an bağlı olduğumuz somut adresi (varsa,
             // `ConnectionEstablished`'ten doldurulan `peer_id_to_addr`)
             // kalıcı yeniden-bağlanma ipucu olarak sakla. Böylece bir
@@ -137,7 +137,7 @@ impl P2PCore {
             }
             return Ok(swarm.local_peer_id().to_string());
         }
-        // M-24: the node is onion-only (`tor::DialReject` on TCP). Without Tor
+        // the node is onion-only (`tor::DialReject` on TCP). Without Tor
         // the swarm could dial nothing and the app sat offline with no error.
         if !tor_enabled {
             return Err("Tor kapalı: ağ yalnızca Tor üzerinden çalışır".to_string());
@@ -153,7 +153,7 @@ impl P2PCore {
         let app_files_dir = self.app_files_dir.clone().ok_or("initDatabase önce çağrılmalı")?;
         let keypair = load_or_generate_libp2p_keypair(&app_files_dir);
 
-        // Spec dışı, kullanıcı isteği (Tor): Tor açıksa arti onion service'i
+        // Tor açıksa arti onion service'i
         // başlat (arka planda bootstrap eder). Onion service, gelen Tor
         // akışlarını `127.0.0.1:TOR_LIBP2P_PORT`'a köprüler; libp2p bu yüzden
         // SABİT o portu dinlemeli (bkz. TOR_LIBP2P_PORT). Tor kapalıysa hiç
@@ -191,7 +191,7 @@ impl P2PCore {
             use libp2p::core::transport::Transport as _;
             use libp2p::core::upgrade::Version;
             let noise_for = |kp: &libp2p::identity::Keypair| noise::Config::new(kp).map_err(|e| e.to_string());
-            // Onion-only (deanon fix, bkz. tor.rs `DialReject`): TCP taşıması
+            // Onion-only: TCP taşıması
             // yalnızca gelen onion-köprüsü bağlantıları için tutulur; giden
             // her TCP (clearnet) dial'ı reddedilir, böylece hiçbir eşin gerçek
             // IP'sine doğrudan bağlanılmaz. Çıkış tamamen onion/röle üzerinden.
@@ -241,7 +241,7 @@ impl P2PCore {
                 // Default 5 min per peer: with 3-4 peers the LTE radio woke
                 // every ~75 s. Addresses change rarely; push covers changes.
                 .with_interval(std::time::Duration::from_secs(3600)));
-                // Spec dışı, ağ sağlamlığı düzeltmesi: kütüphanenin
+                // kütüphanenin
                 // varsayılan `request_timeout`'u (10sn) Tor üzerinden 256
                 // KiB'lik bir dosya parçası (bkz. `FILE_CHUNK_SIZE`) için
                 // çoğu zaman yetersiz — özellikle sıkışık bir devrede.
@@ -312,7 +312,7 @@ impl P2PCore {
                 Ok(P2PBehaviour { server_rpc, kad, identify, file_chunks, relay_client, relay, keepalive, acks, envelopes, stream })
             })(keypair_ref, relay_client)
             .map_err(|e| e.to_string())?;
-            // Spec dışı, ağ sağlamlığı düzeltmesi (kullanıcı isteği: "her şey
+            // "her şey
             // onaylanana/çok çok uzun bir zaman aşımına kadar denenmeli"):
             // AÇIKÇA belirtilmediğinde libp2p-swarm'ın VARSAYILAN
             // `idle_connection_timeout`'u kullanılır — bu, HİÇBİR protokol
@@ -347,7 +347,7 @@ impl P2PCore {
 
         // SABİT port: onion köprüsü buraya bağlanır — bkz. TOR_LIBP2P_PORT.
         //
-        // Onion-only (deanon fix): `0.0.0.0` DEĞİL `127.0.0.1` — dinleyici
+        // Onion-only: `0.0.0.0` DEĞİL `127.0.0.1` — dinleyici
         // yalnızca loopback'te. Onion köprüsü (`bridge_incoming_stream`) zaten
         // `127.0.0.1:<port>`'a bağlanır (bkz. tor.rs:247), yani gelen onion
         // trafiği etkilenmez; buna karşılık LAN/internetten doğrudan clearnet
@@ -364,7 +364,7 @@ impl P2PCore {
         let mut stream_control = swarm.behaviour().stream.new_control();
         call::spawn_media_acceptor(&mut stream_control);
         self.stream_control = Some(stream_control);
-        // Set only now: an error return above left them changed (M-195).
+        // Set only now: an error return above left them changed.
         self.node_mode_enabled = node_mode;
         self.tor_enabled = tor_enabled;
         self.own_listen_addrs.clear();
@@ -394,7 +394,7 @@ impl P2PCore {
     /// `dial`: also open a parallel onion connection now. A late Ack is no
     /// such reason: Tor plus a sleeping radio often take longer than
     /// `ACK_SUSPECT_MS`, so that path only probes, and a failed probe of a
-    /// suspect closes the connection for the redial (fable B-04).
+    /// suspect closes the connection for the redial.
     pub(crate) fn mark_connection_suspect(&mut self, peer: PeerId, dial: bool) {
         let Some(st) = self.keepalive_state.get_mut(&peer) else { return };
         if st.suspect {
@@ -470,17 +470,16 @@ impl P2PCore {
     /// a change takes effect at the next network start. There is no DHT
     /// contribution: Kademlia always runs in Client mode (Server mode answered
     /// FIND_NODE with contacts' peer ids/onions) and no DHT record is written
-    /// (H-16).
     pub(crate) fn set_node_mode(&mut self, enabled: bool) {
         self.node_mode_enabled = enabled;
     }
 
-    /// Spec dışı, kullanıcı isteği: Ayarlar'daki geçmiş/ek depolama sınırı
+    /// Ayarlar'daki geçmiş/ek depolama sınırı
     /// slider'ından çağrılır. Kullanıcı sınırı düşürürse hemen (bir sonraki
     /// `periodic_storage_sweep` turunu beklemeden) uygular — bkz.
     /// `enforce_history_storage_limit`.
     pub(crate) fn set_history_storage_limit_bytes(&mut self, bytes: u64) {
-        // M58: both UIs stop at 32 GB; u64::MAX made the limit meaningless.
+        // both UIs stop at 32 GB; u64::MAX made the limit meaningless.
         self.history_storage_limit_bytes = bytes.min(64 << 30);
         self.enforce_history_storage_limit();
     }
@@ -493,11 +492,11 @@ impl P2PCore {
     /// adresi `kad.add_address`/`dial` için sessizce kullanılmaz kalır
     /// (bkz. process_qr_packet). The onion address, else a relay circuit
     /// address; `None` while Tor bootstraps — never the loopback listener,
-    /// which no peer can dial (M-25).
+    /// which no peer can dial.
     pub(crate) fn get_node_address(&self) -> Option<String> {
         let swarm = self.swarm.as_ref()?;
         let peer_id = *swarm.local_peer_id();
-        // Spec dışı, kullanıcı isteği (Tor): Tor açık VE onion service yayında
+        // Tor açık VE onion service yayında
         // ise, HER ŞEYDEN ÖNCE .onion adresini paylaş — bu, CGNAT dahil HER
         // ağdan (karşı tarafta da Tor açıksa) ulaşılabilir tek adres. Biçim:
         // `/dns/<host>.onion/tcp/<port>/p2p/<peer_id>` (bkz. tor.rs
@@ -509,12 +508,12 @@ impl P2PCore {
                 return Some(format!("/dns/{}/tcp/{}/p2p/{}", onion_host, TOR_LIBP2P_PORT, peer_id));
             }
         }
-        // M-28: the node is onion-only (Tor is mandatory, see `start_network`):
+        // the node is onion-only (Tor is mandatory, see `start_network`):
         // a listen address is a clearnet/UPnP leak and nobody can dial it.
         None
     }
 
-    /// Spec dışı, kullanıcı isteği (Tor): UI için Tor durumu — "disabled" /
+    /// UI için Tor durumu — "disabled" /
     /// "bootstrapping" / "ready" / "failed" (+ hazırsa .onion host adı).
     pub(crate) fn tor_status(&self) -> String {
         match &self.tor {
@@ -578,7 +577,7 @@ impl P2PCore {
             || self.call.is_some()
     }
 
-    /// H71: downloads that moved within the stall timeout and are not waiting
+    /// downloads that moved within the stall timeout and are not waiting
     /// for `retry_at`. A stalled one is probed by `check_stalled_downloads`
     /// on the next poll; its answer is a network event that wakes the native
     /// wait, so it need not hold the wake lock between probes.
@@ -609,7 +608,7 @@ impl P2PCore {
         r.join(",")
     }
 
-    /// Spec dışı, kullanıcı isteği: sohbet ekranının üst çubuğunda BU
+    /// sohbet ekranının üst çubuğunda BU
     /// cihazın (karşı tarafın DEĞİL, bkz. `has_active_session`/
     /// `is_peer_connected`) genel ağ bağlantı durumunu göstermek için ham
     /// sinyalleri JSON olarak döner — insana okunur özet metni Kotlin
@@ -644,7 +643,7 @@ impl P2PCore {
         })
     }
 
-    /// Spec dışı, güvenlik denetimi düzeltmesi: gossipsub topic adı önceden
+    /// gossipsub topic adı önceden
     /// DOĞRUDAN alıcının cihaz fingerprint'inden türetiliyordu
     /// (`p2p_msg_<fingerprint>`) — ağdaki herhangi bir gözlemci, içeriği
     /// okuyamasa bile HANGİ fingerprint'e mesaj gittiğini ve NE ZAMAN
@@ -667,8 +666,8 @@ impl P2PCore {
     /// sadece BİR KEZLİK ilk eşleşme anı fingerprint üzerinden görünür
     /// kalır (SECURITY.md'de belgelendi).
     /// The input is `ratchet::root_handle` of a root (`root_handle_now`, or
-    /// `prev_root_key`), never the root itself (fable H-02).
-    /// Since gossipsub was removed (fable B-01) the topic string only names
+    /// `prev_root_key`), never the root itself.
+    /// Since gossipsub was removed the topic string only names
     /// the session's mailbox on the server.
     pub(crate) fn topic_for_root_key(root_key: &[u8]) -> String {
         use sha2::Sha256;
@@ -815,7 +814,7 @@ impl P2PCore {
             if now < h.next_dial_at {
                 continue;
             }
-            // The onion address first (fable B-06): `peer_id_to_addr` is
+            // The onion address first: `peer_id_to_addr` is
             // filled only for connections we dialed, so a peer that dialed us
             // never got a second connection.
             let onion = self.peer_onion_addr.get(peer).and_then(|a| a.parse::<Multiaddr>().ok());
@@ -1083,7 +1082,7 @@ impl P2PCore {
         }
         self.ensure_relay_reservations();
 
-        // Spec dışı, ağ sağlamlığı düzeltmesi (refactor): asıl dial/backoff
+        // asıl dial/backoff
         // mantığı artık `try_reconnect_device`'te — `ensure_connected` VE
         // ping/ConnectionClosed-tetiklemeli anında yeniden bağlanma (bkz.
         // `poll_events`) ile PAYLAŞILIYOR, böylece hepsi AYNI geri-çekilme
@@ -1303,7 +1302,7 @@ impl P2PCore {
             return Ok(());
         }
         // No direct path, or it failed: the server copy is the delivery
-        // (gossipsub is gone, fable B-01). Without one the envelope is queued.
+        // (gossipsub is gone, ). Without one the envelope is queued.
         if !deposited && direct {
             deposited = self.try_server_deposit(target_device_fingerprint, &topic_str, envelope, &bytes, first_attempt_at);
         }
@@ -1487,7 +1486,7 @@ impl P2PCore {
                 }
             }
         }
-        // Spec dışı, performans denetimi düzeltmesi: `poll_events` bunu
+        // `poll_events` bunu
         // her turda çağırır (bkz. o fonksiyonun dokümantasyonu);
         // `reconnect_sweep`/`group_sync_sweep`/`periodic_storage_sweep`'in
         // aksine bu fonksiyonun kendi aralık kontrolü YOKTU — boş bir
@@ -1499,7 +1498,7 @@ impl P2PCore {
             return;
         }
         let now = current_time_ms();
-        // M-181: the scan below (whole map, HKDF per peer, sort) at most once
+        // the scan below (whole map, HKDF per peer, sort) at most once
         // a second, not on every poll turn.
         if now.saturating_sub(self.last_unconfirmed_retry_at) < 1_000 {
             return;
@@ -1612,7 +1611,7 @@ impl P2PCore {
             // Regenerated earlier in this loop (a rotation or handshake redo
             // of an earlier id re-encrypted every pending packet of the
             // peer): `stamp_cache` is older than that, so it would be sent a
-            // second time (fable A-04).
+            // second time.
             if first_sent_at >= now {
                 continue;
             }
@@ -1632,7 +1631,7 @@ impl P2PCore {
                 None => false,
             };
             if stale_chain || now.saturating_sub(first_sent_at) > MAX_UNCONFIRMED_AGE_MS {
-                // Spec dışı, kullanıcı isteği: gerçek vazgeçme sınırı artık
+                // gerçek vazgeçme sınırı artık
                 // `original_sent_at` (mesajın İLK kuyruğa girdiği an, bkz. o
                 // alanın dokümantasyonu — tazelemeler arasında SABİT)
                 // üzerinden `TEXT_RETRY_GIVE_UP_MS`. Bu, `regen_content`
@@ -1800,7 +1799,7 @@ impl P2PCore {
                 }
             }
             if let Some(pending) = self.awaiting_confirmation.get_mut(&message_id) {
-                // Spec dışı, kullanıcı isteği: Ayarlar'daki bekleyen
+                // Ayarlar'daki bekleyen
                 // mesajlar listesinde (bkz. `list_pending_messages`)
                 // gösterilecek "son deneme" zamanı.
                 pending.last_attempt_at = current_time_ms();
@@ -1846,7 +1845,7 @@ impl P2PCore {
             crate::log_id(&peer_fp), regen.len(), drop_ids.len()
         );
         for id in drop_ids {
-            // H86: reported like the age arm of `retry_unconfirmed_messages`
+            // reported like the age arm of `retry_unconfirmed_messages`
             // (FileOffer/ProfileUpdate/HistorySync… cannot be re-encrypted).
             if let Some(NetworkEnvelope::Message(m)) = self.awaiting_confirmation.remove(&id).map(|p| p.envelope) {
                 warn!("Rotasyon: yeniden üretilemeyen paket {} bırakıldı (Failed)", crate::log_id(&id));
@@ -1871,7 +1870,7 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı, kullanıcı isteği: uygulama ön plana geldiğinde (bkz.
+    /// uygulama ön plana geldiğinde (bkz.
     /// Kotlin `P2PApplication` foreground algılama + JNI `retryAllPendingNow`)
     /// çağrılır — HERHANGİ bir bekleyen mesajın bir sonraki deneme zamanını
     /// (`next_retry_at`) HEMEN'e çeker, üstel geri çekilmenin doğal
@@ -1891,7 +1890,7 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı, kullanıcı isteği: Ayarlar'daki bekleyen mesajlar
+    /// Ayarlar'daki bekleyen mesajlar
     /// listesindeki TEK bir satır için manuel "Şimdi Dene" düğmesi — bkz.
     /// `retry_all_pending_now` aynı mekanizma, ama sadece BU mesaja
     /// uygulanır. Gerçek gönderim denemesi burada YAPILMAZ (pil dostu,
@@ -1929,7 +1928,7 @@ impl P2PCore {
         }).collect()
     }
 
-    /// Spec dışı, kullanıcı isteği: Ayarlar'daki bekleyen mesajlar
+    /// Ayarlar'daki bekleyen mesajlar
     /// listesindeki "İptal" düğmesi — bir mesajı artık yeniden
     /// DENENMEYECEK şekilde kalıcı olarak bırakır (Failed olarak
     /// işaretlenir, kullanıcı isterse sohbet ekranından manuel olarak

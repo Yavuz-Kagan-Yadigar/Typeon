@@ -16,7 +16,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 
 /**
- * Spec dışı, kullanıcı isteği: Ayarlar'dan açılan, henüz karşı taraftan
+ * Ayarlar'dan açılan, henüz karşı taraftan
  * "ack" alınmamış (bkz. lib.rs `awaiting_confirmation`/types.rs `regen_content` —
  * `TEXT_RETRY_GIVE_UP_MS`'ye, 2 güne, kadar otomatik olarak taze bir
  * ratchet adımıyla yeniden denenir) mesajların listesi. Her satırda hedef
@@ -157,7 +157,7 @@ class PendingMessagesActivity : AppCompatActivity() {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: bekleyen mesajlar listesindeki manuel
+     * bekleyen mesajlar listesindeki manuel
      * "Şimdi Dene" düğmesi — bkz. network.rs `retry_pending_message_now`
      * (SADECE bu mesajın bir sonraki deneme zamanını HEMEN'e çeker; gerçek
      * gönderim denemesi bir sonraki `poll_events` turunda, saniyede bir

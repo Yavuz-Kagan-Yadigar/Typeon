@@ -96,7 +96,7 @@ impl P2PCore {
         // In a group it starts with our author tag, which members check
         // (`group_msg_tag`); a 1:1 file gets a random one.
         // The group tag is made from the id's hash part, so it differs per
-        // file (I-42).
+        // file.
         let secret_rest = self.blob_upload_secret(&file_key, &[0u8; 8]).ok_or_else(|| "History key not loaded".to_string())?;
         let hash_hex = server_proto::blob_id_hash_hex(&secret_rest[server_proto::BLOB_TAG_LEN..]);
         let tag: [u8; 8] = match group_id {
@@ -203,7 +203,7 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı, kullanıcı isteği (grup ekleri): `prepare_and_send_file`'ın
+    /// `prepare_and_send_file`'ın
     /// grup karşılığı — dosya TEK SEFERDE şifrelenip diske yazılır (`file_id`/
     /// `file_key` TÜM üyeler arasında PAYLAŞILIR, bkz. `serve_chunk_request`
     /// notu: indirme isteği SADECE `file_id`'ye bakar, isteyen kimliğini
@@ -283,7 +283,7 @@ impl P2PCore {
     /// meta veri görünür kalır, kullanıcı "İndir" demeli).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn receive_file_offer(&mut self, peer_fp: &str, sender_identity_id: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str, preview_jpeg: &Option<Vec<u8>>, duration_ms: Option<u32>, chunk_size: Option<u32>, chunk_hashes: &[u8], caption: &str, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sticker: bool, sticker_origin: Option<&str>) -> serde_json::Value {
-        // Spec dışı, güvenlik denetimi düzeltmesi: `MAX_ATTACHMENT_SIZE`
+        // `MAX_ATTACHMENT_SIZE`
         // önceden SADECE gönderim tarafında (`prepare_and_send_file`/
         // `prepare_and_send_group_file`, bkz. o fonksiyonların kontrolü)
         // uygulanıyordu — ALICI taraf, karşı taraftan gelen `total_size`
@@ -305,7 +305,7 @@ impl P2PCore {
                 "error": "Geçersiz parça boyutu"
             });
         }
-        // Defter #01: `file_id` karşı taraftan geliyor ve birazdan dosya
+        // `file_id` karşı taraftan geliyor ve birazdan dosya
         // yoluna dönüşecek — ÖNCE doğrula (bkz. `is_safe_file_id`).
         if !is_safe_file_id(file_id) {
             warn!(
@@ -318,7 +318,7 @@ impl P2PCore {
                 "error": "Geçersiz dosya kimliği"
             });
         }
-        // Defter #02: aşağıdaki yazma `INSERT OR REPLACE` — karşı taraf,
+        // aşağıdaki yazma `INSERT OR REPLACE` — karşı taraf,
         // KENDİSİNE gönderdiğimiz bir dosyanın `file_id`'sini (ki teklifi
         // ona biz yolladık, yani biliyor) geri gönderirse bizdeki
         // `direction='sent'` satırı 'received' olarak EZİLİYORDU. Sonuç:
@@ -458,7 +458,7 @@ impl P2PCore {
             }
         };
 
-        // Spec dışı düzeltme: önceden burada `download_file`'ın başarısız
+        // önceden burada `download_file`'ın başarısız
         // olması (ör. `device_to_peer_id`'de bu peer henüz yoksa) sadece
         // loglanıyordu — çağıran taraf (Kotlin) her zaman
         // "auto_downloading": true görüyordu ve UI "İndiriliyor" durumunda
@@ -515,7 +515,7 @@ impl P2PCore {
             // kaçınmak için mevcut `hex` crate'i kullanılıyor.
             "preview_hex": preview_jpeg.as_ref().map(|p| hex::encode(p)),
             "duration_ms": duration_ms,
-            // Spec dışı, kullanıcı isteği: ekle birlikte gelen açıklama ve
+            // ekle birlikte gelen açıklama ve
             // (varsa) yanıtlanan mesaj bağlamı — ek balonu bunları metin
             // mesajlarıyla AYNI biçimde gösteriyor.
             "caption": caption,
@@ -587,7 +587,7 @@ impl P2PCore {
             info!("download_file: {} zaten indiriliyor, no-op", file_id);
             return Ok(());
         }
-        // R-21: without a swarm no chunk is ever requested; the UI showed
+        // without a swarm no chunk is ever requested; the UI showed
         // "downloading" for 10 min instead of an error.
         if self.swarm.is_none() {
             return Err("Ağ henüz başlatılmadı".to_string());
@@ -693,7 +693,7 @@ impl P2PCore {
             let _ = conn.execute("UPDATE files SET status = 'downloading', bytes_transferred = ?2 WHERE file_id = ?1", params![file_id, resumed_bytes as i64]);
         }
 
-        // Spec dışı, dış inceleme düzeltmesi ("çoklu kaynak yok"): bu bir
+        // bu bir
         // grup dosyasıysa, DİĞER üyelerin bilinen/aktif cihazlarını (asıl
         // kaynak HARİÇ) alternatif aday olarak topla — bkz. `DownloadState.
         // alt_source_peer_ids` dokümantasyonu. Kimin GERÇEKTEN tamamladığını
@@ -864,7 +864,7 @@ impl P2PCore {
         Some(next_peer)
     }
 
-    /// Spec dışı, ağ sağlamlığı düzeltmesi (kullanıcı isteği: "her şey
+    /// "her şey
     /// onaylanana/çok çok uzun -10 dk- bir zaman aşımına kadar denenmeli"):
     /// bir parça isteği stall oldu (`check_stalled_downloads`) VEYA
     /// libp2p'den açık bir `OutboundFailure` geldiğinde çağrılır. SON
@@ -885,7 +885,7 @@ impl P2PCore {
             self.fail_download(file_id, reason);
             return;
         }
-        // Spec dışı, dış inceleme düzeltmesi ("çoklu kaynak yok"): mevcut
+        // mevcut
         // kaynak ardışık birkaç kez ilerleme sağlamadıysa VE alternatif bir
         // aday varsa (bkz. `DownloadState.alt_source_peer_ids`), aynı
         // kaynağı süresiz yoklamak yerine bir sonraki adaya geçilir.
@@ -937,7 +937,7 @@ impl P2PCore {
     /// `files` tablosuna bakar. Bulunamazsa boş string döner (olay yine
     /// de üretilir, sadece Kotlin tarafı eşleştiremez — DB kaydı hiç
     /// yoksa zaten daha büyük bir sorun var demektir).
-    /// H4: the chat key (canonical device) the screen listens on, not the
+    /// the chat key (canonical device) the screen listens on, not the
     /// device the file came from.
     pub(crate) fn peer_for_file(&self, file_id: &str) -> String {
         if let Some(state) = self.active_downloads.get(file_id) {
@@ -970,13 +970,13 @@ impl P2PCore {
         // every open (`decrypt_file_from_disk_with`).
         let Some(mut state) = self.active_downloads.remove(file_id) else { return };
         // A zero-byte file has no chunk, so no chunk write made its `.enc`:
-        // every open failed with "No such file" (fable F-07).
+        // every open failed with "No such file".
         if state.total_chunks == 0 {
             if let Ok(p) = self.enc_path_for(file_id) {
                 let _ = std::fs::File::create(p);
             }
         }
-        // fable F-02: the peer's `sticker` flag forced this download and
+        // the peer's `sticker` flag forced this download and
         // makes the chat decode it on sight. Only a real sticker keeps it:
         // its headers must say at most `STICKER_MAX_SIDE` a side.
         let flagged = self.db.as_ref().map_or(false, |c| {
@@ -1079,7 +1079,7 @@ impl P2PCore {
         let data = match response {
             FileChunkResponse::Chunk { data } => data,
             FileChunkResponse::NotFound => {
-                // Spec dışı, ağ sağlamlığı notu: bu, `retry_or_give_up_download`'ın
+                // bu, `retry_or_give_up_download`'ın
                 // TERSİNE, AYNI kaynağa KASITLI olarak yeniden DENENMEZ —
                 // geçici bir ağ sorunu değil, karşı tarafın KESİN/olumsuz
                 // bir yanıtı ("bu dosyam yok"); aynı isteği tekrarlamak
@@ -1150,7 +1150,7 @@ impl P2PCore {
                 }
                 return;
             }
-            // H15: the server's rate limit. Same source, later.
+            // the server's rate limit. Same source, later.
             FileChunkResponse::Busy => {
                 if let Some(s) = self.active_downloads.get_mut(file_id) {
                     s.inflight_chunks.remove(&chunk_index);
@@ -1185,7 +1185,7 @@ impl P2PCore {
         // Parçayı KENDİ konumuna yaz (sona ekleme DEĞİL) — boru hattında
         // parçalar sırasız geliyor. AEAD doğrulaması yazmadan önce yapılır,
         // yani `Auth` hatasında diske hiçbir şey yazılmaz.
-        // L-108: every chunk has its exact length (only the last one is
+        // every chunk has its exact length (only the last one is
         // short). A longer last chunk would also leave bytes past the end
         // that a correct copy written later does not overwrite.
         let exact_len = attachments::chunk_plain_len(total_size, chunk_size, chunk_index) as usize + 16;
@@ -1509,7 +1509,7 @@ impl P2PCore {
             }
         };
         let params_dyn: Vec<&dyn rusqlite::ToSql> = device_fps.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-        // H3: previews up to 512 KiB each, 500 rows, as hex: the older rows
+        // previews up to 512 KiB each, 500 rows, as hex: the older rows
         // past the budget come without one.
         let mut preview_budget = PAGE_MAX_BYTES;
         let rows = stmt.query_map(params_dyn.as_slice(), |r| {
@@ -1552,7 +1552,7 @@ impl P2PCore {
         newest_first_rows(rows)
     }
 
-    /// Spec dışı, kullanıcı isteği (grup ekleri): `list_attachments`'ın grup
+    /// `list_attachments`'ın grup
     /// karşılığı — `group_id`'ye göre filtreler (bkz. `load_group_message_history`
     /// AYNI desen). Grup içinde farklı ekler FARKLI göndericilerden
     /// gelebileceğinden, `peer_device_fingerprint`/`sender_identity_id`

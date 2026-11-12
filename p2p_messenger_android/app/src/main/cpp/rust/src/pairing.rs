@@ -16,7 +16,7 @@ impl P2PCore {
             Some(c) => c,
             None => return,
         };
-        // H75: a NULL `primary_device` (the column allows it) hid the whole
+        // a NULL `primary_device` (the column allows it) hid the whole
         // identity and the app offered to create a new one.
         let identity_row: Option<(String, Option<String>)> = conn
             .query_row("SELECT id, primary_device FROM identities ORDER BY rowid DESC LIMIT 1", [], |row| {
@@ -74,7 +74,7 @@ impl P2PCore {
                     device_fingerprint: fp,
                     device_name,
                     // No `added_at` column in `own_devices`: `last_seen` is the
-                    // closest stored time (D-34).
+                    // closest stored time.
                     added_at: last_seen as u64,
                     status: if is_active != 0 { DeviceStatus::Active } else { DeviceStatus::Revoked },
                 });
@@ -374,7 +374,7 @@ impl P2PCore {
         packet.to_cbor()
     }
 
-    /// Spec dışı, kullanıcı isteği: `process_manual_entry`'nin beklediği
+    /// `process_manual_entry`'nin beklediği
     /// `identity_id|device_fingerprint|pairing_nonce|device_name|rendezvous_node`
     /// formatını (bkz. o fonksiyonun dokümantasyonu) burada, TEK bir yerde
     /// üretir — Kotlin tarafında elle string birleştirmek yerine (format
@@ -413,7 +413,7 @@ impl P2PCore {
     /// The nonce for a pairing code shown now. Each one is valid for
     /// `PAIRING_WINDOW_MS` and for any number of scans; at most
     /// `PAIRING_WINDOW_MS / PAIRING_NONCE_REUSE_MS` are valid at a time.
-    /// L-35: Err when the nonce is not on disk: a code whose proof can never
+    /// Err when the nonce is not on disk: a code whose proof can never
     /// verify must not be shown.
     pub(crate) fn issue_pairing_nonce(&self) -> Result<Vec<u8>, String> {
         let now = current_time_ms();
@@ -724,7 +724,7 @@ impl P2PCore {
             .and_then(|cid| self.contacts.get(cid))
             .and_then(|c| c.find_device(device_fingerprint))
             .map_or(false, |d| d.owner_revoked)
-            // L-22: a non-contact identity's (group member's) revoke.
+            // a non-contact identity's (group member's) revoke.
             || self.non_contact_revoke(device_fingerprint).map_or(false, |(id, _)| id == identity_id)
             // A device of my own identity that I revoked: siblings that never
             // held its record have only `own_revokes` to go by. A device
@@ -768,7 +768,7 @@ impl P2PCore {
         self.pair_with_code(packet.identity_id, packet.device_fingerprint, &packet.device_name, &packet.rendezvous_node, &packet.known_relays, &packet.pairing_nonce)
     }
 
-    /// M129: what a scanned contact code names, for the confirm step before
+    /// what a scanned contact code names, for the confirm step before
     /// `process_qr_packet`. The same checks as `pair_with_code` and
     /// `register_contact_from_pairing`; changes nothing, no network.
     /// `short_code` is the one the peer's own main screen shows, `safety_code`
@@ -785,7 +785,7 @@ impl P2PCore {
             return Err("Kendi kodunuzu kişi olarak ekleyemezsiniz".to_string());
         }
         let short = |id: &str| hex::decode(id).map(|raw| identity::format_short_code(&raw)).unwrap_or_default();
-        // fable D-02: the name in a code is the code author's choice; for an
+        // the name in a code is the code author's choice; for an
         // existing contact show the stored name and say so.
         let known = self.identity_to_contact.get(&packet.identity_id).and_then(|c| self.contacts.get(c));
         Ok(serde_json::json!({
@@ -814,7 +814,7 @@ impl P2PCore {
         // A device this contact already lists as Active: the code proves
         // nothing (identity id and fingerprint are public), so it changes no
         // state of that device: no new pairing secret, no block lifted, and
-        // no address (fable D-02); its own AddressAnnounce and the stored
+        // no address; its own AddressAnnounce and the stored
         // addresses reach it. The block has its own
         // control (`unblock_identity`).
         let known_active = self.identity_to_contact.get(&identity_id)
@@ -959,7 +959,7 @@ impl P2PCore {
             sign_pubkey_mldsa: own_record.sign_pubkey_mldsa,
             kem_pubkey_x25519: own_record.kem_pubkey_x25519,
             kem_pubkey_mlkem: own_record.kem_pubkey_mlkem,
-            // Spec dışı, hata düzeltmesi (kullanıcı: "özellikle ikincil
+            // "özellikle ikincil
             // cihazlardan gönderilen mesajlar çok sıkıntılı"): bu cihaz bir
             // ikincilse, birincilin bize verdiği imzalı `DeviceAdd`'i BURADA
             // da taşı — karşı taraf ayrı bir `DeviceAddNotice`'ın ona ulaşmış
@@ -1005,7 +1005,7 @@ impl P2PCore {
         if !exchange.keys_match_fingerprint() {
             return Err(format!("IdentityExchange anahtarları fingerprint ile tutarsız: {}", exchange.device_fingerprint));
         }
-        // L-40: same window as a HandshakeInit (it also waits in the mailbox).
+        // same window as a HandshakeInit (it also waits in the mailbox).
         let now = current_time_ms();
         let window = if exchange.timestamp < now { HANDSHAKE_MAX_AGE_MS } else { HANDSHAKE_MAX_SKEW_MS };
         if now.abs_diff(exchange.timestamp) > window {
@@ -1014,7 +1014,7 @@ impl P2PCore {
         // Signed by the device itself: the packet travels unsealed, and the
         // fingerprint covers neither `device_name` nor `identity_id`. A
         // version before this one sends no signature and cannot pair with us.
-        // The signature also names this device as the recipient (L-40).
+        // The signature also names this device as the recipient.
         let own_fp = self.get_active_own_device_fingerprint()?;
         verify_hybrid_signature_with(
             &packet::identity_exchange_signing_input(
@@ -1044,7 +1044,7 @@ impl P2PCore {
             self.link_consent_peer = Some(exchange.device_fingerprint.clone());
         }
 
-        // Spec dışı, güvenlik denetimi düzeltmesi: önceden bu fonksiyon
+        // önceden bu fonksiyon
         // `evaluate_sender_device`/spec 2.2 TOFU+uyarı karar ağacına HİÇ
         // girmiyordu — zaten bilinen bir Contact için gelen BEKLENMEYEN
         // yeni bir cihaz, hiçbir "tanınmayan cihaz" uyarısı tetiklenmeden
@@ -1136,7 +1136,7 @@ impl P2PCore {
             // uyarı YOK)? Aksi halde bilinen bir kişinin beklenmeyen yeni
             // cihazı BLOKLANIR.
             //
-            // Spec dışı, hata düzeltmesi (kullanıcı: "özellikle ikincil
+            // "özellikle ikincil
             // cihazlardan gönderilen mesajlar çok sıkıntılı"): `verified_
             // device_adds` önceden SADECE ayrı bir `DeviceAddNotice` paketiyle
             // dolduruluyordu — o paket, kişi o an offline'sa/store-and-forward
@@ -1278,7 +1278,7 @@ impl P2PCore {
         } else {
             self.pairing_nonces().into_iter().map(|(n, _)| n)
                 .find(|n| {
-                    // Constant time (fable H-10).
+                    // Constant time.
                     let proof = packet::pairing_nonce_proof(n, &fp);
                     proof.len() == exchange.pairing_proof.len()
                         && proof.iter().zip(&exchange.pairing_proof).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
@@ -1410,13 +1410,13 @@ impl P2PCore {
             let _ = self.send_identity_exchange_opts(&exchange.device_fingerprint, fresh);
         }
 
-        // Spec dışı: eşleşme tamamlanır tamamlanmaz kendi profil
+        // eşleşme tamamlanır tamamlanmaz kendi profil
         // fotoğrafımızı (VARSA) bu yeni kişiye bir kez göndeririz — daha
         // sonra fotoğraf değişirse `set_own_profile_picture` zaten TÜM
         // kişilere tekrar gönderir, burası SADECE ilk eşleşme anını
         // kapsıyor (her yeniden bağlanışta değil, spam önleme).
         //
-        // Defter #18: yorum "SADECE ilk eşleşme anı" diyordu ama kodda o
+        // yorum "SADECE ilk eşleşme anı" diyordu ama kodda o
         // kapı YOKTU — blok, gelen HER `IdentityExchange`'te çalışıyordu.
         // Yukarıdaki `reply_due` kısıtı yalnızca karşı exchange'i koruyor,
         // bunu değil. `reconnect_sweep` bekleyen bir bağlanma hedefine 15

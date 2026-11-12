@@ -100,7 +100,7 @@ class ServerActivity : AppCompatActivity() {
                 // is refused on Android 12+ (see ServerService.onStartCommand).
                 requestIgnoreBatteryOptimizations(quiet = true)
             } else {
-                // Defter #11: artık gerçekten duruyor — `ServerService.onDestroy`
+                // artık gerçekten duruyor — `ServerService.onDestroy`
                 // `ServerLib.stopServer()` çağırıyor, o da Rust döngüsünü
                 // sonlandırıyor. "Yeniden başlatma gerekiyor" uyarısı kalktı.
                 stopService(Intent(this, ServerService::class.java))
@@ -111,7 +111,7 @@ class ServerActivity : AppCompatActivity() {
         nodeSwitch.isChecked = ServerService.isNodeMode(this)
         nodeSwitch.setOnCheckedChangeListener { _, checked ->
             ServerService.setNodeMode(this, checked)
-            // Defter #11: node modu artık gerçekten uygulanabiliyor —
+            // node modu artık gerçekten uygulanabiliyor —
             // sunucuyu durdurup yeniden başlatmak yeterli (süreç öldürmeye
             // gerek yok).
             if (ServerService.isEnabled(this)) {
@@ -368,7 +368,7 @@ class ServerActivity : AppCompatActivity() {
             }
             lastDevicesJson = null
             // Block and revoke rotate the public join code: show the new one
-            // on the next poll, not the dead one (fable I-11).
+            // on the next poll, not the dead one.
             lastInvite = null
             refreshStatus()
         }
@@ -508,7 +508,7 @@ class ServerActivity : AppCompatActivity() {
     /**
      * Blob dizinini seçtirir ve gerekiyorsa BLOB'LARI taşır.
      *
-     * Defter #12: bu yorum eskiden "dizinde SQLite, libp2p kimliği ve Tor
+     * bu yorum eskiden "dizinde SQLite, libp2p kimliği ve Tor
      * onion durumu da duruyor, o yüzden taşımak şart" diyordu — YANLIŞTI.
      * `chooseStorage` yalnızca `blobs` dizinini taşıyor; `data_dir` her
      * zaman `context.filesDir` (bkz. `ServerService.dataDir` ve
@@ -571,7 +571,7 @@ class ServerActivity : AppCompatActivity() {
         // The service is NOT stopped, only the native core: it stays in the
         // foreground through the copy (the process is not killable half-way)
         // and can bring the core back with the app in the background.
-        // M139: files this move created; a failure removes only those, not what was in the target before.
+        // files this move created; a failure removes only those, not what was in the target before.
         val created = java.util.concurrent.CopyOnWriteArrayList<java.io.File>()
         Thread {
             val error = try {

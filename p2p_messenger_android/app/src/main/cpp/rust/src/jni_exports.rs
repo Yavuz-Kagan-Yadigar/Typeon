@@ -8,7 +8,7 @@ use super::*;
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_initDatabaseKeyed<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, files_dir: JString<'local>, key_bytes: JByteArray<'local>) -> jboolean {
     let path: String = jstr(&mut env, &files_dir).unwrap_or_default();
-    // M57: a failed string copy is "", which opened "/p2p_messenger.db".
+    // a failed string copy is "", which opened "/p2p_messenger.db".
     if path.is_empty() {
         return false as jboolean;
     }
@@ -32,7 +32,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_initDatabaseKeyed<'local>(m
 
 /// Debug builds only: the SQLCipher raw key (64 hex characters) for reading
 /// an adb-pulled database. The Kotlin class `DebugDbKey` exists only in the
-/// debug source set; the symbol exists only with the `debug-hooks` feature (M-168).
+/// debug source set; the symbol exists only with the `debug-hooks` feature.
 #[cfg(feature = "debug-hooks")]
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_DebugDbKey_dbKeyHex<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, key_bytes: JByteArray<'local>) -> jstring {
@@ -91,7 +91,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_pbkdf2Sha256<'local>(mut en
         if pw.is_empty() || salt.is_empty() {
             Vec::new()
         } else if let Some(it) = std::num::NonZeroU32::new(iterations.clamp(0, 5_000_000) as u32) {
-            // M9: bounded like `out_len` (the app uses 300 000).
+            // bounded like `out_len` (the app uses 300 000).
             ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA256, it, &salt, pw.as_bytes(), &mut out);
             out
         } else {
@@ -175,7 +175,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setSkippedKeyEncryptionKey<
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_getMessageHistory<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>, limit: jni::sys::jint) -> jstring {
     let fp: String = jstr(&mut env, &peer_device_fingerprint).unwrap_or_default();
     let result = catch_panic(move || {
-        // H57: lock dropped before the JSON is built.
+        // lock dropped before the JSON is built.
         let history = core_lock_read().load_message_history(&fp, limit.clamp(0, MAX_HISTORY_PAGE) as u32, None);
         serde_json::to_string(&history).unwrap_or_else(|_| "[]".to_string())
     });
@@ -183,7 +183,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getMessageHistory<'local>(m
     safe_new_jstring(&mut env, json)
 }
 
-/// H122: only messages archived after `after_timestamp` (the newest
+/// only messages archived after `after_timestamp` (the newest
 /// `timestamp` the screen holds), newest `limit` of them, oldest first.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_getMessageHistorySince<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>, after_timestamp: jlong, limit: jni::sys::jint) -> jstring {
@@ -196,7 +196,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getMessageHistorySince<'loc
     safe_new_jstring(&mut env, json)
 }
 
-/// H122: group twin of `getMessageHistorySince`.
+/// group twin of `getMessageHistorySince`.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_getGroupMessageHistorySince<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, after_timestamp: jlong, limit: jni::sys::jint) -> jstring {
     let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
@@ -208,7 +208,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getGroupMessageHistorySince
     safe_new_jstring(&mut env, json)
 }
 
-/// H137: `{"contacts":{<identity_id>:{"peer","message","attachment"}},
+/// `{"contacts":{<identity_id>:{"peer","message","attachment"}},
 /// "groups":{<group_id>:{"message","attachment"}}}`; `message` is an
 /// `ArchivedMessage` (no reactions/seen-by), `attachment` an
 /// `AttachmentSummary` (no preview), either may be null.
@@ -222,7 +222,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_chatListPreviews<'local>(mu
     safe_new_jstring(&mut env, json)
 }
 
-/// Spec dışı, kullanıcı isteği (sonsuz kaydırma): sohbet geçmişinin en
+/// sohbet geçmişinin en
 /// üstüne kaydırıldığında ÖNCE burası çağrılmalı — YEREL arşivde zaten
 /// `before_timestamp`'ten eski mesaj varsa (ağ gerekmeden, ücretsiz) onları
 /// döner. Boş/sınırdan az dönerse Kotlin tarafı `requestOlderMessageHistory`
@@ -231,7 +231,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_chatListPreviews<'local>(mu
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_getMessageHistoryBefore<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>, before_timestamp: jlong, limit: jni::sys::jint) -> jstring {
     let fp: String = jstr(&mut env, &peer_device_fingerprint).unwrap_or_default();
     let result = catch_panic(move || {
-        // H57: lock dropped before the JSON is built.
+        // lock dropped before the JSON is built.
         let history = core_lock_read().load_message_history(&fp, limit.clamp(0, MAX_HISTORY_PAGE) as u32, Some(before_timestamp));
         serde_json::to_string(&history).unwrap_or_else(|_| "[]".to_string())
     });
@@ -245,7 +245,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getMessageHistoryBefore<'lo
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_getGroupMessageHistoryBefore<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, before_timestamp: jlong, limit: jni::sys::jint) -> jstring {
     let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
     let result = catch_panic(move || {
-        // H57: lock dropped before the JSON is built.
+        // lock dropped before the JSON is built.
         let history = core_lock_read().load_group_message_history(&gid, limit.clamp(0, MAX_HISTORY_PAGE) as u32, Some(before_timestamp));
         serde_json::to_string(&history).unwrap_or_else(|_| "[]".to_string())
     });
@@ -253,7 +253,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getGroupMessageHistoryBefor
     safe_new_jstring(&mut env, json)
 }
 
-/// Spec dışı, hata düzeltmesi (grup geçmişi kalıcılığı): `getMessageHistory`'nin
+/// `getMessageHistory`'nin
 /// grup karşılığı — `GroupChatActivity` açılışında çağrılmalı, aksi halde
 /// (önceki davranış) ekran her açılışta boştan başlar ve sadece o an
 /// canlı gelen/giden mesajları gösterir (bkz. `load_group_message_history`).
@@ -261,7 +261,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getGroupMessageHistoryBefor
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_getGroupMessageHistory<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, limit: jni::sys::jint) -> jstring {
     let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
     let result = catch_panic(move || {
-        // H57: lock dropped before the JSON is built.
+        // lock dropped before the JSON is built.
         let history = core_lock_read().load_group_message_history(&gid, limit.clamp(0, MAX_HISTORY_PAGE) as u32, None);
         serde_json::to_string(&history).unwrap_or_else(|_| "[]".to_string())
     });
@@ -269,7 +269,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getGroupMessageHistory<'loc
     safe_new_jstring(&mut env, json)
 }
 
-/// Spec dışı: dosya/foto/video/ses eki gönderir (bkz.
+/// dosya/foto/video/ses eki gönderir (bkz.
 /// `P2PCore::prepare_and_send_file`). `source_path` Kotlin tarafından
 /// zaten yerel bir dosya yoluna kopyalanmış olmalı (content:// URI burada
 /// işlenmez). BİLİNEN SINIR: senkron bir çağrı — büyük dosyalar için
@@ -293,7 +293,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_prepareAndSendFile<'local>(
     // `duration_ms`: sesli mesaj DIŞINDAKİ türler için Kotlin -1 geçirir
     // (jint null taşıyamadığından) — burada `Option<u32>`'ye çevrilir.
     let duration_opt: Option<u32> = if duration_ms < 0 { None } else { Some(duration_ms as u32) };
-    // Spec dışı, kullanıcı isteği: ekle birlikte açıklama ve yanıt bağlamı.
+    // ekle birlikte açıklama ve yanıt bağlamı.
     // Kotlin, "yok" durumunu BOŞ dize olarak geçiriyor (JNI'da null string
     // ayrı bir kol gerektirirdi ve üç alan için gereksiz karmaşa) — boş
     // dizeler burada `None`'a çevriliyor.
@@ -381,7 +381,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_listGroupAttachmentsBrief<'
     safe_new_jstring(&mut env, api::list_group_attachments_brief(&gid))
 }
 
-/// Spec dışı, kullanıcı isteği (grup ekleri): `prepareAndSendFile`'ın grup
+/// `prepareAndSendFile`'ın grup
 /// karşılığı — bkz. `P2PCore::prepare_and_send_group_file`. Dönüş:
 /// başarılıysa `file_id`, aksi halde `"Error: ..."`. İndirme, tamamlanmış
 /// bir grup ekinin herhangi bir üyesi için MEVCUT `downloadFile` JNI
@@ -471,7 +471,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_encodeJxlLossless<'local>(
     let out: String = jstr(&mut env, &out_path).unwrap_or_default();
     // Native heap, not the Java one: a direct ByteBuffer on Android is a
     // managed array, and 48 MP of pixels ran the app out of Java memory.
-    // L-95: raw pointer code, inside the panic guard too.
+    // raw pointer code, inside the panic guard too.
     let rgba = catch_panic(|| bitmap_rgba(&env, &bitmap)).ok().flatten();
     let result = match rgba {
         Some((mut rgba, width, height)) => catch_panic(move || {
@@ -486,7 +486,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_encodeJxlLossless<'local>(
     safe_new_jstring(&mut env, out)
 }
 
-/// H26: an animated image as a lossless animated JPEG XL. `frames`: one
+/// an animated image as a lossless animated JPEG XL. `frames`: one
 /// `byte[]` per frame of `width * height` RGBA pixels, not premultiplied (what
 /// `Bitmap.copyPixelsToBuffer` gives for `ARGB_8888`); `delays_ms` one per
 /// frame. At most `MAX_ANIMATION_FRAMES` frames and `MAX_IMAGE_PIXELS` in all.
@@ -533,7 +533,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_encodeJxlAnimated<'local>(
     safe_new_jstring(&mut env, out)
 }
 
-/// H26: an animated JPEG XL as an animated GIF (see `attachments::jxl_to_gif`).
+/// an animated JPEG XL as an animated GIF (see `attachments::jxl_to_gif`).
 /// `getAttachmentPlaintextPath` already does this for a received one.
 /// "OK" or "Error: CODE: ...".
 #[no_mangle]
@@ -723,7 +723,7 @@ pub(crate) fn bitmap_rgba(env: &JNIEnv, bitmap: &JObject) -> Option<(Vec<u8>, u3
         if (w as u64 * h as u64) > attachments::MAX_IMAGE_PIXELS || stride < w.checked_mul(4)? {
             return None;
         }
-        // H58: fallible; up to 96 MB, and a failed `with_capacity` aborts
+        // fallible; up to 96 MB, and a failed `with_capacity` aborts
         // the process (no unwind for `catch_panic` to catch).
         let mut rgba = Vec::new();
         if rgba.try_reserve_exact(w * h * 4).is_err() {
@@ -733,7 +733,7 @@ pub(crate) fn bitmap_rgba(env: &JNIEnv, bitmap: &JObject) -> Option<(Vec<u8>, u3
         if AndroidBitmap_lockPixels(raw_env, raw_bitmap, &mut addr) != 0 || addr.is_null() {
             return None;
         }
-        // H60: unlocked on every exit, a panic included.
+        // unlocked on every exit, a panic included.
         struct Unlock(*mut jni::sys::JNIEnv, jni::sys::jobject);
         impl Drop for Unlock {
             fn drop(&mut self) {
@@ -818,7 +818,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setNodeMode(_env: JNIEnv, _
     });
 }
 
-/// Spec dışı, kullanıcı isteği: Ayarlar'daki geçmiş/ek depolama sınırı
+/// Ayarlar'daki geçmiş/ek depolama sınırı
 /// slider'ı (100MB-32GB) için — bkz. `set_history_storage_limit_bytes`.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_setHistoryStorageLimitBytes(_env: JNIEnv, _class: JClass, bytes: jlong) {
@@ -849,7 +849,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getNodeAddress<'local>(mut 
     safe_new_jstring(&mut env, addr)
 }
 
-/// Spec dışı, kullanıcı isteği (Tor): UI için Tor durumu. Dönüş:
+/// UI için Tor durumu. Dönüş:
 /// "disabled" | "bootstrapping" | "ready" | "ready|<host>.onion" | "failed".
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_torStatus<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
@@ -861,7 +861,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_torStatus<'local>(mut env: 
     safe_new_jstring(&mut env, out)
 }
 
-/// Spec dışı, kullanıcı isteği: BU cihazın genel bağlantı durumu (karşı
+/// BU cihazın genel bağlantı durumu (karşı
 /// tarafınki DEĞİL) — JSON: `{"connected_peers": N, "listening": bool,
 /// "tor_enabled": bool, "tor_status": "...", "node_mode": bool}` (bkz.
 /// `P2PCore::own_connection_status`).
@@ -875,7 +875,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_ownConnectionStatus<'local>
     safe_new_jstring(&mut env, out)
 }
 
-/// Spec dışı: ChatActivity'nin "bağlanılıyor..." göstergesi için — bkz.
+/// ChatActivity'nin "bağlanılıyor..." göstergesi için — bkz.
 /// `P2PCore::has_active_session`.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_hasActiveSession<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>) -> jboolean {
@@ -887,7 +887,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_hasActiveSession<'local>(mu
     result.unwrap_or(false) as jboolean
 }
 
-/// Spec dışı: GERÇEK canlı bağlantı durumu (bkz. `P2PCore::is_peer_connected`
+/// GERÇEK canlı bağlantı durumu (bkz. `P2PCore::is_peer_connected`
 /// dokümantasyonu) — `hasActiveSession`'ın aksine bir kez kurulduktan sonra
 /// hep `true` kalmaz, `Swarm`'ın o anki bağlantı defterini yansıtır.
 #[no_mangle]
@@ -900,7 +900,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_isPeerConnected<'local>(mut
     result.unwrap_or(false) as jboolean
 }
 
-/// Spec dışı: bir sohbet ekranı açıldığında proaktif olarak el sıkışmayı
+/// bir sohbet ekranı açıldığında proaktif olarak el sıkışmayı
 /// başlatır — bkz. `P2PCore::ensure_handshake`.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_ensureHandshake<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>) {
@@ -914,7 +914,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_ensureHandshake<'local>(mut
     });
 }
 
-/// Spec dışı: node modu kapalı bir cihazda sohbet ekranı yerel geçmiş
+/// node modu kapalı bir cihazda sohbet ekranı yerel geçmiş
 /// bulamadığında çağrılır — bkz. `P2PCore::request_history_sync`. Yanıt
 /// asenkron (`pollNetwork` üzerinden `"history_sync"` olayı) geldiği için
 /// bu fonksiyon hemen döner, sonuç beklemez.
@@ -974,7 +974,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_processQrPacket<'local>(mut
         let mut core = core_lock();
         core.process_qr_packet(&raw)
     });
-    // Spec dışı, kullanıcı isteği: başarılıysa artık BARE bir identity_id
+    // başarılıysa artık BARE bir identity_id
     // DEĞİL, `{"identity_id":...,"device_fingerprint":...,"device_name":...}`
     // JSON'u — Kotlin tarafı `device_fingerprint`'i kullanarak yeni kişinin
     // sohbet ekranını DOĞRUDAN açabilsin diye (bkz. `process_qr_packet`
@@ -987,7 +987,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_processQrPacket<'local>(mut
     }
 }
 
-/// M129: what a scanned contact QR names, for the confirm step before
+/// what a scanned contact QR names, for the confirm step before
 /// `processQrPacket`. `{"name","short_code","safety_code","identity_id",
 /// "device_fingerprint"}` or "Error: CODE: ..."; changes nothing.
 #[no_mangle]
@@ -1227,7 +1227,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_editMessage<'local>(mut env
     }
 }
 
-/// Spec dışı, kullanıcı isteği: bir mesaja emoji tepkisi bırakır/kaldırır
+/// bir mesaja emoji tepkisi bırakır/kaldırır
 /// — bkz. `P2PCore::react_to_message`. `emoji` boş dize ise kendi tepkim
 /// kaldırılır. Dönen değer, o mesajın GÜNCEL tepki özeti (ör. `"👍2 ❤️"`),
 /// böylece çağıran tarafın ayrıca bir sorgu yapması gerekmez.
@@ -1348,7 +1348,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_pollNetwork<'local>(mut env
         core.poll_events()
     });
     let mut texts = result.unwrap_or_else(|e| { error!("pollNetwork panicked: {}", e); Vec::new() });
-    // fable G-10: events of a turn whose array could not be built (Java heap
+    // events of a turn whose array could not be built (Java heap
     // pressure) go out with the next turn instead of being lost.
     static UNDELIVERED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
     let mut held = UNDELIVERED.lock().unwrap_or_else(|p| p.into_inner());
@@ -1464,7 +1464,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setOwnProfilePicture<'local
     } else {
         Some(jbytearray_to_vec(&mut env, &avatar_jpeg))
     };
-    // M-178: a failed copy arrives empty; do not publish an empty picture.
+    // a failed copy arrives empty; do not publish an empty picture.
     if avatar_vec.as_ref().is_some_and(|v| v.is_empty()) {
         return safe_new_jstring(&mut env, "Error: empty picture");
     }
@@ -1803,7 +1803,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_transferGroupFounder<'local
     safe_new_jstring(&mut env, out)
 }
 
-/// Spec dışı, kullanıcı isteği: uygulama ön plana geldiğinde Kotlin
+/// uygulama ön plana geldiğinde Kotlin
 /// tarafından (bkz. `P2PApplication` foreground algılama) çağrılır — bkz.
 /// `P2PCore::retry_all_pending_now` dokümantasyonu.
 #[no_mangle]
@@ -2012,7 +2012,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_removeFromGroup<'local>(mut
     safe_new_jstring(&mut env, out)
 }
 
-/// Spec dışı, kullanıcı isteği: grubu TÜM üyeler için siler (yalnızca
+/// grubu TÜM üyeler için siler (yalnızca
 /// kurucu) — bkz. `P2PCore::delete_group`.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteGroup<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>) -> jstring {
@@ -2030,7 +2030,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteGroup<'local>(mut env
     safe_new_jstring(&mut env, out)
 }
 
-/// #81 (H103): the founder re-sends the current group state to every
+/// #81: the founder re-sends the current group state to every
 /// member device — bkz. `P2PCore::resend_group_to_all`. "OK" / "Error: …".
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_resendGroupToAll<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>) -> jstring {
@@ -2047,7 +2047,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_resendGroupToAll<'local>(mu
     safe_new_jstring(&mut env, out)
 }
 
-/// Spec dışı, kullanıcı isteği: kurucu OLMAYAN bir üye gruptan kendi
+/// kurucu OLMAYAN bir üye gruptan kendi
 /// isteğiyle ayrılır — bkz. `P2PCore::leave_group`.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_leaveGroup<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>) -> jstring {
@@ -2079,7 +2079,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setGroupProfilePicture<'loc
     } else {
         Some(jbytearray_to_vec(&mut env, &avatar_jpeg))
     };
-    // M-178: a failed copy arrives empty; do not publish an empty picture.
+    // a failed copy arrives empty; do not publish an empty picture.
     if avatar_vec.as_ref().is_some_and(|v| v.is_empty()) {
         return safe_new_jstring(&mut env, "Error: empty picture");
     }
@@ -2124,7 +2124,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mu
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_exportRecovery<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, pass: JString<'local>) -> jni::sys::jbyteArray {
     let pass_str = zeroize::Zeroizing::new(jstr(&mut env, &pass).unwrap_or_default());
     let result = catch_panic(move || {
-        // Argon2 runs after the core lock is released (M-21).
+        // Argon2 runs after the core lock is released.
         let chats = recovery_chats_unlocked();
         let (plaintext, pass) = core_lock_read().recovery_plaintext(pass_str.to_string(), Some(chats))?;
         seal_recovery_file(&plaintext, &pass)
@@ -2151,7 +2151,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_importRecovery<'local>(
     let pass_str = zeroize::Zeroizing::new(jstr(&mut env, &passphrase).unwrap_or_default());
     let name: String = jstr(&mut env, &device_name).unwrap_or_else(|| "Device".to_string());
     let result = catch_panic(move || {
-        // Argon2 runs without the core lock (M-21).
+        // Argon2 runs without the core lock.
         core_lock_read().import_recovery_precheck()?;
         let plaintext = open_recovery_file(&raw, &pass_str)?;
         let mut core = core_lock();
@@ -2189,7 +2189,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_importRecovery<'local>(
 /// DIŞINDA, panic'ten etkilenmeyen çağıran kodda yapılır — böylece panic
 /// olsun olmasın her zaman geçerli bir (non-null) JNI değeri döner.
 pub(crate) fn catch_panic<T>(f: impl FnOnce() -> T) -> Result<T, String> {
-    // M-176: every export runs inside the runtime context, not only the ones
+    // every export runs inside the runtime context, not only the ones
     // that remembered `RUNTIME.enter()`.
     // Inside `catch_unwind`: a failing lazy runtime init must not unwind into JNI.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2210,7 +2210,7 @@ pub(crate) fn catch_panic<T>(f: impl FnOnce() -> T) -> Result<T, String> {
     })
 }
 
-/// M112: the stable code of a core error message, for the UI to pick a
+/// the stable code of a core error message, for the UI to pick a
 /// localized text. First match wins; the order matters (e.g. "zaten" before
 /// "kişi bulunamadı"-style lookups). ponytail: keyed on the message text, so a
 /// reworded message can move to INTERNAL; `error_code_tests` pins the main ones.
@@ -2275,7 +2275,7 @@ mod error_code_tests {
     }
 }
 
-/// Spec dışı, güvenlik/kararlılık denetimi düzeltmesi: bu yardımcılar
+/// bu yardımcılar
 /// (`bytes_to_jbytearray`/`strings_to_jobjectarray`/`safe_new_jstring`)
 /// önceden JNIEnv çağrılarının dönüşünü doğrudan `.unwrap()` ile açıyordu.
 /// `catch_panic` YALNIZCA saf Rust mantığını (yukarıdaki dokümantasyon)
@@ -2307,7 +2307,7 @@ mod error_code_tests {
 /// all run under the core lock.
 pub(crate) const MAX_HISTORY_PAGE: jni::sys::jint = 500;
 pub(crate) const MAX_LISTED_ATTACHMENTS: usize = 500;
-/// H3: the text (history) or preview (attachment list) bytes of one page.
+/// the text (history) or preview (attachment list) bytes of one page.
 pub(crate) const PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 /// Charges `bytes` to a page read newest first. `true`: stop before this

@@ -34,7 +34,7 @@ import org.json.JSONObject
  * kalır (mesaj geçmişi o durumda hiç saklanmıyor) — gruplar için de aynı
  * kısıt geçerli (bkz. `archive_group_message`).
  *
- * Spec dışı: önceden ayrı bir "Gruplar" sekmesi vardı — kullanıcı isteği
+ * önceden ayrı bir "Gruplar" sekmesi vardı — kullanıcı isteği
  * üzerine kaldırıldı, grup listesi/oluşturma buraya taşındı (bkz.
  * `btnCreateGroup`, eski GroupsFragment'in mantığı).
  */
@@ -137,7 +137,7 @@ class ChatsFragment : Fragment() {
         adapter.onContactLongClick = { message -> showChatLongPressMenu(message) }
         recycler.adapter = adapter
 
-        // Spec dışı, kullanıcı isteği: kişi/grup adına göre arama.
+        // kişi/grup adına göre arama.
         view.findViewById<SearchView>(R.id.searchChats).setOnQueryTextListener(object : SearchView.OnQueryTextListener {
             override fun onQueryTextSubmit(query: String?): Boolean = false
             override fun onQueryTextChange(newText: String?): Boolean {
@@ -175,7 +175,7 @@ class ChatsFragment : Fragment() {
     }
 
     /**
-     * Spec dışı, uzun basma menüsü: kullanıcıyla birlikte netleştirilen iki
+     * kullanıcıyla birlikte netleştirilen iki
      * ayrı seçenek — "sohbet geçmişini temizle" (yumuşak, tek onay, kişi
      * paired kalır) ve "kişiyi sil" (sert, ÇİFT onay, eşleşme dahil her şey
      * silinir). SADECE kişiler için — gruplar `realContactId` taşımadığından
@@ -184,7 +184,7 @@ class ChatsFragment : Fragment() {
      */
     private fun showChatLongPressMenu(message: ChatAdapter.ChatMessage) {
         val pinLabel = getString(if (message.isPinned) R.string.action_unpin_chat else R.string.action_pin_chat)
-        // Spec dışı, kullanıcı isteği: grup satırlarında DM seçenekleri
+        // grup satırlarında DM seçenekleri
         // (geçmişi temizle/cihaz iptal/kişi sil) anlamsız — kurucuysak
         // "grubu herkes için sil" gösterilir; DİĞER üyeler için "gruptan
         // ayrıl" gösterilir (bkz. Rust `leave_group` — kurucu ayrılamaz,
@@ -224,7 +224,7 @@ class ChatsFragment : Fragment() {
             .show()
     }
 
-    /** Spec dışı, kullanıcı isteği: kurucu, grubu TÜM üyeler için siler
+    /** kurucu, grubu TÜM üyeler için siler
      *  (imzalı `GroupChange::Delete` herkese gider) — geri alınamaz, bu
      *  yüzden onay isteniyor (bkz. Rust `delete_group`). */
     private fun confirmDeleteGroup(message: ChatAdapter.ChatMessage) {
@@ -246,7 +246,7 @@ class ChatsFragment : Fragment() {
             .show()
     }
 
-    /** Spec dışı, kullanıcı isteği: kurucu OLMAYAN bir üye gruptan kendi
+    /** kurucu OLMAYAN bir üye gruptan kendi
      *  isteğiyle ayrılır (bkz. Rust `leave_group`) — geri alınamaz (tekrar
      *  katılmak için yeniden davet edilmek gerekir), bu yüzden onay
      *  isteniyor. */
@@ -507,7 +507,7 @@ class ChatsFragment : Fragment() {
         val duplicateNames = com.p2p.messenger.util.ContactNames.duplicates(contacts.map { it.displayName })
         val contactItems = contacts.map { contact ->
             val fingerprint = contact.activeDeviceFingerprint ?: ""
-            // Spec dışı, kullanıcı isteği: son satır SADECE metin mesajı
+            // son satır SADECE metin mesajı
             // değil, EK de olabilir — ikisinden hangisi daha yeniyse o
             // gösterilir (ekler `messages` tablosunda değil `files`
             // tablosunda tutulduğu için ayrı sorgulanır).
@@ -528,7 +528,7 @@ class ChatsFragment : Fragment() {
             )
         }
         val groupItems = groups.map { group ->
-            // Spec dışı, kullanıcı isteği: gruplar için de gerçek son mesaj/ek
+            // gruplar için de gerçek son mesaj/ek
             // önizlemesi (1:1 kişilerle AYNI mantık) — hem sohbet listesinin
             // "en güncel mesaj atılan en üstte" sıralanabilmesi için gerçek
             // bir zaman damgası gerektiğinden, hem de sabit "N üye" metninin
@@ -548,7 +548,7 @@ class ChatsFragment : Fragment() {
                 isGroupFounder = group.isFounder
             )
         }
-        // Spec dışı, kullanıcı isteği: sohbet listesi en güncel mesaj
+        // sohbet listesi en güncel mesaj
         // atılan/alınan en üstte olacak şekilde sıralanır (hem kişiler hem
         // gruplar, tek bir zaman çizelgesinde). Hiç mesajı olmayan bir
         // sohbet (timestamp=0) listenin EN ALTINDA kalır — azalan sıralamada
@@ -582,7 +582,7 @@ class ChatsFragment : Fragment() {
     private data class GroupRow(val groupId: String, val name: String, val memberCount: Int, val avatarHex: String?, val isFounder: Boolean)
     private data class LastMessagePreview(val text: String, val timestamp: Long)
 
-    /** H137: the newer of the last text row and the last attachment (one
+    /** the newer of the last text row and the last attachment (one
      *  `chatListPreviews` call for the whole list instead of two per chat). */
     private fun previewOf(entry: JSONObject?): LastMessagePreview? {
         if (entry == null) return null
@@ -662,7 +662,7 @@ class ChatsFragment : Fragment() {
                 name = obj.optString("name"),
                 memberCount = members?.length() ?: 0,
                 avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null },
-                // Spec dışı, kullanıcı isteği: "grubu herkes için sil"
+                // "grubu herkes için sil"
                 // seçeneği yalnızca kurucuya gösterilir.
                 isFounder = obj.optBoolean("is_founder", false)
             )

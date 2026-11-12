@@ -61,7 +61,7 @@ class CallActivity : AppCompatActivity() {
 
     companion object {
         /** The call screen is in picture-in-picture: `P2PApplication` does
-         *  not count it as a visible screen for the background lock (fable J-02). */
+         *  not count it as a visible screen for the background lock. */
         @Volatile var inPip = false
 
         private const val TAG = "CallActivity"
@@ -171,7 +171,7 @@ class CallActivity : AppCompatActivity() {
     private val analysisExecutor = Executors.newSingleThreadExecutor()
     /** slot -> tile */
     private val tiles = HashMap<Int, Tile>()
-    /** H140: phase/participant changes arrive as `call_state` events (same
+    /** phase/participant changes arrive as `call_state` events (same
      *  JSON as `callState()`); the poll below only keeps the timer and media
      *  stats moving. */
     private val keepPollFast: (String) -> Unit = { msg ->

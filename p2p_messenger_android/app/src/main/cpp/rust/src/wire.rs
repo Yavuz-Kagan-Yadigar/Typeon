@@ -5,7 +5,7 @@ use super::*;
 
 /// bkz. `KEEPALIVE_FAST_INTERVAL_MS` dokümantasyonu — bu istek/yanıtın
 /// kendisinin içeriği önemsiz, tek amacı bağlantının hâlâ canlı olduğunu
-/// (round-trip tamamlanabiliyor mu) doğrulamak. `request_response::cbor`
+/// doğrulamak. `request_response::cbor`
 /// gerektirdiği için boş bir struct bile CBOR ile (de)serialize edilebilir
 /// olmalı — `#[derive(Serialize, Deserialize)]` bunu ek alan olmadan sağlar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,7 +114,7 @@ pub(crate) struct P2PBehaviour {
     pub(crate) server_rpc: request_response::cbor::Behaviour<server_proto::ServerRequest, server_proto::ServerResponse>,
     pub(crate) kad: kad::Behaviour<MemoryStore>,
     pub(crate) identify: identify::Behaviour,
-    /// Spec dışı, kullanıcı isteği (bağlantı sağlamlığı + pil): aktif
+    /// aktif
     /// bağlantı canlılık testi — bkz. `KeepAliveRequest`/`KeepAliveState`/
     /// `poll_events` Keepalive kolu dokümantasyonu. Bir bağlantının "yarı
     /// açık" (half-open — libp2p hâlâ bağlı sanıyor ama karşı taraf
@@ -172,6 +172,6 @@ pub(crate) struct P2PBehaviour {
     /// protokolü hiç raporlamıyor — `known_relay_peers` artık SADECE
     /// gerçekten hizmet verebilecek (`node_mode=true`) cihazları içeriyor.
     pub(crate) relay: Toggle<relay::Behaviour>,
-    // mDNS, UPnP and dcutr were removed (M-201): onion-only transport, loopback-only
+    // mDNS, UPnP and dcutr were removed: onion-only transport, loopback-only
     // listener — mDNS beaconed our PeerId on the LAN and UPnP had nothing to map.
 }

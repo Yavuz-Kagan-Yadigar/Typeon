@@ -6,7 +6,7 @@
 # Usage: sign-release.sh in.apk out.apk
 set -eu
 K="${TYPEON_SIGNING:-$HOME/.config/typeon-signing}"
-# H113: the newest installed build-tools.
+# the newest installed build-tools.
 B="$(ls -d "${ANDROID_HOME:-$HOME/Android/Sdk}"/build-tools/*/ | sort -V | tail -1)"
 D="$(dirname "$0")/p2p_messenger_android/app/debug.keystore"
 # --rotation-min-sdk-version 28: the default (33) left Android 9-12 on the

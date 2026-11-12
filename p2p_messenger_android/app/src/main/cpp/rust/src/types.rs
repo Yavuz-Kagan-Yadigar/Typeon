@@ -58,7 +58,7 @@ pub(crate) struct DeviceKeys {
 /// "Rust master şifreleme anahtarını hiç görmesin" ilkesini sağlar: Rust
 /// sadece plaintext key üretir/tüketir, şifreleme/diske yazma Kotlin'in
 /// işidir.
-// Spec dışı, güvenlik denetimi düzeltmesi: `Debug` KASITLI OLARAK derive
+// `Debug` KASITLI OLARAK derive
 // edilmiyor — bu struct dört ham secret key baytını taşıyor, `Debug`
 // olsaydı ileride biri yanlışlıkla `error!("{:?}", bundle)` gibi bir satır
 // eklerse uzun-vadeli kimlik anahtarları düz metin olarak Android logcat'e
@@ -121,7 +121,7 @@ pub struct DeviceAlertInfo {
     pub new_device_short_code: String,
 }
 
-/// Spec dışı, kullanıcı isteği: Ayarlar'daki "bekleyen mesajlar" listesi
+/// Ayarlar'daki "bekleyen mesajlar" listesi
 /// (bkz. `P2PCore::list_pending_messages`) için — `awaiting_confirmation`'da
 /// hâlâ onay bekleyen, kullanıcının GERÇEKTEN yazdığı bir sohbet mesajı
 /// (Edit/Delete/GroupUpdate gibi dahili paketler DEĞİL, bkz. o fonksiyonun
@@ -132,7 +132,7 @@ pub struct DeviceAlertInfo {
 pub struct PendingMessageSummary {
     pub message_id: String,
     pub peer_device_fingerprint: String,
-    /// Spec dışı, kullanıcı isteği: hedef CİHAZIN adı (bkz.
+    /// hedef CİHAZIN adı (bkz.
     /// `DeviceRecord.device_name`) — kişi/grup adı tek başına HANGİ
     /// cihazın hâlâ onay vermediğini söylemez (pairwise grup fan-out'unda
     /// her `PendingMessageSummary` tek bir üyenin tek bir cihazına karşılık
@@ -154,7 +154,7 @@ pub struct ContactSummary {
     pub identity_id: String,
     /// None ise: henüz IdentityExchange tamamlanmamış, mesaj gönderilemez.
     pub active_device_fingerprint: Option<String>,
-    /// Spec dışı: bu kişinin bize gönderdiği profil fotoğrafı (varsa),
+    /// bu kişinin bize gönderdiği profil fotoğrafı (varsa),
     /// `list_attachments`'taki `preview_hex` ile AYNI hex-encode deseni —
     /// JSON ham ikili taşıyamadığı için.
     pub avatar_hex: Option<String>,
@@ -175,7 +175,7 @@ pub struct ArchivedMessage {
     pub direction: String, // "sent" | "received"
     pub text: String,
     pub timestamp: u64,
-    /// Spec dışı, kullanıcı isteği (gönderim-sırası gösterimi): GÖSTERİM/
+    /// GÖSTERİM/
     /// SIRALAMA için etkin zaman — göndericinin gönderim anı (`sent_at_ms`),
     /// bilinmiyorsa yerel `timestamp`'e düşülür. `timestamp` (yerel alınma
     /// anı) sync/sayfalama için ayrıca korunur. Kotlin tarafı balonları
@@ -191,13 +191,13 @@ pub struct ArchivedMessage {
     /// güvenli varsayım, aksi halde eski satırlar sonsuza dek "pending"
     /// görünürdü).
     pub status: Option<String>,
-    /// Spec dışı, hata düzeltmesi (grup geçmişi): SADECE grup
+    /// SADECE grup
     /// mesajlarında dolu — bir grupta birden fazla gönderen olabileceği
     /// için (1:1'in aksine, `direction` tek başına yeterli değil)
     /// GroupChatActivity'nin doğru gönderen adını/avatarını göstermesi
     /// için gerekli.
     pub sender_identity_id: Option<String>,
-    /// Spec dışı: bu satırın kararlı mesaj kimliği (varsa) — reload
+    /// bu satırın kararlı mesaj kimliği (varsa) — reload
     /// sonrası "seen" eşleşmesi ve durum güncellemeleri için (bkz.
     /// dosya başı "BİLİNEN SINIR" notu — artık kısmen çözüldü).
     pub message_id: Option<String>,
@@ -224,13 +224,13 @@ pub struct ArchivedMessage {
     /// The row came from a contact's 1:1 history answer (`mark_synced`).
     #[serde(default)]
     pub via_sync: bool,
-    /// Spec dışı, kullanıcı isteği: bu mesaja bırakılmış tepkilerin hazır
+    /// bu mesaja bırakılmış tepkilerin hazır
     /// özeti (ör. `"👍2 ❤️"`). Boş dize = tepki yok. Kotlin tarafı bunu
     /// olduğu gibi tepki pill'ine yazar — ayrıca bir sorgu yapmaz (bkz.
     /// `reactions_summary`).
     #[serde(default)]
     pub reactions: String,
-    /// Spec dışı, hata düzeltmesi (kullanıcı: "seen mekanizması ve seen pp
+    /// "seen mekanizması ve seen pp
     /// bubbles güvenilir değil, özellikle gruplarda"): bu mesajı kimlerin
     /// gördüğü — `reactions` ile AYNI "gömülü özet" deseni (bkz.
     /// `seen_by_json`), `[{"identity_id":..,"seen_at_ms":..}]`. Önceden bu
@@ -283,17 +283,17 @@ pub struct AttachmentSummary {
     /// Sesli mesajlar için çalma süresi (milisaniye) — bkz.
     /// `MessageContent::FileOffer.duration_ms`.
     pub duration_ms: Option<u32>,
-    /// Spec dışı, kullanıcı isteği (grup ekleri): SADECE `list_group_attachments`
+    /// SADECE `list_group_attachments`
     /// tarafından doldurulur — grup içinde farklı ekler FARKLI göndericilerden
     /// gelebileceğinden (1:1'in aksine, orada zaten sorgunun kendisi tek bir
     /// peer'e sabit), `download_file`'ın "kimden indirileceğini" bilmesi için
     /// gerekli. `list_attachments` (1:1) için her zaman boş string.
     pub peer_device_fingerprint: String,
-    /// Spec dışı, kullanıcı isteği (grup ekleri): SADECE grup eklerinde dolu
+    /// SADECE grup eklerinde dolu
     /// — gönderen adını/avatarını göstermek için (bkz. `ArchivedMessage.
     /// sender_identity_id` AYNI gerekçe).
     pub sender_identity_id: Option<String>,
-    /// Spec dışı, kullanıcı isteği: ekle birlikte gönderilen açıklama ve
+    /// ekle birlikte gönderilen açıklama ve
     /// (varsa) yanıtlanan mesajın bağlamı — sohbet yeniden açıldığında ek
     /// balonu bunları metin mesajlarıyla AYNI biçimde geri kurabilsin diye
     /// arşivden okunuyor (bkz. `files` tablosundaki aynı adlı kolonlar).
@@ -348,7 +348,7 @@ pub(crate) struct DownloadState {
     /// bu alan indirmenin ne kadar süredir hiç İLERLEMEDİĞİNİ (retry
     /// denemeleri SAYILMAZ) izler, "artık pes et" kararı için kullanılır.
     pub(crate) last_progress_at: u64,
-    /// Spec dışı, ağ sağlamlığı düzeltmesi: en son AYNI PARÇAYI yeniden
+    /// en son AYNI PARÇAYI yeniden
     /// istediğimiz an — bkz. `DOWNLOAD_STALL_TIMEOUT_MS`/
     /// `check_stalled_downloads`/`retry_or_give_up_download`. `last_progress_at`'tan
     /// AYRI tutulur: eğer ikisi AYNI alan olsaydı, bir yeniden deneme
@@ -539,7 +539,7 @@ pub(crate) struct PendingConfirmation {
     /// ciphertext'in kendi 25 dakikalık penceresi başlar). "İlk kuyruğa
     /// girdiği an" için bkz. `original_sent_at` (O SIFIRLANMAZ).
     pub(crate) first_sent_at: u64,
-    /// Spec dışı, kullanıcı isteği: bu mesajın İLK KEZ kuyruğa girdiği an
+    /// bu mesajın İLK KEZ kuyruğa girdiği an
     /// — `regen_content` tazelemeleri arasında SABİT kalır (bkz.
     /// `first_sent_at`'in aksine). `TEXT_RETRY_GIVE_UP_MS`'nin (7 gün)
     /// ölçtüğü budur — "karşı taraf günlerce çevrimdışı olsa bile mesaj
@@ -548,7 +548,7 @@ pub(crate) struct PendingConfirmation {
     /// YAZILDIĞIYLA ilgili. Ayrıca Ayarlar'daki bekleyen mesajlar
     /// listesinde (bkz. `list_pending_messages`) kullanıcıya gösterilir.
     pub(crate) original_sent_at: u64,
-    /// Spec dışı, kullanıcı isteği: EN SON gerçek bir gönderim denemesinin
+    /// EN SON gerçek bir gönderim denemesinin
     /// (başarılı olsun olmasın) yapıldığı an — Ayarlar'daki bekleyen
     /// mesajlar listesinde "son deneme: ..." olarak gösterilir. `next_retry_at`
     /// GELECEĞİ (bir sonraki deneme ne zaman) taşır, bu alan GEÇMİŞİ.

@@ -86,7 +86,7 @@ object NotificationHelper {
             putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, displayName)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        // Spec dışı, kullanıcı isteği: bildirim başlığı artık kişi/grup adı
+        // bildirim başlığı artık kişi/grup adı
         // DEĞİL, her zaman uygulama adı ("Typeon") — kimin/nereden geldiği
         // bilgisi gövdeye ("{isim}: mesaj" biçiminde) taşındı.
         //
@@ -98,7 +98,7 @@ object NotificationHelper {
         show(context, peerDeviceFingerprint.hashCode(), context.getString(R.string.app_name), body, intent, alert)
     }
 
-    /** Spec dışı (dış AI incelemesi düzeltmesi — AI2-G, self-revocation): bu
+    /** Spec dışı  : bu
      *  cihaz birincil cihaz tarafından iptal edildiğinde (kendi
      *  DeviceRevokeNotice'ını aldı) yerel veri silinip onboarding'e dönülür;
      *  bu, kullanıcıya NEDEN geri döndüğünü açıklayan tek seferlik bildirim.
@@ -135,7 +135,7 @@ object NotificationHelper {
         show(
             context, DEVICE_ALERT_NOTIFICATION_ID,
             context.getString(R.string.title_security_warning_dialog),
-            // No contact name while message text is hidden (fable J-03): the
+            // No contact name while message text is hidden: the
             // lock screen may show the body. The app shows it after unlock.
             if (NotificationPrefs.showMessageText(context)) context.getString(R.string.notif_new_device_warning, contactName, shortCode)
             else context.getString(R.string.msg_security_warning),
@@ -190,7 +190,7 @@ object NotificationHelper {
         show(context, ("group:$groupId").hashCode(), context.getString(R.string.app_name), body, intent)
     }
 
-    /** Spec dışı, kullanıcı isteği: uygulama ön plana/ana ekrana her
+    /** uygulama ön plana/ana ekrana her
      *  girildiğinde TÜM mesaj bildirimlerini temizler — kullanıcı zaten
      *  uygulamayı açtığından bildirim çubuğunda asılı kalmalarının bir
      *  anlamı yok. `MainActivity.onResume`'dan çağrılır.
@@ -223,12 +223,12 @@ object NotificationHelper {
         }
     }
 
-    /** Spec dışı, kullanıcı isteği: belirli bir 1:1 sohbet açıldığında
+    /** belirli bir 1:1 sohbet açıldığında
      *  SADECE o kişiye ait bildirimi temizler (bkz. `showMessageNotification`
      *  AYNI kimlik hesaplaması — `clearAll`'dan daha dar kapsamlı, ChatActivity
      *  onResume'dan çağrılır). */
     fun clearForPeer(context: Context, peerDeviceFingerprint: String) {
-        shownMessageId.remove(peerDeviceFingerprint.hashCode()) // M118: no stale mapping
+        shownMessageId.remove(peerDeviceFingerprint.hashCode()) // no stale mapping
         context.getSystemService(NotificationManager::class.java).cancel(peerDeviceFingerprint.hashCode())
     }
 
@@ -293,7 +293,7 @@ object NotificationHelper {
             context, notificationId, launchIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        // Spec dışı, güvenlik denetimi düzeltmesi: bu uygulamanın TÜM amacı
+        // bu uygulamanın TÜM amacı
         // uçtan uca şifreleme olduğu halde, bildirimler çözülmüş mesaj
         // METNİNİ hiçbir kilit ekranı gizleme/redaksiyonu olmadan
         // gösteriyordu. Android'in cihaz genelindeki "kilit ekranında

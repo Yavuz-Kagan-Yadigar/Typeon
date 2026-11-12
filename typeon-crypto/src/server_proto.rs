@@ -1,169 +1,157 @@
-//! Sunucu (store-and-forward) protokolü — istemci ve sunucunun ORTAK kablo
-//! tipleri.
+//! Server (store-and-forward) protocol: the wire types shared by client and server.
 //!
-//! Bu modül neden `pub`: depo kökündeki `typeon-server/` crate'i bu çekirdeği
-//! (`Linux/` masaüstü istemcisinin yaptığı gibi) bir path bağımlılığı olarak
-//! linkler ve BU tipleri kullanır. Tek bir tanım var, elle senkron tutulacak
-//! ikinci bir kopya YOK — `api` modülünün Linux istemcisi için var olmasıyla
-//! aynı gerekçe.
+//! The `pub` is needed because `typeon-server` links this core as a path
+//! dependency and uses these types directly. There is one definition, not a
+//! second copy to keep in sync.
 //!
-//! ## Sunucu NE DEĞİLDİR
+//! ## What the server is not
 //!
-//! Bu bir libp2p Circuit Relay v2 DEĞİLDİR. Röle, iki taraf da O ANDA
-//! bağlıyken canlı bir devre kurar ve HİÇBİR ŞEY SAKLAMAZ (bkz. depo
-//! kökündeki `Bagimsiz-AI-Inceleme-Notlari.md` §17). Buradaki sunucu bunun
-//! tam tersi: alıcı çevrimdışıyken zarfı DİSKE yazar, alıcı geri döndüğünde
-//! teslim eder, teslim onaylanana kadar da silmez.
+//! It is not a libp2p Circuit Relay v2. A relay builds a live circuit while both
+//! peers are connected and stores nothing. This server does the opposite: when
+//! the recipient is offline it writes the envelope to disk, delivers it when the
+//! recipient returns, and keeps it until delivery is acknowledged.
 //!
-//! ## İki AYRI depo — birleştirmek en büyük tasarım hatası olurdu
+//! ## Two separate stores
 //!
-//! 1. **Teslim (mail)**: mühürlü zarflar. Alıcı `Ack`'leyince SİLİNİR, en
-//!    fazla `mailbox_ttl_ms` yaşar.
-//! 2. **Arşiv (archive)**: geçmiş. Teslim zarfları burada KULLANILAMAZ —
-//!    ratchet mesaj anahtarları ileri-gizli ve kullanıldıktan sonra
-//!    siliniyor, yani geçen haftanın zarfı bugün HİÇ KİMSE tarafından
-//!    çözülemez. Arşiv, istemcinin `archive_key` ile YENİDEN şifrelediği
-//!    ayrı kayıtlardır (bkz. `server_seal::seal_archive_record`).
+//! 1. **Mail**: sealed envelopes. Deleted when the recipient `Ack`s them, and at
+//!    most `mailbox_ttl_ms` old.
+//! 2. **Archive**: history. Mail envelopes cannot be used here: ratchet message
+//!    keys are forward-secret and deleted after use, so last week's envelope
+//!    cannot be decrypted today. The archive holds separate records that the
+//!    client re-encrypts with its `archive_key` (see
+//!    `server_seal::seal_archive_record`).
 //!
-//! ## Boyut tavanı — KABLO SEVİYESİNDE SERT SINIR
+//! ## Size limit: a hard cap on the wire
 //!
-//! `libp2p-request-response`'un CBOR codec'i istek boyutunu `1 MiB` ile
-//! SABİT olarak sınırlar (`cbor.rs`: `REQUEST_SIZE_MAXIMUM`, bir associated
-//! const — `Behaviour::new` üzerinden AYARLANAMAZ) ve okumayı `io.take()`
-//! ile yapar: tavanı aşan bir istek SESSİZCE KIRPILIR, sonra CBOR çözümü
-//! başarısız olur. Yanıt tavanı 10 MiB.
+//! The CBOR codec of `libp2p-request-response` caps request size at 1 MiB
+//! (`cbor.rs`: `REQUEST_SIZE_MAXIMUM`, an associated const that `Behaviour::new`
+//! cannot change). It reads with `io.take()`, so an oversized request is cut
+//! silently and CBOR decoding then fails. The response cap is 10 MiB.
 //!
-//! Bu, gossipsub'ın `max_transmit_size`'ı (TAM OLARAK 1 MiB) ile birleşince
-//! ince bir tuzak yaratıyor: gossipsub'a SIĞAN bir `FileOffer` (büyük bir
-//! `preview_jpeg` ile), `Deposit` içine CBOR'lanınca sığmayabilir. Bu yüzden
-//! `MAX_DEPOSIT_BYTES` tavanın belirgin şekilde ALTINDA ve aşan zarflar
-//! sunucuya HİÇ denenmez, doğrudan gossipsub'a gider.
+//! Gossipsub's `max_transmit_size` is also exactly 1 MiB. A `FileOffer` that fits
+//! gossipsub (with a large `preview_jpeg`) may not fit in a CBOR `Deposit`. So
+//! `MAX_DEPOSIT_BYTES` is well below the cap, and envelopes over it are never
+//! tried on the server and go to gossipsub directly.
 
 use serde::{Deserialize, Serialize};
 
-/// Sunucu RPC protokol kimliği. `FILE_TRANSFER_PROTOCOL`/`KEEPALIVE_PROTOCOL`
-/// ile aynı desende, `request_response::cbor::Behaviour` üzerinde taşınır.
+/// Server RPC protocol id. Carried on `request_response::cbor::Behaviour`, as
+/// `FILE_TRANSFER_PROTOCOL` and `KEEPALIVE_PROTOCOL` are.
 ///
-/// İKİ UÇ DA `ProtocolSupport::Full` kaydeder — sunucunun istemciye
-/// KENDİLİĞİNDEN `Notify` gönderebilmesi için (bkz. `ServerRequest::Notify`).
-/// `request_response` yalnızca istek-BAŞLATAN tarafı belirler, yön değil.
+/// Both ends register `ProtocolSupport::Full`, so the server can send `Notify`
+/// on its own (see `ServerRequest::Notify`). `request_response` only decides
+/// which side starts a request, not the direction.
 pub const SERVER_PROTOCOL: &str = "/typeon/server/1.0.0";
 
-/// Live call-media relay: ONE long-lived libp2p stream per client, opened by
-/// the client while it is in a call. Frames are `[u16 mailbox len][mailbox]
-/// [u32 len][data]` (core `call::encode_frame`). Client -> server: "push
-/// `data` to whoever is connected and listening on `mailbox`" (the target's
-/// `key_bound_mailbox_id` of the pair key, registered for the call). The sender is
-/// not checked against the readers of `mailbox`: the id is its capability,
-/// and the receiver registers it, not the sender. Server -> client: the same frame with an empty
-/// mailbox. Nothing is stored: a target that is not connected right now
-/// simply misses the frame, which is the right thing for live audio/video.
-/// `data` is already end-to-end encrypted with a per-call key the server
-/// never sees (it travels inside the ratchet, `MessageContent::Call`).
+/// Live call-media relay: one long-lived libp2p stream per client, opened while
+/// the client is in a call. Frames are `[u16 mailbox len][mailbox][u32 len][data]`
+/// (core `call::encode_frame`). Client to server: "push `data` to whoever is
+/// connected and listening on `mailbox`". The mailbox is the target's
+/// `key_bound_mailbox_id` for the pair key, registered for the call. The sender
+/// is not checked against the readers: the id is the capability, and the receiver
+/// registers it. Server to client: the same frame with an empty mailbox.
+/// Nothing is stored. A target that is not connected misses the frame, which is
+/// correct for live audio and video. `data` is already end-to-end encrypted with
+/// a per-call key the server never sees (`MessageContent::Call`).
 pub const RELAY_PROTOCOL: &str = "/typeon/relay/1.0.0";
 
-/// Kablo formatı sürümü — `Hello`/`Welcome` içinde takas edilir.
+/// Wire format version, exchanged in `Hello`/`Welcome`.
 /// 2: `Register` answers `Registered { proof_needed, refused }`.
 /// 4: blob requests carry `upload_secret` instead of `blob_id`.
-/// 5: session and relay mailbox ids are made from their proof key
+/// 5: session and relay mailbox ids are derived from their proof key
 ///    (`key_bound_mailbox_id`); the server refuses any other key for them.
 /// 6: upload secrets are 24 bytes and start with the file's author tag
 ///    (`blob_id_for_upload_secret`).
-/// 7: the id hashes only the secret's bytes after the tag (I-42: a group
-///    file's tag is then made per file, see core `group_msg_tag`).
+/// 7: the id hashes only the secret bytes after the tag. A group file's tag is
+///    made per file (core `group_msg_tag`).
 pub const SERVER_PROTOCOL_VERSION: u16 = 7;
 
-/// Tek bir `Deposit`in azami yükü. Modül başındaki "Boyut tavanı" notuna
-/// bakın: codec'in sert sınırı 1 MiB, buradaki pay CBOR enum/alan
-/// çerçevelemesi için. Bunu aşan zarf sunucuya DENENMEZ.
+/// Maximum payload of one `Deposit`. See the size-limit note at the top of the
+/// module: the codec's hard limit is 1 MiB, and this leaves room for CBOR framing.
+/// Envelopes over this are not tried on the server.
 pub const MAX_DEPOSIT_BYTES: usize = 900 * 1024;
 
-/// Tek bir `Fetch` yanıtının azami boyutu. Codec 10 MiB'a izin verir ama
-/// bu yanıt, ~1 Hz'lik `poll_events` turunun İÇİNDE çözülüp işleniyor —
-/// büyük bir yığın, mesaj listesini süren döngüyü doğrudan takar.
+/// Maximum size of one `Fetch` response. The codec allows 10 MiB, but the
+/// response is decoded inside the roughly 1 Hz `poll_events` cycle, and a large
+/// buffer there would stall the loop.
 pub const MAX_FETCH_BATCH_BYTES: u32 = 512 * 1024;
 pub const MAX_FETCH_BATCH_ITEMS: u32 = 64;
 
-/// Records in one `ArchivePut`. The client sends up to 50; each record costs
-/// the server a SELECT + INSERT inside its single event loop.
+/// Records per `ArchivePut`. The client sends up to 50. Each record costs the
+/// server a SELECT and an INSERT inside its single event loop.
 pub const MAX_ARCHIVE_PUT_RECORDS: usize = 256;
 
-/// `Enroll`/`Rebind` zaman damgası toleransı. Bu kadar eski/ileri bir imza
-/// reddedilir (`ServerErrorCode::Stale`).
+/// Clock tolerance for `Enroll` and `Rebind` timestamps. A signature outside this
+/// window is rejected (`ServerErrorCode::Stale`).
 pub const ENROLL_MAX_SKEW_MS: u64 = 5 * 60 * 1000;
 
 /// A mailbox address: `key_bound_mailbox_id` of a session or relay box
-/// (`mk_<hex16>`), `server_seal::first_contact_mailbox_id` (`mb_<hex16>`),
-/// or an archive bucket (`ar_<hex16>`). The server reads nothing from it
-/// except the `mk_` prefix, which makes it check the `Register` proof key.
+/// (`mk_<hex16>`), `server_seal::first_contact_mailbox_id` (`mb_<hex16>`), or an
+/// archive bucket (`ar_<hex16>`). The server reads only the `mk_` prefix, which
+/// makes it check the `Register` proof key.
 pub type MailboxId = String;
 
 // ---------------------------------------------------------------------------
-// İstek
+// Requests
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerRequest {
-    // --- kayıt (enrollment) ---
-    /// Bağlantı açılışında ilk mesaj. Yanıtı `Welcome`.
+    // --- Enrollment ---
+    /// First message on a new connection. Answered with `Welcome`.
     Hello { version: u16 },
 
-    /// Operatörün verdiği davet jetonuyla kayıt.
+    /// Enrolls with the operator's invite token.
     ///
-    /// KRİTİK TASARIM KARARI — bu anahtarlar cihazın KİMLİK anahtarları
-    /// DEĞİL, SADECE BU SUNUCU İÇİN üretilmiş taze bir çifttir. Sunucunun
-    /// gerçekten ihtiyacı olan iki şey var: Sybil'e karşı bir kapı (davet
-    /// jetonu) ve iptal edilebilir bir tutamak. İkisi de anonim bir anahtarla
-    /// karşılanıyor. Cihazın `device_fingerprint`'ini/`identity_id`'sini
-    /// göndermek, operatöre "bu sunucuyu tam olarak KİMLER kullanıyor"
-    /// listesini KRİPTOGRAFİK OLARAK KANITLANABİLİR biçimde hediye ederdi —
-    /// üstelik sunucular arasında ve PeerId değişse bile eşleştirilebilir
-    /// halde. Bir keypair'in maliyeti buna değmez.
+    /// These keys are not the device's identity keys. They are a fresh pair made
+    /// only for this server. The server needs two things: a gate against Sybil
+    /// registrations (the invite token), and a revocable handle. Both are met by
+    /// an anonymous key. Sending the device fingerprint or identity id would give
+    /// the operator a provable list of who uses the server, even across servers
+    /// and after a PeerId change. A keypair is cheap, and that cost is not worth it.
     ///
-    /// İmza girdisi:
-    /// `version || server_peer_id || invite_token || challenge || ts_ms`.
-    /// `server_peer_id`'nin DAHİL olması şart: aksi halde kötü niyetli bir
-    /// sunucu, kendisine gelen `Enroll` paketini BAŞKA bir sunucuya karşı
-    /// tekrar oynatıp o kullanıcı adına kayıt olabilirdi. `challenge` de
-    /// şart: imzayı sunucunun O AN ürettiği tek kullanımlık değere bağlar.
+    /// Signed input: `version || server_peer_id || invite_token || challenge || ts_ms`.
+    /// `server_peer_id` must be included. Otherwise a malicious server could
+    /// replay the `Enroll` it received against another server and register under
+    /// that user. `challenge` binds the signature to the single-use value the
+    /// server generated for this connection.
     Enroll {
         version: u16,
         #[serde(with = "serde_bytes")]
         invite_token: Vec<u8>,
-        /// Ed25519 public key (32 bayt).
+        /// Ed25519 public key (32 bytes).
         #[serde(with = "serde_bytes")]
         enroll_pk: Vec<u8>,
-        /// ML-DSA-87 public key (2592 bayt). İmza uygulamanın geri kalanıyla
-        /// AYNI şekilde HİBRİT: klasik bir imza tek başına, hasat-şimdi-
-        /// kır-sonra bir saldırgana ileride sahte kayıt üretme imkânı
-        /// verirdi. Gizliliği etkilemezdi (içerik şifrelemesi bu imzaya
-        /// bağlı değil) ama depodaki "her imza hibrittir" kuralını bozardı.
+        /// ML-DSA-87 public key (2592 bytes). The signature is hybrid like the rest
+        /// of the protocol. A classical signature alone would let a
+        /// harvest-now-break-later attacker forge registrations in the future.
+        /// Confidentiality is unaffected (content encryption does not depend on
+        /// this signature), but the rule "every signature is hybrid" would break.
         #[serde(with = "serde_bytes")]
         enroll_pk_pq: Vec<u8>,
-        /// AZ ÖNCE gelen `Welcome.challenge`. İmza girdisine DAHİL (bkz.
-        /// `enroll_signing_input`): sunucu tarafında tek kullanımlık
-        /// olmasının yanında, imzayı O BAĞLANTIYA bağlar — aksi halde
-        /// yakalanan bir imza, sunucunun yeni bir challenge ürettiği taze
-        /// bir bağlantıda hâlâ geçerli olurdu.
+        /// The `Welcome.challenge` just received. It is in the signed input
+        /// (`enroll_signing_input`). The server treats it as single-use, and it
+        /// also binds the signature to this connection. Without it, a captured
+        /// signature would still be valid on a fresh connection that gets a new
+        /// challenge.
         #[serde(with = "serde_bytes")]
         challenge: Vec<u8>,
         ts_ms: u64,
-        /// Ed25519 imzası.
+        /// Ed25519 signature.
         #[serde(with = "serde_bytes")]
         sig: Vec<u8>,
-        /// ML-DSA-87 imzası — AYNI baytlar üzerinde. İkisi de doğrulanmalı.
+        /// ML-DSA-87 signature over the same bytes. Both must verify.
         #[serde(with = "serde_bytes")]
         sig_pq: Vec<u8>,
     },
 
-    /// Var olan bir kaydı YENİ bir libp2p `PeerId`'ye bağla — uygulama
-    /// yeniden kurulduğunda/`libp2p_identity.key` kaybolduğunda. `enroll_pk`
-    /// sahipliğini kanıtlar, davet jetonu TÜKETMEZ (aksi halde tek
-    /// kullanımlık bir davetle kurulan bir cihaz, bir kez yeniden kurulumdan
-    /// sonra sunucuya bir daha bağlanamazdı).
+    /// Binds an existing record to a new libp2p `PeerId`, for when the app is
+    /// reinstalled or `libp2p_identity.key` is lost. `enroll_pk` proves ownership.
+    /// It does not consume an invite token. Otherwise a device enrolled with a
+    /// single-use invite could not reconnect after one reinstall.
     ///
-    /// İmza girdisi: bkz. `rebind_signing_input` (the `Hello` challenge and
-    /// the caller's PeerId are part of it, neither travels in the request).
+    /// Signed input: see `rebind_signing_input`. The `Hello` challenge and the
+    /// caller's PeerId are part of it, and neither is sent in the request.
     Rebind {
         #[serde(with = "serde_bytes")]
         enrollment_id: Vec<u8>,
@@ -174,96 +162,91 @@ pub enum ServerRequest {
         sig_pq: Vec<u8>,
     },
 
-    // --- posta kutusu (transit) ---
-    /// Hangi kutularla ilgilendiğimizi bildir. İdempotent.
+    // --- Mailbox (transit) ---
+    /// Declares which mailboxes this client is interested in. Idempotent.
     ///
-    /// İki işi birden yapar: (a) sunucu bu kutulara gelen zarfları kabul
-    /// eder ve `Fetch`'e servis eder, (b) yeni bir şey düştüğünde `Notify`
-    /// ile İTEBİLİR. `drop`, rotasyonda artık dinlenmeyen bir nesil eski
-    /// topic'i geri alır.
+    /// Two jobs: (a) the server accepts envelopes for these mailboxes and serves
+    /// them through `Fetch`, and (b) it can send `Notify` when something arrives.
+    /// `drop` removes a generation that is no longer read after rotation.
     ///
-    /// An id this enrollment does not read yet needs a `MailboxProof` in
-    /// `proofs`. Without one the id comes back in `Registered.proof_needed`
-    /// and the client sends it again with a proof. An id in
-    /// `Registered.refused` is refused for good (mailbox cap, reader cap,
-    /// bad proof, other key): sending it again gets the same answer.
+    /// A new id needs a `MailboxProof` in `proofs`. Without one, the id comes back
+    /// in `Registered.proof_needed` and the client sends it again with a proof. An
+    /// id in `Registered.refused` is refused for good (mailbox cap, reader cap, bad
+    /// proof, or another key). Sending it again gets the same answer.
     Register {
         add: Vec<MailboxId>,
         drop: Vec<MailboxId>,
         proofs: Vec<MailboxProof>,
     },
 
-    /// Mühürlü bir zarfı kutuya bırak.
+    /// Deposits a sealed envelope in a mailbox.
     ///
-    /// Kota, kutunun SAHİBİNE değil BIRAKANA yazılır — bir spam gönderici
-    /// kendi kotasını yakar ve kimse bir kurbanın kutusunu doldurup ona
-    /// hizmet reddi uygulayamaz.
+    /// Quota is charged to the depositor, not the mailbox owner. A spam sender uses
+    /// up its own quota, and nobody can fill a victim's mailbox to deny it service.
     Deposit { mailbox: MailboxId, #[serde(with = "serde_bytes")] sealed: Vec<u8> },
 
-    /// Birden çok kutudan TEK gidiş-dönüşte çek.
+    /// Fetches from several mailboxes in one round trip.
     ///
-    /// Neden çoklu: 50 kişilik bir cihazın ~100 canlı kutu kimliği var
-    /// (güncel + bir nesil önceki). Her tarama turunda 100 ayrı istek
-    /// saçmalık olurdu.
+    /// A device with about 50 contacts has about 100 live mailbox ids (current and
+    /// one earlier generation). Sending 100 requests every poll cycle would be
+    /// wasteful.
     ///
-    /// `cursors`: her kutu için İŞLENMİŞ en yüksek `seq`; sunucu KESİN
-    /// OLARAK ondan büyük olanları döner (0 = baştan).
+    /// `cursors`: for each mailbox, the highest `seq` already processed. The server
+    /// returns exactly the items above it (0 means from the start).
     Fetch {
         cursors: Vec<(MailboxId, u64)>,
         max_items: u32,
         max_bytes: u32,
     },
 
-    /// "Şu kutudaki şu `seq`'e kadar her şeyi işledim, silebilirsin."
-    /// Kümülatif ve idempotent — kaybolan bir `Ack` en fazla bir kez
-    /// gereksiz yeniden teslime yol açar, ASLA boşluğa yol açmaz.
+    /// Acknowledges everything up to `seq` in one mailbox, so the server may delete it.
+    /// Cumulative and idempotent. A lost `Ack` causes at most one extra redelivery,
+    /// never a gap.
     ///
-    /// KRİTİK: istemci bunu SADECE zarfı çözüp arşive YAZDIKTAN sonra
-    /// gönderir — `send_ack`'in `archive_message` başarılıysa gönderilmesiyle
-    /// (bkz. receive.rs) BİREBİR aynı gerekçe: disk dolu/DB hatası gibi geçici
-    /// bir arızada "aldım" demek, mesajın hiçbir yerde kalıcı olmadığı hâlde
-    /// sunucudan silinmesi demek olurdu.
+    /// The client sends it only after the envelope is decrypted and written to the
+    /// archive. This is the same rule as `send_ack` in receive.rs, which sends the
+    /// ack after `archive_message` succeeds. Acking on a transient failure (full
+    /// disk, DB error) would delete a message that is stored nowhere.
     Ack { acks: Vec<(MailboxId, u64)> },
 
-    /// Dış inceleme önerisi (2026-08-27): GÖNDERENİN, henüz teslim
-    /// edilmemiş kendi paketini geri çekmesi.
+    /// Withdraws the sender's own undelivered packet.
     ///
-    /// `Ack` bunu KASITLI olarak yapamaz: orada `depositor != acker` şartı
-    /// var, çünkü bir gönderenin, alıcı görmeden mesajı sunucudan
-    /// sildirebilmesi kötüye kullanılabilirdi. Ama tersi de bir açıktı —
-    /// yanlışlıkla gönderilen bir mesaj, alıcı çevrimdışıysa 30 gün boyunca
-    /// sunucuda ZORLA duruyordu ve gönderenin hiçbir çaresi yoktu.
+    /// `Ack` cannot do this, because it requires `depositor != acker`. A sender
+    /// that could make the server delete a message before the recipient saw it
+    /// could abuse that. The reverse gap was real, though: a message sent by
+    /// mistake stayed on the server for 30 days if the recipient was offline, and
+    /// the sender had no way to remove it.
     ///
-    /// Bu ayrı işlem o boşluğu kapatıyor ve kötüye kullanıma açık değil:
-    /// sunucu SADECE `depositor == requester` olan satırları siler, yani
-    /// yalnızca kendi bıraktığınızı geri çekebilirsiniz. Alıcı paketi
-    /// çekmişse zaten kutuda değildir; o durumda geri çekme etkisizdir ve
-    /// silme normal "herkesten sil" mesajıyla yapılır.
+    /// This request closes that gap without enabling abuse. The server deletes
+    /// only rows where `depositor == requester`, so you can withdraw only what you
+    /// deposited. If the recipient already fetched the packet, it is no longer in
+    /// the mailbox and withdrawing it does nothing. Deleting for everyone then
+    /// uses the normal "delete" message.
     Cancel { mailbox: MailboxId, seqs: Vec<u64> },
 
-    // --- arşiv (geçmiş) ---
-    /// Geçmiş kayıtlarını yükle. `bucket`, `server_seal::server_archive_bucket`
-    /// çıktısı — sohbet + AY bazlı (bkz. o fonksiyonun notu).
+    // --- Archive (history) ---
+    /// Loads archive records. `bucket` comes from `server_seal::server_archive_bucket`:
+    /// conversation plus month (see that function's note).
     ArchivePut {
         bucket: MailboxId,
         records: Vec<ArchiveRecord>,
     },
 
-    /// "Bu kovalardan hangileri var ve ne kadar dolu?" Sıfırdan kurulan bir
-    /// cihaz, son ~24-60 ayın kovasını TEK istekte yoklar; sunucunun
-    /// yıllarca izlenebilir KALICI bir sohbet dizini tutması gerekmez.
+    /// Probes which buckets exist and how full they are. A freshly installed device
+    /// checks the last 24 to 60 months in one request. The server does not need a
+    /// permanent, browsable index of conversations.
     ArchiveProbe { buckets: Vec<MailboxId> },
 
-    /// Bir kovadan sayfa (yeniden eskiye). `before_ms: None` = en yeni sayfa.
+    /// Pages through one bucket, newest first. `before_ms: None` returns the newest page.
     ///
-    /// Server trust: the server can answer with an OLDER revision of a
-    /// record (or leave records out). The seal stops forgery, not rollback;
-    /// only a device that keeps its own `record_id`/`rev` state notices
-    /// (see `server_seal` KNOWN LIMIT).
+    /// Server trust: the server can answer with an older revision of a record, or
+    /// leave records out. The seal stops forgery, not rollback. Only a device that
+    /// keeps its own `record_id`/`rev` state notices (see the known limit in
+    /// `server_seal`).
     ArchiveFetch {
         bucket: MailboxId,
-        /// Cursor: the last record of the previous page, `(before_ms,
-        /// before_id)`; many records share an (hour-coarsened) `sent_at_ms`.
+        /// Cursor: the last record of the previous page, `(before_ms, before_id)`.
+        /// Many records share an hour-coarsened `sent_at_ms`.
         before_ms: Option<u64>,
         #[serde(default)]
         before_id: Option<String>,
@@ -271,56 +254,53 @@ pub enum ServerRequest {
         max_bytes: u32,
     },
 
-    /// "Geçmişimi bu sunucudan sil." Ayarlardaki görünür eyleme ve
-    /// `remove_server`'a bağlıdır. Sunucunun gerçekten sildiğini
-    /// KANITLAYAMAYIZ — bu SECURITY.md'de yazılı.
+    /// Deletes this device's history on the server. This is tied to the visible
+    /// settings action and to `remove_server`. The app cannot prove the server
+    /// actually deleted it. SECURITY.md documents this.
     ArchivePurge { buckets: Vec<MailboxId> },
 
-    // --- dosya eki blob'ları (SADECE yükleme yönü) ---
-    /// Bir dosya parçasını yükle.
+    // --- Attachment blobs (upload direction only) ---
+    /// Uploads one file chunk.
     ///
-    /// İNDİRME yönü burada YOK: sunucu, istemcilerin ZATEN konuştuğu
-    /// `/p2pmessenger/filexfer/1.0.0` protokolünü `ProtocolSupport::Inbound`
-    /// ile kaydeder, yani sunucudaki bir ek sadece "başka bir kaynak eş"tir.
-    /// Böylece istemcideki TÜM indirme durum makinesi (sıralı parçalar,
-    /// `append_verified_chunk`, `alt_source_peer_ids` rotasyonu,
-    /// `retry_or_give_up_download`, `check_stalled_downloads`, bütün-dosya
-    /// SHA-256 kontrolü) HİÇ DEĞİŞMEDEN yeniden kullanılır.
+    /// Downloads are not here. The server registers the `/p2pmessenger/filexfer/1.0.0`
+    /// protocol with `ProtocolSupport::Inbound`, the same one clients speak, so a
+    /// server-held attachment is just another source peer. The whole client download
+    /// state machine (ordered chunks, `append_verified_chunk`, the
+    /// `alt_source_peer_ids` rotation, `retry_or_give_up_download`,
+    /// `check_stalled_downloads`, whole-file SHA-256) is reused unchanged.
     ///
-    /// `data` diskteki `.enc` dosyasından OLDUĞU GİBİ okunur —
-    /// `attachments.rs`'in "disk formatı = kablo formatı" özelliği sayesinde
-    /// yeniden şifreleme YOK (bkz. `read_chunk_from_disk`).
+    /// `data` is read from the `.enc` file on disk as it is. Attachments store the
+    /// wire format on disk, so nothing is re-encrypted (see `read_chunk_from_disk`).
     BlobPut {
-        /// The uploader's secret; the server stores the blob under
-        /// `blob_id_for_upload_secret(upload_secret)`, which is the file id
-        /// recipients download by. A recipient knows only that id, so it
-        /// cannot claim the blob before the sender uploads it.
+        /// The uploader's secret. The server stores the blob under
+        /// `blob_id_for_upload_secret(upload_secret)`, which is the file id recipients
+        /// download by. A recipient knows only that id, so it cannot claim the blob
+        /// before the sender uploads it.
         #[serde(with = "serde_bytes")]
         upload_secret: Vec<u8>,
         chunk_index: u32,
         total_chunks: u32,
-        /// Bu blob'un parca ADIMI (bayt, AEAD etiketi HARIC).
+        /// Part step of this blob, in bytes, without the AEAD tag.
         ///
-        /// Sunucu parcayi `chunk_index * (chunk_size + 16)` konumuna yaziyor.
-        /// Bu alan olmadan sunucu adimi KENDI sabitinden tahmin ediyordu ve
-        /// istemci farkli bir boyut kullandigi anda 0'dan sonraki her parca
-        /// YANLIS konuma gidiyordu: dosya bozuluyor, bitiste hash tutmuyor,
-        /// blob reddediliyor ve istemci sonsuza dek yeniden deniyordu.
-        /// Gercek cihazda tam olarak bu oldu ve bir hiz olcumunu de
-        /// gecersiz kildi.
+        /// The server writes chunk `i` at `i * (chunk_size + 16)`. Without this field
+        /// the server guessed the step from its own constant. A client using another
+        /// size then put every chunk after the first in the wrong place. The file was
+        /// corrupted, the hash failed at the end, the blob was rejected, and the
+        /// client retried forever. This happened on a real device and invalidated a
+        /// speed measurement.
         ///
-        /// `#[serde(default)]` + 0 = miras 256 KiB, yani guncellenmemis bir
-        /// istemci eskisi gibi calisir.
+        /// `#[serde(default)]` with 0 means the legacy 256 KiB, so an old client keeps
+        /// working.
         #[serde(default)]
         chunk_size: u32,
         #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
 
-    /// Yüklemeyi tamamla ve blob'u servis edilebilir işaretle.
+    /// Finishes an upload and marks the blob servable.
     ///
-    /// `enc_sha256` ŞİFRELİ baytlar üzerindedir — sunucu bunu doğrulayabilir
-    /// (içeriği çözemese de) ve kırpılmış bir yüklemeyi asla servis etmez.
+    /// `enc_sha256` covers the ENCRYPTED bytes. The server can check it without
+    /// decrypting, and never serves a truncated upload.
     BlobFinish {
         #[serde(with = "serde_bytes")]
         upload_secret: Vec<u8>,
@@ -334,35 +314,35 @@ pub enum ServerRequest {
         upload_secret: Vec<u8>,
     },
 
-    // --- sunucu -> istemci (yönü TERS olan tek istek) ---
-    /// "Posta var." Yükün KENDİSİ burada taşınmaz ve kutu kimlikleri de
-    /// listelenmez: istemci `Ok` yanıtlar ve bir sonraki `poll_events`
-    /// turunda `Fetch` eder. Kimlikleri listelemek, kötü niyetli bir eşe
-    /// yoklama imkânı verirdi ve zaten gereksiz — `Fetch` ucuz.
+    // --- Server to client (the one request in the reverse direction) ---
+    /// "Mail is waiting." The payload is not carried here, and mailbox ids are not
+    /// listed. The client replies `Ok` and calls `Fetch` in its next `poll_events`
+    /// cycle. Listing ids would let a hostile peer probe for them, and it is not
+    /// needed because `Fetch` is cheap.
     Notify,
 
-    /// `Notify` WITH the item, saving the client's `Fetch` round trip (1-2 s
-    /// over Tor on mobile data — most of a call ring's delay). The server only
-    /// sends it when this item is the reader's ONLY unacknowledged one in the
-    /// mailbox, so processing it and moving the cursor to its `seq` cannot
-    /// skip anything; otherwise it sends a plain `Notify`.
+    /// `Notify` WITH the item, saving the client's `Fetch` round trip (1 to 2 s over
+    /// Tor on mobile data, most of a call ring's delay). The server sends it only
+    /// when this item is the reader's ONLY unacknowledged one in the mailbox. So
+    /// processing it and moving the cursor to its `seq` cannot skip anything.
+    /// Otherwise it sends a plain `Notify`.
     Push { item: MailItem },
 }
 
 // ---------------------------------------------------------------------------
-// Yanıt
+// Responses
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerResponse {
     Welcome {
         version: u16,
-        /// Tek kullanımlık `Enroll` imza girdisi (32 bayt rastgele).
+        /// Single-use `Enroll` signing input (32 random bytes).
         #[serde(with = "serde_bytes")]
         challenge: Vec<u8>,
         enrolled: bool,
-        /// The id of this PeerId's active enrollment (with `enrolled`): a
-        /// client whose `Enrolled` answer was lost gets it back here.
+        /// The id of this PeerId's active enrollment (with `enrolled`). A client
+        /// whose `Enrolled` answer was lost gets it back here.
         #[serde(with = "serde_bytes")]
         enrollment_id: Option<Vec<u8>>,
         limits: ServerLimits,
@@ -373,40 +353,39 @@ pub enum ServerResponse {
         enrollment_id: Vec<u8>,
         limits: ServerLimits,
     },
-    /// Zarf DİSKE yazıldı.
+    /// The envelope was written to disk.
     ///
-    /// `try_publish_raw` bunu "sent" olarak raporlar — `gossipsub.publish()`'in
-    /// yerel başarısından KESİNLİKLE daha güçlü bir garanti, ama hâlâ uçtan
-    /// uca DEĞİL: uçtan uca teslimin tek kanıtı karşı tarafın
-    /// `MessageContent::Ack`'idir (bkz. lib.rs `awaiting_confirmation`).
-    /// Bu yüzden `Deposited`, gossipsub yolunu KALICI OLARAK susturmaz —
-    /// bkz. server_client.rs `should_shadow_on_gossipsub` (kara delik kuralı).
+    /// `try_publish_raw` reports this as "sent". That is a stronger guarantee than
+    /// the local success of `gossipsub.publish()`, but it is still not end to end.
+    /// The only proof of end-to-end delivery is the recipient's
+    /// `MessageContent::Ack` (see `awaiting_confirmation` in lib.rs). So `Deposited`
+    /// does not permanently silence the gossipsub path. See
+    /// `should_shadow_on_gossipsub` in server_client.rs.
     Deposited { seq: u64 },
     Batch { items: Vec<MailItem>, more: bool },
     ArchiveProbed { present: Vec<BucketStat> },
     ArchiveBatch { records: Vec<ArchiveRecord>, more: bool },
-    /// `Register` with ids that were not registered; every other id of `add`
-    /// is. `proof_needed`: came without a `MailboxProof`, send again with one.
-    /// `refused`: over `ServerLimits.max_mailboxes`, over the reader cap, a
-    /// proof that did not verify or a key other than the mailbox's: do not
-    /// send again. All ids registered = plain `Ok`.
+    /// `Register` with ids that were not registered. Every other id of `add` is
+    /// registered. `proof_needed`: sent without a `MailboxProof`, so send again with
+    /// one. `refused`: over `ServerLimits.max_mailboxes`, over the reader cap, a proof
+    /// that did not verify, or a key other than the mailbox's. Do not send these
+    /// again. If all ids registered, the reply is a plain `Ok`.
     Registered { proof_needed: Vec<MailboxId>, refused: Vec<MailboxId> },
     Ok,
     Err(ServerErrorCode),
 }
 
-/// Proof that the sender of a `Register` owns `mailbox`: a hybrid signature
-/// over `register_signing_input` by the mailbox key. The readers derive the
-/// key from a secret only they hold (`server_seal::mailbox_proof_seeds`).
+/// Proof that the sender of a `Register` owns `mailbox`: a hybrid signature over
+/// `register_signing_input` by the mailbox key. Readers derive the key from a
+/// secret only they hold (`server_seal::mailbox_proof_seeds`).
 ///
-/// A session or relay mailbox has an id made from that key
-/// (`key_bound_mailbox_id`), so the server takes no other key for it: knowing
-/// the id is not enough to read it. A first-contact mailbox cannot work that
-/// way (its proof key is the reading device's alone, and the sender, who only
-/// holds the pairing code, must still compute the id), so there the server
-/// keeps each reader's key and takes at most two readers per key; another key
-/// gets slots of its own (a first-come binding let anyone who knew a
-/// first-contact id lock its device out).
+/// A session or relay mailbox has an id derived from that key (`key_bound_mailbox_id`),
+/// so the server takes no other key for it. Knowing the id is not enough to read it.
+/// A first-contact mailbox cannot work that way: its proof key belongs to the reading
+/// device alone, and the sender, who holds only the pairing code, must still compute
+/// the id. There the server keeps each reader's key and accepts at most two readers
+/// per key. Another key gets its own slots. A first-come binding would let anyone who
+/// knew a first-contact id lock that device out.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailboxProof {
     pub mailbox: MailboxId,
@@ -420,55 +399,55 @@ pub struct MailboxProof {
     pub sig_pq: Vec<u8>,
 }
 
-/// Proofs in one `Register`: each is about 7.3 KB and the request cap is
-/// 1 MiB (`MAX_DEPOSIT_BYTES` note).
+/// Proofs per `Register`. Each is about 7.3 KB, and the request cap is 1 MiB
+/// (see the `MAX_DEPOSIT_BYTES` note).
 pub const MAX_REGISTER_PROOFS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServerErrorCode {
-    /// Bu `PeerId` kayıtlı değil — istemci `Enroll`/`Rebind` başlatmalı.
+    /// This PeerId is not registered. The client must start `Enroll` or `Rebind`.
     NotEnrolled,
-    /// Jeton geçersiz/tükendi/süresi doldu.
+    /// Invite token invalid, used up, or expired.
     BadInvite,
     BadSignature,
-    /// `ts_ms`, `ENROLL_MAX_SKEW_MS` penceresi dışında.
+    /// `ts_ms` is outside the `ENROLL_MAX_SKEW_MS` window.
     Stale,
-    /// Bu sunucuda HİÇ KİMSE bu kutuyu kaydetmemiş.
+    /// No one on this server has registered this mailbox.
     ///
-    /// İstemci bunu "bu alıcı benim sunucumda değil" diye okur ve o kişiye
-    /// giden trafiği bir süre (bkz. lib.rs `server_unknown_mailboxes`)
-    /// DOĞRUDAN gossipsub'a yollar — her mesaj başına boşuna bir gidiş-dönüş
-    /// ödememek için.
+    /// The client reads this as "this recipient is not on my server" and sends
+    /// traffic for that contact straight to gossipsub for a while (see
+    /// `server_unknown_mailboxes` in lib.rs). That avoids a wasted round trip on
+    /// every message.
     UnknownMailbox,
-    /// Öğe `ServerLimits.max_item_bytes`'ı aşıyor — AYNI baytlarla yeniden
-    /// denemek asla başaramaz, KALICI hata.
+    /// The item exceeds `ServerLimits.max_item_bytes`. Retrying with the same bytes
+    /// never succeeds. This is a permanent error.
     TooLarge,
-    /// Kota doldu. KALICI DEĞİL: kullanıcı sunucuda yer açabilir.
+    /// Quota full. Not permanent: the user can free space on the server.
     QuotaExceeded,
     RateLimited,
-    /// Operatör bu kaydı iptal etti.
+    /// The operator revoked this record.
     Revoked,
-    /// Yön hatası — ör. istemciye gelen bir `Deposit`.
+    /// Direction error, for example a `Deposit` sent to a client.
     BadDirection,
     Unsupported,
     Internal,
-    /// `BlobFinish`: the stored bytes do not hash to `enc_sha256` (or cannot
-    /// be read). Deterministic — sending the same finish again never works.
+    /// `BlobFinish`: the stored bytes do not hash to `enc_sha256`, or cannot be read.
+    /// Deterministic: sending the same finish again never succeeds.
     BadHash,
-    /// `BlobFinish`: the server has no complete upload under this id (the
-    /// half-done blob was swept, or chunks are missing). Not permanent: the
-    /// client uploads again from chunk 0.
+    /// `BlobFinish`: the server has no complete upload under this id. The half-done
+    /// blob was swept, or chunks are missing. Not permanent: the client uploads again
+    /// from chunk 0.
     BlobIncomplete,
 }
 
 impl ServerErrorCode {
-    /// Bu hata AYNI baytlarla yeniden denenirse başarabilir mi?
+    /// Could this error succeed if the same bytes were retried?
     ///
-    /// Çağıran (`try_publish_raw`) bunu `PublishFailure::Permanent` /
-    /// `Transient` ayrımına çevirir; yanlış sınıflandırma bu depoda daha önce
-    /// gerçek bir hataya yol açmış bir konu (bkz. types.rs `PublishFailure`
-    /// dokümantasyonu — kalıcı bir hatayı geçici saymak 2 gün boyunca boşuna
-    /// yeniden denemek, tersi ise kurtarılabilir bir mesajı kaybetmek demek).
+    /// The caller (`try_publish_raw`) maps this to `PublishFailure::Permanent` or
+    /// `Transient`. Misclassifying causes harm both ways: a permanent error treated as
+    /// transient is retried for days for nothing, and a transient error treated as
+    /// permanent loses a message that could have been recovered. See the
+    /// `PublishFailure` docs in types.rs.
     pub fn is_permanent(self) -> bool {
         matches!(
             self,
@@ -476,42 +455,42 @@ impl ServerErrorCode {
         )
     }
 
-    /// İstemci bu hatayı görünce sunucuyla ilişkisini yeniden kurmalı mı?
+    /// Should the client rebuild its server relationship after this error?
     pub fn needs_reenroll(self) -> bool {
         matches!(self, ServerErrorCode::NotEnrolled)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Yardımcı tipler
+// Helper types
 // ---------------------------------------------------------------------------
 
-/// Posta kutusundaki tek bir öğe.
+/// One item in a mailbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailItem {
-    /// Bu öğenin hangi kutudan geldiği — istemci DOĞRU kutunun imlecini
-    /// ilerletebilsin diye. Tek bir `Fetch` birden çok kutuyu sorduğundan
-    /// bu alan olmadan yanıt ayrıştırılamaz.
+    /// The mailbox this item came from. The client must advance the cursor of the
+    /// right mailbox. One `Fetch` can ask for several mailboxes, so the response
+    /// cannot be parsed without this field.
     pub mailbox_id: MailboxId,
-    /// Sunucunun atadığı, kutu içinde KESİN OLARAK ARTAN sıra numarası
-    /// (imlecin ihtiyacı olan tam da bu). It counts per mailbox (the server's
-    /// `mail_seq` table): a server-global seq let any reader estimate the
-    /// server-wide intake rate from gaps, so it must not become global again.
+    /// The server-assigned sequence number, strictly increasing within the mailbox.
+    /// This is what the cursor needs. It counts per mailbox (`mail_seq` table). A
+    /// server-global sequence would let any reader estimate the server-wide intake
+    /// rate from gaps, so it must not become global again.
     ///
-    /// İstemci imlecini (`server_cursors` tablosu) ancak öğeyi İŞLEDİKTEN
-    /// SONRA ilerletir. Yani garanti "en az bir kez"dir, "en fazla bir kez"
-    /// DEĞİL — süreç yığının ortasında ölürse öğeler tekrar gelir. Bu
-    /// KASITLI: tersi (işlemeden önce ilerletmek) bir çökmede mesajı SESSİZCE
-    /// kaybetmek olurdu. Tekrar gelen öğe zaten güvenli: `message_id` dedup'ı
-    /// ve tüketilmiş ratchet anahtarının çözülememesi bunu yutar.
+    /// The client advances its cursor (`server_cursors` table) only after processing
+    /// the item. The guarantee is at-least-once, not at-most-once. If the process
+    /// dies mid-batch, items arrive again. This is deliberate: advancing before
+    /// processing would silently lose a message on a crash. A redelivered item is
+    /// safe anyway, because the `message_id` dedup and the failure to decrypt an
+    /// already-consumed ratchet key absorb it.
     pub seq: u64,
     pub deposited_at_ms: u64,
-    /// `server_seal::seal_envelope`/`seal_first_contact` çıktısı — sunucu için opak.
+    /// Output of `server_seal::seal_envelope` or `seal_first_contact`. Opaque to the server.
     #[serde(with = "serde_bytes")]
     pub sealed: Vec<u8>,
 }
 
-/// `ArchiveProbe` yanıtındaki tek bir kova özeti.
+/// One bucket summary in an `ArchiveProbe` response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BucketStat {
     pub bucket: MailboxId,
@@ -520,35 +499,35 @@ pub struct BucketStat {
     pub newest_ms: u64,
 }
 
-/// Sunucudaki geçmiş arşivinin tek bir satırı.
+/// One row of the archive stored on the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveRecord {
-    /// Bütün cihazlarda ve her iki uçta AYNI olan kararlı kimlik: 1:1'de
-    /// `message_id`, grupta `group_message_local_id`. Sunucu
-    /// `(bucket, record_id)` üzerinde dedup ettiğinden, aynı alınan mesajı
-    /// N cihazımın yüklemesi TEK satıra mal olur.
+    /// A stable identity that is the same on every device and at both ends: the
+    /// `message_id` for 1:1, `group_message_local_id` for groups. The server dedups
+    /// on `(bucket, record_id)`, so the same received message uploaded from N of my
+    /// devices costs one row.
     pub record_id: String,
-    /// Monoton revizyon — Edit/Delete eskisinin ÜZERİNE yazsın diye
-    /// (`edited_at_ms`/`deleted_at_ms`, yoksa `sent_at_ms`). Sunucu
-    /// `WHERE excluded.rev > archive.rev` ile uygular.
+    /// Monotonic revision. An Edit or Delete overwrites the old record
+    /// (`edited_at_ms` or `deleted_at_ms`, else `sent_at_ms`). The server applies it
+    /// with `WHERE excluded.rev > archive.rev`.
     ///
-    /// Bu, mevcut `HistorySyncResponse` mekanizmasının YAPAMADIĞI bir şey:
-    /// geç gelen bir Edit'i geçmişte düzeltmek.
+    /// The existing `HistorySyncResponse` cannot do this: it cannot correct a late
+    /// Edit in history.
     pub rev: u64,
-    /// Sunucunun ÇÖZMEDEN yeniden-eskiye sayfalayabilmesi için. M-30: the
-    /// client sends it floored to the hour (the exact time is inside
-    /// `sealed`), so both ends' buckets are not joinable by time.
+    /// Lets the server page backwards without decrypting. The client sends it floored
+    /// to the hour (the exact time is inside `sealed`), so the two ends' buckets
+    /// cannot be joined by time.
     pub sent_at_ms: u64,
-    /// `server_seal::seal_archive_record` çıktısı.
+    /// Output of `server_seal::seal_archive_record`.
     #[serde(with = "serde_bytes")]
     pub sealed: Vec<u8>,
 }
 
-/// Sunucunun ilan ettiği sınırlar.
+/// Limits the server advertises.
 ///
-/// İstemci bunları `Welcome`'da alır ve KENDİ tarafında da uygular (ör.
-/// tavanı aşan bir zarfı sunucuya hiç göndermez) — sunucuya boşuna bayt
-/// yollamamak ve `TooLarge` gidiş-dönüşünü hiç yapmamak için.
+/// The client receives them in `Welcome` and enforces them on its side too. For
+/// example, it never sends an envelope over the cap, so no bytes are wasted and no
+/// `TooLarge` round trip happens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerLimits {
     pub max_item_bytes: u32,
@@ -563,21 +542,20 @@ pub struct ServerLimits {
 }
 
 impl Default for ServerLimits {
-    /// Küçük bir arkadaş grubu için makul varsayılanlar — `typeon-server`
-    /// bunları yapılandırmadan okur, buradaki değerler sadece bir taban.
+    /// Reasonable defaults for a small group of friends. `typeon-server` reads them
+    /// from its config. These values are only a baseline.
     fn default() -> Self {
         ServerLimits {
-            // Modül başındaki "Boyut tavanı" notu — codec'in 1 MiB'lık SERT
-            // sınırının altında kalmak zorunlu.
+            // Must stay under the codec's hard 1 MiB limit (see the size-limit note
+            // at the top of the module).
             max_item_bytes: MAX_DEPOSIT_BYTES as u32,
             max_mailboxes: 512,
             max_items_per_mailbox: 5_000,
             max_mail_bytes: 256 * 1024 * 1024,
             max_archive_bytes: 1024 * 1024 * 1024,
             max_blob_bytes: 4 * 1024 * 1024 * 1024,
-            // 14 gün: gönderen-tarafı vazgeçme süresinin
-            // (`TEXT_RETRY_GIVE_UP_MS` = 7 gün) üstünde — dayanıklılığın
-            // asıl sınırı burası.
+            // 14 days: longer than the sender's give-up time
+            // (`TEXT_RETRY_GIVE_UP_MS`, 7 days). This is the real durability limit.
             mailbox_ttl_ms: 14 * 24 * 60 * 60 * 1000,
             blob_ttl_ms: 30 * 24 * 60 * 60 * 1000,
             requests_per_minute: 1_800,
@@ -586,34 +564,32 @@ impl Default for ServerLimits {
 }
 
 // ---------------------------------------------------------------------------
-// Davet kodu
+// Invite code
 // ---------------------------------------------------------------------------
 
-/// Davet kodu şeması. QR ve elle yapıştırma AYNI metni taşır (mevcut
-/// `processManualEntry` deseniyle aynı mantık: tek bir kanonik metin, iki
-/// giriş yolu).
+/// Invite code format. QR and manual entry carry the same text: one canonical
+/// string, two ways to enter it.
 pub const SERVER_INVITE_SCHEME: &str = "typeon-server:";
 
-/// Davet kodu ayrıştırma sonucu.
+/// Result of parsing an invite code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerInvite {
-    /// Sunucunun BÜTÜN ilan edilen adresleri — onion VE varsa LAN/genel IP.
+    /// All advertised server addresses: onion and, if present, LAN or public IP.
     ///
-    /// Neden çoğul: tek adres taşındığında ve o adres onion olduğunda, aynı
-    /// yerel ağdaki iki cihaz bile bütün trafiği Tor üzerinden geçiriyordu.
-    /// Ölçüldü: 10 MB'lık bir dosya ~12 KB/s ile yükleniyordu. libp2p aynı
-    /// `PeerId`'ye birden fazla eşzamanlı dial'ı zaten yönetiyor (ilk kuran
-    /// kazanır), dolayısıyla hepsini vermek doğrudan hız kazancı — onion da
-    /// listede kaldığı için CGNAT arkasındaki ulaşılabilirlik kaybolmuyor.
+    /// Why plural: with one address that happened to be onion, two devices on the
+    /// same LAN still routed all traffic over Tor. Measured: a 10 MB upload ran at
+    /// about 12 KB/s. libp2p already handles several dials to the same `PeerId` (the
+    /// first one to connect wins), so giving all of them is a direct speed gain. The
+    /// onion address stays in the list, so reachability behind CGNAT is kept.
     pub addrs: Vec<String>,
     pub token: String,
 }
 
-/// `typeon-server:<adres>[,<adres>...]#<jeton>` ayrıştırır.
+/// Parses `typeon-server:<addr>[,<addr>...]#<token>`.
 ///
-/// Jeton `#`'ten SONRA: bir multiaddr asla `#` içermez, bu yüzden ayrım tek
-/// anlamlıdır. Jeton opak bir dize olarak taşınır (sunucu ne ürettiyse) —
-/// burada bir kodlama varsayımı YOK.
+/// The token follows `#`. A multiaddr never contains `#`, so the split is
+/// unambiguous. The token is carried as an opaque string, exactly as the server
+/// generated it. No encoding is assumed.
 pub fn parse_server_invite(text: &str) -> Result<ServerInvite, String> {
     let trimmed = text.trim();
     let body = trimmed
@@ -622,9 +598,8 @@ pub fn parse_server_invite(text: &str) -> Result<ServerInvite, String> {
     let (addr_part, token) = body
         .split_once('#')
         .ok_or("Kodda davet jetonu ('#' sonrası) yok")?;
-    // Adresler virgülle ayrılır — bir multiaddr ne `#` ne de `,` içerir,
-    // dolayısıyla iki ayrım da tek anlamlı. Tek adresli ESKİ kodlar da
-    // ayrıştırılmaya devam eder.
+    // Addresses are separated by commas. A multiaddr contains neither `#` nor `,`, so
+    // both splits are unambiguous. Codes with a single address still parse.
     let addrs: Vec<String> = addr_part
         .split(',')
         .map(|a| a.trim().to_string())
@@ -639,21 +614,21 @@ pub fn parse_server_invite(text: &str) -> Result<ServerInvite, String> {
     Ok(ServerInvite { addrs, token: token.trim().to_string() })
 }
 
-/// `parse_server_invite`'ın tersi — sunucu uygulaması QR/kopyalanabilir kod
-/// üretirken kullanır. BÜTÜN adresleri taşır (bkz. `ServerInvite.addrs`).
+/// Inverse of `parse_server_invite`. The server app uses it to produce a QR or
+/// copyable code. It carries ALL the addresses (see `ServerInvite.addrs`).
 pub fn format_server_invite(addrs: &[String], token: &str) -> String {
     let joined = addrs.iter().map(|a| a.trim()).collect::<Vec<_>>().join(",");
     format!("{}{}#{}", SERVER_INVITE_SCHEME, joined, token.trim())
 }
 
-/// Signed bytes of the enrollment messages: a tag for the kind of message,
-/// then every field with its length. Without the lengths, (peer "ab", token
-/// "c…") and (peer "a", token "bc…") were the same bytes; without the tag,
-/// the one enroll key signed `Enroll` and `Rebind` in a shared format.
+/// Signed bytes of the enrollment messages: a tag for the message kind, then every
+/// field with its length. Without the lengths, (peer "ab", token "c...") and
+/// (peer "a", token "bc...") would produce the same bytes. Without the tag, the
+/// same enroll key could sign `Enroll` and `Rebind` in a shared format.
 ///
-/// PROTOCOL BREAK (2026-10-07): a client and a server on different sides of
-/// this change cannot enroll or rebind with each other (`BadSignature`). A
-/// device the server already knows by its peer id does neither, and goes on.
+/// Protocol break: a client and a server on opposite sides of this change cannot
+/// enroll or rebind with each other (`BadSignature`). A device the server already
+/// knows by its PeerId does neither, and carries on.
 fn signing_input(tag: &[u8], fields: &[&[u8]]) -> Vec<u8> {
     let mut out = tag.to_vec();
     for field in fields {
@@ -663,13 +638,12 @@ fn signing_input(tag: &[u8], fields: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-/// `Enroll.sig`'in üzerinde hesaplandığı baytlar. İstemci ve sunucu AYNI
-/// fonksiyonu çağırır — imza girdisini iki yerde elle kurmak, bu tür
-/// protokollerde klasik bir uyumsuzluk kaynağı.
+/// The bytes `Enroll.sig` signs. The client and the server both call this same
+/// function. Building the signed input by hand in two places is a classic source of
+/// mismatch in protocols like this.
 ///
-/// Both enrollment keys and the client's PeerId are signed too: the
-/// signature commits to the keys it is verified with and is useless from
-/// any other PeerId.
+/// Both enrollment keys and the client's PeerId are signed too. The signature commits
+/// to the keys it is verified with and is useless from any other PeerId.
 #[allow(clippy::too_many_arguments)]
 pub fn enroll_signing_input(
     version: u16,
@@ -696,10 +670,10 @@ pub fn enroll_signing_input(
     )
 }
 
-/// `Rebind.sig`'in üzerinde hesaplandığı baytlar.
+/// The bytes `Rebind.sig` signs.
 ///
-/// `client_peer_id` and the `Hello` challenge are signed too: a Rebind that
-/// leaks is useless from any other PeerId and on any other connection.
+/// `client_peer_id` and the `Hello` challenge are signed too. A leaked Rebind is
+/// useless from any other PeerId and on any other connection.
 pub fn rebind_signing_input(
     enrollment_id: &[u8],
     server_peer_id: &str,
@@ -713,20 +687,20 @@ pub fn rebind_signing_input(
     )
 }
 
-/// The bytes a `MailboxProof` signs. The enrollment and the server are in
-/// it: a proof read off the wire registers nothing for another enrollment
-/// or at another server.
+/// The bytes a `MailboxProof` signs. The enrollment and the server are included, so a
+/// proof read off the wire registers nothing for another enrollment or at another
+/// server.
 pub fn register_signing_input(mailbox: &str, enrollment_id: &[u8], server_peer_id: &str) -> Vec<u8> {
     signing_input(b"p2pmsg-v0.5-server-register", &[mailbox.as_bytes(), enrollment_id, server_peer_id.as_bytes()])
 }
 
-/// Start of every id made by `key_bound_mailbox_id`. The server checks the
-/// key of a `Register` proof for these ids only.
+/// Prefix of every id made by `key_bound_mailbox_id`. The server checks the
+/// `Register` proof key only for these ids.
 pub const KEY_BOUND_MAILBOX_PREFIX: &str = "mk_";
 
-/// The hash of a `MailboxProof` key pair that the server keeps per reader.
-/// Both keys have a fixed length once the signature verifies, so the plain
-/// concatenation is unambiguous.
+/// The hash of a `MailboxProof` key pair, which the server keeps per reader. Both keys
+/// have a fixed length once the signature verifies, so plain concatenation is
+/// unambiguous.
 pub fn mailbox_key_hash(pk: &[u8], pk_pq: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -736,10 +710,10 @@ pub fn mailbox_key_hash(pk: &[u8], pk_pq: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// The id of a mailbox whose one proof key hashes to `key_hash`
-/// (`mailbox_key_hash`). Both ends of a session (or of a call relay) derive
-/// the key from the secret they share, so the sender computes the id too,
-/// and the server can check that a proof is by the mailbox's own key.
+/// The id of a mailbox whose one proof key hashes to `key_hash` (`mailbox_key_hash`).
+/// Both ends of a session (or call relay) derive the key from their shared secret, so
+/// the sender can compute the id too. The server can then check that a proof is made
+/// by the mailbox's own key.
 pub fn key_bound_mailbox_id(key_hash: &[u8]) -> String {
     format!("{}{}", KEY_BOUND_MAILBOX_PREFIX, hex::encode(&key_hash[..key_hash.len().min(16)]))
 }
@@ -755,7 +729,7 @@ mod tests {
         assert!(id.starts_with(&"07".repeat(BLOB_TAG_LEN)));
         assert!(id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
         assert_ne!(id, blob_id_for_upload_secret(&[8u8; BLOB_UPLOAD_SECRET_LEN]).unwrap());
-        // The id itself is no secret: sent back as one it names another blob.
+        // The id is not secret. Sent back as a value, it names another blob.
         assert!(blob_id_for_upload_secret(id.as_bytes()).is_none());
         assert!(blob_id_for_upload_secret(&[7u8; 15]).is_none());
         assert!(id.ends_with(&blob_id_hash_hex(&[7u8; BLOB_UPLOAD_SECRET_LEN - BLOB_TAG_LEN])));
@@ -771,9 +745,9 @@ mod tests {
 
     #[test]
     fn invite_carries_every_address() {
-        // Tek adres tasindiginda (ve o onion oldugunda) ayni LAN'daki iki
-        // cihaz bile butun trafigi Tor'dan geciriyordu — olculen fark 10x'ten
-        // fazlaydi. Kod artik hepsini tasir.
+        // With one address, and that address onion, two devices on the same LAN still
+        // routed all traffic over Tor. The measured gap was over 10x. The code now
+        // carries all of them.
         let addrs = vec![
             "/dns/abcdef.onion/tcp/42612/p2p/12D3KooWTest".to_string(),
             "/ip4/192.168.1.5/tcp/42612/p2p/12D3KooWTest".to_string(),
@@ -801,11 +775,11 @@ mod tests {
 
     #[test]
     fn error_permanence_classification() {
-        // Kalıcı: aynı baytlarla asla başaramaz.
+        // Permanent: the same bytes never succeed.
         assert!(ServerErrorCode::TooLarge.is_permanent());
         assert!(ServerErrorCode::Unsupported.is_permanent());
         assert!(ServerErrorCode::BadHash.is_permanent());
-        // Geçici: kullanıcı yer açabilir / sınır sıfırlanır / kayıt yenilenir.
+        // Transient: the user can free space, the limit can reset, or the record can be renewed.
         assert!(!ServerErrorCode::QuotaExceeded.is_permanent());
         assert!(!ServerErrorCode::RateLimited.is_permanent());
         assert!(!ServerErrorCode::UnknownMailbox.is_permanent());
@@ -815,9 +789,9 @@ mod tests {
 
     #[test]
     fn deposit_cap_stays_below_the_codec_hard_limit() {
-        // Modül başındaki notun testi: libp2p-request-response'un CBOR
-        // codec'i istekleri 1 MiB'da KIRPAR. Bu sabit oraya yaklaşırsa
-        // zarflar sessizce bozulmaya başlar.
+        // Tests the note at the top of the module: libp2p-request-response's CBOR codec
+        // truncates requests at 1 MiB. If this constant gets close to that, envelopes
+        // start to corrupt silently.
         assert!(MAX_DEPOSIT_BYTES < 1024 * 1024, "codec sert sinirini asamaz");
         assert!(ServerLimits::default().max_item_bytes as usize <= MAX_DEPOSIT_BYTES);
     }
@@ -830,15 +804,15 @@ mod tests {
         }
         let base = e(1, "peer", "me", b"tok", b"pk", b"pq", b"chal", 100);
         assert_ne!(base, e(2, "peer", "me", b"tok", b"pk", b"pq", b"chal", 100));
-        // Sunucu kimliği imzaya dahil olmalı — yoksa bir sunucu, aldigi
-        // Enroll'u baska bir sunucuya karsi tekrar oynatabilirdi.
+        // The server id must be in the signed input. Otherwise a server could replay an
+        // Enroll it received against another server.
         assert_ne!(base, e(1, "other", "me", b"tok", b"pk", b"pq", b"chal", 100));
         assert_ne!(base, e(1, "peer", "thief", b"tok", b"pk", b"pq", b"chal", 100));
         assert_ne!(base, e(1, "peer", "me", b"tok2", b"pk", b"pq", b"chal", 100));
         assert_ne!(base, e(1, "peer", "me", b"tok", b"pk2", b"pq", b"chal", 100));
         assert_ne!(base, e(1, "peer", "me", b"tok", b"pk", b"pq2", b"chal", 100));
-        // Challenge imzaya dahil olmali — yoksa yakalanan bir imza, taze bir
-        // baglantida hala gecerli olurdu.
+        // The challenge must be in the signed input. Otherwise a captured signature
+        // would stay valid on a fresh connection.
         assert_ne!(base, e(1, "peer", "me", b"tok", b"pk", b"pq", b"chal2", 100));
         assert_ne!(base, e(1, "peer", "me", b"tok", b"pk", b"pq", b"chal", 101));
 
@@ -849,8 +823,8 @@ mod tests {
         assert_ne!(rb, rebind_signing_input(b"eid", "peer", "thief", b"chal", 100));
         assert_ne!(rb, rebind_signing_input(b"eid", "peer", "me", b"chal2", 100));
 
-        // A shifted field boundary is another message, and an Enroll
-        // signature is never a Rebind signature.
+        // A shifted field boundary is a different message, and an Enroll signature is
+        // never a Rebind signature.
         assert_ne!(e(1, "ab", "c", b"t", b"k", b"q", b"chal", 100), e(1, "a", "bc", b"t", b"k", b"q", b"chal", 100));
         assert_ne!(e(1, "p", "m", b"tok", b"k", b"q", b"chal", 100), e(1, "p", "m", b"tokk", b"", b"q", b"chal", 100));
         assert_ne!(rebind_signing_input(b"ei", "dpeer", "me", b"c", 100), rebind_signing_input(b"eid", "peer", "me", b"c", 100));
@@ -858,9 +832,9 @@ mod tests {
     }
 }
 
-/// Is `addr` an onion address? A server address is nothing else: any other
-/// kind (an IP, or a DNS name that can resolve to a private address) is
-/// refused in invites and server records. The first component decides.
+/// Is `addr` an onion address? A server address is nothing else. Any other kind (an
+/// IP, or a DNS name that may resolve to a private address) is refused in invites and
+/// server records. The first component decides.
 pub fn is_onion_server_addr(addr: &str) -> bool {
     let mut parts = addr.split('/').skip(1);
     match (parts.next(), parts.next()) {
@@ -870,9 +844,8 @@ pub fn is_onion_server_addr(addr: &str) -> bool {
     }
 }
 
-/// The addresses of a server worth storing and dialing: the onion ones
-/// (see `is_onion_server_addr`). An empty result means "this invite cannot
-/// be used".
+/// The addresses worth storing and dialing for a server: the onion ones (see
+/// `is_onion_server_addr`). An empty result means this invite cannot be used.
 pub fn public_server_addrs<I, S>(addrs: I) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
@@ -885,36 +858,33 @@ where
         .collect()
 }
 
-/// Sunucunun kabul edeceği EN BÜYÜK blob parçası (bayt).
+/// Largest blob chunk the server accepts, in bytes.
 ///
-/// Parça boyutu artık istemci tarafında dosya başına seçiliyor (bkz.
-/// `attachments::FILE_CHUNK_SIZE_V2`), dolayısıyla sunucunun doğrulaması da
-/// TEK bir boyuta çakılı olamaz. Nitekim öyleydi: sunucu miras 256 KiB'a
-/// göre kontrol ediyor ve 512 KiB'lık her parçayı `TooLarge` ile
-/// reddediyordu — aktarım hiç ilerlemiyordu.
+/// The chunk size is now chosen per file on the client (see
+/// `attachments::FILE_CHUNK_SIZE_V2`), so the server's check cannot be tied to one
+/// size. It was: the server checked against the legacy 256 KiB and rejected every
+/// 512 KiB chunk with `TooLarge`, so transfers never progressed.
 ///
-/// Tavan `request_response` CBOR codec'inin 1 MiB'lık SERT istek sınırından
-/// geliyor (`REQUEST_SIZE_MAXIMUM`; aşılırsa istek sessizce KIRPILIR ve
-/// çözümleme başarısız olur). 768 KiB, hem 512 KiB'lık parçaya + AEAD
-/// etiketine + CBOR çerçevelemesine rahatça yer bırakıyor hem de sınırın
-/// belirgin biçimde altında kalıyor.
+/// The cap comes from the hard 1 MiB request limit of the `request_response` CBOR
+/// codec (`REQUEST_SIZE_MAXIMUM`; an oversized request is cut silently and decoding
+/// fails). 768 KiB leaves room for a 512 KiB chunk, the AEAD tag and CBOR framing,
+/// and stays well under the limit.
 pub const MAX_BLOB_CHUNK_BYTES: usize = 768 * 1024;
 
-/// Length of a blob upload secret (`BlobPut.upload_secret`): an 8-byte
-/// author tag, shown in the id, then 16 secret bytes.
+/// Length of a blob upload secret (`BlobPut.upload_secret`): an 8-byte author tag,
+/// shown in the id, then 16 secret bytes.
 pub const BLOB_UPLOAD_SECRET_LEN: usize = 24;
 
 /// Length of the author tag at the start of an upload secret.
 pub const BLOB_TAG_LEN: usize = 8;
 
-/// The blob (= file) id an upload secret stands for: 48 lower-case hex
-/// characters, the secret's author tag in the clear and then
-/// `blob_id_hash_hex` of the secret's other bytes. The sender picks the
-/// secret, names only this id in its `FileOffer`, and proves ownership on
-/// the server with the secret itself. The tag lets a group member check that
-/// a file id belongs to the member who offers it (core `group_msg_tag`, made
-/// from the hash part, so it differs per file); the server does not look at
-/// it. `None` for a secret of the wrong length.
+/// The blob (file) id an upload secret stands for: 48 lowercase hex characters, the
+/// author tag in the clear, then `blob_id_hash_hex` of the rest of the secret. The
+/// sender picks the secret, names only this id in its `FileOffer`, and proves ownership
+/// to the server with the secret itself. The tag lets a group member check that a file
+/// id belongs to the member who offers it (core `group_msg_tag`, derived from the hash
+/// part, so it differs per file). The server does not read it. `None` if the secret has
+/// the wrong length.
 pub fn blob_id_for_upload_secret(upload_secret: &[u8]) -> Option<String> {
     if upload_secret.len() != BLOB_UPLOAD_SECRET_LEN {
         return None;
@@ -923,8 +893,8 @@ pub fn blob_id_for_upload_secret(upload_secret: &[u8]) -> Option<String> {
     Some(format!("{}{}", hex::encode(tag), blob_id_hash_hex(rest)))
 }
 
-/// The id's part after the tag: a hash of the upload secret's bytes after
-/// the tag (32 hex characters). Separate so the tag can be made from it.
+/// The id part after the tag: a hash of the upload secret's bytes after the tag (32 hex
+/// characters). Kept separate so the tag can be derived from it.
 pub fn blob_id_hash_hex(secret_after_tag: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let hash = Sha256::new_with_prefix(b"typeon-blob-id-v3").chain_update(secret_after_tag).finalize();

@@ -22,7 +22,7 @@ import androidx.annotation.StringRes
 import com.p2p.messenger.R
 
 /**
- * Spec dışı, kullanıcı isteği ("full hsv color picker"): sabit bir renk
+ * sabit bir renk
  * paletinin (önceki, basit swatch grid deneme) YERİNE — Doygunluk/Değer
  * (SV) karesi + Renk tonu (Hue) çubuğundan oluşan klasik HSV seçici, artı
  * elle Hex girişi. Harici bir kütüphane EKLEMEZ (bu ortamda Gradle build'i

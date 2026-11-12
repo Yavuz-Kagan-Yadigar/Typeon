@@ -57,7 +57,7 @@ class FetchHistoryButton(
         button.setText(R.string.msg_fetch_history_requested)
         val key = chatKey()
         val before = oldestTimestamp()
-        // L-189: a stuck JNI call must not leave the button disabled for good
+        // a stuck JNI call must not leave the button disabled for good
         // (finish() also drops the late result, `current` no longer matches).
         button.postDelayed({ if (current == request) finish() }, JNI_WAIT_MS)
         Thread {

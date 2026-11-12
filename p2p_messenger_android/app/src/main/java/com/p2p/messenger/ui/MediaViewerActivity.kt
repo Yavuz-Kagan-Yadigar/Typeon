@@ -32,7 +32,7 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 
 /**
- * Spec dışı: kullanıcı tarafından istenen basit uygulama içi görüntüleyici
+ * kullanıcı tarafından istenen basit uygulama içi görüntüleyici
  * — önceden tamamlanmış bir foto/video eki, HER ZAMAN sistem varsayılan
  * uygulamasına (ACTION_VIEW) devrediliyordu; artık foto/video özelinde
  * (diğer türler hâlâ sistem uygulamasına gider, bkz. ChatActivity
@@ -327,7 +327,7 @@ class MediaViewerActivity : AppCompatActivity() {
     }
 
     /**
-     * Spec dışı: `VideoView`'ın kendi `MediaController`'ı yerine — YouTube
+     * `VideoView`'ın kendi `MediaController`'ı yerine — YouTube
      * tarzı tek dokunuş (oynat/duraklat), çift dokunuş (ekranın sol/sağ
      * yarısına göre ±5sn atlama + kısa animasyonlu gösterge), ve hız
      * rozeti (bkz. `PlaybackSpeed`, sesli mesajlarla AYNI döngü).
@@ -339,7 +339,7 @@ class MediaViewerActivity : AppCompatActivity() {
         val speedButton = findViewById<TextView>(R.id.btnPlaybackSpeed)
         overlay.visibility = View.VISIBLE
 
-        // Spec dışı: çift dokunuşla ±5sn atlama HÂLÂ çalışır (bkz. gesture
+        // çift dokunuşla ±5sn atlama HÂLÂ çalışır (bkz. gesture
         // detector aşağıda) ama artık kullanıcıya görünür, dokunulabilir
         // düğmeler DE var — önceden sadece görünmez bir dokunuş bölgesi
         // olduğundan kontroller keşfedilemezdi.
@@ -449,7 +449,7 @@ class MediaViewerActivity : AppCompatActivity() {
         super.onDestroy()
         videoHandler.removeCallbacksAndMessages(null)
         videoMediaPlayer = null
-        // M119: release the codec now, not when the view is collected.
+        // release the codec now, not when the view is collected.
         try { findViewById<VideoView>(R.id.videoViewer)?.stopPlayback() } catch (e: Exception) { }
         // The full-size avatar copy of `AvatarUtil.openFullscreen` is plaintext
         // on disk and has no other use.

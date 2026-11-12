@@ -15,7 +15,7 @@ impl P2PCore {
         seal_recovery_file(&plaintext, &passphrase)
     }
 
-    /// M-21: the part of `export_recovery` that needs the core. The Argon2
+    /// the part of `export_recovery` that needs the core. The Argon2
     /// step (`seal_recovery_file`) does not, a caller can run it unlocked.
     /// `chats`: from `recovery_chats_unlocked` (the lock taken per chat), or
     /// `None` to read them here.
@@ -43,7 +43,7 @@ impl P2PCore {
             kem_sk_mlkem: Vec<u8>,
         }
         // The long-term secret keys are wiped when the export is done
-        // (fable F-11), like `SecretKeyBundle`.
+        //like `SecretKeyBundle`.
         impl Drop for ExportedDevice {
             fn drop(&mut self) {
                 use zeroize::Zeroize;
@@ -126,7 +126,7 @@ pub(crate) fn seal_recovery_file(plaintext: &[u8], passphrase: &str) -> Result<V
     let mut nonce_bytes = [0u8; 12];
     rng.fill(&mut nonce_bytes).map_err(|_| "RNG failed")?;
 
-    // Spec dışı, güvenlik denetimi düzeltmesi: parola-tabanlı anahtar
+    // parola-tabanlı anahtar
     // türetmesi ARTIK Argon2id (memory-hard) — önceden HKDF-SHA256
     // kullanılıyordu, o tek bir HMAC olduğundan bu dosya (TÜM uzun-vadeli
     // secret key'leri taşır) sızarsa zayıf bir parola çevrimdışı
@@ -164,7 +164,7 @@ pub(crate) fn seal_recovery_file(plaintext: &[u8], passphrase: &str) -> Result<V
     Ok(file)
 }
 
-/// M-21: Argon2id + decrypt of a recovery file. No core state: run it
+/// Argon2id + decrypt of a recovery file. No core state: run it
 /// without the core lock (between `import_recovery_precheck` and
 /// `import_recovery_plaintext`).
 pub(crate) fn open_recovery_file(file_bytes: &[u8], passphrase: &str) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
@@ -189,7 +189,7 @@ pub(crate) fn open_recovery_file(file_bytes: &[u8], passphrase: &str) -> Result<
     // file asked for gigabytes of memory (the app is killed) or hours of
     // work, before the passphrase is even tested. `seal_recovery_file`
     // writes m=64 MiB, t=2, p=1.
-    // M11: also a total-work bound (4x what `export_recovery` writes), or
+    // also a total-work bound (4x what `export_recovery` writes), or
     // 256 MiB x 10 passes froze the import screen for minutes.
     if file.argon2_m_cost > MAX_RECOVERY_ARGON2_M_COST_KIB || file.argon2_t_cost > 10 || file.argon2_p_cost > 4
         || file.argon2_m_cost as u64 * file.argon2_t_cost as u64 > 4 * 65_536 * 2
@@ -245,7 +245,7 @@ impl P2PCore {
         self.import_recovery_plaintext(&plaintext, device_name)
     }
 
-    /// M-21: the cheap check, under the core lock.
+    /// the cheap check, under the core lock.
     pub(crate) fn import_recovery_precheck(&self) -> Result<(), String> {
         // Sadece ÇALIŞAN (secret key'leri bellekte olan) bir kimliği
         // ezmeyi engeller — `self.identity.is_some()` DEĞİL: MainActivity
@@ -290,7 +290,7 @@ impl P2PCore {
             return Err("Kurtarma dosyası bozuk (arşiv anahtarı)".to_string());
         }
 
-        // M-22: parsed before the wipe, so a bad payload changes nothing.
+        // parsed before the wipe, so a bad payload changes nothing.
         let recovery_data: Option<RecoveryData> = if exported.data.is_empty() {
             None
         } else {
@@ -332,7 +332,7 @@ impl P2PCore {
             if computed_fp != dev.device_fingerprint {
                 return Err("Kurtarma dosyası bozuk (fingerprint uyuşmazlığı)".to_string());
             }
-            // M-22: the keys decoded and match: only now does the other
+            // the keys decoded and match: only now does the other
             // identity go (`take(1)`: once).
             self.wipe_other_identity(&exported.identity_id);
 

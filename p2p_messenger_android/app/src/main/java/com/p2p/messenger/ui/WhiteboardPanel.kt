@@ -329,7 +329,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
                 // and the next undo removed only the successful prefix.
                 // A stroke over 512 points comes back as several segment ids
                 // (8 bytes each): collect what the core returned, so the
-                // rollback and the next undo use the real ids (fable G-06).
+                // rollback and the next undo use the real ids.
                 val collected = java.io.ByteArrayOutputStream()
                 var ok = true
                 step.strokes.forEach { s ->

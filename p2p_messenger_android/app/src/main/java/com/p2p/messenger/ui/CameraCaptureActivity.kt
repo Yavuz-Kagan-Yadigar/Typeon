@@ -27,7 +27,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Spec dışı, kullanıcı isteği: sohbet giriş çubuğundaki kamera düğmesinin
+ * sohbet giriş çubuğundaki kamera düğmesinin
  * açtığı anlık çekim ekranı. The shot goes straight to the caption dialog,
  * which opens it in the image editor (crop, rotate, retake are there).
  *

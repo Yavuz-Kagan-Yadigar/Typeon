@@ -27,7 +27,7 @@ pub struct Group {
     /// Üyelik listesi her değiştiğinde artar (spec 5.2) — eski/tekrarlanan
     /// GroupUpdate paketlerini reddetmek için kullanılır.
     pub version: u32,
-    /// Spec dışı: grup profil fotoğrafı — SADECE `GroupChange::AvatarUpdate`
+    /// grup profil fotoğrafı — SADECE `GroupChange::AvatarUpdate`
     /// ile (dolayısıyla SADECE kurucu tarafından) değişir.
     #[serde(default)]
     pub avatar_jpeg: Option<Vec<u8>>,
@@ -91,7 +91,7 @@ impl Group {
         self.members.iter().map(|m| m.identity_id.clone()).collect()
     }
 
-    /// Spec dışı, hata düzeltmesi (üçüncü üye hatası): üyelik listesini
+    /// üyelik listesini
     /// kurucudan gelen OTORİTER listeye eşitler (bkz. `GroupUpdate.members`).
     /// Var olan üyelerin `added_at`'i korunur (gereksiz değişiklik olmasın),
     /// listede olmayanlar çıkarılır, yeni olanlar eklenir. Bu, hem geç
@@ -196,7 +196,7 @@ pub fn apply_change(group: &mut Group, change: &GroupChange, new_version: u32, n
         GroupChange::Add(identity_id) => {
             // `added_at` is when the latest add reached us: a member removed
             // and added again (even when we missed the removal) starts over.
-            // It limits the group history this member may get from us (C-06).
+            // It limits the group history this member may get from us.
             match group.members.iter_mut().find(|m| m.identity_id == *identity_id) {
                 Some(m) => m.added_at = now,
                 None => group.members.push(GroupMember {
@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(g.founder_identity_id, "b");
     }
 
-    /// C-06: the latest add counts, also when the removal was missed.
+    /// the latest add counts, also when the removal was missed.
     #[test]
     fn re_add_restarts_added_at() {
         let mut g = Group::new("g1".into(), "Test".into(), "founder1".into(), 1000);

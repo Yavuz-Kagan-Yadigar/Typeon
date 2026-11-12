@@ -7,7 +7,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 
 /**
- * Spec dışı, kullanıcı isteği (açıkça, üçüncü kez): klavye açıldığında
+ * klavye açıldığında
  * sohbet onun yüksekliğini telafi etsin ve alttaki mesaj görünür kalsın;
  * klavye kapanınca geri alsın.
  *
@@ -107,7 +107,7 @@ object KeyboardInsets {
             val delta = previousHeight - (bottom - top)
             if (delta == 0) return@addOnLayoutChangeListener
             if (wasNearBottomBeforeResize) {
-                // Spec dışı, hata düzeltmesi (kullanıcı: "en altta klavye
+                // "en altta klavye
                 // açılıp kapanınca view yukarı sürükleniyor"): liste
                 // BÜYÜRKEN (klavye kapanırken) `LinearLayoutManager` zaten
                 // en altta boşluk BIRAKMAMAK için kendiliğinden telafi

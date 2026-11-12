@@ -109,7 +109,7 @@ object ArchiveKeyManager {
         // Kardeşten (`DeviceSync`) gelmiş bir ARK bellekte olabilir: onu
         // yaz, yenisini üretip üstüne yazma (arşiv cihazlar arasında bölünürdü).
         val fromCore = try { P2PLib.archiveRootKey() } catch (e: Exception) { ByteArray(0) }
-        // M-99: a failed read counts as secondary (fail closed, no random key).
+        // a failed read counts as secondary (fail closed, no random key).
         // A linked device waits for its sibling's key: one made here would
         // stay for good and split the archive between the devices.
         if (fromCore.size != 32 && try { P2PLib.isSecondaryDevice() } catch (e: Exception) { true }) return false

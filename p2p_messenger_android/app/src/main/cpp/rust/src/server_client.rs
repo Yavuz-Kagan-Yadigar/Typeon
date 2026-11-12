@@ -248,14 +248,14 @@ pub(crate) struct ServerRuntime {
     /// için.
     pub registered: HashSet<String>,
     /// Ids the server refused (`Registered.refused`): not sent again before
-    /// `refused_retry_at` (M29).
+    /// `refused_retry_at`.
     pub refused: HashSet<String>,
     pub refused_retry_at: u64,
     /// Mailbox -> (seq, first failure ms) of the item holding its cursor, see
     /// `SERVER_HOLD_GRACE_MS`.
     pub held: HashMap<String, (u64, u64)>,
     /// Held items passed over after the grace: skipped, and the cursor goes
-    /// past them like past an item that opened (fable C-02).
+    /// past them like past an item that opened.
     pub passed: HashSet<(String, u64)>,
     /// SHA-256 of each item handed to `incoming` this turn -> (mailbox, seq),
     /// for `server_item_failed`.
@@ -276,7 +276,7 @@ pub(crate) struct ServerRuntime {
     pub deposit_backoff_until: u64,
     /// Deposits refused or unanswered in a row (exponential backoff).
     pub deposit_failures: u32,
-    /// E-01: a refused `ArchivePut` (full quota, rate, server error): no new
+    /// a refused `ArchivePut` (full quota, rate, server error): no new
     /// archive batch before this (ms). Kept apart from the deposit backoff so
     /// a full archive never stops message deposits.
     pub archive_backoff_until: u64,
@@ -366,7 +366,7 @@ pub(crate) enum ServerInflight {
         rest: Vec<String>,
         window: Option<(u64, u64)>,
         next: Vec<(String, bool)>,
-        /// E-03: the cursor this page was asked from, and the pages of this
+        /// the cursor this page was asked from, and the pages of this
         /// bucket so far: the next page is asked only if the server moved
         /// strictly past it, and never past `ARCHIVE_FETCH_MAX_PAGES`.
         cursor: Option<(u64, String)>,
@@ -673,7 +673,7 @@ impl P2PCore {
                     next_chunk,
                     total_chunks: r.get::<_, i64>(2)? as u32,
                     inflight: HashSet::new(),
-                    // Defter #09: `done` eskiden BOŞ kuruluyordu, oysa
+                    // `done` eskiden BOŞ kuruluyordu, oysa
                     // `server_flush_blobs` gönderilecek parçayı SADECE
                     // `done`/`inflight`'a bakarak seçiyor — yani diskten
                     // okunan `next_chunk` filigranı hiçbir şeye etki etmiyor
@@ -897,7 +897,7 @@ impl P2PCore {
             conn.execute("DELETE FROM servers WHERE server_id = ?1", params![server_id])
                 .map_err(|e| format!("Sunucu silinemedi: {e}"))?;
         }
-        // L-138: before `server_archived_convs` is cleared — it lists the
+        // before `server_archived_convs` is cleared — it lists the
         // conversations deleted since they were archived.
         self.purge_server_archive(server_id);
         if let Some(conn) = &self.db {
@@ -905,7 +905,7 @@ impl P2PCore {
                 warn!("Sunucu imleçleri silinemedi: {}", e);
             }
             if no_servers_left {
-                // L-50: the revisions too; no archive is left they could guard.
+                // the revisions too; no archive is left they could guard.
                 for t in ["server_archived_convs", "server_archive_queue", "server_blob_uploads", "server_archive_revs"] {
                     if let Err(e) = conn.execute(&format!("DELETE FROM {t}"), []) {
                         warn!("{} silinemedi: {}", t, e);
@@ -942,7 +942,7 @@ impl P2PCore {
                 self.requeue_failed_deposit(&inflight);
             }
         }
-        // Defter #10: bekleyen arşiv kuyruğu ve blob yüklemeleri de
+        // bekleyen arşiv kuyruğu ve blob yüklemeleri de
         // temizlenmeli. `server_flush_archive`/`server_flush_blobs` bağlı ve
         // (arşiv için) `store_history` açık bir sunucu ister — son sunucu
         // kaldırıldığında bu satırlar bir daha ASLA boşalmıyor, yani
@@ -951,7 +951,7 @@ impl P2PCore {
             self.server_archive_queue.clear();
             self.server_blob_uploads.clear();
         }
-        // E-07: no history server left (another server without history may
+        // no history server left (another server without history may
         // remain): the queue would never drain and a later history switch
         // would upload stale copies, edits and deletes included. Same as
         // `set_server_history`.
@@ -1001,7 +1001,7 @@ impl P2PCore {
         self.purge_archive_convs(server_id, &conv_keys);
     }
 
-    /// K-35: one conversation's archive on every server (a deleted contact),
+    /// one conversation's archive on every server (a deleted contact),
     /// and its queued uploads, which would otherwise put it back. Best effort:
     /// an unreachable server keeps it until its TTL. The
     /// `server_archived_convs` row stays, so a later whole-server purge still
@@ -1174,7 +1174,7 @@ impl P2PCore {
     /// The server mailbox of the session with `peer_fp` and its proof secret:
     /// stable, from the two devices' long-term KEM keys
     /// (`server_seal::session_mailbox_secret`), not from the rotating root
-    /// key (C2). The id is made from the proof key (`key_bound_mailbox_id`).
+    /// key. The id is made from the proof key (`key_bound_mailbox_id`).
     /// PROTOCOL BREAK: older clients use another id.
     fn session_mailbox(&self, peer_fp: &str) -> Option<(String, [u8; 32])> {
         let own_fp = self.own_mailbox_topic_fp.as_ref()?;
@@ -1203,7 +1203,7 @@ impl P2PCore {
     fn send_register(&mut self, server_id: &str, peer_id: PeerId, mut add: Vec<String>, drop: Vec<String>, prove: &[String]) {
         let enrollment_id = self.servers.iter().find(|s| s.server_id == server_id).and_then(|s| s.enrollment_id.clone());
         let proofs: Vec<server_proto::MailboxProof> = match &enrollment_id {
-            // L-65: the mailbox secrets only when there is something to prove.
+            // the mailbox secrets only when there is something to prove.
             Some(eid) if !prove.is_empty() => {
                 let mut secrets: HashMap<String, Vec<u8>> =
                     self.own_server_mailboxes().into_iter().map(|(id, (secret, _))| (id, secret)).collect();
@@ -1306,7 +1306,7 @@ impl P2PCore {
                 self.server_rt
                     .get(&s.server_id)
                     .map(|r| r.connected && r.enrolled && now_ms >= r.deposit_backoff_until
-                        // The server's own item limit (fable C-08): over it the
+                        // The server's own item limit: over it the
                         // answer is TooLarge, which backed off every deposit.
                         && r.limits.as_ref().map_or(true, |l| sealed.len() as u64 <= l.max_item_bytes as u64))
                     .unwrap_or(false)
@@ -1640,7 +1640,7 @@ impl P2PCore {
             let mut wanted: HashSet<String> = if rec.route_messages { own_ids.clone() } else { HashSet::new() };
             wanted.extend(relay_ids.iter().cloned());
             if let Some(rt) = self.server_rt.get_mut(&rec.server_id) {
-                // M29: a refusal is not for good: try again after a while.
+                // a refusal is not for good: try again after a while.
                 if !rt.refused.is_empty() && now >= rt.refused_retry_at {
                     rt.refused.clear();
                 }
@@ -1705,7 +1705,7 @@ impl P2PCore {
     fn server_fetch(&mut self, server_id: &str, peer_id: PeerId, own_ids: &HashSet<String>) {
         // Nothing is taken before the storage keys are loaded: a fetched
         // item would wait in `deferred_incoming`, where it can be evicted.
-        // M-16: nor while fetched mail waits for its rate budget: the
+        // nor while fetched mail waits for its rate budget: the
         // backlog stays one batch.
         if !self.storage_keys_ready() || self.server_mail_deferred() {
             return;
@@ -1774,7 +1774,7 @@ impl P2PCore {
     /// its incoming loop; `drive_server_sync` calls it too, for the turns
     /// before. Acked before processing, a crash in between lost the only copy.
     pub(crate) fn commit_server_fetches(&mut self) {
-        // M-16: fetched mail still waits for its rate budget; acked now, a
+        // fetched mail still waits for its rate budget; acked now, a
         // crash before it is processed would lose it.
         if self.server_mail_deferred() {
             return;
@@ -1784,7 +1784,7 @@ impl P2PCore {
         // (`server_item_failed`). Held and passed items the cursor went past
         // are done.
         let cursors = &self.server_cursors;
-        // H87: items still deferred (keys not ready) keep their record, so a
+        // items still deferred (keys not ready) keep their record, so a
         // later failure can still hold them (`server_item_failed`).
         let deferred: std::collections::HashSet<[u8; 32]> =
             self.deferred_incoming.iter().filter(|(s, _)| s.is_none()).map(|(_, r)| Sha256::digest(r).into()).collect();
@@ -1830,7 +1830,7 @@ impl P2PCore {
         rt.ack_retry_at = mono_ms() + SERVER_SWEEP_INTERVAL_MS;
     }
 
-    /// C1: `seq` of `mailbox` did not open or failed to process. `true`: it
+    /// `seq` of `mailbox` did not open or failed to process. `true`: it
     /// holds the mailbox's cursor (not acked, the server keeps it). `false`:
     /// it has failed for `SERVER_HOLD_GRACE_MS` and is passed over for good.
     pub(crate) fn hold_server_item(&mut self, server_id: &str, mailbox: &str, seq: u64, now: u64) -> bool {
@@ -1869,7 +1869,7 @@ impl P2PCore {
         }
     }
 
-    /// H14: `process_incoming_envelope` failed on a fetched item (`raw`, as
+    /// `process_incoming_envelope` failed on a fetched item (`raw`, as
     /// handed to `incoming`). Its mailbox's cursor goes back before it, so the
     /// Ack of this turn does not let the server delete it; it is fetched again
     /// (`hold_server_item`). Called by `poll_events` for each `Err` of a
@@ -1978,7 +1978,7 @@ impl P2PCore {
                 if over {
                     return self.handle_server_push(peer, ServerRequest::Notify, incoming);
                 }
-                // C1: a mailbox held before an earlier item takes its later
+                // a mailbox held before an earlier item takes its later
                 // items in order, from the held item's refetch (not at once:
                 // see `SERVER_HOLD_REFETCH_MS`).
                 let behind = self.server_rt.get(&server_id)
@@ -2068,7 +2068,7 @@ impl P2PCore {
                 let Some(mut rec) = self.servers.iter().find(|s| s.server_id == server_id).cloned() else { return };
                 if version != SERVER_PROTOCOL_VERSION {
                     if let Some(rt) = self.server_rt.get_mut(&server_id) {
-                        // H105: say which side is behind.
+                        // say which side is behind.
                         rt.last_error = Some(if version < SERVER_PROTOCOL_VERSION {
                             format!("Server protocol {version}, this app speaks {SERVER_PROTOCOL_VERSION}: update the server")
                         } else {
@@ -2257,7 +2257,7 @@ impl P2PCore {
                 let mut highest: HashMap<String, u64> = HashMap::new();
                 let mut count = 0usize;
                 let mut bytes = 0usize;
-                // C1: the cursor of a mailbox stops before its first item that
+                // the cursor of a mailbox stops before its first item that
                 // does not open (`hold_server_item`); its later items come with
                 // the next fetch. `seen`: mailboxes this batch reached;
                 // `blocked`: held in this batch.
@@ -2400,7 +2400,7 @@ impl P2PCore {
                     if let Some((before, _)) = window { self.reopen_fetch_cursor(&conv_key, before) }
                     return;
                 };
-                // Only buckets this probe asked for, each once (fable C-06): a
+                // Only buckets this probe asked for, each once: a
                 // server listed any number and each became a fetch over Tor.
                 let asked: HashSet<String> = match self.archive_root_key {
                     Some(ark) => archive_buckets(&ark, &conv_key, window.map_or_else(current_time_ms, |(before, _)| before)).into_iter().collect(),
@@ -2448,7 +2448,7 @@ impl P2PCore {
                     if let Some((before, _)) = window { self.reopen_fetch_cursor(&conv_key, before) }
                     return;
                 };
-                // E-03: a server repeating a page (or never ending one bucket)
+                // a server repeating a page (or never ending one bucket)
                 // looped here at round-trip speed: go on only when the cursor
                 // moved strictly older (server order is time, then id, both
                 // descending), and for a bounded number of pages.
@@ -2537,7 +2537,7 @@ impl P2PCore {
     fn handle_server_error(&mut self, inflight: ServerInflight, code: ServerErrorCode) {
         let server_id = inflight.server_id().to_string();
 
-        // Teslim garantisi düzeltmesi (defter #08): `fetch_inflight` yalnızca
+        // Teslim garantisi düzeltmesi: `fetch_inflight` yalnızca
         // BAŞARILI `Batch`'te, `handle_server_failure`'da ve aşağıdaki `other`
         // kolunda sıfırlanıyordu — `NotEnrolled`/`Revoked`/`UnknownMailbox`
         // kollarında değil. Bir `Fetch`'e `NotEnrolled` dönmesi (istemcinin
@@ -2717,7 +2717,7 @@ impl P2PCore {
             // instead of once per server — bounded by the mailbox count.
             ServerErrorCode::QuotaExceeded if matches!(inflight, ServerInflight::Deposit { .. }) => {
                 if let ServerInflight::Deposit { mailbox, .. } = &inflight {
-                    // The pause doubles per refusal (fable C-04), like
+                    // The pause doubles per refusal, like
                     // `UnknownMailbox`; a `Deposited` resets the streak.
                     let key = (server_id.clone(), mailbox.clone());
                     let now = mono_ms();
@@ -2756,7 +2756,7 @@ impl P2PCore {
                     if backs_off {
                         Self::back_off_deposits(rt);
                     }
-                    // E-01: a full archive quota (or a rate/server error) gets
+                    // a full archive quota (or a rate/server error) gets
                     // the same answer for a while: without this the same head
                     // batch went out again every sweep. Its own backoff, so
                     // message deposits keep going. A permanent refusal already
@@ -3059,11 +3059,11 @@ impl P2PCore {
         let Ok(k) = <[u8; 32]>::try_from(key) else { return false };
         self.archive_root_key = Some(k);
         self.reconcile_archive_key(true);
-        self.server_sweep_at = 0; // H56: backfill runs in slices from the sweep
+        self.server_sweep_at = 0; // backfill runs in slices from the sweep
         true
     }
 
-    /// L-137: history written while a history server was set but no archive
+    /// history written while a history server was set but no archive
     /// key was loaded was never queued; queue it once the key is here.
     /// One slice (200 rows) per sweep, newest first, down to the oldest row;
     /// the `ark_backfill` marker holds "<next id bound>,<rows done>"
@@ -3252,7 +3252,7 @@ impl P2PCore {
         }
         self.persist_archive_key_change(&key, old.as_ref(), false);
         self.archive_root_key = Some(key);
-        self.server_sweep_at = 0; // H56: backfill runs in slices from the sweep
+        self.server_sweep_at = 0; // backfill runs in slices from the sweep
         true
     }
 
@@ -3314,7 +3314,7 @@ impl P2PCore {
             return;
         }
         if self.archive_root_key.is_none() {
-            // L-137: queued once the key arrives (`maybe_archive_backfill`).
+            // queued once the key arrives (`maybe_archive_backfill`).
             if self.meta_str("ark_backfill").is_none() {
                 self.meta_put("ark_backfill", "1");
             }
@@ -3331,7 +3331,7 @@ impl P2PCore {
             sent_at_ms: sent_at_ms.min(current_time_ms()),
             plaintext,
         };
-        // Defter #10: bu kolon eskiden mesaj gövdesini DÜZ METİN yazıyordu —
+        // bu kolon eskiden mesaj gövdesini DÜZ METİN yazıyordu —
         // `messages` tablosundaki her gövde `history_key` ile şifreliyken,
         // yereldeki "dinlenme hâlinde şifreleme" tam da bu tablo için
         // baypas ediliyordu. Kuyruk normalde hızla boşalıyor, ama
@@ -3822,7 +3822,7 @@ impl P2PCore {
             total_chunks,
             // Şifreli baytların hash'i `BlobFinish` anında `sha256_file` ile
             // hesaplanır — burada dosyayı bir kez daha baştan sona okumamak
-            // için. (Defter #34: bunun için bir struct alanı vardı ama hiç
+            // için. (bunun için bir struct alanı vardı ama hiç
             // yazılmıyor, sadece diskten okunup atılıyordu; kaldırıldı.
             // `server_blob_uploads.enc_sha256` kolonu şema uyumu için duruyor
             // ve boş yazılıyor.)
@@ -4076,7 +4076,7 @@ fn archive_buckets(ark: &[u8; 32], conv_key: &str, newest_ms: u64) -> Vec<String
         .collect()
 }
 
-/// M-30: the `sent_at_ms` the server sees, floored to the hour (same epoch
+/// the `sent_at_ms` the server sees, floored to the hour (same epoch
 /// as the exact time). Restore orders by the time inside the sealed record.
 fn archive_wire_ms(sent_at_ms: u64) -> u64 {
     sent_at_ms - sent_at_ms % 3_600_000
@@ -4094,7 +4094,7 @@ fn archive_wire_id(ark: &[u8; 32], conv_key: &str, record_id: &str) -> String {
     hex::encode(out)
 }
 
-/// M38: a mailbox id is a read capability: logs show 24 bits of its hash,
+/// a mailbox id is a read capability: logs show 24 bits of its hash,
 /// never a part of the id itself.
 /// The signing keys of a mailbox's `Register` proof
 /// (`server_seal::mailbox_proof_seeds`).

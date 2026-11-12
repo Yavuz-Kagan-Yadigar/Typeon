@@ -133,7 +133,7 @@ pub struct DeviceRatchetState {
     /// gönderilmeli, yoksa karşı taraf o topic'e hiç abone olmadığından mesaj
     /// asla ulaşmaz (gerçek bir üretim hatasıydı — bkz. commit notu).
     ///
-    /// fable H-02: holds `root_handle` of the previous root, never the root
+    /// holds `root_handle` of the previous root, never the root
     /// itself. With the root, this side's unchanged ratchet secrets and the
     /// announcement in the clear header re-derived the whole current epoch
     /// from stored state.
@@ -200,7 +200,7 @@ pub struct DeviceRatchetState {
     pub old_recv: Option<OldRecvChain>,
 }
 
-/// Spec dışı, güvenlik denetimi düzeltmesi: bu struct'ın (`own_x25519_secret`/
+/// bu struct'ın (`own_x25519_secret`/
 /// `own_kyber_secret` HARİÇ, bkz. Cargo.toml "zeroize" feature notu — onlar
 /// zaten kendi crate'lerinin `ZeroizeOnDrop` implementasyonuyla sıfırlanıyor)
 /// düz `Vec<u8>` olarak tuttuğu simetrik sırlar (`root_key`/`ck_send`/
@@ -373,7 +373,7 @@ fn transcript(init_x25519: &[u8; 32], init_kyber: &[u8], kyber_ct: &[u8], resp_x
     h.finalize().into()
 }
 
-/// M-198: ratchet failures as values, so callers branch on the kind, not the text.
+/// ratchet failures as values, so callers branch on the kind, not the text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RatchetError {
     /// Behind the chain and no skipped key: already decrypted, or evicted.
@@ -785,7 +785,7 @@ impl DeviceRatchetState {
         let keys = derive_keys(ikm, &bound_to, false)?;
 
         // `prev_chain_length` = BENİM önceki gönderme zincirimin uzunluğu
-        // (defter #33), `perform_dh_ratchet` ile aynı.
+        //`perform_dh_ratchet` ile aynı.
         self.rotate_chains(keys, now_ms);
         // Karşı taraf rotasyon yaptıysa bizim MEVCUT public key'imizi
         // biliyor demektir — hâlâ tekrarlanan bir eski duyurumuz varsa
@@ -851,7 +851,7 @@ impl DeviceRatchetState {
     /// (aynı chain key altında iki farklı mesaj numarası asla aynı nonce'u
     /// üretmez, bu da AEAD güvenliği için yeterlidir).
     ///
-    /// `aad`: the packet's raw header bytes (M-89): the tag binds them, so
+    /// `aad`: the packet's raw header bytes: the tag binds them, so
     /// the header the receiver acts on is the one the sender encrypted under.
     /// `next_send_numbers` gives the numbers to put in that header first.
     pub fn encrypt_next(&mut self, plaintext: &[u8], aad: &[u8]) -> Result<(Vec<u8>, u32, u32), RatchetError> {
@@ -937,7 +937,7 @@ impl DeviceRatchetState {
                     return Ok((plaintext, changes));
                 }
                 // A consumed packet of the old chain: a duplicate, not a
-                // diverged session (fable H-03/A-08). The current chain's
+                // diverged session. The current chain's
                 // DecryptFailed counted it toward the 3-strike reset.
                 Err(RatchetError::KeyNotFound(n)) if message_number < old_next => return Err(RatchetError::KeyNotFound(n)),
                 Err(_) => {}
@@ -1094,7 +1094,7 @@ fn kyber_ciphertext_from_bytes(bytes: &[u8]) -> Result<MlKemCiphertext<MlKem1024
 
 /// One-way handle of a root key: the gossipsub topic and the server seal key
 /// are derived from it, so the previous generation can be kept for those
-/// without keeping its root (fable H-02).
+/// without keeping its root.
 pub fn root_handle(root_key: &[u8]) -> Vec<u8> {
     let hk = Hkdf::<Sha256>::new(None, root_key);
     let mut out = vec![0u8; 32];
@@ -1170,7 +1170,7 @@ mod tests {
         assert_eq!(initiator.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0, b"").unwrap().0, b"selam");
     }
 
-    /// M-89: the header is the AEAD's associated data; another header fails
+    /// the header is the AEAD's associated data; another header fails
     /// the tag and leaves the chain where it was.
     #[test]
     fn changed_header_does_not_decrypt() {
@@ -1221,7 +1221,7 @@ mod tests {
         assert!(!changes.old_chain);
     }
 
-    /// fable H-02: after a rotation both sides keep only the handle of the
+    /// after a rotation both sides keep only the handle of the
     /// old root, and the two handles match (topic and server seal agree).
     #[test]
     fn rotation_keeps_only_a_handle_of_the_old_root() {

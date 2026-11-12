@@ -12,7 +12,7 @@ import kotlin.math.sin
 import kotlin.random.Random
 
 /**
- * Spec dışı, kullanıcı isteği: "son 15 dakikada mesaj olmayan bir sohbete
+ * "son 15 dakikada mesaj olmayan bir sohbete
  * mesaj atıldığında görsel bir particle typhoon efekti" — sonra: "3D gibi
  * olsun, ekranın ÜSTÜNDE GENİŞ altında İNCE, BÜYÜK olsun."
  *

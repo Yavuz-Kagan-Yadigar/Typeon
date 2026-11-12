@@ -48,7 +48,7 @@ object OutgoingMedia {
 
     /** A cleaned photo or video goes out as `image.<ext>` / `video.<ext>`:
      *  gallery and camera names carry the capture date and time the scrub
-     *  just removed, and screenshots the app on screen (fable J-04). */
+     *  just removed, and screenshots the app on screen. */
     private fun neutralName(p: Prepared, base: String): Prepared {
         val ext = p.fileName.substringAfterLast('.', "").takeIf { it.isNotEmpty() && it.length <= 8 }
         return Prepared(p.file, if (ext == null) base else "$base.$ext", p.mimeType)
@@ -85,7 +85,7 @@ object OutgoingMedia {
             throw e
         } catch (e: Throwable) {
             Log.w(TAG, "left unchanged: ${e.message}")
-            // H-07: a JPEG/PNG/JPEG XL that failed to decode goes out NOT as it is (GPS
+            // a JPEG/PNG/JPEG XL that failed to decode goes out NOT as it is (GPS
             // in its EXIF): the caller shows the send-failed error.
             // Any other image or video goes as it is only after the user confirms.
             if (mimeType.startsWith("image/") && coreScrubs(src)) throw java.io.IOException("image scrub failed", e)

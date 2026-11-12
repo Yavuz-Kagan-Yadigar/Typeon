@@ -18,7 +18,7 @@ import java.io.File
 import java.util.UUID
 
 /**
- * Spec dışı: profil fotoğrafı gösterimi (sohbet listesi + grup balonları).
+ * profil fotoğrafı gösterimi (sohbet listesi + grup balonları).
  * Proje içinde Glide/Coil gibi bir görsel kütüphane yok — bu yüzden hem
  * gerçek fotoğrafın (her zaman ORTADAN kare kırpılıp daireye maskelenir,
  * kullanıcının "önizlemeler kare olsun" isteğiyle tutarlı) hem de fotoğrafı
@@ -33,7 +33,7 @@ object AvatarUtil {
     )
 
     /**
-     * Spec dışı, performans denetimi düzeltmesi: `renderInto` — dolayısıyla
+     * `renderInto` — dolayısıyla
      * `decodeCircularSquare` (BitmapFactory decode + kare kırpma + ölçekleme
      * + daire maskeleme) — her `RecyclerView.onBindViewHolder`'da (sohbet
      * listesi, kişi listesi, HER mesaj balonu) sıfırdan çalışıyordu; aynı
@@ -48,7 +48,7 @@ object AvatarUtil {
      * güvenle çağrılabilir. 100 giriş × ~36 KB (96x96 ARGB_8888) ≈ 3.6 MB
      * üst sınır — makul bir bellek/performans dengesi.
      */
-    // H138: the letter placeholder was drawn anew on every bind.
+    // the letter placeholder was drawn anew on every bind.
     private val placeholderCache = android.util.LruCache<String, Bitmap>(64)
 
     private val avatarBitmapCache = android.util.LruCache<Long, Bitmap>(100)
@@ -80,7 +80,7 @@ object AvatarUtil {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: profil fotoğrafına dokununca tam ekran +
+     * profil fotoğrafına dokununca tam ekran +
      * pinch-to-zoom açar (bkz. MediaViewerActivity.setupZoomableImage — tek
      * dokunuşla kapatma da orada uygulanıyor). `renderInto`'nun aksine burada
      * `avatarBytes` KIRPILMADAN/küçültülmeden (96x96 önizlemenin tersine)
@@ -91,7 +91,7 @@ object AvatarUtil {
         if (avatarBytes == null || avatarBytes.isEmpty()) return
         try {
             val dir = File(context.cacheDir, "avatar_view").apply { mkdirs() }
-            // Spec dışı, güvenlik/depolama denetimi düzeltmesi: her tıklama
+            // her tıklama
             // burada yeni bir plaintext JPEG dosyası yazıyordu ama HİÇBİRİ
             // silinmiyordu (uygulamadaki diğer TÜM geçici dosya yollarının
             // aksine — bkz. ChatActivity/SettingsFragment/GroupChatActivity

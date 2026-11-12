@@ -1,16 +1,14 @@
-//! TypeOn — paylaşılan kripto çekirdeği.
+//! Shared crypto core: primitives, identity model and wire formats.
 //!
-//! `p2p_messenger_core`'dan ayrıştırıldı: aynı denetlenmiş kod hem native
-//! (Android/Linux/`typeon-relay`) hem de tarayıcı (`wasm32`, `typeon-web`)
-//! tarafında çalışsın diye — protokolün iki ucu arasında elle senkron tutulacak
-//! ikinci bir kopya yok. Burada SQLite, libp2p, Tor veya JNI YOK.
+//! Used by the native clients (Android, Linux) and by the `wasm32` target.
+//! Protocol logic only: no SQLite, libp2p, Tor or JNI.
 //!
-//! Modüller (çekirdekteki eski yollar `pub use` ile korunuyor):
-//! - `identity`     : Identity/Device modeli, fingerprint
-//! - `packet`       : ağ paket formatları, `MessageContent`
-//! - `ratchet`      : hibrit KEM + Double Ratchet
-//! - `server_proto` : store-and-forward kablo tipleri
-//! - `server_seal`  : sunucu için ikinci şifreleme katmanı
+//! Modules:
+//! - `identity`: identity and device model, fingerprints
+//! - `packet`: wire packet formats, `MessageContent`
+//! - `ratchet`: hybrid KEM and Double Ratchet
+//! - `server_proto`: store-and-forward wire types
+//! - `server_seal`: second encryption layer for the server
 
 pub mod identity;
 pub mod packet;

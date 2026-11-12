@@ -4,14 +4,14 @@ use super::*;
 
 impl P2PCore {
 
-    /// Spec dışı sağlamlaştırma: kullanıcı bir sohbeti AÇAR açmaz (henüz
+    /// kullanıcı bir sohbeti AÇAR açmaz (henüz
     /// mesaj yazmadan) el sıkışmayı proaktif olarak başlatır — önceden
     /// handshake sadece İLK `sendMessage` çağrısında (lazily) tetikleniyordu,
     /// bu da "sohbeti aç, hemen yaz, mesaj git(mesin)" senaryosunda
     /// kullanıcıya hiçbir bağlanma göstergesi olmadan mesaj kaybı riski
     /// yaratıyordu. Zaten bir oturum varsa no-op.
     pub(crate) fn ensure_handshake(&mut self, peer_device_fingerprint: &str) -> Result<(), String> {
-        // Spec dışı, ağ sağlamlığı: oturum olsun olmasın, o an CANLI bir
+        // oturum olsun olmasın, o an CANLI bir
         // bağlantı yoksa hemen yeniden bağlanmayı dene — reconnect_sweep'in
         // bir sonraki turunu (≤15 sn) beklemeden. Sohbet açılışında/mesaj
         // öncesinde en hızlı iyileşme yolu.
@@ -25,7 +25,7 @@ impl P2PCore {
         self.initiate_handshake_with(peer_device_fingerprint)
     }
 
-    /// Spec dışı, ağ sağlamlığı düzeltmesi: belirtilen cihaza o an CANLI bir
+    /// belirtilen cihaza o an CANLI bir
     /// libp2p bağlantısı yoksa VE kalıcı bir adres ipucumuz varsa hemen
     /// (senkron, sweep'i beklemeden) yeniden bağlanmayı başlatır. Bağlıysa
     /// veya adres yoksa no-op. `ensure_handshake` ve mesaj gönderme yolundan
@@ -42,7 +42,7 @@ impl P2PCore {
         self.try_reconnect_device(device_fingerprint, false);
     }
 
-    /// Spec dışı, ağ sağlamlığı düzeltmesi: `ensure_connected`,
+    /// `ensure_connected`,
     /// `reconnect_sweep` (periyodik, TÜM bilinen cihazlar) VE artık
     /// `ping`/`ConnectionClosed` olaylarının (bkz. `poll_events`) tetiklediği
     /// ANINDA tek-cihaz yeniden bağlanmasının ORTAK, backoff-farkında dial
@@ -153,7 +153,7 @@ impl P2PCore {
         // ağ-bağımsız bir "doğrudan" adres.
         if let Some(onion) = onion_addr.clone() {
             if let Some(swarm) = &mut self.swarm {
-                // M-191: with the peer condition, a dial still in flight from
+                // with the peer condition, a dial still in flight from
                 // the previous backoff step is not started a second time.
                 let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
                     .addresses(vec![onion])
@@ -208,7 +208,7 @@ impl P2PCore {
         // Eski arayüzdeki bağlantılar ölü olabilir: hepsini hemen yokla, ölen
         // tek zaman aşımında kapanır (yaşayanlara dokunulmaz — mobil→Wi-Fi
         // geçişinde mobil bağlantılar çalışmaya devam eder).
-        // Not servers (fable B-07): they are never probed, so the flag stayed
+        // Not servers: they are never probed, so the flag stayed
         // set and the next bulk connection closed the working one.
         let peers: Vec<PeerId> = self.keepalive_state.keys().copied().filter(|p| !self.is_server_peer(p)).collect();
         for p in peers {
@@ -277,7 +277,7 @@ impl P2PCore {
                     let sk_x = <[u8; 32]>::try_from(stored.sk_x25519.as_slice()).ok().map(StaticSecret::from);
                     let sk_m = <ml_kem::Encoded<MlKem1024DecapsulationKey>>::try_from(stored.sk_mlkem.as_slice())
                         .ok().map(|e| MlKem1024DecapsulationKey::from_bytes(&e));
-                    // L-63: an id the table cannot hold is not a row we wrote.
+                    // an id the table cannot hold is not a row we wrote.
                     if let (Some(sk_x25519), Some(sk_mlkem), true) = (sk_x, sk_m, stored.signed.id <= i64::MAX as u64) {
                         self.own_prekeys.push(OwnPrekey { signed: stored.signed.clone(), sk_x25519, sk_mlkem });
                     }
@@ -412,7 +412,7 @@ impl P2PCore {
             return Err("Peer device has been revoked".to_string());
         }
 
-        // Spec dışı, hata ayıklama düzeltmesi: `DeviceRatchetState::initiate`
+        // `DeviceRatchetState::initiate`
         // burada "Bad Kyber/X25519 public key length" ile başarısız olursa
         // bu KALICI bir hatadır (bozuk/uyumsuz anahtar verisi — ör. bu kayıt
         // Category 3->5 (ML-KEM-768->1024) geçişinden ÖNCE, ya da karşı
@@ -678,7 +678,7 @@ impl P2PCore {
         }
         let sender =self.known_remote_devices.get(&handshake.sender_device_fingerprint).cloned()
             .ok_or("Unknown sender device; cannot verify signatures")?;
-        // Spec dışı, güvenlik denetimi düzeltmesi: önceden `is_active`
+        // önceden `is_active`
         // hiçbir yerde kontrol edilmiyordu — bu alanı hiçbir zaman false
         // yapan bir çağrı yolu da olmadığından pratikte etkisizdi. Artık
         // `revoke_contact_device` gerçekten `false` yapabiliyor VE burada
@@ -764,7 +764,7 @@ impl P2PCore {
             // was: one we ignored (collision, unknown prekey) could be
             // replayed for 7 days and then replaced the live session.
             seen.push((handshake.timestamp, handshake.signature_classical.clone()));
-            // M110: the newest 256 (the peer signs each one, but a peer that
+            // the newest 256 (the peer signs each one, but a peer that
             // keeps sending inits grew the list, and its app_meta copy, for 7 days).
             if seen.len() > 256 {
                 seen.sort_by_key(|(ts, _)| *ts);
@@ -869,7 +869,7 @@ impl P2PCore {
             // Inside the collision window the rule below decides instead.
             // Two clocks: the sender's against ours. Within the skew this
             // check already accepts above, it is no proof of "older"
-            // (fable A-03); replays are caught by the signature list.
+            //replays are caught by the signature list.
             if !same_round && handshake.timestamp.saturating_add(HANDSHAKE_MAX_SKEW_MS) < existing.last_rotation {
                 info!("HandshakeInit yok sayıldı (peer={}) — oturumdan eski", crate::log_id(&handshake.sender_device_fingerprint));
                 return Ok(());
@@ -929,7 +929,6 @@ impl P2PCore {
         if let Err(e) = installed {
             // A local failure (write error) is no decision about this init:
             // forget it, so the sender's retry of the same bytes is taken
-            // (fable A-07).
             if let Some(seen) = self.recent_handshake_sigs.get_mut(&handshake.sender_device_fingerprint) {
                 seen.retain(|(_, sig)| sig != &handshake.signature_classical);
             }
@@ -960,7 +959,7 @@ impl P2PCore {
             return Ok(None);
         }
         if let Some(state) = self.ratchets.get_mut(peer_device_fingerprint) {
-            // fable A-18: memory goes back to this if the rotated state
+            // memory goes back to this if the rotated state
             // cannot be written.
             let snapshot = state.clone();
             let kyber_ct = state.perform_dh_ratchet(now)?;

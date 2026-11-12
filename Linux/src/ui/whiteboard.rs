@@ -53,7 +53,7 @@ struct State {
     strokes: Vec<Stroke>,
     /// Drawn here, not echoed back by the core yet.
     pending: Vec<Stroke>,
-    /// M148: pending strokes erased while their add is still in flight,
+    /// pending strokes erased while their add is still in flight,
     /// tagged with the page they were drawn on (a same-shaped stroke on a
     /// different page must not inherit this erase). The core does not know
     /// them yet — they cannot be erased by id until the add is acked, and
@@ -316,7 +316,7 @@ impl Board {
             let mut st = me.state.borrow_mut();
             if let Some(pages) = event.value.get("pages").and_then(|v| v.as_array()) {
                 for p in pages.iter().filter_map(|p| p.as_u64()) {
-                    // M149: a remote (or core-bumped) page count past the UI
+                    // a remote (or core-bumped) page count past the UI
                     // cap must not grow `page_count` beyond it — the pager
                     // (and `1u32 << page` below) would go out of range.
                     let reached = u32::try_from(p).unwrap_or(0) + 1;
@@ -594,7 +594,7 @@ impl Inner {
                     }
                     match &result {
                         Ok(ids) => {
-                            // M148: erased while the add was still in flight?
+                            // erased while the add was still in flight?
                             // Do not resurrect it — record the id in the
                             // erase step and send the erase now.
                             let erased = st
@@ -667,7 +667,7 @@ impl Inner {
     fn erase_at(self: &Rc<Self>, p: (f64, f64)) {
         let (hit, pending_hit): (Vec<Stroke>, Vec<Stroke>) = {
             let mut st = self.state.borrow_mut();
-            // M148: pending strokes are drawn too, so "nothing under the
+            // pending strokes are drawn too, so "nothing under the
             // eraser" (the common mouse-move) means neither list has a hit.
             if !st
                 .strokes
@@ -679,7 +679,7 @@ impl Inner {
             }
             let (hit, keep): (Vec<Stroke>, Vec<Stroke>) = st.strokes.drain(..).partition(|s| near(s, p));
             st.strokes = keep;
-            // M148: a pending stroke has no id yet (the add is still in
+            // a pending stroke has no id yet (the add is still in
             // flight), so it cannot be erased by id now. Remember it and
             // finish the erase the moment the add is acked (`add_stroke`),
             // which also keeps the view from drawing the ack tombstone.
@@ -704,7 +704,7 @@ impl Inner {
         all.extend(pending_hit);
         self.remember(Step { page, strokes: all, ids: ids.clone(), live: false });
         // Live hits have ids to erase now; a pending-only erase catches up in
-        // `add_stroke`'s ack (M148). Sending an empty id list would be a
+        // `add_stroke`'s ack. Sending an empty id list would be a
         // pointless core round trip.
         if !ids.is_empty() {
             let (peer, gid) = (self.peer.clone(), self.group_id.clone());
@@ -733,7 +733,7 @@ impl Inner {
         let Some(Step { page, strokes, ids, live }) = copy else { return };
         let (peer, gid) = (self.peer.clone(), self.group_id.clone());
         let me = self.clone();
-        // M148: a restored step that re-adds strokes cancels any erase-in-flight
+        // a restored step that re-adds strokes cancels any erase-in-flight
         // for the same shapes — otherwise the still-un-acked add's callback
         // would "finish" the erase and wipe the stroke the user just restored.
         let restored_points = if live {
@@ -762,7 +762,7 @@ impl Inner {
             move |new_ids| {
                 {
                     let mut st = me.state.borrow_mut();
-                    // M148: the restore went out, so the erase remembered
+                    // the restore went out, so the erase remembered
                     // for those shapes must not fire on the ack.
                     if !restored_points.is_empty() {
                         st.erased_pending.retain(|(_, p)| {
@@ -855,7 +855,7 @@ impl Inner {
                 let Ok(info) = info else { return };
                 {
                     let mut st = me.state.borrow_mut();
-                    // M149: see `handle_event` — the core can report pages
+                    // see `handle_event` — the core can report pages
                     // past the UI cap; the pager stays inside it.
                     st.page_count = st
                         .page_count

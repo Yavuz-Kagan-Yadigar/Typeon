@@ -7,7 +7,7 @@ import android.view.View
 import androidx.core.content.ContextCompat
 
 /**
- * Spec dışı, kullanıcı isteği: bağlantı durumunu (karşı taraf VEYA bu
+ * bağlantı durumunu (karşı taraf VEYA bu
  * cihazın kendisi) küçük renkli bir nokta + "bağlanılıyor" durumunda nabız
  * gibi atan (pulse) bir animasyonla gösterir. ChatActivity'de KARŞI
  * TARAFIN durumu (`dotPeerStatus`) VE bu cihazın kendi durumu

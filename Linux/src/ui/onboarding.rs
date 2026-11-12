@@ -292,7 +292,7 @@ fn start_fresh_identity(
 
 fn unlock(app: &Rc<App>, host: &adw::ToastOverlay, on_open: impl FnOnce(Vault) + 'static) {
     if !secrets::is_passphrase_protected(&app.data_dir) {
-        // H133: wallet round-trip, off the GTK thread.
+        // wallet round-trip, off the GTK thread.
         let data_dir = app.data_dir.clone();
         let (app, host) = (app.clone(), host.clone());
         app::run_in_background(
@@ -336,7 +336,7 @@ fn prompt_passphrase(app: &Rc<App>, on_open: impl FnOnce(Vault) + 'static) {
             app.application.quit();
             return;
         }
-        // H133: Argon2id (64 MiB x 3) + the wallet round-trip froze the GTK
+        // Argon2id (64 MiB x 3) + the wallet round-trip froze the GTK
         // thread for up to seconds, so the check runs on a worker.
         let passphrase = WipeOnDrop(entry.text().to_string());
         let data_dir = app.data_dir.clone();

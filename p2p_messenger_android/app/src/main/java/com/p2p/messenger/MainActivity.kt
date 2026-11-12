@@ -36,7 +36,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
     private val alertPollHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    /** Spec dışı, kararlılık denetimi düzeltmesi: `checkPendingDeviceAlerts`
+    /** `checkPendingDeviceAlerts`
      *  her 5 saniyede bir çalışır. Kullanıcı bir güvenlik uyarısını hemen
      *  kabul/red etmezse (ör. telefondan uzaklaşırsa), önceden HER turda
      *  `array.getJSONObject(0)` hâlâ aynı bekleyen uyarıyı döndürdüğü için
@@ -123,7 +123,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         ensureNotificationPermission()
-        // Spec dışı, gerçek cihazda ölçülen hata düzeltmesi: bu fonksiyon
+        // bu fonksiyon
         // yazılmış ama HİÇ ÇAĞRILMAMIŞTI. Sonucu logcat'te görüldü — Android
         // ön plan servisini "app idle" diyerek durdurdu ("Stopping service
         // due to app idle") ve 14 MB'lık bir yükleme, kullanıcıya
@@ -485,7 +485,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği: uygulamanın İLK açılışında (sadece
+     * uygulamanın İLK açılışında (sadece
      * yeni bir identity oluşturulduğunda — mevcut kullanıcılar için tekrar
      * TEKRAR sorulmaz, `showDeviceNameDialog` zaten sadece bu akışta bir
      * kez çalışır) Android'in pil optimizasyonunu bu uygulama için devre
@@ -608,7 +608,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun resumeWork() {
-        // Spec dışı, kullanıcı isteği: uygulamaya girildiğinde bildirim
+        // uygulamaya girildiğinde bildirim
         // çubuğundaki TÜM mesaj bildirimleri temizlensin.
         // AMA kilit ekranı bu ekranın üstüne geldiğinde bildirim çubuğu
         // okunmamış mesajların TEK izi: kilitliyken temizlenirse kullanıcı
@@ -617,7 +617,7 @@ class MainActivity : AppCompatActivity() {
             com.p2p.messenger.util.NotificationHelper.clearAll(this)
         }
         alertPollHandler.post(alertPollRunnable)
-        // Spec dışı, kullanıcı isteği: uygulama ön plana her alındığında
+        // uygulama ön plana her alındığında
         // gönderilemeyen mesajlar/emirler için bir yeniden deneme
         // tetiklensin. Servis zaten çalışıyorsa `startNetworkService`
         // zararsız bir no-op'tur (bkz. P2PService.onStartCommand

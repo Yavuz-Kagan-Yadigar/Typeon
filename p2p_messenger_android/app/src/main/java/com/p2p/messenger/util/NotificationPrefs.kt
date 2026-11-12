@@ -3,7 +3,7 @@ package com.p2p.messenger.util
 import android.content.Context
 
 /**
- * Spec dışı, kullanıcı isteği: "bildirimlerde mesajları göster" anahtarı
+ * "bildirimlerde mesajları göster" anahtarı
  * (Ayarlar). Varsayılan KAPALI (#43); kapalıyken
  * bildirim yalnızca "Yeni mesaj" der — ne gönderen ne metin görünür (bkz. NotificationHelper).
  *

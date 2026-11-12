@@ -166,7 +166,7 @@ const REBIND_VERIFIES_PER_MINUTE: u32 = 120;
 /// `Register` proof checks per `RATE_WINDOW_MS`, server-wide: no global cap.
 /// A `Register` needs an enrollment bound to one PeerId, so the per-peer
 /// share times `max_enrollments` already bounds the CPU; a global pool let
-/// four enrollments lock every other device out of new mailboxes (fable I-02).
+/// four enrollments lock every other device out of new mailboxes.
 const REGISTER_VERIFIES_PER_MINUTE: u32 = u32::MAX;
 /// One enrolled peer's share of `REGISTER_VERIFIES_PER_MINUTE`: one full
 /// `Register` per window.
@@ -616,7 +616,7 @@ impl ServerCore {
 
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
-            // Onion-only (deanon fix, istemciyle AYNI çıpa): TCP taşıması
+            // Onion-only: TCP taşıması
             // yalnızca gelen onion-köprüsü bağlantıları için tutulur; giden
             // her TCP (clearnet) dial'ı `DialReject` ile reddedilir. Sunucu
             // zaten dışarı dial etmez (store-and-forward yalnızca istemcilerin
@@ -679,7 +679,7 @@ impl ServerCore {
             .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(600)))
             .build();
 
-        // Onion-only (deanon fix, istemciyle AYNI, bkz. p2p_messenger::tor
+        // Onion-only (:tor
         // `DialReject`): `0.0.0.0` DEĞİL `127.0.0.1` — dinleyici yalnızca
         // loopback'te. Sunucunun onion service köprüsü gelen Tor akışlarını
         // zaten `127.0.0.1:TOR_LIBP2P_PORT`'a bağlar, yani gelen onion trafiği
@@ -807,7 +807,7 @@ impl ServerCore {
     /// `run`'un DURDURULABİLİR hâli — `shutdown` tamamlandığında döngü biter
     /// ve `ServerCore` düşürülür (swarm, dinleyiciler, onion service).
     ///
-    /// Defter #11: Android sunucu uygulamasının `ServerLib` yüzeyinde
+    /// Android sunucu uygulamasının `ServerLib` yüzeyinde
     /// durdurma yoktu. `stopService(...)` yalnızca wake lock'u bırakıp ön
     /// plan bildirimini kaldırıyor; Rust çekirdeği süreçte çalışmaya devam
     /// ediyordu — hâlâ posta kabul ediyor, blob servis ediyor, pil ve disk
@@ -1227,7 +1227,7 @@ impl ServerCore {
         self.authenticate(peer).filter(|e| e.state == EnrollmentState::Active)
     }
 
-    /// Sunucunun TOPLAM disk tavanı (defter #23) — `incoming` bayt daha
+    /// Sunucunun TOPLAM disk tavanı — `incoming` bayt daha
     /// yazılırsa bütçe aşılır mı?
     ///
     /// Bu denetimde bulundu: tavan yalnızca `handle_blob_put`'ta
@@ -1256,7 +1256,7 @@ impl ServerCore {
 
     /// Adds bytes that were really written to the cached total. Only written
     /// bytes count: a refused or no-op request charged the cache and one
-    /// device could bounce everyone else's writes (fable I-01).
+    /// device could bounce everyone else's writes.
     fn note_total_written(&self, bytes: usize) {
         let (at, total) = self.total_cache.get();
         if at != 0 {
@@ -1580,7 +1580,7 @@ impl ServerCore {
         if e.bytes_blob.max(0) as u64 + growth > limits.max_blob_bytes {
             return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
         }
-        // Defter #23: kotalar SADECE kayıt başına uygulanıyordu. Bütçe sabit
+        // kotalar SADECE kayıt başına uygulanıyordu. Bütçe sabit
         // `EXPECTED_DEVICES = 8`'e bölündüğü için 20 cihaz kaydolduğunda
         // gerçek tavan bütçenin 2,5 katı oluyordu — bu mekanizmanın var olma
         // sebebi zaten tabletin dolan diskiydi. Artık toplam da kontrol
@@ -1637,7 +1637,7 @@ impl ServerCore {
         // `.enc` formatı sabit adımlı olduğundan (bkz.
         // `attachments::read_chunk_from_disk`) konuma yazmak güvenli.
         use std::io::{Seek, SeekFrom, Write};
-        // Adım blob'la birlikte SAKLANIR (defter #06) — `serve_chunk` aynı
+        // Adım blob'la birlikte SAKLANIR — `serve_chunk` aynı
         // değerle okumak zorunda.
         self.store.blob_set_chunk_size(&blob_id, chunk_size);
         let write = std::fs::OpenOptions::new()
@@ -1817,7 +1817,7 @@ impl ServerCore {
                     if req.chunk_index == 0 {
                         self.store.blob_touch(&req.file_id, now_ms());
                     }
-                    // Defter #06: burası `read_chunk_from_disk` (sabit 256
+                    // burası `read_chunk_from_disk` (sabit 256
                     // KiB adım) çağırıyordu, oysa `handle_blob_put` adımı
                     // İSTEMCİDEN alıp (`BlobPut.chunk_size`) ona göre
                     // yazıyor. İkisi ayrıştığı anda her blob yanlış
@@ -1930,7 +1930,6 @@ impl ServerCore {
                 }
                 // Each frame costs its overhead too, and an empty one is
                 // refused: free empty frames filled a call's writer queue
-                // (fable I-06).
                 if data.is_empty() {
                     self.stats.rejected += 1;
                     return;
@@ -2079,7 +2078,7 @@ impl ServerCore {
         }
         self.resend_notifies();
         let mono = mono_ms();
-        // Every tick, not only every sweep (fable I-08): a peer that is not
+        // Every tick, not only every sweep: a peer that is not
         // enrolled held its slot for up to two sweeps, 60-120 s.
         // ponytail: not in node mode, where strangers are served on purpose
         // (Kad, circuit relay); there the connection cap is still one flood wide.
@@ -2296,7 +2295,7 @@ mod tests {
         assert!(!charge_verify(&mut (0, 0), &mut full, now, 1, ENROLL_VERIFIES_PER_PEER, ENROLL_VERIFIES_PER_MINUTE));
     }
 
-    /// fable I-02: no number of enrolled peers locks the others out of
+    /// no number of enrolled peers locks the others out of
     /// `Register` proofs.
     #[test]
     fn register_has_no_global_pool() {

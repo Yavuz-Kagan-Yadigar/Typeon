@@ -6,7 +6,7 @@ impl P2PCore {
 
     pub(crate) fn poll_events(&mut self) -> Vec<String> {
         lock_watch::phase("swarm_events");
-        // M-180: a caught panic may have left the core half-updated; tell the
+        // a caught panic may have left the core half-updated; tell the
         // frontend once so it can restart the service.
         if CORE_PANICKED.swap(false, std::sync::atomic::Ordering::SeqCst) {
             self.attachment_events.push(r#"{"type":"core_panic"}"#.to_string());
@@ -223,7 +223,7 @@ impl P2PCore {
                             closed_listener_ids.push(listener_id);
                             // The loopback listener the onion bridge feeds: listen
                             // again, or the device stayed unreachable inbound
-                            // until restart (fable B-09). A port another app
+                            // until restart. A port another app
                             // took fails at once here, so this does not loop.
                             for a in addresses.iter().filter(|a| is_loopback_multiaddr(a)) {
                                 warn!("Yerel dinleyici kapandı ({:?}), yeniden açılıyor: {}", reason, a);
@@ -292,7 +292,7 @@ impl P2PCore {
                                 // Only that one address goes to Kademlia, and only
                                 // when it names no other peer: every claimed address
                                 // was stored, and a peer-id dial then opened Tor
-                                // circuits to onion targets the peer chose (fable B-02).
+                                // circuits to onion targets the peer chose.
                                 let other_peer = addr.iter().any(|p| matches!(p, MultiaddrProtocol::P2p(id) if id != peer_id));
                                 if !other_peer {
                                     swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
@@ -466,7 +466,7 @@ impl P2PCore {
                         libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, cause, num_established, connection_id, .. } => {
                             info!("libp2p bağlantısı kapandı: peer={} sebep={:?} kalan_bağlantı={}", crate::log_id(&peer_id), cause, num_established);
                             closed_conns.push((peer_id, connection_id));
-                            // Spec dışı, ağ sağlamlığı düzeltmesi: bkz.
+                            // bkz.
                             // `connections_lost` dokümantasyonu — önceden
                             // bu SADECE loglanıyordu.
                             //
@@ -570,7 +570,7 @@ impl P2PCore {
                                         warn!("Keepalive desteklenmiyor (bağlantı sağlıklı kabul ediliyor, kapatılMIYOR): peer={}", crate::log_id(&peer));
                                         if let Some(state) = keepalive_state.get_mut(&peer) {
                                             state.outstanding = None;
-                                            // Hourly, not never (L-12): a peer that upgrades
+                                            // Hourly, not never: a peer that upgrades
                                             // within this session is probed again.
                                             state.next_due_at = mono_ms().saturating_add(60 * 60_000);
                                         }
@@ -745,7 +745,7 @@ impl P2PCore {
                 continue;
             }
             incoming.push((Some(peer), bytes));
-            // Not while the keys are not loaded (fable B-10): the packet
+            // Not while the keys are not loaded: the packet
             // waits, and "delivered" made the sender skip its early server copy.
             if !self.storage_keys_ready() {
                 continue;
@@ -756,7 +756,7 @@ impl P2PCore {
         }
         // An expired address goes (a dropped relay reservation) and none is
         // listed twice: the list only grew.
-        // M-193: a dead relay's listener id no longer blocks a new
+        // a dead relay's listener id no longer blocks a new
         // reservation for `RELAY_RESERVATION_RETRY_MS`.
         if !closed_listener_ids.is_empty() {
             self.relay_listeners.retain(|_, (lid, _)| !closed_listener_ids.contains(lid));
@@ -799,7 +799,7 @@ impl P2PCore {
             if is_loopback_multiaddr(&addr) {
                 continue;
             }
-            // M-192: a peer-supplied clearnet address (identify) no longer
+            // a peer-supplied clearnet address (identify) no longer
             // replaces the onion address we dialed — the node is onion-only.
             if !is_onion_multiaddr(&addr) && self.peer_id_to_addr.get(&pid).map_or(false, |a| is_onion_multiaddr(a)) {
                 continue;
@@ -837,7 +837,7 @@ impl P2PCore {
             let addr = self.server_onion_addr(&pid).unwrap_or(addr);
             self.record_known_relay(pid, addr);
         }
-        // Spec dışı, ağ sağlamlığı düzeltmesi: bkz. `connections_lost`
+        // bkz. `connections_lost`
         // dokümantasyonu — kaybedilen her bağlantı için karşılık gelen
         // cihaz fingerprint'ini (`device_to_peer_id`'in tersini alarak)
         // bulup ANINDA yeniden bağlanmayı dener (`reconnect_backoff`'a
@@ -941,7 +941,7 @@ impl P2PCore {
             let reconnected: std::collections::HashSet<String> = fps.into_iter().collect();
             let now = current_time_ms();
             for pending in self.awaiting_confirmation.values_mut() {
-                // M-182: at most once per `ACK_RETRY_INITIAL_MS`: a peer that
+                // at most once per `ACK_RETRY_INITIAL_MS`: a peer that
                 // reconnects in a loop got the whole queue on every turn.
                 if reconnected.contains(&pending.peer_device_fingerprint)
                     && now.saturating_sub(pending.last_attempt_at) >= ACK_RETRY_INITIAL_MS
@@ -950,7 +950,7 @@ impl P2PCore {
                     pending.retry_interval_ms = ACK_RETRY_INITIAL_MS;
                 }
             }
-            // M-181: queued envelopes for it are due now too (the 1 s flush
+            // queued envelopes for it are due now too (the 1 s flush
             // gate still applies).
             for queued in self.pending_envelopes.iter_mut() {
                 if reconnected.contains(&queued.target) {
@@ -968,7 +968,7 @@ impl P2PCore {
             for fp in &reconnected {
                 self.maybe_redo_handshake(fp);
             }
-            // Spec dışı (dış AI incelemesi düzeltmesi): onay bekleyen mesajlar
+            // onay bekleyen mesajlar
             // gibi, kaynağı az önce geri dönmüş YARIM/BAŞARISIZ dosya
             // indirmeleri de hemen sürdürülür — bkz.
             // `resume_incomplete_downloads_for`.
@@ -1046,7 +1046,7 @@ impl P2PCore {
                     rate.1 += 1;
                     // Over the limit: no answer (the channel is dropped).
                     // The requester sees an `OutboundFailure` and retries;
-                    // `NotFound` made it fail the whole download (M-187).
+                    // `NotFound` made it fail the whole download.
                     if rate.1 > RATE_LIMIT_MAX_ESTABLISHED {
                         drop(channel);
                         continue;
@@ -1060,7 +1060,7 @@ impl P2PCore {
                     }
                 }
                 FileChunkEventLocal::OutboundFailure { request_id } => {
-                    // Spec dışı, ağ sağlamlığı düzeltmesi: önceden TEK bir
+                    // önceden TEK bir
                     // ağ hatası (ör. geçici bir Tor devresi kopması) indirmeyi
                     // HEMEN başarısız sayardı — artık `DOWNLOAD_GIVE_UP_TIMEOUT_MS`'ye
                     // (10 dk) kadar aynı parçayı yeniden dener.
@@ -1177,7 +1177,7 @@ impl P2PCore {
                         drop(channel);
                         continue;
                     }
-                    // M52: the sender chunks at ACK_BATCH_MAX; more is a broken peer.
+                    // the sender chunks at ACK_BATCH_MAX; more is a broken peer.
                     if ids.len() > ACK_BATCH_MAX {
                         warn!("Toplu Ack {} kimlik taşıyor, ilk {} uygulanıyor (peer={})", ids.len(), ACK_BATCH_MAX, crate::log_id(&peer));
                     }
@@ -1196,7 +1196,7 @@ impl P2PCore {
                     self.ack_batches_inflight.remove(&request_id);
                 }
                 AckEventLocal::Failed { request_id } => {
-                    // L-71: back into the queue. `flush_outbound_acks` batches
+                    // back into the queue. `flush_outbound_acks` batches
                     // it again while the peer is connected and falls back to
                     // one packet per ack only without a connection (it fanned
                     // out up to 256 packets on exactly the flaky link).
@@ -1276,7 +1276,7 @@ impl P2PCore {
         // Edit/Delete paketleri süresi dolunca temizlenir.
         self.prune_pending_edits_deletes();
         // Held content of unknown groups ages out here too, not only when
-        // another such packet arrives (fable A-02).
+        // another such packet arrives.
         let now_wall = current_time_ms();
         self.unknown_group_held.retain(|_, b| {
             b.retain(|e| now_wall.saturating_sub(e.0) <= UNKNOWN_GROUP_HOLD_TTL_MS);
@@ -1297,7 +1297,7 @@ impl P2PCore {
         // bağlantı kurulmadan önce öğrenmeleri gerekiyor.
         let tor_ready_now = self.tor.as_ref().map(|h| h.status() == tor::TorStatus::Ready).unwrap_or(false);
         if tor_ready_now && !self.tor_was_ready {
-            // M-45: not the address itself — it is a stable pseudonym and
+            // not the address itself — it is a stable pseudonym and
             // logcat is readable by adb and OEM log collectors.
             info!("Tor Ready durumuna geçti — bilinen kişilere .onion adresi bildiriliyor");
             self.announce_address_to_all_contacts();
@@ -1322,7 +1322,7 @@ impl P2PCore {
             let now = current_time_ms();
             self.last_pending_flush_at = mono_ms();
             for mut queued in pending {
-                // M-181: per-entry backoff (bkz. `QueuedEnvelope::next_at`).
+                // per-entry backoff (bkz. `QueuedEnvelope::next_at`).
                 if queued.next_at > now {
                     self.pending_envelopes.push(queued);
                     continue;
@@ -1333,7 +1333,7 @@ impl P2PCore {
                 // the one envelope that caused it.
                 let published = catch_panic(|| self.try_publish_raw(&peer_fp, envelope, first_attempt_at));
                 let Ok(published) = published else {
-                    // H5: a Handshake/IdentityExchange has no other carrier
+                    // a Handshake/IdentityExchange has no other carrier
                     // (no `awaiting_confirmation`); it is tried again, later.
                     let handshake_class = matches!(queued.envelope, NetworkEnvelope::Handshake(_) | NetworkEnvelope::IdentityExchange(_));
                     if handshake_class && now.saturating_sub(first_attempt_at) <= PENDING_HANDSHAKE_TIMEOUT_MS {
@@ -1436,7 +1436,7 @@ impl P2PCore {
                     }
                 }
             } else if !self.server_mail_allowed() {
-                // M-16: not acked at the server until processed (bkz.
+                // not acked at the server until processed (bkz.
                 // `commit_server_fetches`), so it waits, it is not dropped.
                 self.defer_incoming(None, raw);
                 continue;
@@ -1449,7 +1449,7 @@ impl P2PCore {
                 Ok(None) => {}
                 Err(e) => {
                     error!("Gelen paket işlenemedi: {}", e);
-                    // H14: covers both the Err result and a caught panic.
+                    // covers both the Err result and a caught panic.
                     if source.is_none() {
                         self.server_item_failed(&raw);
                     }
@@ -1467,12 +1467,12 @@ impl P2PCore {
                 self.deferred_incoming.len()
             );
         }
-        // M-16: the held Fetch (bkz. `server_fetch`) goes out now, not at
+        // the held Fetch (bkz. `server_fetch`) goes out now, not at
         // the next radio window.
         if mail_was_deferred && !self.server_mail_deferred() {
             self.server_sweep_at = 0;
         }
-        // H-06: server Acks go out only now, after this turn processed the
+        // server Acks go out only now, after this turn processed the
         // fetched items (bkz. `commit_server_fetches`).
         self.commit_server_fetches();
 
@@ -1524,7 +1524,7 @@ impl P2PCore {
     /// atılır) — kötü niyetli bir peer sınırsız bellek tüketemesin.
     pub(crate) fn buffer_early_packet(&mut self, sender_fp: String, source: Option<PeerId>, packet: MessagePacket) {
         let now = current_time_ms();
-        // K-06: the header fingerprint is not verified yet, so the per-peer
+        // the header fingerprint is not verified yet, so the per-peer
         // caps alone let one peer fill memory under many names. Cap the total
         // too, evicting from the largest buffer.
         const MAX_EARLY_PACKET_BYTES_TOTAL: usize = 32 * 1024 * 1024;
@@ -1644,7 +1644,7 @@ impl P2PCore {
     /// The Noise-proven `PeerId` is mapped to an active device we know (no
     /// session needed). Such a peer has its own per-peer cap outside the
     /// shared stranger budget: a few stranger connections used it up and
-    /// blocked every IdentityExchange and Handshake (fable B-05).
+    /// blocked every IdentityExchange and Handshake.
     pub(crate) fn is_known_device_peer(&self, peer: PeerId) -> bool {
         self.device_to_peer_id.iter().any(|(fp, pid)| {
             *pid == peer && self.known_remote_devices.get(fp).map_or(false, |d| d.is_active)
@@ -1681,7 +1681,7 @@ impl P2PCore {
             entry.1 <= max_per_window
         };
         if within {
-            // M-190: peer ids cost nothing, so all non-established peers also
+            // peer ids cost nothing, so all non-established peers also
             // share one budget, checked before the packet is decoded. Charged
             // only for packets within the peer's own cap: one peer then takes
             // at most its share, not the whole budget.
@@ -1707,7 +1707,7 @@ impl P2PCore {
         }
     }
 
-    /// M-16: budget for server-delivered mail, as much as one established
+    /// budget for server-delivered mail, as much as one established
     /// peer gets (`RATE_LIMIT_MAX_ESTABLISHED` per `RATE_LIMIT_WINDOW_MS`).
     pub(crate) fn server_mail_allowed(&mut self) -> bool {
         window_allow(&mut self.server_mail_rate, RATE_LIMIT_MAX_ESTABLISHED)
@@ -1738,7 +1738,7 @@ impl P2PCore {
             let i = self.deferred_incoming.iter().position(|(s, _)| *s == top).unwrap_or(0);
             if let Some((src, dropped)) = self.deferred_incoming.remove(i) {
                 bytes -= dropped.len();
-                // H87: server mail is not resent by anyone; keep it on the server.
+                // server mail is not resent by anyone; keep it on the server.
                 if src.is_none() {
                     self.server_item_failed(&dropped);
                 }
@@ -1799,7 +1799,7 @@ impl P2PCore {
         let seen_at = self.recent_inbound_digests.get(&digest).copied();
         if let Some((seen_at, first_ok)) = seen_at {
             if now.saturating_sub(seen_at) < INBOUND_DEDUP_WINDOW_MS {
-                // fable B-03: a server item whose first pass failed fails
+                // a server item whose first pass failed fails
                 // again, so `server_item_failed` holds it once more. An
                 // `Ok(None)` here let the server copy be acked and deleted.
                 if !first_ok {
@@ -1817,7 +1817,7 @@ impl P2PCore {
                 // `message_id`'yi düz taşır ve ilk geçişte zaten doğrulandı;
                 // yalnızca arşivde GERÇEKTEN varsa Ack atıyoruz — hâlâ teslim
                 // edilmemiş bir mesajı yanlışlıkla onaylamayız).
-                // Only after a first pass that succeeded (fable A-09/H-08):
+                // Only after a first pass that succeeded:
                 // a failed one may never have verified this header.
                 if let Ok(NetworkEnvelope::Message(m)) = NetworkEnvelope::from_cbor(raw) {
                     self.reack_if_already_handled(&m.header);
@@ -1886,7 +1886,7 @@ impl P2PCore {
         }
         match envelope {
             NetworkEnvelope::IdentityExchange(x) => {
-                // Spec dışı, güvenlik denetimi düzeltmesi: `record_peer_id_if_known`
+                // `record_peer_id_if_known`
                 // artık BURADA çağrılmıyor — `x.device_fingerprint` bu
                 // noktada henüz doğrulanmamış, sadece gönderenin İDDİASI
                 // (bkz. `process_identity_exchange` içindeki taşınma notu).
@@ -1907,7 +1907,7 @@ impl P2PCore {
                 // artık imza doğrulandıktan SONRA kendi içinde kaydediyor.
                 match self.process_handshake_init(source, &h) {
                     Ok(()) => {}
-                    // H2: the state itself, not the error text.
+                    // the state itself, not the error text.
                     Err(e) if !self.known_remote_devices.contains_key(&sender_fp) => {
                         // bkz. `early_handshakes` — gönderenin IdentityExchange'i
                         // henüz gelmedi; DÜŞÜRME, tamponla. Yalnızca bu kişiyle
@@ -1920,7 +1920,7 @@ impl P2PCore {
                         // And 4 per claimed identity: one known identity id
                         // was enough to take all 64 slots.
                         let same_identity = self.early_handshakes.values().flatten().filter(|(_, _, e)| e.sender_identity_id == h.sender_identity_id).count();
-                        // M100: a claim not backed by a pairing in progress or
+                        // a claim not backed by a pairing in progress or
                         // a device the contact already lists gets 16 of the 64
                         // slots: ~16 known identity ids filled them all and a
                         // real pairing's init was refused.
@@ -1946,7 +1946,7 @@ impl P2PCore {
                     }
                     Err(e) => return Err(e),
                 }
-                // Spec dışı, hata düzeltmesi ("ilk mesaj yutuluyor"): el
+                // el
                 // sıkışmadan ÖNCE gelip tamponlanan paketleri şimdi işle
                 // (bkz. `early_packets`). Olaylar `attachment_events`
                 // kuyruğuna gider, `poll_events` onu zaten drenaj ediyor.

@@ -10,7 +10,7 @@ import com.p2p.messenger.R
 import com.p2p.messenger.util.formatAbsoluteTime
 
 /**
- * Spec dışı, kullanıcı isteği: Ayarlar'daki "bekleyen mesajlar" (henüz
+ * Ayarlar'daki "bekleyen mesajlar" (henüz
  * karşı taraftan "ack" alınmamış, bkz. lib.rs `awaiting_confirmation`/
  * types.rs `regen_content`) listesi — bkz. `PendingMessagesActivity`. Beklenen
  * boyut küçük (tipik kullanımda birkaç kalem) olduğundan `SimpleChatAdapter`
@@ -26,7 +26,7 @@ class PendingMessagesAdapter(
     data class Item(
         val messageId: String,
         val targetName: String,
-        /** Spec dışı, kullanıcı isteği: hedef CİHAZIN adı — bkz.
+        /** hedef CİHAZIN adı — bkz.
          *  types.rs `PendingMessageSummary.device_name` dokümantasyonu (kişi/
          *  grup adı tek başına hangi cihazın hâlâ onay vermediğini
          *  söylemez). Boşsa satırda gösterilmez. */
@@ -52,7 +52,7 @@ class PendingMessagesAdapter(
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         val item = items[position]
-        // Spec dışı, kullanıcı isteği: hedef cihazın adı da (varsa) —
+        // hedef cihazın adı da (varsa) —
         // bkz. `Item.deviceName` dokümantasyonu.
         holder.target.text = if (item.deviceName.isNotEmpty()) {
             "${item.targetName} · ${item.deviceName}"

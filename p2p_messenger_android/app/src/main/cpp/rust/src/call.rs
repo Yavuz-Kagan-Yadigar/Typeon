@@ -78,7 +78,7 @@ const AUDIO_HOLD_MAX_MS: u64 = 5_000;
 const INBOX_MAX: usize = 64;
 /// Ring timeout, both directions.
 const RING_TIMEOUT_MS: u64 = 45_000;
-/// F2: how long and how often a running group call rings absent members again.
+/// how long and how often a running group call rings absent members again.
 const REINVITE_FOR_MS: u64 = 5 * 60_000;
 const REINVITE_EVERY_MS: u64 = 30_000;
 /// Every participant sends a state packet each second, even muted with the
@@ -87,7 +87,7 @@ const REINVITE_EVERY_MS: u64 = 30_000;
 const MEDIA_LOST_MS: u64 = 30_000;
 /// An Invite older than this (store-and-forward delivered it late) no longer rings.
 const INVITE_MAX_AGE_MS: u64 = 60_000;
-/// Bound on a group invite's participant list (C10).
+/// Bound on a group invite's participant list.
 const MAX_INVITE_PARTICIPANTS: usize = 1024;
 const REOPEN_BACKOFF_MS: u64 = 3_000;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(20);
@@ -1077,7 +1077,7 @@ impl P2PCore {
     fn call_signal(&mut self, fp: &str, s: &CallSession, action: CallAction) {
         let with_keys = matches!(action, CallAction::Invite | CallAction::Accept);
         let keys = with_keys.then(|| (pair_key(&s.my_key, fp).to_vec(), s.my_sid.to_vec()));
-        // C10: a group invite names everyone rung, so callees connect to each
+        // a group invite names everyone rung, so callees connect to each
         // other even when each thinks the other is stale.
         let participants = if action == CallAction::Invite && s.group_id.is_some() { s.invited.clone() } else { Vec::new() };
         self.send_call_signal(fp, &s.call_id, s.group_id.clone(), s.video, action, keys, participants);
@@ -1197,7 +1197,7 @@ impl P2PCore {
                     Some(gid) => self.group_call_devices(gid).unwrap_or_default(),
                     None => Vec::new(),
                 };
-                // C10: also every device the caller rang that is an active
+                // also every device the caller rang that is an active
                 // device of a member here (stale or not); never mine.
                 if let Some(gid) = &group_id {
                     let own = self.get_active_own_device_fingerprint().unwrap_or_default();
@@ -1271,7 +1271,7 @@ impl P2PCore {
                 if !stop_ringing.is_empty() {
                     let (cid, video) = (s.call_id.clone(), s.video);
                     // Busy, not Hangup: a Hangup there means "the caller gave
-                    // up" and logged a false missed call (fable F-03).
+                    // up" and logged a false missed call.
                     for fp in stop_ringing {
                         self.send_call_signal(&fp, &cid, None, video, CallAction::Busy, None, Vec::new());
                     }
@@ -1327,7 +1327,7 @@ impl P2PCore {
                         // else that it is over.
                         if s.phase != CallPhase::Incoming {
                             // A 1:1 call answered (rejected) on one device: the
-                            // others did not miss it (fable F-03).
+                            // others did not miss it.
                             let stop = if s.group_id.is_none() { CallAction::Busy } else { CallAction::Hangup };
                             for fp in s.invited.iter().filter(|f| *f != peer_fp) {
                                 self.call_signal(fp, &s, stop);
@@ -1365,7 +1365,7 @@ impl P2PCore {
     /// Ring timeouts + link upkeep. Every poll turn; cheap when idle.
     pub(crate) fn call_sweep(&mut self) {
         self.call_sweep_inner();
-        // H140: a `call_state` event whenever phase/participants change, so
+        // a `call_state` event whenever phase/participants change, so
         // the UI need not poll for transitions (the timer/media stats still
         // come from `callState`).
         let sig = match &self.call {
@@ -1388,7 +1388,7 @@ impl P2PCore {
 
     fn call_sweep_inner(&mut self) {
         if let Some(s) = &self.call {
-            // F2: the group caller rings members not in the call again, so a
+            // the group caller rings members not in the call again, so a
             // device that comes online late still rings (the first Invite
             // is too old by then). Ringing devices drop the repeat (same id).
             let reinvite = s.phase == CallPhase::Active && s.group_id.is_some() && s.peer_fp.is_empty()
@@ -1404,7 +1404,7 @@ impl P2PCore {
             }
         }
         // A participant removed from the group, or blocked, while the call
-        // runs (fable F-08): membership was checked only at Invite/Accept.
+        // runs: membership was checked only at Invite/Accept.
         let not_allowed: Vec<String> = match &self.call {
             Some(s) => s.joined.iter().chain(s.invited.iter()).filter(|fp| {
                 let Some(id) = self.known_remote_devices.get(*fp).map(|d| d.identity_id.clone()) else { return false };
@@ -1452,7 +1452,7 @@ impl P2PCore {
             CallPhase::Incoming if ringing_too_long => {
                 let s = self.call.take().expect("checked above");
                 // Our ring timed out first (the caller's Hangup is late or
-                // never comes): the same trace as that Hangup (fable F-04).
+                // never comes): the same trace as that Hangup.
                 if s.group_id.is_none() {
                     self.log_missed_call(&s.peer_fp);
                     self.attachment_events.push(serde_json::json!({

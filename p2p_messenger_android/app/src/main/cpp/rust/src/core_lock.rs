@@ -8,7 +8,7 @@ pub(crate) static LOCK_WANTED: std::sync::atomic::AtomicUsize = std::sync::atomi
 /// Poll dışı bir çağıran kilidi bıraktı: swarm'a iş kuyruklanmış olabilir
 /// (ör. gönderilen mesaj) — bekleyen poll hemen dönüp tele çıkarsın.
 pub(crate) static CORE_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// A `catch_panic` caught a panic; `poll_events` reports it once (M-180).
+/// A `catch_panic` caught a panic; `poll_events` reports it once.
 pub(crate) static CORE_PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Her JNI export'u `CORE.lock()` alır — bunu DOĞRUDAN `.unwrap()` etmek
@@ -188,7 +188,7 @@ pub(crate) fn wait_for_network_activity(timeout_ms: u64) {
     if !core.attachment_events.is_empty() || !core.deferred_swarm_events.is_empty() {
         return;
     }
-    // H59: clamped; Long.MAX_VALUE panicked in `tokio::time::sleep` (Instant overflow).
+    // clamped; Long.MAX_VALUE panicked in `tokio::time::sleep` (Instant overflow).
     let timeout_ms = timeout_ms.min(60_000);
     let timeout = std::time::Duration::from_millis(timeout_ms);
     let started = std::time::Instant::now();

@@ -21,7 +21,7 @@ pub struct KnownDevice {
     /// Bu cihaz yüz yüze QR/manuel eşleşmeyle mi tanındı, yoksa imzalı bir
     /// `DeviceAdd` zinciriyle mi eklendi?
     ///
-    /// Defter #31/#32: burada eskiden `verified: bool` vardı ama HER İKİ
+    /// burada eskiden `verified: bool` vardı ama HER İKİ
     /// ekleme yolu da onu `false` yazıyor ve hiçbir yer okumuyordu; iki
     /// ekleme fonksiyonunun (`add_device_unverified` /
     /// `add_device_via_signed_chain`) gövdeleri de birebir aynıydı, yani
@@ -36,7 +36,7 @@ pub struct KnownDevice {
     #[serde(default)]
     pub owner_revoked: bool,
     /// When it was revoked (local clock): its author proofs on group rows
-    /// dated after this are refused (M-81). `None` while Active.
+    /// dated after this are refused. `None` while Active.
     #[serde(default)]
     pub revoked_at: Option<u64>,
 }
@@ -53,12 +53,12 @@ pub struct Contact {
     // kayıtlarını taşır (spec 2.1'deki alan burada da var ama gerçek
     // ratchet state serileştirilemeyen secret key'ler içerdiği için ayrı
     // bir map'te — bkz. lib.rs P2PCore.ratchets).
-    /// Spec dışı: bu kişinin bize `MessageContent::ProfileUpdate` ile
+    /// bu kişinin bize `MessageContent::ProfileUpdate` ile
     /// gönderdiği en güncel profil fotoğrafı (720p/%85 JPEG). `None` =
     /// hiç göndermedi ya da fotoğrafını kaldırdı.
     #[serde(default, with = "serde_bytes")]
     pub avatar_jpeg: Option<Vec<u8>>,
-    /// Spec dışı, kullanıcı kararı: bu kişi DOĞRUDAN (QR/manuel eşleşme,
+    /// bu kişi DOĞRUDAN (QR/manuel eşleşme,
     /// yüz yüze TOFU) mi eklendi — `false`; yoksa bir grup üzerinden
     /// KURUCU KEFALETİYLE mi — `true`? İkincisi daha zayıf bir güven
     /// modelidir (kurucunun sözü), bu yüzden UI'de uyarı gösterilir
