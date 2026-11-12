@@ -223,9 +223,12 @@ impl P2PCore {
         // Evicting complete files cannot free what downloads hold, and
         // charging them here let a few running downloads empty the store:
         // in-flight bytes are bounded at offer time (`receive_file_offer`).
-        // Sent files count and are evicted like received ones.
+        // Sent files count but are not evicted: their copy is what peers
+        // download from. A received file loses only this device's copy and
+        // goes back to 'offered' (fable F-06): deleting the row took the
+        // bubble with it, and one contact's files evicted everyone else's.
         let mut stmt = match conn.prepare(
-            "SELECT file_id, total_size, created_at FROM files WHERE status = 'complete' ORDER BY created_at ASC"
+            "SELECT file_id, total_size, created_at FROM files WHERE status = 'complete' AND direction != 'sent' ORDER BY created_at ASC"
         ) {
             Ok(s) => s,
             Err(_) => return,
@@ -247,7 +250,7 @@ impl P2PCore {
         // korumalı satırdan sonrakilerin TAMAMI da (aynı veya daha yeni)
         // korumalıdır, o noktada ilk geçiş durur.
         let now = current_time_ms();
-        let mut remaining = rows.iter().map(|r| r.1.max(0) as u64).sum::<u64>();
+        let mut remaining = complete.max(0) as u64;
         let mut to_delete = Vec::new();
         let mut protected_from_idx = rows.len();
         for (i, (file_id, size, created_at)) in rows.iter().enumerate() {
@@ -282,7 +285,7 @@ impl P2PCore {
         }
         let deleted_count = to_delete.len();
         for file_id in to_delete {
-            self.delete_attachment_file(&file_id);
+            let _ = self.remove_local_attachment(&file_id);
         }
         if deleted_count > 0 {
             info!(
@@ -303,6 +306,11 @@ impl P2PCore {
             return;
         }
         self.last_storage_sweep_at = now;
+        // Acked packet ids are kept as long as the sender can still retry
+        // the packet; pruned here instead of on every ack (fable A-14).
+        if let Some(conn) = &self.db {
+            let _ = conn.execute("DELETE FROM acked_packets WHERE acked_at < ?1", params![now.saturating_sub(TEXT_RETRY_GIVE_UP_MS) as i64]);
+        }
         self.enforce_history_storage_limit();
     }
 
@@ -484,7 +492,9 @@ impl P2PCore {
     /// `(fingerprints, group_id, history floor key)`.
     pub(crate) fn chat_prune_scope(&self, kind: &str, id: &str) -> Option<(Vec<String>, Option<String>, String)> {
         if kind == "group" {
-            return self.groups.contains_key(id).then(|| (Vec::new(), Some(id.to_string()), id.to_string()));
+            // A group left or deleted keeps its rows until the user prunes
+            // them here (fable E-02): the id need not be a held group.
+            return (self.groups.contains_key(id) || is_group_id(id)).then(|| (Vec::new(), Some(id.to_string()), id.to_string()));
         }
         let contact = self.contacts.values().find(|c| self.contact_fingerprints_all(c).iter().any(|f| f == id))?;
         Some((self.contact_fingerprints_all(contact), None, contact.trusted_identity_id.clone()))

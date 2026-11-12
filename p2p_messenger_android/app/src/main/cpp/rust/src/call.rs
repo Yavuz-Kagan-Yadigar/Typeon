@@ -1270,8 +1270,10 @@ impl P2PCore {
                 }
                 if !stop_ringing.is_empty() {
                     let (cid, video) = (s.call_id.clone(), s.video);
+                    // Busy, not Hangup: a Hangup there means "the caller gave
+                    // up" and logged a false missed call (fable F-03).
                     for fp in stop_ringing {
-                        self.send_call_signal(&fp, &cid, None, video, CallAction::Hangup, None, Vec::new());
+                        self.send_call_signal(&fp, &cid, None, video, CallAction::Busy, None, Vec::new());
                     }
                 }
                 if let Some((cid, gid, video, keys)) = reply {
@@ -1324,8 +1326,11 @@ impl P2PCore {
                         // Devices still ringing for this call hear from nobody
                         // else that it is over.
                         if s.phase != CallPhase::Incoming {
+                            // A 1:1 call answered (rejected) on one device: the
+                            // others did not miss it (fable F-03).
+                            let stop = if s.group_id.is_none() { CallAction::Busy } else { CallAction::Hangup };
                             for fp in s.invited.iter().filter(|f| *f != peer_fp) {
-                                self.call_signal(fp, &s, CallAction::Hangup);
+                                self.call_signal(fp, &s, stop);
                             }
                         }
                     }
@@ -1338,10 +1343,7 @@ impl P2PCore {
                     self.last_call_end = Some((call_id.clone(), reason.to_string()));
                 }
                 if missed {
-                    // The callee had no trace of it: a row in the chat, and
-                    // `missed` for the notification.
-                    let id = uuid::Uuid::new_v4().to_string();
-                    let _ = self.archive_message(peer_fp, "received", "\u{1F4DE} Missed call".as_bytes(), Some(&id), None, None, None, crate::current_time_ms());
+                    self.log_missed_call(peer_fp);
                 }
                 serde_json::json!({
                     "type": "call", "action": format!("{:?}", action).to_lowercase(),
@@ -1349,6 +1351,15 @@ impl P2PCore {
                 })
             }
         }
+    }
+
+    /// The callee's trace of a 1:1 call it missed: a row in the chat, under
+    /// the chat key (the caller may be a non-canonical device of the
+    /// contact), for the Hangup and for the local ring timeout.
+    pub(crate) fn log_missed_call(&mut self, peer_fp: &str) {
+        let chat_key = self.canonical_peer_key(peer_fp);
+        let id = uuid::Uuid::new_v4().to_string();
+        let _ = self.archive_message(&chat_key, "received", "\u{1F4DE} Missed call".as_bytes(), Some(&id), None, None, None, crate::current_time_ms());
     }
 
     /// Ring timeouts + link upkeep. Every poll turn; cheap when idle.
@@ -1392,6 +1403,31 @@ impl P2PCore {
                 self.call = Some(s);
             }
         }
+        // A participant removed from the group, or blocked, while the call
+        // runs (fable F-08): membership was checked only at Invite/Accept.
+        let not_allowed: Vec<String> = match &self.call {
+            Some(s) => s.joined.iter().chain(s.invited.iter()).filter(|fp| {
+                let Some(id) = self.known_remote_devices.get(*fp).map(|d| d.identity_id.clone()) else { return false };
+                self.is_blocked(&id) || s.group_id.as_ref().map_or(false, |g| {
+                    !self.groups.get(g).map_or(false, |g| g.member_identity_ids().contains(&id))
+                })
+            }).cloned().collect(),
+            None => Vec::new(),
+        };
+        if !not_allowed.is_empty() {
+            if self.call.as_ref().map_or(false, |s| s.group_id.is_none()) {
+                info!("Arama: karşı taraf engellendi, arama bitiriliyor");
+                self.end_call_with("remote");
+                return;
+            }
+            if let Some(s) = self.call.as_mut() {
+                for fp in &not_allowed {
+                    s.joined.remove(fp);
+                    s.invited.retain(|f| f != fp);
+                    media_remove_remote(fp);
+                }
+            }
+        }
         // Group call: a participant silent that long (phone died, no Hangup)
         // leaves, or every frame went on being sealed and sent to it for the
         // rest of the call. Its state packets alone arrive every second.
@@ -1415,6 +1451,15 @@ impl P2PCore {
             }
             CallPhase::Incoming if ringing_too_long => {
                 let s = self.call.take().expect("checked above");
+                // Our ring timed out first (the caller's Hangup is late or
+                // never comes): the same trace as that Hangup (fable F-04).
+                if s.group_id.is_none() {
+                    self.log_missed_call(&s.peer_fp);
+                    self.attachment_events.push(serde_json::json!({
+                        "type": "call", "action": "hangup", "call_id": s.call_id,
+                        "peer": self.canonical_peer_key(&s.peer_fp), "ended": true, "missed": true,
+                    }).to_string());
+                }
                 self.last_call_end = Some((s.call_id, "missed".to_string()));
                 return;
             }

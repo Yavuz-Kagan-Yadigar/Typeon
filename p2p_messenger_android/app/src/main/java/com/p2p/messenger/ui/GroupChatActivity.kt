@@ -1931,10 +1931,18 @@ class GroupChatActivity : AppCompatActivity() {
         val targetGroupId = groupId
         lifecycleScope.launch(Dispatchers.IO) {
             // The copy is deleted even if the screen closes while sending.
+            // The recorder's MP4 carries the Android version (on many phones
+            // maker and model) and creation times: scrubbed like a picked
+            // m4a; a failed scrub cancels the send (fable J-01).
+            val prepared = try {
+                com.p2p.messenger.util.OutgoingMedia.prepare(file, file.name, "audio/mp4", false) { false }
+            } catch (e: Exception) {
+                null
+            }
             try {
-                val result = try {
+                val result = if (prepared == null) "Error: INTERNAL: voice scrub" else try {
                     P2PLib.prepareAndSendGroupFile(
-                        targetGroupId, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
+                        targetGroupId, prepared.file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
                         caption, quote?.id ?: "", quote?.preview ?: "", quote?.sender ?: ""
                     )
                 } catch (e: Exception) {
@@ -1969,6 +1977,7 @@ class GroupChatActivity : AppCompatActivity() {
                     }
                 }
             } finally {
+                prepared?.file?.delete()
                 file.delete()
             }
         }

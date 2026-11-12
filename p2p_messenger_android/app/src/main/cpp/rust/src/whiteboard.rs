@@ -15,7 +15,7 @@
 //!     (`WbPageRequest` / `WbPage`).
 //!
 //! Every size is capped, both for what is drawn here and for what arrives, so
-//! a board cannot grow past `MAX_PAGES * MAX_PAGE_BYTES`.
+//! a board cannot grow past `MAX_PAGES * (MAX_PAGE_BYTES + REMOTE_PAGE_SLACK)`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -37,6 +37,12 @@ pub const MAX_PAGES: u8 = 20;
 pub const MAX_STROKE_POINTS: usize = 512;
 /// Stored stroke bytes per page; a full page refuses new strokes.
 pub const MAX_PAGE_BYTES: usize = 48 * 1024;
+/// What a page may hold beyond `MAX_PAGE_BYTES` for strokes of others: the
+/// local drawing check stops at `MAX_PAGE_BYTES`, so two last strokes drawn
+/// at once on a nearly full page both fit everywhere. Without it each side
+/// dropped the other's and the pages differed, and were re-pulled, for good
+/// (fable G-01).
+const REMOTE_PAGE_SLACK: usize = MAX_PAGE_BYTES / 4;
 pub const MAX_OPS_STROKES: usize = 64;
 pub const MAX_PEN_WIDTH: u8 = 40;
 // ponytail: tombstones are capped; dropped first are those for strokes this
@@ -288,7 +294,7 @@ impl P2PCore {
         }
         let mut verifies = 0;
         for sig in newest.into_values() {
-            if sig.page >= MAX_PAGES || sig.device.len() != 32 || sig.hashes.len() % 32 != 0 || sig.hashes.len() > MAX_PAGE_BYTES / 16 * 32 {
+            if sig.page >= MAX_PAGES || sig.device.len() != 32 || sig.hashes.len() % 32 != 0 || sig.hashes.len() > (MAX_PAGE_BYTES + REMOTE_PAGE_SLACK) / 16 * 32 {
                 continue;
             }
             let fp = hex::encode(&sig.device);
@@ -337,7 +343,7 @@ impl P2PCore {
                 |r| r.get::<_, i64>(0),
             )
             // Unknown = full: a busy database must not let a page past its cap.
-            .map_or(MAX_PAGE_BYTES, |n| n as usize)
+            .map_or(MAX_PAGE_BYTES + REMOTE_PAGE_SLACK, |n| n as usize)
         })
     }
 
@@ -348,7 +354,7 @@ impl P2PCore {
         if !stroke_ok(stroke) || self.wb_is_tombstoned(board, &stroke.id) {
             return false;
         }
-        if *used + stroke.points.len() > MAX_PAGE_BYTES {
+        if *used + stroke.points.len() > MAX_PAGE_BYTES + REMOTE_PAGE_SLACK {
             return false;
         }
         let Some(sealed) = self.wb_seal(&stroke.points) else { return false };
@@ -948,11 +954,16 @@ impl P2PCore {
             return noop();
         }
         // Each erase record is three statements under the core lock: one
-        // budget unit per 256 of them (clearing a full page is a few units).
-        let erase_units = (erased.len() / 9).div_ceil(256) as u64;
-        if erase_units > 0 && !self.wb_pull_allowed("erase", &board.key, peer_fp, erase_units) {
-            return noop();
-        }
+        // budget unit per full 256 of them (clearing a full page is a few
+        // units). A small erase is free: one unit per packet cut off a device
+        // that kept erasing after 20 packets (fable G-02). Over the budget
+        // only the erase records are skipped; the signed strokes still count.
+        let erase_units = (erased.len() / 9) as u64 / 256;
+        let erased = if erase_units > 0 && !self.wb_pull_allowed("erase", &board.key, peer_fp, erase_units) {
+            Vec::new()
+        } else {
+            erased
+        };
         let mut pages = BTreeSet::new();
         let tx = self.wb_tx();
         let signed = self.wb_verified_sigs(&board, &sigs);
@@ -1071,7 +1082,7 @@ impl P2PCore {
         if page >= MAX_PAGES
             || authors.len() > 256
             // A stored stroke is at least 4 bytes of points plus the seal (28).
-            || strokes.len() > MAX_PAGE_BYTES / 16
+            || strokes.len() > (MAX_PAGE_BYTES + REMOTE_PAGE_SLACK) / 16
             || sigs.len() > MAX_PAGE_SIGS
             || tombstones.len() % 8 != 0
             || tombstones.len() > MAX_TOMBSTONES * 8
@@ -1109,7 +1120,9 @@ impl P2PCore {
         for stroke in strokes.iter().filter(|s| s.page == page) {
             theirs.insert(stroke.id.as_slice());
             let Some(author) = authors.get(stroke.author as usize) else { continue };
-            if author.len() > 128 || (board.group_id.is_none() && !participants.contains(author)) {
+            // Group boards too (fable G-04): a member relayed strokes signed by
+            // a removed member, shown under someone not in the group.
+            if author.len() > 128 || !participants.contains(author) {
                 continue;
             }
             // The relaying device names the author; the author's device signed it.
@@ -1338,7 +1351,7 @@ mod tests {
         while core.wb_insert("g:x", &big(added), "alice") {
             added += 1;
         }
-        assert!(added > 0 && (added as usize) <= MAX_PAGE_BYTES / (MAX_STROKE_POINTS * 4));
+        assert!(added > 0 && (added as usize) <= (MAX_PAGE_BYTES + REMOTE_PAGE_SLACK) / (MAX_STROKE_POINTS * 4));
         assert!(!core.wb_insert("g:x", &big(200), "alice"));
         assert!(core.wb_insert("g:x", &stroke(201, 1), "alice"), "another page has its own budget");
         core.wb_erase("g:x", 0, &[0; 8]);

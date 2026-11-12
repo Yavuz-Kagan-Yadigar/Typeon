@@ -42,6 +42,17 @@ impl P2PCore {
             kem_sk_x25519: Vec<u8>,
             kem_sk_mlkem: Vec<u8>,
         }
+        // The long-term secret keys are wiped when the export is done
+        // (fable F-11), like `SecretKeyBundle`.
+        impl Drop for ExportedDevice {
+            fn drop(&mut self) {
+                use zeroize::Zeroize;
+                self.sign_sk_ed25519.zeroize();
+                self.sign_sk_mldsa.zeroize();
+                self.kem_sk_x25519.zeroize();
+                self.kem_sk_mlkem.zeroize();
+            }
+        }
         #[derive(Serialize)]
         struct ExportedIdentity {
             identity_id: String,
@@ -294,7 +305,7 @@ impl P2PCore {
         // The first device only. The caller stores the secret keys of that one
         // alone, so any other device was a row without keys after a restart.
         for dev in exported.devices.iter().take(1) {
-            let sign_sk_ed_bytes: [u8; 32] = dev.sign_sk_ed25519.as_slice().try_into().map_err(|_| "Bozuk Ed25519 secret key")?;
+            let sign_sk_ed_bytes: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new(dev.sign_sk_ed25519.as_slice().try_into().map_err(|_| "Bozuk Ed25519 secret key")?);
             let sign_sk_ed25519 = SigningKey::from_bytes(&sign_sk_ed_bytes);
             let sign_pk_ed25519 = sign_sk_ed25519.verifying_key();
 
@@ -304,8 +315,8 @@ impl P2PCore {
             let sign_sk_mldsa = MlDsaSigningKey::<MlDsa87>::from_seed(&sign_sk_mldsa_seed);
             let sign_pk_mldsa = sign_sk_mldsa.verifying_key().clone();
 
-            let kem_sk_x_bytes: [u8; 32] = dev.kem_sk_x25519.as_slice().try_into().map_err(|_| "Bozuk X25519 secret key")?;
-            let kem_sk_x25519 = StaticSecret::from(kem_sk_x_bytes);
+            let kem_sk_x_bytes: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new(dev.kem_sk_x25519.as_slice().try_into().map_err(|_| "Bozuk X25519 secret key")?);
+            let kem_sk_x25519 = StaticSecret::from(*kem_sk_x_bytes);
             let kem_pk_x25519 = X25519PublicKey::from(&kem_sk_x25519);
 
             let kem_sk_encoded: ml_kem::Encoded<MlKem1024DecapsulationKey> = dev.kem_sk_mlkem.as_slice().try_into().map_err(|_| "Bozuk Kyber secret key")?;

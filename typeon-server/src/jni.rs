@@ -181,7 +181,10 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
             // Bütçe, beklenen kayıt sayısına bölünür; biri diğerlerinin payını
             // yiyemesin. Bölüşüm kabaca kullanım oranına göre: bloblar en
             // hacimli, posta en küçük.
-            const EXPECTED_DEVICES: u64 = 8;
+            // The quota share and the enrollment cap are one number: more
+            // devices than shares would put the sum of quotas over the budget.
+            const EXPECTED_DEVICES: u64 = 16;
+            config.max_enrollments = EXPECTED_DEVICES as u32;
             let per_device = (budget / EXPECTED_DEVICES).max(8 * 1024 * 1024);
             config.limits.max_blob_bytes = per_device * 6 / 10;
             config.limits.max_archive_bytes = per_device * 3 / 10;
@@ -442,6 +445,11 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_revokeDevice<'loc
             return out(&mut env, "Error: invalid id".to_string());
         };
         let res = control.store.revoke_enrollment(&id);
+        // As for a block (fable I-09): with the old public code the revoked
+        // device enrolls again at once under a fresh key and PeerId.
+        if res.is_ok() {
+            let _ = crate::public_join_token(&control.store, true);
+        }
         let _ = control.net_changed.send(CoreSignal::EnrollmentsChanged);
         drop(guard);
         match res {

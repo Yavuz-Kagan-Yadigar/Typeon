@@ -319,6 +319,11 @@ class P2PApplication : Application() {
                 if (startedActivityCount == 0 && !activity.isChangingConfigurations) {
                     AppLock.lock()
                     com.p2p.messenger.service.P2PService.setAppVisible(false)
+                } else if (startedActivityCount == 1 && com.p2p.messenger.ui.CallActivity.inPip
+                    && activity !is com.p2p.messenger.ui.CallActivity && !activity.isChangingConfigurations) {
+                    // Only the call in picture-in-picture is left: the app is in
+                    // the background for the lock (fable J-02).
+                    AppLock.lock()
                 }
             }
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}

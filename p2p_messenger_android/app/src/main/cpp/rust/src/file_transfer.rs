@@ -969,6 +969,31 @@ impl P2PCore {
         // file is the sender's; its plaintext SHA-256 is checked again on
         // every open (`decrypt_file_from_disk_with`).
         let Some(mut state) = self.active_downloads.remove(file_id) else { return };
+        // A zero-byte file has no chunk, so no chunk write made its `.enc`:
+        // every open failed with "No such file" (fable F-07).
+        if state.total_chunks == 0 {
+            if let Ok(p) = self.enc_path_for(file_id) {
+                let _ = std::fs::File::create(p);
+            }
+        }
+        // fable F-02: the peer's `sticker` flag forced this download and
+        // makes the chat decode it on sight. Only a real sticker keeps it:
+        // its headers must say at most `STICKER_MAX_SIDE` a side.
+        let flagged = self.db.as_ref().map_or(false, |c| {
+            c.query_row("SELECT sticker FROM files WHERE file_id = ?1", params![file_id], |r| r.get::<_, i64>(0)).unwrap_or(0) != 0
+        });
+        if flagged {
+            let side_ok = self.enc_path_for(file_id).ok()
+                .and_then(|p| attachments::read_plain_chunk_with(&p, 0, &state.file_key, state.chunk_size).ok())
+                .and_then(|head| attachments::jxl_head(&head))
+                .map_or(false, |(w, h, _)| w <= attachments::STICKER_MAX_SIDE && h <= attachments::STICKER_MAX_SIDE);
+            if !side_ok {
+                warn!("Çıkartma işaretli dosya çıkartma değil, işaret kaldırıldı: {}", file_id);
+                if let Some(conn) = &self.db {
+                    let _ = conn.execute("UPDATE files SET sticker = 0, sticker_origin = NULL WHERE file_id = ?1", params![file_id]);
+                }
+            }
+        }
         zeroize::Zeroize::zeroize(&mut state.file_key);
         if let Some(conn) = &self.db {
             let _ = conn.execute("UPDATE files SET status = 'complete' WHERE file_id = ?1", params![file_id]);

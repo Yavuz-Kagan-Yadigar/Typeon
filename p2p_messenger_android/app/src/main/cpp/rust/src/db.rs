@@ -68,6 +68,7 @@ impl P2PCore {
             id0_inits: std::collections::HashSet::new(),
             own_mailbox_topic_fp: None,
             pairing_mailbox_subs: HashMap::new(),
+            pairing_reply_peer: HashMap::new(),
             own_device_add: None,
             verified_device_adds: HashMap::new(),
             history_key: None,
@@ -188,7 +189,7 @@ impl P2PCore {
         }
         let conn = Connection::open(&path)?;
         // First statement on the connection. A wrong key fails on the read.
-        conn.execute_batch(&format!("PRAGMA key = {};", key_pragma.as_str()))?;
+        conn.execute_batch(&zeroize::Zeroizing::new(format!("PRAGMA key = {};", key_pragma.as_str())))?;
         conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
         // Defter #21: istemci bağlantısı bunları HİÇ ayarlamıyordu, oysa
         // sunucu tarafı (`typeon-server/src/store.rs`) en başından beri
@@ -480,6 +481,10 @@ impl P2PCore {
         migrate("ALTER TABLE messages ADD COLUMN status TEXT")?;
         migrate("CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id, timestamp)")?;
         migrate("CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)")?;
+        // The chat list and paging order by the effective send time (fable
+        // E-13): without these each preview sorted all rows of its chat.
+        migrate("CREATE INDEX IF NOT EXISTS idx_messages_peer_sent ON messages(peer_device_fingerprint, COALESCE(NULLIF(sent_at_ms, 0), timestamp))")?;
+        migrate("CREATE INDEX IF NOT EXISTS idx_messages_group_sent ON messages(group_id, COALESCE(NULLIF(sent_at_ms, 0), timestamp))")?;
         // Spec dışı, kullanıcı isteği (WhatsApp tarzı "sağa kaydırıp
         // yanıtla"): bkz. packet.rs `MessageContent::Text.reply_to_*`
         // dokümantasyonu — bu satırlar arşive de kalıcılaştırılmazsa, bir
@@ -496,6 +501,9 @@ impl P2PCore {
         migrate("ALTER TABLE messages ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")?;
         // bkz. `ArchivedMessage.is_edited` — düzenleme işareti de kalıcı.
         migrate("ALTER TABLE messages ADD COLUMN is_edited INTEGER NOT NULL DEFAULT 0")?;
+        // Owner decision (fable A-16): the row came from a contact's 1:1
+        // history answer, at a time the contact stated. The UI marks it.
+        migrate("ALTER TABLE messages ADD COLUMN via_sync INTEGER NOT NULL DEFAULT 0")?;
         // Spec dışı (dış AI incelemesi düzeltmesi — sıra-dışı Edit koruması):
         // uygulanan son düzenlemenin gönderici damgası (`MessageContent::Edit
         // .edited_at_ms`). `apply_edit_to_archive`, DAHA ESKİ damgalı bir
@@ -1024,13 +1032,13 @@ pub(crate) fn encrypt_plain_db(path: &str, key_pragma: &str) -> Result<(), rusql
     }
     let expected = objects(&plain)?;
     let user_version: i64 = plain.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    plain.execute_batch(&format!("ATTACH DATABASE '{}' AS enc KEY {};", tmp.replace('\'', "''"), key_pragma))?;
+    plain.execute_batch(&zeroize::Zeroizing::new(format!("ATTACH DATABASE '{}' AS enc KEY {};", tmp.replace('\'', "''"), key_pragma)))?;
     plain.query_row("SELECT sqlcipher_export('enc')", [], |_| Ok(()))?;
     plain.execute_batch(&format!("PRAGMA enc.user_version = {}; DETACH DATABASE enc;", user_version))?;
     drop(plain);
 
     let encrypted = Connection::open(&tmp)?;
-    encrypted.execute_batch(&format!("PRAGMA key = {};", key_pragma))?;
+    encrypted.execute_batch(&zeroize::Zeroizing::new(format!("PRAGMA key = {};", key_pragma)))?;
     if objects(&encrypted)? != expected {
         return Err(rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),

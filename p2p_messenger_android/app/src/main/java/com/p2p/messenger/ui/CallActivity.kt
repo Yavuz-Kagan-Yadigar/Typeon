@@ -60,6 +60,10 @@ import java.util.concurrent.Executors
 class CallActivity : AppCompatActivity() {
 
     companion object {
+        /** The call screen is in picture-in-picture: `P2PApplication` does
+         *  not count it as a visible screen for the background lock (fable J-02). */
+        @Volatile var inPip = false
+
         private const val TAG = "CallActivity"
         const val EXTRA_PEER = "call_peer"
         const val EXTRA_GROUP = "call_group"
@@ -222,6 +226,7 @@ class CallActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        Companion.inPip = false
         P2PService.removeMessageListener(keepPollFast)
         unregisterReceiver(pipMuteReceiver)
         ui.removeCallbacksAndMessages(null)
@@ -286,6 +291,7 @@ class CallActivity : AppCompatActivity() {
         // backgrounded and never locked. A screen of this app that starts
         // right after (PiP by Back) clears the mark again in `guard`.
         if (inPip) com.p2p.messenger.util.AppLock.lock()
+        Companion.inPip = inPip
         val dp = resources.displayMetrics.density
         header.visibility = if (inPip) View.GONE else View.VISIBLE
         bar.visibility = if (inPip) View.GONE else View.VISIBLE

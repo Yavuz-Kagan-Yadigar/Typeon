@@ -69,11 +69,6 @@ pub(crate) const SERVER_DEPOSIT_MEMORY_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// `server_deposited` üst sınırı — dolduğunda en eski girdiler atılır.
 pub(crate) const MAX_SERVER_DEPOSIT_MEMORY: usize = 4096;
 
-/// Sıradan bir `Message`'ın SADECE sunucu üzerinden gitmeye devam edeceği
-/// süre. Bundan sonrası her yeniden denemede gossipsub'a da kopyalanır —
-/// bkz. `should_shadow_on_gossipsub`.
-pub(crate) const SERVER_ONLY_GRACE_MS: u64 = 30_000;
-
 /// `UnknownMailbox` alan bir kutuyu bu süre boyunca sunucuya hiç sormayız.
 ///
 /// "Bu alıcı benim sunucumda değil" bilgisi mesaj başına bir gidiş-dönüşe
@@ -259,8 +254,8 @@ pub(crate) struct ServerRuntime {
     /// Mailbox -> (seq, first failure ms) of the item holding its cursor, see
     /// `SERVER_HOLD_GRACE_MS`.
     pub held: HashMap<String, (u64, u64)>,
-    /// Held items passed over after the grace: skipped, and the cursor never
-    /// goes to their (server-chosen) seq, only to that of an item that opened.
+    /// Held items passed over after the grace: skipped, and the cursor goes
+    /// past them like past an item that opened (fable C-02).
     pub passed: HashSet<(String, u64)>,
     /// SHA-256 of each item handed to `incoming` this turn -> (mailbox, seq),
     /// for `server_item_failed`.
@@ -944,7 +939,7 @@ impl P2PCore {
             .collect();
         for id in stale {
             if let Some(inflight) = self.server_inflight.remove(&id) {
-                self.retry_deposit_over_gossipsub(&inflight);
+                self.requeue_failed_deposit(&inflight);
             }
         }
         // Defter #10: bekleyen arşiv kuyruğu ve blob yüklemeleri de
@@ -1169,7 +1164,7 @@ impl P2PCore {
             let Some((mailbox, secret)) = self.session_mailbox(peer_fp) else { continue };
             // Rotasyon penceresi: karşı taraf son rotasyonumuzu henüz
             // uygulamadıysa hâlâ ESKİ root key ile mühürlüyor olabilir.
-            let mut keys = vec![state.root_key.clone()];
+            let mut keys = vec![state.root_handle_now()];
             keys.extend(state.prev_root_key.clone());
             idx.insert(mailbox, (secret.to_vec(), MailboxKey::Session(keys, peer_fp.clone())));
         }
@@ -1238,35 +1233,6 @@ impl P2PCore {
     // Gönderim
     // -----------------------------------------------------------------
 
-    /// Bu zarf, sunucu kabul etmiş olsa BİLE gossipsub'a da gitmeli mi?
-    ///
-    /// Bu fonksiyon, sunucunun bir kara deliğe dönüşmesini engelleyen tek
-    /// şey. Üç kural:
-    ///
-    /// 1. `Handshake`/`IdentityExchange`: HER ZAMAN iki yoldan da. Küçük,
-    ///    seyrek ve kaybı telafi edilemez (karşı taraf bizi hiç tanıyamaz).
-    /// 2. Rotasyon duyuran `Message`: aynı sebeple her zaman iki yoldan —
-    ///    kaybolursa karşı taraf yeni `root_key`'i (dolayısıyla yeni topic'i)
-    ///    ASLA öğrenemez ve o çift kalıcı olarak sağır kalır.
-    /// 3. Sıradan `Message`: ilk `SERVER_ONLY_GRACE_MS` boyunca sadece
-    ///    sunucu; sonrasında her yeniden deneme gossipsub'a da kopyalanır.
-    ///    Böylece sansürleyen/bozuk bir sunucu teslimi "30 sn daha yavaş"a
-    ///    düşürür, "hiç"e değil.
-    ///
-    /// Yinelenen teslim güvenli: alıcı `message_id` ile dedup ediyor ve
-    /// tüketilmiş bir ratchet anahtarı zaten çözülemiyor.
-    pub(crate) fn should_shadow_on_gossipsub(&self, envelope: &NetworkEnvelope) -> bool {
-        match envelope {
-            NetworkEnvelope::Handshake(_) | NetworkEnvelope::IdentityExchange(_) => true,
-            NetworkEnvelope::Message(m) if m.header.rotation_kyber_ciphertext.is_some() => true,
-            NetworkEnvelope::Message(m) => self
-                .awaiting_confirmation
-                .get(&m.header.message_id)
-                .map(|pc| current_time_ms().saturating_sub(pc.first_sent_at) > SERVER_ONLY_GRACE_MS)
-                .unwrap_or(false),
-        }
-    }
-
     /// Zarfı, yönlendirme açık ve bağlı olan sunuculara bırakmayı dener.
     ///
     /// `true` = en az bir sunucuya BIRAKILDI (RPC kuyruğa girdi). Çağıran
@@ -1306,7 +1272,7 @@ impl P2PCore {
             let Some((mailbox, _)) = self.session_mailbox(target_fp) else { return false };
             let root = self.ratchets.get(target_fp).map(|r| match &r.prev_root_key {
                 Some(prev) if m.header.rotation_kyber_ciphertext.is_some() => prev.clone(),
-                _ => r.root_key.clone(),
+                _ => r.root_handle_now(),
             });
             match root {
                 Some(root_key) => server_seal::seal_envelope(&root_key, &mailbox, &m.header.sender_device_fingerprint, bytes).map(|s| (mailbox, s)),
@@ -1339,7 +1305,10 @@ impl P2PCore {
             .filter(|s| {
                 self.server_rt
                     .get(&s.server_id)
-                    .map(|r| r.connected && r.enrolled && now_ms >= r.deposit_backoff_until)
+                    .map(|r| r.connected && r.enrolled && now_ms >= r.deposit_backoff_until
+                        // The server's own item limit (fable C-08): over it the
+                        // answer is TooLarge, which backed off every deposit.
+                        && r.limits.as_ref().map_or(true, |l| sealed.len() as u64 <= l.max_item_bytes as u64))
                     .unwrap_or(false)
             })
             // "Not on this server" / "mailbox full here" is remembered per
@@ -1864,10 +1833,16 @@ impl P2PCore {
     /// C1: `seq` of `mailbox` did not open or failed to process. `true`: it
     /// holds the mailbox's cursor (not acked, the server keeps it). `false`:
     /// it has failed for `SERVER_HOLD_GRACE_MS` and is passed over for good.
-    fn hold_server_item(&mut self, server_id: &str, mailbox: &str, seq: u64, now: u64) -> bool {
+    pub(crate) fn hold_server_item(&mut self, server_id: &str, mailbox: &str, seq: u64, now: u64) -> bool {
         let Some(rt) = self.server_rt.get_mut(server_id) else { return false };
         let e = rt.held.entry(mailbox.to_string()).or_insert((seq, now));
-        if e.0 != seq {
+        // A lower item holds the cursor: this one waits behind it and must
+        // not restart that item's timer (two failing items reset each other
+        // for good otherwise).
+        if seq > e.0 {
+            return true;
+        }
+        if seq < e.0 {
             *e = (seq, now);
         }
         if now.saturating_sub(e.1) < SERVER_HOLD_GRACE_MS {
@@ -2309,6 +2284,12 @@ impl P2PCore {
                     let first = seen.insert(item.mailbox_id.clone());
                     if let Some(rt) = self.server_rt.get_mut(&server_id) {
                         if rt.passed.contains(&(item.mailbox_id.clone(), item.seq)) {
+                            // Passed over for good: the cursor goes past it
+                            // like past an item that opened, or 64 such items
+                            // (or one over the batch byte cap) stop the
+                            // mailbox and every mailbox after it.
+                            let h = highest.entry(item.mailbox_id.clone()).or_insert(0);
+                            *h = (*h).max(item.seq);
                             continue;
                         }
                         // A Fetch answers from the cursor up: a held item that
@@ -2338,6 +2319,9 @@ impl P2PCore {
                         if self.hold_server_item(&server_id, &item.mailbox_id, item.seq, now) {
                             blocked.insert(item.mailbox_id.clone());
                             held_any = true;
+                        } else {
+                            let h = highest.entry(item.mailbox_id.clone()).or_insert(0);
+                            *h = (*h).max(item.seq);
                         }
                         continue;
                     };
@@ -2416,6 +2400,14 @@ impl P2PCore {
                     if let Some((before, _)) = window { self.reopen_fetch_cursor(&conv_key, before) }
                     return;
                 };
+                // Only buckets this probe asked for, each once (fable C-06): a
+                // server listed any number and each became a fetch over Tor.
+                let asked: HashSet<String> = match self.archive_root_key {
+                    Some(ark) => archive_buckets(&ark, &conv_key, window.map_or_else(current_time_ms, |(before, _)| before)).into_iter().collect(),
+                    None => HashSet::new(),
+                };
+                let mut seen_bucket: HashSet<String> = HashSet::new();
+                present.retain(|b| asked.contains(&b.bucket) && seen_bucket.insert(b.bucket.clone()));
                 // A press: the buckets that reach its window, newest first,
                 // each read from `before` back.
                 if let Some((_, after)) = window {
@@ -2661,10 +2653,10 @@ impl P2PCore {
                 // türleri `awaiting_confirmation` sayesinde kurtuluyordu ama
                 // `Handshake`/`IdentityExchange` — ki bunlar tam da eşleşmenin
                 // ve ilk temasın taşıyıcısı — SESSİZCE düşüyordu. Diğer bütün
-                // hata kolları zaten `retry_deposit_over_gossipsub`
+                // hata kolları zaten `requeue_failed_deposit`
                 // (`publish_envelope` → `pending_envelopes`) kullanıyordu;
                 // tek istisna buydu.
-                self.retry_deposit_over_gossipsub(&inflight);
+                self.requeue_failed_deposit(&inflight);
             }
             ServerErrorCode::NotEnrolled => {
                 // A new Hello at once only when this was not the enrollment
@@ -2692,7 +2684,7 @@ impl P2PCore {
                         self.persist_server(&r);
                     }
                 }
-                self.retry_deposit_over_gossipsub(&inflight);
+                self.requeue_failed_deposit(&inflight);
             }
             ServerErrorCode::Revoked => {
                 warn!("Sunucu kaydımızı iptal etti: {}", crate::log_id(&server_id));
@@ -2713,7 +2705,7 @@ impl P2PCore {
                         self.persist_server(&r);
                     }
                 }
-                self.retry_deposit_over_gossipsub(&inflight);
+                self.requeue_failed_deposit(&inflight);
             }
             // A full mailbox (5000 undelivered items for a device that has
             // not fetched in a week — seen on device, 2026-09-26) must only
@@ -2725,11 +2717,19 @@ impl P2PCore {
             // instead of once per server — bounded by the mailbox count.
             ServerErrorCode::QuotaExceeded if matches!(inflight, ServerInflight::Deposit { .. }) => {
                 if let ServerInflight::Deposit { mailbox, .. } = &inflight {
-                    warn!("Sunucu kutusu dolu, bu kutuya yatırma {} sn durduruldu: {}", SERVER_DEPOSIT_BACKOFF_MS / 1000, mailbox_log_id(mailbox));
-                    self.server_unknown_mailboxes
-                        .insert((server_id.clone(), mailbox.clone()), mono_ms() + SERVER_DEPOSIT_BACKOFF_MS);
+                    // The pause doubles per refusal (fable C-04), like
+                    // `UnknownMailbox`; a `Deposited` resets the streak.
+                    let key = (server_id.clone(), mailbox.clone());
+                    let now = mono_ms();
+                    if self.server_unknown_mailboxes.get(&key).map_or(true, |until| now >= *until) {
+                        let streak = self.server_unknown_streak.entry(key.clone()).or_insert(0);
+                        let ttl = (SERVER_DEPOSIT_BACKOFF_MS << (*streak).min(6)).min(SERVER_UNKNOWN_MAILBOX_MAX_TTL_MS);
+                        *streak += 1;
+                        warn!("Sunucu kutusu dolu, bu kutuya yatırma {} sn durduruldu: {}", ttl / 1000, mailbox_log_id(mailbox));
+                        self.server_unknown_mailboxes.insert(key, now + ttl);
+                    }
                 }
-                self.retry_deposit_over_gossipsub(&inflight);
+                self.requeue_failed_deposit(&inflight);
             }
             other => {
                 warn!("Sunucu hatası: {:?}", other);
@@ -2769,7 +2769,7 @@ impl P2PCore {
                 }
                 // Kota/hız/boyut — hepsinde doğru davranış aynı: bu zarfı
                 // gossipsub'a ver, mesajı kaybetme.
-                self.retry_deposit_over_gossipsub(&inflight);
+                self.requeue_failed_deposit(&inflight);
             }
         }
     }
@@ -2810,7 +2810,7 @@ impl P2PCore {
             self.reopen_fetch_window(&inflight);
             self.attachment_events.push(serde_json::json!({"type": "history_restore_incomplete"}).to_string());
         }
-        self.retry_deposit_over_gossipsub(&inflight);
+        self.requeue_failed_deposit(&inflight);
     }
 
     fn send_archive_fetch(
@@ -2858,7 +2858,7 @@ impl P2PCore {
     }
 
     /// Sunucuya bırakılamamış bir zarfı hemen gossipsub'a verir.
-    fn retry_deposit_over_gossipsub(&mut self, inflight: &ServerInflight) {
+    fn requeue_failed_deposit(&mut self, inflight: &ServerInflight) {
         if let ServerInflight::Deposit { envelope, target_fp, first_attempt_at, cancelled, .. } = inflight {
             // Withdrawn by the user, or confirmed meanwhile: nothing to resend.
             if *cancelled {

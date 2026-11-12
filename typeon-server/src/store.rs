@@ -115,8 +115,18 @@ const READER_EVICT_IDLE_MS: i64 = 7 * 24 * 3600 * 1000;
 /// `record_id` let a 2-byte record cost 2 bytes against a ~150-byte row.
 const ARCHIVE_ROW_OVERHEAD: usize = 128;
 
+/// The same for a mail row (mailbox id, depositor, hash, three index
+/// entries): charging only `sealed` let 3-byte items cost 3 bytes against a
+/// ~250-byte row (fable I-03).
+const MAIL_ROW_OVERHEAD: usize = 128;
+
+/// Bytes a mail item is charged: quota and the server-wide budget.
+pub fn mail_row_bytes(mailbox_id: &str, sealed: &[u8]) -> usize {
+    sealed.len() + mailbox_id.len() + MAIL_ROW_OVERHEAD
+}
+
 /// Bump on every change to `init_schema`, or existing DBs skip it.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Bytes an archive record is charged: quota and the server-wide budget.
 pub fn archive_row_bytes(rec: &ArchiveRecord) -> usize {
@@ -243,6 +253,9 @@ impl Store {
         // FULL: a `Deposited` answer lets the sender drop its copy, so the
         // mail row must be on disk before it, not only in the WAL.
         let _ = conn.pragma_update(None, "synchronous", "FULL");
+        // Deleted reader rows (who read which box), acks and mail are zeroed,
+        // not left in free pages (fable I-10).
+        let _ = conn.pragma_update(None, "secure_delete", "ON");
         // Defter #22: JNI kontrol yüzeyi (`serverStatus`/`joinCode`/
         // `listDevices`/`revokeDevice`) AYNI dosyaya İKİNCİ bir bağlantı
         // açıyor. WAL çoğu durumu kurtarıyor ama `busy_timeout` olmadan
@@ -444,6 +457,9 @@ impl Store {
         };
         add_column("ALTER TABLE blobs ADD COLUMN chunk_size INTEGER NOT NULL DEFAULT 0")?;
         add_column("ALTER TABLE mail ADD COLUMN sealed_hash BLOB")?;
+        // Hash of the invite the enrollment came in with: the public join
+        // code gets a small allowance of active enrollments (see `handle_enroll`).
+        add_column("ALTER TABLE enrollments ADD COLUMN invite_hash BLOB")?;
         // The global AUTOINCREMENT `seq` becomes per mailbox. Old rows keep
         // their seq; new ones start above the old high-water mark
         // (`mail_seq_base`), so no client cursor ends up above new mail.
@@ -613,6 +629,17 @@ impl Store {
             .unwrap_or(0)
     }
 
+    /// Active, non-idle enrollments that came in with this invite.
+    pub fn count_active_enrollments_via(&self, token_hash: &[u8], idle_before: i64) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM enrollments WHERE state = 'active' AND last_seen_at >= ?1 AND invite_hash = ?2",
+                params![idle_before, token_hash],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+    }
+
     /// Puts active enrollments last seen before `before` to sleep: their
     /// reader rows go, and mail in boxes nobody reads any more goes with them.
     /// The row, its key and its quota counters stay, so the device comes back
@@ -685,6 +712,9 @@ impl Store {
             return Ok(false);
         }
         self.insert_enrollment(e)?;
+        self.conn
+            .execute("UPDATE enrollments SET invite_hash = ?1 WHERE enrollment_id = ?2", params![token_hash, e.enrollment_id])
+            .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(true)
     }
@@ -1015,10 +1045,9 @@ impl Store {
     pub fn depositor_item_count(&self, mailbox_id: &str, depositor: &[u8]) -> i64 {
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM mail m WHERE m.mailbox_id = ?1 AND m.depositor = ?2
-                   AND NOT EXISTS (SELECT 1 FROM mail_acks a
-                                   WHERE a.mailbox_id = m.mailbox_id AND a.owner != m.depositor
-                                     AND a.through_seq >= m.seq)",
+                // Every row still stored: one reader's ack does not delete a
+                // row while another reader has not acked it (fable I-03).
+                "SELECT COUNT(*) FROM mail m WHERE m.mailbox_id = ?1 AND m.depositor = ?2",
                 params![mailbox_id, depositor],
                 |r| r.get(0),
             )
@@ -1056,6 +1085,7 @@ impl Store {
             return Ok(existing as u64);
         }
         // Row and charge together: a swallowed charge under-counted the quota.
+        let charge = mail_row_bytes(mailbox_id, sealed) as i64;
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let seq: i64 = self
             .conn
@@ -1072,7 +1102,7 @@ impl Store {
             .execute(
                 "INSERT INTO mail (seq, mailbox_id, sealed, byte_len, deposited_at_ms, expires_at_ms, depositor, sealed_hash)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![seq, mailbox_id, sealed, sealed.len() as i64, now, now + ttl_ms, depositor, hash.as_slice()],
+                params![seq, mailbox_id, sealed, charge, now, now + ttl_ms, depositor, hash.as_slice()],
             )
             .map_err(|e| e.to_string())?;
         let seq = seq as u64;
@@ -1082,7 +1112,7 @@ impl Store {
         self.conn
             .execute(
                 "UPDATE enrollments SET bytes_mail = bytes_mail + ?1 WHERE enrollment_id = ?2",
-                params![sealed.len() as i64, depositor],
+                params![charge, depositor],
             )
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
@@ -1331,9 +1361,10 @@ impl Store {
     /// `archive_row_bytes`.
     pub fn archive_put(&self, bucket: &str, records: &[ArchiveRecord], owner: &[u8], now: i64) -> Result<u64, String> {
         let mut newest = 0u64;
-        // Whose charge changes: the writer and the owners it overwrites.
-        let mut owners = vec![owner.to_vec()];
         // One transaction: one WAL commit per batch, and all or nothing.
+        // The charge moves by the delta of each row written, in the same
+        // transaction: a `SUM` over all of the writer's rows per request was
+        // a full scan on the event loop (fable I-05). The sweep recounts.
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         for rec in records {
             // Skipped, not refused: the client drops what was answered `Ok`,
@@ -1342,16 +1373,12 @@ impl Store {
                 continue;
             }
             let old = self.conn.query_row(
-                "SELECT owner FROM archive WHERE bucket = ?1 AND record_id = ?2",
+                "SELECT owner, byte_len FROM archive WHERE bucket = ?1 AND record_id = ?2",
                 params![bucket, rec.record_id],
-                |r| r.get::<_, Vec<u8>>(0),
-            );
-            if let Ok(old) = old {
-                if !owners.contains(&old) {
-                    owners.push(old);
-                }
-            }
-            self.conn
+                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
+            ).ok();
+            let bytes = archive_row_bytes(rec) as i64;
+            let written = self.conn
                 .execute(
                     "INSERT INTO archive (bucket, record_id, rev, sent_at_ms, sealed, byte_len, owner, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -1360,13 +1387,28 @@ impl Store {
                         sealed = excluded.sealed, byte_len = excluded.byte_len,
                         owner = excluded.owner, updated_at = excluded.updated_at
                      WHERE excluded.rev > archive.rev",
-                    params![bucket, rec.record_id, rec.rev.min(i64::MAX as u64) as i64, rec.sent_at_ms.min(i64::MAX as u64) as i64, rec.sealed, archive_row_bytes(rec) as i64, owner, now],
+                    params![bucket, rec.record_id, rec.rev.min(i64::MAX as u64) as i64, rec.sent_at_ms.min(i64::MAX as u64) as i64, rec.sealed, bytes, owner, now],
                 )
                 .map_err(|e| e.to_string())?;
+            if written > 0 {
+                if let Some((old_owner, old_bytes)) = &old {
+                    self.conn
+                        .execute(
+                            "UPDATE enrollments SET bytes_archive = MAX(0, bytes_archive - ?1) WHERE enrollment_id = ?2",
+                            params![old_bytes, old_owner],
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+                self.conn
+                    .execute(
+                        "UPDATE enrollments SET bytes_archive = bytes_archive + ?1 WHERE enrollment_id = ?2",
+                        params![bytes, owner],
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
             newest = newest.max(rec.rev);
         }
         tx.commit().map_err(|e| e.to_string())?;
-        self.recount_archive_bytes(&owners);
         Ok(newest)
     }
 
@@ -1386,9 +1428,18 @@ impl Store {
 
     pub fn archive_probe(&self, buckets: &[String]) -> Vec<BucketStat> {
         let mut out = Vec::new();
+        // A repeated id is one scan, and the count stops at a cap: 512 full
+        // scans of a bucket of millions of rows held the event loop for
+        // seconds (fable I-05). MIN/MAX come from `idx_archive_page`.
+        let mut seen = std::collections::HashSet::new();
         for b in buckets {
+            if !seen.insert(b.as_str()) {
+                continue;
+            }
             let row = self.conn.query_row(
-                "SELECT COUNT(*), COALESCE(MIN(sent_at_ms),0), COALESCE(MAX(sent_at_ms),0) FROM archive WHERE bucket = ?1",
+                "SELECT (SELECT COUNT(*) FROM (SELECT 1 FROM archive WHERE bucket = ?1 LIMIT 65536)),
+                        COALESCE((SELECT MIN(sent_at_ms) FROM archive WHERE bucket = ?1), 0),
+                        COALESCE((SELECT MAX(sent_at_ms) FROM archive WHERE bucket = ?1), 0)",
                 params![b],
                 |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
             );
@@ -2020,7 +2071,7 @@ mod tests {
 
         // Kota da sadece BİR kopya kadar artmış olmalı — asıl çöküş buydu.
         let e = s.enrollment_by_peer("peerS").unwrap();
-        assert_eq!(e.bytes_mail as usize, b"ayni-el-sikisma".len());
+        assert_eq!(e.bytes_mail as usize, mail_row_bytes("mb_1", b"ayni-el-sikisma"));
 
         // Farklı baytlar hâlâ ayrı satır.
         s.deposit("mb_1", b"baska-zarf", &sender, 60, 1000).unwrap();
@@ -2159,8 +2210,8 @@ mod tests {
         s.archive_put("ar_1", &[rec("m1", 1, 100, &vec![b'y'; 50])], &a, 0).unwrap();
         s.blob_begin("bl_1", &a, 1, 0).unwrap();
         s.blob_record_chunk("bl_1", 0, 25).unwrap();
-        // 100 mail + 50 archive + 2 for the record id "m1" + row + 25 blob.
-        assert_eq!(s.total_stored_bytes(), 177 + ARCHIVE_ROW_OVERHEAD as i64);
+        // 100 mail + its row + 50 archive + 2 for the record id "m1" + row + 25 blob.
+        assert_eq!(s.total_stored_bytes(), 177 + (mail_row_bytes("mb_1", &[]) + ARCHIVE_ROW_OVERHEAD) as i64);
     }
 
     /// Dış inceleme önerisi: gönderen KENDİ teslim edilmemiş paketini geri
@@ -2395,6 +2446,18 @@ mod tests {
     }
 
     #[test]
+    fn enrollments_are_counted_per_invite() {
+        let s = Store::open_in_memory().unwrap();
+        s.create_invite(b"pub", "x", 0, 0, 0).unwrap();
+        enroll(&s, b"aaaa", "peerA");
+        enroll(&s, b"bbbb", "peerB");
+        let a = s.enrollment_by_peer("peerA").unwrap();
+        assert!(s.enroll_with_invite(b"pub", 1, &a).unwrap());
+        assert_eq!(s.count_active_enrollments_via(b"pub", 0), 1, "peerB came in another way");
+        assert_eq!(s.count_active_enrollments_via(b"rotated", 0), 0);
+    }
+
+    #[test]
     fn an_item_over_the_batch_cap_still_leaves_its_mailbox() {
         let s = Store::open_in_memory().unwrap();
         let a = enroll(&s, b"aaaa", "peerA");
@@ -2496,7 +2559,7 @@ mod tests {
         let recipient = enroll(&s, b"recv", "peerR");
         register(&s, &recipient, "mb_1");
         let seq = s.deposit("mb_1", &vec![b'x'; 500], &sender, 1, 1000).unwrap();
-        assert_eq!(s.enrollment_by_peer("peerS").unwrap().bytes_mail, 500);
+        assert_eq!(s.enrollment_by_peer("peerS").unwrap().bytes_mail, mail_row_bytes("mb_1", &[0; 500]) as i64);
         s.ack("mb_1", seq, &recipient).unwrap();
         s.recount_mail_bytes();
         assert_eq!(s.enrollment_by_peer("peerS").unwrap().bytes_mail, 0);

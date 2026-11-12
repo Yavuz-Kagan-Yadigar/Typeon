@@ -136,6 +136,15 @@ struct Shared {
     camera: Mutex<Option<VideoTx>>,
 }
 
+/// Loads GStreamer off the UI thread at start-up. The first `gst::init` after
+/// an install or update rebuilds the plugin registry, which took the first
+/// video call 30 s+ to show a frame.
+pub fn prewarm() {
+    let _ = std::thread::Builder::new().name("gst-init".into()).spawn(|| {
+        let _ = gst::init();
+    });
+}
+
 pub struct CallMedia {
     shared: Arc<Shared>,
     threads: Vec<JoinHandle<()>>,
@@ -724,6 +733,18 @@ struct Gate {
     prev_luma: Vec<u8>,
     force: bool,
     still_skips: u32,
+    /// Frames admitted since the last adapt step (see `encoder_kbps`).
+    admitted: u32,
+}
+
+/// The encoder divides its bitrate by the frame rate of its caps, but the gate
+/// drops frames behind its back (frame cap, congestion, VRR): at 6 of 30 fps
+/// each frame got a fifth of its bits (measured with vah265enc: 70 KB vs
+/// 153 KB for the same frames). Scale the bitrate we give it by caps fps /
+/// frames actually admitted, so the bits per frame match `target`.
+fn encoder_kbps(target: u32, caps_fps: f64, admitted_fps: f64) -> u32 {
+    let scale = (caps_fps / admitted_fps.max(1.0)).clamp(1.0, 8.0);
+    (target as f64 * scale) as u32
 }
 
 impl VideoTx {
@@ -797,6 +818,7 @@ impl VideoTx {
             prev_luma: Vec::new(),
             force: true,
             still_skips: 0,
+            admitted: 0,
         }));
         {
             let gate = gate.clone();
@@ -818,6 +840,7 @@ impl VideoTx {
             let running = running.clone();
             let hevc = enc.hevc;
             let bus = pipeline.bus();
+            let enc_sink = encoder.static_pad("sink");
             let pipe = pipeline.clone();
             std::thread::Builder::new()
                 .name("call-video-tx".into())
@@ -825,6 +848,8 @@ impl VideoTx {
                     let mut bitrate = kbps(tuning::START_KBPS);
                     let (min, max) = (kbps(tuning::MIN_KBPS), kbps(tuning::MAX_KBPS));
                     let mut adapt_at = Instant::now();
+                    let mut admitted_fps = tuning::MAX_FPS as f64;
+                    let mut applied = bitrate;
                     let mut key_at: Option<Instant> = None;
                     while running.load(Ordering::Relaxed) && shared.running.load(Ordering::Relaxed) {
                         if let Some(m) = bus.as_ref().and_then(|b| b.pop_filtered(&[gst::MessageType::Error])) {
@@ -846,15 +871,16 @@ impl VideoTx {
                             out.send_event(gst_video::UpstreamForceKeyUnitEvent::builder().all_headers(true).build());
                         }
                         if adapt_at.elapsed() >= Duration::from_millis(tuning::ADAPT_MS) {
+                            let dt = adapt_at.elapsed().as_secs_f64();
                             adapt_at = Instant::now();
                             let backlog = core::call_backlog();
                             let mut g = gate.lock().unwrap_or_else(|p| p.into_inner());
+                            admitted_fps = admitted_fps * 0.6 + std::mem::take(&mut g.admitted) as f64 / dt * 0.4;
                             if backlog >= tuning::PAUSE_AT {
                                 g.paused = true;
                             } else if backlog <= tuning::RESUME_AT {
                                 g.paused = false;
                             }
-                            let before = bitrate;
                             if backlog > tuning::CUT_AT {
                                 bitrate = (bitrate / 2).max(min);
                                 g.fps = g.fps.saturating_sub(6).max(tuning::MIN_FPS);
@@ -867,8 +893,18 @@ impl VideoTx {
                             }
                             g.still_skips = 0;
                             drop(g);
-                            if bitrate != before {
-                                set_bitrate(bitrate);
+                            let caps_fps = enc_sink.as_ref()
+                                .and_then(|p| p.current_caps())
+                                .and_then(|c| gst_video::VideoInfo::from_caps(&c).ok())
+                                .map(|i| i.fps())
+                                .filter(|f| f.numer() > 0 && f.denom() > 0)
+                                .map_or(tuning::MAX_FPS as f64, |f| f.numer() as f64 / f.denom() as f64);
+                            let want = encoder_kbps(bitrate, caps_fps, admitted_fps);
+                            // Not on every jitter of the frame count: 10 %.
+                            if want.abs_diff(applied) * 10 > applied {
+                                applied = want;
+                                set_bitrate(applied);
+                                log::debug!("call: encoder {} kbps (target {}, {:.1} of {:.0} fps)", applied, bitrate, admitted_fps, caps_fps);
                             }
                         }
                         let Some(sample) = out.try_pull_sample(gst::ClockTime::from_mseconds(100)) else { continue };
@@ -929,6 +965,7 @@ fn admit(g: &mut Gate, pad: &gst::Pad, buffer: &gst::Buffer) -> bool {
     }
     g.force = false;
     g.last_sent = Some(now);
+    g.admitted += 1;
     true
 }
 
@@ -959,6 +996,14 @@ fn mean_abs_diff(a: &[u8], b: &[u8]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoder_budget_follows_admitted_frames() {
+        assert_eq!(encoder_kbps(180, 24.0, 24.0), 180, "every frame admitted: no change");
+        assert_eq!(encoder_kbps(180, 24.0, 6.0), 720, "a quarter admitted: four times the bitrate");
+        assert_eq!(encoder_kbps(40, 30.0, 0.0), 320, "capped at 8x");
+        assert_eq!(encoder_kbps(180, 24.0, 30.0), 180, "never below the target");
+    }
 
     #[test]
     fn bundle_round_trip_matches_android_layout() {

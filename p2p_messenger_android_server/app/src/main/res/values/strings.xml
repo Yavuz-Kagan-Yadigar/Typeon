@@ -21,7 +21,7 @@
     <string name="device_row_fmt">%1$s… · %2$s</string>
     <string name="action_revoke">Revoke</string>
     <string name="dlg_revoke_title">Revoke this device?</string>
-    <string name="dlg_revoke_body">It will stop being able to deposit or fetch, and it cannot enroll again until you unblock it. Its messenger keeps working — it just falls back to peer-to-peer delivery. Revoking only blocks this enrollment key; to really ban someone, rotate the join code.</string>
+    <string name="dlg_revoke_body">It will stop being able to deposit or fetch, and it cannot enroll again until you unblock it. Its messenger keeps working — it just falls back to peer-to-peer delivery. Revoking also replaces the public join code; give the new one to the others.</string>
 
     <string name="lbl_stats">Activity</string>
     <string name="stats_fmt">Devices: %1$d\nStored: %2$d · Fetched: %3$d · File chunks served: %4$d\nDisk: %5$s</string>

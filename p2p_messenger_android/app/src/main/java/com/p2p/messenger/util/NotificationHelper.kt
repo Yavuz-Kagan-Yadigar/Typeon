@@ -135,7 +135,10 @@ object NotificationHelper {
         show(
             context, DEVICE_ALERT_NOTIFICATION_ID,
             context.getString(R.string.title_security_warning_dialog),
-            context.getString(R.string.notif_new_device_warning, contactName, shortCode),
+            // No contact name while message text is hidden (fable J-03): the
+            // lock screen may show the body. The app shows it after unlock.
+            if (NotificationPrefs.showMessageText(context)) context.getString(R.string.notif_new_device_warning, contactName, shortCode)
+            else context.getString(R.string.msg_security_warning),
             intent
         )
     }
@@ -151,7 +154,8 @@ object NotificationHelper {
         val id = ("deleted:$peerDeviceFingerprint").hashCode()
         securityAlertIds.add(id)
         show(context, id, context.getString(R.string.app_name),
-            context.getString(R.string.msg_contact_deleted_account, name), intent)
+            if (NotificationPrefs.showMessageText(context)) context.getString(R.string.msg_contact_deleted_account, name)
+            else context.getString(R.string.notif_contact_deleted_account_hidden), intent)
     }
 
     fun showGroupMessageNotification(context: Context, groupId: String, senderIdentityId: String, text: String, messageId: String = "", mention: Boolean = false) {

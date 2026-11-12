@@ -1347,8 +1347,28 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_pollNetwork<'local>(mut env
         let mut core = core_lock_poll();
         core.poll_events()
     });
-    let texts = result.unwrap_or_else(|e| { error!("pollNetwork panicked: {}", e); Vec::new() });
-    strings_to_jobjectarray(&mut env, &texts)
+    let mut texts = result.unwrap_or_else(|e| { error!("pollNetwork panicked: {}", e); Vec::new() });
+    // fable G-10: events of a turn whose array could not be built (Java heap
+    // pressure) go out with the next turn instead of being lost.
+    static UNDELIVERED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut held = UNDELIVERED.lock().unwrap_or_else(|p| p.into_inner());
+    if !held.is_empty() {
+        let mut all = std::mem::take(&mut *held);
+        all.append(&mut texts);
+        texts = all;
+    }
+    let array = strings_to_jobjectarray(&mut env, &texts);
+    if array.is_null() && !texts.is_empty() {
+        // ponytail: bounded at 4096 events, the oldest go first.
+        let excess = texts.len().saturating_sub(4096);
+        texts.drain(..excess);
+        *held = texts;
+        // A pending OutOfMemoryError must not reach Kotlin as a non-null
+        // return: an empty array when it can be made.
+        let _ = env.exception_clear();
+        return strings_to_jobjectarray(&mut env, &[]);
+    }
+    array
 }
 
 #[no_mangle]

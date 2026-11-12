@@ -363,6 +363,9 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
                 let _ = std::fs::remove_file(&conv_tmp);
                 return Err(e.to_string());
             }
+            if attachment_gone(file_id, out_path) {
+                return Err("Attachment removed".to_string());
+            }
             keep_conversion(out_path, if animated { "att-gif" } else { "att-png" }, file_id, &file_key);
             if animated {
                 return Ok(gif_path.to_string_lossy().to_string());
@@ -370,8 +373,23 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
         } else if let Err(e) = std::fs::rename(&tmp_path, &plain_path) {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(e.to_string());
+        } else if attachment_gone(file_id, &plain_path) {
+            return Err("Attachment removed".to_string());
         }
     }
     info!("get_attachment_plaintext_path: file_id={} -> {}", file_id, plain_path.display());
     Ok(plain_path.to_string_lossy().to_string())
+}
+
+/// fable F-10: the decrypt ran without the lock. When the attachment was
+/// deleted (or evicted) meanwhile, the plaintext just written goes too, or
+/// it stayed in `plain_cache` with no row to remove it.
+fn attachment_gone(file_id: &str, written: &std::path::Path) -> bool {
+    let present = crate::core_lock_read().db.as_ref().map_or(true, |c| {
+        c.query_row("SELECT 1 FROM files WHERE file_id = ?1 AND status = 'complete'", params![file_id], |_| Ok(())).is_ok()
+    });
+    if !present {
+        let _ = std::fs::remove_file(written);
+    }
+    !present
 }

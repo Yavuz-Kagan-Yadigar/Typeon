@@ -154,6 +154,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val sentAtMs: Long? = null,
         var status: Status = Status.SENT,
         var isEdited: Boolean = false,
+        /** The row came from the contact's history answer, not live. */
+        val viaSync: Boolean = false,
         var isDeleted: Boolean = false,
         /** Sadece grup sohbetinde, kendi mesajımız değilse gösterilir. */
         val senderName: String? = null,
@@ -1045,7 +1047,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                 holder.textView.text = shownText
                 holder.textView.setTypeface(Typeface.DEFAULT, Typeface.NORMAL)
                 holder.textView.alpha = 1f
-                holder.editedLabel.visibility = if (item.isEdited) View.VISIBLE else View.GONE
+                holder.editedLabel.visibility = if (item.isEdited || item.viaSync) View.VISIBLE else View.GONE
+                holder.editedLabel.text = listOfNotNull(
+                    holder.itemView.context.getString(R.string.lbl_edited).takeIf { item.isEdited },
+                    holder.itemView.context.getString(R.string.lbl_synced).takeIf { item.viaSync }
+                ).joinToString(" ")
                 // Spec dışı, kullanıcı isteği: mesaj metnindeki linkler
                 // (http/https/www) tıklanabilir olsun. `Linkify.addLinks`
                 // link bulursa TextView'a kendi `LinkMovementMethod`'unu

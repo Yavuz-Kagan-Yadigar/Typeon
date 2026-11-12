@@ -221,6 +221,9 @@ pub struct ArchivedMessage {
     /// but nothing recorded that it had changed, so reopening a chat quietly
     /// presented an edited message as if it were the original.
     pub is_edited: bool,
+    /// The row came from a contact's 1:1 history answer (`mark_synced`).
+    #[serde(default)]
+    pub via_sync: bool,
     /// Spec dışı, kullanıcı isteği: bu mesaja bırakılmış tepkilerin hazır
     /// özeti (ör. `"👍2 ❤️"`). Boş dize = tepki yok. Kotlin tarafı bunu
     /// olduğu gibi tepki pill'ine yazar — ayrıca bir sorgu yapmaz (bkz.

@@ -930,6 +930,12 @@ impl P2PCore {
             }
         }
         for file_id in &file_ids {
+            // Reactions and seen marks of an attachment are keyed by its file
+            // id, not a `messages` row (fable D-08).
+            if let Some(conn) = &self.db {
+                let _ = conn.execute("DELETE FROM message_reactions WHERE message_id = ?1", params![file_id]);
+                let _ = conn.execute("DELETE FROM message_seen WHERE message_id = ?1", params![file_id]);
+            }
             self.delete_attachment_file(file_id);
         }
     }
@@ -1074,10 +1080,7 @@ impl P2PCore {
                 let _ = conn.execute("DELETE FROM peer_prekeys WHERE device_fingerprint = ?1", params![fp]);
             }
         }
-        if let Some(state) = self.ratchets.remove(fp) {
-            // bkz. `topic_for_root_key` — the session's topic is not needed any more.
-            self.resubscribe_ratchet_topic(Some(&state.root_key), None);
-        }
+        self.ratchets.remove(fp);
         if let Some(peer_id) = self.device_to_peer_id.remove(fp) {
             if disconnect {
                 if let Some(swarm) = &mut self.swarm {
@@ -1307,6 +1310,7 @@ impl P2PCore {
         self.ack_batches_inflight.clear();
         self.envelopes_inflight.clear();
         self.pairing_mailbox_subs.clear();
+        self.pairing_reply_peer.clear();
         self.verified_device_adds.clear();
         for d in self.active_downloads.values_mut() {
             zeroize::Zeroize::zeroize(&mut d.file_key);
@@ -1374,6 +1378,9 @@ impl P2PCore {
         zeroize::Zeroize::zeroize(&mut self.pending_secret_bundle);
         self.pending_secret_bundle = None;
         self.skipped_key_encryption_key = None;
+        // The gate shuts with the key (fable A-12): sessions made before a new
+        // key is installed would not be stored.
+        self.ratchets_loaded = false;
         self.peer_onion_addr.clear();
         self.pending_device_alerts.clear();
         self.last_identity_exchange_reply.clear();
@@ -1395,17 +1402,6 @@ impl P2PCore {
         self.attachment_events.clear();
         self.blocked_identities.clear();
         self.deleted_identities.clear();
-        // The swarm outlives the wipe: drop every gossip topic (own mailbox,
-        // session and pairing topics) so the erased identity's traffic stops
-        // arriving. `ensure_own_mailbox_subscription` subscribes a later
-        // identity's mailbox again, since `own_mailbox_topic_fp` is reset.
-        if let Some(swarm) = self.swarm.as_mut() {
-            let gs = &mut swarm.behaviour_mut().gossipsub;
-            let topics: Vec<gossipsub::IdentTopic> = gs.topics().map(|h| gossipsub::IdentTopic::new(h.as_str())).collect();
-            for topic in &topics {
-                let _ = gs.unsubscribe(topic);
-            }
-        }
         self.own_mailbox_topic_fp = None;
         self.pending_link_target = None;
         self.pending_link_started_at = 0;

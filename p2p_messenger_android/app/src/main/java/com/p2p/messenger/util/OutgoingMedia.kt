@@ -46,6 +46,14 @@ object OutgoingMedia {
 
     class Prepared(val file: File, val fileName: String, val mimeType: String)
 
+    /** A cleaned photo or video goes out as `image.<ext>` / `video.<ext>`:
+     *  gallery and camera names carry the capture date and time the scrub
+     *  just removed, and screenshots the app on screen (fable J-04). */
+    private fun neutralName(p: Prepared, base: String): Prepared {
+        val ext = p.fileName.substringAfterLast('.', "").takeIf { it.isNotEmpty() && it.length <= 8 }
+        return Prepared(p.file, if (ext == null) base else "$base.$ext", p.mimeType)
+    }
+
     /** The returned file is either [src] or a new file next to it; the caller deletes both. */
     suspend fun prepare(
         src: File, fileName: String, mimeType: String, hiRes: Boolean,
@@ -55,9 +63,9 @@ object OutgoingMedia {
         return try {
             when {
                 // The core strips only JPEG/PNG/JPEG XL metadata: anything else left as it is asks first.
-                mimeType.startsWith("image/") -> prepareImage(src, fileName, hiRes)
+                mimeType.startsWith("image/") -> prepareImage(src, fileName, hiRes)?.let { neutralName(it, "image") }
                     ?: if (coreScrubs(src) || confirmUnscrubbed()) unchanged else throw java.util.concurrent.CancellationException("send cancelled")
-                mimeType.startsWith("video/") -> remuxVideo(src, fileName, mimeType)
+                mimeType.startsWith("video/") -> remuxVideo(src, fileName, mimeType)?.let { neutralName(it, "video") }
                     ?: if (confirmUnscrubbed()) unchanged else throw java.util.concurrent.CancellationException("send cancelled")
                 // m4a/ISO-BMFF audio can carry location atoms: remux without them, else ask. Other audio is untouched.
                 mimeType.startsWith("audio/") ->

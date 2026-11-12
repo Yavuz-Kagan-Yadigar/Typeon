@@ -856,10 +856,18 @@ class ChatActivity : AppCompatActivity() {
     private fun sendVoiceMessage(file: File, durationMs: Long, caption: String = "", quote: com.p2p.messenger.util.Quote.Ref? = null) {
         lifecycleScope.launch(Dispatchers.IO) {
             // The copy is deleted even if the screen closes while sending.
+            // The recorder's MP4 carries the Android version (on many phones
+            // maker and model) and creation times: scrubbed like a picked
+            // m4a; a failed scrub cancels the send (fable J-01).
+            val prepared = try {
+                com.p2p.messenger.util.OutgoingMedia.prepare(file, file.name, "audio/mp4", false) { false }
+            } catch (e: Exception) {
+                null
+            }
             try {
-                val result = try {
+                val result = if (prepared == null) "Error: INTERNAL: voice scrub" else try {
                     P2PLib.prepareAndSendFile(
-                        peerDeviceFingerprint, file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
+                        peerDeviceFingerprint, prepared.file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
                         caption, quote?.id ?: "", quote?.preview ?: ""
                     )
                 } catch (e: Exception) {
@@ -895,6 +903,7 @@ class ChatActivity : AppCompatActivity() {
                     }
                 }
             } finally {
+                prepared?.file?.delete()
                 file.delete()
             }
         }
@@ -2107,6 +2116,7 @@ class ChatActivity : AppCompatActivity() {
                 timestamp = m.optLong("timestamp", System.currentTimeMillis()),
                 sentAtMs = m.optLong("sent_at_ms", 0L).takeIf { it > 0 },
                 isEdited = m.optBoolean("is_edited", false),
+                viaSync = m.optBoolean("via_sync", false),
                 reactions = m.optString("reactions", ""),
                 isDeleted = m.optBoolean("is_deleted", false)
             )
@@ -2624,6 +2634,7 @@ class ChatActivity : AppCompatActivity() {
             sentAtMs = sentAtMs,
             status = if (direction == "sent") parseStatus(status ?: "sent") else SimpleChatAdapter.Status.SENT,
             isEdited = isEdited,
+            viaSync = obj.optBoolean("via_sync", false),
             isDeleted = isDeleted,
             replyToMessageId = replyToMessageId,
             replyToPreview = replyToPreview,

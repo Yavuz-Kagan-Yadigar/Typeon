@@ -431,10 +431,33 @@ impl P2PCore {
     pub(crate) fn sync_roster_to(&mut self, siblings: Vec<String>) {
         if siblings.is_empty() { return; }
         let parts: Vec<MessageContent> = self.build_sync_payloads().into_iter().map(MessageContent::DeviceSync).collect();
+        // An avatar-only part goes to a sibling once per picture (fable D-05):
+        // every roster sync sent every contact avatar to every sibling, which
+        // keeps the one it has anyway. `avs:<sibling>:<identity>` = its hash.
+        let avatar_key = |fp: &str, content: &MessageContent| match content {
+            MessageContent::DeviceSync(p) if p.contacts.len() == 1 && p.groups.is_empty() && p.contacts[0].devices.is_empty() => {
+                p.contacts[0].avatar_jpeg.as_ref().map(|a| (
+                    format!("avs:{}:{}", fp, p.contacts[0].identity_id),
+                    hex::encode(&<sha2::Sha256 as sha2::Digest>::digest(a)[..8]),
+                ))
+            }
+            _ => None,
+        };
         for fp in siblings {
             for content in &parts {
-                if let Err(e) = self.send_message_content(fp.clone(), content, None) {
-                    error!("DeviceSync gönderimi başarısız: {}", e);
+                let avatar = avatar_key(&fp, content);
+                if let Some((k, h)) = &avatar {
+                    if self.meta_str(k).as_deref() == Some(h.as_str()) {
+                        continue;
+                    }
+                }
+                match self.send_message_content(fp.clone(), content, None) {
+                    Ok(_) => {
+                        if let Some((k, h)) = &avatar {
+                            self.meta_put(k, h);
+                        }
+                    }
+                    Err(e) => error!("DeviceSync gönderimi başarısız: {}", e),
                 }
             }
         }
@@ -829,8 +852,8 @@ impl P2PCore {
                     None => continue,
                 };
                 if own_id.as_ref() == Some(&identity_id) { continue; }
-                // Attachments, once per contact (they live under any of its devices).
-                if files_done.insert(identity_id.clone()) {
+                // Attachments, once per contact; for the backfill after the rows.
+                if !unscoped && files_done.insert(identity_id.clone()) {
                     let fps: Vec<String> = self.known_remote_devices.values()
                         .filter(|d| d.identity_id == identity_id)
                         .map(|d| d.device_fingerprint.clone())
@@ -877,6 +900,22 @@ impl P2PCore {
                     });
                     if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
                 }
+                // Attachments after the text rows (fable D-03): their previews
+                // used the budget up before any text row of the chat.
+                // Once per contact (they live under any of its devices).
+                // A scoped press keeps them first: it ends at its first budget
+                // skip, and pages back from the oldest row it got.
+                if unscoped && files_done.insert(identity_id.clone()) {
+                    let fps: Vec<String> = self.known_remote_devices.values()
+                        .filter(|d| d.identity_id == identity_id)
+                        .map(|d| d.device_fingerprint.clone())
+                        .collect();
+                    for e in self.sibling_file_entries(&fps, None, Some(&identity_id), lo, hi, limit, &mut text_budget) {
+                        entries.push(e);
+                        if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
+                    }
+                    if newer_lo.is_some() { newer.push((fps, None, Some(identity_id.clone()))); }
+                }
             }
         }
         if scope_identity_id.is_none() {
@@ -886,12 +925,14 @@ impl P2PCore {
                 None => self.groups.keys().cloned().collect(),
             };
             for gid in gids {
-                let (lo, hi) = file_bounds;
-                for e in self.sibling_file_entries(&[], Some(&gid), None, lo, hi, limit, &mut text_budget) {
-                    entries.push(e);
-                    if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
+                if !unscoped {
+                    let (lo, hi) = file_bounds;
+                    for e in self.sibling_file_entries(&[], Some(&gid), None, lo, hi, limit, &mut text_budget) {
+                        entries.push(e);
+                        if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
+                    }
+                    if newer_lo.is_some() { newer.push((Vec::new(), Some(gid.clone()), None)); }
                 }
-                if newer_lo.is_some() { newer.push((Vec::new(), Some(gid.clone()), None)); }
                 let rows = match window {
                     Some((before, after)) if !unscoped => self.load_history_fetch_page("", Some(&gid), limit, before, after),
                     _ => self.load_group_message_history_opt(&gid, limit, before_timestamp, false),
@@ -925,6 +966,15 @@ impl P2PCore {
                         reactions: self.reaction_rows(&mid),
                     });
                     if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
+                }
+                // Attachments after the text rows, as for 1:1 chats.
+                if unscoped {
+                    let (lo, hi) = file_bounds;
+                    for e in self.sibling_file_entries(&[], Some(&gid), None, lo, hi, limit, &mut text_budget) {
+                        entries.push(e);
+                        if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
+                    }
+                    if newer_lo.is_some() { newer.push((Vec::new(), Some(gid.clone()), None)); }
                 }
             }
         }

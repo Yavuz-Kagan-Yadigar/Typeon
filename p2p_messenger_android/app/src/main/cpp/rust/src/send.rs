@@ -1069,8 +1069,7 @@ impl P2PCore {
         }
         if let Some(conn) = &self.db {
             let now = current_time_ms() as i64;
-            // Kept as long as the sender can still retry the packet.
-            let _ = conn.execute("DELETE FROM acked_packets WHERE acked_at < ?1", params![now - TEXT_RETRY_GIVE_UP_MS as i64]);
+            // Pruned in `periodic_storage_sweep`, not per ack (fable A-14).
             let _ = conn.execute("INSERT OR REPLACE INTO acked_packets (packet_id, acked_at) VALUES (?1, ?2)", params![packet_id, now]);
         }
     }

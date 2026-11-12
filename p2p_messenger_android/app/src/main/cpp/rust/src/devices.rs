@@ -163,11 +163,14 @@ impl P2PCore {
         }
     }
 
-    /// Seen within `STALE_PEER_RETRY_HORIZON_MS` (or never stamped: 0).
+    /// Seen within `STALE_PEER_RETRY_HORIZON_MS` (or never stamped: 0), or
+    /// connected right now: a device that is connected is not stale, and
+    /// two devices that both wrote each other off never sent the packet
+    /// that would stamp them again (fable D-01).
     pub(crate) fn device_recently_seen(&self, fp: &str) -> bool {
         self.known_remote_devices.get(fp).map_or(true, |d| {
             d.last_seen == 0 || current_time_ms().saturating_sub(d.last_seen) < STALE_PEER_RETRY_HORIZON_MS
-        })
+        }) || self.is_connected_to_device(fp)
     }
 
     /// Kendi kimliğimin, BU cihaz DIŞINDAKİ aktif kardeş cihazları — senkron
@@ -185,7 +188,11 @@ impl P2PCore {
             // Never stamped (0) counts as recent, as in `device_recently_seen`:
             // only a decrypted packet stamps it, and a sibling left out here
             // never gets the sync that would make it answer.
-            .filter(|d| d.last_seen == 0 || now.saturating_sub(d.last_seen) < STALE_PEER_RETRY_HORIZON_MS)
+            .filter(|d| {
+                d.last_seen == 0
+                    || now.saturating_sub(d.last_seen) < STALE_PEER_RETRY_HORIZON_MS
+                    || self.is_connected_to_device(&d.device_fingerprint)
+            })
             .map(|d| d.device_fingerprint.clone())
             .filter(|fp| own_fp.as_deref() != Some(fp.as_str()))
             .collect()
@@ -373,6 +380,12 @@ impl P2PCore {
         }
         let my_id = self.my_identity_id().ok_or("Önce bir kimlik oluşturun")?;
         let own_fp = self.get_active_own_device_fingerprint()?;
+        // Before any side effect (fable D-09): on a secondary the link can
+        // never complete (`sign_device_add` refuses), and both devices waited
+        // an hour with no error shown.
+        if own_fp != my_id {
+            return Err("Only the primary device can do this".to_string());
+        }
         if req.device_fingerprint == own_fp {
             return Err("Bu zaten bu cihaz".to_string());
         }

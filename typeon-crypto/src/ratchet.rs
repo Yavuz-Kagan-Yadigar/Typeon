@@ -132,6 +132,11 @@ pub struct DeviceRatchetState {
     /// — o yüzden rotasyonu duyuran mesaj hâlâ ESKİ (paylaşılan) topic'ten
     /// gönderilmeli, yoksa karşı taraf o topic'e hiç abone olmadığından mesaj
     /// asla ulaşmaz (gerçek bir üretim hatasıydı — bkz. commit notu).
+    ///
+    /// fable H-02: holds `root_handle` of the previous root, never the root
+    /// itself. With the root, this side's unchanged ratchet secrets and the
+    /// announcement in the clear header re-derived the whole current epoch
+    /// from stored state.
     pub prev_root_key: Option<Vec<u8>>,
     pub ck_send: Vec<u8>,
     pub ck_recv: Vec<u8>,
@@ -685,6 +690,12 @@ impl DeviceRatchetState {
         Ok(kyber_ct)
     }
 
+    /// What the session topic and the server seal are derived from:
+    /// `root_handle(root_key)`, and `prev_root_key` one generation back.
+    pub fn root_handle_now(&self) -> Vec<u8> {
+        root_handle(&self.root_key)
+    }
+
     /// The part both sides of a rotation share: new root and chains, counters
     /// back to 0. The old root stays one generation (`prev_root_key`: the
     /// announcement still travels on its topic), and so does the old receive
@@ -699,7 +710,9 @@ impl DeviceRatchetState {
         });
         self.recv_message_number = 0;
         self.prev_root_key.zeroize();
-        self.prev_root_key = Some(std::mem::replace(&mut self.root_key, root_key));
+        let mut old_root = std::mem::replace(&mut self.root_key, root_key);
+        self.prev_root_key = Some(root_handle(&old_root));
+        old_root.zeroize();
         set_secret(&mut self.ck_send, ck_send);
         self.last_rotation = now_ms;
     }
@@ -916,10 +929,18 @@ impl DeviceRatchetState {
         let current = chain_decrypt(&mut self.ck_recv, &mut self.recv_message_number, &mut self.skipped_keys, ciphertext, message_number, aad);
         let Err(current_err) = current else { return current };
         if let Some(old) = &mut self.old_recv {
-            if let Ok((plaintext, _)) = chain_decrypt(&mut old.ck, &mut old.next, &mut old.skipped, ciphertext, message_number, aad) {
-                let mut changes = SkippedKeyChanges::default();
-                changes.old_chain = true;
-                return Ok((plaintext, changes));
+            let old_next = old.next;
+            match chain_decrypt(&mut old.ck, &mut old.next, &mut old.skipped, ciphertext, message_number, aad) {
+                Ok((plaintext, _)) => {
+                    let mut changes = SkippedKeyChanges::default();
+                    changes.old_chain = true;
+                    return Ok((plaintext, changes));
+                }
+                // A consumed packet of the old chain: a duplicate, not a
+                // diverged session (fable H-03/A-08). The current chain's
+                // DecryptFailed counted it toward the 3-strike reset.
+                Err(RatchetError::KeyNotFound(n)) if message_number < old_next => return Err(RatchetError::KeyNotFound(n)),
+                Err(_) => {}
             }
         }
         // The current chain's error: the caller tells a duplicate
@@ -1071,6 +1092,16 @@ fn kyber_ciphertext_from_bytes(bytes: &[u8]) -> Result<MlKemCiphertext<MlKem1024
 // iki taraf da aynı anda tetiklemeye çalışamaz çünkü her an sadece BİR
 // tarafın bayrağı `false`'tur.
 
+/// One-way handle of a root key: the gossipsub topic and the server seal key
+/// are derived from it, so the previous generation can be kept for those
+/// without keeping its root (fable H-02).
+pub fn root_handle(root_key: &[u8]) -> Vec<u8> {
+    let hk = Hkdf::<Sha256>::new(None, root_key);
+    let mut out = vec![0u8; 32];
+    hk.expand(b"typeon-root-handle-v1", &mut out).expect("32 bytes is a valid HKDF length");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1188,6 +1219,20 @@ mod tests {
         let (plain, changes) = b.decrypt(&ciphertext, number, None, T0, b"").unwrap();
         assert_eq!(plain, b"a2");
         assert!(!changes.old_chain);
+    }
+
+    /// fable H-02: after a rotation both sides keep only the handle of the
+    /// old root, and the two handles match (topic and server seal agree).
+    #[test]
+    fn rotation_keeps_only_a_handle_of_the_old_root() {
+        let (mut b, mut a) = session();
+        let old_root = a.root_key.clone();
+        let (keys, kyber_ct, msg, n) = rotate_and_send(&mut a, b"x");
+        b.decrypt(&msg, n, Some((&keys, &kyber_ct)), T0, b"").unwrap();
+        assert_eq!(a.prev_root_key.as_deref(), Some(root_handle(&old_root).as_slice()));
+        assert_eq!(a.prev_root_key, b.prev_root_key);
+        assert_ne!(a.prev_root_key.as_deref(), Some(old_root.as_slice()));
+        assert_eq!(a.root_handle_now(), b.root_handle_now());
     }
 
     /// Finding 3: an announcement that does not belong to this state (here: a

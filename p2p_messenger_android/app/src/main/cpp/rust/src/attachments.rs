@@ -145,9 +145,23 @@ pub fn chunk_plain_len(total_size: u64, chunk_size: usize, index: u32) -> u64 {
 /// file, in order: one `FileOffer.chunk_hashes` entry. A missing chunk is an
 /// error.
 pub fn enc_range_hash(enc_path: &Path, first: u32, count: u32, chunk_size: usize) -> Result<[u8; 32], String> {
+    // One open and one buffer for the whole range (fable F-05): a resume
+    // hashed a multi-GB partial file with an open and an allocation per chunk.
+    let stride = chunk_or_default(chunk_size) as u64 + 16;
+    let mut f = File::open(enc_path).map_err(|_| "Chunk missing")?;
+    f.seek(SeekFrom::Start(first as u64 * stride)).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; stride as usize];
     let mut hasher = Sha256::new();
-    for i in first..first.saturating_add(count) {
-        hasher.update(read_chunk_from_disk_with(enc_path, i, chunk_size)?.ok_or("Chunk missing")?);
+    for _ in 0..count {
+        let n = read_full(&mut f, &mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("Chunk missing".to_string());
+        }
+        hasher.update(&buf[..n]);
+        // A short chunk is the last one of the file.
+        if (n as u64) < stride {
+            break;
+        }
     }
     Ok(hasher.finalize().into())
 }
@@ -233,13 +247,24 @@ fn jpeg_metadata_ranges(file: &mut File) -> Option<(Vec<(u64, u64)>, Option<u8>)
             if !known || size < 2 || end > len {
                 return None;
             }
-            if marker == 0xE1 || marker == 0xED {
-                ranges.push((at, end));
-            }
-            // The multi-picture index points into the dropped trailer.
-            if marker == 0xE2 && size >= 6 {
-                let mut tag = [0u8; 4];
-                if read_full(file, &mut tag).ok()? == 4 && &tag == b"MPF\0" {
+            // Allow-list (fable F-01): of the APPn segments only a JFIF
+            // APP0, an ICC APP2 and an Adobe APP14 stay; every other APPn
+            // (EXIF, XMP, IPTC, MPF, maker blocks, JFXX thumbnails, JUMBF/C2PA)
+            // and every COM goes.
+            if matches!(marker, 0xE0..=0xEF | 0xFE) {
+                let mut tag = [0u8; 12];
+                let want = (size as usize - 2).min(tag.len());
+                if read_full(file, &mut tag[..want]).ok()? != want {
+                    return None;
+                }
+                let tag = &tag[..want];
+                let keep = match marker {
+                    0xE0 => tag.starts_with(b"JFIF\0"),
+                    0xE2 => tag.starts_with(b"ICC_PROFILE\0"),
+                    0xEE => tag.starts_with(b"Adobe"),
+                    _ => false,
+                };
+                if !keep {
                     ranges.push((at, end));
                 }
                 file.seek(SeekFrom::Start(at + 4)).ok()?;
@@ -259,8 +284,8 @@ fn jpeg_metadata_ranges(file: &mut File) -> Option<(Vec<(u64, u64)>, Option<u8>)
 
 /// The offset just past the end-of-image marker, scanning from the start-of-
 /// scan segment at `sos`: entropy-coded data, and between progressive scans
-/// further marker segments with a length. APP1/APP13 segments met between
-/// scans go into `ranges` too (E-05): they can hold EXIF/XMP/IPTC as well.
+/// further marker segments with a length. APPn and COM segments met between
+/// scans go into `ranges` too (E-05, fable F-01).
 fn jpeg_image_end(file: &mut File, sos: u64, ranges: &mut Vec<(u64, u64)>) -> Option<u64> {
     let mut reader = std::io::BufReader::with_capacity(1 << 16, &mut *file);
     reader.seek(SeekFrom::Start(sos + 1)).ok()?;
@@ -287,7 +312,7 @@ fn jpeg_image_end(file: &mut File, sos: u64, ranges: &mut Vec<(u64, u64)>) -> Op
             }
             reader.seek_relative(size - 2).ok()?;
             at += size as u64 - 2;
-            if code == 0xE1 || code == 0xED {
+            if matches!(code, 0xE0..=0xEF | 0xFE) {
                 ranges.push((start, at));
             }
             marker_segment = false;
@@ -313,9 +338,9 @@ fn jpeg_image_end(file: &mut File, sos: u64, ranges: &mut Vec<(u64, u64)>) -> Op
     }
 }
 
-/// PNG chunks that carry text, time or EXIF (`eXIf` can hold the GPS
-/// position), and anything after `IEND`. Image chunks and the colour profile
-/// stay. None for a file that is not a PNG, and on any doubt.
+/// PNG ancillary chunks outside a short allow-list (text, time, `eXIf` with
+/// the GPS position, private chunks), and anything after `IEND`. Image
+/// chunks and the colour profile stay. None for a file that is not a PNG, and on any doubt.
 fn png_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
     {
         let len = file.metadata().ok()?.len();
@@ -337,12 +362,20 @@ fn png_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
                 return None;
             }
             match &head[4..8] {
-                b"eXIf" | b"tEXt" | b"iTXt" | b"zTXt" | b"tIME" => ranges.push((at, end)),
                 b"IEND" => {
                     if end < len {
                         ranges.push((end, len));
                     }
                     return Some(ranges);
+                }
+                // Allow-list (fable F-01): critical chunks (upper-case first
+                // letter) and the ancillary chunks of image, colour and
+                // animation stay; text, time, EXIF and every private or
+                // unknown ancillary chunk (C2PA `caBX`, editor data) go.
+                kind if kind[0].is_ascii_lowercase()
+                    && !matches!(kind, b"tRNS" | b"gAMA" | b"cHRM" | b"sRGB" | b"iCCP" | b"sBIT" | b"pHYs" | b"bKGD" | b"acTL" | b"fcTL" | b"fdAT") =>
+                {
+                    ranges.push((at, end))
                 }
                 _ => {}
             }
@@ -416,7 +449,8 @@ fn jxl_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
     }
 }
 
-/// WebP `EXIF` and `XMP ` chunks, and anything after the RIFF data (E-06).
+/// WebP chunks other than image, alpha, animation and ICC (`EXIF`, `XMP `,
+/// unknown ones), and anything after the RIFF data (E-06).
 /// The second value is the patched start of the file that replaces the same
 /// number of bytes: the RIFF size less the dropped chunks, and in a leading
 /// `VP8X` chunk the EXIF/XMP flags cleared (a decoder may refuse a file whose
@@ -472,12 +506,14 @@ fn webp_metadata_ranges(file: &mut File) -> Option<(Vec<(u64, u64)>, Vec<u8>)> {
             return None;
         }
         match &h[..4] {
-            b"EXIF" | b"XMP " => {
+            b"VP8X" if at == 12 && size >= 10 && got == 21 => vp8x = true,
+            // Allow-list (fable F-01): image, alpha, animation and colour
+            // profile; EXIF, XMP and every unknown chunk go.
+            b"VP8 " | b"VP8L" | b"VP8X" | b"ALPH" | b"ANIM" | b"ANMF" | b"ICCP" => {}
+            _ => {
                 ranges.push((at, end));
                 dropped += end - at;
             }
-            b"VP8X" if at == 12 && size >= 10 && got == 21 => vp8x = true,
-            _ => {}
         }
         at = end;
     }
@@ -1044,16 +1080,44 @@ pub fn sticker_check(src: &Path) -> Result<bool, String> {
 /// Whether a JPEG XL file says it is animated, from its headers only (the
 /// first 64 KiB; a longer ICC profile reads as "not animated").
 pub fn jxl_is_animated(src: &Path) -> bool {
-    use jxl_oxide::{InitializeResult, JxlImage};
+    jxl_head_of(src).map_or(false, |(_, _, animated)| animated)
+}
+
+/// (width, height, animated) from the first 64 KiB of a JPEG XL file.
+fn jxl_head_of(src: &Path) -> Option<(u32, u32, bool)> {
     let mut head = Vec::new();
-    if File::open(src).and_then(|f| f.take(64 << 10).read_to_end(&mut head)).is_err() {
-        return false;
-    }
+    File::open(src).and_then(|f| f.take(64 << 10).read_to_end(&mut head)).ok()?;
+    jxl_head(&head)
+}
+
+/// (width, height, animated) from the start of a JPEG XL file, headers only.
+/// None when they do not fit in `head`.
+pub fn jxl_head(head: &[u8]) -> Option<(u32, u32, bool)> {
+    use jxl_oxide::{InitializeResult, JxlImage};
     let mut image = JxlImage::builder().build_uninit();
-    if image.feed_bytes(&head).is_err() {
-        return false;
+    image.feed_bytes(head).ok()?;
+    match image.try_init() {
+        Ok(InitializeResult::Initialized(i)) => Some((i.width(), i.height(), i.image_header().metadata.animation.is_some())),
+        _ => None,
     }
-    matches!(image.try_init(), Ok(InitializeResult::Initialized(i)) if i.image_header().metadata.animation.is_some())
+}
+
+/// Largest JPEG XL file decoded: `open` reads the whole file into the
+/// decoder before any size check (fable F-02).
+const MAX_JXL_DECODE_BYTES: u64 = 256 << 20;
+
+/// The checks before a JPEG XL decode: file size, and the pixel count from
+/// the headers, so a huge image is refused before `open` reads it all.
+fn jxl_decode_allowed(src: &Path) -> Result<(), String> {
+    if std::fs::metadata(src).map_err(|e| e.to_string())?.len() > MAX_JXL_DECODE_BYTES {
+        return Err("Image too large".to_string());
+    }
+    if let Some((w, h, _)) = jxl_head_of(src) {
+        if w as u64 * h as u64 > MAX_IMAGE_PIXELS {
+            return Err("Image too large".to_string());
+        }
+    }
+    Ok(())
 }
 
 /// GIF LZW image data of palette indices (8-bit minimum code size), as
@@ -1143,6 +1207,7 @@ fn median_cut_palette(pixels: &[[u8; 3]], opaque: &[bool]) -> Vec<[u8; 3]> {
 /// lasting the frames it stands for): the per-frame palette work is the cost.
 pub fn jxl_to_gif(src: &Path, out: &Path) -> Result<(), String> {
     use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, RenderingIntent};
+    jxl_decode_allowed(src)?;
     let mut image = JxlImage::builder()
         .alloc_tracker(AllocTracker::with_limit(512 << 20))
         .open(src)
@@ -1257,6 +1322,7 @@ pub fn convert_cached(src: &Path, out: &Path, conv: fn(&Path, &Path) -> Result<(
 /// allocations are capped.
 pub fn jxl_to_png(src: &Path, out: &Path) -> Result<(), String> {
     use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, PixelFormat, RenderingIntent};
+    jxl_decode_allowed(src)?;
     let mut image = JxlImage::builder()
         .alloc_tracker(AllocTracker::with_limit(512 << 20))
         .open(src)
@@ -1315,7 +1381,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("typeon-meta-{}", std::process::id()));
         // SOI, APP0, SOS, entropy data with a stuffed byte and a restart
         // marker, a DHT between scans, a second SOS, EOI, then a trailer.
-        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 1, 2, 0xFF, 0xDA, 0, 3, 9, 0x11, 0xFF, 0x00, 0x22, 0xFF, 0xD3, 0x33];
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 7, b'J', b'F', b'I', b'F', 0, 0xFF, 0xDA, 0, 3, 9, 0x11, 0xFF, 0x00, 0x22, 0xFF, 0xD3, 0x33];
         jpeg.extend_from_slice(&[0xFF, 0xC4, 0, 3, 7, 0xFF, 0xDA, 0, 3, 9, 0x44, 0xFF, 0xD9]);
         let eoi = jpeg.len() as u64;
         jpeg.extend_from_slice(b"MOTIONPHOTO");
@@ -1335,10 +1401,14 @@ mod tests {
         let text_at = png.len() as u64;
         png.extend(chunk(b"tEXt", b"GPS"));
         let text_end = png.len() as u64;
+        png.extend(chunk(b"pHYs", &[0; 9]));
+        let private_at = png.len() as u64;
+        png.extend(chunk(b"caBX", b"c2pa"));
+        let private_end = png.len() as u64;
         png.extend(chunk(b"IDAT", &[1, 2]));
         png.extend(chunk(b"IEND", &[]));
         std::fs::write(&path, &png).unwrap();
-        assert_eq!(png_metadata_ranges(&mut File::open(&path).unwrap()), Some(vec![(text_at, text_end)]));
+        assert_eq!(png_metadata_ranges(&mut File::open(&path).unwrap()), Some(vec![(text_at, text_end), (private_at, private_end)]));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1622,14 +1692,17 @@ mod tests {
             out
         };
         let soi = [0xFF, 0xD8];
-        let jfif = [0xFF, 0xE0, 0, 4, b'J', b'F'];
+        let jfif = [0xFF, 0xE0, 0, 7, b'J', b'F', b'I', b'F', 0];
         let exif = [0xFF, 0xE1, 0, 6, b'E', b'x', b'i', b'f'];
-        let icc = [0xFF, 0xE2, 0, 4, b'I', b'C'];
+        let icc = [&[0xFF, 0xE2, 0, 14][..], b"ICC_PROFILE\0"].concat();
         let iptc = [0xFF, 0xED, 0, 4, b'P', b'S'];
+        // fable F-01: a maker APPn (GoPro APP6) and a comment are cut too.
+        let maker = [0xFF, 0xE6, 0, 7, b'G', b'o', b'P', b'r', b'o'];
+        let com = [0xFF, 0xFE, 0, 4, b'h', b'i'];
         // An APP1 segment between scans is metadata too (E-05): cut as well.
         let scan = [0xFF, 0xDA, 0, 2, 1, 2, 0xFF, 0xD9];
         let scan_app1 = [0xFF, 0xDA, 0, 2, 1, 2, 0xFF, 0xE1, 0, 2, 0xFF, 0xD9];
-        let photo = [&soi[..], &jfif, &exif, &icc, &iptc, &scan_app1].concat();
+        let photo = [&soi[..], &jfif, &exif, &icc, &iptc, &maker, &com, &scan_app1].concat();
         assert_eq!(sent(&photo), [&soi[..], &jfif, &icc, &scan].concat());
         // A rotated photo keeps its orientation, and only that.
         let rotated = b"\xFF\xE1\0\x32Exif\0\0II*\0\x08\0\0\0\x02\0\x0F\x01\x02\0\x01\0\0\0A\0\0\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0GPS!";

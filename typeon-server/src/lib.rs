@@ -137,6 +137,9 @@ const MAX_CONNECTIONS_PER_PEER: u32 = 8;
 /// A connected peer without an active enrollment is cut after this long: it
 /// otherwise held one of the `MAX_INBOUND_CONNECTIONS` slots for good.
 const UNENROLLED_GRACE_MS: u64 = 60_000;
+/// What one relayed frame is charged on top of its payload (encoding, queue
+/// slot, loop over `live_interest`), see `RelayEvent::Frame`.
+const RELAY_FRAME_OVERHEAD: usize = 64;
 /// `BlobFinish` hashes running at once; each reads a whole blob from disk.
 const MAX_HASH_JOBS: usize = 4;
 /// Repeated `BlobFinish` requests waiting on one running hash.
@@ -160,11 +163,13 @@ const ENROLL_VERIFIES_PER_PEER: u32 = 4;
 /// lock enrolled devices out of rebinding. `Rebind` needs a live enrollment
 /// first, so fresh PeerIds cannot drain this one.
 const REBIND_VERIFIES_PER_MINUTE: u32 = 120;
-/// `Register` proof checks per `RATE_WINDOW_MS`, server-wide. A pool of its
-/// own: a proof flood from enrolled peers cannot starve `Enroll`/`Rebind`.
-const REGISTER_VERIFIES_PER_MINUTE: u32 = 256;
+/// `Register` proof checks per `RATE_WINDOW_MS`, server-wide: no global cap.
+/// A `Register` needs an enrollment bound to one PeerId, so the per-peer
+/// share times `max_enrollments` already bounds the CPU; a global pool let
+/// four enrollments lock every other device out of new mailboxes (fable I-02).
+const REGISTER_VERIFIES_PER_MINUTE: u32 = u32::MAX;
 /// One enrolled peer's share of `REGISTER_VERIFIES_PER_MINUTE`: one full
-/// `Register`, so no single peer holds more than a quarter of the pool.
+/// `Register` per window.
 const REGISTER_VERIFIES_PER_PEER: u32 = server_proto::MAX_REGISTER_PROOFS as u32;
 /// 2026-01-01 UTC. A wall clock before this is wrong (phone booted with a
 /// 1970/2020 RTC): no TTL sweep runs on it.
@@ -261,6 +266,10 @@ const PUBLIC_JOIN_LABEL: &str = "herkese-acik";
 /// Herkese açık kodla saatte açılabilecek azami YENİ kayıt — bkz.
 /// `handle_enroll`.
 const MAX_PUBLIC_ENROLLMENTS_PER_HOUR: i64 = 60;
+/// Active enrollments the public join code may hold at once. The code never
+/// runs out, so without this one leaked code fills every place on the server.
+/// A rotated code starts a new count.
+const PUBLIC_CODE_MAX_ENROLLMENTS: i64 = 16;
 /// Default `ServerConfig::max_enrollments`.
 pub const DEFAULT_MAX_ENROLLMENTS: u32 = 64;
 /// An active enrollment not seen for this long is removed by `maybe_sweep`.
@@ -488,6 +497,10 @@ pub struct ServerCore {
     register_verify_window: (u64, u32),
     /// The same for `REBIND_VERIFIES_PER_MINUTE`.
     rebind_verify_window: (u64, u32),
+    /// `Rebind` checks per enrollment id (`ENROLL_VERIFIES_PER_PEER` per
+    /// window): fresh PeerIds with one id must not drain the pool above.
+    /// Keys are existing enrollment ids only.
+    rebind_by_enrollment: HashMap<Vec<u8>, (u64, u32)>,
 }
 
 /// The server-wide signature check pools, see `verify_budget`.
@@ -708,6 +721,7 @@ impl ServerCore {
             verify_window: (0, 0),
             register_verify_window: (0, 0),
             rebind_verify_window: (0, 0),
+            rebind_by_enrollment: HashMap::new(),
         })
     }
 
@@ -1090,6 +1104,13 @@ impl ServerCore {
                 self.stats.rejected += 1;
                 return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
             }
+            if !prev.as_ref().map_or(false, |p| p.state == EnrollmentState::Active)
+                && self.store.count_active_enrollments_via(hash.as_slice(), now - ENROLLMENT_IDLE_MS) >= PUBLIC_CODE_MAX_ENROLLMENTS
+            {
+                warn!("Enrollment refused: the public join code holds its maximum number of devices");
+                self.stats.rejected += 1;
+                return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
+            }
         }
         // A PeerId that enrolls again takes no new place.
         if !prev.as_ref().map_or(false, |p| p.state == EnrollmentState::Active)
@@ -1158,7 +1179,11 @@ impl ServerCore {
         let Some(existing) = self.store.enrollment_by_id(&enrollment_id) else {
             return ServerResponse::Err(ServerErrorCode::NotEnrolled);
         };
-        if !self.verify_budget(peer, VerifyPool::Rebind, 1) {
+        let per_id = self.rebind_by_enrollment.entry(enrollment_id.clone()).or_insert((0, 0));
+        let mut no_pool = (0, 0);
+        if !charge_verify(per_id, &mut no_pool, mono_ms(), 1, ENROLL_VERIFIES_PER_PEER, u32::MAX)
+            || !self.verify_budget(peer, VerifyPool::Rebind, 1)
+        {
             self.stats.rejected += 1;
             return ServerResponse::Err(ServerErrorCode::RateLimited);
         }
@@ -1217,20 +1242,26 @@ impl ServerCore {
             return false;
         };
         // The sum reads every mail, archive and blob row: at most once per
-        // `TOTAL_CACHE_MS`, with what was let in since added on top (a
-        // refused write is counted too, which only errs on the full side).
+        // `TOTAL_CACHE_MS`, with what was written since added on top
+        // (`note_total_written`).
         let mono = mono_ms();
         let (mut at, mut total) = self.total_cache.get();
         if at == 0 || mono.saturating_sub(at) > TOTAL_CACHE_MS {
             total = self.store.total_stored_bytes().max(0) as u64;
             at = mono.max(1);
+            self.total_cache.set((at, total));
         }
-        let after = total.saturating_add(incoming as u64);
-        let exceeded = after > total_budget;
-        // Only what is let in counts: refused writes inflated the cache and
-        // bounced everyone else near the ceiling.
-        self.total_cache.set((at, if exceeded { total } else { after }));
-        exceeded
+        total.saturating_add(incoming as u64) > total_budget
+    }
+
+    /// Adds bytes that were really written to the cached total. Only written
+    /// bytes count: a refused or no-op request charged the cache and one
+    /// device could bounce everyone else's writes (fable I-01).
+    fn note_total_written(&self, bytes: usize) {
+        let (at, total) = self.total_cache.get();
+        if at != 0 {
+            self.total_cache.set((at, total.saturating_add(bytes as u64)));
+        }
     }
 
     fn handle_authenticated(&mut self, peer: PeerId, e: &Enrollment, req: ServerRequest) -> ServerResponse {
@@ -1350,7 +1381,7 @@ impl ServerCore {
                 }
                 // bkz. `total_budget_exceeded` — kayıt başına kota TEK
                 // başına cihazın diskini korumuyor.
-                if self.total_budget_exceeded(sealed.len()) {
+                if self.total_budget_exceeded(store::mail_row_bytes(&mailbox, &sealed)) {
                     warn!("Toplam disk bütçesi doldu, teslim reddedildi");
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
@@ -1361,6 +1392,7 @@ impl ServerCore {
                 }
                 match self.store.deposit(&mailbox, &sealed, &e.enrollment_id, now, limits.mailbox_ttl_ms as i64) {
                     Ok(seq) => {
+                        self.note_total_written(store::mail_row_bytes(&mailbox, &sealed));
                         self.stats.deposits += 1;
                         let item = MailItem { mailbox_id: mailbox.clone(), seq, deposited_at_ms: now as u64, sealed };
                         self.notify_owner_of(&mailbox, peer, item);
@@ -1428,6 +1460,7 @@ impl ServerCore {
                 }
                 match self.store.archive_put(&bucket, &records, &e.enrollment_id, now) {
                     Ok(_) => {
+                        self.note_total_written(incoming);
                         self.stats.archive_puts += 1;
                         ServerResponse::Ok
                     }
@@ -1624,6 +1657,7 @@ impl ServerCore {
         // Such a failure over-charges the owner by `growth` until the next
         // sweep's `recount_blob_bytes`.
         self.store.add_blob_bytes(&e.enrollment_id, growth as i64);
+        self.note_total_written(growth as usize);
         // An upload in progress is not garbage (see `Store::blobs_to_gc`).
         self.store.blob_touch(&blob_id, now);
         if let Err(msg) = self.store.blob_record_chunk(&blob_id, chunk_index, growth as usize) {
@@ -1703,13 +1737,13 @@ impl ServerCore {
                 }
             },
             Some(_) => {
-                warn!("Blob hash uyuşmuyor, reddedildi: {blob_id}");
+                warn!("Blob hash uyuşmuyor, reddedildi: {}…", blob_id.get(..6).unwrap_or(""));
                 self.drop_blob(&blob_id);
                 ServerResponse::Err(ServerErrorCode::BadHash)
             }
             // Unreadable file: the same finish fails the same way.
             None => {
-                warn!("Blob okunamadı, reddedildi: {blob_id}");
+                warn!("Blob okunamadı, reddedildi: {}…", blob_id.get(..6).unwrap_or(""));
                 self.drop_blob(&blob_id);
                 ServerResponse::Err(ServerErrorCode::BadHash)
             }
@@ -1725,7 +1759,7 @@ impl ServerCore {
     fn drop_blob(&self, blob_id: &str) {
         match std::fs::remove_file(self.blob_path(blob_id)) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-                warn!("Blob dosyası silinemedi ({blob_id}): {err}");
+                warn!("Blob dosyası silinemedi ({}…): {err}", blob_id.get(..6).unwrap_or(""));
             }
             _ => self.store.blob_forget(blob_id),
         }
@@ -1894,7 +1928,14 @@ impl ServerCore {
                 if now.saturating_sub(budget.0) > RELAY_WINDOW_MS {
                     *budget = (now, 0);
                 }
-                budget.1 += data.len();
+                // Each frame costs its overhead too, and an empty one is
+                // refused: free empty frames filled a call's writer queue
+                // (fable I-06).
+                if data.is_empty() {
+                    self.stats.rejected += 1;
+                    return;
+                }
+                budget.1 += data.len() + RELAY_FRAME_OVERHEAD;
                 if budget.1 > RELAY_BYTES_PER_WINDOW {
                     self.stats.rejected += 1;
                     return;
@@ -2038,17 +2079,8 @@ impl ServerCore {
         }
         self.resend_notifies();
         let mono = mono_ms();
-        if self.last_sweep.map_or(false, |t| mono - t < SWEEP_INTERVAL_MS) {
-            return;
-        }
-        self.last_sweep = Some(mono);
-        self.publish_shared();
-
-        let swarm = &self.swarm;
-        self.conns.retain(|p, c| swarm.is_connected(p) || mono - c.window_start <= RATE_WINDOW_MS);
-        self.relay_budget.retain(|_, b| mono - b.0 <= RELAY_WINDOW_MS);
-        self.relay_pairs.retain(|_, t| mono - *t <= RELAY_WINDOW_MS);
-
+        // Every tick, not only every sweep (fable I-08): a peer that is not
+        // enrolled held its slot for up to two sweeps, 60-120 s.
         // ponytail: not in node mode, where strangers are served on purpose
         // (Kad, circuit relay); there the connection cap is still one flood wide.
         if !self.config.node_mode {
@@ -2063,6 +2095,17 @@ impl ServerCore {
                 let _ = self.swarm.disconnect_peer_id(peer);
             }
         }
+        if self.last_sweep.map_or(false, |t| mono - t < SWEEP_INTERVAL_MS) {
+            return;
+        }
+        self.last_sweep = Some(mono);
+        self.publish_shared();
+
+        let swarm = &self.swarm;
+        self.conns.retain(|p, c| swarm.is_connected(p) || mono - c.window_start <= RATE_WINDOW_MS);
+        self.relay_budget.retain(|_, b| mono - b.0 <= RELAY_WINDOW_MS);
+        self.relay_pairs.retain(|_, t| mono - *t <= RELAY_WINDOW_MS);
+
 
         let now = now_ms();
         if self.clock_jumped(now, mono) {
@@ -2251,6 +2294,17 @@ mod tests {
         // The pool itself still caps the total.
         let mut full = (now, ENROLL_VERIFIES_PER_MINUTE);
         assert!(!charge_verify(&mut (0, 0), &mut full, now, 1, ENROLL_VERIFIES_PER_PEER, ENROLL_VERIFIES_PER_MINUTE));
+    }
+
+    /// fable I-02: no number of enrolled peers locks the others out of
+    /// `Register` proofs.
+    #[test]
+    fn register_has_no_global_pool() {
+        let mut pool = (0, 0);
+        for _ in 0..64 {
+            let mut peer = (0, 0);
+            assert!(charge_verify(&mut peer, &mut pool, 1_000, 64, REGISTER_VERIFIES_PER_PEER, REGISTER_VERIFIES_PER_MINUTE));
+        }
     }
 
     #[test]

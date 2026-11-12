@@ -47,7 +47,7 @@ object AppLock {
      *  sabit (120.000) varsayılır, yeni her `setPassword` çağrısı güncel
      *  sabitle yazar. Böylece kullanıcı şifresini bir dahaki DEĞİŞTİRMESİNDE
      *  sessizce güçlendirilmiş olur, mevcut şifresi bozulmaz. */
-    private const val ITERATIONS = 300_000
+    private const val ITERATIONS = 600_000
     /** bkz. `ITERATIONS` dokümantasyonu — bu değeri yükseltmeden önce diske
      *  yazılmış kayıtların gerçek iterasyon sayısı. */
     private const val LEGACY_ITERATIONS = 120_000

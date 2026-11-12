@@ -785,8 +785,13 @@ impl P2PCore {
             return Err("Kendi kodunuzu kişi olarak ekleyemezsiniz".to_string());
         }
         let short = |id: &str| hex::decode(id).map(|raw| identity::format_short_code(&raw)).unwrap_or_default();
+        // fable D-02: the name in a code is the code author's choice; for an
+        // existing contact show the stored name and say so.
+        let known = self.identity_to_contact.get(&packet.identity_id).and_then(|c| self.contacts.get(c));
         Ok(serde_json::json!({
-            "name": sanitize_display_name(&packet.device_name).unwrap_or_default(),
+            "name": known.map(|c| c.display_name.clone())
+                .unwrap_or_else(|| sanitize_display_name(&packet.device_name).unwrap_or_default()),
+            "known_contact": known.is_some(),
             "short_code": short(&packet.identity_id),
             "safety_code": short(&packet.device_fingerprint),
             "identity_id": packet.identity_id,
@@ -806,7 +811,23 @@ impl P2PCore {
         }
         // Peer-chosen text: it is returned to the UI as the chat title.
         let device_name = sanitize_display_name(device_name).unwrap_or_default();
+        // A device this contact already lists as Active: the code proves
+        // nothing (identity id and fingerprint are public), so it changes no
+        // state of that device: no new pairing secret, no block lifted, and
+        // no address (fable D-02); its own AddressAnnounce and the stored
+        // addresses reach it. The block has its own
+        // control (`unblock_identity`).
+        let known_active = self.identity_to_contact.get(&identity_id)
+            .and_then(|c| self.contacts.get(c))
+            .and_then(|c| c.find_device(&device_fingerprint))
+            .map_or(false, |d| d.status == contact::KnownDeviceStatus::Active);
         self.register_contact_from_pairing(identity_id.clone(), device_fingerprint.clone(), device_name.clone())?;
+        if known_active {
+            if let Err(e) = self.send_identity_exchange_fresh(&device_fingerprint) {
+                error!("IdentityExchange gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
+            }
+            return Ok((identity_id, device_fingerprint, device_name));
+        }
         // Goes into each IdentityExchange to this device (`pairing_proof`).
         // ponytail: the row stays after the nonce expired (the proof is then
         // ignored), and is replaced by the next code of the same device.
@@ -923,8 +944,9 @@ impl P2PCore {
         // on the bytes): at most one new copy per interval and target.
         let now = current_time_ms();
         let timestamp = now - now % HANDSHAKE_REDO_MIN_INTERVAL_MS;
+        let revokes = self.own_revokes();
         let to_sign = packet::identity_exchange_signing_input(
-            &own_identity_id, &own_fp, &own_record.device_name, &pairing_proof, target_device_fingerprint, timestamp,
+            &own_identity_id, &own_fp, &own_record.device_name, &pairing_proof, target_device_fingerprint, timestamp, &revokes,
         );
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
         let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
@@ -944,7 +966,7 @@ impl P2PCore {
             // olmasına bağımlı kalmadan (bkz. `process_identity_exchange`)
             // bizi tek paketle doğrulayabilsin.
             device_add: self.own_device_add.clone(),
-            revokes: self.own_revokes(),
+            revokes,
             device_add_signer: self.own_device_add.as_ref().and_then(|da| self.synced_device_for(&da.added_by)),
             pairing_proof,
             link_consent,
@@ -997,7 +1019,7 @@ impl P2PCore {
         verify_hybrid_signature_with(
             &packet::identity_exchange_signing_input(
                 &exchange.identity_id, &exchange.device_fingerprint, &exchange.device_name, &exchange.pairing_proof,
-                &own_fp, exchange.timestamp,
+                &own_fp, exchange.timestamp, &exchange.revokes,
             ),
             &exchange.signature, &exchange.signature_pq,
             &exchange.sign_pubkey_ed25519, &exchange.sign_pubkey_mldsa,
@@ -1009,7 +1031,12 @@ impl P2PCore {
         // PeerId mapped to it, then take our direct sends to the device and fake
         // AckBatch receipts for them. The signed Handshake that follows maps the
         // connection, and a pairing address maps it on connect.
-        let _ = source;
+        // Our reply goes back over the connection this came in on (see
+        // `pairing_reply_peer`): it carries only our public IX and a
+        // HandshakeInit sealed to this device's keys.
+        if let Some(pid) = source.filter(|p| !self.is_server_peer(p)) {
+            self.pairing_reply_peer.insert(exchange.device_fingerprint.clone(), pid);
+        }
         // A first device that read the link code this device shows: our reply
         // carries our half of its DeviceAdd (bkz. `link_consent_peer`).
         let link_proved = exchange.identity_id == exchange.device_fingerprint && self.link_proof_valid(exchange);
@@ -1250,7 +1277,12 @@ impl P2PCore {
             Some(self.link_request_nonce.clone())
         } else {
             self.pairing_nonces().into_iter().map(|(n, _)| n)
-                .find(|n| packet::pairing_nonce_proof(n, &fp) == exchange.pairing_proof)
+                .find(|n| {
+                    // Constant time (fable H-10).
+                    let proof = packet::pairing_nonce_proof(n, &fp);
+                    proof.len() == exchange.pairing_proof.len()
+                        && proof.iter().zip(&exchange.pairing_proof).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+                })
         };
         if let Some(nonce) = proved_nonce {
             self.put_pairing_secret("pk", &fp, &nonce);
@@ -1260,7 +1292,9 @@ impl P2PCore {
         // revoke is: it is checked against a known active device of the
         // identity, the sender included now that its keys are stored.
         if !as_sibling {
-            for revoke in exchange.revokes.iter() {
+            // At most as many as the owner-revoke tombstones hold (fable
+            // D-06): a list of hundreds re-ran every check on each exchange.
+            for revoke in exchange.revokes.iter().take(32) {
                 if revoke.identity_id == exchange.identity_id
                     && !self.own_device_keys.contains_key(&revoke.revoked_device_fingerprint)
                     && !self.owner_revoked(&revoke.identity_id, &revoke.revoked_device_fingerprint)

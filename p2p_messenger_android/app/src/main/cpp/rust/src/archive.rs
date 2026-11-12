@@ -133,6 +133,25 @@ impl P2PCore {
         );
     }
 
+    /// Marks a 1:1 row as taken from the contact's history answer (fable
+    /// A-16): its place in the past is the contact's word only.
+    pub(crate) fn mark_synced(&self, chat_key: &str, message_id: Option<&str>) {
+        let (Some(conn), Some(mid)) = (&self.db, message_id) else { return };
+        let _ = conn.execute(
+            "UPDATE messages SET via_sync = 1 WHERE message_id = ?1 AND peer_device_fingerprint = ?2 AND group_id IS NULL",
+            params![mid, chat_key],
+        );
+    }
+
+    pub(crate) fn is_synced(&self, chat_key: &str, message_id: Option<&str>) -> bool {
+        let (Some(conn), Some(mid)) = (&self.db, message_id) else { return false };
+        conn.query_row(
+            "SELECT via_sync FROM messages WHERE message_id = ?1 AND peer_device_fingerprint = ?2 AND group_id IS NULL",
+            params![mid, chat_key],
+            |r| r.get::<_, i64>(0),
+        ).map_or(false, |v| v != 0)
+    }
+
     /// Is `target_message_id` a message or attachment WE sent in this chat?
     /// The only rows a sibling's echoed Edit/Delete may touch (the 1:1 rule of
     /// `message_owned_by_sender`, mirrored): a linked device could otherwise
@@ -381,6 +400,7 @@ impl P2PCore {
                     reply_to_sender_identity_id: None,
                     is_deleted: false,
                     is_edited: false,
+                    via_sync: false,
                     // Yeni gelen/gonderilen bir mesajin henuz tepkisi/görüldü
                     // bilgisi olamaz. bkz. `ArchivedMessage.reactions`/`seen_by`.
                     reactions: String::new(),
@@ -574,6 +594,7 @@ impl P2PCore {
                 reply_to_sender_identity_id: reply_to_sender_identity_id.map(|s| s.to_string()),
                 is_deleted: false,
                 is_edited: false,
+                via_sync: false,
                 // Yeni gelen/gonderilen bir mesajin henuz tepkisi/görüldü
                 // bilgisi olamaz. bkz. `ArchivedMessage.reactions`/`seen_by`.
                 reactions: String::new(),
@@ -734,7 +755,19 @@ impl P2PCore {
             _ => return,
         };
         info!("Hedef mesaj artık arşivde (target={}) — {} tamponlanmış Edit/Delete yeniden deneniyor", target_message_id, buffered.len());
-        for (_, peer_fp, sender_identity_id, packet_message_id, content) in buffered {
+        for entry in buffered {
+            // The same chat check the live path makes (fable E-06): a Text
+            // with this id in another chat consumed, failed and dropped the
+            // entry. Put back until its own chat holds the target.
+            let group_id = match &entry.4 {
+                MessageContent::Edit { group_id, .. } | MessageContent::Delete { group_id, .. } => group_id.clone(),
+                _ => None,
+            };
+            if !self.edit_target_in_chat(target_message_id, group_id.as_deref(), &entry.1) {
+                self.pending_edits_deletes.entry(target_message_id.to_string()).or_default().push(entry);
+                continue;
+            }
+            let (_, peer_fp, sender_identity_id, packet_message_id, content) = entry;
             let event = self.apply_edit_or_delete_content(&peer_fp, &sender_identity_id, &packet_message_id, content);
             self.attachment_events.push(event.to_string());
         }
@@ -898,19 +931,26 @@ impl P2PCore {
         // eskisiyle "geri alırdı". `edited_at_ms == 0` (sıralama bilgisi
         // taşımayan eski paket) veya `stored == 0` (bu ilk düzenleme)
         // durumunda koşulsuz uygulanır — davranış regresyonu yok.
-        let stored_edit_ts: u64 = {
+        let (stored_edit_ts, deleted): (u64, bool) = {
+            let read = |r: &rusqlite::Row| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?));
             let row = match group_id {
                 Some(gid) => conn.query_row(
-                    "SELECT edit_ts FROM messages WHERE message_id = ?1 AND group_id = ?2",
-                    params![target_message_id, gid], |r| r.get::<_, i64>(0),
+                    "SELECT edit_ts, is_deleted FROM messages WHERE message_id = ?1 AND group_id = ?2",
+                    params![target_message_id, gid], read,
                 ),
                 None => conn.query_row(
-                    "SELECT edit_ts FROM messages WHERE message_id = ?1 AND peer_device_fingerprint = ?2 AND group_id IS NULL",
-                    params![target_message_id, peer_device_fingerprint], |r| r.get::<_, i64>(0),
+                    "SELECT edit_ts, is_deleted FROM messages WHERE message_id = ?1 AND peer_device_fingerprint = ?2 AND group_id IS NULL",
+                    params![target_message_id, peer_device_fingerprint], read,
                 ),
             };
-            row.map(|v| v as u64).unwrap_or(0)
+            row.map(|(ts, del)| (ts as u64, del != 0)).unwrap_or((0, false))
         };
+        // An Edit that arrives after the Delete of the same message must not
+        // write the text back into the tombstone (fable E-05).
+        if deleted {
+            info!("Silinmiş mesaja gelen Edit yok sayıldı (target={})", target_message_id);
+            return Some(false);
+        }
         if edited_at_ms != 0 && stored_edit_ts != 0 && edited_at_ms <= stored_edit_ts {
             info!(
                 "Bayat Edit yok sayıldı (target={} gelen_ts={} <= saklanan_ts={})",
@@ -1007,6 +1047,7 @@ impl P2PCore {
             reply_to_sender_identity_id: r_sender,
             is_deleted: is_deleted != 0,
             is_edited: is_edited != 0,
+            via_sync: false,
             // bkz. `ArchivedMessage.reactions`/`seen_by` — bir düzenleme bu
             // satırı YENİDEN arşivler, o ana kadar birikmiş tepki/görüldü
             // bilgisi kaybolmasın diye ikisi de taze okunur.
@@ -1171,7 +1212,7 @@ impl P2PCore {
         }
         let t = if sent_clock { "COALESCE(NULLIF(sent_at_ms,0), timestamp)" } else { "timestamp" };
         let mut stmt = match conn.prepare(&format!(
-            "SELECT direction, encrypted_blob, nonce, timestamp, message_id, status, reply_to_message_id, reply_to_preview, is_deleted, is_edited, COALESCE(NULLIF(sent_at_ms,0), timestamp) FROM messages
+            "SELECT direction, encrypted_blob, nonce, timestamp, message_id, status, reply_to_message_id, reply_to_preview, is_deleted, is_edited, COALESCE(NULLIF(sent_at_ms,0), timestamp), via_sync FROM messages
              WHERE peer_device_fingerprint = ?1 AND (?3 IS NULL OR {t} < ?3) AND (?4 IS NULL OR {t} > ?4)
                AND {t} >= COALESCE((SELECT {t} FROM messages
                     WHERE peer_device_fingerprint = ?1 AND (?3 IS NULL OR {t} < ?3) AND (?4 IS NULL OR {t} > ?4)
@@ -1195,6 +1236,7 @@ impl P2PCore {
                 row.get::<_, i64>(8)?,
                 row.get::<_, i64>(9)?,
                 row.get::<_, i64>(10)?,
+                row.get::<_, i64>(11)?,
             ))
         });
 
@@ -1202,7 +1244,7 @@ impl P2PCore {
         let (mut page_budget, mut page_cut) = (PAGE_MAX_BYTES, None);
         if let Ok(rows) = rows {
             for row in rows.flatten() {
-                let (direction, encrypted_blob, nonce_bytes, timestamp, message_id, status, reply_to_message_id, reply_to_preview, is_deleted, is_edited, eff_sent) = row;
+                let (direction, encrypted_blob, nonce_bytes, timestamp, message_id, status, reply_to_message_id, reply_to_preview, is_deleted, is_edited, eff_sent, via_sync) = row;
                 // H3: bounded in bytes, not rows only (500 texts near 1 MiB
                 // each went into one JNI string); never mid-millisecond.
                 if page_bytes_full(&mut page_budget, &mut page_cut, if sent_clock { eff_sent } else { timestamp }, encrypted_blob.len()) {
@@ -1233,6 +1275,7 @@ impl P2PCore {
                             reply_to_sender_identity_id: None,
                             is_deleted: is_deleted != 0,
                             is_edited: is_edited != 0,
+                            via_sync: via_sync != 0,
                             reactions: reactions_for_row,
                             seen_by: seen_by_for_row,
                             author_proof: None,
@@ -1451,6 +1494,7 @@ impl P2PCore {
                             reply_to_sender_identity_id,
                             is_deleted: is_deleted != 0,
                             is_edited: is_edited != 0,
+                            via_sync: false,
                             reactions: reactions_for_row,
                             seen_by: seen_by_for_row,
                             author_proof: None,

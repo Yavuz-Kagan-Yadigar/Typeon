@@ -199,6 +199,7 @@
     <string name="confirm_block_contact">Block this contact?</string>
 
     <string name="lbl_edited">(edited)</string>
+    <string name="lbl_synced">(from history sync)</string>
     <string name="lbl_you">You</string>
     <string name="msg_reply_target_not_loaded">Original message isn\'t loaded — scroll up to find it</string>
     <string name="lbl_sent_at">(sent at: %s)</string>
@@ -392,6 +393,7 @@
     <string name="delete_account_keep_waiting">Keep waiting</string>
     <string name="delete_account_anyway">Delete anyway</string>
     <string name="msg_contact_deleted_account">%1$s deleted their account</string>
+    <string name="notif_contact_deleted_account_hidden">A contact deleted their account</string>
     <string name="msg_account_deleted_no_send">This person deleted their account. Messages can no longer be sent.</string>
     <string name="device_unlinked_notification">This device was unlinked from your account. Its local data has been erased.</string>
 

@@ -351,7 +351,7 @@ mod review_oct2026_tests {
         ix.timestamp = current_time_ms();
         let keys = &secondary.own_device_keys[&sec_fp];
         let to_sign = packet::identity_exchange_signing_input(
-            &ix.identity_id, &ix.device_fingerprint, &ix.device_name, &ix.pairing_proof, &stranger_fp, ix.timestamp,
+            &ix.identity_id, &ix.device_fingerprint, &ix.device_name, &ix.pairing_proof, &stranger_fp, ix.timestamp, &ix.revokes,
         );
         let sig_classical: Ed25519Signature = keys.sign_sk_ed25519.sign(&to_sign);
         let sig_pq: MlDsaSignature<MlDsa87> = keys.sign_sk_mldsa.sign(&to_sign);
@@ -1794,5 +1794,62 @@ mod review5_tests {
         assert_eq!(answered_pending_id(&ciborium_bytes(&ack).unwrap()).as_deref(), Some("t1"));
         let typing = MessageContent::TypingIndicator { is_typing: true, group_id: None };
         assert_eq!(answered_pending_id(&ciborium_bytes(&typing).unwrap()), None);
+    }
+}
+
+#[cfg(test)]
+mod fable_review_tests {
+    use super::*;
+
+    /// fable C-01: a second failing item of the same mailbox waits behind
+    /// the first and does not restart its hold timer.
+    #[test]
+    fn two_failing_server_items_do_not_reset_each_other() {
+        let mut core = P2PCore::new();
+        core.server_rt.insert("s".into(), Default::default());
+        let t0 = 1_000_000;
+        assert!(core.hold_server_item("s", "mb", 5, t0));
+        assert!(core.hold_server_item("s", "mb", 7, t0 + 10));
+        let late = t0 + crate::server_client::SERVER_HOLD_GRACE_MS + 1;
+        assert!(!core.hold_server_item("s", "mb", 5, late));
+        assert!(core.server_rt["s"].passed.contains(&("mb".to_string(), 5)));
+        // The next item starts its own timer now.
+        assert!(core.hold_server_item("s", "mb", 7, late));
+    }
+
+    /// fable D-02: a code naming a known Active device lifts no block and
+    /// stores no address.
+    #[test]
+    fn code_for_a_known_device_changes_nothing() {
+        let mut core = P2PCore::new();
+        let (id, fp) = ("a".repeat(64), "b".repeat(64));
+        core.register_contact_from_pairing(id.clone(), fp.clone(), "Bob".into()).unwrap();
+        core.block_identity(&id).unwrap();
+        let addr = "/dns/x.onion/tcp/1/p2p/12D3KooWD3eckifWpRn9wQpMG9R9hX3sD158z7EqHWmweQAJU5SA";
+        core.pair_with_code(id.clone(), fp.clone(), "Eve", addr, &[], &[7u8; 16]).unwrap();
+        assert!(core.is_blocked(&id));
+        assert!(!core.device_last_addr.contains_key(&fp));
+        let cid = core.identity_to_contact[&id].clone();
+        assert_eq!(core.contacts[&cid].display_name, "Bob");
+    }
+
+    /// fable A-05: stored sessions that all fail to open (wrong key) keep
+    /// the send gate shut; the right key opens it.
+    #[test]
+    fn wrong_storage_key_keeps_the_send_gate_shut() {
+        let dir = std::env::temp_dir().join(format!("typeon-gate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut core = P2PCore::new();
+        core.init_db(dir.to_str().unwrap(), &[1u8; 32]).unwrap();
+        core.db.as_ref().unwrap().execute(
+            "INSERT INTO ratchet_states (peer_device_fingerprint, encrypted_state, nonce, updated_at) VALUES ('p', x'00112233445566778899aabbccddeeff', x'000000000000000000000000', 1)",
+            [],
+        ).unwrap();
+        core.install_skipped_key([9u8; 32]);
+        assert!(!core.ratchets_loaded);
+        core.db.as_ref().unwrap().execute("DELETE FROM ratchet_states", []).unwrap();
+        core.install_skipped_key([9u8; 32]);
+        assert!(core.ratchets_loaded);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

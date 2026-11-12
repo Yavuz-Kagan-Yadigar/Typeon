@@ -1616,6 +1616,10 @@ pub fn prekey_signing_input(device_fingerprint: &str, id: u64, kem_pubkey_x25519
 /// `device_fingerprint`; `device_add`, `revokes` and `device_add_signer` prove
 /// themselves. `recipient_fp` is the device the packet is for (not carried:
 /// the receiver uses its own).
+///
+/// fable H-09: the `revokes` list is covered too (`revokes_digest`): each
+/// revoke proves itself, but the list could be stripped on the way, and a
+/// new contact then took a revoked device back from its old DeviceAdd.
 pub fn identity_exchange_signing_input(
     identity_id: &str,
     device_fingerprint: &str,
@@ -1623,14 +1627,31 @@ pub fn identity_exchange_signing_input(
     pairing_proof: &[u8],
     recipient_fp: &str,
     timestamp: u64,
+    revokes: &[DeviceRevoke],
 ) -> Vec<u8> {
-    let mut out = b"p2pmsg-v0.5-identity-exchange".to_vec();
-    for field in [identity_id.as_bytes(), device_fingerprint.as_bytes(), device_name.as_bytes(), pairing_proof, recipient_fp.as_bytes()] {
+    let mut out = b"p2pmsg-v0.6-identity-exchange".to_vec();
+    let digest = revokes_digest(revokes);
+    for field in [identity_id.as_bytes(), device_fingerprint.as_bytes(), device_name.as_bytes(), pairing_proof, recipient_fp.as_bytes(), &digest[..]] {
         out.extend_from_slice(&(field.len() as u32).to_be_bytes());
         out.extend_from_slice(field);
     }
     out.extend_from_slice(&timestamp.to_be_bytes());
     out
+}
+
+/// SHA-256 over every field of each revoke, length-prefixed, in list order.
+pub fn revokes_digest(revokes: &[DeviceRevoke]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"p2pmsg-revokes-v1");
+    h.update((revokes.len() as u32).to_be_bytes());
+    for r in revokes {
+        for field in [r.identity_id.as_bytes(), r.revoked_device_fingerprint.as_bytes(), r.revoked_by.as_bytes(), &r.signature[..], &r.signature_pq[..]] {
+            h.update((field.len() as u32).to_be_bytes());
+            h.update(field);
+        }
+    }
+    h.finalize().into()
 }
 
 /// Çoklu-cihaz (spec 1.7 mesaj geçmişi senkronu): kendi GÖNDERDİĞİM bir
@@ -1739,6 +1760,23 @@ pub enum NetworkEnvelope {
     IdentityExchange(IdentityExchange),
     Handshake(HandshakeInit),
     Message(MessagePacket),
+}
+
+impl NetworkEnvelope {
+    /// Nesting bound for the outer envelope, before any signature check.
+    const MAX_NESTING: usize = 32;
+
+    /// Strict parse of a received envelope (fable H-07): trailing bytes gave
+    /// one signed packet unlimited encodings (each passed the byte dedup),
+    /// and ciborium's default let a stranger nest 256 levels.
+    pub fn from_cbor(data: &[u8]) -> Result<Self, String> {
+        let mut rest = data;
+        let envelope = ciborium::de::from_reader_with_recursion_limit(&mut rest, Self::MAX_NESTING).map_err(|e| e.to_string())?;
+        if !rest.is_empty() {
+            return Err("envelope: trailing bytes".to_string());
+        }
+        Ok(envelope)
+    }
 }
 
 #[cfg(test)]

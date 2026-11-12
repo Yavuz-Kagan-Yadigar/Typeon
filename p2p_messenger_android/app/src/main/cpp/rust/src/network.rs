@@ -175,21 +175,6 @@ impl P2PCore {
         let tor_client = tor_handle.as_ref().map(|h| h.client.clone());
         let listen_port: u16 = if tor_handle.is_some() { TOR_LIBP2P_PORT } else { 0 };
 
-        let gs_config = gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(std::time::Duration::from_secs(10))
-            .validation_mode(gossipsub::ValidationMode::Strict)
-            // Varsayılan 64KB — `FileOffer` artık spec dışı bir 480p/%85
-            // JPEG önizleme kapağı taşıyabiliyor (bkz. packet.rs
-            // `preview_jpeg` notu); tipik değeri 64KB'ı zorlayabilir (hibrit
-            // imza/ratchet_pubkey ek yükü ile birlikte). 1MB, olağan bir
-            // önizlemeyi + zarf ek yükünü rahatça karşılıyor, gerçek dosya
-            // baytları zaten AYRI bir protokolden (request_response,
-            // attachments.rs) gittiği için bu artış büyük dosyaları
-            // etkilemiyor.
-            .max_transmit_size(1024 * 1024)
-            .build()
-            .map_err(|e| e.to_string())?;
-
         // Swarm ELLE kuruluyor, `SwarmBuilder` değil: 0.53'ün `build()`'i
         // bütün bağlantılara SABİT 10 sn zaman aşımı koyuyor (bkz. libp2p
         // builder/phase/build.rs `CONNECTION_TIMEOUT`) ve değiştirmenin yolu
@@ -243,10 +228,6 @@ impl P2PCore {
         let keypair_ref = &keypair;
         let behaviour = (|keypair: &libp2p::identity::Keypair, relay_client: relay::client::Behaviour| -> Result<P2PBehaviour, Box<dyn std::error::Error + Send + Sync>> {
                 let peer_id = keypair.public().to_peer_id();
-                let gossipsub = gossipsub::Behaviour::new(
-                    gossipsub::MessageAuthenticity::Signed(keypair.clone()),
-                    gs_config,
-                )?;
                 let store = MemoryStore::new(peer_id);
                 let kad = kad::Behaviour::new(peer_id, store);
                 // Cache 0: identify's address cache fed every peer's raw listen addresses,
@@ -328,7 +309,7 @@ impl P2PCore {
                         .with_request_timeout(std::time::Duration::from_secs(ACK_REQUEST_TIMEOUT_SECS)),
                 );
                 let stream = libp2p_stream::Behaviour::new();
-                Ok(P2PBehaviour { server_rpc, gossipsub, kad, identify, file_chunks, relay_client, relay, keepalive, acks, envelopes, stream })
+                Ok(P2PBehaviour { server_rpc, kad, identify, file_chunks, relay_client, relay, keepalive, acks, envelopes, stream })
             })(keypair_ref, relay_client)
             .map_err(|e| e.to_string())?;
             // Spec dışı, ağ sağlamlığı düzeltmesi (kullanıcı isteği: "her şey
@@ -349,7 +330,11 @@ impl P2PCore {
             behaviour,
             local_peer_id,
             libp2p::swarm::Config::with_tokio_executor()
-                .with_idle_connection_timeout(std::time::Duration::from_secs(600)),
+                // 30 min: gossipsub is gone, and its mesh kept a contact's
+                // connection open through a quiet keepalive window
+                // (`RADIO_WINDOW_MS`, 8 min) that a dozing phone can overrun.
+                // The keepalive probes still close a dead connection.
+                .with_idle_connection_timeout(std::time::Duration::from_secs(1800)),
         );
 
         // Always Client. Kademlia is only the address book behind peer-id
@@ -371,45 +356,9 @@ impl P2PCore {
         swarm.listen_on(format!("/ip4/127.0.0.1/tcp/{}", listen_port).parse().map_err(|_| "bad multiaddr")?)
             .map_err(|e| e.to_string())?;
 
-        // bkz. `own_mailbox_topic_fp` dokümantasyonu: bu abonelik OLMADAN
-        // cihaza hiçbir paket teslim edilemez. Başarısızlık artık SESSİZCE
-        // yutulmuyor — kimlik henüz yoksa (servis kimlik oluşturulmadan
-        // başlatılmışsa) AÇIKÇA loglanır ve `ensure_own_mailbox_subscription`
-        // ilerideki bir `poll_events` turunda kendi kendine tamamlar.
-        match self.get_active_own_device_fingerprint() {
-            Ok(active_fp) => {
-                let own_topic = gossipsub::IdentTopic::new(format!("p2p_msg_{}", active_fp));
-                swarm.behaviour_mut().gossipsub.subscribe(&own_topic).map_err(|e| e.to_string())?;
-                info!("Kendi posta kutusu topic'ine abone olundu: p2p_msg_{}", crate::log_id(&active_fp));
-                self.own_mailbox_topic_fp = Some(active_fp);
-            }
-            Err(e) => {
-                error!(
-                    "start_network: aktif kimlik YOK ({}) — posta kutusu aboneliği şimdilik atlandı, \
-                     kimlik hazır olunca otomatik tamamlanacak (bkz. ensure_own_mailbox_subscription)",
-                    e
-                );
-            }
-        }
-
-        // bkz. `topic_for_root_key` dokümantasyonu: `load_ratchet_states_from_db`
-        // (init_db sırasında, swarm henüz yokken) diskten yüklenmiş her
-        // mevcut oturum için, o oturumun rotasyonlu topic'ine de abone ol —
-        // aksi halde bu kişilerden gelen (fingerprint tabanlı posta kutusu
-        // ARTIK dinlenmediği için) hiçbir mesaj alınamaz.
-        for state in self.ratchets.values() {
-            if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&Self::topic_for_root_key(&state.root_key)) {
-                error!("Oturum topic'ine abone olunamadı: {:?}", e);
-            }
-            // Güvenilirlik düzeltmesi (rotasyon penceresi): bir önceki
-            // root'un topic'i de dinlenmeye devam eder — karşı taraf bizim
-            // son rotasyonumuzu henüz uygulamadıysa bize hâlâ o topic'ten
-            // yayın yapıyordur (bkz. `maybe_rotate_ratchet` resubscribe notu).
-            if let Some(prev) = &state.prev_root_key {
-                if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&Self::topic_for_root_key(prev)) {
-                    error!("Oturum topic'ine abone olunamadı: {:?}", e);
-                }
-            }
+        // No identity yet: `ensure_own_mailbox_subscription` sets it later.
+        if let Ok(active_fp) = self.get_active_own_device_fingerprint() {
+            self.own_mailbox_topic_fp = Some(active_fp);
         }
 
         let mut stream_control = swarm.behaviour().stream.new_control();
@@ -442,7 +391,11 @@ impl P2PCore {
     }
 
     /// bkz. `KeepAliveState.suspect`.
-    pub(crate) fn mark_connection_suspect(&mut self, peer: PeerId) {
+    /// `dial`: also open a parallel onion connection now. A late Ack is no
+    /// such reason: Tor plus a sleeping radio often take longer than
+    /// `ACK_SUSPECT_MS`, so that path only probes, and a failed probe of a
+    /// suspect closes the connection for the redial (fable B-04).
+    pub(crate) fn mark_connection_suspect(&mut self, peer: PeerId, dial: bool) {
         let Some(st) = self.keepalive_state.get_mut(&peer) else { return };
         if st.suspect {
             return;
@@ -450,6 +403,9 @@ impl P2PCore {
         st.suspect = true;
         if st.outstanding.is_none() {
             st.next_due_at = 0;
+        }
+        if !dial {
+            return;
         }
         // Yoklamanın zaman aşımını beklemeden onion üzerinden paralel yeni
         // bağlantı aç; kurulursa eskisi kapatılır (bkz. `peer_conns`). Ölü
@@ -710,34 +666,16 @@ impl P2PCore {
     /// düzeltme, bir kişiyle YAPILAN TÜM GERÇEK KONUŞMA trafiğini korur;
     /// sadece BİR KEZLİK ilk eşleşme anı fingerprint üzerinden görünür
     /// kalır (SECURITY.md'de belgelendi).
-    pub(crate) fn topic_for_root_key(root_key: &[u8]) -> gossipsub::IdentTopic {
+    /// The input is `ratchet::root_handle` of a root (`root_handle_now`, or
+    /// `prev_root_key`), never the root itself (fable H-02).
+    /// Since gossipsub was removed (fable B-01) the topic string only names
+    /// the session's mailbox on the server.
+    pub(crate) fn topic_for_root_key(root_key: &[u8]) -> String {
         use sha2::Sha256;
         let hk = Hkdf::<Sha256>::new(None, root_key);
         let mut topic_id = [0u8; 16];
         hk.expand(b"p2pmsg-v0.1-gossip-topic", &mut topic_id).expect("HKDF expand failed");
-        gossipsub::IdentTopic::new(format!("p2p_rt_{}", hex::encode(topic_id)))
-    }
-
-    /// `topic_for_root_key` dokümantasyonuna bkz. Bir ratchet oturumu
-    /// kurulduğunda/rotasyon geçirdiğinde/silindiğinde çağrılan ortak
-    /// abonelik yardımcı fonksiyonu — `old_root_key: Some(..)` ise önce o
-    /// topic'ten abonelik iptal edilir (rotasyon/silme), sonra
-    /// `new_root_key: Some(..)` ise o topic'e abone olunur (oluşturma/
-    /// rotasyon). Swarm henüz başlamamışsa (`self.swarm == None`) sessizce
-    /// no-op — `load_ratchet_states_from_db` süreç başlangıcında,
-    /// `start_network`'ten ÖNCE çağrıldığı için bu durum normaldir (bkz.
-    /// `start_network`'teki toplu abonelik döngüsü).
-    pub(crate) fn resubscribe_ratchet_topic(&mut self, old_root_key: Option<&[u8]>, new_root_key: Option<&[u8]>) {
-        if let Some(swarm) = &mut self.swarm {
-            if let Some(old) = old_root_key {
-                let _ = swarm.behaviour_mut().gossipsub.unsubscribe(&Self::topic_for_root_key(old));
-            }
-            if let Some(new) = new_root_key {
-                if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&Self::topic_for_root_key(new)) {
-                    error!("Oturum topic'ine abone olunamadı: {:?}", e);
-                }
-            }
-        }
+        format!("p2p_rt_{}", hex::encode(topic_id))
     }
 
     /// Spec dışı, güvenlik denetimi devamı (bkz. SECURITY.md "Cross-network
@@ -877,7 +815,11 @@ impl P2PCore {
             if now < h.next_dial_at {
                 continue;
             }
-            let Some(addr) = self.peer_id_to_addr.get(peer).cloned() else { continue };
+            // The onion address first (fable B-06): `peer_id_to_addr` is
+            // filled only for connections we dialed, so a peer that dialed us
+            // never got a second connection.
+            let onion = self.peer_onion_addr.get(peer).and_then(|a| a.parse::<Multiaddr>().ok());
+            let Some(addr) = onion.or_else(|| self.peer_id_to_addr.get(peer).cloned()) else { continue };
             if let Some(h) = self.bulk_health.get_mut(peer) {
                 h.next_dial_at = now + BULK_DIAL_MIN_INTERVAL_MS.max(h.backoff_ms);
             }
@@ -1140,19 +1082,6 @@ impl P2PCore {
             return;
         }
         self.ensure_relay_reservations();
-        // L-07: a session topic whose subscribe failed (rotation, start) is
-        // tried again here. Subscribing again to a live topic is a no-op.
-        if first_sweep_of_minute {
-            if let Some(swarm) = &mut self.swarm {
-                for state in self.ratchets.values() {
-                    for root in std::iter::once(&state.root_key).chain(state.prev_root_key.as_ref()) {
-                        if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&Self::topic_for_root_key(root)) {
-                            debug!("Oturum topic'ine yeniden abone olunamadı: {:?}", e);
-                        }
-                    }
-                }
-            }
-        }
 
         // Spec dışı, ağ sağlamlığı düzeltmesi (refactor): asıl dial/backoff
         // mantığı artık `try_reconnect_device`'te — `ensure_connected` VE
@@ -1243,8 +1172,17 @@ impl P2PCore {
     }
 
     /// See `ENVELOPE_PROTOCOL`. `false` = no mapped peer / no swarm.
+    /// The mapped PeerId of the device, else, for an IdentityExchange or a
+    /// Handshake only, the connection its IdentityExchange came in on.
+    fn direct_peer_for(&self, fp: &str, envelope: &NetworkEnvelope) -> Option<PeerId> {
+        self.device_to_peer_id.get(fp).copied().or_else(|| match envelope {
+            NetworkEnvelope::IdentityExchange(_) | NetworkEnvelope::Handshake(_) => self.pairing_reply_peer.get(fp).copied(),
+            _ => None,
+        })
+    }
+
     pub(crate) fn send_envelope_direct(&mut self, fp: &str, envelope: &NetworkEnvelope, bytes: Vec<u8>, first_attempt_at: u64, retried: bool) -> bool {
-        let (Some(pid), Some(swarm)) = (self.device_to_peer_id.get(fp).copied(), self.swarm.as_mut()) else { return false };
+        let (Some(pid), Some(swarm)) = (self.direct_peer_for(fp, envelope), self.swarm.as_mut()) else { return false };
         let request_id = swarm.behaviour_mut().envelopes.send_request(&pid, EnvelopeRequest { bytes });
         self.envelopes_inflight.insert(request_id, (fp.to_string(), envelope.clone(), first_attempt_at, retried));
         true
@@ -1290,7 +1228,7 @@ impl P2PCore {
         if bytes.len() + 4096 > MAX_ENVELOPE_BYTES {
             return Err(PublishFailure::Permanent(format!("Zarf çok büyük ({} bayt)", bytes.len())));
         }
-        let mailbox_topic = || gossipsub::IdentTopic::new(format!("p2p_msg_{}", target_device_fingerprint));
+        let mailbox_topic = || format!("p2p_msg_{}", target_device_fingerprint);
         // Spec dışı, hata ayıklama düzeltmesi (gerçek bir cihazda "hiçbir
         // mesaj gitmiyor da gelmiyor da" olarak rapor edildi): bkz.
         // `topic_for_root_key` dokümantasyonu — bir ratchet oturumu varsa
@@ -1325,7 +1263,7 @@ impl P2PCore {
                 }
             }
             _ => match self.ratchets.get(target_device_fingerprint) {
-                Some(ratchet) => Self::topic_for_root_key(&ratchet.root_key),
+                Some(ratchet) => Self::topic_for_root_key(&ratchet.root_handle_now()),
                 None => mailbox_topic(),
             },
         };
@@ -1337,7 +1275,7 @@ impl P2PCore {
         // zaman posta kutusu topic'i; rotasyon duyuran Message eski
         // root_key'in topic'i) sunucu yoluna da BEDAVA devroluyor — ikisi de
         // gerçek üretim hatalarıydı, ikinci bir yerde tekrar yapılmamalı.
-        let topic_str = topic.to_string();
+        let topic_str = topic;
         // Eşle CANLI bir libp2p bağlantısı varsa (LAN, Tor, röle) önce o yol:
         // sunucu kopyası yalnızca bu zarf ilk yeniden denemeye kadar
         // (`ACK_RETRY_INITIAL_MS`) onaylanmadıysa bırakılır. Önceden sunucu
@@ -1346,7 +1284,8 @@ impl P2PCore {
         // gidiş-dönüşü). Güvence aynı: Ack gelmezse sunucuya düşülüyor.
         // Handshake/IdentityExchange/rotasyon duyurusu yine hep iki yoldan
         // (bkz. `should_shadow_on_gossipsub` — kaybı telafi edilemez).
-        let direct = self.is_connected_to_device(target_device_fingerprint);
+        let direct = self.direct_peer_for(target_device_fingerprint, envelope)
+            .map_or(false, |p| self.swarm.as_ref().map_or(false, |s| s.is_connected(&p)));
         let critical = self.call_signal_sending || match envelope {
             NetworkEnvelope::Handshake(_) | NetworkEnvelope::IdentityExchange(_) => true,
             NetworkEnvelope::Message(m) => m.header.rotation_kyber_ciphertext.is_some(),
@@ -1363,53 +1302,15 @@ impl P2PCore {
         if direct && allow_direct && self.send_envelope_direct(target_device_fingerprint, envelope, bytes.clone(), first_attempt_at, false) {
             return Ok(());
         }
-        // Same when the direct copy is already out and unconfirmed
-        // (`!allow_direct`): a gossipsub copy is one more send to a peer the
-        // server now covers.
-        if deposited && (!direct || (!allow_direct && unconfirmed_past_first_retry)) && !self.should_shadow_on_gossipsub(envelope) {
-            // Sunucu zarfı DİSKE yazacak — `gossipsub.publish()`in yerel
-            // başarısından kesinlikle daha güçlü bir garanti. Uçtan uca
-            // garanti yine de karşı tarafın `Ack`'i (bkz.
-            // `awaiting_confirmation`), o mekanizma hiç değişmedi.
-            return Ok(());
+        // No direct path, or it failed: the server copy is the delivery
+        // (gossipsub is gone, fable B-01). Without one the envelope is queued.
+        if !deposited && direct {
+            deposited = self.try_server_deposit(target_device_fingerprint, &topic_str, envelope, &bytes, first_attempt_at);
         }
-
-        match &mut self.swarm {
-            Some(swarm) => match swarm.behaviour_mut().gossipsub.publish(topic, bytes.clone()) {
-                Ok(_) => Ok(()),
-                // Aynı baytları tekrar denemek boyutu küçültmez — kalıcı.
-                Err(gossipsub::PublishError::MessageTooLarge) => Err(PublishFailure::Permanent(
-                    "Mesaj gossipsub azami boyutunu aşıyor (MessageTooLarge)".to_string(),
-                )),
-                // Sunucu zaten kabul ettiyse gossipsub'ın başarısızlığı bir
-                // başarısızlık DEĞİL — gölge kopya en iyi çabaydı. Doğrudan
-                // yol denenip başarısız olduysa (bağlı ama topic aboneliği
-                // henüz yok) sunucuyu şimdi dene.
-                Err(e) => {
-                    if direct {
-                        warn!(
-                            "gossipsub yayını başarısız ({}): hedef={} tür={}",
-                            e, &target_device_fingerprint[..target_device_fingerprint.len().min(8)],
-                            server_client::envelope_kind(envelope)
-                        );
-                    }
-                    if !deposited && direct {
-                        deposited = self.try_server_deposit(target_device_fingerprint, &topic_str, envelope, &bytes, first_attempt_at);
-                    }
-                    if deposited {
-                        Ok(())
-                    } else {
-                        Err(PublishFailure::Transient(e.to_string()))
-                    }
-                }
-            },
-            None => {
-                if deposited {
-                    Ok(())
-                } else {
-                    Err(PublishFailure::Transient("Ağ katmanı henüz başlatılmadı".to_string()))
-                }
-            }
+        if deposited {
+            Ok(())
+        } else {
+            Err(PublishFailure::Transient("Hedefe bağlantı yok ve sunucu kopyası bırakılamadı".to_string()))
         }
     }
 
@@ -1441,7 +1342,7 @@ impl P2PCore {
 
     /// `publish_envelope`, ama zarfın kuyruktaki yaşlanma sayacını çağıran
     /// belirler. Sunucu hatası sonrası yeniden kuyruğa koyma yolu bunu
-    /// ORİJİNAL zamanla çağırır — bkz. `server_client::retry_deposit_over_gossipsub`.
+    /// ORİJİNAL zamanla çağırır — bkz. `server_client::requeue_failed_deposit`.
     pub(crate) fn publish_envelope_at(
         &mut self,
         target_device_fingerprint: &str,
@@ -1618,7 +1519,7 @@ impl P2PCore {
             }
         }
         for pid in suspects {
-            self.mark_connection_suspect(pid);
+            self.mark_connection_suspect(pid, false);
         }
         // Doğrudan gönderilmiş ama `ACK_SUSPECT_MS` içinde onaylanmamış paketi
         // 15 sn'lik (`ACK_RETRY_INITIAL_MS`) ilk yeniden denemeyi beklemeden sunucuya da bırak: gönderici
@@ -1708,6 +1609,13 @@ impl P2PCore {
                 ),
                 None => continue,
             };
+            // Regenerated earlier in this loop (a rotation or handshake redo
+            // of an earlier id re-encrypted every pending packet of the
+            // peer): `stamp_cache` is older than that, so it would be sent a
+            // second time (fable A-04).
+            if first_sent_at >= now {
+                continue;
+            }
             // KRİTİK (bkz. `MAX_UNCONFIRMED_AGE_MS` dokümantasyonu): bu yaşı
             // aşan bir paket, karşı tarafın ratchet'i muhtemelen bir DH/KEM
             // rotasyonu yaşadığı için ARTIK KRİPTOGRAFİK OLARAK ÇÖZÜLEMEZ —
@@ -2083,30 +1991,8 @@ impl P2PCore {
         if self.own_mailbox_topic_fp.as_deref() == Some(active_fp.as_str()) {
             return;
         }
-        let topic = gossipsub::IdentTopic::new(format!("p2p_msg_{}", active_fp));
-        let old = self.own_mailbox_topic_fp.as_ref().map(|fp| gossipsub::IdentTopic::new(format!("p2p_msg_{}", fp)));
-        let subscribed = match &mut self.swarm {
-            Some(swarm) => {
-                // The fingerprint changed (`import_recovery`): staying on the
-                // old mailbox topic keeps its traffic coming and links the
-                // old and the new fingerprint for an observer.
-                if let Some(old) = old {
-                    let _ = swarm.behaviour_mut().gossipsub.unsubscribe(&old);
-                }
-                swarm.behaviour_mut().gossipsub.subscribe(&topic)
-            }
-            None => return,
-        };
-        match subscribed {
-            Ok(_) => {
-                info!(
-                    "Kendi posta kutusu topic'ine (sonradan) abone olundu: p2p_msg_{} \
-                     — bu olmadan cihaza hiçbir paket teslim edilemezdi",
-                    crate::log_id(&active_fp)
-                );
-                self.own_mailbox_topic_fp = Some(active_fp);
-            }
-            Err(e) => error!("Kendi posta kutusu topic'ine abone olunamadı: {}", e),
+        if self.swarm.is_some() {
+            self.own_mailbox_topic_fp = Some(active_fp);
         }
     }
 
@@ -2118,39 +2004,24 @@ impl P2PCore {
         if self.ratchets.contains_key(peer_fp) { return; }
         if self.own_mailbox_topic_fp.as_deref() == Some(peer_fp) { return; }
         if self.pairing_mailbox_subs.contains_key(peer_fp) { return; }
-        let topic = gossipsub::IdentTopic::new(format!("p2p_msg_{}", peer_fp));
-        let outcome = match &mut self.swarm {
-            // Swarm yoksa: sessizce geç — ağsız eşleşme zaten tamamlanamaz,
-            // IdentityExchange `pending_envelopes`'te bekler.
-            None => return,
-            Some(swarm) => swarm.behaviour_mut().gossipsub.subscribe(&topic),
-        };
-        match outcome {
-            Ok(_) => {
-                info!("Eşleşme: karşı tarafın posta kutusu topic'ine abone olundu (p2p_msg_{})", crate::log_id(&peer_fp));
-                self.pairing_mailbox_subs.insert(peer_fp.to_string(), current_time_ms());
-            }
-            Err(e) => error!("Eşleşme posta kutusu aboneliği başarısız (p2p_msg_{}): {}", crate::log_id(&peer_fp), e),
+        // No gossip topic any more: the entry only marks "we started a
+        // pairing with this device" (see the readers of the map).
+        if self.swarm.is_some() {
+            self.pairing_mailbox_subs.insert(peer_fp.to_string(), current_time_ms());
         }
     }
 
     /// bkz. `subscribe_pairing_mailbox` — aboneliği bırak (ratchet kuruldu
     /// ya da TTL doldu).
     pub(crate) fn drop_pairing_mailbox(&mut self, peer_fp: &str) {
-        if self.pairing_mailbox_subs.remove(peer_fp).is_none() { return; }
-        // Kendi posta kutusu topic'imizi ASLA bırakma (fp çakışması olmamalı
-        // ama savunma amaçlı).
-        if self.own_mailbox_topic_fp.as_deref() == Some(peer_fp) { return; }
-        let topic = gossipsub::IdentTopic::new(format!("p2p_msg_{}", peer_fp));
-        if let Some(swarm) = &mut self.swarm {
-            let _ = swarm.behaviour_mut().gossipsub.unsubscribe(&topic);
-            info!("Eşleşme posta kutusu aboneliği bırakıldı (p2p_msg_{})", crate::log_id(&peer_fp));
-        }
+        self.pairing_mailbox_subs.remove(peer_fp);
     }
 
     /// `poll_events`'ten her turda: ratchet'i kurulmuş ya da TTL'i dolmuş
     /// eşleşme aboneliklerini bırakır.
     pub(crate) fn flush_pairing_mailbox_subs(&mut self) {
+        let ratchets = &self.ratchets;
+        self.pairing_reply_peer.retain(|fp, _| !ratchets.contains_key(fp));
         if self.pairing_mailbox_subs.is_empty() { return; }
         let now = current_time_ms();
         let done: Vec<String> = self.pairing_mailbox_subs.iter()

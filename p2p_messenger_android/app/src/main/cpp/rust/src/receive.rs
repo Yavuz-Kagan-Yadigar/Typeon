@@ -44,9 +44,8 @@ impl P2PCore {
         // on the new chain (bkz. ratchet.rs `decrypt`). Başlık alıcıya bağlı
         // değil: A'nın B'ye gönderdiği rotasyonlu paket C'ye tekrar
         // oynatılırsa, önce uygulanan rotasyon C'nin A oturumunu bozardı.
-        // `rotated_keys`: rotasyon gerçekten uygulandıysa (iki nesil önceki,
-        // yeni) root_key çifti — abonelik/temizlik adımları için.
-        let mut rotated_keys: Option<(Option<Vec<u8>>, Vec<u8>)> = None;
+        // The packet's rotation was applied: the state is written at once.
+        let rotated;
         // Rollback copy: if the advanced state cannot be saved, memory goes
         // back to it and the packet fails (no archive, no Ack), so the
         // sender's retry decrypts again instead of being lost.
@@ -58,14 +57,11 @@ impl P2PCore {
             let new_peer_keys = packet.header.rotation_kyber_ciphertext.as_ref()
                 .and_then(|_| RatchetPublicKeys::from_bytes(&packet.header.ratchet_pubkey).ok());
             let rotation = new_peer_keys.as_ref().zip(packet.header.rotation_kyber_ciphertext.as_deref());
-            let dropped_prev = state.prev_root_key.clone();
             let result = state.decrypt(&packet.ciphertext, packet.header.message_number, rotation, current_time_ms(), packet.header.raw());
-            if result.as_ref().map_or(false, |(_, changes)| changes.rotated) {
-                rotated_keys = Some((dropped_prev, state.root_key.clone()));
-            }
+            rotated = result.as_ref().map_or(false, |(_, changes)| changes.rotated);
             result
         };
-        if let Some((dropped_prev, new_root_key)) = rotated_keys.take() {
+        if rotated {
             // Eski topic hemen bırakılmaz (gönderen hâlâ oradan yayınlayabilir),
             // bir sonraki rotasyonda bırakılır.
             // Eski zincirin skipped-key'leri state'in içine taşındı
@@ -81,7 +77,6 @@ impl P2PCore {
             // The rotated state is on disk now: a later failure must not roll
             // memory back behind it.
             snapshot = None;
-            self.resubscribe_ratchet_topic(dropped_prev.as_deref(), Some(&new_root_key));
             self.clear_persisted_skipped_keys(&packet.header.sender_device_fingerprint);
             // Eski zincirle şifrelenmiş bekleyen paketler hemen taze zincirle yeniden gönderilir.
             // Not the one this very packet answers: it is closed below, and
@@ -253,10 +248,26 @@ impl P2PCore {
                 let buf = self.unknown_group_held.get(&gid);
                 let dup = buf.map_or(false, |b| b.iter().any(|e| e.4 == message_id));
                 let full = buf.map_or(false, |b| b.len() >= UNKNOWN_GROUP_HOLD_PER_GROUP);
-                if room && !dup && !full {
+                // Per sender and in bytes too, as `buffer_edit_or_delete`: one
+                // contact with invented group ids held all slots and up to
+                // ~1 GiB of text (fable A-02).
+                let held_bytes = |c: &MessageContent| match c {
+                    MessageContent::Text { text, .. } => text.len(),
+                    MessageContent::FileOffer { preview_jpeg, caption, .. } => preview_jpeg.as_ref().map_or(0, |p| p.len()) + caption.len(),
+                    _ => 0,
+                };
+                let all = self.unknown_group_held.values().flatten();
+                let sender_full = all.clone().filter(|e| e.2 == peer_fp).count() >= UNKNOWN_GROUP_HOLD_PER_GROUP;
+                let bytes_full = all.map(|e| held_bytes(&e.5)).sum::<usize>() + held_bytes(&content) > 16 * 1024 * 1024;
+                if room && !dup && !full && !sender_full && !bytes_full {
                     self.unknown_group_held.entry(gid).or_default()
                         .push((now, source, peer_fp, sender_identity_id, message_id, content, signed_sent_at_ms));
                 }
+            } else if is_group_id(&gid) {
+                // A group removed here: final until a GroupUpdate adds us
+                // again. Acked, as for a contact removed here, or the sender
+                // retried it for 7 days (fable A-10).
+                self.send_ack(&peer_fp, &message_id);
             }
             return Ok(serde_json::json!({"type": "noop"}).to_string());
         }
@@ -884,6 +895,7 @@ impl P2PCore {
                                         return None;
                                     }
                                     self.backdate_archived(None, &chat_key, Some(mid), m.timestamp);
+                                    self.mark_synced(&chat_key, Some(mid));
                                     let at = if m.sent_at_ms != 0 { m.sent_at_ms } else { m.timestamp };
                                     oldest_written = Some(oldest_written.map_or(at, |o| o.min(at)));
                                     // bkz. yukarıdaki grup koluyla aynı düzeltme —
@@ -891,7 +903,7 @@ impl P2PCore {
                                     // arşivlemede de yansıt.
                                     self.apply_synced_message_flags(None, &chat_key, &m);
                                 }
-                                Some(serde_json::json!({"direction": our_direction, "text": m.text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms, "reactions": m.message_id.as_deref().map(|id| self.reactions_summary(id)).unwrap_or_default(), "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited}))
+                                Some(serde_json::json!({"direction": our_direction, "text": m.text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms, "reactions": m.message_id.as_deref().map(|id| self.reactions_summary(id)).unwrap_or_default(), "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited, "via_sync": self.is_synced(&chat_key, m.message_id.as_deref())}))
                             }).collect();
                             serde_json::json!({"type": "older_history", "peer": chat_key, "messages": merged})
                         }
@@ -946,6 +958,7 @@ impl P2PCore {
                                 return None;
                             }
                             self.backdate_archived(None, &chat_key, m.message_id.as_deref(), m.timestamp);
+                            self.mark_synced(&chat_key, m.message_id.as_deref());
                             // Spec dışı, hata düzeltmesi ("silinen mesaj
                             // geçmiş senkronuyla geri geliyor"): bu satırı
                             // hiç sahip olmadığımız için taze arşivliyoruz —
@@ -953,7 +966,7 @@ impl P2PCore {
                             // de öyle işaretlenmeli.
                             self.apply_synced_message_flags(None, &chat_key, &m);
                         }
-                        Some(serde_json::json!({"direction": our_direction, "text": m.text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms, "reactions": m.message_id.as_deref().map(|id| self.reactions_summary(id)).unwrap_or_default(), "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited}))
+                        Some(serde_json::json!({"direction": our_direction, "text": m.text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms, "reactions": m.message_id.as_deref().map(|id| self.reactions_summary(id)).unwrap_or_default(), "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited, "via_sync": self.is_synced(&chat_key, m.message_id.as_deref())}))
                     }).collect();
                     serde_json::json!({"type": "history_sync", "peer": chat_key, "messages": flipped})
                 };
@@ -1810,15 +1823,22 @@ impl P2PCore {
                     // "etkin" değer, bu yüzden `timestamp` alanı için de
                     // güvenle kullanılabilir.
                     let (merged, press_chat) = self.apply_sibling_reply(&peer_fp, window, more, entries);
+                    // Decided by the request, not by the shape of the answer
+                    // (fable D-04): no window and no press it answers, while
+                    // a backfill request is open, is the unscoped backfill,
+                    // also when all its rows belong to one chat.
+                    let backfill = window.is_none() && press_chat.is_none()
+                        && self.sibling_backfill_since.get(&peer_fp).map_or(false, |s| s.0 > 0);
                     // A press answer is about its chat, empty or not.
                     let (single_group, single_conversation) = match press_chat {
                         Some(c) if self.groups.contains_key(&c) => (Some(c), None),
                         Some(c) => (None, Some(c)),
+                        None if backfill => (None, None),
                         None => (single_group, single_conversation),
                     };
-                    // M-68: an answer to the unscoped backfill (no single chat;
-                    // an empty one too) moves this sibling's watermark.
-                    if window.is_none() && single_group.is_none() && single_conversation.is_none() {
+                    // M-68: an answer to the unscoped backfill (an empty one
+                    // too) moves this sibling's watermark.
+                    if backfill {
                         if let Some(state) = self.sibling_backfill_since.get_mut(&peer_fp) {
                             if state.0 > 0 {
                                 *state = (0, state.0);

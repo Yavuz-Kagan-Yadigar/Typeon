@@ -77,7 +77,8 @@ pub fn get_pending_secret_bundle() -> Vec<u8> {
 }
 
 pub fn load_secret_bundle(bundle_bytes: &[u8]) -> bool {
-    let raw = bundle_bytes.to_vec();
+    // Every secret key of the device: wiped when dropped (fable G-08).
+    let raw = zeroize::Zeroizing::new(bundle_bytes.to_vec());
     matches!(
         catch_panic(move || {
             let mut core = core_lock();
@@ -295,20 +296,9 @@ pub fn device_link_code(data: &[u8]) -> String {
     crate::device_link_code(data)
 }
 
-pub fn approve_device_link(data: &[u8]) -> String {
-    let raw = data.to_vec();
-    let result = catch_panic(move || {
-        let _guard = RUNTIME.enter();
-        core_lock().approve_device_link(&raw)
-    });
-    match result {
-        Ok(Ok((fp, name))) => {
-            serde_json::json!({ "device_fingerprint": fp, "device_name": name }).to_string()
-        }
-        Ok(Err(e)) => format!("Error: {}", e),
-        Err(e) => format!("Error: {}", e),
-    }
-}
+// fable G-07: no `approve_device_link`, `forget_revoked_linked_device` or
+// `import_recovery` here. Desktops are secondary devices only: they never
+// add devices or restore a whole account (owner rule).
 
 pub fn list_linked_devices() -> String {
     catch_panic(|| serde_json::Value::Array(crate::core_lock_read().list_linked_devices()).to_string())
@@ -317,15 +307,6 @@ pub fn list_linked_devices() -> String {
 
 pub fn is_secondary_device() -> bool {
     catch_panic(|| crate::core_lock_read().own_device_add.is_some()).unwrap_or(false)
-}
-
-/// See `P2PCore::forget_revoked_linked_device`.
-pub fn forget_revoked_linked_device(device_fingerprint: &str) -> String {
-    let fp = device_fingerprint.to_string();
-    ok_result(catch_panic(move || {
-        let _guard = RUNTIME.enter();
-        core_lock().forget_revoked_linked_device(&fp)
-    }))
 }
 
 pub fn revoke_linked_device(device_fingerprint: &str) -> String {
@@ -1006,24 +987,6 @@ pub fn export_recovery(passphrase: &str) -> Vec<u8> {
     }
 }
 
-pub fn import_recovery(file_bytes: &[u8], passphrase: &str, device_name: &str) -> String {
-    let raw = file_bytes.to_vec();
-    // bkz. M-23 aynı notu — bu fonksiyonun parola kopyası da siliniyor.
-    let pass = zeroize::Zeroizing::new(passphrase.to_string());
-    let name = device_name.to_string();
-    // M-21: precheck under the lock, Argon2 + decrypt without it, then the
-    // import under the lock again (it repeats the precheck).
-    string_result(catch_panic(move || -> Result<String, String> {
-        crate::core_lock_read().import_recovery_precheck()?;
-        let plaintext = crate::open_recovery_file(&raw, &pass)?;
-        let mut core = core_lock();
-        let (id, bundle_bytes) = core.import_recovery_plaintext(&plaintext, name)?;
-        zeroize::Zeroize::zeroize(&mut core.pending_secret_bundle);
-        core.pending_secret_bundle = Some(bundle_bytes);
-        Ok(id)
-    }))
-}
-
 /// JSON dizisi dönen çağrıların panik yolu — JNI tarafındaki
 /// `unwrap_or_else(|_| "[]")` deseninin aynısı.
 /// JNI `listReactions`: the stored reactions of a message, for a chat that is
@@ -1099,7 +1062,7 @@ pub fn fetch_server_history(chat_key: &str, is_group: bool, before_timestamp: i6
 /// bu anahtar CİHAZA değil KİMLİĞE ait — aynı kimliğin bütün cihazları
 /// sunucudaki arşivi okuyabilmeli.
 pub fn set_archive_root_key(key_bytes: &[u8]) -> bool {
-    let key = key_bytes.to_vec();
+    let key = zeroize::Zeroizing::new(key_bytes.to_vec());
     catch_panic(move || core_lock().set_archive_root_key(&key)).unwrap_or(false)
 }
 

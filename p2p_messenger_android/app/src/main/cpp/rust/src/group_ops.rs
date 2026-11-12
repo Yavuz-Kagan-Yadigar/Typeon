@@ -156,10 +156,9 @@ impl P2PCore {
         if group.version == 0 {
             return Err("Grup henüz yayınlanmadı".to_string());
         }
-        let change = match &group.avatar_jpeg {
-            Some(a) => GroupChange::AvatarUpdate(Some(a.clone())),
-            None => GroupChange::Rename(group.name.clone()),
-        };
+        // "No avatar" is state too (fable E-11): a Rename left a member that
+        // missed `AvatarUpdate(None)` with the old picture.
+        let change = GroupChange::AvatarUpdate(group.avatar_jpeg.clone());
         let members = group.member_identity_ids();
         let vouched = self.collect_vouched_member_devices(&group.group_id, &members);
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
@@ -510,6 +509,10 @@ impl P2PCore {
                 params![group_id, version, founder],
             );
         }
+        // Owner decision (fable E-02): a group deleted for everyone or one we
+        // were removed from leaves no messages or files here. A voluntary
+        // leave keeps them.
+        let _ = self.clear_group_history(group_id);
         Ok(())
     }
 
@@ -569,16 +572,27 @@ impl P2PCore {
     /// Grup kaydını bellekten ve diskten kaldırır (bkz. `delete_group` /
     /// `process_group_update` Delete kolu).
     pub(crate) fn remove_group_locally(&mut self, group_id: &str) {
-        let (version, founder) = self.groups.remove(group_id).map_or((0, String::new()), |g| (g.version, g.founder_identity_id));
+        let (version, founder) = self.groups.get(group_id).map_or((0, String::new()), |g| (g.version, g.founder_identity_id.clone()));
+        // One transaction (fable E-12): a kill between the two left the group
+        // gone but not marked removed, and an old founder-signed update that
+        // names us re-created it. On failure the group stays, in memory too.
         if let Some(conn) = &self.db {
-            let _ = conn.execute("DELETE FROM groups WHERE group_id = ?1", params![group_id]);
-            // bkz. `group_removed_locally`. Cleared when the founder adds us again.
-            let _ = conn.execute(
-                "INSERT INTO removed_groups (group_id, version, founder) VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(group_id) DO UPDATE SET version = MAX(version, excluded.version), founder = excluded.founder",
-                params![group_id, version, founder],
-            );
+            let done = conn.unchecked_transaction().and_then(|tx| {
+                tx.execute("DELETE FROM groups WHERE group_id = ?1", params![group_id])?;
+                // bkz. `group_removed_locally`. Cleared when the founder adds us again.
+                tx.execute(
+                    "INSERT INTO removed_groups (group_id, version, founder) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT(group_id) DO UPDATE SET version = MAX(version, excluded.version), founder = excluded.founder",
+                    params![group_id, version, founder],
+                )?;
+                tx.commit()
+            });
+            if let Err(e) = done {
+                error!("Grup kaldırılamadı ({}): {}", group_id, e);
+                return;
+            }
         }
+        self.groups.remove(group_id);
         // bkz. `pending_group_syncs` dokümantasyonu — artık var olmayan bir
         // grup için sonsuza dek yeniden denenmesin.
         self.pending_group_syncs.retain(|(gid, _), _| gid != group_id);
@@ -854,6 +868,7 @@ impl P2PCore {
                 // device took, and everything after it (order), stays queued.
                 // A sent entry has its own durable retry (`publish_with_ack_tracking`).
                 let mut unsent: Vec<MessageContent> = Vec::new();
+                let total = queued.len();
                 for content in queued {
                     if unsent.is_empty() {
                         let mut ok = false;
@@ -875,6 +890,13 @@ impl P2PCore {
                         }
                     }
                     unsent.push(content);
+                }
+                // Nothing went out: the stored rows are still right. Rewriting
+                // them every sweep wrote ~2 MB per stuck member each 20 s
+                // (fable E-03).
+                if unsent.len() == total {
+                    self.pending_group_messages.insert((group_id.clone(), member_identity_id.clone()), unsent);
+                    continue;
                 }
                 self.remove_persisted_pending_group_messages(&group_id, &member_identity_id);
                 if !unsent.is_empty() {
@@ -932,12 +954,12 @@ impl P2PCore {
     /// founder. Without that floor an old transfer could be replayed: F hands
     /// over to A (v5), A hands back (v9), and anyone holding the v5 blob made
     /// A founder again.
-    pub(crate) fn heal_founder_chain(&self, group_id: &str, current_founder: &str, local_chain: &[packet::FounderTransfer], chain: &[packet::FounderTransfer], new_version: u32) -> Vec<packet::FounderTransfer> {
+    pub(crate) fn heal_founder_chain(&self, group_id: &str, current_founder: &str, local_chain: &[packet::FounderTransfer], chain: &[packet::FounderTransfer], new_version: u32, min_floor: u32) -> Vec<packet::FounderTransfer> {
         let mut walked = Vec::new();
         let mut sorted: Vec<&packet::FounderTransfer> = chain.iter().collect();
         sorted.sort_by_key(|t| t.version);
         let mut founder = current_founder.to_string();
-        let mut floor = founder_transfer_floor(local_chain, current_founder);
+        let mut floor = founder_transfer_floor(local_chain, current_founder).max(min_floor);
         // `< new_version`: the transfer of this very update is applied by
         // `apply_change`. Walked here, it moved the founder before
         // `validate_group_update` ran and the founder's own handover was
@@ -1094,8 +1116,12 @@ impl P2PCore {
         // olarak `NotFounder` reddini önlemek için var. Zincirdeki her
         // girdi kendi imzasını taşıdığından bu, yetkiyi gevşetmiyor: uydurma
         // bir zincir doğrulamadan geçemez.
+        // fable E-01: for a group we left, the stored founder already holds
+        // every transfer up to the version we left at; an older carried
+        // transfer is a replay.
+        let min_floor = removed.as_ref().map_or(0, |(v, _)| *v);
         let walked = self.heal_founder_chain(
-            &update.group_id, &group_ref.founder_identity_id, &group_ref.founder_chain, &update.founder_chain, update.new_version,
+            &update.group_id, &group_ref.founder_identity_id, &group_ref.founder_chain, &update.founder_chain, update.new_version, min_floor,
         );
         if let Some(last) = walked.last() {
             // Only on the working copy. The stored group takes the new
@@ -1128,6 +1154,12 @@ impl P2PCore {
         let mut check = group_ref.clone();
         if retake {
             check.version -= 1;
+        }
+        // The jump limit means something only against a version we hold
+        // (fable E-04): past 4096 a group could take no new member. A group
+        // we left keeps its own guard below (`removed`).
+        if !group_exists {
+            check.version = update.new_version.saturating_sub(1);
         }
         let gap = group_exists && update.new_version > group_ref.version.saturating_add(1);
         if let Err(e) = validate_group_update(&check, &update.signed_by, signer_is_active, update.new_version) {
@@ -1169,6 +1201,24 @@ impl P2PCore {
                         self.set_group_avatar_version(&update.group_id, update.new_version);
                     }
                 }
+                // A late Add of a current member: it was removed and added
+                // again while we missed the removal; its join time restarts
+                // or it was handed the history of its absence (fable E-08).
+                if let GroupChange::Add(id) = &update.change {
+                    let now = current_time_ms();
+                    let mut changed = false;
+                    if let Some(g) = self.groups.get_mut(&update.group_id) {
+                        if let Some(m) = g.members.iter_mut().find(|m| &m.identity_id == id) {
+                            m.added_at = m.added_at.max(now);
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        if let Some(g) = self.groups.get(&update.group_id) {
+                            self.persist_group(g);
+                        }
+                    }
+                }
                 info!("GroupUpdate zaten uygulanmış/bayat (group={}, gelen version={}, yerel version={}) — zararsız, onaylanıyor", update.group_id, update.new_version, group_ref.version);
                 return Ok(());
             }
@@ -1191,6 +1241,20 @@ impl P2PCore {
         // yerel kaydı kaldır ve çık (aşağıdaki alan güncelleme yolu
         // uygulanmaz). Yetki zaten yukarıda `validate_group_update` ile
         // doğrulandı (yalnızca kurucu).
+        // A Delete for a group not held here (fable E-10): no row for an id
+        // never held (any contact could add rows for ids bound to itself),
+        // and for one we left only its version moves; its founder stays.
+        if matches!(update.change, GroupChange::Delete) && !group_exists {
+            if removed.is_some() {
+                if let Some(conn) = &self.db {
+                    let _ = conn.execute(
+                        "UPDATE removed_groups SET version = MAX(version, ?2) WHERE group_id = ?1",
+                        params![update.group_id, update.new_version],
+                    );
+                }
+            }
+            return Ok(());
+        }
         if matches!(update.change, GroupChange::Delete) {
             info!("Grup kurucusu tarafından silindi: {}", update.group_id);
             // The version of the Delete, not the local one: an update between
@@ -1199,6 +1263,7 @@ impl P2PCore {
                 g.version = update.new_version;
             }
             self.remove_group_locally(&update.group_id);
+            let _ = self.clear_group_history(&update.group_id); // E-02, see `delete_group`
             return Ok(());
         }
 
@@ -1318,6 +1383,7 @@ impl P2PCore {
         if matches!(&update.change, GroupChange::Remove(id) if *id == me) && !me.is_empty() {
             info!("Kurucu bizi gruptan çıkardı: {}", update.group_id);
             self.remove_group_locally(&update.group_id);
+            let _ = self.clear_group_history(&update.group_id); // E-02, see `delete_group`
             return Ok(());
         }
         if let Some(g) = self.groups.get(&update.group_id) {

@@ -63,8 +63,6 @@ impl P2PCore {
         // `device_to_peer_id`) için gereken PeerId eşlemesinin KAYNAĞI —
         // önceden bu bilgi okunup hemen atılıyordu.
         let mut incoming: Vec<(Option<PeerId>, Vec<u8>)> = Vec::new();
-        // (connection it came over, author, data)
-        let mut gossip_incoming: Vec<(PeerId, Option<PeerId>, Vec<u8>)> = Vec::new();
         // `true` = new, `false` = expired; in event order.
         let mut listen_addr_changes: Vec<(Multiaddr, bool)> = Vec::new();
         let mut closed_listener_ids: Vec<libp2p::core::transport::ListenerId> = Vec::new();
@@ -80,7 +78,6 @@ impl P2PCore {
         let mut new_relay_peers: Vec<(PeerId, Multiaddr)> = Vec::new();
         let mut file_chunk_events: Vec<FileChunkEventLocal> = Vec::new();
         let mut ack_events: Vec<AckEventLocal> = Vec::new();
-        let mut subscribed_peers: Vec<PeerId> = Vec::new();
         // bkz. `server_client::ServerEventLocal` — `file_chunk_events` ile
         // AYNI "önce topla, sonra işle" deseni: swarm `&mut` borrow'u
         // altındayken `self`'in tamamına erişemiyoruz.
@@ -222,18 +219,22 @@ impl P2PCore {
                         }
                         // A closed listener (a dropped relay reservation) reports
                         // its addresses here only, not as `ExpiredListenAddr`.
-                        libp2p::swarm::SwarmEvent::ListenerClosed { listener_id, addresses, .. } => {
+                        libp2p::swarm::SwarmEvent::ListenerClosed { listener_id, addresses, reason } => {
                             closed_listener_ids.push(listener_id);
+                            // The loopback listener the onion bridge feeds: listen
+                            // again, or the device stayed unreachable inbound
+                            // until restart (fable B-09). A port another app
+                            // took fails at once here, so this does not loop.
+                            for a in addresses.iter().filter(|a| is_loopback_multiaddr(a)) {
+                                warn!("Yerel dinleyici kapandı ({:?}), yeniden açılıyor: {}", reason, a);
+                                if let Err(e) = swarm.listen_on(a.clone()) {
+                                    error!("Yerel dinleyici yeniden açılamadı ({}): {}", a, e);
+                                }
+                            }
                             listen_addr_changes.extend(addresses.into_iter().map(|a| (a, false)));
                         }
-                        // Karşı taraf bir topic'imize abone oldu: yeni bağlantıda
-                        // mesh artık hazır — bekleyenleri 15 sn'lik denemeyi
-                        // beklemeden gönder (bkz. aşağıda `subscribed_peers`).
-                        libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, .. })) => {
-                            subscribed_peers.push(peer_id);
-                        }
-                        libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Gossipsub(gossipsub::Event::Message { propagation_source, message, .. })) => {
-                            gossip_incoming.push((propagation_source, message.source, message.data));
+                        libp2p::swarm::SwarmEvent::ListenerError { error, .. } => {
+                            warn!("Dinleyici hatası: {}", error);
                         }
                         libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
                             if info.protocols.iter().any(|p| p.as_ref() == KEEPALIVE_QUIET_PROTOCOL) {
@@ -288,9 +289,14 @@ impl P2PCore {
                                 is_onion_multiaddr(a) && !a.iter().any(|p| matches!(p, MultiaddrProtocol::P2pCircuit))
                             }) {
                                 new_peer_onions.push((peer_id, addr.clone()));
-                            }
-                            for addr in info.listen_addrs.into_iter().filter(|a| !is_loopback_multiaddr(a)) {
-                                swarm.behaviour_mut().kad.add_address(&peer_id, addr);
+                                // Only that one address goes to Kademlia, and only
+                                // when it names no other peer: every claimed address
+                                // was stored, and a peer-id dial then opened Tor
+                                // circuits to onion targets the peer chose (fable B-02).
+                                let other_peer = addr.iter().any(|p| matches!(p, MultiaddrProtocol::P2p(id) if id != peer_id));
+                                if !other_peer {
+                                    swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                                }
                             }
                         }
                         // DHT peers (the server node) pass on the loopback listen addresses
@@ -730,26 +736,6 @@ impl P2PCore {
                 }
             }
         }
-        // The author of a gossipsub message is a key the sender picks, a new
-        // one per message if it likes. A message that came over another peer's
-        // connection is counted on that connection (Noise-proven) first.
-        for (via, source, data) in gossip_incoming {
-            if source != Some(via) {
-                match self.rate_verdict(via) {
-                    RateVerdict::Allow => {}
-                    // A contact relaying fast: hold it like the main loop does.
-                    RateVerdict::Defer => {
-                        self.defer_incoming(source, data);
-                        continue;
-                    }
-                    RateVerdict::Drop => {
-                        debug!("Hız sınırı (aktaran eş), paket düşürüldü: via={}", crate::log_id(&via));
-                        continue;
-                    }
-                }
-            }
-            incoming.push((source, data));
-        }
         // Direct envelopes: same path as a gossipsub message, with the
         // Noise-proven sender. A packet the rate limit is about to drop gets
         // no answer: the "delivered" reply made the sender skip its early
@@ -759,6 +745,11 @@ impl P2PCore {
                 continue;
             }
             incoming.push((Some(peer), bytes));
+            // Not while the keys are not loaded (fable B-10): the packet
+            // waits, and "delivered" made the sender skip its early server copy.
+            if !self.storage_keys_ready() {
+                continue;
+            }
             if let Some(swarm) = &mut self.swarm {
                 let _ = swarm.behaviour_mut().envelopes.send_response(channel, EnvelopeResponse);
             }
@@ -936,11 +927,6 @@ impl P2PCore {
             // döngü, Tor devresi kopmalarının sessizce bozduğu gossipsub
             // aboneliğini onarır — bekleyenleri bundan ÖNCE tetiklersek ilk
             // (ve en değerli) deneme hâlâ bozuk bir mesh'e yayınlanır.
-            for fp in &fps {
-                if let Some(root_key) = self.ratchets.get(fp).map(|r| r.root_key.clone()) {
-                    self.resubscribe_ratchet_topic(None, Some(&root_key));
-                }
-            }
 
             // Spec dışı, kullanıcı geri bildirimi ("senkron çok geç geliyor"):
             // bu cihaz için onay bekleyen ne varsa HEMEN yeniden denenir.
@@ -1117,20 +1103,6 @@ impl P2PCore {
             }
         }
 
-        if !subscribed_peers.is_empty() {
-            let fps: std::collections::HashSet<String> = self.device_to_peer_id.iter()
-                .filter(|(_, pid)| subscribed_peers.contains(pid))
-                .map(|(fp, _)| fp.clone())
-                .collect();
-            let now = current_time_ms();
-            for pending in self.awaiting_confirmation.values_mut() {
-                if fps.contains(&pending.peer_device_fingerprint) && pending.next_retry_at > now
-                    && now.saturating_sub(pending.last_attempt_at) >= ACK_RETRY_INITIAL_MS
-                {
-                    pending.next_retry_at = 0; // due, and not held (bkz. `hold_retries`)
-                }
-            }
-        }
         for evt in envelope_events {
             match evt {
                 EnvelopeEventLocal::Delivered { request_id } => {
@@ -1303,6 +1275,13 @@ impl P2PCore {
         // bkz. `pending_edits_deletes` — hedefi hiç gelmeyen tamponlanmış
         // Edit/Delete paketleri süresi dolunca temizlenir.
         self.prune_pending_edits_deletes();
+        // Held content of unknown groups ages out here too, not only when
+        // another such packet arrives (fable A-02).
+        let now_wall = current_time_ms();
+        self.unknown_group_held.retain(|_, b| {
+            b.retain(|e| now_wall.saturating_sub(e.0) <= UNKNOWN_GROUP_HOLD_TTL_MS);
+            !b.is_empty()
+        });
         // bkz. `message_rate_limiter` — uzun süredir paket göndermemiş
         // peer'ların hız sınırı girdileri temizlenir.
         self.prune_rate_limiter();
@@ -1662,12 +1641,23 @@ impl P2PCore {
         })
     }
 
+    /// The Noise-proven `PeerId` is mapped to an active device we know (no
+    /// session needed). Such a peer has its own per-peer cap outside the
+    /// shared stranger budget: a few stranger connections used it up and
+    /// blocked every IdentityExchange and Handshake (fable B-05).
+    pub(crate) fn is_known_device_peer(&self, peer: PeerId) -> bool {
+        self.device_to_peer_id.iter().any(|(fp, pid)| {
+            *pid == peer && self.known_remote_devices.get(fp).map_or(false, |d| d.is_active)
+        })
+    }
+
     /// Whether `rate_verdict` is going to drop this peer's next packet. Does
     /// not count the packet.
     pub(crate) fn rate_would_drop(&self, peer: PeerId) -> bool {
         let now = mono_ms();
         let (start, count) = self.unknown_peer_rate;
-        let all_full = now.saturating_sub(start) <= RATE_LIMIT_WINDOW_MS && count >= RATE_LIMIT_MAX_UNKNOWN_TOTAL;
+        let all_full = now.saturating_sub(start) <= RATE_LIMIT_WINDOW_MS && count >= RATE_LIMIT_MAX_UNKNOWN_TOTAL
+            && !self.is_known_device_peer(peer);
         (all_full || self.message_rate_limiter.get(&peer).map_or(false, |(start, count)| {
             now.saturating_sub(*start) <= RATE_LIMIT_WINDOW_MS && *count >= RATE_LIMIT_MAX_PER_WINDOW
         })) && !self.is_established_peer(peer)
@@ -1695,7 +1685,7 @@ impl P2PCore {
             // share one budget, checked before the packet is decoded. Charged
             // only for packets within the peer's own cap: one peer then takes
             // at most its share, not the whole budget.
-            if !established && !window_allow(&mut self.unknown_peer_rate, RATE_LIMIT_MAX_UNKNOWN_TOTAL) {
+            if !established && !self.is_known_device_peer(peer) && !window_allow(&mut self.unknown_peer_rate, RATE_LIMIT_MAX_UNKNOWN_TOTAL) {
                 return RateVerdict::Drop;
             }
             RateVerdict::Allow
@@ -1705,6 +1695,14 @@ impl P2PCore {
             entry.1 -= 1;
             RateVerdict::Defer
         } else {
+            // Over its own cap and not a device we know: the connection goes
+            // (it kept its slot for the whole unknown-peer grace before).
+            // Once per window, at the first packet over the cap.
+            if entry.1 == max_per_window + 1 && !self.is_known_device_peer(peer) && !self.is_server_peer(&peer) {
+                if let Some(swarm) = &mut self.swarm {
+                    let _ = swarm.disconnect_peer_id(peer);
+                }
+            }
             RateVerdict::Drop
         }
     }
@@ -1786,21 +1784,30 @@ impl P2PCore {
         {
             self.last_inbound_dedup_prune_at = now;
             self.recent_inbound_digests
-                .retain(|_, seen_at| now.saturating_sub(*seen_at) < INBOUND_DEDUP_WINDOW_MS);
+                .retain(|_, (seen_at, _)| now.saturating_sub(*seen_at) < INBOUND_DEDUP_WINDOW_MS);
             if self.recent_inbound_digests.len() > INBOUND_DEDUP_MAX_ENTRIES {
                 // Still over the cap: the older half goes. Clearing it all
                 // let a flood make every retried packet be verified again.
                 // By count, not by a time cutoff: under a flood the entries
                 // share a millisecond and a `> median` test kept none.
-                let mut entries: Vec<(u64, u64)> = self.recent_inbound_digests.drain().collect();
-                entries.sort_unstable_by_key(|e| std::cmp::Reverse(e.1));
+                let mut entries: Vec<(u64, (u64, bool))> = self.recent_inbound_digests.drain().collect();
+                entries.sort_unstable_by_key(|e| std::cmp::Reverse(e.1 .0));
                 entries.truncate(INBOUND_DEDUP_MAX_ENTRIES / 2);
                 self.recent_inbound_digests.extend(entries);
             }
         }
         let seen_at = self.recent_inbound_digests.get(&digest).copied();
-        if let Some(seen_at) = seen_at {
+        if let Some((seen_at, first_ok)) = seen_at {
             if now.saturating_sub(seen_at) < INBOUND_DEDUP_WINDOW_MS {
+                // fable B-03: a server item whose first pass failed fails
+                // again, so `server_item_failed` holds it once more. An
+                // `Ok(None)` here let the server copy be acked and deleted.
+                if !first_ok {
+                    if source.is_none() {
+                        return Err("Aynı zarf az önce işlenemedi".to_string());
+                    }
+                    return Ok(None);
+                }
                 // The time stamp is NOT refreshed: the sender retries every
                 // 15-120 s, so a window that slides never ended.
                 // Bu zarfın bayt-aynısı bir kopyasını bu pencerede zaten
@@ -1810,7 +1817,9 @@ impl P2PCore {
                 // `message_id`'yi düz taşır ve ilk geçişte zaten doğrulandı;
                 // yalnızca arşivde GERÇEKTEN varsa Ack atıyoruz — hâlâ teslim
                 // edilmemiş bir mesajı yanlışlıkla onaylamayız).
-                if let Ok(NetworkEnvelope::Message(m)) = ciborium::from_reader(raw) {
+                // Only after a first pass that succeeded (fable A-09/H-08):
+                // a failed one may never have verified this header.
+                if let Ok(NetworkEnvelope::Message(m)) = NetworkEnvelope::from_cbor(raw) {
                     self.reack_if_already_handled(&m.header);
                 }
                 return Ok(None);
@@ -1842,9 +1851,9 @@ impl P2PCore {
         // was deleted and paired again within the window got no answer. It
         // is remembered for 30 s, like a failed packet.
         let short = result.is_err()
-            || matches!(ciborium::from_reader::<NetworkEnvelope, _>(raw), Ok(NetworkEnvelope::IdentityExchange(_)));
+            || matches!(NetworkEnvelope::from_cbor(raw), Ok(NetworkEnvelope::IdentityExchange(_)));
         let seen_at = if short { now.saturating_sub(INBOUND_DEDUP_WINDOW_MS - 30_000) } else { now };
-        self.recent_inbound_digests.insert(digest, seen_at);
+        self.recent_inbound_digests.insert(digest, (seen_at, result.is_ok()));
         result
     }
 
@@ -1857,7 +1866,7 @@ impl P2PCore {
         // Hız sınırı artık BURADA değil, `poll_events`'in gelen döngüsünde
         // uygulanıyor — çünkü "ertele" sonucu (bkz. `RateVerdict::Defer`)
         // paketi geri kuyruğa koymayı gerektiriyor ve bu, döngünün işi.
-        let envelope: NetworkEnvelope = ciborium::from_reader(raw).map_err(|e| e.to_string())?;
+        let envelope = NetworkEnvelope::from_cbor(raw)?;
         // bkz. `blocked_identities`: engelli bir kişiden gelen HİÇBİR paket
         // işlenmez — ne mesaj, ne el sıkışma, ne de kimlik tanıtımı. Uyarı
         // da üretilmez, aksi halde engellenen taraf "yeni cihaz" uyarısı

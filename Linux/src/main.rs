@@ -108,6 +108,7 @@ fn activate(application: &adw::Application) {
         existing.present();
         return;
     }
+    call_media::prewarm();
 
     let data_dir = data_directory();
     // 0700 on the one directory everything lives under: settings, the

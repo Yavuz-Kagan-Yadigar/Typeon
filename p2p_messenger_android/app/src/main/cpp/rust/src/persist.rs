@@ -59,8 +59,9 @@ impl P2PCore {
         };
 
         let persistable = state.to_persistable();
+        // Root, chain and ratchet secret keys: wiped when dropped (fable A-11/H-05).
         let plaintext = match ciborium_bytes(&persistable) {
-            Ok(b) => b,
+            Ok(b) => zeroize::Zeroizing::new(b),
             Err(e) => { error!("Ratchet state serileştirilemedi: {}", e); return false; }
         };
 
@@ -69,11 +70,23 @@ impl P2PCore {
             return false;
         };
 
+        // fable H-01: with WAL and synchronous=NORMAL a commit that returned
+        // can still be lost on power loss; the send chain then rolled back
+        // and the next message reused a key and nonce. This commit is synced
+        // (FULL: the WAL is synced at commit), the rest of the database
+        // keeps NORMAL. Inside an open transaction the pragma is left alone.
+        let durable = conn.is_autocommit();
+        if durable {
+            let _ = conn.pragma_update(None, "synchronous", "FULL");
+        }
         let written = conn.execute(
             "INSERT OR REPLACE INTO ratchet_states (peer_device_fingerprint, encrypted_state, nonce, updated_at)
              VALUES (?1, ?2, ?3, ?4)",
             params![peer_device_fingerprint, encrypted, nonce_bytes.to_vec(), current_time_ms() as i64],
         );
+        if durable {
+            let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        }
         if let Err(e) = &written {
             error!("Ratchet state yazılamadı ({}): {}", crate::log_id(&peer_device_fingerprint), e);
         }
@@ -105,20 +118,29 @@ impl P2PCore {
     }
 
     pub(crate) fn load_ratchet_states_from_db(&mut self) {
-        self.load_ratchet_states_from_db_inner();
+        let (rows, unopened) = self.load_ratchet_states_from_db_inner();
+        // fable A-05: when stored sessions exist and none opens, the key is
+        // wrong: the gate stays shut, or the next send replaced them one by
+        // one. One bad row among good ones is dropped as before.
+        if rows > 0 && unopened == rows {
+            error!("Hiçbir oturum durumu çözülemedi ({} satır): anahtar yanlış, gönderim kapısı kapalı", rows);
+            self.attachment_events.push(serde_json::json!({"type": "session_load_failed", "rows": rows}).to_string());
+            return;
+        }
         if self.skipped_key_encryption_key.is_some() && self.db.is_some() {
             self.ratchets_loaded = true;
         }
     }
 
-    pub(crate) fn load_ratchet_states_from_db_inner(&mut self) {
+    /// (rows read, rows that did not open).
+    pub(crate) fn load_ratchet_states_from_db_inner(&mut self) -> (usize, usize) {
         let enc_key = match &self.skipped_key_encryption_key {
             Some(k) => *k,
-            None => return,
+            None => return (0, 0),
         };
         let conn = match &self.db {
             Some(c) => c,
-            None => return,
+            None => return (0, 0),
         };
 
         use chacha20poly1305::aead::{Aead, KeyInit};
@@ -126,14 +148,14 @@ impl P2PCore {
 
         let cipher = match ChaCha20Poly1305::new_from_slice(&enc_key) {
             Ok(c) => c,
-            Err(_) => return,
+            Err(_) => return (0, 0),
         };
 
         let mut stmt = match conn.prepare(
             "SELECT peer_device_fingerprint, encrypted_state, nonce FROM ratchet_states"
         ) {
             Ok(s) => s,
-            Err(_) => return,
+            Err(_) => return (0, 0),
         };
 
         let rows = stmt.query_map([], |row| {
@@ -141,16 +163,18 @@ impl P2PCore {
         });
 
         let mut loaded: Vec<(String, DeviceRatchetState)> = Vec::new();
+        let (mut read, mut unopened) = (0usize, 0usize);
         if let Ok(rows) = rows {
             for row in rows.flatten() {
                 let (peer_fp, encrypted, nonce_bytes) = row;
+                read += 1;
                 if nonce_bytes.len() != 12 {
                     continue;
                 }
                 let nonce = Nonce::from_slice(&nonce_bytes);
                 let plaintext = match cipher.decrypt(nonce, encrypted.as_slice()) {
-                    Ok(p) => p,
-                    Err(_) => { error!("Ratchet state çözülemedi ({}), atlanıyor", crate::log_id(&peer_fp)); continue; }
+                    Ok(p) => zeroize::Zeroizing::new(p),
+                    Err(_) => { unopened += 1; error!("Ratchet state çözülemedi ({}), atlanıyor", crate::log_id(&peer_fp)); continue; }
                 };
                 let persistable: ratchet::SerializableRatchetState = match ciborium::from_reader(plaintext.as_slice()) {
                     Ok(p) => p,
@@ -166,6 +190,7 @@ impl P2PCore {
         for (peer_fp, state) in loaded {
             self.ratchets.insert(peer_fp, state);
         }
+        (read, unopened)
     }
 
     /// Spec dışı, kullanıcı isteği ("gönderilemeyen mesajlar/emirler ...
@@ -354,7 +379,11 @@ impl P2PCore {
         }
         let mut count = 0usize;
         for (group_id, member_identity_id, content_cbor, row_id) in loaded {
-            let content: MessageContent = match ciborium::from_reader(self.open_local_blob(&content_cbor).unwrap_or_default().as_slice()) {
+            // A row that does not open (wrong or stale key) is kept, as in
+            // the durable-retry twin; only opened bytes that do not parse go
+            // (fable A-06).
+            let Some(plain) = self.open_local_blob(&content_cbor) else { continue };
+            let content: MessageContent = match ciborium::from_reader(plain.as_slice()) {
                 Ok(c) => c,
                 Err(e) => {
                     // Dropped like the durable-retry twin: left in place it is

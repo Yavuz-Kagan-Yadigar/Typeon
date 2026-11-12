@@ -126,7 +126,20 @@ async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // Optional SQLCipher key (64 hex chars); a plain DB is migrated on first use.
-    if let Ok(k) = std::env::var("TYPEON_SERVER_DB_KEY") {
+    // `TYPEON_SERVER_DB_KEY_FILE` (a 0600 file, or systemd `LoadCredential`)
+    // is preferred: an environment variable stays readable in
+    // /proc/<pid>/environ and in a unit file (fable I-10).
+    let from_file = std::env::var("TYPEON_SERVER_DB_KEY_FILE").ok().map(|path| {
+        std::env::remove_var("TYPEON_SERVER_DB_KEY_FILE");
+        match std::fs::read_to_string(&path) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("TYPEON_SERVER_DB_KEY_FILE: {e}");
+                std::process::exit(1);
+            }
+        }
+    });
+    if let Some(k) = from_file.or_else(|| std::env::var("TYPEON_SERVER_DB_KEY").ok()) {
         let k = zeroize::Zeroizing::new(k);
         // Keep the key out of any child process environment.
         std::env::remove_var("TYPEON_SERVER_DB_KEY");
@@ -281,7 +294,12 @@ fn devices(args: &[String]) {
                 std::process::exit(2);
             };
             match store.revoke_enrollment(&id) {
-                Ok(()) => println!("İptal edildi: {id_hex}"),
+                Ok(()) => {
+                    // fable I-09: the public join code changes too, or the
+                    // revoked device enrolls again under a fresh key.
+                    let _ = typeon_server::public_join_token(&store, true);
+                    println!("İptal edildi: {id_hex} (herkese açık katılım kodu yenilendi)");
+                }
                 Err(e) => {
                     eprintln!("İptal edilemedi: {e}");
                     std::process::exit(1);

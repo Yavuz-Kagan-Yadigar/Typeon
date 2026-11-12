@@ -77,8 +77,12 @@ fn set_status(status: &Mutex<TorStatus>, new: TorStatus) {
 
 /// Inbound onion streams bridged at once. A peer needs one per connection.
 const MAX_INBOUND_ONION_STREAMS: usize = 64;
-/// Inbound streams one rendezvous circuit may hold open.
-const MAX_STREAMS_PER_CIRCUIT: u32 = 8;
+/// Inbound streams one rendezvous circuit may hold open. Our dialer opens a
+/// fresh circuit per connection; 8 let 8 circuits hold all 64 slots (fable B-08).
+const MAX_STREAMS_PER_CIRCUIT: u32 = 3;
+/// A bridged stream that sends nothing for this long goes: libp2p's dialer
+/// speaks first, and a silent stream held its slot for the 60 s upgrade timeout.
+const INBOUND_FIRST_BYTE_SECS: u64 = 15;
 
 /// Çalışan Tor katmanının paylaşılan tutamacı. `TorClient` dial transport'u
 /// tarafından da kullanılır (bkz. `ArtiDialTransport`), bu yüzden `Arc`.
@@ -427,6 +431,12 @@ async fn bridge_incoming_stream(stream_request: tor_hsservice::StreamRequest, lo
         }
     };
 
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut first = [0u8; 512];
+    let n = match tokio::time::timeout(std::time::Duration::from_secs(INBOUND_FIRST_BYTE_SECS), tor_stream.read(&mut first)).await {
+        Ok(Ok(n)) if n > 0 => n,
+        _ => return,
+    };
     let mut tcp = match tokio::net::TcpStream::connect(("127.0.0.1", local_port)).await {
         Ok(t) => t,
         Err(e) => {
@@ -434,6 +444,9 @@ async fn bridge_incoming_stream(stream_request: tor_hsservice::StreamRequest, lo
             return;
         }
     };
+    if tcp.write_all(&first[..n]).await.is_err() {
+        return;
+    }
 
     // Çift yönlü kopyala — bağlantı kapanana kadar. DataStream tokio
     // AsyncRead/Write implement ediyor (tor-proto tokio feature).

@@ -113,7 +113,7 @@ use libp2p::multiaddr::Protocol as MultiaddrProtocol;
 use libp2p::request_response;
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::NetworkBehaviour;
-use libp2p::{gossipsub, identify, kad, noise, relay, tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm};
+use libp2p::{identify, kad, noise, relay, tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm};
 use log::{debug, error, info, warn};
 // NOT: pqcrypto-dilithium/pqcrypto-kyber yerine RustCrypto'nun aktif bakımlı
 // ml-dsa/ml-kem crate'lerine geçildi (bkz. Cargo.toml notu — RUSTSEC-2024-0380,
@@ -287,7 +287,7 @@ struct P2PCore {
     /// `ham bayt hash'i -> son görülme (ms)` haritası. Çok yollu teslimin
     /// ürettiği bayt-aynısı tekrarları, imza doğrulama/ratchet decrypt gibi
     /// pahalı işlemlerden ÖNCE, en ucuz noktada eler.
-    recent_inbound_digests: HashMap<u64, u64>,
+    recent_inbound_digests: HashMap<u64, (u64, bool)>,
     /// bkz. `reack_if_already_handled` — `message_id -> (Ack'lenen gönderen
     /// cihaz fp, Ack anı ms)`. Bellek-içi, `RECENTLY_ACKED_MAX_ENTRIES` ile sınırlı.
     recently_acked: HashMap<String, (String, u64)>,
@@ -449,6 +449,12 @@ struct P2PCore {
     /// topic kullanılıyor) ya da `PAIRING_MAILBOX_TTL_MS` dolunca abonelik
     /// bırakılır. key = peer_fp, value = abone olunma anı (ms).
     pairing_mailbox_subs: HashMap<String, u64>,
+    /// The connection a verified IdentityExchange arrived on, per device.
+    /// Only our IdentityExchange and Handshake to that device use it: the
+    /// side that showed its code has no PeerId mapping yet (the IX maps
+    /// nothing, see `process_identity_exchange`), and without gossipsub its
+    /// reply had no path but a server. Dropped once a ratchet exists.
+    pairing_reply_peer: HashMap<String, PeerId>,
     /// Çoklu-cihaz: BU cihaz ikincil olarak bir kimliğe bağlandıysa, onaylayan
     /// (birincil) cihazın bize verdiği imzalı `DeviceAdd` — kişilere kendimizi
     /// tanıtırken (`DeviceAddNotice`) kanıt olarak kullanılır. Diske
@@ -475,7 +481,7 @@ struct P2PCore {
     /// kutular bildirildi) — kalıcı DEĞİL, her açılışta yeniden kurulur.
     server_rt: HashMap<String, server_client::ServerRuntime>,
     /// Havada bekleyen sunucu RPC'leri. Bir `Deposit` başarısız olursa bu
-    /// haritadaki zarf gossipsub'a düşürülür (bkz. `retry_deposit_over_gossipsub`).
+    /// haritadaki zarf gossipsub'a düşürülür (bkz. `requeue_failed_deposit`).
     server_inflight: HashMap<request_response::OutboundRequestId, server_client::ServerInflight>,
     /// `(server_id, mailbox_id) -> işlenmiş en yüksek seq`. KALICI: bu
     /// olmadan her yeniden başlatma bütün kutuyu baştan işlerdi.

@@ -327,13 +327,17 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
                 // it used to join the replies verbatim, so one page-full error
                 // collapsed to "" — an id array shorter than the stroke list,
                 // and the next undo removed only the successful prefix.
-                val ids = ByteArray(step.strokes.size * 8)
+                // A stroke over 512 points comes back as several segment ids
+                // (8 bytes each): collect what the core returned, so the
+                // rollback and the next undo use the real ids (fable G-06).
+                val collected = java.io.ByteArrayOutputStream()
                 var ok = true
-                step.strokes.forEachIndexed { i, s ->
+                step.strokes.forEach { s ->
                     val r = P2PLib.whiteboardAddStroke(peer, groupId, step.page, s.shade, s.width, pointBytes(s))
                     val b = if (r.startsWith("Error")) null else hexToBytes(r)
-                    if (b == null || b.size != 8) ok = false else b.copyInto(ids, i * 8)
+                    if (b == null || b.isEmpty() || b.size % 8 != 0) ok = false else collected.write(b)
                 }
+                val ids = collected.toByteArray()
                 if (ok) {
                     step.ids = ids
                     step.live = !step.live

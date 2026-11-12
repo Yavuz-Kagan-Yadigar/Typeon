@@ -112,7 +112,6 @@ pub(crate) struct P2PBehaviour {
     /// gönderebilmesi için (yoksa istemcinin sürekli yoklaması gerekirdi,
     /// bir telefonda bu doğrudan pil demek).
     pub(crate) server_rpc: request_response::cbor::Behaviour<server_proto::ServerRequest, server_proto::ServerResponse>,
-    pub(crate) gossipsub: gossipsub::Behaviour,
     pub(crate) kad: kad::Behaviour<MemoryStore>,
     pub(crate) identify: identify::Behaviour,
     /// Spec dışı, kullanıcı isteği (bağlantı sağlamlığı + pil): aktif

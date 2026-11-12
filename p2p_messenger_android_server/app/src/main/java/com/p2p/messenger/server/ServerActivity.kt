@@ -367,6 +367,9 @@ class ServerActivity : AppCompatActivity() {
                 Toast.makeText(this, serverErrorText(this, res), Toast.LENGTH_LONG).show()
             }
             lastDevicesJson = null
+            // Block and revoke rotate the public join code: show the new one
+            // on the next poll, not the dead one (fable I-11).
+            lastInvite = null
             refreshStatus()
         }
     }

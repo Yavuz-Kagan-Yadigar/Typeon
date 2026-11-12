@@ -21,7 +21,7 @@
     <string name="device_row_fmt">%1$s… · %2$s</string>
     <string name="action_revoke">İptal et</string>
     <string name="dlg_revoke_title">Bu cihazın kaydı iptal edilsin mi?</string>
-    <string name="dlg_revoke_body">Artık mesaj bırakamaz ve alamaz; siz engeli kaldırana kadar yeniden kaydolamaz. Mesajlaşma uygulaması çalışmaya devam eder — sadece doğrudan eşler arası teslime döner. İptal yalnızca bu kayıt anahtarını engeller; gerçekten yasaklamak için katılım kodunu yenileyin.</string>
+    <string name="dlg_revoke_body">Artık mesaj bırakamaz ve alamaz; siz engeli kaldırana kadar yeniden kaydolamaz. Mesajlaşma uygulaması çalışmaya devam eder — sadece doğrudan eşler arası teslime döner. İptal herkese açık katılım kodunu da yeniler; yenisini diğerlerine verin.</string>
 
     <string name="lbl_stats">Etkinlik</string>
     <string name="stats_fmt">Cihaz: %1$d\nSaklanan: %2$d · Çekilen: %3$d · Servis edilen dosya parçası: %4$d\nDisk: %5$s</string>

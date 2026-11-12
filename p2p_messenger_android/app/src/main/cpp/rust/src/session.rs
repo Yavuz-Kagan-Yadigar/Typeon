@@ -208,9 +208,11 @@ impl P2PCore {
         // Eski arayüzdeki bağlantılar ölü olabilir: hepsini hemen yokla, ölen
         // tek zaman aşımında kapanır (yaşayanlara dokunulmaz — mobil→Wi-Fi
         // geçişinde mobil bağlantılar çalışmaya devam eder).
-        let peers: Vec<PeerId> = self.keepalive_state.keys().copied().collect();
+        // Not servers (fable B-07): they are never probed, so the flag stayed
+        // set and the next bulk connection closed the working one.
+        let peers: Vec<PeerId> = self.keepalive_state.keys().copied().filter(|p| !self.is_server_peer(p)).collect();
         for p in peers {
-            self.mark_connection_suspect(p);
+            self.mark_connection_suspect(p, true);
         }
         self.fast_reconnect_until = mono_ms() + FAST_RECONNECT_WINDOW_MS;
         // Saver: the forced dial and the fast window are for the peers that
@@ -373,15 +375,12 @@ impl P2PCore {
     /// Puts a fresh session in place and stores it. A failed write puts the
     /// previous session back (memory and disk then agree) and is an error.
     pub(crate) fn install_ratchet(&mut self, fp: &str, state: DeviceRatchetState) -> Result<(), String> {
-        let root = state.root_key.clone();
-        self.resubscribe_ratchet_topic(None, Some(&root));
         let previous = self.ratchets.insert(fp.to_string(), state);
         if self.persist_ratchet_state(fp) {
             // Keys of the replaced session must not be loaded onto the new one.
             self.clear_persisted_skipped_keys(fp);
             return Ok(());
         }
-        self.resubscribe_ratchet_topic(Some(&root), None);
         match previous {
             Some(p) => { self.ratchets.insert(fp.to_string(), p); }
             None => { self.ratchets.remove(fp); }
@@ -544,7 +543,7 @@ impl P2PCore {
     pub(crate) fn chain_stamp_for(&self, peer_device_fingerprint: &str) -> String {
         self.ratchets
             .get(peer_device_fingerprint)
-            .map(|r| Self::topic_for_root_key(&r.root_key).to_string())
+            .map(|r| Self::topic_for_root_key(&r.root_handle_now()).to_string())
             .unwrap_or_default()
     }
 
@@ -578,7 +577,7 @@ impl P2PCore {
             return;
         }
         warn!("Karşı taraftan {} paket çözülemedi, oturumlar ayrışmış — el sıkışma yenileniyor: {}", UNDECRYPTABLE_BEFORE_REHANDSHAKE, &fp[..fp.len().min(8)]);
-        let stale = self.ratchets.get(fp).map(|s| s.root_key.clone());
+        let stale = self.ratchets.get(fp).map(|s| s.root_handle_now());
         self.last_handshake_redo.insert(fp.to_string(), (now, stale));
         if let Err(e) = self.initiate_handshake_with(fp) {
             warn!("El sıkışma yenilenemedi: {}", e);
@@ -637,15 +636,9 @@ impl P2PCore {
             "El sıkışma tazeleniyor (peer={}) — bu oturumda karşı taraftan hiç paket alınmadı ve bekleyen mesaj {} ms'i aştı; HandshakeInit'imiz hiç ulaşmamış olabilir",
             crate::log_id(&peer_device_fingerprint), MAX_UNCONFIRMED_AGE_MS
         );
-        // Bir ÖNCEKİ tazelemede terk edilen topic'in aboneliğini ANCAK ŞİMDİ
-        // bırak (bkz. `last_handshake_redo` alan notu / `maybe_rotate_ratchet`
-        // aynı gerekçe: karşı taraf o topic'ten hâlâ yayın yapıyor olabilir).
-        if let Some(stale) = &stale_root {
-            self.resubscribe_ratchet_topic(Some(stale.as_slice()), None);
-        }
-        let before = self.ratchets.get(peer_device_fingerprint).map(|s| s.root_key.clone());
+        let before = self.ratchets.get(peer_device_fingerprint).map(|s| s.root_handle_now());
         let result = self.initiate_handshake_with(peer_device_fingerprint);
-        let after = self.ratchets.get(peer_device_fingerprint).map(|s| s.root_key.clone());
+        let after = self.ratchets.get(peer_device_fingerprint).map(|s| s.root_handle_now());
         let replaced = before != after;
         // Terk edilen kök anahtar bir SONRAKİ tazelemede bırakılmak üzere
         // saklanır; oturum değişmediyse eldeki bayat kayıt korunur.
@@ -874,7 +867,10 @@ impl P2PCore {
             // An init older than the session we hold (H37: not only one that
             // waited past the skew window): the sender has moved on from it.
             // Inside the collision window the rule below decides instead.
-            if !same_round && handshake.timestamp < existing.last_rotation {
+            // Two clocks: the sender's against ours. Within the skew this
+            // check already accepts above, it is no proof of "older"
+            // (fable A-03); replays are caught by the signature list.
+            if !same_round && handshake.timestamp.saturating_add(HANDSHAKE_MAX_SKEW_MS) < existing.last_rotation {
                 info!("HandshakeInit yok sayıldı (peer={}) — oturumdan eski", crate::log_id(&handshake.sender_device_fingerprint));
                 return Ok(());
             }
@@ -909,7 +905,7 @@ impl P2PCore {
                     let fp = handshake.sender_device_fingerprint.clone();
                     warn!("HandshakeInit bilinmeyen prekey kullanıyor (peer={}, id={}) — el sıkışma bizden yenileniyor", &fp[..fp.len().min(8)], handshake.recipient_prekey_id);
                     if self.last_handshake_redo.get(&fp).map_or(true, |(t, _)| now.saturating_sub(*t) >= UNDECRYPTABLE_REDO_MIN_INTERVAL_MS) {
-                        let stale = self.ratchets.get(&fp).map(|s| s.root_key.clone());
+                        let stale = self.ratchets.get(&fp).map(|s| s.root_handle_now());
                         self.last_handshake_redo.insert(fp.clone(), (now, stale));
                         if self.initiate_handshake_with(&fp).is_ok() {
                             self.regen_pending_for_peer(&fp);
@@ -920,16 +916,26 @@ impl P2PCore {
             }
         };
 
-        let state = DeviceRatchetState::respond(
+        let installed = DeviceRatchetState::respond(
             own_kem_x25519,
             own_kem_mlkem,
             &handshake.initiator_x25519_pubkey,
             &handshake.initiator_kyber_pubkey,
             &handshake.kyber_ciphertext,
             now,
-        )?;
-
-        self.install_ratchet(&handshake.sender_device_fingerprint, state)?;
+        )
+        .map_err(|e| e.to_string())
+        .and_then(|state| self.install_ratchet(&handshake.sender_device_fingerprint, state));
+        if let Err(e) = installed {
+            // A local failure (write error) is no decision about this init:
+            // forget it, so the sender's retry of the same bytes is taken
+            // (fable A-07).
+            if let Some(seen) = self.recent_handshake_sigs.get_mut(&handshake.sender_device_fingerprint) {
+                seen.retain(|(_, sig)| sig != &handshake.signature_classical);
+            }
+            self.persist_handshake_sigs(&handshake.sender_device_fingerprint);
+            return Err(e);
+        }
         self.id0_inits.remove(&handshake.sender_device_fingerprint);
         self.record_peer_id_if_known(source, &handshake.sender_device_fingerprint);
         // bkz. `pairing_mailbox_subs` — ratchet kuruldu, eşleşme-dönemi
@@ -954,27 +960,20 @@ impl P2PCore {
             return Ok(None);
         }
         if let Some(state) = self.ratchets.get_mut(peer_device_fingerprint) {
-            // Bir ÖNCEKİ rotasyondan kalan (perform_dh_ratchet birazdan
-            // üzerine yazacak, artık iki nesil eski) topic — aboneliği
-            // ancak şimdi bırakılır (bkz. aşağıdaki resubscribe notu).
-            let dropped_prev = state.prev_root_key.clone();
+            // fable A-18: memory goes back to this if the rotated state
+            // cannot be written.
+            let snapshot = state.clone();
             let kyber_ct = state.perform_dh_ratchet(now)?;
-            let new_root_key = state.root_key.clone();
-            // bkz. `topic_for_root_key` dokümantasyonu — yeni root_key
-            // topic'ine abone ol. Güvenilirlik düzeltmesi: az önceki (bir
-            // önceki root'a ait) topic'in aboneliği HEMEN bırakılMIYOR —
-            // karşı taraf rotasyon duyurumuzu alana kadar bize hâlâ ESKİ
-            // topic'ten yayın yapar (kendi root'u değişmedi); erken
-            // abonelik iptali o pencerede gelen her paketi kaçırırdı.
-            // Eski topic bir SONRAKİ rotasyonda (dropped_prev) bırakılır.
-            self.resubscribe_ratchet_topic(dropped_prev.as_deref(), Some(&new_root_key));
+            // State first, then the table (as in `receive_message`): stopped
+            // in between, the disk held the old state without its skipped keys.
+            if !self.persist_ratchet_state(peer_device_fingerprint) {
+                self.ratchets.insert(peer_device_fingerprint.to_string(), snapshot);
+                return Err("Oturum durumu yazılamadı, rotasyon duyurulmadı".to_string());
+            }
             // Biz rotasyonu tetikledik — eski zincirin skipped-key'leri
             // state'in içine taşındı (`old_recv`), tablodaki kopyaları
             // artık yeni zincirin numaralarıyla çakışırdı.
             self.clear_persisted_skipped_keys(peer_device_fingerprint);
-            if !self.persist_ratchet_state(peer_device_fingerprint) {
-                return Err("Oturum durumu yazılamadı, rotasyon duyurulmadı".to_string());
-            }
             return Ok(Some(kyber_ct));
         }
         Ok(None)
