@@ -1,11 +1,9 @@
 //! The conversation view — one implementation for both 1:1 and group chats.
-//!
 //! On Android these are two ~2200-line activities that duplicate each other
 //! almost line for line, differing only in which core call to use and whether
 //! a sender name belongs on the bubble. Here that difference is a two-armed
 //! `Conversation` match, so a fix to bubble ordering, reply handling or
 //! attachment state lands in both at once.
-//!
 //! Message identity is the thing to get right. Every bubble is keyed by the
 //! id the core considers stable for it — the shared conversation id for 1:1
 //! (so an edit, delete or read receipt from the peer lands on the same bubble
@@ -29,14 +27,13 @@ use crate::util;
 
 /// How many messages a page of history holds, matching the Android chat.
 const PAGE_SIZE: u32 = 50;
-/// H128: hard cap on bubbles kept alive in one open chat. ~8 GTK widgets per
+/// hard cap on bubbles kept alive in one open chat. ~8 GTK widgets per
 /// bubble; past this the oldest page is dropped from the view (the archive
 /// still has everything — scrolling up again, or reopening the chat, brings
 /// it back). 600 ≈ 12 pages of history on screen at once.
 const MAX_BUBBLES: usize = 600;
 const FETCH_HISTORY_LABEL: &str = "Fetch older history";
 /// Hard cap on bubble width, in pixels.
-///
 /// A wrapping GtkLabel's `max-width-chars` turned out not to bound the
 /// allocation here — measured naturals of ~310px were still being allocated
 /// 872px, so long messages stretched the full width of the window and ran off
@@ -47,7 +44,6 @@ const BUBBLE_MAX_WIDTH: i32 = 460;
 /// Android `MergedBubbleDecoration`, AYNI eşik): art arda, aynı göndericiden,
 /// bu pencere içinde gelen mesajlar tek bir görsel grup gibi birleşir —
 /// köşeleri değen kenarlarda küçülür, aralarındaki boşluk daralır.
-///
 /// Android'in tam union-path çizimi burada YOK: GTK CSS'te web'deki
 /// `::before`/`::after` sözde-öğeleri karşılığı olmadığından "arka planla
 /// aynı renkte bir yama ile köşeyi ye" numarası bile AYRI bir widget
@@ -120,7 +116,7 @@ struct Entry {
     /// fresh on screen.
     edited: bool,
     attachment: Option<Attachment>,
-    /// Spec dışı, hata düzeltmesi (kullanıcı: "flatpakda bu son ui
+    /// "flatpakda bu son ui
     /// düzeltmelerini hiçbirini görmüyorum" — Android tarafında aynı hata
     /// zaten düzeltilmişti, bkz. db.rs `message_seen` tablosu): önceden bu
     /// alan hiç yoktu, `build_bubble` her zaman `false` ile başlıyordu —
@@ -188,7 +184,6 @@ struct Bubble {
 
 /// Live, mutable state for one attachment bubble, plus the widgets `file_*`
 /// events update.
-///
 /// This exists (rather than the click handlers simply closing over a cloned
 /// `Attachment`, as they used to) so a click on the action button always sees
 /// the *current* status. A closure capturing a snapshot from build time would
@@ -280,7 +275,7 @@ struct ChatView {
     /// Bumped per `reload`; a page fetched off-thread is dropped if a newer
     /// reload started meanwhile.
     load_gen: Cell<u64>,
-    /// M165: live entries (fresh events) can arrive without a message id —
+    /// live entries (fresh events) can arrive without a message id —
     /// they still need a unique map/order key. `fresh_local_id` mints one.
     live_serial: Cell<u64>,
     loading_older: Cell<bool>,
@@ -696,6 +691,17 @@ fn composer_bar(view: &Rc<ChatView>) -> gtk::Box {
         attach.connect_clicked(move |_| view.pick_attachment());
     }
 
+    let sticker = gtk::Button::builder()
+        .icon_name("face-smile-symbolic")
+        .tooltip_text("Stickers")
+        .valign(gtk::Align::End)
+        .build();
+    sticker.add_css_class("flat");
+    {
+        let view = view.clone();
+        sticker.connect_clicked(move |button| view.sticker_picker(button));
+    }
+
     let record = gtk::Button::builder()
         .icon_name("audio-input-microphone-symbolic")
         .tooltip_text("Record a voice message")
@@ -794,6 +800,7 @@ fn composer_bar(view: &Rc<ChatView>) -> gtk::Box {
     }
 
     bar.append(&attach);
+    bar.append(&sticker);
     bar.append(&record);
     bar.append(&record_cancel);
     bar.append(&record_time);
@@ -944,7 +951,7 @@ impl ChatView {
                 for entry in older {
                     view.insert_entry(entry, false);
                 }
-                // H128: a full page of 50 above the cap drops the oldest
+                // a full page of 50 above the cap drops the oldest
                 // page's worth of bubbles immediately, so the view settles at
                 // ~MAX_BUBBLES instead of growing for as long as the user
                 // keeps scrolling.
@@ -956,11 +963,10 @@ impl ChatView {
         );
     }
 
-    /// H128: drops the oldest bubbles once more than `MAX_BUBBLES` are alive,
+    /// drops the oldest bubbles once more than `MAX_BUBBLES` are alive,
     /// then prunes any day-day separator left stranded by the evictions.
     /// Removing the widgets is safe from the GTK thread (that is where the
     /// rest of timeline surgery happens too).
-    ///
     /// Note the reload cursor: refetching after an eviction still pages from
     /// `oldest_timestamp` (strictly older receive time), so evicted rows stay
     /// gone until a full `reload()` or the chat is reopened — by design, the
@@ -1026,7 +1032,6 @@ struct Page {
 /// Reads one page of messages *and* attachments and merges them onto a
 /// single timeline — the core stores them separately but the user sees one
 /// conversation.
-///
 /// `before` is the message cursor (`None` = the newest page), and
 /// `attachment_before` the attachment one: the `created_at` of the oldest
 /// attachment already on screen (`None` = take the newest ones).
@@ -1147,11 +1152,11 @@ fn attachment_entry(attachment: &core::AttachmentSummary, peer_fingerprint: &str
         id: attachment.file_id.clone(),
         mine: attachment.direction == "sent",
         sender_identity,
-        text: String::new(),
+        text: attachment.caption.clone(),
         order_key: attachment.created_at,
         status: None,
-        reply_preview: None,
-        reply_sender: None,
+        reply_preview: attachment.reply_to_preview.clone().filter(|p| !p.is_empty()),
+        reply_sender: attachment.reply_to_sender_identity_id.clone(),
         deleted: false,
         edited: false,
         attachment: Some(Attachment {
@@ -1178,7 +1183,7 @@ fn attachment_entry(attachment: &core::AttachmentSummary, peer_fingerprint: &str
 // --- rendering ---
 
 impl ChatView {
-    /// M165: a live event without any id would key an empty-string bubble —
+    /// a live event without any id would key an empty-string bubble —
     /// two such messages then collide on `""` and the second silently
     /// overwrites the first's text in place. Mint a unique view-local key
     /// instead. It is not derivable again after a `reload()` (where the
@@ -1381,8 +1386,15 @@ impl ChatView {
 
         // An inline (Android-style) quote at the start of the message is a
         // block of its own, like on the phone: darker rounded box over the text.
+        let (forwarded, own_text) = util::split_forwarded(&entry.text);
+        if forwarded && !entry.deleted {
+            let label = gtk::Label::builder().label("↪ Forwarded").xalign(0.0).build();
+            label.add_css_class("caption");
+            label.add_css_class("dim-label");
+            column.append(&label);
+        }
         if !entry.deleted {
-            if let (Some(preview), _) = crate::util::split_leading_quote(&entry.text) {
+            if let (Some(preview), _) = crate::util::split_leading_quote(own_text) {
                 let quote = gtk::Label::builder()
                     .label(util::preview_text(&preview, 120).as_str())
                     .xalign(0.0)
@@ -1408,9 +1420,10 @@ impl ChatView {
             // An attachment message freshly loaded from the archive is never
             // itself the deleted one — a deletion purges its `files` row
             // outright, so it would not be here to load in the first place.
-            // `text` still goes in (hidden) so a *live* delete arriving later
-            // has a "Message deleted" placeholder ready to swap to.
-            text.set_visible(false);
+            // `text` still goes in so a *live* delete arriving later has a
+            // "Message deleted" placeholder ready to swap to; it shows the
+            // caption, hidden when there is none.
+            text.set_visible(!own_text.is_empty());
             column.append(&widgets);
             column.append(&text);
             attachment_widgets = Some(widgets);
@@ -1597,7 +1610,8 @@ impl ChatView {
         picture.set_size_request(160, 160);
         picture.set_content_fit(gtk::ContentFit::Contain);
         picture.add_css_class("sticker");
-        block.append(&picture);
+        // A Picture asks for its image's own size (up to 600 px): capped.
+        block.append(&adw::Clamp::builder().maximum_size(160).tightening_threshold(160).child(&picture).build());
         let state = Rc::new(AttachmentState {
             file_id: attachment.file_id.clone(),
             file_name: attachment.file_name.clone(),
@@ -1845,7 +1859,6 @@ impl ChatView {
     /// player with it) whenever the poller was mid-round. The work closure
     /// carries only Send data; the widget state is touched exclusively in
     /// `then`, which `run_in_background` runs back on the GTK thread.
-    ///
     /// `hide_on_start` (the generic card's "Download" button) is hidden only
     /// on a confirmed start — exactly the old success/failure split: a failed
     /// start leaves the button up so there is still a way to retry.
@@ -2005,6 +2018,76 @@ impl ChatView {
             ));
         }
 
+        if !entry.deleted && !entry.reactions.is_empty() {
+            let view = self.clone();
+            let entry = entry.clone();
+            actions.push((
+                "view-list-symbolic",
+                "Reactions".to_string(),
+                false,
+                Box::new(move || view.show_reactions(&entry)),
+            ));
+        }
+
+        // The JPEG XL as it came; opening it gives a PNG.
+        if let Some(attachment) = entry.attachment.as_ref().filter(|a| !entry.deleted && !a.sticker && a.file_name.to_lowercase().ends_with(".jxl")) {
+            let view = self.clone();
+            let (file_id, name) = (attachment.file_id.clone(), attachment.file_name.clone());
+            actions.push((
+                "document-save-symbolic",
+                "Save as JPEG XL".to_string(),
+                false,
+                Box::new(move || {
+                    let (view, file_id, name) = (view.clone(), file_id.clone(), name.clone());
+                    app::run_in_background(
+                        move || core::attachment_original_path(&file_id),
+                        move |result| match result {
+                            Ok(path) => crate::ui::media::save_copy(view.app(), &path, &name),
+                            Err(error) => view.app().toast(&format!("Could not save: {}", error)),
+                        },
+                    );
+                }),
+            ));
+        }
+
+        // Stickers are not offered: sent as a file they would lose the sticker look.
+        if !entry.deleted && !entry.id.starts_with("legacy:") && !entry.attachment.as_ref().is_some_and(|a| a.sticker) {
+            let view = self.clone();
+            let entry = entry.clone();
+            actions.push((
+                "mail-forward-symbolic",
+                "Forward".to_string(),
+                false,
+                Box::new(move || view.forward(&entry)),
+            ));
+        }
+
+        // A group message some members' devices missed: send it to just those.
+        if self.is_group() && entry.mine && !entry.deleted && entry.attachment.is_none()
+            && matches!(entry.status.as_deref(), Some("failed") | Some("pending"))
+        {
+            let view = self.clone();
+            let id = entry.id.clone();
+            actions.push((
+                "view-refresh-symbolic",
+                "Send again".to_string(),
+                false,
+                Box::new(move || {
+                    let Conversation::Group { group_id, .. } = &view.conversation else { return };
+                    let (gid, lid, view) = (group_id.clone(), id.clone(), view.clone());
+                    let done_id = id.clone();
+                    app::run_in_background(
+                        move || core::retry_group_message_copies(&gid, &lid),
+                        move |result| match result {
+                            1 => view.apply_status(&done_id, "sent"),
+                            0 => view.app().toast("Nothing to send again"),
+                            _ => view.app().toast("Could not send it again"),
+                        },
+                    );
+                }),
+            ));
+        }
+
         if !entry.deleted && entry.attachment.is_none() {
             {
                 let view = self.clone();
@@ -2028,7 +2111,6 @@ impl ChatView {
             }
         }
 
-        // Spec dışı, hata düzeltmesi ("Linux'ta ekler hiç silinemiyor"):
         // `Edit`in metin girişi bir eke uygulanamaz (protokolün `Edit`
         // içeriği düz metin), o yüzden ek varken hâlâ atlanır — ama
         // `Delete` metinden bağımsız çalışır (bkz. `delete_message` — aynı
@@ -2038,6 +2120,26 @@ impl ChatView {
         // gönderildikten sonra Linux kullanıcısının onu silmesinin HİÇBİR
         // yolu yoktu (disk sızıntısı + yanlışlıkla gönderilen dosyayı
         // geri alamama).
+        if let Some(attachment) = entry.attachment.as_ref().filter(|a| a.sticker && !entry.mine && !entry.deleted) {
+            let view = self.clone();
+            let file_id = attachment.file_id.clone();
+            actions.push((
+                "list-add-symbolic",
+                "Add to my stickers".to_string(),
+                false,
+                Box::new(move || {
+                    let (view, file_id) = (view.clone(), file_id.clone());
+                    app::run_in_background(
+                        move || core::save_received_sticker(&file_id),
+                        move |result| match result {
+                            Ok(_) => view.app().toast("Added to your stickers"),
+                            Err(error) => view.app().toast(&format!("Could not add the sticker: {}", error)),
+                        },
+                    );
+                }),
+            ));
+        }
+
         if entry.mine && !entry.deleted && !entry.id.starts_with("legacy:") {
             if entry.attachment.is_none() {
                 let view = self.clone();
@@ -2610,6 +2712,264 @@ impl ChatView {
         );
     }
 
+    /// My stickers in a popover: click sends, right click deletes, "Add"
+    /// imports a picture. Rebuilt on every open; the pictures are converted
+    /// one by one off the GTK thread and stop when the popover closes.
+    fn sticker_picker(self: &Rc<Self>, anchor: &gtk::Button) {
+        let popover = gtk::Popover::new();
+        popover.set_parent(anchor);
+        popover.connect_closed(|popover| popover.unparent());
+
+        let grid = gtk::FlowBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .max_children_per_line(5)
+            .min_children_per_line(5)
+            .homogeneous(true)
+            .build();
+        let scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .min_content_width(380)
+            .min_content_height(320)
+            .child(&grid)
+            .build();
+        let add = gtk::Button::builder().label("Add from file…").build();
+        {
+            let (view, popover) = (self.clone(), popover.clone());
+            add.connect_clicked(move |_| {
+                popover.popdown();
+                view.import_sticker();
+            });
+        }
+        let fetch = gtk::Button::builder().label("Fetch stickers from phone").build();
+        {
+            let (app, popover) = (self.app().clone(), popover.clone());
+            fetch.connect_clicked(move |_| {
+                popover.popdown();
+                match core::request_stickers_from_phone() {
+                    Ok(()) => app.toast("Asked your phone: stickers arrive in the background"),
+                    Err(error) => app.toast(&format!("Could not ask your phone: {}", error)),
+                }
+            });
+        }
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        buttons.set_homogeneous(true);
+        buttons.append(&add);
+        buttons.append(&fetch);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        column.append(&scroller);
+        column.append(&buttons);
+        popover.set_child(Some(&column));
+
+        let stickers = core::list_stickers();
+        if stickers.is_empty() {
+            grid.append(&gtk::Label::new(Some("No stickers yet")));
+        }
+        // Decoded here too, not on the GTK thread: a big GIF froze the window.
+        // ponytail: the grid shows an animated sticker's first frame.
+        let (tx, rx) = async_channel::unbounded::<(String, bool, Option<gtk::gdk::Texture>)>();
+        std::thread::spawn(move || {
+            for sticker in stickers {
+                let path = if sticker.animated { core::sticker_first_frame(&sticker.id) } else { core::sticker_plain_path(&sticker.id) };
+                let texture = path.ok().and_then(|p| gtk::gdk::Texture::from_filename(p).ok());
+                if tx.send_blocking((sticker.id, sticker.favorite, texture)).is_err() {
+                    break; // popover closed
+                }
+            }
+        });
+        let view = self.clone();
+        let (grid_for_load, popover_for_load) = (grid.clone(), popover.clone());
+        glib::spawn_future_local(async move {
+            while let Ok((id, favorite, texture)) = rx.recv().await {
+                if popover_for_load.parent().is_none() {
+                    break;
+                }
+                let Some(texture) = texture else { continue };
+                let picture = gtk::Picture::for_paintable(&texture);
+                picture.set_size_request(64, 64);
+                picture.set_content_fit(gtk::ContentFit::Contain);
+                let button = gtk::Button::builder().child(&picture).build();
+                button.add_css_class("flat");
+                {
+                    let (view, id, popover) = (view.clone(), id.clone(), popover_for_load.clone());
+                    button.connect_clicked(move |_| {
+                        popover.popdown();
+                        view.send_sticker(&id);
+                    });
+                }
+                let right = gtk::GestureClick::builder().button(gtk::gdk::BUTTON_SECONDARY).build();
+                {
+                    let (view, id, button_ref) = (view.clone(), id.clone(), button.clone());
+                    let favorite = Rc::new(Cell::new(favorite));
+                    right.connect_pressed(move |_, _, x, y| {
+                        let (menu, items) = crate::ui::widgets::menu_popover();
+                        menu.set_parent(&button_ref);
+                        menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                        menu.connect_closed(|menu| menu.unparent());
+                        let fav = crate::ui::widgets::menu_item(
+                            "starred-symbolic",
+                            if favorite.get() { "Unfavorite" } else { "Favorite" },
+                        );
+                        {
+                            let (id, favorite, menu, app) = (id.clone(), favorite.clone(), menu.clone(), view.app().clone());
+                            fav.connect_clicked(move |_| {
+                                menu.popdown();
+                                let want = !favorite.get();
+                                match core::set_sticker_favorite(&id, want) {
+                                    // Shown first from the next opening on.
+                                    Ok(()) => favorite.set(want),
+                                    Err(error) => app.toast(&format!("Could not change the sticker: {}", error)),
+                                }
+                            });
+                        }
+                        let delete = crate::ui::widgets::menu_item("edit-delete-symbolic", "Delete");
+                        delete.add_css_class("destructive-action");
+                        items.append(&fav);
+                        items.append(&delete);
+                        let (id, button_ref, menu_ref) = (id.clone(), button_ref.clone(), menu.clone());
+                        let app = view.app().clone();
+                        delete.connect_clicked(move |_| {
+                        menu_ref.popdown();
+                        let (id, button_ref, app, owner) = (id.clone(), button_ref.clone(), app.clone(), app.clone());
+                        dialogs::confirm(&owner, "Delete this sticker?", "It is removed from all your devices.", "Delete", true, move || {
+                            let (id, button_ref, app) = (id.clone(), button_ref.clone(), app.clone());
+                            app::run_in_background(
+                                move || core::delete_sticker(&id),
+                                move |result| match result {
+                                    Ok(()) => button_ref.parent().unwrap_or_else(|| button_ref.clone().upcast()).set_visible(false),
+                                    Err(error) => app.toast(&format!("Could not delete the sticker: {}", error)),
+                                },
+                            );
+                        });
+                        });
+                        menu.popup();
+                    });
+                }
+                button.add_controller(right);
+                grid_for_load.append(&button);
+            }
+        });
+        popover.popup();
+    }
+
+    /// Sends a copy of `entry` (text, or the file with its caption) to a chat
+    /// picked from a list, marked "Forwarded" like Android does.
+    fn forward(self: &Rc<Self>, entry: &Entry) {
+        let Some(window) = self.app().window() else { return };
+        let mut targets: Vec<(String, Conversation)> = core::list_contacts()
+            .into_iter()
+            .filter_map(|c| {
+                let fp = c.active_device_fingerprint.clone()?;
+                Some((c.display_name.clone(), Conversation::Direct { fingerprint: fp, contact_id: c.contact_id, identity_id: c.identity_id, name: c.display_name }))
+            })
+            .collect();
+        targets.extend(core::list_groups().into_iter().map(|g| (format!("👥 {}", g.name), Conversation::Group { group_id: g.group_id, name: g.name })));
+        targets.sort_by_key(|(name, _)| name.to_lowercase());
+
+        let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).build();
+        list.add_css_class("boxed-list");
+        for (name, _) in &targets {
+            list.append(&adw::ActionRow::builder().title(name.as_str()).activatable(true).build());
+        }
+        let scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .min_content_height(320)
+            .child(&list)
+            .build();
+        let dialog = adw::MessageDialog::new(Some(&window), Some("Forward to…"), None);
+        dialog.set_extra_child(Some(&scroller));
+        dialog.add_response("cancel", "Cancel");
+        dialog.set_close_response("cancel");
+
+        let (app, entry, dialog_ref) = (self.app().clone(), entry.clone(), dialog.clone());
+        list.connect_row_activated(move |_, row| {
+            dialog_ref.close();
+            let Some((_, target)) = targets.get(row.index() as usize).cloned() else { return };
+            let (app, entry) = (app.clone(), entry.clone());
+            app::run_in_background(
+                {
+                    let entry = entry.clone();
+                    move || -> Result<(), String> {
+                        match &entry.attachment {
+                            None => {
+                                let text = util::forward_mark(&entry.text);
+                                match &target {
+                                    Conversation::Direct { fingerprint, .. } => core::send_message(fingerprint, &text, None, None).map(|_| ()),
+                                    Conversation::Group { group_id, .. } => core::send_group_message(group_id, &text, None, None, None, Vec::new()).map(|_| ()),
+                                }
+                            }
+                            Some(a) => {
+                                let path = core::attachment_plaintext_path(&a.file_id)?;
+                                // The core opens a JPEG XL as PNG: the name follows the file.
+                                let name = std::path::Path::new(&path).extension()
+                                    .filter(|ext| !a.file_name.to_lowercase().ends_with(&format!(".{}", ext.to_string_lossy().to_lowercase())))
+                                    .map_or(a.file_name.clone(), |ext| format!("{}.{}", a.file_name, ext.to_string_lossy()));
+                                let mime = util::guess_mime(&name);
+                                let caption = util::forward_mark(&entry.text);
+                                let preview = util::is_image(&mime).then(|| util::scaled_jpeg(&path, 480, 85)).flatten();
+                                let duration = a.duration_ms;
+                                match &target {
+                                    Conversation::Direct { fingerprint, .. } => core::prepare_and_send_file(fingerprint, &path, &name, &mime, preview, duration, caption, None, None).map(|_| ()),
+                                    Conversation::Group { group_id, .. } => core::prepare_and_send_group_file(group_id, &path, &name, &mime, preview, duration, caption, None, None, None).map(|_| ()),
+                                }
+                            }
+                        }
+                    }
+                },
+                move |result| match result {
+                    Ok(()) => app.toast("Forwarded"),
+                    Err(error) => app.toast(&format!("Could not forward: {}", error)),
+                },
+            );
+        });
+        dialog.present();
+    }
+
+    fn send_sticker(self: &Rc<Self>, sticker_id: &str) {
+        let (target, group) = match &self.conversation {
+            Conversation::Direct { fingerprint, .. } => (fingerprint.clone(), false),
+            Conversation::Group { group_id, .. } => (group_id.clone(), true),
+        };
+        let reply = self.reply_to.borrow().clone();
+        let id = sticker_id.to_string();
+        let view = self.clone();
+        app::run_in_background(
+            move || core::send_sticker(&target, group, &id, reply),
+            move |result| match result {
+                Ok(_) => {
+                    view.clear_reply();
+                    view.reload();
+                }
+                Err(error) => view.app().toast(&format!("Could not send the sticker: {}", error)),
+            },
+        );
+    }
+
+    fn import_sticker(self: &Rc<Self>) {
+        let Some(window) = self.app().window() else { return };
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Pictures"));
+        filter.add_pixbuf_formats();
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+        let dialog = gtk::FileDialog::builder().title("Add a sticker").filters(&filters).build();
+        let app = self.app().clone();
+        dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
+            let Ok(file) = result else { return };
+            let Some(path) = file.path() else { return };
+            app::run_in_background(
+                move || {
+                    let (rgba, w, h) = util::image_rgba(&path.to_string_lossy(), 600)
+                        .ok_or_else(|| "this picture cannot be read".to_string())?;
+                    core::import_sticker_rgba(rgba, w, h)
+                },
+                move |result| match result {
+                    Ok(_) => app.toast("Added to your stickers"),
+                    Err(error) => app.toast(&format!("Could not add the sticker: {}", error)),
+                },
+            );
+        });
+    }
+
     fn edit_message(self: &Rc<Self>, entry: &Entry) {
         let view = self.clone();
         let entry = entry.clone();
@@ -2847,7 +3207,7 @@ impl ChatView {
             {
                 self.insert_entry(
                     Entry {
-                        // M165: `""` here would collide with every other
+                        // `""` here would collide with every other
                         // id-less event on the empty key (see `fresh_local_id`).
                         id: nonempty_or(event.optional("message_id"), self.fresh_local_id()),
                         mine: false,
@@ -2873,7 +3233,7 @@ impl ChatView {
                 let sender = event.string("sender_identity_id");
                 self.insert_entry(
                     Entry {
-                        // M165: see `fresh_local_id`.
+                        // see `fresh_local_id`.
                         id: nonempty_or(
                             event.optional("group_message_local_id"),
                             nonempty_or(event.optional("message_id"), self.fresh_local_id()),
@@ -2902,7 +3262,7 @@ impl ChatView {
             {
                 self.insert_entry(
                     Entry {
-                        // M165: see `fresh_local_id`.
+                        // see `fresh_local_id`.
                         id: nonempty_or(event.optional("message_id"), self.fresh_local_id()),
                         mine: true,
                         sender_identity: own_identity,
@@ -2925,7 +3285,7 @@ impl ChatView {
             {
                 self.insert_entry(
                     Entry {
-                        // M165: see `fresh_local_id`.
+                        // see `fresh_local_id`.
                         id: nonempty_or(
                             event.optional("group_message_local_id"),
                             nonempty_or(event.optional("message_id"), self.fresh_local_id()),
@@ -3014,7 +3374,7 @@ impl ChatView {
             }
 
             // --- attachments ---
-            // H129: a full `reload()` per offer — every core round-trip it
+            // a full `reload()` per offer — every core round-trip it
             // implies, run for each file in a burst — is gone; the attachment
             // bubble is built in place instead, with exactly the fields the
             // reload's `fetch_page` merge would have produced (it merges
@@ -3083,7 +3443,7 @@ impl ChatView {
                 let reason = event.string("error");
                 self.apply_attachment_state(&event.string("file_id"), "failed", Some(reason));
             }
-            // Defter #16: dosya yerelden silindi (depolama sınırı tahliyesi
+            // dosya yerelden silindi (depolama sınırı tahliyesi
             // ya da mesajın silinmesi). Hiçbir istemci dinlemiyordu, balon
             // "tamamlandı" görünmeye devam ediyordu.
             (_, "file_evicted") => {
@@ -3202,30 +3562,58 @@ impl ChatView {
         chooser.connect_closed(|chooser| chooser.unparent());
         let view = self.clone();
         let id = entry.id.clone();
-        chooser.connect_emoji_picked(move |_, emoji| {
-            let (direct, target) = match &view.conversation {
-                Conversation::Direct { fingerprint, .. } => (true, fingerprint.clone()),
-                Conversation::Group { group_id, .. } => (false, group_id.clone()),
-            };
-            let (view, id, emoji) = (view.clone(), id.clone(), emoji.to_string());
-            crate::app::run_in_background(
-                {
-                    let id = id.clone();
-                    move || {
-                        if direct {
-                            core::react_to_message(&target, &id, &emoji)
-                        } else {
-                            core::react_to_group_message(&target, &id, &emoji)
-                        }
-                    }
-                },
-                move |result| match result {
-                    Ok(summary) => view.apply_reactions(&id, &summary),
-                    Err(error) => view.app().toast(&format!("Reaction failed: {}", error)),
-                },
-            );
-        });
+        chooser.connect_emoji_picked(move |_, emoji| view.send_reaction(&id, emoji));
         chooser.popup();
+    }
+
+    /// `emoji` empty removes my reaction.
+    fn send_reaction(self: &Rc<Self>, id: &str, emoji: &str) {
+        let (direct, target) = match &self.conversation {
+            Conversation::Direct { fingerprint, .. } => (true, fingerprint.clone()),
+            Conversation::Group { group_id, .. } => (false, group_id.clone()),
+        };
+        let (view, id, emoji) = (self.clone(), id.to_string(), emoji.to_string());
+        crate::app::run_in_background(
+            {
+                let id = id.clone();
+                move || {
+                    if direct {
+                        core::react_to_message(&target, &id, &emoji)
+                    } else {
+                        core::react_to_group_message(&target, &id, &emoji)
+                    }
+                }
+            },
+            move |result| match result {
+                Ok(summary) => view.apply_reactions(&id, &summary),
+                Err(error) => view.app().toast(&format!("Reaction failed: {}", error)),
+            },
+        );
+    }
+
+    /// Who reacted with what; "Remove my reaction" when one is mine.
+    fn show_reactions(self: &Rc<Self>, entry: &Entry) {
+        let rows = core::list_reactions(&entry.id);
+        let body = rows
+            .iter()
+            .map(|r| {
+                let who = if r.is_me { "You".to_string() } else { self.app().identity_name(&r.identity_id) };
+                let who = if who.is_empty() { r.identity_id.chars().take(8).collect() } else { who };
+                format!("{}  {}", r.emoji, who)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let Some(window) = self.app().window() else { return };
+        let dialog = adw::MessageDialog::new(Some(&window), Some("Reactions"), Some(if body.is_empty() { "No reactions" } else { body.as_str() }));
+        dialog.add_response("close", "Close");
+        if rows.iter().any(|r| r.is_me) {
+            dialog.add_response("remove", "Remove my reaction");
+            dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+        }
+        dialog.set_close_response("close");
+        let (view, id) = (self.clone(), entry.id.clone());
+        dialog.connect_response(Some("remove"), move |_, _| view.send_reaction(&id, ""));
+        dialog.present();
     }
 
     fn apply_seen(&self, id: &str) {
@@ -3705,7 +4093,6 @@ fn attachments_overview(view: &Rc<ChatView>) {
 // --- small helpers ---
 
 /// The in-chat search strip: an entry plus previous/next and a match counter.
-///
 /// It searches the bubbles already on screen rather than the archive, which is
 /// what the Android chat does too — scrolling up loads more history and widens
 /// the search with it. Searching the whole archive would mean a decrypt pass
@@ -3798,7 +4185,6 @@ fn bubble_content() -> gtk::Box {
 }
 
 /// The text inside a bubble.
-///
 /// `max_width_chars` bounds the *natural* width so a long message wraps into a
 /// readable column instead of stretching across a wide window; `WordChar` lets
 /// an unbroken run of characters (a URL, or someone mashing the keyboard) break
@@ -3816,11 +4202,9 @@ fn bubble_text_label(text: &str) -> gtk::Label {
 }
 
 /// Places a bubble on its side of the conversation.
-///
 /// The bubble goes straight into the vertical message box, which allocates
 /// every child the full width — so `halign` alone puts it on the correct side
 /// and simultaneously gives the wrapping label an upper bound to wrap against.
-///
 /// Wrapping each bubble in a *horizontal* row first (the obvious thing, and
 /// what this used to do) is what broke both alignment and wrapping: a
 /// horizontal GtkBox packs its children sequentially from the start and
@@ -3968,7 +4352,8 @@ fn display_text(entry: &Entry) -> String {
     if entry.deleted {
         "Message deleted".to_string()
     } else {
-        crate::util::quote_markup(crate::util::split_leading_quote(&entry.text).1)
+        let text = crate::util::split_forwarded(&entry.text).1;
+        crate::util::quote_markup(crate::util::split_leading_quote(text).1)
     }
 }
 
@@ -3982,7 +4367,6 @@ fn meta_text(entry: &Entry, seen: bool) -> String {
 /// actually promise: one tick is "handed to the network", two GREY ticks are
 /// "the peer's device acknowledged it" (delivered), two plain ticks are "the
 /// peer's app told us it displayed this" (seen).
-///
 /// The result is Pango markup (the meta label is set with `set_markup`), so a
 /// tick can carry its own colour — the delivered one is grey, the seen one
 /// keeps the label's own tone. Everything in here is generated by us (a
@@ -4021,7 +4405,6 @@ fn attachment_status_text(attachment: &Attachment) -> String {
 }
 
 /// The label of an attachment's action button.
-///
 /// A download that already moved some bytes is RESUMED, not started over —
 /// the core keeps `bytes_transferred` and continues from there (bkz.
 /// `Attachment.bytes_done`), so the button says so.
@@ -4078,7 +4461,7 @@ fn day_separator(timestamp: u64) -> gtk::Widget {
     let label = gtk::Label::new(Some(&util::format_day_separator(timestamp)));
     label.add_css_class("caption");
     label.add_css_class("dim-label");
-    // H128: `evict_oldest` identifies separators by class when it prunes the
+    // `evict_oldest` identifies separators by class when it prunes the
     // ones left stranded by evicted bubbles (they are not tracked in
     // `order`, which only mirrors bubbles).
     label.add_css_class("day-separator");
@@ -4099,19 +4482,79 @@ fn nonempty_or(value: Option<String>, fallback: String) -> String {
     value.filter(|s| !s.is_empty()).unwrap_or(fallback)
 }
 
-/// Shows a downloaded sticker: the core decrypts it (JPEG XL to PNG/GIF) off
-/// the main thread.
+/// Shows a downloaded sticker. Frames are decoded off the GTK thread (a big
+/// animated sticker froze the window); an animated one plays three times and
+/// stops on its last frame, as on Android (a looping sticker kept the whole
+/// chat redrawing).
 fn load_sticker(state: &Rc<AttachmentState>) {
     let Some(picture) = state.sticker.clone() else { return };
     let file_id = state.file_id.clone();
-    app::run_in_background(
-        move || core::attachment_plaintext_path(&file_id),
-        move |result| {
-            if let Ok(path) = result {
-                picture.set_filename(Some(&path));
+    // One decode at a time: an animated sticker's frames are up to ~140 MB
+    // of RGBA, and a chat full of them decoded all at once.
+    // ponytail: frames kept at full size (600 px) while shown at 160 px.
+    type Job = Box<dyn FnOnce() + Send>;
+    static TX: std::sync::OnceLock<std::sync::mpsc::Sender<Job>> = std::sync::OnceLock::new();
+    let queue = TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        std::thread::spawn(move || {
+            while let Ok(job) = rx.recv() {
+                job();
             }
-        },
-    );
+        });
+        tx
+    });
+    let (tx, rx) = async_channel::bounded(1);
+    let _ = queue.send(Box::new(move || {
+        let _ = tx.send_blocking(sticker_frames(&file_id));
+    }));
+    glib::spawn_future_local(async move {
+        if let Ok(frames) = rx.recv().await {
+            play_sticker(picture, frames);
+        }
+    });
+}
+
+/// The sticker's frames as textures with their durations in ms.
+fn sticker_frames(file_id: &str) -> Vec<(gtk::gdk::Texture, u32)> {
+    use gtk::gdk;
+    match core::attachment_jxl_frames(file_id) {
+        Ok((width, height, frames)) => frames
+            .into_iter()
+            .map(|(rgba, ms)| {
+                let texture = gdk::MemoryTexture::new(
+                    width as i32,
+                    height as i32,
+                    gdk::MemoryFormat::R8g8b8a8,
+                    &glib::Bytes::from_owned(rgba),
+                    width as usize * 4,
+                );
+                (texture.upcast(), ms)
+            })
+            .collect(),
+        // Not a JPEG XL (an older sticker): one still picture.
+        Err(_) => core::attachment_plaintext_path(file_id)
+            .ok()
+            .and_then(|path| gdk::Texture::from_filename(path).ok())
+            .map(|texture| vec![(texture, 0)])
+            .unwrap_or_default(),
+    }
+}
+
+const STICKER_PLAYS: usize = 3;
+
+fn play_sticker(picture: gtk::Picture, frames: Vec<(gtk::gdk::Texture, u32)>) {
+    fn step(picture: gtk::Picture, frames: Rc<Vec<(gtk::gdk::Texture, u32)>>, i: usize) {
+        let (texture, ms) = &frames[i % frames.len()];
+        picture.set_paintable(Some(texture));
+        if i + 1 >= frames.len() * STICKER_PLAYS {
+            return; // the frames go; the picture keeps the last one
+        }
+        let delay = std::time::Duration::from_millis(u64::from((*ms).max(20)));
+        glib::timeout_add_local_once(delay, move || step(picture, frames, i + 1));
+    }
+    if !frames.is_empty() {
+        step(picture, Rc::new(frames), 0);
+    }
 }
 
 /// Ids of the members whose "@Name" is in `text`. The name must end at a

@@ -17,7 +17,7 @@ pub(crate) struct QueuedEnvelope {
     pub(crate) envelope: NetworkEnvelope,
     /// First publish attempt (ms): the timeout counts from here.
     pub(crate) first_attempt_at: u64,
-    /// M-181: next retry (ms). The delay grows with the entry's age (1-30 s),
+    /// next retry (ms). The delay grows with the entry's age (1-30 s),
     /// so a Handshake to an offline peer is not sealed and deposited every
     /// second for 5 min. 0 = due now (connection came up).
     pub(crate) next_at: u64,
@@ -33,7 +33,7 @@ impl QueuedEnvelope {
     }
 }
 
-/// M-181: retry delay = age / 8, clamped to 1-30 s.
+/// retry delay = age / 8, clamped to 1-30 s.
 pub(crate) fn pending_retry_at(first_attempt_at: u64, now: u64) -> u64 {
     now + (now.saturating_sub(first_attempt_at) / 8).clamp(1_000, 30_000)
 }
@@ -41,7 +41,6 @@ pub(crate) fn pending_retry_at(first_attempt_at: u64, now: u64) -> u64 {
 /// Spec dışı, teslim garantisi düzeltmesi ("karşı taraf şu an kapalı, 2-24
 /// saat sonra açacak"): `Handshake`/`IdentityExchange` için AYRI (ve çok
 /// daha uzun) bir kuyruk ömrü.
-///
 /// Bu ikisi `MessageContent` DEĞİL, `NetworkEnvelope` — yani
 /// `awaiting_confirmation`'ın (onaylanana kadar süresiz yeniden deneme)
 /// kapsamına yapısal olarak GİREMİYORLAR ve tek dayanakları bu kuyruk.
@@ -53,7 +52,6 @@ pub(crate) fn pending_retry_at(first_attempt_at: u64, now: u64) -> u64 {
 /// paketleri `early_packets`'e tamponlayıp el sıkışmayı bekler, o hiç
 /// gelmez ve tampon dolar/eskir — iki uçta da hiçbir hata görünmeden mesaj
 /// asla teslim edilmez.
-///
 /// 5 dakika, "az sonra açacak" senaryosunu (ağ birkaç saniye/dakika sonra
 /// toparlanıyor) doğrudan çözer. Daha uzun kesintiler için ikinci bir
 /// savunma katmanı var: `maybe_redo_handshake` (bkz.) — onaylanmamış bir
@@ -87,8 +85,7 @@ pub(crate) const PAIRING_MAILBOX_TTL_MS: u64 = 15 * 60 * 1000;
 /// varmadı" durumundan kurtulmanın TEK yolu.
 pub(crate) const HANDSHAKE_REDO_MIN_INTERVAL_MS: u64 = 10 * 60 * 1000;
 
-/// Spec dışı, pil sağlamlığı düzeltmesi (kullanıcı onayıyla): stok libp2p
-/// `ping::Behaviour` yerine ÖZEL bir keepalive protokolü (request_response
+/// stok libp2p `ping::Behaviour` yerine ÖZEL bir keepalive protokolü (request_response
 /// tabanlı, bkz. `KeepAliveRequest`/`KeepAliveResponse`/`P2PBehaviour.keepalive`)
 /// kullanılıyor. Sebep: stok `ping::Behaviour` TÜM bağlantılara TEK bir sabit
 /// aralık uygular (bağlantı ne kadar süredir kanıtlanmış şekilde sağlıklı
@@ -135,11 +132,9 @@ pub(crate) const KEEPALIVE_STABILIZE_MS: u64 = 120_000;
 /// 3 yavaş-ama-sağlıklı yanıt (`KEEPALIVE_FAILURES_BEFORE_DISCONNECT`) Tor
 /// üzerinde makul bir olasılıkla gerçekleşir ve bağlantı GEREKSİZ YERE
 /// kapatılıp yeniden kurulmaya zorlanırdı.
-///
 /// 6 → 4 sn: o 6 sn'nin ~2 sn'si iki uçtaki poll bekleyişiydi (yanıt ancak
 /// bir sonraki `poll_events` turunda işleniyordu). Poll artık olay güdümlü
 /// (`wait_for_network_activity`) — Tor üzerinde ölçülen gidiş-dönüş <1 sn.
-///
 /// 4 → 10 s: a probe to a phone whose LTE radio sleeps waits for the radio to
 /// come up before Tor even starts; 4 s declared live links dead and every
 /// "reconnect" cost a full onion circuit build (the churn that kept the 9S
@@ -206,9 +201,14 @@ pub(crate) const MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
 
 /// Swarm events one `poll_events` turn handles in its main drain.
 pub(crate) const MAX_SWARM_EVENTS_PER_TURN: u32 = 256;
-/// Largest sticker sent to my other devices inside one `SiblingEcho`
-/// (well under `MAX_ENVELOPE_BYTES` and the server's deposit limit).
+/// Largest sticker part sent to my other devices inside one `SiblingEcho`
+/// (well under `MAX_ENVELOPE_BYTES` and the server's deposit limit); a
+/// bigger sticker goes in several parts.
 pub(crate) const STICKER_SYNC_MAX_BYTES: usize = 768 * 1024;
+/// Most parts of one sticker (`MAX_STICKER_BYTES` / `STICKER_SYNC_MAX_BYTES`, rounded up).
+pub(crate) const STICKER_SYNC_MAX_PARTS: usize = 8;
+/// Stickers being put together from parts at once; the oldest is dropped.
+pub(crate) const STICKER_PARTS_MAX_PENDING: usize = 16;
 pub(crate) const ACK_BATCH_MAX: usize = 256;
 pub(crate) const ACK_REQUEST_TIMEOUT_SECS: u64 = 30;
 
@@ -220,7 +220,6 @@ pub(crate) const MAX_KNOWN_RELAYS: usize = 10;
 pub(crate) const RELAY_RESERVATION_RETRY_MS: u64 = 2 * 60 * 1000;
 
 /// yamux akış alma penceresi.
-///
 /// Varsayılan (yamux spesifikasyonundaki `DEFAULT_CREDIT`) **262.144 bayt**.
 /// Bizim dosya parçamız ise `FILE_CHUNK_SIZE + 16` = **262.160 bayt** — AEAD
 /// etiketi yüzünden krediyi tam **16 bayt** aşıyor. Sonuç: her parça, son 16
@@ -228,12 +227,10 @@ pub(crate) const RELAY_RESERVATION_RETRY_MS: u64 = 2 * 60 * 1000;
 /// yani parça başına FAZLADAN bir gidiş-dönüş. Tor'da gidiş-dönüş 3-18 sn
 /// olduğu için bu, aktarım süresini neredeyse ikiye katlayabilecek bir
 /// tesadüf.
-///
 /// yamux 0.13'ün otomatik pencere büyütmesi (QUIC benzeri BDP tahmini) bunu
 /// kurtarmıyor: `request_response` HER İSTEK İÇİN yeni bir alt-akış açıyor,
 /// akış tek parça taşıyıp kapanıyor, dolayısıyla otomatik ayar hiç devreye
 /// girmiyor — her parça sıfırdan 256 KiB ile başlıyor.
-///
 /// Bu yüzden sabit ve bol bir başlangıç penceresi veriyoruz. (Bunu ayarlamak
 /// libp2p sarmalayıcısında yamux 0.12 yoluna geçiyor, yani otomatik ayardan
 /// vazgeçiyoruz — bizim erişim deseninde zaten hiçbir işe yaramıyordu.)
@@ -272,33 +269,27 @@ pub(crate) struct BulkHealth {
 
 /// Toplu aktarım (dosya parçaları) sürerken bir eşe açık tutulacak libp2p
 /// bağlantısı sayısı.
-///
 /// Neden: `request_response` giden istekleri açık bağlantılara ZATEN
 /// dağıtıyor (`libp2p-request-response`: `ix = request_id % connections.len()`),
 /// ve `ArtiDialTransport` artık her bağlantıya ayrı Tor devresi veriyor.
 /// İkisi birleşince parça boru hattı birden çok devreye yayılıyor — tek bir
 /// Tor devresinin bant genişliği bu uygulamada ölçülen gerçek tavandı.
-///
 /// Yalnızca aktarım SÜRERKEN açılır ve bitince kapatılır: onion devresi
 /// kurmak pahalı (~5-15 sn) ve boşta duran fazladan devre hem Tor ağına hem
 /// pile yük.
-///
 /// Sayı ÖLÇÜMLE seçildi. Aynı ~14 MB'lık dosya, aynı çift, dönüşümlü
 /// (varyantlar sırayla kurulup çalıştırıldı, böylece ikisi de aynı ağ
 /// koşullarını gördü), süre karşı tarafın diskinden okundu:
 ///   1 bağlantı → medyan  46 KB/s (n=5, aralık 23-182)
 ///   3 bağlantı → medyan  90 KB/s (n=7, aralık 51-204)
 ///   6 bağlantı → medyan 150 KB/s (n=3, aralık 64-173)
-///
 /// 1 → 3 farkı yönü tutarlı ve mekanizmayla uyumlu: tek devrede hız o
 /// devrenin kalitesine rehin (dağılım iki uçlu: ya 169-182 ya 23-46),
 /// paralelde kötü devre diğerleriyle seyreliyor.
-///
 /// 3 → 6 farkı ise İSTATİSTİKSEL OLARAK GÖSTERİLEMEDİ: 6, dokuz eşleşmenin
 /// beşinde önde, aralıklar büyük ölçüde örtüşüyor. Ölçülebilir bir kazanç
 /// olmadığı için 3'te kalıyoruz — 6 devre, aynı transfer için Tor ağına ve
 /// (hem gönderen hem alan telefonun) piline iki katı yük demek.
-///
 /// DÜZELTME: burada bir ara "5 bağlantı çok daha kötü, pencere sürekli 2'ye
 /// çöküyor" yazıyordu. O ölçüm ölü-devre kurtarması EKLENMEDEN ÖNCEKİ
 /// derlemeye aitti ve dial aralığı 12 sn olduğu için altı devreyi kurmak
@@ -312,7 +303,6 @@ pub(crate) const BULK_DIAL_MIN_INTERVAL_MS: u64 = 6_000;
 /// Yeniden deneme beklemesinin tavanı.
 pub(crate) const BULK_DIAL_MAX_BACKOFF_MS: u64 = 120_000;
 /// Bu kadar süre içinde bu kadar zaman aşımı görülürse bir devre düşürülür.
-///
 /// Tek bir zaman aşımı Tor'da NORMAL — eski kurtarma kodu ilk zaman aşımında
 /// üç devrenin üçünü birden atıyordu, yani bir kez öksüren yola ceza olarak
 /// sağlam iki devre de gidiyordu. Bir sağlıklı devrenin ölümünü gürültüden
@@ -327,7 +317,7 @@ pub(crate) const BULK_MAX_DROPS_BEFORE_GIVEUP: u32 = 3;
 /// Paralellikten vazgeçildikten sonra yeniden denemeden önceki bekleme.
 pub(crate) const BULK_GIVEUP_COOLDOWN_MS: u64 = 300_000;
 
-/// Spec dışı, güvenlik denetimi düzeltmesi: `contacts` tablosu üst sınırı.
+/// `contacts` tablosu üst sınırı.
 /// `evaluate_sender_device`'in `NewContactTofu` kolu (bkz. o fonksiyonun
 /// dokümantasyonu), spec 2.2'nin gerektirdiği gibi, hem kullanıcının
 /// kendi başlattığı QR/manuel eşleşmede HEM DE tek taraflı bir `IdentityExchange`
@@ -369,11 +359,10 @@ pub(crate) const IDENTITY_EXCHANGE_REPLY_MIN_INTERVAL_MS: u64 = 60_000;
 /// 60'a ancak değer) ama gerçek bir flood'u anlamlı şekilde kısar.
 pub(crate) const RATE_LIMIT_WINDOW_MS: u64 = 10_000;
 pub(crate) const RATE_LIMIT_MAX_PER_WINDOW: u32 = 60;
-/// M-190: all non-established peers together, per `RATE_LIMIT_WINDOW_MS`.
+/// all non-established peers together, per `RATE_LIMIT_WINDOW_MS`.
 pub(crate) const RATE_LIMIT_MAX_UNKNOWN_TOTAL: u32 = 300;
 
 /// Kurulmuş bir oturumu OLAN eşler için pencere başına tavan.
-///
 /// Teslim garantisi düzeltmesi (2026-08-28, kullanıcı isteği "her mesajın
 /// alındığından emin ol"): eski hâlde tanıdık/yabancı ayrımı yoktu ve
 /// tavanı aşan paket SESSİZCE ATILIYORDU. Bu, P2P modunda gerçek bir kayıp
@@ -384,7 +373,6 @@ pub(crate) const RATE_LIMIT_MAX_UNKNOWN_TOTAL: u32 = 300;
 /// saatlere yayılıyordu. SUNUCU modunda ise aynı paketler `source = None`
 /// ile enjekte edildiğinden hız sınırına HİÇ takılmıyordu — yani iki mod
 /// arasında, tam da kullanıcının sorduğu asimetri vardı.
-///
 /// Artık iki şey birden yapılıyor: kurulmuş oturumu olan eşe çok daha
 /// yüksek bir tavan (60/sn) veriliyor VE tavanı aşan paket atılmıyor,
 /// ERTELENİYOR (bkz. `deferred_incoming`).
@@ -407,7 +395,7 @@ pub(crate) enum RateVerdict {
     Drop,
 }
 
-/// Spec dışı, güvenlik denetimi düzeltmesi: `pending_device_alerts` üst
+/// `pending_device_alerts` üst
 /// sınırı — `known_relay_peers`/`early_packets` ile aynı desen. Önceden
 /// bu `HashMap` sınırsızdı; bilinen bir kişinin identity_id'sini taklit
 /// eden (ama imzalı bir DeviceAdd zinciri OLMAYAN) bir saldırgan, farklı
@@ -419,7 +407,7 @@ pub(crate) enum RateVerdict {
 /// bedeli yok — paket zaten spec 2.2 gereği BLOKLANMIŞ durumda kalır).
 pub(crate) const MAX_PENDING_DEVICE_ALERTS: usize = 200;
 
-/// Spec dışı, ağ sağlamlığı düzeltmesi: `reconnect_sweep` bu aralıkta bir
+/// `reconnect_sweep` bu aralıkta bir
 /// çalışır (kendini iyileştiren yeniden-bağlanma). `poll_events` zaten
 /// düzenli olarak çağrıldığından ayrı bir zamanlayıcıya
 /// gerek yok — sadece bu aralık dolduğunda tarama yapılır. 15 sn: kopmuş
@@ -429,11 +417,11 @@ pub(crate) const RECONNECT_SWEEP_INTERVAL_MS: u64 = 15_000;
 /// bkz. `P2PCore.fast_reconnect_until`.
 pub(crate) const FAST_RECONNECT_INTERVAL_MS: u64 = 3_000;
 pub(crate) const FAST_RECONNECT_WINDOW_MS: u64 = 60_000;
-/// M-55: network callbacks closer than this are coalesced into one redial
+/// network callbacks closer than this are coalesced into one redial
 /// round (flapping LTE/Wi-Fi redialed every contact on every callback).
 pub(crate) const NETWORK_CHANGE_DEBOUNCE_MS: u64 = 10_000;
 
-/// Spec dışı, hata düzeltmesi (kullanıcı: "aynı hesaba bağlı cihazlar arası
+/// "aynı hesaba bağlı cihazlar arası
 /// aktarım çok sıkıntılı ... mesajlar gitmiyor bazılarında"; gerçek cihaz
 /// bulgusu — hem tablet hem Redmi Note 8 Pro'da AYNI 2-3 "hayalet" kardeş
 /// cihaz hedefine ait yüzlerce satır birikmiş bulundu, `last_seen` 3+ gün
@@ -452,14 +440,13 @@ pub(crate) const STALE_PEER_RETRY_HORIZON_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// asgari aralığı — her kişi/grup için son N mesajı tekrar tekrar istemek
 /// (tekrarlar zaten `message_id` ile eleniyor) israf olmasın diye.
 pub(crate) const SIBLING_BACKFILL_INTERVAL_MS: u64 = 30 * 60_000;
-/// M-68: the backfill watermark is the requester's clock, the filter the
+/// the backfill watermark is the requester's clock, the filter the
 /// responder's; this much skew between own devices still loses nothing.
 pub(crate) const SIBLING_BACKFILL_SINCE_MARGIN_MS: u64 = 10 * 60_000;
 /// Geri-doldurmada kişi/grup başına istenecek/gönderilecek azami mesaj.
 pub(crate) const SIBLING_BACKFILL_PER_CONVERSATION: u32 = 30;
 /// Çoklu-cihaz kendini-onarma: kardeş cihazlara cihaz listesini (roster)
 /// yeniden gönderme aralığı.
-///
 /// GEREKÇE (gerçek arıza): `handle_handshake_init` GÖNDERİCİYİ tanımıyorsa
 /// paketi reddeder ("Unknown sender device") — yani B cihazı C cihazını hiç
 /// öğrenmediyse ikisi ARASINDA hiçbir zaman oturum kurulamaz, dolayısıyla C
@@ -502,7 +489,7 @@ pub(crate) const HISTORY_FETCH_MAX_PAGES: u32 = 20;
 /// rows stamped before it (a 1970 device clock, a backdated row).
 pub(crate) const HISTORY_FETCH_EPOCH_MS: i64 = 1_735_689_600_000;
 
-/// Spec dışı, kaynak sızıntısı düzeltmesi: `reconnect_sweep`, bekleyen bir
+/// `reconnect_sweep`, bekleyen bir
 /// cihaz bağlama hedefi (`pending_link_target`) için her taramada (≤15sn)
 /// dial + `IdentityExchange` yeniden gönderimi yapar — bağlama HİÇ
 /// tamamlanmazsa (kullanıcı QR'ı okutup vazgeçti, cihazlar bir daha hiç
@@ -546,8 +533,7 @@ pub(crate) const DURABLE_PARK_RELOAD_MS: u64 = 60_000;
 /// SUM sorgusu çalıştırmaktan kaçınmak için makul bir aralıkla sınırlı.
 pub(crate) const HISTORY_STORAGE_SWEEP_INTERVAL_MS: u64 = 30_000;
 
-/// Spec dışı, hata düzeltmesi ("ilk mesaj yutuluyor"): gossipsub SIRA
-/// GARANTİSİ VERMEZ — bir sohbetin İLK mesajı, onu mümkün kılan
+/// gossipsub SIRA GARANTİSİ VERMEZ — bir sohbetin İLK mesajı, onu mümkün kılan
 /// `HandshakeInit`'ten ÖNCE varabilir. Önceden bu durumda `receive_message`
 /// "No ratchet session for sender" ile hata verip paketi ATIYORDU; DM'de
 /// ack-retry eninde sonunda kurtarıyordu ama GRUP mesajlarında retry
@@ -556,8 +542,7 @@ pub(crate) const HISTORY_STORAGE_SWEEP_INTERVAL_MS: u64 = 30_000;
 /// Tampon sınırlıdır (bellek/DoS koruması): peer başına en fazla
 /// `MAX_EARLY_PACKETS_PER_PEER`, ve `EARLY_PACKET_TTL_MS`'ten eski girdiler
 /// budanır.
-///
-/// Spec dışı, teslim garantisi düzeltmesi: bu süre önceden sabit 120 sn'ydi
+/// bu süre önceden sabit 120 sn'ydi
 /// ve `EARLY_EDIT_DELETE_TTL_MS`'in (aynı gerekçeyle zaten
 /// `MAX_UNCONFIRMED_AGE_MS`'e çekilmiş olan) yanında tutarsız kalıyordu.
 /// Tamponun anlamlı olduğu süre, "gönderenin AYNI mesajı hâlâ yeniden
@@ -573,7 +558,6 @@ pub(crate) const UNKNOWN_GROUP_HOLD_TTL_MS: u64 = 30 * 60_000;
 pub(crate) const UNKNOWN_GROUP_HOLD_GROUPS: usize = 16;
 pub(crate) const UNKNOWN_GROUP_HOLD_PER_GROUP: usize = 64;
 /// Teslim garantisi düzeltmesi (2026-08-28): 20'den 200'e çıkarıldı.
-///
 /// Bu tampon, el sıkışmadan ÖNCE gelen paketleri tutuyor. 20, tam da en
 /// çok gerektiği senaryoda yetersizdi: uzun süre kapalı kalmış bir eş geri
 /// döndüğünde birikmiş onlarca mesajını arka arkaya yolluyor ve el sıkışma
@@ -594,8 +578,7 @@ pub(crate) const MAX_EARLY_PACKETS_PER_PEER: usize = 200;
 /// uygulanmıyordu. Artık bu durumda (satır HİÇ yoksa, sahibi başkasına ait
 /// OLDUĞU için değil) paket burada tamponlanır ve hedef `Text` arşivlenince
 /// yeniden denenir — bkz. `pending_edits_deletes`/`replay_buffered_edits_deletes`.
-///
-/// Spec dışı, dış inceleme düzeltmesi: bu süre önceden `EARLY_PACKET_TTL_MS`
+/// bu süre önceden `EARLY_PACKET_TTL_MS`
 /// ile AYNI, sabit 120sn'ydi — bağımsız bir incelemenin haklı olarak
 /// belirttiği gibi, hedef `Text` bundan geç gelirse (aşırı yavaş bir Tor
 /// devresi, ya da göndericinin cihazı uykuda) tampon SESSİZCE silinip
@@ -625,7 +608,7 @@ pub(crate) const MAX_PENDING_GROUP_MESSAGES_PER_MEMBER: usize = 200;
 /// kullanılır.
 pub(crate) const TOR_LIBP2P_PORT: u16 = 42611;
 
-/// Spec dışı, güvenlik denetimi düzeltmesi: bir `HandshakeInit`'in
+/// bir `HandshakeInit`'in
 /// `timestamp`'i, o an ile bu kadar milisaniyeden fazla sapıyorsa (ileri
 /// VEYA geri) reddedilir — çok eski yakalanmış el sıkışmaların tekrar
 /// oynatılmasını engellerken, cihazlar arası makul saat kaymasına (clock
@@ -654,7 +637,6 @@ pub(crate) const UNDECRYPTABLE_REDO_MIN_INTERVAL_MS: u64 = 2 * 60 * 1000;
 /// istemcilerinin gömülü varsayılan bootstrap node'ları gibi. `start_network`
 /// içinde, her biri Ayarlar'daki manuel ekleme ile AYNI fonksiyon
 /// (`add_known_relay_address`) ile eklenir.
-///
 /// KURULUM NOTU: bu liste kasıtlı olarak BOŞ başlıyor — buraya rastgele/
 /// var olmayan bir adres koymak sessizce başarısız dial denemelerine yol
 /// açar. Kendi (veya güvendiğiniz birinin) Node modu açık, herkese açık bir
@@ -733,8 +715,7 @@ pub(crate) const TEXT_RETRY_GIVE_UP_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// bkz. `link_request_open_until`. Grant, birincil cihaz QR'ı taradıktan sonra
 /// kalıcı yeniden deneme/sunucu posta kutusuyla gecikmeli gelebilir (ikincil
 /// çevrimdışıyken, yeniden başlatma sonrası) — pencere diske yazılır.
-///
-/// One hour (R-09): while the window is open any paired contact can attach
+/// One hour: while the window is open any paired contact can attach
 /// this device to its own identity with a grant it signs itself (the device
 /// cannot know who scanned its code). Same as the approver's
 /// `PENDING_LINK_RETRY_HORIZON_MS`.
@@ -744,7 +725,7 @@ pub(crate) const LINK_REQUEST_WINDOW_MS: u64 = PENDING_LINK_RETRY_HORIZON_MS;
 /// window, anyone who knew our fingerprint could fill the contact list at any
 /// time, with no action by the user. The UI produces the code each time its
 /// screen is shown, which opens the window again.
-/// L-131: 30 min, not 24 h — a photographed code is a bearer token for the
+/// 30 min, not 24 h — a photographed code is a bearer token for the
 /// whole window; a delayed (Tor/mailbox) exchange still fits.
 pub(crate) const PAIRING_WINDOW_MS: u64 = 30 * 60 * 1000;
 /// A pairing code produced again inside this time carries the nonce of the
@@ -763,14 +744,11 @@ pub(crate) const MAX_GROUP_MEMBERS: usize = 256;
 /// TCP dial'ın ne başarılı olup ne de temiz bir hatayla sonuçlanmadığı
 /// durumlarda) indirme SÜRESİZ "İndiriliyor" durumunda takılı kalabilirdi.
 /// (The constant is `DOWNLOAD_STALL_TIMEOUT_MS`, below.)
-///
 /// Aynı anda havada olabilecek dosya parçası isteği — UYARLANIR pencere
 /// (bkz. `DownloadState.window`).
-///
 /// Tek parça havadayken aktarım hızı `parça_boyutu / gidiş-dönüş süresi` ile
 /// sınırlıdır — bant genişliğinden BAĞIMSIZ olarak. Gerçek cihazlarda Tor
 /// üzerinden ölçüldü: ~70 KB/s indirme, ~12 KB/s yükleme.
-///
 /// Ancak SABİT bir derinlik de yanlış: gerçek cihazlarda ölçüldü ki yükleme
 /// yolunda derinliği 6'dan 16'ya çıkarmak hızı ~180 KB/s'den ~50 KB/s'ye
 /// DÜŞÜRDÜ — çünkü ~200 KB/s'lik bir Tor devresinde 16 × 256 KiB havada
@@ -804,11 +782,10 @@ pub(crate) const DOWNLOAD_RTT_CEILING_MS: u64 = server_client::BLOB_REQUEST_TIME
 pub(crate) const DOWNLOAD_RTT_FLOOR_MS: u64 = 750;
 
 /// 105 s: longer than the 90 s chunk request timeout. At the old 45 s a chunk
-/// still in flight on a slow Tor path (round trips of 45-72 s) was requested
+/// still in flight on a slow Tor path was requested
 /// again and counted against its source.
 pub(crate) const DOWNLOAD_STALL_TIMEOUT_MS: u64 = server_client::BLOB_REQUEST_TIMEOUT_MS + 15_000;
-/// Spec dışı, ağ sağlamlığı düzeltmesi (kullanıcı isteği: "her şey
-/// onaylanana/çok çok uzun -10 dk- bir zaman aşımına kadar denenmeli"):
+/// "her şey onaylanana/çok çok uzun -10 dk- bir zaman aşımına kadar denenmeli"):
 /// bir indirme, SON GERÇEK ilerlemeden (bkz. `DownloadState.last_progress_at`)
 /// bu kadar süre geçene kadar (ara sıra `DOWNLOAD_STALL_TIMEOUT_MS`'de bir
 /// aynı parçayı yeniden isteyerek) pes etmez. Önceden TEK bir stall/

@@ -1,18 +1,15 @@
 //! Saf-Rust API cephesi (façade) — JNI'siz çağıranlar için.
-//!
 //! Bu modül, dosya sonundaki JNI export'larının (`Java_com_p2p_messenger_P2PLib_*`)
 //! BİREBİR karşılıklarını, JVM'e özgü tiplerden (JNIEnv/JString/JByteArray)
 //! arındırılmış olarak sunar: aynı `catch_panic` + `RUNTIME.enter()` +
 //! `core_lock()` sırası, aynı dönüş biçimleri ("Error: ..." önekli hata
 //! stringleri, JSON dizileri, `{"message_id":..,"status":..}` nesneleri).
-//!
 //! GEREKÇE: Linux masaüstü istemcisi (bkz. depo kökündeki `Linux/`) TAM OLARAK
 //! aynı çekirdeği (aynı kripto, aynı ratchet, aynı veritabanı şeması, aynı
 //! ağ protokolü) kullanır — protokolü ikinci kez yazmak, iki uygulamanın
 //! sessizce birbirinden sapması demek olurdu. Android tarafı için HİÇBİR ŞEY
 //! değişmez: bu modül tamamen EKLEMEDİR, JNI export'ları olduğu gibi durur ve
 //! `api::*` fonksiyonlarını çağırmaz (ikisi de doğrudan `P2PCore`'a gider).
-//!
 //! Kotlin tarafındaki `P2PLib` dokümantasyonu (parametre anlamları, hangi
 //! çağrının ana thread'de yapılmaması gerektiği, dönüş biçimleri) buradaki
 //! her fonksiyon için AYNEN geçerlidir — tekrar edilmiyor.
@@ -27,7 +24,7 @@ fn string_result(result: Result<Result<String, String>, String>) -> String {
     match result {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => format!("Error: {}", e),
-        Err(e) => format!("Error: panic: {}", e), // M21: told apart from a declared failure
+        Err(e) => format!("Error: panic: {}", e), // told apart from a declared failure
     }
 }
 
@@ -36,7 +33,7 @@ fn ok_result(result: Result<Result<(), String>, String>) -> String {
     match result {
         Ok(Ok(())) => "OK".to_string(),
         Ok(Err(e)) => format!("Error: {}", e),
-        Err(e) => format!("Error: panic: {}", e), // M21: told apart from a declared failure
+        Err(e) => format!("Error: panic: {}", e), // told apart from a declared failure
     }
 }
 
@@ -77,7 +74,7 @@ pub fn get_pending_secret_bundle() -> Vec<u8> {
 }
 
 pub fn load_secret_bundle(bundle_bytes: &[u8]) -> bool {
-    // Every secret key of the device: wiped when dropped (fable G-08).
+    // Every secret key of the device: wiped when dropped.
     let raw = zeroize::Zeroizing::new(bundle_bytes.to_vec());
     matches!(
         catch_panic(move || {
@@ -296,7 +293,7 @@ pub fn device_link_code(data: &[u8]) -> String {
     crate::device_link_code(data)
 }
 
-// fable G-07: no `approve_device_link`, `forget_revoked_linked_device` or
+// no `approve_device_link`, `forget_revoked_linked_device` or
 // `import_recovery` here. Desktops are secondary devices only: they never
 // add devices or restore a whole account (owner rule).
 
@@ -529,7 +526,7 @@ pub fn send_seen_receipt(
 ) -> bool {
     let target = target_device_fingerprint.to_string();
     let target_id = target_message_id.to_string();
-    // M-179: the send's own result, not only "did not panic".
+    // the send's own result, not only "did not panic".
     catch_panic(move || {
         let _guard = RUNTIME.enter();
         core_lock().send_seen(&target, &target_id, group_message_local_id)
@@ -548,7 +545,7 @@ pub fn list_contacts() -> String {
 pub fn get_message_history(peer_device_fingerprint: &str, limit: u32) -> String {
     let fp = peer_device_fingerprint.to_string();
     json_list(catch_panic(move || {
-        // H57: lock dropped before the JSON is built.
+        // lock dropped before the JSON is built.
         let h = crate::core_lock_read().load_message_history(&fp, limit.min(crate::MAX_HISTORY_PAGE as u32), None);
         serde_json::to_string(&h)
             .unwrap_or_else(|_| "[]".to_string())
@@ -594,7 +591,7 @@ pub fn get_group_message_history_before(
     }))
 }
 
-/// H122: rows archived after `after_timestamp` only (bkz. JNI `getMessageHistorySince`).
+/// rows archived after `after_timestamp` only (bkz. JNI `getMessageHistorySince`).
 pub fn get_message_history_since(peer_device_fingerprint: &str, after_timestamp: i64, limit: u32) -> String {
     let fp = peer_device_fingerprint.to_string();
     json_list(catch_panic(move || {
@@ -611,7 +608,7 @@ pub fn get_group_message_history_since(group_id: &str, after_timestamp: i64, lim
     }))
 }
 
-/// H137: bkz. JNI `chatListPreviews`.
+/// bkz. JNI `chatListPreviews`.
 pub fn chat_list_previews() -> String {
     catch_panic(|| {
         let previews = crate::core_lock_read().chat_list_previews();
@@ -747,12 +744,12 @@ pub fn encode_jxl_lossless(rgba: &mut [u8], width: u32, height: u32, has_alpha: 
     catch_panic(move || crate::attachments::encode_jxl_lossless(rgba, width, height, has_alpha, std::path::Path::new(out_path)))?
 }
 
-/// H26: animated lossless JPEG XL; see JNI `encodeJxlAnimated` (RGBA frames).
+/// animated lossless JPEG XL; see JNI `encodeJxlAnimated` (RGBA frames).
 pub fn encode_jxl_animated(frames: &mut [Vec<u8>], width: u32, height: u32, delays_ms: &[u32], has_alpha: bool, out_path: &str) -> Result<(), String> {
     catch_panic(move || crate::attachments::encode_jxl_animated(frames, width, height, delays_ms, has_alpha, std::path::Path::new(out_path)))?
 }
 
-/// H26: see JNI `jxlToGif`.
+/// see JNI `jxlToGif`.
 pub fn jxl_to_gif(in_path: &str, out_path: &str) -> Result<(), String> {
     catch_panic(move || crate::attachments::jxl_to_gif(std::path::Path::new(in_path), std::path::Path::new(out_path)))?
 }
@@ -930,7 +927,6 @@ pub fn shutdown() {
 }
 
 /// `P2PCore::account_deletion_pending`.
-///
 /// -1 on a panic, NOT 0: 0 means "every notice was delivered" and the caller
 /// goes on to wipe the device.
 pub fn account_deletion_pending() -> i64 {
@@ -971,13 +967,13 @@ pub fn export_recovery(passphrase: &str) -> Vec<u8> {
     // heap'te kalmasın — kopyamız drop'ta siliniyor (çekirdeğin kendi
     // kopyası ayrı bir konu, bkz. recovery.rs `export_recovery`).
     let pass = zeroize::Zeroizing::new(passphrase.to_string());
-    // M-21: only the plaintext is built under the core lock; Argon2 runs
+    // only the plaintext is built under the core lock; Argon2 runs
     // after the lock is released (it froze every other caller).
     let staged = catch_panic(move || {
         let chats = crate::recovery_chats_unlocked();
         crate::core_lock_read().recovery_plaintext((*pass).clone(), Some(chats))
     });
-    // M20: empty on failure (the Linux UI checks that), but logged.
+    // empty on failure (the Linux UI checks that), but logged.
     match staged.and_then(|r| r).and_then(|(plaintext, pass)| crate::seal_recovery_file(&plaintext, &pass)) {
         Ok(file) => file,
         Err(e) => {
@@ -1003,7 +999,6 @@ fn json_list(result: Result<String, String>) -> String {
 // ---------------------------------------------------------------------------
 // Sunucu (store-and-forward) seçeneği
 // ---------------------------------------------------------------------------
-//
 // bkz. çekirdeğin `server_client` modülü. Bu fonksiyonların JNI karşılıkları
 // `jni_exports.rs`'in sonundadır; ikisi ELLE senkron tutulmalı (bu dosyanın modül
 // notundaki genel kural).
@@ -1068,7 +1063,6 @@ pub fn set_archive_root_key(key_bytes: &[u8]) -> bool {
 
 /// Sunucudaki BÜTÜN geçmişi indirir — kurtarma dosyasından ya da cihaz
 /// bağlamayla yeni kurulmuş bir cihaz için.
-///
 /// `request_older_server_history`'den farkı: o, "bu sohbette yukarı
 /// kaydırdım" durumunu karşılıyor, yani sohbetin zaten görünür olmasını
 /// varsayıyor. Sıfırdan kurulan bir cihazda kişiler geri gelir ama hiç mesaj
@@ -1082,7 +1076,6 @@ pub fn restore_server_history() -> String {
 }
 
 /// Çekirdeğin o an tuttuğu kök arşiv anahtarı (varsa).
-///
 /// SADECE masaüstü istemcisinin bunu diske kalıcılaştırabilmesi için: ARK bir
 /// kardeş cihazdan `DeviceSync` ile SONRADAN gelebiliyor ve o an istemcinin
 /// elinde vault parolası olmuyor. Android'de buna gerek yok — anahtar zaten
@@ -1206,4 +1199,154 @@ pub fn whiteboard_tick() {
         let _guard = RUNTIME.enter();
         core_lock().wb_sweep();
     });
+}
+
+// --- Stickers (same core paths as the JNI `*Sticker*` exports) ---
+
+/// JSON `[{"id","animated","created_at","favorite"}]`, favorites first.
+pub fn list_stickers() -> String {
+    catch_panic(|| crate::core_lock_read().list_stickers()).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// A viewable copy of a sticker: `.png`, or `.gif` when animated.
+pub fn sticker_plain_path(id: &str) -> String {
+    let id = id.to_string();
+    string_result(catch_panic(move || crate::sticker_plain_path_unlocked(&id)))
+}
+
+/// A still sticker from one RGBA frame (at most 600 px a side). Returns its id.
+pub fn import_sticker_rgba(rgba: Vec<u8>, width: u32, height: u32) -> String {
+    if rgba.len() as u64 != u64::from(width) * u64::from(height) * 4 {
+        return "Error: bad sticker size".to_string();
+    }
+    string_result(catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        crate::import_sticker_frames_unlocked(vec![rgba], width, height, &[0], None)
+    }))
+}
+
+/// Sends a sticker to a contact device (`peer`) or a group (`group_id`; the
+/// other one empty). `reply_to` = (message id, preview, group sender).
+/// Returns the attachment's file id.
+pub fn send_sticker(peer: &str, group_id: &str, sticker_id: &str, reply_to: Option<(String, String, Option<String>)>) -> String {
+    let peer = Some(peer.to_string()).filter(|s| !s.is_empty());
+    let gid = Some(group_id.to_string()).filter(|s| !s.is_empty());
+    let id = sticker_id.to_string();
+    string_result(catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        crate::send_sticker_unlocked(peer, gid, &id, reply_to)
+    }))
+}
+
+/// Copies a received (downloaded) sticker attachment into my store. Returns the sticker id.
+pub fn save_received_sticker(file_id: &str) -> String {
+    let id = file_id.to_string();
+    string_result(catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        crate::save_received_sticker_unlocked(&id)
+    }))
+}
+
+/// Removes a sticker from my store and from my other devices.
+pub fn delete_sticker(id: &str) -> String {
+    let id = id.to_string();
+    ok_result(catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().delete_sticker(&id, true)
+    }))
+}
+
+/// Asks the phone for every sticker this device lacks; they arrive one by
+/// one as `stickers_changed` events.
+pub fn request_stickers_from_phone() -> String {
+    ok_result(catch_panic(|| {
+        let _guard = RUNTIME.enter();
+        core_lock().request_stickers_from_siblings()
+    }))
+}
+
+pub fn set_sticker_favorite(id: &str, favorite: bool) -> String {
+    let id = id.to_string();
+    ok_result(catch_panic(move || core_lock().set_sticker_favorite(&id, favorite)))
+}
+
+// --- Storage (this device only, as Android's Settings → Storage) ---
+
+/// See JNI `storageUsage`.
+pub fn storage_usage() -> String {
+    catch_panic(|| crate::core_lock_read().storage_usage().to_string()).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// See JNI `chatPruneStats`; `kind` is "contact" or "group".
+pub fn chat_prune_stats(kind: &str, id: &str, before_ms: i64) -> String {
+    let (kind, id) = (kind.to_string(), id.to_string());
+    catch_panic(move || crate::core_lock_read().chat_prune_stats(&kind, &id, before_ms).to_string()).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Deletes a chat's messages and attachments older than `before_ms` on this device.
+pub fn prune_chat_before(kind: &str, id: &str, before_ms: i64) -> String {
+    let (kind, id) = (kind.to_string(), id.to_string());
+    ok_result(catch_panic(move || core_lock().prune_chat_before(&kind, &id, before_ms)))
+}
+
+/// Drops this device's copy of each attachment (downloadable again). The first error, if any.
+pub fn remove_local_attachments(file_ids: &[String]) -> String {
+    let ids = file_ids.to_vec();
+    ok_result(catch_panic(move || {
+        let mut core = core_lock();
+        let mut first_err = None;
+        for id in &ids {
+            if let Err(e) = core.remove_local_attachment(id) {
+                first_err.get_or_insert(e);
+            }
+        }
+        first_err.map_or(Ok(()), Err)
+    }))
+}
+
+/// A JPEG XL attachment as it came, for "Save as JPEG XL".
+pub fn attachment_original_path(file_id: &str) -> String {
+    let id = file_id.to_string();
+    string_result(catch_panic(move || crate::attachment_original_path_unlocked(&id)))
+}
+
+/// 1 = sent again to the group devices that missed it, 0 = nothing to send, -1 = failed.
+pub fn retry_group_message_copies(group_id: &str, local_id: &str) -> i32 {
+    let (gid, lid) = (group_id.to_string(), local_id.to_string());
+    match catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().retry_group_message_copies(&gid, &lid)
+    }) {
+        Ok(Ok(true)) => 1,
+        Ok(Ok(false)) => 0,
+        _ => -1,
+    }
+}
+
+/// Hides a revoked sibling from `list_linked_devices`.
+pub fn forget_revoked_linked_device(device_fingerprint: &str) -> String {
+    let fp = device_fingerprint.to_string();
+    ok_result(catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().forget_revoked_linked_device(&fp)
+    }))
+}
+
+/// A sticker's first frame as PNG (cheap preview of an animated one).
+pub fn sticker_first_frame(id: &str) -> String {
+    let id = id.to_string();
+    string_result(catch_panic(move || crate::sticker_first_frame_unlocked(&id)))
+}
+
+/// A complete JPEG XL attachment's frames: (width, height, [(RGBA, ms)]).
+/// Slow: off the UI thread.
+pub fn attachment_jxl_frames(file_id: &str) -> Result<(u32, u32, Vec<(Vec<u8>, u32)>), String> {
+    let id = file_id.to_string();
+    catch_panic(move || {
+        let path = crate::attachment_original_path_unlocked(&id)?;
+        let frames = crate::attachments::jxl_frames_rgba(std::path::Path::new(&path));
+        // The original is a plain copy in plain_cache: not kept around.
+        let _ = std::fs::remove_file(&path);
+        frames
+    })?
 }

@@ -1,12 +1,10 @@
 //! Typed, Rust-idiomatic layer over `p2p_messenger::api`.
-//!
 //! The façade in the core crate mirrors the Android JNI surface exactly, which
 //! means it speaks in JSON strings and `"Error: ..."` prefixes (a JNI boundary
 //! cannot carry a `Result`). Everything above this module works with real
 //! types instead. The summary structs are the core's OWN types, re-exported —
 //! not local copies — so a field added on the protocol side cannot silently go
 //! missing here.
-//!
 //! This is a complete binding layer: every entry point the Android `P2PLib`
 //! exposes has a counterpart here, whether or not this client's UI happens to
 //! call it today. Pruning the unused ones would make the next feature look like
@@ -176,7 +174,7 @@ pub fn notify_network_changed() {
     api::notify_network_changed();
 }
 
-/// R-06: drops the core's keepalive ladder and radio-window throttling when
+/// drops the core's keepalive ladder and radio-window throttling when
 /// the platform says this app is idle (bkz. `P2PCore::set_power_save`).
 /// Android feeds this from the app lifecycle; the desktop client had nothing,
 /// so it burned radio time like a phone in power-save-off mode.
@@ -184,7 +182,7 @@ pub fn set_power_save(enabled: bool) {
     api::set_power_save(enabled);
 }
 
-/// R-06: metered (cellular) link or not — the core coalesces its radio
+/// metered (cellular) link or not — the core coalesces its radio
 /// windows differently there (bkz. `P2PCore::set_metered`).
 pub fn set_metered(metered: bool) {
     api::set_metered(metered);
@@ -621,10 +619,150 @@ pub fn list_group_attachments_before(
     parse_list(api::list_group_attachments_before(group_id, before_ms, limit))
 }
 
+/// A complete JPEG XL attachment's frames: (width, height, [(RGBA, ms)]).
+/// Slow: off the GTK thread.
+pub fn attachment_jxl_frames(file_id: &str) -> Result<(u32, u32, Vec<(Vec<u8>, u32)>), String> {
+    api::attachment_jxl_frames(file_id)
+}
+
 /// Decrypts a completed attachment to a plaintext file and returns its path.
 /// Slow for large files — call it off the GTK main thread.
 pub fn attachment_plaintext_path(file_id: &str) -> Result<String, String> {
     parse(api::get_attachment_plaintext_path(file_id))
+}
+
+// --- stickers ---
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StickerEntry {
+    pub id: String,
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default)]
+    pub animated: bool,
+}
+
+/// A sticker's first frame as PNG. Slow the first time: off the GTK thread.
+pub fn sticker_first_frame(id: &str) -> Result<String, String> {
+    parse(api::sticker_first_frame(id))
+}
+
+/// Who reacted to a message, newest first.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReactionEntry {
+    pub identity_id: String,
+    pub emoji: String,
+    #[serde(default)]
+    pub is_me: bool,
+}
+
+pub fn list_reactions(message_id: &str) -> Vec<ReactionEntry> {
+    parse_list(api::list_reactions(message_id))
+}
+
+/// 1 = sent again to the group devices that missed it, 0 = nothing to send, -1 = failed.
+pub fn retry_group_message_copies(group_id: &str, local_id: &str) -> i32 {
+    api::retry_group_message_copies(group_id, local_id)
+}
+
+/// A JPEG XL attachment as it came, for "Save as JPEG XL".
+pub fn attachment_original_path(file_id: &str) -> Result<String, String> {
+    parse(api::attachment_original_path(file_id))
+}
+
+pub fn forget_revoked_linked_device(fingerprint: &str) -> Result<(), String> {
+    parse_unit(api::forget_revoked_linked_device(fingerprint))
+}
+
+// --- storage (this device only) ---
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StorageChat {
+    pub kind: String,
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub bytes: u64,
+    #[serde(default)]
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StorageUsage {
+    #[serde(default)]
+    pub db_bytes: u64,
+    #[serde(default)]
+    pub attachments_bytes: u64,
+    #[serde(default)]
+    pub voice_bytes: u64,
+    #[serde(default)]
+    pub stickers_bytes: u64,
+    #[serde(default)]
+    pub cache_bytes: u64,
+    #[serde(default)]
+    pub chats: Vec<StorageChat>,
+}
+
+pub fn storage_usage() -> StorageUsage {
+    parse_or_default(api::storage_usage(), "storage_usage")
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PruneStats {
+    #[serde(default)]
+    pub del_msg_count: u64,
+    #[serde(default)]
+    pub del_att_bytes: u64,
+}
+
+pub fn chat_prune_stats(kind: &str, id: &str, before_ms: i64) -> PruneStats {
+    parse_or_default(api::chat_prune_stats(kind, id, before_ms), "chat_prune_stats")
+}
+
+pub fn prune_chat_before(kind: &str, id: &str, before_ms: i64) -> Result<(), String> {
+    parse_unit(api::prune_chat_before(kind, id, before_ms))
+}
+
+pub fn remove_local_attachments(file_ids: &[String]) -> Result<(), String> {
+    parse_unit(api::remove_local_attachments(file_ids))
+}
+
+/// My sticker store, favorites first, then newest.
+pub fn list_stickers() -> Vec<StickerEntry> {
+    parse_list(api::list_stickers())
+}
+
+/// A viewable PNG/GIF of a sticker. Slow the first time: call it off the GTK thread.
+pub fn sticker_plain_path(id: &str) -> Result<String, String> {
+    parse(api::sticker_plain_path(id))
+}
+
+/// A still sticker from RGBA pixels (at most 600 px a side). Returns its id.
+pub fn import_sticker_rgba(rgba: Vec<u8>, width: u32, height: u32) -> Result<String, String> {
+    parse(api::import_sticker_rgba(rgba, width, height))
+}
+
+/// `target` is a device fingerprint, or a group id when `group` is set.
+pub fn send_sticker(target: &str, group: bool, sticker_id: &str, reply_to: Option<(String, String, Option<String>)>) -> Result<String, String> {
+    let (peer, gid) = if group { ("", target) } else { (target, "") };
+    parse(api::send_sticker(peer, gid, sticker_id, reply_to))
+}
+
+pub fn save_received_sticker(file_id: &str) -> Result<String, String> {
+    parse(api::save_received_sticker(file_id))
+}
+
+pub fn request_stickers_from_phone() -> Result<(), String> {
+    parse_unit(api::request_stickers_from_phone())
+}
+
+pub fn set_sticker_favorite(id: &str, favorite: bool) -> Result<(), String> {
+    parse_unit(api::set_sticker_favorite(id, favorite))
+}
+
+pub fn delete_sticker(id: &str) -> Result<(), String> {
+    parse_unit(api::delete_sticker(id))
 }
 
 // --- pending (unacknowledged) messages ---
@@ -642,7 +780,6 @@ pub fn retry_pending_message_now(message_id: &str) -> bool {
 }
 
 // --- sunucu (store-and-forward) seçeneği ---
-//
 // bkz. çekirdeğin `server_client` modülü. Rölelerden FARKLI: bir röle hiçbir
 // şey saklamaz, sadece iki taraf da o anda bağlıyken canlı bir devre kurar;
 // sunucu ise alıcı çevrimdışıyken zarfı diske yazar ve geri döndüğünde
@@ -721,7 +858,6 @@ pub fn restore_server_history() -> Result<u32, String> {
 }
 
 /// The archive root key the core currently holds, if any.
-///
 /// Needed because the key can arrive *later*, from a sibling device over the
 /// encrypted sync channel, long after the vault passphrase is gone from
 /// memory — see `secrets::store_archive_key`.

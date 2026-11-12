@@ -5,7 +5,6 @@ use super::*;
 
 /// `wipe_all_local_state`'in HİÇBİR alanı atlamadığını kaynak metin
 /// üzerinden doğrular.
-///
 /// Neden böyle bir test: bu fonksiyon iki kez yarım kaldı (defter #13'te
 /// sunucu tabloları, sonra öz-denetimde anahtar malzemesi ve kişi
 /// eşleştirme haritaları). Yeni bir alan eklendiğinde onu wipe'a eklemeyi
@@ -380,12 +379,12 @@ mod review_oct2026_tests {
             IdentityExchange { device_name: "Mallory".into(), ..ix.clone() },
             IdentityExchange { identity_id: sec_fp.clone(), ..ix.clone() },
             IdentityExchange { signature: Vec::new(), signature_pq: Vec::new(), ..ix.clone() },
-            // L-40: signed for another recipient, or at another time.
+            // signed for another recipient, or at another time.
             IdentityExchange { timestamp: ix.timestamp - 1, ..ix.clone() },
         ] {
             assert!(stranger.process_identity_exchange(None, &forged).unwrap_err().contains("imzası"));
         }
-        // L-40: addressed to the stranger, so another device refuses it; and
+        // addressed to the stranger, so another device refuses it; and
         // one older than the window is refused before the signature.
         let mut other = P2PCore::new();
         other.generate_identity("O".into()).unwrap();
@@ -514,7 +513,7 @@ mod review_oct2026_tests {
         assert_eq!(cores[1].groups[&gid].version, 2);
         assert_eq!(cores[2].groups[&gid].version, 2);
 
-        // H28: one first-contact secret per group, registered while in it.
+        // one first-contact secret per group, registered while in it.
         let other = "group-fedcba9876543210";
         assert_ne!(cores[1].own_group_contact_secret(&gid), cores[1].own_group_contact_secret(other));
         assert!(cores[1].first_contact_secrets().contains(&cores[1].own_group_contact_secret(&gid)));
@@ -640,7 +639,7 @@ mod recovery_tests {
         assert!(!core.unknown_group_has_room(gid), "query error: no room");
     }
 
-    /// L-32: duplicates from an older build are merged at start, then the
+    /// duplicates from an older build are merged at start, then the
     /// UNIQUE index makes a second archive of one id a no-op.
     #[test]
     fn message_ids_are_deduped_and_unique() {
@@ -704,7 +703,7 @@ mod recovery_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// F3: a history page may not forge, freeze or erase my reactions, nor
+    /// a history page may not forge, freeze or erase my reactions, nor
     /// react on rows the filters dropped.
     #[test]
     fn synced_reactions_only_for_kept_rows_and_mine_only_restored() {
@@ -1120,7 +1119,7 @@ mod recovery_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// F1: the preview is the newest by sent time even when 60 older-sent
+    /// the preview is the newest by sent time even when 60 older-sent
     /// rows arrived after it (history sync).
     #[test]
     fn chat_preview_is_newest_sent_however_far_back_it_arrived() {
@@ -1177,6 +1176,26 @@ mod recovery_tests {
         assert!(!cache("a").exists() && !dir.join(format!("attachments/plain_cache/first-{}.png", "a".repeat(64))).exists());
         core.remove_local_attachment("voc").unwrap();
         assert!(cache("b").exists(), "'mine' has the same content");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn big_sticker_parts_round_trip() {
+        let dir = std::env::temp_dir().join(format!("typeon-stk-parts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut core = core_on_disk(&dir);
+        let whole: Vec<u8> = (0..STICKER_SYNC_MAX_BYTES * 2 + 5).map(|i| i as u8).collect();
+        let id = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&whole));
+        let bodies = crate::storage::sticker_echo_parts(&id, &whole, None);
+        assert_eq!(bodies.len(), 3);
+        let mut got = None;
+        for body in bodies.into_iter().rev() {
+            let SiblingEchoBody::Sticker { jxl, id, part, parts, .. } = body else { panic!() };
+            got = core.add_sticker_part(&id, part, parts, jxl).unwrap();
+        }
+        assert_eq!(got.as_deref(), Some(&whole[..]), "out-of-order parts put back together");
+        assert!(core.add_sticker_part(&id, 0, 2, vec![1]).unwrap().is_none());
+        assert!(core.add_sticker_part(&id, 1, 2, vec![2]).is_err(), "wrong hash refused");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1285,7 +1304,6 @@ mod rate_limit_tests {
     /// doğrulanmış, kurulmuş oturumu olan bir eş tavanı aşarsa paket
     /// ATILMAZ, ERTELENİR: bir hafta kapalı kalmış bir eşin birikmiş
     /// mesajlarını yakalarken kayıp yaşanmasın diye.
-    ///
     /// Bu test sabitlerin ilişkisini kilitliyor; karar mantığının kendisi
     /// `rate_verdict` içinde ve `P2PCore` gerektirdiği için burada
     /// çalıştırılamıyor.
@@ -1313,7 +1331,7 @@ mod rate_limit_tests {
 mod path_safety_tests {
     use super::{is_safe_file_id, safe_extension};
 
-    /// Defter #01: `FileOffer.file_id` karsi taraftan geliyor ve dosya
+    /// `FileOffer.file_id` karsi taraftan geliyor ve dosya
     /// yoluna donusuyordu. Bunlar gectiginde `enc_path_for` dizin disina
     /// cikamaz.
     #[test]
@@ -1335,7 +1353,7 @@ mod path_safety_tests {
         assert!(is_safe_file_id("bl_abc123"));
     }
 
-    /// Defter #01 (ikinci yuzey): duz metin onbellek yolu `{file_id}{ext}`
+    /// duz metin onbellek yolu `{file_id}{ext}`
     /// ile kuruluyor ve `ext` de karsi tarafin dosya adindan geliyordu.
     #[test]
     fn extensions_cannot_carry_path_separators() {
@@ -1355,7 +1373,6 @@ mod delivery_ack_coverage_tests {
     /// yeniden dener ve `pending_durable_retries`'e yazar. Sonuç: tepki
     /// alıcıda uygulansa bile gönderen tarafta yeniden-deneme girdisi
     /// günlerce asılı kalıyordu.
-    ///
     /// Bu test, `receive_message`'ın onay bekleyen içerik türlerinin
     /// kollarının GERÇEKTEN bir Ack yolu tetiklediğini kilitler. Kaynağı
     /// tarar (`wipe_coverage_tests` ile aynı desen — `P2PCore` kuramadığımız
@@ -1464,7 +1481,7 @@ mod conn_path_rank_tests {
     fn onion_beats_clearnet_and_relay() {
         let r = |s: &str| conn_path_rank(&s.parse().unwrap());
         let peer = "12D3KooWKyUGW1BQhQRTn6gGcidXMotu34zMsfodWjAZD6ebL1Uv";
-        // Onion-only (deanon fix): clearnet doğrudan yol artık en düşük (0),
+        // Onion-only: clearnet doğrudan yol artık en düşük (0),
         // asla onion'un üstüne çıkmaz.
         assert_eq!(r(&format!("/ip4/192.168.1.103/tcp/42611/p2p/{peer}")), 0);
         assert_eq!(r(&format!("/dns/abc.onion/tcp/42611/p2p/{peer}")), 1);
@@ -1518,7 +1535,7 @@ mod at_rest_tests {
         // An older one from a replayed packet does not replace it...
         a.store_peer_prekey(&b_fp, &make(10), &device, false);
         assert_eq!(a.peer_prekeys[&b_fp].id, 20);
-        // ...one from an accepted HandshakeInit does.
+        // one from an accepted HandshakeInit does.
         a.store_peer_prekey(&b_fp, &make(10), &device, true);
         assert_eq!(a.peer_prekeys[&b_fp].id, 10);
         // Keys the device did not sign are refused.
@@ -1553,7 +1570,7 @@ mod at_rest_tests {
         assert!(conn.execute("INSERT INTO contacts VALUES ('three', 'a', 'idA', '[]', 0, NULL)", []).is_err());
     }
 
-    /// A-3 (claude_review_4): a revoked device of a group member who is not
+    /// a revoked device of a group member who is not
     /// a contact signs rows dated after its revoke in vain.
     #[test]
     fn non_contact_revoke_dates_group_author_proofs() {
@@ -1681,7 +1698,7 @@ mod authz_coverage_tests {
             (&["fn process_identity_exchange", "(&mut self"], 20000, "if my_id.as_deref() == Some(exchange.identity_id.as_str()) {"),
             (&["MessageContent::Seen { target_message_id,", " group_message_local_id } =>"], 5000, "may_mark_seen("),
             (&["fn process_handshake_init", "(&mut self"], 5000, "&recipient_fp,"),
-            // 2026-10-07 (REVIEW_FINDINGS_core_2)
+            // 2026-10-07
             (&["fn remove_from_group", "(&mut self"], 1500, "is_member(member_identity_id)"),
             (&["fn verify_founder_transfer", "(&self"], 1500, "!signer.is_active"),
             (&["fn heal_founder_chain", "(&self"], 1500, "t.version > floor"),
@@ -1698,7 +1715,7 @@ mod authz_coverage_tests {
         }
     }
 
-    /// A-1 (claude_review_4): `touch_device_seen` may send (parked rows of a
+    /// `touch_device_seen` may send (parked rows of a
     /// stale device). Before the decrypted state is on disk, a failed write
     /// rolled memory back behind those sends and the next message reused
     /// their message keys.
@@ -1749,14 +1766,14 @@ mod review5_tests {
     }
 
     /// A group file id (the server blob id) carries its author's tag, so
-    /// members can check who may offer it (C-02).
+    /// members can check who may offer it.
     #[test]
     fn group_file_id_carries_the_author_tag() {
         let rest = server_proto::blob_id_hash_hex(&[1u8; 16]);
         let mut secret = group_msg_tag("g", "a", &rest).to_vec();
         secret.extend_from_slice(&[1u8; 16]);
         let id = server_proto::blob_id_for_upload_secret(&secret).unwrap();
-        // I-42: another file of the same author shows another tag.
+        // another file of the same author shows another tag.
         assert_ne!(group_msg_tag("g", "a", &rest), group_msg_tag("g", "a", &server_proto::blob_id_hash_hex(&[2u8; 16])));
         assert!(group_msg_id_bound("g", "a", &id));
         assert!(!group_msg_id_bound("g", "b", &id));
@@ -1801,7 +1818,7 @@ mod review5_tests {
 mod fable_review_tests {
     use super::*;
 
-    /// fable C-01: a second failing item of the same mailbox waits behind
+    /// a second failing item of the same mailbox waits behind
     /// the first and does not restart its hold timer.
     #[test]
     fn two_failing_server_items_do_not_reset_each_other() {
@@ -1817,7 +1834,7 @@ mod fable_review_tests {
         assert!(core.hold_server_item("s", "mb", 7, late));
     }
 
-    /// fable D-02: a code naming a known Active device lifts no block and
+    /// a code naming a known Active device lifts no block and
     /// stores no address.
     #[test]
     fn code_for_a_known_device_changes_nothing() {
@@ -1833,7 +1850,7 @@ mod fable_review_tests {
         assert_eq!(core.contacts[&cid].display_name, "Bob");
     }
 
-    /// fable A-05: stored sessions that all fail to open (wrong key) keep
+    /// stored sessions that all fail to open (wrong key) keep
     /// the send gate shut; the right key opens it.
     #[test]
     fn wrong_storage_key_keeps_the_send_gate_shut() {

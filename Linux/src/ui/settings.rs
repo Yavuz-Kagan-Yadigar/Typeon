@@ -1,5 +1,4 @@
 //! Settings — the desktop form of `SettingsFragment`.
-//!
 //! Network, profile, appearance and the two security actions that are specific
 //! to this being a desktop: changing the vault passphrase, and exporting a
 //! recovery file for *this* device's keys.
@@ -78,7 +77,7 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
             prefs.tor_enabled = enabled;
             prefs.save();
             drop(prefs);
-            // M177: the notice is a toast, like the Android client's — the
+            // the notice is a toast, like the Android client's — the
             // transport can only be added when the network starts, so the
             // change lands at the next launch.
             // One toast: a second one replaces the first. Tor is the only
@@ -162,6 +161,17 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
         });
     }
     storage.add(&limit);
+    let manage = adw::ActionRow::builder()
+        .title("Manage storage")
+        .subtitle("What this device keeps, per chat; remove files or older history.")
+        .activatable(true)
+        .build();
+    manage.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    {
+        let app = app.clone();
+        manage.connect_activated(move |_| dialogs::storage(&app));
+    }
+    storage.add(&manage);
     page.add(&storage);
 
     let relays = adw::PreferencesGroup::builder()
@@ -227,7 +237,6 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
 }
 
 /// Sunucular (store-and-forward).
-///
 /// Rölelerden AYRI bir grup olması kasıtlı: bir röle hiçbir şey SAKLAMAZ,
 /// sadece iki taraf da o anda bağlıyken canlı bir devre kurar. Sunucu ise
 /// alıcı çevrimdışıyken zarfı diske yazar ve geri döndüğünde teslim eder.
@@ -1440,7 +1449,6 @@ fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
 
 /// Applies the saved appearance: colour scheme, Material 3 palette, text size
 /// and overall density. Called at startup and whenever any of them changes.
-///
 /// Providers are additive on a GdkDisplay and there is no "replace" call, so
 /// re-applying would stack a new one on top of the last every time a slider
 /// moves. The previous provider is therefore removed first — otherwise a few

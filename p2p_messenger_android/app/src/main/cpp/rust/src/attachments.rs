@@ -145,7 +145,7 @@ pub fn chunk_plain_len(total_size: u64, chunk_size: usize, index: u32) -> u64 {
 /// file, in order: one `FileOffer.chunk_hashes` entry. A missing chunk is an
 /// error.
 pub fn enc_range_hash(enc_path: &Path, first: u32, count: u32, chunk_size: usize) -> Result<[u8; 32], String> {
-    // One open and one buffer for the whole range (fable F-05): a resume
+    // One open and one buffer for the whole range: a resume
     // hashed a multi-GB partial file with an open and an allocation per chunk.
     let stride = chunk_or_default(chunk_size) as u64 + 16;
     let mut f = File::open(enc_path).map_err(|_| "Chunk missing")?;
@@ -247,7 +247,7 @@ fn jpeg_metadata_ranges(file: &mut File) -> Option<(Vec<(u64, u64)>, Option<u8>)
             if !known || size < 2 || end > len {
                 return None;
             }
-            // Allow-list (fable F-01): of the APPn segments only a JFIF
+            // Allow-list: of the APPn segments only a JFIF
             // APP0, an ICC APP2 and an Adobe APP14 stay; every other APPn
             // (EXIF, XMP, IPTC, MPF, maker blocks, JFXX thumbnails, JUMBF/C2PA)
             // and every COM goes.
@@ -285,7 +285,7 @@ fn jpeg_metadata_ranges(file: &mut File) -> Option<(Vec<(u64, u64)>, Option<u8>)
 /// The offset just past the end-of-image marker, scanning from the start-of-
 /// scan segment at `sos`: entropy-coded data, and between progressive scans
 /// further marker segments with a length. APPn and COM segments met between
-/// scans go into `ranges` too (E-05, fable F-01).
+/// scans go into `ranges` too (E-05, ).
 fn jpeg_image_end(file: &mut File, sos: u64, ranges: &mut Vec<(u64, u64)>) -> Option<u64> {
     let mut reader = std::io::BufReader::with_capacity(1 << 16, &mut *file);
     reader.seek(SeekFrom::Start(sos + 1)).ok()?;
@@ -368,7 +368,7 @@ fn png_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
                     }
                     return Some(ranges);
                 }
-                // Allow-list (fable F-01): critical chunks (upper-case first
+                // Allow-list: critical chunks (upper-case first
                 // letter) and the ancillary chunks of image, colour and
                 // animation stay; text, time, EXIF and every private or
                 // unknown ancillary chunk (C2PA `caBX`, editor data) go.
@@ -450,7 +450,7 @@ fn jxl_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
 }
 
 /// WebP chunks other than image, alpha, animation and ICC (`EXIF`, `XMP `,
-/// unknown ones), and anything after the RIFF data (E-06).
+/// unknown ones), and anything after the RIFF data.
 /// The second value is the patched start of the file that replaces the same
 /// number of bytes: the RIFF size less the dropped chunks, and in a leading
 /// `VP8X` chunk the EXIF/XMP flags cleared (a decoder may refuse a file whose
@@ -507,7 +507,7 @@ fn webp_metadata_ranges(file: &mut File) -> Option<(Vec<(u64, u64)>, Vec<u8>)> {
         }
         match &h[..4] {
             b"VP8X" if at == 12 && size >= 10 && got == 21 => vp8x = true,
-            // Allow-list (fable F-01): image, alpha, animation and colour
+            // Allow-list: image, alpha, animation and colour
             // profile; EXIF, XMP and every unknown chunk go.
             b"VP8 " | b"VP8L" | b"VP8X" | b"ALPH" | b"ANIM" | b"ANMF" | b"ICCP" => {}
             _ => {
@@ -729,7 +729,7 @@ pub fn read_plain_chunk_with(enc_path: &Path, chunk_index: u32, file_key: &[u8; 
 
 /// `write_verified_chunk_at_with`'in başarısızlık türü — çağıranın (bkz. file_transfer.rs
 /// `handle_chunk_response`) kurtarma stratejisini seçebilmesi için KRİTİK
-/// ayrım (dış AI incelemesi düzeltmesi): AEAD hatası mı yoksa disk yazma
+/// ayrım  : AEAD hatası mı yoksa disk yazma
 /// hatası mı?
 #[derive(Debug)]
 pub enum ChunkAppendError {
@@ -955,7 +955,7 @@ fn jxl_frame_header(alpha: bool, duration: Option<u32>, is_last: bool, toc: &[u6
     b.out
 }
 
-/// H26: an animated image as a lossless animated JPEG XL, no metadata.
+/// an animated image as a lossless animated JPEG XL, no metadata.
 /// `frames`: RGBA bytes each (as `encode_jxl_lossless`, changed in place),
 /// `delays_ms` one per frame. zune-jpegxl writes single frames only: each is
 /// encoded alone and its frame data is re-framed under an animated header.
@@ -1103,7 +1103,7 @@ pub fn jxl_head(head: &[u8]) -> Option<(u32, u32, bool)> {
 }
 
 /// Largest JPEG XL file decoded: `open` reads the whole file into the
-/// decoder before any size check (fable F-02).
+/// decoder before any size check.
 const MAX_JXL_DECODE_BYTES: u64 = 256 << 20;
 
 /// The checks before a JPEG XL decode: file size, and the pixel count from
@@ -1198,7 +1198,7 @@ fn median_cut_palette(pixels: &[[u8; 3]], opaque: &[bool]) -> Vec<[u8; 3]> {
     }).collect()
 }
 
-/// H26: a received animated JPEG XL as an animated GIF for the viewers
+/// a received animated JPEG XL as an animated GIF for the viewers
 /// (neither Android nor GTK plays JPEG XL). Each frame gets its own median-cut
 /// local palette (255 colours + index 255 transparent; alpha below half is
 /// transparent). ponytail: no dithering; palette from ~16k sampled pixels, pixels
@@ -1320,6 +1320,60 @@ pub fn convert_cached(src: &Path, out: &Path, conv: fn(&Path, &Path) -> Result<(
 /// Linux viewer takes the common formats only. The file is the sender's: its
 /// size is checked before the frame is rendered, and the decoder's
 /// allocations are capped.
+/// The frames of an animated JPEG XL as straight RGBA plus each frame's
+/// duration in ms, at most `GIF_MAX_FRAMES` (evenly picked, like `jxl_to_gif`).
+/// For a player that stops after a few loops (the desktop sticker bubble).
+pub fn jxl_frames_rgba(src: &Path) -> Result<(u32, u32, Vec<(Vec<u8>, u32)>), String> {
+    use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, RenderingIntent};
+    jxl_decode_allowed(src)?;
+    let mut image = JxlImage::builder()
+        .alloc_tracker(AllocTracker::with_limit(512 << 20))
+        .open(src)
+        .map_err(|e| format!("JPEG XL: {e}"))?;
+    image.request_color_encoding(EnumColourEncoding::srgb(RenderingIntent::Relative));
+    let (width, height) = (image.width(), image.height());
+    let frames = image.num_loaded_keyframes();
+    if frames == 0 || frames > MAX_ANIMATION_FRAMES || width as u64 * height as u64 * frames as u64 > MAX_IMAGE_PIXELS {
+        return Err("Image too large".to_string());
+    }
+    let (tps_num, tps_den) = image.image_header().metadata.animation.as_ref()
+        .map_or((1, 0), |a| (u64::from(a.tps_numerator).max(1), u64::from(a.tps_denominator)));
+    let out_frames = frames.min(GIF_MAX_FRAMES);
+    let mut out = Vec::with_capacity(out_frames);
+    let mut row = Vec::new();
+    for j in 0..out_frames {
+        let k = j * frames / out_frames;
+        let span = ((j + 1) * frames / out_frames - k) as u64;
+        let render = image.render_frame(k).map_err(|e| format!("JPEG XL: {e}"))?;
+        let mut stream = render.stream();
+        let ch = stream.channels() as usize;
+        if !(1..=4).contains(&ch) || (stream.width(), stream.height()) != (width, height) {
+            return Err("JPEG XL: unexpected frame layout".to_string());
+        }
+        row.resize(width as usize * ch, 0);
+        let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        for _ in 0..height {
+            let mut filled = 0;
+            while filled < row.len() {
+                let n = stream.write_to_buffer(&mut row[filled..]);
+                if n == 0 {
+                    return Err("JPEG XL: frame ended early".to_string());
+                }
+                filled += n;
+            }
+            for p in row.chunks(ch) {
+                let (r, g, b) = if ch >= 3 { (p[0], p[1], p[2]) } else { (p[0], p[0], p[0]) };
+                let a = if ch == 2 || ch == 4 { p[ch - 1] } else { 255 };
+                rgba.extend_from_slice(&[r, g, b, a]);
+            }
+        }
+        let ms = (u128::from(render.duration()) * u128::from(span) * u128::from(tps_den) * 1000 / u128::from(tps_num))
+            .min(u32::MAX as u128) as u32;
+        out.push((rgba, ms));
+    }
+    Ok((width, height, out))
+}
+
 pub fn jxl_to_png(src: &Path, out: &Path) -> Result<(), String> {
     use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, PixelFormat, RenderingIntent};
     jxl_decode_allowed(src)?;
@@ -1696,10 +1750,10 @@ mod tests {
         let exif = [0xFF, 0xE1, 0, 6, b'E', b'x', b'i', b'f'];
         let icc = [&[0xFF, 0xE2, 0, 14][..], b"ICC_PROFILE\0"].concat();
         let iptc = [0xFF, 0xED, 0, 4, b'P', b'S'];
-        // fable F-01: a maker APPn (GoPro APP6) and a comment are cut too.
+        // a maker APPn (GoPro APP6) and a comment are cut too.
         let maker = [0xFF, 0xE6, 0, 7, b'G', b'o', b'P', b'r', b'o'];
         let com = [0xFF, 0xFE, 0, 4, b'h', b'i'];
-        // An APP1 segment between scans is metadata too (E-05): cut as well.
+        // An APP1 segment between scans is metadata too: cut as well.
         let scan = [0xFF, 0xDA, 0, 2, 1, 2, 0xFF, 0xD9];
         let scan_app1 = [0xFF, 0xDA, 0, 2, 1, 2, 0xFF, 0xE1, 0, 2, 0xFF, 0xD9];
         let photo = [&soi[..], &jfif, &exif, &icc, &iptc, &maker, &com, &scan_app1].concat();

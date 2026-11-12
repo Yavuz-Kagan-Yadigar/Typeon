@@ -344,9 +344,9 @@ pub fn stylesheet(appearance: &Appearance) -> String {
     --view-fg-color: {on_surface};
     --headerbar-bg-color: {surface};
     --headerbar-fg-color: {on_surface};
-    --sidebar-bg-color: {surface_low};
+    --sidebar-bg-color: {surface};
     --sidebar-fg-color: {on_surface};
-    --secondary-sidebar-bg-color: {surface_low};
+    --secondary-sidebar-bg-color: {surface};
     --card-bg-color: {surface_low};
     --card-fg-color: {on_surface};
     --dialog-bg-color: {surface_high};
@@ -369,9 +369,9 @@ pub fn stylesheet(appearance: &Appearance) -> String {
 @define-color view_fg_color @m3_on_surface;
 @define-color headerbar_bg_color @m3_surface;
 @define-color headerbar_fg_color @m3_on_surface;
-@define-color sidebar_bg_color @m3_surface_low;
+@define-color sidebar_bg_color @m3_surface;
 @define-color sidebar_fg_color @m3_on_surface;
-@define-color secondary_sidebar_bg_color @m3_surface_low;
+@define-color secondary_sidebar_bg_color @m3_surface;
 @define-color card_bg_color @m3_surface_low;
 @define-color card_fg_color @m3_on_surface;
 @define-color dialog_bg_color @m3_surface_high;
@@ -428,6 +428,8 @@ preferencespage, viewstack, stack, box, scrolledwindow, viewport {{
     color: @m3_on_surface;
 }}
 window, .background {{ background-color: @m3_surface; }}
+/* The chat list sits on the background colour, not a grey sidebar tone. */
+.sidebar-pane, .sidebar-pane > toolbarview, .navigation-sidebar {{ background-color: @m3_surface; }}
 window.messagedialog, window.dialog, dialog, .dialog {{
     background-color: @m3_surface_high;
     color: @m3_on_surface;

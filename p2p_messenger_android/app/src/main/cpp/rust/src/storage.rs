@@ -130,14 +130,62 @@ impl P2PCore {
         ).inspect_err(|_| { let _ = std::fs::remove_file(&enc); }).map_err(|e| e.to_string())?;
         if sync {
             match std::fs::read(src) {
-                // ponytail: one envelope per sticker; a bigger one stays on this
-                // device. Send it as a file transfer if that turns out to matter.
-                Ok(jxl) if jxl.len() <= STICKER_SYNC_MAX_BYTES => self.send_to_siblings(SiblingEchoBody::Sticker { jxl, origin: Some(origin) }),
-                Ok(jxl) => warn!("Sticker {} not synced: {} bytes", id, jxl.len()),
+                Ok(jxl) => {
+                    for body in sticker_echo_parts(&id, &jxl, Some(origin)) {
+                        self.send_to_siblings(body);
+                    }
+                }
                 Err(e) => warn!("Sticker {} not synced: {}", id, e),
             }
         }
         Ok(id)
+    }
+
+    pub(crate) fn sticker_ids(&self) -> Vec<String> {
+        let Some(conn) = &self.db else { return Vec::new() };
+        conn.prepare("SELECT id FROM stickers ORDER BY created_at")
+            .and_then(|mut stmt| stmt.query_map([], |r| r.get::<_, String>(0))?.collect())
+            .unwrap_or_default()
+    }
+
+    /// One sticker of my store to sibling `fp` (a `StickersRequest` answer).
+    pub(crate) fn send_sticker_to_sibling(&mut self, fp: &str, id: &str) {
+        let origin = self.db.as_ref().and_then(|c| {
+            c.query_row("SELECT origin_id FROM stickers WHERE id = ?1", params![id], |r| r.get::<_, Option<String>>(0)).ok().flatten()
+        });
+        let jxl = self.decrypt_sticker_to_tmp(id).and_then(|tmp| {
+            let r = std::fs::read(&tmp).map_err(|e| e.to_string());
+            let _ = std::fs::remove_file(&tmp);
+            r
+        });
+        match jxl {
+            Ok(jxl) => {
+                for body in sticker_echo_parts(id, &jxl, origin.clone()) {
+                    let content = MessageContent::SiblingEcho { conversation_identity_id: None, group_id: None, body };
+                    if let Err(e) = self.send_message_content(fp.to_string(), &content, None) {
+                        error!("Sticker {} to sibling {} not sent: {}", id, crate::log_id(fp), e);
+                        return;
+                    }
+                }
+            }
+            Err(e) => warn!("Sticker {} not sent: {}", id, e),
+        }
+    }
+
+    /// Asks my other devices for their sticker store; the root device answers
+    /// with the ones this device lacks.
+    pub(crate) fn request_stickers_from_siblings(&mut self) -> Result<(), String> {
+        let siblings = self.sibling_active_devices();
+        if siblings.is_empty() {
+            return Err("No linked device reachable".to_string());
+        }
+        let content = MessageContent::SiblingEcho { conversation_identity_id: None, group_id: None, body: SiblingEchoBody::StickersRequest { have: self.sticker_ids() } };
+        for fp in siblings {
+            if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
+                error!("StickersRequest to {} not sent: {}", crate::log_id(&fp), e);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn delete_sticker(&mut self, id: &str, sync: bool) -> Result<(), String> {
@@ -225,7 +273,7 @@ impl P2PCore {
         // in-flight bytes are bounded at offer time (`receive_file_offer`).
         // Sent files count but are not evicted: their copy is what peers
         // download from. A received file loses only this device's copy and
-        // goes back to 'offered' (fable F-06): deleting the row took the
+        // goes back to 'offered': deleting the row took the
         // bubble with it, and one contact's files evicted everyone else's.
         let mut stmt = match conn.prepare(
             "SELECT file_id, total_size, created_at FROM files WHERE status = 'complete' AND direction != 'sent' ORDER BY created_at ASC"
@@ -307,7 +355,7 @@ impl P2PCore {
         }
         self.last_storage_sweep_at = now;
         // Acked packet ids are kept as long as the sender can still retry
-        // the packet; pruned here instead of on every ack (fable A-14).
+        // the packet; pruned here instead of on every ack.
         if let Some(conn) = &self.db {
             let _ = conn.execute("DELETE FROM acked_packets WHERE acked_at < ?1", params![now.saturating_sub(TEXT_RETRY_GIVE_UP_MS) as i64]);
         }
@@ -493,7 +541,7 @@ impl P2PCore {
     pub(crate) fn chat_prune_scope(&self, kind: &str, id: &str) -> Option<(Vec<String>, Option<String>, String)> {
         if kind == "group" {
             // A group left or deleted keeps its rows until the user prunes
-            // them here (fable E-02): the id need not be a held group.
+            // them here: the id need not be a held group.
             return (self.groups.contains_key(id) || is_group_id(id)).then(|| (Vec::new(), Some(id.to_string()), id.to_string()));
         }
         let contact = self.contacts.values().find(|c| self.contact_fingerprints_all(c).iter().any(|f| f == id))?;
@@ -619,5 +667,50 @@ impl P2PCore {
         self.remove_attachment_copy(file_id);
         self.attachment_events.push(serde_json::json!({"type": "file_evicted", "file_id": file_id}).to_string());
         Ok(())
+    }
+}
+
+/// A sticker as `SiblingEcho` bodies: one when it fits `STICKER_SYNC_MAX_BYTES`,
+/// otherwise numbered parts the receiver puts back together.
+pub(crate) fn sticker_echo_parts(id: &str, jxl: &[u8], origin: Option<String>) -> Vec<SiblingEchoBody> {
+    if jxl.len() <= STICKER_SYNC_MAX_BYTES {
+        return vec![SiblingEchoBody::Sticker { jxl: jxl.to_vec(), origin, id: id.to_string(), part: 0, parts: 0 }];
+    }
+    let chunks: Vec<&[u8]> = jxl.chunks(STICKER_SYNC_MAX_BYTES).collect();
+    let parts = chunks.len() as u8; // MAX_STICKER_BYTES keeps this under STICKER_SYNC_MAX_PARTS
+    chunks.into_iter().enumerate().map(|(i, c)| SiblingEchoBody::Sticker {
+        jxl: c.to_vec(), origin: origin.clone(), id: id.to_string(), part: i as u8, parts,
+    }).collect()
+}
+
+impl P2PCore {
+    /// Keeps one part of a big sibling sticker. The whole file once every
+    /// part is here, `Err` for a part that can never fit (final), `Ok(None)`
+    /// while parts are missing.
+    pub(crate) fn add_sticker_part(&mut self, id: &str, part: u8, parts: u8, data: Vec<u8>) -> Result<Option<Vec<u8>>, String> {
+        let (part, parts) = (part as usize, parts as usize);
+        let valid_id = id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if !valid_id || parts < 2 || parts > STICKER_SYNC_MAX_PARTS || part >= parts || data.len() > STICKER_SYNC_MAX_BYTES {
+            return Err("bad sticker part".to_string());
+        }
+        if !self.sticker_parts.contains_key(id) && self.sticker_parts.len() >= STICKER_PARTS_MAX_PENDING {
+            if let Some(oldest) = self.sticker_parts.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| k.clone()) {
+                self.sticker_parts.remove(&oldest);
+            }
+        }
+        let entry = self.sticker_parts.entry(id.to_string()).or_insert_with(|| (current_time_ms(), vec![None; parts]));
+        if entry.1.len() != parts {
+            *entry = (current_time_ms(), vec![None; parts]);
+        }
+        entry.1[part] = Some(data);
+        if entry.1.iter().any(Option::is_none) {
+            return Ok(None);
+        }
+        let (_, pieces) = self.sticker_parts.remove(id).unwrap_or_default();
+        let whole: Vec<u8> = pieces.into_iter().flatten().flatten().collect();
+        if hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&whole)) != id {
+            return Err("sticker parts do not match their id".to_string());
+        }
+        Ok(Some(whole))
     }
 }

@@ -1,7 +1,5 @@
 //! In-app viewer for photos, video and voice messages.
-//!
 //! Images are drawn with gdk-pixbuf, which is part of GTK and always present.
-//!
 //! Audio and video need a *media backend* — a separate GTK module
 //! (`libmedia-gstreamer.so`) that not every distribution installs, and which is
 //! genuinely absent on some. There is no build-time way to know, so the viewer
@@ -147,7 +145,6 @@ pub fn playable_media(path: &str) -> bool {
 }
 
 /// A photo, scrollable to pan and mouse-wheel-scrollable to zoom.
-///
 /// The picture is given an explicit size in image pixels scaled by the
 /// current zoom, rather than living at `hexpand`/`vexpand`+`Contain` as a
 /// plain unzoomed viewer would: `GtkScrolledWindow` only offers scrollbars
@@ -227,7 +224,6 @@ fn image_pane(path: &str) -> gtk::Widget {
 }
 
 /// Audio or video, with transport controls underneath.
-///
 /// This deliberately does not use `GtkVideo` or `GtkMediaControls`: `GtkVideo`
 /// ships its *own* built-in transport bar with no property to turn it off
 /// ("Shows a GtkMediaStream with media controls", straight from its docs), so
@@ -488,7 +484,7 @@ fn launch_externally(app: &Rc<App>, path: &str) {
 /// Copies the decrypted attachment somewhere the user chooses. The plaintext
 /// copy the core produced lives in its own directory and is not meant to be
 /// browsed to.
-fn save_copy(app: &Rc<App>, path: &str, suggested_name: &str) {
+pub fn save_copy(app: &Rc<App>, path: &str, suggested_name: &str) {
     let Some(window) = app.window() else { return };
     // The core opens a JPEG XL as PNG: the copy is a PNG and is named so.
     let png_name;
@@ -503,7 +499,7 @@ fn save_copy(app: &Rc<App>, path: &str, suggested_name: &str) {
         }
         _ => suggested_name,
     };
-    // M163: the name is peer-supplied; a path separator must not reach the
+    // the name is peer-supplied; a path separator must not reach the
     // dialog as a directory component.
     let suggested_name: String = suggested_name
         .chars()

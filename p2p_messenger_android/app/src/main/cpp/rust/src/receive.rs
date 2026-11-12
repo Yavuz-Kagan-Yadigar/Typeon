@@ -14,8 +14,7 @@ impl P2PCore {
             return Err("Sender device has been revoked".to_string());
         }
 
-        // Spec dışı, güvenlik denetimi düzeltmesi (kimlik sahteciliği): imza
-        // SADECE bu paketi `sender` CİHAZININ imzaladığını kanıtlar —
+        // imza SADECE bu paketi `sender` CİHAZININ imzaladığını kanıtlar —
         // header'daki `sender_identity_id` alanının o cihaza AİT güvenilen
         // Identity olduğunu KANITLAMAZ. Cihaz→Identity bağı eşleşme (TOFU)
         // anında kaydedilir (`DeviceRecord.identity_id`); header'daki
@@ -93,11 +92,9 @@ impl P2PCore {
             Ok(v) => v,
             Err(e) => {
                 // İKİ CİHAZLI GERÇEK TESTTE BULUNDU — "Ack kilitlenmesi".
-                //
                 // Gözlenen: iki telefon arasında saniyeler arayla, dakikalarca
                 // tekrar eden `Message N not found in skipped-key cache
                 // (already decrypted, or evicted)` hataları — HER İKİ yönde.
-                //
                 // Döngü şöyle kuruluyor: AYNI zarf iki kez ulaşıyor (bu kurulumda
                 // NORMAL — hem gossipsub hem sunucu aynı anda taşıyor, bkz.
                 // `should_shadow_on_gossipsub`). İlk kopya çözülüp arşivleniyor
@@ -112,7 +109,6 @@ impl P2PCore {
                 // bir ciphertext ürettiğinde kırılıyor: yani 25 dakika boyunca
                 // her iki telefon da boşuna imza doğrulama + radyo trafiği
                 // yapıyor.
-                //
                 // Kilidi kırmak için şifre çözmeye gerek YOK: `MessagePacketHeader`
                 // imzalı ama ŞİFRELİ DEĞİL (bkz. `send_message_content_inner` —
                 // imza `header ‖ ciphertext` üzerine atılır, header düz gider) ve
@@ -120,7 +116,6 @@ impl P2PCore {
                 // yani bu alan güvenilir. O kimliğe sahip bir mesaj arşivimizde
                 // VARSA, bu paketi kanıtlanabilir biçimde daha önce işledik —
                 // Ack'i yeniden gönderip göndereni durdurabiliriz.
-                //
                 // KASITLI OLARAK DAR: yalnızca arşivde GERÇEKTEN bulduğumuzda
                 // Ack atıyoruz. Anahtarı gerçekten kaybettiğimiz (önbellek
                 // taşması/rotasyon) durumda mesaj arşivde olmaz, Ack atılmaz ve
@@ -250,7 +245,7 @@ impl P2PCore {
                 let full = buf.map_or(false, |b| b.len() >= UNKNOWN_GROUP_HOLD_PER_GROUP);
                 // Per sender and in bytes too, as `buffer_edit_or_delete`: one
                 // contact with invented group ids held all slots and up to
-                // ~1 GiB of text (fable A-02).
+                // ~1 GiB of text.
                 let held_bytes = |c: &MessageContent| match c {
                     MessageContent::Text { text, .. } => text.len(),
                     MessageContent::FileOffer { preview_jpeg, caption, .. } => preview_jpeg.as_ref().map_or(0, |p| p.len()) + caption.len(),
@@ -266,7 +261,7 @@ impl P2PCore {
             } else if is_group_id(&gid) {
                 // A group removed here: final until a GroupUpdate adds us
                 // again. Acked, as for a contact removed here, or the sender
-                // retried it for 7 days (fable A-10).
+                // retried it for 7 days.
                 self.send_ack(&peer_fp, &message_id);
             }
             return Ok(serde_json::json!({"type": "noop"}).to_string());
@@ -363,7 +358,6 @@ impl P2PCore {
                 // ChatActivity/SimpleChatAdapter). 0 = eski/bilinmeyen
                 // sürüm, Kotlin tarafı bu durumda parantez içi gösterimi
                 // atlar (bkz. packet.rs `sent_at_ms` notu).
-                //
                 // Spec dışı, kullanıcı isteği (WhatsApp tarzı yanıt): bkz.
                 // packet.rs `MessageContent::Text.reply_to_message_id`
                 // dokümantasyonu — canlı olay da bu bilgiyi taşır (arşive
@@ -384,8 +378,6 @@ impl P2PCore {
                 // işaretlerken (bkz. Seen) geri göndermesi gereken kimlik —
                 // `message_id` göndericiye anlamsız (bkz. packet.rs notu),
                 // sadece bu paylaşılan kimlik her N kopya arasında ortak.
-                //
-                // Spec dışı, hata düzeltmesi (grup geçmişi kalıcılığı):
                 // önceden bu kol HİÇBİR ŞEYİ arşivlemiyordu — alınan bir
                 // grup mesajı sadece bu tek `pollNetwork` turunda Kotlin'e
                 // geçici bir JSON olayı olarak veriliyordu; ekran o an açık
@@ -464,7 +456,6 @@ impl P2PCore {
                 // SESSİZCE kaybolurdu. Artık diğer her şeyle AYNI Ack
                 // mekanizması kullanılıyor (bkz. `needs_delivery_confirmation`
                 // notu — artık grup metnini de kapsıyor).
-                //
                 // Ack yalnızca arşive kalıcı olarak yazılabildiyse gönderilir
                 // (bkz. 1:1 Text kolundaki aynı düzeltme notu) — aksi halde
                 // gönderen tarafın yeniden deneme mekanizması devam eder.
@@ -608,7 +599,7 @@ impl P2PCore {
                 if self.history_answered_at.get(&peer_fp).map_or(false, |t| now.saturating_sub(*t) < 2_000) {
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
-                // K-11: and at most HISTORY_SYNC_BYTES_PER_WINDOW of rows per
+                // and at most HISTORY_SYNC_BYTES_PER_WINDOW of rows per
                 // device per minute, shed the same way.
                 const HISTORY_SYNC_WINDOW_MS: u64 = 60_000;
                 const HISTORY_SYNC_BYTES_PER_WINDOW: usize = 2 * 1024 * 1024;
@@ -627,7 +618,7 @@ impl P2PCore {
                 // A "Fetch older history" press gets only rows sent in its
                 // window `[after, before)`, at most one window long; the
                 // chat-open sync (no `before_timestamp`) is unchanged.
-                // C-06: a group member gets history from at most one day
+                // a group member gets history from at most one day
                 // before it was added (its latest add, `GroupMember.added_at`,
                 // our local time of that update), never older. Our own other
                 // devices get everything. A missing or zero `added_at` counts
@@ -717,7 +708,7 @@ impl P2PCore {
                 };
                 if let Err(e) = self.send_message_content(peer_fp.clone(), &response, None) {
                     error!("HistorySyncResponse gönderilemedi: {}", e);
-                    // H90: nothing went out, the window is not used up.
+                    // nothing went out, the window is not used up.
                     self.history_answered_at.remove(&peer_fp);
                 } else {
                     let used = HISTORY_SYNC_MAX_TEXT_BYTES - text_budget;
@@ -727,7 +718,7 @@ impl P2PCore {
                     }
                     entry.1 += used;
                 }
-                // Defter #16: bu olay hiçbir istemcide işlenmiyordu ve
+                // bu olay hiçbir istemcide işlenmiyordu ve
                 // işlenmesi de gerekmiyor (karşı tarafın bizden geçmiş
                 // istemesi kullanıcıyı ilgilendiren bir olay değil).
                 // Tanılama için log'a, akışa `noop` olarak.
@@ -768,7 +759,7 @@ impl P2PCore {
                 // back from a sibling or from our server archive.
                 let mut messages = messages;
                 messages.truncate(HISTORY_SYNC_MAX_MESSAGES as usize);
-                // F3: reactions ride along; applied at the end, only on the rows
+                // reactions ride along; applied at the end, only on the rows
                 // that passed the filters below (see `apply_synced_reactions`).
                 let mut reactions: HashMap<String, Vec<(String, String, u64)>> = HashMap::new();
                 for m in messages.iter_mut() {
@@ -855,8 +846,7 @@ impl P2PCore {
                                     self.backdate_archived(Some(gid.as_str()), "", m.message_id.as_deref(), m.timestamp);
                                     let at = if m.sent_at_ms != 0 { m.sent_at_ms } else { m.timestamp };
                                     oldest_written = Some(oldest_written.map_or(at, |o| o.min(at)));
-                                    // Spec dışı, hata düzeltmesi: bu satırı hiç
-                                    // sahip olmadığımız için taze arşivliyoruz —
+                                    // bu satırı hiç sahip olmadığımız için taze arşivliyoruz —
                                     // yanıtlayan tarafta silinmiş olarak
                                     // işaretliyse bizde de ÖYLE işaretlenmeli,
                                     // aksi halde silinen bir mesaj bu cihazda
@@ -914,7 +904,6 @@ impl P2PCore {
                     // node'un) bakış açısıyla geldi — bizim ekranımız için
                     // ters çevrilmeli: onların "sent"i bizim "received"imiz,
                     // onların "received"i bizim "sent"imiz.
-                    //
                     // Spec dışı düzeltme: senkronla gelen mesajlar önceden
                     // SADECE bu ekranın o anki bellek-içi listesine
                     // ekleniyordu — kalıcı hiçbir kayıt bırakmıyordu,
@@ -933,7 +922,7 @@ impl P2PCore {
                     let already_have_since = self.latest_archived_timestamp(&chat_key);
                     let flipped: Vec<serde_json::Value> = messages.into_iter().filter_map(|m| {
                         let our_direction = if m.direction == "sent" { "received" } else { "sent" };
-                        // Spec dışı, hata düzeltmesi: önceden dedup SADECE
+                        // önceden dedup SADECE
                         // zaman damgası eşiğiyle yapılıyordu ve arşivleme
                         // `message_id: None` geçiyordu — yani bu yoldan
                         // gelen satırlar hiçbir zaman `message_id` ile
@@ -1066,7 +1055,6 @@ impl P2PCore {
                 // HistorySyncRequest'i başarıyla aldı — o paketi artık
                 // yeniden denemeyi bırakabiliriz (bkz.
                 // `awaiting_confirmation` dokümantasyonu).
-                //
                 // `target_message_id` here is the acked packet's own id. For
                 // a `Text` that equals the UI bubble id, but for Edit/Delete
                 // it's a separate, random packet id — not the message being
@@ -1087,8 +1075,7 @@ impl P2PCore {
                 // bkz. packet.rs `Seen` notu — teslim (Ack) değil, GÖRME
                 // bildirimi. Kendisi ayrıca onaylanmaz (Ack'le aynı sonsuz
                 // döngü gerekçesi).
-                //
-                // Spec dışı, hata düzeltmesi (kullanıcı: "seen mekanizması ve
+                // "seen mekanizması ve
                 // seen pp bubbles güvenilir değil, özellikle gruplarda"):
                 // önceden BURADA kalıcı hiçbir şey yazılmıyordu — aşağıdaki
                 // JSON sadece o an sohbet ekranı AÇIKSA görülen, kalıcı
@@ -1219,8 +1206,7 @@ impl P2PCore {
                 })
             }
             MessageContent::GroupUpdate(update) => {
-                // Spec dışı, güvenlik denetimi düzeltmesi: artık ratchet-
-                // şifreli kanaldan geliyor (bkz. packet.rs notu) — bu, DIŞ
+                // artık ratchet- şifreli kanaldan geliyor (bkz. packet.rs notu) — bu, DIŞ
                 // paketin (`MessagePacket`) zaten hibrit doğrulanmış
                 // göndericisi (`sender_identity_id`/`peer_fp`) İLE
                 // `update.signed_by`'nin AYNI kişi olması gerekmediği
@@ -1631,7 +1617,20 @@ impl P2PCore {
                             }
                             _ => serde_json::json!({"type": "noop"}),
                         },
-                        SiblingEchoBody::Sticker { jxl, origin } => {
+                        SiblingEchoBody::Sticker { jxl, origin, id, part, parts } => 'sticker: {
+                            // A part of a big sticker: kept until all are here.
+                            let jxl = if parts > 1 {
+                                match self.add_sticker_part(&id, part, parts, jxl) {
+                                    Ok(Some(whole)) => whole,
+                                    Ok(None) => break 'sticker serde_json::json!({"type": "noop"}),
+                                    Err(e) => {
+                                        warn!("Kardeş sticker parçası atıldı: {}", e);
+                                        break 'sticker serde_json::json!({"type": "noop"});
+                                    }
+                                }
+                            } else {
+                                jxl
+                            };
                             // Not a sticker at all: final (acked). Anything else
                             // (keys not loaded, disk, DB): sent again.
                             let mut not_a_sticker = false;
@@ -1654,6 +1653,24 @@ impl P2PCore {
                                 }
                             }
                         }
+                        SiblingEchoBody::StickersRequest { have } => {
+                            // Only the root device answers (a desktop's request
+                            // reaches every sibling). Off the core lock: one
+                            // decrypt + send per sticker, the lock taken each time.
+                            if self.own_device_add.is_none() {
+                                let have: std::collections::HashSet<String> = have.into_iter().collect();
+                                let ids: Vec<String> = self.sticker_ids().into_iter().filter(|id| !have.contains(id)).collect();
+                                info!("Sticker request from sibling {}: sending {}", crate::log_id(&peer_fp), ids.len());
+                                let to = peer_fp.clone();
+                                std::thread::spawn(move || {
+                                    let _guard = crate::RUNTIME.enter();
+                                    for id in ids {
+                                        crate::core_lock().send_sticker_to_sibling(&to, &id);
+                                    }
+                                });
+                            }
+                            serde_json::json!({"type": "noop"})
+                        }
                         SiblingEchoBody::StickerRemoved { id } => match self.delete_sticker(&id, false) {
                             Ok(()) => serde_json::json!({"type": "stickers_changed", "removed": id}),
                             Err(e) => {
@@ -1671,7 +1688,7 @@ impl P2PCore {
                             _ => serde_json::json!({"type": "noop"}),
                         },
                         SiblingEchoBody::Delete { target_message_id } => {
-                            // Spec dışı, hata düzeltmesi: birincil cihazdaki
+                            // birincil cihazdaki
                             // silme, ekli dosyayı da diskten kaldırıyor
                             // (bkz. `delete_message`/`delete_group_message`
                             // aynı çağrı) ama bu kardeş-yankı kolu önceden
@@ -1824,7 +1841,7 @@ impl P2PCore {
                     // güvenle kullanılabilir.
                     let (merged, press_chat) = self.apply_sibling_reply(&peer_fp, window, more, entries);
                     // Decided by the request, not by the shape of the answer
-                    // (fable D-04): no window and no press it answers, while
+                    //no window and no press it answers, while
                     // a backfill request is open, is the unscoped backfill,
                     // also when all its rows belong to one chat.
                     let backfill = window.is_none() && press_chat.is_none()
@@ -1836,7 +1853,7 @@ impl P2PCore {
                         None if backfill => (None, None),
                         None => (single_group, single_conversation),
                     };
-                    // M-68: an answer to the unscoped backfill (an empty one
+                    // an answer to the unscoped backfill (an empty one
                     // too) moves this sibling's watermark.
                     if backfill {
                         if let Some(state) = self.sibling_backfill_since.get_mut(&peer_fp) {

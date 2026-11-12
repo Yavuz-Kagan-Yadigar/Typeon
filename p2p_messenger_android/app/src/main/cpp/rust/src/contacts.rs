@@ -211,7 +211,7 @@ impl P2PCore {
                         "TOFU reddedildi: contacts tablosu üst sınırda ({} >= {}), identity {} eklenmedi",
                         self.contacts.len(), MAX_CONTACTS, crate::log_id(&identity_id)
                     );
-                    // L-132: the sender read our code, the user here waits
+                    // the sender read our code, the user here waits
                     // for a contact that never comes: say why.
                     self.attachment_events.push(serde_json::json!({
                         "type": "pairing_failed", "reason": "contact_limit"
@@ -478,7 +478,6 @@ impl P2PCore {
     /// fingerprint'i `sendMessage`'a hedef olarak geçer.
     /// Kullanıcı kararı (2026-08-27): grup üzerinden tanışılmış bir kişiye
     /// TAM güven verir.
-    ///
     /// `added_via_group` olan kişiler arayüzde "grup üzerinden eklendi,
     /// yüz yüze doğrulanmadı" diye işaretleniyor — çünkü onları kurucunun
     /// kefaletiyle tanıdık, karekod okutarak değil. Kullanıcı o kişiyi
@@ -486,13 +485,11 @@ impl P2PCore {
     /// karşılaştırma, telefonla teyit) bu işareti kaldırabilmeli. Sadece
     /// gösterimi etkiler; şifreleme zaten aynı.
     /// Bir kişinin GÜVENLİK KODU — karşılaştırılacak şey bu.
-    ///
     /// Kod, kişinin kanonik cihazının parmak izinden türetiliyor; o parmak
     /// izi de dört açık anahtarın SHA3-256'sı (bkz. `compute_fingerprint`).
     /// Yani kodun eşleşmesi, iki tarafın GERÇEKTEN aynı anahtarları
     /// gördüğü anlamına geliyor — "doğrulandı olarak işaretle" eyleminin
     /// dayandığı tek somut kanıt bu.
-    ///
     /// Neden gerekli: grup üzerinden tanışılan kişilerde anahtarları
     /// kurucudan alıyoruz. Kurucu kötü niyetliyse kendi anahtarını
     /// "Ayşe'ninki" diye verebilir; bunu kriptografiyle ayırt etmenin yolu
@@ -546,7 +543,6 @@ impl P2PCore {
     }
 
     /// Bu cihazın hesap adı — kişilerin bizi gördüğü ad.
-    ///
     /// Veri modelinde ad `own_devices.device_name`'de duruyor (kimlik
     /// kaydında ayrı bir "hesap adı" alanı YOK, bkz. `identity::Identity`).
     /// Yeni bir alan uydurmak yerine olan kullanılıyor: karşı taraf zaten
@@ -599,7 +595,6 @@ impl P2PCore {
 
     /// Kullanıcı isteği (2026-09-04): hesap adını değiştirir ve değişikliği
     /// BİLİNEN HER kişiye otomatik bildirir.
-    ///
     /// Önceden ad, ilk açılıştaki "cihaz adı" diyaloğunda bir kez
     /// soruluyor ve bir daha ASLA değiştirilemiyordu — ne yerelde ne de
     /// karşı tarafta. Merkezî bir dizin olmadığı için bildirim, avatarla
@@ -607,7 +602,6 @@ impl P2PCore {
     /// her kişinin her aktif cihazına, ratchet üzerinden, teslim onayı
     /// bekleyen bir mesaj olarak — yani kişi o an çevrimdışıysa geri
     /// döndüğünde alır, sessizce kaybolmaz.
-    ///
     /// `sync_to_siblings` da çağrılır: kendi ikincil cihazlarım bu cihazın
     /// yeni adını (`SyncedDevice.device_name`) öğrensin.
     /// Hesabı silmeden ÖNCE çağrılır: tüm kişilere (grup üzerinden tanışılanlar
@@ -779,7 +773,7 @@ impl P2PCore {
         // rename on a sibling sends the photo that sibling holds, and with a
         // stale copy every contact got the old photo back.
         let siblings = self.sibling_active_devices();
-        // Defter #26: `status == Active` filtresi YOKTU — iptal edilmiş
+        // `status == Active` filtresi YOKTU — iptal edilmiş
         // (revoked) cihazlara da profil güncellemesi gidiyordu. Karşı taraf
         // zaten `receive_message`'ta iptal edilmiş göndericiyi reddediyor,
         // ama biz de boşuna şifreleyip 7 gün yeniden denemeyelim.
@@ -795,7 +789,7 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Spec dışı, ağ sağlamlığı düzeltmesi — bkz. `packet.rs`
+    /// bkz. `packet.rs`
     /// `MessageContent::AddressAnnounce` dokümantasyonu ("aynı LAN'da + Tor
     /// açık cihazlardan biri mobil veri+Tor'a geçince kimseye ulaşamıyor"
     /// hatası). `set_own_profile_picture` ile AYNI fan-out deseni: bilinen
@@ -846,7 +840,7 @@ impl P2PCore {
         let contact = self.contacts.get(contact_id).ok_or("Kişi bulunamadı")?.clone();
         // No history answer or sibling backfill may bring the rows back.
         self.raise_history_floor(&contact.trusted_identity_id, current_time_ms());
-        // M104: same device set as `delete_contact` (inactive records too).
+        // same device set as `delete_contact` (inactive records too).
         let fingerprints = self.contact_fingerprints_all(&contact);
         self.delete_chat_attachments(&fingerprints);
         // One transaction: a crash half-way left reactions/seen rows of
@@ -914,7 +908,7 @@ impl P2PCore {
         fps
     }
 
-    /// C3: the 1:1 attachments of these devices go completely — `.enc` blob,
+    /// the 1:1 attachments of these devices go completely — `.enc` blob,
     /// the decrypted `plain_cache` copy, a running transfer, the row
     /// (`delete_attachment_file`). `group_id IS NULL`: a group file offer is
     /// stored under the sending member's fingerprint and must stay.
@@ -931,7 +925,7 @@ impl P2PCore {
         }
         for file_id in &file_ids {
             // Reactions and seen marks of an attachment are keyed by its file
-            // id, not a `messages` row (fable D-08).
+            // id, not a `messages` row.
             if let Some(conn) = &self.db {
                 let _ = conn.execute("DELETE FROM message_reactions WHERE message_id = ?1", params![file_id]);
                 let _ = conn.execute("DELETE FROM message_seen WHERE message_id = ?1", params![file_id]);
@@ -965,7 +959,7 @@ impl P2PCore {
             return Ok(());
         }
         let fingerprints = self.contact_fingerprints_all(&contact);
-        // C3: before the transaction (the cache path needs the file row).
+        // before the transaction (the cache path needs the file row).
         self.delete_chat_attachments(&fingerprints);
 
         // Disk first, in one transaction, and memory only after the commit.
@@ -999,7 +993,7 @@ impl P2PCore {
             tx.execute("DELETE FROM contacts WHERE contact_id = ?1", params![contact_id]).map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())?;
         }
-        // K-35: the sealed 1:1 archive would otherwise stay on the history
+        // the sealed 1:1 archive would otherwise stay on the history
         // server for its TTL.
         self.purge_conv_archive(&contact.trusted_identity_id);
 
@@ -1022,7 +1016,7 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Spec dışı, güvenlik denetimi düzeltmesi: önceden `Contact::
+    /// önceden `Contact::
     /// revoke_device`/`DeviceRecord.is_active` her ikisi de VARDI ama
     /// hiçbir çağıran onları gerçekten `false`/`Revoked` yapmıyordu — bir
     /// cihaz asla iptal edilemiyordu (bkz. SECURITY.md). Bu, `delete_contact`
@@ -1045,7 +1039,7 @@ impl P2PCore {
             r.is_active = false;
             r
         });
-        // L-23: disk first, both rows in one transaction; memory only after.
+        // disk first, both rows in one transaction; memory only after.
         if let Some(conn) = &self.db {
             let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
             self.try_persist_contact(&contact)?;
@@ -1211,8 +1205,7 @@ impl P2PCore {
 
 impl P2PCore {
 
-    /// Spec dışı (dış AI incelemesi düzeltmesi — AI2-G, self-revocation): bu
-    /// cihaz KENDİ kimliği tarafından iptal edildiğinde (`apply_device_revoke_notice`)
+    /// bu cihaz KENDİ kimliği tarafından iptal edildiğinde (`apply_device_revoke_notice`)
     /// çağrılır. TÜM yerel durumu — DB tabloları, disk üzerindeki ek
     /// dosyaları ve bellek-içi durum (ÖZEL ANAHTARLAR dahil; `DeviceKeys`
     /// Drop'ta zeroize eder) — siler. Silme sonrası çekirdek "kimliksiz"
@@ -1243,6 +1236,7 @@ impl P2PCore {
 
     pub(crate) fn wipe_all_local_state(&mut self) {
         self.revoked_disconnects.clear();
+        self.sticker_parts.clear();
         // Drops the call (and its media keys) without signalling anyone.
         self.call = None;
         self.first_contact_cache.take();
@@ -1254,7 +1248,7 @@ impl P2PCore {
                 "skipped_message_keys", "remote_devices", "ratchet_states", "files",
                 "device_addrs", "device_onion_addrs", "pending_durable_retries",
                 "pending_group_messages", "app_meta", "pending_sibling_ops", "acked_packets",
-                // Defter #13: sunucu tabloları listede YOKTU. `servers`
+                // sunucu tabloları listede YOKTU. `servers`
                 // satırı `enroll_sk`/`enroll_sk_pq` — sunucudaki kaydımıza
                 // karşılık gelen ÖZEL imza anahtarlarını — taşıyor;
                 // `server_archive_queue` ise mesaj gövdelerini. Uzaktan
@@ -1332,7 +1326,7 @@ impl P2PCore {
         self.sibling_fetch_open.clear();
         self.history_fetch_pages.clear();
         self.handshake_failure_notified.clear();
-        // Defter #13 (bellek tarafı): sunucu durumu ve kök arşiv anahtarı da
+        // sunucu durumu ve kök arşiv anahtarı da
         // temizlenmeli — aksi halde iptal edilmiş bir cihaz, süreç yaşadığı
         // sürece hâlâ kayıtlı bir sunucu istemcisi olarak davranıyor.
         self.servers.clear();
@@ -1351,8 +1345,7 @@ impl P2PCore {
         // Öz-denetim düzeltmesi (2026-08-28): defter #13'te bellek tarafını
         // YARIM bırakmışım. Aşağıdakiler kalıyordu ve ikisi doğrudan ANAHTAR
         // MALZEMESİ:
-        //
-        //   * `pending_secret_bundle` — cihazın HAM gizli anahtarlarını
+        // * `pending_secret_bundle` — cihazın HAM gizli anahtarlarını
         //     taşıyan blok (Kotlin'e verilmeyi bekliyor olabilir). Uzaktan
         //     iptal edilmiş bir cihazda bunun bellekte kalması, silmenin
         //     tam olarak önlemesi gereken şeydi.
@@ -1360,7 +1353,6 @@ impl P2PCore {
         //     mesaj anahtarlarını, dosya anahtarlarını ve sunucu arşiv
         //     kuyruğunu çözen anahtar. `history_key` siliniyordu, bu
         //     silinmiyordu; tutarsızdı.
-        //
         // Geri kalanlar kimlik/kişi eşleştirmesi sızdırıyordu: hangi
         // parmak izini hangi ağ adresinde gördüğümüz, kimden ne zaman
         // el sıkışma aldığımız, hangi kişiler için uyarı beklediğimiz.
@@ -1378,7 +1370,7 @@ impl P2PCore {
         zeroize::Zeroize::zeroize(&mut self.pending_secret_bundle);
         self.pending_secret_bundle = None;
         self.skipped_key_encryption_key = None;
-        // The gate shuts with the key (fable A-12): sessions made before a new
+        // The gate shuts with the key: sessions made before a new
         // key is installed would not be stored.
         self.ratchets_loaded = false;
         self.peer_onion_addr.clear();

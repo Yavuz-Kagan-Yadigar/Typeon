@@ -1,10 +1,9 @@
-//! Ağ üzerinde taşınan paket biçimleri — Description.md bölüm 1.3, 1.5,
-//! 1.6, 3.3, 5.2.
+//! Wire packet formats carried over the network.
 
 use serde::{Deserialize, Serialize};
 
-/// A QR code holds under 3 KB, so a longer pairing code is not one. This
-/// also bounds every field in it (`known_relays`, `rendezvous_node`).
+/// A QR code holds under 3 KB, so a longer pairing code is rejected. This also
+/// bounds every field in it (`known_relays`, `rendezvous_node`).
 const MAX_PAIRING_CODE_BYTES: usize = 4096;
 
 fn to_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
@@ -14,7 +13,7 @@ fn to_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
 }
 
 /// `keys_match_fingerprint()` for every record that carries a device's four
-/// public keys beside its fingerprint (see `identity::keys_match_fingerprint`).
+/// public keys next to its fingerprint (see `identity::keys_match_fingerprint`).
 macro_rules! impl_keys_match_fingerprint {
     ($($record:ty),*) => {$(
         impl $record {
@@ -30,9 +29,9 @@ macro_rules! impl_keys_match_fingerprint {
 }
 impl_keys_match_fingerprint!(SyncedDevice, GroupMemberDevice, IdentityExchange);
 
-/// Parses a scanned or pasted pairing code. `version` reads the version of
-/// the parsed value; one outside `versions` is refused instead of being read
-/// with this version's meaning.
+/// Parses a scanned or pasted pairing code. `version` is the version of the
+/// parsed value. A version not in `versions` is refused, not read with this
+/// version's meaning.
 fn pairing_code_from_cbor<T: serde::de::DeserializeOwned>(
     data: &[u8],
     versions: std::ops::RangeInclusive<u8>,
@@ -56,50 +55,45 @@ fn pairing_code_from_cbor<T: serde::de::DeserializeOwned>(
     Ok(parsed)
 }
 
-/// QR kodun taşıdığı eşleşme paketi (spec 1.3 — "Karar (v0.1): fingerprint-only
-/// QR"). CBOR ile kodlanır (QR kapasitesi kısıtı nedeniyle tam public key'ler
-/// taşınmaz — bağlantı kurulunca karşı taraftan indirilir ve bu `fingerprint`
-/// ile karşılaştırılır).
+/// Pairing payload carried by the QR code. CBOR-encoded. Full public keys do not
+/// fit in a QR code, so the scanner downloads them from the peer after the
+/// connection is made and checks them against `fingerprint`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QrPacket {
     pub version: u8,
     pub device_name: String,
-    /// Kişi kimliği (spec 1.3 v0.2 notu: identity_id de taşınır).
+    /// Identity id of the person (carried since v0.2).
     pub identity_id: String,
-    /// Bu cihazın kendi fingerprint'i.
+    /// Fingerprint of the showing device.
     pub device_fingerprint: String,
-    /// Bağlanmak için yeterli tek bir bilinen adres.
+    /// One known address that is enough to connect.
     pub rendezvous_node: String,
-    /// Spec dışı, güvenlik denetimi devamı (bkz. SECURITY.md "Cross-network
-    /// connectivity" notu, spec §4.1 "~10 node adresi paylaşımı" — önceden
-    /// hiç implemente edilmemişti): QR'ı üreten cihazın bildiği, röle
-    /// (Circuit Relay v2) protokolünü konuşan birkaç peer'in TAM adresi
-    /// (`.../p2p/<peer_id>` dahil). `rendezvous_node` doğrudan erişilemezse
-    /// (farklı ağ/NAT), tarayan taraf bunlardan biri üzerinden bağlanmayı
-    /// dener (bkz. network.rs `dial_with_relay_fallback`). `#[serde(default)]`
-    /// — v1 QR'lar (bu alan olmadan üretilmiş) hâlâ ayrıştırılabilsin diye;
-    /// CURRENT_VERSION 2'ye yükseltildi ama eski taraf bunu görmezden
-    /// gelebilir, alan sadece boş kalır.
+    /// Full addresses (including `/p2p/<peer_id>`) of a few peers that speak the
+    /// Circuit Relay v2 protocol, as known to the showing device. If
+    /// `rendezvous_node` is not reachable directly (other network or NAT), the
+    /// scanner dials through one of these (`network::dial_with_relay_fallback`).
+    /// `#[serde(default)]`: v1 codes without this field still parse. The current
+    /// version is 2. An older peer may ignore the field, and it then stays empty.
     #[serde(default)]
     pub known_relays: Vec<String>,
-    /// Random, issued by the device that shows the code. The scanner proves
-    /// it read the code with `pairing_nonce_proof` in its IdentityExchange.
-    /// Not named `nonce`: with that name this packet also parsed as a
-    /// `DeviceLinkRequest`, and a contact's code scanned on the "add a
-    /// device" screen was taken for a device to link.
+    /// Random nonce, issued by the device that shows the code. The scanner proves
+    /// it read the code by sending `pairing_nonce_proof` in its IdentityExchange.
+    /// Not named `nonce`: under that name this packet would also parse as a
+    /// `DeviceLinkRequest`, and a contact's code scanned on the "add a device"
+    /// screen would be taken as a device to link.
     #[serde(with = "serde_bytes")]
     pub pairing_nonce: Vec<u8>,
 }
 
-/// What a device that read a pairing or link code puts into its
-/// IdentityExchange (`pairing_proof`): the code's nonce, bound to the device
-/// that sends it. The packet travels unsealed; the nonce itself in it could
-/// be taken from the wire and used by another device.
+/// What a device that read a pairing or link code sends in its IdentityExchange
+/// (`pairing_proof`): the code's nonce, bound to the sending device. The packet
+/// travels unsealed, so the nonce could be taken from the wire and reused by
+/// another device without this binding.
 pub fn pairing_nonce_proof(nonce: &[u8], sender_device_fingerprint: &str) -> Vec<u8> {
     use sha3::Digest;
     sha3::Sha3_256::new()
         .chain_update(b"typeon-pairing-nonce")
-        // Length-prefixed: the nonce/fingerprint boundary cannot shift.
+        // Length-prefixed, so the nonce/fingerprint boundary cannot shift.
         .chain_update((nonce.len() as u32).to_be_bytes())
         .chain_update(nonce)
         .chain_update(sender_device_fingerprint.as_bytes())
@@ -110,52 +104,52 @@ pub fn pairing_nonce_proof(nonce: &[u8], sender_device_fingerprint: &str) -> Vec
 impl QrPacket {
     pub const CURRENT_VERSION: u8 = 3;
 
-    /// CBOR olarak kodlar (QR'a gömülecek ham bayt dizisi).
+    /// CBOR encoding (the raw bytes embedded in the QR code).
     pub fn to_cbor(&self) -> Result<Vec<u8>, String> {
         to_cbor(self)
     }
 
-    /// A code without `nonce` (v1, v2) cannot pair any more.
+    /// A code without `nonce` (v1, v2) cannot be used to pair.
     pub fn from_cbor(data: &[u8]) -> Result<Self, String> {
         pairing_code_from_cbor(data, Self::CURRENT_VERSION..=Self::CURRENT_VERSION, |p: &Self| p.version)
     }
 }
 
-/// Var olan (onaylı) cihaz tarafından imzalanıp yayılan cihaz ekleme
-/// bildirimi (spec 1.5 adım 4).
+/// Device-add notice. The existing, approved device signs it and propagates it
+/// (spec 1.5, step 4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceAdd {
     pub identity_id: String,
     pub new_device_fingerprint: String,
-    /// Onaylayan cihazın fingerprint'i.
+    /// Fingerprint of the approving device.
     pub added_by: String,
-    /// Klasik (Ed25519) imza — `identity_id || new_device_fingerprint ||
-    /// added_by` üzerinde, onaylayan cihazın anahtarıyla.
+    /// Classical (Ed25519) signature over `identity_id || new_device_fingerprint ||
+    /// added_by`, made with the approving device's key.
     #[serde(with = "serde_bytes")]
     pub signature: Vec<u8>,
-    /// ML-DSA (post-kuantum) imza — MessagePacket/GroupUpdate ile AYNI hibrit
-    /// model (bkz. `verify_hybrid_signature`). Mandatory: the field must be
-    /// on the wire, and the verifier rejects an empty one.
+    /// ML-DSA (post-quantum) signature, in the same hybrid model as MessagePacket
+    /// and GroupUpdate (see `verify_hybrid_signature`). Mandatory: the field must
+    /// be present, and the verifier rejects an empty one.
     #[serde(with = "serde_bytes")]
     pub signature_pq: Vec<u8>,
-    /// Hybrid signature of the ADDED device over the same bytes plus a tag
-    /// (devices.rs `device_add_consent_bytes`). The first device's signature alone
-    /// let any identity claim a device whose public keys it knew.
+    /// Hybrid signature of the ADDED device over the same bytes plus a domain tag
+    /// (`devices::device_add_consent_bytes`). Without it, one identity's signature
+    /// alone could claim any device whose public keys it knew.
     #[serde(default, with = "serde_bytes")]
     pub consent: Vec<u8>,
     #[serde(default, with = "serde_bytes")]
     pub consent_pq: Vec<u8>,
 }
 
-/// Cihaz iptali (spec 1.6).
+/// Device revocation (spec 1.6).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceRevoke {
     pub identity_id: String,
     pub revoked_device_fingerprint: String,
-    /// İptali yapan cihazın fingerprint'i.
+    /// Fingerprint of the revoking device.
     pub revoked_by: String,
-    /// bkz. `DeviceAdd.signature` — `identity_id || revoked_device_fingerprint
-    /// || revoked_by` üzerinde klasik imza.
+    /// Classical signature over `identity_id || revoked_device_fingerprint ||
+    /// revoked_by` (see `DeviceAdd.signature`).
     #[serde(with = "serde_bytes")]
     pub signature: Vec<u8>,
     /// Mandatory, as in `DeviceAdd`.
@@ -163,57 +157,52 @@ pub struct DeviceRevoke {
     pub signature_pq: Vec<u8>,
 }
 
-/// Grup üyelik değişikliği (spec 5.2).
+/// Group membership change (spec 5.2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GroupChange {
-    Add(String),    // identity_id
-    Remove(String), // identity_id
+    Add(String),  // identity id
+    Remove(String),  // identity id
     Rename(String),
-    /// Spec disi: grup profil fotografi -- SADECE kurucu degistirebilir
-    /// (bu zaten `validate_group_update`'in `NotFounder` kontrolunden
-    /// GECER, ayri bir yetki mekanizmasi icat edilmedi). `None` = fotograf
-    /// kaldirildi.
+    /// Group profile photo. Only the founder may change it. This uses the existing
+    /// `NotFounder` check of `validate_group_update`, not a new permission
+    /// mechanism. `None` removes the photo.
     AvatarUpdate(#[serde(with = "serde_bytes")] Option<Vec<u8>>),
-    /// Spec dışı, kullanıcı isteği: grubu TÜM üyeler için siler. Diğer
-    /// değişikliklerin aksine bu, gruba bir alan güncellemesi değil —
-    /// alıcı tarafta grup kaydı tamamen kaldırılır (bkz. group_ops.rs
-    /// `process_group_update` Delete kolu). Yetki, diğerleriyle AYNI
-    /// kuraldan gelir: `validate_group_update` yalnızca kurucunun imzasını
-    /// kabul eder (`NotFounder`), ayrı bir mekanizma icat edilmedi.
+    /// Deletes the group for all members. Unlike the other changes this is not a
+    /// field update. On the receiving side the group record is removed entirely
+    /// (see the `Delete` arm of `group_ops::process_group_update`). The permission
+    /// rule is the same as for the other changes: `validate_group_update` accepts
+    /// only the founder's signature (`NotFounder`).
     Delete,
-    /// Kurucu yetkisini başka bir üyeye devreder (dış inceleme önerisi,
-    /// 2026-08-27): kurucu bütün cihazlarını kaybederse grup aksi halde
-    /// KALICI olarak kilitleniyordu — kimse üye ekleyip çıkaramıyor, adı
-    /// ya da fotoğrafı değiştiremiyordu; tek çare grubu dağıtıp yeniden
-    /// kurmaktı.
+    /// Transfers the founder role to another member.
     ///
-    /// Yetki kuralı diğerleriyle AYNI: yalnızca MEVCUT kurucunun imzası
-    /// geçerli. Hedef, grubun üyesi olmak zorunda (bkz. `group::apply_change`)
-    /// — aksi halde yetki grup dışında birine geçip grup büsbütün
-    /// kilitlenirdi.
-    ///
-    /// BİLİNÇLİ KAPSAM DIŞI: kurucu ZATEN kaybolduysa bu da işe yaramaz.
-    /// O durum için üyelerin çoğunluk oyuyla yeni kurucu ataması gerekir;
-    /// bu, tek imzalı doğrulama şemasını çok imzalıya çevirmek demek —
-    /// ayrı bir tasarım kararı.
+    /// Without this, a group whose founder lost all devices was locked for good:
+    /// nobody could add or remove members, or change the name or photo. The only
+    /// way out was to dissolve the group and create it again.
+    /// The permission rule is unchanged: only the current founder's signature is
+    /// valid. The target must already be a member (see `group::apply_change`).
+    /// Otherwise the role could pass to someone outside the group and lock it.
+    /// Not covered: if the founder is already gone, this does not help. That case
+    /// needs a majority vote by the members to appoint a new founder. That would
+    /// turn the single-signature scheme into a multi-signature one, which is a
+    /// separate design decision.
     TransferFounder(String),
 }
 
-/// Proof that a device belongs to an identity, checkable by someone who knows
-/// neither: the `DeviceAdd` is signed by the identity's first device (whose
+/// Proof that a device belongs to an identity, checkable by a party that knows
+/// neither. The `DeviceAdd` is signed by the identity's first device (whose
 /// fingerprint IS the identity id), and `signer` carries that device's keys.
-/// Travels beside a third party's claim "this device is that identity's"
-/// (group vouching, sibling sync); a first device needs none.
+/// It travels next to a third party's claim "this device belongs to that
+/// identity" (group vouching, sibling sync). A first device needs no proof.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceAddProof {
     pub device_add: DeviceAdd,
     pub signer: SyncedDevice,
 }
 
-/// Spec dışı, kullanıcı kararı: bir grup üyesinin, kurucu tarafından
-/// kefil olunan cihaz kaydı (bkz. `GroupUpdate.member_devices`). Alıcı,
-/// `device_fingerprint`'in bu anahtarların SHA3-256'sı olduğunu ayrıca
-/// doğrular (kendi içinde tutarlı olmayan kayıtlar reddedilir).
+/// A device record that a group member's device has vouched for. The founder
+/// vouches for it (see `GroupUpdate.member_devices`). The receiver also checks
+/// that `device_fingerprint` is the SHA3-256 of these keys. Records that are not
+/// internally consistent are rejected.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GroupMemberDevice {
     pub identity_id: String,
@@ -227,53 +216,50 @@ pub struct GroupMemberDevice {
     pub kem_pubkey_x25519: Vec<u8>,
     #[serde(with = "serde_bytes")]
     pub kem_pubkey_mlkem: Vec<u8>,
-    /// Kurucunun bildiği son `.onion` adresi — dial ipucu (M-28: never a
-    /// clearnet/UPnP address). Yoksa alıcı röle/sunucuya güvenir.
+    /// The founder's last known `.onion` address, as a dial hint. Never a clearnet
+    /// or UPnP address. If absent, the receiver relies on the relay or server.
     #[serde(default)]
     pub last_addr: Option<String>,
-    /// The device's first-contact secret for THIS group (16 bytes), which it
-    /// gave the founder in `MessageContent::FirstContactSecret`: a member that
-    /// never paired with the device reaches it through that group's
-    /// first-contact mailbox on the server. Only this group's members can
-    /// fill that mailbox, and it is registered only while the device is in
-    /// the group.
+    /// The device's first-contact secret for THIS group (16 bytes), given to the
+    /// founder in `MessageContent::FirstContactSecret`. A member that never paired
+    /// with the device reaches it through the group's first-contact mailbox on the
+    /// server. Only this group's members can fill that mailbox, and it is
+    /// registered only while the device is in the group.
     #[serde(default, with = "serde_bytes", skip_serializing_if = "Vec::is_empty")]
     pub first_contact_secret: Vec<u8>,
 }
 
-/// Kurucu yetkisinin devredildiğine dair, KENDİ BAŞINA doğrulanabilir,
-/// kompakt bir tanıklık (bkz. `GroupUpdate.founder_chain`).
+/// Compact, self-verifying evidence of a founder transfer (see
+/// `GroupUpdate.founder_chain`).
 ///
-/// NEDEN GEREKLİ — gerçek bir kilitlenme senaryosu: `GroupChange::TransferFounder`
-/// yalnızca o güncellemeyi ALAN üyelerde uygulanıyordu. `GroupUpdate` grup
-/// adını, TAM üyelik listesini ve üye anahtarlarını her seferinde taşıdığı
-/// için bunlar kendi kendini onarıyor (bkz. `members`/`sync_members`) — ama
-/// KURUCU alanının böyle bir onarımı YOKTU. Devri kaçıran bir üye
-/// (çevrimdışıyken 7 günlük yeniden deneme penceresi dolduysa, ya da
-/// `pending_group_syncs` o üye için sadece EN SON güncellemeyi sakladığından
-/// devir daha yeni bir güncellemeyle ÜZERİNE YAZILDIYSA) yerel kurucusunu
-/// eski kişi sanmaya devam eder; yeni kurucudan gelen her güncelleme
-/// `NotFounder` ile REDDEDİLİR ve Ack gönderilmez, yani gönderen 7 gün
-/// boyunca boşuna yeniden dener. O üye grup için KALICI olarak kopmuştur:
-/// bir daha ne üye değişikliği, ne ad, ne fotoğraf, ne de grup silme alır.
+/// Why it is needed: `GroupChange::TransferFounder` was applied only by members
+/// that received that update. `GroupUpdate` carries the group name, the full
+/// member list and member keys in every message, so those fields repair
+/// themselves (see `members` and `sync_members`). The founder field had no such
+/// repair. A member that missed the transfer (its 7-day retry window expired
+/// while it was offline, or a newer update overwrote the transfer, since
+/// `pending_group_syncs` keeps only the LAST update for each member) kept the old
+/// founder. Every update from the new founder was then rejected with
+/// `NotFounder` and no Ack was sent, so the sender retried for 7 days. That member
+/// was permanently cut off: it could no longer receive member changes, name,
+/// photo or deletion.
 ///
-/// GÜVENLİK: bu yapı, dış `GroupUpdate.signature`'ın kapsamında DEĞİL —
-/// olması da gerekmiyor, çünkü KENDİ hibrit imzasını taşıyor ve
-/// `founder_transfer_signing_input` ile alan-ayrımlı (domain-separated)
-/// imzalanıyor, yani bir `GroupUpdate` imzası buraya yeniden kullanılamaz.
-/// Aracı bir taraf bu listeyi silebilir (sonuç: bugünkü davranışa geri
-/// düşülür, kayıp yok) ama uyduramaz (imza ESKİ kurucunun cihazına ait
-/// olmak zorunda).
+/// Security: this structure is not covered by the outer `GroupUpdate.signature`,
+/// and it does not need to be. It carries its own hybrid signature, made over
+/// `founder_transfer_signing_input` with a domain separator, so a `GroupUpdate`
+/// signature cannot be reused here. An intermediary can delete the list, which
+/// falls back to today's behavior with no data loss. It cannot forge an entry,
+/// because the signature must come from the OLD founder's device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FounderTransfer {
     pub group_id: String,
-    /// Devrin uygulandığı `GroupUpdate.new_version`.
+    /// The `GroupUpdate.new_version` the transfer was applied in.
     pub version: u32,
-    /// Devri yapan (o anki) kurucu.
+    /// The founder who transferred the role.
     pub from_identity: String,
-    /// Yetkiyi devralan üye.
+    /// The member who takes the role.
     pub to_identity: String,
-    /// Eski kurucunun imzalayan cihazı.
+    /// The old founder's device that signed.
     pub signed_by_device: String,
     #[serde(with = "serde_bytes")]
     pub signature: Vec<u8>,
@@ -281,9 +267,9 @@ pub struct FounderTransfer {
     pub signature_pq: Vec<u8>,
 }
 
-/// `FounderTransfer`'ın imzaladığı baytlar. Uzunluk ön ekli — aksi halde
-/// düz birleştirme, alan sınırlarını kaydırarak farklı (grup_id, kimlik)
-/// üçlülerinin AYNI baytları üretmesine izin verirdi.
+/// Bytes that `FounderTransfer` signs. Length-prefixed. Plain concatenation would
+/// let the field boundaries shift, so different (group_id, identity) pairs could
+/// produce the same bytes.
 pub fn founder_transfer_signing_input(
     group_id: &str,
     version: u32,
@@ -305,46 +291,41 @@ pub struct GroupUpdate {
     pub group_id: String,
     pub new_version: u32,
     pub change: GroupChange,
-    /// Spec dışı: grubun GÜNCEL adı, her `GroupUpdate`'te taşınır (sadece
-    /// `Rename` değişikliklerinde değil). Sebep: bir üye ilk kez `Add` ile
-    /// eklendiğinde henüz yerel bir `Group` kaydı yoktur — bu alan
-    /// olmadan `process_group_update` boş bir isimle ("") bir grup
-    /// oluşturuyordu, bu da grup bildirimlerinde/ekranlarında kalıcı olarak
-    /// boş başlık göstermeye yol açıyordu (bkz. dosya sonu not).
+    /// The group's current name, carried in every `GroupUpdate` and not only in
+    /// `Rename` changes. A member that is added for the first time has no local
+    /// `Group` record yet. Without this field `process_group_update` created the
+    /// group with an empty name (""), and group lists and screens then showed an
+    /// empty title permanently. See the note at the end of the file.
     pub group_name: String,
-    /// Spec dışı, hata düzeltmesi (üçüncü üye hatası): bu değişiklikten
-    /// SONRAKİ TAM üyelik listesi (kurucunun otoritesi). Önceden yoktu ve
-    /// `process_group_update`, grubu yerelde ilk kez oluştururken
-    /// `Group::new` ile SADECE kurucuyu ekleyip üstüne tek bir `change`
-    /// uyguluyordu — yani SONRADAN eklenen bir üye, KENDİSİNDEN ÖNCE
-    /// eklenmiş üyeleri HİÇ öğrenemiyordu (üçüncü cihaz grubu [kurucu, ben]
-    /// olarak görüyor, ikinci üyeye mesaj gönderemiyordu). Artık her
-    /// güncelleme tam listeyi taşıyor: geç katılan üye tam üyeliği alır VE
-    /// arada kaçırılan güncellemeler de kendiliğinden düzelir (self-healing).
-    /// `#[serde(default)]` — bu alan olmadan üretilmiş eski paketler yine
-    /// ayrıştırılabilsin diye (ama imza kapsamına dahil olduğundan, karışık
-    /// sürümler imza doğrulamasında elenir; tüm cihazlar güncellenmeli).
+    /// Full member list after this change, as the founder knows it. Before this
+    /// field existed, `process_group_update` created a new local group with only
+    /// the founder (`Group::new`) and applied the one `change` on top. A member
+    /// added later therefore could not learn the members that were added before
+    /// it. For example, the third device saw the group as [founder, me] and could
+    /// not message the second member. Every update now carries the full list.
+    /// A late joiner gets the full membership, and missed updates heal on their own.
+    /// `#[serde(default)]`: old packets without this field still parse. They are
+    /// covered by the signature, so mixed versions fail verification. All devices
+    /// must update.
     #[serde(default)]
     pub members: Vec<String>,
-    /// Spec dışı, kullanıcı kararı (grup üyelerinin otomatik tanıştırılması):
-    /// üyelerin PUBLIC anahtarları + son bilinen adresleri, KURUCUNUN
-    /// kefaletiyle. Pairwise grup mesajlaşması her üye ÇİFTİNİN birbiriyle
-    /// ratchet kurabilmesini gerektirir; ama üyeler yalnızca kurucuyla QR
-    /// eşleşmesi yapmış olabilir (A↔B, A↔C eşleşmiş ama B↔C eşleşmemiş) —
-    /// bu durumda B ve C birbirine HİÇ mesaj gönderemiyordu. Bu alan, her
-    /// üyenin diğerlerinin anahtarlarını kurucudan öğrenmesini sağlar.
+    /// Members' public keys and last known addresses, vouched for by the founder.
     ///
-    /// GÜVENLİK: bu, QR ile yüz yüze TOFU'dan DAHA ZAYIF bir güven modeli —
-    /// kurucunun sözüne güvenilir. Kötü niyetli bir kurucu, bir üye için
-    /// KENDİ anahtarını verip o üyeyi taklit edebilir (grup içi MITM).
-    /// Bu yüzden: (a) alan imza kapsamındadır (aracılar değiştiremez),
-    /// (b) alıcı ZATEN BİLDİĞİ bir cihazın anahtarlarını ASLA bunlarla
-    /// EZMEZ (bkz. process_group_update), (c) böyle eklenen kişiler
-    /// `verified=false` olarak işaretlenir ve UI'de "grup üzerinden eklendi,
-    /// doğrulanmadı" olarak gösterilir.
+    /// Group messaging needs every pair of members to hold a ratchet. But members
+    /// may have paired only with the founder (A-B and A-C paired, B-C not). In that
+    /// case B and C could never send each other messages. This field lets every
+    /// member learn the others' keys from the founder.
     ///
-    /// M90/H6: only the devices new or changed since the founder's previous
-    /// update (all of them for a member just added, and in a reply to
+    /// Security: this is weaker than face-to-face TOFU with a QR code, because it
+    /// relies on the founder's word. A malicious founder could give its own key for
+    /// a member and impersonate that member inside the group (a group MITM).
+    /// Therefore: (a) the field is covered by the signature, so no intermediary can
+    /// change it; (b) the receiver never overwrites keys of a device it ALREADY
+    /// knows (see `process_group_update`); (c) entries added this way are marked
+    /// `verified = false` and the UI shows them as "added via group, not verified".
+    ///
+    /// Only the devices new or changed since the founder's previous update are sent
+    /// (all of them for a newly added member, and in a reply to
     /// `MessageContent::GroupSyncRequest`).
     #[serde(default)]
     pub member_devices: Vec<GroupMemberDevice>,
@@ -355,84 +336,75 @@ pub struct GroupUpdate {
     /// verifies the update.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub member_device_proofs: Vec<DeviceAddProof>,
-    /// founder_identity_id olmalı — alıcı taraf bunu doğrular.
+    /// Must be `founder_identity_id`. The receiver checks this.
     pub signed_by: String,
-    /// Kurucunun hangi cihazı imzaladı.
+    /// The founder's signing device.
     pub signed_by_device: String,
-    /// Klasik (Ed25519) imza.
+    /// Classical (Ed25519) signature.
     #[serde(with = "serde_bytes")]
     pub signature: Vec<u8>,
-    /// Spec dışı: ML-DSA (post-kuantum) imza — önceden bu alan yoktu ve
-    /// GroupUpdate SADECE Ed25519 ile korunuyordu (MessagePacket/
-    /// HandshakeInit'teki hibrit modelle tutarsızdı, bkz. güvenlik
-    /// denetimi). Artık MessagePacket ile AYNI hibrit doğrulama
-    /// (`verify_hybrid_signature`, HER İKİ imza da zorunlu) uygulanıyor.
+    /// ML-DSA (post-quantum) signature. Before this field, GroupUpdate was
+    /// protected by Ed25519 alone, which was inconsistent with the hybrid model of
+    /// MessagePacket and HandshakeInit. Both signatures are now required, verified
+    /// with `verify_hybrid_signature` as for MessagePacket.
     #[serde(with = "serde_bytes")]
     pub signature_pq: Vec<u8>,
-    /// Kurucu devir zinciri — bkz. `FounderTransfer` (kilitlenme senaryosu
-    /// orada anlatılıyor). Kurucunun gönderdiği HER güncelleme, o gruba
-    /// ait bilinen devirleri taşır; devri kaçırmış bir alıcı yerel
-    /// kurucusunu bu zinciri yürüyerek ilerletir ve güncellemeyi kabul
-    /// eder (bkz. group_ops.rs `heal_founder_chain`). `#[serde(default)]` —
-    /// alanı hiç bilmeyen eski sürümlerle iki yönlü uyumlu; dış imzanın
-    /// KAPSAMINDA DEĞİL (her girdi kendi imzasını taşıyor).
+    /// Founder transfer chain (see `FounderTransfer`). Every update from the founder
+    /// carries the known transfers for the group. A receiver that missed a transfer
+    /// walks this chain forward (`group_ops::heal_founder_chain`) and then accepts
+    /// the update. `#[serde(default)]`, so it is compatible in both directions with
+    /// versions that do not know the field. Not covered by the outer signature,
+    /// because each entry carries its own signature.
     #[serde(default)]
     pub founder_chain: Vec<FounderTransfer>,
 }
 
 // ---------------------------------------------------------------------------
-// Çoklu-cihaz (spec 1.5/1.7) — ikinci bir cihazı var olan bir Identity'ye
-// bağlama akışı. QR'ı YENİ cihaz gösterir, var olan (onaylı) cihaz OKUR
-// (spec 1.5 adım 3 — onay her zaman zaten güvenilen cihazdan çıkar).
+// Multi-device linking (spec 1.5 and 1.7). The new device shows a QR code and
+// the approved device scans it (spec 1.5 step 3). Approval always comes from a
+// device the user already trusts.
 // ---------------------------------------------------------------------------
 
-/// Yeni cihazın gösterdiği "cihaz ekleme QR'ı" (spec 1.5 adım 2).
+/// Device-add QR code shown by the new device (spec 1.5 step 2).
 ///
-/// Spec dışı, gerçek cihaz çökmesi düzeltmesi ("com.google.zxing.WriterException:
-/// Data too big", `LinkDeviceActivity.encodeBinaryAsQrBitmap`): bu struct
-/// ÖNCEDEN tam public key'leri taşıyordu ("QR kapasitesi ~3.3KB sığar"
-/// varsayımıyla) — ama ML-DSA-87 (2592 bayt) + ML-KEM-1024 (1568 bayt)
-/// public key'leri TEK BAŞINA ~4.2KB'a denk gelir, bir QR kodunun mutlak
-/// üst sınırı olan ~2.9KB'ı (versiyon 40, en düşük hata düzeltme, 8-bit bayt
-/// modu) HER ZAMAN aşar — hiçbir hata-düzeltme seviyesi ayarı bunu düzeltemez,
-/// veri gerçekten sığmıyordu. Şimdi `QrPacket` (bkz. yukarısı, spec 1.3
-/// "fingerprint-only QR") ile AYNI desene geçildi: public key'ler QR'da HİÇ
-/// taşınmaz, sadece `device_fingerprint` (SHA3-256, 64 hex karakter). Onaylayan
-/// cihaz `rendezvous_node`'a bağlanır, kendi `IdentityExchange`'ini gönderir;
-/// yeni cihaz bunu alınca KARŞILIKLI kendi `IdentityExchange`'ini geri
-/// gönderir (bkz. `process_identity_exchange` içindeki `pending_link_target`
-/// kolu) — GERÇEK public key'ler (ve bunlardan yeniden hesaplanan fingerprint
-/// doğrulaması) o el sıkışmada öğrenilir, tıpkı normal kişi eşleşmesinde
-/// olduğu gibi (bkz. `process_qr_packet` dokümantasyonu, AYNI gerekçe).
+/// It used to carry full public keys. ML-DSA-87 (2592 bytes) and ML-KEM-1024
+/// (1568 bytes) together come to about 4.2 KB, which is over the roughly 2.9 KB
+/// maximum of a QR code (version 40, lowest error correction, byte mode). No
+/// error-correction level fixes that, so the data never fit. It now follows the
+/// same pattern as `QrPacket` (fingerprint only): no public keys in the QR code,
+/// only `device_fingerprint` (SHA3-256, 64 hex characters). The approving device
+/// connects to `rendezvous_node` and sends its `IdentityExchange`. The new device
+/// replies with its own `IdentityExchange` (see the `pending_link_target` arm of
+/// `process_identity_exchange`). The real public keys, and their check against the
+/// fingerprint, are learned in that exchange, as in a normal contact pairing (see
+/// `process_qr_packet`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceLinkRequest {
     pub version: u8,
     pub device_name: String,
-    /// Yeni cihazın kendi (geçici/provizyonel) fingerprint'i — bu
-    /// anahtarların SHA3-256'sı; onaylayan taraf GERÇEK anahtarları
-    /// `IdentityExchange` ile aldıktan sonra yeniden hesaplayıp karşılaştırır
-    /// (bkz. yukarıdaki struct dokümantasyonu).
+    /// Fingerprint of the new device's own provisional key set: the SHA3-256 of
+    /// those keys. The approving side recomputes it after it gets the real keys in
+    /// `IdentityExchange` and compares (see the struct documentation above).
     pub device_fingerprint: String,
-    /// Onaylayan cihazın bağlanabileceği tek bir bilinen adres
-    /// (`get_node_address` — Tor açıksa `.onion`).
+    /// One known address the approving device can connect to (`get_node_address`,
+    /// which is the `.onion` address when Tor is on).
     pub rendezvous_node: String,
-    /// bkz. `QrPacket.known_relays` — farklı ağ/NAT için röle adayları.
+    /// See `QrPacket.known_relays`. Relay candidates for other networks and NATs.
     #[serde(default)]
     pub known_relays: Vec<String>,
-    /// 16 random bytes made for this QR. The grant has to repeat them: only
-    /// the device that scanned the code knows them, so no other device with
-    /// a session to the new one can claim it (v3).
+    /// 16 random bytes made for this QR code. The grant must repeat them. Only the
+    /// device that scanned the code knows them, so no other device with a session to
+    /// the new one can claim it (v3).
     #[serde(with = "serde_bytes")]
     pub nonce: Vec<u8>,
 }
 
 impl DeviceLinkRequest {
     /// v3: carries `nonce`.
-    /// v2: fingerprint-only (bkz. struct dokümantasyonu — v1 tam public
-    /// key'ler taşıyordu ve QR kapasitesini aşıyordu, hiçbir zaman
-    /// çalışmıyordu). Eski v1 QR'lar artık `from_cbor` ile
-    /// ayrıştırılamaz (alanlar kalıcı olarak kaldırıldı) — zararsız, v1
-    /// zaten hiçbir gerçek cihazda üretilemiyordu (üretim anında çöküyordu).
+    /// v2: fingerprint only (see the struct documentation). v1 carried full public
+    /// keys and was over the QR capacity, so it never worked. Old v1 codes no longer
+    /// parse with `from_cbor` (the fields were removed). This is harmless: v1 could
+    /// not be produced on any real device, because it crashed at creation.
     pub const CURRENT_VERSION: u8 = 3;
     pub fn to_cbor(&self) -> Result<Vec<u8>, String> {
         to_cbor(self)
@@ -442,10 +414,10 @@ impl DeviceLinkRequest {
     }
 }
 
-/// Senkron yükünde (spec 1.7 `SyncPayload`) taşınan tek bir uzak cihazın
-/// public anahtarları — alıcı bunları kendi `known_remote_devices`'ına
-/// yazar, böylece ilk senkrondan hemen sonra o kişiyle ratchet kurup
-/// mesajlaşabilir (kişiyi ayrıca QR ile eşleştirmesine gerek kalmaz).
+/// Public keys of one remote device, carried in the sync payload (spec 1.7
+/// `SyncPayload`). The receiver stores them in its `known_remote_devices`, so it can
+/// start a ratchet and message that contact right after the first sync. No separate
+/// QR pairing is needed.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SyncedDevice {
     pub device_fingerprint: String,
@@ -461,18 +433,18 @@ pub struct SyncedDevice {
     pub is_active: bool,
     #[serde(default)]
     pub last_addr: Option<String>,
-    /// Hex. The secrets of this device's first-contact mailbox that the
-    /// sender holds (`first_contact_secrets`). Filled only in a `SyncPayload`
-    /// (ratchet-encrypted, siblings only): every device of an identity then
-    /// reaches, and is reached by, the devices its siblings paired with.
+    /// Hex. The secrets of this device's first-contact mailboxes that the sender
+    /// holds (`first_contact_secrets`). Filled only in a `SyncPayload`
+    /// (ratchet-encrypted, siblings only). Every device of an identity can then reach
+    /// the devices its siblings paired with, and be reached by them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mailbox_secrets: Vec<String>,
 }
 
-// Hand-written Debug for the two device records: they carry mailbox
-// capabilities (`first_contact_secret`, `mailbox_secrets`), and every type
-// that holds them (`GroupUpdate`, `DeviceAddProof`, `SyncedContact`) derives
-// Debug through these. Name and fingerprint only.
+// Hand-written Debug for the two device records. They carry mailbox capabilities
+// (`first_contact_secret`, `mailbox_secrets`), and every type that holds them
+// (`GroupUpdate`, `DeviceAddProof`, `SyncedContact`) derives Debug through them.
+// Print the name and fingerprint only.
 impl std::fmt::Debug for GroupMemberDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GroupMemberDevice")
@@ -493,8 +465,8 @@ impl std::fmt::Debug for SyncedDevice {
     }
 }
 
-/// Bir kişinin, cihazlar arası senkron için serileştirilmiş biçimi
-/// (spec 1.7 `SyncPayload.contacts`).
+/// Serialized form of one contact for cross-device sync (spec 1.7
+/// `SyncPayload.contacts`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncedContact {
     pub identity_id: String,
@@ -505,103 +477,94 @@ pub struct SyncedContact {
     #[serde(with = "serde_bytes")]
     pub avatar_jpeg: Option<Vec<u8>>,
     pub devices: Vec<SyncedDevice>,
-    /// bkz. `DeviceAddProof`: one for each device that is not the contact's
-    /// first device.
+    /// See `DeviceAddProof`: one for each device that is not the contact's first
+    /// device.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub device_proofs: Vec<DeviceAddProof>,
 }
 
-/// Senkron yükü (spec 1.7). İlk bağlanmada tam kopya olarak taşınır;
-/// `DeviceLinkGrant`'in içinde (ratchet-şifreli) yeni cihaza gider, ayrıca
-/// `MessageContent::DeviceSync` ile sonraki değişikliklerde kardeş cihazlara
-/// yeniden gönderilir (idempotent birleştirme).
+/// Sync payload (spec 1.7). The first connection carries a full copy. It goes to
+/// the new device inside `DeviceLinkGrant` (ratchet-encrypted). Later changes are
+/// sent to sibling devices again through `MessageContent::DeviceSync`. The merge is
+/// idempotent.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SyncPayload {
     pub contacts: Vec<SyncedContact>,
-    /// Serileştirilmiş `group::Group` kayıtları — alıcı bunları olduğu gibi
-    /// benimser (kurucu otoritesi zaten grup içinde imzalıdır).
+    /// Serialized `group::Group` records. The receiver adopts them as they are. The
+    /// founder's authority is already signed inside the group.
     pub groups: Vec<serde_json::Value>,
-    /// Çoklu-cihaz (spec 1.7): AYNI kimliğin DİĞER (kardeş) cihazları —
-    /// 3+ cihaz senaryosunda cihazların birbirini öğrenmesi için. Alıcı
-    /// bunları `identity_id = kendi kimliğim` olacak şekilde
-    /// `known_remote_devices`'a ekler (kendi fingerprint'ini atlayarak).
-    /// `#[serde(default)]` — bu alan olmadan üretilmiş eski senkron
-    /// paketleriyle uyum için.
+    /// Other devices of the SAME identity (spec 1.7), so that with three or more
+    /// devices they learn about each other. The receiver adds them to
+    /// `known_remote_devices` with `identity_id` set to its own identity, skipping its
+    /// own fingerprint. `#[serde(default)]`, for compatibility with older sync
+    /// payloads that do not have this field.
     #[serde(default)]
     pub siblings: Vec<SyncedDevice>,
-    /// bkz. `DeviceAddProof`: one for each of `siblings` that is not the
-    /// identity's first device. A sibling without one is not taken.
+    /// See `DeviceAddProof`: one for each of `siblings` that is not the identity's
+    /// first device. A sibling without one is not taken.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sibling_proofs: Vec<DeviceAddProof>,
-    /// Kök arşiv anahtarı (ARK) — sunucuda saklanan geçmişi çözen anahtar
-    /// (bkz. server_client.rs `set_archive_root_key`, `server_seal`).
-    ///
-    /// Neden BURADA taşınıyor: ARK cihaza değil KİMLİĞE ait; aynı kimliğin
-    /// bütün cihazları sunucudaki arşivi okuyabilmeli. Bu paket zaten
-    /// ratchet-şifreli ve zaten SADECE kardeş cihazlar arasında gidiyor
-    /// (bkz. receive_message `DeviceSync` kolundaki `from_sibling`
-    /// kontrolü), yani yeni bir anahtar taşıma mekanizması icat etmeye
-    /// gerek yok — uzun ömürlü sırların cihazlar arasına geçtiği nokta
-    /// zaten burası.
-    ///
-    /// `#[serde(default)]`: bu alan olmadan üretilmiş eski senkron
-    /// paketleriyle uyum için.
+    /// Root archive key (ARK). It decrypts the history stored on the server (see
+    /// `server_client::set_archive_root_key` and `server_seal`).
+    /// Why it travels here: the ARK belongs to the identity, not to a device. Every
+    /// device of the same identity must be able to read the archive on the server.
+    /// This payload is already ratchet-encrypted and only goes between sibling devices
+    /// (see the `from_sibling` check in the `DeviceSync` arm of `receive_message`). So
+    /// no new key-transport mechanism is needed. This is already the point where
+    /// long-lived secrets move between devices.
+    /// `#[serde(default)]`, for compatibility with older sync payloads.
     #[serde(default)]
     #[serde(with = "serde_bytes")]
     pub archive_root_key: Option<Vec<u8>>,
-    /// When the account name was last changed by the user (ms), on the device
-    /// that sends this. A sync has no order: the receiver takes the name only
-    /// from a payload whose stamp is newer than its own. 0 = a version without
-    /// the stamp.
+    /// When the user last changed the account name (ms), stamped by the sending
+    /// device. A sync has no order, so the receiver takes the name only from a payload
+    /// whose stamp is newer than its own. 0 = a version without the stamp.
     #[serde(default)]
     pub name_changed_at_ms: u64,
-    /// The signed revokes of this identity's own devices: a device linked
-    /// after a revoke learns it here, and refuses the revoked device's
-    /// still-valid `DeviceAdd`. Left out when empty.
+    /// Signed revocations of this identity's own devices. A device linked after a
+    /// revocation learns about it here and refuses the revoked device's still-valid
+    /// `DeviceAdd`. Left out when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub own_revokes: Vec<DeviceRevoke>,
 }
 
-/// Ağ üzerinde taşınan üst-seviye paket zarfı. `MessagePacket` header'ı
-/// spec 3.3'teki alanları birebir taşır: `ratchet_pubkey`, `message_number`,
-/// `prev_chain_length` gerçek bir Double Ratchet DH adımını mümkün kılar
-/// (önceki sürümdeki basitleştirilmiş `Packet`'in aksine).
+/// Top-level packet envelope on the network. The `MessagePacket` header carries the
+/// spec 3.3 fields directly. `ratchet_pubkey`, `message_number` and `prev_chain_length`
+/// make a real Double Ratchet DH step possible (unlike the simplified `Packet` of
+/// earlier versions).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagePacketHeader {
     pub sender_identity_id: String,
     pub sender_device_fingerprint: String,
-    /// Bu mesajın kararlı, ratchet rotasyonlarından bağımsız kimliği (v4
-    /// UUID) — spec dışı, edit/delete'in hangi mesajı hedeflediğini
-    /// belirtebilmesi için gerekli (bkz. `MessageContent::Edit`/`Delete`).
-    /// `message_number`, ratchet rotasyonunda sıfırlanabildiği için tek
-    /// başına kararlı bir kimlik OLAMAZ.
+    /// Stable identity of this message (v4 UUID). It does not change with ratchet
+    /// rotations. It lets Edit and Delete name the message they target (see
+    /// `MessageContent::Edit`/`Delete`). `message_number` resets on a ratchet rotation,
+    /// so it cannot serve as a stable identity by itself.
     pub message_id: String,
-    /// Güncel ratchet adımının public key'i (X25519 + ML-KEM hibrit,
-    /// hibrit anahtarların birleştirilmiş serileştirmesi).
+    /// Current ratchet step public key (hybrid X25519 and ML-KEM, serialized as one
+    /// concatenated value).
     #[serde(with = "serde_bytes")]
     pub ratchet_pubkey: Vec<u8>,
     pub message_number: u32,
     pub prev_chain_length: u32,
-    /// DOLU İSE: gönderen bu mesajla birlikte bir DH/KEM rotasyonu
-    /// tetikledi — bu alan, rotasyonun ürettiği YENİ Kyber ciphertext'ini
-    /// taşır. Alıcı bunu görünce kendi tarafında da
-    /// `perform_dh_ratchet`'i (kendi inisiyatifiyle değil, bu ciphertext'e
-    /// karşı decapsulate ederek) çalıştırıp aynı yeni anahtarları türetmeli
-    /// — bkz. ratchet.rs `RatchetPublicKeys`/`perform_dh_ratchet`
-    /// dokümantasyonu ve session.rs `maybe_rotate_ratchet`. Boşsa (None), bu
-    /// mesaj normal bir simetrik-zincir ilerlemesidir, rotasyon yok.
+    /// If set, the sender triggered a DH/KEM rotation with this message. The field
+    /// carries the new Kyber ciphertext that the rotation produced. The receiver
+    /// decapsulates it and runs `perform_dh_ratchet` on its side too, deriving the same
+    /// new keys. See `RatchetPublicKeys` and `perform_dh_ratchet` in ratchet.rs, and
+    /// `maybe_rotate_ratchet` in session.rs. If None, this is an ordinary symmetric
+    /// chain step with no rotation.
     #[serde(with = "serde_bytes")]
     pub rotation_kyber_ciphertext: Option<Vec<u8>>,
-    /// Sender's clock when the packet was made. Signed with the header, so a
-    /// receiver can tell a replayed old packet from one its session should
-    /// decrypt (session.rs `note_undecryptable`).
+    /// The sender's clock when the packet was made. It is signed with the header, so a
+    /// receiver can tell a replayed old packet from one its session should decrypt
+    /// (see `note_undecryptable` in session.rs).
     pub sent_at_ms: u64,
 }
 
-/// A `MessagePacketHeader` with the exact CBOR bytes it travels as (L-221,
-/// M-89). The packet signature and the ratchet AEAD (associated data) cover
-/// these bytes, never a re-encoding: a receiver checks what the sender made,
-/// and acts only on a header the tag binds to the ciphertext.
+/// A `MessagePacketHeader` together with the exact CBOR bytes it travels as. The
+/// packet signature and the ratchet AEAD (associated data) cover these bytes and
+/// never a re-encoding. A receiver therefore checks what the sender actually made,
+/// and acts only on a header that the tag binds to the ciphertext.
 #[derive(Debug, Clone)]
 pub struct SignedHeader {
     raw: Vec<u8>,
@@ -647,61 +610,55 @@ impl<'de> Deserialize<'de> for SignedHeader {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagePacket {
     pub header: SignedHeader,
-    /// AEAD (ChaCha20-Poly1305) şifreli içerik; nonce, header'dan
-    /// deterministik türetilir (message_number bazlı) — ayrıca taşınmaz.
-    /// Çözüldükten sonra bir `MessageContent` olarak CBOR-decode edilir.
+    /// AEAD (ChaCha20-Poly1305) ciphertext. The nonce is derived from the header
+    /// (from `message_number`) and is not carried. After decryption it is CBOR-decoded
+    /// as a `MessageContent`.
     #[serde(with = "serde_bytes")]
     pub ciphertext: Vec<u8>,
-    /// ML-DSA + Ed25519 hibrit imza (raw header bytes + ciphertext + recipient).
+    /// Hybrid ML-DSA and Ed25519 signature over the raw header bytes, the ciphertext
+    /// and the recipient.
     #[serde(with = "serde_bytes")]
     pub signature_classical: Vec<u8>,
     #[serde(with = "serde_bytes")]
     pub signature_pq: Vec<u8>,
 }
 
-/// `HistorySyncResponse.messages`'ın tek bir elemanı — bkz. types.rs
-/// `ArchivedMessage` (yerel karşılığı, ekstra `status` alanı hariç: bu ağdan
-/// geçtiği için gönderim durumu anlamsız/hassas, taşınmaz).
+/// One element of `HistorySyncResponse.messages`. See `ArchivedMessage` in types.rs
+/// for the local counterpart. The send status is left out: it means nothing to the
+/// peer and is sensitive, so it does not travel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncedMessage {
     pub direction: String,
     pub text: String,
     pub timestamp: u64,
-    /// SADECE grup mesajlarında dolu — bkz. `ArchivedMessage.sender_identity_id`
-    /// notu, `direction == "received"` iken gerçek göndereni taşır
-    /// (`"sent"` iken gönderen zaten YANITLAYANIN kendisidir, paket
-    /// başlığından zaten bilinir).
+    /// Set ONLY for group messages. For `direction == "received"` it carries the real
+    /// sender (see the `ArchivedMessage.sender_identity_id` note). For "sent" the
+    /// sender is the responder itself, which the packet header already tells.
     #[serde(default)]
     pub sender_identity_id: Option<String>,
-    /// Var-olma kontrolüyle (mesaj kimliği bazlı) tekrar birleştirmeyi
-    /// önlemek için — bkz. archive.rs `message_exists_with_id`, ESKİ SAYFA
-    /// (`before_timestamp.is_some()`) birleştirmesinde kullanılır.
+    /// Lets the receiver skip rows it already has, by message id. Used by
+    /// `archive::message_exists_with_id` during an older-page merge
+    /// (`before_timestamp.is_some()`).
     #[serde(default)]
     pub message_id: Option<String>,
-    /// Spec dışı, kullanıcı isteği (gönderim-sırası): göndericinin gönderim
-    /// anı — geçmiş senkronunda da korunur ki alıcı gösterimi GÖNDERİM
-    /// sırasına göre yapabilsin. 0 = bilinmiyor (yerel arşiv zamanına düşülür).
+    /// The sender's send time. Kept in history sync so the receiver can order rows
+    /// by SEND time. 0 = unknown (the local archive time is used instead).
     #[serde(default)]
     pub sent_at_ms: u64,
-    /// Spec dışı, hata düzeltmesi ("silinen mesaj geçmiş senkronuyla geri
-    /// geliyor"): önceden bu alan yoktu — `is_deleted` yerel arşivde
-    /// işaretli olsa bile senkron yanıtı orijinal metni taşıyor ve alıcı
-    /// tarafta silinmemiş gibi yeniden arşivleniyordu (bir cihaz hiç
-    /// sahip olmadığı bir satırı sıfırdan alırken, ör. yeni bağlanan
-    /// ikincil bir cihaz ya da uzun bir kaydırma-geri sayfası). `#[serde(default)]`
-    /// eski/karşı sürümle geriye dönük uyumluluk için (eksikse `false`).
+    /// Deleted flag. Without it, a history sync reply carried the original text even
+    /// when the local archive marked the row as deleted. A receiver that was getting
+    /// the row from scratch (for example a newly linked secondary device, or a long
+    /// backward scroll) then archived it as if it had never been deleted. Old or
+    /// peer versions without the field read `false` (`#[serde(default)]`).
     #[serde(default)]
     pub is_deleted: bool,
-    /// Spec dışı, hata düzeltmesi ("senkronla gelen düzenlenmiş bir mesaj
-    /// '(düzenlendi)' etiketi olmadan görünüyor"): `text` zaten GÜNCEL
-    /// (düzenlenmiş) içeriği taşıyor — `apply_edit_to_archive` metni
-    /// yerinde değiştiriyor — ama bu bayrak olmadan alıcı tarafın onu
-    /// SIFIRDAN, hiç düzenlenmemiş bir mesajmış gibi arşivlemesinden başka
-    /// seçeneği yoktu. Veri kaybı yoktu (metin doğruydu), sadece UI
-    /// etiketi eksikti.
+    /// Edited flag. `text` already holds the current edited content (the local archive
+    /// is changed in place by `apply_edit_to_archive`). Without this flag the receiver
+    /// could only archive the row from scratch, as if it had never been edited. No data
+    /// was lost, because the text was correct. Only the "(edited)" label was missing.
     #[serde(default)]
     pub is_edited: bool,
-    /// See `MessageContent::Text.author_proof`. Needed for a group row the
+    /// See `MessageContent::Text.author_proof`. Needed for a group row that the
     /// responder did not write itself.
     #[serde(default)]
     pub author_proof: Option<String>,
@@ -710,112 +667,91 @@ pub struct SyncedMessage {
     pub reactions: Vec<(String, String, u64)>,
 }
 
-/// `MessagePacket.ciphertext`'in çözüldükten sonraki gerçek içeriği — spec
-/// dışı, mesaj düzenleme/silme desteği için. Edit/delete AYRI bir paket
-/// tipi/imza akışı olarak DEĞİL, normal bir mesaj gibi aynı ratchet adımıyla
-/// şifrelenip gönderilir (bu yüzden onlar da tam uçtan uca gizlilik/
-/// bütünlük korumasına sahip olur — bir relay/node bunun bir düzenleme mi
-/// yoksa yeni bir mesaj mı olduğunu bile göremez).
+/// The real content of `MessagePacket.ciphertext` after decryption. Edit and delete
+/// are not a separate packet type or signature flow. They are sent like an ordinary
+/// message, with the same ratchet step, so they get the same end-to-end
+/// confidentiality and integrity. A relay or node cannot even tell whether a packet is
+/// an edit or a new message.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum MessageContent {
-    // The type is recursive (`SiblingEcho` → `SiblingEchoBody::File.offer`):
-    // parse what a peer sent with `MessageContent::from_cbor`, which bounds
-    // the nesting.
-    /// `group_id`: doluysa bu mesaj bir grup mesajının pairwise
-    /// (1:1 ratchet üzerinden) fan-out kopyasıdır — spec dışı, "gerçek grup
-    /// entegrasyonu" için gerekli. Bu olmadan alıcı taraf, gelen bir grup
-    /// mesajını sıradan bir 1:1 mesajdan AYIRT EDEMİYORDU (bkz. receive.rs
-    /// receive_message/GroupChatActivity notu) — grup sohbeti diye ayrı bir
-    /// yer yoktu, mesajlar göndericinin 1:1 sohbetine karışıyordu.
+    // The type is recursive (`SiblingEcho` contains `SiblingEchoBody::File.offer`).
+    // Parse what a peer sent with `MessageContent::from_cbor`, which bounds the nesting.
+    /// `group_id`: if set, this message is the pairwise (1:1 ratchet) fan-out copy of
+    /// a group message. Without it the receiver could not tell an incoming group
+    /// message from an ordinary 1:1 message. Group chats had no separate place, and
+    /// group messages mixed into the sender's 1:1 chat (see receive.rs `receive_message`
+    /// and the group chat screen).
     Text {
         /// Group messages only: the author's signature over the message
-        /// (`"<device fingerprint>:<Ed25519 hex>:<ML-DSA hex>"`, see core
-        /// `group_author_statement`). Another member hands it on with the
-        /// group history, so a row there cannot be attributed to someone
-        /// who did not write it.
+        /// (`"<device fingerprint>:<Ed25519 hex>:<ML-DSA hex>"`, see
+        /// `group_author_statement` in core). Other members pass it on with the group
+        /// history, so a row there cannot be attributed to someone who did not write it.
         #[serde(default)]
         author_proof: Option<String>,
         group_id: Option<String>,
         text: String,
-        /// Spec disi: SADECE `group_id.is_some()` iken dolu -- ayni grup
-        /// mesajinin N uyeye pairwise fan-out edilen (her biri kendi
-        /// ratchet adimiyla FARKLI bir `MessagePacketHeader.message_id`
-        /// tasiyan) kopyalarini TEK bir yerel kimlikte birlestirir. Gorulme
-        /// bildirimleri (bkz. `Seen`) icin gerekli -- alici tarafin geri
-        /// gonderdigi "gorduk" paketini, gonderenin hangi yerel balona ait
-        /// oldugunu bulabilmesi icin (per-uye message_id'ler gonderen
-        /// tarafta zaten bilinmiyor, sadece alici tarafin KENDI kopyasinin
-        /// id'sini bilir).
+        /// Set only when `group_id` is present. The N pairwise fan-out copies of one
+        /// group message each carry a different `MessagePacketHeader.message_id`, since
+        /// each has its own ratchet step. This field merges them into one local id. It is
+        /// needed for read receipts (see `Seen`). When a recipient sends back "seen", the
+        /// sender must know which local bubble that refers to. The per-member message ids
+        /// are not known on the sending side. Only the recipient knows the id of its own
+        /// copy.
         group_message_local_id: Option<String>,
-        /// Spec dışı, kullanıcı isteği: göndericinin KENDİ cihazında mesajı
-        /// yazdığı/gönderdiği andaki yerel saat (ms, epoch) — alıcı tarafın
-        /// "10:42 (sent at: 10:41)" gibi hem yerel ALINMA anını HEM DE
-        /// göndericinin GERÇEK gönderim anını göstermesi için (bkz.
-        /// ChatActivity/SimpleChatAdapter). ÖNEMLİ: bu, `awaiting_confirmation`'ın
-        /// `regen_content` mekanizmasıyla (bkz. network.rs) tazelenip yeniden
-        /// gönderilse BİLE değişmez — `MessageContent` klonlanıp AYNEN
-        /// yeniden şifreleniyor, bu alan İLK yazılma anını taşımaya devam
-        /// eder (istenen tam olarak budur: "ne zaman yazıldı", "ne zaman
-        /// son denendi" değil). `#[serde(default)]`: bu alan olmadan
-        /// üretilmiş eski/kuyrukta bekleyen paketler yine ayrıştırılabilsin
-        /// diye (0 = bilinmiyor, alıcı tarafı bu durumda parantez içi
-        /// gösterimi atlar).
+        /// The sender's local clock (ms, epoch) when the message was written and sent on
+        /// its own device. The receiver shows both the local arrival time and the sender's
+        /// real send time (for example "10:42 (sent at 10:41)"; see ChatActivity and
+        /// SimpleChatAdapter). This value does NOT change when `awaiting_confirmation`
+        /// resends the message via `regen_content` (see network.rs). The `MessageContent`
+        /// is cloned and encrypted as is, so this field keeps the FIRST write time, which
+        /// is the intent. It is not the last retry time. `#[serde(default)]`: old or queued
+        /// packets without this field still parse (0 = unknown, and the receiver skips the
+        /// bracketed time).
         #[serde(default)]
         sent_at_ms: u64,
-        /// Spec dışı, kullanıcı isteği (WhatsApp tarzı "sağa kaydırıp
-        /// yanıtla"): bu mesaj başka bir mesaja yanıtsa, o mesajın kararlı
-        /// kimliği — 1:1'de `MessagePacketHeader.message_id`, grupta
-        /// `group_message_local_id` (edit/delete'in `target_message_id`
-        /// alanıyla AYNI kural, bkz. `Edit`/`Delete` notu). Alıcı tarafın
-        /// yerel arşivinde bu id'yi arayıp "şuraya kaydır" davranışı
-        /// uygulayabilmesi için taşınır.
+        /// Reply target. If this message replies to another, that message's stable id is
+        /// here: `MessagePacketHeader.message_id` in 1:1, `group_message_local_id` in groups.
+        /// This is the same rule as the `target_message_id` of Edit and Delete (see those).
+        /// The receiver looks the id up in its local archive to show the quoted message.
         #[serde(default)]
         reply_to_message_id: Option<String>,
-        /// Alıcı, yanıtlanan mesajı YERELİNDE hiç arşivlememiş olabilir
-        /// (ör. o mesajı hiç almadı/geçmiş senkronu yapılmadı) — bu yüzden
-        /// gönderen taraf, o mesajın metninden kısa bir ÖZET (bkz.
-        /// ChatActivity/GroupChatActivity `REPLY_PREVIEW_MAX_CHARS`
-        /// kırpması) burada AYRICA gönderir; alıcı tarafın kendi arşivine
-        /// bakmasına GEREK KALMAZ, tıpkı Signal/WhatsApp'ın yaptığı gibi.
+        /// The receiver may never have archived the quoted message locally (it never got
+        /// it, or history sync did not run). So the sender also sends a short summary of
+        /// that message's text here (see `REPLY_PREVIEW_MAX_CHARS` in the chat screens).
+        /// The receiver then does not need to look in its own archive, as Signal and
+        /// WhatsApp do.
         #[serde(default)]
         reply_to_preview: Option<String>,
-        /// SADECE `group_id.is_some()` iken anlamlı — yanıtlanan mesajı
-        /// gönderenin `identity_id`'si (1:1'de göndereni belirtmeye gerek
-        /// yok, zaten iki taraftan biri). Alıcı tarafın yanıt önizlemesinde
-        /// "Ahmet'e yanıt" gibi bir isim gösterebilmesi için.
+        /// Meaningful only when `group_id` is present: the `identity_id` of the author of
+        /// the quoted message. In 1:1 there is no need, since the peer is the other party.
+        /// It lets the receiver show a name such as "reply to Ahmet" in the preview.
         #[serde(default)]
         reply_to_sender_identity_id: Option<String>,
-        /// Group messages only: identity ids of the members this message
-        /// @mentions. The receiver keeps only current members and flags the
-        /// row when its own identity id is listed (the text is not parsed).
+        /// Group messages only: identity ids of the members this message @mentions. The
+        /// receiver keeps only current members and marks the row when its own identity id
+        /// is listed. The text itself is not parsed.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mentions: Vec<String>,
     },
-    /// Spec dışı, kullanıcı isteği (grup düzenle/sil): `group_id` doluysa
-    /// `target_message_id` aslında `Text.group_message_local_id`'dir —
-    /// grup mesajının fan-out kopyaları her üyede FARKLI bir
-    /// `MessagePacketHeader.message_id` taşıdığından (bkz. `Text` notu),
-    /// gönderen taraf hedefi sadece bu paylaşılan yerel kimlikle
-    /// belirtebilir. Alıcı taraf zaten kendi grup arşivinde bu değeri
-    /// `message_id` sütunu olarak saklar (bkz. `archive_group_message`
-    /// çağıranları), bu yüzden eşleştirme tutarlıdır.
-    /// Spec dışı, kullanıcı isteği (WhatsApp tarzı tepkiler): bir mesaja
-    /// uzun basıp bırakılan emoji.
-    ///
-    /// KİŞİ BAŞINA TEK tepki (WhatsApp davranışı): aynı kişiden gelen yeni
-    /// bir `Reaction` öncekinin YERİNE geçer, `emoji` BOŞ dize ise tepki
-    /// kaldırılır. Bu yüzden ayrı bir "tepkiyi kaldır" paketi yok.
-    ///
-    /// `target_message_id`: `Edit`/`Delete` ile AYNI kural — 1:1'de
-    /// `MessagePacketHeader.message_id` (yani kararlı `conv_id`), grupta
+    /// For group messages, `target_message_id` in Edit and Delete is actually the
+    /// `Text.group_message_local_id`. The pairwise fan-out copies carry a different
+    /// `MessagePacketHeader.message_id` for each member (see the `Text` note). So the
+    /// sender can name the target only by this shared local id. Each receiver already
+    /// stores this value as the `message_id` column of its group archive (see the callers
+    /// of `archive_group_message`), so matching is consistent.
+    /// Emoji reaction, long-press on a message.
+    /// ONE reaction per person (WhatsApp behavior). A new `Reaction` from the same person
+    /// replaces the previous one. An empty `emoji` removes the reaction. So there is no
+    /// separate "remove reaction" packet.
+    /// `target_message_id`: same rule as `Edit` and `Delete`. In 1:1 it is
+    /// `MessagePacketHeader.message_id` (the stable `conv_id`). In groups it is
     /// `Text.group_message_local_id`.
-    ///
-    /// `reacted_at_ms`: `Edit.edited_at_ms` ile aynı gerekçe — gossipsub
-    /// sıra garantisi vermez; aynı kişinin hızlıca değiştirdiği iki tepki
-    /// ters sırada ulaşırsa ESKİ olan YENİNİN üzerine yazmamalı.
+    /// `reacted_at_ms`: same reason as `Edit.edited_at_ms`. Gossipsub gives no ordering
+    /// guarantee. If two reactions from the same person arrive out of order, the older
+    /// one must not overwrite the newer one.
     Reaction {
         target_message_id: String,
-        /// Boş dize = "tepkimi kaldır" (bkz. üstteki not).
+        /// Empty string means remove my reaction (see the note above).
         emoji: String,
         #[serde(default)]
         group_id: Option<String>,
@@ -830,20 +766,17 @@ pub enum MessageContent {
         /// As `Text.author_proof`, over the new text.
         #[serde(default)]
         author_proof: Option<String>,
-        /// Spec dışı (dış AI incelemesi düzeltmesi — sıra-dışı Edit / "revert"
-        /// koruması): bu düzenlemenin ÜRETİLDİĞİ andaki gönderici yerel saati
-        /// (ms, epoch). gossipsub sıra garantisi VERMEZ — aynı mesajın iki
-        /// ayrı düzenlemesi (ör. kullanıcı saniyeler içinde iki kez düzeltir)
-        /// alıcıya TERS sırada ulaşabilir; alıcı, DAHA ESKİ bir düzenlemeyi
-        /// DAHA YENİ olanın üzerine yazmasın diye bu damgayı arşivde saklanan
-        /// son değerle karşılaştırır (bkz. archive.rs `apply_edit_to_archive`).
-        /// Not: ratchet zaten AĞDAN gelen bir REPLAY'i (tüketilmiş mesaj
-        /// numarası) reddeder — bu alan farklı bir sorunu, aynı göndericiden
-        /// gelen İKİ MEŞRU düzenlemenin sırasız tesliminde son metnin doğru
-        /// olmasını çözer. `#[serde(default)]` (0 = bilinmiyor): bu alan
-        /// olmadan üretilmiş eski/kuyrukta bekleyen paketler yine
-        /// ayrıştırılır ve sıralama bilgisi olmadığından koşulsuz uygulanır
-        /// (davranış regresyonu yok).
+        /// Sender's local time (ms, epoch) when this edit was made. Gossipsub gives no
+        /// ordering guarantee. Two edits of the same message (for example, a correction
+        /// made twice within seconds) can reach the recipient in reverse order. The
+        /// recipient compares this stamp with the last stored value, so an older edit
+        /// does not overwrite a newer one (see `apply_edit_to_archive` in archive.rs).
+        /// Ratchet replay protection already rejects a packet that was replayed from the
+        /// network (a consumed message number). This field solves a different problem:
+        /// it keeps the final text correct when two legitimate edits from the same sender
+        /// arrive out of order. `#[serde(default)]` (0 = unknown): old or queued packets
+        /// without this field still parse, and they are applied unconditionally because
+        /// there is no order information.
         #[serde(default)]
         edited_at_ms: u64,
     },
@@ -851,87 +784,74 @@ pub enum MessageContent {
         target_message_id: String,
         #[serde(default)]
         group_id: Option<String>,
-        /// Group only: the author's signature over the deletion (util.rs
-        /// `GROUP_TOMBSTONE`). Members hand it on with history.
+        /// Group only: the author's signature over the deletion (`GROUP_TOMBSTONE` in
+        /// util.rs). Members pass it on with the history.
         #[serde(default)]
         author_proof: Option<String>,
     },
-    /// Spec dışı: node modu KAPALI cihazlarda sohbet geçmişi hiç
-    /// arşivlenmediği için (bkz. archive.rs `archive_message`), o cihazlar için
-    /// sohbet ekranı her zaman boş başlıyordu. Karşı taraf (chat peer) node
-    /// modu açıksa zaten kendi tarafında bu konuşmanın her iki yönünü de
-    /// arşivlemiştir — bu istek, doğrudan o arşivden son `limit` mesajı
-    /// ister. Normal mesajlarla AYNI ratchet-şifreli kanaldan taşınır (yeni
-    /// bir libp2p bağlantı/protokolüne gerek yok), yani uçtan uca korunur.
+    /// Asks the peer for recent history. Nodes with node mode OFF never archive chat
+    /// history (see `archive_message` in archive.rs). For them the chat screen always
+    /// started empty. If the chat peer has node mode ON, it has archived both directions
+    /// of this conversation. This request asks that archive directly for the last `limit`
+    /// messages. It travels over the same ratchet-encrypted channel as normal messages, so
+    /// no new libp2p connection or protocol is needed, and it stays end to end encrypted.
     HistorySyncRequest {
         limit: u32,
-        /// Spec dışı, kullanıcı isteği (sonsuz kaydırma — eski geçmiş
-        /// sayfalama): doluysa, YEREL arşivi tükenen isteyen tarafın en
-        /// eski yüklü mesajından DAHA ESKİ mesajlar istenir (bkz. archive.rs
-        /// `request_older_history`/`request_older_group_history`). `None`
-        /// ise mevcut davranış: sohbet açılışında en YENİ `limit` mesaj
-        /// istenir. Zaman damgaları her cihazın KENDİ arşivleme anını
-        /// taşıdığından (bkz. `archive_message` notu) bu karşılaştırma
-        /// gerçek gönderim anı değil, kabaca senkronize duvar saatine
-        /// dayanır — mevcut sync mekanizmasıyla aynı varsayım.
+        /// For infinite scroll (older history paging). If set, the requester has run out
+        /// of local archive and wants messages OLDER than its oldest loaded one (see
+        /// `request_older_history` and `request_older_group_history` in archive.rs). `None`
+        /// keeps the existing behavior: on opening the chat, ask for the newest `limit`
+        /// messages. Timestamps are each device's own archive time (see the note at
+        /// `archive_message`), so this comparison depends on roughly synchronized wall
+        /// clocks. Same assumption as the existing sync mechanism.
         #[serde(default)]
         before_timestamp: Option<i64>,
-        /// Spec dışı: doluysa bu bir GRUP geçmişi isteğidir — yanıtlayan
-        /// taraf kendi 1:1 arşivi yerine bu `group_id`'nin grup arşivini
-        /// arar. Grup mesajları pairwise fan-out olduğundan istek grubun
-        /// HERHANGİ bir başka üyesine gönderilebilir (bkz.
-        /// `request_older_group_history` — ulaşılabilir TÜM üyelere
-        /// gönderilir, ilk yanıt veren boşluğu doldurur).
+        /// Group history request, if set. The responder then searches the group archive for
+        /// this `group_id` instead of its 1:1 archive. Group messages are pairwise fan-out,
+        /// so the request can go to any other member. `request_older_group_history` sends it
+        /// to every reachable member, and the first to answer fills the gap.
         #[serde(default)]
         group_id: Option<String>,
-        /// With `before_timestamp`: the start of the "Fetch older history"
-        /// window `[after_timestamp, before_timestamp)`, by send time. The
-        /// responder sends only rows inside it.
+        /// With `before_timestamp`: the start of the "fetch older history" window
+        /// `[after_timestamp, before_timestamp)`, by send time. The responder sends only the
+        /// rows inside it.
         #[serde(default)]
         after_timestamp: Option<i64>,
     },
-    /// `request_id`: karşılık geldiği `HistorySyncRequest` paketinin
-    /// `MessagePacketHeader.message_id`'si — isteyen tarafın, bu yanıtı
-    /// ait olduğu isteğe eşleyip yeniden deneme kuyruğundan
-    /// (`awaiting_confirmation`) çıkarabilmesi için (bkz. lib.rs
-    /// güvenilir teslim notu). `messages`: eskiden yeniye sıralı —
-    /// `direction` YANITLAYANIN bakış açısıyla ("sent"/"received")
-    /// taşınır; isteyen taraf bunu ters çevirmeli (bkz. receive.rs
-    /// receive_message HistorySyncResponse notu).
+    /// `request_id` is the `MessagePacketHeader.message_id` of the matching
+    /// `HistorySyncRequest`. The requester uses it to match this response to its request
+    /// and remove the request from the retry queue (`awaiting_confirmation`; see the
+    /// reliable-delivery note in lib.rs). `messages` is ordered oldest first. `direction`
+    /// is given from the responder's point of view ("sent" or "received"). The requester
+    /// must reverse it (see `HistorySyncResponse` in receive.rs `receive_message`).
     HistorySyncResponse {
         request_id: String,
         messages: Vec<SyncedMessage>,
-        /// bkz. `HistorySyncRequest.group_id` — isteği yansıtır, yanıtı
-        /// doğru yerel arşive (1:1 mi, yoksa hangi grup mu) birleştirmek
-        /// için.
+        /// See `HistorySyncRequest.group_id`. It mirrors the request, so the response is
+        /// merged into the correct local archive (1:1, or which group).
         #[serde(default)]
         group_id: Option<String>,
-        /// The responder cut rows of the requested window (row or byte
-        /// limit): the requester asks for the older rest of that window.
+        /// The responder cut rows from the requested window (row or byte limit). The
+        /// requester asks for the older rest of that window.
         #[serde(default)]
         more: bool,
     },
-    /// Spec dışı: güvenilir teslim onayı — gossipsub'un `publish()`
-    /// başarısı SADECE yerel düğümün paketi ağa yayınladığını garanti
-    /// eder, karşı tarafın GERÇEKTEN aldığını DEĞİL (bkz. lib.rs
-    /// `awaiting_confirmation` dokümantasyonu). Alıcı taraf, `Text`
-    /// (grup DIŞI)/`Edit`/`Delete`/`HistorySyncRequest` içeriğini
-    /// başarıyla çözüp işlediğinde bu paketi gönderene geri gönderir;
-    /// gönderen taraf bunu alana kadar aynı paketi (yeniden şifrelemeden)
-    /// periyodik olarak tekrar yollamaya devam eder. Ack'in KENDİSİ ayrıca
-    /// onaylanmaz (sonsuz döngüyü önlemek için) — kaybolursa, göndericinin
-    /// asıl paketi tekrar göndermesi alıcının yeni bir Ack denemesi
-    /// yapmasına zaten yol açar.
+    /// Reliable-delivery ack. The gossipsub `publish()` success only guarantees that the
+    /// local node published the packet to the network, not that the peer actually received
+    /// it (see the `awaiting_confirmation` documentation in lib.rs). When the recipient
+    /// successfully decrypts and processes a `Text` (not group), `Edit`, `Delete` or
+    /// `HistorySyncRequest`, it sends this packet back. The sender keeps re-sending the same
+    /// packet, without re-encrypting, until it gets this ack. The Ack itself is not
+    /// acknowledged, to avoid an endless loop. If it is lost, the sender's retry of the
+    /// original packet makes the recipient send a new Ack.
     Ack { target_message_id: String },
-    /// Spec dışı: dosya/foto/video/ses eki meta verisi (spec bölüm 6
-    /// "dosya transferi v0.1/v0.2 kapsamı DIŞINDA" notunu genişleten,
-    /// kullanıcı tarafından istenen bir ek özellik, azami 4GB). Gerçek
-    /// bayt içeriği BU paketle TAŞINMAZ — sadece küçük meta veri + bu
-    /// dosyaya özel taze bir AEAD anahtarı (`file_key`), normal
-    /// ratchet-şifreli mesaj kanalıyla taşınır. Gerçek baytlar ayrı bir
-    /// libp2p `request_response` protokolü üzerinden parça parça (chunk)
-    /// istenir/gönderilir (bkz. file_transfer.rs/attachments.rs
-    /// `FileChunkRequest`/`FileChunkResponse`).
+    /// File, photo, video or audio attachment metadata. This extends the spec section 6
+    /// scope (file transfer v0.1 and v0.2 excluded), and is a requested feature with a
+    /// maximum size of 4 GB. The packet does not carry the file bytes. It carries small
+    /// metadata and a fresh AEAD key for this file (`file_key`), over the normal
+    /// ratchet-encrypted channel. The bytes are requested and sent in chunks over a
+    /// separate libp2p `request_response` protocol (see `FileChunkRequest` and
+    /// `FileChunkResponse` in file_transfer.rs and attachments.rs).
     FileOffer {
         group_id: Option<String>,
         file_id: String,
@@ -941,196 +861,155 @@ pub enum MessageContent {
         #[serde(with = "serde_bytes")]
         file_key: [u8; 32],
         sha256_hex: String,
-        /// Spec dışı: foto/video ekleri için gönderen tarafın önceden
-        /// oluşturduğu küçük bir önizleme kapağı (480p, %85 kalite JPEG —
-        /// tipik olarak birkaç on KB). Diğer her şeyle AYNI ratchet-şifreli
-        /// kanaldan taşınır (ayrı bir mesaj/round-trip icat edilmez) —
-        /// alıcı tarafın TAM dosyayı hiç indirmeden bir önizleme
-        /// gösterebilmesi için. `None` ise (dosya türü foto/video değil,
-        /// veya önizleme oluşturulamadı) önizleme gösterilmez, sadece
-        /// jenerik dosya simgesi.
+        /// Small preview cover (480p, JPEG at 85% quality, typically a few tens of KB), made
+        /// in advance by the sender for photo and video attachments. It travels in the same
+        /// ratchet-encrypted channel as everything else, with no separate message or round
+        /// trip, so the receiver can show a preview without downloading the full file. `None`
+        /// for other file types, or when no preview could be made. Then only a generic file
+        /// icon is shown.
         #[serde(with = "serde_bytes")]
         preview_jpeg: Option<Vec<u8>>,
-        /// Spec disi: sesli mesajlar icin calma suresi (milisaniye).
-        /// `None` ise sure bilinmiyor/uygulanamaz (or. siradan bir belge).
+        /// Playback length in milliseconds, for voice messages. `None` means the length is
+        /// unknown or does not apply, for example for an ordinary document.
         duration_ms: Option<u32>,
-        /// Spec dışı, kullanıcı isteği ("fotoğraf/eklenti/ses atarken de bir
-        /// mesaj yanıtlanabilmeli ve altına bir yazı yazılabilmeli"):
-        /// ek balonunun altında gösterilecek açıklama metni. Boş = yok.
-        ///
-        /// Ekle BİRLİKTE, aynı ratchet-şifreli pakette taşınıyor — ayrı bir
-        /// metin mesajı göndermek iki ayrı balon üretir, sıraları
-        /// karışabilir ve alıcıda ek ile yazının ilişkisi kaybolurdu.
+        /// Caption shown under the attachment bubble. Empty means no caption. It travels in
+        /// the same ratchet-encrypted packet. A separate text message would make two bubbles,
+        /// their order could change, and the receiver would lose the link between the
+        /// attachment and its text.
         #[serde(default)]
         caption: String,
-        /// bkz. `Text.reply_to_message_id` — AYNI anlam, ekler için.
+        /// See `Text.reply_to_message_id`. Same meaning, for attachments.
         #[serde(default)]
         reply_to_message_id: Option<String>,
         #[serde(default)]
         reply_to_preview: Option<String>,
         #[serde(default)]
         reply_to_sender_identity_id: Option<String>,
-        /// Bu dosyanin parca boyutu (bayt).
-        ///
-        /// Parca boyutu artik SABIT degil: yeni dosyalar 512 KiB kullaniyor
-        /// (bkz. `attachments::FILE_CHUNK_SIZE_V2`), cunku her parca bir
-        /// gidis-donus demek ve Tor'da gidis-donus 3-18 saniye. Boyutun
-        /// teklifle TASINMASI sart: iki taraf ayni adimi kullanmazsa parca
-        /// indeksleri kayar ve dosya bozulur.
-        ///
-        /// `#[serde(default)]` + `None` = 256 KiB: guncellenmemis bir esten
-        /// gelen teklifte bu alan yok ve o aktarim miras boyutla yurur.
+        /// Chunk size of this file, in bytes. It is not fixed: new files use 512 KiB (see
+        /// `attachments::FILE_CHUNK_SIZE_V2`), because every chunk costs one round trip and a
+        /// round trip over Tor takes 3 to 18 seconds. The size must travel with the offer.
+        /// If the two sides used different steps, the chunk indices would shift and the file
+        /// would be corrupted. `#[serde(default)]` plus `None` means 256 KiB. An offer from an
+        /// old client has no such field, and that transfer keeps the legacy size.
         #[serde(default)]
         chunk_size: Option<u32>,
-        /// The sender's hashes of the encrypted chunks, 32 bytes per entry
-        /// (see `attachments::chunk_hashes_of`): SHA-256 over the ciphertext
-        /// of each group of `attachments::chunks_per_hash` chunks. Every group
-        /// member holds `file_key`, so the chunk AEAD alone does not stop a
-        /// member serving the file from forging chunks; this signed list
-        /// does, chunk by chunk. An offer without the right length is refused.
+        /// The sender's hashes of the encrypted chunks, 32 bytes per entry (see
+        /// `attachments::chunk_hashes_of`): SHA-256 over the ciphertext of each group of
+        /// `attachments::chunks_per_hash` chunks. Every group member holds `file_key`, so the
+        /// chunk AEAD alone does not stop a member from serving forged chunks. This signed
+        /// list does, chunk by chunk. An offer whose list has the wrong length is refused.
         #[serde(default, with = "serde_bytes")]
         chunk_hashes: Vec<u8>,
-        /// A sticker (JPEG XL, at most 600 px a side): shown without a
-        /// bubble frame and downloaded at once, whatever the node mode.
+        /// A sticker (JPEG XL, at most 600 px per side). Shown without a bubble frame and
+        /// downloaded at once, whatever the node mode.
         #[serde(default)]
         sticker: bool,
-        /// Stable sticker identity (`wa:`/`jxl:` + SHA-256 hex): the receiver
-        /// reuses a local copy instead of downloading.
+        /// Stable sticker identity (`wa:` or `jxl:` plus SHA-256 hex). The receiver reuses a
+        /// local copy instead of downloading again.
         #[serde(default)]
         sticker_origin: Option<String>,
     },
-    /// Spec disi: yaziyor... gostergesi. Kasitli olarak Ack gibi
-    /// arsivlenmez ve teslim-onayi kuyruguna (`awaiting_confirmation`)
-    /// girmez -- birkac saniye icinde eskiyen bir bilgi icin tekrar
-    /// denemenin hicbir degeri yok, en kotu ihtimalle bir sonraki
-    /// tus vurusu zaten yeni bir paket gonderir.
-    ///
-    /// `group_id`: for group typing, fanned out via
-    /// `send_group_typing_indicator` (same pattern as Edit/Delete). The
-    /// event JSON carries `group_id` so GroupChatActivity can route it.
+    /// Typing indicator ("is typing"). It is deliberately not archived, and it does not go
+    /// into the retry queue (`awaiting_confirmation`). Retrying an indicator that goes stale
+    /// within seconds is pointless. At worst the next keystroke sends a new packet.
+    /// `group_id`: for group typing, fanned out via `send_group_typing_indicator`, the same
+    /// pattern as Edit and Delete. The event JSON carries `group_id`, so GroupChatActivity
+    /// can route it.
     TypingIndicator { is_typing: bool, #[serde(default)] group_id: Option<String> },
-    /// Spec disi, kullanici tarafindan istenen "gorüldu" bildirimi --
-    /// `Ack` ile AYNI desen (bkz. send.rs `send_seen`/`send_ack`): ratchet-
-    /// sifreli kanaldan gider, kendisi ayrica onaylanmaz (sonsuz döngü
-    /// riski), bir kez gönderilir (güvenilir yol `ReadStateSync`). `Ack`'ten
-    /// FARKI: "paket basariyla COZULDU" (teslim) degil, "kullanici EKRANDA
-    /// GORDU" anlamina gelir -- alici tarafta otomatik degil, UI mesaji
-    /// gosterdiginde tetiklenir.
+    /// Read receipt ("seen"). The same pattern as `Ack` (see `send_seen` and `send_ack` in
+    /// send.rs). It travels over the ratchet-encrypted channel, is not acknowledged itself
+    /// (to avoid an infinite loop), and is sent once. The reliable path is `ReadStateSync`.
+    /// Unlike `Ack`, which means "the packet was decrypted" (delivery), this means "the user
+    /// SAW the message on screen". It is not automatic on the receiving side. It fires when
+    /// the UI shows the message.
     Seen {
-        /// 1:1 sohbette: gorülen mesajin GERCEK `MessagePacketHeader.
-        /// message_id`si. Grup sohbetinde: bu alan alicinin KENDI aldigi
-        /// kopyanin id'si (gonderen tarafta anlamli degil, bkz.
-        /// `group_message_local_id`).
+        /// In a 1:1 chat: the real `MessagePacketHeader.message_id` of the seen message. In a
+        /// group chat: the id of the receiver's OWN copy. That is meaningless on the sender's
+        /// side. See `group_message_local_id`.
         target_message_id: String,
-        /// SADECE grup mesajlarinda dolu -- bkz. `Text.group_message_local_id`
-        /// notu, gonderenin dogru balonu bulabilmesi icin gerekli.
+        /// Set ONLY for group messages. See the `Text.group_message_local_id` note. The sender
+        /// needs it to find the correct bubble.
         group_message_local_id: Option<String>,
     },
-    /// Spec disi: PROFIL senkronizasyonu -- fotograf ve hesap adi. Merkezi
-    /// bir dizin olmadigi icin (P2P), her taraf kendi profilini BILDIGI her
-    /// kisiye ayri ayri gonderir -- yeni eslesme tamamlandiginda bir kez
-    /// (bkz. process_identity_exchange) ve kullanici profilini
-    /// degistirdiginde tum kisilere tekrar.
-    ///
-    /// Bu paket bir TAM GORUNTU (snapshot), delta degil: `avatar_jpeg:
-    /// None` "fotograf kaldirildi" DEMEKTIR, "degismedi" degil. Bu yuzden
-    /// `set_display_name` sadece ismi degistirse bile o anki avatari da
-    /// gonderir (ve `set_own_profile_picture` o anki ismi) -- aksi halde
-    /// isim degisikligi karsi tarafta fotografi sessizce silerdi.
+    /// Profile sync: photo and account name. There is no central directory (this is P2P), so
+    /// each side sends its profile to every contact that it knows. It does so once when a new
+    /// pairing completes (see `process_identity_exchange`), and again to all contacts when the
+    /// user changes the profile.
+    /// This packet is a full snapshot, not a delta. `avatar_jpeg: None` means "the photo was
+    /// removed", not "unchanged". So even when `set_display_name` changes only the name, it
+    /// also sends the current avatar (and `set_own_profile_picture` sends the current name).
+    /// Otherwise a name change would silently delete the photo on the other side.
     ProfileUpdate {
         #[serde(with = "serde_bytes")]
         avatar_jpeg: Option<Vec<u8>>,
-        /// Kullanici istegi (2026-09-04): hesap adini degistirebilmek ve
-        /// degisikligin kisilere OTOMATIK ulasmasi. Onceden bir kisinin
-        /// adi, ilk `IdentityExchange`'teki `device_name` ile SABITLENIYOR
-        /// ve bir daha asla degismiyordu.
-        ///
-        /// `#[serde(default)]`: bu alan olmadan uretilmis eski paketler
-        /// ayristirilmaya devam eder (`None` = "isim tasimiyorum", yani
-        /// alici mevcut ismi KORUR). Yeni surumun eski surume gonderdigi
-        /// paketteki fazladan alan da karsida sessizce yok sayilir --
-        /// ciborium struct varyantlarini map olarak kodlar ve bilinmeyen
-        /// anahtarlari atlar.
+        /// The user asked to be able to change the account name, and for the change to reach
+        /// contacts automatically. Before, a contact's name was fixed by the `device_name` of
+        /// the first `IdentityExchange` and never changed again.
+        /// `#[serde(default)]`: old packets without this field still parse (`None` means "I am
+        /// not sending a name", so the receiver keeps its current name). An extra field in a
+        /// packet sent from a newer version to an older one is ignored silently. ciborium
+        /// encodes struct variants as maps and skips unknown keys.
         #[serde(default)]
         display_name: Option<String>,
     },
-    /// Spec disi, guvenlik denetimi duzeltmesi: grup uyelik/isim/avatar
-    /// degisiklikleri ONCEDEN cikta (bare) bir `NetworkEnvelope::GroupUpdate`
-    /// olarak, SADECE Ed25519 imzali ve HIC sifrelenmeden gonderiliyordu --
-    /// grup avatari/ismi gibi icerik acik metin olarak gossipsub'a
-    /// yayilıyordu. Artik digerleriyle AYNI ratchet-sifreli kanaldan
-    /// (hibrit X25519+ML-KEM) gidiyor; ic `GroupUpdate.signature`/
-    /// `signature_pq` alanlari (kurucu yetkisini kanitlayan, tasima
-    /// katmanindan BAGIMSIZ bir ikinci dogrulama) korunuyor.
+    /// Security fix: group membership, name and avatar changes used to be sent as a bare
+    /// `NetworkEnvelope::GroupUpdate`, signed with Ed25519 only and NOT encrypted. Group
+    /// content such as the avatar or name was therefore spread over gossipsub in plain text.
+    /// They now travel over the same ratchet-encrypted channel as everything else (hybrid
+    /// X25519 and ML-KEM). The inner `GroupUpdate.signature` and `signature_pq` fields (which
+    /// prove the founder's authority, and are a second check independent of the transport
+    /// layer) are kept.
     GroupUpdate(GroupUpdate),
-    /// Spec dışı, kullanıcı isteği: bir üyenin (kurucu HARİÇ, bkz. group_ops.rs
-    /// `leave_group`) gruptan kendi isteğiyle ayrılması. Sadece kurucunun
-    /// üyelik değiştirebildiği yetki modeli (bkz. `validate_group_update`
-    /// "NotFounder" kontrolü) BOZULMAZ — ayrılan üye bunu doğrudan bir
-    /// `GroupChange::Remove` olarak İMZALAYIP yayınlamaz, bunun yerine bu
-    /// isteği doğrudan (1:1 ratchet üzerinden) KURUCUYA gönderir; kurucu
-    /// bunu alınca kendi `remove_from_group`'unu (zaten var olan, imzalı/
-    /// yetkili üye çıkarma yolu) otomatik çağırıp gerçek `GroupChange::Remove`'u
-    /// TÜM üyelere dağıtır. Ayrılan üyenin kendi cihazı ise, bu isteği
-    /// gönderir göndermez YEREL grup kaydını iyimser (optimistic) olarak
-    /// hemen kaldırır — kurucudan gelecek bir onaya beklemeden (zaten
-    /// `remove_from_group` çıkarılan üyeye SON GroupUpdate'i göndermez,
-    /// bkz. o fonksiyonun notu).
+    /// A member (not the founder, see `leave_group` in group_ops.rs) leaves the group on its
+    /// own. The permission model stays intact: only the founder changes membership (see the
+    /// "NotFounder" check in `validate_group_update`). The leaving member does not sign and
+    /// publish a `GroupChange::Remove` itself. It sends this request directly to the founder
+    /// over the 1:1 ratchet. When the founder receives it, it runs its own `remove_from_group`,
+    /// which already exists and is signed and checked.
     LeaveGroupRequest { group_id: String },
-    /// Spec dışı, ağ sağlamlığı düzeltmesi ("aynı LAN'da + Tor açık birden
-    /// fazla cihazdan biri mobil veri+Tor'a geçince kimseye ulaşamıyor,
-    /// hepsi offline görünüyor" hatası): göndericinin O ANKİ en iyi/güncel
-    /// adresini (bkz. network.rs `get_node_address` — Tor açık/hazırsa HER ZAMAN
-    /// `.onion`) bilinen HER kişiye proaktif olarak bildirir. Önceden bir
-    /// kişinin `.onion` adresi SADECE gerçekten Tor üzerinden bir bağlantı
-    /// KURULURSA öğreniliyordu (`network.rs` `record_peer_id_if_known`/
-    /// `remember_device_addr`) — ama iki cihaz AYNI LAN'dayken (Tor İKİSİNDE
-    /// de açık olsa bile) mDNS/doğrudan bağlantı neredeyse her zaman Tor
-    /// devresinden daha hızlı kurulduğundan, Tor bağlantısı ARADA HİÇ
-    /// FİİLEN kullanılmıyordu — yani `.onion` adresi hiçbir zaman
-    /// öğrenilmemiş oluyordu. Sonra biri ağ değiştirdiğinde geriye
-    /// düşülecek bilinen bir `.onion` adresi olmadığından yeniden bağlanma
-    /// tamamen başarısız oluyordu. Bu paket, `contacts.rs`
-    /// `announce_address_to_all_contacts` tarafından üç anda gönderilir:
-    /// `start_network` sonrası, Tor durumu "Ready"e GEÇTİĞİNDE (bootstrap +
-    /// onion servisi yayına girdiğinde — genelde eşleşmeden DAKİKALAR sonra),
-    /// ve bir ağ değişikliği bildiriminde — alıcı taraf gerçek bir Tor
-    /// bağlantısı hiç kurulmamış olsa BİLE `.onion` adresini öğrenir.
+    /// Network fix: when several devices on the same LAN all have Tor on, and one of them switches to
+    /// mobile data plus Tor, nobody can reach it and all of them look offline. The sender proactively
+    /// tells every known contact its current best address (see `get_node_address` in network.rs, which
+    /// returns the `.onion` address whenever Tor is open or ready). Before this, a contact learned a
+    /// `.onion` address only after a real Tor connection was made (`record_peer_id_if_known` and
+    /// `remember_device_addr` in network.rs). On a shared LAN the direct connection is almost always
+    /// faster than the Tor circuit, even with Tor open on both sides, so the Tor path was never used
+    /// and the `.onion` address was never learned. When a device then changed network, there was no
+    /// known `.onion` to fall back to, and reconnecting failed completely. This packet is sent by
+    /// `announce_address_to_all_contacts` in contacts.rs at three points: after `start_network`, when
+    /// Tor state changes to Ready (bootstrap done and the onion service published, usually minutes
+    /// after pairing), and on a network-change notice. The receiver learns the `.onion` address even
+    /// if no real Tor connection was ever made.
     AddressAnnounce { multiaddr: String },
-    /// Çoklu-cihaz (spec 1.5 adım 5 + 1.7): onaylayan (var olan) cihaz, yeni
-    /// cihazla kurulan 1:1 ratchet üzerinden bunu gönderir. `device_add`,
-    /// onaylayan cihazın İMZALADIĞI yetki belgesidir (yeni cihaz bunu saklar
-    /// ve kişilere kendini tanıtırken kanıt olarak kullanır). `sync`, ilk tam
-    /// senkron (kişiler + gruplar). Bare `NetworkEnvelope::DeviceAdd` yerine
-    /// BURADA taşınır ki kişi listesi/grup verisi ratchet-şifreli + güvenilir-
-    /// teslimli kanaldan gitsin (açık metin gossipsub'a sızmasın).
+    /// Multi-device (spec 1.5 step 5 and 1.7): the approving (existing) device sends this over the 1:1
+    /// ratchet to the new device. `device_add` is the authorization document the approving device signed.
+    /// The new device stores it and uses it as proof when it introduces itself to contacts. `sync` is the
+    /// first full sync (contacts and groups). It is carried here instead of as a bare
+    /// `NetworkEnvelope::DeviceAdd`, so contact and group data travels over the ratchet-encrypted,
+    /// reliably delivered channel and never leaks as plaintext over gossipsub.
     DeviceLinkGrant {
         identity_id: String,
         device_add: DeviceAdd,
         sync: SyncPayload,
-        /// `DeviceLinkRequest.nonce` of the QR this grant answers.
+        /// `DeviceLinkRequest.nonce` of the QR code this grant answers.
         #[serde(default, with = "serde_bytes")]
         nonce: Vec<u8>,
     },
-    /// Çoklu-cihaz (spec 1.5 adım 5, kişilere yayım): "bu kimliğe yeni bir
-    /// cihaz eklendi". Alıcı, `device_add.signature`'ı o kimliğin BİLİNEN
-    /// AKTİF bir cihazının anahtarıyla doğrular; geçerliyse yeni cihazı
-    /// (`device`, TAM public anahtarlarıyla) hem `known_devices`'a hem de
-    /// `known_remote_devices`'a ekler — böylece o cihaza HEMEN mesaj fan-out
-    /// edilebilir (ayrı bir `IdentityExchange`'in gelmesini BEKLEMEDEN; bu,
-    /// bir kişi eşleşme anında çevrimdışıysa bile yönlendirmenin güvenilir
-    /// biçimde propagate olmasını sağlar). `device.device_fingerprint`,
-    /// `device_add.new_device_fingerprint`'e VE anahtarların hash'ine eşit
-    /// olmalı — alıcı ikisini de doğrular.
+    /// Multi-device (spec 1.5 step 5, broadcast to contacts): a device was added to
+    /// this identity. The receiver verifies `device_add.signature` with the key of a
+    /// KNOWN active device of that identity. If valid, it adds the new device (with
+    /// its full public keys) to both `known_devices` and `known_remote_devices`. That
+    /// lets messages fan out to the device immediately, without waiting for a separate
+    /// `IdentityExchange`, so routing propagates even if a contact is offline at
+    /// pairing time. `device.device_fingerprint` must equal both
+    /// `device_add.new_device_fingerprint` and the hash of the keys. The receiver checks both.
     DeviceAddNotice { device_add: DeviceAdd, device: SyncedDevice },
-    /// Çoklu-cihaz (spec 1.7.1): kardeş cihazlar arası "okundu" durumu
-    /// senkronu — bir cihazda bir sohbet okunduğunda, diğer cihazlar da o
-    /// sohbeti okunmuş sayar (aksi halde her cihaz ayrı ayrı okunmamış
-    /// gösterir). SADECE gönderen kendi kimliğimin bir cihazıysa kabul
-    /// edilir. `conversation_identity_id`: 1:1 sohbetin karşı tarafının
-    /// kimliği; `group_id`: grup sohbeti. `read_at_ms`: okunma anı.
-    /// Kasıtlı olarak güvenilir-teslim kuyruğuna girmez (Seen/TypingIndicator
-    /// gibi — bir sonraki okumada yeniden gönderilir).
+    /// Multi-device (spec 1.7.1): read-state sync between sibling devices. When a chat is
+    /// read on one device, the others mark it read too. Otherwise each device would show it
+    /// unread. Accepted only if the sender is a device of my own identity.
+    /// `conversation_identity_id`: the counterpart's identity for a 1:1 chat. `group_id`: for
+    /// a group chat. `read_at_ms`: the read time. Deliberately not queued for reliable
+    /// delivery (like Seen and TypingIndicator). It is resent on the next read.
     ReadStateSync {
         #[serde(default)]
         conversation_identity_id: Option<String>,
@@ -1138,55 +1017,48 @@ pub enum MessageContent {
         group_id: Option<String>,
         read_at_ms: u64,
     },
-    /// Çoklu-cihaz (spec 1.6): imzalı cihaz iptali — kişilere ve kardeş
-    /// cihazlara yayılır. Alıcı imzayı doğrulayıp o cihazı `Revoked` yapar.
+    /// Multi-device (spec 1.6): signed device revocation, spread to contacts and sibling
+    /// devices. The receiver verifies the signature and marks that device `Revoked`.
     DeviceRevokeNotice(DeviceRevoke),
-    /// To a group's founder: the sender device's first-contact secret for
-    /// that group, forwarded to its members in
-    /// `GroupMemberDevice.first_contact_secret`.
+    /// To a group's founder: the sender device's first-contact secret for that group. The
+    /// founder forwards it to members in `GroupMemberDevice.first_contact_secret`.
     FirstContactSecret {
         #[serde(with = "serde_bytes")]
         secret: Vec<u8>,
         group_id: String,
     },
-    /// To a group's founder: "send me the whole group state" (all vouched
-    /// member devices and proofs). A `GroupUpdate` carries only the devices
-    /// new or changed since the founder's previous update; a member that
-    /// missed one (version gap, or a member with no known device) asks.
+    /// To a group's founder: "send me the full group state" (all vouched member devices and
+    /// proofs). A `GroupUpdate` carries only the devices new or changed since the founder's
+    /// previous update. A member that missed one (version gap, or a member with no known
+    /// device) asks for the rest.
     GroupSyncRequest { group_id: String },
-    /// Çoklu-cihaz (spec 1.7 delta senkron): var olan bir cihaz, kendi
-    /// kimliğinin DİĞER (kardeş) cihazlarına güncel kişi/grup durumunu
-    /// yeniden gönderir — ör. yeni bir kişi eklendiğinde. Alıcı idempotent
-    /// birleştirir (bilinen bir cihazın anahtarlarını ezmez, sadece eksikleri
-    /// ekler). `DeviceLinkGrant`'ın senkron kısmının tekrarlanabilir hâli.
+    /// Multi-device (spec 1.7 delta sync): an existing device resends the current contact and
+    /// group state to the OTHER (sibling) devices of its identity, for example after a new
+    /// contact is added. The receiver merges idempotently: it never overwrites keys of a known
+    /// device, it only adds what is missing. This is the repeatable form of the sync part of
+    /// `DeviceLinkGrant`.
     DeviceSync(SyncPayload),
-    /// Çoklu-cihaz (spec 1.7): kendi gönderdiğim mesaj/düzenleme/silmenin
-    /// kardeş cihazlarıma yankısı — bkz. `SiblingEchoBody`. SADECE gönderen
-    /// kendi kimliğimin bir cihazıysa kabul edilir.
+    /// Multi-device (spec 1.7): echo of a message, edit or delete I sent, to my sibling devices.
+    /// See `SiblingEchoBody`. Accepted only if the sender is a device of my own identity.
     SiblingEcho {
-        /// 1:1 sohbette karşı tarafın kimliği (alıcı kardeş kendi kanonik
-        /// cihaz anahtarına çevirir); grupta `None`.
+        /// For a 1:1 chat, the counterpart's identity. The receiving sibling maps it to its own
+        /// canonical device key. `None` for groups.
         #[serde(default)]
         conversation_identity_id: Option<String>,
-        /// Grup sohbetinde grup kimliği; 1:1'de `None`.
+        /// The group id for a group chat. `None` for 1:1.
         #[serde(default)]
         group_id: Option<String>,
         body: SiblingEchoBody,
     },
-    /// Çoklu-cihaz (spec 1.7): kardeş cihazdan son mesajları iste (yeniden
-    /// bağlanma geri-doldurması). SADECE kendi kimliğimin cihazına gönderilir.
-    ///
-    /// Spec dışı, dış inceleme düzeltmesi ("sibling backfill sayfalama
-    /// desteklemiyor"): önceden bu istek HER ZAMAN "tüm sohbetler, en
-    /// yeni N" anlamına geliyordu — bir cihaz, ulaşılamayan bir KİŞİ
-    /// yerine KENDİ diğer cihazından daha eski geçmiş isteyemiyordu (peer
-    /// tarafının `HistorySyncRequest.before_timestamp`'i ile aynı
-    /// sayfalama burada yoktu). Üç yeni alan (`#[serde(default)]` —
-    /// eski/karşı sürümle geriye dönük uyumlu, hepsi `None` ise davranış
-    /// TAMAMEN değişmez): `conversation_identity_id`/`group_id` doluysa
-    /// istek TEK bir sohbete daralır, `before_timestamp` doluysa o
-    /// sohbetin bu zaman damgasından ESKİ mesajları ister (sonsuz kaydırma
-    /// sayfalaması, `HistorySyncRequest` ile AYNI anlam).
+    /// Multi-device (spec 1.7): asks a sibling device for recent messages (backfill after a
+    /// reconnect). Sent only to a device of my own identity.
+    /// Scope change: the request used to mean "all chats, newest N" every time. A device could
+    /// not ask its own other device for older history of one contact, the way a peer's
+    /// `HistorySyncRequest.before_timestamp` allows. Three new fields (`#[serde(default)]`, so
+    /// old and new versions stay compatible, and if all are `None` the behavior is unchanged):
+    /// `conversation_identity_id` or `group_id` narrow the request to one chat, and
+    /// `before_timestamp` asks for messages OLDER than that time in that chat (infinite-scroll
+    /// paging, same meaning as `HistorySyncRequest`).
     SiblingHistoryRequest {
         per_conversation_limit: u32,
         #[serde(default)]
@@ -1195,42 +1067,40 @@ pub enum MessageContent {
         group_id: Option<String>,
         #[serde(default)]
         before_timestamp: Option<i64>,
-        /// M-68 watermark for the unscoped backfill: only rows the responder
-        /// archived (its local `timestamp`, ms) at or after this.
+        /// Watermark for the unscoped backfill (M-68): only rows the responder archived (its
+        /// local `timestamp`, ms) at or after this value.
         #[serde(default)]
         since_timestamp: Option<i64>,
-        /// Scoped, with `before_timestamp`: the start of the "Fetch older
-        /// history" window `[after_timestamp, before_timestamp)`.
+        /// Scoped, with `before_timestamp`: the start of the "fetch older history" window
+        /// `[after_timestamp, before_timestamp)`.
         #[serde(default)]
         after_timestamp: Option<i64>,
     },
-    /// bkz. `SiblingHistoryRequest` — kardeşin arşivinden son mesajlar.
+    /// See `SiblingHistoryRequest`. Recent messages from the sibling's archive.
     SiblingHistoryResponse {
         entries: Vec<SiblingHistoryEntry>,
-        /// The request's window `(before_timestamp, after_timestamp)`,
-        /// echoed: the requester matches it to its open press.
+        /// The request's window `(before_timestamp, after_timestamp)`, echoed so the requester
+        /// can match the response to its open request.
         #[serde(default)]
         window: Option<(i64, i64)>,
-        /// As `HistorySyncResponse.more`.
+        /// Same as `HistorySyncResponse.more`.
         #[serde(default)]
         more: bool,
     },
-    /// Gönderen HESABINI sildi (son cihazından). Kişiler: sohbeti "hesap
-    /// silindi" olarak işaretler, artık mesaj göndermez; kurucusu olduğum
-    /// gruplardan üyeyi çıkarırım. Kardeş cihazlar: kendi yerel durumunu siler.
+    /// The sender deleted its ACCOUNT (from its last device). Contacts mark the chat as
+    /// "account deleted" and stop sending to it. I remove the member from groups I founded.
+    /// Sibling devices wipe their local state.
     AccountDeleted {
         #[serde(default)]
         deleted_at_ms: u64,
     },
-    /// Voice/video call signalling (see core `call.rs`). Ephemeral like
-    /// `TypingIndicator`: never archived, never acked, never retried — a ring
-    /// delivered a minute late is worthless, the receiver drops stale ones by
-    /// `sent_at_ms`.
-    ///
-    /// `media_key`/`stream_id` are the SENDER's own media key (32 B) and
-    /// stream id (8 B), carried on `Invite`/`Accept`. They travel inside the
-    /// ratchet, so the media streams (which the server may relay) are
-    /// end-to-end encrypted with keys the server never sees.
+    /// Voice and video call signalling (see core `call.rs`). Ephemeral, like `TypingIndicator`:
+    /// never archived, never acked, never retried. A ring delivered a minute late is worthless,
+    /// and the receiver drops stale ones by `sent_at_ms`.
+    /// `media_key` and `stream_id` are the SENDER's own media key (32 bytes) and stream id
+    /// (8 bytes), carried on `Invite` and `Accept`. They travel inside the ratchet, so the
+    /// media streams (which the server may relay) are end-to-end encrypted with keys the
+    /// server never sees.
     Call {
         call_id: String,
         action: CallAction,
@@ -1244,21 +1114,18 @@ pub enum MessageContent {
         stream_id: Vec<u8>,
         #[serde(default)]
         sent_at_ms: u64,
-        /// Group `Invite` only: the device fingerprints the caller rang, so
-        /// callees also exchange keys with members they think are stale.
+        /// Group `Invite` only: the device fingerprints the caller rang. Callees then also
+        /// exchange keys with members they think are stale.
         #[serde(default)]
         participants: Vec<String>,
     },
-    /// Shared whiteboard (one board per 1:1 chat or group). `group_id` /
-    /// `conversation_identity_id` name the board the same way `ReadStateSync`
-    /// names a conversation: a group id, or (only from my own sibling
-    /// devices) the contact the 1:1 board belongs to. From a contact, the 1:1
-    /// board is simply the sender's.
-    ///
-    /// Live drawing: strokes finished and strokes erased since the last
-    /// packet. Sent once, never acked or retried — a lost packet is repaired
-    /// by `WbDigest`. The author of every stroke is
-    /// the packet sender (`WbStroke::author` is ignored here).
+    /// Shared whiteboard, one board per 1:1 chat or group. `group_id` or
+    /// `conversation_identity_id` names the board the same way `ReadStateSync` names a
+    /// conversation: a group id, or (only from my own sibling devices) the contact the 1:1
+    /// board belongs to. From a contact, the 1:1 board is simply the sender's.
+    /// Live drawing: strokes finished and strokes erased since the last packet. Sent once,
+    /// never acked or retried. A lost packet is repaired by `WbDigest`. The author of each
+    /// stroke is the packet sender (`WbStroke::author` is ignored here).
     WbOps {
         #[serde(default)]
         group_id: Option<String>,
@@ -1272,9 +1139,9 @@ pub enum MessageContent {
         #[serde(default)]
         sigs: Vec<WbPageSig>,
     },
-    /// "This is what my board looks like": pages that hold strokes, each with
-    /// a stroke count and the XOR of its stroke ids. The one reliable
-    /// whiteboard packet; the receiver pulls the pages that differ.
+    /// "This is what my board looks like": pages that hold strokes, each with a stroke count and
+    /// the XOR of its stroke ids. The one reliable whiteboard packet. The receiver pulls the
+    /// pages that differ.
     WbDigest {
         #[serde(default)]
         group_id: Option<String>,
@@ -1303,14 +1170,14 @@ pub enum MessageContent {
         /// Erased stroke ids, 8 bytes each.
         #[serde(default, with = "serde_bytes")]
         tombstones: Vec<u8>,
-        /// The signature of each device that drew a stroke of `strokes`.
+        /// The signature of each device that drew a stroke in `strokes`.
         #[serde(default)]
         sigs: Vec<WbPageSig>,
     },
 }
 
-// No derived `Debug` on these three: it printed file/media/archive keys and
-// message text into logs. Only the variant name is shown.
+// No derived `Debug` on these three. It printed file, media and archive keys and message
+// text into logs. Only the variant name is shown.
 impl std::fmt::Debug for MessageContent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.kind())
@@ -1334,6 +1201,7 @@ impl std::fmt::Debug for SiblingEchoBody {
             SiblingEchoBody::File { .. } => "File",
             SiblingEchoBody::Sticker { .. } => "Sticker",
             SiblingEchoBody::StickerRemoved { .. } => "StickerRemoved",
+            SiblingEchoBody::StickersRequest { .. } => "StickersRequest",
         })
     }
 }
@@ -1375,15 +1243,15 @@ impl MessageContent {
         }
     }
 
-    /// Deepest CBOR nesting accepted in a peer's content. The deepest real
-    /// one (`DeviceLinkGrant` → sync → group → founder chain → signature as a
-    /// JSON array) needs about 10.
+    /// Deepest CBOR nesting accepted in a peer's content. The deepest real case
+    /// (`DeviceLinkGrant` -> sync -> group -> founder chain -> signature as a JSON array) needs
+    /// about 10 levels.
     const MAX_NESTING: usize = 32;
 
-    /// Parses the decrypted content of a packet. ciborium's own limit (256)
-    /// lets a contact nest `SiblingEcho` inside `File.offer` some 60 times,
-    /// each level several large visitor frames on the receiving thread's
-    /// stack, before any check of who sent it.
+    /// Parses the decrypted content of a packet. ciborium's own limit (256) would let a contact
+    /// nest `SiblingEcho` inside `File.offer` about 60 times. Each level uses several large
+    /// visitor frames on the receiving thread's stack, and this happens before any check of who
+    /// sent the packet.
     pub fn from_cbor(data: &[u8]) -> Result<Self, String> {
         let mut rest = data;
         let content = ciborium::de::from_reader_with_recursion_limit(&mut rest, Self::MAX_NESTING).map_err(|e| e.to_string())?;
@@ -1394,10 +1262,10 @@ impl MessageContent {
     }
 }
 
-/// One whiteboard stroke. `points` are little-endian `u16` x,y pairs on the
-/// 1600x1000 virtual canvas. The colour is not carried: it follows from the
-/// author and `shade` (0 light, 1 base, 2 dark). `width` is the pen width in
-/// canvas units; 0 (also what a sender without the field means) = default.
+/// One whiteboard stroke. `points` are little-endian `u16` x,y pairs on the 1600x1000 virtual
+/// canvas. The colour is not carried. It follows from the author and `shade` (0 light, 1 base,
+/// 2 dark). `width` is the pen width in canvas units. 0 (also what a sender without the field
+/// sends) means default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WbStroke {
     #[serde(with = "serde_bytes")]
@@ -1410,22 +1278,22 @@ pub struct WbStroke {
     pub width: u8,
     #[serde(with = "serde_bytes")]
     pub points: Vec<u8>,
-    /// The device that drew the stroke (raw fingerprint, 32 bytes): its
-    /// `WbPageSig` of this page signs the stroke.
+    /// The device that drew the stroke (raw fingerprint, 32 bytes). Its `WbPageSig` for this page
+    /// signs the stroke.
     #[serde(default, with = "serde_bytes")]
     pub sig: Vec<u8>,
 }
 
-/// One device's hybrid signature (Ed25519 + ML-DSA-87) over every stroke it
-/// drew on one page of a board: lib `whiteboard.rs`, `wb_page_statement`.
-/// A newer one (`at`) replaces the older one of the same device and page.
+/// One device's hybrid signature (Ed25519 + ML-DSA-87) over every stroke it drew on one page of a
+/// board. See `wb_page_statement` in `whiteboard.rs`. A newer one (`at`) replaces the older one
+/// for the same device and page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WbPageSig {
     pub page: u8,
     /// Raw device fingerprint, 32 bytes.
     #[serde(with = "serde_bytes")]
     pub device: Vec<u8>,
-    /// When it was signed (ms), rising per device and page.
+    /// When it was signed (ms). Increases per device and page.
     pub at: u64,
     /// SHA-256 of each signed stroke, 32 bytes each.
     #[serde(with = "serde_bytes")]
@@ -1454,32 +1322,30 @@ pub enum CallAction {
     Busy,
 }
 
-/// El sıkışma paketi — önceki `HandshakeInit` tasarımı; spec'te ayrı bir
-/// paket tipi olarak adlandırılmasa da 3.1'deki hibrit KEM adımını taşımak
-/// için gereklidir (Kyber ciphertext'in karşı tarafa ulaşması şart).
+/// Handshake packet. Earlier design (`HandshakeInit`). Spec does not name it a separate type,
+/// but it carries the hybrid KEM step of spec 3.1. The Kyber ciphertext must reach the peer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeInit {
     pub sender_identity_id: String,
     pub sender_device_fingerprint: String,
     #[serde(with = "serde_bytes")]
     pub initiator_x25519_pubkey: Vec<u8>,
-    /// Initiator'ın bu oturum için ürettiği Kyber public key'i — responder
-    /// bunu, ratchet.rs'teki DH/KEM rotasyon adımında "karşı tarafın bilinen
-    /// Kyber public key'i" olarak saklamalıdır (yalnızca Kyber ciphertext
-    /// taşımak yeterli değildir; responder'ın kendi rotasyonunu tetikleme
-    /// hakkı için initiator'ın public key'ine de ihtiyacı vardır).
+    /// The Kyber public key the initiator generated for this session. The responder stores it as
+    /// the peer's known Kyber public key for the DH/KEM rotation step in ratchet.rs. A ciphertext
+    /// alone is not enough: the responder also needs the initiator's public key to trigger its own
+    /// rotation.
     #[serde(with = "serde_bytes")]
     pub initiator_kyber_pubkey: Vec<u8>,
     #[serde(with = "serde_bytes")]
     pub kyber_ciphertext: Vec<u8>,
     pub timestamp: u64,
-    /// Which of the recipient's keys the initiator encapsulated to: the id
-    /// of a `SignedPrekey`, or 0 for the device's long-term KEM keys (no
-    /// prekey of the recipient was known). Signed with the rest.
+    /// Which of the recipient's keys the initiator encapsulated to: the id of a `SignedPrekey`, or
+    /// 0 for the device's long-term KEM keys (no prekey of the recipient was known). Signed with
+    /// the rest.
     #[serde(default)]
     pub recipient_prekey_id: u64,
-    /// The sender's current prekey, so the recipient can use it for the
-    /// next handshake in the other direction.
+    /// The sender's current prekey, so the recipient can use it for the next handshake in the
+    /// other direction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_prekey: Option<SignedPrekey>,
     #[serde(with = "serde_bytes")]
@@ -1488,11 +1354,10 @@ pub struct HandshakeInit {
     pub signature_pq: Vec<u8>,
 }
 
-/// Spec 1.3: "fingerprint-only [...] bağlantı kurulunca karşı taraftan
-/// indirilir ve bu `fingerprint` ile karşılaştırılır". QR/manuel eşleşme
-/// sadece fingerprint taşıdığı için, bağlantı kurulunca tarafların gerçek
-/// public key'lerini birbirine gönderip kendi fingerprint hesaplamasıyla
-/// karşılaştırması gerekir — bu paket o adımı taşır.
+/// Spec 1.3: "fingerprint-only [...] downloaded from the peer when the connection is made and
+/// compared with this `fingerprint`". QR and manual pairing carry only the fingerprint. So once
+/// the connection is made, each side sends its real public keys and checks them against the
+/// fingerprint itself. This packet carries that step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentityExchange {
     pub identity_id: String,
@@ -1506,31 +1371,20 @@ pub struct IdentityExchange {
     pub kem_pubkey_x25519: Vec<u8>,
     #[serde(with = "serde_bytes")]
     pub kem_pubkey_mlkem: Vec<u8>,
-    /// Spec dışı, hata düzeltmesi (kullanıcı: "özellikle ikincil
-    /// cihazlardan gönderilen mesajlar çok sıkıntılı"): bu cihaz bir
-    /// İKİNCİL cihazsa, birincil cihazın onu yetkilendiren İMZALI
-    /// `DeviceAdd`'i.
-    ///
-    /// NEDEN GEREKLİ: alıcı taraf, tanımadığı bir cihazdan gelen paketi
-    /// spec 2.2 gereği BLOKLAR ve kullanıcıya uyarı gösterir
-    /// (`UnverifiedNewDeviceAlert`). "İmzalı zincirle sessizce kabul"
-    /// (`NewDeviceViaSignedAdd`) yolu ise yalnızca `verified_device_adds`
-    /// haritasına bakıyordu — yani SADECE daha önce ayrı bir
-    /// `DeviceAddNotice` ULAŞMIŞSA. O bildirim ratchet üzerinden giden
-    /// sıradan bir mesaj: kişi o sırada çevrimdışıysa yeniden deneme
-    /// kuyruğunda bekliyor. Sonuç: ikincil cihazın mesajları, kişi
-    /// bildirimi alana kadar sessizce bloklanıyordu — cihazda ölçüldü,
-    /// kuyrukta 739 teslim edilememiş öğe birikmişti.
-    ///
-    /// İmzayı tanıtımın KENDİSİYLE taşımak bu bağımlılığı tamamen
-    /// kaldırıyor: alıcı, imzayı zaten tanıdığı birincil cihazın
-    /// anahtarıyla yerinde doğrulayabiliyor. Güvenlik modeli DEĞİŞMİYOR —
-    /// doğrulama `apply_device_add_notice` ile AYNI (`verify_device_auth`
-    /// + fingerprint/anahtar tutarlılığı); imzasız bir iddia hâlâ
-    /// bloklanıyor.
-    ///
-    /// `#[serde(default)]`: bu alan olmadan üretilmiş eski paketler
-    /// ayrıştırılmaya devam eder (`None` = birincil cihaz ya da eski sürüm).
+    /// Signed `DeviceAdd` from the primary device, authorizing this device when it is a SECONDARY
+    /// device. Without it, messages from secondary devices were a problem in practice.
+    /// Why it is needed: under spec 2.2 the receiver BLOCKS packets from a device it does not
+    /// know and shows a warning (`UnverifiedNewDeviceAlert`). The silent-accept path
+    /// (`NewDeviceViaSignedAdd`) only checked the `verified_device_adds` map, which is filled
+    /// only if a separate `DeviceAddNotice` ARRIVED before. That notice is an ordinary message
+    /// over the ratchet. If the contact was offline, it sat in the retry queue. The result:
+    /// messages from the secondary device stayed blocked until the contact received the notice.
+    /// On a real device, 739 undelivered items had built up in the queue.
+    /// Carrying the signature with the introduction removes that dependency. The receiver can
+    /// verify it directly against the primary device's key, which it already knows. The security
+    /// model is unchanged. Verification is the same as in `apply_device_add_notice`
+    /// (`verify_device_auth` plus fingerprint and key consistency). An unsigned claim is still
+    /// rejected.
     #[serde(default)]
     pub device_add: Option<DeviceAdd>,
     /// The signed `DeviceRevoke`s of this identity. A revoke used to reach
@@ -1566,7 +1420,7 @@ pub struct IdentityExchange {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prekey: Option<SignedPrekey>,
     /// Sender's clock (ms) when made. Signed with the recipient's device
-    /// fingerprint (L-40): a captured packet replays to no other device and
+    /// fingerprint: a captured packet replays to no other device and
     /// only inside the receiver's freshness window.
     pub timestamp: u64,
     /// Hybrid signature of this device over `identity_exchange_signing_input`.
@@ -1585,7 +1439,6 @@ pub struct IdentityExchange {
 /// the device deletes the secret half some weeks after it stops handing the
 /// public half out. What an initiator sent before the first reply can then
 /// no longer be opened with keys taken from the device later.
-///
 /// `id` is the creation time in ms on the owner's clock: unique per device
 /// and larger for a newer key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1616,8 +1469,7 @@ pub fn prekey_signing_input(device_fingerprint: &str, id: u64, kem_pubkey_x25519
 /// `device_fingerprint`; `device_add`, `revokes` and `device_add_signer` prove
 /// themselves. `recipient_fp` is the device the packet is for (not carried:
 /// the receiver uses its own).
-///
-/// fable H-09: the `revokes` list is covered too (`revokes_digest`): each
+/// the `revokes` list is covered too (`revokes_digest`): each
 /// revoke proves itself, but the list could be stripped on the way, and a
 /// new contact then took a revoked device back from its old DeviceAdd.
 pub fn identity_exchange_signing_input(
@@ -1654,17 +1506,16 @@ pub fn revokes_digest(revokes: &[DeviceRevoke]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Çoklu-cihaz (spec 1.7 mesaj geçmişi senkronu): kendi GÖNDERDİĞİM bir
-/// mesajın/işlemin kardeş cihazlarıma "yankısı" — böylece bir cihazda
-/// yazdığım mesaj/düzenleme/silme diğer cihazlarımda da görünür. Alınan
-/// mesajlar zaten fan-out ile tüm cihazlara ulaştığından yankı SADECE
-/// giden (benim) işlemler içindir.
+/// Multi-device (spec 1.7 message history sync): an echo of a message or action I SENT, to my
+/// sibling devices, so an edit or delete made on one device shows on the others too. Received
+/// messages already reach every device through fan-out, so echoes are only for my own outgoing
+/// actions.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum SiblingEchoBody {
     Text {
-        /// 1:1'de `MessagePacketHeader.message_id` (kişinin kanonik cihazına
-        /// giden kopyanın id'si), grupta `group_message_local_id` — kendi
-        /// düzenleme/silmelerimin tüm cihazlarımda AYNI hedefe uygulanması için.
+        /// 1:1: `MessagePacketHeader.message_id` (the id of the copy sent to the contact's canonical
+        /// device). Group: `group_message_local_id`. My own edits and deletes apply to the same target
+        /// on all my devices.
         message_id: String,
         text: String,
         sent_at_ms: u64,
@@ -1680,41 +1531,47 @@ pub enum SiblingEchoBody {
     /// This identity left the group (`group_id` of the echo): the sibling
     /// drops it too, without waiting for the founder's update.
     GroupLeft,
-    /// bkz. `MessageContent::Reaction` — kendi bıraktığım tepki, diğer
-    /// cihazlarımda da görünsün diye.
+    /// See `MessageContent::Reaction`. A reaction I removed, echoed so my other devices show it too.
     Reaction { target_message_id: String, emoji: String, #[serde(default)] reacted_at_ms: u64 },
-    /// Kendi gönderdiğim ek (1:1 ya da grup). `offer` her zaman bir
-    /// `MessageContent::FileOffer`; kardeş dosyayı bu teklifle benden
-    /// indirir. Önceden ekler hiç yankılanmıyordu — telefondan atılan foto
-    /// laptopta hiç görünmüyordu.
+    /// An attachment I sent (1:1 or group). `offer` is always a `MessageContent::FileOffer`, and the
+    /// sibling downloads the file from me with that offer. Attachments were never echoed before, so a
+    /// photo sent from the phone did not appear on the laptop.
     File { offer: Box<MessageContent> },
-    /// A sticker added to my sticker store (imported or saved): the JPEG XL
-    /// itself. Its id is the SHA-256 of these bytes.
+    /// A sticker added to my sticker store (imported or saved): the JPEG XL bytes. Its id is the
+    /// SHA-256 of those bytes. A large sticker travels in several parts (`part` of `parts`, both 0 for
+    /// a single piece). `id` (SHA-256 hex of the whole file) names the parts.
     Sticker {
         #[serde(with = "serde_bytes")]
         jxl: Vec<u8>,
         #[serde(default)]
         origin: Option<String>,
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        part: u8,
+        #[serde(default)]
+        parts: u8,
     },
     /// A sticker removed from my sticker store.
     StickerRemoved { id: String },
+    /// "Send me your whole sticker store". A linked desktop asks. Only the root device answers, with one
+    /// `Sticker` per id that is not in `have`.
+    StickersRequest { #[serde(default)] have: Vec<String> },
 }
 
-/// Çoklu-cihaz (spec 1.7 mesaj geçmişi senkronu — kardeşten geri-doldurma):
-/// bir cihaz çevrimdışıyken KİŞİLERDEN gelen mesajları kaçırmış olabilir
-/// (fan-out kopyası zaman aşımına uğradı). Yeniden bağlanınca bir kardeş
-/// cihazdan son N mesajı ister; kardeş kendi arşivinden bunları gönderir.
-/// Kararlı `message_id` (1:1 `conv_id` / grup `local_id`) ile tekrarlar
-/// elenir.
+/// Multi-device (spec 1.7 message history sync, backfill from a sibling): while a device was offline it
+/// may have missed messages from contacts (a fan-out copy timed out). On reconnect it asks a sibling
+/// device for the last N messages, and the sibling sends them from its archive. Duplicates are dropped
+/// by the stable `message_id` (1:1 `conv_id`, group `local_id`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiblingHistoryEntry {
-    /// 1:1 sohbette karşı tarafın kimliği (alıcı kendi kanonik cihazına
-    /// çevirir); grupta `None`.
+    /// For a 1:1 chat, the counterpart's identity. The receiver maps it to its own canonical device.
+    /// `None` for groups.
     #[serde(default)]
     pub conversation_identity_id: Option<String>,
     #[serde(default)]
     pub group_id: Option<String>,
-    pub direction: String, // "sent" | "received"
+    pub direction: String,  // "sent" or "received"
     pub text: String,
     pub message_id: String,
     #[serde(default)]
@@ -1725,36 +1582,30 @@ pub struct SiblingHistoryEntry {
     pub reply_to_preview: Option<String>,
     #[serde(default)]
     pub reply_to_sender_identity_id: Option<String>,
-    /// Gönderim anı — geri-doldurulan mesajlar da GÖNDERİM sırasına otursun.
+    /// Send time. Backfilled messages are also ordered by SEND time.
     #[serde(default)]
     pub sent_at_ms: u64,
     /// See `MessageContent::Text.author_proof`.
     #[serde(default)]
     pub author_proof: Option<String>,
-    /// An attachment row instead of a text row: always a
-    /// `MessageContent::FileOffer` (its `file_id` is `message_id`). The
-    /// receiver downloads the file from the sibling that sent this.
+    /// An attachment row instead of a text row: always a `MessageContent::FileOffer` (its `file_id` is
+    /// `message_id`). The receiver downloads the file from the sibling that sent it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<Box<MessageContent>>,
-    /// The message's reactions: (reactor identity, emoji, reacted_at_ms).
-    /// An empty emoji is a removal, kept for its stamp.
+    /// Reactions on the message: (reactor identity, emoji, reacted_at_ms). An empty emoji is a removal,
+    /// kept for its timestamp.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<(String, String, u64)>,
 }
 
-/// Ağdan gelen her şeyi taşıyan zarf — hangi varyant olduğunu ayırt etmek
-/// için kullanılır.
+/// Envelope carrying everything received from the network. Used to tell the variants apart.
 ///
-/// Spec dışı, temizlik: `DeviceAdd`/`DeviceRevoke`/`GroupInvite`/`ReadReceipt`
-/// varyantları (Aşama B taslağından kalan) buradan kaldırıldı — hiçbiri hiçbir
-/// yerde ÜRETİLMİYORDU (bkz. eski `process_incoming_envelope` sessiz-yoksay
-/// kolu) ve gerçek mekanizmalar tamamen farklı, çalışan bir yoldan gidiyor:
-/// cihaz ekleme/iptali `MessageContent::DeviceAddNotice`/`DeviceRevokeNotice`
-/// ile (DeviceAdd/DeviceRevoke STRUCT'ları hâlâ kullanılıyor, sadece bu ölü
-/// zarf varyantları gitti), grup daveti `MessageContent::GroupUpdate(Add)`
-/// ile, okundu bildirimi `MessageContent::Seen`/`ReadStateSync` ile — hepsi
-/// ratchet-şifreli kanaldan. Bu ölü kollar dursaydı, ileride biri "spec'teki
-/// ReadReceipt'i tamamlıyorum" sanıp bu asla çalışmayan zarfı doldurabilirdi.
+/// Unused variants (`DeviceAdd`, `DeviceRevoke`, `GroupInvite`, `ReadReceipt`) were removed. None of
+/// them was ever produced, and the real mechanisms use other paths: device add and revoke go through
+/// `MessageContent::DeviceAddNotice` and `DeviceRevokeNotice` (the `DeviceAdd` and `DeviceRevoke`
+/// structs are still used), group invites through `MessageContent::GroupUpdate(Add)`, read receipts
+/// through `MessageContent::Seen` and `ReadStateSync`. All of them go over the ratchet-encrypted channel.
+/// Keeping the dead arms would invite someone to fill in an envelope that never worked.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetworkEnvelope {
     IdentityExchange(IdentityExchange),
@@ -1763,12 +1614,11 @@ pub enum NetworkEnvelope {
 }
 
 impl NetworkEnvelope {
-    /// Nesting bound for the outer envelope, before any signature check.
+    /// Nesting bound for the outer envelope, checked before any signature check.
     const MAX_NESTING: usize = 32;
 
-    /// Strict parse of a received envelope (fable H-07): trailing bytes gave
-    /// one signed packet unlimited encodings (each passed the byte dedup),
-    /// and ciborium's default let a stranger nest 256 levels.
+    /// Strict parse of a received envelope. Trailing bytes would give one signed packet unlimited
+    /// encodings (each passes the byte dedup). ciborium's default would let a stranger nest 256 levels.
     pub fn from_cbor(data: &[u8]) -> Result<Self, String> {
         let mut rest = data;
         let envelope = ciborium::de::from_reader_with_recursion_limit(&mut rest, Self::MAX_NESTING).map_err(|e| e.to_string())?;
@@ -1783,9 +1633,8 @@ impl NetworkEnvelope {
 mod wire_size_tests {
     use super::*;
 
-    /// Bayt alanları CBOR bayt bloğu olarak gitmeli. `serde_bytes` olmadan her
-    /// bayt ayrı bir tam sayı olur ve paket ~1.9 kat büyür (cihazda mesaj
-    /// başına ~15 KB ölçüldü).
+    /// Byte fields must be encoded as CBOR byte strings. Without `serde_bytes` every byte becomes a
+    /// separate integer, and the packet grows about 1.9x (measured about 15 KB per message on a device).
     #[test]
     fn byte_fields_encode_as_cbor_bytes() {
         let raw: Vec<u8> = (0..=255u8).cycle().take(4000).collect();
@@ -1847,7 +1696,7 @@ mod parse_limit_tests {
             rendezvous_node: "/dns/x.onion/tcp/1".into(), known_relays: Vec::new(), nonce: vec![7; 16],
         }.to_cbor().unwrap();
         assert!(DeviceLinkRequest::from_cbor(&link(DeviceLinkRequest::CURRENT_VERSION)).is_ok());
-        // Neither code reads as the other.
+        // Neither encoding reads as the other.
         assert!(DeviceLinkRequest::from_cbor(&qr(DeviceLinkRequest::CURRENT_VERSION)).is_err());
         assert!(QrPacket::from_cbor(&link(QrPacket::CURRENT_VERSION)).is_err());
         assert!(DeviceLinkRequest::from_cbor(&link(1)).is_err());
@@ -1871,10 +1720,10 @@ mod parse_limit_tests {
             body: SiblingEchoBody::File { offer: Box::new(inner) },
         };
         let bytes = |content: &MessageContent| to_cbor(content).unwrap();
-        // What a sibling really sends.
+        // What a sibling actually sends.
         assert!(MessageContent::from_cbor(&bytes(&echo(offer.clone()))).is_ok());
-        // The deepest honest content: a link grant with proofs and a group
-        // (more JSON nesting than `group::Group` has).
+        // The deepest realistic content: a link grant with proofs and a group (more JSON nesting
+        // than `group::Group` has).
         let add = DeviceAdd {
             identity_id: "i".into(), new_device_fingerprint: "f".into(), added_by: "a".into(),
             signature: vec![1], signature_pq: vec![2], consent: vec![3], consent_pq: vec![4],

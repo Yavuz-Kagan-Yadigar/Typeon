@@ -1,9 +1,7 @@
 //! Typeon — Rust çekirdeği.
-//!
 //! Description.md "Aşama A" kapsamını hedefler: tek cihaz (1 Identity = 1
 //! Device) varsayımıyla test edilir, ama Identity/Device ayrımına göre
 //! yazılmıştır (Aşama B'de çoklu cihaza genişletilebilir).
-//!
 //! Modüller:
 //! - `identity`  : bölüm 1 — Identity/Device modeli, fingerprint
 //! - `packet`    : bölüm 1.3-1.6, 3.3, 5.2 — ağ paket formatları
@@ -238,7 +236,6 @@ struct P2PCore {
     known_remote_devices: HashMap<String, DeviceRecord>,
     /// Bir cihaza EN SON ne zaman `IdentityExchange` YANITI verdiğimiz
     /// (bkz. `process_identity_exchange` sonundaki karşılıklı-yanıt bloğu).
-    ///
     /// Neden var: o yanıt koşulsuzdu ve karşı taraf da aynı şeyi yapıyordu —
     /// yani A→B bir yanıt doğuruyor, o yanıt B→A bir yanıt daha doğuruyordu.
     /// İki eşleşmiş cihaz arasında SONSUZ bir ping-pong: gerçek cihazlarda
@@ -265,7 +262,7 @@ struct P2PCore {
     /// (sınırsız büyümez). Bellek-içi; süreç yeniden başlasa da freshness
     /// penceresi çok eski tekrarları zaten reddeder.
     recent_handshake_sigs: HashMap<String, Vec<(u64, Vec<u8>)>>,
-    /// Spec dışı, hata düzeltmesi ("ilk mesaj yutuluyor") — bkz.
+    /// bkz.
     /// `EARLY_PACKET_TTL_MS`. key = gönderen device_fingerprint,
     /// value = (tamponlanma zamanı, paket). El sıkışma tamamlanınca
     /// `replay_early_packets` ile sırayla işlenir.
@@ -416,7 +413,6 @@ struct P2PCore {
     /// yapamıyordu): şu an kendi posta kutusu topic'ine (`p2p_msg_<fp>`)
     /// abone OLDUĞUMUZ cihaz fingerprint'i. `None` ise henüz hiç abone
     /// olunmadı.
-    ///
     /// Neden gerekli: bu abonelik `start_network` içinde BİR KEZ, o an
     /// aktif bir kimlik VARSA yapılıyordu. Ama `P2PService.onStartCommand`
     /// kendi `isRunning` bayrağıyla ağ kurulumunu SÜREÇ BAŞINA BİR KEZE
@@ -431,7 +427,6 @@ struct P2PCore {
     /// dolayısıyla ona hiçbir paket TESLİM EDİLEMİYOR (karşı taraf sonsuza
     /// kadar `InsufficientPeers` alıyor, bkz. libp2p-gossipsub `publish`:
     /// `topic_peers` girdisi yoksa alıcı kümesi boş kalır).
-    ///
     /// Bu alan sayesinde `ensure_own_mailbox_subscription` (her `poll_events`
     /// turunda) kimlik SONRADAN oluşsa/yüklense bile aboneliği
     /// kendi kendine tamamlar — ağ katmanının yeniden başlatılması GEREKMEZ.
@@ -441,7 +436,6 @@ struct P2PCore {
     /// karşı tarafa ~5 DAKİKA ulaşmadı — gossipsub, gönderenin ABONE OLMADIĞI
     /// bir posta kutusu topic'ine ("fanout") güvenilir teslim etmiyor; iş
     /// ancak yavaş Tor/sunucu yolu devreye girince oldu.
-    ///
     /// Çözüm: eşleşme SÜRESİNCE her iki taraf da KARŞI tarafın posta kutusu
     /// topic'ine (`p2p_msg_<peer_fp>`) de abone olur — böylece ikisi de aynı
     /// topic'te → gerçek gossipsub mesh'i kurulur → `Handshake`/`IdentityExchange`
@@ -460,6 +454,10 @@ struct P2PCore {
     /// tanıtırken (`DeviceAddNotice`) kanıt olarak kullanılır. Diske
     /// `own_device_add` tablosunda kalıcı.
     own_device_add: Option<DeviceAdd>,
+    /// Parts of big stickers from my other devices, by sticker id: (first
+    /// part's arrival ms, parts). Memory only: a part lost to a restart comes
+    /// again with the next "Fetch stickers".
+    sticker_parts: HashMap<String, (u64, Vec<Option<Vec<u8>>>)>,
     /// Çoklu-cihaz (spec 2.2): imzası doğrulanmış bir `DeviceAddNotice` ile
     /// önceden duyurulmuş, ama henüz `IdentityExchange`'i gelmemiş yeni cihaz
     /// fingerprint'leri. `evaluate_sender_device`, bu sette olan bir cihazı
@@ -500,19 +498,16 @@ struct P2PCore {
     server_sweep_at: u64,
     /// Bir sunucuya BAŞARIYLA yatırılmış mesajlar: `(server_id, message_id)`
     /// -> yatırma anı (ms).
-    ///
     /// Neden var: `awaiting_confirmation` uçtan uca `Ack` gelene kadar zarfı
     /// yeniden gönderir (7 güne kadar). Bu, gossipsub yolu için doğru —
     /// orada hiçbir şey saklanmaz. Ama sunucu yolunda zarf zaten DİSKTE:
     /// yeniden yatırmak alıcının onu görme ihtimalini bir gram artırmaz,
     /// yalnızca aynı baytları tekrar tekrar yollar.
-    ///
     /// Gerçek cihazda ölçülen sonuç: artık var olmayan bir kimliğe (eski,
     /// eşleşmesi bozulmuş bir kişiye) giden kuyruk, ikisi 368 KB'lık altı
     /// zarfı ~20 saniyede bir yeniden yatırıyordu — Tor bağlantısında
     /// saniyede ~40 KB saf israf, sunucu posta kutusu şişiyor, karşı tarafın
     /// paket hız sınırı doluyor ve ÇALIŞAN sohbet aç kalıyordu.
-    ///
     /// `SERVER_DEPOSIT_MEMORY_MS` (7 gün = mesajın yeniden deneme penceresi,
     /// sunucu kutu TTL'inin altında) sonra unutulur; tavan
     /// `MAX_SERVER_DEPOSIT_MEMORY` girdide tutulur.
@@ -570,7 +565,7 @@ struct P2PCore {
     /// dosya indirmesi başlatılırken `swarm.add_peer_address` ile
     /// `request_response`'un dial edebileceği bir adres ipucu vermek için.
     peer_id_to_addr: HashMap<PeerId, Multiaddr>,
-    /// Spec dışı, ağ sağlamlığı düzeltmesi: bilinen bir uzak CİHAZ için en
+    /// bilinen bir uzak CİHAZ için en
     /// son işe yaramış/paylaşılmış adres (`/ip4/.../tcp/.../p2p/<peer_id>`
     /// tam biçimi). key = device_fingerprint. `peer_id_to_addr`'ın aksine
     /// bu KALICIDIR (bkz. `device_addrs` tablosu) ve süreç yeniden başlasa
@@ -612,12 +607,12 @@ struct P2PCore {
     /// M-68, per sibling: (send time of the unanswered backfill request,
     /// send time of the last answered one). The second is the next watermark.
     sibling_backfill_since: HashMap<String, (u64, u64)>,
-    /// M-55: last full `reconnect_all_known_now`; a network callback inside
+    /// last full `reconnect_all_known_now`; a network callback inside
     /// `NETWORK_CHANGE_DEBOUNCE_MS` only sets `network_change_pending`, run
     /// once by `poll_events` when the window ends.
     last_network_change_at: u64,
     network_change_pending: bool,
-    /// bkz. `retry_unconfirmed_messages` (M-181).
+    /// bkz. `retry_unconfirmed_messages`.
     last_unconfirmed_retry_at: u64,
     /// Device -> when its last HistorySyncRequest was answered (rate limit).
     history_answered_at: HashMap<String, u64>,
@@ -628,7 +623,7 @@ struct P2PCore {
     history_answered_by: HashMap<String, std::collections::HashSet<String>>,
     /// bkz. `SIBLING_ROSTER_SYNC_INTERVAL_MS`.
     last_sibling_roster_sync_at: u64,
-    /// Spec dışı, performans/pil denetimi düzeltmesi: `reconnect_sweep`
+    /// `reconnect_sweep`
     /// önceden HER taramada (≤15 sn'de bir), adresi olan ama bağlı OLMAYAN
     /// her cihaz için — hem doğrudan adrese hem de bilinen tüm röle
     /// adreslerine (üstüne, `dial_with_relay_fallback` bkz.) — sınırsız,
@@ -663,7 +658,6 @@ struct P2PCore {
     /// `poll_events`'in SONUNDA yapılan "flush" turunda (bkz. o fonksiyonun
     /// sonundaki blok) swarm'dan çıkan ama artık işlenemeyecek olan olaylar —
     /// bir SONRAKİ turun başında, taze olayların ÖNÜNDE işlenirler.
-    ///
     /// Neden var: swarm YALNIZCA `poll_events` içinde, o
     /// blokta pollanıyor. Bir parça yanıtı işlenip yeni bir istek
     /// `send_request` ile kuyruğa konduğunda, o istek tele ancak BİR SONRAKİ
@@ -672,7 +666,7 @@ struct P2PCore {
     /// kaldırıyor; o turda düşen olayları ATMAK ise (bir parça yanıtının
     /// kaybolması = takılma) kabul edilemez, bu yüzden burada saklanıyorlar.
     deferred_swarm_events: Vec<libp2p::swarm::SwarmEvent<P2PBehaviourEvent>>,
-    /// Spec dışı, dış inceleme düzeltmesi — bkz. `RATE_LIMIT_WINDOW_MS`
+    /// bkz. `RATE_LIMIT_WINDOW_MS`
     /// dokümantasyonu. key = GERÇEK bağlantı kimliği (`PeerId` — Noise el
     /// sıkışmasıyla kanıtlanmış, sahtelenemez; paketin KENDİ içindeki
     /// `sender_device_fingerprint` header alanı KASITLI OLARAK
@@ -683,12 +677,12 @@ struct P2PCore {
     message_rate_limiter: HashMap<PeerId, (u64, u32)>,
     /// Same shape, for served file chunks (see the `FileChunks` request arm).
     chunk_rate_limiter: HashMap<PeerId, (u64, u32)>,
-    /// M-16: (window start, count) for server-delivered mail (`source ==
+    /// (window start, count) for server-delivered mail (`source ==
     /// None`), which has no peer id to key `message_rate_limiter` on. Over
     /// the budget it waits in `deferred_incoming`; `server_fetch` and
     /// `commit_server_fetches` hold while it does.
     server_mail_rate: (u64, u32),
-    /// M-190: one (window start, count) shared by all non-established peers.
+    /// one (window start, count) shared by all non-established peers.
     unknown_peer_rate: (u64, u32),
     /// Hız sınırı yüzünden bu turda işlenemeyen ama ATILMAMASI gereken
     /// paketler (bkz. `RateVerdict::Defer`). Bir sonraki `poll_events`
@@ -726,7 +720,6 @@ struct P2PCore {
     /// belirtiydi — o kişiyle olan bağlantı/el sıkışma durumu ne zaman
     /// "henüz çözülmedi" durumuna denk gelirse mesaj kaybolurdu, DİĞER
     /// üyelerle (zaten çözülmüş) hiçbir sorun olmazdı.
-    ///
     /// key = (group_id, member_identity_id), value = o üyeye gönderilmeyi
     /// bekleyen (henüz gönderilememiş) mesaj içerikleri, GÖNDERİM SIRASIYLA
     /// — üye çözülünceye kadar `group_sync_sweep` ile periyodik olarak
@@ -738,7 +731,6 @@ struct P2PCore {
     /// olurdu. `MAX_PENDING_GROUP_MESSAGES_PER_MEMBER` ile sınırlı (bellek
     /// koruması — bir üye günler/haftalarca hiç çözülemezse sınırsız
     /// birikmesin diye, en eskisi atılır).
-    ///
     /// Spec dışı, hata düzeltmesi ("üye hiç çözülemezken süreç ölürse
     /// mesaj sessizce kayboluyor"): önceden bu alan SADECE bellekteydi —
     /// `pending_durable_retries`'in (tek bekleyen paket başına) AKSİNE
@@ -823,19 +815,18 @@ struct P2PCore {
     peer_onion_addr: HashMap<PeerId, String>,
     /// Eş başına paralel-aktarım sağlık durumu — bkz. `BulkHealth`.
     bulk_health: HashMap<PeerId, BulkHealth>,
-    /// Spec dışı, hata ayıklama düzeltmesi: `initiate_handshake_with`'in
+    /// `initiate_handshake_with`'in
     /// bir peer için en son kullanıcıya BİLDİRİLMİŞ kalıcı hatası (ör.
     /// "Bad Kyber public key length" — bozuk/uyumsuz anahtar verisi).
     /// Aynı hata tekrar tekrar (her mesaj/typing-indicator/vb. denemesinde)
     /// sessizce oluşmaya devam etse bile kullanıcıya SADECE bir kez
     /// bildirilsin diye — bkz. o fonksiyonun dokümantasyonu.
     handshake_failure_notified: HashMap<String, String>,
-    /// Spec dışı, teslim garantisi düzeltmesi: bir peer için en son NE ZAMAN
+    /// bir peer için en son NE ZAMAN
     /// el sıkışma tazelendiği (bkz. `maybe_redo_handshake`) — kaybolmuş bir
     /// `HandshakeInit`'ten kurtulmak için gereken tek şey yeni bir el
     /// sıkışma, ama bunu her turda yapmak oturumu gereksizce çalkalar; bu
     /// harita `HANDSHAKE_REDO_MIN_INTERVAL_MS` kısıtını uygular.
-    ///
     /// Değerin ikinci alanı: BİR ÖNCEKİ tazelemede terk edilmiş kök anahtar.
     /// `initiate_handshake_with` yeni topic'e abone olurken eskisini
     /// BIRAKMAZ (kasıtlı — karşı taraf yeni el sıkışmayı işleyene kadar
@@ -863,7 +854,6 @@ struct P2PCore {
     /// (`HISTORY_FETCH_MAX_PAGES`).
     history_fetch_pages: HashMap<String, u32>,
     /// Kullanıcı kararı (2026-08-27): ENGELLENEN kimlikler.
-    ///
     /// `revoke`'tan farkı kasıtlı ve keskin: iptal, bir cihazın artık
     /// kullanılmadığını söyler ve o kişi yeni bir cihazla geri gelebilir.
     /// Engelleme ise KİŞİYİ hedefler — o kimliğe ait HİÇBİR cihazdan paket
@@ -879,7 +869,6 @@ struct P2PCore {
     /// Kotlin tarafı bunu açıyor (bkz. `set_power_save`). Etkisi: kanıtlanmış
     /// şekilde sağlıklı bir bağlantının keepalive aralığı 20 sn'den
     /// `KEEPALIVE_POWER_SAVE_INTERVAL_MS`'e genişliyor.
-    ///
     /// Neden bu kadar önemli: hücresel radyo herhangi bir aktiviteden sonra
     /// tipik olarak 5-15 sn yüksek güçlü durumda kalıyor. 20 saniyede bir
     /// yoklama, radyonun neredeyse HİÇ boşta kalamaması demek — bağlı her

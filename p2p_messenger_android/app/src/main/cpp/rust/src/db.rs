@@ -18,7 +18,7 @@ impl P2PCore {
             // Tests have no logger: without this a failed assert prints nothing.
             #[cfg(test)]
             eprintln!("PANIC: {info}");
-            // H38: a panic on a background thread/task (swarm, Tor, server
+            // a panic on a background thread/task (swarm, Tor, server
             // client) was logged and nothing else; the frontend must hear it.
             CORE_PANICKED.store(true, std::sync::atomic::Ordering::SeqCst);
         }));
@@ -70,6 +70,7 @@ impl P2PCore {
             pairing_mailbox_subs: HashMap::new(),
             pairing_reply_peer: HashMap::new(),
             own_device_add: None,
+            sticker_parts: HashMap::new(),
             verified_device_adds: HashMap::new(),
             history_key: None,
             servers: Vec::new(),
@@ -176,7 +177,7 @@ impl P2PCore {
         // turned messages still being sent into 'error'.
         if self.db.is_some() {
             if self.app_files_dir.as_deref() != Some(app_files_dir) {
-                // R-07: the open database stays; say so instead of writing to
+                // the open database stays; say so instead of writing to
                 // the old path silently.
                 error!("init_db: veritabanı zaten {:?} altında açık, {} yok sayıldı", self.app_files_dir, app_files_dir);
             }
@@ -191,7 +192,7 @@ impl P2PCore {
         // First statement on the connection. A wrong key fails on the read.
         conn.execute_batch(&zeroize::Zeroizing::new(format!("PRAGMA key = {};", key_pragma.as_str())))?;
         conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
-        // Defter #21: istemci bağlantısı bunları HİÇ ayarlamıyordu, oysa
+        // istemci bağlantısı bunları HİÇ ayarlamıyordu, oysa
         // sunucu tarafı (`typeon-server/src/store.rs`) en başından beri
         // ayarlıyor. Varsayılan rollback-journal modunda her mesaj
         // (ratchet durumu), her 8 parça (`bytes_transferred`) ve her
@@ -423,7 +424,7 @@ impl P2PCore {
         // Pen width came after the first builds; same ALTER pattern as below.
         migrate("ALTER TABLE wb_strokes ADD COLUMN width INTEGER NOT NULL DEFAULT 0")?;
         migrate("ALTER TABLE wb_strokes ADD COLUMN sig BLOB NOT NULL DEFAULT x''")?;
-        // M-93: skipped keys expire by age. Rows from before the column count
+        // skipped keys expire by age. Rows from before the column count
         // from now.
         migrate("ALTER TABLE skipped_message_keys ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")?;
         let _ = conn.execute("UPDATE skipped_message_keys SET created_at = ?1 WHERE created_at = 0", params![current_time_ms() as i64]);
@@ -501,12 +502,11 @@ impl P2PCore {
         migrate("ALTER TABLE messages ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")?;
         // bkz. `ArchivedMessage.is_edited` — düzenleme işareti de kalıcı.
         migrate("ALTER TABLE messages ADD COLUMN is_edited INTEGER NOT NULL DEFAULT 0")?;
-        // Owner decision (fable A-16): the row came from a contact's 1:1
+        // Owner decision: the row came from a contact's 1:1
         // history answer, at a time the contact stated. The UI marks it.
         migrate("ALTER TABLE messages ADD COLUMN via_sync INTEGER NOT NULL DEFAULT 0")?;
-        // Spec dışı (dış AI incelemesi düzeltmesi — sıra-dışı Edit koruması):
         // uygulanan son düzenlemenin gönderici damgası (`MessageContent::Edit
-        // .edited_at_ms`). `apply_edit_to_archive`, DAHA ESKİ damgalı bir
+        // edited_at_ms`). `apply_edit_to_archive`, DAHA ESKİ damgalı bir
         // düzenlemenin DAHA YENİ olanın üzerine yazmasını bununla engeller
         // (0 = hiç düzenlenmedi / sıralama bilgisi olmayan eski paket).
         migrate("ALTER TABLE messages ADD COLUMN edit_ts INTEGER NOT NULL DEFAULT 0")?;
@@ -514,7 +514,7 @@ impl P2PCore {
         migrate("ALTER TABLE messages ADD COLUMN author_proof TEXT")?;
         // Group rows: my identity id was in the sender's @mention list.
         migrate("ALTER TABLE messages ADD COLUMN mentions_me INTEGER NOT NULL DEFAULT 0")?;
-        // L-32: one row per message id (per group; 1:1 rows share the scope
+        // one row per message id (per group; 1:1 rows share the scope
         // ''). Once, before the index: a deleted copy wins (the user's delete),
         // then an edited one, one with an author proof, then the earliest.
         // Reactions/seen point at the message_id text, which the kept row has.
@@ -561,7 +561,7 @@ impl P2PCore {
         migrate("CREATE INDEX IF NOT EXISTS idx_files_sticker_origin ON files(sticker_origin)")?;
         // `FileOffer.chunk_hashes`: each received chunk is checked against it.
         migrate("ALTER TABLE files ADD COLUMN chunk_hashes BLOB")?;
-        // L-135: the group row id of a queued copy (its own ids are per member).
+        // the group row id of a queued copy (its own ids are per member).
         migrate("ALTER TABLE pending_group_messages ADD COLUMN local_message_id TEXT")?;
         migrate("ALTER TABLE pending_durable_retries ADD COLUMN local_message_id TEXT")?;
         // A 'pending' row left by the previous run with no retry behind it
@@ -570,7 +570,7 @@ impl P2PCore {
         // and so do group rows with a copy still queued (`local_message_id`
         // in `pending_group_messages` or the durable retries): marking those
         // failed made the user resend a message that was then delivered twice.
-        // C6: expired retries first, or their rows are skipped here and
+        // expired retries first, or their rows are skipped here and
         // nothing ever fails them.
         let _ = conn.execute(
             "DELETE FROM pending_durable_retries WHERE created_at < ?1",
@@ -584,7 +584,7 @@ impl P2PCore {
                 AND message_id NOT IN (SELECT local_message_id FROM pending_group_messages WHERE local_message_id IS NOT NULL)))",
             [],
         );
-        // M-186: no download is running at start; a 'downloading' row is a
+        // no download is running at start; a 'downloading' row is a
         // dead one (its owner reconnecting resumes it, the user can retry).
         // #76: its partial `.enc` stays: `download_file` resumes from the
         // verified chunks on disk, and the quota counts 'failed' bytes.
@@ -868,11 +868,10 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı, ağ sağlamlığı düzeltmesi: bilinen cihaz adreslerini
+    /// bilinen cihaz adreslerini
     /// (`device_last_addr`) diskten belleğe yükler — süreç yeniden başlasa
     /// bile `reconnect_sweep` kopmuş kişilere (farklı ağdakiler dahil,
     /// mDNS'in yetişemediği) yeniden bağlanmayı deneyebilsin diye.
-    ///
     /// Spec dışı, hata düzeltmesi (bkz. `remember_device_addr` loopback
     /// notu): `remember_device_addr` artık loopback adresleri baştan
     /// reddediyor, ama bu düzeltmeden ÖNCE zaten diske yazılmış bir
@@ -916,12 +915,11 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı, ağ sağlamlığı düzeltmesi: bir cihaz için en son işe
+    /// bir cihaz için en son işe
     /// yaramış/paylaşılmış adresi hem bellekte hem diskte günceller (bkz.
     /// `device_last_addr`). Adres `.../p2p/<peer_id>` son ekini içermeli
     /// (`reconnect_sweep` PeerId'yi buradan çıkarır) — içermiyorsa yok
     /// sayılır (yeniden bağlanmak için işe yaramaz).
-    ///
     /// Spec dışı, hata düzeltmesi ("bir cihaz sürekli 127.0.0.1'e dial
     /// etmeye çalışıp duruyor"): loopback (127.0.0.1/::1) adresler de AYNI
     /// sebeple yok sayılır (bkz. `is_loopback_multiaddr`) — bu ANCAK iki

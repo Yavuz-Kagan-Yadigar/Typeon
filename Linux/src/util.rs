@@ -100,7 +100,7 @@ pub fn texture_from_hex(hex_string: &str) -> Option<gdk::Texture> {
     use std::hash::{Hash, Hasher};
     // Lists rebuild on every event; decode each distinct image once.
     // GTK main thread only (the textures are not Send), hence thread_local.
-    // H126: an entry-count cap alone let 256 distinct large previews pin
+    // an entry-count cap alone let 256 distinct large previews pin
     // ~17 GB of decoded GdkTexture, so the cache also tracks a byte budget —
     // both caps are checked before every insert and evict everything at once
     // (the same wholesale-evict policy the count cap always used).
@@ -154,6 +154,44 @@ pub fn scaled_jpeg(path: &str, max_dimension: i32, quality: u8) -> Option<Vec<u8
     scaled
         .save_to_bufferv("jpeg", &[("quality", quality.as_str())])
         .ok()
+}
+
+/// A picture as tightly packed RGBA, at most `max_side` a side (aspect kept),
+/// for a sticker import. ponytail: an animated GIF/WebP keeps its first frame.
+pub fn image_rgba(path: &str, max_side: i32) -> Option<(Vec<u8>, u32, u32)> {
+    let (_, width, height) = gdk_pixbuf::Pixbuf::file_info(path)?;
+    if i64::from(width) * i64::from(height) > 64_000_000 {
+        return None;
+    }
+    let pixbuf = if width.max(height) > max_side {
+        gdk_pixbuf::Pixbuf::from_file_at_scale(path, max_side, max_side, true).ok()?
+    } else {
+        gdk_pixbuf::Pixbuf::from_file(path).ok()?
+    };
+    let pixbuf = pixbuf.add_alpha(false, 0, 0, 0).ok()?;
+    let (w, h, stride) = (pixbuf.width() as usize, pixbuf.height() as usize, pixbuf.rowstride() as usize);
+    let bytes = pixbuf.read_pixel_bytes();
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for row in 0..h {
+        rgba.extend_from_slice(bytes.get(row * stride..row * stride + w * 4)?);
+    }
+    Some((rgba, w as u32, h as u32))
+}
+
+/// Android's "Forwarded" mark (Forward.kt `MARK`): invisible characters at
+/// the start of a text or caption, no protocol field.
+pub const FORWARD_MARK: &str = "\u{2064}\u{2063}";
+
+pub fn forward_mark(text: &str) -> String {
+    format!("{FORWARD_MARK}{}", text.strip_prefix(FORWARD_MARK).unwrap_or(text))
+}
+
+/// (forwarded, text without the mark).
+pub fn split_forwarded(text: &str) -> (bool, &str) {
+    match text.strip_prefix(FORWARD_MARK) {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    }
 }
 
 /// Chat-list style stamp: time for today, "Yesterday", otherwise a date.
@@ -541,7 +579,7 @@ fn image_for_sending(
     }
     let stride = pixbuf.rowstride() as usize;
     let bytes = pixbuf.read_pixel_bytes();
-    // M170: gdk-pixbuf promises rowstride >= width * channels and a buffer
+    // gdk-pixbuf promises rowstride >= width * channels and a buffer
     // long enough for every row, so the per-row slice cannot go out of
     // bounds — checking instead of trusting keeps a malformed pixbuf from
     // panicking inside this worker.

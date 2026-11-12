@@ -494,8 +494,7 @@ pub fn linked_devices(app: &Rc<App>) {
     let group = adw::PreferencesGroup::builder()
         .title("Devices on your account")
         .description(
-            "Each device holds its own keys. Revoking one stops every contact from accepting \
-             anything signed by it.",
+            "Each device holds its own keys. Revoke a device from your phone.",
         )
         .build();
 
@@ -544,42 +543,25 @@ pub fn linked_devices(app: &Rc<App>) {
                         .subtitle(subtitle.as_str())
                         .build();
 
-                    if device.is_active && !device.is_this_device {
-                        let revoke = gtk::Button::builder()
-                            .label("Revoke")
-                            .valign(gtk::Align::Center)
-                            .build();
-                        revoke.add_css_class("destructive-action");
+                    // No "Revoke": only the phone (primary device) can revoke; a desktop is secondary.
+
+                    // A revoked device only lingers in the list: hide it here.
+                    if !device.is_active {
+                        let forget = gtk::Button::builder().label("Remove from list").valign(gtk::Align::Center).build();
                         let app = app.clone();
                         let fingerprint = device.device_fingerprint.clone();
-                        let name = device.device_name.clone();
-                        revoke.connect_clicked(move |_| {
-                            let app_inner = app.clone();
-                            let fingerprint = fingerprint.clone();
-                            confirm(
-                                &app,
-                                "Revoke this device?",
-                                &format!(
-                                    "\"{}\" can no longer send or receive on your account. A signed \
-                                     revocation goes out to every contact.",
-                                    name
-                                ),
-                                "Revoke",
-                                true,
-                                move || {
-                                    let app_inner = app_inner.clone();
-                                    let fingerprint = fingerprint.clone();
-                                    crate::app::run_in_background(
-                                        move || core::revoke_linked_device(&fingerprint),
-                                        move |result| match result {
-                                            Ok(()) => app_inner.toast("Device revoked."),
-                                            Err(error) => app_inner.toast(&error),
-                                        },
-                                    );
+                        forget.connect_clicked(move |_| {
+                            let (app, fingerprint) = (app.clone(), fingerprint.clone());
+                            crate::app::run_in_background(
+                                move || core::forget_revoked_linked_device(&fingerprint),
+                                move |result| {
+                                    if let Err(error) = result {
+                                        app.toast(&error);
+                                    }
                                 },
                             );
                         });
-                        row.add_suffix(&revoke);
+                        row.add_suffix(&forget);
                     }
 
                     group.add(&row);
@@ -847,4 +829,158 @@ pub fn watch_device_alerts(app: &Rc<App>) {
         });
         glib::ControlFlow::Continue
     });
+}
+
+/// Settings → Storage, as on Android: what this device keeps, and per chat
+/// "remove local files" (downloadable again) or "delete older than" (messages
+/// and files, this device only). Nothing here touches the other devices.
+pub fn storage(app: &Rc<App>) {
+    let Some(window) = app.window() else { return };
+    let page = adw::PreferencesPage::new();
+    let header = adw::HeaderBar::new();
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&page));
+    let dialog = adw::Window::builder()
+        .modal(true)
+        .transient_for(&window)
+        .title("Storage")
+        .default_width(520)
+        .default_height(620)
+        .content(&toolbar)
+        .build();
+    let groups: Rc<RefCell<Vec<adw::PreferencesGroup>>> = Rc::new(RefCell::new(Vec::new()));
+    let rebuild: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let build: Rc<dyn Fn()> = {
+        let (app, page, groups, rebuild) = (app.clone(), page.clone(), groups.clone(), rebuild.clone());
+        Rc::new(move || {
+            let (app, page, groups, rebuild) = (app.clone(), page.clone(), groups.clone(), rebuild.clone());
+            crate::app::run_in_background(core::storage_usage, move |usage| {
+                for group in groups.borrow_mut().drain(..) {
+                    page.remove(&group);
+                }
+                let again = move || {
+                    if let Some(f) = rebuild.borrow().clone() {
+                        f();
+                    }
+                };
+                let again: Rc<dyn Fn()> = Rc::new(again);
+
+                let totals = adw::PreferencesGroup::builder().title("On this device").build();
+                for (title, bytes) in [
+                    ("Messages (database)", usage.db_bytes),
+                    ("Files and media", usage.attachments_bytes),
+                    ("Voice messages", usage.voice_bytes),
+                    ("Stickers", usage.stickers_bytes),
+                ] {
+                    totals.add(&adw::ActionRow::builder().title(title).subtitle(util::human_size(bytes).as_str()).build());
+                }
+                let cache = adw::ActionRow::builder()
+                    .title("Decrypted cache")
+                    .subtitle(util::human_size(usage.cache_bytes).as_str())
+                    .build();
+                let clear = gtk::Button::builder().label("Clear").valign(gtk::Align::Center).build();
+                {
+                    let again = again.clone();
+                    clear.connect_clicked(move |_| {
+                        let again = again.clone();
+                        crate::app::run_in_background(
+                            || {
+                                let dir = crate::data_directory().join("attachments/plain_cache");
+                                if let Ok(entries) = std::fs::read_dir(&dir) {
+                                    for path in entries.flatten().map(|e| e.path()) {
+                                        let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+                                    }
+                                }
+                            },
+                            move |()| again(),
+                        );
+                    });
+                }
+                cache.add_suffix(&clear);
+                totals.add(&cache);
+                page.add(&totals);
+                groups.borrow_mut().push(totals);
+
+                let chats = adw::PreferencesGroup::builder()
+                    .title("Chats")
+                    .description("Removing files keeps the messages; a file can be downloaded again while its sender still has it.")
+                    .build();
+                for chat in usage.chats {
+                    let row = adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&chat.name).as_str())
+                        .subtitle(format!("{} · {} files", util::human_size(chat.bytes), chat.count).as_str())
+                        .build();
+                    if chat.count > 0 {
+                        let remove = gtk::Button::builder().icon_name("edit-clear-all-symbolic").tooltip_text("Remove this chat's files from this device").valign(gtk::Align::Center).build();
+                        remove.add_css_class("flat");
+                        let (app, chat, again) = (app.clone(), chat.clone(), again.clone());
+                        remove.connect_clicked(move |_| {
+                            let (app2, chat, again) = (app.clone(), chat.clone(), again.clone());
+                            confirm(&app, "Remove these files?", &format!("{} of files from \"{}\" leave this device. The messages stay.", util::human_size(chat.bytes), chat.name), "Remove", true, move || {
+                                let (app, chat, again) = (app2.clone(), chat.clone(), again.clone());
+                                crate::app::run_in_background(
+                                    move || {
+                                        let files = if chat.kind == "group" { core::list_group_attachments_brief(&chat.id) } else { core::list_attachments_brief(&chat.id) };
+                                        let ids: Vec<String> = files.into_iter().filter(|f| f.status == "complete").map(|f| f.file_id).collect();
+                                        core::remove_local_attachments(&ids)
+                                    },
+                                    move |result| {
+                                        if let Err(error) = result {
+                                            app.toast(&error);
+                                        }
+                                        again();
+                                    },
+                                );
+                            });
+                        });
+                        row.add_suffix(&remove);
+                    }
+                    let prune = gtk::DropDown::from_strings(&["Delete older than…", "1 week", "1 month", "3 months", "6 months", "1 year"]);
+                    prune.set_valign(gtk::Align::Center);
+                    {
+                        let (app, chat, again) = (app.clone(), chat.clone(), again.clone());
+                        prune.connect_selected_notify(move |dd| {
+                            let days: i64 = match dd.selected() { 1 => 7, 2 => 30, 3 => 91, 4 => 182, 5 => 365, _ => return };
+                            dd.set_selected(0);
+                            let before = util::now_ms() as i64 - days * 86_400_000;
+                            let (app, chat, again) = (app.clone(), chat.clone(), again.clone());
+                            crate::app::run_in_background(
+                                {
+                                    let chat = chat.clone();
+                                    move || core::chat_prune_stats(&chat.kind, &chat.id, before)
+                                },
+                                move |stats| {
+                                    if stats.del_msg_count == 0 && stats.del_att_bytes == 0 {
+                                        app.toast("Nothing that old in this chat");
+                                        return;
+                                    }
+                                    let app2 = app.clone();
+                                    confirm(&app, "Delete older items?", &format!("{} messages and {} of files from \"{}\" are deleted on this device.", stats.del_msg_count, util::human_size(stats.del_att_bytes), chat.name), "Delete", true, move || {
+                                        let (app, chat, again) = (app2.clone(), chat.clone(), again.clone());
+                                        crate::app::run_in_background(
+                                            move || core::prune_chat_before(&chat.kind, &chat.id, before),
+                                            move |result| {
+                                                if let Err(error) = result {
+                                                    app.toast(&error);
+                                                }
+                                                again();
+                                            },
+                                        );
+                                    });
+                                },
+                            );
+                        });
+                    }
+                    row.add_suffix(&prune);
+                    chats.add(&row);
+                }
+                page.add(&chats);
+                groups.borrow_mut().push(chats);
+            });
+        })
+    };
+    *rebuild.borrow_mut() = Some(build.clone());
+    build();
+    dialog.present();
 }
