@@ -5,7 +5,7 @@ use super::*;
 impl P2PCore {
 
     // ---------------------------------------------------------------
-    // Bölüm 5: Grup Mesajlaşma (pairwise)
+    // Section 5: group messaging (pairwise)
     // ---------------------------------------------------------------
 
     /// `group-<16 hex nonce><32 hex tag>`, the tag a hash of founder and nonce.
@@ -27,8 +27,7 @@ impl P2PCore {
         Ok(group_id)
     }
 
-    /// bkz. `persist_contact` dosya başı notu — `groups` tablosu da aynı
-    /// şekilde hiç yazılmıyordu.
+    /// See the note at the top of `persist_contact`: the `groups` table was never written either.
     pub(crate) fn persist_group(&self, group: &Group) {
         let conn = match &self.db {
             Some(c) => c,
@@ -148,7 +147,7 @@ impl P2PCore {
     /// version with every vouched device: a reply to `GroupSyncRequest`,
     /// `requeue_unresolved_group_syncs`, `resend_group_to_all`. The change
     /// re-states the avatar (or the name): a member behind gets the whole
-    /// state, one at this version takes it as the same state (bkz.
+    /// state, one at this version takes it as the same state (see
     /// `process_group_update`, tie-break).
     pub(crate) fn sign_group_resync(&self, group: &Group) -> Result<GroupUpdate, String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
@@ -172,8 +171,7 @@ impl P2PCore {
         Ok(update)
     }
 
-    /// #81: the founder signs the current group state again and sends
-    /// it to every member device (and to its own other devices).
+    /// The founder signs the current group state again and sends it to every member device (and to its own other devices).
     pub(crate) fn resend_group_to_all(&mut self, group_id: &str) -> Result<(), String> {
         let own_identity_id = self.my_identity_id().ok_or("No identity")?;
         let group = self.groups.get(group_id).cloned_group()?;
@@ -209,7 +207,7 @@ impl P2PCore {
         self.meta_put(&format!("gvh:{}", group_id), &hex::encode(hash));
     }
 
-    /// #77: ask the founder for the whole group state, at most hourly per group.
+    /// Asks the founder for the whole group state, at most once an hour per group.
     pub(crate) fn request_group_sync(&mut self, group_id: &str) {
         const EVERY_MS: u64 = 60 * 60 * 1000;
         let key = format!("gsr:{}", group_id);
@@ -230,10 +228,8 @@ impl P2PCore {
         }
     }
 
-    /// Spec 5.4: kurucu, grup daveti üretir; davet edilen kişi zaten var
-    /// olan/kurulmakta olan 1:1 bağlantı üzerinden `GroupUpdate(Add)` alır.
-    /// Burada: kurucu tarafında hem `members`'a ekler hem de tüm mevcut +
-    /// yeni üyelere `GroupUpdate` pairwise gönderir (spec 5.2).
+    /// The founder creates a group invite. The invited person receives `GroupUpdate(Add)` over an existing or in-progress 1:1 connection.
+    /// Here the founder adds the member to its own `members` and sends a `GroupUpdate` pairwise to all current and new members.
     pub(crate) fn invite_to_group(&mut self, group_id: &str, new_member_identity_id: &str) -> Result<(), String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
 
@@ -258,7 +254,7 @@ impl P2PCore {
         let full = self.sign_group_change_with(&group, &change, true)?;
         let update = self.sign_group_change(&group, &change)?;
 
-        // Yerel state'i güncelle.
+        // Update local state.
         if let Some(g) = self.groups.get_mut(group_id) {
             apply_change(g, &change, new_version, current_time_ms());
         }
@@ -266,17 +262,12 @@ impl P2PCore {
             self.persist_group(g);
         }
 
-        // Tüm üyelere (yeni eklenen dahil) pairwise gönder (spec 5.2).
-        // önceden bare/şifrelenmemiş
-        // bir NetworkEnvelope::GroupUpdate olarak gönderiliyordu (sadece
-        // Ed25519 imzalı, gossipsub'a AÇIK METİN yayılıyordu) — artık diğer
-        // her şeyle AYNI hibrit ratchet-şifreli kanaldan gidiyor (bkz.
-        // MessageContent::GroupUpdate, needs_delivery_confirmation listesi).
-        // Spec dışı, hata düzeltmesi ("Tor üzerinden bağlı bir cihaz gruba
-        // davet edilmesine rağmen grubu hiç görmüyor"): hedef cihaz henüz
-        // çözülemiyorsa (bkz. `send_group_update_to_member`) artık SESSİZCE
-        // kaybolmuyor, periyodik olarak yeniden denenmek üzere bekleyen
-        // listeye ekleniyor.
+        // Send pairwise to all members (including the new one).
+        // Before, this was sent as a bare, unencrypted `NetworkEnvelope::GroupUpdate` (only Ed25519-signed, and it spread in CLEARTEXT over
+        // gossipsub). It now goes over the same hybrid ratchet-encrypted channel as everything else (see `MessageContent::GroupUpdate` and the
+        // `needs_delivery_confirmation` list).
+        // Fix (a device connected over Tor never saw the group, even though it was invited): if the target device cannot be resolved yet
+        // (see `send_group_update_to_member`), it is no longer silently lost. It is added to the pending list and retried periodically.
         let targets = self.groups.get(group_id).map(|g| g.member_identity_ids()).unwrap_or_default();
         for member_identity_id in targets {
             if member_identity_id == own_identity_id {
@@ -322,8 +313,7 @@ impl P2PCore {
             None
         };
 
-        // Çıkarılan üyeye ULAŞMADAN önce eski üye listesini al (spec 5.3:
-        // çıkarılan üyeye artık GroupUpdate/grup mesajı gönderilmez).
+        // Take the old member list before the removed member is reached. A removed member no longer receives GroupUpdate or group messages.
         let remaining_targets: Vec<String> = group.other_members(&own_identity_id)
             .into_iter()
             .filter(|id| id != member_identity_id)
@@ -345,8 +335,7 @@ impl P2PCore {
         if self.pending_group_messages.remove(&removed_key).is_some() {
             self.remove_persisted_pending_group_messages(group_id, member_identity_id);
         }
-        // bkz. `send_group_update_to_member` — hedef cihaz henüz çözülemiyorsa
-        // artık sessizce kaybolmaz, `group_sync_sweep` yeniden dener.
+        // See `send_group_update_to_member`: if the target device cannot be resolved yet, it is not silently lost. `group_sync_sweep` retries it.
         for member_identity_id in remaining_targets {
             self.send_group_update_to_member(group_id, &member_identity_id, &update);
         }
@@ -357,16 +346,12 @@ impl P2PCore {
         Ok(())
     }
 
-    /// grup profil fotoğrafını ayarlar/kaldırır. `invite_to_group`/
-    /// `remove_from_group` ile AYNI imzalı `GroupUpdate` mekanizmasını
-    /// kullanır (`GroupChange::AvatarUpdate`) — "sadece kurucu değiştirebilir"
-    /// kısıtı zaten `validate_group_update`'in `NotFounder` kontrolünden
-    /// (hem burada gönderen tarafta hem de `process_group_update`'te alıcı
-    /// tarafında) geçer, ayrı bir yetki kontrolü icat edilmedi.
+    /// Sets or removes the group profile picture. Uses the same signed `GroupUpdate` mechanism as `invite_to_group`/`remove_from_group`
+    /// (`GroupChange::AvatarUpdate`). The "only the founder may change it" rule is already enforced by `validate_group_update`'s `NotFounder`
+    /// check (here on the sending side, and in `process_group_update` on the receiving side), so no separate authority check was added.
     pub(crate) fn set_group_avatar(&mut self, group_id: &str, avatar_jpeg: Option<Vec<u8>>) -> Result<(), String> {
-        // bkz. `set_own_profile_picture` AYNI kontrolü / `MAX_AVATAR_BYTES`.
-        // Grupta daha da kritik: `GroupUpdate` ayrıca üye başına ~4 KB'lık
-        // kefalet listesi taşıyor.
+        // See `set_own_profile_picture` for the same check and `MAX_AVATAR_BYTES`. More critical in a group: `GroupUpdate` also carries a
+        // ~4 KB vouch list per member.
         if let Some(a) = &avatar_jpeg {
             if a.len() > MAX_AVATAR_BYTES {
                 return Err(format!(
@@ -390,8 +375,7 @@ impl P2PCore {
         if let Some(g) = self.groups.get(group_id) {
             self.persist_group(g);
         }
-        // bkz. `send_group_update_to_member` — hedef cihaz henüz çözülemiyorsa
-        // artık sessizce kaybolmaz, `group_sync_sweep` yeniden dener.
+        // See `send_group_update_to_member`: if the target device cannot be resolved yet, it is not silently lost. `group_sync_sweep` retries it.
         let targets = group.other_members(&own_identity_id);
         for member_identity_id in targets {
             self.send_group_update_to_member(group_id, &member_identity_id, &update);
@@ -400,14 +384,10 @@ impl P2PCore {
         Ok(())
     }
 
-    /// grubu TÜM üyeler için siler. Yalnızca
-    /// kurucu çağırabilir (aynı `validate_group_update` yetki kuralı karşı
-    /// tarafta da uygulanır). İmzalı `GroupChange::Delete` güncellemesi tüm
-    /// üyelere gönderilir, sonra grup yerelde kaldırılır.
-    /// Kurucu yetkisini başka bir ÜYEYE devreder (bkz.
-    /// `GroupChange::TransferFounder`). Devirden sonra bu cihaz artık
-    /// grubu yönetemez — üye ekleme/çıkarma, ad ve fotoğraf değiştirme
-    /// hakkı yeni kurucuya geçer.
+    /// Deletes the group for ALL members. Only the founder can call this (the same `validate_group_update` authority rule is enforced on the other
+    /// side too). A signed `GroupChange::Delete` update goes to all members, then the group is removed locally.
+    /// Hands the founder role to another MEMBER (see `GroupChange::TransferFounder`). After the handover this device can no longer manage the group:
+    /// adding/removing members and changing the name and photo move to the new founder.
     pub(crate) fn transfer_group_founder(&mut self, group_id: &str, new_founder_identity_id: &str) -> Result<(), String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
@@ -424,12 +404,9 @@ impl P2PCore {
         let new_version = group.version.checked_add(1).ok_or("Grup sürümü tükendi")?;
         let change = GroupChange::TransferFounder(new_founder_identity_id.to_string());
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
-        // bkz. `packet::FounderTransfer` — devrin KENDİ BAŞINA
-        // doğrulanabilir, kompakt tanıklığı. Bu güncellemeyi kaçıran bir
-        // üye onu yeni kurucunun SONRAKİ güncellemelerinden öğrenip
-        // kendini onarabilsin diye zincire ekleniyor; imza ESKİ kurucunun
-        // (yani bizim, şu anki) cihazına ait olduğundan sonradan
-        // uydurulamaz.
+        // See `packet::FounderTransfer`: the transfer's own verifiable, compact proof. It is appended to the chain, so a member who missed this update
+        // can learn it from the new founder's NEXT updates and repair itself. The signature is by the OLD founder (us, at this point), so it cannot
+        // be forged afterwards.
         let transfer_input = packet::founder_transfer_signing_input(
             group_id, new_version, &own_identity_id, new_founder_identity_id,
         );
@@ -471,28 +448,19 @@ impl P2PCore {
         }
         let update = self.sign_group_change(&group, &GroupChange::Delete)?;
 
-        // "silinen grup tüm
-        // üyeler için silinmiyor"): önceden burada kendi basit döngüsü
-        // vardı — bir üyenin aktif cihazı o anda çözülemiyorsa (ör.
-        // çevrimdışıydı) bildirimi SESSİZCE kaybediyordu, `invite_to_group`/
-        // `remove_from_group`/`set_group_avatar`'ın hepsinin kullandığı
-        // `send_group_update_to_member` YENİDEN DENEME mekanizmasının
-        // (bkz. `pending_group_syncs`/`group_sync_sweep`) AKSİNE. Artık o
-        // AYNI helper kullanılıyor.
+        // Fix (a deleted group was not deleted for all members): before, this had its own simple loop. If a member's active device could not be
+        // resolved at that moment (e.g. it was offline), the notice was silently LOST. Unlike the retry mechanism (see `pending_group_syncs` and
+        // `group_sync_sweep`), which `invite_to_group`/`remove_from_group`/`set_group_avatar` all use via `send_group_update_to_member`. Now the SAME
+        // helper is used.
         for member_identity_id in group.other_members(&own_identity_id) {
             self.send_group_update_to_member(group_id, &member_identity_id, &update);
         }
         self.send_group_update_to_siblings(&update);
 
-        // `remove_group_locally` KASITLI olarak bu grup için bekleyen TÜM
-        // senkronları temizler ("artık var olmayan bir grup için sonsuza
-        // dek yeniden denenmesin") — `remove_from_group`/`leave_group` için
-        // doğru, ama TAM OLARAK yukarıdaki döngünün az önce kuyruğa almış
-        // olabileceği silme bildirimini (bir üye çevrimdışıysa) kaybetmemesi
-        // gereken bu fonksiyon için YANLIŞ olurdu. Bu yüzden burada onun
-        // YERİNE sadece yerel grup kaydı kaldırılır — `pending_group_syncs`
-        // dokunulmadan kalır, `group_sync_sweep` üye tekrar erişilebilir
-        // olduğunda silme bildirimini teslim eder.
+        // `remove_group_locally` intentionally clears ALL pending syncs for this group ("never retry forever for a group that no longer exists").
+        // That is right for `remove_from_group`/`leave_group`, but WRONG here: the delete notice just queued (for a member who is offline) must not be
+        // lost. So only the local group record is removed here, `pending_group_syncs` is left alone, and `group_sync_sweep` delivers the delete notice
+        // once the member is reachable again.
         let (version, founder) = self.groups.remove(group_id).map_or((0, String::new()), |g| (g.version, g.founder_identity_id));
         // The rest of `remove_group_locally`. `pending_group_syncs` stays: the
         // Delete notice must still reach members whose device is not known yet.
@@ -502,7 +470,7 @@ impl P2PCore {
         self.delete_group_meta(group_id);
         if let Some(conn) = &self.db {
             let _ = conn.execute("DELETE FROM groups WHERE group_id = ?1", params![group_id]);
-            // bkz. `group_removed_locally`. Cleared when the founder adds us again.
+            // see `group_removed_locally`. Cleared when the founder adds us again.
             let _ = conn.execute(
                 "INSERT INTO removed_groups (group_id, version, founder) VALUES (?1, ?2, ?3) \
                  ON CONFLICT(group_id) DO UPDATE SET version = MAX(version, excluded.version), founder = excluded.founder",
@@ -516,19 +484,12 @@ impl P2PCore {
         Ok(())
     }
 
-    /// bir üyenin (kurucu HARİÇ — kurucu için
-    /// "ayrılma" tanımsız, o SADECE `delete_group` ile TÜM üyeler için
-    /// silebilir) gruptan kendi isteğiyle ayrılması. Sadece kurucunun
-    /// üyelik değiştirebildiği yetki modeli (bkz. `validate_group_update`)
-    /// BOZULMAZ: burada YENİ bir imzalı `GroupChange` ÜRETİLMEZ — bunun
-    /// yerine kurucuya doğrudan bir `LeaveGroupRequest` gönderilir, kurucu
-    /// bunu alınca kendi (zaten var olan, yetkili) `remove_from_group`'unu
-    /// çağırıp gerçek/imzalı `GroupChange::Remove`'u TÜM üyelere dağıtır
-    /// (bkz. `receive_message` `LeaveGroupRequest` kolu). Bu cihaz ise
-    /// isteği gönderir göndermez YEREL grup kaydını iyimser (optimistic)
-    /// olarak hemen kaldırır — `remove_from_group` zaten çıkarılan üyeye
-    /// SON GroupUpdate'i göndermediğinden (bkz. o fonksiyonun notu), bu
-    /// cihaz kurucudan bir onay ASLA almayacaktır; beklemek anlamsız olurdu.
+    /// A member (not the founder: for the founder, "leaving" is undefined, it can only `delete_group` for everyone) leaves the group by its own request.
+    /// The authority model (only the founder changes membership, see `validate_group_update`) is NOT broken: no new signed `GroupChange` is produced here.
+    /// Instead a `LeaveGroupRequest` goes directly to the founder, who on receiving it calls its own authorised `remove_from_group` and distributes the
+    /// real signed `GroupChange::Remove` to all members (see the `LeaveGroupRequest` arm of `receive_message`). This device optimistically removes its
+    /// LOCAL group record as soon as the request is sent. `remove_from_group` never sends the removed member a final GroupUpdate (see its note), so this
+    /// device never gets an acknowledgement from the founder. Waiting would be pointless.
     pub(crate) fn leave_group(&mut self, group_id: &str) -> Result<(), String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
@@ -542,11 +503,9 @@ impl P2PCore {
             return Err("Kurucunun cihazı bilinmiyor, ayrılma isteği gönderilemedi".to_string());
         }
         let content = MessageContent::LeaveGroupRequest { group_id: group_id.to_string() };
-        // bkz. `needs_delivery_confirmation` notu — kurucu o an erişilebilir
-        // olmasa bile (uyku modu, çevrimdışı) bu istek onaylanana kadar
-        // otomatik yeniden denenir, kaybolmaz.
-        // The group stays unless the request could be queued for at least one
-        // founder device: otherwise the founder never drops us and the members
+        // See the `needs_delivery_confirmation` note: even if the founder is not reachable right now (sleep, offline), this request is retried
+        // automatically until acknowledged, and is not lost.
+        // The group stays unless the request could be queued for at least one founder device. Otherwise the founder never drops us and the members
         // keep sending to a group we deleted.
         let mut last_err = None;
         let mut sent = false;
@@ -569,8 +528,7 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Grup kaydını bellekten ve diskten kaldırır (bkz. `delete_group` /
-    /// `process_group_update` Delete kolu).
+    /// Removes the group record from memory and from disk (see `delete_group` and the Delete arm of `process_group_update`).
     pub(crate) fn remove_group_locally(&mut self, group_id: &str) {
         let (version, founder) = self.groups.get(group_id).map_or((0, String::new()), |g| (g.version, g.founder_identity_id.clone()));
         // One transaction: a kill between the two left the group
@@ -579,7 +537,7 @@ impl P2PCore {
         if let Some(conn) = &self.db {
             let done = conn.unchecked_transaction().and_then(|tx| {
                 tx.execute("DELETE FROM groups WHERE group_id = ?1", params![group_id])?;
-                // bkz. `group_removed_locally`. Cleared when the founder adds us again.
+                // see `group_removed_locally`. Cleared when the founder adds us again.
                 tx.execute(
                     "INSERT INTO removed_groups (group_id, version, founder) VALUES (?1, ?2, ?3) \
                      ON CONFLICT(group_id) DO UPDATE SET version = MAX(version, excluded.version), founder = excluded.founder",
@@ -593,10 +551,9 @@ impl P2PCore {
             }
         }
         self.groups.remove(group_id);
-        // bkz. `pending_group_syncs` dokümantasyonu — artık var olmayan bir
-        // grup için sonsuza dek yeniden denenmesin.
+        // See `pending_group_syncs`: a group that no longer exists must not be retried forever.
         self.pending_group_syncs.retain(|(gid, _), _| gid != group_id);
-        // bkz. `pending_group_messages` AYNI notu.
+        // see `pending_group_messages` AYNI notu.
         self.pending_group_messages.retain(|(gid, _), _| gid != group_id);
         self.remove_persisted_pending_group_messages_for_group(group_id);
         self.wb_delete_board(Some(group_id), None);
@@ -630,40 +587,26 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `pending_group_messages` alanı dokümantasyonu — bir üyeye bir
-    /// grup mesajı (Text/Edit/Delete) göndermeyi dener; hedefin aktif
-    /// cihazı henüz bilinmiyorsa (bkz. `resolve_active_device_for_identity`)
-    /// içeriği SESSİZCE KAYBETMEK yerine bekleyen kuyruğa ekler —
-    /// `group_sync_sweep` cihaz çözülebilir hale gelince yeniden dener.
-    /// `send_group_message`/`edit_group_message`/`delete_group_message`'ın
-    /// fan-out döngülerindeki TEKRARLANAN bloğu tek bir yerde toplar (bkz.
-    /// `send_group_update_to_member` AYNI desen, GroupUpdate için).
-    /// Dönüş: mesaj GERÇEKTEN gönderildiyse (veya en azından bir gönderim
-    /// denemesi yapıldıysa) `true`, sadece kuyruklandıysa `false`.
+    /// See `pending_group_messages`. Tries to send a group message (Text/Edit/Delete) to one member. If the target's active device is not yet known
+    /// (see `resolve_active_device_for_identity`), the content is queued in the pending list instead of being silently dropped. `group_sync_sweep`
+    /// retries once a device can be resolved. This gathers the block that was repeated in the fan-out loops of `send_group_message`,
+    /// `edit_group_message` and `delete_group_message` (compare `send_group_update_to_member`, the same pattern for GroupUpdate).
+    /// Returns `true` if the message was really sent (or at least a send attempt was made), `false` if it was only queued.
     pub(crate) fn send_group_message_to_member(&mut self, group_id: &str, member_identity_id: &str, content: &MessageContent) -> bool {
-        // Hesabını silmiş üyeye gönderilmez ve kuyruğa da alınmaz.
+        // A member that deleted its account is neither sent to nor queued for.
         if self.deleted_identities.contains(member_identity_id) {
             return false;
         }
-        // Çoklu-cihaz (spec 1.7.1): üyenin TÜM aktif cihazlarına ayrı ayrı
-        // gönder — aksi halde bir üyenin ikincil cihazı grup mesajlarını hiç
-        // görmezdi. Alıcı tarafta grup arşivi `group_message_local_id` ile
-        // anahtarlandığından cihazlar arası tekrar/çakışma olmaz.
+        // Multi-device (1.7.1): send to ALL of the member's active devices separately. Otherwise a member's secondary device would never see group
+        // messages. On the receiving side the group archive is keyed by `group_message_local_id`, so there is no duplication or conflict between devices.
         let devices = self.active_devices_for_identity(member_identity_id);
         if !devices.is_empty() {
-            // Spec dışı, hata düzeltmesi ("grup düzenle/sil sessizce
-            // kimseye ulaşmayabiliyordu"): önceden burada üyenin cihaz
-            // listesi BOŞ DEĞİLSE kayıtsız şartsız `true` dönülüyordu —
-            // `send_message_content`'in HER cihaz için `Err` dönmesi
-            // (ör. o cihazla ratchet oturumu kurulamadı) çağıranlara
-            // (`edit_group_message`/`delete_group_message`) hiç
-            // yansımıyordu, onlar da yine de `Ok(())` (başarı) rapor
-            // ediyordu. `send_message_content`'in `Ok` dönmesi ağ
-            // yayınının o an gerçekten başarılı olduğu anlamına gelmez
-            // (geçici ağ hataları zaten ayrıca `awaiting_confirmation`
-            // yeniden deneme kuyruğuna alınır, bkz. `publish_with_ack_tracking`)
-            // — ama KALICI bir hata (ör. şifreleme/ratchet hatası) varsa bu
-            // artık doğru şekilde `false`'a yansır.
+            // Fix (group edit/delete sometimes reached nobody, silently): before, if the member's device list was NOT empty, `true` was returned
+            // unconditionally. An `Err` from `send_message_content` for every device (e.g. no ratchet session could be set up with that device) was
+            // never reflected to the callers (`edit_group_message`/`delete_group_message`), which still reported `Ok(())`. An `Ok` from
+            // `send_message_content` does not mean the network publish really succeeded at that moment (temporary network errors are queued for
+            // `awaiting_confirmation` retries anyway, see `publish_with_ack_tracking`). But a PERMANENT error (e.g. an encryption or ratchet error) is
+            // now correctly reflected as `false`.
             let mut sent_to_any_device = false;
             let mut refused: Vec<String> = Vec::new();
             for peer_fp in devices {
@@ -686,27 +629,21 @@ impl P2PCore {
                 crate::log_id(&member_identity_id), group_id
             );
         } else {
-            // Üyenin hiçbir aktif cihazı henüz bilinmiyor — sessizce kaybetmek
-            // yerine kuyruğa al; `group_sync_sweep` çözülünce yeniden dener.
+            // None of the member's active devices is known yet. Instead of losing it silently, queue it. `group_sync_sweep` retries once one resolves.
             warn!(
                 "Grup mesajı: {} için aktif cihaz henüz bilinmiyor (group={}) — periyodik olarak yeniden denenecek (bkz. group_sync_sweep)",
                 crate::log_id(&member_identity_id), group_id
             );
         }
         let key = (group_id.to_string(), member_identity_id.to_string());
-        // NOT: `remove_oldest_persisted_pending_group_message` (bir `self`
-        // metodu) `queue` (bkz. aşağıdaki `entry().or_default()`) hâlâ
-        // ödünç alınmışken çağrılamaz — bu yüzden dolu/aşım kontrolü ÖNCE,
-        // AYRI bir salt-okunur bakışla yapılır.
+        // NOTE: `remove_oldest_persisted_pending_group_message` (a `self` method) cannot be called while `queue` (see the `entry().or_default()` below)
+        // is still mutably borrowed. So the full/overflow check is done FIRST, with a separate read-only view.
         let needs_eviction = self.pending_group_messages.get(&key)
             .map(|q| q.len() >= MAX_PENDING_GROUP_MESSAGES_PER_MEMBER)
             .unwrap_or(false);
         if needs_eviction {
-            // Bellek-içi en eskiyi atacağız, kalıcı kopyasını da (aynı
-            // grup/üye için en eski satır) at — aksi halde diskte
-            // bellek-içi listeden FAZLA satır birikir ve bir sonraki
-            // restart'ta gerçekte atılmış olan bu eski mesaj da yeniden
-            // gönderilirdi.
+            // We will drop the in-memory oldest, and also its persisted copy (the oldest row for the same group and member). Otherwise more rows pile up
+            // on disk than in memory, and on the next restart the message that was really dropped would be sent again.
             self.remove_oldest_persisted_pending_group_message(group_id, member_identity_id);
             let dropped = self.pending_group_messages.get_mut(&key).map(|q| q.remove(0));
             // Not silently: the dropped text's bubble turns to "error".
@@ -721,13 +658,9 @@ impl P2PCore {
         let queue = self.pending_group_messages.entry(key).or_default();
         queue.push(content.clone());
         self.persist_pending_group_message(group_id, member_identity_id, content);
-        // burası eskiden `false` dönüyordu ve çağıranlar
-        // (`send_group_message`/`edit_group_message`/`delete_group_message`)
-        // bunu "ulaşılabilir grup üyesi yok" HATASI sayıp arayüze hata
-        // gösteriyordu — oysa içerik hem bellekte hem DİSKTE kuyruğa alındı
-        // (`pending_group_messages`) ve üyenin cihazı çözülür çözülmez
-        // `group_sync_sweep` tarafından gönderilecek. Kuyruğa alma bir
-        // BAŞARISIZLIK değil, ertelenmiş bir teslimdir.
+        // This used to return `false`, and the callers (`send_group_message`/`edit_group_message`/`delete_group_message`) treated that as the error
+        // "no reachable group member" and showed an error in the UI. But the content was queued both in memory and ON DISK (`pending_group_messages`),
+        // and `group_sync_sweep` sends it as soon as the member's device resolves. Queueing is not a FAILURE. It is a deferred delivery.
         true
     }
 
@@ -747,18 +680,12 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı, hata düzeltmesi ("Tor üzerinden bağlı bir cihaz gruba
-    /// davet edilmesine rağmen grubu hiç görmüyor"): bir üyeye bir
-    /// `GroupUpdate` göndermeyi dener — hedefin aktif cihazı henüz
-    /// bilinmiyorsa (bkz. `pending_group_syncs` notu), bu (group_id,
-    /// identity_id) çifti için güncellemeyi SESSİZCE KAYBETMEK yerine
-    /// bekleyen listeye ekler; `group_sync_sweep` cihaz çözülebilir hale
-    /// gelene kadar periyodik olarak yeniden dener. `invite_to_group`/
-    /// `remove_from_group`/`set_group_avatar`/`delete_group`'un fan-out
-    /// döngülerindeki TEKRARLANAN bloğu tek bir yerde toplar.
+    /// Fix (a device connected over Tor never saw the group, even though it was invited): tries to send a `GroupUpdate` to one member. If the target's
+    /// active device is not yet known (see `pending_group_syncs`), the update is added to the pending list for this (group_id, identity_id) pair instead
+    /// of being silently lost. `group_sync_sweep` retries periodically until the device can be resolved. This gathers the block that was repeated in the
+    /// fan-out loops of `invite_to_group`, `remove_from_group`, `set_group_avatar` and `delete_group`.
     pub(crate) fn send_group_update_to_member(&mut self, group_id: &str, member_identity_id: &str, update: &GroupUpdate) {
-        // Çoklu-cihaz: üyenin TÜM aktif cihazlarına gönder — aksi halde bir
-        // üyenin ikincil cihazının grup üyeliği/adı/avatarı bayat kalırdı.
+        // Multi-device: send to ALL of the member's active devices. Otherwise a member's secondary device would keep a stale group membership, name and avatar.
         let devices = self.active_devices_for_identity(member_identity_id);
         let mut sent = false;
         let mut refused: Vec<String> = Vec::new();
@@ -798,17 +725,15 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `pending_group_syncs`/`send_group_update_to_member` — `reconnect_sweep`
-    /// ile AYNI periyodik desen. Bekleyen her (group_id, identity_id) için
-    /// hedef cihaz artık çözülebiliyorsa saklanan `GroupUpdate`'i gönderir.
+    /// See `pending_group_syncs` and `send_group_update_to_member`: the same periodic pattern as `reconnect_sweep`. For each pending (group_id, identity_id),
+    /// if the target device can now be resolved, the stored `GroupUpdate` is sent.
     pub(crate) fn group_sync_sweep(&mut self) {
         let now = current_time_ms();
         if now.saturating_sub(self.last_group_sync_sweep_at) < GROUP_SYNC_SWEEP_INTERVAL_MS {
             return;
         }
         self.last_group_sync_sweep_at = now;
-        // ponytail: one reload per park; a copy whose resend fails again
-        // waits for the next park, a stale device's return or a restart.
+        // ponytail: one reload per park. A copy whose resend fails again waits for the next park, a stale device's return, or a restart.
         if self.durable_reload_at != 0 && now >= self.durable_reload_at {
             self.durable_reload_at = 0;
             self.load_pending_durable_retries_from_db();
@@ -822,25 +747,19 @@ impl P2PCore {
                 .map(|((gid, id), update)| (gid.clone(), id.clone(), update.clone()))
                 .collect();
             for (group_id, member_identity_id, update) in pending {
-                // Çoklu-cihaz: helper üyenin TÜM aktif cihazlarına fan-out
-                // eder ve çözülürse pending_group_syncs'ten düşer; hâlâ
-                // çözülemiyorsa (aktif cihaz yok) girdiyi korur.
+                // Multi-device: the helper fans out to ALL of the member's active devices, and removes the entry from `pending_group_syncs` once they
+                // resolve. If it is still unresolved (no active device), the entry is kept.
                 self.send_group_update_to_member(&group_id, &member_identity_id, &update);
             }
         }
-        // bkz. `pending_group_messages` alanı dokümantasyonu — AYNI sweep,
-        // ayrı kuyruk (bir üye için birikmiş TÜM mesajlar, GroupUpdate'in
-        // aksine tek bir "en güncel durum" değil, SIRAYLA gönderilmeli).
+        // See `pending_group_messages`: the same sweep, but a separate queue. ALL messages accumulated for one member must be sent IN ORDER, unlike
+        // GroupUpdate, where only the latest state matters.
         if !self.pending_group_messages.is_empty() {
             let keys: Vec<(String, String)> = self.pending_group_messages.keys().cloned().collect();
             for (group_id, member_identity_id) in keys {
-                // Spec dışı  : kuyruğu
-                // boşaltmadan ÖNCE üyenin HÂLÂ grupta olduğunu doğrula. Bir
-                // üye, mesajlar onun (o an çözülemeyen) cihazı için beklerken
-                // gruptan çıkarılmış/ayrılmış olabilir; cihazı sonradan
-                // çözülünce bu bayat mesajları göndermek, artık üye OLMAYAN
-                // birine grup etkinliğini sızdırır. Artık üye değilse kuyruğu
-                // (bellek + kalıcı kopya) sessizce at.
+                // Before draining the queue, verify the member is STILL in the group. A member may have been removed or may have left while messages waited
+                // for its (then unresolved) device. Sending the stale messages once that device resolves would leak group activity to someone who is no
+                // longer a member. If it is no longer a member, the queue (in memory and the persisted copy) is dropped silently.
                 let still_member = self.groups.get(&group_id)
                     .map(|g| g.is_member(&member_identity_id))
                     .unwrap_or(false);
@@ -852,7 +771,7 @@ impl P2PCore {
                         crate::log_id(&member_identity_id), group_id, dropped);
                     continue;
                 }
-                // Çoklu-cihaz: üyenin TÜM aktif cihazları çözülebiliyorsa hepsine.
+                // Multi-device: if all of the member's active devices can be resolved, send to all of them.
                 let devices = self.active_devices_for_identity(&member_identity_id);
                 if devices.is_empty() { continue; }
                 let queued = match self.pending_group_messages.remove(&(group_id.clone(), member_identity_id.clone())) {
@@ -908,13 +827,10 @@ impl P2PCore {
         }
     }
 
-    /// Tek bir kurucu devir tanıklığını doğrular — bkz.
-    /// `packet::FounderTransfer`.
+    /// Verifies a single founder handover attestation. See `packet::FounderTransfer`.
     ///
-    /// The signing device must be ACTIVE now (a stolen, revoked device must
-    /// not hand the group over). Known cost: a member that missed a transfer
-    /// whose signing device was revoked afterwards cannot verify it any more
-    /// and must be re-invited.
+    /// The signing device must be ACTIVE now (a stolen or revoked device must not be able to hand the group over). Known cost: a member that missed a
+    /// transfer whose signing device was revoked afterwards cannot verify it any more and must be re-invited.
     pub(crate) fn verify_founder_transfer(&self, group_id: &str, current_founder: &str, t: &packet::FounderTransfer) -> bool {
         if t.group_id != group_id || t.from_identity != current_founder {
             return false;
@@ -938,21 +854,16 @@ impl P2PCore {
         verify_hybrid_signature(&input, &t.signature, &t.signature_pq, signer).is_ok()
     }
 
-    /// Yerel kurucuyu, gelen güncellemenin taşıdığı devir zinciriyle
-    /// ilerletir — bkz. `packet::FounderTransfer` (kilitlenme senaryosu).
+    /// Advances the local founder using the transfer chain carried by an incoming update. See `packet::FounderTransfer` (deadlock scenario).
     ///
-    /// Zinciri sürüm sırasına göre yürür: her adımda "şu anki yerel
-    /// kurucudan devralan, imzası doğrulanan" bir girdi arar. Bulamayınca
-    /// durur. Döngüye giremez — her adım kurucuyu DEĞİŞTİRMEK zorunda ve
-    /// tur sayısı zincir uzunluğuyla sınırlı.
+    /// Walks the chain in version order. At each step it looks for an entry that hands over from the CURRENT local founder and whose signature verifies.
+    /// When it finds none, it stops. It cannot loop: each step must CHANGE the founder, and the number of rounds is bounded by the chain length.
     ///
-    /// Dönüş: onarım yapıldıysa yeni kurucu kimliği.
+    /// Returns the new founder's identity id if a repair was made.
     ///
-    /// `local_chain`: the transfers this device already holds. A transfer is
-    /// taken only if it is NEWER than the one that made the current founder
-    /// founder. Without that floor an old transfer could be replayed: F hands
-    /// over to A (v5), A hands back (v9), and anyone holding the v5 blob made
-    /// A founder again.
+    /// `local_chain`: the transfers this device already holds. A transfer is taken only if it is NEWER than the one that made the current founder
+    /// founder. Without that floor an old transfer could be replayed: F hands over to A (v5), A hands back (v9), and anyone holding the v5 blob would
+    /// make A founder again.
     pub(crate) fn heal_founder_chain(&self, group_id: &str, current_founder: &str, local_chain: &[packet::FounderTransfer], chain: &[packet::FounderTransfer], new_version: u32, min_floor: u32) -> Vec<packet::FounderTransfer> {
         let mut walked = Vec::new();
         let mut sorted: Vec<&packet::FounderTransfer> = chain.iter().collect();
@@ -978,36 +889,24 @@ impl P2PCore {
         walked
     }
 
-    /// Bu gönderen, bu gruba yazma yetkisine sahip mi?
+    /// Is this sender allowed to write to this group?
     ///
-    /// Bu denetimde bulundu: grup mesajları (`Text`/`FileOffer`/`Reaction`,
-    /// hepsi `MessageContent.group_id` taşır) alıcı tarafta HİÇBİR üyelik
-    /// kontrolünden geçmiyordu. `receive_message` yalnızca "paketi imzalayan
-    /// cihaz tanıdık ve `sender_identity_id` o cihazın kayıtlı kimliği"
-    /// olduğunu doğruluyor — `group_id` alanı ise tamamen gönderenin
-    /// İDDİASI. Sonuçları:
+    /// Found in an audit: group messages (`Text`/`FileOffer`/`Reaction`, all carrying `MessageContent.group_id`) passed NO membership check on the
+    /// receiving side. `receive_message` only verifies that the packet was signed by a known device and that `sender_identity_id` is that device's
+    /// registered identity. The `group_id` field was entirely the sender's CLAIM. Consequences:
     ///
-    /// - Gruptan ÇIKARILAN bir üye yazmaya devam edebiliyordu: çıkarma
-    ///   yalnızca kalan üyelerin GÖNDERME fan-out'undan düşürüyor, o kişiyle
-    ///   kurulmuş ikili ratchet duruyor. Mesajı `archive_group_message` ile
-    ///   arşive girip UI'da meşru bir grup mesajı olarak görünüyordu.
-    /// - Grupla hiç ilgisi olmayan HERHANGİ bir kişi listesi üyesi, bir
-    ///   `group_id` bildiği anda (çıkarılmış bir üye bilir, bir ekran
-    ///   görüntüsü sızdırabilir) o gruba mesaj/dosya enjekte edebiliyordu.
+    /// - A member REMOVED from the group could keep writing. Removal only drops that person from the remaining members' send fan-out, and the pairwise
+    ///   ratchet with them stays. The message went into the archive via `archive_group_message` and showed in the UI as a legitimate group message.
+    /// - ANY contact in the list, once it knew a `group_id` (a removed member knows one, a screenshot can leak one), could inject messages or files
+    ///   into that group.
     ///
-    /// Kural KASITLI olarak yalnızca "grubu tanıyorsak" uygulanıyor: yerelde
-    /// hiç bilmediğimiz bir grup, henüz ulaşmamış bir davet/`GroupUpdate`
-    /// olabilir (gossipsub sıra garantisi vermez ve geç katılan üye
-    /// senaryosu tam olarak budur, bkz. `sync_members`) — orada reddetmek
-    /// meşru ilk mesajları düşürürdü. Bilinen bir grupta üye olmayan bir
-    /// gönderen ise belirsiz değil, açık bir yetkisizlik.
+    /// The rule applies ONLY when we know the group, on purpose. A group we have never seen may be an invite or `GroupUpdate` that has not reached us
+    /// yet (gossipsub gives no ordering guarantee, and the late-joining member case is exactly this, see `sync_members`). Rejecting there would drop
+    /// legitimate first messages. For a known group, a sender who is not a member is not ambiguous: it is a clear lack of authority.
     ///
-    /// Reddedilen pakete Ack GÖNDERİLMEZ: bir üyeliği bizden ÖNCE öğrenmiş
-    /// meşru bir gönderen (üyelik güncellemesi bize henüz gelmemiş) yeniden
-    /// dener ve `GroupUpdate` ulaştığı anda kabul edilir — yani yarış
-    /// kendiliğinden onarılır.
-    /// Whether a received group text @mentions me: my own identity id in its
-    /// list after dropping non-members (the text itself is not trusted).
+    /// The rejected packet is NOT acked. A legitimate sender who learned of its membership before we did will retry, and be accepted once our
+    /// `GroupUpdate` arrives. The race heals itself.
+    /// Whether a received group text @mentions me: my own identity id in its list after dropping non-members (the text itself is not trusted).
     pub(crate) fn group_mentions_me(&self, group_id: &str, mentions: Vec<String>) -> bool {
         let (Some(me), Some(group)) = (self.identity.as_ref(), self.groups.get(group_id)) else { return false };
         filter_mentions(group, None, mentions).iter().any(|id| *id == me.identity_id)
@@ -1016,18 +915,15 @@ impl P2PCore {
     pub(crate) fn sender_may_post_to_group(&self, group_id: &str, sender_identity_id: &str) -> bool {
         match self.groups.get(group_id) {
             Some(group) => group.is_member(sender_identity_id),
-            // Unknown: the GroupUpdate may still be on its way. Not so for a
-            // group we left, were removed from or deleted. H13: and only an
-            // id `create_group` can make (any string, up to ~1 MB, was archived).
+            // Unknown: the GroupUpdate may still be on its way. Not so for a group we left, were removed from, or deleted.
+            // Only an id that `create_group` can make is accepted (before, any string up to ~1 MB was archived).
             None => is_group_id(group_id) && !self.group_removed_locally(group_id) && self.unknown_group_has_room(group_id),
         }
     }
 
-    /// rows of a group we do not hold are never shown nor cleaned, and
-    /// any contact can mint ids. An id that already has rows is taken; a new
-    /// one only while fewer than 16 such groups exist.
-    /// ponytail: one COUNT over messages per message of an unknown group;
-    /// keep a set in memory if that path gets hot.
+    /// Rows of a group we do not hold are never shown or cleaned, and any contact can mint ids. An id that already has rows is taken. A new one is
+    /// only accepted while fewer than 16 such groups exist.
+    /// ponytail: one COUNT over messages per message of an unknown group. Keep a set in memory if that path gets hot.
     pub(crate) fn unknown_group_has_room(&self, group_id: &str) -> bool {
         let Some(conn) = &self.db else { return false };
         conn.query_row(
@@ -1051,9 +947,8 @@ impl P2PCore {
             &update.group_id, update.new_version, &update.change, &update.group_name,
             &update.members, &update.member_devices, &update.signed_by, &update.signed_by_device,
         )?;
-        // Artık MessagePacket/HandshakeInit ile AYNI hibrit (Ed25519+ML-DSA)
-        // model — bkz. sign_group_update/packet.rs GroupUpdate.signature_pq
-        // notu (güvenlik denetimi düzeltmesi).
+        // Now the same hybrid (Ed25519 + ML-DSA) model as MessagePacket/HandshakeInit. See `sign_group_update` and the packet.rs
+        // `GroupUpdate.signature_pq` note (security fix).
         verify_hybrid_signature(&to_verify, &update.signature, &update.signature_pq, &signer)
             .map_err(|_| "GroupUpdate signature verification failed".to_string())?;
         // Stored, and returned by every `list_groups`.
@@ -1061,8 +956,7 @@ impl P2PCore {
             return Err("GroupUpdate: grup adı çok uzun".to_string());
         }
 
-        // signed_by_device'ın kurucunun bilinen/Active bir cihazı olup
-        // olmadığını kontrol et (spec 5.2).
+        // Check that `signed_by_device` is an Active device of the founder.
         let signer_is_active = signer.identity_id == update.signed_by && signer.is_active;
 
         // Members are stored, synced and fanned out to; ids are compared
@@ -1085,16 +979,12 @@ impl P2PCore {
             })
         };
 
-        // önceden burada boş isimle ("") bir grup
-        // oluşturuluyordu — `GroupUpdate` artık her zaman güncel
-        // `group_name`'i taşıdığı için (bkz. packet.rs notu), ilk kez
-        // görülen bir grup da doğru adla oluşturulabiliyor.
-        // A group we left comes back only under the founder it had, or one the
-        // carried chain leads to from there: any contact that knew the id
-        // could re-create it with itself as founder.
-        // A group new to us: the founder its id names (`group_id_for_founder`).
-        // That is the signer, or the first founder of the carried chain, from
-        // which the walk below must then reach the signer.
+        // Before, a group was created here with an empty name (""). Since `GroupUpdate` now always carries the current `group_name` (see packet.rs),
+        // a group seen for the first time can be created with the right name.
+        // A group we left comes back only under the founder it had, or one the carried chain leads to from there. Any contact that knew the id could
+        // otherwise re-create it with itself as founder.
+        // A group new to us: the founder its id names (`group_id_for_founder`). That is the signer, or the first founder of the carried chain, from which
+        // the walk below must then reach the signer.
         let default_founder = match removed.as_ref().map(|(_, f)| f.clone()).filter(|f| !f.is_empty()) {
             Some(f) => f,
             None if group_exists => update.signed_by.clone(),
@@ -1110,14 +1000,10 @@ impl P2PCore {
         let default_group = || Group::new(update.group_id.clone(), update.group_name.clone(), default_founder.clone(), current_time_ms());
         let mut group_ref = group_snapshot.unwrap_or_else(default_group);
 
-        // Kurucu devri onarımı — bkz. `heal_founder_chain` /
-        // `packet::FounderTransfer`. Doğrulamadan ÖNCE, çünkü onarım tam
-        // olarak `NotFounder` reddini önlemek için var. Zincirdeki her
-        // girdi kendi imzasını taşıdığından bu, yetkiyi gevşetmiyor: uydurma
-        // bir zincir doğrulamadan geçemez.
-        // for a group we left, the stored founder already holds
-        // every transfer up to the version we left at; an older carried
-        // transfer is a replay.
+        // Founder handover repair: see `heal_founder_chain` and `packet::FounderTransfer`. It runs BEFORE validation, because the repair exists precisely
+        // to prevent a `NotFounder` rejection. Each entry in the chain carries its own signature, so this does not loosen authority: a forged chain would
+        // fail validation.
+        // For a group we left, the stored founder already holds every transfer up to the version we left at. An older carried transfer is a replay.
         let min_floor = removed.as_ref().map_or(0, |(v, _)| *v);
         let walked = self.heal_founder_chain(
             &update.group_id, &group_ref.founder_identity_id, &group_ref.founder_chain, &update.founder_chain, update.new_version, min_floor,
@@ -1162,23 +1048,14 @@ impl P2PCore {
         }
         let gap = group_exists && update.new_version > group_ref.version.saturating_add(1);
         if let Err(e) = validate_group_update(&check, &update.signed_by, signer_is_active, update.new_version) {
-            // Spec dışı, hata düzeltmesi (bkz. `PendingConfirmation.regen_content`
-            // / "6 saat çevrimdışı" senaryosu): `StaleOrOutOfOrderVersion`,
-            // saldırı/bozulma DEĞİL — alıcı bu (veya daha yeni bir)
-            // versiyonu ZATEN uygulamış demektir (ör. bu GroupUpdate uzun
-            // süre teslim edilemediği için tazelenip tekrar denenirken, o
-            // sırada BAŞKA bir grup değişikliği zaten normal yoldan ulaşıp
-            // versiyonu ileri taşımış olabilir). Bunu Err olarak yukarı
-            // taşırsak çağıran Ack GÖNDERMEZ (bkz. çağıran nokta) — gönderen
-            // taraf artık gereksiz/bayat bu paketi SÜRESİZ tazeleyip
-            // göndermeye devam eder, çünkü hiçbir zaman onaylanmaz. Alıcı
-            // için yapacak bir şey kalmadığından bunu Ok(()) say. (H7: the
-            // caller acks every other error too, except "Unknown signer
-            // device": the same update can never pass later. A missed
-            // founder handover is healed by the carried `founder_chain`.)
+            // Fix (see `PendingConfirmation.regen_content` and the "6 hours offline" scenario): `StaleOrOutOfOrderVersion` is not an attack or corruption.
+            // The recipient has ALREADY applied this version, or a newer one. E.g. while this GroupUpdate was refreshed and retried because it could not be
+            // delivered for a long time, ANOTHER group change may already have arrived by the normal path and moved the version forward. If we carried this
+            // up as an Err, the caller would send NO Ack (see the caller), and the sender would keep refreshing and resending this stale packet forever,
+            // because it is never acknowledged. Nothing is left for the recipient to do, so it counts as Ok(()). The caller acks every other error too,
+            // except "unknown signer device": the same update can never pass later. A missed founder handover is healed by the carried `founder_chain`.
             if matches!(e, GroupUpdateError::StaleOrOutOfOrderVersion) {
-                // #77: an older update (late, or a full copy) still vouches
-                // for devices: founder-signed, and only of current members.
+                // An older update (late, or a full copy) still vouches for devices: founder-signed, and only of current members.
                 if group_exists {
                     self.adopt_group_update_devices(update, &group_ref.member_identity_ids());
                 }
@@ -1224,10 +1101,8 @@ impl P2PCore {
             return Err(format!("{:?}", e));
         }
 
-        // Gap tespiti: bir veya daha fazla ara güncelleme kaçırıldıysa
-        // (ör. Add/Remove) yerel üyelik listesi güncelin gerisinde olabilir —
-        // artık kilitlenmiyoruz (bkz. group.rs StaleOrOutOfOrderVersion notu)
-        // ama bunu görünür kılıyoruz.
+        // Gap detection: if one or more intermediate updates were missed (e.g. Add/Remove), the local member list may lag behind the latest. We no longer
+        // deadlock (see the `StaleOrOutOfOrderVersion` note in group.rs), but we make this visible.
         if gap {
             error!(
                 "GroupUpdate gap (group={}): yerel version {} -> gelen {} (aradaki {} güncelleme kaçırıldı; üyelik listesi eksik olabilir)",
@@ -1236,13 +1111,10 @@ impl P2PCore {
             );
         }
 
-        // kurucu grubu TÜM üyeler için sildi —
-        // yerel kaydı kaldır ve çık (aşağıdaki alan güncelleme yolu
-        // uygulanmaz). Yetki zaten yukarıda `validate_group_update` ile
-        // doğrulandı (yalnızca kurucu).
-        // A Delete for a group not held here: no row for an id
-        // never held (any contact could add rows for ids bound to itself),
-        // and for one we left only its version moves; its founder stays.
+        // The founder deleted the group for ALL members: remove the local record and leave (the field update path below is not applied). Authority was
+        // already checked above with `validate_group_update` (founder only).
+        // A Delete for a group not held here: there is no row for an id never held (any contact could add rows for ids bound to itself). For a group we
+        // left, only its version moves, and its founder stays.
         if matches!(update.change, GroupChange::Delete) && !group_exists {
             if removed.is_some() {
                 if let Some(conn) = &self.db {
@@ -1267,23 +1139,15 @@ impl P2PCore {
         }
 
         if !group_exists {
-            // Bu denetimde bulundu: yerelde HİÇ bilmediğimiz bir grup için
-            // `validate_group_update`, `group_ref`'i `default_group()` ile
-            // (kurucu = imzalayan) kuruyor — yani kontrol tanımı gereği
-            // geçiyor. Sonuç: kişi listesindeki HERHANGİ biri, bizi hiç üye
-            // yapmayan bir `GroupUpdate` göndererek cihazımızda istediği
-            // adla bir grup YARATABİLİYORDU ("Şirket BT Destek" gibi) ve
-            // ardından kendisi o grubun tek üyesi/kurucusu olduğundan
-            // `sender_may_post_to_group`'tan da geçip içine mesaj
-            // atabiliyordu. Sosyal mühendislik için hazır bir yüzey.
+            // Found in an audit: for a group we have NEVER known locally, `validate_group_update` builds `group_ref` via `default_group()` (founder = the
+            // signer), so by definition the check passes. Result: ANY person in the contact list could send a `GroupUpdate` that does NOT include us, and
+            // create a group on our device with an arbitrary name (e.g. "IT Support"). Since they were the only member and founder, they then also passed
+            // `sender_may_post_to_group` and could post messages into it. A ready-made social engineering surface.
             //
-            // Kural: bilinmeyen bir grup ancak bu güncelleme BİZİ üye
-            // yapıyorsa oluşturulur. `members` boş olan (eski sürüm)
-            // göndericilerde tek dayanak `Add(biz)` olur.
+            // Rule: an unknown group is created only if this update makes US a member. For a `members` list that is empty (older senders), the only basis
+            // is `Add(us)`.
             //
-            // the caller acks this Err. A group we are really in but lost
-            // locally is not refused here: every update carries `members`,
-            // which names us.
+            // The caller acks this Err. A group we are really in but lost locally is not refused here: every update carries `members`, which names us.
             let me = self.identity.as_ref().map(|i| i.identity_id.clone()).unwrap_or_default();
             let adds_us = matches!(&update.change, GroupChange::Add(id) if *id == me);
             let makes_us_a_member = update.members.iter().any(|m| *m == me) || adds_us;
@@ -1312,10 +1176,8 @@ impl P2PCore {
             // The `removed_groups` row goes once the group is persisted (below).
             self.groups.insert(update.group_id.clone(), Group::new(update.group_id.clone(), update.group_name.clone(), group_ref.founder_identity_id.clone(), current_time_ms()));
         }
-        // bkz. `MAX_AVATAR_BYTES` — gelen yönde sınır yoktu. Kurucu
-        // yetkisi bir boyut yetkisi değil: aşan avatar DÜŞÜRÜLÜR ama
-        // güncellemenin geri kalanı (üyelik, ad, sürüm) normal işlenir,
-        // aksi hâlde tek bir büyük fotoğraf grubu kilitlerdi.
+        // See `MAX_AVATAR_BYTES`. The incoming direction had no limit. Founder authority is not a size authority: an oversized avatar is DROPPED, but
+        // the rest of the update (membership, name, version) is processed normally. Otherwise one large photo would lock the group.
         let change = match &update.change {
             GroupChange::AvatarUpdate(Some(a)) if a.len() > MAX_AVATAR_BYTES => {
                 warn!(
@@ -1335,29 +1197,20 @@ impl P2PCore {
                 g.sync_members(&update.members, current_time_ms());
             }
             apply_change(g, &change, update.new_version, current_time_ms());
-            // Her güncellemede ismi senkron tut (self-healing) — sadece
-            // açık bir Rename değişikliğinde değil.
+            // Keep the name in sync on every update (self-healing), not only on an explicit Rename change.
             g.name = update.group_name.clone();
-            // kurucudan gelen
-            // TAM üyelik listesine eşitle — bkz. `GroupUpdate.members`. Bu
-            // olmadan, sonradan eklenen bir üye kendisinden ÖNCE eklenmiş
-            // üyeleri hiç öğrenemiyordu (grubu [kurucu, ben] sanıyordu).
-            // Eski (members'sız) bir gönderenle uyum için liste boşsa
-            // dokunmuyoruz — o durumda eski davranış korunur. (Applied above,
-            // before `apply_change`.)
+            // Sync to the FULL member list from the founder (see `GroupUpdate.members`). Without this, a member added later never learned about members
+            // added BEFORE it (it thought the group was [founder, me]). For compatibility with an older sender that sends no members list, the list is not
+            // touched when it is empty, and the old behaviour stays in that case. (Applied above, before `apply_change`.)
         }
         if matches!(change, GroupChange::AvatarUpdate(_)) {
             self.set_group_avatar_version(&update.group_id, update.new_version);
         }
-        // Zinciri her güncellemede benimse (yalnızca onarım anında değil):
-        // yetki bize devredilirse SONRAKİ güncellemelerimizi bu zincirle
-        // imzalamamız gerekiyor, yoksa devri kaçıran üyeler bizden gelen
-        // hiçbir şeyi kabul edemez. Doğrulanamayan girdiler alınmaz.
-        // The chain is outside the update signature. Kept: what the walk
-        // above verified from our founder on, and this update's own transfer.
-        // Every self-signed entry used to be kept: a member forwarding a
-        // genuine update filled the chain with transfers of its own at
-        // versions near u32::MAX, and no real transfer could heal us again.
+        // Adopt the chain on every update (not only during a repair). If authority is handed to us, our NEXT updates must be signed with this chain, or
+        // the members who missed the handover would reject everything from us. Unverifiable entries are not taken.
+        // The chain is outside the update signature. What is kept: what the walk above verified from our founder onward, and this update's own transfer.
+        // Every self-signed entry used to be kept: a member forwarding a genuine update filled the chain with transfers of its own at versions near
+        // u32::MAX, and no real transfer could heal us again.
         let own_transfer = update.founder_chain.iter().find(|t| {
             matches!(&update.change, GroupChange::TransferFounder(to) if *to == t.to_identity)
                 && t.version == update.new_version
@@ -1368,10 +1221,8 @@ impl P2PCore {
                 g.push_founder_transfer(t);
             }
         }
-        // kurucunun kefil olduğu üye
-        // anahtarlarını benimse — böylece hiç eşleşmediğimiz üyelerle de
-        // ratchet kurup mesajlaşabiliriz (bkz. adopt_vouched_member_devices;
-        // güvenlik kuralları orada).
+        // Adopt the device keys the founder vouched for on member identities. This lets us set up ratchets and message members we have never paired
+        // with (see `adopt_vouched_member_devices`; the security rules are there).
         self.adopt_group_update_devices(update, &update.members);
         if !same_version || tie > old_tie {
             self.set_group_tie(&update.group_id, &tie);
@@ -1399,8 +1250,7 @@ impl P2PCore {
                 );
             }
         }
-        // #77: updates carry only new devices. Missed one (a gap), or a
-        // member we hold no device of: ask the founder for the whole state.
+        // Updates carry only new devices. If one was missed (a gap), or we hold no device of a member, ask the founder for the whole state.
         let missing = self.groups.get(&update.group_id).map_or(false, |g| {
             g.other_members(&me).iter().any(|m| self.active_devices_for_identity(m).is_empty() && !self.deleted_identities.contains(m))
         });
@@ -1435,20 +1285,15 @@ impl P2PCore {
         }
     }
 
-    /// Bir Identity için bilinen (ve Aşama A'da tek olan) Active cihaz
-    /// fingerprint'ini bulur.
-    /// Spec dışı, kullanıcı kararı (üyelerin otomatik tanıştırılması):
-    /// KURUCU tarafında, verilen üye kimlikleri için kefil olunacak cihaz
-    /// kayıtlarını toplar (bkz. `GroupUpdate.member_devices`). Kendi
-    /// cihazımız `own_devices`'tan, diğerleri `known_remote_devices`'tan
-    /// gelir; bilinmeyen üyeler atlanır (kurucu onları da tanımıyorsa
-    /// kefil olamaz).
+    /// Finds the known Active device fingerprint for an identity (phase A: there is only one).
+    /// On the FOUNDER side, collects the device records to vouch for the given member identities (see `GroupUpdate.member_devices`). Our own devices
+    /// come from `own_devices`, the others from `known_remote_devices`. Unknown members are skipped (if the founder does not know them either, it cannot vouch).
     pub(crate) fn collect_vouched_member_devices(&self, group_id: &str, member_ids: &[String]) -> Vec<GroupMemberDevice> {
         let own_identity_id = self.identity.as_ref().map(|i| i.identity_id.clone()).unwrap_or_default();
         let mut out = Vec::new();
         for id in member_ids {
             // The identity's first device if we have it (it needs no proof,
-            // bkz. `vouch_proofs`), else the smallest fingerprint; `find`
+            // see `vouch_proofs`), else the smallest fingerprint; `find`
             // took whichever the map gave first.
             let pick = |m: &HashMap<String, DeviceRecord>| m.values()
                 .filter(|d| d.identity_id == *id && d.is_active)
@@ -1464,21 +1309,12 @@ impl P2PCore {
                     sign_pubkey_mldsa: d.sign_pubkey_mldsa.clone(),
                     kem_pubkey_x25519: d.kem_pubkey_x25519.clone(),
                     kem_pubkey_mlkem: d.kem_pubkey_mlkem.clone(),
-                    // Spec dışı, ağ sağlamlığı düzeltmesi ("üç Tor eşli, biri
-                    // kurucu/köprü olurken diğer ikisi hem DM hem grup
-                    // içinde birbirine hiç ulaşamıyor" hatası): burada ÖNCEDEN
-                    // sadece `device_last_addr` (en son işe yarayan HERHANGİ
-                    // bir adres — bir LAN/röle bağlantısı görüldüyse bunun
-                    // ÜZERİNE yazılmış, Tor-ONLY bir üçüncü tarafa asla
-                    // ulaşamayacak bir adres olabilir) kullanılıyordu. Bu,
-                    // `try_reconnect_device`'in AYNI kökten (bkz. o fonksiyon
-                    // ve `device_onion_addr` alanı dokümantasyonu) zaten
-                    // düzeltilmiş sorunuydu — kefalet (vouch) anlık görüntüsü
-                    // bu düzeltmeyi hiç görmemişti. Artık asla bir LAN/röle
-                    // adresi tarafından üzerine yazılmayan `device_onion_addr`
-                    // kullanılır (M-28: `device_last_addr`'a düşülmez).
-                    // onion only — a clearnet/UPnP address must never
-                    // travel inside a group update (the node dials onion only).
+                    // Network robustness fix (a case with three Tor peers, where one is the founder/bridge and the other two could not reach each other, in both
+                    // DM and group): this used to use only `device_last_addr`, the last address that worked. That could be an address written OVER a LAN/relay
+                    // connection, one a Tor-only third party could never reach. The same root cause was already fixed in `try_reconnect_device` (see that
+                    // function and the `device_onion_addr` field docs), but the vouch snapshot had never seen the fix. Now `device_onion_addr` is used, which is
+                    // never overwritten by a LAN/relay address (no fallback to `device_last_addr`).
+                    // onion only: a clearnet/UPnP address must never travel inside a group update (the node dials onion only).
                     last_addr: if *id == own_identity_id {
                         self.get_node_address()
                     } else {
@@ -1495,7 +1331,7 @@ impl P2PCore {
         out
     }
 
-    /// bkz. `GroupUpdate.member_device_proofs`.
+    /// see `GroupUpdate.member_device_proofs`.
     pub(crate) fn vouch_proofs(&self, vouched: &[GroupMemberDevice]) -> Vec<packet::DeviceAddProof> {
         vouched.iter()
             .filter(|d| d.device_fingerprint != d.identity_id)
@@ -1503,28 +1339,22 @@ impl P2PCore {
             .collect()
     }
 
-    /// Spec dışı, kullanıcı kararı (üyelerin otomatik tanıştırılması):
-    /// ALICI tarafında, kurucunun kefil olduğu üye cihazlarını benimser —
-    /// böylece daha önce hiç eşleşmediğimiz üyelerle de ratchet kurup
-    /// mesajlaşabiliriz (bkz. `GroupUpdate.member_devices`).
+    /// User decision (automatic introduction of members): on the RECEIVING side, adopts the member devices the founder vouched for, so we can set up
+    /// ratchets and message members we have never paired with (see `GroupUpdate.member_devices`).
     ///
-    /// GÜVENLİK KURALLARI (bkz. o alanın notu):
-    /// - ZATEN BİLDİĞİMİZ bir cihazın anahtarları ASLA ezilmez (kötü niyetli
-    ///   bir kurucu, güvendiğimiz bir kişinin anahtarını değiştiremez).
-    /// - `device_fingerprint`, anahtarların SHA3-256'sı olmalı (kendi içinde
-    ///   tutarsız kayıtlar reddedilir).
-    /// - Kendi kimliğimiz atlanır.
-    /// - Eklenen kişiler `verified=false` (grup üzerinden eklendi, yüz yüze
-    ///   QR ile doğrulanmadı) — UI bunu gösterir.
+    /// SECURITY RULES (see the field's note):
+    /// - The keys of a device we ALREADY know are NEVER overwritten. A malicious founder cannot change the key of a person we trust.
+    /// - `device_fingerprint` must be the SHA3-256 of the keys (records that are inconsistent with themselves are rejected).
+    /// - Our own identity is skipped.
+    /// - Added contacts get `verified=false` (added via a group, not verified face to face with QR). The UI shows this.
     pub(crate) fn adopt_vouched_member_devices(&mut self, devices: &[GroupMemberDevice], proofs: &[packet::DeviceAddProof]) {
         let own_identity_id = self.identity.as_ref().map(|i| i.identity_id.clone()).unwrap_or_default();
         for d in devices {
             if d.identity_id == own_identity_id {
                 continue;
             }
-            // Engelli birini bir grup kurucusu kefil ederek geri
-            // getiremez (bkz. `block_identity`) — engel kişiyi hedefliyor
-            // ve yalnızca yüz yüze eşleşmeyle kalkıyor.
+            // A founder cannot bring a blocked person back by vouching for them (see `block_identity`). The block targets that person, and it is lifted only
+            // by a face-to-face pairing.
             if self.is_blocked(&d.identity_id) {
                 warn!("Engelli kimlik grup kefaletiyle eklenmeye çalışıldı, reddedildi: {}", crate::log_id(&d.identity_id));
                 continue;
@@ -1532,16 +1362,13 @@ impl P2PCore {
             if self.known_remote_devices.contains_key(&d.device_fingerprint) {
                 continue; // zaten biliyoruz — ASLA ezme
             }
-            // Fingerprint, anahtarlarla tutarlı mı? (IdentityExchange ile
-            // aynı kontrol.)
+            // Is the fingerprint consistent with the keys? (Same check as in IdentityExchange.)
             if !d.keys_match_fingerprint() {
                 error!("Grup üyesi cihaz kaydı tutarsız ({}) — reddedildi", crate::log_id(&d.device_fingerprint));
                 continue;
             }
-            // Bu kimlik için BAŞKA bir cihazı zaten biliyorsak, kurucunun
-            // sözüyle ikinci bir cihaz eklemiyoruz — bu, bilinen bir kişinin
-            // yerine geçme (impersonation) denemesi olabilir; spec 2.2
-            // "tanınmayan yeni cihaz" akışı QR/IdentityExchange içindir.
+            // If we already know ANOTHER device for this identity, we do not add a second device on the founder's word. That could be an impersonation
+            // attempt on a known person. The "unrecognised new device" flow is for QR and IdentityExchange.
             if self.known_remote_devices.values().any(|k| k.identity_id == d.identity_id) {
                 info!(
                     "Grup üyesi {} için zaten bilinen bir cihaz var — kefil edilen yeni cihaz eklenmedi",
@@ -1575,7 +1402,7 @@ impl P2PCore {
                     continue;
                 }
             }
-            // bkz. `MAX_CONTACTS` — the same no-user-action contact creation as
+            // see `MAX_CONTACTS` — the same no-user-action contact creation as
             // the TOFU path (`evaluate_sender_device`), with the same cap: a
             // founder could flood the contact list with one large
             // `member_devices` list. Checked before the device record is
@@ -1602,8 +1429,7 @@ impl P2PCore {
             };
             self.persist_remote_device(&record);
             self.known_remote_devices.insert(d.device_fingerprint.clone(), record);
-            // Kişi listesine ekle ve "grup üzerinden eklendi" olarak
-            // işaretle (bkz. Contact.added_via_group / güvenlik notu).
+            // Add to the contact list and mark it as "added via group" (see `Contact.added_via_group` and the security note).
             if let Err(e) = self.register_contact_from_pairing(
                 d.identity_id.clone(),
                 d.device_fingerprint.clone(),
@@ -1621,12 +1447,10 @@ impl P2PCore {
                     }
                 }
             }
-            // Dial ipucu (varsa) — farklı ağdaki bir üyeye ulaşabilmek için.
-            // Only the founder signed it, not the device: kept apart from
-            // `device_last_addr`/`device_onion_addr`, whose PeerIds bind a
-            // connection to the device (ConnectionEstablished,
-            // `record_peer_id_if_known`). As one of those, a founder could
-            // make any PeerId "the member" and take our sends to it.
+            // Dial hint (if any), so a member on another network can be reached.
+            // Only the founder signed it, not the device. It is kept apart from `device_last_addr`/`device_onion_addr`, whose PeerIds bind a connection to
+            // the device (ConnectionEstablished, `record_peer_id_if_known`). As one of those, a founder could make any PeerId "the member" and take our
+            // sends to it.
             if let Some(addr) = d.last_addr.as_deref().filter(|a| a.parse::<Multiaddr>().ok().is_some_and(|m| extract_peer_id(&m).is_some())) {
                 self.meta_put(&format!("vah:{}", d.device_fingerprint), addr);
             }
@@ -1638,30 +1462,21 @@ impl P2PCore {
     }
 
     pub(crate) fn resolve_active_device_for_identity(&self, identity_id: &str) -> Option<String> {
-        // Çoklu-cihaz düzeltmesi: KARARLI (deterministik) seçim — `.find()`
-        // HashMap iterasyon sırasına bağlıydı, yani bir kimliğin BİRDEN FAZLA
-        // aktif cihazı olduğunda her çağrıda FARKLI bir cihaz dönebilirdi.
-        // Bu, grup mesajlarının/güncellemelerinin bir üyenin cihazları
-        // arasında rastgele "sıçramasına" (bir mesaj bir cihaza, sonraki
-        // ötekine → her cihazda EKSİK/tutarsız grup geçmişi) yol açıyordu.
-        // Artık en küçük fingerprint'li aktif cihaz (kanonik) seçilir.
+        // Multi-device fix: a DETERMINISTIC choice. `.find()` depended on HashMap iteration order, so when an identity had MORE THAN ONE active device, a
+        // different device could be returned on each call. That made group messages and updates randomly "jump" between a member's devices (one message to
+        // one device, the next to another), leaving each device with a MISSING or inconsistent group history. Now the active device with the smallest
+        // fingerprint (the canonical one) is chosen.
         self.known_remote_devices.values()
             .filter(|d| d.identity_id == identity_id && d.is_active)
             .map(|d| d.device_fingerprint.clone())
             .min()
     }
 
-    /// Dönüş: `group_message_local_id` — bu grup mesajının N üyeye giden
-    /// fan-out kopyalarını TEK bir yerel kimlikte birleştiren id (bkz.
-    /// packet.rs `Text.group_message_local_id` notu). Kotlin, kendi
-    /// optimistic balonunu rastgele bir UUID yerine BUNU `messageId`
-    /// olarak kullanmalı — aksi halde dönen "seen" bildirimleri hiçbir
-    /// yerel balonla eşleşemez.
-    /// `reply_to_message_id`/`reply_to_preview`/`reply_to_sender_identity_id`:
-    /// bkz. `send_message` AYNI notu — grup karşılığı, ARTI yanıtlanan
-    /// mesajın göndericisinin `identity_id`'si (bkz. packet.rs
-    /// `reply_to_sender_identity_id` notu — alıcı tarafın "Ahmet'e yanıt"
-    /// gösterebilmesi için).
+    /// Returns `group_message_local_id`: the id that merges the N fan-out copies of this group message into ONE local id (see packet.rs
+    /// `Text.group_message_local_id`). Kotlin must use THIS as the `messageId` of its optimistic bubble, not a random UUID. Otherwise the returned
+    /// "seen" notices cannot match any local bubble.
+    /// `reply_to_message_id`/`reply_to_preview`/`reply_to_sender_identity_id`: same as in `send_message`. The group counterpart also carries the replied-to
+    /// message's sender `identity_id` (see the packet.rs `reply_to_sender_identity_id` note), so the receiving side can show "reply to Ahmet".
     /// See `group_failed_copies`.
     pub(crate) fn note_group_copy_failed(&mut self, content: &MessageContent, device_fingerprint: &str) {
         let MessageContent::Text { group_id: Some(_), group_message_local_id: Some(local_id), .. } = content else { return };
@@ -1706,19 +1521,17 @@ impl P2PCore {
         if !group.is_member(&own_identity_id) {
             return Err("Grup üyesi değilsiniz".to_string());
         }
-        // Spec 5.1: her üye için ayrı ayrı, mevcut 1:1 ratchet ile şifrele.
-        // `group_id: Some(...)` — gerçek grup entegrasyonu: alıcı tarafın
-        // bunu sıradan bir 1:1 mesajdan ayırt edip GroupChatActivity'ye
-        // yönlendirebilmesi için (bkz. receive_message notu).
-        // Starts with our author tag: receivers refuse an id without it.
+        // Each member is encrypted separately with the existing 1:1 ratchet. `group_id: Some(...)`: real group integration, so the receiver can tell this
+        // apart from an ordinary 1:1 message and route it to GroupChatActivity (see the receive_message note). Starts with our author tag: receivers
+        // refuse an id without it.
         let id_rest = format!("-{}", uuid::Uuid::new_v4());
         let local_id = format!("{}{}", hex::encode(group_msg_tag(group_id, &own_identity_id, &id_rest)), id_rest);
         let sent_at_ms = current_time_ms();
-        // Kardeş cihaz yankısı için kopyala (aşağıda content'e taşınıyor).
+        // Copy for the sibling-device echo (carried into the content below).
         let echo_reply_id = reply_to_message_id.clone();
         let echo_reply_prev = reply_to_preview.clone();
         let echo_reply_sender = reply_to_sender_identity_id.clone();
-        // bkz. packet.rs `MessageContent::Text.sent_at_ms` dokümantasyonu.
+        // See packet.rs `MessageContent::Text.sent_at_ms`.
         let author_proof = self.sign_group_author(group_id, &local_id, plaintext)?;
         let content = MessageContent::Text {
             group_id: Some(group_id.to_string()),
@@ -1729,15 +1542,9 @@ impl P2PCore {
             author_proof: Some(author_proof.clone()),
             mentions: filter_mentions(&group, Some(&own_identity_id), mentions),
         };
-        // ÖNCE, TEK
-        // bir satır olarak arşivle — fan-out döngüsünün İÇİNDE değil,
-        // çünkü aşağıdaki `send_message_content` her üye için AYRI
-        // çağrılıyor; oraya `archive_plaintext: Some(...)` geçirmek N üye
-        // için N ayrı (ve YANLIŞ anahtarlı, bkz. o fonksiyonun eski notu)
-        // satır oluştururdu. Kendi mesajımızın arşivi, tek bir üyeye
-        // ulaşıp ulaşmadığımızdan bağımsız olmalı — aksi halde fan-out'un
-        // İLK üyesi başarısız olursa kendi "gönderdim" kaydımızı hiç
-        // tutmazdık.
+        // Archive ONCE, as a single row, BEFORE the fan-out loop, not inside it. `send_message_content` is called separately for each member, and passing
+        // `archive_plaintext: Some(...)` there would create N rows for N members (with the WRONG key, see that function's old note). Our own message's
+        // archive should not depend on whether a single member is reached: otherwise, if the FIRST member's send fails, we would never keep our own "sent" record.
         let (reply_to_id, reply_to_prev, reply_to_sender) = match &content {
             MessageContent::Text { reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, .. } => {
                 (reply_to_message_id.as_deref(), reply_to_preview.as_deref(), reply_to_sender_identity_id.as_deref())
@@ -1750,9 +1557,8 @@ impl P2PCore {
         for member_identity_id in group.other_members(&own_identity_id) {
             self.send_group_message_to_member(group_id, &member_identity_id, &content);
         }
-        // Çoklu-cihaz (spec 1.7): kardeş cihazlarıma yankıla — grup mesajım
-        // onlarda da görünsün (kendi mesajım fan-out'a dahil değildir, bu
-        // yüzden yankı çift kayda yol açmaz).
+        // Multi-device (1.7): echo to my sibling devices, so my group message shows there too. My own message is not part of the fan-out, so the echo
+        // does not create a duplicate record.
         self.echo_group_to_siblings(group_id, SiblingEchoBody::Text {
             message_id: local_id.clone(), text: plaintext.to_string(), sent_at_ms,
             reply_to_message_id: echo_reply_id, reply_to_preview: echo_reply_prev,
