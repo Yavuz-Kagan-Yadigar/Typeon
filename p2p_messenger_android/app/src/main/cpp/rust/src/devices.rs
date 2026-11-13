@@ -25,25 +25,19 @@ impl P2PCore {
     }
 
     // ===============================================================
-    // Çoklu-cihaz (Description.md §1.5 cihaz ekleme, §1.6 iptal, §1.7
-    // senkron). Tasarım: ikinci cihaz KENDİ anahtar çiftini üretir (kendi
-    // device_fingerprint'i) ve birincil cihazın kimliğini (identity_id)
-    // BENİMSER — birincilin uzun-vadeli secret anahtarı asla cihaz 1'den
-    // çıkmaz; ikincil cihaz, birincilin İMZALADIĞI bir `DeviceAdd` ile
-    // yetkilendirilir. Eşleşmeden sonra iki cihaz birbirinden bağımsızdır:
-    // kişiler her iki cihaza da ayrı ayrı fan-out ile mesaj gönderir.
+    // Multi-device: adding a device, revoking one, and syncing.
+    // Design: the second device generates its OWN key pair (its own device_fingerprint) and ADOPTS the identity (identity_id) of the primary
+    // device. The primary's long-lived secret key never leaves device 1. The secondary is authorized by a `DeviceAdd` signed by the primary.
+    // After pairing, the two devices are independent: contacts fan out messages to each device separately.
     // ===============================================================
 
     pub(crate) fn my_identity_id(&self) -> Option<String> {
         self.identity.as_ref().map(|i| i.identity_id.clone())
     }
 
-    /// Bir device_fingerprint için, aynı kimliğe ait KARARLI (deterministik)
-    /// "kanonik" sohbet anahtarı — bir kişinin birden fazla cihazı olsa bile
-    /// yerel sohbet/arşiv TEK bir anahtar altında birleşsin diye. Kişinin
-    /// bilinen aktif cihazları arasından `(first_seen, fingerprint)`'e göre
-    /// en küçüğü seçilir (HashMap iterasyon sırasından bağımsız). Kişi
-    /// bilinmiyorsa (kardeş cihaz/grup) fingerprint aynen döner.
+    /// The STABLE ("canonical") chat key for a device_fingerprint, shared by all devices of the same identity. Even when a contact has several
+    /// devices, the local chat and archive stay under ONE key. The key is the smallest `(first_seen, fingerprint)` among the contact's known
+    /// active devices (independent of HashMap iteration order). If the contact is unknown (a sibling device or a group), the fingerprint is returned as is.
     pub(crate) fn canonical_peer_key(&self, sender_fp: &str) -> String {
         let identity_id = match self.known_remote_devices.get(sender_fp) {
             Some(d) => d.identity_id.clone(),
@@ -52,10 +46,9 @@ impl P2PCore {
         self.canonical_device_for_identity(&identity_id).unwrap_or_else(|| sender_fp.to_string())
     }
 
-    /// Bir kimliğin kanonik (deterministik) cihazı — bkz. `canonical_peer_key`.
-    /// ContactSummary.active_device_fingerprint ve gelen mesaj arşivi AYNI
-    /// değeri kullanmalı, aksi halde çoklu-cihazlı bir kişinin geçmişi
-    /// bölünür.
+    /// The canonical (deterministic) device of an identity; see `canonical_peer_key`.
+    /// ContactSummary.active_device_fingerprint and the incoming message archive must use the SAME value. Otherwise the history of a contact
+    /// with several devices gets split.
     pub(crate) fn canonical_device_for_identity(&self, identity_id: &str) -> Option<String> {
         if let Some(cid) = self.identity_to_contact.get(identity_id) {
             if let Some(contact) = self.contacts.get(cid) {
@@ -69,7 +62,7 @@ impl P2PCore {
                 }
             }
         }
-        // Kişi kaydı yoksa known_remote_devices'a düş.
+        // No contact record: fall back to known_remote_devices.
         let mut actives: Vec<&DeviceRecord> = self.known_remote_devices.values()
             .filter(|d| d.identity_id == identity_id && d.is_active)
             .collect();
@@ -77,11 +70,9 @@ impl P2PCore {
         actives.first().map(|d| d.device_fingerprint.clone())
     }
 
-    /// Bir kimliğin, mesaj fan-out edilecek TÜM aktif cihazları (spec 1.7.1
-    /// pairwise). Sadece PUBLIC anahtarları bilinen (known_remote_devices)
-    /// cihazlar döner — bir DeviceAdd ile duyurulmuş ama henüz
-    /// IdentityExchange'i gelmemiş cihaz, anahtarı olmadığından burada YER
-    /// ALMAZ (o cihaza şifreleme yapılamaz; IdentityExchange gelince eklenir).
+    /// ALL active devices of an identity that messages fan out to (pairwise). Only devices whose PUBLIC keys are known (known_remote_devices)
+    /// are returned. A device announced by a DeviceAdd whose IdentityExchange has not arrived yet is NOT included, because there are no keys to
+    /// encrypt to. It is added when the IdentityExchange arrives.
     pub(crate) fn active_devices_for_identity(&self, identity_id: &str) -> Vec<String> {
         let mut v: Vec<String> = self.known_remote_devices.values()
             .filter(|d| d.identity_id == identity_id && d.is_active)
@@ -91,15 +82,12 @@ impl P2PCore {
         v
     }
 
-    /// 1:1 gönderim fan-out hedefleri: `primary_fp`'nin kimliğinin TÜM aktif
-    /// cihazları (`primary_fp` dahil). Kimlik bilinmiyorsa yalnızca
-    /// `primary_fp` (mevcut davranış — tek cihaz).
+    /// 1:1 send fan-out targets: ALL active devices of the identity of `primary_fp` (including `primary_fp`). If the identity is unknown, only
+    /// `primary_fp` (single device, the existing behaviour).
     ///
-    /// A device unseen for `STALE_PEER_RETRY_HORIZON_MS` is left out, like
-    /// `sibling_active_devices` does: a contact's abandoned old phone made
-    /// every message (and call invite) also go to its server mailbox, which
-    /// filled to the 5000-item cap (seen 2026-09-26). If that leaves nobody,
-    /// every active device is kept.
+    /// A device unseen for `STALE_PEER_RETRY_HORIZON_MS` is left out, the same as `sibling_active_devices` does. The reason: a contact's abandoned
+    /// old phone made every message (and every call invite) also go to its server mailbox, which filled up to its 5000-item cap. If that leaves
+    /// nobody, every active device is kept.
     pub(crate) fn fanout_targets(&self, primary_fp: &str) -> Vec<String> {
         match self.known_remote_devices.get(primary_fp).map(|d| d.identity_id.clone()) {
             Some(id) => {
@@ -173,15 +161,12 @@ impl P2PCore {
         }) || self.is_connected_to_device(fp)
     }
 
-    /// Kendi kimliğimin, BU cihaz DIŞINDAKİ aktif kardeş cihazları — senkron
-    /// (DeviceSync/DeviceRevokeNotice) buralara gönderilir.
+    /// The active sibling devices of MY identity, EXCLUDING this device. Sync messages (DeviceSync / DeviceRevokeNotice) are sent to them.
     pub(crate) fn sibling_active_devices(&self) -> Vec<String> {
         let my_id = match self.my_identity_id() { Some(id) => id, None => return Vec::new() };
         let own_fp = self.get_active_own_device_fingerprint().ok();
-        // bkz. `STALE_PEER_RETRY_HORIZON_MS` dokümantasyonu — uzun süredir
-        // görülmemiş bir kardeş, artık her mesajda yeni bir kalıcı yeniden
-        // deneme kaydı biriktirmesin diye buradan (yalnızca YENİ fan-out'tan)
-        // çıkarılır.
+        // Leave out a sibling not seen for a long time (see `STALE_PEER_RETRY_HORIZON_MS`). It is removed only from NEW fan-out, so that it does not
+        // keep accumulating a new durable retry record for every message.
         let now = current_time_ms();
         self.known_remote_devices.values()
             .filter(|d| d.identity_id == my_id && d.is_active)
@@ -198,16 +183,14 @@ impl P2PCore {
             .collect()
     }
 
-    /// İmzalanacak kanonik bayt dizisi (DeviceAdd/DeviceRevoke).
+    /// The canonical byte string that gets signed (DeviceAdd / DeviceRevoke).
     ///
-    /// A revoke carries a tag. Without one the two signed the same bytes, so
-    /// the DeviceAdd a secondary shows to everybody (in each plaintext
-    /// IdentityExchange) was also a valid DeviceRevoke of that secondary:
-    /// any contact could send it back and wipe the device.
+    /// A revoke carries its own tag. Without one, the DeviceAdd and the DeviceRevoke signed the same bytes. So the DeviceAdd that a secondary shows
+    /// to everyone (in each plaintext IdentityExchange) was also a valid DeviceRevoke of that secondary: any contact could send it back and wipe the
+    /// device.
     ///
-    /// domain tag + length-framed fields (NUL joins were
-    /// ambiguous). Every DeviceAdd/DeviceRevoke signed before this no longer
-    /// verifies: devices must be re-linked.
+    /// Domain tag + length-framed fields (NUL-joined fields were ambiguous). Every DeviceAdd / DeviceRevoke signed before this format does not
+    /// verify any more: devices must be re-linked.
     pub(crate) fn device_auth_signing_bytes(identity_id: &str, subject_fp: &str, actor_fp: &str, revoke: bool) -> Vec<u8> {
         let mut b = Vec::with_capacity(32 + identity_id.len() + subject_fp.len() + actor_fp.len());
         b.extend_from_slice(b"typeon-device-auth-v1");
@@ -249,7 +232,7 @@ impl P2PCore {
     pub(crate) fn sign_device_add(&self, new_fp: &str, consent: &[u8], consent_pq: &[u8]) -> Result<DeviceAdd, String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let identity_id = self.my_identity_id().ok_or("No identity")?;
-        // bkz. `verify_device_auth`: nobody accepts another signer.
+        // see `verify_device_auth`: nobody accepts another signer.
         if own_fp != identity_id {
             return Err("Only the primary device can do this".to_string());
         }
@@ -271,7 +254,7 @@ impl P2PCore {
     pub(crate) fn sign_device_revoke(&self, revoked_fp: &str) -> Result<DeviceRevoke, String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let identity_id = self.my_identity_id().ok_or("No identity")?;
-        // bkz. `verify_device_auth`: nobody accepts another signer.
+        // see `verify_device_auth`: nobody accepts another signer.
         if own_fp != identity_id {
             return Err("Only the primary device can do this".to_string());
         }
@@ -288,9 +271,8 @@ impl P2PCore {
         })
     }
 
-    /// DeviceAdd/DeviceRevoke imzasını, o kimliğe ait BİLİNEN AKTİF bir
-    /// cihazın (actor) anahtarıyla doğrular. actor, own_devices veya
-    /// known_remote_devices'ta olabilir; kimliği eşleşmeli ve aktif olmalı.
+    /// Verifies a DeviceAdd / DeviceRevoke signature with the key of a KNOWN ACTIVE device (the actor) of that identity. The actor can be in
+    /// own_devices or known_remote_devices. Its identity must match and it must be active.
     pub(crate) fn verify_device_auth(&self, identity_id: &str, subject_fp: &str, actor_fp: &str, sig: &[u8], sig_pq: &[u8], revoke: bool) -> Result<(), String> {
         let actor = self.own_devices.get(actor_fp)
             .or_else(|| self.known_remote_devices.get(actor_fp))
@@ -325,9 +307,8 @@ impl P2PCore {
         verify_hybrid_signature(&msg, sig, sig_pq, &actor)
     }
 
-    /// İkinci (yeni) cihazın gösterdiği "cihaz ekleme QR'ı" (spec 1.5 adım 2).
-    /// Bu cihaz zaten normal onboarding'den geçmiş (createIdentity ile
-    /// provizyonel bir kimlik üretmiş) ve ağı başlatmış olmalıdır.
+    /// The "add a device" QR code shown by the second (new) device.
+    /// That device has already been through normal onboarding (it created a provisional identity with createIdentity) and has started the network.
     pub(crate) fn build_device_link_request(&mut self) -> Result<Vec<u8>, String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let rec = self.own_devices.get(&own_fp).ok_or("Missing own device record")?.clone();
@@ -342,12 +323,11 @@ impl P2PCore {
             self.link_request_nonce = nonce.to_vec();
             self.link_consent_peer = None;
             self.meta_put("link_request_nonce", &hex::encode(nonce));
-            // bkz. `first_contact_secrets`: the first device answers to the
+            // see `first_contact_secrets`: the first device answers to the
             // mailbox made from this nonce.
             self.server_sweep_at = 0;
         }
-        // bkz. packet.rs DeviceLinkRequest dokümantasyonu — fingerprint-only
-        // (public key'ler artık taşınmaz, QR kapasitesini aşıyordu).
+        // See the packet.rs DeviceLinkRequest docs: fingerprint only. The public keys are no longer carried, because they exceeded the QR capacity.
         let req = DeviceLinkRequest {
             version: DeviceLinkRequest::CURRENT_VERSION,
             device_name: rec.device_name,
@@ -360,16 +340,11 @@ impl P2PCore {
         req.to_cbor()
     }
 
-    /// Birincil (onaylı) cihaz, ikincil cihazın (fingerprint-only, bkz.
-    /// packet.rs DeviceLinkRequest dokümantasyonu) QR'ını okuyunca çağrılır
-    /// (spec 1.5 adım 3-5). Burada SADECE bağlanılır ve `pending_link_target`
-    /// işaretlenip kendi `IdentityExchange`'imiz gönderilir — yeni cihazın
-    /// GERÇEK public key'leri (dolayısıyla fingerprint doğrulaması, imzalı
-    /// DeviceAdd, DeviceLinkGrant/tam senkron ve kişilere duyuru) karşı
-    /// taraftan gelen KARŞILIKLI `IdentityExchange` işlenince
-    /// `process_identity_exchange`'in `is_pending_link` kolunda tamamlanır
-    /// (bkz. orada). `process_qr_packet`'teki "eşleşme WIP" notuyla AYNI
-    /// gerekçeyle bu fonksiyon o el sıkışmayı BEKLEMEDEN döner.
+    /// Called on the primary (approved) device when it scans the QR of the secondary device (fingerprint only; see the packet.rs DeviceLinkRequest docs).
+    /// It ONLY connects here: it marks `pending_link_target` and sends our own `IdentityExchange`. The new device's REAL public keys (and so the
+    /// fingerprint check, the signed DeviceAdd, DeviceLinkGrant / full sync, and the announcement to contacts) are completed when the counterpart's
+    /// IdentityExchange arrives, in the `is_pending_link` arm of `process_identity_exchange`. For the same reason as the "pairing WIP" note in
+    /// `process_qr_packet`, this function returns WITHOUT waiting for that handshake.
     pub(crate) fn approve_device_link(&mut self, request_cbor: &[u8]) -> Result<(String, String), String> {
         let req = DeviceLinkRequest::from_cbor(request_cbor)?;
         if req.nonce.len() != 16 {
@@ -389,8 +364,7 @@ impl P2PCore {
         if req.device_fingerprint == own_fp {
             return Err("Bu zaten bu cihaz".to_string());
         }
-        // Aktif cihaz sınırı (spec 1.1 — max 5). Not `sibling_active_devices`:
-        // that leaves out siblings not seen for a week, which are still active.
+        // Active device limit. Note: unlike `sibling_active_devices`, this does NOT leave out siblings that have not been seen for a week. They are still active.
         let active_count = 1 + self.known_remote_devices.values()
             .filter(|d| d.identity_id == my_id && d.is_active && d.device_fingerprint != own_fp)
             .count();
@@ -399,14 +373,11 @@ impl P2PCore {
         }
         let new_fp = req.device_fingerprint.clone();
 
-        // The device may have been paired as a contact first, under the
-        // identity it had before the link (its own fingerprint). That contact
-        // would stay as a ghost whose only device is now a sibling. A device
-        // of any other contact is not ours to link.
-        // Every contact listing it (H76: only the first one was looked at).
-        // The ghost is deleted only once the device consents (see the
-        // `is_pending_link` arm of `process_identity_exchange`): scanning the
-        // wrong QR must not cost a contact.
+        // The device may first have been paired as a contact, under the identity it had before the link (its own fingerprint). That contact would
+        // stay behind as a ghost whose only device is now a sibling. A device belonging to any OTHER contact is not ours to link.
+        // Every contact listing it is checked (only the first match used to be looked at).
+        // The ghost is deleted only once the device consents (see the `is_pending_link` arm of `process_identity_exchange`), so scanning the wrong
+        // QR cannot cost a contact.
         let foreign = self.contacts.values()
             .filter(|c| c.find_device(&new_fp).is_some())
             .any(|c| c.trusted_identity_id != new_fp || self.contact_fingerprints_all(c).iter().any(|f| *f != new_fp));
@@ -416,16 +387,14 @@ impl P2PCore {
 
         self.dial_pairing_addr(&new_fp, &req.rendezvous_node, &req.known_relays);
 
-        // pending_link_target: process_identity_exchange, bu fingerprint'ten
-        // gelecek bir sonraki IdentityExchange'i kişi olarak DEĞİL kardeş
-        // cihaz olarak işlesin ve bağlanma akışını (DeviceAdd/DeviceLinkGrant/
-        // duyuru) orada tamamlasın. bkz. `PENDING_LINK_RETRY_HORIZON_MS` —
-        // ufuk bu andan itibaren işler (QR yeniden okutulursa tazelenir).
+        // pending_link_target: the next IdentityExchange from this fingerprint must be processed as a SIBLING device, not as a contact, and the
+        // linking flow (DeviceAdd / DeviceLinkGrant / announcement) completes there. See `PENDING_LINK_RETRY_HORIZON_MS`: the window runs from this
+        // moment (re-scanning the QR refreshes it).
         self.set_pending_link(Some(new_fp.clone()));
         // Goes back in the grant: it proves that grant answers this QR.
         self.pending_link_nonce = req.nonce.clone();
         self.meta_put("pending_link_nonce", &hex::encode(&req.nonce));
-        // Kept after the link: bkz. `first_contact_secrets`.
+        // Kept after the link: see `first_contact_secrets`.
         if req.nonce.len() == 16 {
             self.put_pairing_secret("pn", &new_fp, &req.nonce);
             self.server_sweep_at = 0;
@@ -439,7 +408,7 @@ impl P2PCore {
         Ok((new_fp, sanitize_display_name(&req.device_name).unwrap_or_default()))
     }
 
-    /// Bir `DeviceRecord`'dan `SyncedDevice` üretir (senkron/duyuru için).
+    /// Builds a `SyncedDevice` from a `DeviceRecord` (for sync and announcements).
     pub(crate) fn synced_device_from_record(&self, rec: &DeviceRecord) -> SyncedDevice {
         SyncedDevice {
             device_fingerprint: rec.device_fingerprint.clone(),
@@ -458,7 +427,7 @@ impl P2PCore {
     }
 
     /// `synced_device_from_record` for a `SyncPayload`: with the secrets of
-    /// the device's first-contact mailbox (bkz. `SyncedDevice.mailbox_secrets`).
+    /// the device's first-contact mailbox (see `SyncedDevice.mailbox_secrets`).
     pub(crate) fn synced_for_sibling(&self, rec: &DeviceRecord) -> SyncedDevice {
         let mut sd = self.synced_device_from_record(rec);
         sd.mailbox_secrets = self.stored_pairing_secrets(&rec.device_fingerprint).iter().map(hex::encode).collect();
@@ -477,8 +446,7 @@ impl P2PCore {
         }
     }
 
-    /// BU cihazın kendi `SyncedDevice`'ı — kişilere `DeviceAddNotice` ile
-    /// gönderilir (anahtarlarımızı güvenilir biçimde öğrensinler).
+    /// THIS device's own `SyncedDevice`. It is sent to contacts in a `DeviceAddNotice`, so they can reliably learn our keys.
     pub(crate) fn own_synced_device(&self) -> Option<SyncedDevice> {
         let own_fp = self.get_active_own_device_fingerprint().ok()?;
         self.own_devices.get(&own_fp).map(|r| self.synced_device_from_record(r))
@@ -493,9 +461,8 @@ impl P2PCore {
 
 impl P2PCore {
 
-    /// İkincil cihaz benimsemesi (spec 1.5 adım 6). Dönüş: `true` = ilk kez
-    /// benimsendi (UI bilgilendirilmeli), `false` = zaten benimsenmiş (yalnız
-    /// Ack, tekrar duyuru yapma).
+    /// Adoption by a secondary device. Returns `true` if it was adopted for the first time (the UI should be told), or `false` if it was already
+    /// adopted (only an Ack; do not announce again).
     pub(crate) fn adopt_device_link(&mut self, primary_fp: &str, identity_id: &str, device_add: &DeviceAdd, sync: &SyncPayload, nonce: &[u8]) -> Result<bool, String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         if device_add.identity_id != identity_id
@@ -503,8 +470,7 @@ impl P2PCore {
             || device_add.added_by != primary_fp {
             return Err("DeviceLinkGrant alanları tutarsız".to_string());
         }
-        // İmzayı birincil cihazın anahtarıyla doğrula (anahtarları eşleşme
-        // sırasında gelen IdentityExchange'ten biliyoruz).
+        // Verify the signature with the primary device's key (learned from the IdentityExchange during pairing).
         self.verify_device_auth(identity_id, &own_fp, primary_fp, &device_add.signature, &device_add.signature_pq, false)?;
         // Our own half, given to the device that read our code: without it
         // nobody else accepts this add.
@@ -513,7 +479,7 @@ impl P2PCore {
             return Err("DeviceLinkGrant reddedildi: bu cihazın onay imzası yok".to_string());
         }
 
-        // Zaten benimsenmişse: idempotent — sadece senkronu birleştir.
+        // Already adopted: idempotent. Only merge the sync.
         let already = self.my_identity_id().as_deref() == Some(identity_id) && self.own_device_add.is_some();
         if already {
             self.import_sync_payload(sync);
@@ -535,8 +501,7 @@ impl P2PCore {
             return Err("DeviceLinkGrant reddedildi: QR'daki nonce ile eşleşmiyor".to_string());
         }
         let old_id = self.my_identity_id().unwrap_or_default();
-        // Eşleşme sırasında birincil, geçici olarak bir KİŞİ olarak
-        // kaydedilmiş olabilir — kaldır (o artık bir kardeş cihaz).
+        // During pairing, the primary may have been temporarily saved as a CONTACT. Remove it, since it is now a sibling device.
         let primary_cid = self.identity_to_contact.get(identity_id).cloned();
         // Disk FIRST, in one transaction: identities (yeni id) + own_devices
         // (yeni identity_id) + the primary's contact row. On failure nothing
@@ -561,7 +526,7 @@ impl P2PCore {
                 .map_err(|e| format!("Kimlik değişimi diske yazılamadı: {}", e))?;
         }
         self.set_link_request_open_until(0);
-        // Belleği güncelle.
+        // Update memory.
         if let Some(id) = self.identity.as_mut() {
             id.identity_id = identity_id.to_string();
             id.primary_device = Some(device_add.added_by.clone());
@@ -574,7 +539,7 @@ impl P2PCore {
             self.identity_to_contact.remove(identity_id);
             self.contacts.remove(&cid);
         }
-        // Birincil cihazın kaydını (kardeş) kimliğime bağla.
+        // Link the primary device's record (a sibling) to my identity.
         if let Some(rec) = self.known_remote_devices.get_mut(primary_fp) {
             rec.identity_id = identity_id.to_string();
             rec.is_active = true;
@@ -584,10 +549,10 @@ impl P2PCore {
         self.own_device_add = Some(device_add.clone());
         self.persist_own_device_add(device_add);
 
-        // Kişileri/grupları/kardeşleri içe aktar, sonra herkese kendini tanıt.
+        // Import contacts, groups and siblings, then introduce myself to everyone.
         self.import_sync_payload(sync);
         self.announce_self_to_all_contacts();
-        // Öğrendiğim kardeş cihazlar da beni ve birbirlerini bilsin (3+ cihaz).
+        // The sibling devices I learned about should also know me and each other (3+ devices).
         self.sync_to_siblings();
         info!("Bu cihaz {} kimliğine ikincil cihaz olarak bağlandı", crate::log_id(&identity_id));
         Ok(true)
@@ -601,7 +566,7 @@ impl P2PCore {
         if self.owner_revoked(&device_add.identity_id, &device_add.new_device_fingerprint) {
             return Err("DeviceAddNotice: cihaz sahibi tarafından iptal edilmiş".to_string());
         }
-        // Taşınan anahtarlar, iddia edilen fingerprint ile tutarlı mı?
+        // Do the transferred keys match the claimed fingerprint?
         if device.device_fingerprint != device_add.new_device_fingerprint {
             return Err("DeviceAddNotice: cihaz fingerprint'i DeviceAdd ile uyuşmuyor".to_string());
         }
@@ -611,14 +576,11 @@ impl P2PCore {
         if !Self::add_has_consent(device_add, &device.sign_pubkey_ed25519, &device.sign_pubkey_mldsa) {
             return Err("DeviceAddNotice: eklenen cihazın onay imzası yok".to_string());
         }
-        // Güvenlik/DoS: bir kişi (kimlik) SINIRSIZ cihaz iddia edip bizim ona
-        // her mesajı N kez fan-out etmemize yol açamamalı. Zaten bu cihazı
-        // biliyorsak (idempotent tekrar) geç; YENİ bir cihazsa ve o kimlik
-        // için aktif cihaz sayısı üst sınırdaysa reddet (spec 1.1 — max 5).
-        // A device we already hold under another identity, or as revoked, is not
-        // moved or revived by a notice. (The DeviceAdd is signed by the CLAIMED
-        // identity, so anyone could claim a third party's device this way.)
-        // A real move comes with the device's own IdentityExchange.
+        // Security / DoS: one contact (identity) must NOT be able to claim an UNLIMITED number of devices, which would make us fan out every message
+        // N times to it. If we already know this device (an idempotent repeat), let it through. If it is a NEW device and the identity is already at
+        // its active-device maximum, reject it.
+        // A device we already hold under another identity, or as revoked, is not moved or revived by a notice. (The DeviceAdd is signed by the
+        // CLAIMED identity, so anyone could claim a third party's device this way.) A real move comes with the device's own IdentityExchange.
         if let Some(rec) = self.known_remote_devices.get(&device.device_fingerprint) {
             if rec.identity_id != device_add.identity_id || !rec.is_active {
                 return Err("DeviceAddNotice: cihaz başka bir kimlik altında ya da iptal edilmiş olarak kayıtlı".to_string());
@@ -647,8 +609,7 @@ impl P2PCore {
         let now = current_time_ms();
         self.verified_device_adds.insert(device_add.new_device_fingerprint.clone(), device_add.identity_id.clone());
         self.remember_device_add(device_add);
-        // Anahtarları HEMEN known_remote_devices'a yaz — böylece bu cihaza
-        // ayrı bir IdentityExchange beklemeden fan-out yapılabilir.
+        // Write the keys to known_remote_devices IMMEDIATELY, so fan-out to this device works without waiting for a separate IdentityExchange.
         if !self.known_remote_devices.contains_key(&device.device_fingerprint) {
             let rec = DeviceRecord {
                 device_fingerprint: device.device_fingerprint.clone(),
@@ -671,7 +632,7 @@ impl P2PCore {
         if let (Some(addr), true) = (&device.last_addr, !already_known && sender_ok) {
             self.remember_device_addr(&device.device_fingerprint, addr);
         }
-        // Kişinin bilinen cihaz listesine ekle (spec 2.2 NewDeviceViaSignedAdd).
+        // Add it to the contact's known device list.
         if let Some(cid) = self.identity_to_contact.get(&device_add.identity_id).cloned() {
             if let Some(contact) = self.contacts.get_mut(&cid) {
                 if contact.find_device(&device_add.new_device_fingerprint).is_none() {
@@ -683,9 +644,8 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Dönüş: `true` ise bu, BU cihazın KENDİ iptaliydi (yerel durum tamamen
-    /// silindi — çağıran `self_revoked` olayı üretmeli); `false` ise sıradan
-    /// (başka bir kimliğe/cihaza ait) bir iptal.
+    /// Returns `true` if this was a revocation of THIS device (all local state was erased; the caller must emit the `self_revoked` event), or
+    /// `false` for an ordinary revocation of another identity's or device's entry.
     pub(crate) fn apply_device_revoke_notice(&mut self, revoke: &DeviceRevoke, sender_fp: &str) -> Result<bool, String> {
         self.verify_device_auth(
             &revoke.identity_id, &revoke.revoked_device_fingerprint, &revoke.revoked_by,
