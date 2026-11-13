@@ -1,10 +1,8 @@
-//! Grup Mesajlaşma — Description.md bölüm 5.
+//! Group messaging: membership state and authority checks.
 //!
-//! Model kararı (5.1): Sender Keys DEĞİL, pairwise. Grup mesajı gönderilirken
-//! her üye için ayrı ayrı mevcut 1:1 Double Ratchet oturumuyla şifrelenir.
-//! Bu modül grup ÜYELİK durumunu ve yetki kontrolünü taşır; asıl şifreleme
-//! `ratchet.rs`'teki mevcut 1:1 oturumları kullanır (bkz. group_ops.rs
-//! `send_group_message`).
+//! Design decision: pairwise, NOT Sender Keys. When a group message is sent, it is encrypted separately for each member with that member's
+//! existing 1:1 Double Ratchet session. This module holds the group MEMBERSHIP state and the authority checks. The actual encryption uses the
+//! existing 1:1 sessions in `ratchet.rs` (see `send_group_message` in group_ops.rs).
 
 use serde::{Deserialize, Serialize};
 
@@ -12,8 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct GroupMember {
     pub identity_id: String,
     pub added_at: u64,
-    /// Her zaman founder_identity_id olmalı (spec 5.2) — doğrulama
-    /// `apply_update` içinde yapılır.
+    /// Must always be the founder_identity_id. Verified in `apply_update`.
     pub added_by: String,
 }
 
@@ -24,29 +21,23 @@ pub struct Group {
     pub founder_identity_id: String,
     pub members: Vec<GroupMember>,
     pub created_at: u64,
-    /// Üyelik listesi her değiştiğinde artar (spec 5.2) — eski/tekrarlanan
-    /// GroupUpdate paketlerini reddetmek için kullanılır.
+    /// Increases every time the membership list changes. Used to reject old or repeated `GroupUpdate` packets.
     pub version: u32,
-    /// grup profil fotoğrafı — SADECE `GroupChange::AvatarUpdate`
-    /// ile (dolayısıyla SADECE kurucu tarafından) değişir.
+    /// The group profile photo. It changes ONLY through `GroupChange::AvatarUpdate`, so only the founder can change it.
     #[serde(default)]
     pub avatar_jpeg: Option<Vec<u8>>,
-    /// Bu grup için bilinen kurucu devirleri — bkz.
-    /// `packet::FounderTransfer` (neden gerekli olduğu orada). Kurucunun
-    /// gönderdiği her `GroupUpdate` bunu taşır; devri kaçıran bir üye
-    /// zinciri yürüyerek yerel kurucusunu ilerletir ve gruptan KALICI
-    /// olarak kopmaz.
+    /// The known founder transfers for this group. See `packet::FounderTransfer` for why they are needed. Every `GroupUpdate` the founder sends
+    /// carries them. A member who missed a transfer catches up by walking the chain, which advances the local founder. That member is not
+    /// permanently cut off from the group.
     #[serde(default)]
     pub founder_chain: Vec<crate::packet::FounderTransfer>,
 }
 
-/// Kurucu devir zincirinde saklanan azami girdi sayısı.
+/// Maximum number of entries kept in the founder transfer chain.
 ///
-/// Her girdi bir ML-DSA-87 imzası (~4.6 KB) taşıyor ve zincir HER grup
-/// güncellemesiyle birlikte gidiyor — sınırsız bırakmak gossipsub'ın 1 MB
-/// paket tavanını yiyip bitirirdi. 8 devir, gerçek kullanımda fazlasıyla
-/// yeterli. KABUL EDİLEN SINIR: art arda 8'den fazla devrin TAMAMINI
-/// kaçıran bir üye kendini onaramaz ve gruba yeniden davet edilmelidir.
+/// Each entry carries an ML-DSA-87 signature (about 4.6 KB), and the chain travels with EVERY group update. Leaving it unbounded would use up
+/// gossipsub's 1 MB packet limit. 8 transfers are more than enough in practice. ACCEPTED LIMIT: a member who misses ALL of more than 8 consecutive
+/// transfers cannot repair itself and must be invited to the group again.
 pub const MAX_FOUNDER_CHAIN: usize = 8;
 
 impl Group {
@@ -67,8 +58,7 @@ impl Group {
         }
     }
 
-    /// Zincire yeni bir devir ekler (tekrarları eler) ve son
-    /// `MAX_FOUNDER_CHAIN` girdiyi tutar — bkz. o sabitin notu.
+    /// Adds a new transfer to the chain (removing duplicates) and keeps the last `MAX_FOUNDER_CHAIN` entries. See the note on that constant.
     pub fn push_founder_transfer(&mut self, transfer: crate::packet::FounderTransfer) {
         if self.founder_chain.iter().any(|t| {
             t.version == transfer.version && t.from_identity == transfer.from_identity && t.to_identity == transfer.to_identity
@@ -91,12 +81,9 @@ impl Group {
         self.members.iter().map(|m| m.identity_id.clone()).collect()
     }
 
-    /// üyelik listesini
-    /// kurucudan gelen OTORİTER listeye eşitler (bkz. `GroupUpdate.members`).
-    /// Var olan üyelerin `added_at`'i korunur (gereksiz değişiklik olmasın),
-    /// listede olmayanlar çıkarılır, yeni olanlar eklenir. Bu, hem geç
-    /// katılan bir üyenin TAM üyeliği almasını hem de kaçırılan
-    /// güncellemelerin kendiliğinden düzelmesini sağlar.
+    /// Sets the member list to the AUTHORITATIVE list from the founder (see `GroupUpdate.members`). The `added_at` of existing members is kept
+    /// (so there is no needless change). Members not in the list are removed and new ones are added. This does two things: a member who joins
+    /// late gets the FULL membership, and missed updates correct themselves.
     pub fn sync_members(&mut self, identity_ids: &[String], now: u64) {
         let founder = self.founder_identity_id.clone();
         let wanted: std::collections::HashSet<&String> = identity_ids.iter().collect();
@@ -114,7 +101,7 @@ impl Group {
         }
     }
 
-    /// Diğer tüm üyeler (mesaj gönderilecek hedef listesi) — kendisi hariç.
+    /// All other members (the send target list), excluding ourselves.
     pub fn other_members(&self, exclude_identity_id: &str) -> Vec<String> {
         self.members
             .iter()
@@ -126,18 +113,14 @@ impl Group {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupUpdateError {
-    /// signed_by, founder_identity_id ile eşleşmiyor (spec 5.2: "sadece
-    /// founder_identity_id üye ekleyebilir/çıkarabilir").
+    /// signed_by does not match founder_identity_id. Only the founder can add or remove members.
     NotFounder,
-    /// signed_by_device, kurucunun bilinen/Active bir cihazı değil.
+    /// signed_by_device is not a known, ACTIVE device of the founder.
     UnknownOrRevokedSignerDevice,
-    /// new_version, mevcut version'dan BÜYÜK olmalı. Eskiden `== version+1`
-    /// şart koşuluyordu ama bu, TEK bir güncelleme kaçırıldığında (ağ
-    /// kesintisi) o üyeyi KALICI olarak kilitliyordu — sonraki tüm
-    /// güncellemeler "sıra dışı" diye reddediliyor ve üye asla yetişemiyordu.
-    /// Artık ileri sıçramalara (gap) izin veriliyor (yalnızca stale/tekrar,
-    /// yani `<= version`, reddedilir); bir gap tespit edildiğinde çağıran
-    /// taraf uyarı loglar (bkz. group_ops.rs process_group_update).
+    /// new_version must be GREATER than the current version. The old rule required `== version + 1`, but that PERMANENTLY locked out a member
+    /// who missed a single update (for example during a network outage): every later update was rejected as "out of order", and the member could
+    /// never catch up. Now forward jumps (gaps) are allowed. Only stale or repeated versions (`<= version`) are rejected. When a gap is detected,
+    /// the caller logs a warning (see `process_group_update` in group_ops.rs).
     StaleOrOutOfOrderVersion,
     /// new_version is implausibly far ahead. One accepted update at
     /// `u32::MAX` would freeze the group for good: nothing can follow it.
@@ -148,23 +131,17 @@ pub enum GroupUpdateError {
 /// 4096: at 2^20 a founder reached `u32::MAX` in 4096 updates.
 pub const MAX_VERSION_JUMP: u32 = 1 << 12;
 
-/// Uygulanacak değişikliğin türü (spec 5.2 `GroupChange`). Kanonik tanım
-/// `packet::GroupChange`'te (ağ paket formatı, `GroupUpdate.change` alanı) —
-/// burada aynı ismi ikinci bir enum olarak tanımlamak yerine yeniden
-/// export ediliyor, aksi halde `packet::GroupChange`/`group::GroupChange`
-/// aynı isimli ama farklı iki tip olur ve çağıranlar yanlışlıkla birini
-/// diğeri yerine geçirmeye çalışabilir (tip hatası).
+/// The type of change to apply. The canonical definition is `packet::GroupChange` (the network packet format, the `GroupUpdate.change` field).
+/// It is re-exported here instead of defined as a second enum with the same name. Otherwise `packet::GroupChange` and `group::GroupChange` would be two
+/// different types with the same name, and callers could mix them up by mistake (a type error).
 pub use crate::packet::GroupChange;
 
-/// Spec 5.2: "Alıcı taraf, `signed_by == founder_identity_id` değilse
-/// `GroupUpdate`'i reddeder [...] `signed_by_device`'ın kurucunun
-/// bilinen/Active bir cihazı olması da ayrıca doğrulanır."
+/// The receiver rejects a `GroupUpdate` if `signed_by != founder_identity_id` [...]. Whether `signed_by_device` is a known, ACTIVE
+/// device of the founder is checked separately.
 ///
-/// `is_signer_device_active_for_identity`: çağıran taraf (group_ops.rs), bu
-/// device_fingerprint'in gerçekten `signed_by` Identity'sinin Active bir
-/// cihazı olup olmadığını Contact/known_devices tablosuna bakarak
-/// belirler — bu modül kripto/ağ durumuna erişmediği için sonucu parametre
-/// olarak alır.
+/// `is_signer_device_active_for_identity`: the caller (group_ops.rs) determines whether this device_fingerprint really is an ACTIVE device of the
+/// `signed_by` identity, by looking at the Contact / known_devices table. This module has no access to crypto or network state, so it takes the
+/// result as a parameter.
 pub fn validate_group_update(
     group: &Group,
     signed_by_identity: &str,
@@ -177,8 +154,7 @@ pub fn validate_group_update(
     if !signed_by_device_is_active {
         return Err(GroupUpdateError::UnknownOrRevokedSignerDevice);
     }
-    // İleri sıçramalara izin ver (bkz. `StaleOrOutOfOrderVersion` notu) —
-    // sadece stale/tekrar (mevcut version'a eşit veya küçük) reddedilir.
+    // Forward jumps are allowed (see the `StaleOrOutOfOrderVersion` note). Only stale or repeated versions (equal to or below the current one) are rejected.
     if new_version <= group.version {
         return Err(GroupUpdateError::StaleOrOutOfOrderVersion);
     }
@@ -188,9 +164,8 @@ pub fn validate_group_update(
     Ok(())
 }
 
-/// Doğrulanmış bir `GroupChange`'i gruba uygular (imza doğrulaması
-/// `validate_group_update` ile ayrı yapılmış olmalı — bu fonksiyon
-/// çağrılmadan önce).
+/// Applies a verified `GroupChange` to the group. Signature verification must already have been done separately, by `validate_group_update`,
+/// before this function is called.
 pub fn apply_change(group: &mut Group, change: &GroupChange, new_version: u32, now: u64) {
     match change {
         GroupChange::Add(identity_id) => {
@@ -219,13 +194,11 @@ pub fn apply_change(group: &mut Group, change: &GroupChange, new_version: u32, n
         GroupChange::AvatarUpdate(avatar) => {
             group.avatar_jpeg = avatar.clone();
         }
-        // Grup silme, gruba uygulanan bir ALAN değişikliği değil — çağıran
-        // (group_ops.rs `process_group_update`) grup kaydını tamamen kaldırır.
-        // Burada yapılacak bir şey yok (bkz. GroupChange::Delete notu).
+        // Deleting a group is not a field change applied to the group. The caller (`process_group_update` in group_ops.rs) removes the group record
+        // entirely. Nothing to do here (see the GroupChange::Delete note).
         GroupChange::Delete => {}
         GroupChange::TransferFounder(new_founder) => {
-            // Hedef üye değilse devir yok sayılır — aksi halde grup
-            // dışındaki birine yetki geçip grup kilitlenirdi.
+            // If the target is not a member, the transfer is ignored. Otherwise authority would pass to someone outside the group and lock it.
             if group.is_member(new_founder) {
                 group.founder_identity_id = new_founder.clone();
             }
@@ -293,51 +266,46 @@ mod tests {
 
     #[test]
     fn stale_version_rejected() {
-        // Grubu version 3'e getir, sonra STALE (geriye dönük) bir güncelleme
-        // reddedilmeli.
+        // Bring the group to version 3, then a STALE (backdated) update must be rejected.
         let mut group = Group::new("g1".into(), "Test".into(), "founder1".into(), 1000);
         apply_change(&mut group, &GroupChange::Rename("v3".into()), 3, 2000);
         assert_eq!(
             validate_group_update(&group, "founder1", true, 2),
             Err(GroupUpdateError::StaleOrOutOfOrderVersion)
         );
-        // Eşit version da (zaten uygulanmış) reddedilir.
+        // An equal version (already applied) is rejected too.
         assert_eq!(
             validate_group_update(&group, "founder1", true, 3),
             Err(GroupUpdateError::StaleOrOutOfOrderVersion)
         );
     }
 
-    /// Regresyon (üçüncü üye hatası): kurucu A, önce B'yi (v1) sonra C'yi
-    /// (v2) ekler. C grubu İLK KEZ v2 güncellemesiyle öğrenir — yani
-    /// yerelde `Group::new` (SADECE kurucu) + `Add(C)` uygulanır. Bu, C'nin
-    /// üyeliği [A, C] sanmasına ve B'ye hiç mesaj gönderememesine yol
-    /// açıyordu. `sync_members` (güncellemenin taşıdığı otoriter liste) ile
-    /// C artık TAM üyeliği alır.
+    /// Regression test (third-member bug). Founder A adds B (v1), then C (v2). C learns the group for the FIRST time from the v2 update, so locally
+    /// `Group::new` (founder only) + `Add(C)` is applied. That made C think the membership was [A, C], so it could never send a message to B.
+    /// `sync_members` (the authoritative list carried by the update) gives C its FULL membership.
     #[test]
     fn late_joiner_gets_full_membership() {
         let founder = "A".to_string();
-        // C tarafında: grup ilk kez oluşturuluyor (yalnızca kurucu ile).
+        // On C's side: the group is created for the first time (with the founder only).
         let mut c_view = Group::new("g1".into(), "Test".into(), founder.clone(), 1000);
         let change = GroupChange::Add("C".to_string());
         apply_change(&mut c_view, &change, 2, 2000);
 
-        // sync_members OLMADAN B eksik kalırdı — hatanın ta kendisi:
+        // WITHOUT sync_members, B stays missing. This is the bug itself:
         assert!(!c_view.is_member("B"), "ön koşul: sync'ten önce B bilinmiyor");
 
-        // Güncellemenin taşıdığı otoriter liste ile eşitle.
+        // Set equal to the authoritative list carried by the update.
         c_view.sync_members(&["A".to_string(), "B".to_string(), "C".to_string()], 2000);
 
         assert!(c_view.is_member("A"));
         assert!(c_view.is_member("B"), "geç katılan üye, kendisinden ÖNCE eklenmiş üyeyi de görmeli");
         assert!(c_view.is_member("C"));
-        // C, grup mesajını hem A'ya hem B'ye gönderebilmeli.
+        // C must be able to send group messages to both A and B.
         let targets = c_view.other_members("C");
         assert_eq!(targets.len(), 2);
     }
 
-    /// `sync_members` çıkarılan üyeyi de düşürür (kaçırılmış Remove'lar
-    /// kendiliğinden düzelir).
+    /// `sync_members` also drops a removed member. Missed Remove updates correct themselves.
     #[test]
     fn sync_members_drops_removed() {
         let mut g = Group::new("g1".into(), "Test".into(), "A".into(), 1000);
@@ -356,8 +324,7 @@ mod tests {
         assert!(g.is_member("A") && g.is_member("B"));
     }
 
-    /// Dış inceleme önerisi: kurucu bütün cihazlarını kaybederse grup
-    /// kilitleniyordu. Devir, yetkiyi başka bir ÜYEYE geçirir.
+    /// Recovery proposal: if the founder loses ALL their devices, the group was locked. A transfer hands authority to another MEMBER.
     #[test]
     fn founder_can_hand_over_to_a_member() {
         let mut g = Group::new("g1".into(), "Test".into(), "A".into(), 1000);
@@ -371,8 +338,7 @@ mod tests {
         assert_eq!(validate_group_update(&g, "A", true, 3), Err(GroupUpdateError::NotFounder));
     }
 
-    /// Yetki grup DIŞINDAKİ birine geçemez — geçseydi grup büsbütün
-    /// kilitlenirdi.
+    /// Authority cannot pass to someone OUTSIDE the group. If it could, the group would be locked for good.
     #[test]
     fn founder_transfer_to_a_non_member_is_ignored() {
         let mut g = Group::new("g1".into(), "Test".into(), "A".into(), 1000);
@@ -393,10 +359,8 @@ mod tests {
         }
     }
 
-    /// bkz. `packet::FounderTransfer` — zincir sürüme göre sıralı kalmalı,
-    /// aynı devri iki kez taşımamalı ve sınırsız büyümemeli (her girdi
-    /// ~4.6 KB'lık bir ML-DSA imzası taşıyor ve HER grup güncellemesiyle
-    /// birlikte gidiyor).
+    /// See `packet::FounderTransfer`. The chain must stay ordered by version, must not carry the same transfer twice, and must not grow without
+    /// bound. Each entry carries an ML-DSA signature (about 4.6 KB), and the chain goes with EVERY group update.
     #[test]
     fn founder_chain_dedupes_sorts_and_is_capped() {
         let mut g = Group::new("g1".into(), "Test".into(), "A".into(), 1000);
@@ -423,8 +387,7 @@ mod tests {
 
     #[test]
     fn forward_version_gap_allowed() {
-        // Tek bir güncelleme kaçırıldığında üye kilitlenmemeli — ileri
-        // sıçrama (gap) kabul edilir (bkz. StaleOrOutOfOrderVersion notu).
+        // A single missed update must not lock a member out. A forward jump (gap) is accepted (see the StaleOrOutOfOrderVersion note).
         let group = Group::new("g1".into(), "Test".into(), "founder1".into(), 1000);
         assert!(validate_group_update(&group, "founder1", true, 5).is_ok());
     }
