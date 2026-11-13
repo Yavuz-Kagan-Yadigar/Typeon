@@ -478,7 +478,7 @@ class ChatActivity : AppCompatActivity() {
         adapter.warmPool(recycler)
         // Message bubbles flickered: tick, seen and reaction updates arrive through `notifyItemChanged`, and the default animator cross-fades each bubble
         // between its old and new state, so change animations are off. A new message at the bottom gets a small pop.
-        recycler.itemAnimator = MessageItemAnimator(adapter::isMineAt)
+        recycler.itemAnimator = MessageItemAnimator()
         // The single outer outline of merged bubbles. See MergedBubbleDecoration for why each bubble's own background is not enough.
         recycler.addItemDecoration(MergedBubbleDecoration(adapter))
         setupSwipeToReply()
