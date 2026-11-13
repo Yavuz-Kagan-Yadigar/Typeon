@@ -31,24 +31,20 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Spec 1.3/1.4 QR tarama akışı: kamera görüntüsünden QR'ı okur, ISO-8859-1
- * ile ham CBOR baytlarına çevirir (bkz. QrBinaryCodec), ve
- * P2PLib.processQrPacket ile işler.
+ * QR scanning flow (section 1.3 and 1.4). Reads the QR from the camera image, converts it to raw CBOR bytes with
+ * ISO-8859-1 (see QrBinaryCodec), and handles it with P2PLib.processQrPacket.
  */
 class QrScanActivity : AppCompatActivity() {
 
     companion object {
-        /** Çoklu-cihaz (spec 1.5): bu extra `"link_approve"` ise taranan QR bir
-         *  KİŞİ eşleşme QR'ı değil, bir İKİNCİL CİHAZ ekleme QR'ıdır —
-         *  `approveDeviceLink` çağrılır (bkz. SettingsFragment "İkinci cihaz
-         *  ekle"). Yoksa/boşsa normal kişi eşleşmesi (`processQrPacket`). */
+        /** Multi-device (section 1.5): if this extra is `"link_approve"`, the scanned QR is NOT a contact pairing QR. It is a
+         *  SECONDARY device add QR, and `approveDeviceLink` is called. If it is missing or empty, the normal contact pairing
+         *  (`processQrPacket`) runs. */
         const val EXTRA_MODE = "mode"
         const val MODE_LINK_APPROVE = "link_approve"
-        /** Sunucu (store-and-forward) davet QR'ı — bkz. SettingsFragment
-         *  "Sunucular" bölümü. Diğer iki modun aksine bu QR CBOR DEĞİL, düz
-         *  metin bir davet kodu taşır (`typeon-server:<multiaddr>#<jeton>`);
-         *  sunucu uygulaması onu kopyalanabilir metin olarak da gösterdiği
-         *  için tek kanonik biçim bu. */
+        /** Server invitation QR (store-and-forward). Unlike the other two modes, this QR carries plain text, not CBOR. It holds
+         *  an invitation code `typeon-server:<multiaddr>#<token>`. The server app also shows it as copyable text, so this is the
+         *  single canonical format. */
         const val MODE_ADD_SERVER = "add_server"
     }
 
@@ -77,9 +73,8 @@ class QrScanActivity : AppCompatActivity() {
         setContentView(R.layout.activity_qr_scan)
         supportActionBar?.title = getString(R.string.title_scan_qr)
         cameraExecutor = Executors.newSingleThreadExecutor()
-        // Debug builds only (see the debug manifest): a decoded QR from adb
-        // goes through the same confirm-and-run path as a camera frame.
-        // Malformed hex (bad adb input) is ignored and the camera opens as usual.
+        // Debug builds only (see the debug manifest). A decoded QR sent over adb goes through the same confirm-and-run path as a
+        // camera frame. Malformed hex input from adb is ignored, and the camera opens as usual.
         val injected = intent.getStringExtra("debug_qr_hex")
             ?.takeIf { applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0 }
             ?.let { hex -> runCatching { hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray() }.getOrNull() }
@@ -100,7 +95,7 @@ class QrScanActivity : AppCompatActivity() {
 
     private fun startCamera() {
         val previewView = findViewById<PreviewView>(R.id.cameraPreview)
-        // SurfaceView (PERFORMANCE) bazı cihazlarda siyah kare veriyor; TextureView güvenli.
+        // SurfaceView shows a black frame on some devices (performance); TextureView is safe.
         previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
 
@@ -124,9 +119,8 @@ class QrScanActivity : AppCompatActivity() {
             try {
                 cameraProvider.unbindAll()
                 val camera = cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis)
-                // Kamera açılamazsa (gizlilik anahtarı/ERROR_CAMERA_DISABLED, başka
-                // uygulama kullanıyor, donanım hatası) önizleme SİYAH kalıyordu ve
-                // kullanıcıya hiçbir şey söylenmiyordu: hatayı göster ve ekranı kapat.
+                // If the camera cannot open (privacy switch or ERROR_CAMERA_DISABLED, another app is using it, or a hardware fault),
+                // the preview stayed black and the user was told nothing. Show the error and close the screen.
                 camera.cameraInfo.cameraState.observe(this) { st ->
                     val err = st.error ?: return@observe
                     if (err.type == androidx.camera.core.CameraState.ErrorType.CRITICAL ||
@@ -147,9 +141,8 @@ class QrScanActivity : AppCompatActivity() {
     private val reader = MultiFormatReader().apply {
         setHints(mapOf(
             DecodeHintType.POSSIBLE_FORMATS to arrayListOf(BarcodeFormat.QR_CODE),
-            // Encoder tarafında da ISO-8859-1 kullanılmalı (bkz.
-            // QrBinaryCodec) — aksi halde ZXing QR'ın gerçek karakter
-            // setini kendi tahmin eder ve rawBytes ile eşleşmeyebilir.
+            // The encoder side must also use ISO-8859-1 (see QrBinaryCodec). Otherwise ZXing guesses the QR's real character set
+            // itself, and the result may not match rawBytes.
             DecodeHintType.CHARACTER_SET to "ISO-8859-1"
         ))
     }
@@ -167,8 +160,8 @@ class QrScanActivity : AppCompatActivity() {
 
         try {
             val bytes = imageProxy.planes[0].buffer.toByteArray()
-            // The plane's row stride is the data width: with padded rows (stride
-            // wider than the image) the picture was sheared and never decoded.
+            // The plane's row stride is the data width. With padded rows (stride wider than the image), the picture was sheared
+            // and never decoded.
             val source = PlanarYUVLuminanceSource(
                 bytes, imageProxy.planes[0].rowStride, imageProxy.height,
                 0, 0, imageProxy.width, imageProxy.height, false
@@ -179,12 +172,11 @@ class QrScanActivity : AppCompatActivity() {
                 handleScannedText(result.text)
             }
         } catch (e: NotFoundException) {
-            // Bu karede QR bulunamadı — normal, bir sonraki kareyi bekle.
+        // No QR found in this frame. That is normal, so wait for the next frame.
         } catch (e: Exception) {
-            // Kısa bozuk Y düzlemi, ZXing'in kendi ArrayIndexOutOfBounds/
-            // IllegalArgumentException'ı... bu kare çöpe: bir hata buradan
-            // analiz thread'ine kaçtığında süreç ölüyordu ve kapatılmayan
-            // ImageProxy KEEP_ONLY_LATEST akışını kalıcı olarak tıkıyordu.
+            // A short or corrupt Y plane makes ZXing throw ArrayIndexOutOfBoundsException or IllegalArgumentException. This frame is
+            // discarded. If the exception left the analysis thread, the process died, and the ImageProxy that was not closed kept
+            // the KEEP_ONLY_LATEST stream blocked for good.
             android.util.Log.w("QrScan", "Frame analysis failed, skipping frame", e)
         } finally {
             reader.reset()
@@ -192,14 +184,12 @@ class QrScanActivity : AppCompatActivity() {
         }
     }
 
-    /** Rust çağrıları (eşleşme/el sıkışma) uzun sürebilir: ana thread'de
-     *  çalışınca kamera önizlemesi donup siyah ekran kalıyordu. Arka planda
-     *  çalıştır, sonucu UI'ya döndür. */
+    /** Core calls (pairing and handshake) can take a long time. On the main thread the camera preview froze into a black screen.
+     *  So they run in the background, and the result returns to the UI. */
     private fun handleScannedText(text: String) {
         val cborBytes = if (addServerMode) ByteArray(0) else QrBinaryCodec.latin1StringToBytes(text)
         if (!addServerMode && !linkApproveMode) {
-            // #87: confirm before the handshake starts (name + safety code from
-            // a side-effect-free peek); cancel = nothing sent.
+            // Confirm before the handshake starts: name and safety code are shown from a peek with no side effects. Cancel sends nothing.
             Thread {
                 val peek = try { P2PLib.peekContactQr(cborBytes) } catch (e: Throwable) { "Error: ${e.message}" }
                 val obj = if (peek.startsWith("Error:")) null else try { JSONObject(peek) } catch (e: Exception) { null }
@@ -221,12 +211,11 @@ class QrScanActivity : AppCompatActivity() {
             }.start()
             return
         }
-        // Not at once: any code caught in the frame added a server, or linked
-        // a device with the whole account. The user sees what it is first.
+        // Not at once. Any code caught in the frame could add a server, or link a device with the whole account. The user sees what
+        // it is first.
         val question = if (addServerMode) {
             val invite = text.trim()
-            // Already off the main thread (camera analyzer): the same
-            // history-server read MainActivity does before its confirm dialog.
+            // Already off the main thread (camera analyzer). Same history-server read as MainActivity, before its confirm dialog.
             addServerQuestion(invite, P2PLib.nextServerStoresHistory(invite))
         } else {
             val peek = try { P2PLib.peekDeviceLink(cborBytes) } catch (e: Throwable) { "Error: ${e.message}" }
@@ -250,8 +239,8 @@ class QrScanActivity : AppCompatActivity() {
         }
     }
 
-    /** The add-server question; the history warning (and what joining it
-     *  uploads) only when this server would become the history server. */
+    /** The add-server question. The history warning, and what joining it uploads, is shown only when this server would become the
+     *  history server. */
     private fun addServerQuestion(code: String, historyServer: Boolean): String =
         getString(R.string.msg_join_link_confirm, code) +
             if (historyServer) {
@@ -273,8 +262,7 @@ class QrScanActivity : AppCompatActivity() {
         }.start()
     }
 
-    /** Not at once: a bad code that stays in view started a thread, a JNI
-     *  call and a long toast on every camera frame. */
+    /** Not at once. A bad code that stays in view would otherwise start a thread, a JNI call and a long toast on every camera frame. */
     private fun rearmLater() {
         window.decorView.postDelayed({ alreadyHandled.set(false) }, 2000)
     }
@@ -282,9 +270,8 @@ class QrScanActivity : AppCompatActivity() {
     private fun onScanResult(result: String) {
         run {
             if (addServerMode) {
-                // Sunucu davet kodu DÜZ METİN — CBOR'a çevirmiyoruz (bkz.
-                // MODE_ADD_SERVER notu). Rust tarafı adresi ve jetonu
-                // kendisi ayrıştırır.
+                // The server invitation code is plain TEXT. It is NOT converted to CBOR (see the MODE_ADD_SERVER note). The Rust side
+                // parses the address and token itself.
                 if (result.startsWith("Error:")) {
                     Toast.makeText(this, com.p2p.messenger.util.coreErrorText(this, result), Toast.LENGTH_LONG).show()
                     rearmLater()
@@ -295,8 +282,8 @@ class QrScanActivity : AppCompatActivity() {
                 return@run
             }
             if (linkApproveMode) {
-                // Çoklu-cihaz (spec 1.5): taranan QR bir ikincil cihaz ekleme
-                // isteği — onayla, imzalı DeviceAdd + tam senkron gönder.
+                // Multi-device (section 1.5): the scanned QR is a secondary device add request. Approve it, and send a signed DeviceAdd
+                // plus a full sync.
                 if (result.startsWith("Error:")) {
                     Toast.makeText(this, com.p2p.messenger.util.coreErrorText(this, result), Toast.LENGTH_LONG).show()
                     rearmLater()
@@ -310,25 +297,18 @@ class QrScanActivity : AppCompatActivity() {
                 Toast.makeText(this, com.p2p.messenger.util.coreErrorText(this, result), Toast.LENGTH_LONG).show()
                 rearmLater()
             } else {
-                // ilk eşleşme (gerçek dial/
-                // Noise/IdentityExchange el sıkışması) UZUN sürebilir — bir
-                // toast gösterip bu ekranı kapatmak, kullanıcıyı hiçbir
-                // ilerleme göstergesi olmadan bırakıyordu. Artık kullanıcı
-                // DOĞRUDAN yeni kişinin sohbet ekranına yönlendiriliyor —
-                // o ekran zaten `hasActiveSession`/`isPeerConnected`'a
-                // bakan bir "Bağlanılıyor..." göstergesi (bkz. ChatActivity
-                // sessionPollRunnable/layoutConnecting/dotPeerStatus)
-                // taşıyor, eşleşmenin hâlâ devam ettiğini (WIP) doğal
-                // olarak gösterir.
+                // The first pairing (a real dial and Noise / IdentityExchange handshake) can take a long time. Showing a toast and
+                // closing this screen used to leave the user with no progress indicator. Now the user goes straight to the new contact's
+                // chat screen. That screen already shows a "Connecting..." indicator from `hasActiveSession` and `isPeerConnected`
+                // (see ChatActivity sessionPollRunnable, layoutConnecting, dotPeerStatus), so the pairing still in progress is visible.
                 openChatOrFallback(result)
             }
         }
     }
 
-    /** bkz. `handleScannedText` — `P2PLib.processQrPacket`'in JSON dönüşünü
-     *  (`{"identity_id":...,"device_fingerprint":...,"device_name":...}`)
-     *  ayrıştırıp yeni kişinin sohbet ekranını açar. Ayrıştırma başarısız
-     *  olursa (beklenmeyen bir durum) eski davranışa (toast + kapat) düşer. */
+    /** See `handleScannedText`. This parses the JSON returned by `P2PLib.processQrPacket`
+     *  (`{"identity_id":...,"device_fingerprint":...,"device_name":...}`) and opens the new contact's chat screen. If parsing fails
+     *  (an unexpected case), it falls back to the old behaviour: toast and close. */
     private fun openChatOrFallback(resultJson: String) {
         val deviceFingerprint: String?
         val deviceName: String

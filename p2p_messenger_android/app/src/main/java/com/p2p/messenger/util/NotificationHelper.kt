@@ -13,15 +13,12 @@ import com.p2p.messenger.ui.GroupChatActivity
 import org.json.JSONArray
 
 /**
- * Gelen mesajlar için LOKAL bildirimler — Google Play Services/FCM'ye HİÇ
- * bağımlı değil ve olmamalı da (bu, gizlilik odaklı bir P2P uygulaması).
- * P2PService zaten sürekli çalışan bir foreground service olarak ağı her
- * saniye poll ediyor (bkz. P2PService.pollRunnable) — bu yüzden "push"
- * bildirimini taklit etmeye hiç gerek yok: mesaj gerçekten geldiğinde
- * (P2PService'in kendi sürekli taramasıyla) doğrudan burada bildirim
- * gösteriyoruz. Güvenilirliği, üçüncü taraf bir push altyapısına değil,
- * servisin ne kadar sık/düzenli çalıştığına bağlı — ki bu foreground
- * service zaten START_STICKY ve her saniye çalışıyor.
+ * Local notifications for incoming messages. No Google Play Services or FCM is used, and none is needed:
+ * this is a privacy-focused P2P app. P2PService already polls the network every second as an always-running
+ * foreground service (see P2PService.pollRunnable). So no push notification has to be imitated. When a message
+ * really arrives, the service's own loop shows the notification from here. Reliability depends on how often
+ * and how regularly that service runs, not on a third-party push system. The foreground service is START_STICKY
+ * and runs every second.
  */
 object NotificationHelper {
     const val MESSAGE_CHANNEL_ID = "P2PMessagesChannel"
@@ -42,25 +39,22 @@ object NotificationHelper {
         ))
     }
 
-    /** Message each chat's single slot shows now, see `clearIfShowing`. */
+    /** The message that each chat's single slot shows now. See `clearIfShowing`. */
     private val shownMessageId = java.util.concurrent.ConcurrentHashMap<Int, String>()
 
     /**
-     * Güvenlik uyarılarının bildirim slotları — `clearAll` bunları SİLMEZ:
-     * "yeni cihaz", "kendi hesabım iptal edildi" ve "hesabı silindi"
-     * uyarılarının bildirim çubuğundaki tek izi budur; mesaj bildirimleri
-     * gibi temizleniyordu, kullanıcı uyarıyı hiç okuyamadan kayboluyordu.
+     * Notification slots of security alerts. `clearAll` does NOT remove them. For "new device", "my own account
+     * was revoked" and "account deleted" alerts, the notification bar is the only trace. They used to be cleared
+     * together with the message notifications, so the user could lose the alert before reading it.
      */
     private val securityAlertIds = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
 
-    /** `showDeviceAlertNotification`/`showDeviceRevokedNotification` —
-     *  sabit slotlar, kimlikten bağımsız. */
+    /** `showDeviceAlertNotification` and `showDeviceRevokedNotification` use fixed slots, independent of identity. */
     private val DEVICE_ALERT_NOTIFICATION_ID = "device_alert".hashCode()
     private val SELF_REVOKED_NOTIFICATION_ID = "self_revoked".hashCode()
 
-    /** A delete removes the chat's notification only when the slot shows
-     *  that message (or we do not know what it shows): deleting an old, read
-     *  message used to remove the notification of the unread ones. */
+    /** A delete removes the chat's notification only when the slot shows that message, or when the slot's content is
+     *  unknown. Deleting an old, read message used to remove the notification of the unread ones. */
     fun clearIfShowing(context: Context, conversationId: String, messageId: String) {
         for (id in slotIds(conversationId)) {
             val shown = shownMessageId[id]
@@ -70,8 +64,8 @@ object NotificationHelper {
         }
     }
 
-    /** A group has two slots: its messages and its @mentions (`"mention:$groupId"`),
-     *  so a plain message does not replace a mention alert. */
+    /** A group has two slots: its messages and its @mentions (`"mention:$groupId"`). So a plain message does not
+     *  replace a mention alert. */
     private fun slotIds(conversationId: String): List<Int> =
         if (conversationId.startsWith("group:")) {
             listOf(conversationId.hashCode(), ("mention:" + conversationId.removePrefix("group:")).hashCode())
@@ -86,23 +80,18 @@ object NotificationHelper {
             putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, displayName)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        // bildirim başlığı artık kişi/grup adı
-        // DEĞİL, her zaman uygulama adı ("Typeon") — kimin/nereden geldiği
-        // bilgisi gövdeye ("{isim}: mesaj" biçiminde) taşındı.
+        // The notification title is always the app name ("Typeon"), not the contact or group name. Who sent it, and from
+        // where, is in the body, as "{name}: message".
         //
-        // Spec dışı, kullanıcı isteği (Ayarlar'daki "bildirimlerde mesajları
-        // göster" anahtarı, bkz. NotificationPrefs): kapalıyken gövde
-        // SADECE göndereni taşır, mesaj metni HİÇ yazılmaz.
+        // With the "show messages in notifications" switch off (see NotificationPrefs), the body carries ONLY the sender.
+        // The message text is never written.
         val body = if (NotificationPrefs.showMessageText(context)) "$displayName: $text" else context.getString(R.string.notif_new_message)
         if (messageId.isNotEmpty()) shownMessageId[peerDeviceFingerprint.hashCode()] = messageId
         show(context, peerDeviceFingerprint.hashCode(), context.getString(R.string.app_name), body, intent, alert)
     }
 
-    /** Spec dışı  : bu
-     *  cihaz birincil cihaz tarafından iptal edildiğinde (kendi
-     *  DeviceRevokeNotice'ını aldı) yerel veri silinip onboarding'e dönülür;
-     *  bu, kullanıcıya NEDEN geri döndüğünü açıklayan tek seferlik bildirim.
-     *  Dokununca MainActivity (onboarding) açılır. */
+    /** Shown once, when the primary device has revoked this device. The app data is deleted and the app returns to
+     *  onboarding. This one-time notification explains WHY. Tapping it opens MainActivity (onboarding). */
     fun showDeviceRevokedNotification(context: Context) {
         val intent = Intent(context, com.p2p.messenger.MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -117,15 +106,12 @@ object NotificationHelper {
     }
 
     /**
-     * Kullanıcı kararı (2026-08-27): "yeni cihaz" uyarısı artık SESSİZ
-     * değil.
+     * "New device" alerts are no longer silent.
      *
-     * Önceden bu uyarı yalnızca çekirdekteki bekleyenler listesine
-     * yazılıyor, arayüz de sadece ana ekran ÖN PLANDAYKEN saniyede bir
-     * sorarak fark ediyordu. Yani kullanıcı başka bir ekrandaysa ya da
-     * uygulama arka plandaysa uyarıyı hiç görmüyor, bu arada o kişiden
-     * gelen bütün mesajlar sessizce düşüyordu. Artık bildirim olarak da
-     * çıkıyor ve dokunulduğunda kabul/reddet/engelle penceresi açılıyor.
+     * Before, the alert was only written to the core's pending list. The UI asked for it once a second, and only while
+     * the main screen was in the foreground. So if the user was on another screen, or the app was in the background, the
+     * alert was never seen, and every message from that person was dropped quietly. Now the alert is also a notification.
+     * Tapping it opens the accept, reject or block dialog.
      */
     fun showDeviceAlertNotification(context: Context, contactName: String, shortCode: String) {
         val intent = Intent(context, com.p2p.messenger.MainActivity::class.java).apply {
@@ -135,15 +121,15 @@ object NotificationHelper {
         show(
             context, DEVICE_ALERT_NOTIFICATION_ID,
             context.getString(R.string.title_security_warning_dialog),
-            // No contact name while message text is hidden: the
-            // lock screen may show the body. The app shows it after unlock.
+            // No contact name while the message text is hidden: the lock screen may show the body. The app shows the name
+            // after unlock.
             if (NotificationPrefs.showMessageText(context)) context.getString(R.string.notif_new_device_warning, contactName, shortCode)
             else context.getString(R.string.msg_security_warning),
             intent
         )
     }
 
-    /** Bir kişi hesabını sildi — kişi adıyla tek seferlik bildirim. */
+    /** A contact deleted their account. A one-time notification with the contact's name. */
     fun showAccountDeletedNotification(context: Context, peerDeviceFingerprint: String, displayName: String) {
         val name = displayName.ifBlank { resolveContactNameByFingerprint(peerDeviceFingerprint) ?: peerDeviceFingerprint.take(8) }
         val intent = Intent(context, ChatActivity::class.java).apply {
@@ -166,18 +152,16 @@ object NotificationHelper {
             putExtra(GroupChatActivity.EXTRA_GROUP_NAME, groupName)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        // bkz. `showMessageNotification` aynı notu — başlık her zaman
-        // uygulama adı, gövde göndereni (parantez içinde grup adıyla) taşır.
-        // "Mesajları göster" kapalıysa gönderen + grup görünür, metin GÖRÜNMEZ.
+        // See the `showMessageNotification` note. The title is always the app name, and the body carries the sender
+        // (with the group name in brackets). With "show messages" off, the sender and group are visible but the TEXT is not.
         val body = if (NotificationPrefs.showMessageText(context)) {
             "$senderName ($groupName): $text"
         } else {
             context.getString(R.string.notif_new_message)
         }
         if (mention) {
-            // Its own slot (see `slotIds`): a later plain message must not
-            // replace it. Opening/reading the group clears both. Hidden text
-            // hides who and where too, like the plain group notification.
+            // Its own slot (see `slotIds`), so a later plain message does not replace it. Opening or reading the group clears
+            // both. Hidden text hides who and where too, like the plain group notification.
             val id = ("mention:$groupId").hashCode()
             if (messageId.isNotEmpty()) shownMessageId[id] = messageId
             val shown = NotificationPrefs.showMessageText(context)
@@ -190,31 +174,27 @@ object NotificationHelper {
         show(context, ("group:$groupId").hashCode(), context.getString(R.string.app_name), body, intent)
     }
 
-    /** uygulama ön plana/ana ekrana her
-     *  girildiğinde TÜM mesaj bildirimlerini temizler — kullanıcı zaten
-     *  uygulamayı açtığından bildirim çubuğunda asılı kalmalarının bir
-     *  anlamı yok. `MainActivity.onResume`'dan çağrılır.
+    /**
+     * Clears ALL message notifications when the app comes to the foreground or the main screen is entered. The user has
+     * opened the app, so they should not stay in the notification bar. Called from `MainActivity.onResume`.
      *
-     *  GÜVENLİK UYARILARI ve ön plan servisinin kalıcı bildirimi
-     *  TEMİZLENMEZ: "yeni cihaz", "hesabım iptal edildi" ve "hesabı silindi"
-     *  uyarılarının tek izi bildirim çubuğudur; önceki sürümde hepsi
-     *  mesaj bildirimleriyle birlikte siliniyordu — kullanıcı uyarıyı
-     *  okumadan kayboluyordu. */
+     * SECURITY ALERTS and the foreground service's permanent notification are NOT cleared. For "new device", "my account
+     * was revoked" and "account deleted", the notification bar is the only trace. In the previous version they were cleared
+     * together with the message notifications, so the user could lose an alert before reading it.
+     */
     fun clearAll(context: Context) {
-        // Not cancelAll(): that also removed a ringing call's notification,
-        // the only way to answer when the call screen could not open itself.
+        // Not cancelAll(): that also removes a ringing call's notification, which is the only way to answer when the call
+        // screen cannot open itself.
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.activeNotifications
             .filter { it.id != com.p2p.messenger.ui.CallActivity.NOTIFICATION_ID }
-            // The foreground service notification is not a message: it is the
-            // service's own ongoing slot.
+            // The foreground service notification is not a message. It is the service's own ongoing slot.
             .filter { it.id != com.p2p.messenger.service.P2PService.NOTIFICATION_ID }
             .filter { !securityAlertIds.contains(it.id) }
             .forEach { manager.cancel(it.tag, it.id) }
     }
 
-    /** Sibling device read [conversationId] up to [readAt]: remove its
-     *  notification unless a newer message posted it after that. */
+    /** A sibling device read [conversationId] up to [readAt]. Its notification is removed, unless a newer message posted it after that. */
     fun clearIfReadUpTo(context: Context, conversationId: String, readAt: Long) {
         val manager = context.getSystemService(NotificationManager::class.java)
         for (id in slotIds(conversationId)) {
@@ -223,16 +203,14 @@ object NotificationHelper {
         }
     }
 
-    /** belirli bir 1:1 sohbet açıldığında
-     *  SADECE o kişiye ait bildirimi temizler (bkz. `showMessageNotification`
-     *  AYNI kimlik hesaplaması — `clearAll`'dan daha dar kapsamlı, ChatActivity
-     *  onResume'dan çağrılır). */
+    /** When a 1:1 chat opens, ONLY that contact's notification is cleared. The ID is computed the same way as in
+     *  `showMessageNotification`. It is narrower than `clearAll`. ChatActivity calls it from onResume. */
     fun clearForPeer(context: Context, peerDeviceFingerprint: String) {
         shownMessageId.remove(peerDeviceFingerprint.hashCode()) // no stale mapping
         context.getSystemService(NotificationManager::class.java).cancel(peerDeviceFingerprint.hashCode())
     }
 
-    /** bkz. `clearForPeer` aynı notu — grup sohbeti için. */
+    /** See the `clearForPeer` note. This is for group chats. */
     fun clearForGroup(context: Context, groupId: String) {
         for (id in slotIds("group:$groupId")) {
             shownMessageId.remove(id)
@@ -240,31 +218,28 @@ object NotificationHelper {
         }
     }
 
-    /** Spec dışı, hata düzeltmesi (bkz. P2PService.maybeNotify "edit" kolu):
-     *  bir mesaj düzenlendiğinde, o kişi için ekranda HÂLÂ asılı bir
-     *  bildirim varsa yeni metinle günceller; yoksa (kullanıcı zaten görüp
-     *  kapatmışsa) YENİ bir bildirim oluşturmaz — düzenlemenin kendisi
-     *  bildirime değer bir "yeni mesaj" olayı değildir. */
+    /** When a message is edited, the notification for that contact is updated with the new text, if one is still on
+     *  screen. If none is (the user already saw it and dismissed it), no new notification is created. An edit is not a
+     *  "new message" event worth notifying about. See the "edit" branch of P2PService.maybeNotify. */
     fun updateMessageNotificationIfShowing(context: Context, peerDeviceFingerprint: String, newText: String) {
         val id = peerDeviceFingerprint.hashCode()
         if (!isNotificationActive(context, id)) return
         showMessageNotification(context, peerDeviceFingerprint, newText, alert = false)
     }
 
-    /** bkz. `updateMessageNotificationIfShowing` aynı notu — grup için. */
+    /** See `updateMessageNotificationIfShowing`. This is the group version. */
     fun updateGroupMessageNotificationIfShowing(context: Context, groupId: String, newText: String) {
         val id = ("group:$groupId").hashCode()
         if (!isNotificationActive(context, id)) return
-        // Gönderenin adı canlı düzenleme olayında taşınmıyor (bkz. Rust
-        // `group_edit` olayı) — mevcut bildirim zaten gönderen adını
-        // içerdiğinden, burada jenerik bir etiket yeterli.
+        // The sender's name is not carried by the live edit event (see the Rust `group_edit` event). The existing notification
+        // already contains the sender name, so a generic label is enough here.
         val groupName = resolveGroupName(groupId) ?: groupId.take(8)
         val intent = Intent(context, GroupChatActivity::class.java).apply {
             putExtra(GroupChatActivity.EXTRA_GROUP_ID, groupId)
             putExtra(GroupChatActivity.EXTRA_GROUP_NAME, groupName)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        // bkz. `showGroupMessageNotification` — aynı "mesajları göster" kuralı.
+        // See `showGroupMessageNotification`. Same "show messages" rule.
         val body = if (NotificationPrefs.showMessageText(context)) "$groupName: $newText" else context.getString(R.string.notif_new_message)
         show(context, ("group:$groupId").hashCode(), context.getString(R.string.app_name), body, intent, alert = false)
     }
@@ -274,39 +249,31 @@ object NotificationHelper {
         return manager.activeNotifications.any { it.id == notificationId }
     }
 
-    /** Aynı sohbetten gelen ardışık mesajlar aynı bildirim ID'sini paylaşır
-     *  (conversationId'nin hash'i) — bu yüzden yığılıp bildirim çubuğunu
-     *  doldurmak yerine tek bildirim güncellenir. */
+    /** Consecutive messages from the same chat share one notification ID (a hash of conversationId). So they update one
+     *  notification instead of stacking and filling the notification bar. */
     private fun show(context: Context, notificationId: Int, title: String, text: String, contentIntent: Intent, alert: Boolean = true, channel: String = MESSAGE_CHANNEL_ID) {
-        // Kullanıcı isteği: bildirime dokunmak belirli sohbeti değil uygulamayı
-        // normal (launcher) şekilde açsın — geri tuşu da tek seferde çıkar.
+        // Tapping the notification opens the app in the normal launcher way, not the specific chat. One back press also
+        // leaves it.
         val isChat = contentIntent.component?.className.let {
             it == ChatActivity::class.java.name || it == GroupChatActivity::class.java.name
         }
         val launchIntent = if (isChat) {
-            // Package cleared: with it set the intent does not equal the one
-            // the launcher started the task with, and Android 8-10 then put a
-            // second MainActivity on top of the open chat.
+            // The package is cleared: with it set, the intent does not equal the one the launcher started the task with. On
+            // Android 8 to 10 the system then put a second MainActivity on top of the open chat.
             context.packageManager.getLaunchIntentForPackage(context.packageName)?.setPackage(null) ?: contentIntent
         } else contentIntent
         val pendingIntent = PendingIntent.getActivity(
             context, notificationId, launchIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        // bu uygulamanın TÜM amacı
-        // uçtan uca şifreleme olduğu halde, bildirimler çözülmüş mesaj
-        // METNİNİ hiçbir kilit ekranı gizleme/redaksiyonu olmadan
-        // gösteriyordu. Android'in cihaz genelindeki "kilit ekranında
-        // hassas bildirim içeriğini gizle" ayarı bunu KENDİ BAŞINA
-        // düzeltebilir, ama SADECE kullanıcı o ayarı elle bulup açtıysa —
-        // varsayılan olarak kapalı olabilen bir sistem ayarına güvenmek
-        // yerine, Signal'ın yaptığı gibi burada AÇIKÇA `VISIBILITY_PRIVATE`
-        // + içerik taşımayan bir `publicVersion` sağlıyoruz: sistem "hassas
-        // içeriği gizle" AÇIKSA, kilitli ekranda görünen tek şey "Yeni
-        // mesaj" + gönderenin adı olur, mesaj METNİ asla görünmez.
-        // Kilidi açık bir telefonda veya bu ayar KAPALIYSA davranış AYNI
-        // kalır (tam önizleme hâlâ gösterilir) — hiçbir özellik kaldırılmadı,
-        // sadece kilitli+hassas-gizli durumunda ek bir koruma katmanı eklendi.
+        // The whole purpose of this app is end-to-end encryption. Still, notifications showed the decrypted message TEXT
+        // with no redaction on the lock screen. The system setting "hide sensitive notification content on the lock screen"
+        // could fix that, but only if the user found and turned it on. Relying on a system setting that may be off by default
+        // is not enough. So, as Signal does, this sets `VISIBILITY_PRIVATE` plus a `publicVersion` with no content. With the
+        // system "hide sensitive content" setting ON, the lock screen shows only "New message" and the sender name. The message
+        // TEXT is never shown there.
+        // On an unlocked phone, or when this setting is OFF, the behaviour is the same as before: the full preview is shown.
+        // No feature was removed. Only an extra protection layer was added for the locked, hidden-content case.
         // The lock screen shows neither the sender nor the text.
         val publicVersion = NotificationCompat.Builder(context, channel)
             .setContentTitle(context.getString(R.string.app_name))
@@ -319,7 +286,7 @@ object NotificationHelper {
             .setContentText(Quote.plain(text))
             .setSmallIcon(R.drawable.ic_notification)
             .setAutoCancel(true)
-            // An edit updates the slot silently instead of ringing again.
+            // An edit updates the slot silently, instead of ringing again.
             .setOnlyAlertOnce(!alert)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -330,9 +297,8 @@ object NotificationHelper {
         manager.notify(notificationId, notification)
     }
 
-    /** Every notification parsed the whole contact list (each avatar as
-     *  hex) on the poll thread to read one name: 50 queued messages after a
-     *  reconnect were 50-100 full serialisations. */
+    /** Each notification used to parse the whole contact list (every avatar as hex) on the poll thread, only to read one
+     *  name. After a reconnect, 50 queued messages meant 50 to 100 full serialisations. */
     private const val NAME_CACHE_TTL_MS = 30_000L
     private var namesLoadedAt = 0L
     private var namesByFingerprint = emptyMap<String, String>()
@@ -371,7 +337,7 @@ object NotificationHelper {
     private fun lookup(key: String, map: () -> Map<String, String>): String? {
         refreshNames()
         map()[key]?.let { return it }
-        // Not on every miss: a group member who is not a contact never resolves.
+        // Not on every miss: a group member who is not a contact never resolves, and would be retried each time.
         synchronized(this) {
             if (android.os.SystemClock.elapsedRealtime() - namesLoadedAt < 2_000L) return null
             namesLoadedAt = 0L

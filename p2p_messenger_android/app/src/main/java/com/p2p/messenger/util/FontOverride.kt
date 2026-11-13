@@ -5,46 +5,32 @@ import java.lang.reflect.Field
 import java.lang.reflect.Modifier
 
 /**
- * Spec dışı, kullanıcı isteği ("break material, doesn't matter, force
- * font on all UI"): Ayarlar'daki font seçimini GERÇEKTEN her yere
- * uygulamak için — Material bileşenlerinin kendi type scale'inin
- * ÖTESİNDE (bkz. themes.xml `appFontFamily`/`TextAppearance.P2PMessenger.*`
- * — SADECE Material'ın `?attr/textAppearanceBodyLarge` vb. ÖZNİTELİK
- * ZİNCİRİNİ kullanan görünümleri kapsar), bu uygulamada YAYGIN olan
- * (sohbet balonu metinleri, Ayarlar açıklama satırları, vb.) hiçbir
- * `textAppearance`/`fontFamily` BELİRTMEYEN düz `TextView`'lar da dahil
- * OLMAK ÜZERE — Android'in kendi varsayılan `Typeface` statik alanlarını
- * (`Typeface.DEFAULT`/`DEFAULT_BOLD`/`SANS_SERIF`/`SERIF`/`MONOSPACE`) VE
- * stil bazlı varsayılan dizisini (`Typeface.sDefaults`, `Typeface.
- * defaultFromStyle(int)`'in kaynağı) reflection ile DEĞİŞTİRİR — bu,
- * hiçbir şey belirtilmemiş HER `TextView`'ın çözümlediği "varsayılan"
- * fontun ta kendisidir.
+ * Forces the font chosen in Settings onto EVERYTHING, not only the places that use the Material text styles. The theme
+ * (themes.xml `appFontFamily` and `TextAppearance.P2PMessenger.*`) covers views that use Material's
+ * `?attr/textAppearanceBodyLarge` and similar attributes. This class also covers plain `TextView`s that set no
+ * `textAppearance` or `fontFamily` at all (chat bubble text, Settings description lines, and so on). It replaces Android's
+ * own default Typeface static fields (`Typeface.DEFAULT`, `DEFAULT_BOLD`, `SANS_SERIF`, `SERIF`, `MONOSPACE`) and the
+ * style-based default array (`Typeface.sDefaults`, the source of `Typeface.defaultFromStyle(int)`), using reflection.
+ * That array is the "default" font every TextView resolves to when nothing is set.
  *
- * `final` bir statik alanı `Field.set` ile değiştirmek normalde
- * `IllegalAccessException` fırlatır — bu yüzden önce `Field` nesnesinin
- * KENDİ `modifiers` alanından `FINAL` bayrağı temizleniyor (klasik, yaygın
- * kullanılan bir teknik — ör. Calligraphy ve benzeri font-değiştirme
- * kütüphaneleri).
+ * Setting a `final` static field with `Field.set` normally throws IllegalAccessException. So first the FINAL flag is
+ * cleared from the `Field` object's own `modifiers` field. This is a common technique, used by font-changing libraries
+ * such as Calligraphy.
  *
- * BİLİNEN SINIR: bu TAMAMEN belgelenmemiş, resmi olmayan bir teknik —
- * bazı Android sürümlerinde/OEM ROM'larında (özellikle Android'in gizli
- * API kısıtlamaları nedeniyle) `SecurityException`/`NoSuchFieldException`
- * fırlatabilir. Her adım TEK TEK try/catch ile sarmalı: bir alan
- * değiştirilemezse sessizce atlanır, diğerleri yine de denenir — kısmi
- * bir başarı (ör. `DEFAULT` değişir ama `sDefaults` değişmez) tam
- * başarısızlıktan iyidir, ve HİÇBİRİ ÇÖKMEYE yol açmaz. Material
- * bileşenlerinin (buton/toolbar/dropdown) kendi type scale'i zaten AYRI
- * (ve garantili çalışan) `appFontFamily` tema özniteliği yoluyla
- * kapsandığından, bu fonksiyonun asıl hedefi o boşluktaki düz TextView'lar
- * — o yüzden burada bir başarısızlık, uygulamayı YARI fontlanmış bırakır,
- * hiç fontlanmamış değil.
+ * KNOWN LIMIT: this is a completely undocumented, unofficial technique. On some Android versions and OEM ROMs (because of
+ * Android's hidden API restrictions) it can throw SecurityException or NoSuchFieldException. Each step is wrapped in its
+ * own try/catch. If one field cannot be replaced, it is skipped and the others are still tried. A partial success (for
+ * example, `DEFAULT` changes but `sDefaults` does not) is better than a full failure, and none of them crash the app.
+ * Material components (button, toolbar, dropdown) have their own type scale, covered by the `appFontFamily` theme attribute,
+ * which is guaranteed to work. So the target of this function is the plain TextViews in between. A failure here leaves the
+ * app half-styled, not unstyled.
  */
 object FontOverride {
-    /** The font every TextView must carry; null = system font. */
+    /** The font every TextView must carry. null means the system font. */
     @Volatile private var current: Typeface? = null
 
-    /** Last resort for views that bypass the theme and the statics (adapter rows, toolbar
-     *  subtitles): keep the whole window's TextViews on [current], bold/italic preserved. */
+    /** Last resort for views that bypass the theme and the statics (adapter rows, toolbar subtitles): keeps the whole window's
+     *  TextViews on [current], with bold and italic preserved. */
     fun forceOnWindow(activity: android.app.Activity) {
         if (hooked.put(activity, true) != null) return
         val root = activity.window.decorView
@@ -66,11 +52,9 @@ object FontOverride {
 
     private var cachedFile: Pair<Pair<String, Long>, Typeface>? = null
 
-    /** `familyName`: `null`/boş ise no-op (varsayılan sistem fontuna
-     *  dönmenin GERÇEK yolu süreç yeniden başlatmaktır — bu fonksiyon
-     *  SADECE ileri yönde bir değiştirme uygular, geri almaz; bkz.
-     *  P2PApplication/SettingsFragment çağıran taraf notu — zaten bir
-     *  önceki override varsa üzerine YENİ bir tane yazmak zararsız). */
+    /** `familyName` null or empty is a no-op. The REAL way back to the system font is a process restart. This function only
+     *  applies a change going forward, it does not revert. The caller (see P2PApplication and SettingsFragment) is noted. If an
+     *  earlier override exists, writing a new one over it is harmless. */
     fun apply(familyName: String?) {
         remapSansSerif(null)
         if (familyName.isNullOrBlank()) {
@@ -90,13 +74,11 @@ object FontOverride {
         applyTypeface(newTypeface, newBoldTypeface)
     }
 
-    /** bkz. `apply(String?)` — AYNI reflection zincirini çalıştırır,
-     *  Typeface'ı `familyName` yerine bir dosyadan (`Typeface.createFromFile`)
-     *  yükler. Dosya yoksa/geçersiz font ise no-op (çökmez). */
+    /** See `apply(String?)`. It runs the same reflection chain, but loads the Typeface from a file (`Typeface.createFromFile`)
+     *  instead of `familyName`. A missing or invalid font file is a no-op, and does not crash. */
     fun applyFile(file: java.io.File) {
-        // `P2PApplication` bunu HER Activity oluşturulmasında çağırıyor;
-        // `createFromFile` önbelleksiz — her seferinde fontu yeniden okuyup
-        // yeni bir native Typeface ayırırdı. Aynı dosya için öncekini kullan.
+        // P2PApplication calls this on EVERY Activity creation. `createFromFile` has no cache, so every call would read the font
+        // again and allocate a new native Typeface. For the same file, the previous one is reused.
         val key = file.path to file.lastModified()
         val newTypeface = cachedFile?.takeIf { it.first == key }?.second ?: try {
             Typeface.createFromFile(file).also { cachedFile = key to it }
@@ -104,10 +86,8 @@ object FontOverride {
             return
         }
         val newBoldTypeface = try {
-            // `createFromFile` bir stil parametresi almaz (sadece
-            // File/String overload'ları var) — kalın varyant, YÜKLENMİŞ
-            // Typeface'ten `Typeface.create(base, style)` ile türetilir
-            // (bkz. `apply(String?)`'in `familyName` yolu ile AYNI amaç).
+            // `createFromFile` takes no style parameter (it has only the File and String overloads). The bold variant is derived from
+            // the loaded Typeface with `Typeface.create(base, style)`, the same purpose as the `familyName` path in `apply(String?)`.
             Typeface.create(newTypeface, Typeface.BOLD)
         } catch (e: Exception) {
             newTypeface
@@ -116,12 +96,13 @@ object FontOverride {
         remapSansSerif(newTypeface)
     }
 
-    /** Material/AppCompat stilleri (ActionBar başlığı, EditText, M3 type
-     *  scale) `fontFamily="sans-serif"` gibi ADLA font ister; bu ad
-     *  `Typeface.DEFAULT`'a değil sistem font haritasına (`sSystemFontMap`)
-     *  gider — içe aktarılmış font oraya ulaşmaz. `sans-serif*` girdileri
-     *  yüklenen fontla değiştirilir; `null` asıllarını geri koyar (sistem
-     *  fontuna geçişte). `monospace`/`serif` girdilerine dokunulmaz. */
+    /**
+     * Framework and AppCompat styles (action bar title, EditText, the default type scale) ask for a font
+     * with a name, such as fontFamily="sans-serif". That name is resolved through the system font map
+     * (sSystemFontMap), not through Typeface.DEFAULT, so the imported font does not reach it.
+     * The sans-serif entries are replaced with the loaded font. null puts the originals back, when switching
+     * to the system font. The monospace and serif entries are not touched.
+     */
     private var originalSansEntries: Map<String, Typeface>? = null
     private var originalDefaultTypeface: Typeface? = null
 
@@ -136,9 +117,8 @@ object FontOverride {
             for ((name, original) in originals) {
                 map[name] = typeface?.let { Typeface.create(it, original.style) } ?: original
             }
-            // Unknown family names (themes.xml `p2p-imported-font`) fall back to the
-            // private `sDefaultTypeface`, not `Typeface.DEFAULT`: dialogs and
-            // EditTexts that resolve the theme's fontFamily by name kept the system font.
+            // Unknown family names (themes.xml `p2p-imported-font`) fall back to the private `sDefaultTypeface`, not `Typeface.DEFAULT`.
+            // Otherwise dialogs and EditTexts that resolve the theme's fontFamily by name kept the system font.
             if (typeface != null) map["p2p-imported-font"] = typeface else map.remove("p2p-imported-font")
             try {
                 val f = Typeface::class.java.getDeclaredField("sDefaultTypeface")
@@ -148,13 +128,12 @@ object FontOverride {
             } catch (e: Exception) {
             }
         } catch (e: Exception) {
-            // bkz. `replaceStaticField` — gizli API engelliyse sessizce vazgeç.
+        // See `replaceStaticField`. If hidden API access is blocked, give up silently.
         }
     }
 
-    /** `apply` ve `applyFile` tarafından PAYLAŞILAN: 6 reflection
-     *  çağrısını (`replaceStaticField` ×5 + `replaceDefaultsArray` ×1)
-     *  TEK bir yerde toplar — duplication'ı önler. */
+    /** Shared by `apply` and `applyFile`. It gathers the six reflection calls (`replaceStaticField` x5 and `replaceDefaultsArray` x1)
+     *  in one place, so they are not duplicated. */
     private val STATIC_FIELDS = listOf("DEFAULT", "DEFAULT_BOLD", "SANS_SERIF", "SERIF", "MONOSPACE")
     /** The system's own typefaces, captured before the first replacement. */
     private var originalStatics: Map<String, Typeface>? = null
@@ -179,8 +158,7 @@ object FontOverride {
         }
     }
 
-    /** Back to the system font without a process restart: every view with
-     *  no explicit `fontFamily` kept the old custom font until then. */
+    /** Back to the system font without a process restart. Until then, every view with no explicit `fontFamily` kept the old custom font. */
     private fun restoreOriginals() {
         current = null
         for ((name, typeface) in originalStatics ?: return) replaceStaticField(name, typeface)
@@ -210,8 +188,7 @@ object FontOverride {
             makeAccessibleAndNonFinal(field)
             field.set(null, typeface)
         } catch (e: Exception) {
-            // Bu cihazda/Android sürümünde reflection engellenmiş olabilir —
-            // sessizce vazgeç, diğer alanlar yine de denenir.
+        // On this device or Android version, reflection may be blocked. Give up silently, and the other fields are still tried.
         }
     }
 
@@ -225,7 +202,7 @@ object FontOverride {
                 defaults[i] = Typeface.create(typeface, i)
             }
         } catch (e: Exception) {
-            // bkz. yukarısı — sessizce vazgeç.
+        // See above. Give up silently.
         }
     }
 
@@ -236,13 +213,9 @@ object FontOverride {
             modifiersField.isAccessible = true
             modifiersField.setInt(field, field.modifiers and Modifier.FINAL.inv())
         } catch (e: Exception) {
-            // Android 9+ bazı sürümlerde `Field.modifiers` alanının KENDİSİ
-            // gizli API kısıtlamasına takılabilir — bu durumda `field.set`
-            // yine de denenir (bazı ART sürümlerinde `final` statik
-            // referans-tipi alanlar pratikte hâlâ değiştirilebiliyor),
-            // başarısız olursa çağıran taraf (`replaceStaticField`/
-            // `replaceDefaultsArray`) zaten kendi try/catch'iyle bunu
-            // sessizce yutuyor.
+        // On some Android 9+ versions, the `Field.modifiers` field itself may hit the hidden API restriction. In that case `field.set`
+        // is still tried. On some ART versions, `final` static reference-type fields can in practice still be changed. If it fails,
+        // the caller (`replaceStaticField` / `replaceDefaultsArray`) already swallows it silently with its own try/catch.
         }
     }
 }
