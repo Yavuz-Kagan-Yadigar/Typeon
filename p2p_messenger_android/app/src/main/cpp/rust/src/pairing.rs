@@ -121,8 +121,8 @@ impl P2PCore {
         let mut csprng = OsRng;
         let sign_sk_ed25519 = SigningKey::generate(&mut csprng);
         let sign_pk_ed25519 = sign_sk_ed25519.verifying_key();
-        // ML-DSA-87. The spec table listed ML-DSA-65 (NIST category 3), but it was raised to ML-KEM-1024 / ML-DSA-87 (category 5) for more margin
-        // (see the SECURITY.md key sizes note). Keygen without parameters through the getrandom feature avoids the rand_core version clash (see Cargo.toml).
+        // ML-DSA-87. The parameter sets are ML-KEM-1024 and ML-DSA-87 (NIST category 5), chosen for more margin than category 3.
+        // See the SECURITY.md key sizes note. Keygen without parameters through the getrandom feature avoids the rand_core version clash (see Cargo.toml).
         let sign_sk_mldsa: MlDsaSigningKey<MlDsa87> = MlDsaGenerate::generate();
         let sign_pk_mldsa = sign_sk_mldsa.verifying_key().clone();
         let kem_sk_x25519 = StaticSecret::random_from_rng(&mut csprng);
@@ -298,10 +298,10 @@ impl P2PCore {
         Ok(identity::format_short_code(&raw))
     }
 
-    /// User request (WhatsApp-style reply). In group replies, Kotlin needs the RAW `identity_id` to decide whether to show "You" or a member's name when the
-    /// replied-to message is not yet loaded on this device. Unlike `identity_code`/`identity_short_code`, this returns the UNFORMATTED raw hex `identity_id`
-    /// (not Base32 or a short code). It has the same format as the `sender_identity_id`/`reply_to_sender_identity_id` fields in group message events, so
-    /// they can be compared directly.
+    /// The raw `identity_id`, for replies. In group replies, Kotlin needs it to decide whether to show "You" or a member's name when the replied-to
+    /// message is not yet loaded on this device. Unlike `identity_code` / `identity_short_code`, this returns the UNFORMATTED raw hex `identity_id`
+    /// (not Base32 or a short code). It has the same format as the `sender_identity_id` / `reply_to_sender_identity_id` fields in group message events,
+    /// so they can be compared directly.
     pub(crate) fn own_identity_id(&self) -> Result<String, String> {
         Ok(self.identity.as_ref().ok_or("No identity yet")?.identity_id.clone())
     }
@@ -310,16 +310,15 @@ impl P2PCore {
     // Sections 1.3/1.4: QR and manual pairing
     // ---------------------------------------------------------------
 
-    /// Produces our own QR packet. `rendezvous_node` is a known bootstrap node address (spec section 6.5: one known node is enough for v0.1).
+    /// Produces our own QR packet. `rendezvous_node` is a known bootstrap node address. One known node is enough for v0.1.
     pub(crate) fn generate_qr_packet(&mut self, rendezvous_node: String) -> Result<Vec<u8>, String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let device_name = self.own_devices.get(&own_fp).map(|d| d.device_name.clone()).unwrap_or_default();
 
-        // See the SECURITY.md "Cross-network connectivity" note and spec section 4.1 ("share about 10 node addresses", which was never implemented before).
-        // We add a few of the known relay candidates we hold to the QR. That way the other side can find us through a relay even if we cannot be dialled
-        // directly (different network or NAT). The `known_relay_peers` values are already FULL addresses (including `.../p2p/<relay_peer_id>`, see the
-        // `record_known_relay` call sites), so nothing needs adding here.
+        // See the SECURITY.md "Cross-network connectivity" note. We add a few of the known relay candidates we hold to the QR. That way the other side
+        // can find us through a relay even if we cannot be dialled directly (different network or NAT). The `known_relay_peers` values are already FULL
+        // addresses (including `.../p2p/<relay_peer_id>`, see the `record_known_relay` call sites), so nothing needs adding here.
         let known_relays = self.freshest_relays();
 
         let nonce = self.issue_pairing_nonce()?;
@@ -829,19 +828,13 @@ impl P2PCore {
         self.send_identity_exchange_opts(target_device_fingerprint, false)
     }
 
-    /// A (re)pairing the user started, or our reply to one: the peer needs
-    /// our IdentityExchange NOW.
+    /// A (re)pairing the user started, or our reply to one: the peer needs our IdentityExchange NOW.
     ///
-    /// Found on device (2026-09-18): an IdentityExchange is byte-identical
-    /// on every send, so its server dedup key (`deposit_dedup_key`) matches
-    /// the copy deposited at the previous pairing. `already_deposited`
-    /// assumes that copy is still on the server and reports success, but the
-    /// peer fetched and acked it long ago. After deleting a contact and
-    /// re-adding it within 12 h, a peer that was not directly connected
-    /// never got our IdentityExchange. Our side then stayed on "Securing the
-    /// connection" and every `ensure_handshake` failed with "Unknown peer
-    /// device". The periodic resend paths keep the dedup, which is the
-    /// deposit-storm guard.
+    /// Regression: an IdentityExchange is byte-identical on every send, so its server dedup key (`deposit_dedup_key`) matches the copy deposited at
+    /// the previous pairing. `already_deposited` assumes that copy is still on the server and reports success, but the peer fetched and acked it
+    /// long ago. After deleting a contact and re-adding it within 12 hours, a peer that was not directly connected never got our IdentityExchange.
+    /// Our side then stayed on "Securing the connection", and every `ensure_handshake` failed with "Unknown peer device". The periodic resend paths
+    /// keep the dedup, which is the deposit-storm guard.
     pub(crate) fn send_identity_exchange_fresh(&mut self, target_device_fingerprint: &str) -> Result<(), String> {
         self.send_identity_exchange_opts(target_device_fingerprint, true)
     }
@@ -945,12 +938,12 @@ impl P2PCore {
             &exchange.signature, &exchange.signature_pq,
             &exchange.sign_pubkey_ed25519, &exchange.sign_pubkey_mldsa,
         ).map_err(|e| format!("IdentityExchange imzası geçersiz: {}", e))?;
-        // No `record_peer_id_if_known` here (security fix, 2026-09-27): the signature proves who WROTE the packet, not who DELIVERED it. A matching fingerprint only
-        // proves the public keys are consistent. The keys are public, so any contact who knows this device could build this packet and get its own PeerId mapped to
-        // it, then take our direct sends to the device and fake AckBatch receipts. The signed Handshake that follows maps the connection, and a pairing address maps
-        // it on connect.
-        // Our reply goes back over the connection this came in on (see `pairing_reply_peer`). It carries only our public IX and a HandshakeInit sealed to this
-        // device's keys.
+        // No `record_peer_id_if_known` here. The signature proves who WROTE the packet, not who DELIVERED it. A matching fingerprint only proves the
+        // public keys are consistent. The keys are public, so any contact who knows this device could build this packet and get its own PeerId mapped
+        // to it, then take our direct sends to the device and fake AckBatch receipts. The signed Handshake that follows maps the connection, and a
+        // pairing address maps it on connect.
+        // Our reply goes back over the connection this came in on (see `pairing_reply_peer`). It carries only our public IX and a HandshakeInit sealed
+        // to this device's keys.
         if let Some(pid) = source.filter(|p| !self.is_server_peer(p)) {
             self.pairing_reply_peer.insert(exchange.device_fingerprint.clone(), pid);
         }
@@ -962,13 +955,14 @@ impl P2PCore {
         }
 
         // Before, this function never entered the `evaluate_sender_device` TOFU and warning decision tree. An UNEXPECTED new device for an already known
-        // contact was silently written to `known_remote_devices` with no "unrecognised device" warning (see SECURITY.md). Now it goes through the SAME decision
-        // tree as `process_qr_packet`/`process_manual_entry`. For a new person, TOFU adds them (`evaluate_sender_device` does that inside this arm, so
-        // `register_contact_from_pairing` is not needed here). For an unexpected new device of a known person, the  "BLOCK" rule applies: this function
-        // returns without writing to `known_remote_devices` at all, and no packet from or to that device is processed until the user accepts or rejects it in
-        // `pending_device_alerts`.
-        // Multi-device (1.5): is this incoming device a SIBLING device of MY OWN identity? (For example the secondary I just approved, or a third device announced
-        // by a sibling.) If so, the CONTACT decision tree (TOFU/warning) is NOT entered at all. It is recorded directly as a sibling (identity_id = my own identity).
+        // contact was silently written to `known_remote_devices` with no "unrecognised device" warning (see SECURITY.md). Now it goes through the SAME
+        // decision tree as `process_qr_packet` / `process_manual_entry`. For a new person, TOFU adds them (`evaluate_sender_device` does that inside this
+        // arm, so `register_contact_from_pairing` is not needed here). For an unexpected new device of a known person, the BLOCK rule applies: this
+        // function returns without writing to `known_remote_devices` at all, and no packet from or to that device is processed until the user accepts
+        // or rejects it in `pending_device_alerts`.
+        // Multi-device: is this incoming device a SIBLING device of MY OWN identity? (For example the secondary I just approved, or a third device
+        // announced by a sibling.) If so, the CONTACT decision tree (TOFU / warning) is NOT entered at all. It is recorded directly as a sibling
+        // (identity_id = my own identity).
         let fp = exchange.device_fingerprint.clone();
         let my_id = self.my_identity_id();
         // The link the user approved is honoured for as long as it is retried,
@@ -1038,14 +1032,14 @@ impl P2PCore {
         let as_sibling = is_pending_link || is_sibling_by_add || is_existing_sibling;
 
         if !as_sibling {
-            // Spec 2.2: is this a device that was announced in advance with a signed `DeviceAddNotice` (NewDeviceViaSignedAdd: accepted silently, NO warning)?
-            // If not, an unexpected new device of a known contact is BLOCKED.
+            // A device announced in advance with a signed `DeviceAddNotice` (NewDeviceViaSignedAdd) is accepted silently, with NO warning. Any other
+            // unexpected new device of a known contact is BLOCKED.
             //
-            // Bug seen with secondary devices: `verified_device_adds` was filled ONLY by a separate `DeviceAddNotice` packet. That packet may never arrive, if the
-            // contact is offline or store-and-forward dies (see the mailbox quota lockout note in the ledger). Then EVERY message the secondary sends stays blocked
-            // forever. Now every `IdentityExchange` sent by a secondary carries its own signed `DeviceAdd` (see `send_identity_exchange`), so we can verify it directly
-            // here without depending on a separate notice and write it to `verified_device_adds`. The security model is identical to `apply_device_add_notice`
-            // (signature, fingerprint consistency, active device cap). Only the carrier packet differs.
+            // Bug seen with secondary devices: `verified_device_adds` was filled ONLY by a separate `DeviceAddNotice` packet. That packet may never arrive,
+            // if the contact is offline or store-and-forward fails (see the mailbox quota lockout note in the ledger). Then EVERY message the secondary sends
+            // stayed blocked forever. Now every `IdentityExchange` sent by a secondary carries its own signed `DeviceAdd` (see `send_identity_exchange`), so
+            // we verify it directly here, without depending on a separate notice, and write it to `verified_device_adds`. The security model is identical to
+            // `apply_device_add_notice` (signature, fingerprint consistency, active device cap). Only the carrier packet differs.
             // (The signed `DeviceAdd` this packet carries was checked above, before `as_sibling`.)
             let signed = self.verified_device_adds.get(&fp).map(|s| s.as_str()) == Some(exchange.identity_id.as_str());
             // The `identity_id` in IdentityExchange is an UNSIGNED claim. Without a signed DeviceAdd: (1) the identity of a known device cannot be changed, and (2)
@@ -1305,15 +1299,15 @@ impl P2PCore {
             }
         }
 
-        // Found in a two-device test (2026-09-06): IdentityExchange now completes within seconds (see `pairing_mailbox_subs`). But the ONLY thing that started the
-        // handshake was the `ensure_handshake` call made when the chat screen opened or a message was sent. And message sending is now LOCKED until the ratchet is
-        // ready. Result: IX finishes, `known_remote_devices` is filled, but nothing triggers the handshake. The user stayed on the "Setting up secure connection"
-        // screen forever. Now, as soon as IX is processed, if we are actively pairing with this device (`pairing_mailbox_subs`) and there is no ratchet yet, the
-        // handshake is started HERE. Both sides do this. The "smaller fingerprint = canonical initiator" rule in `process_handshake_init` resolves simultaneous
-        // starts deterministically.
-        // See `early_handshakes`: the other side may have sent us its HandshakeInit before we knew its identity. It is now in `known_remote_devices`, so it can be
-        // processed now. That creates a RESPONDER ratchet, so the `initiate_handshake_with` (both-initiate) step below is skipped, and two mismatched initiators
-        // are never created.
+        // Fix: IdentityExchange completes within seconds (see `pairing_mailbox_subs`), but the ONLY thing that started the handshake was the
+        // `ensure_handshake` call made when the chat screen opened or a message was sent. Message sending is LOCKED until the ratchet is ready. The
+        // result: IX finished and `known_remote_devices` was filled, but nothing triggered the handshake, so the user stayed on the "Setting up secure
+        // connection" screen forever. Now, as soon as IX is processed, if we are actively pairing with this device (`pairing_mailbox_subs`) and there
+        // is no ratchet yet, the handshake is started HERE. Both sides do this. The "smaller fingerprint = canonical initiator" rule in
+        // `process_handshake_init` resolves simultaneous starts deterministically.
+        // See `early_handshakes`: the other side may have sent its HandshakeInit before we knew its identity. It is now in `known_remote_devices`, so it
+        // can be processed now. That creates a RESPONDER ratchet, so the `initiate_handshake_with` (both-initiate) step below is skipped, and two
+        // mismatched initiators are never created.
         // Before any handshake below: it should already go to the prekey.
         if let Some(prekey) = &exchange.prekey {
             if let Some(device) = self.known_remote_devices.get(&exchange.device_fingerprint).cloned() {
@@ -1408,9 +1402,9 @@ impl P2PCore {
         Some(packet::DeviceAddProof { device_add, signer })
     }
 
-    /// Spec 1.4: manual entry, a text/code format carrying the same information as QR. Here we accept the Base32 contact code + fingerprint + rendezvous address as a
-    /// single `|`-separated line. Spec 1.4 does not define this format precisely. This is the simplest format a person can type by hand.
-    /// See the `process_qr_packet` docs. For the same reason, it returns `(identity_id, device_fingerprint, device_name)`.
+    /// Manual entry: a text/code format carrying the same information as the QR code. It accepts the Base32 contact code, the fingerprint, and the
+    /// rendezvous address as a single `|`-separated line. The format is not defined precisely by the spec. This is the simplest format a person can
+    /// type by hand. See the `process_qr_packet` docs. For the same reason, it returns `(identity_id, device_fingerprint, device_name)`.
     pub(crate) fn process_manual_entry(&mut self, text: &str) -> Result<(String, String, String), String> {
         const FORMAT_ERR: &str = "Beklenen format: identity_id|device_fingerprint|nonce|device_name|rendezvous_node";
         // The device name is free text and may itself contain `|`: the first
