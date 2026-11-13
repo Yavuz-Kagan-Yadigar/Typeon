@@ -6,39 +6,29 @@ import java.io.File
 import java.security.SecureRandom
 
 /**
- * Skipped-message-key önbelleğinin (Double Ratchet sıra dışı/gecikmeli
- * mesaj desteği) diske şifreli kalıcılığı için kullanılan anahtarı
- * yönetir. `MessageHistoryManager`'ın aksine bu, node modundan
- * BAĞIMSIZ her zaman yüklenir — mesajlaşmanın güvenilirliği için
- * gerekli bir mekanizma, opsiyonel bir arşivleme değil.
+ * Manages the key that keeps the skipped-message-key cache (the Double Ratchet's support for out-of-order and late messages) persisted on disk, encrypted.
+ * Unlike `MessageHistoryManager`, this key is ALWAYS loaded, regardless of node mode. It is a mechanism needed for messaging reliability, not an optional archive.
  *
- * Anahtar hayat döngüsü aynı desende (IdentityManager/MessageHistoryManager
- * ile tutarlı): rastgele 256-bit veri anahtarı üretilir, Keystore'daki
- * AYRI bir sarma anahtarıyla (ALIAS_SKIPPED_KEYS) şifrelenip diske
- * yazılır; her açılışta çözülüp Rust'a yüklenir. Diskte hiçbir zaman
- * plaintext anahtar bulunmaz.
+ * The key lifecycle follows the same pattern (consistent with IdentityManager and MessageHistoryManager): a random 256-bit data key is generated, encrypted with
+ * a SEPARATE wrap key in the Keystore (ALIAS_SKIPPED_KEYS), and written to disk. On every start it is decrypted and loaded into Rust. A plaintext key never
+ * exists on disk.
  */
 object SkippedKeyManager {
     private const val TAG = "SkippedKeyManager"
-    // cozme HATASINDA anahtar YENIDEN URETILMEZ.
+    // On a DECRYPT ERROR the key is NOT regenerated.
     //
-    // Burasi eskiden "dosya var ama decrypt istisna atti" durumunda
-    // `generateAndPersist` cagiriyor, yani anahtar dosyasini taze rastgele
-    // bir anahtarla EZIYORDU — "anahtar yok" ile "anahtar bu sefer
-    // cozulemedi"yi ayni sey sayarak. Tek bir gecici Keystore hatasi (cihaz
-    // yedekten donus, ekran kilidi kimlik bilgisinin sifirlanmasi, StrongBox
-    // arizasi) bu anahtarla sifrelenmis HER SEYI geri donusuz yok ediyordu
-    // ve kullanici hicbir uyari gormuyordu. Kardesleri (`ArchiveKeyManager`,
-    // `IdentityManager`) zaten dogru davraniyordu: cozme basarisizsa sadece
-    // geri don. Yeniden uretim artik SADECE dosya hic yokken.
+    // This used to call `generateAndPersist` when the file existed but decryption threw. That OVERWROTE the key file with a fresh random key. It
+    // treated "no key" and "the key could not be decrypted this time" as the same thing. A single temporary Keystore failure (a device restored from
+    // backup, a lock-screen change that reset the credential, a StrongBox fault) then destroyed everything encrypted with that key, irreversibly, and
+    // the user saw no warning. The sibling classes (`ArchiveKeyManager`, `IdentityManager`) already behaved correctly: on a decrypt failure they only
+    // return. Regeneration now happens ONLY when the file does not exist at all.
 
     private const val KEY_FILENAME = "skipped_key_enc.enc"
 
     private fun keyFile(context: Context): File =
         File(context.filesDir, KEY_FILENAME)
 
-    /** Uygulama her başladığında (initDatabase sonrası, node modundan
-     *  bağımsız) çağrılmalıdır. */
+    /** Must be called every time the app starts (after initDatabase), regardless of node mode. */
     @Synchronized
     fun ensureLoaded(context: Context) {
         val existed = keyFile(context).exists()

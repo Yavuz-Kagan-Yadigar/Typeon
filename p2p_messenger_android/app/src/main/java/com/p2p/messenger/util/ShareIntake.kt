@@ -6,10 +6,8 @@ import android.net.Uri
 import androidx.core.content.IntentCompat
 
 /**
- * Android paylaşım ekranından ("Typeon'a paylaş") gelen ACTION_SEND /
- * ACTION_SEND_MULTIPLE içeriği. MainActivity bekletir; kullanıcı sohbet
- * listesinden bir sohbet seçince hedef sohbet ekranının Intent'ine eklenir
- * ve orada tüketilir (metin → yazı kutusu, dosyalar → ek olarak gönderim).
+ * Content from the Android share sheet ("Share to Typeon"): ACTION_SEND and ACTION_SEND_MULTIPLE. MainActivity holds it. When the user picks a chat
+ * from the chat list, it is added to the target chat screen's Intent and consumed there (text goes to the input box, files are sent as attachments).
  */
 object ShareIntake {
     const val EXTRA_SHARE = "typeon_share"
@@ -44,7 +42,7 @@ object ShareIntake {
     fun isShare(intent: Intent?): Boolean =
         intent?.action == Intent.ACTION_SEND || intent?.action == Intent.ACTION_SEND_MULTIPLE
 
-    /** Bekleyen paylaşımı (varsa) `target`a ekler ve bekleyeni temizler. */
+    /** Adds the pending share (if any) to `target` and clears the pending one. */
     fun attachTo(target: Intent): Intent {
         forward?.let { f ->
             val expired = android.os.SystemClock.elapsedRealtime() - pendingAt > PENDING_TTL_MS
@@ -62,14 +60,14 @@ object ShareIntake {
         target.putExtra(EXTRA_SHARE, share)
         val uris = uris(share)
         if (uris.isNotEmpty()) {
-            // Okuma izni MainActivity'de; sohbet ekranına devredilmesi için.
+            // Read permission is granted in MainActivity, so it can be passed on to the chat screen.
             target.clipData = ClipData.newRawUri("share", uris[0]).also { c -> uris.drop(1).forEach { c.addItem(ClipData.Item(it)) } }
             target.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         return target
     }
 
-    /** Hedef Intent'teki paylaşımı bir kez alır. */
+    /** Takes the share from the target Intent, once. */
     fun take(target: Intent): Intent? {
         val share = IntentCompat.getParcelableExtra(target, EXTRA_SHARE, Intent::class.java) ?: return null
         target.removeExtra(EXTRA_SHARE)

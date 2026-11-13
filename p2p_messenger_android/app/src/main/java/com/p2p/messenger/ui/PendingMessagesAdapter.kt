@@ -10,12 +10,9 @@ import com.p2p.messenger.R
 import com.p2p.messenger.util.formatAbsoluteTime
 
 /**
- * Ayarlar'daki "bekleyen mesajlar" (henüz
- * karşı taraftan "ack" alınmamış, bkz. lib.rs `awaiting_confirmation`/
- * types.rs `regen_content`) listesi — bkz. `PendingMessagesActivity`. Beklenen
- * boyut küçük (tipik kullanımda birkaç kalem) olduğundan `SimpleChatAdapter`
- * ile aynı basit desen: `ListAdapter`/`DiffUtil` yerine düz bir liste +
- * hedefli `notifyItemRemoved`.
+ * The "pending messages" list in Settings: messages that have not been acknowledged by the other side yet (see lib.rs `awaiting_confirmation`
+ * and types.rs `regen_content`). See `PendingMessagesActivity`. The expected size is small (a few items in typical use), so it uses the same simple
+ * pattern as `SimpleChatAdapter`: a plain list with a targeted `notifyItemRemoved`, not `ListAdapter` / `DiffUtil`.
  */
 class PendingMessagesAdapter(
     private val items: MutableList<Item>,
@@ -26,10 +23,8 @@ class PendingMessagesAdapter(
     data class Item(
         val messageId: String,
         val targetName: String,
-        /** hedef CİHAZIN adı — bkz.
-         *  types.rs `PendingMessageSummary.device_name` dokümantasyonu (kişi/
-         *  grup adı tek başına hangi cihazın hâlâ onay vermediğini
-         *  söylemez). Boşsa satırda gösterilmez. */
+        /** The name of the target DEVICE. See the `PendingMessageSummary.device_name` docs in types.rs. A contact or group name alone does not say
+         *  which device has still not confirmed. Empty means it is not shown on the row. */
         val deviceName: String,
         val text: String,
         val lastAttemptAtMs: Long
@@ -52,8 +47,7 @@ class PendingMessagesAdapter(
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         val item = items[position]
-        // hedef cihazın adı da (varsa) —
-        // bkz. `Item.deviceName` dokümantasyonu.
+        // The name of the target device too, if there is one. See the `Item.deviceName` docs.
         holder.target.text = if (item.deviceName.isNotEmpty()) {
             "${item.targetName} · ${item.deviceName}"
         } else {
@@ -67,9 +61,7 @@ class PendingMessagesAdapter(
         holder.btnRetry.setOnClickListener { onRetry(item) }
     }
 
-    /** bkz. `PendingMessagesActivity.cancelPending` — bir öğe iptal
-     *  edildiğinde (Rust tarafında zaten kaldırıldıktan SONRA) listeden
-     *  de kaldırır. */
+    /** See `PendingMessagesActivity.cancelPending`. When an item is cancelled (already removed on the Rust side), it is removed from the list too. */
     fun removeById(messageId: String) {
         val index = items.indexOfFirst { it.messageId == messageId }
         if (index >= 0) {

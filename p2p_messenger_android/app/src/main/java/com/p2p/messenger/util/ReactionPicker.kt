@@ -11,38 +11,26 @@ import androidx.appcompat.app.AlertDialog
 import com.p2p.messenger.R
 
 /**
- * "mesajlara uzun basarak emoji bırakabilmeliyiz
- * WhatsApp'taki gibi" → sonra: "react kısmında TAM SİSTEM emoji seçici ile
- * açılsın."
+ * Long-pressing a message opens the full SYSTEM emoji picker, as in WhatsApp.
  *
- * Bu yüzden ilk sürümdeki sabit altı emojilik sıra KALDIRILDI; yerine
- * `androidx.emoji2.emojipicker.EmojiPickerView` — kategorileri, arama
- * çubuğu, "son kullanılanlar" ve ten rengi varyantlarıyla tam ızgara.
+ * The first version had a fixed row of six emojis. That was removed. In its place is `androidx.emoji2.emojipicker.EmojiPickerView`, a full grid with categories,
+ * a search bar, "recently used", and skin-tone variants.
  *
- * NOT (kapsam sınırı): Android, bir uygulamanın klavyenin KENDİ emoji
- * panelini doğrudan açmasına izin veren bir genel API sunmuyor — böyle bir
- * intent/`InputMethodManager` çağrısı yok. `EmojiPickerView`, platformun
- * kendi emoji verisini (emoji2) kullanan resmi ve en yakın karşılığı.
+ * SCOPE LIMIT: Android has no public API that lets an app open the keyboard's OWN emoji panel directly. No such intent or `InputMethodManager` call exists.
+ * `EmojiPickerView` is the official picker that uses the platform's own emoji data (emoji2), and it is the closest equivalent.
  *
- * SUNUM: ortalanmış bir `AlertDialog`. Önce `BottomSheetDialog` denendi;
- * kullanıcı "garip ve çok aşağıda açılıyor" diye bildirdi ve haklıydı —
- * Material'ın alt sayfası GENİŞ ekranlarda azami bir genişliğe sıkışıyor,
- * bu yüzden tablette ekranın alt ortasında dar, yüzen ve altı kesik bir
- * panel olarak çıkıyordu. Ortalanmış dialog her iki form faktöründe de
- * öngörülebilir: ekranın ortasında, ekrana göre ölçeklenen sabit bir
- * kutu.
+ * PRESENTATION: a centred `AlertDialog`. A `BottomSheetDialog` was tried first. The user reported that it opened strangely and far too low, and that was right:
+ * on wide screens Material's bottom sheet is capped at a maximum width. On tablets it appeared as a narrow, floating panel at the bottom centre, with its
+ * bottom cut off. A centred dialog is predictable on both form factors: a fixed box in the middle of the screen, scaled to the screen.
  */
 object ReactionPicker {
 
     /**
-     * [onPick] boş dize alırsa "tepkimi kaldır" demektir.
+     * [onPick] receives an empty string when the reaction is to be removed.
      *
-     * [showRemove]: mesajda ZATEN tepki varsa sayfanın üstüne bir "kaldır"
-     * düğmesi eklenir. Neden "aynı emojiye tekrar dokun = kaldır" değil:
-     * özet dizesi (bkz. Rust `reactions_summary`) hangi emojinin BENİM
-     * olduğunu taşımıyor, sadece toplamları taşıyor. Bunu bilmek için
-     * protokole kişi bazlı bir liste eklemek gerekirdi; açık bir "kaldır"
-     * düğmesi aynı işi protokolü büyütmeden yapıyor.
+     * [showRemove]: when the message ALREADY has a reaction from me, a "remove" button is added above the grid. Why not "tap the same emoji again to remove it":
+     * the summary string (see Rust `reactions_summary`) does not say which emoji is MINE. It carries only totals. To know that, the protocol would need a
+     * per-person list. An explicit "remove" button does the same job without growing the protocol.
      */
     fun show(context: Context, showRemove: Boolean, onPick: (String) -> Unit) {
         val density = context.resources.displayMetrics.density
@@ -63,7 +51,7 @@ object ReactionPicker {
             setPadding(pad, pad, pad, pad / 2)
         })
 
-        // `dialog` aşağıda kuruluyor; dinleyiciler ona buradan erişebilsin.
+        // `dialog` is built below. The listeners need access to it from here.
         var dialogRef: AlertDialog? = null
 
         if (showRemove) {
@@ -85,8 +73,7 @@ object ReactionPicker {
         }
 
         container.addView(EmojiPickerView(context).apply {
-            // Sabit yükseklik: `WRAP_CONTENT` bir ızgarada anlamsız, sayfa
-            // ya kapanacak kadar kısalıyor ya ekranı tamamen kaplıyordu.
+            // Fixed height: WRAP_CONTENT is meaningless for a grid. It either shrinks to nothing or fills the whole screen.
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 (340 * density).toInt()
@@ -103,9 +90,8 @@ object ReactionPicker {
             .create()
         dialogRef = dialog
         dialog.show()
-        // Izgara `WRAP_CONTENT` ile ya kapanacak kadar kısalıyor ya ekranı
-        // kaplıyor — genişliği ekrana göre AÇIKÇA veriyoruz (tablette
-        // uçtan uca yayılmasın, telefonda da dar kalmasın).
+        // With WRAP_CONTENT, the grid either shrinks too far or fills the screen. So the width is given explicitly from the screen size. On a tablet it does
+        // not stretch edge to edge, and on a phone it is not too narrow.
         dialog.window?.setLayout(
             minOf((metrics.widthPixels * 0.92f).toInt(), (420 * density).toInt()),
             ViewGroup.LayoutParams.WRAP_CONTENT

@@ -8,16 +8,12 @@ import java.io.File
 import java.io.InputStream
 
 /**
- * görsel küçültme/sıkıştırma — hem sohbet eki önizlemeleri
- * (480p/%85, bkz. ChatActivity) hem de profil fotoğrafları (720p/%85, bkz.
- * SettingsFragment) AYNI mantığı kullanır, sadece hedef boyut farklı.
- * Önceden bu mantık ChatActivity içinde private/tek kullanım yerine özeldi
- * — profil fotoğrafı eklenirken buraya taşındı.
+ * Image downscaling and compression. Both chat attachment previews (480p, 85%, see ChatActivity) and profile photos (720p, 85%, see SettingsFragment)
+ * use the SAME logic, with only the target size different. This logic used to be private to ChatActivity. It was moved here when profile photos were added.
  */
 object ImagePreview {
-    /** Büyük görselleri TAM çözünürlükte belleğe yüklememek için önce
-     *  sınırları (`inJustDecodeBounds`) okuyup uygun bir `inSampleSize`
-     *  hesaplar, sonra `compressBitmap` ile tam hassas boyuta iner. */
+    /** To avoid loading large images at full resolution, it first reads the bounds (`inJustDecodeBounds`) and computes a suitable `inSampleSize`. Then
+     *  `compressBitmap` brings it down to the exact target size. */
     fun compressFile(file: File, maxDimension: Int, quality: Int): ByteArray? {
         if (isJxl(file)) {
             // BitmapFactory cannot read JPEG XL: its first frame as a temp GIF.
@@ -113,11 +109,9 @@ object ImagePreview {
         return rotated
     }
 
-    /** En uzun kenarı `maxDimension`'a sığdırır (en-boy oranı KORUNUR —
-     *  kullanıcı isteği: küçük resimler kare olsun ama gerçek görselin
-     *  oranı bozulmasın, kare kırpma sadece bindAttachment'taki
-     *  ImageView'ın `centerCrop` scaleType'ıyla GÖRSEL olarak yapılır, bu
-     *  fonksiyon kaynağı hiç kırpmaz), sonra JPEG'e sıkıştırır. */
+    /** Fits the longest side into `maxDimension`. The aspect ratio is KEPT: small images are square in the UI, but the real image's proportions are not
+     *  distorted. The square crop is done only visually, by the `centerCrop` scaleType of the ImageView in `bindAttachment`. This function never crops the
+     *  source. Then it compresses to JPEG. */
     fun compressBitmap(bitmap: Bitmap, maxDimension: Int, quality: Int): ByteArray {
         val longEdge = maxOf(bitmap.width, bitmap.height)
         val scaled = if (longEdge > maxDimension) {

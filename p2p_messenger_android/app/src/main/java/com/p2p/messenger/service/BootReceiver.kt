@@ -8,22 +8,17 @@ import androidx.core.content.ContextCompat
 import com.p2p.messenger.P2PLib
 
 /**
- * Yeniden başlatmadan sonra ağı geri getirir.
+ * Brings the network back after a reboot.
  *
- * Bu denetimde bulundu: telefon yeniden başladığında uygulama TAMAMEN ölü
- * kalıyordu — kullanıcı uygulamayı elle açana kadar hiçbir mesaj
- * alınmıyordu. Tek yedek, saatte bir çalışan `P2PRetryWorker`'dı; ama o da
- * ARKA PLANDAN `startForegroundService` çağırıyor ve Android 12+ (API 31)
- * bunu `ForegroundServiceStartNotAllowedException` ile reddediyor —
- * uygulama pil optimizasyonundan muaf değilse. Yani en kötü durumda
- * "gece telefonu yeniden başlattım, sabah hiçbir mesaj gelmemiş".
+ * Before this fix, after the phone rebooted the app stayed completely dead. No message was received until the user opened the app by hand. The only
+ * fallback was `P2PRetryWorker`, which runs hourly. It calls `startForegroundService` from the BACKGROUND, and Android 12+ (API 31) refuses that with
+ * `ForegroundServiceStartNotAllowedException` when the app is not exempt from battery optimisation. So the worst case was: the phone rebooted overnight,
+ * and no messages had arrived by morning.
  *
- * `ACTION_BOOT_COMPLETED`, Android'in ön plan servisi başlatma kısıtlarından
- * AÇIKÇA muaf tuttuğu birkaç yayından biri — bu yüzden buradan başlatmak
- * pil muafiyetine bağlı DEĞİL, her zaman çalışır.
+ * `ACTION_BOOT_COMPLETED` is one of the few broadcasts that Android explicitly exempts from the foreground service start restrictions. So starting from
+ * here does not depend on the battery exemption, and it always works.
  *
- * `ACTION_MY_PACKAGE_REPLACED` de aynı sebeple dinleniyor: uygulama
- * güncellendiğinde süreç öldürülür ve servis kendiliğinden geri gelmez.
+ * `ACTION_MY_PACKAGE_REPLACED` is handled for the same reason: when the app is updated, the process is killed and the service does not come back by itself.
  */
 class BootReceiver : BroadcastReceiver() {
 
@@ -39,18 +34,15 @@ class BootReceiver : BroadcastReceiver() {
         val app = context.applicationContext
         Thread {
             try {
-                // bkz. P2PRetryWorker aynı notu: süreç yeni doğmuş olabilir,
-                // `hasStoredIdentity` DB açılmadan yanlış (false) döner.
-                // `initDatabase` idempotent.
-                // A database that did not open (Keystore not ready) is not
-                // "no account": the service retries the open itself.
+                // See the same note in P2PRetryWorker: the process may have just been born, and `hasStoredIdentity` returns a wrong (false) result before the
+                // DB is opened. `initDatabase` is idempotent.
+                // A database that did not open (Keystore not ready) is not "no account": the service retries the open itself.
                 if (!P2PLib.initDatabase(app.filesDir.absolutePath) || P2PLib.hasStoredIdentity()) {
                     ContextCompat.startForegroundService(app, Intent(app, P2PService::class.java))
                 }
             } catch (e: Throwable) {
-                // Cihaz henüz doğrudan-önyükleme (direct boot) aşamasındaysa
-                // veya OEM kısıtlaması varsa: sessizce geç — `P2PRetryWorker`
-                // ve kullanıcının uygulamayı açması hâlâ yedek yollar.
+                // If the device is still in direct boot, or an OEM restriction applies, skip quietly. `P2PRetryWorker` and the user opening the app are still
+                // the fallback paths.
                 Log.w("BootReceiver", "Açılışta servis başlatılamadı: ${e.message}")
             } finally {
                 pending.finish()
