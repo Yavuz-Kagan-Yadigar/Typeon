@@ -3,12 +3,12 @@ name = "typeon-crypto"
 version = "0.2.0"
 edition = "2021"
 
-# TypeOn'un denetlenmiş kripto çekirdeği (identity, double ratchet, paket
-# çerçeveleme, sunucu store-and-forward mührü) burada yaşar. AYNI kod hem native
-# (Android/Linux/relay) hem de tarayıcı (wasm32) tarafında derlenir — protokolü
-# ikinci kez yazmamak için. Bu crate'te SQLite, libp2p, Tor, JNI YOK: sadece
-# saf kripto + serde. wasm-uyumsuz her şey (rusqlite/arti/libp2p) çekirdekte
-# (p2p_messenger_core) kalır.
+# The audited crypto core of TypeOn lives here: identity, double ratchet, packet
+# framing, and the server store-and-forward seal. The SAME code is compiled for
+# both native (Android, Linux, relay) and browser (wasm32) targets, so the protocol
+# is not written twice. This crate has no SQLite, libp2p, Tor or JNI: only pure
+# crypto and serde. Anything that does not build for wasm (rusqlite, arti, libp2p)
+# stays in the core (p2p_messenger_core).
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -17,9 +17,10 @@ serde_json = "1.0"
 ciborium = "0.2"
 hex = "0.4"
 base32 = "0.5"
-# NOT: sürümler çekirdekle (p2p_messenger_core/Cargo.toml) BİREBİR aynı olmalı —
-# aynı bayt formatı iki tarafta da çözülebilsin. ml-dsa/ed25519 BİLEREK yok:
-# bu modüller imza/anahtarları ham bayt olarak taşır, o crate'lere ihtiyaç duymaz.
+# NOTE: versions MUST match the core (p2p_messenger_core/Cargo.toml) exactly, so
+# both sides decode the same byte format. ml-dsa and ed25519 are deliberately not
+# listed: these modules carry signatures and keys as raw bytes and do not need
+# those crates.
 ml-kem = { version = "0.2", features = ["zeroize"] }
 kem = "=0.3.0-pre.0"
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
@@ -30,7 +31,7 @@ sha3 = "0.10"
 zeroize = "1.7"
 rand = "0.8"
 
-# wasm32'de OsRng (getrandom 0.2) tarayıcı Crypto.getRandomValues'a bağlanır;
-# "js" feature'ı olmadan wasm hedefinde derlenmez. Native hedefleri etkilemez.
+# On wasm32, OsRng (getrandom 0.2) is backed by the browser's Crypto.getRandomValues.
+# It does not build for the wasm target without the "js" feature. Native targets are unaffected.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }

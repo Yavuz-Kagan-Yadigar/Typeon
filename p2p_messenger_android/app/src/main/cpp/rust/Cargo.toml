@@ -5,57 +5,55 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 
 [lib]
-# "rlib" EKLENDİ: Linux masaüstü istemcisi (bkz. depo kökündeki `Linux/`) bu
-# çekirdeği bir path bağımlılığı olarak DOĞRUDAN linkler (bkz. `api` modülü) —
-# cdylib/staticlib bir Rust crate'i tarafından `use` edilemez, rlib gerekir.
-# Android tarafı için değişen bir şey yok: cargo-ndk hâlâ cdylib'i üretir.
+# "rlib" is included so the Linux desktop client (see `Linux/` at the repo root)
+# can link this core directly as a path dependency (see the `api` module).
+# A cdylib or staticlib cannot be `use`d by another Rust crate, so rlib is needed.
+# Android is unaffected: cargo-ndk still builds the cdylib.
 crate-type = ["cdylib", "staticlib", "rlib"]
 name = "p2p_messenger"
 
 [features]
-# M-168: debug-only JNI exports (DebugDbKey). Off by default; debug variant only.
+# Debug-only JNI exports (DebugDbKey). Off by default; debug variant only.
 debug-hooks = []
 
 [dependencies]
-# Paylaşılan kripto çekirdeği (identity/ratchet/packet/server_proto/server_seal).
-# Bu modüller buradan `typeon-crypto`'ya taşındı; `lib.rs` onları `pub use` ile
-# yeniden yayımlar, böylece hem bu çekirdek hem de tarayıcı (wasm) tarafı AYNI
-# kodu kullanır. Sürümler aşağıdaki kripto crate'leriyle birebir aynı olmalı.
+# Shared crypto core (identity, ratchet, packet, server_proto, server_seal).
+# These modules moved to `typeon-crypto`. `lib.rs` re-exports them with `pub use`,
+# so this core and any other consumer share the same code. The versions below
+# must match the crypto crates exactly.
 typeon-crypto = { path = "../../../../../../typeon-crypto" }
 
 # Cryptography
 ring = "0.17"
-# NOT: pqcrypto-kyber/pqcrypto-dilithium yerine RustCrypto'nun ml-kem/ml-dsa
-# crate'lerine geçildi — eskiler artık bakımsız (RUSTSEC-2024-0381,
-# RUSTSEC-2024-0380) ve gerçek FIPS 203/204 standardıyla bayt-uyumsuz
-# (PQClean'in round-3 taslak Kyber/Dilithium'una dayanıyorlardı). ml-dsa
-# için >=0.1.0-rc.4 ZORUNLU: rc.2/rc.3 GHSA-5x2r-hc65-25f9 imza malleability
-# açığını taşıyor (tekrarlanan hint index'li sahte imzalar kabul ediliyordu).
+# NOTE: moved from pqcrypto-kyber/pqcrypto-dilithium to RustCrypto's ml-kem and
+# ml-dsa crates. The old crates are unmaintained (RUSTSEC-2024-0381,
+# RUSTSEC-2024-0380), and they are not byte-compatible with the final FIPS 203/204
+# standards (they followed the PQClean round-3 Kyber/Dilithium drafts). ml-dsa
+# requires >=0.1.0-rc.4: rc.2 and rc.3 carry the signature malleability issue
+# GHSA-5x2r-hc65-25f9, where repeated hint indices were accepted as valid signatures.
 #
-# ml-kem'in Decapsulate/Encapsulate trait'leri kendi kökünde değil, ayrı
-# bir `kem` crate'inden geliyor (ml-kem bunu `pub use ::kem::{...}` ile
-# sadece `ml_kem::kem` alt modülünde, kökte DEĞİL re-export ediyor) — bu
-# yüzden `kem` doğrudan bağımlılık olarak eklendi.
+# The Decapsulate/Encapsulate traits of ml-kem come from a separate `kem` crate.
+# ml-kem re-exports them only in its `ml_kem::kem` submodule, not at the root,
+# so `kem` is a direct dependency too.
 #
-# ml-kem'in rand_core sürümü (0.6.4) ile x25519-dalek/ed25519-dalek'in
-# kullandığı rand_core (0.6, rand 0.8 üzerinden) AYNI majör sürüm — gerçekte
-# bir çakışma YOK, `rand::rngs::OsRng` doğrudan ml-kem'in `CryptoRngCore`
-# parametrelerine geçirilebiliyor. ml-kem'in "getrandom" diye bir feature'ı
-# YOK (parametresiz üretim desteklemiyor, RNG her zaman elle verilir).
-# ml-dsa ise crypto-common'ın `Generate` trait'i üzerinden gerçekten
-# parametresiz `generate()` sunuyor (`getrandom` feature'ı sayesinde,
-# içeride kendi ambient RNG'sini kullanır) — bu yüzden ml-dsa tarafında
-# hâlâ `SigningKey::generate()` (parametresiz) kullanılıyor.
-# Spec dışı, güvenlik denetimi düzeltmesi: "zeroize" feature'ı dört crate'te
-# de (ml-kem/ml-dsa/x25519-dalek/ed25519-dalek) AÇILDI — bu, uzun-vadeli
-# kimlik secret key'lerinin (DeviceKeys) VE her ratchet oturumunun kendi
-# X25519/Kyber secret key çiftinin (DeviceRatchetState.own_x25519_secret/
-# own_kyber_secret) bellekten düşürülürken (Drop) otomatik olarak sıfırla
-# ÜZERİNE YAZILMASINI sağlar (bkz. SECURITY.md "Bellekte anahtar hijyeni").
-# Önceden bu crate'ler bu feature'sız derleniyordu — secret key baytları
-# normal Rust `drop` ile (yani hiçbir üzerine yazma olmadan) bellekten
-# çıkıyordu; process belleği bir şekilde okunabilseydi (ör. ayrı bir cihaz
-# açığı) bu baytlar hâlâ orada bulunabilirdi.
+# ml-kem uses rand_core 0.6.4, and x25519-dalek/ed25519-dalek use rand_core 0.6
+# through rand 0.8. Same major version, so there is no conflict: `rand::rngs::OsRng`
+# can be passed straight to ml-kem's `CryptoRngCore` parameters. ml-kem has no
+# "getrandom" feature, because it has no parameterless key generation; the RNG is
+# always supplied by the caller.
+# ml-dsa instead exposes a parameterless `generate()` through crypto-common's
+# `Generate` trait, using the `getrandom` feature to draw from its own ambient RNG.
+# So the ml-dsa side keeps the parameterless `SigningKey::generate()`.
+# Security-audit fix: the `zeroize` feature is enabled in all four crates (ml-kem,
+# ml-dsa, x25519-dalek, ed25519-dalek). Long-term identity secret keys (DeviceKeys)
+# and each ratchet session's own X25519/Kyber secret pair
+# (DeviceRatchetState.own_x25519_secret / own_kyber_secret) are overwritten with
+# zeros on drop, not just freed. See SECURITY.md, section 6 (local storage) for
+# the key handling rules.
+# Before this, these crates were built without the feature, so secret key bytes
+# were released with a plain Rust drop and never overwritten. If process memory
+# were readable (for example through another device-level flaw), those bytes
+# could still be there.
 ml-kem = { version = "0.2", features = ["zeroize"] }
 kem = "=0.3.0-pre.0"
 ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
@@ -74,18 +72,17 @@ png = "0.18"
 # Stickers: lossy JPEG XL (libjxl, built from source by the "vendored" feature;
 # needs cmake + a C++ toolchain, cargo-ndk provides it for Android).
 jpegxl-rs = { version = "0.16", default-features = false, features = ["vendored"] }
-# Spec dışı, güvenlik denetimi düzeltmesi: kurtarma dosyası (tüm uzun-vadeli
-# secret key'leri taşır) parola-tabanlı anahtar türetmesi için ARTIK
-# Argon2id kullanıyor — önceden HKDF-SHA256 (tek bir HMAC, çevrimdışı
-# brute-force'a karşı korumasız) kullanılıyordu. Argon2id memory-hard,
-# saf-Rust (C toolchain gerektirmez, cross-compile'ı etkilemez).
+# Security-audit fix: the recovery file (which carries all long-term secret keys)
+# now derives its key from the passphrase with Argon2id. It used HKDF-SHA256 before,
+# a single HMAC with no protection against offline brute force. Argon2id is
+# memory-hard and pure Rust (no C toolchain needed, so cross-compiles are unaffected).
 argon2 = "0.5"
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 hex = "0.4"
 base32 = "0.5"
 serde = { version = "1.0", features = ["derive"] }
-# Bayt alanları CBOR'da tam sayı dizisi yerine bayt bloğu olarak yazılsın (~1.9x küçük).
+# Write byte fields in CBOR as byte strings, not integer arrays (about 1.9x smaller).
 serde_bytes = "0.11"
 serde_json = "1.0"
 ciborium = "0.2"
@@ -93,28 +90,25 @@ zeroize = "1.7"
 uuid = { version = "1.6", features = ["v4", "serde"] }
 
 # Networking (libp2p)
-# Spec dışı, güvenlik denetimi devamı: "relay" eklendi (dcutr/autonat sonra kaldırıldı, M-201: yalnız onion) —
-# farklı ağlardaki (NAT arkasındaki) iki cihazın birbirine ulaşabilmesi için
-# (bkz. SECURITY.md "Cross-network connectivity" notu). Spec §4.3 zaten Node
-# modu için "isteğe bağlı Circuit Relay v2 hizmeti" öngörmüştü, ama hiçbir
-# zaman implemente edilmemişti.
-# Spec dışı, kullanıcı isteği ("connection testing and re-connecting
-# automatically should be better", sonra pil sağlamlığı düzeltmesi): aktif
-# bağlantı canlılık testi. Önceden bu uygulamanın bir bağlantının hâlâ
-# GERÇEKTEN çalışır durumda olduğunu doğrulamasının TEK yolu, o bağlantı
-# üzerinden bir yazma denemesinin başarısız olmasıydı (ör. bir mesaj
-# göndermeye çalışmak) — bu, "yarı açık" (half-open) bir bağlantıyı (ağ
-# arayüzü değişti, NAT/güvenlik duvarı boşta bağlantıyı sessizce düşürdü,
-# cihaz uykudan döndü) DAKİKALARCA fark edilmeden bırakabilirdi, çünkü
-# libp2p'nin kendi `is_connected()` bookkeeping'i böyle bir durumda hâlâ
-# "bağlı" der (TCP katmanı henüz bir RST/timeout görmedi). Bu ÖNCEDEN stok
-# "ping" feature'ıyla (libp2p::ping) yapılıyordu; artık lib.rs'teki ÖZEL
-# `keepalive` (request-response tabanlı, bkz. `P2PBehaviour.keepalive`/
-# `KeepAliveState`) davranışıyla yapılıyor — sebep, stok ping'in TÜM
-# bağlantılara tek bir SABİT aralık uygulaması (pil sağlamlığı düzeltmesi:
-# bir bağlantı stabilize olunca aralık genişletilebilsin istendi, stok ping
-# bunu desteklemiyor). "ping" feature'ı artık kullanılmadığından kaldırıldı,
-# "request-response"/"cbor" zaten `file_chunks` için buradaydı.
+# Relay is enabled; dcutr and autonat were removed later. The transport is onion
+# only (see SECURITY.md, section 5, "Cross-network connectivity").
+# Devices on different networks reach each other through relays.
+# Spec §4.3 allowed an optional Circuit Relay v2 service for Node mode,
+# but it was never implemented.
+#
+# Connection liveness testing: a connection is checked actively, and reconnects
+# happen automatically. Before, the only way to confirm a connection still worked
+# was a failed write over it (for example, sending a message). A half-open
+# connection (the network interface changed, NAT or the firewall dropped an idle
+# connection silently, the device woke from sleep) could go unnoticed for minutes.
+# libp2p's own `is_connected()` still reports such a connection as up, because TCP
+# has not yet seen a reset or timeout.
+# This used to be done with the stock "ping" feature (libp2p::ping). It is now done
+# by the custom `keepalive` in lib.rs (request-response based, see `KeepAliveState`).
+# Reason: the stock ping applies one fixed interval to all connections. Battery work
+# needed the interval to grow once a connection is stable, and the stock ping does
+# not support that. The "ping" feature is removed because nothing uses it.
+# "request-response" and "cbor" stay, since `file_chunks` already used them.
 libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "kad", "identify", "tokio", "macros", "dns", "request-response", "cbor", "relay"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 # Call media: one long-lived stream per peer instead of a request/response
@@ -123,27 +117,25 @@ libp2p-stream = "=0.1.0-alpha.1"
 futures = "0.3"
 
 # Database
-# NOT: rusqlite 0.30 -> 0.32'ye yükseltildi çünkü arti (tor-dirmgr) rusqlite
-# 0.32'ye KOŞULSUZ bağımlı; iki farklı libsqlite3-sys sürümü (ikisi de
-# `links = "sqlite3"`) cargo'nun "multiple packages link to sqlite3"
-# hatasıyla derlemeyi reddetmesine yol açardı. Tek sürüme hizalayarak
-# çakışma önlendi (kullanılan API — Connection/execute/query_map/params/
-# prepare — 0.30-0.32 arasında değişmedi).
+# NOTE: rusqlite was raised from 0.30 to 0.32, because arti (tor-dirmgr) depends
+# unconditionally on rusqlite 0.32. Two libsqlite3-sys versions (both with
+# `links = "sqlite3"`) make cargo refuse to build with "multiple packages link to
+# sqlite3". Aligning on one version fixed that. The API used (Connection, execute,
+# query_map, params, prepare) did not change between 0.30 and 0.32.
 # SQLCipher: the whole client database is encrypted (see `init_db`). OpenSSL
 # is built from source so Android (NDK), desktop and the Flatpak SDK need no
 # system libcrypto.
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 
-# Tor (onion service) — spec dışı, kullanıcı isteği: CGNAT arkasındaki
-# cihazların birbirine ulaşabilmesi için (bkz. SECURITY.md "Tor onion"
-# notu). native-tls YERİNE rustls (openssl cross-compile derdinden kaçınmak
-# için); arti'nin rustls'i `ring` kullanıyor, o da bu projede zaten cross-
-# compile ediliyor. onion-service-service = host etme, onion-service-client
-# + keymgr = kalıcı .onion adresi.
+# Tor (onion service). Added so devices behind CGNAT can reach each other (see
+# SECURITY.md, section 5, "Tor onion services"). rustls is used instead of
+# native-tls, to avoid cross-compiling OpenSSL. arti's rustls uses `ring`, which
+# this project already cross-compiles. onion-service-service = host a service;
+# onion-service-client + keymgr = a persistent .onion address.
 arti-client = { version = "0.24", default-features = false, features = ["tokio", "rustls", "onion-service-client", "onion-service-service", "compression", "keymgr"] }
 tor-hsservice = "0.24"
 tor-cell = "0.24"
-# M-11: inbound BEGIN port check (`IncomingStreamRequest`); same version arti pulls in.
+# Inbound BEGIN port check (`IncomingStreamRequest`). Same version arti pulls in.
 tor-proto = { version = "0.24", features = ["hs-service"] }
 tor-config = "0.24"
 tor-rtcompat = { version = "0.24", features = ["tokio", "rustls"] }
@@ -153,12 +145,12 @@ jni = "0.21"
 android_logger = "0.13"
 log = "0.4"
 lazy_static = "1.4"
-# M-65: CLOCK_BOOTTIME for `mono_ms` (timers that keep counting through suspend).
+# CLOCK_BOOTTIME for `mono_ms` (timers keep counting through suspend).
 libc = "0.2"
 
 [profile.release]
-# M-172: "s" (speed over the last bytes of size: crypto, Tor and media are
-# CPU-bound during use). Compare BatteryLog against "z" after a normal day.
+# opt-level "s" optimizes for size. Speed was traded for size. Crypto, Tor and
+# media are CPU-bound during use. Compare BatteryLog against "z" after a normal day.
 opt-level = "s"
 lto = true
 codegen-units = 1

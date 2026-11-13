@@ -7,9 +7,9 @@ license = "GPL-3.0-or-later"
 
 [lib]
 name = "typeon_server"
-# "cdylib": Android sunucu uygulaması (bkz. `p2p_messenger_android_server/`)
-# bunu cargo-ndk ile derleyip JNI üzerinden çağırır — istemci tarafındaki
-# `p2p_messenger` cdylib'iyle aynı desen.
+# "cdylib": the Android server app (see `p2p_messenger_android_server/`) builds
+# this with cargo-ndk and calls it through JNI. Same pattern as the `p2p_messenger`
+# cdylib on the client side.
 crate-type = ["lib", "cdylib"]
 
 [[bin]]
@@ -17,19 +17,18 @@ name = "typeon-server"
 path = "src/bin/typeon-server.rs"
 
 [dependencies]
-# Protokolün TEK tanımı — istemcinin gönderdiği tiplerin AYNISI. `Linux/`
-# masaüstü istemcisinin çekirdeği linklemesiyle aynı gerekçe: elle senkron
-# tutulacak ikinci bir kopya yok. Ayrıca `attachments` (dosya parçalarını
-# diskten okuyup servis etmek) ve `tor` (kendi onion service'ini barındırmak)
-# buradan geliyor.
+# The ONLY definition of the protocol: identical to the types the client sends.
+# Same reason as the Linux desktop client linking the core: there is no second
+# copy to keep in sync by hand. `attachments` (reading and serving file chunks
+# from disk) and `tor` (hosting the server's own onion service) also come from here.
 p2p_messenger_core = { path = "../p2p_messenger_android/app/src/main/cpp/rust" }
 
-# İstemcinin kullandığı SÜRÜMLERİN AYNISI olmak ZORUNDA: `ServerRequest`/
-# `FileChunkRequest` tipleri çekirdekten geliyor ve libp2p'nin
-# `request_response::cbor::Behaviour`'ına parametre olarak veriliyor — iki
-# farklı libp2p sürümü, aynı isimli ama FARKLI tipler demek olurdu ve
-# derlenmezdi. rusqlite için de aynı durum (`links = "sqlite3"` çakışması,
-# bkz. çekirdeğin Cargo.toml notu).
+# Versions MUST match the ones the client uses. `ServerRequest` and
+# `FileChunkRequest` come from the core and are passed as parameters to libp2p's
+# `request_response::cbor::Behaviour`. Two different libp2p versions would mean
+# two types with the same name that are NOT the same type, and the build would
+# fail. The same applies to rusqlite (`links = "sqlite3"` conflict, see the note
+# in the core's Cargo.toml).
 libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "identify", "kad", "tokio", "macros", "dns", "request-response", "cbor", "relay"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 futures = "0.3"
@@ -45,19 +44,19 @@ hex = "0.4"
 zeroize = "1.7"
 rand = "0.8"
 sha2 = "0.10"
-# Kayıt (enrollment) imzalarını doğrulamak için. İstemci BU SUNUCUYA ÖZEL
-# taze bir Ed25519 çifti üretir (cihaz kimlik anahtarını DEĞİL — bkz.
-# `ServerRequest::Enroll` notu), sunucu sadece doğrular.
+# For verifying enrollment signatures. The client generates a fresh Ed25519 pair
+# for THIS server only (not the device identity key; see the `ServerRequest::Enroll`
+# note). The server only verifies.
 ed25519-dalek = "2"
-# Kayıt imzası, uygulamanın geri kalanıyla AYNI şekilde hibrit doğrulanır.
-# Sürüm/feature'lar çekirdekle birebir aynı olmak zorunda: `EncodedSignature`
-# gibi tipler protokolde taşınmıyor ama aynı kodlamayı üretmeleri gerekiyor
-# (ve >=0.1.0-rc.4 zorunluluğu — GHSA-5x2r-hc65-25f9 imza malleability'si —
-# aynen geçerli).
+# The enrollment signature is verified hybrid, the same way as in the rest of the
+# app. Versions and features must match the core exactly: types such as
+# `EncodedSignature` are not carried in the protocol, but both sides must produce
+# the same encoding. The >=0.1.0-rc.4 requirement still applies
+# (GHSA-5x2r-hc65-25f9, signature malleability).
 ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
 log = "0.4"
-# Headless Linux daemon'ı için; Android tarafında `android_logger` devreye
-# girer (bkz. src/jni.rs).
+# For the headless Linux daemon. On Android, `android_logger` is used instead
+# (see src/jni.rs).
 env_logger = "0.11"
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -68,11 +67,11 @@ lazy_static = "1.4"
 [profile.release]
 opt-level = 2
 lto = "thin"
-# Sembol tablosu olmadan Android .so'ları üç katına çıkıyordu (25-34 MB
-# yerine ~10 MB; APK 183 MB yerine ~60 MB). Çekirdek crate'i de aynı sebeple
-# `strip = true` kullanıyor. Linux daemon'ında da tek zararı, panik
-# geri-izlemelerinin sembolsüz kalması — sunucu zaten yapılandırılmış
-# günlükleme (`env_logger`) üzerinden teşhis ediliyor.
+# Without a symbol table the Android .so files were about three times larger
+# (25-34 MB instead of about 10 MB; APK 183 MB instead of about 60 MB). The core
+# crate uses `strip = true` for the same reason. On the Linux daemon the only cost
+# is that panic backtraces lose their symbols. The server diagnoses through
+# `env_logger` output.
 strip = true
 
 # Same TypeOn patches (tor-hsservice, tor-netdir) as the core crate; cargo ignores the

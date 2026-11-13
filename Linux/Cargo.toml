@@ -33,11 +33,11 @@ async-channel = "2"
 # PdfSurface for the whiteboard's "save page as PDF" (gtk4 re-exports cairo).
 cairo-rs = { version = "0.20", features = ["pdf"] }
 
-# Çekirdek `log` makrolarıyla epey teşhis bilgisi yayıyor (bağlantı
-# durumu, ratchet olayları, sunucu kayıt/teslim akışı). Android tarafında
-# bunu `android_logger` logcat'e veriyor; masaüstünde ise HİÇBİR logger
-# kurulu değildi, yani o çıktının tamamı sessizce yutuluyordu — bir sorun
-# olduğunda elde hiçbir şey kalmıyordu. `RUST_LOG=info` ile açılır.
+# The core emits a lot of diagnostic output through the `log` macros (connection
+# state, ratchet events, server registration and delivery). On Android,
+# `android_logger` sends it to logcat. On the desktop no logger was installed, so
+# all of that output was dropped silently and nothing was left to diagnose a
+# problem. Set `RUST_LOG=info` to enable it.
 env_logger = "0.11"
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
