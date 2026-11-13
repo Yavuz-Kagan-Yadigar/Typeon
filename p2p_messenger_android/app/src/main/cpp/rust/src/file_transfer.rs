@@ -4,16 +4,10 @@ use super::*;
 
 impl P2PCore {
 
-    /// `attachment_key` diye AYRI bir anahtar İCAT ETMİYORUZ — bunun yerine
-    /// zaten node modundan BAĞIMSIZ her zaman yüklenen
-    /// `skipped_key_encryption_key`'i (bkz. o alanın dokümantasyonu) yeniden
-    /// kullanıyoruz. Bu, "gönderen kendi node modundan bağımsız dosya
-    /// kopyasını tutar" kuralının (dosyanın `file_key`'i her zaman diskte
-    /// şifreli saklanabilmeli, node modu kapalı olsa bile) Kotlin tarafında
-    /// yeni bir Keystore anahtarı/yaşam-döngüsü sınıfı gerektirmeden
-    /// çalışmasını sağlar — aynı KEK, farklı küçük sırları (atlanmış mesaj
-    /// anahtarları, ratchet state, şimdi de dosya anahtarları) taze
-    /// nonce'larla sarmaya devam ediyor, standart bir uygulama.
+    /// No separate `attachment_key` is generated. We reuse `skipped_key_encryption_key` (see its docs), which is always loaded regardless
+    /// of node mode. This lets the sender keep its own encrypted copy of the file (the `file_key` is always stored encrypted on disk, even
+    /// with node mode off) without a new Keystore key or lifecycle class on the Kotlin side. The same KEK keeps wrapping other small secrets
+    /// (skipped message keys, ratchet state, and now file keys) with fresh nonces.
     pub(crate) fn wrap_file_key(&self, file_key: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), String> {
         let enc_key = self.skipped_key_encryption_key.ok_or("Şifreleme anahtarı henüz yüklenmedi")?;
         let (encrypted, nonce_bytes) = seal_with(&enc_key, file_key.as_slice()).ok_or("File key encryption failed")?;
@@ -33,41 +27,28 @@ impl P2PCore {
         plaintext.as_slice().try_into().map_err(|_| "Bad file key length".to_string())
     }
 
-    /// Kullanıcının seçtiği bir dosyayı (Kotlin tarafından zaten yerel bir
-    /// yola kopyalanmış olmalı — content:// URI burada işlenmez, bkz.
-    /// P2PLib.kt dokümantasyonu) şifreleyip diske yazar, kendi kaydını
-    /// `files` tablosuna ekler (sender-always-keeps-copy kuralı, kendi
-    /// node modumuzdan BAĞIMSIZ) ve karşı tarafa bir `FileOffer` meta veri
-    /// mesajı gönderir. BİLİNEN SINIR: `encrypt_file_to_disk` bounded-
-    /// memory'dir ama SENKRONdur — bu çağrı boyunca `CORE` kilidi tutulur,
-    /// yani çok büyük (GB mertebesinde) bir dosya için bu süre boyunca
-    /// `pollNetwork`/diğer JNI çağrıları gecikebilir (mesajlaşmanın
-    /// KENDİSİ bozulmaz, sadece o birkaç saniye/on saniye ertelenir) —
-    /// tam asenkron bir mimari (ayrı worker thread + kanal) bu kapsamın
-    /// dışında bırakıldı, bkz. proje notları.
-    /// Performans/güvenilirlik düzeltmesi (kilit altında dosya şifreleme):
-    /// eski tek parça `prepare_and_send_file`/`prepare_and_send_group_file`,
-    /// 4GB'a varan ChaCha20 şifrelemesini GLOBAL core kilidi TUTARKEN
-    /// yapıyordu — bu süre boyunca `poll_events` hiç çalışamıyor (swarm
-    /// sürülmüyor, gelen keepalive istekleri yanıtlanamıyor), karşı
-    /// taraflar ~20-30 sn içinde bağlantıyı "yarı açık" sayıp KAPATIYORDU:
-    /// büyük bir video göndermek düğümü fiilen çevrimdışına alıyordu.
-    /// Artık üç faz var: `begin_outgoing_file` (kısa, kilitli — doğrulama +
-    /// kimlik/anahtar üretimi), şifrelemenin KENDİSİ (kilitsiz, bkz.
-    /// dosya sonundaki `prepare_and_send_file_unlocked` serbest fonksiyonu)
-    /// ve `finish_outgoing_file`/`finish_outgoing_group_file` (kısa,
-    /// kilitli — DB kaydı + FileOffer gönderimi).
+    /// Encrypts a file the user picked (Kotlin must already have copied it to a local path; content:// URIs are not handled here, see P2PLib.kt),
+    /// writes it to disk, adds the sender's own record to the `files` table (the sender always keeps a copy, independent of node mode), and sends
+    /// the peer a `FileOffer` metadata message.
+    /// KNOWN LIMIT: `encrypt_file_to_disk` is bounded-memory but SYNCHRONOUS: the `CORE` lock is held for the whole call. For a very large
+    /// (GB-scale) file, `pollNetwork` and other JNI calls can be delayed for that time. Messaging itself is not broken, only deferred by seconds
+    /// or tens of seconds. A fully asynchronous design (separate worker thread + channel) is out of scope for now.
+    /// Fix: file encryption now runs outside the lock. The old single-piece `prepare_and_send_file`/`prepare_and_send_group_file` ran the
+    /// ChaCha20 encryption of up to 4 GB while holding the GLOBAL core lock. `poll_events` could not run during that time (the swarm was not
+    /// polled, incoming keepalive requests went unanswered), and peers dropped the connection as half-open after ~20-30 s. Sending a large video
+    /// effectively took the node offline.
+    /// Now there are three phases: `begin_outgoing_file` (short, locked: validation, id and key generation), the encryption itself (unlocked, see
+    /// the free function `prepare_and_send_file_unlocked` at the end of this file), and `finish_outgoing_file`/`finish_outgoing_group_file` (short,
+    /// locked: DB record and FileOffer send).
     ///
-    /// `skipped_key_encryption_key` kontrolünün erken (şifrelemeden ÖNCE)
-    /// yapılması kasıtlı: aksi halde GB'larca veri işlendikten sonra anahtar
-    /// sarmalama başarısız olur, diskte DB kaydı olmayan "öksüz" bir `.enc`
-    /// kalırdı. Boyut kontrolü de aynı gerekçeyle burada.
+    /// The `skipped_key_encryption_key` check runs early (before encryption) on purpose: otherwise key wrapping would fail after GBs were
+    /// processed, leaving an orphan `.enc` on disk with no DB row. The size check is here for the same reason.
     pub(crate) fn begin_outgoing_file(&self, source_path: &str, group_id: Option<&str>) -> Result<(String, [u8; 32], std::path::PathBuf), String> {
         if self.skipped_key_encryption_key.is_none() {
             return Err("Şifreleme anahtarı henüz yüklenmedi, birazdan tekrar deneyin".to_string());
         }
         if let Some(gid) = group_id {
-            // Grup yerelde yoksa şifrelemeye hiç başlama.
+            // Group not present locally: do not start encryption at all.
             if !self.groups.contains_key(gid) {
                 return Err("Unknown group".to_string());
             }
@@ -113,25 +94,19 @@ impl P2PCore {
         Ok((file_id, file_key, dest_path))
     }
 
-    /// bkz. `begin_outgoing_file` — kilitli son faz (1:1). Şifreleme
-    /// kilitsiz fazda zaten bitti; burada anahtar sarmalanır, DB kaydı
-    /// yazılır ve `FileOffer` gönderilir.
+    /// See `begin_outgoing_file`: the final locked phase (1:1). Encryption already finished in the unlocked phase. Here the key is wrapped,
+    /// the DB record is written, and the `FileOffer` is sent.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn finish_outgoing_file(&mut self, peer_device_fingerprint: String, file_id: String, file_key: [u8; 32], total_size: u64, sha256_hex: String, chunk_hashes: Vec<u8>, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, sticker_origin: Option<String>) -> Result<(String, String), String> {
         let sticker = sticker_origin.is_some();
         let (encrypted_key, key_nonce) = self.wrap_file_key(&file_key)?;
         if let Some(conn) = &self.db {
-            // İKİ CİHAZLI GERÇEK TESTTE BULUNDU (2026-09-06): kolon listesi
-            // 15, VALUES listesi 18 ifade taşıyordu (`caption`,
-            // `reply_to_message_id`, `reply_to_preview` kolonları — bkz.
-            // ALTER TABLE eklemeleri — VALUES/params'a eklenmiş ama kolon
-            // listesine EKLENMEMİŞ). SQLite bunu "18 values for 15 columns"
-            // ile reddediyor, `let _ =` hatayı yutuyordu — yani GÖNDEREN
-            // KENDİ gönderdiği 1:1 ekini `files` tablosuna HİÇ yazmıyordu:
-            // `serve_chunk_request` "kayıt yok" dönüyor (alıcı sadece
-            // sunucudan indirebiliyor), `list_attachments` ek balonunu
-            // geçmişte hiç göstermiyordu (sohbet yeniden açılınca ek
-            // kayboluyordu). Kolon listesi artık 18 — VALUES ile birebir.
+            // Found in a two-device test (2026-09-06): the column list had 15 entries but the VALUES list had 18 (`caption`,
+            // `reply_to_message_id`, `reply_to_preview`: added to VALUES/params by the ALTER TABLE changes but NOT to the column list). SQLite
+            // rejected it with "18 values for 15 columns", and `let _ =` swallowed the error. So the SENDER never wrote its own 1:1 attachment to
+            // the `files` table: `serve_chunk_request` answered "no record" (the recipient could only download from the server), and
+            // `list_attachments` never showed the attachment bubble in history (the attachment disappeared when the chat was reopened).
+            // The column list now has 18 entries, matching VALUES.
             let res = conn.execute(
                 "INSERT OR REPLACE INTO files
                  (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
@@ -145,17 +120,14 @@ impl P2PCore {
                     caption, reply_to_message_id, reply_to_preview, sticker, sticker_origin.clone(), chunk_hashes,
                 ],
             );
-            // bkz. yukarıdaki not — bu INSERT sessizce başarısız oluyordu.
-            // Bir daha fark edilmeden geçmesin diye artık hata loglanıyor.
-            // Without the row we cannot serve the file: sending the offer
-            // anyway gave the recipient an attachment it could never download.
+            // See the note above: this INSERT used to fail silently. The failure is logged now, so it cannot slip by unnoticed.
+            // Without the row we cannot serve the file: sending the offer anyway gave the recipient an attachment it could never download.
             if let Err(e) = res {
                 error!("finish_outgoing_file: `files` satırı yazılamadı (file_id={}): {}", file_id, e);
                 return Err(format!("Dosya kaydı yazılamadı: {}", e));
             }
         }
-        // Kendi gönderdiğimiz dosya da toplam depolamaya katkı sağlar —
-        // bkz. `enforce_history_storage_limit` notu.
+        // Our own sent file also counts toward total storage. See the `enforce_history_storage_limit` note.
         self.enforce_history_storage_limit();
 
         let content = MessageContent::FileOffer {
@@ -173,20 +145,17 @@ impl P2PCore {
             caption: caption.clone(),
             reply_to_message_id: reply_to_message_id.clone(),
             reply_to_preview: reply_to_preview.clone(),
-            // 1:1'de yanıtlananın kimliği ayrıca taşınmıyor — karşı taraf
-            // zaten tek bir kişi (bkz. `Text.reply_to_sender_identity_id`,
-            // AYNI kural).
+            // In 1:1 the replied-to sender's id is not carried separately: the peer is one person (same rule as
+            // `Text.reply_to_sender_identity_id`).
             reply_to_sender_identity_id: None,
             sticker,
             sticker_origin,
         };
-        // Sunucu (bkz. `server_client`) varsa şifreli dosyayı oraya da
-        // yükle — sunucu, istemcilerin ZATEN konuştuğu filexfer protokolünü
-        // servis ettiği için alıcı tarafında hiçbir şey değişmiyor: sunucu
-        // sadece "her zaman açık bir kaynak eş" oluyor.
+        // If a server is configured (see `server_client`), upload the encrypted file there too. Recipients already speak the filexfer protocol
+        // that the server serves, so nothing changes on their side: the server is just an always-on source peer.
         self.queue_blob_upload(&file_id, &file_key, attachments::total_chunks_with(total_size, attachments::FILE_CHUNK_SIZE_V2));
         let (_, status) = self.send_message_content(peer_device_fingerprint.clone(), &content, None)?;
-        // `send_message` ile aynı: kişinin diğer cihazları + kendi kardeşlerim.
+        // Same as `send_message`: the contact's other devices plus my own siblings.
         self.fanout_extra_copies(&peer_device_fingerprint, &content);
         self.echo_1to1_to_siblings(&peer_device_fingerprint, SiblingEchoBody::File { offer: Box::new(content) });
         Ok((file_id, status))
@@ -203,19 +172,14 @@ impl P2PCore {
         }
     }
 
-    /// `prepare_and_send_file`'ın
-    /// grup karşılığı — dosya TEK SEFERDE şifrelenip diske yazılır (`file_id`/
-    /// `file_key` TÜM üyeler arasında PAYLAŞILIR, bkz. `serve_chunk_request`
-    /// notu: indirme isteği SADECE `file_id`'ye bakar, isteyen kimliğini
-    /// KONTROL ETMEZ — bu yüzden aynı `.enc` blob'u N farklı üyeye ayrı ayrı
-    /// serve etmek doğal olarak çalışır, ekstra bir mekanizma gerekmez).
-    /// `archive_group_message`/`send_group_message`'daki AYNI desen: ÖNCE
-    /// kendi arşiv satırımızı YAZ (fan-out döngüsünün dışında, tek satır),
-    /// SONRA her üyeye ayrı ayrı `FileOffer` gönder.
-    /// bkz. `begin_outgoing_file` — kilitli son faz (grup). Doğrulama
-    /// (grubun varlığı) kilitli İLK fazda da yapıldı; burada gruba yeniden
-    /// bakılır (kilitsiz şifreleme sırasında silinmiş olabilir — bu durumda
-    /// temiz bir hata döner, `.enc` çağıran serbest fonksiyonda temizlenir).
+    /// Group counterpart of `prepare_and_send_file`. The file is encrypted and written to disk ONCE: `file_id`/`file_key` are SHARED among all
+    /// members (see the `serve_chunk_request` note: a download request looks only at `file_id` and does not check the requester's identity, so
+    /// serving the same `.enc` blob to N members works naturally, with no extra mechanism).
+    /// Same pattern as `archive_group_message`/`send_group_message`: FIRST write our own archive row (once, outside the fan-out loop), THEN send
+    /// a `FileOffer` to each member separately.
+    /// See `begin_outgoing_file`: the final locked phase (group). Validation (the group exists) was done in the first locked phase. Here the
+    /// group is checked again, since it may have been deleted during the unlocked encryption. In that case a clean error is returned, and the
+    /// `.enc` is removed by the calling free function.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn finish_outgoing_group_file(&mut self, group_id: String, file_id: String, file_key: [u8; 32], total_size: u64, sha256_hex: String, chunk_hashes: Vec<u8>, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>, sticker_origin: Option<String>) -> Result<String, String> {
         let sticker = sticker_origin.is_some();
@@ -223,11 +187,9 @@ impl P2PCore {
         let group = self.groups.get(&group_id).cloned_group()?;
         let (encrypted_key, key_nonce) = self.wrap_file_key(&file_key)?;
         if let Some(conn) = &self.db {
-            // bkz. `finish_outgoing_file` (1:1) AYNI hata — kolon listesi
-            // (17) VALUES listesinden (21 ifade) kısa kalıyordu; grup ekleri
-            // için gönderen `files` satırını hiç yazamıyordu. Kolon listesi
-            // artık 21: `caption`, `reply_to_message_id`, `reply_to_preview`,
-            // `reply_to_sender_identity_id` de eklendi.
+            // See `finish_outgoing_file` (1:1), same bug: the column list (17) was shorter than the VALUES list (21), so the sender could not write
+            // its `files` row for group attachments. The column list now has 21 entries: `caption`, `reply_to_message_id`, `reply_to_preview` and
+            // `reply_to_sender_identity_id` were added.
             let res = conn.execute(
                 "INSERT OR REPLACE INTO files
                  (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
@@ -273,29 +235,21 @@ impl P2PCore {
             self.send_group_message_to_member(&group_id, &member_identity_id, &content);
         }
         self.echo_group_to_siblings(&group_id, SiblingEchoBody::File { offer: Box::new(content) });
-        // bkz. `finish_outgoing_file` içindeki aynı kanca.
+        // See the same hook in `finish_outgoing_file`.
         self.queue_blob_upload(&file_id, &file_key, attachments::total_chunks_with(total_size, attachments::FILE_CHUNK_SIZE_V2));
         Ok(file_id)
     }
 
-    /// Gelen bir `FileOffer`'ı işler: `files` tablosuna bir alıcı kaydı
-    /// ekler (node modu açıksa hemen indirmeyi başlatır — kapalıysa sadece
-    /// meta veri görünür kalır, kullanıcı "İndir" demeli).
+    /// Handles an incoming `FileOffer`: adds a recipient row to the `files` table. If node mode is on, the download starts at once. If it is off,
+    /// only the metadata stays visible and the user must tap "Download".
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn receive_file_offer(&mut self, peer_fp: &str, sender_identity_id: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str, preview_jpeg: &Option<Vec<u8>>, duration_ms: Option<u32>, chunk_size: Option<u32>, chunk_hashes: &[u8], caption: &str, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sticker: bool, sticker_origin: Option<&str>) -> serde_json::Value {
         // `MAX_ATTACHMENT_SIZE`
-        // önceden SADECE gönderim tarafında (`prepare_and_send_file`/
-        // `prepare_and_send_group_file`, bkz. o fonksiyonların kontrolü)
-        // uygulanıyordu — ALICI taraf, karşı taraftan gelen `total_size`
-        // alanına hiç güvenmiyordu ki bunu kontrol etsin: kötü niyetli/bozuk
-        // bir eş, `u64::MAX`'e yakın bir `total_size` göndererek aşağıdaki
-        // `total_size as i64` dönüşümünü (ki taşarsa negatif bir sütun
-        // değeri yazar) ve `attachments::total_chunks_with`'teki
-        // `total_size + FILE_CHUNK_SIZE - 1` toplamını (release'de sessizce
-        // sarabilir) tetikleyebilirdi — ikisi de `files` tablosuna bozuk bir
-        // satır yazılmasına yol açardı. Artık alıcı tarafta da aynı üst
-        // sınır uygulanıyor; aşan bir teklif hiçbir DB satırı yazmadan
-        // reddedilir.
+        // Before, this was enforced ONLY on the send side (`prepare_and_send_file`/`prepare_and_send_group_file`). The RECEIVER did not check the
+        // `total_size` the other side sent. A malicious or broken peer could send a `total_size` near `u64::MAX` and trigger the `total_size as i64`
+        // conversion below (which wraps negative and writes a bad column value), and the `total_size + FILE_CHUNK_SIZE - 1` sum in
+        // `attachments::total_chunks_with` (which can silently wrap in release builds). Both would write a corrupt row to `files`. The same upper
+        // limit now applies on the receive side too. An oversized offer is rejected without writing any DB row.
         // The peer's chunk size becomes buffer sizes and file offsets here.
         if chunk_size.map_or(false, |c| !attachments::chunk_size_ok(c as usize)) {
             warn!("FileOffer REDDEDİLDİ: geçersiz parça boyutu {:?} (gönderen: {})", chunk_size, crate::log_id(&peer_fp));
@@ -305,8 +259,7 @@ impl P2PCore {
                 "error": "Geçersiz parça boyutu"
             });
         }
-        // `file_id` karşı taraftan geliyor ve birazdan dosya
-        // yoluna dönüşecek — ÖNCE doğrula (bkz. `is_safe_file_id`).
+        // `file_id` comes from the other side and becomes a file path shortly after. Validate it FIRST (see `is_safe_file_id`).
         if !is_safe_file_id(file_id) {
             warn!(
                 "FileOffer REDDEDİLDİ: file_id yol olarak güvenli değil (gönderen: {}, id: {:?})",
@@ -318,16 +271,11 @@ impl P2PCore {
                 "error": "Geçersiz dosya kimliği"
             });
         }
-        // aşağıdaki yazma `INSERT OR REPLACE` — karşı taraf,
-        // KENDİSİNE gönderdiğimiz bir dosyanın `file_id`'sini (ki teklifi
-        // ona biz yolladık, yani biliyor) geri gönderirse bizdeki
-        // `direction='sent'` satırı 'received' olarak EZİLİYORDU. Sonuç:
-        // kendi giden ekimizin kaydı kayboluyor, `serve_chunk_request`
-        // artık `NotFound` dönüyor (durum 'complete' değil) — yani o
-        // dosyayı bekleyen DİĞER bütün alıcılar da indiremiyor — ve indirme
-        // başlatılırsa `download_file`'ın `remove_file`'ı kendi şifreli
-        // `.enc` dosyamızı siliyordu.
-        // Stored and handed to the UI as they come.
+        // The `INSERT OR REPLACE` below has a problem: if the other side sends back the `file_id` of a file we sent to it (it knows the id because
+        // we offered it), our `direction='sent'` row was overwritten as 'received'. Result: our own outgoing row was lost, `serve_chunk_request`
+        // returned `NotFound` (the state is not 'complete'), so the OTHER recipients waiting on that file could not download it either. And if a
+        // download was started, `download_file`'s `remove_file` deleted our own encrypted `.enc`.
+        // The row is stored and passed to the UI as received.
         if sha256_hex.len() != 64 || !sha256_hex.bytes().all(|b| b.is_ascii_hexdigit())
             || mime_type.len() > 255 || caption.len() > 64 * 1024
             || preview_jpeg.as_ref().map_or(false, |p| p.len() > 512 * 1024)
@@ -399,17 +347,14 @@ impl P2PCore {
                 "error": "Geçersiz dosya teklifi"
             });
         }
-        // Güvenlik düzeltmesi (bu denetim): `file_name` uzaktan kontrollü ve
-        // hem bir dosya adı olarak kullanılıyor hem ekranda gösteriliyor —
-        // TEK giriş kapısı burası, bkz. `safe_file_name`. Temizlenmiş hâli
-        // DB'ye yazılır, böylece her iki istemci ve "İndirilenler'e kaydet"
-        // akışı otomatik olarak korunur.
+        // Security fix (from this audit): `file_name` is controlled by the remote side and is used both as a file name and as displayed text. THE
+        // single entry point is here, see `safe_file_name`. The sanitised form is written to the DB, so both clients and the "save to Downloads"
+        // flow are protected automatically.
         let file_name = safe_file_name(file_name);
         let file_name = file_name.as_str();
-        // 8 running downloads, at most 4 from one sender (H99: one contact
-        // took the whole budget). The rest stay "offered".
+        // 8 running downloads, at most 4 from one sender (one contact could otherwise take the whole budget). The rest stay "offered".
         // Stickers are small and shown at once: fetched in any node mode.
-        // A peer's `sticker` flag forces a download: only for a real sticker file.
+        // A peer's `sticker` flag forces a download, but only for a real sticker file.
         let sticker = sticker && total_size <= attachments::MAX_STICKER_BYTES
             && mime_type == "image/jxl" && file_name.to_ascii_lowercase().ends_with(".jxl");
         // Only the content id (`jxl:<offer sha>`) is kept: a reuse below is
@@ -422,11 +367,8 @@ impl P2PCore {
                 || self.node_mode_enabled && in_flight.saturating_add(total_size) <= self.history_storage_limit_bytes)
             && self.active_downloads.len() < 8
             && self.active_downloads.values().filter(|d| d.peer_device_fingerprint == peer_fp).count() < 4;
-        // Satır YAZILAMADIYSA (ör. şifreleme anahtarı henüz yüklenmedi),
-        // "offered" olarak devam ediyoruz — DB kaydı olmadan "downloading"
-        // raporlamak, `download_file`'ın hiçbir zaman bulamayacağı bir
-        // dosya için Kotlin tarafında sonsuza kadar takılı bir UI'ye yol
-        // açardı (bkz. dosya sonu not).
+        // If the row cannot be written (e.g. the encryption key is not loaded yet), we continue as "offered". Reporting "downloading" without a DB
+        // row would leave the Kotlin UI stuck forever on a file that `download_file` can never find (see the file-end note).
         let row_written = match self.wrap_file_key(file_key) {
             Ok((encrypted_key, key_nonce)) => {
                 let status = if auto_download_requested { "downloading" } else { "offered" };
@@ -441,8 +383,8 @@ impl P2PCore {
                             file_id, peer_fp, file_name, mime_type, total_size as i64,
                             sha256_hex, encrypted_key, key_nonce, status, current_time_ms() as i64, preview_jpeg, duration_ms,
                             group_id, sender_identity_id,
-                            // `None` = guncellenmemis bir esten gelen teklif:
-                            // miras 256 KiB (bkz. `FileOffer.chunk_size`).
+                            // `None`: an offer from a sender that did not set a chunk size:
+                            // legacy default of 256 KiB (see `FileOffer.chunk_size`).
                             chunk_size.map(|v| v as i64).unwrap_or(attachments::FILE_CHUNK_SIZE as i64),
                             caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, chunk_hashes,
                         ],
@@ -458,14 +400,9 @@ impl P2PCore {
             }
         };
 
-        // önceden burada `download_file`'ın başarısız
-        // olması (ör. `device_to_peer_id`'de bu peer henüz yoksa) sadece
-        // loglanıyordu — çağıran taraf (Kotlin) her zaman
-        // "auto_downloading": true görüyordu ve UI "İndiriliyor" durumunda
-        // sonsuza kadar takılı kalıyordu (indirme hiçbir zaman
-        // `active_downloads`'a eklenmediği, dolayısıyla hiçbir zaman
-        // hata/tamamlanma olayı üretmediği için). Artık gerçek sonucu
-        // (`auto_downloading` alanı) doğru raporluyoruz.
+        // Before, a failure of `download_file` here (e.g. because `device_to_peer_id` has no entry for this peer yet) was only logged. The caller
+        // (Kotlin) always saw "auto_downloading": true, and the UI stayed stuck on "Downloading" forever: the download never reached
+        // `active_downloads`, so it never produced an error or completion event. Now the real result is reported in the `auto_downloading` field.
         // No row: no bubble either (it failed on tap and was gone on reload).
         // The caller sends no Ack for this, so the offer comes again.
         if !row_written {
@@ -497,27 +434,22 @@ impl P2PCore {
             }
         };
 
-        // Çoklu-cihaz: 1:1 canlı olayı KANONİK sohbet cihazı altında yayınla
-        // (kişinin ikincil cihazından gelse bile doğru sohbette görünsün).
-        // Grup olayı `group_id` ile yönlendirildiğinden `peer` grupta önemsiz.
+        // The 1:1 live event is emitted under the CANONICAL chat device, so it shows in the right chat even if it came from the contact's secondary
+        // device. A group event is routed by `group_id`, so `peer` does not matter there.
         let chat_peer = if group_id.is_none() { self.canonical_peer_key(peer_fp) } else { peer_fp.to_string() };
         serde_json::json!({
-            // `sender_identity_id`: grup eklerinde bildirimi "kim gönderdi"
-            // ile gösterebilmek için (bkz. P2PService.maybeNotify
-            // "file_offer" kolu) — 1:1'de zaten `peer` yeterli.
+            // `sender_identity_id` is included in group attachments so the notification can say who sent it (see the P2PService.maybeNotify
+            // "file_offer" branch). In 1:1, `peer` is enough.
             "type": "file_offer", "peer": chat_peer, "sender_identity_id": sender_identity_id,
             "group_id": group_id, "file_id": file_id,
             "file_name": file_name, "mime_type": mime_type, "total_size": total_size,
             "auto_downloading": auto_downloading, "complete": reused, "sticker": sticker,
-            // Hex-encoded — JSON ham ikili veri taşıyamaz. Küçük bir
-            // önizleme (tipik birkaç on KB) için hex'in base64'e göre ~%37
-            // daha büyük olması önemsiz; yeni bir bağımlılık eklemekten
-            // kaçınmak için mevcut `hex` crate'i kullanılıyor.
+            // Hex-encoded, since JSON cannot carry raw binary. For a small preview (typically a few tens of KB), hex is about 37% larger than base64,
+            // which does not matter. The existing `hex` crate is used to avoid adding a new dependency.
             "preview_hex": preview_jpeg.as_ref().map(|p| hex::encode(p)),
             "duration_ms": duration_ms,
-            // ekle birlikte gelen açıklama ve
-            // (varsa) yanıtlanan mesaj bağlamı — ek balonu bunları metin
-            // mesajlarıyla AYNI biçimde gösteriyor.
+            // Include the caption that comes with the attachment, and the replied-to message context if there is one. The attachment bubble shows
+            // these the same way as text messages.
             "caption": caption,
             "reply_to_message_id": reply_to_message_id,
             "reply_to_preview": reply_to_preview,
@@ -525,24 +457,15 @@ impl P2PCore {
         })
     }
 
-    /// Spec dışı (dış AI incelemesi düzeltmesi — "FileOffer ack'lendi ama
-    /// dosya sessizce kayboldu"): `reconnected` kümesindeki cihazlardan biri,
-    /// DAHA ÖNCE indirilmeye başlanmış ama YARIM/BAŞARISIZ kalmış bir
-    /// dosyanın kaynağıysa, o indirmeyi OTOMATİK yeniden başlat. Önceden
-    /// FileOffer ack'lense (yalnızca metadata teslim edilse) bile, kaynak
-    /// indirme ortasında çevrimdışı olursa alıcı `DOWNLOAD_GIVE_UP_TIMEOUT_MS`
-    /// (10 dk) sonunda KALICI olarak pes ediyor ve kaynak geri döndüğünde
-    /// dosyayı bir daha ASLA otomatik istemiyordu — kullanıcının elle "tekrar
-    /// dene"mesi gerekiyordu (yanıltıcı teslim garantisi). Artık kaynak
-    /// yeniden bağlandığı an sürdürülür. SADECE `direction='received'` ve
-    /// durumu 'downloading' (ama artık `active_downloads`'da canlı DEĞİL —
-    /// yani süreç ölmüş/pes edilmiş) ya da 'failed' olan dosyalar; kullanıcının
-    /// indirmeyi hiç başlatmadığı 'offered' dosyalara DOKUNULMAZ (istenmeyen
-    /// otomatik indirme olmaz).
-    /// `server_back`: a server just enrolled — any partial download may have
-    /// its blob there, so every row is a candidate.
-    /// A row without chunk hashes (an offer from before them, I-41) is never
-    /// a candidate: `download_file` refuses it every time.
+    /// Fix ("FileOffer was acked but the file vanished silently"): if one of the devices in `reconnected` is the source of a
+    /// file whose download was started before but is PARTIAL or FAILED, that download is restarted automatically. Before, if the offer was acked
+    /// (only the metadata delivered) and the source went offline during the download, the receiver gave up for good after
+    /// `DOWNLOAD_GIVE_UP_TIMEOUT_MS` (10 min) and never asked again when the source came back. The user had to tap "retry" manually, which made the
+    /// delivery guarantee misleading. Now the download continues as soon as the source reconnects. ONLY files with `direction='received'` and state
+    /// 'downloading' (but no longer live in `active_downloads`, i.e. the process died or gave up) or 'failed' are touched. 'offered' files, which the
+    /// user has not started, are NOT touched, so there is no unwanted automatic download.
+    /// `server_back`: a server just enrolled. Any partial download may have its blob there, so every row is a candidate.
+    /// A row without chunk hashes (an offer from before they existed) is never a candidate: `download_file` refuses it every time.
     pub(crate) fn resume_incomplete_downloads_for(&mut self, reconnected: &std::collections::HashSet<String>, server_back: bool) {
         if reconnected.is_empty() && !server_back { return; }
         let candidates: Vec<(String, String, u64)> = {
@@ -557,8 +480,8 @@ impl P2PCore {
                 .unwrap_or_default()
         };
         for (file_id, owner_fp, total_size) in candidates {
-            // Kaynak (satırda kayıtlı gönderen cihaz) az önce bağlanmadıysa
-            // dokunma — hâlâ ulaşılamaz, boşuna bir dial denemesi olur.
+            // If the source (the sender device stored in the row) was not just connected, leave it alone: it is still unreachable, and a dial
+            // attempt would be pointless.
             if !server_back && !reconnected.contains(&owner_fp) { continue; }
             if self.active_downloads.contains_key(&file_id) { continue; }
             // The caps of `receive_file_offer`: 8 running, 4 per sender, and
@@ -567,9 +490,8 @@ impl P2PCore {
             if self.active_downloads.values().filter(|d| d.peer_device_fingerprint == owner_fp).count() >= 4 { continue; }
             let in_flight: u64 = self.active_downloads.values().map(|d| d.total_size).sum();
             if in_flight.saturating_add(total_size) > self.history_storage_limit_bytes { continue; }
-            // Once per process run unless it made progress since (#76,
-            // `handle_chunk_response`): a file that fails each time restarted
-            // on every reconnect of its owner. After that it waits for a tap.
+            // Once per process run, unless the download has made progress since (see `handle_chunk_response`). A file that fails every time would
+            // otherwise restart on every reconnect of its owner. After that it waits for a tap.
             if !self.auto_resumed_downloads.insert(file_id.clone()) { continue; }
             info!("Yarım kalan indirme, kaynak yeniden bağlandığı için sürdürülüyor: file_id={} kaynak={}", file_id, crate::log_id(&owner_fp));
             if let Err(e) = self.download_file(file_id.clone(), owner_fp.clone()) {
@@ -578,9 +500,7 @@ impl P2PCore {
         }
     }
 
-    /// Bir dosyanın indirmesini (kullanıcının "İndir" dokunuşu VEYA node
-    /// modu açıkken otomatik) başlatır/devam ettirir. Zaten indiriliyorsa
-    /// veya tamamlanmışsa no-op.
+    /// Starts or resumes a file download (on the user's tap, or automatically when node mode is on). No-op if it is already downloading or complete.
     pub(crate) fn download_file(&mut self, file_id: String, peer_device_fingerprint: String) -> Result<(), String> {
         info!("download_file çağrıldı: file_id={} peer={}", file_id, crate::log_id(&peer_device_fingerprint));
         if self.active_downloads.contains_key(&file_id) {
@@ -600,11 +520,9 @@ impl P2PCore {
         ).ok();
         let (total_size, encrypted_key, key_nonce, status, owner_fp, group_id, chunk_hashes) = row.ok_or("Unknown file_id")?;
         let chunk_hashes = chunk_hashes.unwrap_or_default();
-        // Çoklu-cihaz (spec 1.7.1): dosyayı GERÇEK sahibinden (satırda kayıtlı
-        // gönderen cihaz) indir. Çağıran, sohbetin KANONİK cihazını geçmiş
-        // olabilir (dosya, o kişinin BAŞKA bir cihazından gelmişse kanonik
-        // cihaz onu taşımıyordur) — o zaman kanonik cihazın PeerId'sine
-        // istek atmak boşa giderdi. Satırdaki sahip boşsa çağırana düş.
+        // Multi-device (1.7.1): download from the REAL owner (the sender device stored in the row). The caller may have passed the chat's CANONICAL
+        // device, but the file may have come from another device of that person, which does not have it. A request to the canonical device's PeerId
+        // would then be wasted. If the owner in the row is empty, fall back to the caller.
         let peer_device_fingerprint = if owner_fp.is_empty() { peer_device_fingerprint } else { owner_fp };
         if status == "complete" {
             info!("download_file: {} zaten tamamlanmış, no-op", file_id);
@@ -612,10 +530,8 @@ impl P2PCore {
         }
         let file_key = self.unwrap_file_key(&encrypted_key, &key_nonce)?;
 
-        // Sunucu (bkz. `server_client`) yapılandırılmışsa, dosya orada da
-        // duruyor olabilir. Bu, dış incelemedeki #19 maddesini kapatıyor:
-        // önceden asıl gönderen çevrimdışıysa indirme 10 dakika boyunca
-        // sessizce zaman aşımına uğrayıp başarısız oluyordu.
+        // If a server is configured (see `server_client`), the file may also be there. This closes a gap where, before, if the
+        // original sender was offline, the download silently timed out after 10 minutes and failed.
         let server_peers = self.ready_server_peers();
         let peer_id = match self.device_to_peer_id.get(&peer_device_fingerprint) {
             Some(pid) => *pid,
@@ -634,27 +550,19 @@ impl P2PCore {
                 swarm.add_peer_address(peer_id, addr);
             }
         }
-        // Spec dışı, ağ sağlamlığı düzeltmesi ("geçmişteki bir dosya, node
-        // modundan bağımsız olarak istenebilmeli" — kullanıcı raporu): burada
-        // önceden SADECE `add_peer_address` çağrılıyordu, bu da adresi
-        // swarm'ın adres defterine ekler ama ne aktif bir dial BAŞLATIR ne de
-        // (mesajlaşma/handshake yeniden bağlanma yollarının HEPSİNİN
-        // kullandığı `dial_with_relay_fallback`'in aksine) bilinen röleler
-        // üzerinden bir devre (circuit) dener. Karşı taraf doğrudan dial
-        // edilemiyorsa (yaygın bir NAT durumu) `file_chunks.send_request`'in
-        // kendi iç dial'ı hiçbir röle denemeden doğrudan başarısız oluyordu —
-        // bu da `OutboundFailure` → `DOWNLOAD_GIVE_UP_TIMEOUT_MS`'ye (10 dk)
-        // kadar sessiz yeniden deneme → sonunda "Ağ hatası" olarak
-        // gözlemleniyordu. Mesajlaşmanın aynı sırada çalışmaya devam etmesi
-        // yanıltıcıydı: gossipsub bir röleye/doğrudan bağlantıya ihtiyaç
-        // duymadan mesh üzerinden yayılabilir, ama bu request-response
-        // protokolü gerçek bir bağlantı gerektirir.
+        // Network robustness fix (user report: an old file should be requestable regardless of node mode). Before, this only called
+        // `add_peer_address`. That adds the address to the swarm's address book but does NOT start an active dial, and (unlike every messaging and
+        // handshake reconnect path, which all use `dial_with_relay_fallback`) it does not try a circuit through known relays. If the other side
+        // cannot be dialled directly (a common NAT case), the internal dial of `file_chunks.send_request` failed straight away with no relay attempt.
+        // That showed as `OutboundFailure`, then silent retries for up to `DOWNLOAD_GIVE_UP_TIMEOUT_MS` (10 min), and finally "Network error". It was
+        // misleading that messaging kept working: gossipsub can spread over the mesh without a relay or a direct link, but this request-response
+        // protocol needs a real connection.
         if !already_connected {
             self.dial_with_relay_fallback(peer_id, cached_addr);
         }
 
-        // Parca boyutu tekliften geldi ve `files` satirinda duruyor —
-        // gonderenle AYNI adimi kullanmak zorundayiz (bkz. `file_chunk_size`).
+        // The chunk size comes from the offer and is stored in the `files` row;
+        // we must use the SAME step as the sender (see `file_chunk_size`).
         let chunk_size = self.file_chunk_size(&file_id);
         let total_chunks = attachments::total_chunks_with(total_size, chunk_size);
         // A row without the offer's chunk hashes (an offer from before they
@@ -665,11 +573,9 @@ impl P2PCore {
         let per_hash = attachments::chunks_per_hash(total_chunks);
         let enc_path = self.enc_path_for(&file_id)?;
         let _ = std::fs::create_dir_all(self.attachments_dir()?);
-        // #76 resume: every chunk group a previous attempt left on disk that
-        // matches its hash in the offer is kept, wherever it is in the file;
-        // the rest is fetched again.
-        // ponytail: hashes the whole partial file on this thread; move it off
-        // the lock if multi-GB resumes show up as a stall.
+        // Resume: every chunk group that a previous attempt left on disk and that matches its hash in the offer is kept, wherever it is in the file.
+        // The rest is fetched again.
+        // ponytail: hashes the whole partial file on this thread; move it off the lock if multi-GB resumes show up as a stall.
         let mut received_chunks: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut resumed_bytes: u64 = 0;
         if enc_path.exists() {
@@ -693,12 +599,9 @@ impl P2PCore {
             let _ = conn.execute("UPDATE files SET status = 'downloading', bytes_transferred = ?2 WHERE file_id = ?1", params![file_id, resumed_bytes as i64]);
         }
 
-        // bu bir
-        // grup dosyasıysa, DİĞER üyelerin bilinen/aktif cihazlarını (asıl
-        // kaynak HARİÇ) alternatif aday olarak topla — bkz. `DownloadState.
-        // alt_source_peer_ids` dokümantasyonu. Kimin GERÇEKTEN tamamladığını
-        // bilmiyoruz, bu yüzden hepsi aday; gerçekte sahip olmayanlar
-        // sadece ANINDA bir `NotFound` üretir (zararsız).
+        // If this is a group file, collect the other members' known/active devices (EXCLUDING the main source) as alternative candidates. See the
+        // `DownloadState.alt_source_peer_ids` docs. We do not know who really has the file, so all of them are candidates. Those that do not have it
+        // just return `NotFound` at once (harmless).
         let alt_source_peer_ids: std::collections::VecDeque<PeerId> = match &group_id {
             Some(gid) => self.groups.get(gid)
                 .map(|g| g.member_identity_ids())
@@ -708,18 +611,15 @@ impl P2PCore {
                 .filter(|fp| fp != &peer_device_fingerprint)
                 .filter_map(|fp| self.device_to_peer_id.get(&fp).copied())
                 .collect(),
-            // 1:1: kendi kardeşlerim — kardeşimin gönderdiği bir ekin
-            // yankısında satırdaki sahip karşı taraftır, dosya ise kardeşte.
+            // 1:1: my own siblings. In the echo of a file my sibling sent, the row's owner is the contact, but the file itself is on the sibling.
             None => self.sibling_active_devices()
                 .into_iter()
                 .filter(|fp| fp != &peer_device_fingerprint)
                 .filter_map(|fp| self.device_to_peer_id.get(&fp).copied())
                 .collect(),
         };
-        // Sunucular ÖNE eklenir: bir sunucu tanım gereği her zaman açık,
-        // bir eş cihaz değil. `serve_chunk_request` karşılığı sunucuda da
-        // dosya yoksa ANINDA `NotFound` döner, yani yanlış tahminin
-        // maliyeti bir gidiş-dönüş.
+        // Servers go FIRST: a server is always on by definition, not a peer device. If the file is not there either, `serve_chunk_request` answers
+        // `NotFound` at once, so a wrong guess costs one round trip.
         let mut alt_source_peer_ids = alt_source_peer_ids;
         for sp in server_peers.into_iter().rev() {
             if sp != peer_id {
@@ -757,16 +657,12 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Bir sonraki parçayı ister — sıra bittiyse (`next_chunk_index >=
-    /// total_chunks`) indirmeyi tamamlanmış sayar. Spec dışı, ağ sağlamlığı
-    /// düzeltmesi: bu bir YENİDEN DENEMEYSE (bkz. `retry_or_give_up_download`
-    /// — aynı `next_chunk_index` için önceki bir istek zaten yapılmış
-    /// olabilir), ESKİ istek kimliğini `download_request_ids`'ten ÖNCE
-    /// temizler — aksi hâlde GEÇ gelen eski bir yanıt/hata, `next_chunk_index`
-    /// artık ilerlemiş olsa bile YANLIŞ parçaya (veri bozulmasına) uygulanabilirdi.
+    /// Requests the next chunk. When the sequence is done (`next_chunk_index >= total_chunks`), counts the download as complete. Network robustness
+    /// fix: if this is a RETRY (see `retry_or_give_up_download`; a request for the same `next_chunk_index` may already have been sent), the OLD
+    /// request id is cleared from `download_request_ids` FIRST. Otherwise a late old response or error could be applied to the WRONG chunk (data
+    /// corruption), even after `next_chunk_index` has moved on.
     pub(crate) fn request_next_chunk(&mut self, file_id: &str) {
-        // Bitiş koşulu artık GELEN parça sayısına bakar; `next_chunk_index`
-        // yalnızca bitişik su seviyesi (bkz. `received_chunks`).
+        // The completion condition now looks at the number of chunks RECEIVED. `next_chunk_index` is only the contiguous water level (see `received_chunks`).
         let done = match self.active_downloads.get(file_id) {
             Some(s) => s.received_chunks.len() as u32 >= s.total_chunks,
             None => return,
@@ -775,10 +671,8 @@ impl P2PCore {
             self.finalize_download(file_id);
             return;
         }
-        // Boru hattını doldur: eksik olan İLK `window` parçayı aynı anda
-        // iste. Tek parça havadayken hız gidiş-dönüş süresine kilitleniyordu;
-        // sabit ve fazla derin bir pencere ise hattı boğuyordu (bkz.
-        // `DOWNLOAD_WINDOW_START`).
+        // Fill the pipeline: request the first `window` missing chunks at once. With a single chunk in flight, speed was locked to the round-trip
+        // time. A fixed, too-deep window, on the other hand, choked the pipe (see `DOWNLOAD_WINDOW_START`).
         let (want, peer): (Vec<u32>, PeerId) = match self.active_downloads.get(file_id) {
             Some(s) => {
                 let mut v = Vec::new();
@@ -818,7 +712,7 @@ impl P2PCore {
         }
     }
 
-    /// Moves the download to its next alternative source (bkz.
+    /// Moves the download to its next alternative source (see
     /// `DownloadState.alt_source_peer_ids`) and dials it. `None`: no candidate
     /// left, nothing changed. The caller asks for the chunks again
     /// (`request_next_chunk`).
@@ -841,12 +735,11 @@ impl P2PCore {
         };
         s.peer_id = next_peer;
         s.retries_on_current_source = 0;
-        // Eski kaynağa gönderilmiş istekler artık gelmeyecek; temizlenmezse o
-        // indeksler sonsuza dek "havada" sayılır ve pencere bir daha dolmaz.
+        // Requests sent to the old source will never arrive. If they are not cleared, those indices count as "in flight" forever and the window
+        // never refills.
         s.inflight_chunks.clear();
         s.chunk_sent_at.clear();
-        // Yeni kaynağın kapasitesi bilinmiyor — pencere ve taban gecikme
-        // ölçümü baştan.
+        // The capacity of the new source is unknown, so the window and the base latency measurement start over.
         s.window = DOWNLOAD_WINDOW_START;
         s.rtt_min = u64::MAX;
         // Up to `window` requests are still open at the old source. Their late
@@ -864,13 +757,10 @@ impl P2PCore {
         Some(next_peer)
     }
 
-    /// "her şey
-    /// onaylanana/çok çok uzun -10 dk- bir zaman aşımına kadar denenmeli"):
-    /// bir parça isteği stall oldu (`check_stalled_downloads`) VEYA
-    /// libp2p'den açık bir `OutboundFailure` geldiğinde çağrılır. SON
-    /// GERÇEK ilerlemeden (`last_progress_at`) beri `DOWNLOAD_GIVE_UP_TIMEOUT_MS`
-    /// geçmediyse AYNI parçayı yeniden ister (`request_next_chunk`);
-    /// geçtiyse artık gerçekten pes edip indirmeyi başarısız sayar.
+    /// Called when a chunk request stalled (`check_stalled_downloads`) or an explicit `OutboundFailure` arrives from libp2p. If
+    /// `DOWNLOAD_GIVE_UP_TIMEOUT_MS` has not passed since the LAST REAL progress (`last_progress_at`), the SAME chunk is requested again
+    /// (`request_next_chunk`). Everything should be retried until acknowledged, up to a long timeout of ~10 min. Once that has passed, the download
+    /// really gives up and is counted as failed.
     pub(crate) fn retry_or_give_up_download(&mut self, file_id: &str, reason: &str) {
         let now = current_time_ms();
         let elapsed_since_progress = match self.active_downloads.get(file_id) {
@@ -885,10 +775,8 @@ impl P2PCore {
             self.fail_download(file_id, reason);
             return;
         }
-        // mevcut
-        // kaynak ardışık birkaç kez ilerleme sağlamadıysa VE alternatif bir
-        // aday varsa (bkz. `DownloadState.alt_source_peer_ids`), aynı
-        // kaynağı süresiz yoklamak yerine bir sonraki adaya geçilir.
+        // The current source has not made progress several times in a row AND an alternative candidate exists (see
+        // `DownloadState.alt_source_peer_ids`): switch to the next candidate instead of polling the same source forever.
         const RETRIES_BEFORE_SOURCE_SWITCH: u32 = 2;
         let over_limit = {
             let s = match self.active_downloads.get_mut(file_id) { Some(s) => s, None => return };
@@ -910,19 +798,14 @@ impl P2PCore {
             );
         }
         info!("İndirme geçici olarak yanıt vermedi ({}), parçalar yeniden isteniyor: file_id={}", reason, file_id);
-        // Havadaki istekler takıldı (yanıt gelmedi ya da kaynak değişti):
-        // temizlenmezlerse o indeksler `inflight_chunks`te sonsuza dek kalır
-        // ve boru hattı penceresi bir daha DOLMAZ — indirme sessizce durur.
-        // Tekrar istemek güvenli: aynı parça iki kez gelirse
-        // `handle_chunk_response` `received_chunks` kontrolüyle ikinciyi
-        // yok sayar.
+        // In-flight requests stalled (no reply, or the source changed). If they are not cleared, those indices stay in `inflight_chunks` forever,
+        // the pipeline window never refills, and the download silently stops. Asking again is safe: if the same chunk arrives twice,
+        // `handle_chunk_response` ignores the second one via the `received_chunks` check.
         if let Some(st) = self.active_downloads.get_mut(file_id) {
             st.inflight_chunks.clear();
             st.chunk_sent_at.clear();
-            // Takılma = hat boğulmuş olabilir; pencereyi yarıya indir
-            // (bkz. `DOWNLOAD_WINDOW_MIN`). Kaynak DEĞİŞTİYSE yukarıda
-            // zaten başlangıç değerine döndürüldü — yeni kaynağı eskisinin
-            // tıkanıklığı yüzünden cezalandırmayalım.
+            // A stall means the pipe may be congested, so halve the window (see `DOWNLOAD_WINDOW_MIN`). If the SOURCE changed, the window was already
+            // reset to its start value above, so the new source is not penalised for the old one's congestion.
             if switched_to.is_none() {
                 st.window = (st.window / 2).max(DOWNLOAD_WINDOW_MIN);
             }
@@ -931,14 +814,10 @@ impl P2PCore {
         self.request_next_chunk(file_id);
     }
 
-    /// `file_progress`/`file_complete`/`file_failed` olaylarının `"peer"`
-    /// alanını doldurmak için — önce (henüz kaldırılmamışsa)
-    /// `active_downloads`'a, yoksa (ör. indirme zaten sonlandırılmışsa)
-    /// `files` tablosuna bakar. Bulunamazsa boş string döner (olay yine
-    /// de üretilir, sadece Kotlin tarafı eşleştiremez — DB kaydı hiç
-    /// yoksa zaten daha büyük bir sorun var demektir).
-    /// the chat key (canonical device) the screen listens on, not the
-    /// device the file came from.
+    /// Fills the `"peer"` field of `file_progress`/`file_complete`/`file_failed` events. It looks first in `active_downloads` (if not yet removed),
+    /// otherwise (e.g. the download already finished) in the `files` table. Returns an empty string if nothing is found. The event is still
+    /// emitted, but the Kotlin side cannot match it. If there is no DB row at all, there is a bigger problem.
+    /// The value is the chat key (the canonical device) that the screen listens on, not the device the file came from.
     pub(crate) fn peer_for_file(&self, file_id: &str) -> String {
         if let Some(state) = self.active_downloads.get(file_id) {
             return self.canonical_peer_key(&state.peer_device_fingerprint);
@@ -999,16 +878,14 @@ impl P2PCore {
             let _ = conn.execute("UPDATE files SET status = 'complete' WHERE file_id = ?1", params![file_id]);
         }
         self.attachment_events.push(serde_json::json!({"type": "file_complete", "peer": peer_fp, "file_id": file_id}).to_string());
-        // Node modu bu dosyayı OTOMATİK indirmiş olabilir (bkz.
-        // receive_file_offer) — bkz. `enforce_history_storage_limit` notu.
+        // Node mode may have downloaded this file AUTOMATICALLY (see receive_file_offer). See the `enforce_history_storage_limit` note.
         self.enforce_history_storage_limit();
     }
 
     pub(crate) fn fail_download(&mut self, file_id: &str, reason: &str) {
         let peer_fp = self.peer_for_file(file_id);
-        // #76: the partial `.enc` stays for the next attempt to resume from
-        // (`download_file`); its size on disk goes into `bytes_transferred`,
-        // which the quota counts for 'failed' rows too.
+        // The partial `.enc` stays for the next attempt to resume from (`download_file`). Its size on disk goes into `bytes_transferred`, which the
+        // quota counts for 'failed' rows too.
         if let Some(mut state) = self.active_downloads.remove(file_id) {
             zeroize::Zeroize::zeroize(&mut state.file_key);
         }
@@ -1023,16 +900,13 @@ impl P2PCore {
         self.attachment_events.push(serde_json::json!({"type": "file_failed", "peer": peer_fp, "file_id": file_id, "error": reason}).to_string());
     }
 
-    /// `poll_events`'ten her turda çağrılır — bkz. `DOWNLOAD_STALL_TIMEOUT_MS`
-    /// dokümantasyonu. Bir indirme, hiçbir ilerleme/başarısızlık olayı
-    /// üretmeden bu süreyi aşarsa (tipik olarak: TCP dial hiç sonuçlanmadı,
-    /// iki cihaz da NAT arkasında ve doğrudan erişilemez) AYNI parça
-    /// otomatik olarak yeniden istenir (bkz. `retry_or_give_up_download`) —
-    /// SADECE `DOWNLOAD_GIVE_UP_TIMEOUT_MS` (10 dk) aşılırsa gerçekten
-    /// başarısız sayılır, en azından UI SÜRESİZ "İndiriliyor" göstermez.
+    /// Called from `poll_events` every turn. See the `DOWNLOAD_STALL_TIMEOUT_MS` docs. If a download exceeds this time without any progress or failure
+    /// event (typically: the TCP dial never resolved, because both devices are behind NAT and not directly reachable), the SAME chunk is re-requested
+    /// automatically (see `retry_or_give_up_download`). Only after `DOWNLOAD_GIVE_UP_TIMEOUT_MS` (10 min) is it really counted as failed, so the UI
+    /// never shows "Downloading" forever.
     pub(crate) fn check_stalled_downloads(&mut self) {
         let now = current_time_ms();
-        // bkz. `DownloadState.retry_at`: only the missing chunks, the requests
+        // see `DownloadState.retry_at`: only the missing chunks, the requests
         // still in flight are kept.
         let due: Vec<String> = self.active_downloads.iter_mut()
             .filter(|(_, s)| s.retry_at != 0 && now >= s.retry_at)
@@ -1041,9 +915,8 @@ impl P2PCore {
         for file_id in due {
             self.request_next_chunk(&file_id);
         }
-        // bkz. `DownloadState.last_retry_at` notu — `last_progress_at`
-        // DEĞİL, bu alan denemeleri makul aralıklarla seyreltir (aksi
-        // hâlde her `poll_events` turunda aynı parça tekrar tekrar istenirdi).
+        // See `DownloadState.last_retry_at`. This field, not `last_progress_at`, spaces retries out at a reasonable interval (otherwise the same chunk
+        // would be requested again on every `poll_events` turn).
         let stalled: Vec<String> = self.active_downloads.iter()
             .filter(|(_, s)| now.saturating_sub(s.last_retry_at) > DOWNLOAD_STALL_TIMEOUT_MS)
             .map(|(id, _)| id.clone())
@@ -1073,32 +946,22 @@ impl P2PCore {
         }
     }
 
-    /// `poll_events`'in `FileChunks` olay kolundan çağrılır — gelen bir
-    /// parça yanıtını işler.
+    /// Called from the `FileChunks` event arm of `poll_events`. Handles an incoming chunk response.
     pub(crate) fn handle_chunk_response(&mut self, file_id: &str, chunk_index: u32, response: FileChunkResponse) {
         let data = match response {
             FileChunkResponse::Chunk { data } => data,
             FileChunkResponse::NotFound => {
-                // bu, `retry_or_give_up_download`'ın
-                // TERSİNE, AYNI kaynağa KASITLI olarak yeniden DENENMEZ —
-                // geçici bir ağ sorunu değil, karşı tarafın KESİN/olumsuz
-                // bir yanıtı ("bu dosyam yok"); aynı isteği tekrarlamak
-                // sonsuza kadar aynı yanıtı üretir.
+                // This is the OPPOSITE of `retry_or_give_up_download`: it is deliberately NOT retried on the same source. It is not a temporary network
+                // problem but a definitive negative answer from the other side ("I do not have this file"). Repeating the request would produce the same
+                // answer forever.
                 //
-                // Spec dışı, dış inceleme düzeltmesi ("çoklu kaynak yok"):
-                // önceden bu HER ZAMAN indirmeyi tamamen başarısız
-                // sayıyordu. Artık (bir grup dosyasıysa) varsa bir sonraki
-                // alternatif kaynak (bkz. `DownloadState.alt_source_peer_ids`)
-                // hemen denenir — sadece TÜM adaylar tükenince gerçekten
-                // pes edilir.
-                // KRİTİK AYRIM (bkz. `server_client`): bir EŞİN "yok"u
-                // kesindir — o cihazda o dosya gerçekten yok. Ama bir
-                // SUNUCUNUN "yok"u "HENÜZ yok" olabilir: gönderen blob'u hâlâ
-                // parça parça yüklüyor olabilir (bkz.
-                // `server_blob_uploads`). Sunucu yolu eklendiğinde bu ayrım
-                // yapılmadığı için, yüklemesi süren 10 MB'lık bir video
-                // ANINDA "Download failed" veriyordu — üstelik gerçek
-                // gönderen o sırada çevrimiçiyken.
+                // Fix (no multi-source fallback): this used to fail the download outright every time. Now, if it is a group file, the next
+                // alternative source (see `DownloadState.alt_source_peer_ids`) is tried at once. The download really gives up only when ALL candidates
+                // are exhausted.
+                // KEY DISTINCTION (see `server_client`): a PEER's "not found" is definitive, since the file really is not on that device. But a SERVER's
+                // "not found" can mean "NOT YET": the sender may still be uploading the blob chunk by chunk (see `server_blob_uploads`). The server path
+                // was added without this distinction, so a 10 MB video still uploading failed IMMEDIATELY with "Download failed", even while the real
+                // sender was online.
                 let from_server = self
                     .active_downloads
                     .get(file_id)
@@ -1127,15 +990,10 @@ impl P2PCore {
                         self.request_next_chunk(file_id);
                     }
                     None if from_server => {
-                        // Zaman sınırlı yeniden deneme (bkz.
-                        // `DOWNLOAD_GIVE_UP_TIMEOUT_MS` — 10 dk): yükleme
-                        // biterse kendiliğinden toparlar, bitmezse yine de
-                        // pes edilir. Kalıcı bir hata gibi davranmıyoruz.
-                        // Not at once: the server answers in about a second, and
-                        // that was a request loop at round-trip rate for the whole
-                        // 10 min. One probe request every `DOWNLOAD_RETRY_DELAY_MS`
-                        // (`check_stalled_downloads`); the window grows again with
-                        // the first chunk.
+                        // Time-limited retry (see `DOWNLOAD_GIVE_UP_TIMEOUT_MS`, 10 min): if the upload finishes, the download recovers on its own. If not, it
+                        // still gives up. We do not treat this as a permanent error.
+                        // Not at once: the server answers in about a second, and that caused a request loop at round-trip rate for the whole 10 min. One probe
+                        // request is sent every `DOWNLOAD_RETRY_DELAY_MS` (`check_stalled_downloads`). The window grows again with the first chunk.
                         if let Some(s) = self.active_downloads.get_mut(file_id) {
                             s.inflight_chunks.remove(&chunk_index);
                             s.chunk_sent_at.remove(&chunk_index);
@@ -1182,12 +1040,10 @@ impl P2PCore {
             self.request_next_chunk(file_id);
             return;
         }
-        // Parçayı KENDİ konumuna yaz (sona ekleme DEĞİL) — boru hattında
-        // parçalar sırasız geliyor. AEAD doğrulaması yazmadan önce yapılır,
-        // yani `Auth` hatasında diske hiçbir şey yazılmaz.
-        // every chunk has its exact length (only the last one is
-        // short). A longer last chunk would also leave bytes past the end
-        // that a correct copy written later does not overwrite.
+        // Write the chunk at its OWN offset (not appended), since chunks arrive out of order in the pipeline. AEAD verification happens before the
+        // write, so an `Auth` error writes nothing to disk.
+        // Every chunk has its exact length (only the last one is short). A longer last chunk would leave bytes past the end that a correct copy
+        // written later does not overwrite.
         let exact_len = attachments::chunk_plain_len(total_size, chunk_size, chunk_index) as usize + 16;
         // With one chunk per hash entry the chunk is checked against the
         // signed offer before anything is written. Every group member holds
@@ -1207,8 +1063,7 @@ impl P2PCore {
                 self.drop_bad_source(file_id, peer, &e);
                 return;
             }
-            // Disk yazma hatası — `.enc` kısmen yazılmış olabilir, tutarlılık
-            // garanti değil. Retry resumes only from chunk groups that match
+            // Disk write error: the `.enc` may be partly written, so consistency is not guaranteed. A retry resumes only from chunk groups that match
             // their hash (`download_file`).
             Err(attachments::ChunkAppendError::Io(e)) => { self.fail_download(file_id, &e); return; }
         };
@@ -1256,9 +1111,8 @@ impl P2PCore {
         let mut all_done = false;
         if let Some(state) = self.active_downloads.get_mut(file_id) {
             state.inflight_chunks.remove(&chunk_index);
-            // Uyarlanır pencere: gidiş-dönüş hedefin altındaysa büyüt.
-            // Hedefin üstündeyse hat doymuştur — büyütmek yalnızca tampon
-            // şişirir (bkz. `DOWNLOAD_RTT_TARGET_MS`).
+            // Adaptive window: grow it when the round trip is below the target. If it is above the target the link is saturated, and growing it would
+            // only inflate the buffer (see `DOWNLOAD_RTT_TARGET_MS`).
             if let Some(sent_at) = state.chunk_sent_at.remove(&chunk_index) {
                 let rtt = current_time_ms().saturating_sub(sent_at);
                 state.rtt_min = state.rtt_min.min(rtt.max(DOWNLOAD_RTT_FLOOR_MS));
@@ -1267,19 +1121,13 @@ impl P2PCore {
                     state.window += 1;
                 }
             }
-            // Aynı parça iki kez geldi (yeniden deneme yarışı) — baytları
-            // iki kez saymayalım.
+            // The same chunk arrived twice (retry race): do not count the bytes twice.
             //
-            // Bu denetimde bulundu: burada `return` vardı ve fonksiyonun
-            // SONUNDAKİ `request_next_chunk`'ı da atlıyordu. Parça ise az
-            // önce `inflight_chunks`'tan DÜŞÜRÜLMÜŞTÜ — yani her yinelenen
-            // parça boru hattı penceresini bir daraltıyor, hiçbir yeni
-            // istek açılmıyordu. Yeterince yineleme üst üste gelirse
-            // pencere boşalıyor ve indirme, 105 sn'lik takılma zamanlayıcısı
-            // (`DOWNLOAD_STALL_TIMEOUT_MS`) devreye girene kadar duruyordu.
-            // Artık muhasebe atlanıyor ama akış devam ediyor.
-            // A chunk in a group still waiting for the rest is progress too,
-            // but only checked chunks are counted as received.
+            // Bug: there was a `return` here that also SKIPPED the `request_next_chunk` at the end of the function. The chunk had just been removed
+            // from `inflight_chunks`, so each duplicate chunk narrowed the pipeline window by one, and no new request was opened. With enough duplicates
+            // in a row, the window emptied and the download stalled until the stall timer (`DOWNLOAD_STALL_TIMEOUT_MS`, 105 s) fired. The bookkeeping is
+            // now skipped but the flow continues.
+            // A chunk in a group that is still waiting for the rest is progress too, but only checked chunks are counted as received.
             let mut duplicate = true;
             for &(i, n) in &verified {
                 if state.received_chunks.insert(i) {
@@ -1288,24 +1136,21 @@ impl P2PCore {
                 }
             }
             if !duplicate || (per_hash > 1 && verified.is_empty()) {
-                // `next_chunk_index` artık BİTİŞİK su seviyesi: sırasız gelen
-                // parçalarda "en yüksek + 1" bir boşluğu sessizce atlardı.
+                // `next_chunk_index` is now the CONTIGUOUS water level. With out-of-order chunks, "highest + 1" would silently skip a gap.
                 while state.received_chunks.contains(&state.next_chunk_index) {
                     state.next_chunk_index += 1;
                 }
                 state.last_progress_at = current_time_ms();
                 // Progress is not a stall (`check_stalled_downloads`).
                 state.last_retry_at = state.last_progress_at;
-                // #76: it moved, so the next reconnect may resume it again.
+                // Progress was made, so the next reconnect may resume it again.
                 self.auto_resumed_downloads.remove(file_id);
             }
             all_done = state.received_chunks.len() as u32 >= total_chunks;
-            // Mevcut kaynak GERÇEKTEN çalışıyor — bkz. `retries_on_current_source`
-            // dokümantasyonu, kaynak değiştirme sayacı sıfırlanır.
+            // The current source is really working (see the `retries_on_current_source` docs), so the source-switch counter is reset.
             state.retries_on_current_source = 0;
-            // Her ~8 parçada bir (yaklaşık 2MB) veya son parçada ilerleme
-            // bildir — her parçada bir olay üretmek (4GB/256KB = 16384 olay)
-            // pollNetwork'ün döndürdüğü diziyi gereksiz yere şişirirdi.
+            // Report progress every ~8 chunks (about 2 MB) or at the last chunk. An event per chunk (4 GB / 256 KB = 16384 events) would needlessly
+            // bloat the array returned by `pollNetwork`.
             emit_progress = !duplicate && (state.received_chunks.len() % 8 == 0 || all_done);
             if emit_progress {
                 if let Some(conn) = &self.db {
@@ -1329,37 +1174,28 @@ impl P2PCore {
         }
     }
 
-    /// `serve_chunk_request`'in yetki kuralı — bkz. oradaki uzun not.
+    /// Access rule for `serve_chunk_request`. See the long note there.
     ///
-    /// `row_peer_fp` = `files.peer_device_fingerprint` (1:1'de sohbetin
-    /// KARŞI tarafındaki cihaz; grupta teklifi yapan üyenin cihazı),
-    /// `row_group_id` doluysa dosya bir grup ekidir.
+    /// `row_peer_fp` = `files.peer_device_fingerprint` (in 1:1, the device on the OTHER side of the chat; in a group, the device of the member who
+    /// offered the file). `row_group_id` is set when the file is a group attachment.
     ///
-    /// İzin verilenler:
-    /// - Yapılandırılmış sunucularımız: blob'ları oraya BİZ yüklüyoruz ve
-    ///   onlar bunu diğer üyelere yeniden servis ediyor (bkz.
-    ///   `server_flush_blobs`) — burada engellemek kendi store-and-forward
-    ///   yolumuzu kapatırdı.
-    /// - Kendi kimliğimizin kardeş cihazları (çoklu-cihaz, spec 1.7).
-    /// - Grup eki: istekçinin kimliği o grubun ÜYESİ olmalı (çıkarılan üye
-    ///   anında erişimi kaybeder).
-    /// - 1:1 eki: istekçinin kimliği, satırdaki karşı tarafın kimliğiyle
-    ///   AYNI olmalı (o kişinin başka bir cihazı da olabilir).
+    /// Allowed:
+    /// - Our configured servers: we upload blobs there and they re-serve them to other members (see `server_flush_blobs`). Blocking them here
+    ///   would break our own store-and-forward path.
+    /// - Sibling devices of our own identity (multi-device, 1.7).
+    /// - Group attachment: the requester's identity must be a MEMBER of that group (a removed member loses access immediately).
+    /// - 1:1 attachment: the requester's identity must be the SAME as the other party's identity in the row (that person may also have another device).
     ///
-    /// KABUL EDİLEN SINIR: `device_to_peer_id` ancak o cihazdan İMZASI
-    /// DOĞRULANMIŞ bir paket aldığımızda dolar. Bir grup üyesi bize hiç
-    /// bir şey göndermediyse PeerId'sini bilmiyoruz ve çoklu-kaynak
-    /// indirmede bizi aday olarak deneyen o üye `NotFound` alır. Zararsız:
-    /// asıl gönderen ve (varsa) sunucu hâlâ kaynak, ve o üye gruba ilk
-    /// mesajını attığı an eşleme kurulur. Bunu gevşetmek, yetkiyi
-    /// kanıtlanamayan bir PeerId'ye dayandırmak demek olurdu.
+    /// ACCEPTED LIMIT: `device_to_peer_id` is filled only when we receive a packet signed by that device. If a group member has never sent us
+    /// anything, we do not know its PeerId. That member, when it tries us as a candidate in a multi-source download, gets `NotFound`. This is
+    /// harmless: the real sender and (if any) the server are still sources, and the mapping is set up the first time that member sends a message to
+    /// the group. Loosening this would mean trusting a PeerId whose authority cannot be proven.
     pub(crate) fn may_serve_file_to(&self, peer: PeerId, row_peer_fp: &str, row_group_id: Option<&str>) -> bool {
         if self.is_server_peer(&peer) {
             return true;
         }
-        // Kanıtlanmış PeerId -> bilinen cihaz. Bir cihazın PeerId'si ancak
-        // ondan imzası doğrulanmış bir paket aldığımızda kaydedilir (bkz.
-        // `record_peer_id_if_known`), yani bu eşleme sahte olamaz.
+        // A verified PeerId -> known device mapping. A device's PeerId is recorded only when we receive a packet signed by it (see
+        // `record_peer_id_if_known`), so this mapping cannot be forged.
         let requester_fp = self.device_to_peer_id.iter()
             .find(|(_, pid)| **pid == peer)
             .map(|(fp, _)| fp.clone());
@@ -1386,9 +1222,7 @@ impl P2PCore {
         }
     }
 
-    /// `request_response` isteğinin RESPONDER tarafı — bu cihazın
-    /// gönderdiği VEYA tamamen indirip yeniden servis ettiği bir dosyadan
-    /// tek bir parça ister.
+    /// The RESPONDER side of the `request_response` request: asks for one chunk of a file that this device sent, or fully downloaded and re-serves.
     pub(crate) fn serve_chunk_request(&self, peer: PeerId, request: &FileChunkRequest) -> FileChunkResponse {
         debug!("serve_chunk_request: file_id={} chunk={} isteği alındı", request.file_id, request.chunk_index);
         let row = self.db.as_ref().and_then(|conn| {
@@ -1406,20 +1240,12 @@ impl P2PCore {
             error!("serve_chunk_request: file_id={} status='complete' değil — NotFound dönülüyor", request.file_id);
             return FileChunkResponse::NotFound;
         }
-        // Güvenlik düzeltmesi (bu denetim): burada HİÇBİR yetki kontrolü
-        // yoktu. Bu protokolü konuşan HERHANGİ bir eş — kişi listemizde
-        // olmayan, hiç eşleşmediğimiz, node modunda bize bağlanan bir
-        // yabancı dahil — bir `file_id` bildiği/tahmin ettiği anda
-        // tamamlanmış HERHANGİ bir ekimizin şifreli parçalarını
-        // çekebiliyordu; üstelik `NotFound`/`Chunk` ayrımı "bu dosya sende
-        // var mı" sorusuna bir kâhin (oracle) olarak cevap veriyordu.
-        // Baytlar `file_key` ile şifreli olduğundan içerik doğrudan
-        // sızmıyordu, AMA: bir grup dosyasının `file_key`'i TÜM üyelerde
-        // ortaktır (bkz. `finish_outgoing_group_file`), yani gruptan
-        // ÇIKARILMIŞ eski bir üye kendi eski anahtarıyla dosyayı hâlâ
-        // herhangi bir üyeden indirebilirdi. Artık istekçi, Noise ile
-        // KANITLANMIŞ `PeerId`'sinden bilinen bir cihaza çözülmek ve o
-        // dosyanın meşru karşı tarafı olmak zorunda.
+        // Security fix (from this audit): there was NO authorization check here. ANY peer speaking this protocol, including a stranger who is not in
+        // our contact list and was never paired with us, connected to us in node mode, could fetch the encrypted chunks of ANY completed file of
+        // ours as soon as it knew or guessed the `file_id`. The `NotFound`/`Chunk` distinction also acted as an oracle answering "do you have this
+        // file". The bytes are encrypted with `file_key`, so the content did not leak directly. BUT a group file's `file_key` is shared by ALL members
+        // (see `finish_outgoing_group_file`), so an old member removed from the group could still download the file from any member with its old key.
+        // Now the requester must resolve, via its Noise-PROVEN `PeerId`, to a known device, and be a legitimate counterpart of that file.
         if !self.may_serve_file_to(peer, &row_peer_fp, row_group_id.as_deref()) {
             warn!(
                 "serve_chunk_request REDDEDİLDİ: {} bu dosyanın yetkili karşı tarafı değil (file_id={})",
@@ -1444,40 +1270,31 @@ impl P2PCore {
         }
     }
 
-    /// Bir sohbetteki bilinen ekleri listeler (bkz. `listAttachments` JNI
-    /// export) — sadece bu süreç boyunca bilinen/DB'ye yazılmış kayıtlar
-    /// (node modu kapalıyken teklif edilip hiç indirilmemiş bir dosya,
-    /// spec dışı kural gereği zaten DB'ye yazılıyor — bkz.
-    /// `receive_file_offer` — bu yüzden restart sonrası da metadata en
-    /// azından görünür kalır, sadece yeniden indirme gerekir).
-    // The newest `MAX_LISTED_ATTACHMENTS` (each row carries its preview JPEG
-    // as hex, all under the core lock); older ones: `list_attachments_page`.
+    /// Lists the known attachments in a chat (see the `listAttachments` JNI export). Only records known in this process or written to the DB are
+    /// returned. A file offered while node mode was off and never downloaded is written to the DB anyway (per the rule in `receive_file_offer`), so
+    /// metadata stays visible after a restart too. Only the download needs to be repeated.
+    // The newest `MAX_LISTED_ATTACHMENTS` (each row carries its preview JPEG as hex, all under the core lock); older ones: `list_attachments_page`.
     pub(crate) fn list_attachments(&self, peer_device_fingerprint: &str) -> Vec<AttachmentSummary> {
         self.list_attachments_opt(peer_device_fingerprint, true, None, MAX_LISTED_ATTACHMENTS)
     }
 
-    /// #80: the `limit` newest attachments created before `before_ms`, oldest first.
+    /// Returns the `limit` newest attachments created before `before_ms`, oldest first.
     pub(crate) fn list_attachments_page(&self, peer_device_fingerprint: &str, before_ms: u64, limit: usize) -> Vec<AttachmentSummary> {
         self.list_attachments_opt(peer_device_fingerprint, true, Some(before_ms), limit.min(MAX_LISTED_ATTACHMENTS))
     }
 
-    /// `with_preview: false` leaves the preview JPEG in the database: the
-    /// chat list asks every few seconds and only wants the newest row's label.
+    /// `with_preview: false` leaves the preview JPEG in the database. The chat list asks every few seconds and only wants the newest row's label.
     pub(crate) fn list_attachments_opt(&self, peer_device_fingerprint: &str, with_preview: bool, before_ms: Option<u64>, limit: usize) -> Vec<AttachmentSummary> {
         let conn = match &self.db {
             Some(c) => c,
             None => return Vec::new(),
         };
-        // Çoklu-cihaz (spec 1.7.1): bir kişinin ekleri, o kişinin HERHANGİ
-        // bir cihazından gelmiş olabilir — hepsini TEK sohbet altında birleştir.
-        // `peer_device_fingerprint` sütununa tam olarak eşitlik yerine, bu
-        // cihazın kimliğinin TÜM bilinen cihaz fingerprint'lerini kabul
-        // ediyoruz (tek cihazlı kişide bu, o tek fingerprint'e indirger —
-        // davranış değişmez). İndirme yine dosyanın GERÇEK sahibine yönlenir
-        // (bkz. download_file — satırdaki sahip cihazdan indirir).
-        // `group_id IS NULL`: bir grup dosya teklifi de gönderen üyenin
-        // `peer_device_fingerprint`'iyle saklanır — bu filtre olmadan bir grup
-        // eki o üyenin 1:1 ek geçmişine sızardı.
+        // Multi-device (1.7.1): a contact's attachments may have come from ANY of that person's devices, so they are merged under ONE chat. Instead of
+        // an exact match on `peer_device_fingerprint`, ALL known device fingerprints of that identity are accepted. For a single-device contact this
+        // reduces to that one fingerprint, so behaviour is unchanged. Download still goes to the file's REAL owner (see download_file: it downloads
+        // from the owning device in the row).
+        // `group_id IS NULL`: a group file offer is also stored under the sending member's `peer_device_fingerprint`. Without this filter a group
+        // attachment would leak into that member's 1:1 attachment history.
         let mut device_fps: Vec<String> = self.known_remote_devices.get(peer_device_fingerprint)
             .map(|d| d.identity_id.clone())
             .map(|id| self.known_remote_devices.values()
@@ -1509,8 +1326,7 @@ impl P2PCore {
             }
         };
         let params_dyn: Vec<&dyn rusqlite::ToSql> = device_fps.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-        // previews up to 512 KiB each, 500 rows, as hex: the older rows
-        // past the budget come without one.
+        // Previews up to 512 KiB each, 500 rows, as hex. Older rows past the budget come without one.
         let mut preview_budget = PAGE_MAX_BYTES;
         let rows = stmt.query_map(params_dyn.as_slice(), |r| {
             let preview: Option<Vec<u8>> = if with_preview { r.get(8)? } else { None };
@@ -1518,14 +1334,10 @@ impl P2PCore {
             let duration: Option<i64> = r.get(9)?;
             let file_id: String = r.get(0)?;
             let mut status: String = r.get(5)?;
-            // `active_downloads` süreç içi bellekte tutulur — süreç
-            // öldürülüp yeniden başladığında (ör. tam uygulama kapatma)
-            // DB'de "downloading" olarak kalmış ama artık HİÇBİR canlı
-            // indirme ilerlemesi almayacak (ve tıklandığında no-op olan,
-            // bkz. ChatActivity.onAttachmentClicked) kayıtlar bu şekilde
-            // sonsuza dek "İndiriliyor" görünürdü. Gerçekten devam eden bir
-            // indirmenin `active_downloads`'da karşılığı OLMALI — yoksa
-            // durum aslında "failed" (tekrar denenebilir) kabul edilir.
+            // `active_downloads` lives in process memory. If the process is killed and restarted (e.g. the app is fully closed), rows left as
+            // "downloading" in the DB would never receive live progress again. Tapping them is a no-op (see ChatActivity.onAttachmentClicked), so they
+            // would show "Downloading" forever. A download that is really in progress must have an entry in `active_downloads`. Otherwise the state is
+            // treated as "failed" (retryable).
             if status == "downloading" && !self.active_downloads.contains_key(&file_id) {
                 status = "failed".to_string();
             }
@@ -1552,18 +1364,14 @@ impl P2PCore {
         newest_first_rows(rows)
     }
 
-    /// `list_attachments`'ın grup
-    /// karşılığı — `group_id`'ye göre filtreler (bkz. `load_group_message_history`
-    /// AYNI desen). Grup içinde farklı ekler FARKLI göndericilerden
-    /// gelebileceğinden, `peer_device_fingerprint`/`sender_identity_id`
-    /// alanları BURADA (1:1'in aksine) doldurulur — `download_file`'ın
-    /// "kimden indirileceğini" bilmesi ve gönderen adının gösterilebilmesi
-    /// için.
+    /// Group counterpart of `list_attachments`: filters by `group_id` (same pattern as `load_group_message_history`). Attachments in a group can come
+    /// from DIFFERENT senders, so the `peer_device_fingerprint`/`sender_identity_id` fields are filled here (unlike 1:1). That lets `download_file`
+    /// know where to download from, and lets the sender's name be shown.
     pub(crate) fn list_group_attachments(&self, group_id: &str) -> Vec<AttachmentSummary> {
         self.list_group_attachments_opt(group_id, true, None, MAX_LISTED_ATTACHMENTS)
     }
 
-    /// #80: see `list_attachments_page`.
+    /// See `list_attachments_page`.
     pub(crate) fn list_group_attachments_page(&self, group_id: &str, before_ms: u64, limit: usize) -> Vec<AttachmentSummary> {
         self.list_group_attachments_opt(group_id, true, Some(before_ms), limit.min(MAX_LISTED_ATTACHMENTS))
     }
@@ -1621,16 +1429,12 @@ impl P2PCore {
         newest_first_rows(rows)
     }
 
-    /// Tamamlanmış bir ekin düz metin (çözülmüş) kopyasının yolunu döner —
-    /// yoksa (ilk açılış) önce diskten çözer. BİLİNEN SINIR:
-    /// `decrypt_file_from_disk` senkron/bounded-memory'dir ama büyük bir
-    /// dosya için yine de zaman alabilir — Kotlin tarafı bunu ana thread
-    /// DIŞINDA çağırmalıdır (bkz. P2PLib.kt dokümantasyonu).
-    /// bkz. `begin_outgoing_file` AYNI kilit-bölme gerekçesi — büyük bir
-    /// ekin tamamını çözmek de dakikalar sürebilir ve önceden global kilit
-    /// altında yapılıyordu. Bu, KISA kilitli faz: DB'den meta veriyi okur,
-    /// anahtarı çözer ve yol çiftini döner; asıl `decrypt_file_from_disk`
-    /// kilitsiz olarak `attachment_plaintext_path_unlocked` içinde çalışır.
+    /// Returns the path to a decrypted (plaintext) copy of a completed attachment. If there is none yet (first open), it decrypts the file from disk
+    /// first. KNOWN LIMIT: `decrypt_file_from_disk` is synchronous and bounded-memory, but for a large file it can still take a while. The Kotlin
+    /// side must call it OFF the main thread (see P2PLib.kt docs).
+    /// Same lock-splitting reason as `begin_outgoing_file`: decrypting a whole large attachment can take minutes, and it used to run under the global
+    /// lock. This is the SHORT locked phase: it reads the metadata from the DB, unwraps the key, and returns the path pair. The actual
+    /// `decrypt_file_from_disk` runs unlocked in `attachment_plaintext_path_unlocked`.
     pub(crate) fn begin_attachment_decrypt(&self, file_id: &str) -> Result<([u8; 32], String, std::path::PathBuf, std::path::PathBuf), String> {
         info!("get_attachment_plaintext_path çağrıldı: file_id={}", file_id);
         let conn = self.db.as_ref().ok_or("DB not open")?;
@@ -1645,8 +1449,7 @@ impl P2PCore {
         }
         let file_key = self.unwrap_file_key(&encrypted_key, &key_nonce)?;
 
-        // bkz. `safe_extension` (#01): uzantı karşı tarafın gönderdiği dosya
-        // adından türetiliyor, yol ayırıcı taşıyamaz.
+        // See `safe_extension`: the extension is derived from the file name the other side sent, and cannot carry a path separator.
         let ext = safe_extension(&file_name);
         let plain_path = self.attachments_dir()?.join("plain_cache").join(format!("{}{}", file_id, ext));
         let enc_path = self.enc_path_for(file_id)?;
