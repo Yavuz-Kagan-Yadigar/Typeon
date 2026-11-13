@@ -185,50 +185,37 @@ pub fn create_invite(store: &Store, label: &str, uses: i64, ttl_ms: i64) -> Resu
     Ok(server_proto::format_server_invite(&addrs, &hex::encode(token)))
 }
 
-/// The server's PERMANENT public join code (see `public_join_token`). `rotate`: the old code becomes invalid
+/// The server's public join code (3-day lifetime) (see `public_join_token`). `rotate`: the old code becomes invalid
 /// IMMEDIATELY. Enrolled devices are not affected.
 pub fn join_code(store: &Store, rotate: bool) -> Result<String, String> {
     let addrs = advertised_addrs(store)?;
     Ok(server_proto::format_server_invite(&addrs, &public_join_token(store, rotate)?))
 }
 
-/// Returns the public join token, creating it if missing. With `rotate`, it first deletes the old one (the old
-/// code becomes invalid at once).
-///
-/// The invite row (unlimited, no expiry) is also guaranteed here. If the operator restores the `data` directory
-/// from an old backup, the token may be in `meta` while the invite row is gone. The published code would then
-/// silently stop working.
+/// Returns the public join token. A new one is made when there is none, when the old one expired
+/// (`PUBLIC_CODE_TTL_MS`), when its invite row is gone (for example a `data` restore from an old backup), or
+/// with `rotate`. The old invite row is deleted, so the old code stops working at once.
 ///
 /// A free function, because the Android server's JNI layer cannot see `ServerCore` (it lives inside the network
 /// task). It uses only `Store`. A second copy of this logic there would drift apart.
 pub fn public_join_token(store: &Store, rotate: bool) -> Result<String, String> {
-    if rotate {
-        if let Some(old) = store.meta_get(PUBLIC_JOIN_TOKEN_KEY) {
-            if let Ok(bytes) = hex::decode(String::from_utf8_lossy(&old).trim().as_bytes()) {
-                let _ = store.delete_invite(Sha256::digest(&bytes).as_slice());
-            }
-        }
-        store.meta_set(PUBLIC_JOIN_TOKEN_KEY, b"")?;
-    }
-    let existing = store
+    let now = now_ms();
+    let old = store
         .meta_get(PUBLIC_JOIN_TOKEN_KEY)
-        .map(|v| String::from_utf8_lossy(&v).trim().to_string())
-        .filter(|v| !v.is_empty());
-    let token = match existing {
-        Some(t) => t,
-        None => {
-            let mut raw = [0u8; 20];
-            rand::rngs::OsRng.fill_bytes(&mut raw);
-            let t = hex::encode(raw);
-            store.meta_set(PUBLIC_JOIN_TOKEN_KEY, t.as_bytes())?;
-            t
+        .and_then(|v| hex::decode(String::from_utf8_lossy(&v).trim().as_bytes()).ok())
+        .filter(|raw| !raw.is_empty());
+    if let Some(raw) = &old {
+        let hash = Sha256::digest(raw);
+        if !rotate && store.invite_uses_left(hash.as_slice(), now) == Some(-1) {
+            return Ok(hex::encode(raw));
         }
-    };
-    let raw = hex::decode(&token).map_err(|_| "Katılım jetonu bozuk".to_string())?;
-    let hash = Sha256::digest(&raw);
-    if store.invite_uses_left(hash.as_slice(), now_ms()) != Some(-1) {
-        store.create_invite(hash.as_slice(), PUBLIC_JOIN_LABEL, 0, 0, now_ms())?;
+        let _ = store.delete_invite(hash.as_slice());
     }
+    let mut raw = [0u8; 20];
+    rand::rngs::OsRng.fill_bytes(&mut raw);
+    store.create_invite(Sha256::digest(raw).as_slice(), PUBLIC_JOIN_LABEL, 0, now + PUBLIC_CODE_TTL_MS, now)?;
+    let token = hex::encode(raw);
+    store.meta_set(PUBLIC_JOIN_TOKEN_KEY, token.as_bytes())?;
     Ok(token)
 }
 
@@ -236,16 +223,15 @@ pub fn public_join_token(store: &Store, rotate: bool) -> Result<String, String> 
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// `meta` key for the public (permanent) join token. See `ServerCore::join_code`.
+/// `meta` key for the public join token (3-day lifetime). See `ServerCore::join_code`.
 const PUBLIC_JOIN_TOKEN_KEY: &str = "public_join_token";
 /// Label of the invite row for this token (shown in `invite list`).
 const PUBLIC_JOIN_LABEL: &str = "herkese-acik";
 /// Maximum NEW enrollments per hour through the public code. See `handle_enroll`.
 const MAX_PUBLIC_ENROLLMENTS_PER_HOUR: i64 = 60;
-/// Active enrollments the public join code may hold at once. The code never
-/// runs out, so without this one leaked code fills every place on the server.
-/// A rotated code starts a new count.
-const PUBLIC_CODE_MAX_ENROLLMENTS: i64 = 16;
+/// Lifetime of the public join code. Unlimited uses, but a leaked code dies by
+/// itself; `public_join_token` then makes a new one.
+const PUBLIC_CODE_TTL_MS: i64 = 3 * 24 * 60 * 60 * 1000;
 /// Default `ServerConfig::max_enrollments`.
 pub const DEFAULT_MAX_ENROLLMENTS: u32 = 64;
 /// An active enrollment not seen for this long is removed by `maybe_sweep`.
@@ -1032,13 +1018,6 @@ impl ServerCore {
             let since = now - 60 * 60 * 1000;
             if self.store.count_enrollments_since(since, now) >= MAX_PUBLIC_ENROLLMENTS_PER_HOUR {
                 warn!("Herkese açık katılım kodu saatlik tavanı aştı, kayıt reddedildi");
-                self.stats.rejected += 1;
-                return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
-            }
-            if !prev.as_ref().map_or(false, |p| p.state == EnrollmentState::Active)
-                && self.store.count_active_enrollments_via(hash.as_slice(), now - ENROLLMENT_IDLE_MS) >= PUBLIC_CODE_MAX_ENROLLMENTS
-            {
-                warn!("Enrollment refused: the public join code holds its maximum number of devices");
                 self.stats.rejected += 1;
                 return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
             }
@@ -2131,6 +2110,22 @@ fn charge_verify(peer: &mut (u64, u32), pool: &mut (u64, u32), now: u64, checks:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_public_join_code_expires_and_renews() {
+        let s = Store::open_in_memory().unwrap();
+        let t1 = public_join_token(&s, false).unwrap();
+        assert_eq!(public_join_token(&s, false).unwrap(), t1, "same code while valid");
+        let h1 = Sha256::digest(hex::decode(&t1).unwrap());
+        // Age the code past its lifetime.
+        s.create_invite(h1.as_slice(), PUBLIC_JOIN_LABEL, 0, 1, 0).unwrap();
+        let t2 = public_join_token(&s, false).unwrap();
+        assert_ne!(t2, t1, "expired code is replaced");
+        assert_eq!(s.invite_uses_left(h1.as_slice(), 0), None, "old invite row deleted");
+        let h2 = Sha256::digest(hex::decode(&t2).unwrap());
+        assert_eq!(s.invite_uses_left(h2.as_slice(), now_ms() + PUBLIC_CODE_TTL_MS - 60_000), Some(-1));
+        assert_eq!(s.invite_uses_left(h2.as_slice(), now_ms() + PUBLIC_CODE_TTL_MS + 60_000), None);
+    }
 
     #[test]
     fn one_peer_cannot_drain_the_verify_pool() {

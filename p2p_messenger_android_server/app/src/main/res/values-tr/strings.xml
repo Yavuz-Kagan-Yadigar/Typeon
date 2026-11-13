@@ -10,7 +10,7 @@
 
     <string name="lbl_address">Adres</string>
     <string name="lbl_invite">Katılım kodu</string>
-    <string name="lbl_invite_desc">Herkes için TEK ve kalıcı kod: telefonda Ayarlar → Sunucular bölümünden tarayın ya da kopyalayıp oraya yapıştırın. Sınırsız kişi aynı kodla, size hiçbir şey sormadan katılabilir — bir kez yayımlamanız yeter. Kod sızarsa yenileyin; kaydı tamamlanmış cihazlar etkilenmez.</string>
+    <string name="lbl_invite_desc">Herkes için TEK kod, 3 gün geçerli: telefonda Ayarlar → Sunucular bölümünden tarayın ya da kopyalayıp oraya yapıştırın. Sınırsız kişi aynı kodla, size hiçbir şey sormadan katılabilir. 3 gün sonra burada kendiliğinden yeni kod çıkar. Kod sızarsa yenileyin; kaydı tamamlanmış cihazlar etkilenmez.</string>
     <string name="action_new_invite">Kodu yenile</string>
     <string name="action_copy_invite">Kodu kopyala</string>
     <string name="msg_invite_copied">Davet kodu kopyalandı</string>

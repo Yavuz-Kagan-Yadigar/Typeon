@@ -64,7 +64,7 @@ object ServerLib {
     external fun serverStatus(): String
 
     /**
-     * The server's PERMANENT join code (`typeon-server:<multiaddr>#<token>`). It is published once, and UNLIMITED people join with the same code.
+     * The server's join code (`typeon-server:<multiaddr>#<token>`). UNLIMITED people join with the same code for 3 days; after that the server makes a new one.
      *
      * The user asked for one QR or link that many people can use, with no interaction with the server needed. The earlier "make a new invite" button did not do
      * that. Each tap made a NEW, single-use code. And because the token is stored hashed, the same code could never be shown again. So the operator had to come

@@ -599,17 +599,6 @@ impl Store {
             .unwrap_or(0)
     }
 
-    /// Active, non-idle enrollments that came in with this invite.
-    pub fn count_active_enrollments_via(&self, token_hash: &[u8], idle_before: i64) -> i64 {
-        self.conn
-            .query_row(
-                "SELECT COUNT(*) FROM enrollments WHERE state = 'active' AND last_seen_at >= ?1 AND invite_hash = ?2",
-                params![idle_before, token_hash],
-                |r| r.get(0),
-            )
-            .unwrap_or(0)
-    }
-
     /// Puts active enrollments last seen before `before` to sleep: their
     /// reader rows go, and mail in boxes nobody reads any more goes with them.
     /// The row, its key and its quota counters stay, so the device comes back
@@ -2351,18 +2340,6 @@ mod tests {
         assert_eq!(s.invite_uses_left(b"h", 0), Some(1), "the use came back with the rollback");
         assert!(s.enroll_with_invite(b"h", 1, &e).unwrap());
         assert!(!s.enroll_with_invite(b"h", 1, &e).unwrap(), "spent");
-    }
-
-    #[test]
-    fn enrollments_are_counted_per_invite() {
-        let s = Store::open_in_memory().unwrap();
-        s.create_invite(b"pub", "x", 0, 0, 0).unwrap();
-        enroll(&s, b"aaaa", "peerA");
-        enroll(&s, b"bbbb", "peerB");
-        let a = s.enrollment_by_peer("peerA").unwrap();
-        assert!(s.enroll_with_invite(b"pub", 1, &a).unwrap());
-        assert_eq!(s.count_active_enrollments_via(b"pub", 0), 1, "peerB came in another way");
-        assert_eq!(s.count_active_enrollments_via(b"rotated", 0), 0);
     }
 
     #[test]

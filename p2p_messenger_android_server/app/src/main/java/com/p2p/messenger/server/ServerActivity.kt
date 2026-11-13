@@ -41,6 +41,7 @@ class ServerActivity : AppCompatActivity() {
     private lateinit var inviteCodeText: TextView
     @Volatile
     private var lastInvite: String? = null
+    private var lastInviteRead = 0L
 
     /** JNI calls hit SQLite and the filesystem: never on the main thread. */
     private val io = java.util.concurrent.Executors.newSingleThreadExecutor()
@@ -258,7 +259,12 @@ class ServerActivity : AppCompatActivity() {
 
         // The code appears by itself as soon as the address is ready. It is read only if it has not been shown yet, or if the address changed (the code
         // contains the addresses, and an old QR leads to the wrong address). `lastInvite` is cleared when the read fails, so the next poll tries again.
-        if (addrs.length() > 0 && (lastInvite == null || addressesChanged)) showJoinCode()
+        // The code expires after 3 days and the server then makes a new one, so it is also re-read once a minute.
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (addrs.length() > 0 && (lastInvite == null || addressesChanged || now - lastInviteRead > 60_000)) {
+            lastInviteRead = now
+            showJoinCode()
+        }
 
         lastStats = setTextIfChanged(
             statsText,
@@ -380,7 +386,7 @@ class ServerActivity : AppCompatActivity() {
     private fun unblock(enrollmentId: String) = deviceAction { ServerLib.unblockDevice(enrollmentId) }
 
     /**
-     * Shows the permanent join code (see `ServerLib.joinCode`).
+     * Shows the join code (see `ServerLib.joinCode`). It is valid for 3 days.
      *
      * The code is redrawn only if it CHANGED. Reading and QR encoding happen off the main thread.
      */
@@ -441,7 +447,7 @@ class ServerActivity : AppCompatActivity() {
         }
         clipboard.addPrimaryClipChangedListener(listener)
         clipboard.setPrimaryClip(clip)
-        // The join code is a permanent bearer token: drop it from the
+        // The join code is a bearer token: drop it from the
         // clipboard after a minute, if nothing else was copied since.
         Handler(Looper.getMainLooper()).postDelayed({
             try {

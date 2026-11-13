@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! typeon-server run                          # run the server
-//! typeon-server join-code                    # permanent join code (for everyone)
+//! typeon-server join-code                    # join code for everyone, valid 3 days
 //! typeon-server join-code rotate             # rotate the code, invalidating the old one
 //! typeon-server invite new [label] [uses]    # single- or few-use invite code
 //! typeon-server invite list
@@ -193,7 +193,7 @@ async fn run() {
 }
 
 /// Requirement: one code must be shareable with EVERYONE. `invite new` creates a NEW code on every call, and the token
-/// cannot be shown again. This command returns the SAME permanent code (see `ServerCore::join_code`).
+/// cannot be shown again. This command returns the SAME code until it expires (3 days) (see `ServerCore::join_code`).
 fn join_code(args: &[String]) {
     let rotate = matches!(args.first().map(String::as_str), Some("rotate") | Some("yenile"));
     match typeon_server::join_code(&open_store(), rotate) {

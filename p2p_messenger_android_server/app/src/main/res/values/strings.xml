@@ -10,7 +10,7 @@
 
     <string name="lbl_address">Address</string>
     <string name="lbl_invite">Join code</string>
-    <string name="lbl_invite_desc">One permanent code for everyone: scan it from Settings → Servers on a phone, or copy and paste it there. Unlimited people can join with the same code without asking you for anything — publish it once. Rotate it if it leaks; already-enrolled devices keep working.</string>
+    <string name="lbl_invite_desc">One code for everyone, valid for 3 days: scan it from Settings → Servers on a phone, or copy and paste it there. Unlimited people can join with the same code without asking you for anything. After 3 days a new code appears here by itself. Rotate it if it leaks; already-enrolled devices keep working.</string>
     <string name="action_new_invite">Rotate code</string>
     <string name="action_copy_invite">Copy code</string>
     <string name="msg_invite_copied">Invite code copied</string>
