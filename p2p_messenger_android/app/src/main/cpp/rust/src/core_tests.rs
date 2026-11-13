@@ -1,34 +1,25 @@
 //! Crate-level tests, many of them scanning the core source (see `CORE_SRC`).
 
 use super::*;
-
-
-/// `wipe_all_local_state`'in HİÇBİR alanı atlamadığını kaynak metin
-/// üzerinden doğrular.
-/// Neden böyle bir test: bu fonksiyon iki kez yarım kaldı (defter #13'te
-/// sunucu tabloları, sonra öz-denetimde anahtar malzemesi ve kişi
-/// eşleştirme haritaları). Yeni bir alan eklendiğinde onu wipe'a eklemeyi
-/// unutmak SESSİZ bir hata — uzaktan iptal edilmiş bir cihazda veri kalır
-/// ve kimse fark etmez. Bu test, `P2PCore`'un her alanının ya wipe
-/// gövdesinde geçtiğini ya da aşağıdaki gerekçeli muafiyet listesinde
-/// olduğunu zorunlu kılıyor.
+/// Checks in the source text that `wipe_all_local_state` skips NO field.
+/// Why this test exists: the function was once left incomplete (server tables, then key material and the contact pairing maps). Adding a new field and forgetting to add it to the wipe is a SILENT bug: a remotely revoked device keeps its data, and
+/// nobody notices. This test requires that every field of `P2PCore` appears either in the wipe body, or in the justified exemption list below.
 #[cfg(test)]
 mod wipe_coverage_tests {
-    /// Kimlik/kişi bilgisi TAŞIMAYAN alanlar — silmeye gerek yok.
-    /// Her biri ya salt yapılandırma, ya bir zamanlayıcı, ya da yeniden
-    /// kurulduğunda kendiliğinden doğru olan çalışma-anı durumu.
+    /// Fields that carry NO identity or contact information, so they need no deleting.
+    /// Each one is either plain configuration, a timer, or runtime state that is correct by construction after a rebuild.
     const EXEMPT: &[&str] = &[
-        "db",                            // bağlantının kendisi; tablolar SQL ile boşaltılıyor
-        "swarm",                         // ağ yığını; kimlik taşımıyor
+        "db",  // connection itself. Tables are emptied with SQL.
+        "swarm",  // network stack. Carries no identity.
         "tor", "tor_enabled", "tor_was_ready",
-        "own_listen_addrs", // KENDİ adreslerimiz
+        "own_listen_addrs",  // our OWN addresses
         "node_mode_enabled", "history_storage_limit_bytes", "power_save",
         "metered", "radio_window_at", "radio_window_open", "tor_dormant", "tor_wake_at", "resync_since", // network state / timers
         "app_files_dir",
-        "known_relay_peers",             // herkese açık röle adresleri
-        "relay_listeners",               // swarm dinleyici kimlikleri; ağla birlikte yeniden kurulur
-        "fast_reconnect_until",          // zamanlayıcı
-        "peer_conns",                    // bağlantı kimlikleri; ağla birlikte yeniden kurulur
+        "known_relay_peers",  // public relay addresses
+        "relay_listeners",  // swarm listener ids. Rebuilt together with the network.
+        "fast_reconnect_until",  // timers
+        "peer_conns",  // connection ids. Rebuilt together with the network.
         "conn_rank",                     // same, per connection id
         "unknown_inbound",               // same, per connection id
         "server_rpc_timeouts",           // connection health counter
@@ -39,8 +30,7 @@ mod wipe_coverage_tests {
         "last_network_change_at", "network_change_pending", "last_unconfirmed_retry_at",
         "last_sibling_roster_sync_at", "last_group_sync_sweep_at", "durable_reload_at",
         "last_storage_sweep_at",
-        // Sadece "en son ne zaman budama yaptık" — kimlik taşımaz; haritanın
-        // KENDİSİ (`recent_inbound_digests`) `wipe_all_local_state`'te temizleniyor.
+        // Only "when did we last prune": carries no identity. The map itself (`recent_inbound_digests`) is cleared in `wipe_all_local_state`.
         "last_inbound_dedup_prune_at",
         "stream_control",                // swarm handle, rebuilt with the network
         "call_stats_logged_at",          // log timer
@@ -51,9 +41,8 @@ mod wipe_coverage_tests {
     #[test]
     fn every_field_is_wiped_or_explicitly_exempt() {
         let src = crate::CORE_SRC;
-        // Struct govdesini SATIR SATIR yuruyoruz: bir doc yorumu icinde
-        // gecen `}` yuzunden erken kesilmesin diye, kapanis olarak yalnizca
-        // tek basina `}` olan satir kabul ediliyor.
+        // Walk the struct body LINE BY LINE. A `}` inside a doc comment must not end the scan early,
+        // so only a line that is a lone `}` counts as the closing brace.
         let mut fields = Vec::new();
         let mut inside = false;
         for line in src.lines() {
@@ -82,13 +71,10 @@ mod wipe_coverage_tests {
         }
         assert!(fields.len() > 50, "alan ayristirma bozuk: {} alan bulundu", fields.len());
 
-        // DIKKAT, iki tuzak birden:
-        //   1) Dosyada bu ismi anan doc yorumlari var; duz bir arama ilk
-        //      olarak onlardan birine duser.
-        //   2) Bu testin KENDI kaynagi da `include_str!` ile okunan dosyanin
-        //      icinde — aranan metni buraya duz yazarsak `find` once kendi
-        //      string sabitimizi bulur. Bu yuzden ihtiyac duyulan metin
-        //      parcalardan birlestiriliyor.
+        // Two traps at once:
+        //   1) Doc comments in the file mention this name, so a plain search would first hit one of them.
+        //   2) This test's own source is inside the file read by `include_str!`. If the needle were written
+        //      out plainly here, `find` would hit this test's own string first. So the needle is built from parts.
         let needle = format!("    pub(crate) fn wipe_all_{}(&mut self)", "local_state");
         let wstart = src.find(&needle).expect("wipe tanimi bulunamadi");
         let wbody = &src[wstart..];
@@ -100,10 +86,9 @@ mod wipe_coverage_tests {
             if EXEMPT.contains(&f.as_str()) {
                 continue;
             }
-            // `self.<alan>` olarak gecmeli — SQL tablo adlarina denk
-            // gelmesin diye `self.` oneki sart (bu tuzaga bir kez dusuldu:
-            // `device_onion_addr`, SQL'deki `device_onion_addrs` icinde
-            // gectigi icin temizlenmis SANILMISTI).
+            // The field must appear as `self.<field>`. The `self.` prefix is required so that it does not match
+            // SQL table names. (This was hit once: `device_onion_addr` was thought wiped because it occurs inside
+            // the SQL name `device_onion_addrs`.)
             if !wbody.contains(&format!("self.{}", f)) {
                 missing.push(f.clone());
             }
@@ -401,8 +386,7 @@ mod review_oct2026_tests {
         assert!(!P2PCore::identity_proved_by_root(&ix));
     }
 
-    /// 2026-10-08: any active device of an identity could sign an add or a
-    /// revoke, the revoke of the first device included.
+    /// Regression: any active device of an identity could sign an add or a revoke, including a revoke of the first device.
     #[test]
     fn only_the_first_device_adds_and_revokes() {
         let (mut primary, mut secondary, mut me) = (P2PCore::new(), P2PCore::new(), P2PCore::new());
@@ -433,8 +417,8 @@ mod review_oct2026_tests {
         }
     }
 
-    /// 2026-10-08 (BLIND G1): the founder's own handover update was rejected
-    /// by every receiver, and the group was left without a working founder.
+    /// Regression: the founder's own handover update was rejected by every receiver, so the group was left
+    /// without a working founder.
     #[test]
     fn founder_handover_is_accepted_and_heals_a_member_that_missed_it() {
         let mut cores: Vec<P2PCore> = (0..4).map(|_| P2PCore::new()).collect();
@@ -471,8 +455,7 @@ mod review_oct2026_tests {
         assert!(cores[3].groups[&gid].founder_chain.iter().all(|t| t.from_identity == ids[0]));
     }
 
-    /// H78 + M90 + H28: two updates of one version end the same on every
-    /// member; an update carries only new devices; secrets are per group.
+    /// Covers three fixes: two updates of one version end the same on every member; an update carries only new devices; secrets are per group.
     #[test]
     fn same_version_updates_converge_and_carry_only_new_devices() {
         let base = std::env::temp_dir().join(format!("typeon-tie-{}", std::process::id()));
@@ -1316,28 +1299,22 @@ mod recovery_tests {
 mod rate_limit_tests {
     use super::{RateVerdict, RATE_LIMIT_MAX_ESTABLISHED, RATE_LIMIT_MAX_PER_WINDOW};
 
-    /// Teslim garantisi (kullanıcı isteği "her mesajın alındığından emin
-    /// ol"): tanınmayan bir eş tavanı aşarsa paketi DÜŞÜRÜYORUZ — imza
-    /// doğrulama maliyetine karşı asıl korumamız bu. Ama kimliği
-    /// doğrulanmış, kurulmuş oturumu olan bir eş tavanı aşarsa paket
-    /// ATILMAZ, ERTELENİR: bir hafta kapalı kalmış bir eşin birikmiş
-    /// mesajlarını yakalarken kayıp yaşanmasın diye.
-    /// Bu test sabitlerin ilişkisini kilitliyor; karar mantığının kendisi
-    /// `rate_verdict` içinde ve `P2PCore` gerektirdiği için burada
-    /// çalıştırılamıyor.
+    /// Delivery guarantee (the user asked that every message be received): if an unknown peer exceeds the cap, the packet is DROPPED. That is our
+    /// main protection against the cost of signature verification. But if a peer with a verified identity and an established session exceeds
+    /// the cap, the packet is NOT dropped; it is DEFERRED. This prevents losing the queued messages of a peer that was offline for a week.
+    /// This test locks the relationship between the constants. The decision logic itself lives in `rate_verdict`, and it needs a `P2PCore`,
+    /// so it cannot run here.
     #[test]
     fn established_peers_get_a_far_higher_ceiling() {
         assert!(
             RATE_LIMIT_MAX_ESTABLISHED > RATE_LIMIT_MAX_PER_WINDOW,
             "kurulmus oturumu olan es daha genis bir tavan almali"
         );
-        // 10 saniyelik pencerede 600 = saniyede 60; birikmis bir kuyrugu
-        // yakalamaya fazlasiyla yeter.
+        // 600 per 10-second window is 60 per second. That is plenty to catch up on a backed-up queue.
         assert!(RATE_LIMIT_MAX_ESTABLISHED >= 600);
     }
 
-    /// Üç sonuç birbirinden ayrı olmalı — "ertele" ile "düşür" aynı şey
-    /// sayılırsa düzeltmenin tamamı anlamsızlaşır.
+    /// The three outcomes must stay distinct. If "defer" and "drop" were treated as the same thing, the whole fix would be meaningless.
     #[test]
     fn defer_is_not_drop() {
         assert_ne!(RateVerdict::Defer, RateVerdict::Drop);
@@ -1349,9 +1326,8 @@ mod rate_limit_tests {
 mod path_safety_tests {
     use super::{is_safe_file_id, safe_extension};
 
-    /// `FileOffer.file_id` karsi taraftan geliyor ve dosya
-    /// yoluna donusuyordu. Bunlar gectiginde `enc_path_for` dizin disina
-    /// cikamaz.
+    /// `FileOffer.file_id` comes from the remote peer and becomes a file path. When these checks pass,
+    /// `enc_path_for` cannot leave the directory.
     #[test]
     fn traversal_shaped_file_ids_are_rejected() {
         assert!(!is_safe_file_id("../identity_secret"));
@@ -1363,16 +1339,14 @@ mod path_safety_tests {
         assert!(!is_safe_file_id(&"x".repeat(129)));
     }
 
-    /// Kendi urettigimiz kimlikler (UUID) gecmeli — aksi halde dosya
-    /// eklerinin tamami kirilirdi.
+    /// Our own ids (UUIDs) must pass. Otherwise every file attachment would break.
     #[test]
     fn our_own_uuids_still_pass() {
         assert!(is_safe_file_id("550e8400-e29b-41d4-a716-446655440000"));
         assert!(is_safe_file_id("bl_abc123"));
     }
 
-    /// duz metin onbellek yolu `{file_id}{ext}`
-    /// ile kuruluyor ve `ext` de karsi tarafin dosya adindan geliyordu.
+    /// The plaintext cache path is built as `{file_id}{ext}`, and `ext` comes from the remote peer's file name.
     #[test]
     fn extensions_cannot_carry_path_separators() {
         assert_eq!(safe_extension("photo.jpg"), ".jpg");
@@ -1385,26 +1359,19 @@ mod path_safety_tests {
 
 #[cfg(test)]
 mod delivery_ack_coverage_tests {
-    /// 2026-09-07 iki cihazlı testte bulunan hata: `Reaction` alıcı kolu
-    /// hiç `send_ack` çağırmıyordu, ama `Reaction` `needs_delivery_
-    /// confirmation` listesinde — yani gönderen onu onaylanana kadar (7 güne)
-    /// yeniden dener ve `pending_durable_retries`'e yazar. Sonuç: tepki
-    /// alıcıda uygulansa bile gönderen tarafta yeniden-deneme girdisi
-    /// günlerce asılı kalıyordu.
-    /// Bu test, `receive_message`'ın onay bekleyen içerik türlerinin
-    /// kollarının GERÇEKTEN bir Ack yolu tetiklediğini kilitler. Kaynağı
-    /// tarar (`wipe_coverage_tests` ile aynı desen — `P2PCore` kuramadığımız
-    /// için). Her kol ya doğrudan `send_ack(` çağırır, ya da acık biçimde
-    /// muaf listesinde olmalı (Ack'i başka bir yol sağlıyor).
+    /// Regression: the `Reaction` receive arm never called `send_ack`, but `Reaction` is in the
+    /// `needs_delivery_confirmation` list. So the sender retried it for up to 7 days and wrote a `pending_durable_retries` entry. Even when the
+    /// reaction was applied on the receiver, the sender kept a retry entry for days.
+    /// This test locks in that every receive arm of a content type that requires confirmation really triggers an Ack path. It scans the source
+    /// (the same pattern as `wipe_coverage_tests`, because `P2PCore` cannot be built here). Each arm either calls `send_ack(` directly, or is
+    /// explicitly on the exemption list (another path provides the Ack).
     #[test]
     fn reaction_receive_arm_sends_an_ack() {
         let src = crate::CORE_SRC;
 
-        // `receive_message`'ın `Reaction` kolunun DESTRUCTURE deseni (send
-        // tarafı `let content = MessageContent::Reaction {\n  target_...:`
-        // şeklinde alanları `:` ile yazar; alıcı kolu tek satırda `, ` ile).
-        // Parçalı kurulur ki bu test bloğu deseni kendi içinde barındırıp
-        // `find`'i şaşırtmasın.
+        // The `Reaction` arm of `receive_message` is destructured in a specific pattern. The send side writes its fields with `:`
+        // (`let content = MessageContent::Reaction {\n  target_...:`), while the receive arm uses `, ` on one line. The pattern is built
+        // from fragments so that this test block does not contain the pattern itself and confuse its own `find`.
         let arm_pat = ["MessageContent::Reaction { target_message_id,",
                        " emoji, group_id, reacted_at_ms } =>"].concat();
         let arm_start = src.find(&arm_pat)
@@ -1460,8 +1427,8 @@ mod fanout_staleness_tests {
         }
     }
 
-    /// 2026-09-26: `last_seen` was never refreshed, so a filter on it dropped
-    /// live devices; with every device stale the invite went only to a dead one.
+    /// Regression: `last_seen` was never refreshed, so a filter on it dropped live devices. With every device stale, the invite went only to a
+    /// dead one.
     #[test]
     fn stale_devices_are_skipped_but_never_everyone() {
         let mut core = P2PCore::new();
@@ -1499,8 +1466,7 @@ mod conn_path_rank_tests {
     fn onion_beats_clearnet_and_relay() {
         let r = |s: &str| conn_path_rank(&s.parse().unwrap());
         let peer = "12D3KooWKyUGW1BQhQRTn6gGcidXMotu34zMsfodWjAZD6ebL1Uv";
-        // Onion-only: clearnet doğrudan yol artık en düşük (0),
-        // asla onion'un üstüne çıkmaz.
+        // Onion-only: the direct clearnet path is now the lowest (0), and never ranks above onion.
         assert_eq!(r(&format!("/ip4/192.168.1.103/tcp/42611/p2p/{peer}")), 0);
         assert_eq!(r(&format!("/dns/abc.onion/tcp/42611/p2p/{peer}")), 1);
         assert_eq!(r("/ip4/127.0.0.1/tcp/47420"), 1); // inbound over our onion service
@@ -1672,11 +1638,9 @@ mod peer_mapping_tests {
 
 #[cfg(test)]
 mod repair_identity_exchange_tests {
-    /// 2026-09-18 device test: re-adding a contact within 12 h sent an
-    /// IdentityExchange byte-identical to the previous one. Server dedup
-    /// swallowed it, and pairing hung. User-started pairing must clear that
-    /// dedup (`send_identity_exchange_fresh`); so must the reply to a peer that
-    /// (re)added us (`process_identity_exchange`, `!we_initiated`).
+    /// Regression: re-adding a contact within 12 hours sent an IdentityExchange byte-identical to the previous one. The
+    /// server's dedup swallowed it, so pairing hung. A pairing started by the user must clear that dedup (`send_identity_exchange_fresh`). So must
+    /// the reply to a peer that (re)added us (`process_identity_exchange`, `!we_initiated`).
     #[test]
     fn pairing_paths_send_a_fresh_identity_exchange() {
         let src = crate::CORE_SRC;
@@ -1692,9 +1656,8 @@ mod repair_identity_exchange_tests {
 
 #[cfg(test)]
 mod authz_coverage_tests {
-    /// 2026-09-13 denetimi: aşağıdaki kolların her biri yetki kontrolü
-    /// olmadan veri sızdırıyor ya da kimlik ele geçirmeye izin veriyordu.
-    /// `P2PCore` kurulamadığından kaynak taranır (bkz. `wipe_coverage_tests`).
+    /// Each of the arms below leaked data or allowed identity takeover without an authority check.
+    /// `P2PCore` cannot be built here, so the source is scanned (see `wipe_coverage_tests`).
     fn body_of<'a>(src: &'a str, start_parts: &[&str], len: usize) -> &'a str {
         let pat = start_parts.concat();
         let at = src.find(&pat).unwrap_or_else(|| panic!("bulunamadı: {pat}"));
@@ -1716,7 +1679,6 @@ mod authz_coverage_tests {
             (&["fn process_identity_exchange", "(&mut self"], 20000, "if my_id.as_deref() == Some(exchange.identity_id.as_str()) {"),
             (&["MessageContent::Seen { target_message_id,", " group_message_local_id } =>"], 5000, "may_mark_seen("),
             (&["fn process_handshake_init", "(&mut self"], 5000, "&recipient_fp,"),
-            // 2026-10-07
             (&["fn remove_from_group", "(&mut self"], 1500, "is_member(member_identity_id)"),
             (&["fn verify_founder_transfer", "(&self"], 1500, "!signer.is_active"),
             (&["fn heal_founder_chain", "(&self"], 1500, "t.version > floor"),
