@@ -3,15 +3,12 @@
 use super::*;
 
 
-/// bkz. `P2PCore::begin_outgoing_file` (kilit-bölme gerekçesi) — GB'larca
-/// sürebilen dosya şifrelemesi GLOBAL core kilidi TUTULMADAN burada, iki
-/// kısa kilitli fazın arasında yapılır. JNI ve `api` sarmalayıcıları eski
-/// tek parça `prepare_and_send_file` yerine artık bunu çağırır.
-/// Shared skeleton of the two wrappers below: begin (locked), encrypt
-/// (unlocked), finish (locked). If any step fails, nothing of the file stays
-/// behind: neither the `.enc` nor the `files` row / queued server upload that
-/// `finish` may already have written (a row marked 'complete' for a deleted
-/// `.enc` made the attachment undownloadable forever).
+/// See `P2PCore::begin_outgoing_file` for the reason the work is split. Encrypting a file that can take gigabytes must not hold the GLOBAL core
+/// lock, so it runs here, between two short locked phases. The JNI and `api` wrappers now call this instead of the old single-piece
+/// `prepare_and_send_file`.
+/// Shared skeleton of the two wrappers below: begin (locked), encrypt (unlocked), finish (locked). If any step fails, nothing of the file stays
+/// behind: neither the `.enc` nor the `files` row / queued server upload that `finish` may already have written (a row marked 'complete' for a
+/// deleted `.enc` made the attachment undownloadable forever).
 pub(crate) fn encrypt_then_finish<T>(source_path: &str, group_id: Option<&str>, finish: impl FnOnce(&mut P2PCore, String, [u8; 32], u64, String, Vec<u8>) -> Result<T, String>) -> Result<T, String> {
     let (file_id, file_key, dest_path) = core_lock().begin_outgoing_file(source_path, group_id)?;
     // The chunk hashes for the offer are read back from the `.enc` here, still
@@ -25,7 +22,7 @@ pub(crate) fn encrypt_then_finish<T>(source_path: &str, group_id: Option<&str>, 
     let (total_size, sha256_hex, chunk_hashes) = match encrypted {
         Ok(v) => v,
         Err(e) => {
-            // Yarım kalmış `.enc` öksüz kalmasın (hiçbir DB kaydı yok).
+            // Do not leave a half-written `.enc` behind (there is no DB record for it).
             let _ = std::fs::remove_file(&dest_path);
             return Err(e);
         }
@@ -46,7 +43,7 @@ pub(crate) fn prepare_and_send_file_unlocked(peer_device_fingerprint: String, so
     })
 }
 
-/// bkz. `prepare_and_send_file_unlocked` — grup karşılığı.
+/// See `prepare_and_send_file_unlocked`. The group counterpart.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_and_send_group_file_unlocked(group_id: String, source_path: String, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>) -> Result<String, String> {
     let gid = group_id.clone();
@@ -298,11 +295,9 @@ pub(crate) fn attachment_original_path_unlocked(file_id: &str) -> Result<String,
     Ok(out.to_string_lossy().to_string())
 }
 
-/// bkz. `P2PCore::begin_attachment_decrypt` — AYNI kilit-bölme deseni,
-/// indirme sonrası tam-dosya çözme tarafı. Eşzamanlılık: aynı dosya için
-/// iki eşzamanlı çağrı aynı önbellek yoluna yazmasın diye önce benzersiz
-/// bir geçici yola çözülür, sonra atomik `rename` ile yerine konur
-/// (ikinci çağrının rename'i kazanır — iki içerik de birebir aynı).
+/// See `P2PCore::begin_attachment_decrypt`. The same lock-splitting pattern, for the full-file decryption after a download. Concurrency: two
+/// concurrent calls for the same file must not write the same cache path. So each decrypts to its own unique temporary path first, then an
+/// atomic `rename` puts it in place (the second call's rename wins; both contents are identical).
 pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String, String> {
     let (file_key, sha256_hex, enc_path, decrypted_path) = core_lock().begin_attachment_decrypt(file_id)?;
     // A JPEG XL ("hi-res" image) is handed out as PNG: no viewer of ours

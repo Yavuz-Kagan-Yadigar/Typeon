@@ -314,8 +314,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_downloadFile<'local>(mut en
     safe_new_jstring(&mut env, out)
 }
 
-/// JSON-encoded `List<AttachmentSummary>` — bir sohbetteki bilinen dosya
-/// eklerini listeler (see `P2PCore::list_attachments`).
+/// JSON-encoded `List<AttachmentSummary>`. Lists the known file attachments in a chat (see `P2PCore::list_attachments`).
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_listAttachments<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>) -> jstring {
     let fp: String = jstr(&mut env, &peer_device_fingerprint).unwrap_or_default();
@@ -1506,7 +1505,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_addKnownRelayAddress<'local
 // Server (store-and-forward) option. See the `server_client` module.
 // ---------------------------------------------------------------------------
 
-/// Davet kodundan (`typeon-server:<multiaddr>#<jeton>`) bir sunucu ekler.
+/// Adds a server from an invite code (`typeon-server:<multiaddr>#<token>`).
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_addServer<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, invite_code: JString<'local>) -> jstring {
     let code: String = jstr(&mut env, &invite_code).unwrap_or_default();
@@ -2000,7 +1999,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mu
     // JSON array of mentioned identity ids; anything else means none.
     let mentions: Vec<String> = optional_jstring(&mut env, &mentions_json)
         .and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
-    // see `optional_jstring`/`sendMessage` AYNI desen.
+    // Same pattern as `optional_jstring` / `sendMessage`.
     let reply_id_opt = optional_jstring(&mut env, &reply_to_message_id);
     let reply_preview_opt = optional_jstring(&mut env, &reply_to_preview);
     let reply_sender_opt = optional_jstring(&mut env, &reply_to_sender_identity_id);

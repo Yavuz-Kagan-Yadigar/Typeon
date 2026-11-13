@@ -765,7 +765,7 @@ impl P2PCore {
         let now = current_time_ms();
         let elapsed_since_progress = match self.active_downloads.get(file_id) {
             Some(s) => now.saturating_sub(s.last_progress_at),
-            None => return, // indirme zaten kaldırılmış/iptal edilmiş
+            None => return,  // the download was already removed or cancelled
         };
         if elapsed_since_progress > DOWNLOAD_GIVE_UP_TIMEOUT_MS {
             error!(
@@ -1028,7 +1028,7 @@ impl P2PCore {
                 };
                 (s.enc_path.clone(), s.file_key, s.total_chunks, s.chunk_size, s.total_size, s.per_hash, s.peer_id, expected)
             }
-            None => return, // İptal edilmiş/başka nedenle düşmüş bir indirme — sessizce yok say.
+            None => return,  // a cancelled download, or one that was dropped for another reason. Ignore it silently.
         };
         // A chunk that is already here (or waits for the rest of its group) is
         // not written again: a second copy could differ.
