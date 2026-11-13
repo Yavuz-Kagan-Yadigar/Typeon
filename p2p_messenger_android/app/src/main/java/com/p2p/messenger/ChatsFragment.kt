@@ -25,80 +25,65 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Spec 3 minimum kapsamı: bilinen kişilerin + grupların TEK bir listesi,
- * tıklanınca ilgili sohbet ekranını açar. `ListAdapter`/`DiffUtil` tabanlı
- * gerçek bir adapter kullanır (bkz. ChatAdapter) ve periyodik olarak
- * yenilenir. En güncel mesaj/ek atılan sohbet en üstte olacak şekilde
- * sıralanır (bkz. `refreshList` — hem kişiler hem gruplar, tek bir zaman
- * çizelgesinde). Node modu kapalıyken kişiler için "son mesaj" alanı boş
- * kalır (mesaj geçmişi o durumda hiç saklanmıyor) — gruplar için de aynı
- * kısıt geçerli (bkz. `archive_group_message`).
+ * One list of known contacts and groups. A tap opens the matching chat screen. It uses a real
+ * `ListAdapter` with `DiffUtil` (see ChatAdapter) and refreshes on events. The chat with the newest
+ * message or attachment is at the top, for contacts and groups together on one timeline (see `refreshList`).
+ * With node mode off, the "last message" field stays empty for contacts, because no message history is
+ * stored then. The same limit applies to groups (see `archive_group_message`).
  *
- * önceden ayrı bir "Gruplar" sekmesi vardı — kullanıcı isteği
- * üzerine kaldırıldı, grup listesi/oluşturma buraya taşındı (bkz.
- * `btnCreateGroup`, eski GroupsFragment'in mantığı).
+ * Groups used to have their own tab. That tab was removed, and group listing and creation moved here
+ * (see `btnCreateGroup`, the logic of the former GroupsFragment).
  */
 class ChatsFragment : Fragment() {
 
     companion object {
-        /** Olay geldiğinde listenin yenilenmesi için beklenen süre: bir
-         *  olay patlaması TEK yenileme olsun (her olayda yenilemek, eskiden
-         *  5 saniyelik turdan çok daha pahalı olurdu). */
+        /** Delay before the list refreshes after an event. A burst of events causes one refresh. */
         private const val EVENT_REFRESH_DEBOUNCE_MS = 1000L
     }
 
     /**
-     * Spec dışı, kullanıcı isteği ("soldan bir drag barla sürüklenebilir
-     * açılıp kapanan chat list"): bu fragment artık İKİ yerde barınabiliyor
-     * — MainActivity'nin sekmesi (normal, TAM EKRAN kullanım — bu geri
-     * çağrı `null` kalır) VE ChatActivity/GroupChatActivity'nin soldan
-     * açılan çekmecesi (bkz. activity_chat.xml DrawerLayout). Çekmece
-     * içindeyken bir sohbete dokunmak YENİ bir ChatActivity/
-     * GroupChatActivity BAŞLATIR (bkz. aşağıdaki `openGroupChat`/DM kolu) —
-     * ama o zaten AÇIK olan sohbet ekranının ÜSTÜNE yığılmaması için host
-     * (bkz. ChatActivity.setupChatListDrawer) bunu `{ finish() }`'e
-     * ayarlar. MainActivity'nin kendi sekmesinde bu callback set
-     * EDİLMEDİĞİNDEN (varsayılan `null`) davranış orada DEĞİŞMEZ.
+     * This fragment can live in two places: the MainActivity tab (full screen, this callback stays `null`),
+     * and the left drawer of ChatActivity / GroupChatActivity (see the DrawerLayout in activity_chat.xml).
+     * Inside the drawer, tapping a chat starts a NEW ChatActivity / GroupChatActivity (see `openGroupChat` and the
+     * DM branch below). The host (see ChatActivity.setupChatListDrawer) sets this callback to `{ finish() }`, so
+     * the open chat is not stacked under another one. The MainActivity tab does not set it, so its behaviour is unchanged.
      */
     var onChatOpenedFromDrawer: (() -> Unit)? = null
 
     private lateinit var adapter: ChatAdapter
     private lateinit var noContactsText: View
-    /** bkz. `applyFilter` — en son çekilen TAM liste (kişi+grup); arama
-     *  sorgusu buradan filtrelenir, listenin yenilenmesi arama sorgusunu
-     *  SIFIRLAMAZ. */
+    /** The most recently loaded FULL list (contacts and groups). The search query filters it here. A refresh
+     *  of the list does NOT reset the search query. */
     private var allChatItems: List<ChatAdapter.ChatMessage> = emptyList()
     private var searchQuery: String = ""
 
-    /** Çekirdek bir hatayı "Error: ..." metniyle döner; kullanıcıya
-     *  gösterilen metin kaynaktan gelir (sabit İngilizce değil). */
+    /** The core returns an error as an "Error: ..." string. The text shown to the user comes from resources,
+     *  not a fixed English string. */
     private fun errorText(result: String): String =
         com.p2p.messenger.util.coreErrorText(requireContext(), result)
     private val refreshHandler = Handler(Looper.getMainLooper())
     /**
-     * 5 saniyede bir TAM liste yeniden kurma YOK: her turda (ve her açık
-     * sohbetin çekmecesinde) tüm kişi/grup listesi, son mesaj önizlemeleri
-     * ve ekler yeniden okunuyordu — çekirdek kilidinde O(sohbet × ek) işi,
-     * her 5 saniyede bir (bkz. `refreshList` notu).
+     * The list is NOT fully rebuilt every 5 seconds. Each round used to re-read every contact and group, the last
+     * message previews and the attachments. That was O(chats x attachments) work under the core lock, every 5 seconds
+     * (see the `refreshList` note).
      *
-     * Liste artık OLAYLA tazelenir: ekrana dönüşte ve servisten bir olay
-     * geldiğinde (mesaj, okundu, eşleşme, grup güncellemesi...).
+     * The list is now refreshed by EVENTS: on return to the screen and when the service reports an event
+     * (message, read state, pairing, group update, ...).
      */
-    /** A refresh is queued (`Handler.hasCallbacks` is API 29, minSdk 26). */
+    /** A refresh is queued (`Handler.hasCallbacks` is API 29, minSdk is 26). */
     @Volatile private var eventRefreshQueued = false
     private val eventRefreshRunnable = Runnable { eventRefreshQueued = false; refreshList() }
     private val eventListener: (String) -> Unit = { _ ->
-        // Olaylar tek tek gelir (bir patlamada 50 mesaj = 50 yeniden kurma
-        // olurdu): bekleyen bir yenileme varsa yenisini EKLEME.
+        // Events arrive one by one. A burst of 50 messages would otherwise cause 50 rebuilds, so if a refresh
+        // is already pending, a new one is not added.
         if (!eventRefreshQueued) {
             eventRefreshQueued = true
             refreshHandler.postDelayed(eventRefreshRunnable, EVENT_REFRESH_DEBOUNCE_MS)
         }
     }
-    /** Spinner while the service leaves power save and re-verifies its links
-     *  ("syncing" in `ownConnectionStatus`); refreshes the list when done.
-     *  Polls off the main thread (the JNI call takes the core lock) and stops
-     *  by itself once the core says it is in sync. */
+    /** Spinner while the service leaves power save and re-verifies its links ("syncing" in `ownConnectionStatus`).
+     *  It refreshes the list when done. It polls off the main thread (the JNI call takes the core lock) and stops
+     *  by itself once the core reports it is in sync. */
     private val syncRunnable = object : Runnable {
         override fun run() {
             runOnWorker {
@@ -137,7 +122,7 @@ class ChatsFragment : Fragment() {
         adapter.onContactLongClick = { message -> showChatLongPressMenu(message) }
         recycler.adapter = adapter
 
-        // kişi/grup adına göre arama.
+        // Search by contact or group name.
         view.findViewById<SearchView>(R.id.searchChats).setOnQueryTextListener(object : SearchView.OnQueryTextListener {
             override fun onQueryTextSubmit(query: String?): Boolean = false
             override fun onQueryTextChange(newText: String?): Boolean {
@@ -163,8 +148,7 @@ class ChatsFragment : Fragment() {
         onChatOpenedFromDrawer?.invoke()
     }
 
-    /** See PinnedChatsPrefs — the same key `refreshList` used to compute
-     *  `message.isPinned` for this row. */
+    /** See PinnedChatsPrefs. It is the same key that `refreshList` uses to compute `message.isPinned` for this row. */
     private fun pinKeyFor(message: ChatAdapter.ChatMessage): String =
         if (message.isGroup) "group:${message.contactId}" else message.realContactId
 
@@ -175,20 +159,16 @@ class ChatsFragment : Fragment() {
     }
 
     /**
-     * kullanıcıyla birlikte netleştirilen iki
-     * ayrı seçenek — "sohbet geçmişini temizle" (yumuşak, tek onay, kişi
-     * paired kalır) ve "kişiyi sil" (sert, ÇİFT onay, eşleşme dahil her şey
-     * silinir). SADECE kişiler için — gruplar `realContactId` taşımadığından
-     * (bkz. ChatAdapter) bu menü zaten tetiklenmez. Ayrıca (hem kişi hem
-     * grup satırları için) sohbeti sabitle/kaldır seçeneği — bkz. `togglePin`.
+     * Two separate options, agreed with the user: "clear chat history" (soft, one confirmation, the contact stays
+     * paired) and "delete contact" (hard, TWO confirmations, everything including the pairing is deleted). ONLY for
+     * contacts. Groups have no `realContactId` (see ChatAdapter), so this menu is never shown for them. Both contact
+     * and group rows also get pin / unpin for the chat (see `togglePin`).
      */
     private fun showChatLongPressMenu(message: ChatAdapter.ChatMessage) {
         val pinLabel = getString(if (message.isPinned) R.string.action_unpin_chat else R.string.action_pin_chat)
-        // grup satırlarında DM seçenekleri
-        // (geçmişi temizle/cihaz iptal/kişi sil) anlamsız — kurucuysak
-        // "grubu herkes için sil" gösterilir; DİĞER üyeler için "gruptan
-        // ayrıl" gösterilir (bkz. Rust `leave_group` — kurucu ayrılamaz,
-        // sadece herkes için silebilir).
+        // Group rows do not get the DM options (clear history, revoke device, delete contact), which make no sense
+        // for a group. The founder sees "Delete group for everyone". Other members see "Leave group"
+        // (see Rust `leave_group`: the founder cannot leave, only delete for everyone).
         if (message.isGroup) {
             val destructiveLabel = getString(
                 if (message.isGroupFounder) R.string.action_delete_group else R.string.action_leave_group
@@ -224,9 +204,8 @@ class ChatsFragment : Fragment() {
             .show()
     }
 
-    /** kurucu, grubu TÜM üyeler için siler
-     *  (imzalı `GroupChange::Delete` herkese gider) — geri alınamaz, bu
-     *  yüzden onay isteniyor (bkz. Rust `delete_group`). */
+    /** The founder deletes the group for ALL members (a signed `GroupChange::Delete` goes to everyone). This cannot
+     *  be undone, so it asks for confirmation (see Rust `delete_group`). */
     private fun confirmDeleteGroup(message: ChatAdapter.ChatMessage) {
         AlertDialog.Builder(requireContext())
             .setMessage(R.string.confirm_delete_group)
@@ -246,10 +225,8 @@ class ChatsFragment : Fragment() {
             .show()
     }
 
-    /** kurucu OLMAYAN bir üye gruptan kendi
-     *  isteğiyle ayrılır (bkz. Rust `leave_group`) — geri alınamaz (tekrar
-     *  katılmak için yeniden davet edilmek gerekir), bu yüzden onay
-     *  isteniyor. */
+    /** A member who is NOT the founder leaves the group by their own choice (see Rust `leave_group`). This cannot be
+     *  undone (rejoining needs a new invitation), so it asks for confirmation. */
     private fun confirmLeaveGroup(message: ChatAdapter.ChatMessage) {
         AlertDialog.Builder(requireContext())
             .setMessage(R.string.confirm_leave_group)
@@ -269,11 +246,9 @@ class ChatsFragment : Fragment() {
             .show()
     }
 
-    /** bkz. dosya başı notu — kişiyi/geçmişi SİLMEZ, sadece bu TEK cihazı
-     *  iptal eder (bkz. Rust revoke_contact_device). Tek onay yeterli:
-     *  clear-history'den daha az yıkıcı (geçmiş korunur), delete-contact'tan
-     *  daha az yıkıcı (yeniden eşleşmeye gerek yok, sadece o cihaz
-     *  engellenir). */
+    /** See the file header. It does NOT delete the contact or the history. It revokes only this ONE device
+     *  (see Rust revoke_contact_device). One confirmation is enough: it is less destructive than clearing history
+     *  (history is kept), and less destructive than deleting the contact (no re-pairing needed, only that device is blocked). */
     private fun confirmRevokeDevice(message: ChatAdapter.ChatMessage) {
         if (message.contactId.isEmpty()) return
         AlertDialog.Builder(requireContext())
@@ -315,8 +290,8 @@ class ChatsFragment : Fragment() {
             .show()
     }
 
-    /** İlk onay — bkz. dosya başı notu, bu işlem SERT olduğundan (eşleşme
-     *  dahil her şey silinir) çift onay isteniyor. */
+    /** First confirmation. See the file header: because this action is HARD (the pairing and everything else is
+     *  deleted), a second confirmation is asked. */
     private fun confirmDeleteContactStep1(message: ChatAdapter.ChatMessage) {
         AlertDialog.Builder(requireContext())
             .setMessage(R.string.confirm_delete_contact_step1)
@@ -345,7 +320,7 @@ class ChatsFragment : Fragment() {
             .show()
     }
 
-    /** bkz. eski GroupsFragment.showCreateGroupDialog — buraya taşındı. */
+    /** Same as the former GroupsFragment.showCreateGroupDialog, moved here. */
     private fun showCreateGroupDialog() {
         val input = EditText(requireContext())
         input.hint = getString(R.string.lbl_new_group_name_hint)
@@ -368,12 +343,10 @@ class ChatsFragment : Fragment() {
             .show()
     }
 
-    /** Kişi listesinden çoklu seçimle grup üyesi ekler (bkz. spec 5.4 —
-     *  kurucu davet üretir, her davet edilen mevcut/kurulmakta olan 1:1
-     *  bağlantı üzerinden GroupUpdate alır). */
+    /** Adds group members from the contact list in a multi-select (see section 5.4). The founder creates the
+     *  invitation, and each invited member receives a GroupUpdate over their existing or new 1:1 connection. */
     private fun showAddMembersDialog(groupId: String) {
-        // `listContacts` her kişinin avatarını hex olarak taşır: ana thread'de
-        // çağrılmaz.
+        // `listContacts` carries every contact's avatar as hex, so it is not called on the main thread.
         offMain({
             try { P2PLib.listContacts() } catch (e: Exception) { "[]" }
         }) { contactsJson ->
@@ -413,11 +386,11 @@ class ChatsFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        // Liste ekrana dönüşte ve servisten olay geldiğinde yenilenir
-        // (5 saniyelik tam yeniden kurma yok — bkz. `eventListener`).
+        // The list refreshes on return to the screen and when an event arrives from the service
+        // (no full rebuild every 5 seconds, see `eventListener`).
         refreshList()
         com.p2p.messenger.service.P2PService.addMessageListener(eventListener)
-        // 300 ms: the service flips out of power save on the same resume.
+        // 300 ms: the service leaves power save on the same resume.
         refreshHandler.postDelayed(syncRunnable, 300)
     }
 
@@ -429,9 +402,8 @@ class ChatsFragment : Fragment() {
         refreshHandler.removeCallbacks(syncRunnable)
     }
 
-    /** Görünüm yok edilince avatar baytları da bırakılır: `allChatItems`
-     *  her kişi/grubun TAM avatarını (100-250 KB) tutuyordu ve liste
-     *  başka bir sekmede açıkken de bellekte kalıyordu. */
+    /** When the view is destroyed, the avatar bytes are released too. `allChatItems` held the FULL avatar of every
+     *  contact and group (100-250 KB each), and it stayed in memory while the list was open in another tab. */
     override fun onDestroyView() {
         super.onDestroyView()
         refreshHandler.removeCallbacksAndMessages(null)
@@ -441,28 +413,26 @@ class ChatsFragment : Fragment() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // The worker is a live non-daemon thread: shut it down with the
-        // fragment.
+        // The worker is a live non-daemon thread, so it is shut down with the fragment.
         worker.shutdownNow()
     }
 
-    /** JNI calls that take the core lock, off the main thread; [done] runs on
-     *  the main thread while the fragment is still attached. */
+    /** JNI calls that take the core lock run off the main thread. [done] runs on the main thread while the
+     *  fragment is still attached. */
     private val worker = java.util.concurrent.Executors.newSingleThreadExecutor()
 
-    /** Runs [work] on the worker thread; the executor is gone after
-     *  `onDestroy` (a late callback must not crash the app). */
+    /** Runs [work] on the worker thread. The executor is shut down in `onDestroy`, so a late callback cannot crash the app. */
     private fun runOnWorker(work: () -> Unit) {
         try {
             worker.execute(work)
         } catch (e: java.util.concurrent.RejectedExecutionException) {
-            // Fragment yok — sonuç zaten gösterecek bir ekran da yok.
+        // The fragment is gone, so there is no screen left to show the result on.
         }
     }
 
     private fun <T> offMain(work: () -> T, done: (T) -> Unit) {
         runOnWorker {
-            // A detached fragment throws from getString: drop the result.
+            // A detached fragment throws from getString, so the result is dropped.
             val result = try { work() } catch (e: Exception) {
                 android.util.Log.w("ChatsFragment", "background call failed", e)
                 return@runOnWorker
@@ -472,16 +442,14 @@ class ChatsFragment : Fragment() {
     }
 
     @Volatile private var refreshing = false
-    /** A refresh was asked for while one was running (after a delete, a
-     *  pin...): run once more, the running one may have read the old state. */
+    /** A refresh requested while one is running (after a delete, a pin, and so on) runs once more, because the running
+     *  one may have read the old state. */
     @Volatile private var refreshAgain = false
 
-    /** Rebuilds the whole list: one history query and the whole attachment
-     *  list per chat, under the core lock. On the main thread that was
-     *  stutter, and an ANR behind a long poll turn.
-     *  Runs when the screen comes back and when the service reports an event
-     *  — NOT every 5 s (that was the cost this list had in every open chat
-     *  and in every chat screen's drawer). */
+    /** Rebuilds the whole list. It runs one history query and reads the whole attachment list per chat, under the core
+     *  lock. On the main thread that caused stutter and an ANR behind a long poll turn. It runs when the screen comes
+     *  back and when the service reports an event, NOT every 5 seconds (the cost this list had in every open chat and in
+     *  every chat screen's drawer). */
     private fun refreshList() {
         if (refreshing) { refreshAgain = true; return }
         val ctx = context?.applicationContext ?: return
@@ -507,10 +475,8 @@ class ChatsFragment : Fragment() {
         val duplicateNames = com.p2p.messenger.util.ContactNames.duplicates(contacts.map { it.displayName })
         val contactItems = contacts.map { contact ->
             val fingerprint = contact.activeDeviceFingerprint ?: ""
-            // son satır SADECE metin mesajı
-            // değil, EK de olabilir — ikisinden hangisi daha yeniyse o
-            // gösterilir (ekler `messages` tablosunda değil `files`
-            // tablosunda tutulduğu için ayrı sorgulanır).
+            // The last row is a TEXT message or an ATTACHMENT. Whichever is newer is shown. Attachments are stored in the
+            // `files` table, not in `messages`, so they are queried separately.
             val lastMessage = if (fingerprint.isNotEmpty()) previewOf(previews?.optJSONObject("contacts")?.optJSONObject(contact.identityId)) else null
             ChatAdapter.ChatMessage(
                 contactId = fingerprint,
@@ -519,20 +485,16 @@ class ChatsFragment : Fragment() {
                 timestamp = lastMessage?.timestamp ?: 0L,
                 hasUnread = lastMessage != null &&
                     lastMessage.timestamp > ReadStatePrefs.lastReadAtForContact(ctx, contact.contactId, fingerprint),
-                // Keyed on the STABLE contact id (not the device fingerprint,
-                // which can change if the contact re-pairs a device) so a
-                // pin survives that.
+                // Keyed on the STABLE contact id (not the device fingerprint, which changes if the contact re-pairs a
+                // device), so a pin survives that.
                 isPinned = PinnedChatsPrefs.isPinned(ctx, contact.contactId),
                 realContactId = contact.contactId,
                 avatarJpeg = contact.avatarHex?.let { hexToBytes(it) }
             )
         }
         val groupItems = groups.map { group ->
-            // gruplar için de gerçek son mesaj/ek
-            // önizlemesi (1:1 kişilerle AYNI mantık) — hem sohbet listesinin
-            // "en güncel mesaj atılan en üstte" sıralanabilmesi için gerçek
-            // bir zaman damgası gerektiğinden, hem de sabit "N üye" metninin
-            // hiçbir zaman değişmeyen, bilgi vermeyen bir önizleme olmasından.
+            // Groups get the same real last message and attachment preview as 1:1 contacts. The list needs a real
+            // timestamp to sort by newest message. A fixed "N members" text never changes and carries no information.
             val lastMessage = previewOf(previews?.optJSONObject("groups")?.optJSONObject(group.groupId))
             ChatAdapter.ChatMessage(
                 contactId = group.groupId,
@@ -548,20 +510,16 @@ class ChatsFragment : Fragment() {
                 isGroupFounder = group.isFounder
             )
         }
-        // sohbet listesi en güncel mesaj
-        // atılan/alınan en üstte olacak şekilde sıralanır (hem kişiler hem
-        // gruplar, tek bir zaman çizelgesinde). Hiç mesajı olmayan bir
-        // sohbet (timestamp=0) listenin EN ALTINDA kalır — azalan sıralamada
-        // doğal olarak en son sıraya düşer. Pinlenmiş sohbetler (birden
-        // çok olabilir) bu sıralamanın ÜZERİNDE, kendi aralarında yine en
-        // güncel mesaja göre en üstte durur.
+        // The chat list is ordered by the newest message sent or received, for contacts and groups together on one
+        // timeline. A chat with no messages (timestamp = 0) sinks to the BOTTOM, as the descending sort does
+        // naturally. Pinned chats (there can be several) stay ABOVE this order, and among themselves are ordered by
+        // newest message too.
         return (contactItems + groupItems)
             .sortedWith(compareByDescending<ChatAdapter.ChatMessage> { it.isPinned }.thenByDescending { it.timestamp })
     }
 
-    /** bkz. `allChatItems`/`searchQuery` dosya başı notu — kişi/grup adına
-     *  (uyarı işareti/baş harf rozeti gibi süslemeler hariç, ham
-     *  `displayName` üzerinden) büyük/küçük harf duyarsız arama. */
+    /** See the `allChatItems` / `searchQuery` notes at the top of the file. Case-insensitive search on the contact or
+     *  group name (the raw `displayName`, not decorations such as the warning mark or the initial badge). */
     private fun applyFilter() {
         val query = searchQuery.trim()
         val filtered = if (query.isEmpty()) {
@@ -582,8 +540,8 @@ class ChatsFragment : Fragment() {
     private data class GroupRow(val groupId: String, val name: String, val memberCount: Int, val avatarHex: String?, val isFounder: Boolean)
     private data class LastMessagePreview(val text: String, val timestamp: Long)
 
-    /** the newer of the last text row and the last attachment (one
-     *  `chatListPreviews` call for the whole list instead of two per chat). */
+    /** The newer of the last text row and the last attachment. One `chatListPreviews` call covers the whole list,
+     *  instead of two per chat. */
     private fun previewOf(entry: JSONObject?): LastMessagePreview? {
         if (entry == null) return null
         val m = entry.optJSONObject("message")
@@ -606,7 +564,7 @@ class ChatsFragment : Fragment() {
         }
     }
 
-    /** Ek türüne göre kısa etiket — bilinmeyen türlerde dosya adı. */
+    /** Short label by attachment type. For unknown types, the file name. */
     private fun attachmentPreviewLabel(mimeType: String, fileName: String, sticker: Boolean): String = when {
         sticker -> getString(R.string.lbl_last_sticker)
         mimeType.startsWith("image/") -> getString(R.string.lbl_last_photo)
@@ -633,8 +591,8 @@ class ChatsFragment : Fragment() {
                 else obj.optString("active_device_fingerprint")
             ContactRow(
                 contactId = obj.optString("contact_id"),
-                // The fallback is the same in both tabs (it used to be
-                // "Bilinmeyen" here and "Unknown" in the contacts tab).
+                // The fallback is the same in both tabs (it used to be a different text here, and "Unknown" in the
+                // contacts tab).
                 displayName = obj.optString("display_name", ctx.getString(R.string.lbl_unknown)),
                 identityId = obj.optString("identity_id"),
                 activeDeviceFingerprint = fingerprint,
@@ -662,8 +620,7 @@ class ChatsFragment : Fragment() {
                 name = obj.optString("name"),
                 memberCount = members?.length() ?: 0,
                 avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null },
-                // "grubu herkes için sil"
-                // seçeneği yalnızca kurucuya gösterilir.
+                // "Delete group for everyone" is shown only to the founder.
                 isFounder = obj.optBoolean("is_founder", false)
             )
         }
