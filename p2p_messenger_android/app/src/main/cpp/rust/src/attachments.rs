@@ -1,32 +1,21 @@
-//! Dosya/foto/video/ses eki taşıma katmanı — spec dışı, kullanıcı
-//! tarafından istenen bir ek özellik (spec bölüm 6 "dosya transferi v0.1/
-//! v0.2 kapsamı DIŞINDA" notunu genişletir; azami 4GB).
+//! File, photo, video and voice attachment transfer layer. Attachments were a later feature: the original file-transfer scope excluded
+//! them, and this module extends it. Maximum size 4 GB.
 //!
-//! Model: meta veri (dosya adı, boyutu, MIME, taze rastgele bir AEAD
-//! anahtarı) normal ratchet-şifreli mesaj kanalıyla taşınır (bkz. file_transfer.rs
-//! `MessageContent::FileOffer`) — bu, taze anahtarın da uçtan uca
-//! korunmasını sağlar, ayrı bir anahtar değişimi icat edilmez. Gerçek bayt
-//! içeriği BURADAKİ ayrı bir libp2p `request_response` protokolü ile,
-//! sabit boyutlu (256 KiB) parçalar (chunk) hâlinde istenir/gönderilir —
-//! 4GB'a kadar bir dosyayı TEK bir gossipsub mesajıyla taşımak pratik
-//! değil (gossipsub küçük/sık mesajlar için tasarlanmış, bütün dosyanın
-//! belleğe sığması gerekirdi).
+//! Model: the metadata (file name, size, MIME type, a fresh random AEAD key) travels over the normal ratchet-encrypted message channel
+//! (see the `MessageContent::FileOffer` in file_transfer.rs). The fresh key is therefore protected end to end, and no separate key exchange
+//! is needed. The actual bytes are requested and sent in fixed-size chunks (256 KiB) over a separate libp2p `request_response` protocol.
+//! A 4 GB file cannot practically travel as ONE gossipsub message: gossipsub is designed for small, frequent messages, and the whole file
+//! would have to fit in memory.
 //!
-//! Her parça, dosyaya özel `file_key` ile AYRI AYRI şifrelenir (parça
-//! indeksinden türetilen bir nonce'la, bkz. `nonce_from_chunk_index` —
-//! `ratchet.rs`'teki `nonce_from_message_number` ile aynı desen). Double
-//! Ratchet'in HER parçada bir adım atması hem gereksiz maliyetli olurdu
-//! (binlerce PQ-KEM adımı) hem de tasarım amacına aykırı (mesaj bazlı
-//! ileri gizlilik için; burada tek bir "mesaj" zaten binlerce parçaya
-//! bölünüyor). Bütünlük iki katmanda sağlanır: her parçanın kendi AEAD
-//! etiketi (parça seviyesinde, alınır alınmaz doğrulanır) ve dosya
-//! tamamen çözülüp görüntülenmek istendiğinde tüm-dosya SHA-256
-//! karşılaştırması (bkz. `decrypt_file_from_disk_with`).
+//! Each chunk is encrypted SEPARATELY with the file's `file_key`, using a nonce derived from the chunk index
+//! (see `nonce_from_chunk_index`, the same pattern as `nonce_from_message_number` in ratchet.rs). Stepping the Double Ratchet on every chunk
+//! would be needlessly expensive (thousands of PQ-KEM steps), and it does not fit the design either: the ratchet gives per-message forward
+//! secrecy, and here one "message" is already split into thousands of chunks. Integrity works at two levels: each chunk has its own AEAD tag,
+//! verified as soon as the chunk arrives, and when the file is fully decrypted for display, the whole file is compared against its SHA-256
+//! (see `decrypt_file_from_disk_with`).
 //!
-//! Diskte saklanan `.enc` dosyası, parçaların OLDUĞU GİBİ (şifreli, ağdan
-//! geldiği/gideceği biçimde) art arda eklenmesinden oluşur — bu, bir
-//! cihazın indirdiği bir dosyayı BAŞKA bir isteyene tekrar şifrelemeden
-//! servis edebilmesini sağlar (bkz. `read_chunk_from_disk_with`).
+//! The `.enc` file on disk is simply the chunks appended in order, exactly as they were sent or received (encrypted). A device can therefore
+//! re-serve a downloaded file to another requester without encrypting it again (see `read_chunk_from_disk_with`).
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
@@ -36,9 +25,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-/// Düz metin parça boyutu — şifrelendiğinde +16 bayt (ChaCha20-Poly1305
-/// AEAD etiketi) eklenir, diskte/ağda bir parça `FILE_CHUNK_SIZE + 16`
-/// bayttır (son parça hariç, o daha kısa olabilir).
+/// Plaintext chunk size. Encryption adds 16 bytes (the ChaCha20-Poly1305 AEAD tag), so a chunk on disk or on the wire is
+/// `FILE_CHUNK_SIZE + 16` bytes (except the last chunk, which may be shorter).
 pub const FILE_CHUNK_SIZE: usize = 256 * 1024;
 
 /// What a peer's `FileOffer.chunk_size` may be. It sizes buffers and file
@@ -48,36 +36,29 @@ pub fn chunk_size_ok(chunk_size: usize) -> bool {
     (64 * 1024..=crate::server_proto::MAX_BLOB_CHUNK_BYTES - 16).contains(&chunk_size)
 }
 
-/// YENI dosyalar icin parca boyutu.
+/// Chunk size for NEW files.
 ///
-/// SU AN 256 KiB — miras boyutla ayni. Yer tutucu degil, OLCULMUS bir karar.
+/// Currently 256 KiB, the same as the legacy size. This is a MEASURED decision, not a placeholder.
 ///
-/// Teori makuldu: her parca bir `request_response` gidis-donusu, parcayi
-/// ikiye katlamak gidis-donus sayisini yariya indirir. Ayni duzenekte,
-/// donusumlu, ayni dosyalarla olculdu:
-///   256 KiB -> medyan 199 KB/s (n=4, 121-291), zaman asimi YOK
-///   512 KiB -> medyan 157 KB/s (n=3, 134-195), dort turun BIRI hic bitmedi
-/// Sebep: gidis-donus de parcayla birlikte iki katina cikiyor (kazanc yok),
-/// ustune bir zaman asiminda KOCA parca bastan gidiyor — yani basarisizligin
-/// maliyeti iki kati ve tamamlanamama riski gercek.
+/// The theory was reasonable: each chunk costs one `request_response` round trip, so doubling the chunk size halves the number of round trips.
+/// Measured with the same setup and the same files, after the fix below:
+///   256 KiB -> median 199 KB/s (n=4, 121-291), no timeouts
+///   512 KiB -> median 157 KB/s (n=3, 134-195), one of the four runs never finished
+/// The reason: the round trip also doubles with the chunk (no gain), and on a timeout the WHOLE chunk is sent again. So a failure costs
+/// twice as much, and the risk of never completing is real.
 ///
-/// NOT: bu karar bir kez YANLIS veriyle verilmisti. O olcumde sunucu, parca
-/// konumunu kendi sabitinden hesapliyordu (`chunk_index * (256 KiB + 16)`),
-/// yani 512 KiB'lik her parca yanlis yere yaziliyor, dosya bozuluyor ve
-/// blob sonsuza dek reddediliyordu; olculen sey parca boyutu degil bozuk
-/// birlestirmeydi. Once o hata duzeltildi (adim artik `BlobPut.chunk_size`
-/// ile telde tasiniyor), sonra olcum tekrarlandi. Yukaridaki rakamlar
-/// duzeltme SONRASI.
+/// Note: this decision was first made with WRONG data. In that measurement the server computed the chunk position from its own constant
+/// (`chunk_index * (256 KiB + 16)`), so every 512 KiB chunk was written to the wrong place. The file was corrupted, and the blob was rejected
+/// forever. What was measured was a broken merge, not the chunk size. That bug was fixed first (the step now travels on the wire as
+/// `BlobPut.chunk_size`), and then the measurement was repeated. The numbers above are AFTER the fix.
 ///
-/// Mekanizma (parca boyutunun DOSYA BASINA olmasi, teklifle tasinmasi,
-/// `files.chunk_size` kolonu, `BlobPut.chunk_size`) KASITLI olarak duruyor:
-/// dogru, geriye donuk uyumlu, ve boyutu yeniden denemek artik tek sabit
-/// degistirmek. Tavan: `server_proto::MAX_BLOB_CHUNK_BYTES`.
+/// The mechanism (chunk size per file, carried in the offer, the `files.chunk_size` column, `BlobPut.chunk_size`) is kept on purpose:
+/// it is correct, backward compatible, and retrying a different size now means changing a single constant. The ceiling is
+/// `server_proto::MAX_BLOB_CHUNK_BYTES`.
 pub const FILE_CHUNK_SIZE_V2: usize = 256 * 1024;
 
-/// Derleme zamanı güvencesi: istemcinin seçtiği parça boyutu, sunucunun
-/// kabul ettiği tavanı ASLA aşamaz. Bu ikisi bir kez ayrıştı ve sonuç,
-/// aktarımın `TooLarge` ile sessizce hiç ilerlememesiydi.
+/// Compile-time guarantee: the chunk size the client picks can NEVER exceed the ceiling the server accepts. Once these two drifted apart,
+/// transfers silently stalled with `TooLarge`.
 const _: () = assert!(FILE_CHUNK_SIZE_V2 + 16 <= crate::server_proto::MAX_BLOB_CHUNK_BYTES);
 
 
@@ -89,28 +70,21 @@ pub struct FileChunkRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FileChunkResponse {
-    /// Şifreli parça (ciphertext + 16 baytlık AEAD etiketi) — sunan taraf
-    /// bunu kendi diskindeki `.enc` dosyasından OLDUĞU GİBİ okuyup
-    /// gönderir (bkz. modül başı notu).
+    /// Encrypted chunk (ciphertext + 16-byte AEAD tag). The serving side reads it as-is from its own `.enc` file and sends it
+    /// (see the module-level note).
     Chunk { #[serde(with = "serde_bytes")] data: Vec<u8> },
-    /// `file_id` bilinmiyor (hiç sunulmuyor/tamamlanmamış) veya
-    /// `chunk_index` aralık dışı.
+    /// `file_id` is unknown (never offered, or not complete), or `chunk_index` is out of range.
     NotFound,
     /// Rate limited: retry later from the same source.
     Busy,
 }
 
-/// `total_size` baytlık bir dosyanın kaç `FILE_CHUNK_SIZE`'lık parçaya
-/// böleceğini hesaplar (0 baytlık dosya için 0 döner — özel durum
-/// gerektirmez, çağıran tarafın "0 parça = hemen tamamlandı" mantığı
-/// doğal olarak çalışır).
+/// Computes how many `FILE_CHUNK_SIZE` chunks a file of `total_size` bytes splits into. A 0-byte file gives 0. No special case is needed:
+/// the caller's "0 chunks means done immediately" logic works naturally.
 pub fn total_chunks_with(total_size: u64, chunk_size: usize) -> u32 {
-    // `saturating_add`: `total_size` çağıranlar tarafından zaten
-    // `MAX_ATTACHMENT_SIZE`'a karşı doğrulanmalı (bkz. file_transfer.rs
-    // `receive_file_offer`/api.rs `prepare_and_send_file`), ama bu fonksiyon
-    // kendi başına da (savunma katmanı) `total_size` neredeyse `u64::MAX`
-    // olsa bile taşmasın diye doygun toplama kullanıyor — çıplak `+`
-    // release'de sessizce sarardı.
+    // `saturating_add`: callers must already validate `total_size` against `MAX_ATTACHMENT_SIZE` (see `receive_file_offer` in
+    // file_transfer.rs and `prepare_and_send_file` in api.rs). This function also uses saturating addition as a defensive layer, so that a
+    // `total_size` close to `u64::MAX` cannot overflow. A plain `+` would silently wrap in release builds.
     let cs = chunk_or_default(chunk_size) as u64;
     ((total_size.saturating_add(cs - 1)) / cs) as u32
 }
@@ -285,7 +259,7 @@ fn jpeg_metadata_ranges(file: &mut File) -> Option<(Vec<(u64, u64)>, Option<u8>)
 /// The offset just past the end-of-image marker, scanning from the start-of-
 /// scan segment at `sos`: entropy-coded data, and between progressive scans
 /// further marker segments with a length. APPn and COM segments met between
-/// scans go into `ranges` too (E-05, ).
+/// scans go into `ranges` too.
 fn jpeg_image_end(file: &mut File, sos: u64, ranges: &mut Vec<(u64, u64)>) -> Option<u64> {
     let mut reader = std::io::BufReader::with_capacity(1 << 16, &mut *file);
     reader.seek(SeekFrom::Start(sos + 1)).ok()?;
@@ -577,12 +551,9 @@ impl Read for SkipRanges {
     }
 }
 
-/// `source_path`'i (kullanıcının seçtiği dosya — Kotlin tarafından zaten
-/// yerel bir yola kopyalanmış olmalı, content:// URI burada işlenmez)
-/// `FILE_CHUNK_SIZE`'lık parçalar hâlinde OKUYUP her parçayı ayrı ayrı
-/// şifreleyerek `dest_enc_path`'e yazar — dosyanın TAMAMI hiçbir anda
-/// bellekte olmaz (4GB'a kadar bir dosya için bu şart). Dönüş: (toplam
-/// bayt, plaintext SHA-256 hex).
+/// Reads `source_path` (the file the user picked; Kotlin has already copied it to a local path, content:// URIs are not handled here) in
+/// `FILE_CHUNK_SIZE` chunks, encrypts each chunk separately, and writes them to `dest_enc_path`. The WHOLE file is never in memory at once
+/// (required for files up to 4 GB). Returns (total bytes, SHA-256 hex of the plaintext).
 pub fn encrypt_file_to_disk_with(
     source_path: &Path,
     dest_enc_path: &Path,
@@ -652,13 +623,10 @@ pub fn encrypt_file_to_disk_with(
     Ok((total, hex::encode(hasher.finalize())))
 }
 
-/// `src_enc_path`'teki (parça parça şifreli) dosyayı çözüp
-/// `dest_plain_path`'e yazar — yine bounded-memory, bir seferde bir parça.
-/// Sonunda hesaplanan SHA-256, `expected_sha256_hex` ile eşleşmezse hata
-/// döner — bu, `FileOffer`'daki iddia edilen hash ile fiili içerik
-/// arasındaki TEK tam-dosya seviyeli bütünlük kontrolüdür (parça
-/// seviyesindeki AEAD etiketi zaten her parçayı ayrı ayrı doğrular, ama
-/// örn. sondan eksik parça gibi bir kesilme burada yakalanır).
+/// Decrypts the file at `src_enc_path` (chunk by chunk) and writes the plaintext to `dest_plain_path`. Again bounded memory, one chunk at a time.
+/// The SHA-256 computed at the end is compared with `expected_sha256_hex`. A mismatch returns an error. This is the ONLY whole-file integrity
+/// check between the hash claimed in the `FileOffer` and the actual content. Per-chunk AEAD tags already verify each chunk separately, but a
+/// truncation such as a missing final chunk is caught here.
 pub fn decrypt_file_from_disk_with(
     src_enc_path: &Path,
     dest_plain_path: &Path,
@@ -696,10 +664,8 @@ pub fn decrypt_file_from_disk_with(
     Ok(())
 }
 
-/// Sunan tarafın (bu cihaz bir dosyayı gönderdi VEYA tamamen indirip
-/// re-serve ediyor) tek bir parçayı `.enc` dosyasından OLDUĞU GİBİ
-/// (şifreli) okuması — tekrar şifrelemeye gerek yok, disk formatı zaten
-/// ağ formatıyla aynı (bkz. modül başı notu).
+/// The serving side (this device sent a file, or downloaded it completely and is re-serving it) reads one chunk from its `.enc` file AS-IS
+/// (still encrypted). No re-encryption is needed: the disk format is already the same as the wire format (see the module-level note).
 pub fn read_chunk_from_disk_with(enc_path: &Path, chunk_index: u32, chunk_size: usize) -> Result<Option<Vec<u8>>, String> {
     let chunk_size = chunk_or_default(chunk_size);
     let mut f = match File::open(enc_path) {
@@ -719,28 +685,22 @@ pub fn read_chunk_from_disk_with(enc_path: &Path, chunk_index: u32, chunk_size: 
     Ok(Some(buf))
 }
 
-/// One chunk of a `.enc` file, decrypted (bkz. file_transfer.rs `handle_chunk_response`:
-/// the whole-file hash of a download).
+/// One chunk of a `.enc` file, decrypted (see `handle_chunk_response` in file_transfer.rs: the whole-file hash check of a download).
 pub fn read_plain_chunk_with(enc_path: &Path, chunk_index: u32, file_key: &[u8; 32], chunk_size: usize) -> Result<Vec<u8>, String> {
     let data = read_chunk_from_disk_with(enc_path, chunk_index, chunk_size)?.ok_or("Chunk missing")?;
     let cipher = ChaCha20Poly1305::new_from_slice(file_key).map_err(|_| "Invalid file key")?;
     cipher.decrypt(&nonce_from_chunk_index(chunk_index), data.as_slice()).map_err(|_| format!("Chunk {} decryption failed", chunk_index))
 }
 
-/// `write_verified_chunk_at_with`'in başarısızlık türü — çağıranın (bkz. file_transfer.rs
-/// `handle_chunk_response`) kurtarma stratejisini seçebilmesi için KRİTİK
-/// ayrım  : AEAD hatası mı yoksa disk yazma
-/// hatası mı?
+/// The failure kinds of `write_verified_chunk_at_with`. The caller (see `handle_chunk_response` in file_transfer.rs) needs this distinction to
+/// choose its recovery strategy: an AEAD failure, or a disk write failure?
 #[derive(Debug)]
 pub enum ChunkAppendError {
-    /// AEAD kimlik doğrulaması BAŞARISIZ — parça bozuk/sahte, AMA çözme
-    /// diske yazmadan ÖNCE yapıldığından `.enc` dosyasına HİÇBİR ŞEY
-    /// yazılmadı. Çağıran, AYNI `chunk_index`'i güvenle BAŞKA bir kaynaktan
-    /// yeniden isteyebilir (indirmeyi baştan başlatmaya gerek yok). Bu, tek
-    /// bir bozuk/kötü niyetli kaynağın tüm indirmeyi öldürmesini önler.
+    /// AEAD authentication FAILED: the chunk is corrupt or forged. Decryption runs BEFORE anything is written to disk, so NOTHING was written
+    /// to the `.enc` file. The caller can safely request the SAME `chunk_index` from ANOTHER source (no need to restart the download). This stops
+    /// a single corrupt or malicious source from killing the whole download.
     Auth(String),
-    /// Dosya sistemi yazma hatası — `.enc` KISMEN yazılmış olabilir ve artık
-    /// tutarlı olduğu GARANTİ EDİLEMEZ; indirme baştan başlatılmalıdır.
+    /// File system write error: the `.enc` file may be PARTIALLY written and cannot be guaranteed consistent any more. The download must restart.
     Io(String),
 }
 
@@ -752,25 +712,21 @@ impl std::fmt::Display for ChunkAppendError {
     }
 }
 
-/// Bir gelen parçayı doğrular (AEAD etiketi) ve sona EKLEMEK
-/// yerine kendi KONUMUNA yazar: `chunk_index * (FILE_CHUNK_SIZE + 16)`.
+/// Verifies an incoming chunk (AEAD tag) and writes it at its OWN position, instead of appending it:
+/// `chunk_index * (FILE_CHUNK_SIZE + 16)`.
 ///
-/// Neden gerekli: sona ekleme, parçaların KESİN OLARAK sırayla gelmesini
-/// şart koşuyordu — yani aynı anda tek bir parça havada olabiliyordu ve
-/// aktarım hızı `parça_boyutu / gidiş-dönüş süresi` ile sınırlı kalıyordu
-/// (bant genişliğinden bağımsız olarak). Boru hattı (aynı anda birden çok
-/// parça) ancak konum tabanlı yazmayla mümkün.
+/// Why this is needed: appending required chunks to arrive in STRICT order. Only one chunk could be in flight at a time, so the transfer rate
+/// was limited to `chunk_size / round_trip_time`, regardless of bandwidth. Pipelining (several chunks in flight at once) is only possible
+/// with position-based writes.
 ///
-/// Bu güvenli, çünkü `.enc` formatı SABİT ADIMLI: `read_chunk_from_disk_with`
-/// zaten tam bu aritmetikle okuyor. Son parça daha kısa olabilir ama en
-/// yüksek indeks olduğundan dosyanın sonunda kalır.
+/// This is safe because the `.enc` format has a FIXED STEP: `read_chunk_from_disk_with` already reads with exactly this arithmetic. The last
+/// chunk may be shorter, but it has the highest index, so it stays at the end of the file.
 ///
-/// KRİTİK ÖZELLİK KORUNUYOR: AEAD doğrulaması yazmadan ÖNCE yapılır, yani
-/// `Auth` hatasında diske HİÇBİR ŞEY yazılmaz — çağıran aynı parçayı başka
-/// bir kaynaktan güvenle yeniden isteyebilir (bkz. `ChunkAppendError`).
+/// CRITICAL PROPERTY, KEPT: the AEAD check runs BEFORE the write. On an `Auth` error nothing is written to disk, so the caller can safely
+/// request the same chunk from another source (see `ChunkAppendError`).
 pub fn write_verified_chunk_at_with(dest_enc_path: &Path, chunk_index: u32, ciphertext: &[u8], file_key: &[u8; 32], chunk_size: usize) -> Result<usize, ChunkAppendError> {
     let chunk_size = chunk_or_default(chunk_size);
-    // A longer chunk would be written over the next chunk's slot.
+    // A longer chunk would overwrite the slot of the next chunk.
     if ciphertext.len() > chunk_size + 16 {
         return Err(ChunkAppendError::Auth(format!("Chunk {} is longer than the file's chunk size", chunk_index)));
     }
@@ -785,8 +741,7 @@ pub fn write_verified_chunk_at_with(dest_enc_path: &Path, chunk_index: u32, ciph
     let offset = chunk_index as u64 * (chunk_size as u64 + 16);
     f.seek(SeekFrom::Start(offset)).map_err(|e| ChunkAppendError::Io(e.to_string()))?;
     f.write_all(ciphertext).map_err(|e| ChunkAppendError::Io(e.to_string()))?;
-    // The caller records the chunk as received: it must be on disk first,
-    // or a power loss leaves a hole in a download marked done.
+    // The caller records the chunk as received only after it is on disk. Otherwise a power loss would leave a hole in a download marked done.
     f.sync_data().map_err(|e| ChunkAppendError::Io(e.to_string()))?;
     Ok(plaintext_len)
 }
