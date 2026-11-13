@@ -913,6 +913,22 @@ pub fn delete_account() -> i64 {
     }
 }
 
+/// Desktop Quit: tells connected peers this device is going offline, so they
+/// stop dialing it until it connects again. Blocks briefly while the poll
+/// thread sends the requests; call it before the process exits.
+pub fn announce_offline() {
+    let sent = catch_panic(|| {
+        let _guard = RUNTIME.enter();
+        core_lock().announce_offline()
+    })
+    .unwrap_or(0);
+    if sent > 0 {
+        // ponytail: fixed wait, not per-response tracking; over Tor one
+        // keepalive round trip on a live circuit is well under this.
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+    }
+}
+
 /// Drops the swarm, the Tor handle and the database connection, so the data
 /// directory can be erased under a quiet core. The core stays unusable until
 /// the process exits.

@@ -121,6 +121,8 @@ impl P2PCore {
         // ve ucuz olduğundan (zaten abone bir topic'e tekrar `subscribe`
         // çağırmak no-op) HER bağlantıda bir güvenlik ağı olarak tekrarlanır.
         let mut connections_established: Vec<PeerId> = Vec::new();
+        // Peers that sent a keepalive with `bye` (shutting down): parked below.
+        let mut bye_peers: Vec<PeerId> = Vec::new();
         // bkz. `keepalive_state` alanı dokümantasyonu — aşağıdaki Keepalive
         // kolunun `self.swarm` borrow'u bitene kadar `self`'in TAMAMINA
         // erişemediği için (dosyadaki aynı desenin diğer örnekleri,
@@ -182,7 +184,7 @@ impl P2PCore {
                     .filter(|peer| !server_peers.contains(peer))
                     .collect();
                 for peer in due {
-                    let request_id = swarm.behaviour_mut().keepalive.send_request(&peer, KeepAliveRequest);
+                    let request_id = swarm.behaviour_mut().keepalive.send_request(&peer, KeepAliveRequest::default());
                     if let Some(state) = keepalive_state.get_mut(&peer) {
                         state.outstanding = Some(request_id);
                     }
@@ -516,7 +518,10 @@ impl P2PCore {
                         // bağlantıyı KAPATMIYORUZ.
                         libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Keepalive(rr_event)) => {
                             match rr_event {
-                                request_response::Event::Message { peer, message: request_response::Message::Request { channel, .. }, .. } => {
+                                request_response::Event::Message { peer, message: request_response::Message::Request { request, channel, .. }, .. } => {
+                                    if request.bye {
+                                        bye_peers.push(peer);
+                                    }
                                     let capable = keepalive_state.get(&peer).is_some_and(|s| s.quiet_capable);
                                     let quiet_ms = (saver && capable).then_some(window_ms);
                                     if swarm.behaviour_mut().keepalive.send_response(channel, KeepAliveResponse { quiet_ms }).is_err() {
@@ -626,6 +631,20 @@ impl P2PCore {
         // bkz. `keepalive_state` alanı dokümantasyonu — döngü boyunca
         // üzerinde çalışılan yerel kopya geri konuyor.
         self.keepalive_state = keepalive_state;
+        // The peer said it is going offline: no dials to it until it connects
+        // again (cleared in the `connections_established` block below). The
+        // source PeerId is noise-authenticated, so a device parks only itself.
+        for peer in bye_peers {
+            let fps: Vec<String> = self.device_to_peer_id.iter()
+                .filter(|(_, p)| **p == peer)
+                .map(|(fp, _)| fp.clone())
+                .collect();
+            for fp in fps {
+                info!("Device {} is going offline: not dialed until it connects", crate::log_id(&peer));
+                self.meta_put(&format!("parked:{}", fp), "1");
+                self.reconnect_backoff.remove(&fp);
+            }
+        }
         // Second+ outbound connections that are not bulk-transfer dials: reconnect
         // races (onion + LAN + relay at once) or a suspect's parallel dial.
         let mut surplus_dials: std::collections::HashSet<libp2p::swarm::ConnectionId> = std::collections::HashSet::new();
@@ -923,6 +942,10 @@ impl P2PCore {
                 .filter(|(_, pid)| connections_established.contains(pid))
                 .map(|(fp, _)| fp.clone())
                 .collect();
+            // A parked device that connects is online again.
+            for fp in &fps {
+                self.meta_del(&format!("parked:{}", fp));
+            }
             // ÖNCE aboneliği tazele, SONRA kuyruğu boşalt. Sıra önemli: bu
             // döngü, Tor devresi kopmalarının sessizce bozduğu gossipsub
             // aboneliğini onarır — bekleyenleri bundan ÖNCE tetiklersek ilk

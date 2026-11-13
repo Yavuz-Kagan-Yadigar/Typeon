@@ -255,6 +255,19 @@ fn activate(application: &adw::Application) {
         }
     }
 
+    // Peers stop dialing this device until it connects again (phones kept
+    // building Tor circuits to a closed desktop).
+    application.connect_shutdown(|_| core::announce_offline());
+    // Session logout sends SIGTERM: quit cleanly, so the goodbye goes out.
+    #[cfg(unix)]
+    {
+        let application = application.clone();
+        glib::unix_signal_add_local(15 /* SIGTERM */, move || {
+            application.quit();
+            glib::ControlFlow::Break
+        });
+    }
+
     ui::settings::apply_theme(&app);
     #[cfg(windows)]
     let hidden = START_HIDDEN.swap(false, std::sync::atomic::Ordering::Relaxed);

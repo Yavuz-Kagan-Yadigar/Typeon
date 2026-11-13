@@ -1026,6 +1026,24 @@ mod recovery_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A device that said it is going offline (keepalive `bye`) is never
+    /// dialed, even forced, until the park mark is cleared by its connection.
+    #[test]
+    fn parked_device_is_not_dialed() {
+        let dir = std::env::temp_dir().join(format!("typeon-parked-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut core = core_on_disk(&dir);
+        let fp = "ab".repeat(32);
+        let pid = libp2p::PeerId::random();
+        core.device_last_addr.insert(fp.clone(), format!("/ip4/127.0.0.1/tcp/1/p2p/{pid}"));
+        core.meta_put(&format!("parked:{fp}"), "1");
+        assert!(!core.try_reconnect_device(&fp, false));
+        assert!(!core.try_reconnect_device(&fp, true));
+        core.meta_del(&format!("parked:{fp}"));
+        assert!(core.try_reconnect_device(&fp, true), "unparked: dialed again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// One press = one fixed window back from the chat's cursor. The first
     /// cursor ignores 1970 and bad-clock rows, a stored one wins over rows
     /// that arrive later. A press that reaches no source returns an error and

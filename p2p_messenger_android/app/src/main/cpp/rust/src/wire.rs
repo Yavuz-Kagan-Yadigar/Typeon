@@ -8,8 +8,14 @@ use super::*;
 /// doğrulamak. `request_response::cbor`
 /// gerektirdiği için boş bir struct bile CBOR ile (de)serialize edilebilir
 /// olmalı — `#[derive(Serialize, Deserialize)]` bunu ek alan olmadan sağlar.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeepAliveRequest;
+/// `bye`: "I am shutting down, do not dial me until I connect again"
+/// (desktop Quit). The receiver parks the device (`parked:{fp}` meta) and
+/// `try_reconnect_device` skips it until a new connection from it arrives.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct KeepAliveRequest {
+    #[serde(default)]
+    pub bye: bool,
+}
 /// `quiet_ms`: "I am saving radio (metered network, screen off) — do not
 /// probe me again for this long". Without it a phone on mobile data could
 /// quiet its own timers but every peer's 20-60 s probe still woke its radio.

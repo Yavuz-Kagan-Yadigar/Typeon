@@ -71,6 +71,10 @@ impl P2PCore {
         if self.is_blocked_device(fp) {
             return false;
         }
+        // It said it is going offline (keepalive `bye`); it dials us when back.
+        if self.meta_str(&format!("parked:{}", fp)).is_some() {
+            return false;
+        }
         let now = current_time_ms();
         // Spec dışı, ağ sağlamlığı düzeltmesi (bkz. `device_onion_addr` alanı
         // dokümantasyonu, "aynı LAN'da + Tor'la eşleşmiş bir cihaz mobil
@@ -177,6 +181,18 @@ impl P2PCore {
             let _ = swarm.dial(opts);
         }
         true
+    }
+
+    /// Tells every connected peer (not servers) that this device is shutting
+    /// down: they park it and stop dialing it until it connects again.
+    /// Returns how many peers were told.
+    pub(crate) fn announce_offline(&mut self) -> usize {
+        let peers: Vec<PeerId> = self.keepalive_state.keys().copied().filter(|p| !self.is_server_peer(p)).collect();
+        let Some(swarm) = &mut self.swarm else { return 0 };
+        for p in &peers {
+            swarm.behaviour_mut().keepalive.send_request(p, KeepAliveRequest { bye: true });
+        }
+        peers.len()
     }
 
     /// Spec dışı, kullanıcı isteği (ağ değişikliği anında tam yeniden

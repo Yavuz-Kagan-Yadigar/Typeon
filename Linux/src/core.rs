@@ -95,6 +95,11 @@ pub fn init_database(dir: &str, storage_key: &[u8; 32]) -> bool {
     api::init_database(dir, storage_key)
 }
 
+/// Tells connected peers we are going offline; see `api::announce_offline`.
+pub fn announce_offline() {
+    api::announce_offline()
+}
+
 /// Closes the database and stops the network; see `api::shutdown`.
 pub fn shutdown() {
     api::shutdown()
