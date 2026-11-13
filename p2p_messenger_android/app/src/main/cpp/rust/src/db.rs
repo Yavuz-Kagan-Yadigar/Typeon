@@ -5,14 +5,9 @@ use super::*;
 impl P2PCore {
     pub(crate) fn new() -> Self {
         android_logger::init_once(LogConfig::default().with_max_level(log::LevelFilter::Info));
-        // JNI export'ları çağırdığı her `P2PCore` metodunu `catch_panic` ile
-        // sarmalıyor (bkz. dosya sonu, JNI Bindings bölümü) — ama panic
-        // hook'u burada AYRICA kurmamızın nedeni: stripped release build'de
-        // (Cargo.toml `strip = true`) bir panic'in crash_dump'ı sembol
-        // içermez, tanı imkansızlaşır (bkz. processQrPacket çökmesi geçmişi).
-        // Bu hook, catch_unwind onu yakalamadan ÖNCE (panic sırasında,
-        // unwind başlamadan) TAM panic mesajını + dosya/satır bilgisini
-        // logcat'e yazar.
+        // Every JNI-exported `P2PCore` method wraps its body in `catch_panic` (see the JNI Bindings section at the end of the file). This panic hook is
+        // installed here as well because release builds are stripped (`strip = true` in Cargo.toml), so a panic's crash dump would have no symbols.
+        // The hook runs BEFORE unwinding starts, so it logs the full panic message and file/line to logcat before `catch_unwind` catches it.
         std::panic::set_hook(Box::new(|info| {
             error!("PANIC yakalandı: {}", info);
             // Tests have no logger: without this a failed assert prints nothing.
@@ -52,8 +47,7 @@ impl P2PCore {
             pending_envelopes: Vec::new(),
             message_status: HashMap::new(),
             node_mode_enabled: false,
-            // Kotlin ayarlar ekranındaki kaydırıcının varsayılan orta
-            // noktasıyla aynı (2 GB) — bkz. alan dokümantasyonu.
+            // Same as the midpoint of the settings slider on the Kotlin side (2 GB). See the field documentation.
             history_storage_limit_bytes: 2 * 1024 * 1024 * 1024,
             pending_secret_bundle: None,
             pending_link_target: None,
@@ -166,11 +160,8 @@ impl P2PCore {
         }
     }
 
-    /// Android'in `std::env::var("ANDROID_DATA")` ile güvenilir biçimde
-    /// bilinemeyen, uygulamaya özel yazılabilir dizinini Kotlin tarafından
-    /// (`Context.filesDir.absolutePath`) almak zorundayız — bu yüzden DB
-    /// açma `new()`'de otomatik değil, Kotlin'in ilk çağrıda geçtiği gerçek
-    /// dosya yoluyla `init_db` çağrılmasını bekler (bkz. JNI `initDatabase`).
+    /// Android's app-private writable directory cannot be reliably found with `std::env::var("ANDROID_DATA")`, so Kotlin passes it in
+    /// (`Context.filesDir.absolutePath`). That is why the database is NOT opened in `new()`: it waits for `init_db` (see JNI `initDatabase`) with the real path.
     pub(crate) fn init_db(&mut self, app_files_dir: &str, storage_key: &[u8; 32]) -> Result<(), rusqlite::Error> {
         // Once per process. Every `MainActivity.onCreate` calls this: it ran
         // the whole migration again, reloaded the maps over live state, and
@@ -192,16 +183,11 @@ impl P2PCore {
         // First statement on the connection. A wrong key fails on the read.
         conn.execute_batch(&zeroize::Zeroizing::new(format!("PRAGMA key = {};", key_pragma.as_str())))?;
         conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
-        // istemci bağlantısı bunları HİÇ ayarlamıyordu, oysa
-        // sunucu tarafı (`typeon-server/src/store.rs`) en başından beri
-        // ayarlıyor. Varsayılan rollback-journal modunda her mesaj
-        // (ratchet durumu), her 8 parça (`bytes_transferred`) ve her
-        // atlanan anahtar ayrı bir fsync ağırlıklı işlem oluyordu — bir
-        // telefonda ölçülebilir pil/gecikme maliyeti. `busy_timeout` da
-        // ileride ikinci bir bağlantı eklenirse sessiz `SQLITE_BUSY`
-        // hatalarını önler.
-        // secure_delete: deleted rows (acked queue entries, removed contacts)
-        // are zeroed instead of lingering in free pages.
+        // Enable WAL and busy_timeout. The client did not set these before, while the server (`typeon-server/src/store.rs`) always did.
+        // With the default rollback journal, every message (ratchet state), every 8 transferred chunks (`bytes_transferred`) and every skipped key was a
+        // separate fsync-heavy transaction, which cost measurable battery and latency on a phone. `busy_timeout` prevents silent `SQLITE_BUSY`
+        // errors if a second connection is added later.
+        // secure_delete: deleted rows (acked queue entries, removed contacts) are zeroed instead of lingering in free pages.
         for (k, v) in [("journal_mode", "WAL"), ("synchronous", "NORMAL"), ("secure_delete", "ON")] {
             if let Err(e) = conn.pragma_update(None, k, v) {
                 warn!("SQLite PRAGMA {} = {} uygulanamadı: {}", k, v, e);
@@ -399,7 +385,7 @@ impl P2PCore {
                 created_at INTEGER NOT NULL
              );"
         )?;
-        // Sunucu (store-and-forward) tabloları — bkz. `server_client`.
+        // Server (store-and-forward) tables. See `server_client`.
         Self::init_server_tables(&conn);
         conn.execute_batch(whiteboard::SCHEMA)?;
         // SQLite has no `ADD COLUMN IF NOT EXISTS`: only "duplicate column name"
@@ -429,68 +415,46 @@ impl P2PCore {
         migrate("ALTER TABLE skipped_message_keys ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")?;
         let _ = conn.execute("UPDATE skipped_message_keys SET created_at = ?1 WHERE created_at = 0", params![current_time_ms() as i64]);
 
-        // Spec dışı geçiş (migration): `preview_jpeg` kolonu bu tabloya
-        // SONRADAN eklendi — `CREATE TABLE IF NOT EXISTS` zaten var olan
-        // bir tabloyu değiştirmez, bu yüzden bu kolon olmadan önceki bir
-        // sürümü çalıştırmış cihazlarda elle eklenmesi gerekir. SQLite
-        // `ADD COLUMN IF NOT EXISTS` desteklemediğinden, kolon zaten
-        // varsa oluşacak hatayı (duplicate column) sessizce yok sayıyoruz.
+        // Migration: the `preview_jpeg` column was added to this table LATER. `CREATE TABLE IF NOT EXISTS` does not alter an existing table, so devices
+        // that ran an earlier version need the column added by hand. SQLite has no `ADD COLUMN IF NOT EXISTS`, so the "duplicate column" error
+        // is ignored when the column already exists.
         migrate("ALTER TABLE files ADD COLUMN preview_jpeg BLOB")?;
-        // Aynı geçiş deseni: sesli mesaj süresi, kendi profil fotoğrafımız
-        // ve kişilerin bize gönderdiği profil fotoğrafları — hepsi sonradan
-        // eklendi.
+        // Same migration pattern: voice-message duration, our own profile photo, and profile photos that contacts sent us. All were added later.
         migrate("ALTER TABLE files ADD COLUMN duration_ms INTEGER")?;
-        // Parca boyutu artik dosya basina (bkz. `attachments::FILE_CHUNK_SIZE_V2`).
+        // Parca boyutu artik dosya basina (see `attachments::FILE_CHUNK_SIZE_V2`).
         // NULL = miras 256 KiB, yani mevcut satirlar oldugu gibi calisir.
         migrate("ALTER TABLE files ADD COLUMN chunk_size INTEGER")?;
         migrate("ALTER TABLE identities ADD COLUMN avatar_jpeg BLOB")?;
         migrate("ALTER TABLE contacts ADD COLUMN avatar_jpeg BLOB")?;
-        // Spec dışı, kullanıcı kararı: kişi grup üzerinden (kurucu
-        // kefaletiyle) mi eklendi — bkz. Contact.added_via_group.
+        // Whether a contact was added through a group (with the founder's vouch). See Contact.added_via_group.
         migrate("ALTER TABLE contacts ADD COLUMN added_via_group INTEGER")?;
         if let Err(e) = conn.execute_batch(CONTACTS_ONE_ROW_PER_IDENTITY_SQL) {
             error!("contacts tekillik indeksi kurulamadı: {}", e);
         }
         migrate("ALTER TABLE groups ADD COLUMN avatar_jpeg BLOB")?;
-        // bkz. `packet::FounderTransfer` — kurucu devir zinciri, kaçırılmış
-        // bir devrin üyeyi gruptan kalıcı olarak koparmasını engelliyor.
+        // See `packet::FounderTransfer`. The founder transfer chain prevents a missed transfer from permanently removing a member from the group.
         migrate("ALTER TABLE groups ADD COLUMN founder_chain_json TEXT")?;
-        // Spec dışı, hata düzeltmesi (grup geçmişi kalıcılığı + mesaj
-        // durumu): `messages` tablosu önceden sadece 1:1 (peer_device_
-        // fingerprint) sohbetler içindi — grup mesajları hiç
-        // arşivlenmiyordu (bkz. receive_message Text/group_id kolu) ve
-        // gönderilen grup mesajları YANLIŞ anahtarla (her alıcının KENDİ
-        // peer_device_fingerprint'i) arşivleniyordu; bu da hem gerçek grup
-        // geçmişi olarak asla okunamıyordu hem de o alıcı aynı zamanda 1:1
-        // bir kişiyse onun DM geçmişine SIZIYORDU. `group_id` dolu satırlar
-        // artık gerçek bir grup mesajını gösterir (peer_device_fingerprint
-        // bu satırlarda boş string — NOT NULL kısıtını bozmadan "bu bir DM
-        // değil" işareti). `sender_identity_id`: grup mesajları çok
-        // gönderenli olduğundan kimin yazdığını bilmek gerekir (1:1'de
-        // `direction` yeterliydi). `message_id`/`status`: gönderim durumu
-        // (bekliyor/gönderildi/başarısız, saat/tik ikonları) önceden SADECE
-        // bellek-içi (`message_status` HashMap) tutuluyordu — uygulama
-        // yeniden başlayınca ya da sohbet ekranı yeniden açılınca (taze bir
-        // `getMessageHistory` okuması) bu bilgi kaybolup HER satır varsayılan
-        // olarak "gönderildi" gösteriliyordu, hâlâ bekleyen/başarısız
-        // mesajlar dahil.
+        // Group history and message status. The `messages` table used to hold only 1:1 chats (keyed by peer_device_fingerprint). Group messages were never
+        // archived (see the Text/group_id arm of receive_message), and sent group messages were archived under the WRONG key: each recipient's own
+        // peer_device_fingerprint. Those rows could never be read back as group history, and if that recipient was also a 1:1 contact, they leaked into
+        // its DM history. Rows with `group_id` set are now real group messages. In those rows peer_device_fingerprint is an empty string, which keeps the
+        // NOT NULL constraint and marks "not a DM". `sender_identity_id`: group messages have many senders, so the author must be stored.
+        // `message_id` / `status`: send status (pending / sent / failed) used to live only in memory (the `message_status` HashMap). After an app restart or a
+        // chat screen reopen (a fresh `getMessageHistory` read), that state was lost and every row showed as "sent", including messages still pending or failed.
         migrate("ALTER TABLE messages ADD COLUMN group_id TEXT")?;
         migrate("ALTER TABLE messages ADD COLUMN sender_identity_id TEXT")?;
-        // bkz. messages tablosu `sent_at_ms` notu — gönderim-sırası gösterimi.
+        // See the `sent_at_ms` note on the messages table: send-order display.
         migrate("ALTER TABLE messages ADD COLUMN sent_at_ms INTEGER")?;
         migrate("ALTER TABLE messages ADD COLUMN message_id TEXT")?;
         migrate("ALTER TABLE messages ADD COLUMN status TEXT")?;
         migrate("CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id, timestamp)")?;
         migrate("CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)")?;
-        // The chat list and paging order by the effective send time (fable
-        // E-13): without these each preview sorted all rows of its chat.
+        // The chat list and paging sort by the effective send time (`sent_at_ms`). Without these, each preview
+        // sorted all rows of its chat.
         migrate("CREATE INDEX IF NOT EXISTS idx_messages_peer_sent ON messages(peer_device_fingerprint, COALESCE(NULLIF(sent_at_ms, 0), timestamp))")?;
         migrate("CREATE INDEX IF NOT EXISTS idx_messages_group_sent ON messages(group_id, COALESCE(NULLIF(sent_at_ms, 0), timestamp))")?;
-        // Spec dışı, kullanıcı isteği (WhatsApp tarzı "sağa kaydırıp
-        // yanıtla"): bkz. packet.rs `MessageContent::Text.reply_to_*`
-        // dokümantasyonu — bu satırlar arşive de kalıcılaştırılmazsa, bir
-        // sohbet geçmişi yeniden yüklendiğinde (uygulama/ekran yeniden
-        // açılışı) yanıt önizlemesi kaybolurdu.
+        // Reply context (swipe-to-reply). See the packet.rs `MessageContent::Text.reply_to_*` docs. If these were not persisted in the archive too,
+        // the reply preview would be lost whenever the chat history was reloaded (app or screen reopened).
         migrate("ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT")?;
         migrate("ALTER TABLE messages ADD COLUMN reply_to_preview TEXT")?;
         migrate("ALTER TABLE messages ADD COLUMN reply_to_sender_identity_id TEXT")?;
@@ -500,15 +464,13 @@ impl P2PCore {
         // re-encrypts and overwrites encrypted_blob/nonce in place (see
         // apply_edit_to_archive/apply_delete_to_archive).
         migrate("ALTER TABLE messages ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")?;
-        // bkz. `ArchivedMessage.is_edited` — düzenleme işareti de kalıcı.
+        // See `ArchivedMessage.is_edited`. The edited flag is persisted too.
         migrate("ALTER TABLE messages ADD COLUMN is_edited INTEGER NOT NULL DEFAULT 0")?;
         // Owner decision: the row came from a contact's 1:1
         // history answer, at a time the contact stated. The UI marks it.
         migrate("ALTER TABLE messages ADD COLUMN via_sync INTEGER NOT NULL DEFAULT 0")?;
-        // uygulanan son düzenlemenin gönderici damgası (`MessageContent::Edit
-        // edited_at_ms`). `apply_edit_to_archive`, DAHA ESKİ damgalı bir
-        // düzenlemenin DAHA YENİ olanın üzerine yazmasını bununla engeller
-        // (0 = hiç düzenlenmedi / sıralama bilgisi olmayan eski paket).
+        // Sender timestamp (`MessageContent::Edit.edited_at_ms`) of the last applied edit. `apply_edit_to_archive` uses it so an edit with an OLDER
+        // timestamp cannot overwrite a NEWER one (0 = never edited, or an old packet with no ordering info).
         migrate("ALTER TABLE messages ADD COLUMN edit_ts INTEGER NOT NULL DEFAULT 0")?;
         // See `group_author_statement`.
         migrate("ALTER TABLE messages ADD COLUMN author_proof TEXT")?;
@@ -534,14 +496,10 @@ impl P2PCore {
             }
             migrate("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_msgid_unique ON messages(COALESCE(group_id, ''), message_id) WHERE message_id IS NOT NULL AND message_id != ''")?;
         }
-        // Spec dışı, kullanıcı isteği (grup ekleri): `messages` tablosundaki
-        // AYNI desen — grup ekleri `peer_device_fingerprint = ''` +
-        // `group_id` ile (bkz. `archive_group_message`), gönderen ise
-        // `sender_identity_id` ile ayırt edilir (bkz.
-        // `prepare_and_send_group_file`/`receive_file_offer`).
-        // Spec dışı, kullanıcı isteği (ek + açıklama + yanıt): canlı olayda
-        // taşımak yetmez — sohbet yeniden açıldığında arşivden okunuyorlar,
-        // yoksa açıklama ve yanıt bağlamı kaybolurdu.
+        // Group attachments use the same pattern as `messages`: `peer_device_fingerprint = ''` plus `group_id` (see `archive_group_message`), and the sender
+        // is told apart by `sender_identity_id` (see `prepare_and_send_group_file` / `receive_file_offer`).
+        // Attachments carry their caption and reply context too. Carrying them only in the live event is not enough: chats read from the archive on reopen,
+        // so the caption and reply context would be lost.
         migrate("ALTER TABLE files ADD COLUMN caption TEXT")?;
         migrate("ALTER TABLE files ADD COLUMN reply_to_message_id TEXT")?;
         migrate("ALTER TABLE files ADD COLUMN reply_to_preview TEXT")?;
@@ -584,10 +542,8 @@ impl P2PCore {
                 AND message_id NOT IN (SELECT local_message_id FROM pending_group_messages WHERE local_message_id IS NOT NULL)))",
             [],
         );
-        // no download is running at start; a 'downloading' row is a
-        // dead one (its owner reconnecting resumes it, the user can retry).
-        // #76: its partial `.enc` stays: `download_file` resumes from the
-        // verified chunks on disk, and the quota counts 'failed' bytes.
+        // No download is running at start, so a 'downloading' row is dead. Its owner reconnecting resumes it, or the user can retry.
+        // The partial `.enc` file stays on disk: `download_file` resumes from the verified chunks, and the quota counts 'failed' bytes.
         let _ = conn.execute("UPDATE files SET status = 'failed' WHERE status = 'downloading'", []);
         self.db = Some(conn);
         self.app_files_dir = Some(app_files_dir.to_string());
@@ -609,15 +565,10 @@ impl P2PCore {
             let _ = std::fs::set_permissions(format!("{}/attachments/sticker_cache", app_files_dir), std::fs::Permissions::from_mode(0o700));
         }
         self.load_identity_from_db();
-        // Spec dışı düzeltme: `contacts`/`groups` tabloları önceden
-        // oluşturuluyor ama hiç yazılıp okunmuyordu — kişiler, gruplar ve
-        // bilinen uzak cihaz public key'leri sadece bellekteydi, her süreç
-        // yeniden başlatmasında (app güncellemesi dahil) kayboluyordu. Artık
-        // her mutasyon noktasında diske yazılıyor (bkz. persist_contact/
-        // persist_group/persist_remote_device) — burada açılışta geri
-        // yükleniyor. (Ratchet oturumları AYRI olarak, şifreleme anahtarı
-        // yüklendiğinde `setSkippedKeyEncryptionKey` içinde geri yüklenir —
-        // bkz. load_ratchet_states_from_db.)
+        // `contacts` / `groups` tables were created but never written or read, so contacts, groups and known remote device public keys existed only
+        // in memory and were lost on every process restart (including app updates). Every mutation now writes to disk (see persist_contact /
+        // persist_group / persist_remote_device), and they are reloaded here at startup. Ratchet sessions are restored separately, inside
+        // `setSkippedKeyEncryptionKey` once the encryption key is loaded (see load_ratchet_states_from_db).
         self.load_contacts_from_db();
         self.load_groups_from_db();
         self.load_remote_devices_from_db();
@@ -628,9 +579,8 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Çoklu-cihaz (spec 1.5): bu cihaz ikincil olarak bir kimliğe
-    /// bağlandıysa saklanan imzalı `DeviceAdd`'i (kendimizi kişilere
-    /// tanıtırken kanıt) belleğe yükler.
+    /// Multi-device: if this device was linked to an identity as a secondary device, loads the stored signed `DeviceAdd`
+    /// (the proof we present when introducing ourselves to contacts) into memory.
     pub(crate) fn load_own_device_add_from_db(&mut self) {
         let conn = match &self.db { Some(c) => c, None => return };
         let blob: Option<Vec<u8>> = conn
@@ -643,7 +593,7 @@ impl P2PCore {
                 Err(e) => error!("own_device_add çözülemedi: {}", e),
             }
         }
-        // bkz. `outstanding_history_requests` — bekleyen geçmiş istekleri.
+        // See `outstanding_history_requests`: pending history requests.
         if let Ok(mut stmt) = conn.prepare("SELECT k, v FROM app_meta WHERE k LIKE 'hsr:%'") {
             if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
                 for (k, v) in rows.flatten() {
@@ -653,7 +603,7 @@ impl P2PCore {
                 }
             }
         }
-        // bkz. `link_request_open_until` — süreç ölse de pencere korunur.
+        // See `link_request_open_until`: the window stays valid even if the process dies.
         self.link_request_open_until = conn
             .query_row("SELECT v FROM app_meta WHERE k = 'link_request_open_until'", [], |r| r.get::<_, i64>(0))
             .map(|v| v.max(0) as u64)
@@ -868,20 +818,11 @@ impl P2PCore {
         }
     }
 
-    /// bilinen cihaz adreslerini
-    /// (`device_last_addr`) diskten belleğe yükler — süreç yeniden başlasa
-    /// bile `reconnect_sweep` kopmuş kişilere (farklı ağdakiler dahil,
-    /// mDNS'in yetişemediği) yeniden bağlanmayı deneyebilsin diye.
-    /// Spec dışı, hata düzeltmesi (bkz. `remember_device_addr` loopback
-    /// notu): `remember_device_addr` artık loopback adresleri baştan
-    /// reddediyor, ama bu düzeltmeden ÖNCE zaten diske yazılmış bir
-    /// loopback girdisi varsa (`device_addrs` tablosunda) bu satır onu asla
-    /// SİLMEZ — sadece belleğe YÜKLEMEZ (bkz. aşağıdaki filtre). Böylece
-    /// zaten kurulu bir uygulama, DB'yi elle temizlemeye gerek kalmadan bir
-    /// sonraki başlatmada kendiliğinden düzelir: bozuk satır DB'de sessizce
-    /// kalır ama hiç kullanılmaz, `try_reconnect_device` o cihaz için adres
-    /// bulamayıp sessizce `false` döner (yeni bir mDNS/röle keşfi/QR ile
-    /// gerçek bir adres öğrenilene kadar).
+    /// Loads known device addresses (`device_last_addr`) from disk into memory, so that after a process restart `reconnect_sweep` can still retry
+    /// disconnected contacts, including those on other networks where mDNS cannot find them.
+    /// Loopback entries are filtered out here, not deleted. `remember_device_addr` rejects loopback addresses, but a loopback row written BEFORE that
+    /// fix stays in the `device_addrs` table. It is never loaded, so an existing install heals on the next start without a manual DB cleanup:
+    /// `try_reconnect_device` finds no address for that device and returns `false` until a real address is learned (mDNS, relay discovery, or QR).
     pub(crate) fn load_device_addrs_from_db(&mut self) {
         let conn = match &self.db { Some(c) => c, None => return };
         let mut stmt = match conn.prepare("SELECT device_fingerprint, multiaddr FROM device_addrs") {
@@ -899,8 +840,7 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `device_onion_addr` alanı dokümantasyonu — `load_device_addrs_from_db`
-    /// ile AYNI desen, ayrı tablo.
+    /// See the `device_onion_addr` field docs. Same pattern as `load_device_addrs_from_db`, separate table.
     pub(crate) fn load_device_onion_addrs_from_db(&mut self) {
         let conn = match &self.db { Some(c) => c, None => return };
         let mut stmt = match conn.prepare("SELECT device_fingerprint, multiaddr FROM device_onion_addrs") {
@@ -915,24 +855,13 @@ impl P2PCore {
         }
     }
 
-    /// bir cihaz için en son işe
-    /// yaramış/paylaşılmış adresi hem bellekte hem diskte günceller (bkz.
-    /// `device_last_addr`). Adres `.../p2p/<peer_id>` son ekini içermeli
-    /// (`reconnect_sweep` PeerId'yi buradan çıkarır) — içermiyorsa yok
-    /// sayılır (yeniden bağlanmak için işe yaramaz).
-    /// Spec dışı, hata düzeltmesi ("bir cihaz sürekli 127.0.0.1'e dial
-    /// etmeye çalışıp duruyor"): loopback (127.0.0.1/::1) adresler de AYNI
-    /// sebeple yok sayılır (bkz. `is_loopback_multiaddr`) — bu ANCAK iki
-    /// cihaz (ör. geliştirme/test sırasında iki emülatör/ADB port
-    /// yönlendirmesi) AYNI makinede çalışırken gözlemlenebilir bir adres,
-    /// gerçek iki cihaz arasında ASLA geçerli değildir. Önceden bu tür bir
-    /// adres (ör. `ConnectionEstablished`'ten `peer_id_to_addr` üzerinden,
-    /// bkz. `record_peer_id_if_known`) bir kez kalıcı yeniden-bağlanma
-    /// ipucu olarak kaydedilirse, o cihaz başka bir yoldan (mDNS/röle)
-    /// yeniden keşfedilene kadar HER periyodik taramada (`try_reconnect_device`)
-    /// kesin olarak başarısız olacak bu loopback adrese dial atmaya devam
-    /// ediyordu — gerçek adresi tekrar öğrenmesi gereken tek yol da zaten
-    /// BAŞARILI bir bağlantı kurmaktı, bir çeşit çıkmaz.
+    /// Updates a device's most recently working address in memory and on disk (see `device_last_addr`). The address must end with `/p2p/<peer_id>`,
+    /// because `reconnect_sweep` takes the PeerId from there. Addresses without it are ignored (they cannot be used to reconnect).
+    /// Loopback addresses (127.0.0.1 / ::1) are ignored for the same reason (see `is_loopback_multiaddr`). Two devices on the same machine (for example two
+    /// emulators with ADB port forwarding during development) can produce such an address, but it never works between real devices. Before this check,
+    /// such an address learned via `ConnectionEstablished` (through `peer_id_to_addr`, see `record_peer_id_if_known`) was saved as a persistent reconnect hint.
+    /// The device then dialed that dead loopback address on every periodic sweep (`try_reconnect_device`). The only way to learn a real address was a
+    /// successful connection, which never happened.
     pub(crate) fn remember_device_addr(&mut self, device_fingerprint: &str, multiaddr: &str) {
         let parsed = match multiaddr.parse::<Multiaddr>() {
             Ok(p) => p,
@@ -941,20 +870,14 @@ impl P2PCore {
         if extract_peer_id(&parsed).is_none() || is_loopback_multiaddr(&parsed) {
             return;
         }
-        // Spec dışı, ağ sağlamlığı düzeltmesi ("aynı LAN'da + Tor'la eşleşmiş
-        // bir cihaz mobil veriye geçince diğer telefonla artık konuşamıyor,
-        // ama 'node' ile konuşmaya devam ediyor" hatası): bu adres bir
-        // `.onion` adresiyse, AŞAĞIDAKİ genel `device_last_addr` güncellemesine
-        // EK olarak (o hâlâ "en son işe yarayan HERHANGİ bir adres" olarak
-        // güncellenir, ör. sohbet ekranının an be an durumu için), AYRI ve
-        // hiçbir zaman bir LAN/doğrudan adres tarafından üzerine yazılmayan
-        // `device_onion_addr`'a da yazılır (bkz. o alanın dokümantasyonu) —
-        // böylece bu cihaz sonradan AYNI LAN'daki bir bağlantıyla eşleşse
-        // BİLE, çalışan Tor adresi kalıcı olarak unutulmaz.
+        // Tor fallback: if this address is a `.onion`, it is ALSO written to the separate `device_onion_addr` (see that field), in addition to the general
+        // `device_last_addr` update above (which tracks the last working address of any kind for the live chat status). LAN or direct addresses never overwrite
+        // `device_onion_addr`. So if a device paired over Tor loses the LAN link and moves to mobile data, the Tor address is still known.
+        // Without this, a device on the same LAN and paired over Tor could not be reached after a network switch.
         if is_onion_multiaddr(&parsed) {
             self.remember_onion_addr(device_fingerprint, multiaddr);
         }
-        // Değişmediyse diske yazma (gereksiz I/O önle).
+        // Skip the disk write if nothing changed (avoids needless I/O).
         if self.device_last_addr.get(device_fingerprint).map(|a| a.as_str()) == Some(multiaddr) {
             return;
         }
@@ -967,12 +890,9 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `device_onion_addr` alanı dokümantasyonu — `remember_device_addr`
-    /// ile AYNI desen (değişmediyse yazmaz), ama KENDİ ayrı tablosuna/
-    /// haritasına yazar ve bir LAN/doğrudan adres tarafından ASLA üzerine
-    /// yazılmaz (sadece daha yeni bir `.onion` adresiyle, ör. Tor kimliği
-    /// değişirse — pratikte nadir, `ONION_NICKNAME` sabit olduğundan aynı
-    /// cihaz hep aynı .onion'u üretir).
+    /// See the `device_onion_addr` field docs. Same pattern as `remember_device_addr` (no write if unchanged), but it writes to its OWN table/map and a
+    /// LAN or direct address never overwrites it. Only a newer `.onion` address replaces it, for example if the Tor identity changes (rare in practice,
+    /// since `ONION_NICKNAME` is fixed and the same device always gets the same .onion).
     pub(crate) fn remember_onion_addr(&mut self, device_fingerprint: &str, multiaddr: &str) {
         if self.device_onion_addr.get(device_fingerprint).map(|a| a.as_str()) == Some(multiaddr) {
             return;
