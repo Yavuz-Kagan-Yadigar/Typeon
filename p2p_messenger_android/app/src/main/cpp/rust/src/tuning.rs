@@ -44,12 +44,12 @@ pub(crate) fn pending_retry_at(first_attempt_at: u64, now: u64) -> u64 {
 /// handshake during the retry pass of an unconfirmed message, so the handshake gets the same durability (7 days) as the message.
 pub(crate) const PENDING_HANDSHAKE_TIMEOUT_MS: u64 = 5 * 60 * 1000;
 
-/// Measured on two real devices (2026-09-06): with four transport paths open at once (LAN direct, Tor onion, server and gossip),
-/// the same envelope arrived two to four times per message. The first copy is processed. Later copies fail to decrypt because
-/// the ratchet has moved on, and each logs an error. That happened about three times a minute on both phones, for hours
-/// (signature checks and radio time wasted). `process_incoming_envelope` now keeps a 64-bit hash of each successfully processed
-/// envelope for this window. Byte-identical copies are dropped silently. A duplicate `Message` still gets its Ack re-sent, which is
-/// the purpose of the repeat. Memory: 16 bytes per entry, periodic pruning and a hard cap (`INBOUND_DEDUP_MAX_ENTRIES`).
+/// Measured on two real devices: with four transport paths open at once (LAN direct, Tor onion, server and gossip), the same envelope arrived
+/// two to four times per message. The first copy is processed. Later copies fail to decrypt because the ratchet has moved on, and each logs an
+/// error. That happened about three times a minute on both phones, for hours, wasting signature checks and radio time. `process_incoming_envelope`
+/// now keeps a 64-bit hash of each successfully processed envelope for this window. Byte-identical copies are dropped silently. A duplicate
+/// `Message` still gets its Ack re-sent, which is the purpose of the repeat. Memory: 16 bytes per entry, periodic pruning and a hard cap
+/// (`INBOUND_DEDUP_MAX_ENTRIES`).
 pub(crate) const INBOUND_DEDUP_WINDOW_MS: u64 = 10 * 60 * 1000;
 pub(crate) const INBOUND_DEDUP_MAX_ENTRIES: usize = 8192;
 
@@ -105,13 +105,10 @@ pub(crate) const RADIO_WINDOW_MS: u64 = 8 * 60 * 1000;
 pub(crate) const RADIO_WINDOW_WIFI_MS: u64 = 4 * 60 * 1000;
 /// How long Tor stays non-dormant after a full wake, see `TOR_FULL_WAKE_MS`.
 pub(crate) const RADIO_AWAKE_MS: u64 = 30_000;
-/// In radio-saver mode Tor leaves dormant only this often, not at every
-/// window. Leaving dormant re-fires arti's periodic tasks: it refills the
-/// onion-service circuit pool (12-16 circuits, ~130 KB) and that kept the LTE
-/// radio up ~100 s per window (9S 2026-10-02: 32 % radio, 22 mAh/h). The
-/// window's own work (keepalive, server poll, redial) runs on existing
-/// circuits and builds what it needs on demand. The consensus is valid 3 h,
-/// so a refresh every 45 min keeps it fresh.
+/// In radio-saver mode, Tor leaves dormant only this often, not at every window. Leaving dormant re-fires arti's periodic tasks. They refill the
+/// onion-service circuit pool (12-16 circuits, about 130 KB), and that kept the LTE radio up about 100 s per window (measured: 32 % radio time,
+/// 22 mAh/h). The window's own work (keepalive, server poll, redial) runs on existing circuits and builds what it needs on demand. The consensus
+/// is valid for 3 h, so a refresh every 45 min keeps it fresh.
 pub(crate) const TOR_FULL_WAKE_MS: u64 = 45 * 60 * 1000;
 /// See `KeepAliveState.suspect`. If no Ack comes from a live connection within this time, probe the connection.
 pub(crate) const ACK_SUSPECT_MS: u64 = 1_500;
@@ -132,15 +129,11 @@ pub(crate) const KEEPALIVE_QUIET_PROTOCOL: &str = "/p2pmessenger/keepalive/1.1.0
 pub(crate) const ACK_PROTOCOL: &str = "/p2pmessenger/ack/1.0.0";
 /// See `start_network`. Maximum time for one connection to be established (dial, Noise, Yamux). The libp2p builder's fixed 10 s was not enough over Tor.
 pub(crate) const SWARM_CONNECTION_TIMEOUT_SECS: u64 = 60;
-/// Direct delivery to a connected device. Before this, a connected device was
-/// reached only through gossipsub, which delivers only if it currently knows
-/// the peer subscribes to the topic. That knowledge is exchanged only when a
-/// peer's first connection opens, so connection churn (Tor/relay/direct paths
-/// replacing each other, mobile data) left one side with a live connection but
-/// a stale topic list. Publishes then failed with InsufficientPeers and went via
-/// the server, 5-16 s (device, 2026-09-18). A request/response goes over the
-/// Noise-authenticated connection itself, and the response proves the peer got
-/// the bytes. Gossipsub and the server stay as the fallback.
+/// Direct delivery to a connected device. Before this, a connected device was reached only through gossipsub, which delivers only if it currently
+/// knows the peer subscribes to the topic. That knowledge is exchanged only when a peer's first connection opens, so connection churn (Tor, relay
+/// and direct paths replacing each other, mobile data) left one side with a live connection but a stale topic list. Publishes then failed with
+/// `InsufficientPeers` and went via the server, taking 5-16 s on the device. A request/response goes over the Noise-authenticated connection
+/// itself, and the response proves the peer got the bytes. Gossipsub and the server stay as the fallback.
 pub(crate) const ENVELOPE_PROTOCOL: &str = "/p2pmessenger/envelope/1.0.0";
 /// Largest serialized envelope any path carries.
 pub(crate) const MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
@@ -163,12 +156,12 @@ pub(crate) const MAX_KNOWN_RELAYS: usize = 10;
 /// See `ensure_relay_reservations`. A reservation that never gets a listen address (never accepted) is dropped after this time and requested again.
 pub(crate) const RELAY_RESERVATION_RETRY_MS: u64 = 2 * 60 * 1000;
 
-/// Yamux receive window. The default (`DEFAULT_CREDIT` in the yamux spec) is 262,144 bytes. A file chunk is `FILE_CHUNK_SIZE + 16`,
-/// 262,160 bytes, because of the AEAD tag. So each chunk exceeds the credit by exactly 16 bytes, and the sender waits for a window
-/// update before it can send the last 16 bytes. That is an extra round trip per chunk, which can nearly double the transfer time over Tor.
-/// yamux 0.13's automatic window growth does not fix this. `request_response` opens a new substream per request, which carries one chunk
-/// and closes, so auto-tuning never kicks in, and each chunk starts from 256 KiB again. A fixed, generous window is used instead.
-/// (Setting it required the yamux 0.12 path in the libp2p wrapper, so auto-tuning is given up. It never helped this access pattern.)
+/// Yamux receive window. The default (`DEFAULT_CREDIT` in the yamux spec) is 262,144 bytes. A file chunk is `FILE_CHUNK_SIZE + 16`, 262,160 bytes,
+/// because of the AEAD tag. So each chunk exceeds the credit by exactly 16 bytes, and the sender waits for a window update before it can send the
+/// last 16 bytes. That is an extra round trip per chunk, which can nearly double the transfer time over Tor. yamux 0.13's automatic window growth
+/// does not fix this. `request_response` opens a new substream per request, which carries one chunk and closes, so auto-tuning never kicks in, and
+/// each chunk starts from 256 KiB again. A fixed, generous window is used instead. (Setting it required the yamux 0.12 path in the libp2p wrapper,
+/// so auto-tuning is given up. It never helped this access pattern.)
 pub(crate) const YAMUX_RECEIVE_WINDOW: u32 = 4 * 1024 * 1024;
 /// Buffer cap per substream. Must not be smaller than the window.
 pub(crate) const YAMUX_MAX_BUFFER: usize = 8 * 1024 * 1024;
@@ -260,11 +253,11 @@ pub(crate) const RATE_LIMIT_MAX_PER_WINDOW: u32 = 60;
 pub(crate) const RATE_LIMIT_MAX_UNKNOWN_TOTAL: u32 = 300;
 
 /// Per-window cap for peers that have an established session.
-/// Delivery fix (2026-08-28, user request "make sure every message arrives"): the old code did not distinguish known and unknown senders, and a
-/// packet over the cap was dropped silently. This produced a real loss pattern in P2P mode. A peer that had been offline for a week came back
-/// and published hundreds of queued messages in a row. We accepted six per second and dropped the rest. The messages were not lost (the sender
-/// retries until acknowledged), but the retries stretched over hours, since the backoff grew from 5 s to 2 min. In server mode the same packets
-/// were injected with `source = None`, so the rate limit never applied. The two modes were asymmetric.
+/// Delivery: the old code did not distinguish known and unknown senders, and a packet over the cap was dropped silently. This caused a real loss
+/// pattern in P2P mode. A peer that had been offline for a week came back and published hundreds of queued messages in a row. We accepted six per
+/// second and dropped the rest. The messages were not lost (the sender retries until acknowledged), but the retries stretched over hours, since the
+/// backoff grew from 5 s to 2 min. In server mode the same packets were injected with `source = None`, so the rate limit never applied. The two
+/// modes were asymmetric.
 /// Now two things happen. Peers with an established session get a much higher cap (60 per second), and a packet over the cap is not dropped.
 /// It is DEFERRED (see `deferred_incoming`).
 pub(crate) const RATE_LIMIT_MAX_ESTABLISHED: u32 = 600;
@@ -299,12 +292,12 @@ pub(crate) const FAST_RECONNECT_WINDOW_MS: u64 = 60_000;
 /// round (flapping LTE/Wi-Fi redialed every contact on every callback).
 pub(crate) const NETWORK_CHANGE_DEBOUNCE_MS: u64 = 10_000;
 
-/// Found on real devices: device-to-device transfer between two phones on the same account was very unreliable (messages missing on some
-/// devices). The tablet and the Redmi Note 8 Pro both held hundreds of rows for the same 2-3 "ghost" sibling devices, with `last_seen` over
-/// three days old. A target that has not been seen for this long is treated as probably gone for good (the app was uninstalled or the device
-/// reset). `sibling_active_devices` no longer includes it in new sync traffic (see there), and `load_pending_durable_retries_from_db` does not
-/// retry sends to it at startup (see there). Neither deletes `known_remote_devices` or `pending_durable_retries` rows. They only stop the useless
-/// retry storm. If the device comes back and refreshes `last_seen`, the next turn picks it up normally.
+/// A target that has not been seen for this long is treated as probably gone for good (the app was uninstalled or the device was reset). The
+/// tablet and a second phone both held hundreds of rows for the same few "ghost" sibling devices, with `last_seen` over three days old, which made
+/// device-to-device delivery unreliable. `sibling_active_devices` no longer includes such a target in new sync traffic (see there), and
+/// `load_pending_durable_retries_from_db` does not retry sends to it at startup (see there). Neither deletes `known_remote_devices` or
+/// `pending_durable_retries` rows. They only stop the useless retry storm. If the device comes back and refreshes `last_seen`, the next turn
+/// picks it up normally.
 pub(crate) const STALE_PEER_RETRY_HORIZON_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 /// Multi-device: minimum interval between requests for history backfill from sibling devices. Repeatedly asking for the last N messages
@@ -325,7 +318,7 @@ pub(crate) const SIBLING_ROSTER_SYNC_INTERVAL_MS: u64 = 60 * 60 * 1000;
 /// Maximum total records in one `SiblingHistoryResponse`. It must stay well below the gossip 1 MB limit (see `max_transmit_size` in `start_network`).
 pub(crate) const SIBLING_BACKFILL_MAX_ENTRIES: usize = 300;
 
-/// Delivery fix (`MessageTooLarge`, see `PublishFailure`): the total text payload of one `HistorySyncResponse` or `SiblingHistoryResponse` must not
+/// Delivery limit (`MessageTooLarge`, see `PublishFailure`): the total text payload of one `HistorySyncResponse` or `SiblingHistoryResponse` must not
 /// exceed this many bytes. A row-count limit alone was not enough, because individual message texts can be arbitrarily long. 300 long messages
 /// easily exceed the gossip `max_transmit_size` of 1 MB, before the hybrid signature and ratchet overhead are added. 512 KB leaves room below the
 /// 1 MB limit. The part that is cut off is fetched later by paging.
@@ -340,8 +333,7 @@ pub(crate) const HISTORY_FETCH_WINDOW_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// The rest of the window arrives within the same press, and a peer cannot make us ask forever.
 // ponytail: shared by all sources. A busy group month with many capped members could run out. Use per-source budgets if that shows up.
 pub(crate) const HISTORY_FETCH_MAX_PAGES: u32 = 20;
-/// No message is older (2025-01-01 UTC): the first cursor of a chat ignores
-/// rows stamped before it (a 1970 device clock, a backdated row).
+/// No message is older than 2025-01-01 UTC: the first cursor of a chat ignores rows stamped before it (a device clock stuck at 1970, a backdated row).
 pub(crate) const HISTORY_FETCH_EPOCH_MS: i64 = 1_735_689_600_000;
 
 /// `reconnect_sweep` dials and resends `IdentityExchange` for a pending device link target (`pending_link_target`) on every sweep (at most every 15 s).
@@ -354,14 +346,13 @@ pub(crate) const PENDING_LINK_RETRY_HORIZON_MS: u64 = 60 * 60 * 1000;
 /// gets attempts that become less and less frequent.
 pub(crate) const RECONNECT_BACKOFF_BASE_MS: u64 = RECONNECT_SWEEP_INTERVAL_MS;
 pub(crate) const RECONNECT_BACKOFF_MAX_MS: u64 = 10 * 60 * 1000;
-/// Radio saver cap: every failed onion dial burns hs-pool circuits (HsDir
-/// lookups) and the pool refills itself in the background, so a long-gone
-/// peer must not be retried every window. It reconnects to us when back.
-/// 3 h: at 30 min, four long-offline peers cost 270-410 KB and 40-75 s of
-/// LTE radio per round (pcap 2026-10-07).
+/// Radio saver cap: every failed onion dial burns hs-pool circuits (HsDir lookups), and the pool refills itself in the background. So a long-gone
+/// peer must not be retried every window. It reconnects to us when it is back. 3 h: at 30 min, four long-offline peers cost 270-410 KB and 40-75 s
+/// of LTE radio time per round.
 pub(crate) const RECONNECT_BACKOFF_SAVER_MAX_MS: u64 = 3 * 60 * 60 * 1000;
 
-/// Interval of `group_sync_sweep`. See `pending_group_syncs`. Spec exception, bug fix: a device connected over Tor was never seen in a group it had been invited to.
+/// Interval of `group_sync_sweep`. See `pending_group_syncs`. Deliberate deviation: a device connected over Tor is also retried for groups it was
+/// invited to.
 pub(crate) const GROUP_SYNC_SWEEP_INTERVAL_MS: u64 = 20_000;
 /// Outside radio saver, a network change force-dials a device heard from
 /// within this long (`last_seen` is stamped at most hourly).
@@ -390,10 +381,10 @@ pub(crate) const EARLY_PACKET_TTL_MS: u64 = MAX_UNCONFIRMED_AGE_MS;
 pub(crate) const UNKNOWN_GROUP_HOLD_TTL_MS: u64 = 30 * 60_000;
 pub(crate) const UNKNOWN_GROUP_HOLD_GROUPS: usize = 16;
 pub(crate) const UNKNOWN_GROUP_HOLD_PER_GROUP: usize = 64;
-/// Delivery fix (2026-08-28): raised from 20 to 200. This buffer holds packets that arrive BEFORE the handshake. Twenty was too small exactly where
-/// it matters most: a peer that was offline for a long time comes back and sends dozens of queued messages in a row, and the handshake may arrive
-/// among or after them. Anything beyond 20 was dropped, oldest first. The loss was not permanent (the sender retries), but it was the slow, uneven
-/// delivery pattern we wanted to avoid. Same size as `MAX_PENDING_GROUP_MESSAGES_PER_MEMBER`. The limit counts packets, and each message is small.
+/// Size of the buffer for packets that arrive BEFORE the handshake. It was raised from 20 to 200. Twenty was too small exactly where it matters most:
+/// a peer that was offline for a long time comes back and sends dozens of queued messages in a row, and the handshake may arrive among or after
+/// them. Anything beyond 20 was dropped, oldest first. The loss was not permanent (the sender retries), but it was slow and uneven. Same size as
+/// `MAX_PENDING_GROUP_MESSAGES_PER_MEMBER`. The limit counts packets, and each message is small.
 pub(crate) const MAX_EARLY_PACKETS_PER_PEER: usize = 200;
 
 /// Fix: gossipsub gives no ordering guarantee. An `Edit` or `Delete` can reach the other side before the `Text` it targets. The target row was
@@ -412,8 +403,8 @@ pub(crate) const MAX_EARLY_EDITS_DELETES_PER_TARGET: usize = 8;
 /// Memory protection.
 pub(crate) const MAX_PENDING_GROUP_MESSAGES_PER_MEMBER: usize = 200;
 
-/// Spec exception, user request (Tor): with Tor on, libp2p listens on a FIXED TCP port. The onion service bridge (`bridge_incoming_stream`) forwards
-/// incoming Tor streams to `127.0.0.1:<this port>`, so the port must be fixed and known in advance. With Tor off, a random port (0) is used as before.
+/// Deliberate deviation (Tor): with Tor on, libp2p listens on a FIXED TCP port. The onion service bridge (`bridge_incoming_stream`) forwards incoming
+/// Tor streams to `127.0.0.1:<this port>`, so the port must be fixed and known in advance. With Tor off, a random port (0) is used.
 pub(crate) const TOR_LIBP2P_PORT: u16 = 42611;
 
 /// A `HandshakeInit` whose `timestamp` differs from the current time by more than this many milliseconds (ahead or behind) is rejected. This stops
@@ -433,22 +424,22 @@ pub(crate) const UNDECRYPTABLE_BEFORE_REHANDSHAKE: u32 = 3;
 pub(crate) const UNDECRYPTABLE_WINDOW_MS: u64 = 2 * 60 * 1000;
 pub(crate) const UNDECRYPTABLE_REDO_MIN_INTERVAL_MS: u64 = 2 * 60 * 1000;
 
-/// Spec exception, user request (see the "Cross-network connectivity" note in SECURITY.md): manual relay address entry is still in Settings and was not
-/// removed. But two strangers with no shared relay history (two new users on different networks) need to be able to match without any manual setup. So
-/// a default bootstrap relay list is embedded in the app, like the default bootstrap nodes of IPFS and BitTorrent clients. In `start_network` each entry
-/// is added with the same function as the manual one (`add_known_relay_address`).
-/// Setup note: the list starts EMPTY on purpose. A random or non-existent address causes silent failed dials. After you set up a Typeon node with
+/// Deliberate deviation (see the "Cross-network connectivity" note in SECURITY.md): manual relay address entry is still in Settings. But two
+/// strangers with no shared relay history (two new users on different networks) need to be able to match without any manual setup. So a default
+/// bootstrap relay list is embedded in the app, like the default bootstrap nodes of IPFS and BitTorrent clients. In `start_network` each entry is
+/// added with the same function as the manual one (`add_known_relay_address`).
+/// Setup note: the list starts EMPTY on purpose. A random or non-existent address causes silent failed dials. After a Typeon node is set up with
 /// Node mode on and a public IP, paste that device's full onion address from `getNodeAddress()` as a string here (for example
-/// "/dns/<host>.onion/tcp/<port>/p2p/12D3Koo..."). A rebuild is needed. Users can still add relays they know in Settings. This list is a starting point
-/// for someone who knows no address yet, not a replacement for that.
+/// "/dns/<host>.onion/tcp/<port>/p2p/12D3Koo..."). A rebuild is needed. Users can still add relays they know in Settings. This list is a starting
+/// point for someone who knows no address yet, not a replacement for that.
 pub(crate) const DEFAULT_BOOTSTRAP_RELAYS: &[&str] = &[
     // "/ip4/1.2.3.4/tcp/4001/p2p/12D3KooWExampleReplaceWithRealAddress",
 ];
 
-/// Spec exception, user-requested reliable delivery: packets that carry `Text` (outside groups), `Edit`, `Delete` or `HistorySyncRequest` are resent at
-/// these intervals until the peer acknowledges them (an `Ack`, or a direct `HistorySyncResponse` for HistorySyncRequest). Exponential backoff, capped at
-/// `MAX`. A local `gossipsub.publish` success does not guarantee the peer really received it (see the `awaiting_confirmation` field). So unlike the
-/// old `pending_envelopes` queue, there is no upper time limit here. The user explicitly asked to keep trying until the peer confirms.
+/// Deliberate deviation, reliable delivery: packets that carry `Text` (outside groups), `Edit`, `Delete` or `HistorySyncRequest` are resent at
+/// these intervals until the peer acknowledges them (an `Ack`, or a direct `HistorySyncResponse` for HistorySyncRequest). Exponential backoff,
+/// capped at `MAX`. A local `gossipsub.publish` success does not guarantee the peer really received it (see the `awaiting_confirmation` field). So
+/// unlike the old `pending_envelopes` queue, there is no upper time limit here. Retries continue until the peer confirms.
 pub(crate) const ACK_RETRY_INITIAL_MS: u64 = 15_000;
 pub(crate) const ACK_RETRY_MAX_MS: u64 = 120_000;
 /// Upper bound of `recently_acked`. Ack and Seen are sent once. Before, they were sent nine times unconditionally (about 10.6 min). A lost Ack is
@@ -465,17 +456,15 @@ pub(crate) const RECENTLY_ACKED_MAX_ENTRIES: usize = 8192;
 /// age limit a little below the rotation window (with a safety margin). Past it, the packet is marked "Failed", and the user can resend it manually as a new message.
 pub(crate) const MAX_UNCONFIRMED_AGE_MS: u64 = ratchet::RATCHET_ROTATION_MS - 5 * 60 * 1000;
 
-/// Spec exception, user request: plain `Text` messages (1:1 and group fan-out copies) are no longer marked "Failed" when `MAX_UNCONFIRMED_AGE_MS`
-/// (about 25 min) passes. They join the `PendingConfirmation.regen_content` mechanism (see that field). Before, only Edit, Delete and GroupUpdate used
-/// it. The message is re-encrypted under a fresh ratchet step and keeps the same `message_id` (see the `message_id_override` of
-/// `send_message_content_inner`). The UI bubble and the `awaiting_confirmation` entry keep their identity, so no new bubble is created by a
-/// manual resend. The retry is not unbounded: `PendingConfirmation.original_sent_at` (the time the message first entered the queue, which stays fixed
-/// across regenerations) is checked against this window, and past it the message is given up (see `retry_unconfirmed_messages`). Two days covers
-/// the real-world case of a contact offline for days, and is still bounded enough not to produce endless background traffic. On app start
-/// (Kotlin `retryAllPendingNow`), everything in this window is retried at once.
-/// User decision (2026-08-27): raised from 2 days to 7 days. The server's mail retention (14 days) is longer, and this limit was the one that
-/// mattered. Ordinary cases such as a week-long holiday or a suspended line exceeded two days. `FILE_RETENTION_GRACE_MS` follows this value, so
-/// attachments are kept for the same time. A file offer that is still being retried finds its file on disk.
+/// Deliberate deviation: plain `Text` messages (1:1 and group fan-out copies) are not marked "Failed" when `MAX_UNCONFIRMED_AGE_MS` (about 25 min)
+/// passes. They join the `PendingConfirmation.regen_content` mechanism (see that field). Before, only Edit, Delete and GroupUpdate used it. The
+/// message is re-encrypted under a fresh ratchet step and keeps the same `message_id` (see the `message_id_override` of
+/// `send_message_content_inner`). The UI bubble and the `awaiting_confirmation` entry keep their identity, so a manual resend creates no new
+/// bubble. The retry is not unbounded: `PendingConfirmation.original_sent_at` (the time the message first entered the queue, which stays fixed
+/// across regenerations) is checked against this window, and past it the message is given up (see `retry_unconfirmed_messages`). The window is
+/// 7 days. This covers a contact who is offline for days, and the server's mail retention (14 days) is longer. `FILE_RETENTION_GRACE_MS` follows
+/// this value, so attachments are kept for the same time. A file offer that is still being retried finds its file on disk. On app start (Kotlin
+/// `retryAllPendingNow`), everything in this window is retried at once.
 pub(crate) const TEXT_RETRY_GIVE_UP_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// See `link_request_open_until`. The grant can arrive late after the primary device scans the QR, because of permanent retry or the server mailbox
 /// (for example the secondary was offline, or restarted). The window is written to disk.
@@ -515,8 +504,8 @@ pub(crate) const DOWNLOAD_WINDOW_MIN: usize = 2;
 pub(crate) const DOWNLOAD_RETRY_DELAY_MS: u64 = 3_000;
 pub(crate) const DOWNLOAD_WINDOW_MAX: usize = 40;
 /// The growth test is NOT an absolute threshold. It is relative to the smallest round trip measured on that path (see `DownloadState.rtt_min`). An
-/// absolute threshold pinned the window to its floor on a slow Tor circuit (measured on a device: round trip 15.6 s, window stuck at 2). A high-latency
-/// path needs the large window. The test is "is the round trip more than twice the best seen on this path" (Vegas-like).
+/// absolute threshold pinned the window to its floor on a slow Tor circuit (measured on a device: round trip 15.6 s, window stuck at 2). A
+/// high-latency path needs the large window. The test is "is the round trip more than twice the best seen on this path" (Vegas-like).
 pub(crate) const DOWNLOAD_RTT_GROW_FACTOR: u64 = 2;
 /// Above this, the window does not grow whatever the test says. We are then close to the `request_timeout` (`BLOB_REQUEST_TIMEOUT_MS`), and a chunk that
 /// times out halves the window.
