@@ -156,12 +156,11 @@ pub(crate) const MAX_KNOWN_RELAYS: usize = 10;
 /// See `ensure_relay_reservations`. A reservation that never gets a listen address (never accepted) is dropped after this time and requested again.
 pub(crate) const RELAY_RESERVATION_RETRY_MS: u64 = 2 * 60 * 1000;
 
-/// Yamux receive window. The default (`DEFAULT_CREDIT` in the yamux spec) is 262,144 bytes. A file chunk is `FILE_CHUNK_SIZE + 16`, 262,160 bytes,
-/// because of the AEAD tag. So each chunk exceeds the credit by exactly 16 bytes, and the sender waits for a window update before it can send the
-/// last 16 bytes. That is an extra round trip per chunk, which can nearly double the transfer time over Tor. yamux 0.13's automatic window growth
-/// does not fix this. `request_response` opens a new substream per request, which carries one chunk and closes, so auto-tuning never kicks in, and
-/// each chunk starts from 256 KiB again. A fixed, generous window is used instead. (Setting it required the yamux 0.12 path in the libp2p wrapper,
-/// so auto-tuning is given up. It never helped this access pattern.)
+/// Yamux receive window. The default (`DEFAULT_CREDIT`) is 262,144 bytes. A file chunk is `FILE_CHUNK_SIZE + 16` bytes (262,160) because of the AEAD tag, so each chunk
+/// exceeds the credit by 16 bytes and the sender waits for a window update before it can send the last 16 bytes. That is an extra round trip per chunk, which can nearly
+/// double transfer time over Tor. yamux 0.13's automatic window growth does not help: `request_response` opens a new substream per request, which carries one chunk and
+/// closes, so each chunk starts from the initial window. A fixed, generous window is used instead. Setting it required the yamux 0.12 path in the libp2p wrapper, so
+/// auto-tuning is not used.
 pub(crate) const YAMUX_RECEIVE_WINDOW: u32 = 4 * 1024 * 1024;
 /// Buffer cap per substream. Must not be smaller than the window.
 pub(crate) const YAMUX_MAX_BUFFER: usize = 8 * 1024 * 1024;
@@ -333,7 +332,7 @@ pub(crate) const HISTORY_FETCH_WINDOW_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// The rest of the window arrives within the same press, and a peer cannot make us ask forever.
 // ponytail: shared by all sources. A busy group month with many capped members could run out. Use per-source budgets if that shows up.
 pub(crate) const HISTORY_FETCH_MAX_PAGES: u32 = 20;
-/// No message is older than 2025-01-01 UTC: the first cursor of a chat ignores rows stamped before it (a device clock stuck at 1970, a backdated row).
+/// Earliest accepted message time: 1 January 2025 UTC. The first cursor of a chat ignores rows stamped before it, such as rows from a device clock stuck at 1970 or a backdated row.
 pub(crate) const HISTORY_FETCH_EPOCH_MS: i64 = 1_735_689_600_000;
 
 /// `reconnect_sweep` dials and resends `IdentityExchange` for a pending device link target (`pending_link_target`) on every sweep (at most every 15 s).
@@ -503,16 +502,16 @@ pub(crate) const DOWNLOAD_WINDOW_MIN: usize = 2;
 /// at round-trip rate. Not the 105 s stall timer: too long for the user.
 pub(crate) const DOWNLOAD_RETRY_DELAY_MS: u64 = 3_000;
 pub(crate) const DOWNLOAD_WINDOW_MAX: usize = 40;
-/// The growth test is NOT an absolute threshold. It is relative to the smallest round trip measured on that path (see `DownloadState.rtt_min`). An
-/// absolute threshold pinned the window to its floor on a slow Tor circuit (measured on a device: round trip 15.6 s, window stuck at 2). A
-/// high-latency path needs the large window. The test is "is the round trip more than twice the best seen on this path" (Vegas-like).
+/// The growth test is not an absolute threshold. It is relative to the smallest round trip measured on that path (see `DownloadState.rtt_min`). An absolute threshold pinned
+/// the window to its floor on a slow Tor circuit (round trip 15.6 s, window stuck at 2). A high-latency path needs the large window. The test is whether the round trip is
+/// more than twice the best measured on this path (Vegas-like).
 pub(crate) const DOWNLOAD_RTT_GROW_FACTOR: u64 = 2;
 /// Above this, the window does not grow whatever the test says. We are then close to the `request_timeout` (`BLOB_REQUEST_TIMEOUT_MS`), and a chunk that
 /// times out halves the window.
 /// See `server_client::BLOB_RTT_CEILING_MS`. Same reason: the round trip scales with chunk size, so an absolute threshold is wrong, and a fraction of
 /// `request_timeout` is correct.
 pub(crate) const DOWNLOAD_RTT_CEILING_MS: u64 = server_client::BLOB_REQUEST_TIMEOUT_MS * 4 / 5;
-/// Round trips below this count as measurement noise. Otherwise a very small `rtt_min` would stop growth for no reason.
+/// Samples below this round trip are measurement noise. Otherwise a very small `rtt_min` would stop growth for no reason.
 pub(crate) const DOWNLOAD_RTT_FLOOR_MS: u64 = 750;
 
 /// 105 s: longer than the 90 s chunk request timeout. At the old 45 s a chunk

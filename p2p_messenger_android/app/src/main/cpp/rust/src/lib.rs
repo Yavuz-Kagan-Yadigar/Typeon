@@ -9,7 +9,7 @@
 //! - `contact`: TOFU and safety-number changes
 //! - `group`: pairwise group messaging
 
-/// Crypto primitives live in the separate `typeon-crypto` crate, so the same audited code runs on native targets (Android, Linux, server) and in wasm.
+/// Crypto primitives live in the separate `typeon-crypto` crate, so the same code runs on native targets (Android, Linux, server) and in wasm.
 /// This `pub use` keeps the old paths (`crate::packet::...`, `crate::identity::...`, `p2p_messenger::server_proto::...`) working, so callers do not change.
 pub use typeon_crypto::{identity, packet, ratchet, server_proto, server_seal};
 mod contact;

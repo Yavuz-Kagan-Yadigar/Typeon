@@ -117,19 +117,18 @@ pub(crate) const BLOB_WINDOW_START: usize = 4;
 pub(crate) const BLOB_WINDOW_MIN: usize = 2;
 pub(crate) const BLOB_WINDOW_MAX: usize = 40;
 
-/// Round-trip threshold above which the window stops growing.
+/// The round-trip time above which the window stops growing.
 ///
-/// Measured, not guessed. With a fixed window of 16 over Tor, the average round trip was 24 s. Requests hit the 30 s protocol timeout, retries ate
-/// the bandwidth, and throughput fell from 180 KB/s to about 50 KB/s. The cause is classic bufferbloat: 16 x 256 KiB = 4 MB queued on one Tor
-/// circuit of about 200 KB/s, so the last chunk waited more than 20 s.
+/// Measured per path, because the right depth differs on LAN, Tor and relays. With a fixed window of 16 over Tor, the average round trip was 24 s. Requests hit the 30 s
+/// protocol timeout, retries ate the bandwidth, and throughput fell from about 180 KB/s to about 50 KB/s. The cause is bufferbloat: 16 x 256 KiB = 4 MB queued on one
+/// Tor circuit of about 200 KB/s, so the last chunk waited more than 20 s.
 ///
-/// So the problem was bandwidth, not latency, and more parallelism made it worse. The right behaviour keeps the bytes in flight small enough that
-/// the queueing delay stays below the timeout. This is measured per path, because the right depth differs on LAN, Tor and relays.
+/// The bottleneck is bandwidth, not latency, so more parallelism makes it worse. The window must keep the bytes in flight small enough that the queueing delay stays
+/// below the timeout.
 ///
-/// The threshold is relative, not absolute: it compares against the smallest round trip seen (`PendingBlobUpload.rtt_min`). A fixed value
-/// (6 s in the first version) pinned the window to its floor on a slow Tor circuit. Measured on a device: round trip 15.6 s, window stuck at 2,
-/// 33 KB/s. A high-latency path needs the large window. The queue-delay test is "round trip more than twice the best seen on this path"
-/// (Vegas-like), which keeps its meaning whatever the path speed.
+/// The threshold is relative, not absolute: it is compared against the smallest round trip seen (`PendingBlobUpload.rtt_min`). A fixed value pinned the window to its
+/// floor on a slow Tor circuit (round trip 15.6 s, window stuck at 2, 33 KB/s). The queue-delay test is "round trip more than twice the best measured on this path",
+/// which holds at any path speed.
 pub(crate) const BLOB_RTT_GROW_FACTOR: u64 = 2;
 /// If the round trip exceeds this, the window does not grow, whatever the queue-delay test
 /// says. We are then close to `BLOB_REQUEST_TIMEOUT_MS` (90 s), and a timed-out chunk halves
@@ -150,7 +149,7 @@ pub(crate) const BLOB_RTT_GROW_FACTOR: u64 = 2;
 /// unless a timeout is really near, whatever the chunk size.
 pub(crate) const BLOB_REQUEST_TIMEOUT_MS: u64 = 90_000;
 pub(crate) const BLOB_RTT_CEILING_MS: u64 = BLOB_REQUEST_TIMEOUT_MS * 4 / 5;
-/// Round trips below this count as measurement noise (local or LAN), so a very small `rtt_min` does not stop growth for no reason.
+/// Samples below this round trip are measurement noise (local or LAN). Otherwise a very small `rtt_min` would stop growth for no reason.
 pub(crate) const BLOB_RTT_FLOOR_MS: u64 = 750;
 
 // ---------------------------------------------------------------------------
@@ -2259,9 +2258,8 @@ impl P2PCore {
 
             // --- Blobs ---
             (ServerInflight::BlobPut { blob_id, chunk_index, total_chunks, server_id, sent_at }, ServerResponse::Ok) => {
-                // Round-trip measurement. It is the only way to tell whether a transfer is limited by latency or by bandwidth. If latency limits it,
-                // a larger window gives speed directly. If bandwidth limits it, a larger window gives nothing, and the real fix lies elsewhere (see the
-                // single Tor circuit ceiling).
+                // The round trip is measured. It tells whether a transfer is limited by latency or by bandwidth. If latency limits it, a larger window gives speed directly.
+                // If bandwidth limits it, a larger window gives nothing, and the fix lies elsewhere (see the single Tor circuit ceiling).
                 let rtt = mono_ms().saturating_sub(sent_at);
                 self.blob_rtt_sum += rtt;
                 self.blob_rtt_count += 1;

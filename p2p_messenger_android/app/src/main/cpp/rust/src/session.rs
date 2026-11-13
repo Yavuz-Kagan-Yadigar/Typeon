@@ -52,9 +52,9 @@ impl P2PCore {
             return false;
         }
         let now = current_time_ms();
-        // Network robustness fix (see the `device_onion_addr` field docs). Before, this used ONLY `device_last_addr`, the last address that worked.
-        // That could be a LAN address written over a LAN connection. Now the `.onion` address is also read from `device_onion_addr`, which is kept
-        // SEPARATE and is never overwritten. If the two differ, BOTH are tried at the same time. Whichever is still valid after the network change succeeds.
+        // A device's `.onion` address comes from `device_onion_addr`, which is kept separate and never overwritten by a LAN or relay address.
+        // `device_last_addr` alone is not used, because it can hold a LAN address that a Tor-only peer cannot reach. If the two differ, both are tried at once,
+        // and whichever is still valid after a network change succeeds.
         let primary_str = self.device_last_addr.get(fp).cloned();
         let onion_str = self.device_onion_addr.get(fp).cloned().filter(|o| Some(o) != primary_str.as_ref());
         // A group founder's hint (`vah:`), only while nothing better is known.
@@ -200,8 +200,8 @@ impl P2PCore {
             let force = connected_before.contains(&fp) || (!saver && seen_lately);
             self.try_reconnect_device(&fp, force);
         }
-        // Network robustness fix (see the `announce_address_to_all_contacts` docs): when the interface changes, our own best address may also change
-        // (new LAN IP, new UPnP mapping). We proactively tell EVERYONE we know, instead of only waiting for our contacts to reconnect to us.
+        // When the interface changes, our own best address may change too (new LAN IP, new UPnP mapping). We tell every known contact proactively, instead of
+        // waiting for them to reconnect to us (see `announce_address_to_all_contacts`).
         self.announce_address_to_all_contacts();
         // Multi-device (1.7): a network change is a strong signal. Ignore the debounce and try the sibling history backfill NOW (to catch messages from
         // people I missed while offline). At most one extra round per 5 minutes: every LTE/Wi-Fi flap asked every sibling for the newest rows of every
@@ -347,9 +347,8 @@ impl P2PCore {
     }
 
     pub(crate) fn initiate_handshake_with(&mut self, peer_device_fingerprint: &str) -> Result<(), String> {
-        // Found on a device: at app start, something sent a message before `setSkippedKeyEncryptionKey` had loaded the sessions. No session was in
-        // memory, so a NEW init was created and persisted over the real session the peer still used. Every restart diverged the two devices
-        // (siblings too) until a re-handshake.
+        // At app start, a message sent before `setSkippedKeyEncryptionKey` has loaded the sessions found no session in memory. A new init was then created and persisted
+        // over the real session the peer still used, so the two devices diverged on every restart until a re-handshake. Sending waits until the sessions are loaded.
         if !self.ratchets_loaded {
             return Err("Oturum durumu henüz yüklenmedi".to_string());
         }
@@ -445,23 +444,19 @@ impl P2PCore {
         r
     }
 
-    /// Fix (delivery guarantee: "the first message written while the other side was offline never arrives"). This is the only way out of a lost
-    /// `HandshakeInit`.
+    /// Sends a fresh handshake when the other side has confirmed nothing for `MAX_UNCONFIRMED_AGE_MS` (not even one Ack). This is the only way out of a lost `HandshakeInit`.
     ///
-    /// Failure pattern: when a message is first written to an offline device, `send_message_content_inner` calls `initiate_handshake_with` first. That
-    /// sets up the ratchet at once and tries to publish the `HandshakeInit`. If the other side is offline, `gossipsub.publish` fails and the envelope
-    /// falls into `pending_envelopes`. If the envelope goes stale there (or the app closes in the meantime), it is NEVER sent again.
-    /// `initiate_handshake_with` is only called when there is NO ratchet, but on the sender's side the ratchet now EXISTS. The receiver buffers incoming
-    /// packets in `early_packets` and waits for a handshake that never comes. No error is visible on either end, and messages are retried for 7 days for nothing.
+    /// Failure pattern: the first message to an offline device calls `initiate_handshake_with`, which sets up the ratchet and tries to publish the `HandshakeInit`. If the
+    /// publish fails, the envelope sits in `pending_envelopes`. If it goes stale there, or the app closes, it is never sent again. Later calls skip
+    /// `initiate_handshake_with` because the sender's ratchet exists, while the receiver buffers packets in `early_packets` and waits for a handshake that never comes.
+    /// Nothing shows on either end, and messages retry for 7 days for nothing.
     ///
-    /// Fix: if the other side has confirmed NOTHING for `MAX_UNCONFIRMED_AGE_MS` (not even one Ack), we assume the session was never set up on its side,
-    /// and send a FRESH handshake. Triggers: (1) the refresh round (see the `message_id_override` arm of `send_message_content_inner`); (2) reconnecting
-    /// to that peer (see the `connections_established` block of `poll_events`).
+    /// Triggers: (1) the refresh round (see the `message_id_override` arm of `send_message_content_inner`); (2) reconnecting to that peer (see the
+    /// `connections_established` block of `poll_events`).
     ///
-    /// Because the session is reset, pending packets stay encrypted under the old chain. So all of them are regenerated on the fresh chain with
-    /// `regen_pending_for_peer`, the same path used after a rotation, with the same meaning of invalidation. The criterion is whether the root key REALLY
-    /// changed, not the return value of `initiate_handshake_with`. Even if publishing fails transiently (the envelope is queued), the ratchet has already
-    /// changed, and the pending packets must be renewed.
+    /// The session is reset, so pending packets stay encrypted under the old chain. They are all regenerated on the fresh chain with `regen_pending_for_peer`, as after
+    /// a rotation. The criterion is whether the root key really changed, not the return value of `initiate_handshake_with`. Even if publishing fails (the envelope is
+    /// queued), the ratchet has already changed and pending packets must be renewed.
     /// Returns the identity of the current chain generation of a session (see `PendingConfirmation.chain_stamp`). Empty string if there is no session.
     pub(crate) fn chain_stamp_for(&self, peer_device_fingerprint: &str) -> String {
         self.ratchets
@@ -606,17 +601,15 @@ impl P2PCore {
         );
         verify_hybrid_signature(&to_verify, &handshake.signature_classical, &handshake.signature_pq, &sender)?;
 
-        // Security fix (see the `record_peer_id_if_known` docs and the same note in `process_identity_exchange`): the signature was verified at this
-        // point, so the sender really holds the private key of this fingerprint (already stored in `known_remote_devices`). It is now safe to link this
-        // fingerprint with the `PeerId` that really published the packet. Before, this was done unconditionally, BEFORE signature verification. The call
-        // itself is further down, after the freshness and replay checks: a replayed old init has a valid signature too.
+        // The signature was verified at this point, so the sender holds the private key of this fingerprint (already stored in `known_remote_devices`). Only now is the
+        // fingerprint linked to the `PeerId` that published the packet. The call is further down, after the freshness and replay checks, because a replayed old init
+        // also has a valid signature.
 
-        // Security fix (handshake replay leading to a session-reset DoS): gossipsub `Signed` mode lets an observer on the network re-publish a valid
-        // `HandshakeInit` it captured. This function overwrites an existing ratchet with a fresh `respond` state, so such a replay could break a live
-        // conversation. Two layers of defence (see the `recent_handshake_sigs` field note):
-        // (1) a freshness window: a timestamp that is too old or too far ahead is rejected (filters captured old handshakes, tolerates clock skew);
-        // (2) content dedup: the same signed (byte-identical) handshake is not applied a second time within the window. A real re-pairing carries fresh
-        //     ephemeral keys, so it has a different signature and is accepted whatever the clock skew (no risk of a monotonic timestamp breaking re-pairing).
+        // Gossipsub `Signed` mode lets an observer re-publish a valid captured `HandshakeInit`. This function overwrites an existing ratchet with a fresh `respond` state,
+        // so a replay could break a live conversation. Two layers guard against it (see the `recent_handshake_sigs` field):
+        // (1) a freshness window: a timestamp too old or too far ahead is rejected (this tolerates clock skew);
+        // (2) content dedup: the same signed, byte-identical handshake is not applied twice within the window. A real re-pairing carries fresh ephemeral keys, so it has a
+        //     different signature and is accepted whatever the clock skew.
         let now = current_time_ms();
         let skew = now.abs_diff(handshake.timestamp);
         // An init waits in the server mailbox while this device is off, so the
