@@ -194,10 +194,9 @@ impl P2PCore {
                 let peer_id = keypair.public().to_peer_id();
                 let store = MemoryStore::new(peer_id);
                 let kad = kad::Behaviour::new(peer_id, store);
-                // Cache 0: identify's address cache would feed every peer's raw listen addresses,
-                // including 127.0.0.1, into each dial. Dials then reached our own node ("Unexpected
-                // peer ID <self>", seen on device 2026-09-18). The Identify arm below records the
-                // useful non-loopback addresses itself.
+                // Cache 0: identify's address cache would feed every peer's raw listen addresses, including 127.0.0.1, into each dial.
+                // Dials then reached our own node ("Unexpected peer ID <self>"). The Identify arm below records the useful non-loopback
+                // addresses itself.
                 let identify = identify::Behaviour::new(identify::Config::new(
                     "/p2pmessenger/1.0.0".to_string(),
                     keypair.public(),
@@ -361,8 +360,8 @@ impl P2PCore {
         }
     }
 
-    /// See `RADIO_WINDOW_MS`. Wi-Fi too: with Tor awake, a night on Wi-Fi woke the CPU
-    /// about once a second (2026-10-04: 64 % in 7 h, screen off).
+    /// See `RADIO_WINDOW_MS`. Wi-Fi too: with Tor awake, a night on Wi-Fi woke the CPU about once a second (measured: 64 % of 7 hours with the
+    /// screen off).
     pub(crate) fn radio_saver(&self) -> bool {
         self.power_save
     }
@@ -378,10 +377,8 @@ impl P2PCore {
         self.metered = metered;
     }
 
-    /// Battery saver (2026-08-28). The Kotlin/GTK side turns this on when the app goes
-    /// to the background and the screen turns off. It does not change network
-    /// behaviour; it only lowers the probe rate of healthy, quiet connections (see the
-    /// `power_save` field note).
+    /// Battery saver. The Kotlin / GTK side turns this on when the app goes to the background and the screen turns off. It does not change network
+    /// behaviour; it only lowers the probe rate of healthy, quiet connections (see the `power_save` field note).
     pub(crate) fn set_power_save(&mut self, enabled: bool) {
         if self.power_save == enabled {
             return;
@@ -488,12 +485,11 @@ impl P2PCore {
         // min). `server_archive_queue` (background sync backlog) is never counted.
         self.pairing_is_fresh()
             || self.downloads_busy() > 0
-            // `server_inflight` is not work. The 30 s fetch sweep is sent in the same poll turn
-            // the service checks next, so it always read as busy and no phone reached deep idle
-            // (measured 2026-09-26: wake lock 30/30 min, LTE radio active 93 %). Its reply is a
-            // network event that wakes the native wait anyway.
-            // Not while the server refuses deposits (quota): the upload then only waits for the
-            // backoff. Only with a routing server up, since uploads go nowhere else.
+            // `server_inflight` is not work. The 30 s fetch sweep is sent in the same poll turn the service checks next, so it always read as busy,
+            // and no phone reached deep idle (measured: wake lock held 30 of 30 minutes, LTE radio active 93 %). Its reply is a network event that
+            // wakes the native wait anyway.
+            // Not while the server refuses deposits (quota): the upload then only waits for the backoff. Only with a routing server up, since
+            // uploads go nowhere else.
             || self.blob_upload_can_run()
             // A deferred incoming packet means the device is not idle. Otherwise it would drop
             // into the 30 s deep-idle step and delay delivery (see `deferred_incoming`). Not
@@ -563,24 +559,18 @@ impl P2PCore {
         })
     }
 
-    /// Gossip topic name. It used to be derived directly from the recipient's device
-    /// fingerprint (`p2p_msg_<fingerprint>`). Any network observer could then see which
-    /// fingerprint received a message, and when, without reading it (see SECURITY.md,
-    /// traffic analysis). After a ratchet session exists, the topic is a pseudorandom
-    /// name derived with HKDF from that session's `root_key`. Only the two sides of the
-    /// session share that secret, so the name cannot be traced back to the fingerprint.
-    /// `root_key` changes at each DH/KEM rotation (every 30 min, see ratchet.rs), so the
-    /// topic rotates too.
+    /// Gossip topic name. It used to be derived directly from the recipient's device fingerprint (`p2p_msg_<fingerprint>`). Any network observer
+    /// could then see which fingerprint received a message, and when, without reading it (traffic analysis; see SECURITY.md). After a ratchet
+    /// session exists, the topic is a pseudorandom name derived with HKDF from that session's `root_key`. Only the two sides of the session share
+    /// that secret, so the name cannot be traced back to the fingerprint. `root_key` changes at each DH/KEM rotation (every 30 min, see ratchet.rs),
+    /// so the topic rotates too.
     ///
-    /// Known limit: before any ratchet session exists (the first IdentityExchange and
-    /// HandshakeInit pair) there is no shared secret, so the old `p2p_msg_<fingerprint>`
-    /// mailbox topic is used. Ongoing conversation traffic is protected. Only the first
-    /// pairing exchange stays visible by fingerprint (documented in SECURITY.md).
+    /// Known limit: before any ratchet session exists (the first IdentityExchange and HandshakeInit pair) there is no shared secret, so the old
+    /// `p2p_msg_<fingerprint>` mailbox topic is used. Ongoing conversation traffic is protected. Only the first pairing exchange stays visible by
+    /// fingerprint (documented in SECURITY.md).
     ///
-    /// The input is `ratchet::root_handle` of a root (`root_handle_now` or
-    /// `prev_root_key`), never the root itself.
-    /// Since gossipsub was removed, the topic string only names the session's mailbox on
-    /// the server.
+    /// The input is `ratchet::root_handle` of a root (`root_handle_now` or `prev_root_key`), never the root itself.
+    /// Since gossipsub was removed, the topic string only names the session's mailbox on the server.
     pub(crate) fn topic_for_root_key(root_key: &[u8]) -> String {
         use sha2::Sha256;
         let hk = Hkdf::<Sha256>::new(None, root_key);
@@ -589,10 +579,8 @@ impl P2PCore {
         format!("p2p_rt_{}", hex::encode(topic_id))
     }
 
-    /// Adds a candidate to `known_relay_peers` (see SECURITY.md, cross-network
-    /// connectivity). When `MAX_KNOWN_RELAYS` is full, the least recently seen entry is
-    /// evicted. It is an opportunistic cache and is not persisted: each process refills
-    /// it from what it sees.
+    /// Adds a candidate to `known_relay_peers` (see SECURITY.md, cross-network connectivity). When `MAX_KNOWN_RELAYS` is full, the least recently
+    /// seen entry is evicted. It is an opportunistic cache and is not persisted: each process refills it from what it sees.
     pub(crate) fn record_known_relay(&mut self, peer_id: PeerId, addr: Multiaddr) {
         // LRU eviction: the entry with the oldest last-seen time is removed. (Earlier,
         // `keys().next()` picked an arbitrary entry, and a working relay could be evicted
@@ -863,11 +851,9 @@ impl P2PCore {
             }
         }
         for (relay_peer_id, (relay_addr, _)) in &self.known_relay_peers {
-            // Only through a relay we are already connected to. Dialing the circuit address of an
-            // unreachable relay first dials the relay. With the server offline, every reconnect
-            // to any peer became another failed onion lookup (overnight 2026-09-30: 444 failed
-            // dials to the server, about one per 80 s, CPU and radio never idle). Connecting to
-            // the relay itself is `server_sweep`'s job.
+            // Only through a relay we are already connected to. Dialing the circuit address of an unreachable relay first dials the relay. With the
+            // server offline, every reconnect to any peer became another failed onion lookup (measured overnight: 444 failed dials to the server,
+            // about one per 80 s, with CPU and radio never idle). Connecting to the relay itself is `server_sweep`'s job.
             if *relay_peer_id == target_peer_id || !swarm.is_connected(relay_peer_id) {
                 continue;
             }
@@ -1331,15 +1317,15 @@ impl P2PCore {
                 }
             }
         }
-        // Critical: `awaiting_confirmation` is a `HashMap`. Rust's std `HashMap` uses a randomly seeded hasher (DoS resistance), so the
-        // `.iter()` order has nothing to do with composition order. When several messages queue up while the user is offline, a random
-        // order could change on every turn. The requirement is that messages not yet sent are retried in composition order. `original_sent_at`
-        // is in every `PendingConfirmation`, so sorting `due_ids` by it is enough. A `BTreeMap` would have touched every
-        // `.get`, `.get_mut`, `.remove` and `.insert` call site.
+        // Important: `awaiting_confirmation` is a `HashMap`. Rust's std `HashMap` uses a randomly seeded hasher (DoS resistance), so the `.iter()`
+        // order has nothing to do with composition order. When several messages queue up while the user is offline, a random order could change on
+        // every turn. The requirement is that messages not yet sent are retried in composition order. `original_sent_at` is in every
+        // `PendingConfirmation`, so sorting `due_ids` by it is enough. A `BTreeMap` would have touched every `.get`, `.get_mut`, `.remove` and
+        // `.insert` call site.
         //
-        // Measured fix (2026-08-28): the chain generation stamp (see `PendingConfirmation.chain_stamp`) was checked only for in-order
-        // packets. A packet whose generation had changed stayed in retry with ciphertext the peer could no longer decrypt, until its
-        // backoff (up to 2 minutes) expired. Refreshing right away on a generation change now works as intended.
+        // Fix: the chain generation stamp (see `PendingConfirmation.chain_stamp`) was checked only for in-order packets. A packet whose generation
+        // had changed stayed in retry with ciphertext the peer could no longer decrypt, until its backoff (up to 2 minutes) expired. Refreshing
+        // right away on a generation change now works as intended.
         //
         // The stamp is computed once per peer (one HKDF step, `topic_for_root_key`), not once per message.
         let mut stamp_cache: HashMap<String, String> = HashMap::new();
@@ -1358,12 +1344,9 @@ impl P2PCore {
                 stamp_cache.insert(fp, stamp);
             }
         }
-        // Radio saver: retries wait for the window like every other periodic
-        // job. They ran on their own clock (5 s doubling to 120 s), so one
-        // connected peer that never acks kept the LTE radio up all the time:
-        // an 8 KB envelope re-sent every minute or two, for days (9S
-        // 2026-10-02: radio 74 % of a 10-min screen-off run). A packet queued
-        // in the last minute is still sent at once.
+        // Radio saver: retries wait for the window like every other periodic job. They used to run on their own clock (5 s doubling to 120 s), so
+        // one connected peer that never acks kept the LTE radio up all the time: an 8 KB envelope re-sent every minute or two, for days (measured:
+        // radio 74 % of a 10-minute screen-off run). A packet queued in the last minute is still sent at once.
         let hold_retries = self.radio_saver() && !self.radio_window_open;
         let mut due_ids: Vec<(String, u64)> = self.awaiting_confirmation.iter()
             .filter(|(_, p)| {
@@ -1433,11 +1416,10 @@ impl P2PCore {
                 if !give_up_for_real {
                     // Clone (not move) so `regen_content` is still available below for the give-up event.
                     if let Some(content) = regen_content.clone() {
-                        // Found in user feedback: messages should be retried for up to about 7 days, even plain Text, until the peer
-                        // acknowledges them. Resending the same stale ciphertext is pointless. Instead the original plaintext is
-                        // re-encrypted with a FRESH ratchet step, keeping the same `message_id` and `original_sent_at` (see
-                        // `send_message_content_inner`). The UI bubble and the `awaiting_confirmation` entry stay continuous.
-                        // The pending-messages screen lists only Text, so this log line is the only place the other kinds show up.
+                        // Messages should be retried for up to about 7 days, even plain Text, until the peer acknowledges them. Resending the same
+                        // stale ciphertext is pointless. Instead the original plaintext is re-encrypted with a FRESH ratchet step, keeping the same
+                        // `message_id` and `original_sent_at` (see `send_message_content_inner`). The UI bubble and the `awaiting_confirmation` entry
+                        // stay continuous. The pending-messages screen lists only Text, so this log line is the only place the other kinds show up.
                         let kind = content.kind();
                         warn!("Paket {} ({} -> {}) onaylanmadan azami yaşı aştı, TAZELENİP AYNI kimlikle yeniden deneniyor",
                             message_id, kind, &peer_fp[..peer_fp.len().min(8)]);
