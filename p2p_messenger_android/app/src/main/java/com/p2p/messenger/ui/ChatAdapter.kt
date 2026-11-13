@@ -16,11 +16,9 @@ import com.p2p.messenger.util.AvatarUtil
 import com.p2p.messenger.util.ImagePreview
 
 /**
- * Sohbet/kişi listesi adapter'ı. `ListAdapter` + `DiffUtil` kullanır ki
- * liste güncellendiğinde (yeni kişi eklendi, son mesaj değişti vb.)
- * `notifyDataSetChanged()` yerine sadece değişen satırlar animasyonlu
- * olarak güncellensin — büyüyen kişi listelerinde performans ve UX farkı
- * yaratır.
+ * Adapter for the chat and contact list. It uses `ListAdapter` with `DiffUtil`, so that when the list changes (a new contact, a changed
+ * last message, and so on) only the changed rows are updated, with animation. `notifyDataSetChanged()` would redraw everything. On
+ * long contact lists that makes a visible difference in speed and smoothness.
  */
 class ChatAdapter(
     private val onItemClick: (ChatMessage) -> Unit
@@ -37,30 +35,21 @@ class ChatAdapter(
         /** See PinnedChatsPrefs — pinned rows always sort above unpinned
          *  ones (ChatsFragment.refreshList) and get a 📌 prefix on the name. */
         val isPinned: Boolean = false,
-        /** Rust'ın gerçek `contact_id`'si (`contactId` alanı tarihsel
-         *  olarak AYGIT parmak izini taşıyor, bkz. ChatsFragment notu) —
-         *  sadece uzun basma menüsündeki sohbet geçmişi temizleme/kişi
-         *  silme çağrıları için gerekli. Grup satırlarında boş kalır. */
+        /** The real `contact_id` from Rust. The `contactId` field historically carries the DEVICE fingerprint (see the ChatsFragment note).
+         *  It is needed only for the clear-history and delete-contact calls of the long-press menu. Empty on group rows. */
         val realContactId: String = "",
-        /** Bu kişinin/grubun profil fotoğrafı (720p/%85 JPEG), yoksa
-         *  `null` (baş harf rozeti gösterilir). */
+        /** Profile photo of this contact or group (720p, 85% JPEG), or `null`. The initial badge is shown when it is `null`. */
         val avatarJpeg: ByteArray? = null,
-        /** Gruplar sekmesi kaldırıldı, gruplar bu listeye
-         *  karıştırıldı (bkz. kullanıcı isteği) — `true` ise `contactId`
-         *  aslında bir `group_id`'dir, tıklama `GroupChatActivity` açmalı. */
+        /** The Groups tab was removed, and groups were merged into this list. When `true`, `contactId` is really a `group_id`, and a tap
+         *  must open `GroupChatActivity`. */
         val isGroup: Boolean = false,
-        /** bu kişi yüz yüze QR ile DEĞİL, bir
-         *  grup üzerinden kurucu kefaletiyle eklendiyse `true` — satırda
-         *  uyarı işareti gösterilir (bkz. Rust `Contact.added_via_group`). */
+        /** `true` when this person was added through a group (vouched for by the founder), not by an in-person QR. A warning mark is shown on
+         *  the row (see Rust `Contact.added_via_group`). */
         val addedViaGroup: Boolean = false,
-        /** `isGroup` satırlarında, bu grubun
-         *  kurucusu BİZ miyiz — uzun basma menüsünde "grubu herkes için
-         *  sil" seçeneği yalnızca kurucuya gösterilir. */
+        /** On `isGroup` rows: whether WE are the founder of this group. The "Delete group for everyone" option is shown only to the founder. */
         val isGroupFounder: Boolean = false,
-        /** Kullanıcı kararı (2026-08-27): ENGELLEME kişiyi (kimliği)
-         *  hedefliyor, cihazı değil — bu yüzden uzun basma menüsünün
-         *  `identity_id`'ye ihtiyacı var. `contactId` tarihsel olarak aygıt
-         *  parmak izini taşıyor, o iş görmüyor. Grup satırlarında boş. */
+        /** Blocking targets the PERSON (identity), not a device. So the long-press menu needs the `identity_id`. `contactId` historically
+         *  carries the device fingerprint, which does not do the job. Empty on group rows. */
         val identityId: String = ""
     ) {
         override fun equals(other: Any?): Boolean {
@@ -72,15 +61,10 @@ class ChatAdapter(
                 isPinned == other.isPinned &&
                 realContactId == other.realContactId && identityId == other.identityId &&
                 isGroup == other.isGroup &&
-                // bu
-                // ikisi önceden eksikti — `DiffUtil.ItemCallback.areContentsTheSame`
-                // bu `equals`'ı kullandığından, GÜVENLİKLE İLGİLİ "⚠
-                // doğrulanmadı" rozetini süren `addedViaGroup` (bkz. `bind`
-                // fonksiyonundaki kullanımı) yalnızca BAŞKA bir alan (ör.
-                // isim/son mesaj) da aynı anda değişirse güncellenirdi — bir
-                // kişi sonradan doğrulanıp `addedViaGroup` tek başına
-                // değiştiğinde satır YENİDEN BAĞLANMAZ, eski uyarı rozeti
-                // ekranda kalırdı.
+                // Both of these fields were missing before. `DiffUtil.ItemCallback.areContentsTheSame` uses this `equals`. So the security
+                // "unverified" mark, driven by `addedViaGroup` (see its use in `bind`), was updated only when ANOTHER field (such as the name
+                // or the last message) changed too. When a contact was verified later and only `addedViaGroup` changed, the row was NOT
+                // rebound, and the old warning mark stayed on screen.
                 addedViaGroup == other.addedViaGroup && isGroupFounder == other.isGroupFounder &&
                 (avatarJpeg?.contentEquals(other.avatarJpeg) ?: (other.avatarJpeg == null))
         }
@@ -111,8 +95,7 @@ class ChatAdapter(
         }
     }
 
-    /** Bir kişi satırına uzun basıldığında (sohbet geçmişini temizle/
-     *  kişiyi sil menüsü ChatsFragment/ContactsFragment'ta gösterilir). */
+    /** Called on long press of a contact row. The clear-history and delete-contact menu is shown by ChatsFragment and ContactsFragment. */
     var onContactLongClick: ((ChatMessage) -> Unit)? = null
 
     inner class ChatViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
@@ -127,8 +110,7 @@ class ChatAdapter(
         }
 
         fun bind(message: ChatMessage) {
-            // Grup üzerinden (kurucu kefaletiyle) eklenmiş kişiler yüz yüze
-            // QR ile doğrulanmadı — isimde görünür bir uyarı işareti.
+            // Contacts added through a group (vouched for by the founder) were not verified in person with QR. A visible warning mark on the name.
             val pinPrefix = if (message.isPinned) "📌 " else ""
             val warnPrefix = if (message.addedViaGroup) "⚠ " else ""
             txtName.text = "$pinPrefix$warnPrefix${message.displayName}"

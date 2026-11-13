@@ -7,51 +7,37 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 
 /**
- * klavye açıldığında
- * sohbet onun yüksekliğini telafi etsin ve alttaki mesaj görünür kalsın;
- * klavye kapanınca geri alsın.
+ * When the keyboard opens, the chat compensates for its height, so the bottom message stays visible. When the keyboard closes, it
+ * takes that back.
  *
- * NEDEN sadece `android:windowSoftInputMode="adjustResize"` YETMİYOR: bu
- * projenin test telefonunda (Redmi Note 8 Pro / Android 16) `adb shell
- * dumpsys window` ile ÖLÇÜLDÜ — `adjustResize` bildirilse bile pencere
- * gerçekte yeniden boyutlanmıyor. Yine de manifeste konması ŞART: aksi
- * halde devreye giren varsayılan `adjustPan` tüm pencereyi kaydırıyor ve
- * bizim eklediğimiz dolguyla üst üste biniyor.
+ * WHY `android:windowSoftInputMode="adjustResize"` ALONE IS NOT ENOUGH: on the project's test phone (Redmi Note 8 Pro, Android 16), it was
+ * measured with `adb shell dumpsys window`. Even with `adjustResize` declared, the window was not really resized. The manifest entry is still
+ * REQUIRED: otherwise the default `adjustPan` takes effect, which pans the whole window, and it overlaps the padding this code adds.
  *
- * ÖLÇÜM KAYNAĞI TEK: `WindowInsetsCompat.Type.ime()`. Yedek olarak
- * `getWindowVisibleDisplayFrame` ("pencerenin klavyeyle örtülmeyen alanı")
- * eklendi ve gerçek cihazda DENENDİ — kaldırıldı: o metrik bu ekranda
- * pencere yüksekliğine göre anlamsız büyük değerler döndürüp düzeni
- * tamamen bozdu (giriş çubuğu ekranın tepesine fırladı). Aynı sınıf
- * heuristikler bu projede daha önce de başarısız olmuştu. Insets tek
- * doğru kaynak; telefonda çalışmamasının sebebi ölçüm değil, eksik
- * `adjustResize` yüzünden pencerenin PAN etmesiydi.
+ * ONE MEASUREMENT SOURCE: `WindowInsetsCompat.Type.ime()`. As a fallback, `getWindowVisibleDisplayFrame` (the area of the window not covered
+ * by the keyboard) was tried on a real device and then removed. On this screen that metric returned meaningless large values for the window
+ * height and broke the layout completely: the input bar jumped to the top of the screen. Heuristics of this kind had failed in this project
+ * before. Insets are the only correct source. The reason it did not work on the phone was not the measurement. It was the missing
+ * `adjustResize`, which made the window PAN.
  *
- * KAYDIRMA: "sona atla" DEĞİL. İlk sürüm öyleydi ve cihazda yanlış olduğu
- * görüldü — kullanıcı yukarı kaydırmışken klavyeyi açmak onu istemeden en
- * dibe fırlatıyordu. Doğrusu TELAFİ: liste ne kadar küçüldüyse içerik o
- * kadar kaydırılır; ekranın altındaki mesaj altta kalır, klavye kapanınca
- * (delta negatif) kendiliğinden geri alınır. Ayrıntı ve neden insets
- * deltası KULLANILMADIĞI için `addOnLayoutChangeListener` yorumuna bakın.
+ * SCROLLING: not "scroll to the bottom". The first version did that, and on the device it was wrong. Opening the keyboard while the user had
+ * scrolled up threw the list to the very bottom. The right behaviour is COMPENSATION. The content scrolls by exactly as much as the list shrank.
+ * The message at the bottom of the screen stays at the bottom. When the keyboard closes (negative delta), it is taken back automatically.
+ * See the `addOnLayoutChangeListener` comment for the details, and for why the insets delta is NOT used.
  */
 object KeyboardInsets {
 
     fun attach(root: View, recycler: RecyclerView) {
         val basePaddingBottom = root.paddingBottom
-        // bkz. aşağıdaki `addOnLayoutChangeListener` notu — insets
-        // dağıtıldığında (yerleşim henüz TETİKLENMEDEN) alınan bir
-        // an-görüntü: kullanıcı o an listenin dibinde miydi?
+        // See the `addOnLayoutChangeListener` note below. A snapshot taken when the insets are dispatched (before the layout runs): was the user
+        // at the bottom of the list at that moment?
         var wasNearBottomBeforeResize = true
 
-        // Found on device (Note 9S, Android 12, 2026-09-19): the insets listener
-        // below is never called there. The chat root sits inside a DrawerLayout
-        // that consumes the insets, and the window resizes by itself
-        // (adjustResize works). The flag stayed false, so on keyboard CLOSE the
-        // "not at bottom" branch scrolled back by the keyboard height ON TOP of
-        // LinearLayoutManager's own re-anchoring, and the list jumped up. The flag
-        // is now tracked from real scrolls: dy == 0 calls (sent after every
-        // layout, including the resize itself) do not touch it, so it still
-        // holds the state from before the resize when the layout listener runs.
+        // On a Note 9S (Android 12), the insets listener below is never called. The chat root sits inside a DrawerLayout that consumes the
+        // insets, and the window resizes by itself (adjustResize works). The flag stayed false. So on keyboard CLOSE, the "not at bottom"
+        // branch scrolled back by the keyboard height ON TOP of LinearLayoutManager's own re-anchoring, and the list jumped up. The flag is
+        // now tracked from real scrolls. Calls with dy == 0 (sent after every layout, including the resize itself) do not touch it, so it
+        // still holds the state from before the resize when the layout listener runs.
         recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
                 if (dy != 0) wasNearBottomBeforeResize = isRecyclerNearBottom(rv)
@@ -67,8 +53,7 @@ object KeyboardInsets {
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
             val navigation = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
-            // Gezinme çubuğu zaten kök dolgusunun bir parçası; yalnızca onu
-            // AŞAN kısım klavyeye ait.
+            // The navigation bar is already part of the root padding. Only the part BEYOND it belongs to the keyboard.
             val extra = (ime - navigation).coerceAtLeast(0)
             wasNearBottomBeforeResize = isRecyclerNearBottom(recycler)
             root.setPadding(
@@ -81,50 +66,33 @@ object KeyboardInsets {
         }
 
         /*
-         * Telafiyi, insets deltasından DEĞİL listenin GERÇEK boyut
-         * değişiminden türetiyoruz.
+         * The compensation is derived from the REAL size change of the list, not from the insets delta.
          *
-         * Önceki sürüm "klavye ne kadar açıldıysa o kadar kaydır" diyordu ve
-         * cihazda çalışmadı (kullanıcı ekran görüntüsüyle gösterdi: çubuk
-         * yukarı çıkıyor ama liste hiç kaymıyor, alttaki mesajlar kırpılıyor).
-         * Sebep zamanlama: dolgu atandığı anda kaydırma miktarı biriktiriliyor,
-         * ama araya listenin boyutu HENÜZ değişmemişken tetiklenen bir yerleşim
-         * geçişi giriyor; kaydırma orada tüketiliyor ve asıl küçülme
-         * gerçekleştiğinde düzen yöneticisi çıpasını geri yükleyip etkiyi
-         * siliyordu.
+         * An earlier version said "scroll by as much as the keyboard opened" and did not work on the device. The user showed it with a
+         * screenshot: the input bar moved up, but the list did not scroll, and the bottom messages were cut off. The cause was timing. The
+         * scroll amount was accumulated when the padding was assigned. But a layout pass triggered while the list size had NOT changed yet
+         * came in between. The scroll was consumed there, and when the real shrink happened, the layout manager restored its anchor and
+         * cancelled the effect.
          *
-         * Bu sürümde böyle bir "bekleyen miktar" defteri YOK: liste ne zaman
-         * N piksel küçülürse içerik tam o anda N piksel kaydırılır (büyürse
-         * ters yönde). Bu, tanımı gereği "ekranın altındaki mesaj altta
-         * kalsın" demek ve klavyenin açılması/kapanması için ayrı bir kola
-         * gerek bırakmıyor.
+         * This version has no "pending amount" ledger. Whenever the list shrinks by N pixels, the content scrolls by exactly N pixels at that
+         * moment (it scrolls the other way if it grows). By definition, this keeps "the message at the bottom of the screen stays at the
+         * bottom", and it needs no separate branch for opening or closing the keyboard.
          */
         recycler.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
             val previousHeight = oldBottom - oldTop
-            // İlk yerleşimde "önceki yükseklik" yok — 0'dan kaydırmak listeyi
-            // açılışta sıçratırdı.
+            // No previous height on the first layout. Scrolling from 0 would make the list jump when it opens.
             if (previousHeight == 0) return@addOnLayoutChangeListener
             val delta = previousHeight - (bottom - top)
             if (delta == 0) return@addOnLayoutChangeListener
             if (wasNearBottomBeforeResize) {
-                // "en altta klavye
-                // açılıp kapanınca view yukarı sürükleniyor"): liste
-                // BÜYÜRKEN (klavye kapanırken) `LinearLayoutManager` zaten
-                // en altta boşluk BIRAKMAMAK için kendiliğinden telafi
-                // ediyor — içerik sonunu viewport sonuna göre yeniden
-                // çıpalıyor, bizim `scrollBy` çağırmamıza GEREK KALMADAN.
-                // Küçülürken (klavye açılırken) bu kendiliğinden telafi
-                // YOK — LayoutManager üstteki çıpayı sabit tutup alttaki
-                // içeriği sessizce kırpıyor, bu yüzden ORADA piksel
-                // deltası gerçekten gerekli (aşağıdaki `else` kolu).
-                // Ama en alttayken BÜYÜME tarafında da aynı piksel
-                // deltasını uygulamaya devam etmek, LayoutManager'ın KENDİ
-                // telafisinin ÜSTÜNE bir kez daha ekleniyor ve listeyi
-                // gerçek dipten fazladan yukarı sürüklüyordu — tam da
-                // bildirilen hata. En alttayken bu yüzden pikselle
-                // uğraşmak yerine doğrudan dibe sabitleniyor —
-                // `ChatActivity.onNewIncomingItemAdded` ile AYNI iki
-                // geçişli (scrollToPosition + kalan-fark) desen.
+                // When the list GROWS (the keyboard closes), LinearLayoutManager already compensates by itself, so the bottom gap is not left.
+                // It re-anchors the content end to the viewport end, without any `scrollBy` call from us. When the list SHRINKS (the keyboard
+                // opens), that self-compensation does NOT happen. The LayoutManager keeps the top anchor fixed and silently clips the content
+                // below. So a pixel delta is really needed there (the `else` branch below).
+                // But if we also apply the same pixel delta on GROW while at the bottom, it stacks on top of the LayoutManager's own compensation.
+                // That dragged the list up beyond the real bottom, which was the reported bug. So while at the bottom on grow, the list is pinned
+                // straight to the bottom, instead of doing pixel work. It uses the same two-pass pattern (scrollToPosition, then the remaining
+                // difference) as `ChatActivity.onNewIncomingItemAdded`.
                 recycler.post {
                     val adapter = recycler.adapter
                     val last = (adapter?.itemCount ?: 0) - 1
@@ -138,20 +106,18 @@ object KeyboardInsets {
                     }
                 }
             } else {
-                // `post`: yerleşim sürerken `scrollBy` çağrılamaz
-                // (RecyclerView "layout hesaplanırken" reddeder).
+                // `post`: a `scrollBy` cannot run while a layout is in progress (RecyclerView rejects it).
                 recycler.post { recycler.scrollBy(0, delta) }
             }
         }
 
-        // Dinleyici, kurulmadan ÖNCE gönderilmiş insets'i görmez — ekran
-        // klavye AÇIKKEN yeniden oluşturulduysa ilk dolgu hiç uygulanmazdı.
+        // The listener does not see insets sent BEFORE it was installed. If the screen was recreated while the keyboard was open, the first
+        // padding would never have been applied.
         ViewCompat.requestApplyInsets(root)
     }
 
-    /** bkz. `ChatActivity.isRecyclerNearBottom` — aynı "en alta yakın mı"
-     *  tanımı, buraya (genel amaçlı bir util nesnesi olduğundan Activity'ye
-     *  bağımlı olmadan) yeniden yazıldı. */
+    /** Same definition of "near the bottom" as `ChatActivity.isRecyclerNearBottom`, rewritten here so this general-purpose util object does
+     *  not depend on an Activity. */
     private fun isRecyclerNearBottom(recycler: RecyclerView): Boolean {
         val adapter = recycler.adapter ?: return true
         if (adapter.itemCount == 0) return true

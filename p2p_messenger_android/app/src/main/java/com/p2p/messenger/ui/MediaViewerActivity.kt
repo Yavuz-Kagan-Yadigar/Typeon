@@ -32,16 +32,11 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 
 /**
- * kullanıcı tarafından istenen basit uygulama içi görüntüleyici
- * — önceden tamamlanmış bir foto/video eki, HER ZAMAN sistem varsayılan
- * uygulamasına (ACTION_VIEW) devrediliyordu; artık foto/video özelinde
- * (diğer türler hâlâ sistem uygulamasına gider, bkz. ChatActivity
- * onAttachmentClicked) tam boyut/kalitede, uygulamanın kendi içinde
- * gösterilir. Video oynatma için Android'in kendi `VideoView`'ı
- * kullanılıyor — yeni bir kütüphaneye (ExoPlayer vb.) gerek yok; hız
- * kontrolü + çift dokunuşla atlama için `VideoView.setOnPreparedListener`in
- * verdiği GERÇEK `MediaPlayer` referansı kullanılıyor (reflection gerekmez
- * — `onPrepared(MediaPlayer mp)` zaten canlı nesneyi taşıyor).
+ * A simple in-app viewer. A completed photo or video attachment used to be ALWAYS handed to the system default app (ACTION_VIEW). Now photos and
+ * videos show inside the app, at full size and quality. Other types still go to the system app (see ChatActivity onAttachmentClicked). Video
+ * playback uses Android's own `VideoView`, so no new library (such as ExoPlayer) is needed. Speed control and double-tap skipping use the REAL
+ * `MediaPlayer` reference given by `VideoView.setOnPreparedListener`. Reflection is not needed, because `onPrepared(MediaPlayer mp)` already
+ * carries the live object.
  */
 class MediaViewerActivity : AppCompatActivity() {
 
@@ -63,9 +58,8 @@ class MediaViewerActivity : AppCompatActivity() {
     private val videoHandler = Handler(Looper.getMainLooper())
     private var videoSlider: Slider? = null
     private var btnPlayPauseVideo: ImageButton? = null
-    /** Kullanıcı kaydırıcıyı sürüklerken periyodik konum güncellemesi
-     *  ATLANIR — aksi halde kaydırıcı sürüklemenin altından kayardı (bkz.
-     *  SimpleChatAdapter sesli mesaj kaydırıcısındaki AYNI gerekçe). */
+    /** While the user drags the slider, the periodic position update is SKIPPED. Otherwise the slider would move under the drag (the same reason
+     *  as the voice slider in SimpleChatAdapter). */
     private var isSeekingVideo = false
     private val videoProgressRunnable = object : Runnable {
         override fun run() {
@@ -83,10 +77,8 @@ class MediaViewerActivity : AppCompatActivity() {
         }
     }
 
-    // Bkz. `setupZoomableImage` — `ImageView.ScaleType.MATRIX` ile elle
-    // yönetilen pinch-zoom/pan durumu. `baseMatrix` ekrana tam oturmuş
-    // (fitCenter benzeri) hâli, `currentMatrix` kullanıcının o anki
-    // zoom/pan durumunu taşır.
+    // See `setupZoomableImage`. Pinch zoom and pan state is managed by hand with `ImageView.ScaleType.MATRIX`. `baseMatrix` is the fitted state
+    // (a fit-center equivalent, filling the screen). `currentMatrix` holds the user's current zoom and pan.
     private val baseMatrix = Matrix()
     private val currentMatrix = Matrix()
     private var currentScale = MIN_SCALE
@@ -96,9 +88,8 @@ class MediaViewerActivity : AppCompatActivity() {
     private var activePointerId = -1
     private var isDragging = false
 
-    // Bkz. `setupZoomableImage` tek dokunuşla kapatma: ACTION_DOWN
-    // noktasından `touchSlop`u aşan bir sürükleme YA da bir pinch
-    // (multi-touch) olmadıysa, ACTION_UP bir "tek dokunuş" sayılır.
+    // See `setupZoomableImage`. One tap closes the viewer: if the ACTION_DOWN point was not dragged past `touchSlop` and there was no pinch
+    // (multi-touch), ACTION_UP counts as a single tap.
     private var downX = 0f
     private var downY = 0f
     private var hasMovedPastSlop = false
@@ -171,12 +162,9 @@ class MediaViewerActivity : AppCompatActivity() {
                 }
             }
         } else {
-            // Görsel — büyük dosyaları TAM çözünürlükte belleğe yüklememek
-            // için ekran boyutuna göre bir `inSampleSize` hesaplanır (bkz.
-            // ChatActivity.generateImagePreview'daki aynı desen, burada
-            // hedef 480px değil EKRANIN gerçek boyutu — "tam kalite"
-            // isteniyor, sadece gereksiz yere aşırı büyük bir bitmap
-            // (OOM riski) önleniyor).
+            // For images, `inSampleSize` is computed from the SCREEN size, so large files are not loaded into memory at full resolution. This is the
+            // same pattern as ChatActivity.generateImagePreview. The target is the real screen size here, not 480 px. Full quality is wanted, and only an
+            // unnecessarily huge bitmap (OOM risk) is avoided.
             lifecycleScope.launch(Dispatchers.IO) {
                 val bitmap = try {
                     contentResolver.openInputStream(uri)?.use { input ->
@@ -225,11 +213,8 @@ class MediaViewerActivity : AppCompatActivity() {
     }
 
     /**
-     * Pinch-to-zoom + sürükleyerek gezinme (pan) — proje içinde Glide/Coil/
-     * PhotoView gibi bir görsel kütüphane yok, bu yüzden elle
-     * `ScaleGestureDetector` + `Matrix` ile uygulanıyor.
-     * `ImageView.scaleType` XML'de zaten `matrix` — `imageMatrix` her
-     * güncellemede manuel set edilir.
+     * Pinch-to-zoom and pan. The project has no image library such as Glide, Coil or PhotoView, so it is implemented by hand with a
+     * `ScaleGestureDetector` and a `Matrix`. `ImageView.scaleType` is already `matrix` in the XML, and `imageMatrix` is set manually on every update.
      */
     private fun setupZoomableImage(imageView: ImageView, bitmap: Bitmap) {
         imageView.setImageBitmap(bitmap)
@@ -304,9 +289,7 @@ class MediaViewerActivity : AppCompatActivity() {
                         currentScale = MIN_SCALE
                         imageView.imageMatrix = currentMatrix
                     }
-                    // Spec dışı, kullanıcı isteği (profil fotoğrafı tam ekran
-                    // görüntüleyici): pinch/sürükleme OLMADAN tek dokunuş —
-                    // görüntüleyiciyi kapatır.
+                    // A single tap WITHOUT pinch or drag closes the viewer. This is for the full-screen profile photo viewer.
                     if (event.actionMasked == MotionEvent.ACTION_UP && !hasMovedPastSlop && !hadMultiTouch) {
                         finish()
                     }
@@ -327,10 +310,8 @@ class MediaViewerActivity : AppCompatActivity() {
     }
 
     /**
-     * `VideoView`'ın kendi `MediaController`'ı yerine — YouTube
-     * tarzı tek dokunuş (oynat/duraklat), çift dokunuş (ekranın sol/sağ
-     * yarısına göre ±5sn atlama + kısa animasyonlu gösterge), ve hız
-     * rozeti (bkz. `PlaybackSpeed`, sesli mesajlarla AYNI döngü).
+     * Replaces the `VideoView`'s own `MediaController`. In the YouTube style: a single tap plays or pauses, a double tap skips ±5 s (depending on
+     * the left or right half of the screen, with a short animated indicator), and a speed badge (see `PlaybackSpeed`, the same cycle as voice messages).
      */
     private fun setupVideoControls(videoView: VideoView) {
         val overlay = findViewById<View>(R.id.viewVideoGestureOverlay)
@@ -339,10 +320,8 @@ class MediaViewerActivity : AppCompatActivity() {
         val speedButton = findViewById<TextView>(R.id.btnPlaybackSpeed)
         overlay.visibility = View.VISIBLE
 
-        // çift dokunuşla ±5sn atlama HÂLÂ çalışır (bkz. gesture
-        // detector aşağıda) ama artık kullanıcıya görünür, dokunulabilir
-        // düğmeler DE var — önceden sadece görünmez bir dokunuş bölgesi
-        // olduğundan kontroller keşfedilemezdi.
+        // Double-tap skipping of ±5 s still works (see the gesture detector below). But the controls are also visible, tappable buttons now. Before,
+        // there was only an invisible tap region, so the controls could not be discovered.
         videoSlider = findViewById(R.id.progressVideoPlayback)
         btnPlayPauseVideo = findViewById(R.id.btnPlayPauseVideo)
         val btnSkipBack = findViewById<ImageButton>(R.id.btnSkipBack)
