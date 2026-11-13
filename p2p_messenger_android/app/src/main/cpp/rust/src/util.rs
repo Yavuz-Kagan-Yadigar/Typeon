@@ -3,26 +3,17 @@
 use super::*;
 
 
-/// Bir `file_id`'nin dosya yolu olarak kullanılmasının GÜVENLİ olduğunu
-/// doğrular.
+/// Checks that a `file_id` is safe to use as a file path.
 ///
-/// `FileOffer.file_id` tamamen KARŞI TARAFTAN geliyor ve `enc_path_for` onu
-/// doğrudan `<files>/attachments/{file_id}.enc` yoluna yapıştırıyordu —
-/// hiçbir doğrulama olmadan. Sunucu tarafında bunun karşılığı (`is_safe_id`)
-/// en başından beri vardı, istemcide yoktu. Sonuç, eşleşmiş herhangi bir
-/// kişinin (ya da bir grup üyesinin) elindeydi:
-///   * `file_id = "../identity_secret"` → `download_file`'ın açılıştaki
-///     `remove_file` çağrısı kurbanın `identity_secret.enc` dosyasını siler
-///     (kimlik kalıcı olarak yok olur). Aynı yolla `history_key.enc` ve
-///     `skipped_key_enc.enc` de silinebilir.
-///   * Sonraki parçalar aynı yola yazıldığı ve AEAD doğrulaması saldırganın
-///     KENDİ `file_key`'iyle yapıldığı için, içeriği tamamen saldırganın
-///     belirlediği baytlar rastgele bir yola YAZILABİLİR.
-/// Node modu açıkken kullanıcı hiçbir şeye dokunmadan tetikleniyordu
-/// (`receive_file_offer` teklifi alır almaz otomatik indirmeye başlıyor).
+/// `FileOffer.file_id` comes entirely from the REMOTE peer, and `enc_path_for` used it directly in the path
+/// `<files>/attachments/{file_id}.enc`, with no validation. The server side has had the equivalent check (`is_safe_id`) from the start,
+/// but the client did not. A matched contact (or a group member) could then:
+///   * `file_id = "../identity_secret"`: the `remove_file` call at the start of `download_file` deletes the victim's
+///     `identity_secret.enc`, which destroys the identity. `history_key.enc` and `skipped_key_enc.enc` can be deleted the same way.
+///   * Write attacker-chosen bytes to an arbitrary path: later chunks are written to that path and authenticated with the attacker's own `file_key`.
+/// This was triggered without user action when Node mode was on (`receive_file_offer` starts the download as soon as the offer arrives).
 ///
-/// Kendi ürettiğimiz kimlikler UUID (hex + tire) olduğu için bu filtreden
-/// sorunsuz geçer.
+/// Our own ids are UUIDs (hex and dashes), so they pass this check.
 pub(crate) fn is_safe_file_id(id: &str) -> bool {
     // Lower case only, same rule as the server's `is_safe_id`: ids are our own
     // lower-case UUIDs, and on a case-insensitive volume `AB` and `ab` are one
@@ -56,8 +47,7 @@ pub(crate) fn group_msg_tag(group_id: &str, author_identity_id: &str, rest: &str
     tag
 }
 
-/// Whether group message id `id` was made by `author_identity_id` in
-/// `group_id` (it starts with that author's `group_msg_tag` of the rest).
+/// Whether group message id `id` was made by `author_identity_id` in `group_id`. The id starts with that author's `group_msg_tag`.
 pub(crate) fn group_msg_id_bound(group_id: &str, author_identity_id: &str, id: &str) -> bool {
     match (id.get(..16), id.get(16..)) {
         (Some(tag), Some(rest)) if !rest.is_empty() => tag == hex::encode(group_msg_tag(group_id, author_identity_id, rest)),
@@ -65,8 +55,7 @@ pub(crate) fn group_msg_id_bound(group_id: &str, author_identity_id: &str, id: &
     }
 }
 
-/// A group reply that names the quoted author must quote an id of that
-/// author; otherwise it shows the wrong name and the reply is dropped.
+/// A group reply that names the quoted author must quote an id of that author. Otherwise the wrong name is shown and the reply is dropped.
 pub(crate) fn group_reply_bound(group_id: &str, reply_to_message_id: Option<&str>, reply_to_sender_identity_id: Option<&str>) -> bool {
     match (reply_to_message_id, reply_to_sender_identity_id) {
         (Some(id), Some(author)) => group_msg_id_bound(group_id, author, id),
@@ -74,11 +63,9 @@ pub(crate) fn group_reply_bound(group_id: &str, reply_to_message_id: Option<&str
     }
 }
 
-/// `file_name`'den türetilen uzantının yol ayırıcı taşımadığını garanti eder
-/// (bkz. `is_safe_file_id` — AYNI saldırı yüzeyi). `begin_attachment_decrypt`
-/// düz metin önbellek yolunu `{file_id}{ext}` ile kuruyor ve `ext` de karşı
-/// tarafın gönderdiği dosya adından geliyordu: `file_name = "x./../../y"`
-/// uzantıyı `/../../y` yapar ve `file_id` temiz olsa bile yol dışına çıkar.
+/// Guarantees that the extension derived from `file_name` contains no path separator (same attack surface as `is_safe_file_id`).
+/// `begin_attachment_decrypt` builds the plaintext cache path as `{file_id}{ext}`, and `ext` comes from the peer's file name.
+/// `file_name = "x./../../y"` yields the extension `/../../y`, which escapes the directory even when `file_id` is clean.
 pub(crate) fn safe_extension(file_name: &str) -> String {
     match file_name.rsplit_once('.') {
         Some((_, ext))
@@ -92,15 +79,13 @@ pub(crate) fn safe_extension(file_name: &str) -> String {
     }
 }
 
-/// Bir dosyanın diskteki boyutu (bayt) — yoksa 0 (bkz. `storage_usage`).
+/// Size on disk in bytes of one file, or 0 if it does not exist (see `storage_usage`).
 pub(crate) fn disk_size(path: &std::path::Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
-/// Bir dizindeki dosyaların toplam boyutu (alt dizinler dahil).
-/// `ext_filter` verilirse yalnız o uzantıdaki dosyalar sayılır —
-/// `attachments/` içinde `plain_cache` de var; oradaki düz metin kopyalar
-/// `.enc` DEĞİLDİR ve ek boyutuna girmemelidir.
+/// Total size of the files in a directory, including subdirectories. If `ext_filter` is given, only files with that extension are counted.
+/// `attachments/` also holds `plain_cache`. Its plaintext copies are NOT `.enc` and must not count toward attachment size.
 pub(crate) fn dir_size(dir: &std::path::Path, ext_filter: Option<&str>) -> u64 {
     let mut total = 0u64;
     let mut dirs = vec![dir.to_path_buf()];
@@ -128,26 +113,19 @@ pub(crate) fn dir_size(dir: &std::path::Path, ext_filter: Option<&str>) -> u64 {
     total
 }
 
-/// Karşı tarafın gönderdiği `file_name`'i, GÖSTERİLMEDEN ve bir dosya adı
-/// olarak KULLANILMADAN önce zararsız hâle getirir.
+/// Makes the `file_name` sent by the peer harmless before it is DISPLAYED or USED as a file name.
 ///
-/// Bu alan tamamen uzaktan kontrollü ve iki ayrı yere akıyordu:
-///   * Android'in "İndirilenler/P2P'ye kaydet" akışı (API 26-28 kolu)
-///     `File(p2pDir, fileName)` yapıyor — `"../../DCIM/Camera/IMG_0001.jpg"`
-///     gibi bir ad paylaşılan depolamada KEYFİ BİR YOLA yazardı.
-///   * Her iki istemcinin de sohbet balonu. Unicode yön değiştirme
-///     karakterleri (U+202E RIGHT-TO-LEFT OVERRIDE ve akrabaları) uzantıyı
-///     görsel olarak TERS çevirir: `"fatura\u{202E}kpa.pdf"` ekranda
-///     `"faturafdp.apk"` diye okunur — klasik uzantı sahteciliği.
+/// This field is fully remote-controlled and flows to two places:
+///   * The Android "save to Downloads / P2P" path (the API 26-28 branch) does `File(p2pDir, fileName)`. A name such as
+///     `"../../DCIM/Camera/IMG_0001.jpg"` would write to an arbitrary path in shared storage.
+///   * The chat bubble on both clients. Unicode bidi override characters (U+202E RIGHT-TO-LEFT OVERRIDE and relatives) visually reverse the
+///     extension: `"fatura\u{202E}kpa.pdf"` is displayed as `"faturafdp.apk"`. This is the classic extension spoof.
 ///
-/// Kural: yol ayırıcıları ve sürücü/kök işaretleri düşer, kontrol ve
-/// çift-yönlü (bidi) biçimlendirme karakterleri düşer, baştaki noktalar
-/// düşer (`".."`/gizli dosya), uzunluk sınırlanır. Boş kalırsa `"file"`.
-/// Uzantı KORUNUR — `safe_extension` ve MIME eşlemesi bozulmasın.
-/// Characters that draw nothing or reorder the text around them: bidi
-/// controls, zero-width and blank fillers, line/paragraph separators, soft
-/// hyphen, tag characters. With one of them a name looks empty, or like
-/// another contact's.
+/// Rule: path separators and drive/root markers are dropped. Control characters and bidi formatting characters are dropped. Leading dots are
+/// dropped (`".."` or a hidden file). The length is capped. If nothing is left, the result is `"file"`.
+/// The extension is KEPT, so `safe_extension` and the MIME mapping keep working.
+/// Characters that draw nothing or reorder the text around them: bidi controls, zero-width and blank fillers, line/paragraph
+/// separators, soft hyphen, tag characters. With one of them, a name can look empty or look like another contact's name.
 pub(crate) fn is_invisible_char(c: char) -> bool {
     matches!(c as u32,
         0x00AD | 0x061C | 0x115F | 0x1160 | 0x180E | 0x3164 | 0xFFA0 | 0xFEFF
@@ -155,8 +133,7 @@ pub(crate) fn is_invisible_char(c: char) -> bool {
 }
 
 pub(crate) fn safe_file_name(name: &str) -> String {
-    // Bytes, not chars: ext4/F2FS NAME_MAX is 255 bytes; 120 CJK/emoji chars
-    // went past it. Room left for a " (1)" suffix.
+    // Bytes, not chars: ext4/F2FS NAME_MAX is 255 bytes, and 120 CJK or emoji chars exceed it. Leave room for a " (1)" suffix.
     const MAX_FILE_NAME_LEN: usize = 200;
     let cleaned: String = name
         .chars()
@@ -166,7 +143,7 @@ pub(crate) fn safe_file_name(name: &str) -> String {
                 && !is_invisible_char(*c)
         })
         .collect();
-    // dots and spaces stripped together (". .x" left ".x", a hidden file).
+    // Dots and spaces are stripped together (". .x" would otherwise leave ".x", a hidden file).
     let cleaned = cleaned.trim_start_matches(|c: char| c == '.' || c.is_whitespace()).trim_end().to_string();
     if cleaned.is_empty() {
         return "file".to_string();
@@ -174,7 +151,7 @@ pub(crate) fn safe_file_name(name: &str) -> String {
     if cleaned.len() <= MAX_FILE_NAME_LEN {
         return cleaned;
     }
-    // Uzun adı KIRP ama uzantıyı koru (uzantı ASCII, en çok 17 bayt).
+    // Truncate long names, but keep the extension (ASCII, at most 17 bytes).
     let ext = safe_extension(&cleaned);
     let mut keep = MAX_FILE_NAME_LEN.saturating_sub(ext.len());
     while !cleaned.is_char_boundary(keep) {
@@ -193,20 +170,15 @@ mod safe_file_name_tests {
     }
 }
 
-/// Bir profil/grup fotoğrafının kabul edilebilir azami boyutu.
+/// Maximum accepted size of a profile or group photo.
 ///
-/// İki ayrı sebep, ikisi de gerçek:
-///   * GİDEN yön: avatar, `ProfileUpdate`/`GroupChange::AvatarUpdate`
-///     içinde ratchet-şifreli bir pakete biniyor ve gossipsub'ın 1 MB
-///     `max_transmit_size` sınırına tabi. Grup güncellemesi ayrıca üye
-///     başına ~4 KB'lık `member_devices` kefaleti taşıyor. Sınırı aşan bir
-///     avatar `MessageTooLarge` (KALICI hata) üretir — kullanıcı için
-///     "grup fotoğrafı bir türlü değişmiyor" demek.
-///   * GELEN yön: karşı taraf 900 KB'lık bir JPEG yollayabilir ve bu her
-///     kişi/grup için kalıcı olarak DB'ye yazılıyordu; hiçbir kontrol yoktu.
+/// Two reasons, both real:
+///   * Outgoing: the avatar travels inside a ratchet-encrypted `ProfileUpdate` / `GroupChange::AvatarUpdate` packet, subject to gossipsub's
+///     1 MB `max_transmit_size`. A group update also carries a ~4 KB `member_devices` proof per member. An avatar over the limit fails with
+///     `MessageTooLarge` (a permanent error), which means the group photo can never be changed.
+///   * Incoming: the peer could send a 900 KB JPEG, which was then written to the DB permanently for each contact or group. Nothing checked it.
 ///
-/// 256 KiB, istemcilerin ÜRETTİĞİNDEN (720p/%85, tipik 60-200 KB) rahatça
-/// büyük, sınırın kendisinden rahatça küçük.
+/// 256 KiB is well above what our clients PRODUCE (720p / 85%, typically 60-200 KB) and well below the limit itself.
 pub(crate) const MAX_AVATAR_BYTES: usize = 256 * 1024;
 
 /// Largest Argon2 memory cost `import_recovery` accepts from a file: 128 MiB (2x export).
@@ -216,21 +188,17 @@ pub(crate) const MAX_RECOVERY_FILE_BYTES: usize = 64 * 1024 * 1024;
 /// Chats over that size: only this many newest messages go into the file.
 pub(crate) const RECOVERY_TRIMMED_MESSAGES: usize = 6500;
 
-/// Bir hesap adının azami uzunluğu — KARAKTER (bayt değil) cinsinden.
+/// Maximum length of an account name, in CHARACTERS (not bytes).
 ///
-/// Kullanıcı isteği (2026-09-04, hesap adı değiştirme): ad artık ağdan
-/// GELEN bir veri, yani karşı tarafın seçtiği bir dize kişi listesine
-/// yazılıyor. Sınırsız bir ad, kişi satırını taşıran ya da bildirim
-/// metnini ele geçiren bir dize demek olurdu.
+/// The name is now incoming network data: the peer chooses it, and it is written into the contact list. An unbounded name could overflow
+/// the contact row or be used to spoof notification text.
 pub(crate) const MAX_DISPLAY_NAME_CHARS: usize = 48;
 
-/// Bir hesap adını arayüzde gösterilebilir hâle getirir: boşlukları
-/// kırpar, KONTROL karakterlerini (satır sonu dahil) atar ve
-/// `MAX_DISPLAY_NAME_CHARS` ile keser. Sonuç boşsa `None`.
+/// Makes an account name displayable: trims whitespace, removes CONTROL characters (including line breaks), and truncates to
+/// `MAX_DISPLAY_NAME_CHARS`. Returns `None` if nothing is left.
 ///
-/// Satır sonlarının atılması kozmetik değil güvenlik: tek satırlık bir
-/// kişi satırına gömülen `\n`, bildirim/sohbet başlığında sahte bir
-/// ikinci satır ("...doğrulandı" gibi) üretebilirdi.
+/// Removing line breaks is a security measure, not cosmetic. An embedded `\n` in a one-line contact row could produce a fake second line
+/// in the notification or chat header (for example "...verified").
 pub(crate) fn sanitize_display_name(name: &str) -> Option<String> {
     // Bidi override/embedding/isolate and zero-width characters go too (same
     // set as `safe_file_name`): U+202E lets a contact show a reversed name in
@@ -269,12 +237,10 @@ pub(crate) fn is_fingerprint_hex(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// `HandshakeInit` imza girdisi. Alan tag'i + alıcı fingerprint'i dahil
-/// (2026-09-13: önceki biçim alıcıyı bağlamıyordu — tekrar oynatma DoS'u;
-/// eski sürümlerle uyum bilerek kırıldı).
-/// 2026-10-07: also the two prekey ids (which of the recipient's keys the
-/// secret is encapsulated to, and which prekey the sender hands out), so a
-/// relay can change neither. Tag bumped, older versions do not verify.
+/// Input to the `HandshakeInit` signature. It includes the tag and the recipient's fingerprint.
+/// Protocol break: the older format did not bind the recipient, which allowed replay DoS. Older versions are intentionally incompatible.
+/// The two prekey ids are also included (which of the recipient's keys the secret is encapsulated to, and which prekey the sender used),
+/// so a relay cannot change either. The tag was bumped, and older versions do not verify.
 pub(crate) fn handshake_signing_input(x25519_pub: &[u8], kyber_pub: &[u8], kyber_ct: &[u8], timestamp: u64, recipient_fp: &str, recipient_prekey_id: u64, sender_prekey_id: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(32 + x25519_pub.len() + kyber_pub.len() + kyber_ct.len() + 24 + recipient_fp.len() + 12);
     out.extend_from_slice(b"p2pmsg-v0.4-handshake");
@@ -288,17 +254,13 @@ pub(crate) fn handshake_signing_input(x25519_pub: &[u8], kyber_pub: &[u8], kyber
     out
 }
 
-/// Signed bytes of a `MessagePacket`. They include the RECIPIENT device
-/// (2026-10-07, same reason as `handshake_signing_input`): a packet A sent to
-/// M verified at B too, and three such replays made B drop its healthy session
-/// with A (`note_undecryptable`). Versions before this one signed header and
-/// ciphertext only; the two cannot exchange messages. Deliberate break.
+/// Signed bytes of a `MessagePacket`. They include the RECIPIENT device, so a packet sent to M could not also verify at B.
+/// Without that binding, three such replays made B drop its healthy session with A (`note_undecryptable`).
+/// Versions before this one signed only the header and ciphertext, and the two cannot exchange messages. This is a deliberate protocol break.
 ///
-/// tagged and length-framed, like `handshake_signing_input`.
-/// Older versions do not verify.
+/// Tagged and length-framed, like `handshake_signing_input`.
 ///
-/// `header` is the raw header bytes as sent
-/// (`SignedHeader::raw`), not a re-encoding. Older versions do not verify.
+/// `header` is the raw header bytes as sent (`SignedHeader::raw`), not a re-encoding. Older versions do not verify.
 pub(crate) fn packet_signing_input(header: &[u8], ciphertext: &[u8], recipient_fp: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(32 + header.len() + ciphertext.len() + recipient_fp.len());
     out.extend_from_slice(b"p2pmsg-v0.6-packet");
@@ -419,7 +381,7 @@ pub(crate) fn mono_ms() -> u64 {
     ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000 + 86_400_000
 }
 
-// --- Yardımcı fonksiyonlar ---
+// --- Helper functions ---
 
 /// One `contacts` row per identity, enforced by the database. Rows that
 /// share an identity are reduced to one first: the row that knows the most
@@ -555,22 +517,14 @@ pub(crate) fn ciborium_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, String>
     Ok(buf)
 }
 
-/// KRİTİK: önceden HER
-/// `start_network` çağrısı (yani her süreç başlangıcı) `Keypair::generate_ed25519()`
-/// ile RASTGELE, geçici bir libp2p kimliği (ve dolayısıyla `PeerId`)
-/// üretiyordu — bu, "tam kapat/aç sonrası tekrar QR okutman gerekiyor"
-/// şikayetinin kök nedenlerinden biriydi: bilinen bir kişinin `PeerId`'si
-/// (bkz. `device_to_peer_id`) her süreç yeniden başlatmasında GEÇERSİZ
-/// hâle geliyordu, çünkü KARŞI TARAF da kendi PeerId'sini değiştirmişti.
-/// Artık bu kimlik `{app_files_dir}/libp2p_identity.key`'e (protobuf
-/// kodlamasıyla) kalıcı kılınıyor — bir kez üretilip sonsuza kadar aynı
-/// kalıyor. Bu dosya şifrelenmiyor (Android Keystore'un aksine) — bilinçli
-/// bir kapsam kararı: bu, uygulamanın E2E mesaj içeriğini koruyan asıl
-/// kimlik/oturum anahtarlarından (bkz. IdentityManager) AYRI, sadece ağ
-/// katmanı taşıma kimliğidir; sızması mesaj içeriğini DEĞİL, sadece ağ
-/// katmanında cihaz kimliğinin taklit edilebilmesini riske atar — zaten
-/// uygulamaya özel (app-private) depoda, aynı DB dosyasındaki PUBLIC
-/// anahtarlarla aynı güven seviyesinde.
+/// CRITICAL: `start_network` used to generate a RANDOM, temporary libp2p identity (and therefore a new `PeerId`) with
+/// `Keypair::generate_ed25519()` on every process start. That was one root cause of "after a full restart I have to scan the QR again":
+/// a known contact's `PeerId` (see `device_to_peer_id`) became invalid on every restart, because the other side had changed its own `PeerId` too.
+/// The identity is now persisted at `{app_files_dir}/libp2p_identity.key` (protobuf encoding), generated once and kept.
+/// This file is not encrypted (unlike the Android Keystore). That is a deliberate scope decision: it is a transport identity only,
+/// separate from the E2E identity and session keys that protect message content (see IdentityManager). Leaking it does not expose message content.
+/// It only allows impersonating the device at the network layer. It sits in app-private storage, at the same trust level as the public keys
+/// in the same DB file.
 pub(crate) fn load_or_generate_libp2p_keypair(app_files_dir: &str) -> libp2p::identity::Keypair {
     let path = format!("{}/libp2p_identity.key", app_files_dir);
     match std::fs::read(&path) {
@@ -581,9 +535,7 @@ pub(crate) fn load_or_generate_libp2p_keypair(app_files_dir: &str) -> libp2p::id
             error!("libp2p_identity.key bozuk, yeni kimlik üretiliyor");
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        // The file may be intact (a passing I/O error): it is not written over,
-        // every contact's stored address carries its PeerId. A key for this
-        // run only.
+        // The file may be intact despite an I/O error, so it is not overwritten: every contact's stored address carries its PeerId. Use a key for this run only.
         Err(e) => {
             error!("libp2p_identity.key okunamadı ({}), bu çalıştırma için geçici kimlik", e);
             return libp2p::identity::Keypair::generate_ed25519();
@@ -592,10 +544,8 @@ pub(crate) fn load_or_generate_libp2p_keypair(app_files_dir: &str) -> libp2p::id
     let kp = libp2p::identity::Keypair::generate_ed25519();
     match kp.to_protobuf_encoding() {
         Ok(bytes) => {
-            // Temp file, owner-only, then rename: a crash in the middle of a
-            // plain write left exactly the corrupt file that is replaced by
-            // a new identity above, and on the desktop the key was readable
-            // by other users.
+            // Temp file with owner-only permissions, then rename. A crash during a plain write would leave exactly the corrupt file that is replaced
+            // by a new identity above. On desktop the key was also readable by other users.
             let tmp = format!("{}.tmp", path);
             let mut opts = std::fs::OpenOptions::new();
             opts.write(true).create(true).truncate(true);
@@ -616,8 +566,7 @@ pub(crate) fn load_or_generate_libp2p_keypair(app_files_dir: &str) -> libp2p::id
     kp
 }
 
-/// Connection path quality, higher is better: 0 = relay circuit, 1 = Tor
-/// (onion dial, or the loopback address an inbound onion connection shows).
+/// Connection path quality, higher is better: 0 = relay circuit, 1 = Tor (onion dial, or the loopback address an inbound onion connection shows).
 pub(crate) fn conn_path_rank(addr: &Multiaddr) -> u8 {
     use libp2p::multiaddr::Protocol;
     let relayed = addr.iter().any(|p| matches!(p, Protocol::P2pCircuit))
@@ -631,12 +580,10 @@ pub(crate) fn conn_path_rank(addr: &Multiaddr) -> u8 {
         Protocol::Onion(..) | Protocol::Onion3(_) => true,
         _ => false,
     });
-    // Onion-only: clearnet doğrudan yol ARTIK tercih edilmez.
-    // Eskiden clearnet=2 onion=1 idi (hız için gerçek IP tercih ediliyordu);
-    // artık yalnızca onion (ve kendi onion servisimize gelen loopback) tercih
-    // edilir, clearnet röle ile aynı en düşük seviyeye (0) düşer. Zaten
-    // `DialReject` ile clearnet bağlantı hiç kurulmaz; bu, o yol bir şekilde
-    // görünürse bile onion'un üstüne çıkmamasını garanti eder.
+    // Onion-only: a direct clearnet path is NO LONGER preferred.
+    // Clearnet used to be 2 and onion 1 (the real IP was preferred for speed). Now only onion (and loopback from our own onion service)
+    // is preferred, and clearnet drops to the same lowest level as relay (0). `DialReject` means clearnet connections are never made at all.
+    // This level only guarantees that a clearnet path, if one appears anyway, never ranks above onion.
     if onion || is_loopback_multiaddr(addr) { 1 } else { 0 }
 }
 
@@ -651,9 +598,8 @@ pub(crate) fn extract_peer_id(addr: &Multiaddr) -> Option<PeerId> {
     }).last()
 }
 
-/// 127.0.0.1/::1 gibi loopback adresleri, aynı cihaz dışından hiçbir zaman
-/// dial edilemez — `get_node_address` bunları QR/rendezvous adresi olarak
-/// seçmekten kaçınır (varsa gerçek bir LAN adresi tercih edilir).
+/// Loopback addresses such as 127.0.0.1 / ::1 can never be dialed from another device. `get_node_address` avoids selecting them as the QR or
+/// rendezvous address (a real LAN address is preferred when one exists).
 pub(crate) fn is_loopback_multiaddr(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| match p {
         libp2p::multiaddr::Protocol::Ip4(ip) => ip.is_loopback(),
@@ -662,11 +608,9 @@ pub(crate) fn is_loopback_multiaddr(addr: &Multiaddr) -> bool {
     })
 }
 
-/// RFC 1918 özel adres aralığı (10/8, 172.16/12, 192.168/16) — ev/ofis Wi-Fi
-/// ağlarının tipik adres biçimi, `Ipv4Addr::is_private()` (stdlib) ile
-/// tespit edilir. Mobil operatör adresleri (CGNAT dahil, ör. 100.64/10) bu
-/// aralığa GİRMEZ — `get_node_address` bu ayrımı, aynı Wi-Fi'deki karşı
-/// cihazın dial edebileceği doğru arayüzü seçmek için kullanır.
+/// RFC 1918 private ranges (10/8, 172.16/12, 192.168/16), the usual home and office Wi-Fi address format, detected with the stdlib's
+/// `Ipv4Addr::is_private()`. Mobile carrier addresses (including CGNAT, for example 100.64/10) are NOT in this range. `get_node_address`
+/// uses this distinction to pick the interface a peer on the same Wi-Fi can actually dial.
 pub(crate) fn is_private_lan_multiaddr(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| match p {
         libp2p::multiaddr::Protocol::Ip4(ip) => ip.is_private(),
@@ -674,12 +618,10 @@ pub(crate) fn is_private_lan_multiaddr(addr: &Multiaddr) -> bool {
     })
 }
 
-/// Spec dışı, ağ sağlamlığı düzeltmesi ("aynı LAN'da + Tor'la eşleşmiş 3
-/// cihazdan biri mobil veriye geçince sadece 'node' ile mesajlaşmaya devam
-/// edebiliyor" hatası): bir adresin `.onion` (Tor) adresi olup olmadığını
-/// tespit eder — bkz. `device_onion_addr` alanı dokümantasyonu. tor.rs'teki
-/// özel `onion_host_port`'un AYNI mantığı, burada da (o fonksiyon `tor`
-/// modülüne özel/private olduğundan) ayrıca gerekiyor.
+/// Detects whether an address is a `.onion` (Tor) address. See the `device_onion_addr` field docs.
+/// The same logic as the private `onion_host_port` in tor.rs is needed here too, because that function is private to the `tor` module.
+/// Network-robustness fix: a device paired over Tor, on the same LAN as another device, could only keep talking to it through the node (not directly)
+/// after switching to mobile data.
 pub(crate) fn is_onion_multiaddr(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| match p {
         libp2p::multiaddr::Protocol::Dns(h) | libp2p::multiaddr::Protocol::Dns4(h) | libp2p::multiaddr::Protocol::Dns6(h) => {
@@ -690,14 +632,9 @@ pub(crate) fn is_onion_multiaddr(addr: &Multiaddr) -> bool {
     })
 }
 
-/// ÖNCEDEN her iki imza alanı
-/// da opsiyoneldi (boşsa o kısım sessizce ATLANIYORDU) — bu, klasik-sadece
-/// veya PQ-sadece imzalı bir paketin de kabul edilebilmesi anlamına
-/// geliyordu (o an hiçbir çağıran bunu istismar etmiyordu ama fonksiyonun
-/// kendisi bunu ZORUNLU kılmıyordu). Artık HER İKİ imza da dolu olmalı —
-/// hibrit korumanın "post-kuantum güvenli" iddiasının, gelecekte bir
-/// çağıran yanlışlıkla boş bir `sig_pq` geçirse bile sessizce klasiğe
-/// düşmeyeceğinden emin olunur.
+/// Both signature fields are now REQUIRED. Before, either could be empty and that part was silently skipped, so a classical-only or
+/// PQ-only signed packet was accepted. No caller exploited this, but the function did not enforce it. A hybrid security guarantee
+/// must not silently fall back to classical signatures if a caller ever passes an empty `sig_pq` by mistake.
 pub(crate) fn verify_hybrid_signature(message: &[u8], sig_classical: &[u8], sig_pq: &[u8], sender: &DeviceRecord) -> Result<(), String> {
     verify_hybrid_signature_with(message, sig_classical, sig_pq, &sender.sign_pubkey_ed25519, &sender.sign_pubkey_mldsa)
 }
@@ -721,14 +658,11 @@ pub(crate) fn verify_hybrid_signature_with(message: &[u8], sig_classical: &[u8],
     Ok(())
 }
 
-/// The bytes a `GroupUpdate` signature covers: one CBOR tuple with a domain
-/// tag. Name, member list and the member keys are in it (a relay could
-/// change them otherwise), and so are the signer fields.
+/// The bytes covered by a `GroupUpdate` signature: one CBOR tuple with a domain tag. The name, member list, and member keys are included
+/// (a relay could otherwise change them), and so are the signer fields.
 ///
-/// PROTOCOL BREAK (2026-10-07): before this the fields were concatenated
-/// with no length prefixes, and `signed_by`/`signed_by_device` were not
-/// signed. A client with the old format rejects updates of a new one, and
-/// the other way round.
+/// Protocol break: earlier versions concatenated the fields with no length prefixes, and `signed_by` / `signed_by_device` were not signed.
+/// A client with the old format rejects updates from a new one, and the other way round.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn group_update_signing_input(
     group_id: &str,
@@ -770,12 +704,9 @@ pub(crate) fn sign_group_update(
     let to_sign = group_update_signing_input(
         group_id, new_version, change, group_name, members, member_devices, signed_by, signed_by_device,
     )?;
-    // GroupUpdate artık
-    // MessagePacket/HandshakeInit ile AYNI hibrit (Ed25519 + ML-DSA)
-    // imza modelini kullanıyor — önceden SADECE klasik Ed25519 imzalıydı,
-    // bu da kurucu yetkisinin (üye ekleme/çıkarma/yeniden adlandırma/
-    // avatar) kuantum-yetenekli bir saldırgan tarafından sahtelenebilir
-    // olması anlamına geliyordu.
+    // GroupUpdate now uses the SAME hybrid signature model (Ed25519 + ML-DSA) as MessagePacket and HandshakeInit.
+    // Before, it was signed ONLY with classical Ed25519, so a quantum-capable attacker could forge the founder's authority
+    // (adding and removing members, renaming, changing the avatar).
     let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
     let sig_pq: MlDsaSignature<MlDsa87> = own_keys.sign_sk_mldsa.sign(&to_sign);
     Ok(GroupUpdate {
@@ -785,16 +716,14 @@ pub(crate) fn sign_group_update(
         group_name: group_name.to_string(),
         members: members.to_vec(),
         member_devices: member_devices.to_vec(),
-        // Not in `to_sign`: bkz. `GroupUpdate.member_device_proofs`.
+        // Not in `to_sign`: see `GroupUpdate.member_device_proofs`.
         member_device_proofs: member_device_proofs.to_vec(),
         signed_by: signed_by.to_string(),
         signed_by_device: signed_by_device.to_string(),
         signature: sig_classical.to_bytes().to_vec(),
         signature_pq: sig_pq.encode().to_vec(),
-        // bkz. `packet::FounderTransfer` — dış imzanın KAPSAMINDA DEĞİL
-        // (her girdi kendi hibrit imzasını taşıyor), bu yüzden yukarıdaki
-        // `to_sign` bloğuna eklenmiyor: eklenseydi bu alanı hiç bilmeyen
-        // eski bir gönderen/alıcı çiftinde imza doğrulaması kırılırdı.
+        // See `packet::FounderTransfer`. It is NOT covered by the outer signature (each entry carries its own hybrid signature). That is why
+        // it is not added to the `to_sign` block above. Adding it would break signature verification on an older sender/receiver pair that does not know this field.
         founder_chain: founder_chain.to_vec(),
     })
 }
