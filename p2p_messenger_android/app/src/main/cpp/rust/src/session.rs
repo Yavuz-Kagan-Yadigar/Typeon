@@ -4,19 +4,13 @@ use super::*;
 
 impl P2PCore {
 
-    /// kullanıcı bir sohbeti AÇAR açmaz (henüz
-    /// mesaj yazmadan) el sıkışmayı proaktif olarak başlatır — önceden
-    /// handshake sadece İLK `sendMessage` çağrısında (lazily) tetikleniyordu,
-    /// bu da "sohbeti aç, hemen yaz, mesaj git(mesin)" senaryosunda
-    /// kullanıcıya hiçbir bağlanma göstergesi olmadan mesaj kaybı riski
-    /// yaratıyordu. Zaten bir oturum varsa no-op.
+    /// Starts the handshake proactively when the user opens a chat, before any message is typed. Before, the handshake only started lazily on the
+    /// first `sendMessage` call. That left a window where the user opened a chat, typed, and sent with no connection indicator, so the message could
+    /// be lost. No-op if a session already exists.
     pub(crate) fn ensure_handshake(&mut self, peer_device_fingerprint: &str) -> Result<(), String> {
-        // oturum olsun olmasın, o an CANLI bir
-        // bağlantı yoksa hemen yeniden bağlanmayı dene — reconnect_sweep'in
-        // bir sonraki turunu (≤15 sn) beklemeden. Sohbet açılışında/mesaj
-        // öncesinde en hızlı iyileşme yolu.
-        // Forced: the chat is on screen (or was just unblocked), a wait left
-        // by a failed sweep must not hold it back. The send path stays gated:
+        // Even with a session: if no live connection exists right now, try to reconnect at once, without waiting for the next `reconnect_sweep`
+        // round (up to 15 s). This is the fastest recovery when a chat is opened or before a message.
+        // Forced: the chat is on screen (or was just unblocked), so a wait left by a failed sweep must not hold it back. The send path stays gated:
         // automatic retries go through it too.
         self.try_reconnect_device(peer_device_fingerprint, true);
         if self.has_active_session(peer_device_fingerprint) {
@@ -25,49 +19,31 @@ impl P2PCore {
         self.initiate_handshake_with(peer_device_fingerprint)
     }
 
-    /// belirtilen cihaza o an CANLI bir
-    /// libp2p bağlantısı yoksa VE kalıcı bir adres ipucumuz varsa hemen
-    /// (senkron, sweep'i beklemeden) yeniden bağlanmayı başlatır. Bağlıysa
-    /// veya adres yoksa no-op. `ensure_handshake` ve mesaj gönderme yolundan
-    /// çağrılır — kopmuş bir kişiye anında yeniden bağlanma için.
+    /// If there is no LIVE libp2p connection to the given device AND we have a stored address hint, starts reconnecting at once (synchronously, without
+    /// waiting for the sweep). No-op if it is connected or there is no address. Called from `ensure_handshake` and the send path, to reconnect a dropped
+    /// contact immediately.
     ///
-    /// bkz. `try_reconnect_device` dokümantasyonu: burada KASITLI OLARAK
-    /// `known_remote_devices`/Aktif filtresi YOK — bu, TAZE eşleşmiş (henüz
-    /// hiç IdentityExchange tamamlanmamış) bir cihaz için de çalışabilmeli,
-    /// aksi halde ilk eşleşmenin kendisi hiçbir zaman gerçek bir bağlantı
-    /// kuramazdı (bkz. QrScanActivity/ContactsFragment "eşleşme WIP"
-    /// düzeltmesi — kullanıcı DOĞRUDAN bu fonksiyonun tetiklediği bağlantının
-    /// tamamlanmasını beklediği ChatActivity'ye yönlendiriliyor).
+    /// See `try_reconnect_device`: there is deliberately NO `known_remote_devices`/Active filter here. This must work for a device that was JUST paired
+    /// (its IdentityExchange has not completed yet), otherwise the first pairing could never make a real connection. The user is sent to ChatActivity,
+    /// which waits for exactly the connection this function starts.
     pub(crate) fn ensure_connected(&mut self, device_fingerprint: &str) {
         self.try_reconnect_device(device_fingerprint, false);
     }
 
-    /// `ensure_connected`,
-    /// `reconnect_sweep` (periyodik, TÜM bilinen cihazlar) VE artık
-    /// `ping`/`ConnectionClosed` olaylarının (bkz. `poll_events`) tetiklediği
-    /// ANINDA tek-cihaz yeniden bağlanmasının ORTAK, backoff-farkında dial
-    /// mantığı — pil dostu (bkz. `RECONNECT_BACKOFF_*`) VE dial fırtınası
-    /// önleyici (aynı cihaza kısa aralıklarla BİRDEN FAZLA tetikleyiciden
-    /// [mesaj gönderme + periyodik tarama + ping-hatası] gelen çağrılar
-    /// artık HEPSİ aynı geri-çekilme durumunu paylaşır, birbirinden
-    /// habersiz üst üste dial YAPMAZLAR).
+    /// The shared, backoff-aware dial logic for one device: used by `ensure_connected`, by the periodic `reconnect_sweep` (all known devices), and now by
+    /// the immediate single-device reconnect triggered by `ping`/`ConnectionClosed` events (see `poll_events`). It is battery-friendly (see
+    /// `RECONNECT_BACKOFF_*`) and prevents dial storms: calls from several triggers in a short time (message send, periodic scan, ping error) share the
+    /// same backoff state, so they do not dial over each other.
     ///
-    /// "Bu cihaz bilinen/aktif mi" filtrelemesi KASITLI OLARAK burada
-    /// YAPILMAZ — çağıranların farklı gereksinimleri var (bkz.
-    /// `ensure_connected` dokümantasyonu); bu fonksiyon SADECE "adres
-    /// ipucu var mı + o an bağlı mı + geri çekilme penceresi doldu mu"
-    /// sorularına bakıp gerçek dial'i yapar.
+    /// "Is this device known/active" filtering is deliberately NOT done here. Callers have different needs (see the `ensure_connected` docs). This
+    /// function ONLY checks: is there an address hint, is it connected right now, and has the backoff window passed. Then it dials.
     ///
-    /// `force=true` (ağ değişikliği bildirimi — bkz.
-    /// `reconnect_all_known_now` — and `ensure_handshake`) `reconnect_backoff`'u YOK SAYAR: bir ağ
-    /// arayüzü değişikliği (Wi-Fi<->hücresel) ESKİ ağ üzerinden birikmiş
-    /// geri çekilme geçmişini ANLAMSIZ kılar — yeni arayüz üzerinden ilk
-    /// deneme her zaman hemen yapılmalı.
+    /// `force=true` (a network change notification, see `reconnect_all_known_now`, and `ensure_handshake`) IGNORES `reconnect_backoff`. An interface
+    /// change (Wi-Fi to cellular) makes the backoff history from the OLD network meaningless, so the first try on the new interface should always happen at once.
     ///
-    /// Dönüş: bir dial GERÇEKTEN denendiyse `true` (zaten bağlıysa, adres
-    /// yoksa veya backoff nedeniyle atlandıysa `false`).
+    /// Returns `true` if a dial was really attempted. `false` if it was already connected, there was no address, or the backoff skipped it.
     pub(crate) fn try_reconnect_device(&mut self, fp: &str, force: bool) -> bool {
-        // bkz. `blocked_identities` — engelli kişiye ASLA bağlanılmaz.
+        // See `blocked_identities`: a blocked contact is NEVER connected to.
         if self.is_blocked_device(fp) {
             return false;
         }
@@ -76,15 +52,10 @@ impl P2PCore {
             return false;
         }
         let now = current_time_ms();
-        // Spec dışı, ağ sağlamlığı düzeltmesi (bkz. `device_onion_addr` alanı
-        // dokümantasyonu, "aynı LAN'da + Tor'la eşleşmiş bir cihaz mobil
-        // veriye geçince diğer telefonla artık konuşamıyor" hatası): önceden
-        // burada SADECE `device_last_addr` (en son işe yarayan HERHANGİ bir
-        // adres — bir LAN bağlantısı kurulduysa bu ÜZERİNE yazılmış bir LAN
-        // adresi olabilir) kullanılıyordu. Artık `.onion` adresi AYRI ve asla
-        // üzerine yazılmayan `device_onion_addr`'dan da okunup, ikisi de
-        // (farklıysa) EŞ ZAMANLI denenir — hangisi ağ değişikliğinden sonra
-        // hâlâ geçerliyse o başarılı olur.
+        // Network robustness fix (see the `device_onion_addr` field docs; the bug was: "a device paired over Tor on the same LAN can no longer talk to the
+        // other phone once it switches to mobile data"). Before, this used ONLY `device_last_addr`, the last address that worked. That could be a LAN
+        // address written over a LAN connection. Now the `.onion` address is also read from `device_onion_addr`, which is kept SEPARATE and is never
+        // overwritten. If the two differ, BOTH are tried at the same time. Whichever is still valid after the network change succeeds.
         let primary_str = self.device_last_addr.get(fp).cloned();
         let onion_str = self.device_onion_addr.get(fp).cloned().filter(|o| Some(o) != primary_str.as_ref());
         // A group founder's hint (`vah:`), only while nothing better is known.
@@ -97,17 +68,15 @@ impl P2PCore {
         }
         let primary_addr = primary_str.as_deref().and_then(|s| s.parse::<Multiaddr>().ok());
         let onion_addr = onion_str.as_deref().and_then(|s| s.parse::<Multiaddr>().ok());
-        // PeerId, hangi adresten çıkarılırsa çıkarılsın AYNI olmalı (ikisi de
-        // aynı cihaza ait) — hangisi mevcut/ayrıştırılabilirse ondan alınır.
+        // The PeerId must be the SAME whichever address it is extracted from (both belong to the same device). It is taken from whichever is present or parseable.
         let peer_id = match primary_addr.as_ref().or(onion_addr.as_ref()).and_then(extract_peer_id) {
             Some(p) => p,
             None => return false,
         };
         let connected = self.swarm.as_ref().map(|s| s.is_connected(&peer_id)).unwrap_or(false);
         if connected {
-            // bkz. `reconnect_backoff` dokümantasyonu — bağlantı bir
-            // şekilde zaten kurulduysa geri çekilme geçmişini sıfırla, bir
-            // sonraki kopmada sıfırdan (hızlı) başlasın.
+            // See the `reconnect_backoff` docs. If the connection was somehow set up already, reset the backoff history, so the next drop starts again
+            // from zero (quickly).
             self.reconnect_backoff.remove(fp);
             return false;
         }
@@ -121,28 +90,19 @@ impl P2PCore {
                 }
             }
         }
-        // Spec dışı, hata düzeltmesi ("ağ değişikliğinden sonra yeniden
-        // bağlanma dakikalarca gecikiyor"): `force=true` yukarıdaki GATE'i
-        // (satır ~3688) atlıyordu ama `attempts` sayacı yine de ESKİ ağdan
-        // BİRİKMİŞ değerden devam ediyordu — yani tek bir zorlanmış deneme
-        // başarısız olursa (arayüz değişiminin hemen ardından, ya da karşı
-        // tarafın adresi de değiştiyse gayet olası), `reconnect_backoff`'a
-        // önceki değerden bir kademe DAHA YÜKSEK (azami `RECONNECT_BACKOFF_MAX_MS`,
-        // 10 dakika) bir giriş yazılıyordu — bu da sonraki TÜM otomatik
-        // yeniden bağlanma yollarını (periyodik `reconnect_sweep`, ping
-        // başarısızlığı) dakikalarca engelliyordu; tam olarak `force`'un
-        // önlemeye çalıştığı senaryonun kendisi. `force` iken sayaç HER ZAMAN
-        // 1'den başlar — "eski ağ üzerinden birikmiş geri çekilme geçmişi
-        // ANLAMSIZ" yorumunun (yukarıdaki fonksiyon dokümantasyonu) sadece
-        // GATE'i değil, SONRAKİ bekleme süresini de kapsaması gerekir.
+        // Fix (reconnect after a network change was delayed by minutes): `force=true` skipped the gate above (around line 3688), but the `attempts` counter
+        // still continued from the value accumulated on the OLD network. So a single forced try that failed (right after an interface change, or if the peer's
+        // address also changed, which is quite likely) wrote a backoff entry one step HIGHER than before (up to `RECONNECT_BACKOFF_MAX_MS`, 10 min). That
+        // blocked ALL later automatic reconnect paths (periodic `reconnect_sweep`, ping failure) for minutes: exactly the scenario `force` is meant to prevent.
+        // With `force`, the counter ALWAYS starts at 1. The reasoning "backoff history from the old network is meaningless" (see the function docs above) must
+        // cover the NEXT wait time, not only the gate.
         let attempts = if force {
             1
         } else {
             self.reconnect_backoff.get(fp).map(|&(_, n)| n).unwrap_or(0) + 1
         };
-        // attempts=1 -> base*2^0 (=RECONNECT_SWEEP_INTERVAL_MS, normal
-        // tarama hızıyla aynı, ekstra bekleme yok), attempts=2 -> 2x,
-        // attempts=3 -> 4x, ... `RECONNECT_BACKOFF_MAX_MS`'te tavan yapar.
+        // attempts=1 -> base * 2^0 (= RECONNECT_SWEEP_INTERVAL_MS, the same speed as a normal scan, no extra wait). attempts=2 -> 2x, attempts=3 -> 4x, ...
+        // capped at `RECONNECT_BACKOFF_MAX_MS`.
         let delay = RECONNECT_BACKOFF_BASE_MS
             .saturating_mul(1u64 << attempts.saturating_sub(1).min(16))
             .min(if self.radio_saver() { RECONNECT_BACKOFF_SAVER_MAX_MS } else { RECONNECT_BACKOFF_MAX_MS });
@@ -151,10 +111,8 @@ impl P2PCore {
             "try_reconnect_device: kopmuş peer'a yeniden bağlanılıyor (deneme #{}, force={}, onion adayı={}): {}",
             attempts, force, onion_addr.is_some(), crate::log_id(&peer_id)
         );
-        // `dial_with_relay_fallback` zaten `primary_addr`'ı VE bilinen tüm
-        // röle adaylarını dener — `.onion` adayı varsa AYRICA (relay-fallback
-        // mantığına girmeden, doğrudan) deniyoruz, o da zaten kendi başına
-        // ağ-bağımsız bir "doğrudan" adres.
+        // `dial_with_relay_fallback` already tries the `primary_addr` AND all known relay candidates. If there is an `.onion` candidate, it is ALSO tried
+        // here directly (without going through the relay fallback logic), since it is already a network-independent "direct" address.
         if let Some(onion) = onion_addr.clone() {
             if let Some(swarm) = &mut self.swarm {
                 // with the peer condition, a dial still in flight from
@@ -195,17 +153,11 @@ impl P2PCore {
         peers.len()
     }
 
-    /// Spec dışı, kullanıcı isteği (ağ değişikliği anında tam yeniden
-    /// bağlanma): Kotlin tarafından (bkz. P2PService genel ağ değişikliği
-    /// algılama, `notifyNetworkChanged` JNI) bir ağ arayüzü değişikliği
-    /// (Wi-Fi<->hücresel, ya da herhangi bir "varsayılan ağ değişti"
-    /// olayı) bildirildiğinde çağrılır — TÜM bilinen Aktif cihazlar için,
-    /// `reconnect_backoff`'u YOK SAYARAK (bkz. `try_reconnect_device`
-    /// `force` notu), ANINDA yeniden bağlanmayı dener. Eski ağ üzerinden
-    /// kurulmuş TÜM bağlantılar yeni arayüzde artık geçersiz soketlerdir
-    /// (IP değişti) — periyodik `reconnect_sweep`'in (≤15sn) VEYA
-    /// `ping`'in bunu fark etmesini beklemek yerine, ağ değişikliğinin
-    /// KENDİSİ zaten kesin bir sinyal olduğundan hemen harekete geçilir.
+    /// Called from Kotlin when a network interface change is reported (Wi-Fi to cellular, or any "default network changed" event; see the
+    /// `notifyNetworkChanged` JNI and the P2PService network change detection). It immediately tries to reconnect to ALL known ACTIVE devices,
+    /// IGNORING `reconnect_backoff` (see the `force` note in `try_reconnect_device`). All connections made over the old network are now dead sockets
+    /// (the IP changed). Instead of waiting for the periodic `reconnect_sweep` (up to 15 s) or for `ping` to notice, the network change itself is a clear
+    /// signal, so it acts at once.
     pub(crate) fn reconnect_all_known_now(&mut self) {
         let now = mono_ms();
         if now.saturating_sub(self.last_network_change_at) < NETWORK_CHANGE_DEBOUNCE_MS {
@@ -215,17 +167,14 @@ impl P2PCore {
         }
         self.last_network_change_at = now;
         self.network_change_pending = false;
-        // İKİ CİHAZLI TESTTE (2026-09-06): ağ değişikliğinden sonra Tor
-        // devreleri/onion descriptor'ı dakikalarca toparlanmıyordu. arti'yi
-        // de dürt — `bootstrap()` idempotent, ucuz (bkz. `notify_network_changed`).
+        // Two-device test (2026-09-06): after a network change, Tor circuits and the onion descriptor took minutes to recover. Poke arti too: `bootstrap()`
+        // is idempotent and cheap (see `notify_network_changed`).
         if let Some(tor) = &self.tor {
             tor.notify_network_changed();
         }
-        // Eski arayüzdeki bağlantılar ölü olabilir: hepsini hemen yokla, ölen
-        // tek zaman aşımında kapanır (yaşayanlara dokunulmaz — mobil→Wi-Fi
-        // geçişinde mobil bağlantılar çalışmaya devam eder).
-        // Not servers: they are never probed, so the flag stayed
-        // set and the next bulk connection closed the working one.
+        // Old-interface connections may be dead. Probe them all at once. A dead one closes on timeout, and live ones are left alone (on a mobile-to-Wi-Fi
+        // switch, mobile connections keep working). Servers are never probed. Without that, the flag stayed set, and the next bulk connection closed the
+        // working one.
         let peers: Vec<PeerId> = self.keepalive_state.keys().copied().filter(|p| !self.is_server_peer(p)).collect();
         for p in peers {
             self.mark_connection_suspect(p, true);
@@ -253,17 +202,12 @@ impl P2PCore {
             let force = connected_before.contains(&fp) || (!saver && seen_lately);
             self.try_reconnect_device(&fp, force);
         }
-        // Spec dışı, ağ sağlamlığı düzeltmesi (bkz. `announce_address_to_all_contacts`
-        // dokümantasyonu): ağ arayüzü değiştiğinde bizim de o anki en iyi
-        // adresimiz değişmiş olabilir (yeni LAN IP'si, yeni UPnP eşlemesi) —
-        // bilinen herkese proaktif olarak bildiriyoruz, sadece kendi
-        // taraflarımızdan yeniden bağlanmayı beklemek yerine.
+        // Network robustness fix (see the `announce_address_to_all_contacts` docs): when the interface changes, our own best address may also change (new
+        // LAN IP, new UPnP mapping). We proactively tell EVERYONE we know, instead of only waiting for our contacts to reconnect to us.
         self.announce_address_to_all_contacts();
-        // Çoklu-cihaz (spec 1.7): ağ değişikliği güçlü bir sinyal — debounce'u
-        // yok sayıp kardeşlerden geçmiş geri-doldurmayı HEMEN dene (bir süre
-        // çevrimdışıydıysam kaçırdığım kişi mesajlarını yakalamak için).
-        // At most one extra round per 5 minutes: every LTE/Wi-Fi flap asked
-        // every sibling for the newest rows of every conversation again.
+        // Multi-device (1.7): a network change is a strong signal. Ignore the debounce and try the sibling history backfill NOW (to catch messages from
+        // people I missed while offline). At most one extra round per 5 minutes: every LTE/Wi-Fi flap asked every sibling for the newest rows of every
+        // conversation again.
         self.last_sibling_backfill_at = self.last_sibling_backfill_at
             .min(current_time_ms().saturating_sub(SIBLING_BACKFILL_INTERVAL_MS - 5 * 60_000));
         self.last_sibling_roster_sync_at = 0;
@@ -413,10 +357,8 @@ impl P2PCore {
         if !self.ratchets_loaded {
             return Err("Oturum durumu henüz yüklenmedi".to_string());
         }
-        // Engellenen biriyle oturum KURULMAZ bile — aksi halde arayüzden
-        // sohbet açmak ya da `ensure_handshake` çağrısı taze bir ratchet
-        // yaratır ve karşı tarafa el sıkışma yollardı (bkz. `try_publish_raw`
-        // aynı gerekçe).
+        // No session is set up at all with a blocked person. Otherwise opening a chat from the UI or calling `ensure_handshake` would create a fresh ratchet
+        // and send a handshake to the other side (see the `try_publish_raw` note for the same reasoning).
         if self.is_blocked_device(peer_device_fingerprint) {
             return Err("Bu kişi engellenmiş".to_string());
         }
@@ -428,22 +370,14 @@ impl P2PCore {
             return Err("Peer device has been revoked".to_string());
         }
 
-        // `DeviceRatchetState::initiate`
-        // burada "Bad Kyber/X25519 public key length" ile başarısız olursa
-        // bu KALICI bir hatadır (bozuk/uyumsuz anahtar verisi — ör. bu kayıt
-        // Category 3->5 (ML-KEM-768->1024) geçişinden ÖNCE, ya da karşı
-        // taraf hâlâ eski bir uygulama sürümüyle eşleşmişken oluşmuş) —
-        // network sorunlarının aksine yeniden denemekle ASLA düzelmez.
-        // Önceden bu, `send_message_content`'in HER çağrısında (mesaj,
-        // typing indicator, profil güncellemesi, geçmiş senkronu — hepsi
-        // aynı yoldan geçiyor) sessizce logcat'e yazılıyor, kullanıcı
-        // arayüzüne HİÇ yansımıyordu — "bağlanamıyorum" şikayetine hiçbir
-        // ipucu vermiyordu. Artık bu peer için İLK KEZ görülüyorsa (veya
-        // hata metni değiştiyse) `attachment_events` üzerinden bir kerelik
-        // bir olay olarak bildiriliyor (bkz. `handshake_failure_notified`).
-        // To the peer's prekey when one is known: its secret is deleted
-        // within weeks, the long-term KEM secret never. Without one (first
-        // contact before any packet of the peer) the long-term keys, id 0.
+        // If `DeviceRatchetState::initiate` fails here with "Bad Kyber/X25519 public key length", this is a PERMANENT error (corrupted or incompatible key data,
+        // e.g. this record was created BEFORE the Category 3 to 5 (ML-KEM-768 to 1024) migration, or while the other side was still paired with an old app
+        // version). Unlike network problems, retrying never fixes it. Before, this was silently written to logcat on EVERY `send_message_content` call (messages,
+        // typing indicators, profile updates and history sync all go through the same path), and the UI never showed it, so there was no hint for "cannot
+        // connect". Now, the FIRST time it is seen for this peer (or when the error text changes), it is reported once as an event through
+        // `attachment_events` (see `handshake_failure_notified`).
+        // To the peer's prekey when one is known: its secret is deleted within weeks, the long-term KEM secret never. Without one (first contact before any
+        // packet from the peer), the long-term keys are used, id 0.
         let peer_prekey = self.peer_prekeys.get(peer_device_fingerprint).cloned();
         let (peer_kem_x25519, peer_kem_mlkem, recipient_prekey_id) = match &peer_prekey {
             Some(p) => (p.kem_pubkey_x25519.as_slice(), p.kem_pubkey_mlkem.as_slice(), p.id),
@@ -467,23 +401,15 @@ impl P2PCore {
                 return Err(e);
             }
         };
-        // El sıkışma bu turda başarıyla kuruldu — daha önce bu peer için
-        // bildirilmiş kalıcı bir hata varsa artık geçersiz, temizle (ör.
-        // kişi silinip yeniden eşleştirildi ve bu sefer anahtar uzunluğu
-        // doğru).
+        // The handshake was set up successfully in this turn. Any permanent error recorded earlier for this peer is no longer valid, so clear it (e.g. the
+        // contact was deleted and re-paired, and this time the key length is right).
         self.handshake_failure_notified.remove(peer_device_fingerprint);
 
-        // KRİTİK: `state.own_x25519_secret`, `DeviceRatchetState::initiate()`
-        // içinde ÜRETİLEN TAZE EPHEMERAL secret'tir ve DH hesaplaması zaten
-        // BUNUNLA yapıldı (ratchet.rs). Karşı tarafa (HandshakeInit'te)
-        // gönderilecek "initiator_x25519_pubkey" da AYNI ephemeral secret'ten
-        // türetilmeli — önceden yanlışlıkla `own_keys.kem_sk_x25519`
-        // (cihazın UZUN VADELİ kimlik anahtarı, tamamen farklı bir keypair)
-        // kullanılıyordu. Bu durumda responder tarafı `respond()` içinde
-        // initiator'ın gönderdiği (yanlış/uzun-vadeli) public key'e karşı DH
-        // yapıyor, initiator ise kendi tarafında EPHEMERAL secret'le DH
-        // yapmış oluyordu — iki taraf asla aynı paylaşılan sırra ulaşamıyor,
-        // bu da HER mesajda "Decryption failed" ile sonuçlanıyordu.
+        // CRITICAL: `state.own_x25519_secret` is the FRESH EPHEMERAL secret generated inside `DeviceRatchetState::initiate()`, and the DH calculation was
+        // already done with IT (ratchet.rs). The "initiator_x25519_pubkey" sent to the other side (in HandshakeInit) must be derived from the SAME ephemeral
+        // secret. Before, `own_keys.kem_sk_x25519` was used by mistake (the device's LONG-TERM identity key, a completely different keypair). In that case the
+        // responder does DH inside `respond()` against the (wrong, long-term) public key the initiator sent, while the initiator did DH with its ephemeral secret.
+        // The two sides can never reach the same shared secret, so EVERY message ended in "Decryption failed".
         let initiator_x25519_pub = X25519PublicKey::from(&state.own_x25519_secret).as_bytes().to_vec();
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
 
@@ -517,45 +443,29 @@ impl P2PCore {
             self.id0_inits.remove(peer_device_fingerprint);
         }
         let r = self.publish_envelope(peer_device_fingerprint, &NetworkEnvelope::Handshake(handshake));
-        // bkz. `pairing_mailbox_subs` — el sıkışma YAYINLANDIKTAN sonra
-        // (Handshake karşı tarafın posta kutusu topic'ine gider) eşleşme
-        // aboneliğini bırak: bundan sonra karşı taraf rotasyonlu topic'ten
-        // yazacak, biz de zaten ona abone olduk.
+        // See `pairing_mailbox_subs`. Once the handshake is PUBLISHED (it goes to the other side's mailbox topic), drop the pairing subscription. From now on
+        // the other side writes on the rotated topic, and we are already subscribed to it.
         self.drop_pairing_mailbox(peer_device_fingerprint);
         r
     }
 
-    /// Spec dışı, teslim garantisi düzeltmesi ("karşı taraf kapalıyken
-    /// yazılan ilk mesaj HİÇ ulaşmıyor"): kaybolmuş bir `HandshakeInit`'ten
-    /// tek çıkış yolu.
+    /// Fix (delivery guarantee: "the first message written while the other side was offline never arrives"): the only way out of a lost `HandshakeInit`.
     ///
-    /// Arıza deseni: kapalı bir cihaza ilk kez mesaj yazıldığında
-    /// `send_message_content_inner` önce `initiate_handshake_with`'i
-    /// çağırır — o da ratchet'i ANINDA kurup `HandshakeInit`'i yayınlamayı
-    /// dener. Karşı taraf kapalıysa `gossipsub.publish` başarısız olur ve
-    /// zarf `pending_envelopes`'e düşer. Zarf orada eskirse (ya da uygulama
-    /// bu arada kapanırsa) BİR DAHA HİÇ gönderilmez: `initiate_handshake_with`
-    /// yalnızca ratchet YOKKEN çağrılıyor, oysa gönderen tarafta ratchet
-    /// ARTIK VAR. Alıcı ise gelen paketleri `early_packets`'e tamponlayıp
-    /// hiç gelmeyecek el sıkışmayı bekler. İki uçta da hiçbir hata
-    /// görünmez; mesajlar 7 gün boyunca boşuna yeniden denenir.
+    /// Failure pattern: when a message is first written to an offline device, `send_message_content_inner` calls `initiate_handshake_with` first. That sets
+    /// up the ratchet at once and tries to publish the `HandshakeInit`. If the other side is offline, `gossipsub.publish` fails and the envelope falls into
+    /// `pending_envelopes`. If the envelope gets stale there (or the app closes in the meantime) it is NEVER sent again. `initiate_handshake_with` is only
+    /// called when there is NO ratchet, but on the sender's side the ratchet now EXISTS. The receiver buffers incoming packets in `early_packets` and waits for
+    /// a handshake that never comes. No error is visible on either end, and messages are retried for 7 days for nothing.
     ///
-    /// Çözüm: karşı taraf `MAX_UNCONFIRMED_AGE_MS` boyunca HİÇBİR ŞEYİ
-    /// onaylamadıysa (tek bir Ack bile yok), oturumun karşı tarafta hiç
-    /// kurulmamış olduğunu varsayıp TAZE bir el sıkışma gönderiyoruz.
-    /// Tetikleyiciler: (1) tazeleme turu — bkz. `send_message_content_inner`
-    /// `message_id_override` kolu; (2) o eşe yeniden bağlanma — bkz.
-    /// `poll_events` `connections_established` bloğu.
+    /// Fix: if the other side has confirmed NOTHING for `MAX_UNCONFIRMED_AGE_MS` (not even one Ack), we assume the session was never set up on its side, and
+    /// send a FRESH handshake. Triggers: (1) the refresh round (see the `message_id_override` arm of `send_message_content_inner`); (2) reconnecting to that
+    /// peer (see the `connections_established` block of `poll_events`).
     ///
-    /// Oturum sıfırlandığı için bekleyen paketler eski zincirle şifreli
-    /// kalır — bu yüzden `regen_pending_for_peer` ile hepsi taze zincirle
-    /// yeniden üretilir (rotasyon sonrası kullanılan AYNI yol, aynı
-    /// geçersizleşme anlamı). `initiate_handshake_with`'in dönüşü değil,
-    /// kök anahtarın GERÇEKTEN değişip değişmediği ölçüt: yayın geçici
-    /// olarak başarısız olsa bile (zarf kuyruğa alınır) ratchet zaten
-    /// değişmiştir ve bekleyenler mutlaka yenilenmelidir.
-    /// Bir oturumun o anki zincir kuşağının kimliği — bkz.
-    /// `PendingConfirmation.chain_stamp`. Oturum yoksa boş string.
+    /// Because the session is reset, pending packets stay encrypted under the old chain. So all of them are regenerated on the fresh chain with
+    /// `regen_pending_for_peer`, the same path used after a rotation, with the same meaning of invalidation. The criterion is whether the root key REALLY
+    /// changed, not the return value of `initiate_handshake_with`. Even if publishing fails transiently (the envelope is queued), the ratchet has already
+    /// changed, and the pending packets must be renewed.
+    /// Returns the identity of the current chain generation of a session (see `PendingConfirmation.chain_stamp`). Empty string if there is no session.
     pub(crate) fn chain_stamp_for(&self, peer_device_fingerprint: &str) -> String {
         self.ratchets
             .get(peer_device_fingerprint)
@@ -604,13 +514,10 @@ impl P2PCore {
     }
 
     pub(crate) fn maybe_redo_handshake(&mut self, peer_device_fingerprint: &str) {
-        // Oturum hiç yoksa normal yol zaten el sıkışmayı başlatıyor.
-        // KESİN ölçüt: bu oturumda karşı taraftan HİÇ bir şey çözemedik mi
-        // (bkz. ratchet.rs `never_heard` — bir rotasyon alma sayacını
-        // sıfırlar, o yüzden önceki zincir de sayılır)? Öyleyse karşı taraf
-        // el sıkışmamızı işlememiş olabilir. Karşı taraf BİR KEZ bile cevap
-        // verdiyse (recv > 0) burası bir daha ASLA tetiklenmez — sağlıklı,
-        // sadece sessiz bir oturum hiçbir koşulda sıfırlanmaz.
+        // If there is no session at all, the normal path already starts the handshake.
+        // DEFINITIVE criterion: have we NOT been able to decrypt ANYTHING from the other side in this session (see `never_heard` in ratchet.rs: it resets on
+        // a rotation receive, so the previous chain is counted too)? If so, the other side may never have processed our handshake. If the other side has
+        // answered even once (recv > 0), this never fires again. A healthy session is never reset.
         let never_heard = match self.ratchets.get(peer_device_fingerprint) {
             Some(s) => s.never_heard(),
             None => return,
@@ -637,10 +544,8 @@ impl P2PCore {
             }
             None => None,
         };
-        // İkinci ölçüt: gerçekten teslim edilmeyi bekleyen bir şey olsun.
-        // `original_sent_at` (mesajın İLK kuyruğa girdiği an) kullanılıyor,
-        // `first_sent_at` (son tazeleme anı) değil — aksi halde her tazeleme
-        // sayacı sıfırlar ve yeniden bağlanma tetikleyicisi hiç ateşlemezdi.
+        // Second criterion: something must really be waiting for delivery. `original_sent_at` (when the message first entered the queue) is used, not
+        // `first_sent_at` (the last refresh time). Otherwise each refresh would reset the counter, and the reconnect trigger would never fire.
         let stuck = self.awaiting_confirmation.values().any(|p| {
             p.peer_device_fingerprint == peer_device_fingerprint
                 && now.saturating_sub(p.original_sent_at) > MAX_UNCONFIRMED_AGE_MS
@@ -656,8 +561,7 @@ impl P2PCore {
         let result = self.initiate_handshake_with(peer_device_fingerprint);
         let after = self.ratchets.get(peer_device_fingerprint).map(|s| s.root_handle_now());
         let replaced = before != after;
-        // Terk edilen kök anahtar bir SONRAKİ tazelemede bırakılmak üzere
-        // saklanır; oturum değişmediyse eldeki bayat kayıt korunur.
+        // The abandoned root key is kept for a later refresh to drop. If the session did not change, the stale record already held is kept.
         self.last_handshake_redo.insert(
             peer_device_fingerprint.to_string(),
             (now, if replaced { before } else { stale_root }),
@@ -670,21 +574,14 @@ impl P2PCore {
         }
     }
 
-    // NOT: Skipped-key'ler burada (yeni oturum kurulurken) diskten
-    // yüklenmiyor çünkü bu YENİ bir el sıkışma — DB'de bu cihaz-çifti için
-    // henüz hiçbir skipped-key kaydı olamaz (yeni oturumda mesaj numarası
-    // sıfırdan başlar). Skipped-key diske yazma/silme, sadece bir oturum
-    // İÇİNDEYKEN (receive_message'ta) gerçekleşir.
+    // NOTE: skipped keys are NOT loaded from disk here (while a new session is being set up), because this is a NEW handshake. There can be no skipped-key
+    // record in the DB for this device pair yet (message numbers start from zero in a new session). Writing or deleting skipped keys on disk happens only
+    // WITHIN a session (in `receive_message`).
     //
-    // Ratchet state'in TAMAMI (root_key/ck_send/ck_recv/own+peer anahtarlar/
-    // sayaçlar) artık `ratchet_states` tablosuna (skipped_key_encryption_key
-    // ile şifreli) kalıcı hale getiriliyor — bkz. `persist_ratchet_state`/
-    // `load_ratchet_states_from_db`. Süreç yeniden başladığında (uygulama
-    // güncellemesi, arka plan öldürme vb.) `init_db` sonrası
-    // `setSkippedKeyEncryptionKey` çağrıldığı an bu oturumlar geri yüklenir
-    // — yeniden el sıkışma gerekmez, geçmişte alınan gecikmeli/atlanmış
-    // mesaj anahtarları da (skipped_message_keys tablosundan) hâlâ geçerli
-    // kalır.
+    // The WHOLE ratchet state (root_key, ck_send/ck_recv, own and peer keys, counters) is now persisted in the `ratchet_states` table (encrypted with
+    // `skipped_key_encryption_key`). See `persist_ratchet_state` and `load_ratchet_states_from_db`. When the process restarts (app update, background kill,
+    // etc.), these sessions are restored after `init_db` once `setSkippedKeyEncryptionKey` is called. No new handshake is needed, and delayed or skipped
+    // message keys from the past (from the skipped_message_keys table) are still valid.
 
     pub(crate) fn process_handshake_init(&mut self, source: Option<PeerId>, handshake: &HandshakeInit) -> Result<(), String> {
         // See `initiate_handshake_with`: a session made before the load is
@@ -694,26 +591,20 @@ impl P2PCore {
         }
         let sender =self.known_remote_devices.get(&handshake.sender_device_fingerprint).cloned()
             .ok_or("Unknown sender device; cannot verify signatures")?;
-        // önceden `is_active`
-        // hiçbir yerde kontrol edilmiyordu — bu alanı hiçbir zaman false
-        // yapan bir çağrı yolu da olmadığından pratikte etkisizdi. Artık
-        // `revoke_contact_device` gerçekten `false` yapabiliyor VE burada
-        // gerçekten uygulanıyor: iptal edilmiş bir cihazdan gelen bir el
-        // sıkışma reddedilir.
+        // Before, `is_active` was not checked anywhere. Since no code path ever set it to false, it had no effect in practice. Now `revoke_contact_device`
+        // really can set it to `false`, and it is enforced here: a handshake from a revoked device is rejected.
         if !sender.is_active {
             self.answer_revoked_sibling(&sender.device_fingerprint);
             return Err("Sender device has been revoked".to_string());
         }
 
-        // bkz. receive_message'teki aynı kimlik-bağı düzeltmesi: imza sadece
-        // cihazın imzaladığını kanıtlar, header'daki identity_id'nin o cihaza
-        // ait olduğunu değil — kayıtlı (TOFU) bağla eşleşmeyi zorunlu kıl.
+        // See the same identity-binding fix in receive_message: the signature only proves the device signed it, not that the identity_id in the header belongs to
+        // that device. Enforce the match with the stored (TOFU) binding.
         if handshake.sender_identity_id != sender.identity_id {
             return Err("HandshakeInit sender_identity_id, kayıtlı cihaz kimliğiyle eşleşmiyor".to_string());
         }
 
-        // İmza ALICIYI (bizim fingerprint'imizi) kapsar: A'nın B'ye gönderdiği
-        // handshake C'ye tekrar oynatılıp C'nin A oturumunu bozamaz.
+        // The signature covers the RECIPIENT (our fingerprint): a handshake that A sent to B cannot be replayed to C to break C's session with A.
         let recipient_fp = self.get_active_own_device_fingerprint()?;
         let to_verify = handshake_signing_input(
             &handshake.initiator_x25519_pubkey, &handshake.initiator_kyber_pubkey,
@@ -722,30 +613,17 @@ impl P2PCore {
         );
         verify_hybrid_signature(&to_verify, &handshake.signature_classical, &handshake.signature_pq, &sender)?;
 
-        // Spec dışı, güvenlik denetimi düzeltmesi (bkz. `record_peer_id_if_known`
-        // dokümantasyonu / `process_identity_exchange` AYNI notu): imza bu
-        // noktada BAŞARIYLA doğrulandı — gönderenin gerçekten bu fingerprint'in
-        // (`known_remote_devices`'ta zaten kayıtlı) özel anahtarına sahip
-        // olduğu kanıtlanmış oldu. Artık bu fingerprint'i, paketi GERÇEKTEN
-        // yayınlayan `PeerId` ile ilişkilendirmek güvenli (önceden bu,
-        // imza doğrulamadan ÖNCE koşulsuz yapılıyordu).
-        // The call itself is further down, after the freshness and replay
-        // checks: a replayed old init has a valid signature too.
+        // Security fix (see the `record_peer_id_if_known` docs and the same note in `process_identity_exchange`): the signature was verified successfully at
+        // this point. So it is proven that the sender really holds the private key of this fingerprint (already stored in `known_remote_devices`). It is now
+        // safe to link this fingerprint with the `PeerId` that really published the packet. Before, this was done unconditionally, BEFORE signature verification.
+        // The call itself is further down, after the freshness and replay checks: a replayed old init has a valid signature too.
 
-        // Spec dışı, güvenlik denetimi düzeltmesi (el sıkışma tekrar oynatma
-        // → oturum sıfırlama DoS'u): gossipsub `Signed` modu, ağdaki bir
-        // gözlemcinin YAKALADIĞI geçerli bir `HandshakeInit`'i yeniden
-        // yayınlamasına izin verir. Bu fonksiyon (aşağıda) mevcut bir
-        // ratchet'i taze bir `respond` state'iyle EZDİĞİ için, böyle bir
-        // tekrar canlı bir konuşmayı koparabilirdi. İki katmanlı savunma
-        // (bkz. `recent_handshake_sigs` alan notu):
-        // (1) freshness penceresi — çok eski/çok ileri timestamp reddedilir
-        //     (yakalanmış eski el sıkışmaları eler, saat kaymasına tolerans);
-        // (2) içerik dedup — aynı imzalı (bayt-aynısı) el sıkışma pencerede
-        //     ikinci kez uygulanmaz. Gerçek bir yeniden-eşleşme taze efemeral
-        //     anahtarlar → farklı imza taşıdığından, saat kayması ne olursa
-        //     olsun kabul edilir (monoton-timestamp'in re-pair'i kırma riski
-        //     olmadan).
+        // Security fix (handshake replay leading to a session-reset DoS): gossipsub `Signed` mode lets an observer on the network re-publish a valid
+        // `HandshakeInit` it captured. This function overwrites an existing ratchet with a fresh `respond` state, so such a replay could break a live
+        // conversation. Two layers of defence (see the `recent_handshake_sigs` field note):
+        // (1) a freshness window: a timestamp that is too old or too far ahead is rejected (filters captured old handshakes, tolerates clock skew);
+        // (2) content dedup: the same signed (byte-identical) handshake is not applied a second time within the window. A real re-pairing carries fresh
+        //     ephemeral keys, so a different signature, and it is accepted whatever the clock skew (no risk of a monotonic timestamp breaking re-pairing).
         let now = current_time_ms();
         let skew = now.abs_diff(handshake.timestamp);
         // An init waits in the server mailbox while this device is off, so the
@@ -760,11 +638,10 @@ impl P2PCore {
         }
         {
             let seen = self.recent_handshake_sigs.entry(handshake.sender_device_fingerprint.clone()).or_default();
-            // Pencereden eski girdileri buda (sınırsız büyümeyi önle).
+            // Prune old entries from the window (prevents unbounded growth).
             seen.retain(|(ts, _)| now.abs_diff(*ts) <= HANDSHAKE_MAX_AGE_MS);
-            // A stored init older than one already accepted would put the
-            // session back on keys the sender has replaced. H37: any older
-            // one, not only one past the skew window (both on the sender's clock).
+            // A stored init older than one already accepted would put the session back on keys the sender has replaced. Any older one counts, not only one
+            // past the skew window (both on the sender's clock).
             if seen.iter().any(|(ts, _)| *ts > handshake.timestamp) {
                 info!("HandshakeInit yok sayıldı (peer={}) — daha yenisi zaten kabul edildi", crate::log_id(&handshake.sender_device_fingerprint));
                 return Ok(());
@@ -823,34 +700,19 @@ impl P2PCore {
             }
         }
 
-        // KRİTİK: eşzamanlı el sıkışma çakışması. İki cihaz da (ör. ikisi
-        // de uygulamayı yeniden başlatıp aynı sohbeti aynı anda açtığında,
-        // `ensure_handshake` ikisinde de `has_active_session == false`
-        // bulur) TAM AYNI ANDA birbirine `HandshakeInit` gönderirse: her
-        // iki taraf da KENDİ `initiate_handshake_with` çağrısında ÖNCE bir
-        // "initiator" ratchet state'i oluşturup `self.ratchets`'e yazar,
-        // SONRA karşı taraftan gelen HandshakeInit'i işlerken (burada) bu
-        // state'i bir "responder" state'iyle EZER. Sorun: responder modu,
-        // KENDİ uzun-vadeli kimlik KEM anahtarını (`own_keys.kem_sk_*`)
-        // karşı tarafın EPHEMERAL (geçici, o el sıkışmaya özel) public
-        // key'iyle DH/decapsulate eder — iki taraf da bunu yaparsa,
-        // türetilen paylaşımlı sırlar birbiriyle UYUŞMAZ (DH'nin simetri
-        // özelliği yalnızca "A'nın ephemeral'ı + B'nin kimliği" ile "B'nin
-        // kimliği + A'nın ephemeral'ı" ÇAPRAZ eşleştiğinde geçerlidir, iki
-        // tarafın da kendi kimliğini kullanması bu simetriyi bozar). Sonuç:
-        // TÜM sonraki mesajlar "Decryption failed"/"skipped-key cache'te
-        // yok" ile başarısız olur — QR yeniden tarama, çakışmayı kırıp
-        // tek taraflı bir el sıkışma zorladığı için "düzeltiyormuş" gibi
-        // görünür.
+        // CRITICAL: concurrent handshake collision. If both devices (e.g. both restart the app and open the same chat at the same time, so `ensure_handshake`
+        // finds `has_active_session == false` on both) send a `HandshakeInit` to each other at EXACTLY the same time: each side first creates an "initiator"
+        // ratchet state in its own `initiate_handshake_with` call and writes it to `self.ratchets`. Then, while processing the other side's HandshakeInit (here),
+        // it overwrites that state with a "responder" state. The problem: responder mode does DH/decapsulation with its OWN long-term identity KEM keys
+        // (`own_keys.kem_sk_*`) against the other side's EPHEMERAL public key. If both sides do this, the derived shared secrets do NOT match. The symmetry of
+        // DH only holds when "A's ephemeral + B's identity" CROSSES with "B's identity + A's ephemeral", and both sides using their own identity breaks that
+        // symmetry. The result: ALL later messages fail with "Decryption failed" / "not in the skipped-key cache". A QR rescan appears to "fix" it, because it
+        // forces a one-sided handshake.
         //
-        // Deterministik çözüm: fingerprint'i (hex string, karşılaştırılabilir)
-        // KÜÇÜK olan taraf "kanonik initiator" sayılır. Eğer az önce KENDİ
-        // (henüz hiç mesaj taşımamış — bkz. `send_message_number`/
-        // `recv_message_number` sıfır kontrolü) initiator state'imiz varsa
-        // VE bizim fingerprint'imiz karşı tarafınkinden KÜÇÜKSE, bu gelen
-        // HandshakeInit'i YOK SAYARIZ (kendi initiator state'imizi koruruz)
-        // — karşı taraf (fingerprint'i büyük olan), simetrik olarak BİZİM
-        // HandshakeInit'imizi kabul edip doğru responder state'ini üretecektir.
+        // Deterministic resolution: the side whose fingerprint (hex string, comparable) is SMALLER is the "canonical initiator". If we already have our OWN
+        // initiator state (one that has not carried any message yet, see the `send_message_number`/`recv_message_number` zero checks) AND our fingerprint is
+        // SMALLER than the other side's, the incoming HandshakeInit is IGNORED (we keep our initiator state). The other side (with the bigger fingerprint)
+        // then accepts OUR HandshakeInit symmetrically, and produces the correct responder state.
         if let Some(existing) = self.ratchets.get(&handshake.sender_device_fingerprint) {
             // Simultaneous handshake: both sides initiated. The smaller fingerprint's
             // init wins, and the larger side adopts it (the `respond` below). This
@@ -873,19 +735,13 @@ impl P2PCore {
             let we_initiated = existing.has_responded_to_peer_key == existing.prev_root_key.is_none();
             let same_round = handshake.timestamp.abs_diff(existing.last_rotation) <= HANDSHAKE_COLLISION_WINDOW_MS;
             let existing_unused = existing.send_message_number == 0 && existing.recv_message_number == 0;
-            // A device waiting to be linked (showing its link QR) always adopts:
-            // its own init carries its pre-link identity, which the primary
-            // rejects ("sender_identity_id ... eşleşmiyor"). Keeping it (when this
-            // device's fingerprint happened to be the smaller one) left the two on
-            // different sessions, and the DeviceLinkGrant never decrypted
-            // (device, 2026-09-19).
+            // A device waiting to be linked (showing its link QR) always adopts. Its own init carries its pre-link identity, which the primary rejects
+            // ("sender_identity_id does not match"). Keeping it (when this device's fingerprint happened to be the smaller one) left the two on different
+            // sessions, and the DeviceLinkGrant never decrypted (device test, 2026-09-19).
             let awaiting_link = self.link_request_open_until > now;
-            // An init older than the session we hold (H37: not only one that
-            // waited past the skew window): the sender has moved on from it.
-            // Inside the collision window the rule below decides instead.
-            // Two clocks: the sender's against ours. Within the skew this
-            // check already accepts above, it is no proof of "older"
-            //replays are caught by the signature list.
+            // An init older than the session we hold (not only one that waited past the skew window): the sender has moved on from it. Inside the
+            // collision window the rule below decides instead. Two clocks: the sender's against ours. Within the skew this check already accepts above, it is
+            // no proof of "older". Replays are caught by the signature list.
             if !same_round && handshake.timestamp.saturating_add(HANDSHAKE_MAX_SKEW_MS) < existing.last_rotation {
                 info!("HandshakeInit yok sayıldı (peer={}) — oturumdan eski", crate::log_id(&handshake.sender_device_fingerprint));
                 return Ok(());
@@ -953,21 +809,15 @@ impl P2PCore {
         }
         self.id0_inits.remove(&handshake.sender_device_fingerprint);
         self.record_peer_id_if_known(source, &handshake.sender_device_fingerprint);
-        // bkz. `pairing_mailbox_subs` — ratchet kuruldu, eşleşme-dönemi
-        // aboneliği artık gereksiz.
+        // See `pairing_mailbox_subs`: the ratchet is set up, so the pairing-period subscription is no longer needed.
         self.drop_pairing_mailbox(&handshake.sender_device_fingerprint);
         Ok(())
     }
 
-    /// Aktif sohbete girmeden önce/mesaj gönderirken çağrılır. `should_rotate()`
-    /// Signal'ın gerçek modelini uyguluyor (bkz. ratchet.rs): 30 dakika
-    /// dolmuş VE biz henüz karşı tarafın güncel public key'ine cevap
-    /// vermemişsek (`has_responded_to_peer_key == false`) rotasyonu BİZ
-    /// tetikleriz. Aksi halde (cevap zaten verilmişse, sıradaki rotasyon
-    /// hakkı karşı tarafta) hiçbir şey yapmayız — deterministik bir
-    /// "fingerprint küçük olan tetikler" kuralına gerek yok, çünkü
-    /// `has_responded_to_peer_key` bayrağı zaten hangi tarafın sırası
-    /// geldiğini doğal olarak belirliyor.
+    /// Called before entering an active chat and when sending a message. `should_rotate()` implements Signal's real model (see ratchet.rs): we trigger the
+    /// rotation ourselves only if 30 minutes have passed AND we have not yet answered the other side's current public key (`has_responded_to_peer_key == false`).
+    /// Otherwise (we already answered, so the next rotation right belongs to the other side) nothing is done. A deterministic "smaller fingerprint triggers"
+    /// rule is not needed, because the `has_responded_to_peer_key` flag already decides naturally whose turn it is.
     pub(crate) fn maybe_rotate_ratchet(&mut self, peer_device_fingerprint: &str) -> Result<Option<Vec<u8>>, String> {
         let now = current_time_ms();
         let should_rotate = self.ratchets.get(peer_device_fingerprint).map(|s| s.should_rotate(now)).unwrap_or(false);
@@ -985,9 +835,8 @@ impl P2PCore {
                 self.ratchets.insert(peer_device_fingerprint.to_string(), snapshot);
                 return Err("Oturum durumu yazılamadı, rotasyon duyurulmadı".to_string());
             }
-            // Biz rotasyonu tetikledik — eski zincirin skipped-key'leri
-            // state'in içine taşındı (`old_recv`), tablodaki kopyaları
-            // artık yeni zincirin numaralarıyla çakışırdı.
+            // We triggered the rotation. The skipped keys of the old chain were moved into the state (`old_recv`), and their copies in the table would now
+            // clash with the new chain's numbers.
             self.clear_persisted_skipped_keys(peer_device_fingerprint);
             return Ok(Some(kyber_ct));
         }
