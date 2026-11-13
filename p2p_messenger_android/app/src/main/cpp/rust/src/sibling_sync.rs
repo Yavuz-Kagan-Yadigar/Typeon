@@ -4,13 +4,12 @@ use super::*;
 
 impl P2PCore {
 
-    /// Tam senkron yükü (spec 1.7): kişiler (public anahtarlarıyla) + gruplar
-    /// + kardeş cihazlar.
+    /// Full sync payload: contacts (with their public keys), groups, and sibling devices.
     pub(crate) fn build_sync_payload(&self) -> SyncPayload {
         let my_id = self.my_identity_id();
         let mut contacts = Vec::new();
         for contact in self.contacts.values() {
-            // Kendi kimliğimi (kardeş cihazlar) kişi olarak SENKRONLAMA.
+            // Do not sync our own identity (the sibling devices) as a contact.
             if my_id.as_deref() == Some(contact.trusted_identity_id.as_str()) { continue; }
             let devices: Vec<SyncedDevice> = self.known_remote_devices.values()
                 .filter(|d| d.identity_id == contact.trusted_identity_id)
@@ -24,27 +23,19 @@ impl P2PCore {
                 identity_id: contact.trusted_identity_id.clone(),
                 display_name: contact.display_name.clone(),
                 added_via_group: contact.added_via_group,
-                // Avatarları KASITLI olarak senkrona dahil ETMİYORUZ:
-                // gossipsub tek-mesaj sınırı 1MB (bkz. start_network
-                // `max_transmit_size`) — büyük bir kişi listesi + avatarlar bu
-                // sınırı aşabilir. Avatarlar zaten kişilerin `ProfileUpdate`'i
-                // ile ayrıca yayılır (ikincil cihaz kendini tanıtınca kişiler
-                // yeniden bağlanır); mesajlaşma için gerekli DEĞİL.
+                // Avatars are deliberately NOT part of the sync: the gossipsub single-message limit is 1 MB (see `max_transmit_size` in start_network),
+                // and a large contact list plus avatars could exceed it. Avatars travel separately, in each contact's `ProfileUpdate`
+                // (contacts re-send them when the sibling introduces itself). Messaging does not need them.
                 avatar_jpeg: None,
                 devices,
                 device_proofs,
             });
         }
-        // kişi avatarları yukarıda KASITLI olarak dışarıda
-        // bırakılıyor (1 MiB `max_transmit_size` gerekçesiyle) ama gruplar
-        // `serde_json::to_value(g)` ile OLDUĞU GİBİ gömülüyordu — ve
-        // `Group.avatar_jpeg` de o yapının içinde. Avatarlar 720p/%85 JPEG
-        // (~100-250 KB), yani birkaç avatarlı grupta `DeviceSync`/
-        // `DeviceLinkGrant` tavanı aşıyor. `try_publish_raw` bunu
-        // `PublishFailure::Permanent` sayıyor: yeniden denenmiyor ve
-        // `awaiting_confirmation`'dan düşürülüyor — cihaz senkronu SESSİZCE
-        // hiç gitmiyordu. Grup avatarı zaten kurucunun `GroupUpdate`'i
-        // (`GroupChange::AvatarUpdate`) ile ayrıca yayılıyor.
+        // Contact avatars are left out on purpose (the 1 MiB `max_transmit_size` limit). Groups, however, were embedded as-is through
+        // `serde_json::to_value(g)`, and `Group.avatar_jpeg` lives inside that struct. Avatars are 720p / 85% JPEG (about 100-250 KB), so a few
+        // groups with avatars exceed the `DeviceSync` / `DeviceLinkGrant` limit. `try_publish_raw` treats that as `PublishFailure::Permanent`: no retry,
+        // and the message is dropped from `awaiting_confirmation`, so the device sync was silently never sent. The group avatar travels separately,
+        // in the founder's `GroupUpdate` (`GroupChange::AvatarUpdate`).
         let groups: Vec<serde_json::Value> = self.groups.values()
             .map(|g| {
                 let mut stripped = g.clone();
@@ -53,8 +44,7 @@ impl P2PCore {
             })
             .filter_map(|g| serde_json::to_value(&g).ok())
             .collect();
-        // Kardeş cihazlar: bu cihaz + kimliğimin diğer bilinen cihazları
-        // (3+ cihaz senaryosunda birbirlerini öğrensinler).
+        // Sibling devices: this device plus the other known devices of our identity (so that 3+ devices learn about each other).
         let mut siblings: Vec<SyncedDevice> = Vec::new();
         if let Some(dev) = self.own_synced_device() {
             siblings.push(dev);
@@ -172,10 +162,8 @@ impl P2PCore {
             .unwrap_or(0)
     }
 
-    /// Senkron yükünü idempotent birleştirir (spec 1.7): bilinen bir cihazın
-    /// anahtarlarını ASLA ezmez, sadece eksik kişi/cihaz/grupları ekler.
-    /// Dönüş: yeni öğrenilen kişi kimlikleri (arayan, onlara kendini
-    /// tanıtabilsin diye).
+    /// Merges a sync payload idempotently. It NEVER overwrites the keys of a known device; it only adds missing contacts, devices and groups.
+    /// Returns the newly learned contact identity ids, so the caller can introduce itself to them.
     pub(crate) fn import_sync_payload(&mut self, sync: &SyncPayload) -> Vec<String> {
         let now = current_time_ms();
         let my_id = self.my_identity_id();
@@ -185,9 +173,9 @@ impl P2PCore {
             if !is_fingerprint_hex(&sc.identity_id) { continue; }
             // Deleted on this device: the sibling's copy must not bring it back.
             if !self.identity_to_contact.contains_key(&sc.identity_id) && self.contact_removed_locally(&sc.identity_id) { continue; }
-            // Cihaz public anahtarlarını ekle (bilinenleri ezmeden).
+            // Add the device public keys, without overwriting known ones.
             for sd in &sc.devices {
-                // fingerprint = anahtarların hash'i — güven modeli gereği doğrula.
+                // The fingerprint is the hash of the keys. Verify it, per the trust model.
                 if !sd.keys_match_fingerprint() { continue; }
                 // A device learned here must be bound to the identity (first
                 // device, or proof): the sibling's word alone does not put a
@@ -235,7 +223,7 @@ impl P2PCore {
                     .map_or(false, |d| d.identity_id == sc.identity_id && d.is_active))
                 .map(|sd| sd.device_fingerprint.clone())
                 .collect();
-            // Kişi kaydını ekle (bilinen kişiyi ezmeden).
+            // Add the contact record, without overwriting a known contact.
             if let Some(cid) = self.identity_to_contact.get(&sc.identity_id).cloned() {
                 // Known contact: its devices the sibling learned first. Without
                 // an entry in `known_devices` such a device raised a false
@@ -290,17 +278,12 @@ impl P2PCore {
                 }
             }
         }
-        // Kardeş cihazlar (spec 1.7): kimliğimin diğer cihazlarını öğren
-        // (3+ cihaz). Kendi fingerprint'imi atla; bilinenleri ezme.
+        // Sibling devices: learn the other devices of our identity (3+ devices). Skip our own fingerprint and do not overwrite known ones.
         let own_fp = self.get_active_own_device_fingerprint().ok();
         if let Some(my) = &my_id {
-            // Kullanıcı isteği (2026-09-04, hesap adı): bir kardeş cihazda
-            // yapılan yeniden adlandırma buradan geliyor. YALNIZCA ad
-            // benimsenir — anahtarlar/aktiflik hâlâ ASLA ezilmez (aşağıdaki
-            // `continue`'ların gerekçesi değişmedi). Ad güvenlik verisi
-            // değil ve zaten kimliğe ait (bkz. `adopt_own_device_name`);
-            // benimsememek, telefonda değiştirilen adın dizüstünde eski
-            // kalması ve ilk fırsatta kişilere geri yayılması demekti.
+            // A rename made on a sibling device arrives here. ONLY the name is adopted. Keys and active state are still NEVER overwritten
+            // (the `continue` rules below are unchanged). The name is not security data and already belongs to the identity (see `adopt_own_device_name`).
+            // Not adopting it would leave the old name on this device, and it would be spread back to contacts at the first opportunity.
             let sibling_names: Vec<String> = sync.siblings.iter()
                 .filter_map(|sd| sanitize_display_name(&sd.device_name))
                 .collect();
@@ -377,13 +360,11 @@ impl P2PCore {
         learned
     }
 
-    /// Tüm kişilere `DeviceAddNotice` yayar (spec 1.5 adım 5). Her kişinin
-    /// bilinen aktif cihazlarına ayrı ayrı gider (güvenilir teslim).
+    /// Sends a `DeviceAddNotice` to every contact. Each goes to the contact's known active devices, one by one (reliable delivery).
     pub(crate) fn broadcast_device_add_to_contacts(&mut self, device_add: &DeviceAdd) {
         let targets = self.contact_device_targets();
-        // Yeni cihazın TAM anahtarlarını (biz onları biliyoruz — QR/kardeş
-        // kaydından) duyuruya göm ki kişiler ayrı bir IdentityExchange
-        // beklemeden hemen fan-out yapabilsin.
+        // Embed the new device's full keys (we know them from the QR or the sibling record) in the announcement, so contacts can fan out
+        // to it right away without waiting for a separate IdentityExchange.
         let device = match self.synced_device_for(&device_add.new_device_fingerprint) {
             Some(d) => d,
             None => { error!("DeviceAddNotice: yeni cihazın anahtarları bilinmiyor"); return; }
@@ -396,9 +377,8 @@ impl P2PCore {
         }
     }
 
-    /// İkincil cihaz benimsedikten sonra: tüm kişilere kendini tanıtır —
-    /// IdentityExchange (anahtarlar) + DeviceAddNotice (yetki kanıtı). Böylece
-    /// kişiler bu cihazı da mesaj alıcısı olarak tanır ve ona fan-out yapar.
+    /// After a secondary device is adopted: introduces it to every contact with an IdentityExchange (keys) and a DeviceAddNotice (authority proof).
+    /// Contacts then treat this device as a message recipient and fan out to it.
     pub(crate) fn announce_self_to_all_contacts(&mut self) {
         let device_add = match &self.own_device_add { Some(d) => d.clone(), None => return };
         let my_id = self.my_identity_id();
@@ -420,9 +400,8 @@ impl P2PCore {
         }
     }
 
-    /// Kardeş cihazlara güncel kişi/grup durumunu gönderir (spec 1.7 delta).
-    /// Yeni bir kişi eklendiğinde/grup değiştiğinde çağrılır — kardeş cihaz
-    /// idempotent birleştirir.
+    /// Sends the current contact and group state to the sibling devices (a delta). Called when a contact is added or a group changes.
+    /// The sibling merges it idempotently.
     pub(crate) fn sync_to_siblings(&mut self) {
         let siblings = self.sibling_active_devices();
         self.sync_roster_to(siblings);
@@ -463,22 +442,16 @@ impl P2PCore {
         }
     }
 
-    /// Bir sohbet BU cihazda okunduğunda "okuma sınırı" (`read_at_ms`)
-    /// paketini yayar. İKİ hedefe gider:
-    ///   1. Kardeş cihazlar (spec 1.7.1) — orada da okunmuş saysınlar.
-    ///   2. **Karşı taraf / grup üyeleri** (2026-09-07, kullanıcı isteği
-    ///      "görüldü daha hızlı + güvenilir"): 1:1 görüldü makbuzunun asıl
-    ///      GÜVENİLİR yolu artık bu. Tek pakette "şu ana kadar okudum",
-    ///      idempotent (monoton damga), `needs_delivery_confirmation` +
-    ///      `regen_content` sayesinde diske yazılır / ratchet dönünce taze
-    ///      şifrelenir / karşı taraf çevrimdışıysa sunucuya bırakılır /
-    ///      onaylanana (7 güne) kadar yeniden denenir. Tekil `Seen` paketi
-    ///      (kırılgan: 9 bellek-içi deneme, diske yazılmaz, restart/rotasyonda
-    ///      ölür, geçmişten yüklenen mesajlar için hiç gönderilmez) artık
-    ///      yalnızca anlık ince-ayrıntı; dayanıklılık burada.
+    /// Emits a "read boundary" packet (`read_at_ms`) when a chat is read on THIS device. It goes to two targets:
+    ///   1. Sibling devices, so they also count the chat as read.
+    ///   2. **The counterpart / group members.** This is now the reliable path for 1:1 read receipts. One packet says "I have read up to here".
+    ///      It is idempotent (the timestamp only moves forward). `needs_delivery_confirmation` and `regen_content` persist it to disk, re-encrypt
+    ///      it after a ratchet rotation, leave it on the server if the counterpart is offline, and retry until acknowledged (for up to 7 days).
+    ///      The single `Seen` packet is fragile (9 in-memory attempts, not persisted, lost on restart or rotation, never sent for messages loaded
+    ///      from history). It now serves only as a fast, fine-grained signal. Durability is handled here.
     ///
-    /// `peer_fp`: 1:1 sohbetin karşı taraf cihazı (grup için boş);
-    /// `group_id`: grup sohbeti (1:1 için boş).
+    /// `peer_fp`: the counterpart device of a 1:1 chat (empty for a group).
+    /// `group_id`: the group chat (empty for 1:1).
     pub(crate) fn sync_read_state(&mut self, peer_fp: &str, group_id: &str, read_at_ms: u64) {
         let is_group = !group_id.is_empty();
         // the reader compares the boundary with the SENDER's clock
@@ -513,11 +486,9 @@ impl P2PCore {
             read_at_ms,
         };
 
-        // Birikmeyi önle (bkz. `request_history_sync` AYNI deseni): bu
-        // konuşmaya ait bekleyen ESKİ okuma-sınırı yeniden-denemelerini at —
-        // yeni (daha büyük) `read_at_ms` hepsinin işini görür. Aksi halde
-        // her sohbet açılışı/`onResume` çevrimdışı bir peer'a +1 kalıcı
-        // yeniden-deneme satırı biriktirirdi.
+        // Prevent pile-up (same pattern as `request_history_sync`): drop the older pending read-boundary retries for this conversation.
+        // The new, larger `read_at_ms` covers all of them. Otherwise every chat open or `onResume` would add one more durable retry row
+        // for an offline peer.
         let stale: Vec<String> = self.awaiting_confirmation.iter()
             .filter(|(_, p)| matches!(
                 &p.regen_content,
@@ -531,13 +502,12 @@ impl P2PCore {
             self.remove_durable_retry(&id);
         }
 
-        // Hedefleri topla (borrow-checker: göndermeden ÖNCE).
+        // Collect the targets first (borrow checker: before sending).
         let mut targets: Vec<String> = self.sibling_active_devices();
         if is_group {
             if let Ok(group) = self.groups.get(group_id).cloned_group() {
                 let own_id = self.my_identity_id().unwrap_or_default();
-                // Every live device of each member, like the 1:1 case below
-                // (H83: with the same stale-device rule as `fanout_targets`).
+                // Every live device of each member, like the 1:1 case below (with the same stale-device rule as `fanout_targets`).
                 for member_identity_id in group.other_members(&own_id) {
                     let all = self.active_devices_for_identity(&member_identity_id);
                     let recent: Vec<String> = all.iter().filter(|fp| self.device_recently_seen(fp)).cloned().collect();
@@ -558,12 +528,9 @@ impl P2PCore {
         }
     }
 
-    /// Karşı taraftan (kardeş DEĞİL) gelen `ReadStateSync` (okuma sınırı) →
-    /// TOPLU görüldü makbuzu. Gönderenin kimliği = okuyan (`viewer`). Bu
-    /// konuşmada BENİM gönderdiğim, gönderim anı `read_at_ms`'e kadar olan
-    /// tüm mesajları `apply_seen_receipt` ile işaretler (idempotent — eski
-    /// bir sınır yeni bir kaydı ezmez). Etkilenen `message_id`'leri döner
-    /// (en eskiden yeniye), Kotlin `seen_bulk` olayında kullanır.
+    /// Handles a `ReadStateSync` (read boundary) from the counterpart (NOT a sibling) by applying a BULK seen receipt. The sender identity is the
+    /// reader (`viewer`). It marks every message I sent in this conversation up to the boundary `read_at_ms` as seen, via `apply_seen_receipt`
+    /// (idempotent: an older boundary never overwrites a newer record). Returns the affected `message_id`s, oldest first. Kotlin uses them for the `seen_bulk` event.
     pub(crate) fn apply_incoming_read_watermark(
         &self,
         peer_fp: &str,
@@ -572,16 +539,14 @@ impl P2PCore {
         read_at_ms: u64,
     ) -> Vec<String> {
         let Some(conn) = &self.db else { return Vec::new() };
-        // Sınır, göndericinin saatine göre; gelecekteki bir damga (saat
-        // kayması / kötü niyetli peer) sonraki gerçek `Seen` makbuzlarını
-        // monoton kontrolde ezmesin diye şimdiye kırpılır.
+        // The boundary is in the sender's clock. Clamp it to now, so a future timestamp (clock skew, or a malicious peer) cannot overwrite
+        // later genuine `Seen` receipts in the monotonic check.
         let read_at_ms = read_at_ms.min(current_time_ms());
         let read_at = read_at_ms as i64;
         let mut ids: Vec<String> = Vec::new();
 
         if let Some(gid) = group_id {
-            // bkz. `sender_may_post_to_group` — üye olmayan bir kişi grup
-            // mesajlarımı "görüldü" diye işaretleyemesin.
+            // See `sender_may_post_to_group`: a non-member must not be able to mark my group messages as seen.
             if !self.sender_may_post_to_group(gid, viewer_identity_id) {
                 return Vec::new();
             }
@@ -598,8 +563,7 @@ impl P2PCore {
                 }
             }
         } else {
-            // 1:1: mesajlar peer'ın kanonik cihaz fp'si altında arşivlenmiş
-            // olabilir — hem gelen fp'yi hem kanoniği dene.
+            // For 1:1, the messages may be archived under the peer's canonical device fp. Try both the incoming fp and the canonical one.
             let mut keys: Vec<String> = vec![peer_fp.to_string()];
             if let Some(d) = self.known_remote_devices.get(peer_fp) {
                 if let Some(canon) = self.canonical_device_for_identity(&d.identity_id) {
@@ -655,18 +619,14 @@ impl P2PCore {
         ids
     }
 
-    /// Çoklu-cihaz (spec 1.7): kendi gönderdiğim bir 1:1 mesaj/düzenleme/silmeyi
-    /// kardeş cihazlarıma yankılar (onlarda da "gönderilen" olarak görünsün).
-    /// `peer_fp`: mesajı gönderdiğim kişinin cihazı (kimliği buradan çözülür).
+    /// Multi-device: echoes a 1:1 message, edit, or delete that I sent to my sibling devices, so it also appears as "sent" there.
+    /// `peer_fp`: the device of the contact I sent to (its identity is resolved from it).
     pub(crate) fn echo_1to1_to_siblings(&mut self, peer_fp: &str, body: SiblingEchoBody) {
         let siblings = self.sibling_active_devices();
         if siblings.is_empty() {
-            // bu sessizce hiçbir şey
-            // GÖNDERMEZ — "düzenleme/silme diğer cihaza ulaşmadı" şikayeti
-            // burada mı yoksa gönderim hatasında mı (aşağıdaki `error!`)
-            // olduğunu ayırt edebilmek için loglanıyor. Boş liste, ya hiç
-            // kardeş cihaz linklenmemiş ya da roster senkronu
-            // (`sync_to_siblings`) hiç tamamlanmamış demektir.
+            // If no sibling device is linked, this silently sends NOTHING. The log distinguishes "the edit/delete never reached the other device"
+            // here from a send failure (the `error!` below). An empty list means either no sibling device is linked, or the roster sync
+            // (`sync_to_siblings`) has not completed yet.
             warn!("echo_1to1_to_siblings: bilinen aktif kardeş cihaz yok, hiçbir şey gönderilmedi (peer={})", crate::log_id(&peer_fp));
             return;
         }
@@ -686,11 +646,11 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `echo_1to1_to_siblings` — grup karşılığı.
+    /// See `echo_1to1_to_siblings`. The group counterpart.
     pub(crate) fn echo_group_to_siblings(&mut self, group_id: &str, body: SiblingEchoBody) {
         let siblings = self.sibling_active_devices();
         if siblings.is_empty() {
-            // bkz. `echo_1to1_to_siblings` AYNI hata ayıklama gerekçesi.
+            // Same debugging rationale as `echo_1to1_to_siblings`.
             warn!("echo_group_to_siblings: bilinen aktif kardeş cihaz yok, hiçbir şey gönderilmedi (group={})", group_id);
             return;
         }
@@ -706,9 +666,8 @@ impl P2PCore {
         }
     }
 
-    /// Çoklu-cihaz (spec 1.7): kardeş cihazlardan geçmiş geri-doldurma ister —
-    /// bu cihaz çevrimdışıyken KİŞİLERDEN gelmiş mesajları (fan-out kopyası
-    /// zaman aşımına uğrayanları) kaçırmış olabilir. Debounce'lu.
+    /// Multi-device: asks sibling devices for a history backfill. While this device was offline it may have missed messages sent by CONTACTS
+    /// (fan-out copies that timed out). Debounced.
     pub(crate) fn request_sibling_backfill(&mut self) {
         let now = current_time_ms();
         if now.saturating_sub(self.last_sibling_backfill_at) < SIBLING_BACKFILL_INTERVAL_MS {
@@ -740,15 +699,10 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı, dış inceleme düzeltmesi ("sibling backfill sayfalama
-    /// desteklemiyor"): `request_sibling_backfill`'in (otomatik, sınırlı,
-    /// TÜM sohbetler) AKSİNE, kullanıcı bir sohbette "yukarı kaydırıp daha
-    /// eskisini iste" yaptığında — karşı TARAF (contact/grup üyesi) o an
-    /// ulaşılamıyorsa bile — KENDİ diğer cihazlarından o TEK sohbetin daha
-    /// eski sayfasını ister. `peer_device_fingerprint`: 1:1 sohbetin karşı
-    /// tarafı (bu cihazdaki kanonik cihaz fp'si — `conversation_identity_id`
-    /// buradan çözülür); `group_id`: grup sohbeti. İkisi birden dolu
-    /// olamaz, çağıran taraf (JNI) hangisi doluysa onu kullanır.
+    /// Requests an older page of ONE chat from our own sibling devices, even when the counterpart (contact or group member) is unreachable.
+    /// Unlike the automatic, bounded `request_sibling_backfill` (which covers ALL chats), this is triggered when the user scrolls up in a chat
+    /// and asks for older messages. `peer_device_fingerprint` is the counterpart device of the 1:1 chat (the canonical device fp on this device;
+    /// `conversation_identity_id` is resolved from it). `group_id` is the group chat. Both cannot be set at once: the caller (JNI) passes whichever is set.
     ///
     /// The window `[after, before)` of a "Fetch older history" press, sent
     /// to every connected sibling (or only `to`, a follow-up page). Each
@@ -783,32 +737,24 @@ impl P2PCore {
         if sent_to_any { Ok(()) } else { Err("Kardeş cihaza gönderilemedi".to_string()) }
     }
 
-    /// Kendi arşivimden son `limit` mesajı toplar — bir kardeşin
-    /// geri-doldurma isteğine yanıt. Toplam kayıt `SIBLING_BACKFILL_MAX_ENTRIES`
-    /// ile sınırlı (gossipsub 1MB).
+    /// Collects the last `limit` messages from my own archive. This is the answer to a sibling's backfill request. The total number of
+    /// entries is capped by `SIBLING_BACKFILL_MAX_ENTRIES` (gossipsub 1 MB limit).
     ///
-    /// `scope_identity_id`/`scope_group_id`
-    /// İKİSİ DE `None` ise eski davranış (TÜM sohbetler, `before_timestamp`
-    /// yok sayılır — otomatik `request_sibling_backfill` bunu kullanır).
-    /// Biri doluysa istek TEK bir sohbete daralır ve `before_timestamp`
-    /// (doluysa) o sohbetin sayfalamasında kullanılır (bkz.
-    /// `request_older_sibling_history`).
-    /// `window`: a scoped "Fetch older history" request's `(before, after)`;
-    /// only rows sent inside it. The second value is `more`: rows of the
-    /// scoped request were cut (row or byte limit).
+    /// If both `scope_identity_id` and `scope_group_id` are `None`, the old behaviour applies: ALL chats, and `before_timestamp` is ignored
+    /// (the automatic `request_sibling_backfill` uses this). If one is set, the request narrows to that single chat, and `before_timestamp`
+    /// (if set) is used for its paging (see `request_older_sibling_history`).
+    /// `window`: the `(before, after)` of a scoped "Fetch older history" request. Only rows sent inside it are returned. The second value is `more`:
+    /// rows of the scoped request were cut (row or byte limit).
     pub(crate) fn build_sibling_history_response(&self, limit: u32, scope_identity_id: Option<&str>, scope_group_id: Option<&str>, before_timestamp: Option<i64>, since_timestamp: Option<i64>, window: Option<(i64, i64)>) -> (Vec<SiblingHistoryEntry>, bool) {
         // rows come newest first (local `timestamp`), so stop at the first older one.
         let too_old = |m: &ArchivedMessage| since_timestamp.is_some_and(|s| (m.timestamp as i64) < s);
         let mut entries = Vec::new();
-        // bkz. `HISTORY_SYNC_MAX_TEXT_BYTES` — satır sayısı sınırı tek başına
-        // gossipsub 1MB sınırını garanti etmiyordu (uzun mesaj metinleri).
+        // The row-count cap alone did not guarantee the gossipsub 1 MB limit (long message texts). See `HISTORY_SYNC_MAX_TEXT_BYTES`.
         let mut text_budget: usize = HISTORY_SYNC_MAX_TEXT_BYTES;
         let own_id = self.my_identity_id();
-        // Unscoped (the automatic backfill): the entry cap is shared. With
-        // `limit` rows from each, the first ten 1:1 chats filled it; the
-        // other chats and all groups were never sent, on any backfill.
-        // ponytail: with more conversations than the cap, the last ones still
-        // get nothing. Rotate the start if that ever matters.
+        // Unscoped (the automatic backfill): the entry cap is shared. With `limit` rows from each chat, the first ten 1:1 chats filled it,
+        // so the other chats and all groups were never sent in any backfill.
+        // ponytail: with more conversations than the cap, the last ones still get nothing. Rotate the start if that ever matters.
         let unscoped = scope_identity_id.is_none() && scope_group_id.is_none();
         // Attachment rows have only their local `created_at`.
         let file_bounds = match window {
@@ -823,9 +769,8 @@ impl P2PCore {
         let newer_lo = match window { Some((before, _)) if !unscoped => Some(before), _ => None };
         let mut newer: Vec<(Vec<String>, Option<String>, Option<String>)> = Vec::new();
         if scope_group_id.is_none() {
-            // 1:1 sohbetler — TEK bir kişiye daralmışsa o kişinin bilinen
-            // TÜM cihazları (arşiv hangi fp altında tutuluyorsa), aksi
-            // halde arşivdeki farklı peer'ların tamamı.
+            // 1:1 chats. If narrowed to ONE contact, use all known devices of that contact (wherever the archive stores them).
+            // Otherwise use every peer's rows in the archive.
             let peers: Vec<String> = if let Some(scope_id) = scope_identity_id {
                 self.known_remote_devices.values()
                     .filter(|d| d.identity_id == scope_id)
@@ -900,11 +845,9 @@ impl P2PCore {
                     });
                     if entries.len() >= SIBLING_BACKFILL_MAX_ENTRIES { return (entries, true); }
                 }
-                // Attachments after the text rows: their previews
-                // used the budget up before any text row of the chat.
+                // Attachments come after the text rows. Their previews would otherwise use up the budget before any text row of the chat.
                 // Once per contact (they live under any of its devices).
-                // A scoped press keeps them first: it ends at its first budget
-                // skip, and pages back from the oldest row it got.
+                // A scoped press keeps them first: it ends at its first budget skip, and pages back from the oldest row it got.
                 if unscoped && files_done.insert(identity_id.clone()) {
                     let fps: Vec<String> = self.known_remote_devices.values()
                         .filter(|d| d.identity_id == identity_id)
@@ -919,7 +862,7 @@ impl P2PCore {
             }
         }
         if scope_identity_id.is_none() {
-            // Gruplar — TEK bir gruba daralmışsa sadece o, aksi halde hepsi.
+            // Groups: if narrowed to ONE group, only that group. Otherwise all of them.
             let gids: Vec<String> = match scope_group_id {
                 Some(gid) => vec![gid.to_string()],
                 None => self.groups.keys().cloned().collect(),
@@ -944,7 +887,7 @@ impl P2PCore {
                     let mid = match &m.message_id { Some(id) if !id.is_empty() => id.clone(), _ => continue };
                     let author_proof = self.group_author_proof(&gid, &mid);
                     let cost = m.text.len() + author_proof.as_ref().map_or(0, |p| p.len());
-                    // bkz. the 1:1 loop above.
+                    // see the 1:1 loop above.
                     if cost > text_budget {
                         if !unscoped && !entries.is_empty() { return (entries, true); }
                         continue;
@@ -1085,8 +1028,7 @@ impl P2PCore {
             let Ok(file_key) = self.unwrap_file_key(&enc_key, &key_nonce) else { continue };
             let caption = caption.unwrap_or_default();
             let chunk_hashes = chunk_hashes.unwrap_or_default();
-            // Over the budget, the preview goes first: the file still comes,
-            // shown with a generic icon until it is downloaded.
+            // Over the budget, the preview is dropped first. The file still arrives, shown with a generic icon until it is downloaded.
             let bare = 512 + caption.len() + chunk_hashes.len();
             let preview_len = preview_jpeg.as_ref().map_or(0, |p| p.len());
             let preview_jpeg = if bare + preview_len <= *budget { preview_jpeg } else { None };
@@ -1155,16 +1097,11 @@ impl P2PCore {
         true
     }
 
-    /// Bir kardeşten gelen geçmiş kayıtlarını yerel arşive işler — `message_id`
-    /// (1:1 `conv_id` / grup `local_id`) ile tekrar eleme. Zaten olan atlanır.
-    /// A sibling's history answer. `window` is its echo of our request: when
-    /// it matches an open press to this sibling (`sibling_fetch_open`,
-    /// consumed here), only that chat's rows sent inside the window are kept,
-    /// they may bring back rows below the history floor, and the floor goes
-    /// down to the oldest row written. Any other answer is automatic and the
-    /// floor holds. `more`: the sibling cut its page, so the older rest of
-    /// the window is asked for. Returns the rows as event JSON and, for a
-    /// press, its chat.
+    /// Imports history rows from a sibling into the local archive. Duplicates are skipped by `message_id` (1:1 `conv_id` / group `local_id`).
+    /// This is a sibling's history answer. `window` is its echo of our request. When it matches an open press to this sibling
+    /// (`sibling_fetch_open`, consumed here), only that chat's rows sent inside the window are kept. They may bring back rows below the history floor,
+    /// and the floor moves down to the oldest row written. Any other answer is automatic, and the floor holds. `more`: the sibling cut its page,
+    /// so the older rest of the window is requested. Returns the rows as event JSON and, for a press, its chat.
     pub(crate) fn apply_sibling_reply(&mut self, peer_fp: &str, window: Option<(i64, i64)>, more: bool, mut entries: Vec<SiblingHistoryEntry>) -> (Vec<serde_json::Value>, Option<String>) {
         let press = window.and_then(|(before, after)| {
             self.sibling_fetch_open.remove(&(peer_fp.to_string(), before, after)).map(|(chat, _)| (chat, before, after))
@@ -1294,7 +1231,7 @@ impl P2PCore {
         oldest_written
     }
 
-    /// Ayarlar ekranı için kimliğimin cihazları — BU cihaz + kardeş cihazlar.
+    /// Devices of my identity for the settings screen: THIS device plus the sibling devices.
     /// JSON: `[{"device_fingerprint","device_name","is_active","is_this_device"}]`.
     pub(crate) fn list_linked_devices(&self) -> Vec<serde_json::Value> {
         let my_id = match self.my_identity_id() { Some(id) => id, None => return Vec::new() };
@@ -1311,7 +1248,7 @@ impl P2PCore {
                 }));
             }
         }
-        // Kardeş cihazlar (kimliğim = my_id, ama bu cihaz değil).
+        // Sibling devices (same identity as my_id, but not this device).
         let mut siblings: Vec<&DeviceRecord> = self.known_remote_devices.values()
             .filter(|d| d.identity_id == my_id && own_fp.as_deref() != Some(d.device_fingerprint.as_str()))
             .filter(|d| d.is_active || self.meta_str(&format!("hidden_dev:{}", d.device_fingerprint)).is_none())
@@ -1341,9 +1278,8 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Kimliğimin bir KARDEŞ cihazını iptal eder (spec 1.6): imzalı
-    /// `DeviceRevoke` üretip tüm kişilere ve diğer kardeş cihazlara yayar,
-    /// yerelde de aktifliğini kapatır. Son aktif cihaz iptal edilemez.
+    /// Revokes a SIBLING device of my identity: builds a signed `DeviceRevoke` and broadcasts it to all contacts and the other sibling devices,
+    /// and deactivates it locally. The last active device cannot be revoked.
     pub(crate) fn revoke_own_linked_device(&mut self, fp: &str) -> Result<(), String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         if fp == own_fp {
@@ -1380,7 +1316,7 @@ impl P2PCore {
         // the connection now cancelled it ("Connection was closed before a
         // response"), so an online revoked device only learned at its next send.
         self.drop_device_sessions_keep_link(fp, false);
-        // Tüm kişilere + diğer kardeşlere yay.
+        // Broadcast to all contacts and the other siblings.
         let ids: Vec<String> = self.contacts.values()
             .filter(|c| c.trusted_identity_id != my_id)
             .map(|c| c.trusted_identity_id.clone())
