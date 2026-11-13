@@ -553,7 +553,7 @@ impl P2PCore {
         self.groups.remove(group_id);
         // See `pending_group_syncs`: a group that no longer exists must not be retried forever.
         self.pending_group_syncs.retain(|(gid, _), _| gid != group_id);
-        // see `pending_group_messages` AYNI notu.
+        // Same note as `pending_group_messages`.
         self.pending_group_messages.retain(|(gid, _), _| gid != group_id);
         self.remove_persisted_pending_group_messages_for_group(group_id);
         self.wb_delete_board(Some(group_id), None);
