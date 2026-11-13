@@ -20,24 +20,21 @@ import com.p2p.messenger.util.formatAbsoluteTime
 import java.util.Locale
 
 /**
- * Bir sohbet ekranındaki mesaj balonlarını gösteren minimal adapter.
- * Kalıcı depolama yok — bkz. ChatActivity dosya başı notu. GroupChatActivity
- * da aynı adapter'ı kullanır (`senderName` alanı sadece orada dolu olur).
+ * Minimal adapter that draws the message bubbles of one chat screen.
+ * Storage is not here (see ChatActivity). GroupChatActivity uses the same adapter;
+ * `senderName` is filled only there.
  *
- * mesaj düzenleme/silme desteği — her `Item` kararlı bir
- * `messageId` taşır (bkz. Rust `MessagePacketHeader.message_id`), bu sayede
- * gelen bir edit/delete olayı doğru satırı bulup güncelleyebilir
- * (`applyEdit`/`applyDelete`). Silinen mesajlar listeden ÇIKARILMAZ —
- * pozisyon kararlılığı için yerine "Bu mesaj silindi" yer tutucusu konur
- * (WhatsApp/Telegram'daki gibi).
+ * Every `Item` carries a stable `messageId` (the Rust `MessagePacketHeader.message_id`),
+ * so an incoming edit or delete finds its row (`applyEdit` / `applyDelete`).
+ * Deleted messages stay in the list as a "This message was deleted" placeholder,
+ * so positions do not shift.
  */
 class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Adapter<SimpleChatAdapter.BubbleViewHolder>() {
 
     companion object {
         private const val GROUP_WINDOW_MS = 2 * 60 * 1000L
         private const val ORDER_MAX_AGE_MS = 31L * 24 * 60 * 60 * 1000
-        /** Attachment preview decodes run here, not on the main thread. One
-         *  shared thread: a per-adapter one leaked a thread per chat opened. */
+        /** Attachment preview decodes run on one shared background thread, not per adapter. */
         private val previewDecoder = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
             Thread(r, "preview-decode").apply { isDaemon = true }
         }
@@ -45,11 +42,10 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
     enum class Status { PENDING, SENT, ERROR }
 
-    /** Group chats: member names whose "@Name" is shown bold in bubbles. */
+    /** Group chats: member names that are shown bold ("@Name") in bubbles. */
     var mentionNames: List<String> = emptyList()
 
-    /** Bolds "@Name" of known members; on a message that mentions me also
-     *  every "@word" (my name as the sender wrote it is not known here). */
+    /** Bolds "@Name" for known members. A message that mentions me also bolds every "@word". */
     private fun markMentions(text: android.text.Spannable, mentionsMe: Boolean): Boolean {
         var any = false
         fun mark(start: Int, end: Int, highlight: Boolean) {
@@ -68,12 +64,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         return any
     }
 
-    /** 1:1 chats: the label of the peer's quoted messages. */
+    /** 1:1 chats: label used for the peer's quoted messages. */
     var peerName: () -> String? = { null }
 
-    /** An inline quote (see util.Quote): the quoted message's own text when
-     *  it is here, else the sender's preview with no label, so nobody can
-     *  put words under "You". */
+    /** Inline quote (see util.Quote). Shows the quoted message's own text when it is
+     *  available locally; otherwise the sender's preview with no label. */
     private fun quoteOf(ctx: android.content.Context, id: String, preview: String): Pair<String?, String> {
         val t = items.firstOrNull { it.messageId == id } ?: return null to preview
         val label = if (t.isMine) ctx.getString(R.string.lbl_you) else t.senderName?.takeIf { it.isNotEmpty() } ?: peerName() ?: ""
@@ -85,18 +80,16 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         return label to text
     }
 
-    /** Decoded attachment previews by file id: a rebind does not decode again. */
+    /** Decoded attachment previews by file id. A rebind does not decode again. */
     private val previewCache = object : android.util.LruCache<String, android.graphics.Bitmap>(24 * 1024 * 1024) {
         override fun sizeOf(key: String, value: android.graphics.Bitmap): Int = value.byteCount
     }
 
-    /** bkz. `applySeen`/`lastSeenAvatars` — `displayName` yalnızca bu
-     *  kişinin fotoğrafı yoksa baş harf rozeti üretmek için (bkz.
-     *  AvatarUtil). */
+    /** `applySeen` / `lastSeenAvatars`. `displayName` is used only to draw an initial badge
+     *  when the person has no photo (see AvatarUtil). */
     data class SeenByViewer(val avatarJpeg: ByteArray?, val displayName: String)
 
-    /** dosya/foto/video/ses eki durumu (bkz. dosya başı notu —
-     *  P2PLib.prepareAndSendFile/downloadFile/pollNetwork "file_*" olayları). */
+    /** Attachment state (see P2PLib.prepareAndSendFile / downloadFile and the "file_*" poll events). */
     enum class AttachmentStatus { OFFERED, DOWNLOADING, COMPLETE, FAILED }
 
     data class AttachmentInfo(
@@ -106,168 +99,119 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val totalSize: Long,
         var status: AttachmentStatus,
         var bytesDone: Long = 0,
-        /** indirmenin başladığı
-         *  an (ms). İlk `file_progress` olayında set edilir; kalan süre
-         *  ortalama hızdan (bytesDone / geçen süre) hesaplanır. */
+        /** Download start time in ms. Set on the first "file_progress" event.
+         *  Remaining time is computed from the average speed (bytesDone / elapsed). */
         var downloadStartedAt: Long = 0L,
-        /** gönderen tarafın önceden oluşturduğu küçük bir 480p/
-         *  %85 JPEG önizleme kapağı (foto/video için) — doluysa, TAM dosya
-         *  hiç indirilmeden `bindAttachment`'ta küçük resim olarak
-         *  gösterilir. */
+        /** Small 480p / 85% JPEG cover made by the sender (photo and video only). When present,
+         *  it is shown in `bindAttachment` before the full file is downloaded. */
         var previewJpeg: ByteArray? = null,
-        /** Sadece sesli mesajlar için (mimeType "audio/" ile başlar) —
-         *  bkz. Rust `FileOffer.duration_ms`. */
+        /** Voice messages only (mimeType starts with "audio/"). See Rust `FileOffer.duration_ms`. */
         var durationMs: Int? = null,
-        /** Aşağıdaki üç alan SADECE sesli mesaj çalma durumunu yansıtır —
-         *  ChatActivity'nin tek paylaşımlı MediaPlayer'ı tarafından
-         *  yönetilir (bkz. `updateVoicePlayback`). */
+        /** The three fields below mirror voice playback only. ChatActivity's single shared
+         *  MediaPlayer owns them (see `updateVoicePlayback`). */
         var isPlaying: Boolean = false,
         var playbackPositionMs: Int = 0,
         var playbackSpeed: Float = 1f,
-        /** SADECE grup sohbetinde
-         *  dolu — bu ekin `downloadFile` ile HANGİ göndericiden isteneceği
-         *  (1:1'de bu her zaman tek bir sabit peer olduğundan gerek yok,
-         *  ChatActivity kendi `peerDeviceFingerprint` alanını kullanır). */
+        /** Group chats only: the sender this attachment is downloaded from with `downloadFile`.
+         *  1:1 chats do not need it (ChatActivity uses its `peerDeviceFingerprint`). */
         var peerDeviceFingerprint: String = "",
-        /** Rust `FileOffer.sticker`: shown frameless, see `bindSticker`. */
+        /** Rust `FileOffer.sticker`: drawn without a frame (see `bindSticker`). */
         var isSticker: Boolean = false
     )
 
     data class Item(
-        /** Spec dışı, kullanıcı isteği (başarısız mesajı yeniden gönder):
-         *  `var` — bir retry, AYNI balonu tutup içindeki mesaj kimliğini
-         *  yeni gönderimin kimliğiyle değiştirir (bkz. `retryMessage`),
-         *  ikinci bir balon oluşturmaz. */
+        /** Retry of a failed message. `var`: the retry replaces the message id of THIS bubble
+         *  with the new send's id (see `retryMessage`). No second bubble is created. */
         var messageId: String,
         var text: String,
         val isMine: Boolean,
         val timestamp: Long = System.currentTimeMillis(),
-        /** SADECE alınan (`!isMine`) mesajlar
-         *  için, göndericinin KENDİ cihazındaki gönderim anı (bkz. Rust
-         *  `MessageContent::Text.sent_at_ms`) — `timestamp` (bu cihazın
-         *  ALDIĞI an) ile birlikte "10:42 (sent at: 10:41)" gibi ikisini
-         *  ayrı ayrı gösterebilmek için. `null`/`0` = bilinmiyor (eski
-         *  sürüm göndericisi, ya da yerel geçmişten yüklenmiş — bkz.
-         *  ChatActivity/GroupChatActivity notu, SADECE canlı gelen
-         *  olaylarda dolduruluyor) — bu durumda `timestamp` tek başına
-         *  gösterilir, önceki davranışla AYNI. */
+        /** Received messages (`!isMine`) only: the sender's own send time (Rust
+         *  `MessageContent::Text.sent_at_ms`). Shown next to `timestamp` (local receive time),
+         *  for example "10:42 (sent at: 10:41)". `null` or `0` means unknown (older sender,
+         *  or loaded from local history). Then only `timestamp` is shown. */
         val sentAtMs: Long? = null,
         var status: Status = Status.SENT,
         var isEdited: Boolean = false,
-        /** The row came from the contact's history answer, not live. */
+        /** The row came from the contact's history answer, not from a live event. */
         val viaSync: Boolean = false,
         var isDeleted: Boolean = false,
-        /** Sadece grup sohbetinde, kendi mesajımız değilse gösterilir. */
+        /** Group chats only. Shown when the message is not mine. */
         val senderName: String? = null,
-        /** SADECE grup sohbetinde dolu — bu mesajı gönderenin HAM
-         *  `identity_id`'si (`isMine` ise bu cihazın kendi kimliği).
-         *  `senderName` görüntü amaçlı çözülmüş isimken, BU alan bir
-         *  yanıt başlatıldığında (bkz. GroupChatActivity.startReply)
-         *  `reply_to_sender_identity_id` olarak gönderilmek üzere saklanır
-         *  — alıcı taraf, yanıtlanan mesajı yerelde bulamazsa bunu bir
-         *  YEDEK olarak kullanıp yine de doğru ada çözebilsin diye (bkz.
-         *  `resolveReplyLabel`). */
+        /** Group chats only: the raw `identity_id` of the sender (this device's own identity when
+         *  `isMine`). `senderName` is the resolved display name. When a reply starts, this value
+         *  is sent as `reply_to_sender_identity_id`. The receiver uses it as a fallback to
+         *  resolve the name when the replied-to message is not stored locally (see `resolveReplyLabel`). */
         val senderIdentityId: String? = null,
-        /** Sadece grup sohbetinde, `senderName` ile birlikte gösterilir —
-         *  bkz. AvatarUtil (fotoğraf yoksa baş harf rozeti). */
+        /** Group chats only, shown with `senderName`. See AvatarUtil (initial badge when no photo). */
         val senderAvatarJpeg: ByteArray? = null,
-        /** Doluysa bu bir metin değil, dosya eki balonudur (bkz.
-         *  onBindViewHolder) — `messageId` bu durumda `file_id`'dir. */
+        /** When set, this row is a file attachment bubble, not text. `messageId` is then the `file_id`. */
         var attachment: AttachmentInfo? = null,
-        /** Spec dışı, kullanıcı isteği (WhatsApp tarzı "sağa kaydırıp
-         *  yanıtla"): bu mesaj başka bir mesaja yanıtsa, o mesajın kararlı
-         *  kimliği (1:1'de `message_id`, grupta `group_message_local_id`) —
-         *  dolu olması balonun içinde küçük bir alıntı kutusu gösterilmesini
-         *  tetikler (bkz. `onBindViewHolder`/`onReplyPreviewClick`, ona
-         *  dokununca sohbet bu id'ye kaydırılır). */
-        /** bu mesaja bırakılmış tepkilerin
-         *  hazır özeti (ör. "👍2 ❤️"); boş = tepki yok. Rust tarafında
-         *  hesaplanıp hem geçmiş JSON'unda hem canlı `reaction` olayında
-         *  aynen geliyor (bkz. `reactions_summary`) — burada ayrıca bir
-         *  toplama/sayma YAPILMAZ, böylece her cihaz aynı dizeyi gösterir. */
+        /** Id of the message this one replies to: the stable id (`message_id` in 1:1,
+         *  `group_message_local_id` in groups). When set, a small quote box is drawn in the bubble.
+         *  Tapping it scrolls the chat to that message (see `onBindViewHolder` / `onReplyPreviewClick`). */
+        /** Summary of the reactions on this message, for example "👍2 ❤️". Empty means none.
+         *  Rust computes it (`reactions_summary`) and sends the same string in history JSON and in
+         *  the live `reaction` event. The adapter does not count anything itself. */
         var reactions: String = "",
         /** Group text that @mentions me (see Rust `mentions_me`). */
         val mentionsMe: Boolean = false,
-        /** ek balonunun ALTINDA gösterilen
-         *  açıklama metni (boş = yok). Metin mesajlarında kullanılmaz —
-         *  onların metni zaten `text`. */
+        /** Caption drawn under an attachment bubble. Empty means none. Text messages do not use
+         *  it (their text is `text`). */
         var caption: String = "",
         var replyToMessageId: String? = null,
-        /** Yanıtlanan mesajın (gönderen tarafından gömülen) kısa metin
-         *  özeti — bu cihazın o mesajı yerelde arşivlemiş olması
-         *  GEREKMEZ. */
+        /** Short text summary of the replied-to message, embedded by the sender. The receiver
+         *  does NOT need to have that message archived locally. */
         var replyToPreview: String? = null,
-        /** Alıntı kutusunda gösterilecek "kime yanıt verildiği" etiketi —
-         *  1:1'de sabit "Sen" (bkz. R.string.lbl_you) ya da kişi adı,
-         *  grupta yanıtlanan mesajın göndericisinin adı. Çağıran taraf
-         *  (ChatActivity/GroupChatActivity) zaten bu ismi bildiğinden
-         *  BURADA ayrıca bir kimlik çözümlemesi yapılmaz. */
+        /** Label shown in the quote box for the replied-to person: fixed "You" (R.string.lbl_you)
+         *  in 1:1, or the replied-to sender's name in groups. The caller (ChatActivity /
+         *  GroupChatActivity) already knows the name, so no id lookup happens here. */
         var replyToSenderLabel: String? = null,
-        /** SADECE grup mesajlarında dolu — yanıtlanan mesajı gönderenin HAM
-         *  `identity_id`'si (bkz. Rust `MessageContent::Text.
-         *  reply_to_sender_identity_id`). `replyToSenderLabel`'ı hesaplayan
-         *  taraf (bkz. GroupChatActivity.resolveReplyLabel), yanıtlanan
-         *  mesaj bu cihazda YERELDE bulunamazsa (ör. hiç senkronlanmadı)
-         *  BUNU bir YEDEK olarak kullanır — `resolveContactByIdentity` ile
-         *  kişi listesinden ada çevrilebilir, yerel arşive bakmaya gerek
-         *  kalmadan. */
+        /** Group messages only: the raw `identity_id` of the replied-to message's sender
+         *  (Rust `MessageContent::Text.reply_to_sender_identity_id`). The caller that builds
+         *  `replyToSenderLabel` (GroupChatActivity.resolveReplyLabel) falls back to this value
+         *  when the replied-to message is not stored on this device. It maps the id to a name
+         *  through the contact list (`resolveContactByIdentity`). */
         var replyToSenderIdentityId: String? = null
     ) {
-        /** balonların SIRALAMA
-         *  anahtarı — göndericinin gönderim anı (`sentAtMs`), bilinmiyorsa
-         *  bu cihazın aldığı/oluşturduğu an (`timestamp`). Gecikmeli teslim
-         *  edilen bir mesaj, ALINMA değil GÖNDERİM sırasındaki yerine oturur
-         *  (bkz. `addMessage` sıralı ekleme).
+        /** Sort key of the row: the sender's send time (`sentAtMs`), or this device's receive or
+         *  create time (`timestamp`) when unknown. A late-delivered message goes to its SEND
+         *  position, not the bottom (see `addMessage`).
          *
-         *  BİLİNEN SINIR  : bu,
-         *  göndericinin HAM yerel saatidir — senkronize bir mantıksal
-         *  (Lamport/vector clock) sayaç DEĞİLDİR. Aynı kişinin farklı
-         *  cihazları (ör. Ahmet'in telefonu + laptop'u) neredeyse aynı anda
-         *  mesaj gönderirse, iki cihazın sistem saatleri arasında kayma
-         *  varsa sıra karışabilir. Bunu KESİN çözmek, her identity için
-         *  cihazlar arası senkronize bir mantıksal sayaç (yeni bir kablo
-         *  alanı + DB kolonu + `SiblingEcho` üzerinden senkron) gerektirir
-         *  — gerçek fayda alanı dar (aynı kişinin İKİ cihazının aynı
-         *  saniye içinde, senkron olmadan yazması) olduğundan ve yanlış
-         *  uygulanırsa asıl mesaj sıralamasını BOZMA riski gerçek olduğundan
-         *  şimdilik ertelendi. */
+         *  Known limit: this is the sender's raw local clock, not a synchronised logical clock.
+         *  Two devices of one identity that send in the same second, with clock skew, can
+         *  interleave out of order. A fix needs a per-identity logical counter (new wire field,
+         *  DB column, sync over `SiblingEcho`). Not done: the gain is small and a wrong
+         *  implementation could break ordering in general. */
         val orderKey: Long get() = sentAtMs?.takeIf { it > 0 }
-            // The sender's clock is not trusted without bounds: nothing was
-            // sent after we received it, and the server holds mail 30 days.
-            // A clock far ahead used to pin a message to the bottom forever.
+            // The sender's clock is only trusted within bounds: a message cannot have been
+            // sent after we received it, and the server keeps mail for 30 days. A clock far
+            // ahead is clamped to the receive time, so it cannot pin the message to the bottom.
             ?.coerceIn(timestamp - ORDER_MAX_AGE_MS, timestamp) ?: timestamp
     }
 
-    /** Kendi mesajlarımıza uzun basıldığında tetiklenir (Düzenle/Sil menüsü
-     *  ChatActivity/GroupChatActivity'de gösterilir — adapter sadece
-     *  "hangi item" bilgisini taşır). */
+    /** Called on long press of one of my own messages. The Edit / Delete menu is shown by
+     *  ChatActivity / GroupChatActivity; the adapter only passes the item. */
     var onItemLongPress: ((Item) -> Unit)? = null
-    /** Bir ek balonundaki "İndir" düğmesine (veya tamamlanmış bir eke)
-     *  dokunulduğunda tetiklenir. */
+    /** Called when the "Download" button of an attachment bubble, or a completed attachment, is tapped. */
     var onAttachmentClick: ((Item) -> Unit)? = null
-    /** tamamlanmış bir ek balonuna basılı tutulunca (ör.
-     *  "İndirilenler/P2P"ye kaydet menüsünü açmak için) tetiklenir —
-     *  bkz. `bindAttachment`, SADECE `AttachmentStatus.COMPLETE` iken
-     *  etkin. */
+    /** Called on long press of a completed attachment bubble (for example to open the
+     *  "save to Downloads/P2P" menu). Enabled only when `AttachmentStatus.COMPLETE`. */
     var onAttachmentLongClick: ((Item) -> Unit)? = null
-    /** Sesli mesaj balonundaki oynat/duraklat düğmesine dokunulduğunda —
-     *  ChatActivity tek paylaşımlı bir MediaPlayer ile gerçek çalmayı
-     *  yönetir, adapter sadece "hangi item" bilgisini taşır. */
+    /** Called when the play / pause button of a voice bubble is tapped. ChatActivity runs the
+     *  real playback with one shared MediaPlayer; the adapter only passes the item. */
     var onVoicePlayClick: ((Item) -> Unit)? = null
-    /** Hız rozetine (1x/1.5x/2x/0.5x) dokunulduğunda. */
+    /** Called when the speed badge (1x / 1.5x / 2x / 0.5x) is tapped. */
     var onVoiceSpeedClick: ((Item) -> Unit)? = null
-    /** Kullanıcı bir sesli mesajın kaydırıcısını sürükleyip bırakınca —
-     *  hedef konum milisaniye olarak taşınır. */
+    /** Called when the user drags and releases a voice slider. The target position is in ms. */
     var onVoiceSeek: ((Item, Int) -> Unit)? = null
-    /** bir balonun
-     *  içindeki küçük alıntı kutusuna dokunulduğunda — hedef
-     *  `replyToMessageId` taşınır, çağıran taraf (bkz. ChatActivity/
-     *  GroupChatActivity) sohbeti o mesaja kaydırır. */
+    /** Called when the small quote box inside a bubble is tapped. The target `replyToMessageId`
+     *  is passed; the caller (ChatActivity / GroupChatActivity) scrolls to that message. */
     var onReplyPreviewClick: ((String) -> Unit)? = null
 
-    /** Multi-select (see [MessageSelection]): message ids. One [Kind] at a
-     *  time, set by the first pick: the actions differ per kind. While
-     *  anything is selected a tap or long press toggles instead of acting. */
+    /** Multi-select (see [MessageSelection]): selected message ids. One [Kind] at a time,
+     *  set by the first pick, because the actions differ per kind. While anything is selected,
+     *  tap and long press toggle the row instead of acting. */
     enum class Kind { TEXT, IMAGE, VIDEO, VOICE, STICKER, FILE }
     val selectedIds = LinkedHashSet<String>()
     private var selectedKind: Kind? = null
@@ -286,7 +230,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         }
     }
 
-    /** Selected items in chat order. */
+    /** Selected items, in chat order. */
     fun selectedItems(): List<Item> = items.filter { it.messageId in selectedIds && !it.isDeleted }
 
     fun toggleSelection(item: Item) {
@@ -319,8 +263,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (selecting) toggleSelection(item) else menu?.invoke(item)
     }
 
-    /** While selecting, a tap anywhere on a row toggles it. Taken on UP:
-     *  scrolling still works and the row's own click gets a CANCEL. */
+    /** While selecting, a tap anywhere on a row toggles it. Handled on ACTION_UP, so scrolling
+     *  still works and the row's own click receives a CANCEL. */
     override fun onAttachedToRecyclerView(rv: RecyclerView) {
         recyclerView = rv
         val taps = android.view.GestureDetector(rv.context, object : android.view.GestureDetector.SimpleOnGestureListener() {
@@ -337,12 +281,10 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         })
     }
 
-    /** bkz. `tickVoicePlayback` — çalma sırasında HER karede tam
-     *  `notifyItemChanged` (yeniden bind) yapmak yerine, o an ekranda
-     *  bağlı olan ViewHolder'a doğrudan yazmak için. Sürükleniyorken
-     *  (bkz. `userSeekingFileIds`) programatik güncelleme ATLANIR, aksi
-     *  halde kullanıcının parmağı sürüklerken kaydırıcı sürekli geri
-     *  sıçrardı. */
+    /** Playback progress is pushed straight into the ViewHolder that is on screen, instead of
+     *  calling a full `notifyItemChanged` every frame (see `tickVoicePlayback`). While the user
+     *  drags the slider (`userSeekingFileIds`) programmatic updates are skipped, so the thumb
+     *  does not jump back. */
     private val boundVoiceHolders = mutableMapOf<String, BubbleViewHolder>()
     private val userSeekingFileIds = mutableSetOf<String>()
 
@@ -352,12 +294,12 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     private val stickerImages = object : android.util.LruCache<String, android.graphics.drawable.Drawable>(STICKER_CACHE_BYTES) {
         override fun sizeOf(key: String, value: android.graphics.drawable.Drawable): Int = stickerDrawableBytes(value)
     }
-    /** Being decoded: no second request for the same file. */
+    /** Decode in progress: no second request for the same file. */
     private val stickerPending = mutableSetOf<String>()
 
-    /** Consecutive same-sender messages within this window merge visually
-     *  (tighter spacing, single trailing timestamp, sender name/avatar
-     *  shown once) — WhatsApp/Telegram-style grouping. */
+    /** Consecutive messages from the same sender within this time window are drawn as one group
+     *  (tighter spacing, one trailing timestamp, sender name and avatar shown once), like
+     *  WhatsApp and Telegram. */
     private fun isSameSender(a: Item, b: Item): Boolean {
         if (a.isMine != b.isMine) return false
         return a.isMine || a.senderIdentityId == b.senderIdentityId
@@ -368,31 +310,28 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val prev = items[position - 1]
         val cur = items[position]
         if (prev.isDeleted || cur.isDeleted) return false
-        // A frameless sticker never merges with a neighbour.
+        // A frameless sticker never joins a group with its neighbours.
         if (isSticker(cur) || isSticker(prev)) return false
-        // "alıntılar bozuk"): bir
-        // alıntı kutusu balonun İÇİNDE değil, ÜSTÜNDE ayrı bir blok olarak
-        // duruyor (bkz. item_message_bubble.xml `layoutReplyQuote`). Yani
-        // iki balon arasına dikey bir boşluk giriyor ve birleşik dış hat
-        // (bkz. MergedBubbleDecoration) o boşluğu da doldurup alıntının
-        // arkasını boyuyordu. Alıntılı bir mesaj zaten görsel olarak yeni
-        // bir başlangıç — grubu burada kesmek hem doğrusu hem de en basiti.
+        // A message with a quote box does not join the group with the one before it. The quote box
+        // sits ABOVE the bubble as a separate block, so it adds a gap between the bubbles, and the
+        // merged outline (see MergedBubbleDecoration) would paint over the quote. A quoted message
+        // is a new visual start anyway.
         if (cur.replyToMessageId != null) return false
         if (!isSameSender(prev, cur)) return false
-        // Send order, like the sort: messages sent hours apart and delivered
-        // together are not one group.
+        // Groups follow send order, like the sort: messages sent hours apart and delivered
+        // together do not form one group.
         return cur.orderKey - prev.orderKey in 0 until GROUP_WINDOW_MS
     }
 
-    /** bkz. MergedBubbleDecoration — birleşik şekli çizen dekorasyon,
-     *  grubun sınırlarını ve hangi tarafa yaslı olduğunu bilmek zorunda. */
+    /** See MergedBubbleDecoration: it draws the merged shape and needs the group bounds and
+     *  which side the group is aligned to. */
     fun isGroupedWithNextPublic(position: Int): Boolean = isGroupedWithNext(position)
 
     fun isMineAt(position: Int): Boolean = items.getOrNull(position)?.isMine ?: false
 
     fun isStickerAt(position: Int): Boolean = isSticker(items.getOrNull(position))
 
-    /** Drawn as a sticker: frameless. Until downloaded it is a normal attachment bubble. */
+    /** Drawn as a sticker: no frame. Until it is downloaded it is a normal attachment bubble. */
     private fun isSticker(item: Item?): Boolean =
         item?.attachment?.let { it.isSticker && it.status == AttachmentStatus.COMPLETE && !item.isDeleted } == true
 
@@ -402,44 +341,33 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val next = items[position + 1]
         if (cur.isDeleted || next.isDeleted) return false
         if (isSticker(cur) || isSticker(next)) return false
-        // Same break as `isGroupedWithPrevious`: a bubble followed by a
-        // reply ends its group, otherwise it never showed its time.
+        // Same rule as `isGroupedWithPrevious`: a bubble followed by a reply ends its group.
+        // Otherwise it would never show its timestamp.
         if (next.replyToMessageId != null) return false
         if (!isSameSender(cur, next)) return false
         return next.orderKey - cur.orderKey in 0 until GROUP_WINDOW_MS
     }
 
-    /** "görüldü" bilgisi SADECE en son
-     *  görülen (kendi gönderdiğimiz) mesajın altında gösterilir — önceki
-     *  tüm mesajlar örtük olarak görülmüş sayılır (WhatsApp/Telegram
-     *  deseni). `applySeen` bu ikisini günceller; `onBindViewHolder`
-     *  sadece `messageId == lastSeenMessageId` olan satırda avatar
-     *  satırını gösterir. */
+    /** The "seen" mark is shown only under the latest seen message that I sent. All earlier
+     *  messages count as seen implicitly (WhatsApp / Telegram pattern). `applySeen` updates
+     *  both values; `onBindViewHolder` shows the avatar row only on the row whose
+     *  `messageId == lastSeenMessageId`. */
     private var lastSeenMessageId: String? = null
     private var lastSeenAvatars: List<SeenByViewer> = emptyList()
 
     /**
-     * "görülmeyle chatte
-     * hareket eden profil fotoğrafları geç ve yanlış oluyor bazen").
+     * A seen notice whose target row is not in the list yet is held back. Before, it was
+     * dropped. That happens often: the other side opens the chat right away, while our
+     * bubble is still loading from the archive or arrives later in event order. Then the
+     * avatars did not show, or showed only after the next notice.
      *
-     * `applySeen` hedef mesajı listede bulamazsa ESKİDEN olayı tamamen
-     * DÜŞÜRÜYORDU. Bu, düşünüldüğünden çok daha sık oluyor: "görüldü"
-     * bildirimi, karşı taraf sohbeti açar açmaz gelir ve bizim
-     * gönderdiğimiz mesajın balonu o an listeye HENÜZ eklenmemiş olabilir
-     * (arşivden sayfa yükleniyor, ya da olay sırası gereği). Sonuç:
-     * avatarlar ya hiç görünmüyor ya da bir SONRAKİ bildirimle geç
-     * görünüyordu — ve bu arada gösterge, gerçekte daha yeni bir mesaj
-     * görülmüşken hâlâ ESKİ mesajın yanında durduğu için "yanlış" oluyordu.
-     *
-     * Artık uygulanamayan bildirim burada bekletiliyor ve hedef mesaj
-     * listeye girdiği anda (bkz. `addMessage`) uygulanıyor.
+     * The held notice is applied as soon as its target row is added (see `addMessage`).
      */
     private var pendingSeenMessageId: String? = null
     private var pendingSeenAvatars: List<SeenByViewer> = emptyList()
 
-    /** sohbet içi mesaj arama — o an
-     *  "hedeflenen" eşleşmeyi geçici olarak vurgular (bkz. `setHighlighted`,
-     *  ChatActivity/GroupChatActivity arama gezinme düğmeleri). */
+    /** In-chat message search. Temporarily highlights the current match (see `setHighlighted`;
+     *  ChatActivity / GroupChatActivity search navigation buttons). */
     private var highlightedMessageId: String? = null
 
     class BubbleViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
@@ -498,11 +426,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     )
 
     /**
-     * Applies freshly loaded history to rows that are ALREADY on screen.
-     * The live listener is detached while a chat is paused, so a download
-     * that finished, an edit, a delete or a pending->sent change in that
-     * time never reached the bubble: it stayed "downloading" until the chat
-     * was closed and reopened. Returns true if any row changed.
+     * Applies freshly loaded history to rows that are ALREADY on screen. The live listener is
+     * detached while the chat is paused, so a download that finished, an edit, a delete or a
+     * pending-to-sent change during that time did not reach the bubble. Returns true if any row changed.
      */
     fun refreshFrom(loaded: List<Item>): Boolean {
         val byId = loaded.associateBy { it.messageId }
@@ -519,7 +445,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             old.reactions = now.reactions
             if (old.isMine) old.status = now.status
             if (!sameAttachment) {
-                // The reload may skip the preview of a row it knows is on screen.
+                // The reload may skip the preview of a row that is on screen.
                 now.attachment?.let { if (it.previewJpeg == null) it.previewJpeg = old.attachment?.previewJpeg }
                 old.attachment = now.attachment
             }
@@ -530,14 +456,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     }
 
     /**
-     * İKİ CİHAZLI GERÇEK TESTTE (2026-09-06) görüldü: `loadHistoryIfAvailable`
-     * ve `onResume`'daki `syncMissedMessages` ikisi de IO'da geçmişi çekip
-     * `localMessages`'a EKLİYOR (bkz. o iki fonksiyondaki "yarış koşulu"
-     * notları). Nadiren aynı `message_id` iki kez giriyor — bir mesaj balonu
-     * çift görünüyor (veri değil, sadece liste; bir sonraki resume'da
-     * kendiliğinden düzeliyordu). Her birleştirmeden SONRA çağrılır: aynı
-     * NON-BLANK `message_id`'ye sahip fazladan satırları (ilki kalır) atar.
-     * Dönüş: silinen satır sayısı.
+     * Two paths can both add history rows: `loadHistoryIfAvailable` and `syncMissedMessages`
+     * in `onResume`. Both read the archive on IO and add to `localMessages`, so one
+     * `message_id` can occasionally appear twice. This removes the extra rows for the same
+     * non-blank `message_id` and keeps the first one. Called after every merge.
+     * Returns the number of rows removed.
      */
     fun dedupeByMessageId(): Int {
         val seen = HashSet<String>()
@@ -556,9 +479,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         return removed
     }
 
-    /** bkz. dosya başı `highlightedMessageId` notu — `null` geçilerek
-     *  vurgu kaldırılır (ör. bir zamanlayıcıyla kısa süre sonra, bkz.
-     *  ChatActivity/GroupChatActivity arama gezinmesi). */
+    /** See the `highlightedMessageId` note at the top of the file. Passing `null` clears the
+     *  highlight (for example after a timer, see the search navigation in ChatActivity / GroupChatActivity). */
     fun setHighlighted(messageId: String?) {
         val previous = highlightedMessageId
         highlightedMessageId = messageId
@@ -573,50 +495,38 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     }
 
     fun addMessage(item: Item) {
-        // İKİ CİHAZLI GERÇEK TESTTE BULUNDU (2026-09-06): çok yollu teslim
-        // (LAN + onion + sunucu + gossipsub) aynı zarfı 2-4 kez getirebiliyor;
-        // her kopya için `handleIncomingEvent` bir kez daha `addMessage`
-        // çağırıyordu → AYNI mesaj için birden fazla balon (gönderende de
-        // görülüyordu — geçici, sohbet yeniden yüklenince tek'e düşüyordu).
-        // Artık `messageId` bazında idempotent: aynı kimlikli bir satır zaten
-        // varsa yeni balon EKLENMEZ (rastgele UUID taşıyan hata/iyimser
-        // satırlar zaten benzersiz).
+        // One message can arrive several times over different paths (LAN, onion, server, gossip).
+        // Each copy used to call `addMessage` again, so one message got several bubbles.
+        // Now the add is idempotent by `messageId`: if a row with that id exists, no new bubble
+        // is added. Rows with random UUIDs (failed or optimistic rows) are already unique.
         if (item.messageId.isNotEmpty() && items.any { it.messageId == item.messageId }) {
             return
         }
-        // GÖNDERİM sırasına göre ekle — mesajlar
-        // genelde sırayla gelir (sondan başa tarama O(1)'e yakın), ama
-        // gecikmeli teslim edilen bir mesaj (ör. gönderen bir süre çevrimdışı
-        // kaldıysa) ALINMA sırasına göre EN ALTA değil, GÖNDERİM anındaki
-        // doğru konumuna oturur. Eşit anahtarda sona (en yeniden sonra) ekler.
+        // Insert in SEND order. Messages mostly arrive in order (a backwards scan is close to O(1)).
+        // A late-delivered message, for example one from a sender that was offline for a while,
+        // goes to its send-time position, not to the bottom. Equal keys append after the last one.
         var idx = items.size
         while (idx > 0 && items[idx - 1].orderKey > item.orderKey) idx--
         items.add(idx, item)
         notifyItemInserted(idx)
-        // bkz. `pendingSeenMessageId`: hedefi olmadığı için bekletilen bir
-        // "görüldü" bildirimi varsa ve gelen mesaj TAM O hedefse, şimdi
-        // uygula — yoksa gösterge eski mesajın yanında asılı kalırdı.
+        // If a held "seen" notice targets exactly this message, apply it now. Otherwise the mark
+        // would stay on the old message (see `pendingSeenMessageId`).
         val awaitingSeenId = pendingSeenMessageId
         if (awaitingSeenId != null && awaitingSeenId == item.messageId) {
             val avatars = pendingSeenAvatars
             pendingSeenMessageId = null
             applySeen(awaitingSeenId, avatars)
         }
-        // Komşuların "bir sonrakiyle gruplandı" durumu değişmiş olabilir
-        // (yeni bir komşu edindiler) — zaman damgası gizleme/gösterme için
-        // yeniden bind et.
+        // The "grouped with the previous" state of the neighbours may have changed when a new
+        // neighbour is added. Rebind them so the timestamp is hidden or shown correctly.
         if (idx > 0) notifyItemChanged(idx - 1)
         if (idx < items.size - 1) notifyItemChanged(idx + 1)
     }
 
-    /** bir mesajın tepki özetini günceller
-     *  (bkz. Rust `reaction` olayı / `reactions_summary`). Hedef bu
-     *  listede yoksa sessizce yok sayılır — tepki, kaybolduğunda sohbetin
-     *  anlamını bozmayan bir süs; gönderen tarafta zaten yeniden deneme
-     *  kuyruğunda. */
-    /** tepki pill'ine dokununca "kim ne attı"
-     *  listesi açılır (bkz. ChatActivity/GroupChatActivity
-     *  `showReactionsDialog`). */
+    /** Updates the reaction summary of a message (see the Rust `reaction` event and
+     *  `reactions_summary`). If the target is not in this list, it is ignored silently. */
+    /** Tapping the reaction pill opens the "who reacted with what" list (see ChatActivity /
+     *  GroupChatActivity `showReactionsDialog`). */
     var onReactionsClick: ((Item) -> Unit)? = null
 
     fun applyReactions(messageId: String, summary: String) {
@@ -626,16 +536,14 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         notifyItemChanged(idx)
     }
 
-    /** Bir ekin durumunu/ilerlemesini günceller (bkz. pollNetwork
-     *  "file_progress"/"file_complete"/"file_failed" olayları). Hedef
-     *  bulunamazsa sessizce yok sayılır. */
+    /** Updates the state and progress of an attachment (see the pollNetwork "file_progress",
+     *  "file_complete" and "file_failed" events). An unknown target is ignored silently. */
     fun applyAttachmentUpdate(fileId: String, status: AttachmentStatus, bytesDone: Long? = null) {
         val idx = indexOfMessageId(fileId)
         if (idx < 0) return
         val attachment = items[idx].attachment ?: return
-        // indirme başlangıcını ilk
-        // DOWNLOADING geçişinde damgala; tamamlanınca/başarısız olunca
-        // sıfırla ki olası bir yeniden denemede taze ölçüm yapılsın.
+        // Record the download start at the first DOWNLOADING transition. Reset it on complete or
+        // failure, so a later retry measures from scratch.
         if (status == AttachmentStatus.DOWNLOADING) {
             if (attachment.downloadStartedAt == 0L) {
                 attachment.downloadStartedAt = System.currentTimeMillis()
@@ -648,12 +556,10 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         notifyItemChanged(idx)
     }
 
-    /** Sesli mesaj çalma durumunu günceller — ChatActivity oynat/duraklat/
-     *  hız DEĞİŞİKLİKLERİNDE (sık olmayan olaylar) çağırır, tam bir
-     *  `notifyItemChanged` (yeniden bind) tetikler. Sık aralıklı ilerleme
-     *  karolarını (200ms'de bir) bunun YERİNE `tickVoicePlayback`
-     *  kullanmalı — aksi halde sürekli yeniden bind, kullanıcı
-     *  kaydırıcıyı sürüklerken elini altından "kayardı". */
+    /** Updates voice playback state. ChatActivity calls it on play, pause and speed changes
+     *  (infrequent events) and it triggers a full `notifyItemChanged`. For the frequent
+     *  progress ticks (every 200 ms) use `tickVoicePlayback` instead, otherwise the full rebind
+     *  would move the slider under the user's finger. */
     fun updateVoicePlayback(fileId: String, isPlaying: Boolean, positionMs: Int, speed: Float) {
         val idx = indexOfMessageId(fileId)
         if (idx < 0) return
@@ -664,12 +570,10 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         notifyItemChanged(idx)
     }
 
-    /** bkz. dosya başı `boundVoiceHolders` notu — çalma sırasında sık
-     *  aralıklı (200ms) konum güncellemesi için, TAM yeniden bind
-     *  YAPMADAN doğrudan o an ekranda bağlı ViewHolder'a yazar. Item
-     *  ekranda değilse (kaydırılıp gitmişse) sessizce yok sayılır —
-     *  `attachment.playbackPositionMs` yine de item verisinde güncel
-     *  tutulur ki tekrar ekrana gelince doğru konumla göstersin. */
+    /** Frequent position update during playback (every 200 ms). It writes straight into the
+     *  ViewHolder that is on screen, without a full rebind (see `boundVoiceHolders`). If the row
+     *  is off screen, the update is ignored, but `attachment.playbackPositionMs` is still
+     *  updated in the item data, so the correct position shows when the row comes back. */
     fun tickVoicePlayback(fileId: String, positionMs: Int, durationMs: Int) {
         val idx = indexOfMessageId(fileId)
         if (idx >= 0) items[idx].attachment?.playbackPositionMs = positionMs
@@ -683,8 +587,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         holder.txtVoiceDuration.text = formatDuration(remaining)
     }
 
-    /** Gelen/giden bir edit olayını uygular. Hedef bulunamazsa (ör. geçmişte
-     *  yüklenmemiş bir mesajı düzenliyorsa) sessizce yok sayılır. */
+    /** Applies an incoming or outgoing edit event. An unknown target (for example a message
+     *  that is not loaded) is ignored silently. */
     fun applyEdit(targetMessageId: String, newText: String) {
         val idx = indexOfMessageId(targetMessageId)
         if (idx < 0) return
@@ -698,17 +602,17 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (idx < 0) return
         items[idx].isDeleted = true
         notifyItemChanged(idx)
-        // A selected row deleted under the selection leaves it.
+        // A selected row that is deleted leaves the selection.
         if (selectedIds.remove(targetMessageId)) {
             if (selectedIds.isEmpty()) selectedKind = null
             onSelectionChanged?.invoke()
         }
-        // A deleted message no longer groups with its neighbors — re-bind
-        // them too, so they un-merge (restore spacing/timestamp/sender row).
+        // A deleted message no longer groups with its neighbours. Rebind them too, so they
+        // un-merge (spacing, timestamp and sender row are restored).
         if (idx > 0) notifyItemChanged(idx - 1)
         if (idx < items.size - 1) notifyItemChanged(idx + 1)
-        // Replies on screen that quote it lose the text too (the core has
-        // cleared it; these rows were loaded before).
+        // Replies on screen that quote this message lose the quoted text too. The core has cleared
+        // it, but these rows were loaded before.
         items.forEachIndexed { i, it ->
             if (it.replyToMessageId == targetMessageId && it.replyToPreview != null) {
                 it.replyToPreview = null
@@ -717,8 +621,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         }
     }
 
-    /** Bir gönderim durumu güncellemesi uygular (bkz. Rust "status" olayı —
-     *  ilk denemede "pending" kalan bir mesaj sonradan "sent"/"error" olur). */
+    /** Applies a send status update (see the Rust "status" event). A message that stayed "pending"
+     *  on the first try becomes "sent" or "error" later. */
     fun applyStatus(targetMessageId: String, status: Status) {
         val idx = indexOfMessageId(targetMessageId)
         if (idx < 0) return
@@ -727,13 +631,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     }
 
     /**
-     * başarısız (ERROR) bir mesajı yeniden
-     * gönderme — AYNI balonu tutar, ikinci bir kopya EKLEMEZ. Yeniden
-     * gönderim yeni bir ağ paketi (yeni `message_id`/`local_id`, çünkü
-     * eskisinin ratchet konumu artık geçersiz olabilir — bkz. Rust
-     * `MAX_UNCONFIRMED_AGE_MS` notu) olduğundan, bu balonun kimliği de
-     * ileride gelecek "status"/"seen" olaylarının doğru eşleşebilmesi için
-     * yeni kimlikle güncellenir. Hedef bulunamazsa sessizce yok sayılır.
+     * Retries a failed (ERROR) message. The SAME bubble is kept, no second copy is added.
+     * The retry is a new network packet with a new `message_id` / `local_id`, because the old
+     * ratchet position may no longer be valid (see the Rust `MAX_UNCONFIRMED_AGE_MS` note).
+     * So this bubble's id is updated to the new one, and later "status" and "seen" events match it.
+     * An unknown target is ignored silently.
      */
     fun retryMessage(oldMessageId: String, newMessageId: String, status: Status) {
         val idx = indexOfMessageId(oldMessageId)
@@ -744,25 +646,22 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     }
 
     /**
-     * Bir "görüldü" bildirimi uygular — bkz. `lastSeenMessageId` dosya
-     * başı notu. `viewerAvatars`: bu mesajı gören(ler)in TAM güncel
-     * listesi (artımlı değil — çağıran taraf, ör. bir grupta zamanla
-     * birikensetten, HER seferinde tam listeyi geçirmeli). Hedef mesaj,
-     * şu an "en son görülen" olarak işaretliden DAHA YENİ veya AYNIYSA
-     * (ör. aynı gruptaki başka bir üye de aynı mesajı gördüyse)
-     * güncellenir — daha ESKİ bir mesaj için gelen bir bildirim (nadir,
-     * ör. sıra dışı geliş) yok sayılır ki gösterge geri gitmesin.
+     * Applies a seen notice (see the `lastSeenMessageId` note at the top of the file).
+     * `viewerAvatars` is the FULL current list of people who have seen this message, not a
+     * delta: the caller passes the full list every time (in a group it builds up over time).
+     * The row is updated if it is the current latest-seen message or newer. A notice for an
+     * OLDER message (rare, for example out of order) is ignored, so the mark never moves back.
      */
     fun applySeen(targetMessageId: String, viewerAvatars: List<SeenByViewer>) {
         val idx = indexOfMessageId(targetMessageId)
         if (idx < 0) {
-            // bkz. `pendingSeenMessageId` — düşürmek yerine beklet.
+            // Held back, not dropped, when its target is not loaded yet (see `pendingSeenMessageId`).
             pendingSeenMessageId = targetMessageId
             pendingSeenAvatars = viewerAvatars
             return
         }
-        // Only its own: an older "seen" arriving first used to drop the one
-        // held back for a message not in the list yet.
+        // Only its own held notice is cleared. An older "seen" that arrives first must not drop
+        // the one held for a message that is not in the list yet.
         if (pendingSeenMessageId == targetMessageId) pendingSeenMessageId = null
         val previousId = lastSeenMessageId
         val previousIdx = previousId?.let { indexOfMessageId(it) } ?: -1
@@ -775,9 +674,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         notifyItemChanged(idx)
     }
 
-    /** The pool keeps 5 rows by default; a screen of short text rows needs ~20,
-     *  and each inflate is slow (ROM font lookup per TextView), so the first
-     *  scroll from tall media rows into text stuttered. Pre-inflate on idle. */
+    /** The RecyclerView pool keeps 5 rows by default. A screen of short text rows needs about 20,
+     *  and each inflate is slow (font lookup per TextView). The pool is pre-filled when idle, so the
+     *  first scroll from tall media rows into text rows does not stutter. */
     fun warmPool(rv: RecyclerView, count: Int = 24) {
         val pool = rv.recycledViewPool
         pool.setMaxRecycledViews(0, count + 8)
@@ -794,8 +693,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val view = LayoutInflater.from(parent.context)
             .inflate(R.layout.item_message_bubble, parent, false)
         val holder = BubbleViewHolder(view)
-        // Sabit 340dp maxWidth + yan sütun (tepki/görüldü) dar ekranda satırı
-        // ekrandan taşırıyordu; sınırı ekran genişliğinden türet.
+        // The fixed 340 dp max width plus the side column (reactions, seen marks) pushed the row off
+        // narrow screens. The limit is now derived from the screen width.
         val d = parent.resources.displayMetrics
         val screenDp = d.widthPixels / d.density
         val textMax = (minOf(340f, screenDp - 8f - 72f - 24f) * d.density).toInt()
@@ -820,34 +719,21 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val groupedWithNext = isGroupedWithNext(position)
         holder.container.gravity = if (item.isMine) Gravity.END else Gravity.START
         placeSideColumn(holder, item.isMine)
-        // Spec dışı, kullanıcı isteği (saat/tikler balonun İÇİNE taşındı):
-        // balon arka planı artık metnin/ek düzeninin KENDİSİNE değil,
-        // ikisini de meta satırıyla birlikte saran kapsayıcıya uygulanıyor
-        // — bkz. item_message_bubble.xml `layoutBubble`. Aksi halde saat,
-        // balonun içinde değil altında/yanında ayrı bir kutuda kalırdı.
-        // art arda gelen
-        // ve arası 2 dakikadan kısa olan mesajlar TEK bir yığın gibi
-        // okunsun. Bunu, balonların BİRLEŞTİĞİ kenardaki köşe yarıçapını
-        // küçülterek yapıyoruz — grubun ilki normal, sonrakiler "kaynamış"
-        // varyantı kullanır (bkz. bubble_*_grouped.xml).
-        // Gruplanan balonlar KENDİ arka planlarını ÇİZMEZ: birleşik dış hat
-        // (dışbükey köşeler + basamaklardaki içbükey filetolar) tek bir yol
-        // olarak `MergedBubbleDecoration` tarafından listenin altına
-        // çiziliyor. Burada bir yuvarlak dikdörtgen çizmek, tam da
-        // kullanıcının şikâyet ettiği "hâlâ kendi filetleriyle kalıyorlar"
-        // durumunu geri getirirdi.
-        // Hiçbir balon KENDİ arka planını çizmez — gruplu da, tek de.
-        // Sebep kullanıcı isteği: "en üstteki balonlar daha açık, alttakiler
-        // şu anki renginde, arada gradient". Bir drawable yalnızca kendi
-        // sınırlarını bilir, listenin tamamına gerilmiş bir gradyandan kendi
-        // payına düşen dilimi alamaz. Bütün zeminler tek yerden, ortak bir
-        // shader ile çiziliyor: bkz. MergedBubbleDecoration.
+        // The bubble background is applied to the container that wraps the text or attachment
+        // layout AND the meta row together (see item_message_bubble.xml `layoutBubble`), so the
+        // time sits inside the bubble.
+        // Grouped bubbles: the corner radius on the joined edge is reduced, so a run of messages
+        // reads as one stack. The first bubble of a group keeps its normal corners, the others use
+        // the "grouped" variant (see bubble_*_grouped.xml).
+        // Grouped bubbles do NOT draw their own background. The merged outline (convex corners and
+        // concave steps) is drawn as one path under the list by MergedBubbleDecoration. A drawable
+        // per bubble only knows its own bounds, so a gradient across the whole list is not possible.
+        // All backgrounds are drawn in one place with one shared shader (see MergedBubbleDecoration).
         holder.bubble.background = null
 
-        // Tepki pill'i — balonun yanında, ilk satır hizasında (bkz.
-        // item_message_bubble.xml `colBubbleSide`).
-        // Açıklama SADECE ek balonlarında (metin mesajının kendi metni
-        // zaten `txtBubbleText`). A sticker has no caption.
+        // The reaction pill sits beside the bubble, on the first line (see item_message_bubble.xml
+        // `colBubbleSide`). The caption exists only on attachment bubbles (a text message's text is
+        // `txtBubbleText`). A sticker has no caption.
         val attachmentInfo = item.attachment
         if (attachmentInfo != null && item.caption.isNotBlank() && !item.isDeleted
             && !attachmentInfo.isSticker
@@ -866,14 +752,10 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.pillReactions.setOnClickListener { onReactionsClick?.invoke(item) }
         }
 
-        // "birleşen balonlar
-        // çalışmıyor"): köşe yarıçapları doğru seçiliyordu ama balonlar
-        // birbirine HİÇ DEĞMİYORDU — önceki satırın ALT dolgusu 4dp olarak
-        // kalıyor, yalnızca sonrakinin ÜST dolgusu 1dp'ye çekiliyordu, yani
-        // arada hâlâ 5dp boşluk vardı ve "kaynamış blok" etkisi hiç
-        // oluşmuyordu. Gruplanan kenarda dolgu artık TAM SIFIR: iki balon
-        // birbirine değiyor ve küçültülmüş köşelerle tek parça okunuyor
-        // (bkz. bubble_*_grouped.xml).
+        // Corner radii are chosen per position in the group. The bubbles themselves must also touch:
+        // the bottom padding of the row above is set to ZERO on the grouped edge, and the top padding
+        // of the next row is zero too. The two bubbles then join into one shape
+        // (see bubble_*_grouped.xml).
         val defaultPaddingPx = (4 * holder.itemView.resources.displayMetrics.density).toInt()
         holder.container.setPadding(
             defaultPaddingPx,
@@ -882,10 +764,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             if (groupedWithNext) 0 else defaultPaddingPx
         )
 
-        // arama sonucunda hedeflenen mesajı
-        // geçici olarak vurgular — bubble drawable'ını DEĞİŞTİRMEK yerine
-        // (açık/koyu tema varyantı gerektirirdi) tüm satırın arkaplanına
-        // yarı saydam bir renk uygulanır.
+        // The row that matches the search is highlighted temporarily. A translucent colour is set on
+        // the whole row background, instead of changing the bubble drawable (that would need a light
+        // and a dark variant).
         holder.container.setBackgroundColor(
             if (item.messageId == highlightedMessageId) {
                 MaterialColors.getColor(holder.container, com.google.android.material.R.attr.colorTertiaryContainer)
@@ -894,13 +775,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             }
         )
 
-        // metin rengi HER ZAMAN tema rengiyle
-        // (dolayısıyla — kendi balonlarımız için — Ayarlar'daki vurgu/accent
-        // rengiyle, bkz. ThemePrefs.applyAccentColor) OTOMATİK belirlenir,
-        // elle seçilebilir AYRI bir metin rengi tercihi YOK ("text alwasy
-        // should be full black or white depending on accent color" — bunu
-        // Material'ın content-based dynamic color motoru zaten `colorOn*`
-        // rollerinde doğru hesaplıyor).
+        // The text colour is always set from the theme (for my own bubbles, from the accent colour in
+        // Settings, see ThemePrefs.applyAccentColor). There is no separate text colour setting.
+        // Material's dynamic colour engine computes the `colorOn*` roles correctly from the background.
         val onColorAttr = if (item.isMine) {
             com.google.android.material.R.attr.colorOnPrimaryContainer
         } else {
@@ -913,34 +790,28 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         holder.txtForwarded.setTextColor(onColor)
         val forwarded = !item.isDeleted && com.p2p.messenger.util.Forward.isForwarded(if (item.attachment != null) item.caption else item.text)
         holder.txtForwarded.visibility = if (forwarded) View.VISIBLE else View.GONE
-        // Saat/"düzenlendi"/durum tiki artık balonun İÇİNDE — sabit bir
-        // `?attr/colorOnSurfaceVariant` (XML'deki eski değer) giden balonun
-        // vurgu renkli zemininde okunmuyordu. Balonun kendi metin renginin
-        // hafif soluk bir tonu her iki balonda da, açık ve koyu temada
-        // doğru kontrastı verir.
+        // The time, "edited" label and status tick are inside the bubble. A fixed
+        // `?attr/colorOnSurfaceVariant` is hard to read on an outgoing bubble with an accent
+        // background. A slightly faded version of the bubble's own text colour gives the right
+        // contrast on both bubble colours, in light and dark themes.
         val metaColor = androidx.core.graphics.ColorUtils.setAlphaComponent(onColor, 0xB3)
         holder.timestamp.setTextColor(metaColor)
         holder.editedLabel.setTextColor(metaColor)
-        // Ek balonundaki ikincil satırlar da AYNI aileden olmalı: sabit
-        // `?attr/colorOnSurfaceVariant` (XML'deki değer) griler
-        // koyulaştırıldıktan sonra vurgu renkli giden balonun üzerinde
-        // neredeyse okunmuyordu (gerçek cihazda görüldü).
+        // Secondary lines of an attachment bubble use the same colour family. A fixed
+        // `?attr/colorOnSurfaceVariant` is too grey, and on an outgoing accent bubble it is almost
+        // unreadable after the colour was darkened.
         holder.txtAttachmentSize.setTextColor(metaColor)
         holder.txtAttachmentEta.setTextColor(metaColor)
         holder.txtVoiceDuration.setTextColor(metaColor)
-        // "Redmi'de okunma tikleri
-        // görünmüyor"): durum tiki ve "gören" göstergesi artık balonun
-        // İÇİNDE değil, YANINDA — yani sohbetin arka planının üzerinde
-        // duruyorlar. Balonun metin rengini (`onColor`) miras almaya devam
-        // ediyorlardı ve o renk yalnızca balonun İÇİNDE doğru: turuncu
-        // balonun `colorOnPrimaryContainer`'ı koyu, koyu sohbet zemininde
-        // ise neredeyse görünmez oluyordu. Dışarıda doğru rol yüzeyin
-        // rengi.
+        // The status tick and the "seen by" indicator are NOT inside the bubble. They sit BESIDE it,
+        // directly on the chat background. They used to inherit the bubble's text colour (`onColor`),
+        // which only works inside the bubble. On a dark chat background it was almost invisible.
+        // The correct role for this position is the surface colour.
         val sideColor = MaterialColors.getColor(
             holder.container, com.google.android.material.R.attr.colorOnSurfaceVariant
         )
         holder.status.imageTintList = android.content.res.ColorStateList.valueOf(sideColor)
-        // No bubble behind a sticker: its time is on the chat background too.
+        // No bubble behind a sticker: its time sits on the chat background too.
         if (isSticker(item)) holder.timestamp.setTextColor(sideColor)
         holder.txtSeenByMore.setTextColor(sideColor)
 
@@ -952,21 +823,18 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             holder.senderRow.visibility = View.GONE
         }
 
-        // Spec dışı, kullanıcı isteği (WhatsApp tarzı "sağa kaydırıp
-        // yanıtla"): bu mesaj başka bir mesaja yanıtsa, balonun içinde
-        // küçük bir alıntı kutusu — dokununca sohbet yanıtlanan mesaja
-        // kaydırılır (bkz. `onReplyPreviewClick`).
-        // "null" guard: a JSON-parsing bug upstream once let the literal
-        // string "null" through instead of real null here (org.json's
-        // optString(key, "") doesn't fall back on an explicit JSON null,
-        // only a missing key) — kept as a safety net against that class of bug.
+        // A message that replies to another one gets a small quote box inside the bubble. Tapping it
+        // scrolls the chat to the replied-to message (see `onReplyPreviewClick`).
+        // The "null" guard: a JSON parsing bug upstream once let the literal string "null" through
+        // instead of a real null (org.json's optString(key, "") does not fall back on an explicit JSON
+        // null, only on a missing key). The guard stays as a safety net for that class of bug.
         val replyToId = item.replyToMessageId?.takeIf { it != "null" }
         if (replyToId != null) {
             holder.layoutReplyQuote.visibility = View.VISIBLE
             holder.txtReplyQuoteSender.text = item.replyToSenderLabel?.takeIf { it != "null" }
             // No preview left: the quoted message was deleted.
-            // The sender writes the preview: when the quoted message is here,
-            // its own text is shown, so nobody can put words under "You".
+            // The preview comes from the sender. When the quoted message is available locally, its own
+            // text is shown instead, so the text is never put under the wrong name.
             val replyTarget = items.firstOrNull { it.messageId == replyToId }
             val quoteText = when {
                 replyTarget == null -> item.replyToPreview?.takeIf { it != "null" && it.isNotEmpty() }
@@ -976,26 +844,13 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                     ?: com.p2p.messenger.util.Quote.ownText(com.p2p.messenger.util.Forward.strip(replyTarget.text)).takeWholeChars(120)
             }
             holder.txtReplyQuoteText.text = quoteText ?: holder.itemView.context.getString(R.string.msg_deleted)
-            // Kullanıcı raporu ("alıntı mesajlar beyaz görünüyor").
+            // Quote background: the design is a translucent `colorOnSurface` over the surface colour.
+            // XML cannot set the alpha on `<solid>`, so the alpha is applied in code, and the colours
+            // stay in the theme roles.
             //
-            // Tasarım niyeti doğruydu: yüzey renginin üzerine %12 opaklıkta
-            // `colorOnSurface`. Uygulaması bozuktu — `reply_quote_background.xml`
-            // içinde `<solid android:color="?attr/colorOnSurface"
-            // android:alpha="0.12" />` yazıyordu ve `android:alpha`, `<solid>`
-            // etiketinin GEÇERLİ bir özniteliği DEĞİL. Sessizce yok sayılıp
-            // dolgu TAM OPAK `colorOnSurface` oluyordu; koyu temada bu renk
-            // neredeyse beyaz olduğu için kutu, koyu sohbetin ortasında
-            // bembeyaz bir blok olarak çiziliyordu.
-            //
-            // NOT (ilk denememde yanlış varsaydım): bu kutu balonun İÇİNDE
-            // değil — `item_message_bubble.xml`'de `txtBubbleText`'in KARDEŞİ,
-            // yani sohbet arka planının üzerinde duruyor. Bu yüzden renk
-            // temeli balonun metin rengi değil, YÜZEY rengi olmalı; zaten
-            // balonun altındaki zaman damgası da aynı aileyi kullanıyor ve
-            // bu arka planda okunaklı olduğu görülüyor.
-            //
-            // Alfa artık kodda uygulanıyor (XML'de mümkün olmadığı için),
-            // renkler orijinal niyetteki tema rollerinde kalıyor.
+            // The quote box is NOT inside the bubble. It is a sibling of `txtBubbleText` in
+            // item_message_bubble.xml, on top of the chat background. So the base colour is the surface
+            // colour, not the bubble's text colour. The timestamp below uses the same colour family.
             val quoteBase = MaterialColors.getColor(
                 holder.layoutReplyQuote, com.google.android.material.R.attr.colorOnSurface
             )
@@ -1018,12 +873,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
         val attachment = item.attachment
         if (attachment != null && item.isDeleted) {
-            // Spec dışı, hata düzeltmesi ("ekleri de uzun basıp silebilmeliyiz"):
-            // önceden bu dal HİÇ `isDeleted`i kontrol etmiyordu — bir ek
-            // silindiğinde (bkz. ChatActivity.confirmDeleteMessage) balon
-            // görsel olarak DEĞİŞMİYORDU, sanki hiç silinmemiş gibi
-            // göründüğü hâlde arka planda mesaj zaten silinmişti. Metin
-            // mesajlarıyla AYNI "Bu mesaj silindi" yer tutucusu.
+            // An attachment that is deleted shows the same "This message was deleted" placeholder as a
+            // deleted text message. Before, this branch did not check `isDeleted` at all, so a deleted
+            // attachment kept its look.
             holder.layoutAttachment.visibility = View.GONE
             holder.textView.visibility = View.VISIBLE
             holder.editedLabel.visibility = View.GONE
@@ -1052,16 +904,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                     holder.itemView.context.getString(R.string.lbl_edited).takeIf { item.isEdited },
                     holder.itemView.context.getString(R.string.lbl_synced).takeIf { item.viaSync }
                 ).joinToString(" ")
-                // mesaj metnindeki linkler
-                // (http/https/www) tıklanabilir olsun. `Linkify.addLinks`
-                // link bulursa TextView'a kendi `LinkMovementMethod`'unu
-                // atar — bu, ACTION_DOWN'ı tüketip üstteki `holder.itemView`
-                // long-click dinleyicisinin hiç tetiklenmemesine yol
-                // açabilir (bilinen Android davranışı: bir alt view kendi
-                // hareket yöntemiyle dokunuşu tüketirse üst view'a asla
-                // ulaşmaz) — bu yüzden AYNI uzun-basma dinleyicisi (bkz.
-                // aşağısı) `holder.textView`'a da AYRICA atanıyor, hangisi
-                // dokunuşu yakalarsa yakalasın menü yine açılır.
+                // Links in the message text (http, https, www) are clickable. `Linkify.addLinks` sets its
+                // own `LinkMovementMethod` on the TextView, which consumes ACTION_DOWN, so the long-press
+                // listener of `holder.itemView` never fires (a child view that consumes touch hides it from
+                // the parent). The same long-press listener is therefore also set on `holder.textView`
+                // (below), so the menu opens whichever view gets the touch.
                 val linked = android.text.SpannableString(shownText)
                 if (markMentions(linked, item.mentionsMe)) holder.textView.text = linked
                 val quoted = com.p2p.messenger.util.Quote.decorate(
@@ -1071,7 +918,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                 )
                 if (quoted) holder.textView.text = linked
                 if (android.text.util.Linkify.addLinks(linked, android.text.util.Linkify.WEB_URLS) || quoted) {
-                    // A tap leaves Tor for the system browser: ask first.
+                    // A tap on a link leaves the app for the system browser: ask first.
                     for (span in linked.getSpans(0, linked.length, android.text.style.URLSpan::class.java)) {
                         val start = linked.getSpanStart(span)
                         val end = linked.getSpanEnd(span)
@@ -1085,24 +932,18 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                     holder.textView.text = linked
                     holder.textView.movementMethod = android.text.method.LinkMovementMethod.getInstance()
                 } else {
-                    // A recycled row that showed a link kept consuming taps.
+                    // A recycled row that showed a link must stop consuming taps.
                     holder.textView.movementMethod = null
                 }
             }
         }
 
-        // her mesajın altında salt "HH:mm"
-        // yerine tam "(sent at: HH:MM day)" biçiminde, hangi GÜN
-        // gönderildiğini de gösteren mutlak bir zaman damgası — bkz.
-        // util.formatAbsoluteTime (Ayarlar'daki bekleyen mesajlar
-        // listesiyle PAYLAŞILAN aynı biçim). Kullanıcı isteği (genişletme):
-        // ALINAN mesajlarda, göndericinin embed ettiği GERÇEK gönderim anı
-        // (bkz. `Item.sentAtMs`) biliniyorsa "10:42 (sent at: 10:41)" gibi
-        // hem yerel ALINMA anı HEM gönderim anı gösterilir — ikisi network
-        // gecikmesi/kuyruklama yüzünden FARKLI olabilir. Bilinmiyorsa
-        // (gönderiliyor balonu, eski sürüm göndericisi, ya da yerel
-        // geçmişten yüklenmiş bir mesaj) önceki tek-zaman-damgası davranışına
-        // düşülür.
+        // The timestamp is an absolute time, for example "(sent at: HH:MM day)", which also shows the
+        // day. The format is util.formatAbsoluteTime, shared with the pending-message list in Settings.
+        // For received messages with a known sender send time (`Item.sentAtMs`), both times are shown,
+        // for example "10:42 (sent at: 10:41)". Network delay and queuing can make them differ.
+        // Otherwise (a sending bubble, an older sender, or a message loaded from history) only the
+        // single receive time is shown.
         val sentAt = item.sentAtMs
         holder.timestamp.text = if (!item.isMine && sentAt != null && sentAt > 0) {
             holder.itemView.context.getString(
@@ -1111,11 +952,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         } else {
             holder.itemView.context.getString(R.string.lbl_sent_at, formatAbsoluteTime(item.timestamp))
         }
-        // Only the last bubble in a grouped run shows a timestamp.
+        // Only the last bubble of a grouped run shows a timestamp.
         holder.timestamp.visibility = if (groupedWithNext) View.GONE else View.VISIBLE
 
-        // Only a message that is not out yet (or failed) carries a mark; a
-        // sent one shows nothing — read state is the seen-by avatars below.
+        // Only a message that is not yet out, or that failed, carries a status mark. A sent message
+        // shows nothing; its read state is the seen-by avatars below.
         val statusIcon = if (!item.isMine || item.isDeleted) 0 else when (item.status) {
             Status.PENDING -> R.drawable.ic_status_pending
             Status.ERROR -> R.drawable.ic_status_error
@@ -1135,13 +976,10 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         }
 
         val longPressListener = View.OnLongClickListener {
-            // Ek balonları için düzenle/sil/kopyala desteklenmiyor (bkz.
-            // dosya başı notu) — sadece düz metin mesajları uzun basmaya
-            // tepki verir. önceden SADECE
-            // kendi mesajlarımız (`item.isMine`) tepki veriyordu (Düzenle/
-            // Sil için) — artık alınan mesajlar da tepki verir, çağıran
-            // taraf (bkz. ChatActivity/GroupChatActivity) `isMine`'a göre
-            // ya sadece "Kopyala" ya da tam menüyü gösterir.
+            // Attachment bubbles support no edit, delete or copy (see the top of the file). Only plain
+            // text messages react to long press. Both my own and received messages react now. The
+            // caller (ChatActivity / GroupChatActivity) shows only "Copy" for received messages and the
+            // full menu for my own.
             if (!item.isDeleted && item.attachment == null) {
                 longPress(item, onItemLongPress)
                 true
@@ -1150,20 +988,17 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             }
         }
         holder.itemView.setOnLongClickListener(longPressListener)
-        // bkz. `Linkify.addLinks` çağrısı yukarısı — link içeren bir metinde
-        // `holder.textView` kendi `LinkMovementMethod`'u yüzünden dokunuşu
-        // tüketebilir, bu yüzden AYNI dinleyici ona da atanıyor.
+        // See the `Linkify.addLinks` note above. A text with links can consume the touch on
+        // `holder.textView` through its own `LinkMovementMethod`, so the same listener is set there too.
         holder.textView.setOnLongClickListener(longPressListener)
     }
 
     /**
-     * The side column (reactions, pending/error mark, seen-by avatars) goes
-     * on the OUTER side of the bubble: right of a received one, LEFT of my
-     * own. Right of my own it pushed the bubble in by its width, so my
-     * bubbles no longer shared their right edge; MergedBubbleDecoration draws
-     * a run from that shared edge and so painted the bubble under the
-     * neighbours' avatars and pills, and the avatars sat in the screen-edge
-     * column of the scroll-to-bottom button.
+     * The side column (reactions, pending or error mark, seen-by avatars) is on the OUTER side of
+     * the bubble: right of a received bubble, LEFT of my own. On my own side it used to push the
+     * bubble inward by its width, so my bubbles did not share their right edge. MergedBubbleDecoration
+     * draws a run from that shared edge, so the bubbles were painted under the neighbours' avatars and
+     * pills, and the avatars sat in the screen-edge column of the scroll-to-bottom button.
      */
     private fun placeSideColumn(holder: BubbleViewHolder, isMine: Boolean) {
         val line = holder.bubbleLine
@@ -1184,13 +1019,10 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         holder.sideColumn.gravity = Gravity.TOP or (if (isMine) Gravity.END else Gravity.START)
     }
 
-    /** Bir ek balonunu doldurur: OFFERED/FAILED -> "İndir" düğmesi,
-     *  DOWNLOADING -> ilerleme göstergesi, COMPLETE -> dokununca açılabilir
-     *  (indirme düğmesi/ilerleme gizli, tüm satır tıklanabilir). Küçük
-     *  resim önizlemesi bilinçli olarak v1 kapsamı DIŞINDA bırakıldı — her
-     *  ek türü aynı jenerik dosya simgesi + ad/boyut satırıyla gösterilir,
-     *  tamamlanmış bir görsele dokunmak sistem görüntüleyicisini açar
-     *  (bkz. ChatActivity openAttachment).
+    /** Fills an attachment bubble. OFFERED / FAILED: "Download" button. DOWNLOADING: progress indicator.
+     *  COMPLETE: tap opens the file (download button and progress hidden, whole row tappable).
+     *  Preview images are not part of this version: every file type shows the same generic file icon,
+     *  name and size. Tapping a completed image opens the system viewer (see ChatActivity openAttachment).
      */
     private fun bindAttachment(holder: BubbleViewHolder, item: Item, attachment: AttachmentInfo) {
         holder.layoutAttachment.visibility = View.VISIBLE
@@ -1200,18 +1032,16 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         }
         holder.imgSticker.visibility = View.GONE
 
-        // Sadece GERÇEK bir sesli mesaj oynatıcı olarak çizilir. Kullanıcının
-        // dosya yöneticisinden eklediği düz bir ses DOSYASININ süresi yoktur
-        // ve oynatıcı olarak çizilince balonda ne dosya adı, ne boyut, ne de
-        // anlamlı bir etiket kalıyordu — alıcı ne geldiğini göremiyordu.
-        // Gönderen gerçek sesli notlarda `duration_ms`'i FileOffer'a koyduğu
-        // için, henüz İNDİRİLMEMİŞ bir sesli not yine oynatıcı olarak çizilir.
+        // Only a REAL voice message is drawn as a player. A plain audio FILE that the user added from the
+        // file manager has no duration. Drawn as a player, the bubble lost its file name, size and any
+        // useful label, so the receiver could not see what it was. The sender puts `duration_ms` into
+        // FileOffer for real voice notes, so a voice note that is NOT downloaded yet is still drawn as a player.
         if (attachment.mimeType.startsWith("audio/") && (attachment.durationMs ?: 0) > 0) {
             holder.imgAttachmentThumbnail.visibility = View.GONE
             holder.rowGenericAttachment.visibility = View.GONE
             holder.layoutVoiceMessage.visibility = View.VISIBLE
-            // A recycled holder keeps the previous FILE row's state: stale
-            // progress, and a tap that opened the other message's file.
+            // A recycled holder keeps the state of the previous FILE row: stale progress, and a tap that
+            // would open the other message's file. Both are reset here.
             holder.progressAttachment.visibility = View.GONE
             holder.txtAttachmentEta.visibility = View.GONE
             val voiceClick = View.OnClickListener {
@@ -1230,12 +1060,12 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         holder.txtAttachmentName.text = attachment.fileName
         val context = holder.itemView.context
 
-        // Doluysa TAM dosya hiç indirilmeden bir önizleme gösterilir.
+        // If the preview is present, it is shown without downloading the full file.
         val preview = attachment.previewJpeg
         val thumb = holder.imgAttachmentThumbnail
         if (preview != null) {
-            // Sender-controlled bytes: bounded decode (see ImagePreview.decodeBytes).
-            // keyed by the bytes too, a re-sent file with the same id gets its new preview.
+            // The sender controls the bytes: decode with a bounded size (see ImagePreview.decodeBytes).
+            // The cache key includes the bytes too, so a re-sent file with the same id gets its new preview.
             val cacheKey = attachment.fileId + ":" + preview.contentHashCode()
             val cached = previewCache.get(cacheKey)
             thumb.tag = cacheKey
@@ -1243,7 +1073,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                 thumb.visibility = View.VISIBLE
                 thumb.setImageBitmap(cached)
             } else {
-                // A cache miss decodes on a worker; the recycled holder is checked by tag.
+                // A cache miss decodes on a worker thread. The recycled holder is checked by its tag.
                 thumb.visibility = View.GONE
                 previewDecoder.execute {
                     val bmp = com.p2p.messenger.util.ImagePreview.decodeBytes(preview, 1024) ?: return@execute
@@ -1272,15 +1102,13 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (attachment.status == AttachmentStatus.DOWNLOADING) {
             holder.progressAttachment.visibility = View.VISIBLE
             val max = attachment.totalSize.coerceAtLeast(1L)
-            // `setProgressCompat(.., true)` yüzde
-            // sıçramak yerine akıcı animasyonla ilerler — bkz. dosya başı
-            // "gerçek belirlenimli ilerleme" notu.
+            // `setProgressCompat(.., true)` animates the progress instead of jumping to the new percentage
+            // (see the "real progress" note at the top of the file).
             holder.progressAttachment.max = 1000
             val fraction = ((attachment.bytesDone.toDouble() / max.toDouble()) * 1000).toInt().coerceIn(0, 1000)
             holder.progressAttachment.setProgressCompat(fraction, true)
-            // kalan süre (ETA) — ortalama hız
-            // (indirilen bayt / geçen süre) üzerinden. Henüz ölçecek kadar
-            // veri yoksa gizli kalır (yanıltıcı bir tahmin göstermektense).
+            // Remaining time (ETA) is computed from the average speed (bytes received / elapsed time).
+            // It stays hidden until there is enough data to measure, rather than showing a misleading estimate.
             val etaText = formatEta(context, attachment)
             if (etaText != null) {
                 holder.txtAttachmentEta.visibility = View.VISIBLE
@@ -1329,8 +1157,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val cached = stickerImages.get(attachment.fileId)
         if (cached != null) {
             holder.imgSticker.setImageDrawable(cached)
-            // A few loops, then the last frame: a looping sticker on screen kept
-            // the whole chat redrawing at ~35 fps (half a core on a 9S).
+            // Play a few loops, then stop on the last frame. A looping sticker on screen kept the whole
+            // chat redrawing at about 35 fps, which cost half a core on a Samsung 9S.
             (cached as? android.graphics.drawable.AnimatedImageDrawable)?.apply { repeatCount = 2; start() }
         } else {
             holder.imgSticker.setImageDrawable(null)
@@ -1355,11 +1183,10 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     }
 
     /**
-     * sesli mesaj balonu. OFFERED/DOWNLOADING/FAILED durumunda
-     * çubuk indirme ilerlemesini gösterir, oynat düğmesi indirmeyi tetikler
-     * (bkz. `onAttachmentClick` — jenerik ekle AYNI tetikleyici). COMPLETE
-     * olunca çubuk ÇALMA konumuna döner, oynat/duraklat + hız rozeti etkin
-     * olur.
+     * Voice message bubble. In OFFERED, DOWNLOADING and FAILED states the bar shows the download
+     * progress, and the play button starts the download (`onAttachmentClick`, the same trigger as the
+     * generic attachment). In COMPLETE the bar returns to the playback position, and the play / pause
+     * and speed badge are enabled.
      */
     private fun bindVoiceMessage(holder: BubbleViewHolder, item: Item, attachment: AttachmentInfo) {
         val isComplete = attachment.status == AttachmentStatus.COMPLETE
@@ -1372,9 +1199,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (isComplete) {
             slider.isEnabled = true
             val safeDuration = durationMs.coerceAtLeast(1)
-            // `valueTo` degistirmeden once `value`'nun gecerli araliktan
-            // disari cikmamasi icin sira onemli (Slider, value > valueTo
-            // ise IllegalStateException firlatir).
+            // Order matters: set `valueTo` before `value`, so `value` never leaves the valid range
+            // (a Slider throws IllegalStateException when value > valueTo).
             slider.value = 0f
             slider.valueTo = safeDuration.toFloat()
             slider.value = attachment.playbackPositionMs.toFloat().coerceIn(0f, safeDuration.toFloat())
@@ -1421,9 +1247,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         }
     }
 
-    /** En fazla 3 küçük avatar gösterir, fazlası "+N" ile özetlenir —
-     *  1:1 sohbette `lastSeenAvatars` her zaman tek elemanlıdır, grup
-     *  sohbetinde birden fazla üyenin avatarı olabilir. */
+    /** Shows at most 3 small avatars. The rest is summarised as "+N". In 1:1 chats `lastSeenAvatars`
+     *  always has one entry. In group chats it can have several members' avatars. */
     private fun bindSeenBy(holder: BubbleViewHolder) {
         holder.rowSeenBy.visibility = View.VISIBLE
         val avatars = lastSeenAvatars
@@ -1445,12 +1270,10 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         }
     }
 
-    /** kalan süre (ETA) metni. Ortalama hız
-     *  (indirilen bayt / geçen süre) üzerinden hesaplanır — anlık hız
-     *  yerine ortalama, ağdaki dalgalanmalarda çok daha kararlı bir tahmin
-     *  verir. Ölçüm için yeterli veri yoksa (henüz başlamadı, 1 sn'den az
-     *  geçti, veya hiç bayt inmedi) `null` döner ve sayaç gizlenir —
-     *  yanıltıcı bir "0 sn kaldı" göstermemek için. */
+    /** Remaining time (ETA) text. Computed from the average speed (bytes received / elapsed time).
+     *  The average is steadier than the instantaneous speed on a fluctuating network. Returns `null`
+     *  when there is not enough data yet (not started, less than 1 s elapsed, or no bytes received),
+     *  and the counter is hidden. */
     private fun formatEta(context: android.content.Context, attachment: AttachmentInfo): String? {
         val startedAt = attachment.downloadStartedAt
         if (startedAt <= 0L) return null
@@ -1509,6 +1332,6 @@ private class ConfirmUrlSpan(url: String) : android.text.style.URLSpan(url) {
     }
 }
 
-/** `take(n)` on UTF-16 can cut a surrogate pair (emoji) in half; back off one unit then. */
+/** `take(n)` on UTF-16 can split a surrogate pair (emoji) in half; back off one unit then. */
 fun String.takeWholeChars(n: Int): String =
     if (length <= n) this else substring(0, if (n > 0 && Character.isHighSurrogate(this[n - 1])) n - 1 else n)
