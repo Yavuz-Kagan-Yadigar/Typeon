@@ -276,6 +276,10 @@ struct ChatView {
     live_serial: Cell<u64>,
     loading_older: Cell<bool>,
     exhausted_locally: Cell<bool>,
+    /// `load_older` dropped the newest bubbles to stay under `MAX_BUBBLES`.
+    /// Live messages are not appended past that gap; reaching the bottom
+    /// reloads the newest page instead.
+    trimmed_bottom: Cell<bool>,
     last_typing_sent: Cell<u64>,
     typing_active: Cell<bool>,
     /// Direct chat only: the contact deleted their account, so sending is off.
@@ -440,6 +444,7 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         live_serial: Cell::new(0),
         loading_older: Cell::new(false),
         exhausted_locally: Cell::new(false),
+        trimmed_bottom: Cell::new(false),
         last_typing_sent: Cell::new(0),
         typing_active: Cell::new(false),
         account_deleted: Cell::new(false),
@@ -564,6 +569,10 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
             view.update_date_pill();
             if adjustment.value() <= 8.0 && adjustment.upper() > adjustment.page_size() {
                 view.load_older();
+            } else if view.trimmed_bottom.get()
+                && adjustment.upper() - adjustment.page_size() - adjustment.value() < 80.0
+            {
+                view.reload();
             }
         });
     }
@@ -856,6 +865,9 @@ impl ChatView {
     fn reload(self: &Rc<Self>) {
         let generation = self.load_gen.get() + 1;
         self.load_gen.set(generation);
+        // Cleared now, not in the callback: the scroll handler must not
+        // restart this reload on every tick while it runs.
+        self.trimmed_bottom.set(false);
         let conversation = self.conversation.clone();
         let own_identity = self.app().own_identity_id.borrow().clone();
         let view = self.clone();
@@ -984,44 +996,49 @@ impl ChatView {
                 }
                 older.sort_by_key(|entry| entry.order_key);
 
-                // Preserve the reading position. Inserting above shifts
-                // everything down by the height of what was added; distance
-                // from the *bottom* is the invariant, and the restore waits for
-                // the next layout pass because `upper` is stale until then.
+                // Preserve the reading position. Rows go in above and may come
+                // off below, so neither end is a fixed reference: the old top
+                // row is. Its offset to the viewport is restored after the
+                // next layout pass (positions are stale until then).
                 let adjustment = view.scroller.vadjustment();
-                let distance_from_bottom = adjustment.upper() - adjustment.value();
+                let anchor = view.messages.first_child();
+                let offset = anchor
+                    .as_ref()
+                    .and_then(|row| row.compute_bounds(&view.messages))
+                    .map(|bounds| adjustment.value() - bounds.y() as f64);
                 for entry in older {
                     view.insert_entry(entry, false);
                 }
-                // a full page above the cap drops the oldest
-                // page's worth of bubbles immediately, so the view settles at
-                // ~MAX_BUBBLES instead of growing for as long as the user
-                // keeps scrolling.
-                view.evict_oldest();
+                // Above the cap, drop the newest bubbles (far below the
+                // reader), so the view settles at ~MAX_BUBBLES while the page
+                // just loaded stays.
+                view.trim_newest();
+                let messages = view.messages.clone();
                 glib::idle_add_local_once(move || {
-                    adjustment.set_value(adjustment.upper() - distance_from_bottom);
+                    if let (Some(row), Some(offset)) = (anchor, offset) {
+                        if let Some(bounds) = row.compute_bounds(&messages) {
+                            adjustment.set_value(bounds.y() as f64 + offset);
+                        }
+                    }
                 });
             },
         );
     }
 
-    /// drops the oldest bubbles once more than `MAX_BUBBLES` are alive,
-    /// then prunes any day-day separator left stranded by the evictions.
-    /// Removing the widgets is safe from the GTK thread (that is where the
-    /// rest of timeline surgery happens too).
-    /// Note the reload cursor: refetching after an eviction still pages from
-    /// `oldest_timestamp` (strictly older receive time), so evicted rows stay
-    /// gone until a full `reload()` or the chat is reopened — by design, the
-    /// user scrolled past them into the archive anyway.
-    fn evict_oldest(self: &Rc<Self>) {
+    /// Drops the newest bubbles once more than `MAX_BUBBLES` are alive, then
+    /// prunes day separators left stranded at the bottom. Sets
+    /// `trimmed_bottom`: the scroll handler reloads the newest page when the
+    /// reader gets back down there.
+    fn trim_newest(self: &Rc<Self>) {
         let evicted: Vec<String> = {
             let mut order = self.order.borrow_mut();
-            let excess = order.len().saturating_sub(MAX_BUBBLES);
-            if excess == 0 {
+            let keep = order.len().min(MAX_BUBBLES);
+            if keep == order.len() {
                 return;
             }
-            order.drain(..excess).map(|(_, id)| id).collect()
+            order.drain(keep..).map(|(_, id)| id).collect()
         };
+        self.trimmed_bottom.set(true);
 
         {
             let mut bubbles = self.bubbles.borrow_mut();
@@ -1040,21 +1057,12 @@ impl ChatView {
             !evicted.iter().any(|gone| gone == id)
         });
 
-        // Two leading day separators (the bubble between them was evicted) or
-        // a separator with nothing after it are leftovers; a separator still
-        // followed by a bubble is legitimate and stays.
-        while let Some(first) = self.messages.first_child() {
-            if !first.has_css_class("day-separator") {
+        // Trailing separators lost the bubbles they introduced.
+        while let Some(last) = self.messages.last_child() {
+            if !last.has_css_class("day-separator") {
                 break;
             }
-            let stranded = first
-                .next_sibling()
-                .map(|next| next.has_css_class("day-separator"))
-                .unwrap_or(true); // nothing after it at all
-            if !stranded {
-                break;
-            }
-            self.messages.remove(&first);
+            self.messages.remove(&last);
         }
     }
 }
@@ -1292,6 +1300,23 @@ impl ChatView {
             .rposition(|(key, _)| *key <= entry.order_key)
             .map(|index| index + 1)
             .unwrap_or(0);
+        // The newest rows were trimmed off: the end of `order` is not the end
+        // of the chat, so a row past it would sit after a gap. The reload on
+        // reaching the bottom brings it in.
+        if position == order.len() && self.trimmed_bottom.get() {
+            // My own message: jump to the newest page so it shows. Scrolling
+            // to the end lets the scroll handler reload; reload here only if
+            // it did not.
+            if entry.mine {
+                drop(order);
+                let adjustment = self.scroller.vadjustment();
+                adjustment.set_value(adjustment.upper());
+                if self.trimmed_bottom.get() {
+                    self.reload();
+                }
+            }
+            return;
+        }
         let previous_bubble = if position > 0 {
             self.bubbles.borrow().get(&order[position - 1].1).cloned()
         } else {
@@ -4521,7 +4546,7 @@ fn day_separator(timestamp: u64) -> gtk::Widget {
     let label = gtk::Label::new(Some(&util::format_day_separator(timestamp)));
     label.add_css_class("caption");
     label.add_css_class("dim-label");
-    // `evict_oldest` identifies separators by class when it prunes the
+    // `trim_newest` identifies separators by class when it prunes the
     // ones left stranded by evicted bubbles (they are not tracked in
     // `order`, which only mirrors bubbles).
     label.add_css_class("day-separator");
