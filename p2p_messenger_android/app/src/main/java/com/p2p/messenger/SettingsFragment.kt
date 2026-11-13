@@ -56,24 +56,20 @@ class SettingsFragment : Fragment() {
         /** Which settings cards are open. Process-wide so an appearance change
          *  (which recreates the activity) does not fold the card the user was in. */
         private val expandedSections = mutableSetOf("profile")
-        /** bkz. ChatActivity PREVIEW_MAX_DIMENSION notu — kullanıcı
-         *  tarafından istenen profil fotoğrafı standardı: 720p/%85 JPEG
-         *  (sohbet eki önizlemelerinden — 480p — daha büyük, çünkü profil
-         *  fotoğrafı tam ekran/daha büyük gösterilebilir). */
+        /** Same note as ChatActivity PREVIEW_MAX_DIMENSION. The profile photo standard is 720p at 85% JPEG: larger than chat attachment previews (480p),
+         *  because a profile photo can be shown full screen or larger. */
         private const val AVATAR_MAX_DIMENSION = 720
-        /** bkz. `performDeleteAccount`. */
+        /** See `performDeleteAccount`. */
         private const val ACCOUNT_DELETE_WAIT_MS = 15_000L
-        /** bkz. `onFontPicked` — büyük CJK fontları ~20 MB civarı. */
+        /** See `onFontPicked`: large CJK fonts are around 20 MB. */
         private const val MAX_FONT_BYTES = 32L * 1024 * 1024
         private const val AVATAR_JPEG_QUALITY = 85
 
-        /** bkz. `onChatWallpaperPicked` — avatardan daha büyük (tam ekran
-         *  arka plan olarak gösterilecek), ama yine de makul bir üst sınır. */
+        /** See `onChatWallpaperPicked`: larger than an avatar (it is shown full screen as the background), but still a reasonable upper limit. */
         private const val WALLPAPER_MAX_DIMENSION = 1080
         private const val WALLPAPER_JPEG_QUALITY = 80
 
-        /** geçmiş/ek depolama sınırı slider'ı
-         *  — 100MB'dan 32GB'a, ayrık adımlarla (Slider valueFrom=0..8). */
+        /** Slider for the history and attachment storage limit, from 100 MB to 32 GB, in discrete steps (Slider valueFrom=0..8). */
         private val HISTORY_STORAGE_LIMIT_STEPS_BYTES = longArrayOf(
             100L * 1024 * 1024,
             250L * 1024 * 1024,
@@ -108,20 +104,11 @@ class SettingsFragment : Fragment() {
         }
 
         /**
-         * "Value(1.24375)
-         * must be equal to valueFrom(0.85) plus a multiple of stepSize(0.05)"):
-         * metin/arayüz boyutu kaydırıcıları önceden ÇIPLAK bir ondalık
-         * `stepSize` (0.05f) kullanıyordu — 0.05 ikili kayan noktada TAM
-         * temsil edilemez, bu yüzden Material Slider'ın kendi iç
-         * `validateValues()` kontrolü (her `onSizeChanged`'da çalışır),
-         * SharedPreferences'tan geri okunan/tekrar atanan bir değerin
-         * "valueFrom + N×stepSize" olup olmadığını doğrularken küçük bir
-         * kayan nokta sapmasında bile `IllegalStateException` fırlatıp
-         * uygulamayı ÇÖKERTİYORDU. Çözüm: `history_storage_limit_slider`
-         * (bkz. yukarısı) ile AYNI desen — kaydırıcı SADECE TAM SAYI
-         * indeksler üzerinde çalışır (`valueFrom=0, stepSize=1`, kayan
-         * nokta hassasiyeti SÖZ KONUSU BİLE DEĞİL), gerçek ölçek değeri bu
-         * sabit dizilerden indekslenir.
+         * The text and interface size sliders used to use a bare decimal `stepSize` (0.05f). 0.05 cannot be represented exactly in binary floating point.
+         * The Material Slider's own `validateValues()` check (run on every `onSizeChanged`) requires a value read back from SharedPreferences to be exactly
+         * 'valueFrom plus a multiple of stepSize'. A tiny floating-point error there threw `IllegalStateException` and crashed the app.
+         * Fix, using the same pattern as `history_storage_limit_slider`: the slider works ONLY on whole-number indices (`valueFrom=0, stepSize=1`, so no
+         * floating-point precision is involved), and the real scale value is looked up from these constant arrays.
          */
         private val TEXT_SCALE_STEPS = floatArrayOf(
             0.70f, 0.75f, 0.80f, 0.85f, 0.90f, 0.95f, 1.00f, 1.05f, 1.10f, 1.15f,
@@ -146,52 +133,42 @@ class SettingsFragment : Fragment() {
     }
 
     private lateinit var imgOwnAvatar: ImageView
-    /** bkz. `imgOwnAvatar` tıklama dinleyicisi — tam ekran görüntüleyiciye
-     *  taşınacak ham profil fotoğrafı baytları (bkz. AvatarUtil.openFullscreen). */
+    /** Raw profile photo bytes, passed to the full-screen viewer by the click listener of `imgOwnAvatar` (see AvatarUtil.openFullscreen). */
     private var ownAvatarBytes: ByteArray? = null
     private var displayNameValue: TextView? = null
 
-    /** durum etiketi + periyodik yoklama.
-     *  Yoklama `onResume`da başlar, `onPause`'da BİTER: view yaratıldığı andan
-     *  itibaren 2 sn'de bir çalışan bir JNI yoklaması, uygulama arka
-     *  plandayken de sürüyordu (pilde ve çekirdek kilidinde gereksiz iş). */
+    /** Status label and periodic poll. The poll starts in `onResume` and stops in `onPause`. A JNI poll every 2 s from view creation would keep running
+     *  while the app is in the background, wasting battery and core-lock time. */
     private var torStatusView: TextView? = null
     private val torStatusHandler = Handler(Looper.getMainLooper())
     private val torStatusRunnable = object : Runnable {
         override fun run() {
             updateTorStatusLabel()
-            // Tor durumu (bootstrap) saniyeler içinde değişebildiğinden 2 sn'de
-            // bir yenile.
+            // The Tor status (bootstrap) can change within seconds, so refresh every 2 s.
             torStatusHandler.postDelayed(this, 2000)
         }
     }
 
-    /** `registerForActivityResult` Fragment STARTED olmadan ÖNCE
-     *  çağrılmalı — bkz. ChatActivity pickFileLauncher aynı notu. */
+    /** `registerForActivityResult` must be called BEFORE the Fragment is STARTED. See the same note in ChatActivity's pickFileLauncher. */
     private val pickAvatarLauncher = registerForActivityResult(com.p2p.messenger.util.OpenDocumentAtHome()) { uri ->
         uri?.let { onAvatarPicked(it) }
     }
 
-    /** bkz. `onChatWallpaperPicked` — `pickAvatarLauncher` ile AYNI desen. */
+    /** See `onChatWallpaperPicked`: the same pattern as `pickAvatarLauncher`. */
     private val pickWallpaperLauncher = registerForActivityResult(com.p2p.messenger.util.OpenDocumentAtHome()) { uri ->
         uri?.let { onChatWallpaperPicked(it) }
     }
 
-    /** bkz. font seçim diyalogu — `.ttf`/`.otf` font dosyası seçmek için;
-     *  `pickWallpaperLauncher` ile AYNI `OpenDocument` deseni. */
+    /** Font picker: chooses a `.ttf` or `.otf` font file. The same `OpenDocument` pattern as `pickWallpaperLauncher`. */
     private val pickFontLauncher = registerForActivityResult(com.p2p.messenger.util.OpenDocumentAtHome()) { uri ->
         uri?.let { onFontPicked(it) }
     }
 
     /**
-     * Rust tarafı (`export_recovery`,
-     * Argon2id ile sertleştirilmiş — bkz. SECURITY.md §6) daha önce hiçbir
-     * ekrandan tetiklenemiyordu. Kullanıcının parolayı SAF (Storage Access
-     * Framework, `CreateDocument`) ile seçtiği hedefe yazmadan HEMEN önce
-     * `showExportRecoveryDialog`'da geçici olarak burada tutulur — bu dosya
-     * TÜM uzun-vadeli kimlik anahtarlarını taşıdığından, hedef kullanıcının
-     * KENDİSİNİN seçtiği bir konum olmalı (WRITE_EXTERNAL_STORAGE izni
-     * gerektirmeyen, herhangi bir API seviyesinde tekdüze çalışan tek yol).
+     * The Rust side (`export_recovery`, hardened with Argon2id, see SECURITY.md §6) is triggered from this screen.
+     * The passphrase is held here temporarily, just before it is written to the target the user picks with SAF (Storage Access Framework,
+     * `CreateDocument`), in `showExportRecoveryDialog`. This file carries ALL long-term identity keys, so the target must be a location the user
+     * chooses. SAF is the only way that works the same on every API level without WRITE_EXTERNAL_STORAGE.
      */
     private var pendingRecoveryPassphrase: String? = null
 
@@ -272,8 +249,7 @@ class SettingsFragment : Fragment() {
 
         imgOwnAvatar = view.findViewById(R.id.img_own_avatar)
         refreshOwnAvatar()
-        // profil fotoğrafına dokununca tam
-        // ekran + pinch-to-zoom açar (bkz. AvatarUtil.openFullscreen).
+        // Tapping the profile photo opens it full screen with pinch-to-zoom (see AvatarUtil.openFullscreen).
         imgOwnAvatar.setOnClickListener { AvatarUtil.openFullscreen(requireContext(), ownAvatarBytes) }
         view.findViewById<Button>(R.id.btn_change_picture).setOnClickListener {
             AppLock.beginTrustedExcursion()
@@ -283,8 +259,7 @@ class SettingsFragment : Fragment() {
             setOwnAvatar(null)
         }
 
-        // Kullanıcı isteği (2026-09-04): hesap adı — bkz.
-        // `showChangeDisplayNameDialog`.
+        // Account name: see `showChangeDisplayNameDialog`.
         displayNameValue = view.findViewById(R.id.display_name_value)
         refreshDisplayName()
         view.findViewById<Button>(R.id.btn_change_display_name).setOnClickListener {
@@ -292,8 +267,7 @@ class SettingsFragment : Fragment() {
         }
 
         val identityCodeValue = view.findViewById<android.widget.TextView>(R.id.identity_code_value)
-        // JNI çağrısı (`getIdentityCode` → çekirdek kilidi)
-        // ana iş parçacığından ÇALIŞMAZ; sonuç ana iş parçacığına yazılır.
+        // The JNI call (`getIdentityCode` → core lock) does NOT run on the main thread; the result is written on the main thread.
         identityCodeValue.text = ""
         lifecycleScope.launch(Dispatchers.IO) {
             val code = try { P2PLib.getIdentityCode() } catch (e: Exception) { "" }
@@ -340,11 +314,8 @@ class SettingsFragment : Fragment() {
             setHistoryStorageLimitVisible(isChecked)
         }
 
-        // Tor onion service — CGNAT arkasında da
-        // ulaşılabilirlik (bkz. tor.rs / SECURITY.md). Node modunun aksine
-        // CANLI toggle YOK: değişiklik ancak ağ katmanı yeniden başlayınca
-        // etkinleşir (transport ancak startNetwork'te eklenebiliyor), bu yüzden
-        // kullanıcıya "uygulamayı yeniden başlatın" uyarısı gösterilir.
+        // Tor onion service: reachable even behind CGNAT (see tor.rs and SECURITY.md). Unlike node mode there is NO live toggle: a change takes effect
+        // only when the network layer restarts (the transport can only be added in startNetwork). So the user is shown a 'restart the app' notice.
         val torSwitch = view.findViewById<SwitchMaterial>(R.id.tor_switch)
         torStatusView = view.findViewById(R.id.tor_status)
         torSwitch.isChecked = P2PService.isTorEnabled(requireContext())
@@ -353,14 +324,10 @@ class SettingsFragment : Fragment() {
             Toast.makeText(requireContext(), R.string.tor_restart_needed, Toast.LENGTH_LONG).show()
             if (!isChecked) Toast.makeText(requireContext(), R.string.tor_off_no_network, Toast.LENGTH_LONG).show()
         }
-        // Yoklama `onResume`'da başlar (aşağıda) — view yaratılırken değil:
-        // uygulama arka plandayken de sürmesin.
+        // The poll starts in `onResume` (below), not at view creation, so it does not keep running while the app is in the background.
 
-        // bkz. SECURITY.md
-        // "Cross-network connectivity" notu — organik olarak keşfedilen bir
-        // röle yoksa (ör. hiç Node modu açık, erişilebilir bir kişiyle
-        // karşılaşılmadıysa), farklı ağlardaki iki kişinin ilk eşleşmesi
-        // için tek garanti bu manuel adres.
+        // See SECURITY.md, 'Cross-network connectivity'. If no relay is discovered organically (for example no node mode is on and no reachable contact has been met),
+        // this manual address is the only guarantee for a first pairing between two people on different networks.
         val relayAddressInput = view.findViewById<EditText>(R.id.relay_address_input)
         view.findViewById<Button>(R.id.btn_add_relay_address).setOnClickListener {
             val addr = relayAddressInput.text.toString().trim()
@@ -390,8 +357,7 @@ class SettingsFragment : Fragment() {
         setupNotificationControls(view)
         setupAppLockControls(view)
 
-        // Anahtarların donanım güvenlik modülünde (StrongBox/TEE) tutulup
-        // tutulmadığını göster — kullanıcıya somut bir güvenlik göstergesi.
+        // Show whether the keys are kept in the hardware security module (StrongBox or TEE): a concrete security indicator for the user.
         val securityStatus = view.findViewById<android.widget.TextView>(R.id.key_security_status)
         securityStatus.text = if (com.p2p.messenger.util.KeystoreCrypto.isHardwareBacked()) {
             getString(R.string.lbl_keys_hardware_backed)
@@ -399,15 +365,12 @@ class SettingsFragment : Fragment() {
             getString(R.string.lbl_keys_software_backed)
         }
 
-        // bkz. `pendingRecoveryPassphrase`/`createRecoveryFileLauncher`
-        // dokümantasyonu — daha önce hiçbir ekranda erişilemeyen kurtarma
-        // dosyası dışa aktarma akışının tetiği.
+        // Trigger for the recovery-file export flow (see `pendingRecoveryPassphrase` and `createRecoveryFileLauncher`).
         view.findViewById<Button>(R.id.btn_export_recovery).setOnClickListener {
             withAppPassword { showExportRecoveryDialog() }
         }
 
-        // bekleyen (henüz ack alınmamış)
-        // mesajlar listesi — bkz. ui.PendingMessagesActivity.
+        // Pending messages list (not yet acknowledged): see ui.PendingMessagesActivity.
         view.findViewById<Button>(R.id.btn_pending_messages).setOnClickListener {
             startActivity(Intent(requireContext(), PendingMessagesActivity::class.java))
         }
@@ -416,12 +379,12 @@ class SettingsFragment : Fragment() {
             startActivity(Intent(requireContext(), StorageActivity::class.java))
         }
 
-        // Çoklu-cihaz (spec 1.5): bağlı cihazları yönet / yeni cihaz ekle.
+        // Multi-device: manage linked devices and add a new one.
         view.findViewById<Button>(R.id.btn_linked_devices).setOnClickListener {
             showLinkedDevicesDialog()
         }
 
-        // hesaptan çıkış — bkz. `confirmLogout`.
+        // Log out of the account: see `confirmLogout`.
         view.findViewById<Button>(R.id.btn_logout).setOnClickListener {
             withAppPassword { confirmLogout() }
         }
@@ -434,19 +397,12 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * kullanıcı gerçek bir cihazda "İkincil
-     * cihaz olarak bağlan" akışında (`LinkDeviceActivity`) bir çökme
-     * yaşadı — çökme ANINDAN önce kimlik zaten diske yazılmıştı
-     * (`createIdentityAndStart` -> `IdentityManager.persistNewIdentity`
-     * `startActivity`'den ÖNCE çalışır), bu yüzden bir sonraki açılışta
-     * `MainActivity.onCreate` `hasStoredIdentity()==true` görüp bu yarım
-     * kalmış/eşleşmemiş kimlikle normal (yalnız) bir hesap gibi devam
-     * ediyordu — kullanıcının baştan başlamasının hiçbir yolu yoktu. Bu,
-     * o kilitlenmeden çıkış için genel bir "çıkış yap" kapısı: yerel
-     * kimlik/mesaj/kişi verisini SİLER (bkz. `performLogout`) ve
-     * `AppRestarter` ile temiz bir süreçte yeniden başlatır — bu da
-     * `MainActivity`'yi `hasStoredIdentity()==false` görüp yeniden
-     * `showDeviceNameDialog()`'a düşürür.
+     * Logout, and the recovery path after a crash during 'Link as a secondary device' (`LinkDeviceActivity`).
+     * The identity is written to disk before that screen starts (`createIdentityAndStart` → `IdentityManager.persistNewIdentity`). If the app crashes right after,
+     * the next launch sees `hasStoredIdentity()==true` in `MainActivity.onCreate` and continues with that half-finished, unpaired identity as if it were a normal
+     * account, with no way to start over. This is the general 'log out' gate for that case: it deletes the local identity, message and contact data
+     * (see `performLogout`), and restarts in a clean process with `AppRestarter`. `MainActivity` then sees `hasStoredIdentity()==false` and shows
+     * `showDeviceNameDialog()` again.
      */
     private fun confirmLogout() {
         AlertDialog.Builder(requireContext())
@@ -458,22 +414,14 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Bu cihazdaki TÜM kalıcı kimlik/mesaj verisini siler: SQLite DB
-     * (+ WAL/SHM yardımcı dosyaları), şifreli secret key bundle'ı
-     * (`identity_secret.enc`), Keystore ile sarılmış DİĞER kimlik
-     * anahtarları (geçmiş/skipped-key/ARK — bkz. [com.p2p.messenger.util.LocalWipe],
-     * bu üçü burada ATLANIYORDU) ve ek (attachment) depolama dizini. Rust
-     * çekirdeği bunları süreç İÇİNDE güvenle "unutacak" doğrulanmış bir
-     * yola sahip değil (bkz. `AppRestarter` dokümantasyonu — AYNI gerekçe:
-     * canlı bir süreçte kimlik/ağ durumunu sıfırlamak yerine dosyaları
-     * silip TEMİZ bir süreçte yeniden başlamak). Görünüm/tema tercihleri
-     * (`ThemePrefs`) kasıtlı olarak dokunulmadan bırakılır — kimliğe değil
-     * cihaza ait, silinmeleri kullanıcı için bir kazanç sağlamaz.
+     * Deletes ALL persistent identity and message data on this device: the SQLite DB (plus its WAL and SHM helper files), the encrypted secret key bundle
+     * (`identity_secret.enc`), the other identity keys wrapped by the Keystore (history, skipped-key and ARK; see [com.p2p.messenger.util.LocalWipe]),
+     * and the attachment storage directory. The Rust core has no verified way to 'forget' these safely inside a running process (see the `AppRestarter` docs:
+     * same reason, delete the files and restart in a clean process instead of resetting identity or network state in a live process).
+     * View and theme preferences (`ThemePrefs`) are deliberately left alone: they belong to the device, not the identity.
      */
-    /** Hesabı siler: önce tüm kişilere/gruplara/kardeş cihazlara bildirim
-     *  gider (bkz. Rust `delete_account`), onaylar ya da en fazla
-     *  [ACCOUNT_DELETE_WAIT_MS] beklenir (çevrimdışı kişilere sunucu üzerinden
-     *  bırakılır), sonra `performLogout` ile yerel veri silinir. */
+    /** Deletes the account. First a notice goes to all contacts, groups and sibling devices (see Rust `delete_account`). It waits for confirmations, or at most
+     *  [ACCOUNT_DELETE_WAIT_MS] (offline contacts get it through the server), then the local data is deleted with `performLogout`. */
     /** This device is the root of the account (its fingerprint is the identity id). */
     private fun isRootDevice(): Boolean = try {
         val arr = org.json.JSONArray(P2PLib.listLinkedDevices())
@@ -482,9 +430,7 @@ class SettingsFragment : Fragment() {
     } catch (e: Exception) { true }
 
     private fun confirmDeleteAccount() {
-        // `isRootDevice()` iki JNI çağrısı yapar — ana iş
-        // parçacığından ÇALIŞMAZ; iletişim kutusu sonuç ana iş parçacığında
-        // açılır.
+        // `isRootDevice()` makes two JNI calls, so it does NOT run on the main thread. The dialog opens on the main thread with the result.
         lifecycleScope.launch(Dispatchers.IO) {
             val root = isRootDevice()
             withContext(Dispatchers.Main) {
@@ -581,15 +527,11 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Çoklu-cihaz (spec 1.5/1.6): kimliğe bağlı cihazları listeler, yeni bir
-     * cihaz eklemeye (QR tarayarak) ve bir kardeş cihazı iptal etmeye izin
-     * verir. "Cihaz ekle" akışı: DİĞER (yeni) cihazda "İkincil cihaz olarak
-     * bağlan" seçilip bir QR gösterilir; BU (var olan) cihaz o QR'ı tarar.
+     * Multi-device: lists the devices linked to the identity, and allows adding a new one (by scanning a QR) and revoking a sibling device.
+     * Add flow: on the OTHER (new) device, 'Link as a secondary device' is chosen and a QR is shown. THIS (existing) device scans that QR.
      */
     private fun showLinkedDevicesDialog() {
-        // JNI çağrısı (`listLinkedDevices` → çekirdek kilidi) ana
-        // iş parçacığından ÇALIŞMAZ; diyalog ana iş parçacığında kurulur
-        // (identityCode deseni).
+        // The JNI call (`listLinkedDevices` → core lock) does NOT run on the main thread. The dialog is built on the main thread (the identityCode pattern).
         lifecycleScope.launch(Dispatchers.IO) {
             val json = try { P2PLib.listLinkedDevices() } catch (e: Exception) { "[]" }
             withContext(Dispatchers.Main) {
@@ -736,22 +678,15 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * metin boyutu/arayüz boyutu kaydırıcıları
-     * + sistem fontu seçici — bkz. `ThemePrefs`/`P2PApplication.applyScalePreferences`
-     * (her ikisi de `onActivityPreCreated`'da, Activity daha `onCreate`
-     * ÇALIŞMADAN önce uygulanır). OLED anahtarıyla AYNI sebep: değişiklik
-     * ancak bir sonraki Activity oluşturmasında etkinleşir, bu yüzden HER
-     * ÜÇÜ de değer serbest bırakıldığında (kaydırıcı) / seçildiğinde
-     * (dropdown) `requireActivity().recreate()` çağırır — kaydırma
-     * SIRASINDA değil (aksi hâlde saniyede onlarca gereksiz recreate
-     * olurdu), sadece SONUÇ değerinde.
+     * Text size and interface size sliders, plus the system font picker. See `ThemePrefs` / `P2PApplication.applyScalePreferences`. Both are applied in
+     * `onActivityPreCreated`, before the Activity's `onCreate` runs. The reason is the same as for the OLED switch: a change takes effect only when the next
+     * Activity is created. So ALL THREE call `requireActivity().recreate()` when the value is released (slider) or chosen (dropdown). Not during the drag
+     * (that would mean dozens of needless recreates per second), only at the final value.
      */
     private fun setupAppearanceControls(view: View) {
         val textScaleValue = view.findViewById<TextView>(R.id.text_scale_value)
         val textScaleSlider = view.findViewById<android.widget.SeekBar>(R.id.text_scale_slider)
-        // bkz. `TEXT_SCALE_STEPS`/`closestStepIndex` dokümantasyonu — TAM
-        // SAYI indeks (kayan nokta `stepSize` DEĞİL), gerçek Material
-        // Slider çökmesini (bkz. o notun ayrıntısı) kökünden önler.
+        // See `TEXT_SCALE_STEPS` / `closestStepIndex`: a whole-number index (not a floating-point `stepSize`). This avoids the Material Slider crash at its root.
         textScaleSlider.max = TEXT_SCALE_STEPS.size - 1
         val currentTextScale = ThemePrefs.getTextScale(requireContext())
         textScaleSlider.progress = closestStepIndex(TEXT_SCALE_STEPS, currentTextScale)
@@ -784,13 +719,9 @@ class SettingsFragment : Fragment() {
             }
         })
 
-        // bkz. ThemePrefs.FontChoice — sırası buradaki görünen isim listesiyle
-        // BİREBİR eşleşmeli (index bazlı eşleme). `CUSTOM` bu listede YOK —
-        // bir dizin değil, `ThemePrefs.getCustomFonts()`'taki N içe aktarılmış
-        // fonttan HANGİSİNİN seçili olduğunu `getActiveCustomFontId` ayrıca
-        // tutuyor (bkz. aşağıdaki diyalog kurulumu — kullanıcı isteği:
-        // "custom" yerine içe aktarılan fontun GERÇEK adı, birden fazla
-        // içe aktarma desteklenmeli).
+        // See ThemePrefs.FontChoice: the order must match the displayed name list exactly (index-based mapping). `CUSTOM` is NOT in this list: it is not a directory.
+        // `getActiveCustomFontId` tracks which of the N imported fonts from `ThemePrefs.getCustomFonts()` is selected (see the dialog setup below).
+        // A custom font shows its real imported name, and several imports are supported.
         val fontChoices = ThemePrefs.FontChoice.entries.filter { it != ThemePrefs.FontChoice.CUSTOM }
         val fontLabels = arrayOf(
             getString(R.string.lbl_font_default),
@@ -800,34 +731,20 @@ class SettingsFragment : Fragment() {
             getString(R.string.lbl_font_monospace),
             getString(R.string.lbl_font_sans_black)
         )
-        // Spec dışı, hata düzeltmesi (ikinci deneme — "comboboxta hâlâ
-        // sadece Default görünüyor"): `MaterialAutoCompleteTextView` +
-        // `setSimpleItems` teoride filtrelenmemesi GEREKEN bir liste
-        // vermeliydi, ama kullanıcı gerçek cihazda hâlâ tek seçenek
-        // gördüğünü bildirdi — bu View'ın (exposed dropdown popup'ının
-        // açılma/gösterim mantığı) bu ortamda hiç test edilemediğinden,
-        // TAMAMEN farklı ve kırılması çok daha zor bir mekanizmaya
-        // geçiliyor: düz bir `Button` + `AlertDialog.setSingleChoiceItems`.
-        // Bu, listeleme/filtreleme gibi hiçbir "akıllı" davranışa sahip
-        // değil — TÜM seçenekler HER ZAMAN gösterilir.
+        // Replaces a `MaterialAutoCompleteTextView` with `setSimpleItems` by a plain `Button` and `AlertDialog.setSingleChoiceItems`. The exposed dropdown
+        // showed only the default item on a real device, and its popup behaviour cannot be verified in this environment, so a simpler mechanism is used.
+        // This list is not filtered: ALL options are always shown.
         //
-        // BİLİNEN SINIR: bu liste sadece Android'in HER cihazda var olması
-        // GARANTİ jenerik takma adlarını (`sans-serif`, `serif`,
-        // `monospace` + ağırlık/genişlik varyantları) sunar — cihaz
-        // üreticisinin (ör. Samsung/Xiaomi) Ayarlar'da gösterdiği MARKALI/
-        // İNDİRİLMİŞ font adlarını (ör. "One UI Sans", indirilen bir Google
-        // Fonts ailesi) numaralandırıp listelemenin genel, resmi bir
-        // Android API'si YOK — bu yüzden burada asla görünmeyecekler.
-        // "Varsayılan" seçeneği yine de cihazın O ANKİ sistem varsayılanını
-        // (kullanıcı üretici ayarlarından değiştirmiş olsa BİLE) kullanır,
-        // çünkü hiçbir override UYGULAMAZ.
+        // Known limit: the list offers only the generic aliases that every Android device guarantees (`sans-serif`, `serif`, `monospace`, plus weight and width
+        // variants). There is no general, official Android API to enumerate a manufacturer's branded or downloaded font names (for example 'One UI Sans' or a
+        // downloaded Google Fonts family), so those never appear here. The 'Default' option still uses the device's CURRENT system default (even if the user
+        // changed it in manufacturer settings), because no override is applied.
         val fontValueText = view.findViewById<TextView>(R.id.font_family_value)
         fun currentFontLabel(): String {
             val choice = ThemePrefs.getFontChoice(requireContext())
             return if (choice == ThemePrefs.FontChoice.CUSTOM) {
-                // bkz. `ThemePrefs.activeCustomFontName` — birden fazla içe
-                // aktarılmış font arasından seçili olanın GERÇEK adı; kayıt
-                // bozulmuşsa (id silinmiş) jenerik ada düşülür.
+                // See `ThemePrefs.activeCustomFontName`: the real name of the selected font among several imported ones. If the record is broken (the id was deleted),
+                // it falls back to the generic name.
                 ThemePrefs.activeCustomFontName(requireContext()) ?: getString(R.string.lbl_font_custom)
             } else {
                 fontLabels[fontChoices.indexOf(choice).coerceAtLeast(0)]
@@ -838,10 +755,8 @@ class SettingsFragment : Fragment() {
             val currentChoice = ThemePrefs.getFontChoice(requireContext())
             val activeCustomId = ThemePrefs.getActiveCustomFontId(requireContext())
             val customFonts = ThemePrefs.getCustomFonts(requireContext())
-            // Diyalog satırları: [0] "İçe aktar", [1..fontChoices.size] yerleşik
-            // fontlar, gerisi (varsa) içe aktarılmış fontlar — HER BİRİ kendi
-            // adıyla (bkz. `ThemePrefs.CustomFont.displayName`, kullanıcı
-            // isteği: "custom" değil gerçek font adı, birden fazla olabilmeli).
+            // Dialog rows: [0] 'Import', [1..fontChoices.size] the built-in fonts, then any imported fonts. Each imported font has its own name
+            // (see `ThemePrefs.CustomFont.displayName`): the real font name, not 'custom', and several may exist.
             val dialogLabels = arrayOf(getString(R.string.lbl_font_import)) + fontLabels +
                 customFonts.map { it.displayName }.toTypedArray()
             val currentIndex = if (currentChoice == ThemePrefs.FontChoice.CUSTOM) {
@@ -855,36 +770,27 @@ class SettingsFragment : Fragment() {
                 .setSingleChoiceItems(dialogLabels, currentIndex) { dialog, position ->
                     when {
                         position == 0 -> {
-                            // "Import a .ttf file…" — font seçmez, dialog'u
-                            // kapatıp dosya seçiciyi açar.
+                            // 'Import a .ttf file…' selects no font. It closes the dialog and opens the file picker.
                             dialog.dismiss()
                             AppLock.beginTrustedExcursion()
                             pickFontLauncher.launch(arrayOf("font/ttf", "font/otf", "application/x-font-ttf", "application/octet-stream", "*/*"))
                         }
                         position <= fontChoices.size -> {
-                            // bkz. `fontChoices` — position 1+ → index = position - 1
+                            // See `fontChoices`: position 1 and up maps to index = position - 1.
                             val chosen = fontChoices[position - 1]
                             if (chosen != currentChoice) {
                                 ThemePrefs.setFontChoice(requireContext(), chosen)
                                 fontValueText.text = fontLabels[position - 1]
-                                // Spec dışı, kullanıcı isteği ("force font on all UI"):
-                                // bkz. `FontOverride` dokümantasyonu — Android'in
-                                // varsayılan Typeface'ini HEMEN değiştirir
-                                // (P2PApplication.onCreate sadece SÜREÇ başlangıcında
-                                // çalışır, bu çağrı olmadan değişiklik ancak bir
-                                // sonraki tam uygulama yeniden başlatmasında
-                                // görülürdü). `recreate()` bunun ardından bu
-                                // Activity'yi hemen yeniden çizer, ARTIK güncellenmiş
-                                // varsayılan Typeface'le.
+                                // Forces the font on all UI: see the `FontOverride` docs. It replaces Android's default Typeface at once (`P2PApplication.onCreate` runs only at
+                                // process start, so without this call the change would show only after the next full app restart). `recreate()` then redraws this Activity with the
+                                // updated default Typeface.
                                 com.p2p.messenger.util.FontOverride.apply(chosen.familyName)
                                 requireActivity().recreate()
                             }
                             dialog.dismiss()
                         }
                         else -> {
-                            // Daha önce içe aktarılmış fontlardan biri seçildi
-                            // (bkz. `dialogLabels` — bu satırlar `customFonts`'a
-                            // fontChoices.size kadar kaydırılmış eşleşir).
+                            // One of the fonts imported earlier was selected (see `dialogLabels`: these rows are offset in `customFonts` by fontChoices.size).
                             val cf = customFonts[position - 1 - fontChoices.size]
                             if (!(currentChoice == ThemePrefs.FontChoice.CUSTOM && cf.id == activeCustomId)) {
                                 ThemePrefs.setFontChoice(requireContext(), ThemePrefs.FontChoice.CUSTOM)
@@ -903,10 +809,8 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * "bildirimlerde mesajları göster"
-     * anahtarı — varsayılan AÇIK. Kapalıyken bildirimde sadece gönderen
-     * (grup mesajıysa gönderen + grup) görünür, metin görünmez. bkz.
-     * util.NotificationPrefs / NotificationHelper.
+     * 'Show messages in notifications' switch. On by default. When off, a notification shows only the sender (for a group message, the sender and the group),
+     * not the text. See util.NotificationPrefs and NotificationHelper.
      */
     private fun setupNotificationControls(view: View) {
         val notifSwitch = view.findViewById<SwitchMaterial>(R.id.notif_show_message_switch)
@@ -917,15 +821,11 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * uygulama açılış şifresi — buradan
-     * yalnızca DEĞİŞTİRİLEBİLİR. Kaldırma seçeneği BİLEREK yok ("şifre asla
-     * boş olmamalı"); boş bir yeni şifre de kabul edilmez.
+     * App-open password. From here it can only be CHANGED. There is no removal option (a password must never be empty), and an empty new password is refused too.
      *
-     * Mevcut şifre doğrulaması `AppLock.verify` ile yapılıyor — kilitli
-     * olmayan bir oturumda (kullanıcı zaten içeride) telefonu kısa süre
-     * eline geçiren birinin şifreyi sessizce değiştirmesini engeller.
-     * `AppLock.verify`/`setPassword` kasıtlı olarak yavaş bir KDF çalıştırır
-     * (bkz. AppLock.ITERATIONS), bu yüzden ana thread DIŞINDA çağrılıyor.
+     * The current password is checked with `AppLock.verify`. In a session that is not locked (the user is already inside), this stops someone who briefly
+     * gets the phone from changing the password silently. `AppLock.verify` and `setPassword` deliberately run a slow KDF (see AppLock.ITERATIONS), so they
+     * are called OFF the main thread.
      */
     private fun setupAppLockControls(view: View) {
         view.findViewById<Button>(R.id.btn_change_app_password).setOnClickListener {
@@ -939,9 +839,8 @@ class SettingsFragment : Fragment() {
                 hint = getString(hintRes)
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             }
-            // Şifre henüz hiç kurulmamışsa (ör. bu sürüme yükseltilmiş eski
-            // bir kurulum, kilit ekranını henüz görmemiş) "mevcut şifre"
-            // alanını sormanın anlamı yok.
+            // If no password has ever been set (for example an older install upgraded to this version that has not shown the lock screen yet), asking for the
+            // 'current password' field makes no sense.
             val hasExisting = AppLock.hasPassword(context)
             val currentField = passwordField(R.string.hint_app_lock_current)
             val newField = passwordField(R.string.hint_app_lock_new)
@@ -1020,18 +919,12 @@ class SettingsFragment : Fragment() {
     private fun formatScalePercent(scale: Float): String = getString(R.string.lbl_scale_percent, (scale * 100).toInt())
 
     /**
-     * TEK bir vurgu (accent) rengi — HER YERDE
-     * (düğmeler, anahtarlar, kaydırıcılar, KENDİ mesaj balonlarımız)
-     * varyasyonlarıyla (bkz. `ThemePrefs.applyAccentColor` — Material'ın
-     * content-based dynamic color motoru) kullanılır; metin rengi AYRICA
-     * seçilmez, HER ZAMAN o rengin üzerinde okunaklı siyah/beyaz otomatik
-     * hesaplanır. Arka plan rengi ise hem genel UI hem sohbet ekranı için
-     * GEÇERLİ (bkz. `ThemePrefs.applyChatBackground`).
-     * Renk seçici tam bir HSV seçici (bkz. `HsvColorPickerDialog`) — harici
-     * bir kütüphane GEREKTİRMEZ (bu proje build'i bu ortamda
-     * doğrulanamadığından yeni bir Gradle bağımlılığı eklemekten kaçınıyoruz).
-     * Her iki renk de (accent VE background) tüm uygulamanın temasını
-     * değiştirdiğinden — OLED/font gibi — seçim SONRASI `recreate()` gerekir.
+     * ONE accent colour, used everywhere (buttons, switches, sliders, and our own message bubbles), with variations (see `ThemePrefs.applyAccentColor`,
+     * Material's content-based dynamic colour engine). The text colour is NOT chosen separately: it is always computed as black or white, whichever is
+     * readable on that colour. The background colour is valid for both the general UI and the chat screen (see `ThemePrefs.applyChatBackground`).
+     * The colour picker is a full HSV picker (see `HsvColorPickerDialog`) and needs NO external library: this build cannot be verified in this environment,
+     * so no new Gradle dependency is added. Both colours (accent and background) change the whole app's theme, like OLED and the font,
+     * so `recreate()` is needed after the choice.
      */
     private fun setupChatAppearanceControls(view: View) {
         val bgSwatch = view.findViewById<View>(R.id.chat_bg_color_swatch)
@@ -1187,10 +1080,8 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * bkz. `onAvatarPicked` AYNI `content://` -> yerel dosya kopyalama
-     * deseni. Profil fotoğrafından FARKI: bu SADECE yerel bir UI tercihi,
-     * hiçbir kişiye gönderilmiyor (bkz. ThemePrefs.chatWallpaperFile) — bu
-     * yüzden Rust'a hiç dokunmuyor.
+     * Same `content://` to local file copy pattern as `onAvatarPicked`. The difference: this is ONLY a local UI preference, sent to nobody
+     * (see ThemePrefs.chatWallpaperFile), so Rust is not involved.
      */
     private fun onChatWallpaperPicked(uri: Uri) {
         // Off the fragment: `requireContext()` on the worker threw once the
@@ -1199,8 +1090,7 @@ class SettingsFragment : Fragment() {
         lifecycleScope.launch(Dispatchers.IO) {
             val tempFile = File(File(app.cacheDir, "wallpaper").apply { mkdirs() }, UUID.randomUUID().toString())
             try {
-                // Foreign `content://` URI: cap the bytes actually streamed
-                // into the cache (bkz. ImagePreview.copyToCapped / GroupChatActivity).
+                // Foreign `content://` URI: cap the bytes actually streamed into the cache (see ImagePreview.copyToCapped and GroupChatActivity).
                 val copied = app.contentResolver.openInputStream(uri)?.use { input ->
                     input.copyToCapped(tempFile, MAX_FOREIGN_URI_BYTES)
                 } ?: false
@@ -1236,18 +1126,12 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * bkz. `onChatWallpaperPicked` — `content://` URI'den yerel
-     * `filesDir`'e HAM bayt kopyalama; saf (coroutines/thread) yok,
-     * senkron, basit `openInputStream` → `copyTo`. Font dosyası küçük
-     * olduğu için (genellikle <1 MB) blok boyutu optimizasyonuna gerek yok.
+     * See `onChatWallpaperPicked`: a RAW byte copy from a `content://` URI into the local `filesDir`. No threads or coroutines: synchronous, a simple
+     * `openInputStream` → `copyTo`. Font files are small (usually under 1 MB), so no block-size optimisation is needed.
      *
-     * Spec dışı, kullanıcı isteği ("custom değil o fontun adı, birden fazla
-     * import edilebilmeli"): her seçim YENİ bir kimlikle (`newCustomFontId`)
-     * kendi dosyasına kopyalanır ve listeye EKLENİR (önceki içe aktarılmış
-     * fontlar KAYBOLMAZ) — görünen ad, SAF'ın verdiği GERÇEK dosya adı
-     * (`OpenableColumns.DISPLAY_NAME`). Kopyalama BAŞARISIZ olursa (ya da
-     * SAF ad vermezse ve kalan yol da başarısız olursa) hiçbir kayıt
-     * eklenmez/seçilmez — yetim bir liste girdisi kalmaz.
+     * Each pick is copied to its OWN new id (`newCustomFontId`) and ADDED to the list, so earlier imported fonts stay. The shown name is the REAL file name
+     * that SAF provides (`OpenableColumns.DISPLAY_NAME`). If the copy fails (or SAF gives no name and the fallback path also fails), no record is added or selected,
+     * so no orphan list entry remains.
      */
     private fun onFontPicked(uri: Uri) {
         // Copies up to 32 MB: off the main thread.
@@ -1276,11 +1160,9 @@ class SettingsFragment : Fragment() {
         val file = ThemePrefs.customFontFile(context, id)
         try {
             context.contentResolver.openInputStream(uri)?.use { input ->
-                // "*/*" seçici her dosyayı kabul ediyor: yalnızca font imzası
-                // (TrueType/OpenType/koleksiyon) olan ve makul boyuttaki
-                // dosyalar kopyalanır — yanlışlıkla seçilen bir video
-                // filesDir'i doldurmasın, bozuk dosya listeye girmesin.
-                // `readNBytes` API 33+; minSdk 26 — kısa dosyada EOFException.
+                // The '*/*' picker accepts any file. Only files with a font signature (TrueType, OpenType or collection) and a reasonable size are copied, so an
+                // accidentally picked video cannot fill filesDir and a broken file does not enter the list. `readNBytes` needs API 33+; minSdk is 26, so a short
+                // file hits EOFException.
                 val head = ByteArray(4).also { java.io.DataInputStream(input).readFully(it) }
                 val magicOk = (
                     head.contentEquals(byteArrayOf(0, 1, 0, 0)) ||
@@ -1301,18 +1183,15 @@ class SettingsFragment : Fragment() {
             } ?: return null
             return id to (queryDisplayName(context, uri) ?: file.name)
         } catch (e: Exception) {
-            // bkz. `onChatWallpaperPicked` — çökmemeli, sessizce geç; yarım
-            // kalmış dosyayı da bırakma (listeye hiç eklenmediği için zaten
-            // seçilemez, ama diskte yetim kalmasın).
+            // See `onChatWallpaperPicked`: must not crash, passes silently. A half-copied file is also dropped. It is never added to the list, so it cannot be
+            // selected, but it must not stay on disk as an orphan.
             file.delete()
             return null
         }
     }
 
-    /** SAF'ın verdiği `content://` URI'den GERÇEK dosya adını okur (bkz.
-     *  `onFontPicked` — font listesinde "Custom" yerine bu ad gösterilir).
-     *  Bazı sağlayıcılar bu sütunu doldurmayabilir; `null` dönerse çağıran
-     *  taraf kendi dosya adına düşer. */
+    /** Reads the REAL file name from the `content://` URI that SAF gave (see `onFontPicked`: the font list shows this name instead of 'Custom').
+     *  Some providers may leave this column empty; if it returns `null`, the caller falls back to its own file name. */
     private fun queryDisplayName(context: android.content.Context, uri: Uri): String? {
         return try {
             context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
@@ -1325,17 +1204,11 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * üst çubukta hızlı Tor/ağ bağlantısını
-     * kes/yeniden kur menü öğesi — bkz. util/AppRestarter.kt (neden tam bir
-     * uygulama yeniden başlatması gerektiği), menu_settings.xml. MainActivity
-     * TEK bir Activity, üç bottom-nav sekmesi (Chats/Contacts/Settings)
-     * paylaşıyor — `MenuProvider`, `viewLifecycleOwner` + `RESUMED` ile
-     * kaydedildiğinden bu menü öğesi SADECE Ayarlar sekmesi görünürken
-     * belirir, diğer sekmelerde otomatik kaybolur (Fragment view'ı
-     * destroy olduğunda provider da kaldırılır — elle temizlemeye gerek
-     * yok). `onCreateView` İÇİNDE değil `onViewCreated`'ta kaydedilir:
-     * `viewLifecycleOwner`, fragment'ın view'ı `onCreateView`'dan DÖNENE
-     * kadar geçerli değildir.
+     * Quick Tor and network reconnect menu item in the top bar. See util/AppRestarter.kt (why a full app restart is needed) and menu_settings.xml.
+     * MainActivity is ONE Activity with three bottom-navigation tabs (Chats, Contacts, Settings). The `MenuProvider` is registered with `viewLifecycleOwner`
+     * and `RESUMED`, so this menu item appears ONLY while the Settings tab is visible, and disappears on the other tabs automatically (when the Fragment's
+     * view is destroyed, the provider is removed too, no manual cleanup needed). It is registered in `onViewCreated`, not inside `onCreateView`:
+     * `viewLifecycleOwner` is valid only once `onCreateView` has returned.
      */
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
@@ -1355,13 +1228,9 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * parolayı (+ onayını) alır,
-     * eşleşmiyorsa/boşsa kullanıcıyı uyarır, eşleşiyorsa SAF hedef seçici
-     * ile devam eder (bkz. `createRecoveryFileLauncher`). Rust tarafı
-     * (`export_recovery`) parolayı Argon2id ile sertleştirdiğinden burada
-     * herhangi bir minimum uzunluk/karmaşıklık kuralı DAYATMIYORUZ — kısa
-     * bir parola daha ucuz brute-force edilir ama bu kullanıcının kendi
-     * riski/tercihi, spec bunun ötesinde bir politika belirtmiyor.
+     * Takes the passphrase (and its confirmation). If they do not match or it is empty, the user is warned. If they match, it continues with the SAF
+     * target picker (see `createRecoveryFileLauncher`). The Rust side (`export_recovery`) hardens the passphrase with Argon2id, so no minimum length or
+     * complexity rule is imposed here. A short passphrase is cheaper to brute-force, but that is the user's own risk and preference; no further policy is set here.
      */
     private fun showExportRecoveryDialog() {
         val context = requireContext()
@@ -1406,12 +1275,9 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * `uri`'ye (kullanıcının SAF ile seçtiği hedef) Argon2id-şifreli kurtarma
-     * dosyasını yazar. `P2PLib.exportRecovery` KASITLI OLARAK yavaş/bellek-
-     * ağır bir KDF çalıştırdığından (bkz. Cargo.toml Argon2id notu) ANA
-     * THREAD DIŞINDA çağrılır — aksi halde saniyeler süren bir ANR riski
-     * olurdu. Boş bir bayt dizisi (bkz. Rust `Java_..._exportRecovery`
-     * dokümantasyonu) başarısızlık anlamına gelir.
+     * Writes the Argon2id-encrypted recovery file to `uri` (the target the user picked with SAF). `P2PLib.exportRecovery` runs a deliberately slow,
+     * memory-heavy KDF (see the Argon2id note in Cargo.toml), so it is called OFF the main thread, otherwise it would risk an ANR lasting seconds.
+     * An empty byte array (see the Rust `Java_..._exportRecovery` docs) means failure.
      */
     private fun exportRecoveryTo(uri: Uri, passphrase: String) {
         Toast.makeText(requireContext(), R.string.msg_recovery_exporting, Toast.LENGTH_SHORT).show()
@@ -1446,8 +1312,7 @@ class SettingsFragment : Fragment() {
     }
 
     private fun refreshDisplayName() {
-        // JNI çağrısı (`getDisplayName` → çekirdek kilidi) ana
-        // iş parçacığından ÇALIŞMAZ; sonuç ana iş parçacığına yazılır.
+        // The JNI call (`getDisplayName` → core lock) does NOT run on the main thread; the result is written on the main thread.
         lifecycleScope.launch(Dispatchers.IO) {
             val name = try {
                 P2PLib.getDisplayName()
@@ -1462,18 +1327,13 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Kullanıcı isteği (2026-09-04): hesap adını değiştirmek ve
-     * değişikliğin kişilere OTOMATİK ulaşması.
+     * Changes the account name and sends the change to contacts AUTOMATICALLY.
      *
-     * `setOwnAvatar` ile AYNI desen ve AYNI sebep: fan-out kişi başına
-     * ayrı bir şifreleme yapıyor (bkz. Rust `set_display_name`), yani ana
-     * thread'de çağrılamaz. Arayüzdeki ad hemen güncellenir — gönderim
-     * arka planda, çevrimdışı kişiler için günlerce yeniden denenerek
-     * sürer, kullanıcının bunu beklemesi gerekmez.
+     * Same pattern and reason as `setOwnAvatar`: the fan-out encrypts separately for each contact (see Rust `set_display_name`), so it cannot run on the main thread.
+     * The name on screen updates at once. The sending runs in the background and is retried for offline contacts over days, so the user does not need to wait for it.
      */
     private fun showChangeDisplayNameDialog() {
-        // JNI çağrısı (`getDisplayName` → çekirdek kilidi) ana
-        // iş parçacığından ÇALIŞMAZ; diyalog ana iş parçacığında açılır.
+        // The JNI call (`getDisplayName` → core lock) does NOT run on the main thread; the dialog opens on the main thread.
         lifecycleScope.launch(Dispatchers.IO) {
             val current = try {
                 P2PLib.getDisplayName()
@@ -1485,9 +1345,7 @@ class SettingsFragment : Fragment() {
                 val input = EditText(requireContext()).apply {
                     setText(current)
                     setSingleLine(true)
-                    // Rust tarafı da kırpıyor (`MAX_DISPLAY_NAME_CHARS`); buradaki
-                    // sınır yalnızca kullanıcının sessizce kesilen bir ad
-                    // yazmasını engellemek için.
+                    // Rust also trims the name (`MAX_DISPLAY_NAME_CHARS`). This limit only stops the user typing a name that would be cut silently.
                     filters = arrayOf(android.text.InputFilter.LengthFilter(48))
                 }
                 AlertDialog.Builder(requireContext())
@@ -1522,18 +1380,16 @@ class SettingsFragment : Fragment() {
     }
 
     private fun refreshOwnAvatar() {
-        // JNI çağrıları (`getOwnProfilePicture`/`getDisplayName`/
-        // `getIdentityShortCode` → çekirdek kilidi) ana iş parçacığından
-        // ÇALIŞMAZ; çizim ana iş parçacığına yazılır (identityCode deseni).
+        // The JNI calls (`getOwnProfilePicture`, `getDisplayName`, `getIdentityShortCode` → core lock) do NOT run on the main thread.
+        // The drawing happens on the main thread (identityCode pattern).
         lifecycleScope.launch(Dispatchers.IO) {
             val bytes = try {
                 P2PLib.getOwnProfilePicture().takeIf { it.isNotEmpty() }
             } catch (e: Exception) {
                 null
             }
-            // Fotoğraf yoksa baş harf gösteriliyor (bkz. AvatarUtil) — hesap
-            // adının baş harfi, kimlik kodunun ilk karakterinden ("a3f…")
-            // anlamlı: kişiler bizi zaten o adla görüyor.
+            // With no photo, the initial letter is shown (see AvatarUtil). The initial of the account name, or the first character of the identity code,
+            // is meaningful: contacts already know us by that name.
             val name = try {
                 P2PLib.getDisplayName().ifEmpty { P2PLib.getIdentityShortCode() }
             } catch (e: Exception) {
@@ -1550,20 +1406,15 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Kullanıcının SAF (`OpenDocument`) ile seçtiği bir görsel — bkz.
-     * ChatActivity.onFilePicked aynı `content://` -> yerel dosya kopyalama
-     * notu. 720p/%85 JPEG'e sıkıştırılıp `setOwnProfilePicture` ile hem
-     * kalıcılaştırılır hem TÜM bilinen kişilere gönderilir (bkz. Rust
-     * `set_own_profile_picture` dokümantasyonu) — bu yüzden ANA THREAD
-     * DIŞINDA yapılır.
+     * An image the user picked with SAF (`OpenDocument`). Same `content://` to local file copy as `ChatActivity.onFilePicked`. It is compressed to 720p at
+     * 85% JPEG, then both stored by `setOwnProfilePicture` AND sent to ALL known contacts (see Rust `set_own_profile_picture`). So it runs OFF the main thread.
      */
     private fun onAvatarPicked(uri: Uri) {
         val app = requireContext().applicationContext
         lifecycleScope.launch(Dispatchers.IO) {
             val tempFile = File(File(app.cacheDir, "avatar").apply { mkdirs() }, UUID.randomUUID().toString())
             try {
-                // Foreign `content://` URI: cap the bytes actually streamed
-                // into the cache (bkz. ImagePreview.copyToCapped / AttachmentPrompt).
+                // Foreign `content://` URI: cap the bytes actually streamed into the cache (see ImagePreview.copyToCapped and AttachmentPrompt).
                 val copied = app.contentResolver.openInputStream(uri)?.use { input ->
                     input.copyToCapped(tempFile, MAX_FOREIGN_URI_BYTES)
                 } ?: false
@@ -1584,10 +1435,8 @@ class SettingsFragment : Fragment() {
     }
 
     private fun setOwnAvatar(avatarJpeg: ByteArray?) {
-        // JNI çağrıları (`getDisplayName`/`getIdentityShortCode` →
-        // çekirdek kilidi) ana iş parçacığından ÇALIŞMAZ; çizim ana iş
-        // parçacığına yazılır, gönderim arka planda sürer (bkz. identityCode
-        // deseni, `onCreateView`).
+        // The JNI calls (`getDisplayName` and `getIdentityShortCode` → core lock) do NOT run on the main thread. Drawing happens on the main thread,
+        // and sending continues in the background (see the identityCode pattern, `onCreateView`).
         lifecycleScope.launch(Dispatchers.IO) {
             val name = try {
                 P2PLib.getDisplayName().ifEmpty { P2PLib.getIdentityShortCode() }
@@ -1614,14 +1463,13 @@ class SettingsFragment : Fragment() {
         }
     }
 
-    /** Rust `torStatus()`'u yoklar ve
-     *  etiketi günceller. Dönüş "ready|<host>.onion" ise host'u da gösterir. */
+    /** Polls Rust `torStatus()` and updates the label. If the reply is 'ready|<host>.onion', it shows the host too. */
     private fun startTorStatusPolling() {
         torStatusHandler.removeCallbacks(torStatusRunnable)
         torStatusHandler.post(torStatusRunnable)
     }
 
-    /** bkz. `torStatusRunnable` — yoklama yalnızca ekran öndeyken çalışır. */
+    /** See `torStatusRunnable`: the poll runs only while the screen is in the foreground. */
     override fun onResume() {
         super.onResume()
         startTorStatusPolling()
@@ -1634,8 +1482,7 @@ class SettingsFragment : Fragment() {
 
     private fun updateTorStatusLabel() {
         val label = torStatusView ?: return
-        // `torStatus()` bir JNI çağrısı ve çekirdek kilidi alıyor: ana
-        // thread'de yapılmaz.
+        // `torStatus()` is a JNI call that takes the core lock, so it is not run on the main thread.
         lifecycleScope.launch {
             val raw = withContext(Dispatchers.IO) {
                 try {
@@ -1666,18 +1513,16 @@ class SettingsFragment : Fragment() {
     }
 
     // -----------------------------------------------------------------
-    // Sunucular (store-and-forward) — bkz. Rust `server_client` modülü
+    // Servers (store-and-forward). See the Rust `server_client` module.
     // -----------------------------------------------------------------
     //
-    // Rölelerden FARKLI oldukları için ayrı bir bölüm: bir röle hiçbir şey
-    // SAKLAMAZ (sadece iki taraf da o anda bağlıyken canlı bir devre kurar),
-    // sunucu ise alıcı çevrimdışıyken zarfı diske yazar. Kullanıcı için
-    // görünen fark tam olarak budur ve tek bir "adres ekle" kutusunda
-    // birleştirilirse yanlış beklenti yaratır.
+    // Servers are a separate section because they are not relays. A relay stores nothing: it builds a live circuit only while both sides are connected.
+    // A server writes the envelope to disk when the recipient is offline. That difference is what the user sees, and combining both in one 'add address'
+    // box would set a wrong expectation.
 
     private var serversContainer: LinearLayout? = null
 
-    /** Sunucu QR'ı taramak için — bkz. QrScanActivity.MODE_ADD_SERVER. */
+    /** To scan a server QR: see QrScanActivity.MODE_ADD_SERVER. */
     private val scanServerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { refreshServers() }
@@ -1753,12 +1598,10 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Sunucu satırlarını yeniden çizer.
+     * Redraws the server rows.
      *
-     * Satır sayısı değişken olduğu için XML'de sabit değil, programatik —
-     * ama görünüm ayarlardaki diğer bölümlerle aynı (kalın 16sp başlık,
-     * 12sp %70 opak açıklama, `?attr/materialButtonOutlinedStyle` butonlar,
-     * `SwitchMaterial`).
+     * The number of rows varies, so they are built in code rather than fixed in XML. The look matches the other sections of the settings:
+     * bold 16sp title, 12sp description at 70% opacity, `?attr/materialButtonOutlinedStyle` buttons, and `SwitchMaterial`.
      */
     private fun refreshServers() {
         if (serversContainer == null) return
@@ -1812,9 +1655,8 @@ class SettingsFragment : Fragment() {
             setTypeface(typeface, android.graphics.Typeface.BOLD)
         })
 
-        // Durum: bağlı+kayıtlı / bağlanıyor / kayıtlı değil. Kayıt, operatörün
-        // yayımladığı katılım koduyla yapılır ve başarısız olursa sebebi
-        // burada görünür (`last_error`).
+        // Status: connected and registered, connecting, or not registered. Registration uses the join code the operator publishes. If it fails, the reason
+        // is shown here (`last_error`).
         val connected = obj.optBoolean("connected")
         val enrolled = obj.optBoolean("enrolled")
         val lastError = obj.optString("last_error").takeIf { it.isNotEmpty() && it != "null" }
@@ -1843,11 +1685,8 @@ class SettingsFragment : Fragment() {
             isChecked = obj.optBoolean("store_history")
             setOnCheckedChangeListener { button, checked ->
                 applyServerToggle(button, checked) {
-                    // Kök arşiv anahtarı (ARK) SADECE burada üretilir —
-                    // bkz. ArchiveKeyManager: açılışta kendiliğinden
-                    // üretilseydi, kardeşinden anahtar almadan önce açılan
-                    // bir cihaz kendi rastgele anahtarını kullanır ve
-                    // yüklediği arşiv diğer cihazlarda okunamaz olurdu.
+                    // The root archive key (ARK) is generated ONLY here (see ArchiveKeyManager). If it were generated at startup, a device that opened before getting the key
+                    // from its sibling would use its own random key, and the archive it uploaded would be unreadable on the other devices.
                     if (checked && !revertingServerToggle && !ArchiveKeyManager.ensureCreated(ctx.applicationContext)) {
                         "Error: archive key unavailable"
                     } else {
@@ -1863,9 +1702,7 @@ class SettingsFragment : Fragment() {
             alpha = 0.7f
         })
 
-        // Sıfırdan kurulan bir cihaz için: yukarı kaydırma akışı sohbetin
-        // zaten görünür olmasını varsayıyor, ama burada hiç mesaj yok ve
-        // kaydırılacak bir şey de yok.
+        // For a freshly set up device: the scroll-up flow assumes the chat is already visible, but here there are no messages and nothing to scroll.
         row.addView(Button(ctx, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
             text = getString(R.string.action_restore_history)
             setOnClickListener {
