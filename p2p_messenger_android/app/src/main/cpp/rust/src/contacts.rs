@@ -224,7 +224,7 @@ impl P2PCore {
                         self.persist_contact(c);
                     }
                 }
-                // Spec 2.2: "only an information notice is shown", not an alarm.
+                // Only an information notice is shown here, not an alarm.
                 info!("Identity {} yeni bir cihaz ekledi: {}", crate::log_id(&identity_id), crate::log_id(&device_fingerprint));
             }
             DeviceCheckOutcome::UnverifiedNewDeviceAlert => {
@@ -260,9 +260,7 @@ impl P2PCore {
                 if self.pending_device_alerts.contains_key(device_fingerprint)
                     || (self.pending_device_alerts.len() < MAX_PENDING_DEVICE_ALERTS && for_this_identity < 3)
                 {
-                    // User decision (2026-08-27): the alert is no longer silent. Before, it was only written to the `pending_device_alerts` map, and the UI had to
-                    // open the settings screen and query the list to notice it, so in practice nobody saw it. It now also goes to the event stream. Both UIs show it
-                    // as a popup or notification and ask accept or reject.
+                    // The alert is shown in the UI, not only stored. It is written to `pending_device_alerts` and also sent to the event stream. Both UIs show it as a popup or notification and ask accept or reject.
                     let is_new = !self.pending_device_alerts.contains_key(device_fingerprint);
                     self.pending_device_alerts.insert(device_fingerprint.to_string(), DeviceAlertInfo {
                         contact_display_name: display_name.clone(),
@@ -287,8 +285,7 @@ impl P2PCore {
                         self.pending_device_alerts.len(), MAX_PENDING_DEVICE_ALERTS, crate::log_id(&identity_id)
                     );
                 }
-                // Spec: "BLOCK (new messages stop being sent or received)". The packet is not processed from or to this device. It waits in `pending_device_alerts`,
-                // and the user must accept or reject it in the UI.
+                // BLOCK: new messages are neither sent nor received. The packet is not processed from or to this device. It waits in `pending_device_alerts` until the user accepts or rejects it in the UI.
             }
             DeviceCheckOutcome::KnownActive => {}
         }
@@ -445,17 +442,10 @@ impl P2PCore {
         self.pending_device_alerts.values().cloned().collect()
     }
 
-    /// Returns the known contacts for the UI's "who should I start a chat with" picker list. Each contact includes that identity's known (in phase A, the only)
-    /// Active device fingerprint. The chat screen passes this fingerprint to `sendMessage` as the target.
-    /// User decision (2026-08-27): a contact met through a group gets FULL trust.
-    /// Contacts with `added_via_group` are marked in the UI as "added via group, not verified face to face", because we learned them through the founder's vouching,
-    /// not by scanning a code. If the user verified that person by another route (comparing the security number in person, or confirming by phone), they must be able
-    /// to remove this mark. It only affects display, not encryption.
-    /// The SAFETY CODE of a contact is what gets compared. The code is derived from the fingerprint of the contact's canonical device, and that fingerprint is the
-    /// SHA3-256 of four public keys (see `compute_fingerprint`). So a matching code means both sides really saw the same keys. That is the only concrete proof the
-    /// "mark as verified" action rests on.
-    /// Why it is needed: for contacts met through a group we take the keys from the founder. If the founder is malicious, it can hand over its own key as "Ayse's".
-    /// There is NO cryptographic way to tell that apart, only comparing the code over another channel. Without showing this code, offering "verified" would be meaningless.
+    /// Known contacts for the UI's chat-picker list. Each contact includes that identity's active device fingerprint (the only one in phase A). The chat screen passes this fingerprint to `sendMessage` as the target.
+    /// A contact met through a group is marked in the UI as "added via group, not verified face to face", because the founder vouched for its keys instead of a scanned code. The user can clear this mark after verifying the person another way (safety number in person or by phone). It affects only display, not encryption.
+    /// The SAFETY CODE of a contact is what gets compared. It is derived from the fingerprint of the contact's canonical device, which is the SHA3-256 of four public keys (see `compute_fingerprint`). A matching code proves both sides saw the same keys, and the "mark as verified" action rests on that.
+    /// The code is needed because keys of contacts met through a group come from the founder. A malicious founder could hand over its own key as another person's. Only comparing the code over a separate channel tells that apart.
     pub(crate) fn contact_safety_code(&self, identity_id: &str) -> Option<String> {
         let fp = self.canonical_device_for_identity(identity_id)?;
         let raw = hex::decode(&fp).ok()?;
@@ -934,10 +924,7 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Before: `Contact::revoke_device` and `DeviceRecord.is_active` both EXISTED, but no caller ever set them to `false`/`Revoked`. A device could never be revoked
-    /// (see SECURITY.md). This does the SAME cleanup steps as `delete_contact` (which deletes the contact COMPLETELY), but it does NOT delete the contact or its history.
-    /// It only stops everything to and from this ONE device fingerprint (through the new `is_active` checks in `receive_message` and `process_handshake_init`).
-    /// If the same contact has ANOTHER known device, that one is not affected (the multi-device case of ).
+    /// Revokes ONE device of a contact by setting `Contact::revoke_device` and `DeviceRecord.is_active`. It runs the same cleanup steps as `delete_contact`, but keeps the contact and its history. It stops all traffic to and from this device fingerprint (checked via `is_active` in `receive_message` and `process_handshake_init`). Other devices of the same contact are not affected.
     pub(crate) fn revoke_contact_device(&mut self, contact_id: &str, device_fingerprint: &str) -> Result<(), String> {
         let mut contact = self.contacts.get(contact_id).cloned().ok_or("Kişi bulunamadı")?;
         // Everything below acts on the fingerprint alone: for a device of
@@ -1052,9 +1039,7 @@ impl P2PCore {
         }
     }
 
-    /// User-requested extra (see the SECURITY.md "Cross-network connectivity" note): a relay address the user adds by hand in Settings, one they trust or run themselves
-    /// (for example a VPS with a fixed IP, or a device with node mode on). This is the ONLY way to GUARANTEE that two STRANGERS with no shared relay history can pair
-    /// across different networks for the first time. Organic discovery (identify, QR sharing, `known_relay_peers`) only works when a relay is already known on the network.
+    /// A relay address the user adds by hand in Settings, one they trust or run themselves (for example a VPS with a fixed IP, or a device with node mode on). This is the only way two strangers with no shared relay history can pair across different networks for the first time. Organic discovery (identify, QR sharing, `known_relay_peers`) needs a relay already known on the network. See SECURITY.md, "Cross-network connectivity".
     pub(crate) fn add_known_relay_address(&mut self, multiaddr: &str) -> Result<(), String> {
         let addr: Multiaddr = multiaddr.trim().parse().map_err(|_| "Geçersiz multiaddr".to_string())?;
         let peer_id = extract_peer_id(&addr).ok_or("Adres bir /p2p/<peer_id> son eki içermeli")?;

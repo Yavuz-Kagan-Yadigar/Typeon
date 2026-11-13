@@ -89,14 +89,9 @@ impl P2PCore {
                 | MessageContent::WbDigest { .. }
         );
 
-        // Fix (lost rotation announcement): rotation is triggered ONLY when content that is retried until acknowledged (by the peer's Ack) is sent.
-        // Before, ANY content could trigger it. If the announcement rode on a `TypingIndicator` (never retried) or an `Ack` (limited retries) and that
-        // packet was lost, the peer never learned the new root key or topic, and the session broke for good. Extra safety: even without a fresh
-        // rotation, an announcement of a previous, not-yet-confirmed rotation (`pending_rotation_ct`, see ratchet.rs) is attached to EVERY outgoing
-        // packet. The receiver handles it idempotently (see the double-apply guard in `respond_to_rotation`), and `try_publish_raw` sends these packets
-        // on the OLD topic the peer still listens on.
-        // A responder leaves the handshake chain before it sends anything at all, Ack included (see `respond` in ratchet.rs). That chain is a function
-        // of the HandshakeInit alone. The announcement is repeated on every packet until confirmed, so it may ride an unreliable one.
+        // A rotation is announced only on content that is retried until acknowledged. A lost announcement would otherwise break the session for good.
+        // A previous, unconfirmed rotation (`pending_rotation_ct`, see ratchet.rs) is attached to every outgoing packet. The receiver applies it idempotently (see `respond_to_rotation`). `try_publish_raw` sends these packets on the OLD topic the peer still listens on.
+        // A responder leaves the handshake chain before it sends anything, Ack included (see `respond` in ratchet.rs). That chain depends only on the HandshakeInit, so repeating the announcement is safe.
         let fresh_responder = self.ratchets.get(&peer_device_fingerprint).map_or(false, |s| s.is_fresh_responder());
         // a peer that only reads sends `Seen` (and `ReadStateSync`,
         // in the list above); it takes its rotation turn on them too, or it
@@ -205,16 +200,10 @@ impl P2PCore {
             signature_pq: sig_pq.encode().to_vec(),
         };
 
-        // Previously, messages were archived ONLY on devices with node mode on (the user's setting at that time). The user has now explicitly asked for
-        // every device (node or not) to keep its own chat history persisted and encrypted locally. Node mode now only affects helping peers with
-        // history-sync requests (see HistorySyncRequest) and the relay service, not whether this device keeps its own history.
-        // The network packet is already end-to-end encrypted. This is a SEPARATE "encryption at rest" layer (see archive_message: `history_key` is now
-        // always loaded regardless of node mode, see P2PService/MessageHistoryManager).
-        // Fix (pending messages showed as sent after reopening): `message_id` and the initial status are now written together with the row. It starts
-        // as `Pending`, and the real publish attempt (`publish_with_ack_tracking`/`publish_envelope`) then updates the SAME row to Sent/Failed via
-        // `set_message_status`. So a reload (app or chat screen reopened) shows the real state, instead of always assuming "sent". Note: group messages
-        // (`send_group_message`) pass `archive_plaintext: None` here (see that function's note). They archive themselves as ONE row with
-        // `archive_group_message`, before the fan-out loop. Otherwise every fan-out copy would create its own row here.
+        // Every device, node or not, keeps its own chat history, persisted and encrypted locally. Node mode only affects history-sync requests (see HistorySyncRequest) and the relay service.
+        // The network packet is already end-to-end encrypted. This is a separate encryption-at-rest layer (see archive_message: `history_key` is always loaded, regardless of node mode, see P2PService/MessageHistoryManager).
+        // `message_id` and the initial status are written together with the row. It starts as `Pending`, and the publish attempt (`publish_with_ack_tracking`/`publish_envelope`) then updates the same row to Sent/Failed via `set_message_status`, so a reload shows the real state.
+        // Group messages (`send_group_message`) pass `archive_plaintext: None` here. They archive themselves as one row with `archive_group_message`, before the fan-out loop.
         if let Some(plaintext) = archive_plaintext {
             // See packet.rs `MessageContent::Text.reply_to_message_id`. Our own sent message's archive row must also carry the reply info (if any).
             // Otherwise, even on our own bubble, the "replying to whom" info would be lost after a reload.
@@ -232,50 +221,27 @@ impl P2PCore {
             }
         }
 
-        // Reliable delivery, as requested by the user: Text (outside groups), Edit, Delete and HistorySyncRequest are re-sent INDEFINITELY until the peer
-        // confirms (Ack or HistorySyncResponse). See the `awaiting_confirmation` docs. A successful local gossipsub `publish()` does not guarantee that
-        // the peer received it. The one-shot or time-limited `publish_envelope`/`pending_envelopes` was not enough: some messages, edits and deletes were
-        // silently treated as "sent" without ever reaching the peer. Other content types (Ack, HistorySyncResponse, FileOffer, group messages) keep the
-        // old behaviour (one-shot, short retries). Ack is never acknowledged itself (endless-loop risk). The N-way group fan-out would complicate this
-        // mechanism (a known limit, can be extended later).
-        // FileOffer is included too: if this packet is lost (the same network unreliability), the recipient never learns a file was offered, and the
-        // attachment bubble never appears. The file chunk transfer (request_response, attachments.rs) has its own reliability (chunk-level retries), but
-        // it does not cover this METADATA message. That is a separate issue.
+        // Retried indefinitely until the peer confirms (Ack or HistorySyncResponse): Text (outside groups), Edit, Delete and HistorySyncRequest. See the `awaiting_confirmation` docs. A successful local gossipsub `publish()` does not guarantee delivery.
+        // Other content types get one-shot delivery with short retries. Ack is never acknowledged itself, which would loop endlessly.
+        // FileOffer is included: if it is lost, the recipient never learns of the file. Chunk transfer (request_response, attachments.rs) has its own chunk-level retries, but it does not cover this metadata message.
         //
-        // Fix (lost group messages): `Text { group_id: Some(_), .. }` is now covered here too. Before, group text was deliberately left out, on the
-        // reasoning that the N-way fan-out complicates things. But the fan-out already makes a SEPARATE `send_message_content` call per member (its own
-        // message_id and target peer_fp), so this mechanism applies to each copy like a single 1:1 send. Nothing complicated, just an oversight. The
-        // receiver now also sends an Ack (see the receive_message Text/group_id arm).
+        // Group Text (`Text { group_id: Some(_), .. }`) is included too. The fan-out makes a separate `send_message_content` call per member, with its own message_id and target, so each copy behaves like a 1:1 send. The receiver acks it (see the receive_message Text/group_id arm).
         //
-        // Fix (every message should be retried until acknowledged): `ProfileUpdate` (the receiver already sent an Ack, but it was never on this list)
-        // and `HistorySyncResponse` (the receiver now also sends an Ack back, see receive_message) are now here too.
-        // Deliberately NOT here: `Ack`/`Seen` (never acknowledged themselves, to avoid an endless ack-of-ack loop; sent once, see
-        // `reack_if_already_handled`), and `TypingIndicator` (see the packet.rs note: retrying a signal that goes stale within seconds, for minutes,
-        // has no value. It would only show a wrong or old "typing" indicator).
-        // (`needs_delivery_confirmation` was moved UP from here, since the rotation gating needs it before packet construction. The scope list and the
-        // reasons are unchanged: DeviceLinkGrant is critical (if lost, the secondary never adopts), SiblingEcho/ReadStateSync must be reliable for sibling
-        // sync, and SiblingHistoryRequest was never acked before.)
-        // Ack/Seen are sent once (if the publish fails transiently, `pending_envelopes` retries). Before, they were repeated unconditionally 9 times
-        // (~10.6 min): dozens of unneeded packets per message, and with a server up, each one was a separate Deposit. A lost Ack is now compensated by
-        // the sender's own retry plus `reack_if_already_handled`. The reliable path for "seen" is `ReadStateSync`.
-        // Per user feedback (the case of a person who did not open the internet for 6 hours, later extended to plain Text): when `MAX_UNCONFIRMED_AGE_MS`
-        // passes, these types do not give up. They are re-encrypted fresh and retried up to `TEXT_RETRY_GIVE_UP_MS`. See the
-        // `PendingConfirmation.regen_content` docs.
+        // ProfileUpdate and HistorySyncResponse are included as well. The receiver acks both (see receive_message).
         //
-        // Per user feedback (cross-device sync between devices on the same account is slow and late, and many messages get lost): multi-device control
-        // messages are now in this list too. Before, they were not, and that was the direct cause of silent, PERMANENT losses. These types were retried
-        // until acknowledged, but ALWAYS with the SAME ciphertext. If a sibling device stayed offline longer than `MAX_UNCONFIRMED_AGE_MS` (~25 min),
-        // e.g. a phone in a pocket all afternoon, the ratchet rotation in between deletes the receiver's skipped-key cache for that chain, and the packet
-        // can NEVER be decrypted again. The retry kept trying something cryptographically impossible, then was left as "Failed". For the user, this
-        // meant "most messages never reached the other device".
+        // Not included: Ack and Seen (never acknowledged themselves, sent once, see `reack_if_already_handled`), and TypingIndicator (a signal that goes stale within seconds has no value to retry).
         //
-        // Instead, they are re-encrypted with a FRESH ratchet step under the SAME `message_id` (see `message_id_override`). The receiver already dedups
-        // on `message_id`, so no double archive is made, and they survive up to `TEXT_RETRY_GIVE_UP_MS` (7 days). `Ack`/`Seen`/`TypingIndicator` are
-        // deliberately excluded (see the notes above). `HistorySyncResponse` is retried but not re-encrypted: it is a bulk reply. If it is lost, the
-        // request is asked again, and re-encrypting it for days is not worth it.
-        // `HistorySyncRequest` and `LeaveGroupRequest` were NOT on this list before. With `regen_content` = `None`, `publish_with_ack_tracking` does NOT
-        // write this entry to disk with `persist_durable_retry` (see its call site). So if the process is killed or restarted before the peer confirms,
-        // the in-memory `awaiting_confirmation` entry is lost for good, and the packet is NEVER retried: a silent permanent loss.
+        // `needs_delivery_confirmation` is computed before packet construction, because rotation gating needs it. DeviceLinkGrant is critical, SiblingEcho and ReadStateSync must be reliable for sibling sync, and SiblingHistoryRequest is acked.
+        //
+        // Ack and Seen are sent once. If the publish fails transiently, `pending_envelopes` retries. A lost Ack is covered by the sender's retry plus `reack_if_already_handled`. The reliable path for "seen" is `ReadStateSync`.
+        //
+        // When `MAX_UNCONFIRMED_AGE_MS` passes, these types do not give up. They are re-encrypted fresh and retried up to `TEXT_RETRY_GIVE_UP_MS`. See the `PendingConfirmation.regen_content` docs.
+        //
+        // Multi-device control messages are in this list too. They are re-encrypted with a fresh ratchet step under the same `message_id` (see `message_id_override`). Retrying the old ciphertext fails once the ratchet has rotated past the receiver's skipped-key cache. The receiver dedups on `message_id`, so nothing is archived twice. They survive up to `TEXT_RETRY_GIVE_UP_MS`.
+        //
+        // HistorySyncResponse is retried but not re-encrypted: it is a bulk reply, and if it is lost the request is sent again.
+        //
+        // HistorySyncRequest and LeaveGroupRequest have `regen_content` = `None`, so `publish_with_ack_tracking` does not write them to disk with `persist_durable_retry` (see its call site). A process restart before the peer confirms loses the entry.
         let regen_content = matches!(
             content,
             MessageContent::Text { .. }
@@ -310,8 +276,7 @@ impl P2PCore {
         Ok((message_id, status.as_str().to_string()))
     }
 
-    /// `reply_to_message_id` / `reply_to_preview`: user request (WhatsApp-style swipe-to-reply). See the packet.rs `MessageContent::Text.reply_to_message_id`
-    /// docs. The Kotlin side already knows the text of the message it shows, so it passes the (truncated) summary here. The Rust side does no archive lookup.
+    /// `reply_to_message_id` / `reply_to_preview`: a swipe-to-reply quote (see the packet.rs `MessageContent::Text.reply_to_message_id` docs). The Kotlin side already shows the text, so it passes the truncated summary. The Rust side does no archive lookup.
     pub(crate) fn send_message(&mut self, peer_device_fingerprint: String, plaintext: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>) -> Result<(String, String), String> {
         if self.known_remote_devices.get(&peer_device_fingerprint)
             .map_or(false, |d| self.deleted_identities.contains(&d.identity_id))
@@ -493,9 +458,7 @@ impl P2PCore {
             .join(" ")
     }
 
-    /// User request ("tapping the reaction pill opens a list of who reacted with what"): returns a message's reactions PER PERSON:
-    /// `[{"identity_id": "...", "emoji": "👍"}, ...]`. `reactions_summary` deliberately gives only totals (for the pill next to the bubble). This separate
-    /// read is needed for who reacted with what. Newest reaction at the top, as WhatsApp does.
+    /// Returns a message's reactions per person: `[{"identity_id": "...", "emoji": "👍"}, ...]`. `reactions_summary` gives only totals (for the pill next to the bubble). This read gives who reacted with what, newest first.
     pub(crate) fn list_reactions(&self, target_message_id: &str) -> String {
         let Some(conn) = &self.db else { return "[]".to_string() };
         let mut out = Vec::new();
@@ -934,8 +897,7 @@ impl P2PCore {
         true
     }
 
-    /// User request: a "seen" notice, same pattern as `send_ack` (see the packet.rs `Seen` note). Unlike `Ack` it is NOT automatic. The Kotlin side must call
-    /// it when the message is actually shown on screen (see ChatActivity/GroupChatActivity).
+    /// Sends a "seen" notice, same pattern as `send_ack` (see the packet.rs `Seen` note). Unlike `Ack` it is not automatic: the Kotlin side calls it when the message is shown on screen (see ChatActivity/GroupChatActivity).
     pub(crate) fn send_seen(&mut self, peer_device_fingerprint: &str, target_message_id: &str, group_message_local_id: Option<String>) -> bool {
         let content = MessageContent::Seen {
             target_message_id: target_message_id.to_string(),

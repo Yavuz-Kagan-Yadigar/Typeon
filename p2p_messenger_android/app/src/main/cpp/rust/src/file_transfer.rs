@@ -101,12 +101,7 @@ impl P2PCore {
         let sticker = sticker_origin.is_some();
         let (encrypted_key, key_nonce) = self.wrap_file_key(&file_key)?;
         if let Some(conn) = &self.db {
-            // Found in a two-device test (2026-09-06): the column list had 15 entries but the VALUES list had 18 (`caption`,
-            // `reply_to_message_id`, `reply_to_preview`: added to VALUES/params by the ALTER TABLE changes but NOT to the column list). SQLite
-            // rejected it with "18 values for 15 columns", and `let _ =` swallowed the error. So the SENDER never wrote its own 1:1 attachment to
-            // the `files` table: `serve_chunk_request` answered "no record" (the recipient could only download from the server), and
-            // `list_attachments` never showed the attachment bubble in history (the attachment disappeared when the chat was reopened).
-            // The column list now has 18 entries, matching VALUES.
+            // The column list has 18 entries, matching VALUES. `caption`, `reply_to_message_id` and `reply_to_preview` were in VALUES but missing from the column list. SQLite rejects the mismatch and `let _ =` hid the error, so the sender never stored its own 1:1 attachment. `serve_chunk_request` then answered "no record" and the bubble vanished on reopen. Keep the two lists in step.
             let res = conn.execute(
                 "INSERT OR REPLACE INTO files
                  (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
@@ -347,9 +342,7 @@ impl P2PCore {
                 "error": "Geçersiz dosya teklifi"
             });
         }
-        // Security fix (from this audit): `file_name` is controlled by the remote side and is used both as a file name and as displayed text. THE
-        // single entry point is here, see `safe_file_name`. The sanitised form is written to the DB, so both clients and the "save to Downloads"
-        // flow are protected automatically.
+        // `file_name` is controlled by the remote side and is used as both file name and displayed text. This is the single entry point: `safe_file_name` sanitises it before anything is written to the DB, so both clients and the "save to Downloads" flow are protected.
         let file_name = safe_file_name(file_name);
         let file_name = file_name.as_str();
         // 8 running downloads, at most 4 from one sender (one contact could otherwise take the whole budget). The rest stay "offered".
@@ -457,15 +450,9 @@ impl P2PCore {
         })
     }
 
-    /// Fix ("FileOffer was acked but the file vanished silently"): if one of the devices in `reconnected` is the source of a
-    /// file whose download was started before but is PARTIAL or FAILED, that download is restarted automatically. Before, if the offer was acked
-    /// (only the metadata delivered) and the source went offline during the download, the receiver gave up for good after
-    /// `DOWNLOAD_GIVE_UP_TIMEOUT_MS` (10 min) and never asked again when the source came back. The user had to tap "retry" manually, which made the
-    /// delivery guarantee misleading. Now the download continues as soon as the source reconnects. ONLY files with `direction='received'` and state
-    /// 'downloading' (but no longer live in `active_downloads`, i.e. the process died or gave up) or 'failed' are touched. 'offered' files, which the
-    /// user has not started, are NOT touched, so there is no unwanted automatic download.
-    /// `server_back`: a server just enrolled. Any partial download may have its blob there, so every row is a candidate.
-    /// A row without chunk hashes (an offer from before they existed) is never a candidate: `download_file` refuses it every time.
+    /// Restarts downloads for files from `reconnected` devices whose download is partial or failed, so the file arrives once the source is back. Only received files in state 'downloading' that are no longer in `active_downloads` (the process died or gave up), or 'failed', are touched. 'offered' files the user has not started are left alone.
+    /// `server_back`: a server was just enrolled, so any partial download may have its blob there, and every row is a candidate.
+    /// A row without chunk hashes (an offer made before they existed) is never a candidate: `download_file` refuses it every time.
     pub(crate) fn resume_incomplete_downloads_for(&mut self, reconnected: &std::collections::HashSet<String>, server_back: bool) {
         if reconnected.is_empty() && !server_back { return; }
         let candidates: Vec<(String, String, u64)> = {
@@ -550,13 +537,7 @@ impl P2PCore {
                 swarm.add_peer_address(peer_id, addr);
             }
         }
-        // Network robustness fix (user report: an old file should be requestable regardless of node mode). Before, this only called
-        // `add_peer_address`. That adds the address to the swarm's address book but does NOT start an active dial, and (unlike every messaging and
-        // handshake reconnect path, which all use `dial_with_relay_fallback`) it does not try a circuit through known relays. If the other side
-        // cannot be dialled directly (a common NAT case), the internal dial of `file_chunks.send_request` failed straight away with no relay attempt.
-        // That showed as `OutboundFailure`, then silent retries for up to `DOWNLOAD_GIVE_UP_TIMEOUT_MS` (10 min), and finally "Network error". It was
-        // misleading that messaging kept working: gossipsub can spread over the mesh without a relay or a direct link, but this request-response
-        // protocol needs a real connection.
+        // Requests use `dial_with_relay_fallback`, like every messaging and handshake reconnect path. A bare `add_peer_address` only adds the address to the swarm's book. It starts no dial and tries no circuit through known relays, so a peer behind NAT would fail at once. Gossipsub can spread messages without a direct link, but this request-response protocol needs a real connection.
         if !already_connected {
             self.dial_with_relay_fallback(peer_id, cached_addr);
         }
@@ -951,17 +932,11 @@ impl P2PCore {
         let data = match response {
             FileChunkResponse::Chunk { data } => data,
             FileChunkResponse::NotFound => {
-                // This is the OPPOSITE of `retry_or_give_up_download`: it is deliberately NOT retried on the same source. It is not a temporary network
-                // problem but a definitive negative answer from the other side ("I do not have this file"). Repeating the request would produce the same
-                // answer forever.
+                // Not retried on the same source. A "not found" from a peer is definitive: the device does not have the file, and repeating the request gives the same answer. This is the opposite of `retry_or_give_up_download`, which handles temporary network errors.
                 //
-                // Fix (no multi-source fallback): this used to fail the download outright every time. Now, if it is a group file, the next
-                // alternative source (see `DownloadState.alt_source_peer_ids`) is tried at once. The download really gives up only when ALL candidates
-                // are exhausted.
-                // KEY DISTINCTION (see `server_client`): a PEER's "not found" is definitive, since the file really is not on that device. But a SERVER's
-                // "not found" can mean "NOT YET": the sender may still be uploading the blob chunk by chunk (see `server_blob_uploads`). The server path
-                // was added without this distinction, so a 10 MB video still uploading failed IMMEDIATELY with "Download failed", even while the real
-                // sender was online.
+                // A group file moves on to the next alternative source at once (see `DownloadState.alt_source_peer_ids`). The download gives up only when all candidates are exhausted.
+                //
+                // Server and peer differ: a SERVER's "not found" can mean "not yet", because the sender may still be uploading the blob chunk by chunk (see `server_blob_uploads`). Only a peer's "not found" is final (see `server_client`).
                 let from_server = self
                     .active_downloads
                     .get(file_id)
@@ -1240,12 +1215,7 @@ impl P2PCore {
             error!("serve_chunk_request: file_id={} status='complete' değil — NotFound dönülüyor", request.file_id);
             return FileChunkResponse::NotFound;
         }
-        // Security fix (from this audit): there was NO authorization check here. ANY peer speaking this protocol, including a stranger who is not in
-        // our contact list and was never paired with us, connected to us in node mode, could fetch the encrypted chunks of ANY completed file of
-        // ours as soon as it knew or guessed the `file_id`. The `NotFound`/`Chunk` distinction also acted as an oracle answering "do you have this
-        // file". The bytes are encrypted with `file_key`, so the content did not leak directly. BUT a group file's `file_key` is shared by ALL members
-        // (see `finish_outgoing_group_file`), so an old member removed from the group could still download the file from any member with its old key.
-        // Now the requester must resolve, via its Noise-PROVEN `PeerId`, to a known device, and be a legitimate counterpart of that file.
+        // Authorization: the requester must resolve, via its Noise-authenticated `PeerId`, to a known device, and must be a legitimate counterpart of the file. Without this, anyone who knew or guessed a `file_id` could fetch the encrypted chunks. The `NotFound`/`Chunk` split also answered "do you have this file". The bytes are encrypted with `file_key`, but a group file's key is shared by all members (see `finish_outgoing_group_file`), so a removed member could still fetch with the old key.
         if !self.may_serve_file_to(peer, &row_peer_fp, row_group_id.as_deref()) {
             warn!(
                 "serve_chunk_request REDDEDİLDİ: {} bu dosyanın yetkili karşı tarafı değil (file_id={})",

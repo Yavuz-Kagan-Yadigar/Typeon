@@ -388,11 +388,7 @@ impl P2PCore {
                 })
             }
             MessageContent::Edit { target_message_id, new_text, group_id, edited_at_ms, author_proof } => {
-                // Ordering fix ("fast send + edit, the edit disappears"): gossipsub gives no ordering guarantee, so this Edit may arrive BEFORE the
-                // Text it targets. In that case the target row is not in the archive at all (not because it belongs to someone else). That
-                // distinction is made here and the Edit is buffered (see `pending_edits_deletes`). Otherwise `message_owned_by_sender` finds no
-                // target, returns `false`, the packet is treated as permanently "rejected", and the Text would never get the edit even when it
-                // arrives later.
+                // Gossipsub gives no ordering guarantee, so an Edit can arrive before the Text it targets. The target row is then absent from the archive, which is not the same as belonging to someone else. Such an Edit is buffered (see `pending_edits_deletes`). Otherwise `message_owned_by_sender` would find no target, reject the packet permanently, and the Text would never get the edit.
                 if self.edit_target_in_chat(&target_message_id, group_id.as_deref(), &peer_fp) {
                     self.apply_edit_or_delete_content(&peer_fp, &sender_identity_id, &message_id,
                         MessageContent::Edit { target_message_id, new_text, group_id, edited_at_ms, author_proof })
@@ -453,14 +449,9 @@ impl P2PCore {
                 }
             }
             MessageContent::HistorySyncRequest { limit, before_timestamp, group_id, after_timestamp } => {
-                // `load_message_history`/`load_group_message_history` already return an empty list when `history_key` was never loaded (node mode
-                // never opened) or the archive is empty, so no separate `node_mode_enabled` check is needed here. This is a control packet, not a
-                // user message, so it is not written to our own archive (archive_plaintext: None, see send_message_content).
-                // Fix (MessageTooLarge): the `limit` in the request is controlled by the other side and was unbounded. A huge reply
-                // could exceed gossipsub's 1 MB `max_transmit_size` and become impossible to publish (see `PublishFailure`). Both the row count
-                // and the total text bytes are capped. The cut-off part can be fetched later with a paging request (before_timestamp).
-                // Group history is given only to someone who IS a member now. Otherwise anyone who knows the `group_id` (e.g. a removed former
-                // member) could page through the whole history, including messages after their removal.
+                // `load_message_history`/`load_group_message_history` return an empty list when `history_key` was never loaded or the archive is empty, so no separate `node_mode_enabled` check is needed. This is a control packet, not a user message, so it is not written to our archive (archive_plaintext: None, see send_message_content).
+                // The `limit` in the request comes from the other side. Row count and total text bytes are capped, so the reply stays under gossipsub's 1 MB `max_transmit_size` (see `PublishFailure`). The cut-off part is fetched later with a paging request (before_timestamp).
+                // Group history goes only to someone who is a member now. Otherwise anyone who knew the `group_id`, such as a removed member, could page through the history, including messages sent after their removal.
                 if let Some(gid) = &group_id {
                     if !self.groups.get(gid).map_or(false, |g| g.is_member(&sender_identity_id)) {
                         warn!("Grup geçmişi isteği REDDEDİLDİ: gönderen üye değil (group={}, gönderen={})", gid, crate::log_id(&sender_identity_id));
@@ -781,8 +772,7 @@ impl P2PCore {
                             }
                             self.backdate_archived(None, &chat_key, m.message_id.as_deref(), m.timestamp);
                             self.mark_synced(&chat_key, m.message_id.as_deref());
-                            // Ordering fix ("a deleted message comes back with the history sync"): we do not have this row, so it is archived
-                            // fresh. If the responder marked it deleted, we mark it deleted here too.
+                            // We do not have this row, so it is archived fresh. If the responder marked it deleted, it is marked deleted here too.
                             self.apply_synced_message_flags(None, &chat_key, &m);
                         }
                         Some(serde_json::json!({"direction": our_direction, "text": m.text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms, "reactions": m.message_id.as_deref().map(|id| self.reactions_summary(id)).unwrap_or_default(), "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited, "via_sync": self.is_synced(&chat_key, m.message_id.as_deref())}))
@@ -962,10 +952,8 @@ impl P2PCore {
                         avatar_jpeg.as_ref().map_or(0, |a| a.len()), crate::log_id(&peer_fp)
                     );
                 }
-                // User request (2026-09-04): if the other side changed its name, the name in the contact list changes too. `None` = the packet
-                // carries NO name (older version); the current name is kept then. An empty or control-character name is also ignored (see
-                // `sanitize_display_name`). From one of my own devices: it is MY photo that changed (`set_own_profile_picture`). The name travels
-                // with DeviceSync.
+                // The contact's display name follows the peer's name when it changes. `None` means the packet carries no name (an older version), and the current name is kept. An empty or control-character name is ignored (see `sanitize_display_name`).
+                // From one of my own devices, the packet means MY photo changed (`set_own_profile_picture`). The name travels with DeviceSync.
                 if self.my_identity_id().as_deref() == Some(sender_identity_id.as_str()) {
                     if let (Some(conn), false) = (&self.db, avatar_too_big) {
                         if let Err(e) = conn.execute(
@@ -1196,7 +1184,7 @@ impl P2PCore {
                         serde_json::json!({"type": "read_state_sync", "conversation": conversation, "read_at": read_at_ms})
                     }
                 } else {
-                    // From the OTHER side (2026-09-07): the "read watermark" is a BULK seen receipt. Sender = reader. See `apply_incoming_read_watermark`.
+                    // A read watermark from the other side is a bulk seen receipt, with the sender as the reader. See `apply_incoming_read_watermark`.
                     let viewer = self.known_remote_devices.get(&peer_fp).map(|d| d.identity_id.clone());
                     match viewer {
                         Some(viewer_id) => {

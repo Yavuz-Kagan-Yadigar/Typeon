@@ -30,10 +30,7 @@ impl P2PCore {
     /// Called when a chat screen finds no local history on a device with node mode off (see ChatActivity `loadHistoryIfAvailable`). Sends an encrypted
     /// `HistorySyncRequest` to the chat peer. The reply arrives asynchronously, as a `{"type":"history_sync",...}` event in a later `pollNetwork` turn.
     pub(crate) fn request_history_sync(&mut self, peer_device_fingerprint: String, limit: u32) -> Result<(), String> {
-        // Seen in a two-device test: every chat open sent a `HistorySyncRequest`. Because it is on the `regen_content` list, it was written to
-        // `pending_durable_retries` + `awaiting_confirmation`, and cleared only when a `HistorySyncResponse` arrived. If the other side was slow or offline, these
-        // rows piled up (one more per open), and all of them were re-sent for up to 7 days for nothing. Before sending a new request, cancel the pending full-sync
-        // (`before_timestamp: None`) request to this peer. The newest one does the same job.
+        // A chat open sends a `HistorySyncRequest`, which is on the `regen_content` list. Without cancellation, every open adds a pending row that is re-sent for up to 7 days until a `HistorySyncResponse` arrives, even if the peer is offline. Before sending a new request, cancel the pending full-sync request (`before_timestamp: None`) to this peer. The newest one does the same job.
         self.cancel_pending_history_requests(&peer_device_fingerprint, None);
         let content = MessageContent::HistorySyncRequest { limit, before_timestamp: None, group_id: None, after_timestamp: None };
         self.send_message_content(peer_device_fingerprint, &content, None).map(|_| ())
@@ -113,7 +110,7 @@ impl P2PCore {
         );
     }
 
-    /// Marks a 1:1 row as taken from the contact's history answer (audit ref A-16): its place in the past is the contact's word only.
+    /// Marks a 1:1 row as taken from the contact's history answer: its place in the past is the contact's word only.
     pub(crate) fn mark_synced(&self, chat_key: &str, message_id: Option<&str>) {
         let (Some(conn), Some(mid)) = (&self.db, message_id) else { return };
         let _ = conn.execute(
@@ -293,16 +290,10 @@ impl P2PCore {
         conn.query_row("SELECT 1 FROM messages WHERE message_id = ?1 LIMIT 1", params![message_id], |_| Ok(())).is_ok()
     }
 
-    /// Adds a message to the local archive. Callers: (1) live 1:1 message traffic; (2) `HistorySyncResponse`, to make history learned through sync permanent locally
-    /// (see the receive_message note). If `history_key` is not loaded (Kotlin has not yet unwrapped it from the Keystore), it is silently skipped. Archiving is
-    /// best-effort and never blocks messaging itself.
+    /// Adds a message to the local archive. Callers: (1) live 1:1 traffic; (2) `HistorySyncResponse`, which makes history learned through sync permanent locally (see the receive_message note). If `history_key` is not loaded yet (Kotlin has not unwrapped it from the Keystore), the call is skipped. Archiving is best-effort and never blocks messaging.
     ///
-    /// `message_id` / `status`: fix ("pending messages show as sent after reopening"). Before, neither was stored. `message_status` was ONLY an in-memory
-    /// `HashMap`, so a fresh DB read after the app or chat screen reopened returned every row without status, and Kotlin assumed "sent" (checkmark), even for a
-    /// message that was still pending or had failed. Now `message_id` is kept stable, and status updates are written to the SAME row with `set_message_status`,
-    /// so a reload shows the real state.
-    /// `reply_to_message_id` / `reply_to_preview`: user request (WhatsApp-style reply). See the packet.rs `MessageContent::Text.reply_to_message_id` docs. These are
-    /// ALSO persisted in the row. Otherwise the reply preview would be lost whenever the chat history was reloaded (app or screen reopened).
+    /// `message_id` and `status` are stored in the row. A DB read after a reopen must return the real state, not assume "sent". Status updates are written to the same row via `set_message_status`.
+    /// `reply_to_message_id` / `reply_to_preview` (see the packet.rs `MessageContent::Text.reply_to_message_id` docs) are persisted in the row, so a reply preview survives a history reload.
     pub(crate) fn archive_message(&mut self, peer_device_fingerprint: &str, direction: &str, plaintext: &[u8], message_id: Option<&str>, status: Option<&str>, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, sent_at_ms: u64) -> Result<(), String> {
         // The sender's clock: not later than ours, or its messages sort into
         // the future (and land in an archive bucket nobody probes).
@@ -723,9 +714,7 @@ impl P2PCore {
     /// Called both for live packets whose target already exists and from `replay_buffered_edits_deletes` (for buffered packets). Keeping it in one place guarantees
     /// that both call paths behave IDENTICALLY.
     pub(crate) fn apply_edit_or_delete_content(&mut self, peer_fp: &str, sender_identity_id: &str, packet_message_id: &str, content: MessageContent) -> serde_json::Value {
-        // Multi-device fix (see `canonical_peer_key`): 1:1 archive rows are written under the CANONICAL device key (receive_message Text arm). So the ownership check,
-        // archive update and UI event must use the SAME key too. Otherwise an Edit/Delete from a non-canonical device would never find its target row. The Ack, however,
-        // goes to the REAL sender device (`peer_fp`), over the ratchet established with that device.
+        // 1:1 archive rows are written under the CANONICAL device key (receive_message Text arm), so the ownership check, archive update and UI event use the same key. Otherwise an Edit or Delete from a non-canonical device would never find its target row. The Ack goes to the real sender device (`peer_fp`), over the ratchet established with that device.
         let chat_key = self.canonical_peer_key(peer_fp);
         // Authorship of the row is not enough in a group: a removed member
         // could still rewrite or delete its old messages for everyone. A group
@@ -839,9 +828,7 @@ impl P2PCore {
         // None: nothing could be stored (key, DB). Some(false): a stale edit.
         let key = self.history_key?;
         let conn = self.db.as_ref()?;
-        // Out-of-order check: read the edit timestamp stored with the target row. If the incoming edit is OLDER (both values non-zero), it is a stale edit that arrived
-        // AFTER a newer one because of gossipsub's lack of ordering. It is silently ignored. Otherwise it would "undo" the newest text by replacing it with an older one.
-        // If `edited_at_ms == 0` (an old packet with no ordering info) or `stored == 0` (this is the first edit), it is applied unconditionally. No behaviour regression.
+        // Out-of-order check: the edit timestamp stored with the target row is compared. If the incoming edit is older (both values non-zero), it is stale, having arrived after a newer one, and is ignored. Otherwise it would replace the newest text with an older one. If `edited_at_ms == 0` (no ordering info) or `stored == 0` (first edit), it is applied unconditionally.
         let (stored_edit_ts, deleted): (u64, bool) = {
             let read = |r: &rusqlite::Row| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?));
             let row = match group_id {
@@ -1381,9 +1368,7 @@ impl P2PCore {
         results
     }
 
-    /// Fix ("pending messages show as sent after reopening"): every change of `message_status` (the in-memory HashMap) is ALSO written to the archived row at the same
-    /// time. That way the next `load_message_history` returns the real state, even after the app restarts or the chat screen reopens. If the row is not archived yet
-    /// (e.g. `history_key` was not loaded at that moment), the `UPDATE` silently affects 0 rows. That is harmless, because a later archive write will store the current state directly.
+    /// Every change of `message_status` is also written to the archived row. The next `load_message_history` then returns the real state, even after an app restart. If the row is not archived yet (for example `history_key` was not loaded), the UPDATE affects 0 rows. That is harmless: a later archive write stores the current state.
     pub(crate) fn set_message_status(&mut self, message_id: &str, status: MessageSendStatus) {
         // The map is read once, right after the send (`send_message_content_inner`). The row in `messages` is the record.
         // ponytail: a crude bound. Drop the map and return the status from the publish call instead.
