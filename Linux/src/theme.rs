@@ -653,6 +653,8 @@ avatar {{ border-radius: 9999px; }}
 .sticker {{ border-radius: 8px; }}
 /* Current in-chat search hit. */
 .bubble-match {{ outline: 2px solid @m3_primary; outline-offset: 2px; }}
+/* Day of the top visible message, over the timeline while it scrolls. */
+.date-pill {{ background: @m3_surface_high; color: @m3_on_surface; border: 1px solid @m3_outline_variant; border-radius: 9999px; padding: 3px 12px; }}
 .msg-pop {{ animation: msg-pop 220ms cubic-bezier(0.2, 0.8, 0.2, 1); transform-origin: 0% 100%; }}
 .msg-pop.msg-pop-mine {{ transform-origin: 100% 100%; }}
 @keyframes msg-pop {{ from {{ opacity: 0; transform: translateY(12px) scale(0.85); }} to {{ opacity: 1; transform: none; }} }}

@@ -25,8 +25,9 @@ use crate::ui::dialogs;
 use crate::ui::window::{Conversation, MainUi};
 use crate::util;
 
-/// How many messages a page of history holds, matching the Android chat.
-const PAGE_SIZE: u32 = 50;
+/// How many messages (texts and files together) a page of history holds,
+/// matching the Android chat.
+const PAGE_SIZE: u32 = 100;
 /// hard cap on bubbles kept alive in one open chat. ~8 GTK widgets per
 /// bubble; past this the oldest page is dropped from the view (the archive
 /// still has everything — scrolling up again, or reopening the chat, brings
@@ -218,6 +219,13 @@ struct ChatView {
     messages: gtk::Box,
     scroller: gtk::ScrolledWindow,
     fetch_history: gtk::Button,
+    /// Over the top of the timeline while an older page loads.
+    older_spinner: gtk::Spinner,
+    /// Over the top of the timeline while scrolling: the day of the top
+    /// visible message. `date_pill_hide` fades it out once scrolling stops.
+    date_pill: gtk::Revealer,
+    date_pill_label: gtk::Label,
+    date_pill_hide: RefCell<Option<glib::SourceId>>,
     bubbles: RefCell<HashMap<String, Rc<Bubble>>>,
     /// Ids we have already sent a read receipt for. Survives `reload()`, which
     /// clears `bubbles` — see `insert_entry`.
@@ -345,6 +353,29 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
     // Hook for the chat wallpaper (see theme.rs); harmless when none is set.
     scroller.add_css_class("chat-messages");
 
+    let older_spinner = gtk::Spinner::builder()
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Start)
+        .margin_top(44)
+        .width_request(24)
+        .height_request(24)
+        .visible(false)
+        .build();
+    let date_pill_label = gtk::Label::new(None);
+    date_pill_label.add_css_class("caption");
+    date_pill_label.add_css_class("date-pill");
+    let date_pill = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::Crossfade)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Start)
+        .margin_top(8)
+        .can_target(false)
+        .child(&date_pill_label)
+        .build();
+    let scroller_overlay = gtk::Overlay::builder().child(&scroller).vexpand(true).build();
+    scroller_overlay.add_overlay(&date_pill);
+    scroller_overlay.add_overlay(&older_spinner);
+
     let subtitle = gtk::Label::new(None);
     subtitle.add_css_class("caption");
     subtitle.add_css_class("dim-label");
@@ -381,6 +412,10 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         messages: messages.clone(),
         scroller: scroller.clone(),
         fetch_history: fetch_history.clone(),
+        older_spinner: older_spinner.clone(),
+        date_pill: date_pill.clone(),
+        date_pill_label: date_pill_label.clone(),
+        date_pill_hide: RefCell::new(None),
         bubbles: RefCell::new(HashMap::new()),
         seen_sent: RefCell::new(HashSet::new()),
         watermark_pending: Cell::new(false),
@@ -470,7 +505,7 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         .build();
     page_content.append(&search_bar);
     page_content.append(view.whiteboard.panel());
-    page_content.append(&scroller);
+    page_content.append(&scroller_overlay);
     page_content.append(&typing_indicator);
     reply_island.append(&reply_bar);
     reply_island.append(&composer_bar(&view));
@@ -520,6 +555,7 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         let view = view.clone();
         scroller.vadjustment().connect_value_changed(move |adjustment| {
             view.update_shading();
+            view.update_date_pill();
             if adjustment.value() <= 8.0 && adjustment.upper() > adjustment.page_size() {
                 view.load_older();
             }
@@ -892,6 +928,8 @@ impl ChatView {
             return;
         }
         self.loading_older.set(true);
+        self.older_spinner.set_visible(true);
+        self.older_spinner.start();
 
         let generation = self.load_gen.get();
         let conversation = self.conversation.clone();
@@ -913,6 +951,8 @@ impl ChatView {
             },
             move |page| {
                 view.loading_older.set(false);
+                view.older_spinner.stop();
+                view.older_spinner.set_visible(false);
                 if view.load_gen.get() != generation {
                     return; // a reload replaced the timeline meanwhile
                 }
@@ -936,7 +976,7 @@ impl ChatView {
                 for entry in older {
                     view.insert_entry(entry, false);
                 }
-                // a full page of 50 above the cap drops the oldest
+                // a full page above the cap drops the oldest
                 // page's worth of bubbles immediately, so the view settles at
                 // ~MAX_BUBBLES instead of growing for as long as the user
                 // keeps scrolling.
@@ -1027,7 +1067,9 @@ fn fetch_page(
     mut oldest: u64,
     attachment_before: Option<u64>,
 ) -> Page {
-    let mut entries = Vec::new();
+    // (cursor clock, is a file, entry): the merged page is cut by the clock
+    // the two archive cursors compare, see the cut below.
+    let mut rows: Vec<(u64, bool, Entry)> = Vec::new();
     let peer_fingerprint = match conversation {
         Conversation::Direct { fingerprint, .. } => fingerprint.clone(),
         Conversation::Group { .. } => String::new(),
@@ -1049,18 +1091,15 @@ fn fetch_page(
     };
 
     for message in archived {
-        if oldest == 0 || message.timestamp < oldest {
-            oldest = message.timestamp;
-        }
         let sender_identity = message.sender_identity_id.clone().unwrap_or_default();
         let mine = message.direction == "sent"
             || (!sender_identity.is_empty() && sender_identity == own_identity);
-        entries.push(Entry {
+        rows.push((message.timestamp, false, Entry {
             id: message.message_id.clone().unwrap_or_else(|| {
                 // Pre-`message_id` rows exist in old archives; a synthetic
                 // key keeps them renderable, they just cannot be targeted
                 // by an edit or a receipt.
-                format!("legacy:{}:{}", message.timestamp, entries.len())
+                format!("legacy:{}:{}", message.timestamp, rows.len())
             }),
             mine,
             sender_identity,
@@ -1081,36 +1120,47 @@ fn fetch_page(
             attachment: None,
             seen: mine && !message.seen_by.is_empty(),
             reactions: message.reactions.clone(),
-        });
+        }));
     }
 
     // Attachments live in their own table in the core, so they page on a
-    // cursor of their own: the first page takes the newest ones, an older
-    // page (loaded while scrolling up) takes the ones below the oldest
-    // already on screen.
+    // cursor of their own: below the oldest file on screen, or the newest
+    // ones while no file is on screen yet (everything not on screen is older
+    // than what is, see the cut below).
+    let attachment_cursor = attachment_before.filter(|&c| c > 0).unwrap_or(u64::MAX);
     let listed: Vec<core::AttachmentSummary> = match conversation {
-        Conversation::Direct { fingerprint, .. } => match (before, attachment_before) {
-            (None, _) => core::list_attachments(fingerprint),
-            (Some(_), Some(cursor)) if cursor > 0 => {
-                core::list_attachments_before(fingerprint, cursor, PAGE_SIZE as usize)
-            }
-            (Some(_), _) => Vec::new(),
-        },
-        Conversation::Group { group_id, .. } => match (before, attachment_before) {
-            (None, _) => core::list_group_attachments(group_id),
-            (Some(_), Some(cursor)) if cursor > 0 => {
-                core::list_group_attachments_before(group_id, cursor, PAGE_SIZE as usize)
-            }
-            (Some(_), _) => Vec::new(),
-        },
+        Conversation::Direct { fingerprint, .. } => {
+            core::list_attachments_before(fingerprint, attachment_cursor, PAGE_SIZE as usize)
+        }
+        Conversation::Group { group_id, .. } => {
+            core::list_group_attachments_before(group_id, attachment_cursor, PAGE_SIZE as usize)
+        }
     };
+    for attachment in listed {
+        rows.push((attachment.created_at, true, attachment_entry(&attachment, &peer_fingerprint)));
+    }
+
+    // Keep the newest PAGE_SIZE of texts and files together. What is cut off
+    // is older than everything kept, so the next older page reads it again.
+    // The cut never splits a millisecond: the cursors are strict `<`.
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    if let Some(&(floor, _, _)) = rows.get(PAGE_SIZE as usize - 1) {
+        rows.retain(|row| row.0 >= floor);
+    }
 
     let mut oldest_attachment = 0u64;
-    for attachment in listed {
-        if oldest_attachment == 0 || attachment.created_at < oldest_attachment {
-            oldest_attachment = attachment.created_at;
+    let mut entries = Vec::with_capacity(rows.len());
+    for (clock, is_file, entry) in rows {
+        let cursor = if is_file { &mut oldest_attachment } else { &mut oldest };
+        if *cursor == 0 || clock < *cursor {
+            *cursor = clock;
         }
-        entries.push(attachment_entry(&attachment, &peer_fingerprint));
+        entries.push(entry);
+    }
+    // No text kept (a page of files only): the texts not on screen are all
+    // older than the oldest file kept, so page them from there.
+    if oldest == 0 {
+        oldest = oldest_attachment;
     }
 
     Page {
@@ -1312,6 +1362,44 @@ impl ChatView {
             view.shade_pending.set(false);
             view.update_shading();
         });
+    }
+
+    /// Shows the day of the top visible message while the timeline scrolls,
+    /// and fades it out 1.5 s after the last scroll. Hidden at the bottom, so
+    /// opening a chat (a programmatic scroll to the end) does not flash it.
+    fn update_date_pill(self: &Rc<Self>) {
+        let adjustment = self.scroller.vadjustment();
+        if adjustment.upper() - adjustment.page_size() - adjustment.value() < 80.0 {
+            self.date_pill.set_reveal_child(false);
+            return;
+        }
+        // `order` is sorted top to bottom: the first bubble whose bottom is
+        // below the top edge is the top visible one.
+        // `try_borrow`: a scroll can fire while a bubble insert holds them.
+        let (Ok(bubbles), Ok(order)) = (self.bubbles.try_borrow(), self.order.try_borrow()) else { return };
+        let top_key = {
+            order.iter().find_map(|(key, id)| {
+                let bounds = bubbles.get(id)?.root.compute_bounds(&self.scroller)?;
+                (bounds.y() + bounds.height() > 0.0).then_some(*key)
+            })
+        };
+        drop((bubbles, order));
+        let Some(key) = top_key else { return };
+        self.date_pill_label.set_label(&util::format_day_separator(key));
+        self.date_pill.set_reveal_child(true);
+        if let Some(source) = self.date_pill_hide.take() {
+            source.remove();
+        }
+        let view = Rc::downgrade(self);
+        *self.date_pill_hide.borrow_mut() = Some(glib::timeout_add_local_once(
+            std::time::Duration::from_millis(1500),
+            move || {
+                if let Some(view) = view.upgrade() {
+                    view.date_pill_hide.take();
+                    view.date_pill.set_reveal_child(false);
+                }
+            },
+        ));
     }
 
     /// Screen-space shading: each bubble takes the shade step of its vertical

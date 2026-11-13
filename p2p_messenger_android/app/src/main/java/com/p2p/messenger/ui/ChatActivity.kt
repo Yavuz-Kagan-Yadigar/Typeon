@@ -89,10 +89,7 @@ class ChatActivity : AppCompatActivity() {
         const val EXTRA_PEER_DEVICE_FINGERPRINT = "peer_device_fingerprint"
         const val EXTRA_PEER_DISPLAY_NAME = "peer_display_name"
 
-        private const val HISTORY_LOAD_LIMIT = 200
         private const val HISTORY_SYNC_LIMIT = 30
-        /** Page size for one 'older' page in infinite scroll. */
-        private const val OLDER_HISTORY_PAGE_SIZE = 50
         private const val OLDER_HISTORY_REPLY_WAIT_MS = 15_000L
         /** When the list is scrolled this close to the top, the next page is requested. */
         private const val LOAD_OLDER_HISTORY_THRESHOLD = 3
@@ -189,6 +186,7 @@ class ChatActivity : AppCompatActivity() {
     /** See `maybePlayTyphoonEffect` and ui.TyphoonParticleView. */
     private lateinit var typhoonEffect: TyphoonParticleView
     private lateinit var progressSending: ProgressBar
+    private lateinit var progressOlderHistory: ProgressBar
     /** The contact's avatar in the top bar. It is kept so the full-screen view can open (see `AvatarUtil.openFullscreen`). */
     private var toolbarAvatarBytes: ByteArray? = null
 
@@ -495,6 +493,8 @@ class ChatActivity : AppCompatActivity() {
                 fetchHistoryButton.update()
             }
         })
+        progressOlderHistory = findViewById(R.id.progressOlderHistory)
+        attachScrollDatePill(recycler, findViewById(R.id.txtScrollDate)) { localMessages.getOrNull(it)?.timestamp }
         fetchHistoryButton = FetchHistoryButton(findViewById(R.id.btnFetchHistory), recycler, false,
             { peerDeviceFingerprint }, { localMessages.minOfOrNull { it.orderKey } ?: 0L })
 
@@ -2321,77 +2321,7 @@ class ChatActivity : AppCompatActivity() {
 
     private fun loadHistoryIfAvailable(targetPeer: String) {
         lifecycleScope.launch {
-            val merged = withContext(Dispatchers.IO) {
-                val textItems = mutableListOf<SimpleChatAdapter.Item>()
-                val json = try {
-                    P2PLib.getMessageHistory(targetPeer, HISTORY_LOAD_LIMIT)
-                } catch (e: Exception) {
-                    null
-                }
-                val array = try {
-                    if (json != null) JSONArray(json) else null
-                } catch (e: Exception) {
-                    null
-                }
-                // See the 'seen' replay note under `loadHistoryIfAvailable`. Which messages (archived) carry a 'seen' state is collected here (IO thread).
-                // The SeenByViewer itself, which needs View reads, is built on the main thread.
-                val seenMessageIds = mutableListOf<String>()
-                if (array != null) {
-                    for (i in 0 until array.length()) {
-                        val obj = array.getJSONObject(i)
-                        textItems.add(itemFromHistoryJson(obj))
-                        val messageId = if (obj.isNull("message_id")) null else obj.optString("message_id").ifEmpty { null }
-                        val seenByRaw = obj.optString("seen_by", "[]").ifEmpty { "[]" }
-                        if (messageId != null && seenByRaw != "[]") {
-                            seenMessageIds.add(messageId)
-                        }
-                    }
-                }
-                // File attachments from the past are fetched with `listAttachments` at the same time as the text messages, and merged in BY TIMESTAMP,
-                // so they appear in chronological order, as in a live chat.
-                val attachmentItems = mutableListOf<SimpleChatAdapter.Item>()
-                val attachmentsJson = try {
-                    P2PLib.listAttachments(targetPeer)
-                } catch (e: Exception) {
-                    null
-                }
-                val attachmentsArray = try {
-                    if (attachmentsJson != null) JSONArray(attachmentsJson) else null
-                } catch (e: Exception) {
-                    null
-                }
-                if (attachmentsArray != null) {
-                    for (i in 0 until attachmentsArray.length()) {
-                        val obj = attachmentsArray.getJSONObject(i)
-                        val previewHex = obj.optString("preview_hex", "")
-                        val previewJpeg = if (previewHex.isNotEmpty() && previewHex != "null") hexToBytes(previewHex) else null
-                        attachmentItems.add(
-                            SimpleChatAdapter.Item(
-                                messageId = obj.optString("file_id"),
-                                text = "",
-                                isMine = obj.optString("direction") == "sent",
-                                timestamp = obj.optLong("created_at", System.currentTimeMillis()),
-                                attachment = SimpleChatAdapter.AttachmentInfo(
-                                    fileId = obj.optString("file_id"),
-                                    fileName = obj.optString("file_name"),
-                                    mimeType = obj.optString("mime_type"),
-                                    totalSize = obj.optLong("total_size"),
-                                    status = parseAttachmentStatus(obj.optString("status")),
-                                    bytesDone = obj.optLong("bytes_transferred"),
-                                    previewJpeg = previewJpeg,
-                                    durationMs = obj.optInt("duration_ms", -1).let { if (it < 0) null else it },
-                                    isSticker = obj.optBoolean("sticker", false)
-                                ),
-                                // Attachments restored from the archive keep their caption and reply context (see Rust `files` table).
-                                caption = obj.optString("caption", ""),
-                                replyToMessageId = if (obj.isNull("reply_to_message_id")) null else obj.optString("reply_to_message_id").ifEmpty { null },
-                                replyToPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null }
-                            )
-                        )
-                    }
-                }
-                (textItems + attachmentItems).sortedBy { it.orderKey } to seenMessageIds
-            }
+            val merged = withContext(Dispatchers.IO) { readNewestPage(targetPeer) }
             if (peerDeviceFingerprint != targetPeer) return@launch
             val (mergedItems, seenMessageIds) = merged
             // `syncMissedMessages` (onResume) can race this: both fetch on
@@ -2481,9 +2411,8 @@ class ChatActivity : AppCompatActivity() {
     private fun loadOlderHistory() {
         if (isLoadingOlderHistory || noMoreOlderHistory || localMessages.isEmpty()) return
         isLoadingOlderHistory = true
-        // Text rows only: the first load mixes the newest texts with EVERY
-        // attachment ever sent, so one old photo used to move the cursor
-        // past all the texts between it and the oldest loaded one.
+        progressOlderHistory.visibility = View.VISIBLE
+        // Texts and attachments page on cursors of their own (separate tables).
         val beforeTimestamp = localMessages.filter { it.attachment == null }.minOfOrNull { it.timestamp }
             ?: localMessages.minOf { it.timestamp }
         val beforeAttachment = localMessages.filter { it.attachment != null }.minOfOrNull { it.timestamp } ?: Long.MAX_VALUE
@@ -2492,7 +2421,7 @@ class ChatActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val localOlder = withContext(Dispatchers.IO) {
                 try {
-                    val json = P2PLib.getMessageHistoryBefore(peer, beforeTimestamp, OLDER_HISTORY_PAGE_SIZE)
+                    val json = P2PLib.getMessageHistoryBefore(peer, beforeTimestamp, CHAT_PAGE_SIZE)
                     val array = JSONArray(json)
                     (0 until array.length()).map { itemFromHistoryJson(array.getJSONObject(it)) }
                 } catch (e: Exception) {
@@ -2502,26 +2431,51 @@ class ChatActivity : AppCompatActivity() {
             // Attachments older than the oldest loaded one (own cursor).
             val olderAttachments = withContext(Dispatchers.IO) {
                 try {
-                    val array = JSONArray(P2PLib.listAttachmentsBefore(peer, beforeAttachment, OLDER_HISTORY_PAGE_SIZE))
+                    val array = JSONArray(P2PLib.listAttachmentsBefore(peer, beforeAttachment, CHAT_PAGE_SIZE))
                     (0 until array.length()).map { attachmentItemFromJson(array.getJSONObject(it)) }
                 } catch (e: Exception) {
                     emptyList()
                 }
             }
             if (peer == peerDeviceFingerprint) {
-                val page = (localOlder ?: emptyList()) + olderAttachments
+                val page = newestPage(localOlder ?: emptyList(), olderAttachments)
                 if (page.isNotEmpty()) prependOlderMessages(page)
                 // an empty page from the local archive is the end of it.
                 else if (localOlder != null) noMoreOlderHistory = true
             }
             // Local archive only: scrolling sends nothing to the network.
             isLoadingOlderHistory = false
+            progressOlderHistory.visibility = View.GONE
         }
     }
 
-    /** Item from one `listAttachments`-shaped JSON row (older-page path). */
-    private fun attachmentItemFromJson(obj: JSONObject): SimpleChatAdapter.Item {
-        val previewHex = obj.optString("preview_hex", "")
+    /** IO thread: the newest page (texts + attachments, see `newestPage`), in send order, and the ids of
+     *  its messages that carry a 'seen' mark. `knownIds`: rows already on screen keep their decoded preview. */
+    private fun readNewestPage(peer: String, knownIds: Set<String> = emptySet()): Pair<List<SimpleChatAdapter.Item>, List<String>> {
+        val seen = mutableListOf<String>()
+        val texts = try {
+            val array = JSONArray(P2PLib.getMessageHistory(peer, CHAT_PAGE_SIZE))
+            (0 until array.length()).map { i ->
+                val obj = array.getJSONObject(i)
+                val id = if (obj.isNull("message_id")) null else obj.optString("message_id").ifEmpty { null }
+                if (id != null && obj.optString("seen_by", "[]").ifEmpty { "[]" } != "[]") seen.add(id)
+                itemFromHistoryJson(obj)
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+        val attachments = try {
+            val array = JSONArray(P2PLib.listAttachmentsBefore(peer, Long.MAX_VALUE, CHAT_PAGE_SIZE))
+            (0 until array.length()).map { attachmentItemFromJson(array.getJSONObject(it), knownIds) }
+        } catch (e: Exception) {
+            emptyList()
+        }
+        return newestPage(texts, attachments).sortedBy { it.orderKey } to seen
+    }
+
+    /** Item from one `listAttachments`-shaped JSON row. No preview decode for ids in `skipPreview`. */
+    private fun attachmentItemFromJson(obj: JSONObject, skipPreview: Set<String> = emptySet()): SimpleChatAdapter.Item {
+        val previewHex = if (obj.optString("file_id") in skipPreview) "" else obj.optString("preview_hex", "")
         return SimpleChatAdapter.Item(
             messageId = obj.optString("file_id"),
             text = "",
@@ -2739,76 +2693,7 @@ class ChatActivity : AppCompatActivity() {
         // preview (see `refreshFrom`) instead of decoding it from hex again.
         val knownIds = localMessages.mapTo(HashSet()) { it.messageId }
         lifecycleScope.launch {
-            val missed = withContext(Dispatchers.IO) {
-                val textItems = mutableListOf<SimpleChatAdapter.Item>()
-                val json = try {
-                    P2PLib.getMessageHistory(targetPeer, HISTORY_LOAD_LIMIT)
-                } catch (e: Exception) {
-                    null
-                }
-                val array = try {
-                    if (json != null) JSONArray(json) else null
-                } catch (e: Exception) {
-                    null
-                }
-                // See the 'seen' replay note under `loadHistoryIfAvailable`: the same pattern. This function runs in `onResume` (returning from the background),
-                // so it is the most frequently hit path in practice.
-                val seenMessageIds = mutableListOf<String>()
-                if (array != null) {
-                    for (i in 0 until array.length()) {
-                        val obj = array.getJSONObject(i)
-                        textItems.add(itemFromHistoryJson(obj))
-                        val messageId = if (obj.isNull("message_id")) null else obj.optString("message_id").ifEmpty { null }
-                        val seenByRaw = obj.optString("seen_by", "[]").ifEmpty { "[]" }
-                        if (messageId != null && seenByRaw != "[]") {
-                            seenMessageIds.add(messageId)
-                        }
-                    }
-                }
-                val attachmentItems = mutableListOf<SimpleChatAdapter.Item>()
-                val attachmentsJson = try {
-                    P2PLib.listAttachments(targetPeer)
-                } catch (e: Exception) {
-                    null
-                }
-                val attachmentsArray = try {
-                    if (attachmentsJson != null) JSONArray(attachmentsJson) else null
-                } catch (e: Exception) {
-                    null
-                }
-                if (attachmentsArray != null) {
-                    for (i in 0 until attachmentsArray.length()) {
-                        val obj = attachmentsArray.getJSONObject(i)
-                        val fileId = obj.optString("file_id")
-                        val previewHex = obj.optString("preview_hex", "")
-                        val previewJpeg = if (fileId !in knownIds && previewHex.isNotEmpty() && previewHex != "null") hexToBytes(previewHex) else null
-                        attachmentItems.add(
-                            SimpleChatAdapter.Item(
-                                messageId = fileId,
-                                text = "",
-                                isMine = obj.optString("direction") == "sent",
-                                timestamp = obj.optLong("created_at", System.currentTimeMillis()),
-                                attachment = SimpleChatAdapter.AttachmentInfo(
-                                    fileId = fileId,
-                                    fileName = obj.optString("file_name"),
-                                    mimeType = obj.optString("mime_type"),
-                                    totalSize = obj.optLong("total_size"),
-                                    status = parseAttachmentStatus(obj.optString("status")),
-                                    bytesDone = obj.optLong("bytes_transferred"),
-                                    previewJpeg = previewJpeg,
-                                    durationMs = obj.optInt("duration_ms", -1).let { if (it < 0) null else it },
-                                    isSticker = obj.optBoolean("sticker", false)
-                                ),
-                                // Attachments restored from the archive keep their caption and reply context (see Rust `files` table).
-                                caption = obj.optString("caption", ""),
-                                replyToMessageId = if (obj.isNull("reply_to_message_id")) null else obj.optString("reply_to_message_id").ifEmpty { null },
-                                replyToPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null }
-                            )
-                        )
-                    }
-                }
-                (textItems + attachmentItems).sortedBy { it.orderKey } to seenMessageIds
-            }
+            val missed = withContext(Dispatchers.IO) { readNewestPage(targetPeer, knownIds) }
             if (peerDeviceFingerprint != targetPeer) return@launch
             val (missedItems, seenMessageIds) = missed
             val existingIds = localMessages.mapTo(mutableSetOf()) { it.messageId }

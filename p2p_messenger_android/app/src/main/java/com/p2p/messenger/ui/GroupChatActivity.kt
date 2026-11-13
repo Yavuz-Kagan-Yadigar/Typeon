@@ -90,12 +90,9 @@ class GroupChatActivity : AppCompatActivity() {
         /** Same standard as SettingsFragment AVATAR_MAX_DIMENSION. */
         private const val AVATAR_MAX_DIMENSION = 720
         private const val AVATAR_JPEG_QUALITY = 85
-        /** Same constant as ChatActivity. */
-        private const val HISTORY_LOAD_LIMIT = 200
         /** See the `resolveContactByIdentity` docs. */
         private const val CONTACT_CACHE_TTL_MS = 5000L
         /** Same constants as ChatActivity (infinite scroll). */
-        private const val OLDER_HISTORY_PAGE_SIZE = 50
         private const val OLDER_HISTORY_REPLY_WAIT_MS = 15_000L
         private const val LOAD_OLDER_HISTORY_THRESHOLD = 3
         /** Same constants as ChatActivity (group attachments). */
@@ -145,6 +142,7 @@ class GroupChatActivity : AppCompatActivity() {
     /** See `maybePlayTyphoonEffect` and ui.TyphoonParticleView. */
     private lateinit var typhoonEffect: TyphoonParticleView
     private lateinit var progressSending: ProgressBar
+    private lateinit var progressOlderHistory: ProgressBar
 
     /**
      * This device's raw `identity_id`: not formatted like `getIdentityCode`, but in the same form as the `sender_identity_id` fields, so they compare directly.
@@ -463,6 +461,8 @@ class GroupChatActivity : AppCompatActivity() {
                 fetchHistoryButton.update()
             }
         })
+        progressOlderHistory = findViewById(R.id.progressOlderHistory)
+        attachScrollDatePill(recycler, findViewById(R.id.txtScrollDate)) { localMessages.getOrNull(it)?.timestamp }
         fetchHistoryButton = FetchHistoryButton(findViewById(R.id.btnFetchHistory), recycler, true,
             { groupId }, { localMessages.minOfOrNull { it.orderKey } ?: 0L })
         // Group messages also get Edit and Delete (plus Resend if sending failed). See ChatActivity.showEditDeleteDialog, same pattern.
@@ -662,47 +662,31 @@ class GroupChatActivity : AppCompatActivity() {
      * which can make another JNI call through `resolveContactByIdentity`) run on `Dispatchers.IO`. Only the list and adapter update runs on the main thread.
      * `targetGroupId` stops a result from being applied to the wrong chat if the user switches to another group before the load finishes.
      */
+    /** IO thread: the newest page (texts + attachments, see `newestPage`), in send order, and the 'seen' viewers of its messages
+     *  (see `seenViewersFromHistoryJson`). `knownIds`: rows already on screen keep their decoded preview. */
+    private fun readNewestGroupPage(gid: String, knownIds: Set<String> = emptySet()): Pair<List<SimpleChatAdapter.Item>, List<Pair<String, List<Pair<String, SimpleChatAdapter.SeenByViewer>>>>> {
+        val array = try { JSONArray(P2PLib.getGroupMessageHistory(gid, CHAT_PAGE_SIZE)) } catch (e: Exception) { null }
+        val texts = if (array != null) (0 until array.length()).map { itemFromGroupHistoryJson(array.getJSONObject(it)) } else emptyList()
+        // Rows oldest to newest, replayed to `applySeen` in the same order, so the adapter settles on the last message seen.
+        val seenEntries = if (array != null) (0 until array.length()).mapNotNull { i ->
+            val obj = array.getJSONObject(i)
+            val localId = if (obj.isNull("message_id")) null else obj.optString("message_id").ifEmpty { null }
+            val viewers = if (localId != null) seenViewersFromHistoryJson(obj) else emptyList()
+            if (localId != null && viewers.isNotEmpty()) localId to viewers else null
+        } else emptyList()
+        val attachments = try {
+            val att = JSONArray(P2PLib.listGroupAttachmentsBefore(gid, Long.MAX_VALUE, CHAT_PAGE_SIZE))
+            (0 until att.length()).map { itemFromGroupAttachmentJson(att.getJSONObject(it), knownIds) }
+        } catch (e: Exception) {
+            emptyList()
+        }
+        return newestPage(texts, attachments).sortedBy { it.orderKey } to seenEntries
+    }
+
     private fun loadGroupHistoryIfAvailable() {
         val targetGroupId = groupId
         lifecycleScope.launch {
-            val (merged, seenEntries) = withContext(Dispatchers.IO) {
-                val json = try {
-                    P2PLib.getGroupMessageHistory(targetGroupId, HISTORY_LOAD_LIMIT)
-                } catch (e: Exception) {
-                    null
-                }
-                val array = try {
-                    if (json != null) JSONArray(json) else null
-                } catch (e: Exception) {
-                    null
-                }
-                val textItems = if (array != null) (0 until array.length()).map { itemFromGroupHistoryJson(array.getJSONObject(it)) } else emptyList()
-                // See `seenViewersFromHistoryJson`. Rows are collected oldest to newest and replayed to `applySeen` in the same order,
-                // so the adapter settles on the last message seen.
-                val seenEntries = if (array != null) (0 until array.length()).mapNotNull { i ->
-                    val obj = array.getJSONObject(i)
-                    val localId = if (obj.isNull("message_id")) null else obj.optString("message_id").ifEmpty { null }
-                    val viewers = if (localId != null) seenViewersFromHistoryJson(obj) else emptyList()
-                    if (localId != null && viewers.isNotEmpty()) localId to viewers else null
-                } else emptyList()
-
-                // Same pattern as ChatActivity.loadHistoryIfAvailable: attachments sent or received in the past are merged into the text messages by timestamp.
-                val attachmentsJson = try {
-                    P2PLib.listGroupAttachments(targetGroupId)
-                } catch (e: Exception) {
-                    null
-                }
-                val attachmentsArray = try {
-                    if (attachmentsJson != null) JSONArray(attachmentsJson) else null
-                } catch (e: Exception) {
-                    null
-                }
-                val attachmentItems = if (attachmentsArray != null) {
-                    (0 until attachmentsArray.length()).map { itemFromGroupAttachmentJson(attachmentsArray.getJSONObject(it)) }
-                } else emptyList()
-
-                (textItems + attachmentItems).sortedBy { it.orderKey } to seenEntries
-            }
+            val (merged, seenEntries) = withContext(Dispatchers.IO) { readNewestGroupPage(targetGroupId) }
             if (groupId != targetGroupId) return@launch
             // syncMissedGroupMessages (onResume) can race this: both fetch on
             // IO and either can finish first. Filter by what's already in
@@ -867,9 +851,8 @@ class GroupChatActivity : AppCompatActivity() {
     private fun loadOlderGroupHistory() {
         if (isLoadingOlderHistory || noMoreOlderHistory || localMessages.isEmpty()) return
         isLoadingOlderHistory = true
-        // Text rows only: the first load mixes the newest texts with EVERY
-        // attachment ever sent, so one old photo used to move the cursor
-        // past all the texts between it and the oldest loaded one.
+        progressOlderHistory.visibility = View.VISIBLE
+        // Texts and attachments page on cursors of their own (separate tables).
         val beforeTimestamp = localMessages.filter { it.attachment == null }.minOfOrNull { it.timestamp }
             ?: localMessages.minOf { it.timestamp }
         val beforeAttachment = localMessages.filter { it.attachment != null }.minOfOrNull { it.timestamp } ?: Long.MAX_VALUE
@@ -878,7 +861,7 @@ class GroupChatActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val localOlder = withContext(Dispatchers.IO) {
                 try {
-                    val json = P2PLib.getGroupMessageHistoryBefore(gid, beforeTimestamp, OLDER_HISTORY_PAGE_SIZE)
+                    val json = P2PLib.getGroupMessageHistoryBefore(gid, beforeTimestamp, CHAT_PAGE_SIZE)
                     val array = JSONArray(json)
                     (0 until array.length()).map { itemFromGroupHistoryJson(array.getJSONObject(it)) }
                 } catch (e: Exception) {
@@ -888,18 +871,19 @@ class GroupChatActivity : AppCompatActivity() {
             // Attachments older than the oldest loaded one (own cursor).
             val olderAttachments = withContext(Dispatchers.IO) {
                 try {
-                    val array = JSONArray(P2PLib.listGroupAttachmentsBefore(gid, beforeAttachment, OLDER_HISTORY_PAGE_SIZE))
+                    val array = JSONArray(P2PLib.listGroupAttachmentsBefore(gid, beforeAttachment, CHAT_PAGE_SIZE))
                     (0 until array.length()).map { itemFromGroupAttachmentJson(array.getJSONObject(it)) }
                 } catch (e: Exception) {
                     emptyList()
                 }
             }
             if (gid == groupId) {
-                val page = (localOlder ?: emptyList()) + olderAttachments
+                val page = newestPage(localOlder ?: emptyList(), olderAttachments)
                 if (page.isNotEmpty()) prependOlderMessages(page)
                 else if (localOlder != null) noMoreOlderHistory = true
             }
             isLoadingOlderHistory = false
+            progressOlderHistory.visibility = View.GONE
         }
     }
 
@@ -2973,29 +2957,7 @@ class GroupChatActivity : AppCompatActivity() {
         // See ChatActivity.syncMissedMessages: rows on screen keep their preview.
         val knownIds = localMessages.mapTo(HashSet()) { it.messageId }
         lifecycleScope.launch {
-            val (merged, seenEntries) = withContext(Dispatchers.IO) {
-                val json = try { P2PLib.getGroupMessageHistory(targetGroupId, HISTORY_LOAD_LIMIT) } catch (e: Exception) { null }
-                val array = try { if (json != null) JSONArray(json) else null } catch (e: Exception) { null }
-                val textItems = if (array != null) {
-                    (0 until array.length()).map { itemFromGroupHistoryJson(array.getJSONObject(it)) }
-                } else emptyList()
-                // Same pattern as `loadGroupHistoryIfAvailable` / `seenViewersFromHistoryJson`. This function runs in `onResume` (returning from the background),
-                // so it is the most frequently hit path in practice.
-                val seenEntries = if (array != null) (0 until array.length()).mapNotNull { i ->
-                    val obj = array.getJSONObject(i)
-                    val localId = if (obj.isNull("message_id")) null else obj.optString("message_id").ifEmpty { null }
-                    val viewers = if (localId != null) seenViewersFromHistoryJson(obj) else emptyList()
-                    if (localId != null && viewers.isNotEmpty()) localId to viewers else null
-                } else emptyList()
-
-                val attachmentsJson = try { P2PLib.listGroupAttachments(targetGroupId) } catch (e: Exception) { null }
-                val attachmentsArray = try { if (attachmentsJson != null) JSONArray(attachmentsJson) else null } catch (e: Exception) { null }
-                val attachmentItems = if (attachmentsArray != null) {
-                    (0 until attachmentsArray.length()).map { itemFromGroupAttachmentJson(attachmentsArray.getJSONObject(it), knownIds) }
-                } else emptyList()
-
-                (textItems + attachmentItems).sortedBy { it.orderKey } to seenEntries
-            }
+            val (merged, seenEntries) = withContext(Dispatchers.IO) { readNewestGroupPage(targetGroupId, knownIds) }
             if (groupId != targetGroupId) return@launch
             // Recompute existingIds here, right before merging, not before the
             // IO fetch above — loadGroupHistoryIfAvailable can insert

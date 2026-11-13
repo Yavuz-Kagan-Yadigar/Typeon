@@ -199,6 +199,8 @@
     <string name="lbl_edited">(edited)</string>
     <string name="lbl_synced">(from history sync)</string>
     <string name="lbl_you">You</string>
+    <string name="lbl_today">Today</string>
+    <string name="lbl_yesterday">Yesterday</string>
     <string name="msg_reply_target_not_loaded">Original message isn\'t loaded — scroll up to find it</string>
     <string name="lbl_sent_at">(sent at: %s)</string>
         <!-- Received messages show both the local receive time and the sender's real send time, for
