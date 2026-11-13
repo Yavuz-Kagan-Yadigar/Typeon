@@ -39,10 +39,10 @@ use gtk::glib;
 const APP_ID: &str = "com.p2p.messenger.Typeon";
 
 fn main() -> glib::ExitCode {
-    // Çekirdeğin `log` çıktısını görünür kıl. Bu olmadan bağlantı, ratchet
-    // ve sunucu akışına dair her teşhis satırı sessizce kayboluyordu —
-    // Android'de logcat'e giden bilginin masaüstünde hiçbir karşılığı yoktu.
-    // Varsayılan `warn`: normal çalışmada sessiz, `RUST_LOG=info` ile açılır.
+    // Show the core's `log` output. Without this, connection, ratchet and
+    // server diagnostics were dropped silently. The desktop had no
+    // equivalent of the logcat output on Android.
+    // Default `warn`: quiet in normal runs. Set `RUST_LOG=info` to see more.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     // GTK closures unwind into C and abort; leave a trace before that happens.

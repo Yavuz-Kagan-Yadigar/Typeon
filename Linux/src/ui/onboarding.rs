@@ -672,11 +672,9 @@ fn erase_button(app: &Rc<App>, label: &str) -> gtk::Button {
         let app = app.clone();
         logout.connect_clicked(move |_| {
             let app = app.clone();
-            // `confirm`'in `&app` (aşağıda) ve döndürdüğü onay kapanışının
-            // `app`'ı TAŞIMASI (bkz. `move ||`) AYNI çağrının iki farklı
-            // argümanı — `&app` ödünç alması `confirm(...)` çağrısı boyunca
-            // canlı kalırken kapanış `app`'ı taşımaya çalışıyor, bu yüzden
-            // ayrı bir klonla ayrıştırılıyor.
+            // `confirm` takes `&app` and its accept closure moves `app`, both
+            // in the same call. The borrow would still be alive while the
+            // closure tries to move `app`. So the closure gets its own clone.
             let on_confirm_app = app.clone();
             crate::ui::dialogs::confirm(
                 &app,
@@ -687,10 +685,9 @@ fn erase_button(app: &Rc<App>, label: &str) -> gtk::Button {
                 "Erase",
                 true,
                 move || {
-                    // `.clone()`, not a move: `dialogs::confirm`'in
-                    // `on_accept` parametresi `Fn` istiyor (`FnOnce` değil)
-                    // — kendi ortamından bir şey TAŞIYAMAZ, sadece ödünç
-                    // alabilir/klonlayabilir.
+                    // `.clone()`, not a move: `dialogs::confirm` takes an
+                    // `Fn` accept closure, not `FnOnce`. The closure cannot move
+                    // captured values out, it can only borrow or clone them.
                     crate::ui::settings::erase_profile_and_quit(&on_confirm_app);
                 },
             );

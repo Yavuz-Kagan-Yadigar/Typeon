@@ -243,9 +243,9 @@ pub fn change_passphrase(dir: &Path, vault: &Vault, new_passphrase: &str) -> Res
     save(dir, vault, new_passphrase)
 }
 
-/// burası her zaman `Backend::Unknown` kullanıyordu, yani hata
-/// mesajı hiçbir zaman "KDE Wallet"/"GNOME Keyring" diyemiyordu. Artık
-/// gerçekten tespit edilen arka uç adlandırılıyor.
+/// Names the keyring backend found by the startup probe, for error messages
+/// such as "KDE Wallet" or "GNOME Keyring". Falls back to `Unknown` when the
+/// probe found nothing.
 fn keyring_name() -> &'static str {
     // Cached by the startup probe: this only formats an error message.
     keyring::detected().unwrap_or(keyring::Backend::Unknown).display_name()

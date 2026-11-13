@@ -84,18 +84,14 @@ impl MainUi {
         self.split.set_show_content(false);
     }
 
-    /// Spec dışı, kullanıcı isteği ("bir left bar with chat list, ve onu
-    /// resize/fully close edecek bir dragable bar"): drag-to-resize
-    /// (300-420px arası) `AdwNavigationSplitView`'a zaten yerleşik — ekstra
-    /// kod gerektirmiyor. Eksik olan tek şey, pencere genişliğinden BAĞIMSIZ
-    /// olarak kullanıcının kendi isteğiyle kenar çubuğunu TAMAMEN
-    /// kapatabilmesiydi (`collapsed` alanı burada hiçbir `AdwBreakpoint`'e
-    /// bağlı değil, yani otomatik daralmıyor — bkz. dosya başı notu, bu
-    /// zaten amaçlanan davranış değil, sadece hiç kullanılmamış bir alan).
-    /// `collapsed=true` + `show_content=true`: sohbet listesi tamamen
-    /// gizlenir, içerik tüm pencereyi kaplar; tekrar açmak için bkz.
-    /// `sidebar_toggle_button` (içerik başlıklarına da eklenir, aksi halde
-    /// kenar çubuğu kapatıldıktan sonra geri açacak hiçbir yol kalmazdı).
+    /// Toggles the chat-list sidebar between shown and collapsed.
+    /// The split view handles drag-to-resize (300-420px) by itself. This
+    /// toggle lets the user hide the sidebar completely, whatever the window
+    /// width. `collapsed` is not tied to a breakpoint, so the sidebar never
+    /// collapses on its own.
+    /// `collapsed=true` with `show_content=true` hides the chat list and lets
+    /// the content fill the window. The toggle button is also added to the
+    /// content headers, so the sidebar can be shown again.
     pub fn toggle_sidebar(self: &Rc<Self>) {
         let collapsing = !self.split.is_collapsed();
         self.split.set_collapsed(collapsing);
@@ -105,20 +101,18 @@ impl MainUi {
     }
 }
 
-/// bkz. `MainUi::toggle_sidebar` dokümantasyonu. Kenar çubuğunun KENDİ
-/// başlığına VE her içerik sayfasının başlığına (sohbet ekranı + "hiçbir
-/// şey seçili değil" yer tutucusu) eklenir — aksi halde kenar çubuğu
-/// kapatıldıktan sonra geri açacak hiçbir yol kalmaz. `split.collapsed`
-/// değişince (bu düğmeden ya da ileride eklenecek bir `AdwBreakpoint`'ten)
-/// simge/ipucu kendiliğinden güncellenir.
+/// See `MainUi::toggle_sidebar`. The button goes into the sidebar's own
+/// header and into every content page header (chat view and the "nothing
+/// selected" placeholder). Without it there is no way to show the sidebar
+/// again once it is collapsed. The icon and tooltip update when
+/// `split.collapsed` changes.
 pub(crate) fn sidebar_toggle_button(main: &Rc<MainUi>) -> gtk::Button {
     let button = gtk::Button::builder().build();
     button.add_css_class("flat");
 
-    // Tek bir simge yeterli (yönlü bir çift yerine) — Adwaita ikon
-    // temasında HER sürümde bulunması garanti olan tek bu ad; hangi yönde
-    // olduğu ipucu metninden ve düğmenin basılı/basılı-değil görünümünden
-    // zaten anlaşılıyor.
+    // One icon instead of a directional pair. This name is present in every
+    // Adwaita icon theme. The direction comes from the tooltip and the
+    // pressed or unpressed look of the button.
     button.set_icon_name("sidebar-show-symbolic");
     // Weak refs both ways: the handler lives on `split`, the button inside
     // it — strong captures would be a cycle that leaks every chat page.
@@ -474,9 +468,9 @@ fn placeholder_page(main: &Rc<MainUi>) -> adw::NavigationPage {
         .build();
 
     let header = adw::HeaderBar::new();
-    // bkz. `MainUi::toggle_sidebar` — kenar çubuğu kapalıyken geri açacak
-    // tek yol bu, çünkü bu sayfa TAM DA kenar çubuğu görünmediğinde
-    // (`collapsed=true`) görünür durumda.
+    // See `MainUi::toggle_sidebar`. When the sidebar is collapsed
+    // (`collapsed=true`) this page is shown, so this button is the only way
+    // back to the sidebar.
     header.pack_start(&sidebar_toggle_button(main));
 
     let toolbar = adw::ToolbarView::new();

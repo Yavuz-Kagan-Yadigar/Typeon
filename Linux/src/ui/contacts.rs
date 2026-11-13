@@ -247,8 +247,8 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
         row.add_suffix(&revoke);
     }
 
-    // Engel kimliği hedefler (hiçbir cihazından paket kabul edilmez).
-    // Engelliyse aynı yerde "Engeli kaldır" düğmesi durur.
+    // Blocking targets the identity, so no packet is accepted from any of its
+    // devices. While blocked, the same spot shows an "Unblock" button.
     if blocked {
         let unblock = gtk::Button::builder()
             .icon_name("object-select-symbolic")
@@ -306,9 +306,9 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
         row.add_suffix(&block);
     }
 
-    // Grup üzerinden tanışılan kişiye TAM güven verme (kullanıcı kararı):
-    // şifreleme zaten aynıydı, değişen yalnızca güven göstergesi — bu yüzden
-    // düğme SADECE o işaret duruyorken görünüyor.
+    // A contact met through a group is not fully trusted by default. The
+    // encryption is the same either way. Only the trust indicator differs, so
+    // the button shows only while that indicator is set.
     if contact.added_via_group {
         let trust = gtk::Button::builder()
             .icon_name("security-high-symbolic")
@@ -319,11 +319,11 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
         let app = main.app.clone();
         let contact_id = contact.contact_id.clone();
         let name = contact.display_name.clone();
-        // Kullanıcı sorusu (2026-08-28): "güven" arkada anahtar alışverişi
-        // YAPMIYOR — anahtarlar zaten uçtan uca kullanımda. Eksik olan tek
-        // şey, o anahtarların gerçekten bu kişiye ait olduğunun
-        // DOĞRULANMASI; bunu ancak kullanıcı başka bir kanaldan
-        // karşılaştırarak yapabilir. O yüzden kod pencerenin İÇİNDE.
+        // "Verified" does not exchange keys. Keys are already in use
+        // end to end. What is missing is confirming that the keys really
+        // belong to this contact. Only the user can do that, by comparing the
+        // safety code over another channel. So the code is shown inside the
+        // dialog.
         trust.connect_clicked(move |_| {
             let app_inner = app.clone();
             let contact_id = contact_id.clone();
