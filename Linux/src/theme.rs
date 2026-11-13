@@ -1,31 +1,31 @@
-//! Material 3 theming: tonal colour palette, shape scale, and the density /
-//! text-size knobs the Android Settings screen exposes.
+//! Material 3 theming: tonal colour palette, shape scale, and the density and
+//! text-size knobs that the Android Settings screen exposes.
 //!
 //! ## Colour
 //!
-//! M3 derives every colour role from a single seed by picking *tones* — fixed
-//! perceptual lightness steps — out of a few hue families. Google's own
+//! Material 3 derives every colour role from a single seed by picking *tones* (fixed
+//! perceptual lightness steps) out of a few hue families. Google's own
 //! implementation does this in HCT (a CAM16-based space). Reimplementing HCT
 //! here would be a lot of colour science for a chat client, so tones are
 //! approximated in HSL: hue is preserved, chroma is scaled per family, and the
 //! tone number is used as HSL lightness. That is not colorimetrically equal to
-//! HCT — mid tones of a very saturated seed come out somewhat more vivid — but
-//! it reproduces the part that matters here: one seed generating a consistent,
-//! correctly-ordered set of surfaces and accents that stay legible in both
+//! HCT (mid tones of a very saturated seed come out somewhat more vivid). It
+//! still gives the part that matters here: one seed generates a consistent,
+//! correctly ordered set of surfaces and accents that stay legible in both
 //! light and dark.
 //!
 //! The generated roles are then mapped onto libadwaita's named colours, so
-//! *every* stock widget — rows, dialogs, popovers, switches, the header bar —
+//! *every* stock widget (rows, dialogs, popovers, switches, the header bar)
 //! picks them up, not only the widgets styled by hand below.
 //!
 //! ## Shape
 //!
-//! M3's shape scale (4 / 8 / 12 / 16 / 28) plus fully-rounded "pill" geometry
+//! Material 3's shape scale (4 / 8 / 12 / 16 / 28), plus fully rounded "pill" geometry
 //! for everything interactive.
 
 use crate::prefs::Prefs;
 
-/// M3's own baseline seed, used when the user has not picked an accent.
+/// Material 3's own baseline seed, used when the user has not picked an accent.
 pub const DEFAULT_SEED: &str = "#6750A4";
 
 // --- a small HSL colour model ---
@@ -89,7 +89,7 @@ fn hsl_to_hex(hue: f64, saturation: f64, lightness: f64) -> String {
     )
 }
 
-/// The tonal families M3 derives from one seed.
+/// The tonal families Material 3 derives from one seed.
 struct Palette {
     hue: f64,
     chroma: f64,
@@ -118,7 +118,7 @@ impl Palette {
     fn tertiary(&self, tone: f64) -> String {
         hsl_to_hex(self.hue + 60.0, self.chroma * 0.50, tone / 100.0)
     }
-    /// Near-grey, faintly tinted by the seed — M3 surfaces are never pure grey.
+        /// Near-grey, faintly tinted by the seed. Material 3 surfaces are never pure grey.
     fn neutral(&self, tone: f64) -> String {
         hsl_to_hex(self.hue, self.chroma * 0.05, tone / 100.0)
     }
@@ -185,7 +185,7 @@ pub fn effective_colors(appearance: &Appearance) -> (String, String, String) {
     )
 }
 
-/// Builds the full stylesheet: M3 colour roles mapped onto libadwaita's named
+/// Builds the full stylesheet: Material 3 colour roles mapped onto libadwaita's named
 /// colours, then the shape and metric rules on top.
 pub fn stylesheet(appearance: &Appearance) -> String {
     let palette = Palette::from_seed(&appearance.seed);
@@ -218,8 +218,8 @@ pub fn stylesheet(appearance: &Appearance) -> String {
         match appearance.background.as_deref().and_then(hex_to_rgb) {
             Some((r, g, b)) => {
                 let (hue, saturation, lightness) = rgb_to_hsl(r, g, b);
-                // Containers step *towards* the viewer: lighter on dark, darker
-                // on light, exactly as M3's surface-container roles do.
+                                // Containers step towards the viewer: lighter on dark, darker
+                                // on light, as Material 3's surface-container roles do.
                 let step = if dark { 0.035 } else { -0.030 };
                 (
                     hsl_to_hex(hue, saturation, lightness - step),
@@ -493,7 +493,7 @@ passwordentry:focus-within, searchentry:focus-within {{
     background-color: @m3_outline_variant;
 }}
 
-/* Containers: corner-large, no hairlines — M3 separates tonally. */
+/* Containers: corner-large, no hairlines. Material 3 separates them tonally. */
 .card, .boxed-list, list.boxed-list {{
     border-radius: 20px;
     border: none;
@@ -504,7 +504,7 @@ list.boxed-list > row:last-child {{ border-bottom-left-radius: 20px; border-bott
 list.boxed-list > row:not(:last-child) {{ border-bottom: none; }}
 list, listview {{ background-color: transparent; }}
 
-/* Navigation rows are pills, as in an M3 navigation drawer. */
+/* Navigation rows are pills, as in a Material 3 navigation drawer. */
 .navigation-sidebar {{ padding: 6px 4px; background-color: transparent; }}
 .navigation-sidebar > row {{
     border-radius: 9999px;
@@ -601,16 +601,9 @@ toast {{ border-radius: 9999px; }}
 avatar {{ border-radius: 9999px; }}
 
 /* ===================== chat bubbles ===================== */
-/* Spec dışı, kullanıcı isteği ("androidde gradient pill var, flatpakda
-   yok"): Android tarafı ekranın en üstündeki balonu daha açık, alttakini
-   mevcut renginde gösterip aralarında KAYDIRMAYA bağlı bir gradyan çiziyor
-   (bkz. Android MergedBubbleDecoration) — GTK4'te balonlar tek tek widget'lar
-   olduğundan (RecyclerView'ın tek bir Canvas'a çizdiği dekorasyon gibi bir
-   mekanizma yok) kaydırma konumuna göre HEPSİNİ yeniden boyayan bir eşdeğer,
-   her scroll adımında tüm balon arka planlarını elle yeniden hesaplamayı
-   gerektirirdi. Onun yerine burada HER balonun KENDİ içinde üstten alta
-   doğru bir gradyan var — aynı görsel "düz değil, hafif katmanlı" hissini
-   çok daha ucuza veriyor. */
+/* Android draws a gradient pill, and the same look is wanted on Flatpak. The bubble colour is
+   lighter at the top of the list and keeps the current colour at the bottom. GTK widgets only
+   know their own bounds, so the gradient is drawn inside each bubble. */
 .bubble {{ border-radius: 20px; }}
 .bubble-mine {{
     background-color: @m3_primary_container;
@@ -623,16 +616,12 @@ avatar {{ border-radius: 9999px; }}
     border-bottom-left-radius: 6px;
 }}
 .bubble-mine .dim-label {{ opacity: 0.85; }}
-/* Spec dışı, kullanıcı isteği ("merging message bubles on linux? ... internal
-   corner fillet is important as well, do it cheaper way" — bkz.
-   `chat.rs` `BUBBLE_GROUP_WINDOW_MS`/`mark_group_seam` dosya başı notları):
-   art arda aynı göndericiden gelen balonlar birbirine değen kenarlarda
-   küçük bir yarıçapa düşer (WhatsApp/Telegram'ın kendi grup görünümüyle
-   AYNI yaklaşım) — `.bubble-mine`/`.bubble-theirs`'in TEK köşeyi küçülten
-   "kuyruk" kuralından DAHA ÖZGÜL olduğundan, o kuralı gerektiğinde
-   sorunsuzca ezer. */
-/* Joined corners of a run of bubbles: small on the straight (aligned) side,
-   square where a narrower bubble meets a wider one. */
+/* Consecutive bubbles from one sender read as a single block. The edges that touch get small
+   radii. The seam classes below handle the corners at width steps. This is the same approach as
+   the WhatsApp and Telegram group views, and it overrides the single tail rule of .bubble-mine
+   and .bubble-theirs because it is more specific. */
+/* Joined corners of a run of bubbles: small on the straight (aligned) side, square where a
+   narrower bubble meets a wider one. */
 .bubble.seam-tl {{ border-top-left-radius: 4px; }}
 .bubble.seam-tr {{ border-top-right-radius: 4px; }}
 .bubble.seam-bl {{ border-bottom-left-radius: 4px; }}
@@ -641,20 +630,15 @@ avatar {{ border-radius: 9999px; }}
 .bubble.sq-tr {{ border-top-right-radius: 0; }}
 .bubble.sq-bl {{ border-bottom-left-radius: 0; }}
 .bubble.sq-br {{ border-bottom-right-radius: 0; }}
-/* Aynı gruptaki balonlar arasındaki boşluğu daraltır — `.chat-messages`
-   listesinin kendi (6px) `spacing`'inin üzerine binen negatif bir üst
-   dolgu. */
+/* Narrows the gap between bubbles of the same group (see `.chat-messages`). */
 /* (GTK CSS rejects negative margins; the gap is set in chat.rs.) */
 .bubble-row-continued {{ }}
-/* Genişlik farkı olan bir dikişteki "iç bükey" çentik — bkz. `mark_group_seam`
-   dosya başı notu (GTK CSS'te web'deki `::before`/`::after` sözde-öğe
-   karşılığı olmadığından bu gerçek, ayrı bir widget). Arka planla AYNI ton:
-   duvarkağıdı ayarlıysa (bkz. `wallpaper` değişkeni) o dokunun üzerine düz
-   bir yama gibi oturur — bilinen, kabul edilmiş küçük bir sınır (ucuz
-   yöntemin bedeli, bkz. dosya başı notu). */
-{fillet_css}/* Spec dışı, kullanıcı isteği ("gönderilen resim/videolar kenarları
-   yuvarlatılmış ve ince bir border ile görünsün" — Android `ShapeableImageView
-   strokeWidth`): burada sadece köşe yarıçapı vardı, çerçeve YOKTU. */
+/* Concave notch at a seam where the width changes (see `mark_group_seam`). GTK CSS has no
+   ::before or ::after pseudo-elements, so the notch is a separate widget. Its colour matches the
+   background. With a wallpaper set (see the `wallpaper` variable) it sits over the texture as a
+   flat patch. This small limit is accepted as the cost of the cheap method. */
+{fillet_css}/* Images and videos in a chat get rounded corners and a thin border, as on Android
+   (ShapeableImageView strokeWidth). Before, only the corner radius was set. */
 .attachment-preview {{
     border-radius: 14px;
     border: 1px solid @m3_outline_variant;

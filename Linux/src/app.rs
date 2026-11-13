@@ -250,10 +250,8 @@ impl App {
         // logged only, nothing restarts on it.
         if kind == "core_panic" {
             log::error!("core caught a panic (see the core log)");
-            // H132/M146: on Android the service restarts a dead core; here the
-            // window just kept looking alive while sends, receives and
-            // downloads were silently dead until a manual restart. Say so —
-            // once per process, prominently.
+                        // On Android the service restarts a dead core. Here the window kept looking alive while sends, receives and downloads were silently
+                        // dead until a manual restart. So the failure is shown, once per process and prominently.
             if !self.core_panic_reported.replace(true) {
                 post_notification(
                     &self.application,
@@ -315,14 +313,10 @@ impl App {
                 if let Err(error) = crate::keyring::delete_key(&profile) {
                     eprintln!("typeon: could not remove the vault key after remote unlink: {error}");
                 }
-                // dizin silme, uygulamanın kapanmasıyla AYNI
-                // ana alındı. `stop_poll_loop` yalnızca bir bayrak set
-                // ediyor (anket iş parçacığı 1 sn'ye kadar uyuyor olabilir)
-                // ve Rust çekirdeği — swarm, tokio görevleri, AÇIK SQLite
-                // bağlantısı — çalışmaya devam ediyor. Dizin hemen silinip
-                // uygulama kullanıcı "OK"a basana kadar açık kalınca,
-                // çekirdek silinmiş bir dizine yazmayı sürdürüyordu. Kasa
-                // anahtarı (asıl kritik olan) yukarıda ZATEN silindi.
+                                // Deleting the directory is on the same main-thread path as closing the app. `stop_poll_loop` only sets a flag (the poll thread may
+                                // be asleep for up to 1 s), and the Rust core (swarm, tokio tasks, the OPEN SQLite connection) keeps running. If the directory is
+                                // deleted right away and the app stays open until the user presses OK, the core would keep writing into a deleted directory. The vault
+                                // key, which is the critical one, was already deleted above.
                 let data_dir = self.data_dir.clone();
                 let app_quit = self.application.clone();
                 let erase_and_quit = move || {
@@ -432,16 +426,11 @@ impl App {
                     }
                 }
             }
-            // Contact/group membership changed under us — keep the name caches
-            // honest so the next event resolves correctly.
-            // Android bunu bir toast'a bağlıyordu, Linux hiç
-            // işlemiyordu — masaüstünde KALICI el sıkışma hatası tamamen
-            // sessizdi (kullanıcı "mesaj gitmiyor" der, arayüzde hiçbir
-            // ipucu yok).
-            // Kullanıcı kararı (2026-08-27): tanınmayan cihaz uyarısı artık
-            // sessiz değil — çekirdek bir olay yayınlıyor, burada masaüstü
-            // bildirimi olarak gösteriliyor. Kabul/reddet/engelle seçimi
-            // kişiler ekranındaki uyarı satırından yapılıyor.
+                        // Contact or group membership changed under us. Keep the name caches current, so the next event resolves correctly.
+                        // Android ties this to a toast. Linux used to ignore it entirely. A PERMANENT handshake failure on desktop was completely silent: the user
+                        // says "messages are not going through" and the interface gives no hint.
+                        // An unrecognised-device alert is no longer silent. The core publishes an event, and it is shown here as a desktop notification. Accept,
+                        // reject or block is chosen from the alert row on the contacts screen.
             "device_alert" => {
                 let who = event.string("contact_display_name");
                 let code = event.string("device_short_code");
@@ -472,8 +461,7 @@ impl App {
                     "{who}: secure session could not be set up — the other side may be on an incompatible version."
                 ));
             }
-            // reddedilen bir grup güncellemesi kullanıcıya
-            // görünmeliydi; hiçbir istemci dinlemiyordu.
+                        // A rejected group update should be visible to the user. No client was listening to it.
             "group_update_failed" => {
                 let name = self.group_name(&event.string("group_id"));
                 self.toast(&format!("{name}: a group update was rejected and not applied."));
@@ -522,9 +510,7 @@ impl App {
         );
     }
 
-    /// Sohbet açık olsa bile gösterilen bildirim — güvenlik uyarıları
-    /// (bkz. `device_alert`) kullanıcının nerede olduğuna bakmadan
-    /// görünmeli.
+        /// Notifications shown even while the chat is open. Security alerts (see `device_alert`) must be visible no matter where the user is.
     fn notify_always(self: &Rc<Self>, id: &str, title: &str, body: &str) {
         // Same setting as message notifications: no names on a lock screen.
         // The body carries a peer-chosen name, so it is markup-escaped too.

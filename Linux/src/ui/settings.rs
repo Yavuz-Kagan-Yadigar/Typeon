@@ -236,12 +236,10 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
     page
 }
 
-/// Sunucular (store-and-forward).
-/// Rölelerden AYRI bir grup olması kasıtlı: bir röle hiçbir şey SAKLAMAZ,
-/// sadece iki taraf da o anda bağlıyken canlı bir devre kurar. Sunucu ise
-/// alıcı çevrimdışıyken zarfı diske yazar ve geri döndüğünde teslim eder.
-/// Kullanıcı için görünen fark tam olarak budur; tek bir "adres ekle"
-/// kutusunda birleştirmek yanlış beklenti yaratırdı.
+/// Servers (store-and-forward).
+/// This is deliberately a separate group from relays. A relay stores nothing. It only builds a live circuit while BOTH sides are
+/// connected. A server writes the envelope to disk while the recipient is offline, and delivers it when the recipient returns.
+/// That difference is what the user sees. Merging both into one "add address" box would set the wrong expectation.
 fn servers_group(app: &Rc<App>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Servers")
@@ -284,7 +282,7 @@ fn servers_group(app: &Rc<App>) -> adw::PreferencesGroup {
                     Ok(()) => {
                         app.toast("Server added. Connecting…");
                         row.set_text("");
-                        // Satır listesi yeniden çizilsin diye pencereyi tazele.
+                                                // Refresh the window so the row list is redrawn.
                         present_page(&app, Some("Network"));
                     }
                     Err(error) => app.toast(&format!("Rejected: {}", error)),
@@ -299,8 +297,7 @@ fn servers_group(app: &Rc<App>) -> adw::PreferencesGroup {
 
 fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
     let title = if entry.name.is_empty() { entry.address.clone() } else { entry.name.clone() };
-    // Kayıt (enrollment), operatörün yayımladığı katılım koduyla yapılır;
-    // başarısız olursa sebebi burada görünür.
+        // Enrolment uses the join code the operator published. If it fails, the reason shows here.
     let subtitle = match (&entry.last_error, entry.connected, entry.enrolled) {
         (Some(err), _, _) if !err.is_empty() => err.clone(),
         (_, true, true) => "Connected".to_string(),
@@ -947,10 +944,8 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
 
     let profile = adw::PreferencesGroup::builder().title("Profile").build();
 
-    // User request (2026-09-04): the account name was fixed forever at the
-    // device name typed during onboarding. Changing it here notifies every
-    // contact over the same ratchet channel the profile picture uses, so
-    // contacts that are offline get it when they return.
+        // The account name used to be fixed to the device name typed during onboarding. Changing it here notifies every contact over the same
+        // ratchet channel the profile picture uses, so contacts that are offline get it when they return.
     let name_row = adw::EntryRow::builder()
         .title("Account name")
         .show_apply_button(true)
@@ -1380,11 +1375,8 @@ fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
             std::process::id(),
             nanos
         ));
-        // A USB stick (FAT/exFAT) has no Unix permissions: the mode stays
-        // 0755 whatever we ask for, so the file can never be private there.
-        // The full key set must not sit wide-open anywhere — even
-        // passphrase-wrapped — so such a location is REFUSED (owner
-        // decision, round 3) instead of being written with a warning.
+                // A USB stick (FAT or exFAT) has no Unix permissions. The mode stays 0755 whatever is asked for, so the file can never be private there.
+                // The full key set must not sit wide open anywhere, even passphrase-wrapped. So such a location is REFUSED, instead of being written with a warning.
         let refused = "Recovery file not written: that location cannot make it private. \
                        Choose a folder inside your home directory.";
         // Only a file this `create_new` call actually created may ever be
