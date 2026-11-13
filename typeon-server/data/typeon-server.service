@@ -1,17 +1,17 @@
-# Typeon sunucusu — systemd birim örneği.
+# TypeOn server: systemd unit example.
 #
 #   sudo cp data/typeon-server.service /etc/systemd/system/
 #   sudo useradd --system --home /var/lib/typeon-server typeon
 #   sudo install -d -o typeon -g typeon /var/lib/typeon-server
 #   sudo systemctl enable --now typeon-server
 #
-# Katılım/davet kodu (sunucu ÇALIŞIRKEN — yönetim komutları yalnızca
-# veritabanını açar, sunucunun son ilan ettiği onion adresini oradan okur):
+# Join code and invite (run while the server is RUNNING. Management commands only open
+# the database and read the onion address the server last announced from it):
 #
 #   sudo -u typeon TYPEON_SERVER_DIR=/var/lib/typeon-server \
 #        /usr/local/bin/typeon-server join-code
 #   sudo -u typeon TYPEON_SERVER_DIR=/var/lib/typeon-server \
-#        /usr/local/bin/typeon-server invite new telefonum 1 7
+#        /usr/local/bin/typeon-server invite new my-phone 1 7
 
 [Unit]
 Description=Typeon store-and-forward server
@@ -27,14 +27,14 @@ Restart=on-failure
 RestartSec=5
 
 Environment=TYPEON_SERVER_DIR=/var/lib/typeon-server
-# Tor her zaman açık: sunucu yalnızca kendi .onion adresinden ulaşılır
-# (dinleyici 127.0.0.1'de); port yönlendirme/alan adı/TLS gerekmez.
+# Tor is always on: the server is reachable only at its own .onion address (the
+# listener is on 127.0.0.1). No port forwarding, domain or TLS is needed.
 Environment=TYPEON_SERVER_NAME=Typeon
-# Toplam disk bütçesi (bayt). Yoksa 16 GiB; diskinize göre ayarlayın.
+# Total disk budget in bytes. Defaults to 16 GiB if unset; set it to suit your disk.
 #Environment=TYPEON_SERVER_BUDGET_BYTES=17179869184
 
-# Sunucu yalnızca kendi veri dizinine yazar. Veritabanı libp2p anahtarını ve
-# katılım jetonunu tutar: dosyalar yalnızca sahibine açık.
+# The server writes only to its own data directory. The database holds the libp2p key
+# and the join token, so the files are readable by the owner only.
 UMask=0077
 StateDirectory=typeon-server
 StateDirectoryMode=0700

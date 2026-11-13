@@ -1,13 +1,12 @@
-# Flatpak manifest — Typeon Linux masaüstü istemcisi.
+# Flatpak manifest for the Typeon Linux desktop client.
 #
-# Neden Flatpak: uygulama GTK4 + libadwaita üzerine kurulu. Bu ikisini bir
-# AppImage'a elle paketlemek (gdk-pixbuf loader önbelleği, derlenmiş GSettings
-# şemaları, ikon teması) kırılgan; GNOME runtime bunların HEPSİNİ zaten doğru
-# sürümlerle sağlıyor.
+# Why Flatpak: the app is built on GTK4 and libadwaita. Packaging those by hand into
+# an AppImage (gdk-pixbuf loader cache, compiled GSettings schemas, icon theme) is
+# fragile. The GNOME runtime provides all of them at the right versions.
 #
-# Derleme SANDBOX İÇİNDE yapılıyor (host'ta değil): host openSUSE'de GTK 4.22
-# var, runtime'da 4.20 — host'ta derleyip runtime'da çalıştırmak sembol
-# uyuşmazlığı riski taşırdı.
+# The build runs INSIDE the sandbox, not on the host. The host runs openSUSE with
+# GTK 4.22 and the runtime has 4.20. Building on the host and running in the runtime
+# would risk symbol mismatches.
 app-id: com.p2p.messenger.Typeon
 runtime: org.gnome.Platform
 runtime-version: '49'
@@ -17,38 +16,36 @@ sdk-extensions:
 command: typeon
 
 finish-args:
-  # libp2p/gossipsub + Tor: ağ olmadan uygulamanın hiçbir anlamı yok.
+    # libp2p + Tor: without the network the app has no purpose.
   - --share=network
   - --share=ipc
   - --socket=wayland
   - --socket=fallback-x11
-  # GPU (VA-API video encode/decode) + camera for video calls. Flatpak has
-  # no camera-only device type (1.18.3 rejects `v4l2`: "valid types are dri,
-  # all, kvm, shm, input, usb"), so the camera needs `--device=all`
-  # (owner decision, 2026-10-29).
+    # GPU (VA-API video encode/decode) and camera for video calls. Flatpak has no
+    # camera-only device type (1.18.3 rejects `v4l2`: "valid types are dri, all, kvm,
+    # shm, input, usb"), so the camera needs `--device=all` (owner decision).
   - --device=all
-  # Sesli mesaj kaydı/çalması, arama sesi.
+    # Voice message recording and playback, and call audio.
   - --socket=pulseaudio
-  # KRİTİK: kasa anahtarı sistem anahtarlığında tutuluyor ve uygulama
-  # anahtarlık olmadan AÇILMIYOR (bkz. src/keyring.rs).
+    # CRITICAL: the vault key is kept in the system keyring, and the app does NOT start
+    # without a keyring (see src/keyring.rs).
   - --talk-name=org.freedesktop.secrets
-  # ...ve SADECE yukarıdaki ad YETMİYOR. Gerçek cihazda doğrulandı: yalnız
-  # `org.freedesktop.secrets` verildiğinde uygulama "No system keyring found
-  # — Neither KDE Wallet nor GNOME Keyring is installed" diyerek açılmıyordu.
-  #
-  # Sebep `keyring.rs`'in kendi dosya başı notunda yazıyor: KDE'de
-  # `org.freedesktop.secrets` çoğu zaman KENDİ BAŞINA D-Bus ile
-  # başlatılabilir DEĞİL, bu yüzden `ensure_available` önce cüzdanı GERÇEK
-  # adıyla aktive ediyor (`StartServiceByName`). Flatpak'in D-Bus proxy'si
-  # ise izin verilmeyen adları `ListActivatableNames` sonucundan da
-  # gizliyor — uygulama hiçbir aday göremeyip "kurulu değil" sonucuna
-  # varıyordu. Dört arka uç adı da `BACKEND_NAMES` listesinden.
+    # The well-known name alone is NOT enough. Verified on a real device: with only
+    # `org.freedesktop.secrets` granted, the app refused to start, reporting "No system
+    # keyring found — Neither KDE Wallet nor GNOME Keyring is installed".
+    #
+    # The reason is in the file header note of `keyring.rs`. On KDE,
+    # `org.freedesktop.secrets` often cannot be started over D-Bus by itself. So
+    # `ensure_available` first activates the wallet under its real name
+    # (`StartServiceByName`). The Flatpak D-Bus proxy also hides names it does not allow
+    # from the `ListActivatableNames` result, so the app saw no candidate and concluded
+    # that nothing was installed. All four backend names are in the `BACKEND_NAMES` list.
   - --talk-name=org.kde.secretservicecompat
   - --talk-name=org.kde.kwalletd6
   - --talk-name=org.kde.kwalletd5
   - --talk-name=org.gnome.keyring
-  # Dosya seçme/kaydetme portal üzerinden gidiyor (gtk::FileDialog), bu
-  # yüzden geniş dosya sistemi izni İSTEMİYORUZ.
+    # File open and save go through the portal (gtk::FileDialog), so the app does NOT
+    # request broad filesystem access.
 
 modules:
   - name: typeon
@@ -58,8 +55,8 @@ modules:
       env:
         CARGO_HOME: /run/build/typeon/cargo
         CARGO_TERM_COLOR: never
-      # Cargo bağımlılıkları sandbox içinde kendisi çeksin diye ağ açık.
-      # (Alternatifi `cargo vendor` ile kaynakları depoya gömmek olurdu.)
+            # Network is open so cargo can fetch dependencies inside the sandbox.
+            # (The alternative would be vendoring the sources into the repo with `cargo vendor`.)
       build-args:
         - --share=network
     build-commands:
@@ -81,12 +78,11 @@ modules:
           - reviews
           - Linux/target
           - Linux/target-sdk
-          # `Linux/packaging` KOMPLE atlanıyor (sadece build çıktıları
-          # değil): kaynak `../..`, yani manifest'in KENDİSİ de kopyalanan
-          # ağacın içinde. Atlanmazsa manifest'te tek satır değiştirmek
-          # kaynak hash'ini değiştiriyor, flatpak-builder önbelleği ıskalıyor
-          # ve sadece izin (finish-args) düzenlemesi için TÜM Rust bağımlılık
-          # ağacı baştan derleniyor (~15 dk). Bir kez bu şekilde kaybedildi.
+                    # `Linux/packaging` is skipped ENTIRELY, not only its build outputs. The source
+                    # is `../..`, which includes the manifest itself. If it were not skipped,
+                    # changing one line of the manifest would change the source hash, flatpak-builder's
+                    # cache would miss, and the whole Rust dependency tree would be rebuilt from
+                    # scratch (about 15 minutes) just to edit finish-args. This happened once.
           - Linux/packaging
           - p2p_messenger_android/app/build
           - p2p_messenger_android/app/src/main/cpp/rust/target
