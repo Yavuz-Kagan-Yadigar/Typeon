@@ -545,13 +545,15 @@ impl P2PCore {
         }
     }
 
-    /// User request (2026-09-04): changes the account name and automatically notifies EVERY known contact of the change.
-    /// Before, the name was asked once in the "device name" dialog at first launch, and could NEVER be changed afterwards, neither locally nor on the other side.
-    /// Since there is no central directory, the notice goes out with the same fan-out pattern as the avatar (`set_own_profile_picture`): to each contact's each
-    /// active device, over the ratchet, as a message awaiting delivery confirmation. So if the contact is offline, it receives the change when it returns, and it is not lost.
-    /// `sync_to_siblings` is also called: my own secondary devices learn this device's new name (`SyncedDevice.device_name`).
-    /// Called before the account is deleted: sends `AccountDeleted` to all contacts (including those met through a group) and to sibling devices, and hands the founder
-    /// role to a remaining member in groups I founded. Returns the number of devices the notice was sent to. Deleting the local data is the UI's job (see `account_deletion_pending`).
+    /// Changes the account name and automatically notifies EVERY known contact of the change. The name used to be asked once, in the
+    /// "device name" dialog at first launch, and could never be changed afterwards, either locally or on the other side.
+    /// There is no central directory, so the notice goes out with the same fan-out pattern as the avatar (`set_own_profile_picture`): to each
+    /// contact's each active device, over the ratchet, as a message awaiting delivery confirmation. A contact that is offline receives the change
+    /// when it returns, so it is not lost.
+    /// `sync_to_siblings` is also called, so my own secondary devices learn this device's new name (`SyncedDevice.device_name`).
+    /// Called before the account is deleted: sends `AccountDeleted` to all contacts (including those met through a group) and to sibling devices,
+    /// and hands the founder role to a remaining member in groups I founded. Returns the number of devices the notice was sent to. Deleting the
+    /// local data is the UI's job (see `account_deletion_pending`).
     pub(crate) fn delete_account(&mut self) -> Result<usize, String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let own_id = self.my_identity_id().ok_or("No identity")?;
@@ -715,19 +717,19 @@ impl P2PCore {
         Ok(())
     }
 
-    /// See the `packet.rs` `MessageContent::AddressAnnounce` docs (the bug: "after one of two Tor-enabled devices on the same LAN switches to mobile data and Tor, it cannot
-    /// reach anyone"). Same fan-out pattern as `set_own_profile_picture`: sends our CURRENT `get_node_address()` to EVERY known contact. If there is no address yet (no
-    /// listen address reported), it is a silent no-op. Callers: once after `start_network` (with the current address), when Tor reaches Ready (see the `tor_was_ready`
-    /// comparison in `poll_events`), and on a network change notice (see `reconnect_all_known_now`). All three call this one function.
+    /// See the `MessageContent::AddressAnnounce` docs in packet.rs. Same fan-out pattern as `set_own_profile_picture`: sends our CURRENT
+    /// `get_node_address()` to EVERY known contact. This was added because a device on the same LAN as a Tor-enabled peer that switched to mobile
+    /// data could not reach anyone afterwards. If there is no address yet (no listen address reported), it is a silent no-op. Callers: once after
+    /// `start_network` (with the current address), when Tor reaches Ready (see the `tor_was_ready` comparison in `poll_events`), and on a network
+    /// change notice (see `reconnect_all_known_now`). All three call this one function.
     pub(crate) fn announce_address_to_all_contacts(&mut self) {
         let addr = match self.get_node_address() {
             Some(a) => a,
             None => return,
         };
-        // The address is the stable onion and PeerId: it does not change with
-        // the network, yet every network change sent a signed packet (and a
-        // server deposit) to every contact device. Again only when it changed,
-        // or once a day for a device that missed it.
+        // The address is the stable onion and PeerId: it does not change with the network. But every network change sent a signed packet
+        // (and a server deposit) to every contact device. Now it is sent only when the address actually changed, or once a day to a device that
+        // missed it.
         let now = current_time_ms();
         let last = self.meta_str("last_announced_addr");
         let unchanged = last.as_deref().and_then(|v| v.rsplit_once('|')).map_or(false, |(a, t)| {
@@ -1085,10 +1087,11 @@ impl P2PCore {
         self.ratchets.contains_key(peer_device_fingerprint)
     }
 
-    /// The REAL live connection status. Unlike `has_active_session` (which only answers "has a ratchet session been set up?", stays true FOREVER once it is set up,
-    /// is a cryptographic state, independent of the network connection), this function checks the `Swarm`'s OWN live connection table (`is_connected`).
-    /// Before, ChatActivity's status line used `has_active_session`, so even when the other side was actually unreachable (after the ratchet was set up once),
-    /// it always showed "Connected". Returns `false` if there is no record for the device in `device_to_peer_id` (no packet from that device has been received during this process).
+    /// The REAL live connection status. Unlike `has_active_session` (which only answers "has a ratchet session been set up?". It stays true
+    /// forever once set up, and is a cryptographic state independent of the network connection), this function checks the `Swarm`'s OWN live
+    /// connection table (`is_connected`). Before, the ChatActivity status line used `has_active_session`, so even when the other side was actually
+    /// unreachable (after the ratchet was set up once), it always showed "Connected". Returns `false` if there is no record for the device in
+    /// `device_to_peer_id` (no packet from that device has been received during this process).
     pub(crate) fn is_peer_connected(&self, peer_device_fingerprint: &str) -> bool {
         let peer_id = match self.device_to_peer_id.get(peer_device_fingerprint) {
             Some(pid) => pid,
