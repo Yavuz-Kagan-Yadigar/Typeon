@@ -23,7 +23,8 @@ object P2PLib {
      *  exist only in memory and are lost when the process dies. */
     external fun createIdentity(deviceName: String): String
     /** Called once after createIdentity: returns the secret key bundle just generated (CBOR, plaintext). It stays in memory on the Rust side, so a failed
-     *  disk write can be retried, and it is cleared only by loadSecretBundle or a local wipe. */
+     *  disk write can be retried. It is cleared by loadSecretBundle and by wipe_all_local_state
+     *  (device revoke or local wipe), and replaced when createIdentity or importRecovery generates a new bundle. */
     external fun getPendingSecretBundle(): ByteArray
     /** Loads a secret bundle, decrypted by the Keystore, into memory. Called at app start, after initDatabase, once hasStoredIdentity is true. */
     external fun loadSecretBundle(bundleBytes: ByteArray): Boolean
