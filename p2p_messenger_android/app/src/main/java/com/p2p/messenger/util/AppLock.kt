@@ -12,20 +12,16 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 
 /**
- * uygulamayı açmak için bir şifre.
+ * A password that opens the app.
  *
- * Şifrenin KENDİSİ hiçbir yerde saklanmaz — rastgele bir tuzla (salt)
- * birlikte PBKDF2-HMAC-SHA256 türevi saklanır. Bu, cihaz belleğine erişen
- * birinin şifreyi doğrudan okumasını engeller; yüksek iterasyon sayısı da
- * kaba kuvvet denemesini pahalılaştırır. (Bu kilit, uygulamanın uçtan uca
- * şifrelemesinden BAĞIMSIZ bir katman: kimlik/ratchet anahtarları zaten
- * Android Keystore ile korunuyor — bkz. `KeystoreCrypto` — bu ekran
- * telefonu eline alan birine karşı arayüz düzeyinde bir engel.)
+ * The password itself is stored nowhere. A PBKDF2-HMAC-SHA256 derivation with a random salt is stored instead.
+ * That stops someone with access to device memory from reading the password directly, and a high iteration count
+ * makes guessing expensive. This lock is a layer SEPARATE from the end-to-end encryption of the app: identity and
+ * ratchet keys are already protected by the Android Keystore (see `KeystoreCrypto`). This screen is an interface-level
+ * barrier against someone who picks up the phone.
  *
- * Kullanıcı isteği: şifre "asla boş olmamalı" — bu yüzden hem ilk kurulum
- * (bkz. `AppLockActivity` CREATE modu) hem de değiştirme (bkz.
- * SettingsFragment) akışında boş bir değer kabul edilmez ve şifreyi
- * TAMAMEN kaldırmanın bir yolu yoktur.
+ * The password must never be empty. So neither the first setup (`AppLockActivity` CREATE mode) nor a change
+ * (SettingsFragment) accepts an empty value, and there is no way to remove the password entirely.
  */
 object AppLock {
     private const val PREFS_NAME = "p2p_settings"
@@ -33,61 +29,49 @@ object AppLock {
     private const val KEY_HASH = "app_lock_hash"
     private const val KEY_ITERATIONS = "app_lock_iterations"
 
-    /** GÜVENLİK DENETİMİ DÜZELTMESİ (2026-09-05): eski sabit 120.000'di —
-     *  2018 civarı OWASP tavsiyesiydi, modern GPU/ASIC kaba kuvvetine karşı
-     *  artık zayıf sayılıyor. Güncel OWASP tavsiyesi PBKDF2-HMAC-SHA256 için
-     *  ≥600.000, ama bu her açılışta (bkz. AppLockActivity) hissedilir bir
-     *  gecikme yaratır; 300.000 modern bir telefonda hâlâ ~300-500 ms'de
-     *  kalıp sözlük saldırısını iki buçuk katına çıkarıyor — kabul edilebilir
-     *  bir orta nokta.
+    /** The old fixed value was 120,000. That was the OWASP recommendation around 2018, and modern GPU and ASIC guessing
+     *  makes it weak. Current OWASP guidance for PBKDF2-HMAC-SHA256 is at least 600,000, but that adds a noticeable delay
+     *  on every unlock (see AppLockActivity). 300,000 still takes about 300-500 ms on a modern phone, and it multiplies
+     *  the cost of a dictionary attack by two and a half. It is a reasonable middle point.
      *
-     *  Sabiti YÜKSELTMEK eski kurulumları KİLİTLEMEMELİ: hash'i hangi
-     *  iterasyon sayısıyla türettiğimiz `KEY_ITERATIONS`'da AYRICA saklanır
-     *  (bkz. `setPassword`/`verify`) — eski bir kayıtta bu alan yoksa eski
-     *  sabit (120.000) varsayılır, yeni her `setPassword` çağrısı güncel
-     *  sabitle yazar. Böylece kullanıcı şifresini bir dahaki DEĞİŞTİRMESİNDE
-     *  sessizce güçlendirilmiş olur, mevcut şifresi bozulmaz. */
+     *  Raising the constant must NOT lock out existing installs. The iteration count a hash was derived with is stored
+     *  separately in `KEY_ITERATIONS` (see `setPassword` / `verify`). If an old record has no such field, the old constant
+     *  (120,000) is assumed. Every new `setPassword` call writes the current constant. So the password gets stronger
+     *  silently the next time the user changes it, and the existing password does not break. */
     private const val ITERATIONS = 600_000
-    /** bkz. `ITERATIONS` dokümantasyonu — bu değeri yükseltmeden önce diske
-     *  yazılmış kayıtların gerçek iterasyon sayısı. */
+    /** See the `ITERATIONS` docs. This is the iteration count the records already written to disk were derived with,
+     *  before that constant is raised. */
     private const val LEGACY_ITERATIONS = 120_000
     private const val KEY_LENGTH_BITS = 256
     const val MIN_PASSWORD_LENGTH = 6
 
-    /** Süreç ömrü boyunca tutulan kilit durumu — DİSKE YAZILMAZ: süreç
-     *  öldüğünde (ya da uygulama arka plana düşüp `lock()` çağrıldığında)
-     *  şifre yeniden sorulur. */
+    /** Lock state for the life of the process. NOT written to disk. When the process dies, or the app goes to the
+     *  background and `lock()` is called, the password is asked again. */
     @Volatile private var unlocked = false
 
-    /** bkz. `beginTrustedExcursion` — bu ana kadar (elapsedRealtime) gelen
-     *  İLK arka plan geçişi kilitlemeden geçer. Zaman damgası, düz bir
-     *  bayrak DEĞİL: bkz. `TRUSTED_EXCURSION_WINDOW_MS`. */
+    /** See `beginTrustedExcursion`. The first background transition after this time (elapsedRealtime) passes without
+     *  locking. The timestamp is used, not a plain flag. See `TRUSTED_EXCURSION_WINDOW_MS`. */
     @Volatile private var excursionValidUntil = 0L
 
     /**
-     * Bir "güvenli çıkış" işaretinin ne kadar süre geçerli olduğu.
+     * How long a "trusted exit" marker stays valid.
      *
-     * Kullanıcı raporu (2026-08-29): "bildirime tıklandığında şifresiz bir
-     * şekilde açılıyor". Sebep, işaretin SÜRESİZ bir bayrak olmasıydı:
-     * `beginTrustedExcursion()` çağrılıp da beklenen dış ekran HİÇ
-     * açılmazsa (en somut örnek: Android 13+'ta iki kez reddedilmiş
-     * `POST_NOTIFICATIONS` izni — `launch()` sistem diyaloğunu artık
-     * GÖSTERMEZ, anında reddeder, uygulama arka plana hiç düşmez) bayrak
-     * asılı kalıyor ve SIRADAKİ gerçek arka plan geçişini — yani
-     * kullanıcının Home'a basmasını — kilitlemeden geçiriyordu. Uygulama o
-     * andan sonra kilitsiz kalıyor, bildirimden açılınca da şifre
-     * sorulmuyordu.
+     * A user report said the app opened without a password when a notification was tapped. The cause was that the marker
+     * had no time limit. `beginTrustedExcursion()` was called, but the expected external screen never opened. An example:
+     * the POST_NOTIFICATIONS permission was denied twice on Android 13+. `launch()` then does not show the system dialog
+     * any more, it denies at once, and the app never goes to the background. The marker stayed set, and the NEXT real
+     * background transition (the user pressing Home) went through without a lock. After that the app stayed unlocked, and
+     * opening from a notification did not ask for the password.
      *
-     * Zaman penceresi bunu yapısal olarak kapatır: gerçekten başlattığımız
-     * bir Activity bizi anında (milisaniyeler içinde) arka plana düşürür;
-     * hiç açılmayan bir ekranın işareti ise kendiliğinden geçersizleşir.
+     * The time window closes this structurally. An activity we really started sends us to the background within
+     * milliseconds. A marker for a screen that never opened expires by itself.
      */
     private const val TRUSTED_EXCURSION_WINDOW_MS = 5_000L
     private const val MAX_EXCURSION_MS = 60_000L  // was 3 min; same as BACKGROUND_LOCK_MS
     @Volatile private var excursionLeftAt = 0L
 
-    /** Kullanıcı isteği: arka planda bu süreden uzun kalırsa şifre sorulur
-     *  (ekran kilitlenince hemen — bkz. `lockNow`); kısa geçişlerde sorulmaz. */
+    /** If the app stays in the background longer than this, the password is asked (the screen locks at once, see `lockNow`).
+     *  Short transitions do not ask. */
     private const val BACKGROUND_LOCK_MS = 60_000L
     @Volatile private var backgroundedAt = 0L
 
@@ -96,7 +80,7 @@ object AppLock {
         return prefs.contains(KEY_HASH) && prefs.contains(KEY_SALT)
     }
 
-    /** `false` döner (ve HİÇBİR ŞEY yazmaz) şifre boşsa — bkz. sınıf notu. */
+    /** Returns `false` and writes NOTHING if the password is empty. See the class note. */
     fun setPassword(context: Context, password: String): Boolean {
         if (password.isBlank() || password.length < MIN_PASSWORD_LENGTH) return false
         val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
@@ -110,18 +94,16 @@ object AppLock {
     }
 
     /**
-     * `MessageDigest.isEqual`: sabit zamanlı karşılaştırma — düz `==`
-     * (ya da `contentEquals`) ilk farklı bayta gelince erken çıkar ve
-     * teorik olarak zamanlama sızıntısına açıktır.
+     * `MessageDigest.isEqual` is a constant-time comparison. A plain `==` (or `contentEquals`) returns at the first
+     * differing byte, and in theory that leaks timing information.
      */
     fun verify(context: Context, password: String): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val saltB64 = prefs.getString(KEY_SALT, null) ?: return false
         val hashB64 = prefs.getString(KEY_HASH, null) ?: return false
-        // bkz. `ITERATIONS` dokümantasyonu: bu alan güncel sabit
-        // yükseltilmeden ÖNCE yazılmış bir kayıtta yok — o durumda eski
-        // (120.000) sabitle türetilmiş olması gerekir, aksi halde her eski
-        // kurulumun şifresi bu güncellemeyle KIRILIRDI.
+        // See the `ITERATIONS` docs. This field is absent in a record written BEFORE the current constant was raised, so
+        // that record must have been derived with the old constant (120,000). Otherwise every old install's password would
+        // break with this update.
         val iterations = if (prefs.contains(KEY_ITERATIONS)) prefs.getInt(KEY_ITERATIONS, ITERATIONS) else LEGACY_ITERATIONS
         return try {
             val expected = Base64.decode(hashB64, Base64.NO_WRAP)
@@ -133,8 +115,8 @@ object AppLock {
     }
 
     private fun derive(password: String, salt: ByteArray, iterations: Int): ByteArray {
-        // Native (ring) yol: aynı çıktı, Java'dan kat kat hızlı — Tab A8'de
-        // Java ile kilit açma 4-8 sn sürüyordu. Kütüphane yüklenemezse Java.
+        // Native (ring) path: same output, much faster than Java. On a Samsung Tab A8 the Java unlock took 4-8 seconds.
+        // Java is the fallback if the library cannot be loaded.
         try {
             val out = com.p2p.messenger.P2PLib.pbkdf2Sha256(password, salt, iterations, KEY_LENGTH_BITS / 8)
             if (out.size == KEY_LENGTH_BITS / 8) return out
@@ -150,15 +132,15 @@ object AppLock {
         unlocked = true
     }
 
-    /** Stored, so a force stop does not hand out fresh attempts. Time since
-     *  boot, not the wall clock: the user can set that one forward. */
+    /** Stored, so a force stop does not hand out fresh attempts. Time since boot, not the wall clock: the user can set the
+     *  wall clock forward. */
     private const val FREE_ATTEMPTS = 5
     private const val KEY_FAILED_ATTEMPTS = "app_lock_failed_attempts"
     private const val KEY_WAIT_FROM = "app_lock_wait_from_elapsed"
     private const val KEY_WAIT_MS = "app_lock_wait_ms"
     private const val KEY_WAIT_WALL = "app_lock_wait_wall"
 
-    /** Seconds until the next attempt is allowed, 0 = now. */
+    /** Seconds until the next attempt is allowed. 0 = now. */
     fun retryWaitSeconds(context: Context): Int {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val waitMs = prefs.getLong(KEY_WAIT_MS, 0L)
@@ -166,10 +148,9 @@ object AppLock {
         val now = SystemClock.elapsedRealtime()
         var from = prefs.getLong(KEY_WAIT_FROM, 0L)
         if (now < from) {
-            // Rebooted: time since boot restarted. Re-anchor from the wall
-            // clock saved at the failure so the reboot does not refund the wait,
-            // but credit no more than the uptime since boot: a clock set
-            // forward before opening the app must not skip the wait.
+            // After a reboot the time since boot restarts. Re-anchor from the wall clock saved at the failure, so the reboot
+            // does not refund the wait. But credit no more than the uptime since boot: a clock set forward before opening the
+            // app must not skip the wait.
             val wallPassed = (System.currentTimeMillis() - prefs.getLong(KEY_WAIT_WALL, 0L)).coerceIn(0L, minOf(waitMs, now))
             from = now - wallPassed
             prefs.edit().putLong(KEY_WAIT_FROM, from).apply()
@@ -177,7 +158,7 @@ object AppLock {
         return ((from + waitMs - now).coerceAtLeast(0L) + 999).div(1000).toInt()
     }
 
-    /** After [FREE_ATTEMPTS] wrong passwords: 30 s, doubling to 16 min. */
+    /** After [FREE_ATTEMPTS] wrong passwords: 30 s, doubling up to 16 min. */
     fun noteFailedAttempt(context: Context) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val failed = prefs.getInt(KEY_FAILED_ATTEMPTS, 0) + 1
@@ -191,8 +172,8 @@ object AppLock {
         edit.apply()
     }
 
-    /** Password check for flows outside the lock screen (password change):
-     *  same wait + failure counting as the prompt. False while waiting. */
+    /** Password check for flows outside the lock screen (password change). It applies the same wait and failure counting as the
+     *  prompt. Returns false while waiting. */
     fun verifyThrottled(context: Context, password: String): Boolean {
         if (retryWaitSeconds(context) > 0) return false
         val ok = verify(context, password)
@@ -206,36 +187,28 @@ object AppLock {
     }
 
     /**
-     * Kullanıcı raporu: "mesaj için dahili dosya seçici ya da kameradan
-     * sonra şifre istemesin."
+     * A user report: "after the internal file picker or the camera for a message, don't ask for the password."
      *
-     * Sorun yapısal: sistem dosya seçicisi (SAF/DocumentsUI), çalışma
-     * zamanı izin diyaloğu, harici görüntüleyici ve sistem ayar ekranları
-     * BAŞKA süreçlerde çalışan Activity'ler — açıldıklarında bizim TÜM
-     * Activity'lerimiz `onStop`'a düşer, "başlamış Activity" sayacı 0 olur
-     * ve `lock()` tetiklenir. Kullanıcı aslında uygulamadan HİÇ çıkmamıştır;
-     * dönüşte şifre sorulması saf bir hata.
+     * The problem is structural. The system file picker (SAF / DocumentsUI), the runtime permission dialog, external viewers
+     * and system settings screens are activities in OTHER processes. When they open, all of OUR activities get `onStop`, the
+     * started-activity count drops to 0, and `lock()` fires. The user never left the app, so asking for the password on
+     * return is a plain bug.
      *
-     * Bu yüzden dışarıya kontrol devreden HER çağrı noktası (bkz. bu
-     * fonksiyonun çağrıldığı yerler) bunu önceden bildirir ve SIRADAKİ tek
-     * arka plan geçişi kilitlemez.
+     * So every call site that hands control to an outside screen (see where this function is called) announces it first,
+     * and the NEXT single background transition is not locked.
      *
-     * BİLİNEN SINIR: kullanıcı seçici/izin ekranı açıkken Home'a basarsa
-     * bayrak zaten harcanmış olduğundan (bizim Activity'lerimiz o noktada
-     * çoktan durmuş, ikinci bir `onStop` gelmez) o dönüşte de şifre
-     * sorulmaz — kilit ancak bir SONRAKİ gerçek arka plan geçişinde
-     * devreye girer. Bunu kapatmanın tek yolu "hangi Activity'nin öne
-     * geçtiğini" sormak olurdu ki Android bunu (haklı olarak) uygulamalara
-     * vermiyor. Sık ve görünür bir hata olan yanlış kilitlenmeye karşı
-     * bilinçli bir takas.
+     * KNOWN LIMIT: if the user presses Home while the picker or permission screen is open, the flag is already used up. Our
+     * activities have stopped at that point, and no second `onStop` arrives. So the password is not asked on that return
+     * either. The lock then applies only on the NEXT real background transition. Closing this would need to know which
+     * activity is in front, and Android deliberately does not give apps that. This is a deliberate trade: a wrong lock is a
+     * frequent and visible error, and this gap is rarer.
      */
     fun beginTrustedExcursion() {
         excursionValidUntil = SystemClock.elapsedRealtime() + TRUSTED_EXCURSION_WINDOW_MS
     }
 
-    /** Our screen was covered within the window (a chooser or a dialog of
-     *  another app): the excursion holds until our screen comes back, however
-     *  long the user takes to pick an app there. */
+    /** Our screen was covered within the window (a chooser or a dialog of another app). The excursion holds until our screen
+     *  comes back, however long the user takes to pick an app there. */
     @Volatile private var excursionCovered = false
 
     fun excursionPaused() {
@@ -248,27 +221,25 @@ object AppLock {
         excursionCovered = false
     }
 
-    /** bkz. P2PApplication.onActivityStopped — uygulama tamamen arka plana
-     *  düştüğünde çağrılır. */
+    /** See P2PApplication.onActivityStopped. Called when the app goes fully to the background. */
     fun lock() {
         val validUntil = excursionValidUntil
         val covered = excursionCovered
         excursionValidUntil = 0L
         excursionCovered = false
-        // `elapsedRealtime`: duvar saati DEĞİL — kullanıcı/şebeke saati
-        // değiştirse bile pencere kayamaz.
+        // `elapsedRealtime`, not the wall clock. The window cannot move even if the user or the network changes the clock.
         val inWindow = validUntil != 0L && SystemClock.elapsedRealtime() < validUntil
         if (covered || inWindow) {
             excursionLeftAt = SystemClock.elapsedRealtime()
-            // Left later from a chooser: the user may have gone Home from it,
-            // so the usual background timeout, not the long excursion one.
+            // Left later from a chooser: the user may have gone Home from it, so the usual background timeout applies, not
+            // the long excursion one.
             excursionLimitMs = if (inWindow) MAX_EXCURSION_MS else BACKGROUND_LOCK_MS
             return
         }
         backgroundedAt = SystemClock.elapsedRealtime()
     }
 
-    /** Ekran kapandı: bekleme olmadan hemen kilitle. */
+    /** Screen off: lock at once, with no delay. */
     fun lockNow(context: Context?) {
         if (!unlocked) return
         unlocked = false
@@ -278,9 +249,8 @@ object AppLock {
             purgePlainCache(context)
             return
         }
-        // An external viewer may still have a decrypted file open: purge when
-        // the user comes back (`guard`), at the latest when the excursion
-        // would have timed out anyway.
+        // An external viewer may still have a decrypted file open. Purge when the user comes back (`guard`), at the latest
+        // when the excursion would have timed out anyway.
         purgePending = true
         purgeContext = context.applicationContext
         val wait = (leftAt + excursionLimitMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
@@ -288,7 +258,7 @@ object AppLock {
         mainHandler.postDelayed(purgeLater, wait)
     }
 
-    /** `lockNow` during a trusted excursion: the purge waits for its end. */
+    /** `lockNow` during a trusted excursion: the purge waits for the excursion to end. */
     @Volatile private var purgePending = false
     @Volatile private var purgeContext: Context? = null
     @Volatile private var excursionLimitMs = MAX_EXCURSION_MS
@@ -301,9 +271,8 @@ object AppLock {
         }
     }
 
-    /** Decrypted attachment copies do not outlive the unlocked session. Only
-     *  where the lock really engages: a trusted excursion (picker, external
-     *  viewer) keeps `unlocked`, so the file it has open stays. */
+    /** Decrypted attachment copies do not outlive the unlocked session. This happens only where the lock really engages.
+     *  A trusted excursion (picker, external viewer) keeps `unlocked`, so the file it has open stays. */
     private fun purgePlainCache(context: Context) {
         if (!hasPassword(context)) return
         // Off the main thread: deleting large decrypted videos takes time. File names are unique, so order does not matter.
@@ -311,28 +280,24 @@ object AppLock {
         val cache = context.cacheDir
         Thread {
             java.io.File(files, "attachments/plain_cache").listFiles()?.forEach { it.deleteRecursively() }
-            // decrypted full-screen avatar copies (AvatarUtil.openFullscreen)
+            // Decrypted full-screen avatar copies (AvatarUtil.openFullscreen).
             java.io.File(cache, "avatar_view").listFiles()?.forEach { it.deleteRecursively() }
         }.start()
     }
 
     /**
-     * HER Activity'nin `onStart`'ından çağrılır (bkz.
-     * P2PApplication.onActivityStarted) — bir bildirimden doğrudan
-     * ChatActivity'ye girmek de kilidi atlayamasın diye, sadece
-     * MainActivity'de değil.
+     * Called from the `onStart` of EVERY activity (see P2PApplication.onActivityStarted). It is not only in MainActivity,
+     * so that opening ChatActivity straight from a notification cannot skip the lock.
      *
-     * Şifre henüz hiç kurulmamışsa da AYNI ekran açılır (CREATE modunda):
-     * kullanıcı isteği gereği şifresiz bir durum kalıcı olamaz.
+     * If no password has been set yet, the same screen opens in CREATE mode. A state with no password cannot be permanent:
+     * the user must set one.
      */
     fun guard(activity: Activity) {
-        // The call screen works like a phone call: answer or decline without
-        // the app password. Since the app locks on screen-off the password
-        // prompt covered every incoming call. Everything else stays guarded.
+        // The call screen works like a phone call: answer or decline without the app password. Since the app locks on
+        // screen-off, the password prompt would otherwise cover every incoming call. Everything else stays guarded.
         if (activity is AppLockActivity) return
-        // Güvenilir gezinti kilidi ertelediyse ve kullanıcı seçiciden Home'a
-        // basıp uzun süre sonra döndüyse kilitli açılmalı — aksi halde
-        // uygulama süresiz kilitsiz kalırdı.
+        // If a trusted navigation deferred the lock, and the user pressed Home from the picker and came back a long time later,
+        // the app must open locked. Otherwise it would stay unlocked forever.
         val wasUnlocked = unlocked
         val leftAt = excursionLeftAt
         if (leftAt != 0L) {
@@ -347,18 +312,16 @@ object AppLock {
             mainHandler.removeCallbacks(purgeLater)
             purgePlainCache(activity)
         }
-        // After the timeouts above: skipping them here let the call screen's
-        // own stop renew `backgroundedAt`, so the app opened without the
-        // password for a minute after any call.
+        // After the timeouts above. Skipping them here let the call screen's own stop renew `backgroundedAt`, so the app opened
+        // without the password for a minute after any call.
         if (activity is com.p2p.messenger.ui.CallActivity) return
-        // The screen under the prompt is drawn for a moment before the prompt
-        // covers it: its content stays hidden until the password is in.
+        // The screen under the prompt is drawn for a moment before the prompt covers it. Its content stays hidden until the
+        // password is entered.
         activity.findViewById<android.view.View>(android.R.id.content)?.visibility =
             if (unlocked) android.view.View.VISIBLE else android.view.View.INVISIBLE
         if (unlocked) return
-        // No "already showing" short-circuit: an activity started over the prompt
-        // (a notification with CLEAR_TOP) finished it and stayed open unlocked.
-        // SINGLE_TOP keeps a prompt that is already on top from stacking.
+        // No "already showing" short-circuit: an activity started over the prompt (a notification with CLEAR_TOP) would finish
+        // it and stay open unlocked. SINGLE_TOP keeps a prompt that is already on top from stacking.
         activity.startActivity(
             Intent(activity, AppLockActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_NO_ANIMATION)

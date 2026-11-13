@@ -18,28 +18,20 @@ import java.util.concurrent.TimeUnit
 
 class P2PApplication : Application() {
     /**
-     * uygulama ön plana geldiğinde (arka
-     * planda bekletildikten SONRA yeniden açıldığında — herhangi bir
-     * Activity'nin sıradan `onResume`'u DEĞİL, ör. ChatActivity açıp
-     * kapatmak/döndürmek bunu TETİKLEMEMELİ) bekleyen tüm mesajları HEMEN
-     * yeniden dener (bkz. `P2PLib.retryAllPendingNow`). Android'in bunun
-     * için standart aracı `androidx.lifecycle:lifecycle-process`
-     * (`ProcessLifecycleOwner`) — ama bu proje o bağımlılığı henüz
-     * içermiyor ve yeni bir bağımlılık eklemek gradle senkronu
-     * gerektirir (build doğrulanamıyor). Bunun yerine `ProcessLifecycleOwner`'ın
-     * kendi iç mantığıyla AYNI, bağımlılıksız desen: "başlamış" (started,
-     * `onStart`..`onStop` arası) Activity sayacı — sıfırdan bire çıkış
-     * "uygulama ön plana geldi" anıdır (birden çok Activity arasında
-     * geçiş sırasında sayaç asla 0'a inmez, bu yüzden ekran değiştirmek
-     * yanlışlıkla tetiklemez).
+     * Runs when the app comes back to the foreground after being stopped. Ordinary `onResume` of an
+     * activity does NOT trigger it (opening and closing a chat screen, or rotating, must not). It retries
+     * all pending messages at once (see `P2PLib.retryAllPendingNow`). The standard tool is
+     * `ProcessLifecycleOwner` from androidx.lifecycle:lifecycle-process, but this project does not depend
+     * on it. Adding a dependency needs a Gradle sync. So the same logic is done without it: a count of
+     * started activities (between `onStart` and `onStop`). Going from 0 to 1 is the "came to the foreground"
+     * moment. Moving between activities never drops the count to 0, so switching screens does not trigger it.
      */
     private var startedActivityCount = 0
-    /** Set once the core reported a stored identity: later checks skip the
-     *  core mutex on the main thread. */
+    /** Set once the core reported a stored identity. Later checks skip the core mutex on the main thread. */
     @Volatile private var identityKnown = false
 
     companion object {
-        /** FLAG_SECURE on release builds only: debuggable builds stay capturable (adb screenshots in device tests). */
+        /** FLAG_SECURE on release builds only. Debuggable builds stay capturable, for adb screenshots. */
         fun setSecure(activity: Activity, on: Boolean) {
             if ((activity.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) return
             if (on) activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
@@ -49,10 +41,9 @@ class P2PApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        // Plaintext a killed process left behind: a recording or an
-        // outgoing copy that was never sent.
-        // On this thread, before any activity runs: a background delete could
-        // remove a file a cold-start share or recording has just written there.
+        // Plaintext left behind by a killed process: a recording or an outgoing copy that was never sent.
+        // It runs on this thread before any activity starts. A background delete could otherwise remove a file
+        // that a cold-start share or a recording has just written there.
         java.io.File(cacheDir, "voice").deleteRecursively()
         java.io.File(cacheDir, "outgoing").deleteRecursively()
         java.io.File(cacheDir, "attachment_edit").deleteRecursively()
@@ -62,19 +53,14 @@ class P2PApplication : Application() {
             override fun onReceive(c: android.content.Context?, i: Intent?) = AppLock.lockNow(c)
         }, android.content.IntentFilter(Intent.ACTION_SCREEN_OFF), androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
 
-        // Spec dışı, kullanıcı isteği ("break material, doesn't matter,
-        // force font on all UI"): Android'in kendi varsayılan Typeface
-        // statik alanlarını değiştirir — bkz. `FontOverride` dokümantasyonu.
-        // BURADA, ilk Activity oluşturulmadan ÖNCE (Application.onCreate,
-        // her zaman en erken çalışan hook) uygulanmalı ki İLK ekran bile
-        // eski fontla bir an için çizilip sonra değişmesin. Kullanıcı
-        // Ayarlar'dan font değiştirdiğinde `SettingsFragment` bunu AYRICA
-        // (hemen, `recreate()`'ten önce) çağırır — bkz. o çağrı noktası.
+        // Forces the app font on all UI. It replaces Android's own default Typeface static fields (see the
+        // `FontOverride` docs). It runs HERE, before the first activity is created (Application.onCreate is the
+        // earliest hook), so even the first screen does not draw in the old font and then change. When the user
+        // changes the font in Settings, SettingsFragment calls this again right away, before `recreate()`.
         val initialFontChoice = com.p2p.messenger.util.ThemePrefs.getFontChoice(this)
         if (initialFontChoice == com.p2p.messenger.util.ThemePrefs.FontChoice.CUSTOM) {
-            // bkz. `ThemePrefs.activeCustomFontFile` — birden fazla içe
-            // aktarılmış font arasından o an SEÇİLİ olanın dosyası; kayıt
-            // bozulmuşsa (null) sessizce hiçbir şey uygulanmaz.
+            // The file of the custom font that is SELECTED among the imported ones (see `ThemePrefs.activeCustomFontFile`).
+            // If the record is broken (null), nothing is applied, silently.
             com.p2p.messenger.util.ThemePrefs.activeCustomFontFile(this)?.let {
                 com.p2p.messenger.util.FontOverride.applyFile(it)
             }
@@ -82,27 +68,19 @@ class P2PApplication : Application() {
             com.p2p.messenger.util.FontOverride.apply(initialFontChoice.familyName)
         }
 
-        // gönderilemeyen mesajlar/emirler
-        // (Edit/Delete/GroupUpdate — bkz. persist.rs `pending_durable_retries`)
-        // arka planda da saatte bir denensin. `KEEP`: uygulama her
-        // başlatıldığında yeniden enqueue edilse bile MEVCUT programı
-        // (ve bir sonraki çalışma zamanını) bozmaz — sadece hiç
-        // programlanmamışsa yenisini oluşturur. `NetworkType.CONNECTED`
-        // kısıtı: hiç bağlantı yokken servisi boşuna uyandırmaz (bkz.
-        // P2PRetryWorker dokümantasyonu — asıl iş zaten P2PService'in
-        // sürekli çalışan döngüsünde, bu sadece "ölmüşse yeniden başlat"
-        // yedek mekanizması).
+        // Messages that could not be sent (Edit, Delete, GroupUpdate; see persist.rs `pending_durable_retries`) are also
+        // retried in the background, once an hour. `KEEP` means that re-enqueueing on every app start keeps the EXISTING
+        // work and its next run time. It creates one only when none is scheduled. The `NetworkType.CONNECTED` constraint
+        // means no wake-up without a connection (see P2PRetryWorker). The main delivery is the always-running loop of
+        // P2PService. This is only a fallback that restarts the service if it died.
         val retryWork = PeriodicWorkRequestBuilder<P2PRetryWorker>(1, TimeUnit.HOURS)
             .setConstraints(
                 Constraints.Builder()
                     .setRequiredNetworkType(NetworkType.CONNECTED)
-                    // bu, "ölmüşse
-                    // yeniden başlat" yedek mekanizması — asıl teslimat
-                    // P2PService'in kendi sürekli döngüsünde. Pil kritik
-                    // seviyedeyken bu saatlik yedek taramayı ertelemenin
-                    // güvenilirlik bedeli yok (WorkManager pil normale
-                    // dönünce zaten çalıştırır), ama sistemin en çok
-                    // tasarruf etmeye çalıştığı anda bir uyanma daha az.
+                    // This is the fallback that restarts the service if it died. Main delivery is P2PService's
+                    // own always-running loop. Deferring this hourly fallback costs no reliability when the battery is
+                    // critical (WorkManager runs it again once the battery is normal). It saves one wake-up when the
+                    // system is trying hardest to save power.
                     .setRequiresBatteryNotLow(true)
                     .build()
             )
@@ -113,55 +91,41 @@ class P2PApplication : Application() {
             retryWork
         )
 
-        // Material You: cihazın duvar kağıdından türetilen dinamik renkler
-        // (Android 12+). Desteklenmeyen cihazlarda no-op'tur — otomatik
-        // olarak themes.xml'deki statik M3 paletine düşülür.
-        // ThemePrefs.applyAccentColor uygular (Material You anahtarına bağlı).
+        // Dynamic colours derived from the wallpaper, on Android 12 and later. On older devices it is a no-op,
+        // and the static palette in themes.xml is used.
+        // ThemePrefs.applyAccentColor applies it, depending on the dynamic-colour switch.
 
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) {
                 // The Recents card showed the last chat without the app password.
                 if (android.os.Build.VERSION.SDK_INT >= 33) activity.setRecentsScreenshotEnabled(false)
                 // No recents opt-out before API 33: every screen gets FLAG_SECURE there.
-                // Link QR, QR scan, camera and lock screens always.
+                // Link QR, QR scan, camera and lock screens always do.
                 if (activity is com.p2p.messenger.ui.LinkDeviceActivity ||
                     activity is com.p2p.messenger.ui.QrScanActivity ||
                     activity is com.p2p.messenger.ui.CameraCaptureActivity ||
                     activity is com.p2p.messenger.ui.AppLockActivity ||
                     android.os.Build.VERSION.SDK_INT < 33
                 ) setSecure(activity, true)
-                // Ayarlar'daki vurgu (accent)
-                // rengi — bkz. ThemePrefs.applyAccentColor dokümantasyonu.
+                // The accent colour chosen in Settings. See the ThemePrefs.applyAccentColor docs.
                 ThemePrefs.applyAccentColor(activity)
-                // Ayarlar'daki metin/arayüz
-                // boyutu kaydırıcıları — bkz. ThemePrefs dokümantasyonu.
+                // The text and interface size sliders in Settings. See the ThemePrefs docs.
                 applyScalePreferences(activity)
-                // Ayarlar'daki sistem fontu
-                // seçici combobox'ı — bkz. ThemePrefs.FontChoice/themes.xml
-                // `appFontFamily` notu. Yukarıdakilerle SIRA ÖNEMLİ DEĞİL
-                // (hepsi ayrık özniteliklere dokunuyor).
+                // The system font combo box in Settings. See ThemePrefs.FontChoice and the `appFontFamily` note in themes.xml.
+                // Order against the lines above does not matter: they all touch separate attributes.
                 val fontChoice = ThemePrefs.getFontChoice(activity)
                 if (fontChoice.overlayStyleRes != 0) {
                     activity.theme.applyStyle(fontChoice.overlayStyleRes, true)
                 }
-                // Spec dışı, hata düzeltmesi ("uygulamadan gir çık yapınca
-                // ya da ekran değiştirince metin tipi varsayılana dönüyor"):
-                // `FontOverride` süreç genelindeki `Typeface` statiklerini
-                // değiştirir ve BU, `Application.onCreate`'te TEK SEFER
-                // yapılıyordu. Belgelenmemiş bir teknik olduğundan bu
-                // statikler bazı ROM'larda/konfigürasyon değişimlerinde
-                // yeniden kurulabiliyor ve o andan sonra açılan ekranlar
-                // varsayılan fontla çiziliyordu. Burada HER Activity
-                // oluşturulmadan hemen önce (yani ekran değiştirmede de,
-                // süreç yeniden başlatmada da) yeniden uygulanıyor —
-                // idempotent ve çok ucuz (yalnızca birkaç reflection
-                // `Field.set`). Asıl kalıcı çözüm tema tarafında
-                // (`android:textViewStyle`, bkz. themes.xml); bu, o
-                // özniteliği hiç okumayan görünümler için yedek katman.
+                // Activities re-apply the font overrides before they are created, because `FontOverride` changes
+                // process-wide Typeface statics. Those were set once in Application.onCreate. The override is undocumented,
+                // so on some ROMs or configuration changes the statics can be rebuilt. Screens opened after that drew in the
+                // default font. Re-applying it here, before every Activity is created (both on a screen change and on a
+                // process restart), is idempotent and cheap (a few reflection Field.set calls). The lasting fix is on the
+                // theme side (`android:textViewStyle`, see themes.xml). This is the fallback for views that never read that attribute.
                 //
-                // SIRA ÖNEMLİ: `applyScalePreferences` yukarıda
-                // `Resources.updateConfiguration` çağırdıktan SONRA
-                // gelmeli.
+                // ORDER MATTERS: this must come AFTER `applyScalePreferences`, which calls `Resources.updateConfiguration`
+                // above.
                 if (fontChoice == com.p2p.messenger.util.ThemePrefs.FontChoice.CUSTOM) {
                     com.p2p.messenger.util.ThemePrefs.activeCustomFontFile(activity)?.let {
                         com.p2p.messenger.util.FontOverride.applyFile(it)
@@ -172,22 +136,14 @@ class P2PApplication : Application() {
             }
 
             /**
-             * Ayarlar'daki "Metin boyutu"/
-             * "Arayüz boyutu" kaydırıcıları — sistemin ERİŞİLEBİLİRLİK
-             * ayarlarının (Configuration.fontScale/densityDpi) ÜZERİNE,
-             * uygulamaya özel bir ek çarpan olarak bindirilir (sistem
-             * tercihini SIFIRLAMAZ, ondan başlayıp ölçekler).
+             * The "text size" and "interface size" sliders in Settings. They are applied as an app-only multiplier ON TOP
+             * of the system accessibility settings (Configuration.fontScale / densityDpi). The system preference is not reset.
              *
-             * `Activity.applyOverrideConfiguration` burada KULLANILAMAZ —
-             * `Activity.attach()` (dolayısıyla `mWindow`) bu callback'ten
-             * ÖNCE zaten kurulduğundan `IllegalStateException` fırlatır (o
-             * API sadece `attachBaseContext()` içinden çağrılabilir, ki bu
-             * uygulama HER Activity'ye ayrı bir taban sınıf eklemeden bunu
-             * yapamaz). Bunun yerine, daha eski ama bu tam senaryoda hâlâ
-             * işlevsel olan `Resources.updateConfiguration` kullanılıyor —
-             * Activity'nin KENDİ `Resources`'ını, henüz `onCreate`/
-             * `setContentView` (dolayısıyla ilk düzen şişirmesi) ÇALIŞMADAN
-             * ÖNCE (bu callback tam bunun için doğru an) günceller.
+             * `Activity.applyOverrideConfiguration` cannot be used here. `Activity.attach()` (so `mWindow` too) is already
+             * set up before this callback, which throws IllegalStateException. That API works only inside
+             * `attachBaseContext()`, and this app cannot add that to every Activity without a base class. So
+             * `Resources.updateConfiguration` is used instead. It updates the Activity's own Resources before `onCreate`
+             * and `setContentView` run (so before the first layout inflation), which is the right moment for this callback.
              */
             private fun applyScalePreferences(activity: Activity) {
                 val res = activity.resources
@@ -200,24 +156,16 @@ class P2PApplication : Application() {
                     return
                 }
                 val config = Configuration(res.configuration)
-                // At default after a non-default value: the shared Resources
-                // were changed for good and stayed scaled until a restart.
+                // Back to the default after a non-default value: the shared Resources were changed for good and stayed scaled
+                // until a restart.
                 config.fontScale = if (atDefault) system.configuration.fontScale else textScale
                 val metrics = res.displayMetrics
-                // Spec dışı, hata düzeltmesi ("hangi kaydırıcıyı hareket
-                // ettirirsem ettireyim aynı şeyi yapıyor, birbirini
-                // etkiliyor"): `activity.resources` çoğu durumda süreç
-                // genelinde PAYLAŞILAN tek bir Resources örneğidir —
-                // `res.updateConfiguration(...)` çağrısı onu KALICI olarak
-                // mutasyona uğratır. Taban değer buradan (`metrics.densityDpi`)
-                // okunursa, HER Activity yeniden oluşturmasında (font
-                // değişimi/accent-arka plan rengi/ui_scale farketmeksizin
-                // TÜMÜ `recreate()` çağırır) o an zaten ÖNCEKİ çağrıdan ölçeklenmiş
-                // yoğunluk tekrar `uiScale` ile çarpılır — katlanarak büyür/
-                // küçülür, bu yüzden HANGİ kaydırıcı hareket ettirilirse
-                // ettirilsin aynı (kümülatif) görsel etki ortaya çıkar.
-                // `Resources.getSystem()` ise cihazın hiç dokunulmamış
-                // SİSTEM varsayılanını verir — sabit bir taban.
+                // `activity.resources` is in most cases ONE Resources object shared by the whole process. The
+                // `res.updateConfiguration(...)` call changes it permanently. If the base value were read from it
+                // (`metrics.densityDpi`), every Activity recreation (font change, accent or background change, ui_scale:
+                // all of them call `recreate()`) would multiply the density already scaled by the previous call by
+                // `uiScale` again. It would grow or shrink each time, so every slider had the same cumulative effect.
+                // `Resources.getSystem()` gives the device's untouched SYSTEM default, which is a fixed base.
                 val baseDensityDpi = android.content.res.Resources.getSystem().displayMetrics.densityDpi
                 val newDensityDpi = (baseDensityDpi * uiScale).toInt()
                 config.densityDpi = newDensityDpi
@@ -225,21 +173,19 @@ class P2PApplication : Application() {
                 res.updateConfiguration(config, metrics)
             }
 
-            // After the activity's `onCreate`: its views exist. Android 12+ gets
-            // the text color through the theme (`applyAccentColor`).
+            // After the activity's `onCreate`: its views exist. On Android 12+ the text colour comes through the
+            // theme (`applyAccentColor`).
             override fun onActivityPostCreated(activity: Activity, savedInstanceState: Bundle?) {
                 ThemePrefs.applyTextColorLegacy(activity)
             }
 
             /**
-             * Runs inside `super.onCreate()`, before the activity's own
-             * `onCreate` body. After process death Android recreates the top
-             * activity directly: a chat screen came up on a core that had
-             * never opened its database (empty history, sends fail, no
-             * service start) until the user went back to MainActivity.
+             * Runs inside `super.onCreate()`, before the activity's own `onCreate` body. After a process death Android
+             * recreates the top activity directly. A chat screen could come up on a core that had never opened its
+             * database (empty history, sends fail, no service start) until the user went back to MainActivity.
              */
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
-                // #48: MainActivity opens the core itself, off the main thread.
+                // MainActivity opens the core itself, off the main thread.
                 if (activity is MainActivity || identityKnown) return
                 if (P2PLib.hasStoredIdentity()) {
                     identityKnown = true
@@ -259,28 +205,20 @@ class P2PApplication : Application() {
 
             override fun onActivityStarted(activity: Activity) {
                 com.p2p.messenger.util.FontOverride.forceOnWindow(activity)
-                // uygulamayı açmak için şifre.
-                // Kilit ekranı HER Activity başlangıcında kontrol edilir
-                // (sadece MainActivity'de değil) — bir bildirimden doğrudan
-                // ChatActivity'ye girmek de kilidi atlamamalı. bkz.
-                // `AppLock` / `AppLockActivity`.
+                // The app password. The lock screen is checked at EVERY Activity start, not only in MainActivity. Opening
+                // ChatActivity straight from a notification must not skip the lock. See `AppLock` and `AppLockActivity`.
                 AppLock.guard(activity)
-                // bkz. `startedActivityCount` dokümantasyonu.
+                // See the `startedActivityCount` docs.
                 if (startedActivityCount == 0) {
-                    // The check takes the core mutex, which a long poll turn
-                    // can hold: not on the UI thread once identity was seen.
+                    // The check takes the core mutex, which a long poll turn can hold. Off the UI thread once an identity was seen.
                     if (identityKnown || P2PLib.hasStoredIdentity()) {
                         identityKnown = true
-                        // Ana thread'i JNI çağrısıyla meşgul etmemek için
-                        // (bkz. genel JNI-ana-thread hijyeni bu projede) —
-                        // `retry_all_pending_now` kendisi hafif olsa da
-                        // (sadece bir HashMap üzerinde zaman damgası
-                        // günceller, ağ I/O'su YAPMAZ) tutarlılık için.
+                        // Kept off the main thread so JNI does not block it. `retry_all_pending_now` is light (it only updates
+                        // timestamps in a HashMap, and does no network I/O), but it is kept consistent with the other calls.
                         Thread { P2PLib.retryAllPendingNow() }.start()
-                        // Servis yalnızca MainActivity.onResume'dan başlıyordu: sistem
-                        // servisi durdurduktan sonra kullanıcı doğrudan ChatActivity'ye
-                        // dönerse (görev geri yükleme/bildirim) mesaj alımı hiç
-                        // yeniden başlamıyordu. Startın idempotent (bkz. onStartCommand).
+                        // The service used to start only from MainActivity.onResume. If the system stopped the service and the
+                        // user came straight back into ChatActivity (task restore or a notification), message receipt never
+                        // restarted. The start is idempotent (see onStartCommand).
                         try {
                             androidx.core.content.ContextCompat.startForegroundService(
                                 this@P2PApplication,
@@ -297,9 +235,8 @@ class P2PApplication : Application() {
 
             override fun onActivityResumed(activity: Activity) {
                 AppLock.excursionResumed()
-                // `AppLock.guard` hides the content under the prompt and shows
-                // it again in `onStart`; a screen that was never stopped under
-                // the prompt gets only this call.
+                // `AppLock.guard` hides the content under the prompt and shows it again in `onStart`. A screen that was never
+                // stopped under the prompt gets only this call.
                 if (AppLock.isUnlocked()) {
                     activity.findViewById<android.view.View>(android.R.id.content)?.visibility = android.view.View.VISIBLE
                 }
@@ -308,21 +245,17 @@ class P2PApplication : Application() {
 
             override fun onActivityStopped(activity: Activity) {
                 startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
-                // Uygulama TAMAMEN arka plana düştü (ekranlar arası geçişte
-                // sayaç 0'a inmez, bkz. `startedActivityCount`) — bir
-                // sonraki dönüşte şifre yeniden sorulsun.
-                // `isChangingConfigurations`: `recreate()` (ölçek, yazı tipi,
-                // dil, renk/tema ayarları) ve döndürme Activity'yi durdurup
-                // yeniden başlatıyor — sayaç o anda 0'a iniyor ama uygulama
-                // arka plana DÜŞMEDİ; önceden her görünüm değişikliği şifre
-                // soruyordu.
+                // The app went fully to the background (the count does not drop to 0 between screens, see
+                // `startedActivityCount`). The password is asked again on the next return. `isChangingConfigurations` covers
+                // `recreate()` (scale, font, language, colour and theme settings) and rotation: they stop and restart the
+                // activity, so the count drops to 0 briefly, but the app did NOT go to the background. Without this check,
+                // every appearance change asked for the password.
                 if (startedActivityCount == 0 && !activity.isChangingConfigurations) {
                     AppLock.lock()
                     com.p2p.messenger.service.P2PService.setAppVisible(false)
                 } else if (startedActivityCount == 1 && com.p2p.messenger.ui.CallActivity.inPip
                     && activity !is com.p2p.messenger.ui.CallActivity && !activity.isChangingConfigurations) {
-                    // Only the call in picture-in-picture is left: the app is in
-                    // the background for the lock.
+                    // Only the call in picture-in-picture is left: the app is in the background for the lock.
                     AppLock.lock()
                 }
             }
