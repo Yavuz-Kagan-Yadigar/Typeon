@@ -5,27 +5,20 @@ import com.p2p.messenger.P2PLib
 import java.io.File
 
 /**
- * Identity yaşam döngüsünü yönetir: ilk oluşturma sırasında secret key
- * bundle'ını Keystore ile şifreleyip diske yazar; sonraki açılışlarda
- * şifreyi çözüp Rust çekirdeğine geri yükler.
+ * Manages the identity lifecycle. At first creation it encrypts the secret key bundle with the Keystore and writes it to disk. At later starts it
+ * decrypts it and loads it back into the Rust core.
  *
- * Diskte SADECE KeystoreCrypto.encrypt çıktısı (AES-256-GCM ciphertext,
- * Android Keystore/StrongBox'ta tutulan bir anahtarla) bulunur — hiçbir
- * zaman plaintext secret key diske yazılmaz. Bu dosyayı başka bir uygulama
- * (root olmadan) okuyamaz; root ile okunsa bile Keystore anahtarı olmadan
- * (ki o anahtar donanım güvenlik modülünde tutulur ve dışarı çıkarılamaz)
- * içerik anlamsız ciphertext'tir.
+ * Only KeystoreCrypto.encrypt output (AES-256-GCM ciphertext, under a key held in the Android Keystore / StrongBox) is on disk. A plaintext secret key
+ * is never written to disk. Another app cannot read this file without root. Even with root, without the Keystore key (held in the hardware security module,
+ * and not exportable) the content is meaningless ciphertext.
  */
 object IdentityManager {
     private const val SECRET_BUNDLE_FILENAME = "identity_secret.enc"
 
     /**
-     * Bundle YÜKLEME bir kez yapılır: `P2PApplication` (Activity oluşturulurken)
-     * ve `MainActivity` her soğuk başlangıçta aynı şeyi istiyor — her istek
-     * dosyayı yeniden okuyup Keystore'da yeniden çözüyor ve Rust'a yeniden
-     * yüklüyordu (süreç başlangıcının ANR'ye en duyarlı penceresinde).
-     * Yalnızca BAŞARILI yükleme hatırlanır: başarısız olan yeniden
-     * denenebilir kalmalı (kurtarma dosyası akışı).
+     * The bundle is loaded ONCE. `P2PApplication` (when the Activity is created) and `MainActivity` both ask for it on every cold start. Each request read the file
+     * again and decrypted it again in the Keystore, and reloaded it into Rust. That happened in the window most sensitive to ANRs during process start.
+     * Only a SUCCESSFUL load is remembered. A failed load must stay retryable (the recovery file flow).
      */
     @Volatile
     private var loaded = false
@@ -34,16 +27,12 @@ object IdentityManager {
         File(context.filesDir, SECRET_BUNDLE_FILENAME)
 
     /**
-     * Uygulama açılışında çağrılır (initDatabase sonrası). DB'de bir
-     * identity varsa ama Rust'ın belleğinde secret key henüz yoksa
-     * (`hasStoredIdentity() == true` ama ratchet/imza işlemleri henüz
-     * mümkün değil), şifreli bundle'ı diskten okuyup çözer ve Rust'a
-     * yükler. Dosya yoksa veya bozuksa false döner (identity_secret.enc
-     * kaybolmuş/bozulmuş demektir — kurtarma dosyasından geri yükleme
-     * gerekir, spec 1.8).
+     * Called at app start (after initDatabase). If the DB has an identity but the Rust side does not have its secret keys in memory yet
+     * (`hasStoredIdentity() == true`, but ratchet and signing operations are not possible yet), it reads the encrypted bundle from disk, decrypts it and loads it
+     * into Rust. If the file is missing or damaged, it returns false. That means identity_secret.enc is lost or corrupt, and a restore from the recovery file is needed
+     * (section 1.8).
      *
-     * Sonuç SÜREÇ BOYUNCA hatırlanır: aynı bundle'ı ikinci kez yüklemek
-     * (Keystore çözme + dosya okuma + `loadSecretBundle`) gereksiz.
+     * The result is remembered for the whole process. Loading the same bundle a second time (Keystore decrypt, file read, `loadSecretBundle`) is not needed.
      */
     @Synchronized
     fun loadIfPresent(context: Context): Boolean {
@@ -60,30 +49,25 @@ object IdentityManager {
         val plaintext = try {
             KeystoreCrypto.decrypt(encrypted)
         } catch (e: Exception) {
-            // Keystore anahtarı kayıp/bozuk olabilir (ör. factory reset
-            // sonrası Keystore temizlendi ama dosya kaldıysa) — bu durumda
-            // kurtarma dosyasından geri yükleme gerekir.
+            // The Keystore key may be lost or corrupt (for example, after a factory reset the Keystore was cleared but the file stayed). In that case a
+            // restore from the recovery file is needed.
             return false
         }
 
         val ok = try {
             P2PLib.loadSecretBundle(plaintext)
         } finally {
-            plaintext.fill(0) // bellekte iz bırakmamak için sıfırla
+            plaintext.fill(0)  // // wipe to avoid leaving traces in memory
         }
         if (ok) loaded = true
         return ok
     }
 
     /**
-     * createIdentity() çağrısından HEMEN SONRA çağrılmalıdır: Rust'ın
-     * ürettiği plaintext secret bundle'ı alır, Keystore ile şifreler,
-     * diske yazar.
+     * Must be called RIGHT AFTER createIdentity(). It takes the plaintext secret bundle that Rust generated, encrypts it with the Keystore, and writes it to disk.
      *
-     * DÖNÜŞ: `true` = bundle diske yazıldı, `false` = YAZILAMADI (çekirdekte
-     * bekleyen bundle yoktu). Çağıran, `false` aldığında "kimlik oluşturuldu"
-     * diye devam etmemeli: secret key'ler diskte olmadığı için bir sonraki
-     * açılışta o kimlik yüklenemez.
+     * RETURN: `true` = the bundle was written to disk. `false` = it could NOT be written (the core had no pending bundle). When the caller gets `false`, it must not
+     * continue as if the identity was created. The secret keys are not on disk, so that identity cannot be loaded at the next start.
      */
     fun persistNewIdentity(context: Context): Boolean {
         val plaintext = P2PLib.getPendingSecretBundle()

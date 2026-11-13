@@ -16,12 +16,10 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 
 /**
- * Ayarlar'dan açılan, henüz karşı taraftan
- * "ack" alınmamış (bkz. lib.rs `awaiting_confirmation`/types.rs `regen_content` —
- * `TEXT_RETRY_GIVE_UP_MS`'ye, 2 güne, kadar otomatik olarak taze bir
- * ratchet adımıyla yeniden denenir) mesajların listesi. Her satırda hedef
- * (kişi/grup), metin önizlemesi, en son deneme zamanı ve bir "İptal"
- * düğmesi (bkz. network.rs `cancel_pending_message`) gösterilir.
+ * List of messages opened from Settings that have not been acknowledged by the other side yet. Unconfirmed messages are retried
+ * automatically with a fresh ratchet step, up to TEXT_RETRY_GIVE_UP_MS (2 days). See lib.rs `awaiting_confirmation` and types.rs
+ * `regen_content`. Each row shows the target (contact or group), a text preview, the last retry time, and a "Cancel" button
+ * (see network.rs `cancel_pending_message`).
  */
 class PendingMessagesActivity : AppCompatActivity() {
 
@@ -62,11 +60,9 @@ class PendingMessagesActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         com.p2p.messenger.service.P2PService.addMessageListener(listener)
-        // Bu ekran ASLINDA canlı bir olay akışına abonedir: `listener` bir
-        // ack/status olayında listeyi yeniden yükler (bir mesaj bu ekran
-        // açıkken onaylanırsa satır bayatlamasın — bkz. `retry_unconfirmed_
-        // messages`, arka planda P2PService poll döngüsü çalışmaya devam
-        // eder). Her ön plana gelişte tekrar tazelemek de basit ve yeterli.
+        // This screen is subscribed to a live event stream. The `listener` reloads the list on an ack or status event, so a row does not go
+        // stale when a message is confirmed while this screen is open. See `retry_unconfirmed_messages`. The P2PService poll loop keeps running
+        // in the background. Refreshing again on every return to the foreground is simple and enough.
         loadPendingMessages()
     }
 
@@ -79,11 +75,8 @@ class PendingMessagesActivity : AppCompatActivity() {
     }
 
     /**
-     * `peer_device_fingerprint`/`group_id`'yi (bkz. types.rs
-     * `PendingMessageSummary`) insan-okur bir isme çevirir — `listContacts`/
-     * `listGroups` zaten var olan JNI çağrılarını yeniden kullanır, isim
-     * çözümleme mantığını burada TEKRAR İCAT ETMEZ (bkz. NotificationHelper
-     * aynı desen).
+     * Turns `peer_device_fingerprint` / `group_id` (see types.rs `PendingMessageSummary`) into a readable name. It reuses the existing
+     * `listContacts` / `listGroups` JNI calls, and does not reinvent name resolution here (the same pattern as NotificationHelper).
      */
     private fun fetchPendingMessages(): List<PendingMessagesAdapter.Item> {
         val pendingJson = try {
@@ -100,7 +93,7 @@ class PendingMessagesActivity : AppCompatActivity() {
                 if (fp.isNotEmpty()) contactsByFp[fp] = c.optString("display_name")
             }
         } catch (e: Exception) {
-            // İsim çözülemedi — fingerprint kısaltması gösterilir.
+        // Name not resolved, so a shortened fingerprint is shown.
         }
         val groupsById = mutableMapOf<String, String>()
         try {
@@ -110,7 +103,7 @@ class PendingMessagesActivity : AppCompatActivity() {
                 groupsById[g.optString("group_id")] = g.optString("name")
             }
         } catch (e: Exception) {
-            // İsim çözülemedi — group_id kısaltması gösterilir.
+        // Name not resolved, so a shortened group_id is shown.
         }
 
         val result = mutableListOf<PendingMessagesAdapter.Item>()
@@ -133,8 +126,7 @@ class PendingMessagesActivity : AppCompatActivity() {
                 )
             )
         }
-        // En son denenen en üstte — kullanıcının "hangisi hâlâ takılı"
-        // sorusuna en alakalı sırayla cevap verir.
+        // The most recently tried one comes first. That answers "which one is still stuck" most directly.
         result.sortByDescending { it.lastAttemptAtMs }
         return result
     }
@@ -157,15 +149,11 @@ class PendingMessagesActivity : AppCompatActivity() {
     }
 
     /**
-     * bekleyen mesajlar listesindeki manuel
-     * "Şimdi Dene" düğmesi — bkz. network.rs `retry_pending_message_now`
-     * (SADECE bu mesajın bir sonraki deneme zamanını HEMEN'e çeker; gerçek
-     * gönderim denemesi bir sonraki `poll_events` turunda, saniyede bir
-     * zaten çalışan arka plan döngüsünde olur — burada AYRI bir ağ I/O'su
-     * YAPILMAZ, pil dostu). Listeyi hemen kaldırmıyoruz (İptal'in aksine) —
-     * mesaj hâlâ bekliyor, sadece denemesi öne çekildi; bir sonraki
-     * `onResume`/tazelemede ya onaylanmış (listeden düşmüş) ya da hâlâ
-     * bekliyor (aynı satırda, güncel "son deneme" zamanıyla) görünecek.
+     * The manual "Retry now" button in the pending list. See network.rs `retry_pending_message_now`. It only moves this message's next retry
+     * time to NOW. The actual send attempt happens on the next `poll_events` turn, in the background loop that already runs every second. So no
+     * separate network I/O happens here, which is good for the battery. The row is NOT removed (unlike Cancel): the message is still pending,
+     * only its retry was moved up. On the next `onResume` or refresh, the row will show either as confirmed (gone from the list) or still pending
+     * (with the current "last tried" time).
      */
     private fun retryPending(item: PendingMessagesAdapter.Item) {
         lifecycleScope.launch {

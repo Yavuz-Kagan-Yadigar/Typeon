@@ -27,30 +27,21 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * sohbet giriş çubuğundaki kamera düğmesinin
- * açtığı anlık çekim ekranı. The shot goes straight to the caption dialog,
- * which opens it in the image editor (crop, rotate, retake are there).
+ * Instant capture screen, opened by the camera button in the chat input bar. The shot goes straight to the caption dialog, which opens it in the image
+ * editor (crop, rotate and retake are there).
  *
- * Kullanıcı isteğinin can alıcı kısmı "diske kaydedilmeden": bu yüzden
- * `ImageCapture.OnImageCapturedCallback` (BELLEĞE çeken overload)
- * kullanılıyor — dosyaya yazan `takePicture(OutputFileOptions, ...)`
- * overload'ı DEĞİL — ve sonuç, sistem galerisine/`MediaStore`'a HİÇ
- * dokunmadan `CapturedImage` üzerinden çağırana geçiyor. (Rust çekirdeği
- * ek gönderirken gerçek bir dosya yolu istediğinden gönderme anında
- * uygulamanın KENDİ önbelleğinde kısa ömürlü bir geçici dosya oluşur ve
- * hemen silinir — bkz. ChatActivity.onFilePicked AYNI desen; galeriye ya
- * da paylaşılan depolamaya hiçbir şey yazılmaz.)
+ * The key point is "without saving to disk". So `ImageCapture.OnImageCapturedCallback` is used (the overload that captures to MEMORY), not the
+ * `takePicture(OutputFileOptions, ...)` overload that writes to a file. The result goes to the caller through `CapturedImage`, without touching the system
+ * gallery or `MediaStore` at all. (The Rust core needs a real file path when an attachment is sent, so at send time a short-lived temporary file is created in
+ * the app's OWN cache and deleted right away. See ChatActivity.onFilePicked, the same pattern. Nothing is written to the gallery or to shared storage.)
  *
- * Sonuç `Intent` extra'sı olarak DEĞİL, `CapturedImage` üzerinden
- * taşınıyor — gerekçe orada.
+ * The result is carried through `CapturedImage`, not as an Intent extra. The reason is in that class.
  */
 class CameraCaptureActivity : AppCompatActivity() {
 
     companion object {
-        /** Çekilen fotoğrafın uzun kenar sınırı. Mesajlaşma için 1600px
-         *  fazlasıyla yeterli; tam sensör çözünürlüğünü taşımak hem
-         *  belleği hem de karşı tarafın indirme süresini gereksiz
-         *  büyütürdü (bkz. ChatActivity MAX_ATTACHMENT_SIZE). */
+        /** Long-edge limit of the captured photo. 1600 px is more than enough for messaging. Carrying the full sensor resolution would inflate both memory and
+         *  the other side's download time (see ChatActivity MAX_ATTACHMENT_SIZE). */
         private const val CAPTURE_MAX_DIMENSION = 1600
         private const val CAPTURE_JPEG_QUALITY = 88
     }
@@ -93,8 +84,7 @@ class CameraCaptureActivity : AppCompatActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
         } else {
-            // Çalışma zamanı izin diyaloğu da dış süreçte — bkz.
-            // AppLock.beginTrustedExcursion.
+            // The runtime permission dialog is also in an external process. See AppLock.beginTrustedExcursion.
             AppLock.beginTrustedExcursion()
             requestCameraPermission.launch(Manifest.permission.CAMERA)
         }
@@ -115,9 +105,8 @@ class CameraCaptureActivity : AppCompatActivity() {
             val preview = androidx.camera.core.Preview.Builder().build().also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
-            // MINIMIZE_LATENCY: kullanıcı isteği "anlık çekim" — deklanşöre
-            // basınca beklemeden çeksin (kalite modu birden fazla kare
-            // biriktirip işler, gözle görülür bir gecikme yaratır).
+            // MINIMIZE_LATENCY: the shot should be taken as soon as the shutter is pressed, without waiting. The quality mode gathers several frames and
+            // processes them, which adds a visible delay.
             val capture = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                 .build()
@@ -192,11 +181,8 @@ class CameraCaptureActivity : AppCompatActivity() {
     }
 
     /**
-     * `ImageProxy` JPEG baytlarını taşır ama fiziksel sensör yönünde —
-     * `imageInfo.rotationDegrees` uygulanmazsa fotoğraf yan çıkar. Aynı
-     * anda, sensörün TAM çözünürlüğünü belleğe almamak için
-     * `inSampleSize` ile örnekleyerek çözüyoruz (bkz. ImagePreview,
-     * AYNI desen).
+     * The `ImageProxy` JPEG bytes are in the physical sensor orientation. If `imageInfo.rotationDegrees` is not applied, the photo comes out sideways.
+     * At the same time, the full sensor resolution is not loaded into memory. It is decoded with `inSampleSize` sampling (the same pattern as ImagePreview).
      */
     private fun decodeRotated(image: ImageProxy): Bitmap? {
         val buffer = image.planes[0].buffer
@@ -215,8 +201,7 @@ class CameraCaptureActivity : AppCompatActivity() {
         ) ?: return null
 
         val degrees = image.imageInfo.rotationDegrees
-        // Ön kamera görüntüsü aynalanmış gelir — önizlemede kullanıcının
-        // gördüğüyle çekilen kare aynı olsun diye yatayda çevriliyor.
+        // A front camera image comes mirrored. It is flipped horizontally here, so the frame the user sees in the preview matches the captured one.
         val mirrored = lensFacing == CameraSelector.LENS_FACING_FRONT
         if (degrees == 0 && !mirrored) return decoded
         // Upright first, then mirror: mirrored first, a 90/270 degree sensor

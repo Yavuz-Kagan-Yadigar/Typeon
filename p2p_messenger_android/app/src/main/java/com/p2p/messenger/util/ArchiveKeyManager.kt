@@ -6,28 +6,19 @@ import java.io.File
 import java.security.SecureRandom
 
 /**
- * Kök arşiv anahtarını (ARK) yönetir — sunucuda saklanan mesaj geçmişini
- * çözen anahtar (bkz. Rust `server_seal::seal_archive_record`).
+ * Manages the root archive key (ARK): the key that decrypts the message history stored on the server (see Rust `server_seal::seal_archive_record`).
  *
- * `MessageHistoryManager` ile AYNI Keystore desenini kullanır ama KAPSAMI
- * farklıdır ve bu fark önemli:
+ * It uses the SAME Keystore pattern as `MessageHistoryManager`, but its SCOPE is different, and the difference matters:
  *
- * - `history_key`: **cihaza** ait, rastgele, kurtarma dosyasında YOK.
- *   Sadece yerel SQLite arşivini diskte şifreler. Kaybolursa sadece bu
- *   cihazın yerel geçmişi okunamaz hale gelir.
- * - **ARK** (bu sınıf): **kimliğe** ait. Aynı kimliğin bütün cihazları
- *   sunucudaki arşivi okuyabilmeli, bu yüzden kardeş cihazlara `DeviceSync`
- *   ile taşınır (ratchet-şifreli) ve kurtarma dosyasına da girer. İlk
- *   üreten cihaz "kaynak"tır; sonradan bağlanan cihazlar kendi rastgele
- *   anahtarlarını üretmez, kardeşten geleni benimser (Rust tarafı zaten
- *   var olan bir ARK'ın üzerine yazmaz).
+ * - `history_key`: belongs to the DEVICE. Random. NOT in the recovery file. It only encrypts the local SQLite archive on disk. If it is lost, only
+ *   this device's local history becomes unreadable.
+ * - ARK (this class): belongs to the IDENTITY. Every device of the same identity must be able to read the archive on the server. So it is passed to
+ *   sibling devices with `DeviceSync` (ratchet-encrypted), and it is included in the recovery file. The device that created it first is the source.
+ *   Devices linked later do not generate their own random key. They adopt the one from a sibling (the Rust side never overwrites an existing ARK).
  *
- * Dürüst takas: ARK ileri-gizli DEĞİLDİR. Bir gün sızarsa o ana kadar
- * sunucuya yüklenmiş TÜM geçmiş okunur — ratchet ciphertext'inin aksine,
- * ki o kullanıldıktan sonra çözülemez hale gelir. "Yeni cihazımda geçmişimi
- * göreyim" ile ileri-gizlilik matematiksel olarak uzlaşmaz; bu yüzden
- * sunucuda geçmiş saklama Ayarlar'da AYRI ve VARSAYILAN KAPALI bir
- * seçenektir.
+ * The honest trade-off: the ARK is NOT forward-secret. If it ever leaks, ALL history uploaded to the server up to that point can be read. Ratchet
+ * ciphertext, by contrast, becomes unreadable once used. "I want to see my history on my new device" cannot be reconciled with forward secrecy
+ * mathematically. So keeping history on the server is a SEPARATE option in Settings, and it is OFF by default.
  */
 object ArchiveKeyManager {
     private const val ARCHIVE_KEY_FILENAME = "archive_root_key.enc"
@@ -36,17 +27,13 @@ object ArchiveKeyManager {
         File(context.filesDir, ARCHIVE_KEY_FILENAME)
 
     /**
-     * Uygulama açılışında çağrılır. Anahtar varsa çözüp Rust'a yükler.
+     * Called at app start. If a key exists, it is decrypted and loaded into Rust.
      *
-     * `MessageHistoryManager`den FARKLI olarak burada anahtar yoksa
-     * KENDİLİĞİNDEN ÜRETİLMEZ — bkz. `ensureCreated`. Sebep: sonradan
-     * bağlanan bir cihaz, kardeşinden ARK'ı almadan önce kendi rastgele
-     * anahtarını üretirse, o cihazın yüklediği arşiv diğer cihazlarda
-     * okunamaz olurdu. Üretim sadece kullanıcı sunucuda geçmiş saklamayı
-     * AÇTIĞINDA yapılır.
+     * Unlike `MessageHistoryManager`, a key is NOT generated here if none exists (see `ensureCreated`). Reason: a device linked later that generated
+     * its own random key before getting the ARK from its sibling would write an archive that the other devices could not read. Generation happens only
+     * when the user turns on server-side history.
      */
-    /** Kardeş cihazdan gelen ARK yalnızca çekirdeğin belleğindeydi —
-     *  yeniden başlatınca kayboluyordu. Dosya henüz yoksa diske yazar. */
+    /** An ARK that came from a sibling device was held only in the core's memory, and was lost on restart. It is written to disk now, if the file does not exist yet. */
     @Synchronized
     fun persistIfNew(context: Context) {
         val file = keyFile(context)
@@ -75,11 +62,9 @@ object ArchiveKeyManager {
         val dataKey = try {
             KeystoreCrypto.decrypt(file.readBytes(), KeystoreCrypto.ALIAS_ARCHIVE_ROOT)
         } catch (e: Exception) {
-            // Keystore anahtarı kayıp/bozuk. Yenisini ÜRETMİYORUZ: sunucudaki
-            // mevcut arşiv o anahtarla şifreli ve yeni bir anahtar onu
-            // kurtarmaz, sadece bundan sonrasını böler. Kullanıcı kurtarma
-            // dosyasından geri yükleyebilir ya da kardeş bir cihazdan
-            // `DeviceSync` ile anahtar tekrar gelir.
+            // The Keystore key is lost or corrupt. A new one is NOT generated. The archive on the server is encrypted with the old key, and a new key
+            // would not recover it. It would only split the archive from this point on. The user can restore from the recovery file, or the key comes
+            // back from a sibling device through `DeviceSync`.
             return
         }
         try {
@@ -90,14 +75,11 @@ object ArchiveKeyManager {
     }
 
     /**
-     * Sunucuda geçmiş saklama açılırken çağrılır: anahtar yoksa üretir.
+     * Called when server-side history is turned on. It generates the key if none exists.
      *
-     * Rust tarafı bir kardeş cihazdan ARK aldığında onu bize geri
-     * bildirmediği için, burada üretilen anahtar yalnızca "bu kimliğin ilk
-     * cihazı" durumunda doğrudur. Kardeşten anahtar gelmiş bir cihazda bu
-     * fonksiyon çağrılırsa Rust tarafı zaten var olanın üzerine yazmaz —
-     * ama diskteki kopya ayrışır. Bu yüzden çağıran, kullanıcı geçmiş
-     * saklamayı açtığında ve SADECE o zaman çağırmalı.
+     * When the Rust side receives an ARK from a sibling device, it does not report it back to us. So the key generated here is correct only for "the first
+     * device of this identity". If this is called on a device that already got a key from a sibling, the Rust side does not overwrite the existing one, but
+     * the copy on disk can diverge. So the caller must call this only when the user turns history on, and only then.
      */
     @Synchronized
     fun ensureCreated(context: Context): Boolean {
@@ -106,8 +88,8 @@ object ArchiveKeyManager {
             loadIfPresent(context)
             return true
         }
-        // Kardeşten (`DeviceSync`) gelmiş bir ARK bellekte olabilir: onu
-        // yaz, yenisini üretip üstüne yazma (arşiv cihazlar arasında bölünürdü).
+        // A key that arrived from a sibling (`DeviceSync`) may be in memory. Write it, and do not generate a new one on top. Otherwise the archive would
+        // be split across devices.
         val fromCore = try { P2PLib.archiveRootKey() } catch (e: Exception) { ByteArray(0) }
         // a failed read counts as secondary (fail closed, no random key).
         // A linked device waits for its sibling's key: one made here would
@@ -119,9 +101,8 @@ object ArchiveKeyManager {
             P2PLib.setArchiveRootKey(dataKey)
             return true
         } catch (e: Exception) {
-            // Keystore erişilemiyor — sunucu yönlendirmesi (mesaj teslimi)
-            // bundan ETKİLENMEZ, sadece geçmiş yüklenmez. Çağıran anahtarı
-            // AÇIK göstermesin diye `false`.
+            // The Keystore is not reachable. Server routing (message delivery) is NOT affected by this. Only the history is not loaded. `false` is returned
+            // so the caller does not show the key as available.
             return false
         } finally {
             dataKey.fill(0)

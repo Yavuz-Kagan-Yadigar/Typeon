@@ -18,11 +18,9 @@ import java.io.File
 import java.util.UUID
 
 /**
- * profil fotoğrafı gösterimi (sohbet listesi + grup balonları).
- * Proje içinde Glide/Coil gibi bir görsel kütüphane yok — bu yüzden hem
- * gerçek fotoğrafın (her zaman ORTADAN kare kırpılıp daireye maskelenir,
- * kullanıcının "önizlemeler kare olsun" isteğiyle tutarlı) hem de fotoğrafı
- * olmayan kişiler için renkli baş harf rozetinin çizimi elle yapılıyor.
+ * Profile photo display (chat list and group bubbles). There is no image library such as Glide or Coil in the project. So both the drawing of a
+ * real photo (always cropped to a square from the centre and masked to a circle, to match the "previews are square" choice) and the coloured
+ * initial badge for people without a photo are done by hand.
  */
 object AvatarUtil {
     private const val SIZE_PX = 96
@@ -33,22 +31,13 @@ object AvatarUtil {
     )
 
     /**
-     * `renderInto` — dolayısıyla
-     * `decodeCircularSquare` (BitmapFactory decode + kare kırpma + ölçekleme
-     * + daire maskeleme) — her `RecyclerView.onBindViewHolder`'da (sohbet
-     * listesi, kişi listesi, HER mesaj balonu) sıfırdan çalışıyordu; aynı
-     * kişinin/grubun avatarı bir liste kaydırılırken defalarca yeniden
-     * çözülüyordu, gözle görülür kasılmaya (jank) yol açabiliyordu. Basit
-     * bir bellek-içi önbellek — anahtar olarak baytların 64 bitlik parmak
-     * izi (contentHashCode + bağımsız FNV-1a geçişi; salt 32 bitlik hash'te
-     * kişi taraflı bir JPEG başka bir kişinin girdisiyle çakışıp YANLIŞ
-     * yüzü gösterebiliyordu) — aynı fotoğrafı tekrar tekrar decode
-     * etmeyi önler. `LruCache`
-     * dahili olarak senkronize, birden fazla RecyclerView/thread'den
-     * güvenle çağrılabilir. 100 giriş × ~36 KB (96x96 ARGB_8888) ≈ 3.6 MB
-     * üst sınır — makul bir bellek/performans dengesi.
+     * `renderInto`, and therefore `decodeCircularSquare` (BitmapFactory decode, square crop, scale, circle mask), used to run from scratch in every
+     * `RecyclerView.onBindViewHolder` (chat list, contact list, EVERY message bubble). The same person's avatar was decoded again and again while a
+     * list scrolled, which could cause visible jank. This is a simple in-memory cache. The key is a 64-bit fingerprint of the bytes (contentHashCode
+     * plus an independent FNV-1a pass). A plain 32-bit hash could collide: one person's JPEG could match another's input and show the WRONG face.
+     * It prevents decoding the same photo again and again. `LruCache` is synchronised internally, so it is safe to call from several RecyclerViews and
+     * threads. 100 entries at about 36 KB each (96x96 ARGB_8888) is an upper bound of about 3.6 MB, a reasonable memory and speed balance.
      */
-    // the letter placeholder was drawn anew on every bind.
     private val placeholderCache = android.util.LruCache<String, Bitmap>(64)
 
     private val avatarBitmapCache = android.util.LruCache<Long, Bitmap>(100)
@@ -67,9 +56,8 @@ object AvatarUtil {
         return (bytes.contentHashCode().toLong() shl 32) or (fnv.toLong() and 0xffffffffL)
     }
 
-    /** `avatarBytes` doluysa gerçek fotoğraf (kare kırpılıp daireye
-     *  maskelenir) gösterilir, yoksa `displayName`'in baş harfinden
-     *  deterministik renkli bir rozet üretilir. */
+    /** If `avatarBytes` is set, the real photo is shown (cropped to a square and masked to a circle). Otherwise a deterministic coloured badge is
+     *  made from the initial letter of `displayName`. */
     fun renderInto(imageView: ImageView, avatarBytes: ByteArray?, displayName: String) {
         val bitmap = avatarBytes?.let { bytes ->
             val key = cacheKey(bytes)
@@ -80,31 +68,20 @@ object AvatarUtil {
     }
 
     /**
-     * profil fotoğrafına dokununca tam ekran +
-     * pinch-to-zoom açar (bkz. MediaViewerActivity.setupZoomableImage — tek
-     * dokunuşla kapatma da orada uygulanıyor). `renderInto`'nun aksine burada
-     * `avatarBytes` KIRPILMADAN/küçültülmeden (96x96 önizlemenin tersine)
-     * ham/orijinal çözünürlükte gösterilir. Fotoğraf yoksa (ör. sadece baş
-     * harf rozeti gösteriliyorsa) hiçbir şey yapmaz.
+     * Tapping the profile photo opens it full screen with pinch-to-zoom (single-tap close is implemented in
+     * MediaViewerActivity.setupZoomableImage). Unlike `renderInto`, the original bytes are shown here at full resolution, without the crop or
+     * downscale of the 96x96 preview. If there is no photo (only the initial badge is shown), nothing happens.
      */
     fun openFullscreen(context: Context, avatarBytes: ByteArray?) {
         if (avatarBytes == null || avatarBytes.isEmpty()) return
         try {
             val dir = File(context.cacheDir, "avatar_view").apply { mkdirs() }
-            // her tıklama
-            // burada yeni bir plaintext JPEG dosyası yazıyordu ama HİÇBİRİ
-            // silinmiyordu (uygulamadaki diğer TÜM geçici dosya yollarının
-            // aksine — bkz. ChatActivity/SettingsFragment/GroupChatActivity
-            // `tempFile.delete()` deseni). Profil fotoğrafları tekrar tekrar
-            // görüntülendikçe uygulama önbelleğinde sınırsız sayıda
-            // şifrelenmemiş yüz fotoğrafı birikiyordu — `allowBackup=false`
-            // bulut sızıntısını engelliyor ama yerel dosya erişimi olan
-            // herhangi bir şeye (root, USB hata ayıklamalı ADB, adli analiz)
-            // gereğinden çok daha uzun süre açık kalıyordu. `MediaViewerActivity`
-            // dosyayı hâlâ görüntülüyor olabileceğinden YENİ dosyayı yazmadan
-            // önce TÜMÜNÜ silmek riskli (o an açık bir görüntüleyiciyi
-            // bozabilir) — bunun yerine makul bir saklama süresini (10 dk)
-            // aşan ESKİ dosyaları buduyoruz, bu da sınırsız birikmeyi önler.
+            // Each tap used to write a new plaintext JPEG file here, and NONE of them was deleted. Every other temp file path in the app deletes its
+            // file (see the `tempFile.delete()` pattern in ChatActivity, SettingsFragment and GroupChatActivity). Repeated views of a profile photo
+            // therefore piled up an unlimited number of unencrypted face photos in the app cache. `allowBackup=false` blocks cloud leaks, but anyone with
+            // local file access (root, USB debugging ADB, forensic analysis) could read them for far longer than needed. MediaViewerActivity may still be
+            // showing the file, so deleting ALL of them before writing a new one is risky (it could break a viewer that is open). Instead, old files
+            // older than a reasonable retention time (10 minutes) are pruned. That prevents unbounded growth.
             val retentionMs = 10 * 60 * 1000L
             val now = System.currentTimeMillis()
             dir.listFiles()?.forEach { old ->
@@ -121,8 +98,7 @@ object AvatarUtil {
             }
             context.startActivity(intent)
         } catch (e: Exception) {
-            // Sessizce yok say — profil fotoğrafı önizlemesi zaten görünür,
-            // tam ekran sadece bir kolaylık.
+        // Silently ignored. The profile photo preview is already visible, and full screen is only a convenience.
         }
     }
 
