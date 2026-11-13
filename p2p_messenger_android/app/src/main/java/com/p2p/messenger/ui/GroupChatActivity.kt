@@ -449,8 +449,8 @@ class GroupChatActivity : AppCompatActivity() {
         recycler.adapter = adapter
         adapter.warmPool(recycler)
         // Message bubbles flickered: tick, seen and reaction updates arrive through `notifyItemChanged`, and the default animator cross-fades each bubble
-        // between its old and new state. Add and remove animations stay.
-        (recycler.itemAnimator as? androidx.recyclerview.widget.SimpleItemAnimator)?.supportsChangeAnimations = false
+        // between its old and new state, so change animations are off. A new message at the bottom gets a small pop.
+        recycler.itemAnimator = MessageItemAnimator(adapter::isMineAt)
         // The single outer outline of merged bubbles. See MergedBubbleDecoration for why each bubble's own background is not enough.
         recycler.addItemDecoration(MergedBubbleDecoration(adapter))
         // Loads older history when the list is scrolled near the top.

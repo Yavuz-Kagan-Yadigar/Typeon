@@ -1253,6 +1253,20 @@ impl ChatView {
         let mut order = self.order.borrow_mut();
         if position == order.len() {
             self.messages.append(&bubble.root);
+            // A live message at the bottom (sent or received) pops in; page
+            // loads pass `scroll = false` and stay still. The class goes away
+            // after the run so a later restyle cannot replay it.
+            if scroll {
+                let root = bubble.root.clone();
+                root.add_css_class("msg-pop");
+                if entry.mine {
+                    root.add_css_class("msg-pop-mine");
+                }
+                glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || {
+                    root.remove_css_class("msg-pop");
+                    root.remove_css_class("msg-pop-mine");
+                });
+            }
         } else {
             let after = if position == 0 {
                 None
