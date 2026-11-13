@@ -74,60 +74,48 @@ import java.util.Locale
 import java.util.UUID
 
 /**
- * Spec 5 (Grup mesajlaşma) — gerçek grup sohbet ekranı. Önceden
- * `sendGroupMessage` her üyeye ayrı ayrı normal bir 1:1 mesaj olarak
- * gönderiliyordu AMA alıcı tarafta bunun bir grup mesajı olduğunu belirten
- * hiçbir bilgi yoktu — gelen mesaj göndericinin 1:1 sohbetine karışıyordu,
- * grup diye ayrı bir yer yoktu. Artık `MessageContent::Text.group_id`
- * (bkz. packet.rs) sayesinde `receive_message` bunu "group_message" olayı
- * olarak ayırt edip buraya yönlendirebiliyor.
+ * Group chat screen. A group message is sent to each member as a separate 1:1 message, with `MessageContent::Text.group_id` (see packet.rs).
+ * `receive_message` uses that field to raise a "group_message" event, which this screen handles.
  *
- * Hata düzeltmesi ("grup geçmişi bazen kalıcı olmuyor"): grup mesajları
- * artık `archive_group_message` ile (group_id'ye göre, TEK satır) yerelde
- * şifreli kalıcı kılınıyor ve bu ekran `bindToIntent` içinde
- * `loadGroupHistoryIfAvailable` ile bu geçmişi yükler (1:1 ChatActivity ile
- * aynı desen). Bilinen kalan sınır: bu, cihazınızın kendi arşivi — bir üye
- * siz çevrimdışıyken gönderilen bir mesajı (bu cihaza hiç ULAŞMAMIŞSA)
- * geriye dönük olarak senkronlamaz; DM'lerdeki `HistorySyncRequest` gibi bir
- * ağ-üzerinden-geçmiş-isteme mekanizması gruplar için henüz yok.
+ * Group messages are archived and encrypted locally by `archive_group_message` (one row per group). `loadGroupHistoryIfAvailable`, called from `bindToIntent`,
+ * loads that history, the same pattern as ChatActivity.
+ * Known limit: this is the device's own archive. A message a member sent while this device was offline, and that never reached it, is not synced.
+ * There is no network history request for groups yet, unlike `HistorySyncRequest` for direct chats.
  */
 class GroupChatActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_GROUP_ID = "group_id"
         const val EXTRA_GROUP_NAME = "group_name"
-        /** bkz. SettingsFragment AVATAR_MAX_DIMENSION aynı standart. */
+        /** Same standard as SettingsFragment AVATAR_MAX_DIMENSION. */
         private const val AVATAR_MAX_DIMENSION = 720
         private const val AVATAR_JPEG_QUALITY = 85
-        /** bkz. ChatActivity aynı sabit. */
+        /** Same constant as ChatActivity. */
         private const val HISTORY_LOAD_LIMIT = 200
-        /** bkz. `resolveContactByIdentity` dokümantasyonu. */
+        /** See the `resolveContactByIdentity` docs. */
         private const val CONTACT_CACHE_TTL_MS = 5000L
-        /** bkz. ChatActivity aynı sabitler (sonsuz kaydırma). */
+        /** Same constants as ChatActivity (infinite scroll). */
         private const val OLDER_HISTORY_PAGE_SIZE = 50
         private const val OLDER_HISTORY_REPLY_WAIT_MS = 15_000L
         private const val LOAD_OLDER_HISTORY_THRESHOLD = 3
-        /** bkz. ChatActivity aynı sabitler (grup ekleri). */
+        /** Same constants as ChatActivity (group attachments). */
         private const val MAX_ATTACHMENT_SIZE = 4L * 1024 * 1024 * 1024
-        /** bkz. ChatActivity AYNI sabit. */
+        /** Same constant as ChatActivity. */
         private const val TYPHOON_QUIET_WINDOW_MS = 15 * 60 * 1000L
 
         private const val PREVIEW_MAX_DIMENSION = 480
         private const val PREVIEW_JPEG_QUALITY = 85
-        /** bkz. ChatActivity `ownStatusPollRunnable` aynı sabit. */
+        /** Same constant as ChatActivity `ownStatusPollRunnable`. */
         private const val OWN_STATUS_POLL_INTERVAL_MS = 2000L
-        /** bkz. ChatActivity aynı sabitler (basılı tut/kaydet sesli mesaj —
-         *  kullanıcı isteği: grup sohbetinde de destekleniyor). */
+        /** Same constants as ChatActivity (hold to record a voice message). Supported in group chats too. */
         private const val RECORDING_MIN_DURATION_MS = 500L
         private const val RECORDING_CANCEL_SWIPE_DP = 120f
         private const val VOICE_PLAYBACK_TICK_MS = 200L
-        /** bkz. ChatActivity aynı sabitler (WhatsApp tarzı "sağa kaydırıp
-         *  yanıtla" — kullanıcı isteği: grup sohbetinde de destekleniyor). */
+        /** Same constants as ChatActivity (WhatsApp-style swipe to reply). Supported in group chats too. */
         private const val REPLY_PREVIEW_MAX_CHARS = 120
         private const val REPLY_SWIPE_MAX_DP = 72f
         private const val REPLY_HIGHLIGHT_DURATION_MS = 1500L
-        /** bkz. ChatActivity aynı sabitler ("yazıyor..." göstergesi —
-         *  kullanıcı isteği: grup sohbetinde de destekleniyor). */
+        /** Same constants as ChatActivity (typing indicator). Supported in group chats too. */
         private const val TYPING_IDLE_TIMEOUT_MS = 3000L
         private const val TYPING_INDICATOR_TIMEOUT_MS = 8000L
     }
@@ -140,31 +128,27 @@ class GroupChatActivity : AppCompatActivity() {
     private lateinit var recycler: RecyclerView
     private lateinit var txtToolbarTitle: TextView
     private lateinit var imgToolbarAvatar: ImageView
-    /** bkz. util.ConnectionStatus — BU cihazın genel bağlantı durumu. */
+    /** See util.ConnectionStatus: this device's overall connection state. */
     private lateinit var txtOwnConnectionStatus: TextView
-    /** bu cihazın kendi bağlantı durumu için
-     *  renkli nokta — bkz. ChatActivity aynı desen, `util.PulsingStatusDot`.
-     *  Grup sohbetinde tek bir "karşı taraf" kavramı olmadığından SADECE
-     *  bu (kendi durumumuz), ChatActivity'deki `dotPeerStatus`'un karşılığı
-     *  YOK (bkz. `layoutToolbarSubtitleRow` gizleme notu). */
+    /**
+     * Coloured dot for this device's own connection state. Same pattern as ChatActivity (`util.PulsingStatusDot`).
+     * A group chat has no single 'other side', so only this device's own state is shown. ChatActivity's `dotPeerStatus` has no equivalent here
+     * (see the `layoutToolbarSubtitleRow` hiding note).
+     */
     private lateinit var dotOwnStatus: View
     private lateinit var ownStatusDot: PulsingStatusDot
-    /** gönderim sırasında düğmenin YERİNE
-     *  yükleniyor göstergesi + çift dokunuşu engellemek için devre dışı
-     *  bırakma — bkz. ChatActivity aynı desen, `sendNewMessage`. */
-    /** bkz. ChatActivity `btnSend` aynı notu — bulut logosu maskeli
-     *  dairesel `ImageButton`. */
+    /**
+     * While a message is sending, the send button is replaced by a loading indicator and disabled, which blocks double taps (same pattern as ChatActivity, `sendNewMessage`).
+     */
+    /** Same note as ChatActivity `btnSend`: the cloud logo is a masked circular `ImageButton`. */
     private lateinit var btnSend: ImageButton
-    /** bkz. `maybePlayTyphoonEffect` / ui.TyphoonParticleView. */
+    /** See `maybePlayTyphoonEffect` and ui.TyphoonParticleView. */
     private lateinit var typhoonEffect: TyphoonParticleView
     private lateinit var progressSending: ProgressBar
 
-    /** Spec dışı, kullanıcı isteği (WhatsApp tarzı grup yanıtı — "Sen" mi
-     *  yoksa bir üyenin adı mı gösterileceğine karar vermek için, bkz.
-     *  `resolveReplyLabel`/`startReply`): bu cihazın HAM `identity_id`'si —
-     *  `getIdentityCode`'un aksine biçimlendirilmemiş, `sender_identity_id`
-     *  alanlarıyla AYNI biçimde, doğrudan karşılaştırılabilir. `lazy`:
-     *  sadece ilk gerçekten ihtiyaç duyulduğunda (JNI çağrısı) çözülür.
+    /**
+     * This device's raw `identity_id`: not formatted like `getIdentityCode`, but in the same form as the `sender_identity_id` fields, so they compare directly.
+     * Used to decide whether a reply label shows "You" or a member's name (see `resolveReplyLabel` / `startReply`). `lazy`: resolved on first use only (a JNI call).
      */
     private val ownIdentityId: String? by lazy {
         try {
@@ -174,16 +158,13 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. `refreshGroupInfo` — üst çubuğa dokununca açılan grup bilgi
-     *  dialogunu doldurmak için son çekilen durum. */
+    /** Last fetched state, used to fill the group info dialog opened by tapping the top bar (see `refreshGroupInfo`). */
     private var isFounder = false
     private var currentGroupAvatar: ByteArray? = null
     private var memberIdentityIds: List<String> = emptyList()
-    /** bkz. `showGroupInfoDialog` — kurucunun kendi satırında "kaldır"
-     *  düğmesi gösterilmemesi için (bkz. `list_groups` `founder_identity_id`
-     *  alanı). */
+    /** Used so the founder's own row in `showGroupInfoDialog` has no 'remove' button (see the `founder_identity_id` field of `list_groups`). */
     private var founderIdentityId: String = ""
-    /** bkz. ChatActivity aynı alanlar (sonsuz kaydırma). */
+    /** Same fields as ChatActivity (infinite scroll). */
     private var isLoadingOlderHistory = false
     private var noMoreOlderHistory = false
     private lateinit var fetchHistoryButton: FetchHistoryButton
@@ -194,17 +175,15 @@ class GroupChatActivity : AppCompatActivity() {
     private var resumedUnlocked = false
     /** Invalidates a voice message still being loaded (see `loadAndPlayVoiceMessage`). */
     private var voiceLoadRequest = 0
-    /** bkz. ChatActivity aynı alanlar (sohbet içi mesaj arama). */
-    /** Message ids, not list positions: an older page prepended or a
-     *  re-sort moves every position. */
+    /** Same fields as ChatActivity (in-chat message search). */
+    /** Message ids, not list positions: prepending an older page or re-sorting moves every position. */
     private var searchMatches: List<String> = emptyList()
     private var currentSearchMatchIndex: Int = -1
     private lateinit var layoutSearchMessages: View
     private lateinit var searchMessagesView: SearchView
     private lateinit var txtSearchMatchCount: TextView
 
-    // --- Spec dışı, kullanıcı isteği (WhatsApp tarzı "sağa kaydırıp
-    // yanıtla") — bkz. ChatActivity AYNI alanlar/desen. ---
+    // --- Swipe right to reply (WhatsApp style). Same fields and pattern as ChatActivity. ---
     private lateinit var swipeHelper: ItemTouchHelper
     private val replyHighlightHandler = Handler(Looper.getMainLooper())
 
@@ -215,10 +194,10 @@ class GroupChatActivity : AppCompatActivity() {
     private lateinit var imgTypingAvatar: ImageView
     private lateinit var txtTypingIndicator: TextView
     private val typingHandler = Handler(Looper.getMainLooper())
-    /** `sendGroupTypingIndicator` / `sendSeenReceipt` JNI
-     *  çağrıları çekirdek kilidinde sıraya durabildiğinden ana iş parçacığında
-     *  ÇALIŞMAZ — tek iş parçacıklı sıra (CallActivity'deki `DiscardPolicy`
-     *  deseni; kapanış sonrası gönderimler sessizce atılır). */
+    /**
+     * The `sendGroupTypingIndicator` and `sendSeenReceipt` JNI calls can queue on the core lock, so they do NOT run on the main thread.
+     * They run on a single-thread executor (same `DiscardPolicy` pattern as CallActivity: sends after close are dropped silently).
+     */
     private val netPack = java.util.concurrent.ThreadPoolExecutor(
         1, 1, 10L, java.util.concurrent.TimeUnit.SECONDS,
         java.util.concurrent.LinkedBlockingQueue(), java.util.concurrent.ThreadPoolExecutor.DiscardPolicy()
@@ -231,9 +210,8 @@ class GroupChatActivity : AppCompatActivity() {
     // Scroll-to-bottom FAB (see ChatActivity for the same fields/pattern).
     private lateinit var fabScrollToBottom: FloatingActionButton
 
-    // --- basılı tut/kaydet sesli mesaj (grup) —
-    // bkz. ChatActivity AYNI alanlar/desen, tek fark gönderim
-    // `prepareAndSendGroupFile` ile TÜM üyelere yapılır.
+    // --- Hold to record a voice message (group). Same fields and pattern as ChatActivity.
+    // The one difference: sending goes to ALL members through `prepareAndSendGroupFile`. ---
     private var mediaRecorder: MediaRecorder? = null
     private var backgrounded = false
     private var recordingDialog: AlertDialog? = null
@@ -268,8 +246,7 @@ class GroupChatActivity : AppCompatActivity() {
         ActivityResultContracts.RequestPermission()
     ) { /* reddedilse bile devam — kullanıcı düğmeye tekrar basmalı */ }
 
-    // --- sesli mesaj çalma (grup) — bkz.
-    // ChatActivity AYNI alanlar/desen (tek paylaşımlı MediaPlayer).
+    // --- Voice message playback (group). Same fields and pattern as ChatActivity (one shared MediaPlayer). ---
     private var voicePlayer: MediaPlayer? = null
     private var voicePlayingFileId: String? = null
     private var voicePlaybackSpeed: Float = 1f
@@ -287,13 +264,13 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** group_message_local_id -> (identity_id -> görüntüleyen bilgisi) —
-     *  aynı mesajı gören farklı üyeleri biriktirir (bkz. SimpleChatAdapter
-     *  applySeen'in TAM liste beklediği notu). */
+    /**
+     * group_message_local_id -> (identity_id -> viewer info). Accumulates the different members who saw the same message.
+     * See the note in SimpleChatAdapter applySeen: it expects the FULL list.
+     */
     private val seenByPerMessage = mutableMapOf<String, MutableMap<String, SimpleChatAdapter.SeenByViewer>>()
 
-    /** bkz. util.ConnectionStatus / ChatActivity `ownStatusPollRunnable`
-     *  AYNI desen — BU cihazın genel bağlantı durumu. */
+    /** See util.ConnectionStatus and ChatActivity `ownStatusPollRunnable`: this device's overall connection state (same pattern). */
     private val ownStatusPollHandler = Handler(Looper.getMainLooper())
     private val ownStatusPollRunnable: Runnable = object : Runnable {
         override fun run() {
@@ -316,21 +293,19 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** `registerForActivityResult` Activity STARTED olmadan ÖNCE
-     *  çağrılmalı — bkz. ChatActivity/SettingsFragment aynı notu. */
+    /** `registerForActivityResult` must be called BEFORE the Activity is STARTED. See the same note in ChatActivity and SettingsFragment. */
     private val pickGroupAvatarLauncher = registerForActivityResult(com.p2p.messenger.util.OpenDocumentAtHome()) { uri ->
         uri?.let { onGroupAvatarPicked(it) }
     }
 
-    /** bkz. ChatActivity `pickFileLauncher` aynı notu (grup ekleri). */
+    /** Same note as ChatActivity `pickFileLauncher` (group attachments). */
     private val pickGroupFileLauncher = registerForActivityResult(com.p2p.messenger.util.OpenMultipleDocumentsAtHome()) { uris ->
         if (uris.isNotEmpty()) promptAttachmentCaption(uris = uris) { caption, picked ->
         sendPickedFiles(picked.map { it.uri!! to it.hiRes }, caption, takeQuote()).invokeOnCompletion { picked.forEach { it.release() } }
     }
     }
 
-    /** bkz. ChatActivity `takePhotoLauncher` aynı notu — anlık çekim +
-     *  kırpma, sonuç `CapturedImage` üzerinden. */
+    /** Same note as ChatActivity `takePhotoLauncher`: an instant capture and crop, with the result arriving as a `CapturedImage`. */
     private val takePhotoLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -345,9 +320,10 @@ class GroupChatActivity : AppCompatActivity() {
         scrollToBottomNow()
     }
 
-    /** `peer` alanı burada anlamlı değil (grup mesajı birden çok 1:1
-     *  bağlantı üzerinden pairwise geliyor) — bunun yerine `group_id`'ye
-     *  bakıyoruz. Sadece "group_message" tipi olaylarla ilgileniyoruz. */
+    /**
+     * The `peer` field has no meaning here: a group message arrives pairwise over several 1:1 connections. So this screen looks at `group_id` instead,
+     * and only handles "group_message" events.
+     */
     private val messageListener: (String) -> Unit = { json ->
         try {
             val obj = JSONObject(json)
@@ -356,54 +332,37 @@ class GroupChatActivity : AppCompatActivity() {
                 type == "stickers_changed" -> runOnUiThread { stickerPicker.reload() }
                 type == "group_message" && obj.optString("group_id") == groupId ->
                     runOnUiThread { handleIncomingGroupMessage(obj) }
-                // Çoklu-cihaz (spec 1.7): başka bir cihazımdan gönderdiğim grup
-                // mesajı — burada da "gönderilen" olarak göster.
+                // Multi-device echo: a group message I sent from another of my devices is shown here as sent as well.
                 type == "sibling_group_message" && obj.optString("group_id") == groupId ->
                     runOnUiThread { handleSiblingGroupMessage(obj) }
                 // "seen" carries no `group_id`: `handleIncomingSeen` keeps it
                 // only when it names one of OUR messages in this list.
                 type == "seen" && !obj.isNull("group_message_local_id") ->
                     runOnUiThread { handleIncomingSeen(obj) }
-                // Toplu görüldü (2026-09-07): bir üye "buraya kadar okudum"
-                // sınırı yolladı (bkz. Rust `apply_incoming_read_watermark`).
+                // Bulk seen: a member sent a 'read up to here' boundary (see Rust `apply_incoming_read_watermark`).
                 type == "seen_bulk" && obj.optString("group_id") == groupId ->
                     runOnUiThread { handleIncomingSeenBulk(obj) }
-                // Spec dışı, hata düzeltmesi ("grup fotoğrafı cihazlar
-                // arasında senkron olmuyor"): Rust, bir GroupUpdate
-                // işlendiğinde (isim/üyelik/AVATAR — bkz. group_ops.rs
-                // process_group_update) bu olayı zaten yayınlıyordu, ama
-                // hiçbir Kotlin kodu onu dinlemiyordu. Bu ekran zaten
-                // açıkken (ör. kurucu fotoğrafı değiştirirken karşı üye bu
-                // sohbete bakıyorsa) üst çubuk avatarı hiç güncellenmiyordu
-                // — geri gidip yeniden girmek (yeni bir Intent/bindToIntent)
-                // dışında hiçbir yenileme yolu yoktu.
+                // Rust emits this event when a GroupUpdate is processed (name, membership, avatar; see group_ops.rs process_group_update).
+                // The top bar avatar refreshes on it, so an open screen picks up a changed group photo.
                 type == "group_updated" && obj.optString("group_id") == groupId ->
                     runOnUiThread { refreshGroupInfo() }
-                // karşı
-                // üyeden gelen eski-sayfa yanıtı — bkz. `loadOlderGroupHistory`.
+                // The old-page reply from the other member (see `loadOlderGroupHistory`).
                 type == "older_group_history" && obj.optString("group_id") == groupId ->
                     runOnUiThread { applyOlderGroupHistory(obj) }
-                // grup mesajı düzenle/sil —
-                // bkz. Rust receive_message Edit/Delete kolu, `group_id`
-                // ile taşınır (1:1'in aksine, "peer" outer filtreye gerek
-                // yok).
+                // Group message edit and delete. Rust's receive_message Edit/Delete arm carries `group_id`, so no outer 'peer' filter is needed (unlike 1:1).
                 type == "group_edit" && obj.optString("group_id") == groupId ->
                     runOnUiThread { adapter.applyEdit(obj.optString("message_id"), obj.optString("text")) }
                 type == "group_delete" && obj.optString("group_id") == groupId ->
                     runOnUiThread { adapter.applyDelete(obj.optString("message_id")) }
-                // emoji tepkileri — Rust hazır
-                // ÖZET dizesi gönderir (bkz. `reactions_summary`).
+                // Emoji reactions: Rust sends a ready SUMMARY string (see `reactions_summary`).
                 type == "reaction" && obj.optString("group_id") == groupId ->
                     runOnUiThread { adapter.applyReactions(obj.optString("message_id"), obj.optString("reactions")) }
                 // `isNull("group_id")` filters out 1:1 typing events too (they never carry it).
                 type == "typing" && !obj.isNull("group_id") && obj.optString("group_id") == groupId ->
                     runOnUiThread { handleIncomingGroupTyping(obj) }
-                // "file_offer"
-                // SADECE bu gruba aitse işlenir (`group_id` ile taşınır);
-                // "file_progress"/"file_complete"/"file_failed" `file_id`
-                // GLOBAL olarak benzersiz olduğundan koşulsuz işlenir —
-                // bu ekranın `localMessages`'ında yoksa zaten no-op'tur
-                // (bkz. SimpleChatAdapter.applyAttachmentUpdate).
+                // "file_offer" is handled only when it belongs to this group (carried in `group_id`).
+                // file_progress, file_complete and file_failed are keyed by a globally unique `file_id`, so they are handled unconditionally.
+                // If the file is not in `localMessages` they are no-ops (see SimpleChatAdapter.applyAttachmentUpdate).
                 (type == "file_offer" || type == "sibling_file") && !obj.isNull("group_id") && obj.optString("group_id") == groupId ->
                     runOnUiThread { handleIncomingGroupFileOffer(obj) }
                 type == "file_progress" -> runOnUiThread {
@@ -432,18 +391,14 @@ class GroupChatActivity : AppCompatActivity() {
                 type == "file_failed" -> runOnUiThread {
                     adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.FAILED)
                 }
-                // dosya yerelden silindi — balon "tamamlandı"
-                // görünmeye devam etmesin, tekrar indirilebilir olsun.
+                // The file was deleted locally: the bubble must not keep showing 'completed', and it should become downloadable again.
                 type == "file_evicted" -> runOnUiThread {
                     adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.OFFERED)
                 }
-                // bir üye gruptan ayrıldığında Linux önbelleği
-                // tazeliyordu, Android hiçbir şey yapmıyordu — üye listesi
-                // ve alt başlık sekme değiştirilene kadar bayat kalıyordu.
-                // (`group_updated` yukarıda zaten karşılanıyor.)
+                // A member leaving the group: refresh the member list and subtitle here too (`group_updated` above already covers it).
                 type == "member_left" && obj.optString("group_id") == groupId ->
                     runOnUiThread { refreshGroupInfo() }
-                // Bir üye hesabını sildi: gruptaki herkese görünür bildirim.
+                // A member deleted their account: show a visible notice to everyone in the group.
                 type == "account_deleted" &&
                     (obj.optJSONArray("group_ids")?.let { a -> (0 until a.length()).any { a.optString(it) == groupId } } == true) ->
                     runOnUiThread {
@@ -451,10 +406,7 @@ class GroupChatActivity : AppCompatActivity() {
                         Toast.makeText(this, getString(R.string.msg_contact_deleted_account, name), Toast.LENGTH_LONG).show()
                         refreshGroupInfo()
                     }
-                // bir `GroupUpdate` imza/versiyon/kurucu
-                // doğrulamasından geçemediğinde Rust bu olayı üretiyordu ama
-                // kimse dinlemiyordu — kullanıcı grubun sessizce
-                // güncellenmediğini hiç öğrenmiyordu.
+                // Rust emits this event when a GroupUpdate fails the signature, version or founder check. Show it, so the user knows the group was not updated.
                 type == "group_update_failed" && obj.optString("group_id") == groupId -> runOnUiThread {
                     Toast.makeText(
                         this, getString(R.string.error_group_update_rejected), Toast.LENGTH_LONG
@@ -462,7 +414,7 @@ class GroupChatActivity : AppCompatActivity() {
                 }
             }
         } catch (e: Exception) {
-            // Ayrıştırılamayan olay — sessizce yok say.
+            // Unparseable event: ignore silently.
         }
     }
 
@@ -474,14 +426,13 @@ class GroupChatActivity : AppCompatActivity() {
         refreshContactCacheAsync()
         whiteboard = WhiteboardPanel(this, findViewById(R.id.whiteboardHost), findViewById(R.id.whiteboardHandle))
         com.p2p.messenger.util.ThemePrefs.applyChatBackground(this)
-        // bkz. util.ChatListDrawer dokümantasyonu.
+        // See the util.ChatListDrawer docs.
         com.p2p.messenger.util.ChatListDrawer.setup(this) {
             // Back with the search bar open closes the bar, not the chat.
             (layoutSearchMessages.visibility == View.VISIBLE).also { if (it) toggleMessageSearch() }
         }
 
-        // Grup sohbetinde tek bir "el sıkışma" durumu yok (her üyeyle ayrı
-        // bir 1:1 bağlantı) — bu banner burada anlamlı değil, gizli kalır.
+        // A group chat has no single handshake state (each member has its own 1:1 link), so this banner does not apply and stays hidden.
         findViewById<View>(R.id.layoutConnecting).visibility = View.GONE
         setupMessageSearch()
 
@@ -497,15 +448,12 @@ class GroupChatActivity : AppCompatActivity() {
         recycler.layoutManager = groupLayoutManager
         recycler.adapter = adapter
         adapter.warmPool(recycler)
-        // Kullanıcı: "mesaj balonları bazen titriyor". Tik/görüldü/tepki
-        // güncellemeleri `notifyItemChanged` ile geliyor ve varsayılan
-        // animatör her birinde balonun eski ve yeni hâli arasında çapraz
-        // geçiş (crossfade) oynatıyordu. Ekleme/silme animasyonları kalıyor.
+        // Message bubbles flickered: tick, seen and reaction updates arrive through `notifyItemChanged`, and the default animator cross-fades each bubble
+        // between its old and new state. Add and remove animations stay.
         (recycler.itemAnimator as? androidx.recyclerview.widget.SimpleItemAnimator)?.supportsChangeAnimations = false
-        // Birleşen balonların TEK dış hattı — bkz. MergedBubbleDecoration
-        // (neden her balonun kendi arka planı yetmiyor, orada yazılı).
+        // The single outer outline of merged bubbles. See MergedBubbleDecoration for why each bubble's own background is not enough.
         recycler.addItemDecoration(MergedBubbleDecoration(adapter))
-        // Listenin üstüne yaklaşınca eski geçmişi yükler.
+        // Loads older history when the list is scrolled near the top.
         recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
                 if (groupLayoutManager.findFirstVisibleItemPosition() <= LOAD_OLDER_HISTORY_THRESHOLD) {
@@ -517,26 +465,19 @@ class GroupChatActivity : AppCompatActivity() {
         })
         fetchHistoryButton = FetchHistoryButton(findViewById(R.id.btnFetchHistory), recycler, true,
             { groupId }, { localMessages.minOfOrNull { it.orderKey } ?: 0L })
-        // grup mesajları için de Düzenle/Sil
-        // (+ başarısızsa Yeniden Gönder) — bkz. ChatActivity.showEditDeleteDialog
-        // AYNI desen.
+        // Group messages also get Edit and Delete (plus Resend if sending failed). See ChatActivity.showEditDeleteDialog, same pattern.
         adapter.onItemLongPress = { item -> showGroupEditDeleteDialog(item) }
         selection = MessageSelection(this, adapter, { saveGroupAttachmentToDownloads(it) }) { P2PLib.deleteGroupMessage(groupId, it) }
         adapter.onAttachmentClick = { item -> onGroupAttachmentClicked(item) }
-        // bu ekranda ek
-        // balonuna uzun basmak ÖNCEDEN hiç kablolanmamıştı (bkz.
-        // ChatActivity.onAttachmentLongClicked AYNI desen — orada var,
-        // burada eksikti) — artık "İndirilenler"e kaydet VE "Başka bir
-        // uygulamayla aç" ikisi de var.
+        // Long press on an attachment bubble opens 'Save to Downloads' and 'Open with another app'. This was not wired on this screen before
+        // (see ChatActivity.onAttachmentLongClicked, same pattern).
         adapter.onAttachmentLongClick = { item -> onGroupAttachmentLongClicked(item) }
         adapter.onReactionsClick = { item -> showReactionsDialog(item) }
         adapter.onReplyPreviewClick = { targetMessageId -> scrollToMessage(targetMessageId) }
         stickerPicker.provideBubbleImages(adapter)
         setupSwipeToReply()
-        // grup sohbetinde de sesli mesaj kaydı/
-        // oynatımı — bkz. ChatActivity AYNI MediaRecorder/MediaPlayer
-        // altyapısı, tek fark gönderimin `prepareAndSendGroupFile` ile TÜM
-        // üyelere yapılması (bkz. `sendVoiceMessage`).
+        // Voice recording and playback in group chats use the same MediaRecorder and MediaPlayer setup as ChatActivity. The one difference:
+        // sending goes to ALL members through `prepareAndSendGroupFile` (see `sendVoiceMessage`).
         layoutMessageInput = findViewById(R.id.layoutMessageInput)
         layoutRecording = findViewById(R.id.layoutRecording)
         txtRecordingTimer = findViewById(R.id.txtRecordingTimer)
@@ -546,15 +487,14 @@ class GroupChatActivity : AppCompatActivity() {
         adapter.onVoiceSpeedClick = { item -> onVoiceSpeedClicked(item) }
         adapter.onVoiceSeek = { item, positionMs -> onVoiceSeeked(item, positionMs) }
 
-        // dosya/foto/video eki
-        // gönderme — bkz. ChatActivity.onFilePicked AYNI desen.
+        // File, photo and video attachment sending. See ChatActivity.onFilePicked, same pattern.
         findViewById<ImageButton>(R.id.btnAttach).setOnClickListener {
-            // bkz. ChatActivity aynı notu — sistem seçicisi dış süreç.
+            // Same note as ChatActivity: the system picker is an external process.
             AppLock.beginTrustedExcursion()
             pickGroupFileLauncher.launch(arrayOf("*/*"))
         }
 
-        // bkz. ChatActivity aynı notu — doğrudan kamera.
+        // Same note as ChatActivity: direct camera.
         findViewById<ImageButton>(R.id.btnCamera).setOnClickListener {
             takePhotoLauncher.launch(Intent(this, CameraCaptureActivity::class.java))
         }
@@ -563,46 +503,35 @@ class GroupChatActivity : AppCompatActivity() {
             stickerPicker.show()
         }
 
-        // bkz. ChatActivity aynı notu — grup için gerçek bir "grup
-        // fotoğrafı" kavramı yok, bu yüzden AvatarUtil'in isimden ürettiği
-        // rozet gösterilir (fotoğrafsız kişilerle aynı görsel dil).
+        // Same note as ChatActivity. A group has no real group-photo concept here, so the badge AvatarUtil generates from the name is shown
+        // (the same visual language as contacts without a photo).
         val toolbarTitleView = layoutInflater.inflate(R.layout.actionbar_chat_title, null)
         txtToolbarTitle = toolbarTitleView.findViewById(R.id.txtToolbarTitle)
         imgToolbarAvatar = toolbarTitleView.findViewById(R.id.imgToolbarAvatar)
         txtOwnConnectionStatus = toolbarTitleView.findViewById(R.id.txtOwnConnectionStatus)
         dotOwnStatus = toolbarTitleView.findViewById(R.id.dotOwnStatus)
         ownStatusDot = PulsingStatusDot(dotOwnStatus)
-        // bkz. actionbar_chat_title.xml notu — TEK bir karşı taraf/el
-        // sıkışma kavramı yok, bu yüzden metin+durum noktası SATIRININ
-        // TAMAMI gizlenir (sadece metni gizlemek yetim/etiketsiz bir nokta
-        // bırakırdı).
+        // See actionbar_chat_title.xml: there is no single other side or handshake state, so the whole text and status dot ROW is hidden.
+        // Hiding only the text would leave an orphan, unlabelled dot.
         toolbarTitleView.findViewById<View>(R.id.layoutToolbarSubtitleRow).visibility = View.GONE
-        // üst çubuğa dokununca grup bilgisi (üye listesi + —
-        // SADECE kurucu için — profil fotoğrafı değiştirme) açılır.
+        // Tapping the top bar opens the group info (member list, plus profile photo change for the founder only).
         toolbarTitleView.setOnClickListener { showGroupInfoDialog() }
-        // avatarın kendisine dokununca (üstteki
-        // genel tıklamayı geçersiz kılarak) tam ekran + pinch-to-zoom açar —
-        // bkz. AvatarUtil.openFullscreen.
+        // Tapping the avatar itself opens fullscreen with pinch-to-zoom, overriding the general click on the row. See AvatarUtil.openFullscreen.
         imgToolbarAvatar.setOnClickListener { AvatarUtil.openFullscreen(this, currentGroupAvatar) }
         supportActionBar?.apply {
             setDisplayShowCustomEnabled(true)
             setDisplayShowTitleEnabled(false)
-            // bkz. ChatActivity aynı notu — bağlantı durumunun üst çubuğun
-            // EN SAĞINDA görünebilmesi için özel görünüm AÇIKÇA toolbar
-            // genişliğini kaplamalı.
+            // Same note as ChatActivity: the connection status view must span the full toolbar width to appear at the far right.
             setCustomView(toolbarTitleView, ActionBar.LayoutParams(ActionBar.LayoutParams.MATCH_PARENT, ActionBar.LayoutParams.MATCH_PARENT))
         }
 
         val input = findViewById<EditText>(R.id.edtMessage)
         com.p2p.messenger.util.Quote.attach(input)
         typhoonEffect = findViewById(R.id.typhoonEffect)
-        // klavye
-        // açılınca sohbet onun yüksekliğini telafi etsin ve son mesaj
-        // görünür kalsın — bkz. util.KeyboardInsets (neden `adjustResize`
-        // yetmiyor, orada ölçümle birlikte yazılı).
+        // When the keyboard opens, the chat compensates for its height so the last message stays visible.
+        // See util.KeyboardInsets (why `adjustResize` alone is not enough is documented there, with measurements).
         KeyboardInsets.attach(findViewById(R.id.rootChatLayout), recycler)
-        // bkz. `syncRecyclerBottomInset` — çubuğun/alıntı pilinin yüksekliği
-        // değiştikçe listenin alt dolgusu takip etmeli.
+        // See `syncRecyclerBottomInset`: the list's bottom padding must follow changes in the height of the bar and the quote pill.
         layoutMessageInput.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> syncRecyclerBottomInset() }
         btnSend = findViewById(R.id.btnSend)
         progressSending = findViewById(R.id.progressSending)
@@ -647,7 +576,7 @@ class GroupChatActivity : AppCompatActivity() {
         if (savedInstanceState == null) consumeShare(intent)
     }
 
-    /** Paylaşım ekranından seçilen içerik (bkz. util.ShareIntake). */
+    /** Content selected from the share screen (see util.ShareIntake). */
     private fun consumeShare(intent: Intent) {
         com.p2p.messenger.util.ShareIntake.takeForward(intent)?.let { f ->
             AlertDialog.Builder(this)
@@ -687,10 +616,8 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * bkz. ChatActivity.bindToIntent aynı notu — `FLAG_ACTIVITY_CLEAR_TOP`
-     * yığındaki var olan bir `GroupChatActivity`'yi `onNewIntent` ile
-     * çağırdığında, önceden bu override edilmediği için bildirim yanlış
-     * (eski) grubu öne getiriyordu.
+     * See ChatActivity.bindToIntent, same note: when `FLAG_ACTIVITY_CLEAR_TOP` calls `onNewIntent` on an existing `GroupChatActivity` in the stack,
+     * this override is required. Without it, the notification brought the wrong (old) group forward.
      */
     private fun bindToIntent(intent: Intent): Boolean {
         val newGroupId = intent.getStringExtra(EXTRA_GROUP_ID) ?: return false
@@ -714,11 +641,8 @@ class GroupChatActivity : AppCompatActivity() {
         searchMatches = emptyList()
         currentSearchMatchIndex = -1
         if (::layoutSearchMessages.isInitialized) layoutSearchMessages.visibility = View.GONE
-        // "…yazıyor" satırları ve sesli mesajın sesi ÖNCEKİ grubun aitti:
-        // 1:1'in `bindToIntent`'i bunu sıfırlıyor, grup ikizi sıfırlamıyordu
-        // (A grubu ön plandayken B açılırsa A'nın göstergesi B'nin üstünde
-        // kalıyordu). `isTypingSent` de sıfırlanmalı: aksi halde B'nin ilk
-        // "yazıyor" paketi bastırılıyordu.
+        // The typing line and the voice message playback belonged to the PREVIOUS group. The 1:1 `bindToIntent` resets them, but the group twin did not:
+        // if group A was in front and B was opened, A's indicator stayed on top of B. `isTypingSent` must be reset too, or B's first typing packet is suppressed.
         typingHandler.removeCallbacksAndMessages(null)
         typingMembers.clear()
         updateTypingIndicatorUi()
@@ -730,25 +654,13 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Spec dışı, hata düzeltmesi ("grup geçmişi bazen kalıcı olmuyor"):
-     * önceden bu ekran HİÇ geçmiş yüklemiyordu (bkz. dosya başı eski
-     * "BİLİNEN SINIR" notu) — sadece ekran açıkken canlı gelen/giden
-     * mesajları gösteriyordu, bu yüzden ekranı kapatıp yeniden açmak ya da
-     * uygulamayı yeniden başlatmak tüm görünür geçmişi siliyordu (gerçekte
-     * artık Rust tarafında `archive_group_message` ile kalıcı olsa bile,
-     * Kotlin tarafı hiç okumuyordu). Artık `getGroupMessageHistory` ile
-     * yükleniyor — bkz. ChatActivity.loadHistoryIfAvailable AYNI desen.
+     * Loads group history in the background, through `getGroupMessageHistory` (same pattern as ChatActivity.loadHistoryIfAvailable).
+     * Without it, the screen would show only live messages, so reopening the screen or restarting the app would hide all visible history
+     * (the Rust side keeps it in `archive_group_message`).
      *
-     * Spec dışı, performans düzeltmesi ("sohbetin açılması uzun sürüyor"):
-     * bu fonksiyon (`getGroupMessageHistory`/`listGroupAttachments` JNI
-     * çağrıları + HER satır için `itemFromGroupHistoryJson`/
-     * `itemFromGroupAttachmentJson`, bunlar da `resolveContactByIdentity`
-     * ÜZERİNDEN başka bir JNI çağrısı yapabilir) önceden `bindToIntent`
-     * (dolayısıyla `onCreate`) içinde ANA THREAD'DE SENKRON çalışıyordu.
-     * Artık ağır kısmın TAMAMI (`Dispatchers.IO`) arka planda, SADECE
-     * liste/adapter güncellemesi ana thread'de. `targetGroupId` —
-     * kullanıcı bu yükleme bitmeden BAŞKA bir gruba geçerse sonucun YANLIŞ
-     * sohbete uygulanmasını önler.
+     * The JNI calls (`getGroupMessageHistory` and `listGroupAttachments`) and the per-row parsing (`itemFromGroupHistoryJson` / `itemFromGroupAttachmentJson`,
+     * which can make another JNI call through `resolveContactByIdentity`) run on `Dispatchers.IO`. Only the list and adapter update runs on the main thread.
+     * `targetGroupId` stops a result from being applied to the wrong chat if the user switches to another group before the load finishes.
      */
     private fun loadGroupHistoryIfAvailable() {
         val targetGroupId = groupId
@@ -765,10 +677,8 @@ class GroupChatActivity : AppCompatActivity() {
                     null
                 }
                 val textItems = if (array != null) (0 until array.length()).map { itemFromGroupHistoryJson(array.getJSONObject(it)) } else emptyList()
-                // bkz. `seenViewersFromHistoryJson` dokümantasyonu — geçmiş
-                // sırasıyla (eskiden yeniye) toplanır, aşağıda AYNI sırayla
-                // `applySeen`'e replay edilir ki adaptör kendiliğinden en
-                // SONUNCU görülen mesajda karar kılsın.
+                // See `seenViewersFromHistoryJson`. Rows are collected oldest to newest and replayed to `applySeen` in the same order,
+                // so the adapter settles on the last message seen.
                 val seenEntries = if (array != null) (0 until array.length()).mapNotNull { i ->
                     val obj = array.getJSONObject(i)
                     val localId = if (obj.isNull("message_id")) null else obj.optString("message_id").ifEmpty { null }
@@ -776,10 +686,7 @@ class GroupChatActivity : AppCompatActivity() {
                     if (localId != null && viewers.isNotEmpty()) localId to viewers else null
                 } else emptyList()
 
-                // bkz.
-                // ChatActivity.loadHistoryIfAvailable AYNI desen — geçmişte
-                // gönderilmiş/alınmış ekler metin mesajlarıyla zaman damgasına
-                // göre ARAYA SERPİŞTİRİLİR.
+                // Same pattern as ChatActivity.loadHistoryIfAvailable: attachments sent or received in the past are merged into the text messages by timestamp.
                 val attachmentsJson = try {
                     P2PLib.listGroupAttachments(targetGroupId)
                 } catch (e: Exception) {
@@ -805,23 +712,17 @@ class GroupChatActivity : AppCompatActivity() {
             val newItems = merged.filter { it.messageId !in existingIds }
             if (newItems.isNotEmpty()) {
                 localMessages.addAll(newItems)
-                // Geçmiş yüklemesi bir canlı mesajdan SONRA biterse sona eklemek
-                // canlı mesajı eski geçmişin üstüne, ekran dışına itiyordu (cihazda
-                // görüldü) — gönderim sırasına göre yeniden diz.
+                // If history loading finishes after a live message, appending would push the live message above the old history, off screen.
+                // Re-sort by send order.
                 localMessages.sortWith(compareBy { it.orderKey })
                 resolveReplyLabels()
                 adapter.notifyDataSetChanged()
                 adapter.dedupeByMessageId()
                 recycler.scrollToPosition(localMessages.size - 1)
             }
-            // bkz. `seenViewersFromHistoryJson` dokümantasyonu — mesajların
-            // TAMAMI adaptöre eklendikten SONRA replay edilir
-            // (`applySeen` içindeki `indexOfMessageId` henüz eklenmemiş bir
-            // satır için -1 döner ve yalnızca TEK bir bekleyen girdi
-            // tutulabilir — bkz. `pendingSeenMessageId` — sıradaki
-            // `applySeen` çağrıları onu sessizce ezerdi). `newItems` boş
-            // olsa BİLE (ör. bu satırlar zaten localMessages'taysa) "kim
-            // gördü" bilgisi yine de tazelenmeli.
+            // See `seenViewersFromHistoryJson`. The replay runs AFTER all messages are added to the adapter. `applySeen` returns -1 from `indexOfMessageId` for a row
+            // not added yet, and only ONE pending entry (`pendingSeenMessageId`) can be held, so earlier calls would be overwritten.
+            // The "who saw" info is refreshed even when `newItems` is empty (for example when these rows are already in localMessages).
             for ((localId, viewers) in seenEntries) {
                 val map = seenByPerMessage.getOrPut(localId) { mutableMapOf() }
                 for ((identityId, viewer) in viewers) map[identityId] = viewer
@@ -830,10 +731,10 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. ChatActivity `loadHistoryIfAvailable` ek-satırı AYNI desen —
-     *  `listGroupAttachments`'ın JSON satırından bir `Item` üretir.
-     *  Gönderen (kendi mesajımız değilse) `sender_identity_id` üzerinden
-     *  çözülür — metin mesajlarıyla AYNI mantık. */
+    /**
+     * Same pattern as ChatActivity's attachment-row loader: builds an `Item` from one JSON row of `listGroupAttachments`.
+     * The sender (if this is not my own message) is resolved via `sender_identity_id`, the same logic as for text messages.
+     */
     private fun itemFromGroupAttachmentJson(obj: JSONObject, knownIds: Set<String> = emptySet()): SimpleChatAdapter.Item {
         val isMine = obj.optString("direction") == "sent"
         val senderIdentityId = if (obj.isNull("sender_identity_id")) null else obj.optString("sender_identity_id").ifEmpty { null }
@@ -860,8 +761,7 @@ class GroupChatActivity : AppCompatActivity() {
                 peerDeviceFingerprint = obj.optString("peer_device_fingerprint"),
                 isSticker = obj.optBoolean("sticker", false)
             ),
-            // bkz. ChatActivity aynı notu — arşivden gelen ek de açıklamasını
-            // ve yanıt bağlamını korur.
+            // Same as ChatActivity: an attachment from the archive also keeps its caption and reply context.
             caption = obj.optString("caption", ""),
             replyToMessageId = if (obj.isNull("reply_to_message_id")) null else obj.optString("reply_to_message_id").ifEmpty { null },
             replyToPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null }
@@ -875,18 +775,17 @@ class GroupChatActivity : AppCompatActivity() {
         else -> SimpleChatAdapter.AttachmentStatus.OFFERED
     }
 
-    /** bkz. ChatActivity.itemFromHistoryJson aynı notu — üç kaynaktan
-     *  (yerel ilk yükleme, yerel eski sayfa, ağdan gelen eski sayfa) gelen
-     *  JSON satırı AYNI şekilde ayrıştırılır. */
+    /**
+     * Same note as ChatActivity.itemFromHistoryJson: a JSON row from any of the three sources (local first load, local older page, older page from the network)
+     * is parsed the same way.
+     */
     private fun itemFromGroupHistoryJson(obj: JSONObject): SimpleChatAdapter.Item {
         val direction = obj.optString("direction")
         val isMine = direction == "sent"
         val senderIdentityId = if (obj.isNull("sender_identity_id")) null else obj.optString("sender_identity_id").ifEmpty { null }
         val sender = if (!isMine && senderIdentityId != null) resolveContactByIdentity(senderIdentityId) else null
         val messageId = if (obj.isNull("message_id")) null else obj.optString("message_id").ifEmpty { null }
-        // bkz. ChatActivity.itemFromHistoryJson AYNI notu (WhatsApp tarzı
-        // yanıt) — `replyToSenderLabel` burada çözülemez, bkz.
-        // `resolveReplyLabels`.
+        // Same as ChatActivity.itemFromHistoryJson (WhatsApp-style reply). `replyToSenderLabel` cannot be resolved here; see `resolveReplyLabels`.
         val replyToMessageId = if (obj.isNull("reply_to_message_id")) null else obj.optString("reply_to_message_id").ifEmpty { null }
         val replyToPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null }
         val replyToSenderIdentityId = if (obj.isNull("reply_to_sender_identity_id")) null else obj.optString("reply_to_sender_identity_id").ifEmpty { null }
@@ -896,23 +795,19 @@ class GroupChatActivity : AppCompatActivity() {
             isMine = isMine,
             status = SimpleChatAdapter.Status.SENT,
             timestamp = obj.optLong("timestamp", System.currentTimeMillis()),
-            // Gönderim-sırası: göndericinin gönderim anı (bkz. ChatActivity aynı not).
+            // Send order: the sender's send time (same note as ChatActivity).
             sentAtMs = obj.optLong("sent_at_ms", 0L).takeIf { it > 0 },
             senderName = sender?.displayName ?: senderIdentityId?.take(8),
             senderAvatarJpeg = sender?.avatarHex?.let { hexToBytes(it) },
-            // bkz. Item.senderIdentityId dokümantasyonu — `isMine`'dan
-            // BAĞIMSIZ her zaman kaydedilir (arşiv "sent" satırları için de
-            // `sender_identity_id` doldurulur, bkz. Rust `archive_group_message`
-            // çağrı noktası), bir SONRAKİ yanıtın doğru kimliği taşıyabilmesi
-            // için (bkz. `startReply`).
+            // See the Item.senderIdentityId docs. It is always stored, regardless of `isMine`. Archive 'sent' rows also carry `sender_identity_id`
+            // (see the Rust `archive_group_message` call site), so the next reply can carry the correct identity (see `startReply`).
             senderIdentityId = senderIdentityId,
             replyToMessageId = replyToMessageId,
             replyToPreview = replyToPreview,
             replyToSenderIdentityId = replyToSenderIdentityId,
             isDeleted = obj.optBoolean("is_deleted", false),
-            // bkz. Rust `ArchivedMessage.is_edited` — önceden "(düzenlendi)"
-            // etiketi SADECE canlı edit olayından geliyordu, sohbet yeniden
-            // açılınca kayboluyordu.
+            // The '(edited)' label comes from the archived `is_edited` flag (see Rust `ArchivedMessage.is_edited`), so it survives a reopen,
+            // not only the live edit event.
             isEdited = obj.optBoolean("is_edited", false),
             mentionsMe = obj.optBoolean("mentions_me", false),
             reactions = obj.optString("reactions", "")
@@ -920,16 +815,10 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * "seen mekanizması ve seen pp
-     * bubbles güvenilir değil, özellikle gruplarda"): önceden `seenByPerMessage`
-     * SADECE ekran açıkken canlı gelen `handleIncomingSeen` olaylarıyla
-     * dolduruluyordu — sohbet kapalıyken/uygulama arka plandayken görülen HER
-     * mesaj, sohbet yeniden açıldığında "kim gördü" listesinden KALICI olarak
-     * kaybolmuş görünüyordu (Rust tarafında `message_seen` tablosunda gerçekte
-     * duruyordu, sadece Kotlin okumuyordu). Artık geçmiş satırındaki
-     * `seen_by` (bkz. Rust `ArchivedMessage.seen_by`) da `handleIncomingSeen`
-     * ile AYNI şekilde çözülüyor — `(identityId, viewer)` çiftleri döner ki
-     * çağıran taraf `seenByPerMessage`'a AYNI anahtarla yazabilsin.
+     * Seen state for old messages. Live `handleIncomingSeen` events fill `seenByPerMessage` only while the screen is open.
+     * The history row's `seen_by` (see Rust `ArchivedMessage.seen_by`) is resolved the same way as `handleIncomingSeen`, so messages seen while the chat
+     * was closed still show in the 'seen by' list after a reopen. It returns `(identityId, viewer)` pairs, so the caller can write them into
+     * `seenByPerMessage` with the same key.
      */
     private fun seenViewersFromHistoryJson(obj: JSONObject): List<Pair<String, SimpleChatAdapter.SeenByViewer>> {
         val raw = obj.optString("seen_by", "[]").ifEmpty { "[]" }
@@ -962,7 +851,7 @@ class GroupChatActivity : AppCompatActivity() {
         return null
     }
 
-    /** bkz. ChatActivity.resolveReplyLabels AYNI desen. */
+    /** Same pattern as ChatActivity.resolveReplyLabels. */
     private fun resolveReplyLabels() {
         for (item in localMessages) {
             if (item.replyToMessageId != null) {
@@ -972,11 +861,8 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * bkz.
-     * ChatActivity.loadOlderHistory AYNI desen — grup geçmişinin en
-     * üstüne kaydırıldığında ÖNCE yereldeki (ücretsiz) arşivi dener,
-     * yetersiz kalırsa ulaşılabilir TÜM diğer üyelere ağ üzerinden istek
-     * gönderir (bkz. Rust `request_older_group_history` fan-out).
+     * Same pattern as ChatActivity.loadOlderHistory. When the top of the group history is scrolled to, it first tries the free local archive.
+     * If that is not enough, it asks all reachable members over the network (see the Rust `request_older_group_history` fan-out).
      */
     private fun loadOlderGroupHistory() {
         if (isLoadingOlderHistory || noMoreOlderHistory || localMessages.isEmpty()) return
@@ -988,7 +874,7 @@ class GroupChatActivity : AppCompatActivity() {
             ?: localMessages.minOf { it.timestamp }
         val beforeAttachment = localMessages.filter { it.attachment != null }.minOfOrNull { it.timestamp } ?: Long.MAX_VALUE
         val gid = groupId
-        // off the main thread (core lock); M115: empty page = end of archive.
+        // off the main thread (core lock); an empty page means the end of the archive.
         lifecycleScope.launch {
             val localOlder = withContext(Dispatchers.IO) {
                 try {
@@ -1017,8 +903,7 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. `loadOlderGroupHistory` — bir üyeden gelen "older_group_history"
-     *  ağ yanıtı. Boş dizi dönerse artık bu grup için tekrar denenmez. */
+    /** See `loadOlderGroupHistory`: an 'older_group_history' network reply from a member. An empty array means this group is not asked again. */
     private fun applyOlderGroupHistory(obj: JSONObject) {
         val array = obj.optJSONArray("messages") ?: return
         // Every member answers; a later answer may carry reactions the first lacked.
@@ -1036,7 +921,7 @@ class GroupChatActivity : AppCompatActivity() {
         prependOlderMessages(items)
     }
 
-    /** bkz. ChatActivity.prependOlderMessages aynı notu. */
+    /** Same note as ChatActivity.prependOlderMessages. */
     private fun prependOlderMessages(items: List<SimpleChatAdapter.Item>) {
         if (items.isEmpty()) return
         val existingIds = localMessages.mapTo(mutableSetOf()) { it.messageId }
@@ -1062,17 +947,11 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * `listGroups()`'tan bu grubun güncel durumunu (kurucu mu, üyeler,
-     * profil fotoğrafı) çeker — üst çubuk avatarını da günceller.
+     * Fetches this group's current state from `listGroups()` (founder or not, members, profile photo) and updates the top bar avatar too.
      *
-     * Spec dışı, performans düzeltmesi ("sohbetin açılması uzun sürüyor"):
-     * `P2PLib.listGroups()` (JNI + TÜM grupların bilgisini/avatar hex
-     * blob'unu okuyan bir DB sorgusu) önceden `bindToIntent`'ten
-     * (dolayısıyla `onCreate`'ten) ANA THREAD'DE SENKRON çağrılıyordu.
-     * Çağıran taraflardan HİÇBİRİ dönüşte GÜNCELLENMİŞ `isFounder`/
-     * `memberIdentityIds`'a hemen bağımlı olmadığından (hepsi ya bir
-     * olayın SONUNDA ya da başka bir ekranda tetiklenen bir yenileme),
-     * fire-and-forget bir arka plan görevine çevrilmesi güvenli.
+     * `P2PLib.listGroups()` (a JNI call plus a DB query over ALL groups, avatar hex blobs included) runs on a background thread, not synchronously on the
+     * main thread from `bindToIntent` (and so from `onCreate`). None of the callers depends on the updated `isFounder` / `memberIdentityIds` right after the call
+     * (they run at the end of an event or are triggered by another screen's refresh), so fire-and-forget on a background task is safe.
      */
     private fun refreshGroupInfo() {
         val targetGroupId = groupId
@@ -1106,10 +985,8 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * üst çubuğa dokununca — üye listesi + (SADECE kurucu için)
-     * profil fotoğrafı değiştirme/kaldırma + üye ekleme. Önceden bu bilgi
-     * (Gruplar sekmesindeki uzun basma menüsü) ayrı bir yerdeydi — kullanıcı
-     * isteği üzerine buraya, üst çubuğa taşındı.
+     * Tapping the top bar opens the member list and, for the founder only, the profile photo change and remove options, plus adding members.
+     * The member and photo actions live here, not in the Groups tab.
      */
     private fun showGroupInfoDialog() {
         val view = layoutInflater.inflate(R.layout.dialog_group_info, null)
@@ -1124,14 +1001,13 @@ class GroupChatActivity : AppCompatActivity() {
         AvatarUtil.renderInto(imgAvatar, currentGroupAvatar, txtToolbarTitle.text.toString())
         imgAvatar.setOnClickListener { AvatarUtil.openFullscreen(this, currentGroupAvatar) }
         rowAvatarActions.visibility = if (isFounder) View.VISIBLE else View.GONE
-        // kurucu için "Üyeleri Yönet" — sadece
-        // üye sayısı değil, bu bölümün artık kaldırma da yaptığını belirtir.
+        // For the founder, 'Manage members' also covers removing members, not just showing the count.
         txtMemberCount.text = if (isFounder) {
             getString(R.string.lbl_manage_members)
         } else {
             resources.getQuantityString(R.plurals.lbl_member_count, memberIdentityIds.size, memberIdentityIds.size)
         }
-        // "Üye Ekle" listenin ÜZERİNDE.
+        // 'Add member' sits above the list.
         btnAddMember.visibility = if (isFounder) View.VISIBLE else View.GONE
 
         val dialog = AlertDialog.Builder(this)
@@ -1140,10 +1016,8 @@ class GroupChatActivity : AppCompatActivity() {
             .setNegativeButton(android.R.string.ok, null)
             .create()
 
-        // her üyenin adı + (SADECE kurucu,
-        // kendi satırı HARİÇ) doğrulamalı bir kaldırma düğmesi. Bir üye
-        // kaldırıldıktan sonra listeyi YENİDEN ÇİZMEK için yerel fonksiyon
-        // (dialog'u kapatıp yeniden açmadan).
+        // Each member's name, plus (founder only, not on their own row) a confirmed remove button. A local function redraws the list
+        // after a removal, without closing and reopening the dialog.
         fun populateMembers() {
             layoutMembersList.removeAllViews()
             for (identityId in memberIdentityIds) {
@@ -1163,11 +1037,8 @@ class GroupChatActivity : AppCompatActivity() {
                     rowRemoveButton.setOnClickListener {
                         confirmRemoveMember(identityId, displayName) { populateMembers() }
                     }
-                    // Dis inceleme onerisi (2026-08-27): kurucu butun
-                    // cihazlarini kaybederse grup KALICI olarak kilitleniyor
-                    // — kimse uye ekleyip cikaramiyor, adini ve fotografini
-                    // degistiremiyordu. Uyeye uzun basip yoneticiligi
-                    // devredebiliyoruz.
+                    // If the founder loses all devices, the group is locked for good: nobody can add or remove members, or change its name or photo.
+                    // A long press on a member hands over the founder role, which avoids that.
                     row.setOnLongClickListener {
                         confirmTransferFounder(identityId, displayName) {
                             dialog.dismiss()
@@ -1222,14 +1093,13 @@ class GroupChatActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    /** bir üyeyi (kurucu HARİÇ, bkz. çağıran
-     *  taraf) gruptan çıkarmadan önce onay ister — geri alınamaz (bkz. Rust
-     *  `remove_from_group`, imzalı `GroupChange::Remove` tüm üyelere gider).
-     *  `onRemoved`, başarılı çıkarma sonrası üye listesini yeniden
-     *  çizebilmesi için çağıranın (dialog açıkken) verdiği geri çağırım. */
     /**
-     * Grup yoneticiligini baska bir uyeye devreder  .
-     * Devirden sonra BU cihaz artik grubu yonetemez.
+     * Asks for confirmation before removing a member (not the founder; see the caller). The removal cannot be undone:
+     * Rust `remove_from_group` sends a signed `GroupChange::Remove` to all members.
+     * `onRemoved` is the callback the caller passes (while the dialog is open), so the member list can be redrawn after a successful removal.
+     */
+    /**
+     * Hands the group's admin role to another member. After the handover, THIS device can no longer manage the group.
      */
     private fun confirmTransferFounder(identityId: String, displayName: String, onDone: () -> Unit) {
         AlertDialog.Builder(this)
@@ -1299,10 +1169,8 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** SADECE kurucu için başarılı olur (bkz. Rust `set_group_avatar` —
-     *  `validate_group_update`'in mevcut founder kontrolünü yeniden
-     *  kullanır) — bu çağrı bir non-founder'dan gelirse Rust "Error: ..."
-     *  döner ve burada gösterilir. */
+    /** Succeeds ONLY for the founder (see Rust `set_group_avatar`, which reuses the existing founder check of `validate_group_update`).
+     *  A call from a non-founder returns "Error: ..." from Rust, and that error is shown here. */
     private fun setGroupAvatar(avatarJpeg: ByteArray?) {
         currentGroupAvatar = avatarJpeg
         AvatarUtil.renderInto(imgToolbarAvatar, avatarJpeg, txtToolbarTitle.text.toString())
@@ -1321,7 +1189,7 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. eski GroupsFragment.showAddMembersDialog — buraya taşındı. */
+    /** See the old GroupsFragment.showAddMembersDialog, which moved here. */
     private fun showAddMembersDialog() {
         // listContacts takes the core lock: off the main thread.
         lifecycleScope.launch {
@@ -1388,15 +1256,9 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Performans/kullanıcı isteği düzeltmesi: `P2PLib.sendGroupMessage`
-     * (JNI — grubun HER üyesi için AYRI bir ratchet şifreleme + hibrit
-     * imza + gossipsub publish denemesi, bkz. Rust `send_group_message`
-     * pairwise fan-out) önceden doğrudan ANA THREAD'DE, senkron
-     * çağrılıyordu — birden çok üyeli bir grupta bu, 1:1'e göre orantılı
-     * olarak DAHA UZUN sürer, dokunma girdisini o süre boyunca hiçbir geri
-     * bildirim vermeden dondurabilirdi. Artık arka planda çalışıyor;
-     * `btnSend` bu sırada devre dışı + yerine `progressSending` gösteriliyor
-     * (bkz. ChatActivity aynı desen).
+     * Sends a group message in the background. `P2PLib.sendGroupMessage` (JNI) runs a separate ratchet encryption, a hybrid signature and a gossipsub
+     * publish attempt for EVERY member (see Rust `send_group_message`, the pairwise fan-out). On the main thread that froze touch input for the whole
+     * time, which grows with group size. `btnSend` is now disabled while it runs and `progressSending` is shown instead (same pattern as ChatActivity).
      */
     /** Other members as (identity id, display name), for @mentions. */
     private fun mentionCandidates(): List<Pair<String, String>> =
@@ -1474,10 +1336,8 @@ class GroupChatActivity : AppCompatActivity() {
             if (!ok) {
                 Toast.makeText(this@GroupChatActivity, R.string.error_send_failed, Toast.LENGTH_SHORT).show()
             }
-            // Rust'ın döndürdüğü
-            // `group_message_local_id`'yi KENDİ balonumuzun `messageId`'si
-            // olarak kullanıyoruz (rastgele bir UUID yerine, önceden olduğu
-            // gibi) ki dönen "seen" bildirimleri doğru balonla eşleşebilsin.
+            // Use the `group_message_local_id` returned by Rust as the `messageId` of our own bubble (not a random UUID),
+            // so the returned 'seen' notices match the right bubble.
             val localId = if (ok) result else UUID.randomUUID().toString()
             adapter.addMessage(
                 SimpleChatAdapter.Item(
@@ -1494,11 +1354,8 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * başarısız (ERROR) bir grup mesajını
-     * yeniden gönderir — AYNI balonu tutar (bkz.
-     * `SimpleChatAdapter.retryMessage`), ikinci bir kopya eklemez. Yeni bir
-     * `group_message_local_id` ile yeniden fan-out edilir (bkz.
-     * `sendNewMessage` aynı mekanizma).
+     * Resends a failed (ERROR) group message. It keeps the SAME bubble (see `SimpleChatAdapter.retryMessage`) and adds no second copy.
+     * It fans out again with a new `group_message_local_id` (same mechanism as `sendNewMessage`).
      */
     private fun retryFailedGroupMessage(item: SimpleChatAdapter.Item) {
         // Some members got it: send only the copies that failed, under the
@@ -1511,8 +1368,7 @@ class GroupChatActivity : AppCompatActivity() {
                 1 -> { adapter.applyStatus(item.messageId, SimpleChatAdapter.Status.SENT); return@launch }
                 -1 -> { Toast.makeText(this@GroupChatActivity, R.string.error_send_failed, Toast.LENGTH_SHORT).show(); return@launch }
             }
-            // bkz. ChatActivity.retryFailedMessage AYNI notu — bir yanıtsa AYNI
-            // yanıt korunmalı.
+            // Same as ChatActivity.retryFailedMessage: if it is a reply, the same reply context is kept.
             val result = withContext(Dispatchers.IO) {
                 try {
                     P2PLib.sendGroupMessage(gid, item.text, item.replyToMessageId, item.replyToPreview, item.replyToSenderIdentityId, mentionIdsJson(item.text))
@@ -1529,18 +1385,14 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. ChatActivity.showEditDeleteDialog AYNI desen — kullanıcı
-     *  isteği üzerine grup mesajlarına da Düzenle/Sil eklendi. Ek
-     *  balonları için desteklenmiyor (bkz. SimpleChatAdapter uzun basma
-     *  guard'ı — `item.attachment == null`), bu yüzden burası SADECE düz
-     *  metin mesajları için tetiklenir. alınan
-     *  (kendimize ait olmayan) mesajlar da artık uzun basmaya tepki verir
-     *  — onlar için SADECE Kopyala gösterilir, Düzenle/Sil/Yeniden Gönder
-     *  sadece kendi mesajlarımızda anlamlı. */
+    /**
+     * Same pattern as ChatActivity.showEditDeleteDialog. Edit and delete also apply to group messages.
+     * Attachment bubbles are not supported (see the SimpleChatAdapter long-press guard, `item.attachment == null`), so this fires only for plain text messages.
+     * Messages from others also react to a long press, but for them only Copy is shown. Edit, Delete and Resend make sense only for our own messages.
+     */
     private fun showGroupEditDeleteDialog(item: SimpleChatAdapter.Item) {
         if (!item.isMine) {
-            // bkz. ChatActivity AYNI desen — başkasının mesajını
-            // düzenleyemeyiz ama tepki bırakabiliriz.
+            // Same pattern as ChatActivity: we cannot edit someone else's message, but we can leave a reaction.
             val theirOptions = listOfNotNull(
                 getString(R.string.action_react),
                 getString(R.string.lbl_copy),
@@ -1585,13 +1437,10 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * tepki pill'ine dokununca "kim ne attı"
-     * listesi (WhatsApp deseni).
+     * Tapping the reaction pill opens a list of who reacted with what (WhatsApp style).
      *
-     * Kimlikler ağdan `identity_id` olarak geliyor; isimler burada, cihazın
-     * KENDİ kişi listesinden çözülüyor — protokole isim koymuyoruz (bir
-     * gönderici istediği ismi iddia edebilirdi). Tanınmayan bir kimlik
-     * kısaltılmış kimliğiyle gösterilir; kendi kimliğim "Sen" olur.
+     * The identities come from the network as `identity_id`. Names are resolved here, from this device's OWN contact list: the protocol carries no names,
+     * since a sender could claim any name. An unknown identity is shown with its shortened id, and our own id shows as "You".
      */
     private fun showReactionsDialog(item: SimpleChatAdapter.Item) {
         lifecycleScope.launch(Dispatchers.IO) {
@@ -1604,7 +1453,7 @@ class GroupChatActivity : AppCompatActivity() {
                     names[c.optString("identity_id")] = c.optString("display_name")
                 }
             } catch (e: Exception) {
-                // Kişi listesi okunamazsa isimler kısaltılmış kimliğe düşer.
+                // If the contact list cannot be read, names fall back to the shortened id.
             }
             val rows = mutableListOf<String>()
             var myRow = -1
@@ -1614,8 +1463,7 @@ class GroupChatActivity : AppCompatActivity() {
                     val entry = array.getJSONObject(i)
                     val identityId = entry.optString("identity_id")
                     val who = when {
-                        // bkz. Rust `list_reactions` — "benim mi" kararı
-                        // kimliğe sahip olan çekirdekte veriliyor.
+                        // See Rust `list_reactions`: the 'is it me' decision is made in the core, which owns the identity.
                         entry.optBoolean("is_me", false) -> getString(R.string.lbl_you)
                         names[identityId]?.isNotBlank() == true -> names[identityId]!!
                         else -> identityId.take(8)
@@ -1624,14 +1472,14 @@ class GroupChatActivity : AppCompatActivity() {
                     rows.add("${entry.optString("emoji")}   $who")
                 }
             } catch (e: Exception) {
-                // Bozuk JSON: boş liste gösterilir, çökmez.
+                // Malformed JSON: show an empty list instead of crashing.
             }
             withContext(Dispatchers.Main) {
                 if (rows.isEmpty()) return@withContext
                 AlertDialog.Builder(this@GroupChatActivity)
                     .setTitle(R.string.title_reactions)
                     .setItems(rows.toTypedArray()) { _, which ->
-                        // Kendi satırıma dokunmak tepkimi kaldırır (boş emoji).
+                        // Removing my own reaction clears it (empty emoji).
                         if (which != myRow) return@setItems
                         lifecycleScope.launch(Dispatchers.IO) {
                             val summary = try { P2PLib.reactToGroupMessage(groupId, item.messageId, "") } catch (e: Exception) { "Error: ${e.message}" }
@@ -1650,7 +1498,7 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. ChatActivity.showReactionPicker AYNI desen — grup için. */
+    /** Same pattern as ChatActivity.showReactionPicker, for groups. */
     private fun showReactionPicker(item: SimpleChatAdapter.Item) {
         ReactionPicker.show(this, item.reactions.isNotBlank()) { emoji ->
             lifecycleScope.launch(Dispatchers.IO) {
@@ -1670,36 +1518,32 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. ChatActivity.maybePlayTyphoonEffect AYNI desen ve gerekçe. */
+    /** Same pattern and reasoning as ChatActivity.maybePlayTyphoonEffect. */
     private fun maybePlayTyphoonEffect() {
         val newest = localMessages.lastOrNull() ?: return
         val previous = localMessages.getOrNull(localMessages.size - 2) ?: return
         if (newest.orderKey - previous.orderKey < TYPHOON_QUIET_WINDOW_MS) return
-        // Huni artık görünümün TAMAMINI kaplıyor (bkz. TyphoonParticleView
-        // `burst`) — balonun konumunu hesaplamaya gerek yok.
+        // The funnel now covers the whole view (see TyphoonParticleView `burst`), so the bubble position does not need to be computed.
         typhoonEffect.burst(
             com.google.android.material.color.MaterialColors.getColor(
-                // `colorPrimary` DEĞİL: bu temada o, balonlarda görünen
-                // turuncunun koyu/mat karşılığı ve parçacıklar koyu zeminde
-                // sönük çıkıyordu. Kullanıcının "accent" diye GÖRDÜĞÜ renk
-                // balonların zemini, yani `colorPrimaryContainer`.
+                // Not `colorPrimary`: in this theme that is the dark, matte counterpart of the bubble orange, and particles looked dim on the dark background.
+                // The colour the user sees as the accent is the bubble background, which is `colorPrimaryContainer`.
                 typhoonEffect, com.google.android.material.R.attr.colorPrimaryContainer
             )
         )
     }
 
-    /** bkz. ChatActivity.copyMessageText AYNI desen. */
+    /** Same pattern as ChatActivity.copyMessageText. */
     private fun copyMessageText(item: SimpleChatAdapter.Item) {
         com.p2p.messenger.util.copySensitive(this, "message", com.p2p.messenger.util.Quote.plain(com.p2p.messenger.util.Forward.strip(item.text)))
         Toast.makeText(this, R.string.lbl_copied, Toast.LENGTH_SHORT).show()
     }
 
     // ---------------------------------------------------------------
-    // Spec dışı, kullanıcı isteği (WhatsApp tarzı "sağa kaydırıp yanıtla",
-    // grup sohbetinde de) — bkz. ChatActivity AYNI desen.
+    // Swipe right to reply (WhatsApp style), also in group chats. Same pattern as ChatActivity.
     // ---------------------------------------------------------------
 
-    /** bkz. `setupSwipeToReply` — kaydırma BAŞLADIĞINDA yakalanan hedef. */
+    /** The target captured when the swipe STARTS (see `setupSwipeToReply`). */
     private var swipeStartMessageId: String? = null
 
     private fun setupSwipeToReply() {
@@ -1730,8 +1574,7 @@ class GroupChatActivity : AppCompatActivity() {
                 super.onChildDraw(c, recyclerView, viewHolder, clampedDx, dY, actionState, isCurrentlyActive)
             }
 
-            /** bkz. ChatActivity.setupSwipeToReply AYNI hata ve gerekçe —
-             *  hedef, hareketin BİTTİĞİ değil BAŞLADIĞI mesaj. */
+            /** Same fix as ChatActivity.setupSwipeToReply: the target is the message the gesture STARTED on, not the one it ended on. */
             override fun onSelectedChanged(viewHolder: RecyclerView.ViewHolder?, actionState: Int) {
                 super.onSelectedChanged(viewHolder, actionState)
                 if (actionState == ItemTouchHelper.ACTION_STATE_SWIPE && viewHolder != null) {
@@ -1744,12 +1587,9 @@ class GroupChatActivity : AppCompatActivity() {
             override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {
                 @Suppress("DEPRECATION")
                 val position = viewHolder.adapterPosition
-                // Değişiklik animasyonu kapalıyken (bkz. `supportsChangeAnimations`)
-                // `notifyItemChanged` AYNI görünümü yeniden bağlar ve ItemTouchHelper
-                // o görünümü "kaydırılmış" olarak tutup her karede kaydırılmış
-                // konumda çizmeye devam eder (eskiden eski görünüm ayrıldığı için
-                // temizleniyordu). Helper'ı ayırıp yeniden bağlamak bu durumu
-                // temizler ve ötelemeyi sıfırlar.
+                // With change animations off (see `supportsChangeAnimations`), `notifyItemChanged` rebinds the SAME view.
+                // ItemTouchHelper keeps that view as swiped and keeps drawing it offset on every frame.
+                // Detaching and re-attaching the helper clears that state and resets the offset.
                 recycler.post {
                     swipeHelper.attachToRecyclerView(null)
                     swipeHelper.attachToRecyclerView(recycler)
@@ -1758,7 +1598,7 @@ class GroupChatActivity : AppCompatActivity() {
                 val startedOn = swipeStartMessageId
                 swipeStartMessageId = null
                 val item = startedOn?.let { id -> localMessages.firstOrNull { it.messageId == id } } ?: return
-                // bkz. ChatActivity AYNI desen — ekler için de yanıt destekleniyor.
+                // Same pattern as ChatActivity: replies are supported for attachments too.
                 if (item.isDeleted) return
                 startReply(item)
             }
@@ -1767,13 +1607,12 @@ class GroupChatActivity : AppCompatActivity() {
         swipeHelper.attachToRecyclerView(recycler)
     }
 
-    /** bkz. ChatActivity.startReply AYNI desen — grupta `item.isMine`
-     *  değilse etiket, o mesajın zaten çözülmüş `senderName`'i. */
+    /** Same pattern as ChatActivity.startReply: in a group, when `item.isMine` is false, the label is the already-resolved `senderName` of that message. */
     private fun startReply(item: SimpleChatAdapter.Item) {
         com.p2p.messenger.util.Quote.insert(findViewById(R.id.edtMessage), item.messageId, replyPreviewFor(item))
     }
 
-    /** bkz. `ChatActivity.replyPreviewFor` AYNI desen. */
+    /** Same pattern as `ChatActivity.replyPreviewFor`. */
     private fun replyPreviewFor(item: SimpleChatAdapter.Item): String {
         val attachment = item.attachment
         return if (attachment != null) {
@@ -1783,7 +1622,7 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. ChatActivity.scrollToMessage AYNI desen. */
+    /** Same pattern as ChatActivity.scrollToMessage. */
     private fun scrollToMessage(targetMessageId: String) {
         val position = localMessages.indexOfFirst { it.messageId == targetMessageId }
         if (position < 0) {
@@ -1797,9 +1636,8 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     // ---------------------------------------------------------------
-    // grup sohbetinde sesli mesaj kaydı —
-    // bkz. ChatActivity AYNI desen (basılı tut/kaydet, sağa kaydır iptal
-    // et), tek fark gönderimin `prepareAndSendGroupFile` ile olması.
+    // Voice recording in group chats. Same pattern as ChatActivity (hold to record, slide right to cancel).
+    // The one difference: sending goes through `prepareAndSendGroupFile`.
     // ---------------------------------------------------------------
 
     private fun setupVoiceRecordButton() {
@@ -1829,7 +1667,7 @@ class GroupChatActivity : AppCompatActivity() {
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
-                    // #86: backgrounding cancels the touch; the recording goes on, the user decides
+                    // backgrounding cancels the touch; the recording goes on, the user decides
                     promptRecordingDecision()
                     true
                 }
@@ -1864,13 +1702,11 @@ class GroupChatActivity : AppCompatActivity() {
             recorder.setAudioEncodingBitRate(64000)
             recorder.setAudioSamplingRate(44100)
             recorder.setOutputFile(file.absolutePath)
-            // Tavan: 10 dakika. Kayıt kendiliğinden biter ve uygulama, kaydın
-            // bittiği anda (ACTION_UP) ZATEN aldığı aynı gönder/at kararını alır.
+            // Upper limit: 10 minutes. The recording ends by itself, and the app then makes the same send-or-attach decision it makes on ACTION_UP.
             recorder.setMaxDuration(10 * 60 * 1000)
             recorder.setOnInfoListener { _, what, _ ->
                 if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) {
-                    // Olay ana thread'de gelmeyebilir: karar (ve ekran işleri)
-                    // ana thread'de verilir.
+                    // The event may not arrive on the main thread, so the decision (and the screen work) runs on the main thread.
                     recordingHandler.post {
                         if (mediaRecorder === recorder) finishVoiceRecording(send = !recordingCancelled)
                     }
@@ -1919,14 +1755,14 @@ class GroupChatActivity : AppCompatActivity() {
             if (send) Toast.makeText(this, R.string.msg_recording_cancelled, Toast.LENGTH_SHORT).show()
             return
         }
-        // bkz. ChatActivity aynı notu — sesli mesajın altına da yazı.
+        // Same note as ChatActivity: text goes under the voice message too.
         promptAttachmentCaption(onCancel = { file.delete() }) { caption, _ -> sendVoiceMessage(file, durationMs, caption, takeQuote()) }
     }
 
-    /** bkz. ChatActivity.sendVoiceMessage AYNI desen — tek fark
-     *  `prepareAndSendGroupFile` (TÜM üyelere sunulur) ve dönüşün sadece
-     *  bir dosya kimliği string'i olması (bkz. `onGroupFilePicked` AYNI
-     *  dönüş biçimi notu, 1:1'in JSON `{message_id, status}`'ından farklı). */
+    /**
+     * Same pattern as ChatActivity.sendVoiceMessage. The differences: `prepareAndSendGroupFile` (offered to ALL members), and the return value
+     * is a plain file-id string, not the JSON `{message_id, status}` of the 1:1 path (see the `onGroupFilePicked` note on the return format).
+     */
     private fun sendVoiceMessage(file: File, durationMs: Long, caption: String = "", quote: com.p2p.messenger.util.Quote.Ref? = null) {
         val targetGroupId = groupId
         lifecycleScope.launch(Dispatchers.IO) {
@@ -1991,8 +1827,7 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     // ---------------------------------------------------------------
-    // grup sohbetinde sesli mesaj oynatma —
-    // bkz. ChatActivity AYNI desen (tek paylaşımlı MediaPlayer).
+    // Voice message playback in group chats. Same pattern as ChatActivity (one shared MediaPlayer).
     // ---------------------------------------------------------------
 
     private fun onVoicePlayClicked(item: SimpleChatAdapter.Item) {
@@ -2107,9 +1942,9 @@ class GroupChatActivity : AppCompatActivity() {
         if (fileId != null) adapter.updateVoicePlayback(fileId, false, 0, voicePlaybackSpeed)
     }
 
-    /** bkz. ChatActivity.showEditMessageDialog AYNI desen —
-     *  `editGroupMessage` "OK"/"Error: ..." döner (1:1'in aksine JSON
-     *  değil, bkz. P2PLib.kt notu). */
+    /**
+     * Same pattern as ChatActivity.showEditMessageDialog. `editGroupMessage` returns "OK" or "Error: ..." (not JSON; see the P2PLib.kt note).
+     */
     private fun showEditGroupMessageDialog(item: SimpleChatAdapter.Item) {
         val input = EditText(this)
         com.p2p.messenger.util.Quote.attach(input)
@@ -2120,7 +1955,7 @@ class GroupChatActivity : AppCompatActivity() {
             .setView(input)
             .setPositiveButton(R.string.action_edit_message) { _, _ ->
                 if (input.text.isBlank()) return@setPositiveButton
-                // bkz. ChatActivity.showEditMessageDialog — the label stays.
+                // Same pattern as ChatActivity.showEditMessageDialog. The label stays.
                 val newText = input.text.toString().let { if (com.p2p.messenger.util.Forward.isForwarded(item.text)) com.p2p.messenger.util.Forward.mark(it) else it }
                 val gid = groupId
                 lifecycleScope.launch {
@@ -2158,10 +1993,10 @@ class GroupChatActivity : AppCompatActivity() {
             .show()
     }
 
-    /** bkz. ChatActivity.onPhotoCaptured AYNI desen (grup için) — kameradan
-     *  gelen kare bellekten geçici bir önbellek dosyasına yazılıp
-     *  gönderilir ve dosya hemen silinir; galeriye/paylaşılan depolamaya
-     *  hiçbir şey yazılmaz. */
+    /**
+     * Same pattern as ChatActivity.onPhotoCaptured, for groups. The captured frame is written to a temporary cache file, sent, and deleted at once.
+     * Nothing is written to the gallery or shared storage.
+     */
     private fun onGroupPhotoCaptured(jpeg: ByteArray, caption: String = "", hiRes: Boolean = false, quote: com.p2p.messenger.util.Quote.Ref? = null) {
         val fileName = "IMG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
         // The group is captured BEFORE the coroutine: `groupId` was read
@@ -2204,7 +2039,7 @@ class GroupChatActivity : AppCompatActivity() {
                                     previewJpeg = previewJpeg
                                 
                                 ),
-                                // gönderirken yazılan açıklama hemen görünsün.
+                                // The caption typed during sending shows at once.
                                 caption = caption,
                                 replyToMessageId = quote?.id,
                                 replyToPreview = quote?.preview,
@@ -2240,13 +2075,11 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * bkz. ChatActivity.onFilePicked
-     * AYNI desen — SAF ile seçilen dosya önce önbelleğe kopyalanır, sonra
-     * `prepareAndSendGroupFile` ile TÜM üyelere sunulur.
+     * Same pattern as ChatActivity.onFilePicked: the file picked with SAF is first copied to the cache,
+     * then offered to ALL members with `prepareAndSendGroupFile`.
      */
     private fun onGroupFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null, quote: com.p2p.messenger.util.Quote.Ref? = null): kotlinx.coroutines.Job {
-        // The group is captured BEFORE the coroutine (bkz.
-        // `onGroupPhotoCaptured` aynı not).
+        // The group is captured BEFORE the coroutine starts (same note as `onGroupPhotoCaptured`).
         val targetGroupId = groupId
         return lifecycleScope.launch(Dispatchers.IO) {
             // Provider queries are IPC to another app: not on the main thread.
@@ -2315,7 +2148,7 @@ class GroupChatActivity : AppCompatActivity() {
                                     previewJpeg = previewJpeg
                                 
                                 ),
-                                // gönderirken yazılan açıklama hemen görünsün.
+                                // The caption typed during sending shows at once.
                                 caption = caption,
                                 replyToMessageId = quote?.id,
                                 replyToPreview = quote?.preview,
@@ -2338,10 +2171,10 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. ChatActivity.onAttachmentClicked AYNI desen — tek fark: indirme
-     *  hedefi (`peerDeviceFingerprint`) sabit bir alan değil, `AttachmentInfo`
-     *  üzerinde taşınır (bkz. dosya başı notu — grup içinde farklı ekler
-     *  farklı göndericilerden gelebilir). */
+    /**
+     * Same pattern as ChatActivity.onAttachmentClicked. One difference: the download target (`peerDeviceFingerprint`) is not a fixed field
+     * but is carried on `AttachmentInfo`, because different attachments in a group can come from different senders.
+     */
     private fun onGroupAttachmentClicked(item: SimpleChatAdapter.Item) {
         val attachment = item.attachment ?: return
         when (attachment.status) {
@@ -2381,7 +2214,7 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. ChatActivity.openAttachmentFile — AYNI, peer'e bağımlı değil. */
+    /** Same as ChatActivity.openAttachmentFile; it does not depend on the peer. */
     private fun openGroupAttachmentFile(path: String) {
         // The file's own extension picks the viewer and the handler, not the
         // type the sender declared.
@@ -2415,12 +2248,10 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. ChatActivity.onAttachmentLongClicked AYNI desen — önceden bu
-     *  ekranda hiç kablolanmamıştı (grup ek balonuna uzun basmak no-op'tu). */
+    /** Same pattern as ChatActivity.onAttachmentLongClicked. This screen never wired it before, so a long press on a group attachment did nothing. */
     private fun onGroupAttachmentLongClicked(item: SimpleChatAdapter.Item) {
         val attachment = item.attachment ?: return
-        // bkz. ChatActivity.onAttachmentLongClicked AYNI desen — sadece
-        // KENDİ gönderdiğimiz ekler silinebilir.
+        // Same pattern as ChatActivity.onAttachmentLongClicked: only attachments we sent ourselves can be deleted.
         val options = mutableListOf<String>().apply {
             add(getString(R.string.action_open_with))
             add(getString(R.string.action_save_to_downloads))
@@ -2448,7 +2279,7 @@ class GroupChatActivity : AppCompatActivity() {
             .show()
     }
 
-    /** bkz. ChatActivity.openAttachmentWithChooser AYNI desen. */
+    /** Same pattern as ChatActivity.openAttachmentWithChooser. */
     private fun openGroupAttachmentWithChooser(attachment: SimpleChatAdapter.AttachmentInfo) {
         lifecycleScope.launch(Dispatchers.IO) {
             val path = try {
@@ -2485,7 +2316,7 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. ChatActivity.saveAttachmentToDownloads AYNI desen. */
+    /** Same pattern as ChatActivity.saveAttachmentToDownloads. */
     /** `original`: a JPEG XL as it came (`image/jxl`), not converted. */
     private fun saveGroupAttachmentToDownloads(attachment: SimpleChatAdapter.AttachmentInfo, original: Boolean = false) {
         lifecycleScope.launch(Dispatchers.IO) {
@@ -2514,17 +2345,13 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. ChatActivity.saveToPublicDownloads AYNI desen. */
+    /** Same pattern as ChatActivity.saveToPublicDownloads. */
     /**
-     * Karsi tarafin gonderdigi dosya adini, bir DOSYA ADI olarak
-     * kullanmadan once zararsiz hale getirir.
+     * Makes the file name sent by the other side harmless before it is used as a FILE NAME.
      *
-     * Cekirdek tarafinda da ayni temizlik yapiliyor (bkz. Rust
-     * `safe_file_name`, `receive_file_offer`) — ama o, bu duzeltmeden SONRA
-     * gelen teklifler icin gecerli. `files` tablosunda ONCEDEN duran
-     * satirlar hala ham adi tasiyor, ve asagidaki API 26-28 kolu
-     * `File(p2pDir, displayName)` yapiyor: `"../../DCIM/Camera/IMG_0001.jpg"`
-     * gibi bir ad paylasilan depolamada KEYFI bir yola yazardi.
+     * The core does the same cleaning (Rust `safe_file_name`, `receive_file_offer`), but only for offers received AFTER that change.
+     * Rows already in the `files` table keep the raw name, and the API 26-28 branch below does `File(p2pDir, displayName)`.
+     * A name such as "../../DCIM/Camera/IMG_0001.jpg" would then write to an arbitrary path in shared storage.
      */
     private fun safeSaveFileName(name: String): String {
         val cleaned = name
@@ -2583,11 +2410,8 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * canlı gelen bir grup
-     * `FileOffer`'ı — bkz. ChatActivity handleIncomingEvent "file_offer"
-     * kolu AYNI mantık, ARTI gönderen adı/avatarı (metin mesajlarıyla AYNI
-     * `resolveContactByIdentity` çözümü) ve `peerDeviceFingerprint`
-     * (indirme hedefi).
+     * A live group FileOffer, received as an event. Same logic as the ChatActivity handleIncomingEvent "file_offer" arm, plus the sender name and
+     * avatar (resolved as for text messages, `resolveContactByIdentity`) and `peerDeviceFingerprint` (the download target).
      */
     private fun handleIncomingGroupFileOffer(obj: JSONObject) {
         val senderIdentityId = obj.optString("sender_identity_id")
@@ -2596,7 +2420,7 @@ class GroupChatActivity : AppCompatActivity() {
         val previewHex = obj.optString("preview_hex", "")
         val previewJpeg = if (previewHex.isNotEmpty() && previewHex != "null") hexToBytes(previewHex) else null
         val durationMs = obj.optInt("duration_ms", -1).let { if (it < 0) null else it }
-        // ekle gelen açıklama + yanıt bağlamı.
+        // Attachment bubble with incoming caption and reply context.
         val attachmentCaption = obj.optString("caption", "")
         val attachmentReplyId = if (obj.isNull("reply_to_message_id")) null else obj.optString("reply_to_message_id").ifEmpty { null }
         val attachmentReplyPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null }
@@ -2620,7 +2444,7 @@ class GroupChatActivity : AppCompatActivity() {
                     peerDeviceFingerprint = obj.optString("peer"),
                     isSticker = obj.optBoolean("sticker", false)
                 ),
-                // ek + açıklama + yanıt.
+                // Attachment + caption + reply.
                 caption = attachmentCaption,
                 replyToMessageId = attachmentReplyId,
                 replyToPreview = attachmentReplyPreview,
@@ -2667,11 +2491,11 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. ChatActivity.generateImagePreview — AYNI. */
+    /** Same as ChatActivity.generateImagePreview. */
     private fun generateImagePreview(file: File): ByteArray? =
         ImagePreview.compressFile(file, PREVIEW_MAX_DIMENSION, PREVIEW_JPEG_QUALITY)
 
-    /** bkz. ChatActivity.generateVideoPreview — AYNI. */
+    /** Same as ChatActivity.generateVideoPreview. */
     private fun generateVideoPreview(file: File): ByteArray? {
         val retriever = MediaMetadataRetriever()
         return try {
@@ -2688,9 +2512,8 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Çoklu-cihaz (spec 1.7): başka bir cihazımdan gönderdiğim grup mesajının
-     * yankısı — `isMine=true` balon olarak eklenir (görüldü gönderilmez, kendi
-     * mesajım). Yeniden açılışta arşivden "sent" olarak zaten gelir.
+     * Multi-device echo: a group message I sent from another of my devices is added as an isMine bubble (not marked as seen, since it is my own message).
+     * After a reopen it already comes from the archive as 'sent'.
      */
     private fun handleSiblingGroupMessage(obj: JSONObject) {
         val localId = obj.optString("message_id")
@@ -2719,20 +2542,11 @@ class GroupChatActivity : AppCompatActivity() {
         val sender = resolveContactByIdentity(senderIdentityId)
         val senderName = sender?.displayName ?: senderIdentityId.take(8)
         val messageId = obj.optString("message_id")
-        // bu balonun `Item.messageId`'si ARTIK
-        // per-paket `message_id` DEĞİL, `group_message_local_id` — kendi
-        // gönderdiğimiz grup mesajlarıyla (bkz. `sendNewMessage` "KENDİ
-        // balonumuzun messageId'si" notu) VE geçmişten yüklenen satırlarla
-        // (bkz. `itemFromGroupHistoryJson` — DB'nin `message_id` kolonuna
-        // zaten `group_message_local_id` yazılıyor, bkz. Rust
-        // `archive_group_message` çağrı noktası) TUTARLI olması için.
-        // Önceden bu satır per-paket id kullanıyordu — edit/delete zaten
-        // SADECE kendi mesajlarımızda tetiklendiğinden (bkz.
-        // `showGroupEditDeleteDialog` `isMine` guard'ı) bu tutarsızlık
-        // fark edilmemişti, ama WhatsApp tarzı "yanıtla" (bkz.
-        // `startReply`) BAŞKASININ mesajına da yanıt vermeyi gerektiriyor —
-        // yanlış id, yanıtın karşı tarafta hiçbir mesajla eşleşmemesine
-        // yol açardı.
+        // This bubble's `Item.messageId` is the `group_message_local_id`, NOT the per-packet `message_id`.
+        // That keeps it consistent with messages I sent to the group (see the `sendNewMessage` note on my own bubble's messageId) and with rows loaded
+        // from history (the DB's `message_id` column stores `group_message_local_id`; see the Rust `archive_group_message` call site).
+        // The per-packet id was used here before. Edit and delete only fire on my own messages (see the `isMine` guard in `showGroupEditDeleteDialog`),
+        // so the mismatch went unnoticed. Reply (`startReply`) also works on OTHERS' messages, though, and the wrong id would match no message on the other side.
         val localId = if (obj.isNull("group_message_local_id")) null else obj.optString("group_message_local_id").ifEmpty { null }
         val bubbleId = localId ?: messageId
         // Sender-embedded real send time, same pattern as ChatActivity.
@@ -2761,20 +2575,17 @@ class GroupChatActivity : AppCompatActivity() {
         )
         maybePlayTyphoonEffect()
         onNewIncomingItemAdded()
-        // "görüldü" — ekran açıkken gelen
-        // canlı grup mesajı için otomatik gönderilir (bkz. ChatActivity
-        // 1:1 karşılığı AYNI gerekçe). `peer`, bu kopyanın geldiği 1:1
-        // kanalın (göndericinin) fingerprint'i.
+        // Seen: sent automatically for a live group message that arrives while the screen is open (same reasoning as the 1:1 ChatActivity).
+        // `peer` is the fingerprint of the 1:1 channel (the sender) this copy arrived on.
         if (AppLock.isUnlocked()) netPack.execute {
             try { P2PLib.sendSeenReceipt(obj.optString("peer"), messageId, localId) } catch (e: Exception) { /* yoksay */ }
         }
-        // Güvenilir yol: tekil `Seen` kaybolsa bile okuma sınırı diske yazılır.
+        // Reliable path: the read boundary is written to disk even if an individual Seen is lost.
         scheduleGroupReadWatermark()
     }
 
-    /** bkz. dosya başı `seenByPerMessage` notu — aynı mesajı gören farklı
-     *  üyeleri identity_id bazında biriktirir, adaptöre her seferinde
-     *  TAM güncel listeyi geçirir. */
+    /** Same as the `seenByPerMessage` note at the top of the file: accumulates the members who saw each message, keyed by identity_id,
+     *  and passes the complete current list to the adapter every time. */
     private fun handleIncomingSeen(obj: JSONObject) {
         // group_message_local_id is an Option<String> on the Rust side, so an
         // explicit JSON null must be guarded (optString alone would return
@@ -2796,10 +2607,10 @@ class GroupChatActivity : AppCompatActivity() {
         adapter.applySeen(localId, viewers.values.toList())
     }
 
-    /** Toplu görüldü: bir üye "buraya kadar okudum" sınırı yolladı; Rust
-     *  BENİM gönderdiğim, sınıra kadar olan mesajların `message_id`'lerini
-     *  verir. Her biri için o üyeyi `seenByPerMessage`'a ekleyip adaptöre
-     *  tam listeyi geçir — tıpkı `handleIncomingSeen` gibi. */
+    /**
+     * Bulk seen: a member sent a "read up to here" boundary. Rust returns the `message_id`s of MY messages up to that boundary.
+     * For each one, add that member to `seenByPerMessage` and pass the full list to the adapter, as `handleIncomingSeen` does.
+     */
     private fun handleIncomingSeenBulk(obj: JSONObject) {
         val arr = obj.optJSONArray("message_ids") ?: return
         val senderIdentityId = obj.optString("viewer_identity_id")
@@ -2820,27 +2631,15 @@ class GroupChatActivity : AppCompatActivity() {
 
     private data class ContactLookup(val displayName: String, val avatarHex: String?)
 
-    /** bkz. `resolveContactByIdentity` dokümantasyonu — geçmiş yüklenirken
-     *  aynı JNI/DB sonucunun tekrar tekrar çekilmesini önleyen kısa ömürlü
-     *  önbellek. */
+    /** Short-lived cache for `resolveContactByIdentity`, so history loading does not repeat the same JNI/DB result over and over. */
     @Volatile private var contactListCache: JSONArray? = null
     @Volatile private var contactListCacheAt: Long = 0
 
     /**
-     * Spec dışı, performans düzeltmesi ("sohbetin açılması uzun sürüyor"):
-     * önceden HER çağrıda `P2PLib.listContacts()` (JNI + TÜM kişi listesini,
-     * avatar hex blobları DAHİL, yeniden okuyup JSON ayrıştıran bir DB
-     * sorgusu) baştan çalıştırılıyordu — grup geçmişi yüklenirken bu fonksiyon
-     * HER mesaj/ek satırı için (bkz. `itemFromGroupHistoryJson`/
-     * `itemFromGroupAttachmentJson`, geçmişteki YÜZLERCE satır üzerinde
-     * döngüde çağrılıyor) ayrı ayrı çağrılıyordu — yani N mesajlı bir
-     * geçmiş, TÜM kişi listesini N KEZ baştan çekip ayrıştırıyordu (N×M
-     * büyümesi, M=kişi sayısı). Artık sonuç kısa bir süre (bkz.
-     * `CONTACT_CACHE_TTL_MS`) önbellekleniyor — bir geçmiş yükleme
-     * "patlaması" içindeki TÜM çağrılar TEK bir JNI/JSON ayrıştırmasını
-     * paylaşır. TTL kısa tutulduğundan (canlı olay işleyicileri de AYNI
-     * fonksiyonu kullanıyor) bir kişi bilgisi değiştiğinde birkaç saniyeden
-     * daha eski gösterilmez.
+     * Cached for a short time. Group history loading calls `resolveContactByIdentity` once per row (through `itemFromGroupHistoryJson` and `itemFromGroupAttachmentJson`).
+     * Without a cache, each call re-runs `P2PLib.listContacts()`: a JNI call and a DB query that reads the whole contact list, avatar hex blobs included, and parses the JSON.
+     * So a history of N rows would parse the whole list N times (N x M, M = number of contacts). The cache holds the result for `CONTACT_CACHE_TTL_MS`,
+     * so one history-load burst shares one parse. The TTL is short and the live event handlers use the same function, so a changed contact shows up within a few seconds.
      */
     private fun resolveContactByIdentity(identityId: String): ContactLookup? {
         return try {
@@ -2899,7 +2698,7 @@ class GroupChatActivity : AppCompatActivity() {
     private fun sendTypingState(isTyping: Boolean) {
         if (isTypingSent == isTyping) return
         isTypingSent = isTyping
-        // bkz. `netPack` (dosya başı).
+        // Same as `netPack` (see the top of the file).
         val gid = groupId
         netPack.execute {
             try {
@@ -2928,19 +2727,15 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    /** Unconditional scroll — for our own sent messages/attachments. */
+    /** Unconditional scroll, for our own sent messages and attachments. */
     /**
-     * Spec dışı, kullanıcı isteği ("alt bar ve alıntı pilinin dışı şeffaf
-     * olsun, chat yanlardan ve alttan görünsün"): liste artık ekranın
-     * altına kadar uzanıyor ve çubuk onun üstünde yüzüyor (bkz.
-     * activity_chat.xml). Mesajların çubuğun ALTINDA kaybolmaması için
-     * listeye, çubuğun GERÇEK yüksekliği kadar alt dolgu veriliyor —
-     * `clipToPadding=false` sayesinde içerik kaydırırken çubuğun arkasından
-     * geçer ama dinlenme konumunda üstünde durur.
+     * The bottom bar and the quote pill are transparent outside, so the chat shows at the sides and underneath.
+     * The list now extends to the bottom of the screen and the bar floats above it (see activity_chat.xml).
+     * So messages do not disappear under the bar, the list gets bottom padding equal to the bar's real height. With `clipToPadding=false`, content scrolls
+     * behind the bar but rests above it.
      *
-     * Sabit bir dp YETMEZ: çubuk çok satırlı yazarken büyüyor, alıntı pili
-     * açılıp kapanıyor. Bu yüzden ikisinin de yerleşimi her değiştiğinde
-     * yeniden hesaplanıyor.
+     * A fixed dp value is not enough: the bar grows while a multi-line message is typed, and the quote pill opens and closes. So the padding is recalculated
+     * whenever either layout changes.
      */
     private fun syncRecyclerBottomInset() {
         // The list runs under the bar: its padding reaches the top of the
@@ -2955,14 +2750,10 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     private fun scrollToLastSettled() {
-        // "en alttaysak yeni
-        // mesajla otomatik aşağı kaysın"): `scrollToPosition` DOĞRUDAN
-        // çağrılınca güvenilmez — yeni eklenen satır o anda henüz
-        // ölçülmemiş oluyor ve kaydırma ya hiç olmuyor ya da eksik
-        // kalıyordu. `post`: yerleşim bittikten sonra; ikinci `post`:
-        // uzun bir balonun alt kenarı hâlâ ekranın altında kalıyorsa
-        // kalan farkı kapatır (aynı iki geçişli düzeltme klavye
-        // telafisinde de kullanılıyor, bkz. util.KeyboardInsets).
+        // Scroll to the new message when the user is already at the bottom (auto-scroll for new messages).
+        // `scrollToPosition` called DIRECTLY is unreliable: the newly added row is not measured yet, so the scroll sometimes does not happen or stops short.
+        // `post` runs after layout. The second `post` closes the remaining gap if the bottom edge of a long bubble is still below the screen
+        // (the same two-pass correction is used by the keyboard offset, see util.KeyboardInsets).
         val last = localMessages.size - 1
         recycler.post {
             recycler.scrollToPosition(last)
@@ -3038,9 +2829,10 @@ class GroupChatActivity : AppCompatActivity() {
         layoutTypingIndicator.visibility = View.VISIBLE
     }
 
-    /** bkz. ChatActivity.setupMessageSearch/toggleMessageSearch/
-     *  runMessageSearch/moveSearchMatch/goToSearchMatch AYNI desen —
-     *  sohbet içi mesaj arama, sadece o an yüklü `localMessages` üzerinde. */
+    /**
+     * Same pattern as ChatActivity.setupMessageSearch / toggleMessageSearch / runMessageSearch / moveSearchMatch / goToSearchMatch:
+     * in-chat message search, over the `localMessages` currently loaded.
+     */
     private fun setupMessageSearch() {
         layoutSearchMessages = findViewById(R.id.layoutSearchMessages)
         searchMessagesView = findViewById(R.id.searchMessages)
@@ -3135,15 +2927,12 @@ class GroupChatActivity : AppCompatActivity() {
         val wasBackgrounded = backgrounded
         backgrounded = false
         if (wasBackgrounded) promptRecordingDecision()
-        // bu grup sohbeti açıldığında ona ait
-        // bekleyen bildirim varsa temizlensin.
-        // A locked app resumes this screen for a moment under the password
-        // prompt: nothing was read, so no notification is cleared and no
-        // "read up to now" goes out (see onPause too).
+        // When this group chat opens, clear any pending notification for it.
+        // A locked app resumes this screen for a moment under the password prompt. Nothing was read then, so no notification is cleared and
+        // no "read up to now" is sent (see onPause too).
         resumedUnlocked = com.p2p.messenger.util.AppLock.isUnlocked()
         if (resumedUnlocked) com.p2p.messenger.util.NotificationHelper.clearForGroup(this, groupId)
-        // Ayarlar'dan duvarkağıdı/renk
-        // değiştirilip bu ekrana geri dönüldüğünde HEMEN yansısın.
+        // So a wallpaper or colour change made in Settings shows here at once when returning to this screen.
         com.p2p.messenger.util.ThemePrefs.applyChatBackground(this)
         // The conversation id FIRST: a message that lands between the
         // listener registration and this line would post a notification for
@@ -3156,9 +2945,7 @@ class GroupChatActivity : AppCompatActivity() {
         // message that arrived meanwhile was archived but never appended
         // to the UI. Catch up now.
         syncMissedGroupMessages()
-        // "görüldü" güvenilirlik + hız (2026-09-07): grup açılır açılmaz
-        // "buraya kadar okudum" sınırını üyelere bildir — eskiden sadece
-        // onPause'da ve yalnızca kardeş cihazlara gidiyordu.
+        // Members are told the read boundary as soon as the group opens (not only in onPause, and to members as well as sibling devices).
         if (resumedUnlocked) scheduleGroupReadWatermark()
     }
 
@@ -3192,9 +2979,8 @@ class GroupChatActivity : AppCompatActivity() {
                 val textItems = if (array != null) {
                     (0 until array.length()).map { itemFromGroupHistoryJson(array.getJSONObject(it)) }
                 } else emptyList()
-                // bkz. `loadGroupHistoryIfAvailable`/`seenViewersFromHistoryJson`
-                // AYNI desen — bu fonksiyon `onResume`'da (arka plandan
-                // dönüşte) çalıştığından pratikte EN ÇOK vurulan yol.
+                // Same pattern as `loadGroupHistoryIfAvailable` / `seenViewersFromHistoryJson`. This function runs in `onResume` (returning from the background),
+                // so it is the most frequently hit path in practice.
                 val seenEntries = if (array != null) (0 until array.length()).mapNotNull { i ->
                     val obj = array.getJSONObject(i)
                     val localId = if (obj.isNull("message_id")) null else obj.optString("message_id").ifEmpty { null }
@@ -3220,16 +3006,15 @@ class GroupChatActivity : AppCompatActivity() {
             if (adapter.refreshFrom(merged)) resolveReplyLabels()
             if (missed.isNotEmpty()) {
                 localMessages.addAll(missed)
-                // Geçmiş yüklemesi bir canlı mesajdan SONRA biterse sona eklemek
-                // canlı mesajı eski geçmişin üstüne, ekran dışına itiyordu (cihazda
-                // görüldü) — gönderim sırasına göre yeniden diz.
+                // If history loading finishes after a live message, appending would push the live message above the old history, off screen (observed on a device).
+                // So re-sort by send order.
                 localMessages.sortWith(compareBy { it.orderKey })
                 resolveReplyLabels()
                 adapter.notifyDataSetChanged()
                 adapter.dedupeByMessageId()
                 onNewIncomingItemAdded()
             }
-            // bkz. `loadGroupHistoryIfAvailable` altındaki AYNI "seen" replay notu.
+            // Same seen-replay note as under `loadGroupHistoryIfAvailable`.
             for ((localId, viewers) in seenEntries) {
                 val map = seenByPerMessage.getOrPut(localId) { mutableMapOf() }
                 for ((identityId, viewer) in viewers) map[identityId] = viewer
@@ -3240,13 +3025,12 @@ class GroupChatActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        if (!::groupId.isInitialized) return // H63
+        if (!::groupId.isInitialized) return  // group id is not initialised yet, nothing to load
         P2PService.removeMessageListener(messageListener)
         if (P2PService.activeConversationId == "group:$groupId") {
             P2PService.activeConversationId = null
         }
-        // Kardeş cihazlar VE üyeler bu grubu okunmuş saysın (bkz.
-        // `sync_read_state` — artık iki hedef).
+        // Sibling devices AND members both count this group as read (see `sync_read_state`, which now has two targets).
         groupReadWatermarkHandler.removeCallbacks(groupReadWatermarkRunnable)
         if (resumedUnlocked) {
             com.p2p.messenger.util.ReadStatePrefs.markRead(this, "group:$groupId")
@@ -3254,17 +3038,15 @@ class GroupChatActivity : AppCompatActivity() {
         }
         resumedUnlocked = false
         ownStatusPollHandler.removeCallbacks(ownStatusPollRunnable)
-        // bkz. ChatActivity onPause aynı notu — Activity görünür değilken
-        // bir pulse animasyonunun arka planda vsync'e kayıtlı kalmaması için.
+        // Same note as ChatActivity onPause: a pulse animation must not stay registered with vsync in the background while the Activity is not visible.
         ownStatusDot.cancelPulse()
         // Tell members we stopped typing and clear pending timeouts.
         typingHandler.removeCallbacksAndMessages(null)
         typingMembers.clear()
         updateTypingIndicatorUi()
         sendTypingState(false)
-        // bkz. ChatActivity onPause AYNI notu — kullanıcı ekranı kapatırken
-        // devam eden bir kayıt/oynatma varsa temiz bir şekilde durdurulur.
-        backgrounded = true // #86: the recording keeps running (service has the microphone type)
+        // Same note as ChatActivity onPause: an ongoing recording or playback is stopped cleanly when the user leaves the screen.
+        backgrounded = true // the recording keeps running (service has the microphone type)
         stopVoicePlayback()
     }
 
