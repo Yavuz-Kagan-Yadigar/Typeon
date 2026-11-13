@@ -56,7 +56,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 CapabilityBoundingSet=
-# AF_NETLINK: arayüz değişikliklerini izlemek için (libp2p if-watch).
+# AF_NETLINK: needed to watch network interface changes (libp2p if-watch).
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
