@@ -75,17 +75,13 @@ import java.util.Locale
 import java.util.UUID
 
 /**
- * Tek bir kişiyle (1:1) yapılan sohbet ekranı.
+ * One-to-one chat screen with a single contact.
  *
- * Mesajlar `P2PService`'in `pollNetwork` döngüsünden `messageListener`
- * üzerinden gelir; her olay `{"type":...}` etiketli bir JSON'dur (bkz. Rust
- * `receive_message`). Bu ekran SADECE kendi karşı tarafına (`peer`) ait ve
- * gruba ait OLMAYAN olayları işler — bkz. `messageListener`.
+ * Messages arrive from `P2PService`'s `pollNetwork` loop through `messageListener`. Each event is JSON tagged with `{"type":...}` (see Rust `receive_message`).
+ * This screen handles ONLY the events of its own peer (`peer`) that do NOT belong to a group. See `messageListener`.
  *
- * Mesaj geçmişi artık node modundan BAĞIMSIZ olarak her cihazda yerelde
- * şifreli tutuluyor (bkz. Rust `archive_message` / MessageHistoryManager);
- * bu ekran açılışta önce yereli yükler (`loadHistoryIfAvailable`), sonra
- * karşı taraftan eksik olanları ister (`requestHistorySync`).
+ * Message history is kept encrypted on each device, independent of node mode (see Rust `archive_message` / MessageHistoryManager).
+ * On open, this screen loads the local history first (`loadHistoryIfAvailable`), then asks the other side for what is missing (`requestHistorySync`).
  */
 class ChatActivity : AppCompatActivity() {
 
@@ -95,34 +91,30 @@ class ChatActivity : AppCompatActivity() {
 
         private const val HISTORY_LOAD_LIMIT = 200
         private const val HISTORY_SYNC_LIMIT = 30
-        /** Sonsuz kaydırmada bir seferde çekilen "daha eski" sayfa boyutu. */
+        /** Page size for one 'older' page in infinite scroll. */
         private const val OLDER_HISTORY_PAGE_SIZE = 50
         private const val OLDER_HISTORY_REPLY_WAIT_MS = 15_000L
-        /** Listenin başına bu kadar yaklaşıldığında bir sonraki sayfa istenir. */
+        /** When the list is scrolled this close to the top, the next page is requested. */
         private const val LOAD_OLDER_HISTORY_THRESHOLD = 3
 
         private const val SESSION_POLL_INTERVAL_MS = 800L
-        /** El sıkışma tamamlandıktan sonra yoklama seyrekleşir — bkz.
-         *  `sessionPollRunnable`. */
+        /** After the handshake completes, polling becomes sparser. See `sessionPollRunnable`. */
         private const val STEADY_STATE_POLL_INTERVAL_MS = 5_000L
         private const val OWN_STATUS_POLL_INTERVAL_MS = 2_000L
 
-        /** bkz. Rust `MAX_ATTACHMENT_SIZE` — aynı üst sınır. */
+        /** See Rust `MAX_ATTACHMENT_SIZE`: the same upper limit. */
         private const val MAX_ATTACHMENT_SIZE = 4L * 1024 * 1024 * 1024
 
-        /** bkz. `maybePlayTyphoonEffect` — bu kadar süredir sessiz olan bir
-         *  sohbete gelen mesaj "uyandırma" sayılır. */
+        /** See `maybePlayTyphoonEffect`: a message arriving in a chat that has been quiet this long counts as a 'wake-up'. */
         private const val TYPHOON_QUIET_WINDOW_MS = 15 * 60 * 1000L
 
         private const val PREVIEW_MAX_DIMENSION = 480
         private const val PREVIEW_JPEG_QUALITY = 85
 
-        /** Yazmayı bıraktıktan sonra "yazıyor" durumunun kapatılma süresi. */
+        /** How long after the user stops typing the 'typing' state is turned off. */
         private const val TYPING_IDLE_TIMEOUT_MS = 3_000L
-        /** Karşı taraftan gelen "yazıyor" göstergesinin kendi kendine
-         *  sönme süresi — kapatma bildirimi kaybolursa ekranda asılı
-         *  kalmasın (bkz. Rust `TypingIndicator` notu: bu paket kasıtlı
-         *  olarak yeniden denenmiyor). */
+        /** How long the peer's 'typing' indicator stays on by itself, so that if its turn-off notice is lost it does not hang on screen
+         *  (see Rust `TypingIndicator`: this packet is intentionally not retried). */
         private const val TYPING_INDICATOR_TIMEOUT_MS = 8_000L
 
         private const val RECORDING_MIN_DURATION_MS = 500L
@@ -142,13 +134,12 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var recycler: RecyclerView
     private lateinit var connectingBanner: View
 
-    /** `requestHistorySync` gönderildi, yanıtı bekleniyor — bkz.
-     *  `applyHistorySync` (yanıt gelmezse hiçbir şey olmaz). */
+    /** `requestHistorySync` was sent and the reply is awaited (see `applyHistorySync`; if no reply comes, nothing happens). */
     private var historySyncPending = false
     private lateinit var fetchHistoryButton: FetchHistoryButton
-    /** Sonsuz kaydırmada aynı anda tek bir sayfa isteği olsun diye. */
+    /** Only one older-page request at a time during infinite scroll. */
     private var isLoadingOlderHistory = false
-    /** Karşı taraf da boş sayfa döndürdüyse artık hiç sorma. */
+    /** If the other side also returned an empty page, stop asking. */
     private var noMoreOlderHistory = false
     private var olderHistoryRequest = 0
     private var olderHistoryEmptyReply = false
@@ -159,10 +150,8 @@ class ChatActivity : AppCompatActivity() {
     /** Invalidates a voice message still being loaded (see `loadAndPlayVoiceMessage`). */
     private var voiceLoadRequest = 0
 
-    /** Sohbet içi arama: eşleşen satırların `localMessages` içindeki
-     *  indeksleri (bkz. `runMessageSearch`/`goToSearchMatch`). */
-    /** Message ids, not list positions: an older page prepended or a
-     *  re-sort moves every position. */
+    /** In-chat search: indices into `localMessages` of the matching rows (see `runMessageSearch` / `goToSearchMatch`). */
+    /** Message ids, not list positions: prepending an older page or re-sorting moves every position. */
     private var searchMatches: List<String> = emptyList()
     private var currentSearchMatchIndex = -1
     private lateinit var layoutSearchMessages: View
@@ -178,43 +167,37 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var peerStatusDot: PulsingStatusDot
     private lateinit var ownStatusDot: PulsingStatusDot
 
-    /** gönder tuşu artık metin ("➤") taşıyan
-     *  bir `Button` değil, uygulamanın bulut logosunu maske olarak
-     *  kullanan dairesel bir `ImageButton` — bkz. activity_chat.xml
-     *  btnSend / drawable/ic_send_cloud. */
+    /** The send key is no longer a `Button` with a text glyph. It is a circular `ImageButton` that uses the app's cloud logo as a mask
+     *  (see activity_chat.xml btnSend and drawable/ic_send_cloud). */
     private lateinit var btnSend: ImageButton
-    /** Kullanıcı isteği (2026-09-06): "birşey göndermeyi engellemek gerek
-     *  [ratchet oturumu] tam gelene kadar". Bu üç düğme + `btnSend`, bir
-     *  ratchet oturumu kurulana kadar (bkz. `sessionPollRunnable` /
-     *  `updateComposerLock`) devre dışı bırakılıyor. */
+    /** Until a ratchet session exists, the send, attach, camera and voice buttons and `btnSend` are disabled (see `sessionPollRunnable` and `updateComposerLock`).
+     *  The text box stays editable, and the banner states the reason. */
     private lateinit var btnAttach: ImageButton
     private lateinit var btnCamera: ImageButton
     private lateinit var btnVoice: ImageButton
     private lateinit var btnSticker: ImageButton
     private lateinit var txtConnectingBanner: TextView
-    /** `sessionPollRunnable` günceller — `hasActiveSession` (bir ratchet
-     *  oturumu kuruldu mu). Bu `true` olana kadar hiçbir şey gönderilemez. */
+    /** Updated by `sessionPollRunnable`: `hasActiveSession`, whether a ratchet session has been set up. Nothing can be sent while this is false. */
     private var handshakeReady = false
-    /** Karşı taraf hesabını sildi (`account_deleted`) — gönderim kapalı. */
+    /** The other side deleted its account (`account_deleted`): sending is closed. */
     private var peerAccountDeleted = false
-    /** `sessionPollRunnable`'ın el sıkışmayı yeniden dürtme hızını sınırlar. */
+    /** Limits how often `sessionPollRunnable` nudges the handshake. */
     private var lastEnsureHandshakeAt = 0L
-    /** Ardışık başarısız dürtme sayısı: eşleşmesi hiç tamamlanmayan kişide her 3 sn'de bir
-     *  hata + uyanma yerine ilk 5 denemeden sonra 30 sn'ye seyrelir. */
+    /** Consecutive failed nudges. For a contact whose handshake never completes, the retry is spaced out to every 30 s after the first 5 tries,
+     *  instead of an error and a wake-up every 3 s. */
     private var ensureHandshakeStreak = 0
-    /** bkz. `maybePlayTyphoonEffect` / ui.TyphoonParticleView. */
+    /** See `maybePlayTyphoonEffect` and ui.TyphoonParticleView. */
     private lateinit var typhoonEffect: TyphoonParticleView
     private lateinit var progressSending: ProgressBar
-    /** Üst çubuktaki kişi avatarı — tam ekran açılabilmesi için saklanır
-     *  (bkz. `AvatarUtil.openFullscreen`). */
+    /** The contact's avatar in the top bar. It is kept so the full-screen view can open (see `AvatarUtil.openFullscreen`). */
     private var toolbarAvatarBytes: ByteArray? = null
 
     private lateinit var layoutTypingIndicator: View
     private val typingHandler = Handler(Looper.getMainLooper())
-    /** bkz. `TYPING_INDICATOR_TIMEOUT_MS`. */
+    /** See `TYPING_INDICATOR_TIMEOUT_MS`. */
     private val clearPeerTypingRunnable = Runnable { layoutTypingIndicator.visibility = View.GONE }
     private var isTypingSent = false
-    /** bkz. `TYPING_IDLE_TIMEOUT_MS`. */
+    /** See `TYPING_IDLE_TIMEOUT_MS`. */
     private val stopTypingRunnable = Runnable { sendTypingState(false) }
 
     private lateinit var fabScrollToBottom: FloatingActionButton
@@ -245,10 +228,10 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var txtRecordingTimer: TextView
     private lateinit var txtCancelPill: TextView
     private val recordingHandler = Handler(Looper.getMainLooper())
-    /** `sendSeenReceipt` / `sendTypingIndicator` JNI çağrıları
-     *  paylaşılan çekirdek kilidinde sıraya durabildiğinden ana iş parçacığında
-     *  ÇALIŞMAZ — tek iş parçacıklı sıra (CallActivity'deki `DiscardPolicy`
-     *  deseni; kapanış sonrası gönderimler sessizce atılır). */
+    /**
+     * The `sendSeenReceipt` and `sendTypingIndicator` JNI calls can queue on the shared core lock, so they do NOT run on the main thread.
+     * They run on a single-thread queue (same `DiscardPolicy` pattern as CallActivity: sends after close are dropped silently).
+     */
     private val netPack = java.util.concurrent.ThreadPoolExecutor(
         1, 1, 10L, java.util.concurrent.TimeUnit.SECONDS,
         java.util.concurrent.LinkedBlockingQueue(), java.util.concurrent.ThreadPoolExecutor.DiscardPolicy()
@@ -264,8 +247,7 @@ class ChatActivity : AppCompatActivity() {
         ActivityResultContracts.RequestPermission()
     ) { /* reddedilse bile devam — basılı tutma o zaman kayıt başlatmaz */ }
 
-    /** Sesli mesaj çalma: TÜM balonlar için TEK bir paylaşımlı
-     *  `MediaPlayer` (bkz. SimpleChatAdapter `updateVoicePlayback`). */
+    /** Voice message playback: ONE shared `MediaPlayer` for ALL bubbles (see SimpleChatAdapter `updateVoicePlayback`). */
     private var voicePlayer: MediaPlayer? = null
     private var voicePlayingFileId: String? = null
     private var voicePlaybackSpeed = 1f
@@ -295,10 +277,8 @@ class ChatActivity : AppCompatActivity() {
     }
 
     /**
-     * giriş çubuğundaki kamera düğmesi —
-     * anlık çekim + kırpma (bkz. ui.CameraCaptureActivity). Sonuç
-     * `Intent` extra'sıyla DEĞİL, `CapturedImage` üzerinden geliyor
-     * (gerekçe orada); burada sadece "tamam mı" bilgisi taşınıyor.
+     * The camera button on the input bar: instant capture and crop (see ui.CameraCaptureActivity). The result comes back through `CapturedImage`,
+     * not an `Intent` extra (see the reason there). Only an 'ok or not' flag is carried here.
      */
     private val takePhotoLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -308,29 +288,21 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    /** SADECE API 26-28 (scoped storage öncesi) için — bkz.
-     *  saveToPublicDownloads notu. API 29+'ta hiç kullanılmaz. */
+    /** ONLY for API 26-28 (before scoped storage). Never used on API 29+. See the saveToPublicDownloads note. */
     private val requestStoragePermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { /* reddedilse bile devam — kaydetme o zaman başarısız olur, mesajlaşma etkilenmez */ }
 
     private val sessionPollHandler = Handler(Looper.getMainLooper())
     /**
-     * bağlantı durumu göstergesi — iki AYRI sorunun cevabını
-     * ayrı ayrı kontrol eder, çünkü bunlar farklı şeyler:
-     * - `hasActiveSession` (üstteki "Bağlanılıyor" banner'ı için): "bir
-     *   ratchet oturumu kuruldu mu" — kriptografik bir durum, bir kez
-     *   kurulunca SÜRESİZ true kalır (bağlantı kopsa bile geçerliliğini
-     *   korur — mesajlar artık onaylanana kadar yeniden denendiği için,
-     *   bkz. `awaiting_confirmation`, "bağlı değilsin" demek yanlış olurdu).
-     * - `isPeerConnected` (action bar altyazısındaki "Bağlı"/"Bağlanılıyor"
-     *   durum metni için): karşı taraf ŞU AN gerçekten bağlı mı — Swarm'ın
-     *   canlı bağlantı defterine bakar, bağlantı koparsa hemen "Bağlanılıyor"a
-     *   döner.
+     * Connection status indicator. Two different questions are checked separately, because they are different things:
+     * - `hasActiveSession` (for the 'Connecting' banner at the top): whether a ratchet session has been set up. It is a cryptographic state.
+     *   Once set up it stays true, even if the connection drops: messages are retried until acknowledged (see `awaiting_confirmation`),
+     *   so saying 'not connected' would be wrong.
+     * - `isPeerConnected` (for the 'Connected' / 'Connecting' status line under the action bar): whether the peer is connected RIGHT NOW. It reads the live
+     *   connection book of the swarm, and switches back to 'Connecting' at once when the connection drops.
      *
-     * ÖNCEDEN İKİSİ İÇİN DE `hasActiveSession` kullanılıyordu — bu yüzden
-     * durum metni bir kez "Bağlı" olduktan sonra karşı cihaz gerçekten
-     * kapansa/erişilemez olsa bile hep "Bağlı" göstermeye devam ediyordu.
+     * Using `hasActiveSession` for both would keep 'Connected' on even when the other device is offline or unreachable.
      */
     private val sessionPollRunnable: Runnable = object : Runnable {
         override fun run() {
@@ -377,11 +349,8 @@ class ChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Kullanıcı isteği (2026-09-06): ratchet oturumu kurulana kadar HİÇBİR
-     * şey gönderilemesin — 1:1 sohbette taze eşleşmeden sonra ilk dakikalarda
-     * gönderilen mesajların "kaybolmuş gibi" görünmesi buradan geliyordu.
-     * Metin kutusu düzenlenebilir kalır (taslak yazılabilir), ama gönder/ek/
-     * kamera/ses düğmeleri devre dışı ve soluk; banner NEDEN'i açıkça yazar.
+     * Until a ratchet session is set up, NOTHING can be sent. The text box stays editable, so a draft can be typed, but the send, attach, camera and voice
+     * buttons are disabled and dimmed. The banner states the reason clearly.
      */
     private fun updateComposerLock() {
         val enabled = handshakeReady && !peerAccountDeleted
@@ -399,8 +368,7 @@ class ChatActivity : AppCompatActivity() {
         )
     }
 
-    /** Gönderme yolundaki her giriş noktası (gönder/ek/kamera/ses) bunu
-     *  çağırır — hazır değilse kısa bir uyarı gösterip `false` döner. */
+    /** Every send entry point (send, attach, camera, voice) calls this: if not ready, it shows a short warning and returns `false`. */
     private fun ensureHandshakeReadyOrWarn(): Boolean {
         if (peerAccountDeleted) {
             Toast.makeText(this, R.string.msg_account_deleted_no_send, Toast.LENGTH_SHORT).show()
@@ -412,14 +380,11 @@ class ChatActivity : AppCompatActivity() {
     }
 
     /**
-     * karşı tarafın bağlantı durumunu
-     * `txtToolbarSubtitle`'ın düz metninden DAHA belirgin/ilk bakışta
-     * ayırt edilebilir kılmak için küçük renkli bir nokta + "bağlanılıyor"
-     * durumunda nabız gibi atan (pulse) bir animasyon. Üç durum:
-     * - `connecting` (henüz bir ratchet oturumu kurulmadı, bkz.
-     *   `hasActiveSession`): turuncu, sürekli soluklaşıp-koyulaşan pulse.
-     * - `online` (oturum kuruldu VE şu an gerçekten bağlı): yeşil, sabit.
-     * - aksi hâlde (`offline` — oturum var ama şu an ulaşılamıyor): gri, sabit.
+     * A small coloured dot plus a pulsing animation while 'connecting', so the peer's connection state is easier to see at a glance than the plain
+     * text of `txtToolbarSubtitle`. Three states:
+     * - `connecting` (no ratchet session yet, see `hasActiveSession`): orange, a continuous fade-in and fade-out pulse.
+     * - `online` (session set up AND connected right now): green, steady.
+     * - otherwise `offline` (session exists but the peer cannot be reached right now): grey, steady.
      */
     private fun updatePeerStatusDot(connecting: Boolean, online: Boolean) {
         val colorRes = when {
@@ -431,8 +396,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private val ownStatusPollHandler = Handler(Looper.getMainLooper())
-    /** BU cihazın kendi ağ durumu (bkz. ConnectionStatus) —
-     *  karşı tarafın durumunun yanında, ayrı bir nokta + metin olarak. */
+    /** This device's own network state (see ConnectionStatus), as a separate dot and text next to the peer's state. */
     private val ownStatusPollRunnable: Runnable = object : Runnable {
         override fun run() {
             val self = this
@@ -458,12 +422,9 @@ class ChatActivity : AppCompatActivity() {
     }
 
     /**
-     * "attachments and
-     * messages sended to groups seems like sended from 1:1 as well").
-     * Artık `group_id`/`group_message_local_id` doluysa (yani bu olay bir
-     * GRUBA aitse) 1:1 ekranı bu olayı asla işlemez —
-     * GroupChatActivity zaten kendi `group_id` eşleşmesiyle bunu doğru
-     * ekrana yönlendiriyor.
+     * Attachments and messages sent to groups must not appear as 1:1 traffic as well.
+     * If `group_id` / `group_message_local_id` is set (the event belongs to a GROUP), the 1:1 screen never handles it.
+     * GroupChatActivity routes it to the right screen by its own `group_id` match.
      */
     private val messageListener: (String) -> Unit = { json ->
         try {
@@ -478,7 +439,7 @@ class ChatActivity : AppCompatActivity() {
                 runOnUiThread { handleIncomingEvent(obj) }
             }
         } catch (e: Exception) {
-            // Ayrıştırılamayan olay — sessizce yok say.
+            // Unparseable event: ignore silently.
         }
     }
 
@@ -487,7 +448,7 @@ class ChatActivity : AppCompatActivity() {
         setContentView(R.layout.activity_chat)
         whiteboard = WhiteboardPanel(this, findViewById(R.id.whiteboardHost), findViewById(R.id.whiteboardHandle))
         ThemePrefs.applyChatBackground(this)
-        // bkz. util.ChatListDrawer dokümantasyonu.
+        // See the util.ChatListDrawer docs.
         com.p2p.messenger.util.ChatListDrawer.setup(this) {
             // Back with the search bar open closes the bar, not the chat.
             (layoutSearchMessages.visibility == View.VISIBLE).also { if (it) toggleMessageSearch() }
@@ -498,10 +459,8 @@ class ChatActivity : AppCompatActivity() {
         fabScrollToBottom = findViewById(R.id.fabScrollToBottom)
         fabScrollToBottom.setOnClickListener { scrollToBottomNow() }
         recycler = findViewById(R.id.recyclerMessages)
-        // bkz. aşağıdaki `addOnLayoutChangeListener` — bu, findViewById'i
-        // ondan ÖNCE yapmalı, yoksa lateinit init edilmeden kullanılır
-        // (UninitializedPropertyAccessException, her ChatActivity açılışında
-        // çöktürüyordu).
+        // This must run BEFORE `addOnLayoutChangeListener` below, which uses it. Otherwise the lateinit property is accessed before init
+        // (UninitializedPropertyAccessException). That crashed every ChatActivity open.
         layoutMessageInput = findViewById(R.id.layoutMessageInput)
         setupMessageSearch()
 
@@ -519,18 +478,14 @@ class ChatActivity : AppCompatActivity() {
         recycler.layoutManager = chatLayoutManager
         recycler.adapter = adapter
         adapter.warmPool(recycler)
-        // Kullanıcı: "mesaj balonları bazen titriyor". Tik/görüldü/tepki
-        // güncellemeleri `notifyItemChanged` ile geliyor ve varsayılan
-        // animatör her birinde balonun eski ve yeni hâli arasında çapraz
-        // geçiş (crossfade) oynatıyordu. Ekleme/silme animasyonları kalıyor.
+        // Message bubbles flickered: tick, seen and reaction updates arrive through `notifyItemChanged`, and the default animator cross-fades each bubble
+        // between its old and new state. Add and remove animations stay.
         (recycler.itemAnimator as? androidx.recyclerview.widget.SimpleItemAnimator)?.supportsChangeAnimations = false
-        // Birleşen balonların TEK dış hattı — bkz. MergedBubbleDecoration
-        // (neden her balonun kendi arka planı yetmiyor, orada yazılı).
+        // The single outer outline of merged bubbles. See MergedBubbleDecoration for why each bubble's own background is not enough.
         recycler.addItemDecoration(MergedBubbleDecoration(adapter))
         setupSwipeToReply()
 
-        // Sonsuz kaydırma: listenin başına yaklaşıldığında bir sonraki
-        // "daha eski" sayfa istenir (bkz. `loadOlderHistory`).
+        // Infinite scroll: when the top of the list is reached, the next 'older' page is requested (see `loadOlderHistory`).
         recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
                 if (chatLayoutManager.findFirstVisibleItemPosition() <= LOAD_OLDER_HISTORY_THRESHOLD) {
@@ -553,8 +508,7 @@ class ChatActivity : AppCompatActivity() {
         peerStatusDot = PulsingStatusDot(dotPeerStatus)
         ownStatusDot = PulsingStatusDot(dotOwnStatus)
         imgToolbarAvatar.setOnClickListener { AvatarUtil.openFullscreen(this, toolbarAvatarBytes) }
-        // Üst çubuğa dokununca kişi bilgisi + "Dosyalar ve medya" (grup
-        // sohbetindeki menünün 1:1 karşılığı, bkz. showGroupInfoDialog).
+        // Tapping the top bar opens contact info and 'Files and media' (the 1:1 counterpart of the group chat menu, see showGroupInfoDialog).
         toolbarTitleView.setOnClickListener { showContactInfoDialog() }
         supportActionBar?.apply {
             setDisplayShowCustomEnabled(true)
@@ -568,13 +522,10 @@ class ChatActivity : AppCompatActivity() {
         val input = findViewById<EditText>(R.id.edtMessage)
         com.p2p.messenger.util.Quote.attach(input)
         typhoonEffect = findViewById(R.id.typhoonEffect)
-        // klavye
-        // açılınca sohbet onun yüksekliğini telafi etsin ve son mesaj
-        // görünür kalsın — bkz. util.KeyboardInsets (neden `adjustResize`
-        // yetmiyor, orada ölçümle birlikte yazılı).
+        // When the keyboard opens, the chat compensates for its height so the last message stays visible.
+        // See util.KeyboardInsets (why `adjustResize` alone is not enough is documented there, with measurements).
         KeyboardInsets.attach(findViewById(R.id.rootChatLayout), recycler)
-        // bkz. `syncRecyclerBottomInset` — çubuğun/alıntı pilinin yüksekliği
-        // değiştikçe listenin alt dolgusu takip etmeli.
+        // See `syncRecyclerBottomInset`: the list's bottom padding must follow changes in the height of the bar and the quote pill.
         layoutMessageInput.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> syncRecyclerBottomInset() }
         btnSend = findViewById(R.id.btnSend)
         btnAttach = findViewById(R.id.btnAttach)
@@ -607,13 +558,12 @@ class ChatActivity : AppCompatActivity() {
 
         btnAttach.setOnClickListener {
             if (!ensureHandshakeReadyOrWarn()) return@setOnClickListener
-            // Sistem dosya seçicisi BAŞKA bir süreçte açılır — bkz.
-            // AppLock.beginTrustedExcursion (dönüşte şifre sorulmamalı).
+            // The system file picker opens in ANOTHER process. See AppLock.beginTrustedExcursion (the password must not be asked on return).
             AppLock.beginTrustedExcursion()
             pickFileLauncher.launch(arrayOf("*/*"))
         }
 
-        // ek düğmesinin yanında doğrudan kamera.
+        // Camera directly, next to the attach button.
         btnCamera.setOnClickListener {
             if (!ensureHandshakeReadyOrWarn()) return@setOnClickListener
             takePhotoLauncher.launch(Intent(this, CameraCaptureActivity::class.java))
@@ -624,8 +574,7 @@ class ChatActivity : AppCompatActivity() {
             stickerPicker.show()
         }
 
-        // bkz. `saveToPublicDownloads` — SADECE scoped storage öncesi
-        // sürümlerde gerekiyor, API 29+ hiçbir izin istemiyor.
+        // See `saveToPublicDownloads`: only needed on versions before scoped storage. API 29+ asks for no permission.
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q &&
             ContextCompat.checkSelfPermission(
                 this, android.Manifest.permission.WRITE_EXTERNAL_STORAGE
@@ -648,7 +597,7 @@ class ChatActivity : AppCompatActivity() {
         if (!bindToIntent(intent)) finish() else if (savedInstanceState == null) consumeShare(intent)
     }
 
-    /** Paylaşım ekranından seçilen içerik (bkz. util.ShareIntake). */
+    /** Content selected on the share screen (see util.ShareIntake). */
     private fun consumeShare(intent: Intent) {
         com.p2p.messenger.util.ShareIntake.takeForward(intent)?.let {
             pendingForward = it
@@ -705,10 +654,10 @@ class ChatActivity : AppCompatActivity() {
     }
 
     // ---------------------------------------------------------------
-    // Sesli mesaj — kayıt
+    // Voice message: recording
     // ---------------------------------------------------------------
 
-    /** Basılı tut = kaydet, sola kaydır = iptal (WhatsApp deseni). */
+    /** Hold to record, slide left to cancel (WhatsApp style). */
     private fun setupVoiceRecordButton() {
         btnVoice.setOnTouchListener { _, event ->
             when (event.actionMasked) {
@@ -740,7 +689,7 @@ class ChatActivity : AppCompatActivity() {
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
-                    // #86: backgrounding cancels the touch; the recording goes on, the user decides
+                    // backgrounding cancels the touch; the recording goes on, the user decides
                     promptRecordingDecision()
                     true
                 }
@@ -749,8 +698,7 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    /** "İptal etmek için kaydır" hapı: parmakla birlikte kayar, eşiği
-     *  geçince kırmızıya döner. */
+    /** The 'slide to cancel' pill: it moves with the finger, and turns red once the threshold is passed. */
     private fun updateCancelPill(dx: Float, thresholdPx: Float) {
         txtCancelPill.translationX = dx.coerceIn(0f, thresholdPx)
         val pastThreshold = dx > thresholdPx
@@ -816,7 +764,7 @@ class ChatActivity : AppCompatActivity() {
         recordingHandler.post(recordingTimerRunnable)
     }
 
-    /** `send = false` (iptal ya da hata) durumunda kayıt dosyası silinir. */
+    /** When `send = false` (cancelled or error), the recording file is deleted. */
     private fun finishVoiceRecording(send: Boolean) {
         val recorder = mediaRecorder ?: return
         val file = recordingFile
@@ -830,17 +778,15 @@ class ChatActivity : AppCompatActivity() {
         try {
             recorder.stop()
         } catch (e: Exception) {
-            // Çok kısa kayıtlarda `stop()` fırlatabilir — dosya kullanılamaz.
+            // Very short recordings can make `stop()` throw. The file is unusable then.
             file?.delete()
             recorder.release()
             return
         }
         recorder.release()
         if (send && durationMs >= RECORDING_MIN_DURATION_MS && file != null) {
-            // sesli mesajın da altına yazı
-            // yazılabilsin. Kayıt bırakılır bırakılmaz gönderilmiyor, önce
-            // açıklama soruluyor — kullanıcı boş bırakırsa davranış eskisiyle
-            // aynı.
+            // A caption can also be typed under the voice message. The recording is not sent on release: the caption is asked for first.
+            // If it is left empty, the message is sent as before.
             promptAttachmentCaption(onCancel = { file.delete() }) { caption, _ -> sendVoiceMessage(file, durationMs, caption, takeQuote()) }
         } else {
             file?.delete()
@@ -850,9 +796,7 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    /** Sesli mesaj, normal bir dosya eki olarak gönderilir (mime
-     *  "audio/mp4") — tek fark `durationMs`'in taşınması, bkz. Rust
-     *  `FileOffer.duration_ms`. */
+    /** A voice message is sent as a normal file attachment (MIME 'audio/mp4'). The only difference is that `durationMs` is carried (see Rust `FileOffer.duration_ms`). */
     private fun sendVoiceMessage(file: File, durationMs: Long, caption: String = "", quote: com.p2p.messenger.util.Quote.Ref? = null) {
         lifecycleScope.launch(Dispatchers.IO) {
             // The copy is deleted even if the screen closes while sending.
@@ -915,7 +859,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     // ---------------------------------------------------------------
-    // Sesli mesaj — çalma
+    // Voice message: playback
     // ---------------------------------------------------------------
 
     private fun onVoicePlayClicked(item: SimpleChatAdapter.Item) {
@@ -937,8 +881,7 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    /** Kullanıcı kaydırıcıyı sürükleyip bıraktı — o an çalan mesaj buysa
-     *  doğrudan `seekTo`, değilse o konumdan başlatarak yükle. */
+    /** The user drags the slider and releases it: if the playing message is this one, seek directly; otherwise load it from that position. */
     private fun onVoiceSeeked(item: SimpleChatAdapter.Item, positionMs: Int) {
         val attachment = item.attachment ?: return
         if (attachment.status != SimpleChatAdapter.AttachmentStatus.COMPLETE) return
@@ -951,9 +894,7 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    /** Ekin çözülmüş kopyasının yolu ana thread DIŞINDA alınır — büyük bir
-     *  dosyanın çözülmesi dakikalar sürebilir (bkz. Rust
-     *  `begin_attachment_decrypt` notu). */
+    /** The decrypted copy's path is obtained OFF the main thread: decrypting a large file can take minutes (see Rust `begin_attachment_decrypt`). */
     private fun loadAndPlayVoiceMessage(
         item: SimpleChatAdapter.Item,
         attachment: SimpleChatAdapter.AttachmentInfo,
@@ -1006,8 +947,7 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    /** Hız rozeti (1x → 1.5x → 2x → 0.5x, bkz. PlaybackSpeed). Çalmayan bir
-     *  balonda sadece tercih olarak saklanır. */
+    /** Speed badge (1x → 1.5x → 2x → 0.5x, see PlaybackSpeed). On a bubble that is not playing it is only stored as a preference. */
     private fun onVoiceSpeedClicked(item: SimpleChatAdapter.Item) {
         val attachment = item.attachment ?: return
         val newSpeed = PlaybackSpeed.next(attachment.playbackSpeed)
@@ -1049,21 +989,19 @@ class ChatActivity : AppCompatActivity() {
     }
 
     // ---------------------------------------------------------------
-    // Sohbet bağlama / gönderim
+    // Binding the chat and sending
     // ---------------------------------------------------------------
 
     /**
-     * Intent'teki kişiye bağlanır. `false` dönerse Intent kullanılamaz
-     * (fingerprint yok) ve ekran kapanır. AYNI kişiye tekrar bağlanmak
-     * (ör. bildirimden gelen ikinci bir Intent) durumu SIFIRLAMAZ —
-     * yalnızca farklı bir kişiye geçildiğinde ekran temizlenir.
+     * Binds this screen to the contact in the Intent. If it returns `false`, the Intent cannot be used (no fingerprint) and the screen closes.
+     * Binding to the SAME contact again (for example a second Intent from a notification) does NOT reset the state. The screen is cleared only
+     * when switching to a different contact.
      */
     private fun bindToIntent(intent: Intent): Boolean {
         val newPeer = intent.getStringExtra(EXTRA_PEER_DEVICE_FINGERPRINT) ?: return false
         val displayName = intent.getStringExtra(EXTRA_PEER_DISPLAY_NAME) ?: newPeer.take(8)
         txtToolbarTitle.text = displayName
-        // Fotoğraf henüz yüklenmedi — baş harf rozetiyle başla, aşağıdaki
-        // arka plan işi gerçek avatarı getirince değiştir.
+        // The photo is not loaded yet: start with the initial-letter badge, and replace it when the background job below fetches the real avatar.
         AvatarUtil.renderInto(imgToolbarAvatar, null, displayName)
 
         if (::peerDeviceFingerprint.isInitialized && peerDeviceFingerprint == newPeer) return true
@@ -1084,7 +1022,7 @@ class ChatActivity : AppCompatActivity() {
         isTypingSent = false
         stopVoicePlayback()
         connectingBanner.visibility = View.VISIBLE
-        // Yeni sohbet: kanıtlanana kadar (poll'ün ilk turu) gönderim KİLİTLİ.
+        // New chat: sending stays LOCKED until proven (the first round of the poll).
         handshakeReady = false
         pendingShare = emptyList()
         peerAccountDeleted = false
@@ -1093,12 +1031,12 @@ class ChatActivity : AppCompatActivity() {
         sessionPollHandler.removeCallbacks(sessionPollRunnable)
         sessionPollHandler.post(sessionPollRunnable)
 
-        // `listContacts` bir JNI çağrısı — ana thread'de yapılmaz.
+        // `listContacts` is a JNI call, so it is not run on the main thread.
         lifecycleScope.launch(Dispatchers.IO) {
             val avatarBytes = resolveContactAvatar(newPeer)
             val deleted = isAccountDeleted(newPeer)
             withContext(Dispatchers.Main) {
-                // Bu arada başka bir sohbete geçilmiş olabilir.
+                // The user may have switched to another chat in the meantime.
                 if (peerDeviceFingerprint == newPeer) {
                     if (deleted) {
                         peerAccountDeleted = true
@@ -1113,8 +1051,7 @@ class ChatActivity : AppCompatActivity() {
 
         loadHistoryIfAvailable(newPeer)
 
-        // El sıkışma yoksa başlat — ilk mesajın yazılmasını beklemeden
-        // (bkz. Rust `ensure_handshake`).
+        // Start the handshake if none exists, without waiting for the first message to be typed (see Rust `ensure_handshake`).
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 P2PLib.ensureHandshake(newPeer)
@@ -1130,7 +1067,7 @@ class ChatActivity : AppCompatActivity() {
         if (!bindToIntent(intent)) finish() else consumeShare(intent)
     }
 
-    /** Kişi bilgisi + bu sohbetin yerel ekleri (`StorageActivity`). */
+    /** Contact info plus this chat's local attachments (`StorageActivity`). */
     private fun showContactInfoDialog() {
         val view = layoutInflater.inflate(R.layout.dialog_contact_info, null)
         val name = txtToolbarTitle.text.toString()
@@ -1201,9 +1138,8 @@ class ChatActivity : AppCompatActivity() {
         else -> SimpleChatAdapter.AttachmentStatus.OFFERED
     }
 
-    /** bkz. üst çubuk avatarı — `listContacts()`'ta bu cihaz parmak izine
-     *  sahip kişiyi bulup profil fotoğrafını döner (yoksa `null`, o zaman
-     *  `AvatarUtil` baş harf rozeti gösterir). */
+    /** Top bar avatar: finds the contact with this device fingerprint in `listContacts()` and returns its profile photo (or `null`,
+     *  in which case `AvatarUtil` shows the initial-letter badge). */
     private fun isAccountDeleted(deviceFingerprint: String): Boolean = try {
         val array = JSONArray(P2PLib.listContacts())
         (0 until array.length()).any {
@@ -1240,18 +1176,13 @@ class ChatActivity : AppCompatActivity() {
             "stickers_changed" -> stickerPicker.reload()
             "message" -> {
                 val messageId = obj.optString("message_id")
-                // göndericinin embed ettiği
-                // gerçek gönderim anı (bkz. SimpleChatAdapter.Item.sentAtMs
-                // dokümantasyonu) — "0"/eksikse (eski sürüm göndericisi)
-                // null'a düşer, bubble tek zaman damgasına döner.
+                // The sender's embedded send time, the real moment it was sent (see SimpleChatAdapter.Item.sentAtMs). If it is '0' or missing
+                // (an older sender version), it falls back to null, and the bubble shows a single timestamp.
                 val sentAtMs = obj.optLong("sent_at_ms", 0L).takeIf { it > 0 }
-                // bkz. `resolveReplyLabel` — bu canlı olay için `localMessages`
-                // zaten TAM (yanıtlanan mesaj, varsa, önceden eklenmiş
-                // olmalı), bu yüzden burada DOĞRUDAN çözülebilir.
-                // isNull() check matters: org.json's optString(key, "") only
-                // falls back on a MISSING key, not an explicit JSON null —
-                // Rust always sends this key, so without the check every
-                // received message got the literal string "null" here.
+                // See `resolveReplyLabel`: for this live event, `localMessages` already holds the complete set (the replied-to message, if any, must have been added
+                // earlier), so it can be resolved directly here.
+                // The isNull() check matters: org.json's optString(key, "") only falls back on a MISSING key, not an explicit JSON null. Rust always sends this key,
+                // so without the check every received message would get the literal string 'null' here.
                 val replyToMessageId = if (obj.isNull("reply_to_message_id")) null else obj.optString("reply_to_message_id").ifEmpty { null }
                 adapter.addMessage(
                     SimpleChatAdapter.Item(
@@ -1266,15 +1197,12 @@ class ChatActivity : AppCompatActivity() {
                 )
                 maybePlayTyphoonEffect()
                 onNewIncomingItemAdded()
-                // "Görüldü": 1:1'de yalnızca okuma sınırı (ReadStateSync) —
-                // karşı taraf onu `seen_bulk` ile bu mesaja da uygular, diske
-                // yazılır ve yeniden denenir. Mesaj başına ayrıca `Seen`
-                // göndermek aynı bilginin ikinci bir paketiydi.
+                // 'Seen' in 1:1 is only the read boundary (ReadStateSync). The other side applies it to this message as well, via `seen_bulk`; it is written to disk
+                // and retried. Sending a separate `Seen` per message would have been a second packet carrying the same information.
                 scheduleReadWatermark()
             }
-            // Çoklu-cihaz (spec 1.7): başka bir cihazımdan gönderdiğim mesaj —
-            // burada da "gönderilen" balon olarak göster (markSeen YOK, kendi
-            // mesajım). Yeniden açılışta arşivden zaten "sent" olarak gelir.
+            // Multi-device echo: a message I sent from another of my devices. It is shown here as a 'sent' bubble too (markSeen NOT called, since it is my own
+            // message). After a reopen it already comes from the archive as 'sent'.
             "sibling_message" -> {
                 val messageId = obj.optString("message_id")
                 val sentAtMs = obj.optLong("sent_at_ms", 0L).takeIf { it > 0 }
@@ -1295,9 +1223,7 @@ class ChatActivity : AppCompatActivity() {
             }
             "edit" -> adapter.applyEdit(obj.optString("message_id"), obj.optString("text"))
             "delete" -> adapter.applyDelete(obj.optString("message_id"))
-            // emoji tepkileri — Rust tarafı
-            // hazır ÖZET dizesini gönderiyor (bkz. `reactions_summary`),
-            // burada sayma/toplama yapılmaz.
+            // Emoji reactions: Rust sends a ready SUMMARY string (see `reactions_summary`); nothing is counted or summed here.
             "reaction" -> adapter.applyReactions(obj.optString("message_id"), obj.optString("reactions"))
             "status" -> adapter.applyStatus(obj.optString("message_id"), parseStatus(obj.optString("status")))
             "history_sync" -> applyHistorySync(obj)
@@ -1311,7 +1237,7 @@ class ChatActivity : AppCompatActivity() {
                     loadOlderHistory()
                 }
             }
-            // "sibling_file": başka cihazımdan gönderdiğim ek — aynı balon, benim tarafımda.
+            // 'sibling_file': an attachment I sent from another of my devices. Same bubble, on my side.
             "file_offer", "sibling_file" -> {
                 val autoDownloading = obj.optBoolean("auto_downloading", false)
                 // isNull() check: optString("preview_hex", "") returns the
@@ -1320,8 +1246,7 @@ class ChatActivity : AppCompatActivity() {
                 val previewHex = if (obj.isNull("preview_hex")) null else obj.optString("preview_hex").ifEmpty { null }
                 val previewJpeg = previewHex?.let { hexToBytes(it) }
                 val durationMs = obj.optInt("duration_ms", -1).let { if (it < 0) null else it }
-                // ekle birlikte gelen açıklama
-                // ve yanıt bağlamı (bkz. Rust `file_offer` olayı).
+                // Attachment bubble with its caption and reply context (see the Rust `file_offer` event).
                 val attachmentCaption = obj.optString("caption", "")
                 val attachmentReplyId = if (obj.isNull("reply_to_message_id")) null else obj.optString("reply_to_message_id").ifEmpty { null }
                 val attachmentReplyPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null }
@@ -1342,7 +1267,7 @@ class ChatActivity : AppCompatActivity() {
                             durationMs = durationMs,
                             isSticker = obj.optBoolean("sticker", false)
                         ),
-                        // ek + açıklama + yanıt.
+                        // Attachment + caption + reply.
                         caption = attachmentCaption,
                         replyToMessageId = attachmentReplyId,
                         replyToPreview = attachmentReplyPreview,
@@ -1350,8 +1275,7 @@ class ChatActivity : AppCompatActivity() {
                     )
                 )
                 onNewIncomingItemAdded()
-                // Okuma sınırı yalnızca `messages` tablosunu kapsıyor; ekler
-                // için tekil `Seen` kalıyor. Kendi ekimin yankısına gönderilmez.
+                // The read boundary covers only the `messages` table. Attachments keep individual `Seen` packets. It is not sent for the echo of my own attachment.
                 if (obj.optString("type") == "file_offer") {
                     markSeen(obj.optString("file_id"))
                     // Sibling devices keep the notification until the watermark moves.
@@ -1363,15 +1287,10 @@ class ChatActivity : AppCompatActivity() {
             )
             "file_complete" -> adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.COMPLETE)
             "file_failed" -> adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.FAILED)
-            // Rust bu olayı hem depolama sınırı tahliyesinde hem
-            // de ekli bir mesaj silindiğinde üretiyordu ama HİÇBİR istemci
-            // dinlemiyordu — balon "tamamlandı" görünmeye devam ediyor,
-            // kullanıcı dokununca dosya yok. Artık "teklif edildi"ye döner,
-            // yani tekrar indirilebilir görünür.
+            // Rust emits this event both when the storage limit evicts a file and when an attached message is deleted, but no client listened to it.
+            // The bubble kept showing 'completed', and tapping it found no file. Now it goes back to 'offered', so it looks downloadable again.
             "file_evicted" -> adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.OFFERED)
-            // "görüldü" bildirimi — karşı taraf
-            // mesajı ekranında gördü. Balonun altında küçük bir avatar
-            // rozetiyle gösterilir (bkz. SimpleChatAdapter.applySeen).
+            // 'Seen' notice: the other side saw the message on its screen. It is shown as a small avatar badge under the bubble (see SimpleChatAdapter.applySeen).
             "seen" -> {
                 val messageId = obj.optString("message_id")
                 val peerName = txtToolbarTitle.text.toString()
@@ -1380,12 +1299,10 @@ class ChatActivity : AppCompatActivity() {
                     listOf(SimpleChatAdapter.SeenByViewer(peerAvatar(), peerName))
                 )
             }
-            // Toplu görüldü (2026-09-07): karşı taraf "buraya kadar okudum"
-            // sınırı yolladı (bkz. Rust `apply_incoming_read_watermark`).
-            // `message_ids` en eskiden yeniye sıralı — 1:1 adaptörü tek bir
-            // "son görülen" işareti gösterdiğinden EN YENİsini uygulamak yeter.
+            // Bulk seen: the other side sent a 'read up to here' boundary (see Rust `apply_incoming_read_watermark`). `message_ids` are sorted oldest to newest.
+            // The 1:1 adapter shows a single 'last seen' mark, so applying the NEWEST one is enough.
             "seen_bulk" -> {
-                // Grup olayları `messageListener`'da zaten elendi (`group_id` null değilse).
+                // Group events were already filtered out in `messageListener` (when `group_id` is not null).
                 val arr = obj.optJSONArray("message_ids")
                 if (arr != null && arr.length() > 0) {
                     val newestId = arr.optString(arr.length() - 1)
@@ -1406,25 +1323,20 @@ class ChatActivity : AppCompatActivity() {
                 typingHandler.removeCallbacks(clearPeerTypingRunnable)
                 layoutTypingIndicator.visibility = if (isTyping) View.VISIBLE else View.GONE
                 if (isTyping) {
-                    // bkz. `TYPING_INDICATOR_TIMEOUT_MS` — kapatma bildirimi
-                    // kaybolursa gösterge sonsuza dek asılı kalmasın.
+                    // See `TYPING_INDICATOR_TIMEOUT_MS`: if the turn-off notice is lost, the indicator must not hang forever.
                     typingHandler.postDelayed(clearPeerTypingRunnable, TYPING_INDICATOR_TIMEOUT_MS)
                     if (isRecyclerNearBottom()) {
                         recycler.scrollToPosition(localMessages.size - 1)
                     }
                 }
             }
-            // Karşı taraf profilini değiştirdi (bkz. Rust `ProfileUpdate`)
-            // — üst çubuktaki avatar VE ad canlı güncellenir.
+            // The other side changed its profile (see Rust `ProfileUpdate`): the avatar and name in the top bar update live.
             "profile_update" -> {
                 val avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null }
                 toolbarAvatarBytes = avatarHex?.let { hexToBytes(it) }
                 toolbarAvatarLoaded = true
-                // `previous_display_name` yalnızca ad GERÇEKTEN değiştiyse
-                // dolu (her fotoğraf değişikliği de bu paketi taşıyor, bkz.
-                // Rust tarafındaki not) — kullanıcıya bildirimi ona bakarak
-                // gösteriyoruz, yoksa aynı ad her seferinde "değişti"
-                // diye görünürdü.
+                // `previous_display_name` is set only if the NAME really changed (every photo change carries this packet too, see the note on the Rust side).
+                // The user notice is based on it; otherwise the same name would look 'changed' every time.
                 val newName = if (obj.isNull("display_name")) null else obj.optString("display_name").ifEmpty { null }
                 val oldName = if (obj.isNull("previous_display_name")) null else obj.optString("previous_display_name").ifEmpty { null }
                 if (newName != null && oldName != null) {
@@ -1433,9 +1345,7 @@ class ChatActivity : AppCompatActivity() {
                 }
                 AvatarUtil.renderInto(imgToolbarAvatar, toolbarAvatarBytes, txtToolbarTitle.text.toString())
             }
-            // el sıkışma kalıcı olarak başarısız (sürüm/anahtar
-            // uyuşmazlığı) — kullanıcıya söylenmeden sessizce sonsuza kadar
-            // "Bağlanılıyor" gösteriliyordu.
+            // Permanent handshake failure (version or key mismatch): tell the user, instead of showing 'Connecting' forever.
             "handshake_failed" -> {
                 Toast.makeText(this, R.string.error_handshake_incompatible, Toast.LENGTH_LONG).show()
             }
@@ -1444,11 +1354,8 @@ class ChatActivity : AppCompatActivity() {
 
     private fun markSeen(messageId: String) {
         if (!AppLock.isUnlocked()) return
-        // `sendSeenReceipt` JNI çağrısı çekirdek kilidinde
-        // sıraya durur — ana iş parçacığından çağrılmaz (arayüz takılması
-        // / ANR). Sıra korunur: tek iş parçacıklı kuyruk.
-        // The peer of THIS message: the screen may switch chats before the
-        // queued task runs, and the receipt must not go to the next peer.
+        // The `sendSeenReceipt` JNI call queues on the core lock, so it is not called from the main thread (UI stalls / ANR). Order is kept by the single-thread queue.
+        // The peer of THIS message: the screen may switch chats before the queued task runs, and the receipt must not go to the next peer.
         val peer = peerDeviceFingerprint
         netPack.execute {
             try {
@@ -1458,12 +1365,11 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    /** Durum DEĞİŞTİĞİNDE tek bir paket gönderilir — her tuş vuruşunda
-     *  değil (bkz. `isTypingSent`). */
+    /** A single packet is sent when the status CHANGES, not on every keystroke (see `isTypingSent`). */
     private fun sendTypingState(isTyping: Boolean) {
         if (isTypingSent == isTyping) return
         isTypingSent = isTyping
-        // bkz. `markSeen`.
+        // See `markSeen`.
         val peer = peerDeviceFingerprint
         netPack.execute {
             try {
@@ -1474,7 +1380,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     // ---------------------------------------------------------------
-    // Kaydırma / "en alta in" düğmesi
+    // Scrolling and the 'scroll to bottom' button
     // ---------------------------------------------------------------
 
     private fun isRecyclerNearBottom(): Boolean {
@@ -1484,8 +1390,7 @@ class ChatActivity : AppCompatActivity() {
         return lastVisible == RecyclerView.NO_POSITION || lastVisible >= localMessages.size - 2
     }
 
-    /** Yeni bir mesaj geldi: kullanıcı zaten en alttaysa takip et, yukarıda
-     *  geçmişe bakıyorsa yerini BOZMA — sadece FAB'ı yanıp söndür. */
+    /** A new message arrived: follow it if the user is already at the bottom. If they are scrolled up in the history, keep their position and only blink the FAB. */
     private fun onNewIncomingItemAdded() {
         if (isRecyclerNearBottom()) {
             scrollToLastSettled()
@@ -1495,48 +1400,35 @@ class ChatActivity : AppCompatActivity() {
     }
 
     /**
-     * "son 15 dakikada mesaj olmayan bir
-     * sohbete mesaj atıldığında hafif bir parçacık typhoon efekti".
+     * Plays a light particle 'typhoon' effect when a message is sent to a chat that has had no messages for the last 15 minutes.
      *
-     * Kontrol EKLEMEDEN SONRA yapılıyor: en yeni mesajla ondan bir öncekinin
-     * arasındaki boşluğa bakıyoruz. Böylece her çağıran tarafın ekleme
-     * ÖNCESİNDE ayrıca bir "sessiz miydi" bayrağı taşıması gerekmiyor —
-     * tek bir çağrı noktası yetiyor.
+     * The check runs AFTER insertion: it compares the gap between the newest message and the one before it. So callers need no separate 'was it quiet' flag
+     * before inserting; one call site is enough.
      *
-     * Sohbetin İLK mesajında oynamaz (kıyaslanacak bir önceki yok): boş bir
-     * sohbeti açıp ilk mesajı yazmak "uyandırma" anı değil.
+     * It does not play on the chat's FIRST message (there is no earlier one to compare with): opening an empty chat and writing the first message is not a wake-up moment.
      */
     private fun maybePlayTyphoonEffect() {
         val newest = localMessages.lastOrNull() ?: return
         val previous = localMessages.getOrNull(localMessages.size - 2) ?: return
         if (newest.orderKey - previous.orderKey < TYPHOON_QUIET_WINDOW_MS) return
-        // `post`: balon bu karede henüz ölçülmedi, konumu ancak yerleşimden
-        // sonra biliniyor.
-        // Huni artık görünümün TAMAMINI kaplıyor (bkz. TyphoonParticleView
-        // `burst`) — balonun konumunu hesaplamaya gerek yok.
+        // `post`: the bubble has not been measured in this frame yet, so its position is known only after layout.
+        // The funnel now covers the whole view (see TyphoonParticleView `burst`), so the bubble position does not need to be computed.
         typhoonEffect.burst(
             com.google.android.material.color.MaterialColors.getColor(
-                // `colorPrimary` DEĞİL: bu temada o, balonlarda görünen
-                // turuncunun koyu/mat karşılığı ve parçacıklar koyu zeminde
-                // sönük çıkıyordu. Kullanıcının "accent" diye GÖRDÜĞÜ renk
-                // balonların zemini, yani `colorPrimaryContainer`.
+                // Not `colorPrimary`: in this theme that is the dark, matte counterpart of the bubble orange, and particles looked dim on the dark background.
+                // The colour the user sees as the accent is the bubble background, which is `colorPrimaryContainer`.
                 typhoonEffect, com.google.android.material.R.attr.colorPrimaryContainer
             )
         )
     }
 
     /**
-     * Spec dışı, kullanıcı isteği ("alt bar ve alıntı pilinin dışı şeffaf
-     * olsun, chat yanlardan ve alttan görünsün"): liste artık ekranın
-     * altına kadar uzanıyor ve çubuk onun üstünde yüzüyor (bkz.
-     * activity_chat.xml). Mesajların çubuğun ALTINDA kaybolmaması için
-     * listeye, çubuğun GERÇEK yüksekliği kadar alt dolgu veriliyor —
-     * `clipToPadding=false` sayesinde içerik kaydırırken çubuğun arkasından
-     * geçer ama dinlenme konumunda üstünde durur.
+     * The bottom bar and the quote pill are transparent outside, so the chat shows at the sides and underneath (see activity_chat.xml).
+     * The list extends to the bottom of the screen and the bar floats above it. So messages do not disappear under the bar, the list gets bottom padding
+     * equal to the bar's real height. With `clipToPadding=false`, content scrolls behind the bar but rests above it.
      *
-     * Sabit bir dp YETMEZ: çubuk çok satırlı yazarken büyüyor, alıntı pili
-     * açılıp kapanıyor. Bu yüzden ikisinin de yerleşimi her değiştiğinde
-     * yeniden hesaplanıyor.
+     * A fixed dp value is not enough: the bar grows while a multi-line message is typed, and the quote pill opens and closes. So the padding is
+     * recalculated whenever either layout changes.
      */
     private fun syncRecyclerBottomInset() {
         // The list runs under the bar: its padding reaches the top of the
@@ -1551,14 +1443,10 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private fun scrollToLastSettled() {
-        // "en alttaysak yeni
-        // mesajla otomatik aşağı kaysın"): `scrollToPosition` DOĞRUDAN
-        // çağrılınca güvenilmez — yeni eklenen satır o anda henüz
-        // ölçülmemiş oluyor ve kaydırma ya hiç olmuyor ya da eksik
-        // kalıyordu. `post`: yerleşim bittikten sonra; ikinci `post`:
-        // uzun bir balonun alt kenarı hâlâ ekranın altında kalıyorsa
-        // kalan farkı kapatır (aynı iki geçişli düzeltme klavye
-        // telafisinde de kullanılıyor, bkz. util.KeyboardInsets).
+        // Scroll to the new message when the user is already at the bottom (auto-scroll for new messages).
+        // `scrollToPosition` called DIRECTLY is unreliable: the newly added row is not measured yet, so the scroll sometimes does not happen or stops short.
+        // `post` runs after layout. The second `post` closes the remaining gap if the bottom edge of a long bubble is still below the screen
+        // (the same two-pass correction is used by the keyboard offset, see util.KeyboardInsets).
         val last = localMessages.size - 1
         recycler.post {
             recycler.scrollToPosition(last)
@@ -1598,19 +1486,14 @@ class ChatActivity : AppCompatActivity() {
     // Ekler
     // ---------------------------------------------------------------
 
-    /** çözülmüş bir eki "İndirilenler/P2P" klasörüne kopyalar.
-     *  API 29+ MediaStore (izin gerekmez), altında doğrudan dosya yazımı
-     *  (WRITE_EXTERNAL_STORAGE, bkz. onCreate'teki izin isteği). */
+    /** Copies a resolved attachment into the 'Downloads/P2P' folder. API 29+ uses MediaStore (no permission needed). Below that, direct file writes
+     *  (WRITE_EXTERNAL_STORAGE; see the permission request in onCreate). */
     /**
-     * Karsi tarafin gonderdigi dosya adini, bir DOSYA ADI olarak
-     * kullanmadan once zararsiz hale getirir.
+     * Makes the file name sent by the other side harmless before it is used as a FILE NAME.
      *
-     * Cekirdek tarafinda da ayni temizlik yapiliyor (bkz. Rust
-     * `safe_file_name`, `receive_file_offer`) — ama o, bu duzeltmeden SONRA
-     * gelen teklifler icin gecerli. `files` tablosunda ONCEDEN duran
-     * satirlar hala ham adi tasiyor, ve asagidaki API 26-28 kolu
-     * `File(p2pDir, displayName)` yapiyor: `"../../DCIM/Camera/IMG_0001.jpg"`
-     * gibi bir ad paylasilan depolamada KEYFI bir yola yazardi.
+     * The core does the same cleaning (Rust `safe_file_name`, `receive_file_offer`), but only for offers received AFTER that change.
+     * Rows already in the `files` table keep the raw name, and the API 26-28 branch below does `File(p2pDir, displayName)`.
+     * A name such as "../../DCIM/Camera/IMG_0001.jpg" would write to an arbitrary path in shared storage.
      */
     private fun safeSaveFileName(name: String): String {
         val cleaned = name
@@ -1669,7 +1552,7 @@ class ChatActivity : AppCompatActivity() {
                     if (it.exists()) File(p2pDir, "${System.currentTimeMillis()}_$safeName") else it
                 }
                 source.inputStream().use { input -> dest.outputStream().use { output -> input.copyTo(output) } }
-                // Galeri/dosya yöneticisinin yeni dosyayı hemen görmesi için.
+                // So the gallery and file manager see the new file at once.
                 MediaScannerConnection.scanFile(this, arrayOf(dest.absolutePath), arrayOf(mimeType), null)
                 true
             }
@@ -1679,28 +1562,14 @@ class ChatActivity : AppCompatActivity() {
     }
 
     /**
-     * bir ek balonuna basılı tutulunca (SADECE tamamlanmışsa,
-     * bkz. SimpleChatAdapter) "İndirilenler/P2P"ye kaydet seçeneğini
-     * gösterir.
-     *
-     * Kullanıcı isteğiyle KALDIRILDI: önceden karşı taraftan gelen (bizim
-     * göndermediğimiz) bir ek için, kaydetmeden önce göndericiye bir
-     * `SaveRequest` gönderip Evet/Hayır onayını BEKLİYORDU (bkz. eski
-     * `showSaveRequestDialog`/`handleSaveResponse`, Rust
-     * `MessageContent::SaveRequest`/`SaveApproval`) — dosya zaten uçtan uca
-     * şifreli olarak indirilip yerel cihazda duruyorken, onu KENDİ
-     * "İndirilenler" klasörüne kopyalamak için ayrıca göndericiden izin
-     * istemenin (asenkron, karşı taraf çevrimdışıysa hiç gelmeyen bir ek
-     * round-trip) kullanıcı deneyimi açısından değeri yoktu. Artık
-     * `item.isMine`'dan BAĞIMSIZ, doğrudan yerelde kaydedilir.
+     * Long press on an attachment bubble (only when it is completed; see SimpleChatAdapter) shows 'Save to Downloads/P2P'.
+     * It saves directly, without asking the sender. The file is already downloaded and encrypted on the device, and a sender approval round trip
+     * added nothing (it could never arrive while the sender was offline). This applies to incoming and own attachments alike (`item.isMine` is not checked).
      */
     private fun onAttachmentLongClicked(item: SimpleChatAdapter.Item) {
         val attachment = item.attachment ?: return
-        // "Başka bir uygulamayla aç" eklendi —
-        // `onAttachmentClicked`'ın tek dokunuşu (foto/video için uygulama
-        // içi MediaViewerActivity'ye, diğerleri için doğrudan sistem
-        // varsayılanına) gider; bu SEÇENEK yerine `Intent.createChooser`
-        // ile HER ZAMAN uygulama seçici gösterir.
+        // 'Open with another app' is available. A tap (photo and video in the in-app MediaViewerActivity, others in the system default) is unchanged.
+        // This option always shows the app chooser (`Intent.createChooser`).
         val options = mutableListOf<String>().apply {
             add(getString(R.string.action_open_with))
             add(getString(R.string.action_save_to_downloads))
@@ -1793,8 +1662,7 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    /** Tek dokunuş: indirilmemişse indir, tamamlanmışsa aç. İndirme
-     *  sürerken dokunmak no-op'tur. */
+    /** Single tap: download if not yet downloaded, open if completed. A tap during a download does nothing. */
     private fun onAttachmentClicked(item: SimpleChatAdapter.Item) {
         val attachment = item.attachment ?: return
         when (attachment.status) {
@@ -1831,13 +1699,12 @@ class ChatActivity : AppCompatActivity() {
                 }
             }
             SimpleChatAdapter.AttachmentStatus.DOWNLOADING -> {
-                // Zaten indiriliyor — dokunmak bir şey yapmaz.
+                // Already downloading: a tap does nothing.
             }
         }
     }
 
-    /** Foto/video uygulama İÇİNDEKİ görüntüleyiciye (MediaViewerActivity),
-     *  diğer türler sistem varsayılanına gider. */
+    /** Photos and videos open in the in-app viewer (MediaViewerActivity); other types go to the system default. */
     private fun openAttachmentFile(path: String) {
         // The file's own extension picks the viewer and the handler, not the
         // type the sender declared.
@@ -1872,16 +1739,11 @@ class ChatActivity : AppCompatActivity() {
     }
 
     /**
-     * kameradan gelen kare. `onFilePicked`
-     * ile AYNI gönderme yolu, tek farkı kaynağın bir `content://` URI
-     * yerine ZATEN bellekte duran JPEG baytları olması — bu yüzden ayrı
-     * bir isim/boyut sorgusu (SAF `OpenableColumns`) yok, ad da
-     * çekim anından üretiliyor.
+     * Sends a photo captured by the camera. Same send path as `onFilePicked`; the one difference is that the source is JPEG bytes already in memory,
+     * not a `content://` URI. So there is no separate name or size lookup (SAF `OpenableColumns`), and the name is generated at capture time.
      *
-     * Önbellekteki geçici dosya (`cacheDir/outgoing`) Rust çekirdeği ek
-     * gönderirken gerçek bir dosya YOLU istediği için gerekli ve
-     * `finally`'de siliniyor — fotoğraf sistem galerisine/paylaşılan
-     * depolamaya HİÇ yazılmıyor (kullanıcı isteği: "diske kaydedilmeden").
+     * The temporary file in the cache (`cacheDir/outgoing`) is needed because the Rust core wants a real file PATH when sending an attachment.
+     * It is deleted in `finally`. The photo is never written to the system gallery or shared storage.
      */
     private fun onPhotoCaptured(jpeg: ByteArray, caption: String = "", hiRes: Boolean = false, quote: com.p2p.messenger.util.Quote.Ref? = null) {
         val fileName = "IMG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
@@ -1921,7 +1783,7 @@ class ChatActivity : AppCompatActivity() {
                                     previewJpeg = previewJpeg
                                 
                                 ),
-                                // gönderirken yazılan açıklama hemen görünsün.
+                                // The caption typed during sending shows at once.
                                 caption = caption,
                                 replyToMessageId = quote?.id,
                                 replyToPreview = quote?.preview,
@@ -1952,10 +1814,8 @@ class ChatActivity : AppCompatActivity() {
     private fun takeQuote() = com.p2p.messenger.util.Quote.takeFirst(findViewById(R.id.edtMessage))
 
     /**
-     * SAF (`OpenDocument`) ile seçilen dosya önce uygulamanın kendi
-     * önbelleğine kopyalanır (`content://` bir yol değildir, Rust tarafı
-     * gerçek bir dosya yolu ister), sonra `prepareAndSendFile` ile
-     * şifrelenip teklif edilir.
+     * A file picked with SAF (`OpenDocument`) is first copied to the app's own cache, because a `content://` URI is not a path and the Rust side needs a real file path.
+     * Then it is encrypted and offered with `prepareAndSendFile`.
      */
     private fun onFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null, quote: com.p2p.messenger.util.Quote.Ref? = null): kotlinx.coroutines.Job {
         return lifecycleScope.launch(Dispatchers.IO) {
@@ -2026,7 +1886,7 @@ class ChatActivity : AppCompatActivity() {
                                     previewJpeg = previewJpeg
                                 
                                 ),
-                                // gönderirken yazılan açıklama hemen görünsün.
+                                // The caption typed during sending shows at once.
                                 caption = caption,
                                 replyToMessageId = quote?.id,
                                 replyToPreview = quote?.preview,
@@ -2074,8 +1934,7 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    /** Küçük bir 480p/%85 JPEG kapak — `FileOffer` ile birlikte gider, alıcı
-     *  TAM dosyayı indirmeden önizleme görebilsin diye. */
+    /** A small 480p / 85% JPEG cover, sent with the `FileOffer`, so the recipient can see a preview before downloading the full file. */
     private fun generateImagePreview(file: File): ByteArray? =
         ImagePreview.compressFile(file, PREVIEW_MAX_DIMENSION, PREVIEW_JPEG_QUALITY)
 
@@ -2095,11 +1954,10 @@ class ChatActivity : AppCompatActivity() {
     }
 
     // ---------------------------------------------------------------
-    // Geçmiş
+    // History
     // ---------------------------------------------------------------
 
-    /** Karşı taraftan gelen açılış senkronu (bkz. `requestHistorySync`) —
-     *  SADECE yerelde olandan DAHA YENİ satırlar eklenir. */
+    /** Opening sync from the other side (see `requestHistorySync`): only rows NEWER than the local ones are added. */
     private fun applyHistorySync(obj: JSONObject) {
         if (!historySyncPending) return
         historySyncPending = false
@@ -2121,13 +1979,8 @@ class ChatActivity : AppCompatActivity() {
                 isDeleted = m.optBoolean("is_deleted", false)
             )
         }
-        // İKİ CİHAZLI TESTTE (2026-09-06) bulundu: eski filtre SADECE
-        // `timestamp > latestLocal` idi. Ama `timestamp` yerel arşivleme
-        // anıdır — karşı taraf mesajı BİZDEN sonra arşivlediği için, karşı
-        // tarafın senkron kopyasının timestamp'i bizim yerel kopyamızınkinden
-        // DAHA BÜYÜK; sonuç: gönderdiğimiz mesajlar, zaten listede olsa bile
-        // (aynı `message_id`) senkron yanıtından bir kez daha ekleniyordu
-        // (gönderende çift balon). Artık `message_id` bazında da eleniyor.
+        // Rows are filtered by `message_id` as well as by time. `timestamp` is the local archive time, so a sync copy from the other side can carry a LATER
+        // timestamp than our own copy of the same message. Without the id filter, our own sent messages were added a second time (a duplicate bubble on the sender).
         val existingIds = localMessages.mapTo(HashSet()) { it.messageId }
         val toAdd = if (localMessages.isEmpty()) {
             synced
@@ -2147,14 +2000,12 @@ class ChatActivity : AppCompatActivity() {
     }
 
     // ---------------------------------------------------------------
-    // Düzenle / sil / kopyala / yanıtla
+    // Edit / delete / copy / reply
     // ---------------------------------------------------------------
 
     private fun showEditDeleteDialog(item: SimpleChatAdapter.Item) {
         if (!item.isMine) {
-            // Karşı tarafın mesajını düzenleyemeyiz/silemeyiz (karşı taraf
-            // zaten reddederdi, bkz. Rust `message_owned_by_sender`) — ama
-            // tepki bırakabiliriz.
+            // We cannot edit or delete the other side's message (the other side would reject it anyway; see Rust `message_owned_by_sender`), but we can leave a reaction.
             val theirOptions = listOfNotNull(
                 getString(R.string.action_react),
                 getString(R.string.lbl_copy),
@@ -2199,13 +2050,10 @@ class ChatActivity : AppCompatActivity() {
     }
 
     /**
-     * tepki pill'ine dokununca "kim ne attı"
-     * listesi (WhatsApp deseni).
+     * Tapping the reaction pill opens a list of who reacted with what (WhatsApp style).
      *
-     * Kimlikler ağdan `identity_id` olarak geliyor; isimler burada, cihazın
-     * KENDİ kişi listesinden çözülüyor — protokole isim koymuyoruz (bir
-     * gönderici istediği ismi iddia edebilirdi). Tanınmayan bir kimlik
-     * kısaltılmış kimliğiyle gösterilir; kendi kimliğim "Sen" olur.
+     * The identities come from the network as `identity_id`. Names are resolved here, from this device's OWN contact list: the protocol carries no names,
+     * since a sender could claim any name. An unknown identity is shown with its shortened id, and our own id shows as "You".
      */
     private fun showReactionsDialog(item: SimpleChatAdapter.Item) {
         lifecycleScope.launch(Dispatchers.IO) {
@@ -2218,7 +2066,7 @@ class ChatActivity : AppCompatActivity() {
                     names[c.optString("identity_id")] = c.optString("display_name")
                 }
             } catch (e: Exception) {
-                // Kişi listesi okunamazsa isimler kısaltılmış kimliğe düşer.
+                // If the contact list cannot be read, names fall back to the shortened id.
             }
             val rows = mutableListOf<String>()
             var myRow = -1
@@ -2228,8 +2076,7 @@ class ChatActivity : AppCompatActivity() {
                     val entry = array.getJSONObject(i)
                     val identityId = entry.optString("identity_id")
                     val who = when {
-                        // bkz. Rust `list_reactions` — "benim mi" kararı
-                        // kimliğe sahip olan çekirdekte veriliyor.
+                        // See Rust `list_reactions`: the 'is it me' decision is made in the core, which owns the identity.
                         entry.optBoolean("is_me", false) -> getString(R.string.lbl_you)
                         names[identityId]?.isNotBlank() == true -> names[identityId]!!
                         else -> identityId.take(8)
@@ -2238,14 +2085,14 @@ class ChatActivity : AppCompatActivity() {
                     rows.add("${entry.optString("emoji")}   $who")
                 }
             } catch (e: Exception) {
-                // Bozuk JSON: boş liste gösterilir, çökmez.
+                // Malformed JSON: show an empty list instead of crashing.
             }
             withContext(Dispatchers.Main) {
                 if (rows.isEmpty()) return@withContext
                 AlertDialog.Builder(this@ChatActivity)
                     .setTitle(R.string.title_reactions)
                     .setItems(rows.toTypedArray()) { _, which ->
-                        // Kendi satırıma dokunmak tepkimi kaldırır (boş emoji).
+                        // Tapping my own row removes my reaction (empty emoji).
                         if (which != myRow) return@setItems
                         lifecycleScope.launch(Dispatchers.IO) {
                             val summary = try { P2PLib.reactToMessage(peerDeviceFingerprint, item.messageId, "") } catch (e: Exception) { "Error: ${e.message}" }
@@ -2265,11 +2112,9 @@ class ChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği (WhatsApp tarzı tepkiler). JNI çağrısı
-     * ağa çıkabildiğinden ana thread DIŞINDA; dönen değer o mesajın GÜNCEL
-     * tepki özeti (bkz. Rust `react_to_message`), doğrudan pill'e yazılır.
-     * Karşı tarafa ulaşması `needs_delivery_confirmation` ile garanti —
-     * burada beklemeye gerek yok.
+     * Sends a reaction. The JNI call can reach the network, so it runs OFF the main thread. The returned value is the message's CURRENT reaction summary
+     * (see Rust `react_to_message`), written straight into the pill. Delivery to the other side is guaranteed by `needs_delivery_confirmation`,
+     * so there is no need to wait here.
      */
     private fun showReactionPicker(item: SimpleChatAdapter.Item) {
         ReactionPicker.show(this, item.reactions.isNotBlank()) { emoji ->
@@ -2295,11 +2140,9 @@ class ChatActivity : AppCompatActivity() {
         Toast.makeText(this, R.string.lbl_copied, Toast.LENGTH_SHORT).show()
     }
 
-    /** balonu SAĞA kaydırmak
-     *  o mesaja yanıt başlatır. Kaydırma `REPLY_SWIPE_MAX_DP` ile sınırlı,
-     *  balon geri yerine oturur (gerçek bir "swipe to dismiss" değil). */
-    /** bkz. `setupSwipeToReply`/`onSelectedChanged` — kaydırma BAŞLADIĞINDA
-     *  yakalanan hedef mesajın kararlı kimliği. */
+    /** Swiping a bubble RIGHT starts a reply to that message. The swipe is limited to `REPLY_SWIPE_MAX_DP`, and the bubble settles back into place
+     *  (it is not a real swipe-to-dismiss). */
+    /** See `setupSwipeToReply` / `onSelectedChanged`: the stable id of the target message, captured when the swipe STARTS. */
     private var swipeStartMessageId: String? = null
 
     private fun setupSwipeToReply() {
@@ -2307,15 +2150,10 @@ class ChatActivity : AppCompatActivity() {
         val maxSwipePx = REPLY_SWIPE_MAX_DP * resources.displayMetrics.density
         val callback = object : ItemTouchHelper.SimpleCallback(0, ItemTouchHelper.RIGHT) {
             /**
-             * Kullanıcı raporu: "alıntılama hareketi başka mesajın yanında
-             * bitince yanıtlamıyor; swipe'ın BAŞLADIĞI noktaya göre
-             * seçilsin". `onSwiped` içindeki `adapterPosition`, hareketin
-             * BİTTİĞİ andaki konumdur — hareket sürerken yeni bir mesaj
-             * gelirse (canlı sohbette sık) tüm konumlar kayar ve o indeks
-             * artık BAŞKA bir mesajı gösterir; liste o arada yeniden
-             * bağlandıysa `NO_POSITION` dönüp hiç yanıtlamaz. Bu yüzden
-             * hedefi hareketin BAŞINDA, kararlı `messageId` olarak
-             * yakalıyoruz — indeks kaysa da doğru mesaj yanıtlanır.
+             * The target is chosen by where the swipe STARTED, not where it ended. `onSwiped` gets `adapterPosition` at the moment the gesture ENDS.
+             * If a new message arrives during the gesture (common in a live chat), every position shifts: that index now points to a DIFFERENT message,
+             * and if the list was rebound meanwhile, `NO_POSITION` is returned and nothing is replied to. So the target is captured at the START as a stable
+             * `messageId`, and the right message is replied to even if the index shifts.
              */
             override fun onSelectedChanged(viewHolder: RecyclerView.ViewHolder?, actionState: Int) {
                 super.onSelectedChanged(viewHolder, actionState)
@@ -2361,19 +2199,15 @@ class ChatActivity : AppCompatActivity() {
 
             override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {
                 val position = viewHolder.adapterPosition
-                // Balonu geri yerine oturt — bu bir "kaydırıp sil" değil.
-                // Değişiklik animasyonu kapalıyken (bkz. `supportsChangeAnimations`)
-                // `notifyItemChanged` AYNI görünümü yeniden bağlar ve ItemTouchHelper
-                // o görünümü "kaydırılmış" olarak tutup her karede kaydırılmış
-                // konumda çizmeye devam eder (eskiden eski görünüm ayrıldığı için
-                // temizleniyordu). Helper'ı ayırıp yeniden bağlamak bu durumu
-                // temizler ve ötelemeyi sıfırlar.
+                // Settle the bubble back into place. This is not a swipe-to-delete.
+                // With change animations off (see `supportsChangeAnimations`), `notifyItemChanged` rebinds the SAME view. ItemTouchHelper keeps that view as swiped
+                // and keeps drawing it offset on every frame. Detaching and re-attaching the helper clears that state and resets the offset.
                 recycler.post {
                     swipeHelper.attachToRecyclerView(null)
                     swipeHelper.attachToRecyclerView(recycler)
                 }
                 if (position != RecyclerView.NO_POSITION) adapter.notifyItemChanged(position)
-                // bkz. `onSelectedChanged` — hedef, hareketin BAŞLADIĞI mesaj.
+                // See `onSelectedChanged`: the target is the message the gesture STARTED on.
                 val startedOn = swipeStartMessageId
                 swipeStartMessageId = null
                 val item = startedOn?.let { id -> localMessages.firstOrNull { it.messageId == id } }
@@ -2388,7 +2222,7 @@ class ChatActivity : AppCompatActivity() {
         com.p2p.messenger.util.Quote.insert(findViewById(R.id.edtMessage), item.messageId, replyPreviewFor(item))
     }
 
-    /** Ek balonlarında metin yok — dosya adı gösterilir. */
+    /** Attachment bubbles have no text, so the file name is shown. */
     private fun replyPreviewFor(item: SimpleChatAdapter.Item): String {
         val attachment = item.attachment
         return if (attachment != null) {
@@ -2398,8 +2232,7 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    /** Alıntı kutusuna dokunulunca yanıtlanan mesaja kaydırır ve kısa süre
-     *  vurgular. Hedef henüz yüklenmemişse (eski geçmiş) uyarır. */
+    /** Tapping the quote box scrolls to the replied message and highlights it briefly. If the target is not loaded yet (older history), it warns. */
     private fun scrollToMessage(targetMessageId: String) {
         val position = localMessages.indexOfFirst { it.messageId == targetMessageId }
         if (position < 0) {
@@ -2412,9 +2245,7 @@ class ChatActivity : AppCompatActivity() {
         replyHighlightHandler.postDelayed({ adapter.setHighlighted(null) }, REPLY_HIGHLIGHT_DURATION_MS)
     }
 
-    /** "Failed" bir mesajı AYNI balonda
-     *  yeniden gönder — ikinci bir balon oluşturmaz (bkz.
-     *  SimpleChatAdapter.retryMessage). */
+    /** Resends a FAILED message in the SAME bubble. It does not create a second bubble (see SimpleChatAdapter.retryMessage). */
     private fun retryFailedMessage(item: SimpleChatAdapter.Item) {
         val peer = peerDeviceFingerprint
         lifecycleScope.launch {
@@ -2502,10 +2333,8 @@ class ChatActivity : AppCompatActivity() {
                 } catch (e: Exception) {
                     null
                 }
-                // bkz. `loadHistoryIfAvailable` altındaki "seen" replay notu —
-                // hangi mesajların (arşivlenmiş) görüldü bilgisi taşıdığı
-                // burada (IO thread) toplanır, SeenByViewer'ın kendisi (View
-                // okuması gerektirir) ana thread'de kuruluyor.
+                // See the 'seen' replay note under `loadHistoryIfAvailable`. Which messages (archived) carry a 'seen' state is collected here (IO thread).
+                // The SeenByViewer itself, which needs View reads, is built on the main thread.
                 val seenMessageIds = mutableListOf<String>()
                 if (array != null) {
                     for (i in 0 until array.length()) {
@@ -2518,11 +2347,8 @@ class ChatActivity : AppCompatActivity() {
                         }
                     }
                 }
-                // geçmişte gönderilmiş/alınmış dosya ekleri önceden
-                // hiç yeniden yüklenmiyordu (sadece metin mesajları) — artık
-                // `listAttachments` ile aynı anda çekilip zaman damgasına göre
-                // metin mesajlarıyla ARAYA SERPİŞTİRİLİYOR, tıpkı canlı
-                // sohbette olduğu gibi kronolojik sırada görünsünler diye.
+                // File attachments from the past are fetched with `listAttachments` at the same time as the text messages, and merged in BY TIMESTAMP,
+                // so they appear in chronological order, as in a live chat.
                 val attachmentItems = mutableListOf<SimpleChatAdapter.Item>()
                 val attachmentsJson = try {
                     P2PLib.listAttachments(targetPeer)
@@ -2556,9 +2382,7 @@ class ChatActivity : AppCompatActivity() {
                                     durationMs = obj.optInt("duration_ms", -1).let { if (it < 0) null else it },
                                     isSticker = obj.optBoolean("sticker", false)
                                 ),
-                                // arşivden geri
-                                // yüklenen ekler de açıklamalarını ve yanıt
-                                // bağlamını korur (bkz. Rust `files` tablosu).
+                                // Attachments restored from the archive keep their caption and reply context (see Rust `files` table).
                                 caption = obj.optString("caption", ""),
                                 replyToMessageId = if (obj.isNull("reply_to_message_id")) null else obj.optString("reply_to_message_id").ifEmpty { null },
                                 replyToPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null }
@@ -2580,25 +2404,16 @@ class ChatActivity : AppCompatActivity() {
             val newItems = mergedItems.filter { it.messageId !in existingIds }
             if (newItems.isNotEmpty()) {
                 localMessages.addAll(newItems)
-                // Geçmiş yüklemesi bir canlı mesajdan SONRA biterse sona eklemek
-                // canlı mesajı eski geçmişin üstüne, ekran dışına itiyordu (cihazda
-                // görüldü) — gönderim sırasına göre yeniden diz.
+                // If history loading finishes after a live message, appending would push the live message above the old history, off screen. Re-sort by send order.
                 localMessages.sortWith(compareBy { it.orderKey })
                 resolveReplyLabels()
                 adapter.notifyDataSetChanged()
-                // bkz. `dedupeByMessageId` — loadHistory/syncMissed yarışı
-                // aynı message_id'yi iki kez ekleyebiliyor.
+                // `dedupeByMessageId`: the loadHistory and syncMissed paths can race and add the same message_id twice.
                 adapter.dedupeByMessageId()
                 recycler.scrollToPosition(localMessages.size - 1)
             }
-            // "seen mekanizması ... hem
-            // dm hem gruplarda güvenilir değil"): önceden "görüldü" tiki
-            // SADECE sohbet ekranı açıkken canlı gelen olayla işaretleniyordu
-            // — ekran kapalıyken görülen bir mesaj, sohbet yeniden açıldığında
-            // hiç görülmemiş gösteriliyordu (Rust `message_seen` tablosunda
-            // gerçekte duruyordu, sadece burada okunmuyordu). Mesajlar
-            // adaptöre eklendikten SONRA replay edilir — `applySeen` içindeki
-            // `indexOfMessageId` henüz eklenmemiş bir satır için -1 döner.
+            // The 'seen' state is read from the archive too, not only from live events, so a message seen while the chat was closed still shows as seen after a reopen
+            // (the Rust `message_seen` table holds it). Replays run AFTER the messages are added: `applySeen` returns -1 from `indexOfMessageId` for a row not added yet.
             if (seenMessageIds.isNotEmpty()) {
                 val viewer = SimpleChatAdapter.SeenByViewer(
                     peerAvatar(), txtToolbarTitle.text.toString()
@@ -2610,11 +2425,10 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. `loadHistoryIfAvailable`/`loadOlderHistory`/`applyOlderHistory`
-     *  — üç kaynaktan gelen (yerel ilk yükleme, yerel eski sayfa, ağdan
-     *  gelen eski sayfa) JSON satırı AYNI şekilde ayrıştırılır; "status"
-     *  alanı ağ yolunda hiç taşınmadığından eksik olabilir, bu durumda
-     *  (eski satırlar için de geçerli olan) "sent" varsayımına düşer. */
+    /**
+     * Parses a JSON row from any of the three sources (local first load, local older page, older page from the network) the same way.
+     * The 'status' field is not carried on the network path, so it can be missing. In that case it falls back to 'sent', the same assumption as for older rows.
+     */
     private fun itemFromHistoryJson(obj: JSONObject): SimpleChatAdapter.Item {
         val direction = obj.optString("direction")
         val text = obj.optString("text")
@@ -2638,26 +2452,21 @@ class ChatActivity : AppCompatActivity() {
             isDeleted = isDeleted,
             replyToMessageId = replyToMessageId,
             replyToPreview = replyToPreview,
-            // İki cihazlı test (2026-09-07): 1:1 geçmiş yüklemesi tepki özetini
-            // OKUMUYORDU (grup yolu `itemFromGroupHistoryJson` okuyor) — tepki
-            // DB'de kalıcı (`message_reactions`) ve canlı olayda görünüyordu ama
-            // sohbet yeniden açılınca / uygulama yeniden başlayınca balondan
-            // kayboluyordu. `load_message_history` zaten `reactions` alanını
-            // JSON'a koyuyor (bkz. Rust `reactions_summary`).
+            // The 1:1 history load now reads the reaction summary too (the group path, `itemFromGroupHistoryJson`, already did). Reactions are kept in the DB
+            // (`message_reactions`) and show in the live event, but a reopen or app restart would hide them. `load_message_history` puts the `reactions` field
+            // in the JSON (see Rust `reactions_summary`).
             reactions = obj.optString("reactions", "")
         )
     }
 
-    /** Alıntı kutusundaki "kime yanıt" etiketi — 1:1'de sadece iki
-     *  olasılık var: ben ya da karşı taraf. */
+    /** The 'replying to' label in the quote box. In 1:1 there are only two possibilities: me or the other side. */
     private fun resolveReplyLabel(replyToMessageId: String?): String? {
         if (replyToMessageId == null) return null
         val target = localMessages.firstOrNull { it.messageId == replyToMessageId } ?: return null
         return if (target.isMine) getString(R.string.lbl_you) else txtToolbarTitle.text?.toString()
     }
 
-    /** Yeni satırlar eklendikten sonra: bir yanıtın hedefi ancak ŞİMDİ
-     *  yüklenmiş olabilir (ör. eski sayfa geldi) — etiketleri tazele. */
+    /** After new rows are added: the target of a reply may only be loaded NOW (for example an older page arrived), so the labels are refreshed. */
     private fun resolveReplyLabels() {
         for (item in localMessages) {
             if (item.replyToMessageId != null) {
@@ -2667,7 +2476,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Sonsuz kaydırma: YEREL arşivden bir sayfa. Ağa hiçbir şey gitmez.
+     * Infinite scroll: one page from the LOCAL archive. Nothing is sent over the network.
      */
     private fun loadOlderHistory() {
         if (isLoadingOlderHistory || noMoreOlderHistory || localMessages.isEmpty()) return
@@ -2735,10 +2544,8 @@ class ChatActivity : AppCompatActivity() {
         )
     }
 
-    /** bkz. `loadOlderHistory` — karşı taraftan gelen "older_history" ağ
-     *  yanıtı. Boş dizi dönerse (ne yerelde ne karşı tarafta daha eski
-     *  mesaj kalmadı) `noMoreOlderHistory` işaretlenir, bu sohbet için
-     *  artık tekrar denenmez. */
+    /** See `loadOlderHistory`: an 'older_history' network reply from the other side. If an empty array comes back (no older message left, locally or on the other side),
+     *  `noMoreOlderHistory` is set and this chat is not asked again. */
     private fun applyOlderHistory(obj: JSONObject) {
         // Only what the "Fetch older history" button asked for.
         if (!fetchHistoryButton.acceptsReply()) return
@@ -2750,10 +2557,8 @@ class ChatActivity : AppCompatActivity() {
         prependOlderMessages(items)
     }
 
-    /** Eski sayfa sonuçlarını listenin BAŞINA ekler — hem yerel hem ağ
-     *  yolunda ortak. `message_id` eşleşmesiyle zaten ekranda olan bir
-     *  mesajın TEKRAR eklenmesini önler (ör. yerel sayfa ile ağ yanıtı
-     *  aynı satırları içeriyorsa). */
+    /** Adds older page results to the START of the list, shared by the local and network paths. A message already on screen (same `message_id`)
+     *  is not added again, for example when the local page and the network reply contain the same rows. */
     private fun prependOlderMessages(items: List<SimpleChatAdapter.Item>) {
         if (items.isEmpty()) return
         val existingIds = localMessages.mapTo(mutableSetOf()) { it.messageId }
@@ -2774,24 +2579,19 @@ class ChatActivity : AppCompatActivity() {
             return
         }
         localMessages.addAll(0, fresh)
-        // bkz. `resolveReplyLabels` — eski sayfa, daha önce görülmemiş bir
-        // yanıt zinciri getirmiş olabilir (ör. yanıtlanan mesaj da bu
-        // sayfadaydı).
+        // See `resolveReplyLabels`: an older page may bring a reply chain not seen before (for example when the replied-to message is on this page too).
         resolveReplyLabels()
         adapter.notifyItemRangeInserted(0, fresh.size)
     }
 
     // ---------------------------------------------------------------
-    // Sohbet içi arama
+    // In-chat search
     // ---------------------------------------------------------------
 
     /**
-     * sohbet içi mesaj arama. Toolbar'daki
-     * arama simgesi (bkz. `onOptionsItemSelected`) bu satırı aç/kapatır;
-     * arama SADECE o an yüklü (`localMessages`) mesajlarda çalışır — henüz
-     * yüklenmemiş eski geçmiş için ayrıca bir ağ isteği tetiklenmez (bkz.
-     * `loadOlderHistory` — kullanıcı yukarı kaydırdıkça zaten daha fazla
-     * geçmiş yüklenir).
+     * In-chat message search. The search icon in the toolbar (see `onOptionsItemSelected`) opens and closes this row.
+     * Search works ONLY on the messages loaded right now (`localMessages`). No network request is made for older history that is not loaded yet;
+     * more history loads as the user scrolls up (see `loadOlderHistory`).
      */
     private fun setupMessageSearch() {
         layoutSearchMessages = findViewById(R.id.layoutSearchMessages)
@@ -2824,8 +2624,7 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    /** Silinmiş satırlar ve ekler aramaya girmez. Sonuçlar EN YENİDEN
-     *  başlar (kullanıcı genelde son konuşmayı arar). */
+    /** Deleted rows and attachments are not searched. Results start from the NEWEST (users usually look for the latest conversation). */
     private fun runMessageSearch(query: String) {
         if (query.isBlank()) {
             searchMatches = emptyList()
@@ -2876,8 +2675,7 @@ class ChatActivity : AppCompatActivity() {
                 CallActivity.startOutgoing(this, peerDeviceFingerprint, null, item.itemId == R.id.action_video_call)
                 true
             }
-            // bkz. AppRestarter — Tor devresi/ağ yığını sadece süreç
-            // yeniden başlayınca temiz kurulabiliyor.
+            // See AppRestarter: the Tor circuit and the network stack can only be set up cleanly when the process restarts.
             R.id.action_tor_reconnect -> {
                 AppRestarter.confirmAndRestart(this)
                 true
@@ -2887,7 +2685,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     // ---------------------------------------------------------------
-    // Yaşam döngüsü
+    // Lifecycle
     // ---------------------------------------------------------------
 
     override fun onResume() {
@@ -2909,10 +2707,8 @@ class ChatActivity : AppCompatActivity() {
         sessionPollHandler.post(sessionPollRunnable)
         ownStatusPollHandler.post(ownStatusPollRunnable)
         syncMissedMessages()
-        // "görüldü" güvenilirlik + hız (2026-09-07): sohbeti AÇAR AÇMAZ karşı
-        // tarafa "şu ana kadar okudum" sınırını bildir. Eskiden sadece
-        // `onPause`'da ve yalnızca kardeş cihazlara gidiyordu → store-forward
-        // ile gelip geçmiş olarak yüklenen mesajlar için makbuz HİÇ gitmezdi.
+        // Tell the other side the 'read up to here' boundary as soon as the chat opens. Doing it only in onPause, and only to sibling devices,
+        // meant messages delivered by store-and-forward and loaded as history never got a receipt.
         if (resumedUnlocked) scheduleReadWatermark()
     }
 
@@ -2927,20 +2723,16 @@ class ChatActivity : AppCompatActivity() {
         Thread { try { P2PLib.syncReadState(peer, "", now) } catch (e: Exception) { } }.start()
     }
 
-    /** Karşı tarafa "buraya kadar okudum" sınırını yollar — debounce'lu
-     *  (tek pakette toplanır; Rust tarafı bekleyen eski sınırı iptal eder,
-     *  bkz. `sync_read_state`). Sohbet açılışı / `onResume` / canlı gelen
-     *  mesaj sonrası çağrılır. */
+    /** Sends the 'read up to here' boundary to the other side. Debounced: many calls are collected into one packet (the Rust side cancels a pending
+     *  older boundary, see `sync_read_state`). Called on chat open, `onResume`, and after a live message arrives. */
     private fun scheduleReadWatermark() {
         if (!AppLock.isUnlocked()) return
         readWatermarkHandler.removeCallbacks(readWatermarkRunnable)
         readWatermarkHandler.postDelayed(readWatermarkRunnable, 700L)
     }
 
-    /** Ekran arka plandayken gelen mesajlar `messageListener` dinlemediği
-     *  için ekrana düşmedi; arşivden okunup eksikler tamamlanır. Yarış
-     *  koşulu için bkz. `loadHistoryIfAvailable` aynı not (ikisi de IO'da
-     *  çalışır ve hangisinin önce biteceği belli değildir). */
+    /** Messages that arrive while the screen is in the background are not heard by `messageListener`, so they do not reach the screen. They are read from
+     *  the archive and the missing ones are filled in. For the race condition see the same note under `loadHistoryIfAvailable` (both run on IO, and which finishes first is not known). */
     private fun syncMissedMessages() {
         val targetPeer = peerDeviceFingerprint
         // Runs on every resume: rows already on screen keep their decoded
@@ -2959,9 +2751,8 @@ class ChatActivity : AppCompatActivity() {
                 } catch (e: Exception) {
                     null
                 }
-                // bkz. `loadHistoryIfAvailable` altındaki "seen" replay notu —
-                // AYNI desen, bu fonksiyon `onResume`'da (arka plandan
-                // dönüşte) çalıştığından pratikte EN ÇOK vurulan yol.
+                // See the 'seen' replay note under `loadHistoryIfAvailable`: the same pattern. This function runs in `onResume` (returning from the background),
+                // so it is the most frequently hit path in practice.
                 val seenMessageIds = mutableListOf<String>()
                 if (array != null) {
                     for (i in 0 until array.length()) {
@@ -3008,9 +2799,7 @@ class ChatActivity : AppCompatActivity() {
                                     durationMs = obj.optInt("duration_ms", -1).let { if (it < 0) null else it },
                                     isSticker = obj.optBoolean("sticker", false)
                                 ),
-                                // arşivden geri
-                                // yüklenen ekler de açıklamalarını ve yanıt
-                                // bağlamını korur (bkz. Rust `files` tablosu).
+                                // Attachments restored from the archive keep their caption and reply context (see Rust `files` table).
                                 caption = obj.optString("caption", ""),
                                 replyToMessageId = if (obj.isNull("reply_to_message_id")) null else obj.optString("reply_to_message_id").ifEmpty { null },
                                 replyToPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null }
@@ -3027,16 +2816,14 @@ class ChatActivity : AppCompatActivity() {
             if (adapter.refreshFrom(missedItems)) resolveReplyLabels()
             if (fresh.isNotEmpty()) {
                 localMessages.addAll(fresh)
-                // Geçmiş yüklemesi bir canlı mesajdan SONRA biterse sona eklemek
-                // canlı mesajı eski geçmişin üstüne, ekran dışına itiyordu (cihazda
-                // görüldü) — gönderim sırasına göre yeniden diz.
+                // If history loading finishes after a live message, appending would push the live message above the old history, off screen. Re-sort by send order.
                 localMessages.sortWith(compareBy { it.orderKey })
                 resolveReplyLabels()
                 adapter.notifyDataSetChanged()
                 adapter.dedupeByMessageId()
                 onNewIncomingItemAdded()
             }
-            // bkz. `loadHistoryIfAvailable` altındaki AYNI "seen" replay notu.
+            // See the same 'seen' replay note under `loadHistoryIfAvailable`.
             if (seenMessageIds.isNotEmpty()) {
                 val viewer = SimpleChatAdapter.SeenByViewer(
                     peerAvatar(), txtToolbarTitle.text.toString()
@@ -3054,9 +2841,8 @@ class ChatActivity : AppCompatActivity() {
         if (P2PService.activeConversationId == peerDeviceFingerprint) {
             P2PService.activeConversationId = null
         }
-        // Bu sohbeti okuduğumuzu kardeş cihazlara VE karşı tarafa bildir
-        // (bkz. `sync_read_state` — artık iki hedef). Debounce'lu bekleyen
-        // varsa iptal edip HEMEN kesin bir tane yolla.
+        // Tell the sibling devices AND the other side that this chat was read (see `sync_read_state`, which now has two targets).
+        // If a debounced send is pending, cancel it and send one definitive packet now.
         readWatermarkHandler.removeCallbacks(readWatermarkRunnable)
         if (resumedUnlocked) {
             ReadStatePrefs.markRead(this, peerDeviceFingerprint)
@@ -3072,7 +2858,7 @@ class ChatActivity : AppCompatActivity() {
         // event is missed while paused.
         layoutTypingIndicator.visibility = View.GONE
         sendTypingState(false)
-        backgrounded = true // #86: the recording keeps running (service has the microphone type)
+        backgrounded = true // the recording keeps running (service has the microphone type)
         stopVoicePlayback()
     }
 
