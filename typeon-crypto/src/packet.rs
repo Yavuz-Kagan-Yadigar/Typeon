@@ -115,8 +115,8 @@ impl QrPacket {
     }
 }
 
-/// Device-add notice. The existing, approved device signs it and propagates it
-/// (spec 1.5, step 4).
+/// Device-add notice. The approved device signs it and propagates it
+/// (step 4 of device linking).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceAdd {
     pub identity_id: String,
@@ -141,7 +141,7 @@ pub struct DeviceAdd {
     pub consent_pq: Vec<u8>,
 }
 
-/// Device revocation (spec 1.6).
+/// Device revocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceRevoke {
     pub identity_id: String,
@@ -157,7 +157,7 @@ pub struct DeviceRevoke {
     pub signature_pq: Vec<u8>,
 }
 
-/// Group membership change (spec 5.2).
+/// Group membership change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GroupChange {
     Add(String),  // identity id
@@ -329,11 +329,11 @@ pub struct GroupUpdate {
     /// `MessageContent::GroupSyncRequest`).
     #[serde(default)]
     pub member_devices: Vec<GroupMemberDevice>,
-    /// For each vouched device that is not its identity's first device: the
-    /// proof that it belongs to that identity (bkz. `DeviceAddProof`).
-    /// Outside the founder's signature, like `founder_chain`: each proof is
-    /// signed by itself, and a version that does not know the field still
-    /// verifies the update.
+        /// For each vouched device that is not its identity's first device: the
+        /// proof that it belongs to that identity (see `DeviceAddProof`).
+        /// Outside the founder's signature, like `founder_chain`: each proof is
+        /// signed by itself, and a version that does not know the field still
+        /// verifies the update.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub member_device_proofs: Vec<DeviceAddProof>,
     /// Must be `founder_identity_id`. The receiver checks this.
@@ -360,24 +360,22 @@ pub struct GroupUpdate {
 }
 
 // ---------------------------------------------------------------------------
-// Multi-device linking (spec 1.5 and 1.7). The new device shows a QR code and
-// the approved device scans it (spec 1.5 step 3). Approval always comes from a
-// device the user already trusts.
+// Multi-device linking. The new device shows a QR code and the approved device
+// scans it. Approval always comes from a device the user already trusts.
 // ---------------------------------------------------------------------------
 
-/// Device-add QR code shown by the new device (spec 1.5 step 2).
+/// Device-add QR code shown by the new device.
 ///
-/// It used to carry full public keys. ML-DSA-87 (2592 bytes) and ML-KEM-1024
-/// (1568 bytes) together come to about 4.2 KB, which is over the roughly 2.9 KB
-/// maximum of a QR code (version 40, lowest error correction, byte mode). No
-/// error-correction level fixes that, so the data never fit. It now follows the
-/// same pattern as `QrPacket` (fingerprint only): no public keys in the QR code,
-/// only `device_fingerprint` (SHA3-256, 64 hex characters). The approving device
-/// connects to `rendezvous_node` and sends its `IdentityExchange`. The new device
-/// replies with its own `IdentityExchange` (see the `pending_link_target` arm of
-/// `process_identity_exchange`). The real public keys, and their check against the
-/// fingerprint, are learned in that exchange, as in a normal contact pairing (see
-/// `process_qr_packet`).
+/// It carries only the device fingerprint, not full public keys. ML-DSA-87
+/// (2592 bytes) and ML-KEM-1024 (1568 bytes) together come to about 4.2 KB,
+/// which is over the roughly 2.9 KB maximum of a QR code (version 40, lowest
+/// error correction, byte mode). No error-correction level fixes that. The
+/// pattern now matches `QrPacket`: `device_fingerprint` only (SHA3-256, 64 hex
+/// characters). The approving device connects to `rendezvous_node` and sends
+/// its `IdentityExchange`. The new device replies with its own `IdentityExchange`
+/// (see the `pending_link_target` arm of `process_identity_exchange`). The real
+/// public keys, and their check against the fingerprint, are learned in that
+/// exchange, as in a normal contact pairing (see `process_qr_packet`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceLinkRequest {
     pub version: u8,
@@ -414,10 +412,9 @@ impl DeviceLinkRequest {
     }
 }
 
-/// Public keys of one remote device, carried in the sync payload (spec 1.7
-/// `SyncPayload`). The receiver stores them in its `known_remote_devices`, so it can
-/// start a ratchet and message that contact right after the first sync. No separate
-/// QR pairing is needed.
+/// Public keys of one remote device, carried in the sync payload. The receiver
+/// stores them in its `known_remote_devices`, so it can start a ratchet and message
+/// that contact right after the first sync. No separate QR pairing is needed.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SyncedDevice {
     pub device_fingerprint: String,
@@ -465,8 +462,7 @@ impl std::fmt::Debug for SyncedDevice {
     }
 }
 
-/// Serialized form of one contact for cross-device sync (spec 1.7
-/// `SyncPayload.contacts`).
+/// Serialized form of one contact for cross-device sync (`SyncPayload.contacts`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncedContact {
     pub identity_id: String,
@@ -483,9 +479,9 @@ pub struct SyncedContact {
     pub device_proofs: Vec<DeviceAddProof>,
 }
 
-/// Sync payload (spec 1.7). The first connection carries a full copy. It goes to
-/// the new device inside `DeviceLinkGrant` (ratchet-encrypted). Later changes are
-/// sent to sibling devices again through `MessageContent::DeviceSync`. The merge is
+/// Sync payload. The first connection carries a full copy. It goes to the new
+/// device inside `DeviceLinkGrant` (ratchet-encrypted). Later changes are sent to
+/// sibling devices again through `MessageContent::DeviceSync`. The merge is
 /// idempotent.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SyncPayload {
@@ -493,11 +489,11 @@ pub struct SyncPayload {
     /// Serialized `group::Group` records. The receiver adopts them as they are. The
     /// founder's authority is already signed inside the group.
     pub groups: Vec<serde_json::Value>,
-    /// Other devices of the SAME identity (spec 1.7), so that with three or more
-    /// devices they learn about each other. The receiver adds them to
-    /// `known_remote_devices` with `identity_id` set to its own identity, skipping its
-    /// own fingerprint. `#[serde(default)]`, for compatibility with older sync
-    /// payloads that do not have this field.
+        /// Other devices of the SAME identity, so that with three or more devices they
+        /// learn about each other. The receiver adds them to `known_remote_devices` with
+        /// `identity_id` set to its own identity, skipping its own fingerprint.
+        /// `#[serde(default)]`, for compatibility with sync payloads that do not have
+        /// this field.
     #[serde(default)]
     pub siblings: Vec<SyncedDevice>,
     /// See `DeviceAddProof`: one for each of `siblings` that is not the identity's
@@ -529,9 +525,8 @@ pub struct SyncPayload {
 }
 
 /// Top-level packet envelope on the network. The `MessagePacket` header carries the
-/// spec 3.3 fields directly. `ratchet_pubkey`, `message_number` and `prev_chain_length`
-/// make a real Double Ratchet DH step possible (unlike the simplified `Packet` of
-/// earlier versions).
+/// message fields directly. `ratchet_pubkey`, `message_number` and `prev_chain_length`
+/// make a real Double Ratchet DH step possible.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagePacketHeader {
     pub sender_identity_id: String,
@@ -845,13 +840,12 @@ pub enum MessageContent {
     /// acknowledged, to avoid an endless loop. If it is lost, the sender's retry of the
     /// original packet makes the recipient send a new Ack.
     Ack { target_message_id: String },
-    /// File, photo, video or audio attachment metadata. This extends the spec section 6
-    /// scope (file transfer v0.1 and v0.2 excluded), and is a requested feature with a
-    /// maximum size of 4 GB. The packet does not carry the file bytes. It carries small
-    /// metadata and a fresh AEAD key for this file (`file_key`), over the normal
-    /// ratchet-encrypted channel. The bytes are requested and sent in chunks over a
-    /// separate libp2p `request_response` protocol (see `FileChunkRequest` and
-    /// `FileChunkResponse` in file_transfer.rs and attachments.rs).
+        /// File, photo, video or audio attachment metadata. The maximum size is 4 GB. The
+        /// packet does not carry the file bytes. It carries small metadata and a fresh AEAD
+        /// key for this file (`file_key`), over the normal ratchet-encrypted channel. The
+        /// bytes are requested and sent in chunks over a separate libp2p `request_response`
+        /// protocol (see `FileChunkRequest` and `FileChunkResponse` in file_transfer.rs and
+        /// attachments.rs).
     FileOffer {
         group_id: Option<String>,
         file_id: String,
@@ -981,12 +975,13 @@ pub enum MessageContent {
     /// after pairing), and on a network-change notice. The receiver learns the `.onion` address even
     /// if no real Tor connection was ever made.
     AddressAnnounce { multiaddr: String },
-    /// Multi-device (spec 1.5 step 5 and 1.7): the approving (existing) device sends this over the 1:1
-    /// ratchet to the new device. `device_add` is the authorization document the approving device signed.
-    /// The new device stores it and uses it as proof when it introduces itself to contacts. `sync` is the
-    /// first full sync (contacts and groups). It is carried here instead of as a bare
-    /// `NetworkEnvelope::DeviceAdd`, so contact and group data travels over the ratchet-encrypted,
-    /// reliably delivered channel and never leaks as plaintext over gossipsub.
+        /// Multi-device (step 5 of linking, and sync): the approving (existing) device sends
+        /// this over the 1:1 ratchet to the new device. `device_add` is the authorization
+        /// document the approving device signed. The new device stores it and uses it as
+        /// proof when it introduces itself to contacts. `sync` is the first full sync
+        /// (contacts and groups). It is carried here instead of as a bare
+        /// `NetworkEnvelope::DeviceAdd`, so contact and group data travels over the
+        /// ratchet-encrypted, reliably delivered channel and never goes as plaintext over gossipsub.
     DeviceLinkGrant {
         identity_id: String,
         device_add: DeviceAdd,
@@ -995,21 +990,20 @@ pub enum MessageContent {
         #[serde(default, with = "serde_bytes")]
         nonce: Vec<u8>,
     },
-    /// Multi-device (spec 1.5 step 5, broadcast to contacts): a device was added to
-    /// this identity. The receiver verifies `device_add.signature` with the key of a
-    /// KNOWN active device of that identity. If valid, it adds the new device (with
-    /// its full public keys) to both `known_devices` and `known_remote_devices`. That
-    /// lets messages fan out to the device immediately, without waiting for a separate
-    /// `IdentityExchange`, so routing propagates even if a contact is offline at
-    /// pairing time. `device.device_fingerprint` must equal both
-    /// `device_add.new_device_fingerprint` and the hash of the keys. The receiver checks both.
+        /// Multi-device (broadcast to contacts): a device was added to this identity. The
+        /// receiver verifies `device_add.signature` with the key of a KNOWN active device of
+        /// that identity. If valid, it adds the new device (with its full public keys) to both
+        /// `known_devices` and `known_remote_devices`. That lets messages fan out to the device
+        /// immediately, without waiting for a separate `IdentityExchange`, so routing propagates
+        /// even if a contact was offline at pairing time. `device.device_fingerprint` must equal
+        /// both `device_add.new_device_fingerprint` and the hash of the keys. The receiver checks both.
     DeviceAddNotice { device_add: DeviceAdd, device: SyncedDevice },
-    /// Multi-device (spec 1.7.1): read-state sync between sibling devices. When a chat is
-    /// read on one device, the others mark it read too. Otherwise each device would show it
-    /// unread. Accepted only if the sender is a device of my own identity.
-    /// `conversation_identity_id`: the counterpart's identity for a 1:1 chat. `group_id`: for
-    /// a group chat. `read_at_ms`: the read time. Deliberately not queued for reliable
-    /// delivery (like Seen and TypingIndicator). It is resent on the next read.
+        /// Multi-device: read-state sync between sibling devices. When a chat is read on one
+        /// device, the others mark it read too. Otherwise each device would show it unread.
+        /// Accepted only if the sender is a device of my own identity.
+        /// `conversation_identity_id`: the counterpart's identity for a 1:1 chat. `group_id`:
+        /// for a group chat. `read_at_ms`: the read time. Deliberately not queued for reliable
+        /// delivery (like Seen and TypingIndicator). It is resent on the next read.
     ReadStateSync {
         #[serde(default)]
         conversation_identity_id: Option<String>,
@@ -1017,8 +1011,8 @@ pub enum MessageContent {
         group_id: Option<String>,
         read_at_ms: u64,
     },
-    /// Multi-device (spec 1.6): signed device revocation, spread to contacts and sibling
-    /// devices. The receiver verifies the signature and marks that device `Revoked`.
+        /// Multi-device: signed device revocation, spread to contacts and sibling devices.
+        /// The receiver verifies the signature and marks that device `Revoked`.
     DeviceRevokeNotice(DeviceRevoke),
     /// To a group's founder: the sender device's first-contact secret for that group. The
     /// founder forwards it to members in `GroupMemberDevice.first_contact_secret`.
@@ -1032,14 +1026,14 @@ pub enum MessageContent {
     /// previous update. A member that missed one (version gap, or a member with no known
     /// device) asks for the rest.
     GroupSyncRequest { group_id: String },
-    /// Multi-device (spec 1.7 delta sync): an existing device resends the current contact and
-    /// group state to the OTHER (sibling) devices of its identity, for example after a new
-    /// contact is added. The receiver merges idempotently: it never overwrites keys of a known
-    /// device, it only adds what is missing. This is the repeatable form of the sync part of
-    /// `DeviceLinkGrant`.
+        /// Multi-device (delta sync): an existing device resends the current contact and group
+        /// state to the OTHER (sibling) devices of its identity, for example after a new contact
+        /// is added. The receiver merges idempotently: it never overwrites keys of a known device,
+        /// it only adds what is missing. This is the repeatable form of the sync part of
+        /// `DeviceLinkGrant`.
     DeviceSync(SyncPayload),
-    /// Multi-device (spec 1.7): echo of a message, edit or delete I sent, to my sibling devices.
-    /// See `SiblingEchoBody`. Accepted only if the sender is a device of my own identity.
+        /// Multi-device: echo of a message, edit or delete I sent, to my sibling devices.
+        /// See `SiblingEchoBody`. Accepted only if the sender is a device of my own identity.
     SiblingEcho {
         /// For a 1:1 chat, the counterpart's identity. The receiving sibling maps it to its own
         /// canonical device key. `None` for groups.
@@ -1050,15 +1044,15 @@ pub enum MessageContent {
         group_id: Option<String>,
         body: SiblingEchoBody,
     },
-    /// Multi-device (spec 1.7): asks a sibling device for recent messages (backfill after a
-    /// reconnect). Sent only to a device of my own identity.
-    /// Scope change: the request used to mean "all chats, newest N" every time. A device could
-    /// not ask its own other device for older history of one contact, the way a peer's
-    /// `HistorySyncRequest.before_timestamp` allows. Three new fields (`#[serde(default)]`, so
-    /// old and new versions stay compatible, and if all are `None` the behavior is unchanged):
-    /// `conversation_identity_id` or `group_id` narrow the request to one chat, and
-    /// `before_timestamp` asks for messages OLDER than that time in that chat (infinite-scroll
-    /// paging, same meaning as `HistorySyncRequest`).
+        /// Multi-device: asks a sibling device for recent messages (backfill after a reconnect).
+        /// Sent only to a device of my own identity.
+        /// The request used to mean "all chats, newest N" every time. A device could not ask
+        /// its own other device for older history of one contact, the way a peer's
+        /// `HistorySyncRequest.before_timestamp` allows. Three new fields (`#[serde(default)]`,
+        /// so old and new versions stay compatible, and if all are `None` the behaviour is
+        /// unchanged): `conversation_identity_id` or `group_id` narrow the request to one chat,
+        /// and `before_timestamp` asks for messages OLDER than that time in that chat
+        /// (infinite-scroll paging, same meaning as `HistorySyncRequest`).
     SiblingHistoryRequest {
         per_conversation_limit: u32,
         #[serde(default)]
@@ -1322,8 +1316,8 @@ pub enum CallAction {
     Busy,
 }
 
-/// Handshake packet. Earlier design (`HandshakeInit`). Spec does not name it a separate type,
-/// but it carries the hybrid KEM step of spec 3.1. The Kyber ciphertext must reach the peer.
+/// Handshake packet. It carries the hybrid KEM step of the initial handshake. The Kyber
+/// ciphertext must reach the peer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeInit {
     pub sender_identity_id: String,
@@ -1354,10 +1348,10 @@ pub struct HandshakeInit {
     pub signature_pq: Vec<u8>,
 }
 
-/// Spec 1.3: "fingerprint-only [...] downloaded from the peer when the connection is made and
-/// compared with this `fingerprint`". QR and manual pairing carry only the fingerprint. So once
-/// the connection is made, each side sends its real public keys and checks them against the
-/// fingerprint itself. This packet carries that step.
+/// QR and manual pairing carry only the fingerprint. The connection specification says the
+/// peer's real public keys are downloaded when the connection is made and compared with this
+/// `fingerprint`. So once the connection is made, each side sends its real public keys and
+/// checks them against the fingerprint itself. This packet carries that step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentityExchange {
     pub identity_id: String,
@@ -1371,20 +1365,18 @@ pub struct IdentityExchange {
     pub kem_pubkey_x25519: Vec<u8>,
     #[serde(with = "serde_bytes")]
     pub kem_pubkey_mlkem: Vec<u8>,
-    /// Signed `DeviceAdd` from the primary device, authorizing this device when it is a SECONDARY
-    /// device. Without it, messages from secondary devices were a problem in practice.
-    /// Why it is needed: under spec 2.2 the receiver BLOCKS packets from a device it does not
-    /// know and shows a warning (`UnverifiedNewDeviceAlert`). The silent-accept path
-    /// (`NewDeviceViaSignedAdd`) only checked the `verified_device_adds` map, which is filled
-    /// only if a separate `DeviceAddNotice` ARRIVED before. That notice is an ordinary message
-    /// over the ratchet. If the contact was offline, it sat in the retry queue. The result:
-    /// messages from the secondary device stayed blocked until the contact received the notice.
-    /// On a real device, 739 undelivered items had built up in the queue.
-    /// Carrying the signature with the introduction removes that dependency. The receiver can
-    /// verify it directly against the primary device's key, which it already knows. The security
-    /// model is unchanged. Verification is the same as in `apply_device_add_notice`
-    /// (`verify_device_auth` plus fingerprint and key consistency). An unsigned claim is still
-    /// rejected.
+        /// Signed `DeviceAdd` from the primary device, authorizing this device when it is a
+        /// SECONDARY device.
+        /// The receiver BLOCKS packets from a device it does not know, and shows a warning
+        /// (`UnverifiedNewDeviceAlert`). The silent-accept path (`NewDeviceViaSignedAdd`) checks
+        /// only the `verified_device_adds` map, and that map is filled only if a separate
+        /// `DeviceAddNotice` arrived before. That notice is an ordinary message over the ratchet.
+        /// If the contact was offline, it waits in the retry queue, so packets from the secondary
+        /// device stay blocked until the contact receives the notice.
+        /// Carrying the signature with the introduction removes that dependency. The receiver can
+        /// verify it directly against the primary device's key, which it already knows. The
+        /// security model is unchanged. Verification is the same as in `apply_device_add_notice`
+        /// (`verify_device_auth` plus fingerprint and key consistency). An unsigned claim is still rejected.
     #[serde(default)]
     pub device_add: Option<DeviceAdd>,
     /// The signed `DeviceRevoke`s of this identity. A revoke used to reach
@@ -1506,10 +1498,9 @@ pub fn revokes_digest(revokes: &[DeviceRevoke]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Multi-device (spec 1.7 message history sync): an echo of a message or action I SENT, to my
-/// sibling devices, so an edit or delete made on one device shows on the others too. Received
-/// messages already reach every device through fan-out, so echoes are only for my own outgoing
-/// actions.
+/// Multi-device (message history sync): an echo of a message or action I SENT, to my sibling
+/// devices, so an edit or delete made on one device shows on the others too. Received messages
+/// already reach every device through fan-out, so echoes are only for my own outgoing actions.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum SiblingEchoBody {
     Text {
@@ -1559,10 +1550,10 @@ pub enum SiblingEchoBody {
     StickersRequest { #[serde(default)] have: Vec<String> },
 }
 
-/// Multi-device (spec 1.7 message history sync, backfill from a sibling): while a device was offline it
-/// may have missed messages from contacts (a fan-out copy timed out). On reconnect it asks a sibling
-/// device for the last N messages, and the sibling sends them from its archive. Duplicates are dropped
-/// by the stable `message_id` (1:1 `conv_id`, group `local_id`).
+/// Multi-device (history backfill from a sibling): while a device was offline it may have
+/// missed messages from contacts (a fan-out copy timed out). On reconnect it asks a sibling
+/// device for the last N messages, and the sibling sends them from its archive. Duplicates are
+/// dropped by the stable `message_id` (1:1 `conv_id`, group `local_id`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiblingHistoryEntry {
     /// For a 1:1 chat, the counterpart's identity. The receiver maps it to its own canonical device.

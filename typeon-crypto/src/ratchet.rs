@@ -128,11 +128,11 @@ pub struct DeviceRatchetState {
     /// The latest ratchet public key received from the peer. A rotation is performed against these.
     pub peer_x25519_pubkey: X25519PublicKey,
     pub peer_kyber_pubkey: MlKem1024EncapsulationKey,
-    /// Message counter for this direction (spec 3.3 `message_number`).
+        /// Message counter for this direction (`message_number`).
     pub send_message_number: u32,
     /// Message counter for the receive direction. Used to detect replays and out-of-order packets.
     pub recv_message_number: u32,
-    /// Length of the chain before the last DH/KEM ratchet step (spec 3.3 `prev_chain_length`).
+        /// Length of the chain before the last DH/KEM ratchet step (`prev_chain_length`).
     pub prev_chain_length: u32,
     pub last_rotation: u64,
     /// Signal's DH-ratchet model (see the note at the end of the file): only a side that has NOT yet
@@ -445,7 +445,7 @@ fn kem_key(mut ikm: Vec<u8>, transcript: &[u8; 32]) -> Result<[u8; 32], RatchetE
     Ok(key)
 }
 
-/// One symmetric ratchet step (spec 3.2): the key of this message and the chain key of the next. Send
+/// One symmetric ratchet step: the key of this message and the chain key of the next. Send
 /// and receive share it, so their two HKDF labels cannot drift apart.
 fn chain_step(chain_key: &[u8]) -> Result<([u8; 32], [u8; 32]), RatchetError> {
     let hk = Hkdf::<Sha256>::new(None, chain_key);
@@ -457,12 +457,12 @@ fn chain_step(chain_key: &[u8]) -> Result<([u8; 32], [u8; 32]), RatchetError> {
 }
 
 impl DeviceRatchetState {
-    /// Spec 3.1: hybrid, two-way handshake on first contact.
-    /// `root_key = HKDF(shared_secret_classic || shared_secret_pq, salt = "p2pmsg-v0.1")`
-    ///
-    /// Initiator: generates a fresh X25519 + ML-KEM pair, then performs DH and encapsulation
-    /// against the peer's public keys. The ML-KEM ciphertext must reach the peer in the
-    /// `HandshakeInit` packet (see `crate::packet::HandshakeInit`).
+        /// Hybrid, two-way handshake on first contact.
+        /// `root_key = HKDF(shared_secret_classic || shared_secret_pq, salt = "p2pmsg-v0.1")`
+        ///
+        /// Initiator: generates a fresh X25519 + ML-KEM pair, then performs DH and encapsulation
+        /// against the peer's public keys. The ML-KEM ciphertext must reach the peer in the
+        /// `HandshakeInit` packet (see `crate::packet::HandshakeInit`).
     pub fn initiate(
         peer_x25519_pubkey: &[u8],
         peer_kyber_pubkey: &[u8],
@@ -581,19 +581,19 @@ impl DeviceRatchetState {
         }
     }
 
-    /// DH/KEM ratchet step (spec 3.2): generates a new X25519 + ML-KEM pair, performs key exchange against
-    /// the peer's latest known public keys, and refreshes the root, send and receive keys.
-    /// `prev_chain_length` is set to the previous `send_message_number`, and `send_message_number` is reset.
-    /// This is the meaning of the spec 3.3 fields: the peer learns "last message number on the old chain"
-    /// from `prev_chain_length`.
-    ///
-    /// Call only when `should_rotate()` is true. That check includes Signal's rule: "have I already answered
-    /// the peer's current key" (`has_responded_to_peer_key`). There is no deterministic "who triggers" rule.
-    /// Only a side that has not yet answered triggers (see the note at the end of the file).
-    ///
-    /// The returned ML-KEM ciphertext must be sent to the peer with the next `MessagePacket`, in its header
-    /// `ratchet_pubkey` field (`RatchetPublicKeys` plus this ciphertext). The peer synchronizes with
-    /// `respond_to_rotation` when it receives it.
+        /// DH/KEM ratchet step: generates a new X25519 + ML-KEM pair, performs key exchange against
+        /// the peer's latest known public keys, and refreshes the root, send and receive keys.
+        /// `prev_chain_length` is set to the previous `send_message_number`, and `send_message_number`
+        /// is reset. The peer learns "last message number on the old chain" from `prev_chain_length`.
+        ///
+        /// Call only when `should_rotate()` is true. That check includes Signal's rule: "have I already
+        /// answered the peer's current key" (`has_responded_to_peer_key`). There is no deterministic
+        /// "who triggers" rule. Only a side that has not yet answered triggers (see the note at the end
+        /// of the file).
+        ///
+        /// The returned ML-KEM ciphertext must be sent to the peer with the next `MessagePacket`, in its
+        /// header `ratchet_pubkey` field (`RatchetPublicKeys` plus this ciphertext). The peer synchronizes
+        /// with `respond_to_rotation` when it receives it.
     pub fn perform_dh_ratchet(&mut self, now_ms: u64) -> Result<Vec<u8>, RatchetError> {
         let mut csprng = OsRng;
         let new_x25519_secret = StaticSecret::random_from_rng(&mut csprng);
@@ -650,32 +650,32 @@ impl DeviceRatchetState {
         self.last_rotation = now_ms;
     }
 
-    /// Receive-side reaction to a rotation. Called when the peer ran `perform_dh_ratchet` and sent us (a) its
-    /// new `ratchet_pubkey` (both X25519 and Kyber) and (b) the ciphertext from that rotation
-    /// (`MessagePacketHeader.rotation_kyber_ciphertext`). This is the counterpart of the "encapsulate" side
-    /// of `perform_dh_ratchet`. We do NOT generate a new key pair (we did not start the rotation). We
-    /// decapsulate the peer's ciphertext with our own (PRE-rotation, still valid) Kyber secret. That meets
-    /// spec 3.2: both sides derive the same new root key.
-    ///
-    /// `new_peer_keys` is the peer's NEW (post-rotation) X25519 + Kyber public key pair. Both parts are
-    /// updated here: the X25519 part is used in this decapsulation, and the Kyber part is used by our future
-    /// rotations (`perform_dh_ratchet` encapsulates against `self.peer_kyber_pubkey`).
-    ///
-    /// Returns: `Ok(true)` = rotation APPLIED. `Ok(false)` = this announcement was ALREADY applied, and no state
-    /// changed (guard below).
-    ///
-    /// Critical (double-application guard): this function mixes the current `root_key` into the KDF. Applying
-    /// the same announcement twice would derive a root key the sender never saw, and would break the session for
-    /// good. Repeats are unavoidable: the sender's `awaiting_confirmation` mechanism re-sends the SAME envelope
-    /// (with the same rotation ciphertext) if an Ack was lost, and `pending_rotation_ct` deliberately repeats the
-    /// announcement (see that field). The peer's X25519 public key is freshly generated at every rotation. So if
-    /// the incoming key equals the stored `peer_x25519_pubkey`, the rotation was already applied, and it is
-    /// safely ignored.
-    ///
-    /// Private: nothing here is authenticated. ML-KEM decapsulation never fails (a ciphertext made for another
-    /// key gives pseudo-random bytes). The guard above knows only the current peer key. So a delayed
-    /// announcement of an older rotation would overwrite the root and chains with garbage. `decrypt` runs this
-    /// on a copy and keeps the result only if the packet then decrypts on the new chain.
+        /// Receive-side reaction to a rotation. Called when the peer ran `perform_dh_ratchet` and sent us
+        /// (a) its new `ratchet_pubkey` (both X25519 and Kyber) and (b) the ciphertext from that rotation
+        /// (`MessagePacketHeader.rotation_kyber_ciphertext`). This is the counterpart of the "encapsulate"
+        /// side of `perform_dh_ratchet`. We do NOT generate a new key pair, because we did not start the
+        /// rotation. We decapsulate the peer's ciphertext with our own (pre-rotation, still valid) Kyber
+        /// secret. Both sides then derive the same new root key.
+        ///
+        /// `new_peer_keys` is the peer's NEW (post-rotation) X25519 + Kyber public key pair. Both parts are
+        /// updated here: the X25519 part is used in this decapsulation, and the Kyber part is used by our
+        /// future rotations (`perform_dh_ratchet` encapsulates against `self.peer_kyber_pubkey`).
+        ///
+        /// Returns: `Ok(true)` = rotation APPLIED. `Ok(false)` = this announcement was ALREADY applied, and no
+        /// state changed (guard below).
+        ///
+        /// Double-application guard: this function mixes the current `root_key` into the KDF. Applying the same
+        /// announcement twice would derive a root key the sender never saw, and would break the session for
+        /// good. Repeats are unavoidable: the sender's `awaiting_confirmation` mechanism re-sends the SAME
+        /// envelope (with the same rotation ciphertext) if an Ack was lost, and `pending_rotation_ct`
+        /// deliberately repeats the announcement (see that field). The peer's X25519 public key is freshly
+        /// generated at every rotation. So if the incoming key equals the stored `peer_x25519_pubkey`, the
+        /// rotation was already applied, and it is safely ignored.
+        ///
+        /// Nothing here is authenticated by itself. ML-KEM decapsulation never fails (a ciphertext made for
+        /// another key gives pseudo-random bytes). The guard above knows only the current peer key. So a
+        /// delayed announcement of an older rotation would overwrite the root and chains with garbage. `decrypt`
+        /// runs this on a copy and keeps the result only if the packet then decrypts on the new chain.
     fn respond_to_rotation(&mut self, new_peer_keys: &RatchetPublicKeys, rotation_kyber_ciphertext: &[u8], now_ms: u64) -> Result<bool, RatchetError> {
         let x25519_bytes: [u8; 32] = new_peer_keys.x25519_pubkey.as_slice().try_into().map_err(|_| "Bad peer X25519 key length")?;
         if x25519_bytes == *self.peer_x25519_pubkey.as_bytes() {
@@ -719,13 +719,13 @@ impl DeviceRatchetState {
         Ok(true)
     }
 
-    /// Spec 3.2: the 30-minute rule, following Signal's model. ONLY a side that has not yet answered the peer's
-    /// current public key (`has_responded_to_peer_key == false`) may trigger a rotation. If this side has
-    /// already answered (the next rotation right is the peer's), it does not trigger even after 30 minutes. It
-    /// waits for the peer's own message or rotation. This is Signal's asymmetric "whose turn it is" model, not a
-    /// deterministic rule like comparing fingerprints.
-    ///
-    /// A responder that has not rotated yet does so before its first send, whatever the clock says (see `respond`).
+        /// The 30-minute rule, following Signal's model. ONLY a side that has not yet answered the peer's
+        /// current public key (`has_responded_to_peer_key == false`) may trigger a rotation. If this side has
+        /// already answered (the next rotation right is the peer's), it does not trigger even after 30 minutes.
+        /// It waits for the peer's own message or rotation. This is Signal's asymmetric "whose turn it is"
+        /// model, not a deterministic rule such as comparing fingerprints.
+        ///
+        /// A responder that has not rotated yet does so before its first send, whatever the clock says (see `respond`).
     pub fn should_rotate(&self, now_ms: u64) -> bool {
         // `saturating_sub`: `last_rotation` may be in the future (the clock went back, or a persisted state was
         // produced on a device with a fast clock). A plain subtraction wraps in release builds (a spurious
@@ -752,12 +752,12 @@ impl DeviceRatchetState {
             }
     }
 
-    /// Encrypts the next outgoing message (produces the spec 3.3 `MessagePacket` fields). The nonce is derived
-    /// deterministically from `message_number`. Under one chain key, two message numbers never produce the same
-    /// nonce, which is enough for AEAD security.
-    ///
-    /// `aad` is the packet's raw header bytes. The tag binds them, so the header the receiver acts on is the one
-    /// the sender encrypted under. `next_send_numbers` gives the numbers to put in that header first.
+        /// Encrypts the next outgoing message (produces the `MessagePacket` fields). The nonce is derived
+        /// deterministically from `message_number`. Under one chain key, two message numbers never produce the
+        /// same nonce, which is enough for AEAD security.
+        ///
+        /// `aad` is the packet's raw header bytes. The tag binds them, so the header the receiver acts on is the
+        /// one the sender encrypted under. `next_send_numbers` gives the numbers to put in that header first.
     pub fn encrypt_next(&mut self, plaintext: &[u8], aad: &[u8]) -> Result<(Vec<u8>, u32, u32), RatchetError> {
         // The responder's handshake chain is a function of `HandshakeInit` alone (see `respond`). It is never sent on.
         if self.is_fresh_responder() {
@@ -939,8 +939,8 @@ fn chain_decrypt(
     Ok((plaintext, changes))
 }
 
-/// Derives a deterministic 12-byte nonce from the message number (for ChaCha20-Poly1305). Under one chain key,
-/// every message_number is unique (spec 3.2 symmetric ratchet progression), so nonces never collide.
+/// Derives a deterministic 12-byte nonce from the message number (for ChaCha20-Poly1305). Under one chain
+/// key, every message_number is unique (symmetric ratchet progression), so nonces never collide.
 fn nonce_from_message_number(n: u32) -> Nonce {
     let mut bytes = [0u8; 12];
     bytes[8..12].copy_from_slice(&n.to_be_bytes());

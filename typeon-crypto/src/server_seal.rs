@@ -153,14 +153,12 @@ pub fn mailbox_proof_seeds(secret: &[u8], mailbox: &str) -> Result<([u8; 32], [u
 
 /// Archive bucket period: each bucket covers this many ms (30 days).
 ///
-/// The bucket is monthly rather than a fixed chat id. A fixed id would be a
-/// permanent handle that lets the server track one relationship for years.
-/// Monthly rotation makes buckets unlinkable for a passive server, at almost no
-/// cost, and matches the user's experience of loading earlier history by month.
+/// The bucket is monthly rather than a fixed chat id. A fixed id would be a permanent handle that
+/// lets the server track one relationship for years. Monthly rotation makes buckets unlinkable for a
+/// passive server, at almost no cost, and matches how earlier history is usually loaded, month by month.
 ///
-/// The limit: the server still sees which buckets one device polls, so an
-/// active server can link them. A full fix (per-bucket anonymous credentials
-/// plus separate circuits) is out of scope. See SECURITY.md.
+/// Limit: the server still sees which buckets one device polls, so an active server can link them.
+/// A complete solution (per-bucket anonymous credentials plus separate circuits) is out of scope. See SECURITY.md.
 pub const ARCHIVE_EPOCH_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
 /// Archive period that a timestamp falls into.
@@ -170,12 +168,11 @@ pub fn archive_epoch_for(ts_ms: u64) -> u64 {
 
 /// Conversation archive key (CAK), derived from the root archive key (ARK).
 ///
-/// `conv_key` is the counterpart's `identity_id` for 1:1 chats and the
-/// `group_id` for groups. It is the identity id, not the device fingerprint, so
-/// the archive stays readable when the counterpart changes device (spec 2.2).
-/// Both kinds share this key space with no tag, because a tag would orphan
-/// every stored archive. The caller keeps them apart by format: a group id is
-/// `group-<16 hex>`, an identity id is 64 hex (`group_ops::process_group_update`).
+/// `conv_key` is the counterpart's `identity_id` for 1:1 chats and the `group_id` for groups. It is the
+/// identity id, not the device fingerprint, so the archive stays readable when the counterpart changes
+/// device. Both kinds share this key space with no tag, because a tag would orphan every stored archive.
+/// The caller keeps them apart by format: a group id is `group-<16 hex>`, an identity id is 64 hex
+/// (`group_ops::process_group_update`).
 fn conv_archive_key(archive_root_key: &[u8; 32], conv_key: &str) -> Result<[u8; 32], String> {
     let mut info = Vec::with_capacity(24 + conv_key.len());
     info.extend_from_slice(b"p2pmsg-v0.1-archive-conv");
