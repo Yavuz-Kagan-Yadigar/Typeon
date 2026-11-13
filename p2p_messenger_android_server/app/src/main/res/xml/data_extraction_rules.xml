@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Sunucunun veri dizini başkalarının şifreli zarflarını, onion servis
-     anahtarını ve kayıt defterini tutuyor. Hiçbir alan (root, file, database,
-     sharedpref, external) ne buluta yedeklenmeli ne de cihaz aktarımına girmeli. -->
+<!-- The server's data directory holds other people's encrypted envelopes, the onion service
+     key, and the registry. No domain (root, file, database, sharedpref, external) should go
+     into cloud backup or device transfer. -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="root" path="." />

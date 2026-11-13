@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- bkz. values/colors.xml aynı not — gri/nötr roller bilerek
-         Material referansından daha koyu. -->
-    <!-- Material You (M3) tema renk rolleri — koyu tema. Işık tema
-         karşılıkları values/colors.xml'de. -->
+        <!-- See the same note in values/colors.xml: the grey and neutral roles are deliberately
+         darker than the Material reference. -->
+        <!-- Material You (M3) theme colour roles, dark theme. The light theme counterparts are in
+         values/colors.xml. -->
     <color name="md_primary">#D0BCFF</color>
     <color name="md_on_primary">#381E72</color>
     <color name="md_primary_container">#4F378B</color>

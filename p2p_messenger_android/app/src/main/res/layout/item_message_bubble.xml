@@ -6,8 +6,8 @@
     android:orientation="vertical"
     android:padding="4dp">
 
-    <!-- Sadece grup sohbetinde, kendi mesajlarımız DIŞINDA gösterilir
-         (bir grupta birden fazla gönderici olabileceğinden). -->
+        <!-- Shown only in group chat, and not on our own messages (a group can have several
+         senders). -->
     <LinearLayout
         android:id="@+id/rowSender"
         android:layout_width="wrap_content"
@@ -35,11 +35,10 @@
 
     </LinearLayout>
 
-    <!-- Spec dışı, kullanıcı isteği (WhatsApp tarzı "yanıtla"): bu mesaj
-         başka bir mesaja yanıtsa (bkz. SimpleChatAdapter.Item.replyToMessageId)
-         yanıtlanan mesajın küçük bir özeti burada gösterilir — dokununca
-         (bkz. ChatActivity/GroupChatActivity onReplyPreviewClick) sohbet o
-         mesaja kaydırılır. -->
+        <!-- Reply preview. If this message replies to another message (see
+         SimpleChatAdapter.Item.replyToMessageId), a small summary of the replied-to message is
+         shown here. Tapping it (see onReplyPreviewClick in ChatActivity and GroupChatActivity)
+         scrolls the chat to that message. -->
     <LinearLayout
         android:id="@+id/layoutReplyQuote"
         android:layout_width="wrap_content"
@@ -55,10 +54,9 @@
         android:background="@drawable/reply_quote_background"
         android:visibility="gone">
 
-        <!-- Rengi kodda balonun metin rengine göre veriliyor (bkz.
-             SimpleChatAdapter `bindReplyQuote`) — `?attr/colorPrimary`
-             turuncu giden balonun üzerinde turuncu kalıyordu, yani
-             görünmüyordu. -->
+                <!-- The colour is set in code from the bubble's text colour (see SimpleChatAdapter
+             bindReplyQuote). ?attr/colorPrimary stayed orange on the orange outgoing bubble, so
+             it was invisible. -->
         <View
             android:id="@+id/viewReplyQuoteBar"
             android:layout_width="3dp"
@@ -90,20 +88,16 @@
 
     </LinearLayout>
 
-    <!-- Spec dışı, kullanıcı isteği: gönderilme saati ve "iletildi/okundu"
-         tikleri artık balonun ALTINDA değil, İÇİNDE (WhatsApp/Telegram
-         deseni). Bu yüzden balon arka planı (bkz. SimpleChatAdapter
-         `bubbleBackground`) ARTIK `txtBubbleText`/`layoutAttachment`'a
-         DEĞİL, ikisini de meta satırıyla birlikte saran BU kapsayıcıya
-         uygulanıyor — tek bir arka plan, üç ayrı parça yerine.
-         `wrap_content` + üstteki `container`ın gravity'si (END/START)
-         balonun hangi kenara yaslanacağını belirlemeye devam ediyor. -->
-    <!-- Spec dışı, kullanıcı isteği: "görüldü ve ulaştı tiklerini mesaj
-         balonunun YANINA, ekran kenarıyla arasına taşı". Bu yüzden balon
-         artık tek başına değil, yatay bir satırın içinde: [balon][yan
-         sütun]. Üstteki `container`ın gravity'si (END/START) satırın
-         tamamını hizaladığı için, KENDİ mesajlarımızda yan sütun balonla
-         ekranın sağ kenarı ARASINDA kalıyor — istenen tam olarak bu. -->
+        <!-- Send time and the forwarded and read ticks are now inside the bubble, not below it
+         (WhatsApp and Telegram pattern). So the bubble background (see SimpleChatAdapter
+         bubbleBackground) is applied to THIS container, which wraps the text, the attachment
+         and the meta row together: one background instead of three separate pieces.
+         wrap_content plus the container's gravity (END or START) still decide which edge the
+         bubble sits against. -->
+        <!-- Time, read ticks and send status moved out of the bubble to a side column. The bubble
+         now sits in a horizontal row: [bubble][side column]. Because the outer container's
+         gravity (END or START) aligns the whole row, on our own messages the side column sits
+         between the bubble and the right edge of the screen. That is the intended layout. -->
     <LinearLayout
         android:id="@+id/rowBubbleLine"
         android:layout_width="wrap_content"
@@ -138,12 +132,11 @@
         android:maxWidth="340dp"
         android:textSize="16sp" />
 
-    <!-- Spec dışı: dosya/foto/video/ses eki balonu — `item.attachment`
-         doluysa `txtBubbleText` yerine bu gösterilir (bkz.
-         SimpleChatAdapter.onBindViewHolder). Tek, esnek bir düzen (dört
-         ayrı görünüm tipi yerine) — küçük resim önizlemesi SADECE
-         image/video MIME'lerinde görünür, diğerlerinde jenerik dosya
-         simgesi + ad/boyut satırı yeterli. -->
+        <!-- Attachment bubble for a file, photo, video or audio. If item.attachment is set, this is
+         shown instead of txtBubbleText (see SimpleChatAdapter.onBindViewHolder). One flexible
+         layout, instead of four separate view types. The small image preview appears only for
+         image and video MIME types. Other files show a generic file icon with a name and size
+         line. -->
     <LinearLayout
         android:id="@+id/layoutAttachment"
         android:layout_width="wrap_content"
@@ -160,11 +153,9 @@
             android:visibility="gone"
             android:contentDescription="@null" />
 
-        <!-- Spec dışı, kullanıcı isteği: gönderilen resim/videolar sohbette
-             yuvarlatılmış köşeli ve ince kenarlıklı görünsün. Düz bir
-             `ImageView` bunu yapamaz (kırpma yok, kenarlık yok);
-             `ShapeableImageView` ikisini de tek bileşende veriyor ve
-             `centerCrop` davranışı aynen korunuyor. -->
+                <!-- Sent images and videos look rounded and have a thin border in the chat. A plain
+             ImageView cannot do this (no clipping, no border). ShapeableImageView provides both
+             in one component, and centerCrop behaviour is kept as it was. -->
         <com.google.android.material.imageview.ShapeableImageView
             android:id="@+id/imgAttachmentThumbnail"
             android:layout_width="220dp"
@@ -227,11 +218,9 @@
 
         </LinearLayout>
 
-        <!-- Spec dışı, kullanıcı isteği: indirme için GERÇEK bir ilerleme
-             ÇUBUĞU (önceden satır içinde 24dp'lik küçük bir dairesel
-             göstergeydi) + kalan süre (ETA) sayacı. Belirlenimli:
-             bytesDone/totalSize'ı yansıtır (bkz.
-             SimpleChatAdapter.bindAttachment). -->
+                <!-- A real progress bar for downloads (previously a small 24dp circular indicator
+             inline), plus an ETA countdown. It is determinate: it reflects bytesDone and
+             totalSize (see SimpleChatAdapter.bindAttachment). -->
         <com.google.android.material.progressindicator.LinearProgressIndicator
             android:id="@+id/progressAttachment"
             android:layout_width="match_parent"
@@ -251,9 +240,8 @@
             android:textColor="?attr/colorOnSurfaceVariant"
             android:visibility="gone" />
 
-        <!-- Spec dışı: sesli mesaj balonu — jenerik dosya satırının YERİNE
-             (bkz. SimpleChatAdapter.bindVoiceMessage), mime "audio/" ile
-             başladığında. -->
+                <!-- Voice message bubble: it replaces the generic file row (see
+             SimpleChatAdapter.bindVoiceMessage) when the MIME type starts with audio/. -->
         <LinearLayout
             android:id="@+id/layoutVoiceMessage"
             android:layout_width="270dp"
@@ -279,13 +267,11 @@
                 android:orientation="vertical"
                 android:gravity="center_vertical">
 
-                <!-- Spec dışı, Material You: hem indirme ilerlemesi hem
-                     (indirme tamamlandıktan sonra) çalma konumu için AYNI
-                     kaydırıcı kullanılır — dokunup sürükleyerek (touch-to-
-                     seek) konumu değiştirmek için `LinearProgressIndicator`
-                     YERİNE `Slider` kullanılıyor (Material progress
-                     göstergeleri kasıtlı olarak etkileşimsizdir, bu yüzden
-                     eski çubukta sürükleme hiç çalışmıyordu). -->
+                                <!-- Material You: the same slider is used both for download progress and for
+                     the playback position after the download completes. A Slider replaces
+                     LinearProgressIndicator so the user can drag to change position (touch-to-
+                     seek). Material progress indicators are intentionally non-interactive, so
+                     dragging on the old bar never worked. -->
                 <com.google.android.material.slider.Slider
                     android:id="@+id/progressVoicePlayback"
                     android:layout_width="match_parent"
@@ -309,9 +295,9 @@
 
             </LinearLayout>
 
-            <!-- Spec dışı: hız kontrolü — dokununca 1x/1.5x/2x/0.5x
-                 arasında döner (bkz. ChatActivity/PlaybackSpeedMenu). En az
-                 40dp dokunma hedefi için padding'i büyütüldü. -->
+                        <!-- Speed control: tapping it cycles through 1x, 1.5x, 2x and 0.5x (see
+                 ChatActivity and PlaybackSpeedMenu). The padding was enlarged to give a touch
+                 target of at least 40dp. -->
             <TextView
                 android:id="@+id/btnVoiceSpeed"
                 android:layout_width="wrap_content"
@@ -332,10 +318,9 @@
 
     </LinearLayout>
 
-        <!-- Spec dışı, kullanıcı isteği: ek gönderirken "altına bir yazı
-             yazılabilmeli". Açıklama, ekin ALTINDA ve balonun İÇİNDE —
-             `txtBubbleText` kullanılamazdı, o düzende ekin ÜSTÜNDE duruyor
-             ve metin mesajları için ayrılmış. -->
+                <!-- When sending a file, a caption can be written under it. The caption is below the
+             attachment and inside the bubble. txtBubbleText could not be used, since in that
+             layout it sits above the attachment and is reserved for text messages. -->
         <TextView
             android:id="@+id/txtAttachmentCaption"
             android:layout_width="wrap_content"
@@ -345,12 +330,11 @@
             android:textSize="16sp"
             android:visibility="gone" />
 
-        <!-- bkz. `layoutBubble` notu — düzenlendi etiketi + saat + durum
-             tiki artık balonun İÇİNDE, sağ alt köşesinde. Renkleri kodda
-             balonun KENDİ metin rengine göre veriliyor (bkz.
-             SimpleChatAdapter `onColor`): sabit `?attr/colorOnSurfaceVariant`
-             gelen balonda doğruydu ama giden balonun (accent renkli)
-             üzerinde okunmuyordu. -->
+                <!-- See the layoutBubble note. The edited label, time and status tick are now inside
+             the bubble, at the bottom right. Their colours are set in code from the bubble's
+             own text colour (see SimpleChatAdapter onColor). The fixed
+             ?attr/colorOnSurfaceVariant was right for an incoming bubble, but not readable on
+             the outgoing bubble, which is accent coloured. -->
         <LinearLayout
             android:id="@+id/rowBubbleMeta"
             android:layout_width="wrap_content"
@@ -378,12 +362,11 @@
 
     </LinearLayout>
 
-        <!-- Yan sütun: tepkiler + bekleyen/hata işareti + "gören" avatarları
-             (gelen balonun sağında, kendi balonumuzun SOLUNDA — bkz.
-             SimpleChatAdapter.placeSideColumn). `top`
-             hizası, kullanıcının "bırakılan emojiler mesajın İLK SATIRININ
-             yanında görünsün" isteği için — çok satırlı bir balonda pill
-             aşağı kaymaz. -->
+                <!-- Side column: reactions, the pending or error mark, and the avatars of those who
+             have seen the message. It sits beside the bubble: on the right of an incoming
+             bubble, and on the left of our own (see SimpleChatAdapter.placeSideColumn). top
+             alignment is for the requirement that emoji reactions show next to the first line
+             of the message. On a multi-line bubble the pill does not drift down. -->
         <LinearLayout
             android:id="@+id/colBubbleSide"
             android:layout_width="wrap_content"
@@ -392,8 +375,8 @@
             android:orientation="vertical"
             android:gravity="top">
 
-            <!-- Emoji tepkileri (bkz. SimpleChatAdapter.bindReactions) —
-                 sayı 1'den büyükse emojinin yanında adet de yazar. -->
+                        <!-- Emoji reactions (see SimpleChatAdapter.bindReactions). If the count is above 1,
+                 the number is written next to the emoji. -->
             <TextView
                 android:id="@+id/pillReactions"
                 android:layout_width="wrap_content"
@@ -414,11 +397,10 @@
                 android:visibility="gone"
                 android:contentDescription="@null" />
 
-        <!-- Spec dışı, kullanıcı isteği: "görüldü" bildirimi — SADECE en son
-             görülen mesajın altında (bkz. SimpleChatAdapter.applySeen, tüm
-             önceki mesajlar örtük olarak görülmüş sayılır). Hem 1:1 (tek
-             avatar) hem grup (birden fazla görenin avatarı) için aynı satır —
-             gruplarda 3'ten fazla goren "+N" ile özetlenir. -->
+                <!-- Seen indicator: shown only below the most recent seen message (see
+             SimpleChatAdapter.applySeen; all earlier messages count as seen implicitly). The
+             same row serves 1:1 (one avatar) and groups (the avatars of several viewers). In
+             groups, more than 3 viewers are summarised as +N. -->
         <LinearLayout
             android:id="@+id/rowSeenBy"
             android:layout_width="wrap_content"

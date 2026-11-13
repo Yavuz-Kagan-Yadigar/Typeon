@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spec dışı, kullanıcı isteği: bir mesaja bırakılan emojiler, balonun
-     İÇİNDE değil, ilk satırının yanında AYRI bir pill içinde görünür
-     (WhatsApp deseni). Zemin balondan bağımsız — sohbet arka planının
-     üzerinde durduğu için `colorSurfaceVariant` + ince kontur. -->
+<!-- Emoji reactions on a message appear in their OWN pill beside the first line of the bubble,
+     not inside it (WhatsApp pattern). The background is independent of the bubble, because it
+     sits on the chat background: colorSurfaceVariant plus a thin outline. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
     <solid android:color="?attr/colorSurfaceVariant" />
     <corners android:radius="14dp" />

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spec dışı: GroupChatActivity üst çubuğuna dokununca açılır — grup
-     profil fotoğrafı (SADECE kurucu değiştirebilir) + üye listesi + (kurucu
-     ise) üye ekleme, tek bir yerde. -->
+<!-- Opened by tapping the top bar of GroupChatActivity: the group profile photo (only the
+     founder can change it), the member list, and (for the founder) adding members, all in one
+     place. -->
 <androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content">
@@ -19,7 +19,7 @@
             android:layout_gravity="center_horizontal"
             android:contentDescription="@null" />
 
-        <!-- Sadece kurucu görür. -->
+                <!-- Only the founder sees this. -->
         <LinearLayout
             android:id="@+id/rowAvatarActions"
             android:layout_width="wrap_content"
@@ -46,8 +46,8 @@
 
         </LinearLayout>
 
-        <!-- Sohbet ekranındaki 1:1 menüsüyle aynı: bu grubun yerel ekleri
-             (bkz. GroupChatActivity.showGroupInfoDialog). -->
+                <!-- Same as the 1:1 menu in the chat screen: this group's local attachments (see
+             GroupChatActivity.showGroupInfoDialog). -->
         <Button
             android:id="@+id/btnGroupFilesMedia"
             style="?attr/materialButtonOutlinedStyle"
@@ -57,8 +57,8 @@
             android:layout_marginTop="16dp"
             android:text="@string/action_files_media" />
 
-        <!-- Spec dışı, kullanıcı isteği: kurucu için "Üyeleri Yönet" başlığı
-             (sadece "Üye Ekle" değil) — diğer üyeler için mevcut üye sayısı. -->
+                <!-- For the founder the heading is 'Manage members' (not just 'Add member'). For other
+             members it shows the current member count. -->
         <TextView
             android:id="@+id/txtGroupMemberCount"
             android:layout_width="wrap_content"
@@ -66,8 +66,7 @@
             android:layout_marginTop="20dp"
             android:textStyle="bold" />
 
-        <!-- Spec dışı, kullanıcı isteği: "Üye Ekle" artık EN ÜSTTE, listenin
-             ÜZERİNDE — sadece kurucu görür. -->
+                <!-- 'Add member' is now at the very top, above the list. Only the founder sees it. -->
         <Button
             android:id="@+id/btnAddMemberToGroup"
             style="?attr/materialButtonOutlinedStyle"
@@ -77,9 +76,9 @@
             android:text="@string/lbl_add_member_to_group"
             android:visibility="gone" />
 
-        <!-- Spec dışı, kullanıcı isteği: her üyenin adı + (SADECE kurucu,
-             kendi satırı HARİÇ) doğrulamalı kaldırma düğmesi — bkz.
-             GroupChatActivity.showGroupInfoDialog / item_group_member.xml. -->
+                <!-- Each member's name, plus a confirmed removal button (only for the founder, and not
+             on the founder's own row). See GroupChatActivity.showGroupInfoDialog and
+             item_group_member.xml. -->
         <LinearLayout
             android:id="@+id/layoutMembersList"
             android:layout_width="match_parent"

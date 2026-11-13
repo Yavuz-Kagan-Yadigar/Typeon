@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- İstemcinin temasıyla aynı taban (Material 3, gündüz/gece) — sunucu
-         uygulaması istemcinin kapsamlı tema/font özelleştirmelerini
-         taşımıyor, ihtiyacı yok. -->
+        <!-- Same base as the client theme (Material 3, day and night). The server app does not
+         carry the client's extensive theme and font customisations, and does not need them. -->
     <style name="Theme.TypeonServer" parent="Theme.Material3.DayNight">
         <item name="android:statusBarColor">?attr/colorSurface</item>
     </style>

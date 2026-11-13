@@ -1,8 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- Spec dışı, hata ayıklama düzeltmesi: bkz. P2PService.bindToWifiIfAvailable
-         dokümantasyonu — ConnectivityManager ile aktif WiFi ağını sorgulamak/
-         izlemek için gerekli. -->
+        <!-- Needed to query and watch the active Wi-Fi network through ConnectivityManager. See the
+         P2PService.bindToWifiIfAvailable documentation. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
@@ -16,39 +15,32 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
-    <!-- Spec dışı: "İndirilenler/P2P"ye kaydetme akışı — API 29+'ta
-         MediaStore.Downloads scoped storage üzerinden hiçbir izin
-         gerektirmez; SADECE API 26-28'de (scoped storage öncesi) elle
-         izin istenip doğrudan dosya yazımı için kullanılır (bkz.
+        <!-- Saving to the public Downloads folder. On API 29+ this needs no permission
+         (MediaStore.Downloads with scoped storage). The permission is requested and the file is
+         written directly only on API 26-28, before scoped storage existed (see
          ChatActivity.saveToPublicDownloads). -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
-    <!-- Spec dışı: basılı tut/kaydet sesli mesaj özelliği (bkz.
-         ChatActivity ses kaydı akışı) — çalışma zamanında (ilk basılı
-         tutma denemesinde) istenir. -->
+        <!-- Record audio for the press-and-hold voice message (see the ChatActivity recording
+         flow). Requested at run time, on the first press-and-hold attempt. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Calls: speakerphone/communication mode, and the ringing screen over the lock screen. -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
-    <!-- Spec dışı, kullanıcı isteği: ilk açılışta pil optimizasyonu
-         muafiyeti istemi — bkz. MainActivity.ensureBatteryOptimizationExemption.
-         "Normal" korumalı bir izin (çalışma zamanında ayrıca istenmez,
-         sadece burada bildirilmesi yeterli); asıl kullanıcı onayı
-         `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` sistem diyaloğu
-         üzerinden alınır. Bu izin OLMADAN o intent bazı cihazlarda
-         SecurityException fırlatır. -->
+        <!-- Battery optimization exemption request on first launch (see
+         MainActivity.ensureBatteryOptimizationExemption). This is a normal protected
+         permission: it is not requested at run time, and declaring it here is enough. The
+         user's approval is taken through the ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS system
+         dialog. Without this permission, that intent throws SecurityException on some devices. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <!-- Spec dışı, gerçek cihazda ölçülen hata: Android 14+ `dataSync`
-         ön plan servisini "app idle" gerekçesiyle DURDURUYOR (logcat:
-         "Stopping service due to app idle") — 14 MB'lık bir aktarımın tam
-         ortasında oldu ve yükleme sessizce durdu, hiçbir hata üretmeden.
-         Kısmi wake lock, aktarım sürerken CPU'nun uykuya dalmasını da
-         engeller. Tek başına yetmez (bkz. SettingsFragment'teki pil
-         optimizasyonu muafiyeti düğmesi), ama ikisi birlikte gerekli. -->
+        <!-- Measured on a real device: on Android 14+, the dataSync foreground service was stopped
+         for 'app idle' (logcat: 'Stopping service due to app idle'). It happened in the middle
+         of a 14 MB transfer, and the upload stopped silently with no error. A partial wake lock
+         keeps the CPU awake while a transfer runs. It is not enough alone (see the battery
+         optimization exemption button in SettingsFragment), but both are needed together. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- Bu denetimde bulundu: yeniden başlatmadan sonra uygulama tamamen
-         ölü kalıyor, kullanıcı elle açana kadar hiçbir mesaj alınmıyordu —
-         bkz. service/BootReceiver.kt (neden saatlik WorkManager yedeğinin
-         Android 12+'ta yetmediği de orada). -->
+        <!-- Found in an audit: after a reboot the app stayed completely dead, and no messages
+         arrived until the user opened it by hand. See service/BootReceiver.kt for why the
+         hourly WorkManager fallback is not enough on Android 12+. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
@@ -63,11 +55,10 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.P2PMessenger">
 
-        <!-- `singleTop`: aşağıdaki katılım bağlantısı, uygulama zaten
-             açıkken tıklandığında İKİNCİ bir MainActivity yığmasın (aynı
-             örnek `onNewIntent` ile uyandırılır). Uygulamanın kendi
-             gezinme akışını etkilemez — MainActivity zaten yığının
-             kökünde tek örnek olarak duruyor. -->
+                <!-- singleTop: when the join link below is tapped while the app is already open, it
+             must not stack a second MainActivity. The same instance is brought forward through
+             onNewIntent. This does not change the app's own navigation: MainActivity already
+             sits as the single instance at the root of the stack. -->
         <activity
             android:name=".MainActivity"
             android:launchMode="singleTop"
@@ -76,20 +67,18 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Kullanıcı isteği (2026-09-04): sunucuya "tek QR/link/metin"
-                 ile katılma. QR ve elle yapıştırma zaten vardı; bu, ÜÇÜNCÜ
-                 yolu açıyor — operatörün yayımladığı `typeon-server:…#…`
-                 kodu bir sohbette/web sayfasında tıklanabilir bir bağlantı
-                 olur ve doğrudan buraya düşer (bkz. MainActivity
-                 `handleJoinLink`). Şema hiyerarşik değil (host yok), bu
-                 yüzden `android:scheme` tek başına yeterli. -->
+                        <!-- Joining the server with one QR, link or text string. QR and manual paste
+                 already existed; this adds a third path. The operator's published `typeon-
+                 server:...#...` code becomes a clickable link in a chat or web page, and it
+                 opens directly here (see MainActivity handleJoinLink). The scheme has no
+                 hierarchy (no host), so `android:scheme` alone is enough. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="typeon-server" />
             </intent-filter>
-            <!-- Android paylaşım ekranında "Typeon" — bkz. util.ShareIntake. -->
+                        <!-- Shown as 'Typeon' on the Android share sheet. See util.ShareIntake. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <action android:name="android.intent.action.SEND_MULTIPLE" />
@@ -98,19 +87,15 @@
             </intent-filter>
         </activity>
 
-        <!-- Spec dışı, kullanıcı isteği (klavye telafisi — bkz.
-             util.KeyboardInsets): `adjustResize` ZORUNLU, ama beklenen
-             sebepten değil. Bu cihazda (Redmi Note 8 Pro / Android 16)
-             pencere `adjustResize` bildirilse bile gerçekte YENİDEN
-             BOYUTLANMIYOR (ölçüldü: `dumpsys window`, `mAttrs` `fillxfill`
-             kalıyor) — telafiyi zaten biz elle yapıyoruz. Buradaki asıl
-             işlevi, bildirilmediğinde devreye giren varsayılan davranışı
-             (`adjustPan`) KAPATMAK: pan, pencerenin tamamını yukarı
-             kaydırıyor ve bizim eklediğimiz dolguyla üst üste binip
-             düzeni bozuyordu. İlk denemede eksik olan buydu.
-             `configChanges`: a rotation must not recreate the chat while the
-             caption dialog / image editor is open (the edit and the camera
-             shot live only there). -->
+                <!-- Keyboard compensation (see util.KeyboardInsets). adjustResize is required, but not
+             for the reason it suggests. On this device (Redmi Note 8 Pro, Android 16) the
+             window is NOT actually resized even when adjustResize is declared (measured with
+             dumpsys window: mAttrs stays fillxfill). We already do the compensation by hand.
+             Its real job here is to turn OFF the default behaviour that applies when nothing is
+             declared, adjustPan. Pan shifts the whole window up, and it overlapped the padding
+             we add, which broke the layout. That was the missing piece in the first attempt.
+             configChanges: a rotation must not recreate the chat while the caption dialog or
+             image editor is open, because the edit and the camera shot exist only there. -->
         <activity
             android:name=".ui.ChatActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
@@ -120,22 +105,20 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
             android:windowSoftInputMode="adjustResize" />
         <activity android:name=".ui.QrScanActivity" />
-        <!-- Spec dışı, kullanıcı isteği: sohbetten doğrudan anlık çekim +
-             kırpma (bkz. ui.CameraCaptureActivity). `configChanges`: ekran
-             döndürüldüğünde Activity YENİDEN OLUŞTURULMAMALI — çekilen kare
-             bilerek yalnızca BELLEKTE tutuluyor (diske yazılmıyor), yeniden
-             oluşturma onu geri getirilemez biçimde kaybederdi. -->
+                <!-- Instant camera capture and crop from the chat (see ui.CameraCaptureActivity).
+             configChanges: the Activity must NOT be recreated on rotation. The captured frame
+             is kept in memory only, never written to disk, and recreation would lose it
+             irrecoverably. -->
         <activity
             android:name=".ui.CameraCaptureActivity"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout" />
-        <!-- Spec dışı, kullanıcı isteği: uygulama açılış şifresi (bkz.
-             ui.AppLockActivity / util.AppLock). `singleTop`: kilit ekranı
-             zaten en üstteyken ikinci bir örneği yığına eklenmesin. -->
+                <!-- App lock passcode (see ui.AppLockActivity and util.AppLock). singleTop: when the
+             lock screen is already on top, a second instance must not be pushed onto the stack. -->
         <activity
             android:name=".ui.AppLockActivity"
             android:launchMode="singleTop" />
-        <!-- Çoklu-cihaz (spec 1.5): ikincil cihazın bağlanma QR'ını gösteren
-             ve benimsenmeyi bekleyen ekran. -->
+                <!-- Multi-device (spec 1.5): the screen that shows the secondary device's linking QR
+             and waits for it to be accepted. -->
         <activity android:name=".ui.LinkDeviceActivity" />
         <!-- Voice/video call screen (ringing, in call). singleTask: a second
              ring notification tap must reuse the screen, not stack another. -->
@@ -147,27 +130,23 @@
             android:turnScreenOn="true"
             android:excludeFromRecents="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden" />
-        <!-- Spec dışı, kullanıcı isteği: Ayarlar'dan açılan "bekleyen
-             mesajlar" listesi — bkz. PendingMessagesActivity, lib.rs
-             list_pending_messages/cancel_pending_message. -->
+                <!-- Pending messages list, opened from Settings. See PendingMessagesActivity and lib.rs
+             list_pending_messages / cancel_pending_message. -->
         <activity android:name=".ui.PendingMessagesActivity" />
         <!-- Settings → Storage. -->
         <activity android:name=".ui.StorageActivity" />
-        <!-- Spec dışı: foto/video ekleri için basit, tam boyut/kalitede
-             uygulama içi görüntüleyici — bkz. ChatActivity.onAttachmentClicked
-             notu (önceden HER zaman sistem varsayılan uygulamasına
-             devrediliyordu). -->
+                <!-- Simple in-app viewer for photo and video attachments, at full size and quality. See
+             the note on ChatActivity.onAttachmentClicked. Previously these always went to the
+             system default app. -->
         <activity
             android:name=".ui.MediaViewerActivity"
             android:launchMode="singleTop"
             android:theme="@style/Theme.P2PMessenger" />
 
-        <!-- bkz. BootReceiver — ACTION_BOOT_COMPLETED, ön plan servisi
-             başlatma kısıtlarından muaf tutulan yayınlardan biri. `permission`:
-             yayınlayanın RECEIVE_BOOT_COMPLETED sahibi olması şartı — sistem
-             zaten taşıyor, ama yüzeysel bir aksiyonla (P2PService başlatılmaya)
-             kastetmiş başka bir uygulamanın sahte BOOT_COMPLETED yayını
-             buraya düşemez artık. -->
+                <!-- See BootReceiver. ACTION_BOOT_COMPLETED is one of the broadcasts exempt from the
+             foreground-service start restrictions. `permission`: the sender must hold
+             RECEIVE_BOOT_COMPLETED. The system already enforces this, and now an app that only
+             meant to start P2PService cannot inject a fake BOOT_COMPLETED broadcast either. -->
         <receiver
             android:name=".service.BootReceiver"
             android:enabled="true"
@@ -186,11 +165,9 @@
             android:exported="false"
             android:foregroundServiceType="dataSync|remoteMessaging|microphone" />
 
-        <!-- Spec dışı: dosya/foto/video/ses ekleri (bkz. ChatActivity
-             openAttachmentFile) — çözülmüş (plaintext) ek kopyalarını
-             sistem görüntüleyicilerine content:// URI olarak, uygulamanın
-             kendi dosya sisteminden çıkmadan (app-private storage, spec
-             dışı gizlilik-öncelikli tercih) sunmak için gerekli. -->
+                <!-- Decrypted (plaintext) attachment copies for files, photos, videos and audio. They
+             are served to system viewers as content:// URIs, without leaving the app's private
+             storage. This is a privacy-first choice. -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

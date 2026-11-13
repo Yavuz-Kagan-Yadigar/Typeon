@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spec dışı, kullanıcı isteği: hızlı Tor bağlantısını kes/yeniden kur
-     düğmesi için standart "refresh" glifi (bkz. ChatActivity/GroupChatActivity
-     actionbar_chat_title.xml, SettingsFragment menu_settings.xml). -->
+<!-- Standard refresh glyph for the quick Tor connection reset button (see ChatActivity,
+     GroupChatActivity, actionbar_chat_title.xml, and SettingsFragment menu_settings.xml). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"

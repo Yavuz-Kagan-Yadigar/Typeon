@@ -30,7 +30,7 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/txtPendingTarget" />
 
-    <!-- Spec dışı, kullanıcı isteği: "son deneme zamanı". -->
+        <!-- Last attempt time. -->
     <TextView
         android:id="@+id/txtPendingLastAttempt"
         android:layout_width="0dp"
@@ -42,10 +42,9 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/txtPendingText" />
 
-    <!-- Spec dışı, kullanıcı isteği: bekleyen mesajın YANINDA "Şimdi Dene"
-         (manuel, üstel geri çekilme aralığını beklemeden — bkz. lib.rs
-         retry_pending_message_now) VE İptal (bkz. cancel_pending_message)
-         düğmeleri — bkz. PendingMessagesActivity/PendingMessagesAdapter. -->
+        <!-- Next to the pending message: a Retry now button (manual, without waiting for the
+         exponential backoff interval, see lib.rs retry_pending_message_now) and a Cancel button
+         (see cancel_pending_message). See PendingMessagesActivity and PendingMessagesAdapter. -->
     <LinearLayout
         android:id="@+id/layoutPendingActions"
         android:layout_width="wrap_content"

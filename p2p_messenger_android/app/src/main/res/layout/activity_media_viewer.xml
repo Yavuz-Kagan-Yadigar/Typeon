@@ -19,18 +19,17 @@
         android:layout_height="match_parent"
         android:visibility="gone" />
 
-    <!-- Spec dışı: VideoView'ın kendi dokunuşlarını yakalamıyor — bunun
-         üzerine şeffaf bir katman koyup tek/çift dokunuşu (oynat-duraklat/
-         YouTube tarzı ±5sn atlama) burada işliyoruz, bkz.
-         MediaViewerActivity setupVideoGestures. -->
+        <!-- VideoView does not catch its own touches. A transparent overlay is placed on top, and
+         it handles single and double taps here (play and pause, and YouTube-style skip of 5
+         seconds). See MediaViewerActivity setupVideoGestures. -->
     <View
         android:id="@+id/viewVideoGestureOverlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:visibility="gone" />
 
-    <!-- Spec dışı: -5sn/+5sn atlama göstergesi — dokunulan yarıda kısaca
-         belirip kaybolur (bkz. YouTube). -->
+        <!-- The -5 s / +5 s skip indicator: it briefly appears where the tap was, and fades out
+         (see YouTube). -->
     <TextView
         android:id="@+id/txtSkipIndicatorLeft"
         android:layout_width="wrap_content"
@@ -74,8 +73,8 @@
         android:src="@android:drawable/ic_menu_close_clear_cancel"
         android:contentDescription="@android:string/cancel" />
 
-    <!-- Spec dışı: hız kontrolü — video için, bkz. ChatActivity sesli
-         mesaj hız rozetiyle AYNI PlaybackSpeed döngüsü. -->
+        <!-- Speed control for video. It uses the same PlaybackSpeed cycle as the voice message
+         speed badge in ChatActivity. -->
     <TextView
         android:id="@+id/btnPlaybackSpeed"
         android:layout_width="wrap_content"
@@ -91,13 +90,11 @@
         android:clickable="true"
         android:focusable="true" />
 
-    <!-- Spec dışı: alt kontrol çubuğu — ekran kenarına YAPIŞIK değil (bkz.
-         kullanıcı geri bildirimi), belirgin oynat/duraklat + ±5sn
-         düğmeleri (önceden sadece görünmez çift-dokunuş bölgeleri vardı,
-         hiçbir görsel ipucu yoktu) + dokunup sürüklenebilir (touch-to-
-         seek) bir kaydırıcı. `Slider`, `LinearProgressIndicator`'ın
-         aksine etkileşimlidir — bkz. SimpleChatAdapter sesli mesaj
-         kaydırıcısıyla AYNI gerekçe. -->
+        <!-- Bottom control bar, not stuck to the screen edge. It has clear play and pause and plus
+         or minus 5 s buttons (earlier there were only invisible double-tap zones with no visual
+         hint), plus a touch-to-seek slider. Slider is interactive, unlike
+         LinearProgressIndicator, for the same reason as the voice message slider in
+         SimpleChatAdapter. -->
     <LinearLayout
         android:id="@+id/layoutVideoControls"
         android:layout_width="match_parent"

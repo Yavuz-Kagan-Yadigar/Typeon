@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spec dışı, kullanıcı isteği: grup bilgisi dialogundaki "Üyeleri Yönet"
-     listesinin tek bir satırı — bkz. GroupChatActivity.showGroupInfoDialog. -->
+<!-- One row of the 'Manage members' list in the group info dialog. See
+     GroupChatActivity.showGroupInfoDialog. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
@@ -24,8 +24,8 @@
         android:maxLines="1"
         android:ellipsize="end" />
 
-    <!-- Sadece kurucu, ve kendi satırında DEĞİL — bkz. Kotlin tarafı
-         doğrulamalı kaldırma dialogu. -->
+        <!-- Only the founder sees this, and not on their own row. See the Kotlin side's confirmed
+         removal dialog. -->
     <Button
         android:id="@+id/btnRemoveMember"
         style="?attr/materialButtonOutlinedStyle"

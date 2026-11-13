@@ -31,7 +31,7 @@
                 android:visibility="gone"
                 android:contentDescription="@string/desc_syncing"/>
         </LinearLayout>
-        <!-- Spec dışı, kullanıcı isteği: kişi/grup adına göre arama. -->
+                <!-- Search by contact or group name. -->
         <androidx.appcompat.widget.SearchView
             android:id="@+id/searchChats"
             android:layout_width="match_parent"
@@ -53,9 +53,7 @@
             android:layout_marginTop="8dp"/>
     </LinearLayout>
 
-    <!-- Spec dışı: Gruplar sekmesi kaldırıldı, grup oluşturma buraya
-         taşındı (bkz. kullanıcı isteği "gruplar tabını kaldır ve
-         gruplari da normal chat tabına taşı"). -->
+        <!-- The Groups tab was removed and group creation moved here, into the normal chats tab. -->
     <com.google.android.material.floatingactionbutton.FloatingActionButton
         android:id="@+id/btnCreateGroup"
         android:layout_width="wrap_content"

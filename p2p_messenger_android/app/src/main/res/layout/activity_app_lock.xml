@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spec dışı, kullanıcı isteği: uygulama açılış şifresi — bkz.
-     ui.AppLockActivity / util.AppLock. TEK bir düzen iki modu da taşır
-     (şifre oluşturma / şifre girme); fark yalnızca başlık, açıklama ve
-     `edt_app_lock_confirm`ın görünürlüğü. -->
+<!-- App lock passcode (see ui.AppLockActivity and util.AppLock). One layout serves both modes
+     (create a passcode, enter a passcode). The difference is only the title, the description,
+     and the visibility of edt_app_lock_confirm. -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"

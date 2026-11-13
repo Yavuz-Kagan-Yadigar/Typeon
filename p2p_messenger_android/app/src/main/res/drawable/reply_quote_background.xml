@@ -1,21 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spec dışı, kullanıcı isteği (WhatsApp tarzı yanıt önizlemesi): bir
-     balonun İÇİNDE, yanıtlanan mesajın küçük özetini saran hafif kontrast
-     dörtgen.
-
-     Kullanıcı raporu ("alıntı mesajlar beyaz görünüyor") — HATA BURADAYDI:
-     burada `<solid android:color="?attr/colorOnSurface" android:alpha="0.12" />`
-     yazıyordu. `android:alpha`, `<solid>` etiketinin GEÇERLİ bir özniteliği
-     DEĞİL; sessizce yok sayılıyor ve dolgu %12 değil TAM OPAK
-     `colorOnSurface` oluyordu. Koyu temada bu renk neredeyse beyaz olduğundan
-     alıntı kutusu, koyu sohbetin ortasında bembeyaz bir blok olarak
-     çiziliyordu.
-
-     Renk artık KODDA veriliyor (bkz. SimpleChatAdapter `bindReplyQuote`):
-     kutunun tonu, içinde bulunduğu balonun KENDİ metin rengine (`onColor`)
-     göre düşük alfayla hesaplanıyor — böylece hem turuncu giden balonda hem
-     gri gelen balonda, açık ve koyu temada okunaklı kalıyor. Buradaki beyaz
-     yalnızca tint'in uygulanacağı nötr taban. -->
+<!-- Reply preview (WhatsApp style): a light contrast rectangle inside a bubble, wrapping a
+     short summary of the message being replied to. A user report ('quoted messages look white')
+     pointed at the bug here. This file had <solid android:color="?attr/colorOnSurface"
+     android:alpha="0.12" />. android:alpha is NOT a valid attribute of solid. It is silently
+     ignored, so the fill was fully opaque colorOnSurface instead of 12%. In dark mode that
+     colour is nearly white, so the quote box drew as a solid white block in the middle of the
+     dark chat. The colour is now set in code (see SimpleChatAdapter bindReplyQuote): the box
+     tone is computed with a low alpha from the bubble's own text colour (onColor). That keeps
+     it readable on both the orange outgoing bubble and the grey incoming bubble, in light and
+     dark themes. The white here is only the neutral base the tint is applied to. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
     <solid android:color="@android:color/white" />
     <corners android:radius="8dp" />

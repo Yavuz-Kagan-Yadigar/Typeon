@@ -1,9 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spec dışı, kullanıcı isteği: sohbet ekranının alt çubuğu (ek/kamera/
-     ses düğmeleri + metin alanı + gönder) artık TEK bir "pill" içinde.
-     Yarıçap, çubuğun tek satırlık yüksekliğinin yarısından büyük tutuldu
-     (çok satırlı yazarken bile kenarlar yuvarlak kalsın diye Android
-     yarıçapı otomatik kısar). -->
+<!-- The chat bottom bar (attach, camera and voice buttons, text field, send) is now inside ONE
+     pill. The radius is kept larger than half the height of one line, so the edges stay round
+     even when several lines are typed (Android shortens the radius automatically). -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
     <solid android:color="?attr/colorSurfaceVariant" />
     <corners android:radius="999dp" />

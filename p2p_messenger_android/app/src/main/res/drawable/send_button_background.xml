@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spec dışı, kullanıcı isteği: gönder tuşu, pill'in içinde dolu dairesel
-     bir vurgu düğmesi — simgesi `ic_send_cloud` maskesi (bkz. o dosya). -->
+<!-- Send button: a solid circular accent button inside the pill. Its icon is the ic_send_cloud
+     mask (see that file). -->
 <ripple xmlns:android="http://schemas.android.com/apk/res/android"
     android:color="?attr/colorOnPrimary">
     <item>

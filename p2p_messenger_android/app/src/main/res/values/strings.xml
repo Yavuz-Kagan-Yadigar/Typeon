@@ -38,10 +38,9 @@
     <string name="lbl_verify_identity">Verify Identity</string>
     <string name="lbl_safety_number">Safety Number</string>
     <string name="lbl_node_mode">Node Mode</string>
-    <!-- Spec dışı, güvenlik denetimi devamı: bu metin ÖNCEDEN yanlıştı —
-         Node modu şimdiye kadar sadece DHT routing'e katkı sağlıyordu,
-         gerçek bir röle görevi görmüyordu (bkz. SECURITY.md "Cross-network
-         connectivity" notu). Artık gerçekten doğru. -->
+        <!-- Security-audit follow-up: this text was wrong before. Node mode only contributed to DHT
+         routing and did not act as a real relay (see SECURITY.md, Cross-network connectivity).
+         It is accurate now. -->
     <string name="lbl_node_mode_desc">Helps others connect by passing their encrypted traffic along. It cannot read any content. But it uses your internet data and bandwidth, and it can see who connects through you.</string>
     <string name="lbl_history_storage_limit">Attachment storage limit</string>
     <string name="lbl_history_storage_limit_desc">With Node Mode on, your device saves every file sent through it. When the total goes over this limit, the oldest files are deleted first.</string>
@@ -81,12 +80,12 @@
     <string name="error_key_unreadable">A stored key could not be read. Message history and session state are not being saved on this device.</string>
     <string name="msg_restore_incomplete">The server did not send all of the history. Try again later.</string>
 
-    <!-- Spec dışı, kullanıcı isteği: Tor onion service -->
-    <!-- Spec dışı, kullanıcı kararı: grup üzerinden (kurucu kefaletiyle)
-         eklenen kişiler yüz yüze QR ile doğrulanmadı. -->
+        <!-- Tor onion service -->
+        <!-- A contact added through a group, vouched for by the founder, has not been verified face
+         to face with a QR code. -->
     <string name="contact_added_via_group">Added via group — not verified face-to-face</string>
 
-    <!-- Spec dışı, kullanıcı isteği: kurucu grubu herkes için silebilir. -->
+        <!-- The founder can delete the group for everyone. -->
     <string name="action_delete_group">Delete group (for everyone)</string>
     <string name="confirm_delete_group">This group will be deleted for ALL members and cannot be undone. Are you sure?</string>
     <string name="msg_group_deleted">Group deleted</string>
@@ -103,13 +102,13 @@
     <string name="status_connected">Connected</string>
     <string name="status_reconnecting">Reconnecting…</string>
 
-    <!-- Spec dışı, kullanıcı isteği: sohbet listesinde ek önizlemesi -->
+        <!-- Attachment preview in the chat list. -->
     <string name="lbl_last_photo">📷 Photo</string>
     <string name="lbl_last_sticker">🙂 Sticker</string>
     <string name="lbl_last_video">🎬 Video</string>
     <string name="lbl_last_voice">🎤 Voice message</string>
     <string name="lbl_last_file">📎 File</string>
-    <!-- Spec dışı, kullanıcı isteği: indirme ETA sayacı -->
+        <!-- Download ETA counter. -->
     <string name="lbl_eta_seconds">~%d sec left</string>
     <string name="lbl_eta_minutes">~%1$d min %2$d sec left</string>
 
@@ -125,8 +124,8 @@
     <string name="msg_tor_reconnect">This restarts the app to disconnect and reconnect the network layer (including Tor, if enabled). Any unsent draft text will be lost.</string>
     <string name="action_reconnect">Reconnect</string>
 
-    <!-- Spec dışı, kullanıcı isteği: QR yerine kopyala/yapıştır ile eşleşme/
-         röle adresi paylaşımı — bkz. ContactsFragment. -->
+        <!-- Pairing by copy and paste instead of QR, and sharing the relay address. See
+         ContactsFragment. -->
     <string name="action_copy_manual_code">Copy my code</string>
     <string name="action_copy_own_address">Copy my address</string>
     <string name="msg_manual_code_copied">Pairing code copied — paste it into the other person\'s \"Add Manually\"</string>
@@ -146,8 +145,8 @@
     <string name="msg_recovery_export_success">Recovery file saved</string>
     <string name="error_recovery_export_failed">Couldn\'t export recovery file</string>
 
-    <!-- Spec dışı, kullanıcı isteği: export'un eksik karşılığı — kurtarma
-         dosyasından geri yükleme (bkz. MainActivity `importRecoveryFrom`). -->
+        <!-- The counterpart of export: restore from a recovery file (see MainActivity
+         importRecoveryFrom). -->
     <string name="action_restore_from_recovery">Restore from recovery file</string>
     <string name="lbl_recovery_import_desc">Enter the password you used when you exported this recovery file.</string>
     <string name="msg_recovery_importing">Restoring identity…</string>
@@ -190,10 +189,9 @@
     <string name="error_camera_permission">Camera permission is required</string>
     <string name="error_network">Network error. Please check your connection.</string>
     <string name="error_send_failed">Failed to send message</string>
-    <!-- Spec dışı, hata ayıklama düzeltmesi: initiate_handshake_with
-         kalıcı olarak başarısız olduğunda (bozuk/uyumsuz anahtar verisi,
-         ör. taraflardan biri eski bir uygulama sürümü/kripto parametresi
-         kullanıyor) gösterilir — bkz. ChatActivity "handshake_failed". -->
+        <!-- Shown when initiate_handshake_with fails permanently, for example because the key data
+         is broken or incompatible, or one side uses an older app version or crypto parameters.
+         See ChatActivity handshake_failed. -->
     <string name="error_handshake_incompatible">Can\'t connect with this contact — incompatible key format. One side is probably running a different app version. Try deleting the contact and pairing again.</string>
     <string name="confirm_revoke_device">Are you sure you want to revoke this device? It stays in your contact list, but you won\'t be able to send/receive messages from this device anymore — history isn\'t deleted.</string>
     <string name="confirm_block_contact">Block this contact?</string>
@@ -203,9 +201,8 @@
     <string name="lbl_you">You</string>
     <string name="msg_reply_target_not_loaded">Original message isn\'t loaded — scroll up to find it</string>
     <string name="lbl_sent_at">(sent at: %s)</string>
-    <!-- Spec dışı, kullanıcı isteği: alınan mesajlarda hem yerel ALINMA
-         anı HEM DE göndericinin GERÇEK gönderim anı — ör. "10:42 (sent at:
-         10:41)". %1$s = alınma anı, %2$s = gönderim anı. -->
+        <!-- Received messages show both the local receive time and the sender's real send time, for
+         example '10:42 (sent at: 10:41)'. %1$s is the receive time, %2$s the send time. -->
     <string name="lbl_received_sent_at">%1$s (sent at: %2$s)</string>
     <string name="title_pending_messages">Pending Messages</string>
     <string name="action_view_pending_messages">Pending Messages</string>
@@ -215,9 +212,8 @@
     <string name="msg_pending_message_retrying">Retrying…</string>
     <string name="lbl_pending_last_attempt">Last tried: %s</string>
     <string name="msg_pending_message_cancelled">Cancelled — no longer retrying</string>
-    <!-- Spec dışı, kullanıcı isteği: depolama yönetimi ekranı (Ayarlar →
-         "Storage") — toplam kullanım, sohbet başına ek boyutu ve tek tek
-         ek silme. -->
+        <!-- Storage management screen (Settings, Storage): total usage, attachment size per chat,
+         and deleting attachments one by one. -->
     <string name="title_storage">Storage</string>
     <string name="action_view_storage">Storage</string>
     <string name="storage_total">Total</string>
@@ -245,9 +241,8 @@
     <string name="msg_wait_secure_connection">Wait for the secure connection to finish setting up.</string>
     <string name="action_edit_message">Edit</string>
     <string name="action_delete_message">Delete</string>
-    <!-- Spec dışı, kullanıcı isteği: başarısız (ERROR ikonlu) bir mesajı
-         yeniden gönderme — uzun basma menüsünde SADECE başarısız mesajlarda
-         görünür. -->
+        <!-- Resend a failed message (ERROR icon). In the long-press menu it appears only on failed
+         messages. -->
     <string name="action_resume_download">Resume</string>
     <string name="action_retry_message">Retry</string>
     <string name="msg_retrying_message">Retrying…</string>
@@ -287,7 +282,7 @@
     <string name="lbl_open_with_chooser">Open with</string>
     <string name="lbl_attachment_reply_preview">📎 %1$s</string>
 
-    <!-- Spec dışı: sohbet listesinde uzun basma menüsü -->
+        <!-- Long-press menu in the chat list. -->
     <string name="action_clear_chat_history">Clear chat history</string>
     <string name="confirm_clear_chat_history">This chat\'s local history (messages and attachments) will be deleted. The contact stays in your list. Are you sure?</string>
     <string name="action_delete_contact">Delete contact</string>
@@ -295,25 +290,25 @@
     <string name="confirm_delete_contact_step2">This action CANNOT BE UNDONE — you\'ll need to scan their QR code again to message them. Delete anyway?</string>
     <string name="msg_chat_history_cleared">Chat history cleared</string>
     <string name="msg_contact_deleted">Contact deleted</string>
-    <!-- Spec dışı, güvenlik denetimi düzeltmesi: kişiyi silmeden sadece o
-         cihazı güvenilmez ilan eder (bkz. Rust revoke_contact_device). -->
+        <!-- Security-audit fix: removing a device only marks that device as untrusted, without
+         deleting the contact (see Rust revoke_contact_device). -->
     <string name="action_revoke_device">Revoke this device</string>
     <string name="msg_device_revoked">Device revoked — messages from this contact will no longer be accepted</string>
 
-    <!-- Spec dışı: sesli mesaj kaydı -->
+        <!-- Voice message recording. -->
     <string name="content_desc_record_voice">Record voice message</string>
     <string name="msg_recording_voice">Slide to cancel ▷</string>
     <string name="msg_recording_cancelled">Recording cancelled</string>
     <string name="error_recording_failed">Couldn\'t start audio recording</string>
 
-    <!-- Spec dışı: profil fotoğrafı -->
+        <!-- Profile photo. -->
     <string name="content_desc_profile_picture">Profile picture</string>
     <string name="lbl_profile_picture">Profile Picture</string>
     <string name="lbl_profile_picture_desc">Your contacts see this picture in the chat list</string>
     <string name="action_change_picture">Change picture</string>
     <string name="action_remove_picture">Remove picture</string>
 
-    <!-- Spec dışı: video/ses oynatıcı hız kontrolü -->
+        <!-- Playback speed control for the video and audio players. -->
     <string name="lbl_playback_speed">Speed</string>
 
     <!-- Strings previously hardcoded in MainActivity/ContactsFragment/QrScanActivity/fragment_*.xml
@@ -363,7 +358,7 @@
     <string name="action_pin_chat">Pin chat</string>
     <string name="action_unpin_chat">Unpin chat</string>
 
-    <!-- Çoklu-cihaz (spec 1.5/1.6/1.7): ikincil cihaz bağlama -->
+        <!-- Multi-device (spec 1.5, 1.6, 1.7): linking a secondary device. -->
     <string name="linked_devices_section_title">Linked devices</string>
     <string name="linked_devices_section_desc">Use this account on several devices. Each device has its own keys. Messages are sent to all your active devices.</string>
     <string name="linked_devices_manage">Manage devices / Add a device</string>
@@ -374,7 +369,7 @@
     <string name="action_remove_from_list">Remove from list</string>
     <string name="linked_devices_confirm_revoke">Revoke this linked device? It will no longer be able to send or receive as this account.</string>
 
-    <!-- Spec dışı, kullanıcı isteği: hesaptan çıkış (yerel verileri sil). -->
+        <!-- Sign out of the account (deletes local data). -->
     <string name="logout_section_title">Log out</string>
     <string name="logout_section_desc">Removes this account from this device. Messages, contacts and keys stored here are permanently deleted. Your other devices and other people\'s copies of your messages are not affected.</string>
     <string name="action_logout">Log out</string>
@@ -422,18 +417,17 @@
     <string name="confirm_transfer_founder">Hand group ownership to %1$s? You will no longer be able to add or remove members, or change the name and photo.</string>
     <string name="lbl_safety_code">Security code: %1$s\n\nCompare it with them over a different channel — a call, or in person. If it matches, the keys are genuinely theirs.</string>
 
-    <!-- Spec dışı, kullanıcı isteği: anlık çekim (kamera) — bkz.
-         ui.CameraCaptureActivity. -->
+        <!-- Instant capture (camera). See ui.CameraCaptureActivity. -->
     <string name="content_desc_take_photo">Take a photo</string>
     <string name="action_capture_photo">Take photo</string>
     <string name="action_flip_camera">Switch camera</string>
     <string name="action_retake_photo">Retake</string>
 
-    <!-- Spec dışı, kullanıcı isteği: bildirimlerde mesaj metnini göster/gizle. -->
+        <!-- Show or hide the message text in notifications. -->
     <string name="lbl_notif_show_message">Show messages in notifications</string>
     <string name="lbl_notif_show_message_desc">When off, notifications only say "New message". The sender and text stay hidden.</string>
 
-    <!-- Spec dışı, kullanıcı isteği: uygulama açılış şifresi. -->
+        <!-- App lock passcode. -->
     <string name="lbl_app_lock_section">App password</string>
     <string name="lbl_app_lock_section_desc">Asked every time you open the app. You can change the password, but you cannot remove it.</string>
     <string name="action_change_app_password">Change password</string>
@@ -453,7 +447,7 @@
     <string name="error_app_lock_wait">Too many wrong attempts. Try again in %1$d s.</string>
     <string name="msg_app_lock_changed">Password changed.</string>
 
-    <!-- Spec dışı, kullanıcı isteği: mesajlara emoji tepkisi. -->
+        <!-- Emoji reactions on messages. -->
     <string name="title_pick_reaction">React</string>
     <string name="action_react">React</string>
     <string name="action_remove_reaction">Remove my reaction</string>

@@ -21,10 +21,10 @@
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
 
-        <!-- bkz. ContactsFragment imgOwnQr aynı not: boyut burada HARDCODED
-             DEĞİL — LinkDeviceActivity, ekranın kendi ölçülmüş viewport'una
-             göre AYNI mantıkla (bkz. Kotlin doOnPreDraw) programatik olarak
-             ayarlar; wrap_content + adjustViewBounds bunun için gerekli. -->
+                <!-- See the same note on ContactsFragment imgOwnQr: the size is NOT hardcoded here.
+             LinkDeviceActivity sets it programmatically with the same logic, from the screen's
+             measured viewport (see the Kotlin doOnPreDraw). wrap_content with adjustViewBounds
+             is needed for that. -->
         <ImageView
             android:id="@+id/link_qr_image"
             android:layout_width="wrap_content"

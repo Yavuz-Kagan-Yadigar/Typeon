@@ -1,10 +1,9 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme — Material3 DayNight, Material You (dinamik
-         renk) desteğiyle: bkz. P2PApplication.onCreate() içindeki
-         DynamicColors.applyToActivitiesIfAvailable(). Android 12+'ta
-         duvar kağıdından türetilen renkler bu temanın rollerini otomatik
-         geçersiz kılar; desteklenmeyen cihazlarda burada tanımlı statik
-         M3 paleti (values/colors.xml + values-night/colors.xml) kullanılır. -->
+        <!-- Base application theme: Material3 DayNight, with Material You (dynamic colour) support.
+         See DynamicColors.applyToActivitiesIfAvailable() in P2PApplication.onCreate(). On
+         Android 12+, colours derived from the wallpaper override this theme's roles
+         automatically. On unsupported devices the static M3 palette defined here
+         (values/colors.xml and values-night/colors.xml) is used. -->
     <style name="Theme.P2PMessenger" parent="Theme.Material3.DayNight">
         <item name="colorPrimary">@color/md_primary</item>
         <item name="colorOnPrimary">@color/md_on_primary</item>
@@ -28,33 +27,27 @@
         <item name="colorOnError">@color/md_on_error</item>
         <item name="colorErrorContainer">@color/md_error_container</item>
         <item name="colorOnErrorContainer">@color/md_on_error_container</item>
-        <!-- Durum/gezinme çubuklarını yüzey rengiyle aynı yapıp "tek parça
-             yüzey" görünümü veriyoruz (edge-to-edge + inset yönetimi bu
-             kapsamın dışında). -->
+                <!-- The status and navigation bars are set to the surface colour, for a one-piece
+             surface look. Edge-to-edge and inset handling are out of scope here. -->
         <item name="android:statusBarColor">?attr/colorSurface</item>
         <item name="android:navigationBarColor">?attr/colorSurface</item>
         <item name="android:windowLightStatusBar">@bool/is_light_theme</item>
         <item name="android:windowLightNavigationBar">@bool/is_light_theme</item>
-        <!-- Spec dışı, kullanıcı isteği (Ayarlar'da sistem fontu seçimi):
-             varsayılan — bkz. attrs.xml `appFontFamily` notu. Tüm M3 type
-             scale attribute'ları (aşağısı) bunun yerine kendi
-             `TextAppearance.P2PMessenger.*` karşılıklarına yönlendiriliyor,
-             onlar da fontFamily'yi buradan okuyor. -->
+                <!-- Font choice from Settings (system font): the default. See the attrs.xml
+             appFontFamily note. All the M3 type scale attributes (below) are pointed to their
+             own TextAppearance.P2PMessenger.* equivalents instead, which read fontFamily from
+             here. -->
         <item name="appFontFamily">sans-serif</item>
-        <!-- Spec dışı, hata düzeltmesi ("uygulamadan gir çık yapınca ya da
-             ekran değiştirince metin tipi varsayılana dönüyor"): font
-             seçimi ESKİDEN tek başına `FontOverride`'ın reflection ile
-             `Typeface.DEFAULT`/`sDefaults` statiklerini değiştirmesine
-             dayanıyordu — bu, hiçbir `textAppearance` BELİRTMEYEN düz
-             TextView'lar için TEK mekanizmaydı ve süreç genelinde tek
-             seferlik olduğu için ROM/Android sürümüne göre kolayca
-             kaybolabiliyordu (belgesiz, resmi olmayan bir teknik).
-             `android:textViewStyle`/`editTextStyle` ise Android'in KENDİ
-             desteklenen mekanizması: bir TextView/EditText, XML'de style
-             verilmemişse varsayılan stilini HER ZAMAN temadan bu
-             öznitelikler üzerinden çözer. Tema her Activity için yeniden
-             çözüldüğünden ekran değiştirmek ya da süreç yeniden başlamak
-             bunu SIFIRLAYAMAZ. -->
+                <!-- Bug fix (after leaving and re-entering the app, or rotating the screen, the text
+             type went back to default): the font choice used to rely only on FontOverride
+             changing the Typeface.DEFAULT and sDefaults statics through reflection. That was
+             the only mechanism for plain TextViews that set no textAppearance. Because it is a
+             one-time, process-wide change, it could easily be lost depending on the ROM or
+             Android version. It is an undocumented, unofficial technique. android:textViewStyle
+             and editTextStyle are Android's own supported mechanism: a TextView or EditText
+             with no style set in XML always resolves its default style from these theme
+             attributes. The theme is re-resolved for every Activity, so changing screens or
+             restarting the process cannot reset it. -->
         <item name="android:textViewStyle">@style/Widget.P2PMessenger.TextView</item>
         <item name="android:editTextStyle">@style/Widget.P2PMessenger.EditText</item>
         <item name="textAppearanceDisplayLarge">@style/TextAppearance.P2PMessenger.DisplayLarge</item>
@@ -74,11 +67,10 @@
         <item name="textAppearanceLabelSmall">@style/TextAppearance.P2PMessenger.LabelSmall</item>
     </style>
 
-    <!-- Spec dışı, kullanıcı isteği: M3 type scale'in HER seviyesi için,
-         orijinal Material3 stilinden TEK farkı `fontFamily`'yi
-         `?attr/appFontFamily`'den okuması olan birebir kopyalar — böylece
-         bir font seçimi (aşağıdaki ThemeOverlay'ler) sadece bu tek
-         özniteliği değiştirerek TÜM type scale'i aynı anda etkiler. -->
+        <!-- For EACH level of the M3 type scale, an exact copy of the original Material3 style,
+         with one difference: its fontFamily is read from ?attr/appFontFamily. So a font choice
+         (the ThemeOverlays below) changes the whole type scale at once, by changing only this
+         one attribute. -->
     <style name="TextAppearance.P2PMessenger.DisplayLarge" parent="TextAppearance.Material3.DisplayLarge">
         <item name="fontFamily">?attr/appFontFamily</item>
         <item name="android:fontFamily">?attr/appFontFamily</item>
@@ -140,18 +132,16 @@
         <item name="android:fontFamily">?attr/appFontFamily</item>
     </style>
 
-    <!-- bkz. Theme.P2PMessenger `android:textViewStyle` notu — tek farkları
-         `fontFamily`'yi `?attr/appFontFamily`'den okumaları. Material/
-         AppCompat bileşenleri de bu iki PLATFORM özniteliğini defStyleAttr
-         olarak kullandığından (AppCompatTextView -> android.R.attr.textViewStyle)
-         onlar da kapsanır. -->
-    <!-- Parent BİLEREK platformun kendi Material stilleri: bu tema
-         zinciri (Theme.Material3 -> ... -> android:Theme.Material)
-         `android:textViewStyle`/`android:editTextStyle` için ZATEN bunları
-         çözüyordu, yani burada tek DEĞİŞEN şey fontFamily — arka plan
-         çizimi, satır kırma stratejisi gibi varsayılanların hiçbiri
-         kaymıyor. (AppCompat karşılıkları farklı arka plan drawable'ları
-         taşıdığından görsel bir kayma yaratırdı.) -->
+        <!-- See the Theme.P2PMessenger android:textViewStyle note. The only difference is that they
+         read fontFamily from ?attr/appFontFamily. Material and AppCompat components also use
+         these two platform attributes as their defStyleAttr (AppCompatTextView maps to
+         android.R.attr.textViewStyle), so they are covered too. -->
+        <!-- The parent is deliberately the platform's own Material styles. This theme chain
+         (Theme.Material3 through to android:Theme.Material) already resolved
+         android:textViewStyle and android:editTextStyle to these, so the only thing that
+         changes here is fontFamily. None of the other defaults shift, such as background
+         drawing or line-break strategy. (AppCompat equivalents carry different background
+         drawables, which would cause a visual shift.) -->
     <style name="Widget.P2PMessenger.TextView" parent="@android:style/Widget.Material.TextView">
         <item name="android:fontFamily">?attr/appFontFamily</item>
         <item name="fontFamily">?attr/appFontFamily</item>
@@ -161,18 +151,16 @@
         <item name="fontFamily">?attr/appFontFamily</item>
     </style>
 
-    <!-- bkz. item_message_bubble.xml `imgAttachmentThumbnail` — sohbetteki
-         resim/video önizlemelerinin köşe yuvarlaklığı. -->
+        <!-- See item_message_bubble.xml imgAttachmentThumbnail: the corner radius of image and
+         video previews in the chat. -->
     <style name="ShapeAppearance.P2PMessenger.Attachment" parent="">
         <item name="cornerFamily">rounded</item>
         <item name="cornerSize">12dp</item>
     </style>
 
-    <!-- Spec dışı, kullanıcı isteği: Ayarlar'daki font seçici combobox'ın
-         her seçeneği için — bkz. ThemePrefs.FontChoice/P2PApplication
-         (her Activity oluşturulmadan hemen önce uygulanır). `parent=""`:
-         SADECE bu tek özniteliği taşısın, temanın geri kalanına
-         dokunmasın. -->
+        <!-- For each option in the font picker combo box in Settings, see ThemePrefs.FontChoice and
+         P2PApplication (applied just before each Activity is created). parent="" means only
+         this one attribute is carried, and the rest of the theme is not touched. -->
     <style name="ThemeOverlay.P2PMessenger.Font.SansMedium" parent="">
         <item name="appFontFamily">sans-serif-medium</item>
     </style>
@@ -188,10 +176,10 @@
     <style name="ThemeOverlay.P2PMessenger.Font.SansBlack" parent="">
         <item name="appFontFamily">sans-serif-black</item>
     </style>
-    <!-- İçe aktarılmış font: sistemde OLMAYAN bir aile adı. `Typeface.create(ad)`
-         bilinmeyen adda `Typeface.DEFAULT`'a düşer — `FontOverride.applyFile`
-         o alanı yüklenen fontla değiştirdiği için bütün TextView'lar onu alır.
-         "sans-serif" kalsaydı sistem font haritasından gerçek Roboto gelirdi. -->
+        <!-- Imported font: a family name that is NOT on the system. Typeface.create(name) falls
+         back to Typeface.DEFAULT for an unknown name. FontOverride.applyFile replaces that
+         field with the loaded font, so every TextView receives it. If sans-serif were kept, the
+         real Roboto would come from the system font map. -->
     <style name="ThemeOverlay.P2PMessenger.Font.Custom" parent="">
         <item name="appFontFamily">p2p-imported-font</item>
     </style>

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 1:1 sohbet üst çubuğuna dokununca açılır: kişi avatarı/adı + "Dosyalar
-     ve medya" (bkz. ChatActivity.showContactInfoDialog). Grup menüsüyle
-     (dialog_group_info.xml) aynı görünüm. -->
+<!-- Opened by tapping the top bar of a 1:1 chat: contact avatar and name, plus Files and media
+     (see ChatActivity.showContactInfoDialog). Same look as the group menu
+     (dialog_group_info.xml). -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"

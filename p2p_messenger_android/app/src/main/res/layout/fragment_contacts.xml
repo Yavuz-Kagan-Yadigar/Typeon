@@ -1,9 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spec dışı, kullanıcı isteği: sayfa kaydırılabilir olmalı (QR büyük
-     olduğundan içerik ekrana sığmayabilir). Root artık NestedScrollView.
-     RecyclerView, NestedScrollView içinde `nestedScrollingEnabled=false` +
-     `wrap_content` ile — tüm kişileri açar, kaydırmayı dış scroll üstlenir
-     (kişi listesi küçük olduğu için recycling kaybı önemsiz). -->
+<!-- The page must scroll, because the QR code is large and the content may not fit the screen.
+     The root is now a NestedScrollView. The RecyclerView sits inside it with
+     nestedScrollingEnabled=false and wrap_content: it shows all contacts, and the outer scroll
+     does the scrolling (the contact list is small, so losing recycling does not matter). -->
 <androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -22,9 +21,8 @@
             android:textSize="24sp"
             android:textStyle="bold"/>
 
-        <!-- Spec dışı, kullanıcı isteği: kendi QR kodumuz doğrudan bu
-             sekmede görünür. Boyut HARDCODED DEĞİL — ContactsFragment,
-             ekran genişliğinin %75'ine ayarlar (bkz. sizeOwnQr). -->
+                <!-- Our own QR code appears directly on this tab. Its size is not hardcoded:
+             ContactsFragment sets it to 75% of the screen width (see sizeOwnQr). -->
         <ImageView
             android:id="@+id/imgOwnQr"
             android:layout_width="wrap_content"
@@ -45,7 +43,7 @@
             android:textIsSelectable="true"
             android:textSize="12sp" />
 
-        <!-- Spec dışı, kullanıcı isteği: QR taranamıyorsa panoya kopyalama. -->
+                <!-- Copy to clipboard, for when the QR code cannot be scanned. -->
         <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -69,7 +67,7 @@
 
         </LinearLayout>
 
-        <!-- Diğer eşleşme yöntemleri — QR'ın hemen altında, ortalanmış. -->
+                <!-- Other pairing methods: just below the QR, centred. -->
         <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"

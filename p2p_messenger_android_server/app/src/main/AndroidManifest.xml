@@ -10,14 +10,13 @@
          network in the background. remoteMessaging has no cap. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Sunucunun ekran kapalıyken de teslim yapabilmesi için; kullanıcı
-         onayı istenir, reddedilirse sunucu yine çalışır ama Android onu
-         uyku modunda daha agresif kısıtlar. -->
+        <!-- So the server can keep delivering while the screen is off. The user is asked for
+         approval. If it is declined, the server still runs, but Android restricts it more
+         aggressively in sleep mode. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- Yeniden başlatmadan sonra sunucuyu geri getirmek için — bkz.
-         server/BootReceiver.kt. Sunucu kapalıyken store-and-forward
-         tamamen durduğu için bu, istemcidekinden daha kritik. -->
+        <!-- To bring the server back after a reboot. See server/BootReceiver.kt. Store-and-forward
+         stops completely while the server is down, so this matters more than on the client. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
@@ -39,8 +38,8 @@
             </intent-filter>
         </activity>
 
-        <!-- bkz. BootReceiver — ACTION_BOOT_COMPLETED, ön plan servisi
-             başlatma kısıtlarından muaf tutulan yayınlardan biri. -->
+                <!-- See BootReceiver. ACTION_BOOT_COMPLETED is one of the broadcasts exempt from the
+             foreground-service start restrictions. -->
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"

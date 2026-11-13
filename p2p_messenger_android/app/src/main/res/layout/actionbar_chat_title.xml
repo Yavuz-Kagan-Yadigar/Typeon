@@ -1,19 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spec dışı: sohbet başlığı — bkz. kullanıcı isteği "profil fotoğrafı
-     üst çubukta da görünsün". ActionBar.setCustomView ile takılır (bkz.
-     ChatActivity/GroupChatActivity onCreate) — varsayılan ActionBar
-     başlığının aksine bir avatar taşıyabilmek için.
-
-     Spec dışı, kullanıcı isteği: BU cihazın bağlantı durumu (bkz.
-     txtOwnConnectionStatus) üst çubuğun EN SAĞINDA — kullanıcı adının/
-     başlığın ALTINDA değil. Bunun için kök genişlik `match_parent`
-     olmalı (bkz. ChatActivity/GroupChatActivity `setCustomView` çağrısı —
-     ActionBar.LayoutParams AÇIKÇA MATCH_PARENT geçiyor, aksi halde
-     ActionBar özel görünümü sadece içeriği kadar dar sarar ve "en sağ"
-     hiçbir zaman gerçek kenara ulaşmaz) ve başlık/altyazı bloğu `weight=1`
-     ile kalan TÜM alanı kaplamalı — böylece uzun bir başlık/altyazı kendi
-     içinde kırpılır (ellipsize), durum metnini asla sağdan iterek ekran
-     dışına ATMAZ. -->
+<!-- Chat title: the profile photo also shows in the top bar. It is attached with
+     ActionBar.setCustomView (see ChatActivity and GroupChatActivity onCreate), so it can carry
+     an avatar, unlike the default ActionBar title. The device's own connection status
+     (txtOwnConnectionStatus) is at the far right of the top bar, not below the name. For that,
+     the root width must be match_parent: ChatActivity and GroupChatActivity pass
+     ActionBar.LayoutParams with MATCH_PARENT explicitly, otherwise the custom view wraps its
+     content and 'far right' never reaches the real edge. The title and subtitle block takes all
+     remaining space with weight=1, so a long title or subtitle is cut inside itself
+     (ellipsize). It never pushes the status text off-screen. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -42,13 +36,11 @@
             android:maxLines="1"
             android:ellipsize="end" />
 
-        <!-- Spec dışı, kullanıcı isteği: karşı tarafın bağlantı durumunu
-             düz metnin YANINDA küçük renkli bir noktayla da göster (bkz.
-             ChatActivity dotPeerStatus/updatePeerStatusDot) — "bağlı"/
-             "bağlanılıyor"/"bağlı değil" durumları arasında ilk bakışta
-             ayrım. Grup sohbetinde (tek bir karşı taraf/el sıkışma kavramı
-             olmadığından) bu satırın TAMAMI gizlenir (bkz.
-             GroupChatActivity, txtToolbarSubtitle'ı değil bu satırı gizler). -->
+                <!-- The peer's connection status is also shown as a small coloured dot beside the plain
+             text (see ChatActivity dotPeerStatus and updatePeerStatusDot), so 'connected',
+             'connecting' and 'not connected' can be told apart at a glance. In group chat the
+             whole row is hidden, because there is no single peer or handshake concept (see
+             GroupChatActivity, which hides this row rather than txtToolbarSubtitle). -->
         <LinearLayout
             android:id="@+id/layoutToolbarSubtitleRow"
             android:layout_width="wrap_content"
@@ -76,13 +68,11 @@
 
     </LinearLayout>
 
-    <!-- Spec dışı, kullanıcı isteği: BU cihazın (karşı tarafınki DEĞİL —
-         bkz. txtToolbarSubtitle) genel bağlantı durumu (Tor/node/internet) —
-         bkz. ChatActivity/GroupChatActivity ownStatusPollRunnable. Üst
-         çubuğun EN SAĞINDA, sabit (üstteki başlık bloğu genişleyip
-         daralırken sıçramaması için). Kullanıcı isteği: sadece PEER
-         durumu değil, BU cihazın durumu da aynı renkli nokta + pulse
-         deseniyle gösterilsin (bkz. dotPeerStatus, util.PulsingStatusDot). -->
+        <!-- This device's own connection status (Tor, node, internet), not the peer's (see
+         txtToolbarSubtitle). See ChatActivity and GroupChatActivity ownStatusPollRunnable. It
+         sits at the far right of the top bar and stays fixed, so it does not jump while the
+         title block grows and shrinks. The peer status and this device's status use the same
+         coloured dot and pulse pattern (see dotPeerStatus and util.PulsingStatusDot). -->
     <LinearLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"

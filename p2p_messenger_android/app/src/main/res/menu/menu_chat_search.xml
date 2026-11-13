@@ -14,17 +14,16 @@
         android:title="@string/action_video_call"
         app:showAsAction="ifRoom" />
 
-    <!-- Spec dışı, kullanıcı isteği: sohbet içi mesaj arama. -->
+        <!-- In-chat message search. -->
     <item
         android:id="@+id/action_search_messages"
         android:icon="@drawable/search"
         android:title="@string/action_search_messages"
         app:showAsAction="always" />
 
-    <!-- Spec dışı, kullanıcı isteği: hızlı Tor/ağ bağlantısını kes/yeniden
-         kur — bkz. ChatActivity/GroupChatActivity onOptionsItemSelected,
-         util/AppRestarter.kt (neden tam bir uygulama yeniden başlatması
-         gerektiği). Bu menü dosyası ikisi arasında paylaşılır. -->
+        <!-- Quick Tor and network connection reset. See ChatActivity and GroupChatActivity
+         onOptionsItemSelected, and util/AppRestarter.kt (why a full app restart is needed).
+         This menu file is shared between the two. -->
     <item
         android:id="@+id/action_tor_reconnect"
         android:icon="@drawable/reconnect"

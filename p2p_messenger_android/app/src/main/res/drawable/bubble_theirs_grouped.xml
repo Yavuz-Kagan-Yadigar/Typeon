@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- bkz. bubble_mine_grouped — gelen balonun omurgası SOL tarafta. -->
+<!-- See bubble_mine_grouped. For an incoming bubble the spine is on the LEFT side. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
     <solid android:color="?attr/colorSurfaceVariant" />
     <corners

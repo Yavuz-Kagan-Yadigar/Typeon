@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spec dışı: ek/sesli mesaj düğmelerinin dairesel arkaplanı — bkz.
-     activity_chat.xml btnAttach/btnVoice notu (önceden sadece kenarlıksız
-     ripple vardı, hiç dolgu yoktu). -->
+<!-- Circular background of the attach and voice buttons (see the note on activity_chat.xml
+     btnAttach and btnVoice). Previously they had only a borderless ripple and no fill. -->
 <ripple xmlns:android="http://schemas.android.com/apk/res/android"
     android:color="?attr/colorOnSurfaceVariant">
     <item>

@@ -1,14 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Context.getFilesDir()/attachments/plain_cache/ — bkz.
-         P2PCore::get_attachment_plaintext_path (lib.rs). Sadece bu alt
-         dizin paylaşılır; şifreli `.enc` dosyaları veya DB hiçbir zaman
-         FileProvider üzerinden erişilebilir değildir. -->
+        <!-- Context.getFilesDir()/attachments/plain_cache/. See
+         P2PCore::get_attachment_plaintext_path (lib.rs). Only this subdirectory is shared.
+         Encrypted .enc files and the database are never reachable through the FileProvider. -->
     <files-path name="attachment_plain_cache" path="attachments/plain_cache/" />
-    <!-- Context.getCacheDir()/avatar_view/ — bkz. AvatarUtil.openFullscreen:
-         profil/grup fotoğrafı tam ekran görüntüleyiciye (MediaViewerActivity)
-         taşınırken geçici olarak buraya yazılır. Sadece bu alt dizin
-         paylaşılır. -->
+        <!-- Context.getCacheDir()/avatar_view/. See AvatarUtil.openFullscreen: a profile or group
+         photo is written here temporarily while it is passed to the full-screen viewer
+         (MediaViewerActivity). Only this subdirectory is shared. -->
     <cache-path name="avatar_view" path="avatar_view/" />
     <!-- Context.getCacheDir()/attachment_preview/ — util.AttachmentPrompt:
          the camera shot or a JPEG XL (as GIF) shown full screen from the

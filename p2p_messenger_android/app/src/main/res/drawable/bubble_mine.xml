@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Material 3 stili sohbet balonu (kendi mesajlarımız) — köşelerden biri
-     (alt-sağ) küçük yarıçapla "kuyruk" hissi verir, WhatsApp/Telegram/Google
-     Messages'ta yaygın olan asimetrik balon şekli. -->
+<!-- Material 3 style chat bubble for our own messages. One corner, bottom-right, has a small
+     radius, which gives a tail look. This asymmetric bubble shape is common in WhatsApp,
+     Telegram and Google Messages. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
     <solid android:color="?attr/colorPrimaryContainer" />
     <corners

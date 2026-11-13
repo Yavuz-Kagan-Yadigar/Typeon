@@ -1,17 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spec dışı, kullanıcı isteği: "soldan bir drag barla sürüklenebilir
-     açılıp kapanan chat list" — sohbet ekranından ayrılmadan başka bir
-     sohbete geçebilmek için soldan açılan bir çekmece. `DrawerLayout`
-     bilinçli seçim: Android'in kendi standart "kenardan kaydırarak aç/
-     kapat" bileşeni (Gmail/Slack/Discord'un kanal listesi de AYNI desen) —
-     kendiliğinden hem kaydırma jestini hem programatik aç/kapatmayı verir.
-     Sürekli-değişken genişlikte bir sürükle-boyutlandırma (masaüstündeki
-     Linux sürümünün aksine, bkz. Linux/src/ui/window.rs) telefon
-     genişliğinde pratik bir fayda sağlamıyor — standart gezinme çekmecesi
-     genişliği (bkz. aşağıdaki 304dp) kullanılıyor.
-     İLK çocuk = asıl ekran içeriği (aşağıdaki `rootChatLayout`, DEĞİŞMEDİ);
-     İKİNCİ çocuk = çekmece içeriği (`layout_gravity="start"` ZORUNLU, bu
-     DrawerLayout'un onu "sol çekmece" olarak tanımasının TEK yolu). -->
+<!-- Left-edge drawer holding the chat list, opened by dragging from the edge, so the user can
+     switch to another chat without leaving this screen. DrawerLayout is a deliberate choice: it
+     is Android's standard swipe-from-edge component (the channel list in Gmail, Slack and
+     Discord uses the same pattern), and it gives both the swipe gesture and programmatic open
+     and close. A continuously resizable drag-to-resize panel, as in the Linux desktop client
+     (see Linux/src/ui/window.rs), gives no practical benefit on a phone, so the standard
+     navigation drawer width is used (304dp, below). The FIRST child is the main screen content
+     (rootChatLayout below, unchanged). The SECOND child is the drawer content.
+     layout_gravity="start" is required: it is the only way DrawerLayout recognises it as the
+     left drawer. -->
 <androidx.drawerlayout.widget.DrawerLayout
     android:id="@+id/chatDrawerLayout"
     xmlns:android="http://schemas.android.com/apk/res/android"
@@ -24,13 +21,11 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <!-- Spec dışı, kullanıcı isteği: sohbet duvarkağıdı — Ayarlar'daki
-         "arka plan rengi"/"duvarkağıdı" tercihleri (bkz. ThemePrefs/
-         ChatActivity.applyChatBackgroundPrefs). En üstte, İLK çocuk olarak
-         eklendi (ConstraintLayout çocukları XML bildirim sırasına göre
-         çizilir) — böylece diğer TÜM içeriğin ARKASINDA kalır. Duvarkağıdı
-         yoksa GONE, tercih edilen arka plan rengi (varsa) doğrudan
-         `rootChatLayout`'a uygulanır. -->
+        <!-- Chat wallpaper: the background colour and wallpaper preferences in Settings (see
+         ThemePrefs and ChatActivity.applyChatBackgroundPrefs). Added as the FIRST child, so it
+         sits behind all other content, because ConstraintLayout children are drawn in XML
+         declaration order. With no wallpaper it is GONE, and the preferred background colour,
+         if set, is applied directly to rootChatLayout. -->
     <!-- Top only, height = screen height (set in ThemePrefs.applyChatBackground):
          pinned to the bottom too, it shrank with the keyboard and centerCrop
          moved the picture up. -->
@@ -45,12 +40,10 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- Spec dışı sağlamlaştırma: el sıkışma tamamlanana kadar gösterilir
-         (bkz. ChatActivity — ensureHandshake/hasActiveSession). Kullanıcı
-         "bağlantı yeni kurulduysa ilk mesajlar kayboluyor gibi görünüyor"
-         diye şikayet etmişti; artık mesajlar zaten hiç kaybolmuyor (bkz.
-         Rust pending_envelopes) ama bu banner en azından NEDEN bir gecikme
-         olabileceğini açıkça gösteriyor. -->
+        <!-- Shown until the handshake completes (see ChatActivity ensureHandshake and
+         hasActiveSession). Users reported that the first messages seemed lost right after a new
+         connection. Messages are no longer lost (see the Rust pending_envelopes), but this
+         banner at least shows clearly why there may be a delay. -->
     <LinearLayout
         android:id="@+id/layoutConnecting"
         android:layout_width="0dp"
@@ -80,9 +73,8 @@
 
     </LinearLayout>
 
-    <!-- Spec dışı, kullanıcı isteği: sohbet içi mesaj arama — toolbar'daki
-         arama simgesiyle açılıp kapanır (bkz. ChatActivity/GroupChatActivity
-         toggleMessageSearch). -->
+        <!-- In-chat message search, opened and closed with the search icon on the toolbar (see
+         ChatActivity and GroupChatActivity toggleMessageSearch). -->
     <LinearLayout
         android:id="@+id/layoutSearchMessages"
         android:layout_width="0dp"
@@ -134,14 +126,12 @@
 
     </LinearLayout>
 
-    <!-- Spec dışı, kullanıcı isteği: alt çubuk TEK bir "pill" içinde ve
-         pill'in yanlarında/altında %2'lik boşluk. Sabit bir dp yerine
-         `Guideline` + `layout_constraintGuide_percent`: istenen boşluk
-         ORANSAL, yani telefonda da tablette de ekranın %2'si kadar kalır
-         (sabit dp, geniş ekranda görsel olarak çok daha dar görünürdü).
-         Aynı üç kılavuz hem giriş çubuğu hem de onun YERİNE geçen ses
-         kaydı çubuğu tarafından kullanılıyor, böylece ikisi birebir aynı
-         yerde duruyor. -->
+        <!-- The bottom bar is one pill, with a 2% gap on its sides and below. Instead of a fixed dp
+         value, a Guideline with layout_constraintGuide_percent is used. The gap is
+         proportional, so it stays 2% of the screen on phone and tablet alike (a fixed dp value
+         looked much narrower on wide screens). The same three guidelines are used by the input
+         bar and by the voice-recording bar that replaces it, so both sit in exactly the same
+         place. -->
     <androidx.constraintlayout.widget.Guideline
         android:id="@+id/guideInputStart"
         android:layout_width="wrap_content"
@@ -163,12 +153,10 @@
         android:orientation="horizontal"
         app:layout_constraintGuide_percent="0.98" />
 
-    <!-- Spec dışı, kullanıcı isteği: "alt barla mesaj arasında %5 dikey
-         padding". Sabit bir dp DEĞİL — istenen oransal, bu yüzden yüksekliği
-         ebeveynin %5'ine bağlı boş bir `Space`. Giriş çubuğunun kendi
-         yüksekliği (çok satırlı yazarken) değiştiği için bunu bir
-         `Guideline` ile ifade etmek mümkün değil: kılavuz ekrana göre
-         sabittir, bu boşluk ise çubuğun ÜSTÜNE yapışmalı. -->
+        <!-- Vertical padding of 5% between the bottom bar and the messages. Not a fixed dp: it is
+         an empty Space whose height is 5% of the parent. A Guideline cannot express this,
+         because the input bar's own height changes while several lines are typed. A guideline
+         is fixed to the screen, but this gap has to stick to the top of the bar. -->
     <Space
         android:id="@+id/spaceAboveInput"
         android:layout_width="0dp"
@@ -177,18 +165,15 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- Spec dışı, kullanıcı isteği: "alt barın üstünde sürekli bir siyah
-         bar var, kaldır" + "alt bar ve alıntı pillinin DIŞI şeffaf olsun,
-         chat yanlardan ve alttan görünsün".
-         İkisi aynı şeyin sonucu: liste eskiden giriş çubuğunun ÜSTÜNDE
-         bitiyordu, dolayısıyla çubuğun etrafında/altında kalan şerit
-         sohbetin değil pencerenin arka planıydı — o "siyah bar" buydu.
-         Artık liste ekranın ALTINA kadar uzanıyor; çubuk ve alıntı pili
-         onun ÜSTÜNDE yüzüyor (XML'de listeden SONRA bildirildikleri için
-         üstte çiziliyorlar). `clipToPadding=false`: içerik pillerin
-         ARKASINDAN kayarak geçer ama dinlenme konumunda onların üstünde
-         durur — alt dolgu çalışma zamanında çubuğun gerçek yüksekliğine
-         göre veriliyor (bkz. ChatActivity `syncRecyclerBottomInset`). -->
+        <!-- There was a constant black strip below the bottom bar. The requested change was to
+         remove it, and to let the chat show through at the sides and below the bar and the
+         quote pill. Both come from the same cause: the list used to end ABOVE the input bar, so
+         the strip around and below the bar was the window background, not the chat's. That was
+         the black bar. Now the list extends to the bottom of the screen, and the bar and the
+         quote pill float on top of it (they are declared after the list in XML, so they are
+         drawn on top). clipToPadding=false: content slides behind the pills and rests above
+         them. The bottom padding is set at run time from the bar's real height (see
+         ChatActivity syncRecyclerBottomInset). -->
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/recyclerMessages"
         android:layout_width="0dp"
@@ -238,11 +223,10 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- Spec dışı: "yazıyor..." göstergesi — kullanıcı isteği üzerine üst
-         çubuktaki durum yazısından buraya, yeni mesajların BELİRECEĞİ
-         noktaya (mesaj listesinin hemen altına, karşı taraf balonu gibi)
-         taşındı. bkz. ChatActivity peerIsTyping. `imgTypingAvatar`: group
-         chat only, shows who's typing (GONE in 1:1). -->
+        <!-- The typing indicator. It was moved from the status text in the top bar to the point
+         where new messages will appear: just below the message list, like a peer bubble (see
+         ChatActivity peerIsTyping). imgTypingAvatar: group chat only, shows who is typing (GONE
+         in 1:1). -->
     <LinearLayout
         android:id="@+id/layoutTypingIndicator"
         android:layout_width="wrap_content"
@@ -276,15 +260,12 @@
 
     </LinearLayout>
 
-    <!-- Spec dışı, kullanıcı isteği: ek/kamera/ses düğmeleri, metin alanı ve
-         gönder tuşu HEPSİ tek bir dış pill'in (bkz. message_bar_pill.xml)
-         içinde; o pill'in İÇİNDE de düğme grubu SADECE ince çerçeveli bir
-         pill (bkz. message_bar_inner_pill.xml — dolgusuz, yalnızca kontur).
-         Metin alanının kendi çerçevesi kullanıcı isteğiyle KALDIRILDI —
-         dış pill zaten onu sarıyor. Düğmelerin eski dolgulu dairesel
-         arkaplanları (`round_icon_button_background`) kaldırıldı: artık
-         çerçeveyi grup taşıyor, düğmelerde yalnızca kenarlıksız dokunma
-         dalgası (ripple) var. -->
+        <!-- The attach, camera and voice buttons, the text field and the send button are all inside
+         one outer pill (see message_bar_pill.xml). Inside that pill, the button group is a pill
+         with a thin frame only (see message_bar_inner_pill.xml: no fill, outline only). The
+         text field's own frame was removed, since the outer pill already wraps it. The buttons'
+         old solid circular backgrounds (round_icon_button_background) were removed: the group
+         now carries the frame, and the buttons have only a borderless ripple. -->
     <LinearLayout
         android:id="@+id/layoutMessageInput"
         android:layout_width="0dp"
@@ -297,21 +278,15 @@
         app:layout_constraintStart_toStartOf="@id/guideInputStart"
         app:layout_constraintEnd_toEndOf="@id/guideInputEnd">
 
-        <!-- Ek + kamera + ses: TEK bir ince çerçevenin içinde (kullanıcı
-             isteği), üçü bir grup olarak okunuyor.
-
-             Spec dışı, hata düzeltmesi (kullanıcı: "üçlü buton pilli ve dış
-             pill arası hep aynı mesafede olsun, şu an pilin ucunda daha
-             yakın"): bu üç düğme önceden 38dp'ydi, gönder düğmesi (aşağıda)
-             44dp — satırın toplam yüksekliği en UZUN kardeşe (44dp'lik
-             gönder düğmesi) göre belirlendiğinden, bu iç pil dikeyde
-             `center_vertical` ile ekstra bir "gevşeklik" payıyla ortalanıyor
-             ve dış pilin üstü/altıyla arasındaki boşluk, dış pilin SOLUYLA
-             arasındaki boşluktan (salt üst LinearLayout dolgusundan gelen,
-             6dp) daha GENİŞ oluyordu — yuvarlak uçta bu fark göze
-             çarpıyordu. Üç düğmeyi de gönder düğmesiyle AYNI 44dp/10dp
-             yapmak bu gevşekliği sıfırlıyor: dört yönde de boşluk artık
-             SADECE dış `layoutMessageInput`'un 6dp dolgusundan geliyor. -->
+                <!-- Attach, camera and voice sit inside ONE thin frame and read as a group. Bug fix
+             (the pill's ends looked closer to the outer pill than its sides): these three
+             buttons were 38dp, and the send button below is 44dp. The row's total height
+             follows the tallest sibling, so this inner pill was centred with extra slack via
+             center_vertical, and the gap between the outer pill's top and bottom and the inner
+             pill was wider than the gap on the left side (6dp, from the parent LinearLayout
+             padding only). At the rounded end the difference was visible. Making all three
+             buttons 44dp with 10dp, the same as the send button, removes that slack: on all
+             four sides the gap now comes only from the outer layoutMessageInput 6dp padding. -->
         <LinearLayout
             android:id="@+id/rowInputActions"
             android:layout_width="wrap_content"
@@ -331,10 +306,9 @@
                 android:contentDescription="@string/content_desc_attach_file"
                 android:src="@drawable/ic_attach" />
 
-            <!-- Spec dışı, kullanıcı isteği: ek düğmesinin YANINDA doğrudan
-                 kamera — anlık çekim + kırpma, galeriye/diske hiç yazmadan
-                 (bkz. ui.CameraCaptureActivity). Dosya seçiciden bir fotoğraf
-                 seçmekten AYRI bir akış. -->
+                        <!-- Camera directly beside the attach button: instant capture and crop, never
+                 written to the gallery or disk (see ui.CameraCaptureActivity). A separate flow
+                 from picking a photo in the file picker. -->
             <ImageButton
                 android:id="@+id/btnCamera"
                 android:layout_width="44dp"
@@ -384,25 +358,21 @@
             android:layout_marginStart="4dp"
             android:layout_marginEnd="4dp" />
 
-        <!-- Spec dışı, kullanıcı isteği: gönderim sırasında (JNI/ratchet
-             şifreleme çağrısı arka plan thread'inde çalışırken, bkz.
-             ChatActivity/GroupChatActivity sendNewMessage) düğmenin YERİNE
-             dönen bir yükleniyor göstergesi + çift dokunuşu engellemek için
-             düğmenin devre dışı bırakılması. Aynı FrameLayout hücresinde
-             ikisi de aynı boyutu kapladığından düğme gizlenince (INVISIBLE,
-             GONE DEĞİL — yer kaplamaya devam etsin, aksi halde çevredeki
-             satır sıçrardı) düzen sıçramaz. -->
+                <!-- While a message is being sent (the JNI and ratchet encryption call runs on a
+             background thread, see ChatActivity and GroupChatActivity sendNewMessage), a
+             loading indicator replaces the button, and the button is disabled to prevent double
+             taps. Both sit in the same FrameLayout cell and take the same size. When the button
+             is hidden it is INVISIBLE, not GONE, so it keeps taking up space and the
+             neighbouring row does not jump. -->
         <FrameLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content">
 
-            <!-- Spec dışı, kullanıcı isteği: gönder tuşunun simgesi artık
-                 uygulamanın kendi bulut+yağmur logosu, MASKE olarak —
-                 `ic_send_cloud` tek renk bir siluet, gerçek rengini
-                 buradaki `tint`ten alır (bkz. o dosyanın notu). Metin
-                 taşıyan `Button` yerine `ImageButton`: bir Button'ın
-                 `drawable`'ı metin hizalamasıyla birlikte konumlanır ve
-                 dairesel bir tuşta ortalanmaz. -->
+                        <!-- The send icon is now the app's own cloud and rain logo, as a mask.
+                 ic_send_cloud is a single-colour silhouette, and its real colour comes from the
+                 tint here (see the note in that file). It uses an ImageButton rather than a
+                 text Button: a Button's drawable is positioned together with the text
+                 alignment, so it would not centre in a circular button. -->
             <ImageButton
                 android:id="@+id/btnSend"
                 android:layout_width="44dp"
@@ -426,10 +396,9 @@
 
     </LinearLayout>
 
-    <!-- Spec dışı: basılı tut/kaydet sesli mesaj — kayıt sırasında input
-         satırının YERİNE geçer (bkz. ChatActivity ses kaydı akışı). Sağa
-         kaydırınca iptal (bkz. txtCancelPill — parmakla birlikte kayar),
-         bırakınca gönderilir. -->
+        <!-- Press-and-hold voice message. While recording, it replaces the input row (see the
+         ChatActivity voice recording flow). Sliding right cancels (see txtCancelPill, which
+         slides with the finger), and releasing sends. -->
     <LinearLayout
         android:id="@+id/layoutRecording"
         android:layout_width="0dp"
@@ -462,9 +431,9 @@
             android:fontFamily="monospace"
             android:textColor="?attr/colorOnSurfaceVariant" />
 
-        <!-- Parmakla BİRLİKTE sağa kayan (translationX, bkz. ChatActivity
-             setupVoiceRecordButton) iptal pili — sabit kalan kayıt
-             göstergesinin (yukarıdaki nokta+zamanlayıcı) aksine. -->
+                <!-- Cancel pill that slides right with the finger (translationX, see ChatActivity
+             setupVoiceRecordButton), unlike the fixed recording indicator above it (the dot and
+             timer). -->
         <FrameLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
@@ -489,11 +458,10 @@
 
     </LinearLayout>
 
-    <!-- Spec dışı, kullanıcı isteği: 15 dakikadır sessiz bir sohbete mesaj
-         geldiğinde/gittiğinde oynayan hafif parçacık efekti (bkz.
-         ui.TyphoonParticleView). Mesaj listesinin ÜSTÜNE, ama alt çubuğun
-         ALTINA denk gelen bir katman — XML sırası gereği listeden sonra
-         çiziliyor. Dokunuşları tüketmez. -->
+        <!-- A light particle effect that plays when a message comes in or goes out, in a chat that
+         has been quiet for 15 minutes (see ui.TyphoonParticleView). It is a layer above the
+         message list but below the bottom bar. In XML order it is drawn after the list. It does
+         not consume touches. -->
     <com.p2p.messenger.ui.TyphoonParticleView
         android:id="@+id/typhoonEffect"
         android:layout_width="0dp"
@@ -531,15 +499,13 @@
 
 </androidx.constraintlayout.widget.ConstraintLayout>
 
-    <!-- bkz. dosya başı DrawerLayout notu — çekmece içeriği: mevcut
-         `ChatsFragment`'in AYNI örneği (MainActivity'nin sekmesiyle KODU
-         paylaşır, ayrı bir sohbet listesi yeniden yazılmadı). `android:name`
-         ile bildirilen bir `FragmentContainerView`, layout şişirilirken
-         fragment'ı KENDİLİĞİNDEN oluşturur — ayrı bir FragmentTransaction
-         gerekmez. Genişlik: standart Material gezinme çekmecesi genişliği
-         (304dp) — dosya başı notundaki gerekçeyle sabit, sürüklenerek
-         değiştirilmiyor. `android:fitsSystemWindows`: çekmece kendi
-         durum çubuğu/kenar boşluklarını doğru hesaplasın diye. -->
+        <!-- See the DrawerLayout note at the top of the file. Drawer content: the same instance of
+         the existing ChatsFragment (it shares code with the tab in MainActivity, so the chat
+         list was not rewritten). A FragmentContainerView declared with android:name creates the
+         fragment itself while the layout is inflated, so no separate FragmentTransaction is
+         needed. Width: the standard Material navigation drawer width (304dp). It is fixed for
+         the reason in the file-level note, not changed by dragging. android:fitsSystemWindows
+         lets the drawer work out its own status bar and edge insets correctly. -->
     <androidx.fragment.app.FragmentContainerView
         android:id="@+id/chatListDrawerContainer"
         android:name="com.p2p.messenger.ChatsFragment"

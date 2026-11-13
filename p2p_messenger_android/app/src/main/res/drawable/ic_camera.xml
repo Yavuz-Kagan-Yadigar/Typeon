@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spec dışı, kullanıcı isteği: sohbet giriş çubuğundaki "anlık çekim"
-     düğmesi (bkz. activity_chat.xml btnCamera / ui.CameraCaptureActivity). -->
+<!-- Camera button on the chat input bar: instant capture (see activity_chat.xml btnCamera and
+     ui.CameraCaptureActivity). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"

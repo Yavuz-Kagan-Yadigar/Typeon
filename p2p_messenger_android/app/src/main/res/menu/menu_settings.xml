@@ -1,10 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Spec dışı, kullanıcı isteği: hızlı Tor/ağ bağlantısını kes/yeniden kur —
-     bkz. SettingsFragment (MenuProvider, sadece bu ekran RESUMED iken
-     görünür), util/AppRestarter.kt. MainActivity kendi özel bir toolbar
-     görünümü KULLANMIYOR (bkz. ChatActivity/GroupChatActivity'nin aksine),
-     bu yüzden burada standart sistem ActionBar'ının menü mekanizması
-     kullanılıyor. -->
+<!-- Quick Tor and network connection reset. See SettingsFragment (MenuProvider, visible only
+     while this screen is resumed) and util/AppRestarter.kt. MainActivity does not use its own
+     custom toolbar view (unlike ChatActivity and GroupChatActivity), so the standard system
+     ActionBar menu mechanism is used here. -->
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
 

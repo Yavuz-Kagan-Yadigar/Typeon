@@ -1,13 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Spec dışı, kullanıcı isteği ("arayüzdeki gri renkleri daha koyu
-         yap"): NÖTR/gri roller (`*surface_variant`, `outline*`) bilerek
-         Material'ın referans tonlarından DAHA KOYU tutuluyor. Yalnızca
-         dinamik rengin uygulanmadığı statik palette geçerlidir. -->
-    <!-- Material You (M3) tema renk rolleri — açık tema. Koyu tema
-         karşılıkları values-night/colors.xml'de aynı isimlerle tanımlı;
-         themes.xml bunları @color/md_* üzerinden referans alıyor, böylece
-         tek bir tema tanımı hem açık hem koyu modda doğru rengi çözüyor. -->
+        <!-- The neutral and grey roles (*surface_variant, outline*) are deliberately kept darker
+         than Material's reference tones. This applies only to the static palette, where dynamic
+         colour is not applied. -->
+        <!-- Material You (M3) theme colour roles, light theme. The dark theme counterparts are
+         defined with the same names in values-night/colors.xml. themes.xml refers to them
+         through @color/md_*, so one theme definition resolves the right colour in both light
+         and dark mode. -->
     <color name="md_primary">#6750A4</color>
     <color name="md_on_primary">#FFFFFF</color>
     <color name="md_primary_container">#EADDFF</color>
@@ -31,7 +30,7 @@
     <color name="md_error_container">#F9DEDC</color>
     <color name="md_on_error_container">#410E0B</color>
 
-    <!-- Legacy marka renkleri (bazı eski drawable/tema referansları için korunuyor) -->
+        <!-- Legacy brand colours, kept for some old drawable and theme references. -->
     <color name="primary">#2196F3</color>
     <color name="primary_dark">#1976D2</color>
     <color name="secondary">#03DAC5</color>

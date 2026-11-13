@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Açık temada durum/gezinme çubuğu ikonları koyu olmalı; koyu temada
-         (values-night/bools.xml) tam tersi. -->
+        <!-- In the light theme the status and navigation bar icons must be dark. In the dark theme
+         (values-night/bools.xml) it is the opposite. -->
     <bool name="is_light_theme">true</bool>
 </resources>
