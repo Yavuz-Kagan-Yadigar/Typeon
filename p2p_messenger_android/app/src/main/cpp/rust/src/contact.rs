@@ -1,5 +1,4 @@
-//! Güven modeli: TOFU + Güvenlik Numarası Değişikliği — Description.md
-//! bölüm 2.
+//! Trust model: TOFU plus change detection for the security number. See the Description.md section 2 for the design.
 
 use serde::{Deserialize, Serialize};
 
@@ -18,16 +17,12 @@ pub struct KnownDevice {
     pub device_fingerprint: String,
     pub first_seen: u64,
     pub status: KnownDeviceStatus,
-    /// Bu cihaz yüz yüze QR/manuel eşleşmeyle mi tanındı, yoksa imzalı bir
-    /// `DeviceAdd` zinciriyle mi eklendi?
+    /// Whether this device was recognised through an in-person QR or manual pairing, or added through a signed `DeviceAdd` chain.
     ///
-    /// burada eskiden `verified: bool` vardı ama HER İKİ
-    /// ekleme yolu da onu `false` yazıyor ve hiçbir yer okumuyordu; iki
-    /// ekleme fonksiyonunun (`add_device_unverified` /
-    /// `add_device_via_signed_chain`) gövdeleri de birebir aynıydı, yani
-    /// isimlerin ima ettiği ayrım kodda hiç yoktu. Alan artık o ayrımı
-    /// GERÇEKTEN taşıyor: `canonical_device_for_identity` ve arayüzün
-    /// "doğrulanmadı" uyarısı için anlamlı bir sinyal.
+    /// A `verified: bool` field used to exist here. BOTH add paths wrote it as `false`, and nothing ever read it. The two add functions
+    /// (`add_device_unverified` / `add_device_via_signed_chain`) also had identical bodies, so the distinction their names implied did not
+    /// exist in the code. The field now really carries that distinction. It is the signal for `canonical_device_for_identity` and for the
+    /// "not verified" warning in the UI.
     #[serde(default)]
     pub via_signed_chain: bool,
     /// Revoked by the contact's own signed `DeviceRevoke`, not by the local
@@ -48,39 +43,31 @@ pub struct Contact {
     pub trusted_identity_id: String,
     pub known_devices: Vec<KnownDevice>,
     pub last_device_change: Option<u64>,
-    // `ratchet_states` P2PCore seviyesinde (device_fingerprint çifti ->
-    // DeviceRatchetState) ayrıca tutulur; Contact struct'ı sadece TOFU
-    // kayıtlarını taşır (spec 2.1'deki alan burada da var ama gerçek
-    // ratchet state serileştirilemeyen secret key'ler içerdiği için ayrı
-    // bir map'te — bkz. lib.rs P2PCore.ratchets).
-    /// bu kişinin bize `MessageContent::ProfileUpdate` ile
-    /// gönderdiği en güncel profil fotoğrafı (720p/%85 JPEG). `None` =
-    /// hiç göndermedi ya da fotoğrafını kaldırdı.
+    // `ratchet_states` is kept at the P2PCore level (a map from (device_fingerprint pair) to DeviceRatchetState). The Contact struct carries
+    // only the TOFU records. The real ratchet state holds secret keys that cannot be serialised, so it lives in a separate map
+    // (see `P2PCore.ratchets` in lib.rs).
+    /// The most recent profile photo this contact sent us in a `MessageContent::ProfileUpdate` (720p, 85% JPEG). `None` means the
+    /// contact never sent one, or removed it.
     #[serde(default, with = "serde_bytes")]
     pub avatar_jpeg: Option<Vec<u8>>,
-    /// bu kişi DOĞRUDAN (QR/manuel eşleşme,
-    /// yüz yüze TOFU) mi eklendi — `false`; yoksa bir grup üzerinden
-    /// KURUCU KEFALETİYLE mi — `true`? İkincisi daha zayıf bir güven
-    /// modelidir (kurucunun sözü), bu yüzden UI'de uyarı gösterilir
-    /// (bkz. packet.rs `GroupUpdate.member_devices` güvenlik notu).
-    /// `#[serde(default)]` — bu alan olmadan kaydedilmiş eski kişiler
-    /// doğrudan eklenmiş (false) sayılır.
+    /// Whether this contact was added DIRECTLY (in-person QR or manual pairing, TOFU): `false`. Or through a group, on the strength of the
+    /// FOUNDER'S VOUCH: `true`. The second is a weaker trust model (it rests on the founder's word), so the UI shows a warning for it
+    /// (see the security note on `GroupUpdate.member_devices` in packet.rs).
+    /// `#[serde(default)]`: contacts saved before this field existed count as added directly (`false`).
     #[serde(default)]
     pub added_via_group: bool,
 }
 
-/// Bir bağlantı kurulurken (spec 2.2) `(identity_id, device_fingerprint)`
-/// çiftinin ne yapılması gerektiğini belirten sonuç.
+/// The outcome that decides what to do when a connection is set up with an `(identity_id, device_fingerprint)` pair.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceCheckOutcome {
-    /// identity_id hiç bilinmiyor: TOFU, kaydet, verified=false, devam et.
+    /// The identity_id is unknown: TOFU. Save it, set verified=false, and continue.
     NewContactTofu,
-    /// Bilinen + Active cihaz: sessizce devam.
+    /// Known and ACTIVE device: continue silently.
     KnownActive,
-    /// Yeni cihaz ama geçerli imzalı DeviceAdd ile geldi: sessizce ekle,
-    /// sadece bilgi bildirimi göster.
+    /// A new device, but it arrived with a valid signed DeviceAdd: add it silently and show an informational notice only.
     NewDeviceViaSignedAdd,
-    /// Yeni cihaz, imzalı DeviceAdd YOK: BLOKLA, kullanıcıya uyarı göster.
+    /// A new device with NO signed DeviceAdd: BLOCK it and show a warning to the user.
     UnverifiedNewDeviceAlert,
 }
 
@@ -107,14 +94,12 @@ impl Contact {
             .unwrap_or(false)
     }
 
-    /// TOFU: yeni bir cihazı doğrulanmamış olarak kaydeder (ilk temas
-    /// veya alarm ekranında kullanıcı "kabul et" dediğinde çağrılır).
+    /// TOFU: records a new device as unverified. Called on first contact, or when the user accepts on the alarm screen.
     pub fn add_device_unverified(&mut self, fingerprint: String, now: u64) {
         self.push_device(fingerprint, now, false);
     }
 
-    /// İmzalı DeviceAdd zinciriyle gelen yeni cihazı sessizce ekler (spec
-    /// 2.2 — kullanıcıya sadece bilgi bildirimi gösterilir, alarm değil).
+    /// Adds a new device that arrives with a signed DeviceAdd chain, silently. The user sees only an informational notice, not an alarm.
     pub fn add_device_via_signed_chain(&mut self, fingerprint: String, now: u64) {
         self.push_device(fingerprint, now, true);
     }
@@ -212,10 +197,8 @@ impl Contact {
     }
 }
 
-/// Spec 2.2'deki karar ağacını uygular. `has_valid_signed_device_add`,
-/// çağıran tarafından önceden hesaplanmış olmalı (bu paket gerçekten
-/// bilinen bir Active cihaz tarafından imzalanmış bir DeviceAdd ile mi
-/// geldi, yoksa çıplak bir "ben buyum" iddiası mı).
+/// Applies the decision tree from the Description.md section 2.2. `has_valid_signed_device_add` must be computed by the caller in advance:
+/// it says whether this packet really came with a DeviceAdd signed by a KNOWN ACTIVE device, or is a bare "it's me" claim.
 pub fn check_incoming_device(
     contact: Option<&Contact>,
     device_fingerprint: &str,
