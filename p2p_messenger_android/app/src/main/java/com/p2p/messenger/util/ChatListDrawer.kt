@@ -8,26 +8,19 @@ import com.p2p.messenger.ChatsFragment
 import com.p2p.messenger.R
 
 /**
- * "soldan bir drag barla sürüklenebilir açılıp
- * kapanan chat list" — ChatActivity/GroupChatActivity'nin soldan açılan
- * sohbet listesi çekmecesi (bkz. activity_chat.xml `DrawerLayout` +
- * `chatListDrawerContainer`). İkisi arasında paylaşılan tek bir kurulum
- * fonksiyonu — çekmecenin kendisi, içindeki `ChatsFragment` örneği ve geri
- * tuşu davranışı HER İKİ ekranda da birebir aynı olmalı.
+ * The chat list drawer that slides in from the left, in ChatActivity and GroupChatActivity (see `DrawerLayout` and `chatListDrawerContainer` in
+ * activity_chat.xml). One shared setup function serves both screens. The drawer itself, the `ChatsFragment` inside it, and the back button behaviour
+ * must be identical on both screens.
  */
 object ChatListDrawer {
 
     /**
-     * `onCreate`'ten, `setContentView`'den SONRA çağrılır. Çekmece içindeki
-     * `ChatsFragment`'e (bkz. `activity_chat.xml` `android:name` ile
-     * kendiliğinden oluşturulan `FragmentContainerView`) bir sohbete
-     * dokunulduğunda BU activity'yi kapatmasını söyler — aksi halde
-     * çekmeceden açılan her sohbet, üstüne yığılan yeni bir Activity
-     * yaratır ve geri tuşu sonsuz bir yığını geriye sarardı.
+     * Called from `onCreate`, AFTER `setContentView`. It tells the `ChatsFragment` inside the drawer (created automatically by the `android:name` on the
+     * `FragmentContainerView` in activity_chat.xml) that tapping a chat must close THIS activity. Otherwise every chat opened from the drawer would create a
+     * new Activity stacked on top, and the back button would unwind an endless stack.
      *
-     * Geri tuşu: çekmece açıkken SADECE onu kapatır (sohbetten ÇIKMAZ) —
-     * standart `DrawerLayout` davranışı, kullanıcının "yanlışlıkla çekmeceyi
-     * açtım, geri tuşuna bastım, tüm sohbetten çıktım" şaşkınlığını önler.
+     * Back button: while the drawer is open, it only closes the drawer (it does NOT leave the chat). That is the standard `DrawerLayout` behaviour. It stops
+     * the surprise of "I opened the drawer by mistake, pressed back, and left the whole chat".
      */
     fun setup(activity: AppCompatActivity, onBack: () -> Boolean = { false }): DrawerLayout? {
         val drawer = activity.findViewById<DrawerLayout>(R.id.chatDrawerLayout) ?: return null
@@ -40,7 +33,7 @@ object ChatListDrawer {
                 if (drawer.isDrawerOpen(GravityCompat.START)) {
                     drawer.closeDrawer(GravityCompat.START)
                 } else if (onBack()) {
-                    // The screen used Back itself (closed its search bar).
+                // The screen used Back itself (closed its search bar).
                 } else {
                     activity.finish()
                 }

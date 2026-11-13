@@ -22,12 +22,9 @@ import androidx.annotation.StringRes
 import com.p2p.messenger.R
 
 /**
- * sabit bir renk
- * paletinin (önceki, basit swatch grid deneme) YERİNE — Doygunluk/Değer
- * (SV) karesi + Renk tonu (Hue) çubuğundan oluşan klasik HSV seçici, artı
- * elle Hex girişi. Harici bir kütüphane EKLEMEZ (bu ortamda Gradle build'i
- * doğrulanamıyor, bkz. dosyadaki diğer "yeni bağımlılıktan kaçın" notları)
- * — tamamen `Canvas`/`Shader` ile elle çizilir.
+ * Classic HSV picker, with a Saturation/Value (SV) square and a Hue bar, plus manual hex entry. It replaces a fixed colour swatch grid. No external
+ * library is added (the Gradle build cannot be verified in this environment; see the other notes in this file about avoiding new dependencies). It is
+ * drawn entirely by hand with `Canvas` and `Shader`.
  */
 private class SvPickerView(context: Context) : View(context) {
     var hue: Float = 0f
@@ -157,8 +154,7 @@ private class HuePickerView(context: Context) : View(context) {
 }
 
 object HsvColorPickerDialog {
-    /** `onPicked(null)` = "Sıfırla" (tema varsayılanına dön), diyalog
-     *  `Reset` butonuyla tetiklenir. */
+    /** `onPicked(null)` means "Reset" (back to the theme default). The dialog triggers it with its `Reset` button. */
     fun show(context: Context, @StringRes titleRes: Int, initialColor: Int?, onPicked: (Int?) -> Unit) {
         val density = context.resources.displayMetrics.density
         fun dp(v: Int) = (v * density).toInt()

@@ -24,9 +24,8 @@ object ReadStatePrefs {
     }
 
     /**
-     * Çoklu-cihaz (spec 1.7.1): bir kardeş cihazdan gelen "okundu"
-     * senkronunu uygular — `timestamp`, mevcut değerden yeniyse ileri
-     * taşınır (asla geri gitmez). bkz. P2PService "read_state_sync" olayı.
+     * Applies a "read" sync that came from a sibling device: `timestamp` moves forward if it is newer than the current value. It never moves backward.
+     * See the P2PService "read_state_sync" event.
      */
     fun markReadAt(context: Context, conversationId: String, timestamp: Long) {
         if (conversationId.isEmpty()) return

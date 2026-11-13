@@ -1,21 +1,14 @@
 package com.p2p.messenger.util
 
 /**
- * Spec dışı, kullanıcı isteği ("anlık çekim ... diske kaydedilmeden"):
- * `CameraCaptureActivity` ile onu başlatan sohbet ekranı arasında JPEG
- * baytlarını taşıyan tek seferlik bellek içi kutu.
+ * A one-shot in-memory box that carries JPEG bytes between `CameraCaptureActivity` and the chat screen that launched it. The photo is never written to disk.
  *
- * Neden Intent extra DEĞİL: Binder işlem tamponu ~1 MB'lık toplam bir
- * sınıra tabidir (`TransactionTooLargeException`) — birkaç yüz KB'lık bir
- * fotoğraf bunu tek başına aşmasa bile sınırın hemen dibinde çalışmak
- * kırılgan olurdu. Neden geçici DOSYA değil: kullanıcı isteği tam olarak
- * fotoğrafın diske düşmemesi. Bu nesne yalnızca aynı süreç içindeki iki
- * Activity arasında el değiştirdiği için ikisine de gerek yok.
+ * Why not an Intent extra: the Binder transaction buffer has a total limit of about 1 MB (`TransactionTooLargeException`). A photo of a few hundred KB would not
+ * exceed it alone, but running that close to the limit would be fragile. Why not a temporary FILE: the point is that the photo must not reach the disk. This
+ * object only passes between two activities in the same process, so neither needs a file.
  *
- * `take()` okuduğu değeri AYNI ANDA temizler: aynı fotoğrafın (ör. ekran
- * döndürme sonrası yeniden `onActivityResult`) iki kez gönderilmesini
- * yapısal olarak imkânsız kılar ve baytları bellekte gereksiz yere asılı
- * bırakmaz.
+ * `take()` clears the value it reads at the same time. That makes sending the same photo twice (for example after a screen rotation redelivers
+ * `onActivityResult`) structurally impossible, and it does not keep the bytes in memory any longer than needed.
  */
 object CapturedImage {
     @Volatile

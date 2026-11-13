@@ -3,13 +3,9 @@ package com.p2p.messenger.util
 import java.nio.charset.StandardCharsets
 
 /**
- * QR kodları (spec 1.3) CBOR ile kodlanmış ham baytlar taşır — düz metin
- * değil. ZXing'in encoder/decoder API'leri String tabanlıdır; ham baytları
- * kayıpsız taşımak için ISO-8859-1 (Latin-1) kullanıyoruz: bu kodlamada her
- * bayt (0-255) tam olarak bir karaktere eşlenir, bu yüzden
- * bytesToLatin1String(bytes).let { latin1StringToBytes(it) } == bytes
- * garantisi vardır. QR üretirken (ContactsFragment "Kodumu Göster") ve QR
- * okurken (QrScanActivity) aynı kodlama kullanılmalıdır.
+ * QR codes carry raw CBOR-encoded bytes, not plain text. ZXing's encoder and decoder APIs are String based. To carry raw bytes losslessly, ISO-8859-1 (Latin-1)
+ * is used: in this encoding every byte (0-255) maps to exactly one character. So `bytesToLatin1String(bytes).let { latin1StringToBytes(it) } == bytes` always
+ * holds. The same encoding must be used when generating a QR (ContactsFragment "Show my code") and when reading one (QrScanActivity).
  */
 object QrBinaryCodec {
     fun bytesToLatin1String(bytes: ByteArray): String =

@@ -114,9 +114,8 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
     init {
         handle.background = tab
         handle.setOnClickListener { toggle() }
-        // Listen only while the chat is on screen. Held until onDestroy, a chat
-        // left in the back stack kept the service in "a screen is open" mode
-        // with the phone locked: no power save, no deep idle (9S 2026-10-02).
+        // Listen only while the chat is on screen. The listener was held until onDestroy. A chat left in the back stack kept the service in "a screen is
+        // open" mode with the phone locked. That blocked power save and deep idle.
         activity.lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
                 P2PService.addMessageListener(listener)
@@ -268,8 +267,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
         remember(step)
         io.execute {
             val result = P2PLib.whiteboardAddStroke(peer, groupId, shown, stroke.shade, stroke.width, pointBytes(stroke))
-            // Invalid input from the core takes the error path as well, not a
-            // NumberFormatException (bkz. hexToBytesOrNull above).
+            // Invalid input from the core takes the error path as well, not a NumberFormatException (see hexToBytesOrNull above).
             val ids = if (result.startsWith("Error")) null else hexToBytes(result)
             val failed = ids == null
             // The stroke disappears from the board without a word otherwise.

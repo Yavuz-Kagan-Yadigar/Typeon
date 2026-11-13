@@ -3,14 +3,11 @@ package com.p2p.messenger.util
 import android.content.Context
 
 /**
- * "bildirimlerde mesajları göster" anahtarı
- * (Ayarlar). Varsayılan KAPALI (#43); kapalıyken
- * bildirim yalnızca "Yeni mesaj" der — ne gönderen ne metin görünür (bkz. NotificationHelper).
+ * The "show messages in notifications" switch (Settings). OFF by default. When it is off, a notification says only "New message". It shows neither the sender
+ * nor the text. See NotificationHelper.
  *
- * Bu, `NotificationHelper`'daki kilit ekranı `publicVersion`
- * redaksiyonundan FARKLI ve ondan bağımsız bir katman: o yalnızca cihaz
- * kilitliyken ve sistemin "hassas içeriği gizle" ayarı açıkken devreye
- * girer; bu anahtar ise kilit açıkken de her zaman geçerlidir.
+ * This is a DIFFERENT layer from the lock-screen `publicVersion` redaction in NotificationHelper, and it is independent of it. That one applies only while the
+ * device is locked and the system "hide sensitive content" setting is on. This switch always applies, even when the device is unlocked.
  */
 object NotificationPrefs {
     private const val PREFS_NAME = "p2p_settings"

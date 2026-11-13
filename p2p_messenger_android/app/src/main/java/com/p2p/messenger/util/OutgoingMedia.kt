@@ -119,9 +119,8 @@ object OutgoingMedia {
             fileName to mimeType
         }
 
-    /** A received image on the clipboard: its decrypted copy (a JPEG XL is
-     *  already PNG there, bkz. `savedAs`). The AppLock purge of `plain_cache`
-     *  makes a later paste fail. */
+    /** A received image on the clipboard: its decrypted copy. A JPEG XL is already a PNG there (see `savedAs`). The AppLock purge of `plain_cache` makes a later
+     *  paste fail. */
     fun copyImage(activity: androidx.appcompat.app.AppCompatActivity, fileId: String) {
         activity.lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val path = try {

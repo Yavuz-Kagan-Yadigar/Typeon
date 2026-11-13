@@ -7,13 +7,9 @@ import android.view.View
 import androidx.core.content.ContextCompat
 
 /**
- * bağlantı durumunu (karşı taraf VEYA bu
- * cihazın kendisi) küçük renkli bir nokta + "bağlanılıyor" durumunda nabız
- * gibi atan (pulse) bir animasyonla gösterir. ChatActivity'de KARŞI
- * TARAFIN durumu (`dotPeerStatus`) VE bu cihazın kendi durumu
- * (`dotOwnStatus`) için, GroupChatActivity'de sadece bu cihazın kendi
- * durumu için kullanılır — üçünün de animator yaşam döngüsü (başlat/
- * durdur/`onPause`'da iptal) birebir aynı olduğundan tek bir yerde.
+ * Shows the connection state (of the other side, OR of this device itself) as a small coloured dot. While "connecting", the dot pulses.
+ * ChatActivity uses it for the PEER state (`dotPeerStatus`) and for this device's own state (`dotOwnStatus`). GroupChatActivity uses it only for
+ * this device's own state. All three share the same animator lifecycle (start, stop, cancel in `onPause`), so the logic lives in one place.
  */
 class PulsingStatusDot(private val dot: View) {
     private var pulseAnimator: ObjectAnimator? = null
@@ -42,8 +38,7 @@ class PulsingStatusDot(private val dot: View) {
         }
     }
 
-    /** bkz. `Activity.onPause` — Activity görünür değilken bir pulse
-     *  animasyonunun arka planda vsync'e kayıtlı kalmaması için. */
+    /** See `Activity.onPause`. A pulse animation must not stay registered with vsync in the background while the Activity is not visible. */
     fun cancelPulse() {
         pulseAnimator?.cancel()
     }

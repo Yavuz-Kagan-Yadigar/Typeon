@@ -5,13 +5,9 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * "(sent at: HH:MM day)" biçiminde mutlak
- * (göreli DEĞİL — bkz. ChatAdapter.formatTimestamp'in "5m ago"/"2h ago"
- * biçimi, o sohbet LİSTESİ satırları için ayrı bir amaca hizmet ediyor)
- * bir zaman damgası. Hem mesaj balonlarının (bkz. SimpleChatAdapter) HER
- * birinin altında HEM DE Ayarlar'daki bekleyen mesajlar listesinin (bkz.
- * PendingMessagesAdapter) "son deneme" sütununda kullanılan TEK, paylaşılan
- * biçimlendirme — ikisi de aynı görünmeli.
+ * An ABSOLUTE timestamp of the form "(sent at: HH:MM day)". It is not relative (see ChatAdapter.formatTimestamp, whose "5m ago" / "2h ago" format serves a
+ * different purpose in the chat LIST rows). This is the ONE shared format used both under EVERY message bubble (see SimpleChatAdapter) and in the "last try"
+ * column of the pending-messages list in Settings (see PendingMessagesAdapter). Both must look the same.
  */
 fun formatAbsoluteTime(timestampMs: Long): String {
     if (timestampMs <= 0) return ""

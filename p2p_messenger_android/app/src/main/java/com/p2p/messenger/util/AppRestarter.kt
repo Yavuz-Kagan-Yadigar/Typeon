@@ -6,27 +6,17 @@ import androidx.appcompat.app.AlertDialog
 import com.p2p.messenger.R
 
 /**
- * sohbet/ayarlar üst çubuğundaki hızlı "Tor
- * bağlantısını kes/yeniden kur" düğmesi için.
+ * Used by the quick "disconnect / reconnect Tor" button on the chat and settings top bar.
  *
- * Bugün ağ katmanı (özellikle libp2p swarm'a eklenen Tor dial transport'u,
- * bkz. tor.rs `ArtiDialTransport`) CANLI bir süreçte yeniden kurulmayı
- * desteklemiyor — mevcut Ayarlar'daki Tor açma/kapama anahtarı bile sadece
- * tercihi kaydedip kullanıcıdan MANUEL olarak uygulamayı yeniden başlatmasını
- * istiyor (bkz. SettingsFragment `tor_switch`, `R.string.tor_restart_needed`
- * ve SECURITY.md "toggle takes effect on the next network-layer start"
- * notu). Rust tarafında `start_network`'ü canlı bir süreçte GÜVENLE ikinci
- * kez çağırmanın (eski swarm'ın soketlerinin/arka plan görevlerinin
- * (bkz. tor.rs bootstrap yeniden deneme döngüsü) düzgün kapandığından emin
- * olmadan) doğrulanmış bir yolu yok — bu yüzden burada YENİ/doğrulanmamış
- * bir Rust "sıcak yeniden başlatma" mantığı İCAT EDİLMİYOR.
+ * Today the network layer does NOT support being rebuilt inside a LIVE process. This includes the Tor dial transport added to the libp2p swarm (see
+ * `ArtiDialTransport` in tor.rs). Even the Tor on/off switch in Settings only saves the preference, and asks the user to restart the app by hand (see
+ * SettingsFragment `tor_switch`, `R.string.tor_restart_needed`, and the note "toggle takes effect on the next network-layer start" in SECURITY.md). On the
+ * Rust side there is no verified way to call `start_network` a second time in a live process SAFELY. The old swarm's sockets and background tasks (see the
+ * Tor bootstrap retry loop in tor.rs) must be shut down cleanly first, and that is not verified. So no new, unverified "hot restart" logic is written here.
  *
- * Bunun yerine tek güvenli, tamamen zaten var olan yol kullanılıyor:
- * uygulama SÜRECİNİ tamamen kapatıp yeniden başlatmak — bu, kullanıcının
- * uygulamayı Son Uygulamalar'dan kapatıp tekrar açmasıyla BİREBİR AYNI
- * (ve zaten normal her açılışta çalışan, kanıtlanmış) kod yolunu izler:
- * `MainActivity.onCreate` -> `initDatabase`/`loadIfPresent`/
- * `startNetworkService` -> `P2PLib.startNetwork` TEMİZ bir süreçte.
+ * Instead, the one safe path that already exists is used: the app PROCESS is killed completely and restarted. That is exactly what happens when the user
+ * closes the app from Recents and opens it again. It follows the same code path that already runs on every normal start:
+ * `MainActivity.onCreate` -> `initDatabase` / `loadIfPresent` / `startNetworkService` -> `P2PLib.startNetwork` in a CLEAN process.
  */
 object AppRestarter {
     fun restart(context: Context) {
@@ -41,10 +31,8 @@ object AppRestarter {
     }
 
     /**
-     * Yıkıcı bir işlem olduğundan (tüm süreci kapatır) doğrudan
-     * tetiklenmez, önce onay istenir. Hem toolbar düğmesi (bkz.
-     * `wireTorReconnectButton`) hem de SettingsFragment'ın üst çubuk menü
-     * öğesi bunu paylaşır.
+     * This is destructive (it kills the whole process), so it is never triggered directly. The user is asked to confirm first. Both the toolbar button (see
+     * `wireTorReconnectButton`) and the top-bar menu item in SettingsFragment share this.
      */
     fun confirmAndRestart(context: Context) {
         AlertDialog.Builder(context)
