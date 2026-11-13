@@ -40,23 +40,15 @@ const FETCH_HISTORY_LABEL: &str = "Fetch older history";
 /// the edge. AdwClamp caps the natural width outright, which is exactly the
 /// guarantee a chat bubble needs.
 const BUBBLE_MAX_WIDTH: i32 = 460;
-/// Spec dışı, kullanıcı isteği ("merging message bubles on linux?" — bkz.
-/// Android `MergedBubbleDecoration`, AYNI eşik): art arda, aynı göndericiden,
-/// bu pencere içinde gelen mesajlar tek bir görsel grup gibi birleşir —
-/// köşeleri değen kenarlarda küçülür, aralarındaki boşluk daralır.
-/// Android'in tam union-path çizimi burada YOK: GTK CSS'te web'deki
-/// `::before`/`::after` sözde-öğeleri karşılığı olmadığından "arka planla
-/// aynı renkte bir yama ile köşeyi ye" numarası bile AYRI bir widget
-/// gerektiriyor (bkz. `mark_group_seam`/`SEAM_NOTCH_SIZE`) — RecyclerView'ın
-/// tek bir `Canvas`'a tüm balonları birden çizdiği Android tarafının aksine.
-/// Bu yüzden burada "ucuz" yöntem: köşe yarıçapını CSS sınıflarıyla küçültüp
-/// (bkz. theme.rs `.continued-top`/`.continued-bottom`) genişlik farkı olan
-/// dikişlere SABİT boyutlu, dairesel küçük bir çentik ekliyoruz — tam
-/// geometrik eşleşme değil ama aynı "düz kesim değil, yumuşak birleşim"
-/// hissini çok daha ucuza veriyor.
+/// Messages from the same sender that arrive within this window merge into one visual group, like the Android
+/// `MergedBubbleDecoration` with the same threshold. The edges that touch shrink their corner radius, and the gap between
+/// them narrows. Android draws the full merged outline in one canvas pass. GTK CSS has no `::before` / `::after`
+/// pseudo-elements, so the corner patch needs its own widget (see `mark_group_seam` and `SEAM_NOTCH_SIZE`). So this
+/// side uses the cheap method: corner radii are reduced with CSS classes (see theme.rs `.continued-top` /
+/// `.continued-bottom`), and a small fixed circular notch is added at seams where the width changes. It is not an
+/// exact geometric match, but it gives the same soft-join feel at much lower cost.
 const BUBBLE_GROUP_WINDOW_MS: u64 = 2 * 60 * 1000;
-/// Bir dikişteki genişlik farkı bunun ALTINDAYSA çentik eklenmez — görünmez
-/// kadar küçük bir fark için fazladan bir widget/render maliyetine değmez.
+/// A seam whose width difference is below this gets no notch. A difference that small is not worth an extra widget or render cost.
 // Steps narrower than this are drawn as a plain, slightly rounded join.
 const SEAM_NOTCH_MIN_DELTA: i32 = 8;
 /// Largest fillet radius; smaller steps / shorter bubbles get a smaller one
@@ -67,9 +59,8 @@ const SHADE_STEPS: i32 = 24;
 /// Dev harness only (`demo_bubbles`).
 #[cfg(debug_assertions)]
 const SEAM_NOTCH_SIZE: i32 = 12;
-/// Çentik dairesinin çapı (px) — SABİT, gerçek genişlik farkına göre
-/// büyümez (bkz. dosya başı notu — kesin geometri yerine ucuz bir görsel
-/// ipucu).
+/// Diameter of the notch circle, in px. It is FIXED. It does not grow with the real width difference. It is a cheap
+/// visual hint, not exact geometry.
 
 /// Idle time after the last keystroke before we say we stopped typing.
 const TYPING_TIMEOUT_MS: u64 = 4_000;
@@ -116,15 +107,10 @@ struct Entry {
     /// fresh on screen.
     edited: bool,
     attachment: Option<Attachment>,
-    /// "flatpakda bu son ui
-    /// düzeltmelerini hiçbirini görmüyorum" — Android tarafında aynı hata
-    /// zaten düzeltilmişti, bkz. db.rs `message_seen` tablosu): önceden bu
-    /// alan hiç yoktu, `build_bubble` her zaman `false` ile başlıyordu —
-    /// yani bir mesajın "görüldü" durumu SADECE o an sohbet ekranı açıkken
-    /// gelen canlı bir olaydan geliyordu, sohbeti kapatıp yeniden açmak
-    /// tikleri sıfırlıyordu. Artık kalıcı çekirdek tablosundan gelen
-    /// `ArchivedMessage.seen_by` boş değilse (bkz. `load_page`) doğrudan
-    /// burada taşınıyor.
+        /// Read receipt state of this message ("seen"). It used to be a field that was always `false` at build time. So the
+        /// seen state came only from a live event while the chat was open, and closing and reopening the chat reset the ticks.
+        /// Now the value from the core's persistent table (`ArchivedMessage.seen_by`) is carried here, when it is non-empty
+        /// (see `load_page`).
     seen: bool,
     /// Reaction summary from the core ("😂2 👍"), empty when none.
     reactions: String,
@@ -133,10 +119,9 @@ struct Entry {
 /// The widgets of one rendered bubble that later events may need to touch.
 struct Bubble {
     root: gtk::Widget,
-    /// Same widget as `root`, kept typed — `mark_group_seam` adds a small
-    /// notch to it after the fact (bkz. `BUBBLE_GROUP_WINDOW_MS` dosya başı
-    /// notu) when a LATER bubble turns out to continue this one; `root`
-    /// alone (a bare `gtk::Widget`) cannot take `add_overlay`.
+        /// Same widget as `root`, kept typed. `mark_group_seam` adds a small notch to it after the fact, when a LATER bubble
+        /// turns out to continue this one (see the `BUBBLE_GROUP_WINDOW_MS` note at the top of the file). `root` alone (a bare
+        /// `gtk::Widget`) cannot take `add_overlay`.
     overlay: gtk::Overlay,
     /// The actual coloured bubble box (`.bubble` CSS class) — `mark_group_seam`
     /// toggles its corner-radius classes; `root`/`overlay` are just the
@@ -239,7 +224,7 @@ struct ChatView {
     seen_sent: RefCell<HashSet<String>>,
     /// A shading pass is already scheduled (see `schedule_shading`).
     shade_pending: Cell<bool>,
-    /// bkz. `send_seen` — bekleyen debounce'lu okuma sınırı var mı.
+        /// See `send_seen`. Whether a debounced read boundary is pending.
     watermark_pending: Cell<bool>,
     /// Ascending by `order_key`; mirrors the widget order so an out-of-order
     /// arrival can be slotted in without walking the widget tree.
@@ -608,8 +593,8 @@ fn build_header(
     title_box.append(subtitle);
 
     let header = adw::HeaderBar::builder().title_widget(&title_box).build();
-    // bkz. `MainUi::toggle_sidebar` — kenar çubuğu kapatıldıysa geri açacak
-    // yol bir sohbet açıkken de gerekli (yer tutucu sayfasıyla AYNI desen).
+        // See `MainUi::toggle_sidebar`. If the sidebar was hidden, a way to show it again is needed while a chat is open too
+        // (the same pattern as the placeholder page).
     header.pack_start(&crate::ui::window::sidebar_toggle_button(&view.main));
 
     let (popover, items) = crate::ui::widgets::menu_popover();
@@ -1085,11 +1070,9 @@ fn fetch_page(
             } else {
                 message.timestamp
             },
-            // A missing status is an archive row from before the column
-            // existed; treating it as delivered is the safe reading.
-            // Ticks describe delivery of MY messages; a received one has none.
-            // "delivered" is the core's end-to-end Ack — a state between
-            // "sent" and "seen" (bkz. `format_meta`).
+                        // A missing status is an archive row from before the column existed. Treating it as delivered is the safe reading.
+                        // Ticks describe delivery of MY messages. A received one has none. "delivered" is the core's end-to-end Ack, a
+                        // state between "sent" and "seen" (see `format_meta`).
             status: mine.then(|| message.status.clone().unwrap_or_else(|| "sent".to_string())),
             reply_preview: message.reply_to_preview.clone(),
             reply_sender: message.reply_to_sender_identity_id.clone(),
@@ -1171,10 +1154,8 @@ fn attachment_entry(attachment: &core::AttachmentSummary, peer_fingerprint: &str
             duration_ms: attachment.duration_ms,
             sticker: attachment.sticker,
         }),
-        // Ekler için kalıcı bir "görüldü" kaynağı yok (bkz. `Entry.seen`
-        // notu — `message_seen` tablosu `files`'a değil
-        // `messages.message_id`'ye bağlı); ESKİ davranışla aynı, hiçbir
-        // zaman görüldü göstermiyordu.
+                // Attachments have no persistent "seen" source (see the `Entry.seen` note: the `message_seen` table is keyed on
+                // `messages.message_id`, not on `files`). Same as before: attachments never show "seen".
         seen: false,
         reactions: String::new(),
     }
@@ -1233,14 +1214,11 @@ impl ChatView {
             return;
         }
 
-        // bkz. `BUBBLE_GROUP_WINDOW_MS` dosya başı notu — hangi konuma
-        // gireceği (dolayısıyla hangi balonun "öncesi" sayılacağı) `build_bubble`'dan
-        // ÖNCE bilinmeli, çünkü grup durumu balonun KENDİ üst köşesini
-        // etkiliyor. Yalnızca GERİYE (önceki balona) bakılıyor — araya
-        // sırasız (gecikmeli) bir mesaj girerse, ondan SONRAKİ balonun grup
-        // durumu bu turda yeniden hesaplanmaz (bkz. dosya başı "ucuz yöntem"
-        // notu — nadir bir sınır durumu, en yaygın durum olan "en sona ekle"
-        // için tam doğru).
+                // The position a message will go to (and so which bubble counts as the one before it) must be known BEFORE
+                // `build_bubble`, because the group state affects the bubble's OWN top corners. Only the PREVIOUS bubble is looked
+                // at. If an out-of-order (late) message lands between, the group state of the bubble after it is not recomputed in
+                // this pass (see the "cheap method" note at the top of the file). A rare edge case. The common case, appending at the
+                // end, is handled exactly.
         let order = self.order.borrow();
         let position = order
             .iter()
@@ -1453,20 +1431,16 @@ impl ChatView {
             skin.remove_css_class("bubble");
             skin.remove_css_class(if entry.mine { "bubble-mine" } else { "bubble-theirs" });
         }
-        // bkz. `BUBBLE_GROUP_WINDOW_MS` dosya başı notu — `insert_entry`
-        // önceki balonla aynı grupta olduğuna karar verdiyse üst köşeler
-        // küçülür ve boşluk daralır (aynı sınıf `.bubble-mine`'ın tek başına
-        // taşıdığı "kuyruk" köşesini de — bkz. theme.rs — daha yüksek
-        // özgüllükle ezer, o yüzden `continued-bottom` ayrıca bir şey
-        // KALDIRMAK zorunda değil).
+                // If `insert_entry` decided this bubble is in the same group as the one before, its top corners shrink and the gap
+                // narrows. The same class also overrides the tail corner that `.bubble-mine` carries on its own (see theme.rs), with
+                // higher specificity, so `continued-bottom` does not need to remove anything.
         if continued_top {
             overlay.add_css_class("bubble-row-continued");
         } else {
             overlay.set_margin_top(6);
         }
-        // Ölçüm burada (Clamp'ın üst sınırı hesaba katılmış hâliyle, ham
-        // `skin` DEĞİL) yapılıyor ki `mark_group_seam` ikinci bir (ve o an
-        // potansiyel olarak yanlış) `measure()` çağrısına gerek duymasın.
+                // The measurement is taken here, with the Clamp's upper limit already applied (not the raw `skin`). That way
+                // `mark_group_seam` does not need a second `measure()` call, which could be wrong at that moment.
         let content_width = overlay.measure(gtk::Orientation::Horizontal, -1).1;
         let root: gtk::Widget = overlay.clone().upcast();
 
@@ -1504,18 +1478,13 @@ impl ChatView {
         })
     }
 
-    /// bkz. `BUBBLE_GROUP_WINDOW_MS` dosya başı notu. `current` az önce
-    /// `previous`'un grubuna eklendi — `previous`'un artık grubun SONU
-    /// olmadığını (bkz. `continued-bottom`) ve, genişlikleri belirgin
-    /// şekilde farklıysa, aradaki dikişi yumuşatan küçük bir çentiği
-    /// işaretler.
-    /// `current` just joined `previous`'s run. Draws the join like the phone:
-    /// the edge both bubbles are aligned to stays straight (square corners),
-    /// and where their widths differ the wider bubble keeps its outer
-    /// (convex) corner while the narrower one's corner becomes square, with a
-    /// concave fillet filling the inside corner between them. The widths are
-    /// read from the real allocation once the rows have been laid out — a
-    /// measure at build time was off by several pixels.
+        /// Called after `current` has just joined `previous`'s run. It marks that `previous` is no longer the END of the group
+        /// (see `continued-bottom`). If the two widths differ noticeably, it also marks a small notch that softens the seam
+        /// between them.
+        /// `current` just joined `previous`'s run. The join is drawn like the phone version: the edge both bubbles are aligned to
+        /// stays straight (square corners). Where their widths differ, the wider bubble keeps its outer (convex) corner, while the
+        /// narrower one's corner becomes square, with a concave fillet filling the inside corner between them. The widths are read
+        /// from the real allocation once the rows have been laid out. A measure at build time was off by several pixels.
     fn mark_group_seam(&self, previous: &Rc<Bubble>, current: &Rc<Bubble>) {
         // Time and ticks only on the last bubble of a run, like the phone.
         previous.meta.set_visible(false);
@@ -1853,15 +1822,11 @@ impl ChatView {
         );
     }
 
-    /// Kicks a download off the core. H125 straggler: `core::download_file`
-    /// takes the global core mutex the poll thread can hold for seconds, so
-    /// the inline call used to freeze the whole window (and every voice
-    /// player with it) whenever the poller was mid-round. The work closure
-    /// carries only Send data; the widget state is touched exclusively in
-    /// `then`, which `run_in_background` runs back on the GTK thread.
-    /// `hide_on_start` (the generic card's "Download" button) is hidden only
-    /// on a confirmed start — exactly the old success/failure split: a failed
-    /// start leaves the button up so there is still a way to retry.
+        /// Starts a download from the core. `core::download_file` takes the global core mutex, which the poll thread can hold for
+        /// seconds. So the inline call used to freeze the whole window (and every voice player with it) whenever the poller was in
+        /// the middle of a round. The work closure carries only Send data. The widget state is touched only in `then`, which
+        /// `run_in_background` runs back on the GTK thread. `hide_on_start` (the generic card's "Download" button) is hidden only on
+        /// a confirmed start. A failed start leaves the button visible, so there is still a way to retry.
     fn start_download(self: &Rc<Self>, state: &Rc<AttachmentState>, hide_on_start: Option<gtk::Button>) {
         state.download_started_at.set(util::now_ms());
         let file_id = state.file_id.clone();
@@ -2111,15 +2076,11 @@ impl ChatView {
             }
         }
 
-        // `Edit`in metin girişi bir eke uygulanamaz (protokolün `Edit`
-        // içeriği düz metin), o yüzden ek varken hâlâ atlanır — ama
-        // `Delete` metinden bağımsız çalışır (bkz. `delete_message` — aynı
-        // paylaşılan Rust çekirdek yolu, `purge_attachment_if_exists` dahil,
-        // Android tarafı zaten bunu destekliyor). Önceden BU koşul da
-        // `entry.attachment.is_none()` gerektiriyordu, yani bir ek
-        // gönderildikten sonra Linux kullanıcısının onu silmesinin HİÇBİR
-        // yolu yoktu (disk sızıntısı + yanlışlıkla gönderilen dosyayı
-        // geri alamama).
+                // An edit cannot be applied to an attachment's caption (the protocol's `Edit` content is plain text), so it is still
+                // skipped when an attachment is present. But `Delete` works regardless of the text (see `delete_message`, the same shared
+                // Rust core path, including `purge_attachment_if_exists`, which Android also supports). Before, this condition also
+                // required `entry.attachment.is_none()`. So after an attachment was sent, the Linux user had NO way to delete it: a disk
+                // leak, and no way to take back a file sent by mistake.
         if let Some(attachment) = entry.attachment.as_ref().filter(|a| a.sticker && !entry.mine && !entry.deleted) {
             let view = self.clone();
             let file_id = attachment.file_id.clone();
@@ -2388,9 +2349,8 @@ impl ChatView {
             return;
         }
 
-        // bkz. `prompt_attachment_caption` dosya başı notu — sesli mesaj da
-        // fotoğraf/eklenti ile AYNI akıştan geçer: isteğe bağlı açıklama +
-        // (varsa) aktif yanıt.
+                // See the `prompt_attachment_caption` note at the top of the file. A voice message goes through the same flow as photos
+                // and files: an optional caption, plus the active reply if there is one.
         let reply = self.reply_to.borrow().clone();
         let (reply_id, reply_preview, reply_sender) = match reply {
             Some((id, preview, sender)) => (Some(id), Some(preview), sender),
@@ -2542,15 +2502,11 @@ impl ChatView {
         }
     }
 
-    /// Spec dışı, kullanıcı isteği ("fotoğraf/eklenti/ses atarken de bir
-    /// mesaj yanıtlanabilmeli ve altına bir yazı yazılabilmeli" — bkz.
-    /// Android `ChatActivity.promptAttachmentCaption` AYNI tasarım kararı):
-    /// eklenti/ses göndermeden hemen önce isteğe bağlı bir açıklama sorar.
-    /// Yanıt için AYRI bir adım yok — ekran zaten aktif bir yanıt tutuyorsa
-    /// (bkz. `reply_to`) eklenti onunla birlikte gider; bu diyalog SADECE
-    /// açıklamayı sorar. Gerçek bir "vazgeç" yolu kasıtlı olarak yok — dosya
-    /// zaten seçilmiş/kaydedilmiş, "Skip" boş açıklamayla göndermeye devam
-    /// eder (Android'deki aynı davranış).
+        /// Asks for an optional caption right before a file or voice message is sent (same design as Android
+        /// `ChatActivity.promptAttachmentCaption`). There is no separate step for the reply. If the screen already holds an active
+        /// reply (see `reply_to`), the attachment is sent with it. This dialog asks only for the caption. There is deliberately no
+        /// real "cancel" path: the file is already chosen or recorded, and "Skip" keeps sending with an empty caption (the same
+        /// behaviour as on Android).
     fn prompt_attachment_caption(self: &Rc<Self>, offer_hi_res: bool, on_confirm: impl FnOnce(String, bool) + 'static) {
         let Some(window) = self.app().window() else {
             on_confirm(String::new(), false);
@@ -2575,12 +2531,10 @@ impl ChatView {
         dialog.set_default_response(Some("send"));
         dialog.set_close_response("skip");
         dialog.set_response_appearance("send", adw::ResponseAppearance::Suggested);
-        // `connect_response`'un beklediği `Fn` ile elimizdeki `FnOnce` (bkz.
-        // ses kaydı çağıranı — `Recording::finish` `self`'i TÜKETİYOR, o
-        // yüzden onu saran kapanış birden fazla kez ÇAĞRILAMAZ) arasındaki
-        // farkı kapatan standart desen: `FnOnce`'u bir `RefCell<Option<_>>`'a
-        // koy, sinyal (pratikte tek sefer ateşlenir) onu `take()` ile ÇEKİP
-        // çağırır — ikinci bir ateşleme (olmaması gerekir) sessizce no-op.
+                // The standard pattern that bridges the `Fn` that `connect_response` expects with the `FnOnce` we have (the voice
+                // recording's finisher: `Recording::finish` CONSUMES `self`, so the closure wrapping it cannot be called more than once):
+                // put the `FnOnce` in a `RefCell<Option<_>>`. When the signal fires (in practice only once), `take()` takes it out and
+                // calls it. A second firing (which should not happen) is a silent no-op.
         let on_confirm = std::cell::RefCell::new(Some(on_confirm));
         dialog.connect_response(None, move |_, response| {
             let caption = if response == "send" {
@@ -2622,9 +2576,8 @@ impl ChatView {
         // Decoded in the worker below, never on the GTK thread.
         let want_preview = util::is_image(&mime);
 
-        // bkz. `prompt_attachment_caption` dosya başı notu — ekran zaten
-        // aktif bir yanıt tutuyorsa (metin mesajıyla AYNI mantık, bkz.
-        // `send_message`) eklenti de onunla birlikte gider.
+                // See the `prompt_attachment_caption` note at the top of the file. If the screen already holds an active reply (the
+                // same logic as a text message, see `send_message`), the attachment goes with it.
         let reply = self.reply_to.borrow().clone();
         let (reply_id, reply_preview, reply_sender) = match reply {
             Some((id, preview, sender)) => (Some(id), Some(preview), sender),
@@ -3095,10 +3048,9 @@ impl ChatView {
 
     fn send_seen(self: &Rc<Self>, entry: &Entry) {
         match &self.conversation {
-            // 1:1: tekil `Seen` yerine okuma sınırı (ReadStateSync) — karşı
-            // taraf onu bu mesaja da uygular, güvenilir teslim edilir. Bir
-            // okuma patlaması tek pakette toplanır; `reload()` sırasında
-            // geçmişin tamamı bu yoldan geçse de sadece bir tane gider.
+                        // 1:1: a read boundary (ReadStateSync) is used instead of a single `Seen`. The other side applies it to this message
+                        // too, and it is delivered reliably. A burst of reads is collected in one packet. Even when the whole history passes
+                        // through this path during `reload()`, only one packet goes out.
             Conversation::Direct { fingerprint, .. } => {
                 if self.watermark_pending.replace(true) {
                     return;
@@ -3443,9 +3395,8 @@ impl ChatView {
                 let reason = event.string("error");
                 self.apply_attachment_state(&event.string("file_id"), "failed", Some(reason));
             }
-            // dosya yerelden silindi (depolama sınırı tahliyesi
-            // ya da mesajın silinmesi). Hiçbir istemci dinlemiyordu, balon
-            // "tamamlandı" görünmeye devam ediyordu.
+                        // The file was deleted locally (eviction from the storage limit, or the message was deleted). No client was listening,
+                        // so the bubble kept looking "complete".
             (_, "file_evicted") => {
                 self.apply_attachment_state(&event.string("file_id"), "offered", None);
             }
@@ -4231,11 +4182,9 @@ fn place_bubble(column: &gtk::Box, mine: bool) -> (gtk::Overlay, gtk::Box) {
         })
         .build();
 
-    // Spec dışı, kullanıcı isteği (bkz. dosya başı "birleşen balonlar" notu):
-    // her balon artık bir `Overlay` içinde — normalde boş, ana çocusunun
-    // (Clamp) boyutunu/hizalamasını AYNEN korur, sıfır ekstra maliyet. Sadece
-    // `mark_group_seam` sonradan (bu balonun bir SONRAKİ mesajla aynı grupta
-    // olduğu anlaşıldığında) küçük bir çentik bindirebilsin diye burada.
+        // Each bubble is now inside an `Overlay`. It is normally empty and keeps the child's (Clamp) size and alignment exactly, at
+        // no extra cost. It is here so that `mark_group_seam` can later add a small notch to this bubble, when it is found to be in
+        // the same group as a NEXT message.
     let overlay = gtk::Overlay::builder().child(&clamp).build();
     (overlay, skin)
 }
@@ -4256,14 +4205,11 @@ pub fn demo_bubbles() -> gtk::Widget {
         .hexpand(true)
         .build();
 
-    // Spec dışı, hata ayıklama (kullanıcı: "linux hala olmamış" — ekran
-    // görüntüsünde 5 art arda "mine" balonun HİÇBİRİ birleşmiyordu):
-    // gerçek sohbet ekranını TIKLAYARAK gezmeden `mark_group_seam`/
-    // `.continued-top`/`.continued-bottom` CSS'inin GERÇEKTEN render
-    // olup olmadığını izole etmek için ilk beş örnek, kullanıcının
-    // ekran görüntüsündeki AYNI kısa/art arda "mine" düzenini taklit
-    // ediyor — gruplama mantığının kendisi (`insert_entry`) burada YOK,
-    // sadece SONUCU (köşe sınıfları + çentik) elle uygulanıyor.
+        // Debugging helper. A user reported that none of five consecutive "mine" bubbles joined, on a screenshot. The first five
+        // examples imitate that same short, consecutive "mine" layout. The point is to check in isolation that the
+        // `mark_group_seam` / `.continued-top` / `.continued-bottom` CSS really renders, without clicking through the real chat
+        // screen. The grouping logic itself (`insert_entry`) is NOT here. Only its RESULT (the corner classes and the notch) is
+        // applied by hand.
     let samples: [(bool, &str); 8] = [
         (true, "ya abi"),
         (true, "yalan ya"),
@@ -4315,12 +4261,9 @@ pub fn demo_bubbles() -> gtk::Widget {
                     } else {
                         notch.set_margin_start(margin);
                     }
-                    // Basitlik için burada HER ZAMAN mevcut satıra
-                    // bindiriliyor (gerçek `mark_group_seam` iki geniş
-                    // balondan hangisi ise ona koyar) — sadece CSS/render
-                    // sorusunu izole etmek yeterli, geometri gerçek
-                    // koddan (bkz. `mark_group_seam`) zaten ayrı test
-                    // edildi.
+                                        // For simplicity the notch is ALWAYS placed on the existing row here. The real `mark_group_seam` puts it on
+                                        // whichever of the two wide bubbles it is. This is enough to isolate the CSS and render question. The geometry
+                                        // itself was already tested separately, from the real code (see `mark_group_seam`).
                     overlay.add_overlay(&notch);
                 }
             }
@@ -4361,16 +4304,13 @@ fn meta_text(entry: &Entry, seen: bool) -> String {
     format_meta(entry.order_key, entry.status.as_deref(), seen, entry.edited)
 }
 
-/// Time plus a delivery tick, and — small, right beside the time, matching
-/// Android's `txtEditedLabel` — an "edited" marker instead of the old inline
-/// suffix on the message text itself. The ticks mean what the core can
-/// actually promise: one tick is "handed to the network", two GREY ticks are
-/// "the peer's device acknowledged it" (delivered), two plain ticks are "the
+/// Time plus a delivery tick, and, small and right beside the time (matching Android's `txtEditedLabel`), an "edited" marker
+/// instead of the old inline suffix on the message text. The ticks mean what the core can actually promise. One tick means
+/// "handed to the network". Two GREY ticks mean "the peer's device acknowledged it" (delivered). Two plain ticks mean "the
 /// peer's app told us it displayed this" (seen).
-/// The result is Pango markup (the meta label is set with `set_markup`), so a
-/// tick can carry its own colour — the delivered one is grey, the seen one
-/// keeps the label's own tone. Everything in here is generated by us (a
-/// timestamp and fixed glyphs), so there is no user text to escape.
+/// The result is Pango markup (the meta label is set with `set_markup`), so a tick can carry its own colour. The delivered
+/// tick is grey, and the seen tick keeps the label's own tone. Everything here is generated by us (a timestamp and fixed
+/// glyphs), so there is no user text to escape.
 fn format_meta(timestamp: u64, status: Option<&str>, seen: bool, edited: bool) -> String {
     let time = util::format_bubble_time(timestamp);
     // No "seen" tick: the highest mark is the delivered double tick.
@@ -4405,9 +4345,8 @@ fn attachment_status_text(attachment: &Attachment) -> String {
 }
 
 /// The label of an attachment's action button.
-/// A download that already moved some bytes is RESUMED, not started over —
-/// the core keeps `bytes_transferred` and continues from there (bkz.
-/// `Attachment.bytes_done`), so the button says so.
+/// A download that already moved some bytes is RESUMED, not started over. The core keeps `bytes_transferred` and continues
+/// from there (see `Attachment.bytes_done`), so the button says so.
 fn action_label(status: &str, bytes_done: u64) -> String {
     match status {
         "complete" => "Open".to_string(),

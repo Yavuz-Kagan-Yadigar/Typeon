@@ -1,14 +1,9 @@
 //! Typed, Rust-idiomatic layer over `p2p_messenger::api`.
-//! The façade in the core crate mirrors the Android JNI surface exactly, which
-//! means it speaks in JSON strings and `"Error: ..."` prefixes (a JNI boundary
-//! cannot carry a `Result`). Everything above this module works with real
-//! types instead. The summary structs are the core's OWN types, re-exported —
-//! not local copies — so a field added on the protocol side cannot silently go
-//! missing here.
-//! This is a complete binding layer: every entry point the Android `P2PLib`
-//! exposes has a counterpart here, whether or not this client's UI happens to
-//! call it today. Pruning the unused ones would make the next feature look like
-//! it needs core changes when it does not.
+//! The facade in the core crate mirrors the Android JNI surface exactly. It speaks in JSON strings and `"Error: ..."` prefixes,
+//! because a JNI boundary cannot carry a `Result`. Everything above this module works with real types instead. The summary structs
+//! are the core's OWN types, re-exported and not local copies, so a field added on the protocol side cannot silently go missing here.
+//! This is a complete binding layer: every entry point the Android `P2PLib` exposes has a counterpart here, whether or not this client's
+//! UI calls it today. Pruning the unused ones would make the next feature look as if it needs core changes when it does not.
 #![allow(dead_code)]
 
 pub use p2p_messenger::{
@@ -18,8 +13,7 @@ pub use p2p_messenger::{
 use p2p_messenger::api;
 use serde::Deserialize;
 
-/// The façade signals failure with a `"Error: ..."` prefix (JNI convention).
-/// Everything above this module wants a `Result`.
+/// The facade signals failure with a `"Error: ..."` prefix (the JNI convention). Everything above this module wants a `Result`.
 fn parse(value: String) -> Result<String, String> {
     match value.strip_prefix("Error: ") {
         Some(message) => Err(message.to_string()),
@@ -179,16 +173,13 @@ pub fn notify_network_changed() {
     api::notify_network_changed();
 }
 
-/// drops the core's keepalive ladder and radio-window throttling when
-/// the platform says this app is idle (bkz. `P2PCore::set_power_save`).
-/// Android feeds this from the app lifecycle; the desktop client had nothing,
-/// so it burned radio time like a phone in power-save-off mode.
+/// Drops the core's keepalive ladder and radio-window throttling when the platform says this app is idle (see `P2PCore::set_power_save`).
+/// Android feeds this from the app lifecycle. The desktop client had nothing, so it burned radio time like a phone with power save off.
 pub fn set_power_save(enabled: bool) {
     api::set_power_save(enabled);
 }
 
-/// metered (cellular) link or not — the core coalesces its radio
-/// windows differently there (bkz. `P2PCore::set_metered`).
+/// Whether the link is metered (cellular) or not. The core coalesces its radio windows differently there (see `P2PCore::set_metered`).
 pub fn set_metered(metered: bool) {
     api::set_metered(metered);
 }
@@ -292,9 +283,8 @@ pub fn revoke_contact_device(contact_id: &str, fingerprint: &str) -> Result<(), 
     parse_unit(api::revoke_contact_device(contact_id, fingerprint))
 }
 
-/// Kullanıcı kararı (2026-08-27): kişiyi kalıcı olarak engeller. `revoke`
-/// tek bir cihazı kapatır ve kişi yeni bir cihazla geri gelebilir; engel
-/// kimliği hedefler ve yalnızca yüz yüze yeniden eşleşmeyle kalkar.
+/// Blocks the contact permanently. `revoke` shuts down a single device, and the person can come back with a new device. A block targets
+/// the identity, and only an in-person re-pairing lifts it.
 pub fn block_identity(identity_id: &str) -> Result<(), String> {
     parse_unit(api::block_identity(identity_id))
 }
@@ -307,18 +297,17 @@ pub fn list_blocked_identities() -> Vec<String> {
     parse_list(api::list_blocked_identities())
 }
 
-/// Karşılaştırılacak güvenlik kodu (bkz. `P2PCore::contact_safety_code`).
+/// The safety code to compare (see `P2PCore::contact_safety_code`).
 pub fn contact_safety_code(identity_id: &str) -> String {
     api::contact_safety_code(identity_id)
 }
 
-/// Grup üzerinden tanışılmış bir kişiye tam güven verir — "doğrulanmadı"
-/// işaretini kaldırır.
+/// Gives full trust to a contact met through a group. It removes the "not verified" mark.
 pub fn trust_contact(contact_id: &str) -> Result<(), String> {
     parse_unit(api::trust_contact(contact_id))
 }
 
-/// Grup yöneticiliğini başka bir üyeye devreder.
+/// Hands group founder role to another member.
 pub fn transfer_group_founder(group_id: &str, new_founder_identity_id: &str) -> Result<(), String> {
     parse_unit(api::transfer_group_founder(group_id, new_founder_identity_id))
 }
@@ -351,7 +340,7 @@ pub fn set_own_profile_picture(jpeg: Option<Vec<u8>>) -> Result<(), String> {
     parse_unit(api::set_own_profile_picture(jpeg))
 }
 
-// --- device-change alerts (TOFU, spec 2.2) ---
+// --- device-change alerts (TOFU, section 2.2) ---
 
 pub fn list_pending_device_alerts() -> Vec<DeviceAlertInfo> {
     parse_list(api::list_pending_device_alerts())
@@ -784,12 +773,10 @@ pub fn retry_pending_message_now(message_id: &str) -> bool {
     api::retry_pending_message_now(message_id)
 }
 
-// --- sunucu (store-and-forward) seçeneği ---
-// bkz. çekirdeğin `server_client` modülü. Rölelerden FARKLI: bir röle hiçbir
-// şey saklamaz, sadece iki taraf da o anda bağlıyken canlı bir devre kurar;
-// sunucu ise alıcı çevrimdışıyken zarfı diske yazar ve geri döndüğünde
-// teslim eder. İçeriği okuyamaz — zarflar uçtan uca şifreli ve ikinci kez
-// mühürlü.
+// --- server (store-and-forward) option ---
+// See the core's `server_client` module. Unlike relays, a server stores envelopes: a relay stores nothing and builds a live circuit only
+// while BOTH sides are connected. A server writes the envelope to disk when the recipient is offline, and delivers it when the recipient
+// returns. The server cannot read the content: envelopes are already end-to-end encrypted and sealed a second time.
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerEntry {
@@ -805,7 +792,7 @@ pub struct ServerEntry {
     pub last_error: Option<String>,
 }
 
-/// Davet kodundan (`typeon-server:<multiaddr>#<jeton>`) bir sunucu ekler.
+/// Adds a server from an invite code (`typeon-server:<multiaddr>#<token>`).
 pub fn add_server(invite_code: &str) -> Result<(), String> {
     let out = api::add_server(invite_code);
     if let Some(rest) = out.strip_prefix("Error: ") {
@@ -827,17 +814,14 @@ pub fn set_server_routing(server_id: &str, enabled: bool) -> Result<(), String> 
     parse_unit(api::set_server_routing(server_id, enabled))
 }
 
-/// Geçmişi sunucuda saklama — mesaj yönlendirmeden AYRI ve varsayılan
-/// KAPALI. Arşiv gerçek bir yedektir ve ratchet'in aksine ileri-gizli
-/// DEĞİLDİR: kök arşiv anahtarı bir gün sızarsa o ana kadar yüklenmiş TÜM
-/// geçmiş okunur.
+/// Keeping history on the server is separate from message routing, and is OFF by default. The archive is a real backup, but unlike the
+/// ratchet it is NOT forward-secret: if the root archive key ever leaks, all history uploaded up to that point can be read.
 pub fn set_server_history(server_id: &str, enabled: bool) -> Result<(), String> {
     parse_unit(api::set_server_history(server_id, enabled))
 }
 
-/// Kök arşiv anahtarını (ARK) çekirdeğe yükler — bkz. `secrets.rs`
-/// (`Vault.archive_root_key`). `set_history_key` ile aynı desen ama bu
-/// anahtar CİHAZA değil KİMLİĞE aittir.
+/// Loads the root archive key (ARK) into the core. See `secrets.rs` (`Vault.archive_root_key`). It follows the same pattern as
+/// `set_history_key`, but this key belongs to the IDENTITY, not the device.
 pub fn set_archive_root_key(key: &[u8]) -> bool {
     api::set_archive_root_key(key)
 }
