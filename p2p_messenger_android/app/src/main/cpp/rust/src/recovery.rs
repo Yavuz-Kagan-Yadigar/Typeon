@@ -5,8 +5,7 @@ use super::*;
 impl P2PCore {
 
     // ---------------------------------------------------------------
-    // Kurtarma dosyası (spec 1.8) — Aşama A'da da temel bir sürümü var,
-    // tam SyncPayload/çoklu-cihaz entegrasyonu Aşama B.
+    // Recovery file. The basic version is in place. Full SyncPayload and multi-device integration are the next step.
     // ---------------------------------------------------------------
 
     #[cfg(test)]
@@ -57,10 +56,8 @@ impl P2PCore {
         struct ExportedIdentity {
             identity_id: String,
             devices: Vec<ExportedDevice>,
-            /// Kök arşiv anahtarı (ARK). Bu olmadan, kurtarma dosyasından
-            /// kurulan bir cihaz sunucudaki geçmişini ÇÖZEMEZ — kimliği ve
-            /// kişileri geri gelir ama arşiv okunamaz bir blob olarak
-            /// kalırdı. `Option`: sunucu hiç kullanılmamışsa ARK de yoktur.
+            /// Root archive key (ARK). Without it, a device restored from the recovery file cannot DECRYPT its history on the server.
+            /// The identity and contacts come back, but the archive would remain an unreadable blob. `Option`: if the server was never used, there is no ARK.
             archive_root_key: Option<Vec<u8>>,
             /// Contacts, groups and every chat (`RecoveryData`), CBOR.
             #[serde(with = "serde_bytes")]
@@ -83,7 +80,7 @@ impl P2PCore {
                 kem_sk_mlkem: k.kem_sk_mlkem.as_bytes().to_vec(),
             }))
             .collect();
-        // Primary first: import takes the first device (bkz. `import_recovery`).
+        // Primary first: import takes the first device (see `import_recovery`).
         devices.sort_by_key(|d| Some(&d.device_fingerprint) != identity.primary_device.as_ref());
 
         // Over the import cap the file would be written and never open again:
@@ -126,13 +123,9 @@ pub(crate) fn seal_recovery_file(plaintext: &[u8], passphrase: &str) -> Result<V
     let mut nonce_bytes = [0u8; 12];
     rng.fill(&mut nonce_bytes).map_err(|_| "RNG failed")?;
 
-    // parola-tabanlı anahtar
-    // türetmesi ARTIK Argon2id (memory-hard) — önceden HKDF-SHA256
-    // kullanılıyordu, o tek bir HMAC olduğundan bu dosya (TÜM uzun-vadeli
-    // secret key'leri taşır) sızarsa zayıf bir parola çevrimdışı
-    // saniyeler içinde kırılabilirdi. Parametreler dosyada saklanır ki
-    // gelecekteki bir import aynı anahtarı yeniden türetebilsin (format
-    // kendini tanımlar, sabit parametrelere bağlı değil).
+    // Passphrase-based key derivation is now Argon2id (memory-hard). It used to be HKDF-SHA256, a single HMAC. This file holds every long-term
+    // secret key, so with HKDF a weak passphrase could be brute-forced offline in seconds. The parameters are stored in the file, so a future
+    // import can re-derive the same key (the format describes itself and does not depend on fixed parameters).
     // 64 MiB (OWASP baseline is 19 MiB): the file holds every long-term secret key and only an empty
     // passphrase is refused, so the cost per guess is the whole defence.
     let (m_cost, t_cost, p_cost) = (65_536u32, 2u32, 1u32);
@@ -218,26 +211,17 @@ pub(crate) fn open_recovery_file(file_bytes: &[u8], passphrase: &str) -> Result<
 
 impl P2PCore {
 
-    /// `export_recovery`'nin karşılığı (bkz. dosya sonu "BİLİNEN EKSİKLER"
-    /// notu — önceden hiç yoktu, dosya formatı bunun için kendini
-    /// tanımlıyordu: kdf/argon2 parametreleri/salt/nonce dosyada saklanır,
-    /// sabit varsayımlara bağlı değildir). Yeni/sıfırlanmış bir cihazda
-    /// (henüz kimliği YOK — `create_identity`'nin rastgele üretim yerine
-    /// bu dosyadan DETERMİNİSTİK olarak aynı anahtarları geri kurması)
-    /// çağrılır. Kotlin tarafı `createIdentity` ile TAMAMEN AYNI şekilde
-    /// devam eder: dönüşteki `secret_bundle_bytes`'ı `getPendingSecretBundle`
-    /// ile çekip Keystore'la şifreleyip diske yazar (bkz.
-    /// `IdentityManager.persistNewIdentity` — aynı çağrı, aynı akış).
+    /// The counterpart of `export_recovery`. Before it existed there was no such function. The file format describes itself for this purpose:
+    /// KDF, Argon2 parameters, salt and nonce are stored in the file, not assumed as constants. It is called on a new or reset device (with NO
+    /// identity yet). Instead of generating random keys, `create_identity` restores the SAME keys deterministically from this file.
+    /// The Kotlin side then continues exactly as with `createIdentity`: it fetches `secret_bundle_bytes` from the return value via
+    /// `getPendingSecretBundle`, encrypts it with the Keystore, and writes it to disk (see `IdentityManager.persistNewIdentity`, the same call and flow).
     ///
-    /// `device_name` dosyada YOK (`export_recovery`'nin `ExportedDevice`'ı
-    /// sadece secret key'leri taşır) — bu yüzden import ANINDA kullanıcıdan
-    /// yeni bir isim istenir (bkz. Kotlin `ImportRecoveryActivity`/
-    /// `showDeviceNameDialog` aynı deseni). ML-KEM hariç TÜM public key'ler
-    /// secret'ten deterministik türetilebilir (Ed25519/ML-DSA/X25519 —
-    /// `generate_identity` ile AYNI türetme); ML-KEM'in `encapsulation_key()`
-    /// metodu da secret'ten (decapsulation key) public'i (encapsulation key)
-    /// doğrudan türetir — bu yüzden dosyada hiç public key taşımaya GEREK
-    /// yok, `export_recovery` çıktısı zaten sadece secret'leri içeriyordu.
+    /// `device_name` is NOT in the file (`export_recovery`'s `ExportedDevice` carries only the secret keys). So the import asks the user for a new
+    /// name at that moment (the same pattern as Kotlin `ImportRecoveryActivity` / `showDeviceNameDialog`). All public keys EXCEPT ML-KEM can be
+    /// derived deterministically from the secret (Ed25519 / ML-DSA / X25519, the same derivation as `generate_identity`). ML-KEM's
+    /// `encapsulation_key()` also derives the public key (encapsulation key) directly from the secret (decapsulation key). So the file never
+    /// needs to carry a public key: the `export_recovery` output already contained only secrets.
     #[cfg(test)]
     pub(crate) fn import_recovery(&mut self, file_bytes: &[u8], passphrase: &str, device_name: String) -> Result<(String, Vec<u8>), String> {
         self.import_recovery_precheck()?;
@@ -247,12 +231,9 @@ impl P2PCore {
 
     /// the cheap check, under the core lock.
     pub(crate) fn import_recovery_precheck(&self) -> Result<(), String> {
-        // Sadece ÇALIŞAN (secret key'leri bellekte olan) bir kimliği
-        // ezmeyi engeller — `self.identity.is_some()` DEĞİL: MainActivity
-        // "identity_secret.enc kayıp/bozuk" senaryosunda (bkz. oradaki
-        // yorum) `initDatabase` zaten PUBLIC key'leri DB'den yükleyip
-        // `self.identity`'yi doldurur, ama secret key'ler (`own_device_keys`)
-        // boş kalır — TAM DA bu fonksiyonun kurtarması gereken durum bu.
+        // Refuses to overwrite a WORKING identity (one whose secret keys are in memory). This is NOT `self.identity.is_some()`: in the
+        // "identity_secret.enc lost or corrupt" case (see the comment in MainActivity), `initDatabase` already loads the PUBLIC keys from the DB and
+        // fills `self.identity`, but the secret keys (`own_device_keys`) stay empty. That is exactly the state this function must recover from.
         if self.get_active_own_device_fingerprint().is_ok() {
             return Err("Bu cihazda zaten çalışan bir kimlik var — önce Ayarlar'dan çıkış yapın".to_string());
         }
@@ -267,9 +248,7 @@ impl P2PCore {
         struct ExportedIdentity {
             identity_id: String,
             devices: Vec<SecretKeyBundle>,
-            /// bkz. `export_recovery` — `#[serde(default)]`: bu alan
-            /// eklenmeden ÖNCE üretilmiş kurtarma dosyaları hâlâ
-            /// içe aktarılabilmeli.
+            /// See `export_recovery`. `#[serde(default)]`: recovery files made BEFORE this field existed must still be importable.
             #[serde(default)]
             archive_root_key: Option<Vec<u8>>,
             #[serde(default, with = "serde_bytes")]
@@ -309,8 +288,7 @@ impl P2PCore {
             let sign_sk_ed25519 = SigningKey::from_bytes(&sign_sk_ed_bytes);
             let sign_pk_ed25519 = sign_sk_ed25519.verifying_key();
 
-            // bkz. generate_identity notu — ML-DSA secret key'i 32 baytlık
-            // seed olarak saklanır, from_seed ile deterministik geri üretilir.
+            // See the generate_identity note. The ML-DSA secret key is stored as a 32-byte seed and deterministically regenerated with `from_seed`.
             let sign_sk_mldsa_seed: ml_dsa::Seed = dev.sign_sk_mldsa.as_slice().try_into().map_err(|_| "Bozuk ML-DSA secret key")?;
             let sign_sk_mldsa = MlDsaSigningKey::<MlDsa87>::from_seed(&sign_sk_mldsa_seed);
             let sign_pk_mldsa = sign_sk_mldsa.verifying_key().clone();
@@ -353,7 +331,7 @@ impl P2PCore {
                 // One transaction: a failed insert left the other identity
                 // deleted and none in its place.
                 let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-                // bkz. `generate_identity` — one identity per database.
+                // see `generate_identity` — one identity per database.
                 tx.execute("DELETE FROM identities WHERE id != ?1", params![exported.identity_id]).map_err(|e| e.to_string())?;
                 tx.execute(
                     "INSERT OR REPLACE INTO identities (id, primary_device) VALUES (?1, ?2)",
@@ -425,7 +403,7 @@ impl P2PCore {
         }
         // After the devices: a file that fails their checks changes nothing.
         if let Some(ark) = &exported.archive_root_key {
-            // Sunucudaki geçmişin bu cihazda çözülebilmesinin ön koşulu.
+            // A precondition for the history on the server to be decryptable on this device.
             if !self.set_archive_root_key(ark) {
                 error!("Kurtarma: arşiv kök anahtarı yüklenemedi, sunucudaki geçmiş okunamayacak");
             }
@@ -517,8 +495,7 @@ impl P2PCore {
 /// group row's author proof is about 9.4 KB, and hex doubled it again.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct RecoveryFile {
-    /// Anahtar türetme algoritması — import'un ileride HKDF'li eski
-    /// dosyalarla Argon2id'li yenileri ayırt edebilmesi için.
+    /// The key derivation algorithm. It lets an import tell apart older HKDF-based files from newer Argon2id-based ones.
     pub(crate) kdf: String,
     pub(crate) argon2_m_cost: u32,
     pub(crate) argon2_t_cost: u32,
@@ -531,7 +508,7 @@ pub(crate) struct RecoveryFile {
     pub(crate) salt: Vec<u8>,
 }
 
-/// bkz. `P2PCore::recovery_data`: (group id, 1:1 chat key, rows) per chat.
+/// see `P2PCore::recovery_data`: (group id, 1:1 chat key, rows) per chat.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct RecoveryData {
     pub(crate) sync: SyncPayload,
