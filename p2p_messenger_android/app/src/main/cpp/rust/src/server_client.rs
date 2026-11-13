@@ -39,12 +39,9 @@ use crate::{current_time_ms, extract_peer_id, mono_ms, P2PCore};
 
 /// Full scan interval, a safety net for when the server pushes nothing.
 ///
-/// Normally mail is fetched when the server sends `Push` or `Notify`. In radio saver
-/// mode the sweep runs only inside the radio window, so the real cadence is this
-/// interval or the next window, whichever is later. A server without the resend
-/// (`NOTIFY_RESEND_MS` in typeon-server) must not get a longer interval: one lost
-/// `Notify` would then delay all mail by that much (device test 2026-10-08: a call
-/// invite arrived 4 minutes late).
+/// Normally mail is fetched when the server sends `Push` or `Notify`. In radio saver mode the sweep runs only inside the radio window, so the
+/// real cadence is this interval or the next window, whichever is later. A server without the resend (`NOTIFY_RESEND_MS` in typeon-server)
+/// must not get a longer interval: one lost `Notify` would then delay all mail by that much (observed: a call invite arrived 4 minutes late).
 pub(crate) const SERVER_FETCH_SWEEP_INTERVAL_MS: u64 = 5 * 60 * 1000;
 
 /// Interval for the server connection and registration status scan.
@@ -68,17 +65,15 @@ pub(crate) const MAX_SERVER_DEPOSIT_MEMORY: usize = 4096;
 /// for 10 minutes.
 pub(crate) const SERVER_UNKNOWN_MAILBOX_TTL_MS: u64 = 60 * 1000;
 /// Each further `UnknownMailbox` for the same mailbox doubles the pause, up to this.
-/// Measured on the 9S (2026-11-08): a device never enrolled on this server held six
-/// unconfirmed messages. A retry every 2 minutes re-deposited them over Tor and kept the
-/// LTE radio busy 60-75 % of the night.
+/// Measured on a device: a phone never enrolled on this server held six unconfirmed messages. A retry every 2 minutes re-deposited them over Tor,
+/// and kept the LTE radio busy 60-75 % of the night.
 pub(crate) const SERVER_UNKNOWN_MAILBOX_MAX_TTL_MS: u64 = 60 * 60 * 1000;
 
 /// How long a server that answered with a quota or rate-limit error gets no new deposits.
 ///
-/// Measured failure (logcat 2026-08-29): the server answered every `Deposit` with
-/// `QuotaExceeded`, and the client re-deposited the same 15 KB handshake every poll turn
-/// (about once a second), forever, to three mailboxes. With no backoff, a single quota
-/// error turned all store-and-forward traffic of that device into a permanent busy loop.
+/// Observed failure: the server answered every `Deposit` with `QuotaExceeded`, and the client re-deposited the same 15 KB handshake every poll
+/// turn (about once a second), forever, to three mailboxes. With no backoff, a single quota error turned all store-and-forward traffic of that
+/// device into a permanent busy loop.
 pub(crate) const SERVER_DEPOSIT_BACKOFF_MS: u64 = 5 * 60 * 1000;
 /// Each further refused or unanswered deposit doubles the backoff, up to this.
 pub(crate) const SERVER_DEPOSIT_BACKOFF_MAX_MS: u64 = 30 * 60 * 1000;
@@ -124,23 +119,17 @@ pub(crate) const BLOB_WINDOW_MAX: usize = 40;
 
 /// Round-trip threshold above which the window stops growing.
 ///
-/// Measured, not guessed. With a fixed window of 16 over Tor, the average round trip
-/// was 24 s. Requests hit the 30 s protocol timeout, retries ate the bandwidth, and
-/// throughput fell from 180 KB/s to about 50 KB/s. The cause is classic bufferbloat:
-/// 16 x 256 KiB = 4 MB queued on one Tor circuit of about 200 KB/s, so the last chunk
-/// waited more than 20 s.
+/// Measured, not guessed. With a fixed window of 16 over Tor, the average round trip was 24 s. Requests hit the 30 s protocol timeout, retries ate
+/// the bandwidth, and throughput fell from 180 KB/s to about 50 KB/s. The cause is classic bufferbloat: 16 x 256 KiB = 4 MB queued on one Tor
+/// circuit of about 200 KB/s, so the last chunk waited more than 20 s.
 ///
-/// So the problem was bandwidth, not latency, and more parallelism made it worse. The
-/// right behaviour keeps the bytes in flight small enough that queueing delay stays below
-/// the timeout. This is measured per path, because the right depth differs on LAN, Tor
-/// and relays.
+/// So the problem was bandwidth, not latency, and more parallelism made it worse. The right behaviour keeps the bytes in flight small enough that
+/// the queueing delay stays below the timeout. This is measured per path, because the right depth differs on LAN, Tor and relays.
 ///
-/// The threshold is relative, not absolute: it compares against the smallest round trip
-/// seen (`PendingBlobUpload.rtt_min`). A fixed value (6 s in the first version) pinned the
-/// window to its floor on a slow Tor circuit. Measured on a device: round trip 15.6 s,
-/// window stuck at 2, 33 KB/s. A high-latency path needs the large window. The queue-delay
-/// test is "round trip more than twice the best seen on this path" (Vegas-like), which keeps
-/// its meaning whatever the path speed.
+/// The threshold is relative, not absolute: it compares against the smallest round trip seen (`PendingBlobUpload.rtt_min`). A fixed value
+/// (6 s in the first version) pinned the window to its floor on a slow Tor circuit. Measured on a device: round trip 15.6 s, window stuck at 2,
+/// 33 KB/s. A high-latency path needs the large window. The queue-delay test is "round trip more than twice the best seen on this path"
+/// (Vegas-like), which keeps its meaning whatever the path speed.
 pub(crate) const BLOB_RTT_GROW_FACTOR: u64 = 2;
 /// If the round trip exceeds this, the window does not grow, whatever the queue-delay test
 /// says. We are then close to `BLOB_REQUEST_TIMEOUT_MS` (90 s), and a timed-out chunk halves
@@ -161,8 +150,7 @@ pub(crate) const BLOB_RTT_GROW_FACTOR: u64 = 2;
 /// unless a timeout is really near, whatever the chunk size.
 pub(crate) const BLOB_REQUEST_TIMEOUT_MS: u64 = 90_000;
 pub(crate) const BLOB_RTT_CEILING_MS: u64 = BLOB_REQUEST_TIMEOUT_MS * 4 / 5;
-/// Round trips below this count as measurement noise (local or LAN), so `rtt_min` being very small
-/// does not stop growth for no reason.
+/// Round trips below this count as measurement noise (local or LAN), so a very small `rtt_min` does not stop growth for no reason.
 pub(crate) const BLOB_RTT_FLOOR_MS: u64 = 750;
 
 // ---------------------------------------------------------------------------
@@ -790,9 +778,8 @@ impl P2PCore {
 
     /// Removes a server.
     ///
-    /// Asks the server to delete our archive before removal. Without that, an encrypted copy of our history would
-    /// stay on a server we no longer use, indefinitely. We cannot PROVE the deletion (see SECURITY.md). Not asking,
-    /// though, would mean choosing to keep it.
+    /// Asks the server to delete our archive before removal. Without that, an encrypted copy of our history would stay on a server we no longer
+    /// use, indefinitely. The deletion cannot be PROVED (see SECURITY.md). Not asking, though, would mean choosing to keep it.
     pub(crate) fn remove_server(&mut self, server_id: &str) -> Result<(), String> {
         let Some(idx) = self.servers.iter().position(|s| s.server_id == server_id) else {
             return Err("Sunucu bulunamadı".to_string());
@@ -1386,12 +1373,12 @@ impl P2PCore {
         self.resume_archive_rotation();
         self.maybe_archive_backfill();
 
-        // Self-audit fix (2026-08-28): `server_deposit_locations` was pruned nowhere. Entries were removed only
-        // on cancel (`cancel_server_deposit`) or refresh (`forget_server_deposit`), so every normally acknowledged
-        // message left an entry behind and the map grew without bound for the life of the process.
+        // Self-check fix: `server_deposit_locations` was pruned nowhere. Entries were removed only on cancel (`cancel_server_deposit`) or refresh
+        // (`forget_server_deposit`), so every normally acknowledged message left an entry behind and the map grew without bound for the life of the
+        // process.
         //
-        // An entry is only useful while the message is still awaiting confirmation (the only thing a cancel can
-        // withdraw). So the rule is simple: drop every entry whose message is not in `awaiting_confirmation`.
+        // An entry is only useful while the message is still awaiting confirmation (the only thing a cancel can withdraw). So the rule is simple:
+        // drop every entry whose message is not in `awaiting_confirmation`.
         if !self.server_deposit_locations.is_empty() {
             let before = self.server_deposit_locations.len();
             let pending: std::collections::HashSet<String> =
@@ -1451,8 +1438,8 @@ impl P2PCore {
             let connected = connected || really_connected;
 
             if !connected {
-                // Offline server: back off 15 s, doubling to 30 min. Without it, every sweep (15 s) was one more failed
-                // onion lookup, and the CPU never idled (9S, 2026-09-30: 35 dials in 11 min on Wi-Fi).
+                // Offline server: back off 15 s, doubling to 30 min. Without it, every sweep (every 15 s) was one more failed onion lookup, and the
+                // CPU never idled (measured: 35 dials in 11 minutes on Wi-Fi).
                 let Some(rt) = self.server_rt.get_mut(&rec.server_id) else { continue };
                 // A legacy record holding only private-network addresses: the server path is onion-only, so do not dial the LAN.
                 let addrs = server_proto::public_server_addrs(rec.address.split(','));
@@ -2272,9 +2259,9 @@ impl P2PCore {
 
             // --- Blobs ---
             (ServerInflight::BlobPut { blob_id, chunk_index, total_chunks, server_id, sent_at }, ServerResponse::Ok) => {
-                // Round-trip measurement. It is the only way to tell whether a transfer is limited by latency or by
-                // bandwidth. If latency limits it, a larger window gives speed directly. If bandwidth limits it, a larger
-                // window gives nothing, and the real fix lies elsewhere (see the single Tor circuit ceiling).
+                // Round-trip measurement. It is the only way to tell whether a transfer is limited by latency or by bandwidth. If latency limits it,
+                // a larger window gives speed directly. If bandwidth limits it, a larger window gives nothing, and the real fix lies elsewhere (see the
+                // single Tor circuit ceiling).
                 let rtt = mono_ms().saturating_sub(sent_at);
                 self.blob_rtt_sum += rtt;
                 self.blob_rtt_count += 1;
@@ -2479,11 +2466,10 @@ impl P2PCore {
                 }
                 self.requeue_failed_deposit(&inflight);
             }
-            // A full mailbox (5000 undelivered items for a device that has not fetched in a week, seen on a device on
-            // 2026-09-26) must stop deposits to THAT mailbox only. The server-wide backoff below locked the whole account
-            // out of the server, call invites included, for as long as the dead mailbox stayed full.
-            // ponytail: QuotaExceeded also covers the per-account and disk caps. For those, this retries each mailbox once
-            // per backoff instead of once per server, which is bounded by the mailbox count.
+            // A full mailbox (5000 undelivered items for a device that has not fetched in a week) must stop deposits to THAT mailbox only. The
+            // server-wide backoff below would lock the whole account out of the server, call invites included, for as long as the dead mailbox stayed full.
+            // ponytail: QuotaExceeded also covers the per-account and disk caps. For those, this retries each mailbox once per backoff instead of once
+            // per server, which is bounded by the mailbox count.
             ServerErrorCode::QuotaExceeded if matches!(inflight, ServerInflight::Deposit { .. }) => {
                 if let ServerInflight::Deposit { mailbox, .. } = &inflight {
                     // The pause doubles per refusal, like `UnknownMailbox`. A `Deposited` resets the streak.
@@ -3815,16 +3801,14 @@ fn sha256_file(path: &std::path::Path) -> Option<Vec<u8>> {
 /// Short type name of an envelope, for logging. See `try_server_deposit`.
 /// The "have I already deposited this envelope to this server?" key.
 ///
-/// A bug measured on a real device (2026-08-29): `already_deposited` and `note_server_deposit` recognized only the
-/// `NetworkEnvelope::Message` arm (`m.header.message_id`) and returned `false` for every other type. `Handshake` and
-/// `IdentityExchange` cannot enter `awaiting_confirmation`, so their only safety net was the `pending_envelopes` queue, which
-/// is retried on EVERY poll turn. They were re-deposited to the server about once a second. Each was about 15 KB, so the
-/// depositor's `bytes_mail` quota (256 MB) filled within a few hours. From then on every server delivery of that device, to
-/// ANY peer, got `QuotaExceeded`. The user experienced this as slow, unreliable message delivery, and secondary devices were
-/// hit hardest, since reaching them almost always goes through a fresh handshake or the server.
+/// Before this was fixed, `already_deposited` and `note_server_deposit` recognized only the `NetworkEnvelope::Message` arm (`m.header.message_id`)
+/// and returned `false` for every other type. `Handshake` and `IdentityExchange` cannot enter `awaiting_confirmation`, so their only safety net was
+/// the `pending_envelopes` queue, which is retried on EVERY poll turn. They were re-deposited to the server about once a second. Each was about 15 KB,
+/// so the depositor's `bytes_mail` quota (256 MB) filled within a few hours. From then on every server delivery of that device, to ANY peer, got
+/// `QuotaExceeded`. Secondary devices were hit hardest, since reaching them almost always goes through a fresh handshake or the server.
 ///
-/// For `Message` the key is still the `message_id` (so the same message re-serialized is also deduplicated). For other types it
-/// is a digest of the envelope bytes, which is stable because the queue retries by cloning the same envelope.
+/// For `Message` the key is still the `message_id` (so the same message re-serialized is also deduplicated). For other types it is a digest of the
+/// envelope bytes, which is stable because the queue retries by cloning the same envelope.
 pub(crate) fn deposit_dedup_key(envelope: &NetworkEnvelope, bytes: &[u8]) -> String {
     match envelope {
         NetworkEnvelope::Message(m) => m.header.message_id.clone(),
@@ -3943,9 +3927,9 @@ mod tests {
         })
     }
 
-    /// Root cause (2026-08-29, real device): envelopes that were NOT `Message` had no dedup key, so `already_deposited` always
-    /// returned `false`. The `pending_envelopes` queue then re-deposited the SAME handshake to the server on every poll turn. Within
-    /// hours the depositor's quota filled up and all server delivery of that device locked up.
+    /// Root cause: envelopes that were NOT `Message` had no dedup key, so `already_deposited` always returned `false`. The `pending_envelopes` queue
+    /// then re-deposited the SAME handshake to the server on every poll turn. Within hours the depositor's quota filled up, and all server delivery
+    /// of that device locked up.
     #[test]
     fn non_message_envelopes_have_a_stable_dedup_key() {
         let env = ident();
