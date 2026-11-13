@@ -1420,6 +1420,19 @@ impl P2PCore {
                                 serde_json::json!({"type": "noop"})
                             }
                         },
+                        SiblingEchoBody::ContactRemoved { identity_id } => {
+                            match self.identity_to_contact.get(&identity_id).cloned() {
+                                Some(cid) => match self.delete_contact(&cid, false) {
+                                    Ok(()) => serde_json::json!({"type": "device_change", "identity_id": identity_id}),
+                                    Err(e) => {
+                                        warn!("Kardeş kişi silinemedi: {}", e);
+                                        ack = false; // DB error: the sibling sends again.
+                                        serde_json::json!({"type": "noop"})
+                                    }
+                                },
+                                None => serde_json::json!({"type": "noop"}),
+                            }
+                        }
                         SiblingEchoBody::GroupLeft => match &group_id {
                             Some(gid) if self.groups.contains_key(gid) => {
                                 self.remove_group_locally(gid);

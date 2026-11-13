@@ -846,7 +846,17 @@ impl P2PCore {
 
     /// Delete contact (the hard option requested by the user, with a double confirmation in the UI): deletes EVERYTHING, including the pairing and ratchet session.
     /// Chatting again requires a fresh QR or manual pairing. See `clear_chat_history` (the soft option, which only deletes history).
-    pub(crate) fn delete_contact(&mut self, contact_id: &str) -> Result<(), String> {
+    /// `sync`: also delete it on my other devices (`SiblingEchoBody::ContactRemoved`).
+    pub(crate) fn delete_contact(&mut self, contact_id: &str, sync: bool) -> Result<(), String> {
+        let identity_id = self.contacts.get(contact_id).ok_or("Kişi bulunamadı")?.trusted_identity_id.clone();
+        self.delete_contact_local(contact_id)?;
+        if sync {
+            self.send_to_siblings(SiblingEchoBody::ContactRemoved { identity_id });
+        }
+        Ok(())
+    }
+
+    fn delete_contact_local(&mut self, contact_id: &str) -> Result<(), String> {
         let contact = self.contacts.get(contact_id).ok_or("Kişi bulunamadı")?.clone();
         // see the `hfloor:` filter in the HistorySyncResponse arm.
         self.raise_history_floor(&contact.trusted_identity_id, current_time_ms());

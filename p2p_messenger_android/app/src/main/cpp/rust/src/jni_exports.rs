@@ -1459,7 +1459,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteContact<'local>(mut e
     let contact_id_str: String = jstr(&mut env, &contact_id).unwrap_or_default();
     let result = catch_panic(move || {
         let mut core = core_lock();
-        core.delete_contact(&contact_id_str)
+        core.delete_contact(&contact_id_str, true)
     });
     let out = match result {
         Ok(Ok(())) => "OK".to_string(),

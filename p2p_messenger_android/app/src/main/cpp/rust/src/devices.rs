@@ -9,8 +9,7 @@ impl P2PCore {
     /// (`import_sync_payload`), and its own IdentityExchange must not either
     /// (`evaluate_sender_device`); scanning or typing its code again clears
     /// the mark (`pair_with_code`).
-    /// ponytail: local mark only, the delete is not sent to siblings. Add a
-    /// sync message if contacts must disappear on every device.
+    /// The delete itself reaches siblings as `SiblingEchoBody::ContactRemoved`.
     /// Same mark for a group the user left or deleted here.
     pub(crate) fn group_removed_locally(&self, group_id: &str) -> bool {
         self.db.as_ref().map_or(false, |conn| {

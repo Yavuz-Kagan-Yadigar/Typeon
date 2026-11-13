@@ -1195,6 +1195,7 @@ impl std::fmt::Debug for SiblingEchoBody {
             SiblingEchoBody::File { .. } => "File",
             SiblingEchoBody::Sticker { .. } => "Sticker",
             SiblingEchoBody::StickerRemoved { .. } => "StickerRemoved",
+            SiblingEchoBody::ContactRemoved { .. } => "ContactRemoved",
             SiblingEchoBody::StickersRequest { .. } => "StickersRequest",
         })
     }
@@ -1545,6 +1546,8 @@ pub enum SiblingEchoBody {
     },
     /// A sticker removed from my sticker store.
     StickerRemoved { id: String },
+    /// The user deleted this contact (by identity) on one of my devices.
+    ContactRemoved { identity_id: String },
     /// "Send me your whole sticker store". A linked desktop asks. Only the root device answers, with one
     /// `Sticker` per id that is not in `have`.
     StickersRequest { #[serde(default)] have: Vec<String> },

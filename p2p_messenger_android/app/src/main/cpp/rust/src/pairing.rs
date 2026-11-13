@@ -1110,7 +1110,7 @@ impl P2PCore {
                     .map(|c| c.contact_id.clone())
                     .collect();
                 for cid in ghosts {
-                    if let Err(e) = self.delete_contact(&cid) {
+                    if let Err(e) = self.delete_contact(&cid, false) {
                         warn!("Bağlanan cihazın eski kişi kaydı silinemedi: {}", e);
                     }
                 }

@@ -522,7 +522,7 @@ mod review_oct2026_tests {
         for c in cores.iter_mut() { c.groups.insert(gid.clone(), g.clone()); }
         cores[2].register_contact_from_pairing(ids[1].clone(), ids[1].clone(), "b".into()).unwrap();
         let cid = cores[2].identity_to_contact[&ids[1]].clone();
-        cores[2].delete_contact(&cid).unwrap();
+        cores[2].delete_contact(&cid, false).unwrap();
         assert!(cores[2].known_remote_devices.contains_key(&ids[1]));
         assert!(cores[2].contacts[&cid].added_via_group);
 
@@ -536,7 +536,7 @@ mod review_oct2026_tests {
 
         // No shared group left: the delete takes the keys too.
         cores[2].groups.clear();
-        cores[2].delete_contact(&cid).unwrap();
+        cores[2].delete_contact(&cid, false).unwrap();
         assert!(!cores[2].known_remote_devices.contains_key(&ids[1]));
         assert!(cores[2].contacts.is_empty());
     }

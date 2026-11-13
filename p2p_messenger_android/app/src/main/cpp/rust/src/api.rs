@@ -953,7 +953,7 @@ pub fn clear_chat_history(contact_id: &str) -> String {
 
 pub fn delete_contact(contact_id: &str) -> String {
     let id = contact_id.to_string();
-    ok_result(catch_panic(move || core_lock().delete_contact(&id)))
+    ok_result(catch_panic(move || core_lock().delete_contact(&id, true)))
 }
 
 pub fn revoke_contact_device(contact_id: &str, device_fingerprint: &str) -> String {
