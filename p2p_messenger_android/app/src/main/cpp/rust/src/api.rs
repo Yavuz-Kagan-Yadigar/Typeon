@@ -1,25 +1,18 @@
-//! Saf-Rust API cephesi (façade) — JNI'siz çağıranlar için.
-//! Bu modül, dosya sonundaki JNI export'larının (`Java_com_p2p_messenger_P2PLib_*`)
-//! BİREBİR karşılıklarını, JVM'e özgü tiplerden (JNIEnv/JString/JByteArray)
-//! arındırılmış olarak sunar: aynı `catch_panic` + `RUNTIME.enter()` +
-//! `core_lock()` sırası, aynı dönüş biçimleri ("Error: ..." önekli hata
-//! stringleri, JSON dizileri, `{"message_id":..,"status":..}` nesneleri).
-//! GEREKÇE: Linux masaüstü istemcisi (bkz. depo kökündeki `Linux/`) TAM OLARAK
-//! aynı çekirdeği (aynı kripto, aynı ratchet, aynı veritabanı şeması, aynı
-//! ağ protokolü) kullanır — protokolü ikinci kez yazmak, iki uygulamanın
-//! sessizce birbirinden sapması demek olurdu. Android tarafı için HİÇBİR ŞEY
-//! değişmez: bu modül tamamen EKLEMEDİR, JNI export'ları olduğu gibi durur ve
-//! `api::*` fonksiyonlarını çağırmaz (ikisi de doğrudan `P2PCore`'a gider).
-//! Kotlin tarafındaki `P2PLib` dokümantasyonu (parametre anlamları, hangi
-//! çağrının ana thread'de yapılmaması gerektiği, dönüş biçimleri) buradaki
-//! her fonksiyon için AYNEN geçerlidir — tekrar edilmiyor.
+//! Pure-Rust API façade for callers that do not go through JNI.
+//! This module provides one-to-one counterparts of the JNI exports at the end of the file (`Java_com_p2p_messenger_P2PLib_*`),
+//! stripped of JVM-specific types (JNIEnv / JString / JByteArray). The same `catch_panic` + `RUNTIME.enter()` + `core_lock()` order is kept,
+//! and so are the return formats: "Error: ..." prefixed error strings, JSON arrays, and `{"message_id":..,"status":..}` objects.
+//! Reason: the Linux desktop client (see the `Linux/` directory at the repository root) uses EXACTLY the same core: the same crypto, ratchet,
+//! database schema and network protocol. Writing the protocol a second time would let the two apps drift apart silently.
+//! Nothing changes for Android: this module is purely an addition. The JNI exports stay as they are and do not call the `api::*` functions
+//! (both go directly to `P2PCore`).
+//! The Kotlin `P2PLib` documentation (parameter meanings, which calls must not run on the main thread, return formats) applies to every
+//! function here as well, and is not repeated.
 
 use crate::{catch_panic, core_lock, RUNTIME};
 
-/// JNI tarafındaki `Ok(Ok(v)) / Ok(Err(e)) / Err(panic)` üçlüsünü, her iki
-/// hata yolunu da `"Error: ..."` biçimine indirgeyen tek bir string'e çevirir
-/// (bkz. `Java_..._createIdentity` ve kardeşleri — hepsi bu deseni tekrar
-/// ediyordu).
+/// Converts the JNI triple `Ok(Ok(v)) / Ok(Err(e)) / Err(panic)` into one string. Both error paths become the `"Error: ..."` format.
+/// See `Java_..._createIdentity` and its siblings, which all repeat this pattern.
 fn string_result(result: Result<Result<String, String>, String>) -> String {
     match result {
         Ok(Ok(v)) => v,
@@ -28,7 +21,7 @@ fn string_result(result: Result<Result<String, String>, String>) -> String {
     }
 }
 
-/// `Result<(), String>` dönen çekirdek çağrıları için: başarıda `"OK"`.
+/// For core calls that return `Result<(), String>`: `"OK"` on success.
 fn ok_result(result: Result<Result<(), String>, String>) -> String {
     match result {
         Ok(Ok(())) => "OK".to_string(),
@@ -37,7 +30,7 @@ fn ok_result(result: Result<Result<(), String>, String>) -> String {
     }
 }
 
-// --- Bölüm 1: Identity/Device ---
+// --- Identity and device ---
 
 /// `storage_key`: the 32-byte local storage key, the same one later handed
 /// to `set_skipped_key_encryption_key`. The database is encrypted under it.
@@ -103,7 +96,7 @@ pub fn get_own_identity_id() -> String {
     string_result(catch_panic(|| crate::core_lock_read().own_identity_id()))
 }
 
-/// bkz. Kotlin `setHistoryKey` — 32 bayt olmayan anahtar sessizce reddedilir.
+/// see Kotlin `setHistoryKey` — 32 bayt olmayan anahtar sessizce reddedilir.
 pub fn set_history_key(key_bytes: &[u8]) -> bool {
     let key: [u8; 32] = match key_bytes.try_into() {
         Ok(k) => k,
@@ -126,7 +119,7 @@ pub fn set_skipped_key_encryption_key(key_bytes: &[u8]) -> bool {
     .is_ok()
 }
 
-// --- Bölüm 4: Ağ ---
+// --- Network ---
 
 pub fn start_network(node_mode: bool, tor_enabled: bool) -> String {
     string_result(catch_panic(move || {
@@ -144,9 +137,8 @@ pub fn set_node_mode(enabled: bool) {
 }
 
 pub fn set_history_storage_limit_bytes(bytes: u64) {
-    // bkz. JNI `setHistoryStorageLimitBytes`: 0 = a failed pref read, never a
-    // choice — as a limit it would delete every stored attachment. `u64`'de
-    // "negatif" yok, tek zararlı değer 0.
+    // See JNI `setHistoryStorageLimitBytes`. 0 means a failed preference read, never a real choice: as a limit it would delete every stored
+    // attachment. A `u64` has no negative values, so 0 is the only harmful value.
     if bytes == 0 {
         return;
     }
@@ -156,8 +148,7 @@ pub fn set_history_storage_limit_bytes(bytes: u64) {
     });
 }
 
-/// bkz. JNI `setPowerSave` — ekran kapalı/uygulama arka planda iken açılır
-/// (bkz. `P2PCore::set_power_save`).
+/// See JNI `setPowerSave`. Enabled while the screen is off or the app is in the background (see `P2PCore::set_power_save`).
 pub fn set_power_save(enabled: bool) {
     let _ = catch_panic(move || {
         let _guard = RUNTIME.enter();
@@ -165,8 +156,7 @@ pub fn set_power_save(enabled: bool) {
     });
 }
 
-/// bkz. JNI `setMeteredNetwork` — ölçülü (hücresel) ağ, radyo-penceresi
-/// birleştirmesi için (bkz. `P2PCore::set_metered`).
+/// See JNI `setMeteredNetwork`. A metered (cellular) network. Used to combine radio windows (see `P2PCore::set_metered`).
 pub fn set_metered(metered: bool) {
     let _ = catch_panic(move || {
         let _guard = RUNTIME.enter();
@@ -183,7 +173,7 @@ pub fn own_connection_status() -> String {
         .unwrap_or_else(|_| "{}".to_string())
 }
 
-/// bkz. Kotlin `pollNetwork` — her turda çözülen olayların JSON listesi.
+/// See Kotlin `pollNetwork`. Returns a JSON list of the events resolved in each turn.
 pub fn poll_network() -> Vec<String> {
     catch_panic(|| {
         let _guard = RUNTIME.enter();
@@ -199,7 +189,7 @@ pub fn poll_network() -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// bkz. core_lock.rs `wait_for_network_activity` — poll döngüsü sabit uyku yerine bunu çağırır.
+/// See core_lock.rs `wait_for_network_activity`. The poll loop calls it instead of sleeping for a fixed interval.
 pub fn wait_for_network_activity(timeout_ms: u64) {
     let _ = catch_panic(|| crate::wait_for_network_activity(timeout_ms));
 }
@@ -216,7 +206,7 @@ pub fn add_known_relay_address(multiaddr: &str) -> String {
     ok_result(catch_panic(move || core_lock().add_known_relay_address(&addr)))
 }
 
-// --- Bölüm 1.3/1.4: QR + manuel eşleşme ---
+// --- QR and manual pairing ---
 
 pub fn generate_qr_packet(rendezvous_node: &str) -> Vec<u8> {
     let node = rendezvous_node.to_string();
@@ -234,7 +224,7 @@ pub fn get_manual_add_code(rendezvous_node: &str) -> String {
     }
 }
 
-/// bkz. Kotlin `processQrPacket` — başarıda
+/// See Kotlin `processQrPacket`. On success returns
 /// `{"identity_id":..,"device_fingerprint":..,"device_name":..}`.
 pub fn process_qr_packet(data: &[u8]) -> String {
     let raw = data.to_vec();
@@ -245,7 +235,7 @@ pub fn process_qr_packet(data: &[u8]) -> String {
     pairing_result(result)
 }
 
-/// bkz. JNI `peekContactQr` — the confirm step's data; changes nothing.
+/// see JNI `peekContactQr` — the confirm step's data; changes nothing.
 pub fn peek_contact_qr(data: &[u8]) -> String {
     let raw = data.to_vec();
     string_result(catch_panic(move || crate::core_lock_read().peek_qr_packet(&raw).map(|v| v.to_string())))
@@ -260,7 +250,7 @@ pub fn process_manual_entry(text: &str) -> String {
     pairing_result(result)
 }
 
-/// `process_qr_packet`/`process_manual_entry`'nin ORTAK dönüş biçimi.
+/// The shared return format of `process_qr_packet` and `process_manual_entry`.
 fn pairing_result(result: Result<Result<(String, String, String), String>, String>) -> String {
     match result {
         Ok(Ok((identity_id, device_fingerprint, device_name))) => serde_json::json!({
@@ -274,7 +264,7 @@ fn pairing_result(result: Result<Result<(String, String, String), String>, Strin
     }
 }
 
-// --- Çoklu-cihaz (spec 1.5/1.6/1.7) ---
+// --- Multi-device ---
 
 /// The link QR is no longer shown: a grant that comes now is refused.
 pub fn close_device_link_window() {
@@ -323,7 +313,7 @@ pub fn sync_read_state(peer_device_fingerprint: &str, group_id: &str, read_at_ms
     });
 }
 
-// --- Bölüm 2.2: Cihaz değişikliği uyarıları ---
+// --- Device change warnings ---
 
 pub fn list_pending_device_alerts() -> String {
     json_list(catch_panic(|| {
@@ -332,7 +322,7 @@ pub fn list_pending_device_alerts() -> String {
     }))
 }
 
-/// bkz. `P2PCore::block_identity` — kalıcı engelleme.
+/// See `P2PCore::block_identity`. A permanent block.
 pub fn block_identity(identity_id: &str) -> String {
     match catch_panic(|| core_lock().block_identity(identity_id)) {
         Ok(Ok(())) => "OK".to_string(),
@@ -340,7 +330,7 @@ pub fn block_identity(identity_id: &str) -> String {
     }
 }
 
-/// bkz. `P2PCore::unblock_identity`.
+/// see `P2PCore::unblock_identity`.
 pub fn unblock_identity(identity_id: &str) {
     let _ = catch_panic(|| core_lock().unblock_identity(identity_id));
 }
@@ -351,13 +341,13 @@ pub fn list_blocked_identities() -> String {
         .unwrap_or_else(|_| "[]".to_string())
 }
 
-/// bkz. `P2PCore::contact_safety_code` — karşılaştırılacak güvenlik kodu.
+/// See `P2PCore::contact_safety_code`. The safety code to compare.
 pub fn contact_safety_code(identity_id: &str) -> String {
     catch_panic(|| crate::core_lock_read().contact_safety_code(identity_id).unwrap_or_default())
         .unwrap_or_default()
 }
 
-/// bkz. `P2PCore::trust_contact` — grup üzerinden tanışılana tam güven.
+/// See `P2PCore::trust_contact`. Full trust for a contact met through a group.
 pub fn trust_contact(contact_id: &str) -> String {
     match catch_panic(|| core_lock().trust_contact(contact_id)) {
         Ok(Ok(())) => "OK".to_string(),
@@ -365,7 +355,7 @@ pub fn trust_contact(contact_id: &str) -> String {
     }
 }
 
-/// bkz. `P2PCore::transfer_group_founder`.
+/// see `P2PCore::transfer_group_founder`.
 pub fn transfer_group_founder(group_id: &str, new_founder_identity_id: &str) -> String {
     match catch_panic(|| core_lock().transfer_group_founder(group_id, new_founder_identity_id)) {
         Ok(Ok(())) => "OK".to_string(),
@@ -389,7 +379,7 @@ pub fn reject_device_alert(fingerprint: &str) {
     });
 }
 
-// --- Bekleyen (onay almamış) mesajlar ---
+// --- Pending (not yet confirmed) messages ---
 
 pub fn retry_all_pending_now() {
     let _ = catch_panic(|| core_lock().retry_all_pending_now());
@@ -412,9 +402,9 @@ pub fn retry_pending_message_now(message_id: &str) -> bool {
     catch_panic(move || core_lock().retry_pending_message_now(&id).is_ok()).unwrap_or(false)
 }
 
-// --- Bölüm 3: Mesajlaşma ---
+// --- Messaging ---
 
-/// `send_message`/`edit_message`/`delete_message`'ın ORTAK dönüş biçimi:
+/// The shared return format of `send_message`, `edit_message` and `delete_message`:
 /// `{"message_id":..,"status":"sent"|"pending"}`.
 fn send_result(result: Result<Result<(String, String), String>, String>) -> String {
     match result {
@@ -540,7 +530,7 @@ pub fn list_contacts() -> String {
     }))
 }
 
-// --- Mesaj geçmişi ---
+// --- Message history ---
 
 pub fn get_message_history(peer_device_fingerprint: &str, limit: u32) -> String {
     let fp = peer_device_fingerprint.to_string();
@@ -591,7 +581,7 @@ pub fn get_group_message_history_before(
     }))
 }
 
-/// rows archived after `after_timestamp` only (bkz. JNI `getMessageHistorySince`).
+/// rows archived after `after_timestamp` only (see JNI `getMessageHistorySince`).
 pub fn get_message_history_since(peer_device_fingerprint: &str, after_timestamp: i64, limit: u32) -> String {
     let fp = peer_device_fingerprint.to_string();
     json_list(catch_panic(move || {
@@ -608,7 +598,7 @@ pub fn get_group_message_history_since(group_id: &str, after_timestamp: i64, lim
     }))
 }
 
-/// bkz. JNI `chatListPreviews`.
+/// see JNI `chatListPreviews`.
 pub fn chat_list_previews() -> String {
     catch_panic(|| {
         let previews = crate::core_lock_read().chat_list_previews();
@@ -634,9 +624,8 @@ pub fn prepare_and_send_file(
     mime_type: &str,
     preview_jpeg: Option<Vec<u8>>,
     duration_ms: Option<u32>,
-    // Spec dışı, kullanıcı isteği: ek balonunun altında görünecek açıklama
-    // (boş = yok) ve — varsa — yanıtlanan mesajın bağlamı. Android tarafıyla
-    // AYNI çekirdek yolu; bkz. `MessageContent::FileOffer`.
+    // Also carries the caption shown under the attachment bubble (empty = none) and the context of the message being
+    // replied to. Same core path as Android. See `MessageContent::FileOffer`.
     caption: String,
     reply_to_message_id: Option<String>,
     reply_to_preview: Option<String>,
@@ -647,9 +636,8 @@ pub fn prepare_and_send_file(
     let mime = mime_type.to_string();
     send_result(catch_panic(move || {
         let _guard = RUNTIME.enter();
-        // Kilit-bölme düzeltmesi (bkz. media_unlocked.rs `prepare_and_send_file_unlocked`):
-        // şifreleme global kilit TUTULMADAN çalışır — poll döngüsü/ağ bu
-        // sırada bloklanmaz.
+        // Lock splitting (see `prepare_and_send_file_unlocked` in media_unlocked.rs): encryption runs WITHOUT holding the global lock,
+        // so the poll loop and the network are not blocked meanwhile.
         crate::prepare_and_send_file_unlocked(target, source, name, mime, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview)
     }))
 }
@@ -661,7 +649,7 @@ pub fn prepare_and_send_group_file(
     mime_type: &str,
     preview_jpeg: Option<Vec<u8>>,
     duration_ms: Option<u32>,
-    // bkz. `prepare_and_send_file` aynı not.
+    // Same note as `prepare_and_send_file`.
     caption: String,
     reply_to_message_id: Option<String>,
     reply_to_preview: Option<String>,
@@ -673,7 +661,7 @@ pub fn prepare_and_send_group_file(
     let mime = mime_type.to_string();
     string_result(catch_panic(move || {
         let _guard = RUNTIME.enter();
-        // bkz. `prepare_and_send_file` aynı kilit-bölme notu.
+        // Same lock-splitting note as `prepare_and_send_file`.
         crate::prepare_and_send_group_file_unlocked(gid, source, name, mime, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id)
     }))
 }
@@ -705,7 +693,7 @@ pub fn list_attachments_brief(peer_device_fingerprint: &str) -> String {
     }))
 }
 
-/// #80: the `limit` newest attachments older than `before_ms`, oldest first.
+/// the `limit` newest attachments older than `before_ms`, oldest first.
 pub fn list_attachments_before(peer_device_fingerprint: &str, before_ms: u64, limit: usize) -> String {
     let fp = peer_device_fingerprint.to_string();
     json_list(catch_panic(move || {
@@ -757,12 +745,12 @@ pub fn jxl_to_gif(in_path: &str, out_path: &str) -> Result<(), String> {
 pub fn get_attachment_plaintext_path(file_id: &str) -> String {
     let id = file_id.to_string();
     string_result(catch_panic(move || {
-        // bkz. `prepare_and_send_file` aynı kilit-bölme notu — çözme kilitsiz.
+        // Same lock-splitting note as `prepare_and_send_file`. Decryption runs without the lock.
         crate::attachment_plaintext_path_unlocked(&id)
     }))
 }
 
-// --- Bölüm 5: Grup mesajlaşma ---
+// --- Group messaging ---
 
 pub fn list_groups() -> String {
     json_list(catch_panic(|| {
@@ -810,7 +798,7 @@ pub fn delete_group(group_id: &str) -> String {
     }))
 }
 
-/// #81: the founder re-sends the current group state to every member.
+/// the founder re-sends the current group state to every member.
 pub fn resend_group_to_all(group_id: &str) -> String {
     let gid = group_id.to_string();
     ok_result(catch_panic(move || {
@@ -835,8 +823,8 @@ pub fn set_group_profile_picture(group_id: &str, avatar_jpeg: Option<Vec<u8>>) -
     }))
 }
 
-/// bkz. Kotlin `editGroupMessage` — ulaşılabilir TÜM üyelere gider.
-/// `target_group_message_local_id`, `send_group_message`'ın döndürdüğü kimlik.
+/// See Kotlin `editGroupMessage`. Sent to ALL reachable members.
+/// `target_group_message_local_id` is the id returned by `send_group_message`.
 pub fn edit_group_message(
     group_id: &str,
     target_group_message_local_id: &str,
@@ -851,7 +839,7 @@ pub fn edit_group_message(
     }))
 }
 
-/// bkz. `edit_group_message` AYNI notu.
+/// see `edit_group_message` AYNI notu.
 pub fn delete_group_message(group_id: &str, target_group_message_local_id: &str) -> String {
     let gid = group_id.to_string();
     let target = target_group_message_local_id.to_string();
@@ -884,7 +872,7 @@ pub fn send_group_message(
     }))
 }
 
-// --- Profil fotoğrafı / sohbet-kişi silme ---
+// --- Profile photo and deleting chat contacts ---
 
 pub fn get_own_profile_picture() -> Vec<u8> {
     catch_panic(|| crate::core_lock_read().get_own_avatar().unwrap_or_default()).unwrap_or_default()
@@ -897,12 +885,12 @@ pub fn set_own_profile_picture(avatar_jpeg: Option<Vec<u8>>) -> String {
     }))
 }
 
-/// Hesap adı — bkz. `P2PCore::own_display_name`.
+/// The account name. See `P2PCore::own_display_name`.
 pub fn get_display_name() -> String {
     catch_panic(|| crate::core_lock_read().own_display_name().unwrap_or_default()).unwrap_or_default()
 }
 
-/// `P2PCore::delete_account` — bildirim giden cihaz sayısı, hata için `-1`.
+/// `P2PCore::delete_account`. Returns the number of devices notified, or `-1` on error.
 pub fn delete_account() -> i64 {
     match catch_panic(|| {
         let _guard = RUNTIME.enter();
@@ -976,12 +964,11 @@ pub fn revoke_contact_device(contact_id: &str, device_fingerprint: &str) -> Stri
     }))
 }
 
-// --- Bölüm 1.8: Kurtarma dosyası ---
+// --- Recovery file ---
 
 pub fn export_recovery(passphrase: &str) -> Vec<u8> {
-    // bkz. M-23: uzun ömürlü TÜM anahtarları koruyan parola serbest
-    // heap'te kalmasın — kopyamız drop'ta siliniyor (çekirdeğin kendi
-    // kopyası ayrı bir konu, bkz. recovery.rs `export_recovery`).
+    // The password protects the long-lived secret keys, so it must not stay in plain heap memory. Our copy is erased on drop. The core's own
+    // copy is a separate matter (see `export_recovery` in recovery.rs).
     let pass = zeroize::Zeroizing::new(passphrase.to_string());
     // only the plaintext is built under the core lock; Argon2 runs
     // after the lock is released (it froze every other caller).
@@ -999,10 +986,8 @@ pub fn export_recovery(passphrase: &str) -> Vec<u8> {
     }
 }
 
-/// JSON dizisi dönen çağrıların panik yolu — JNI tarafındaki
-/// `unwrap_or_else(|_| "[]")` deseninin aynısı.
-/// JNI `listReactions`: the stored reactions of a message, for a chat that is
-/// opened again.
+/// The panic path for calls that return a JSON array. It is the same as the `unwrap_or_else(|_| "[]")` pattern on the JNI side.
+/// JNI `listReactions`: the stored reactions of a message, for a chat that is opened again.
 pub fn list_reactions(target_message_id: &str) -> String {
     let id = target_message_id.to_string();
     json_list(catch_panic(move || crate::core_lock_read().list_reactions(&id)))
@@ -1013,14 +998,12 @@ fn json_list(result: Result<String, String>) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Sunucu (store-and-forward) seçeneği
+// Server (store-and-forward) option
 // ---------------------------------------------------------------------------
-// bkz. çekirdeğin `server_client` modülü. Bu fonksiyonların JNI karşılıkları
-// `jni_exports.rs`'in sonundadır; ikisi ELLE senkron tutulmalı (bu dosyanın modül
-// notundaki genel kural).
+// See the core's `server_client` module. The JNI counterparts of these functions are at the end of `jni_exports.rs`. The two must be kept
+// in sync BY HAND (the general rule in this file's module note).
 
-/// Davet kodundan (`typeon-server:<multiaddr>#<jeton>`) bir sunucu ekler.
-/// Başarıda `{"server_id":".."}`.
+/// Adds a server from an invite code (`typeon-server:<multiaddr>#<token>`). On success returns `{"server_id":".."}`.
 pub fn add_server(invite_code: &str) -> String {
     let code = invite_code.to_string();
     match catch_panic(move || {
@@ -1049,11 +1032,9 @@ pub fn set_server_routing(server_id: &str, enabled: bool) -> String {
     ok_result(catch_panic(move || core_lock().set_server_routing(&sid, enabled)))
 }
 
-/// Geçmişi sunucuda saklama — mesaj yönlendirmeden AYRI ve varsayılan
-/// KAPALI. Arşiv gerçek bir yedek ve ratchet'in aksine ileri-gizli DEĞİL:
-/// kök arşiv anahtarı bir gün sızarsa o ana kadar yüklenmiş TÜM geçmiş
-/// okunur. "Yeni cihazımda geçmişimi göreyim" ile ileri-gizlilik matematiksel
-/// olarak uzlaşmaz; bu takas kullanıcının açık tercihi olmalı.
+/// Server-side history storage. It is SEPARATE from message routing and disabled by default. The archive is a real backup, and unlike the
+/// ratchet it is NOT forward secret: if the root archive key ever leaks, ALL history stored up to that point can be read. Forward secrecy
+/// and "I want to see my history on a new device" cannot both hold, so this trade-off must be the user's explicit choice.
 pub fn set_server_history(server_id: &str, enabled: bool) -> String {
     let sid = server_id.to_string();
     ok_result(catch_panic(move || core_lock().set_server_history(&sid, enabled)))
@@ -1069,20 +1050,16 @@ pub fn fetch_server_history(chat_key: &str, is_group: bool, before_timestamp: i6
     ok_result(catch_panic(move || core_lock().fetch_server_history(&key, is_group, before_timestamp.max(0) as u64)))
 }
 
-/// Kök arşiv anahtarını (ARK) yükler. `set_history_key` ile aynı desen ama
-/// bu anahtar CİHAZA değil KİMLİĞE ait — aynı kimliğin bütün cihazları
-/// sunucudaki arşivi okuyabilmeli.
+/// Loads the root archive key (ARK). The same pattern as `set_history_key`, but this key belongs to the IDENTITY, not the device: every device
+/// of the same identity must be able to read the archive on the server.
 pub fn set_archive_root_key(key_bytes: &[u8]) -> bool {
     let key = zeroize::Zeroizing::new(key_bytes.to_vec());
     catch_panic(move || core_lock().set_archive_root_key(&key)).unwrap_or(false)
 }
 
-/// Sunucudaki BÜTÜN geçmişi indirir — kurtarma dosyasından ya da cihaz
-/// bağlamayla yeni kurulmuş bir cihaz için.
-/// `request_older_server_history`'den farkı: o, "bu sohbette yukarı
-/// kaydırdım" durumunu karşılıyor, yani sohbetin zaten görünür olmasını
-/// varsayıyor. Sıfırdan kurulan bir cihazda kişiler geri gelir ama hiç mesaj
-/// yoktur ve kullanıcının kaydıracağı bir şey de yoktur.
+/// Downloads ALL history from the server. Used for a device restored from a recovery file, or a newly installed device after pairing.
+/// The difference from `request_older_server_history`: that one serves "I scrolled up in this chat", so it assumes the chat is already visible.
+/// On a device set up from scratch, contacts come back but there are no messages yet, and nothing exists for the user to scroll through.
 pub fn restore_server_history() -> String {
     match catch_panic(|| core_lock().restore_all_server_history()) {
         Ok(Ok(n)) => format!("OK:{}", n),
@@ -1091,11 +1068,9 @@ pub fn restore_server_history() -> String {
     }
 }
 
-/// Çekirdeğin o an tuttuğu kök arşiv anahtarı (varsa).
-/// SADECE masaüstü istemcisinin bunu diske kalıcılaştırabilmesi için: ARK bir
-/// kardeş cihazdan `DeviceSync` ile SONRADAN gelebiliyor ve o an istemcinin
-/// elinde vault parolası olmuyor. Android'de buna gerek yok — anahtar zaten
-/// Keystore sarmalı bir dosyada üretiliyor.
+/// The root archive key the core currently holds, if any. It exists so the DESKTOP client can persist it to disk: the ARK can arrive LATER
+/// from a sibling device via `DeviceSync`, and at that point the client does not have the vault passphrase. Android does not need this,
+/// because the key is already produced in a file wrapped by the Keystore.
 pub fn archive_root_key() -> Vec<u8> {
     catch_panic(|| crate::core_lock_read().archive_root_key_bytes().unwrap_or_default()).unwrap_or_default()
 }
