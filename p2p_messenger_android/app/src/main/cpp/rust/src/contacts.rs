@@ -4,11 +4,8 @@ use super::*;
 
 impl P2PCore {
 
-    /// bkz. dosya başı düzeltme notu: `contacts` tablosu önceden hiç
-    /// yazılmıyordu — kişi listesi süreç yeniden başladığında (app
-    /// güncellemesi dahil) kayboluyordu. Her mutasyon noktasından
-    /// (register_contact_from_pairing, evaluate_sender_device,
-    /// accept_pending_device_alert) çağrılır.
+    /// See the file-top note: the `contacts` table was never written before, so the contact list was lost on every restart (including app updates).
+    /// Called from every mutation point (register_contact_from_pairing, evaluate_sender_device, accept_pending_device_alert).
     pub(crate) fn persist_contact(&self, contact: &Contact) {
         if let Err(e) = self.try_persist_contact(contact) {
             error!("Kişi kaydedilemedi: {}", e);
@@ -33,8 +30,7 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Açılışta DB'de kayıtlı tüm kişileri `self.contacts`/
-    /// `self.identity_to_contact`'a geri yükler.
+    /// On startup, restores all contacts stored in the DB into `self.contacts` / `self.identity_to_contact`.
     pub(crate) fn load_contacts_from_db(&mut self) {
         let conn = match &self.db {
             Some(c) => c,
@@ -54,7 +50,7 @@ impl P2PCore {
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<i64>>(4)?,
                 row.get::<_, Option<Vec<u8>>>(5)?,
-                // Eski satırlarda NULL — doğrudan eklenmiş (false) sayılır.
+                // Old rows have NULL here. They count as directly added (false).
                 row.get::<_, Option<i64>>(6)?.unwrap_or(0) != 0,
             ))
         });
@@ -100,12 +96,9 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `persist_contact` dosya başı notu — `known_remote_devices`
-    /// (bilinen uzak cihazların PUBLIC key'leri; secret değildir, şifreleme
-    /// gerekmez) de aynı sebeple hiç kalıcı değildi. İmza doğrulama ve
-    /// yeniden el sıkışma bu kayıtlara bağımlı olduğundan, bunlar
-    /// kaybolunca (süreç yeniden başlayınca) var olan bir kişiyle mesajlaşma
-    /// bile YENİ bir IdentityExchange'e kadar mümkün değildi.
+    /// See the `persist_contact` note at the top of the file. `known_remote_devices` (the PUBLIC keys of known remote devices; not secret, so no encryption
+    /// needed) was not persistent either. Signature verification and re-handshakes depend on these records, so when they were lost on restart, even messaging an
+    /// existing contact was impossible until a new IdentityExchange arrived.
     pub(crate) fn persist_remote_device(&self, device: &DeviceRecord) {
         if let Err(e) = self.try_persist_remote_device(device) {
             error!("Cihaz kaydı yazılamadı: {}", e);
@@ -175,12 +168,11 @@ impl P2PCore {
     }
 
     // ---------------------------------------------------------------
-    // Bölüm 2: TOFU + cihaz değişikliği tespiti
+    // Section 2: TOFU and device-change detection
     // ---------------------------------------------------------------
 
-    /// Gelen bir paketin gönderen cihazına spec 2.2 karar ağacını uygular.
-    /// `sender_device_known_pubkeys`: bu fonksiyon çağrılmadan önce
-    /// karşı taraftan indirilmiş/bilinen olmalı (imza doğrulaması için).
+    /// Applies the  decision tree to the sending device of an incoming packet.
+    /// `sender_device_known_pubkeys`: must be downloaded from the other side or already known before this function is called (needed for signature verification).
     pub(crate) fn evaluate_sender_device(&mut self, identity_id: &str, device_fingerprint: &str, has_valid_signed_device_add: bool, device_name_hint: &str, pairing_proved: bool) -> DeviceCheckOutcome {
         let contact_id = self.identity_to_contact.get(identity_id).cloned();
         let contact = contact_id.as_ref().and_then(|id| self.contacts.get(id));
@@ -197,15 +189,13 @@ impl P2PCore {
                     info!("TOFU reddedildi: {} bu cihazda silinmiş bir kişi", crate::log_id(&identity_id));
                     return DeviceCheckOutcome::UnverifiedNewDeviceAlert;
                 }
-                // bkz. `pairing_proof_valid`: only a device that read a code
+                // see `pairing_proof_valid`: only a device that read a code
                 // this device shows becomes a contact.
                 if !pairing_proved {
                     info!("TOFU reddedildi: gönderen bu cihazın kodunu okumamış ({})", crate::log_id(&identity_id));
                     return DeviceCheckOutcome::UnverifiedNewDeviceAlert;
                 }
-                // bkz. `MAX_CONTACTS` dokümantasyonu — özellikle tek taraflı,
-                // kullanıcı eylemi gerektirmeyen `IdentityExchange` yoluyla
-                // tetiklenen TOFU kayıtlarına karşı Sybil/flood koruması.
+                // See `MAX_CONTACTS`: protection against Sybil/flood, especially for TOFU records created by one-sided `IdentityExchange` packets that need no user action.
                 if self.contacts.len() >= MAX_CONTACTS {
                     warn!(
                         "TOFU reddedildi: contacts tablosu üst sınırda ({} >= {}), identity {} eklenmedi",
@@ -234,7 +224,7 @@ impl P2PCore {
                         self.persist_contact(c);
                     }
                 }
-                // Spec 2.2: "sadece bilgi bildirimi gösterilir" — alarm değil.
+                // Spec 2.2: "only an information notice is shown", not an alarm.
                 info!("Identity {} yeni bir cihaz ekledi: {}", crate::log_id(&identity_id), crate::log_id(&device_fingerprint));
             }
             DeviceCheckOutcome::UnverifiedNewDeviceAlert => {
@@ -262,27 +252,17 @@ impl P2PCore {
                     .map(|raw| identity::format_short_code(&raw))
                     .unwrap_or_else(|_| device_fingerprint.to_string());
 
-                // bkz. `MAX_PENDING_DEVICE_ALERTS` dokümantasyonu — aynı
-                // fingerprint için mevcut bir uyarının GÜNCELLENMESİ (yeni
-                // bir alarm sayısına katkı yapmaz) her zaman izinli; sadece
-                // TAMAMEN YENİ bir fingerprint için, tavan dolduysa, alarm
-                // sessizce düşürülür. Paket her hâlükârda spec 2.2 gereği
-                // BLOKLANMIŞ kalır (yalnızca UI'da bir alarm gösterilmez).
-                // Per identity too: unsigned claims with made-up keys cost the
-                // sender nothing, and 200 of them against one contact used up
-                // the whole cap, so a real alert for another contact was lost.
+                // See `MAX_PENDING_DEVICE_ALERTS`. Updating an existing alert for the same fingerprint is always allowed (it does not add to the alert count). Only a
+                // brand-new fingerprint is silently dropped when the cap is full. The packet stays BLOCKED as the  requires (only no alert is shown in the UI).
+                // Per identity too: unsigned claims with made-up keys cost the sender nothing, and 200 of them against one contact used up the whole cap, so a real
+                // alert for another contact was lost.
                 let for_this_identity = self.pending_device_alerts.values().filter(|a| a.identity_id == identity_id).count();
                 if self.pending_device_alerts.contains_key(device_fingerprint)
                     || (self.pending_device_alerts.len() < MAX_PENDING_DEVICE_ALERTS && for_this_identity < 3)
                 {
-                    // Kullanıcı kararı (2026-08-27): uyarı artık SESSİZ
-                    // değil. Önceden yalnızca `pending_device_alerts`
-                    // haritasına yazılıyordu ve arayüzün bunu fark etmesi
-                    // için ayarlar ekranını açıp listeyi sorması
-                    // gerekiyordu — yani pratikte kimse görmüyordu. Artık
-                    // olay akışına da düşüyor: iki arayüz de bunu bir
-                    // açılır pencere ve bildirimle gösterip kabul/reddet
-                    // soruyor.
+                    // User decision (2026-08-27): the alert is no longer silent. Before, it was only written to the `pending_device_alerts` map, and the UI had to
+                    // open the settings screen and query the list to notice it, so in practice nobody saw it. It now also goes to the event stream. Both UIs show it
+                    // as a popup or notification and ask accept or reject.
                     let is_new = !self.pending_device_alerts.contains_key(device_fingerprint);
                     self.pending_device_alerts.insert(device_fingerprint.to_string(), DeviceAlertInfo {
                         contact_display_name: display_name.clone(),
@@ -307,9 +287,8 @@ impl P2PCore {
                         self.pending_device_alerts.len(), MAX_PENDING_DEVICE_ALERTS, crate::log_id(&identity_id)
                     );
                 }
-                // Spec: "BLOKLA (yeni mesaj gönderme/alma durur)" — paket bu
-                // cihazdan/bu cihaza işlenmez, `pending_device_alerts`
-                // içinde bekler; kullanıcı UI'dan kabul/red etmeli.
+                // Spec: "BLOCK (new messages stop being sent or received)". The packet is not processed from or to this device. It waits in `pending_device_alerts`,
+                // and the user must accept or reject it in the UI.
             }
             DeviceCheckOutcome::KnownActive => {}
         }
@@ -331,13 +310,12 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `blocked_identities`. Engelleme kişiyi hedefler, cihazı değil.
+    /// See `blocked_identities`. Blocking targets the contact, not the device.
     pub(crate) fn is_blocked(&self, identity_id: &str) -> bool {
         self.blocked_identities.contains(identity_id)
     }
 
-    /// Bir cihaz parmak izinden kimliğe bakıp engel kontrolü yapar — gelen
-    /// paket yolunda kullanılıyor.
+    /// Looks up the identity for a device fingerprint and checks whether it is blocked. Used on the incoming packet path.
     pub(crate) fn is_blocked_device(&self, device_fingerprint: &str) -> bool {
         match self.known_remote_devices.get(device_fingerprint) {
             Some(d) => self.is_blocked(&d.identity_id),
@@ -345,9 +323,8 @@ impl P2PCore {
         }
     }
 
-    /// Kişiyi engeller: bütün cihazlarına giden oturumlar/kuyruklar silinir,
-    /// bekleyen "yeni cihaz" uyarıları temizlenir, bir daha bağlanılmaz.
-    /// `delete_contact`'tan farkı, engelin kişi silinse bile SÜRMESİ.
+    /// Blocks a contact: sessions and queues to all of its devices are deleted, pending "new device" alerts are cleared, and it is never connected to again.
+    /// The difference from `delete_contact` is that the block SURVIVES deleting the contact.
     pub(crate) fn block_identity(&mut self, identity_id: &str) -> Result<(), String> {
         if self.my_identity_id().as_deref() == Some(identity_id) {
             return Err("Kendi kimliğinizi engelleyemezsiniz".to_string());
@@ -371,8 +348,7 @@ impl P2PCore {
         }
         self.pending_device_alerts.retain(|_, a| a.identity_id != identity_id);
         self.persist_device_alerts();
-        // Grup kuyrukları KİMLİĞE göre anahtarlanıyor, cihaza göre değil —
-        // yukarıdaki cihaz döngüsü bunları yakalamaz.
+        // Group queues are keyed by IDENTITY, not by device, so the device loop above does not catch them.
         self.pending_group_messages.retain(|(_, member), _| member != identity_id);
         self.pending_group_syncs.retain(|(_, member), _| member != identity_id);
         if let Some(conn) = &self.db {
@@ -385,10 +361,8 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Engeli kaldırır. Bilinçli olarak yalnızca YÜZ YÜZE yeniden eşleşme
-    /// yolundan (`register_contact_from_pairing`, yani karekod/manuel kod)
-    /// ve kullanıcının açık isteğiyle çağrılır — uzaktan gelen hiçbir paket
-    /// bu fonksiyona erişemez.
+    /// Lifts a block. Deliberately called only from a face-to-face re-pairing (`register_contact_from_pairing`, i.e. QR or manual code) and on the user's explicit
+    /// request. No packet from the network can reach this function.
     pub(crate) fn unblock_identity(&mut self, identity_id: &str) {
         if self.blocked_identities.contains(identity_id) {
             // Disk first: lifted only in memory, the block came back on restart.
@@ -419,8 +393,7 @@ impl P2PCore {
         self.blocked_identities.iter().cloned().collect()
     }
 
-    /// Kullanıcı uyarı ekranında "Yeniden doğrula ve kabul et" dediğinde
-    /// çağrılır (spec 2.2).
+    /// Called when the user taps "Re-verify and accept" on the alert screen.
     pub(crate) fn accept_pending_device_alert(&mut self, device_fingerprint: &str) -> Result<(), String> {
         let identity_id = self.pending_device_alerts.get(device_fingerprint)
             .ok_or("No pending alert for this device")?.identity_id.clone();
@@ -449,7 +422,7 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Kullanıcı "Reddet" dediğinde (varsayılan davranış — spec 2.2).
+    /// Called when the user taps "Reject" (the default behaviour, ).
     pub(crate) fn reject_pending_device_alert(&mut self, device_fingerprint: &str) {
         let Some(alert) = self.pending_device_alerts.remove(device_fingerprint) else { return };
         self.persist_device_alerts();
@@ -472,29 +445,17 @@ impl P2PCore {
         self.pending_device_alerts.values().cloned().collect()
     }
 
-    /// UI'nin "kiminle sohbet başlatayım" seçici listesi için bilinen
-    /// kişileri döner. Her kişi için, o identity'nin bilinen (Aşama A'da
-    /// tek) Active cihaz fingerprint'ini de içerir — sohbet ekranı bu
-    /// fingerprint'i `sendMessage`'a hedef olarak geçer.
-    /// Kullanıcı kararı (2026-08-27): grup üzerinden tanışılmış bir kişiye
-    /// TAM güven verir.
-    /// `added_via_group` olan kişiler arayüzde "grup üzerinden eklendi,
-    /// yüz yüze doğrulanmadı" diye işaretleniyor — çünkü onları kurucunun
-    /// kefaletiyle tanıdık, karekod okutarak değil. Kullanıcı o kişiyi
-    /// başka bir yoldan doğruladıysa (yüz yüze güvenlik numarası
-    /// karşılaştırma, telefonla teyit) bu işareti kaldırabilmeli. Sadece
-    /// gösterimi etkiler; şifreleme zaten aynı.
-    /// Bir kişinin GÜVENLİK KODU — karşılaştırılacak şey bu.
-    /// Kod, kişinin kanonik cihazının parmak izinden türetiliyor; o parmak
-    /// izi de dört açık anahtarın SHA3-256'sı (bkz. `compute_fingerprint`).
-    /// Yani kodun eşleşmesi, iki tarafın GERÇEKTEN aynı anahtarları
-    /// gördüğü anlamına geliyor — "doğrulandı olarak işaretle" eyleminin
-    /// dayandığı tek somut kanıt bu.
-    /// Neden gerekli: grup üzerinden tanışılan kişilerde anahtarları
-    /// kurucudan alıyoruz. Kurucu kötü niyetliyse kendi anahtarını
-    /// "Ayşe'ninki" diye verebilir; bunu kriptografiyle ayırt etmenin yolu
-    /// YOK, yalnızca kodu başka bir kanaldan karşılaştırmak var. Arayüz bu
-    /// kodu göstermeden "doğrulandı" demek istemek anlamsızdı.
+    /// Returns the known contacts for the UI's "who should I start a chat with" picker list. Each contact includes that identity's known (in phase A, the only)
+    /// Active device fingerprint. The chat screen passes this fingerprint to `sendMessage` as the target.
+    /// User decision (2026-08-27): a contact met through a group gets FULL trust.
+    /// Contacts with `added_via_group` are marked in the UI as "added via group, not verified face to face", because we learned them through the founder's vouching,
+    /// not by scanning a code. If the user verified that person by another route (comparing the security number in person, or confirming by phone), they must be able
+    /// to remove this mark. It only affects display, not encryption.
+    /// The SAFETY CODE of a contact is what gets compared. The code is derived from the fingerprint of the contact's canonical device, and that fingerprint is the
+    /// SHA3-256 of four public keys (see `compute_fingerprint`). So a matching code means both sides really saw the same keys. That is the only concrete proof the
+    /// "mark as verified" action rests on.
+    /// Why it is needed: for contacts met through a group we take the keys from the founder. If the founder is malicious, it can hand over its own key as "Ayse's".
+    /// There is NO cryptographic way to tell that apart, only comparing the code over another channel. Without showing this code, offering "verified" would be meaningless.
     pub(crate) fn contact_safety_code(&self, identity_id: &str) -> Option<String> {
         let fp = self.canonical_device_for_identity(identity_id)?;
         let raw = hex::decode(&fp).ok()?;
@@ -518,11 +479,9 @@ impl P2PCore {
             contact_id: c.contact_id.clone(),
             display_name: c.display_name.clone(),
             identity_id: c.trusted_identity_id.clone(),
-            // Çoklu-cihaz: KARARLI kanonik cihaz — bir kişinin birden fazla
-            // cihazı olsa bile sohbet/arşiv TEK bir anahtar altında birleşsin
-            // (bkz. `canonical_device_for_identity`). `resolve_*` (HashMap
-            // sırasına bağlı, kararsız) yerine bu kullanılmalı ki gelen mesaj
-            // arşiv anahtarıyla tutarlı olsun.
+            // Multi-device: a STABLE canonical device, so that a contact's chat and archive merge under ONE key even when the contact has several devices (see
+            // `canonical_device_for_identity`). `resolve_*` (order depends on HashMap, so unstable) should not be used here, so that an incoming message stays
+            // consistent with the archive key.
             active_device_fingerprint: self.canonical_device_for_identity(&c.trusted_identity_id),
             avatar_hex: c.avatar_jpeg.as_ref().map(|a| hex::encode(a)),
             added_via_group: c.added_via_group,
@@ -530,8 +489,7 @@ impl P2PCore {
         }).collect()
     }
 
-    /// Kendi profil fotoğrafımızı (varsa) döner — Ayarlar ekranının mevcut
-    /// fotoğrafı gösterebilmesi için.
+    /// Returns our own profile picture (if any), so the settings screen can show the current picture.
     pub(crate) fn get_own_avatar(&self) -> Option<Vec<u8>> {
         let conn = self.db.as_ref()?;
         let identity_id = self.identity.as_ref()?.identity_id.clone();
@@ -542,22 +500,17 @@ impl P2PCore {
         ).ok().flatten()
     }
 
-    /// Bu cihazın hesap adı — kişilerin bizi gördüğü ad.
-    /// Veri modelinde ad `own_devices.device_name`'de duruyor (kimlik
-    /// kaydında ayrı bir "hesap adı" alanı YOK, bkz. `identity::Identity`).
-    /// Yeni bir alan uydurmak yerine olan kullanılıyor: karşı taraf zaten
-    /// kişiyi ilk `IdentityExchange.device_name` ile isimlendiriyor, yani
-    /// "hesap adı" bu kod tabanında fiilen ZATEN bu alandı.
+    /// This device's account name, as contacts see us.
+    /// The name lives in `own_devices.device_name` in the data model (the identity record has NO separate "account name" field, see `identity::Identity`).
+    /// Instead of inventing a new field, the existing one is used: the other side already names the contact from the first `IdentityExchange.device_name`, so the
+    /// "account name" in this code base was ALREADY this field.
     pub(crate) fn own_display_name(&self) -> Option<String> {
         let fp = self.get_active_own_device_fingerprint().ok()?;
         self.own_devices.get(&fp).and_then(|d| sanitize_display_name(&d.device_name))
     }
 
-    /// Hesap adını YEREL olarak bütün kendi cihaz kayıtlarıma yazar —
-    /// yayın YAPMAZ. `set_display_name` (kullanıcı değiştirdiğinde) ve
-    /// `import_sync_payload` (bir kardeş cihaz değiştirdiğinde) ortak
-    /// kullanır; ikincisinin yayın yapmaması şart, aksi halde iki cihaz
-    /// birbirini sonsuza kadar tetiklerdi.
+    /// Writes the account name LOCALLY to all of my own device records. It does NOT publish. `set_display_name` (when the user changes it) and `import_sync_payload`
+    /// (when a sibling device changes it) share this. The second must not publish, or two devices would trigger each other forever.
     pub(crate) fn adopt_own_device_name(&mut self, name: &str) {
         let my_id = match self.my_identity_id() { Some(id) => id, None => return };
         for rec in self.own_devices.values_mut() {
@@ -570,8 +523,7 @@ impl P2PCore {
                 dev.device_name = name.to_string();
             }
         }
-        // Kardeş cihazların `known_remote_devices` kopyaları da aynı adı
-        // taşımalı: kişi listesi/bekleyen mesaj ekranı adı BURADAN okuyor.
+        // The `known_remote_devices` copies on sibling devices must carry the same name too, since the contact list and pending-message screens read it from here.
         let sibling_fps: Vec<String> = self.known_remote_devices.values()
             .filter(|d| d.identity_id == my_id && d.device_name != name)
             .map(|d| d.device_fingerprint.clone())
@@ -593,21 +545,13 @@ impl P2PCore {
         }
     }
 
-    /// Kullanıcı isteği (2026-09-04): hesap adını değiştirir ve değişikliği
-    /// BİLİNEN HER kişiye otomatik bildirir.
-    /// Önceden ad, ilk açılıştaki "cihaz adı" diyaloğunda bir kez
-    /// soruluyor ve bir daha ASLA değiştirilemiyordu — ne yerelde ne de
-    /// karşı tarafta. Merkezî bir dizin olmadığı için bildirim, avatarla
-    /// AYNI fan-out deseniyle gider (`set_own_profile_picture`): tek tek
-    /// her kişinin her aktif cihazına, ratchet üzerinden, teslim onayı
-    /// bekleyen bir mesaj olarak — yani kişi o an çevrimdışıysa geri
-    /// döndüğünde alır, sessizce kaybolmaz.
-    /// `sync_to_siblings` da çağrılır: kendi ikincil cihazlarım bu cihazın
-    /// yeni adını (`SyncedDevice.device_name`) öğrensin.
-    /// Hesabı silmeden ÖNCE çağrılır: tüm kişilere (grup üzerinden tanışılanlar
-    /// dahil) ve kardeş cihazlara `AccountDeleted` gönderir; kurucusu olduğum
-    /// gruplarda yetkiyi kalan bir üyeye devreder. Dönen sayı: bildirim giden
-    /// cihaz sayısı. Yerel silme UI'nin işi (bkz. `account_deletion_pending`).
+    /// User request (2026-09-04): changes the account name and automatically notifies EVERY known contact of the change.
+    /// Before, the name was asked once in the "device name" dialog at first launch, and could NEVER be changed afterwards, neither locally nor on the other side.
+    /// Since there is no central directory, the notice goes out with the same fan-out pattern as the avatar (`set_own_profile_picture`): to each contact's each
+    /// active device, over the ratchet, as a message awaiting delivery confirmation. So if the contact is offline, it receives the change when it returns, and it is not lost.
+    /// `sync_to_siblings` is also called: my own secondary devices learn this device's new name (`SyncedDevice.device_name`).
+    /// Called before the account is deleted: sends `AccountDeleted` to all contacts (including those met through a group) and to sibling devices, and hands the founder
+    /// role to a remaining member in groups I founded. Returns the number of devices the notice was sent to. Deleting the local data is the UI's job (see `account_deletion_pending`).
     pub(crate) fn delete_account(&mut self) -> Result<usize, String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let own_id = self.my_identity_id().ok_or("No identity")?;
@@ -656,17 +600,15 @@ impl P2PCore {
         Ok(sent)
     }
 
-    /// Henüz onaylanmamış `AccountDeleted` gönderimi sayısı — UI yerel veriyi
-    /// silmeden önce bunun sıfırlanmasını (ya da bir üst süreyi) bekler.
+    /// The number of `AccountDeleted` sends not yet confirmed. The UI waits for this to reach zero (or for an upper time limit) before deleting local data.
     pub(crate) fn account_deletion_pending(&self) -> usize {
         self.awaiting_confirmation.values()
             .filter(|p| matches!(p.regen_content, Some(MessageContent::AccountDeleted { .. })))
             .count()
     }
 
-    /// Bir kişinin `AccountDeleted` bildirimini uygular: kimliği kalıcı
-    /// işaretler, ona giden bekleyen kuyrukları temizler, kurucusu olduğum
-    /// gruplardan çıkarır. Etkilenen grup kimliklerini döner.
+    /// Applies a contact's `AccountDeleted` notice: marks the identity as permanently deleted, clears the pending queues to it, and removes it from groups I founded.
+    /// Returns the affected group ids.
     pub(crate) fn apply_account_deleted(&mut self, identity_id: &str) -> Vec<String> {
         self.deleted_identities.insert(identity_id.to_string());
         if let Some(conn) = &self.db {
@@ -706,32 +648,24 @@ impl P2PCore {
     pub(crate) fn set_display_name(&mut self, name: &str) -> Result<(), String> {
         let name = sanitize_display_name(name)
             .ok_or_else(|| "Hesap adı boş olamaz".to_string())?;
-        // Kimlik yoksa (ilk açılış tamamlanmadı) adın yazılacağı bir kayıt
-        // da yok: `adopt_own_device_name` sessizce no-op olurdu ve kullanıcı
-        // "değişti" görüp değişmediğini fark etmezdi.
+        // If there is no identity (first launch not finished), there is no record to write the name to: `adopt_own_device_name` would silently do nothing, and the
+        // user would see "changed" without knowing it did not.
         self.get_active_own_device_fingerprint()?;
-        // Ad KİMLİĞE aittir, tek bir cihaza değil: karşı taraf kişiyi
-        // `identity_id` üzerinden isimlendiriyor (bkz. `ProfileUpdate`
-        // işleyicisi). İki cihazımın adı farklı kalsaydı, kişilerimin
-        // gördüğü ad EN SON konuşan cihaza göre gidip gelirdi — telefonda
-        // "Ali" yapıp dizüstünden bir fotoğraf değiştirmek adı sessizce
-        // "Laptop"a döndürürdü. Bu yüzden yeniden adlandırma BÜTÜN
-        // cihazlarımın kaydını günceller; kardeş cihazlara da
-        // `sync_to_siblings` ile taşınır (bkz. `import_sync_payload`
-        // kardeş döngüsündeki ad benimseme).
+        // The name belongs to the IDENTITY, not to one device: the other side names the contact by `identity_id` (see the `ProfileUpdate` handler). If my two devices
+        // kept different names, the name my contacts see would keep flipping depending on which device spoke last. Renaming on the phone and changing a photo on the
+        // laptop would silently switch the name back to "Laptop". So a rename updates the records of ALL my devices. It is carried to sibling devices with
+        // `sync_to_siblings` (see the sibling loop in `import_sync_payload`, where the name is adopted).
         self.adopt_own_device_name(&name);
-        // bkz. `import_sync_payload`: a sibling takes the name only from a
+        // see `import_sync_payload`: a sibling takes the name only from a
         // sync that is newer than its own last rename.
         self.meta_put("name_changed_at", &current_time_ms().to_string());
 
-        // bkz. packet.rs `ProfileUpdate` — TAM GÖRÜNTÜ: avatar da gider,
-        // aksi halde ad değişikliği karşı taraftaki fotoğrafımızı silerdi.
+        // See packet.rs `ProfileUpdate`: a FULL snapshot, the avatar goes too. Otherwise a name change would delete our photo on the other side.
         let content = MessageContent::ProfileUpdate {
             avatar_jpeg: self.get_own_avatar(),
             display_name: Some(name),
         };
-        // `set_own_profile_picture` ile AYNI filtre: iptal edilmiş
-        // cihazlara göndermenin anlamı yok (karşı taraf zaten reddeder).
+        // The same filter as `set_own_profile_picture`: there is no point sending to revoked devices, since the other side rejects them anyway.
         let peer_fps = self.contact_device_targets();
         for fp in peer_fps {
             if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
@@ -742,14 +676,10 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Kendi profil fotoğrafımızı ayarlar/kaldırır (`avatar_jpeg: None`) ve
-    /// BİLİNEN HER kişiye (P2P'de merkezi bir dizin olmadığı için tek tek)
-    /// yeni `MessageContent::ProfileUpdate` gönderir. bkz. packet.rs notu —
-    /// bu, otomatik her bağlantıda DEĞİL, sadece kullanıcı fotoğrafı
-    /// değiştirdiğinde tetiklenir (spam önleme).
+    /// Sets or removes our own profile picture (`avatar_jpeg: None`) and sends a new `MessageContent::ProfileUpdate` to EVERY known contact (one by one, since there
+    /// is no central directory in P2P). See the packet.rs note. This is triggered only when the user changes the picture, not automatically on every connection (spam prevention).
     pub(crate) fn set_own_profile_picture(&mut self, avatar_jpeg: Option<Vec<u8>>) -> Result<(), String> {
-        // bkz. `MAX_AVATAR_BYTES` — sınırı aşan bir avatar yayınlanamaz
-        // (`MessageTooLarge`, KALICI) ve kullanıcı sebebini hiç öğrenemezdi.
+        // See `MAX_AVATAR_BYTES`. An avatar over the limit cannot be published (`MessageTooLarge`, PERMANENT), and the user would never learn why.
         if let Some(a) = &avatar_jpeg {
             if a.len() > MAX_AVATAR_BYTES {
                 return Err(format!(
@@ -765,18 +695,14 @@ impl P2PCore {
                 params![avatar_jpeg, identity_id],
             ).map_err(|e| e.to_string())?;
         }
-        // `ProfileUpdate` TAM GÖRÜNTÜ (bkz. packet.rs notu): adı da taşımak
-        // zorunda, aksi halde fotoğraf değişikliği karşı tarafta adı
-        // "hiç bildirilmemiş" hâle düşürürdü.
+        // `ProfileUpdate` is a FULL snapshot (see the packet.rs note): it has to carry the name too. Otherwise a photo change would leave the name "never announced" on the other side.
         let content = MessageContent::ProfileUpdate { avatar_jpeg, display_name: self.own_display_name() };
-        // My other devices store it too (bkz. the `ProfileUpdate` arm): a
+        // My other devices store it too (see the `ProfileUpdate` arm): a
         // rename on a sibling sends the photo that sibling holds, and with a
         // stale copy every contact got the old photo back.
         let siblings = self.sibling_active_devices();
-        // `status == Active` filtresi YOKTU — iptal edilmiş
-        // (revoked) cihazlara da profil güncellemesi gidiyordu. Karşı taraf
-        // zaten `receive_message`'ta iptal edilmiş göndericiyi reddediyor,
-        // ama biz de boşuna şifreleyip 7 gün yeniden denemeyelim.
+        // There was NO `status == Active` filter, so revoked devices also got profile updates. The other side already rejects a revoked sender in `receive_message`, but we
+        // should not waste the encryption and 7 days of retries either.
         let peer_fps = self.contact_device_targets();
         for fp in peer_fps {
             if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
@@ -789,16 +715,10 @@ impl P2PCore {
         Ok(())
     }
 
-    /// bkz. `packet.rs`
-    /// `MessageContent::AddressAnnounce` dokümantasyonu ("aynı LAN'da + Tor
-    /// açık cihazlardan biri mobil veri+Tor'a geçince kimseye ulaşamıyor"
-    /// hatası). `set_own_profile_picture` ile AYNI fan-out deseni: bilinen
-    /// HER kişiye kendi o anki `get_node_address()`'imizi gönderir — adres
-    /// yoksa (henüz hiçbir dinleme adresi bildirilmedi) sessizce no-op.
-    /// Çağıranlar: `start_network` sonrası (bir kerelik, mevcut adresle),
-    /// Tor durumu Ready'e geçtiğinde (bkz. `poll_events` `tor_was_ready`
-    /// karşılaştırması) ve ağ değişikliği bildiriminde (bkz.
-    /// `reconnect_all_known_now`) — üçü de bu tek fonksiyonu çağırır.
+    /// See the `packet.rs` `MessageContent::AddressAnnounce` docs (the bug: "after one of two Tor-enabled devices on the same LAN switches to mobile data and Tor, it cannot
+    /// reach anyone"). Same fan-out pattern as `set_own_profile_picture`: sends our CURRENT `get_node_address()` to EVERY known contact. If there is no address yet (no
+    /// listen address reported), it is a silent no-op. Callers: once after `start_network` (with the current address), when Tor reaches Ready (see the `tor_was_ready`
+    /// comparison in `poll_events`), and on a network change notice (see `reconnect_all_known_now`). All three call this one function.
     pub(crate) fn announce_address_to_all_contacts(&mut self) {
         let addr = match self.get_node_address() {
             Some(a) => a,
@@ -829,10 +749,8 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı, kullanıcı tarafından istenen "sohbeti temizle" (yumuşak
-    /// seçenek): sadece yerel mesaj/ek geçmişini (diskteki `.enc` blob'ları
-    /// dahil) siler — eşleşme/ratchet oturumu KORUNUR, kişi listede kalır,
-    /// sohbet boş başlar. bkz. `delete_contact` (sert seçenek).
+    /// Clear chat (the soft option, requested by the user): deletes only the local message and attachment history (including the `.enc` blobs on disk). The pairing and
+    /// ratchet session are KEPT, the contact stays in the list, and the chat starts empty. See `delete_contact` (the hard option).
     pub(crate) fn clear_chat_history(&mut self, contact_id: &str) -> Result<(), String> {
         if self.groups.contains_key(contact_id) {
             return self.clear_group_history(contact_id);
@@ -934,13 +852,11 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı, kullanıcı tarafından istenen "kişiyi sil" (sert seçenek,
-    /// UI'da çift onaylı): eşleşme/ratchet oturumu DAHİL her şeyi siler —
-    /// yeniden mesajlaşmak için taze bir QR/manuel eşleşme gerekir. bkz.
-    /// `clear_chat_history` (yumuşak seçenek, sadece geçmişi siler).
+    /// Delete contact (the hard option requested by the user, with a double confirmation in the UI): deletes EVERYTHING, including the pairing and ratchet session.
+    /// Chatting again requires a fresh QR or manual pairing. See `clear_chat_history` (the soft option, which only deletes history).
     pub(crate) fn delete_contact(&mut self, contact_id: &str) -> Result<(), String> {
         let contact = self.contacts.get(contact_id).ok_or("Kişi bulunamadı")?.clone();
-        // bkz. the `hfloor:` filter in the HistorySyncResponse arm.
+        // see the `hfloor:` filter in the HistorySyncResponse arm.
         self.raise_history_floor(&contact.trusted_identity_id, current_time_ms());
         // Still a member of one of our groups: the device records, keys and
         // sessions stay. Without them group messages to and from this member
@@ -968,7 +884,7 @@ impl P2PCore {
         // user paired again.
         if let Some(conn) = &self.db {
             let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-            // bkz. `contact_removed_locally`.
+            // see `contact_removed_locally`.
             tx.execute("INSERT OR REPLACE INTO removed_contacts (identity_id) VALUES (?1)", params![contact.trusted_identity_id])
                 .map_err(|e| e.to_string())?;
             for fp in &fingerprints {
@@ -1016,16 +932,10 @@ impl P2PCore {
         Ok(())
     }
 
-    /// önceden `Contact::
-    /// revoke_device`/`DeviceRecord.is_active` her ikisi de VARDI ama
-    /// hiçbir çağıran onları gerçekten `false`/`Revoked` yapmıyordu — bir
-    /// cihaz asla iptal edilemiyordu (bkz. SECURITY.md). Bu, `delete_contact`
-    /// (kişiyi TAMAMEN siler) ile AYNI temizlik adımlarını yapar ama
-    /// kişiyi/geçmişi SİLMEZ — sadece bu TEK cihaz fingerprint'inden
-    /// gelecek/giden her şeyi durdurur (`receive_message`/
-    /// `process_handshake_init`'teki yeni `is_active` kontrolü sayesinde).
-    /// Aynı kişinin BAŞKA bilinen bir cihazı varsa (spec 1.6 çoklu cihaz
-    /// senaryosu) o etkilenmez.
+    /// Before: `Contact::revoke_device` and `DeviceRecord.is_active` both EXISTED, but no caller ever set them to `false`/`Revoked`. A device could never be revoked
+    /// (see SECURITY.md). This does the SAME cleanup steps as `delete_contact` (which deletes the contact COMPLETELY), but it does NOT delete the contact or its history.
+    /// It only stops everything to and from this ONE device fingerprint (through the new `is_active` checks in `receive_message` and `process_handshake_init`).
+    /// If the same contact has ANOTHER known device, that one is not affected (the multi-device case of ).
     pub(crate) fn revoke_contact_device(&mut self, contact_id: &str, device_fingerprint: &str) -> Result<(), String> {
         let mut contact = self.contacts.get(contact_id).cloned().ok_or("Kişi bulunamadı")?;
         // Everything below acts on the fingerprint alone: for a device of
@@ -1117,13 +1027,9 @@ impl P2PCore {
         }
     }
 
-    /// A chat is archived under the contact's canonical device
-    /// (`canonical_device_for_identity`). When that device changes (it was
-    /// revoked, or an older one came back) the rows move with it; the chat
-    /// used to open empty, its history left under the old fingerprint.
-    /// ponytail: message rows only. Attachment rows (`files`) stay under the
-    /// device that offered them; move them too if the attachment list of
-    /// such a chat matters.
+    /// A chat is archived under the contact's canonical device (`canonical_device_for_identity`). When that device changes (it was revoked, or an older one came back),
+    /// the rows move with it. Before, the chat opened empty, because its history was left under the old fingerprint.
+    /// ponytail: message rows only. Attachment rows (`files`) stay under the device that offered them. Move them too if the attachment list of such a chat matters.
     pub(crate) fn rekey_archive_to_canonical(&self, identity_id: &str) {
         let Some(canon) = self.canonical_device_for_identity(identity_id) else { return };
         let Some(contact) = self.identity_to_contact.get(identity_id).and_then(|cid| self.contacts.get(cid)) else { return };
@@ -1144,13 +1050,9 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı, güvenlik denetimi devamı (bkz. SECURITY.md "Cross-network
-    /// connectivity" notu): kullanıcının Ayarlar'dan elle ekleyebileceği,
-    /// güvendiği/kendi işlettiği bir röle adresi (ör. sabit IP'li bir VPS,
-    /// Node modu açık). Bu, sıfırdan bir kişiyle hiç ortak röle geçmişi
-    /// olmayan iki YABANCI'nın ilk kez farklı ağlardan eşleşebilmesini
-    /// GARANTİ eden tek yol — organik keşif (identify/QR paylaşımı,
-    /// `known_relay_peers`) ancak ağda zaten bilinen bir röle varsa işler.
+    /// User-requested extra (see the SECURITY.md "Cross-network connectivity" note): a relay address the user adds by hand in Settings, one they trust or run themselves
+    /// (for example a VPS with a fixed IP, or a device with node mode on). This is the ONLY way to GUARANTEE that two STRANGERS with no shared relay history can pair
+    /// across different networks for the first time. Organic discovery (identify, QR sharing, `known_relay_peers`) only works when a relay is already known on the network.
     pub(crate) fn add_known_relay_address(&mut self, multiaddr: &str) -> Result<(), String> {
         let addr: Multiaddr = multiaddr.trim().parse().map_err(|_| "Geçersiz multiaddr".to_string())?;
         let peer_id = extract_peer_id(&addr).ok_or("Adres bir /p2p/<peer_id> son eki içermeli")?;
@@ -1161,7 +1063,7 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Groups tab GUI'sinin listesi için — bkz. `GroupSummary` notu.
+    /// For the Groups tab list. See the `GroupSummary` note.
     pub(crate) fn list_groups(&self) -> Vec<GroupSummary> {
         let own_identity_id = self.identity.as_ref().map(|i| i.identity_id.clone()).unwrap_or_default();
         self.groups.values().map(|g| GroupSummary {
@@ -1175,25 +1077,18 @@ impl P2PCore {
     }
 
     // ---------------------------------------------------------------
-    // Bölüm 3: Hibrit KEM + Double Ratchet
+    // Section 3: hybrid KEM and Double Ratchet
     // ---------------------------------------------------------------
 
-    /// Spec dışı: ChatActivity'nin "bağlanılıyor..." göstergesini ne zaman
-    /// gizleyeceğini bilebilmesi için — bir ratchet oturumu var mı.
+    /// Lets ChatActivity know when to hide its "connecting..." indicator: whether a ratchet session exists.
     pub(crate) fn has_active_session(&self, peer_device_fingerprint: &str) -> bool {
         self.ratchets.contains_key(peer_device_fingerprint)
     }
 
-    /// Spec dışı: GERÇEK canlı bağlantı durumu — `has_active_session`'ın
-    /// aksine (o sadece "bir ratchet oturumu kuruldu mu" sorusuna cevap
-    /// verir, bir kez kurulunca SÜRESİZ true kalır, kriptografik bir
-    /// durumdur, ağ bağlantısından bağımsızdır), bu fonksiyon `Swarm`'ın
-    /// KENDİ canlı bağlantı defterine (`is_connected`) bakar. Önceden
-    /// ChatActivity'nin durum yazısı `has_active_session`'ı kullanıyordu —
-    /// bu yüzden karşı taraf aslında erişilemez olsa bile (ratchet bir kez
-    /// kurulduktan sonra) hep "Bağlı" gösteriyordu. `device_to_peer_id`'de
-    /// hiç kayıt yoksa (bu süreç boyunca o cihazdan hiç paket alınmadıysa)
-    /// `false` döner.
+    /// The REAL live connection status. Unlike `has_active_session` (which only answers "has a ratchet session been set up?", stays true FOREVER once it is set up,
+    /// is a cryptographic state, independent of the network connection), this function checks the `Swarm`'s OWN live connection table (`is_connected`).
+    /// Before, ChatActivity's status line used `has_active_session`, so even when the other side was actually unreachable (after the ratchet was set up once),
+    /// it always showed "Connected". Returns `false` if there is no record for the device in `device_to_peer_id` (no packet from that device has been received during this process).
     pub(crate) fn is_peer_connected(&self, peer_device_fingerprint: &str) -> bool {
         let peer_id = match self.device_to_peer_id.get(peer_device_fingerprint) {
             Some(pid) => pid,
@@ -1205,22 +1100,13 @@ impl P2PCore {
 
 impl P2PCore {
 
-    /// bu cihaz KENDİ kimliği tarafından iptal edildiğinde (`apply_device_revoke_notice`)
-    /// çağrılır. TÜM yerel durumu — DB tabloları, disk üzerindeki ek
-    /// dosyaları ve bellek-içi durum (ÖZEL ANAHTARLAR dahil; `DeviceKeys`
-    /// Drop'ta zeroize eder) — siler. Silme sonrası çekirdek "kimliksiz"
-    /// (fresh-install) duruma döner: kimlik/anahtar olmadığından gönderim/
-    /// alım yolları doğal olarak inert olur (ayrı bir "kilitli" bayrağına
-    /// gerek yok, o bir takılı-durum riski yaratırdı — kullanıcı aynı süreçte
-    /// yeni bir kimlik oluşturabilmeli). ÖNEMLİ: özel anahtarların KALICI
-    /// kopyası çekirdekte DEĞİL, UI'nin Keystore/vault'undadır (bkz.
-    /// `load_secret_bundle`) — UI, `self_revoked` olayını alınca onu KENDİ
-    /// tarafında siler ve onboarding'e döner.
-    /// One identity per database. When the DB holds another identity than
-    /// the one about to be installed, its whole local state goes first:
-    /// history, contacts, groups, sessions, server records, attachment files.
-    /// The storage keys the client loaded at start stay, they belong to the
-    /// device and not to the identity: no restart is needed.
+    /// Called when this device is revoked by its OWN identity (`apply_device_revoke_notice`). Deletes ALL local state: DB tables, extra files on disk, and in-memory
+    /// state (INCLUDING the PRIVATE KEYS; `DeviceKeys` zeroizes on Drop). After the delete, the core returns to an "identity-less" (fresh install) state. With no
+    /// identity or keys, the send and receive paths are naturally inert, so no separate "locked" flag is needed (that would create a stuck-state risk, and the user
+    /// must be able to create a new identity in the same process). IMPORTANT: the PERSISTENT copy of the private keys is NOT in the core, it is in the UI's
+    /// Keystore/vault (see `load_secret_bundle`). The UI deletes it on its side when it gets the `self_revoked` event, and returns to onboarding.
+    /// One identity per database. When the DB holds another identity than the one about to be installed, its whole local state goes first: history, contacts, groups,
+    /// sessions, server records, attachment files. The storage keys the client loaded at start stay, since they belong to the device and not to the identity, so no restart is needed.
     pub(crate) fn wipe_other_identity(&mut self, identity_id: &str) {
         let other = self.db.as_ref().map_or(false, |c| {
             c.query_row("SELECT 1 FROM identities WHERE id != ?1", params![identity_id], |_| Ok(())).is_ok()
@@ -1248,15 +1134,11 @@ impl P2PCore {
                 "skipped_message_keys", "remote_devices", "ratchet_states", "files",
                 "device_addrs", "device_onion_addrs", "pending_durable_retries",
                 "pending_group_messages", "app_meta", "pending_sibling_ops", "acked_packets",
-                // sunucu tabloları listede YOKTU. `servers`
-                // satırı `enroll_sk`/`enroll_sk_pq` — sunucudaki kaydımıza
-                // karşılık gelen ÖZEL imza anahtarlarını — taşıyor;
-                // `server_archive_queue` ise mesaj gövdelerini. Uzaktan
-                // iptal edilmiş bir cihazda ikisi de diskte kalıyordu.
+                // The server tables were NOT in the list. The `servers` row carries `enroll_sk`/`enroll_sk_pq`, the PRIVATE signing keys for our registration on the server.
+                // `server_archive_queue` carries message bodies. On a remotely revoked device both were left on disk.
                 "servers", "server_cursors", "server_archive_queue", "server_blob_uploads",
                 "server_archived_convs", "server_archive_revs",
-                // Engel listesi de bu cihazın yerel durumu — silinen bir
-                // kimliğin kimleri engellediği geride kalmamalı.
+                // The block list is also local state of this device. The blocks of a deleted identity must not be left behind.
                 "blocked_identities", "deleted_identities", "removed_contacts", "removed_groups",
                 "wb_strokes", "wb_tombstones", "wb_page_sigs", "own_prekeys", "peer_prekeys",
                 // They hold other people's identity ids (who reacted, who saw).
@@ -1271,8 +1153,7 @@ impl P2PCore {
         if let Ok(dir) = self.stickers_dir() {
             let _ = std::fs::remove_dir_all(&dir);
         }
-        // Bellek: özel anahtarlar ve oturum sırları dahil. `own_device_keys`
-        // (DeviceKeys) ve ratchet state'leri Drop'ta zeroize eder.
+        // Memory: including the private keys and session secrets. `own_device_keys` (DeviceKeys) and the ratchet states zeroize on Drop.
         self.identity = None;
         self.own_devices.clear();
         self.own_device_keys.clear();
@@ -1326,9 +1207,7 @@ impl P2PCore {
         self.sibling_fetch_open.clear();
         self.history_fetch_pages.clear();
         self.handshake_failure_notified.clear();
-        // sunucu durumu ve kök arşiv anahtarı da
-        // temizlenmeli — aksi halde iptal edilmiş bir cihaz, süreç yaşadığı
-        // sürece hâlâ kayıtlı bir sunucu istemcisi olarak davranıyor.
+        // The server state and the root archive key must be cleared too. Otherwise a revoked device keeps acting as a registered server client for as long as the process lives.
         self.servers.clear();
         self.server_rt.clear();
         self.server_inflight.clear();
@@ -1342,20 +1221,13 @@ impl P2PCore {
         self.deferred_incoming.clear();
         self.download_request_ids.clear();
 
-        // Öz-denetim düzeltmesi (2026-08-28): defter #13'te bellek tarafını
-        // YARIM bırakmışım. Aşağıdakiler kalıyordu ve ikisi doğrudan ANAHTAR
-        // MALZEMESİ:
-        // * `pending_secret_bundle` — cihazın HAM gizli anahtarlarını
-        //     taşıyan blok (Kotlin'e verilmeyi bekliyor olabilir). Uzaktan
-        //     iptal edilmiş bir cihazda bunun bellekte kalması, silmenin
-        //     tam olarak önlemesi gereken şeydi.
-        //   * `skipped_key_encryption_key` — ratchet durumlarını, atlanan
-        //     mesaj anahtarlarını, dosya anahtarlarını ve sunucu arşiv
-        //     kuyruğunu çözen anahtar. `history_key` siliniyordu, bu
-        //     silinmiyordu; tutarsızdı.
-        // Geri kalanlar kimlik/kişi eşleştirmesi sızdırıyordu: hangi
-        // parmak izini hangi ağ adresinde gördüğümüz, kimden ne zaman
-        // el sıkışma aldığımız, hangi kişiler için uyarı beklediğimiz.
+        // Fix: the memory side of the device-revoke cleanup had been left half done. The following remained, and two of them are direct KEY MATERIAL:
+        // * `pending_secret_bundle`: the block with the device's RAW private keys (it may be waiting to be handed to Kotlin). Leaving it in memory on a remotely
+        //   revoked device was exactly what the delete must prevent.
+        // * `skipped_key_encryption_key`: the key that decrypts ratchet states, skipped message keys, file keys and the server archive queue. `history_key` was cleared
+        //   but this was not, which was inconsistent.
+        // The rest leaked identity and contact pairing data: which fingerprint we saw at which network address, from whom and when we received a handshake, and which
+        // contacts we were waiting on alerts for.
         {
             // Wiped, not only dropped: these are the raw device secrets and
             // the keys that open everything stored.
