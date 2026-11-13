@@ -91,14 +91,11 @@ impl P2PCore {
         }
     }
 
-    /// The signed `GroupUpdate` for `change` on top of `group`: version + 1,
-    /// and the member list and vouched devices as they are AFTER the change
-    /// (a new member must get the full list, a removed one must not be in it).
-    /// Shared by every founder action; the caller applies and fans out.
+    /// The signed `GroupUpdate` for `change` on top of `group`: version + 1, and the member list and vouched devices as they are AFTER the change
+    /// (a new member must get the full list, a removed one must not be in it). Shared by every founder action; the caller applies and fans out.
     ///
-    /// M90/H6: `member_devices` holds only the devices new or changed since
-    /// the previous update of this device (`gvd:` in app_meta); `full` puts
-    /// every one in (for a member just added). See `GroupSyncRequest`.
+    /// `member_devices` holds only the devices new or changed since the previous update of this device (`gvd:` in app_meta). `full` puts every one
+    /// in (for a member just added). See `GroupSyncRequest`.
     pub(crate) fn sign_group_change(&self, group: &Group, change: &GroupChange) -> Result<GroupUpdate, String> {
         self.sign_group_change_with(group, change, false)
     }
@@ -263,11 +260,11 @@ impl P2PCore {
         }
 
         // Send pairwise to all members (including the new one).
-        // Before, this was sent as a bare, unencrypted `NetworkEnvelope::GroupUpdate` (only Ed25519-signed, and it spread in CLEARTEXT over
+        // Earlier, this was sent as a bare, unencrypted `NetworkEnvelope::GroupUpdate` (signed with Ed25519 only, and it spread in CLEARTEXT over
         // gossipsub). It now goes over the same hybrid ratchet-encrypted channel as everything else (see `MessageContent::GroupUpdate` and the
         // `needs_delivery_confirmation` list).
-        // Fix (a device connected over Tor never saw the group, even though it was invited): if the target device cannot be resolved yet
-        // (see `send_group_update_to_member`), it is no longer silently lost. It is added to the pending list and retried periodically.
+        // Fix: if the target device cannot be resolved yet (see `send_group_update_to_member`), the update is no longer silently lost. It is added to
+        // the pending list and retried periodically.
         let targets = self.groups.get(group_id).map(|g| g.member_identity_ids()).unwrap_or_default();
         for member_identity_id in targets {
             if member_identity_id == own_identity_id {
@@ -448,10 +445,9 @@ impl P2PCore {
         }
         let update = self.sign_group_change(&group, &GroupChange::Delete)?;
 
-        // Fix (a deleted group was not deleted for all members): before, this had its own simple loop. If a member's active device could not be
-        // resolved at that moment (e.g. it was offline), the notice was silently LOST. Unlike the retry mechanism (see `pending_group_syncs` and
-        // `group_sync_sweep`), which `invite_to_group`/`remove_from_group`/`set_group_avatar` all use via `send_group_update_to_member`. Now the SAME
-        // helper is used.
+        // Fix: a deleted group was not deleted for all members. Before, this had its own simple loop. If a member's active device could not be resolved at
+        // that moment (e.g. it was offline), the notice was silently LOST. Unlike the retry mechanism (see `pending_group_syncs` and `group_sync_sweep`),
+        // which `invite_to_group`, `remove_from_group` and `set_group_avatar` all use via `send_group_update_to_member`. Now the SAME helper is used.
         for member_identity_id in group.other_members(&own_identity_id) {
             self.send_group_update_to_member(group_id, &member_identity_id, &update);
         }
@@ -601,9 +597,9 @@ impl P2PCore {
         // messages. On the receiving side the group archive is keyed by `group_message_local_id`, so there is no duplication or conflict between devices.
         let devices = self.active_devices_for_identity(member_identity_id);
         if !devices.is_empty() {
-            // Fix (group edit/delete sometimes reached nobody, silently): before, if the member's device list was NOT empty, `true` was returned
-            // unconditionally. An `Err` from `send_message_content` for every device (e.g. no ratchet session could be set up with that device) was
-            // never reflected to the callers (`edit_group_message`/`delete_group_message`), which still reported `Ok(())`. An `Ok` from
+            // Fix: group edits and deletes sometimes reached nobody, silently. Before, if the member's device list was NOT empty, `true` was returned
+            // unconditionally. An `Err` from `send_message_content` for every device (e.g. no ratchet session could be set up with that device) was never
+            // reflected to the callers (`edit_group_message` / `delete_group_message`), which still reported `Ok(())`. An `Ok` from
             // `send_message_content` does not mean the network publish really succeeded at that moment (temporary network errors are queued for
             // `awaiting_confirmation` retries anyway, see `publish_with_ack_tracking`). But a PERMANENT error (e.g. an encryption or ratchet error) is
             // now correctly reflected as `false`.
@@ -680,10 +676,9 @@ impl P2PCore {
         }
     }
 
-    /// Fix (a device connected over Tor never saw the group, even though it was invited): tries to send a `GroupUpdate` to one member. If the target's
-    /// active device is not yet known (see `pending_group_syncs`), the update is added to the pending list for this (group_id, identity_id) pair instead
-    /// of being silently lost. `group_sync_sweep` retries periodically until the device can be resolved. This gathers the block that was repeated in the
-    /// fan-out loops of `invite_to_group`, `remove_from_group`, `set_group_avatar` and `delete_group`.
+    /// Fix: tries to send a `GroupUpdate` to one member. If the target's active device is not yet known (see `pending_group_syncs`), the update is added
+    /// to the pending list for this (group_id, identity_id) pair instead of being silently lost. `group_sync_sweep` retries periodically until the device
+    /// can be resolved. This gathers the block that was repeated in the fan-out loops of `invite_to_group`, `remove_from_group`, `set_group_avatar` and `delete_group`.
     pub(crate) fn send_group_update_to_member(&mut self, group_id: &str, member_identity_id: &str, update: &GroupUpdate) {
         // Multi-device: send to ALL of the member's active devices. Otherwise a member's secondary device would keep a stale group membership, name and avatar.
         let devices = self.active_devices_for_identity(member_identity_id);
@@ -889,15 +884,15 @@ impl P2PCore {
         walked
     }
 
-    /// Is this sender allowed to write to this group?
+    /// Whether this sender is allowed to write to this group.
     ///
-    /// Found in an audit: group messages (`Text`/`FileOffer`/`Reaction`, all carrying `MessageContent.group_id`) passed NO membership check on the
-    /// receiving side. `receive_message` only verifies that the packet was signed by a known device and that `sender_identity_id` is that device's
-    /// registered identity. The `group_id` field was entirely the sender's CLAIM. Consequences:
+    /// Group messages (`Text`, `FileOffer`, `Reaction`, all carrying `MessageContent.group_id`) used to pass NO membership check on the receiving side.
+    /// `receive_message` only verified that the packet was signed by a known device and that `sender_identity_id` is that device's registered identity.
+    /// The `group_id` field was entirely the sender's claim. Consequences:
     ///
     /// - A member REMOVED from the group could keep writing. Removal only drops that person from the remaining members' send fan-out, and the pairwise
     ///   ratchet with them stays. The message went into the archive via `archive_group_message` and showed in the UI as a legitimate group message.
-    /// - ANY contact in the list, once it knew a `group_id` (a removed member knows one, a screenshot can leak one), could inject messages or files
+    /// - ANY contact in the list, once it knew a `group_id` (a removed member knows one, and a screenshot can leak one), could inject messages or files
     ///   into that group.
     ///
     /// The rule applies ONLY when we know the group, on purpose. A group we have never seen may be an invite or `GroupUpdate` that has not reached us
@@ -1048,12 +1043,12 @@ impl P2PCore {
         }
         let gap = group_exists && update.new_version > group_ref.version.saturating_add(1);
         if let Err(e) = validate_group_update(&check, &update.signed_by, signer_is_active, update.new_version) {
-            // Fix (see `PendingConfirmation.regen_content` and the "6 hours offline" scenario): `StaleOrOutOfOrderVersion` is not an attack or corruption.
-            // The recipient has ALREADY applied this version, or a newer one. E.g. while this GroupUpdate was refreshed and retried because it could not be
-            // delivered for a long time, ANOTHER group change may already have arrived by the normal path and moved the version forward. If we carried this
-            // up as an Err, the caller would send NO Ack (see the caller), and the sender would keep refreshing and resending this stale packet forever,
-            // because it is never acknowledged. Nothing is left for the recipient to do, so it counts as Ok(()). The caller acks every other error too,
-            // except "unknown signer device": the same update can never pass later. A missed founder handover is healed by the carried `founder_chain`.
+            // `StaleOrOutOfOrderVersion` is not an attack or corruption. The recipient has ALREADY applied this version, or a newer one. For example, while
+            // this GroupUpdate was refreshed and retried because it could not be delivered for a long time, ANOTHER group change may already have arrived by
+            // the normal path and moved the version forward. If we carried this up as an Err, the caller would send NO Ack (see the caller), and the sender
+            // would keep refreshing and resending this stale packet forever, because it is never acknowledged. Nothing is left for the recipient to do, so
+            // it counts as Ok(()). The caller acks every other error too, except "unknown signer device": the same update can never pass later. A missed
+            // founder handover is healed by the carried `founder_chain`.
             if matches!(e, GroupUpdateError::StaleOrOutOfOrderVersion) {
                 // An older update (late, or a full copy) still vouches for devices: founder-signed, and only of current members.
                 if group_exists {
@@ -1134,15 +1129,15 @@ impl P2PCore {
                 g.version = update.new_version;
             }
             self.remove_group_locally(&update.group_id);
-            let _ = self.clear_group_history(&update.group_id); // E-02, see `delete_group`
+            let _ = self.clear_group_history(&update.group_id);  // Deleting a group: see `delete_group`.
             return Ok(());
         }
 
         if !group_exists {
-            // Found in an audit: for a group we have NEVER known locally, `validate_group_update` builds `group_ref` via `default_group()` (founder = the
-            // signer), so by definition the check passes. Result: ANY person in the contact list could send a `GroupUpdate` that does NOT include us, and
-            // create a group on our device with an arbitrary name (e.g. "IT Support"). Since they were the only member and founder, they then also passed
-            // `sender_may_post_to_group` and could post messages into it. A ready-made social engineering surface.
+            // For a group we have NEVER known locally, `validate_group_update` builds `group_ref` via `default_group()` (founder = the signer), so by
+            // definition the check passes. Result: ANY person in the contact list could send a `GroupUpdate` that does NOT include us, and create a group
+            // on our device with an arbitrary name (for example "IT Support"). Since they were the only member and founder, they could also pass
+            // `sender_may_post_to_group` and post messages into it. That is a ready-made social engineering surface.
             //
             // Rule: an unknown group is created only if this update makes US a member. For a `members` list that is empty (older senders), the only basis
             // is `Add(us)`.
@@ -1233,7 +1228,7 @@ impl P2PCore {
         if matches!(&update.change, GroupChange::Remove(id) if *id == me) && !me.is_empty() {
             info!("Kurucu bizi gruptan çıkardı: {}", update.group_id);
             self.remove_group_locally(&update.group_id);
-            let _ = self.clear_group_history(&update.group_id); // E-02, see `delete_group`
+            let _ = self.clear_group_history(&update.group_id);  // Deleting a group: see `delete_group`.
             return Ok(());
         }
         if let Some(g) = self.groups.get(&update.group_id) {
@@ -1309,12 +1304,8 @@ impl P2PCore {
                     sign_pubkey_mldsa: d.sign_pubkey_mldsa.clone(),
                     kem_pubkey_x25519: d.kem_pubkey_x25519.clone(),
                     kem_pubkey_mlkem: d.kem_pubkey_mlkem.clone(),
-                    // Network robustness fix (a case with three Tor peers, where one is the founder/bridge and the other two could not reach each other, in both
-                    // DM and group): this used to use only `device_last_addr`, the last address that worked. That could be an address written OVER a LAN/relay
-                    // connection, one a Tor-only third party could never reach. The same root cause was already fixed in `try_reconnect_device` (see that
-                    // function and the `device_onion_addr` field docs), but the vouch snapshot had never seen the fix. Now `device_onion_addr` is used, which is
-                    // never overwritten by a LAN/relay address (no fallback to `device_last_addr`).
-                    // onion only: a clearnet/UPnP address must never travel inside a group update (the node dials onion only).
+                    // Vouched addresses come from `device_onion_addr` only. It is never overwritten by a LAN or relay address, so a Tor-only peer can always reach it.
+                    // Onion only: a clearnet or UPnP address must never travel inside a group update (the node dials onion only).
                     last_addr: if *id == own_identity_id {
                         self.get_node_address()
                     } else {
@@ -1339,10 +1330,10 @@ impl P2PCore {
             .collect()
     }
 
-    /// User decision (automatic introduction of members): on the RECEIVING side, adopts the member devices the founder vouched for, so we can set up
-    /// ratchets and message members we have never paired with (see `GroupUpdate.member_devices`).
+    /// Automatic introduction of members. On the RECEIVING side, this adopts the member devices the founder vouched for, so we can set up ratchets and
+    /// message members we have never paired with (see `GroupUpdate.member_devices`).
     ///
-    /// SECURITY RULES (see the field's note):
+    /// Security rules:
     /// - The keys of a device we ALREADY know are NEVER overwritten. A malicious founder cannot change the key of a person we trust.
     /// - `device_fingerprint` must be the SHA3-256 of the keys (records that are inconsistent with themselves are rejected).
     /// - Our own identity is skipped.
