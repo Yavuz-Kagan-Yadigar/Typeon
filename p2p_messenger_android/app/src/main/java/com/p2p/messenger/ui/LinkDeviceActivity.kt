@@ -19,20 +19,15 @@ import com.p2p.messenger.R
 import com.p2p.messenger.util.QrBinaryCodec
 
 /**
- * Çoklu-cihaz (Description.md §1.5): İKİNCİL cihazda gösterilen bağlanma
- * ekranı. Bu cihazın "cihaz ekleme QR'ı"nı (`buildDeviceLinkRequest` —
- * fingerprint-only, bkz. Rust packet.rs `DeviceLinkRequest` dokümantasyonu:
- * tam public key'ler [ML-DSA-87 + ML-KEM-1024 dahil ~4.2KB] bir QR koduna
- * SIĞMAZ, önceden buradaki taramanın HER ZAMAN "Data too big" ile
- * çökmesine yol açıyordu) gösterir ve birincil cihazın onu taramasını
- * bekler. Birincil taradıktan sonra karşılıklı `IdentityExchange` ile
- * gerçek anahtarlar öğrenilir, imzalı `DeviceAdd` + tam senkron gelir;
- * `isSecondaryDevice()` `true` olduğunda bağlanma tamamlanmıştır.
+ * Multi-device linking (section 1.5). The linking screen shown on the SECONDARY device. It shows this device's "add device QR"
+ * (`buildDeviceLinkRequest`, fingerprint only; see the Rust packet.rs `DeviceLinkRequest` docs). The full public keys (ML-DSA-87 plus
+ * ML-KEM-1024, about 4.2 KB in total) do not fit in one QR code. Scanning it used to fail every time with "Data too big". The screen
+ * waits for the primary device to scan it. After the scan, the real keys are learned through a mutual `IdentityExchange`, and a signed
+ * `DeviceAdd` plus a full sync arrive. Linking is complete when `isSecondaryDevice()` is `true`.
  *
- * Bu cihaz bu ekrana gelmeden önce zaten normal `createIdentity` +
- * `startNetwork`'ten geçmiştir (provizyonel bir kimlikle) — QR yalnızca ağ
- * dinleme adresi (`getNodeAddress`) hazır olunca üretilebildiğinden kısa
- * aralıklarla yeniden denenir (bkz. ContactsFragment aynı desen).
+ * Before this screen, the device has already gone through the normal `createIdentity` and `startNetwork` (with a provisional identity).
+ * The QR can only be produced once the network listen address (`getNodeAddress`) is ready. So it is retried at short intervals (the
+ * same pattern as ContactsFragment).
  */
 class LinkDeviceActivity : AppCompatActivity() {
 
@@ -49,10 +44,8 @@ class LinkDeviceActivity : AppCompatActivity() {
         statusText = findViewById(R.id.link_status)
         statusText.text = getString(R.string.link_device_waiting)
 
-        // bkz. ContactsFragment imgOwnQr sizing notu — kullanıcı isteği:
-        // AYNI ölçekleme burada da kullanılsın. Sabit 280dp yerine, bu
-        // ekranın kendi ölçülmüş viewport'unun (durum/talimat metni İÇİN
-        // yer bırakarak) en küçük boyutu kadar büyütülür.
+        // See the ContactsFragment imgOwnQr sizing note. The same sizing is used here. Instead of a fixed 280 dp, the QR grows to the smallest
+        // measured size of this screen's own viewport, leaving room for the status and instruction text.
         val root = findViewById<View>(R.id.link_device_root)
         root.doOnPreDraw {
             val minDimensionPx = minOf(root.width, root.height)
@@ -78,7 +71,7 @@ class LinkDeviceActivity : AppCompatActivity() {
         handler.removeCallbacks(pollAdopted)
     }
 
-    /** Ağ adresi hazır olana kadar QR üretimini yeniden dener. */
+    /** Retries QR generation until the network address is ready. */
     private fun tryBuildQr(attemptsLeft: Int) {
         // the JNI call (core lock) runs off the main thread.
         Thread {
@@ -120,7 +113,7 @@ class LinkDeviceActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    /** Birincil cihaz benimseyene kadar 2 saniyede bir yoklar. */
+    /** Polls every 2 seconds until the primary device accepts this device. */
     private val pollAdopted = object : Runnable {
         override fun run() {
             if (done) return
@@ -141,7 +134,7 @@ class LinkDeviceActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. ContactsFragment.encodeBinaryAsQrBitmap — birebir aynı. */
+    /** Same as ContactsFragment.encodeBinaryAsQrBitmap. */
     private fun encodeBinaryAsQrBitmap(data: ByteArray, width: Int, height: Int): Bitmap {
         val text = QrBinaryCodec.bytesToLatin1String(data)
         val hints = mapOf(EncodeHintType.CHARACTER_SET to "ISO-8859-1")

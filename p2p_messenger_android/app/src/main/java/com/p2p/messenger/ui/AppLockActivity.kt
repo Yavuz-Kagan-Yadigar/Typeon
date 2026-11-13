@@ -17,16 +17,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * uygulamayı açmak için şifre ekranı.
+ * The password screen for opening the app.
  *
- * İki modu var ve modu KENDİSİ seçer (çağıran tarafın bilmesi gerekmez,
- * bkz. `AppLock.guard`): henüz hiç şifre kurulmamışsa "oluştur" (iki alan,
- * doğrulamalı), kurulmuşsa "gir".
+ * It has two modes, and the screen chooses the mode itself (the caller does not need to know; see `AppLock.guard`). If no password has ever
+ * been set, it is "create" mode (two fields, validated). If one is set, it is "enter" mode.
  *
- * `showWhenLocked`/`excludeFromRecents` gibi ek sertleştirmeler bilinçli
- * olarak kapsam dışı — bu ekran, telefonu eline alan birine karşı arayüz
- * düzeyinde bir engel; asıl gizlilik garantisi kimlik/mesaj anahtarlarının
- * Android Keystore ile korunmasında (bkz. util.KeystoreCrypto).
+ * Extra hardening such as `showWhenLocked` or `excludeFromRecents` is deliberately out of scope. This screen is an interface-level barrier
+ * against someone who picks up the phone. The real privacy guarantee lies in the identity and message keys being protected by the Android
+ * Keystore (see util.KeystoreCrypto).
  */
 class AppLockActivity : AppCompatActivity() {
 
@@ -77,8 +75,7 @@ class AppLockActivity : AppCompatActivity() {
                 showError(error, getString(R.string.error_app_lock_mismatch))
                 return@setOnClickListener
             }
-            // PBKDF2 KASITLI olarak yavaş (bkz. AppLock.ITERATIONS) — ana
-            // thread'de çalıştırılırsa görünür bir donma yaratır.
+            // PBKDF2 is deliberately slow (see AppLock.ITERATIONS). Run on the main thread, it would freeze the UI visibly.
             submit.isEnabled = false
             lifecycleScope.launch(Dispatchers.IO) {
                 val ok = if (createMode) {
@@ -101,8 +98,7 @@ class AppLockActivity : AppCompatActivity() {
             }
         }
 
-        // Kullanıcı isteği: klavyedeki onay/ok tuşu da kilidi açsın. Oluşturma
-        // modunda ilk alan önce onay alanına geçer; son alanda gönderir.
+        // The keyboard's done or OK key also unlocks. In create mode the first field moves to the confirm field, and the last field submits.
         if (createMode) password.imeOptions = EditorInfo.IME_ACTION_NEXT
         val submitOnIme = TextView.OnEditorActionListener { _, actionId, event ->
             val enterKey = event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN
@@ -115,8 +111,7 @@ class AppLockActivity : AppCompatActivity() {
         }
         (if (createMode) confirm else password).setOnEditorActionListener(submitOnIme)
 
-        // Geri tuşu kilidi ATLAYAMAZ: kilit ekranı kapanacaksa uygulamadan
-        // tamamen çıkılır (arkadaki Activity yığını görünür kalmamalı).
+        // The back key cannot skip the lock. If the lock screen is closing, the app exits completely, so no activity from the stack stays visible behind it.
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 finishAffinity()

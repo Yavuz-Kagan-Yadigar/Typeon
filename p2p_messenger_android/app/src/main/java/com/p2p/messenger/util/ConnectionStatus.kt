@@ -8,27 +8,20 @@ import com.p2p.messenger.R
 import org.json.JSONObject
 
 /**
- * sohbet ekranının üst çubuğunda BU cihazın
- * (karşı tarafınki DEĞİL — bkz. ChatActivity `txtToolbarSubtitle`/
- * `hasActiveSession`) genel ağ bağlantı durumunu göstermek için. İki
- * kaynağı birleştirir: Android'in `ConnectivityManager`'ı (gerçekten
- * internet var mı — Rust/libp2p'nin işletim sistemi ağ arayüzlerine erişimi
- * yok) ve Rust `ownConnectionStatus()` (Tor/node/swarm bağlantı sayısı).
+ * Shows this device's general network connection status (NOT the other side's) in the top bar of the chat screen (see ChatActivity
+ * `txtToolbarSubtitle` and `hasActiveSession`). It combines two sources: Android's `ConnectivityManager` (is there real internet access?
+ * Rust and libp2p have no access to the OS network interfaces), and the Rust `ownConnectionStatus()` (Tor, node and swarm connection counts).
  */
 object ConnectionStatus {
 
-    /** sadece metin değil, ilk bakışta ayırt
-     *  edilebilir bir renkli nokta da göstermek için (bkz.
-     *  `util.PulsingStatusDot`) — `describe()`'un metin kararıyla AYNI
-     *  karar ağacından türetilir (bkz. `current()`), iki AYRI mantık
-     *  YAZILMAZ ki metin ile nokta rengi asla birbirinden SAPMASIN. */
+    /** Not only text: a coloured dot that is easy to tell apart at a glance (see `util.PulsingStatusDot`). It is derived from the SAME decision
+     *  tree as the text (see `current()`). There is no second, separate logic, so the text and the dot colour can never disagree. */
     enum class Level { CONNECTED, CONNECTING, PROBLEM }
 
     data class Status(val level: Level, val text: String)
 
-    /** Herhangi bir aktif ağ üzerinden (WiFi/mobil veri/ethernet — SADECE
-     *  WiFi değil, bkz. P2PService `isValidatedWifi` aynı desenin daha
-     *  genel hali) doğrulanmış internet erişimi var mı. */
+    /** Whether there is verified internet access over any active network: WiFi, mobile data or Ethernet, not only WiFi. This is the general form of
+     *  the `isValidatedWifi` pattern in P2PService. */
     fun hasInternet(context: Context): Boolean {
         return try {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
@@ -43,9 +36,8 @@ object ConnectionStatus {
         }
     }
 
-    /** Bu cihazın genel bağlantı durumu — hem insana okunur kısa özet
-     *  (sohbet üst çubuğundaki küçük durum satırı) hem de bir `Level`
-     *  (renkli nokta için) birlikte döner. */
+    /** This device's overall connection state. It returns both a short human-readable summary (the small status line in the chat top bar) and a
+     *  `Level` (for the coloured dot). */
     fun current(context: Context): Status {
         if (!hasInternet(context)) {
             return Status(Level.PROBLEM, context.getString(R.string.status_no_internet))
