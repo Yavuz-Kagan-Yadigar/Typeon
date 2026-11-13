@@ -1,121 +1,115 @@
-# Paketleme
+# Packaging
 
 ## Linux — Flatpak
 
 ```sh
-# Bir kerelik: runtime + SDK + Rust eklentisi + derleyici
+# One-time: runtime + SDK + Rust extension + builder
 flatpak --user install -y flathub org.gnome.Platform//49 org.gnome.Sdk//49 \
         org.freedesktop.Sdk.Extension.rust-stable//25.08 org.flatpak.Builder
 
-# Derle ve yerel bir ostree deposuna yaz
+# Build and write to a local ostree repo
 cd Linux/packaging
 flatpak run org.flatpak.Builder --user --force-clean --disable-rofiles-fuse \
         --repo=repo build-dir com.p2p.messenger.Typeon.yml
 
-# Tek dosyalık dağıtılabilir paket
+# Single-file distributable bundle
 flatpak build-bundle repo typeon.flatpak com.p2p.messenger.Typeon
 
-# Kurulum (hedef makinede)
+# Install (on the target machine)
 flatpak install --user typeon.flatpak
 flatpak run com.p2p.messenger.Typeon
 ```
 
-`flatpak-builder` bu makinede PATH'te YOK — flatpak uygulaması olarak
-(`org.flatpak.Builder`) kurulu, bu yüzden `flatpak run` ile çağrılıyor.
+`flatpak-builder` is NOT on PATH on this machine. It is installed as a flatpak app
+(`org.flatpak.Builder`), so it is called through `flatpak run`.
 
-`--disable-rofiles-fuse` gereksiz görünüyor ama grafik oturumu DIŞINDAN
-(ör. ssh, otomasyon) çalıştırıldığında şart: aksi halde derleme
-`Failed to execute child process "fusermount3" (Permission denied)` →
-`Failure spawning rofiles-fuse` ile ölüyor. Kapattığı şey yalnızca bir
-yazma-koruma iyileştirmesi; çıktıyı etkilemiyor.
+`--disable-rofiles-fuse` looks unnecessary, but it is required when the build runs
+OUTSIDE the graphical session (for example over ssh or from automation). Otherwise the
+build dies with `Failed to execute child process "fusermount3" (Permission denied)` →
+`Failure spawning rofiles-fuse`. The flag only disables a write-protection optimisation;
+it does not change the output.
 
-**Tuzak:** `flatpak build-bundle`, kendisinden ÖNCEKİ derleme başarısız olsa
-bile 0 ile döner — `repo`'da ne varsa onu paketler, yani TAZE ZAMAN DAMGALI
-ESKİ içerik elde edersiniz. Derleyicinin kendi çıkış kodunu kontrol edin ve
-paketlemeden önce commit tarihini doğrulayın:
+**Trap:** `flatpak build-bundle` returns 0 even when the build before it failed. It
+packages whatever is in `repo`, so you get a freshly timestamped copy of OLD content.
+Check the builder's own exit code, and verify the commit date before packaging:
 
 ```sh
 ostree --repo=repo log app/com.p2p.messenger.Typeon/x86_64/master | head -4
 ```
 
-### Neden Flatpak (AppImage/RPM değil)
+### Why Flatpak (not AppImage or RPM)
 
-- Uygulama **GTK4 + libadwaita** üzerine kurulu. Bir AppImage'a bunları elle
-  paketlemek gdk-pixbuf loader önbelleğini, derlenmiş GSettings şemalarını ve
-  ikon temasını da taşımayı gerektirir — kırılgan ve dağıtımlar arası zayıf.
-  GNOME runtime bunların hepsini doğru sürümlerle zaten sağlıyor.
-- RPM en kolayı olurdu ama **self-contained değil**: sistemdeki
-  gtk4/libadwaita sürümlerine bağlı kalırdı.
-- Derleme **sandbox içinde** yapılıyor, host'ta değil: host openSUSE'de
-  GTK 4.22, runtime'da 4.20 var. Host'ta derleyip runtime'da çalıştırmak
-  sembol uyuşmazlığı riski taşırdı.
+- The app is built on **GTK4 + libadwaita**. Packaging these by hand into an AppImage
+  also means bundling the gdk-pixbuf loader cache, the compiled GSettings schemas and the
+  icon theme. That is fragile and does not carry across distributions. The GNOME runtime
+  already provides all of them at the right versions.
+- An RPM would be the easiest, but it is **not self-contained**: it would depend on the
+  gtk4 and libadwaita versions installed on the system.
+- The build runs **inside the sandbox**, not on the host. The host has openSUSE with
+  GTK 4.22, and the runtime has 4.20. Building on the host and running in the runtime
+  would risk symbol mismatches.
 
-### İzinler (`finish-args`) ve gerekçeleri
+### Permissions (`finish-args`) and why
 
-| İzin | Neden |
+| Permission | Reason |
 |---|---|
-| `--share=network` | libp2p/gossipsub + Tor. Ağsız uygulamanın işlevi yok. |
-| `--talk-name=org.freedesktop.secrets` | **Zorunlu.** Kasa anahtarı sistem anahtarlığında; uygulama anahtarlık olmadan açılmıyor (bkz. `src/keyring.rs`). KDE Wallet ve GNOME Keyring ikisi de bu adı sağlıyor. |
-| `--socket=wayland` / `--socket=fallback-x11` / `--device=dri` | GTK4 penceresi. |
-| `--socket=pulseaudio` | Sesli mesaj kaydı ve çalınması. |
+| `--share=network` | libp2p/gossipsub + Tor. The app has no function without a network. |
+| `--talk-name=org.freedesktop.secrets` | **Required.** The vault key lives in the system keyring, and the app does not start without a keyring (see `src/keyring.rs`). KDE Wallet and GNOME Keyring both provide this name. |
+| `--socket=wayland` / `--socket=fallback-x11` / `--device=dri` | GTK4 window. |
+| `--socket=pulseaudio` | Voice message recording and playback. |
 
-Geniş dosya sistemi izni **kasıtlı olarak yok**: dosya seçme/kaydetme
-`gtk::FileDialog` üzerinden portal ile gidiyor, sandbox dışına erişim
-gerekmiyor.
+Broad filesystem access is **deliberately absent**. File open and save go through the
+portal via `gtk::FileDialog`, so nothing outside the sandbox needs to be reachable.
 
 ## Android — release APK
 
 ```sh
 export JAVA_HOME=/usr/lib64/jvm/java-21-openjdk
-cd p2p_messenger_android        && ./gradlew :app:assembleRelease   # istemci
-cd p2p_messenger_android_server && ./gradlew :app:assembleRelease   # sunucu
+cd p2p_messenger_android        && ./gradlew :app:assembleRelease   # client
+cd p2p_messenger_android_server && ./gradlew :app:assembleRelease   # server
 ```
 
-Çıktılar: `app/build/outputs/apk/release/app-release.apk`
+Output: `app/build/outputs/apk/release/app-release.apk`
 
-`--offline` KULLANMAYIN: `lintVitalRelease` görevi `lint-gradle` artefaktını
-indirmek istiyor ve çevrimdışı modda derleme bu adımda kırılıyor.
+Do NOT use `--offline`. The `lintVitalRelease` task wants to download the `lint-gradle`
+artifact, and an offline build fails at that step.
 
-### İmzalama — dikkat
+### Signing — read this
 
-Release, **depodaki aynı keystore** ile imzalanıyor (`app/debug.keystore`,
-`CN=Typeon Debug`). Bu bilinçli bir tercih: imza anahtarı değişirse Android
-uygulamayı farklı bir uygulama sayar, üzerine kurulumu reddeder ve kullanıcı
-önce kaldırmak zorunda kalır — bu da kimliği, ratchet oturumlarını, mesaj
-arşivini ve sunucu uygulamasında **onion kimliğini** siler. Onion adresi
-değişince o sunucuya adresine göre kayıtlı tüm istemciler bir daha ulaşamaz.
+The release is signed with **the keystore committed to the repo** (`app/debug.keystore`,
+`CN=Typeon Debug`). This is a deliberate choice. If the signing key changed, Android would
+treat the app as a different application, refuse to install over it, and the user would
+have to uninstall first. That deletes the identity, ratchet sessions, the message archive,
+and on the server app the **onion identity**. Once the onion address changes, every client
+registered with that server by its address can no longer reach it.
 
-Play Store'a çıkılacaksa ayrı bir release keystore gerekir — ama o geçiş
-mevcut kurulumların bir kez kaldırılmasını gerektirir.
+If the app is ever published to the Play Store, a separate release keystore will be needed.
+That switch requires the existing installs to be removed once.
 
-## Gerçek cihazda bulunan iki tuzak
+## Two traps found on a real device
 
-**1. Anahtarlık izni tek başına yetmiyor.** Sadece
-`--talk-name=org.freedesktop.secrets` verildiğinde uygulama şu ekranla
-açılmıyordu: *"No system keyring found — Neither KDE Wallet nor GNOME Keyring
-is installed."*
+**1. The keyring permission alone is not enough.** With only
+`--talk-name=org.freedesktop.secrets` granted, the app did not start and showed:
+*"No system keyring found — Neither KDE Wallet nor GNOME Keyring is installed."*
 
-Sebep `src/keyring.rs` dosya başı notunda zaten yazıyor: KDE'de
-`org.freedesktop.secrets` çoğu zaman kendi başına D-Bus ile başlatılabilir
-değil, bu yüzden `ensure_available()` cüzdanı önce GERÇEK adıyla aktive
-ediyor. Flatpak'in D-Bus proxy'si izin verilmeyen adları
-`ListActivatableNames` sonucundan da gizlediği için uygulama hiç aday
-göremiyor ve "kurulu değil" sonucuna varıyor. Bu yüzden dört arka uç adının
-hepsine `--talk-name` gerekiyor (`BACKEND_NAMES` listesi).
+The reason is written in the file header note of `src/keyring.rs`. On KDE,
+`org.freedesktop.secrets` often cannot be started over D-Bus by itself, so
+`ensure_available()` first activates the wallet under its real name. The Flatpak D-Bus
+proxy also hides the names it does not allow from the `ListActivatableNames` result, so the
+app could not see any candidate and concluded that nothing was installed. That is why all
+four backend names need `--talk-name` (the `BACKEND_NAMES` list).
 
-**2. Manifest'i düzenlemek build önbelleğini ıskalatıyordu.** Kaynak `../..`
-olduğu için manifest de kopyalanan ağacın içindeydi; `Linux/packaging` artık
-`skip` listesinde.
+**2. Editing the manifest invalidated the build cache.** The source is `../..`, so the
+manifest was inside the copied tree. `Linux/packaging` is now on the `skip` list.
 
-## Bilinen sınırlar
+## Known limits
 
-- **Flatpak AYRI bir cihazdır.** Native derleme `~/.local/share/typeon`
-  kullanıyor, Flatpak ise `~/.var/app/com.p2p.messenger.Typeon/data/typeon`.
-  Üstelik kasa anahtarı sistem anahtarlığında **veri dizini yoluna göre**
-  saklanıyor (`keyring.rs`, `attributes()` içinde `profile` alanı) — profili
-  kopyalamak kasayı AÇILAMAZ hale getirir. Doğru yol: Flatpak'i QR ile yeni
-  bir ikincil cihaz olarak bağlamak.
-- Tema: libadwaita sistem GTK temasını takip etmiyor; sandbox içinde
-  Breeze-Dark yerine Adwaita'ya düşüyor. Kozmetik.
-- Sesli mesaj `ffmpeg` çağırıyor; GNOME 49 Platform runtime'ı
-  `/usr/bin/ffmpeg` (7.1.3) sağladığı için ek modül gerekmiyor.
+- **The Flatpak is a SEPARATE device.** The native build uses `~/.local/share/typeon`,
+  and the Flatpak uses `~/.var/app/com.p2p.messenger.Typeon/data/typeon`. Also, the vault
+  key in the system keyring is stored **per data directory path** (the `profile` field in
+  `attributes()` in `keyring.rs`). Copying the profile makes the vault impossible to open.
+  The right way: link the Flatpak to your account as a new secondary device by QR.
+- Theme: libadwaita does not follow the system GTK theme. Inside the sandbox it falls back
+  to Adwaita instead of Breeze-Dark. Cosmetic.
+- Voice messages call `ffmpeg`. The GNOME 49 Platform runtime provides `/usr/bin/ffmpeg`
+  (7.1.3), so no extra module is needed.
