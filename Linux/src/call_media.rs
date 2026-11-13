@@ -210,12 +210,20 @@ impl CallMedia {
                 let _ = p.set_state(gst::State::Playing);
             }
         } else if let Some(p) = &self.shared.playback {
-            if let Some(spk) = p.by_name("spk") {
-                // The pipeline runs on the system clock, so the sink may restart alone.
+            let Some(spk) = p.by_name("spk") else { return };
+            let Some(feed) = spk.static_pad("sink").and_then(|pad| pad.peer()) else { return };
+            let p = p.clone();
+            // The pipeline runs on the system clock, so the sink may restart
+            // alone. Not under a running feed, though: a stopped sink answers
+            // the mixer's next push with FLUSHING and the mixer's streaming
+            // task stops for good (silence until the call ends). Swap while
+            // the feed is idle; the next buffer then prerolls the new device.
+            feed.add_probe(gst::PadProbeType::IDLE, move |_, _| {
                 let _ = spk.set_state(gst::State::Null);
-                apply_device(p, false);
+                apply_device(&p, false);
                 let _ = spk.sync_state_with_parent();
-            }
+                gst::PadProbeReturn::Remove
+            });
         }
     }
 
