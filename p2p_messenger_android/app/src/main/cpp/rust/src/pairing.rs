@@ -121,8 +121,8 @@ impl P2PCore {
         let mut csprng = OsRng;
         let sign_sk_ed25519 = SigningKey::generate(&mut csprng);
         let sign_pk_ed25519 = sign_sk_ed25519.verifying_key();
-        // ML-DSA-87. The parameter sets are ML-KEM-1024 and ML-DSA-87 (NIST category 5), chosen for more margin than category 3.
-        // See the SECURITY.md key sizes note. Keygen without parameters through the getrandom feature avoids the rand_core version clash (see Cargo.toml).
+        // Parameter sets: ML-KEM-1024 and ML-DSA-87 (NIST category 5). See SECURITY.md for key sizes.
+        // Keygen runs without parameters through the getrandom feature, which avoids a rand_core version clash (see Cargo.toml).
         let sign_sk_mldsa: MlDsaSigningKey<MlDsa87> = MlDsaGenerate::generate();
         let sign_pk_mldsa = sign_sk_mldsa.verifying_key().clone();
         let kem_sk_x25519 = StaticSecret::random_from_rng(&mut csprng);
@@ -316,9 +316,9 @@ impl P2PCore {
         let identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let device_name = self.own_devices.get(&own_fp).map(|d| d.device_name.clone()).unwrap_or_default();
 
-        // See the SECURITY.md "Cross-network connectivity" note. We add a few of the known relay candidates we hold to the QR. That way the other side
-        // can find us through a relay even if we cannot be dialled directly (different network or NAT). The `known_relay_peers` values are already FULL
-        // addresses (including `.../p2p/<relay_peer_id>`, see the `record_known_relay` call sites), so nothing needs adding here.
+        // Relay candidates we hold are added to the QR, so a peer can reach us through a relay when no direct dial works (different network or NAT).
+        // `known_relay_peers` entries are already full addresses (with `/p2p/<relay_peer_id>`, see `record_known_relay`), so nothing is added here.
+        // See SECURITY.md, "Cross-network connectivity".
         let known_relays = self.freshest_relays();
 
         let nonce = self.issue_pairing_nonce()?;
@@ -828,13 +828,11 @@ impl P2PCore {
         self.send_identity_exchange_opts(target_device_fingerprint, false)
     }
 
-    /// A (re)pairing the user started, or our reply to one: the peer needs our IdentityExchange NOW.
+    /// A (re)pairing the user started, or our reply to one: the peer needs our IdentityExchange now.
     ///
-    /// Regression: an IdentityExchange is byte-identical on every send, so its server dedup key (`deposit_dedup_key`) matches the copy deposited at
-    /// the previous pairing. `already_deposited` assumes that copy is still on the server and reports success, but the peer fetched and acked it
-    /// long ago. After deleting a contact and re-adding it within 12 hours, a peer that was not directly connected never got our IdentityExchange.
-    /// Our side then stayed on "Securing the connection", and every `ensure_handshake` failed with "Unknown peer device". The periodic resend paths
-    /// keep the dedup, which is the deposit-storm guard.
+    /// An IdentityExchange is byte-identical on every send, so its server dedup key (`deposit_dedup_key`) matches the copy deposited earlier.
+    /// `already_deposited` would then report success, although the peer may have fetched and acked that copy long ago, and the exchange would never arrive.
+    /// This path clears the dedup entry first (`fresh`). The periodic resend paths keep the dedup, which guards against deposit storms.
     pub(crate) fn send_identity_exchange_fresh(&mut self, target_device_fingerprint: &str) -> Result<(), String> {
         self.send_identity_exchange_opts(target_device_fingerprint, true)
     }
@@ -954,15 +952,11 @@ impl P2PCore {
             self.link_consent_peer = Some(exchange.device_fingerprint.clone());
         }
 
-        // Before, this function never entered the `evaluate_sender_device` TOFU and warning decision tree. An UNEXPECTED new device for an already known
-        // contact was silently written to `known_remote_devices` with no "unrecognised device" warning (see SECURITY.md). Now it goes through the SAME
-        // decision tree as `process_qr_packet` / `process_manual_entry`. For a new person, TOFU adds them (`evaluate_sender_device` does that inside this
-        // arm, so `register_contact_from_pairing` is not needed here). For an unexpected new device of a known person, the BLOCK rule applies: this
-        // function returns without writing to `known_remote_devices` at all, and no packet from or to that device is processed until the user accepts
-        // or rejects it in `pending_device_alerts`.
-        // Multi-device: is this incoming device a SIBLING device of MY OWN identity? (For example the secondary I just approved, or a third device
-        // announced by a sibling.) If so, the CONTACT decision tree (TOFU / warning) is NOT entered at all. It is recorded directly as a sibling
-        // (identity_id = my own identity).
+        // Same decision tree as `process_qr_packet` and `process_manual_entry`. A new contact goes through TOFU (`evaluate_sender_device` does it inside this arm,
+        // so `register_contact_from_pairing` is not called here). An unexpected new device of a known contact follows the block rule: nothing is written to
+        // `known_remote_devices`, and no packet from or to that device is processed until the user accepts or rejects it in `pending_device_alerts`. See SECURITY.md.
+        // A device of my own identity (a secondary I approved, or a third device announced by a sibling) skips the contact decision tree and is recorded
+        // directly as a sibling (identity_id = my own identity).
         let fp = exchange.device_fingerprint.clone();
         let my_id = self.my_identity_id();
         // The link the user approved is honoured for as long as it is retried,
@@ -1402,9 +1396,8 @@ impl P2PCore {
         Some(packet::DeviceAddProof { device_add, signer })
     }
 
-    /// Manual entry: a text/code format carrying the same information as the QR code. It accepts the Base32 contact code, the fingerprint, and the
-    /// rendezvous address as a single `|`-separated line. The format is not defined precisely by the spec. This is the simplest format a person can
-    /// type by hand. See the `process_qr_packet` docs. For the same reason, it returns `(identity_id, device_fingerprint, device_name)`.
+    /// Manual entry: the contact code, fingerprint and rendezvous address as one `|`-separated line, the simplest format a person can type by hand.
+    /// This format is not formally specified. See `process_qr_packet`. Returns `(identity_id, device_fingerprint, device_name)`.
     pub(crate) fn process_manual_entry(&mut self, text: &str) -> Result<(String, String, String), String> {
         const FORMAT_ERR: &str = "Beklenen format: identity_id|device_fingerprint|nonce|device_name|rendezvous_node";
         // The device name is free text and may itself contain `|`: the first

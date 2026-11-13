@@ -512,12 +512,8 @@ impl P2PCore {
                     continue;
                 }
             }
-            // Fix ("the bubble stays 'error' forever after a restart"): this used to call `send_message_content` (new random message_id).
-            // The archived bubble carried the OLD id, so the Ack and status events of the new id never updated it. `init_db` turns 'pending' into 'error'
-            // at startup, and the message stayed that way even when it was actually delivered. On the receiving side, the new id could also get past
-            // id-dedup and create a second archive copy. Now the SAME `message_id` (the table's primary key) and the moment the message FIRST entered
-            // the queue (`created_at` → `original_sent_at`) are kept. When the Ack arrives, `set_message_status` turns the same archive row 'sent',
-            // and receiver dedup works as well.
+            // Re-queued messages keep their original `message_id` and first-queued time (`original_sent_at`). A new id would leave the archived bubble on the old id,
+            // so Ack and status events never reached it, and `init_db` turned 'pending' into 'error' at startup. Receivers also dedup on the same id.
             let known = self.known_remote_devices.contains_key(&peer_fp);
             // The backoff reaches its cap (15 + 30 + 60 s) long before most restores. Do not restart it at 15 s after every process kill.
             let interval = (current_time_ms().saturating_sub(created_at) > ACK_RETRY_MAX_MS).then_some(ACK_RETRY_MAX_MS);
