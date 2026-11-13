@@ -69,8 +69,8 @@ const AUDIO_QUEUE_MAX: usize = 16;
 /// only not sending drains it. State and report packets keep flowing.
 const AUDIO_HOLD_ABOVE_MS: u32 = 400;
 const AUDIO_HOLD_BELOW_MS: u32 = 150;
-/// #83: a hold lasts at most this long; it re-arms only once the report drops
-/// below `AUDIO_HOLD_BELOW_MS` (a stale baseline must not mute a call).
+/// A hold lasts at most this long. It re-arms only once the report drops below `AUDIO_HOLD_BELOW_MS`
+/// (a stale baseline must not mute a call).
 const AUDIO_HOLD_MAX_MS: u64 = 5_000;
 /// Received frames waiting for Kotlin. ~1 s of a 3-way video call: a slow
 /// decoder must shed old frames, never let them pile up (256 here once meant
@@ -254,8 +254,8 @@ struct Remote {
     delay_ewma: f64,
     delay_min: f64,
     samples: u64,
-    /// Link the last frame came over (`None` direct, else the relay server):
-    /// a route change re-baselines `delay_min` (#83).
+    /// Link the last frame came over (`None` direct, else the relay server).
+    /// A route change re-baselines `delay_min`.
     via: Option<PeerId>,
     last_report_ms: u64,
     /// Our decoder for this sender lost sync (dropped frame, late join):
@@ -1028,7 +1028,7 @@ impl P2PCore {
                 media_add_remote(fp, k, sid);
             }
         }
-        // Register the relay addresses now (bkz. `relay_listen_keys`).
+        // Register the relay addresses now (see `relay_listen_keys`).
         self.server_sweep_at = 0;
         self.call_broadcast(CallAction::Accept);
         Ok(())
