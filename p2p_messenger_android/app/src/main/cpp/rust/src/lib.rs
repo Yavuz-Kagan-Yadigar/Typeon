@@ -1,7 +1,6 @@
 //! Typeon protocol core.
 //!
-//! Targets the scope of Description.md, phase A: one identity per device. The
-//! Identity/Device split is kept so the core can grow to several devices.
+//! Scope: one identity per device, with the Identity / Device split kept so the core can grow to several devices.
 //!
 //! Modules:
 //! - `identity`: Identity and Device model, fingerprints
@@ -10,10 +9,8 @@
 //! - `contact`: TOFU and safety-number changes
 //! - `group`: pairwise group messaging
 
-/// Crypto primitives live in the separate `typeon-crypto` crate, so the same
-/// audited code runs on native targets (Android, Linux, server) and in wasm. This
-/// `pub use` keeps the old paths (`crate::packet::...`, `crate::identity::...`,
-/// `p2p_messenger::server_proto::...`) working, so callers do not change.
+/// Crypto primitives live in the separate `typeon-crypto` crate, so the same audited code runs on native targets (Android, Linux, server) and in wasm.
+/// This `pub use` keeps the old paths (`crate::packet::...`, `crate::identity::...`, `p2p_messenger::server_proto::...`) working, so callers do not change.
 pub use typeon_crypto::{identity, packet, ratchet, server_proto, server_seal};
 mod contact;
 mod group;
@@ -108,12 +105,10 @@ use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{identify, kad, noise, relay, tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm};
 use log::{debug, error, info, warn};
-// Uses the maintained RustCrypto `ml-dsa` and `ml-kem` crates instead of
-// pqcrypto-dilithium and pqcrypto-kyber (RUSTSEC-2024-0380, RUSTSEC-2024-0381, and
-// FIPS 204/203 byte incompatibility; see the Cargo.toml note). The spec calls for
-// ML-DSA-65. An earlier version used ML-DSA-44 by mistake, and was corrected to
-// MlDsa65. The keys were later raised to NIST category 5 (ML-KEM-1024 and ML-DSA-87)
-// for extra margin. See the "Key sizes" note in SECURITY.md.
+// Uses the maintained RustCrypto `ml-dsa` and `ml-kem` crates instead of pqcrypto-dilithium and pqcrypto-kyber, which have advisories
+// (RUSTSEC-2024-0380, RUSTSEC-2024-0381) and FIPS 204/203 byte incompatibilities (see the Cargo.toml note). The parameter sets are
+// ML-KEM-1024 and ML-DSA-87 (NIST category 5), for extra margin. An earlier version used ML-DSA-44 by mistake, and was then moved to
+// ML-DSA-65 before the category 5 sets were chosen. See the "Key sizes" note in SECURITY.md.
 use ml_dsa::{EncodedSignature, EncodedVerifyingKey, Generate as MlDsaGenerate, KeyExport as MlDsaKeyExport, Keypair as MlDsaKeypair, MlDsa87, Signature as MlDsaSignature, SigningKey as MlDsaSigningKey, Signer as MlDsaSigner, VerifyingKey as MlDsaVerifyingKey, Verifier as MlDsaVerifier};
 use ml_kem::{EncodedSizeUser as MlKemEncodedSizeUser, KemCore as MlKemCore, MlKem1024};
 use rand::rngs::OsRng;
@@ -296,23 +291,18 @@ struct P2PCore {
     /// Device-change alerts waiting for the user's decision, not yet accepted or
     /// rejected. Key: new_device_fingerprint.
     pending_device_alerts: HashMap<String, DeviceAlertInfo>,
-    /// Pending messages. Messages from a device that is not yet verified or is blocked
-    /// are not kept. The spec says message send and receive stop until the alert is
-    /// resolved, so messages from that device are dropped silently until then.
+    /// Pending messages. Messages from a device that is not yet verified or is blocked are not kept. Send and receive stop until the alert
+    /// is resolved, so messages from that device are dropped silently until then.
     swarm: Option<Swarm<P2PBehaviour>>,
-    /// Spec exception, user request (see tor.rs and SECURITY.md, "Tor onion"): the
-    /// running onion service handle when the Tor layer is on (client, service and
-    /// bridge). `None` means Tor is off. Started in `start_network` when `tor_enabled`.
+    /// Handle to the running onion service, when the Tor layer is on (client, service and bridge). `None` means Tor is off. Started in
+    /// `start_network` when `tor_enabled` is set. See tor.rs and the "Tor onion" note in SECURITY.md.
     tor: Option<tor::TorHandle>,
     /// Whether the user turned Tor on. Passed to `start_network`, and read by
     /// `tor_status` and `get_node_address`.
     tor_enabled: bool,
-    /// Spec exception, network robustness (see `announce_address_to_all_contacts` and
-    /// the `AddressAnnounce` docs in packet.rs). The "is ready" state seen in the
-    /// previous turn. It lets `poll_events` notice the NEW transition of Tor to `Ready`.
-    /// Reset to `false` in `start_network`, when a new Tor client and session start. On
-    /// the transition, our current `.onion` address is sent proactively to every known
-    /// contact.
+    /// Set when the previous Tor status was "ready". It lets `poll_events` detect the NEW transition of Tor to `Ready` (see
+    /// `announce_address_to_all_contacts` and the `AddressAnnounce` docs in packet.rs). Reset to `false` in `start_network`, when a new Tor client
+    /// and session start. On the transition, our current `.onion` address is sent proactively to every known contact.
     tor_was_ready: bool,
     /// Addresses the swarm really listens on after `start_network` (`SwarmEvent::NewListenAddr`,
     /// see `poll_events`). The `node_address` shown on the QR / "my code" screen is
@@ -336,13 +326,10 @@ struct P2PCore {
     /// Node mode on: relay service (from the next network start), history-sync help, and
     /// auto-download. Kademlia is always client mode (see `set_node_mode`).
     node_mode_enabled: bool,
-    /// Spec exception, user request. In node mode every offered file is auto-downloaded
-    /// (see the auto-download note in `receive_file_offer`), so disk use could grow without
-    /// bound. This is the upper limit on total attachment storage. Kotlin sets it from the
-    /// Settings slider with `setHistoryStorageLimitBytes`, and it is sent again on every
-    /// `start_network` (see P2PService). The default here is only a safety net until the
-    /// first setting. When the limit is exceeded, `enforce_history_storage_limit` deletes
-    /// the OLDEST completed files first (by created_at, ascending).
+    /// Upper limit on total attachment storage. In node mode every offered file is auto-downloaded (see the auto-download note in
+    /// `receive_file_offer`), so disk use could grow without bound. Kotlin sets it from the Settings slider with `setHistoryStorageLimitBytes`,
+    /// and it is sent again on every `start_network` (see P2PService). The default here is only a safety net until the first setting. When the
+    /// limit is exceeded, `enforce_history_storage_limit` deletes the OLDEST completed files first (by created_at, ascending).
     history_storage_limit_bytes: u64,
     /// Plaintext secret bundle handed to Kotlin once, after `createIdentity`. It is taken
     /// by `getPendingSecretBundle` and then becomes `None` (see that function).
@@ -383,35 +370,24 @@ struct P2PCore {
     /// of their prekeys. A peer that hands out prekeys refuses such an init as a first
     /// contact. See `process_handshake_init`.
     id0_inits: std::collections::HashSet<String>,
-    /// Found on a real device: "QR scanned, nothing happened on either device". The other
-    /// side could not publish, with `InsufficientPeers`. This is the device fingerprint
-    /// whose mailbox topic (`p2p_msg_<fp>`) we are currently subscribed to. `None` means
-    /// we have not subscribed yet.
-    /// Why this is needed: the subscription used to happen once in `start_network`, and
-    /// only if an identity already existed. `P2PService.onStartCommand` locks network
-    /// setup to one run per process with its `isRunning` flag. If the service started
-    /// before the identity existed (for example a START_STICKY restart after `exit(0)`, or a
-    /// service left over from an earlier run), `start_network` ran without an identity. The
-    /// subscription was then skipped silently, and `createIdentity` plus
-    /// `startNetworkService()` became a no-op because of `isRunning`. Result: the swarm was
-    /// live, the Tor onion service was up, the QR could be made and inbound connections were
-    /// accepted, but the device subscribed to no gossip topic, so no packet could reach it
-    /// (the sender got `InsufficientPeers` forever; see libp2p-gossipsub `publish`, where an
-    /// empty recipient set results when there is no `topic_peers` entry).
-    /// With this field, `ensure_own_mailbox_subscription` (run every `poll_events` turn)
-    /// completes the subscription when the identity is created or loaded later. No network
-    /// restart is needed.
+    /// The device fingerprint whose mailbox topic (`p2p_msg_<fp>`) we are currently subscribed to. `None` means we have not subscribed yet.
+    ///
+    /// Why this is needed: the subscription used to happen once in `start_network`, and only if an identity already existed.
+    /// `P2PService.onStartCommand` allows network setup only once per process (its `isRunning` flag). If the service started before the identity
+    /// existed (for example a START_STICKY restart after `exit(0)`, or a service left over from an earlier run), `start_network` ran without an
+    /// identity. The subscription was then skipped silently, and `createIdentity` plus `startNetworkService()` became a no-op because of `isRunning`.
+    /// The result: the swarm was live, the Tor onion service was up, the QR could be made, and inbound connections were accepted, but the device
+    /// subscribed to no gossip topic. No packet could reach it, and the sender got `InsufficientPeers` forever (see libp2p-gossipsub `publish`, where
+    /// an empty recipient set results when there is no `topic_peers` entry).
+    /// With this field, `ensure_own_mailbox_subscription` (run every `poll_events` turn) completes the subscription when the identity is created or
+    /// loaded later. No network restart is needed.
     own_mailbox_topic_fp: Option<String>,
-    /// Measured on two real devices (2026-09-06): even with both phones directly connected
-    /// on the same LAN, after a fresh pairing the `IdentityExchange` took about 5 MINUTES
-    /// to reach the other side. Gossip did not deliver reliably to a mailbox topic the
-    /// sender was not subscribed to ("fanout"). It worked only once the slower Tor or
-    /// server path kicked in.
-    /// Fix: during pairing, each side also subscribes to the OTHER side's mailbox topic
-    /// (`p2p_msg_<peer_fp>`). Both then use the same topic, a real gossip mesh forms, and
-    /// `Handshake` and `IdentityExchange` go out within seconds. The subscription is dropped
-    /// once a ratchet session exists (it uses the rotating topic then), or when
-    /// `PAIRING_MAILBOX_TTL_MS` expires. Key: peer_fp. Value: time subscribed (ms).
+    /// Measured on two real devices: even with both phones directly connected on the same LAN, after a fresh pairing the `IdentityExchange` took
+    /// about 5 MINUTES to reach the other side. Gossip did not deliver reliably to a mailbox topic the sender was not subscribed to ("fanout").
+    /// It worked only once the slower Tor or server path kicked in.
+    /// Fix: during pairing, each side also subscribes to the OTHER side's mailbox topic (`p2p_msg_<peer_fp>`). Both then use the same topic, a real
+    /// gossip mesh forms, and `Handshake` and `IdentityExchange` go out within seconds. The subscription is dropped once a ratchet session exists
+    /// (it uses the rotating topic then), or when `PAIRING_MAILBOX_TTL_MS` expires. Key: peer_fp. Value: time subscribed (ms).
     pairing_mailbox_subs: HashMap<String, u64>,
     /// The connection a verified IdentityExchange arrived on, per device. Only our
     /// IdentityExchange and Handshake to that device use it. The side that showed its
@@ -512,10 +488,8 @@ struct P2PCore {
     last_call_end: Option<(String, String)>,
     /// Time (ms) of the last periodic media stats log line.
     call_stats_logged_at: u64,
-    /// Set while `call::send_call_signal` publishes. The envelope goes to the server AND
-    /// over the direct link. A "connected" peer can be a half-open link to a phone that
-    /// just restarted. The direct copy then dies in a timeout and the ring never arrives
-    /// (seen 2026-09-26).
+    /// Set while `call::send_call_signal` publishes. The envelope goes to the server AND over the direct link. A "connected" peer can be a
+    /// half-open link to a phone that just restarted. The direct copy then dies in a timeout and the ring never arrives.
     call_signal_sending: bool,
     /// Opens the call media streams. Set per swarm in `start_network`.
     stream_control: Option<libp2p_stream::Control>,
@@ -531,20 +505,15 @@ struct P2PCore {
     /// updated at pairing (the rendezvous_node) and on every received packet (the real
     /// address of the current connection).
     device_last_addr: HashMap<String, String>,
-    /// Spec exception, network robustness. Symptom: two devices paired over Tor, on the same
-    /// LAN. When one switched to mobile data, it could no longer message the other device on
-    /// the LAN, but still reached the remote node. `device_last_addr` holds ONE "last working
-    /// address". When two devices on the same LAN connect with Tor on, a direct LAN connection
-    /// usually forms before or instead of the Tor circuit (the same TCP port listens on
-    /// 0.0.0.0 even with Tor on; see `start_network` and `TOR_LIBP2P_PORT`). This LAN address
-    /// is written to `device_last_addr` by `record_peer_id_if_known`, and it overwrites the
-    /// known `.onion` address if there was one. The LAN address becomes invalid for good
-    /// when one device changes network (Wi-Fi to mobile data). The Tor connection does not
-    /// depend on the network, but the `.onion` address had already been overwritten, so
-    /// `try_reconnect_device` never tried it again. This map stores a known `.onion` address
-    /// separately from `device_last_addr`, and no LAN or direct address ever overwrites it
-    /// (see `remember_onion_addr`). `try_reconnect_device` now tries BOTH, when present, on
-    /// every reconnect attempt.
+    /// Fix for network robustness. Symptom: two devices paired over Tor, on the same LAN. When one switched to mobile data, it could no longer
+    /// message the other device on the LAN, but still reached the remote node. `device_last_addr` holds ONE "last working address". When two
+    /// devices on the same LAN connect with Tor on, a direct LAN connection usually forms before or instead of the Tor circuit (the same TCP port
+    /// listens on 0.0.0.0 even with Tor on; see `start_network` and `TOR_LIBP2P_PORT`). That LAN address is written to `device_last_addr` by
+    /// `record_peer_id_if_known`, and it overwrites the known `.onion` address if there was one. The LAN address becomes invalid for good when one
+    /// device changes network (Wi-Fi to mobile data). The Tor connection does not depend on the network, but the `.onion` address had already been
+    /// overwritten, so `try_reconnect_device` never tried it again. This map stores a known `.onion` address separately from `device_last_addr`,
+    /// and no LAN or direct address ever overwrites it (see `remember_onion_addr`). `try_reconnect_device` now tries BOTH, when present, on every
+    /// reconnect attempt.
     device_onion_addr: HashMap<String, String>,
     /// Last time `reconnect_sweep` ran. See `RECONNECT_SWEEP_INTERVAL_MS`.
     last_reconnect_sweep_at: u64,
@@ -589,13 +558,10 @@ struct P2PCore {
     /// Saver mode: the devices that were connected at the last network change
     /// (`reconnect_all_known_now`). Only these get the fast reconnect window.
     fast_reconnect_fps: std::collections::HashSet<String>,
-    /// Spec exception, user request: try 3 pings at 2-second intervals before a direct
-    /// reconnect, then battery robustness (see `KeepAliveState` and `KEEPALIVE_STABILIZE_MS`).
-    /// Keepalive state per connected peer: next send time, consecutive failure count, pending
-    /// request. It starts with a fresh entry on `ConnectionEstablished` and is removed on
-    /// `ConnectionClosed` (see the matching arms in `poll_events`). The connection is closed
-    /// and redialed only after `KEEPALIVE_FAILURES_BEFORE_DISCONNECT` consecutive failures. A
-    /// single late or lost keepalive no longer closes the connection.
+    /// Keepalive state per connected peer: next send time, consecutive failure count, pending request. Before a direct reconnect, three pings are
+    /// sent at 2-second intervals. The stabilisation and battery behaviour is described in `KeepAliveState` and `KEEPALIVE_STABILIZE_MS`. A fresh
+    /// entry is created on `ConnectionEstablished` and removed on `ConnectionClosed` (see the matching arms in `poll_events`). The connection is closed
+    /// and redialed only after `KEEPALIVE_FAILURES_BEFORE_DISCONNECT` consecutive failures. A single late or lost keepalive no longer closes it.
     keepalive_state: HashMap<PeerId, KeepAliveState>,
     /// Events that leave the swarm in the flush at the END of `poll_events` (see the block at
     /// the end of that function) and cannot be handled yet. They are handled at the START of the
@@ -624,42 +590,29 @@ struct P2PCore {
     /// be dropped (see `RateVerdict::Defer`). They are handled at the start of the next
     /// `poll_events` turn, before new arrivals, so the order is kept.
     deferred_incoming: std::collections::VecDeque<(Option<PeerId>, Vec<u8>)>,
-    /// Spec exception, bug fix ("a device connected over Tor is never seen in a group it was
-    /// invited to"). The fan-out loop of `invite_to_group`, `remove_from_group`,
-    /// `set_group_avatar` and `delete_group` silently dropped a `GroupUpdate` whenever
-    /// `resolve_active_device_for_identity` returned `None` for a member. For example the device
-    /// was not yet registered as "active". Tor pairing and handshakes can finish later than they
-    /// do on the same LAN. There was no log, no retry, and the function still returned `Ok(())`.
-    /// Now each (group_id, identity_id) pair that could not be sent keeps its latest `GroupUpdate`
-    /// here. `group_sync_sweep` (run by the same periodic pattern as `reconnect_sweep`) retries it
-    /// until the device resolves. It is in memory, same scope as the other retry queues
-    /// (`awaiting_confirmation` and `pending_envelopes`), and is cleared when the group is deleted
-    /// locally (see `remove_group_locally`).
+    /// Fix: a device connected over Tor was never seen in a group it had been invited to. The fan-out loop of `invite_to_group`,
+    /// `remove_from_group`, `set_group_avatar` and `delete_group` silently dropped a `GroupUpdate` whenever `resolve_active_device_for_identity`
+    /// returned `None` for a member, for example because the device was not yet registered as "active". Tor pairing and handshakes can finish later
+    /// than they do on the same LAN. There was no log, no retry, and the function still returned `Ok(())`.
+    /// Now each (group_id, identity_id) pair that could not be sent keeps its latest `GroupUpdate` here. `group_sync_sweep` (run by the same periodic
+    /// pattern as `reconnect_sweep`) retries it until the device resolves. It is in memory, the same scope as the other retry queues
+    /// (`awaiting_confirmation` and `pending_envelopes`), and is cleared when the group is deleted locally (see `remove_group_locally`).
     pending_group_syncs: HashMap<(String, String), GroupUpdate>,
-    /// Spec exception, bug fix ("a group member sometimes cannot receive messages, behaves
-    /// inconsistently"). `pending_group_syncs` above fixed this class of failure for
-    /// `GroupUpdate` (membership, name, avatar) only. The same fan-out pattern in
-    /// `send_group_message`, `edit_group_message` and `delete_group_message` (skip a member's copy
-    /// when `resolve_active_device_for_identity` returns `None`) was not covered. When a member's
-    /// active device could not be resolved yet (no IdentityExchange had completed with that member
-    /// since this process started, or the member briefly dropped from "active"), messages to that
-    /// member were lost SILENTLY. There was no error, no retry, and the sender never found out, since
-    /// the function returned `Ok(...)` as long as at least one other member got a copy. This matched
-    /// the report that messaging one person in a group sometimes never worked. The problem came up
-    /// only when that contact's connection or handshake state was "not resolved yet". The other
-    /// members, already resolved, were never affected.
-    /// key = (group_id, member_identity_id). Value = the message contents not yet sent to that
-    /// member, IN SEND ORDER. `group_sync_sweep` retries them periodically (same up-to-20 s interval)
-    /// until the member resolves. It is a Vec, not a single entry like `pending_group_syncs`: several
-    /// messages can go out before the member resolves (for example someone typing fast). All must be
-    /// kept, in order. Keeping only the LAST one, as with GroupUpdate (where only the latest state
-    /// matters), would lose messages here. Capped at `MAX_PENDING_GROUP_MESSAGES_PER_MEMBER` to bound
-    /// memory: if a member never resolves for days or weeks, the oldest entries are dropped first.
-    /// Spec exception, bug fix ("if the process dies while a member is unresolved, the message is
-    /// silently lost"). Before, this field was ONLY in memory. Unlike `pending_durable_retries` (one
-    /// pending packet each) it had no persistence. Each add and remove is now mirrored to the
-    /// `pending_group_messages` SQL table (see `persist_pending_group_message` and
-    /// `remove_persisted_pending_group_messages`). It is reloaded at app start by
+    /// Fix: a group member sometimes could not receive messages, and behaved inconsistently. `pending_group_syncs` above covered this failure class
+    /// only for `GroupUpdate` (membership, name, avatar). The same fan-out pattern in `send_group_message`, `edit_group_message` and
+    /// `delete_group_message` (skip a member's copy when `resolve_active_device_for_identity` returns `None`) was not covered. When a member's active
+    /// device could not be resolved yet (no IdentityExchange had completed with that member since this process started, or the member briefly
+    /// dropped out of "active"), messages to that member were lost silently. There was no error and no retry, and the sender never found out, since
+    /// the function returned `Ok(...)` as long as at least one other member got a copy. The problem appeared only while that contact's connection or
+    /// handshake state was unresolved. The other members, already resolved, were never affected.
+    /// key = (group_id, member_identity_id). Value = the message contents not yet sent to that member, IN SEND ORDER. `group_sync_sweep` retries them
+    /// periodically (same up-to-20 s interval) until the member resolves. It is a Vec, not a single entry like `pending_group_syncs`: several messages
+    /// can go out before the member resolves (for example someone typing fast). All must be kept, in order. Keeping only the LAST one, as with
+    /// GroupUpdate (where only the latest state matters), would lose messages here. Capped at `MAX_PENDING_GROUP_MESSAGES_PER_MEMBER` to bound memory:
+    /// if a member never resolves for days or weeks, the oldest entries are dropped first.
+    /// Fix: if the process dies while a member is unresolved, the queued messages used to be lost. This field was memory-only. Unlike
+    /// `pending_durable_retries` (one pending packet each) it had no persistence. Each add and remove is now mirrored to the `pending_group_messages`
+    /// SQL table (see `persist_pending_group_message` and `remove_persisted_pending_group_messages`). It is reloaded at app start by
     /// `load_pending_group_messages_from_db`, so the queue survives a process kill and restart.
     pending_group_messages: HashMap<(String, String), Vec<MessageContent>>,
     /// Group texts with a copy that was given up or cancelled: group-wide id -> the content and
@@ -685,16 +638,11 @@ struct P2PCore {
     /// Time of the last periodic run of `enforce_history_storage_limit`. See
     /// `HISTORY_STORAGE_SWEEP_INTERVAL_MS`.
     last_storage_sweep_at: u64,
-    /// Peers confirmed by `identify` to support the relay protocol and directly reachable (see
-    /// SECURITY.md, "Cross-network connectivity"). Peers that `identify` confirmed support the relay protocol, and that are
-    /// directly reachable (see `dial_with_relay_fallback`). They are shared in the QR packet
-    /// (`QrPacket.known_relays`) and grow organically from `identify::Event::Received`. There was
-    /// never a fixed bootstrap list. This is the relay-specific form of the  idea of
-    /// sharing about 10 node addresses, which was never implemented. Keeps at most
-    /// `MAX_KNOWN_RELAYS`. Value: (full multiaddr, last seen or renewed time in ms). The second field
-    /// drives LRU eviction (see `record_known_relay`). Before, a RANDOM entry was evicted from the full
-    /// map (HashMap iteration order is arbitrary), so the one working relay could be dropped while dead
-    /// ones stayed.
+    /// Peers confirmed by `identify` to support the relay protocol and directly reachable (see the "Cross-network connectivity" note in SECURITY.md).
+    /// They are shared in the QR packet (`QrPacket.known_relays`) and grow organically from `identify::Event::Received`. There is no fixed bootstrap list.
+    /// This is the relay-specific form of sharing node addresses. Keeps at most `MAX_KNOWN_RELAYS`. Value: (full multiaddr, last seen or renewed time
+    /// in ms). The second field drives LRU eviction (see `record_known_relay`). Before, a RANDOM entry was evicted from the full map (HashMap iteration
+    /// order is arbitrary), so the one working relay could be dropped while dead ones stayed.
     known_relay_peers: HashMap<PeerId, (Multiaddr, u64)>,
     /// Until this time after a network change, `reconnect_sweep` runs in fast mode (see
     /// `FAST_RECONNECT_INTERVAL_MS`).
@@ -765,22 +713,18 @@ struct P2PCore {
     sibling_fetch_open: HashMap<(String, i64, i64), (String, u64)>,
     /// Chat -> follow-up pages its presses may still ask for (`HISTORY_FETCH_MAX_PAGES`).
     history_fetch_pages: HashMap<String, u32>,
-    /// User decision (2026-08-27): BLOCKED identities. This is deliberately sharper than `revoke`.
-    /// Revoke says a device is no longer used, and that person can come back with a new device. Blocking
-    /// targets the PERSON. No packet from ANY device of that identity is accepted, no connection is
-    /// attempted to any of them, and no "new device" alert is produced. Otherwise a blocked person could
-    /// flood the user with alerts. The only way out is re-pairing IN PERSON: unblocking works only with a
-    /// QR or manual code scan, and no remote packet can do it.
+    /// BLOCKED identities. This is deliberately stricter than `revoke`. Revoke says a device is no longer used, and that person can come back with a
+    /// new device. Blocking targets the PERSON. No packet from ANY device of that identity is accepted, no connection is attempted to any of them,
+    /// and no "new device" alert is produced. Otherwise a blocked person could flood the user with alerts. The only way out is re-pairing IN PERSON:
+    /// unblocking works only with a QR or manual code scan, and no remote packet can do it.
     blocked_identities: std::collections::HashSet<String>,
     /// Identities that sent `AccountDeleted`. No messages are sent to them any more.
     deleted_identities: std::collections::HashSet<String>,
-    /// Battery fix (2026-08-28): the Kotlin side turns this on when the app is in the background and the
-    /// screen is off (see `set_power_save`). Effect: for a connection proven healthy, the keepalive
-    /// interval widens from 20 s to `KEEPALIVE_POWER_SAVE_INTERVAL_MS`.
-    /// Why this matters: after any activity, the cellular radio typically stays in its high-power state
-    /// for 5-15 s. A probe every 20 s means the radio almost never gets to idle, for every connected peer.
-    /// With the screen off, stretching this to 60 s opens long sleep windows without losing liveness
-    /// detection.
+    /// The Kotlin side turns this on when the app is in the background and the screen is off (see `set_power_save`). Effect: for a connection proven
+    /// healthy, the keepalive interval widens from 20 s to `KEEPALIVE_POWER_SAVE_INTERVAL_MS`.
+    /// Why this matters: after any activity, the cellular radio typically stays in its high-power state for 5-15 s. A probe every 20 s means the
+    /// radio almost never gets to idle, for every connected peer. With the screen off, stretching this to 60 s opens long sleep windows without
+    /// losing liveness detection.
     power_save: bool,
     /// The active network is metered (Kotlin `setMeteredNetwork`). With `power_save` this is
     /// radio-saver mode (see `RADIO_WINDOW_MS`).
@@ -813,12 +757,10 @@ struct P2PCore {
     attachment_events: Vec<String>,
     /// (PeerId of a just-revoked own device, mono_ms at which to disconnect it).
     revoked_disconnects: Vec<(PeerId, u64)>,
-    /// Spec exception, delivery the user asked for. Key = the message id of the packet we sent (Text,
-    /// Edit, Delete and HistorySyncRequest packets). `poll_events` republishes every entry periodically
-    /// until the peer confirms it (an Ack, or a HistorySyncResponse). See `ACK_RETRY_INITIAL_MS` and
-    /// `ACK_RETRY_MAX_MS`. A successful gossip publish is only a local guarantee (see the note on
-    /// `pending_envelopes` for why that is not enough). This is the app's only real end-to-end delivery
-    /// guarantee layer.
+    /// Delivery guarantee: the key is the message id of the packet we sent (Text, Edit, Delete and HistorySyncRequest packets). `poll_events`
+    /// republishes every entry periodically until the peer confirms it (an Ack, or a HistorySyncResponse). See `ACK_RETRY_INITIAL_MS` and
+    /// `ACK_RETRY_MAX_MS`. A successful gossip publish is only a local guarantee (see the note on `pending_envelopes` for why that is not enough).
+    /// This is the app's only real end-to-end delivery guarantee layer.
     awaiting_confirmation: HashMap<String, PendingConfirmation>,
 }
 
