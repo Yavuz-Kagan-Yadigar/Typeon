@@ -7,27 +7,20 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 
 /**
- * Yeniden başlatmadan sonra sunucuyu geri getirir.
+ * Brings the server back after a reboot.
  *
- * İstemcideki `service.BootReceiver` ile AYNI gerekçe, ama sonucu daha ağır:
- * sunucu kapalıyken store-and-forward TAMAMEN durur. Çevrimdışı bir alıcıya
- * gönderilen her mesaj, gönderenin yeniden deneme kuyruğunda bekler ve
- * alıcı P2P olarak ulaşılabilir olana kadar teslim edilemez — yani sunucunun
- * var olma sebebi ortadan kalkar. Telefon gece yeniden başladıysa, kimse
- * uygulamayı elle açana kadar bu böyle sürer.
+ * The same reason as `service.BootReceiver` in the client, but the result is heavier. While the server is off, store-and-forward stops COMPLETELY. Every message
+ * sent to an offline recipient waits in the sender's retry queue, and it cannot be delivered until the recipient is reachable peer to peer. So the server's reason
+ * to exist disappears. If the phone rebooted overnight, that lasts until someone opens the app by hand.
  *
- * `ACTION_BOOT_COMPLETED`, Android'in ön plan servisi başlatma kısıtlarından
- * AÇIKÇA muaf tuttuğu birkaç yayından biri; bu yüzden buradan başlatmak pil
- * optimizasyonu muafiyetine bağlı değil.
+ * `ACTION_BOOT_COMPLETED` is one of the few broadcasts that Android explicitly exempts from the foreground service start restrictions. So starting from here
+ * does not depend on the battery optimisation exemption.
  *
- * `ACTION_MY_PACKAGE_REPLACED` de dinleniyor: uygulama güncellendiğinde süreç
- * öldürülüyor ve servis kendiliğinden geri gelmiyor (bu, release APK'ları
- * kurarken gerçek cihazda gözlemlendi — sunucu kurulumdan sonra kapalı kaldı).
+ * `ACTION_MY_PACKAGE_REPLACED` is also handled. When the app is updated, the process is killed and the service does not come back by itself. This happened on a phone
+ * when release APKs were installed: the server stayed off after the install.
  *
- * Not direct-boot aware (the data is in credential-protected storage): after
- * a reboot the server returns only once the phone has been unlocked — keep
- * the lock screen. Removing it makes the DB key and the enrolment keys
- * readable on a cold-booted device.
+ * NOT direct-boot aware, on purpose (the data is in credential-protected storage). After a reboot, the server comes back only once the phone has been unlocked.
+ * Keep it that way. Making it direct-boot aware would make the DB key and the enrolment keys readable on a cold-booted device.
  */
 class BootReceiver : BroadcastReceiver() {
 
@@ -37,8 +30,7 @@ class BootReceiver : BroadcastReceiver() {
             Intent.ACTION_MY_PACKAGE_REPLACED -> {}
             else -> return
         }
-        // Kullanıcının açma/kapama anahtarı (bkz. ServerActivity). Kapalıysa
-        // açılışta da başlatmıyoruz — "kapalı" kararına saygı.
+        // The user's on/off switch (see ServerActivity). If it is off, do not start it at boot either. The "off" decision is respected.
         if (!ServerService.isEnabled(context)) {
             Log.i("ServerBootReceiver", "Sunucu kullanıcı tarafından kapalı — açılışta başlatılmadı")
             return
@@ -49,8 +41,7 @@ class BootReceiver : BroadcastReceiver() {
                 Intent(context.applicationContext, ServerService::class.java)
             )
         } catch (e: Exception) {
-            // Doğrudan-önyükleme (direct boot) aşaması ya da OEM kısıtlaması:
-            // sessizce geç, kullanıcı uygulamayı açtığında yine başlar.
+            // Direct boot stage, or an OEM restriction: skip quietly. The server starts when the user next opens the app.
             Log.w("ServerBootReceiver", "Açılışta sunucu başlatılamadı: ${e.message}")
         }
     }

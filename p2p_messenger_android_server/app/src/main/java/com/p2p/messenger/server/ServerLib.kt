@@ -1,14 +1,12 @@
 package com.p2p.messenger.server
 
 /**
- * `typeon-server` Rust çekirdeğinin JNI yüzeyi.
+ * The JNI surface of the `typeon-server` Rust core.
  *
- * İstemcinin `P2PLib`'iyle aynı desen: her şey JSON dizesi olarak geçer,
- * hatalar `"Error: ..."` önekiyle döner. Bu ayrı bir kütüphane
- * (`libtypeon_server.so`) — istemcinin `libp2p_messenger.so`'suyla aynı
- * protokol tiplerini paylaşır ama ayrı bir crate'tir.
+ * The same pattern as the client's `P2PLib`: everything crosses as JSON strings, and errors come back with an `"Error: ..."` prefix. This is a separate
+ * library (`libtypeon_server.so`). It shares the same protocol types as the client's `libp2p_messenger.so`, but it is a separate crate.
  */
-/** the native side answers in English; show it in the user's language. */
+/** The native side answers in English. Show it in the user's language. */
 fun serverErrorText(ctx: android.content.Context, raw: String): String {
     val id = when {
         raw.startsWith("Error: internal error") -> R.string.err_internal
@@ -29,45 +27,35 @@ object ServerLib {
     }
 
     /**
-     * Sunucuyu başlatır, `peer_id` döner. Zaten çalışıyorsa no-op —
-     * foreground service `START_STICKY` ile yeniden başlatılabiliyor.
+     * Starts the server and returns its `peer_id`. A no-op if it is already running, so the foreground service can be restarted with `START_STICKY`.
      *
-     * Tor parametresi YOK: onion service bu uygulamada her zaman açık. Bir
-     * telefonun operatör NAT'ı arkasından ulaşılabilir olmasının tek yolu o;
-     * kapatılabilir yapmak, sunucuyu sessizce erişilemez kılan bir ayak
-     * kapanı olurdu.
+     * NO Tor parameter. The onion service is always on in this app. It is the only way for a phone behind an operator's NAT to be reachable. Making it optional
+     * would be a trap that silently makes the server unreachable.
      */
     external fun startServer(
         dataDir: String,
         nodeMode: Boolean,
         name: String,
         /**
-         * Sunucunun kullanmasına izin verilen TOPLAM disk bütçesi (bayt).
+         * The TOTAL disk budget, in bytes, that the server may use.
          *
-         * Rust tarafındaki varsayılan kotalar bir VPS için yazılmıştı: kayıt
-         * BAŞINA 256 MB posta + 1 GB arşiv + 4 GB blob. Beş cihazla bu 26
-         * GB'a çıkıyor ve gerçekten oldu — test sırasında tabletin 22 GB'lık
-         * diski doldu, sunucu 751 MB biriktirdi ve yeni kurulum
-         * `INSTALL_FAILED_INSUFFICIENT_STORAGE` ile reddedildi. Telefonda
-         * kotalar cihazın GERÇEK boş alanından türetilmeli.
+         * The Rust side's default quotas were written for a VPS: 256 MB of mail per enrolment, plus 1 GB of archive, plus 4 GB of blobs. With five devices that
+         * comes to 26 GB. It really happened: during a test, the tablet's 22 GB disk filled up, the server had accumulated 751 MB, and a new install was refused with
+         * `INSTALL_FAILED_INSUFFICIENT_STORAGE`. On a phone, the quotas must be derived from the device's REAL free space.
          */
         storageBudgetBytes: Long,
-        /** Blob dizini — kimlik/Tor durumu HER ZAMAN dahilide kalır. */
+        /** Blob directory. The identity and Tor state always stay in internal storage. */
         blobDir: String
     ): String
 
     /**
-     * Sunucuyu GERÇEKTEN durdurur.
+     * Really STOPS the server.
      *
-     * Bu yoktu: `stopService(...)` yalnızca wake lock'u bırakıp ön plan
-     * bildirimini kaldırıyordu, Rust çekirdeği süreçte çalışmaya devam
-     * ediyordu — hâlâ posta kabul ediyor, blob servis ediyor, pil harcıyor.
-     * Ayrıca `startServer` zaten çalışan bir çekirdek varken no-op olduğu
-     * için node modu / blob dizini / disk bütçesi değişiklikleri de süreç
-     * öldürülmeden uygulanmıyordu. Durdurma sonrası `startServer` temiz bir
-     * kurulum yapar.
+     * This did not exist before. `stopService(...)` only released the wake lock and removed the foreground notification. The Rust core kept running in the process.
+     * It went on accepting mail, serving blobs and using battery. Also, because `startServer` is a no-op while a core is already running, changes to node mode,
+     * blob directory or disk budget were not applied without killing the process. After a stop, `startServer` does a clean setup.
      */
-    /** SQLCipher raw key (32 bytes) for the server DB; call before [startServer]. "ok" or "Error: ...". */
+    /** SQLCipher raw key (32 bytes) for the server DB. Call before [startServer]. Returns "ok" or "Error: ...". */
     external fun setDbKey(key: ByteArray): String
 
     external fun stopServer(): String
@@ -76,22 +64,15 @@ object ServerLib {
     external fun serverStatus(): String
 
     /**
-     * Sunucunun KALICI katılım kodu (`typeon-server:<multiaddr>#<jeton>`) —
-     * bir kez yayımlanır, SINIRSIZ kişi aynı kodla katılır.
+     * The server's PERMANENT join code (`typeon-server:<multiaddr>#<token>`). It is published once, and UNLIMITED people join with the same code.
      *
-     * Kullanıcı isteği (2026-09-04): "tek QR/link ile birden çok kişi
-     * katılabilmeli, server ile etkileşime girmeye gerek kalmadan".
-     * Önceki "yeni davet üret" düğmesi bunu çözmüyordu — her dokunuşta
-     * YENİ ve tek kullanımlık bir kod üretiyor, jetonu hash'li sakladığı
-     * için de aynı kodu bir daha gösteremiyordu: her yeni kişi için
-     * operatörün bu ekrana gelmesi gerekiyordu. (Sayılı/süreli davetler
-     * headless daemon'da `typeon-server invite new` ile duruyor.)
+     * The user asked for one QR or link that many people can use, with no interaction with the server needed. The earlier "make a new invite" button did not do
+     * that. Each tap made a NEW, single-use code. And because the token is stored hashed, the same code could never be shown again. So the operator had to come
+     * to this screen for every new person. (Numbered and time-limited invites live in the headless daemon, through `typeon-server invite new`.)
      *
-     * `rotate = true`: eski kod ANINDA geçersizleşir, yenisi döner. Kayıtlı
-     * cihazlar etkilenmez (kayıt jetondan bağımsız).
+     * `rotate = true`: the old code becomes invalid AT ONCE, and a new one is returned. Registered devices are not affected (enrolment does not depend on the token).
      *
-     * Sunucunun henüz bir adresi yoksa hata döner — Tor açıkken onion
-     * adresi arti'nin bootstrap'ını bekler (ilk açılışta 30-60 sn).
+     * If the server has no address yet, an error is returned. With Tor on, the onion address waits for arti's bootstrap (30 to 60 seconds on the first start).
      */
     external fun joinCode(rotate: Boolean): String
 
@@ -101,26 +82,22 @@ object ServerLib {
     external fun revokeDevice(enrollmentId: String): String
 
     /**
-     * Kaydı ENGELLER (kullanıcı kararı, 2026-08-27).
+     * BLOCKS the enrolment.
      *
-     * `revokeDevice` de kayıt anahtarını engeller (iptal = engel). Farkı:
-     * bu çağrı herkese açık katılım kodunu da yeniler.
+     * `revokeDevice` also blocks the enrolment key (revoke = block). The difference: this call also rotates the public join code.
      */
     external fun blockDevice(enrollmentId: String): String
 
-    /** Engeli kaldırır; cihaz taze bir davetle yeniden kaydolabilir. */
+    /** Lifts the block. The device can enrol again with a fresh invite. */
     external fun unblockDevice(enrollmentId: String): String
 
-    /** Veri dizininin toplam boyutu (bayt, dize olarak). */
+    /** Total size of the data directory, in bytes, as a string. */
     external fun diskUsage(): String
 
     /**
-     * Ağ arayüzü değiştiğinde (Wi-Fi kopup gelme, hücresele geçiş) çağrılır
-     * — bkz. `ServerService` `ConnectivityManager` geri çağrısı. Çekirdek
-     * Tor bootstrap'ını (idempotent) yeniden tetikler ve libp2p
-     * dinleyicisini tazeler; böylece bir Wi-Fi kesintisinden sonra onion
-     * descriptor'ın yeniden yayınlanması periyodik iyileşmeyi (dakikalar)
-     * beklemez. Çekirdek çalışmıyorsa no-op.
+     * Called when the network interface changes (Wi-Fi drops and comes back, or a switch to mobile data). See the `ConnectivityManager` callback in `ServerService`.
+     * The core re-triggers the Tor bootstrap (idempotently) and refreshes the libp2p listener. So after a Wi-Fi interruption, republishing the onion descriptor
+     * does not wait for the periodic recovery (minutes). It is a no-op if the core is not running.
      */
     external fun notifyNetworkChanged()
 }

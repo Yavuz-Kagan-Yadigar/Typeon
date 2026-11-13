@@ -21,17 +21,13 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Sunucuyu ayakta tutan foreground service.
+ * The foreground service that keeps the server alive.
  *
- * İstemcinin `P2PService`'iyle aynı desen (aynı `dataSync` tipi, aynı
- * `START_STICKY`), ama çok daha basit: burada olay döngüsü yok. Rust
- * tarafındaki `ServerCore` kendi tokio görevinde dönüyor; bu servisin tek
- * işi süreci canlı tutmak ve kullanıcıya kalıcı bir bildirim göstermek.
+ * The same pattern as the client's `P2PService` (the same `dataSync` type, the same `START_STICKY`), but much simpler. There is no event loop here. The Rust
+ * `ServerCore` runs in its own tokio task. This service has one job: keep the process alive and show a permanent notification to the user.
  *
- * DÜRÜST SINIR: Android bellek baskısı altında bir foreground service'i
- * yine de öldürebilir. Bu uygulama "evde duran, fişte bir yedek telefon"
- * senaryosu için; kesintisiz çalışması gereken bir sunucu için küçük bir
- * VPS'te `typeon-server` daemon'ı önerilir.
+ * HONEST LIMIT: under memory pressure, Android can still kill a foreground service. This app is meant for a "spare phone left at home, plugged in" scenario.
+ * For a server that must run without interruption, the `typeon-server` daemon on a small VPS is recommended.
  */
 class ServerService : Service() {
 
@@ -100,20 +96,17 @@ class ServerService : Service() {
         }
 
         /**
-         * Kimlik, veritabanı ve Tor durumu — HER ZAMAN dahili depolama.
+         * Identity, database and Tor state: ALWAYS in internal storage.
          *
-         * Taşınabilir DEĞİL: arti (Tor) kalıcı durumu için POSIX izin modeli
-         * istiyor, SD kart bağlaması vermiyor ve
-         * `could not read/write persistent state` ile açılmıyor. Gerçek
-         * testte olan buydu — sunucu Tor'suz, rastgele portta kalktı ve
-         * kayıtlı bütün istemciler koptu.
+         * NOT portable. arti (Tor) needs a POSIX permission model for its persistent state. SD card mounts do not give that, and it fails to open with
+         * `could not read/write persistent state`. That is exactly what happened in a real test: the server came up without Tor, on a random port, and every
+         * registered client disconnected.
          */
         fun dataDir(context: Context): java.io.File = context.filesDir
 
         /**
-         * Blobların (dosya ekleri) dizini — yer kaplayan TEK şey bu (gerçek
-         * testte 504 MB), ve izin modeline duyarlı bir şey içermediği için
-         * güvenle SD karta alınabilir.
+         * The blob directory (file attachments). It is the ONLY thing that takes up space (504 MB in a real test). It holds nothing that is sensitive to the
+         * permission model, so it can safely go to the SD card.
          */
         fun blobDir(context: Context): java.io.File {
             val saved = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -135,13 +128,10 @@ class ServerService : Service() {
         }
 
         /**
-         * Yazılabilir depolama birimleri: dahili + varsa SD kart.
+         * Writable storage units: internal, plus the SD card if present.
          *
-         * `getExternalFilesDirs` KASITLI tercih — SAF (klasör seçici) burada
-         * kullanılamaz: SQLite ve blob dosyaları GERÇEK bir dosya yolu
-         * istiyor, SAF ise `content://` URI veriyor. `getExternalFilesDirs`
-         * her birimde uygulamaya ait, izin gerektirmeyen ve gerçek yolu olan
-         * bir dizin döndürüyor.
+         * `getExternalFilesDirs` is a DELIBERATE choice. SAF (the folder picker) cannot be used here: SQLite and blob files need a REAL file path, and SAF gives a
+         * `content://` URI. `getExternalFilesDirs` returns, for each unit, an app-owned directory that needs no permission and has a real path.
          */
         fun storageVolumes(context: Context): List<java.io.File> {
             val out = mutableListOf(context.filesDir)
@@ -163,10 +153,8 @@ class ServerService : Service() {
     private var netCallback: ConnectivityManager.NetworkCallback? = null
 
     /**
-     * Wake lock + Wi-Fi lock. A server that is up needs both (screen-off Wi-Fi
-     * power save dropped the Tor circuits in the 2026-09-06 test;
-     * `WIFI_MODE_FULL_LOW_LATENCY` only works in the foreground), so they are
-     * held while it runs. Released while the core is failing to start.
+     * Wake lock and Wi-Fi lock. A server that is up needs both. Screen-off Wi-Fi power save dropped the Tor circuits in an earlier test, and
+     * `WIFI_MODE_FULL_LOW_LATENCY` only works in the foreground. So they are held while it runs. They are released while the core is failing to start.
      */
     @Synchronized
     private fun setLocks(on: Boolean) {
@@ -241,15 +229,12 @@ class ServerService : Service() {
             return START_NOT_STICKY
         }
 
-        // Ekran kapalıyken de teslim yapabilmek için. Sunucu tanım gereği
-        // "her zaman açık" olmalı; kullanıcı pil optimizasyonu muafiyetini
-        // reddederse bu wakelock tek başına yeterli olmayabilir.
+        // To deliver with the screen off too. The server must be "always on" by definition. If the user refuses the battery optimisation exemption, this wake
+        // lock alone may not be enough.
         setLocks(true)
 
-        // Ağ değişikliği (Wi-Fi kopup gelme, hücresele geçiş) güçlü bir
-        // sinyal — arti'nin devreleri yeniden kurup onion descriptor'ı
-        // yeniden yayınlaması için çekirdeği dürt (bkz.
-        // ServerLib.notifyNetworkChanged / `ServerCore::notify_network_changed`).
+        // A network change (Wi-Fi drops and comes back, or a switch to mobile data) is a strong signal. It prods the core so arti rebuilds its circuits and
+        // republishes the onion descriptor (see ServerLib.notifyNetworkChanged / `ServerCore::notify_network_changed`).
         try {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             val cb = object : ConnectivityManager.NetworkCallback() {
@@ -310,8 +295,7 @@ class ServerService : Service() {
             val result = try {
                 val blobs = awaitBlobDir()
                     ?: throw java.io.IOException(getString(R.string.err_storage_unavailable))
-                // Tor parametresi yok — onion service her zaman açık
-                // (bkz. ServerLib.startServer notu).
+                // No Tor parameter: the onion service is always on (see the ServerLib.startServer note).
                 // DB encryption at rest: fail closed, never fall back to a plain DB.
                 val dbKey = DbKey.get(this)
                 val keyRes = try { ServerLib.setDbKey(dbKey) } finally { dbKey.fill(0) }
@@ -351,10 +335,8 @@ class ServerService : Service() {
     }
 
     override fun onDestroy() {
-        // Rust çekirdeğini de GERÇEKTEN durdur. Önceden burada
-        // yalnızca wake lock bırakılıyordu; sunucu süreçte çalışmaya devam
-        // ediyor, arayüzdeki anahtar "kapalı" gösterse bile posta kabul
-        // etmeyi sürdürüyordu.
+        // Really stop the Rust core too. Before, only the wake lock was released here. The server kept running in the process. Even with the switch showing
+        // "off", it went on accepting mail.
         core.execute {
             try {
                 val r = ServerLib.stopServer()
@@ -377,8 +359,7 @@ class ServerService : Service() {
         super.onDestroy()
     }
 
-    /** Ağ değişikliğinde çekirdeği dürt — arti devrelerini/onion yayınını
-     *  tazelesin. `ServerLib.notifyNetworkChanged` yoksa (eski .so) sessizce geç. */
+    /** Prods the core on a network change, so arti refreshes its circuits and onion publication. If `ServerLib.notifyNetworkChanged` does not exist (an old .so), it is skipped silently. */
     private fun pokeCore(reason: String) {
         if (!pokePending.compareAndSet(false, true)) return
         poker.execute {
@@ -432,15 +413,11 @@ class ServerService : Service() {
     }
 
     /**
-     * Sunucunun disk bütçesi: ZATEN sakladığı bloblar + o anki BOŞ alanın
-     * yarısı, 8 GB'ı geçmemek üzere.
+     * The server's disk budget: the blobs it ALREADY stores, plus HALF of the currently FREE space, capped at 8 GB.
      *
-     * "Yarısı", cihazın kendi işine (güncelleme, fotoğraf, kurulum) yer
-     * bırakmak için. What the server already stores is added back: half of
-     * the free space alone shrank on every start as the server filled, fell
-     * below current usage, and then every deposit was refused with space left.
-     * Free space is the smaller of the blob dir's and the internal data
-     * dir's volume: mail and archive live in the database on internal storage.
+     * The half is left for the phone's own use (updates, photos, installs). What the server already stores is added back. Half of the free space alone shrank on
+     * every start as the server filled up. It fell below current usage, and then every deposit was refused while space was still left.
+     * Free space is the smaller of the blob directory's and the internal data directory's volume. Mail and the archive live in the database on internal storage.
      */
     private fun storageBudgetBytes(blobs: java.io.File): Long {
         return try {

@@ -25,11 +25,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Sunucunun tek ekranı: aç/kapat, adresler, katılım QR'ı, kayıtlı cihazlar.
+ * The server's single screen: on/off, addresses, the join QR, and the registered devices.
  *
- * Bilinçli olarak minimal — bu bir mesajlaşma uygulaması değil, bir altyapı
- * aracı. Gösterdiği her şey operatörün gerçekten karar vermesi gereken
- * şeyler: sunucu ayakta mı, adresi ne, kimi davet ettim, kimi çıkarıyorum.
+ * Deliberately minimal. This is not a messaging app, it is an infrastructure tool. Everything it shows is something the operator must decide:
+ * whether the server is up, what its address is, whom I invited, and whom I am removing.
  */
 class ServerActivity : AppCompatActivity() {
 
@@ -51,10 +50,8 @@ class ServerActivity : AppCompatActivity() {
     private var lastDisk = 0L
 
     /**
-     * Son çizilen cihaz listesinin ham JSON'u ve son yazılan durum/istatistik
-     * metinleri. Yenileme turu 2 saniyede bir dönüyor; DEĞİŞMEDİĞİ hâlde
-     * satırları söküp yeniden kurmak ScrollView'ın odağı kaybedip listenin
-     * başına zıplamasına yol açıyordu (ekran kendiliğinden yukarı kayıyor).
+     * The raw JSON of the last device list drawn, and the last status and statistics text written. The refresh loop runs every 2 seconds. Tearing down and
+     * rebuilding rows when nothing changed made the ScrollView lose focus and jump back to the top of the list (the screen scrolled up by itself).
      */
     private var lastDevicesJson: String? = null
     private var lastStatus: String? = null
@@ -70,9 +67,8 @@ class ServerActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // The join code is a bearer token for unlimited enrollments: keep the
-        // QR out of the recents thumbnail and screen recordings. Debuggable
-        // builds stay capturable (adb screenshots in device tests).
+        // The join code is a bearer token for unlimited enrolments. Keep the QR out of the recents thumbnail and screen recordings. Debuggable builds
+        // stay capturable, for adb screenshots.
         if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) {
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         }
@@ -100,9 +96,7 @@ class ServerActivity : AppCompatActivity() {
                 // is refused on Android 12+ (see ServerService.onStartCommand).
                 requestIgnoreBatteryOptimizations(quiet = true)
             } else {
-                // artık gerçekten duruyor — `ServerService.onDestroy`
-                // `ServerLib.stopServer()` çağırıyor, o da Rust döngüsünü
-                // sonlandırıyor. "Yeniden başlatma gerekiyor" uyarısı kalktı.
+                // The server really stops now. `ServerService.onDestroy` calls `ServerLib.stopServer()`, which ends the Rust loop. The "restart needed" warning is gone.
                 stopService(Intent(this, ServerService::class.java))
             }
         }
@@ -111,9 +105,7 @@ class ServerActivity : AppCompatActivity() {
         nodeSwitch.isChecked = ServerService.isNodeMode(this)
         nodeSwitch.setOnCheckedChangeListener { _, checked ->
             ServerService.setNodeMode(this, checked)
-            // node modu artık gerçekten uygulanabiliyor —
-            // sunucuyu durdurup yeniden başlatmak yeterli (süreç öldürmeye
-            // gerek yok).
+            // Node mode can now really be applied. Stopping and starting the server is enough. The process does not need to be killed.
             if (ServerService.isEnabled(this)) {
                 restartServerService()
             }
@@ -194,14 +186,13 @@ class ServerActivity : AppCompatActivity() {
                 runOnUiThread { if (!isDestroyed) done(result) }
             }
         } catch (e: java.util.concurrent.RejectedExecutionException) {
-            // Activity destroyed.
+        // Activity destroyed.
         }
     }
 
     /**
-     * Sunucuyu durdurup yeniden başlatır — yapılandırma değişiklikleri
-     * (node modu, blob dizini, disk bütçesi) yalnızca `startServer`
-     * anında okunuyor ve o da çalışan bir çekirdek varken no-op.
+     * Stops and restarts the server. Configuration changes (node mode, blob directory, disk budget) are read only at `startServer` time, and that call is a
+     * no-op while a core is already running.
      */
     private fun restartServerService() {
         stopService(Intent(this, ServerService::class.java))
@@ -257,9 +248,7 @@ class ServerActivity : AppCompatActivity() {
 
         val addrs = json.optJSONArray("addresses") ?: JSONArray()
         val addressLabel = if (addrs.length() == 0) {
-            // Tor açıkken onion adresi arti'nin bootstrap'ını bekler; ilk
-            // açılışta 30-60 sn sürebilir ve o ana kadar davet kodu
-            // üretilemez.
+            // With Tor on, the onion address waits for arti's bootstrap. The first start can take 30 to 60 seconds, and until then no invite code can be made.
             getString(R.string.state_no_address)
         } else {
             (0 until addrs.length()).joinToString("\n") { addrs.optString(it) }
@@ -267,10 +256,8 @@ class ServerActivity : AppCompatActivity() {
         val addressesChanged = addressLabel != lastAddresses
         lastAddresses = setTextIfChanged(addressText, addressLabel, lastAddresses)
 
-        // Kod, adres hazır olur olmaz kendiliğinden görünür. Yalnızca henüz
-        // gösterilmediyse ya da adres değiştiyse okunur (kod adresleri
-        // içeriyor: eski QR yanlış adrese götürür). `lastInvite` is cleared
-        // when the read fails, so the next poll tries again.
+        // The code appears by itself as soon as the address is ready. It is read only if it has not been shown yet, or if the address changed (the code
+        // contains the addresses, and an old QR leads to the wrong address). `lastInvite` is cleared when the read fails, so the next poll tries again.
         if (addrs.length() > 0 && (lastInvite == null || addressesChanged)) showJoinCode()
 
         lastStats = setTextIfChanged(
@@ -290,13 +277,11 @@ class ServerActivity : AppCompatActivity() {
     }
 
     /**
-     * Metni yalnızca gerçekten değiştiyse yazar.
+     * Writes the text only if it really changed.
      *
-     * `TextView.setText` aynı metinle bile yeni bir ölçüm/yerleşim turu
-     * tetikliyor; her yoklamada tüm ekranı yeniden yerleştirmek kaydırma
-     * konumunu oynatıyordu. Karşılaştırmayı `TextView.getText` yerine ayrı
-     * bir alanda tutuyoruz: seçilebilir metinlerde (`textIsSelectable`)
-     * getText, span'lar yüzünden yazdığımız String'e eşit çıkmayabiliyor.
+     * `TextView.setText` triggers a new measure and layout pass even with the same text. Re-laying out the whole screen on every poll moved the scroll position.
+     * The comparison uses a separate field, not `TextView.getText`. In selectable texts (`textIsSelectable`), getText can fail to equal the String we wrote,
+     * because of spans.
      */
     private fun setTextIfChanged(view: TextView, value: String, last: String?): String {
         if (value != last) view.text = value
@@ -311,9 +296,8 @@ class ServerActivity : AppCompatActivity() {
     }
 
     private fun renderDevices(raw: String) {
-        // Liste aynıysa hiçbir şeye dokunma: `removeAllViews` + yeniden ekleme,
-        // o an odaklı olan satır düğmesini yok ediyor ve ScrollView odağı
-        // yukarıdaki ilk odaklanabilir view'a taşıyarak ekranı kaydırıyordu.
+        // If the list is the same, do nothing. `removeAllViews` followed by re-adding destroys the row button that has focus. The ScrollView then moves focus to
+        // the first focusable view above and scrolls the screen.
         if (raw == lastDevicesJson) return
         lastDevicesJson = raw
         val arr = try {
@@ -330,10 +314,8 @@ class ServerActivity : AppCompatActivity() {
                 setPadding(0, 8, 0, 8)
             }
             row.addView(TextView(this).apply {
-                // Kayıt kimliği, cihazın GERÇEK kimliğiyle ilişkisiz taze bir
-                // anahtardan üretiliyor (bkz. Rust `ServerRequest::Enroll`) —
-                // operatör kimin kim olduğunu buradan öğrenemez, sadece
-                // iptal edebilir.
+                // The enrolment identifier is generated from a fresh key, unrelated to the device's real identity (see the Rust `ServerRequest::Enroll`).
+                // The operator cannot learn who is who from it. It can only revoke.
                 text = getString(
                     R.string.device_row_fmt,
                     id.take(12),
@@ -350,8 +332,7 @@ class ServerActivity : AppCompatActivity() {
                     setOnClickListener { confirmRevoke(id) }
                 })
             }
-            // Kullanıcı kararı: iptalin YANINA engelleme. İptal, cihazın taze
-            // bir davetle geri dönmesine izin verir; engel vermez.
+            // The user's decision: block sits NEXT TO revoke. Revoke lets the device come back with a fresh invite. Block does not.
             row.addView(Button(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
                 setText(if (blocked) R.string.action_unblock else R.string.action_block)
                 setOnClickListener { if (blocked) unblock(id) else confirmBlock(id) }
@@ -384,8 +365,8 @@ class ServerActivity : AppCompatActivity() {
     }
 
     /**
-     * Engelleme, iptalden farklı: kayıt anahtarına konur, yani cihaz taze
-     * bir davetle bile geri dönemez. Bu yüzden ayrı bir onay metni var.
+     * Blocking is different from revoking. It is put on the enrolment key, so the device cannot come back even with a fresh invite. That is why it has its own
+     * confirmation text.
      */
     private fun confirmBlock(enrollmentId: String) {
         AlertDialog.Builder(this)
@@ -399,10 +380,9 @@ class ServerActivity : AppCompatActivity() {
     private fun unblock(enrollmentId: String) = deviceAction { ServerLib.unblockDevice(enrollmentId) }
 
     /**
-     * Kalıcı katılım kodunu gösterir (bkz. `ServerLib.joinCode`).
+     * Shows the permanent join code (see `ServerLib.joinCode`).
      *
-     * Kod yalnızca DEĞİŞTİYSE yeniden çizilir; okuma ve QR kodlama ana
-     * thread'in dışında yapılır.
+     * The code is redrawn only if it CHANGED. Reading and QR encoding happen off the main thread.
      */
     private fun showJoinCode(rotate: Boolean = false) {
         bg<Pair<String, Bitmap?>>({
@@ -410,8 +390,7 @@ class ServerActivity : AppCompatActivity() {
             code to (if (code.startsWith("Error:") || code == lastInvite) null else encodeQr(code, 900, 900))
         }, { "Error: ${it.message}" to null }) { (code, qr) ->
             if (code.startsWith("Error:")) {
-                // Adres henüz yokken (Tor açılıyor) hata NORMAL; yalnızca
-                // kullanıcı kodu KENDİSİ yenilemek istediğinde söylüyoruz.
+                // While the address is not there yet (Tor is starting), the error is NORMAL. We say so only when the user asks to rotate the code.
                 if (rotate) Toast.makeText(this, serverErrorText(this, code), Toast.LENGTH_LONG).show()
                 // Retry on the next poll: a failed read on the poll where the
                 // address changed otherwise left the old QR up for good.
@@ -425,9 +404,8 @@ class ServerActivity : AppCompatActivity() {
     }
 
     /**
-     * Kodu döndürme YIKICI: yayımlanmış QR/link o an ölür ve henüz
-     * katılmamış herkesin elindeki kod çalışmaz. Bu yüzden onay isteniyor —
-     * eski "yeni davet üret" düğmesinin aksine burada geri dönüş yok.
+     * Rotating the code is DESTRUCTIVE. The published QR and link die at once, and the code in everyone's hands who has not joined yet stops working. So a
+     * confirmation is asked. Unlike the old "make a new invite" button, there is no way back here.
      */
     private fun confirmRotateJoinCode() {
         AlertDialog.Builder(this)
@@ -478,12 +456,10 @@ class ServerActivity : AppCompatActivity() {
     }
 
     /**
-     * Davet kodunu QR'a çevirir.
+     * Turns the invite code into a QR.
      *
-     * İstemcinin QR'larından FARKLI olarak burada `QrBinaryCodec` yok:
-     * davet kodu düz ASCII metin (`typeon-server:…#…`), CBOR değil. Sunucu
-     * uygulaması aynı kodu kopyalanabilir metin olarak da gösterdiği için
-     * tek kanonik biçim bu.
+     * Unlike the client's QRs, there is no `QrBinaryCodec` here. The invite code is plain ASCII text (`typeon-server:...#...`), not CBOR. The server app also
+     * shows the same code as copyable text, so this is the single canonical format.
      */
     private fun encodeQr(text: String, width: Int, height: Int): Bitmap {
         val hints = mapOf(EncodeHintType.CHARACTER_SET to "UTF-8")
@@ -492,7 +468,7 @@ class ServerActivity : AppCompatActivity() {
         return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.RGB_565)
     }
 
-    /** Seçili konumu ve boş alanını gösterir. */
+    /** Shows the selected location and its free space. */
     private fun refreshStorageLabel() {
         val dir = ServerService.blobDir(this)
         val free = try {
@@ -506,26 +482,20 @@ class ServerActivity : AppCompatActivity() {
     }
 
     /**
-     * Blob dizinini seçtirir ve gerekiyorsa BLOB'LARI taşır.
+     * Lets the user pick the blob directory, and moves the BLOBS if needed.
      *
-     * bu yorum eskiden "dizinde SQLite, libp2p kimliği ve Tor
-     * onion durumu da duruyor, o yüzden taşımak şart" diyordu — YANLIŞTI.
-     * `chooseStorage` yalnızca `blobs` dizinini taşıyor; `data_dir` her
-     * zaman `context.filesDir` (bkz. `ServerService.dataDir` ve
-     * `jni.rs` — sadece `blob_dir` geçersiz kılınabiliyor). Yani peer id ve
-     * .onion adresi bu işlemden HİÇ etkilenmiyor.
+     * An earlier comment here said that the SQLite database, the libp2p identity and the Tor onion state also live in that directory, so moving them was
+     * required. That was WRONG. `chooseStorage` moves only the `blobs` directory. `data_dir` is always `context.filesDir` (see `ServerService.dataDir` and
+     * `jni.rs`, where only `blob_dir` can be overridden). So the peer id and the .onion address are not affected by this operation at all.
      */
     private fun chooseStorage() {
         val vols = ServerService.storageVolumes(this)
         val current = ServerService.blobDir(this)
         val labels = vols.map { v ->
             val free = try { android.os.StatFs(v.absolutePath).availableBytes } catch (e: Throwable) { 0L }
-            // Etiketi YOLA göre tahmin etmek yanlış sonuç veriyordu:
-            // `getExternalFilesDirs` dahili birimin `Android/data` dizinini de
-            // döndürüyor ve o da "SD kart" görünüyordu (ikisi de aynı boş
-            // alanı gösterince kullanıcı hangisini seçeceğini bilemez).
-            // `isExternalStorageRemovable` gerçekten çıkarılabilir birimi
-            // ayırt eden tek doğru API.
+            // Guessing the label from the path gave wrong results. `getExternalFilesDirs` also returns the internal unit's `Android/data` directory, and that
+            // looked like an "SD card". With both showing the same free space, the user could not tell which one to pick. `isExternalStorageRemovable` is the
+            // only correct API that tells a removable unit apart.
             val name = when {
                 v.absolutePath == filesDir.absolutePath -> getString(R.string.lbl_internal)
                 isRemovable(v) -> getString(R.string.lbl_sdcard)
@@ -635,9 +605,8 @@ class ServerActivity : AppCompatActivity() {
     }
 
     /**
-     * Pil optimizasyonu muafiyeti. Bir sunucunun tanım gereği her zaman
-     * açık olması gerekiyor; Android'in uyku kısıtlamaları bunu doğrudan
-     * baltalar. [quiet]: no toast when already exempt.
+     * Battery optimisation exemption. A server must always be on by definition, and Android's sleep restrictions undermine that directly. [quiet]: no toast
+     * when the app is already exempt.
      */
     private fun requestIgnoreBatteryOptimizations(quiet: Boolean = false) {
         val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
@@ -651,7 +620,7 @@ class ServerActivity : AppCompatActivity() {
                     .setData(Uri.parse("package:$packageName"))
             )
         } catch (e: Exception) {
-            // Bazı ROM'larda bu intent yok — kullanıcı ayarlardan elle yapar.
+            // On some ROMs this intent does not exist, and the user does it by hand in the settings.
             Toast.makeText(this, R.string.msg_battery_manual, Toast.LENGTH_LONG).show()
         }
     }
