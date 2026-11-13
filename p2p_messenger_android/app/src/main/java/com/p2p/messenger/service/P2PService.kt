@@ -16,10 +16,8 @@ import com.p2p.messenger.util.NotificationHelper
 import com.p2p.messenger.util.ReadStatePrefs
 import org.json.JSONObject
 
-/** bkz. `P2PService.bindToWifiIfAvailable` dokümantasyonu — transport tipi
- *  TEK BAŞINA yeterli değil, gerçekten doğrulanmış internet erişimi de
- *  gerekli (aksi halde internetsiz bir WiFi'ye yanlışlıkla bağlanıp mobil
- *  veri üzerinden çalışan bir cihazı bağlantısız bırakabiliriz). */
+/** See `P2PService.bindToWifiIfAvailable`. The transport type alone is not enough: the network must also be verified to reach the internet.
+ *  Otherwise a device could join a WiFi without internet and be cut off from its working mobile data. */
 private fun NetworkCapabilities?.isValidatedWifi(): Boolean {
     if (this == null) return false
     return hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
@@ -35,122 +33,79 @@ class P2PService : Service() {
         const val NOTIFICATION_ID = 1
         const val PREFS_NAME = "p2p_settings"
         const val KEY_NODE_MODE = "node_mode_enabled"
-        /** Spec dışı, kullanıcı isteği (Tor onion). */
+        /** Tor onion service preference, persisted. */
         const val KEY_TOR_ENABLED = "tor_enabled"
-        /** node modu için geçmiş/ek depolama
-         *  sınırı (bayt) — bkz. Rust `history_storage_limit_bytes`. */
+        /** Byte limit for history and attachment storage in node mode (see Rust `history_storage_limit_bytes`). */
         const val KEY_HISTORY_STORAGE_LIMIT = "history_storage_limit_bytes"
         const val DEFAULT_HISTORY_STORAGE_LIMIT_BYTES = 2L * 1024 * 1024 * 1024
 
-        /** bkz. `pollRunnable`/`nextPollDelayMs` dokümantasyonu.
+        /** See `pollRunnable` and `nextPollDelayMs`.
          *
-         *  Boşta tavanı 2sn (önceden 4sn): Rust tarafındaki keepalive
-         *  zamanlaması (`KEEPALIVE_FAST_INTERVAL_MS` = 2sn) poll turları
-         *  İÇİNDE işletiliyor — tavan 2sn'yi aşarsa arka planda "yarı açık"
-         *  bağlantı tespiti tasarlandığından yavaş çalışır. */
+         *  The idle ceiling is 2 s: the Rust keepalive schedule (`KEEPALIVE_FAST_INTERVAL_MS` = 2 s) runs inside poll turns, so a longer ceiling would slow down
+         *  detection of half-open connections in the background. */
         private const val POLL_INTERVAL_ACTIVE_MS = 1000L
         private const val POLL_IDLE_STEP_MS = 500L
-        /** Arka planda arka arkaya kaç boş tur geçtikten SONRA aralık
-         *  genişlemeye başlar (~5sn) — kısa bir arka plan sıçramasında
-         *  (ör. ekran kilitlenip hemen açılması) gecikme yaratmaz. */
+        /** The interval starts widening only after this many consecutive empty background turns (about 5 s), so a short background wake
+         *  (for example the screen locking and unlocking straight away) causes no delay. */
         private const val POLL_IDLE_BACKOFF_THRESHOLD = 5
 
-        /* ---------------- Pil düzeltmesi (2026-08-28) ----------------
+        /* ---------------- Battery design ----------------
          *
-         * Ölçüm değil, mimari bir gözlem: libp2p swarm'ı YALNIZCA
-         * `pollNetwork()` çağrıldığında ilerliyor (Rust tarafında
-         * `now_or_never`, arka planda süren bir görev yok). Yani yoklama
-         * aralığı doğrudan ağın tepki süresi — körlemesine açmak el
-         * sıkışmaları, Tor devresi kurulumunu ve mesh bakımını da yavaşlatır.
+         * This is an architectural observation, not a measurement: the libp2p swarm advances only when `pollNetwork()` is called (on the Rust side with `now_or_never`;
+         * no background task runs). So the poll interval directly sets the network's response time, and polling blindly would also slow handshakes, Tor circuit
+         * setup and mesh maintenance.
          *
-         * Bu yüzden aralık artık tek bir sayaca değil, ÜÇ gerçek sinyale
-         * birden bakıyor: bir ekran dinliyor mu, cihazın ekranı açık mı, ve
-         * çekirdekte gerçekten iş var mı (`P2PLib.getOwnConnectionStatus`
-         * içindeki `busy` — bağlı eş, onay bekleyen paket, süren indirme,
-         * kuyruktaki zarf, sunucu işi). Hiçbiri yoksa yapılacak tek şey
-         * GELEN bir bağlantıyı kabul etmek; o da saniyede bir uyanmayı
-         * gerektirmiyor.
+         * The interval therefore depends on THREE real signals: whether a screen is listening, whether the device screen is on, and whether the core has real work
+         * (`busy` from `P2PLib.getOwnConnectionStatus`: a connected peer, an unconfirmed packet, a running download, a queued envelope, server work).
+         * If none of them holds, the only thing to do is accept an incoming connection, which does not need a wake-up every second.
          *
-         * Asıl kazanç uyanma SAYISINDA: ekran kapalı ve hiçbir şey
-         * olmuyorken günde ~86.400 uyanma yerine ~2.900 oluyor.
+         * The main gain is in the NUMBER of wake-ups: with the screen off and nothing happening, about 2,900 a day instead of about 86,400.
          */
-        /** Ekran açık ama hiçbir sohbet ekranı dinlemiyor. */
+        /** Screen on, but no chat screen is listening. */
         private const val POLL_INTERVAL_SCREEN_ON_MS = 2000L
-        /** Ekran kapalı, ama çekirdekte iş var (bağlı eş / bekleyen mesaj /
-         *  süren indirme). Gelen mesaj en fazla bu kadar geç görünür. */
+        /** Screen off, but the core has work (a connected peer, a pending message, a running download). An incoming message is seen at most this late. */
         private const val POLL_INTERVAL_SCREEN_OFF_MS = 5000L
-        /** Ekran kapalı VE çekirdek tamamen boşta. Bağlı eş yok, bekleyen
-         *  iş yok — olabilecek tek şey gelen bir bağlantı. */
+        /** Screen off AND the core is completely idle: no connected peer, no pending work. The only thing that can happen is an incoming connection. */
         private const val POLL_INTERVAL_DEEP_IDLE_MS = 30000L
-        /** Derin boşta moduna geçmeden önce kaç ardışık boş tur beklenir
-         *  (~1 dk) — anlık bir sessizlikte moda düşüp gecikme yaratmasın. */
+        /** How many consecutive empty turns are waited before entering deep-idle mode (about 1 minute), so a momentary silence does not cause a delay. */
         private const val DEEP_IDLE_AFTER_EMPTY_POLLS = 12
-        /** Derin boştayken wake lock BIRAKILIYOR; cihaz uykuya dalarsa
-         *  `Handler.postDelayed` (uptime tabanlı) durur. Bu alarm, Doze
-         *  altında bile periyodik bir uyanma garantisi veriyor.
+        /** In deep idle the wake lock is RELEASED, so the device can sleep. `Handler.postDelayed` (uptime-based) stops while the device sleeps.
+         *  This alarm guarantees a periodic wake-up, even under Doze.
          *
-         *  Kullanıcı kararı (2026-08-28): en fazla 3 dakika.
+         *  The requested maximum is 3 minutes. It is a REQUEST, not a hard limit: `setAndAllowWhileIdle` needs no special permission, but in deep Doze the OS does not
+         *  fire these alarms every 3 minutes (in practice about every 9 minutes). To get the 3 minutes, the app must be exempt from battery optimisation, which the app
+         *  asks for in Settings (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`). With the exemption, 3 minutes applies exactly; without it, the system stretches it to about 9 minutes.
          *
-         *  DÜRÜST OLMAK GEREKİRSE: bu bir üst sınır değil, bir TALEP.
-         *  `setAndAllowWhileIdle` özel izin istemiyor ama işletim sistemi
-         *  cihaz DERİN Doze'dayken bu alarmları ~9 dakikada birden sık
-         *  ateşlemiyor — 3 yazsak da. Talebin gerçekten 3 dakikada bir
-         *  karşılanması için uygulamanın pil optimizasyonundan MUAF olması
-         *  gerekiyor; uygulama bunu zaten ayarlardan istiyor
-         *  (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`). Muafiyet verilmişse 3
-         *  dakika birebir geçerli, verilmemişse sistem ~9 dakikaya çeker.
-         *
-         *  Bu, mesaj kaybı DEĞİL gecikme: gönderen 7 gün boyunca yeniden
-         *  deniyor, sunucu varsa 30 gün tutuyor. */
+         *  This is a delay, not message loss: the sender keeps retrying for 7 days, and the server keeps the message for 30 days if one is available. */
         private const val DOZE_WAKE_INTERVAL_MS = 3 * 60 * 1000L
-        /** En uzun süreli kısmi wake lock (bkz. `acquireWakeLock`): çekirdek
-         *  "meşgul" kalıp kalsa bile cihazın uyumasına izin verilir. */
+        /** The longest-lived partial wake lock (see `acquireWakeLock`): the device may sleep even if the core stays busy. */
         private const val WAKE_LOCK_MAX_MS = 10 * 60 * 1000L
-        /** Ağ başlatma denemeleri arasındaki ilk bekleme (bkz. `startNet`).
-         *  Sonrası üstel olarak büyür, tavan `START_NET_RETRY_MAX_MS`. */
+        /** First wait between network start attempts (see `startNet`). It grows exponentially afterwards, up to `START_NET_RETRY_MAX_MS`. */
         private const val START_NET_RETRY_INITIAL_MS = 30_000L
         private const val START_NET_RETRY_MAX_MS = 10 * 60 * 1000L
-        /** Ağ değişikliği olaylarının birleştirilmesi (bkz.
-         *  `notifyNetworkChangedInBackground`). */
+        /** Coalescing of network change events (see `notifyNetworkChangedInBackground`). */
         private const val NETWORK_CHANGE_DEBOUNCE_MS = 2000L
         const val ACTION_WAKE_POLL = "com.p2p.messenger.action.WAKE_POLL"
 
-        /** Registered by UI components (e.g. ChatActivity) that want to be
-         *  notified as decrypted messages arrive. Kept simple/static rather
-         *  than a full pub-sub bus since this is a single-process app.
+        /** Registered by UI components (for example ChatActivity) that want to be notified as decrypted messages arrive. Kept simple and static rather than a full
+         *  pub-sub bus, since this is a single-process app.
          *
-         *  `pollRunnable` artık
-         *  kendi arka plan `HandlerThread`'inde çalışıyor (bkz. o alanın
-         *  dokümantasyonu), ama `addMessageListener`/`removeMessageListener`
-         *  hâlâ Activity'lerin `onResume`/`onPause`'undan, yani ANA
-         *  thread'den çağrılıyor. Düz bir `mutableListOf` (ArrayList) burada
-         *  GÜVENLİ DEĞİLDİR — bir thread `forEach` ile üzerinde gezinirken
-         *  başka bir thread `add`/`remove` çağırırsa `ConcurrentModificationException`
-         *  ya da dahili dizi durumunun bozulması riski var (poll döngüsü
-         *  saniyede bir çalıştığından, bir sohbet ekranının açılıp
-         *  kapanmasıyla çakışması gerçek bir zamanlama penceresi). Okumalar
-         *  (her poll turunda) yazmalardan (yalnızca ekran geçişlerinde) çok
-         *  daha sık olduğundan `CopyOnWriteArrayList` tam bu desen için
-         *  tasarlanmış: yazmalar dizinin kopyasını alır, okumalar (iterasyon)
-         *  hiç kilitlenmeden mevcut anlık görüntü üzerinde güvenle çalışır. */
+         *  `pollRunnable` runs on its own background `HandlerThread` (see that field's docs), but `addMessageListener` and `removeMessageListener` are still called
+         *  from the Activities' `onResume` and `onPause`, that is, from the main thread. A plain `mutableListOf` (ArrayList) is NOT safe here: if one thread iterates
+         *  with `forEach` while another calls `add` or `remove`, there is a risk of `ConcurrentModificationException` or corrupted internal state. The poll loop runs
+         *  every second, so a chat screen opening or closing at that moment is a real timing window. Reads (every poll turn) are far more frequent than writes (only on
+         *  screen changes), so `CopyOnWriteArrayList` fits: writes copy the array, and iteration works on the current snapshot without locking. */
         private val listeners = java.util.concurrent.CopyOnWriteArrayList<(String) -> Unit>()
 
-        /** bkz. `nextPollDelayMs` dokümantasyonu: poll döngüsü arka planda
-         *  boşta beklerken aralığını genişletebilir (üstel değil, kademeli
-         *  ve sınırlı) — bir ekran (`addMessageListener`) tam o genişlemiş
-         *  bekleme ortasında açılırsa, halihazırda kuyruklanmış GECİKMELİ
-         *  `postDelayed` çağrısı bitene kadar (en fazla
-         *  aşağıdaki kademelerden biri) yeni ekranın hızlı tur beklentisini
-         *  karşılamazdı. Servis örneği çalışırken bu, o kuyruklanmış
-         *  çağrıyı iptal edip HEMEN yeni bir tur tetikler — bir ekran
-         *  açılır açılmaz gecikme her zaman anında sıfırlanır. */
+        /** See `nextPollDelayMs`: the poll loop can widen its interval while idle in the background (gradually and up to a limit, not exponentially). If a screen
+         *  (`addMessageListener`) opens in the middle of a widened wait, the already queued delayed `postDelayed` call would delay the new screen's quick turn.
+         *  While the service instance runs, that queued call is cancelled and a new turn is triggered at once, so the delay resets as soon as a screen opens. */
         @Volatile
         private var wakePollNow: (() -> Unit)? = null
 
         fun addMessageListener(listener: (String) -> Unit) {
             listeners.add(listener)
-            // Bir sohbet ekranı açıldı: güç tasarrufundan ÇIK ve hemen bir
-            // tur at — kullanıcı gecikme hissetmesin.
+            // A chat screen opened: leave power-save mode and run a turn at once, so the user does not feel a delay.
             listenerRemoved?.invoke()
             wakePollNow?.invoke()
         }
@@ -168,11 +123,8 @@ class P2PService : Service() {
 
         private val powerSaveExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
-        /** True while one of our activities is started (set by P2PApplication).
-         *  Power save follows this, not just the screen: with the screen on
-         *  in ANOTHER app the service ran at full rate, the LTE radio never
-         *  slept and all of it was billed to us (9S 2026-10-02: ~1 mAh per
-         *  minute of screen-on time). */
+        /** True while one of our activities is started (set by P2PApplication). Power save follows this, not just the screen: with the screen on in ANOTHER app,
+         *  the service would run at full rate and the LTE radio would never sleep, all of it charged to us (about 1 mAh per minute of screen-on time, measured on a device). */
         /** The service is up and polling (see `P2PRetryWorker`). */
         @Volatile
         var alive = false
@@ -218,28 +170,18 @@ class P2PService : Service() {
         }
 
         /**
-         * şu an EKRANDA açık olan sohbetin kimliği — 1:1 için
-         * `peer_device_fingerprint`, grup için `"group:$group_id"`
-         * (ChatActivity/GroupChatActivity onResume/onPause'da set/clear
-         * eder). Bir mesaj bu konuşmaya aitse bildirim GÖSTERİLMEZ (zaten
-         * ekranda canlı görünüyor) — başka HERHANGİ bir konuşmaya aitse
-         * (veya hiçbir sohbet açık değilse) bildirim gösterilir.
+         * The ID of the conversation shown on screen right now: `peer_device_fingerprint` for 1:1, `"group:$group_id"` for groups. ChatActivity and
+         * GroupChatActivity set and clear it in onResume and onPause. If a message belongs to that conversation, NO notification is shown (it is already visible
+         * live). For any other conversation, or when no chat is open, a notification is shown.
          *
-         * `maybeNotify` artık
-         * `pollRunnable`'ın arka plan `HandlerThread`'inden okunuyor
-         * (bkz. o alanların dokümantasyonu), yazma ise Activity'lerin ANA
-         * thread'inden geliyor. `@Volatile` olmadan bir thread'in yazdığı
-         * yeni değer diğer thread'e (CPU önbelleği/derleyici yeniden
-         * sıralaması yüzünden) hiç görünmeyebilir/gecikebilir — pratik
-         * sonucu, bir sohbet ekranı açılır açılmaz artık gösterilmemesi
-         * gereken bir bildirimin kısa bir süre daha görünmeye devam etmesi
-         * (çökme riski yok, ama yanlış davranış). `@Volatile` her okumanın
-         * en güncel yazılan değeri görmesini garanti eder.
+         * `maybeNotify` now reads this from the background `HandlerThread` of `pollRunnable` (see those fields' docs), while writes come from the Activities' main thread.
+         * Without `@Volatile`, a value written on one thread may never become visible to the other (CPU caches and compiler reordering), so a notification that should be
+         * suppressed could keep showing briefly. `@Volatile` guarantees that every read sees the latest written value.
          */
         @Volatile
         var activeConversationId: String? = null
 
-        /** Spec 4.3: Node modu — kullanıcı ayarlardan açıp kapatabilir. */
+        /** Node mode: the user switches it on or off in Settings. */
         fun isNodeModeEnabled(context: Context): Boolean {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             return prefs.getBoolean(KEY_NODE_MODE, false)
@@ -248,21 +190,15 @@ class P2PService : Service() {
         fun setNodeModeEnabled(context: Context, enabled: Boolean) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putBoolean(KEY_NODE_MODE, enabled).apply()
-            // Zaten çalışan bir ağ varsa canlı olarak da güncelle.
+                        // If a network is already running, update it live too.
             P2PLib.setNodeMode(enabled)
         }
 
-        /** Spec dışı, kullanıcı isteği (Tor onion) — node modu gibi kalıcı
-         *  bir tercih. `setNodeMode`'un aksine CANLI toggle YOK: Tor transport'u
-         *  ancak `startNetwork`'te eklenebildiğinden, değişiklik ağ katmanı
-         *  yeniden başlayınca geçerli olur (bkz. tor.rs / network.rs start_network).
+        /** Tor onion service: a persistent preference, like node mode. Unlike `setNodeMode`, there is NO live toggle: the Tor transport can only be added in
+         *  `startNetwork`, so a change takes effect when the network layer restarts (see tor.rs and network.rs start_network).
          *
-         *  varsayılan olarak AÇIK — kutudan
-         *  çıktığı gibi CGNAT arkasındaki iki cihaz bile hiçbir ayar
-         *  değiştirmeden birbirine ulaşabilsin diye (bkz. tor.rs/SECURITY.md
-         *  "Tor onion" notu). Bu varsayılan SADECE anahtar hiç yazılmamışsa
-         *  (ilk kurulum) geçerli — kullanıcı Ayarlar'dan kapatırsa bu tercih
-         *  kalıcı olarak saklanır, bir sonraki açılışta tekrar AÇIK'a dönmez. */
+         *  The default is ON, so two devices behind CGNAT can reach each other with no settings changed (see tor.rs and SECURITY.md, 'Tor onion'). This default applies
+         *  ONLY when the key was never written (first install). If the user turns it off in Settings, that choice is stored and is not turned back on at the next start. */
         fun isTorEnabled(context: Context): Boolean {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             return prefs.getBoolean(KEY_TOR_ENABLED, true)
@@ -273,10 +209,8 @@ class P2PService : Service() {
             prefs.edit().putBoolean(KEY_TOR_ENABLED, enabled).apply()
         }
 
-        /** Ayarlar'daki geçmiş/ek depolama
-         *  sınırı slider'ı — sadece node modu açıkken anlamlı (bkz.
-         *  Rust `enforce_history_storage_limit`), ama tercih her zaman
-         *  kalıcılaştırılır. */
+        /** The history and attachment storage limit slider in Settings. It matters only while node mode is on (see Rust `enforce_history_storage_limit`),
+         *  but the preference is always stored. */
         fun getHistoryStorageLimitBytes(context: Context): Long {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             return prefs.getLong(KEY_HISTORY_STORAGE_LIMIT, DEFAULT_HISTORY_STORAGE_LIMIT_BYTES)
@@ -285,33 +219,28 @@ class P2PService : Service() {
         fun setHistoryStorageLimitBytes(context: Context, bytes: Long) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putLong(KEY_HISTORY_STORAGE_LIMIT, bytes).apply()
-            // Zaten çalışan bir ağ varsa canlı olarak da güncelle (sınır
-            // düşürüldüyse en eski dosyalar hemen silinir).
+                        // If a network is already running, update it live too (if the limit was lowered, the oldest files are deleted at once).
             P2PLib.setHistoryStorageLimitBytes(bytes)
         }
     }
 
-    // bkz. `pollThread`/`activeConversationId` dokümantasyonu — bu artık
-    // arka plan poll thread'inden okunuyor, ana thread'den (onStartCommand/
-    // onDestroy) yazılıyor; `@Volatile` görünürlük garantisi için.
+        // See `pollThread` and `activeConversationId`: the poll thread reads these, and onStartCommand and onDestroy write them on the main thread.
+        // `@Volatile` gives visibility.
     @Volatile
     private var isRunning = false
 
-    /* --- Pil düzeltmesi (2026-08-28): bkz. companion object'teki not. --- */
+        /* --- Battery design: see the note in the companion object. --- */
 
-    /** Cihazın ekranı açık mı. `ACTION_SCREEN_ON/OFF` yayınıyla güncelleniyor
-     *  — bu iki yayın manifest'ten dinlenemiyor, çalışma anında kaydedilmek
-     *  ZORUNDA. */
+    /** Whether the device screen is on. Updated by the ACTION_SCREEN_ON and ACTION_SCREEN_OFF broadcasts. These cannot be received from the manifest,
+     *  so they must be registered at run time. */
     @Volatile
     private var screenOn = true
 
-    /** `startNet` yeniden deneme aralığı (bkz. `startNet`): üstel büyür,
-     *  tavan `START_NET_RETRY_MAX_MS`. */
+    /** Retry interval for `startNet` (see `startNet`): grows exponentially, up to `START_NET_RETRY_MAX_MS`. */
     private var startNetRetryDelayMs = START_NET_RETRY_INITIAL_MS
 
-    /** Çekirdekte gerçekten iş var mı (bkz. Rust `has_pending_work`).
-     *  Her turda sormuyoruz: sorgunun kendisi de bir JNI çağrısı ve global
-     *  kilit alıyor. Yalnızca boş turlarda, seyrek olarak tazeleniyor. */
+    /** Whether the core really has work (see Rust `has_pending_work`). It is not asked on every turn: the query is itself a JNI call that takes the global lock.
+     *  It is refreshed sparsely, only on empty turns. */
     @Volatile
     private var coreBusy = true
     private var lastBusyCheckAt = 0L
@@ -320,73 +249,47 @@ class P2PService : Service() {
     @Volatile private var dozeAlarmSet = false
 
     /**
-     * Spec dışı, gerçek cihazda ölçülen hata düzeltmesi.
+     * A fix for Android 14 and later, measured on a real device.
      *
-     * Android 14+ `dataSync` ön plan servisini "app idle" gerekçesiyle
-     * DURDURUYOR — logcat'te görüldü: 14 MB'lık bir dosya sunucuya
-     * yüklenirken servis öldü, yükleme hiçbir hata üretmeden sessizce durdu
-     * ve `pollNetwork` bir daha hiç çağrılmadı. Kullanıcıya gönderdiği dosya
-     * "gönderildi" görünüyordu ama sunucuya hiç ulaşmamıştı.
+     * Android 14+ stops a `dataSync` foreground service for 'app idle' reasons. Logcat showed it: while a 14 MB file was uploading to the server, the service died,
+     * the upload stopped silently with no error, and `pollNetwork` was never called again. The file looked sent to the user, but it had never reached the server.
      *
-     * Kısmi wake lock, aktarım sürerken CPU'nun uykuya dalmasını engeller.
-     * Tek başına yeterli DEĞİL (pil optimizasyonu muafiyeti de gerekiyor,
-     * bkz. `SettingsFragment` — ama o kullanıcının onayına bağlı, bu değil).
+     * The partial wake lock keeps the CPU awake while a transfer runs. It is NOT enough on its own: the battery optimisation exemption is also needed (see
+     * `SettingsFragment`, which asks the user for it; that is the user's choice, not automatic).
      */
     private var wakeLock: android.os.PowerManager.WakeLock? = null
     /** The timeout the held lock was taken with (0 = none). */
     @Volatile private var heldWakeTimeoutMs = 0L
     private var wifiNetworkCallback: ConnectivityManager.NetworkCallback? = null
-    /** bkz. `observeNetworkChangesForReconnect` — `wifiNetworkCallback`'ten
-     *  (WiFi'ye ÖZEL, sadece süreç bağlama amaçlı) AYRI, HERHANGİ bir
-     *  varsayılan ağ değişikliğini izleyen callback. */
+    /** See `observeNetworkChangesForReconnect`: a separate callback from `wifiNetworkCallback` (WiFi only, used only to bind the process). This one follows ANY
+     *  default-network change. */
     private var defaultNetworkCallback: ConnectivityManager.NetworkCallback? = null
-    // bu servis
-    // süresiz olarak HER SANİYE `P2PLib.pollNetwork()` (JNI: mesaj çözme,
-    // ratchet kriptografisi, DB arşivleme, gossipsub/dosya-teklifi olay
-    // işleme) çalıştırıyor. Önceden ana (UI) thread'inin `Handler`'ıyla
-    // zamanlanıyordu — bu, birkaç yüz milisaniyeyi aşan HERHANGİ bir poll
-    // turunun (büyük bir `HistorySyncResponse`, grup fan-out'u, disk I/O
-    // rekabeti altında yavaş bir SQLite yazımı) uygulamanın HER YERİNDE
-    // (hangi ekran açık olursa olsun, servis Activity'den bağımsız
-    // yaşadığından) dokunma girdisini bloklaması, 5 saniyeyi aşarsa ANR
-    // diyaloğu göstermesi anlamına geliyordu. Artık kendi ayrık
-    // `HandlerThread`'inde çalışıyor. Bu güvenli: `pollRunnable`'ın
-    // çağırdığı `listeners` zaten UI'ya dokunan kısımlarını kendi
-    // `runOnUiThread` sarmalayıcılarıyla koruyor (bkz.
-    // ChatActivity/GroupChatActivity `messageListener`), `maybeNotify` ise
-    // sadece `NotificationManager`/basit bir `var` okuması yapıyor — ikisi
-    // de herhangi bir thread'den güvenle çağrılabilir.
+    // This service runs `P2PLib.pollNetwork()` (JNI: message decryption, ratchet cryptography, DB archiving, gossipsub and file-offer event handling) every second, indefinitely.
+    // It is scheduled on its own `HandlerThread`, not on the UI thread's `Handler`. On the UI thread, any poll turn longer than a few hundred milliseconds (a large
+    // `HistorySyncResponse`, a group fan-out, a slow SQLite write under disk I/O contention) would block touch input everywhere in the app, because the service
+    // outlives the Activities. It would also show an ANR dialog past 5 seconds.
+    // This is safe: the `listeners` called from `pollRunnable` already protect their UI parts with their own `runOnUiThread` wrappers (see the ChatActivity and
+    // GroupChatActivity `messageListener`), and `maybeNotify` only uses `NotificationManager` and a simple `var` read, so both may be called from any thread.
     private val pollThread = HandlerThread("P2PPollThread").apply { start() }
     private var handler: Handler = Handler(pollThread.looper)
-    /** `pollRunnable` önceden sabit
-     *  1sn'de, süresiz olarak çalışıyordu — bu, bir sohbet ekranı asla
-     *  açılmasa bile arka planda süresiz her saniye bir JNI çağrısı (Rust
-     *  tarafında `poll_events` — swarm taraması, `reconnect_sweep`,
-     *  `retry_unconfirmed_messages` vb.) demekti, bu da modern güç
-     *  modellerinde asıl maliyeti oluşturan şeydir (uyanma SAYISI, tek bir
-     *  uyanmanın maliyetinden çok daha ağır basar). Mesaj kaybı/gecikmesi
-     *  YARATMADAN bunu azaltmak için: HERHANGİ bir ekran dinliyorsa
-     *  (`listeners` dolu — kullanıcı O AN uygulamayla etkileşimde) hız HİÇ
-     *  değişmez (`POLL_INTERVAL_ACTIVE_MS`). Arka planda VE art arda birkaç
-     *  tur boyunca hiçbir olay gelmediyse (`consecutiveEmptyPolls`), aralık
-     *  kademeli olarak genişler (bkz. `nextPollDelayMs`) — bir
-     *  mesaj ASLA kaybolmaz, sadece boşta beklerken en fazla birkaç saniye
-     *  ek gecikmeyle teslim edilir. Gerçek bir olay (mesaj/ack/vb.) ya da
-     *  bir ekranın tekrar açılması aralığı ANINDA 1sn'ye sıfırlar.
-     */
+    /** `pollRunnable` used to run at a fixed 1 s, forever. A JNI call every second in the background (Rust `poll_events`: swarm scan, `reconnect_sweep`,
+     *  `retry_unconfirmed_messages`, etc.), even when no chat screen was ever opened, is the main cost in modern power models, because the number of wake-ups
+     *  weighs more than the cost of any single one. To reduce it without losing or delaying messages: while ANY screen is listening (`listeners` is non-empty,
+     *  the user is interacting with the app right now) the speed never changes (`POLL_INTERVAL_ACTIVE_MS`). In the background, after several consecutive turns
+     *  with no event (`consecutiveEmptyPolls`), the interval widens gradually (see `nextPollDelayMs`). A message is never lost. At most it arrives a few seconds
+     *  late while idle. A real event (message, ack, etc.) or a screen opening resets the interval to 1 s at once. */
     private var consecutiveEmptyPolls = 0
-    /** Bir sonraki turun başında `waitForNetworkActivity` ile beklenecek süre. */
+    /** The time to wait in `waitForNetworkActivity` at the start of the next turn. */
     @Volatile private var pendingWaitMs = 0L
     private val pollRunnable = object : Runnable {
         override fun run() {
             if (isRunning) {
-                // bkz. aşağıda `pendingWaitMs`: sabit gecikme yerine ağ olayını bekle.
+                                // See `pendingWaitMs` below: wait for a network event instead of a fixed delay.
                 val waitMs = pendingWaitMs
                 pendingWaitMs = 0L
                 if (waitMs > 0L) {
                     try { P2PLib.waitForNetworkActivity(waitMs) } catch (e: Throwable) {}
-                    // Derin boşta kilit yok: ağ olayı CPU'yu uyandırdı, işlem
-                    // bitene kadar kısa zamanlı kilit tut (mesaj kaçmasın).
+                                        // Deep idle holds no lock: the network event woke the CPU, so a short-lived lock is held until the work is done, so no message is missed.
                     acquireWakeLock(20_000L)
                 }
                 // An uncaught exception here (pollNetwork, a listener, or
@@ -423,20 +326,16 @@ class P2PService : Service() {
                 } catch (e: Throwable) {
                     android.util.Log.e("P2PService", "Poll cycle failed", e)
                 } finally {
-                    // Pil düzeltmesi: her turdan sonra hangi kademede
-                    // olduğumuza yeniden karar ver.
+                                        // After every turn, decide again which stage of power-save we are in.
                     refreshCoreBusy()
                     if (!isRunning) {
                         // onDestroy ran during the blocking wait above: do not
                         // take the wake lock or set the alarm again.
                     } else if (inDeepIdle()) {
-                        // Derin boşta: wake lock BIRAKILIYOR, böylece işlemci
-                        // gerçekten uyuyabiliyor. Cihaz uykuya dalarsa
-                        // `postDelayed` (uptime tabanlı) durur — bu yüzden
-                        // Doze altında da ateşleyen bir alarm kuruluyor.
-                        // Kilitsiz ama uyanık-bekleyen: Rust'ta ağ olayını bekle
-                        // (gelen bayt CPU'yu uyandırır → mesaj gecikmez). Doze
-                        // alarmı yedek.
+                                                // Deep idle: the wake lock is RELEASED so the CPU can really sleep. If the device sleeps, `postDelayed` (uptime-based) stops,
+                                                // so an alarm is set that also fires under Doze.
+                                                // Without a lock but staying awake: wait for a network event in Rust (incoming bytes wake the CPU, so messages are not delayed).
+                                                // The Doze alarm is the backup.
                         releaseWakeLock()
                         scheduleDozeWakeup()
                         pendingWaitMs = nextPollDelayMs()
@@ -445,10 +344,8 @@ class P2PService : Service() {
                     } else {
                         acquireWakeLock()
                         cancelDozeWakeup()
-                        // Uyanık modda bekleme Rust'ta: gelen bayt ya da giden
-                        // mesaj beklemeyi anında bitirir (önceden her yön ~1 sn
-                        // poll turunu bekliyordu). Aynı runnable iki kez
-                        // kuyruklanmasın diye önce kaldırılıyor.
+                                                // In awake mode the wait happens in Rust: incoming bytes or an outgoing message end the wait at once (each direction used to wait
+                                                // for a ~1 s poll turn). The same runnable is removed first, so it is not queued twice.
                         pendingWaitMs = nextPollDelayMs()
                         handler.removeCallbacks(this)
                         handler.post(this)
@@ -459,16 +356,14 @@ class P2PService : Service() {
     }
 
     /**
-     * Yoklama aralığı — bkz. companion object'teki pil notu.
+     * The poll interval (see the battery note in the companion object).
      *
-     * Sıra önemli: en hızlı koşul en üstte. Bir sohbet ekranı açıksa hiçbir
-     * şey değişmez, kullanıcı gecikme hissetmez.
+     * Order matters: the fastest condition is at the top. If a chat screen is open, nothing changes and the user feels no delay.
      */
     private fun nextPollDelayMs(): Long {
-        // 1) Kullanıcı O AN bir sohbete bakıyor.
+                // 1) The user is looking at a chat right now.
         if (listeners.isNotEmpty()) return POLL_INTERVAL_ACTIVE_MS
-        // 2) Yeni bir olay geldi ya da henüz yeterince sessizlik yok —
-        //    eski davranışın aynısı (1sn -> 2sn kademeli).
+                // 2) A new event arrived, or there has not been enough quiet yet: the old behaviour (gradually from 1 s to 2 s).
         if (consecutiveEmptyPolls < POLL_IDLE_BACKOFF_THRESHOLD) return POLL_INTERVAL_ACTIVE_MS
         // `appVisible` like `inDeepIdle`: with the screen on in ANOTHER app the
         // loop counted as deep idle but still polled every 2-3 s.
@@ -477,26 +372,24 @@ class P2PService : Service() {
             val delay = POLL_INTERVAL_SCREEN_ON_MS + idleSteps * POLL_IDLE_STEP_MS
             return delay.coerceAtMost(POLL_INTERVAL_SCREEN_ON_MS + POLL_IDLE_STEP_MS * 2)
         }
-        // 3) Ekran kapalı. Çekirdekte iş varsa (bağlı eş, bekleyen mesaj,
-        //    süren indirme) hâlâ makul sıklıkta yoklanır.
+                // 3) Screen off. If the core has work (a connected peer, a pending message, a running download), it is still polled at a reasonable rate.
         if (coreBusy || consecutiveEmptyPolls < DEEP_IDLE_AFTER_EMPTY_POLLS) {
             return POLL_INTERVAL_SCREEN_OFF_MS
         }
-        // 4) Ekran kapalı VE çekirdek tamamen boşta.
+                // 4) Screen off AND the core is completely idle.
         return POLL_INTERVAL_DEEP_IDLE_MS
     }
 
-    /** Derin boşta mıyız — wake lock'ın bırakıldığı tek durum. */
+    /** Whether we are in deep idle: the only state in which the wake lock is released. */
     private fun inDeepIdle(): Boolean =
         !(screenOn && appVisible) && listeners.isEmpty() && !coreBusy &&
             consecutiveEmptyPolls >= DEEP_IDLE_AFTER_EMPTY_POLLS
 
     /**
-     * Çekirdeğin meşgul olup olmadığını seyrek olarak tazeler.
+     * Refreshes whether the core is busy, sparsely.
      *
-     * Sorgunun kendisi de bir JNI çağrısı ve global kilit alıyor, o yüzden
-     * her turda yapılmıyor: yalnızca ekran kapalıyken ve en fazla 15
-     * saniyede bir. Ekran açıkken zaten hızlı turdayız, cevabı önemsiz.
+     * The query is itself a JNI call that takes the global lock, so it is not done on every turn: only while the screen is off, and at most every 15 seconds.
+     * With the screen on we are already on the fast turn, so the answer does not matter then.
      */
     private fun refreshCoreBusy() {
         if (screenOn && appVisible) { coreBusy = true; return }
@@ -506,15 +399,13 @@ class P2PService : Service() {
         coreBusy = try {
             JSONObject(P2PLib.ownConnectionStatus()).optBoolean("busy", true)
         } catch (e: Exception) {
-            // Emin olamıyorsak MEŞGUL varsay — yanılıp mesaj geciktirmektense
-            // biraz fazla uyanmak yeğ.
+                        // If we cannot tell, assume BUSY: waking up a bit too often is better than delaying a message by being wrong.
             true
         }
     }
 
     /**
-     * Ekran durumunu izler. Bu iki yayın (`ACTION_SCREEN_ON`/`OFF`)
-     * manifest'ten dinlenemez, çalışma anında kaydedilmek zorunda.
+     * Watches the screen state. The two broadcasts (`ACTION_SCREEN_ON` and `ACTION_SCREEN_OFF`) cannot be received from the manifest, so they must be registered at run time.
      */
     private fun observeScreenState() {
         val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
@@ -552,26 +443,21 @@ class P2PService : Service() {
             addAction(Intent.ACTION_SCREEN_OFF)
         }
         try {
-            // API 34+ yayın alıcıları için dışa açıklık bayrağı istiyor.
-            // `ACTION_SCREEN_ON/OFF` korumalı sistem yayınları olduğu için
-            // teknik olarak muaf, ama açıkça NOT_EXPORTED demek hem doğru
-            // hem de ileride bir sistem-dışı eylem eklenirse çökmeyi önler.
+                        // API 34+ requires an export flag for broadcast receivers. `ACTION_SCREEN_ON/OFF` are protected system broadcasts, so they are technically exempt.
+                        // Stating NOT_EXPORTED explicitly is correct, and it prevents a crash if a non-system action is added later.
             androidx.core.content.ContextCompat.registerReceiver(
                 this, receiver, filter,
                 androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
             )
         } catch (e: Exception) {
             Log.w(TAG, "Ekran durumu izlenemedi: ${e.message}")
-            // Kayıt başarısız olursa `screenOn` hep true kalır ve derin
-            // boşta modu HİÇ devreye girmez: süreç boyunca (kilit + 1-2 sn
-            // yoklama) uyanık kalırdı. Ekran durumu bilinmiyorsa en kötü
-            // varsayım "kapalı" — derin boşta modu o zaman devreye girer.
+                        // If registration fails, `screenOn` would stay true and deep idle would NEVER engage: the process would stay awake for its whole lifetime
+                        // (lock plus a 1-2 s poll). When the screen state is unknown, the worst assumption is 'off', so deep idle can engage.
             screenOn = false
         }
     }
 
-    /** bkz. Rust `set_power_save` — sessiz bekleyen bağlantıların canlılık
-     *  yoklaması 20sn yerine 60sn'de bir yapılır, radyo uzun uyuyabilir. */
+    /** See Rust `set_power_save`: the liveness check of quiet connections runs every 60 s instead of 20 s, so the radio can sleep longer. */
     private fun applyPowerSave() {
         // Off the caller's thread: the JNI call takes the core lock and the
         // callers are the main thread (screen receiver, every chat onPause).
@@ -587,9 +473,8 @@ class P2PService : Service() {
     }
 
     /**
-     * Derin boştayken wake lock bırakıldığı için cihaz uykuya dalabilir ve
-     * `Handler.postDelayed` (uptime tabanlı) durur. Bu alarm, Doze altında
-     * bile periyodik bir uyanma garantisi veriyor.
+     * While in deep idle the wake lock is released, so the device may sleep and `Handler.postDelayed` (uptime-based) stops.
+     * This alarm guarantees a periodic wake-up, even under Doze.
      */
     private fun scheduleDozeWakeup() {
         dozeAlarmSet = true
@@ -633,20 +518,16 @@ class P2PService : Service() {
     }
 
     /**
-     * Google Play Services/FCM'ye bağımlı OLMAYAN, tamamen lokal bildirim
-     * sistemi (bkz. NotificationHelper dosya başı notu) — bu servis zaten
-     * her saniye ağı taradığından ayrı bir push altyapısına gerek yok.
-     * SADECE gerçek yeni mesajlar ("message"/"group_message") bildirim
-     * üretir; edit/delete/status olayları sessizdir. İlgili sohbet ekranda
-     * açıksa (activeConversationId eşleşiyorsa) bildirim BASTIRILIR — zaten
-     * canlı görünüyor.
+     * A fully local notification system that does not depend on Google Play Services or FCM (see the file-header note in NotificationHelper). This service
+     * already scans the network every second, so a separate push infrastructure is not needed. ONLY real new messages ('message' and 'group_message') produce a
+     * notification. Edit, delete and status events are silent. If the related chat is open on screen (activeConversationId matches), the notification is
+     * SUPPRESSED, since the message is already visible live.
      */
     private fun maybeNotify(json: String) {
         val obj = try {
             JSONObject(json)
         } catch (e: Exception) {
-            // Sessizce yutulursa bir olay biçimi değişikliği bildirimleri
-            // sessizce kapatır ve kimse nedenini bilmez.
+                        // If this were swallowed silently, a change in the event format would silently turn notifications off, and nobody would know why.
             Log.w(TAG, "Olay JSON'u okunamadı: ${e.message}")
             return
         }
@@ -668,44 +549,30 @@ class P2PService : Service() {
             "account_deleted" -> NotificationHelper.showAccountDeletedNotification(
                 applicationContext, obj.optString("peer"), obj.optString("display_name")
             )
-            // Spec dışı  :
-            // bu cihaz KENDİ kimliği (birincil cihaz) tarafından iptal edildi.
-            // Rust çekirdeği DB tablolarını + ekleri zaten sildi ve artık
-            // inert; burada UI tarafındaki KALICI sırrı (Keystore-sarılı
-            // secret bundle dosyası) ve DB dosyasını da silip TEMİZ bir
-            // süreçte onboarding'e yeniden başlatıyoruz — SettingsFragment.
-            // performLogout ile AYNI adımlar (aynı gerekçe: canlı süreçte
-            // kimliği sıfırlamak yerine dosyaları silip temiz başlamak).
+                        // This device was revoked by its own (primary) identity. The Rust core has already deleted the DB tables and attachments and is now inert.
+                        // Here the UI-side persistent secrets (the Keystore-wrapped secret bundle file) and the DB file are deleted too, and the app restarts into
+                        // onboarding in a CLEAN process. The steps are the same as in `SettingsFragment.performLogout`, for the same reason: delete the files and
+                        // start clean, instead of resetting the identity in a live process.
             "self_revoked" -> {
-                // Bu denetimde bulundu: burası `identity_secret.enc` dışındaki
-                // Keystore-sarılı anahtarları (geçmiş anahtarı, skipped-key
-                // anahtarı ve en önemlisi SUNUCUDAKİ arşivi çözen ARK)
-                // bırakıyordu — oysa bu kolun var olma sebebi "cihazım
-                // çalındı, uzaktan iptal ediyorum". Tek ortak yola alındı:
-                // bkz. `util.LocalWipe`.
+                                // Wipes every Keystore-wrapped key too: the history key, the skipped-key key, and the ARK that decrypts the archive on the server.
+                                // Not only `identity_secret.enc`. The point of this branch is 'my device was stolen, I am revoking it remotely', so the keys must go as well.
+                                // Shared with the other wipe path: see `util.LocalWipe`.
                 com.p2p.messenger.util.LocalWipe.wipe(applicationContext)
                 NotificationHelper.showDeviceRevokedNotification(applicationContext)
                 com.p2p.messenger.util.AppRestarter.restart(applicationContext)
             }
-            // Çoklu-cihaz (spec 1.7.1): başka bir cihazımız bu sohbeti okudu —
-            // burada da okunmuş say (böylece sohbet listesi okunmamış
-            // göstermez). Rust bu olayı yalnızca bir kardeş cihazdan gelen
-            // ReadStateSync için üretir ve "conversation"ı bu cihazdaki yerel
-            // sohbet anahtarına (kanonik cihaz fp'si veya "group:<id>") çevirir.
+                        // Multi-device: another of our devices read this conversation, so it counts as read here too (the conversation list then does not show it unread).
+                        // Rust raises this event only for a ReadStateSync from a sibling device, and converts the conversation to this device's local key
+                        // (the canonical device fingerprint, or "group:<id>").
             "read_state_sync" -> {
                 val conv = obj.optString("conversation")
                 val readAt = obj.optLong("read_at")
                 if (conv.isNotEmpty() && readAt > 0L) {
                     ReadStatePrefs.markReadAt(applicationContext, conv, readAt)
-                    // Bu denetimde bulundu: sohbet okunmuş işaretleniyordu ama
-                    // bildirim çubuğunda ASILI KALAN bildirim kaldırılmıyordu.
-                    // Gerçek senaryo: masaüstünde (ya da öteki telefonda)
-                    // sohbeti okuyorsun, bu cihazda aynı mesajın bildirimi
-                    // durmaya devam ediyor — "okuduğum şey hâlâ okunmamış
-                    // görünüyor". Sohbet listesi zaten düzeliyordu, sadece
-                    // bildirim geride kalıyordu.
-                    // Compared with `read_at`: a late sync must not remove
-                    // the notification of a message that arrived after it.
+                                        // The conversation was marked read, but the notification stayed in the status bar. Example: you read the chat on the desktop (or on
+                                        // the other phone), and this device still shows the notification for the same message. The chat list was already right; only the
+                                        // notification stayed behind.
+                                        // Compared with `read_at`: a late sync must not remove the notification of a message that arrived after it.
                     NotificationHelper.clearIfReadUpTo(applicationContext, conv, readAt)
                 }
             }
@@ -734,27 +601,17 @@ class P2PService : Service() {
                     )
                 }
             }
-            // Spec dışı, hata düzeltmesi ("silinen/düzenlenen mesajın
-            // bildirimi bildirim çubuğunda eski haliyle asılı kalıyor"):
-            // önceden edit/delete olayları burada hiç ele alınmıyordu — bir
-            // mesaj, arkaplandaki bildirimi henüz görülmemişken silinir/
-            // düzenlenirse bildirim SONSUZA DEK eski (artık geçersiz/silik)
-            // metniyle asılı kalırdı. Bildirimler sohbet başına TEK slotta
-            // toplandığından (bkz. `show` notu) hangi TEK mesaja ait olduğunu
-            // kesin bilemeyiz — bu yüzden silme bildirimi tamamen temizler
-            // (en güvenli/kabul edilebilir davranış), düzenleme ise SADECE
-            // o an ekranda asılı bir bildirim varsa güncellenir (yoksa
-            // kullanıcı zaten görmüş/kapatmıştır, düzenleme için yeniden
-            // bildirim göstermenin bir anlamı yok).
+                        // Edit and delete events, for the notification in the status bar. If a message is deleted or edited while its notification is still unseen in the
+                        // background, the notification would stay forever with the old (now invalid) text. Notifications use ONE slot per conversation (see the `show` note),
+                        // so we cannot know exactly which message a notification belongs to. A delete therefore clears the notification completely (the safest acceptable
+                        // behaviour), while an edit updates it ONLY if a notification for that conversation is still showing. If none is showing, the user has already
+                        // seen or dismissed it, and posting a new one for an edit makes no sense.
             "delete" -> {
                 val peer = obj.optString("peer")
                 if (peer.isNotEmpty()) NotificationHelper.clearIfShowing(applicationContext, peer, obj.optString("message_id"))
             }
-            // Kullanıcı kararı: tanınmayan cihaz uyarısı artık bildirim
-            // olarak da çıkıyor (bkz. NotificationHelper.showDeviceAlertNotification).
-            // Ana ekran ön plandaysa dialog zaten açılıyor; bu, uygulama
-            // arka plandayken veya başka bir ekrandayken uyarının tamamen
-            // kaybolmasını engelliyor.
+                        // A device-alert notification is also posted now (see `NotificationHelper.showDeviceAlertNotification`), not only the in-app dialog. The dialog opens
+                        // only when the main screen is in the foreground. This keeps the alert visible when the app is in the background or on another screen.
             "device_alert" -> {
                 NotificationHelper.showDeviceAlertNotification(
                     applicationContext,
@@ -778,9 +635,7 @@ class P2PService : Service() {
                     NotificationHelper.updateGroupMessageNotificationIfShowing(applicationContext, groupId, obj.optString("text"))
                 }
             }
-            // EKLER de bildirim üretsin —
-            // önceden sadece metin mesajları bildirim üretiyordu, biri
-            // fotoğraf/dosya gönderdiğinde hiçbir uyarı gelmiyordu.
+                        // Attachments produce notifications too, not only text messages.
             "file_offer" -> {
                 val groupId = if (obj.isNull("group_id")) "" else obj.optString("group_id")
                 val label = attachmentNotificationLabel(
@@ -803,7 +658,7 @@ class P2PService : Service() {
         }
     }
 
-    /** Ek bildirimi için kısa etiket (bkz. `maybeNotify` "file_offer"). */
+    /** Short label for the attachment notification (see `maybeNotify`, 'file_offer'). */
     private fun attachmentNotificationLabel(mimeType: String, fileName: String, sticker: Boolean): String = when {
         sticker -> getString(R.string.lbl_last_sticker)
         mimeType.startsWith("image/") -> getString(R.string.lbl_last_photo)
@@ -863,14 +718,10 @@ class P2PService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // "bildirimde Typeon değil
-        // Android logosu görünüyor"): bu SÜREKLİ görünen (ön plan servisi)
-        // bildirimi `ic_launcher_foreground` kullanıyordu — TAM RENKLİ bir
-        // adaptive-icon katmanı, geçerli bir bildirim siluet DEĞİL. Aynı hata
-        // daha önce mesaj bildirimlerinde (bkz. NotificationHelper.kt)
-        // `ic_notification`'a geçilerek düzeltilmişti, ama BU çağrı noktası
-        // atlanmıştı — ve bu, uygulama çalışırken HER ZAMAN görünen bildirim
-        // olduğundan en görünür olanıydı.
+                // The persistent notification of this foreground service used `ic_launcher_foreground`, a FULL-COLOUR adaptive-icon layer rather than a valid
+                // notification silhouette, so the status bar showed the Android logo instead of Typeon. The same error was already fixed for message notifications
+                // (see NotificationHelper.kt) by switching to `ic_notification`, but THIS call site was missed. It is the most visible notification, since it shows
+                // whenever the app runs.
         val notification = foregroundNotification(
             if (recordingActive) getString(R.string.notif_fg_recording) else fgStatusText ?: getString(R.string.notif_fg_text)
         )
@@ -903,8 +754,7 @@ class P2PService : Service() {
             }
         }
 
-        // Doze uyandırma alarmından geldiysek servis zaten çalışıyor; tek
-        // yapılacak hemen bir tur atmak (bkz. `scheduleDozeWakeup`).
+                // If we came from the Doze wake-up alarm, the service is already running. The only thing to do is run one turn at once (see `scheduleDozeWakeup`).
         if (intent?.action == ACTION_WAKE_POLL && isRunning) {
             // Timed, and the empty-poll counter is NOT reset: an indefinite
             // lock plus twelve fresh empty turns kept the CPU awake 40-70 s
@@ -929,44 +779,26 @@ class P2PService : Service() {
             // an indefinite one taken by every other start (retry worker, call
             // end, boot receiver) stayed held until the blocking wait returned.
             acquireWakeLock()
-            // bkz. `bindToWifiIfAvailable` dokümantasyonu — libp2p soketleri
-            // (özellikle UPnP arama) `startNetwork`'ten ÖNCE doğru arayüze
-            // (WiFi) bağlanabilsin diye burada, ağ başlamadan hemen önce.
+                    // See `bindToWifiIfAvailable`: libp2p sockets (especially the UPnP search) must bind to the right interface (WiFi) before the network starts,
+                    // so this runs just before it.
             bindToWifiIfAvailable()
-            // Pil düzeltmesi: ekran durumu, yoklama kademesinin en güçlü
-            // sinyali (bkz. companion object'teki not).
+                    // Power save: the screen state is the strongest signal for the poll stage (see the note in the companion object).
             observeScreenState()
             BatteryLog.start(this)
-            // Spec dışı, kullanıcı isteği ("connection testing and
-            // re-connecting automatically should be better") — bkz.
-            // `observeNetworkChangesForReconnect` dokümantasyonu.
+                    // Connection testing and automatic reconnecting: see `observeNetworkChangesForReconnect`.
             observeNetworkChangesForReconnect()
-            // Güvenlik ağı: sistem bu servisi MainActivity'den bağımsız
-            // olarak yeniden başlatırsa (START_STICKY sonrası süreç
-            // öldürülüp geri getirilirse), initDatabase VE secret key
-            // yükleme hiç çağrılmamış olabilir. Bu çağrılar idempotent —
-            // initDatabase zaten açık bir bağlantıyı tekrar açmak
-            // zararsızdır (SQLite yeniden CREATE TABLE IF NOT EXISTS
-            // çalıştırır), loadIfPresent de zaten yüklenmiş key'lerin
-            // üzerine aynı değerleri yazar.
-            // Spec dışı, hata düzeltmesi (cihazda ÖLÇÜLEN ANR — bkz.
-            // /data/anr izi): aşağıdaki altı çağrının hepsi ağır JNI +
-            // SQLite işi ve TAMAMI ANA THREAD'de çalışıyordu. Yakalanan
-            // yığın izinde ana thread `SkippedKeyManager.ensureLoaded` ->
-            // JNI -> `fsync()` içinde, `state=D` (kesintisiz disk
-            // beklemesi) donmuştu; sonuç "Input dispatching timed out"
-            // ANR'ı ve kullanıcı gözünde "uygulama çöküyor".
-            //
-            // Tetikleyici sık: `MainActivity.onResume` her dönüşte
-            // `startNetworkService()` çağırıyor ve süreç OS tarafından
-            // öldürülüp START_STICKY ile geri getirildiğinde bu blok
-            // yeniden çalışıyor.
-            //
-            // `handler` zaten ayrı bir `HandlerThread`'e (pollThread) bağlı
-            // ve SIRALI: init'i ona post edip HEMEN ardından `pollRunnable`ı
-            // post etmek, yoklamanın init'ten önce çalışmamasını da
-            // kendiliğinden garanti eder. `startForeground` ANA THREAD'de
-            // kaldı — Android onu 5 sn içinde orada bekliyor.
+                    // Safety net: if the system restarts this service on its own, separately from MainActivity (the process was killed and brought back with START_STICKY),
+                    // initDatabase and the secret key load may not have run yet. These calls are idempotent: calling initDatabase on an open connection is harmless
+                    // (SQLite runs CREATE TABLE IF NOT EXISTS again), and loadIfPresent writes the same values over keys already loaded.
+                    // Measured as an ANR on a device (see /data/anr). All six calls below are heavy JNI and SQLite work, and ALL ran on the main thread. The captured stack
+                    // showed the main thread inside `SkippedKeyManager.ensureLoaded` → JNI → `fsync()` in uninterruptible disk wait (`state=D`), which gave an
+                    // 'Input dispatching timed out' ANR.
+                    //
+                    // The trigger is frequent: `MainActivity.onResume` calls `startNetworkService()` on every return, and when the process is killed by the OS and brought
+                    // back with START_STICKY, this block runs again.
+                    //
+                    // `handler` is already bound to a separate `HandlerThread` (pollThread) and runs SEQUENTIALLY. Posting init to it and then posting `pollRunnable` right
+                    // after guarantees that polling does not run before init. `startForeground` stayed on the main thread, since Android waits for it there within 5 s.
             handler.post { initAndStart() }
             listenerRemoved = { applyPowerSave() }
             wakePollNow = {
@@ -1068,7 +900,7 @@ class P2PService : Service() {
             try {
                 (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it)
             } catch (e: Exception) {
-                // Zaten kayıtlı değilse (ör. WiFi hiç bağlanmadıysa) sessizce yok say.
+                                // If it is not registered yet (for example WiFi was never connected), silently ignore.
             }
         }
         wifiNetworkCallback = null
@@ -1083,32 +915,27 @@ class P2PService : Service() {
         networkChangeExecutor.shutdownNow()
     }
 
-    /** bkz. `wakeLock` alan notu.
+    /**
+     * See the `wakeLock` field note.
      *
-     * One lock object for the service's lifetime, and both functions are
-     * synchronized: they run on the poll thread and on the main thread (screen
-     * receiver, onStartCommand). Creating a new lock per call let a race or an
-     * overwrite drop a held lock that nothing ever released again (9S,
-     * 2026-09-30: three 'Typeon:network' locks held at once, one for 1h42m,
-     * CPU never slept, ~180 mA all night with the screen off).
+     * One lock object for the service's lifetime, and both functions are `synchronized`: they run on the poll thread and on the main thread (screen receiver,
+     * onStartCommand). Creating a new lock per call let a race or an overwrite drop a held lock that nothing ever released again (on a device: three
+     * 'Typeon:network' locks held at once, one for 1h42m, the CPU never slept, about 180 mA all night with the screen off).
      *
-     * SÜRESİZ KİLİT YOK: çekirdek "meşgul" dediğinde (süren indirme, taze
-     * eşleşme, kuyruktaki zarf) kilit süresiz tutuluyordu — karşı taraf
-     * takılıp kalırsa indirme hiç bitmiyor ve kilit SÜRESİZ kalıyordu
-     * (cihazın uyumasına izin vermeyen partial wake lock). Artık en fazla
-     * WAKE_LOCK_MAX_MS tutulur: kilit kendi penceresini doldurunca kendiliğinden
-     * biter, yoklama döngüsü bir sonraki turda yeniden alır. */
+     * No UNBOUNDED LOCK: when the core reported busy (a running download, a fresh pairing, a queued envelope), the lock used to be held indefinitely. If the other side
+     * hung, the download never finished and the lock never ended (a partial wake lock that keeps the device from sleeping). Now it is held for at most
+     * WAKE_LOCK_MAX_MS: when the lock fills its window it ends by itself, and the poll loop acquires it again on the next turn.
+     */
     @Synchronized
     private fun acquireWakeLock(timeoutMs: Long = 0L) {
         try {
             val lock = wakeLock ?: (getSystemService(Context.POWER_SERVICE) as android.os.PowerManager)
                 .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "Typeon:network")
                 .also { it.setReferenceCounted(false); wakeLock = it }
-            // 0 = "süresiz" isteniyordu: tavan uygulanır.
+                        // 0 used to mean 'unbounded': the cap applies to it now.
             val wanted = if (timeoutMs > 0L) timeoutMs else WAKE_LOCK_MAX_MS
             if (lock.isHeld) {
-                // Daha uzun kilit kazanır; daha kısası tutulan kiliti
-                // KISALTMAZ ve süresini UZATMAZ.
+                                // A longer lock wins. A shorter request does not shorten a held lock or reduce its expiry.
                 if (wanted <= heldWakeTimeoutMs) return
                 lock.release()
             }
@@ -1125,77 +952,50 @@ class P2PService : Service() {
         try {
             wakeLock?.let { if (it.isHeld) { it.release(); BatteryLog.wakeReleased() } }
         } catch (e: Exception) {
-            // Zaten bırakılmışsa yok say.
+                        // If already released, ignore.
         }
         heldWakeTimeoutMs = 0L
     }
 
     /**
-     * Spec dışı, kullanıcı isteği ("connection testing and re-connecting
-     * automatically should be better"): `bindToWifiIfAvailable`'ın
-     * WiFi'ye ÖZEL callback'inin aksine, bu HERHANGİ bir "varsayılan ağ"
-     * değişikliğini (Wi-Fi<->hücresel geçiş, ağ tamamen kaybolup tekrar
-     * kazanılması) yakalar ve Rust tarafına bildirir (bkz.
-     * `P2PLib.notifyNetworkChanged`/session.rs `reconnect_all_known_now`) —
-     * ESKİ ağ üzerinden kurulmuş TÜM libp2p bağlantıları yeni arayüzde
-     * artık geçersiz soketlerdir (yerel IP değişti), periyodik taramanın
-     * (≤15sn) veya `ping`in (≤~25sn, aralık+zaman aşımı) bunu fark
-     * etmesini beklemek yerine ANINDA tam bir yeniden bağlanma turu
-     * tetiklenir. `onCapabilitiesChanged` KASITLI OLARAK dinlenmiyor —
-     * bu çok daha sık (ör. sinyal gücü meta verisi değişince) tetiklenir
-     * ve her seferinde tam bir yeniden bağlanma turu pil açısından
-     * savurgan olurdu; `onAvailable`/`onLost` (varsayılan ağ TAMAMEN
-     * değiştiğinde/kaybolduğunda) yeterince güvenilir VE seyrek bir
-     * sinyal.
+     * Unlike the WiFi-only callback of `bindToWifiIfAvailable`, this follows ANY default-network change (Wi-Fi to cellular, or the network disappearing and coming
+     * back), and tells the Rust side (see `P2PLib.notifyNetworkChanged` and session.rs `reconnect_all_known_now`). Every libp2p connection set up over the OLD
+     * network is now an invalid socket on the new interface (the local IP changed). Instead of waiting for the periodic scan (up to 15 s) or a ping (up to about
+     * 25 s, interval plus timeout) to notice, a full reconnect turn is triggered at once.
+     * `onCapabilitiesChanged` is deliberately NOT listened to: it fires much more often (for example when signal strength metadata changes), and a full reconnect
+     * turn each time would waste battery. `onAvailable` and `onLost` (when the default network changes or disappears completely) are reliable enough and a rarer signal.
      */
     private fun observeNetworkChangesForReconnect() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                // Spec dışı, hata düzeltmesi ("mobil veri+Tor'a geçen cihaz
-                // Tor'a bağlı görünüp yeşil yanıyor ama kimseye ulaşamıyor"):
-                // bkz. `refreshWifiBinding` dokümantasyonu — `wifiNetworkCallback`'in
-                // KENDİ `onLost`'u, WiFi Android tarafından teknik olarak hâlâ
-                // "kayıp" sayılmadığı (ör. sinyal zayıflayıp varsayılan rota
-                // sessizce mobil veriye kaydığı, OEM'e özgü "WiFi uykuda" durumları)
-                // ARA DURUMLARDA hiç tetiklenmeyebilir — süreç, artık gerçekte
-                // kullanılamayan bir WiFi'ye SONSUZA DEK bağlı (`bindProcessToNetwork`)
-                // kalabilir: Tor önceden bu WiFi üzerinden zaten "Ready" olmuş
-                // olduğundan durum göstergesi yeşil kalmaya devam eder, ama
-                // YENİ soketler (başka birinin `.onion`'una devre kurmak dahil)
-                // sessizce bu artık ölü arayüzden çıkmaya çalışır. Varsayılan ağ
-                // değişikliği bildirimi (bu callback) Android'in genel/güvenilir
-                // sinyali olduğundan, bağlamayı da HER SEFERİNDE (WiFi'ye özel
-                // callback'in kendi olaylarını beklemeden) doğru duruma göre
-                // tazeliyoruz.
+                                // The Tor status can show 'connected' over a dead WiFi. The WiFi callback's own `onLost` is not always called: in some intermediate states Android
+                                // still counts WiFi as up (for example the signal weakens and the default route silently moves to mobile data, or OEM-specific 'WiFi asleep'
+                                // states). The process could then stay bound to a WiFi that is unusable, forever (`bindProcessToNetwork`). Tor, having been 'Ready' over that
+                                // WiFi, keeps showing green, but NEW sockets (including building a circuit to someone's `.onion`) would silently try to leave through that dead interface.
+                                // The default-network change notification (this callback) is Android's general, reliable signal. So the binding is also refreshed on EVERY such
+                                // event, according to the current state, without waiting for the WiFi-specific callback's own events.
                 refreshWifiBinding(cm)
                 notifyNetworkChangedInBackground()
             }
             override fun onLost(network: Network) {
                 refreshWifiBinding(cm)
-                // Yeniden bağlanma YALNIZCA yeni varsayılan ağ geldiğinde
-                // (`onAvailable`): ağ yokken yapılan dial/Tor denemeleri anında
-                // "Network is unreachable" ile düşüyor ve arti'nin guard/devre
-                // durumunu bozup yeni ağda toparlanmayı geciktiriyordu.
+                                // Reconnect ONLY when a new default network arrives (`onAvailable`). Dial and Tor attempts made while there is no network fail at once with
+                                // 'Network is unreachable', which breaks the arti guard and circuit state and delays recovery on the new network.
             }
         }
         defaultNetworkCallback = callback
         try {
             cm.registerDefaultNetworkCallback(callback)
         } catch (e: Exception) {
-            // Kayıt başarısız olursa (ör. çok eski/tuhaf bir cihaz) sessizce
-            // devam — periyodik `reconnect_sweep`/`ping` hâlâ (daha yavaş
-            // ama) aynı sonuca ulaşır.
+                        // If registration fails (for example on a very old or unusual device), it passes silently. The periodic `reconnect_sweep` and `ping` still reach
+                        // the same result, only more slowly.
         }
     }
 
     /**
-     * Spec dışı, hata düzeltmesi (bkz. `observeNetworkChangesForReconnect`
-     * `onAvailable`/`onLost` notu): `bindToWifiIfAvailable`/`wifiNetworkCallback`
-     * ile AYNI mantık — o an gerçekten doğrulanmış bir WiFi varsa sürece
-     * bağlar, yoksa bağlamayı (varsa) serbest bırakır. Tek bir yerde
-     * tutuluyor ki hem ilk kurulum hem de varsayılan ağ değişikliği
-     * bildirimi AYNI kararı versin.
+     * The same logic as `bindToWifiIfAvailable` and `wifiNetworkCallback`: if a verified WiFi is available right now, bind the process to it; otherwise release
+     * any binding. It is kept in one place, so the initial setup and the default-network change notification make the SAME decision.
      */
     private fun refreshWifiBinding(cm: ConnectivityManager) {
         val active = cm.activeNetwork
@@ -1207,10 +1007,9 @@ class P2PService : Service() {
         }
     }
 
-    /** JNI çağrısını ana thread dışında yapar — `ConnectivityManager`
-     *  callback'leri genellikle ana thread'de çağrılır, `notifyNetworkChanged`
-     *  (bir dial turu başlatabilir) burada onu bloklamamalı. */
-    /** See `P2PLib.setMeteredNetwork` — padding keeps a cellular radio awake. */
+    /** Runs the JNI call off the main thread. `ConnectivityManager` callbacks are usually called on the main thread, and `notifyNetworkChanged` (which can start
+     *  a dial turn) must not block it. */
+    /** See `P2PLib.setMeteredNetwork`: the padding setting keeps a cellular radio awake. */
     private fun applyMeteredToTor() {
         try {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -1220,14 +1019,11 @@ class P2PService : Service() {
         }
     }
 
-    /** Ağ değişikliği olayları TEK bir iş parçacığında sıraya girer: her
-     *  olay kendi thread'ini açıyordu ve hepsi çekirdek kilidinde
-     *  bekliyordu (WiFi/hücresel arası salınımda yığılma). */
+    /** Network change events are queued on ONE thread. Each event used to start its own thread, and all of them waited on the core lock, so they piled up
+     *  when the device flipped between WiFi and cellular. */
     private val networkChangeExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
-    /** Bir tur zaten kuyruğa alınmışsa yenisi eklenmez: Android bir ağ
-     *  değişikliğini birkaç callback ile bildirir, çekirdek TÜM eşleri
-     *  yeniden bağlamak istiyorsa bir tur yeter. */
+    /** If a turn is already queued, another is not added: Android reports one network change through several callbacks, and one turn is enough to reconnect all peers. */
     @Volatile private var networkChangePending = false
 
     private fun notifyNetworkChangedInBackground() {
@@ -1235,8 +1031,7 @@ class P2PService : Service() {
         networkChangePending = true
         networkChangeExecutor.execute {
             try {
-                // Debounce: olamların oturması için beklenir, sonra TEK bir
-                // yeniden bağlanma turu çalışır.
+                                // Debounce: wait for the events to settle, then run ONE reconnect turn.
                 Thread.sleep(NETWORK_CHANGE_DEBOUNCE_MS)
             } catch (e: InterruptedException) {
                 networkChangePending = false
@@ -1253,48 +1048,30 @@ class P2PService : Service() {
     }
 
     /**
-     * gerçek bir cihazda, router'da
-     * UPnP açık olmasına rağmen UPnP taraması hep "gateway bulunamadı"
-     * döndürdüğü rapor edildi. Kök sebep muhtemelen şu: Android telefonlar
-     * genelde WiFi'ye bağlıyken bile mobil veriyi arka planda AÇIK tutar —
-     * Rust tarafındaki UPnP arama soketi (igd_next crate'i) `0.0.0.0`'a
-     * bind olur, yani HANGİ arayüzden çıkacağını işletim sisteminin
-     * varsayılan yönlendirme tablosuna bırakır. Bu, WiFi yerine YANLIŞLIKLA
-     * mobil veri üzerinden gönderilebilir — router hiç görmez, "bulunamadı"
-     * sonucu WiFi UPnP'siyle hiç ilgisi olmadan ortaya çıkar (aynı sınıf
-     * karışıklık teorik olarak libp2p'nin diğer soketlerini de
-     * etkileyebilir).
+     * The UPnP search reported 'gateway not found' on a real device, even with UPnP enabled on the router. The likely root cause: Android phones usually keep
+     * mobile data on in the background even while connected to WiFi. The UPnP search socket in the Rust layer (igd_next crate) binds to `0.0.0.0`, so the choice
+     * of interface is left to the OS routing table. That can send the request over mobile data by mistake, so the router never sees it, and the 'not found'
+     * result has nothing to do with the WiFi UPnP. The same confusion could in theory affect libp2p's other sockets too.
      *
-     * `ConnectivityManager.bindProcessToNetwork` bu süreçte AÇILAN TÜM yeni
-     * soketleri (Rust tarafındakiler dahil, aynı process'te çalıştıkları
-     * için) belirtilen ağa zorlar — WiFi varsa ona bağlanır, WiFi
-     * kaybolursa serbest bırakılır (mobil veriye doğal olarak döner, ör.
-     * hiç WiFi'si olmayan bir kullanıcı için).
+     * `ConnectivityManager.bindProcessToNetwork` forces ALL new sockets opened in this process (including the Rust-side ones, since they run in the same process)
+     * onto the named network. WiFi is used when it is available, and the binding is released when WiFi disappears, so mobile data is the natural fallback
+     * (for example for a user with no WiFi at all).
      */
     private fun bindToWifiIfAvailable() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        // SADECE WiFi transport'u
-        // kontrol etmek YETERSİZ — bir cihazın WiFi radyosu açık ve
-        // bilinen/kayıtlı bir ağa bağlı olabilir ama o ağın GERÇEK internet
-        // erişimi olmayabilir (ör. boşta duran bir ev ağı, portal arkasında
-        // kalmış bir misafir ağı). Sadece transport'a bakıp bağlarsak, o an
-        // mobil veri üzerinden ÇALIŞAN bir cihazı internetsiz bir WiFi'ye
-        // zorlayıp TAMAMEN bağlantısız bırakabiliriz — NET_CAPABILITY_INTERNET
-        // + NET_CAPABILITY_VALIDATED (sistem gerçekten "bu ağdan internete
-        // çıkabiliyorum" diye doğruladı) ikisi de gerekli. bkz.
-        // `refreshWifiBinding` — aynı karar mantığı burada da kullanılıyor.
+                // Checking the WiFi transport ONLY is not enough. A device can have WiFi on and connected to a known network, while that network has no real internet
+                // access (for example an idle home network, or a guest network behind a captive portal). If we bind on the transport alone, a device working over mobile
+                // data at that moment could be forced onto an internet-less WiFi and left completely offline. Both NET_CAPABILITY_INTERNET and
+                // NET_CAPABILITY_VALIDATED are required (the system confirmed that 'this network can reach the internet'). See `refreshWifiBinding`, which uses the same logic.
         refreshWifiBinding(cm)
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
             .build()
-        // bu iki gövde eskiden KOŞULSUZ `bindProcessToNetwork`
-        // çağırıyordu ve `defaultNetworkCallback`'in `refreshWifiBinding`
-        // kararıyla yarışıyordu. Varsayılan ağ hücreselken bir Wi-Fi
-        // belirirse süreç TÜM trafiği (Tor dahil) Wi-Fi'ye bağlanıyor; ya da
-        // `onLost` geçerli bir bağı geri alıyordu — sonuç hangi geri
-        // çağrının son geldiğine bağlıydı. Artık tek karar noktası var.
+                // Both bodies must NOT call `bindProcessToNetwork` unconditionally. That raced the `refreshWifiBinding` decision of `defaultNetworkCallback`: with
+                // cellular as the default and a WiFi appearing, the whole process (Tor included) was bound to WiFi, or an `onLost` could undo a valid binding. The result
+                // depended on which callback arrived last. There is now a single decision point.
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 refreshWifiBinding(cm)
@@ -1307,9 +1084,8 @@ class P2PService : Service() {
         try {
             cm.registerNetworkCallback(request, callback)
         } catch (e: Exception) {
-            // Kayıt başarısız olursa (ör. çok eski/tuhaf bir cihaz) sessizce
-            // devam — süreç varsayılan sistem yönlendirmesini kullanır,
-            // bugünkünden daha kötü olmaz.
+                        // If registration fails (for example on a very old or unusual device), it passes silently. The process then uses the system default routing,
+                        // which is no worse than before.
         }
     }
 
