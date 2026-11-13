@@ -52,10 +52,9 @@ impl P2PCore {
             return false;
         }
         let now = current_time_ms();
-        // Network robustness fix (see the `device_onion_addr` field docs; the bug was: "a device paired over Tor on the same LAN can no longer talk to the
-        // other phone once it switches to mobile data"). Before, this used ONLY `device_last_addr`, the last address that worked. That could be a LAN
-        // address written over a LAN connection. Now the `.onion` address is also read from `device_onion_addr`, which is kept SEPARATE and is never
-        // overwritten. If the two differ, BOTH are tried at the same time. Whichever is still valid after the network change succeeds.
+        // Network robustness fix (see the `device_onion_addr` field docs). Before, this used ONLY `device_last_addr`, the last address that worked.
+        // That could be a LAN address written over a LAN connection. Now the `.onion` address is also read from `device_onion_addr`, which is kept
+        // SEPARATE and is never overwritten. If the two differ, BOTH are tried at the same time. Whichever is still valid after the network change succeeds.
         let primary_str = self.device_last_addr.get(fp).cloned();
         let onion_str = self.device_onion_addr.get(fp).cloned().filter(|o| Some(o) != primary_str.as_ref());
         // A group founder's hint (`vah:`), only while nothing better is known.
@@ -90,12 +89,12 @@ impl P2PCore {
                 }
             }
         }
-        // Fix (reconnect after a network change was delayed by minutes): `force=true` skipped the gate above (around line 3688), but the `attempts` counter
-        // still continued from the value accumulated on the OLD network. So a single forced try that failed (right after an interface change, or if the peer's
-        // address also changed, which is quite likely) wrote a backoff entry one step HIGHER than before (up to `RECONNECT_BACKOFF_MAX_MS`, 10 min). That
-        // blocked ALL later automatic reconnect paths (periodic `reconnect_sweep`, ping failure) for minutes: exactly the scenario `force` is meant to prevent.
-        // With `force`, the counter ALWAYS starts at 1. The reasoning "backoff history from the old network is meaningless" (see the function docs above) must
-        // cover the NEXT wait time, not only the gate.
+        // Fix: after a network change, reconnecting was delayed by minutes. `force=true` skipped the gate above, but the `attempts` counter still
+        // continued from the value accumulated on the OLD network. So a single forced try that failed (right after an interface change, or if the
+        // peer's address also changed, which is quite likely) wrote a backoff entry one step HIGHER than before (up to `RECONNECT_BACKOFF_MAX_MS`,
+        // 10 min). That blocked ALL later automatic reconnect paths (periodic `reconnect_sweep`, ping failure) for minutes, which is exactly what `force`
+        // is meant to prevent. With `force`, the counter ALWAYS starts at 1. The reasoning "backoff history from the old network is meaningless" (see the
+        // function docs above) must cover the NEXT wait time, not only the gate.
         let attempts = if force {
             1
         } else {
@@ -127,9 +126,8 @@ impl P2PCore {
             }
         }
         self.dial_with_relay_fallback(peer_id, primary_addr);
-        // Also every address the behaviours know for this peer. No direct (IP)
-        // addresses are added: the node is onion-only since the 2026-09-23
-        // deanon fix (`DialReject` refuses clearnet dials anyway).
+        // Also every address the behaviours know for this peer. No direct (IP) addresses are added: the node is onion-only, and `DialReject`
+        // refuses clearnet dials anyway.
         if let Some(swarm) = &mut self.swarm {
             let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
                 // Only if none of the dials above started. With `Always` this
@@ -167,8 +165,8 @@ impl P2PCore {
         }
         self.last_network_change_at = now;
         self.network_change_pending = false;
-        // Two-device test (2026-09-06): after a network change, Tor circuits and the onion descriptor took minutes to recover. Poke arti too: `bootstrap()`
-        // is idempotent and cheap (see `notify_network_changed`).
+        // Also poke arti. `bootstrap()` is idempotent and cheap (see `notify_network_changed`). After a network change, Tor circuits and the onion
+        // descriptor can take minutes to recover.
         if let Some(tor) = &self.tor {
             tor.notify_network_changed();
         }
@@ -202,8 +200,8 @@ impl P2PCore {
             let force = connected_before.contains(&fp) || (!saver && seen_lately);
             self.try_reconnect_device(&fp, force);
         }
-        // Network robustness fix (see the `announce_address_to_all_contacts` docs): when the interface changes, our own best address may also change (new
-        // LAN IP, new UPnP mapping). We proactively tell EVERYONE we know, instead of only waiting for our contacts to reconnect to us.
+        // Network robustness fix (see the `announce_address_to_all_contacts` docs): when the interface changes, our own best address may also change
+        // (new LAN IP, new UPnP mapping). We proactively tell EVERYONE we know, instead of only waiting for our contacts to reconnect to us.
         self.announce_address_to_all_contacts();
         // Multi-device (1.7): a network change is a strong signal. Ignore the debounce and try the sibling history backfill NOW (to catch messages from
         // people I missed while offline). At most one extra round per 5 minutes: every LTE/Wi-Fi flap asked every sibling for the newest rows of every
@@ -349,10 +347,8 @@ impl P2PCore {
     }
 
     pub(crate) fn initiate_handshake_with(&mut self, peer_device_fingerprint: &str) -> Result<(), String> {
-        // Found on device (2026-09-18): at app start something sent a message
-        // before `setSkippedKeyEncryptionKey` had loaded the sessions. No session
-        // was in memory, so a NEW init was created and persisted over the real
-        // session the peer still used. Every restart diverged the two devices
+        // Found on a device: at app start, something sent a message before `setSkippedKeyEncryptionKey` had loaded the sessions. No session was in
+        // memory, so a NEW init was created and persisted over the real session the peer still used. Every restart diverged the two devices
         // (siblings too) until a re-handshake.
         if !self.ratchets_loaded {
             return Err("Oturum durumu henüz yüklenmedi".to_string());
@@ -449,17 +445,18 @@ impl P2PCore {
         r
     }
 
-    /// Fix (delivery guarantee: "the first message written while the other side was offline never arrives"): the only way out of a lost `HandshakeInit`.
+    /// Fix (delivery guarantee: "the first message written while the other side was offline never arrives"). This is the only way out of a lost
+    /// `HandshakeInit`.
     ///
-    /// Failure pattern: when a message is first written to an offline device, `send_message_content_inner` calls `initiate_handshake_with` first. That sets
-    /// up the ratchet at once and tries to publish the `HandshakeInit`. If the other side is offline, `gossipsub.publish` fails and the envelope falls into
-    /// `pending_envelopes`. If the envelope gets stale there (or the app closes in the meantime) it is NEVER sent again. `initiate_handshake_with` is only
-    /// called when there is NO ratchet, but on the sender's side the ratchet now EXISTS. The receiver buffers incoming packets in `early_packets` and waits for
-    /// a handshake that never comes. No error is visible on either end, and messages are retried for 7 days for nothing.
+    /// Failure pattern: when a message is first written to an offline device, `send_message_content_inner` calls `initiate_handshake_with` first. That
+    /// sets up the ratchet at once and tries to publish the `HandshakeInit`. If the other side is offline, `gossipsub.publish` fails and the envelope
+    /// falls into `pending_envelopes`. If the envelope goes stale there (or the app closes in the meantime), it is NEVER sent again.
+    /// `initiate_handshake_with` is only called when there is NO ratchet, but on the sender's side the ratchet now EXISTS. The receiver buffers incoming
+    /// packets in `early_packets` and waits for a handshake that never comes. No error is visible on either end, and messages are retried for 7 days for nothing.
     ///
-    /// Fix: if the other side has confirmed NOTHING for `MAX_UNCONFIRMED_AGE_MS` (not even one Ack), we assume the session was never set up on its side, and
-    /// send a FRESH handshake. Triggers: (1) the refresh round (see the `message_id_override` arm of `send_message_content_inner`); (2) reconnecting to that
-    /// peer (see the `connections_established` block of `poll_events`).
+    /// Fix: if the other side has confirmed NOTHING for `MAX_UNCONFIRMED_AGE_MS` (not even one Ack), we assume the session was never set up on its side,
+    /// and send a FRESH handshake. Triggers: (1) the refresh round (see the `message_id_override` arm of `send_message_content_inner`); (2) reconnecting
+    /// to that peer (see the `connections_established` block of `poll_events`).
     ///
     /// Because the session is reset, pending packets stay encrypted under the old chain. So all of them are regenerated on the fresh chain with
     /// `regen_pending_for_peer`, the same path used after a rotation, with the same meaning of invalidation. The criterion is whether the root key REALLY
@@ -473,19 +470,15 @@ impl P2PCore {
             .unwrap_or_default()
     }
 
-    /// A signed packet from a known device that our session cannot decrypt (and
-    /// that is not a duplicate: `reack_if_already_handled` ran first). A few in a
-    /// row mean the two sides hold different sessions. Both still look online,
-    /// and nothing gets through until the 25 min redo (device, 2026-09-18). After
-    /// `UNDECRYPTABLE_BEFORE_REHANDSHAKE` failures with no good packet in between,
-    /// start a fresh handshake. If both sides do it at once, the collision rule
-    /// in `process_handshake_init` picks one.
+    /// A signed packet from a known device that our session cannot decrypt (and that is not a duplicate: `reack_if_already_handled` runs first).
+    /// A few in a row mean the two sides hold different sessions. Both still look online, and nothing gets through until the 25-minute redo. After
+    /// `UNDECRYPTABLE_BEFORE_REHANDSHAKE` failures with no good packet in between, a fresh handshake is started. If both sides do it at once, the
+    /// collision rule in `process_handshake_init` picks one.
     pub(crate) fn note_undecryptable(&mut self, fp: &str) {
         let now = current_time_ms();
-        // A session installed moments ago (by us or from the peer's init): packets
-        // still in flight from the old session are expected to fail. Re-initiating
-        // here overwrote a freshly adopted session, and the peer then ignored our
-        // init under the collision rule → diverged again (device, 2026-09-18).
+        // A session installed moments ago (by us or from the peer's init): packets still in flight from the old session are expected to fail.
+        // Re-initiating here would overwrite a freshly adopted session, and the peer would then ignore our init under the collision rule, which
+        // diverges the two sides again.
         if self.ratchets.get(fp).map_or(false, |s| now.saturating_sub(s.last_rotation) < HANDSHAKE_COLLISION_WINDOW_MS) {
             self.undecryptable_from.remove(fp);
             return;
@@ -613,17 +606,17 @@ impl P2PCore {
         );
         verify_hybrid_signature(&to_verify, &handshake.signature_classical, &handshake.signature_pq, &sender)?;
 
-        // Security fix (see the `record_peer_id_if_known` docs and the same note in `process_identity_exchange`): the signature was verified successfully at
-        // this point. So it is proven that the sender really holds the private key of this fingerprint (already stored in `known_remote_devices`). It is now
-        // safe to link this fingerprint with the `PeerId` that really published the packet. Before, this was done unconditionally, BEFORE signature verification.
-        // The call itself is further down, after the freshness and replay checks: a replayed old init has a valid signature too.
+        // Security fix (see the `record_peer_id_if_known` docs and the same note in `process_identity_exchange`): the signature was verified at this
+        // point, so the sender really holds the private key of this fingerprint (already stored in `known_remote_devices`). It is now safe to link this
+        // fingerprint with the `PeerId` that really published the packet. Before, this was done unconditionally, BEFORE signature verification. The call
+        // itself is further down, after the freshness and replay checks: a replayed old init has a valid signature too.
 
         // Security fix (handshake replay leading to a session-reset DoS): gossipsub `Signed` mode lets an observer on the network re-publish a valid
         // `HandshakeInit` it captured. This function overwrites an existing ratchet with a fresh `respond` state, so such a replay could break a live
         // conversation. Two layers of defence (see the `recent_handshake_sigs` field note):
         // (1) a freshness window: a timestamp that is too old or too far ahead is rejected (filters captured old handshakes, tolerates clock skew);
         // (2) content dedup: the same signed (byte-identical) handshake is not applied a second time within the window. A real re-pairing carries fresh
-        //     ephemeral keys, so a different signature, and it is accepted whatever the clock skew (no risk of a monotonic timestamp breaking re-pairing).
+        //     ephemeral keys, so it has a different signature and is accepted whatever the clock skew (no risk of a monotonic timestamp breaking re-pairing).
         let now = current_time_ms();
         let skew = now.abs_diff(handshake.timestamp);
         // An init waits in the server mailbox while this device is off, so the
@@ -714,30 +707,21 @@ impl P2PCore {
         // SMALLER than the other side's, the incoming HandshakeInit is IGNORED (we keep our initiator state). The other side (with the bigger fingerprint)
         // then accepts OUR HandshakeInit symmetrically, and produces the correct responder state.
         if let Some(existing) = self.ratchets.get(&handshake.sender_device_fingerprint) {
-            // Simultaneous handshake: both sides initiated. The smaller fingerprint's
-            // init wins, and the larger side adopts it (the `respond` below). This
-            // used to hold only while our session was still UNUSED. On a slow path
-            // the losing init arrives late: the peer's init came via the server 31 s
-            // after ours (device, re-pair on mobile data, 2026-09-18). By then the
-            // peer had adopted our session and messages were flowing, so we replaced
-            // a live session with the one the peer had already dropped. Both sides
-            // stayed "online" but could not decrypt each other until the 25 min
-            // redo. The winner now keeps its own young initiator session (not yet
-            // rotated, `!has_responded_to_peer_key`) against any init created
-            // within the collision window. A later init is a real re-handshake
-            // (the peer's `maybe_redo_handshake`) and is still accepted.
-            // The session we initiated, in its first generation: untouched
-            // (flag set, no rotation), or after the peer's first rotation,
-            // which a responder makes before its first send (flag clear, one
-            // rotation). `!has_responded_to_peer_key` alone was also true for
-            // a session we had only responded to, and false for our own
-            // untouched one.
+            // Simultaneous handshake: both sides initiated. The smaller fingerprint's init wins, and the larger side adopts it (the `respond` below).
+            // This used to hold only while our session was still UNUSED. On a slow path, the losing init arrives late: the peer's init came via the
+            // server 31 s after ours (a re-pair on mobile data). By then the peer had adopted our session and messages were flowing, so we replaced a
+            // live session with the one the peer had already dropped. Both sides stayed "online" but could not decrypt each other until the 25-minute
+            // redo. The winner now keeps its own young initiator session (not yet rotated, `!has_responded_to_peer_key`) against any init created within
+            // the collision window. A later init is a real re-handshake (the peer's `maybe_redo_handshake`) and is still accepted.
+            // The session we initiated, in its first generation, is either untouched (flag set, no rotation), or it has seen the peer's first rotation,
+            // which a responder makes before its first send (flag clear, one rotation). `!has_responded_to_peer_key` alone was also true for a session we
+            // had only responded to, and false for our own untouched one.
             let we_initiated = existing.has_responded_to_peer_key == existing.prev_root_key.is_none();
             let same_round = handshake.timestamp.abs_diff(existing.last_rotation) <= HANDSHAKE_COLLISION_WINDOW_MS;
             let existing_unused = existing.send_message_number == 0 && existing.recv_message_number == 0;
             // A device waiting to be linked (showing its link QR) always adopts. Its own init carries its pre-link identity, which the primary rejects
-            // ("sender_identity_id does not match"). Keeping it (when this device's fingerprint happened to be the smaller one) left the two on different
-            // sessions, and the DeviceLinkGrant never decrypted (device test, 2026-09-19).
+            // ("sender_identity_id does not match"). Keeping it (when this device's fingerprint happened to be the smaller one) left the two on
+            // different sessions, and the DeviceLinkGrant never decrypted.
             let awaiting_link = self.link_request_open_until > now;
             // An init older than the session we hold (not only one that waited past the skew window): the sender has moved on from it. Inside the
             // collision window the rule below decides instead. Two clocks: the sender's against ours. Within the skew this check already accepts above, it is
