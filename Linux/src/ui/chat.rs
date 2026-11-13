@@ -28,11 +28,10 @@ use crate::util;
 /// How many messages (texts and files together) a page of history holds,
 /// matching the Android chat.
 const PAGE_SIZE: u32 = 100;
-/// hard cap on bubbles kept alive in one open chat. ~8 GTK widgets per
-/// bubble; past this the oldest page is dropped from the view (the archive
-/// still has everything — scrolling up again, or reopening the chat, brings
-/// it back). 600 ≈ 12 pages of history on screen at once.
-const MAX_BUBBLES: usize = 600;
+/// Hard cap on bubbles kept alive in one open chat (~8 GTK widgets each):
+/// two pages. Past it, loading an older page drops the newest bubbles (see
+/// `trim_newest`); reaching the bottom reloads them from the archive.
+const MAX_BUBBLES: usize = 200;
 const FETCH_HISTORY_LABEL: &str = "Fetch older history";
 /// Hard cap on bubble width, in pixels.
 /// A wrapping GtkLabel's `max-width-chars` turned out not to bound the
@@ -583,7 +582,14 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         let view = view.clone();
         scroller.vadjustment().connect_changed(move |adjustment| {
             if view.follow_bottom.get() {
-                adjustment.set_value(adjustment.upper() - adjustment.page_size());
+                // `changed` fires inside the scroller's size allocation; a
+                // value set there moved the scrollbar but not the content
+                // (the viewport kept the old offset until the next scroll).
+                // One idle later the allocation is over and `upper` is final.
+                let adjustment = adjustment.clone();
+                glib::idle_add_local_once(move || {
+                    adjustment.set_value(adjustment.upper() - adjustment.page_size());
+                });
             }
         });
     }
