@@ -5,16 +5,11 @@ use super::*;
 impl P2PCore {
 
     // ---------------------------------------------------------------
-    // Spec dışı: dosya/foto/video/ses ekleri (bkz. attachments.rs modül
-    // notu, azami 4GB). Kullanıcı tercihi (bu görüşmede netleştirildi):
-    // GÖNDEREN kendi node modu durumundan BAĞIMSIZ olarak gönderdiği
-    // dosyanın kendi kopyasını her zaman tutar; ALICI tarafta, node modu
-    // açıksa yeni bir dosya teklifi geldiğinde OTOMATİK indirilip
-    // saklanır (bkz. receive_message FileOffer kolu), kapalıysa sadece
-    // meta veri gösterilir ve indirme kullanıcının "İndir" dokunuşunu
-    // bekler — bu, mevcut mesaj geçmişi arşivleme kuralıyla (sadece node
-    // modu açıkken yerelde sakla) birebir aynı prensip, dosya baytlarına
-    // genişletilmiş hâli.
+    // Attachments (files, photos, videos, voice). See the attachments.rs module note; maximum size 4 GB.
+    // Policy: the SENDER always keeps its own copy of a file it sent, regardless of its node mode. On the RECEIVING side, when node mode is on,
+    // a new file offer is downloaded and stored automatically (see the receive_message FileOffer arm). When node mode is off, only the metadata
+    // is shown and the download waits for the user's "Download" tap. This is the same rule as message-history archiving (stored locally only
+    // while node mode is on), extended to file bytes.
     // ---------------------------------------------------------------
 
     pub(crate) fn attachments_dir(&self) -> Result<std::path::PathBuf, String> {
@@ -22,11 +17,8 @@ impl P2PCore {
         Ok(std::path::Path::new(base).join("attachments"))
     }
 
-    /// bkz. `is_safe_file_id` (#01) — SON savunma katmanı. Çağıranların
-    /// hepsi zaten doğrulanmış bir kimlikle gelmeli, ama bu fonksiyon
-    /// yol üretiminin TEK kapısı olduğu için kontrolü burada da yapıyoruz:
-    /// ileride eklenecek yeni bir çağrı yolu kontrolü unutsa bile dizin
-    /// dışına çıkılamaz.
+    /// See `is_safe_file_id`, the LAST line of defence. Callers should already pass a validated id, but this function is the ONLY gate for building
+    /// paths, so the check is repeated here. A future call path that forgets the check still cannot leave the directory.
     pub(crate) fn enc_path_for(&self, file_id: &str) -> Result<std::path::PathBuf, String> {
         if !is_safe_file_id(file_id) {
             return Err(format!("Geçersiz file_id (yol olarak kullanılamaz): {}", file_id));
@@ -233,15 +225,11 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı, kullanıcı isteği: `history_storage_limit_bytes`'ı
-    /// canlıya uygular. SADECE node modu açıkken çalışır — sınırın
-    /// gerekçesi zaten node modunun agresif auto-download davranışı (bkz.
-    /// alan dokümantasyonu), node modu kapalı bir cihaz zaten dosyaları
-    /// kullanıcı isteği olmadan biriktirmiyor. Toplam tamamlanmış dosya
-    /// boyutu sınırı aşarsa, EN ESKİ dosyalardan başlayarak (created_at
-    /// artan) sınırın altına inene kadar TAMAMEN siler (DB satırı + diskteki
-    /// `.enc` blob + varsa `plain_cache` kopyası) — kısmi/kesik dosya
-    /// bırakmaz, her zaman ya tam var ya hiç yok.
+    /// Applies `history_storage_limit_bytes` live. It runs ONLY while node mode is on. The limit exists because node mode auto-downloads aggressively
+    /// (see the field docs). A device with node mode off does not accumulate files without the user asking. If the total size of completed files
+    /// exceeds the limit, it deletes whole files, OLDEST first (by ascending created_at), until the total is under the limit. Each file is removed
+    /// completely (the DB row, the on-disk `.enc` blob, and any `plain_cache` copy). No partial or truncated file is left: a file is either all there
+    /// or gone.
     pub(crate) fn enforce_history_storage_limit(&mut self) {
         if !self.node_mode_enabled {
             return;
@@ -287,16 +275,11 @@ impl P2PCore {
         };
         drop(stmt);
 
-        // Spec dışı, dış inceleme düzeltmesi ("kaynak cihaz depolama sınırı
-        // için dosyayı silebilir, alıcı henüz hiç indirmemiş/indirmeye
-        // başlamamışken"): önceden bu sadece created_at'e göre EN ESKİDEN
-        // başlayıp sınırın altına inene kadar siliyordu — TAZE tamamlanmış
-        // (ör. az önce bittiği için indirmesi henüz başlamamış) bir dosya
-        // bile toplam boyut yeterince büyükse hemen silinebiliyordu. Artık
-        // `FILE_RETENTION_GRACE_MS`'ten YENİ dosyalar önce "korumalı"
-        // sayılıp atlanıyor — rows `created_at ASC` sıralı olduğundan, ilk
-        // korumalı satırdan sonrakilerin TAMAMI da (aynı veya daha yeni)
-        // korumalıdır, o noktada ilk geçiş durur.
+        // Fix: the SENDING device may delete a file to enforce its own storage limit while the recipient has not downloaded it yet, or has not started.
+        // Before this, the pass deleted strictly OLDEST first until under the limit, so even a freshly completed file (one whose download had not
+        // started yet) could be deleted right away when the total was large. Now rows newer than `FILE_RETENTION_GRACE_MS` count as PROTECTED
+        // and are skipped. Rows are sorted by `created_at ASC`, so once the first protected row is reached, every later row is protected too, and
+        // the first pass stops there.
         let now = current_time_ms();
         let mut remaining = complete.max(0) as u64;
         let mut to_delete = Vec::new();
@@ -314,10 +297,8 @@ impl P2PCore {
             to_delete.push(file_id.clone());
             remaining = remaining.saturating_sub((*size).max(0) as u64);
         }
-        // İSTİSNA: korumalı (yeterince yeni) dosyalar HARİÇ TUTULARAK bile
-        // kullanıcının AÇIKÇA belirlediği sınır hâlâ aşılıyorsa (ör. kullanıcı
-        // sınırı çok düşük bir değere düşürdü), o sınır yine de önceliklidir
-        // — bu durumda yeni dosyalar da (en eskiden başlanarak) tahliye edilir.
+        // EXCEPTION: even with the protected (recent enough) files EXCLUDED, if the limit the user explicitly set is still exceeded (for example the
+        // user lowered the limit to a very small value), that limit still takes priority. In that case recent files are evicted too, oldest first.
         if remaining > limit {
             warn!(
                 "history_storage_limit ({} bayt) korumalı (henüz {} saatten yeni) dosyalar hariç tutularak bile aşılıyor — kullanıcının belirlediği sınır önceliklidir, gerekirse onlar da tahliye edilecek",
@@ -343,11 +324,9 @@ impl P2PCore {
         }
     }
 
-    /// `poll_events`'ten çağrılır — `enforce_history_storage_limit`'in
-    /// dosya-tamamlanma anlarındaki çağrılarına EK bir güvenlik ağı, ör.
-    /// kullanıcı sınırı DÜŞÜRDÜĞÜNDE zaten birikmiş dosyaların da
-    /// budanabilmesi için. `HISTORY_STORAGE_SWEEP_INTERVAL_MS` ile
-    /// sınırlıdır (her turda tam bir SQL SUM sorgusu çalıştırmamak için).
+    /// Called from `poll_events`. This is a SAFETY NET in addition to the calls to `enforce_history_storage_limit` at file-completion time. It
+    /// trims files that have already accumulated, for example after the user LOWERS the limit. It is rate limited by
+    /// `HISTORY_STORAGE_SWEEP_INTERVAL_MS` (so a full SQL SUM query does not run on every turn).
     pub(crate) fn periodic_storage_sweep(&mut self) {
         let now = current_time_ms();
         if now.saturating_sub(self.last_storage_sweep_at) < HISTORY_STORAGE_SWEEP_INTERVAL_MS {
@@ -378,8 +357,7 @@ impl P2PCore {
         }
     }
 
-    /// Bir eki (DB satırı + diskteki `.enc` blob + varsa `plain_cache`
-    /// kopyası) tamamen kaldırır — bkz. `enforce_history_storage_limit`.
+    /// Removes one attachment completely (the DB row, the on-disk `.enc` blob, and any `plain_cache` copy). See `enforce_history_storage_limit`.
     pub(crate) fn delete_attachment_file(&mut self, file_id: &str) {
         self.remove_attachment_copy(file_id);
         if let Some(conn) = &self.db {
@@ -411,8 +389,7 @@ impl P2PCore {
             let _ = std::fs::remove_file(enc_path);
         }
         if let Some(name) = file_name {
-            // bkz. `safe_extension` (#01) — silme yolu da uzantıdan yol
-            // dışına çıkamamalı.
+            // See `safe_extension`. The delete path must also not be able to leave the directory through the extension.
             let ext = safe_extension(&name);
             if is_safe_file_id(file_id) {
                 if let Ok(dir) = self.attachments_dir() {
