@@ -7,23 +7,17 @@ impl P2PCore {
     pub(crate) fn receive_message(&mut self, source: Option<PeerId>, packet: &MessagePacket) -> Result<String, String> {
         let sender = self.known_remote_devices.get(&packet.header.sender_device_fingerprint).cloned()
             .ok_or("Unknown sender device; cannot verify signatures")?;
-        // bkz. process_handshake_init aynı notu — güvenlik denetimi
-        // düzeltmesi, artık gerçekten uygulanıyor.
+        // Same sender-identity check as in `process_handshake_init`.
         if !sender.is_active {
             self.answer_revoked_sibling(&sender.device_fingerprint);
             return Err("Sender device has been revoked".to_string());
         }
 
-        // imza SADECE bu paketi `sender` CİHAZININ imzaladığını kanıtlar —
-        // header'daki `sender_identity_id` alanının o cihaza AİT güvenilen
-        // Identity olduğunu KANITLAMAZ. Cihaz→Identity bağı eşleşme (TOFU)
-        // anında kaydedilir (`DeviceRecord.identity_id`); header'daki
-        // değerin bununla eşleştiğini burada zorlamazsak, eşleşmiş bir cihaz
-        // header'a BAŞKA bir kişinin identity_id'sini yazıp grup mesajlarında
-        // o kişiyi taklit edebilir (bkz. group_message kolu) VEYA bir
-        // `ProfileUpdate`'i başka bir kişiye yönlendirip onun avatarını
-        // ezebilir (bkz. ProfileUpdate kolu — `identity_to_contact` lookup'ı
-        // bu alana güveniyordu). Artık uyuşmazlık paketi tamamen reddediyor.
+        // The signature only proves that the `sender` DEVICE signed this packet. It does not prove that `sender_identity_id` in the header
+        // belongs to that device. The device-to-identity link is recorded at pairing (TOFU, `DeviceRecord.identity_id`). If the header value
+        // is not checked against it, a paired device could write another person's identity_id and impersonate that person in group messages
+        // (see the group_message arm), or redirect a `ProfileUpdate` to another contact and overwrite that contact's avatar (see the
+        // ProfileUpdate arm, which trusted this field through `identity_to_contact`). A mismatch rejects the whole packet.
         if packet.header.sender_identity_id != sender.identity_id {
             return Err("sender_identity_id, imzalayan cihazın kayıtlı kimliğiyle eşleşmiyor".to_string());
         }
@@ -32,18 +26,12 @@ impl P2PCore {
         verify_hybrid_signature(&to_verify, &packet.signature_classical, &packet.signature_pq, &sender)?;
 
 
-        // Rotasyon senkronizasyonu (spec 3.2, artık gerçek): gönderen bu
-        // mesajla birlikte bir DH/KEM rotasyonu tetiklediyse
-        // (rotation_kyber_ciphertext dolu), biz de kendi tarafımızda aynı
-        // yeni anahtarları türetmek için respond_to_rotation çağırırız.
-        // Boşsa (normal mesaj, rotasyon yok) hiçbir şey yapmayız —
-        // ratchet_pubkey zaten her mesajda taşınır ama rotasyon olmadıkça
-        // değişmez, bu yüzden onu görmezden gelmek güvenlidir.
-        // The ratchet applies the rotation only if the packet then decrypts
-        // on the new chain (bkz. ratchet.rs `decrypt`). Başlık alıcıya bağlı
-        // değil: A'nın B'ye gönderdiği rotasyonlu paket C'ye tekrar
-        // oynatılırsa, önce uygulanan rotasyon C'nin A oturumunu bozardı.
-        // The packet's rotation was applied: the state is written at once.
+        // Ratchet rotation sync: if the sender triggered a DH/KEM rotation with this message (`rotation_kyber_ciphertext` is set),
+        // call `respond_to_rotation` to derive the same new keys on our side. If empty (normal message, no rotation), nothing is done.
+        // `ratchet_pubkey` is sent with every message but only changes on rotation, so ignoring it otherwise is safe.
+        // The ratchet applies the rotation only if the packet then decrypts on the new chain (see `decrypt` in ratchet.rs). The header is
+        // not bound to the recipient: if a rotated packet sent to B were replayed to C, applying the rotation first would break C's session.
+        // The state is written at once when the packet's rotation was applied.
         let rotated;
         // Rollback copy: if the advanced state cannot be saved, memory goes
         // back to it and the packet fails (no archive, no Ack), so the
@@ -61,12 +49,9 @@ impl P2PCore {
             result
         };
         if rotated {
-            // Eski topic hemen bırakılmaz (gönderen hâlâ oradan yayınlayabilir),
-            // bir sonraki rotasyonda bırakılır.
-            // Eski zincirin skipped-key'leri state'in içine taşındı
-            // (`old_recv`); bu çözmenin eklediği yeni anahtarlar aşağıda
-            // tabloya yazılır. State first: the table rows go only once
-            // the state holding them is on disk.
+            // The old topic is not dropped right away (the sender may still publish there). It is dropped at the next rotation.
+            // Skipped keys of the old chain move into the state (`old_recv`). New keys derived by this decryption are written to the table
+            // below. State first: the table rows are written only once the state holding them is on disk.
             if !self.persist_ratchet_state(&packet.header.sender_device_fingerprint) {
                 if let Some(s) = snapshot.take() {
                     self.ratchets.insert(packet.header.sender_device_fingerprint.clone(), s);
@@ -77,9 +62,8 @@ impl P2PCore {
             // memory back behind it.
             snapshot = None;
             self.clear_persisted_skipped_keys(&packet.header.sender_device_fingerprint);
-            // Eski zincirle şifrelenmiş bekleyen paketler hemen taze zincirle yeniden gönderilir.
-            // Not the one this very packet answers: it is closed below, and
-            // resent the peer answered it a second time.
+            // Pending packets encrypted under the old chain are resent at once on the fresh chain, except the one this packet answers:
+            // that one is closed below, and resending it would make the peer answer it a second time.
             let answered = decrypted.as_ref().ok().and_then(|(p, _)| answered_pending_id(p.as_slice()));
             let prev = self.regen_skip_id.clone();
             if answered.is_some() {
@@ -91,37 +75,20 @@ impl P2PCore {
         let (payload_bytes, skipped_changes) = match decrypted {
             Ok(v) => v,
             Err(e) => {
-                // İKİ CİHAZLI GERÇEK TESTTE BULUNDU — "Ack kilitlenmesi".
-                // Gözlenen: iki telefon arasında saniyeler arayla, dakikalarca
-                // tekrar eden `Message N not found in skipped-key cache
-                // (already decrypted, or evicted)` hataları — HER İKİ yönde.
-                // Döngü şöyle kuruluyor: AYNI zarf iki kez ulaşıyor (bu kurulumda
-                // NORMAL — hem gossipsub hem sunucu aynı anda taşıyor, bkz.
-                // `should_shadow_on_gossipsub`). İlk kopya çözülüp arşivleniyor
-                // ve Ack gönderiliyor. İkinci kopya geldiğinde ise zincir çoktan
-                // ilerlemiş ve o mesaj numarasının skipped-key'i TÜKETİLMİŞ
-                // durumda, yani ARTIK ÇÖZÜLEMİYOR. Çözülemeyince `message_id`
-                // okunamıyor; okunamayınca dedup edilemiyor; dedup edilemeyince
-                // Ack GÖNDERİLEMİYOR. Gönderen onay alamadığı için aynı zarfı
-                // yeniden denemeye devam ediyor — ve o zarf da asla
-                // çözülemeyeceği için durum kilitleniyor. Ancak
-                // `MAX_UNCONFIRMED_AGE_MS` (~25 dk) dolup `regen_content` taze
-                // bir ciphertext ürettiğinde kırılıyor: yani 25 dakika boyunca
-                // her iki telefon da boşuna imza doğrulama + radyo trafiği
-                // yapıyor.
-                // Kilidi kırmak için şifre çözmeye gerek YOK: `MessagePacketHeader`
-                // imzalı ama ŞİFRELİ DEĞİL (bkz. `send_message_content_inner` —
-                // imza `header ‖ ciphertext` üzerine atılır, header düz gider) ve
-                // `message_id`'yi açıkça taşır. İmza bu noktada ZATEN doğrulandı,
-                // yani bu alan güvenilir. O kimliğe sahip bir mesaj arşivimizde
-                // VARSA, bu paketi kanıtlanabilir biçimde daha önce işledik —
-                // Ack'i yeniden gönderip göndereni durdurabiliriz.
-                // KASITLI OLARAK DAR: yalnızca arşivde GERÇEKTEN bulduğumuzda
-                // Ack atıyoruz. Anahtarı gerçekten kaybettiğimiz (önbellek
-                // taşması/rotasyon) durumda mesaj arşivde olmaz, Ack atılmaz ve
-                // mevcut davranış (25 dk sonra taze şifrelemeyle yeniden deneme)
-                // aynen korunur — teslim edilmemiş bir mesajı yanlışlıkla
-                // onaylamayız.
+                // Observed on two phones: an ack deadlock. Repeated `Message N not found in skipped-key cache (already decrypted, or evicted)`
+                // errors in both directions for minutes. The loop: the SAME envelope arrives twice (normal here, since gossipsub and the server
+                // both carry it, see `should_shadow_on_gossipsub`). The first copy is decrypted, archived and acked. The second copy arrives after
+                // the chain has moved on and the skipped key for that message number is already consumed, so it cannot be decrypted. Without
+                // decryption, `message_id` cannot be read, so the packet cannot be deduplicated, so no Ack is sent. The sender keeps retrying the
+                // same envelope, which never decrypts, so the state stays locked. The lock only breaks when `MAX_UNCONFIRMED_AGE_MS` (~25 min)
+                // passes and `regen_content` produces a fresh ciphertext. Both phones spent those 25 minutes on signature checks and radio traffic.
+                // Breaking the lock does not need decryption. `MessagePacketHeader` is signed but NOT encrypted (see `send_message_content_inner`:
+                // the signature covers `header ‖ ciphertext`, and the header travels in clear) and carries `message_id` in clear. The signature
+                // was already verified at this point, so the field is trusted. If a message with that id IS in our archive, we processed this
+                // packet before, and we can resend the Ack to stop the sender.
+                // Deliberately narrow: an Ack is sent only when the archive really holds the message. If the key was truly lost (cache overflow
+                // or rotation), the message is not in the archive, no Ack is sent, and the existing behaviour (retry with fresh encryption after
+                // 25 min) stays. An undelivered message is never acked by mistake.
                 if self.reack_if_already_handled(&packet.header) {
                     info!(
                         "Çözülemeyen paket zaten işlendi (id={}) — yinelenen teslim, Ack yeniden gönderildi (gönderen aksi hâlde ~25 dk boşuna dener)",
@@ -143,20 +110,15 @@ impl P2PCore {
                 return Err(e.to_string());
             }
         };
-        // Map the connection only now (security review 2026-09-27): a valid
-        // signature proves who WROTE the packet, not who delivered it. Any
-        // contact holding an old packet of this device could replay it to get
-        // its own PeerId mapped here, then take our direct sends to the device
-        // and fake AckBatch receipts for them. A replayed or cross-addressed
-        // packet never decrypts.
+        // The connection is mapped only now. A valid signature proves who WROTE the packet, not who DELIVERED it. Any contact holding an old
+        // packet of this device could replay it to get its own PeerId mapped here, then take our direct sends to the device and fake AckBatch
+        // receipts. A replayed or cross-addressed packet never decrypts.
         self.record_peer_id_if_known(source, &packet.header.sender_device_fingerprint);
         self.undecryptable_from.remove(&packet.header.sender_device_fingerprint);
         let state = self.ratchets.get_mut(&packet.header.sender_device_fingerprint)
             .ok_or("No ratchet session for sender")?;
-        // bkz. `pending_rotation_ct` (ratchet.rs): rotasyonu BİZ tetiklediysek,
-        // karşı taraftan YENİ zincirde gelen bir paketin çözülmesi onun
-        // rotasyonu uyguladığının kanıtıdır — duyuruyu her pakete eklemeyi
-        // bırakabiliriz. A packet of the chain before the rotation
+        // If we triggered the rotation (`pending_rotation_ct`, ratchet.rs), a packet that decrypts on the NEW chain from the peer proves the
+        // peer applied the rotation, so the announcement no longer needs to be added to every packet. A packet of the chain before the rotation
         // (`old_chain`) proves nothing: the peer sent it before it knew.
         if !skipped_changes.old_chain && state.pending_rotation_ct.take().is_some() {
             info!(
@@ -164,8 +126,7 @@ impl P2PCore {
                 crate::log_id(&packet.header.sender_device_fingerprint)
             );
         }
-        // Skipped-key değişikliklerini diske (Keystore ile şifreli) yansıt.
-        // Before the ratchet state: a crash in between must not leave the
+        // Write skipped-key changes to disk (encrypted with the Keystore). Before the ratchet state: a crash in between must not leave the
         // advanced counter on disk without the keys it skipped.
         let mut saved = true;
         for (msg_num, key) in &skipped_changes.added {
@@ -175,9 +136,8 @@ impl P2PCore {
                 break;
             }
         }
-        // `decrypt` her çağrıda ck_recv/recv_message_number'ı ilerletir —
-        // diskteki kopyayı güncel tut. A failed write rolls memory back and
-        // fails the packet: the retry must still find the key it needs.
+        // `decrypt` advances ck_recv/recv_message_number on every call, so keep the disk copy current. If the write fails, memory is rolled
+        // back and the packet fails: the retry must still find the key it needs.
         if saved {
             saved = self.persist_ratchet_state(&packet.header.sender_device_fingerprint);
         }
@@ -271,7 +231,7 @@ impl P2PCore {
         result
     }
 
-    /// Replays the held content of every group that is known now (bkz.
+    /// Replays the held content of every group that is known now (see
     /// `dispatch_received_content`). Each entry is checked like a live one:
     /// a sender that is not a member is refused.
     pub(crate) fn replay_unknown_group_held(&mut self) {
@@ -288,60 +248,39 @@ impl P2PCore {
     }
 
     pub(crate) fn dispatch_received_content_inner(&mut self, source: Option<PeerId>, peer_fp: String, sender_identity_id: String, message_id: String, content: MessageContent, signed_sent_at_ms: u64) -> Result<String, String> {
-        // Çoklu-cihaz: gönderen kişi birden fazla cihaza sahip olabilir —
-        // yerel sohbet/arşiv, o kişinin KARARLI kanonik cihazı altında
-        // birleşsin (bkz. `canonical_peer_key`). ACK/Seen gibi geri
-        // gönderimler yine GERÇEK gönderen `peer_fp`'ye gider (o cihazla
-        // kurulu ratchet üzerinden); yalnızca yerel arşiv anahtarı + UI'ye
-        // giden "peer" alanı kanonikleşir. Tek cihazlı kişilerde
-        // `chat_key == peer_fp` (davranış değişmez).
+        // Multi-device: the sender may have several devices. The local chat/archive key is merged under that person's stable canonical device
+        // (see `canonical_peer_key`). Replies such as ACK/Seen still go to the real sender `peer_fp` (over the ratchet with that device). Only the
+        // local archive key and the "peer" field sent to the UI are canonicalised. For single-device contacts `chat_key == peer_fp` (no change).
         let chat_key = self.canonical_peer_key(&peer_fp);
 
-        // Spec dışı: `pollNetwork`'ün Kotlin tarafına döndürdüğü her satır
-        // artık düz metin DEĞİL, `{"type":...}` etiketli bir JSON olayı —
-        // bkz. P2PService/ChatActivity. Bu, edit/delete'i aynı String
-        // kanalından (JNI imzasını değiştirmeden) taşıyabilmek ve mesajın
-        // HANGİ karşı tarafa (peer) ait olduğunu iletebilmek için gerekli —
-        // önceden bu bilgi hiç taşınmıyordu (bkz. eski "cross-chat sızıntısı"
-        // notu: birden çok sohbet varken gelen her mesaj, o an açık olan
-        // HANGİ ChatActivity ise ona ekleniyordu, doğru olanına değil).
+        // Every line that `pollNetwork` returns to the Kotlin side is now a JSON event tagged `{"type":...}`, not plain text (see
+        // P2PService/ChatActivity). This carries edit/delete through the same String channel (without changing the JNI signature) and tells
+        // the UI WHICH peer a message belongs to. Before, that was never passed on: with several chats open, each incoming message went to
+        // whichever ChatActivity was open, not to the right one.
         let event = match content {
             MessageContent::Text { group_id: None, text, group_message_local_id, sent_at_ms, reply_to_message_id, reply_to_preview, .. } => {
-                // Çoklu-cihaz (spec 1.7.1): KARARLI konuşma kimliği — varsa
-                // `group_message_local_id` (gönderenin tüm fan-out kopyalarında
-                // AYNI), yoksa (eski sürüm göndericisi) paket başlığındaki id.
-                // Arşiv/UI/düzenleme/silme/görüldü hepsi bunu kullanır; ACK ise
-                // paketin KENDİ `message_id`'sini kullanır (per-cihaz teslim).
+                // Multi-device: a STABLE conversation id. `group_message_local_id` if present (the SAME in all fan-out copies from the sender),
+                // otherwise (older sender) the id in the packet header. Archive, UI, edit, delete and seen all use this. ACK uses the packet's
+                // OWN `message_id` (per-device delivery).
                 let display_id = group_message_local_id.clone().unwrap_or_else(|| message_id.clone());
-                // Güvenilirlik düzeltmesi (çift arşiv): AYNI mantıksal mesaj
-                // ikinci kez gelebilir — `regen_content` tazelemesi kayıp bir
-                // Ack'ten sonra AYNI kimlikle TAZE (çözülebilir) bir
-                // ciphertext yollar; restart sonrası kalıcı kuyruk da aynı
-                // şekilde yeniden gönderir. Önceden bu kol hiç dedup
-                // yapmadığından her tekrar ayrı bir arşiv satırı oluşturuyordu
-                // (UI ekranda maskeliyordu ama arşiv/geçmiş senkronu çiftleri
-                // taşımaya devam ediyordu). Ack YİNE gönderilir — gönderenin
-                // yeniden denemesi ancak böyle durur.
+                // Double archive: the SAME logical message can arrive twice. The `regen_content` refresh sends a FRESH (decryptable) ciphertext
+                // with the SAME id after a lost Ack, and the persistent queue resends after a restart. This arm used to dedup nothing, so each
+                // repeat made a separate archive row (the UI hid it, but archive/history sync kept copying the pairs). Ack is still sent: that is
+                // the only way the sender's retry stops.
                 info!("Metin alındı: id={} kaynak={}", display_id.chars().take(8).collect::<String>(), if source.is_some() { "p2p" } else { "sunucu" });
                 if self.message_exists_in_chat(&display_id, None, &chat_key) {
                     self.ack_text_packet(&peer_fp, &message_id, Some(&display_id));
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
-                // bkz. send_message_content'teki aynı düzeltme notu —
-                // artık node modundan bağımsız her cihaz kendi geçmişini
-                // yerelde şifreli tutuyor.
-                // Ack sadece arşive KALICI olarak yazılabildiyse gönderilir
-                // — aksi halde (disk dolu/DB hatası gibi geçici bir arıza)
-                // gönderen tarafa "aldım, artık tekrar deneme" denmiş
-                // olurdu ama mesaj hiçbir yerde kalıcı değil; Ack
-                // gönderilmezse gönderenin `awaiting_confirmation` mekanizması
-                // (bkz. o alanın dokümantasyonu) otomatik olarak tekrar dener.
+                // See the same note in send_message_content. Each device now keeps its own history encrypted locally, regardless of node mode.
+                // The Ack is sent only if the archive write was made PERMANENT. Otherwise (a transient failure such as a full disk or DB error)
+                // the sender would be told "received, no retry" while the message is stored nowhere. Without an Ack, the sender's
+                // `awaiting_confirmation` mechanism (see its docs) retries automatically.
                 match self.archive_message(&chat_key, "received", text.as_bytes(), Some(&display_id), None, reply_to_message_id.as_deref(), reply_to_preview.as_deref(), sent_at_ms) {
                     Ok(()) => {
                         self.ack_text_packet(&peer_fp, &message_id, Some(&display_id));
-                        // bkz. `pending_edits_deletes` dokümantasyonu — bu
-                        // Text'ten ÖNCE gelmiş (gossipsub sırasızlığı) bir
-                        // Edit/Delete varsa şimdi uygula.
+                        // See `pending_edits_deletes`. If an Edit/Delete for this message arrived BEFORE the Text (gossipsub gives no ordering),
+                        // apply it now.
                         self.replay_buffered_edits_deletes(&display_id);
                     }
                     Err(e) => {
@@ -351,53 +290,30 @@ impl P2PCore {
                         return Ok(serde_json::json!({"type": "noop"}).to_string());
                     }
                 }
-                // Spec dışı, kullanıcı isteği: `sent_at_ms` — göndericinin
-                // KENDİ cihazındaki gönderim anı — alıcı tarafın "10:42
-                // (sent at: 10:41)" gibi hem yerel ALINMA anını hem
-                // göndericinin GERÇEK gönderim anını göstermesi için (bkz.
-                // ChatActivity/SimpleChatAdapter). 0 = eski/bilinmeyen
-                // sürüm, Kotlin tarafı bu durumda parantez içi gösterimi
-                // atlar (bkz. packet.rs `sent_at_ms` notu).
-                // Spec dışı, kullanıcı isteği (WhatsApp tarzı yanıt): bkz.
-                // packet.rs `MessageContent::Text.reply_to_message_id`
-                // dokümantasyonu — canlı olay da bu bilgiyi taşır (arşive
-                // yazılmasını/bir reload'u beklemeden, ekran o an açıksa
-                // hemen doğru şekilde çizilsin diye).
+                // `sent_at_ms` is the send time on the SENDER's device. The receiving side can show both the local receive time and the real send
+                // time, e.g. "10:42 (sent at: 10:41)" (see ChatActivity/SimpleChatAdapter). 0 = old or unknown version; the Kotlin side then skips
+                // the bracketed display (see the `sent_at_ms` note in packet.rs).
+                // Reply field (WhatsApp-style): see the `MessageContent::Text.reply_to_message_id` docs in packet.rs. The live event carries it
+                // too, so an open screen draws the message correctly at once, without waiting for an archive write or reload.
                 serde_json::json!({
                     "type": "message", "peer": chat_key, "message_id": display_id, "text": text, "sent_at_ms": sent_at_ms,
                     "reply_to_message_id": reply_to_message_id, "reply_to_preview": reply_to_preview
                 })
             }
             MessageContent::Text { group_id: Some(gid), text, group_message_local_id, sent_at_ms, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, author_proof, mentions } => {
-                // Gerçek grup entegrasyonu: bu, bir grup mesajının pairwise
-                // fan-out kopyası — GroupChatActivity'nin doğru sohbete
-                // yönlendirebilmesi için `group_id` VE göndericinin
-                // `identity_id`'si (bir grupta birden fazla kişi olduğundan
-                // "kim gönderdi" bilgisi 1:1'in aksine zorunlu) taşınıyor.
-                // `group_message_local_id`: Kotlin bu mesajı "gördü" olarak
-                // işaretlerken (bkz. Seen) geri göndermesi gereken kimlik —
-                // `message_id` göndericiye anlamsız (bkz. packet.rs notu),
-                // sadece bu paylaşılan kimlik her N kopya arasında ortak.
-                // önceden bu kol HİÇBİR ŞEYİ arşivlemiyordu — alınan bir
-                // grup mesajı sadece bu tek `pollNetwork` turunda Kotlin'e
-                // geçici bir JSON olayı olarak veriliyordu; ekran o an açık
-                // değilse ya da süreç yeniden başlarsa mesaj kalıcı olarak
-                // kayboluyordu ("grup geçmişi bazen kalıcı olmuyor" hatası).
-                // `group_message_local_id`, her N kopya arasında ortak
-                // olduğundan `message_id` yerine arşiv kimliği olarak
-                // kullanılıyor — reload sonrası "görüldü" eşleşmesi hâlâ
-                // çalışsın diye.
-                // Güvenilirlik düzeltmesi (çift arşiv) — 1:1 Text kolundaki
-                // AYNI dedup: `group_message_local_id` tüm fan-out kopyaları/
-                // tekrarlar arasında kararlı olduğundan dedup anahtarıdır
-                // (yoksa — eski sürüm göndericisi — dedup yapılamaz, eski
-                // davranış korunur). Ack yine gönderilir.
-                // bkz. `sender_may_post_to_group` — çıkarılmış bir üyenin
-                // (ya da grupla hiç ilgisi olmayan bir kişinin) mesajı
-                // buraya kadar gelebiliyordu ve arşive girip meşru bir grup
-                // mesajı gibi görünüyordu. Ack GÖNDERİLMEZ: bizden önce
-                // eklenmiş meşru bir üye, `GroupUpdate` bize ulaştığında
-                // yeniden denemesiyle kabul edilir.
+                // Group integration: this is one pairwise fan-out copy of a group message. It carries `group_id` AND the sender's `identity_id`
+                // (required in a group, unlike 1:1, since several people are in it), so GroupChatActivity can route it to the right chat.
+                // `group_message_local_id` is the id Kotlin must send back when marking a message "seen" (see Seen). `message_id` means nothing to
+                // the sender (see packet.rs). Only this shared id is common across the N copies.
+                // Before, this arm archived NOTHING: a received group message was passed to Kotlin only as a temporary JSON event in this one
+                // `pollNetwork` turn. If the screen was not open, or the process restarted, the message was lost for good.
+                // `group_message_local_id` is the same across all N copies, so it is the archive id instead of `message_id`, and the "seen" match
+                // after a reload still works.
+                // Double archive fix, same dedup as the 1:1 Text arm: `group_message_local_id` is stable across fan-out copies and repeats, so it
+                // is the dedup key. Without it (older sender) no dedup is possible and the old behaviour stays. Ack is still sent.
+                // See `sender_may_post_to_group`. A removed member (or someone with no link to the group) could get a message this far: it went
+                // into the archive and looked like a legitimate group message. No Ack is sent here: a member that is legitimately added will have
+                // its retry accepted once the `GroupUpdate` reaches us.
                 if !self.sender_may_post_to_group(&gid, &sender_identity_id) {
                     warn!(
                         "Grup mesajı REDDEDİLDİ: gönderen bu grubun üyesi değil (group={}, gönderen={})",
@@ -440,33 +356,19 @@ impl P2PCore {
                         let _ = conn.execute("UPDATE messages SET mentions_me = 1 WHERE group_id = ?1 AND message_id = ?2", params![gid, mid]);
                     }
                 }
-                // Spec dışı, hata düzeltmesi ("bir grup üyesi bazı mesajları
-                // kaçırıyor"): önceden grup metin mesajları için HİÇ Ack
-                // gönderilmiyordu (bkz. `needs_delivery_confirmation`
-                // dokümantasyonu — grup mesajları bilinçli olarak bu
-                // mekanizmanın DIŞINDA bırakılmıştı). Bu, gönderenin
-                // `awaiting_confirmation` yeniden deneme döngüsünün hiçbir
-                // zaman tetiklenemeyeceği anlamına geliyordu — tek seferlik
-                // `publish_envelope` (20 sn sonra sessizce vazgeçen) TEK
-                // güvenceydi. Alıcı o anda kısa süreliğine ulaşılamazsa
-                // (uyku modu, arka plana atılma, geçici NAT/ağ sıçraması —
-                // özellikle 3 üyeli bir grupta fan-out'un HER bir kopyası
-                // ayrı bir dial gerektirdiğinden, tam o anda meşgul/uykuda
-                // olan üye sistematik olarak mesaj kaybediyordu) mesaj
-                // SESSİZCE kaybolurdu. Artık diğer her şeyle AYNI Ack
-                // mekanizması kullanılıyor (bkz. `needs_delivery_confirmation`
-                // notu — artık grup metnini de kapsıyor).
-                // Ack yalnızca arşive kalıcı olarak yazılabildiyse gönderilir
-                // (bkz. 1:1 Text kolundaki aynı düzeltme notu) — aksi halde
-                // gönderen tarafın yeniden deneme mekanizması devam eder.
+                // Group text messages never got an Ack before. See `needs_delivery_confirmation`: group messages were deliberately left out of
+                // this mechanism. That meant the sender's `awaiting_confirmation` retry loop could never fire for them, and the single
+                // `publish_envelope` (which gave up silently after 20 s) was the ONLY guarantee. If a recipient was briefly unreachable (sleep,
+                // background, a short NAT or network change), the message was lost SILENTLY. With 3 members, each fan-out copy needs its own
+                // dial, so a member busy or asleep at that moment lost messages systematically.
+                // Now the SAME Ack mechanism as everything else is used (see the `needs_delivery_confirmation` note, which now covers group text).
+                // The Ack is sent only if the archive write was made permanent (see the same note in the 1:1 Text arm). Otherwise the sender's
+                // retry carries on.
                 if archived_ok {
                     self.ack_text_packet(&peer_fp, &message_id, group_message_local_id.as_deref());
-                    // bkz. `pending_edits_deletes` dokümantasyonu — bu grup
-                    // Text'inden ÖNCE gelmiş bir Edit/Delete varsa şimdi
-                    // uygula. `target_message_id` grup bağlamında
-                    // `group_message_local_id`'dir (bkz. edit_group_message/
-                    // delete_group_message notu) — yoksa (eski sürüm
-                    // göndericisi) zaten tamponlanamamıştır, atlanır.
+                    // See `pending_edits_deletes`. If an Edit/Delete for this group Text arrived BEFORE it, apply it now. In a group context
+                    // `target_message_id` is the `group_message_local_id` (see the edit_group_message/delete_group_message note). Without it (older
+                    // sender) nothing could have been buffered, so this is skipped.
                     if let Some(local_id) = &group_message_local_id {
                         self.replay_buffered_edits_deletes(local_id);
                     }
@@ -486,15 +388,11 @@ impl P2PCore {
                 })
             }
             MessageContent::Edit { target_message_id, new_text, group_id, edited_at_ms, author_proof } => {
-                // Spec dışı, hata düzeltmesi ("hızlı gönder+düzenle, düzenleme
-                // kayboluyor"): gossipsub sıra garantisi vermediğinden bu Edit,
-                // hedefi olan Text'ten ÖNCE gelmiş olabilir. Böyle bir durumda
-                // hedef satır arşivde HİÇ yok (başkasına ait olduğu için değil)
-                // — bu ayrımı burada yapıp tamponluyoruz (bkz.
-                // `pending_edits_deletes`), aksi halde `message_owned_by_sender`
-                // hedefi bulamadığı için `false` döner ve paket KALICI olarak
-                // "rejected" sayılırdı, Text sonradan gelse bile bir daha asla
-                // uygulanmazdı.
+                // Ordering fix ("fast send + edit, the edit disappears"): gossipsub gives no ordering guarantee, so this Edit may arrive BEFORE the
+                // Text it targets. In that case the target row is not in the archive at all (not because it belongs to someone else). That
+                // distinction is made here and the Edit is buffered (see `pending_edits_deletes`). Otherwise `message_owned_by_sender` finds no
+                // target, returns `false`, the packet is treated as permanently "rejected", and the Text would never get the edit even when it
+                // arrives later.
                 if self.edit_target_in_chat(&target_message_id, group_id.as_deref(), &peer_fp) {
                     self.apply_edit_or_delete_content(&peer_fp, &sender_identity_id, &message_id,
                         MessageContent::Edit { target_message_id, new_text, group_id, edited_at_ms, author_proof })
@@ -505,7 +403,7 @@ impl P2PCore {
                 }
             }
             MessageContent::Delete { target_message_id, group_id, author_proof } => {
-                // bkz. yukarıdaki Edit kolu aynı notu.
+                // See the Edit arm above.
                 if self.edit_target_in_chat(&target_message_id, group_id.as_deref(), &peer_fp) {
                     self.apply_edit_or_delete_content(&peer_fp, &sender_identity_id, &message_id,
                         MessageContent::Delete { target_message_id, group_id, author_proof })
@@ -516,14 +414,10 @@ impl P2PCore {
                 }
             }
             MessageContent::Reaction { target_message_id, emoji, group_id, reacted_at_ms } => {
-                // `Reaction` is in `needs_delivery_confirmation`: the sender
-                // retries it for 7 days until acked. Acked once written or
-                // rejected for good; NOT acked when the write failed (the retry
-                // brings it back) nor from a non-member of a known group (like
-                // group Text: a member we do not know of yet is taken once its
-                // GroupUpdate arrives).
-                // bkz. `sender_may_post_to_group` — grup Text/FileOffer ile
-                // AYNI boşluk; tepki de arşive (reactions tablosu) yazıyor.
+                // `Reaction` is in `needs_delivery_confirmation`: the sender retries it for 7 days until acked. It is acked once written or
+                // rejected for good. It is NOT acked when the write failed (the retry brings it back), nor from a non-member of a known group (as
+                // with group Text: a member we do not know of yet is taken once its GroupUpdate arrives).
+                // See `sender_may_post_to_group`. Same gap as group Text/FileOffer; reactions are archived too (reactions table).
                 if let Some(gid) = &group_id {
                     if !self.sender_may_post_to_group(gid, &sender_identity_id) {
                         warn!(
@@ -559,29 +453,18 @@ impl P2PCore {
                 }
             }
             MessageContent::HistorySyncRequest { limit, before_timestamp, group_id, after_timestamp } => {
-                // `load_message_history`/`load_group_message_history` zaten
-                // `history_key` yüklenmemişse (node modu hiç açılmadıysa)
-                // veya arşiv yoksa boş liste döner — burada ayrıca
-                // `node_mode_enabled` kontrolüne gerek yok. Bu bir orijinal
-                // kullanıcı mesajı değil, kontrol paketi — kendi arşivimize
-                // TEKRAR yazılmaz (archive_plaintext: None, bkz.
-                // send_message_content).
-                // Güvenilirlik düzeltmesi (MessageTooLarge): istekteki `limit`
-                // karşı taraf kontrolünde ve sınırsızdı — devasa bir yanıt,
-                // gossipsub'un 1MB `max_transmit_size` sınırını aşıp KALICI
-                // olarak yayınlanamaz hale gelirdi (bkz. `PublishFailure`).
-                // Hem satır sayısı hem toplam metin baytı sınırlanır; kırpılan
-                // kısım karşı tarafın sayfalama isteğiyle (before_timestamp)
-                // zaten sonradan çekilebilir.
-                // Grup geçmişi yalnızca ŞU AN üye olana verilir: aksi halde
-                // `group_id`'yi bilen herhangi bir kişi (ör. çıkarılmış eski
-                // üye) çıkarıldıktan sonraki mesajlar dahil tüm geçmişi
-                // sayfalayarak çekebilirdi.
+                // `load_message_history`/`load_group_message_history` already return an empty list when `history_key` was never loaded (node mode
+                // never opened) or the archive is empty, so no separate `node_mode_enabled` check is needed here. This is a control packet, not a
+                // user message, so it is not written to our own archive (archive_plaintext: None, see send_message_content).
+                // Fix (MessageTooLarge): the `limit` in the request is controlled by the other side and was unbounded. A huge reply
+                // could exceed gossipsub's 1 MB `max_transmit_size` and become impossible to publish (see `PublishFailure`). Both the row count
+                // and the total text bytes are capped. The cut-off part can be fetched later with a paging request (before_timestamp).
+                // Group history is given only to someone who IS a member now. Otherwise anyone who knows the `group_id` (e.g. a removed former
+                // member) could page through the whole history, including messages after their removal.
                 if let Some(gid) = &group_id {
                     if !self.groups.get(gid).map_or(false, |g| g.is_member(&sender_identity_id)) {
                         warn!("Grup geçmişi isteği REDDEDİLDİ: gönderen üye değil (group={}, gönderen={})", gid, crate::log_id(&sender_identity_id));
-                        // Ack: istek `needs_delivery_confirmation`'da; yanıt
-                        // gelmeyeceği için aksi halde gönderen günlerce yeniden dener.
+                        // Ack: the request is in `needs_delivery_confirmation`, and no reply will come, otherwise the sender would retry for days.
                         self.send_ack(&peer_fp, &message_id);
                         return Ok(serde_json::json!({"type": "noop"}).to_string());
                     }
@@ -611,18 +494,12 @@ impl P2PCore {
                 }
                 self.history_answered_at.insert(peer_fp.clone(), now);
                 let limit = limit.min(HISTORY_SYNC_MAX_MESSAGES);
-                // Çoklu-cihaz düzeltmesi: 1:1 arşivimiz KANONİK cihaz
-                // anahtarı altında (bkz. `canonical_peer_key`/Text kolu) —
-                // isteyen kişinin kanonik-olmayan bir cihazından gelen istek
-                // de aynı sohbet geçmişini bulabilmeli.
-                // A "Fetch older history" press gets only rows sent in its
-                // window `[after, before)`, at most one window long; the
-                // chat-open sync (no `before_timestamp`) is unchanged.
-                // a group member gets history from at most one day
-                // before it was added (its latest add, `GroupMember.added_at`,
-                // our local time of that update), never older. Our own other
-                // devices get everything. A missing or zero `added_at` counts
-                // as now.
+                // Multi-device fix: our 1:1 archive is under the CANONICAL device key (see `canonical_peer_key` and the Text arm). A request from a
+                // non-canonical device of the requester must also find the same chat history.
+                // A "Fetch older history" press gets only rows sent in its window `[after, before)`, at most one window long. The chat-open sync
+                // (no `before_timestamp`) is unchanged. A group member gets history from at most one day before it was added (its latest add,
+                // `GroupMember.added_at`, our local time of that update), never older. Our own other devices get everything. A missing or zero
+                // `added_at` counts as now.
                 const GROUP_HISTORY_BEFORE_JOIN_MS: u64 = 24 * 60 * 60 * 1000;
                 let history_floor: Option<u64> = group_id.as_ref().and_then(|gid| {
                     if self.my_identity_id().as_deref() == Some(sender_identity_id.as_str()) {
@@ -687,8 +564,7 @@ impl P2PCore {
                     .collect();
                 kept.reverse();
                 // Rows of the window were cut: the requester asks for the rest.
-                // `raw_loaded`: a full page before the C-06 filter may still
-                // have more; a page the filter emptied has no row to page from.
+                // `raw_loaded`: a full page before the filter may still have more; a page the filter emptied has no row to page from.
                 let more = window.is_some() && !kept.is_empty() && (raw_loaded as u32 >= limit || kept.len() < loaded);
                 let messages: Vec<SyncedMessage> = kept.into_iter()
                     .map(|(m, reactions)| SyncedMessage {
@@ -699,10 +575,8 @@ impl P2PCore {
                         author_proof: m.author_proof,
                     })
                     .collect();
-                // `request_id`, isteyen tarafın bu yanıtı doğru
-                // `awaiting_confirmation` girdisine eşleyip yeniden
-                // deneme kuyruğundan çıkarabilmesi için isteğin KENDİ
-                // `message_id`'sini taşır (bkz. packet.rs notu).
+                // `request_id` carries the REQUEST's own `message_id`, so the requester can match this reply to its `awaiting_confirmation` entry
+                // and take it out of the retry queue (see packet.rs).
                 let response = MessageContent::HistorySyncResponse {
                     request_id: message_id.clone(), messages, group_id: group_id.clone(), more,
                 };
@@ -718,10 +592,8 @@ impl P2PCore {
                     }
                     entry.1 += used;
                 }
-                // bu olay hiçbir istemcide işlenmiyordu ve
-                // işlenmesi de gerekmiyor (karşı tarafın bizden geçmiş
-                // istemesi kullanıcıyı ilgilendiren bir olay değil).
-                // Tanılama için log'a, akışa `noop` olarak.
+                // No client handles this event, and none needs to: the other side asking for history is not something the user has to see.
+                // Logged for diagnostics, and emitted to the stream as `noop`.
                 info!("Geçmiş senkronu istendi (peer={}, group={:?})", crate::log_id(&peer_fp), group_id);
                 serde_json::json!({"type": "noop"})
             }
@@ -736,7 +608,7 @@ impl P2PCore {
                     _ => false,
                 };
                 if !solicited {
-                    // Ack yine gider: yanıtlayan aksi halde boşuna yeniden dener.
+                    // The Ack is still sent: otherwise the responder would retry for nothing.
                     self.send_ack(&peer_fp, &message_id);
                     // A member answering its own request again (it got a
                     // resent copy) is handled already, not unsolicited.
@@ -779,21 +651,14 @@ impl P2PCore {
                 // below: unfiltered, unsigned rows, archived into our 1:1
                 // chat as sent by us.
                 let mut event = if group_id.is_some() || press.is_some() {
-                    // Spec dışı, kullanıcı isteği (sonsuz kaydırma): ESKİ
-                    // SAYFA yanıtı — mevcut "en yeniden daha yeni" zaman
-                    // damgası eşiği burada YANLIŞ yönde çalışırdı (bu
-                    // sayfalama KASITLI olarak daha eski mesajlar getiriyor),
-                    // bu yüzden `message_id` bazlı var-olma kontrolü kullanılır.
+                    // Infinite scroll: this is an OLDER PAGE reply. The usual "newer than the latest timestamp" threshold would work in the WRONG
+                    // direction here (this paging deliberately fetches older messages), so a `message_id` existence check is used instead.
                     match &group_id {
                         Some(gid) => {
                             let own_identity_id = self.identity.as_ref().map(|i| i.identity_id.clone());
                             let merged: Vec<serde_json::Value> = messages.into_iter().filter_map(|mut m| {
-                                // "sent" ise gönderen YANITLAYANIN kendisi
-                                // (paket başlığından zaten bilinen
-                                // `sender_identity_id`); "received" ise
-                                // yanıtlayanın kendi arşivindeki gerçek
-                                // gönderen taşınır (bkz. packet.rs
-                                // SyncedMessage notu).
+                                // For "sent", the sender is the RESPONDER itself (already known from the packet header, `sender_identity_id`).
+                                // For "received", the real sender is taken from the responder's own archive (see the SyncedMessage note in packet.rs).
                                 let actual_sender = if m.direction == "sent" {
                                     Some(sender_identity_id.clone())
                                 } else {
@@ -833,10 +698,8 @@ impl P2PCore {
                                     return None;
                                 }
                                 if !self.message_exists_in_chat(&mid, Some(gid.as_str()), "") {
-                                    // NOT: `SyncedMessage` (bkz. packet.rs) henüz yanıt
-                                    // bilgisi taşımıyor — geçmiş senkronuyla gelen eski
-                                    // mesajlar şimdilik yanıt önizlemesi olmadan arşivlenir
-                                    // (bilinen, kabul edilmiş bir kapsam sınırı).
+                                    // NOTE: `SyncedMessage` (see packet.rs) does not carry reply info yet. Old messages that arrive via history
+                                    // sync are archived without a reply preview for now (a known, accepted scope limit).
                                     // Not shown when it is not on disk: it would vanish on reload.
                                     if let Err(e) = self.archive_group_message(gid, &author, our_direction, m.text.as_bytes(), Some(&mid), None, None, None, m.sent_at_ms, m.author_proof.as_deref()) {
                                         error!("Grup geçmişi satırı arşivlenemedi: {}", e);
@@ -846,13 +709,9 @@ impl P2PCore {
                                     self.backdate_archived(Some(gid.as_str()), "", m.message_id.as_deref(), m.timestamp);
                                     let at = if m.sent_at_ms != 0 { m.sent_at_ms } else { m.timestamp };
                                     oldest_written = Some(oldest_written.map_or(at, |o| o.min(at)));
-                                    // bu satırı hiç sahip olmadığımız için taze arşivliyoruz —
-                                    // yanıtlayan tarafta silinmiş olarak
-                                    // işaretliyse bizde de ÖYLE işaretlenmeli,
-                                    // aksi halde silinen bir mesaj bu cihazda
-                                    // (ör. yeni eklenen ikincil cihaz, ya da
-                                    // hiç sahip olunmayan eski bir sayfa)
-                                    // sanki hiç silinmemiş gibi geri gelir.
+                                    // We do not have this row, so it is archived fresh. If the responder marked it deleted, we mark it deleted
+                                    // too. Otherwise a deleted message comes back on this device (e.g. a newly added secondary device, or an old
+                                    // page we never had) as if it had never been deleted.
                                     self.apply_synced_message_flags(Some(gid), "", &m);
                                     // The delete above cleared the proof.
                                     if let (true, Some(mid)) = (m.is_deleted, m.message_id.as_deref()) {
@@ -872,13 +731,9 @@ impl P2PCore {
                                 // See the group arm: id-less rows are skipped.
                                 let mid = m.message_id.as_deref()?;
                                 if !self.message_exists_in_chat(mid, None, &chat_key) {
-                                    // bkz. yukarıdaki archive_group_message aynı notu
-                                    // (SyncedMessage henüz yanıt bilgisi taşımıyor).
-                                    // Çoklu-cihaz düzeltmesi: KANONİK sohbet
-                                    // anahtarı altına arşivle (canlı Text
-                                    // koluyla AYNI) — `peer_fp` kanonik değilse
-                                    // satırlar UI'nin hiç okumadığı ayrı bir
-                                    // sohbete düşüyordu.
+                                    // See the same note in archive_group_message above (SyncedMessage does not carry reply info yet).
+                                    // Multi-device fix: archive under the CANONICAL chat key (same as the live Text arm). If `peer_fp` is not
+                                    // canonical, the rows landed in a separate chat the UI never reads.
                                     if let Err(e) = self.archive_message(&chat_key, our_direction, m.text.as_bytes(), Some(mid), None, None, None, m.sent_at_ms) {
                                         error!("Geçmiş satırı arşivlenemedi: {}", e);
                                         write_failed = true;
@@ -888,9 +743,7 @@ impl P2PCore {
                                     self.mark_synced(&chat_key, Some(mid));
                                     let at = if m.sent_at_ms != 0 { m.sent_at_ms } else { m.timestamp };
                                     oldest_written = Some(oldest_written.map_or(at, |o| o.min(at)));
-                                    // bkz. yukarıdaki grup koluyla aynı düzeltme —
-                                    // yanıtlayanın silinmiş işaretini bu ilk
-                                    // arşivlemede de yansıt.
+                                    // See the group arm above: mirror the responder's deleted flag on this first archive too.
                                     self.apply_synced_message_flags(None, &chat_key, &m);
                                 }
                                 Some(serde_json::json!({"direction": our_direction, "text": m.text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms, "reactions": m.message_id.as_deref().map(|id| self.reactions_summary(id)).unwrap_or_default(), "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited, "via_sync": self.is_synced(&chat_key, m.message_id.as_deref())}))
@@ -899,39 +752,19 @@ impl P2PCore {
                         }
                     }
                 } else {
-                    // Mevcut davranış (DEĞİŞMEDİ): sohbet açılışı senkronu.
-                    // `messages`'in direction'ı YANITLAYANIN (arşivi tutan
-                    // node'un) bakış açısıyla geldi — bizim ekranımız için
-                    // ters çevrilmeli: onların "sent"i bizim "received"imiz,
-                    // onların "received"i bizim "sent"imiz.
-                    // Spec dışı düzeltme: senkronla gelen mesajlar önceden
-                    // SADECE bu ekranın o anki bellek-içi listesine
-                    // ekleniyordu — kalıcı hiçbir kayıt bırakmıyordu,
-                    // geçmiş her sohbet açılışında ağdan yeniden çekilmek
-                    // zorundaydı. Artık HER cihaz (node olsun olmasın, bkz.
-                    // send_message_content/yukarıdaki Text kolu notu)
-                    // kendi canlı trafiğini zaten yerelde arşivliyor —
-                    // burada `latest_archived_timestamp` ile SADECE zaten
-                    // sahip OLMADIĞIMIZ (daha yeni) mesajlar yazılıyor,
-                    // aksi halde her sohbet açılışında (artık her zaman
-                    // senkron denendiği için) aynı satırlar tekrar tekrar
-                    // eklenip yinelenen kayıtlar oluşurdu.
-                    // Çoklu-cihaz düzeltmesi: eşik/arşiv/olay hepsi KANONİK
-                    // sohbet anahtarını kullanır (bkz. pagination kolundaki
-                    // aynı not).
+                    // Existing behaviour (UNCHANGED): chat-open sync. The `messages` direction came from the RESPONDER's point of view (the node
+                    // holding the archive). It must be flipped for our screen: their "sent" is our "received", and their "received" is our "sent".
+                    // Previously synced messages were only added to this screen's in-memory list and left no permanent record, so history had to be
+                    // fetched from the network again on every chat open. Now EVERY device (node or not, see send_message_content and the live Text
+                    // arm above) archives its own live traffic locally. Here, `latest_archived_timestamp` writes ONLY the messages we do NOT yet have
+                    // (newer ones). Otherwise each chat open (sync is always attempted now) would add the same rows again as duplicates.
+                    // Multi-device fix: the threshold, the archive and the event all use the CANONICAL chat key (see the pagination arm's note).
                     let already_have_since = self.latest_archived_timestamp(&chat_key);
                     let flipped: Vec<serde_json::Value> = messages.into_iter().filter_map(|m| {
                         let our_direction = if m.direction == "sent" { "received" } else { "sent" };
-                        // önceden dedup SADECE
-                        // zaman damgası eşiğiyle yapılıyordu ve arşivleme
-                        // `message_id: None` geçiyordu — yani bu yoldan
-                        // gelen satırlar hiçbir zaman `message_id` ile
-                        // aranamıyordu (gelecekteki bir senkronda tekrar
-                        // dedup edilemez, bkz. `message_exists_with_id`).
-                        // Artık (varsa) `message_id` de hem dedup için hem
-                        // kalıcı kayıt için kullanılıyor — pagination
-                        // yolundaki (`before_timestamp.is_some()`) aynı
-                        // deseni burada da uyguluyoruz.
+                        // Before, dedup used ONLY the timestamp threshold, and archiving passed `message_id: None`. So rows from this path could never
+                        // be looked up by `message_id` (a later sync could not dedup them, see `message_exists_with_id`). Now `message_id`, when
+                        // present, is used both for dedup and for the permanent record, as in the pagination path (`before_timestamp.is_some()`).
                         let already_exists = m.message_id.as_deref()
                             .map(|mid| self.message_exists_in_chat(mid, None, &chat_key))
                             .unwrap_or(false);
@@ -948,11 +781,8 @@ impl P2PCore {
                             }
                             self.backdate_archived(None, &chat_key, m.message_id.as_deref(), m.timestamp);
                             self.mark_synced(&chat_key, m.message_id.as_deref());
-                            // Spec dışı, hata düzeltmesi ("silinen mesaj
-                            // geçmiş senkronuyla geri geliyor"): bu satırı
-                            // hiç sahip olmadığımız için taze arşivliyoruz —
-                            // yanıtlayan tarafta silinmiş işaretliyse bizde
-                            // de öyle işaretlenmeli.
+                            // Ordering fix ("a deleted message comes back with the history sync"): we do not have this row, so it is archived
+                            // fresh. If the responder marked it deleted, we mark it deleted here too.
                             self.apply_synced_message_flags(None, &chat_key, &m);
                         }
                         Some(serde_json::json!({"direction": our_direction, "text": m.text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms, "reactions": m.message_id.as_deref().map(|id| self.reactions_summary(id)).unwrap_or_default(), "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited, "via_sync": self.is_synced(&chat_key, m.message_id.as_deref())}))
@@ -1010,11 +840,8 @@ impl P2PCore {
                 preview_jpeg, duration_ms, chunk_size, chunk_hashes,
                 caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin,
             } => {
-                // bkz. `sender_may_post_to_group` — grup Text koluyla AYNI
-                // boşluk, ve burada daha ağır: kabul edilen bir teklif node
-                // modunda OTOMATİK indirme başlatıyor, yani yetkisiz bir
-                // gönderen alıcının diskine ve bant genişliğine doğrudan
-                // erişiyordu.
+                // See `sender_may_post_to_group`. Same gap as the group Text arm, and worse here: an accepted offer starts an AUTOMATIC download in
+                // node mode, so an unauthorised sender got direct access to the recipient's disk and bandwidth.
                 if let Some(gid) = &group_id {
                     if !self.sender_may_post_to_group(gid, &sender_identity_id) {
                         warn!(
@@ -1051,40 +878,23 @@ impl P2PCore {
                 ev
             }
             MessageContent::Ack { target_message_id } => {
-                // Karşı taraf bizim gönderdiğimiz bir Text/Edit/Delete/
-                // HistorySyncRequest'i başarıyla aldı — o paketi artık
-                // yeniden denemeyi bırakabiliriz (bkz.
-                // `awaiting_confirmation` dokümantasyonu).
-                // `target_message_id` here is the acked packet's own id. For
-                // a `Text` that equals the UI bubble id, but for Edit/Delete
-                // it's a separate, random packet id — not the message being
-                // edited/deleted. Look up `regen_content` (the original
-                // content) before removing, so the emitted event can carry
-                // the real target id instead.
-                // Onaylanan paketin GERÇEKTEN bu Ack'i gönderen eş için
-                // kuyruklanmış olduğunu doğrula — aksi halde herhangi bir
-                // eş, rastgele/bilinen bir `message_id` ile başka bir eşe
-                // giden bekleyen bir paketi sahte Ack'le iptal edebilirdi
-                // (session binding eksikliği).
+                // The peer received a Text/Edit/Delete/HistorySyncRequest we sent. We can stop retrying that packet (see `awaiting_confirmation`).
+                // `target_message_id` here is the acked packet's own id. For a `Text` it equals the UI bubble id, but for Edit/Delete it is a separate,
+                // random packet id, not the message being edited/deleted. Look up `regen_content` (the original content) before removing, so the
+                // emitted event can carry the real target id.
+                // Check that the acked packet really was queued for THIS peer. Otherwise any peer could cancel a pending packet bound for another
+                // peer with a forged Ack using a known or guessed `message_id` (missing session binding).
                 match self.apply_incoming_ack(&peer_fp, &target_message_id) {
                     Some(ev) => ev,
                     None => return Ok(serde_json::json!({"type": "noop"}).to_string()),
                 }
             }
             MessageContent::Seen { target_message_id, group_message_local_id } => {
-                // bkz. packet.rs `Seen` notu — teslim (Ack) değil, GÖRME
-                // bildirimi. Kendisi ayrıca onaylanmaz (Ack'le aynı sonsuz
-                // döngü gerekçesi).
-                // "seen mekanizması ve
-                // seen pp bubbles güvenilir değil, özellikle gruplarda"):
-                // önceden BURADA kalıcı hiçbir şey yazılmıyordu — aşağıdaki
-                // JSON sadece o an sohbet ekranı AÇIKSA görülen, kalıcı
-                // olmayan bir olaydı. Uygulama arka plandayken/ekran
-                // kapalıyken gelen HER "görüldü" bildirimi sonsuza dek
-                // kayboluyordu (bkz. `message_seen` tablosu dokümantasyonu).
-                // `message_id` kolonuyla AYNI anlam: grup mesajında
-                // `group_message_local_id`, 1:1'de `target_message_id` (bkz.
-                // `load_message_history`/`load_group_message_history`).
+                // See packet.rs `Seen`. This is a read receipt, not delivery (Ack). It is not acked itself (same endless-loop reasoning as Ack).
+                // Seen used to be non-persistent: nothing was written here, and the JSON below was an event that existed only while the chat screen
+                // was OPEN. Every "seen" arriving while the app was in the background or the screen off was lost for good (see the `message_seen`
+                // table docs). The `message_id` column means the same as in the Ack path: `group_message_local_id` for group messages,
+                // `target_message_id` for 1:1 (see `load_message_history`/`load_group_message_history`).
                 let seen_key = group_message_local_id.clone().unwrap_or_else(|| target_message_id.clone());
                 if !self.may_mark_seen(&seen_key, &sender_identity_id) {
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
@@ -1126,9 +936,8 @@ impl P2PCore {
                 if group_id.as_ref().map_or(false, |gid| !self.sender_may_post_to_group(gid, &sender_identity_id)) {
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
-                // Kasitli olarak: arsivlenmez, Ack GONDERILMEZ (bkz.
-                // packet.rs notu) -- birkac saniyede bayatlayan bir bilgi
-                // icin tekrar deneme/onay trafiginin hicbir degeri yok.
+                // Deliberately: not archived, no Ack sent (see
+                // packet.rs note): the value goes stale within seconds, so retry/ack traffic is pointless.
                 // `sender_identity_id` identifies which member is typing (needed for groups).
                 match &group_id {
                     Some(gid) => serde_json::json!({
@@ -1143,11 +952,9 @@ impl P2PCore {
             }
             MessageContent::ProfileUpdate { avatar_jpeg, display_name } => {
                 self.send_ack(&peer_fp, &message_id);
-                // bkz. `MAX_AVATAR_BYTES` — gelen yönde hiç sınır yoktu;
-                // karşı taraf her kişi satırına istediği kadar bayt
-                // yazdırabiliyordu. Ack YİNE gönderilir (yeniden denemesin),
-                // sadece avatar yok sayılır — the stored one stays, and the
-                // name in the same packet is still taken.
+                // See `MAX_AVATAR_BYTES`. The incoming direction used to have no limit: the other side could write any number of bytes into each
+                // contact row. The Ack is still sent (so it does not retry), only the avatar is ignored. The stored one stays, and the name in the
+                // same packet is still taken.
                 let avatar_too_big = avatar_jpeg.as_ref().map_or(false, |a| a.len() > MAX_AVATAR_BYTES);
                 if avatar_too_big {
                     warn!(
@@ -1155,13 +962,10 @@ impl P2PCore {
                         avatar_jpeg.as_ref().map_or(0, |a| a.len()), crate::log_id(&peer_fp)
                     );
                 }
-                // Kullanıcı isteği (2026-09-04): karşı taraf adını
-                // değiştirdiyse kişi listesindeki ad da değişir. `None` =
-                // paket ad TAŞIMIYOR (eski sürüm) — o durumda mevcut ad
-                // KORUNUR; boş/kontrol karakterli bir ad da yok sayılır
-                // (bkz. `sanitize_display_name`).
-                // From one of my own devices: it is MY photo that changed
-                // (`set_own_profile_picture`). The name travels by DeviceSync.
+                // User request (2026-09-04): if the other side changed its name, the name in the contact list changes too. `None` = the packet
+                // carries NO name (older version); the current name is kept then. An empty or control-character name is also ignored (see
+                // `sanitize_display_name`). From one of my own devices: it is MY photo that changed (`set_own_profile_picture`). The name travels
+                // with DeviceSync.
                 if self.my_identity_id().as_deref() == Some(sender_identity_id.as_str()) {
                     if let (Some(conn), false) = (&self.db, avatar_too_big) {
                         if let Err(e) = conn.execute(
@@ -1197,26 +1001,18 @@ impl P2PCore {
                 serde_json::json!({
                     "type": "profile_update", "peer": chat_key,
                     "avatar_hex": shown_avatar.as_ref().map(|a| hex::encode(a)),
-                    // Arayüz, ad GERÇEKTEN değiştiyse kullanıcıya
-                    // gösterebilsin diye eski/yeni ad birlikte veriliyor
-                    // (aynı adın yeniden bildirilmesi olağan: her fotoğraf
-                    // değişikliği de bu paketi taşıyor).
+                    // The UI can show that the name really changed, so both the old and new name are passed (the same name being re-announced is
+                    // normal: every photo change carries this packet too).
                     "display_name": new_name,
                     "previous_display_name": renamed_from
                 })
             }
             MessageContent::GroupUpdate(update) => {
-                // artık ratchet- şifreli kanaldan geliyor (bkz. packet.rs notu) — bu, DIŞ
-                // paketin (`MessagePacket`) zaten hibrit doğrulanmış
-                // göndericisi (`sender_identity_id`/`peer_fp`) İLE
-                // `update.signed_by`'nin AYNI kişi olması gerekmediği
-                // anlamına gelir (ör. kurucu olmayan bir üye de bu paketi
-                // pairwise iletebilir, sadece bu kod tabanında henüz
-                // relay yok) — asıl yetki kontrolü `process_group_update`
-                // içindeki KENDİ (ayrıca hibrit) `update.signature`/
-                // `signature_pq` doğrulaması ve `signed_by == founder`
-                // kısıtıdır, dış paket imzası sadece taşıma bütünlüğünü
-                // garanti eder.
+                // now arrives over the ratchet-encrypted channel (see the packet.rs note). The OUTER packet (`MessagePacket`) already has a
+                // hybrid-verified sender (`sender_identity_id`/`peer_fp`), and this does NOT require that sender to equal `update.signed_by`. For
+                // example a non-founder member may also relay this packet pairwise (there is no relay in this code base yet). The real authority
+                // check is the group's own `update.signature`/`signature_pq` verification inside `process_group_update` (also hybrid) and the
+                // `signed_by == founder` rule. The outer packet signature only guarantees transport integrity.
                 let group_id = update.group_id.clone();
                 match self.process_group_update(&update) {
                     Ok(()) => {
@@ -1237,9 +1033,8 @@ impl P2PCore {
                 }
             }
             MessageContent::GroupSyncRequest { group_id } => {
-                // #77: a member (or my own other device) lacks devices of the
-                // group: the founder re-sends the whole state to it, at most
-                // every 10 minutes per member.
+                // A member (or one of my own other devices) lacks devices of the group: the founder re-sends the whole state to it, at most every
+                // 10 minutes per member.
                 self.send_ack(&peer_fp, &message_id);
                 let me = self.my_identity_id().unwrap_or_default();
                 let group = self.groups.get(&group_id)
@@ -1261,15 +1056,10 @@ impl P2PCore {
                 serde_json::json!({"type": "noop"})
             }
             MessageContent::LeaveGroupRequest { group_id } => {
-                // bkz. `leave_group` dokümantasyonu — bu isteği yalnızca
-                // gerçekten bu grubun kurucusu isek işleriz (`remove_from_group`
-                // zaten bunu kendi içinde kontrol eder, ör. bir hata/kafa
-                // karışıklığı sonucu kurucu olmayan bir cihaza ulaşırsa
-                // sessizce reddedilir, grup durumu bozulmaz). Ack HER
-                // durumda gönderilir — ayrılan üyenin isteği en azından
-                // BİZE ulaştı, `awaiting_confirmation` yeniden denemeyi
-                // durdurabilir (işleyemesek bile, örn. bu grubun kurucusu
-                // biz değilsek, tekrar denemenin bir faydası olmaz).
+                // See `leave_group`. We act on this request only if we really are this group's founder (`remove_from_group` checks that itself, so a
+                // device that is not the founder and gets it by mistake rejects it silently and the group state stays intact). The Ack is sent in
+                // EVERY case: the leaving member's request has at least reached US, so `awaiting_confirmation` can stop retrying (even if we cannot
+                // process it, e.g. we are not this group's founder, retrying would not help).
                 self.send_ack(&peer_fp, &message_id);
                 if let Err(e) = self.remove_from_group(&group_id, &sender_identity_id, false) {
                     error!("LeaveGroupRequest işlenemedi (group={}, ayrılan={}): {}", group_id, crate::log_id(&sender_identity_id), e);
@@ -1278,22 +1068,13 @@ impl P2PCore {
                 serde_json::json!({"type": "member_left", "group_id": group_id, "identity_id": sender_identity_id})
             }
             MessageContent::AddressAnnounce { multiaddr } => {
-                // bkz. packet.rs `AddressAnnounce` dokümantasyonu — bu, tam
-                // olarak `remember_device_addr`'ın (bkz. o fonksiyon —
-                // `.onion` ise ayrıca `device_onion_addr`'a da yazar)
-                // beklediği biçimde tam bir multiaddr (`.../p2p/<peer_id>`
-                // dahil). Kasıtlı olarak Ack GÖNDERİLMİYOR/arşivlenmiyor —
-                // `TypingIndicator` ile AYNI gerekçe (bkz. o notun ayrıntısı):
-                // bu bir "o anki en iyi adresim" anlık görüntüsü, göndericinin
-                // kendisi zaten Tor hazır olduğunda/ağ değiştiğinde periyodik
-                // olarak yeniden yollar (bkz. `announce_address_to_all_contacts`
-                // çağıranları) — süresiz onay bekleme mekanizmasının burada
-                // hiçbir değeri yok.
-                // Only the sender's own onion address: a contact must not
-                // point us at a stranger to dial again and again. A PeerId
-                // other than the one we know for the device (or any, when none
-                // is known) counts only when the device delivered this itself
-                // over that PeerId's connection (a restored device has a new one).
+                // See packet.rs `AddressAnnounce`. This is a full multiaddr (`.../p2p/<peer_id>` included), in the form `remember_device_addr` expects
+                // (it also writes `.onion` to `device_onion_addr`). No Ack is sent and nothing is archived, for the same reason as `TypingIndicator`:
+                // this is a snapshot of "my best current address", and the sender re-sends it periodically when Tor becomes ready or the network
+                // changes (see callers of `announce_address_to_all_contacts`). Endless ack waiting has no value here.
+                // Only the sender's own onion address: a contact must not point us at a stranger to dial again and again. A PeerId other than the
+                // one we know for the device (or any, when none is known) counts only when the device delivered this itself over that PeerId's
+                // connection (a restored device has a new one).
                 let announced = multiaddr.parse::<Multiaddr>().ok()
                     .filter(is_onion_multiaddr)
                     .and_then(|m| extract_peer_id(&m));
@@ -1307,8 +1088,7 @@ impl P2PCore {
                 }
                 serde_json::json!({"type": "address_announce", "peer": peer_fp})
             }
-            // Çoklu-cihaz (spec 1.5 adım 5-6): birincil cihaz, bu (ikincil)
-            // cihazı kimliğine kabul etti. `peer_fp` = gönderen = birincil.
+            // Multi-device: the primary accepted this (secondary) device into its identity. `peer_fp` = sender = primary.
             MessageContent::DeviceLinkGrant { identity_id, device_add, sync, nonce } => {
                 // Acked once adopted: acked first, a failure here lost the
                 // grant and the link never completed.
@@ -1328,8 +1108,7 @@ impl P2PCore {
                     }
                 }
             }
-            // Çoklu-cihaz (spec 1.5 adım 5, kişi tarafı): bir kimliğe yeni cihaz
-            // eklendi. İmzayı o kimliğin bilinen aktif cihazıyla doğrula.
+            // Multi-device: a new device was added to an identity. Verify the signature with that identity's known active device.
             MessageContent::DeviceAddNotice { device_add, device } => {
                 self.send_ack(&peer_fp, &message_id);
                 match self.apply_device_add_notice(&device_add, &device, &sender_identity_id) {
@@ -1337,24 +1116,20 @@ impl P2PCore {
                     Err(e) => { error!("DeviceAddNotice reddedildi: {}", e); serde_json::json!({"type": "noop"}) }
                 }
             }
-            // Çoklu-cihaz (spec 1.6): imzalı cihaz iptali.
+            // Multi-device: signed device revocation.
             MessageContent::DeviceRevokeNotice(revoke) => {
-                // Ack ÖNCE gönderilir — self-revoke'ta wipe ratchet'i sildikten
-                // sonra artık Ack üretemeyiz, ama iptali başlatan cihazın "bu
-                // cihaz bildirimi aldı" bilmesi değerli.
+                // The Ack is sent FIRST: after a self-revoke wipes the ratchet we can no longer produce an Ack, but the device starting the revoke
+                // should still learn that this device got the notice.
                 self.send_ack(&peer_fp, &message_id);
                 match self.apply_device_revoke_notice(&revoke, &peer_fp) {
-                    // Bu cihazın KENDİ iptali — yerel durum tamamen silindi.
-                    // UI bunu alınca Keystore/vault sırrını da silip
-                    // onboarding'e dönmeli (bkz. `wipe_all_local_state`).
-                    // `self_revoked` is already queued by `apply_device_revoke_notice`.
+                    // This device's OWN revocation: local state is fully wiped. The UI must, on receiving this, also delete the Keystore/vault secret
+                    // and return to onboarding (see `wipe_all_local_state`). `self_revoked` is already queued by `apply_device_revoke_notice`.
                     Ok(true) => serde_json::json!({"type": "noop"}),
                     Ok(false) => serde_json::json!({"type": "device_change", "identity_id": revoke.identity_id}),
                     Err(e) => { error!("DeviceRevokeNotice reddedildi: {}", e); serde_json::json!({"type": "noop"}) }
                 }
             }
-            // Çoklu-cihaz (spec 1.7): kardeş cihazdan gelen delta senkron —
-            // SADECE gönderen kendi kimliğimin bir cihazıysa kabul et.
+            // Multi-device: delta sync from a sibling device. Accept ONLY if the sender is one of my own identity's devices.
             MessageContent::DeviceSync(sync) => {
                 self.send_ack(&peer_fp, &message_id);
                 let my_id_now = self.my_identity_id();
@@ -1362,14 +1137,10 @@ impl P2PCore {
                     .map(|d| my_id_now.as_deref() == Some(d.identity_id.as_str()))
                     .unwrap_or(false);
                 if from_sibling {
-                    // Kardeş cihaz bize kök arşiv anahtarını (ARK) verdiyse
-                    // benimse — bu olmadan sunucudaki geçmiş bu cihazda
-                    // ÇÖZÜLEMEZ. Zaten bir ARK'ımız varsa DOKUNMA: iki
-                    // cihaz aynı anda kurulup farklı anahtar üretmiş
-                    // olabilir, o durumda sessizce üzerine yazmak eski
-                    // arşivi okunamaz hâle getirirdi.
-                    // The primary's key replaces ours (it rotates the key
-                    // when it revokes a device); bkz. `adopt_archive_key`.
+                    // If the sibling device gave us the root archive key (ARK), adopt it. Without it the history on the server cannot be DECRYPTED on
+                    // this device. If we already have an ARK, do NOT touch it: two devices may have been set up at the same time and generated
+                    // different keys, and silently overwriting it would make the old archive unreadable. The primary's key replaces ours (it rotates
+                    // the key when it revokes a device); see `adopt_archive_key`.
                     if let Some(ark) = &sync.archive_root_key {
                         let had_key = self.archive_root_key.is_some();
                         if self.adopt_archive_key(ark, my_id_now.as_deref() == Some(peer_fp.as_str())) {
@@ -1383,8 +1154,7 @@ impl P2PCore {
                         }
                     }
                     let learned = self.import_sync_payload(&sync);
-                    // Yeni öğrenilen kişilere kendimizi tanıt (bu cihazı da
-                    // tanısınlar) — anahtarlarımızı güvenilir biçimde ver.
+                    // Introduce ourselves to newly learned contacts (so they know this device too), handing them our keys reliably.
                     let own_dev = self.own_synced_device();
                     let own_da = self.own_device_add.clone();
                     for id in &learned {
@@ -1400,22 +1170,19 @@ impl P2PCore {
                     serde_json::json!({"type": "noop"})
                 }
             }
-            // Çoklu-cihaz (spec 1.7.1): kardeşten "okundu" senkronu.
+            // Multi-device: "read" sync from a sibling.
             MessageContent::ReadStateSync { conversation_identity_id, group_id, read_at_ms } => {
-                // Ack KOŞULSUZ (bkz. DeviceSync kolu aynı desen): bu artık
-                // güvenilir teslimli, ve reddedilen bir senkronu sonsuza dek
-                // yeniden denetmenin hiçbir değeri yok — küçük bir ipucu
-                // mesajı, kaybolması "sohbet diğer cihazda okunmadı görünür"
-                // demek, sonsuz trafikten iyidir.
+                // Ack UNCONDITIONALLY (see the DeviceSync arm, same pattern): this is now reliably delivered, and there is no point endlessly
+                // re-checking a rejected sync. A small hint message: if it is lost, the chat just shows as unread on the other device, which is
+                // better than endless traffic.
                 self.send_ack(&peer_fp, &message_id);
                 let my_id_now = self.my_identity_id();
                 let from_sibling = self.known_remote_devices.get(&peer_fp)
                     .map(|d| my_id_now.as_deref() == Some(d.identity_id.as_str()))
                     .unwrap_or(false);
                 if from_sibling {
-                    // Yerel sohbet anahtarına çevir: grup → "group:<id>",
-                    // 1:1 → kişinin kanonik cihazı (bu cihazdaki sohbet
-                    // anahtarı). Kotlin bunu ReadStatePrefs'e uygular.
+                    // Translate to the local chat key: group -> "group:<id>", 1:1 -> the contact's canonical device (the chat key on this device).
+                    // Kotlin applies this to ReadStatePrefs.
                     let conversation = if let Some(gid) = group_id {
                         format!("group:{}", gid)
                     } else if let Some(id) = conversation_identity_id {
@@ -1429,9 +1196,7 @@ impl P2PCore {
                         serde_json::json!({"type": "read_state_sync", "conversation": conversation, "read_at": read_at_ms})
                     }
                 } else {
-                    // KARŞI TARAFTAN (2026-09-07): "okuma sınırı" = TOPLU
-                    // görüldü makbuzu. Gönderen = okuyan. bkz.
-                    // `apply_incoming_read_watermark`.
+                    // From the OTHER side (2026-09-07): the "read watermark" is a BULK seen receipt. Sender = reader. See `apply_incoming_read_watermark`.
                     let viewer = self.known_remote_devices.get(&peer_fp).map(|d| d.identity_id.clone());
                     match viewer {
                         Some(viewer_id) => {
@@ -1449,9 +1214,8 @@ impl P2PCore {
                                 serde_json::json!({
                                     "type": "seen_bulk",
                                     "peer": peer_fp,
-                                    // 1:1 için `null` (boş string DEĞİL): ChatActivity
-                                    // dinleyicisi `!isNull("group_id")` olan olayı
-                                    // grup olayı sayıp atıyor.
+                                    // For 1:1 use `null` (not an empty string): the ChatActivity listener treats an event with `!isNull("group_id")`
+                                    // as a group event and drops it.
                                     "group_id": group_id.clone(),
                                     "viewer_identity_id": viewer_id,
                                     "up_to_ms": read_at_ms,
@@ -1463,8 +1227,7 @@ impl P2PCore {
                     }
                 }
             }
-            // Çoklu-cihaz (spec 1.7): kendi başka cihazımın gönderdiği mesaj/
-            // düzenleme/silme — burada da "gönderilen" olarak göster.
+            // Multi-device: a message/edit/delete sent from my other device, shown here too as "sent".
             MessageContent::SiblingEcho { conversation_identity_id, group_id, body } => {
                 let my_id_now = self.my_identity_id();
                 let from_sibling = self.known_remote_devices.get(&peer_fp)
@@ -1474,7 +1237,7 @@ impl P2PCore {
                     serde_json::json!({"type": "noop"})
                 } else {
                     let own_id = my_id_now.clone().unwrap_or_default();
-                    // 1:1 için yerel sohbet anahtarı (bu cihazdaki kanonik cihaz).
+                    // Local chat key for 1:1 (the canonical device on this device).
                     let chat_key = conversation_identity_id.as_ref()
                         .and_then(|id| self.canonical_device_for_identity(id));
                     // A contact deleted on this device only: there is nowhere
@@ -1492,14 +1255,9 @@ impl P2PCore {
                     let mut ack = true;
                     let ev = match body {
                         SiblingEchoBody::Text { message_id: mid, text, sent_at_ms, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id } => {
-                            // Güvenilirlik düzeltmesi (çift arşiv) — 1:1/grup
-                            // Text kollarındaki AYNI dedup: kardeşin
-                            // `regen_content` tazelemesi/restart yeniden
-                            // gönderimi aynı yankıyı ikinci kez getirebilir.
-                            // Ack aşağıda (`ack`) gönderilir.
-                            // In this chat: with the global check, a member who
-                            // saw the id could send any text under it first and
-                            // the echo was dropped as a duplicate.
+                            // Double archive fix, same dedup as the 1:1 and group Text arms: a sibling's `regen_content` refresh or restart resend can
+                            // bring the same echo a second time. The Ack is sent below (`ack`).
+                            // In this chat: with the global check, a member who saw the id could send any text under it first, and the echo was dropped as a duplicate.
                             let dup = match (&group_id, &chat_key) {
                                 (Some(gid), _) => self.message_exists_in_chat(&mid, Some(gid.as_str()), ""),
                                 (None, Some(ck)) => self.message_exists_in_chat(&mid, None, ck),
@@ -1549,11 +1307,8 @@ impl P2PCore {
                             }
                         }
                         SiblingEchoBody::Reaction { target_message_id, emoji, reacted_at_ms } => {
-                            // Yankı KENDİ tepkim — bu yüzden tepki veren
-                            // kendi kimliğim (`own_id`), kardeş cihazın
-                            // kimliği değil (ikisi zaten aynı identity).
-                            // The contact arm's checks; a 1:1 row's chat is the
-                            // conversation identity, not mine.
+                            // The echo is MY reaction, so the reacting identity is `own_id` (my own), not the sibling device's id (both are the same identity).
+                            // Same checks as the contact arm; a 1:1 row's chat is the conversation identity, not mine.
                             let chat_identity = if group_id.is_some() { own_id.as_str() } else { conversation_identity_id.as_deref().unwrap_or("") };
                             if emoji.len() > 64 || !self.reaction_fits_chat(&target_message_id, group_id.as_deref(), chat_identity) {
                                 warn!("Kardeş tepkisi yok sayıldı: hedef bu sohbete ait değil ya da emoji çok uzun");
@@ -1577,9 +1332,8 @@ impl P2PCore {
                                 preview_jpeg, duration_ms, chunk_size, chunk_hashes,
                                 caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, ..
                             } => {
-                                // Aynı yankı ikinci kez (regen/restart): satır varsa
-                                // dokunma — `receive_file_offer`'ın INSERT OR REPLACE'i
-                                // tamamlanmış bir indirmeyi sıfırlardı.
+                                // The same echo a second time (regen/restart): if the row exists, leave it alone. `receive_file_offer`'s INSERT OR REPLACE
+                                // would reset a completed download.
                                 let exists = self.db.as_ref().map_or(false, |c| {
                                     c.query_row("SELECT 1 FROM files WHERE file_id = ?1", params![file_id], |_| Ok(())).is_ok()
                                 });
@@ -1596,10 +1350,8 @@ impl P2PCore {
                                         reply_to_sender_identity_id.as_deref(), sticker, sticker_origin.as_deref(),
                                     );
                                     if ev["type"] == "file_offer" {
-                                        // Satır benim giden ekim. Grupta kaynak kardeş
-                                        // kalır; 1:1'de sütun sohbet anahtarıdır (ek
-                                        // doğru sohbette listelensin) ve yeniden
-                                        // indirmede `download_file` kardeşleri aday ekler.
+                                        // The row is my outgoing offer. In a group the source sibling stays as is. In 1:1 the column is the chat key (so the
+                                        // file is listed in the right chat), and on re-download `download_file` adds the siblings as candidates.
                                         let peer_col = if group_id.is_some() { peer_fp.clone() } else { chat_key.clone().unwrap_or_default() };
                                         if let Some(conn) = &self.db {
                                             let _ = conn.execute(
@@ -1688,13 +1440,9 @@ impl P2PCore {
                             _ => serde_json::json!({"type": "noop"}),
                         },
                         SiblingEchoBody::Delete { target_message_id } => {
-                            // birincil cihazdaki
-                            // silme, ekli dosyayı da diskten kaldırıyor
-                            // (bkz. `delete_message`/`delete_group_message`
-                            // aynı çağrı) ama bu kardeş-yankı kolu önceden
-                            // SADECE arşiv satırını güncelliyordu — ikincil
-                            // cihazda dosya kalıcı olarak diskte kalırdı
-                            // (sızıntı, hiçbir zaman temizlenmezdi).
+                            // Deleting a message on the primary also removes the attached file from disk (see `delete_message`/`delete_group_message`,
+                            // the same call). But this sibling-echo arm used to update only the archive row, so on the secondary device the file stayed
+                            // on disk for good (a leak, never cleaned up).
                             if !self.edit_or_delete_target_exists(&target_message_id) {
                                 ack = self.remember_sibling_op(&target_message_id, None, 0);
                                 serde_json::json!({"type": "noop"})
@@ -1722,7 +1470,7 @@ impl P2PCore {
                     ev
                 }
             }
-            // Çoklu-cihaz (spec 1.7): kardeşten geçmiş geri-doldurma isteği.
+            // Multi-device: history back-fill request from a sibling.
             MessageContent::FirstContactSecret { secret, group_id } => {
                 self.send_ack(&peer_fp, &message_id);
                 // Kept only by the founder of that group: only it forwards the secret.
@@ -1738,15 +1486,14 @@ impl P2PCore {
                 self.send_ack(&peer_fp, &message_id);
                 let my_id_now = self.my_identity_id();
                 let from_sibling = my_id_now.as_deref() == Some(sender_identity_id.as_str());
-                // Only the identity's first device deletes the account (bkz.
+                // Only the identity's first device deletes the account (see
                 // `verify_device_auth`): a stolen secondary wiped the others,
                 // and made every contact drop the identity.
                 if peer_fp != sender_identity_id {
                     warn!("AccountDeleted ana cihazdan gelmedi, yok sayıldı (peer={})", crate::log_id(&peer_fp));
                     serde_json::json!({"type": "noop"})
                 } else if from_sibling {
-                    // Hesap başka bir cihazımdan silindi: bu cihaz da silinir
-                    // (UI `self_revoked` ile dosyaları temizleyip yeniden başlar).
+                    // The account was deleted from one of my other devices: this device is deleted too (the UI cleans up files and restarts with `self_revoked`).
                     warn!("Hesap kardeş cihazdan silindi (peer={}) — yerel durum siliniyor", crate::log_id(&peer_fp));
                     self.wipe_all_local_state();
                     serde_json::json!({"type": "self_revoked"})
@@ -1766,16 +1513,10 @@ impl P2PCore {
                 }
             }
             MessageContent::SiblingHistoryRequest { per_conversation_limit, conversation_identity_id, group_id, before_timestamp, since_timestamp, after_timestamp } => {
-                // Spec dışı, ağ sağlamlığı düzeltmesi ("ack kullanımını
-                // genişlet"): önceden bu paket hiç Ack'lenmiyordu — tek
-                // güvence 5 dakikalık debounce'lu periyodik yeniden
-                // tetiklemeydi (bkz. `request_sibling_backfill`), yani kayıp
-                // bir istek en kötü senaryoda 5 dakika fark edilmeden
-                // kalabiliyordu. `LeaveGroupRequest` ile AYNI gerekçe: Ack
-                // HER durumda gönderilir — istek en azından BİZE ulaştı,
-                // gönderenin `awaiting_confirmation` yeniden denemesi
-                // durabilir (yanıt üretilemese/gönderilemese bile, ör.
-                // gönderen artık gerçek bir kardeş değilse).
+                // Ack widened (network robustness fix): this packet was never acked before. The only guarantee was the periodic re-trigger with a
+                // 5-minute debounce (see `request_sibling_backfill`), so a lost request could go unnoticed for up to 5 minutes. Same reasoning as
+                // `LeaveGroupRequest`: the Ack is sent in EVERY case, the request has at least reached US, and the sender's `awaiting_confirmation`
+                // retry can stop (even if no reply can be produced or sent, e.g. the sender is no longer a real sibling).
                 self.send_ack(&peer_fp, &message_id);
                 let my_id_now = self.my_identity_id();
                 let from_sibling = self.known_remote_devices.get(&peer_fp)
@@ -1795,7 +1536,7 @@ impl P2PCore {
                 }
                 serde_json::json!({"type": "noop"})
             }
-            // Çoklu-cihaz (spec 1.7): kardeşin gönderdiği geçmiş — arşive işle.
+            // Multi-device: history sent by a sibling; archive it.
             MessageContent::SiblingHistoryResponse { entries, window, more } => {
                 let my_id_now = self.my_identity_id();
                 let from_sibling = self.known_remote_devices.get(&peer_fp)
@@ -1804,17 +1545,11 @@ impl P2PCore {
                 if !from_sibling {
                     serde_json::json!({"type": "noop"})
                 } else {
-                    // Spec dışı, dış inceleme düzeltmesi ("sibling backfill
-                    // sayfalama desteklemiyor"): `request_older_sibling_history`
-                    // TEK bir sohbete daralmış bir istek gönderir, bu yüzden
-                    // yanıt da (varsa) o TEK sohbetin girdilerinden oluşur —
-                    // bunu tespit edip, ekranda açık bir sohbet varsa ANINDA
-                    // birleşsin diye `older_history`/`older_group_history` ile
-                    // AYNI şekle sokuyoruz (Kotlin/Linux tarafı zaten bu iki
-                    // olay türünü biliyor, yeni bir tüketici yazmaya gerek
-                    // yok). Otomatik/geniş kapsamlı `request_sibling_backfill`
-                    // yanıtı (birden fazla/karışık sohbet) için eski genel
-                    // "history_backfilled" bildirimi korunur.
+                    // Sibling backfill has no paging: `request_older_sibling_history` sends a request narrowed to ONE chat, so the reply (if any) also
+                    // contains entries from that ONE chat. Detect that and, if a chat is open on screen, shape the reply the SAME way as
+                    // `older_history`/`older_group_history` so it merges right away (Kotlin/Linux already know these two event types, so no new
+                    // consumer is needed). The old general "history_backfilled" notice stays for the automatic/broad `request_sibling_backfill`
+                    // reply (several or mixed chats).
                     let single_group: Option<String> = {
                         let gids: std::collections::HashSet<&str> = entries.iter().filter_map(|e| e.group_id.as_deref()).collect();
                         if gids.len() == 1 && entries.iter().all(|e| e.group_id.is_some()) {
@@ -1833,12 +1568,9 @@ impl P2PCore {
                     } else {
                         None
                     };
-                    // NOT: `SiblingHistoryEntry` ayrı bir "yerel alınma anı"
-                    // taşımıyor (`ArchivedMessage.timestamp`'in aksine) —
-                    // `sent_at_ms` zaten `load_message_history`'nin
-                    // `COALESCE(NULLIF(sent_at_ms,0), timestamp)` ile ürettiği
-                    // "etkin" değer, bu yüzden `timestamp` alanı için de
-                    // güvenle kullanılabilir.
+                    // NOTE: `SiblingHistoryEntry` does not carry a separate local receive time (unlike `ArchivedMessage.timestamp`). `sent_at_ms` is
+                    // already the "effective" value that `load_message_history` produces with `COALESCE(NULLIF(sent_at_ms,0), timestamp)`, so it can
+                    // safely be used for the `timestamp` field too.
                     let (merged, press_chat) = self.apply_sibling_reply(&peer_fp, window, more, entries);
                     // Decided by the request, not by the shape of the answer
                     //no window and no press it answers, while
