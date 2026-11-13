@@ -1,9 +1,9 @@
-//! Swarm start, radio/power modes, relays, reconnects and publishing with retry.
+//! Swarm setup, radio and power modes, relays, reconnects, and publish with retry.
 
 use super::*;
 
 
-/// CM-09: connection slots that peers not known to this device may hold.
+/// Inbound connection slots for peers unknown to this device.
 pub(crate) const MAX_UNKNOWN_INBOUND: usize = 16;
 pub(crate) const UNKNOWN_INBOUND_GRACE_MS: u64 = 2 * 60 * 1000;
 
@@ -19,46 +19,27 @@ pub(crate) fn unknown_inbound_to_close<T>(mut held: Vec<(T, u64)>, now: u64) -> 
 }
 impl P2PCore {
 
-    /// bkz. `P2PCore.device_to_peer_id` alanı dokümantasyonu — herhangi bir
-    /// gelen paketin gönderen cihaz fingerprint'i ile o paketin geldiği
-    /// gossipsub `PeerId`'sini eşler.
+    /// Maps the sender's device fingerprint to the gossip `PeerId` of the packet.
     ///
-    /// GÜVENLİK KOŞULU: `device_fingerprint` burada tamamen GÜVENİLİR
-    /// olmalı — bu fonksiyon, `process_identity_exchange`/
-    /// `process_handshake_init`/`receive_message` içinden, SADECE o
-    /// fonksiyonların kendi kriptografik doğrulaması (fingerprint'in
-    /// taşınan public key'lerden gerçekten türediği / hibrit imza) BAŞARILI
-    /// olduktan SONRA çağrılmalıdır. Spec dışı, güvenlik denetimi düzeltmesi:
-    /// önceden `process_incoming_envelope` bunu HER zarf türü için, o
-    /// zarfın içeriği doğrulanmadan ÖNCE koşulsuz çağırıyordu — `source`
-    /// (gossipsub'ın doğruladığı gerçek gönderen `PeerId`'si) sahtelenemez
-    /// olsa da, `device_fingerprint` sadece zarfın İDDİASIYDI. Bir saldırgan,
-    /// KENDİ gerçek `PeerId`'sinden, rastgele bir (ör. kurbanın bilinen bir
-    /// kişisine ait) `device_fingerprint` iddia eden bir zarf yayınlayarak
-    /// bu haritayı (ve kalıcı yeniden-bağlanma ipucu `device_last_addr`'ı)
-    /// ZEHİRLEYEBİLİYORDU — paket daha sonra imza/fingerprint uyuşmazlığı
-    /// yüzünden reddedilse bile bu yan etki geri alınmıyordu. Sonuç: o
-    /// kişiye yönelik dosya indirme istekleri saldırganın `PeerId`'sine
-    /// yönlendirilebiliyor, otomatik yeniden bağlanma saldırganın adresini
-    /// deniyordu (mesaj gizliliği/bütünlüğü etkilenmiyordu — `known_remote_devices`
-    /// ayrıca ve doğru sırayla korunuyordu).
+    /// Security precondition: the fingerprint must be trusted. Call this only after
+    /// the caller has verified the packet cryptographically (fingerprint derived from
+    /// the carried public keys, hybrid signature). Before this rule, every envelope
+    /// type set the mapping before verification. An attacker could then poison the
+    /// mapping and the reconnect hint (`device_last_addr`) with a forged fingerprint,
+    /// even when the packet was rejected later.
     pub(crate) fn record_peer_id_if_known(&mut self, source: Option<PeerId>, device_fingerprint: &str) {
         if let Some(pid) = source {
-            // A device keeps one libp2p key. While its mapped PeerId is still
-            // connected, a packet arriving from another PeerId was relayed or
-            // replayed by someone else: never let that take over the mapping.
+            // A device keeps one libp2p key. While its mapped PeerId is connected, a packet
+            // from another PeerId was relayed or replayed. Never let it replace the mapping.
             if let Some(old) = self.device_to_peer_id.get(device_fingerprint) {
                 if *old != pid && self.swarm.as_ref().map_or(false, |s| s.is_connected(old)) {
                     return;
                 }
             }
-            // Nor while an address we hold for the device names another
-            // PeerId. The packet is genuine, its carrier need not be: a relay
-            // or server that withheld it and delivered the same bytes itself
-            // became "the device", got our messages to it, acked them and
-            // replaced its onion address. A device that really changed its
-            // key says so in its (signed, encrypted) AddressAnnounce, which
-            // replaces the stored address.
+            // Also not while a stored device address names another PeerId. The packet is
+            // genuine, but its carrier need not be: a relay that delivered the same bytes
+            // must not become the device. A device with a new key says so in its signed,
+            // encrypted AddressAnnounce, which replaces the stored address.
             let mut unproven = false;
             if self.device_to_peer_id.get(device_fingerprint) != Some(&pid) {
                 let known: Vec<PeerId> = [self.device_last_addr.get(device_fingerprint), self.device_onion_addr.get(device_fingerprint)]
@@ -70,13 +51,10 @@ impl P2PCore {
                 }
                 unproven = known.is_empty();
             }
-            // Nothing names this PeerId for the device: the carrier is
-            // unproven. A gossip author is a key the publisher picks, so a
-            // contact could republish the device's packet under its own key
-            // and become the device. Bound only over a live connection from
-            // that PeerId, never to a server or to another identity's device,
-            // and no address is stored from it: the device's own
-            // AddressAnnounce supplies that.
+            // No PeerId is named for the device, so the carrier is unproven. A gossip author
+            // is chosen by the publisher. Bind only over a live connection from that PeerId,
+            // never to a server or to another identity's device. Store no address from it:
+            // the device's own AddressAnnounce supplies that.
             if unproven {
                 let my_identity = self.known_remote_devices.get(device_fingerprint).map(|d| d.identity_id.clone());
                 let other_identity = self.device_to_peer_id.iter().any(|(f, p)| {
@@ -97,18 +75,15 @@ impl P2PCore {
             if let Some(onion) = self.peer_onion_addr.get(&pid).cloned() {
                 self.remember_onion_addr(device_fingerprint, &onion);
             }
-            // bu cihazdan GERÇEKTEN
-            // paket aldık — o an bağlı olduğumuz somut adresi (varsa,
-            // `ConnectionEstablished`'ten doldurulan `peer_id_to_addr`)
-            // kalıcı yeniden-bağlanma ipucu olarak sakla. Böylece bir
-            // sonraki kopmada `reconnect_sweep` en son ÇALIŞAN adresi
-            // kullanır (eşleşme anındaki rendezvous adresi bayatladıysa
-            // bile). Adres `/p2p/<peer_id>` son eki içermiyorsa
-            // `remember_device_addr` onu zaten yok sayar.
+            // We received a packet from this device. Save the concrete address of the current
+            // connection (`peer_id_to_addr`, filled on ConnectionEstablished) as the persistent
+            // reconnect hint. The next `reconnect_sweep` then uses the last working address,
+            // even if the rendezvous address from pairing is stale. `remember_device_addr`
+            // ignores addresses without a `/p2p/<peer_id>` suffix.
             if let Some(addr) = self.peer_id_to_addr.get(&pid).cloned() {
-                // Adres zaten `/p2p/<peer_id>` içeriyorsa (giden dial'de
-                // öyle kurmuştuk) tekrar ekleme — yoksa (gelen bağlantının
-                // ham `/ip4/.../tcp/...` adresi) ekle.
+                // An address that already ends in `/p2p/<peer_id>` (our outgoing dials build it
+                // that way) is not appended again. A raw `/ip4/.../tcp/...` address from an
+                // inbound connection gets the suffix.
                 let addr_str = if extract_peer_id(&addr).is_some() {
                     addr.to_string()
                 } else {
@@ -122,68 +97,58 @@ impl P2PCore {
 
 impl P2PCore {
 
-    // ---------------------------------------------------------------
-    // Bölüm 4: Ağ / Keşif
-    // ---------------------------------------------------------------
+    // --- Network and discovery ---
 
     pub(crate) fn start_network(&mut self, node_mode: bool, tor_enabled: bool) -> Result<String, String> {
-        // A second call in one process (Android restarted the service) started
-        // a second arti on the same state dir and a second listener on the
-        // same port, with the connection maps of the old swarm still filled.
+        // Repeat calls in one process (Android restarts the service) would start a second
+        // arti on the same state dir and listen twice on the same port.
         if let Some(swarm) = &self.swarm {
-            // Node mode / Tor take effect on the next process start only.
+            // Node mode and Tor take effect on the next process start.
             if node_mode != self.node_mode_enabled || tor_enabled != self.tor_enabled {
                 warn!("start_network: ağ zaten çalışıyor, yeni ayarlar (node={}, tor={}) yeniden başlatmada geçerli olur", node_mode, tor_enabled);
             }
             return Ok(swarm.local_peer_id().to_string());
         }
-        // the node is onion-only (`tor::DialReject` on TCP). Without Tor
-        // the swarm could dial nothing and the app sat offline with no error.
+        // The node is onion-only (`tor::DialReject` on TCP). Without Tor the swarm could
+        // dial nothing, and the app would sit offline without an error.
         if !tor_enabled {
             return Err("Tor kapalı: ağ yalnızca Tor üzerinden çalışır".to_string());
         }
-        // No network without the storage keys. The gate used to be opened
-        // here regardless: after a keystore failure handshakes built sessions
-        // that could not be stored, and after the next start both sides were
-        // out of step. The caller loads the keys and tries again.
+        // The swarm needs the storage keys. The gate opens only after they load. Handshakes
+        // built before that could create sessions that cannot be stored, and the two sides
+        // would fall out of step. The caller loads the keys and retries.
         if !self.storage_keys_ready() {
             return Err("Depolama anahtarları yüklenmedi".to_string());
         }
-        // Kalıcı keypair (PeerId) — bkz. `load_or_generate_libp2p_keypair`.
+        // Persistent keypair (PeerId). See `load_or_generate_libp2p_keypair`.
         let app_files_dir = self.app_files_dir.clone().ok_or("initDatabase önce çağrılmalı")?;
         let keypair = load_or_generate_libp2p_keypair(&app_files_dir);
 
-        // Tor açıksa arti onion service'i
-        // başlat (arka planda bootstrap eder). Onion service, gelen Tor
-        // akışlarını `127.0.0.1:TOR_LIBP2P_PORT`'a köprüler; libp2p bu yüzden
-        // SABİT o portu dinlemeli (bkz. TOR_LIBP2P_PORT). Tor kapalıysa hiç
-        // arti oluşturulmaz (ağır bağımlılık çalışma-zamanı maliyeti yok).
+        // With Tor on, start the arti onion service (bootstraps in the background). It
+        // bridges incoming Tor streams to `127.0.0.1:TOR_LIBP2P_PORT`, so libp2p must
+        // listen on that fixed port. With Tor off, arti is never created (no runtime cost).
         let tor_handle: Option<tor::TorHandle> = if tor_enabled {
             let state_dir = format!("{}/arti_state", app_files_dir);
             let cache_dir = format!("{}/arti_cache", app_files_dir);
             match tor::TorHandle::launch(&state_dir, &cache_dir, TOR_LIBP2P_PORT) {
                 Ok(h) => Some(h),
-                // Not "go on without Tor": the node is onion-only, so that swarm
-                // could dial nothing and put a loopback address in the QR code.
-                // The caller tries again.
+                // Do not continue without Tor. The node is onion-only, so the swarm could dial
+                // nothing and would put a loopback address in the QR code. The caller retries.
                 Err(e) => return Err(format!("Tor başlatılamadı: {}", e)),
             }
         } else {
             None
         };
-        // Dial transport için client (Tor kapalıysa None — transport inert).
+        // Dial client for the dial transport. None when Tor is off; the transport is inert.
         let tor_client = tor_handle.as_ref().map(|h| h.client.clone());
         let listen_port: u16 = if tor_handle.is_some() { TOR_LIBP2P_PORT } else { 0 };
 
-        // Swarm ELLE kuruluyor, `SwarmBuilder` değil: 0.53'ün `build()`'i
-        // bütün bağlantılara SABİT 10 sn zaman aşımı koyuyor (bkz. libp2p
-        // builder/phase/build.rs `CONNECTION_TIMEOUT`) ve değiştirmenin yolu
-        // yok. Bir Tor onion dial'ı (devre kurulumu + Noise) ya da Tor
-        // üzerinden bir röle devresi mobil veride bunu rutin olarak aşıyor —
-        // cihazda ölçüldü: sürekli "Timeout has been reached", onion
-        // bağlantısı ancak şans eseri kuruluyordu. Transport'lar builder'ın
-        // kurduğuyla AYNI (TCP, arti onion dial, röle istemcisi; hepsi
-        // Noise + Yamux, V1Lazy).
+        // The swarm is built by hand, not with `SwarmBuilder`. libp2p 0.53's `build()`
+        // sets a fixed 10 s timeout on every connection and offers no way to change it.
+        // Tor onion dials (circuit build plus Noise) and relay circuits routinely exceed
+        // that on mobile data; measured on device: constant "Timeout has been reached".
+        // The transports match what the builder would set up (TCP, arti onion dial, relay
+        // client). All use Noise and Yamux, V1Lazy.
         let local_peer_id = keypair.public().to_peer_id();
         let (relay_transport, relay_client) = relay::client::new(local_peer_id);
         let transport = {
@@ -191,16 +156,15 @@ impl P2PCore {
             use libp2p::core::transport::Transport as _;
             use libp2p::core::upgrade::Version;
             let noise_for = |kp: &libp2p::identity::Keypair| noise::Config::new(kp).map_err(|e| e.to_string());
-            // Onion-only: TCP taşıması
-            // yalnızca gelen onion-köprüsü bağlantıları için tutulur; giden
-            // her TCP (clearnet) dial'ı reddedilir, böylece hiçbir eşin gerçek
-            // IP'sine doğrudan bağlanılmaz. Çıkış tamamen onion/röle üzerinden.
+            // Onion-only: TCP is kept only for incoming onion-bridge connections. Every outgoing
+            // TCP (clearnet) dial is refused, so no peer's real IP is dialed. All egress goes
+            // through onion or relay circuits.
             let tcp_t = tor::DialReject(tcp::tokio::Transport::new(tcp::Config::default().nodelay(true)))
                 .upgrade(Version::V1Lazy)
                 .authenticate(noise_for(&keypair)?)
                 .multiplex(tuned_yamux())
                 .map(|(p, m), _| (p, StreamMuxerBox::new(m)));
-            // Tor kapalıysa client None → her dial'ı reddeder (bkz. tor.rs).
+            // With Tor off the client is None, and every dial is refused (see tor.rs).
             let tor_t = tor::ArtiDialTransport::new(tor_client.clone())
                 .upgrade(Version::V1Lazy)
                 .authenticate(noise_for(&keypair)?)
@@ -230,57 +194,44 @@ impl P2PCore {
                 let peer_id = keypair.public().to_peer_id();
                 let store = MemoryStore::new(peer_id);
                 let kad = kad::Behaviour::new(peer_id, store);
-                // Cache 0: identify's address cache fed every peer's raw listen addresses,
-                // 127.0.0.1 included, into each dial. Dials then reached our own node
-                // ("Unexpected peer ID <self>", seen on device 2026-09-18). The Identify arm
-                // below already records the useful non-loopback addresses itself.
+                // Cache 0: identify's address cache would feed every peer's raw listen addresses,
+                // including 127.0.0.1, into each dial. Dials then reached our own node ("Unexpected
+                // peer ID <self>", seen on device 2026-09-18). The Identify arm below records the
+                // useful non-loopback addresses itself.
                 let identify = identify::Behaviour::new(identify::Config::new(
                     "/p2pmessenger/1.0.0".to_string(),
                     keypair.public(),
                 ).with_cache_size(0)
-                // Default 5 min per peer: with 3-4 peers the LTE radio woke
-                // every ~75 s. Addresses change rarely; push covers changes.
+                // Default 5 min per peer. With 3-4 peers the LTE radio woke about every 75 s.
+                // Addresses change rarely; push covers changes.
                 .with_interval(std::time::Duration::from_secs(3600)));
-                // kütüphanenin
-                // varsayılan `request_timeout`'u (10sn) Tor üzerinden 256
-                // KiB'lik bir dosya parçası (bkz. `FILE_CHUNK_SIZE`) için
-                // çoğu zaman yetersiz — özellikle sıkışık bir devrede.
-                // `retry_or_give_up_download` bir `OutboundFailure`'da AYNI
-                // parçayı ANINDA (geri çekilmeden) yeniden ister, yani kısa
-                // bir timeout burada "parçaya asla yetecek kadar süre
-                // tanımadan sürekli yeniden deneme" döngüsüne yol açabilir.
-                // 30sn, Tor'da tipik bir parça transferine (sıkışıklık dahil)
-                // yetecek kadar cömert, ama gerçekten ölü bir bağlantıyı hâlâ
-                // makul sürede (bkz. `DOWNLOAD_STALL_TIMEOUT_MS`) tespit
-                // etmeyi engellemiyor.
+                // The library default `request_timeout` (10 s) is often too short over Tor for a
+                // 256 KiB file chunk (`FILE_CHUNK_SIZE`), especially on a congested circuit.
+                // `retry_or_give_up_download` re-requests the same chunk at once on an
+                // OutboundFailure, so a short timeout could retry forever without giving the chunk
+                // enough time. 30 s is generous for a typical chunk over Tor, but still detects a
+                // dead connection in reasonable time (see `DOWNLOAD_STALL_TIMEOUT_MS`).
                 let file_chunks = request_response::cbor::Behaviour::new(
                     [(StreamProtocol::new(FILE_TRANSFER_PROTOCOL), request_response::ProtocolSupport::Full)],
                     request_response::Config::default()
                         .with_request_timeout(std::time::Duration::from_millis(server_client::BLOB_REQUEST_TIMEOUT_MS)),
                 );
-                // bkz. `P2PBehaviour.relay` alan dokümantasyonu — Node modu
-                // kapalıyken röle HOP davranışını TAMAMEN devre dışı
-                // bırakıyoruz (`Toggle::from(None)`), sıfır kapasiteyle
-                // inşa etmiyoruz — libp2p-relay'in HOP handler'ı `Config`'e
-                // bakmadan protokolü her zaman advertise ettiğinden, sıfır
-                // kapasiteli bir `Behaviour` bile identify üzerinden "röle
-                // adayıyım" yalanını yayardı. Node modu daha sonra
-                // `set_node_mode` ile açılırsa, röle GÖREVİ görme kapasitesi
-                // bir sonraki ağ yeniden başlatmasına kadar etkinleşmez
-                // (bkz. `set_node_mode` dokümantasyonu).
+                // See `P2PBehaviour.relay`. With node mode off, the relay HOP behaviour is fully
+                // disabled (`Toggle::from(None)`), not built with zero capacity. libp2p-relay's HOP
+                // handler advertises the protocol regardless of Config, so even a zero-capacity
+                // behaviour would tell peers via identify that this device is a relay candidate.
+                // If node mode is turned on later with `set_node_mode`, relay capacity activates
+                // only at the next network restart (see `set_node_mode`).
                 let relay: Toggle<relay::Behaviour> = if node_mode {
                     Some(relay::Behaviour::new(peer_id, relay_server_config())).into()
                 } else {
                     None.into()
                 };
-                // bkz. `P2PBehaviour.keepalive`/`KeepAliveState` dokümantasyonu.
-                // Gönderim ZAMANLAMASI (hızlı/genişletilmiş aralık) burada
-                // DEĞİL, `poll_events` içindeki "süresi gelmiş keepalive"
-                // taraması içinde uygulanıyor (stok `ping::Config`in aksine —
-                // bu davranışın TÜM bağlantılara AYNI sabit aralığı
-                // uygulamasını önlemek tam olarak bu özel protokolün amacı).
-                // `with_request_timeout`, tek bir isteğin yanıt için beklediği
-                // azami süre (bkz. `KEEPALIVE_TIMEOUT_SECS`).
+                // See `P2PBehaviour.keepalive` and `KeepAliveState`. Send timing (fast or extended
+                // interval) is not set here. It is applied by the "keepalive due" scan in
+                // `poll_events`. The stock `ping::Config` would apply one fixed interval to all
+                // connections, which this custom protocol avoids. `with_request_timeout` is the
+                // longest wait for one reply (see `KEEPALIVE_TIMEOUT_SECS`).
                 let keepalive = request_response::cbor::Behaviour::new(
                     [
                         (StreamProtocol::new(KEEPALIVE_PROTOCOL), request_response::ProtocolSupport::Full),
@@ -289,15 +240,14 @@ impl P2PCore {
                     request_response::Config::default()
                         .with_request_timeout(std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS)),
                 );
-                // bkz. `P2PBehaviour.server_rpc` — `BLOB_REQUEST_TIMEOUT_MS` (90 sn) timeout,
-                // `file_chunks` ile aynı gerekçe (Tor üzerinden büyük bir
-                // yük için kütüphanenin 10 sn'lik varsayılanı yetersiz).
+                // See `P2PBehaviour.server_rpc`: `BLOB_REQUEST_TIMEOUT_MS` (90 s). Same reason as
+                // `file_chunks`: the library's 10 s default is too short for a large payload over Tor.
                 let server_rpc = request_response::cbor::Behaviour::new(
                     [(StreamProtocol::new(server_proto::SERVER_PROTOCOL), request_response::ProtocolSupport::Full)],
                     request_response::Config::default()
                         .with_request_timeout(std::time::Duration::from_millis(server_client::BLOB_REQUEST_TIMEOUT_MS)),
                 );
-                // bkz. `ACK_PROTOCOL` — Tor devresinde gidiş-dönüş saniyeler sürebilir.
+                // See `ACK_PROTOCOL`. Over a Tor circuit a round trip can take seconds.
                 let acks = request_response::cbor::Behaviour::new(
                     [(StreamProtocol::new(ACK_PROTOCOL), request_response::ProtocolSupport::Full)],
                     request_response::Config::default()
@@ -312,51 +262,40 @@ impl P2PCore {
                 Ok(P2PBehaviour { server_rpc, kad, identify, file_chunks, relay_client, relay, keepalive, acks, envelopes, stream })
             })(keypair_ref, relay_client)
             .map_err(|e| e.to_string())?;
-            // "her şey
-            // onaylanana/çok çok uzun bir zaman aşımına kadar denenmeli"):
-            // AÇIKÇA belirtilmediğinde libp2p-swarm'ın VARSAYILAN
-            // `idle_connection_timeout`'u kullanılır — bu, HİÇBİR protokol
-            // substream'i açık olmayan (ör. iki mesaj arasındaki sessiz
-            // dönemler) bir bağlantıyı kısa sürede KAPATIR, `reconnect_sweep`'in
-            // (bkz. `RECONNECT_SWEEP_INTERVAL_MS`) her seferinde yeniden dial
-            // etmesini gerektirir — gereksiz devre/el sıkışma trafiği,
-            // özellikle Tor gibi devre kurulumu YAVAŞ olan taşıyıcılarda
-            // (her kopuş, dakikalarca sürebilecek yeni bir devre kurulumu
-            // demektir). 10 dakikaya çıkarılarak sohbetler arasındaki normal
-            // sessiz dönemlerde bağlantı CANLI tutulur, gereksiz yeniden
-            // bağlanma döngüsü önlenir.
+            // Idle timeout. The libp2p-swarm default closes a connection with no open protocol
+            // substream, such as quiet periods between two messages. `reconnect_sweep` would
+            // then re-dial each time, adding circuit and handshake traffic. Tor circuit builds
+            // are slow, so each drop can cost minutes. Ten minutes keeps the connection alive
+            // through normal quiet periods and avoids the reconnect loop.
         let mut swarm = Swarm::new(
             transport,
             behaviour,
             local_peer_id,
             libp2p::swarm::Config::with_tokio_executor()
-                // 30 min: gossipsub is gone, and its mesh kept a contact's
-                // connection open through a quiet keepalive window
-                // (`RADIO_WINDOW_MS`, 8 min) that a dozing phone can overrun.
-                // The keepalive probes still close a dead connection.
+                // 30 min. Gossipsub is gone. Its mesh once kept a contact's connection open through
+                // the quiet keepalive window (`RADIO_WINDOW_MS`, 8 min), which a dozing phone can
+                // overrun. The keepalive probes still close a dead connection.
                 .with_idle_connection_timeout(std::time::Duration::from_secs(1800)),
         );
 
-        // Always Client. Kademlia is only the address book behind peer-id
-        // dials here; nothing ever queries it. In Server mode (node mode) it
-        // answered FIND_NODE from any stranger that reached the onion address
-        // with the peer ids and onion addresses of the user's contacts.
+        // Always client mode. Kademlia is only the address book behind peer-id dials here,
+        // and nothing queries it. In server mode it answered FIND_NODE from any stranger
+        // that reached the onion address, with the peer IDs and onion addresses of the
+        // user's contacts.
         swarm.behaviour_mut().kad.set_mode(Some(kad::Mode::Client));
 
         let peer_id = *swarm.local_peer_id();
 
-        // SABİT port: onion köprüsü buraya bağlanır — bkz. TOR_LIBP2P_PORT.
+        // Fixed port. The onion bridge connects here (see TOR_LIBP2P_PORT).
         //
-        // Onion-only: `0.0.0.0` DEĞİL `127.0.0.1` — dinleyici
-        // yalnızca loopback'te. Onion köprüsü (`bridge_incoming_stream`) zaten
-        // `127.0.0.1:<port>`'a bağlanır (bkz. tor.rs:247), yani gelen onion
-        // trafiği etkilenmez; buna karşılık LAN/internetten doğrudan clearnet
-        // bağlantı KABUL EDİLMEZ ve identify eşlere yönlendirilebilir bir
-        // adres duyurmaz.
+        // Onion-only: listen on 127.0.0.1, not 0.0.0.0. The bridge (`bridge_incoming_stream`)
+        // connects to `127.0.0.1:<port>` itself, so incoming onion traffic is unaffected.
+        // Direct clearnet connections from LAN or internet are refused, and identify does
+        // not advertise an address that peers could dial.
         swarm.listen_on(format!("/ip4/127.0.0.1/tcp/{}", listen_port).parse().map_err(|_| "bad multiaddr")?)
             .map_err(|e| e.to_string())?;
 
-        // No identity yet: `ensure_own_mailbox_subscription` sets it later.
+        // No identity yet. `ensure_own_mailbox_subscription` sets it later.
         if let Ok(active_fp) = self.get_active_own_device_fingerprint() {
             self.own_mailbox_topic_fp = Some(active_fp);
         }
@@ -364,23 +303,23 @@ impl P2PCore {
         let mut stream_control = swarm.behaviour().stream.new_control();
         call::spawn_media_acceptor(&mut stream_control);
         self.stream_control = Some(stream_control);
-        // Set only now: an error return above left them changed.
+        // Set only now. An error return above would leave them changed.
         self.node_mode_enabled = node_mode;
         self.tor_enabled = tor_enabled;
         self.own_listen_addrs.clear();
         self.advertised_onion = None; // new swarm: announce again
-        // bkz. `tor_was_ready` alanı dokümantasyonu — taze bir Tor
-        // istemcisi/oturumu başlıyor, "hazır" geçişini sıfırdan izle.
+        // See `tor_was_ready`. A fresh Tor client and session start, so the "ready"
+        // transition is tracked from scratch.
         self.tor_was_ready = false;
         self.swarm = Some(swarm);
         self.tor = tor_handle;
         self.tor_dormant = false;
 
-        // bkz. `server_client` — yapılandırılmış sunuculara bağlanma/kayıt
-        // ilk `server_sweep` turunda yapılır.
+        // See `server_client`. Connecting to and registering with configured servers
+        // happens in the first `server_sweep` round.
         self.server_sweep_at = 0;
 
-        // bkz. `DEFAULT_BOOTSTRAP_RELAYS` dokümantasyonu — boşsa no-op.
+        // See `DEFAULT_BOOTSTRAP_RELAYS`. An empty list is a no-op.
         for addr in DEFAULT_BOOTSTRAP_RELAYS {
             if let Err(e) = self.add_known_relay_address(addr) {
                 error!("Varsayılan bootstrap röle eklenemedi ({}): {}", addr, e);
@@ -390,10 +329,9 @@ impl P2PCore {
         Ok(peer_id.to_string())
     }
 
-    /// bkz. `KeepAliveState.suspect`.
-    /// `dial`: also open a parallel onion connection now. A late Ack is no
-    /// such reason: Tor plus a sleeping radio often take longer than
-    /// `ACK_SUSPECT_MS`, so that path only probes, and a failed probe of a
+    /// See `KeepAliveState.suspect`. `dial`: also open a parallel onion connection now.
+    /// A late Ack alone is no reason to do so: Tor plus a sleeping radio often take
+    /// longer than `ACK_SUSPECT_MS`, so that path only probes. A failed probe of a
     /// suspect closes the connection for the redial.
     pub(crate) fn mark_connection_suspect(&mut self, peer: PeerId, dial: bool) {
         let Some(st) = self.keepalive_state.get_mut(&peer) else { return };
@@ -407,10 +345,9 @@ impl P2PCore {
         if !dial {
             return;
         }
-        // Yoklamanın zaman aşımını beklemeden onion üzerinden paralel yeni
-        // bağlantı aç; kurulursa eskisi kapatılır (bkz. `peer_conns`). Ölü
-        // bağlantı fark edilene kadar geçen süre ile yeniden dial süresi
-        // böylece üst üste binmek yerine paralel ilerliyor.
+        // Open a parallel onion connection without waiting for the probe timeout. If it
+        // succeeds, the old connection is closed (see `peer_conns`). Noticing a dead
+        // connection and redialing then overlap instead of running in sequence.
         let onion = self.device_to_peer_id.iter()
             .find(|(_, p)| **p == peer)
             .and_then(|(fp, _)| self.device_onion_addr.get(fp))
@@ -424,8 +361,8 @@ impl P2PCore {
         }
     }
 
-    /// See `RADIO_WINDOW_MS`. Wi-Fi too: with Tor awake a night on Wi-Fi woke
-    /// the CPU ~once a second (2026-10-04: 64 % in 7 h, screen off).
+    /// See `RADIO_WINDOW_MS`. Wi-Fi too: with Tor awake, a night on Wi-Fi woke the CPU
+    /// about once a second (2026-10-04: 64 % in 7 h, screen off).
     pub(crate) fn radio_saver(&self) -> bool {
         self.power_save
     }
@@ -441,19 +378,18 @@ impl P2PCore {
         self.metered = metered;
     }
 
-    /// Pil düzeltmesi (2026-08-28): Kotlin/GTK tarafı, uygulama arka plana
-    /// düşüp ekran kapandığında bunu açıyor. Ağ davranışını BOZMUYOR —
-    /// sadece zaten sağlıklı ve sessiz bekleyen bağlantıların yoklama
-    /// sıklığını düşürüyor (bkz. `power_save` alan notu).
+    /// Battery saver (2026-08-28). The Kotlin/GTK side turns this on when the app goes
+    /// to the background and the screen turns off. It does not change network
+    /// behaviour; it only lowers the probe rate of healthy, quiet connections (see the
+    /// `power_save` field note).
     pub(crate) fn set_power_save(&mut self, enabled: bool) {
         if self.power_save == enabled {
             return;
         }
         self.power_save = enabled;
         info!("Güç tasarrufu modu: {}", if enabled { "açık" } else { "kapalı" });
-        // Moddan ÇIKARKEN bekleyen yoklamaları öne çek: kullanıcı ekranı
-        // açtığı anda bağlantıların canlılığı hemen doğrulansın, 60 saniye
-        // beklemesin.
+        // On leaving the mode, pull pending probes forward, so liveness is checked as soon
+        // as the user opens the screen, not after 60 s.
         if !enabled {
             let now = mono_ms();
             self.resync_since = now;
@@ -465,56 +401,52 @@ impl P2PCore {
         }
     }
 
-    /// Only stores the flag. Node mode means one thing in code: this device
-    /// serves as a relay (`P2PBehaviour.relay`), chosen in `start_network`, so
-    /// a change takes effect at the next network start. There is no DHT
-    /// contribution: Kademlia always runs in Client mode (Server mode answered
-    /// FIND_NODE with contacts' peer ids/onions) and no DHT record is written
+    /// Only stores the flag. In code, node mode means one thing: the device serves as a
+    /// relay (`P2PBehaviour.relay`), set in `start_network`. A change takes effect at
+    /// the next network start. There is no DHT role. Kademlia always runs in client
+    /// mode (server mode answered FIND_NODE with contacts' peer IDs and onions), and no
+    /// DHT record is written.
     pub(crate) fn set_node_mode(&mut self, enabled: bool) {
         self.node_mode_enabled = enabled;
     }
 
-    /// Ayarlar'daki geçmiş/ek depolama sınırı
-    /// slider'ından çağrılır. Kullanıcı sınırı düşürürse hemen (bir sonraki
-    /// `periodic_storage_sweep` turunu beklemeden) uygular — bkz.
-    /// `enforce_history_storage_limit`.
+    /// Called from the history and attachment storage limit slider in settings. A
+    /// lowered limit applies at once, without waiting for the next
+    /// `periodic_storage_sweep` round (see `enforce_history_storage_limit`).
     pub(crate) fn set_history_storage_limit_bytes(&mut self, bytes: u64) {
-        // both UIs stop at 32 GB; u64::MAX made the limit meaningless.
+        // Both UIs stop at 32 GB. u64::MAX would make the limit meaningless.
         self.history_storage_limit_bytes = bytes.min(64 << 30);
         self.enforce_history_storage_limit();
     }
 
-    /// QR/"Kodum" ekranında gösterilecek ve karşı tarafa taşınacak
-    /// `rendezvous_node` — swarm'ın gerçekten dinlemeye başladığı bir adres
-    /// (`own_listen_addrs`, bkz. `poll_events`) artı kendi PeerId'imiz
-    /// (`/p2p/<peer_id>` son eki). Bu son ek olmadan `extract_peer_id`
-    /// karşı tarafta hiçbir zaman bir PeerId bulamaz ve taranan QR'ın
-    /// adresi `kad.add_address`/`dial` için sessizce kullanılmaz kalır
-    /// (bkz. process_qr_packet). The onion address, else a relay circuit
-    /// address; `None` while Tor bootstraps — never the loopback listener,
-    /// which no peer can dial.
+    /// The `rendezvous_node` shown on the QR / "my code" screen and carried to the other
+    /// side: an address the swarm really listens on (`own_listen_addrs`, see
+    /// `poll_events`), plus our PeerId as a `/p2p/<peer_id>` suffix. Without the suffix,
+    /// `extract_peer_id` on the other side never finds a PeerId, and a scanned QR
+    /// address is silently unusable for `kad.add_address` and `dial` (see
+    /// `process_qr_packet`). Prefers the onion address, else a relay circuit address.
+    /// `None` while Tor bootstraps. Never the loopback listener: no peer can dial it.
     pub(crate) fn get_node_address(&self) -> Option<String> {
         let swarm = self.swarm.as_ref()?;
         let peer_id = *swarm.local_peer_id();
-        // Tor açık VE onion service yayında
-        // ise, HER ŞEYDEN ÖNCE .onion adresini paylaş — bu, CGNAT dahil HER
-        // ağdan (karşı tarafta da Tor açıksa) ulaşılabilir tek adres. Biçim:
-        // `/dns/<host>.onion/tcp/<port>/p2p/<peer_id>` (bkz. tor.rs
-        // ArtiDialTransport `onion_host_port`). Port keyfi — onion köprüsü
-        // gelen HER portu yerel libp2p'ye yönlendiriyor (bkz.
-        // bridge_incoming_stream), tutarlılık için TOR_LIBP2P_PORT kullanılıyor.
+        // With Tor on and the onion service published, share the .onion address first. It
+        // is the only address reachable from every network (CGNAT included) when the other
+        // side also runs Tor. Format: `/dns/<host>.onion/tcp/<port>/p2p/<peer_id>` (see
+        // tor.rs, ArtiDialTransport `onion_host_port`). The port is arbitrary: the bridge
+        // forwards every incoming port to local libp2p (see `bridge_incoming_stream`).
+        // TOR_LIBP2P_PORT is used for consistency.
         if let Some(tor) = &self.tor {
             if let Some(onion_host) = tor.onion_host() {
                 return Some(format!("/dns/{}/tcp/{}/p2p/{}", onion_host, TOR_LIBP2P_PORT, peer_id));
             }
         }
-        // the node is onion-only (Tor is mandatory, see `start_network`):
-        // a listen address is a clearnet/UPnP leak and nobody can dial it.
+        // The node is onion-only (Tor is mandatory, see `start_network`). A listen address
+        // would leak clearnet and UPnP addresses, and nobody can dial it.
         None
     }
 
-    /// UI için Tor durumu — "disabled" /
-    /// "bootstrapping" / "ready" / "failed" (+ hazırsa .onion host adı).
+    /// Tor status for the UI: "disabled", "bootstrapping", "ready" or "failed", plus the
+    /// .onion host name when ready.
     pub(crate) fn tor_status(&self) -> String {
         match &self.tor {
             None => "disabled".to_string(),
@@ -528,59 +460,53 @@ impl P2PCore {
         }
     }
 
-    /// Çekirdekte GERÇEKTEN yapılacak iş var mı — Android tarafındaki
-    /// yoklama aralığı kararı için (bkz. P2PService `nextPollDelayMs`).
+    /// Whether the core has real work to do. Used for the Android poll-interval choice
+    /// (see `nextPollDelayMs` in P2PService).
     ///
-    /// Pil düzeltmesi (2026-08-28): swarm YALNIZCA `poll_events`
-    /// çağrıldığında ilerliyor (`now_or_never`, arka planda süren bir görev
-    /// yok) — bu yüzden yoklama aralığını körlemesine açmak ağı bozar:
-    /// el sıkışmalar, Tor devresi kurulumu ve gossipsub mesh bakımı da o
-    /// hızda yavaşlar. Bunun yerine aralık, çekirdeğin GERÇEK durumuna
-    /// bakılarak seçiliyor. "Meşgul" sayılan haller:
-    ///   * bağlı en az bir eş var (gelen mesaj olabilir, keepalive sürüyor),
-    ///   * onay bekleyen bir paket var (yeniden deneme zamanlayıcısı işliyor),
-    ///   * süren bir dosya indirmesi/yüklemesi var,
-    ///   * gönderilememiş bir zarf kuyrukta,
-    ///   * sunucuya bırakılacak/çekilecek iş var.
-    /// Hiçbiri yoksa yapılacak tek şey GELEN bir bağlantıyı kabul etmek —
-    /// o da saniyede bir yoklamayı gerektirmiyor.
+    /// Battery: the swarm advances only while `poll_events` runs (`now_or_never`, no
+    /// background task). Opening the poll interval blindly would stall the network:
+    /// handshakes, Tor circuit builds and mesh upkeep would slow down too. So the
+    /// interval follows the core's real state. Busy means:
+    ///   * at least one connected peer (an incoming message is possible, keepalive runs),
+    ///   * a packet awaiting confirmation (retry timer runs),
+    ///   * a file download or upload in progress,
+    ///   * an unsent envelope in the queue,
+    ///   * server work to deposit or fetch.
+    /// If none holds, the only thing left is accepting an inbound connection, which
+    /// needs no poll every second.
     pub(crate) fn has_pending_work(&self) -> bool {
-        // Pil: BAĞLI eş tek başına "meşgul" sayılmaz — sürekli açık bir Tor/sunucu
-        // bağlantısı ekran kapalıyken wake lock'u 7/24 tutup günde %20-40 pil
-        // yiyordu. Yalnızca gerçek bekleyen iş uyanık tutar.
-        // awaiting_confirmation / pending_envelopes / pending_group_messages burada YOK:
-        // çevrimdışı eşe bekleyen mesajlar saatlerce kalır; zamanlayıcıyla yeniden denenir,
-        // CPU'yu 7/24 uyanık tutmaz (ölçüldü: wake lock 15/15 dk tutuluyordu).
-        // Aktif eşleşme (TTL'li, 15 dk): IdentityExchange/Handshake turları hızlı poll ister;
-        // bu olmadan eşleşme derin boşta 60 sn'lik bekleyişlere takılıp tamamlanmıyordu.
-        // Sunucu işleri YALNIZCA sunucuya bağlıyken "iş" sayılır: sunucu erişilmezken bu
-        // kuyruklar ilerleyemez, sayılırlarsa wake lock yine 7/24 tutuluyordu (ölçüldü:
-        // 15/15 dk). `server_archive_queue` arka plan senkron birikimi: hiç sayılmaz.
+        // Battery: a connected peer alone is not busy. A permanently open Tor or server
+        // connection kept the wake lock held 24/7 with the screen off and drained 20-40 %
+        // per day. Only real pending work keeps the device awake.
+        // awaiting_confirmation, pending_envelopes and pending_group_messages are NOT
+        // counted. Messages for an offline peer wait for hours and the retry timer handles
+        // them. Counting them would hold the CPU awake (measured: wake lock held 15/15 min).
+        // An active pairing (TTL 15 min) needs fast polls for the IdentityExchange and
+        // Handshake rounds. Without them, pairing stalled in the 60 s waits of deep idle.
+        // Server work counts only while connected to a server. While it is unreachable these
+        // queues cannot advance, and counting them held the wake lock 24/7 (measured 15/15
+        // min). `server_archive_queue` (background sync backlog) is never counted.
         self.pairing_is_fresh()
             || self.downloads_busy() > 0
-            // `server_inflight` is NOT work: the 30 s Fetch sweep is sent in
-            // the very poll turn the service then checks, so it read "busy"
-            // every time and no phone ever reached deep idle (measured
-            // 2026-09-26: wake lock 30/30 min, LTE radio active 93 %, 35 mAh
-            // per half hour). Its reply is a network event, which wakes the
-            // native wait anyway.
-            // Not while the server refuses deposits (quota): the upload only
-            // waits for the backoff then.
-            // And only with a routing server up: uploads go nowhere else.
+            // `server_inflight` is not work. The 30 s fetch sweep is sent in the same poll turn
+            // the service checks next, so it always read as busy and no phone reached deep idle
+            // (measured 2026-09-26: wake lock 30/30 min, LTE radio active 93 %). Its reply is a
+            // network event that wakes the native wait anyway.
+            // Not while the server refuses deposits (quota): the upload then only waits for the
+            // backoff. Only with a routing server up, since uploads go nowhere else.
             || self.blob_upload_can_run()
-            // Ertelenmiş gelen paket varsa kesinlikle boşta değiliz —
-            // aksi halde 30 sn'lik derin boşta kademesine düşüp teslimi
-            // geciktirirdik (bkz. `deferred_incoming`).
-            // Not while they only wait for the storage keys: that wait ends with
-            // a call from the app, not with work here, and must not hold the CPU.
+            // A deferred incoming packet means the device is not idle. Otherwise it would drop
+            // into the 30 s deep-idle step and delay delivery (see `deferred_incoming`). Not
+            // while the core only waits for the storage keys: that wait ends with a call from
+            // the app, not with work here, and must not hold the CPU.
             || (!self.deferred_incoming.is_empty() && self.storage_keys_ready())
             || self.call.is_some()
     }
 
-    /// downloads that moved within the stall timeout and are not waiting
-    /// for `retry_at`. A stalled one is probed by `check_stalled_downloads`
-    /// on the next poll; its answer is a network event that wakes the native
-    /// wait, so it need not hold the wake lock between probes.
+    /// Downloads that moved within the stall timeout and are not waiting for `retry_at`.
+    /// A stalled one is probed by `check_stalled_downloads` on the next poll. The answer
+    /// is a network event that wakes the native wait, so the wake lock need not be held
+    /// between probes.
     pub(crate) fn downloads_busy(&self) -> usize {
         let now = current_time_ms();
         self.active_downloads.values()
@@ -588,16 +514,15 @@ impl P2PCore {
             .count()
     }
 
-    /// A pairing counts as work for its first two minutes only: one that
-    /// never completes held the wake lock for the whole 15 min TTL.
+    /// A pairing counts as work for its first two minutes only. One that never completes
+    /// would otherwise hold the wake lock for the whole 15 min TTL.
     pub(crate) fn pairing_is_fresh(&self) -> bool {
         let now = current_time_ms();
         self.pairing_mailbox_subs.values().any(|at| now.saturating_sub(*at) < 2 * 60 * 1000)
     }
 
-    /// Which `has_pending_work` terms are true — logged when busy so a phone
-    /// that never reaches deep idle (seen: Note 9S, wake lock held 30/30 min)
-    /// says why.
+    /// Which `has_pending_work` terms are true. Logged when busy, so a phone that never
+    /// reaches deep idle says why.
     pub(crate) fn busy_reasons(&self) -> String {
         let mut r = Vec::new();
         if self.pairing_is_fresh() { r.push(format!("pairing={}", self.pairing_mailbox_subs.len())); }
@@ -608,25 +533,20 @@ impl P2PCore {
         r.join(",")
     }
 
-    /// sohbet ekranının üst çubuğunda BU
-    /// cihazın (karşı tarafın DEĞİL, bkz. `has_active_session`/
-    /// `is_peer_connected`) genel ağ bağlantı durumunu göstermek için ham
-    /// sinyalleri JSON olarak döner — insana okunur özet metni Kotlin
-    /// tarafında hesaplanır (i18n ve gelecekte ince ayar esnekliği için,
-    /// bkz. P2PLib.kt/ChatActivity notu). "Gerçekten internet var mı"
-    /// sorusu BURADAN yanıtlanamaz (libp2p/Rust'ın işletim sistemi ağ
-    /// arayüzlerine erişimi yok) — o kontrol Android tarafında
-    /// `ConnectivityManager` ile yapılır, bu JSON'a `has_internet` olarak
-    /// Kotlin ekler.
+    /// Raw network signals of THIS device (not the peer) for the chat header status, as
+    /// JSON. The Kotlin side builds the human-readable summary (i18n, adjustable later;
+    /// see P2PLib.kt). Rust and libp2p cannot tell whether the internet is reachable,
+    /// since they have no access to OS interfaces. Kotlin adds that as `has_internet`
+    /// via `ConnectivityManager`.
     pub(crate) fn own_connection_status(&self) -> serde_json::Value {
         let connected_peers = self.swarm.as_ref().map(|s| s.connected_peers().count()).unwrap_or(0);
         let busy = self.has_pending_work();
         if busy {
             log::debug!("Çekirdek meşgul: {}", self.busy_reasons());
         }
-        // Coming out of power save: true until every link's pulled-forward
-        // keepalive probe was answered (the UI shows a spinner meanwhile);
-        // 10 s cap so a dead link cannot keep it spinning.
+        // Coming out of power save: true until every link's pulled-forward keepalive probe
+        // is answered (the UI shows a spinner). 10 s cap, so a dead link cannot keep it
+        // spinning.
         let syncing = self.resync_since != 0
             && mono_ms().saturating_sub(self.resync_since) < 10_000
             && self.keepalive_state.values().any(|s| {
@@ -643,32 +563,24 @@ impl P2PCore {
         })
     }
 
-    /// gossipsub topic adı önceden
-    /// DOĞRUDAN alıcının cihaz fingerprint'inden türetiliyordu
-    /// (`p2p_msg_<fingerprint>`) — ağdaki herhangi bir gözlemci, içeriği
-    /// okuyamasa bile HANGİ fingerprint'e mesaj gittiğini ve NE ZAMAN
-    /// gittiğini doğrudan görebiliyordu (bkz. SECURITY.md "Trafik analizi"
-    /// notu). Bir ratchet oturumu KURULDUKTAN SONRA artık bunun yerine, o
-    /// oturumun `root_key`'inden HKDF ile türetilen sözde-rastgele bir
-    /// topic adı kullanılıyor — bu, sadece o oturumun paylaşılan sırrına
-    /// sahip iki tarafın hesaplayabileceği bir değer, fingerprint'ten
-    /// GERİYE türetilemez. `root_key` her DH/KEM rotasyonunda (30 dakikada
-    /// bir, bkz. ratchet.rs) değiştiğinden, topic adı da otomatik olarak
-    /// rotate olur — uzun vadeli bir gözlemci bile "bu iki topic aynı
-    /// çifte ait" bağlantısını kuramaz.
+    /// Gossip topic name. It used to be derived directly from the recipient's device
+    /// fingerprint (`p2p_msg_<fingerprint>`). Any network observer could then see which
+    /// fingerprint received a message, and when, without reading it (see SECURITY.md,
+    /// traffic analysis). After a ratchet session exists, the topic is a pseudorandom
+    /// name derived with HKDF from that session's `root_key`. Only the two sides of the
+    /// session share that secret, so the name cannot be traced back to the fingerprint.
+    /// `root_key` changes at each DH/KEM rotation (every 30 min, see ratchet.rs), so the
+    /// topic rotates too.
     ///
-    /// BİLİNEN SINIR: henüz hiçbir ratchet oturumu yokken (ilk eşleşmenin
-    /// `IdentityExchange`/`HandshakeInit` çifti) paylaşılacak bir sır da
-    /// yok — bu durumda kaçınılmaz olarak eski `p2p_msg_<fingerprint>`
-    /// "posta kutusu" topic'ine düşülür (birini tanımadan önce onunla
-    /// nasıl bir "rastgele buluşma noktası" paylaşılabilir ki?). Yani bu
-    /// düzeltme, bir kişiyle YAPILAN TÜM GERÇEK KONUŞMA trafiğini korur;
-    /// sadece BİR KEZLİK ilk eşleşme anı fingerprint üzerinden görünür
-    /// kalır (SECURITY.md'de belgelendi).
-    /// The input is `ratchet::root_handle` of a root (`root_handle_now`, or
+    /// Known limit: before any ratchet session exists (the first IdentityExchange and
+    /// HandshakeInit pair) there is no shared secret, so the old `p2p_msg_<fingerprint>`
+    /// mailbox topic is used. Ongoing conversation traffic is protected. Only the first
+    /// pairing exchange stays visible by fingerprint (documented in SECURITY.md).
+    ///
+    /// The input is `ratchet::root_handle` of a root (`root_handle_now` or
     /// `prev_root_key`), never the root itself.
-    /// Since gossipsub was removed the topic string only names
-    /// the session's mailbox on the server.
+    /// Since gossipsub was removed, the topic string only names the session's mailbox on
+    /// the server.
     pub(crate) fn topic_for_root_key(root_key: &[u8]) -> String {
         use sha2::Sha256;
         let hk = Hkdf::<Sha256>::new(None, root_key);
@@ -677,18 +589,15 @@ impl P2PCore {
         format!("p2p_rt_{}", hex::encode(topic_id))
     }
 
-    /// Spec dışı, güvenlik denetimi devamı (bkz. SECURITY.md "Cross-network
-    /// connectivity" notu): `known_relay_peers`'e yeni bir aday ekler,
-    /// `MAX_KNOWN_RELAYS` dolmuşsa rastgele bir eskisini atar (gerçek LRU
-    /// değil — bu sadece opportunistic bir önbellek, kalıcı da değil,
-    /// her süreç kendi görüşüyle yeniden doldurur, bu yüzden hangi girdinin
-    /// atıldığı önemli değil, sadece sınırsız büyümemesi önemli).
+    /// Adds a candidate to `known_relay_peers` (see SECURITY.md, cross-network
+    /// connectivity). When `MAX_KNOWN_RELAYS` is full, the least recently seen entry is
+    /// evicted. It is an opportunistic cache and is not persisted: each process refills
+    /// it from what it sees.
     pub(crate) fn record_known_relay(&mut self, peer_id: PeerId, addr: Multiaddr) {
-        // LRU tahliyesi (bkz. alan dokümantasyonu): dolu haritadan EN ESKİ
-        // görülmüş girdi atılır — önceden `keys().next()` (HashMap'in keyfi
-        // iterasyon sırası) rastgele bir girdi atıyordu, çalışan tek röle
-        // gidip ölüler kalabiliyordu. identify her karşılaşmada bu fonksiyonu
-        // yeniden çağırdığından zaman damgası doğal olarak tazelenir.
+        // LRU eviction: the entry with the oldest last-seen time is removed. (Earlier,
+        // `keys().next()` picked an arbitrary entry, and a working relay could be evicted
+        // while dead ones stayed.) identify calls this on every encounter, so timestamps
+        // refresh naturally.
         if !self.known_relay_peers.contains_key(&peer_id) && self.known_relay_peers.len() >= MAX_KNOWN_RELAYS {
             if let Some(evict) = self.known_relay_peers.iter()
                 .min_by_key(|(_, (_, last_seen))| *last_seen)
@@ -703,7 +612,7 @@ impl P2PCore {
         self.known_relay_peers.insert(peer_id, (addr, current_time_ms()));
     }
 
-    /// Yapılandırılmış bir sunucunun onion adresi (`/p2p/<id>` son ekiyle).
+    /// Onion address of a configured server (with the `/p2p/<id>` suffix).
     pub(crate) fn server_onion_addr(&self, peer: &PeerId) -> Option<Multiaddr> {
         let id = peer.to_string();
         let rec = self.servers.iter().find(|r| r.server_id == id)?;
@@ -714,22 +623,20 @@ impl P2PCore {
         Some(if extract_peer_id(&addr).is_some() { addr } else { addr.with(MultiaddrProtocol::P2p(*peer)) })
     }
 
-    /// Bilinen her röleden bir Circuit Relay v2 REZERVASYONU alır
-    /// (`listen_on <röle>/p2p-circuit`). Önceden hiçbir cihaz rezervasyon
-    /// yapmıyordu; `dial_with_relay_fallback`'in `/p2p-circuit/p2p/<hedef>`
-    /// dial'ı röle tarafında hedefin rezervasyonu olmadığı için HER ZAMAN
-    /// reddediliyordu — yani iki NAT'lı cihaz röle üzerinden hiç
-    /// buluşamıyordu. Kabul edilen rezervasyon `swarm.listeners()`'ta bir
-    /// circuit adresi olarak görünür; görünmüyorsa ve son deneme
-    /// `RELAY_RESERVATION_RETRY_MS`'den eskiyse yeniden istenir (röle
-    /// koptuğunda dinleyici kapanır, adres kaybolur). `reconnect_sweep`'ten
-    /// çağrılır.
+    /// Requests a Circuit Relay v2 reservation on every known relay (`listen_on
+    /// <relay>/p2p-circuit`). Without reservations a device cannot be reached through a
+    /// relay: a `/p2p-circuit/p2p/<target>` dial is refused unless the target holds a
+    /// reservation there, so two NATed devices could never meet through a relay. An
+    /// accepted reservation appears as a circuit address in `swarm.listeners()`. If none
+    /// appears and the last try is older than `RELAY_RESERVATION_RETRY_MS`, it is
+    /// requested again. The listener disappears when the relay drops, so this retries.
+    /// Called from `reconnect_sweep`.
     pub(crate) fn ensure_relay_reservations(&mut self) {
         let Some(swarm) = &mut self.swarm else { return };
         let now = current_time_ms();
         let local = *swarm.local_peer_id();
-        // Kabul edilmiş rezervasyonlar: `<röle>/p2p/<röle_id>/p2p-circuit...`
-        // — circuit'ten önceki ilk /p2p röleye aittir.
+        // Accepted reservations look like `<relay>/p2p/<relay_id>/p2p-circuit...`. The
+        // first /p2p belongs to the relay.
         let active: std::collections::HashSet<PeerId> = swarm.listeners()
             .filter(|a| a.iter().any(|p| matches!(p, MultiaddrProtocol::P2pCircuit)))
             .filter_map(|a| a.iter().find_map(|p| match p { MultiaddrProtocol::P2p(pid) => Some(pid), _ => None }))
@@ -741,8 +648,8 @@ impl P2PCore {
             keep
         });
         for (pid, (addr, _)) in known {
-            // Same reason as `dial_with_relay_fallback`: a reservation on an
-            // unconnected relay is a dial to it every RELAY_RESERVATION_RETRY_MS.
+            // Same reason as `dial_with_relay_fallback`: a reservation on an unconnected relay
+            // means a dial to it every RELAY_RESERVATION_RETRY_MS.
             if *pid == local || active.contains(pid) || !swarm.is_connected(pid) { continue; }
             if let Some((lid, at)) = self.relay_listeners.get(pid) {
                 if now.saturating_sub(*at) < RELAY_RESERVATION_RETRY_MS { continue; }
@@ -758,23 +665,18 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı, güvenlik denetimi devamı (bkz. SECURITY.md "Cross-network
-    /// connectivity" notu): `direct_addr` (varsa) DOĞRUDAN dial edilir VE
-    /// (varsa) bilinen HER röle adayı üzerinden `/p2p-circuit/` adresiyle
-    /// de AYNI ANDA dial denenir — libp2p aynı `PeerId`'ye birden fazla
-    /// eşzamanlı dial denemesini sorunsuz yönetir (ilk başarılı olan
-    /// kazanır, diğerleri iptal edilir). Bu, "önce doğrudan dene,
-    /// başarısız olursa röleyi dene" sırasına göre daha düşük gecikmeli
-    /// (röle denemesi, başarısız bir doğrudan denemenin zaman aşımını
-    /// beklemeden hemen başlar) VE daha basit (ayrı bir asenkron
-    /// başarısızlık-sonrası-yeniden-dene durum makinesi gerekmiyor).
-    /// Toplu aktarım sürerken ilgili eşlere fazladan bağlantı açar, bitince
-    /// kapatır — bkz. `BULK_PARALLEL_CONNECTIONS`.
+    /// Dials a peer directly (`direct_addr`, if any) and, for each known relay candidate,
+    /// through a `/p2p-circuit/` address, all at once. libp2p handles several concurrent
+    /// dials to one PeerId well: the first success wins and the rest are cancelled.
+    /// Compared with "try direct, then the relay on failure", this has lower latency
+    /// (the relay attempt starts without waiting for a failed direct timeout) and needs
+    /// no separate retry state machine. During a bulk transfer it opens extra connections
+    /// to the peers involved and closes them when done (see `BULK_PARALLEL_CONNECTIONS`).
     ///
-    /// `poll_events`'ten her turda çağrılır; kendi zaman kapısı var.
+    /// Called from `poll_events` every turn. It has its own time gate.
     pub(crate) fn manage_bulk_connections(&mut self) {
-        // Şu an toplu iş olan eşler: indirmenin KAYNAĞI ve blob yüklemesi
-        // bekleyen sunucular.
+        // Peers currently in a bulk transfer: the download source, and servers with a
+        // pending blob upload.
         let mut want: std::collections::HashSet<PeerId> = self
             .active_downloads
             .values()
@@ -788,43 +690,40 @@ impl P2PCore {
 
         let now = mono_ms();
         for peer in &want {
-            // Extra connections to a peer we have a first one to. `have`
-            // assumes it: without, this dialed an unreachable server or
-            // download source again and again, outside the radio window.
+            // Extra connections to a peer we already have one to. `have` assumes that. Without
+            // it, an unreachable server or download source was redialed again and again, outside
+            // the radio window.
             if !self.swarm.as_ref().map_or(false, |s| s.is_connected(peer)) {
                 continue;
             }
-            // Dials still in flight count: an onion dial takes 10-30 s, and a
-            // new one was started every `BULK_DIAL_MIN_INTERVAL_MS` until the
-            // first one landed.
+            // Dials still in flight count. An onion dial takes 10-30 s. Without this, a new one
+            // started every `BULK_DIAL_MIN_INTERVAL_MS` until the first one landed.
             let have = 1 + self.extra_conns.get(peer).map(|v| v.len()).unwrap_or(0)
                 + self.bulk_dials.values().filter(|p| *p == peer).count();
             if have >= BULK_PARALLEL_CONNECTIONS {
                 continue;
             }
             let h = self.bulk_health.entry(*peer).or_default();
-            // Paralellikten vazgeçildiyse soğuma bitene kadar tek devre.
+            // Parallelism given up: a single circuit until the cooldown ends.
             if now < h.giveup_until {
                 continue;
             }
             if h.giveup_until != 0 && now >= h.giveup_until {
-                // Soğuma bitti: temiz sayfa.
+                // Cooldown over: clean slate.
                 *h = BulkHealth::default();
             }
             if now < h.next_dial_at {
                 continue;
             }
-            // The onion address first: `peer_id_to_addr` is
-            // filled only for connections we dialed, so a peer that dialed us
-            // never got a second connection.
+            // Onion address first. `peer_id_to_addr` is filled only for connections we dialed,
+            // so a peer that dialed us never got a second connection.
             let onion = self.peer_onion_addr.get(peer).and_then(|a| a.parse::<Multiaddr>().ok());
             let Some(addr) = onion.or_else(|| self.peer_id_to_addr.get(peer).cloned()) else { continue };
             if let Some(h) = self.bulk_health.get_mut(peer) {
                 h.next_dial_at = now + BULK_DIAL_MIN_INTERVAL_MS.max(h.backoff_ms);
             }
-            // `PeerCondition::Always`: zaten bağlıyken de YENİ bir bağlantı
-            // aç — varsayılan koşul "bağlıysa dial etme"dir ve tam olarak
-            // istemediğimiz şey odur.
+            // `PeerCondition::Always`: open a NEW connection even when already connected. The
+            // default condition ("do not dial if connected") is exactly what is not wanted here.
             let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(*peer)
                 .addresses(vec![addr])
                 .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
@@ -841,7 +740,7 @@ impl P2PCore {
             }
         }
 
-        // Toplu işi biten eşlerin fazladan bağlantılarını kapat.
+        // Close the extra connections of peers whose bulk transfer ended.
         let stale: Vec<(PeerId, Vec<libp2p::swarm::ConnectionId>)> = self
             .extra_conns
             .iter()
@@ -857,25 +756,21 @@ impl P2PCore {
             info!("Toplu aktarım bitti, {} fazladan bağlantı kapatılıyor: peer={}", conns.len(), crate::log_id(&peer));
             self.extra_conns.remove(&peer);
             self.bulk_dials.retain(|_, p| *p != peer);
-            // Sağlık durumu aktarıma özgüdür; bir sonraki aktarım temiz
-            // sayfayla başlasın.
+            // Health is per transfer. The next transfer starts from a clean state.
             self.bulk_health.remove(&peer);
         }
     }
 
-    /// Bir parça zaman aşımını kaydeder ve GEREKİRSE paralelliği bir kademe
-    /// geri çeker — bkz. `BulkHealth`.
+    /// Records a chunk timeout and, if needed, lowers parallelism one step (see `BulkHealth`).
     ///
-    /// Eski davranış "ilk zaman aşımında bütün fazladan bağlantıları kapat"
-    /// idi ve iki yönden yanlıştı: (a) Tor'da tek bir zaman aşımı gürültüdür,
-    /// üç devrenin üçünü birden atmak için gerekçe değil; (b) yol kalıcı
-    /// olarak kötüyse sürekli devre açıp kapamak durumu kötüleştirir, çünkü
-    /// her kurulum ~5-15 sn sürer ve o sırada veri trafiğiyle yarışır.
+    /// The earlier behaviour closed all extra connections at the first timeout, which was
+    /// wrong twice. (a) Over Tor one timeout is noise, not a reason to drop three
+    /// circuits. (b) If the path is persistently bad, opening and closing circuits makes
+    /// it worse, since each build takes 5-15 s and competes with data traffic.
     ///
-    /// Yeni davranış kademeli: pencere içinde yeterince zaman aşımı birikirse
-    /// TEK bir devre düşürülür (3→2→1), her düşürmede yeniden deneme
-    /// beklemesi ikiye katlanır, ve düşürme sayısı tavanı aşarsa bu aktarım
-    /// için paralellik bir süre tamamen bırakılır.
+    /// Now it steps down. Once enough timeouts pile up in the window, ONE circuit is
+    /// dropped (3, then 2, then 1). Each step doubles the retry wait. When the step count
+    /// passes the ceiling, parallelism is abandoned for this transfer.
     pub(crate) fn note_bulk_timeout(&mut self, peer: PeerId) {
         let now = mono_ms();
         let h = self.bulk_health.entry(peer).or_default();
@@ -902,30 +797,26 @@ impl P2PCore {
             self.drop_extra_connections(peer, "Paralellikten vazgeçildi", usize::MAX);
             return;
         }
-        // TEK bir devre düşür — üçünü birden değil.
+        // Drop ONE circuit, not all of them.
         self.drop_extra_connections(peer, "Tekrarlayan parça zaman aşımı", 1);
     }
 
-    /// Bir eşin FAZLADAN bağlantılarını kapatır — bkz. `extra_conns`.
-    ///
-    /// Zaman aşımı görülünce çağrılır. Paralel devrelerin getirdiği yeni
-    /// başarısızlık biçimi şu: devrelerden biri ölürse `request_response`
-    /// istekleri ona dağıtmaya DEVAM eder (açık bağlantılar arasında
-    /// round-robin yapıyor) ve isteklerin 1/N'i zaman aşımına gider. Gerçek
-    /// cihazda görüldü: aktarımın ortasında 58 saniyelik duraklama, pencere
-    /// 19'dan 9'a düştü. Ölü devreyi taşıyan bağlantıyı kapatmak trafiği
-    /// sağlam devrelere toplar; yönetici (bkz. `manage_bulk_connections`)
-    /// bekleme süresi dolunca TAZE bir devreyle yenisini açar.
+    /// Closes the extra connections of one peer (see `extra_conns`). Called when a timeout
+    /// is seen. A new failure mode comes with parallel circuits: when one dies,
+    /// `request_response` keeps spreading requests over the open connections (round-robin),
+    /// and 1/N of the requests time out. On a real device this caused a 58 s stall in the
+    /// middle of a transfer, and the window fell from 19 to 9. Closing the connection that
+    /// carries the dead circuit concentrates traffic on the healthy ones.
+    /// `manage_bulk_connections` opens a fresh circuit when the wait is over.
     pub(crate) fn drop_extra_connections(&mut self, peer: PeerId, reason: &str, how_many: usize) {
         let Some(list) = self.extra_conns.get_mut(&peer) else { return };
         if list.is_empty() {
             return;
         }
-        // EN YENİLERİ at: `manage_bulk_connections` sırayla açıyor, yani en
-        // son eklenen en genç devredir ve sorunun ondan gelme ihtimali daha
-        // yüksek. (Hangi devrenin bozuk olduğunu KESİN bilemiyoruz:
-        // `request_response`'un `OutboundFailure` olayı `connection_id`
-        // taşımıyor, yani başarısız isteği bir bağlantıya bağlayamıyoruz.)
+        // Drop the NEWEST ones. `manage_bulk_connections` opens them in order, so the last one
+        // added is the youngest circuit and the likeliest source of the problem. The exact
+        // broken circuit is not known: the `OutboundFailure` event of `request_response`
+        // carries no `connection_id`, so a failed request cannot be tied to a connection.
         let n = how_many.min(list.len());
         let victims: Vec<libp2p::swarm::ConnectionId> = list.split_off(list.len() - n);
         let remaining = list.len();
@@ -944,11 +835,10 @@ impl P2PCore {
     }
 
 
-    /// Bir dosyanin parca boyutu — satirda NULL ise MIRAS 256 KiB.
-    ///
-    /// Boyut dosya basina saklaniyor cunku `.enc` bicimi SABIT ADIMLI: eski
-    /// bir dosyayi yeni adimla okumak cop uretir. Yeni dosyalar
-    /// `FILE_CHUNK_SIZE_V2` (512 KiB) kullaniyor.
+    /// Chunk size of a file, stored per file. A NULL value in the row means the legacy
+    /// 256 KiB. The size is stored per file because the `.enc` format uses FIXED steps:
+    /// reading an old file with a new step gives garbage. New files use
+    /// `FILE_CHUNK_SIZE_V2` (512 KiB).
     pub(crate) fn file_chunk_size(&self, file_id: &str) -> usize {
         self.db
             .as_ref()
@@ -973,12 +863,11 @@ impl P2PCore {
             }
         }
         for (relay_peer_id, (relay_addr, _)) in &self.known_relay_peers {
-            // Only through a relay we are already connected to. Dialing the
-            // circuit address of an unreachable relay dials the relay first:
-            // with the server offline every reconnect to any peer became one
-            // more failed onion lookup (9S overnight 2026-09-30: 444 failed
-            // dials to the server, one per ~80 s, CPU and radio never idle).
-            // Connecting to the relay itself is `server_sweep`'s job.
+            // Only through a relay we are already connected to. Dialing the circuit address of an
+            // unreachable relay first dials the relay. With the server offline, every reconnect
+            // to any peer became another failed onion lookup (overnight 2026-09-30: 444 failed
+            // dials to the server, about one per 80 s, CPU and radio never idle). Connecting to
+            // the relay itself is `server_sweep`'s job.
             if *relay_peer_id == target_peer_id || !swarm.is_connected(relay_peer_id) {
                 continue;
             }
@@ -991,44 +880,35 @@ impl P2PCore {
         }
     }
 
-    /// Spec dışı, ağ sağlamlığı düzeltmesi (kendini iyileştiren yeniden
-    /// bağlanma): `poll_events`'ten periyodik olarak (bkz.
-    /// `RECONNECT_SWEEP_INTERVAL_MS`) çağrılır. Bilinen + aktif her uzak
-    /// cihaz için, o an CANLI bir libp2p bağlantısı YOKSA VE kalıcı bir
-    /// adres ipucumuz varsa (`device_last_addr`), `try_reconnect_device`
-    /// ile yeniden bağlanmayı dener.
+    /// Self-healing reconnect. Called periodically from `poll_events` (see
+    /// `RECONNECT_SWEEP_INTERVAL_MS`). For each known and active remote device with no live
+    /// libp2p connection and a persistent address hint (`device_last_addr`), it calls
+    /// `try_reconnect_device`.
     ///
-    /// Bu, EN GENİŞ kapsamlı ağ-sağlamlığı güvencesidir — tarih boyunca
-    /// birkaç kez genişletildi: önce (bu fonksiyonun kendisi) periyodik
-    /// tarama eklendi (önceden yeniden bağlanmanın TEK yolu mDNS [yalnızca
-    /// aynı yerel ağ] veya elle QR yeniden taramaydı). Sonra keepalive
-    /// (bkz. `P2PBehaviour.keepalive`) VE `ConnectionClosed` olayının KENDİSİ
-    /// (bkz. `poll_events` — artık SADECE loglamıyor, `connections_lost`
-    /// üzerinden ANINDA `try_reconnect_device` tetikliyor) eklenerek bir
-    /// disconnect'in bu periyodik taramayı (≤15sn) BEKLEMEDEN saniyeler
-    /// içinde fark edilip iyileşmesi sağlandı — bu fonksiyon artık ASIL
-    /// kurtarma mekanizması değil, bir GÜVENLİK AĞI (ör. keepalive/ConnectionClosed
-    /// bir şekilde kaçırılırsa, ya da süreç bir bağlantı hiç kurulmadan
-    /// önce başladıysa).
+    /// This is the broadest network safety net. It grew over time. First came this
+    /// periodic scan (before it, reconnecting relied on the QR being rescanned by hand).
+    /// Then keepalive (see `P2PBehaviour.keepalive`) and the `ConnectionClosed` event were
+    /// added. `poll_events` now triggers `try_reconnect_device` at once through
+    /// `connections_lost`, so a disconnect is repaired within seconds, not at the next scan
+    /// (up to 15 s). Today this function is a SAFETY NET, not the main recovery. It catches
+    /// cases where keepalive or ConnectionClosed missed something, or where the process
+    /// started before a connection existed.
     ///
-    /// BİLİNEN SINIR: karşı tarafın adresi tamamen değiştiyse (yeni public
-    /// IP, UPnP eşlemesi yok, ortak röle yok) doğrudan yeniden bağlanma yine
-    /// başarısız olur — bu, merkezi bir rendezvous sunucusu olmayan her P2P
-    /// sistemin yapısal sınırıdır. Tarama yine de denemeye devam eder;
-    /// adres bir şekilde tazelendiğinde (mDNS, yeni QR, röle keşfi) bağlanır.
-    /// A contact device, a sibling device or a configured server. The device
-    /// map holds only fingerprints of known devices, tied to a PeerId by a
-    /// verified packet or by the address of the pairing code.
+    /// Known limit: if the peer's address changed completely (new public IP, no UPnP
+    /// mapping, no shared relay), direct reconnect still fails. Any P2P system without a
+    /// central rendezvous has this limit. The scan keeps trying, and connects once an
+    /// address refreshes (new QR, relay discovery).
+    ///
+    /// Covers contact devices, sibling devices and configured servers. The device map
+    /// holds only fingerprints of known devices, tied to a PeerId by a verified packet or
+    /// by the address in the pairing code.
     pub(crate) fn is_known_peer(&self, peer: &PeerId) -> bool {
         self.is_server_peer(peer) || self.device_to_peer_id.values().any(|p| p == peer)
     }
 
-    /// Inbound connections of peers that are not known hold at most
-    /// `MAX_UNKNOWN_INBOUND` slots together, each for at most
-    /// `UNKNOWN_INBOUND_GRACE_MS`: every one is a slot of the Tor inbound
-    /// bridge. Pairing makes the peer known well inside that time.
-    /// ponytail: off in node mode, where strangers hold relay reservations
-    /// on purpose; there the bridge's own slot count is the only cap.
+    /// Inbound connections of unknown peers share at most `MAX_UNKNOWN_INBOUND` slots. Each lasts at most
+    /// `UNKNOWN_INBOUND_GRACE_MS`. Each takes a slot of the Tor inbound bridge. Pairing makes a peer known within that time.
+    // ponytail: off in node mode, where strangers hold relay reservations on purpose. There the bridge's own slot count is the only cap.
     pub(crate) fn sweep_unknown_inbound(&mut self) {
         if self.unknown_inbound.is_empty() {
             return;
@@ -1057,10 +937,10 @@ impl P2PCore {
 
     pub(crate) fn reconnect_sweep(&mut self) {
         let now = mono_ms();
-        // bkz. `fast_reconnect_until`: ağ yeni değiştiyse 3 sn'de bir, geri
-        // çekilmeyi yok sayarak dene — ilk denemeler Tor henüz hazır değilken
-        // düşüyor ve sıradan geri çekilme sonrakini ~20 sn erteliyordu.
-        // Saver: fast only for the peers of `fast_reconnect_fps`.
+        // See `fast_reconnect_until`: after a network change, retry every 3 s and ignore
+        // backoff. The first tries fail while Tor is not ready yet, and normal backoff would
+        // then delay the next try by about 20 s. Radio saver: fast only for the peers in
+        // `fast_reconnect_fps`.
         let saver_fast = self.radio_saver() && !self.fast_reconnect_fps.is_empty();
         let fast = now < self.fast_reconnect_until && (!self.radio_saver() || saver_fast);
         // Radio saver: dials (onion circuit builds) only inside the window.
@@ -1074,7 +954,7 @@ impl P2PCore {
         let first_sweep_of_minute = self.last_reconnect_sweep_at / 60_000 != now / 60_000;
         self.last_reconnect_sweep_at = now;
         if fast && saver_fast && !self.radio_window_open {
-            // Outside the radio window: those peers only, nothing else of the sweep.
+            // Outside the radio window only those peers are dialed. Nothing else of the sweep runs.
             for fp in self.fast_reconnect_fps.clone() {
                 self.try_reconnect_device(&fp, false);
             }
@@ -1082,85 +962,71 @@ impl P2PCore {
         }
         self.ensure_relay_reservations();
 
-        // asıl dial/backoff
-        // mantığı artık `try_reconnect_device`'te — `ensure_connected` VE
-        // ping/ConnectionClosed-tetiklemeli anında yeniden bağlanma (bkz.
-        // `poll_events`) ile PAYLAŞILIYOR, böylece hepsi AYNI geri-çekilme
-        // durumunu görüyor (dial fırtınası riski azalır). Burada SADECE
-        // "bilinen + Aktif" filtrelemesi kalıyor (bkz. `try_reconnect_device`
-        // dokümantasyonu — bu filtre kasıtlı olarak `ensure_connected`'ta
-        // YOK, o yüzden burada, çağıran tarafta kalmalı).
+        // The dial and backoff logic lives in `try_reconnect_device`. It is shared with
+        // `ensure_connected` and with the immediate reconnect on ping or ConnectionClosed (see
+        // `poll_events`), so all of them see the same backoff state, which lowers the risk of
+        // a dial storm. Only the "known and active" filter stays here. It is intentionally NOT
+        // in `ensure_connected`, so it belongs to this caller.
         let fps: Vec<String> = self.known_remote_devices.values()
             .filter(|d| d.is_active)
             .map(|d| d.device_fingerprint.clone())
             .collect();
-        // Not forced even in the fast window: `reconnect_all_known_now`
-        // already forced one dial and reset the backoff to 15 s; forcing
-        // every 3 s stacked parallel onion dials to peers that are offline.
+        // Not forced even in the fast window. `reconnect_all_known_now` already forced one dial
+        // and reset the backoff to 15 s. Forcing every 3 s stacked parallel onion dials to
+        // offline peers.
         for fp in fps {
             self.try_reconnect_device(&fp, false);
         }
-        // Spec dışı, gerçek cihaz çökmesi düzeltmesi ("QR tarandı, iki
-        // cihazda da hiçbir şey olmadı", ilk dial bir Tor onion timeout'uyla
-        // başarısız oldu): `approve_device_link`'in bıraktığı bir bağlama
-        // denemesi (`pending_link_target`) henüz `known_remote_devices`'a HİÇ
-        // girmemiştir (girmesi için karşılıklı IdentityExchange'in TAMAMLANMASI
-        // gerekir — tam da başarısız olan şey bu) — yukarıdaki döngü bu
-        // yüzden bu fingerprint'i asla göremez ve ilk dial denemesi başarısız
-        // olduğunda otomatik bir yeniden deneme YOKTU. `try_reconnect_device`
-        // `known_remote_devices` üyeliği GEREKTİRMEZ (sadece `remember_device_addr`
-        // ile zaten yazılmış `device_last_addr`'a bakar) — bu yüzden burada
-        // AYRICA, doğrudan bu tek bekleyen hedef için de denenir.
-        // bkz. `PENDING_LINK_RETRY_HORIZON_MS` — hiç tamamlanmayan bir
-        // bağlama denemesi için süresiz dial/yeniden-gönderim sızıntısını
-        // durdurur; ufuk içindeki davranış değişmedi.
+        // Real-device failure: "QR scanned, nothing happened on either device". The first dial
+        // failed with a Tor onion timeout. A pending link target (`pending_link_target`, set by
+        // `approve_device_link`) is not yet in `known_remote_devices`, because that needs the
+        // mutual IdentityExchange to complete, which is exactly what failed. The loop above
+        // never sees this fingerprint, and there was no automatic retry after a failed first
+        // dial. `try_reconnect_device` does not require membership in `known_remote_devices`
+        // (it reads only `device_last_addr`, written by `remember_device_addr`), so the pending
+        // target is also tried here directly. See `PENDING_LINK_RETRY_HORIZON_MS`: it stops
+        // unbounded dial and resend for a link that never completes. Behaviour inside that
+        // horizon is unchanged.
         let link_within_horizon = current_time_ms().saturating_sub(self.pending_link_started_at) <= PENDING_LINK_RETRY_HORIZON_MS;
         if let Some(fp) = self.pending_link_target.clone().filter(|_| link_within_horizon) {
             self.try_reconnect_device(&fp, false);
-            // ...ve AYRICA `IdentityExchange`'i yeniden gönder (bkz.
-            // `poll_events`'teki `connections_established` kolunun uzun
-            // notu — zarf, `PENDING_ENVELOPE_TIMEOUT_MS` dolduğunda kalıcı
-            // olarak atılıyor ve onu yeniden üreten hiçbir yol yoktu).
-            // Orası bağlantının KURULDUĞU anı yakalar; burası ise genel
-            // güvenlik ağıdır (ör. bağlantı bu süreç başlamadan önce
-            // kurulmuşsa, ya da mesh ilk denemeden sonra bozulup
-            // toparlanmışsa). Kuyrukta bu hedef için zaten bekleyen bir
-            // `IdentityExchange` varsa TEKRAR eklenmez — aksi halde her
-            // taramada bir kopya daha birikirdi.
+            // Also resend the `IdentityExchange`. See the long note in the `connections_established`
+            // arm of `poll_events`: the envelope is dropped for good when `PENDING_ENVELOPE_TIMEOUT_MS`
+            // expires, and nothing regenerated it. That arm catches the moment the connection is made.
+            // This is the general safety net, for a connection made before this process started, or
+            // after a mesh break that recovered. If an `IdentityExchange` for this target is already
+            // queued, do not add another. Each sweep would add one more copy.
             let already_queued = self.pending_envelopes.iter().any(|q| {
                 q.target == fp && matches!(q.envelope, NetworkEnvelope::IdentityExchange(_))
             });
-            // Once a minute: a publish that worked leaves nothing queued, so
-            // every sweep (15 s, 3 s in the fast window) sent a new one.
+            // Once a minute. A publish that worked leaves nothing queued, so without this every
+            // sweep (15 s, 3 s in the fast window) sent a new one.
             if !already_queued && first_sweep_of_minute {
                 if let Err(e) = self.send_identity_exchange(&fp) {
                     error!("Bağlanma IdentityExchange'i (periyodik tarama) gönderilemedi, yeniden denenecek: {}", e);
                 }
             }
         }
-        // Çoklu-cihaz (spec 1.7): kardeş cihazlardan periyodik geçmiş
-        // geri-doldurma (kendi içinde debounce'lu — bkz.
-        // SIBLING_BACKFILL_INTERVAL_MS) — çevrimdışıyken kaçırdığım kişi
-        // mesajlarını yakalamak için.
+        // Multi-device (spec 1.7): periodic history backfill from sibling devices, debounced
+        // internally (see SIBLING_BACKFILL_INTERVAL_MS). Catches contact messages missed while
+        // offline.
         self.request_sibling_backfill();
     }
 
-    /// Sadece ham gossipsub publish — kuyruğa EKLEMEZ, durum güncellemez.
-    /// `publish_envelope` (ilk deneme) ve `poll_events`'teki retry döngüsü
-    /// (sonraki denemeler) tarafından ortak kullanılır.
+    /// Raw gossip publish only. Does not queue or update state. Shared by `publish_envelope`
+    /// (first attempt) and the retry loop in `poll_events` (later attempts).
     ///
-    /// Güvenilirlik düzeltmesi (kalıcı-hata ayrımı): hata artık tipli —
-    /// `MessageTooLarge` (gossipsub `max_transmit_size` aşıldı) gibi KALICI
-    /// bir hata, AYNI baytlarla ne kadar yeniden denenirse denensin asla
-    /// başaramaz; önceden tüm hatalar geçici sayılıp 2 güne kadar boşuna
-    /// yeniden deneniyordu (kullanıcıya da hiçbir zaman "başarısız"
-    /// denmiyordu). Ayrıca `swarm` henüz yokken publish önceden SESSİZCE
-    /// `Ok(())` dönüyordu — mesajlar hiç yayınlanmadan "sent" işaretleniyordu;
-    /// artık dürüstçe Transient hata döner (retry kuyrukları devralır).
-    /// `first_attempt_at`: bu zarfın İLK yayın denemesinin zamanı. Sunucu
-    /// yolu bunu `ServerInflight::Deposit`'e taşır ki bir sunucu hatası
-    /// sonrası zarf kuyruğa AYNI son-kullanma tarihiyle dönsün (bkz. orada
-    /// ve `poll_events` retry döngüsündeki `timeout` hesabı).
+    /// Reliability: the error is typed now. `MessageTooLarge` (gossipsub `max_transmit_size`
+    /// exceeded) is permanent: the same bytes can never succeed, however often they are
+    /// retried. Before, every error counted as transient and was retried for up to 2 days,
+    /// and the user was never told "failed". Also, while `swarm` did not exist yet, publish
+    /// silently returned `Ok(())`, marking messages sent without publishing anything. It now
+    /// returns a Transient error honestly, and the retry queues take over.
+    ///
+    /// `first_attempt_at`: time of this envelope's first publish attempt. The server path
+    /// carries it into `ServerInflight::Deposit`, so after a server error the envelope
+    /// re-queues with the SAME expiry (see there, and the `timeout` calculation in the
+    /// `poll_events` retry loop).
     pub(crate) fn try_publish_raw(
         &mut self,
         target_device_fingerprint: &str,
@@ -1170,9 +1036,9 @@ impl P2PCore {
         self.try_publish_raw_via(target_device_fingerprint, envelope, first_attempt_at, true)
     }
 
-    /// See `ENVELOPE_PROTOCOL`. `false` = no mapped peer / no swarm.
-    /// The mapped PeerId of the device, else, for an IdentityExchange or a
-    /// Handshake only, the connection its IdentityExchange came in on.
+    /// See `ENVELOPE_PROTOCOL`. `false` = no mapped peer and no swarm. The target is the
+    /// mapped PeerId of the device. For an IdentityExchange or Handshake only, it is the
+    /// connection the IdentityExchange came in on.
     fn direct_peer_for(&self, fp: &str, envelope: &NetworkEnvelope) -> Option<PeerId> {
         self.device_to_peer_id.get(fp).copied().or_else(|| match envelope {
             NetworkEnvelope::IdentityExchange(_) | NetworkEnvelope::Handshake(_) => self.pairing_reply_peer.get(fp).copied(),
@@ -1196,17 +1062,12 @@ impl P2PCore {
         first_attempt_at: u64,
         allow_direct: bool,
     ) -> Result<(), PublishFailure> {
-        // Öz-denetim düzeltmesi (2026-08-28): engelleme TEK YÖNLÜYDÜ.
-        // Gelen paketleri düşürüyor ve dial etmiyorduk, ama GÖNDERME yolunda
-        // hiçbir kontrol yoktu — `announce_address_to_all_contacts`,
-        // `set_own_profile_picture`, grup fan-out'u ve ortak bir gruptaki
-        // kuyruk, engellenen kişiye paket yollamaya devam ediyordu. Yani
-        // kendi adresimizi ve çevrimiçi olduğumuzu ona sızdırıyorduk.
+        // Blocking is a one-way check. Incoming packets were dropped and no dial was made, but the send path had no check at all:
+        // `announce_address_to_all_contacts`, `set_own_profile_picture`, group fan-out and the queue kept sending packets to a blocked
+        // contact, which leaked our address and online status.
         //
-        // Burası BÜTÜN giden zarfların tek geçiş noktası — mesaj, düzenleme,
-        // silme, ack, el sıkışma, kimlik tanıtımı, dosya teklifi, grup
-        // güncellemesi. `Permanent` dönüyoruz ki yeniden deneme kuyruğuna
-        // hiç girmesin.
+        // This is the single exit point of all outgoing envelopes (message, edit, delete, ack, handshake, identity, file offer,
+        // group update). Returns `Permanent` so the retry queue never takes the envelope.
         if self.is_blocked_device(target_device_fingerprint) {
             return Err(PublishFailure::Permanent(
                 "Alıcı engellenmiş — gönderilmedi".to_string(),
@@ -1228,31 +1089,14 @@ impl P2PCore {
             return Err(PublishFailure::Permanent(format!("Zarf çok büyük ({} bayt)", bytes.len())));
         }
         let mailbox_topic = || format!("p2p_msg_{}", target_device_fingerprint);
-        // Spec dışı, hata ayıklama düzeltmesi (gerçek bir cihazda "hiçbir
-        // mesaj gitmiyor da gelmiyor da" olarak rapor edildi): bkz.
-        // `topic_for_root_key` dokümantasyonu — bir ratchet oturumu varsa
-        // fingerprint yerine paylaşılan sırdan türetilen rotasyonlu topic
-        // kullanılır, AMA bunun İKİ istisnası var, ikisi de "karşı taraf bu
-        // ANDA hangi topic'i dinliyor olabilir" sorusuna dayanıyor:
+        // A ratchet session normally routes by the rotating topic derived from `root_key` (see `topic_for_root_key`). Two exceptions
+        // use the mailbox topic (`p2p_msg_<fingerprint>`) instead, because the peer cannot yet derive the rotating topic:
         //
-        // 1. `Handshake`/`IdentityExchange`: bunlar HER ZAMAN posta kutusu
-        //    topic'inden gider, `self.ratchets`'te bu peer için bir kayıt
-        //    olsa BİLE. Sebep: `initiate_handshake_with` kendi ratchet
-        //    state'ini `self.ratchets`'e, HandshakeInit'i publish etmeden
-        //    ÖNCE ekliyor (bkz. o fonksiyon) — bu yüzden `self.ratchets.get`
-        //    kontrolü burada "true" dönerdi ve rotasyonlu topic seçilirdi.
-        //    Ama karşı taraf bu paketi ALMADAN o rotasyonlu topic'i asla
-        //    hesaplayamaz/abone olamaz (root_key'i bilmiyor) — bu, karşı
-        //    tarafın HİÇBİR ZAMAN dinlemediği bir topic'e mesaj göndermek
-        //    anlamına gelirdi (gerçek üretim hatasıydı, bu düzeltme onu
-        //    kapatıyor).
-        // 2. `Message` içindeki paket bir rotasyon ANONS EDİYORSA
-        //    (`rotation_kyber_ciphertext` dolu): aynı sebepten, karşı taraf
-        //    bu paketi almadan yeni root_key'i (dolayısıyla yeni topic'i)
-        //    bilemez — bu yüzden rotasyonu tetikleyen tarafın kaydettiği
-        //    `prev_root_key`'e (bkz. o alanın dokümantasyonu) karşılık gelen
-        //    ESKİ topic kullanılır. Rotasyon içermeyen sıradan `Message`'lar
-        //    her zamanki gibi GÜNCEL `root_key`'in topic'ini kullanır.
+        // 1. `Handshake` and `IdentityExchange` always use the mailbox topic, even when a ratchet record exists. `initiate_handshake_with`
+        //    inserts the ratchet into `self.ratchets` before publishing HandshakeInit, so a plain lookup would wrongly pick the rotating
+        //    topic. The peer does not have the root key yet and cannot subscribe to it.
+        // 2. A `Message` that announces a rotation (`rotation_kyber_ciphertext` set) uses the topic of the previous root key (`prev_root_key`).
+        //    The peer cannot learn the new root key before it receives this packet. Ordinary messages use the current `root_key` topic.
         let topic = match envelope {
             NetworkEnvelope::Handshake(_) | NetworkEnvelope::IdentityExchange(_) => mailbox_topic(),
             NetworkEnvelope::Message(packet) if packet.header.rotation_kyber_ciphertext.is_some() => {
@@ -1266,23 +1110,14 @@ impl P2PCore {
                 None => mailbox_topic(),
             },
         };
-        // --- Sunucu yolu (bkz. `server_client`) ---
-        //
-        // Topic SEÇİMİ yukarıda olduğu gibi kalıyor; sunucu, aynı topic
-        // dizesinin körleştirilmiş hâlini kutu kimliği olarak kullanıyor.
-        // Böylece yukarıdaki iki istisna (Handshake/IdentityExchange her
-        // zaman posta kutusu topic'i; rotasyon duyuran Message eski
-        // root_key'in topic'i) sunucu yoluna da BEDAVA devroluyor — ikisi de
-        // gerçek üretim hatalarıydı, ikinci bir yerde tekrar yapılmamalı.
+        // Server path (see `server_client`). Topic choice stays as above. The server uses a blinded form of the same topic string as the
+        // mailbox id. So both exceptions above carry over to the server path as well.
         let topic_str = topic;
-        // Eşle CANLI bir libp2p bağlantısı varsa (LAN, Tor, röle) önce o yol:
-        // sunucu kopyası yalnızca bu zarf ilk yeniden denemeye kadar
-        // (`ACK_RETRY_INITIAL_MS`) onaylanmadıysa bırakılır. Önceden sunucu
-        // ekliyken yan yana iki telefon bile her mesajı ilk 30 sn yalnızca
-        // Tor üzerinden sunucuya yüklüyordu (mesaj başına ~15 KB + Tor
-        // gidiş-dönüşü). Güvence aynı: Ack gelmezse sunucuya düşülüyor.
-        // Handshake/IdentityExchange/rotasyon duyurusu yine hep iki yoldan
-        // (bkz. `should_shadow_on_gossipsub` — kaybı telafi edilemez).
+        // If a live libp2p connection exists (LAN, Tor or relay), try that path first. The server copy is kept only if the envelope is
+        // still unacknowledged at the first retry (`ACK_RETRY_INITIAL_MS`). Before, with a server configured, two phones on the same LAN
+        // uploaded every message over Tor to the server for the first 30 s (about 15 KB per message plus a Tor round trip).
+        // The guarantee is unchanged: without an Ack, the envelope falls back to the server.
+        // Handshake, IdentityExchange and rotation announcements always go by both paths (see `should_shadow_on_gossipsub`).
         let direct = self.direct_peer_for(target_device_fingerprint, envelope)
             .map_or(false, |p| self.swarm.as_ref().map_or(false, |s| s.is_connected(&p)));
         let critical = self.call_signal_sending || match envelope {
@@ -1313,24 +1148,17 @@ impl P2PCore {
         }
     }
 
-    /// Herhangi bir zarfı (Handshake/IdentityExchange/Message/GroupUpdate/...)
-    /// bir karşı tarafın gossipsub topic'ine yayınlar. İlk bağlantıdan sonraki
-    /// ilk birkaç saniyede gossipsub mesh'i henüz oluşmamış olabilir — bu
-    /// durumda publish anında "InsufficientPeers"/"NoPeersSubscribedToTopic"
-    /// ile başarısız olur. Bunu MERKEZİ olarak burada ele alıyoruz: başarısız
-    /// olan HER zarf `pending_envelopes`'e eklenir, `poll_events` her turda
-    /// aynı zarfı (yeniden şifreleme/imzalama YAPMADAN) yeniden göndermeyi
-    /// dener. Bu, önceden her çağıranın kendi tip-özel kuyruğunu tutmasından
-    /// (ve HandshakeInit'in hiç kapsanmamasından) daha basit ve eksiksiz.
-    /// `envelope` bir `Message` ise `message_status` da güncellenir (bkz. o
-    /// alanın dokümantasyonu — UI'nin gönderim/hata ikonları için).
+    /// Publishes any envelope (Handshake, IdentityExchange, Message, GroupUpdate, ...) to the peer's gossip topic. Right after the first
+    /// connection the gossip mesh may not exist yet, and the publish fails with `InsufficientPeers` or `NoPeersSubscribedToTopic`.
+    /// Every failed envelope is queued in `pending_envelopes`. `poll_events` resends the SAME envelope each turn (no re-encryption and
+    /// no re-signing). This is one central mechanism for all envelope types, replacing per-caller queues that did not cover
+    /// HandshakeInit. For a `Message`, `message_status` is updated too (the UI shows send and error icons from it).
     pub(crate) fn publish_envelope(&mut self, target_device_fingerprint: &str, envelope: &NetworkEnvelope) -> Result<(), String> {
         self.publish_envelope_at(target_device_fingerprint, envelope, current_time_ms())
     }
 
-    /// Adds to `pending_envelopes` unless the same envelope is already queued
-    /// for this target. M-181: keys are cached per entry; only the new one is
-    /// encoded.
+    /// Adds to `pending_envelopes` unless the same envelope is already queued for this target. Keys are cached per entry, so only
+    /// the new one is encoded.
     pub(crate) fn enqueue_pending(&mut self, queued: QueuedEnvelope) {
         let already_queued = queued.key.is_some()
             && self.pending_envelopes.iter().any(|q| q.target == queued.target && q.key == queued.key);
@@ -1339,9 +1167,8 @@ impl P2PCore {
         }
     }
 
-    /// `publish_envelope`, ama zarfın kuyruktaki yaşlanma sayacını çağıran
-    /// belirler. Sunucu hatası sonrası yeniden kuyruğa koyma yolu bunu
-    /// ORİJİNAL zamanla çağırır — bkz. `server_client::requeue_failed_deposit`.
+    /// Like `publish_envelope`, but the caller sets the envelope's age counter. The server-failure requeue path passes the ORIGINAL
+    /// time. See `server_client::requeue_failed_deposit`.
     pub(crate) fn publish_envelope_at(
         &mut self,
         target_device_fingerprint: &str,
@@ -1350,8 +1177,7 @@ impl P2PCore {
     ) -> Result<(), String> {
         match self.try_publish_raw(target_device_fingerprint, envelope, first_attempt_at) {
             Err(PublishFailure::Permanent(e)) => {
-                // bkz. `PublishFailure` — yeniden denemek asla başaramaz,
-                // kuyruğa EKLEME; hemen Failed işaretle ve UI'ye bildir.
+                // See `PublishFailure`. A retry can never succeed, so do not queue it. Mark Failed now and notify the UI.
                 if let NetworkEnvelope::Message(m) = envelope {
                     self.set_message_status(&m.header.message_id, MessageSendStatus::Failed);
                     self.attachment_events.push(serde_json::json!({
@@ -1365,13 +1191,10 @@ impl P2PCore {
                 if let NetworkEnvelope::Message(m) = envelope {
                     self.set_message_status(&m.header.message_id, MessageSendStatus::Pending);
                 }
-                // Aynı hedefe aynı zarf zaten kuyruktaysa İKİNCİ bir kopya
-                // EKLEME: her sunucu gidiş-dönüşü bir kopya daha bırakıyor
-                // ve kuyruk (dolayısıyla saniyede bir yeniden yatırma)
-                // katlanarak büyüyordu.
-                // `NetworkEnvelope` `PartialEq` türetmiyor (içi ham bayt
-                // dolu paketler) — kimlik için sunucu yolunun ZATEN
-                // kullandığı tekilleştirme anahtarını kullanıyoruz.
+                // If the same envelope is already queued for this target, do not add a second copy. Each server round trip
+                // left one more copy, and the queue (and the redeposit every second) grew exponentially.
+                // `NetworkEnvelope` does not derive `PartialEq` (packets hold raw bytes). So identity uses the deduplication key the
+                // server path already uses.
                 self.enqueue_pending(QueuedEnvelope::new(target_device_fingerprint.to_string(), envelope.clone(), first_attempt_at));
                 Err(e)
             }
@@ -1384,23 +1207,15 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `awaiting_confirmation` alanı dokümantasyonu — `publish_envelope`
-    /// gibi ilk denemeyi hemen yapar (durumu/aynı şekilde günceller), ama
-    /// SONRASINDA da (ilk deneme başarılı olsa BİLE) karşı taraftan bir
-    /// onay gelene kadar paketi periyodik olarak yeniden göndermeye devam
-    /// eder — `pending_envelopes`'in aksine bir üst zaman sınırı yoktur.
+    /// Like `publish_envelope`: it tries once right away and updates the status the same way. Unlike that function, it keeps
+    /// re-sending the packet after the first attempt, even on success, until the peer acknowledges it. There is no upper time limit,
+    /// unlike `pending_envelopes`.
     ///
-    /// `original_sent_at_override`/`retry_interval_ms_override`: SADECE
-    /// `regen_content` tazelemesinden (bkz. `retry_unconfirmed_messages`
-    /// yaş-aşımı kolu) çağrıldığında `Some(...)` — mesajın İLK kuyruğa
-    /// girdiği an VE o ana kadar ulaşılmış üstel geri çekilme aralığını
-    /// KORUR. Pil ömrü düzeltmesi: bunlar korunmadan her 25 dakikalık
-    /// tazelemede `retry_interval_ms` `ACK_RETRY_INITIAL_MS`'ye (15s)
-    /// sıfırlanırdı — karşı taraf günlerce çevrimdışıyken bu, her 25
-    /// dakikada bir 15s→30s→60s→120s hızlı bir "patlama"
-    /// anlamına gelirdi. Artık zaten `ACK_RETRY_MAX_MS` (120s) tavanına
-    /// ulaşmış bir mesaj, tazelemeler arasında da o TAVANDA kalır — sabit,
-    /// öngörülebilir ~2 dakikalık bir nabız, patlama yok.
+    /// `original_sent_at_override` and `retry_interval_ms_override` are `Some` ONLY when called from a `regen_content` regeneration
+    /// (see the age branch of `retry_unconfirmed_messages`). They keep the message's first queue time and the backoff reached so far.
+    /// Without them, each 25-minute regeneration reset `retry_interval_ms` to `ACK_RETRY_INITIAL_MS` (15 s). A peer offline for days would
+    /// then see a 15 s, 30 s, 60 s, 120 s burst every 25 minutes. A message already at the `ACK_RETRY_MAX_MS` (120 s) ceiling now stays
+    /// there across regenerations: a steady, predictable pulse of about two minutes.
     pub(crate) fn publish_with_ack_tracking(
         &mut self,
         target_device_fingerprint: &str,
@@ -1417,9 +1232,8 @@ impl P2PCore {
                     self.set_message_status(&m.header.message_id, MessageSendStatus::Sent);
                 }
             }
-            // bkz. `PublishFailure` — kalıcı hata (ör. MessageTooLarge):
-            // onay-takip kuyruğuna HİÇ girme, hemen Failed işaretle ve
-            // UI'ye bildir; yeniden denemek asla başaramazdı.
+            // See `PublishFailure`. A permanent error (for example `MessageTooLarge`) must not enter the acknowledgement queue.
+            // Mark it Failed now and notify the UI, since a retry can never succeed.
             Err(PublishFailure::Permanent(e)) => {
                 error!("Gönderim KALICI olarak başarısız (yeniden denenmeyecek): {}", e);
                 // A refresh of an entry that is already tracked: drop the old
@@ -1442,12 +1256,8 @@ impl P2PCore {
                 }
             }
         }
-        // bkz. `persist_durable_retry` dokümantasyonu — süreç öldürülüp
-        // yeniden başlasa bile bu kaybolmasın diye şifreli DB'ye de yazılır.
-        // Struct'a taşınmadan (move) ÖNCE, referans üzerinden.
-        // bkz. `persist_durable_retry` — diske GERÇEK başlangıç anı yazılır,
-        // `now` değil; yoksa 7 günlük vazgeçme penceresi her tazelemede
-        // sıfırlanırdı.
+        // The entry is also written to the encrypted DB, so it survives a process kill. Written by reference before the move
+        // into the struct. The real start time is stored, not `now`. Otherwise the 7-day give-up window would reset on every refresh.
         let original_sent_at = original_sent_at_override.unwrap_or(now);
         if let Some(content) = &regen_content {
             self.persist_durable_retry(message_id, target_device_fingerprint, content, original_sent_at);
@@ -1456,8 +1266,7 @@ impl P2PCore {
         self.awaiting_confirmation.insert(message_id.to_string(), PendingConfirmation {
             suspect_probed: false,
             direct_delivered: false,
-            // bkz. `chain_stamp` alan notu — paket hangi zincir kuşağıyla
-            // şifrelendiyse o damgalanır.
+            // The packet is stamped with the chain generation it was encrypted under.
             chain_stamp: self.chain_stamp_for(target_device_fingerprint),
             peer_device_fingerprint: target_device_fingerprint.to_string(),
             envelope,
@@ -1470,12 +1279,10 @@ impl P2PCore {
         });
     }
 
-    /// `poll_events`'ten çağrılır — `awaiting_confirmation`'daki, süresi
-    /// gelmiş her girdiyi (yeniden şifrelemeden) tekrar yayınlar ve bir
-    /// sonraki deneme aralığını üstel olarak büyütür (`ACK_RETRY_MAX_MS`
-    /// ile sınırlı).
+    /// Called from `poll_events`. Re-publishes every due entry of `awaiting_confirmation` (without re-encrypting) and grows the next
+    /// retry interval exponentially, capped at `ACK_RETRY_MAX_MS`.
     pub(crate) fn retry_unconfirmed_messages(&mut self) {
-        // Revoked devices whose last notice had its time to go out.
+        // Revoked devices whose last notice had time to go out.
         if !self.revoked_disconnects.is_empty() {
             let now = mono_ms();
             let (due, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.revoked_disconnects).into_iter().partition(|(_, at)| now >= *at);
@@ -1486,26 +1293,19 @@ impl P2PCore {
                 }
             }
         }
-        // `poll_events` bunu
-        // her turda çağırır (bkz. o fonksiyonun dokümantasyonu);
-        // `reconnect_sweep`/`group_sync_sweep`/`periodic_storage_sweep`'in
-        // aksine bu fonksiyonun kendi aralık kontrolü YOKTU — boş bir
-        // `awaiting_confirmation` haritasında (yeniden gönderilecek hiçbir
-        // mesaj olmayan sıradan bir bekleme durumunda, ki en yaygın durum
-        // budur) bile aşağıdaki `.iter().filter().map().collect()` +
-        // `sort_by_key` her turda gereksiz bir tahsis/tarama yapıyordu.
+        // `poll_events` calls this every turn. Unlike `reconnect_sweep`, `group_sync_sweep` and `periodic_storage_sweep`, this function
+        // had no interval check. With an empty `awaiting_confirmation` map, the usual idle case, the filter, map, collect and sort below
+        // still allocated and scanned on every turn.
         if self.awaiting_confirmation.is_empty() {
             return;
         }
         let now = current_time_ms();
-        // the scan below (whole map, HKDF per peer, sort) at most once
-        // a second, not on every poll turn.
+        // Runs the scan below (whole map, HKDF per peer, sort) at most once a second, not on every poll turn.
         if now.saturating_sub(self.last_unconfirmed_retry_at) < 1_000 {
             return;
         }
         self.last_unconfirmed_retry_at = now;
-        // bkz. `KeepAliveState.suspect`: canlı sandığımız bir bağlantıdan
-        // `ACK_SUSPECT_MS` içinde onay gelmediyse bağlantıyı hemen yokla.
+        // See `KeepAliveState.suspect`. If a connection we think is alive gives no Ack within `ACK_SUSPECT_MS`, probe it now.
         let mut suspects: Vec<PeerId> = Vec::new();
         let mut early_deposit: Vec<(String, NetworkEnvelope)> = Vec::new();
         for p in self.awaiting_confirmation.values_mut() {
@@ -1520,41 +1320,28 @@ impl P2PCore {
         for pid in suspects {
             self.mark_connection_suspect(pid, false);
         }
-        // Doğrudan gönderilmiş ama `ACK_SUSPECT_MS` içinde onaylanmamış paketi
-        // 15 sn'lik (`ACK_RETRY_INITIAL_MS`) ilk yeniden denemeyi beklemeden sunucuya da bırak: gönderici
-        // bu arada çevrimdışı kalırsa mesaj sunucuda olsun. Aynı baytları
-        // gossipsub zaten `Duplicate` diye tekrar göndermez.
+        // A packet sent directly but unacknowledged within `ACK_SUSPECT_MS` is also left on the server, without waiting for the first
+        // 15 s retry (`ACK_RETRY_INITIAL_MS`). If the sender goes offline meanwhile, the message is on the server. Gossip would not
+        // re-send the same bytes anyway (it reports `Duplicate`).
         for (fp, envelope) in early_deposit {
-            // Server copy only (`allow_direct = false`): the direct copy is in
-            // flight, and `try_publish_raw` sent the envelope a second time.
+            // Server copy only (`allow_direct = false`). The direct copy is in flight, and `try_publish_raw` already sent the envelope once.
             if self.is_connected_to_device(&fp) && !self.ready_server_peers().is_empty() {
                 if let Err(PublishFailure::Transient(e) | PublishFailure::Permanent(e)) = self.try_publish_raw_via(&fp, &envelope, now, false) {
                     warn!("Early server copy for suspect peer {} failed: {}", crate::log_id(&fp), e);
                 }
             }
         }
-        // KRİTİK: `awaiting_confirmation` bir `HashMap` — Rust'ın std
-        // `HashMap`'i her süreçte rastgele tohumlanmış bir hasher
-        // kullanır (DoS direnci için), yani `.iter()` sırası KOMPOZİSYON
-        // sırasıyla HİÇ ilgili değildir. Kullanıcı çevrimdışıyken art
-        // arda birkaç mesaj biriktiyse, bu sıralama olmadan yeniden
-        // gönderim sırası her `poll_events` turunda değişebilen, rastgele
-        // bir sıraydı — kullanıcı isteği: ilk gönderilemeyen mesajlar
-        // BİRİKTİYSE gönderilme (composition) sırasına göre denenmeli.
-        // `original_sent_at` zaten her `PendingConfirmation`'da var, bu
-        // yüzden `due_ids`'i ona göre sıralamak yeterli (yapıyı
-        // `BTreeMap`'e çevirmek gibi daha büyük bir değişikliğe gerek
-        // yok — tüm `.get`/`.get_mut`/`.remove`/`.insert` çağrı yerlerini
-        // etkilerdi).
-        // Öz-denetim düzeltmesi (2026-08-28): zincir kuşağı damgasına
-        // (bkz. `PendingConfirmation.chain_stamp`) yalnızca SIRASI GELEN
-        // paketler için bakılıyordu — yani kuşak değişmiş olsa bile paket,
-        // kendi geri çekilme aralığı (2 dakikaya kadar) dolana dek karşı
-        // tarafın ARTIK ÇÖZEMEYECEĞİ ciphertext'le yeniden denenmeye devam
-        // ediyordu. "Kuşak değişince hemen tazelenir" ancak şimdi doğru.
+        // Critical: `awaiting_confirmation` is a `HashMap`. Rust's std `HashMap` uses a randomly seeded hasher (DoS resistance), so the
+        // `.iter()` order has nothing to do with composition order. When several messages queue up while the user is offline, a random
+        // order could change on every turn. The requirement is that messages not yet sent are retried in composition order. `original_sent_at`
+        // is in every `PendingConfirmation`, so sorting `due_ids` by it is enough. A `BTreeMap` would have touched every
+        // `.get`, `.get_mut`, `.remove` and `.insert` call site.
         //
-        // Damga eş BAŞINA bir kez hesaplanıyor (`topic_for_root_key` bir
-        // HKDF adımı), mesaj başına değil.
+        // Measured fix (2026-08-28): the chain generation stamp (see `PendingConfirmation.chain_stamp`) was checked only for in-order
+        // packets. A packet whose generation had changed stayed in retry with ciphertext the peer could no longer decrypt, until its
+        // backoff (up to 2 minutes) expired. Refreshing right away on a generation change now works as intended.
+        //
+        // The stamp is computed once per peer (one HKDF step, `topic_for_root_key`), not once per message.
         let mut stamp_cache: HashMap<String, String> = HashMap::new();
         // Unique first: one String per peer, not one per held message.
         let peers: Vec<String> = self
@@ -1615,29 +1402,19 @@ impl P2PCore {
             if first_sent_at >= now {
                 continue;
             }
-            // KRİTİK (bkz. `MAX_UNCONFIRMED_AGE_MS` dokümantasyonu): bu yaşı
-            // aşan bir paket, karşı tarafın ratchet'i muhtemelen bir DH/KEM
-            // rotasyonu yaşadığı için ARTIK KRİPTOGRAFİK OLARAK ÇÖZÜLEMEZ —
-            // yeniden göndermeye devam etmek sadece alıcıya sonsuza dek
-            // "Decryption failed" ürettirir.
-            // bkz. `PendingConfirmation.chain_stamp`: oturumun kuşağı
-            // değiştiyse bu paket karşı tarafta ARTIK çözülemez — süre
-            // dolmasını beklemeden hemen tazele. Süre ölçütü yalnızca
-            // "hiç rotasyon olmadı" hâli için yedek olarak duruyor.
-            // Damga eş başına önceden hesaplandı (bkz. `stamp_cache`) —
-            // mesaj başına bir HKDF adımı tekrarlamıyoruz.
+            // Critical (see `MAX_UNCONFIRMED_AGE_MS`): a packet older than this can no longer be decrypted by the peer, because its ratchet
+            // has probably gone through a DH/KEM rotation. Resending it only makes the recipient show "Decryption failed" forever.
+            // See `PendingConfirmation.chain_stamp`: if the session generation changed, the packet is undecryptable at the peer. Refresh it
+            // now instead of waiting for the age limit. The age check remains only as a fallback for the case with no rotation at all.
+            // The stamp is computed once per peer (see `stamp_cache`), not once per message.
             let stale_chain = match stamp_cache.get(&peer_fp) {
                 Some(current) => !current.is_empty() && !chain_stamp.is_empty() && current != &chain_stamp,
                 None => false,
             };
             if stale_chain || now.saturating_sub(first_sent_at) > MAX_UNCONFIRMED_AGE_MS {
-                // gerçek vazgeçme sınırı artık
-                // `original_sent_at` (mesajın İLK kuyruğa girdiği an, bkz. o
-                // alanın dokümantasyonu — tazelemeler arasında SABİT)
-                // üzerinden `TEXT_RETRY_GIVE_UP_MS`. Bu, `regen_content`
-                // dolu olsa BİLE kontrol edilir — aksi halde bir mesaj
-                // sonsuza dek (günler/haftalar) tazelenip denenmeye devam
-                // ederdi, "7 gün" sınırının hiçbir anlamı kalmazdı.
+                // The real give-up limit is now `original_sent_at` (when the message first entered the queue, stable across refreshes),
+                // checked against `TEXT_RETRY_GIVE_UP_MS`. This check runs even when `regen_content` is set. Otherwise a message would be
+                // refreshed and retried for days or weeks, and the 7-day limit would mean nothing.
                 let give_up_for_real = now.saturating_sub(original_sent_at) > TEXT_RETRY_GIVE_UP_MS;
                 // Sync packets are not refreshed: re-encrypting and re-depositing
                 // them every ~30 min for 7 days to a device that is switched off
@@ -1656,19 +1433,11 @@ impl P2PCore {
                 if !give_up_for_real {
                     // Clone (not move) so `regen_content` is still available below for the give-up event.
                     if let Some(content) = regen_content.clone() {
-                        // Spec dışı, kullanıcı geri bildirimi ("give up time
-                        // bazı yerlerde sorun çıkarabilir... adam 6 saat
-                        // interneti açmadı, ne yapalım?" + kullanıcı isteği:
-                        // sıradan Text de dahil, karşı taraf onaylayana
-                        // kadar ~7 güne kadar dener): AYNI bayatlamış
-                        // şifreli paketi tekrar göndermenin anlamı yok —
-                        // orijinal düz metni TAZE bir ratchet adımıyla
-                        // yeniden şifreleyip AYNI `message_id`/`original_sent_at`
-                        // (bkz. `send_message_content_inner`) ile devam
-                        // ediyoruz, böylece UI balonu/`awaiting_confirmation`
-                        // girdisi KESİNTİSİZ aynı kalır.
-                        // Kind and target: the pending-messages screen lists only
-                        // Text, so this line is the only place the rest shows up.
+                        // Found in user feedback: messages should be retried for up to about 7 days, even plain Text, until the peer
+                        // acknowledges them. Resending the same stale ciphertext is pointless. Instead the original plaintext is
+                        // re-encrypted with a FRESH ratchet step, keeping the same `message_id` and `original_sent_at` (see
+                        // `send_message_content_inner`). The UI bubble and the `awaiting_confirmation` entry stay continuous.
+                        // The pending-messages screen lists only Text, so this log line is the only place the other kinds show up.
                         let kind = content.kind();
                         warn!("Paket {} ({} -> {}) onaylanmadan azami yaşı aştı, TAZELENİP AYNI kimlikle yeniden deneniyor",
                             message_id, kind, &peer_fp[..peer_fp.len().min(8)]);
@@ -1676,16 +1445,10 @@ impl P2PCore {
                             peer_fp.clone(), &content, None,
                             Some(message_id.clone()), Some(original_sent_at), Some(retry_interval_ms),
                         ) {
-                            // Düzeltme: log metni "kalıcı olarak vazgeçildi"
-                            // diyordu ama vazgeçilmiyordu — girdi
-                            // `next_retry_at <= now` ile kuyrukta kaldığı
-                            // için HER `poll_events` turunda (saniyede bir)
-                            // yeniden tazelenmeye çalışılıyordu; iki gün
-                            // boyunca, her turda bir ratchet adımıyla
-                            // birlikte. Artık geri çekilme aralığı ileri
-                            // alınıyor: yeniden deneme sürüyor ama makul bir
-                            // hızda (`TEXT_RETRY_GIVE_UP_MS` tavanı hâlâ
-                            // geçerli).
+                            // Fix: the log said "permanently given up", but nothing was given up. The entry stayed due, because
+                            // `next_retry_at <= now`, and every `poll_events` turn (once a second) tried to regenerate it again.
+                            // That went on for two days, with a ratchet step on every turn. Now the backoff is pushed forward: retries
+                            // continue at a reasonable pace, and the `TEXT_RETRY_GIVE_UP_MS` ceiling still applies.
                             error!("Tazeleme gönderim denemesi başarısız, geri çekilme aralığıyla yeniden denenecek: {}", e);
                             if let Some(pending) = self.awaiting_confirmation.get_mut(&message_id) {
                                 pending.retry_interval_ms =
@@ -1705,10 +1468,8 @@ impl P2PCore {
                 self.remove_durable_retry(&message_id);
                 // Marked failed: the relay copy must not deliver it later.
                 self.cancel_server_deposit(&message_id);
-                // Types without `regen_content` (e.g. HistorySyncResponse) OR
-                // anything past `TEXT_RETRY_GIVE_UP_MS`: "Failed" olarak
-                // işaretle (kullanıcı isterse manuel olarak yeniden
-                // gönderebilir).
+                // Types without `regen_content` (for example HistorySyncResponse), and anything past `TEXT_RETRY_GIVE_UP_MS`, are marked
+                // Failed. The user can resend them manually.
                 if let NetworkEnvelope::Message(m) = &envelope {
                     self.set_message_status(&m.header.message_id, MessageSendStatus::Failed);
                     // Same fix as the Ack arm: resolve the real target from regen_content.
@@ -1777,8 +1538,7 @@ impl P2PCore {
                         self.set_message_status(&m.header.message_id, MessageSendStatus::Sent);
                     }
                 }
-                // bkz. `PublishFailure` — kalıcı hata: bu zarf bir daha ASLA
-                // yayınlanamaz, kuyruğu meşgul etmeye devam etmesin.
+                // See `PublishFailure`. A permanent error means this envelope can never be published again. Do not let it keep the queue busy.
                 Err(PublishFailure::Permanent(e)) => {
                     error!("Bekleyen paket {} KALICI yayın hatasıyla bırakılıyor: {}", message_id, e);
                     self.awaiting_confirmation.remove(&message_id);
@@ -1793,15 +1553,11 @@ impl P2PCore {
                     continue;
                 }
                 Err(PublishFailure::Transient(_)) => {
-                    // Sessizce bir sonraki turda tekrar denenecek — henüz
-                    // "Failed" olarak işaretlemiyoruz, kullanıcı açıkça
-                    // "onaylanana kadar sürekli dene" istedi.
+                    // Retried silently on the next turn. It is not marked Failed yet, because the user asked for "keep trying until acknowledged".
                 }
             }
             if let Some(pending) = self.awaiting_confirmation.get_mut(&message_id) {
-                // Ayarlar'daki bekleyen
-                // mesajlar listesinde (bkz. `list_pending_messages`)
-                // gösterilecek "son deneme" zamanı.
+                // The "last attempt" time shown in the pending-messages list in Settings (see `list_pending_messages`).
                 pending.last_attempt_at = current_time_ms();
                 pending.retry_interval_ms = (pending.retry_interval_ms * 2).min(ACK_RETRY_MAX_MS);
                 pending.next_retry_at = current_time_ms() + pending.retry_interval_ms;
@@ -1809,19 +1565,13 @@ impl P2PCore {
         }
     }
 
-    /// Güvenilirlik düzeltmesi ("rotasyonu kesen mesajlar 25 dakika takılı
-    /// kalıyor"): bu peer'la olan oturumda az önce bir DH/KEM rotasyonu
-    /// gerçekleşti (BİZ tetikledik ya da karşı tarafın rotasyonuna cevap
-    /// verdik) — `awaiting_confirmation`'da bu peer için bekleyen, ESKİ
-    /// zincirle şifrelenmiş her paket artık KRİPTOGRAFİK OLARAK ÇÖZÜLEMEZ
-    /// (bkz. `MAX_UNCONFIRMED_AGE_MS` notu). Önceden bu paketler 25
-    /// dakikalık yaş aşımına kadar boşuna aynen yeniden gönderiliyordu —
-    /// artık rotasyon ANINDA: `regen_content` taşıyanlar AYNI `message_id`/
-    /// `original_sent_at`/geri-çekilme aralığıyla taze zincir altında hemen
-    /// yeniden şifrelenip gönderilir; taşımayanlar (Ack/Seen/
-    /// HistorySyncResponse — hiçbiri yeniden üretilemez ve hepsinin kaybı
-    /// zararsızdır: Ack'lenmemiş orijinal zaten yeniden gönderilir, yanıt
-    /// isteğin yeniden denemesiyle tazelenir) sessizce bırakılır.
+    /// Fix for "messages that cross a rotation stay stuck for 25 minutes": a DH or KEM rotation just happened in the session with this peer,
+    /// either triggered by us or as a reply to the peer's rotation. Every packet still pending in `awaiting_confirmation` for this peer was
+    /// encrypted under the OLD chain and can no longer be decrypted (see `MAX_UNCONFIRMED_AGE_MS`). Before, those packets were resent
+    /// unchanged until the 25-minute age limit. Now the rotation takes effect at once. Packets carrying `regen_content` are re-encrypted
+    /// under the fresh chain right away, keeping the same `message_id`, `original_sent_at` and backoff. Packets without it (Ack, Seen,
+    /// HistorySyncResponse) cannot be regenerated, and losing them is harmless: an unacknowledged original is resent anyway, and a response
+    /// is refreshed when the request is retried. They are dropped quietly.
     pub(crate) fn regen_pending_for_peer(&mut self, peer_fp: &str) {
         let mut regen: Vec<(String, MessageContent, u64, u64)> = Vec::new();
         let mut drop_ids: Vec<String> = Vec::new();
@@ -1870,19 +1620,12 @@ impl P2PCore {
         }
     }
 
-    /// uygulama ön plana geldiğinde (bkz.
-    /// Kotlin `P2PApplication` foreground algılama + JNI `retryAllPendingNow`)
-    /// çağrılır — HERHANGİ bir bekleyen mesajın bir sonraki deneme zamanını
-    /// (`next_retry_at`) HEMEN'e çeker, üstel geri çekilmenin doğal
-    /// aralığını (şu an 120s'ye kadar) beklemeden. `awaiting_confirmation`
-    /// zaten SADECE `TEXT_RETRY_GIVE_UP_MS` (7 gün) içindeki girdileri
-    /// tutar — daha eskiler `retry_unconfirmed_messages`'ın yaş-aşımı
-    /// kolunda zaten kalıcı olarak temizlenmiştir — bu yüzden burada AYRICA
-    /// bir yaş filtresi gerekmez, mevcut TÜM girdiler zaten "son 7 gün"
-    /// kapsamındadır. Gerçek gönderim denemesi, bir sonraki `poll_events`
-    /// turunda (saniyede bir, Kotlin tarafından zaten çağrılıyor) normal
-    /// `retry_unconfirmed_messages` yolundan geçer — burada AYRI bir ağ
-    /// I/O'su YAPILMAZ (pil dostu: sadece bir zaman damgası ileri çekilir).
+    /// Called when the app comes to the foreground (Kotlin `P2PApplication` foreground detection, plus the JNI `retryAllPendingNow`). It pulls
+    /// the next retry time (`next_retry_at`) of every pending message forward to now, without waiting for the natural exponential backoff
+    /// (up to 120 s). `awaiting_confirmation` holds only entries within `TEXT_RETRY_GIVE_UP_MS` (7 days). Older ones were already removed by
+    /// the age branch of `retry_unconfirmed_messages`, so no extra age filter is needed here. The actual send attempt happens on the next
+    /// `poll_events` turn (once a second, already driven by Kotlin) through the normal `retry_unconfirmed_messages` path. No network I/O
+    /// happens here: only a timestamp moves, which is gentle on the battery.
     pub(crate) fn retry_all_pending_now(&mut self) {
         let now = current_time_ms();
         for pending in self.awaiting_confirmation.values_mut() {
@@ -1890,27 +1633,23 @@ impl P2PCore {
         }
     }
 
-    /// Ayarlar'daki bekleyen mesajlar
-    /// listesindeki TEK bir satır için manuel "Şimdi Dene" düğmesi — bkz.
-    /// `retry_all_pending_now` aynı mekanizma, ama sadece BU mesaja
-    /// uygulanır. Gerçek gönderim denemesi burada YAPILMAZ (pil dostu,
-    /// AYNI gerekçe) — sadece `next_retry_at`'i HEMEN'e çeker, bir sonraki
-    /// `poll_events` turu (saniyede bir, zaten çalışıyor) gerçek denemeyi
-    /// yapar.
+    /// Manual "Retry now" for ONE row of the pending-messages list in Settings. Same mechanism as `retry_all_pending_now`, but only for
+    /// this message. No send happens here (same battery reason). It only pulls `next_retry_at` to now, and the next `poll_events` turn
+    /// (once a second, already running) makes the real attempt.
     pub(crate) fn retry_pending_message_now(&mut self, message_id: &str) -> Result<(), String> {
         let pending = self.awaiting_confirmation.get_mut(message_id).ok_or("Bekleyen mesaj bulunamadı")?;
         pending.next_retry_at = current_time_ms();
         Ok(())
     }
 
-    /// bkz. `PendingMessageSummary` dokümantasyonu.
+    /// See `PendingMessageSummary`.
     pub(crate) fn list_pending_messages(&self) -> Vec<PendingMessageSummary> {
         self.awaiting_confirmation.iter().filter_map(|(message_id, p)| {
             match &p.regen_content {
                 Some(MessageContent::Text { group_id, text, .. }) => Some(PendingMessageSummary {
                     message_id: message_id.clone(),
                     peer_device_fingerprint: p.peer_device_fingerprint.clone(),
-                    // bkz. `PendingMessageSummary.device_name` dokümantasyonu.
+                    // See `PendingMessageSummary.device_name`.
                     device_name: self.known_remote_devices.get(&p.peer_device_fingerprint)
                         .map(|d| d.device_name.clone())
                         .unwrap_or_default(),
@@ -1919,26 +1658,20 @@ impl P2PCore {
                     original_sent_at: p.original_sent_at,
                     last_attempt_at: p.last_attempt_at,
                 }),
-                // Edit/Delete/GroupUpdate (veya regen_content taşımayan
-                // diğer türler, ör. HistorySyncRequest/FileOffer) — bunlar
-                // kullanıcının "yazdığı bir mesaj" değil, UI'da ayrı bir
-                // satır olarak gösterilecek bir şeyleri yok.
+                // Edit, Delete and GroupUpdate (and the other kinds without `regen_content`, such as HistorySyncRequest and FileOffer) are not
+                // messages the user wrote. The UI has no separate row for them, so they are skipped here.
                 _ => None,
             }
         }).collect()
     }
 
-    /// Ayarlar'daki bekleyen mesajlar
-    /// listesindeki "İptal" düğmesi — bir mesajı artık yeniden
-    /// DENENMEYECEK şekilde kalıcı olarak bırakır (Failed olarak
-    /// işaretlenir, kullanıcı isterse sohbet ekranından manuel olarak
-    /// yeniden gönderebilir — bkz. mevcut `retryMessage` akışı).
+    /// Cancel button for one row of the pending-messages list in Settings. Drops the message permanently, so it is never retried: it is marked
+    /// Failed, and the user can resend it from the chat screen through the existing `retryMessage` flow.
     pub(crate) fn cancel_pending_message(&mut self, message_id: &str) -> Result<(), String> {
         let pending = self.awaiting_confirmation.remove(message_id).ok_or("Bekleyen mesaj bulunamadı")?;
         self.remove_durable_retry(message_id);
-        // bkz. `cancel_server_deposit`: iptal, sunucudaki kopyayı da geri
-        // çekmeli — aksi halde "vazgeçtim" demenin hiçbir karşılığı olmuyor
-        // ve paket 30 gün sonra bile teslim edilebiliyordu.
+        // See `cancel_server_deposit`. Cancelling must also withdraw the server copy. Otherwise "I changed my mind" had no effect, and the
+        // packet could still be delivered 30 days later.
         self.cancel_server_deposit(message_id);
         if let NetworkEnvelope::Message(m) = &pending.envelope {
             self.set_message_status(&m.header.message_id, MessageSendStatus::Failed);
@@ -1951,8 +1684,7 @@ impl P2PCore {
                     (real_target.clone(), group_id.clone()),
                 Some(MessageContent::Delete { target_message_id: real_target, group_id, .. }) =>
                     (real_target.clone(), group_id.clone()),
-                // A group text: the bubble is keyed by the group-wide id, and
-                // without `group_id` the event is taken for a 1:1 status.
+                // A group text: the bubble is keyed by the group-wide id. Without `group_id` the event would be taken for a 1:1 status.
                 Some(MessageContent::Text { group_id: Some(gid), group_message_local_id, .. }) =>
                     (group_message_local_id.clone().unwrap_or_else(|| m.header.message_id.clone()), Some(gid.clone())),
                 _ => (m.header.message_id.clone(), None),
@@ -1969,22 +1701,16 @@ impl P2PCore {
         Ok(())
     }
 
-    /// bkz. `own_mailbox_topic_fp` dokümantasyonu — cihazın kendi posta
-    /// kutusu topic'ine aboneliğini (gerekiyorsa) tamamlar. Her `poll_events`
-    /// turunda çağrılır; normal durumda ilk turda bir kez iş yapar, sonra
-    /// yalnızca bir karşılaştırmadır. Kimlik `start_network`'ten SONRA
-    /// oluşturulduysa/yüklendiyse (bkz. o alanın uzun notu) aboneliği burada
-    /// kurar — ağ katmanını yeniden başlatmaya GEREK KALMADAN.
+    /// Completes the device's own mailbox subscription if needed (see `own_mailbox_topic_fp`). `poll_events` calls it every turn. Normally it
+    /// does work once on the first turn, and afterwards it is only a comparison. If the identity was created or loaded after `start_network`
+    /// (see that field's note), it sets up the subscription here, without a network restart.
     ///
-    /// Fingerprint'e göre karşılaştırılır (sadece "abone oldum mu" bayrağına
-    /// göre değil): `import_recovery` gibi bir yol cihazın aktif
-    /// fingerprint'ini DEĞİŞTİREBİLİR — o durumda yeni posta kutusuna da
-    /// abone olunması gerekir.
+    /// The comparison is by fingerprint, not just a "subscribed" flag. A path such as `import_recovery` can CHANGE the device's active
+    /// fingerprint. In that case the new mailbox must be subscribed too.
     pub(crate) fn ensure_own_mailbox_subscription(&mut self) {
         let active_fp = match self.get_active_own_device_fingerprint() {
             Ok(fp) => fp,
-            // Hâlâ kimlik yok — sessizce geç (her saniye loglamak logcat'i
-            // boğardı; `start_network` bunu zaten bir kez AÇIKÇA loglamıştı).
+            // No identity yet. Pass silently: logging every second would flood logcat. `start_network` already logs it once.
             Err(_) => return,
         };
         if self.own_mailbox_topic_fp.as_deref() == Some(active_fp.as_str()) {
@@ -1995,29 +1721,25 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `pairing_mailbox_subs` — eşleşme süresince karşı tarafın posta
-    /// kutusu topic'ine de abone ol (idempotent; zaten aboneyse ya da bir
-    /// ratchet zaten varsa no-op).
+    /// See `pairing_mailbox_subs`. Subscribe to the peer's mailbox topic during pairing too. Idempotent: no-op if already subscribed, or if a
+    /// ratchet already exists.
     pub(crate) fn subscribe_pairing_mailbox(&mut self, peer_fp: &str) {
         if peer_fp.is_empty() { return; }
         if self.ratchets.contains_key(peer_fp) { return; }
         if self.own_mailbox_topic_fp.as_deref() == Some(peer_fp) { return; }
         if self.pairing_mailbox_subs.contains_key(peer_fp) { return; }
-        // No gossip topic any more: the entry only marks "we started a
-        // pairing with this device" (see the readers of the map).
+        // No gossip topic any more: the entry only marks "a pairing with this device was started" (see the readers of the map).
         if self.swarm.is_some() {
             self.pairing_mailbox_subs.insert(peer_fp.to_string(), current_time_ms());
         }
     }
 
-    /// bkz. `subscribe_pairing_mailbox` — aboneliği bırak (ratchet kuruldu
-    /// ya da TTL doldu).
+    /// See `subscribe_pairing_mailbox`. Unsubscribes (the ratchet is established, or the TTL expired).
     pub(crate) fn drop_pairing_mailbox(&mut self, peer_fp: &str) {
         self.pairing_mailbox_subs.remove(peer_fp);
     }
 
-    /// `poll_events`'ten her turda: ratchet'i kurulmuş ya da TTL'i dolmuş
-    /// eşleşme aboneliklerini bırakır.
+    /// Called every turn from `poll_events`. Drops pairing subscriptions whose ratchet is established or whose TTL expired.
     pub(crate) fn flush_pairing_mailbox_subs(&mut self) {
         let ratchets = &self.ratchets;
         self.pairing_reply_peer.retain(|fp, _| !ratchets.contains_key(fp));
