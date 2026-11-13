@@ -3,33 +3,23 @@
 use super::*;
 
 
-/// Poll dışındaki kaç çağıran şu an çekirdek kilidini bekliyor.
+/// The number of callers other than the poll that are currently waiting for the core lock.
 pub(crate) static LOCK_WANTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// Poll dışı bir çağıran kilidi bıraktı: swarm'a iş kuyruklanmış olabilir
-/// (ör. gönderilen mesaj) — bekleyen poll hemen dönüp tele çıkarsın.
+/// A non-poll caller released the lock. Work may have been queued for the swarm (for example a sent message), so a waiting poll
+/// returns at once and flushes it to the network.
 pub(crate) static CORE_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// A `catch_panic` caught a panic; `poll_events` reports it once.
 pub(crate) static CORE_PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Her JNI export'u `CORE.lock()` alır — bunu DOĞRUDAN `.unwrap()` etmek
-/// (önceki hâli) ciddi bir kırılganlık taşıyordu: `std::sync::Mutex`,
-/// kilit TUTULURKEN bir panik olursa kalıcı olarak "poisoned" (zehirli)
-/// hâle gelir; `catch_panic` (bkz. dosya sonu, JNI Bindings bölümü) TEK
-/// bir JNI çağrısını izbadılasa da, kilidin kendisi zehirlendiğinde
-/// SONRAKİ HER `core_lock()` çağrısı (yani gerçekte HER JNI
-/// export'u — pollNetwork dahil) ANINDA panikler. Sonuç: TEK bir yerde
-/// (ör. bu oturumda eklenen geniş yeni kod yüzeyinden herhangi biri)
-/// oluşan TEK bir panik, süreç yeniden başlatılana kadar UYGULAMANIN TÜM
-/// ağ/mesajlaşma işlevselliğini SESSİZCE (kullanıcıya hiçbir hata
-/// göstermeden — pollNetwork boş sonuç döner, "her şey normal görünür
-/// ama hiçbir şey ASLA ilerlemez") kalıcı olarak durdurabilirdi. Bu,
-/// "indirme 0B'de sonsuza kadar takılı kalıyor, hiç hata görünmüyor"
-/// gibi tam olarak bu türden bir arızayla eşleşen bir belirti üretir.
-/// `unwrap_or_else(|poisoned| poisoned.into_inner())` ile zehirlenmeyi
-/// YOKSAYIP alttaki veriyi olduğu gibi geri alıyoruz — `catch_panic`
-/// zaten her çağrıyı izbadıladığı için, TEK bir başarısız işlemin
-/// yarım kalmış bir durum bırakma riski (kabul edilebilir, nadir bir
-/// tutarsızlık) her şeyin kalıcı olarak kilitlenmesinden çok daha iyi.
+/// Every JNI export takes `CORE.lock()`. Calling `.unwrap()` on it directly (the old form) was fragile. A `std::sync::Mutex` becomes
+/// permanently POISONED if it panics while HELD. `catch_panic` (see the JNI Bindings section at the end of the file) contains a panic in ONE
+/// JNI call, but once the lock itself is poisoned, EVERY later `core_lock()` call panics immediately, which means every JNI export including
+/// pollNetwork. So a single panic anywhere (for example in new code added to a wide surface) could silently stop ALL network and messaging work
+/// until the process restarts. The user sees no error: pollNetwork returns an empty result and "everything looks normal, but nothing ever
+/// progresses". That matches symptoms like "the download is stuck at 0 B forever, with no error".
+/// `unwrap_or_else(|poisoned| poisoned.into_inner())` ignores the poisoning and takes the underlying data as it is. Since `catch_panic`
+/// already contains every call, the risk of one failed operation leaving a half-finished state (an acceptable, rare inconsistency) is much
+/// better than locking everything up permanently.
 #[track_caller]
 pub(crate) fn core_lock() -> CoreGuard {
     use std::sync::atomic::Ordering;
@@ -63,8 +53,7 @@ impl std::ops::Deref for ReadGuard {
     fn deref(&self) -> &P2PCore { &self.0 }
 }
 
-/// Poll döngüsünün kendi kilidi — `CORE_DIRTY`'yi işaretlemez, yoksa her
-/// poll turu bir sonrakini hemen uyandırırdı.
+/// The poll loop's own lock. It does NOT mark `CORE_DIRTY`, or every poll turn would wake the next one immediately.
 #[track_caller]
 pub(crate) fn core_lock_poll() -> PollGuard {
     let guard = CORE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -106,10 +95,8 @@ pub(crate) mod lock_watch {
         if let Ok(mut h) = HOLDER.lock() { *h = Some(at); }
         HELD_SINCE.store(crate::current_time_ms(), Ordering::SeqCst);
         STARTED.call_once(|| {
-            // One line per doubling of the stall (10 s, 20 s, 40 s ...), not
-            // one every 5 s for the whole stall. H72: the thread sleeps until
-            // the next log is due and parks while nobody holds the lock (it
-            // woke every 5 s for the life of the process).
+            // One log line per doubling of the stall (10 s, 20 s, 40 s, ...), not one every 5 s for the whole stall. The thread sleeps until
+            // the next log is due, and parks while nobody holds the lock. Before this it woke every 5 s for the life of the process.
             if let Ok(h) = std::thread::Builder::new().name("core-lock-watch".into()).spawn(|| {
                 let (mut stall_since, mut next_log_ms) = (0u64, 0u64);
                 loop {
@@ -151,7 +138,7 @@ pub(crate) mod lock_watch {
     }
 }
 
-/// `core_lock` dönüşü: bırakılınca bekleyen poll'u uyandırır.
+/// Returned by `core_lock`. When it is dropped, the waiting poll is woken.
 pub(crate) struct CoreGuard(Option<std::sync::MutexGuard<'static, P2PCore>>);
 impl std::ops::Deref for CoreGuard {
     type Target = P2PCore;
@@ -169,12 +156,10 @@ impl Drop for CoreGuard {
     }
 }
 
-/// Poll döngüsü saniyede bir uyanmak yerine bunu çağırır: swarm'da bir olay
-/// olana (gelen bayt, yeni bağlantı, zamanlayıcı), başka bir çağıran çekirdeği
-/// isteyene/bırakana ya da `timeout_ms` dolana kadar bekler. Önceden ağ yığını
-/// YALNIZCA `poll_events` çağrıldığında ilerliyordu: giden mesaj bir sonraki
-/// tura kadar tele çıkmıyor, gelen de işlenmiyordu — cihazda Tor üzerinden
-/// mesaj başına ~1-2 sn fazladan gecikme ölçüldü.
+/// The poll loop calls this instead of waking every second. It waits until something happens in the swarm (incoming bytes, a new connection,
+/// a timer), another caller asks for or releases the core, or `timeout_ms` runs out. Before this, the network stack advanced ONLY when
+/// `poll_events` was called. An outgoing message left the phone only on the next turn, and incoming ones were not processed. Measured on the
+/// device: about 1-2 s of extra latency per message over Tor.
 pub(crate) fn wait_for_network_activity(timeout_ms: u64) {
     use std::sync::atomic::Ordering;
     let notified = NET_WAKE.notified();
