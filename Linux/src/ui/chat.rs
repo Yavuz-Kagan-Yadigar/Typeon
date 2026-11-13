@@ -218,6 +218,9 @@ struct ChatView {
     conversation: Conversation,
     messages: gtk::Box,
     scroller: gtk::ScrolledWindow,
+    /// True while the view sits at the bottom (or a scroll there is pending):
+    /// every content-size change then re-pins to the newest message.
+    follow_bottom: Cell<bool>,
     fetch_history: gtk::Button,
     /// Over the top of the timeline while an older page loads.
     older_spinner: gtk::Spinner,
@@ -411,6 +414,7 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         conversation: conversation.clone(),
         messages: messages.clone(),
         scroller: scroller.clone(),
+        follow_bottom: Cell::new(true),
         fetch_history: fetch_history.clone(),
         older_spinner: older_spinner.clone(),
         date_pill: date_pill.clone(),
@@ -554,10 +558,23 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
     {
         let view = view.clone();
         scroller.vadjustment().connect_value_changed(move |adjustment| {
+            view.follow_bottom
+                .set(adjustment.upper() - adjustment.page_size() - adjustment.value() < 80.0);
             view.update_shading();
             view.update_date_pill();
             if adjustment.value() <= 8.0 && adjustment.upper() > adjustment.page_size() {
                 view.load_older();
+            }
+        });
+    }
+
+    // Stick to the bottom: new rows grow `upper` only at the next layout,
+    // so the snap happens here, when the size actually changes.
+    {
+        let view = view.clone();
+        scroller.vadjustment().connect_changed(move |adjustment| {
+            if view.follow_bottom.get() {
+                adjustment.set_value(adjustment.upper() - adjustment.page_size());
             }
         });
     }
@@ -1346,7 +1363,10 @@ impl ChatView {
         }
 
         self.schedule_shading();
-        if scroll {
+        // Own messages always jump to the bottom. Others only follow when the
+        // view is already there (`follow_bottom`), so reading history is not
+        // interrupted.
+        if scroll && entry.mine {
             self.scroll_to_bottom();
         }
     }
@@ -3840,12 +3860,11 @@ impl ChatView {
     }
 
     fn scroll_to_bottom(&self) {
+        // The new row is not allocated yet; `follow_bottom` makes the
+        // adjustment's `changed` handler finish the scroll after layout.
         let adjustment = self.scroller.vadjustment();
-        // The new row has not been allocated yet, so the scroll has to wait for
-        // the next layout pass.
-        glib::idle_add_local_once(move || {
-            adjustment.set_value(adjustment.upper() - adjustment.page_size());
-        });
+        adjustment.set_value(adjustment.upper() - adjustment.page_size());
+        self.follow_bottom.set(true);
     }
 }
 
