@@ -3,8 +3,8 @@
 use super::*;
 
 
-// --- Yerel cihazın secret key'leri (asla ağa/DB'ye çıplak yazılmaz;
-// export_recovery yolu hariç, o da şifreli) ---
+// --- The device's local secret keys. Never written to the network or DB in plaintext;
+// only the export_recovery path, which is encrypted ---
 /// How long a prekey is handed out before a new one is made.
 pub(crate) const PREKEY_ROTATE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// How long its secret half is kept: while it is handed out, plus the time a
@@ -34,12 +34,9 @@ pub(crate) struct DeviceKeys {
     pub(crate) sign_sk_ed25519: SigningKey,
     #[allow(dead_code)]
     pub(crate) sign_pk_ed25519: VerifyingKey,
-    /// Kardeşleri (`sign_pk_ed25519`/`kem_pk_x25519`) gibi: bu iki AÇIK
-    /// anahtar da yalnızca üretim anında fingerprint hesaplamak için
-    /// kullanılıyor, sonrasında yetkili kopya `own_devices`
-    /// (`DeviceRecord`) içinde duruyor. Struct'ta simetri ve okunabilirlik
-    /// için tutuluyorlar; derleyicinin `dead_code` uyarısı bu yüzden
-    /// susturuluyor (aynı gerekçe, aynı desen).
+    /// Like the siblings (`sign_pk_ed25519`/`kem_pk_x25519`): these two PUBLIC keys are used only to compute the fingerprint at creation time. The
+    /// authoritative copy then lives in `own_devices` (`DeviceRecord`). They are kept in the struct for symmetry and readability, and the compiler's
+    /// `dead_code` warning is silenced for that reason.
     #[allow(dead_code)]
     pub(crate) sign_pk_mldsa: MlDsaVerifyingKey<MlDsa87>,
     pub(crate) sign_sk_mldsa: MlDsaSigningKey<MlDsa87>,
@@ -51,21 +48,13 @@ pub(crate) struct DeviceKeys {
     pub(crate) kem_sk_mlkem: MlKem1024DecapsulationKey,
 }
 
-/// Bir cihazın tüm secret key'lerini taşıyan, JNI sınırı üzerinden
-/// Kotlin'e/Kotlin'den geçirilen paket. Rust bu bloğu ASLA diske yazmaz —
-/// diske yazma/okuma sorumluluğu tamamen Kotlin tarafındadır
-/// (KeystoreCrypto ile şifrelenip ayrı bir tabloya/dosyaya konur). Bu,
-/// "Rust master şifreleme anahtarını hiç görmesin" ilkesini sağlar: Rust
-/// sadece plaintext key üretir/tüketir, şifreleme/diske yazma Kotlin'in
-/// işidir.
-// `Debug` KASITLI OLARAK derive
-// edilmiyor — bu struct dört ham secret key baytını taşıyor, `Debug`
-// olsaydı ileride biri yanlışlıkla `error!("{:?}", bundle)` gibi bir satır
-// eklerse uzun-vadeli kimlik anahtarları düz metin olarak Android logcat'e
-// yazılabilirdi. Ayrıca `Drop` ile bellekten çıkarken sıfırlanıyor (bkz.
-// Cargo.toml "zeroize" feature notu — tipli `DeviceKeys`/`DeviceRatchetState`
-// için bu upstream crate'lerin kendi `ZeroizeOnDrop`'u hallediyor, ama bu
-// struct ham `Vec<u8>` kullandığından elle yapılması gerekiyor).
+/// Carries all secret keys of a device across the JNI boundary to and from Kotlin. Rust NEVER writes this block to disk. Reading and writing to disk is
+/// entirely Kotlin's job (encrypted with KeystoreCrypto and stored in a separate table or file). So Rust never sees the master encryption key: it only
+/// generates and consumes plaintext keys, and encryption and disk writes are Kotlin's responsibility.
+// `Debug` is deliberately NOT derived. This struct holds four raw secret key byte arrays. If someone later added a line like `error!("{:?}", bundle)`,
+// the long-term identity keys would be written to Android logcat in plaintext. It is also zeroed on `Drop` when freed (see the "zeroize" feature note in
+// Cargo.toml: the typed `DeviceKeys`/`DeviceRatchetState` get that from the upstream crates' `ZeroizeOnDrop`, but this struct uses raw `Vec<u8>`, so it
+// has to be done by hand).
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SecretKeyBundle {
     pub(crate) device_fingerprint: String,
@@ -106,12 +95,9 @@ pub(crate) struct DeviceRecord {
     pub(crate) last_seen: u64,
 }
 
-/// Bir bağlantı kurulurken tespit edilen "cihaz değişikliği" durumunun
-/// Kotlin tarafına iletilecek özeti (spec 2.2 uyarı ekranı).
-// `Deserialize` EKLENDİ (bu ve aşağıdaki beş özet struct'ta): Linux masaüstü
-// istemcisi (bkz. `api` modülü) bu tipleri JSON'dan GERİ okur — kendi ayna
-// struct'larını tanımlasaydı, buradaki bir alan değişikliği orada sessizce
-// kaybolurdu. Android tarafı bu derive'ı hiç kullanmaz.
+/// Summary of a "device changed" condition detected during connection setup, passed to Kotlin (the warning screen).
+// `Deserialize` was added (to this and the five summary structs below): the Linux desktop client (see the `api` module) reads these types back from JSON.
+// If it defined its own mirror structs, a field change here would be silently lost there. The Android side does not use this derive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceAlertInfo {
     pub contact_display_name: String,
@@ -121,24 +107,17 @@ pub struct DeviceAlertInfo {
     pub new_device_short_code: String,
 }
 
-/// Ayarlar'daki "bekleyen mesajlar" listesi
-/// (bkz. `P2PCore::list_pending_messages`) için — `awaiting_confirmation`'da
-/// hâlâ onay bekleyen, kullanıcının GERÇEKTEN yazdığı bir sohbet mesajı
-/// (Edit/Delete/GroupUpdate gibi dahili paketler DEĞİL, bkz. o fonksiyonun
-/// filtresi). `peer_device_fingerprint`/`group_id`, Kotlin tarafının zaten
-/// sahip olduğu `listContacts()`/`listGroups()` ile isme çevrilir — burada
-/// tekrar bir isim çözümleme mantığı icat edilmiyor.
+/// For the "pending messages" list in Settings (see `P2PCore::list_pending_messages`). These are chat messages the user actually wrote that are still
+/// waiting for confirmation in `awaiting_confirmation` (not internal packets such as Edit/Delete/GroupUpdate; see the filter in that function). The
+/// `peer_device_fingerprint`/`group_id` are turned into names on the Kotlin side with the `listContacts()`/`listGroups()` it already has. No name
+/// resolution logic is duplicated here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingMessageSummary {
     pub message_id: String,
     pub peer_device_fingerprint: String,
-    /// hedef CİHAZIN adı (bkz.
-    /// `DeviceRecord.device_name`) — kişi/grup adı tek başına HANGİ
-    /// cihazın hâlâ onay vermediğini söylemez (pairwise grup fan-out'unda
-    /// her `PendingMessageSummary` tek bir üyenin tek bir cihazına karşılık
-    /// gelir). Bilinmiyorsa (nadiren — cihaz kaydı silinmiş/iptal edilmiş
-    /// olabilir) boş string; Kotlin tarafı bu durumda fingerprint
-    /// kısaltmasına düşer.
+    /// The name of the TARGET DEVICE (see `DeviceRecord.device_name`). A contact or group name alone does not say WHICH device has not yet confirmed
+    /// (in pairwise group fan-out, each `PendingMessageSummary` maps to one device of one member). Empty if unknown (rare: the device record may have been
+    /// deleted or revoked). In that case Kotlin falls back to a short fingerprint.
     pub device_name: String,
     pub group_id: Option<String>,
     pub text: String,
@@ -146,71 +125,50 @@ pub struct PendingMessageSummary {
     pub last_attempt_at: u64,
 }
 
-/// UI'nin kişi seçici listesi için kullandığı özet.
+/// Summary used by the UI's contact picker list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContactSummary {
     pub contact_id: String,
     pub display_name: String,
     pub identity_id: String,
-    /// None ise: henüz IdentityExchange tamamlanmamış, mesaj gönderilemez.
+    /// None: the IdentityExchange has not completed yet, so no message can be sent.
     pub active_device_fingerprint: Option<String>,
-    /// bu kişinin bize gönderdiği profil fotoğrafı (varsa),
-    /// `list_attachments`'taki `preview_hex` ile AYNI hex-encode deseni —
-    /// JSON ham ikili taşıyamadığı için.
+    /// The profile photo this contact sent us (if any), hex-encoded with the same pattern as `preview_hex` in `list_attachments`, since JSON cannot carry raw binary.
     pub avatar_hex: Option<String>,
-    /// Spec dışı, kullanıcı kararı (üyelerin otomatik tanıştırılması):
-    /// `true` ise bu kişi yüz yüze QR/manuel eşleşmeyle DEĞİL, bir grup
-    /// üzerinden KURUCU KEFALETİYLE eklendi — UI "grup üzerinden eklendi,
-    /// doğrulanmadı" uyarısı gösterir (bkz. `GroupUpdate.member_devices`
-    /// güvenlik notu).
+    /// `true` if this contact was added through a group, with the FOUNDER'S VOUCH, not through face-to-face QR/manual pairing. The UI shows a "added via group,
+    /// not verified" warning (see the `GroupUpdate.member_devices` security note).
     pub added_via_group: bool,
-    /// Kişi hesabını sildi (`AccountDeleted`) — UI mesaj göndermeyi kapatır.
+    /// The contact deleted its account (`AccountDeleted`). The UI disables sending.
     #[serde(default)]
     pub account_deleted: bool,
 }
 
-/// Yerel şifreli arşivden çözülüp Kotlin'e döndürülen tek bir mesaj.
+/// One message, decrypted from the local encrypted archive and returned to Kotlin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchivedMessage {
     pub direction: String, // "sent" | "received"
     pub text: String,
     pub timestamp: u64,
-    /// GÖSTERİM/
-    /// SIRALAMA için etkin zaman — göndericinin gönderim anı (`sent_at_ms`),
-    /// bilinmiyorsa yerel `timestamp`'e düşülür. `timestamp` (yerel alınma
-    /// anı) sync/sayfalama için ayrıca korunur. Kotlin tarafı balonları
-    /// BUNA göre sıralar (gecikmeli teslim edilen bir mesaj, alınma değil
-    /// GÖNDERİM sırasındaki yerine oturur).
+    /// Effective time for DISPLAY and SORTING: the sender's send time (`sent_at_ms`), or the local `timestamp` if that is unknown. `timestamp` (the local
+    /// receive time) is kept separately for sync and paging. Kotlin sorts bubbles by this value, so a delayed message appears at its SEND position, not its
+    /// receive position.
     pub sent_at_ms: u64,
-    /// Spec dışı, hata düzeltmesi ("kaydırılan mesajlar yanlışlıkla
-    /// gönderildi gösteriliyor"): gönderim durumu artık gerçekten
-    /// kalıcı — `Some("pending"|"sent"|"error")` bir "sent" (bizim
-    /// gönderdiğimiz) satır için; alınan mesajlarda anlamsız (`None`).
-    /// Eski (bu kolon eklenmeden önce yazılmış) satırlarda da `None` —
-    /// Kotlin tarafı `None`'ı "sent" gibi ele alır (geriye dönük en
-    /// güvenli varsayım, aksi halde eski satırlar sonsuza dek "pending"
-    /// görünürdü).
+    /// Send status is persisted now: `Some("pending"|"sent"|"error")` for a row we sent. `None` for received messages. Older rows (written before this
+    /// column existed) also have `None`, and Kotlin treats `None` as "sent" (the safest assumption for old rows; otherwise they would show "pending"
+    /// forever).
     pub status: Option<String>,
-    /// SADECE grup
-    /// mesajlarında dolu — bir grupta birden fazla gönderen olabileceği
-    /// için (1:1'in aksine, `direction` tek başına yeterli değil)
-    /// GroupChatActivity'nin doğru gönderen adını/avatarını göstermesi
-    /// için gerekli.
+    /// Filled ONLY for group messages. In a group there can be several senders (unlike 1:1, where `direction` alone is enough). GroupChatActivity needs this
+    /// to show the correct sender name and avatar.
     pub sender_identity_id: Option<String>,
-    /// bu satırın kararlı mesaj kimliği (varsa) — reload
-    /// sonrası "seen" eşleşmesi ve durum güncellemeleri için (bkz.
-    /// dosya başı "BİLİNEN SINIR" notu — artık kısmen çözüldü).
+    /// This row's stable message id (if any). Used for the "seen" match after a reload and for status updates (see the BUGS/LIMITS note at the top of the file;
+    /// now partly resolved).
     pub message_id: Option<String>,
-    /// Spec dışı, kullanıcı isteği (WhatsApp tarzı "sağa kaydırıp
-    /// yanıtla"): bu mesajın yanıtladığı mesajın kararlı kimliği (1:1'de
-    /// `message_id`, grupta `group_message_local_id`) — bkz. packet.rs
-    /// `MessageContent::Text.reply_to_message_id` dokümantasyonu.
+    /// User request (WhatsApp-style swipe-to-reply): the stable id of the message this one replies to (`message_id` in 1:1, `group_message_local_id` in
+    /// a group). See the `MessageContent::Text.reply_to_message_id` docs in packet.rs.
     pub reply_to_message_id: Option<String>,
-    /// Yanıtlanan mesajın (gönderen tarafından gömülen, kırpılmış) metin
-    /// özeti — Kotlin tarafı kendi arşivinde ayrıca aramaz.
+    /// Truncated text summary of the replied-to message, as embedded by the sender. Kotlin does not look it up in its own archive.
     pub reply_to_preview: Option<String>,
-    /// SADECE grup mesajlarında dolu — yanıtlanan mesajı gönderenin
-    /// `identity_id`'si.
+    /// Filled ONLY for group messages: the `identity_id` of the sender of the replied-to message.
     pub reply_to_sender_identity_id: Option<String>,
     /// True if this message was deleted (see apply_delete_to_archive) — the
     /// archived text is stale/meaningless once this is set, Kotlin should
@@ -224,19 +182,13 @@ pub struct ArchivedMessage {
     /// The row came from a contact's 1:1 history answer (`mark_synced`).
     #[serde(default)]
     pub via_sync: bool,
-    /// bu mesaja bırakılmış tepkilerin hazır
-    /// özeti (ör. `"👍2 ❤️"`). Boş dize = tepki yok. Kotlin tarafı bunu
-    /// olduğu gibi tepki pill'ine yazar — ayrıca bir sorgu yapmaz (bkz.
-    /// `reactions_summary`).
+    /// Ready-made summary of the reactions on this message (e.g. `"👍2 ❤️"`). Empty string = no reactions. Kotlin writes it straight into the reaction pill
+    /// without a separate query (see `reactions_summary`).
     #[serde(default)]
     pub reactions: String,
-    /// "seen mekanizması ve seen pp
-    /// bubbles güvenilir değil, özellikle gruplarda"): bu mesajı kimlerin
-    /// gördüğü — `reactions` ile AYNI "gömülü özet" deseni (bkz.
-    /// `seen_by_json`), `[{"identity_id":..,"seen_at_ms":..}]`. Önceden bu
-    /// bilgi HİÇ kalıcı değildi — sadece o an sohbet ekranı açıkken gelen
-    /// canlı bir olaydı, kapalıyken/arka plandayken gelen her "görüldü"
-    /// bildirimi sonsuza dek kayboluyordu.
+    /// Who has seen this message: the same "embedded summary" pattern as `reactions` (see `seen_by_json`), `[{"identity_id":..,"seen_at_ms":..}]`. Before,
+    /// this information was NEVER persisted. It was a live event that existed only while the chat screen was open, so every "seen" notice arriving while the
+    /// screen was closed or in the background was lost for good.
     #[serde(default)]
     pub seen_by: String,
     /// Group rows: the author's signature, see `group_author_statement`.
@@ -250,9 +202,7 @@ pub struct ArchivedMessage {
     pub mentions_me: bool,
 }
 
-/// Groups tab GUI'sinin liste/detay göstermesi için özet (spec dışı —
-/// `list_groups` yoktu, Groups tab'ı hiçbir zaman gerçek grup listesi
-/// göstermiyordu).
+/// Summary for the Groups tab list and detail view. (`list_groups` did not exist before, so the Groups tab never showed a real group list.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupSummary {
     pub group_id: String,
@@ -260,12 +210,11 @@ pub struct GroupSummary {
     pub founder_identity_id: String,
     pub is_founder: bool,
     pub member_identity_ids: Vec<String>,
-    /// bkz. `ContactSummary.avatar_hex` aynı hex-encode deseni.
+    /// Same hex-encoding pattern as `ContactSummary.avatar_hex`.
     pub avatar_hex: Option<String>,
 }
 
-/// Kotlin'e döndürülen, bir sohbetteki dosya eklerinin listesi (bkz.
-/// `list_attachments` JNI export).
+/// List of file attachments in a chat, returned to Kotlin (see the `list_attachments` JNI export).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentSummary {
     pub file_id: String,
@@ -276,27 +225,18 @@ pub struct AttachmentSummary {
     pub status: String,    // "offered" | "downloading" | "complete" | "failed"
     pub bytes_transferred: u64,
     pub created_at: u64,
-    /// `file_offer` poll olayındaki "preview_hex" ile AYNI biçim — Kotlin
-    /// tarafı geçmişi yeniden kurarken küçük resmi hemen gösterebilsin diye
-    /// (indirme beklemeden), bkz. `SimpleChatAdapter.AttachmentInfo`.
+    /// Same format as `preview_hex` in the `file_offer` poll event, so Kotlin can show the thumbnail at once while rebuilding history, without waiting for a
+    /// download (see `SimpleChatAdapter.AttachmentInfo`).
     pub preview_hex: Option<String>,
-    /// Sesli mesajlar için çalma süresi (milisaniye) — bkz.
-    /// `MessageContent::FileOffer.duration_ms`.
+    /// Playback duration in milliseconds for voice messages (see `MessageContent::FileOffer.duration_ms`).
     pub duration_ms: Option<u32>,
-    /// SADECE `list_group_attachments`
-    /// tarafından doldurulur — grup içinde farklı ekler FARKLI göndericilerden
-    /// gelebileceğinden (1:1'in aksine, orada zaten sorgunun kendisi tek bir
-    /// peer'e sabit), `download_file`'ın "kimden indirileceğini" bilmesi için
-    /// gerekli. `list_attachments` (1:1) için her zaman boş string.
+    /// Filled ONLY by `list_group_attachments`. In a group, attachments can come from DIFFERENT senders (unlike 1:1, where the query is already fixed to one
+    /// peer). `download_file` needs it to know where to download from. Always an empty string for `list_attachments` (1:1).
     pub peer_device_fingerprint: String,
-    /// SADECE grup eklerinde dolu
-    /// — gönderen adını/avatarını göstermek için (bkz. `ArchivedMessage.
-    /// sender_identity_id` AYNI gerekçe).
+    /// Filled ONLY for group attachments: to show the sender's name and avatar (same reason as `ArchivedMessage.sender_identity_id`).
     pub sender_identity_id: Option<String>,
-    /// ekle birlikte gönderilen açıklama ve
-    /// (varsa) yanıtlanan mesajın bağlamı — sohbet yeniden açıldığında ek
-    /// balonu bunları metin mesajlarıyla AYNI biçimde geri kurabilsin diye
-    /// arşivden okunuyor (bkz. `files` tablosundaki aynı adlı kolonlar).
+    /// The caption sent with the file and the replied-to message context (if any). Read from the archive so that when the chat reopens, the attachment bubble
+    /// can rebuild them the same way as text messages (see the same-named columns in the `files` table).
     #[serde(default)]
     pub caption: String,
     #[serde(default)]
@@ -310,10 +250,8 @@ pub struct AttachmentSummary {
     pub sticker: bool,
 }
 
-/// Devam eden bir indirmenin bellek-içi durumu (bkz. `download_file`/
-/// `request_next_chunk`/attachments.rs modül notu — parçalar HER ZAMAN
-/// sırayla (0, 1, 2, ...) istenir, bu yüzden `.enc` dosyasına sadece
-/// EKLEME (append) yapılır, seek gerekmez).
+/// In-memory state of an ongoing download (see `download_file`, `request_next_chunk` and the attachments.rs module note). Chunks are ALWAYS requested in
+/// order (0, 1, 2, ...), so the `.enc` file is only ever APPENDED to, and no seek is needed.
 pub(crate) struct DownloadState {
     /// `FileOffer.chunk_hashes` of this file (from the `files` row): one
     /// SHA-256 per group of `per_hash` chunks, over their ciphertext.
@@ -328,12 +266,9 @@ pub(crate) struct DownloadState {
     /// asked again in this attempt.
     pub(crate) bad_sources: std::collections::HashSet<PeerId>,
     pub(crate) peer_id: PeerId,
-    /// Bkz. `P2PCore::peer_for_file` — `file_progress`/`file_complete`/
-    /// `file_failed` olaylarının `"peer"` alanını doldurmak için gerekli
-    /// (bkz. o alanın eklenmesine yol açan hata: ChatActivity'nin olay
-    /// dinleyicisi `"peer"` eşleşmezse olayı SESSİZCE YOK SAYIYOR —
-    /// bu alan hiç doldurulmadığı için indirme Rust tarafında tamamen
-    /// başarıyla bitse bile UI hiçbir zaman haberdar olmuyordu).
+    /// See `P2PCore::peer_for_file`. Needed to fill the `"peer"` field of `file_progress`/`file_complete`/`file_failed` events. Without it, the chat screen's
+    /// event listener silently IGNORED the event (no match on `"peer"`). Since this field was never filled, the UI never heard about a download even when it
+    /// finished successfully on the Rust side.
     pub(crate) peer_device_fingerprint: String,
     pub(crate) total_size: u64,
     pub(crate) total_chunks: u32,
@@ -341,68 +276,40 @@ pub(crate) struct DownloadState {
     pub(crate) bytes_done: u64,
     pub(crate) file_key: [u8; 32],
     pub(crate) enc_path: std::path::PathBuf,
-    /// Son GERÇEK ilerlemenin (bir parçanın başarıyla alınıp yazıldığı an)
-    /// olduğu an (hiç parça gelmediyse indirmenin başladığı an) — bkz.
-    /// `DOWNLOAD_GIVE_UP_TIMEOUT_MS`. SADECE `handle_chunk_response`'ta
-    /// gerçek veri alındığında güncellenir — `last_retry_at`'ın aksine,
-    /// bu alan indirmenin ne kadar süredir hiç İLERLEMEDİĞİNİ (retry
-    /// denemeleri SAYILMAZ) izler, "artık pes et" kararı için kullanılır.
+    /// When the last REAL progress happened (a chunk was received and written), or when the download started if no chunk has arrived yet. See
+    /// `DOWNLOAD_GIVE_UP_TIMEOUT_MS`. Updated ONLY when real data arrives in `handle_chunk_response`. Unlike `last_retry_at`, this tracks how long the download
+    /// has made NO progress (retries are not counted). It is used for the "give up now" decision.
     pub(crate) last_progress_at: u64,
-    /// en son AYNI PARÇAYI yeniden
-    /// istediğimiz an — bkz. `DOWNLOAD_STALL_TIMEOUT_MS`/
-    /// `check_stalled_downloads`/`retry_or_give_up_download`. `last_progress_at`'tan
-    /// AYRI tutulur: eğer ikisi AYNI alan olsaydı, bir yeniden deneme
-    /// GERÇEK ilerleme olmadan bu alanı güncellemeyeceğinden (retry henüz
-    /// yanıt almadı), `check_stalled_downloads` HER `poll_events` turunda
-    /// (saniyede bir) yeniden tetiklenip aynı parçayı defalarca art arda
-    /// isterdi — bu alan sayesinde denemeler `DOWNLOAD_STALL_TIMEOUT_MS`
-    /// aralıklarla makul şekilde seyreltilir. TCP dial'ın hiç sonuçlanmadığı
-    /// (ne başarı ne açık bir hata — özellikle iki cihaz da NAT arkasında
-    /// olduğunda tipik bir durum) senaryoda `request_response`'un KENDİ
-    /// hiçbir olay üretmediği durumları yakalamak için gerekli — o durumda
-    /// libp2p katmanından ne bir yanıt ne de bir OutboundFailure/timeout
-    /// hiç gelmez, indirme aksi hâlde SÜRESİZ "İndiriliyor" durumunda kalırdı.
+    /// The last time the SAME CHUNK was requested again. See `DOWNLOAD_STALL_TIMEOUT_MS`, `check_stalled_downloads` and `retry_or_give_up_download`. Kept
+    /// SEPARATE from `last_progress_at`: if they were the same field, a retry (which does not update it until a reply arrives) would make
+    /// `check_stalled_downloads` fire again on EVERY `poll_events` turn (once a second) and re-request the same chunk over and over. With this field, retries
+    /// are spaced out at `DOWNLOAD_STALL_TIMEOUT_MS`. It catches the case where the TCP dial never completes (neither success nor a clear error, typical when both
+    /// devices are behind NAT): there, libp2p's `request_response` produces no event at all (no reply, no OutboundFailure, no timeout). Without this, the download
+    /// would stay "Downloading" forever.
     pub(crate) last_retry_at: u64,
-    /// Spec dışı, dış inceleme düzeltmesi ("kaynak cihaz offline'ken dosya
-    /// indirilemiyor, çoklu kaynak yok"): bu bir GRUP dosyasıysa (bkz.
-    /// `download_file`), aynı dosyayı zaten TAMAMLAMIŞ olabilecek diğer
-    /// üyelerin cihazları — mevcut kaynak tekrar tekrar başarısız/stall
-    /// olursa (bkz. `retry_or_give_up_download`/`handle_chunk_response`
-    /// `NotFound` kolu) sırayla denenir. Kimin GERÇEKTEN tamamladığını
-    /// önceden BİLMİYORUZ (bir "kimde bu dosya var" duyurusu protokolde
-    /// yok) — bu yüzden aday sırayla denenip `FileChunkResponse::NotFound`
-    /// alınırsa bir sonrakine geçilir (zararsız: `serve_chunk_request`
-    /// zaten dosya yoksa ANINDA/ucuz bu yanıtı döner).
+    /// If this is a GROUP file (see `download_file`), the devices of other members who may already have finished the same file. If the current source keeps
+    /// failing or stalling (see `retry_or_give_up_download` and the `NotFound` arm of `handle_chunk_response`), they are tried in turn. We do not know in
+    /// advance who really has the file (the protocol has no "who has this" announcement). So the candidates are tried in order, and on `NotFound` the next one
+    /// is used. This is harmless: `serve_chunk_request` answers at once if the file is not there.
     pub(crate) alt_source_peer_ids: std::collections::VecDeque<PeerId>,
-    /// Mevcut `peer_id`de GERÇEK ilerleme olmadan kaç kez yeniden denendiği
-    /// — bkz. `retry_or_give_up_download`, bir eşiği aşınca (varsa) bir
-    /// sonraki adaya geçilir. Kaynak değiştiğinde/gerçek ilerlemede
-    /// (bkz. `handle_chunk_response`) sıfırlanır.
+    /// How many times the CURRENT peer was retried without real progress. See `retry_or_give_up_download`: past a threshold, the next candidate is tried.
+    /// Reset when the source changes or on real progress (see `handle_chunk_response`).
     pub(crate) retries_on_current_source: u32,
-    /// Şu an havada olan parça indeksleri — boru hattı (bkz.
-    /// `DOWNLOAD_PIPELINE_DEPTH`). Önceden aynı anda TEK parça havada
-    /// olabiliyordu, yani hız `parça_boyutu / gidiş-dönüş süresi` ile
-    /// sınırlıydı; bant genişliği ne olursa olsun. Tor üzerinde ölçülen
-    /// gerçek rakam ~70 KB/s'ydi.
+    /// Chunk indices currently in flight (the pipeline, see `DOWNLOAD_PIPELINE_DEPTH`). Before, only ONE chunk could be in flight, so the speed was capped at
+    /// `chunk size / round-trip time`, whatever the bandwidth. The real figure measured over Tor was about 70 KB/s.
     pub(crate) inflight_chunks: std::collections::HashSet<u32>,
-    /// Diske YAZILMIŞ parçalar. Boru hattında parçalar sırasız geldiği için
-    /// bir sayaç yetmez — hangi indeksin tamamlandığı tek tek tutulmalı.
+    /// Chunks already WRITTEN to disk. Chunks arrive out of order in the pipeline, so a counter is not enough: each index that completed has to be tracked.
     /// Only chunks whose group matched `chunk_hashes` are in it.
     pub(crate) received_chunks: std::collections::HashSet<u32>,
-    /// Uyarlanır boru hattı penceresi (bkz. `DOWNLOAD_WINDOW_START`) — aynı
-    /// anda kaç parçanın havada olabileceği. Başarıda büyür, hatada yarılanır.
+    /// Adaptive pipeline window (see `DOWNLOAD_WINDOW_START`): how many chunks may be in flight at once. It grows on success and halves on a timeout or error.
     pub(crate) window: usize,
-    /// Havadaki her parçanın istendiği an — gidiş-dönüş ölçümü için
-    /// (bkz. `DOWNLOAD_RTT_TARGET_MS`). Yanıt/hata gelince silinir.
+    /// When each in-flight chunk was requested. Used for the round-trip measurement (see `DOWNLOAD_RTT_TARGET_MS`). Removed when a reply or error arrives.
     pub(crate) chunk_sent_at: std::collections::HashMap<u32, u64>,
-    /// Bu indirmede görülen EN KÜÇÜK gidiş-dönüş — yolun kuyruksuz taban
-    /// gecikmesi; büyüme ölçütü buna GÖRE (bkz. `DOWNLOAD_RTT_GROW_FACTOR`).
+    /// The SMALLEST round trip seen in this download: the path's queue-free base latency. The window growth is judged against it (see `DOWNLOAD_RTT_GROW_FACTOR`).
     pub(crate) rtt_min: u64,
-    /// İndirmenin başladığı an — yalnızca `finalize_download`'daki verim
-    /// ölçüm günlüğü için (uyarlanır pencerenin işe yarayıp yaramadığı
-    /// gerçek cihazda ancak böyle görülebiliyor).
+    /// When the download started. Used only for the throughput log in `finalize_download` (whether the adaptive window helps can only be seen on a real device this way).
     pub(crate) started_at: u64,
-    /// `files.chunk_size` of this file, read once (bkz. `file_chunk_size`).
+    /// `files.chunk_size` of this file, read once (see `file_chunk_size`).
     pub(crate) chunk_size: usize,
     /// Ask for the missing chunks again at this time (0 = not set): a failed
     /// request, or a server that does not have the file yet. See
@@ -410,17 +317,15 @@ pub(crate) struct DownloadState {
     pub(crate) retry_at: u64,
 }
 
-/// `poll_events`'in `RUNTIME.block_on` bloğu İÇİNDE (swarm borrow'u altında)
-/// toplanıp, blok BİTTİKTEN SONRA (self'e serbestçe erişilebilecekken)
-/// işlenen dosya-parça olayları — `incoming`/`new_listen_addrs`'in zaten
-/// kullandığı "önce topla, sonra işle" deseninin aynısı (bkz. poll_events).
-/// bkz. `ENVELOPE_PROTOCOL` — collected under the swarm borrow, handled after.
+/// File chunk events collected INSIDE the `RUNTIME.block_on` block of `poll_events` (under the swarm borrow), and processed AFTER the block ends, when `self`
+/// can be accessed freely. Same "collect first, then process" pattern as `incoming` and `new_listen_addrs` (see poll_events).
+/// See `ENVELOPE_PROTOCOL`: collected under the swarm borrow, handled afterwards.
 pub(crate) enum EnvelopeEventLocal {
     Delivered { request_id: request_response::OutboundRequestId },
     Failed { request_id: request_response::OutboundRequestId, error: String },
 }
 
-/// bkz. `ACK_PROTOCOL` — swarm borrow'u altında toplanıp sonra işlenir.
+/// See `ACK_PROTOCOL`: collected under the swarm borrow, handled afterwards.
 pub(crate) enum AckEventLocal {
     Request { peer: PeerId, ids: Vec<String>, channel: request_response::ResponseChannel<AckBatchResponse> },
     Delivered { request_id: request_response::OutboundRequestId },
@@ -428,44 +333,34 @@ pub(crate) enum AckEventLocal {
 }
 
 pub(crate) enum FileChunkEventLocal {
-    /// `peer`: Noise ile KANITLANMIŞ istekçi — `serve_chunk_request`'in
-    /// yetki kontrolü buna dayanıyor (bkz. o fonksiyon). Paketin İDDİA
-    /// ettiği hiçbir alan yok, `is_established_peer`/sunucu hız sınırıyla
-    /// aynı gerekçe.
+    /// `peer`: the requester, PROVEN by Noise. The access check in `serve_chunk_request` relies on it (see that function). No field of the packet, which is only a
+    /// CLAIM, is used. Same reasoning as `is_established_peer` and the server rate limit.
     Request { peer: PeerId, request: FileChunkRequest, channel: request_response::ResponseChannel<FileChunkResponse> },
     Response { request_id: request_response::OutboundRequestId, response: FileChunkResponse },
     OutboundFailure { request_id: request_response::OutboundRequestId },
 }
 
-/// bkz. `try_publish_raw` — yayın hatasının yeniden denemeye DEĞER olup
-/// olmadığını çağıranların ayırt edebilmesi için (güvenilirlik düzeltmesi:
-/// önceden `MessageTooLarge` gibi kalıcı hatalar da 2 güne kadar boşuna
-/// yeniden deneniyordu).
+/// See `try_publish_raw`. It lets callers tell whether a publish error is worth retrying. (Fix: permanent errors such as `MessageTooLarge` were
+/// retried for up to 2 days for nothing.)
 #[derive(Debug)]
 pub(crate) enum PublishFailure {
-    /// Geçici (mesh henüz oluşmadı, hiç abone yok, ağ başlatılmadı) —
-    /// yeniden denemek anlamlı.
+    /// Temporary (the mesh is not formed yet, no subscriber, network not started). Retrying makes sense.
     Transient(String),
-    /// Kalıcı — AYNI zarfı yeniden denemek ASLA başaramaz; çağıran hemen
-    /// `Failed` sayıp kullanıcıya bildirmeli.
+    /// Permanent. Retrying the SAME envelope can NEVER succeed. The caller must mark it `Failed` at once and tell the user.
     Permanent(String),
 }
 
-/// Bir gönderilen mesajın ("bizim" mesajımızın) UI'da gösterilecek durumu —
-/// spec dışı, kullanıcının istediği gönderim/hata ikonları için.
+/// The display status of a message WE sent, for the send and error icons the user asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MessageSendStatus {
-    /// `publish_envelope` henüz başarılı olmadı — `pending_envelopes`'te
-    /// bekliyor, `poll_events` yeniden deniyor.
+    /// `publish_envelope` has not succeeded yet. It is waiting in `pending_envelopes`, and `poll_events` keeps retrying.
     Pending,
-    /// gossipsub publish() başarıyla tamamlandı (bu, karşı tarafın FİİLEN
-    /// aldığının garantisi DEĞİLDİR — sadece yerel düğümün mesajı ağa
-    /// yayınladığının garantisidir; spec bir teslim onayı/ACK tanımlamıyor).
+    /// gossipsub publish() completed. This is NOT a guarantee that the other side actually received it. It only guarantees that the local node published the
+    /// message to the network. The protocol defines no delivery receipt here (Ack is separate).
     Sent,
-    /// `PENDING_ENVELOPE_TIMEOUT_MS` boyunca gönderilemedi, vazgeçildi.
+    /// Could not be sent within `PENDING_ENVELOPE_TIMEOUT_MS`, and was given up.
     Failed,
-    /// #85: a device of the peer (any member, in a group) sent the
-    /// end-to-end Ack. Between sent and seen; seen lives in `message_seen`.
+    /// A device of the peer (any member, in a group) sent the end-to-end Ack. Between sent and seen; "seen" lives in `message_seen`.
     Delivered,
 }
 
@@ -480,22 +375,15 @@ impl MessageSendStatus {
     }
 }
 
-/// Bkz. `P2PCore.awaiting_confirmation` dokümantasyonu.
-/// BİLİNEN SINIR: bu paket, belirli bir ratchet zincir adımına (`ck_send`
-/// durumuna) karşı şifrelendi — eğer bu peer'le olan oturum, onay
-/// gelmeden ÖNCE bir DH/KEM rotasyonu yaşarsa (spec 3.2, 30 dakikada bir),
-/// alıcı tarafın o eski zincire ait skipped-key önbelleği rotasyonda
-/// TEMİZLENİR (bkz. ratchet.rs `perform_dh_ratchet`/`respond_to_rotation`
-/// notu — bu, forward secrecy'nin doğal/istenen bir sonucu). Böyle bir
-/// durumda bu retry artık kalıcı olarak çözülemez hâle gelir — pratikte
-/// bu, "mesaj 30+ dakika boyunca hiç onaylanmadı" gibi nadir bir kenar
-/// durumu (yaygın "karşı taraf birkaç saniye/dakika erişilemezdi" durumunu
-/// ETKİLEMEZ). Tam çözüm (rotasyon algılandığında bekleyen paketleri YENİ
-/// zincir altında yeniden şifreleyip AYNI message_id ile göndermek),
-/// bilinçli olarak bu turun kapsamı dışında bırakıldı — forward-secrecy
-/// mekanizmasıyla etkileşimi dikkatli test gerektirir.
+/// See the `P2PCore.awaiting_confirmation` docs.
+/// KNOWN LIMIT: this packet was encrypted under one specific ratchet chain step (the `ck_send` state). If the session with this peer goes through a DH/KEM
+/// rotation BEFORE the confirmation arrives (every 30 minutes, see the rotation spec), the receiver's skipped-key cache for the old chain is CLEARED at
+/// rotation (see `perform_dh_ratchet`/`respond_to_rotation` in ratchet.rs; this is the intended result of forward secrecy). In that case the retry can never
+/// be decrypted again. In practice this is a rare edge case: "the message was not confirmed for 30+ minutes". It does NOT affect the common case of the
+/// peer being unreachable for seconds or minutes. The full fix (re-encrypting pending packets under the new chain with the SAME message_id when a rotation is
+/// detected) was deliberately left out of this round, because its interaction with forward secrecy needs careful testing.
 pub(crate) struct PendingConfirmation {
-    /// bkz. `KeepAliveState.suspect` — bu paket için bağlantı bir kez yoklandı mı.
+    /// See `KeepAliveState.suspect`: whether the connection was probed once for this packet.
     pub(crate) suspect_probed: bool,
     /// The peer confirmed receiving the bytes over `ENVELOPE_PROTOCOL`. A late
     /// Ack is then only latency (Tor round trips often exceed `ACK_SUSPECT_MS`),
@@ -503,71 +391,42 @@ pub(crate) struct PendingConfirmation {
     /// suspect: parallel dials, surplus connections closed, in-flight requests
     /// dropped, more slow Acks (device, 2026-09-18).
     pub(crate) direct_delivered: bool,
-    /// Bu paketin şifrelendiği ZİNCİR KUŞAĞININ kimliği (kök anahtardan
-    /// türetilen, gizli OLMAYAN 16 baytlık topic kimliği — zaten gossipsub
-    /// topic adı olarak yayınlanıyor).
+    /// The identity of the chain GENERATION this packet was encrypted under (a 16-byte topic id derived from the root key, not secret; it is already published
+    /// as the gossipsub topic name).
     ///
-    /// Kullanıcı sorusu (2026-08-27): "25 dakikalık sınır her 30 dakikada bir
-    /// sıfırlanıyor mu, yoksa 25/50/75 ile 30/60/90 arasındaki fark sürekli
-    /// açılıp senkron bozuluyor mu?"
+    /// User question (2026-08-27): "Does the 25-minute limit reset every 30 minutes, or does the gap between 25/50/75 and 30/60/90 keep opening and break sync?"
     ///
-    /// Kalıcı bir bozulma YOKTU: tazeleme aslında olay güdümlü. Kendi
-    /// rotasyonumuzda `maybe_rotate_ratchet` hemen ardından, karşı tarafın
-    /// rotasyonunu öğrendiğimizde de `receive_message` içinde
-    /// `regen_pending_for_peer` çalışıyor ve bekleyen her paket taze
-    /// zincirle yeniden üretiliyor. 25 dakikalık sayaç yalnızca bir yedekti.
+    /// There was NO permanent breakage. Refreshing is actually event-driven. When we rotate ourselves, `maybe_rotate_ratchet` runs right after, and when we learn
+    /// of the other side's rotation, `receive_message` runs `regen_pending_for_peer`. Every pending packet is then regenerated under the fresh chain. The 25-minute
+    /// timer is only a fallback.
     ///
-    /// AMA bir boşluk vardı: rotasyon duyurusu KAYBOLURSA o olay hiç
-    /// gerçekleşmiyor ve paket, kendi bağımsız 25 dakikalık sayacı dolana
-    /// kadar (en kötü ihtimalle 25 dakika) karşı tarafın artık çözemeyeceği
-    /// bir zincirle yeniden denenip duruyordu. Bu damga o boşluğu kapatıyor:
-    /// oturumun güncel kuşağı damgadan farklıysa paket ANINDA tazeleniyor,
-    /// süre beklenmiyor. Böylece iki saat arasında "fark açılması" diye bir
-    /// şey kalmıyor — ölçüt artık süre değil, kuşak eşitliği.
+    /// BUT there was a gap: if the rotation announcement is LOST, that event never happens, and the packet kept retrying under a chain the other side can no
+    /// longer decrypt, until its own independent 25-minute timer ran out (up to 25 minutes). This stamp closes that gap. If the session's current generation differs
+    /// from the stamp, the packet is refreshed AT ONCE, with no waiting. So there is no longer any "gap opening" between the two clocks. The criterion is now
+    /// generation equality, not elapsed time.
     pub(crate) chain_stamp: String,
     pub(crate) peer_device_fingerprint: String,
-    /// Zaten şifrelenmiş/imzalanmış paket — her yeniden denemede AYNEN
-    /// tekrar gönderilir, YENİDEN ŞİFRELENMEZ (ratchet'i tekrar
-    /// ilerletmek, karşı tarafın "aynı mantıksal mesaj" olarak
-    /// tanımasını imkansız kılardı — bkz. ratchet.rs simetrik zincir
-    /// notu).
+    /// Already encrypted and signed packet. It is sent AS IS on every retry and is NOT re-encrypted. Encrypting again would advance the ratchet, and the other side
+    /// could then not recognise it as the "same logical message" (see the symmetric chain note in ratchet.rs).
     pub(crate) envelope: NetworkEnvelope,
     pub(crate) next_retry_at: u64,
     pub(crate) retry_interval_ms: u64,
-    /// Şu ANKİ deneme DÖNGÜSÜNÜN başladığı an — `regen_content` her
-    /// tazelendiğinde (bkz. o alan) YENİ bir değere sıfırlanır (yeni
-    /// ciphertext'in kendi 25 dakikalık penceresi başlar). "İlk kuyruğa
-    /// girdiği an" için bkz. `original_sent_at` (O SIFIRLANMAZ).
+    /// When the CURRENT retry LOOP started. Reset to a new value each time `regen_content` is refreshed (the new ciphertext gets its own 25-minute window).
+    /// For "when it first entered the queue", see `original_sent_at` (which is NOT reset).
     pub(crate) first_sent_at: u64,
-    /// bu mesajın İLK KEZ kuyruğa girdiği an
-    /// — `regen_content` tazelemeleri arasında SABİT kalır (bkz.
-    /// `first_sent_at`'in aksine). `TEXT_RETRY_GIVE_UP_MS`'nin (7 gün)
-    /// ölçtüğü budur — "karşı taraf günlerce çevrimdışı olsa bile mesaj
-    /// hâlâ deneniyor mu" sorusunun cevabı, ciphertext'in kaçıncı
-    /// rotasyon-döngüsünde olduğuyla değil, mesajın ne zaman
-    /// YAZILDIĞIYLA ilgili. Ayrıca Ayarlar'daki bekleyen mesajlar
-    /// listesinde (bkz. `list_pending_messages`) kullanıcıya gösterilir.
+    /// When this message FIRST entered the queue. It stays FIXED across `regen_content` refreshes (unlike `first_sent_at`). `TEXT_RETRY_GIVE_UP_MS` (7 days) is
+    /// measured against it. So "does the message keep being retried while the other side is offline for days" depends on when the message was WRITTEN, not on which
+    /// rotation round the ciphertext is in. It is also shown to the user in the pending messages list (see `list_pending_messages`).
     pub(crate) original_sent_at: u64,
-    /// EN SON gerçek bir gönderim denemesinin
-    /// (başarılı olsun olmasın) yapıldığı an — Ayarlar'daki bekleyen
-    /// mesajlar listesinde "son deneme: ..." olarak gösterilir. `next_retry_at`
-    /// GELECEĞİ (bir sonraki deneme ne zaman) taşır, bu alan GEÇMİŞİ.
+    /// When the LAST real send attempt was made (successful or not). Shown as "last try: ..." in the pending messages list in Settings. `next_retry_at` is the
+    /// FUTURE (when the next try is due). This field is the PAST.
     pub(crate) last_attempt_at: u64,
-    /// Spec dışı, kullanıcı geri bildirimi ("give up time bazı yerlerde
-    /// sorun çıkarabilir, biri 6 saat interneti açmazsa ne olacak?"):
-    /// `MAX_UNCONFIRMED_AGE_MS` dolduğunda AYNI (artık muhtemelen
-    /// çözülemez) şifreli paketi tekrar göndermenin bir anlamı yok, ama
-    /// PES ETMEK de yanlış — bazı içerik türleri için doğru davranış
-    /// "orijinal düz metni YENİDEN şifreleyip (taze ratchet adımı, AYNI
-    /// message_id ile — bkz. `send_message_content_inner`
-    /// `message_id_override`) `TEXT_RETRY_GIVE_UP_MS`'ye kadar denemeye
-    /// devam etmek". Kapsamı: Edit/Delete/GroupUpdate (UI'da mesaj başına
-    /// görünür bir durum taşımadıklarından message_id değişse de sorun
-    /// olmazdı, ama artık AYNI id korunuyor) VE — kullanıcı isteğiyle
-    /// artık — sıradan `Text` (1:1 VE grup fan-out kopyaları): AYNI
-    /// `message_id` korunduğundan UI balonu/`awaiting_confirmation` girdisi
-    /// KESİNTİSİZ aynı kalır, `retryMessage(oldId,newId,status)` (manuel
-    /// yeniden gönderim) akışıyla çakışmaz — o hâlâ SADECE gerçekten
-    /// "Failed" (7 günü de aşmış) bir mesaj için kullanılabilir.
+    /// User feedback ("the give-up time could cause problems in some places; what if someone does not open the internet for 6 hours?"): once
+    /// `MAX_UNCONFIRMED_AGE_MS` passes, re-sending the SAME (probably undecryptable) encrypted packet makes no sense. But GIVING UP is wrong too for some content
+    /// types. The right behaviour there is to re-encrypt the original plaintext fresh (a new ratchet step, under the SAME message_id, see the
+    /// `message_id_override` in `send_message_content_inner`), and keep retrying up to `TEXT_RETRY_GIVE_UP_MS`. Scope: Edit/Delete/GroupUpdate, and now,
+    /// at the user's request, plain `Text` too (1:1 and group fan-out copies). Because the SAME `message_id` is kept, the UI bubble and the `awaiting_confirmation`
+    /// entry stay continuous. It does not clash with the manual resend flow (`retryMessage(oldId,newId,status)`), which is still for messages that are really
+    /// `Failed` (past the 7-day limit).
     pub(crate) regen_content: Option<MessageContent>,
 }
