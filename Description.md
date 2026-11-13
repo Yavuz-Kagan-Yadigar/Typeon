@@ -1,698 +1,700 @@
-# Typoon P2P Mesajlaşma Protokolü — Taslak v0.2
+# Typoon P2P Messaging Protocol — Draft v0.2
 
-## 1. Kimlik (Identity)
+## 1. Identity
 
-**v0.2 kararı: iki katmanlı kimlik modeli.**
+**v0.2 decision: a two-layer identity model.**
 
 ```
-Identity (kişi)  →  1..N Device (cihaz)
+Identity (person)  →  1..N Device (device)
 ```
 
-- **Identity**: kullanıcının "kim olduğu" — kişiler ve gruplar bir Identity'ye
-  güvenir, bir cihaza değil.
-- **Device**: her fiziksel cihaz kendi anahtar çiftini üretir (bkz. 1.2),
-  kendi fingerprint'ine sahiptir. Bir Identity'ye bağlı birden fazla Device
-  olabilir (telefon + laptop + masaüstü).
+- **Identity**: who the user is. Contacts and groups trust an Identity, not a device.
+- **Device**: each physical device generates its own key pair (see 1.2) and has
+  its own fingerprint. One Identity may have several Devices
+  (phone + laptop + desktop).
 
 ```
 Identity {
-  identity_id: bytes[32],          // ilk cihazın fingerprint'i, DEĞİŞMEZ
+  identity_id: bytes[32],          // fingerprint of the first device, NEVER changes
   devices: [
     {
       device_fingerprint: bytes[32],
-      device_name: string,          // "Ahmet'in telefonu"
+      device_name: string,          // "Ahmet's phone"
       added_at: timestamp,
       status: Active | Revoked,
     }
-  ],                                 // max 5 Active cihaz (bkz. not aşağıda)
-  primary_device: bytes[32] | null, // bkz. 1.6, cihaz ekleme/çıkarma yetkisi
+  ],                                 // max 5 Active devices (see note below)
+  primary_device: bytes[32] | null, // see 1.6, authority to add/remove devices
 }
 ```
 
-**Karar: bir Identity'ye en fazla 5 Active cihaz.** Sebep: pairwise
-çoklu-cihaz mesajlaşmasının maliyeti (bölüm 1.7.1) cihaz sayısıyla
-çarpımsal artıyor (N_A × N_B şifreleme/gönderim) — 5 cihaz makul bir
-gerçek kullanım tavanı (telefon, laptop, masaüstü, tablet, yedek telefon
-gibi) sağlarken, maliyeti de öngörülebilir tutuyor. `Revoked` cihazlar
-sayıya dahil değil; 5. Active cihaz eklenmek istendiğinde en eski/istenen
-bir cihazın önce iptal edilmesi istenir.
+**Decision: at most 5 Active devices per Identity.** Reason: the cost of pairwise
+multi-device messaging (section 1.7.1) grows multiplicatively with device count
+(N_A × N_B encryptions/sends). 5 devices is a reasonable real-world ceiling
+(phone, laptop, desktop, tablet, spare phone) and keeps the cost predictable.
+`Revoked` devices do not count; when a 6th Active device is wanted, one of the
+existing devices must first be revoked.
 
-- `identity_id`, o kişinin ilk kurduğu cihazın fingerprint'i olarak sabitlenir
-  ve bir daha değişmez — dışarıdan biri bu kişiyle konuşurken hep aynı
-  `identity_id`'ye güvenir, hangi cihazın o an aktif olduğuna bakmaz.
-- Kişiler (Contact) ve gruplar artık **device_fingerprint değil, identity_id**
-  bazlı tutulur (bkz. bölüm 2 ve 5 güncellemeleri).
+- `identity_id` is fixed to the fingerprint of the person's first device and
+  never changes. When someone talks to this person, they always trust the same
+  `identity_id`; they do not check which device is currently active.
+- Contacts (Contact) and groups are now stored by **identity_id, not
+  device_fingerprint** (see the updates in sections 2 and 5).
 
-### 1.1 Anahtar çiftleri
+### 1.1 Key pairs
 
-Her **cihaz** (Device) iki ayrı amaç için iki anahtar çifti tutar:
+Each **device** (Device) holds two separate key pairs for two purposes:
 
-| Amaç | Algoritma | Kullanım |
+| Purpose | Algorithm | Use |
 |---|---|---|
-| İmzalama (kimlik doğrulama) | Ed25519 + ML-DSA-87 (hibrit) | Mesaj/paket imzalama, fingerprint temeli |
-| Anahtar değişimi (KEM) | X25519 + ML-KEM-1024 (hibrit) | Oturum anahtarı türetme, forward secrecy |
+| Signing (authentication) | Ed25519 + ML-DSA-87 (hybrid) | Message/packet signing, basis of the fingerprint |
+| Key exchange (KEM) | X25519 + ML-KEM-1024 (hybrid) | Session key derivation, forward secrecy |
 
-**Neden hibrit (klasik + PQ birlikte)?**
-- Saf PQ algoritmalar (ML-DSA, ML-KEM) nispeten yeni; olası bir kriptanaliz
-  kırılmasına karşı klasik algoritma (Ed25519/X25519) yedek katman sağlar.
-- Güvenlik = klasik VE post-kuantum güvenliğin ikisinin de kırılması gerekir
-  (birleşik anahtar, her iki algoritmanın çıktısının hash'lenmesiyle türetilir).
-- Bu, Signal'ın PQXDH yaklaşımı ve genel endüstri pratiğiyle uyumlu.
+**Why hybrid (classical + PQ together)?**
+- Pure PQ algorithms (ML-DSA, ML-KEM) are relatively new. If a cryptanalytic
+  break is found, the classical algorithm (Ed25519/X25519) is a fallback layer.
+- Security = both the classical AND the post-quantum security must be broken
+  (the combined key is derived by hashing the outputs of both algorithms).
+- This matches Signal's PQXDH approach and general industry practice.
 
-### 1.2 Fingerprint (Cihaz Kimliği)
+### 1.2 Fingerprint (device identity)
 
 ```
 fingerprint = SHA3-256( sign_pubkey_ed25519 || sign_pubkey_mldsa || kem_pubkey_x25519 || kem_pubkey_mlkem )
 ```
 
-- Ham fingerprint: 32 byte.
-- Kullanıcıya gösterilen biçim: **Base32, 5'li gruplar halinde, büyük harf**
-  Örnek: `XJ4K2-9QWRT-7YHBM-3ZPLC-VN8DF-...` (tamamı ~52 karakter, 8 grup)
-- Kısa doğrulama kodu (sesli okuma için): fingerprint'in ilk 16 baytından türetilen
-  **5 haneli sayı grupları x 8** (`format_short_code`; 8 bayt ile çakışma araması erişilebilirdi) (Signal'ın "safety number" formatına benzer,
-  insan gözüyle karşılaştırmayı kolaylaştırır).
-- **Identity kodu** (kullanıcıya gösterilen "benim kişi kodum"): `identity_id`
-  aynı formatta gösterilir — TOFU eşleşmesinde artık bu kod paylaşılır,
-  tek bir cihazın fingerprint'i değil.
+- Raw fingerprint: 32 bytes.
+- Format shown to the user: **Base32, in groups of 5, uppercase**.
+  Example: `XJ4K2-9QWRT-7YHBM-3ZPLC-VN8DF-...` (about 52 characters total, 8 groups)
+- Short verification code (for reading aloud): **8 groups of 5-digit numbers**
+  derived from the first 16 bytes of the fingerprint (`format_short_code`; 8 bytes
+  would have made collision search feasible). Similar to Signal's "safety number"
+  format, it makes comparison by eye easier.
+- **Identity code** (the "my contact code" shown to the user): `identity_id` is
+  shown in the same format. In TOFU matching, this code is now shared, not the
+  fingerprint of a single device.
 
-### 1.3 QR içeriği (ilk eşleşme paketi)
+### 1.3 QR content (first pairing package)
 
-QR kod, aşağıdaki alanları içeren CBOR (compact binary) kodlanmış bir yapı taşır:
+The QR code carries a CBOR (compact binary) encoded structure with these fields:
 
 ```
-EshlesmePaketi {
+PairingPackage {
   version: u8,
-  device_name: string,           // kullanıcı dostu isim, örn "Ahmet'in telefonu"
+  device_name: string,           // user-friendly name, e.g. "Ahmet's phone"
   sign_pubkey_ed25519: bytes[32],
   sign_pubkey_mldsa: bytes[~2592],
   kem_pubkey_x25519: bytes[32],
   kem_pubkey_mlkem: bytes[~1568],
-  fingerprint: bytes[32],        // yukarıdakilerden türetilmiş, doğrulama için
-  known_nodes: [Multiaddr],      // bu cihazın bildiği node listesi (max ~10)
+  fingerprint: bytes[32],        // derived from the above, for verification
+  known_nodes: [Multiaddr],      // node list this device knows (max ~10)
   timestamp: u64,
 }
 ```
 
-QR kapasitesi gerçek bir kısıt — ML-DSA/ML-KEM public key'leri klasik anahtarlardan
-çok daha büyük (ML-KEM-1024 ~1568 byte, ML-DSA-87 ~2592 byte). Ham haliyle bu tek
-QR'a sığmayabilir.
+QR capacity is a real constraint. ML-DSA/ML-KEM public keys are much larger than
+classical keys (ML-KEM-1024 ~1568 bytes, ML-DSA-87 ~2592 bytes). In this raw form
+they may not fit in a single QR code.
 
-**Karar (v0.1): fingerprint-only QR.**
+**Decision (v0.1): fingerprint-only QR.**
 ```
-QRPaketi {
+QRPackage {
   version: u8,
   device_name: string,
-  identity_id: bytes[32],        // v0.2: artık kişi kimliği taşınır
-  device_fingerprint: bytes[32], // bu cihazın kendi fingerprint'i
-  rendezvous_node: Multiaddr,    // tek bir bilinen adres, bağlanmak için yeterli
+  identity_id: bytes[32],        // v0.2: the person's identity is now carried
+  device_fingerprint: bytes[32], // this device's own fingerprint
+  rendezvous_node: Multiaddr,    // one known address, enough to connect
 }
 ```
-- QR küçük kalır, tarama anlık ve hatasız (çoklu-QR/galeri yöntemi denendi,
-  sıra karışma riski ve tarama sürtünmesi nedeniyle ertelendi — ihtiyaç
-  olursa "çevrimdışı tam aktarım modu" olarak ileride eklenebilir).
-- Tam public key'ler bağlantı kurulunca karşı taraftan indirilir, indirilen
-  anahtarların hash'i QR'daki `fingerprint` ile karşılaştırılır; eşleşmezse
-  bağlantı reddedilir. Bu ekstra bir round-trip getirir ama güvenliği
-  bozmaz (fingerprint zaten TOFU'nun temel doğrulama noktası).
+- The QR stays small, and scanning is instant and reliable. Multi-QR / gallery
+  methods were tried but postponed because of ordering risk and scanning friction.
+  If needed later, they can be added as an "offline full transfer mode".
+- The full public keys are downloaded from the other side once the connection is
+  set up. The hash of the downloaded keys is compared with the `fingerprint` in the
+  QR; if they do not match, the connection is rejected. This adds an extra
+  round trip but does not weaken security (the fingerprint is already the
+  primary verification point of TOFU).
 
-### 1.4 Manuel giriş formatı
+### 1.4 Manual entry format
 
 ```
 identity_id|device_fingerprint|nonce|device_name|rendezvous_node
 ```
-Tek satırlık, `|` ile ayrılmış 5 alanlı eşleşme kodu (`process_manual_entry`);
-`nonce` hex'tir (eşleşme kodu taşıyıcı sırrı, aşağıya bakın). Eski
-"node-adresi + kişi kodu Base32" ikilisi artık yok.
+A single-line, `|`-separated pairing code with 5 fields (`process_manual_entry`).
+`nonce` is hex (the pairing code is a bearer secret, see below). The old
+"node address + contact code in Base32" pair no longer exists.
 
-Cihaz kendi ayarlar ekranında hem QR hem bu metni gösterir (kopyalanabilir).
+The device shows both the QR and this text on its own settings screen (copyable).
 
-**Eşleşme kodu ömrü (spec boşluğu kapatıldı):** QR/manuel kodun `nonce`'u bir taşıyıcı (bearer) sırdır; **30 dakika** (`PAIRING_WINDOW_MS`) geçerlidir ve süre içinde **sınırsız sayıda taramaya** izin verir (en fazla 30 dk / 5 dk = 6 nonce aynı anda geçerli, `PAIRING_NONCE_REUSE_MS`). Kodu gören herkes süre dolana dek eşleşme başlatabilir; kullanıcıya bu açıkça söylenmelidir.
+**Pairing code lifetime (specification gap closed):** the `nonce` of a QR/manual
+code is a bearer secret. It is valid for **30 minutes** (`PAIRING_WINDOW_MS`) and
+allows **an unlimited number of scans** within that time (at most 30 min / 5 min =
+6 nonces valid at the same time, `PAIRING_NONCE_REUSE_MS`). Anyone who sees the
+code can start a pairing until it expires; the user must be told this clearly.
 
-### 1.5 Cihaz ekleme (yeni Device, var olan Identity'ye)
+### 1.5 Adding a device (new Device, to an existing Identity)
 
-Bir kullanıcı ikinci cihazını (örn. laptop) eklemek istediğinde:
+When a user wants to add a second device (e.g. a laptop):
 
 ```
-1. Yeni cihaz kendi anahtar çiftini üretir → kendi device_fingerprint'i olur.
-2. Yeni cihaz bir "cihaz ekleme QR'ı" gösterir:
+1. The new device generates its own key pair → it becomes its own device_fingerprint.
+2. The new device shows a "add device QR":
    DeviceLinkRequest {
      device_fingerprint: bytes[32],
      device_name: string,
-     kem_pubkey_x25519, kem_pubkey_mlkem,  // geçici bağlantı kurmak için
+     kem_pubkey_x25519, kem_pubkey_mlkem,  // to set up a temporary connection
    }
-3. Var olan (onaylı) cihaz bu QR'ı OKUR (yani onay, var olan cihazdan verilir,
-   ters yönde değil — bu, saldırganın "sahte cihaz ekle" isteği göndermesini
-   anlamsız kılar, çünkü onay her zaman zaten güvenilen cihazdan çıkar).
-4. Var olan cihaz, DeviceAdd paketini imzalar:
+3. An existing (approved) device READS this QR (so approval is given by the
+   existing device, not the reverse direction. This makes an attacker's
+   "add a fake device" request meaningless, because approval always comes from
+   an already trusted device).
+4. The existing device signs a DeviceAdd packet:
    DeviceAdd {
      identity_id: bytes[32],
      new_device_fingerprint: bytes[32],
-     added_by: bytes[32],            // onaylayan cihazın fingerprint'i
+     added_by: bytes[32],            // fingerprint of the approving device
      signature: bytes,
    }
-5. DeviceAdd, doğrudan bağlantı üzerinden yeni cihaza gönderilir VE
-   identity_id'ye güvenen tüm kişilere/gruplara yayılır (bkz. 1.7 senkron).
-6. Yeni cihaz artık identity_id'nin parçası; kişiler onu da mesaj alıcısı
-   olarak tanır.
+5. DeviceAdd is sent to the new device over the direct connection AND propagated
+   to all contacts/groups that trust identity_id (see sync in 1.7).
+6. The new device is now part of identity_id; contacts recognise it as a message
+   recipient too.
 ```
 
-### 1.6 Cihaz çıkarma / iptal (Revoke)
+### 1.6 Device removal / revocation (Revoke)
 
-- Herhangi bir **Active** cihaz, aynı Identity'deki başka bir cihazı iptal
-  edebilir (`status: Revoked`) — bu, "birincil cihaz" tekelini önler: telefon
-  kaybolursa laptop üzerinden iptal edilebilir, tersi de geçerli.
-  **Bu, bölüm 6'daki "kurucu cihaz kaybı" sorununu da kişisel kimlik
-  düzeyinde çözer** (bkz. bölüm 5.5, grup bağlamına aktarımı).
-- İptal, imzalı bir `DeviceRevoke` paketiyle diğer tüm Active cihazlara ve
-  bilinen kişilere/gruplara yayılır.
-- İptal edilen cihaz artık geçerli imza/şifreleme üretemez sayılır — karşı
-  taraflar bu cihazdan gelen yeni mesajları reddeder (geçmiş mesajlar
-  etkilenmez, bkz. bölüm 2.2 fingerprint değişikliği mantığıyla tutarlı).
-- **Son cihaz iptali engellenir**: bir Identity'nin en az bir Active cihazı
-  kalmalı (aksi halde kimlik kurtarılamaz hale gelir) — istisna: 1.8'deki
-  kurtarma dosyası ile yeni cihaz eklenmesi.
+- Any **Active** device may revoke another device of the same Identity
+  (`status: Revoked`). This prevents a monopoly of the "primary device": if the
+  phone is lost, it can be revoked from the laptop, and vice versa.
+  **This also solves the "founder device loss" problem from section 6 at the
+  personal identity level** (see section 5.5 for transfer to the group context).
+- Revocation is propagated to all other Active devices and known contacts/groups
+  through a signed `DeviceRevoke` packet.
+- A revoked device is treated as no longer able to produce valid signatures or
+  encryption. The other side rejects new messages from that device (past messages
+  are not affected; this is consistent with the fingerprint-change logic in 2.2).
+- **Last-device revocation is blocked**: an Identity must keep at least one Active
+  device (otherwise the identity becomes unrecoverable). Exception: adding a new
+  device with the recovery file from 1.8.
 
-### 1.7 Cihazlar arası senkronizasyon
+### 1.7 Synchronisation between devices
 
-Yeni bir Device eklendiğinde veya var olan cihazlar arasında durum
-tutarlılığı sağlanırken şu veriler senkronize edilir:
+When a new Device is added, or consistency between existing devices is needed,
+the following data is synchronised:
 
 ```
 SyncPayload {
-  contacts: [SyncedContact],     // bkz. bölüm 2.1
-  groups: [Group],               // bkz. bölüm 5.2 (serileştirilmiş Group kayıtları)
-  siblings: [SyncedDevice],      // aynı kimliğin diğer cihazları
-  sibling_proofs: [DeviceAddProof], // ilk cihaz dışındaki her sibling için kanıt
-  archive_root_key: bytes?,      // sunucu arşivi kök anahtarı (kimliğe ait)
-  name_changed_at_ms: u64,       // hesap adı son değişim damgası
+  contacts: [SyncedContact],     // see section 2.1
+  groups: [Group],               // see section 5.2 (serialised Group records)
+  siblings: [SyncedDevice],      // the other devices of the same identity
+  sibling_proofs: [DeviceAddProof], // proof for every sibling except the first device
+  archive_root_key: bytes?,      // server archive root key (belongs to the identity)
+  name_changed_at_ms: u64,       // timestamp of the last account-name change
 }
-// Not: ratchet durumu ve mesaj geçmişi SyncPayload'da TAŞINMAZ; cihazlar
-// kendi cihaz-çifti ratchet'lerini kurar (1.7.1), geçmiş `SiblingHistoryRequest/
-// Response` ile ayrı istenir. Kod tarafında "geçmişi aç/kapat" ayarı yoktur.
+// Note: ratchet state and message history are NOT carried in SyncPayload; devices
+// set up their own device-pair ratchets (1.7.1), and history is requested
+// separately with `SiblingHistoryRequest/Response`. The code has no
+// "history sync on/off" setting.
 ```
 
-- Senkron, cihazlar arasında kurulan kendi 1:1 ratchet oturumu üzerinden
-  taşınır (yani cihaz-cihaz iletişimi de kullanıcı-kullanıcı iletişimiyle
-  aynı şifreleme/imza mekanizmasını kullanır, ayrı bir kanal icat edilmez).
-- İlk senkron tam kopya; sonrasında sadece **delta** (değişiklikler)
-  gönderilir (yeni kişi, yeni grup, ratchet ilerlemesi).
-- Mesaj geçmişi `SyncPayload` içinde gitmez; ayrı `SiblingHistoryRequest/
-  Response` ile istenir. (Eski taslaktaki kullanıcı "açık/kapalı" geçmiş
-  senkron ayarı uygulanmadı.)
+- Sync is carried over the device's own 1:1 ratchet session established between
+  devices (so device-to-device traffic uses the same encryption/signing mechanism
+  as user-to-user traffic; no separate channel is invented).
+- The first sync is a full copy; afterwards only the **delta** (changes) is sent
+  (new contacts, new groups, ratchet progress).
+- Message history is not sent in `SyncPayload`; it is requested separately with
+  `SiblingHistoryRequest/Response`. (The "history sync on/off" setting from the
+  old draft was not implemented.)
 
-#### 1.7.1 Ratchet state senkronu ve çakışma çözümü
+#### 1.7.1 Ratchet state sync and conflict resolution
 
-Bu, tam senkronizasyonun **en riskli** kısmı — iki cihaz aynı anda aynı
-kişiyle konuşursa ratchet zinciri çakışabilir. Çözüm (Signal'ın Sesame
-yaklaşımına benzer):
+This is the **riskiest** part of full synchronisation: if two devices talk to the
+same person at the same time, the ratchet chain could conflict. The solution is
+similar to Signal's Sesame approach:
 
 ```
-Her (Identity_A ↔ Identity_B) çifti için TEK BİR mantıksal ratchet yerine,
-Identity_A'nın HER cihazı, Identity_B'nin HER cihazıyla AYRI bir ratchet
-oturumu tutar:
+Instead of one logical ratchet for each (Identity_A ↔ Identity_B) pair,
+EVERY device of Identity_A holds a SEPARATE ratchet session with EVERY device of Identity_B:
 
   (device_A1 ↔ device_B1), (device_A1 ↔ device_B2),
   (device_A2 ↔ device_B1), (device_A2 ↔ device_B2), ...
 ```
 
-- Yani "kişiler arası mesajlaşma" aslında **cihaz çiftleri arası pairwise
-  ratchet oturumlarının toplamı** olarak modellenir — bölüm 5'teki grup
-  mesajlaşma mantığıyla birebir aynı prensip (pairwise), sadece "grup
-  üyeleri" yerine "aynı kişinin cihazları" için uygulanıyor.
-- Mesaj gönderilirken: gönderen cihaz, alıcı Identity'nin **tüm Active
-  cihazlarına** kendi ratchet oturumuyla ayrı ayrı şifreli kopya gönderir.
-- Çakışma riski **yok** çünkü her cihaz çifti kendi bağımsız ratchet
-  zincirini yürütüyor — "iki cihaz aynı anda yazdı" durumu, günlük
-  kullanımda "aynı mesaj iki farklı cihaz-çiftinde iki kez şifrelenip
-  gönderildi" haline geliyor, ratchet matematiği bozulmuyor.
-- Bedeli: N_A cihaz × N_B cihaz kadar şifreleme/gönderim (küçük N'lerde,
-  örn. 2x2, ihmal edilebilir maliyet).
-- Okundu bilgisi / "diğer cihazım da bu mesajı gördü" senkronu **v0.2
-  kapsamına alındı** (aşağıda tasarlandı) — yeni bir mimari katman değil,
-  var olan iki mekanizmaya (normal mesajlaşma + SyncPayload) küçük birer
-  ek yeterli.
+- So "messaging between people" is really modelled as the **sum of pairwise ratchet
+  sessions between device pairs**. This is the same principle as the group
+  messaging logic in section 5 (pairwise), applied to "the devices of the same
+  person" instead of "group members".
+- When sending a message, the sending device sends a separately encrypted copy,
+  using its own ratchet session, to **every Active device** of the recipient Identity.
+- There is **no** conflict risk, because each device pair runs its own independent
+  ratchet chain. The case "two devices wrote at the same time" becomes, in daily
+  use, "the same message was encrypted and sent twice on two different device
+  pairs"; the ratchet mathematics is not broken.
+- The cost: N_A devices × N_B devices of encryption/sending (for small N, e.g. 2×2,
+  the cost is negligible).
+- The read status / "my other device has also seen this message" sync **has been
+  brought into the v0.2 scope** (designed below). It is not a new architectural
+  layer; it needs only a small addition to the two existing mechanisms (normal
+  messaging + SyncPayload).
 
-**Karşı tarafa okundu bildirimi** (normal mesaj trafiğinin parçası):
+**Read receipt to the other side** (part of normal message traffic):
 ```
 ReadReceipt {
   message_id: bytes,
-  read_by_identity: bytes[32],   // hangi kişi okudu
+  read_by_identity: bytes[32],   // which person read it
   read_at: timestamp,
 }
 ```
-Bu, diğer `MessagePacket`'ler gibi şifrelenip imzalanarak gönderilir —
-ayrı bir kanal icat edilmiyor. **Hangi cihazdan okunduğu arayüzde gösterilmez** (ancak her `MessagePacketHeader` açıkta `sender_device_fingerprint` taşır, bölüm 3.3 — bir `Seen` paketi hangi cihazın gördüğünü ağ/sunucu düzeyinde ele verir)
-— kişinin Active cihazlarından **herhangi biri** mesajı okuduğu an, o kişi
-için tek bir "görüldü" durumu tetiklenir.
+It is sent encrypted and signed like other `MessagePacket`s; no separate channel is
+invented. **Which device it was read on is not shown in the interface.** However,
+every `MessagePacketHeader` carries `sender_device_fingerprint` in the clear (see
+section 3.3), so a `Seen` packet reveals which device saw it at the network/server
+level. As soon as **any** of the person's Active devices reads the message, a single
+"seen" state is triggered for that person.
 
-**Görüntüleme biçimi**: basit, kişi bazlı tek satır.
+**Display format**: simple, one line per person.
 
 ```
-{display_name}  görüldü  {read_at}
+{display_name}  seen  {read_at}
 
-örnek:
-Ahmet  görüldü  14:32
+example:
+Ahmet  seen  14:32
 ```
 
-- 1:1 sohbette: karşı taraf **herhangi bir cihazından** okuduğu an tek
-  "görüldü" işareti belirir (hangi cihaz olduğu önemsiz, gösterilmez).
-- Grup sohbette: "tamamı görüldü" özeti, gruptaki **her üyenin en az bir
-  cihazının** okumasıyla tamamlanır; kişi bazlı liste istenirse görülebilir
-  ama cihaz detayı yine gösterilmez.
-- `display_name`, alıcı tarafın o kişiye verdiği takma addır (bölüm 2.1
+- In a 1:1 chat: the moment the other side reads it from **any device**, a single
+  "seen" mark appears (which device it was does not matter and is not shown).
+- In a group chat: the "all seen" summary is complete once **at least one device
+  of every member** has read it; a per-person list can be viewed if requested, but
+  device details are still not shown.
+- `display_name` is the alias the receiving side gave that person (section 2.1
   `Contact.display_name`).
 
-**Kendi cihazların arasında "okundu" senkronu**
-(bölüm 1.7'deki `SyncPayload`'a küçük bir ek):
+**"Read" sync between your own devices**
+(a small addition to the `SyncPayload` in section 1.7):
 ```
-// Kodda: ayrı `ReadStateSync` mesajı (SyncPayload alanı değil) — kalıcı
-// "okundu" watermark'ı; kardeş cihazlara ve karşı tarafa store-and-forward gider.
+// In code: a separate `ReadStateSync` message (not a SyncPayload field) — a persistent
+// "read" watermark; sent store-and-forward to sibling devices and to the other side.
 ReadStateSync { ... }
 ```
-Bir cihaz mesajı ilk okuyan cihaz olduğunda: `ReadReceipt` karşı tarafa
-gönderilir, aynı zamanda "bu mesaj okundu" bilgisi kendi `SyncPayload`
-delta'sına eklenir. Diğer cihazların (laptop gibi) senkronda öğreneceği
-tek şey "bu mesaj zaten okundu" — hangi cihazın okuduğu bilgisi taşınmaz,
-sadece durum (okundu/okunmadı) senkronize edilir.
+When a device is the first to read a message, the `ReadReceipt` goes to the other
+side, and at the same time the "this message was read" information is added to its
+own `SyncPayload` delta. The only thing other devices (such as a laptop) learn during
+sync is "this message is already read". Which device did the reading is not carried;
+only the state (read/unread) is synchronised.
 
-### 1.8 Kimlik kurtarma dosyası (kişisel bazda)
+### 1.8 Identity recovery file (per person)
 
-Kullanıcının **son cihazını** kaybetmesi durumuna karşı (bölüm 1.6'nın
-"en az bir Active cihaz kalmalı" kuralının istisnası):
+Against the case where the user loses their **last device** (the exception to the
+rule in 1.6 that "at least one Active device must remain"):
 
 ```
-RecoveryFile (CBOR; kullanıcı tarafından indirilip güvenli saklanır) {
-  kdf: "argon2id", m/t/p (Argon2 parametreleri),
+RecoveryFile (CBOR; downloaded by the user and stored safely) {
+  kdf: "argon2id", m/t/p (Argon2 parameters),
   salt, nonce,
-  ciphertext,                    // ChaCha20-Poly1305 ile şifreli kimlik gizli
-                                   // anahtarları (identity_id + cihaz anahtarları)
+  ciphertext,                    // identity secret keys (identity_id + device keys)
+                                   // encrypted with ChaCha20-Poly1305
 }
 ```
 
-- Bu dosya kimliğin gizli anahtarlarını + `RecoveryData`'yı içerir (kodda
-  `master_seed` kavramı yoktur; anahtarlar doğrudan şifrelenir).
-- Kullanıcı bu dosyayı ilk kurulumda indirip (parola ile şifreli: Argon2id + ChaCha20-Poly1305)
-  offline bir yerde saklar (USB, kağıda yazılan kurtarma cümlesi, vs.).
-- Kaybolma durumunda: yeni cihaza bu dosya + parola girilir → `identity_id`
-  ile aynı kimlik altında yeni bir Device olarak devam edilir → tüm eski
-  Active cihazlara (varsa) otomatik `DeviceAdd` bildirimi gider.
-- **Not**: bu dosya ele geçirilirse saldırgan o kimliği taklit edebilir —
-  bu nedenle "sadece son çare" olarak tanıtılmalı, günlük kullanımda
-  cihaz-cihaz onayı (1.5) tercih edilen yol olmalı.
+- This file contains the identity's secret keys + `RecoveryData` (the code has no
+  `master_seed` concept; keys are encrypted directly).
+- At first setup the user downloads this file, protected by a password (Argon2id +
+  ChaCha20-Poly1305), and keeps it somewhere offline (USB, a recovery phrase written
+  on paper, etc.).
+- In case of loss: the file and password are entered on a new device → it continues
+  as a new Device under the same `identity_id` → an automatic `DeviceAdd`
+  notice goes to all old Active devices (if any).
+- **Note**: if this file is captured, an attacker can impersonate that identity. It
+  must therefore be presented as a "last resort only"; for daily use, device-to-device
+  approval (1.5) should be the preferred path.
 
 ---
 
-## 2. Güven Modeli (TOFU + Güvenlik Numarası Değişikliği)
+## 2. Trust Model (TOFU + Security Number Change)
 
-### 2.1 Yerel kayıt (her cihazda tutulan tablo)
+### 2.1 Local record (table kept on each device)
 
-**v0.2 güncellemesi**: Contact artık tek bir fingerprint değil, bir
-`identity_id` ve o kimliğe ait **bilinen (Active) cihazlar listesini** tutar:
+**v0.2 update**: a Contact no longer holds a single fingerprint; it holds an
+`identity_id` and the list of **known (Active) devices** of that identity:
 
 ```
 Contact {
-  contact_id: uuid,                    // yerel, kullanıcıya özel
-  display_name: string,                // kullanıcının verdiği takma ad
-  trusted_identity_id: bytes[32],      // TOFU anında kaydedilen kişi kimliği
+  contact_id: uuid,                    // local, specific to this user
+  display_name: string,                // alias given by the user
+  trusted_identity_id: bytes[32],      // person identity recorded at TOFU time
   known_devices: [
     {
       device_fingerprint: bytes[32],
-      verified: bool,                  // bu spesifik cihaz doğrulandı mı
+      verified: bool,                  // whether this specific device was verified
       first_seen: timestamp,
       status: Active | Revoked,
     }
   ],
   last_device_change: timestamp | null,
-  ratchet_states: [DeviceRatchetState],// bkz. bölüm 3, cihaz çifti başına ayrı
+  ratchet_states: [DeviceRatchetState],// see section 3, separate per device pair
 }
 ```
 
-### 2.2 Cihaz değişikliği akışı (fingerprint bazında, identity_id sabit)
+### 2.2 Device change flow (per fingerprint, identity_id fixed)
 
-`identity_id` sabit kaldığı sürece (yani karşı taraf hep aynı "kişi" olarak
-tanınıyorsa), cihaz ekleme/çıkarma **beklenen ve imzalı** bir olaydır —
-bölüm 1.5/1.6'daki `DeviceAdd`/`DeviceRevoke` paketleri bunu taşır ve bu
-paketler zaten var olan güvenilir bir cihaz tarafından imzalanmıştır. Bu
-durumda **kullanıcıya alarm gösterilmez** — sadece bilgilendirme:
-"[Kişi] yeni bir cihaz ekledi: [device_name]".
+As long as `identity_id` stays the same (that is, the other side is still
+recognised as the same "person"), adding or removing a device is an **expected and
+signed** event. The `DeviceAdd`/`DeviceRevoke` packets in sections 1.5/1.6 carry it,
+and those packets are already signed by an existing trusted device. In this case
+**no alarm is shown to the user**, only a notice:
+"[Contact] added a new device: [device_name]".
 
-**Gerçek alarm durumu**, imzasız veya beklenmeyen bir değişiklik:
+**A real alarm case** is an unsigned or unexpected change:
 
 ```
-Bağlantı kurulurken gelen (identity_id, device_fingerprint) çifti kontrol edilir:
+When a connection is set up, the incoming (identity_id, device_fingerprint) pair is checked:
 
-  identity_id hiç bilinmiyor (ilk kez görülüyor)
-    → TOFU: kaydet, verified = false, normal devam et
+  identity_id is unknown (seen for the first time)
+    → TOFU: record it, verified = false, continue normally
 
-  identity_id biliniyor, device_fingerprint known_devices içinde VE Active
-    → normal, sessiz devam
+  identity_id is known, device_fingerprint is in known_devices AND Active
+    → normal, silent continuation
 
-  identity_id biliniyor, device_fingerprint YENİ ama geçerli imzalı
-  DeviceAdd paketiyle geldi (mevcut Active cihazdan onaylanmış)
-    → sessizce known_devices'a eklenir, sadece bilgi bildirimi gösterilir
+  identity_id is known, device_fingerprint is NEW but arrived with a valid signed
+  DeviceAdd packet (approved by an existing Active device)
+    → silently added to known_devices, only an informational notice is shown
 
-  identity_id biliniyor, device_fingerprint YENİ ve imzalı DeviceAdd YOK
-  (yani biri doğrudan yeni bir anahtarla "ben buyum" diyor, onay zinciri yok)
-    → BLOKLA (yeni mesaj gönderme/alma durur)
-    → kullanıcıya uyarı ekranı:
-        - "[Kişi] için tanınmayan yeni bir cihaz görüldü, onaylı değil"
-        - eski/bilinen cihazların kısa kodu vs yeni cihazın kısa kodu
-        - "Reddet" (varsayılan) / "Yeniden doğrula ve kabul et"
-        - kabul edilirse: known_devices'a eklenir, verified = false,
+  identity_id is known, device_fingerprint is NEW and there is NO signed DeviceAdd
+  (that is, someone is directly saying "it's me" with a new key, with no approval chain)
+    → BLOCK (new messages sent or received stop)
+    → warning screen to the user:
+        - "An unrecognised new device was seen for [Contact], not approved"
+        - short code of the old/known device vs short code of the new device
+        - "Reject" (default) / "Re-verify and accept"
+        - if accepted: added to known_devices, verified = false,
           last_device_change = now
-    → ESKİ mesajlar/ratchet state'ler korunur, sadece yeni cihazla olan
-      oturum yeni bir DeviceRatchetState ile başlar
+    → OLD messages/ratchet states are kept; only the session with the new device
+      starts with a new DeviceRatchetState
 ```
 
-Bu ayrım önemli: **imzalı DeviceAdd zinciri**, çoklu cihaz senaryosunda
-her yeni cihaz eklemesinin kullanıcıyı gereksiz yere alarma boğmamasını
-sağlıyor, ama zincirsiz/beklenmeyen bir anahtar değişikliği hâlâ tam
-güçle yakalanıp bloklanıyor — yani MITM/impersonation koruması bölüm
-1 öncesindeki tasarımla aynı sıkılıkta korunuyor, sadece "meşru çoklu
-cihaz" durumuna sürtünmesiz bir yol açılıyor.
+This distinction matters: the **signed DeviceAdd chain** ensures that adding each
+new device in a multi-device setup does not needlessly flood the user with alarms,
+yet an unchained or unexpected key change is still caught and blocked at full
+strength. So MITM/impersonation protection stays as strict as in the design before
+section 1, and only the "legitimate multi-device" case gets a frictionless path.
 
-### 2.3 Doğrulama (opsiyonel ama teşvik edilen adım)
+### 2.3 Verification (optional but encouraged step)
 
-Kullanıcı iki kısa kodu (kendi Identity'si + karşı tarafın Identity'si,
-bölüm 1.2'de tanımlı `identity_id` kısa kodu) yüz yüze veya güvenilir bir
-sesli kanaldan karşılaştırıp doğrulayabilir. Bu adım olmadan da sistem
-çalışır (TOFU yeterli güvenlik sağlar, sadece ilk temas anında kim
-olduğuna güvenmiş olursun) — ama doğrulama, ilk temasın da sahte
-olmadığını garantiler. Doğrulama Identity düzeyinde yapılır; tek tek her
-cihazı ayrıca doğrulamaya gerek yoktur (DeviceAdd zinciri zaten Identity
-doğrulamasının cihazlara yayılmasını sağlar).
+The user can compare two short codes (their own Identity + the other side's
+Identity, the `identity_id` short code defined in section 1.2) face to face or over
+a trusted voice channel. The system works without this step (TOFU gives sufficient
+security; you only trust who the person was at first contact). But verification
+guarantees that the first contact was not fake too. Verification is done at the
+Identity level; there is no need to verify each device separately (the DeviceAdd
+chain already spreads Identity verification to the devices).
 
 ---
 
-## 3. Mesaj Şifreleme ve Forward Secrecy
+## 3. Message Encryption and Forward Secrecy
 
-### 3.1 Oturum kurulumu (hibrit KEM)
+### 3.1 Session setup (hybrid KEM)
 
-İlk bağlantıda çift taraflı bir "hibrit el sıkışma" yapılır:
+On the first connection a two-sided "hybrid handshake" is performed:
 
 ```
 1. X25519 ECDH  → shared_secret_classic
 2. ML-KEM-1024  → shared_secret_pq (encapsulate/decapsulate)
-3. root_key = HKDF( shared_secret_classic || shared_secret_pq, salt=yok (None) )
-   (kod: `Hkdf::new(None, ikm)`; etiketler `p2pmsg-v0.2-root/a-to-b/b-to-a`, mesaj/zincir anahtarı `p2pmsg-v0.1-msgkey/chainkey`, KEM mühürleme `p2pmsg-v0.5-*` — transcript'e bağlı)
+3. root_key = HKDF( shared_secret_classic || shared_secret_pq, salt=none (None) )
+   (code: `Hkdf::new(None, ikm)`; labels `p2pmsg-v0.2-root/a-to-b/b-to-a`, message/chain key `p2pmsg-v0.1-msgkey/chainkey`, KEM sealing `p2pmsg-v0.5-*` — bound to the transcript)
 ```
 
 ### 3.2 Double Ratchet (forward secrecy + break-in recovery)
 
-Signal'ın Double Ratchet algoritması, KEM adımı PQ-hibrit olacak şekilde uyarlanır:
+Signal's Double Ratchet algorithm is adapted so that the KEM step is PQ-hybrid:
 
-- **Simetrik ratchet**: her mesajda mesaj anahtarı ilerletilir (HKDF zinciri),
-  bir mesaj anahtarı ele geçirilse bile öncekiler/sonrakiler etkilenmez.
-- **DH ratchet → KEM ratchet**: taraflar yeni bir X25519+ML-KEM çifti üretip
-  yeniden anahtar değişimi yapar — bu adım "break-in recovery" sağlar (biri
-  geçmiş anahtarı ele geçirse bile gelecekteki mesajlara erişemez).
+- **Symmetric ratchet**: a message key is advanced with every message (HKDF chain).
+  Even if one message key is compromised, earlier and later ones are not affected.
+- **DH ratchet → KEM ratchet**: the parties generate a new X25519 + ML-KEM pair and
+  exchange keys again. This step provides "break-in recovery" (even if someone
+  steals a past key, they cannot read future messages).
 
-  **Karar (v0.1): 30 dakikada bir** (mesaj sayısından bağımsız, zaman bazlı).
-  PQ-KEM adımları klasik DH'den ağır olduğu için her mesajda yenileme
-  anlamsız maliyet getirir; 30 dakika, aktif bir sohbette birkaç kez
-  tetiklenecek, boşta bekleyen sohbette gereksiz yere çalışmayacak makul
-  bir denge. Sabit kodlanmış değil, ileride ayarlanabilir bir parametre
-  olarak bırakılabilir.
+  **Decision (v0.1): every 30 minutes** (time-based, independent of message count).
+  PQ-KEM steps are heavier than classical DH, so renewing on every message would be
+  pointless cost. 30 minutes is a reasonable balance: it fires a few times in an
+  active chat and does not run needlessly in an idle chat. It is not hard-coded; it
+  can be left as a tunable parameter later.
 
-### 3.3 Her mesaj paketi
+### 3.3 Each message packet
 
 ```
 MessagePacket {
   header: {
-    sender_identity_id: bytes[32],   // v0.2: kişi kimliği (kime ait olduğu)
-    sender_device_fingerprint: bytes[32], // v0.2: hangi cihazdan gönderildi
-    ratchet_pubkey: bytes,           // güncel ratchet adımının public key'i
+    sender_identity_id: bytes[32],   // v0.2: person identity (whose message it is)
+    sender_device_fingerprint: bytes[32], // v0.2: which device sent it
+    ratchet_pubkey: bytes,           // public key of the current ratchet step
     message_number: u32,
     prev_chain_length: u32,
   },
-  ciphertext: bytes,               // AEAD (ChaCha20-Poly1305) şifreli içerik
-  signature: bytes,                // ML-DSA + Ed25519 hibrit imza (header+ciphertext üzerinde)
+  ciphertext: bytes,               // AEAD (ChaCha20-Poly1305) encrypted content
+  signature: bytes,                // ML-DSA + Ed25519 hybrid signature (over header + ciphertext)
 }
 ```
 
-- **İmza neden var?** Şifreleme gizliliği sağlar ama tek başına *kimin
-  gönderdiğini* kriptografik olarak kanıtlamaz (KEM simetriktir). İmza,
-  relay/node'ların ya da bir saldırganın paketi değiştirememesini
-  ve gönderenin gerçekten iddia edilen cihaz fingerprint'ine sahip
-  olduğunu garanti eder.
-- Node/relay bu paketi kör taşır: `ciphertext` içeriğini çözemez, `signature`'ı
-  değiştirirse alıcı tarafta doğrulama başarısız olur ve paket reddedilir.
-- **v0.2 çoklu cihaz kuralı**: gönderen taraf, alıcı Identity'nin **tüm
-  Active cihazlarına** ayrı ayrı `MessagePacket` gönderir (her biri kendi
-  cihaz-çifti `DeviceRatchetState`'i ile şifrelenir, bkz. bölüm 1.7.1).
-  Alıcı tarafta, aynı mantıksal mesajın Identity'nin diğer cihazlarına da
-  gittiğini bilmesi gerekmez — her cihaz kendi kopyasını bağımsız alır.
+- **Why the signature?** Encryption provides confidentiality but alone does not
+  cryptographically prove *who sent* the message (KEM is symmetric). The signature
+  guarantees that relays/nodes or an attacker cannot modify the packet, and that the
+  sender really holds the claimed device fingerprint.
+- A node/relay carries this packet blindly: it cannot decrypt `ciphertext`; if it
+  changes the `signature`, verification fails on the receiving side and the packet
+  is rejected.
+- **v0.2 multi-device rule**: the sending side sends a separate `MessagePacket` to
+  **every Active device** of the recipient Identity (each one encrypted with its own
+  device-pair `DeviceRatchetState`, see section 1.7.1). The receiving side does not
+  need to know that the same logical message went to the other devices of the
+  Identity; each device receives its own copy independently.
 
 ---
 
-## 4. Keşif ve Adresleme
+## 4. Discovery and Addressing
 
-### 4.1 Node listesi paylaşımı
+### 4.1 Node list sharing
 
-Her cihaz bildiği node adreslerinin küçük bir alt kümesini (~10, en son
-görülen/en güvenilir) QR eşleşme paketinde taşır. Yeni kullanıcı bu listeyi
-alıp kendi DHT bootstrap listesine ekler.
+Each device carries a small subset (~10, most recently seen/most trusted) of the
+node addresses it knows in the QR pairing package. The new user takes this list and
+adds it to their own DHT bootstrap list.
 
-### 4.2 Keşif (WAN) — DHT kaydı YOK
+### 4.2 Discovery (WAN) — NO DHT record
 
-**Uygulanan durum (kod kazanır):** İmzalı DHT kaydı (`put_record`) yoktur.
-Kademlia her zaman `Mode::Client`'tır: yalnızca bootstrap/sorgu yapar, kimsenin
-yönlendirme tablosuna girmez ve hiçbir kayıt yayımlamaz. Adres keşfi QR'daki
-`rendezvous_node`, `device_addrs`/`device_onion_addrs`, `AddressAnnounce`,
-röleler ve (varsa) sunucu üzerinden yürür; ağ onion-only'dir (clearnet dial
-`DialReject` ile reddedilir). Aşağıdaki eski taslak hedeftir, uygulanmamıştır:
+**Implemented state (code wins):** there is no signed DHT record (`put_record`).
+Kademlia always runs in `Mode::Client`: it only bootstraps/queries, never enters
+anyone's routing table, and publishes no records. Address discovery runs through the
+QR's `rendezvous_node`, `device_addrs`/`device_onion_addrs`, `AddressAnnounce`,
+relays and (if present) the server; the network is onion-only (clearnet dial is
+rejected with `DialReject`). The old draft below is the target and is not implemented:
 
 ```
 DHT_Entry { key: device_fingerprint, value: { multiaddrs, last_updated, signature } }
 ```
 
-### 4.3 Node modu (opsiyonel)
+### 4.3 Node mode (optional)
 
-- **Peer modu** (varsayılan): şifreli trafik yalnızca kendi bağlantıları içindir.
-- **Node modu** (kullanıcı açar): yalnızca **Circuit Relay v2 hizmeti** —
-  simetrik NAT arkasındaki iki peer arasında şifreli trafiği kör taşır.
-  Kademlia routing tablosuna katkı **yoktur** (DHT istemci modunda; `set_node_mode`
-  sadece röle/otomatik-indirme davranışını açar).
+- **Peer mode** (default): encrypted traffic is only for the device's own connections.
+- **Node mode** (the user turns it on): only the **Circuit Relay v2 service** — it
+  blindly carries encrypted traffic between two peers behind symmetric NAT.
+  It makes **no** contribution to the Kademlia routing table (DHT is in client mode;
+  `set_node_mode` only enables relay/auto-download behaviour).
 
-### 4.4 Sunucu modu (opsiyonel, spec dışı — sonradan eklendi)
+### 4.4 Server mode (optional, outside the spec — added later)
 
-Node modu ve röle, adı üstünde, **hiçbir şey saklamaz**: Circuit Relay v2
-sadece iki taraf da O ANDA bağlıyken canlı bir devre kurar. Dolayısıyla
-alıcı çevrimdışıyken dayanıklılığın tamamı gönderen tarafta kalıyor
-(`awaiting_confirmation`, 7 güne kadar yeniden deneme (`TEXT_RETRY_GIVE_UP_MS`; sunucuda ek 14 gün TTL)). Telefonu bir hafta
-kapalı kalan, ya da yeni kurulmuş bir cihaz için bu yetmiyor.
+Node mode and relays, as the name says, **store nothing**: Circuit Relay v2 only
+builds a live circuit while both sides are connected at that moment. So while the
+recipient is offline, durability rests entirely with the sending side
+(`awaiting_confirmation`, retries for up to 7 days (`TEXT_RETRY_GIVE_UP_MS`; the
+server adds a 14-day TTL)). For a phone that stays off for a week, or a newly set up
+device, that is not enough.
 
-Bunun için ayrı bir **sunucu** seçeneği var (bkz. depo kökündeki
-`typeon-server/`). Röleden farkı tek cümleyle: sunucu zarfı DİSKE yazar.
+For this there is a separate **server** option (see `typeon-server/` at the repo
+root). The one-sentence difference from a relay: the server writes the envelope to DISK.
 
 ```
-Deposit { mailbox_id, sealed }   -> sunucu zarfı saklar
-Fetch   { cursors }              -> alıcı döndüğünde imleçten sonrasını çeker
-Ack     { mailbox_id, seq }      -> işlendi, silinebilir
+Deposit { mailbox_id, sealed }   -> server stores the envelope
+Fetch   { cursors }              -> recipient fetches everything after its cursor on return
+Ack     { mailbox_id, seq }      -> processed, can be deleted
 ```
 
-- `mailbox_id`, istemcinin zaten hesapladığı gossipsub topic adının
-  HKDF ile körleştirilmiş hâli — sunucu bir kutu adından fingerprint
-  okuyamaz.
-- `sealed`, zarfın ratchet `root_key`'inden türetilen AYRI bir anahtarla
-  İKİNCİ kez şifrelenmiş hâli. Aksi halde `MessagePacketHeader`'ın açık
-  taşıdığı `sender_device_fingerprint` sunucunun veritabanına okunabilir
-  girerdi.
-- Katılım tek bir KALICI kodla olur (`typeon-server:<adres>#<jeton>`):
-  operatör onu bir kez yayımlar (QR, bağlantı ya da düz metin) ve sınırsız
-  kişi kendi başına katılır — operatörle hiç konuşmadan. Sybil kapısı
-  jetonun tek kullanımlık olması DEĞİL, saatlik kayıt tavanı (60) ve
-  operatörün kodu istediği an döndürebilmesidir; kod döndürmek kayıtlı
-  cihazları etkilemez. Dar durumlar için (belirli sayıda kullanım / gün)
-  tek kullanımlık davetler duruyor.
-- Kayıt (`Enroll`), operatörün verdiği davet jetonu ve
-  SADECE O SUNUCU İÇİN üretilmiş taze bir anahtar çiftiyle yapılır —
-  cihazın kimlik anahtarları sunucuya hiç gitmez. İmza, uygulamanın geri
-  kalanıyla aynı şekilde HİBRİT (Ed25519 + ML-DSA-87, ikisi de doğrulanır).
-- Sunucu yolu gossipsub'ın YERİNE geçmez: el sıkışmalar ve ratchet
-  rotasyon duyuruları her zaman iki yoldan gider, sıradan mesajlar ise 30
-  saniye sonra gossipsub'a da kopyalanır. Sansürleyen/bozuk bir sunucu
-  teslimi yavaşlatır, engelleyemez.
+- `mailbox_id` is the gossipsub topic name the client already computes, blinded
+  with HKDF — the server cannot read a fingerprint from a mailbox name.
+- `sealed` is the envelope encrypted a SECOND time with a SEPARATE key derived from
+  the ratchet `root_key`. Otherwise the `sender_device_fingerprint` that
+  `MessagePacketHeader` carries in the clear would be readable in the server's database.
+- Joining uses a single PERMANENT code (`typeon-server:<address>#<token>`): the
+  operator publishes it once (QR, link or plain text) and an unlimited number of
+  people join on their own — without ever talking to the operator. The Sybil gate is
+  not that the token is single-use, but an hourly enrolment ceiling (60) and the
+  operator's ability to rotate the code at any moment; rotating the code does not
+  affect enrolled devices. For narrow cases (a set number of uses / per day),
+  single-use invites still exist.
+- Enrolment (`Enroll`) is done with the operator-issued invite token and a fresh key
+  pair generated ONLY FOR THAT SERVER — the device's identity keys never go to the
+  server. The signature is HYBRID (Ed25519 + ML-DSA-87, both verified), the same as
+  in the rest of the app.
+- The server path does NOT replace gossipsub: handshakes and ratchet rotation
+  announcements always go by both paths, while ordinary messages are also copied to
+  gossipsub after 30 seconds. A censoring or broken server slows delivery; it cannot
+  block it.
 
-Geçmişin sunucuda saklanması AYRI ve varsayılan kapalı bir seçenek: teslim
-zarfları geçmiş olarak kullanılamaz (ratchet anahtarları ileri-gizli ve
-silinmiş), bu yüzden arşiv uzun ömürlü bir "kök arşiv anahtarı" ile YENİDEN
-şifrelenir — ve o katman ileri-gizli DEĞİLDİR. Ayrıntılı gerekçe ve tehdit
-modeli için bkz. `SECURITY.md`.
+Storing history on the server is a SEPARATE and default-off option: delivery
+envelopes cannot be used as history (the ratchet keys are forward-secret and
+deleted), so the archive is re-encrypted with a long-lived "root archive key" — and
+that layer is NOT forward-secret. For the detailed rationale and threat model see
+`SECURITY.md`.
 
 ---
 
-## 5. Grup Mesajlaşma
+## 5. Group Messaging
 
-### 5.1 Model kararı: Pairwise (çiftler halinde) şifreleme
+### 5.1 Model decision: pairwise encryption
 
-Hedef ölçek küçük (2-15 kişi), üyelik yönetimi tek yetkili (kurucu) elinde.
-Bu ölçekte **Sender Keys** modelinin getirdiği karmaşıklık (üyelik değişiminde
-anahtar rotasyonu, "kim ne zaman hangi anahtarı biliyordu" durum takibi)
-gereksiz — bunun yerine mevcut 1:1 Double Ratchet altyapısı olduğu gibi
-yeniden kullanılır:
+The target scale is small (2–15 people), and membership management is in the hands
+of a single authority (the founder). At this scale the complexity that the **Sender
+Keys** model brings (key rotation on membership change, tracking "who knew which
+key when") is unnecessary. Instead, the existing 1:1 Double Ratchet infrastructure is
+reused as it is:
 
 ```
-Grup mesajı gönderilirken:
-  gönderen cihaz, mesajı gruptaki her üye için AYRI AYRI
-  kendi 1:1 ratchet oturumuyla şifreler ve doğrudan o üyeye gönderir.
+When sending a group message:
+  the sending device encrypts the message separately for EACH member of the group,
+  using its own 1:1 ratchet session, and sends it directly to that member.
 
-  N üyeli grup → her mesaj N-1 kez şifrelenir, N-1 ayrı paket gider.
+  Group of N members → each message is encrypted N-1 times, and N-1 separate packets go out.
 ```
 
-- Avantaj: yeni kripto yok, mevcut güvenlik garantileri (forward secrecy,
-  fingerprint doğrulama, güvenlik numarası değişikliği tespiti) hiçbir
-  değişiklik olmadan grup bağlamına taşınıyor.
-- Maliyet: N ile doğrusal büyüyen bant genişliği/CPU — 15 kişilik grupta
-  kabul edilebilir, yüzlerce kişilik grupta sorun olurdu (bu ölçek hedefte yok).
-- İleride ölçek büyürse Sender Keys'e geçiş **ayrı bir protokol versiyonu**
-  olarak ele alınabilir (v0.1 kapsamı dışı, ama mimari buna kapalı değil —
-  grup kimliği/üyelik modeli aşağıda buna izin verecek şekilde tasarlandı).
+- Advantage: no new cryptography; the existing security guarantees (forward
+  secrecy, fingerprint verification, security-number change detection) carry over to
+  the group context with no change.
+- Cost: bandwidth/CPU that grows linearly with N — acceptable for a 15-person group,
+  a problem for groups of hundreds (that scale is not a target).
+- If scale grows later, moving to Sender Keys can be treated as a **separate protocol
+  version** (outside the v0.1 scope, but the architecture does not rule it out — the
+  group identity/membership model below is designed to allow it).
 
-### 5.2 Grup kimliği ve üyelik
+### 5.2 Group identity and membership
 
 ```
 Group {
-  group_id: uuid,                      // yerel + üyeler arası paylaşılan, rastgele üretilir
+  group_id: uuid,                      // shared locally and between members, randomly generated
   name: string,
-  founder_fingerprint: bytes[32],      // kurucu, tek yetkili
+  founder_fingerprint: bytes[32],      // founder, the single authority
   members: [
     {
-      identity_id: bytes[32],            // v0.2: kişi bazlı üyelik (cihaz değil)
+      identity_id: bytes[32],            // v0.2: membership is per person (not per device)
       added_at: timestamp,
-      added_by: bytes[32],               // her zaman founder_identity_id olmalı
+      added_by: bytes[32],               // must always be founder_identity_id
     }
   ],
   created_at: timestamp,
-  version: u32,                        // üyelik listesi her değiştiğinde artar
+  version: u32,                        // increases every time the membership list changes
 }
 ```
 
-**Kararlar:**
-- Sadece `founder_identity_id` üye ekleyebilir/çıkarabilir. Başka hiçbir üyenin
-  bu yetkisi yok. **v0.2 güncellemesi**: kurucunun kendisi artık birden
-  fazla cihaza sahip olabileceği için (bölüm 1), "kurucu cihazını kaybetti"
-  sorunu grup düzeyinde değil **kimlik düzeyinde** çözülüyor — kurucu
-  telefonunu kaybederse, kurucunun başka bir Active cihazı (bölüm 1.6)
-  ya da son çare olarak kurtarma dosyası (bölüm 1.8) ile aynı
-  `founder_identity_id` altında devam eder, grup üyelik yetkisi kesintiye
-  uğramaz. Eskiden bağımsız bir "yedek kurucu" mekanizması gerektiren bu
-  sorun, artık genel kimlik/cihaz modelinin doğal bir sonucu olarak çözülmüş
-  oluyor.
-- Üyelik değişikliği kurucu tarafından imzalanmış bir `GroupUpdate` paketi
-  olarak tüm mevcut (ve varsa yeni eklenen) üyelere pairwise gönderilir —
-  ve her üyenin **tüm Active cihazlarına** ayrı ayrı (bölüm 1.7.1 pairwise
-  cihaz-çifti mantığıyla tutarlı):
+**Decisions:**
+- Only `founder_identity_id` can add or remove members. No other member has this
+  authority. **v0.2 update**: since the founder may now have several devices (section
+  1), the "founder lost their device" problem is solved at the **identity level**, not
+  the group level. If the founder loses their phone, another Active device of the
+  founder (section 1.6), or as a last resort the recovery file (section 1.8), continues
+  under the same `founder_identity_id`, and the group membership authority is not
+  interrupted. The problem, which previously needed a separate "backup founder"
+  mechanism, is now solved as a natural result of the general identity/device model.
+- A membership change is sent as a `GroupUpdate` packet signed by the founder, pairwise
+  to all current (and any newly added) members — and to **every Active device** of
+  each member separately (consistent with the pairwise device-pair logic in section 1.7.1):
 
 ```
 GroupUpdate {
   group_id: uuid,
   new_version: u32,
   change: Add(identity_id) | Remove(identity_id) | Rename(string),
-  signed_by: bytes[32],                // founder_identity_id olmalı
-  signed_by_device: bytes[32],         // kurucunun hangi cihazı imzaladı
+  signed_by: bytes[32],                // must be founder_identity_id
+  signed_by_device: bytes[32],         // which founder device signed it
   signature: bytes,
 }
 ```
 
-- Alıcı taraf, `signed_by == founder_identity_id` değilse `GroupUpdate`'i
-  reddeder — bu, kurucu olmayan birinin sahte üyelik değişikliği
-  göndermesini engeller (imza doğrulaması zaten var olan Dilithium+Ed25519
-  imza mekanizmasını kullanır, bölüm 3.3). `signed_by_device`'ın kurucunun
-  bilinen/Active bir cihazı olması da ayrıca doğrulanır (bölüm 2.2).
+- If `signed_by == founder_identity_id` does not hold, the receiving side rejects the
+  `GroupUpdate`. This stops someone who is not the founder from sending a fake
+  membership change (signature verification uses the existing Dilithium+Ed25519
+  signature mechanism, section 3.3). It is also separately verified that
+  `signed_by_device` is a known/Active device of the founder (section 2.2).
 
-### 5.3 Üye çıkarma ve forward secrecy
+### 5.3 Member removal and forward secrecy
 
-Bir üye gruptan çıkarıldığında:
-- Kalan üyelerle olan 1:1 ratchet oturumları etkilenmez (zaten ayrı ayrı).
-- Çıkarılan üyeyle (üyenin **tüm cihazlarıyla**) olan grup-özel mesajlaşma
-  durur (kurucu artık ona `GroupUpdate` veya grup mesajı göndermez).
-- **Not**: çıkarılan üye, çıkarılmadan önce aldığı geçmiş mesajları hâlâ
-  okuyabilir durumda (yerel kopyası var) — bu p2p/uçtan uca modelde
-  kaçınılmaz bir sınırlama (merkezi sunucu olmadığı için "geçmişi sil"
-  zorlanamaz). Kullanıcıya bu konuda net olmak gerekir.
+When a member is removed from the group:
+- The 1:1 ratchet sessions with the remaining members are not affected (they are
+  already separate).
+- Group-specific messaging with the removed member (with **all of their devices**)
+  stops (the founder no longer sends them `GroupUpdate` or group messages).
+- **Note**: the removed member can still read the past messages they received before
+  removal (they have a local copy). This is an unavoidable limit of a p2p/end-to-end
+  model: with no central server, "delete the history" cannot be enforced. The user
+  must be clear about this.
 
-### 5.4 Grup keşfi / davet akışı
+### 5.4 Group discovery / invite flow
 
-- Ayrı bir grup-daveti QR/manuel artefaktı **yoktur**. Kurucu (`invite_to_group`)
-  zaten var olan 1:1 bağlantı üzerinden pairwise `GroupUpdate(Add)` gönderir.
-- Davet edilen kişi bu 1:1 bağlantı üzerinden `GroupUpdate(Add)` paketini alır, grubu yerel olarak
-  oluşturur/günceller.
+- There is **no** separate group-invite QR/manual artefact. The founder
+  (`invite_to_group`) sends a pairwise `GroupUpdate(Add)` over the existing 1:1
+  connection.
+- The invited person receives the `GroupUpdate(Add)` packet over this 1:1 connection
+  and creates/updates the group locally.
 
-### 5.5 Çoklu cihazlı üyelerle grup etkileşimi
+### 5.5 Group interaction with multi-device members
 
-- Bir grup üyesinin yeni bir cihaz eklemesi (bölüm 1.5), grup üyeliğini
-  otomatik olarak genişletir — kurucudan ayrıca onay istenmez, çünkü
-  `identity_id` zaten üye olarak kayıtlı; yeni cihaz sadece o Identity'nin
-  bir parçası olarak mesaj trafiğine dahil olur.
-- Bir üye kendi cihazlarından birini iptal ederse (bölüm 1.6), grup
-  otomatik olarak günceli takip eder — o cihaza artık grup mesajı gönderilmez.
-
----
-
-## 6. Açık Kalan Kararlar
-
-1. **QR içeriği**: tam public key mi, yoksa fingerprint + sonradan çekme mi?
-   → **Karar verildi**: fingerprint-only (bkz. bölüm 1.3).
-2. **Ratchet yenileme sıklığı**: → **Karar verildi**: 30 dakika (bkz. bölüm 3.2).
-3. **Çoklu cihaz desteği**: → **Karar verildi**: tam senkronizasyon,
-   Identity/Device iki katmanlı model (bkz. bölüm 1, 2.2, 3.3, 5.5).
-4. **Kurucu cihaz kaybı**: → **Karar verildi**: kimlik düzeyinde çözüldü,
-   kurtarma dosyası (bölüm 1.8) son çare olarak mevcut (bkz. bölüm 5.2 notu).
-5. **Node teşvik modeli — karar: sadece gönüllülük.**
-   Kullanım senaryosu küçük ölçekli (arkadaş grubu, tanıdık kişi sayısı),
-   node modu proje sahibi tarafından kendi cihazında açık tutulacak.
-   Karşılıklılık/teşvik mekanizmasına gerek yok; ölçek büyürse (yabancılar
-   arası kullanım) bu karar yeniden değerlendirilebilir.
-
-   **Bunun bootstrap'a etkisi**: Küçük, güvenilir bir grup için tam DHT
-   şart değil — v0.1'de tek "bilinen node" (senin her zaman açık cihazın)
-   bootstrap noktası olarak yeterli olabilir. DHT (Kademlia) yine de
-   koddan çıkarılmaz (ileride büyürse hazır dursun), ama pratik akış
-   şöyle basitleşir: yeni kullanıcı → senin node'unun adresini QR/manuel
-   alır → ona bağlanır → DHT üzerinden diğerlerini keşfeder. Tek node
-   çevrimdışıysa (v0.1'in kabul ettiği kısıt) yeni keşif durur; bu,
-   küçük ölçekte kabul edilebilir bir trade-off.
-6. **Okundu bilgisi senkronu**: → **Karar verildi**: v0.2 kapsamına alındı,
-   ReadReceipt (normal mesaj trafiği) + SyncPayload'a `read_states` eki
-   (bkz. bölüm 1.7.1).
-7. **Cihaz sayısı sınırı**: → **Karar verildi**: Identity başına en fazla
-   5 Active cihaz (bkz. bölüm 1).
+- When a group member adds a new device (section 1.5), their group membership is
+  extended automatically. The founder is not asked for approval again, because
+  `identity_id` is already registered as a member; the new device simply joins the
+  message traffic as part of that Identity.
+- If a member revokes one of their own devices (section 1.6), the group follows the
+  current state automatically — group messages are no longer sent to that device.
 
 ---
 
-## 7. Prototip için minimum kapsam (v0.1 hedefi)
+## 6. Open Decisions
 
-Çoklu cihaz/senkron protokol düzeyinde tam tasarlandı (bölüm 1), ama
-**prototipte uygulama sırası** hâlâ aşamalı olmalı — aksi halde ilk
-çalışan sürüme ulaşmak gereksiz yere gecikir. Protokol tek parça, kod
-teslimatı iki aşama:
+1. **QR content**: full public keys, or fingerprint + later fetch?
+   → **Decided**: fingerprint-only (see section 1.3).
+2. **Ratchet renewal frequency**: → **Decided**: 30 minutes (see section 3.2).
+3. **Multi-device support**: → **Decided**: full synchronisation, two-layer
+   Identity/Device model (see sections 1, 2.2, 3.3, 5.5).
+4. **Founder device loss**: → **Decided**: solved at the identity level; the recovery
+   file (section 1.8) remains available as a last resort (see the note in section 5.2).
+5. **Node incentive model — decision: volunteer only.**
+   The use case is small scale (a group of friends, a known number of people); node
+   mode is kept on by the project owner on their own device. No reciprocity or
+   incentive mechanism is needed; if scale grows (use between strangers), this
+   decision can be re-evaluated.
 
-**Durum (2026-10-20): aşağıdaki kutuların tamamı uygulandı; yalnızca Kademlia DHT
-kaydı/Node-modu DHT katkısı (bölüm 4.2/4.3) bilerek yapılmadı. Dosya transferi,
-sesli/görüntülü arama, beyaz tahta, düzenle/sil, tepki/yanıt, yazıyor, profil de
-SHIP edildi ve bu spec'in tehdit modeli kapsamı DIŞINDA kalıyor — kendi şifreleme
-yolları var, gereksinimleri bu belgede tanımlı değil.**
+   **Effect on bootstrap**: for a small, trusted group the full DHT is not
+   required — in v0.1 a single "known node" (your always-on device) is enough as the
+   bootstrap point. Kademlia is still not removed from the code (so it is ready if the
+   network grows), but the practical flow simplifies to: a new user → gets your
+   node's address via QR/manual entry → connects to it → discovers the others over
+   the DHT. If the single node is offline (the constraint v0.1 accepts), new discovery
+   stops; at small scale this is an acceptable trade-off.
+6. **Read status sync**: → **Decided**: brought into the v0.2 scope, a `read_states`
+   addition to `ReadReceipt` (normal message traffic) + `SyncPayload` (see section 1.7.1).
+7. **Device count limit**: → **Decided**: at most 5 Active devices per Identity
+   (see section 1).
 
-**Aşama A — temel (tek cihaz varsayımıyla test edilir, ama kod
-Identity/Device ayrımına göre yazılır, sadece "1 Identity = 1 Device"
-özel durumuyla çalıştırılır):**
-- [x] Identity/Device modeli, fingerprint üretimi ve gösterimi
-- [x] QR eşleşme (identity_id + device_fingerprint + tek node adresi)
-- [x] Manuel node/kişi ekleme
-- [ ] libp2p + Kademlia DHT üzerinden iki cihazın birbirini bulması (yapılmadı: keşif QR/adres/röle/sunucu ile)
-- [x] Hibrit KEM ile oturum kurulumu
-- [x] Double Ratchet ile 1:1 mesajlaşma (metin, tek satır)
-- [x] Cihaz/kimlik değişikliği tespiti ve uyarı ekranı (bölüm 2.2)
-- [x] Node modu aç/kapa (Linux masaüstünde önce, Android sonra)
-- [x] Grup oluşturma, davet, pairwise grup mesajlaşma (bölüm 5)
+---
 
-**Aşama B — çoklu cihaz (Aşama A'nın üzerine eklenir):**
-- [x] DeviceAdd/DeviceRevoke akışı (bölüm 1.5/1.6)
-- [x] Cihazlar arası SyncPayload (kişiler, gruplar) (bölüm 1.7)
-- [x] Cihaz-çifti bazlı DeviceRatchetState ve pairwise çoklu-cihaz gönderimi (bölüm 1.7.1)
-- [x] Kimlik kurtarma dosyası (.txt, parola korumalı) (bölüm 1.8)
-- [ ] Mesaj geçmişi senkronu (opsiyonel, kullanıcı tercihi) (SyncPayload'da yok; `SiblingHistoryRequest/Response` var, ayar yok)
-- [x] Okundu bilgisi (ReadReceipt + ayrı `ReadStateSync` mesajı) (bölüm 1.7.1)
+## 7. Minimum Scope for the Prototype (v0.1 target)
 
-Dosya transferi, sesli/görüntülü arama v0.1/v0.2 kapsamı DIŞINDA (sonradan eklendi; bkz. yukarıdaki durum notu).
+The multi-device/sync protocol is fully designed at protocol level (section 1), but
+in the **prototype the implementation order** must still be staged — otherwise
+reaching the first working version is needlessly delayed. The protocol is one piece;
+code delivery is in two stages:
+
+**Status (2026-10-20): every box below is implemented; only the Kademlia DHT record /
+node-mode DHT contribution (sections 4.2/4.3) was deliberately not done. File
+transfer, voice/video calls, whiteboard, edit/delete, reactions/replies, typing
+indicator and profile were also SHIPPED, and they are OUTSIDE this spec's threat-model
+scope — they have their own encryption paths, and their requirements are not defined
+in this document.**
+
+**Stage A — foundation (tested with a single-device assumption, but the code is written
+to the Identity/Device split and runs only in the special case "1 Identity = 1 Device"):**
+- [x] Identity/Device model, fingerprint generation and display
+- [x] QR pairing (identity_id + device_fingerprint + one node address)
+- [x] Manual node/contact entry
+- [ ] Two devices finding each other over libp2p + Kademlia DHT (not done: discovery goes via QR/address/relay/server)
+- [x] Session setup with hybrid KEM
+- [x] 1:1 messaging with Double Ratchet (text, one line)
+- [x] Device/identity change detection and warning screen (section 2.2)
+- [x] Node mode on/off (on Linux desktop first, Android later)
+- [x] Group creation, invite, pairwise group messaging (section 5)
+
+**Stage B — multi-device (added on top of Stage A):**
+- [x] DeviceAdd/DeviceRevoke flow (sections 1.5/1.6)
+- [x] Sync between devices: SyncPayload (contacts, groups) (section 1.7)
+- [x] Device-pair based DeviceRatchetState and pairwise multi-device sending (section 1.7.1)
+- [x] Identity recovery file (.txt, password-protected) (section 1.8)
+- [ ] Message history sync (optional, user preference) (not in SyncPayload; `SiblingHistoryRequest/Response` exists, no setting)
+- [x] Read status (ReadReceipt + separate `ReadStateSync` message) (section 1.7.1)
+
+File transfer and voice/video calls are OUTSIDE the v0.1/v0.2 scope (added later; see
+the status note above).
