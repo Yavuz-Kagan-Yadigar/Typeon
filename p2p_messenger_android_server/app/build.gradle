@@ -3,16 +3,16 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
-// Typeon sunucu uygulaması — istemciden AYRI bir APK.
+// TypeOn server app: a separate APK from the client.
 //
-// Neden ayrı proje: istemcinin derlemesi bundan hiç etkilenmesin. İkisi tek
-// bir Gradle projesinde iki modül olsaydı, sunucunun Rust crate'i (kendi
-// cargo-ndk çağrısıyla) her istemci derlemesine de eklenirdi.
+// Why a separate project: the client build must not be affected by it. If both were
+// modules of one Gradle project, the server's Rust crate (with its own cargo-ndk
+// call) would also be added to every client build.
 //
-// GERÇEKÇİ DAĞITIM UYARISI: Android, bellek baskısı altında bir foreground
-// service'i yine de öldürebilir. Bu uygulama "evde duran, sürekli fişte bir
-// yedek telefon" senaryosu içindir; sürekli çalışması gereken bir sunucu için
-// küçük bir VPS'te `typeon-server` daemon'ı önerilir (bkz. typeon-server/README.md).
+// REALISTIC DEPLOYMENT WARNING: Android can still kill a foreground service under
+// memory pressure. This app is meant for a "spare phone that stays plugged in at
+// home" scenario. A server that must run continuously should use the
+// `typeon-server` daemon on a small VPS (see typeon-server/README.md).
 android {
     namespace 'com.p2p.messenger.server'
     compileSdk 34
@@ -31,10 +31,10 @@ android {
     }
 
     signingConfigs {
-        // İstemcideki AYNI gerekçe: depoya girmiş sabit bir debug keystore,
-        // farklı makinelerden yeniden kurulumda /data/data'nın silinmemesi
-        // için (imza değişirse Android uygulamayı kaldırıp yeniden kurar ve
-        // sunucunun veritabanı/onion kimliği gider).
+                // Same reason as the client: a fixed, checked-in debug keystore, so
+                // reinstalling from another machine does not wipe /data/data. If the
+                // signature changes, Android uninstalls and reinstalls the app, and the
+                // server's database and onion identity are lost.
         debug {
             storeFile file('debug.keystore')
             storePassword 'android'
@@ -67,13 +67,13 @@ android {
 
     packagingOptions {
         jniLibs {
-            // 16 KB sayfa hizalaması — istemcideki aynı gerekçe.
+                        // 16 KB page alignment, same reason as the client.
             useLegacyPackaging = false
-            // `if-watch` bağımlılığının ürettiği, hizalama denetimini geçemeyen
-            // yan cdylib (istemcide de dışlanıyor). Under `jniLibs`: under
-            // `resources` it matched nothing and 9 copies shipped.
-            // The client core (libp2p_messenger.so) is a build dependency only:
-            // the server never loads it (H111).
+                        // A side cdylib from the `if-watch` dependency that fails the alignment
+                        // check (the client excludes it too). Under `jniLibs`: under `resources`
+                        // it matched nothing and 9 copies shipped.
+                        // The client core (libp2p_messenger.so) is a build dependency only: the
+                        // server never loads it.
             excludes += ["**/libif_watch*.so", "**/libp2p_messenger.so"]
         }
     }
@@ -82,15 +82,15 @@ android {
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
-    // Davet kodunun QR'ını çizmek için — istemcide de kullanılan sürüm.
+        // Used to draw the invite code's QR, same version as the client.
     implementation 'com.google.zxing:core:3.5.1'
 }
 
-// --- Rust (typeon-server) cross-derlemesi ---
+// --- Rust (typeon-server) cross-build ---
 //
-// İstemcideki `cargoNdkBuild` görevinin birebir eşi; tek farkı çalışma
-// dizini (depo kökündeki `typeon-server/`) ve çıktı `.so`'nun adı
-// (`libtypeon_server.so`).
+// Counterpart of the `cargoNdkBuild` task in the client. The only differences are
+// the working directory (`typeon-server/` at the repo root) and the output `.so`
+// name (`libtypeon_server.so`).
 
 def resolveCargoExecutable() {
     def pathEnv = System.getenv("PATH") ?: ""
@@ -122,7 +122,7 @@ def resolveNdkHome() {
             if (ndkRoot.isDirectory()) {
                 def versions = ndkRoot.listFiles({ f -> f.isDirectory() } as FileFilter)
                 if (versions != null && versions.length > 0) {
-                    // Numeric, not lexicographic: "9.0.0" sorted after "30.0.x" (H110).
+                                        // Numeric, not lexicographic: "9.0.0" sorted after "30.0.x".
                     def num = { f -> f.name.tokenize(".").collect { it.isInteger() ? it.toInteger() : 0 } }
                     return versions.max { a, b ->
                         def pa = num(a), pb = num(b)
@@ -148,9 +148,10 @@ task cargoNdkBuild(type: Exec) {
         // libjxl (jpegxl-rs "vendored", via p2p_messenger_core) is built by CMake, which finds the NDK here.
         environment "ANDROID_NDK_ROOT", ndkHome
     }
-    // M-161/M-167: RUSTFLAGS env, config'teki rustflags'i tamamen ezer ve sunucu
-    // crate'inde .cargo/config.toml bulunmaz => 16 KB bayragini + yol maskelemeyi
-    // hedef-ozel env ile burada veriyoruz. ($HOME ve proje yolu .so'ya sizmasin)
+        // RUSTFLAGS in the environment overrides the rustflags in the config completely,
+        // and the server crate has no .cargo/config.toml. So the 16 KB flag and path
+        // masking are passed here as target-specific env vars. This keeps $HOME and the
+        // project path out of the .so.
     environment.remove("RUSTFLAGS")
     environment.remove("CARGO_ENCODED_RUSTFLAGS")
     def home = System.getProperty('user.home')
@@ -159,13 +160,12 @@ task cargoNdkBuild(type: Exec) {
     environment "CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS", (remap + page).join(" ")
     environment "CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS", (remap + page).join(" ")
     environment "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_RUSTFLAGS", remap.join(" ")
-    // `--lib` ZORUNLU: bu crate ayrıca headless Linux daemon'ını
-    // (`src/bin/typeon-server.rs`) üretiyor ve `cargo ndk build` varsayılan
-    // olarak TÜM hedefleri derliyor. O binary Android'de linklenmiyor —
-    // libp2p'nin `if-watch`'i `getifaddrs`e ihtiyaç duyuyor, cdylib'de sorun
-    // çıkarmayan ama `-pie -nodefaultlibs` ile linklenen bir çalıştırılabilir
-    // için çözülemeyen bir sembol. Zaten Android'de bir daemon binary'sine
-    // ihtiyaç da yok: uygulama kütüphaneyi JNI ile çağırıyor.
+        // `--lib` is REQUIRED: this crate also builds the headless Linux daemon
+        // (`src/bin/typeon-server.rs`), and `cargo ndk build` builds ALL targets by
+        // default. That binary is not linked on Android. libp2p's `if-watch` needs
+        // `getifaddrs`, a symbol that cannot be resolved in a PIE executable linked with
+        // `-nodefaultlibs`, though it causes no problem in a cdylib. Android also has no
+        // use for a daemon binary: the app calls the library through JNI.
     commandLine resolveCargoExecutable(), 'ndk',
             '-t', 'armeabi-v7a', '-t', 'arm64-v8a', '-t', 'x86_64',
             '-o', "${projectDir}/src/main/jniLibs",

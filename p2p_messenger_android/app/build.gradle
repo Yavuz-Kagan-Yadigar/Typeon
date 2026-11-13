@@ -22,13 +22,13 @@ android {
         }
     }
 
-    // Fixed, checked-in debug key (app/debug.keystore) instead of each
-    // machine's own auto-generated ~/.android/debug.keystore: without this,
-    // rebuilding on a different machine (or after that file is regenerated)
-    // produces a differently-signed APK. `adb install -r`/Play can't update
-    // across a signature change, forcing an uninstall first — which wipes
-    // /data/data (contacts, identity keys), so previously-paired contacts
-    // need re-pairing even though nothing else about them changed.
+        // Fixed, checked-in debug key (app/debug.keystore) instead of each machine's
+        // own auto-generated ~/.android/debug.keystore. Without it, a rebuild on
+        // another machine, or after that file is regenerated, produces an APK with a
+        // different signature. `adb install -r` and Play cannot update across a
+        // signature change, so the app must be uninstalled first. That wipes
+        // /data/data (contacts, identity keys), and previously paired contacts must be
+        // paired again, even though nothing else about them changed.
     signingConfigs {
         debug {
             storeFile file('debug.keystore')
@@ -45,10 +45,10 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            // C5: release is NOT signed by Gradle (the tracked debug key would
-            // let anyone with the repo sign an update). `sign-release.sh`
-            // signs it with the private key through the v3 lineage
-            // (~/.config/typeon-signing), so installs update without a wipe.
+                        // The release build is NOT signed by Gradle. Signing it with the tracked
+                        // debug key would let anyone with the repo sign an update. `sign-release.sh`
+                        // signs it with the private key through the v3 lineage
+                        // (~/.config/typeon-signing), so installs update without a wipe.
         }
     }
 
@@ -67,18 +67,17 @@ android {
 
     packagingOptions {
         jniLibs {
-            // AGP 8.5+/build-tools zipalign uncompressed native libs to the
-            // page size automatically; keep this explicit so it doesn't
-            // silently regress if legacy packaging is ever re-enabled.
+                        // AGP 8.5+ and build-tools zipalign uncompressed native libs to the page
+                        // size automatically. Keep this explicit so it does not silently regress
+                        // if legacy packaging is ever re-enabled.
             useLegacyPackaging = false
-            // `if-watch` (a libp2p dependency, used for network-interface
-            // change detection) declares `crate-type = ["cdylib", "lib"]`
-            // in its own Cargo.toml, so cargo-ndk's build sweeps up a
-            // `libif_watch-*.so` as an incidental side artifact alongside
-            // our real libp2p_messenger.so. Nothing loads it (no
-            // System.loadLibrary call references it) — it's dead weight
-            // that was also failing the 16 KB page-size check, so exclude
-            // it instead of trying to align a library the app never uses.
+                        // `if-watch` (a libp2p dependency, used for network-interface change
+                        // detection) declares `crate-type = ["cdylib", "lib"]` in its own
+                        // Cargo.toml. So cargo-ndk's build also produces a `libif_watch-*.so` side
+                        // artifact next to the real libp2p_messenger.so. Nothing loads it: no
+                        // System.loadLibrary call references it. It was dead weight, and it also
+                        // failed the 16 KB page-size check. So it is excluded, rather than
+                        // aligning a library the app never uses.
             excludes += ["**/libif_watch*.so"]
         }
     }
@@ -93,24 +92,20 @@ dependencies {
     implementation 'androidx.activity:activity-ktx:1.8.2'
     implementation 'androidx.fragment:fragment-ktx:1.6.2'
 
-    // Spec dışı, kullanıcı isteği ("react kısmında tam sistem emoji seçici
-    // ile açılsın"): AndroidX'in tam emoji ızgarası — kategoriler, arama,
-    // "son kullanılanlar" ve ten rengi varyantları dahil. Android'in
-    // klavye emoji panelini bir uygulamanın doğrudan açmasını sağlayan
-    // herhangi bir genel API YOK; bu widget, platformun kendi emoji
-    // verisini (emoji2) kullanan resmi karşılığı.
+        // AndroidX's full emoji grid: categories, search, recently used, and skin tone
+        // variants. No public Android API lets an app open the system keyboard's emoji
+        // panel directly. This widget is the official equivalent, and it uses the
+        // platform's own emoji data (emoji2).
     implementation 'androidx.emoji2:emoji2-emojipicker:1.4.0'
-    // Spec dışı, derleme düzeltmesi (emoji seçiciyle birlikte geldi):
-    // guava ÇALIŞMA ZAMANI sınıf yolunda zaten vardı ama DERLEME yolunda
-    // yoktu; `listenablefuture` ise guava ile çakışmasın diye BOŞ
-    // `9999.0-empty-to-avoid-conflict-with-guava` sürümüne yükseliyor.
-    // Sonuç: `ListenableFuture` sınıfı derlemede hiçbir yerde bulunamıyor
-    // ve CameraX kullanan iki ekran (QrScan/CameraCapture) kırılıyor.
-    // guava'yı açıkça bildirmek onu her iki sınıf yoluna da koyar —
-    // artefakt zaten paketleniyordu, ek boyut maliyeti YOK. (Alternatif
-    // olarak `listenablefuture`'ı 1.0'a sabitlemek denendi: bu sefer
-    // guava ile ÇİFT SINIF hatası verdi, çünkü ikisi de aynı sınıfı
-    // taşıyor.)
+        // Build fix that came with the emoji picker. Guava was already on the runtime
+        // classpath but not on the compile classpath. `listenablefuture` is pinned to
+        // the empty `9999.0-empty-to-avoid-conflict-with-guava` version so it does not
+        // clash with guava. Result: the `ListenableFuture` class could not be found at
+        // compile time, and the two CameraX screens (QrScan and CameraCapture) broke.
+        // Declaring guava explicitly puts it on both classpaths. The artifact was
+        // already packaged, so there is no extra size cost. (Pinning `listenablefuture`
+        // to 1.0 was also tried. It failed with duplicate-class errors, because both
+        // artifacts ship the same class.)
     implementation 'com.google.guava:guava:31.0.1-jre'
 
     // Navigation
@@ -133,10 +128,9 @@ dependencies {
     // Coroutines
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
 
-    // Spec dışı, kullanıcı isteği: kalıcı yeniden deneme kuyruğu için
-    // saatte bir arka plan taraması — WorkManager, JobScheduler üzerinden
-    // OS tarafından diğer uygulamaların işleriyle toplu (batched) çalıştırılır,
-    // özel bir AlarmManager/wakelock döngüsünden çok daha bataryayı dostu.
+        // Periodic background scan, once an hour, for the persistent retry queue.
+        // WorkManager runs it through the OS, batched with other apps' jobs. That is
+        // much more battery-friendly than a custom AlarmManager or wakelock loop.
     implementation 'androidx.work:work-runtime-ktx:2.9.0'
 
     testImplementation 'junit:junit:4.13.2'
@@ -144,17 +138,16 @@ dependencies {
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
 }
 
-// Build the Rust core via cargo-ndk and drop the resulting .so files into
-// jniLibs so System.loadLibrary("p2p_messenger") can find them.
-// Requires: cargo install cargo-ndk, and the Android NDK on PATH/ANDROID_NDK_HOME.
-// Android Studio, masaüstü kısayolundan/uygulama menüsünden (veya Flatpak
-// sandbox'ından) başlatıldığında genelde bir "login shell" DEĞİLDİR — bu
-// yüzden ~/.bashrc/~/.profile hiç çalıştırılmaz ve ~/.cargo/bin PATH'e
-// eklenmez, Gradle "cargo" komutunu bulamaz (error=2: No such file or
-// directory), oysa terminalden `cargo` çalışır çünkü terminal PATH'i
-// .bashrc üzerinden zaten doğru kurulmuştur.
-// Çözüm: cargo'nun tam yolunu kendimiz buluyoruz — önce PATH'te ara, yoksa
-// standart rustup kurulum konumuna (~/.cargo/bin/cargo) düş.
+// Build the Rust core via cargo-ndk and drop the resulting .so files into jniLibs,
+// so System.loadLibrary("p2p_messenger") can find them.
+// Requires: cargo install cargo-ndk, and the Android NDK on PATH or in ANDROID_NDK_HOME.
+// Android Studio, when started from the desktop menu or launcher (or from the
+// Flatpak sandbox), is usually NOT a login shell. So ~/.bashrc and ~/.profile never
+// run, ~/.cargo/bin is not added to PATH, and Gradle cannot find `cargo`
+// (error=2: No such file or directory). A terminal `cargo` works because the
+// terminal's PATH is set up by .bashrc.
+// Fix: find the full cargo path ourselves. Search PATH first, then fall back to the
+// standard rustup location (~/.cargo/bin/cargo).
 def resolveCargoExecutable() {
     def pathEnv = System.getenv("PATH") ?: ""
     def candidates = pathEnv.split(File.pathSeparator).collect { new File(it, "cargo") }
@@ -170,10 +163,10 @@ def resolveCargoExecutable() {
     return found.absolutePath
 }
 
-// ANDROID_NDK_HOME de aynı nedenle (Android Studio'nun süreci kullanıcının
-// shell ortam değişkenlerini miras almayabilir) burada elle çözülüyor.
-// Önce ortam değişkenine bakılır; yoksa local.properties'teki sdk.dir
-// altındaki ndk/ klasöründe kurulu en yeni sürüm otomatik seçilir.
+// ANDROID_NDK_HOME is resolved here by hand for the same reason: Android Studio's
+// process may not inherit the user's shell environment variables. The environment
+// variable is checked first. If it is not set, the newest version installed under
+// ndk/ in the sdk.dir from local.properties is picked automatically.
 def resolveNdkHome() {
     def fromEnv = System.getenv("ANDROID_NDK_HOME") ?: System.getenv("ANDROID_NDK_ROOT")
     if (fromEnv != null && new File(fromEnv).isDirectory()) {
@@ -189,7 +182,7 @@ def resolveNdkHome() {
             if (ndkRoot.isDirectory()) {
                 def versions = ndkRoot.listFiles({ f -> f.isDirectory() } as FileFilter)
                 if (versions != null && versions.length > 0) {
-                    // Numeric, not lexicographic: "9.0.0" sorted after "30.0.x" (H110).
+                                        // Numeric, not lexicographic: "9.0.0" sorted after "30.0.x".
                     def num = { f -> f.name.tokenize(".").collect { it.isInteger() ? it.toInteger() : 0 } }
                     return versions.max { a, b ->
                         def pa = num(a), pb = num(b)
@@ -215,9 +208,10 @@ task cargoNdkBuild(type: Exec) {
         // libjxl (jpegxl-rs "vendored") is built by CMake, which finds the NDK here.
         environment "ANDROID_NDK_ROOT", ndkHome
     }
-    // M-161/M-167: RUSTFLAGS env, config'teki rustflags'i tamamen ezer ve sunucu
-    // crate'inde .cargo/config.toml bulunmaz => 16 KB bayragini + yol maskelemeyi
-    // hedef-ozel env ile burada veriyoruz. ($HOME ve proje yolu .so'ya sizmasin)
+        // RUSTFLAGS in the environment overrides the rustflags in the config completely,
+        // and the server crate has no .cargo/config.toml. So the 16 KB flag and path
+        // masking are passed here as target-specific env vars. This keeps $HOME and the
+        // project path out of the .so.
     environment.remove("RUSTFLAGS")
     environment.remove("CARGO_ENCODED_RUSTFLAGS")
     def home = System.getProperty('user.home')
@@ -226,12 +220,12 @@ task cargoNdkBuild(type: Exec) {
     environment "CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS", (remap + page).join(" ")
     environment "CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS", (remap + page).join(" ")
     environment "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_RUSTFLAGS", remap.join(" ")
-    // M-168: the DebugDbKey JNI export exists only in a debug build (one .so
-    // is built per Gradle run, for the variant asked for). Opt-in: debug-hooks
-    // are enabled only for an explicitly debug-flavored invocation — the
-    // requested task list is non-empty, at least one task name contains
-    // 'debug' and none contains 'release' (case-insensitive);
-    // assemble/build/bundle and studio sync run WITHOUT them.
+        // The DebugDbKey JNI export exists only in a debug build (one .so is built per
+        // Gradle run, for the variant requested). Opt-in: debug-hooks are enabled only
+        // for an explicit debug-flavored invocation. The requested task list must be
+        // non-empty, at least one task name must contain 'debug', and none may contain
+        // 'release' (case-insensitive). assemble/build/bundle and studio sync run
+        // WITHOUT them.
     def taskNames = gradle.startParameter.taskNames
     def taskNamesLower = taskNames.collect { it.toLowerCase() }
     def debugOnly = !taskNames.isEmpty() && taskNamesLower.any { it.contains('debug') } && taskNamesLower.every { !it.contains('release') }
