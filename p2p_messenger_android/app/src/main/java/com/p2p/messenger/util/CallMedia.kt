@@ -63,6 +63,12 @@ object CallMedia {
     private const val LANE_QUEUE = 24
 
     @Volatile var muted = false
+    /** Plays silence; local only, the peers are not told. */
+    @Volatile var speakerMuted = false
+    /** Microphone picked on the call screen; null = system choice. */
+    @Volatile var micDevice: android.media.AudioDeviceInfo? = null
+        set(value) { field = value; try { recorder?.setPreferredDevice(value) } catch (_: Exception) {} }
+    @Volatile private var recorder: AudioRecord? = null
     @Volatile private var running = false
     private var audioThread: Thread? = null
     private var recvThread: Thread? = null
@@ -86,6 +92,7 @@ object CallMedia {
         lanes.clear()
         running = true
         muted = false
+        speakerMuted = false
         if (video) videoEncoder = VideoEncoder()
         audioThread = Thread({ captureLoop(gen) }, "call-audio-tx").apply { start() }
         recvThread = Thread({ receiveLoop(gen) }, "call-rx").apply { start() }
@@ -162,6 +169,8 @@ object CallMedia {
                 AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
                 maxOf(minBuf, FRAME_SAMPLES * 2 * 8)
             )
+            rec.setPreferredDevice(micDevice)
+            recorder = rec
             enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS)
             val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, SAMPLE_RATE, 1).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BITRATE)
@@ -250,6 +259,7 @@ object CallMedia {
             Log.e(TAG, "Audio capture failed", e)
         } finally {
             try { rec?.stop() } catch (_: Exception) {}
+            if (recorder === rec) recorder = null
             rec?.release()
             try { enc?.stop() } catch (_: Exception) {}
             enc?.release()
@@ -505,6 +515,7 @@ object CallMedia {
                 written = 0
                 overSince = 0
             }
+            if (speakerMuted) pcm.fill(0)
             val n = t.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
             if (n < 0) {
                 // ERROR_DEAD_OBJECT and friends: the track is gone, the next

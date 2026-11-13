@@ -40,6 +40,9 @@ struct CallUi {
     accept: gtk::Button,
     hangup: gtk::Button,
     mute: gtk::ToggleButton,
+    speaker: gtk::ToggleButton,
+    /// Microphone + speaker pills, shown only in an active call.
+    audio: gtk::Box,
     camera: gtk::ToggleButton,
     tiles: RefCell<HashMap<u8, Tile>>,
     media: RefCell<Option<CallMedia>>,
@@ -156,13 +159,18 @@ impl CallUi {
         stage.set_margin_end(12);
         stage.set_margin_top(12);
 
-        let mute = gtk::ToggleButton::builder().icon_name("microphone-sensitivity-high-symbolic").tooltip_text("Mute").visible(false).build();
+        let mute = gtk::ToggleButton::builder().icon_name("microphone-sensitivity-high-symbolic").tooltip_text("Mute").build();
+        let speaker = gtk::ToggleButton::builder().icon_name("audio-volume-high-symbolic").tooltip_text("Mute speaker").build();
+        let audio = gtk::Box::new(gtk::Orientation::Horizontal, 18);
+        audio.set_visible(false);
+        audio.append(&device_pill(&mute, true));
+        audio.append(&device_pill(&speaker, false));
         let camera = gtk::ToggleButton::builder().icon_name("camera-video-symbolic").tooltip_text("Camera").active(true).visible(false).build();
         let accept = gtk::Button::builder().icon_name("call-start-symbolic").tooltip_text("Answer").visible(false).build();
         accept.add_css_class("call-accept");
         let hangup = gtk::Button::builder().icon_name("call-stop-symbolic").tooltip_text("Hang up").build();
         hangup.add_css_class("call-hangup");
-        for b in [mute.upcast_ref::<gtk::Widget>(), camera.upcast_ref(), accept.upcast_ref(), hangup.upcast_ref()] {
+        for b in [camera.upcast_ref::<gtk::Widget>(), accept.upcast_ref(), hangup.upcast_ref()] {
             b.add_css_class("circular");
             b.add_css_class("call-button");
         }
@@ -170,7 +178,7 @@ impl CallUi {
         controls.set_halign(gtk::Align::Center);
         controls.set_margin_top(12);
         controls.set_margin_bottom(18);
-        controls.append(&mute);
+        controls.append(&audio);
         controls.append(&camera);
         controls.append(&accept);
         controls.append(&hangup);
@@ -192,6 +200,8 @@ impl CallUi {
             accept,
             hangup,
             mute,
+            speaker,
+            audio,
             camera,
             tiles: RefCell::new(HashMap::new()),
             media: RefCell::new(None),
@@ -227,6 +237,33 @@ impl CallUi {
             }
             b.set_icon_name(if b.is_active() { "microphone-disabled-symbolic" } else { "microphone-sensitivity-high-symbolic" });
         });
+        let weak = Rc::downgrade(&ui);
+        ui.speaker.connect_toggled(move |b| {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Some(m) = ui.media.borrow().as_ref() {
+                m.set_speaker_muted(b.is_active());
+            }
+            b.set_icon_name(if b.is_active() { "audio-volume-muted-symbolic" } else { "audio-volume-high-symbolic" });
+        });
+        let actions = gio::SimpleActionGroup::new();
+        for (input, name) in [(true, "mic"), (false, "speaker")] {
+            let current = crate::call_media::chosen_device(input).unwrap_or_default();
+            let action = gio::SimpleAction::new_stateful(name, Some(glib::VariantTy::STRING), &current.to_variant());
+            let weak = Rc::downgrade(&ui);
+            action.connect_change_state(move |a, v| {
+                let Some(v) = v else { return };
+                a.set_state(v);
+                let id = v.get::<String>().filter(|id| !id.is_empty());
+                let Some(ui) = weak.upgrade() else { return };
+                let media = ui.media.borrow();
+                match media.as_ref() {
+                    Some(m) => m.set_device(input, id),
+                    None => crate::call_media::choose_device(input, id),
+                }
+            });
+            actions.add_action(&action);
+        }
+        ui.window.insert_action_group("call", Some(&actions));
         let weak = Rc::downgrade(&ui);
         ui.camera.connect_toggled(move |b| {
             let Some(ui) = weak.upgrade() else { return };
@@ -316,7 +353,7 @@ impl CallUi {
         let active = new == "active";
         self.accept.set_visible(incoming);
         self.hangup.set_tooltip_text(Some(if incoming { "Decline" } else { "Hang up" }));
-        self.mute.set_visible(active);
+        self.audio.set_visible(active);
         self.camera.set_visible(active && self.video.get());
     }
 
@@ -360,6 +397,8 @@ impl CallUi {
             Ok(media) => {
                 self.self_view.set_visible(media.camera_on());
                 self.camera.set_active(media.camera_on());
+                media.set_muted(self.mute.is_active());
+                media.set_speaker_muted(self.speaker.is_active());
                 *self.media.borrow_mut() = Some(media);
             }
             Err(e) => {
@@ -519,6 +558,37 @@ fn new_tile(video: bool) -> Tile {
     Tile { root, picture, name, mic_off, avatar, peer: RefCell::new(String::new()) }
 }
 
+/// `toggle` (mute) joined to an arrow that lists the microphones (`input`)
+/// or speakers; the pick goes to the `call.mic` / `call.speaker` action.
+fn device_pill(toggle: &gtk::ToggleButton, input: bool) -> gtk::Box {
+    let action = if input { "call.mic" } else { "call.speaker" };
+    let arrow = gtk::MenuButton::builder()
+        .icon_name("pan-down-symbolic")
+        .tooltip_text(if input { "Microphone" } else { "Speaker" })
+        .direction(gtk::ArrowType::Up)
+        .build();
+    let menu = gio::Menu::new();
+    arrow.set_menu_model(Some(&menu));
+    if let Some(popover) = arrow.popover() {
+        // Listed on every open: headsets come and go mid-call.
+        popover.connect_show(move |_| {
+            menu.remove_all();
+            let devices = crate::call_media::audio_devices(input);
+            for (id, label) in std::iter::once((String::new(), "System default".to_string())).chain(devices) {
+                let item = gio::MenuItem::new(Some(&label), None);
+                item.set_action_and_target_value(Some(action), Some(&id.to_variant()));
+                menu.append_item(&item);
+            }
+        });
+    }
+    let pill = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    pill.add_css_class("linked");
+    pill.add_css_class("call-pill");
+    pill.append(toggle);
+    pill.append(&arrow);
+    pill
+}
+
 fn install_css() {
     thread_local!(static DONE: Cell<bool> = const { Cell::new(false) });
     if DONE.with(|d| d.replace(true)) {
@@ -531,6 +601,8 @@ fn install_css() {
          .call-self { border-radius: 10px; }
          .call-label { color: white; background: alpha(black, 0.45); border-radius: 8px; padding: 4px 10px; }
          .call-button { min-width: 56px; min-height: 56px; }
+         .call-pill > button { min-width: 56px; min-height: 56px; border-radius: 28px 0 0 28px; }
+         .call-pill > menubutton > button { min-height: 56px; min-width: 20px; padding: 0 10px; border-radius: 0 28px 28px 0; }
          .call-accept { background: #2ea043; color: white; }
          .call-hangup { background: #d32f2f; color: white; }",
     );

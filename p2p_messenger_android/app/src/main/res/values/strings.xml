@@ -493,6 +493,11 @@
     <string name="call_mute">Mute</string>
     <string name="call_unmute">Unmute</string>
     <string name="call_speaker">Speaker</string>
+    <string name="call_device_default">System default</string>
+    <string name="call_device_phone_mic">Phone microphone</string>
+    <string name="call_device_wired">Wired headset</string>
+    <string name="call_pick_mic">Microphone</string>
+    <string name="call_pick_output">Speaker output</string>
     <string name="call_earpiece">Earpiece</string>
     <string name="call_camera_off">Camera off</string>
     <string name="call_camera_on">Camera on</string>

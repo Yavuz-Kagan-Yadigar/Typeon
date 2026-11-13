@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.SurfaceTexture
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.RingtoneManager
 import android.media.ToneGenerator
@@ -60,6 +61,11 @@ import java.util.concurrent.Executors
 class CallActivity : AppCompatActivity() {
 
     companion object {
+        /** Microphones worth offering (not FM tuner, telephony, remote submix...). */
+        private val MIC_TYPES = setOf(
+            AudioDeviceInfo.TYPE_BUILTIN_MIC, AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+            AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET, 26 /* TYPE_BLE_HEADSET, API 31 */
+        )
         /** The call screen is in picture-in-picture: `P2PApplication` does
          *  not count it as a visible screen for the background lock. */
         @Volatile var inPip = false
@@ -151,8 +157,9 @@ class CallActivity : AppCompatActivity() {
     private lateinit var selfView: PreviewView
     private lateinit var btnAccept: Button
     private lateinit var btnHangup: Button
-    private lateinit var btnMute: Button
-    private lateinit var btnSpeaker: Button
+    /** Mute halves of the microphone / output pills (their parent is the pill). */
+    private lateinit var micIcon: ImageView
+    private lateinit var spkIcon: ImageView
     private lateinit var btnCamera: Button
     private lateinit var btnPip: Button
 
@@ -277,7 +284,7 @@ class CallActivity : AppCompatActivity() {
 
     private fun toggleMute() {
         CallMedia.muted = !CallMedia.muted
-        btnMute.setText(if (CallMedia.muted) R.string.call_unmute else R.string.call_mute)
+        refreshAudioIcons()
         if (isInPictureInPictureMode) setPictureInPictureParams(pipParams())
     }
 
@@ -419,8 +426,8 @@ class CallActivity : AppCompatActivity() {
         btnAccept.visibility = if (newState == "incoming") View.VISIBLE else View.GONE
         btnHangup.setText(if (newState == "incoming") R.string.call_decline else R.string.call_hangup)
         val inCall = newState == "active"
-        btnMute.visibility = if (inCall) View.VISIBLE else View.GONE
-        btnSpeaker.visibility = if (inCall) View.VISIBLE else View.GONE
+        (micIcon.parent as View).visibility = if (inCall) View.VISIBLE else View.GONE
+        (spkIcon.parent as View).visibility = if (inCall) View.VISIBLE else View.GONE
         btnCamera.visibility = if (inCall && video) View.VISIBLE else View.GONE
         btnPip.visibility = if (inCall || newState == "outgoing") View.VISIBLE else View.GONE
         if (inCall && participants != null) { syncTiles(participants); frameTiles() }
@@ -484,8 +491,8 @@ class CallActivity : AppCompatActivity() {
         am.mode = AudioManager.MODE_IN_COMMUNICATION
         @Suppress("DEPRECATION")
         am.isSpeakerphoneOn = video
-        updateSpeakerLabel()
         CallMedia.start(video && hasPermissions(true))
+        refreshAudioIcons()
         if (video && hasPermissions(true)) startCamera()
     }
 
@@ -502,6 +509,7 @@ class CallActivity : AppCompatActivity() {
         val am = getSystemService(AudioManager::class.java)
         @Suppress("DEPRECATION")
         am.isSpeakerphoneOn = false
+        if (android.os.Build.VERSION.SDK_INT >= 31) am.clearCommunicationDevice()
         am.mode = AudioManager.MODE_NORMAL
     }
 
@@ -676,10 +684,53 @@ class CallActivity : AppCompatActivity() {
         tv.layoutParams = FrameLayout.LayoutParams((vw * scale).toInt(), (vh * scale).toInt(), Gravity.CENTER)
     }
 
-    private fun updateSpeakerLabel() {
+    private fun refreshAudioIcons() {
+        micIcon.setImageResource(if (CallMedia.muted) R.drawable.ic_mic_off else R.drawable.ic_mic)
+        micIcon.contentDescription = getString(if (CallMedia.muted) R.string.call_unmute else R.string.call_mute)
+        spkIcon.setImageResource(if (CallMedia.speakerMuted) R.drawable.ic_volume_off else R.drawable.ic_volume_up)
+    }
+
+    private fun pickMic(anchor: View) {
+        val am = getSystemService(AudioManager::class.java)
+        val mics = am.getDevices(AudioManager.GET_DEVICES_INPUTS).filter { it.type in MIC_TYPES }
+        showDevices(anchor, mics, CallMedia.micDevice?.id, true) { CallMedia.micDevice = it }
+    }
+
+    /** API 31+: any communication device; before that only earpiece / speaker. */
+    private fun pickOutput(anchor: View) {
+        val am = getSystemService(AudioManager::class.java)
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            showDevices(anchor, am.availableCommunicationDevices, am.communicationDevice?.id, true) {
+                if (it != null) am.setCommunicationDevice(it) else am.clearCommunicationDevice()
+            }
+            return
+        }
+        val outs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            .filter { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE || it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
         @Suppress("DEPRECATION")
-        val on = getSystemService(AudioManager::class.java).isSpeakerphoneOn
-        btnSpeaker.setText(if (on) R.string.call_earpiece else R.string.call_speaker)
+        val speakerOn = am.isSpeakerphoneOn
+        val current = outs.firstOrNull { (it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) == speakerOn }?.id
+        showDevices(anchor, outs, current, false) {
+            @Suppress("DEPRECATION")
+            am.isSpeakerphoneOn = it?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+        }
+    }
+
+    private fun showDevices(anchor: View, devices: List<AudioDeviceInfo>, currentId: Int?, withDefault: Boolean, onPick: (AudioDeviceInfo?) -> Unit) {
+        val popup = android.widget.PopupMenu(this, anchor)
+        if (withDefault) popup.menu.add(0, -1, 0, R.string.call_device_default).isChecked = currentId == null
+        devices.forEachIndexed { i, d -> popup.menu.add(0, i, i + 1, deviceLabel(d)).isChecked = d.id == currentId }
+        popup.menu.setGroupCheckable(0, true, true)
+        popup.setOnMenuItemClickListener { onPick(devices.getOrNull(it.itemId)); true }
+        popup.show()
+    }
+
+    private fun deviceLabel(d: AudioDeviceInfo): String = when (d.type) {
+        AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> getString(R.string.call_earpiece)
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> getString(R.string.call_speaker)
+        AudioDeviceInfo.TYPE_BUILTIN_MIC -> getString(R.string.call_device_phone_mic) + (d.address.takeIf { it.isNotEmpty() }?.let { " ($it)" } ?: "")
+        AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> getString(R.string.call_device_wired)
+        else -> d.productName?.toString()?.takeIf { it.isNotBlank() } ?: "#${d.id}"
     }
 
     // ---------------------------------------------------------------- layout
@@ -732,13 +783,48 @@ class CallActivity : AppCompatActivity() {
             })
         }
         val grey = Color.rgb(60, 60, 66)
-        btnMute = button(R.string.call_mute, grey) { toggleMute() }
-        btnSpeaker = button(R.string.call_speaker, grey) {
-            val am = getSystemService(AudioManager::class.java)
-            @Suppress("DEPRECATION")
-            am.isSpeakerphoneOn = !am.isSpeakerphoneOn
-            updateSpeakerLabel()
+        val ripple = android.util.TypedValue().also { theme.resolveAttribute(android.R.attr.selectableItemBackground, it, true) }.resourceId
+        val white = android.content.res.ColorStateList.valueOf(Color.WHITE)
+        /** Tap the icon = mute, tap the arrow = device list. */
+        fun pill(icon: Int, desc: Int, pickDesc: Int, onTap: () -> Unit, onPick: (View) -> Unit): ImageView {
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    cornerRadius = 100 * dp
+                    setColor(grey)
+                }
+                clipToOutline = true
+            }
+            val main = ImageView(this).apply {
+                setImageResource(icon)
+                imageTintList = white
+                scaleType = ImageView.ScaleType.CENTER
+                contentDescription = getString(desc)
+                setBackgroundResource(ripple)
+                setOnClickListener { onTap() }
+            }
+            box.addView(main, LinearLayout.LayoutParams(0, (48 * dp).toInt(), 1f))
+            box.addView(View(this).apply { setBackgroundColor(Color.argb(70, 255, 255, 255)) },
+                LinearLayout.LayoutParams(maxOf(1, dp.toInt()), (24 * dp).toInt()))
+            box.addView(ImageView(this).apply {
+                setImageResource(R.drawable.ic_arrow_drop_down)
+                imageTintList = white
+                scaleType = ImageView.ScaleType.CENTER
+                contentDescription = getString(pickDesc)
+                setBackgroundResource(ripple)
+                setOnClickListener { onPick(it) }
+            }, LinearLayout.LayoutParams((32 * dp).toInt(), (48 * dp).toInt()))
+            bar.addView(box, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = (4 * dp).toInt(); marginEnd = (4 * dp).toInt()
+            })
+            return main
         }
+        micIcon = pill(R.drawable.ic_mic, R.string.call_mute, R.string.call_pick_mic, { toggleMute() }, { pickMic(it) })
+        spkIcon = pill(R.drawable.ic_volume_up, R.string.call_speaker, R.string.call_pick_output, {
+            CallMedia.speakerMuted = !CallMedia.speakerMuted
+            refreshAudioIcons()
+        }, { pickOutput(it) })
         // Off unbinds the camera; on binds it again — which is also how the
         // user recovers after unblocking the system camera privacy switch
         // (CameraX gives up on a disabled camera and never retries).
@@ -754,8 +840,8 @@ class CallActivity : AppCompatActivity() {
         btnPip = button(R.string.call_pip, grey) { enterPip() }
         btnAccept = button(R.string.call_accept, Color.rgb(46, 160, 67)) { accept() }
         btnHangup = button(R.string.call_hangup, Color.rgb(211, 47, 47)) { hangup() }
-        btnMute.visibility = View.GONE
-        btnSpeaker.visibility = View.GONE
+        (micIcon.parent as View).visibility = View.GONE
+        (spkIcon.parent as View).visibility = View.GONE
         btnCamera.visibility = View.GONE
         btnPip.visibility = View.GONE
         btnAccept.visibility = View.GONE

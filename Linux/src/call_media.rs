@@ -134,6 +134,8 @@ struct Shared {
     audio: Mutex<HashMap<u8, AudioLane>>,
     video: Mutex<HashMap<u8, VideoLane>>,
     camera: Mutex<Option<VideoTx>>,
+    /// The running microphone pipeline, so a device change can reopen it.
+    mic: Mutex<Option<gst::Pipeline>>,
 }
 
 /// Loads GStreamer off the UI thread at start-up. The first `gst::init` after
@@ -166,6 +168,7 @@ impl CallMedia {
             audio: Mutex::new(HashMap::new()),
             video: Mutex::new(HashMap::new()),
             camera: Mutex::new(None),
+            mic: Mutex::new(None),
         });
         let mut threads = Vec::new();
         {
@@ -185,6 +188,35 @@ impl CallMedia {
 
     pub fn set_muted(&self, muted: bool) {
         self.shared.muted.store(muted, Ordering::Relaxed);
+    }
+
+    /// Mutes only our own playback; the peers are not told.
+    pub fn set_speaker_muted(&self, muted: bool) {
+        if let Some(spk) = self.shared.playback.as_ref().and_then(|p| p.by_name("spk")) {
+            if spk.find_property("mute").is_some() {
+                spk.set_property("mute", muted);
+            }
+        }
+    }
+
+    /// Stores the choice (see `choose_device`) and reopens that side on it.
+    pub fn set_device(&self, input: bool, id: Option<String>) {
+        choose_device(input, id);
+        if input {
+            let mic = self.shared.mic.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            if let Some(p) = mic {
+                let _ = p.set_state(gst::State::Null);
+                apply_device(&p, true);
+                let _ = p.set_state(gst::State::Playing);
+            }
+        } else if let Some(p) = &self.shared.playback {
+            if let Some(spk) = p.by_name("spk") {
+                // The pipeline runs on the system clock, so the sink may restart alone.
+                let _ = spk.set_state(gst::State::Null);
+                apply_device(p, false);
+                let _ = spk.sync_state_with_parent();
+            }
+        }
     }
 
     pub fn camera_on(&self) -> bool {
@@ -259,17 +291,76 @@ const MAX_LANES: usize = 16;
 
 /// Microphone, speaker and camera elements of this OS.
 #[cfg(not(windows))]
-const MIC: &str = "pulsesrc stream-properties=\"props,media.role=phone\"";
+const MIC: &str = "pulsesrc name=mic stream-properties=\"props,media.role=phone\"";
 #[cfg(not(windows))]
 const SPEAKER: &str = "pulsesink name=spk stream-properties=\"props,media.role=phone\"";
 #[cfg(not(windows))]
 const CAMERA: &str = "v4l2src";
 #[cfg(windows)]
-const MIC: &str = "wasapi2src low-latency=true";
+const MIC: &str = "wasapi2src name=mic low-latency=true";
 #[cfg(windows)]
 const SPEAKER: &str = "wasapi2sink name=spk low-latency=true";
 #[cfg(windows)]
 const CAMERA: &str = "mfvideosrc";
+#[cfg(not(windows))]
+const DEVICE_FACTORIES: [&str; 2] = ["pulsesrc", "pulsesink"];
+#[cfg(windows)]
+const DEVICE_FACTORIES: [&str; 2] = ["wasapi2src", "wasapi2sink"];
+
+/// Chosen microphone / speaker (`device` property of `MIC` / `SPEAKER`);
+/// None = system default. Kept for the app's lifetime, so the next call reuses it.
+static DEVICES: Mutex<[Option<String>; 2]> = Mutex::new([None, None]);
+
+pub fn chosen_device(input: bool) -> Option<String> {
+    DEVICES.lock().unwrap_or_else(|p| p.into_inner())[!input as usize].clone()
+}
+
+pub fn choose_device(input: bool, id: Option<String>) {
+    DEVICES.lock().unwrap_or_else(|p| p.into_inner())[!input as usize] = id;
+}
+
+/// Sets the chosen device on `mic` / `spk` of `p` (element must be stopped).
+fn apply_device(p: &gst::Pipeline, input: bool) {
+    if let Some(e) = p.by_name(if input { "mic" } else { "spk" }) {
+        if e.find_property("device").is_some() {
+            e.set_property("device", chosen_device(input));
+        }
+    }
+}
+
+/// `(device id, label)` of every microphone (`input`) or speaker the call
+/// elements of this OS can open. Monitors / loopbacks are left out.
+pub fn audio_devices(input: bool) -> Vec<(String, String)> {
+    if gst::init().is_err() {
+        return Vec::new();
+    }
+    let factory = DEVICE_FACTORIES[!input as usize];
+    let monitor = gst::DeviceMonitor::new();
+    monitor.add_filter(Some(if input { "Audio/Source" } else { "Audio/Sink" }), None);
+    if monitor.start().is_err() {
+        return Vec::new();
+    }
+    let mut list: Vec<(String, String)> = Vec::new();
+    for d in monitor.devices() {
+        let props = d.properties();
+        let prop = |k: &str| props.as_ref().and_then(|p| p.get::<String>(k).ok());
+        let loopback = props.as_ref().and_then(|p| p.get::<bool>("wasapi2.device.loopback").ok()) == Some(true);
+        if prop("device.class").as_deref() == Some("monitor") || loopback {
+            continue;
+        }
+        let Ok(e) = d.create_element(None) else { continue };
+        if e.factory().map_or(true, |f| f.name().as_str() != factory) || e.find_property("device").is_none() {
+            continue;
+        }
+        if let Some(id) = e.property::<Option<String>>("device") {
+            if !list.iter().any(|(i, _)| *i == id) {
+                list.push((id, d.display_name().to_string()));
+            }
+        }
+    }
+    monitor.stop();
+    list
+}
 
 fn launch(desc: &str) -> Result<gst::Pipeline, String> {
     gst::parse::launch(desc)
@@ -321,6 +412,9 @@ fn build_playback() -> Result<gst::Pipeline, String> {
          audio/x-raw,format=S16LE,rate=48000,channels=1 ! queue max-size-time=1000000000 ! mix."
     ))?;
     drain_bus(&p, "playback");
+    // Not the sink's clock: a device change restarts the sink alone.
+    p.use_clock(Some(&gst::SystemClock::obtain()));
+    apply_device(&p, false);
     p.set_state(gst::State::Playing).map_err(|e| e.to_string())?;
     Ok(p)
 }
@@ -340,13 +434,15 @@ fn audio_tx(shared: Arc<Shared>) {
              appsink name=out sync=false max-buffers=50 drop=true"
         )
     };
-    let pipeline = match launch(&desc(dsp)).and_then(|p| {
+    let start = |p: gst::Pipeline| {
+        apply_device(&p, true);
         p.set_state(gst::State::Playing).map(|_| p).map_err(|e| e.to_string())
-    }) {
+    };
+    let pipeline = match launch(&desc(dsp)).and_then(start) {
         Ok(p) => p,
         Err(e) if !dsp.is_empty() => {
             log::warn!("call: echo cancellation unavailable ({e}), capturing without it");
-            match launch(&desc("")).and_then(|p| p.set_state(gst::State::Playing).map(|_| p).map_err(|e| e.to_string())) {
+            match launch(&desc("")).and_then(start) {
                 Ok(p) => p,
                 Err(e) => return state_only(&shared, &e),
             }
@@ -363,6 +459,7 @@ fn audio_tx(shared: Arc<Shared>) {
         let _ = pipeline.set_state(gst::State::Null);
         return state_only(&shared, "microphone pipeline has no appsink element");
     };
+    *shared.mic.lock().unwrap_or_else(|p| p.into_inner()) = Some(pipeline.clone());
     let mut bundle: Vec<Vec<u8>> = Vec::with_capacity(PACKETS_PER_BUNDLE);
     let mut state_at = Instant::now() - STATE_EVERY;
     let mut last_flags = u8::MAX;
@@ -392,6 +489,7 @@ fn audio_tx(shared: Arc<Shared>) {
             bundle.clear();
         }
     }
+    shared.mic.lock().unwrap_or_else(|p| p.into_inner()).take();
     let _ = pipeline.set_state(gst::State::Null);
 }
 
