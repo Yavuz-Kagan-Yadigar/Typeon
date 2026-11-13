@@ -36,25 +36,18 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
     private val alertPollHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    /** `checkPendingDeviceAlerts`
-     *  her 5 saniyede bir çalışır. Kullanıcı bir güvenlik uyarısını hemen
-     *  kabul/red etmezse (ör. telefondan uzaklaşırsa), önceden HER turda
-     *  `array.getJSONObject(0)` hâlâ aynı bekleyen uyarıyı döndürdüğü için
-     *  YENİ bir `AlertDialog` (`setCancelable(false)`) üstüste açılıyordu —
-     *  dakikalar içinde onlarca kapatılamaz modal dialog birikebilir, hatta
-     *  kötü niyetli bir kişi tekrar tekrar yeni-cihaz olayı tetikleyerek bu
-     *  ekranı kasıtlı spam'leyebilir (tam da bu güvenlik kontrolüne olan
-     *  güveni zedeler).
+    /** `checkPendingDeviceAlerts` runs every 5 seconds. A security alert that the user does not
+     *  answer right away (for example, the user walks away from the phone) is shown once. The same
+     *  pending alert is returned on every poll, so the dialog is not opened again each time: one
+     *  non-cancelable dialog would otherwise pile up per poll. A hostile sender could also trigger
+     *  new-device events in a loop to spam this screen, so the dedupe is part of the security check.
      *
-     *  Bekleyen uyarılar bir KÜME ile takip edilir, TEK bir slotla değil:
-     *  çekirdek listeyi bir HashMap'te tutuyor, sıra her yoklamada
-     *  değişebiliyor — iki uyarı beklerken "ilk uyarı" A,B,A şeklinde
-     *  değişiyor ve her turda yeni bir kapatılamaz dialog üstüste biniyordu.
-     *  Artık: aynı uyarı için ikinci bir dialog AÇILMAZ ve aynı anda yalnızca
-     *  TEK dialog açık olur; sıradaki uyarı ancak önceki kapanınca gösterilir. */
+     *  Pending alerts are tracked as a SET, not as a single slot. The core keeps the list in a HashMap,
+     *  so the order can change between polls. The same alert never opens a second dialog, and only one
+     *  dialog is open at a time. The next alert is shown after the current one is closed. */
     private val shownAlertFingerprints = HashSet<String>()
-    /** Aynı anda açık olan tek güvenlik dialog'u (üste binen ikinci bir
-     *  dialog, altındakinin cevaplanmasını engelliyordu). */
+    /** The single security dialog that is open at a time. A second dialog on top would block the
+     *  answer to the one below it. */
     private var alertDialog: androidx.appcompat.app.AlertDialog? = null
     private val alertPollRunnable = object : Runnable {
         override fun run() {
@@ -63,11 +56,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Android 13+ (API 33) bildirim göstermek için çalışma zamanı izni
-     *  ister — bu YAPILMADAN hem P2PService'in kalıcı bildirimi hem de
-     *  (bkz. NotificationHelper) gelen mesaj bildirimleri sistem tarafından
-     *  SESSİZCE bastırılır. Google Play Services/FCM ile ilgisi yok, salt
-     *  platform izni. */
+    /** Android 13+ (API 33) needs the runtime permission to post notifications. Without it, the
+     *  foreground service notification of P2PService and the incoming-message notifications
+     *  (see NotificationHelper) are suppressed by the system. This is a plain platform permission,
+     *  not Google Play Services or FCM. */
     private val requestNotificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { /* reddedilse bile devam ediyoruz — bildirimler o zaman görünmez, mesajlaşma etkilenmez */ }
@@ -81,24 +73,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. SettingsFragment `pickAvatarLauncher` aynı not: `registerForActivityResult`
-     *  Activity STARTED olmadan ÖNCE (bir property initializer'ında) kaydedilmeli.
-     *  bkz. `showImportPassphraseDialog`/`importRecoveryFrom` — SettingsFragment'ın
-     *  "Kurtarma Dosyasını Dışa Aktar"ının EKSİK karşılığı: dışa aktarılan bir
-     *  dosyanın bu (veya başka) bir cihazda geri yüklenebileceği hiçbir yer yoktu. */
+    /** Like the note in SettingsFragment `pickAvatarLauncher`: `registerForActivityResult` must be
+     *  registered before the activity is STARTED, so it is a property initializer.
+     *  See `showImportPassphraseDialog` / `importRecoveryFrom`. This is the import side of the
+     *  recovery-file export in SettingsFragment: without it, an exported file had nowhere to be restored. */
     private val pickRecoveryFileLauncher = registerForActivityResult(com.p2p.messenger.util.OpenDocumentAtHome()) { uri ->
         uri?.let { showImportPassphraseDialog(it) }
     }
 
-    /** [showDeviceNameDialog]'daki isim alanından, dosya seçici açılmadan
-     *  ÖNCE okunur (kullanıcı SAF'ta gezinirken dialog'un View'ı zaten
-     *  dismiss edilmiş olur). */
+    /** The name field of [showDeviceNameDialog] is read BEFORE the file picker opens, because the
+     *  dialog's view is dismissed while the user browses in SAF. */
     private var pendingImportDeviceName: String = "Device"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // #48: the database / key work is slow: not on the main thread. A loading
-        // screen meanwhile; the real layout (and its fragments) only after the core is up.
+        // The database and key work is slow, so it does not run on the main thread. A loading screen
+        // is shown meanwhile. The real layout and its fragments are created only after the core is up.
         setContentView(android.widget.FrameLayout(this).apply {
             addView(android.widget.ProgressBar(this@MainActivity), android.widget.FrameLayout.LayoutParams(
                 android.view.ViewGroup.LayoutParams.WRAP_CONTENT, android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -106,55 +96,49 @@ class MainActivity : AppCompatActivity() {
             contentDescription = getString(R.string.msg_loading)
         })
         lifecycleScope.launch {
-            // 0 = no database, 1 = identity stored (+ secrets loaded?), 2 = first start
+            // 0 = no database, 1 = identity stored (secrets loaded), 2 = first start
             val state = withContext(Dispatchers.IO) {
                 if (!P2PLib.initDatabase(applicationContext.filesDir.absolutePath)) 0
                 else if (P2PLib.hasStoredIdentity()) (if (IdentityManager.loadIfPresent(applicationContext)) 1 else 3)
                 else 2
             }
-            // The app lock may sit on top meanwhile: inflating the fragments
-            // after onSaveInstanceState throws, so wait until we are started.
+            // The app lock may cover the screen meanwhile. Inflating fragments after
+            // onSaveInstanceState throws, so wait until the activity is started.
             lifecycle.withStarted { continueStartup(savedInstanceState, state) }
         }
     }
 
-    /** Core is open. [state]: 0 no database, 1 identity loaded, 3 identity unreadable, 2 first start. */
+    /** The core is open. [state]: 0 no database, 1 identity loaded, 3 identity unreadable, 2 first start. */
     private fun continueStartup(savedInstanceState: Bundle?, state: Int) {
         setContentView(R.layout.activity_main)
 
         ensureNotificationPermission()
-        // bu fonksiyon
-        // yazılmış ama HİÇ ÇAĞRILMAMIŞTI. Sonucu logcat'te görüldü — Android
-        // ön plan servisini "app idle" diyerek durdurdu ("Stopping service
-        // due to app idle") ve 14 MB'lık bir yükleme, kullanıcıya
-        // "gönderildi" görünürken sessizce yarıda kaldı; `pollNetwork` bir
-        // daha hiç çalışmadı. Muafiyet, o kısıtlamanın doğrudan çaresi.
+        // Battery-optimisation exemption. Without it, Android stops the foreground service as "app idle"
+        // (seen in logcat: "Stopping service due to app idle"). A large download then stops silently in
+        // the middle, and `pollNetwork` no longer runs. The exemption is the direct fix for that restriction.
         ensureBatteryOptimizationExemption()
 
         statusText = findViewById(R.id.statusText)
         val navView: BottomNavigationView = findViewById(R.id.nav_view)
-        // NOT: `Activity.findNavController(viewId)` yerine NavHostFragment'ı
-        // FragmentManager'dan doğrudan alıp `.navController` okuyoruz —
-        // ilki, NavHostFragment'ın kendi NavController tag'ini XML'deki
-        // konteyner view'ına taşıması gereken bir iç kontrole (`onViewCreated`
-        // içindeki `viewParent.id == id`) bağımlı ve bazı ortamlarda bu adım
-        // atlanıp "does not have a NavController set" hatasına yol açabiliyor.
+        // The NavController is read from the NavHostFragment in FragmentManager, not with
+        // `Activity.findNavController(viewId)`. The latter depends on NavHostFragment moving its
+        // NavController tag to the container view (checked in `onViewCreated`). On some devices that
+        // step is skipped and the call fails with "does not have a NavController set".
         val navHostFragment = supportFragmentManager
             .findFragmentById(R.id.nav_host_fragment) as NavHostFragment
         val navController = navHostFragment.navController
         navView.setupWithNavController(navController)
 
         if (state == 0) {
-            // No database (its key could not be read): not a first start. A
-            // new identity made here would overwrite the stored one.
+            // No database (its key could not be read): this is not a first start. A new identity
+            // created here would overwrite the stored one.
             com.p2p.messenger.util.KeystoreCrypto.reportKeyFailure(this)
         } else if (state != 2) {
             if (state == 3) {
-                // identity_secret.enc lost/corrupt — the Keystore key is
-                // probably gone (e.g. device reset). The core's
-                // import_recovery accepts exactly this state (public keys
-                // loaded, no secret keys): offer the same recovery-file flow
-                // the first-start dialog uses.
+                // identity_secret.enc is lost or corrupt, probably because the Keystore key is gone
+                // (for example after a device reset). The core's import_recovery accepts exactly this
+                // state (public keys loaded, no secret keys), so the same recovery-file flow as the
+                // first-start dialog is offered.
                 AlertDialog.Builder(this)
                     .setMessage(R.string.msg_identity_read_failed)
                     .setPositiveButton(R.string.action_restore_from_recovery) { _, _ ->
@@ -166,14 +150,14 @@ class MainActivity : AppCompatActivity() {
             }
             startNetworkService()
         } else {
-            // İlk açılış: kullanıcıdan cihaz adı iste, identity'yi bir kez
-            // oluştur (spec 1: her Device bir device_name taşır).
+            // First start: ask for the device name and create the identity once. Each device carries
+            // a device_name.
             showDeviceNameDialog()
         }
 
         handleJoinLink(intent)
-        // Only on a real start: a rotation, a theme change or a restore after
-        // process death replays the same intent and queued the share again.
+        // Only on a real start. A rotation, a theme change or a restore after process death replays the
+        // same intent and would queue the share again.
         if (savedInstanceState == null) handleShare(intent)
         ready = true
         if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) resumeWork()
@@ -183,30 +167,30 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         if (isFinishing) com.p2p.messenger.util.ShareIntake.pending = null
-        // The security dialog is a window of this activity: leaving it open
-        // leaks it (and the answer buttons would act on a dead activity).
+        // The security dialog is a window of this activity. Leaving it open leaks the window, and the
+        // answer buttons would act on a dead activity.
         alertDialog?.dismiss()
         alertDialog = null
         super.onDestroy()
     }
 
     override fun onStop() {
-        // Left without picking a chat (Home, another screen): the share must
-        // not ride along with the next chat opened. Not while the lock prompt
-        // covers this screen, the share is still wanted after the password.
+        // If the user leaves without picking a chat (Home, another screen), the pending share is dropped.
+        // It must not ride along with the next chat opened. It is kept while the lock prompt covers this
+        // screen, because the share is still wanted after the password.
         if (!isChangingConfigurations && com.p2p.messenger.util.AppLock.isUnlocked()) {
             com.p2p.messenger.util.ShareIntake.pending = null
         }
         super.onStop()
     }
 
-    /** Paylaşım ekranından gelen içerik: bekletilir, kullanıcı sohbet seçince
-     *  gönderilir (bkz. util.ShareIntake). */
+    /** Content from the share sheet. It is held until the user picks a chat, then sent
+     *  (see util.ShareIntake). */
     private fun handleShare(intent: Intent?) {
         if (!com.p2p.messenger.util.ShareIntake.isShare(intent)) return
-        // The share target is exported: a sender that grants no read access
-        // to its URIs made `startActivity` (which passes the grant on to the
-        // chat screen) throw SecurityException and kill the app.
+        // The share target is exported. A sender that grants no read access to its URIs makes
+        // `startActivity` throw SecurityException (the grant is passed on to the chat screen), which
+        // would kill the app. Such a share is refused.
         if (com.p2p.messenger.util.ShareIntake.uris(intent!!).any {
                 checkCallingOrSelfUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) != android.content.pm.PackageManager.PERMISSION_GRANTED
             }) {
@@ -217,8 +201,8 @@ class MainActivity : AppCompatActivity() {
         android.widget.Toast.makeText(this, R.string.msg_share_pick_chat, android.widget.Toast.LENGTH_LONG).show()
     }
 
-    /** `singleTop` — uygulama zaten açıkken tıklanan katılım bağlantısı
-     *  yeni bir örnek yerine BURAYA düşer (bkz. AndroidManifest). */
+    /** `singleTop`: a join link tapped while the app is already open lands HERE, not in a new
+     *  instance (see AndroidManifest). */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -228,35 +212,32 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Kullanıcı isteği (2026-09-04): sunucuya tek bir QR/link/metin ile,
-     * operatörle hiç konuşmadan katılabilmek. QR tarama ve elle yapıştırma
-     * Ayarlar'da zaten vardı; burası ÜÇÜNCÜ yol — operatörün bir kez
-     * yayımladığı `typeon-server:…#…` kodu, tıklanabilir bir bağlantı
-     * olarak doğrudan uygulamayı açar.
+     * Joining a server with one QR, link or text. The operator publishes a `typeon-server:...#...`
+     * code once. Tapping it as a link opens the app directly. QR scanning and manual paste already
+     * exist in Settings. This is the third route, and it needs no conversation with the operator.
      *
-     * Onay diyaloğu ATLANMAZ: bir bağlantıya dokunmak, sunucu eklemeyi
-     * kullanıcının GÖRDÜĞÜ bir karar olmaktan çıkarmamalı — kötü niyetli
-     * bir sayfa aksi halde arka planda sunucu ekletebilirdi.
+     * The confirmation dialog is NOT skipped. Tapping a link must not turn adding a server into a
+     * decision the user did not see. Otherwise a hostile page could add a server in the background.
      */
     private fun handleJoinLink(intent: Intent?) {
         val data = intent?.data ?: return
         if (intent.action != Intent.ACTION_VIEW) return
         if (!data.scheme.equals("typeon-server", ignoreCase = true)) return
-        // Aynı bağlantı `onCreate` + yapılandırma değişikliğiyle iki kez
-        // gelmesin: tüketildiği anda intent'ten düşürülür.
+        // The same link must not be handled twice (onCreate plus a configuration change). It is removed
+        // from the intent as soon as it is consumed.
         intent.data = null
 
         val code = data.toString().take(300)
         if (!P2PLib.hasStoredIdentity()) {
-            // No account, no server. Not put on the clipboard: any web page
-            // could overwrite what the user had copied.
+            // No account, no server. The link is not copied to the clipboard: any web page could
+            // overwrite what the user copied.
             Toast.makeText(this, R.string.msg_join_link_needs_identity, Toast.LENGTH_LONG).show()
             return
         }
 
-        // Whether THIS server would become the history server is a JNI/SQLite
-        // read (off the main thread, see SettingsFragment `refreshServers`):
-        // the history warning is appended only for the server that would be it.
+        // Whether THIS server would become the history server is a JNI and SQLite read. It runs off the
+        // main thread (see SettingsFragment `refreshServers`). The history warning is added only for the
+        // server that would become the history server.
         lifecycleScope.launch {
             val historyServer = withContext(Dispatchers.IO) { P2PLib.nextServerStoresHistory(code) }
             if (isFinishing || isDestroyed) return@launch
@@ -269,8 +250,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** The add-server question; the history warning (and what joining it
-     *  uploads) only when this server would become the history server. */
+    /** The add-server question. The history warning, and what joining it uploads, is shown only when
+     *  this server would become the history server. */
     private fun addServerQuestion(code: String, historyServer: Boolean): String =
         getString(R.string.msg_join_link_confirm, code) +
             if (historyServer) {
@@ -279,9 +260,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun addServerFromLink(code: String) {
         lifecycleScope.launch(Dispatchers.IO) {
-            // `addServer` diske yazar ve dial başlatır — ana thread'de değil
-            // (SettingsFragment'taki aynı çağrının senkron olması, orada
-            // kullanıcının zaten bir diyalogda beklemesinden).
+            // `addServer` writes to disk and starts the dial, so it does not run on the main thread.
+            // (The same call in SettingsFragment is synchronous, because the user is already waiting
+            // in a dialog there.)
             val result = try {
                 P2PLib.addServer(code)
             } catch (e: Exception) {
@@ -308,12 +289,11 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton(R.string.action_create) { _, _ ->
                 createIdentityAndStart(input.text.toString().ifBlank { "Device" }, linkAsSecondary = false)
             }
-            // Çoklu-cihaz (spec 1.5): bu, var olan bir hesabın İKİNCİL cihazı.
-            // Yine de kendi anahtar çiftini/geçici kimliğini üretir (birincilin
-            // secret anahtarı asla kopyalanmaz) ve bir bağlanma QR'ı gösterir;
-            // birincil cihaz bu QR'ı tarayınca bu cihaz hesaba katılır.
+            // Multi-device: this is a SECONDARY device of an existing account. It still generates its own
+            // key pair and a provisional identity (the primary's secret key is never copied). It shows a
+            // link QR. When the primary scans that QR, this device joins the account.
             .setNeutralButton(R.string.link_device_as_secondary) { _, _ ->
-                // The primary lists this device under that name: the model says more than "Device".
+                // The primary lists this device under that name, so the label says more than "Device".
                 createIdentityAndStart(input.text.toString().ifBlank { android.os.Build.MODEL ?: "Device" }, linkAsSecondary = true)
             }
             .setNegativeButton(R.string.action_restore_from_recovery) { _, _ ->
@@ -325,10 +305,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * bkz. `pickRecoveryFileLauncher` dokümantasyonu. Dosya seçildikten
-     * sonra parolayı ister (bkz. SettingsFragment `showExportRecoveryDialog`
-     * AYNI desen) — dosyanın kendisi parola olmadan anlamsız (Argon2id ile
-     * sertleştirilmiş, bkz. Rust `import_recovery`).
+     * See the `pickRecoveryFileLauncher` docs. After the file is picked, the passphrase is asked for
+     * (same pattern as SettingsFragment `showExportRecoveryDialog`). The file alone is useless without
+     * the passphrase: it is hardened with Argon2id (see Rust `import_recovery`).
      */
     private fun showImportPassphraseDialog(uri: Uri) {
         val input = EditText(this).apply {
@@ -354,17 +333,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * `P2PLib.importRecovery` KASITLI OLARAK yavaş bir Argon2id KDF
-     * çalıştırır (bkz. SettingsFragment `exportRecoveryTo` AYNI gerekçe) —
-     * ANA THREAD DIŞINDA çağrılır. Başarılıysa `createIdentityAndStart`'ın
-     * kimlik-oluşturma-sonrası kuyruğuyla (persist + startNetworkService +
-     * pil optimizasyonu istemi) AYNI kuyruğu izler.
+     * `P2PLib.importRecovery` runs a deliberately slow Argon2id KDF (same reason as SettingsFragment
+     * `exportRecoveryTo`). It is called OFF the main thread. On success it follows the same queue as
+     * `createIdentityAndStart` after identity creation: persist, start the network service, and ask for
+     * the battery-optimisation exemption.
      */
     private fun importRecoveryFrom(uri: Uri, passphrase: String) {
         Toast.makeText(this, R.string.msg_recovery_importing, Toast.LENGTH_SHORT).show()
         lifecycleScope.launch(Dispatchers.IO) {
-            // Bounded: the user may pick any file, and a huge one ended in
-            // an OutOfMemoryError that no `catch (Exception)` stops.
+            // Bounded read: the user may pick any file, and a very large one ends in an
+            // OutOfMemoryError that `catch (Exception)` does not stop.
             val bytes = try {
                 contentResolver.openInputStream(uri)?.use { input ->
                     val out = java.io.ByteArrayOutputStream()
@@ -387,8 +365,8 @@ class MainActivity : AppCompatActivity() {
                 return@launch
             }
             val identityId = try {
-                // The chats in the file are stored under the history key; with
-                // no identity yet the app had not loaded one.
+                // The chats in the file are stored under the history key. With no identity yet, the app has
+                // not loaded one, so the chats cannot be read yet.
                 com.p2p.messenger.util.MessageHistoryManager.ensureHistoryKeyLoaded(applicationContext)
                 P2PLib.importRecovery(bytes, passphrase, pendingImportDeviceName)
             } catch (e: Exception) {
@@ -401,16 +379,15 @@ class MainActivity : AppCompatActivity() {
                 }
                 return@launch
             }
-            // Keystore + disk: this coroutine already runs on the IO
-            // dispatcher. `false` = çekirdekte bekleyen bundle yoktu, yani
-            // secret key'ler hiç yazılmadı.
+            // Keystore and disk writes. This coroutine already runs on the IO dispatcher. `false` means the
+            // core had no pending secret bundle, so no secret keys were written.
             val persistError = try {
                 if (IdentityManager.persistNewIdentity(applicationContext)) null else "no pending secret bundle"
             } catch (e: Exception) {
                 e.message ?: e.toString()
             }
             if (persistError != null) {
-                // Keystore or disk failure, as in `createIdentityAndStart`.
+                // Keystore or disk failure, handled as in `createIdentityAndStart`.
                 android.util.Log.w("MainActivity", "Kimlik secret bundle'ı kaydedilemedi: $persistError")
                 withContext(Dispatchers.Main) {
                     Toast.makeText(this@MainActivity, R.string.error_identity_persist_failed, Toast.LENGTH_LONG).show()
@@ -420,9 +397,8 @@ class MainActivity : AppCompatActivity() {
                 return@launch
             }
             withContext(Dispatchers.Main) {
-                // The archive root key came back with the recovery file
-                // but lived only in the core's memory: after a restart it
-                // was gone and a new random one split the server archive.
+                // The archive root key comes back with the recovery file, but it lived only in the core's
+                // memory. After a restart it was lost, and a new random key would split the server archive.
                 com.p2p.messenger.util.ArchiveKeyManager.persistIfNew(applicationContext)
                 statusText.text = getString(R.string.lbl_id_short, identityId.take(8))
                 startNetworkService()
@@ -433,25 +409,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Yeni kimlik oluşturur ve ağı başlatır. Anahtar üretimi ve
-     * Keystore/diske yazma JNI + dosya I/O'su olduğu için ANA THREAD'de
-     * yapılmaz (bkz. `importRecoveryFrom` AYNI desen).
+     * Creates a new identity and starts the network. Key generation and the Keystore/disk writes are
+     * JNI and file I/O, so they do NOT run on the main thread (same pattern as `importRecoveryFrom`).
      */
     private fun createIdentityAndStart(deviceName: String, linkAsSecondary: Boolean) {
         lifecycleScope.launch {
-            // One block that a rotation cannot cancel: if the activity dies between
-            // creating the identity and saving its secret keys, the keys are lost.
+            // One block that a rotation cannot cancel. If the activity dies between creating the identity
+            // and saving its secret keys, the keys are lost.
             var persistError: String? = null
             val identityId = withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
                 val id = try { P2PLib.createIdentity(deviceName) } catch (e: Exception) { "Error: ${e.message}" }
                 if (!id.startsWith("Error:")) {
-                    // Secret key bundle'ını HEMEN Keystore ile şifreleyip diske yaz —
-                    // aksi halde süreç öldüğünde kaybolur. (İkincil cihaz da KENDİ
-                    // anahtarlarını böyle saklar; benimseme sadece identity_id'yi değiştirir.)
+                    // Encrypt the secret key bundle with the Keystore and write it to disk at once. Otherwise
+                    // it is lost when the process dies. A secondary device keeps its keys the same way; adopting
+                    // a identity only changes the identity_id.
                     persistError = try {
-                        // `false` = çekirdekte bekleyen bundle yoktu: kimliğin
-                        // secret key'leri hiç yazılmadı, bir sonraki açılışta
-                        // yüklenemez.
+                        // `false` means the core had no pending bundle: the secret keys of the identity were
+                        // never written, so the identity cannot be loaded at the next start.
                         if (IdentityManager.persistNewIdentity(applicationContext)) null else "no pending secret bundle"
                     } catch (e: Exception) {
                         e.message ?: e.toString()
@@ -465,10 +439,9 @@ class MainActivity : AppCompatActivity() {
                 return@launch
             }
             if (persistError != null) {
-                // Keystore or disk failure: without this the identity exists in
-                // the database but its secret keys are lost at the next restart,
-                // and the install is stuck at "identity read failed". The identity
-                // is seconds old: remove it and start the setup again.
+                // Keystore or disk failure. Without this step the identity exists in the database, but its
+                // secret keys are lost at the next restart, and the install gets stuck at "identity read
+                // failed". The identity is only seconds old, so it is removed and the setup starts again.
                 android.util.Log.w("MainActivity", "Kimlik secret bundle'ı kaydedilemedi: $persistError")
                 Toast.makeText(this@MainActivity, R.string.error_identity_persist_failed, Toast.LENGTH_LONG).show()
                 com.p2p.messenger.util.LocalWipe.wipe(applicationContext)
@@ -485,28 +458,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * uygulamanın İLK açılışında (sadece
-     * yeni bir identity oluşturulduğunda — mevcut kullanıcılar için tekrar
-     * TEKRAR sorulmaz, `showDeviceNameDialog` zaten sadece bu akışta bir
-     * kez çalışır) Android'in pil optimizasyonunu bu uygulama için devre
-     * dışı bırakmasını ister. Bu uygulama sürekli çalışan bir foreground
-     * service + arka plan mesaj teslim/yeniden deneme döngüsüne (bkz.
-     * P2PService, lib.rs `awaiting_confirmation`) dayanıyor — OEM'lerin
-     * agresif pil yönetimi (Doze, uygulama bazlı arka plan kısıtlamaları)
-     * bu döngüyü geciktirip mesajların "takılı" görünmesine yol açabilir.
-     * `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, kullanıcıya TEK
-     * dokunuşluk bir sistem diyaloğu gösterir ("İzin ver"/"Reddet") —
-     * genel Ayarlar listesine gömülü bir toggle aratmaktan çok daha az
-     * sürtünmeli. Bazı OEM'lerde bu intent kısıtlı/desteklenmiyor olabilir
-     * — o durumda genel pil optimizasyonu ayarlar ekranına düşülür,
-     * o da yoksa sessizce vazgeçilir (bu bir gereklilik değil, bir öneri).
+     * Asks the user to disable Android's battery optimisation for this app. It is asked on the first
+     * start only, right after a NEW identity is created. Existing users are not asked again, because
+     * `showDeviceNameDialog` runs only once in this flow.
+     *
+     * The app depends on a long-running foreground service and a background delivery and retry loop
+     * (see P2PService and lib.rs `awaiting_confirmation`). Aggressive OEM battery management (Doze,
+     * per-app background restrictions) can delay that loop, and messages then look stuck.
+     * `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` shows a single system dialog with one tap
+     * ("Allow" / "Deny"). That is less friction than searching for a toggle in the settings list.
+     * Some OEMs restrict or do not support this intent. Then the general battery-optimisation settings
+     * screen is used, and if that is missing too, the request is dropped silently. It is a suggestion,
+     * not a requirement.
      */
     private fun ensureBatteryOptimizationExemption() {
         val powerManager = getSystemService(android.os.PowerManager::class.java) ?: return
-        // "Background restricted" (MIUI battery saver "Restrict", Android's
-        // "Restricted") is a different switch from the optimisation exemption
-        // and worse: startForeground() is refused, so nothing arrives with
-        // the screen off (seen on the Note 9S: "not allowed due to bg
+        // "Background restricted" (for example MIUI's battery saver "Restrict", or Android's "Restricted")
+        // is a different switch from the optimisation exemption, and it is stricter. startForeground() is
+        // refused, so nothing arrives with the screen off (logcat on Note 9S: "not allowed due to bg
         // restriction"). Only the app's settings page can lift it.
         val am = getSystemService(android.app.ActivityManager::class.java)
         val prefs0 = getSharedPreferences("p2p_settings", Context.MODE_PRIVATE)
@@ -528,10 +497,9 @@ class MainActivity : AppCompatActivity() {
                 .show()
             return
         }
-        // Android 14+ grants full-screen intents only to dialer/alarm apps by
-        // default; without it an incoming call on a locked phone is just a
-        // notification (seen on the Note 8 Pro: "USE_FULL_SCREEN_INTENT ...
-        // rejectTime"). Only the system settings page can grant it.
+        // On Android 14+ full-screen intents are granted by default only to dialer and alarm apps. Without
+        // the grant, an incoming call on a locked phone is only a notification (logcat on Note 8 Pro:
+        // "USE_FULL_SCREEN_INTENT ... rejectTime"). Only the system settings page can grant it.
         val nm = getSystemService(android.app.NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 34 && nm?.canUseFullScreenIntent() == false &&
             System.currentTimeMillis() - prefs0.getLong("fsi_prompt_ms", 0L) > 24L * 60 * 60 * 1000) {
@@ -552,8 +520,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
-        // Her açılışta sormak dırdır olurdu: kullanıcı reddettiyse bir gün
-        // boyunca bir daha sorma. (Muafiyet zaten varsa yukarıda çıkıldı.)
+        // Asking on every start would be annoying. If the user declined, the question is not asked again
+        // for one day. (If the exemption is already granted, it was left above.)
         val prefs = getSharedPreferences("p2p_settings", Context.MODE_PRIVATE)
         val lastAsked = prefs.getLong("battery_prompt_last_ms", 0L)
         val now = System.currentTimeMillis()
@@ -574,8 +542,8 @@ class MainActivity : AppCompatActivity() {
                     try {
                         startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
                     } catch (e2: Exception) {
-                        // Cihaz/OEM bu ayarı desteklemiyor — sessizce vazgeç,
-                        // mesajlaşmanın kendisi bundan bağımsız çalışır.
+                    // The device or OEM does not support this setting. Give up silently: messaging works
+                    // without it.
                     }
                 }
             }
@@ -588,12 +556,12 @@ class MainActivity : AppCompatActivity() {
         try {
             startForegroundService(serviceIntent)
         } catch (e: Exception) {
-            // API 31+: ForegroundServiceStartNotAllowedException when this runs
-            // after the user left the app (e.g. during a recovery import).
+            // API 31+: ForegroundServiceStartNotAllowedException when this runs after the user has left the
+            // app (for example during a recovery import).
             android.util.Log.w("MainActivity", "Service not started: ${e.message}")
         }
-        // Off the main thread: the call waits for the core lock, which a
-        // long poll turn holds (every onResume came through here).
+        // Off the main thread: the call waits for the core lock, which a long poll turn holds. Every
+        // onResume comes through here.
         lifecycleScope.launch {
             val code = withContext(Dispatchers.IO) {
                 try { P2PLib.getIdentityShortCode() } catch (e: Exception) { null }
@@ -608,23 +576,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun resumeWork() {
-        // uygulamaya girildiğinde bildirim
-        // çubuğundaki TÜM mesaj bildirimleri temizlensin.
-        // AMA kilit ekranı bu ekranın üstüne geldiğinde bildirim çubuğu
-        // okunmamış mesajların TEK izi: kilitliyken temizlenirse kullanıcı
-        // şifreyi girip geri çıktığında bildirim çubuğu bomboş kalıyordu.
+        // When the app comes to the foreground, all message notifications in the status bar are cleared.
+        // BUT while the lock screen covers this screen, the status bar is the only trace of unread messages.
+        // If it were cleared while locked, the status bar would be empty after the user entered the
+        // password and came back.
         if (com.p2p.messenger.util.AppLock.isUnlocked()) {
             com.p2p.messenger.util.NotificationHelper.clearAll(this)
         }
         alertPollHandler.post(alertPollRunnable)
-        // uygulama ön plana her alındığında
-        // gönderilemeyen mesajlar/emirler için bir yeniden deneme
-        // tetiklensin. Servis zaten çalışıyorsa `startNetworkService`
-        // zararsız bir no-op'tur (bkz. P2PService.onStartCommand
-        // `isRunning` koruması); OS tarafından öldürülmüşse yeniden
-        // başlatılması, kalıcı yeniden deneme kuyruğunun (bkz. persist.rs
-        // `load_pending_durable_retries_from_db`) diskten geri
-        // yüklenmesini de otomatik tetikler.
+        // Each time the app comes to the foreground, a retry is triggered for messages and commands that
+        // could not be sent. If the service is already running, `startNetworkService` is a harmless no-op
+        // (see the `isRunning` guard in P2PService.onStartCommand). If the OS killed it, starting it again
+        // also reloads the durable retry queue from disk (see persist.rs `load_pending_durable_retries_from_db`).
         lifecycleScope.launch {
             val hasIdentity = withContext(Dispatchers.IO) {
                 try { P2PLib.hasStoredIdentity() } catch (e: Exception) { false }
@@ -639,11 +602,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Spec 2.2: bekleyen cihaz değişikliği uyarılarını kontrol eder, varsa
-     * kullanıcıya bir uyarı dialog'u gösterir (kabul/red).
+     * Checks for pending device-change alerts (section 2.2). If there are any, shows a dialog that asks the
+     * user to accept or reject them.
      */
     private fun checkPendingDeviceAlerts() {
-        // Every 5 s, and the JNI call takes the core lock: not on the main thread.
+        // Every 5 seconds. The JNI call takes the core lock, so it does not run on the main thread.
         lifecycleScope.launch {
             val json = withContext(Dispatchers.IO) {
                 try { P2PLib.listPendingDeviceAlerts() } catch (e: Exception) { null }
@@ -662,11 +625,10 @@ class MainActivity : AppCompatActivity() {
             shownAlertFingerprints.clear()
             return
         }
-        // Aynı anda tek dialog: altındaki kapatılamaz dialog cevaplanmadan
-        // üstüne ikinci biri açılırsa ekran kilitlenir.
+        // Only one dialog at a time. If a second non-cancelable dialog opened on top before the one below
+        // was answered, the screen would lock up.
         if (alertDialog?.isShowing == true) return
-        // Sıra kararlı değil (çekirdek HashMap): henüz gösterilmemiş ilk
-        // uyarıyı seç.
+        // The order is not stable (the core uses a HashMap). Pick the first alert that is not shown yet.
         for (i in 0 until array.length()) {
             val alert = array.optJSONObject(i) ?: continue
             val fingerprint = alert.optString("new_device_fingerprint", "")
@@ -676,7 +638,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. `shownAlertFingerprints` dokümantasyonu. */
+    /** See the `shownAlertFingerprints` docs. */
     private fun showDeviceAlertDialog(alert: org.json.JSONObject, fingerprint: String) {
         val contactName = alert.optString("contact_display_name", getString(R.string.lbl_unknown))
         val newCode = alert.optString("new_device_short_code", "")
@@ -693,11 +655,9 @@ class MainActivity : AppCompatActivity() {
                 answerDeviceAlert(fingerprint, accept = false)
                 shownAlertFingerprints.remove(fingerprint)
             }
-            // Kullanıcı kararı (2026-08-27): reddetmek yalnızca BU uyarıyı
-            // kapatır — aynı cihaz tekrar paket yollarsa uyarı geri gelir.
-            // Engelleme ise kalıcı: o kimliğin hiçbir cihazından bir daha
-            // paket kabul edilmez ve yalnızca yüz yüze yeniden eşleşmeyle
-            // geri açılır.
+            // Rejecting closes only THIS alert. If the same device sends packets again, the
+            // alert comes back. Blocking is permanent: no packet from any device of that identity is accepted
+            // again, and it is lifted only by an in-person re-pairing.
             .setNeutralButton(R.string.action_block) { _, _ ->
                 answerDeviceAlert(fingerprint, accept = false)
                 val identityId = alert.optString("identity_id", "")
@@ -711,7 +671,7 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    /** The core calls take the global lock: not on the main thread. */
+    /** The core calls take the global lock, so they do not run on the main thread. */
     private fun answerDeviceAlert(fingerprint: String, accept: Boolean) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
@@ -722,7 +682,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** bkz. `answerDeviceAlert` — aynı nedenle arka planda. */
+    /** See `answerDeviceAlert`: same reason, off the main thread. */
     private fun blockIdentityInBackground(identityId: String) {
         lifecycleScope.launch(Dispatchers.IO) {
             val result = try { P2PLib.blockIdentity(identityId) } catch (e: Exception) { "Error: ${e.message}" }
