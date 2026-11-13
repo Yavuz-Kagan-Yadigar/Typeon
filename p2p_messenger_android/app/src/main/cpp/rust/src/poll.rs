@@ -22,10 +22,8 @@ impl P2PCore {
             self.radio_window_open = !saver || now >= self.radio_window_at;
             if saver && self.radio_window_open {
                 self.radio_window_at = now + self.radio_window_ms();
-                // Every window fetches. A sleeping phone can miss the
-                // server's Notify (its CPU was suspended: device test
-                // 2026-10-08), and with the 5 min fetch sweep a window could
-                // pass without one. The radio is up for the window anyway.
+                // Every window fetches. A sleeping phone can miss the server's Notify (the CPU was suspended), and with the 5-minute
+                // fetch sweep a window could pass without one. The radio is up for the window anyway.
                 for rt in self.server_rt.values_mut() {
                     rt.fetch_due_at = 0;
                 }
@@ -198,9 +196,9 @@ impl P2PCore {
                                     state.quiet_capable = true;
                                 }
                             }
-                            // See `known_relay_peers` (SECURITY.md, "Cross-network connectivity"). If this peer speaks the relay protocol (Circuit Relay
-                            // v2 HOP) AND reports at least one listen address, it is recorded as a relay candidate for reaching unreachable peers later.
-                            // The first address is copied before `listen_addrs` is consumed (the `kad.add_address` loop below moves it).
+                            // See `known_relay_peers` and the "Cross-network connectivity" note in SECURITY.md. If this peer speaks the relay
+                            // protocol (Circuit Relay v2 HOP) AND reports at least one listen address, it is recorded as a relay candidate for
+                            // reaching unreachable peers later. The first address is copied before `listen_addrs` is consumed (the `kad.add_address` loop below moves it).
                             if info.protocols.iter().any(|p| *p == relay::HOP_PROTOCOL_NAME) {
                                 // Loopback is meaningless to the other side. If the relay client is already connected to the relay it uses that connection;
                                 // the address is only for a re-dial.
@@ -325,15 +323,16 @@ impl P2PCore {
                             if !endpoint.is_dialer() {
                                 new_inbound.push((connection_id, peer_id));
                             }
-                            // Bug seen on two devices: there was no `is_dialer()` check here, and that permanently broke reconnection between two devices on the same LAN.
+                            // There must be an `is_dialer()` check here. Without it, a connection from a peer that dialed us could record the wrong
+                            // address, which permanently broke reconnection between two devices on the same LAN.
                             //
-                            // `get_remote_address()` on an OUTGOING connection gives the address we dialed (dialable and correct). On an INCOMING connection it
-                            // gives `send_back_addr`, which is the EPHEMERAL SOURCE PORT the peer used for that TCP session. Nothing listens on that port, and it
-                            // disappears when the session ends.
+                            // `get_remote_address()` on an OUTGOING connection gives the address we dialed (dialable and correct). On an INCOMING
+                            // connection it gives `send_back_addr`, which is the EPHEMERAL SOURCE PORT the peer used for that TCP session. Nothing
+                            // listens on that port, and it disappears when the session ends.
                             //
-                            // That address was then stored in `peer_id_to_addr`, and from there `record_peer_id_if_known` wrote it to the `device_addrs` table as a
-                            // PERSISTENT reconnect hint. Observed result: A stored `/ip4/192.168.1.103/tcp/55230` for B, while B listened on 42611. After B restarted,
-                            // A could never reach it over the LAN, and all traffic fell back to Tor or the server.
+                            // That address was then stored in `peer_id_to_addr`, and from there `record_peer_id_if_known` wrote it to the
+                            // `device_addrs` table as a PERSISTENT reconnect hint. Observed result: A stored `/ip4/192.168.1.103/tcp/55230` for B,
+                            // while B listened on 42611. After B restarted, A could never reach it over the LAN, and all traffic fell back to Tor or the server.
                             //
                             // For incoming connections, the peer's real listen address is learned from Identify instead (see the Identify arm below).
                             if endpoint.is_dialer() {
@@ -346,9 +345,10 @@ impl P2PCore {
                             if num_established.get() == 1 {
                                 connections_established.push(peer_id);
                             }
-                            // Every connection after the first is "extra". When the transfer ends, exactly these are closed (see `extra_conns`). Only connections
-                            // WE opened count. Extra inbound connections were opened by the other side for its own download. Before, the sending side treated
-                            // them as "no transfer of mine" and closed them during the transfer, so chunk requests failed with ConnectionClosed (seen on a device).
+                            // Every connection after the first is "extra". When the transfer ends, exactly these are closed (see `extra_conns`). Only
+                            // connections WE opened count. Extra inbound connections were opened by the other side for its own download. Before this,
+                            // the sending side treated them as "no transfer of mine" and closed them during the transfer, so chunk requests failed
+                            // with ConnectionClosed.
                             if num_established.get() > 1 && endpoint.is_dialer() {
                                 new_extra_conns.push((peer_id, connection_id));
                             }
@@ -458,10 +458,8 @@ impl P2PCore {
                                     } else if matches!(error, request_response::OutboundFailure::ConnectionClosed)
                                         && swarm.is_connected(&peer)
                                     {
-                                        // The probe rode a connection we just closed (a surplus or a
-                                        // suspect's replacement) while another is up. Counting it as a
-                                        // failure made `disconnect_peer_id` kill the fresh connection
-                                        // too (device, 2026-09-18). Probe again on the live one.
+                                        // The probe rode a connection we had just closed (a surplus or a suspect's replacement) while another
+                                        // is up. Counting it as a failure made `disconnect_peer_id` kill the fresh connection too. Probe again on the live one.
                                         if let Some(state) = keepalive_state.get_mut(&peer) {
                                             state.outstanding = None;
                                             state.next_due_at = mono_ms() + KEEPALIVE_FAST_INTERVAL_MS;
@@ -578,11 +576,9 @@ impl P2PCore {
                 .map(|v| v.iter().copied().filter(|c| c != cid).collect())
                 .unwrap_or_default();
             if surplus_dials.contains(cid) && !suspect && !others.is_empty() {
-                // The existing connection is not in doubt, so one of them goes. Keep the
-                // better path. Before this the new one was always closed: an early relay
-                // circuit through the server beat the direct onion connection that came
-                // up seconds later, and all traffic took the extra hop and the circuit's
-                // limits (seen on device, Note 9S on mobile data, 2026-09-18).
+                // The existing connection is not in doubt, so one of them goes. Keep the better path. Before this, the new one was always closed: an
+                // early relay circuit through the server beat the direct onion connection that came up seconds later, and all traffic took the extra
+                // hop and the circuit's limits.
                 let rank = |c: &libp2p::swarm::ConnectionId| self.conn_rank.get(c).copied().unwrap_or(0);
                 let new_rank = rank(cid);
                 let bulk: Vec<libp2p::swarm::ConnectionId> = self.extra_conns.get(peer).cloned().unwrap_or_default();
@@ -659,11 +655,9 @@ impl P2PCore {
                 self.own_listen_addrs.push(addr);
             }
         }
-        // A device added from the other side's IdentityExchange (not from a code)
-        // had no onion address. It could reach the peer only through a relay,
-        // which first needs its own Tor connection to the server: ~40 s after
-        // mobile data came back (device, 2026-09-18). Peers now announce their
-        // onion address over identify (see `advertised_onion`).
+        // A device added from the other side's IdentityExchange (not from a code) had no onion address. It could reach the peer only through a relay,
+        // which first needs its own Tor connection to the server: about 40 s after mobile data came back. Peers now announce their onion address
+        // over identify (see `advertised_onion`).
         for (pid, addr) in new_peer_onions {
             // An address that names another peer is not this peer's onion.
             let addr = match extract_peer_id(&addr) {
@@ -1010,12 +1004,10 @@ impl P2PCore {
                         .filter(|(_, p)| **p == peer)
                         .map(|(fp, _)| fp.clone())
                         .collect();
-                    // The sender knows our PeerId (from the pairing address) before we know
-                    // theirs (we learn it only from a packet received over gossipsub). Replying
-                    // here told them "delivered" while every Ack was ignored, so our messages
-                    // stayed unconfirmed and were retried for minutes (device, 2026-09-18).
-                    // Dropping the channel fails their request, and they fall back to the
-                    // encrypted Ack. That one also teaches us their PeerId.
+                    // The sender knows our PeerId (from the pairing address) before we know theirs (we learn it only from a packet received over
+                    // gossipsub). Replying here told them "delivered" while every Ack was ignored, so our messages stayed unconfirmed and were
+                    // retried for minutes. Dropping the channel fails their request, and they fall back to the encrypted Ack. That one also
+                    // teaches us their PeerId.
                     if fps.is_empty() {
                         warn!("Toplu Ack tanınmayan peer'dan, yanıtlanmıyor (şifreli Ack'e düşecek): {}", crate::log_id(&peer));
                         drop(channel);
@@ -1605,16 +1597,16 @@ impl P2PCore {
             }
         }
         let result = self.process_incoming_envelope_inner(source, raw);
-        // The result is recorded whether it is Ok or Err. Seen in a two-device test (2026-09-06): an undecryptable control packet (the ratchet moved on,
-        // and it is not in the archive, such as typing or a receipt) returns Err from `_inner`. It was therefore not entered in the map, and each time the network
-        // delivered the same bytes again, `error!("Gelen paket işlenemedi")` was logged again (one message number 11 times). Processing byte-identical bytes gives
-        // the same result every time: an Err stays an Err forever. A packet regenerated by `regen_content` carries DIFFERENT ciphertext (a different digest), so it
-        // still gets delivered. That makes recording the Err safe.
-        // Exception: if `_inner` buffered the packet as an "early packet", it returns Ok(None), and the digest is recorded. The buffered copy will be processed by
-        // `replay_early_packets` once the handshake completes, so the network does not need to repeat it.
-        // Some failures depend on state. For example, the sender's IdentityExchange has not arrived yet. Such a failure is forgotten after 30 s, so the sender's
-        // retry of the same bytes is processed again. An IdentityExchange is always the same bytes: a contact that was deleted and paired again within the window
-        // got no answer. It is remembered for 30 s, like a failed packet.
+        // The result is recorded whether it is Ok or Err. A two-device test showed the problem: an undecryptable control packet (the ratchet
+        // moved on, and it is not in the archive, such as typing or a receipt) returns Err from `_inner`. It was therefore not entered in the
+        // map, and each time the network delivered the same bytes again, the "packet could not be processed" error was logged again (one message
+        // number 11 times). Processing byte-identical bytes gives the same result every time: an Err stays an Err. A packet regenerated by
+        // `regen_content` carries DIFFERENT ciphertext (a different digest), so it still gets delivered. That makes recording the Err safe.
+        // Exception: if `_inner` buffered the packet as an "early packet", it returns Ok(None), and the digest is recorded. The buffered copy is
+        // processed by `replay_early_packets` once the handshake completes, so the network does not need to repeat it.
+        // Some failures depend on state. For example, the sender's IdentityExchange has not arrived yet. Such a failure is forgotten after 30 s, so the
+        // sender's retry of the same bytes is processed again. An IdentityExchange is always the same bytes: a contact that was deleted and paired
+        // again within the window got no answer. It is remembered for 30 s, like a failed packet.
         let short = result.is_err()
             || matches!(NetworkEnvelope::from_cbor(raw), Ok(NetworkEnvelope::IdentityExchange(_)));
         let seen_at = if short { now.saturating_sub(INBOUND_DEDUP_WINDOW_MS - 30_000) } else { now };
