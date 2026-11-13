@@ -34,11 +34,9 @@ import org.json.JSONObject
 class ContactsFragment : Fragment() {
 
     companion object {
-        /** Olay geldiğinde listenin yenilenmesi için beklenen süre (bkz.
-         *  `eventListener`): bir olay patlaması TEK yenileme olsun. */
+        /** Delay before the list refreshes after an event. A burst of events causes a single refresh. */
         private const val EVENT_REFRESH_DEBOUNCE_MS = 1000L
-        /** Ekrandaki eşleşme QR'ı ne sıklıkla tazelenir (bkz.
-         *  `qrRefreshRunnable`): çekirdeğin penceresi 30 dakikadır. */
+        /** How often the pairing QR on screen is regenerated. The core's pairing window is 30 minutes (`qrRefreshRunnable`). */
         private const val QR_REFRESH_INTERVAL_MS = 5 * 60 * 1000L
     }
 
@@ -47,20 +45,16 @@ class ContactsFragment : Fragment() {
     private lateinit var recycler: RecyclerView
     private lateinit var imgOwnQr: ImageView
     private lateinit var txtOwnIdentityCode: TextView
-    /** bkz. `startQrChain` — `getNodeAddress()` swarm
-     *  gerçekten dinlemeye başlayana kadar boş dönebilir, bu yüzden ayrı
-     *  bir handler ile birkaç kez yeniden denenir (bkz. eski
-     *  QrDisplayActivity — bu mantık buraya taşındı). */
+    /** `getNodeAddress()` can return empty until the swarm is actually listening, so the QR chain
+     *  retries a few times on a separate handler (the logic moved here from the former QrDisplayActivity). */
     private val qrRetryHandler = Handler(Looper.getMainLooper())
-    /** bkz. `startQrChain` — QR ile aynı kaynaktan, "Kodumu/
-     *  Adresimi kopyala" düğmeleri için ayrıca saklanır. QR üretilene kadar
-     *  boş kalabilir (bkz. o fonksiyonun yeniden deneme notu). */
+    /** The same source as the QR, kept for the "Copy my code / my address" buttons. Can stay empty until
+     *  the QR is produced (see the retry note of that function). */
     private var ownNodeAddress: String = ""
     private val refreshHandler = Handler(Looper.getMainLooper())
-    /** 5 saniyelik tam yeniden kurma yerine: ekrana dönüşte ve servisten
-     *  bir olay geldiğinde yenilenir (`listContacts` her çağrıda her kişinin
-     *  avatarını hex olarak taşır — 5 saniyede bir bunu yapmak pahalıydı). */
-    /** A refresh is queued (`Handler.hasCallbacks` is API 29, minSdk 26). */
+    /** Not a full rebuild every 5 seconds. The list refreshes on return to the screen and when an event
+     *  arrives from the service (`listContacts` carries every contact's avatar as hex, so polling is expensive). */
+    /** A refresh is queued (`Handler.hasCallbacks` is API 29, minSdk is 26). */
     @Volatile private var eventRefreshQueued = false
     private val eventRefreshRunnable = Runnable { eventRefreshQueued = false; refreshList() }
     private val eventListener: (String) -> Unit = { _ ->
@@ -69,12 +63,11 @@ class ContactsFragment : Fragment() {
             refreshHandler.postDelayed(eventRefreshRunnable, EVENT_REFRESH_DEBOUNCE_MS)
         }
     }
-    /** QR üretim zinciri çalışıyor mu (tek zincir). */
+    /** Whether the QR generation chain is running (only one chain). */
     @Volatile private var qrChainRunning = false
-    /** Çekirdeğin eşleşme kodu penceresi 30 dakikadır (`PAIRING_WINDOW_MS`);
-     *  ekranda unutulmuş bir QR sessizce bayatlamasın diye, fragment önde
-     *  kaldığı sürece aynı `refreshOwnQrCode()` 5 dakikada bir yinelenir
-     *  (bkz. `onResume` / `onPause`). */
+    /** The core's pairing code window is 30 minutes (`PAIRING_WINDOW_MS`). So that a QR left on screen does not
+     *  go stale silently, `refreshOwnQrCode()` repeats every 5 minutes while the fragment is in front
+     *  (see `onResume` / `onPause`). */
     private val qrRefreshHandler = Handler(Looper.getMainLooper())
     private val qrRefreshRunnable = object : Runnable {
         override fun run() {
@@ -84,17 +77,17 @@ class ContactsFragment : Fragment() {
         }
     }
 
-    /** JNI calls that take the core lock, off the main thread; [done] runs on
-     *  the main thread while the fragment is still attached. */
+    /** JNI calls that take the core lock run off the main thread. [done] runs on the main thread while the
+     *  fragment is still attached. */
     private val worker = java.util.concurrent.Executors.newSingleThreadExecutor()
 
-    /** Runs [work] on the worker thread; the executor is gone after
-     *  `onDestroy` (a late callback must not crash the app). */
+    /** Runs [work] on the worker thread. The executor is shut down in `onDestroy`, so a late callback
+     *  cannot crash the app. */
     private fun runOnWorker(work: () -> Unit) {
         try {
             worker.execute(work)
         } catch (e: java.util.concurrent.RejectedExecutionException) {
-            // Fragment yok — sonuç zaten gösterecek bir ekran da yok.
+        // The fragment is gone, so there is no screen left to show the result on.
         }
     }
 
@@ -108,8 +101,8 @@ class ContactsFragment : Fragment() {
         }
     }
 
-    /** Çekirdek bir hatayı "Error: ..." metniyle döner; kullanıcıya
-     *  gösterilen metin kaynaktan gelir (sabit İngilizce değil). */
+    /** The core returns an error as an "Error: ..." string. The text shown to the user comes from resources,
+     *  not a fixed English string. */
     private fun errorText(result: String): String =
         com.p2p.messenger.util.coreErrorText(requireContext(), result)
 
@@ -125,24 +118,17 @@ class ContactsFragment : Fragment() {
             showManualAddDialog()
         }
 
-        // kendi QR kodumuz artık "My QR"
-        // adında ayrı bir düğme/ekrana gitmeden doğrudan bu sekmede
-        // görünür — bkz. eski QrDisplayActivity (silindi), üretim mantığı
-        // birebir buraya taşındı.
+        // The own QR code is shown directly on this tab, with no separate "My QR" button or screen.
+        // The generation logic was moved here unchanged from the former QrDisplayActivity (now deleted).
         imgOwnQr = view.findViewById(R.id.imgOwnQr)
-        // Not hardcoded, and not just a fraction of the RAW screen size:
-        // `resources.displayMetrics` is the full display, which still
-        // includes the status bar, the system nav bar, AND this app's own
-        // top status-text bar + BottomNavigationView (see activity_main.xml
-        // — nav_host_fragment is constrained between them). Sizing off that
-        // raw figure overshoots the space actually available for this
-        // fragment's content. Instead, wait for this view to be laid out
-        // and size off ITS OWN measured viewport (`view` here is the
-        // NestedScrollView root, match_parent WITHIN nav_host_fragment, so
-        // its height already excludes all of the above) — the smaller of
-        // its width/height, minus a fixed thin margin, so the QR (a
-        // square) always fits with at least that margin regardless of
-        // device or orientation.
+        // Not a hardcoded size, and not a fraction of the raw screen size. `resources.displayMetrics` covers
+        // the whole display, including the status bar, the system navigation bar and this app's own top
+        // status text and BottomNavigationView (nav_host_fragment is constrained between them, see
+        // activity_main.xml). Sizing from that figure overshoots the space this fragment really has.
+        // So the size waits for the view to be laid out and uses ITS OWN measured viewport. `view` is the
+        // NestedScrollView root, match_parent inside nav_host_fragment, so its height already excludes the
+        // bars above. The smaller of its width and height, minus a fixed margin, is used, so the square QR
+        // always fits with that margin, on any device and orientation.
         view.doOnPreDraw {
             val minDimensionPx = minOf(view.width, view.height)
             val thinMarginPx = (16 * resources.displayMetrics.density).toInt()
@@ -154,7 +140,7 @@ class ContactsFragment : Fragment() {
             }
         }
         txtOwnIdentityCode = view.findViewById(R.id.txtOwnIdentityCode)
-        // `getIdentityCode` bir JNI çağrısı: ana thread'de yapılmaz.
+        // `getIdentityCode` is a JNI call, so it does not run on the main thread.
         runOnWorker {
             val code = try {
                 P2PLib.getIdentityCode()
@@ -166,8 +152,7 @@ class ContactsFragment : Fragment() {
                 txtOwnIdentityCode.text = code
             }
         }
-        // The QR chain starts in `onResume` (only while this screen is in
-        // front).
+        // The QR chain starts in `onResume`, only while this screen is in front.
 
         view.findViewById<Button>(R.id.btn_copy_manual_code).setOnClickListener { copyManualAddCode() }
         view.findViewById<Button>(R.id.btn_copy_own_address).setOnClickListener { copyOwnAddress() }
@@ -182,9 +167,8 @@ class ContactsFragment : Fragment() {
                 intent.putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, message.displayName)
                 startActivity(com.p2p.messenger.util.ShareIntake.attachTo(intent))
             } else {
-                // Kayıt (TOFU) tamamlandı ama karşı tarafla henüz gerçek bir
-                // bağlantı/IdentityExchange tamamlanmadı (bkz. Rust
-                // pending_identity_exchanges notu) — sohbet açılamaz.
+                // Registration (TOFU) is complete, but the real connection and IdentityExchange with the other
+                // side are not finished yet (see the Rust pending_identity_exchanges note). The chat cannot be opened yet.
                 Toast.makeText(requireContext(), R.string.msg_connection_not_complete, Toast.LENGTH_SHORT).show()
             }
         }
@@ -195,21 +179,19 @@ class ContactsFragment : Fragment() {
         return view
     }
 
-    /** bkz. dosya başı notu — `getNodeAddress()` boşsa kısa aralıklarla
-     *  yeniden dener (sabit bir 0.0.0.0/tcp/0 asla dial edilemez).
-     *  Zincir TEK'tir: `qrChainRunning` ikinci bir zinciri başlatmayı
-     *  engeller (her yeniden denemede ayrı bir thread açılıyordu). */
+    /** See the file header: if `getNodeAddress()` is empty, it is retried at short intervals (a fixed
+     *  0.0.0.0/tcp/0 can never be dialled). The chain is a SINGLE chain: `qrChainRunning` stops a second
+     *  chain from starting (each retry used to open a new thread). */
     private fun startQrChain(attemptsLeft: Int) {
         if (!isAdded || qrChainRunning) return
         qrChainRunning = true
         qrChainStep(attemptsLeft)
     }
 
-    /** Zincirin bir adımı; sonraki adım ana thread'den planlanır. */
+    /** One step of the chain. The next step is scheduled from the main thread. */
     private fun qrChainStep(attemptsLeft: Int) {
-        // Two JNI calls and a 1200x1200 QR bitmap: off the main thread (and
-        // on the ONE worker thread — a new thread per attempt was spawning
-        // every 500 ms while the node address was unknown).
+        // Two JNI calls and a 1200x1200 QR bitmap run off the main thread, on the ONE worker thread.
+        // A new thread per attempt used to be spawned every 500 ms while the node address was unknown.
         runOnWorker {
             val nodeAddress = try {
                 P2PLib.getNodeAddress()
@@ -228,7 +210,7 @@ class ContactsFragment : Fragment() {
                 null
             }
             qrRetryHandler.post {
-                // Paused meanwhile: the chain stops (`onResume` restarts it).
+                // Paused in the meantime: the chain stops here, and `onResume` restarts it.
                 if (!isAdded || view == null || !isResumed) {
                     qrChainRunning = false
                     return@post
@@ -237,9 +219,8 @@ class ContactsFragment : Fragment() {
                     qrRetryHandler.postDelayed({ qrChainStep(attemptsLeft - 1) }, 500)
                     return@post
                 }
-                // Tor not ready after the fast retries: show what we have, but keep
-                // trying. A code without the rendezvous address was never refreshed
-                // and pairing from it hung.
+                // Tor is not ready after the fast retries: show what is available, but keep trying.
+                // A code without the rendezvous address was never refreshed, and pairing from it hung.
                 if (nodeAddress.isEmpty()) {
                     qrRetryHandler.postDelayed({ qrChainStep(0) }, 3000)
                     return@post
@@ -252,11 +233,9 @@ class ContactsFragment : Fragment() {
     }
 
     /**
-     * Taze bir eşleşme paketi (ve QR bitmap'i): çekirdeğin kabul ettiği
-     * eşleşme kodu yalnızca bir gün geçerliydi ve ekrandaki kod, çekirdekte
-     * kayıtlı olan pakete UYMUYORDU — önceki `onResume` çağrısı yeni paketi
-     * ÜRETİP sonucu atıyordu. Artık paket kullanılıyor ve ekrana konuyor.
-     * JNI çağrıları ana thread'de yapılmaz.
+     * Shows a fresh pairing packet and its QR bitmap. The core accepts a pairing code only for one day, and the
+     * code on screen did not match the packet stored in the core: the previous `onResume` produced a new packet
+     * and threw the result away. The packet is now used and shown. JNI calls do not run on the main thread.
      */
     private fun refreshOwnQrCode() {
         val address = ownNodeAddress
@@ -279,7 +258,7 @@ class ContactsFragment : Fragment() {
         }
     }
 
-    /** bkz. eski QrDisplayActivity.encodeBinaryAsQrBitmap — birebir aynı. */
+    /** Same as `encodeBinaryAsQrBitmap` in the former QrDisplayActivity. */
     private fun encodeBinaryAsQrBitmap(data: ByteArray, width: Int, height: Int): Bitmap {
         val text = QrBinaryCodec.bytesToLatin1String(data)
         val hints = mapOf(EncodeHintType.CHARACTER_SET to "ISO-8859-1")
@@ -289,15 +268,12 @@ class ContactsFragment : Fragment() {
         return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.RGB_565)
     }
 
-    /** bkz. ChatsFragment.showChatLongPressMenu aynı notu — iki sekme de
-     *  aynı kişi listesini/adapter'ı paylaştığından davranış birebir aynı. */
+    /** Same note as `ChatsFragment.showChatLongPressMenu`. Both tabs share the same contact list and adapter,
+     *  so the behaviour is identical. */
     private fun showChatLongPressMenu(message: ChatAdapter.ChatMessage) {
-        // Kullanicı kararı (2026-08-27): menuye ENGELLE eklendi ve grup
-        // uzerinden tanisilan kisiler icin "dogrulandi olarak isaretle"
-        // secenegi cikiyor. Engelle, iptalin (revoke) yanina konuldu ama
-        // anlami cok farkli: iptal tek bir cihazi kapatir ve kisi yeni bir
-        // cihazla geri gelebilir; engel ise kimligi hedefler ve yalnizca
-        // yuz yuze yeniden eslesmeyle kalkar.
+        // The menu has a "Block" entry, and for people met through a group a "Mark as verified" entry.
+        // Block sits next to Revoke but means something different. Revoke shuts down one device, and the person
+        // can come back with a new device. Block targets the identity, and only an in-person re-pairing lifts it.
         // A JNI call that takes the core lock: off the main thread.
         offMain({
             message.identityId.isNotEmpty() && try {
@@ -353,8 +329,8 @@ class ContactsFragment : Fragment() {
     }
 
     /**
-     * Kullanici karari: kalici engelleme. `revoke`'tan farki metinde acikca
-     * anlatiliyor — geri donusu yalnizca yuz yuze yeniden eslesme.
+     * Permanent block of a contact. The text says plainly how it differs from revoke: the only way back is an
+     * in-person re-pairing.
      */
     private fun confirmBlockIdentity(message: ChatAdapter.ChatMessage) {
         val identityId = message.identityId
@@ -397,20 +373,15 @@ class ContactsFragment : Fragment() {
     }
 
     /**
-     * Kullanici karari: grup uzerinden tanisilan bir kisiye TAM guven verir
-     * — "grup uzerinden eklendi, dogrulanmadi" isaretini kaldirir.
-     * Sifreleme zaten aynıydi; degisen yalnizca guven gostergesi.
+     * Gives FULL trust to a contact met through a group. It removes the "added via group, not verified" mark.
+     * The encryption was the same before; only the trust indicator changes.
      */
     private fun confirmTrustContact(message: ChatAdapter.ChatMessage) {
         if (message.realContactId.isEmpty()) return
-        // Kullanıcı sorusu (2026-08-28): "güven" derken arkada anahtar
-        // alışverişi olmuyor — anahtarlar ZATEN uçtan uca kullanılıyor.
-        // Eksik olan tek şey, o anahtarların gerçekten bu kişiye ait
-        // olduğunun DOĞRULANMASI. Bunu ancak kullanıcı, kodu başka bir
-        // kanaldan karşılaştırarak yapabilir; o yüzden kod artık burada,
-        // onay penceresinin içinde gösteriliyor.
-        // Ekran kaydırması: kod JNI çağrısıyla üretilir — fixpass
-        // gereği ana iş parçacığından ÇALIŞMAZ (`offMain` deseni).
+        // Trust here does not mean a key exchange: the keys are ALREADY used end to end. What is missing is
+        // checking that those keys really belong to this person. Only the user can do that, by comparing the
+        // code over another channel. So the code is shown here, inside the confirmation dialog.
+        // The screen does not block: the code is produced with a JNI call, so it runs off the main thread (`offMain`).
         runOnWorker {
             val safetyCode = try {
                 P2PLib.contactSafetyCode(message.identityId)
@@ -446,7 +417,7 @@ class ContactsFragment : Fragment() {
         }
     }
 
-    /** bkz. ChatsFragment.confirmRevokeDevice aynı notu. */
+    /** See the same note on `ChatsFragment.confirmRevokeDevice`. */
     private fun confirmRevokeDevice(message: ChatAdapter.ChatMessage) {
         if (message.contactId.isEmpty()) return
         AlertDialog.Builder(requireContext())
@@ -520,14 +491,13 @@ class ContactsFragment : Fragment() {
         super.onResume()
         // The own pairing QR is on screen.
         P2PApplication.setSecure(requireActivity(), true)
-        // The core accepts a stranger's pairing only for 30 minutes after the
-        // code was produced (PAIRING_WINDOW_MS); this view can live longer than
-        // that — refresh the code (and the QR that shows it) when the screen
-        // comes back, and while it stays on screen.
+        // The core accepts a stranger's pairing only for 30 minutes after the code was produced (PAIRING_WINDOW_MS).
+        // This view can stay alive longer than that, so the code (and the QR showing it) is refreshed when the
+        // screen comes back, and again while it stays on screen.
         refreshOwnQrCode()
         qrRefreshHandler.postDelayed(qrRefreshRunnable, QR_REFRESH_INTERVAL_MS)
-        // The QR is produced when the node address is known; the chain only
-        // runs while this screen is in front (bkz. `onPause`).
+        // The QR is produced once the node address is known. The chain runs only while this screen is in front
+        // (see `onPause`).
         if (ownNodeAddress.isEmpty()) startQrChain(attemptsLeft = 10)
         refreshList()
         com.p2p.messenger.service.P2PService.addMessageListener(eventListener)
@@ -535,13 +505,12 @@ class ContactsFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
-        // Before API 33 the whole app stays FLAG_SECURE (no recents opt-out).
+        // Before API 33 the whole app stays FLAG_SECURE (no opt-out from recents).
         if (android.os.Build.VERSION.SDK_INT >= 33) P2PApplication.setSecure(requireActivity(), false)
         com.p2p.messenger.service.P2PService.removeMessageListener(eventListener)
         refreshHandler.removeCallbacks(eventRefreshRunnable)
         eventRefreshQueued = false
-        // The QR retry chain must not keep the core busy while the app is in
-        // the background.
+        // The QR retry chain must not keep the core busy while the app is in the background.
         qrRetryHandler.removeCallbacksAndMessages(null)
         qrChainRunning = false
         qrRefreshHandler.removeCallbacks(qrRefreshRunnable)
@@ -552,35 +521,32 @@ class ContactsFragment : Fragment() {
         // The next view starts with an empty adapter.
         lastContactsJson = null
         qrRetryHandler.removeCallbacksAndMessages(null)
-        // The adapter holds EVERY contact's avatar bytes and the QR bitmap is
-        // ~2.9 MB: they must not stay alive while another tab is shown.
+        // The adapter holds EVERY contact's avatar bytes, and the QR bitmap is about 2.9 MB. Both must not stay
+        // alive while another tab is shown.
         if (::adapter.isInitialized) adapter.submitList(emptyList())
         if (::imgOwnQr.isInitialized) imgOwnQr.setImageDrawable(null)
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        // The worker is a live non-daemon thread: shut it down with the
-        // fragment.
+        // The worker is a live non-daemon thread, so it is shut down with the fragment.
         worker.shutdownNow()
     }
 
     private var lastContactsJson: String? = null
     @Volatile private var refreshing = false
-    /** A refresh was asked for while one was running (after a delete, a
-     *  pin...): run once more, the running one may have read the old state. */
+    /** A refresh requested while one is running (after a delete, a pin, and so on) runs once more, because the
+     *  running one may have read the old state. */
     private var refreshAgain = false
 
-    /** Ekrana dönüşte ve servisten olay geldiğinde (5 saniyede bir değil):
-     *  ana thread dışında (JNI çağrısı çekirdek kilidini alır) ve
-     *  değişmemiş bir liste yeniden ayrıştırılmaz, avatarları yeniden
-     *  çözülmez. */
+    /** Called on return to the screen and when an event arrives from the service, not every 5 seconds. It runs
+     *  off the main thread (the JNI call takes the core lock). An unchanged list is not parsed again, and avatars
+     *  are not resolved again. */
     private fun refreshList() {
         if (refreshing) { refreshAgain = true; return }
         val ctx = context ?: return
         val viaGroupLabel = ctx.getString(R.string.contact_added_via_group)
-        // The fallback for a contact without a name — the same text in both
-        // tabs, and it comes from the resources.
+        // The fallback for a contact without a name. The same text is used in both tabs, and it comes from resources.
         val unknownLabel = ctx.getString(R.string.lbl_unknown)
         refreshing = true
         runOnWorker {
@@ -612,8 +578,7 @@ class ContactsFragment : Fragment() {
         } catch (e: Exception) {
             JSONArray()
         }
-        // The fallback is the same in both tabs (it used to be "Unknown" here
-        // and "Bilinmeyen" in the chats tab).
+        // The fallback is the same in both tabs (it used to be "Unknown" here and another text in the chats tab).
         val duplicateNames = com.p2p.messenger.util.ContactNames.duplicates(
             (0 until array.length()).map { array.getJSONObject(it).optString("display_name", unknownLabel) }
         )
@@ -622,10 +587,8 @@ class ContactsFragment : Fragment() {
             val fingerprint = if (obj.isNull("active_device_fingerprint")) ""
                 else obj.optString("active_device_fingerprint")
             val avatarHex = if (obj.isNull("avatar_hex")) null else obj.optString("avatar_hex").ifEmpty { null }
-            // grup üzerinden (kurucu
-            // kefaletiyle) eklenen kişiler yüz yüze doğrulanmadı — kişi
-            // satırında hem uyarı işareti (bkz. ChatAdapter.bind) hem de
-            // açıklama gösterilir.
+            // Contacts added through a group (vouched by the founder) have not been verified in person. Their row
+            // shows a warning mark (see ChatAdapter.bind) and a description.
             val addedViaGroup = obj.optBoolean("added_via_group", false)
             ChatAdapter.ChatMessage(
                 contactId = fingerprint,
@@ -645,9 +608,9 @@ class ContactsFragment : Fragment() {
     }
 
     /**
-     * Spec 1.4: manuel giriş, QR'ın taşıdığı bilgiyi elle girmek için.
+     * Manual entry (section 1.4): enter the information the QR carries by hand.
      * Format: identity_id|device_fingerprint|nonce|device_name|rendezvous_node
-     * (bkz. Rust P2PLib.processManualEntry dokümantasyonu).
+     * (see the Rust P2PLib.processManualEntry docs).
      */
     private fun showManualAddDialog() {
         val input = EditText(requireContext())
@@ -658,7 +621,7 @@ class ContactsFragment : Fragment() {
             .setView(input)
             .setPositiveButton(R.string.action_add) { _, _ ->
                 val text = input.text.toString()
-                // Rust el sıkışması uzun sürebilir: ana thread'i bloklama.
+                // The Rust handshake can take a while, so the main thread is not blocked.
                 offMain({
                     try { P2PLib.processManualEntry(text) } catch (e: Throwable) { "Error: ${e.message}" }
                 }) { result ->
@@ -673,9 +636,8 @@ class ContactsFragment : Fragment() {
             .show()
     }
 
-    /** bkz. `showManualAddDialog`/QrScanActivity.openChatOrFallback AYNI
-     *  desen — `processManualEntry`'nin JSON dönüşünü ayrıştırıp yeni
-     *  kişinin sohbet ekranını açar. */
+    /** Same pattern as `showManualAddDialog` and QrScanActivity.openChatOrFallback: parses the JSON returned by
+     *  `processManualEntry` and opens the new contact's chat screen. */
     private fun openChatForPairingResult(resultJson: String) {
         val deviceFingerprint: String?
         val deviceName: String
@@ -694,23 +656,20 @@ class ContactsFragment : Fragment() {
         val intent = Intent(requireContext(), ChatActivity::class.java)
         intent.putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, deviceFingerprint)
         intent.putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, deviceName.ifEmpty { deviceFingerprint.take(8) })
-        // Bekleyen paylaşımı da bu sohbete bağla (her açılış yolunda olduğu
-        // gibi): paylaşılan içerik, tarayıcı/manuel ekleme yolundan sonra
-        // kaybolup daha sonra ilgisiz bir sohbete yapışıyordu.
+        // The pending share is also attached to this chat, as in every other open path. Otherwise shared content
+        // was lost after the browser or manual add path and later stuck to an unrelated chat.
         startActivity(com.p2p.messenger.util.ShareIntake.attachTo(intent))
     }
 
-    /** bkz. `btn_copy_manual_code` — karşı taraf QR tarayamıyorsa (ör.
-     *  ekranlar yan yana değil, farklı ağ) bu metni "Manuel Ekle"sine
-     *  yapıştırabilir. `getManualAddCode` Rust tarafında tek bir yerden
-     *  üretilir (bkz. o fonksiyonun dokümantasyonu) — format
-     *  `processManualEntry`'nin beklediğiyle birebir aynı kalır. */
+    /** See `btn_copy_manual_code`. If the other side cannot scan the QR (for example the screens are not side by side,
+     *  or the networks differ), this text can be pasted into their "Add Manually" field. `getManualAddCode` builds it in
+     *  one place in Rust (see that function's docs). The format stays identical to what `processManualEntry` expects. */
     private fun copyManualAddCode() {
         if (ownNodeAddress.isEmpty()) {
             Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
             return
         }
-        // `getManualAddCode` takes the core lock: off the main thread (`offMain`).
+        // `getManualAddCode` takes the core lock, so it runs off the main thread (`offMain`).
         offMain({
             try {
                 P2PLib.getManualAddCode(ownNodeAddress)
@@ -727,18 +686,15 @@ class ContactsFragment : Fragment() {
         }
     }
 
-    /** bkz. `btn_copy_own_address` — spec dışı, kullanıcı isteği: bu da
-     *  `copyManualAddCode` ile AYNI `getManualAddCode` formatını kopyalar
-     *  (bkz. o fonksiyonun dokümantasyonu), böylece bir telefonda "Copy my
-     *  address"e basıp öbür telefonda direkt "Add Manually"ye yapıştırmak
-     *  bire bir çalışır — önceden burada bare multiaddr kopyalanıyordu ki
-     *  `processManualEntry`'nin beklediği pipe'lı formatla uyuşmuyordu. */
+    /** See `btn_copy_own_address`. It copies the SAME `getManualAddCode` format as `copyManualAddCode`, so the text
+     *  copied with "Copy my address" pastes directly into "Add Manually" on the other phone. Earlier it copied a bare
+     *  multiaddr, which did not match the pipe-separated format `processManualEntry` expects. */
     private fun copyOwnAddress() {
         if (ownNodeAddress.isEmpty()) {
             Toast.makeText(requireContext(), R.string.error_address_not_ready, Toast.LENGTH_SHORT).show()
             return
         }
-        // `getManualAddCode` takes the core lock: off the main thread (`offMain`).
+        // `getManualAddCode` takes the core lock, so it runs off the main thread (`offMain`).
         offMain({
             try {
                 P2PLib.getManualAddCode(ownNodeAddress)
