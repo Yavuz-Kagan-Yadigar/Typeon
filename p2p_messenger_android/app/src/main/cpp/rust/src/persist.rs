@@ -4,22 +4,16 @@ use super::*;
 
 impl P2PCore {
 
-    /// `self.ratchets[peer_device_fingerprint]`'i (varsa) diske şifreli
-    /// olarak kalıcılaştırır — aynı `skipped_key_encryption_key` ile
-    /// (`persist_skipped_key`'deki AEAD desenini birebir tekrarlar).
-    /// `skipped_key_encryption_key` henüz yüklenmemişse (Kotlin
-    /// `setSkippedKeyEncryptionKey` çağırmadıysa) sessizce atlar —
-    /// arşivleme gibi bu da best-effort'tur, mesajlaşmanın kendisini
-    /// engellemez (state bellekte zaten güncel).
-    /// `skipped_key_encryption_key` ile mühürler (12 baytlık nonce öneki +
-    /// ChaCha20-Poly1305) — `persist_ratchet_state`/`persist_skipped_key` ile
-    /// AYNI anahtar ve AYNI çerçeveleme.
+    /// Persists `self.ratchets[peer_device_fingerprint]` (if present) to disk, encrypted. It repeats the AEAD pattern of `persist_skipped_key`
+    /// exactly, with the same `skipped_key_encryption_key` and the same framing.
+    /// If `skipped_key_encryption_key` is not loaded yet (Kotlin has not called `setSkippedKeyEncryptionKey`), the call is silently skipped.
+    /// Like archiving, this is best-effort and never blocks messaging (the in-memory state is already current).
+    /// Seals with `skipped_key_encryption_key` (12-byte nonce prefix + ChaCha20-Poly1305), the same key and framing as
+    /// `persist_ratchet_state` / `persist_skipped_key`.
     ///
-    /// Bu anahtar seçildi çünkü `setSkippedKeyEncryptionKey` JNI çağrısı
-    /// alanı doldurduktan HEMEN SONRA `load_servers_from_db`'yi çağırıyor —
-    /// yani kuyruk diskten okunurken anahtar KESİN olarak elimizde.
-    /// `history_key` öyle değil (Kotlin tarafında SkippedKeyManager'dan
-    /// SONRA yükleniyor), o yüzden burada kullanılamaz.
+    /// This key is used because the `setSkippedKeyEncryptionKey` JNI call runs `load_servers_from_db` right AFTER it fills the field,
+    /// so the key is certainly available when the queue is read from disk. `history_key` cannot be used here: Kotlin loads it
+    /// later, after SkippedKeyManager.
     pub(crate) fn seal_local_blob(&self, plaintext: &[u8]) -> Option<Vec<u8>> {
         let (ciphertext, nonce_bytes) = seal_with(&self.skipped_key_encryption_key?, plaintext)?;
         let mut out = Vec::with_capacity(12 + ciphertext.len());
@@ -28,8 +22,7 @@ impl P2PCore {
         Some(out)
     }
 
-    /// `seal_local_blob`'un tersi. `None` (no key, damaged, never sealed):
-    /// the caller drops the bytes — never uses them as plaintext.
+    /// The inverse of `seal_local_blob`. `None` (no key, damaged, or never sealed): the caller drops the bytes and never uses them as plaintext.
     pub(crate) fn open_local_blob(&self, sealed: &[u8]) -> Option<Vec<u8>> {
         use chacha20poly1305::aead::{Aead, KeyInit};
         use chacha20poly1305::{ChaCha20Poly1305, Nonce};
@@ -41,9 +34,8 @@ impl P2PCore {
         cipher.decrypt(Nonce::from_slice(&sealed[..12]), &sealed[12..]).ok()
     }
 
-    /// `false`: the write failed (disk full, SQLITE_BUSY). A sender must not
-    /// publish then: after a restart the same message key and nonce would be
-    /// used again. No DB or no key is `true`, there is nothing to fall behind.
+    /// `false`: the write failed (disk full, SQLITE_BUSY). A sender must not publish then: after a restart the same message key and nonce
+    /// would be used again. With no DB or no key it returns `true`, because there is nothing to fall behind.
     pub(crate) fn persist_ratchet_state(&self, peer_device_fingerprint: &str) -> bool {
         let state = match self.ratchets.get(peer_device_fingerprint) {
             Some(s) => s,
@@ -59,7 +51,7 @@ impl P2PCore {
         };
 
         let persistable = state.to_persistable();
-        // Root, chain and ratchet secret keys: wiped when dropped.
+        // Root, chain and ratchet secret keys are wiped when dropped.
         let plaintext = match ciborium_bytes(&persistable) {
             Ok(b) => zeroize::Zeroizing::new(b),
             Err(e) => { error!("Ratchet state serileştirilemedi: {}", e); return false; }
@@ -70,10 +62,8 @@ impl P2PCore {
             return false;
         };
 
-        // with WAL and synchronous=NORMAL a commit that returned
-        // can still be lost on power loss; the send chain then rolled back
-        // and the next message reused a key and nonce. This commit is synced
-        // (FULL: the WAL is synced at commit), the rest of the database
+        // With WAL and synchronous=NORMAL, a commit that returned can still be lost on power loss. The send chain would then roll back,
+        // and the next message would reuse a key and nonce. This commit is synced (FULL: the WAL is synced at commit). The rest of the database
         // keeps NORMAL. Inside an open transaction the pragma is left alone.
         let durable = conn.is_autocommit();
         if durable {
@@ -93,18 +83,12 @@ impl P2PCore {
         written.is_ok()
     }
 
-    /// Uygulama açılışında (skipped_key_encryption_key yüklendikten sonra
-    /// — bkz. JNI `setSkippedKeyEncryptionKey`) DB'de kayıtlı TÜM ratchet
-    /// oturumlarını çözüp `self.ratchets`'e geri yükler. Bu, süreç yeniden
-    /// başladığında (app güncellemesi, arka plan öldürme) devam eden
-    /// sohbetlerin YENİDEN el sıkışma gerektirmeden çalışmaya devam
-    /// etmesini sağlar — önceden bu state tamamen bellek-only olduğu için
-    /// her süreç yeniden başlatmasında kayboluyordu (bkz. dosya sonu not).
+    /// Restores ALL ratchet sessions stored in the DB into `self.ratchets`, at app start (after `skipped_key_encryption_key` is loaded;
+    /// see the JNI `setSkippedKeyEncryptionKey`). This lets conversations continue after a process restart (app update, background kill)
+    /// without a new handshake. Before this, the state was memory-only and was lost on every process restart (see the note at the end of the file).
     /// Loads the persisted sessions and opens the send gate (`ratchets_loaded`).
-    /// The skipped-key/ratchet storage key arrived: load everything sealed
-    /// with it. One implementation for JNI and `api.rs` (they had drifted).
-    /// A second call with the same key does nothing: the reload rolled live
-    /// sessions back to their stored state.
+    /// Called once the skipped-key / ratchet storage key has arrived: loads everything sealed with it. One implementation for JNI and `api.rs`
+    /// (they had drifted apart). A second call with the same key does nothing: a reload would roll live sessions back to their stored state.
     pub(crate) fn install_skipped_key(&mut self, key: [u8; 32]) {
         if self.skipped_key_encryption_key == Some(key) && self.ratchets_loaded {
             return;
@@ -119,9 +103,8 @@ impl P2PCore {
 
     pub(crate) fn load_ratchet_states_from_db(&mut self) {
         let (rows, unopened) = self.load_ratchet_states_from_db_inner();
-        // when stored sessions exist and none opens, the key is
-        // wrong: the gate stays shut, or the next send replaced them one by
-        // one. One bad row among good ones is dropped as before.
+        // If stored sessions exist and none of them opens, the key is wrong: the gate stays shut. Otherwise the next send would replace them
+        // one by one. A single bad row among good ones is dropped, as before.
         if rows > 0 && unopened == rows {
             error!("Hiçbir oturum durumu çözülemedi ({} satır): anahtar yanlış, gönderim kapısı kapalı", rows);
             self.attachment_events.push(serde_json::json!({"type": "session_load_failed", "rows": rows}).to_string());
@@ -193,36 +176,22 @@ impl P2PCore {
         (read, unopened)
     }
 
-    /// Spec dışı, kullanıcı isteği ("gönderilemeyen mesajlar/emirler ...
-    /// geçici bir dosyada tutulsun"): `awaiting_confirmation` tamamen
-    /// bellek-içi olduğundan, süreç TAMAMEN öldürülüp yeniden başlarsa
-    /// (uygulama kapatılıp OS tarafından servis öldürülürse — sadece arka
-    /// planda beklerken DEĞİL) bekleyen Edit/Delete/GroupUpdate kayboluyordu.
-    /// Bunları "geçici dosya" yerine zaten var olan şifreli SQLite DB'ye
-    /// yazıyoruz (ayrı bir dosya formatı/temizleme mantığı icat etmemek
-    /// için — ratchet state de aynı DB'de). SADECE `regen_content` dolu
-    /// girdiler (bkz. o alanın dokümantasyonu) buraya yazılır.
+    /// Pending Edit / Delete / GroupUpdate messages and other outgoing control packets used to live ONLY in memory (`awaiting_confirmation`).
+    /// A full process kill (the OS killing the app, not just being backgrounded) lost them. They are now written to the existing encrypted
+    /// SQLite DB, instead of a separate temp file with its own format and cleanup logic. Ratchet state lives in the same DB too.
+    /// Only entries with `regen_content` set (see that field's docs) are written here.
     ///
-    /// NOT (eskimiş yorum düzeltildi): burada bir zamanlar "Text/
-    /// HistorySyncRequest zaten kapsam dışında" yazıyordu — `Text` o zamandan
-    /// beri `regen_content`'e alındı, yani süreç ölümüne karşı O DA korunuyor.
-    /// Aynı şekilde çoklu-cihaz kontrol mesajları da (SiblingEcho/DeviceSync/
-    /// DeviceAddNotice/…) artık buraya yazılıyor — önceden bir yeniden
-    /// başlatma kuyruktaki TÜM kardeş senkronunu sessizce siliyordu.
-    /// `original_sent_at`: mesajın İLK kuyruğa girdiği an — `current_time_ms()`
-    /// DEĞİL. burası eskiden her
-    /// yazışta `current_time_ms()` damgalıyordu, ama bu kolon
-    /// `load_pending_durable_retries_from_db` tarafından `original_sent_at`
-    /// olarak geri okunuyor — yani `TEXT_RETRY_GIVE_UP_MS` (7 gün) penceresi
-    /// HER uygulama açılışında ve HER `regen` tazelemesinde (25 dakikada bir)
-    /// sıfırlanıyordu. Sonuç: artık var olmayan bir eşe giden bir mesaj
-    /// sonsuza kadar yeniden deneniyor ve kullanıcıya asla "gönderilemedi"
-    /// denmiyordu. Gerçek başlangıç anı taşınınca 7 günlük tavan gerçekten
-    /// işliyor.
+    /// Note: `Text` and `HistorySyncRequest` used to be excluded. `Text` is now in `regen_content`, so it is protected against process death too.
+    /// Multi-device control messages (SiblingEcho / DeviceSync / DeviceAddNotice, and others) are also written here now. Before, a restart
+    /// silently deleted the entire pending sibling sync queue.
+    /// `original_sent_at`: the moment the message FIRST entered the queue, not `current_time_ms()`. This function used to stamp
+    /// `current_time_ms()` on every write, but the column is read back by `load_pending_durable_retries_from_db` as `original_sent_at`.
+    /// So the `TEXT_RETRY_GIVE_UP_MS` window (7 days) was reset on every app start and every `regen` refresh (every 25 minutes). The result:
+    /// a message to a peer that no longer existed was retried forever, and the user was never told "not delivered". Now the real start time is
+    /// carried along, so the 7-day ceiling actually applies.
     pub(crate) fn persist_durable_retry(&self, message_id: &str, peer_device_fingerprint: &str, content: &MessageContent, original_sent_at: u64) {
         let conn = match &self.db { Some(c) => c, None => return };
-        // Sealed like `server_archive_queue` (it used to be plain CBOR: every
-        // sent message sat readable on disk until acked).
+        // Sealed like `server_archive_queue`. It used to be plain CBOR, so every sent message sat readable on disk until acked.
         let content_cbor = match ciborium_bytes(content).map(|b| self.seal_local_blob(&b)) {
             Ok(Some(b)) => b,
             Ok(None) => { error!("Kalıcı yeniden deneme kaydı serileştirilemedi: şifreleme anahtarı yok"); return; }
@@ -233,26 +202,22 @@ impl P2PCore {
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![message_id, peer_device_fingerprint, content_cbor, original_sent_at as i64, group_row_id(content)],
         ) {
-            // Memory copy still retries; only a process death loses it now.
+            // The memory copy still retries. Only a process death loses it now.
             error!("Kalıcı yeniden deneme kaydı yazılamadı ({}): {}", message_id, e);
         }
     }
 
-    /// bkz. `persist_durable_retry` — bir girdi onaylandığında (Ack) veya
-    /// tazelenip YENİ bir message_id altında yeniden kaydedildiğinde ESKİ
-    /// satır silinmezse bir sonraki süreç başlangıcında hem eski hem yeni
-    /// kayıt yeniden gönderilir (ÇİFT GÖNDERİM) — bu yüzden
-    /// `awaiting_confirmation`'dan her çıkarma/değiştirme noktasında bu da
-    /// çağrılmalı.
+    /// See `persist_durable_retry`. When an entry is acked (Ack), or is refreshed and saved again under a NEW message_id, the OLD row must also be
+    /// removed. Otherwise the next process start resends both the old and the new record (a DOUBLE SEND). So this must be called at every point
+    /// where an entry is removed from or replaced in `awaiting_confirmation`.
     pub(crate) fn remove_durable_retry(&self, message_id: &str) {
         if let Some(conn) = &self.db {
             let _ = conn.execute("DELETE FROM pending_durable_retries WHERE message_id = ?1", params![message_id]);
         }
     }
 
-    /// bkz. `remove_durable_retry` — bir cihaz/kişi tamamen kaldırıldığında
-    /// (bkz. `awaiting_confirmation.retain` çağrı yerleri) o cihaza ait
-    /// TÜM kalıcı kayıtları da temizler.
+    /// See `remove_durable_retry`. When a device or contact is removed entirely (see the `awaiting_confirmation.retain` call sites),
+    /// ALL durable rows for that device are cleared too.
     pub(crate) fn remove_durable_retries_for_peer(&mut self, peer_device_fingerprint: &str) {
         let mut ids: Vec<String> = Vec::new();
         if let Some(conn) = &self.db {
@@ -263,13 +228,12 @@ impl P2PCore {
             }
             let _ = conn.execute("DELETE FROM pending_durable_retries WHERE peer_device_fingerprint = ?1", params![peer_device_fingerprint]);
         }
-        // nothing retries them any more.
+        // Nothing retries them any more.
         self.fail_orphaned_sends(&ids);
     }
 
-    /// C6/H92/H93: our 1:1 messages whose retry was dropped with no Ack. A
-    /// row left `pending` showed the clock icon for good, with no event; it
-    /// goes to `error` and the screen is told. `sent`/`error` rows stay.
+    /// Our 1:1 messages whose retry was dropped without an Ack. A row left `pending` showed the clock icon forever, with no event.
+    /// It is now set to `error`, and the screen is told. `sent` and `error` rows stay.
     pub(crate) fn fail_orphaned_sends(&mut self, message_ids: &[String]) {
         for id in message_ids {
             let Some(conn) = &self.db else { return };
@@ -286,14 +250,11 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `pending_group_messages` alanı dokümantasyonu — bir üyeye
-    /// kuyruklanan HER mesajı ayrı bir satır olarak (üye başına birden
-    /// fazla satır normal, `id` sütunuyla SIRAYLA korunur) kalıcı DB'ye
-    /// de yazar.
+    /// See the `pending_group_messages` field docs. Every message queued for a member is also written to the persistent DB, as one row per message.
+    /// Several rows per member is normal. They are kept in ORDER by the `id` column.
     pub(crate) fn persist_pending_group_message(&self, group_id: &str, member_identity_id: &str, content: &MessageContent) {
         let conn = match &self.db { Some(c) => c, None => return };
-        // Sealed like `server_archive_queue` (it used to be plain CBOR: every
-        // sent message sat readable on disk until acked).
+        // Sealed like `server_archive_queue`. It used to be plain CBOR, so every sent message sat readable on disk until acked.
         let content_cbor = match ciborium_bytes(content).map(|b| self.seal_local_blob(&b)) {
             Ok(Some(b)) => b,
             Ok(None) => { error!("Kalıcı grup mesaj kuyruğu kaydı serileştirilemedi: şifreleme anahtarı yok"); return; }
@@ -308,10 +269,8 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `persist_pending_group_message` — bellek-içi kuyruk
-    /// `MAX_PENDING_GROUP_MESSAGES_PER_MEMBER` sınırını aşıp en eskiyi
-    /// attığında, o üye/grup için diskteki EN ESKİ satırı da (aynı sırayla,
-    /// `id ASC`) atarak iki tarafı senkron tutar.
+    /// See `persist_pending_group_message`. When the in-memory queue exceeds `MAX_PENDING_GROUP_MESSAGES_PER_MEMBER` and drops its oldest entry,
+    /// the OLDEST row for that member/group on disk is also dropped (same order, `id ASC`), keeping the two in sync.
     pub(crate) fn remove_oldest_persisted_pending_group_message(&self, group_id: &str, member_identity_id: &str) {
         if let Some(conn) = &self.db {
             let _ = conn.execute(
@@ -325,9 +284,8 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `persist_pending_group_message` — üye çözülüp kuyruk
-    /// tamamen boşaltıldığında (bkz. `group_sync_sweep`) o üye/grup için
-    /// kalan TÜM kalıcı satırları temizler.
+    /// See `persist_pending_group_message`. When a member is resolved and the queue is fully drained (see `group_sync_sweep`), ALL remaining
+    /// durable rows for that member/group are cleared.
     pub(crate) fn remove_persisted_pending_group_messages(&self, group_id: &str, member_identity_id: &str) {
         if let Some(conn) = &self.db {
             let _ = conn.execute(
@@ -337,22 +295,18 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `remove_persisted_pending_group_messages` — bir grup tamamen
-    /// silindiğinde (bkz. `remove_group_locally`) o gruba ait TÜM kalıcı
-    /// kayıtları da temizler.
+    /// See `remove_persisted_pending_group_messages`. When a group is removed entirely (see `remove_group_locally`), ALL durable rows
+    /// for that group are cleared too.
     pub(crate) fn remove_persisted_pending_group_messages_for_group(&self, group_id: &str) {
         if let Some(conn) = &self.db {
             let _ = conn.execute("DELETE FROM pending_group_messages WHERE group_id = ?1", params![group_id]);
         }
     }
 
-    /// Uygulama açılışında, `load_pending_durable_retries_from_db` ile AYNI
-    /// noktada çağrılır — diskte kalan tüm kuyruklanmış grup mesajlarını
-    /// bellek-içi `pending_group_messages`'a geri yükler (SIRAYLA, `id ASC`)
-    /// — süreç ölümünde bu kuyruk artık kaybolmaz.
+    /// Called at app start, at the same point as `load_pending_durable_retries_from_db`. It restores every queued group message still on disk into
+    /// the in-memory `pending_group_messages`, in ORDER (`id ASC`). The queue no longer disappears on process death.
     pub(crate) fn load_pending_group_messages_from_db(&mut self) {
-        // Rows are sealed with this key. Without it they parsed as bad CBOR
-        // and were deleted: the whole queue, silently.
+        // Rows are sealed with this key. Without it they failed to parse as CBOR and were deleted: the whole queue, silently.
         if self.skipped_key_encryption_key.is_none() {
             return;
         }
@@ -379,15 +333,13 @@ impl P2PCore {
         }
         let mut count = 0usize;
         for (group_id, member_identity_id, content_cbor, row_id) in loaded {
-            // A row that does not open (wrong or stale key) is kept, as in
-            // the durable-retry twin; only opened bytes that do not parse go
+            // A row that does not open (wrong or stale key) is kept, as in the durable-retry twin. Only opened bytes that do not parse are dropped.
             let Some(plain) = self.open_local_blob(&content_cbor) else { continue };
             let content: MessageContent = match ciborium::from_reader(plain.as_slice()) {
                 Ok(c) => c,
                 Err(e) => {
-                    // Dropped like the durable-retry twin: left in place it is
-                    // read again on every start, and the "oldest row" eviction
-                    // then removes it instead of the entry evicted from memory.
+                    // Dropped like the durable-retry twin. If left in place, it would be read again on every start, and the "oldest row" eviction
+                    // would then remove it instead of the entry evicted from memory.
                     error!("Kalıcı grup mesaj kuyruğu kaydı ayrıştırılamadı, satır atılıyor: {}", e);
                     if let Some(conn) = &self.db {
                         let _ = conn.execute("DELETE FROM pending_group_messages WHERE id = ?1", params![row_id]);
@@ -401,21 +353,14 @@ impl P2PCore {
         info!("Kalıcı grup mesaj kuyruğundan {} girdi geri yüklendi", count);
     }
 
-    /// Uygulama açılışında, ratchet state'lerle TAM OLARAK AYNI anda (bkz.
-    /// JNI `setSkippedKeyEncryptionKey` — ratchet'ler olmadan zaten
-    /// şifreleyip gönderemeyiz) çağrılır: diskte kalan tüm kalıcı yeniden
-    /// deneme kayıtlarını okur ve HER BİRİNİ TAZE bir paket olarak
-    /// (`send_message_content` — yeni message_id, yeni ratchet adımı)
-    /// yeniden gönderir. Eski satır ÖNCE silinir (bkz. `remove_durable_retry`
-    /// dokümantasyonu — çift gönderimi önlemek için) — `send_message_content`
-    /// zaten kendi YENİ satırını `publish_with_ack_tracking` üzerinden
-    /// baştan yazacaktır.
-    /// `pending_group_syncs` is memory only. After a restart, sign the current
-    /// state again (`sign_group_resync`) for each member of a group we founded
-    /// whose device is still unknown; `group_sync_sweep` delivers it when the
-    /// device resolves.
+    /// Called at app start, at exactly the same moment as the ratchet states (see the JNI `setSkippedKeyEncryptionKey`. Without ratchets we
+    /// cannot encrypt or send anyway). It reads every durable retry row left on disk and resends EACH ONE as a fresh packet
+    /// (`send_message_content`: new message_id, new ratchet step). The old row is deleted FIRST (see `remove_durable_retry`, to prevent a double
+    /// send). `send_message_content` then writes its own NEW row again through `publish_with_ack_tracking`.
+    /// `pending_group_syncs` is memory only. After a restart, the current state is signed again (`sign_group_resync`) for each member of a group
+    /// we founded whose device is still unknown. `group_sync_sweep` delivers it once the device resolves.
     pub(crate) fn requeue_unresolved_group_syncs(&mut self) {
-        // The Delete / removal notices `send_group_update_to_member` kept.
+        // The Delete / removal notices kept by `send_group_update_to_member`.
         let kept: Vec<(String, String)> = self.db.as_ref().and_then(|c| {
             let mut stmt = c.prepare("SELECT k, v FROM app_meta WHERE k >= 'pgs:' AND k < 'pgs;'").ok()?;
             let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).ok()?;
@@ -434,7 +379,7 @@ impl P2PCore {
             }
         }
         let (Ok(own_fp), Some(own_identity_id)) = (self.get_active_own_device_fingerprint(), self.my_identity_id()) else { return };
-        // checked once, and said, instead of a silent return inside the loop.
+        // Checked once, and reported, instead of silently returning inside the loop.
         if !self.own_device_keys.contains_key(&own_fp) {
             error!("Grup senkronları yeniden kuyruklanamadı: kendi cihaz anahtarları yok");
             return;
@@ -456,16 +401,11 @@ impl P2PCore {
     }
 
     pub(crate) fn load_pending_durable_retries_from_db(&mut self) {
-        // KRİTİK: DB okuma kısmı (conn/stmt/rows) KENDİ bloğunda —
-        // `self.send_message_content`/`self.remove_durable_retry` gibi
-        // TÜM `self`'i ödünç alan (borrow) çağrılar aşağıda olduğundan,
-        // `conn`'un (`&self.db`'den türeyen) ödünç alması buradaki blok
-        // KAPANMADAN bitmiş olmalı — aksi halde "cannot borrow `*self`
-        // as mutable because it is also borrowed as immutable" derleme
-        // hatası (rusqlite `Rows`/`MappedRows` Drop implementasyonu
-        // yüzünden NLL bunu son kullanım yerine göre otomatik kısaltamıyor).
-        // bkz. `load_pending_group_messages_from_db`: also called from
-        // `touch_device_seen`, at any time.
+        // CRITICAL: the DB read (conn / stmt / rows) lives in its OWN block. The calls below (`self.send_message_content`, `self.remove_durable_retry`)
+        // borrow ALL of `self`, so the `conn` borrow (derived from `&self.db`) must end BEFORE this block closes. Otherwise the compiler reports
+        // "cannot borrow `*self` as mutable because it is also borrowed as immutable". The reason is the rusqlite `Rows` / `MappedRows` Drop
+        // implementation: NLL cannot shorten that borrow on its own, because it depends on the last use.
+        // See `load_pending_group_messages_from_db`, which is also called from `touch_device_seen` at any time.
         if self.skipped_key_encryption_key.is_none() {
             return;
         }
@@ -473,10 +413,9 @@ impl P2PCore {
         let mut expired: Vec<String> = Vec::new();
         {
             let conn = match &self.db { Some(c) => c, None => return };
-            // Expired rows first: past the 7-day give-up nothing retries them,
-            // and they were read again on every start.
+            // Expired rows first. Past the 7-day give-up, nothing retries them, and they were read again on every start.
             let cutoff = current_time_ms().saturating_sub(TEXT_RETRY_GIVE_UP_MS) as i64;
-            // their messages are marked failed below.
+            // Their messages are marked failed below.
             if let Ok(mut stmt) = conn.prepare("SELECT message_id FROM pending_durable_retries WHERE created_at < ?1") {
                 if let Ok(rows) = stmt.query_map(params![cutoff], |r| r.get::<_, String>(0)) {
                     expired.extend(rows.flatten());
@@ -485,10 +424,9 @@ impl P2PCore {
             if let Err(e) = conn.execute("DELETE FROM pending_durable_retries WHERE created_at < ?1", params![cutoff]) {
                 error!("Süresi dolmuş kalıcı yeniden deneme kayıtları silinemedi: {}", e);
             }
-            // the keys of every row first (small), then the oldest 1000
-            // that would really be sent now. A plain `LIMIT 1000` read rows
-            // of stale devices or already in memory, and the rest never came.
-            // ponytail: 1000 per load; the rest come on the next load.
+            // Read the keys of every row first (small), then the oldest 1000 that would really be sent now. A plain `LIMIT 1000` read rows of stale
+            // devices or rows already in memory, and the rest never came through.
+            // ponytail: 1000 per load. The rest come on the next load.
             let mut heads: Vec<(String, String, u64)> = Vec::new();
             {
                 let mut stmt = match conn.prepare(
@@ -517,7 +455,7 @@ impl P2PCore {
                 }
             }
         }
-        // An expired entry still in memory is failed by the retry loop's age arm.
+        // An expired entry still in memory is failed by the age arm of the retry loop.
         expired.retain(|id| !self.awaiting_confirmation.contains_key(id));
         self.fail_orphaned_sends(&expired);
         if loaded.is_empty() {
@@ -525,38 +463,25 @@ impl P2PCore {
         }
         info!("Kalıcı yeniden deneme kuyruğundan {} girdi geri yükleniyor", loaded.len());
         for (message_id, peer_fp, content_cbor, created_at) in loaded {
-            // KRİTİK (teslim garantisi düzeltmesi): satır burada SİLİNMEZ.
-            // Önceden `remove_durable_retry` yeniden gönderimden ÖNCE
-            // çağrılıyordu ("nasılsa taze bir gönderimle değiştirilecek"
-            // gerekçesiyle) — ama aşağıdaki `send_message_content_inner`
-            // `Err` dönerse ("No ratchet session", "Missing own keys", "No
-            // identity"; üçü de açılıştan hemen sonra gayet olası) o
-            // değiştirme HİÇ olmuyor: ne disk satırı ne de bellekteki
-            // `awaiting_confirmation` girdisi kalıyor ve mesaj KALICI olarak
-            // kayboluyordu. Alttaki hata log'u "normal yeniden deneme
-            // döngüsü devralacak" diyordu ama devralacak bir şey
-            // bırakılmıyordu — oysa bu tablonun var oluş sebebi tam olarak
-            // bu senaryoyu önlemekti.
+            // CRITICAL (delivery guarantee): the row is NOT deleted here. `remove_durable_retry` used to be called BEFORE the resend ("a fresh send
+            // will replace it anyway"). But if `send_message_content_inner` returns `Err` ("No ratchet session", "Missing own keys", "No identity",
+            // all quite likely right after launch), the replacement never happens. Neither the disk row nor the in-memory `awaiting_confirmation` entry
+            // remained, and the message was lost PERMANENTLY. The error log said "the normal retry loop will take over", but there was nothing left
+            // for it to take over. Preventing exactly this scenario is why the table exists.
             //
-            // Silmeye gerek de yok: `persist_durable_retry` `INSERT OR
-            // REPLACE`, yani BAŞARILI yolda satır zaten aynı birincil
-            // anahtarla tazeleniyor; hata yolunda ise yerinde kalıp bir
-            // sonraki açılışta yeniden deneniyor.
+            // No delete is needed. `persist_durable_retry` uses `INSERT OR REPLACE`, so on success the row is refreshed under the same primary key.
+            // On the error path it stays in place and is retried on the next start.
             if self.awaiting_confirmation.contains_key(&message_id) {
                 continue;
             }
-            // bkz. `STALE_PEER_RETRY_HORIZON_MS` dokümantasyonu — gerçek
-            // cihazda (tablet + Redmi) her açılışta yüzlerce satırın
-            // hayalet kardeş cihazlara boşuna yeniden gönderilmeye
-            // çalışılması hem gözle görülür bir açılış gecikmesi yaratıyor
-            // hem de kuyruğu asla küçültmüyordu. Satır yine SİLİNMEZ (üstteki
-            // not) — sadece bu turda atlanır.
+            // See `STALE_PEER_RETRY_HORIZON_MS`. On a real device (tablet + Redmi), hundreds of rows were resent to ghost sibling devices on every start.
+            // That caused a visible startup delay, and the queue never shrank. The row is still NOT deleted (see the note above). It is only skipped
+            // in this pass.
             // Same test as the reload trigger (`last_seen == 0` is not stale).
             if !self.device_recently_seen(&peer_fp) {
                 continue;
             }
-            // A decrypt failure (a wrong key passed once, keychain hiccup) is
-            // not a corrupt row: keep it for the next load.
+            // A decrypt failure (a wrong key passed once, or a keychain hiccup) is not a corrupt row. Keep it for the next load.
             let Some(plain) = self.open_local_blob(&content_cbor) else {
                 warn!("Durable retry row {} could not be decrypted, kept", message_id);
                 continue;
@@ -564,15 +489,13 @@ impl P2PCore {
             let content: MessageContent = match ciborium::from_reader(plain.as_slice()) {
                 Ok(c) => c,
                 Err(e) => {
-                    // Bozuk satır YENİDEN DENENEMEZ (her açılışta aynı
-                    // hatayı verir) — tek silinmesi gereken durum bu.
+                    // A corrupt row is NOT retried (it would fail the same way on every start). Deleting it is the only case that should delete a row.
                     error!("Kalıcı yeniden deneme kaydı ayrıştırılamadı, satır atılıyor ({}): {}", message_id, e);
                     self.remove_durable_retry(&message_id);
                     continue;
                 }
             };
-            // A parked group copy is resent only while the device's
-            // identity is still a member: a removed member got it forever.
+            // A parked group copy is resent only while the device's identity is still a member. A removed member would otherwise get it forever.
             let group_id = match &content {
                 MessageContent::Text { group_id: Some(g), .. }
                 | MessageContent::Edit { group_id: Some(g), .. }
@@ -589,27 +512,21 @@ impl P2PCore {
                     continue;
                 }
             }
-            // Güvenilirlik düzeltmesi ("restart sonrası balon sonsuza dek
-            // 'error' kalıyor"): önceden buradan `send_message_content` (yeni
-            // rastgele message_id) çağrılıyordu — arşivdeki balon ESKİ id'yi
-            // taşıdığından, yeni id'nin Ack/status olayları o balonu asla
-            // güncellemiyordu (init_db açılışta 'pending'→'error' çevirir,
-            // mesaj gerçekte teslim edilse bile öyle kalırdı); alıcı tarafta
-            // da id-dedup'u atlatıp çift arşive yol açabiliyordu. Artık AYNI
-            // `message_id` (tablonun birincil anahtarı) ve mesajın İLK
-            // kuyruğa girdiği an (`created_at` → `original_sent_at`) korunur
-            // — Ack gelince `set_message_status` aynı arşiv satırını
-            // 'sent'e çevirir, alıcı dedup'u da çalışır.
+            // Fix ("the bubble stays 'error' forever after a restart"): this used to call `send_message_content` (new random message_id).
+            // The archived bubble carried the OLD id, so the Ack and status events of the new id never updated it. `init_db` turns 'pending' into 'error'
+            // at startup, and the message stayed that way even when it was actually delivered. On the receiving side, the new id could also get past
+            // id-dedup and create a second archive copy. Now the SAME `message_id` (the table's primary key) and the moment the message FIRST entered
+            // the queue (`created_at` → `original_sent_at`) are kept. When the Ack arrives, `set_message_status` turns the same archive row 'sent',
+            // and receiver dedup works as well.
             let known = self.known_remote_devices.contains_key(&peer_fp);
-            // The backoff reaches its cap (15+30+60 s) long before most
-            // restores: do not restart it at 15 s after every process kill.
+            // The backoff reaches its cap (15 + 30 + 60 s) long before most restores. Do not restart it at 15 s after every process kill.
             let interval = (current_time_ms().saturating_sub(created_at) > ACK_RETRY_MAX_MS).then_some(ACK_RETRY_MAX_MS);
             if let Err(e) = self.send_message_content_inner(
                 peer_fp, &content, None,
                 Some(message_id.clone()), Some(created_at), interval,
             ) {
                 error!("Kalıcı kuyruktan yeniden gönderim denemesi geçici olarak başarısız (normal yeniden deneme döngüsü devralacak): {}", e);
-                // A device that is gone never gets it: the row would stay for good.
+                // A device that is gone never gets it, and the row would stay forever.
                 if !known {
                     self.remove_durable_retry(&message_id);
                     self.fail_orphaned_sends(std::slice::from_ref(&message_id));
