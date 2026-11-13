@@ -19,7 +19,7 @@ impl P2PCore {
             .collect();
         // only the retry stops. The request stays solicited, so an
         // answer already on its way is still taken (it was discarded and
-        // acked, a lost page); it ages out after 7 days (bkz. the
+        // acked, a lost page); it ages out after 7 days (see the
         // `HistorySyncRequest` arm of `send_message_content_inner`).
         for id in stale {
             self.awaiting_confirmation.remove(&id);
@@ -27,35 +27,22 @@ impl P2PCore {
         }
     }
 
-    /// node modu kapalı bir cihazda sohbet ekranı hiç yerel
-    /// geçmiş bulamadığında çağrılır (bkz. ChatActivity
-    /// `loadHistoryIfAvailable`) — karşı tarafa (chat peer) şifreli bir
-    /// `HistorySyncRequest` gönderir. Yanıt asenkron gelir (bir sonraki
-    /// `pollNetwork` turunda `{"type":"history_sync",...}` olayı olarak).
+    /// Called when a chat screen finds no local history on a device with node mode off (see ChatActivity `loadHistoryIfAvailable`). Sends an encrypted
+    /// `HistorySyncRequest` to the chat peer. The reply arrives asynchronously, as a `{"type":"history_sync",...}` event in a later `pollNetwork` turn.
     pub(crate) fn request_history_sync(&mut self, peer_device_fingerprint: String, limit: u32) -> Result<(), String> {
-        // İKİ CİHAZLI TESTTE (2026-09-06) görüldü: sohbet HER açılışında bir
-        // `HistorySyncRequest` gidiyor ve bu, `regen_content` listesinde
-        // olduğu için `pending_durable_retries` + `awaiting_confirmation`'a
-        // yazılıyor; yalnızca `HistorySyncResponse` gelince temizleniyor.
-        // Karşı taraf yavaş/çevrimdışıysa bu satırlar birikiyor (her açılış
-        // +1) ve hepsi 7 güne kadar boşuna yeniden gönderiliyor. Yeni bir
-        // istek göndermeden ÖNCE, bu peer'a giden bekleyen "tam senkron"
-        // (`before_timestamp: None`) isteğini iptal et — en yenisi zaten
-        // aynı işi yapar.
+        // Seen in a two-device test: every chat open sent a `HistorySyncRequest`. Because it is on the `regen_content` list, it was written to
+        // `pending_durable_retries` + `awaiting_confirmation`, and cleared only when a `HistorySyncResponse` arrived. If the other side was slow or offline, these
+        // rows piled up (one more per open), and all of them were re-sent for up to 7 days for nothing. Before sending a new request, cancel the pending full-sync
+        // (`before_timestamp: None`) request to this peer. The newest one does the same job.
         self.cancel_pending_history_requests(&peer_device_fingerprint, None);
         let content = MessageContent::HistorySyncRequest { limit, before_timestamp: None, group_id: None, after_timestamp: None };
         self.send_message_content(peer_device_fingerprint, &content, None).map(|_| ())
     }
 
-    /// sohbet geçmişinin en
-    /// üstüne kaydırıldığında, YEREL arşiv tükendiğinde çağrılır (bkz.
-    /// `getMessageHistoryBefore`) — karşı taraftan (chat peer) doğrudan
-    /// `before_timestamp`'ten eski mesajları ister. Yanıt asenkron gelir
-    /// (bkz. `HistorySyncResponse` kolu — `before_timestamp` dolu ise
-    /// "older_history" olayı üretir).
+    /// Called when the chat history is scrolled to the top and the LOCAL archive is exhausted (see `getMessageHistoryBefore`). Asks the chat peer directly for messages
+    /// older than `before_timestamp`. The reply arrives asynchronously (see the `HistorySyncResponse` arm: if `before_timestamp` is set, it produces an "older_history" event).
     ///
-    /// The window `[after, before)` of a "Fetch older history" press. Older
-    /// presses are not cancelled: each asks for its own window.
+    /// The window `[after, before)` of a "Fetch older history" press. Older presses are not cancelled: each asks for its own window.
     pub(crate) fn request_older_history(&mut self, peer_device_fingerprint: &str, before: i64, after: i64) -> Result<(), String> {
         let content = MessageContent::HistorySyncRequest {
             limit: HISTORY_SYNC_MAX_MESSAGES, before_timestamp: Some(before), group_id: None, after_timestamp: Some(after),
@@ -63,12 +50,9 @@ impl P2PCore {
         self.send_message_content(peer_device_fingerprint.to_string(), &content, None).map(|_| ())
     }
 
-    /// bkz. `request_older_history` aynı notu — grup için. Grup mesajları
-    /// pairwise fan-out olduğundan tek bir "otorite" yok; istek
-    /// ulaşılabilir TÜM diğer üyelere gönderilir (bkz. `send_group_message`
-    /// aynı fan-out deseni) — ilk yanıt veren boşluğu doldurur, sonraki
-    /// yanıtlar `message_id` var-olma kontrolüyle (bkz.
-    /// `message_exists_with_id`) sessizce yok sayılır.
+    /// Group counterpart of `request_older_history`. Group messages are pairwise fan-out, so there is no single authority. The request goes to ALL reachable other
+    /// members (same fan-out pattern as `send_group_message`). The first reply fills the gap. Later replies are silently ignored by the `message_exists_with_id`
+    /// check (see there).
     pub(crate) fn request_older_group_history(&mut self, group_id: &str, before: i64, after: i64) -> Result<(), String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
@@ -90,13 +74,9 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `HistorySyncResponse` "older" kolu — bir mesajın (kararlı
-    /// `message_id`'sine göre) zaten yerel arşivde olup olmadığını
-    /// kontrol eder. ESKİ SAYFA birleştirmesinde, mevcut "en yeniden daha
-    /// yeni" zaman damgası eşiğinin YANLIŞ yönde çalışacağı yerde
-    /// kullanılır (sayfalama kasıtlı olarak DAHA ESKİ mesajlar getirir).
-    /// `message_exists_with_id` within one chat. The id is chosen by the peer,
-    /// so a global match let a 1:1 message suppress a group message with the
+    /// See the "older" arm of `HistorySyncResponse`. Checks whether a message (by its stable `message_id`) is already in the local archive. Used in OLD-PAGE merging,
+    /// where the "newer than the latest timestamp" threshold would work in the WRONG direction (paging deliberately fetches OLDER messages).
+    /// `message_exists_with_id` is scoped to one chat. The id is chosen by the peer, so a global match would let a 1:1 message suppress a group message with the
     /// same id (and the reverse).
     pub(crate) fn message_exists_in_chat(&self, message_id: &str, group_id: Option<&str>, chat_key: &str) -> bool {
         let Some(conn) = &self.db else { return false };
@@ -133,8 +113,7 @@ impl P2PCore {
         );
     }
 
-    /// Marks a 1:1 row as taken from the contact's history answer (fable
-    /// A-16): its place in the past is the contact's word only.
+    /// Marks a 1:1 row as taken from the contact's history answer (audit ref A-16): its place in the past is the contact's word only.
     pub(crate) fn mark_synced(&self, chat_key: &str, message_id: Option<&str>) {
         let (Some(conn), Some(mid)) = (&self.db, message_id) else { return };
         let _ = conn.execute(
@@ -169,12 +148,9 @@ impl P2PCore {
         })
     }
 
-    /// A sibling echoed an Edit (`new_text` Some) or Delete (None) of a message
-    /// this device does not have yet. It is stored (text sealed) and acked, and
-    /// applied when the message is archived (`apply_pending_sibling_ops`).
-    /// Returns false if it could not be stored; the caller then sends no Ack.
-    /// ponytail: no index on target_message_id, the table holds a few rows;
-    /// add one if it ever grows.
+    /// A sibling echoed an Edit (`new_text` Some) or a Delete (None) of a message this device does not have yet. It is stored (text sealed) and acked, and applied
+    /// when the message is archived (`apply_pending_sibling_ops`). Returns false if it could not be stored, and the caller then sends no Ack.
+    /// ponytail: no index on target_message_id. The table holds a few rows; add one if it ever grows.
     pub(crate) fn remember_sibling_op(&self, target_message_id: &str, new_text: Option<&str>, edited_at_ms: u64) -> bool {
         const KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
         let Some(conn) = &self.db else { return false };
@@ -193,7 +169,7 @@ impl P2PCore {
         ).is_ok()
     }
 
-    /// bkz. `remember_sibling_op`. Called when one of OUR messages is archived.
+    /// see `remember_sibling_op`. Called when one of OUR messages is archived.
     /// Edits first, by stamp; a delete last.
     pub(crate) fn apply_pending_sibling_ops(&mut self, group_id: Option<&str>, chat_key: &str, target_message_id: &str) {
         let ops: Vec<(i64, Option<Vec<u8>>, i64)> = {
@@ -243,7 +219,7 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `remember_sibling_op` — a file whose delete came before its offer.
+    /// see `remember_sibling_op` — a file whose delete came before its offer.
     pub(crate) fn take_pending_sibling_delete(&self, target_message_id: &str) -> bool {
         self.db.as_ref().map_or(false, |conn| {
             conn.execute(
@@ -253,7 +229,7 @@ impl P2PCore {
         })
     }
 
-    /// bkz. `process_group_update` (late AvatarUpdate): the version of the last
+    /// see `process_group_update` (late AvatarUpdate): the version of the last
     /// avatar change applied to a group.
     pub(crate) fn group_avatar_version(&self, group_id: &str) -> u32 {
         self.db.as_ref()
@@ -285,7 +261,7 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `outstanding_history_requests` — bir isteği kayıttan düşürür.
+    /// See `outstanding_history_requests`: removes a request from the record.
     pub(crate) fn forget_history_request(&mut self, request_id: &str) {
         self.outstanding_history_requests.remove(request_id);
         self.history_answered_by.remove(request_id);
@@ -317,28 +293,16 @@ impl P2PCore {
         conn.query_row("SELECT 1 FROM messages WHERE message_id = ?1 LIMIT 1", params![message_id], |_| Ok(())).is_ok()
     }
 
-    /// Bir mesajı yerel arşive ekler. Çağıran senaryolar: (1) canlı 1:1
-    /// mesaj trafiği; (2) `HistorySyncResponse` — senkron yoluyla öğrenilen
-    /// geçmişi yerelde kalıcı kılmak için (bkz. receive_message notu).
-    /// `history_key` yüklenmemişse (Kotlin henüz Keystore'dan çözüp
-    /// vermemişse) sessizce atlar — arşivleme best-effort, mesajlaşmanın
-    /// kendisini asla engellemez.
+    /// Adds a message to the local archive. Callers: (1) live 1:1 message traffic; (2) `HistorySyncResponse`, to make history learned through sync permanent locally
+    /// (see the receive_message note). If `history_key` is not loaded (Kotlin has not yet unwrapped it from the Keystore), it is silently skipped. Archiving is
+    /// best-effort and never blocks messaging itself.
     ///
-    /// `message_id`/`status`: spec dışı, hata düzeltmesi ("bekleyen
-    /// mesajlar yeniden açılınca gönderildi gösteriliyor") — önceden bu
-    /// ikisi hiç kaydedilmiyordu, `message_status` SADECE bellek-içi bir
-    /// `HashMap` idi; uygulama/sohbet ekranı yeniden açıldığında taze bir
-    /// DB okuması HER satırı durumsuz döndürüyordu ve Kotlin tarafı
-    /// eksik durumu "gönderildi" (checkmark) varsayıyordu — gerçekten
-    /// hâlâ bekleyen ya da başarısız olmuş bir mesaj dahil. Artık
-    /// `message_id` sabit tutulup durum güncellemeleri `set_message_status`
-    /// ile AYNI satıra yazılıyor, bu yüzden bir reload gerçek durumu görür.
-    /// `reply_to_message_id`/`reply_to_preview`: spec dışı, kullanıcı
-    /// isteği (WhatsApp tarzı yanıt) — bkz. packet.rs
-    /// `MessageContent::Text.reply_to_message_id` dokümantasyonu. Bu
-    /// satırlara AYRICA kalıcılaştırılır, aksi hâlde bir sohbet geçmişi
-    /// yeniden yüklendiğinde (uygulama/ekran yeniden açılışı) yanıt
-    /// önizlemesi kaybolurdu.
+    /// `message_id` / `status`: fix ("pending messages show as sent after reopening"). Before, neither was stored. `message_status` was ONLY an in-memory
+    /// `HashMap`, so a fresh DB read after the app or chat screen reopened returned every row without status, and Kotlin assumed "sent" (checkmark), even for a
+    /// message that was still pending or had failed. Now `message_id` is kept stable, and status updates are written to the SAME row with `set_message_status`,
+    /// so a reload shows the real state.
+    /// `reply_to_message_id` / `reply_to_preview`: user request (WhatsApp-style reply). See the packet.rs `MessageContent::Text.reply_to_message_id` docs. These are
+    /// ALSO persisted in the row. Otherwise the reply preview would be lost whenever the chat history was reloaded (app or screen reopened).
     pub(crate) fn archive_message(&mut self, peer_device_fingerprint: &str, direction: &str, plaintext: &[u8], message_id: Option<&str>, status: Option<&str>, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, sent_at_ms: u64) -> Result<(), String> {
         // The sender's clock: not later than ours, or its messages sort into
         // the future (and land in an archive bucket nobody probes).
@@ -346,11 +310,8 @@ impl P2PCore {
         let key = match &self.history_key {
             Some(k) => *k,
             None => {
-                // SESSİZCE düşürmek gerçek bir hataya yol açtı: Linux
-                // istemcisinde gelen mesajlar çözülüyor, hata üretmiyor ama
-                // arşive yazılmadığı için arayüzde HİÇ görünmüyordu
-                // ("No messages yet"), sohbet bile açılmıyordu. Sebebi
-                // bulmak, bu satır olmadığı için saatler aldı.
+                // Silently dropping this caused a real bug. On the Linux client, incoming messages were decrypted without error but were never written to the archive, so
+                // the UI showed "No messages yet" and the chat did not even open. Finding the cause took hours, because this line was missing.
                 warn!(
                     "Geçmiş anahtarı yüklenmemiş — mesaj arşive YAZILMIYOR (peer={}, yön={})",
                     crate::log_id(&peer_device_fingerprint), direction
@@ -376,14 +337,10 @@ impl P2PCore {
             return Ok(());
         }
 
-        // Sunucu arşivi (bkz. `server_client::queue_archive_record`) — YEREL
-        // arşive yazılan satırın aynısı, ama `archive_key` ile YENİDEN
-        // şifrelenip sunucuya yüklenmek üzere. Sunucuda geçmiş saklama
-        // kapalıysa fonksiyon hemen döner.
+        // Server archive (see `server_client::queue_archive_record`): the SAME row as written to the local archive, but re-encrypted with `archive_key` for upload to the
+        // server. If history storage on the server is off, the function returns at once.
         //
-        // Sunucu arşivi KİMLİK bazlı (cihaz fingerprint'i değil): karşı taraf
-        // cihazını değiştirdiğinde (spec §2.2) geçmişin okunabilirliği
-        // kaybolmasın diye.
+        // The server archive is keyed by IDENTITY, not by device fingerprint, so that readability survives when the contact changes device.
         if let Some(mid) = message_id {
             let conv_key = self.identity_id_for_device(peer_device_fingerprint);
             if let Some(conv_key) = conv_key {
@@ -401,8 +358,7 @@ impl P2PCore {
                     is_deleted: false,
                     is_edited: false,
                     via_sync: false,
-                    // Yeni gelen/gonderilen bir mesajin henuz tepkisi/görüldü
-                    // bilgisi olamaz. bkz. `ArchivedMessage.reactions`/`seen_by`.
+                    // A newly received or sent message cannot have reactions or seen info yet. See `ArchivedMessage.reactions` / `seen_by`.
                     reactions: String::new(),
                     seen_by: String::new(),
                     author_proof: None,
@@ -425,41 +381,24 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Bir cihaz fingerprint'inden sahibinin `identity_id`'si.
-    ///
-    /// Sunucu arşivinin sohbet anahtarı için gerekli — bkz. `archive_message`
-    /// içindeki not.
+    /// Returns the `identity_id` of a device fingerprint's owner. Needed for the chat key of the server archive. See the note in `archive_message`.
     pub(crate) fn identity_id_for_device(&self, device_fingerprint: &str) -> Option<String> {
         self.known_remote_devices
             .get(device_fingerprint)
             .map(|d| d.identity_id.clone())
     }
 
-    /// bir grup
-    /// mesajını yerel arşive ekler — `archive_message`'ın grup karşılığı.
-    /// `peer_device_fingerprint` sütununa kasıtlı olarak boş string
-    /// yazılır (NOT NULL kısıtını bozmadan "bu bir DM değil" işareti);
-    /// gerçek anahtar `group_id`. Önceden grup mesajları ya HİÇ
-    /// arşivlenmiyordu (alınanlar — bkz. receive_message Text/group_id
-    /// notu) ya da YANLIŞ anahtarla (gönderilenler — her alıcının 1:1
-    /// `peer_device_fingerprint`'i, N-yönlü fan-out'un her kopyası için
-    /// AYRI bir satır) arşivleniyordu; ikincisi hem gerçek grup geçmişi
-    /// olarak hiç okunamıyordu hem de o alıcı aynı zamanda bir 1:1
-    /// kişiyse onun DM geçmişine sızıyordu (`load_message_history`
-    /// SADECE `peer_device_fingerprint`'e göre filtreliyor). Artık HER
-    /// grup mesajı (gönderilen/alınan) TEK bir satırla, `group_id`'ye göre
-    /// arşivleniyor.
-    /// `reply_to_message_id`/`reply_to_preview`/`reply_to_sender_identity_id`:
-    /// bkz. `archive_message` AYNI notu — grup karşılığı, ARTI yanıtlanan
-    /// mesajın göndericisinin `identity_id`'si (bkz. packet.rs
-    /// `reply_to_sender_identity_id` notu).
-    /// Signs a group message as its author, with this device's hybrid key
-    /// (Ed25519 and ML-DSA-87, like every other signature here). The result
-    /// travels with the message and is stored by every member:
-    /// `"<device fingerprint>:<Ed25519 hex>:<ML-DSA hex>"`.
-    // ponytail: hex text, about 9.4 KB a message (the ML-DSA signature is
-    // 4.6 KB raw). Make the field bytes if the size of group packets and
-    // history pages matters.
+    /// Adds a group message to the local archive: the group counterpart of `archive_message`. `peer_device_fingerprint` is deliberately written as an empty string
+    /// (a "this is not a DM" marker that keeps the NOT NULL constraint); the real key is `group_id`. Before, group messages were either NEVER archived (received ones,
+    /// see the receive_message Text/group_id note), or archived under the WRONG key (sent ones: each recipient's 1:1 `peer_device_fingerprint`, a SEPARATE row for each
+    /// copy of the N-way fan-out). The second could never be read back as real group history, and if that recipient was also a 1:1 contact, it leaked into that
+    /// contact's DM history (`load_message_history` filters ONLY by `peer_device_fingerprint`). Now EVERY group message (sent or received) is archived as ONE row,
+    /// keyed by `group_id`.
+    /// `reply_to_message_id` / `reply_to_preview` / `reply_to_sender_identity_id`: same note as `archive_message`. The group counterpart also carries the
+    /// replied-to message's sender `identity_id` (see the packet.rs `reply_to_sender_identity_id` note).
+    /// Signs a group message as its author, with this device's hybrid key (Ed25519 and ML-DSA-87, like every other signature here). The result travels with the
+    /// message and is stored by every member: `"<device fingerprint>:<Ed25519 hex>:<ML-DSA hex>"`.
+    // ponytail: hex text, about 9.4 KB per message (the ML-DSA signature is 4.6 KB raw). Make the field bytes if the size of group packets and history pages matters.
     pub(crate) fn sign_group_author(&self, group_id: &str, message_id: &str, text: &str) -> Result<String, String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let own_identity_id = self.my_identity_id().ok_or("No identity")?;
@@ -578,8 +517,7 @@ impl P2PCore {
             return Ok(());
         }
 
-        // bkz. `archive_message` içindeki aynı kanca — grupta sohbet
-        // anahtarı doğrudan `group_id`.
+        // See the same hook in `archive_message`. In a group, the chat key is directly the `group_id`.
         if let Some(mid) = message_id {
             let archived = ArchivedMessage {
                 direction: direction.to_string(),
@@ -595,15 +533,14 @@ impl P2PCore {
                 is_deleted: false,
                 is_edited: false,
                 via_sync: false,
-                // Yeni gelen/gonderilen bir mesajin henuz tepkisi/görüldü
-                // bilgisi olamaz. bkz. `ArchivedMessage.reactions`/`seen_by`.
+                // A newly received or sent message cannot have reactions or seen info yet. See `ArchivedMessage.reactions` / `seen_by`.
                 reactions: String::new(),
                 seen_by: String::new(),
                 author_proof: author_proof.map(|p| p.to_string()),
                 mentions_me: false,
             };
             if let Ok(cbor) = ciborium_bytes(&archived) {
-                // bkz. `archive_message`.
+                // see `archive_message`.
                 let now = current_time_ms();
                 self.queue_archive_record(group_id, mid, now, if sent_at_ms > 0 { sent_at_ms } else { now }, cbor);
             }
@@ -653,12 +590,9 @@ impl P2PCore {
         }
     }
 
-    /// bkz. `pending_edits_deletes` dokümantasyonu — bir Edit/Delete'in
-    /// hedefinin arşivde (mesaj OLARAK ya da dosya OLARAK) HİÇ olup
-    /// olmadığını, sahiplik/yetki kontrolü YAPMADAN kontrol eder. Bu,
-    /// `message_owned_by_sender`/`owns_file`'ın "satır yok" (Text henüz
-    /// gelmedi — tamponla) durumunu "satır var ama başkasına ait" (gerçek,
-    /// kalıcı red) durumundan ayırt edebilmek için gerekli.
+    /// See `pending_edits_deletes`. Checks, WITHOUT any ownership or authority check, whether the target of an Edit/Delete exists in the archive at all (as a message
+    /// OR as a file). This is needed to tell apart the state "no row" (the Text has not arrived yet, so buffer it) from "a row exists but belongs to someone else"
+    /// (a real, permanent rejection).
     pub(crate) fn edit_or_delete_target_exists(&self, target_message_id: &str) -> bool {
         if self.message_exists_with_id(target_message_id) {
             return true;
@@ -690,14 +624,9 @@ impl P2PCore {
         }
     }
 
-    /// Hedefi HENÜZ arşivde olmayan bir Edit/Delete'i tamponlar — bkz.
-    /// `pending_edits_deletes` alanı ve `EARLY_EDIT_DELETE_TTL_MS`
-    /// dokümantasyonu. KASITLI OLARAK Ack GÖNDERMEZ: gönderenin
-    /// `awaiting_confirmation` yeniden deneme mekanizması bu paketi canlı
-    /// tutar, hedef `Text` arşivlenip `replay_buffered_edits_deletes`
-    /// çağrılana (ya da TTL dolana) kadar. Hedef başına
-    /// `MAX_EARLY_EDITS_DELETES_PER_TARGET` ile sınırlı (en eskisi atılır) —
-    /// kötü niyetli bir eş sınırsız bellek tüketemesin.
+    /// Buffers an Edit/Delete whose target is NOT YET in the archive. See the `pending_edits_deletes` field and `EARLY_EDIT_DELETE_TTL_MS` docs. It deliberately sends NO
+    /// Ack: the sender's `awaiting_confirmation` retry keeps this packet alive until the target `Text` is archived and `replay_buffered_edits_deletes` runs (or the TTL
+    /// expires). Limited to `MAX_EARLY_EDITS_DELETES_PER_TARGET` per target (the oldest is dropped), so a malicious peer cannot consume unbounded memory.
     pub(crate) fn buffer_edit_or_delete(&mut self, target_message_id: &str, peer_fp: &str, sender_identity_id: &str, packet_message_id: &str, content: MessageContent) {
         let now = current_time_ms();
         // The per-target cap alone left the number of targets open: a peer
@@ -713,8 +642,7 @@ impl P2PCore {
             warn!("Erken Edit tamponu dolu (gönderen) — atlandı (target={})", target_message_id);
             return;
         }
-        // And in bytes: the counts alone let edits of ~1 MiB text each park
-        // hundreds of MB. ponytail: scan per buffered packet; fine at these caps.
+        // And in bytes: the counts alone let edits of about 1 MiB text each park hundreds of MB. ponytail: scan per buffered packet. Fine at these caps.
         let edit_bytes = |c: &MessageContent| match c { MessageContent::Edit { new_text, .. } => new_text.len(), _ => 0 };
         let held: usize = self.pending_edits_deletes.values().flatten().map(|e| edit_bytes(&e.4)).sum();
         if held + edit_bytes(&content) > 16 * 1024 * 1024 {
@@ -743,12 +671,9 @@ impl P2PCore {
         );
     }
 
-    /// Bir `Text`/grup `Text` başarıyla arşivlendikten HEMEN sonra çağrılır
-    /// (bkz. receive_message Text kolları) — o hedef için tamponlanmış
-    /// Edit/Delete varsa (bkz. `pending_edits_deletes`) GELİŞ SIRASINDA
-    /// yeniden uygular. Üretilen olaylar `attachment_events`'e eklenir
-    /// (bkz. `replay_early_packets` aynı desen — `poll_events` bunu
-    /// drenaj edip Kotlin/Linux tarafına iletir).
+    /// Called immediately AFTER a `Text` / group `Text` is archived successfully (see the receive_message Text arms). If there are buffered Edit/Delete packets for that
+    /// target (see `pending_edits_deletes`), they are applied again IN ARRIVAL ORDER. The events produced are added to `attachment_events` (the same pattern as
+    /// `replay_early_packets`: `poll_events` drains it and forwards it to Kotlin/Linux).
     pub(crate) fn replay_buffered_edits_deletes(&mut self, target_message_id: &str) {
         let buffered = match self.pending_edits_deletes.remove(target_message_id) {
             Some(b) if !b.is_empty() => b,
@@ -773,9 +698,7 @@ impl P2PCore {
         }
     }
 
-    /// `poll_events`'ten çağrılır — hedefi hiç gelmeyen tamponlanmış
-    /// Edit/Delete paketlerini süresi dolunca temizler (bkz.
-    /// `EARLY_EDIT_DELETE_TTL_MS`).
+    /// Called from `poll_events`. Clears buffered Edit/Delete packets whose target never arrives, once they expire (see `EARLY_EDIT_DELETE_TTL_MS`).
     pub(crate) fn prune_pending_edits_deletes(&mut self) {
         let now = current_time_ms();
         // Dropped entries are acked: the target never came (e.g. the chat was
@@ -796,19 +719,13 @@ impl P2PCore {
         }
     }
 
-    /// `Edit`/`Delete` içeriğini GERÇEKTEN uygular — sahiplik/yetki kontrolü,
-    /// arşiv güncellemesi, Ack ve olay üretimi (bkz. `message_owned_by_sender`
-    /// dokümantasyonu). Hem hedefi zaten var olan canlı paketler için hem de
-    /// `replay_buffered_edits_deletes`'ten (tamponlanmış paketler için)
-    /// çağrılır — tek bir yerde tutularak iki çağrı yolunun DAVRANIŞÇA
-    /// AYNI kalması garanti edilir.
+    /// Actually APPLIES Edit/Delete content: the ownership and authority check, the archive update, the Ack and event production (see `message_owned_by_sender`).
+    /// Called both for live packets whose target already exists and from `replay_buffered_edits_deletes` (for buffered packets). Keeping it in one place guarantees
+    /// that both call paths behave IDENTICALLY.
     pub(crate) fn apply_edit_or_delete_content(&mut self, peer_fp: &str, sender_identity_id: &str, packet_message_id: &str, content: MessageContent) -> serde_json::Value {
-        // Çoklu-cihaz düzeltmesi (bkz. `canonical_peer_key`): 1:1 arşiv
-        // satırları KANONİK cihaz anahtarı altında yazılır (receive_message
-        // Text kolu) — sahiplik kontrolü/arşiv güncellemesi/UI olayı da AYNI
-        // anahtarı kullanmalı, aksi hâlde kanonik olmayan bir cihazdan gelen
-        // Edit/Delete hedef satırı asla bulamazdı. Ack ise GERÇEK gönderen
-        // cihaza (`peer_fp`) gider — o cihazla kurulu ratchet üzerinden.
+        // Multi-device fix (see `canonical_peer_key`): 1:1 archive rows are written under the CANONICAL device key (receive_message Text arm). So the ownership check,
+        // archive update and UI event must use the SAME key too. Otherwise an Edit/Delete from a non-canonical device would never find its target row. The Ack, however,
+        // goes to the REAL sender device (`peer_fp`), over the ratchet established with that device.
         let chat_key = self.canonical_peer_key(peer_fp);
         // Authorship of the row is not enough in a group: a removed member
         // could still rewrite or delete its old messages for everyone. A group
@@ -854,8 +771,7 @@ impl P2PCore {
                 match (&group_id, owns_message) {
                     (Some(gid), true) => serde_json::json!({"type": "group_edit", "group_id": gid, "message_id": target_message_id, "text": new_text}),
                     (None, true) => serde_json::json!({"type": "edit", "peer": chat_key, "message_id": target_message_id, "text": new_text}),
-                    // bkz. #16 — hiçbir istemcinin işlemediği bir tür
-                    // yayınlamak yerine tanılama log'u + `noop`.
+                    // See instead of publishing a type that no client handles, a diagnostic log plus `noop`.
                     (_, false) => {
                         warn!("Edit reddedildi (sahiplik doğrulanamadı): {}", packet_message_id);
                         serde_json::json!({"type": "noop"})
@@ -902,7 +818,7 @@ impl P2PCore {
                 match (&group_id, owns_message || owns_file) {
                     (Some(gid), true) => serde_json::json!({"type": "group_delete", "group_id": gid, "message_id": target_message_id}),
                     (None, true) => serde_json::json!({"type": "delete", "peer": chat_key, "message_id": target_message_id}),
-                    // bkz. #16 — aynı gerekçe.
+                    // See same reason.
                     (_, false) => {
                         warn!("Delete reddedildi (sahiplik doğrulanamadı): {}", packet_message_id);
                         serde_json::json!({"type": "noop"})
@@ -923,14 +839,9 @@ impl P2PCore {
         // None: nothing could be stored (key, DB). Some(false): a stale edit.
         let key = self.history_key?;
         let conn = self.db.as_ref()?;
-        // Spec dışı  :
-        // hedef satırın arşivde SAKLANAN son düzenleme damgasını oku; gelen
-        // düzenleme DAHA ESKİ ise (ikisi de sıfırdan farklıysa) bu, gossipsub
-        // sırasızlığı yüzünden DAHA YENİ bir düzenlemeden SONRA ulaşan bayat
-        // bir düzenlemedir — sessizce yok say, aksi halde en güncel metni
-        // eskisiyle "geri alırdı". `edited_at_ms == 0` (sıralama bilgisi
-        // taşımayan eski paket) veya `stored == 0` (bu ilk düzenleme)
-        // durumunda koşulsuz uygulanır — davranış regresyonu yok.
+        // Out-of-order check: read the edit timestamp stored with the target row. If the incoming edit is OLDER (both values non-zero), it is a stale edit that arrived
+        // AFTER a newer one because of gossipsub's lack of ordering. It is silently ignored. Otherwise it would "undo" the newest text by replacing it with an older one.
+        // If `edited_at_ms == 0` (an old packet with no ordering info) or `stored == 0` (this is the first edit), it is applied unconditionally. No behaviour regression.
         let (stored_edit_ts, deleted): (u64, bool) = {
             let read = |r: &rusqlite::Row| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?));
             let row = match group_id {
@@ -959,11 +870,8 @@ impl P2PCore {
             return Some(false);
         }
         let (encrypted, nonce_bytes) = seal_with(&key, new_text.as_bytes())?;
-        // `edit_ts`: en güncel uygulanan düzenlemenin damgasını sakla — bir
-        // sonraki (muhtemelen sırasız) düzenlemenin bayat olup olmadığını
-        // yukarıdaki kontrol bununla belirler. `GREATEST`-benzeri davranış:
-        // yalnızca gelen damga daha büyükse ilerlet (0 gelirse mevcut değeri
-        // korur, çünkü buraya sadece "uygulanmalı" kararı verildiğinde geldik).
+        // `edit_ts`: keep the timestamp of the most recently applied edit. The check above uses it to judge whether the next (possibly out-of-order) edit is stale. It works
+        // like `GREATEST`: the value only moves forward when the incoming timestamp is larger (a 0 keeps the current value, since we only get here when "apply" was decided).
         let new_edit_ts = std::cmp::max(edited_at_ms, stored_edit_ts) as i64;
         let updated = match group_id {
             Some(gid) => conn.execute(
@@ -976,27 +884,20 @@ impl P2PCore {
             ),
         };
         updated.ok()?;
-        // Sunucudaki geçmişe de yansıt — bkz. `requeue_archive_row`. Bu
-        // olmadan sunucu arşivi mesajın DÜZENLENMEMİŞ hâlini saklamaya devam
-        // ederdi ve yeni bir cihaz eski metni görürdü.
+        // Also reflect this to the server's history. See `requeue_archive_row`. Without it, the server archive would keep storing the UNEDITED version of the message, and a
+        // new device would see the old text.
         self.requeue_archive_row(group_id, peer_device_fingerprint, target_message_id);
         Some(true)
     }
 
 
-    /// Yerelde DEĞİŞTİRİLMİŞ (düzenlenmiş/silinmiş) bir arşiv satırını
-    /// sunucu arşivine yeniden yükler.
+    /// Re-uploads an archive row that was changed locally (edited or deleted) to the server archive.
     ///
-    /// Bu olmadan sunucudaki geçmiş, yeni bir cihaza mesajların DÜZENLENMEMİŞ
-    /// hâlini gösterirdi — silinmiş bir mesaj bile geri gelirdi. Protokol bunu
-    /// `ArchiveRecord.rev` ile çözüyor: sunucu aynı `record_id` için sadece
-    /// DAHA YÜKSEK revizyonu kabul eder.
+    /// Without this, history on the server would show a new device the UNEDITED version of messages. Even a deleted message would come back. The protocol solves this
+    /// with `ArchiveRecord.rev`: the server accepts only a HIGHER revision for the same `record_id`.
     ///
-    /// `rev` olarak duvar saati kullanılıyor. İlk yükleme `sent_at_ms`
-    /// (geçmişte bir an) ile yapıldığından, bir düzenleme/silme her zaman
-    /// daha büyük bir değer üretir. Aynı kimliğin iki cihazı aynı satırı
-    /// yüklerse yüksek revizyonlu kazanır — yerel arşivin kendi
-    /// son-yazan-kazanır kuralıyla (bkz. `edit_ts`) aynı davranış.
+    /// The `rev` is the wall clock. The first upload used `sent_at_ms` (a moment in the past), so an edit or delete always produces a larger value. If two devices of
+    /// the same identity upload the same row, the higher revision wins. This is the same behaviour as the local archive's own last-write-wins rule (see `edit_ts`).
     pub(crate) fn requeue_archive_row(&mut self, group_id: Option<&str>, peer_device_fingerprint: &str, target_message_id: &str) {
         let Some(key) = self.history_key else { return };
         if self.archive_root_key.is_none() {
@@ -1048,9 +949,8 @@ impl P2PCore {
             is_deleted: is_deleted != 0,
             is_edited: is_edited != 0,
             via_sync: false,
-            // bkz. `ArchivedMessage.reactions`/`seen_by` — bir düzenleme bu
-            // satırı YENİDEN arşivler, o ana kadar birikmiş tepki/görüldü
-            // bilgisi kaybolmasın diye ikisi de taze okunur.
+            // See `ArchivedMessage.reactions` / `seen_by`. An edit re-archives this row, so both are read fresh, so that reactions and seen info accumulated up to that
+            // point are not lost.
             reactions: self.reactions_summary(target_message_id),
             seen_by: self.seen_by_json(target_message_id),
             author_proof: group_id.and_then(|gid| self.group_author_proof(gid, target_message_id)),
@@ -1102,10 +1002,8 @@ impl P2PCore {
                 );
             }
         }
-        // Replies that quote it kept its text in `reply_to_preview`, here and
-        // in their archived copies.
-        // In this chat only: the id is the peer's choice, and in 1:1 this ran
-        // over every chat (previews of replies to a same-id message elsewhere).
+        // Replies that quote it kept its text in `reply_to_preview`, here and in their archived copies.
+        // In this chat only: the id is the peer's choice, and in 1:1 this used to run over every chat (previews of replies to a same-id message elsewhere).
         let quoting: Vec<(String, String)> = conn
             .prepare("SELECT message_id, peer_device_fingerprint FROM messages WHERE reply_to_message_id = ?1 AND group_id IS ?2 AND (?2 IS NOT NULL OR peer_device_fingerprint = ?3) AND reply_to_preview IS NOT NULL AND message_id IS NOT NULL")
             .and_then(|mut st| st.query_map(params![target_message_id, group_id, peer_device_fingerprint], |r| Ok((r.get(0)?, r.get(1)?))).map(|rows| rows.flatten().collect()))
@@ -1120,22 +1018,16 @@ impl P2PCore {
                      (SELECT identity_id FROM remote_devices WHERE device_fingerprint = ?3)))",
             params![target_message_id, group_id, peer_device_fingerprint],
         );
-        // bkz. `apply_edit_to_archive` içindeki aynı kanca — silinmiş bir
-        // mesajın sunucudaki kopyası da tombstone'lanmalı, yoksa yeni bir
-        // cihazda geri gelirdi.
+        // See the same hook in `apply_edit_to_archive`. A deleted message's copy on the server must be tombstoned too, or it would come back on a new device.
         self.requeue_archive_row(group_id, peer_device_fingerprint, target_message_id);
         for (message_id, fp) in quoting {
             self.requeue_archive_row(group_id, &fp, &message_id);
         }
     }
 
-    /// Bir geçmiş-senkron satırı TAZE arşivlendiğinde (bu cihaz o satıra
-    /// hiç sahip değildi — bkz. `apply_delete_to_archive` çağrı yerlerindeki
-    /// AYNI desen) yanıtlayan tarafta `is_edited` işaretliyse burada da
-    /// işaretlemek için. `apply_edit_to_archive`'ın AKSİNE metni yeniden
-    /// ŞİFRELEMEZ — taze arşivleme zaten `SyncedMessage.text`'i (yanıtlayanın
-    /// GÜNCEL/düzenlenmiş içeriği) yazdı, burada sadece bayrak eksik kalmasın
-    /// diye üzerine yazılıyor.
+    /// When a history-sync row is archived FRESH (this device had no copy of it; see the same pattern at the `apply_delete_to_archive` call sites), the responder's
+    /// `is_edited` flag is also set here if it is set on the responder side. Unlike `apply_edit_to_archive`, it does NOT re-encrypt the text. The fresh archive write
+    /// already stored `SyncedMessage.text` (the responder's CURRENT, edited content). The flag is only set here, so that it does not go missing.
     pub(crate) fn mark_synced_message_edited(&mut self, group_id: Option<&str>, peer_device_fingerprint: &str, target_message_id: &str) {
         let conn = match &self.db {
             Some(c) => c,
@@ -1157,8 +1049,7 @@ impl P2PCore {
         }
     }
 
-    /// Bir kişiyle olan mesaj geçmişini çözüp döner (en yeni `limit` mesaj,
-    /// eskiden yeniye sıralı). `history_key` yoksa boş liste döner.
+    /// Decrypts and returns the message history with a contact (the newest `limit` messages, oldest first). Returns an empty list if `history_key` is missing.
     pub(crate) fn load_message_history(&self, peer_device_fingerprint: &str, limit: u32, before_timestamp: Option<i64>) -> Vec<ArchivedMessage> {
         self.load_message_history_opt(peer_device_fingerprint, limit, before_timestamp, true)
     }
@@ -1195,18 +1086,13 @@ impl P2PCore {
             Err(_) => return Vec::new(),
         };
 
-        // `before_timestamp`: bkz. `request_older_history` — dolu ise
-        // sonsuz kaydırma sayfalaması (bu zaman damgasından eski mesajlar),
-        // `None` ise mevcut davranış (en yeni `limit` mesaj).
+        // `before_timestamp`: see `request_older_history`. If set, it is infinite-scroll paging (messages older than this timestamp). If `None`, the current behaviour
+        // applies (the newest `limit` messages).
         //
-        // The cursor is a timestamp only, and a history sync archives a whole
-        // batch within one millisecond. A plain `LIMIT` that cut through such
-        // a batch lost the rest of it: the next page asks for
-        // `timestamp < boundary`. So the page runs to the end of the
-        // millisecond of its `limit`-th row (the subquery) and can be a few
+        // The cursor is a timestamp only, and a history sync archives a whole batch within one millisecond. A plain `LIMIT` that cut through such a batch lost the rest of
+        // it, because the next page asks for `timestamp < boundary`. So the page runs to the end of the millisecond of its `limit`-th row (the subquery), and can be a few
         // rows longer than `limit`.
-        // ponytail: page size is not exact. A (timestamp, id) cursor through
-        // JNI and both UIs is the upgrade if that ever matters.
+        // ponytail: the page size is not exact. A (timestamp, id) cursor through JNI and both UIs is the upgrade if that ever matters.
         if limit == 0 {
             return Vec::new();
         }
@@ -1258,9 +1144,7 @@ impl P2PCore {
                     if let Ok(text) = String::from_utf8(plaintext) {
                         // `message_id` push icinde MOVE edildiginden ozetleri ONCE hesapla.
                         let reactions_for_row = if with_marks { self.reactions_summary(message_id.as_deref().unwrap_or("")) } else { String::new() };
-                        // bkz. `ArchivedMessage.seen_by` — `reactions` ile AYNI
-                        // desen, canlı olaydan değil BURADAN (kalıcı
-                        // `message_seen` tablosu) taze okunur.
+                        // See `ArchivedMessage.seen_by`. Same pattern as `reactions`: read fresh HERE (from the persistent `message_seen` table), not from the live event.
                         let seen_by_for_row = if with_marks { self.seen_by_json(message_id.as_deref().unwrap_or("")) } else { String::new() };
                         results.push(ArchivedMessage {
                             direction,
@@ -1289,13 +1173,9 @@ impl P2PCore {
         results
     }
 
-    /// Bu peer için yerelde ARŞİVLENMİŞ en yeni mesajın zaman damgası
-    /// (arşiv boşsa/DB yoksa `None`). `HistorySyncResponse` işlenirken,
-    /// zaten sahip olduğumuz mesajları TEKRAR arşivlememek için kullanılır
-    /// (bkz. receive_message notu) — aksi halde her sohbet açılışında
-    /// (artık her zaman senkron denendiği için) aynı satırlar yinelenirdi.
-    /// `history_key` gerektirmez (sadece zaman damgası okunuyor, şifreli
-    /// içerik çözülmüyor).
+    /// The timestamp of the newest message ARCHIVED locally for this peer (`None` if the archive is empty or there is no DB). Used while processing a
+    /// `HistorySyncResponse`, to avoid archiving AGAIN the messages we already have (see the receive_message note). Otherwise the same rows would be duplicated on every
+    /// chat open (sync is always attempted now). Does not need `history_key`: only the timestamp is read, the encrypted content is not decrypted.
     pub(crate) fn latest_archived_timestamp(&self, peer_device_fingerprint: &str) -> Option<i64> {
         let conn = self.db.as_ref()?;
         conn.query_row(
@@ -1305,10 +1185,8 @@ impl P2PCore {
         ).ok().flatten()
     }
 
-    /// bir grubun
-    /// mesaj geçmişini çözüp döner — `load_message_history`'nin grup
-    /// karşılığı, `group_id`'ye göre filtreler (bkz. `archive_group_message`
-    /// notu — artık `peer_device_fingerprint`'e göre YANLIŞ filtrelenmiyor).
+    /// Decrypts and returns a group's message history: the group counterpart of `load_message_history`, filtering by `group_id` (see the `archive_group_message` note: it is
+    /// no longer filtered WRONGLY by `peer_device_fingerprint`).
     pub(crate) fn load_group_message_history(&self, group_id: &str, limit: u32, before_timestamp: Option<i64>) -> Vec<ArchivedMessage> {
         self.load_group_message_history_opt(group_id, limit, before_timestamp, true)
     }
@@ -1362,13 +1240,10 @@ impl P2PCore {
         }
     }
 
-    /// the chat list's previews under one lock: per contact (key:
-    /// identity id) and per group, the newest message and newest attachment.
+    /// the chat list's previews under one lock: per contact (key: identity id) and per group, the newest message and newest attachment.
     pub(crate) fn chat_list_previews(&self) -> serde_json::Value {
-        // the chat orders by sent time, so the preview must too. SQL picks
-        // the row (no decryption); only its arrival millisecond is loaded.
-        // ponytail: rows sharing that millisecond (a history-sync batch) are all
-        // decrypted; a (timestamp, id) cursor is the upgrade if that matters.
+        // The chat orders by sent time, so the preview must too. SQL picks the row (no decryption), and only its arrival millisecond is loaded.
+        // ponytail: rows sharing that millisecond (a history-sync batch) are all decrypted. A (timestamp, id) cursor is the upgrade if that matters.
         fn newest_sent(rows: Vec<ArchivedMessage>) -> Option<ArchivedMessage> {
             rows.into_iter().max_by_key(|m| if m.sent_at_ms > 0 { m.sent_at_ms } else { m.timestamp })
         }
@@ -1421,7 +1296,7 @@ impl P2PCore {
             Err(_) => return Vec::new(),
         };
 
-        // bkz. `load_message_history` aynı `before_timestamp` notu.
+        // See the same `before_timestamp` note in `load_message_history`.
         if limit == 0 {
             return Vec::new();
         }
@@ -1475,10 +1350,8 @@ impl P2PCore {
                     if let Ok(text) = String::from_utf8(plaintext) {
                         // `message_id` push icinde MOVE edildiginden ozetleri ONCE hesapla.
                         let reactions_for_row = if with_marks { self.reactions_summary(message_id.as_deref().unwrap_or("")) } else { String::new() };
-                        // bkz. `ArchivedMessage.seen_by` — grup için ÖZELLİKLE
-                        // önemli (kullanıcı: "özellikle gruplarda güvenilir
-                        // değil"): çoklu-üye "kim gördü" listesi artık burada,
-                        // kalıcı `message_seen` tablosundan taze okunuyor.
+                        // See `ArchivedMessage.seen_by`. Especially important for GROUPS (user: "not reliable, especially in groups"): the multi-member "who saw it" list
+                        // is now read fresh here, from the persistent `message_seen` table.
                         let seen_by_for_row = if with_marks { self.seen_by_json(message_id.as_deref().unwrap_or("")) } else { String::new() };
                         results.push(ArchivedMessage {
                             direction,
@@ -1508,28 +1381,20 @@ impl P2PCore {
         results
     }
 
-    /// Spec dışı, hata düzeltmesi ("bekleyen mesajlar yeniden açılınca
-    /// gönderildi gösteriliyor"): `message_status`'un HER değişimini
-    /// (bellek-içi HashMap) AYNI ANDA arşivlenmiş satıra da yazar — bu
-    /// sayede bir sonraki `load_message_history` (uygulama yeniden
-    /// başlasa/sohbet ekranı yeniden açılsa BİLE) gerçek durumu döner.
-    /// Satır henüz arşivlenmemişse (ör. `history_key` o an yüklenmemişti)
-    /// `UPDATE` sessizce 0 satır etkiler — zararsız, sonraki bir arşivleme
-    /// zaten güncel durumu doğrudan yazacaktır.
+    /// Fix ("pending messages show as sent after reopening"): every change of `message_status` (the in-memory HashMap) is ALSO written to the archived row at the same
+    /// time. That way the next `load_message_history` returns the real state, even after the app restarts or the chat screen reopens. If the row is not archived yet
+    /// (e.g. `history_key` was not loaded at that moment), the `UPDATE` silently affects 0 rows. That is harmless, because a later archive write will store the current state directly.
     pub(crate) fn set_message_status(&mut self, message_id: &str, status: MessageSendStatus) {
-        // The map is read once, right after the send (`send_message_content_inner`);
-        // the row in `messages` is the record.
-        // ponytail: crude bound. Drop the map and return the status from the publish call instead.
+        // The map is read once, right after the send (`send_message_content_inner`). The row in `messages` is the record.
+        // ponytail: a crude bound. Drop the map and return the status from the publish call instead.
         if self.message_status.len() >= 10_000 {
             self.message_status.clear();
         }
         self.message_status.insert(message_id.to_string(), status);
         if let Some(conn) = &self.db {
             let _ = conn.execute(
-                // Only our own rows carry a send status; ids are the sender's
-                // choice and a received row may share one.
-                // #85: 'delivered' is final; a late copy's publish or failure
-                // must not turn it back into sent/error.
+                // Only our own rows carry a send status. The ids are the sender's choice, and a received row may share one.
+                // See 'delivered' is final. A late copy's publish or failure must not turn it back into sent or error.
                 "UPDATE messages SET status = ?1 WHERE message_id = ?2 AND direction = 'sent' AND status != 'delivered'",
                 params![status.as_str(), message_id],
             );
@@ -1537,16 +1402,12 @@ impl P2PCore {
     }
 
     // ---------------------------------------------------------------
-    // Skipped-message-key kalıcılığı (Double Ratchet sıra dışı mesaj
-    // desteği) — bkz. ratchet.rs `skipped_keys` alanı dokümantasyonu.
+    // Skipped-message-key persistence (Double Ratchet out-of-order message support). See the `skipped_keys` field docs in ratchet.rs.
     // ---------------------------------------------------------------
 
-    /// Bir skipped-key'i (bir cihaz-çifti oturumunda atlanmış bir mesaj
-    /// numarasına ait anahtar) Keystore'dan yüklenen anahtarla şifreleyip
-    /// DB'ye yazar. `ratchet.rs decrypt`'in "Greater" dalında yeni bir
-    /// skipped-key üretildiğinde çağrılır. Anahtar yüklenmemişse (Kotlin
-    /// henüz `setSkippedKeyEncryptionKey` çağırmadıysa) sessizce atlanır —
-    /// bu durumda skipped-key sadece bellekte kalır (eski davranış).
+    /// Encrypts a skipped key (the key for a message number skipped in a device-pair session) with the key loaded from the Keystore, and writes it to the DB. Called when
+    /// the "Greater" branch of `ratchet.rs decrypt` produces a new skipped key. If the key is not loaded (Kotlin has not called `setSkippedKeyEncryptionKey` yet), it is
+    /// silently skipped. In that case the skipped key stays in memory only (the old behaviour).
     pub(crate) fn persist_skipped_key(&self, peer_device_fingerprint: &str, message_number: u32, key: &[u8; 32]) -> Result<(), String> {
         let enc_key = match &self.skipped_key_encryption_key {
             Some(k) => *k,
@@ -1567,9 +1428,8 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Bir skipped-key kullanıldığında (mesaj çözüldüğünde) DB'den silinir
-    /// — artık tekrar gerekmeyecek (Double Ratchet'in tek-kullanımlık
-    /// mesaj anahtarı prensibi diskteki kopya için de geçerli).
+    /// Deleted from the DB when a skipped key is used (once the message is decrypted), since it is no longer needed. The Double Ratchet's single-use message key principle
+    /// applies to the on-disk copy too.
     pub(crate) fn delete_persisted_skipped_key(&self, peer_device_fingerprint: &str, message_number: u32) {
         if let Some(conn) = &self.db {
             let _ = conn.execute(
@@ -1579,10 +1439,8 @@ impl P2PCore {
         }
     }
 
-    /// Bir cihaz-çifti oturumu için DB'de kayıtlı (henüz kullanılmamış)
-    /// skipped-key'leri çözüp döner. `load_ratchet_states_from_db` tarafından
-    /// çağrılır — dönen map, geri yüklenen `DeviceRatchetState.skipped_keys`
-    /// alanına atanır.
+    /// Decrypts and returns the (not yet used) skipped keys stored in the DB for a device-pair session. Called by `load_ratchet_states_from_db`. The returned map is assigned
+    /// to the restored `DeviceRatchetState.skipped_keys` field.
     pub(crate) fn load_skipped_keys_from_db(&self, peer_device_fingerprint: &str) -> HashMap<u32, [u8; 32]> {
         let enc_key = match &self.skipped_key_encryption_key {
             Some(k) => *k,
@@ -1636,11 +1494,8 @@ impl P2PCore {
         results
     }
 
-    /// Bir cihaz-çifti için diskte kayıtlı TÜM skipped-key'leri siler —
-    /// rotasyon olduğunda (`perform_dh_ratchet`/`respond_to_rotation`,
-    /// bkz. ratchet.rs) eski zincire ait skipped-key'ler anlamsız kaldığı
-    /// için bellekteki `skipped_keys.clear()` ile birlikte diskten de
-    /// temizlenmesi gerekir.
+    /// Deletes ALL skipped keys stored on disk for a device pair. When a rotation happens (`perform_dh_ratchet`/`respond_to_rotation`, see ratchet.rs), the skipped keys of the
+    /// old chain are meaningless, so they must be cleared from disk too, together with the in-memory `skipped_keys.clear()`.
     pub(crate) fn clear_persisted_skipped_keys(&self, peer_device_fingerprint: &str) {
         if let Some(conn) = &self.db {
             let _ = conn.execute(
