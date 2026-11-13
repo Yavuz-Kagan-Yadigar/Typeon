@@ -1,11 +1,11 @@
-//! Pure-Rust API façade for callers that do not go through JNI.
+//! Pure-Rust API facade for callers that do not go through JNI.
 //! This module provides one-to-one counterparts of the JNI exports at the end of the file (`Java_com_p2p_messenger_P2PLib_*`),
-//! stripped of JVM-specific types (JNIEnv / JString / JByteArray). The same `catch_panic` + `RUNTIME.enter()` + `core_lock()` order is kept,
-//! and so are the return formats: "Error: ..." prefixed error strings, JSON arrays, and `{"message_id":..,"status":..}` objects.
-//! Reason: the Linux desktop client (see the `Linux/` directory at the repository root) uses EXACTLY the same core: the same crypto, ratchet,
-//! database schema and network protocol. Writing the protocol a second time would let the two apps drift apart silently.
-//! Nothing changes for Android: this module is purely an addition. The JNI exports stay as they are and do not call the `api::*` functions
-//! (both go directly to `P2PCore`).
+//! stripped of JVM-specific types (JNIEnv / JString / JByteArray). The same `catch_panic` + `RUNTIME.enter()` + `core_lock()` order
+//! is kept, and so are the return formats: "Error: ..." prefixed error strings, JSON arrays, and `{"message_id":..,"status":..}` objects.
+//! Reason: the Linux desktop client (see the `Linux/` directory at the repository root) uses exactly the same core: the same crypto,
+//! ratchet, database schema and network protocol. Writing the protocol a second time would let the two apps drift apart silently.
+//! Nothing changes for Android: this module is purely an addition. The JNI exports stay as they are and do not call the `api::*`
+//! functions (both go directly to `P2PCore`).
 //! The Kotlin `P2PLib` documentation (parameter meanings, which calls must not run on the main thread, return formats) applies to every
 //! function here as well, and is not repeated.
 

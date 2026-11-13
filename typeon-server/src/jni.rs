@@ -154,11 +154,10 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
         // that eats the phone's own disk and makes the device unusable is not acceptable.
         if storage_budget_bytes > 0 {
             let budget = storage_budget_bytes as u64;
-            // Found in review: `ServerConfig.total_storage_budget_bytes` was written and read by `handle_blob_put` and
-            // `handle_authenticated`, but NEVER SET anywhere. `ServerConfig::new` leaves it `None`, and neither this file nor
-            // the headless daemon filled it in. So the total ceiling from the store-quota work was dead code, and only the
-            // per-record quotas applied. The bug that the work was written to fix stayed in force: with 20 enrolled devices
-            // instead of 8, the real ceiling was 2.5 times the budget.
+                        // `ServerConfig.total_storage_budget_bytes` was written and read by `handle_blob_put` and
+                        // `handle_authenticated`, but was NEVER SET anywhere. `ServerConfig::new` leaves it `None`, and neither this file
+                        // nor the headless daemon filled it in. So the total ceiling was dead code, and only the per-record quotas applied.
+                        // With 20 enrolled devices instead of 8, the real ceiling was 2.5 times the budget.
             config.total_storage_budget_bytes = Some(budget);
             // The budget is divided by the expected enrollment count, so no single device takes everyone else's share. The
             // split is roughly by usage: blobs are the largest, mail the smallest.
@@ -183,10 +182,10 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
         }
 
         let _guard = RUNTIME.enter();
-        // Found on a device (2026-09-18): toggling the relay/DHT switch restarts the server 600 ms after `stopServer`, which
-        // only signals the old loop. The old arti client still held its state lock, so the new one failed with "Onion
-        // service could not start: local resource (port, lockfile, etc.) already in use", and the server had no address
-        // until toggled again. Wait for the old loop (and the Tor client it owns) to be dropped first.
+                // Toggling the relay / DHT switch restarts the server 600 ms after `stopServer`, which only signals the old loop.
+                // The old arti client still held its state lock, so the new one failed with "Onion service could not start: local
+                // resource (port, lockfile, etc.) already in use", and the server had no address until toggled again. Wait for the old
+                // loop (and the Tor client it owns) to be dropped first.
         let previous = LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(mut handle) = previous {
             if RUNTIME.block_on(async { tokio::time::timeout(std::time::Duration::from_secs(20), &mut handle).await }).is_err() {

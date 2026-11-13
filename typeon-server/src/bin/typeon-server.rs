@@ -67,8 +67,8 @@ fn build_config() -> ServerConfig {
     if let Ok(name) = std::env::var("TYPEON_SERVER_NAME") {
         cfg.server_name = name;
     }
-    // Found in review: `total_storage_budget_bytes` was read but never set anywhere. The server's total disk ceiling was
-    // dead code. Only per-record quotas applied, so N records could grow real usage to N times the quota.
+        // `total_storage_budget_bytes` used to be read but never set anywhere. The server's total disk ceiling was dead code. Only
+        // per-record quotas applied, so N records could grow real usage to N times the quota.
     cfg.total_storage_budget_bytes = Some(DEFAULT_BUDGET_BYTES);
     match std::env::var("TYPEON_SERVER_BUDGET_BYTES") {
         Ok(v) => match v.trim().parse::<u64>() {

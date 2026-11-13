@@ -842,12 +842,12 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM mailbox_readers WHERE owner = ?1", params![owner], |r| r.get(0))
             .unwrap_or(0);
         for id in add {
-            // If already registered, skip the counter check. The call must be idempotent.
-            //
-            // Found during review: the query did NOT filter by `owner`, but `mailbox_readers` is multi-reader (see the
-            // schema note). So a box another party registered counted as "already there" for this client too, and the
-            // `max_mailboxes` quota was skipped. Both sides of a ratchet box register it, so this is the NORMAL case,
-            // not an edge case. In practice the quota was never enforced on the second side.
+                        // If already registered, skip the counter check. The call must be idempotent.
+                        //
+                        // The query does not filter by `owner`, but `mailbox_readers` is multi-reader (see the schema note). So a box
+                        // another party registered counted as "already there" for this client too, and the `max_mailboxes` quota was
+                        // skipped. Both sides of a ratchet box register it, so this is the NORMAL case, not an edge case, and the quota
+                        // must still apply on the second side.
             let exists: bool = self
                 .conn
                 .query_row(
@@ -1004,16 +1004,16 @@ impl Store {
             .unwrap_or(i64::MAX)
     }
 
-    /// If the SAME bytes from the same depositor are already in this box, no new row is opened. The existing `seq` is
-    /// returned.
-    ///
-    /// Crash measured on a real device (2026-08-29): client-side de-duplication recognized only `Message` envelopes. A
-    /// `Handshake` was re-deposited about once a second (~15 KB each). That filled the depositor's `bytes_mail` quota
-    /// within hours and locked all store-and-forward traffic for that device (see `deposit_dedup_key` in the client).
-    /// The client is fixed. This check is the second defence: an old or buggy client can no longer inflate the server.
-    ///
-    /// Dropping the repeat is safe: the recipient already de-duplicates by `message_id`, and an identical second copy
-    /// carries no information.
+        /// If the SAME bytes from the same depositor are already in this box, no new row is opened. The existing `seq` is
+        /// returned.
+        ///
+        /// Client-side de-duplication used to recognise only `Message` envelopes. A `Handshake` was re-deposited about once
+        /// a second (about 15 KB each). That filled the depositor's `bytes_mail` quota within hours and locked all
+        /// store-and-forward traffic for that device (see `deposit_dedup_key` in the client). The client now de-duplicates
+        /// every kind. This check is the second line of defence: an old or buggy client cannot inflate the server.
+        ///
+        /// Dropping the repeat is safe: the recipient already de-duplicates by `message_id`, and an identical second copy
+        /// carries no information.
     pub fn deposit(&self, mailbox_id: &str, sealed: &[u8], depositor: &[u8], now: i64, ttl_ms: i64) -> Result<u64, String> {
         // Matched by hash, from the index. Comparing `sealed` itself read every same-length blob of this depositor in the
         // box on each deposit.

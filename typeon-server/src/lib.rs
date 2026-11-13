@@ -154,8 +154,8 @@ const REBIND_VERIFIES_PER_MINUTE: u32 = 120;
 const REGISTER_VERIFIES_PER_MINUTE: u32 = u32::MAX;
 /// One enrolled peer's share of `REGISTER_VERIFIES_PER_MINUTE`: one full `Register` per window.
 const REGISTER_VERIFIES_PER_PEER: u32 = server_proto::MAX_REGISTER_PROOFS as u32;
-/// 2026-01-01 UTC. A wall clock before this is wrong (for example, a phone booted with a 1970 or 2020 RTC).
-/// No TTL sweep runs on such a clock.
+/// Lower sanity bound for the wall clock: 1 January 2026, UTC. A clock before this is wrong (for example a phone
+/// booted with a 1970 or 2020 RTC). No TTL sweep runs on such a clock.
 const SANE_WALL_FLOOR_MS: i64 = 1_767_225_600_000;
 
 /// `meta` key: the addresses the running server last advertised, one per line. Management commands read it
@@ -1153,12 +1153,12 @@ impl ServerCore {
         self.authenticate(peer).filter(|e| e.state == EnrollmentState::Active)
     }
 
-    /// Checks whether `incoming` more bytes would exceed the server's TOTAL disk budget.
-    ///
-    /// Found during review: the budget was enforced only in `handle_blob_put`. Mail and archive were limited per
-    /// record only, so a server with enough records (or just enough users) could use far more than the budget.
-    /// Disk-full on a phone or tablet is exactly what this mechanism exists to prevent. Blobs are the largest, but
-    /// not the only, consumers: 30-day TTL mail and unlimited archive grow too.
+        /// Checks whether `incoming` more bytes would exceed the server's TOTAL disk budget.
+        ///
+        /// The budget used to be enforced only in `handle_blob_put`. Mail and archive were limited per record only, so a
+        /// server with enough records (or just enough users) could use far more than the budget. Disk-full on a phone or
+        /// tablet is exactly what this mechanism exists to prevent. Blobs are the largest consumer, but not the only one:
+        /// 30-day TTL mail and the archive grow too.
     fn total_budget_exceeded(&self, incoming: usize) -> bool {
         let Some(total_budget) = self.config.total_storage_budget_bytes else {
             return false;
@@ -1670,20 +1670,20 @@ impl ServerCore {
         req: FileChunkRequest,
         channel: ResponseChannel<FileChunkResponse>,
     ) {
-        // This path is entirely separate from `handle_request`. It is a distinct request_response behaviour, called
-        // straight from `handle_swarm_event`, and it sat outside the enrollment check (`authenticate`). As a result,
-        // ANY peer speaking this protocol, including an unenrolled stranger connecting in node mode, could fetch chunks
-        // as soon as it knew or guessed a `blob_id`. The bytes are encrypted with `file_key`, so content did not leak
-        // directly. But the `NotFound`/`Chunk` split answered "does this file exist on the server" as an oracle, and it
-        // made a stranger cause unlimited disk and CPU work. The core had the same bug (`may_serve_file_to`), closed in
-        // an earlier review. The server counterpart had been missed.
-        //
-        // Legitimate clients are not affected. `ready_server_peers` (client) uses a server as a source only when it is
-        // `connected && enrolled`, so a download always arrives here with an enrolled `PeerId`.
-        //
-        // Rate limit: its own budget (`CHUNKS_PER_MINUTE`, 10/s), separate from the RPC budget. Tor carries about one
-        // chunk a second, so only a request loop reaches it. An enrolled peer over budget gets `Busy` (back off, same
-        // source). An unenrolled one gets `NotFound`.
+                // This path is entirely separate from `handle_request`. It is a distinct request_response behaviour, called
+                // straight from `handle_swarm_event`, and it used to sit outside the enrollment check (`authenticate`). So ANY peer
+                // speaking this protocol, including an unenrolled stranger in node mode, could fetch chunks as soon as it knew or
+                // guessed a `blob_id`. The bytes are encrypted with `file_key`, so content did not leak directly. But the
+                // `NotFound` / `Chunk` split answered "does this file exist on the server" as an oracle, and it let a stranger
+                // cause unlimited disk and CPU work. The core had the same problem (`may_serve_file_to`), which was closed earlier.
+                // The server counterpart had been missed.
+                //
+                // Legitimate clients are not affected. `ready_server_peers` (client) uses a server as a source only when it is
+                // `connected && enrolled`, so a download always arrives here with an enrolled `PeerId`.
+                //
+                // Rate limit: its own budget (`CHUNKS_PER_MINUTE`, 10/s), separate from the RPC budget. Tor carries about one
+                // chunk a second, so only a request loop reaches it. An enrolled peer over budget gets `Busy` (back off, same
+                // source). An unenrolled one gets `NotFound`.
         let enrolled = self.active(peer).is_some();
         if !enrolled || !self.check_rate(peer, true, 1) {
             warn!("Dosya parçası isteği reddedildi (kayıtsız eş ya da hız sınırı)");

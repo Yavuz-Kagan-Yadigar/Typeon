@@ -123,7 +123,7 @@ impl P2PCore {
         let window_open = self.radio_window_open;
         // See `deferred_swarm_events`. Events that were dropped by the previous turn's flush are processed before the fresh events (arrival order).
         let mut deferred = std::mem::take(&mut self.deferred_swarm_events);
-        deferred.reverse(); // `pop()` ile FIFO tüketilebilsin
+        deferred.reverse();  // consumed in FIFO order with `pop()`
         if let Some(swarm) = &mut self.swarm {
             RUNTIME.block_on(async {
                 // See `KeepAliveState` and `KEEPALIVE_FAST_INTERVAL_MS`. For each connection that is due, and not already awaiting a reply, a fresh
