@@ -386,7 +386,7 @@ mod review_oct2026_tests {
         assert!(!P2PCore::identity_proved_by_root(&ix));
     }
 
-    /// Regression: any active device of an identity could sign an add or a revoke, including a revoke of the first device.
+    /// Only the root device may sign a device add or revoke. Any other active device must be rejected, including a revoke of the first device.
     #[test]
     fn only_the_first_device_adds_and_revokes() {
         let (mut primary, mut secondary, mut me) = (P2PCore::new(), P2PCore::new(), P2PCore::new());
@@ -417,8 +417,7 @@ mod review_oct2026_tests {
         }
     }
 
-    /// Regression: the founder's own handover update was rejected by every receiver, so the group was left
-    /// without a working founder.
+    /// The founder's own handover update must be accepted by every receiver. Otherwise the group is left without a working founder.
     #[test]
     fn founder_handover_is_accepted_and_heals_a_member_that_missed_it() {
         let mut cores: Vec<P2PCore> = (0..4).map(|_| P2PCore::new()).collect();
@@ -1359,12 +1358,9 @@ mod path_safety_tests {
 
 #[cfg(test)]
 mod delivery_ack_coverage_tests {
-    /// Regression: the `Reaction` receive arm never called `send_ack`, but `Reaction` is in the
-    /// `needs_delivery_confirmation` list. So the sender retried it for up to 7 days and wrote a `pending_durable_retries` entry. Even when the
-    /// reaction was applied on the receiver, the sender kept a retry entry for days.
-    /// This test locks in that every receive arm of a content type that requires confirmation really triggers an Ack path. It scans the source
-    /// (the same pattern as `wipe_coverage_tests`, because `P2PCore` cannot be built here). Each arm either calls `send_ack(` directly, or is
-    /// explicitly on the exemption list (another path provides the Ack).
+    /// Every content type that requires confirmation must trigger an Ack path on receipt. A receive arm without `send_ack` would make the sender retry for up to 7 days.
+    /// The test scans the source (like `wipe_coverage_tests`, because `P2PCore` cannot be built here). Each arm calls `send_ack(` directly or is on the exemption list
+    /// (another path provides the Ack).
     #[test]
     fn reaction_receive_arm_sends_an_ack() {
         let src = crate::CORE_SRC;
@@ -1427,8 +1423,7 @@ mod fanout_staleness_tests {
         }
     }
 
-    /// Regression: `last_seen` was never refreshed, so a filter on it dropped live devices. With every device stale, the invite went only to a
-    /// dead one.
+    /// `last_seen` must be refreshed, so the device filter for invites does not drop live devices.
     #[test]
     fn stale_devices_are_skipped_but_never_everyone() {
         let mut core = P2PCore::new();
@@ -1638,9 +1633,8 @@ mod peer_mapping_tests {
 
 #[cfg(test)]
 mod repair_identity_exchange_tests {
-    /// Regression: re-adding a contact within 12 hours sent an IdentityExchange byte-identical to the previous one. The
-    /// server's dedup swallowed it, so pairing hung. A pairing started by the user must clear that dedup (`send_identity_exchange_fresh`). So must
-    /// the reply to a peer that (re)added us (`process_identity_exchange`, `!we_initiated`).
+    /// A contact re-added within 12 hours sends an IdentityExchange byte-identical to the previous one, which the server's dedup would swallow.
+    /// A pairing the user starts must clear that dedup (`send_identity_exchange_fresh`). So must the reply to a peer that (re)added us (`process_identity_exchange`, `!we_initiated`).
     #[test]
     fn pairing_paths_send_a_fresh_identity_exchange() {
         let src = crate::CORE_SRC;

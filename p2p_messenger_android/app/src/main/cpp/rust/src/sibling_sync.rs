@@ -673,10 +673,8 @@ impl P2PCore {
         if now.saturating_sub(self.last_sibling_backfill_at) < SIBLING_BACKFILL_INTERVAL_MS {
             return;
         }
-        // Connected siblings only: an offline one cannot answer, and the request
-        // was retried and re-deposited on the server until it expired, then sent
-        // again (9S 2026-10-02: an 8 KB deposit every window all night, radio
-        // on 28 % of the time, Typeon 19 % of the battery used).
+        // Only connected siblings are asked. An offline one cannot answer, and an unanswered request is retried and re-deposited on the server until it expires.
+        // That repeated deposit kept the radio busy all night.
         let siblings: Vec<String> = self.sibling_active_devices().into_iter()
             .filter(|fp| self.is_connected_to_device(fp)).collect();
         if siblings.is_empty() { return; }

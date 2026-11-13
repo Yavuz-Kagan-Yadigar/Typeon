@@ -280,9 +280,8 @@ mod tests {
         );
     }
 
-    /// Regression test (third-member bug). Founder A adds B (v1), then C (v2). C learns the group for the FIRST time from the v2 update, so locally
-    /// `Group::new` (founder only) + `Add(C)` is applied. That made C think the membership was [A, C], so it could never send a message to B.
-    /// `sync_members` (the authoritative list carried by the update) gives C its FULL membership.
+    /// A member who first learns of a group from a later update must get the full membership. Founder A adds B (v1), then C (v2). C first hears of the group from v2,
+    /// so the local group starts from the founder only, plus `Add(C)`. `sync_members` (the authoritative list in the update) must give C the full membership, or C could not message B.
     #[test]
     fn late_joiner_gets_full_membership() {
         let founder = "A".to_string();

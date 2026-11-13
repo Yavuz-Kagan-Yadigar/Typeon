@@ -980,10 +980,8 @@ impl P2PCore {
         if self.call.is_some() {
             return Err("Zaten bir arama sürüyor".to_string());
         }
-        // Ring EVERY active device of the contact: the chat's key is the
-        // lowest fingerprint, which can be a long-dead old phone (seen on
-        // device: the invite went only there and nothing rang). First to
-        // answer wins, see the Accept arm.
+        // Ring every active device of the contact. The chat key is the lowest fingerprint, which may belong to an old, dead device, so ringing only that one can leave
+        // the call unanswered. The first device to answer wins (see the Accept arm).
         let invited: Vec<String> = self.fanout_targets(&peer_fp).into_iter().filter(|fp| self.ratchets.contains_key(fp)).collect();
         if invited.is_empty() {
             return Err("Bu kişiyle oturum yok".to_string());

@@ -163,8 +163,7 @@ pub struct ArchivedMessage {
     /// This row's stable message id (if any). Used for the "seen" match after a reload and for status updates (see the BUGS/LIMITS note at the top of the file;
     /// now partly resolved).
     pub message_id: Option<String>,
-    /// User request (WhatsApp-style swipe-to-reply): the stable id of the message this one replies to (`message_id` in 1:1, `group_message_local_id` in
-    /// a group). See the `MessageContent::Text.reply_to_message_id` docs in packet.rs.
+    /// The stable id of the message this one replies to (`message_id` in 1:1, `group_message_local_id` in a group). See the `MessageContent::Text.reply_to_message_id` docs in packet.rs.
     pub reply_to_message_id: Option<String>,
     /// Truncated text summary of the replied-to message, as embedded by the sender. Kotlin does not look it up in its own archive.
     pub reply_to_preview: Option<String>,
@@ -307,7 +306,7 @@ pub(crate) struct DownloadState {
     pub(crate) chunk_sent_at: std::collections::HashMap<u32, u64>,
     /// The SMALLEST round trip seen in this download: the path's queue-free base latency. The window growth is judged against it (see `DOWNLOAD_RTT_GROW_FACTOR`).
     pub(crate) rtt_min: u64,
-    /// When the download started. Used only for the throughput log in `finalize_download` (whether the adaptive window helps can only be seen on a real device this way).
+    /// When the download started. Used for the throughput log in `finalize_download`, which shows whether the adaptive window helps.
     pub(crate) started_at: u64,
     /// `files.chunk_size` of this file, read once (see `file_chunk_size`).
     pub(crate) chunk_size: usize,
@@ -376,34 +375,22 @@ impl MessageSendStatus {
 }
 
 /// See the `P2PCore.awaiting_confirmation` docs.
-/// KNOWN LIMIT: this packet was encrypted under one specific ratchet chain step (the `ck_send` state). If the session with this peer goes through a DH/KEM
-/// rotation BEFORE the confirmation arrives (every 30 minutes, see the rotation spec), the receiver's skipped-key cache for the old chain is CLEARED at
-/// rotation (see `perform_dh_ratchet`/`respond_to_rotation` in ratchet.rs; this is the intended result of forward secrecy). In that case the retry can never
-/// be decrypted again. In practice this is a rare edge case: "the message was not confirmed for 30+ minutes". It does NOT affect the common case of the
-/// peer being unreachable for seconds or minutes. The full fix (re-encrypting pending packets under the new chain with the SAME message_id when a rotation is
-/// detected) was deliberately left out of this round, because its interaction with forward secrecy needs careful testing.
+/// Known limit: a retry is encrypted under the ratchet chain step current when it was made. If a DH/KEM rotation happens before the confirmation arrives,
+/// the receiver clears its skipped-key cache for the old chain (intended forward secrecy), so the old ciphertext can no longer be decrypted. Pending packets
+/// are refreshed on rotation (see `regen_pending_for_peer` and `regen_content`). It is rare: the message must stay unconfirmed across a rotation (30 minutes).
 pub(crate) struct PendingConfirmation {
     /// See `KeepAliveState.suspect`: whether the connection was probed once for this packet.
     pub(crate) suspect_probed: bool,
-    /// The peer confirmed receiving the bytes over `ENVELOPE_PROTOCOL`. A late
-    /// Ack is then only latency (Tor round trips often exceed `ACK_SUSPECT_MS`),
-    /// not a dead connection. Without this, every slow Ack marked the connection
-    /// suspect: parallel dials, surplus connections closed, in-flight requests
-    /// dropped, more slow Acks (device, 2026-09-18).
+    /// The peer confirmed receiving the bytes over `ENVELOPE_PROTOCOL`. A late Ack is only latency (Tor round trips often exceed `ACK_SUSPECT_MS`),
+    /// not a dead connection. A slow Ack must not mark the connection suspect, which would trigger parallel dials, close surplus connections and drop in-flight requests.
     pub(crate) direct_delivered: bool,
-    /// The identity of the chain GENERATION this packet was encrypted under (a 16-byte topic id derived from the root key, not secret; it is already published
-    /// as the gossipsub topic name).
+    /// The identity of the chain GENERATION this packet was encrypted under: a 16-byte topic id derived from the root key. It is not secret; it is already the gossipsub topic name.
     ///
-    /// User question (2026-08-27): "Does the 25-minute limit reset every 30 minutes, or does the gap between 25/50/75 and 30/60/90 keep opening and break sync?"
+    /// Pending packets are refreshed when the generation changes. When we rotate ourselves, `maybe_rotate_ratchet` runs and then `regen_pending_for_peer`. When the other side rotates,
+    /// `receive_message` runs `regen_pending_for_peer`. The 25-minute timer is only a fallback.
     ///
-    /// There was NO permanent breakage. Refreshing is actually event-driven. When we rotate ourselves, `maybe_rotate_ratchet` runs right after, and when we learn
-    /// of the other side's rotation, `receive_message` runs `regen_pending_for_peer`. Every pending packet is then regenerated under the fresh chain. The 25-minute
-    /// timer is only a fallback.
-    ///
-    /// BUT there was a gap: if the rotation announcement is LOST, that event never happens, and the packet kept retrying under a chain the other side can no
-    /// longer decrypt, until its own independent 25-minute timer ran out (up to 25 minutes). This stamp closes that gap. If the session's current generation differs
-    /// from the stamp, the packet is refreshed AT ONCE, with no waiting. So there is no longer any "gap opening" between the two clocks. The criterion is now
-    /// generation equality, not elapsed time.
+    /// If the rotation announcement is lost, that event never happens, and the packet would keep retrying under a chain the peer can no longer decrypt.
+    /// This stamp closes that gap: when the session's current generation differs from the stamp, the packet is refreshed at once. The criterion is generation equality, not elapsed time.
     pub(crate) chain_stamp: String,
     pub(crate) peer_device_fingerprint: String,
     /// Already encrypted and signed packet. It is sent AS IS on every retry and is NOT re-encrypted. Encrypting again would advance the ratchet, and the other side

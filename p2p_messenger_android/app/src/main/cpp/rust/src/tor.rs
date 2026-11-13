@@ -527,14 +527,12 @@ impl Transport for ArtiDialTransport {
     }
 }
 
-/// Wrapper that keeps the transport for INBOUND connections only and rejects EVERY `dial`. It is the transport-layer anchor of the onion-only guarantee.
+/// Keeps the TCP transport for INBOUND connections only and rejects every `dial`. It is the transport-layer anchor of the onion-only guarantee.
 ///
-/// The TCP transport cannot be removed from the swarm entirely: the onion service bridge (`bridge_incoming_stream`) connects inbound Tor streams to
-/// `127.0.0.1:<port>`, so a local TCP listener is required. But an outgoing TCP dial connects directly to a peer's REAL IP (clearnet) and breaks Tor
-/// anonymity (deanonymization: a pentest found UPnP and direct SYNs to `:42611`). This wrapper makes TCP listen-only: `listen_on` and inbound
-/// streams pass through unchanged, and `dial` / `dial_as_listener` always return `MultiaddrNotSupported`. So all outgoing traffic goes through
-/// `ArtiDialTransport` (onion) or the relay (over onion). libp2p can never dial a peer's clearnet address directly, no matter who calls
-/// `swarm.dial()` (kad and identify included).
+/// The TCP transport cannot leave the swarm: the onion bridge (`bridge_incoming_stream`) connects inbound Tor streams to `127.0.0.1:<port>`. An outgoing TCP dial would
+/// connect straight to a peer's real IP, which breaks Tor anonymity (UPnP and direct SYNs to `:42611` were observed). `listen_on` and inbound streams pass through;
+/// `dial` and `dial_as_listener` return `MultiaddrNotSupported`. All outgoing traffic goes through `ArtiDialTransport` (onion) or the relay over onion, so libp2p
+/// cannot dial a clearnet address, whoever calls `swarm.dial()` (kad and identify included).
 #[derive(Clone)]
 pub struct DialReject<T>(pub T);
 

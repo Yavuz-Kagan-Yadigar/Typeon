@@ -76,11 +76,8 @@ impl Drop for PollGuard {
     }
 }
 
-/// Diagnostics for a stalled core. Found on device (2026-09-18): the Note 9S
-/// core stopped for 4 minutes (no log line, no keepalive answer) with no crash,
-/// and a release build gives no way to get a stack. A watchdog thread logs who
-/// holds the core lock (caller file:line) and which `poll_events` phase is
-/// running once the lock is held past `STALL_LOG_AFTER_MS`.
+/// Diagnostics for a stalled core. A watchdog thread logs which caller holds the core lock (file:line) and which `poll_events` phase is running,
+/// once the lock is held past `STALL_LOG_AFTER_MS`. Release builds otherwise give no stack.
 pub(crate) mod lock_watch {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;

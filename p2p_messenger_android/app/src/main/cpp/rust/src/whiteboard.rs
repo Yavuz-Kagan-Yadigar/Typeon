@@ -613,9 +613,7 @@ impl P2PCore {
         let mut targets: Vec<String> = self.known_remote_devices.values()
             .filter(|d| d.is_active && participants.contains(&d.identity_id))
             .filter(|d| !self.deleted_identities.contains(&d.identity_id))
-            // Only over an established session: a whiteboard packet must never
-            // start a handshake of its own (it raced the chat screen's and the
-            // two sessions diverged — two-device test, 2026-10-01).
+            // Only over an established session. A whiteboard packet must never start a handshake of its own. Such a handshake would race the chat screen's and split the sessions.
             .filter(|d| self.ratchets.contains_key(&d.device_fingerprint))
             // Never stamped (0) counts as recent, as in `sibling_active_devices`.
             .filter(|d| self.device_recently_seen(&d.device_fingerprint))
@@ -670,8 +668,7 @@ impl P2PCore {
             erased,
             sigs,
         };
-        // Offline devices included (user decision, 2026-10-01): the packet is
-        // then left on the store-and-forward server, one deposit per burst.
+        // Offline devices are included. The packet is then left on the store-and-forward server, one deposit per burst.
         for fp in self.wb_targets(&board) {
             if let Err(e) = self.send_message_content(fp, &content, None) {
                 warn!("Whiteboard ops not sent: {}", e);

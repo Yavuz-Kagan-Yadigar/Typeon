@@ -1646,7 +1646,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_rejectDeviceAlert(mut _env:
     });
 }
 
-/// User decision: BLOCK a contact (see `block_identity`). Unlike `revoke`, this is persistent, and it is lifted only by a face-to-face re-pairing.
+/// Blocks a contact (see `block_identity`). Unlike `revoke`, this is persistent. It is lifted only by a face-to-face re-pairing.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_blockIdentity<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, identity_id: JString<'local>) -> jstring {
     let id: String = jstr(&mut env, &identity_id).unwrap_or_default();
@@ -1691,7 +1691,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_contactSafetyCode<'local>(m
     safe_new_jstring(&mut env, result.unwrap_or_default())
 }
 
-/// User decision: gives FULL trust to a contact that was met through a group (see `trust_contact`).
+/// Gives full trust to a contact met through a group (see `trust_contact`).
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_trustContact<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, contact_id: JString<'local>) -> jstring {
     let cid: String = jstr(&mut env, &contact_id).unwrap_or_default();
@@ -1745,8 +1745,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setMeteredNetwork(_env: JNI
     });
 }
 
-/// User request ("connection testing and automatic reconnection should be better"): called from Kotlin when a network interface change is reported
-/// (Wi-Fi to cellular, or any "default network changed" event). See `P2PCore::reconnect_all_known_now`.
+/// Called from Kotlin on a network interface change (Wi-Fi to cellular, or any default-network change). See `P2PCore::reconnect_all_known_now`.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_notifyNetworkChanged(_env: JNIEnv, _class: JClass) {
     let _ = catch_panic(|| {
@@ -1887,7 +1886,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_retryGroupMessageCopies<'lo
     }
 }
 
-/// "OK" or "Error: CODE: ..." (M112; was a Boolean).
+/// Returns "OK" or "Error: CODE: ...".
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_inviteToGroup<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, identity_id: JString<'local>) -> jstring {
     let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
@@ -1901,7 +1900,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_inviteToGroup<'local>(mut e
     safe_new_jstring(&mut env, out)
 }
 
-/// "OK" or "Error: CODE: ..." (M112; was a Boolean).
+/// Returns "OK" or "Error: CODE: ...".
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_removeFromGroup<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, identity_id: JString<'local>) -> jstring {
     let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
@@ -2308,22 +2307,17 @@ pub(crate) fn strings_to_jobjectarray<'local>(env: &mut JNIEnv<'local>, texts: &
 }
 
 // =====================================================================
-// KNOWN GAPS / OUT OF SCOPE (honestly marked):
+// KNOWN GAPS / OUT OF SCOPE
 //
-// NOTE: keep this block current as the code changes. The items below are the limits that are STILL valid. Items listed here before that were later
-// resolved (GroupUpdate hybrid signature, rotation sync, skipped-key cache, IdentityExchange entering the TOFU flow) have been REMOVED, so they do not
-// mislead. Their fixes are in the docs of the relevant functions and in SECURITY.md.
+// Keep this block current as the code changes. Only limits that still hold are listed here.
 //
-// 1. (RESOLVED) Phase B multi-device flow now EXISTS: device add and revoke spread over the network as
-//    `MessageContent::DeviceAddNotice`/`DeviceRevokeNotice` (over the ratchet-encrypted channel, acked and retried). See
-//    `adopt_device_link`, `apply_device_add_notice` and `apply_device_revoke_notice`. The old version of this item described
-//    `NetworkEnvelope::DeviceAdd`/`DeviceRevoke`/`GroupInvite`/`ReadReceipt` variants that were never produced. Those variants have been removed
-//    (see the `NetworkEnvelope` note in packet.rs). The real mechanism was already different.
-// 2. (RESOLVED) A Linux desktop client now EXISTS: see `Linux/` at the repo root (GTK4). It links this core directly as an rlib through the `api`
-//    module. There is no second implementation of the protocol. Node mode works there too. ONE limit: that client can only be a SECONDARY device
-//    (the  linking flow). It cannot create a new identity on its own.
-// 3. (RESOLVED) Every update carries the full member list. On a version gap, or when a member's device is unknown, the member asks the founder for
-//    the whole state (`GroupSyncRequest`), and the founder can re-send everything (`resend_group_to_all`).
+// 1. Multi-device linking is implemented: device add and revoke spread over the network as `MessageContent::DeviceAddNotice`/`DeviceRevokeNotice`
+//    (over the ratchet-encrypted channel, acked and retried). See `adopt_device_link`, `apply_device_add_notice` and `apply_device_revoke_notice`.
+// 2. A Linux desktop client exists: see `Linux/` at the repo root (GTK4). It links this core directly as an rlib through the `api` module, so there is
+//    no second protocol implementation. Node mode works there too. Limit: that client can only be a SECONDARY device (linking flow). It cannot create
+//    a new identity on its own.
+// 3. Every update carries the full member list. On a version gap, or when a member's device is unknown, the member asks the founder for the whole state
+//    (`GroupSyncRequest`), and the founder can re-send everything (`resend_group_to_all`).
 // =====================================================================
 
 #[cfg(test)]
