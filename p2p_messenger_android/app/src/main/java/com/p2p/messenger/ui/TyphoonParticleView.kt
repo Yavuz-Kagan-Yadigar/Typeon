@@ -12,28 +12,18 @@ import kotlin.math.sin
 import kotlin.random.Random
 
 /**
- * "son 15 dakikada mesaj olmayan bir sohbete
- * mesaj atıldığında görsel bir particle typhoon efekti" — sonra: "3D gibi
- * olsun, ekranın ÜSTÜNDE GENİŞ altında İNCE, BÜYÜK olsun."
+ * A particle "typhoon" effect, played when a message is sent to a chat that had no message in the last 15 minutes. It is drawn in 3D:
+ * wide at the top, narrow at the bottom, and large. So the first version, a spiral thrown outward from one point, was dropped. A real
+ * FUNNEL (tornado) geometry replaces it:
  *
- * Bu yüzden ilk sürümdeki "tek noktadan dışa savrulan sarmal" bırakıldı;
- * yerine gerçek bir HUNİ (kasırga) geometrisi:
+ * - Each particle has a HEIGHT (`h`, 0 = funnel tip at the bottom, 1 = mouth at the top) and an ANGLE. The orbit radius grows with
+ *   height (`FUNNEL_TIP_RADIUS` to `FUNNEL_MOUTH_RADIUS`), so the top is wide and the bottom narrow.
+ * - The 3D feel comes from PERSPECTIVE, not from a fake shadow. The horizontal radius is full, and the vertical radius is squashed by
+ *   `ELLIPSE_SQUASH`, so a circle seen from above appears as an ellipse. `sin(angle)` is used as DEPTH: particles behind (farther away)
+ *   are smaller and fainter. So the rotation reads as real volume moving from front to back.
+ * - Particles rise over time, and they spin faster toward the tip (as in a real tornado). That gives the funnel its twist.
  *
- * - Her parçacığın bir YÜKSEKLİĞİ (`h`, 0 = huninin ucu/alt, 1 = ağzı/üst)
- *   ve bir AÇISI var. Yörünge yarıçapı yüksekliğe göre büyüyor
- *   (`FUNNEL_TIP_RADIUS` → `FUNNEL_MOUTH_RADIUS`), yani üstte geniş altta
- *   ince — istenen huni silueti.
- * - 3D hissi PERSPEKTİFTEN geliyor, sahte bir gölgeden değil: yatayda tam
- *   yarıçap, dikeyde `ELLIPSE_SQUASH` ile ezilmiş bir elips çiziliyor
- *   (yukarıdan bakılan bir daire ekranda elips olarak görünür) ve
- *   `sin(angle)` DERİNLİK olarak kullanılıyor: arkadaki (uzaktaki)
- *   parçacıklar hem daha küçük hem daha soluk. Böylece dönme, önden arkaya
- *   geçtiği anlaşılan gerçek bir hacim gibi okunuyor.
- * - Parçacıklar zamanla yükseliyor ve dönüş hızı ucda daha yüksek (gerçek
- *   bir hortumda olduğu gibi), bu da huninin "burulma"sını veriyor.
- *
- * Yine de HAFİF: tek `Paint`, sabit süre, animasyon bitince `GONE` — sürekli
- * çalışan bir animasyon yok.
+ * It is still light: one `Paint`, a fixed duration, and the view goes `GONE` when the animation ends. No endless animation runs.
  */
 class TyphoonParticleView @JvmOverloads constructor(
     context: Context,
@@ -42,39 +32,30 @@ class TyphoonParticleView @JvmOverloads constructor(
 
     private companion object {
         /**
-         * Parçacık sayısı 110'dan 56'ya indirildi.
+         * The particle count was lowered from 110 to 56.
          *
-         * Kullanıcı "performansı çok düşük ve kasıyor" dedi ve asıl suçlu
-         * sayı DEĞİLDİ: her parçacığın izine bir `BlurMaskFilter`
-         * uygulanıyordu. O filtre donanım hızlandırmada DESTEKLENMİYOR —
-         * kullanıldığı her çizim, sistemi o katman için yazılım
-         * rasterleştirmeye düşürür. Kare başına 110 bulanık çizgi, pratikte
-         * her karede 110 yazılım geçişi demekti. Filtre tamamen kaldırıldı;
-         * "bulanıklık" hissi artık izin KENDİ geometrisinden geliyor (bkz.
-         * `TRAIL_SEGMENTS`). Sayının yarıya inmesi ek bir rahatlama.
+         * The real cost was not the count. Each particle's trail had a `BlurMaskFilter`. That filter is NOT supported by hardware
+         * acceleration, so every draw that uses it falls back to software rasterisation for that layer. With 110 blurred lines per
+         * frame, that meant 110 software passes every frame. The filter is removed entirely. The "blur" feel now comes from the
+         * trail's own geometry (see `TRAIL_SEGMENTS`). Halving the count is an extra saving.
          */
         const val PARTICLE_COUNT = 56
         const val DURATION_MS = 1900L
         /**
-         * İz, tek bir kalın çizgi DEĞİL, uç uca eklenmiş kısa parçalar.
-         * Kullanıcı raporu: "motion blur değil çizgi gibi görünüyor;
-         * parçacığın başında kalın ve opak, uca gittikçe ince ve şeffaf
-         * olsun." Tek `drawLine` bunu yapamaz (tek kalınlık, tek alfa);
-         * parçalara bölüp her parçada kalınlığı ve alfayı azaltmak, gerçek
-         * bir hız izinin koniklenmesini ve sönmesini veriyor — üstelik
-         * `BlurMaskFilter`'dan kat kat ucuz.
+         * The trail is not one thick line. It is a chain of short segments. The thick end is opaque, and the tail thins and fades out.
+         * A single `drawLine` cannot do that: it has one width and one alpha. Splitting it into segments, and reducing the width and
+         * alpha along the chain, gives a tapered and fading motion trail. It is much cheaper than `BlurMaskFilter`.
          */
         const val TRAIL_SEGMENTS = 10
-        /** Huninin ucu (alt) — görünüm genişliğinin oranı olarak. */
+        /** Funnel tip (bottom), as a fraction of the view width. */
         const val FUNNEL_TIP_RADIUS = 0.045f
-        /** Huninin ağzı (üst). Kullanıcı "üstte geniş" istedi. */
+        /** Funnel mouth (top): wide at the top, as wanted. */
         const val FUNNEL_MOUTH_RADIUS = 0.46f
-        /** Dikey ezme: 1 = daire (tepeden bakış), küçük = daha yatık. */
+        /** Vertical squash: 1 = circle (seen from above), smaller = flatter. */
         const val ELLIPSE_SQUASH = 0.30f
-        /** Parçacığın ömrü boyunca kat ettiği toplam dönüş (radyan). */
+        /** Total rotation the particle makes over its life, in radians. */
         const val BASE_SPIN = 7.0f
-        /** İzin en uzun hâlinin zaman cinsinden karşılığı — gerçek uzunluk
-         *  parçacığın boyutuyla ölçekleniyor (bkz. `Particle.trailSpan`). */
+        /** Time-based length of the longest trail. The real length is scaled with the particle's size (see `Particle.trailSpan`). */
         const val TRAIL_SPAN_MAX = 0.22f
     }
 
@@ -85,14 +66,12 @@ class TyphoonParticleView @JvmOverloads constructor(
         val spin: Float,
         val size: Float,
         val delay: Float,
-        /** Kullanıcı isteği: "izin uzunluğu, rastgele varyasyonlu parçacık
-         *  BOYUTUNA göre olsun" — büyük parçacık uzun iz bırakır. */
+        /** The trail length follows the particle SIZE, with random variation: a large particle leaves a long trail. */
         val trailSpan: Float,
         val hueShift: Float,
         val satShift: Float,
         val valShift: Float,
-        /** Accent'ten türetilmiş nihai renk — her karede yeniden
-         *  hesaplamamak için `burst`ta bir kez üretilir. */
+        /** Final colour, derived from the accent. It is computed once in `burst`, not on every frame. */
         var color: Int = 0,
     )
 
@@ -108,33 +87,29 @@ class TyphoonParticleView @JvmOverloads constructor(
     }
 
     /**
-     * Efekti başlatır. Huni GÖRÜNÜMÜN TAMAMINI kaplar (kullanıcı "büyük
-     * olsun" dedi) — bu yüzden bir merkez noktası almıyor; çağıran tarafın
-     * balon konumunu hesaplamasına gerek yok.
+     * Starts the effect. The funnel covers the WHOLE view, so there is no centre point. The caller does not need to compute the
+     * position of a bubble.
      */
     fun burst(color: Int) {
         tint = color
         val random = Random(SystemClock.uptimeMillis())
         particles = List(PARTICLE_COUNT) {
-            // Boyut önce oranı olarak seçiliyor: hem piksel boyutu hem iz
-            // uzunluğu AYNI rastgele değerden türesin diye.
+            // The size is chosen first, as a ratio. Both the pixel size and the trail length come from the same random value.
             val sizeFraction = random.nextFloat()
             val sizePx = (4.0f + sizeFraction * 7.5f) * resources.displayMetrics.density
             Particle(
                 angle0 = random.nextFloat() * 6.2832f,
-                // Başlangıç yüksekliği tüm huniye dağılsın ki efekt daha
-                // ilk karede dolu görünsün, aşağıdan yavaşça dolmasın.
+                // The starting heights are spread over the whole funnel, so the effect is full from the first frame and does not
+                // fill up slowly from the bottom.
                 height0 = random.nextFloat(),
                 rise = 0.25f + random.nextFloat() * 0.55f,
                 spin = 0.7f + random.nextFloat() * 0.8f,
-                // Kullanıcı isteği: parçacıklar DAHA BÜYÜK.
+                // Particles are larger than before.
                 size = sizePx,
                 trailSpan = TRAIL_SPAN_MAX * (0.35f + 0.65f * sizeFraction),
                 delay = random.nextFloat() * 0.2f,
-                // Kullanıcı isteği: "yaklaşık accent renginde, biraz
-                // varyasyonla". Ton/doygunluk/parlaklık HSV'de hafifçe
-                // kaydırılıyor — RGB'de kaydırmak rengi accent ailesinden
-                // çıkarıp gri/kirli tonlar üretiyordu.
+                // Colour: about the accent colour, with some variation. Hue, saturation and brightness are shifted slightly in HSV.
+                // Shifting in RGB pulled the colour away from the accent family and produced grey or muddy tones.
                 hueShift = (random.nextFloat() - 0.5f) * 34f,
                 satShift = (random.nextFloat() - 0.5f) * 0.30f,
                 valShift = (random.nextFloat() - 0.5f) * 0.34f,
@@ -156,21 +131,20 @@ class TyphoonParticleView @JvmOverloads constructor(
         postInvalidateOnAnimation()
     }
 
-    // Konum hesabının çıktısı — her parça için bir `PointF` ayırmamak
-    // (kare başına yüzlerce nesne) yerine tek bir çift alan.
+    // Output of the position calculation, reused for every particle. This avoids allocating a `PointF` per particle every frame
+    // (hundreds of objects).
     private var posX = 0f
     private var posY = 0f
     private var posHeight = 0f
 
-    // İzin noktaları — kare başına parçacık başına dizi ayırmamak için
-    // yeniden kullanılıyor. +1: baş nokta da dahil.
+    // Trail points, reused so that no array is allocated per particle per frame. Plus one for the head point.
     private val trailX = FloatArray(TRAIL_SEGMENTS + 1)
     private val trailY = FloatArray(TRAIL_SEGMENTS + 1)
 
-    /** Parçacığın `t` anındaki ekran konumunu `posX/posY`'ye yazar. */
+    /** Writes the particle's screen position at time `t` into `posX` / `posY`. */
     private fun computePosition(p: Particle, t: Float, w: Float, h: Float, centerX: Float) {
         val heightFraction = (p.height0 + p.rise * t) % 1f
-        // Ucda daha hızlı dönüş — hortumun burulması.
+        // Faster spin toward the tip, which gives the twist of the tornado.
         val angle = p.angle0 + BASE_SPIN * p.spin * (1.6f - heightFraction) * t
         val radius = (FUNNEL_TIP_RADIUS + (FUNNEL_MOUTH_RADIUS - FUNNEL_TIP_RADIUS) * heightFraction) * w
         posHeight = heightFraction
@@ -191,7 +165,7 @@ class TyphoonParticleView @JvmOverloads constructor(
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
         val centerX = w / 2f
-        // Tüm efektin genel görünürlüğü: hızlı belirir, yavaş söner.
+        // Overall visibility of the effect: it appears quickly and fades out slowly.
         val envelope = if (progress < 0.18f) progress / 0.18f else 1f - (progress - 0.18f) / 0.82f
 
         paint.style = Paint.Style.STROKE
@@ -207,16 +181,13 @@ class TyphoonParticleView @JvmOverloads constructor(
             var headHeight = posHeight
             val heightFraction = posHeight
 
-            // `sin(angle)` yerine konumdan türetilen derinlik yaklaşımı
-            // kullanmıyoruz — açıyı zaten `computePosition` biliyor; burada
-            // yalnızca kabaca ön/arka ayrımı yeterli olduğundan yörüngedeki
-            // dikey kayma işareti kullanılıyor.
+            // The depth is not derived from the position. The angle is already known to `computePosition`. Here, only a rough front/back
+            // split is needed, so the sign of the vertical offset along the orbit is used.
             val orbitCenterY = h - heightFraction * h
             val depth = ((headY - orbitCenterY) / (ELLIPSE_SQUASH * FUNNEL_MOUTH_RADIUS * w))
                 .coerceIn(-1f, 1f)
             val depthScale = 0.55f + 0.45f * (depth + 1f) / 2f
-            // Uçlarda (en alt/en üst) yumuşakça sönsün ki huni kesik
-            // görünmesin.
+            // Softly fade at the ends (bottom and top), so the funnel does not look cut off.
             val edgeFade = (1f - kotlin.math.abs(heightFraction - 0.5f) * 1.35f).coerceIn(0f, 1f)
             val headAlpha = 235f * envelope * depthScale * edgeFade
             if (headAlpha <= 1f) continue
@@ -224,15 +195,12 @@ class TyphoonParticleView @JvmOverloads constructor(
             val headWidth = p.size * depthScale
             paint.color = p.color
 
-            // İzin noktalarını önce topla (baştan uca), sonra TERS sırada
-            // çiz.
+            // Collect the trail points first (head to tail), then draw in REVERSE order.
             //
-            // Ters sıra şart: her parça yuvarlak uçlu (`Cap.ROUND`) ve
-            // parçalar farklı kalınlıkta. Baştan uca çizince kalın parçanın
-            // yuvarlak ucu, ondan sonra çizilen ince parçanın üzerinde
-            // kalıyor ve iz boyunca "boncuk" gibi şişkinlikler oluşuyordu
-            // (cihazda görüldü). Uçtan başa çizince her kalın parça bir
-            // öncekinin ucunu ÖRTÜYOR ve geçiş pürüzsüz koniye dönüşüyor.
+            // The reverse order is required. Each segment has round caps (`Cap.ROUND`) and the segments have different widths. Drawing
+            // from head to tail put the round end of a thick segment on top of the next, thinner segment, and the trail showed bulges
+            // like beads on a real device. Drawing from tail to head makes each thick segment cover the end of the previous one, so the
+            // transition becomes a smooth taper.
             trailX[0] = headX
             trailY[0] = headY
             var points = 1
@@ -241,9 +209,8 @@ class TyphoonParticleView @JvmOverloads constructor(
                 val fraction = segment.toFloat() / TRAIL_SEGMENTS
                 val tailT = (t - p.trailSpan * fraction).coerceAtLeast(0f)
                 computePosition(p, tailT, w, h, centerX)
-                // Yükseklik sarmalandığında (`% 1f`) geçmiş konum huninin
-                // öbür ucuna düşer — o parçayı çizmek ekranı boydan boya
-                // kesen yanlış bir çizgi üretirdi.
+                // When the height wraps (`% 1f`), the earlier position lands on the other end of the funnel. Drawing that segment would
+                // produce a wrong line across the whole screen.
                 if (kotlin.math.abs(posHeight - previousHeight) > 0.5f) break
                 trailX[points] = posX
                 trailY[points] = posY
@@ -252,8 +219,7 @@ class TyphoonParticleView @JvmOverloads constructor(
             }
 
             for (i in points - 1 downTo 1) {
-                // `i` uca yakınken ince ve şeffaf, başa yaklaştıkça kalın ve
-                // opak — kullanıcının istediği koniklik.
+                // `i` near the tail is thin and transparent, and near the head it is thick and opaque. That is the taper.
                 val fraction = i.toFloat() / TRAIL_SEGMENTS
                 paint.strokeWidth = headWidth * (1f - fraction) + 0.35f
                 paint.alpha = (headAlpha * (1f - fraction)).toInt().coerceIn(0, 255)

@@ -10,50 +10,34 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Yerel identity/device secret key'lerini VE mesaj geçmişi arşivini
- * diskte şifreli tutmak için kullanılan zarf şifreleme (envelope
- * encryption) katmanı.
+ * Envelope encryption layer. It keeps the local identity and device secret keys, and the message history archive, encrypted on disk.
  *
- * Android Keystore'da (mümkünse StrongBox donanımında) bir AES-256 anahtarı
- * üretilir ve tutulur — bu anahtar HİÇBİR ZAMAN dışarı çıkmaz, sadece
- * Cipher nesnesi Keystore içinde çalıştırılır. Rust/JNI tarafına asla
- * Keystore anahtarının kendisi geçirilmez; sadece bu anahtarla
- * şifrelenmiş/çözülmüş VERİ (identity secret key'leri, mesaj geçmişi
- * anahtarı) geçirilir.
+ * An AES-256 key is created and stored in the Android Keystore (in StrongBox hardware when available). That key NEVER leaves the Keystore.
+ * The Cipher object runs inside the Keystore. The Keystore key itself is never passed to the Rust/JNI side. Only DATA encrypted or decrypted
+ * with it crosses over (identity secret keys, the history key).
  *
- * NOT: Post-quantum (Kyber, Dilithium) ve X25519/Ed25519 anahtarları
- * Android Keystore'un desteklediği algoritmalar DEĞİL (Keystore sadece
- * EC/RSA/AES destekler), bu yüzden bu anahtarların kendisini doğrudan
- * Keystore'da üretip işlemleri orada yaptırmak mümkün değil. Bunun yerine
- * "envelope encryption" kullanılır: gerçek secret key'ler Rust tarafında
- * normal şekilde üretilir, ama diske yazılmadan önce bu AES anahtarıyla
- * şifrelenir. Diskte hiçbir zaman çıplak secret key bulunmaz; sadece bu
- * AES anahtarının şifrelediği ciphertext bulunur.
+ * Note: the post-quantum keys (Kyber, Dilithium) and X25519/Ed25519 keys are NOT algorithms the Android Keystore supports (it supports only
+ * EC, RSA and AES). So those keys cannot be generated in the Keystore and operated there. Instead, envelope encryption is used. The real secret
+ * keys are generated normally on the Rust side. Before being written to disk, they are encrypted with this AES key. A bare secret key never
+ * reaches the disk; only the ciphertext does.
  */
 object KeystoreCrypto {
     private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
-    /** Identity secret key bundle'ını sarmalayan anahtarın alias'ı. */
+    /** Alias of the key that wraps the identity secret key bundle. */
     const val ALIAS_IDENTITY = "p2p_messenger_master_key"
-    /** Mesaj geçmişi arşiv anahtarını sarmalayan anahtarın alias'ı — ayrı
-     *  tutulmasının nedeni: ileride birini iptal edip diğerini
-     *  etkilememek (ör. "tüm geçmişi sil" ayrı bir anahtar rotasyonuyla
-     *  yapılabilir, identity'yi etkilemeden). */
+    /** Alias of the key that wraps the message history archive key. It is kept separate so one can be revoked without affecting the other.
+     *  For example, "delete all history" can be done with a separate key rotation, without touching the identity. */
     const val ALIAS_HISTORY = "p2p_messenger_history_wrap_key"
-    /** Skipped-message-key önbelleğini (Double Ratchet'in sıra dışı/
-     *  gecikmeli mesaj desteği) sarmalayan anahtarın alias'ı. Bu, node
-     *  modundan BAĞIMSIZ her zaman kullanılır — mesaj geçmişi arşivinin
-     *  aksine, bu cache mesajlaşmanın güvenilirliği için gerekli (node
-     *  modu kapalıyken de sıra dışı mesajlar çözülebilmeli). */
+    /** Alias of the key that wraps the skipped-message-key cache (the Double Ratchet's support for out-of-order and late messages). It is
+     *  ALWAYS used, regardless of node mode. Unlike the history archive, this cache is needed for messaging reliability: out-of-order messages
+     *  must still decrypt while node mode is off. */
     const val ALIAS_SKIPPED_KEYS = "p2p_messenger_skipped_keys_wrap_key"
-    /** Kök arşiv anahtarını (ARK) sarmalayan anahtarın alias'ı — sunucuda
-     *  saklanan geçmişi çözer (bkz. ArchiveKeyManager).
+    /** Alias of the key that wraps the root archive key (ARK). It decrypts the history stored on the server (see ArchiveKeyManager).
      *
-     *  ALIAS_HISTORY'den AYRI olmasının nedeni ikisinin KAPSAMLARININ
-     *  farklı olması: history key CİHAZA ait, rastgele, kurtarma dosyasında
-     *  YOK — sadece yerel arşivi diskte şifreler. ARK ise KİMLİĞE ait,
-     *  kardeş cihazlara `DeviceSync` ile gider ve kurtarma dosyasına da
-     *  girer. Aynı alias altında tutulsalardı "yerel geçmişi sıfırla"
-     *  eylemi sunucudaki arşivi de okunamaz hale getirirdi. */
+     *  Why it is separate from ALIAS_HISTORY: the two have different scopes. The history key belongs to the DEVICE, is random, and is NOT
+     *  in the recovery file. It only encrypts the local archive on disk. The ARK belongs to the IDENTITY. It goes to sibling devices through
+     *  `DeviceSync`, and it is included in the recovery file. If they shared one alias, "reset local history" would also make the server
+     *  archive unreadable. */
     const val ALIAS_ARCHIVE_ROOT = "p2p_messenger_archive_root_wrap_key"
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
     private const val GCM_TAG_LENGTH_BITS = 128
@@ -62,8 +46,7 @@ object KeystoreCrypto {
         KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
     }
 
-    /** Verilen alias için Keystore anahtarını döner, yoksa üretir
-     *  (StrongBox varsa onda, yoksa TEE'de). */
+    /** Returns the Keystore key for the given alias. If it does not exist, it is created (in StrongBox if available, otherwise in the TEE). */
     @Synchronized
     private fun getOrCreateKey(alias: String): SecretKey {
         (keyStore.getKey(alias, null) as? SecretKey)?.let { return it }
@@ -80,23 +63,18 @@ object KeystoreCrypto {
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(256)
 
-        // Önce StrongBox'ta (ayrı güvenlik çipi) denenir — daha güçlü
-        // izolasyon. `setIsStrongBoxBacked` API 28'de eklendi; bu
-        // uygulamanın minSdk'ı 26 olduğu için önce API seviyesini kontrol
-        // ediyoruz (aksi halde API 26/27'de NoSuchMethodError riski var).
-        // Cihaz/Android sürümü desteklemiyorsa TEE'ye (Trusted Execution
-        // Environment) düşülür; ikisi de "diğer uygulamaların okuyamayacağı"
-        // garantisini sağlar, StrongBox ekstra donanım izolasyonu ekler.
+        // StrongBox (a separate security chip) is tried first, for stronger isolation. `setIsStrongBoxBacked` was added in API 28, and this
+        // app's minSdk is 26, so the API level is checked first (otherwise there is a NoSuchMethodError risk on API 26 and 27). If the device or
+        // Android version does not support it, it falls back to the TEE (Trusted Execution Environment). Both give the guarantee that other
+        // apps cannot read the key. StrongBox adds extra hardware isolation.
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
             try {
                 keyGenerator.init(baseSpec.setIsStrongBoxBacked(true).build())
                 return keyGenerator.generateKey()
             } catch (e: StrongBoxUnavailableException) {
-                // Aşağıdaki TEE fallback'ine düş.
+            // Falls back to the TEE path below.
             } catch (e: Exception) {
-                // Bazı OEM'lerde StrongBox flag'i farklı istisnalarla
-                // başarısız olabiliyor; güvenli tarafta kalıp TEE'ye
-                // düşüyoruz.
+            // On some OEMs the StrongBox flag fails with different exceptions. Staying on the safe side, it falls back to the TEE.
             }
         }
         // API 28+ only, like the call above: on 8.0/8.1 this method does not
@@ -117,9 +95,8 @@ object KeystoreCrypto {
     }
 
     /**
-     * Veriyi belirtilen Keystore anahtarıyla şifreler. Dönen bayt dizisi
-     * `[12 byte IV][ciphertext+tag]` biçimindedir — dosyaya/BLOB olarak
-     * olduğu gibi yazılabilir.
+     * Encrypts data with the given Keystore key. The returned byte array has the form `[12-byte IV][ciphertext+tag]`. It can be written
+     * to a file or a BLOB as is.
      */
     fun encrypt(plaintext: ByteArray, alias: String = ALIAS_IDENTITY): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORMATION)
@@ -129,7 +106,7 @@ object KeystoreCrypto {
         return iv + ciphertext
     }
 
-    /** `encrypt`'in ürettiği `[iv][ciphertext+tag]` formatını çözer. */
+    /** Decodes the `[iv][ciphertext+tag]` format produced by `encrypt`. */
     fun decrypt(ivAndCiphertext: ByteArray, alias: String = ALIAS_IDENTITY): ByteArray {
         require(ivAndCiphertext.size > 12) { "Encrypted blob too short" }
         val iv = ivAndCiphertext.copyOfRange(0, 12)
@@ -143,8 +120,7 @@ object KeystoreCrypto {
         return cipher.doFinal(ciphertext)
     }
 
-    /** Bu cihazda anahtarın gerçekten donanım içinde tutulup tutulmadığını
-     *  bildirir — teşhis/ayarlar ekranında gösterilebilir. */
+    /** Reports whether the key really is kept in hardware on this device. It can be shown on a diagnostics or settings screen. */
     private val keyFailureShown = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /** A stored key could not be opened, so history or session state is not
@@ -170,8 +146,8 @@ object KeystoreCrypto {
     }
 }
 
-/** Geçici dosyaya yaz + `rename`: şifreli anahtar dosyaları yazılırken
- *  çökme/güç kesintisi yarım (açılamaz) bir dosya bırakmasın. */
+/** Writes to a temporary file, then `rename`s it. This stops a crash or power loss during a write from leaving a half-written (unreadable)
+ *  key file. */
 fun java.io.File.writeBytesAtomic(bytes: ByteArray) {
     // unique tmp per call, two writers never share one.
     val tmp = java.io.File(parentFile, "$name.${System.nanoTime()}.tmp")
