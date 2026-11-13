@@ -14,7 +14,7 @@ import com.google.android.material.R.color as MR
 import java.io.File
 
 /**
- * Görünüm tercihleri — spec dışı, salt kullanıcı deneyimi tercihi.
+ * Appearance preferences. Pure user-experience settings, not part of the protocol.
  */
 object ThemePrefs {
     private const val PREFS_NAME = "p2p_settings"
@@ -31,36 +31,30 @@ object ThemePrefs {
     private const val KEY_WALLPAPER_DARKNESS = "chat_wallpaper_darkness"
     private const val TAG = "ThemePrefs"
 
-    /** Slider ranges: blur in tenths of a box radius on the downscaled work bitmap
-     *  (50 = radius 5.0, the old integer value 5), darkness in percent. */
+    /** Slider ranges. Blur is in tenths of a box radius, on the downscaled work bitmap
+     *  (50 = radius 5.0). Darkness is in percent. */
     const val WALLPAPER_BLUR_MAX = 50
     const val WALLPAPER_DARKNESS_MAX = 90
-    /** Longest side of the bitmap the blur runs on; the result is scaled back up. */
+    /** Longest side of the bitmap the blur runs on. The result is scaled back up. */
     private const val BLUR_WORK_SIDE = 256
     private const val PROCESSED_JPEG_QUALITY = 90
 
-    /** bkz. `getTextScale`/`SettingsFragment` metin boyutu kaydırıcısı —
-     *  sistemin kendi "Yazı tipi boyutu" ayarına EK, uygulamaya özel bir
-     *  çarpan (bkz. `P2PApplication.onActivityPreCreated` — `Configuration.fontScale`
-     *  üzerine bindirilir, sistem tercihini SIFIRLAMAZ). */
+    /** Text size slider in SettingsFragment. It is an app-only multiplier ON TOP of the system
+     *  font size setting (see `P2PApplication.onActivityPreCreated`: applied to `Configuration.fontScale`).
+     *  It does not reset the system preference. */
     const val TEXT_SCALE_MIN = 0.70f
     const val TEXT_SCALE_MAX = 1.60f
     const val TEXT_SCALE_DEFAULT = 1.0f
 
-    /** bkz. `getUiScale` — genel arayüz yoğunluğu (density) çarpanı; metnin
-     *  yanında dp tabanlı boşluk/simge boyutlarını da ölçekler (Android'in
-     *  sistem geneli "Görüntü boyutu" ayarıyla AYNI mekanizma, bkz.
-     *  `Configuration.densityDpi`). Çok dar bir aralıkta tutuluyor — aşırı
-     *  bir yoğunluk değişikliği (ör. 2x) düzenin taşmasına/kırılmasına yol
-     *  açabilir. */
+    /** UI density multiplier (see `getUiScale`). It scales dp-based spacing and icon sizes along with the text.
+     *  It uses the same mechanism as the system-wide display size setting (`Configuration.densityDpi`).
+     *  The range is kept narrow: a large change (for example 2x) can overflow or break the layout. */
     const val UI_SCALE_MIN = 0.75f
     const val UI_SCALE_MAX = 1.30f
     const val UI_SCALE_DEFAULT = 1.0f
 
-    /** bkz. `FontChoice`/`getFontFamily` — seçilebilecek sistem font
-     *  aileleri. Hepsi Android'in HER cihazda (bkz. platform `fonts.xml`
-     *  geri dönüş zinciri) barındırdığı jenerik aile adları — hiçbir font
-     *  dosyası paketlenmesi GEREKMEZ. */
+    /** Selectable system font families (see `FontChoice` / `getFontFamily`). They are generic family names
+     *  that every Android device has (see the platform fallback chain in fonts.xml). No font file has to be bundled. */
     enum class FontChoice(val prefValue: String, val familyName: String?, val overlayStyleRes: Int) {
         DEFAULT("default", null, 0),
         SANS_MEDIUM("sans_medium", "sans-serif-medium", R.style.ThemeOverlay_P2PMessenger_Font_SansMedium),
@@ -106,10 +100,9 @@ object ThemePrefs {
     }
 
     /**
-     * sohbet ekranının arka plan rengi — TEK
-     * (kişi/grup başına AYRI değil) tercih. `null` = "tercih yok, tema
-     * varsayılanı kullan" (bkz. `applyChatBackground`). Metin rengiyle İLGİSİ YOK — bkz. `getAccentColor`
-     * dokümantasyonu, o amaçla kullanıcı isteği üzerine kaldırıldı.
+     * Background colour of the chat screen. ONE preference for all chats (not per contact or group).
+     * `null` means "no preference, use the theme default" (see `applyChatBackground`). It has no relation to
+     * the text colour. See the `getAccentColor` docs.
      */
     fun getChatBackgroundColor(context: Context): Int? {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -127,16 +120,12 @@ object ThemePrefs {
     }
 
     /**
-     * TEK bir "vurgu" (accent) rengi — metin
-     * rengi AYRICA seçilmez, her zaman bu rengin (ve ondan türetilen ton
-     * ailesinin) üzerinde okunaklı olacak şekilde OTOMATİK siyah/beyaz
-     * hesaplanır (bkz. `applyAccentColor` — Material'ın "content-based
-     * dynamic color" motoru, ATC/HCT renk bilimiyle bunu ZATEN doğru
-     * yapıyor, elle kontrast hesaplamaya GEREK YOK). Bu tek renkten TÜM
-     * `colorPrimary*`/`colorSecondary*`/`colorTertiary*` rolleri (ve
-     * dolayısıyla düğmeler, anahtarlar, kaydırıcılar, KENDİ mesaj
-     * balonlarımız — bkz. `bubble_mine.xml` `?attr/colorPrimaryContainer`)
-     * türetilir.
+     * ONE accent colour. The text colour is NOT chosen separately. Black or white is always computed
+     * automatically to be readable on this colour and the tonal family derived from it (see `applyAccentColor`).
+     * Material's content-based dynamic colour engine (HCT colour science) does this correctly already, so no
+     * manual contrast maths is needed. From this one colour, all `colorPrimary*`, `colorSecondary*` and
+     * `colorTertiary*` roles are derived. That covers buttons, switches, sliders, and my own message bubbles
+     * (see `bubble_mine.xml`, `?attr/colorPrimaryContainer`).
      */
     fun getAccentColor(context: Context): Int? {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -153,7 +142,7 @@ object ThemePrefs {
         }
     }
 
-    /** Material You açıkken sistem (duvarkağıdı) renkleri kullanılır, vurgu seçici devre dışıdır. */
+    /** When Material You is on, system (wallpaper) colours are used and the accent picker is disabled. */
     fun isMaterialYou(context: Context): Boolean =
         DynamicColors.isDynamicColorAvailable() &&
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_MATERIAL_YOU, true)
@@ -175,11 +164,11 @@ object ThemePrefs {
     }
 
     /**
-     * Below Android 12 there is no dynamic theme for `applyAccentColor` to
-     * recolor: the chosen text color is painted onto the TextViews that use a
-     * default theme text color (buttons, errors and bubble colors untouched).
-     * ponytail: walks the tree once per burst of layout passes (50 ms
-     * debounce); per-adapter painting if that is ever measurably slow.
+     * Below Android 12 there is no dynamic theme that `applyAccentColor` can recolour. The chosen text colour
+     * is painted onto the TextViews that use a default theme text colour. Buttons, errors and bubble colours
+     * are not touched.
+     * ponytail: walks the tree once per burst of layout passes (50 ms debounce). Per-adapter painting, if this
+     * is ever measurably slow.
      */
     fun applyTextColorLegacy(activity: Activity) {
         if (DynamicColors.isDynamicColorAvailable()) return
@@ -203,8 +192,8 @@ object ThemePrefs {
             }
             if (v is android.view.ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
         }
-        // Layout passes come in bursts (scrolling, typing): one walk after
-        // they settle instead of one per pass.
+        // Layout passes come in bursts (scrolling, typing). One walk runs after they settle,
+        // instead of one per pass.
         val walkNow = Runnable { walk(decor) }
         decor.viewTreeObserver.addOnGlobalLayoutListener {
             decor.removeCallbacks(walkNow)
@@ -213,17 +202,14 @@ object ThemePrefs {
     }
 
     /**
-     * duvarkağıdı resmi uygulamanın kendi
-     * `filesDir`'inde SABİT bir dosya adıyla saklanır (bkz. profil fotoğrafı
-     * deseni — `content://` URI'sini DEĞİL, kalıcı izin karmaşasına hiç
-     * girmeden ham JPEG baytlarını tutuyoruz). Varlığı dosyanın kendisi
-     * "seçilmiş mi" bilgisini taşır, ayrı bir SharedPreferences bayrağına
-     * gerek yok.
+     * The wallpaper image is kept under a FIXED file name in the app's own `filesDir`. The raw JPEG bytes are
+     * stored, not a `content://` URI, so no persistent-permission handling is needed. The file's existence says
+     * whether a wallpaper is set, so no separate SharedPreferences flag is needed.
      */
     fun chatWallpaperFile(context: Context): File = File(context.filesDir, WALLPAPER_FILE_NAME)
 
-    /** Blurred + darkened copy of [chatWallpaperFile], next to it. Exists only
-     *  while at least one slider is above 0; see [regenerateProcessedWallpaper]. */
+    /** Blurred and darkened copy of [chatWallpaperFile], next to it. It exists only while at least one slider
+     *  is above 0. See [regenerateProcessedWallpaper]. */
     fun chatWallpaperProcessedFile(context: Context): File = File(context.filesDir, WALLPAPER_PROCESSED_FILE_NAME)
 
     /** Blur in tenths (0..[WALLPAPER_BLUR_MAX]). */
@@ -244,10 +230,9 @@ object ThemePrefs {
     }
 
     /**
-     * Computes the processed wallpaper ONCE from the stored sliders and writes it
-     * (or deletes it when both are 0). Blocking: call from a background thread,
-     * only when a slider is released or a new image is picked. Chats never call
-     * this, they just load whatever file this left behind.
+     * Computes the processed wallpaper ONCE from the stored sliders and writes it (or deletes it when both are 0).
+     * It blocks, so call it from a background thread, and only when a slider is released or a new image is picked.
+     * Chats never call this. They load whatever file it left behind.
      */
     @Synchronized
     fun regenerateProcessedWallpaper(context: Context) {
@@ -274,7 +259,7 @@ object ThemePrefs {
         }
     }
 
-    /** Cheap bitmap for the live preview while a slider is dragged (not stored). */
+    /** Cheap bitmap for the live preview while a slider is dragged. It is not stored. */
     fun wallpaperPreview(context: Context, blur: Int, darkness: Int, side: Int): Bitmap? {
         val original = chatWallpaperFile(context)
         if (!original.exists()) return null
@@ -333,7 +318,7 @@ object ThemePrefs {
         }
     }
 
-    /** Running-sum box blur of radius [r] along rows ([horizontal]) or columns, edges clamped. */
+    /** Running-sum box blur of radius [r] along rows ([horizontal]) or columns, with edges clamped. */
     private fun boxBlur(px: IntArray, w: Int, h: Int, r: Int, horizontal: Boolean) {
         val len = if (horizontal) w else h
         val lines = if (horizontal) h else w
@@ -360,43 +345,36 @@ object ThemePrefs {
         }
     }
 
-    /** Spec dışı, kullanıcı isteği ("birden fazla font içe aktarabilmeli,
-     *  her biri kendi adıyla listede görünmeli"): tek sabit dosya yerine
-     *  KİMLİKLİ bir font listesi. `id`, `newCustomFontId()`'nin ürettiği
-     *  (kronolojik SIRALANABİLİR — 13 haneli epoch-ms) bir dizedir; ekranda
-     *  gösterilen ad ayrı saklanır (SAF'ın verdiği gerçek dosya adı, bkz.
-     *  `SettingsFragment.onFontPicked`). */
+    /**
+     * Several custom fonts can be imported, and each one appears in the list under its own name. So instead of
+     * one fixed file, there is a list of IDENTIFIED fonts. `id` is a string from `newCustomFontId()`
+     * (sortable, a 13-digit epoch-ms value). The display name is stored separately. It is the real file name
+     * given by SAF (see `SettingsFragment.onFontPicked`).
+     */
     data class CustomFont(val id: String, val displayName: String)
 
     private const val KEY_CUSTOM_FONTS = "custom_fonts"
     private const val KEY_ACTIVE_CUSTOM_FONT_ID = "active_custom_font_id"
-    // `id` ve `displayName`'i TEK bir Set<String> girdisinde ayıran işaretçi —
-    // bir dosya adında asla geçmeyecek bir kontrol karakteri (kullanıcı adı
-    // her ne olursa olsun `` yazamaz).
+    // Separator between `id` and `displayName` in ONE Set<String> entry. It is a control character that can
+    // never occur in a file name, so the display name cannot break the entry.
     private const val CUSTOM_FONT_SEP = ''
 
-    /** bkz. `customFontFile` — `content://` URI'yi DEĞİL, kalıcı izin
-     *  karmaşasına hiç girmeden ham font baytlarını tutuyoruz. Her içe
-     *  aktarılan font KENDİ dosyasını alır (`id` bazlı ad) — tek dosyanın
-     *  üzerine yazmak öncekini sessizce kaybederdi. */
+    /** See `customFontFile`. The raw font bytes are stored, not a `content://` URI. Each imported font gets its
+     *  own file, named by its `id`. Writing over one shared file would silently lose the previous font. */
     fun customFontFile(context: Context, id: String): File {
-        // Ids come from `newCustomFontId` (digits only); refuse anything else
-        // so a stored id can never point outside filesDir.
+        // Ids come from `newCustomFontId` (digits only). Anything else is refused, so a stored id can
+        // never point outside filesDir.
         require(id.isNotEmpty() && id.all { it in '0'..'9' }) { "bad font id" }
         return File(context.filesDir, "custom_font_$id.ttf")
     }
 
-    /** Yeni bir içe aktarma için kararlı, kronolojik sıralanabilir bir
-     *  kimlik üretir — dosya adı VE listedeki sıralama anahtarı olarak
-     *  kullanılır (bkz. `getCustomFonts` — id'ye göre string sıralama,
-     *  epoch-ms hep aynı basamak sayısında olduğu sürece kronolojiktir). */
+    /** Makes a new stable, chronologically sortable id for an import. It is used as the file name AND as the sort key
+     *  in the list (see `getCustomFonts`: string sort by id is chronological while epoch-ms has the same number of digits). */
     fun newCustomFontId(): String = System.currentTimeMillis().toString()
 
-    /** `id`'yi (ve dosyasını, çağıran taraf `customFontFile` ile ayrıca
-     *  silmeli) listeye KAYDETMEZ, sadece görünen adı verilen listeye
-     *  ekler — çağıran taraf font baytlarını dosyaya BAŞARIYLA yazdıktan
-     *  SONRA çağırmalı (bkz. `SettingsFragment.onFontPicked` — kopyalama
-     *  başarısız olursa listeye hiç eklenmez, yetim bir kayıt kalmaz). */
+    /** Does NOT save `id` (or its file; the caller deletes the file with `customFontFile`) to the list. It only adds
+     *  the display name to the list. The caller must call it AFTER the font bytes were written to the file successfully
+     *  (see `SettingsFragment.onFontPicked`). If the copy fails, nothing is added to the list, and no orphan entry remains. */
     fun registerCustomFont(context: Context, id: String, displayName: String) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val current = prefs.getStringSet(KEY_CUSTOM_FONTS, emptySet()) ?: emptySet()
@@ -405,8 +383,7 @@ object ThemePrefs {
         prefs.edit().putStringSet(KEY_CUSTOM_FONTS, updated).apply()
     }
 
-    /** İçe aktarılmış tüm fontlar, en eskiden en yeniye (bkz. `newCustomFontId`
-     *  — id'ler epoch-ms olduğundan string sıralama zaman sırasıyla aynı). */
+    /** All imported fonts, from oldest to newest (see `newCustomFontId`: ids are epoch-ms, so string order is time order). */
     fun getCustomFonts(context: Context): List<CustomFont> {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val raw = prefs.getStringSet(KEY_CUSTOM_FONTS, emptySet()) ?: emptySet()
@@ -426,24 +403,21 @@ object ThemePrefs {
         prefs.edit().putString(KEY_ACTIVE_CUSTOM_FONT_ID, id).apply()
     }
 
-    /** bkz. `getFontChoice`/`FontChoice.CUSTOM` — o an SEÇİLİ olan içe
-     *  aktarılmış fontun dosyası; kayıt bozulmuşsa (id silinmiş/eksik)
-     *  `null` (çağıran taraf sessizce no-op yapar, bkz. `FontOverride.
-     *  applyFile`'ın kendi dosya-yok kontrolü). */
+    /** See `getFontChoice` / `FontChoice.CUSTOM`. The file of the custom font that is currently SELECTED. If the record
+     *  is broken (id removed or missing), it returns `null`. The caller then does nothing (see `FontOverride.applyFile`'s
+     *  own missing-file check). */
     fun activeCustomFontFile(context: Context): File? =
         getActiveCustomFontId(context)?.let { runCatching { customFontFile(context, it) }.getOrNull() }
 
-    /** bkz. `getCustomFonts`/`getActiveCustomFontId` — o an seçili içe
-     *  aktarılmış fontun görünen adı; kayıt bulunamazsa `null` (çağıran
-     *  taraf jenerik bir yer tutucu adı gösterir). */
+    /** See `getCustomFonts` / `getActiveCustomFontId`. The display name of the custom font that is currently selected.
+     *  If no record is found, `null`. The caller then shows a generic placeholder name. */
     fun activeCustomFontName(context: Context): String? {
         val id = getActiveCustomFontId(context) ?: return null
         return getCustomFonts(context).find { it.id == id }?.displayName
     }
 
-    /** `clearChatWallpaper` — dosya silindiğinde bellekteki son decoded
-     *  örneği de düşer (dialog'dan döndüğünde silinmiş duvarkağıdı, eski
-     *  bitmap'le bir kez daha görünmesin). */
+    /** `clearChatWallpaper`. When the file is deleted, the last decoded bitmap in memory is dropped too, so a deleted
+     *  wallpaper cannot show again from the old bitmap after the dialog returns. */
     fun clearChatWallpaper(context: Context) {
         chatWallpaperCache = null
         chatWallpaperKey = ""
@@ -452,16 +426,14 @@ object ThemePrefs {
     }
 
     /**
-     * `ChatActivity`/`GroupChatActivity` — ikisi de AYNI `activity_chat.xml`
-     * düzenini kullanır (bkz. o dosyanın `imgChatWallpaper`/`rootChatLayout`
-     * notu) — bu yüzden duvarkağıdı/arka plan rengi uygulama mantığı burada
-     * TEK bir yerde, `onCreate` (ilk açılış) VE `onResume`'dan (Ayarlar'dan
-     * dönüşte AYNI anda etkili olması için) çağrılır.
+     * ChatActivity and GroupChatActivity use the SAME `activity_chat.xml` layout (see the `imgChatWallpaper` /
+     * `rootChatLayout` notes in that file). So the wallpaper and background colour logic lives in ONE place here.
+     * It is called from `onCreate` (first open) and from `onResume` (so a change made in Settings applies at once on return).
      */
     fun applyChatBackground(activity: Activity) {
         val wallpaperView = activity.findViewById<ImageView>(R.id.imgChatWallpaper) ?: return
-        // The processed file (if any) is the only thing loaded here; the
-        // size+mtime key below makes a new one invalidate the memory cache.
+        // The processed file (if any) is the only thing loaded here. The size and mtime key below means a new
+        // file invalidates the memory cache.
         val wallpaperFile = chatWallpaperProcessedFile(activity).takeIf { it.exists() && chatWallpaperFile(activity).exists() }
             ?: chatWallpaperFile(activity)
         if (wallpaperFile.exists()) {
@@ -474,15 +446,14 @@ object ThemePrefs {
                 null
             }
             if (bitmap != null) {
-                // Before the screen-sampled decode: the FULL-resolution file
-                // was re-decoded on the UI thread at every onCreate/onResume
-                // (both chat screens). One bitmap, refreshed only when the
-                // wallpaper file itself changed, is all this view needs.
+                // The bitmap is decoded at the screen's sampled size. The full-resolution file used to be
+                // decoded on the UI thread at every onCreate and onResume of both chat screens. One bitmap,
+                // refreshed only when the wallpaper file itself changes, is all this view needs.
                 chatWallpaperCache = bitmap
                 chatWallpaperKey = key
                 wallpaperView.setImageBitmap(bitmap)
-                // Fixed full-display height: the keyboard shrinks the root, not
-                // the picture (the overflow under the keyboard is clipped).
+                // Fixed full-display height: the keyboard shrinks the root, not the picture
+                // (the overflow under the keyboard is clipped).
                 @Suppress("DEPRECATION")
                 wallpaperView.layoutParams.height = android.util.DisplayMetrics()
                     .also { activity.windowManager.defaultDisplay.getRealMetrics(it) }.heightPixels
@@ -502,13 +473,12 @@ object ThemePrefs {
         }
     }
 
-    /** Önbellek: SADECE son decoded örneği tek bitmap; eski girdisi GC'ye kalır. */
+    /** Cache: only the last decoded sample, as one bitmap. The older entry is left for the GC. */
     private var chatWallpaperCache: Bitmap? = null
     private var chatWallpaperKey = ""
 
-    /** Bounds sorgusu + `inSampleSize`: boyutu ekrana yeten çözünürlük yeter,
-     *  dosyanın megapikseli belleğe girmiyor (bkz. MediaViewerActivity'deki
-     *  aynı desen). */
+    /** Bounds query, then `inSampleSize`. A resolution that fits the screen is enough, so the file's full megapixels
+     *  are never loaded into memory (same pattern as MediaViewerActivity). */
     private fun decodeWallpaper(path: String, screenW: Int, screenH: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(path, bounds)
@@ -521,35 +491,21 @@ object ThemePrefs {
     }
 
     /**
-     * Spec dışı, kullanıcı isteği ("accent color picker, kullanılsın her
-     * yerde, varyasyonlarla, metin her zaman rengin üzerinde okunaklı siyah/
-     * beyaz olsun"): elle bir kontrast hesabı YAPMIYORUZ — Material
-     * kütüphanesinin "content-based dynamic color" motoru (Google'ın HCT/
-     * Material Color Utilities renk bilimi, Android 12+ duvarkağıdı tabanlı
-     * dinamik rengin AYNISI ama duvarkağıdı yerine BİZİM verdiğimiz tek bir
-     * "tohum" renkten) TEK bir renkten `colorPrimary`/`colorOnPrimary`/
-     * `colorPrimaryContainer`/`colorOnPrimaryContainer`/`colorSecondary*`/
-     * `colorTertiary*` (VARYASYONLAR) dahil TÜM tonal aileyi VE her birinin
-     * üzerindeki metnin doğru kontrastını OTOMATİK üretir — bu, Google'ın
-     * kendi (yoğun test edilmiş) renk motoru, elle siyah/beyaz hesaplamaktan
-     * çok daha güvenilir. `setContentBasedSource(@ColorInt Int)` — Bitmap'e
-     * HİÇ gerek yok, Material kütüphanesi tek bir renk int'ini doğrudan
-     * tohum olarak kabul eden bir overload zaten sunuyor.
+     * Accent colour picker, applied everywhere, with variations. The text is always black or white, readable on the colour.
+     * No manual contrast maths is done. Material's content-based dynamic colour engine (Material Color Utilities,
+     * HCT) builds the whole tonal family from ONE seed colour: `colorPrimary`, `colorOnPrimary`, `colorPrimaryContainer`,
+     * `colorOnPrimaryContainer`, `colorSecondary*` and `colorTertiary*` (the variants). It also computes the text
+     * contrast on each of them. It is the same engine as Android 12+ wallpaper dynamic colour, but seeded with the
+     * colour we choose. `setContentBasedSource(@ColorInt Int)` takes that colour directly, so no Bitmap is needed.
      *
-     * BİLİNEN SINIR (kullanıcı geri bildirimi): maksimum saturasyonda bir
-     * tohum seçilse BİLE sonuç hâlâ soluk görünebilir — bu, Android'in
-     * içindeki (kapalı kaynak/OEM'e özel) dinamik renk üretim ardışık
-     * düzeninin `colorPrimaryContainer` gibi AÇIK tonlu (yüksek "tone")
-     * rollerde chroma'yı YAPISAL olarak kısıtlamasından kaynaklanıyor
-     * (yüksek tone'da sRGB gamut'u ZATEN az chroma'ya izin verir) — tohum
-     * rengin chroma'sını büyütmek bunu ÇÖZMEDİ (denendi, geri alındı),
-     * çünkü darboğaz tohumda değil, o rolün TONUNDA. Şu an için düzeltilmiş
-     * bir çözüm YOK.
+     * Known limit: even at maximum saturation, the result can still look pale. Android's dynamic colour pipeline
+     * limits chroma structurally in the light tonal roles such as `colorPrimaryContainer` (at high tone the sRGB
+     * gamut allows little chroma anyway). The seed's chroma does not change this: the limit is in the tone of
+     * that role, not in the seed. No fix is known yet.
      *
-     * `P2PApplication.onCreate`'teki `DynamicColors.applyToActivitiesIfAvailable(this)`
-     * (duvarkağıdı tabanlı, Android 12+) ile ÇAKIŞMAZ — bu ONDAN SONRA
-     * (Activity oluşturulduğunda) çağrılır, kullanıcının AÇIKÇA seçtiği
-     * vurgu rengi duvarkağıdı tabanlı otomatik rengin ÜZERİNE biner.
+     * It does not conflict with the wallpaper-based dynamic colour of `P2PApplication.onCreate`
+     * (`DynamicColors.applyToActivitiesIfAvailable(this)`, Android 12+). This runs AFTER that, when the
+     * Activity is created, so the accent the user chose is layered on top of the automatic colour.
      */
     @android.annotation.SuppressLint("RestrictedApi")
     fun applyAccentColor(activity: Activity) {
@@ -557,15 +513,15 @@ object ThemePrefs {
             DynamicColors.applyToActivityIfAvailable(activity)
             return
         }
-        // Arka plan rengi yalnızca sohbet arka planıdır (bkz. applyChatBackground), palete girmez.
+        // The background colour is only the chat background (see applyChatBackground). It is not in the palette.
         val accent = getAccentColor(activity)
         val text = getTextColor(activity)
         val seed = accent ?: text ?: return
         if (!DynamicColors.isDynamicColorAvailable()) return
         DynamicColors.applyToActivityIfAvailable(activity, DynamicColorsOptions.Builder().setContentBasedSource(seed).build())
         if (text != null) {
-            // Seçilen metin rengini temanın yüzey üstü metin rollerine taşır: dinamik
-            // temanın renk kaynaklarının değerini çalışma anında değiştirir.
+            // Moves the chosen text colour to the theme's on-surface text roles. It changes the value of the
+            // dynamic theme's colour resources at run time.
             com.google.android.material.color.ColorResourcesOverride.getInstance()?.applyIfPossible(
                 activity,
                 mapOf(
