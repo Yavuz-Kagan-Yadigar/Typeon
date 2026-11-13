@@ -4,33 +4,22 @@ use super::*;
 
 impl P2PCore {
 
-    /// `send_message`/`edit_message`/`delete_message`'ın ortak gövdesi —
-    /// üçü de aynı ratchet-şifreli `MessagePacket` yolundan geçer, sadece
-    /// çözüldükten sonraki `MessageContent` türü farklıdır (bkz. packet.rs
-    /// dokümantasyonu — edit/delete de tam uçtan uca şifreli/imzalı olsun
-    /// diye ayrı bir zarf yerine bu ortak yol kullanılıyor).
-    /// `archive_plaintext`: SADECE düz metin mesajlar için Some — edit/delete
-    /// şu an yerel (node modu) arşive yansıtılmıyor (bkz. dosya sonu not).
-    /// Başarılıysa bu mesajın `message_id`'sini döner — çağıran taraf
-    /// (Kotlin) bunu ileride edit/delete hedefi olarak saklayabilir.
-    /// Dönüş: `(message_id, durum_string)` — durum "sent" (hemen
-    /// gönderildi) veya "pending" (geçici olarak kuyrukta, arka planda
-    /// yeniden denenecek) olabilir. Bkz. `MessageSendStatus`.
+    /// Common body of `send_message`, `edit_message` and `delete_message`. All three go through the same ratchet-encrypted `MessagePacket` path.
+    /// Only the `MessageContent` type after decryption differs. Edit and delete use this shared path (not a separate envelope), so they get the
+    /// same end-to-end encryption and signing.
+    /// `archive_plaintext`: `Some` only for plain text messages. Edit and delete are not mirrored into the local (node-mode) archive yet (see the
+    /// note at the end of the file).
+    /// On success returns the `message_id`. The caller (Kotlin) can keep it as the target for a later edit or delete.
+    /// Returns `(message_id, status)`. Status is "sent" (delivered at once) or "pending" (queued, retried in the background). See `MessageSendStatus`.
     pub(crate) fn send_message_content(&mut self, peer_device_fingerprint: String, content: &MessageContent, archive_plaintext: Option<&[u8]>) -> Result<(String, String), String> {
         self.send_message_content_inner(peer_device_fingerprint, content, archive_plaintext, None, None, None)
     }
 
-    /// bkz. `send_message_content` dokümantasyonu — asıl gövde. Spec dışı,
-    /// kullanıcı isteği (pil dostu, kalıcı yeniden deneme): son üç parametre
-    /// SADECE `retry_unconfirmed_messages`'ın `regen_content` tazeleme
-    /// yolundan (bkz. o fonksiyon) `Some(...)` geçirilir — bir mesaj
-    /// `TEXT_RETRY_GIVE_UP_MS`'ye kadar taze ciphertext'lerle yeniden
-    /// denenirken AYNI `message_id`'yi (dolayısıyla AYNI UI balonunu/
-    /// `awaiting_confirmation` girdisini), mesajın İLK kuyruğa girdiği
-    /// zaman damgasını VE o ana kadar ulaşılmış üstel geri çekilme
-    /// aralığını (bkz. `publish_with_ack_tracking` pil dokümantasyonu —
-    /// her tazelemede 15s'ye sıfırlanmasın diye) KORUR — normal (yeni) bir
-    /// gönderim için üçü de `None`, davranış tamamen değişmeden kalır.
+    /// See `send_message_content`, the main body. The last three parameters are `Some(...)` only when `retry_unconfirmed_messages` re-sends through
+    /// its `regen_content` path. While a message is retried with fresh ciphertext (up to `TEXT_RETRY_GIVE_UP_MS`), they keep the SAME `message_id`
+    /// (so the same UI bubble and `awaiting_confirmation` entry), the timestamp of the first queueing, and the backoff already reached (see the
+    /// `publish_with_ack_tracking` notes; so it does not reset to 15 s on every refresh). For a normal new send all three are `None`, and behaviour
+    /// is unchanged.
     pub(crate) fn send_message_content_inner(
         &mut self,
         peer_device_fingerprint: String,
@@ -46,49 +35,35 @@ impl P2PCore {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
 
-        // `message_id_override` dolu = bu bir TAZELEME (regen / kalıcı kuyruk
-        // geri yüklemesi): aynı kimlikle YEPYENİ bir ciphertext üretilecek.
-        // bkz. `forget_server_deposit` — sunucu hafızası ciphertext'i değil
-        // sadece message_id'yi tanıdığı için, bu silinmezse taze kopya
-        // sunucuya (yani karşı taraf çevrimdışıyken tek ulaşılabilir yere)
-        // hiç yatırılmıyordu.
-        // Only a refresh carries `original_sent_at_override`; a fresh 1:1 text
-        // also pins its id (`send_message`) but is no refresh.
+        // `message_id_override` set = this is a REFRESH (regen, or a restore from the durable queue): a brand-new ciphertext is produced under the
+        // same id. See `forget_server_deposit`. The server remembers only the message_id, not the ciphertext. If that memory is not cleared, the
+        // fresh copy is never deposited on the server, which is the only reachable place while the peer is offline.
+        // Only a refresh carries `original_sent_at_override`. A fresh 1:1 text also pins its id (`send_message`), but is not a refresh.
         if let (Some(mid), Some(_)) = (&message_id_override, original_sent_at_override) {
             self.forget_server_deposit(mid);
-            // Tazeleme, karşı tarafın 25 dakikadır HİÇBİR şeyi
-            // onaylamadığı anlamına gelir — el sıkışmamızın hiç ulaşmamış
-            // olma ihtimali de buna dahil (bkz. `maybe_redo_handshake`).
+            // A refresh means the peer has confirmed nothing for 25 minutes. That includes the chance that our handshake never arrived at all
+            // (see `maybe_redo_handshake`).
             let prev = self.regen_skip_id.replace(mid.clone());
             self.maybe_redo_handshake(&peer_device_fingerprint);
             self.regen_skip_id = prev;
         }
 
-        // gönderim yolunda, karşı tarafa canlı bir
-        // bağlantı yoksa hemen yeniden bağlanmayı tetikle — böylece gossipsub
-        // publish, bağlantı kurulur kurulmaz (pending_envelopes retry'siyle)
-        // başarılı olur, reconnect_sweep'in bir sonraki turunu beklemeden.
+        // On the send path, if there is no live connection to the peer, reconnect right away. The gossipsub publish then succeeds as soon as the
+        // connection is up (via the `pending_envelopes` retry), without waiting for the next `reconnect_sweep` round.
         self.ensure_connected(&peer_device_fingerprint);
 
         if !self.ratchets.contains_key(&peer_device_fingerprint) {
-            // `initiate_handshake_with` ratchet state'i publish denemesinden
-            // ÖNCE oluşturur (bkz. o fonksiyon) — bu yüzden HandshakeInit'in
-            // KENDİ gönderimi (aşağıdaki `publish_envelope` gibi) geçici
-            // olarak başarısız olsa bile burada durmuyoruz: state zaten var,
-            // asıl mesajı şifreleyip göndermeye devam edebiliriz.
-            // HandshakeInit'in kendisi başarısız olduysa `publish_envelope`
-            // onu kendi içinde yeniden deneme kuyruğuna zaten ekledi.
+            // `initiate_handshake_with` creates the ratchet state BEFORE the publish attempt (see that function). So even if the HandshakeInit's own
+            // send (like `publish_envelope` below) fails transiently, we do not stop here: the state exists, and we can keep encrypting and sending the
+            // real message. If the HandshakeInit itself failed, `publish_envelope` already added it to the retry queue.
             if let Err(e) = self.initiate_handshake_with(&peer_device_fingerprint) {
                 error!("Handshake gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
             }
-            // KNOWN GAP (aynı önceki tasarımdan miras): handshake ve mesaj
-            // ardışık gönderiliyor, gossipsub sıra garantisi vermiyor.
+            // KNOWN GAP (carried over from an earlier design): the handshake and the message are sent back to back, and gossipsub gives no ordering guarantee.
         }
 
-        // NOT: bu iki bayrak ÖNCEDEN paket inşasından SONRA hesaplanıyordu —
-        // artık rotasyon kararının ÖNCESİNE taşındı (aşağıdaki rotasyon
-        // gating'i için gerekli), anlamları/dokümantasyonları değişmedi
-        // (bkz. aşağıda, publish seçim noktasındaki uzun notlar).
+        // Note: these two flags used to be computed AFTER packet construction. They now come before the rotation decision (the rotation gating below
+        // needs them). Their meaning is unchanged (see the long notes at the publish choice point below).
         let needs_delivery_confirmation = matches!(
             content,
             MessageContent::Text { .. }
@@ -114,22 +89,14 @@ impl P2PCore {
                 | MessageContent::WbDigest { .. }
         );
 
-        // Güvenilirlik düzeltmesi (rotasyon duyurusu kaybı): rotasyon SADECE
-        // onay-takipli (karşı taraf Ack'leyene kadar yeniden denenen) bir
-        // içerik gönderilirken tetiklenir. Önceden HER içerik tetikleyebilirdi
-        // — duyuru bir `TypingIndicator`'a (hiç yeniden denenmeyen) ya da
-        // bir `Ack`'e (sınırlı deneme) binerse ve o paket kaybolursa, karşı
-        // taraf yeni kök anahtarı/topic'i ASLA öğrenemiyor ve oturum kalıcı
-        // olarak kopuyordu. Ek güvence: taze bir rotasyon yoksa bile,
-        // henüz doğrulanMAMIŞ bir önceki rotasyonun duyurusu
-        // (`pending_rotation_ct`, bkz. ratchet.rs) HER giden pakete yeniden
-        // eklenir — alıcı tarafta idempotent (bkz. `respond_to_rotation`
-        // çift-uygulama koruması), `try_publish_raw` bu paketleri karşı
-        // tarafın hâlâ dinlediği ESKİ topic'ten yollar.
-        // A responder leaves the handshake chain before it sends anything at
-        // all, an Ack included (bkz. ratchet.rs `respond`): that chain is a
-        // function of the HandshakeInit alone. The announcement is repeated
-        // on every packet until confirmed, so it may ride an unreliable one.
+        // Fix (lost rotation announcement): rotation is triggered ONLY when content that is retried until acknowledged (by the peer's Ack) is sent.
+        // Before, ANY content could trigger it. If the announcement rode on a `TypingIndicator` (never retried) or an `Ack` (limited retries) and that
+        // packet was lost, the peer never learned the new root key or topic, and the session broke for good. Extra safety: even without a fresh
+        // rotation, an announcement of a previous, not-yet-confirmed rotation (`pending_rotation_ct`, see ratchet.rs) is attached to EVERY outgoing
+        // packet. The receiver handles it idempotently (see the double-apply guard in `respond_to_rotation`), and `try_publish_raw` sends these packets
+        // on the OLD topic the peer still listens on.
+        // A responder leaves the handshake chain before it sends anything at all, Ack included (see `respond` in ratchet.rs). That chain is a function
+        // of the HandshakeInit alone. The announcement is repeated on every packet until confirmed, so it may ride an unreliable one.
         let fresh_responder = self.ratchets.get(&peer_device_fingerprint).map_or(false, |s| s.is_fresh_responder());
         // a peer that only reads sends `Seen` (and `ReadStateSync`,
         // in the list above); it takes its rotation turn on them too, or it
@@ -141,10 +108,8 @@ impl P2PCore {
             None
         };
         if fresh_rotation_ct.is_some() {
-            // bkz. `regen_pending_for_peer` — az önce rotasyon yaptık; bu
-            // peer için bekleyen (eski zincirle şifrelenmiş, artık asla
-            // çözülemeyecek) paketler hemen taze zincirle yeniden üretilir.
-            // This message is encrypted on the fresh chain below anyway.
+            // See `regen_pending_for_peer`: we just rotated, so pending packets for this peer (encrypted under the old chain, which can never be decrypted
+            // now) are regenerated at once on the fresh chain. This message is encrypted on the fresh chain below anyway.
             let prev = std::mem::replace(&mut self.regen_skip_id, message_id_override.clone());
             self.regen_pending_for_peer(&peer_device_fingerprint);
             self.regen_skip_id = prev;
@@ -163,11 +128,9 @@ impl P2PCore {
             return Err("Missing own keys".to_string());
         }
         let state = self.ratchets.get_mut(&peer_device_fingerprint).ok_or("No ratchet session")?;
-        // NOT: `own_ratchet_pubkeys()` rotasyon SONRASI çağrılıyor
-        // (maybe_rotate_ratchet zaten çalıştı), bu yüzden rotasyon olduysa
-        // burada YENİ public key'ler alınır. Sent only with a rotation
-        // announcement: the receiver reads it in no other packet, and it was
-        // 1.6 KB of every message, ack and typing indicator.
+        // Note: `own_ratchet_pubkeys()` is called AFTER rotation (`maybe_rotate_ratchet` has already run), so if a rotation happened, the NEW public
+        // keys are read here. They are sent only with a rotation announcement: the receiver reads them from no other packet, and they were 1.6 KB of
+        // every message, ack and typing indicator.
         let ratchet_pubkey = match rotation_kyber_ciphertext {
             Some(_) => state.own_ratchet_pubkeys().to_bytes()?,
             None => Vec::new(),
@@ -195,10 +158,8 @@ impl P2PCore {
             self.ratchets.insert(peer_device_fingerprint.clone(), snapshot);
             return Err("Ratchet numbers moved under the header".to_string());
         }
-        // `encrypt_next` her çağrıda ck_send/send_message_number'ı ilerletir
-        // — diskteki kopya bayatlamasın diye her mesajda kalıcılaştırıyoruz
-        // (rotasyon olduysa `maybe_rotate_ratchet` zaten yukarıda ayrıca
-        // yazdı, bu ikinci yazma zararsız/idempotent bir üst kaplama).
+        // `encrypt_next` advances ck_send/send_message_number on every call. The state is persisted on every message so the disk copy does not go
+        // stale. (If a rotation happened, `maybe_rotate_ratchet` already wrote it above. This second write is harmless and idempotent.)
         if !self.persist_ratchet_state(&peer_device_fingerprint) {
             self.ratchets.insert(peer_device_fingerprint.clone(), snapshot);
             return Err("Oturum durumu yazılamadı, paket gönderilmedi".to_string());
@@ -207,7 +168,7 @@ impl P2PCore {
 
         if let MessageContent::HistorySyncRequest { group_id, before_timestamp, after_timestamp, .. } = content {
             let now = current_time_ms();
-            // Yanıt, isteğin yeniden deneme ömrü içinde gelir; daha eskisi atılır.
+            // The reply arrives within the request's retry lifetime. Anything older is dropped.
             let stale: Vec<String> = self.outstanding_history_requests.iter()
                 .filter(|(_, (_, _, at, _))| now.saturating_sub(*at) >= TEXT_RETRY_GIVE_UP_MS)
                 .map(|(id, _)| id.clone())
@@ -221,8 +182,7 @@ impl P2PCore {
                 None
             };
             let entry = (target_identity, group_id.clone(), now, before_timestamp.zip(*after_timestamp));
-            // Diske de yazılır: yanıt sunucu posta kutusunda beklerken süreç
-            // ölürse, açılışta istenmemiş sayılıp reddedilmesin.
+            // Also written to disk: if the process dies while the reply waits on the server mailbox, it must not be rejected as unsolicited at startup.
             if let Some(conn) = &self.db {
                 if let Ok(json) = serde_json::to_string(&entry) {
                     let _ = conn.execute(
@@ -245,34 +205,19 @@ impl P2PCore {
             signature_pq: sig_pq.encode().to_vec(),
         };
 
-        // önceden SADECE node modu açık cihazlarda
-        // arşivleniyordu (o zamanki kullanıcı tercihi) — kullanıcı artık
-        // açıkça TÜM cihazlarda (node olsun olmasın) kendi sohbet
-        // geçmişinin yerelde şifreli kalıcı kılınmasını istedi; node modu
-        // artık SADECE "karşı taraflara geçmiş senkronizasyon isteklerinde
-        // yardımcı olma" (bkz. HistorySyncRequest) ve röle hizmetini
-        // etkiliyor, kendi geçmişini SAKLAMA kararını değil.
-        // Ağ paketinin kendisi zaten uçtan uca şifreli; bu AYRI bir
-        // "dinlenme hâlinde şifreleme" katmanıdır (bkz. archive_message —
-        // `history_key` artık node modundan bağımsız her zaman yüklü,
-        // bkz. P2PService/MessageHistoryManager).
-        // Spec dışı, hata düzeltmesi ("bekleyen mesajlar yeniden açılınca
-        // gönderildi gösteriliyor"): `message_id` ve ilk durum artık
-        // satırla BİRLİKTE yazılıyor — `Pending` olarak başlar, aşağıdaki
-        // gerçek yayın denemesi (`publish_with_ack_tracking`/
-        // `publish_envelope`) sonucu `set_message_status` ile AYNI satırı
-        // Sent/Failed'e günceller. Böylece bir reload (uygulama/sohbet
-        // ekranı yeniden açılışı) gerçek durumu görür, sabit "gönderildi"
-        // varsaymaz. NOT: grup mesajları (`send_group_message`) BURAYA
-        // `archive_plaintext: None` geçer (bkz. o fonksiyonun notu) — kendi
-        // arşivlemesini `archive_group_message` ile TEK satır olarak,
-        // fan-out döngüsünden ÖNCE zaten yapıyor; aksi halde N üyeye giden
-        // fan-out'un HER kopyası burada ayrı bir satır oluştururdu.
+        // Previously, messages were archived ONLY on devices with node mode on (the user's setting at that time). The user has now explicitly asked for
+        // every device (node or not) to keep its own chat history persisted and encrypted locally. Node mode now only affects helping peers with
+        // history-sync requests (see HistorySyncRequest) and the relay service, not whether this device keeps its own history.
+        // The network packet is already end-to-end encrypted. This is a SEPARATE "encryption at rest" layer (see archive_message: `history_key` is now
+        // always loaded regardless of node mode, see P2PService/MessageHistoryManager).
+        // Fix (pending messages showed as sent after reopening): `message_id` and the initial status are now written together with the row. It starts
+        // as `Pending`, and the real publish attempt (`publish_with_ack_tracking`/`publish_envelope`) then updates the SAME row to Sent/Failed via
+        // `set_message_status`. So a reload (app or chat screen reopened) shows the real state, instead of always assuming "sent". Note: group messages
+        // (`send_group_message`) pass `archive_plaintext: None` here (see that function's note). They archive themselves as ONE row with
+        // `archive_group_message`, before the fan-out loop. Otherwise every fan-out copy would create its own row here.
         if let Some(plaintext) = archive_plaintext {
-            // bkz. packet.rs `MessageContent::Text.reply_to_message_id`
-            // dokümantasyonu — kendi gönderdiğimiz mesajın arşiv satırı da
-            // (varsa) yanıt bilgisini taşımalı, aksi hâlde KENDİ balonumuzda
-            // bile bir reload sonrası "kime yanıt verdim" bilgisi kaybolurdu.
+            // See packet.rs `MessageContent::Text.reply_to_message_id`. Our own sent message's archive row must also carry the reply info (if any).
+            // Otherwise, even on our own bubble, the "replying to whom" info would be lost after a reload.
             let (reply_to_id, reply_to_prev, sent_at) = match content {
                 MessageContent::Text { reply_to_message_id, reply_to_preview, sent_at_ms, .. } => {
                     (reply_to_message_id.as_deref(), reply_to_preview.as_deref(), *sent_at_ms)
@@ -287,99 +232,50 @@ impl P2PCore {
             }
         }
 
-        // Spec dışı, kullanıcı tarafından istenen güvenilir teslim:
-        // Text (grup DIŞI)/Edit/Delete/HistorySyncRequest, karşı taraftan
-        // bir onay (Ack veya HistorySyncResponse) gelene kadar SÜRESİZ
-        // yeniden gönderilir (bkz. `awaiting_confirmation` dokümantasyonu)
-        // — `gossipsub.publish()`'in yerel başarısı karşı tarafın GERÇEKTEN
-        // aldığının garantisi değildir, bu yüzden tek seferlik/zaman
-        // sınırlı `publish_envelope`/`pending_envelopes` yetersizdi (bazı
-        // mesajlar/düzenlemeler/silmeler hiç karşı tarafa ulaşmadan
-        // sessizce "gönderildi" sayılıyordu). Diğer içerik türleri (Ack,
-        // HistorySyncResponse, FileOffer, grup mesajları) eski davranışı
-        // (tek seferlik, kısa süreli yeniden deneme) korur — Ack zaten
-        // kendisi onaylanmıyor (sonsuz döngü riski), grup mesajlarının
-        // N-yönlü fan-out'u bu mekanizmayı karmaşıklaştırırdı (bilinen
-        // sınır, ileride genişletilebilir).
-        // `FileOffer` de dahil: bu paket kaybolursa (aynı ağ
-        // güvenilmezliği, bkz. dosya başı not), alıcı bir dosya
-        // teklif edildiğini HİÇBİR ZAMAN öğrenemez ve ek balonu hiç
-        // görünmez — dosya parça transferinin (request_response,
-        // attachments.rs) KENDİ güvenilirliği (chunk-seviyeli yeniden
-        // deneme) bu METADATA mesajını kapsamıyordu, ayrı bir sorun.
+        // Reliable delivery, as requested by the user: Text (outside groups), Edit, Delete and HistorySyncRequest are re-sent INDEFINITELY until the peer
+        // confirms (Ack or HistorySyncResponse). See the `awaiting_confirmation` docs. A successful local gossipsub `publish()` does not guarantee that
+        // the peer received it. The one-shot or time-limited `publish_envelope`/`pending_envelopes` was not enough: some messages, edits and deletes were
+        // silently treated as "sent" without ever reaching the peer. Other content types (Ack, HistorySyncResponse, FileOffer, group messages) keep the
+        // old behaviour (one-shot, short retries). Ack is never acknowledged itself (endless-loop risk). The N-way group fan-out would complicate this
+        // mechanism (a known limit, can be extended later).
+        // FileOffer is included too: if this packet is lost (the same network unreliability), the recipient never learns a file was offered, and the
+        // attachment bubble never appears. The file chunk transfer (request_response, attachments.rs) has its own reliability (chunk-level retries), but
+        // it does not cover this METADATA message. That is a separate issue.
         //
-        // Spec dışı, hata düzeltmesi ("bir grup üyesi bazı mesajları
-        // kaçırıyor"): `Text { group_id: Some(_), .. }` artık BURADA DA —
-        // önceden grup metni bilinçli olarak dışarıda bırakılmıştı ("N-yönlü
-        // fan-out'u karmaşıklaştırır" gerekçesiyle), ama fan-out zaten HER
-        // üyeye AYRI bir `send_message_content` çağrısı (kendi message_id/
-        // kendi hedef peer_fp) olduğundan, bu mekanizma tek bir 1:1 gönderim
-        // gibi sorunsuz uygulanıyor — karmaşıklaştıran bir şey yok, sadece
-        // gözden kaçmış bir hariç tutma. Alıcı tarafı da artık Ack gönderiyor
-        // (bkz. receive_message Text/group_id kolu).
+        // Fix (lost group messages): `Text { group_id: Some(_), .. }` is now covered here too. Before, group text was deliberately left out, on the
+        // reasoning that the N-way fan-out complicates things. But the fan-out already makes a SEPARATE `send_message_content` call per member (its own
+        // message_id and target peer_fp), so this mechanism applies to each copy like a single 1:1 send. Nothing complicated, just an oversight. The
+        // receiver now also sends an Ack (see the receive_message Text/group_id arm).
         //
-        // "her şey
-        // onaylanana kadar denenmeli"): `ProfileUpdate` (alıcı zaten Ack
-        // gönderiyordu, sadece bu listeye hiç eklenmemişti) ve
-        // `HistorySyncResponse` (bkz. receive_message HistorySyncResponse
-        // kolu — artık geri bir Ack gönderiyor) da artık BURADA. Kasıtlı
-        // olarak BURAYA EKLENMEYENLER: `Ack`/`Seen` (kendileri
-        // onaylanmıyor — sonsuz ack-of-ack döngüsü riski; bir kez gönderilir,
-        // bkz. `reack_if_already_handled`) ve `TypingIndicator` (bkz. packet.rs
-        // notu — birkaç saniyede bayatlayan bir sinyali dakikalarca yeniden
-        // denemenin hiçbir değeri yok, YANLIŞ/eski bir "yazıyor" göstergesi
-        // göstermekten başka bir işe yaramaz).
-        // (`needs_delivery_confirmation` bu noktadan YUKARI taşındı — rotasyon
-        // gating'i onu paket inşasından önce gerektiriyor; kapsam listesi ve
-        // gerekçeleri değişmedi: DeviceLinkGrant kritik [kaybolursa ikincil
-        // cihaz asla benimsenmez], SiblingEcho/ReadStateSync kardeş senkronu
-        // güvenilir olmalı, SiblingHistoryRequest önceden hiç Ack'lenmiyordu.)
-        // Ack/Seen bir kez gönderilir (yayın geçici başarısızsa
-        // `pending_envelopes` yeniden dener). Önceden koşulsuz 9 kez (~10.6 dk)
-        // tekrar ediliyordu: tek bir mesaj başına onlarca gereksiz paket, ve
-        // sunucu açıkken her biri ayrı bir Deposit. Kayıp bir Ack'i artık
-        // göndericinin kendi yeniden denemesi + `reack_if_already_handled`
-        // telafi ediyor; "görüldü"nün güvenilir yolu `ReadStateSync`.
-        // Spec dışı, kullanıcı geri bildirimi ("6 saat interneti açmayan
-        // biri" senaryosu, sonra kullanıcı isteğiyle sıradan Text'e de
-        // genişletildi): `MAX_UNCONFIRMED_AGE_MS` dolduğunda bu türler pes
-        // etmek yerine taze şifrelenip `TEXT_RETRY_GIVE_UP_MS`'ye kadar
-        // yeniden denenir — bkz. `PendingConfirmation.regen_content`
-        // dokümantasyonu.
+        // Fix (every message should be retried until acknowledged): `ProfileUpdate` (the receiver already sent an Ack, but it was never on this list)
+        // and `HistorySyncResponse` (the receiver now also sends an Ack back, see receive_message) are now here too.
+        // Deliberately NOT here: `Ack`/`Seen` (never acknowledged themselves, to avoid an endless ack-of-ack loop; sent once, see
+        // `reack_if_already_handled`), and `TypingIndicator` (see the packet.rs note: retrying a signal that goes stale within seconds, for minutes,
+        // has no value. It would only show a wrong or old "typing" indicator).
+        // (`needs_delivery_confirmation` was moved UP from here, since the rotation gating needs it before packet construction. The scope list and the
+        // reasons are unchanged: DeviceLinkGrant is critical (if lost, the secondary never adopts), SiblingEcho/ReadStateSync must be reliable for sibling
+        // sync, and SiblingHistoryRequest was never acked before.)
+        // Ack/Seen are sent once (if the publish fails transiently, `pending_envelopes` retries). Before, they were repeated unconditionally 9 times
+        // (~10.6 min): dozens of unneeded packets per message, and with a server up, each one was a separate Deposit. A lost Ack is now compensated by
+        // the sender's own retry plus `reack_if_already_handled`. The reliable path for "seen" is `ReadStateSync`.
+        // Per user feedback (the case of a person who did not open the internet for 6 hours, later extended to plain Text): when `MAX_UNCONFIRMED_AGE_MS`
+        // passes, these types do not give up. They are re-encrypted fresh and retried up to `TEXT_RETRY_GIVE_UP_MS`. See the
+        // `PendingConfirmation.regen_content` docs.
         //
-        // Spec dışı, kullanıcı geri bildirimi ("aynı hesaba bağlı cihazlar
-        // arası senkron berbat, çok geç geliyor, çoğu düşüyor"): çoklu-cihaz
-        // kontrol mesajları da ARTIK bu listede. Önceden değillerdi ve bu,
-        // sessiz KALICI kayıplarının doğrudan sebebiydi: bu türler
-        // `needs_delivery_confirmation`'da olduğu için onaylanana kadar
-        // yeniden deneniyorlardı, ama HER ZAMAN AYNI ciphertext'le. Kardeş
-        // cihaz `MAX_UNCONFIRMED_AGE_MS`'ten (~25 dk) uzun süre çevrimdışı
-        // kalırsa — telefonun cebinde kaldığı herhangi bir öğleden sonra —
-        // aradaki ratchet rotasyonu alıcının o zincire ait skipped-key
-        // önbelleğini siler ve o paket ARTIK ASLA çözülemez; yeniden deneme
-        // kriptografik olarak imkânsız bir şeyi denemeye devam eder, sonra
-        // "Failed" olarak bırakılır. Kullanıcı tarafında bu tam olarak
-        // "mesajların çoğu diğer cihaza hiç düşmedi" demek.
+        // Per user feedback (cross-device sync between devices on the same account is slow and late, and many messages get lost): multi-device control
+        // messages are now in this list too. Before, they were not, and that was the direct cause of silent, PERMANENT losses. These types were retried
+        // until acknowledged, but ALWAYS with the SAME ciphertext. If a sibling device stayed offline longer than `MAX_UNCONFIRMED_AGE_MS` (~25 min),
+        // e.g. a phone in a pocket all afternoon, the ratchet rotation in between deletes the receiver's skipped-key cache for that chain, and the packet
+        // can NEVER be decrypted again. The retry kept trying something cryptographically impossible, then was left as "Failed". For the user, this
+        // meant "most messages never reached the other device".
         //
-        // `regen_content` ile bunun yerine TAZE bir ratchet adımıyla, AYNI
-        // `message_id` ile yeniden şifrelenirler (bkz. `message_id_override`)
-        // — alıcı zaten `message_id` üzerinden dedup ettiği için çift arşiv
-        // oluşmaz, ve `TEXT_RETRY_GIVE_UP_MS`'ye (7 gün) kadar hayatta
-        // kalırlar. `Ack`/`Seen`/`TypingIndicator` KASITLI olarak dışarıda
-        // (bkz. yukarıdaki notlar); `HistorySyncResponse` de dışarıda —
-        // toplu bir yanıt, kaybolursa istek zaten yeniden sorulur ve
-        // günlerce yeniden şifrelemeye değmez.
-        // `HistorySyncRequest` ve
-        // `LeaveGroupRequest` önceden bu listede DEĞİLDİ — `regen_content`
-        // `None` olduğunda `publish_with_ack_tracking` bu girdiyi
-        // `persist_durable_retry` ile diske YAZMIYOR (bkz. o fonksiyonun
-        // çağrı yeri), yani süreç (uygulama) bu paketler onaylanmadan
-        // ÖLDÜRÜLÜRSE/yeniden başlarsa `awaiting_confirmation`'daki bellek
-        // içi kaydı kalıcı olarak kaybolur ve bir daha ASLA yeniden
-        // denenmez — sessiz kalıcı kayıp. `HistorySyncResponse` kasıtlı
-        // olarak dışarıda bırakılıyor (yukarıdaki not) çünkü kaybı zaten
-        // zararsız: istek (`HistorySyncRequest`) artık kalıcı olduğundan
-        // kendi yeniden denemesi taze bir yanıt tetikleyecektir.
+        // Instead, they are re-encrypted with a FRESH ratchet step under the SAME `message_id` (see `message_id_override`). The receiver already dedups
+        // on `message_id`, so no double archive is made, and they survive up to `TEXT_RETRY_GIVE_UP_MS` (7 days). `Ack`/`Seen`/`TypingIndicator` are
+        // deliberately excluded (see the notes above). `HistorySyncResponse` is retried but not re-encrypted: it is a bulk reply. If it is lost, the
+        // request is asked again, and re-encrypting it for days is not worth it.
+        // `HistorySyncRequest` and `LeaveGroupRequest` were NOT on this list before. With `regen_content` = `None`, `publish_with_ack_tracking` does NOT
+        // write this entry to disk with `persist_durable_retry` (see its call site). So if the process is killed or restarted before the peer confirms,
+        // the in-memory `awaiting_confirmation` entry is lost for good, and the packet is NEVER retried: a silent permanent loss.
         let regen_content = matches!(
             content,
             MessageContent::Text { .. }
@@ -414,32 +310,21 @@ impl P2PCore {
         Ok((message_id, status.as_str().to_string()))
     }
 
-    /// `reply_to_message_id`/`reply_to_preview`: spec dışı, kullanıcı
-    /// isteği (WhatsApp tarzı "sağa kaydırıp yanıtla") — bkz. packet.rs
-    /// `MessageContent::Text.reply_to_message_id` dokümantasyonu. Kotlin
-    /// tarafı zaten yerelde gösterdiği mesajın metnini bildiğinden özeti
-    /// (kırpılmış) BURADA sağlar — Rust tarafı ayrıca bir arşiv sorgusu
-    /// yapmaz.
+    /// `reply_to_message_id` / `reply_to_preview`: user request (WhatsApp-style swipe-to-reply). See the packet.rs `MessageContent::Text.reply_to_message_id`
+    /// docs. The Kotlin side already knows the text of the message it shows, so it passes the (truncated) summary here. The Rust side does no archive lookup.
     pub(crate) fn send_message(&mut self, peer_device_fingerprint: String, plaintext: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>) -> Result<(String, String), String> {
         if self.known_remote_devices.get(&peer_device_fingerprint)
             .map_or(false, |d| self.deleted_identities.contains(&d.identity_id))
         {
             return Err("Bu kişi hesabını sildi".to_string());
         }
-        // bkz. packet.rs `MessageContent::Text.sent_at_ms` dokümantasyonu —
-        // BURADA, İLK yazılma anında, bir kez damgalanır; `regen_content`
-        // tazelemeleri (bkz. network.rs retry_unconfirmed_messages) bu değeri
-        // İÇEREN `content`'i AYNEN klonlayıp yeniden şifreler, DEĞİŞTİRMEZ.
+        // See packet.rs `MessageContent::Text.sent_at_ms`: it is stamped HERE, once, on first write. `regen_content` refreshes (see
+        // `retry_unconfirmed_messages` in network.rs) clone the `content` that already contains this value and re-encrypt it unchanged.
         let sent_at_ms = current_time_ms();
-        // Çoklu-cihaz (spec 1.7.1): 1:1 mesajlara da grup mesajları gibi
-        // KARARLI bir konuşma-içi kimlik (`conv_id`) veriyoruz — TÜM fan-out
-        // kopyaları AYNI `group_message_local_id`'yi taşır. Böylece bir
-        // düzenleme/silme/"görüldü" (alıcı ister tek ister çok cihazlı olsun)
-        // her cihazda AYNI balona uygulanır. Ana kopyanın paket başlığı
-        // (`message_id`) da `conv_id`'ye sabitlenir (`message_id_override`),
-        // böylece teslim onayı (Ack) + gönderim durumu + UI balonu hepsi AYNI
-        // kimliği paylaşır. Fan-out kopyaları kendi (farklı) paket kimliğini
-        // alır (kendi Ack'leri için) ama içerikteki `conv_id` ortaktır.
+        // Multi-device (1.7.1): like group messages, 1:1 messages also get a STABLE conversation-level id (`conv_id`). ALL fan-out copies carry the same
+        // `group_message_local_id`. So an edit, delete or "seen" (whether the recipient has one device or many) applies to the SAME bubble on every
+        // device. The main copy's packet header `message_id` is also pinned to `conv_id` (`message_id_override`), so the delivery ack, the send status and
+        // the UI bubble all share ONE id. Fan-out copies get their own (different) packet id for their own Acks, but the `conv_id` in the content is shared.
         let conv_id = uuid::Uuid::new_v4().to_string();
         let content = MessageContent::Text {
             group_id: None, text: plaintext.clone(), group_message_local_id: Some(conv_id.clone()), sent_at_ms,
@@ -450,7 +335,7 @@ impl P2PCore {
         let result = self.send_message_content_inner(
             peer_device_fingerprint.clone(), &content, Some(plaintext.as_bytes()), Some(conv_id.clone()), None, None,
         );
-        // Kardeş cihazlarıma da yankıla (AYNI conv_id ile).
+        // Echo to my own siblings too (with the same conv_id).
         if result.is_ok() {
             // Only after the primary copy: on Err there is no row and no
             // retry entry here, and the other devices would get a text the
@@ -464,11 +349,8 @@ impl P2PCore {
         result
     }
 
-    /// Çoklu-cihaz (spec 1.7.1): bir 1:1 mesajı, hedef kişinin ANA cihazına
-    /// gönderildikten sonra AYNI kişinin DİĞER aktif cihazlarına da ayrı ayrı
-    /// (kendi ratchet'leriyle) gönderilir. Tek cihazlı kişilerde no-op
-    /// (davranış değişmez). Arşiv YAPILMAZ (ana gönderim zaten tek satır
-    /// arşivledi).
+    /// Multi-device (1.7.1): after a 1:1 message is sent to the contact's PRIMARY device, it is also sent separately (each with its own ratchet) to the
+    /// contact's OTHER active devices. No-op for single-device contacts (behaviour unchanged). Nothing is archived here: the main send already archived one row.
     pub(crate) fn fanout_extra_copies(&mut self, primary_fp: &str, content: &MessageContent) {
         for fp in self.fanout_targets(primary_fp) {
             if fp == primary_fp { continue; }
@@ -520,15 +402,11 @@ impl P2PCore {
         }
     }
 
-    /// bir kişinin
-    /// bir mesaja bıraktığı emojiyi yerel arşive yazar.
+    /// Writes the emoji a person left on a message to the local archive.
     ///
-    /// KİŞİ BAŞINA TEK tepki: `INSERT OR REPLACE` yeni emojiyi eskinin
-    /// yerine koyar, boş `emoji` satırı siler. `reacted_at_ms` koruması
-    /// `apply_edit_to_archive` ile AYNI gerekçeye dayanır: gossipsub sıra
-    /// garantisi vermez, aynı kişinin hızlıca değiştirdiği iki tepki ters
-    /// sırada ulaşabilir — DAHA ESKİ olan, daha yeninin üzerine YAZMAMALI.
-    /// Damgası olmayan (eski sürüm) paketler koşulsuz uygulanır.
+    /// ONE reaction per person: `INSERT OR REPLACE` puts the new emoji in place of the old one, and an empty `emoji` row deletes it. The `reacted_at_ms`
+    /// guard follows the same reasoning as `apply_edit_to_archive`: gossipsub gives no ordering guarantee, so two reactions from the same person changed
+    /// quickly can arrive out of order. An OLDER one must not overwrite a newer one. Packets with no timestamp (older versions) are applied unconditionally.
     /// `false`: the row could not be written (a received reaction is then not acked).
     pub(crate) fn apply_reaction(&self, target_message_id: &str, reactor_identity_id: &str, emoji: &str, reacted_at_ms: u64) -> bool {
         // no DB is not "applied".
@@ -572,9 +450,8 @@ impl P2PCore {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .ok();
-        // Not here yet (the reaction overtook its message): allowed, but not
-        // under an id of any length.
-        // And not without end: each invented id left a row for good.
+        // Not here yet (the reaction arrived before its message): allowed, but not under an id of any length. And not without limit: each invented id left
+        // a row for good.
         // ponytail: scans the reactor's rows; index reactor_identity_id if the table grows.
         let Some((row_group, row_peer)) = row else {
             let pending: i64 = conn.query_row(
@@ -594,10 +471,8 @@ impl P2PCore {
         }
     }
 
-    /// Bir mesajın tepkilerinin gösterime hazır özeti — ör. `"👍2 ❤️"`.
-    /// Tek kişilik bir tepkide sayı YAZILMAZ (WhatsApp deseni). Sıralama
-    /// önce adede, sonra emojiye göre — böylece aynı veri her cihazda AYNI
-    /// dizeyi üretir.
+    /// Ready-to-display summary of a message's reactions, e.g. `"👍2 ❤️"`. A single reaction shows no count (WhatsApp style). Sorted by count first, then
+    /// by emoji, so the same data produces the SAME string on every device.
     pub(crate) fn reactions_summary(&self, target_message_id: &str) -> String {
         let Some(conn) = &self.db else { return String::new() };
         let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
@@ -618,13 +493,9 @@ impl P2PCore {
             .join(" ")
     }
 
-    /// Spec dışı, kullanıcı isteği ("tepki pill'ine tıklayınca kim ne atmış
-    /// gösteren bir liste açılsın"): bir mesajın tepkilerini KİŞİ BAZINDA
-    /// döner — `[{"identity_id": "...", "emoji": "👍"}, ...]`.
-    ///
-    /// `reactions_summary` bilerek yalnızca toplamları veriyor (balonun
-    /// yanındaki pill için); burada kimin ne attığı gerektiğinden ayrı bir
-    /// okuma var. En yeni tepki en üstte — WhatsApp da böyle sıralıyor.
+    /// User request ("tapping the reaction pill opens a list of who reacted with what"): returns a message's reactions PER PERSON:
+    /// `[{"identity_id": "...", "emoji": "👍"}, ...]`. `reactions_summary` deliberately gives only totals (for the pill next to the bubble). This separate
+    /// read is needed for who reacted with what. Newest reaction at the top, as WhatsApp does.
     pub(crate) fn list_reactions(&self, target_message_id: &str) -> String {
         let Some(conn) = &self.db else { return "[]".to_string() };
         let mut out = Vec::new();
@@ -635,11 +506,8 @@ impl P2PCore {
             if let Ok(rows) = stmt.query_map(params![target_message_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             }) {
-                // `is_me`: "Sen" etiketini Kotlin tarafında hesaplamak için
-                // orada kendi `identity_id`'mizi bilmek gerekirdi ve onu
-                // veren bir JNI yok. Karşılaştırmayı zaten kimliğe sahip
-                // olan burada yapmak hem doğru yer hem de yeni bir API
-                // yüzeyi açmıyor.
+                // `is_me`: the "You" label is computed on the Kotlin side, which would need our own `identity_id`, and no JNI exposes it. Doing the comparison
+                // here, where the identity is already known, is the right place and adds no new API surface.
                 let own = self.identity.as_ref().map(|i| i.identity_id.as_str()).unwrap_or("");
                 for (identity_id, emoji) in rows.flatten() {
                     let is_me = identity_id == own;
@@ -652,16 +520,11 @@ impl P2PCore {
         serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
     }
 
-    /// bkz. `message_seen` tablosu dokümantasyonu — bir "görüldü" bildirimi
-    /// alındığında (1:1 VEYA grup, `message_id` her iki durumda da AYNI
-    /// kolon/anlam, bkz. `load_message_history`/`load_group_message_history`)
-    /// kalıcı olarak yazar. `apply_reaction` ile AYNI sırasız-teslim koruması:
-    /// daha eski bir damga, aynı görüntüleyenin daha yeni kaydının üzerine
-    /// YAZMAZ.
-    /// `viewer`, BENİM gönderdiğim `message_id`'yi görmüş olabilir mi? 1:1'de
-    /// mesajın karşı tarafı, grupta o grubun üyesi olmalı — aksi halde
-    /// herhangi bir kişi başka sohbetlerdeki mesajlarımı "gördü" diye
-    /// işaretleyebilirdi.
+    /// See the `message_seen` table docs. Persists a "seen" receipt when one arrives (1:1 or group). `message_id` has the same column and meaning in
+    /// both cases (see `load_message_history`/`load_group_message_history`). Same out-of-order protection as `apply_reaction`: an older timestamp does not
+    /// overwrite a newer record from the same viewer.
+    /// `viewer`: could the viewer have seen MY sent `message_id`? In 1:1, the message's other party must be the viewer. In a group, the viewer must be a
+    /// member of that group. Otherwise any person could mark my messages in other chats as "seen".
     pub(crate) fn may_mark_seen(&self, message_id: &str, viewer_identity_id: &str) -> bool {
         let Some(conn) = &self.db else { return false };
         let row: Option<(Option<String>, Option<String>)> = conn
@@ -705,10 +568,8 @@ impl P2PCore {
         );
     }
 
-    /// bkz. `ArchivedMessage.seen_by` — bir mesajı kimlerin gördüğü, her
-    /// geçmiş satırına GÖMÜLECEK şekilde `list_reactions` ile AYNI JSON
-    /// şekli (`[{"identity_id":..,"seen_at_ms":..}]`). En ÖNCE gören en
-    /// üstte (WhatsApp'ın grup okundu listesiyle aynı sıralama hissi).
+    /// See `ArchivedMessage.seen_by`: who has seen a message, in the same JSON shape as `list_reactions` (`[{"identity_id":..,"seen_at_ms":..}]`),
+    /// embedded in each history row. The FIRST viewer is at the top (the same ordering as WhatsApp's group read list).
     pub(crate) fn seen_by_json(&self, message_id: &str) -> String {
         if message_id.is_empty() { return "[]".to_string() }
         let Some(conn) = &self.db else { return "[]".to_string() };
@@ -730,13 +591,11 @@ impl P2PCore {
         serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
     }
 
-    /// 1:1 sohbette bir mesaja tepki bırakır
-    /// (boş `emoji` = kendi tepkimi kaldır). `edit_message` ile AYNI dört
-    /// adımlı desen: karşı tarafa gönder, kişinin diğer cihazlarına fan-out,
-    /// yerel arşive uygula, kendi kardeş cihazlarıma yankıla.
+    /// Puts a reaction on a message in a 1:1 chat (empty `emoji` = remove my own reaction). Same four-step pattern as `edit_message`: send to the peer,
+    /// fan out to the contact's other devices, apply to the local archive, echo to my own siblings.
     pub(crate) fn react_to_message(&mut self, peer_device_fingerprint: String, target_message_id: String, emoji: String) -> Result<String, String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
-        // Tek damga, tüm kopyalarda AYNI — bkz. `edit_message` aynı gerekçe.
+        // One timestamp, identical in all copies. See `edit_message` for the same reason.
         let reacted_at_ms = current_time_ms();
         let content = MessageContent::Reaction {
             target_message_id: target_message_id.clone(),
@@ -755,8 +614,7 @@ impl P2PCore {
         Ok(self.reactions_summary(&target_message_id))
     }
 
-    /// bkz. `react_to_message` — grup karşılığı (`edit_group_message` ile
-    /// AYNI fan-out deseni).
+    /// Group counterpart of `react_to_message` (same fan-out pattern as `edit_group_message`).
     pub(crate) fn react_to_group_message(&mut self, group_id: String, target_message_id: String, emoji: String) -> Result<String, String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(&group_id).cloned_group()?;
@@ -778,15 +636,11 @@ impl P2PCore {
         Ok(self.reactions_summary(&target_message_id))
     }
 
-    /// bir mesajı düzenler. `target_message_id`, düzenlenecek
-    /// mesajın `MessagePacketHeader.message_id`'sidir (gönderirken dönen
-    /// değer). Karşı taraf, bu `message_id`'ye sahip bir mesajı daha önce
-    /// gördüyse UI'da güncellemelidir (bkz. ChatActivity).
+    /// Edits a message. `target_message_id` is the `MessagePacketHeader.message_id` of the message to edit (the value returned when it was sent). If the
+    /// peer has already seen a message with that `message_id`, it must update the UI (see ChatActivity).
     pub(crate) fn edit_message(&mut self, peer_device_fingerprint: String, target_message_id: String, new_text: String) -> Result<(String, String), String> {
-        // Sıra-dışı Edit koruması (bkz. `apply_edit_to_archive`): tüm
-        // kopyalar (karşı tarafa giden paket, çoklu-cihaz fan-out, kardeş
-        // yankısı ve yerel arşiv) AYNI damgayı taşımalı ki her cihaz aynı
-        // sıralama kararını versin — bu yüzden BİR KEZ üretilip paylaşılır.
+        // Out-of-order Edit protection (see `apply_edit_to_archive`): all copies (the packet to the peer, the multi-device fan-out, sibling echoes and the
+        // local archive) must carry the SAME timestamp, so every device makes the same ordering decision. So it is generated ONCE and shared.
         let edited_at_ms = current_time_ms();
         let content = MessageContent::Edit { target_message_id: target_message_id.clone(), new_text: new_text.clone(), group_id: None, edited_at_ms, author_proof: None };
         // `?` first: an edit that could not even be queued must not show as
@@ -800,13 +654,9 @@ impl P2PCore {
         result
     }
 
-    /// bir mesajı siler (karşı tarafa "sil" bildirimi gönderir).
-    /// Also purges the local attachment file, if any (see `purge_attachment_if_exists`).
-    /// Deleting a message that is still queued withdraws every copy that has
-    /// not been confirmed (peer devices, siblings, server deposits). Without
-    /// this the text was still delivered, notification and all, and only
-    /// then deleted. The Delete itself still goes out for copies that did
-    /// arrive.
+    /// Deletes a message (sends a "delete" notice to the peer). Also purges the local attachment file, if any (see `purge_attachment_if_exists`).
+    /// Deleting a message that is still queued withdraws every copy that has not been confirmed (peer devices, siblings, server deposits). Without this,
+    /// the text was still delivered, notification and all, and only then deleted. The Delete itself still goes out for copies that did arrive.
     pub(crate) fn withdraw_unsent(&mut self, target_message_id: &str) {
         let ids: Vec<String> = self.awaiting_confirmation.iter()
             .filter(|(id, p)| id.as_str() == target_message_id || match &p.regen_content {
@@ -850,15 +700,12 @@ impl P2PCore {
         result
     }
 
-    /// `edit_message`'ın grup karşılığı — bkz.
-    /// `send_group_message`/`request_older_group_history` AYNI fan-out
-    /// deseni. `target_group_message_local_id`, düzenlenecek grup mesajının
-    /// `Text.group_message_local_id`'sidir (Kotlin zaten kendi balonunun
-    /// `messageId`'si olarak BUNU kullanıyor, bkz. GroupChatActivity notu).
+    /// Group counterpart of `edit_message`: same fan-out pattern as `send_group_message`/`request_older_group_history`. `target_group_message_local_id` is
+    /// the `Text.group_message_local_id` of the group message to edit. Kotlin already uses THIS as the `messageId` of its bubble (see the GroupChatActivity note).
     pub(crate) fn edit_group_message(&mut self, group_id: String, target_group_message_local_id: String, new_text: String) -> Result<(), String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(&group_id).cloned_group()?;
-        // bkz. `edit_message` — tüm kopyalar aynı sıralama damgasını taşır.
+        // See `edit_message`: all copies carry the same ordering timestamp.
         let edited_at_ms = current_time_ms();
         let content = MessageContent::Edit {
             target_message_id: target_group_message_local_id.clone(),
@@ -884,8 +731,7 @@ impl P2PCore {
         Ok(())
     }
 
-    /// bkz. `edit_group_message` aynı notu — `delete_message`'ın grup
-    /// karşılığı. Also purges the local attachment file, if any.
+    /// See the note on `edit_group_message`: the group counterpart of `delete_message`. Also purges the local attachment file, if any.
     pub(crate) fn delete_group_message(&mut self, group_id: String, target_group_message_local_id: String) -> Result<(), String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(&group_id).cloned_group()?;
@@ -918,13 +764,10 @@ impl P2PCore {
 
 impl P2PCore {
 
-    /// bkz. `MessageContent::Ack` dokümantasyonu (packet.rs) — Text (grup
-    /// dışı)/Edit/Delete/HistorySyncRequest başarıyla işlendiğinde
-    /// gönderene geri gönderilir. Fire-and-forget: bu çağrının kendisi
-    /// `send_message_content`'in normal (kısa süreli, `pending_envelopes`
-    /// tabanlı) yolundan geçer — Ack'in KENDİSİ `awaiting_confirmation`'a
-    /// eklenmez (sonsuz döngü riski, bkz. packet.rs notu). Kaybolursa
-    /// göndericinin yeniden denemesi `reack_if_already_handled`'a düşer.
+    /// See `MessageContent::Ack` (packet.rs). Sent back to the sender when a Text (outside groups), Edit, Delete or HistorySyncRequest is processed
+    /// successfully. Fire-and-forget: this call itself goes through the normal short-lived `pending_envelopes`-based path of `send_message_content`. The
+    /// Ack itself is NOT added to `awaiting_confirmation` (endless-loop risk, see the packet.rs note). If it is lost, the sender's retry falls through to
+    /// `reack_if_already_handled`.
     pub(crate) fn send_ack(&mut self, peer_device_fingerprint: &str, target_message_id: &str) {
         let now = current_time_ms();
         if self.recently_acked.len() >= RECENTLY_ACKED_MAX_ENTRIES {
@@ -949,10 +792,8 @@ impl P2PCore {
         }
     }
 
-    /// Bir Ack'i uygular (şifreli `MessageContent::Ack` ya da `AckBatchRequest`).
-    /// Bekleyen paket GERÇEKTEN bu eşe kuyruklanmış olmalı — aksi halde herhangi
-    /// bir eş, bilinen bir `message_id` ile başka bir eşe giden bekleyen paketi
-    /// sahte Ack'le iptal edebilirdi. `None` = uygulanmadı.
+    /// Applies an Ack (encrypted `MessageContent::Ack` or `AckBatchRequest`). The pending packet MUST really have been queued for this peer. Otherwise any
+    /// peer could cancel a pending packet bound for another peer with a forged Ack using a known `message_id`. `None` = not applied.
     pub(crate) fn apply_incoming_ack(&mut self, peer_fp: &str, target_message_id: &str) -> Option<serde_json::Value> {
         let owned_by_this_peer = self.awaiting_confirmation.get(target_message_id)
             .map(|p| p.peer_device_fingerprint == peer_fp)
@@ -971,9 +812,8 @@ impl P2PCore {
         let acked = |e: &NetworkEnvelope| matches!(e, NetworkEnvelope::Message(m) if m.header.message_id == target_message_id);
         self.envelopes_inflight.retain(|_, (_, e, _, _)| !acked(e));
         self.pending_envelopes.retain(|q| !acked(&q.envelope));
-        // #85: a text acked by a device of the peer (not one of our siblings)
-        // is delivered. The bubble id is the conversation-wide id the copies
-        // to every device share.
+        // A text acked by a device of the peer (not one of our siblings) counts as delivered. The bubble id is the conversation-wide id shared by the
+        // copies to every device.
         if let Some(MessageContent::Text { group_id, group_message_local_id, .. }) = &regen_content {
             let from_peer = self.known_remote_devices.get(peer_fp)
                 .map_or(true, |d| self.my_identity_id().as_deref() != Some(d.identity_id.as_str()));
@@ -1012,8 +852,8 @@ impl P2PCore {
         })
     }
 
-    /// Ack'in şifreli paket yolu — bağlantı yokken ya da toplu istek
-    /// başarısız olunca (bkz. `ACK_PROTOCOL`). Sunucu açıksa oraya bırakılır.
+    /// Encrypted packet path for an Ack, used when there is no live connection or the batch request failed (see `ACK_PROTOCOL`). If a server is configured,
+    /// the Ack is left there.
     pub(crate) fn send_ack_message(&mut self, peer_device_fingerprint: &str, target_message_id: &str) {
         let content = MessageContent::Ack { target_message_id: target_message_id.to_string() };
         if let Err(e) = self.send_message_content(peer_device_fingerprint.to_string(), &content, None) {
@@ -1021,9 +861,8 @@ impl P2PCore {
         }
     }
 
-    /// `send_ack` kuyruğunu boşaltır: canlı bağlantısı olan eşe tek bir
-    /// `AckBatchRequest`, olmayana şifreli Ack paketleri. `poll_events`
-    /// sonunda çağrılır, yani o turda üretilen Ack'ler aynı turda çıkar.
+    /// Empties the `send_ack` queue: one `AckBatchRequest` to a peer with a live connection, encrypted Ack packets to the others. Called at the end of
+    /// `poll_events`, so Acks produced in that turn leave in the same turn.
     pub(crate) fn flush_outbound_acks(&mut self) {
         if self.outbound_acks.is_empty() {
             return;
@@ -1050,18 +889,13 @@ impl P2PCore {
         }
     }
 
-    /// Tekrar gelen (çözülemeyen ya da bayt-aynısı) bir `Message` için: bu
-    /// paketi daha önce işleyip Ack'lediysek Ack'i yeniden yolla. Gönderen
-    /// ancak Ack'imiz ona ulaşmadıysa yeniden dener, yani bu kayıp Ack'i
-    /// telafi eder. Arşiv kontrolü süreç yeniden başlasa da kalıcı mesajları
-    /// kapsar; `recently_acked` arşive yazılmayan türleri (ReadStateSync,
-    /// SiblingEcho, GroupUpdate...) kapsar. İmza çağıranda zaten doğrulandı;
-    /// gönderen de eşleşmeli.
-    /// Ack for a Text, and a durable note of the packet id when the row is
-    /// archived under ANOTHER id (group texts and fan-out copies use the
-    /// conversation-wide id). `reack_if_already_handled` finds a replayed
-    /// packet by its packet id; after a restart `recently_acked` is empty and
-    /// the row lookup missed these, so the sender resent for ~25 min.
+    /// For a repeated `Message` that cannot be decrypted, or is byte-identical: if we already processed and acked this packet, resend the Ack. The sender
+    /// only retries if our Ack never reached it, so this compensates for a lost Ack. The archive check covers messages that survive a restart.
+    /// `recently_acked` covers types that are not archived (ReadStateSync, SiblingEcho, GroupUpdate, ...). The signature was already verified by the
+    /// caller, and the sender must match.
+    /// Ack for a Text, and a durable note of the packet id when the row is archived under ANOTHER id (group texts and fan-out copies use the
+    /// conversation-wide id). `reack_if_already_handled` finds a replayed packet by its packet id. After a restart, `recently_acked` is empty and the row
+    /// lookup missed these, so the sender resent for ~25 min.
     pub(crate) fn ack_text_packet(&mut self, peer_fp: &str, packet_id: &str, archived_as: Option<&str>) {
         self.send_ack(peer_fp, packet_id);
         if archived_as == Some(packet_id) {
@@ -1100,10 +934,8 @@ impl P2PCore {
         true
     }
 
-    /// Spec dışı, kullanıcı tarafından istenen "görüldü" bildirimi —
-    /// `send_ack` ile AYNI desen (bkz. packet.rs `Seen` notu). `Ack`'in
-    /// aksine OTOMATİK değil: Kotlin tarafı, mesajı kullanıcıya EKRANDA
-    /// gösterdiği anda çağırmalı (bkz. ChatActivity/GroupChatActivity).
+    /// User request: a "seen" notice, same pattern as `send_ack` (see the packet.rs `Seen` note). Unlike `Ack` it is NOT automatic. The Kotlin side must call
+    /// it when the message is actually shown on screen (see ChatActivity/GroupChatActivity).
     pub(crate) fn send_seen(&mut self, peer_device_fingerprint: &str, target_message_id: &str, group_message_local_id: Option<String>) -> bool {
         let content = MessageContent::Seen {
             target_message_id: target_message_id.to_string(),
@@ -1118,14 +950,10 @@ impl P2PCore {
         }
     }
 
-    /// "yazıyor..." göstergesi. bkz. `MessageContent::TypingIndicator`
-    /// dokümantasyonu (packet.rs) — arşivlenmez, güvenilir teslim
-    /// kuyruğuna girmez, fire-and-forget.
+    /// "Typing..." indicator. See `MessageContent::TypingIndicator` (packet.rs). Not archived, not put in the reliable delivery queue. Fire-and-forget.
     pub(crate) fn send_typing_indicator(&mut self, peer_device_fingerprint: String, is_typing: bool) -> Result<(), String> {
-        // Canlı bağlantı yoksa hiç gönderme: aksi halde sunucuya bırakılıyor
-        // ve alıcı dakikalar sonra bayat bir "yazıyor" çekiyordu (cihazda
-        // ölçüldü: çevrimdışı alıcıya her metinle birlikte 2 × ~8 KB).
-        // No session: sending would start a handshake just for "typing".
+        // With no live connection, do not send at all. Otherwise the message would be left on the server, and the recipient would fetch a stale "typing"
+        // minutes later (measured on a device: 2 x ~8 KB per text to an offline recipient). No session: sending would start a handshake just for "typing".
         if !self.is_connected_to_device(&peer_device_fingerprint) || !self.has_active_session(&peer_device_fingerprint) {
             return Ok(());
         }
@@ -1133,7 +961,7 @@ impl P2PCore {
         self.send_message_content(peer_device_fingerprint, &content, None).map(|_| ())
     }
 
-    /// Bu cihazla şu an canlı bir libp2p bağlantısı var mı (LAN, Tor, röle).
+    /// Whether there is a live libp2p connection to this device right now (LAN, Tor or relay).
     pub(crate) fn is_connected_to_device(&self, device_fingerprint: &str) -> bool {
         self.device_to_peer_id.get(device_fingerprint)
             .map_or(false, |p| self.swarm.as_ref().map_or(false, |s| s.is_connected(p)))
