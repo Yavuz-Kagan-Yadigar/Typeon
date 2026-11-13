@@ -421,8 +421,8 @@ impl P2PCore {
         migrate("ALTER TABLE files ADD COLUMN preview_jpeg BLOB")?;
         // Same migration pattern: voice-message duration, our own profile photo, and profile photos that contacts sent us. All were added later.
         migrate("ALTER TABLE files ADD COLUMN duration_ms INTEGER")?;
-        // Parca boyutu artik dosya basina (see `attachments::FILE_CHUNK_SIZE_V2`).
-        // NULL = miras 256 KiB, yani mevcut satirlar oldugu gibi calisir.
+        // The chunk size is now per file (see `attachments::FILE_CHUNK_SIZE_V2`).
+        // NULL = legacy 256 KiB, so existing rows work as before.
         migrate("ALTER TABLE files ADD COLUMN chunk_size INTEGER")?;
         migrate("ALTER TABLE identities ADD COLUMN avatar_jpeg BLOB")?;
         migrate("ALTER TABLE contacts ADD COLUMN avatar_jpeg BLOB")?;

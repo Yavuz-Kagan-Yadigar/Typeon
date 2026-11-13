@@ -615,7 +615,7 @@ pub fn request_history_sync(peer_device_fingerprint: &str, limit: u32) {
     });
 }
 
-// --- Dosya ekleri ---
+// --- File attachments ---
 
 pub fn prepare_and_send_file(
     target_device_fingerprint: &str,
@@ -839,7 +839,7 @@ pub fn edit_group_message(
     }))
 }
 
-/// see `edit_group_message` AYNI notu.
+/// Same note as `edit_group_message`.
 pub fn delete_group_message(group_id: &str, target_group_message_local_id: &str) -> String {
     let gid = group_id.to_string();
     let target = target_group_message_local_id.to_string();

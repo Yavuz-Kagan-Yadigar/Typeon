@@ -1007,7 +1007,7 @@ impl P2PCore {
                 }
             }
         }
-        // Multi-device (spec 1.7): periodic history backfill from sibling devices, debounced
+        // Multi-device: periodic history backfill from sibling devices, debounced
         // internally (see SIBLING_BACKFILL_INTERVAL_MS). Catches contact messages missed while
         // offline.
         self.request_sibling_backfill();

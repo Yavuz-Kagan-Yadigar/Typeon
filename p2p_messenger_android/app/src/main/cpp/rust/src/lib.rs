@@ -294,7 +294,7 @@ struct P2PCore {
     unknown_group_held: HashMap<String, Vec<(u64, Option<PeerId>, String, String, String, MessageContent, u64)>>,
     groups: HashMap<String, Group>,
     /// Device-change alerts waiting for the user's decision, not yet accepted or
-    /// rejected (spec 2.2). Key: new_device_fingerprint.
+    /// rejected. Key: new_device_fingerprint.
     pending_device_alerts: HashMap<String, DeviceAlertInfo>,
     /// Pending messages. Messages from a device that is not yet verified or is blocked
     /// are not kept. The spec says message send and receive stop until the alert is
@@ -347,7 +347,7 @@ struct P2PCore {
     /// Plaintext secret bundle handed to Kotlin once, after `createIdentity`. It is taken
     /// by `getPendingSecretBundle` and then becomes `None` (see that function).
     pending_secret_bundle: Option<Vec<u8>>,
-    /// Multi-device (spec 1.5): the fingerprint of the NEW device that `approve_device_link`
+    /// Multi-device: the fingerprint of the NEW device that `approve_device_link`
     /// approved. When `process_identity_exchange` sees it, it records the incoming device
     /// as a SIBLING of our own identity, not as a contact. It sets identity_id to ours and
     /// sends `DeviceLinkGrant` (a signed DeviceAdd plus a full sync). Cleared once the
@@ -428,7 +428,7 @@ struct P2PCore {
     /// first part in ms, parts). Memory only. A part lost to a restart arrives again with
     /// the next "Fetch stickers".
     sticker_parts: HashMap<String, (u64, Vec<Option<Vec<u8>>>)>,
-    /// Multi-device (spec 2.2): new device fingerprints announced beforehand by a
+    /// Multi-device: new device fingerprints announced beforehand by a
     /// `DeviceAddNotice` with a verified signature, whose `IdentityExchange` has not
     /// arrived yet. `evaluate_sender_device` silently accepts a device in this set as an
     /// addition signed by a known active device (NewDeviceViaSignedAdd), without showing
@@ -552,7 +552,7 @@ struct P2PCore {
     last_pending_flush_at: u64,
     /// Files `resume_incomplete_downloads_for` restarted in this process run.
     auto_resumed_downloads: std::collections::HashSet<String>,
-    /// Multi-device (spec 1.7): last time we asked sibling devices for a history backfill.
+    /// Multi-device: last time we asked sibling devices for a history backfill.
     /// We do not ask more often than `SIBLING_BACKFILL_INTERVAL_MS`.
     last_sibling_backfill_at: u64,
     /// Per sibling: (send time of the unanswered backfill request, send time of the last
@@ -689,7 +689,7 @@ struct P2PCore {
     /// SECURITY.md, "Cross-network connectivity"). Peers that `identify` confirmed support the relay protocol, and that are
     /// directly reachable (see `dial_with_relay_fallback`). They are shared in the QR packet
     /// (`QrPacket.known_relays`) and grow organically from `identify::Event::Received`. There was
-    /// never a fixed bootstrap list. This is the relay-specific form of the spec 4.1 idea of
+    /// never a fixed bootstrap list. This is the relay-specific form of the  idea of
     /// sharing about 10 node addresses, which was never implemented. Keeps at most
     /// `MAX_KNOWN_RELAYS`. Value: (full multiaddr, last seen or renewed time in ms). The second field
     /// drives LRU eviction (see `record_known_relay`). Before, a RANDOM entry was evicted from the full

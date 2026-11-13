@@ -1237,7 +1237,7 @@ impl P2PCore {
         let my_id = match self.my_identity_id() { Some(id) => id, None => return Vec::new() };
         let own_fp = self.get_active_own_device_fingerprint().ok();
         let mut out = Vec::new();
-        // Bu cihaz.
+        // This device.
         if let Some(fp) = &own_fp {
             if let Some(rec) = self.own_devices.get(fp) {
                 out.push(serde_json::json!({

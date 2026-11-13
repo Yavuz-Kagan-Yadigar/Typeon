@@ -818,7 +818,7 @@ impl P2PCore {
                 if reconnected.contains(&pending.peer_device_fingerprint)
                     && now.saturating_sub(pending.last_attempt_at) >= ACK_RETRY_INITIAL_MS
                 {
-                    pending.next_retry_at = 0; // due, and not held (bkz. `hold_retries`)
+                    pending.next_retry_at = 0; // due, and not held (see `hold_retries`)
                     pending.retry_interval_ms = ACK_RETRY_INITIAL_MS;
                 }
             }
@@ -1001,7 +1001,7 @@ impl P2PCore {
                 }
             }
         }
-        // bkz. `ACK_PROTOCOL`.
+        // see `ACK_PROTOCOL`.
         let mut ack_replies: Vec<request_response::ResponseChannel<AckBatchResponse>> = Vec::new();
         for evt in ack_events {
             match evt {
@@ -1092,7 +1092,7 @@ impl P2PCore {
         // UI events collect in `self.attachment_events` and are taken only at
         // the end: a panic in this turn no longer loses the ones gathered so
         // far, they go out with the next turn.
-        // bkz. `DOWNLOAD_STALL_TIMEOUT_MS` — `file_failed` events of this call
+        // see `DOWNLOAD_STALL_TIMEOUT_MS` — `file_failed` events of this call
         // go out in this turn.
         self.check_stalled_downloads();
 
@@ -1146,7 +1146,7 @@ impl P2PCore {
             let now = current_time_ms();
             self.last_pending_flush_at = mono_ms();
             for mut queued in pending {
-                // per-entry backoff (bkz. `QueuedEnvelope::next_at`).
+                // per-entry backoff (see `QueuedEnvelope::next_at`).
                 if queued.next_at > now {
                     self.pending_envelopes.push(queued);
                     continue;
@@ -1250,7 +1250,7 @@ impl P2PCore {
                     }
                 }
             } else if !self.server_mail_allowed() {
-                // not acked at the server until processed (bkz.
+                // not acked at the server until processed (see
                 // `commit_server_fetches`), so it waits, it is not dropped.
                 self.defer_incoming(None, raw);
                 continue;
@@ -1281,13 +1281,13 @@ impl P2PCore {
                 self.deferred_incoming.len()
             );
         }
-        // the held Fetch (bkz. `server_fetch`) goes out now, not at
+        // the held Fetch (see `server_fetch`) goes out now, not at
         // the next radio window.
         if mail_was_deferred && !self.server_mail_deferred() {
             self.server_sweep_at = 0;
         }
         // server Acks go out only now, after this turn processed the
-        // fetched items (bkz. `commit_server_fetches`).
+        // fetched items (see `commit_server_fetches`).
         self.commit_server_fetches();
 
         // See `flush_outbound_acks`. The Acks produced in this turn go out with the final swarm turn below.
@@ -1501,7 +1501,7 @@ impl P2PCore {
         window_allow(&mut self.server_mail_rate, RATE_LIMIT_MAX_ESTABLISHED)
     }
 
-    /// Server mail waiting for its rate budget (bkz. `server_mail_allowed`).
+    /// Server mail waiting for its rate budget (see `server_mail_allowed`).
     pub(crate) fn server_mail_deferred(&self) -> bool {
         self.deferred_incoming.iter().any(|(s, _)| s.is_none())
     }
@@ -1691,7 +1691,7 @@ impl P2PCore {
                             self.early_handshakes.entry(sender_fp.clone()).or_default().push((current_time_ms(), source, h));
                             return Ok(None);
                         }
-                        // Not buffered: an Err, so the dedup forgets it soon (bkz.
+                        // Not buffered: an Err, so the dedup forgets it soon (see
                         // `process_incoming_envelope`).
                         return Err(e);
                     }

@@ -574,7 +574,7 @@ impl P2PCore {
                     plaintext: r.get(4)?,
                 })
             }) {
-                // See `queue_archive_record` (#10): rows are sealed with `seal_local_blob`. A row that does not open
+                // See `queue_archive_record` : rows are sealed with `seal_local_blob`. A row that does not open
                 // is dropped (never sent on as raw bytes).
                 let raw: Vec<PendingArchive> = rows.flatten().collect();
                 let mut opened: Vec<PendingArchive> = raw

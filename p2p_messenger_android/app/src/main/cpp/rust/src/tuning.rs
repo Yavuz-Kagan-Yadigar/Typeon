@@ -158,7 +158,7 @@ pub(crate) const STICKER_PARTS_MAX_PENDING: usize = 16;
 pub(crate) const ACK_BATCH_MAX: usize = 256;
 pub(crate) const ACK_REQUEST_TIMEOUT_SECS: u64 = 30;
 
-/// Upper bound of `known_relay_peers`. Matches the "about 10, most recently seen or most trusted" size of spec 4.1 (see the field's docs).
+/// Upper bound of `known_relay_peers`. Matches the "about 10, most recently seen or most trusted" size of  (see the field's docs).
 pub(crate) const MAX_KNOWN_RELAYS: usize = 10;
 /// See `ensure_relay_reservations`. A reservation that never gets a listen address (never accepted) is dropped after this time and requested again.
 pub(crate) const RELAY_RESERVATION_RETRY_MS: u64 = 2 * 60 * 1000;
@@ -173,7 +173,7 @@ pub(crate) const YAMUX_RECEIVE_WINDOW: u32 = 4 * 1024 * 1024;
 /// Buffer cap per substream. Must not be smaller than the window.
 pub(crate) const YAMUX_MAX_BUFFER: usize = 8 * 1024 * 1024;
 
-/// bkz. `YAMUX_RECEIVE_WINDOW`.
+/// see `YAMUX_RECEIVE_WINDOW`.
 pub(crate) fn tuned_yamux() -> yamux::Config {
     let mut cfg = yamux::Config::default();
     #[allow(deprecated)]
@@ -236,14 +236,14 @@ pub(crate) const BULK_MAX_DROPS_BEFORE_GIVEUP: u32 = 3;
 /// Wait after parallelism is abandoned, before retrying it.
 pub(crate) const BULK_GIVEUP_COOLDOWN_MS: u64 = 300_000;
 
-/// Maximum size of the `contacts` table. The `NewContactTofu` arm of `evaluate_sender_device` (spec 2.2) is triggered both by the user's own
+/// Maximum size of the `contacts` table. The `NewContactTofu` arm of `evaluate_sender_device` is triggered both by the user's own
 /// QR or manual pairing, and by a one-sided `IdentityExchange` arriving unexpectedly on the mailbox topic (`p2p_msg_<own_fingerprint>`, always
 /// subscribed). The second case needs no local action: the sender only has to know the fingerprint, for example from a shared group,
-/// the DHT or a shared relay list. The one-sided QR flow needs this behaviour, so it is kept on purpose (see spec 1.3). But without a limit,
+/// the DHT or a shared relay list. The one-sided QR flow needs this behaviour, so it is kept on purpose (see ). But without a limit,
 /// an attacker who can create fresh identities for free could flood the contact list and the database (every record is also written to SQLite).
-/// Once the cap is reached, new TOFU records from identities never seen before are dropped silently. Devices of known contacts (spec 2.2
+/// Once the cap is reached, new TOFU records from identities never seen before are dropped silently. Devices of known contacts (
 /// `NewDeviceViaSignedAdd` / `UnverifiedNewDeviceAlert`) are not affected. Only brand new contacts stop. 500 is generous for the target
-/// audience (groups of friends, spec 7.1) and still caps an attacker's cost.
+/// audience (groups of friends, ) and still caps an attacker's cost.
 pub(crate) const MAX_CONTACTS: usize = 500;
 
 /// Maximum frequency of sending a mutual `IdentityExchange` reply to one device. See `P2PCore.last_identity_exchange_reply`.
@@ -286,13 +286,13 @@ pub(crate) enum RateVerdict {
 /// Upper bound of `pending_device_alerts`, the same pattern as `known_relay_peers` and `early_packets`. The map was unbounded before. An attacker
 /// who copies a known contact's identity_id, without a signed DeviceAdd chain, could send "new device" packets with fresh keys over and over and grow
 /// the map without limit (memory and disk exhaustion, even if the user never accepts or rejects an alert). When the cap is reached, new alerts are
-/// dropped silently. A user with dozens of pending alerts gains nothing from one more, and the packet stays blocked per spec 2.2 regardless.
+/// dropped silently. A user with dozens of pending alerts gains nothing from one more, and the packet stays blocked per  regardless.
 pub(crate) const MAX_PENDING_DEVICE_ALERTS: usize = 200;
 
 /// `reconnect_sweep` runs at this interval (self-healing reconnect). `poll_events` is called regularly, so no separate timer is needed. The sweep
 /// runs only when this interval has elapsed. 15 s reconnects a dropped contact at a reasonable pace without generating needless dial traffic.
 pub(crate) const RECONNECT_SWEEP_INTERVAL_MS: u64 = 15_000;
-/// bkz. `P2PCore.fast_reconnect_until`.
+/// see `P2PCore.fast_reconnect_until`.
 pub(crate) const FAST_RECONNECT_INTERVAL_MS: u64 = 3_000;
 pub(crate) const FAST_RECONNECT_WINDOW_MS: u64 = 60_000;
 /// network callbacks closer than this are coalesced into one redial
@@ -307,7 +307,7 @@ pub(crate) const NETWORK_CHANGE_DEBOUNCE_MS: u64 = 10_000;
 /// retry storm. If the device comes back and refreshes `last_seen`, the next turn picks it up normally.
 pub(crate) const STALE_PEER_RETRY_HORIZON_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
-/// Multi-device (spec 1.7): minimum interval between requests for history backfill from sibling devices. Repeatedly asking for the last N messages
+/// Multi-device: minimum interval between requests for history backfill from sibling devices. Repeatedly asking for the last N messages
 /// of every contact or group is wasteful. Duplicates are already removed by `message_id`.
 pub(crate) const SIBLING_BACKFILL_INTERVAL_MS: u64 = 30 * 60_000;
 /// the backfill watermark is the requester's clock, the filter the
@@ -385,7 +385,7 @@ pub(crate) const HISTORY_STORAGE_SWEEP_INTERVAL_MS: u64 = 30_000;
 /// after 120 s (a slow Tor circuit, a queued `HandshakeInit`, or a backlog pulled from the server), the buffer was emptied and messages were dropped
 /// for that round. The memory bound does not change: the real limit is the count, `MAX_EARLY_PACKETS_PER_PEER`, not the time.
 pub(crate) const EARLY_PACKET_TTL_MS: u64 = MAX_UNCONFIRMED_AGE_MS;
-/// bkz. `P2PCore.unknown_group_held`: how long, for how many groups, and how
+/// see `P2PCore.unknown_group_held`: how long, for how many groups, and how
 /// many packets per group content for a group we do not hold is kept.
 pub(crate) const UNKNOWN_GROUP_HOLD_TTL_MS: u64 = 30 * 60_000;
 pub(crate) const UNKNOWN_GROUP_HOLD_GROUPS: usize = 16;
@@ -493,7 +493,7 @@ pub(crate) const PAIRING_WINDOW_MS: u64 = 30 * 60 * 1000;
 /// A pairing code produced again inside this time carries the nonce of the
 /// one before (the UI produces the code each time its screen is shown).
 pub(crate) const PAIRING_NONCE_REUSE_MS: u64 = 5 * 60 * 1000;
-/// Members one GroupUpdate may name (bkz. `process_group_update`).
+/// Members one GroupUpdate may name (see `process_group_update`).
 pub(crate) const MAX_GROUP_MEMBERS: usize = 256;
 
 /// See `DownloadState.last_retry_at`. How long a download can stay silent without any libp2p-level event (no chunk reply and no `OutboundFailure`)

@@ -1142,7 +1142,7 @@ impl P2PCore {
                 let nonce = Nonce::from_slice(&nonce_bytes);
                 if let Ok(plaintext) = cipher.decrypt(nonce, encrypted_blob.as_slice()) {
                     if let Ok(text) = String::from_utf8(plaintext) {
-                        // `message_id` push icinde MOVE edildiginden ozetleri ONCE hesapla.
+                        // Compute the digests first: `message_id` is MOVED inside the push.
                         let reactions_for_row = if with_marks { self.reactions_summary(message_id.as_deref().unwrap_or("")) } else { String::new() };
                         // See `ArchivedMessage.seen_by`. Same pattern as `reactions`: read fresh HERE (from the persistent `message_seen` table), not from the live event.
                         let seen_by_for_row = if with_marks { self.seen_by_json(message_id.as_deref().unwrap_or("")) } else { String::new() };
@@ -1348,7 +1348,7 @@ impl P2PCore {
                 let nonce = Nonce::from_slice(&nonce_bytes);
                 if let Ok(plaintext) = cipher.decrypt(nonce, encrypted_blob.as_slice()) {
                     if let Ok(text) = String::from_utf8(plaintext) {
-                        // `message_id` push icinde MOVE edildiginden ozetleri ONCE hesapla.
+                        // Compute the digests first: `message_id` is MOVED inside the push.
                         let reactions_for_row = if with_marks { self.reactions_summary(message_id.as_deref().unwrap_or("")) } else { String::new() };
                         // See `ArchivedMessage.seen_by`. Especially important for GROUPS (user: "not reliable, especially in groups"): the multi-member "who saw it" list
                         // is now read fresh here, from the persistent `message_seen` table.
