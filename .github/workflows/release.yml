@@ -57,9 +57,49 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: flatpak, path: typeon-linux.flatpak }
 
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: p2p_messenger_android/app/src/main/cpp/rust }
+      - run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+          cargo install cargo-ndk --locked
+      - name: build client + server apps
+        run: |
+          for d in p2p_messenger_android p2p_messenger_android_server; do
+            (cd $d && ./gradlew --no-daemon assembleRelease)
+          done
+      - name: sign (only when signing secrets exist)
+        env:
+          JKS: ${{ secrets.SIGNING_JKS_B64 }}
+          PASS: ${{ secrets.SIGNING_PASS }}
+          LINEAGE: ${{ secrets.SIGNING_LINEAGE_B64 }}
+        run: |
+          mkdir out
+          VER=$(sed -n 's/.*versionName "\(.*\)"/\1/p' p2p_messenger_android/app/build.gradle | head -1)
+          cp p2p_messenger_android/app/build/outputs/apk/release/*.apk "out/typeon-client-$VER.apk"
+          cp p2p_messenger_android_server/app/build/outputs/apk/release/*.apk "out/typeon-server-$VER.apk"
+          if [ -n "$JKS" ]; then
+            export TYPEON_SIGNING="$RUNNER_TEMP/sign"; mkdir -p "$TYPEON_SIGNING"
+            echo "$JKS" | base64 -d > "$TYPEON_SIGNING/typeon-release.jks"
+            echo "$LINEAGE" | base64 -d > "$TYPEON_SIGNING/lineage.bin"
+            printf %s "$PASS" > "$TYPEON_SIGNING/pass.txt"
+            export ANDROID_HOME=${ANDROID_HOME:-$ANDROID_SDK_ROOT}
+            for a in out/*.apk; do ./sign-release.sh "$a" "$a.signed" && mv "$a.signed" "$a"; done
+            rm -rf "$TYPEON_SIGNING"
+          else
+            for a in out/*.apk; do mv "$a" "${a%.apk}-UNSIGNED.apk"; done
+          fi
+      - uses: actions/upload-artifact@v4
+        with: { name: android, path: out/*.apk }
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [server, windows, flatpak]
+    needs: [server, windows, flatpak, android]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
