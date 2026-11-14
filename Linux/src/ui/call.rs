@@ -558,34 +558,71 @@ fn new_tile(video: bool) -> Tile {
     Tile { root, picture, name, mic_off, avatar, peer: RefCell::new(String::new()) }
 }
 
-/// `toggle` (mute) joined to an arrow that lists the microphones (`input`)
-/// or speakers; the pick goes to the `call.mic` / `call.speaker` action.
+/// Pill: the round `toggle` (mute) on the left, the rest of the surface shows
+/// the device name and opens the list of microphones (`input`) or speakers;
+/// the pick goes to the `call.mic` / `call.speaker` action.
 fn device_pill(toggle: &gtk::ToggleButton, input: bool) -> gtk::Box {
     let action = if input { "call.mic" } else { "call.speaker" };
-    let arrow = gtk::MenuButton::builder()
-        .icon_name("pan-down-symbolic")
+    let name = gtk::Label::builder().label("System default").xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(16).build();
+    name.add_css_class("heading");
+    let status = gtk::Label::builder().label(if input { "On" } else { "Sound on" }).xalign(0.0).build();
+    status.add_css_class("caption");
+    status.add_css_class("dim-label");
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    text.set_valign(gtk::Align::Center);
+    text.append(&name);
+    text.append(&status);
+    let surface = gtk::MenuButton::builder()
+        .child(&text)
         .tooltip_text(if input { "Microphone" } else { "Speaker" })
         .direction(gtk::ArrowType::Up)
+        .always_show_arrow(false)
+        .hexpand(true)
         .build();
+    surface.add_css_class("flat");
     let menu = gio::Menu::new();
-    arrow.set_menu_model(Some(&menu));
-    if let Some(popover) = arrow.popover() {
+    surface.set_menu_model(Some(&menu));
+    let known: Rc<RefCell<Vec<(String, String)>>> = Rc::default();
+    let show_name = {
+        let (name, known) = (name.clone(), known.clone());
+        move || {
+            let label = match crate::call_media::chosen_device(input) {
+                Some(id) => known.borrow().iter().find(|(i, _)| *i == id).map(|(_, l)| l.clone()).unwrap_or(id),
+                None => "System default".to_string(),
+            };
+            name.set_label(&label);
+        }
+    };
+    if let Some(popover) = surface.popover() {
         // Listed on every open: headsets come and go mid-call.
-        popover.connect_show(move |_| {
-            menu.remove_all();
-            let devices = crate::call_media::audio_devices(input);
-            for (id, label) in std::iter::once((String::new(), "System default".to_string())).chain(devices) {
-                let item = gio::MenuItem::new(Some(&label), None);
-                item.set_action_and_target_value(Some(action), Some(&id.to_variant()));
-                menu.append_item(&item);
+        popover.connect_show({
+            let (known, show_name) = (known.clone(), show_name.clone());
+            move |_| {
+                menu.remove_all();
+                *known.borrow_mut() = crate::call_media::audio_devices(input);
+                show_name();
+                for (id, label) in std::iter::once((String::new(), "System default".to_string())).chain(known.borrow().iter().cloned()) {
+                    let item = gio::MenuItem::new(Some(&label), None);
+                    item.set_action_and_target_value(Some(action), Some(&id.to_variant()));
+                    menu.append_item(&item);
+                }
             }
         });
+        popover.connect_closed(move |_| show_name());
     }
-    let pill = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    pill.add_css_class("linked");
+    toggle.connect_toggled(move |b| {
+        status.set_label(match (input, b.is_active()) {
+            (true, false) => "On",
+            (true, true) => "Muted",
+            (false, false) => "Sound on",
+            (false, true) => "Sound off",
+        });
+    });
+    toggle.add_css_class("circular");
+    let pill = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     pill.add_css_class("call-pill");
     pill.append(toggle);
-    pill.append(&arrow);
+    pill.append(&surface);
     pill
 }
 
@@ -601,8 +638,11 @@ fn install_css() {
          .call-self { border-radius: 10px; }
          .call-label { color: white; background: alpha(black, 0.45); border-radius: 8px; padding: 4px 10px; }
          .call-button { min-width: 56px; min-height: 56px; }
-         .call-pill > button { min-width: 56px; min-height: 56px; border-radius: 28px 0 0 28px; }
-         .call-pill > menubutton > button { min-height: 56px; min-width: 20px; padding: 0 10px; border-radius: 0 28px 28px 0; }
+         .call-pill { background: alpha(@window_fg_color, 0.1); border-radius: 32px; padding: 4px; }
+         .call-pill > button { min-width: 48px; min-height: 48px; }
+         .call-pill > button:checked { background: @accent_bg_color; color: @accent_fg_color; }
+         .call-pill > menubutton { min-width: 150px; }
+         .call-pill > menubutton > button { min-height: 48px; padding: 0 12px 0 8px; border-radius: 0 28px 28px 0; }
          .call-accept { background: #2ea043; color: white; }
          .call-hangup { background: #d32f2f; color: white; }",
     );
