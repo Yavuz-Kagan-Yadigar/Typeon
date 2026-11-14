@@ -1,0 +1,75 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:   # build only, artifacts stay on the run (no release)
+
+permissions:
+  contents: write
+
+jobs:
+  server:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: typeon-server }
+      - run: cargo build --release --manifest-path typeon-server/Cargo.toml --bin typeon-server
+      - run: |
+          mkdir out
+          cp typeon-server/target/release/typeon-server out/typeon-server-linux
+          cp typeon-server/data/typeon-server.service out/
+      - uses: actions/upload-artifact@v4
+        with: { name: server, path: out/* }
+
+  windows:
+    runs-on: ubuntu-24.04
+    env:
+      LLVM_MINGW: '20261104'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: Linux }
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd p7zip-full libglib2.0-bin
+          rustup target add x86_64-pc-windows-gnullvm
+          mkdir -p ~/tools
+          curl -fsSL "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW/llvm-mingw-$LLVM_MINGW-ucrt-ubuntu-22.04-x86_64.tar.xz" | tar -xJ -C ~/tools
+      - run: python3 -I Linux/packaging/windows/fetch-sysroot.py
+      - run: Linux/packaging/windows/package.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: Linux/target/typeon-windows-*.zip }
+
+  flatpak:
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-49
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: typeon-linux.flatpak
+          manifest-path: Linux/packaging/com.p2p.messenger.Typeon.yml
+          cache: false
+      - uses: actions/upload-artifact@v4
+        with: { name: flatpak, path: typeon-linux.flatpak }
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [server, windows, flatpak]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          mv typeon-linux.flatpak "typeon-linux-${TAG#v}.flatpak"
+          sha256sum * > SHA256SUMS
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" -t "Typeon ${TAG#v}" --generate-notes * 2>/dev/null \
+            || gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber *
