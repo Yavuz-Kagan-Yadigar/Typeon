@@ -95,12 +95,22 @@ fn platform_install(bundle: &Path) -> Result<(), String> {
     } else {
         "--user"
     };
+    let commit = || {
+        Command::new("flatpak-spawn")
+            .args(["--host", "flatpak", "info", scope, "--show-commit", "com.p2p.messenger.Typeon"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    let before = commit();
     let status = Command::new("flatpak-spawn")
         .args(["--host", "flatpak", "install", scope, "-y", "--noninteractive", "--reinstall", "--bundle"])
         .arg(bundle)
         .status()
         .map_err(|e| format!("flatpak-spawn: {e}"))?;
-    if !status.success() {
+    // Seen on flatpak 1.18: the new commit is deployed, then removing the old deploy fails with
+    // "Directory not empty" and the exit code says failure. What counts is the active commit.
+    if !status.success() && commit() == before {
         return Err(format!("flatpak install exited with {status}"));
     }
     let _ = std::fs::remove_file(bundle);

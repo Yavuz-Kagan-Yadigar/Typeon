@@ -15,5 +15,7 @@ for c in Linux typeon-server; do
     # Lock file: the version line right after this package's name.
     sed -i "/^name = \"$name\"$/{n;s/^version = \".*\"/version = \"$V\"/}" "$c/Cargo.lock"
 done
+# Flatpak's `flatpak info` version comes from the newest <release> in the metainfo.
+sed -i "0,/<release version=\"[^\"]*\" date=\"[^\"]*\"/s//<release version=\"$V\" date=\"$(date +%F)\"/" Linux/data/com.p2p.messenger.Typeon.metainfo.xml
 grep -H 'versionName\|versionCode' p2p_messenger_android*/app/build.gradle
 grep -H -m1 '^version' Linux/Cargo.toml typeon-server/Cargo.toml
