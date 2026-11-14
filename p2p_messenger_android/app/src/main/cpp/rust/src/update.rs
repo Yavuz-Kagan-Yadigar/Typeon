@@ -90,19 +90,19 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
     }
 }
 
-/// The newest tag in the feed that the channel allows.
-fn pick_tag(atom: &str, beta: bool) -> Option<String> {
-    let mut best: Option<String> = None;
+/// Tags in the feed that the channel allows, newest first. The feed also lists bare tags whose release is
+/// not published yet (CI still building), so the caller falls back down this list.
+fn pick_tags(atom: &str, beta: bool) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
     for part in atom.split("/releases/tag/").skip(1) {
         let tag = part.split(['"', '<', '\'']).next().unwrap_or("");
-        if tag.is_empty() || parse_version(tag).is_none() || (!beta && tag.contains('-')) {
+        if tag.is_empty() || parse_version(tag).is_none() || (!beta && tag.contains('-')) || tags.iter().any(|t| t == tag) {
             continue;
         }
-        if best.as_deref().map_or(true, |b| is_newer(tag, b)) {
-            best = Some(tag.to_string());
-        }
+        tags.push(tag.to_string());
     }
-    best
+    tags.sort_by(|a, b| if is_newer(a, b) { std::cmp::Ordering::Less } else if is_newer(b, a) { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Equal });
+    tags
 }
 
 /// Plain HTTP/1.1 GET over Tor and TLS. Follows redirects to GitHub hosts only. The body goes to `sink`.
@@ -256,21 +256,41 @@ pub async fn check(tor: &Tor, dir: &Path, current: &str, asset: &str, force: boo
     }
     let beta = beta_enabled(dir);
     let atom = get_text(tor, &format!("https://github.com/{REPO}/releases.atom")).await?;
-    let Some(tag) = pick_tag(&atom, beta).filter(|t| is_newer(t, current)) else {
-        let _ = std::fs::write(&stamp, b"");
-        return Ok(None);
-    };
-    let version = tag.trim_start_matches('v').to_string();
-    let name = asset.replace("{v}", &version);
-    let base = format!("https://github.com/{REPO}/releases/download/{tag}");
-    let sums = get_text(tor, &format!("{base}/SHA256SUMS")).await?;
-    let want = sums
-        .lines()
-        .find_map(|l| {
+    // The newest release that has our asset. A tag without one (release not published yet, or a build that
+    // left this platform out) is skipped, and the stamp is not written so the next tick looks again.
+    // ponytail: a bare tag that never gets a release keeps the check hourly; fine at two small requests.
+    let mut found = None;
+    let mut skipped = false;
+    for tag in pick_tags(&atom, beta).into_iter().filter(|t| is_newer(t, current)) {
+        let version = tag.trim_start_matches('v').to_string();
+        let name = asset.replace("{v}", &version);
+        let base = format!("https://github.com/{REPO}/releases/download/{tag}");
+        let sums = match get_text(tor, &format!("{base}/SHA256SUMS")).await {
+            Ok(s) => s,
+            Err(e) if e.starts_with("HTTP 404") => {
+                skipped = true;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let want = sums.lines().find_map(|l| {
             let (hash, file) = l.split_once(char::is_whitespace)?;
             (file.trim().trim_start_matches('*') == name).then(|| hash.to_ascii_lowercase())
-        })
-        .ok_or_else(|| format!("{name} not in SHA256SUMS of {tag}"))?;
+        });
+        match want {
+            Some(want) => {
+                found = Some((tag, version, name, base, want));
+                break;
+            }
+            None => skipped = true,
+        }
+    }
+    let Some((tag, version, name, base, want)) = found else {
+        if !skipped {
+            let _ = std::fs::write(&stamp, b"");
+        }
+        return Ok(None);
+    };
 
     let target = dir.join(format!("{version}-{name}"));
     if sha256_file(&target).as_deref() != Some(want.as_str()) {
@@ -337,8 +357,8 @@ mod tests {
     fn channel() {
         let atom = r#"<link href="https://github.com/x/y/releases/tag/v7.4.0-beta.1"/>
             <link href="https://github.com/x/y/releases/tag/v7.3.1"/><link href="https://github.com/x/y/releases/tag/v7.3.0"/>"#;
-        assert_eq!(pick_tag(atom, false).as_deref(), Some("v7.3.1"));
-        assert_eq!(pick_tag(atom, true).as_deref(), Some("v7.4.0-beta.1"));
+        assert_eq!(pick_tags(atom, false), ["v7.3.1", "v7.3.0"]);
+        assert_eq!(pick_tags(atom, true), ["v7.4.0-beta.1", "v7.3.1", "v7.3.0"]);
     }
 
     /// Real GitHub over real Tor: `TYPEON_UPDATE_LIVE=<dir> cargo test --lib update::tests::live -- --ignored`.
