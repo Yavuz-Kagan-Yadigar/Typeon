@@ -63,6 +63,8 @@ object SelfUpdate {
 
     fun install(context: Context, apk: File) {
         val installer = context.packageManager.packageInstaller
+        // A session the user never confirmed keeps its staged APK copy; only the newest one matters.
+        for (old in installer.mySessions) try { installer.abandonSession(old.sessionId) } catch (e: Exception) {}
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(context.packageName)
             if (Build.VERSION.SDK_INT >= 31) setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
@@ -112,7 +114,13 @@ class UpdateWorker(context: Context, params: WorkerParameters) : Worker(context,
             Log.w("SelfUpdate", out)
             return Result.retry()
         }
-        if (out.isNotEmpty()) SelfUpdate.install(ctx, File(out))
+        if (out.isNotEmpty()) try {
+            SelfUpdate.install(ctx, File(out))
+        } catch (e: Exception) {
+            Log.w("SelfUpdate", "install: ${e.message}")
+            File(SelfUpdate.dir(ctx), "last-check").delete()
+            return Result.retry()
+        }
         return Result.success()
     }
 }

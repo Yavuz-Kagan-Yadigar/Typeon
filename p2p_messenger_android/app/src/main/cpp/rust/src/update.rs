@@ -105,6 +105,18 @@ fn pick_tags(atom: &str, beta: bool) -> Vec<String> {
     tags
 }
 
+/// Any single network step (connect, handshake, one read) that stalls this long fails the check; the next
+/// tick retries on a fresh circuit. Without it a dead circuit held the check for the whole hour.
+const IDLE: Duration = Duration::from_secs(120);
+
+async fn idle<T, E: std::fmt::Display>(what: &str, f: impl std::future::Future<Output = Result<T, E>>) -> Result<T, String> {
+    match tokio::time::timeout(IDLE, f).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(format!("{what}: {e}")),
+        Err(_) => Err(format!("{what}: stalled for {} s", IDLE.as_secs())),
+    }
+}
+
 /// Plain HTTP/1.1 GET over Tor and TLS. Follows redirects to GitHub hosts only. The body goes to `sink`.
 async fn get(tor: &Tor, url: &str, max: u64, sink: &mut (dyn FnMut(&[u8]) -> Result<(), String> + Send)) -> Result<(), String> {
     let mut url = url.to_string();
@@ -115,7 +127,11 @@ async fn get(tor: &Tor, url: &str, max: u64, sink: &mut (dyn FnMut(&[u8]) -> Res
         if !(host == "github.com" || host.ends_with(".github.com") || host.ends_with(".githubusercontent.com")) {
             return Err(format!("redirect to foreign host {host}"));
         }
-        let stream = tor.connect((host.as_str(), 443)).await.map_err(|e| format!("tor connect {host}: {e}"))?;
+        // A fresh circuit per request: a retry must not land on the same dead exit again, and update
+        // traffic shares no circuit with anything else.
+        let mut prefs = arti_client::StreamPrefs::new();
+        prefs.set_isolation(arti_client::IsolationToken::new());
+        let stream = idle(&format!("tor connect {host}"), tor.connect_with_prefs((host.as_str(), 443), &prefs)).await?;
         let mut roots = rustls::RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
@@ -124,15 +140,12 @@ async fn get(tor: &Tor, url: &str, max: u64, sink: &mut (dyn FnMut(&[u8]) -> Res
             .with_root_certificates(roots)
             .with_no_client_auth();
         let name = rustls::pki_types::ServerName::try_from(host.clone()).map_err(|e| e.to_string())?;
-        let mut tls = futures_rustls::TlsConnector::from(Arc::new(config))
-            .connect(name, stream)
-            .await
-            .map_err(|e| format!("tls {host}: {e}"))?;
+        let mut tls = idle(&format!("tls {host}"), futures_rustls::TlsConnector::from(Arc::new(config)).connect(name, stream)).await?;
         let request = format!(
             "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: typeon-updater\r\nAccept: */*\r\nConnection: close\r\n\r\n"
         );
-        tls.write_all(request.as_bytes()).await.map_err(|e| e.to_string())?;
-        tls.flush().await.map_err(|e| e.to_string())?;
+        idle("write", tls.write_all(request.as_bytes())).await?;
+        idle("write", tls.flush()).await?;
         let mut reader = BufReader::new(tls);
 
         let mut status = 0u16;
@@ -142,7 +155,7 @@ async fn get(tor: &Tor, url: &str, max: u64, sink: &mut (dyn FnMut(&[u8]) -> Res
         let mut line = String::new();
         for i in 0..100 {
             line.clear();
-            if reader.read_line(&mut line).await.map_err(|e| e.to_string())? == 0 {
+            if idle("read", reader.read_line(&mut line)).await? == 0 {
                 return Err("connection closed in headers".into());
             }
             let l = line.trim_end();
@@ -186,7 +199,7 @@ async fn get(tor: &Tor, url: &str, max: u64, sink: &mut (dyn FnMut(&[u8]) -> Res
         if chunked {
             loop {
                 line.clear();
-                reader.read_line(&mut line).await.map_err(|e| e.to_string())?;
+                idle("read", reader.read_line(&mut line)).await?;
                 let size = u64::from_str_radix(line.trim().split(';').next().unwrap_or(""), 16).map_err(|_| "bad chunk size")?;
                 if size == 0 {
                     break;
@@ -194,19 +207,19 @@ async fn get(tor: &Tor, url: &str, max: u64, sink: &mut (dyn FnMut(&[u8]) -> Res
                 let mut left = size;
                 while left > 0 {
                     let want = left.min(buf.len() as u64) as usize;
-                    reader.read_exact(&mut buf[..want]).await.map_err(|e| e.to_string())?;
+                    idle("read", reader.read_exact(&mut buf[..want])).await?;
                     take(want, &buf, &mut total)?;
                     left -= want as u64;
                 }
                 line.clear();
-                reader.read_line(&mut line).await.map_err(|e| e.to_string())?;
+                idle("read", reader.read_line(&mut line)).await?;
             }
         } else {
             loop {
                 if length.is_some_and(|l| total >= l) {
                     break;
                 }
-                let n = reader.read(&mut buf).await.map_err(|e| e.to_string())?;
+                let n = idle("read", reader.read(&mut buf)).await?;
                 if n == 0 {
                     break;
                 }
@@ -319,6 +332,10 @@ pub async fn check(tor: &Tor, dir: &Path, current: &str, asset: &str, force: boo
             return Err(e);
         }
         std::fs::rename(&part, &target).map_err(|e| e.to_string())?;
+    }
+    // The switch may have gone off during a download that takes minutes: no beta for a stable-only app.
+    if version.contains('-') && !beta_enabled(dir) {
+        return Ok(None);
     }
     let _ = std::fs::write(&stamp, b"");
     log::info!("update: {tag} ready at {}", target.display());

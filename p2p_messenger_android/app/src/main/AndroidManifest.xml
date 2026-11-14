@@ -2,6 +2,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Self-update (service/SelfUpdate.kt). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Android 12+: later self-updates install without asking (the app is installer of record). -->
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
         <!-- Needed to query and watch the active Wi-Fi network through ConnectivityManager. See the
          P2PService.bindToWifiIfAvailable documentation. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
