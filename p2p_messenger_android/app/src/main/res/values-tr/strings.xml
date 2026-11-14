@@ -457,6 +457,8 @@
     <string name="call_accept">Cevapla</string>
     <string name="call_decline">Reddet</string>
     <string name="call_hangup">Kapat</string>
+    <string name="call_state_on">Açık</string>
+    <string name="call_state_off">Sessiz</string>
     <string name="call_mute">Sessiz</string>
     <string name="call_unmute">Sesi aç</string>
     <string name="call_speaker">Hoparlör</string>

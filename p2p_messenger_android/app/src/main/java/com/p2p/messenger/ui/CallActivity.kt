@@ -160,6 +160,10 @@ class CallActivity : AppCompatActivity() {
     /** Mute halves of the microphone / output pills (their parent is the pill). */
     private lateinit var micIcon: ImageView
     private lateinit var spkIcon: ImageView
+    private lateinit var micName: TextView
+    private lateinit var micState: TextView
+    private lateinit var spkName: TextView
+    private lateinit var spkState: TextView
     private lateinit var btnCamera: Button
     private lateinit var btnPip: Button
 
@@ -685,15 +689,33 @@ class CallActivity : AppCompatActivity() {
     }
 
     private fun refreshAudioIcons() {
+        val am = getSystemService(AudioManager::class.java)
         micIcon.setImageResource(if (CallMedia.muted) R.drawable.ic_mic_off else R.drawable.ic_mic)
         micIcon.contentDescription = getString(if (CallMedia.muted) R.string.call_unmute else R.string.call_mute)
         spkIcon.setImageResource(if (CallMedia.speakerMuted) R.drawable.ic_volume_off else R.drawable.ic_volume_up)
+        styleCircle(micIcon, CallMedia.muted)
+        styleCircle(spkIcon, CallMedia.speakerMuted)
+        micName.text = CallMedia.micDevice?.let { deviceLabel(it) } ?: getString(R.string.call_device_default)
+        micState.setText(if (CallMedia.muted) R.string.call_state_off else R.string.call_state_on)
+        val out = if (android.os.Build.VERSION.SDK_INT >= 31) am.communicationDevice?.let { deviceLabel(it) } else null
+        @Suppress("DEPRECATION")
+        spkName.text = out ?: getString(if (am.isSpeakerphoneOn) R.string.call_speaker else R.string.call_earpiece)
+        spkState.setText(if (CallMedia.speakerMuted) R.string.call_state_off else R.string.call_state_on)
+    }
+
+    /** Peach circle = live, grey = muted. */
+    private fun styleCircle(v: ImageView, off: Boolean) {
+        v.imageTintList = android.content.res.ColorStateList.valueOf(if (off) Color.WHITE else Color.rgb(60, 30, 20))
+        v.background = android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.OVAL
+            setColor(if (off) Color.rgb(90, 90, 98) else Color.rgb(255, 183, 160))
+        }
     }
 
     private fun pickMic(anchor: View) {
         val am = getSystemService(AudioManager::class.java)
         val mics = am.getDevices(AudioManager.GET_DEVICES_INPUTS).filter { it.type in MIC_TYPES }
-        showDevices(anchor, mics, CallMedia.micDevice?.id, true) { CallMedia.micDevice = it }
+        showDevices(anchor, mics, CallMedia.micDevice?.id, true) { CallMedia.micDevice = it; refreshAudioIcons() }
     }
 
     /** API 31+: any communication device; before that only earpiece / speaker. */
@@ -702,6 +724,7 @@ class CallActivity : AppCompatActivity() {
         if (android.os.Build.VERSION.SDK_INT >= 31) {
             showDevices(anchor, am.availableCommunicationDevices, am.communicationDevice?.id, true) {
                 if (it != null) am.setCommunicationDevice(it) else am.clearCommunicationDevice()
+                refreshAudioIcons()
             }
             return
         }
@@ -713,6 +736,7 @@ class CallActivity : AppCompatActivity() {
         showDevices(anchor, outs, current, false) {
             @Suppress("DEPRECATION")
             am.isSpeakerphoneOn = it?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+            refreshAudioIcons()
         }
     }
 
@@ -785,8 +809,8 @@ class CallActivity : AppCompatActivity() {
         val grey = Color.rgb(60, 60, 66)
         val ripple = android.util.TypedValue().also { theme.resolveAttribute(android.R.attr.selectableItemBackground, it, true) }.resourceId
         val white = android.content.res.ColorStateList.valueOf(Color.WHITE)
-        /** Tap the icon = mute, tap the arrow = device list. */
-        fun pill(icon: Int, desc: Int, pickDesc: Int, onTap: () -> Unit, onPick: (View) -> Unit): ImageView {
+        /** Tap the circle = mute, tap the rest of the surface = device list. */
+        fun pill(icon: Int, desc: Int, pickDesc: Int, onTap: () -> Unit, onPick: (View) -> Unit): Triple<ImageView, TextView, TextView> {
             val box = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -798,33 +822,39 @@ class CallActivity : AppCompatActivity() {
             }
             val main = ImageView(this).apply {
                 setImageResource(icon)
-                imageTintList = white
                 scaleType = ImageView.ScaleType.CENTER
                 contentDescription = getString(desc)
-                setBackgroundResource(ripple)
                 setOnClickListener { onTap() }
             }
-            box.addView(main, LinearLayout.LayoutParams(0, (48 * dp).toInt(), 1f))
-            box.addView(View(this).apply { setBackgroundColor(Color.argb(70, 255, 255, 255)) },
-                LinearLayout.LayoutParams(maxOf(1, dp.toInt()), (24 * dp).toInt()))
-            box.addView(ImageView(this).apply {
-                setImageResource(R.drawable.ic_arrow_drop_down)
-                imageTintList = white
-                scaleType = ImageView.ScaleType.CENTER
+            box.addView(main, LinearLayout.LayoutParams((44 * dp).toInt(), (44 * dp).toInt()).apply {
+                setMargins((4 * dp).toInt(), (4 * dp).toInt(), 0, (4 * dp).toInt())
+            })
+            val name = TextView(this).apply {
+                setTextColor(Color.WHITE); textSize = 13f; maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            val state = TextView(this).apply { setTextColor(Color.rgb(190, 190, 196)); textSize = 11f; maxLines = 1 }
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding((8 * dp).toInt(), 0, (10 * dp).toInt(), 0)
                 contentDescription = getString(pickDesc)
                 setBackgroundResource(ripple)
                 setOnClickListener { onPick(it) }
-            }, LinearLayout.LayoutParams((32 * dp).toInt(), (48 * dp).toInt()))
+                addView(name); addView(state)
+            }
+            box.addView(col, LinearLayout.LayoutParams(0, (52 * dp).toInt(), 1f))
             bar.addView(box, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginStart = (4 * dp).toInt(); marginEnd = (4 * dp).toInt()
             })
-            return main
+            return Triple(main, name, state)
         }
-        micIcon = pill(R.drawable.ic_mic, R.string.call_mute, R.string.call_pick_mic, { toggleMute() }, { pickMic(it) })
-        spkIcon = pill(R.drawable.ic_volume_up, R.string.call_speaker, R.string.call_pick_output, {
+        pill(R.drawable.ic_mic, R.string.call_mute, R.string.call_pick_mic, { toggleMute() }, { pickMic(it) }).let { (i, n, t) -> micIcon = i; micName = n; micState = t }
+        pill(R.drawable.ic_volume_up, R.string.call_speaker, R.string.call_pick_output, {
             CallMedia.speakerMuted = !CallMedia.speakerMuted
             refreshAudioIcons()
-        }, { pickOutput(it) })
+        }, { pickOutput(it) }).let { (i, n, t) -> spkIcon = i; spkName = n; spkState = t }
+        refreshAudioIcons()
         // Off unbinds the camera; on binds it again — which is also how the
         // user recovers after unblocking the system camera privacy switch
         // (CameraX gives up on a disabled camera and never retries).
