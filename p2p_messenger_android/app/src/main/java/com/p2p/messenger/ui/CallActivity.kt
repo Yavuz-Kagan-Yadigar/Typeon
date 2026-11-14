@@ -705,9 +705,8 @@ class CallActivity : AppCompatActivity() {
 
     /** Accent circle = live, grey = muted. */
     private fun styleCircle(v: ImageView, off: Boolean) {
-        val m = com.google.android.material.R.attr
-        val accent = com.google.android.material.color.MaterialColors.getColor(v, m.colorPrimaryContainer)
-        val onAccent = com.google.android.material.color.MaterialColors.getColor(v, m.colorOnPrimaryContainer)
+        val accent = com.google.android.material.color.MaterialColors.getColor(v, com.google.android.material.R.attr.colorPrimaryContainer)
+        val onAccent = com.google.android.material.color.MaterialColors.getColor(v, com.google.android.material.R.attr.colorOnPrimaryContainer)
         v.imageTintList = android.content.res.ColorStateList.valueOf(if (off) Color.WHITE else onAccent)
         v.background = android.graphics.drawable.GradientDrawable().apply {
             shape = android.graphics.drawable.GradientDrawable.OVAL
