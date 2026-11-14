@@ -1,6 +1,7 @@
 # TypeOn server: systemd unit example.
 #
-#   sudo cp data/typeon-server.service /etc/systemd/system/
+#   sudo install -m 0755 typeon-server /usr/local/bin/
+#   sudo cp typeon-server.service /etc/systemd/system/
 #   sudo useradd --system --home /var/lib/typeon-server typeon
 #   sudo install -d -o typeon -g typeon /var/lib/typeon-server
 #   sudo systemctl enable --now typeon-server
@@ -8,10 +9,12 @@
 # Join code and invite (run while the server is RUNNING. Management commands only open
 # the database and read the onion address the server last announced from it):
 #
-#   sudo -u typeon TYPEON_SERVER_DIR=/var/lib/typeon-server \
-#        /usr/local/bin/typeon-server join-code
-#   sudo -u typeon TYPEON_SERVER_DIR=/var/lib/typeon-server \
-#        /usr/local/bin/typeon-server invite new my-phone 1 7
+#   sudo -u typeon /usr/local/bin/typeon-server --dir /var/lib/typeon-server join-code
+#   sudo -u typeon /usr/local/bin/typeon-server --dir /var/lib/typeon-server invite new my-phone 1 7
+#
+# Data path and disk budget are the --dir and --storage options on ExecStart. Change
+# both together with ReadWritePaths if you move the data directory (and drop
+# StateDirectory, which only manages /var/lib/typeon-server).
 
 [Unit]
 Description=Typeon store-and-forward server
@@ -22,16 +25,15 @@ Wants=network-online.target
 Type=simple
 User=typeon
 Group=typeon
-ExecStart=/usr/local/bin/typeon-server run
+# --storage: total disk the server may use (mail + archive + blobs). Bytes, or
+# K/M/G/T (powers of 1024). Set it to suit your disk.
+ExecStart=/usr/local/bin/typeon-server --dir /var/lib/typeon-server --storage 16G run
 Restart=on-failure
 RestartSec=5
 
-Environment=TYPEON_SERVER_DIR=/var/lib/typeon-server
 # Tor is always on: the server is reachable only at its own .onion address (the
 # listener is on 127.0.0.1). No port forwarding, domain or TLS is needed.
 Environment=TYPEON_SERVER_NAME=Typeon
-# Total disk budget in bytes. Defaults to 16 GiB if unset; set it to suit your disk.
-#Environment=TYPEON_SERVER_BUDGET_BYTES=17179869184
 
 # The server writes only to its own data directory. The database holds the libp2p key
 # and the join token, so the files are readable by the owner only.

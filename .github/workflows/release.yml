@@ -43,16 +43,17 @@ jobs:
 
   flatpak:
     runs-on: ubuntu-24.04
-    container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-49
-      options: --privileged
     steps:
       - uses: actions/checkout@v4
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
-        with:
-          bundle: typeon-linux.flatpak
-          manifest-path: Linux/packaging/com.p2p.messenger.Typeon.yml
-          cache: false
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.gnome.Platform//49 org.gnome.Sdk//49 org.freedesktop.Sdk.Extension.rust-stable//25.08
+      - run: |
+          cd Linux/packaging
+          flatpak-builder --user --force-clean --disable-rofiles-fuse --repo=repo build-dir com.p2p.messenger.Typeon.yml
+          flatpak build-bundle repo ../../typeon-linux.flatpak com.p2p.messenger.Typeon
       - uses: actions/upload-artifact@v4
         with: { name: flatpak, path: typeon-linux.flatpak }
 

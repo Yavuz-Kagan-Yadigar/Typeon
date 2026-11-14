@@ -74,13 +74,20 @@ SQLite.
 
     ./target/release/typeon-server run
 
-Configuration is environment variables — systemd already does this well, so
-there is no bespoke config file format:
+Two options set the data path and the disk budget. They work with every
+command, in any position, and win over the environment variables:
+
+    typeon-server --dir /srv/typeon --storage 20G run
+
+`--storage` takes bytes or a number with a K/M/G/T suffix (powers of 1024).
+
+The rest of the configuration is environment variables — systemd already does
+this well, so there is no bespoke config file format:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TYPEON_SERVER_DIR` | `~/.local/share/typeon-server` | data directory |
-| `TYPEON_SERVER_BUDGET_BYTES` | 16 GiB | total disk the server may use (mail + archive + blobs) |
+| `TYPEON_SERVER_DIR` | `~/.local/share/typeon-server` | data directory (`--dir`) |
+| `TYPEON_SERVER_BUDGET_BYTES` | 16 GiB | total disk the server may use (mail + archive + blobs), same syntax as `--storage` |
 | `TYPEON_SERVER_MAX_DEVICES` | `64` | most enrolled devices |
 | `TYPEON_SERVER_NODE` | `0` | also act as a Kademlia server + Circuit Relay v2 |
 | `TYPEON_SERVER_NAME` | `Typeon Server` | shown to clients on connect |

@@ -17,17 +17,25 @@
 //! typeon-server address                      # advertised addresses
 //! ```
 //!
-//! Configuration comes from environment variables. No config file format is needed, because systemd already
+//! Global options (any position, they win over the environment variables below):
+//!
+//! - `--dir <path>`      data directory, same as `TYPEON_SERVER_DIR`
+//! - `--storage <size>`  total disk budget, same as `TYPEON_SERVER_BUDGET_BYTES`. Bytes, or a number with a
+//!   K/M/G/T suffix (powers of 1024), e.g. `20G`.
+//!
+//! Configuration also comes from environment variables. No config file format is needed, because systemd already
 //! handles `Environment=` naturally:
 //!
 //! - `TYPEON_SERVER_DIR`   (default `~/.local/share/typeon-server`)
 //! - `TYPEON_SERVER_NODE`  (`1` enables the Kademlia server and Circuit Relay v2 service)
 //! - `TYPEON_SERVER_NAME`
-//! - `TYPEON_SERVER_BUDGET_BYTES` (total disk the server may use; default `DEFAULT_BUDGET_BYTES`, 16 GiB)
+//! - `TYPEON_SERVER_BUDGET_BYTES` (total disk the server may use, same syntax as `--storage`; default
+//!   `DEFAULT_BUDGET_BYTES`, 16 GiB)
 //! - `TYPEON_SERVER_DB_KEY` (optional 64-hex SQLCipher key; a plain DB is migrated)
 //! - `TYPEON_SERVER_MAX_DEVICES` (maximum enrolled devices; default 64)
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use typeon_server::store::Store;
 use typeon_server::{now_ms, ServerConfig, ServerCore};
@@ -36,7 +44,78 @@ use typeon_server::{now_ms, ServerConfig, ServerCore};
 /// per-device quotas, 336 GiB) would let enrolled clients fill a small VPS disk.
 const DEFAULT_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
+/// `--dir`, set once in `main` before anything reads the data directory.
+static DIR_FLAG: OnceLock<PathBuf> = OnceLock::new();
+/// `--storage`, already parsed to bytes.
+static STORAGE_FLAG: OnceLock<u64> = OnceLock::new();
+
+/// `"20G"`, `"512M"`, `"1.5T"` or plain bytes. Suffixes are powers of 1024; a trailing `B`/`iB` is allowed.
+fn parse_size(text: &str) -> Option<u64> {
+    let t = text.trim().to_ascii_uppercase();
+    let t = t.strip_suffix("IB").or_else(|| t.strip_suffix('B')).unwrap_or(&t);
+    let (num, shift) = match t.chars().last()? {
+        'K' => (&t[..t.len() - 1], 10),
+        'M' => (&t[..t.len() - 1], 20),
+        'G' => (&t[..t.len() - 1], 30),
+        'T' => (&t[..t.len() - 1], 40),
+        _ => (t, 0),
+    };
+    let num = num.trim();
+    let bytes = match num.parse::<u64>() {
+        Ok(n) => n.checked_mul(1u64 << shift)?,
+        Err(_) => {
+            let f = num.parse::<f64>().ok()?;
+            let b = f * (1u64 << shift) as f64;
+            if !b.is_finite() || b < 0.0 || b >= u64::MAX as f64 {
+                return None;
+            }
+            b as u64
+        }
+    };
+    (bytes > 0).then_some(bytes)
+}
+
+/// Removes `--dir`/`--storage` (as `--x v` or `--x=v`) from `args` and records them. A bad value is a usage error.
+fn take_global_flags(args: &mut Vec<String>) {
+    let mut i = 0;
+    while i < args.len() {
+        let (name, inline) = match args[i].split_once('=') {
+            Some((n, v)) => (n.to_string(), Some(v.to_string())),
+            None => (args[i].clone(), None),
+        };
+        if name != "--dir" && name != "--storage" {
+            i += 1;
+            continue;
+        }
+        args.remove(i);
+        let value = match inline {
+            Some(v) => v,
+            None if i < args.len() => args.remove(i),
+            None => {
+                eprintln!("{name} bir değer bekliyor");
+                std::process::exit(2);
+            }
+        };
+        if name == "--dir" {
+            let _ = DIR_FLAG.set(PathBuf::from(value));
+        } else {
+            match parse_size(&value) {
+                Some(b) => {
+                    let _ = STORAGE_FLAG.set(b);
+                }
+                None => {
+                    eprintln!("--storage anlaşılmadı (örnek: 20G, 512M, 1073741824): {value}");
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
+}
+
 fn data_dir() -> PathBuf {
+    if let Some(dir) = DIR_FLAG.get() {
+        return dir.clone();
+    }
     if let Ok(dir) = std::env::var("TYPEON_SERVER_DIR") {
         return PathBuf::from(dir);
     }
@@ -70,13 +149,14 @@ fn build_config() -> ServerConfig {
         // `total_storage_budget_bytes` used to be read but never set anywhere. The server's total disk ceiling was dead code. Only
         // per-record quotas applied, so N records could grow real usage to N times the quota.
     cfg.total_storage_budget_bytes = Some(DEFAULT_BUDGET_BYTES);
-    match std::env::var("TYPEON_SERVER_BUDGET_BYTES") {
-        Ok(v) => match v.trim().parse::<u64>() {
-            Ok(bytes) if bytes > 0 => cfg.total_storage_budget_bytes = Some(bytes),
-            _ => eprintln!("TYPEON_SERVER_BUDGET_BYTES yok sayıldı (pozitif bir bayt sayısı bekleniyor): {v}"),
+    match (STORAGE_FLAG.get(), std::env::var("TYPEON_SERVER_BUDGET_BYTES")) {
+        (Some(&bytes), _) => cfg.total_storage_budget_bytes = Some(bytes),
+        (None, Ok(v)) => match parse_size(&v) {
+            Some(bytes) => cfg.total_storage_budget_bytes = Some(bytes),
+            None => eprintln!("TYPEON_SERVER_BUDGET_BYTES yok sayıldı (örnek: 20G, 512M, bayt sayısı): {v}"),
         },
-        Err(_) => eprintln!(
-            "TYPEON_SERVER_BUDGET_BYTES yok: disk bütçesi {} GiB. Diskinize göre ayarlayın.",
+        (None, Err(_)) => eprintln!(
+            "--storage / TYPEON_SERVER_BUDGET_BYTES yok: disk bütçesi {} GiB. Diskinize göre ayarlayın.",
             DEFAULT_BUDGET_BYTES >> 30
         ),
     }
@@ -144,7 +224,8 @@ async fn main() {
         }
     }
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    take_global_flags(&mut args);
     let cmd = args.first().map(String::as_str).unwrap_or("run");
 
     match cmd {
@@ -153,6 +234,7 @@ async fn main() {
         "invite" => invite(&args[1..]),
         "devices" => devices(&args[1..]),
         "address" => address(),
+        "version" | "--version" | "-V" => println!("typeon-server {}", env!("CARGO_PKG_VERSION")),
         "help" | "--help" | "-h" => usage(),
         other => {
             eprintln!("Bilinmeyen komut: {other}\n");
@@ -173,12 +255,22 @@ fn usage() {
          devices list                        Kayıtlı cihazlar\n\
          devices revoke <enrollment_id>      Bir cihazın kaydını iptal et ve engelle\n\
          devices unblock <enrollment_id>     Engeli kaldır (cihaz yeniden kaydolabilir)\n\
-         address                             İlan edilen adresler\n"
+         address                             İlan edilen adresler\n\
+         version                             Sürüm\n\n\
+         Genel seçenekler (her komutta):\n\
+         --dir <yol>                         Veri dizini (TYPEON_SERVER_DIR)\n\
+         --storage <boyut>                   Toplam disk bütçesi, örn. 20G, 512M (TYPEON_SERVER_BUDGET_BYTES)\n"
     );
 }
 
 async fn run() {
-    let core = match ServerCore::new(build_config()) {
+    let cfg = build_config();
+    println!(
+        "dir: {}  storage: {} MiB",
+        data_dir().display(),
+        cfg.total_storage_budget_bytes.unwrap_or(0) >> 20
+    );
+    let core = match ServerCore::new(cfg) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Sunucu başlatılamadı: {e}");
@@ -318,5 +410,25 @@ fn address() {
             eprintln!("{e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_size;
+
+    #[test]
+    fn sizes() {
+        assert_eq!(parse_size("1073741824"), Some(1 << 30));
+        assert_eq!(parse_size("20G"), Some(20 << 30));
+        assert_eq!(parse_size("20gib"), Some(20 << 30));
+        assert_eq!(parse_size("512M"), Some(512 << 20));
+        assert_eq!(parse_size("1.5T"), Some(3 << 39));
+        assert_eq!(parse_size(" 4k "), Some(4096));
+        assert_eq!(parse_size("0"), None);
+        assert_eq!(parse_size("-1G"), None);
+        assert_eq!(parse_size("abc"), None);
+        assert_eq!(parse_size(""), None);
+        assert_eq!(parse_size("99999999999T"), None);
     }
 }
