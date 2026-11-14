@@ -703,12 +703,15 @@ class CallActivity : AppCompatActivity() {
         spkState.setText(if (CallMedia.speakerMuted) R.string.call_state_off else R.string.call_state_on)
     }
 
-    /** Peach circle = live, grey = muted. */
+    /** Accent circle = live, grey = muted. */
     private fun styleCircle(v: ImageView, off: Boolean) {
-        v.imageTintList = android.content.res.ColorStateList.valueOf(if (off) Color.WHITE else Color.rgb(60, 30, 20))
+        val m = com.google.android.material.R.attr
+        val accent = com.google.android.material.color.MaterialColors.getColor(v, m.colorPrimaryContainer)
+        val onAccent = com.google.android.material.color.MaterialColors.getColor(v, m.colorOnPrimaryContainer)
+        v.imageTintList = android.content.res.ColorStateList.valueOf(if (off) Color.WHITE else onAccent)
         v.background = android.graphics.drawable.GradientDrawable().apply {
             shape = android.graphics.drawable.GradientDrawable.OVAL
-            setColor(if (off) Color.rgb(90, 90, 98) else Color.rgb(255, 183, 160))
+            setColor(if (off) Color.rgb(90, 90, 98) else accent)
         }
     }
 
