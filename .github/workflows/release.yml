@@ -26,7 +26,10 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       LLVM_MINGW: '20261104'
+      CARGO_PROFILE_DEV_DEBUG: '0'   # debug exe is stripped anyway; DWARF filled the disk
     steps:
+      - name: free disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: Linux }
@@ -44,6 +47,8 @@ jobs:
   flatpak:
     runs-on: ubuntu-24.04
     steps:
+      - name: free disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: actions/checkout@v4
       - run: |
           sudo apt-get update
