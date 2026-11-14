@@ -139,6 +139,11 @@ tor-cell = "0.24"
 tor-proto = { version = "0.24", features = ["hs-service"] }
 tor-config = "0.24"
 tor-rtcompat = { version = "0.24", features = ["tokio", "rustls"] }
+# Self-update (update.rs): HTTPS to GitHub over a Tor stream. rustls and futures-rustls are the
+# versions arti already pulls in; webpki-roots is the root store (no OS store on every platform).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+futures-rustls = { version = "0.26", default-features = false }
+webpki-roots = "1"
 
 # Android JNI
 jni = "0.21"

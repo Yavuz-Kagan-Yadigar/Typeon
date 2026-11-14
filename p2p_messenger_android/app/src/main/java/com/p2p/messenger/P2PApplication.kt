@@ -90,6 +90,7 @@ class P2PApplication : Application() {
             ExistingPeriodicWorkPolicy.KEEP,
             retryWork
         )
+        com.p2p.messenger.service.SelfUpdate.schedule(this)
 
         // Dynamic colours derived from the wallpaper, on Android 12 and later. On older devices it is a no-op,
         // and the static palette in themes.xml is used.

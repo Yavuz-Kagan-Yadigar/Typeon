@@ -30,6 +30,10 @@ finish-args:
     # CRITICAL: the vault key is kept in the system keyring, and the app does NOT start
     # without a keyring (see src/keyring.rs).
   - --talk-name=org.freedesktop.secrets
+    # Self-update (src/update.rs): `flatpak-spawn --host flatpak install --bundle` of the
+    # verified release bundle, then `flatpak run` again. This lets the app run host commands (a sandbox
+    # hole); it is the price of updating without the user.
+  - --talk-name=org.freedesktop.Flatpak
     # The well-known name alone is NOT enough. Verified on a real device: with only
     # `org.freedesktop.secrets` granted, the app refused to start, reporting "No system
     # keyring found — Neither KDE Wallet nor GNOME Keyring is installed".

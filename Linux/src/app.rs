@@ -636,6 +636,7 @@ impl App {
 /// Starts the once-a-second poll on a worker thread and pumps its output into
 /// the main loop. Also drives the periodic name-cache refresh.
 pub fn start_poll_loop(app: &Rc<App>) {
+    crate::update::start(app);
     let (sender, receiver) = async_channel::bounded::<Vec<String>>(64);
 
     std::thread::spawn(move || loop {

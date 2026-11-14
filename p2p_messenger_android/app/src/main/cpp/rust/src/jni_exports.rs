@@ -2330,3 +2330,24 @@ mod pbkdf2_tests {
         assert_eq!(hex::encode(&out[..8]), "55ac046e56e3089f");
     }
 }
+
+/// Self-update (see update.rs). Blocking, network: call off the main thread. Returns the verified APK path,
+/// `""` when up to date or checked within the day, or `"Error: ..."`.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_checkUpdate<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    dir: JString<'local>,
+    current: JString<'local>,
+    force: jboolean,
+) -> jstring {
+    let (Some(dir), Some(current)) = (jstr(&mut env, &dir), jstr(&mut env, &current)) else {
+        return safe_new_jstring(&mut env, "Error: bad arguments");
+    };
+    let out = match crate::update::check_blocking(&dir, &current, "typeon-client-{v}.apk", force != 0) {
+        Ok(Some((_, path))) => path.to_string_lossy().into_owned(),
+        Ok(None) => String::new(),
+        Err(e) => format!("Error: {e}"),
+    };
+    safe_new_jstring(&mut env, out)
+}

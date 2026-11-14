@@ -710,6 +710,11 @@ impl ServerCore {
         *self.swarm.local_peer_id()
     }
 
+    /// For the self-update check (`p2p_messenger::update`), which rides the server's own Tor client.
+    pub fn tor_client(&self) -> p2p_messenger::update::Tor {
+        self.tor.client.clone()
+    }
+
     pub fn tor_status(&self) -> String {
         self.tor.status().as_str().to_string()
     }

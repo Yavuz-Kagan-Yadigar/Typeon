@@ -612,4 +612,8 @@
         <item quantity="one">1 forwarded message was not sent</item>
         <item quantity="other">%d forwarded messages were not sent</item>
     </plurals>
+    <string name="lbl_beta_updates">Beta updates</string>
+    <string name="lbl_beta_updates_desc">Typeon updates itself once a day from GitHub releases, over Tor. On: also install beta releases.</string>
+    <string name="update_ready_title">Update ready</string>
+    <string name="update_ready_text">Tap to install Typeon %1$s</string>
 </resources>

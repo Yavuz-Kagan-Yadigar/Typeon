@@ -3963,6 +3963,7 @@ dependencies = [
  "ciborium",
  "ed25519-dalek",
  "futures",
+ "futures-rustls",
  "hex",
  "hkdf",
  "jni",
@@ -3980,6 +3981,7 @@ dependencies = [
  "rand 0.8.7",
  "ring 0.17.14",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -3993,6 +3995,7 @@ dependencies = [
  "tor-rtcompat",
  "typeon-crypto",
  "uuid",
+ "webpki-roots",
  "x25519-dalek",
  "zeroize",
  "zune-core",
@@ -6842,7 +6845,7 @@ dependencies = [
 
 [[package]]
 name = "typeon-server"
-version = "7.2.1"
+version = "7.4.0"
 dependencies = [
  "android_logger",
  "ciborium",
@@ -7122,6 +7125,15 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7265c9301c16a8711c992c2d8da90ee77ef54b1ed51482d6dfeb00dc756b1297"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

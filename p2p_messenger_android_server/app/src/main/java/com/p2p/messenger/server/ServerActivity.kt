@@ -112,6 +112,10 @@ class ServerActivity : AppCompatActivity() {
             }
         }
 
+        val betaSwitch = findViewById<SwitchMaterial>(R.id.switch_beta_updates)
+        betaSwitch.isChecked = SelfUpdate.beta(this)
+        betaSwitch.setOnCheckedChangeListener { _, checked -> SelfUpdate.setBeta(this, checked) }
+
         findViewById<Button>(R.id.btn_new_invite).setOnClickListener { confirmRotateJoinCode() }
         findViewById<Button>(R.id.btn_copy_invite).setOnClickListener { copyInvite() }
         findViewById<Button>(R.id.btn_pin).setOnClickListener { ServerLock.showSettings(this) }

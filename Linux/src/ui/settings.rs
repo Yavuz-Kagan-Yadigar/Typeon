@@ -107,6 +107,22 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
         connectivity.add(&autostart);
     }
 
+    // Builds without an installer path (a plain cargo build) do not self-update; no switch there.
+    if cfg!(windows) || std::path::Path::new("/.flatpak-info").exists() {
+        let beta = adw::SwitchRow::builder()
+            .title("Beta updates")
+            .subtitle("Typeon updates itself once a day from GitHub releases, over Tor. On: also install beta releases.")
+            .active(p2p_messenger::update::beta_enabled(&crate::update::dir()))
+            .build();
+        let app = app.clone();
+        beta.connect_active_notify(move |row| {
+            if let Err(error) = p2p_messenger::update::set_beta(&crate::update::dir(), row.is_active()) {
+                app.toast(&format!("Could not change the update channel: {error}"));
+            }
+        });
+        connectivity.add(&beta);
+    }
+
     let node = adw::SwitchRow::builder()
         .title("Node mode")
         .subtitle(

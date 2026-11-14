@@ -27,6 +27,7 @@ mod qr;
 mod secrets;
 mod theme;
 mod ui;
+mod update;
 mod util;
 #[cfg(windows)]
 mod win;

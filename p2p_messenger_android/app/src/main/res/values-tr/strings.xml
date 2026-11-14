@@ -577,4 +577,8 @@
         <item quantity="one">İletilen 1 mesaj gönderilmedi</item>
         <item quantity="other">İletilen %d mesaj gönderilmedi</item>
     </plurals>
+    <string name="lbl_beta_updates">Beta güncellemeleri</string>
+    <string name="lbl_beta_updates_desc">Typeon günde bir kez GitHub sürümlerinden, Tor üzerinden kendini günceller. Açık: beta sürümleri de kurar.</string>
+    <string name="update_ready_title">Güncelleme hazır</string>
+    <string name="update_ready_text">Typeon %1$s kurmak için dokun</string>
 </resources>

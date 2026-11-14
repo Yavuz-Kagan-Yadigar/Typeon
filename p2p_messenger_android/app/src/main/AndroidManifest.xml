@@ -1,5 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Self-update (service/SelfUpdate.kt). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
         <!-- Needed to query and watch the active Wi-Fi network through ConnectivityManager. See the
          P2PService.bindToWifiIfAvailable documentation. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -158,6 +160,8 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <receiver android:name=".service.UpdateReceiver" android:exported="false" />
 
         <service
             android:name=".service.P2PService"

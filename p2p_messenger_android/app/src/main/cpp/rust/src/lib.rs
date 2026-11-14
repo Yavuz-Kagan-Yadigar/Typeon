@@ -21,6 +21,7 @@ pub mod attachments;
 /// `pub`: the server also hosts its own onion service. That is how a phone running
 /// the server app stays reachable behind CGNAT.
 pub mod tor;
+pub mod update;
 
 // `server_proto` and `server_seal` now live in `typeon-crypto`. The `pub use` above
 // keeps `p2p_messenger::server_proto::...` and `crate::server_seal::...` valid, and

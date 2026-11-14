@@ -45,6 +45,8 @@ object P2PLib {
     external fun setHistoryStorageLimitBytes(bytes: Long)
     /** Tor status for the UI. Returns "disabled", "bootstrapping", "ready", "ready|<host>.onion", or "failed". */
     external fun torStatus(): String
+    /** Self-update check (update.rs). Blocking, network. Verified APK path, "" if nothing to do, or "Error: ...". */
+    external fun checkUpdate(dir: String, current: String, force: Boolean): String
     /** The general network status of THIS device (not the peer's; see hasActiveSession and isPeerConnected). JSON:
      *  {"connected_peers": Int, "listening": Bool, "tor_enabled": Bool, "tor_status": String, "node_mode": Bool}. Shown in the chat screen's top bar. */
     external fun ownConnectionStatus(): String

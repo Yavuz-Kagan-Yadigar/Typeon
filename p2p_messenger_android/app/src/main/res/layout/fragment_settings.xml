@@ -428,6 +428,16 @@
                 <View style="@style/Settings.Divider" />
 
                 <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/beta_updates_switch"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textSize="15sp"
+                    android:text="@string/lbl_beta_updates" />
+                <TextView style="@style/Settings.Desc" android:text="@string/lbl_beta_updates_desc" />
+
+                <View style="@style/Settings.Divider" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
                     android:id="@+id/node_mode_switch"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"

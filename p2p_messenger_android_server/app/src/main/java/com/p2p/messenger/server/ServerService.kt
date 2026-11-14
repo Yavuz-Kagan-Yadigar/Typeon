@@ -60,6 +60,7 @@ class ServerService : Service() {
         val moving = AtomicBoolean(false)
 
         private const val WATCHDOG_MS = 60_000L
+        private const val UPDATE_FIRST_MS = 5 * 60_000L
         private const val WATCHDOG_MAX_MS = 30 * 60_000L
 
         /** Network pokes run here, coalesced: a flapping network used to spawn a thread per callback. */
@@ -255,10 +256,19 @@ class ServerService : Service() {
 
         startCore()
         watchdog.postDelayed(watchdogTick, WATCHDOG_MS)
+        watchdog.postDelayed(updateTick, UPDATE_FIRST_MS)
         return START_STICKY
     }
 
     private val watchdog = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** Self-update: first look once Tor had time to bootstrap, then hourly (the core keeps it to one check a day). */
+    private val updateTick = object : Runnable {
+        override fun run() {
+            SelfUpdate.checkNow(this@ServerService)
+            watchdog.postDelayed(this, 3_600_000L)
+        }
+    }
 
     /**
      * The native loop can end on its own (a panic inside it). Nobody else
@@ -354,6 +364,7 @@ class ServerService : Service() {
         }
         netCallback = null
         watchdog.removeCallbacks(watchdogTick)
+        watchdog.removeCallbacks(updateTick)
         if (instance === this) instance = null
         isRunning = false
         super.onDestroy()

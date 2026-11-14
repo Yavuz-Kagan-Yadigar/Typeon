@@ -324,6 +324,11 @@ class SettingsFragment : Fragment() {
             Toast.makeText(requireContext(), R.string.tor_restart_needed, Toast.LENGTH_LONG).show()
             if (!isChecked) Toast.makeText(requireContext(), R.string.tor_off_no_network, Toast.LENGTH_LONG).show()
         }
+        val betaSwitch = view.findViewById<SwitchMaterial>(R.id.beta_updates_switch)
+        betaSwitch.isChecked = com.p2p.messenger.service.SelfUpdate.beta(requireContext())
+        betaSwitch.setOnCheckedChangeListener { _, isChecked ->
+            com.p2p.messenger.service.SelfUpdate.setBeta(requireContext(), isChecked)
+        }
         // The poll starts in `onResume` (below), not at view creation, so it does not keep running while the app is in the background.
 
         // See SECURITY.md, 'Cross-network connectivity'. If no relay is discovered organically (for example no node mode is on and no reachable contact has been met),

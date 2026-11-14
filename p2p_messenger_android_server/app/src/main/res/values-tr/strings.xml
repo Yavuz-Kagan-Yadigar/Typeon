@@ -82,4 +82,8 @@
     <string name="pin_too_short_fmt">PIN en az %1$d karakter olmalı</string>
     <string name="pin_saved">PIN kaydedildi</string>
     <string name="pin_removed">PIN kaldırıldı</string>
+    <string name="lbl_beta_updates">Beta güncellemeleri</string>
+    <string name="lbl_beta_updates_desc">Sunucu günde bir kez GitHub sürümlerinden, Tor üzerinden kendini günceller. Açık: beta sürümleri de kurar.</string>
+    <string name="update_ready_title">Güncelleme hazır</string>
+    <string name="update_ready_text">Typeon Sunucu %1$s kurmak için dokun</string>
 </resources>

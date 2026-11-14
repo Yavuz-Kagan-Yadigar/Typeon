@@ -118,6 +118,18 @@ jobs:
     needs: [server, windows, flatpak, sign]
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
+      - name: every app carries the tag's version (the self-updater compares against it)
+        env: { TAG: '${{ github.ref_name }}' }
+        run: |
+          V=${TAG#v}; bad=0
+          for f in p2p_messenger_android/app/build.gradle p2p_messenger_android_server/app/build.gradle; do
+            grep -q "versionName \"$V\"" $f || { echo "$f is not $V"; bad=1; }
+          done
+          for f in Linux/Cargo.toml typeon-server/Cargo.toml; do
+            grep -m1 '^version' $f | grep -q "\"$V\"" || { echo "$f is not $V"; bad=1; }
+          done
+          exit $bad
       - uses: actions/download-artifact@v4
         with: { path: dist, pattern: '{server,windows,flatpak,android}', merge-multiple: true }  # NOT android-unsigned: same filenames, would clobber the signed APKs
       - name: release
@@ -128,5 +140,7 @@ jobs:
           cd dist
           mv typeon-linux.flatpak "typeon-linux-${TAG#v}.flatpak"
           sha256sum * > SHA256SUMS
-          gh release create "$TAG" -R "$GITHUB_REPOSITORY" -t "Typeon ${TAG#v}" --generate-notes * 2>/dev/null \
+          # A "-" tag (v7.4.0-beta.1) is a beta: only apps with "Beta updates" on take it.
+          case "$TAG" in *-*) PRE=--prerelease;; *) PRE=;; esac
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" -t "Typeon ${TAG#v}" $PRE --generate-notes * 2>/dev/null \
             || gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber *

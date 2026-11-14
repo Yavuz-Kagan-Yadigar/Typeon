@@ -20,6 +20,11 @@ thread_local! {
     static CURRENT: RefCell<Option<Rc<CallUi>>> = const { RefCell::new(None) };
 }
 
+/// A call is up (ringing included): the self-update waits for it to end.
+pub fn active() -> bool {
+    CURRENT.with(|c| c.borrow().is_some())
+}
+
 struct Tile {
     root: gtk::Overlay,
     picture: gtk::Picture,

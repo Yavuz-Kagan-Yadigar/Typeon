@@ -82,4 +82,8 @@
     <string name="pin_too_short_fmt">The PIN needs at least %1$d characters</string>
     <string name="pin_saved">PIN saved</string>
     <string name="pin_removed">PIN removed</string>
+    <string name="lbl_beta_updates">Beta updates</string>
+    <string name="lbl_beta_updates_desc">The server updates itself once a day from GitHub releases, over Tor. On: also install beta releases.</string>
+    <string name="update_ready_title">Update ready</string>
+    <string name="update_ready_text">Tap to install Typeon Server %1$s</string>
 </resources>

@@ -234,6 +234,7 @@ async fn main() {
         "invite" => invite(&args[1..]),
         "devices" => devices(&args[1..]),
         "address" => address(),
+        "updates" => updates(&args[1..]),
         "version" | "--version" | "-V" => println!("typeon-server {}", env!("CARGO_PKG_VERSION")),
         "help" | "--help" | "-h" => usage(),
         other => {
@@ -256,6 +257,7 @@ fn usage() {
          devices revoke <enrollment_id>      Bir cihazın kaydını iptal et ve engelle\n\
          devices unblock <enrollment_id>     Engeli kaldır (cihaz yeniden kaydolabilir)\n\
          address                             İlan edilen adresler\n\
+         updates beta on|off                 Beta sürümleri de otomatik kur (varsayılan kapalı)\n\
          version                             Sürüm\n\n\
          Genel seçenekler (her komutta):\n\
          --dir <yol>                         Veri dizini (TYPEON_SERVER_DIR)\n\
@@ -278,6 +280,7 @@ async fn run() {
         }
     };
     println!("peer_id: {}", core.local_peer_id());
+    tokio::spawn(update_loop(std::sync::Arc::downgrade(&core.tor_client())));
     if let Err(e) = core.run().await {
         eprintln!("Sunucu hatası: {e}");
         std::process::exit(1);
@@ -431,4 +434,87 @@ mod tests {
         assert_eq!(parse_size(""), None);
         assert_eq!(parse_size("99999999999T"), None);
     }
+}
+
+fn update_dir() -> PathBuf {
+    data_dir().join("update")
+}
+
+fn updates(args: &[String]) {
+    let dir = update_dir();
+    let on = match args {
+        [b, v] if b == "beta" && v == "on" => true,
+        [b, v] if b == "beta" && v == "off" => false,
+        [] => {
+            let beta = p2p_messenger::update::beta_enabled(&dir);
+            println!("auto-update: on, channel: {}", if beta { "beta" } else { "stable" });
+            return;
+        }
+        _ => {
+            eprintln!("updates beta on|off");
+            std::process::exit(2);
+        }
+    };
+    if let Err(e) = p2p_messenger::update::set_beta(&dir, on) {
+        eprintln!("{}: {e}", dir.display());
+        std::process::exit(1);
+    }
+}
+
+/// Exit code that makes systemd (`Restart=on-failure`) start the server again, through the unit's
+/// `ExecStartPre` that installs a staged binary.
+const EXIT_UPDATE: i32 = 75;
+/// Name the unit's `ExecStartPre` looks for when the binary itself is read-only (`ProtectSystem=strict`).
+const STAGED: &str = "typeon-server.staged";
+
+/// Once Tor had time to bootstrap, then hourly; `update::check` keeps it to one real check a day.
+async fn update_loop(tor: std::sync::Weak<p2p_messenger::update::TorClientRt>) {
+    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+    loop {
+        if let Some(tor) = tor.upgrade() {
+            let dir = update_dir();
+            match p2p_messenger::update::check(&tor, &dir, env!("CARGO_PKG_VERSION"), "typeon-server-linux", false).await {
+                Ok(Some((version, path))) => apply_update(&version, &path),
+                Ok(None) => {}
+                Err(e) => log::warn!("update check: {e}"),
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    }
+}
+
+fn apply_update(version: &str, path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let systemd = std::env::var_os("INVOCATION_ID").is_some();
+    let replace = || -> std::io::Result<()> {
+        let exe = std::env::current_exe()?;
+        let tmp = exe.with_extension("new");
+        std::fs::copy(path, &tmp)?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::rename(&tmp, &exe).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
+    };
+    match replace() {
+        Ok(()) => {
+            let _ = std::fs::remove_file(path);
+            log::info!("update: installed {version}");
+        }
+        Err(e) if systemd => {
+            if let Err(e2) = std::fs::rename(path, update_dir().join(STAGED)) {
+                log::warn!("update: cannot replace binary ({e}) nor stage it ({e2})");
+                return;
+            }
+            log::info!("update: {version} staged for the unit's ExecStartPre ({e})");
+        }
+        Err(e) => {
+            log::warn!("update: {version} downloaded to {} but the binary is not writable ({e})", path.display());
+            return;
+        }
+    }
+    if systemd {
+        log::info!("update: exiting so systemd restarts into {version}");
+        std::process::exit(EXIT_UPDATE);
+    }
+    log::info!("update: {version} takes effect at the next start");
 }

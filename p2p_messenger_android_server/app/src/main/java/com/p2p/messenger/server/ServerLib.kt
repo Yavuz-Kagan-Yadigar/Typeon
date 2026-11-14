@@ -100,4 +100,7 @@ object ServerLib {
      * does not wait for the periodic recovery (minutes). It is a no-op if the core is not running.
      */
     external fun notifyNetworkChanged()
+
+    /** Self-update check (update.rs). Blocking, network. Verified APK path, "" if nothing to do, or "Error: ...". */
+    external fun checkUpdate(dir: String, current: String, force: Boolean): String
 }

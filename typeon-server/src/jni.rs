@@ -33,6 +33,8 @@ struct Control {
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     /// See `ServerCore::set_net_changed_rx`. `notifyNetworkChanged` pushes to it.
     net_changed: tokio::sync::mpsc::UnboundedSender<CoreSignal>,
+    /// For `checkUpdate`. Weak: a stopped server must drop its Tor client (arti state lock) for the next start.
+    tor: std::sync::Weak<p2p_messenger::update::TorClientRt>,
 }
 
 lazy_static::lazy_static! {
@@ -202,6 +204,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
         let shared = Arc::new(ServerShared::default());
         core.attach_shared(shared.clone());
         let peer_id = core.local_peer_id().to_string();
+        let tor = Arc::downgrade(&core.tor_client());
 
         let store = match Store::open(&PathBuf::from(&dir).join("typeon_server.db")) {
             Ok(s) => s,
@@ -229,6 +232,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
             blob_dir,
             shutdown: Some(stop_tx),
             net_changed: net_tx,
+            tor,
         });
         out(&mut env, peer_id)
     })
@@ -523,5 +527,37 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_diskUsage<'local>
             total += tree_bytes(&blobs, &dir);
         }
         out(&mut env, total.to_string())
+    })
+}
+
+/// Self-update (see `p2p_messenger::update`). Blocking, network: call off the main thread. Returns the verified
+/// APK path, `""` when up to date or checked within the day, or `"Error: ..."`.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_checkUpdate<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    dir: JString<'local>,
+    current: JString<'local>,
+    force: jboolean,
+) -> jstring {
+    guarded(&mut env, |mut env| {
+        let dir = jstr(&mut env, &dir);
+        let current = jstr(&mut env, &current);
+        let tor = CONTROL.lock().unwrap_or_else(|p| p.into_inner()).as_ref().and_then(|c| c.tor.upgrade());
+        let Some(tor) = tor else { return out(&mut env, "Error: server not running".to_string()) };
+        let result = RUNTIME.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3600),
+                p2p_messenger::update::check(&tor, std::path::Path::new(&dir), &current, "typeon-server-{v}.apk", force != 0),
+            )
+            .await
+            .unwrap_or_else(|_| Err("update check timed out".to_string()))
+        });
+        drop(tor);
+        out(&mut env, match result {
+            Ok(Some((_, path))) => path.to_string_lossy().into_owned(),
+            Ok(None) => String::new(),
+            Err(e) => format!("Error: {e}"),
+        })
     })
 }
