@@ -101,6 +101,9 @@ class UpdateReceiver : BroadcastReceiver() {
             SelfUpdate.askUser(context, confirm, version)
         } else {
             Log.i("SelfUpdate", "install status $status: ${intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)}")
+            // Not installed (user backed out, storage...): the next tick tries again. The verified APK stays,
+            // so that costs no download.
+            if (status != PackageInstaller.STATUS_SUCCESS) File(SelfUpdate.dir(context), "last-check").delete()
         }
     }
 }
