@@ -109,10 +109,22 @@ fn pick_tags(atom: &str, beta: bool) -> Vec<String> {
 /// tick retries on a fresh circuit. Without it a dead circuit held the check for the whole hour.
 const IDLE: Duration = Duration::from_secs(120);
 
-async fn idle<T, E: std::fmt::Display>(what: &str, f: impl std::future::Future<Output = Result<T, E>>) -> Result<T, String> {
+/// The error with its whole `source()` chain: arti's top line alone ("internal error (bug)") says nothing.
+fn report(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        out.push_str(": ");
+        out.push_str(&c.to_string());
+        cause = c.source();
+    }
+    out
+}
+
+async fn idle<T, E: std::error::Error>(what: &str, f: impl std::future::Future<Output = Result<T, E>>) -> Result<T, String> {
     match tokio::time::timeout(IDLE, f).await {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(format!("{what}: {e}")),
+        Ok(Err(e)) => Err(format!("{what}: {}", report(&e))),
         Err(_) => Err(format!("{what}: stalled for {} s", IDLE.as_secs())),
     }
 }
@@ -131,7 +143,16 @@ async fn get(tor: &Tor, url: &str, max: u64, sink: &mut (dyn FnMut(&[u8]) -> Res
         // traffic shares no circuit with anything else.
         let mut prefs = arti_client::StreamPrefs::new();
         prefs.set_isolation(arti_client::IsolationToken::new());
-        let stream = idle(&format!("tor connect {host}"), tor.connect_with_prefs((host.as_str(), 443), &prefs)).await?;
+        let what = format!("tor connect {host}");
+        let stream = match idle(&what, tor.connect_with_prefs((host.as_str(), 443), &prefs)).await {
+            Ok(s) => s,
+            // Seen on a phone: arti kept failing isolated exit circuits ("internal error (bug)") while
+            // shared ones worked. One more try on the shared circuit before giving up.
+            Err(e) => {
+                log::warn!("update: {e}; retrying on a shared circuit");
+                idle(&what, tor.connect((host.as_str(), 443))).await?
+            }
+        };
         let mut roots = rustls::RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
