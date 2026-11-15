@@ -1916,5 +1916,14 @@ mod fable_review_tests {
         signal(&mut me, &other_fp, &other_id, CallAction::Invite);
         assert_eq!(me.group_call_offer(&gid), 0);
         assert!(me.call.is_none());
+
+        // Ended also stops a ring of that call.
+        let ring = "call-attend-2".to_string();
+        me.handle_call_signal(&other_fp, &other_id, ring.clone(), CallAction::Invite, Some(gid.clone()), true, vec![1; 32], vec![2; 8], current_time_ms(), Vec::new());
+        assert!(me.call.is_some(), "rings");
+        let ev = me.handle_call_signal(&other_fp, &other_id, ring, CallAction::Ended, Some(gid.clone()), true, Vec::new(), Vec::new(), current_time_ms(), Vec::new());
+        assert!(me.call.is_none());
+        assert_eq!(ev["ended"], true);
+        assert_eq!(me.group_call_offer(&gid), 0);
     }
 }

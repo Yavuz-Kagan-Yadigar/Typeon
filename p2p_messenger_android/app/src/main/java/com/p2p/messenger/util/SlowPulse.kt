@@ -36,10 +36,11 @@ class SlowPulse(private val onFrame: (Float) -> Unit) {
     }
 }
 
-/** [color] with its saturation raised to 100 % (hue and value kept). */
+/** [color] with its saturation raised to 100 % (hue and value kept). A grey has no hue: kept as is, not turned red. */
 fun fullSaturation(color: Int): Int {
     val hsv = FloatArray(3)
     android.graphics.Color.colorToHSV(color, hsv)
+    if (hsv[1] < 0.05f) return color
     hsv[1] = 1f
     return android.graphics.Color.HSVToColor(android.graphics.Color.alpha(color), hsv)
 }

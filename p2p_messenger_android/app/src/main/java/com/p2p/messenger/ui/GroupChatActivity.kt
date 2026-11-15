@@ -656,7 +656,10 @@ class GroupChatActivity : AppCompatActivity() {
             setOnClickListener { CallActivity.startOutgoing(this@GroupChatActivity, null, groupId, callOffer == 2) }
             val tv = android.util.TypedValue()
             theme.resolveAttribute(androidx.appcompat.R.attr.colorPrimary, tv, true)
-            background = background?.mutate()?.also { it.setTint(com.p2p.messenger.util.fullSaturation(tv.data)) }
+            val pill = com.p2p.messenger.util.fullSaturation(tv.data)
+            background = background?.mutate()?.also { it.setTint(pill) }
+            // onPrimary was picked for the paler accent: pick again for the saturated one (the icon follows the text colour).
+            setTextColor(if (androidx.core.graphics.ColorUtils.calculateContrast(android.graphics.Color.WHITE, pill or 0xFF000000.toInt()) >= 3.0) android.graphics.Color.WHITE else android.graphics.Color.BLACK)
         }
         return true
     }
@@ -695,7 +698,8 @@ class GroupChatActivity : AppCompatActivity() {
             attendPulse.running = callOffer != 0 && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
             // The core's expiry event can be missed: look again until the pill is gone.
             offerRecheck.removeCallbacksAndMessages(null)
-            if (callOffer != 0) offerRecheck.postDelayed({ refreshCallOffer() }, 20_000)
+            // Only in front: a refresh that finishes after onPause must not start polling in the background.
+            if (attendPulse.running) offerRecheck.postDelayed({ refreshCallOffer() }, 20_000)
         }
     }
 

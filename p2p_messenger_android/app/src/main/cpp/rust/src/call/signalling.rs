@@ -136,7 +136,14 @@ impl P2PCore {
     /// its "Attend" (`CallAction::Ended`), mine too.
     fn group_call_ended(&mut self, s: &CallSession) {
         let Some(gid) = s.group_id.clone() else { return };
+        // Same devices the re-invite reaches (`call_sweep_inner`): every one that may hold an offer.
+        let mut to = s.invited.clone();
         for fp in self.group_call_devices(&gid).unwrap_or_default() {
+            if !to.contains(&fp) {
+                to.push(fp);
+            }
+        }
+        for fp in to {
             self.send_call_signal(&fp, &s.call_id, Some(gid.clone()), s.video, CallAction::Ended, None, Vec::new());
         }
         if group_offers().remove(&gid).is_some() {
@@ -417,6 +424,15 @@ impl P2PCore {
                 if gone {
                     group_offers().remove(&gid);
                     self.attachment_events.push(serde_json::json!({"type": "group_call_offer", "group_id": gid}).to_string());
+                }
+                // Still ringing here for the call that just ended: stop.
+                if self.call.as_ref().map_or(false, |s| s.call_id == call_id && s.phase == CallPhase::Incoming) {
+                    self.call = None;
+                    self.last_call_end = Some((call_id.clone(), "remote".to_string()));
+                    return serde_json::json!({
+                        "type": "call", "action": "hangup", "call_id": call_id,
+                        "peer": self.canonical_peer_key(peer_fp), "ended": true, "missed": false,
+                    });
                 }
                 noop()
             }
