@@ -469,8 +469,18 @@ pub(super) async fn open_link(mut control: libp2p_stream::Control, peer: PeerId,
     // A link that opened and closed is not reopened on the very next sweep.
     if m.generation == generation {
         m.opening.insert(peer, mono_ms() + REOPEN_BACKOFF_MS);
+        link_lost(&mut m);
     }
     info!("Call stream closed ({}, {})", what, crate::log_id(&peer));
+}
+
+/// A link that closed mid-call took the frames it had queued or in flight
+/// with it (a Tor circuit dying is the usual cause). The decoders on both
+/// ends now have holes: ask every sender for a keyframe, and send one.
+fn link_lost(m: &mut Media) {
+    m.keyframe_asked = true;
+    m.keyframe_at = current_time_ms();
+    m.remotes.values_mut().for_each(|r| r.want_keyframe = true);
 }
 
 /// Reads media frames peers push to us over direct streams. Registered once
@@ -524,6 +534,7 @@ pub(crate) fn spawn_media_acceptor(control: &mut libp2p_stream::Control) {
                 }
                 let mut m = media();
                 if m.generation == generation {
+                    link_lost(&mut m);
                     let left = m.inbound.get(&peer).map_or(0, |n| n.saturating_sub(1));
                     if left == 0 {
                         m.inbound.remove(&peer);

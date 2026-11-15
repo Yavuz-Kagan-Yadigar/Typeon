@@ -50,14 +50,15 @@ object CallMedia {
     /** While the path queues: 120 ms per write, half the Tor cells (a cell is a
      *  fixed ~500 bytes, so lowering the Opus bitrate alone saves none). */
     private const val PACKETS_PER_FRAME_LOW = 6
-    private const val AUDIO_BITRATE = 12000
-    /** Used while the send queue stands (slow link); back to [AUDIO_BITRATE] once it is empty. */
-    private const val AUDIO_BITRATE_LOW = 6000
+    /** A 60 ms bundle at 24 kbps is ~180 bytes, 120 ms ~360: one Tor cell
+     *  either way, so the higher bitrate costs no extra cells. 12 kbps, and
+     *  6 kbps while the path queued, sounded muffled ("noise-cancelled"). */
+    private const val AUDIO_BITRATE = 24000
     /** `callBacklog` (frames, 100 ms each when reported by the peer) to drop / to restore. */
     private const val AUDIO_LOW_AT = 4
     private const val AUDIO_HIGH_AT = 1
     /** Stay low at least this long: while audio is held the queue empties at once
-     *  and an immediate climb back flapped 6/12 kbps every ~4 s. */
+     *  and an immediate climb back flapped every ~4 s. */
     private const val AUDIO_LOW_HOLD_MS = 10_000L
     /** Frames a decode lane may hold (~1 s of audio bundles or video). */
     private const val LANE_QUEUE = 24
@@ -188,7 +189,6 @@ object CallMedia {
             var peak = 0
             var sentBundles = 0
             var logAt = System.currentTimeMillis()
-            var bitrate = AUDIO_BITRATE
             var perFrame = PACKETS_PER_FRAME
             var rateAt = 0L
             var lowAt = 0L
@@ -198,14 +198,12 @@ object CallMedia {
                     rateAt = nowMs
                     val backlog = P2PLib.callBacklog()
                     if (backlog >= AUDIO_LOW_AT) lowAt = nowMs
-                    val want = if (backlog >= AUDIO_LOW_AT) AUDIO_BITRATE_LOW
-                        else if (backlog <= AUDIO_HIGH_AT && nowMs - lowAt >= AUDIO_LOW_HOLD_MS) AUDIO_BITRATE
-                        else bitrate
-                    if (want != bitrate) {
-                        bitrate = want
-                        perFrame = if (want == AUDIO_BITRATE_LOW) PACKETS_PER_FRAME_LOW else PACKETS_PER_FRAME
-                        Log.i(TAG, "audio bitrate $bitrate (backlog $backlog)")
-                        enc.setParameters(Bundle().apply { putInt(MediaFormat.KEY_BIT_RATE, bitrate) })
+                    val want = if (backlog >= AUDIO_LOW_AT) PACKETS_PER_FRAME_LOW
+                        else if (backlog <= AUDIO_HIGH_AT && nowMs - lowAt >= AUDIO_LOW_HOLD_MS) PACKETS_PER_FRAME
+                        else perFrame
+                    if (want != perFrame) {
+                        perFrame = want
+                        Log.i(TAG, "audio ${perFrame * 20} ms per packet (backlog $backlog)")
                     }
                 }
                 val flags = (if (muted) 1 else 0) or (if (videoEncoder?.enabled == false) 2 else 0)
@@ -425,21 +423,6 @@ object CallMedia {
             if (p > 1500 && p > noise * 3.2f) speakingUntil = android.os.SystemClock.elapsedRealtime() + 400
         }
 
-        init {
-            val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48000, 1).apply {
-                setByteBuffer("csd-0", ByteBuffer.wrap(opusHead()))
-                setByteBuffer("csd-1", nativeLong(0))
-                setByteBuffer("csd-2", nativeLong(80_000_000))
-            }
-            try {
-                dec.configure(fmt, null, null, 0)
-                dec.start()
-            } catch (e: Exception) {
-                dec.release()
-                throw e
-            }
-        }
-
         fun feed(frame: ByteArray, off: Int) {
             for (pkt in unpackBundle(frame, off)) {
                 drain()
@@ -499,9 +482,13 @@ object CallMedia {
                 statPackets = 0; statPeak = 0; statOverflow = 0; statAt = now
             }
             val nowMs = android.os.SystemClock.elapsedRealtime()
-            // Sit on a low target: a standing buffer above CATCHUP_MS for
+            // Sit on a low target: a standing buffer above it for
             // CATCHUP_AFTER_MS plays 25 % fast (every 4th packet skipped).
-            if (buffered > outRate.toLong() * CATCHUP_MS / 1000) {
+            // Each recent underrun raises the target: catching up to 250 ms
+            // on a path whose jitter is 400+ ms drained the buffer just in
+            // time for the next spike (measured ~0.6 gaps/s over Tor).
+            val target = CATCHUP_MS + CATCHUP_STEP_MS * minOf(underruns, 3)
+            if (buffered > outRate.toLong() * target / 1000) {
                 if (overSince == 0L) overSince = nowMs
                 if (nowMs - overSince >= CATCHUP_AFTER_MS && ++catchupTick % 4 == 0) { statOverflow++; return }
             } else overSince = 0
@@ -575,17 +562,19 @@ object CallMedia {
             const val PAD_BASE_MS = 80
             const val PAD_STEP_MS = 40
             /** AudioTrack buffer, start threshold, and jitter cap (API 31+). */
-            const val BUFFER_MS = 800
+            const val BUFFER_MS = 1200
             /** Below API 31 there is no start threshold: the track starts
              *  when its WHOLE buffer is full, so the buffer size is the added
              *  delay (0.8 s with [BUFFER_MS]). Not measured on a device:
              *  raise it if audio breaks up on LTE bursts there. */
             const val LEGACY_BUFFER_MS = 300
             const val START_MS = 60
-            const val MAX_BUFFER_MS = 600 // LTE+Tor delivers audio in ~1 s bursts
+            /** Above the highest catch-up target (550 ms): a flush there throws the whole buffer away. */
+            const val MAX_BUFFER_MS = 900 // LTE+Tor delivers audio in ~1 s bursts
             const val CATCHUP_MS = 250
+            const val CATCHUP_STEP_MS = 100
             const val CATCHUP_AFTER_MS = 2_000L
-            const val UNDERRUN_FORGET_MS = 10_000L
+            const val UNDERRUN_FORGET_MS = 30_000L
 
             /** RFC 7845 identification header, mono, 16 kHz input. */
             fun opusHead(): ByteArray = ByteBuffer.allocate(19).order(ByteOrder.LITTLE_ENDIAN).apply {
@@ -634,10 +623,13 @@ object CallMedia {
          *  into mush; drop frames (below) instead. */
         const val QP_MIN = 22
         const val QP_MAX = 44
-        /** VRR: mean |ΔY| over a 1/64 luma sample grid, against the last SENT
-         *  frame, below this = nothing moved, the frame is not encoded at all.
-         *  0-255 scale; 1.5 ignores sensor noise, catches a blink. */
-        const val CHANGE_THRESHOLD = 1.5
+        /** VRR: a luma sample (1/64 grid) whose |ΔY| against the last SENT
+         *  frame exceeds [CHANGE_LEVEL] moved; fewer than 1/[CHANGE_FRACTION]
+         *  of the samples moved = nothing moved, the frame is not encoded.
+         *  A mean over the whole frame let a talking mouth (a few % of the
+         *  picture) read as still: ~2 fps of a face. */
+        const val CHANGE_LEVEL = 12
+        const val CHANGE_FRACTION = 400
         /** ...but never longer than this without a frame, so a still scene
          *  still shows up to date (and the encoder's rate control keeps ticking). */
         const val MAX_STILL_MS = 1000L
@@ -662,10 +654,14 @@ object CallMedia {
         private var bitrate = VideoTuning.START_BITRATE
         private var fps = VideoTuning.MAX_FPS
         private var lastFrameNs = 0L
+        /** Earliest time the next frame may go out, see [encode]. */
+        private var nextDueNs = 0L
         private var lastAdaptMs = 0L
         private var lastKeyNs = 0L
         private var prevLuma: ByteArray? = null
         private var stillSkips = 0
+        /** Frames handed to the encoder since the last [adapt] log line. */
+        private var sentFrames = 0
         private val info = MediaCodec.BufferInfo()
         @Volatile var enabled = true
         /** Congestion pause, see [adapt]. */
@@ -684,7 +680,10 @@ object CallMedia {
             adapt()
             if (paused) return
             val now = System.nanoTime()
-            if (now - lastFrameNs < 1_000_000_000L / fps) return
+            // A schedule, not "time since the last frame": with a 30 fps
+            // camera and a 24 fps cap the frame 33 ms after a sent one was too
+            // early, the next one passed, and the call ran at 15 fps.
+            if (now < nextDueNs) return
             val c = codec ?: create(image.width, image.height)
             if (image.width != width || image.height != height) { release(); return }
             // At most one on-demand keyframe per KEYFRAME_MIN_GAP_MS: a
@@ -709,12 +708,15 @@ object CallMedia {
             val stillFor = (now - lastFrameNs) / 1_000_000
             val prev = prevLuma
             if (!keyAsked && prev != null && stillFor < VideoTuning.MAX_STILL_MS &&
-                meanAbsDiff(prev, luma) < VideoTuning.CHANGE_THRESHOLD) {
+                !moved(prev, luma)) {
                 stillSkips++
                 return
             }
             prevLuma = luma
             lastFrameNs = now
+            val interval = 1_000_000_000L / fps
+            nextDueNs = maxOf(nextDueNs + interval, now - interval / 2)
+            sentFrames++
             val rotation = image.imageInfo.rotationDegrees
             val idx = c.dequeueInputBuffer(0)
             if (idx >= 0) {
@@ -870,8 +872,9 @@ object CallMedia {
             if (bitrate != before) {
                 codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrate) })
             }
-            if (stillSkips > 0 || paused) Log.d(TAG, "VRR: skipped $stillSkips still frames, bitrate=$bitrate fps<=$fps paused=$paused backlog=$backlog")
+            if (stillSkips > 0 || paused) Log.d(TAG, "VRR: sent $sentFrames, skipped $stillSkips still frames, bitrate=$bitrate fps<=$fps paused=$paused backlog=$backlog")
             stillSkips = 0
+            sentFrames = 0
         }
 
         @Synchronized
@@ -901,11 +904,14 @@ object CallMedia {
                 return out
             }
 
-            private fun meanAbsDiff(a: ByteArray, b: ByteArray): Double {
-                if (a.size != b.size || a.isEmpty()) return Double.MAX_VALUE
-                var sum = 0L
-                for (i in a.indices) sum += kotlin.math.abs((a[i].toInt() and 0xff) - (b[i].toInt() and 0xff))
-                return sum.toDouble() / a.size
+            private fun moved(a: ByteArray, b: ByteArray): Boolean {
+                if (a.size != b.size || a.isEmpty()) return true
+                val need = maxOf(4, a.size / VideoTuning.CHANGE_FRACTION)
+                var n = 0
+                for (i in a.indices) {
+                    if (kotlin.math.abs((a[i].toInt() and 0xff) - (b[i].toInt() and 0xff)) > VideoTuning.CHANGE_LEVEL && ++n >= need) return true
+                }
+                return false
             }
 
             /** YUV_420_888 -> the codec's flexible YUV input image, any strides. */
@@ -966,6 +972,8 @@ object CallMedia {
         private var createdAt = -1000L
         /** Frames the current decoder has rendered. */
         private var rendered = 0
+        private var statFrames = 0L
+        private var statAt = android.os.SystemClock.elapsedRealtime()
         /** A frame was skipped: feed nothing until the next keyframe. */
         private var waitKey = false
         private val info = MediaCodec.BufferInfo()
@@ -1060,7 +1068,12 @@ object CallMedia {
             while (true) {
                 val o = c.dequeueOutputBuffer(info, 0)
                 if (o == MediaCodec.INFO_TRY_AGAIN_LATER) break
-                if (o >= 0) { c.releaseOutputBuffer(o, true); rendered++ }
+                if (o >= 0) { c.releaseOutputBuffer(o, true); rendered++; statFrames++ }
+            }
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - statAt >= 5000) {
+                Log.i(TAG, "video rx slot $slot: ${statFrames * 1000 / (now - statAt)} fps rendered")
+                statFrames = 0; statAt = now
             }
         }
 

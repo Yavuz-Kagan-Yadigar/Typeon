@@ -59,8 +59,11 @@ mod tuning {
     pub const KEYFRAME_MIN_GAP_MS: u64 = 2000;
     pub const QP_MIN: u32 = 22;
     pub const QP_MAX: u32 = 44;
-    /// Mean |ΔY| (0-255) over a 1/64 luma grid below which nothing moved.
-    pub const CHANGE_THRESHOLD: f64 = 1.5;
+    /// A 1/64-grid luma sample with |ΔY| above CHANGE_LEVEL moved; fewer
+    /// than 1/CHANGE_FRACTION of the samples moved = nothing moved. A mean
+    /// over the whole frame let a talking mouth read as still.
+    pub const CHANGE_LEVEL: u32 = 12;
+    pub const CHANGE_FRACTION: usize = 400;
     pub const MAX_STILL_MS: u64 = 1000;
     pub const SAMPLE_STEP: usize = 8;
     pub const ADAPT_MS: u64 = 500;
@@ -438,7 +441,7 @@ fn audio_tx(shared: Arc<Shared>) {
             "{MIC} ! audioconvert ! audioresample ! \
              audio/x-raw,format=S16LE,rate=48000,channels=1 ! {dsp}audioconvert ! audioresample ! \
              audio/x-raw,format=S16LE,rate=16000,channels=1 ! \
-             opusenc bitrate=12000 frame-size=20 audio-type=voice bandwidth=wideband complexity=10 ! \
+             opusenc bitrate=24000 frame-size=20 audio-type=voice bandwidth=wideband complexity=10 ! \
              appsink name=out sync=false max-buffers=50 drop=true"
         )
     };
@@ -836,6 +839,9 @@ struct Gate {
     fps: u32,
     paused: bool,
     last_sent: Option<Instant>,
+    /// Earliest time the next frame may go out: a schedule, not "time since
+    /// the last frame" (30 fps camera + 24 fps cap gave 15 fps).
+    next_due: Option<Instant>,
     prev_luma: Vec<u8>,
     force: bool,
     still_skips: u32,
@@ -921,6 +927,7 @@ impl VideoTx {
             fps: tuning::MAX_FPS,
             paused: false,
             last_sent: None,
+            next_due: None,
             prev_luma: Vec::new(),
             force: true,
             still_skips: 0,
@@ -1052,7 +1059,7 @@ fn admit(g: &mut Gate, pad: &gst::Pad, buffer: &gst::Buffer) -> bool {
     }
     let now = Instant::now();
     let since = g.last_sent.map(|t| now.duration_since(t));
-    if !g.force && since.is_some_and(|d| d < Duration::from_millis(1000 / g.fps as u64)) {
+    if !g.force && g.next_due.is_some_and(|t| now < t) {
         return false;
     }
     let luma = pad
@@ -1062,7 +1069,7 @@ fn admit(g: &mut Gate, pad: &gst::Pad, buffer: &gst::Buffer) -> bool {
     if let Some(luma) = luma {
         let still = !g.force
             && since.is_some_and(|d| d < Duration::from_millis(tuning::MAX_STILL_MS))
-            && mean_abs_diff(&g.prev_luma, &luma) < tuning::CHANGE_THRESHOLD;
+            && !moved(&g.prev_luma, &luma);
         if still {
             g.still_skips += 1;
             return false;
@@ -1071,6 +1078,9 @@ fn admit(g: &mut Gate, pad: &gst::Pad, buffer: &gst::Buffer) -> bool {
     }
     g.force = false;
     g.last_sent = Some(now);
+    let interval = Duration::from_millis(1000 / g.fps.max(1) as u64);
+    let floor = now.checked_sub(interval / 2).unwrap_or(now);
+    g.next_due = Some(g.next_due.map_or(now + interval, |t| (t + interval).max(floor)));
     g.admitted += 1;
     true
 }
@@ -1091,12 +1101,12 @@ fn sample_luma(info: &gst_video::VideoInfo, buffer: &gst::Buffer) -> Option<Vec<
     Some(out)
 }
 
-fn mean_abs_diff(a: &[u8], b: &[u8]) -> f64 {
+fn moved(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() || a.is_empty() {
-        return f64::MAX;
+        return true;
     }
-    let sum: u64 = a.iter().zip(b).map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as u64).sum();
-    sum as f64 / a.len() as f64
+    let need = (a.len() / tuning::CHANGE_FRACTION).max(4);
+    a.iter().zip(b).filter(|(x, y)| (**x as i32 - **y as i32).unsigned_abs() > tuning::CHANGE_LEVEL).take(need).count() >= need
 }
 
 #[cfg(test)]
@@ -1129,7 +1139,13 @@ mod tests {
 
     #[test]
     fn vrr_diff() {
-        assert_eq!(mean_abs_diff(&[10, 20], &[12, 16]), 3.0);
-        assert_eq!(mean_abs_diff(&[], &[]), f64::MAX);
+        let still = vec![100u8; 4800];
+        // Sensor noise everywhere: still.
+        assert!(!moved(&still, &vec![104u8; 4800]));
+        // A mouth: 30 of 4800 samples (0.6 %) change a lot: moved.
+        let mut mouth = still.clone();
+        mouth[..30].fill(160);
+        assert!(moved(&still, &mouth));
+        assert!(moved(&[], &[]));
     }
 }
