@@ -21,7 +21,7 @@ object LocalWipe {
         // Everything the app stores lives under filesDir: database, wrapped
         // keys, libp2p key, attachments, arti state, wallpaper, fonts.
         app.filesDir.listFiles()?.forEach {
-            if (!it.deleteRecursively()) android.util.Log.w("LocalWipe", "could not delete ${it.name}")
+            if (!it.deleteRecursively()) com.p2p.messenger.util.Log.w("LocalWipe", "could not delete ${it.name}")
         }
         // The wrapping keys too: a deleted `.enc` file recovered from flash
         // stays closed. The next identity makes new ones.
@@ -30,7 +30,7 @@ object LocalWipe {
         for (dir in listOfNotNull(app.cacheDir, app.codeCacheDir, app.noBackupFilesDir,
                 app.externalCacheDir, app.getExternalFilesDir(null))) {
             if (dir.exists() && !dir.deleteRecursively()) {
-                android.util.Log.w("LocalWipe", "could not fully delete ${dir.name}")
+                com.p2p.messenger.util.Log.w("LocalWipe", "could not fully delete ${dir.name}")
             }
         }
         // Every preference file, not a list of names: a new one is covered.

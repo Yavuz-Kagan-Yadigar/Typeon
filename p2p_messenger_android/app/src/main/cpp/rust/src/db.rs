@@ -4,7 +4,6 @@ use super::*;
 
 impl P2PCore {
     pub(crate) fn new() -> Self {
-        android_logger::init_once(LogConfig::default().with_max_level(log::LevelFilter::Info));
         // Every JNI-exported `P2PCore` method wraps its body in `catch_panic` (see the JNI Bindings section at the end of the file). This panic hook is
         // installed here as well because release builds are stripped (`strip = true` in Cargo.toml), so a panic's crash dump would have no symbols.
         // The hook runs BEFORE unwinding starts, so it logs the full panic message and file/line to logcat before `catch_unwind` catches it.

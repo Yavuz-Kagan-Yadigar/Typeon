@@ -5,7 +5,11 @@
 //! - The release list is the Atom feed (`releases.atom`): it has no API rate limit (Tor exits share the
 //!   60 requests/hour of the unauthenticated API) and lists pre-releases too.
 //! - A tag with a `-` (`v7.4.0-beta.1`) is a beta. Without the beta flag only plain versions count.
-//! - The download is checked against the release's `SHA256SUMS`. TLS uses the webpki roots, not the OS store.
+//! - The download is checked against the release's `SHA256SUMS`, and `SHA256SUMS` against `SHA256SUMS.sig`:
+//!   an Ed25519 signature made OFFLINE by the owner (`tools/sign-update.sh`) over the tag and the sums.
+//!   A GitHub account or CI compromise alone cannot ship an update. A release without the signature counts
+//!   as not published yet. TLS uses the webpki roots, not the OS store.
+//! - An interrupted download keeps its `.part` file and resumes with an HTTP range request.
 //! - State lives in one directory per app: `beta` (flag file), `last-check` (stamp), `status` (for the
 //!   settings screens), the verified download.
 
@@ -23,6 +27,64 @@ const REPO: &str = "Yavuz-Kagan-Yadigar/Typeon";
 const CHECK_EVERY: Duration = Duration::from_secs(20 * 3600);
 const MAX_ASSET_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_SMALL_BYTES: u64 = 1024 * 1024;
+
+/// Public half of the owner's offline release key (private half in `~/.config/typeon-signing`, never in the repo).
+const UPDATE_KEY: [u8; 32] = hex_literal(b"f1678c65025d25526c1abb556fc163e01f0041d58a354f2b2f1e947a7a07dffc");
+
+const fn hex_literal(h: &[u8; 64]) -> [u8; 32] {
+    const fn nib(c: u8) -> u8 {
+        match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => panic!("bad hex"),
+        }
+    }
+    let mut out = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        out[i] = nib(h[2 * i]) << 4 | nib(h[2 * i + 1]);
+        i += 1;
+    }
+    out
+}
+
+/// The bytes the release key signs: a header, the tag, then `SHA256SUMS` verbatim. The tag is inside so an
+/// old signed release cannot be passed off as a newer one.
+pub fn signed_message(tag: &str, sums: &str) -> Vec<u8> {
+    format!("typeon-update v1\n{tag}\n{sums}").into_bytes()
+}
+
+/// Checks `sig_hex` (128 hex chars) over `msg` with [`UPDATE_KEY`]. Returns the tag and the sums.
+pub fn verify_release(msg: &[u8], sig_hex: &str) -> Result<(String, String), String> {
+    verify_with(&UPDATE_KEY, msg, sig_hex)
+}
+
+fn verify_with(key: &[u8; 32], msg: &[u8], sig_hex: &str) -> Result<(String, String), String> {
+    let sig: [u8; 64] = hex::decode(sig_hex.trim())
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or("SHA256SUMS.sig: not a signature")?;
+    let key = ed25519_dalek::VerifyingKey::from_bytes(key).map_err(|e| e.to_string())?;
+    key.verify_strict(msg, &ed25519_dalek::Signature::from_bytes(&sig))
+        .map_err(|_| "SHA256SUMS.sig: bad signature".to_string())?;
+    let text = std::str::from_utf8(msg).map_err(|_| "signed release: not UTF-8")?;
+    let rest = text.strip_prefix("typeon-update v1\n").ok_or("signed release: bad header")?;
+    let (tag, sums) = rest.split_once('\n').ok_or("signed release: no tag")?;
+    Ok((tag.to_string(), sums.to_string()))
+}
+
+/// The lowercase hash `SHA256SUMS` lists for `name`.
+pub fn sums_hash(sums: &str, name: &str) -> Option<String> {
+    sums.lines().find_map(|l| {
+        let (hash, file) = l.split_once(char::is_whitespace)?;
+        (file.trim().trim_start_matches('*') == name).then(|| hash.to_ascii_lowercase())
+    })
+}
+
+/// Files `check` leaves next to a verified download, so a privileged installer (the server's systemd
+/// `ExecStartPre`) can verify the file again without trusting whoever wrote it.
+pub const SIGNED_FILE: &str = "release.signed";
+pub const SIG_FILE: &str = "release.sig";
 
 pub type TorClientRt = TorClient<TokioRustlsRuntime>;
 pub type Tor = Arc<TorClientRt>;
@@ -131,7 +193,9 @@ async fn idle<T, E: std::error::Error>(what: &str, f: impl std::future::Future<O
 }
 
 /// Plain HTTP/1.1 GET over Tor and TLS. Follows redirects to GitHub hosts only. The body goes to `sink`.
-async fn get(tor: &Tor, url: &str, max: u64, sink: &mut (dyn FnMut(&[u8]) -> Result<(), String> + Send)) -> Result<(), String> {
+/// `from` > 0 asks for the bytes from that offset on (a resumed download); a server that ignores the range
+/// fails with `range ignored`.
+async fn get(tor: &Tor, url: &str, max: u64, from: u64, sink: &mut (dyn FnMut(&[u8]) -> Result<(), String> + Send)) -> Result<(), String> {
     let mut url = url.to_string();
     for _ in 0..5 {
         let rest = url.strip_prefix("https://").ok_or("only https")?;
@@ -163,8 +227,9 @@ async fn get(tor: &Tor, url: &str, max: u64, sink: &mut (dyn FnMut(&[u8]) -> Res
             .with_no_client_auth();
         let name = rustls::pki_types::ServerName::try_from(host.clone()).map_err(|e| e.to_string())?;
         let mut tls = idle(&format!("tls {host}"), futures_rustls::TlsConnector::from(Arc::new(config)).connect(name, stream)).await?;
+        let range = if from > 0 { format!("Range: bytes={from}-\r\n") } else { String::new() };
         let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: typeon-updater\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: typeon-updater\r\nAccept: */*\r\n{range}Connection: close\r\n\r\n"
         );
         idle("write", tls.write_all(request.as_bytes())).await?;
         idle("write", tls.flush()).await?;
@@ -203,7 +268,10 @@ async fn get(tor: &Tor, url: &str, max: u64, sink: &mut (dyn FnMut(&[u8]) -> Res
             url = if loc.starts_with('/') { format!("https://{host}{loc}") } else { loc };
             continue;
         }
-        if status != 200 {
+        if from > 0 && status == 200 {
+            return Err("range ignored".into());
+        }
+        if status != if from > 0 { 206 } else { 200 } {
             return Err(format!("HTTP {status} for {url}"));
         }
         if length.is_some_and(|l| l > max) {
@@ -258,7 +326,7 @@ async fn get(tor: &Tor, url: &str, max: u64, sink: &mut (dyn FnMut(&[u8]) -> Res
 
 async fn get_text(tor: &Tor, url: &str) -> Result<String, String> {
     let mut body = Vec::new();
-    get(tor, url, MAX_SMALL_BYTES, &mut |b| {
+    get(tor, url, MAX_SMALL_BYTES, 0, &mut |b| {
         body.extend_from_slice(b);
         Ok(())
     })
@@ -340,19 +408,25 @@ async fn check_inner(tor: &Tor, dir: &Path, current: &str, asset: &str, force: b
             }
             Err(e) => return Err(e),
         };
-        let want = sums.lines().find_map(|l| {
-            let (hash, file) = l.split_once(char::is_whitespace)?;
-            (file.trim().trim_start_matches('*') == name).then(|| hash.to_ascii_lowercase())
-        });
-        match want {
-            Some(want) => {
-                found = Some((tag, version, name, base, want));
-                break;
+        let Some(want) = sums_hash(&sums, &name) else {
+            skipped = true;
+            continue;
+        };
+        // Signed by the owner after CI published the release; until then the release waits.
+        let sig = match get_text(tor, &format!("{base}/SHA256SUMS.sig")).await {
+            Ok(s) => s,
+            Err(e) if e.starts_with("HTTP 404") => {
+                skipped = true;
+                continue;
             }
-            None => skipped = true,
-        }
+            Err(e) => return Err(e),
+        };
+        let msg = signed_message(&tag, &sums);
+        verify_release(&msg, &sig).map_err(|e| format!("{tag}: {e}"))?;
+        found = Some((tag, version, name, base, want, msg, sig));
+        break;
     }
-    let Some((tag, version, name, base, want)) = found else {
+    let Some((tag, version, name, base, want, msg, sig)) = found else {
         if !skipped {
             let _ = std::fs::write(&stamp, b"");
         }
@@ -362,39 +436,61 @@ async fn check_inner(tor: &Tor, dir: &Path, current: &str, asset: &str, force: b
 
     let target = dir.join(format!("{version}-{name}"));
     if sha256_file(&target).as_deref() != Some(want.as_str()) {
-        // Old downloads are dead weight once a newer one is wanted.
+        let part = dir.join(format!("{version}-{name}.part"));
+        // Old downloads are dead weight once a newer one is wanted. A `.part` of this same file stays: it resumes.
         if let Ok(entries) = std::fs::read_dir(dir) {
             for e in entries.flatten() {
                 let n = e.file_name();
-                if n != "beta" && n != "last-check" && n != "status" {
+                if n != "beta" && n != "last-check" && n != "status" && e.path() != part {
                     let _ = std::fs::remove_file(e.path());
                 }
             }
         }
-        let part = dir.join(format!("{name}.part"));
-        let mut file = std::fs::File::create(&part).map_err(|e| e.to_string())?;
         let mut hasher = Sha256::new();
-        log::info!("update: downloading {name} ({tag})");
-        set_status(dir, github, "downloading 0");
-        let mut done = 0u64;
-        let result = get(tor, &format!("{base}/{name}"), MAX_ASSET_BYTES, &mut |b| {
-            let before = done >> 20;
-            done += b.len() as u64;
-            if done >> 20 != before {
-                set_status(dir, github, &format!("downloading {}", done >> 20));
+        let mut done = match std::fs::File::open(&part).and_then(|mut f| std::io::copy(&mut f, &mut hasher)) {
+            Ok(n) => n,
+            Err(_) => {
+                hasher = Sha256::new();
+                0
             }
-            hasher.update(b);
-            std::io::Write::write_all(&mut file, b).map_err(|e| e.to_string())
-        })
-        .await;
+        };
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&part).map_err(|e| e.to_string())?;
+        if file.metadata().map(|m| m.len()).unwrap_or(0) != done {
+            // Unreadable tail: start over.
+            file.set_len(0).map_err(|e| e.to_string())?;
+            hasher = Sha256::new();
+            done = 0;
+        }
+        log::info!("update: downloading {name} ({tag}) from byte {done}");
+        set_status(dir, github, &format!("downloading {}", done >> 20));
+        let complete = done > 0 && hex::encode(hasher.clone().finalize()) == want;
+        let result = if complete {
+            Ok(())
+        } else {
+            get(tor, &format!("{base}/{name}"), MAX_ASSET_BYTES.saturating_sub(done), done, &mut |b| {
+                let before = done >> 20;
+                done += b.len() as u64;
+                if done >> 20 != before {
+                    set_status(dir, github, &format!("downloading {}", done >> 20));
+                }
+                hasher.update(b);
+                std::io::Write::write_all(&mut file, b).map_err(|e| e.to_string())
+            })
+            .await
+        };
         drop(file);
         let got = hex::encode(hasher.finalize());
         if let Err(e) = result.and_then(|()| if got == want { Ok(()) } else { Err(format!("{name}: SHA-256 mismatch")) }) {
-            let _ = std::fs::remove_file(&part);
+            // A dropped circuit keeps the bytes so far; a bad or unresumable file starts over.
+            if e.contains("mismatch") || e == "range ignored" || e.starts_with("HTTP 416") || e == "response too large" {
+                let _ = std::fs::remove_file(&part);
+            }
             return Err(e);
         }
         std::fs::rename(&part, &target).map_err(|e| e.to_string())?;
     }
+    std::fs::write(dir.join(SIGNED_FILE), &msg).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(SIG_FILE), sig.trim()).map_err(|e| e.to_string())?;
     // The switch may have gone off during a download that takes minutes: no beta for a stable-only app.
     if version.contains('-') && !beta_enabled(dir) {
         set_status(dir, Some("-"), "latest");
@@ -432,6 +528,19 @@ mod tests {
         assert!(is_newer("7.4.0-beta.10", "7.4.0-beta.9"));
         assert!(is_newer("7.4.0-beta.1", "7.3.1"));
         assert!(!is_newer("junk", "7.3.1"));
+    }
+
+    #[test]
+    fn release_signature() {
+        // Made with the release key over this exact message (openssl pkeyutl -sign -rawin).
+        let msg = signed_message("v1.0.0", "abc  typeon-server-linux\n");
+        let sig = "e6898c55400d678d63f5d2e0820987b2ffcb32c4e4b382b4610ca1589ff11b2a20fc28d52e550b2a8de6454d6d182c8dd64cc187cb5a6717437d7a423876510e";
+        let (tag, sums) = verify_release(&msg, sig).unwrap();
+        assert_eq!(tag, "v1.0.0");
+        assert_eq!(sums_hash(&sums, "typeon-server-linux").as_deref(), Some("abc"));
+        assert!(verify_release(&signed_message("v9.0.0", "abc  typeon-server-linux\n"), sig).is_err());
+        assert!(verify_release(&msg, &sig.replace('e', "f")).is_err());
+        assert!(verify_release(&msg, "00").is_err());
     }
 
     #[test]

@@ -3,7 +3,8 @@ package com.p2p.messenger.util
 import android.content.Context
 import com.p2p.messenger.R
 
-/** "Error: CODE: detail" from the core -> a localized text; unknown/old shapes keep the detail. */
+/** "Error: CODE: detail" from the core -> a localized text. The core's detail is English and goes to the log only:
+ *  the screen shows the selected language alone, so an error without a known code gets the generic text. */
 fun coreErrorText(ctx: Context, raw: String): String {
     val body = raw.removePrefix("Error:").trim()
     val code = body.substringBefore(':', "").trim()
@@ -19,7 +20,10 @@ fun coreErrorText(ctx: Context, raw: String): String {
         "NETWORK" -> R.string.error_network
         "NOT_FOUND" -> R.string.err_core_not_found
         "INTERNAL" -> R.string.err_core_internal
-        else -> return ctx.getString(R.string.error_with_message, body)
+        else -> {
+            Log.w("CoreError", body)
+            R.string.err_core_internal
+        }
     }
     return ctx.getString(id)
 }

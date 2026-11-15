@@ -271,7 +271,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
             val ids = if (result.startsWith("Error")) null else hexToBytes(result)
             val failed = ids == null
             // The stroke disappears from the board without a word otherwise.
-            if (failed || result.length != 16) android.util.Log.w("Whiteboard", "addStroke: '$result' page=$shown points=${stroke.points.size}")
+            if (failed || result.length != 16) com.p2p.messenger.util.Log.w("Whiteboard", "addStroke: '$result' page=$shown points=${stroke.points.size}")
             if (ids != null) step.ids = ids
             ui.post {
                 board.pending.remove(stroke)
@@ -342,7 +342,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
                 } else {
                     // Roll the partially re-added strokes back so the core is
                     // not left half-redone, and the redo can be tried again.
-                    android.util.Log.w("Whiteboard", "redo: page ${step.page} full or malformed id")
+                    com.p2p.messenger.util.Log.w("Whiteboard", "redo: page ${step.page} full or malformed id")
                     P2PLib.whiteboardErase(peer, groupId, ids)
                     ui.post { Toast.makeText(activity, R.string.whiteboard_page_full, Toast.LENGTH_SHORT).show() }
                 }

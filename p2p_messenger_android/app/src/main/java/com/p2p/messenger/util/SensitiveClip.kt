@@ -73,9 +73,7 @@ private fun ClipboardManager.trySelfClear(label: String, retries: Int) {
         }
         removePrimaryClipChangedListener(foreignCopyListener)
         if (desc.label?.toString() == label) {
-            // `clearPrimaryClip` is API 28; minSdk is 26.
-            if (android.os.Build.VERSION.SDK_INT >= 28) clearPrimaryClip()
-            else setPrimaryClip(ClipData.newPlainText("", ""))
+            clearPrimaryClip()
         }
     } catch (e: Exception) { }
 }

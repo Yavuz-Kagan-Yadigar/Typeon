@@ -7,6 +7,31 @@ correct and what remains a known, accepted limitation.
 
 ---
 
+## 0. Limits you should know first
+
+These are deliberate trade-offs, each explained further down:
+
+- **Tor hides who can reach you, not who you are to a peer.** The libp2p
+  `identify` exchange shows a connected peer your device's addresses, and a
+  peer on the same LAN is dialled directly. Use Tor for reachability across
+  NAT, not for anonymity from your contacts.
+- **A store-and-forward server sees its users' social graph**: which enrolled
+  devices deposit into which mailboxes, and when. It never sees content.
+- **The server history archive is not forward-secret.** A leaked archive key
+  decrypts every record uploaded with it, and a server can serve an older
+  revision of a record to a freshly linked device without it noticing.
+- **Session mailbox reader proofs are X25519-only.** A future quantum attacker
+  holding both public keys could register as a mailbox reader and see
+  deposits arrive; the deposits themselves stay hybrid-sealed.
+- **Updates trust one offline key.** Every app installs an update only when
+  the release's `SHA256SUMS` carries the owner's Ed25519 signature
+  (`SHA256SUMS.sig`, made with `tools/sign-update.sh` on the owner's machine,
+  public key pinned in `update.rs`). A GitHub account or CI compromise alone
+  cannot push code; theft of that key can. Android additionally requires the
+  APK signing key.
+
+---
+
 ## 1. The short version
 
 - Every message is encrypted **end-to-end** with a key that a passive
@@ -746,7 +771,7 @@ anything, so the honest reading is "we asked", not "it is gone".
   - The server stores each client's global libp2p `PeerId` (#20): servers can link the same device across servers; no per-server identity.
   - The join token is stored in plaintext (#22): the join code must stay re-showable; it is behind the DB encryption and the app PIN.
   - The server app holds a wake lock and Wi-Fi lock while running (#23): without them Doze drops the Tor circuits; costs battery.
-  - Blob ids and archive bucket ids are pure capabilities (#72): anyone enrolled who learns one can fetch/purge it; ids are random and derived from secrets the server never sees.
+  - Blob ids and archive bucket ids are capabilities (#72): anyone enrolled who learns one can fetch it. Since server protocol 8 a bucket id is a hash of a per-bucket purge secret derived from the archive key, so only the account's own devices can purge a bucket; the operator, who sees every id, cannot hand out deletion.
 - **2nd round protocol breaks (2026-10-21):** stable session mailbox id, `ServerErrorCode::BadHash`, `FileChunkResponse::Busy`, length-prefixed pairing nonce proof, mandatory `signature_pq` on `DeviceAdd`/`DeviceRevoke`. Bump the version; every device must update.
 - **3rd round protocol breaks (2026-10-21):** the message header now travels as the sender's **raw CBOR bytes** — the hybrid signature covers exactly those bytes (`p2pmsg-v0.6-packet`) and the same bytes are the ratchet AEAD's **associated data**, so a receiver can only act on the header the sender actually encrypted under. `IdentityExchange` is signed **for the recipient device** and carries a **timestamp** (`p2pmsg-v0.5-identity-exchange`): a captured pairing packet replays to no other device and only inside the receiver's freshness window. Group first-contact secrets are **per group** (`FirstContactSecret.group_id`), a group update now carries only the **changed** member devices (a `GroupSyncRequest` asks the founder for the full state), a group call invite names its **participants**, and the whiteboard digest is a **per-stroke content hash**. Bump the version; every device must be re-linked and every contact re-paired.
 - **Release APKs are signed only by `sign-release.sh`.** Gradle leaves the release build **unsigned** (the debug key tracked in the repo would let anyone with the source sign an update); the script signs with the private key of the v3 rotation lineage, for the client and the server app alike.

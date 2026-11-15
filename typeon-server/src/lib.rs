@@ -1184,7 +1184,7 @@ impl ServerCore {
             }
             ServerRequest::Fetch { cursors, .. } => cursors.len() > boxes,
             ServerRequest::Ack { acks } => acks.len() > boxes,
-            ServerRequest::ArchiveProbe { buckets } | ServerRequest::ArchivePurge { buckets } => buckets.len() > boxes,
+            ServerRequest::ArchiveProbe { buckets } | ServerRequest::ArchivePurge { purge_secrets: buckets } => buckets.len() > boxes,
             ServerRequest::Cancel { seqs, .. } => seqs.len() > boxes,
             ServerRequest::ArchivePut { records, .. } => records.len() > server_proto::MAX_ARCHIVE_PUT_RECORDS,
             _ => false,
@@ -1199,8 +1199,9 @@ impl ServerCore {
             ServerRequest::Fetch { cursors: list, .. } | ServerRequest::Ack { acks: list } => {
                 list.iter().any(|(id, _)| !is_safe_id(id))
             }
-            ServerRequest::ArchiveProbe { buckets } | ServerRequest::ArchivePurge { buckets } => {
-                buckets.iter().any(|id| !is_safe_id(id))
+            ServerRequest::ArchiveProbe { buckets } => buckets.iter().any(|id| !is_safe_id(id)),
+            ServerRequest::ArchivePurge { purge_secrets } => {
+                purge_secrets.iter().any(|s| server_proto::archive_bucket_for_purge_secret(s).is_none())
             }
             ServerRequest::Deposit { mailbox: id, .. }
             | ServerRequest::Cancel { mailbox: id, .. }
@@ -1378,7 +1379,11 @@ impl ServerCore {
                 ServerResponse::ArchiveBatch { records, more }
             }
 
-            ServerRequest::ArchivePurge { buckets } => {
+            // Only the archive key's holders know a secret; the bucket id alone (which the server and anyone it
+            // tells know) deletes nothing.
+            ServerRequest::ArchivePurge { purge_secrets } => {
+                let buckets: Vec<String> =
+                    purge_secrets.iter().filter_map(|s| server_proto::archive_bucket_for_purge_secret(s)).collect();
                 self.store.archive_purge(&buckets);
                 ServerResponse::Ok
             }
@@ -2057,7 +2062,7 @@ fn request_cost(req: &ServerRequest) -> u32 {
         ServerRequest::ArchivePut { records, .. } => {
             records.len() + records.iter().map(|r| r.sealed.len()).sum::<usize>() / (64 * 1024) * 8
         }
-        ServerRequest::ArchiveProbe { buckets } | ServerRequest::ArchivePurge { buckets } => buckets.len(),
+        ServerRequest::ArchiveProbe { buckets } | ServerRequest::ArchivePurge { purge_secrets: buckets } => buckets.len(),
         _ => 0,
     };
     1u32.saturating_add(u32::try_from(n / 8).unwrap_or(u32::MAX))

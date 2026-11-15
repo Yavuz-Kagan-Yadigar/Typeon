@@ -15,7 +15,12 @@ for c in Linux typeon-server; do
     # Lock file: the version line right after this package's name.
     sed -i "/^name = \"$name\"$/{n;s/^version = \".*\"/version = \"$V\"/}" "$c/Cargo.lock"
 done
+# The core crate too (crash triage reads its version); every lock file that links it.
+sed -i "0,/^version = \".*\"/s//version = \"$V\"/" p2p_messenger_android/app/src/main/cpp/rust/Cargo.toml
+for l in p2p_messenger_android/app/src/main/cpp/rust/Cargo.lock Linux/Cargo.lock typeon-server/Cargo.lock; do
+    sed -i "/^name = \"p2p_messenger_core\"$/{n;s/^version = \".*\"/version = \"$V\"/}" "$l"
+done
 # Flatpak's `flatpak info` version comes from the newest <release> in the metainfo.
 sed -i "0,/<release version=\"[^\"]*\" date=\"[^\"]*\"/s//<release version=\"$V\" date=\"$(date +%F)\"/" Linux/data/com.p2p.messenger.Typeon.metainfo.xml
 grep -H 'versionName\|versionCode' p2p_messenger_android*/app/build.gradle
-grep -H -m1 '^version' Linux/Cargo.toml typeon-server/Cargo.toml
+grep -H -m1 '^version' Linux/Cargo.toml typeon-server/Cargo.toml p2p_messenger_android/app/src/main/cpp/rust/Cargo.toml

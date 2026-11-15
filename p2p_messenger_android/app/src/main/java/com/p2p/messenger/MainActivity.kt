@@ -388,7 +388,7 @@ class MainActivity : AppCompatActivity() {
             }
             if (persistError != null) {
                 // Keystore or disk failure, handled as in `createIdentityAndStart`.
-                android.util.Log.w("MainActivity", "Kimlik secret bundle'ı kaydedilemedi: $persistError")
+                com.p2p.messenger.util.Log.w("MainActivity", "Kimlik secret bundle'ı kaydedilemedi: $persistError")
                 withContext(Dispatchers.Main) {
                     Toast.makeText(this@MainActivity, R.string.error_identity_persist_failed, Toast.LENGTH_LONG).show()
                     com.p2p.messenger.util.LocalWipe.wipe(applicationContext)
@@ -442,7 +442,7 @@ class MainActivity : AppCompatActivity() {
                 // Keystore or disk failure. Without this step the identity exists in the database, but its
                 // secret keys are lost at the next restart, and the install gets stuck at "identity read
                 // failed". The identity is only seconds old, so it is removed and the setup starts again.
-                android.util.Log.w("MainActivity", "Kimlik secret bundle'ı kaydedilemedi: $persistError")
+                com.p2p.messenger.util.Log.w("MainActivity", "Kimlik secret bundle'ı kaydedilemedi: $persistError")
                 Toast.makeText(this@MainActivity, R.string.error_identity_persist_failed, Toast.LENGTH_LONG).show()
                 com.p2p.messenger.util.LocalWipe.wipe(applicationContext)
                 com.p2p.messenger.util.AppRestarter.restart(applicationContext)
@@ -558,7 +558,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             // API 31+: ForegroundServiceStartNotAllowedException when this runs after the user has left the
             // app (for example during a recovery import).
-            android.util.Log.w("MainActivity", "Service not started: ${e.message}")
+            com.p2p.messenger.util.Log.w("MainActivity", "Service not started: ${e.message}")
         }
         // Off the main thread: the call waits for the core lock, which a long poll turn holds. Every
         // onResume comes through here.
@@ -677,7 +677,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 if (accept) P2PLib.acceptDeviceAlert(fingerprint) else P2PLib.rejectDeviceAlert(fingerprint)
             } catch (e: Exception) {
-                android.util.Log.w("MainActivity", "Cihaz uyarısı yanıtlanamadı: ${e.message}")
+                com.p2p.messenger.util.Log.w("MainActivity", "Cihaz uyarısı yanıtlanamadı: ${e.message}")
             }
         }
     }

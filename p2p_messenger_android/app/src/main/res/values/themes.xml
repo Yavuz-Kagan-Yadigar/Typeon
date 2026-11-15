@@ -5,6 +5,8 @@
          automatically. On unsupported devices the static M3 palette defined here
          (values/colors.xml and values-night/colors.xml) is used. -->
     <style name="Theme.P2PMessenger" parent="Theme.Material3.DayNight">
+        <!-- targetSdk 35 forces edge-to-edge; the layouts do not handle insets, so keep the old behaviour. -->
+        <item name="android:windowOptOutEdgeToEdgeEnforcement" tools:targetApi="35">true</item>
         <item name="colorPrimary">@color/md_primary</item>
         <item name="colorOnPrimary">@color/md_on_primary</item>
         <item name="colorPrimaryContainer">@color/md_primary_container</item>

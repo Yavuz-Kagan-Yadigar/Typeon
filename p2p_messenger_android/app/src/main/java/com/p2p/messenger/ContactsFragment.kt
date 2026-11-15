@@ -94,7 +94,7 @@ class ContactsFragment : Fragment() {
     private fun <T> offMain(work: () -> T, done: (T) -> Unit) {
         runOnWorker {
             val result = try { work() } catch (e: Exception) {
-                android.util.Log.w("ContactsFragment", "background call failed", e)
+                com.p2p.messenger.util.Log.w("ContactsFragment", "background call failed", e)
                 return@runOnWorker
             }
             refreshHandler.post { if (isAdded && view != null) done(result) }

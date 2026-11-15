@@ -177,7 +177,7 @@ class QrScanActivity : AppCompatActivity() {
             // A short or corrupt Y plane makes ZXing throw ArrayIndexOutOfBoundsException or IllegalArgumentException. This frame is
             // discarded. If the exception left the analysis thread, the process died, and the ImageProxy that was not closed kept
             // the KEEP_ONLY_LATEST stream blocked for good.
-            android.util.Log.w("QrScan", "Frame analysis failed, skipping frame", e)
+            com.p2p.messenger.util.Log.w("QrScan", "Frame analysis failed, skipping frame", e)
         } finally {
             reader.reset()
             imageProxy.close()

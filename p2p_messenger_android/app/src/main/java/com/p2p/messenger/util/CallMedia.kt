@@ -10,7 +10,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.os.Bundle
-import android.util.Log
+import com.p2p.messenger.util.Log
 import android.view.Surface
 import androidx.camera.core.ImageProxy
 import com.p2p.messenger.P2PLib

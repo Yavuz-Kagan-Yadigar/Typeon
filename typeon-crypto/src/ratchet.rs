@@ -16,8 +16,7 @@
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use hkdf::Hkdf;
-use kem::{Decapsulate, Encapsulate};
-use ml_kem::{Ciphertext as MlKemCiphertext, EncodedSizeUser, KemCore, MlKem1024};
+use ml_kem::{Decapsulate, Encapsulate, Kem, KeyExport, MlKem1024};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -25,8 +24,46 @@ use std::collections::HashMap;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
-pub type MlKem1024DecapsulationKey = ml_kem::kem::DecapsulationKey<ml_kem::MlKem1024Params>;
-pub type MlKem1024EncapsulationKey = ml_kem::kem::EncapsulationKey<ml_kem::MlKem1024Params>;
+pub type MlKem1024DecapsulationKey = ml_kem::DecapsulationKey1024;
+pub type MlKem1024EncapsulationKey = ml_kem::EncapsulationKey1024;
+type MlKemCiphertext = ml_kem::Ciphertext<MlKem1024>;
+
+/// New ML-KEM-1024 key pair from the system RNG.
+pub fn mlkem_generate() -> (MlKem1024DecapsulationKey, MlKem1024EncapsulationKey) {
+    MlKem1024::generate_keypair()
+}
+
+/// Stored form of a decapsulation key: the 64-byte seed. A key loaded from the old 3168-byte expanded form has no
+/// seed and is written back in that form.
+pub fn mlkem_dk_to_bytes(dk: &MlKem1024DecapsulationKey) -> Vec<u8> {
+    match dk.to_seed() {
+        Some(seed) => seed.to_vec(),
+        #[allow(deprecated)]
+        None => ml_kem::ExpandedKeyEncoding::to_expanded_bytes(dk).to_vec(),
+    }
+}
+
+/// Reads `mlkem_dk_to_bytes`: a 64-byte seed, or a 3168-byte expanded key written by ml-kem 0.2 (identity keys on
+/// disk, recovery files), so an update does not lose the device identity.
+pub fn mlkem_dk_from_bytes(bytes: &[u8]) -> Result<MlKem1024DecapsulationKey, RatchetError> {
+    if let Ok(seed) = ml_kem::Seed::try_from(bytes) {
+        return Ok(MlKem1024DecapsulationKey::from_seed(seed));
+    }
+    #[allow(deprecated)]
+    let expanded = ml_kem::ml_kem_1024::ExpandedDecapsulationKey::try_from(bytes)
+        .map_err(|_| RatchetError::Invalid("Bad Kyber secret key length"))?;
+    #[allow(deprecated)]
+    let dk = <MlKem1024DecapsulationKey as ml_kem::ExpandedKeyEncoding>::from_expanded_bytes(&expanded)
+        .map_err(|_| RatchetError::Invalid("Bad Kyber secret key"));
+    let mut expanded = expanded;
+    expanded.as_mut_slice().zeroize();
+    dk
+}
+
+/// The 1568-byte encoded public key.
+pub fn mlkem_ek_to_bytes(ek: &MlKem1024EncapsulationKey) -> Vec<u8> {
+    ek.to_bytes().to_vec()
+}
 
 /// Ratchet policy: a DH/KEM ratchet step every 30 minutes (time-based, independent of message count).
 pub const RATCHET_ROTATION_MS: u64 = 30 * 60 * 1000;
@@ -241,9 +278,9 @@ impl DeviceRatchetState {
             ck_send: self.ck_send.clone(),
             ck_recv: self.ck_recv.clone(),
             own_x25519_secret: self.own_x25519_secret.to_bytes(),
-            own_kyber_secret: self.own_kyber_secret.as_bytes().to_vec(),
+            own_kyber_secret: mlkem_dk_to_bytes(&self.own_kyber_secret),
             peer_x25519_pubkey: *self.peer_x25519_pubkey.as_bytes(),
-            peer_kyber_pubkey: self.peer_kyber_pubkey.as_bytes().to_vec(),
+            peer_kyber_pubkey: mlkem_ek_to_bytes(&self.peer_kyber_pubkey),
             send_message_number: self.send_message_number,
             recv_message_number: self.recv_message_number,
             prev_chain_length: self.prev_chain_length,
@@ -258,11 +295,7 @@ impl DeviceRatchetState {
     /// passed in here (see `load_skipped_keys_from_db` in archive.rs). This function does not touch
     /// that table itself. ratchet.rs is the crypto-only layer, consistent with the header note.
     pub fn from_persistable(mut s: SerializableRatchetState, skipped_keys: HashMap<u32, [u8; 32]>) -> Result<Self, RatchetError> {
-        let mut own_kyber_encoded: ml_kem::Encoded<MlKem1024DecapsulationKey> = s.own_kyber_secret.as_slice()
-            .try_into().map_err(|_| "Bozuk kayıtlı Kyber secret key")?;
-        let own_kyber_secret = MlKem1024DecapsulationKey::from_bytes(&own_kyber_encoded);
-        // The stack copy of the secret key is wiped like `s` itself.
-        own_kyber_encoded.as_mut_slice().zeroize();
+        let own_kyber_secret = mlkem_dk_from_bytes(&s.own_kyber_secret)?;
         Ok(DeviceRatchetState {
             root_key: std::mem::take(&mut s.root_key),
             prev_root_key: s.prev_root_key.take(),
@@ -409,11 +442,11 @@ pub fn kem_key_to(peer_x25519_pubkey: &[u8], peer_kyber_pubkey: &[u8]) -> Result
     let peer_x25519_bytes: [u8; 32] = peer_x25519_pubkey.try_into().map_err(|_| "Bad peer X25519 key length")?;
     let dh_shared = x25519(&own_x25519_secret, &X25519PublicKey::from(peer_x25519_bytes))?;
     let peer_kyber_pk = kyber_pubkey_from_bytes(peer_kyber_pubkey)?;
-    let (kyber_ct, mut kyber_shared) = peer_kyber_pk.encapsulate(&mut csprng).map_err(|_| "Kyber encapsulate failed")?;
+    let (kyber_ct, mut kyber_shared) = peer_kyber_pk.encapsulate();
     let kyber_ct = kyber_ct.to_vec();
     let ikm = [dh_shared.as_bytes().as_slice(), kyber_shared.as_slice()].concat();
     kyber_shared.as_mut_slice().zeroize();
-    let bound_to = transcript(&own_x25519_bytes, &[], &kyber_ct, &peer_x25519_bytes, &peer_kyber_pk.as_bytes());
+    let bound_to = transcript(&own_x25519_bytes, &[], &kyber_ct, &peer_x25519_bytes, &peer_kyber_pk.to_bytes());
     Ok((kem_key(ikm, &bound_to)?, [&own_x25519_bytes[..], &kyber_ct].concat()))
 }
 
@@ -426,12 +459,12 @@ pub fn kem_key_from(own_x25519_secret: &StaticSecret, own_kyber_secret: &MlKem10
     let sender_x25519_bytes: [u8; 32] = sender_x25519.try_into().map_err(|_| "Bad sender X25519 key length")?;
     let dh_shared = x25519(own_x25519_secret, &X25519PublicKey::from(sender_x25519_bytes))?;
     let ct = kyber_ciphertext_from_bytes(kyber_ciphertext)?;
-    let mut kyber_shared = own_kyber_secret.decapsulate(&ct).map_err(|_| "Kyber decapsulate failed")?;
+    let mut kyber_shared = own_kyber_secret.decapsulate(&ct);
     let ikm = [dh_shared.as_bytes().as_slice(), kyber_shared.as_slice()].concat();
     kyber_shared.as_mut_slice().zeroize();
     let bound_to = transcript(
         &sender_x25519_bytes, &[], kyber_ciphertext,
-        X25519PublicKey::from(own_x25519_secret).as_bytes(), &own_kyber_secret.encapsulation_key().as_bytes(),
+        X25519PublicKey::from(own_x25519_secret).as_bytes(), &own_kyber_secret.encapsulation_key().to_bytes(),
     );
     kem_key(ikm, &bound_to)
 }
@@ -478,18 +511,18 @@ impl DeviceRatchetState {
         let dh_shared = x25519(&own_x25519_secret, &peer_x25519_pk)?;
 
         // Generate a fresh ML-KEM pair for this side.
-        let (own_kyber_secret, own_kyber_ek) = MlKem1024::generate(&mut csprng);
-        let own_kyber_public_bytes = own_kyber_ek.as_bytes().to_vec();
+        let (own_kyber_secret, own_kyber_ek) = mlkem_generate();
+        let own_kyber_public_bytes = own_kyber_ek.to_bytes().to_vec();
 
         let peer_kyber_pk = kyber_pubkey_from_bytes(peer_kyber_pubkey)?;
-        let (kyber_ct, mut kyber_shared) = peer_kyber_pk.encapsulate(&mut csprng).map_err(|_| "Kyber encapsulate failed")?;
+        let (kyber_ct, mut kyber_shared) = peer_kyber_pk.encapsulate();
         let kyber_ct = kyber_ct.to_vec();
 
         let ikm = [dh_shared.as_bytes().as_slice(), kyber_shared.as_slice()].concat();
         kyber_shared.as_mut_slice().zeroize();
         let bound_to = transcript(
             X25519PublicKey::from(&own_x25519_secret).as_bytes(), &own_kyber_public_bytes, &kyber_ct,
-            &peer_x25519_bytes, &peer_kyber_pk.as_bytes(),
+            &peer_x25519_bytes, &peer_kyber_pk.to_bytes(),
         );
         let (root_key, ck_send, ck_recv) = derive_keys(ikm, &bound_to, true)?;
 
@@ -537,15 +570,15 @@ impl DeviceRatchetState {
         let dh_shared = x25519(&own_x25519_secret, &initiator_x25519_pk)?;
 
         let ct = kyber_ciphertext_from_bytes(kyber_ciphertext)?;
-        let mut kyber_shared = own_kyber_secret.decapsulate(&ct).map_err(|_| "Kyber decapsulate failed")?;
+        let mut kyber_shared = own_kyber_secret.decapsulate(&ct);
 
         let initiator_kyber_pk = kyber_pubkey_from_bytes(initiator_kyber_pubkey)?;
 
         let ikm = [dh_shared.as_bytes().as_slice(), kyber_shared.as_slice()].concat();
         kyber_shared.as_mut_slice().zeroize();
         let bound_to = transcript(
-            &initiator_x25519_bytes, &initiator_kyber_pk.as_bytes(), kyber_ciphertext,
-            X25519PublicKey::from(&own_x25519_secret).as_bytes(), &own_kyber_secret.encapsulation_key().as_bytes(),
+            &initiator_x25519_bytes, &initiator_kyber_pk.to_bytes(), kyber_ciphertext,
+            X25519PublicKey::from(&own_x25519_secret).as_bytes(), &own_kyber_secret.encapsulation_key().to_bytes(),
         );
         let (root_key, ck_send, ck_recv) = derive_keys(ikm, &bound_to, false)?;
 
@@ -577,7 +610,7 @@ impl DeviceRatchetState {
     pub fn own_ratchet_pubkeys(&self) -> RatchetPublicKeys {
         RatchetPublicKeys {
             x25519_pubkey: X25519PublicKey::from(&self.own_x25519_secret).as_bytes().to_vec(),
-            kyber_pubkey: self.own_kyber_secret.encapsulation_key().as_bytes().to_vec(),
+            kyber_pubkey: self.own_kyber_secret.encapsulation_key().to_bytes().to_vec(),
         }
     }
 
@@ -597,17 +630,17 @@ impl DeviceRatchetState {
     pub fn perform_dh_ratchet(&mut self, now_ms: u64) -> Result<Vec<u8>, RatchetError> {
         let mut csprng = OsRng;
         let new_x25519_secret = StaticSecret::random_from_rng(&mut csprng);
-        let (new_kyber_secret, new_kyber_ek) = MlKem1024::generate(&mut csprng);
+        let (new_kyber_secret, new_kyber_ek) = mlkem_generate();
 
         let dh_shared = x25519(&new_x25519_secret, &self.peer_x25519_pubkey)?;
-        let (kyber_ct, mut kyber_shared) = self.peer_kyber_pubkey.encapsulate(&mut csprng).map_err(|_| "Kyber encapsulate failed")?;
+        let (kyber_ct, mut kyber_shared) = self.peer_kyber_pubkey.encapsulate();
         let kyber_ct = kyber_ct.to_vec();
 
         let ikm = [self.root_key.as_slice(), dh_shared.as_bytes().as_slice(), kyber_shared.as_slice()].concat();
         kyber_shared.as_mut_slice().zeroize();
         let bound_to = transcript(
-            X25519PublicKey::from(&new_x25519_secret).as_bytes(), &new_kyber_ek.as_bytes(), &kyber_ct,
-            self.peer_x25519_pubkey.as_bytes(), &self.peer_kyber_pubkey.as_bytes(),
+            X25519PublicKey::from(&new_x25519_secret).as_bytes(), &new_kyber_ek.to_bytes(), &kyber_ct,
+            self.peer_x25519_pubkey.as_bytes(), &self.peer_kyber_pubkey.to_bytes(),
         );
         // This function always means "this side triggers": we_initiated = true.
         let keys = derive_keys(ikm, &bound_to, true)?;
@@ -691,13 +724,13 @@ impl DeviceRatchetState {
         // mirrors the `self.peer_kyber_pubkey.encapsulate(...)` call in `perform_dh_ratchet`. The peer
         // encapsulated against our OLD Kyber public key.
         let ct = kyber_ciphertext_from_bytes(rotation_kyber_ciphertext)?;
-        let mut kyber_shared = self.own_kyber_secret.decapsulate(&ct).map_err(|_| "Kyber decapsulate failed")?;
+        let mut kyber_shared = self.own_kyber_secret.decapsulate(&ct);
 
         let ikm = [self.root_key.as_slice(), dh_shared.as_bytes().as_slice(), kyber_shared.as_slice()].concat();
         kyber_shared.as_mut_slice().zeroize();
         let bound_to = transcript(
-            &x25519_bytes, &new_peer_kyber_pk.as_bytes(), rotation_kyber_ciphertext,
-            X25519PublicKey::from(&self.own_x25519_secret).as_bytes(), &self.own_kyber_secret.encapsulation_key().as_bytes(),
+            &x25519_bytes, &new_peer_kyber_pk.to_bytes(), rotation_kyber_ciphertext,
+            X25519PublicKey::from(&self.own_x25519_secret).as_bytes(), &self.own_kyber_secret.encapsulation_key().to_bytes(),
         );
         // We did not start this rotation, the peer did: we_initiated = false.
         let keys = derive_keys(ikm, &bound_to, false)?;
@@ -951,15 +984,14 @@ fn nonce_from_message_number(n: u32) -> Nonce {
 /// `EncodedSizeUser::from_bytes` is infallible (ml-kem does not validate the public key point, only the
 /// length). The length check is done here with `try_into()`. `hybrid_array::Array<T, N>` implements
 /// `TryFrom<&[u8]>`, so `bytes.try_into()` compiles.
-fn kyber_pubkey_from_bytes(bytes: &[u8]) -> Result<MlKem1024EncapsulationKey, RatchetError> {
-    let encoded: ml_kem::Encoded<MlKem1024EncapsulationKey> = bytes
-        .try_into()
+pub fn kyber_pubkey_from_bytes(bytes: &[u8]) -> Result<MlKem1024EncapsulationKey, RatchetError> {
+    let encoded = ml_kem::Key::<MlKem1024EncapsulationKey>::try_from(bytes)
         .map_err(|_| RatchetError::Invalid("Bad Kyber public key length"))?;
-    Ok(MlKem1024EncapsulationKey::from_bytes(&encoded))
+    MlKem1024EncapsulationKey::new(&encoded).map_err(|_| RatchetError::Invalid("Bad Kyber public key"))
 }
 
 /// Parses a raw byte slice into an ML-KEM-1024 ciphertext.
-fn kyber_ciphertext_from_bytes(bytes: &[u8]) -> Result<MlKemCiphertext<MlKem1024>, RatchetError> {
+fn kyber_ciphertext_from_bytes(bytes: &[u8]) -> Result<MlKemCiphertext, RatchetError> {
     bytes.try_into().map_err(|_| RatchetError::Invalid("Bad Kyber ciphertext length"))
 }
 
@@ -1008,22 +1040,40 @@ mod tests {
     #[test]
     fn kem_key_needs_the_recipient_secrets() {
         let x_secret = StaticSecret::random_from_rng(&mut OsRng);
-        let (kyber_secret, kyber_ek) = MlKem1024::generate(&mut OsRng);
-        let (key, header) = kem_key_to(X25519PublicKey::from(&x_secret).as_bytes(), &kyber_ek.as_bytes()).unwrap();
+        let (kyber_secret, kyber_ek) = mlkem_generate();
+        let (key, header) = kem_key_to(X25519PublicKey::from(&x_secret).as_bytes(), &kyber_ek.to_bytes()).unwrap();
         assert_eq!(header.len(), KEM_HEADER_LEN);
         assert_eq!(kem_key_from(&x_secret, &kyber_secret, &header).unwrap(), key);
         let other_x = StaticSecret::random_from_rng(&mut OsRng);
         assert_ne!(kem_key_from(&other_x, &kyber_secret, &header).unwrap(), key);
-        let (other_kyber, _) = MlKem1024::generate(&mut OsRng);
+        let (other_kyber, _) = mlkem_generate();
         assert_ne!(kem_key_from(&x_secret, &other_kyber, &header).unwrap(), key);
     }
 
     type Init = (DeviceRatchetState, Vec<u8>, Vec<u8>);
 
+    #[test]
+    fn mlkem_keys_round_trip_as_seed_and_as_old_expanded_form() {
+        let (dk, ek) = mlkem_generate();
+        let seed = mlkem_dk_to_bytes(&dk);
+        assert_eq!(seed.len(), 64);
+        assert_eq!(mlkem_ek_to_bytes(mlkem_dk_from_bytes(&seed).unwrap().encapsulation_key()), mlkem_ek_to_bytes(&ek));
+        // A key written by ml-kem 0.2 (expanded, 3168 bytes) still loads, decapsulates, and is written back the same way.
+        #[allow(deprecated)]
+        let expanded = ml_kem::ExpandedKeyEncoding::to_expanded_bytes(&dk).to_vec();
+        assert_eq!(expanded.len(), 3168);
+        let old = mlkem_dk_from_bytes(&expanded).unwrap();
+        let (ct, shared) = ek.encapsulate();
+        assert_eq!(old.decapsulate(&ct), shared);
+        assert_eq!(mlkem_dk_to_bytes(&old), expanded);
+        assert!(mlkem_dk_from_bytes(&[0u8; 100]).is_err());
+        assert_eq!(kyber_pubkey_from_bytes(&mlkem_ek_to_bytes(&ek)).unwrap(), ek);
+    }
+
     fn handshake_init() -> (Init, StaticSecret, MlKem1024DecapsulationKey) {
         let x_secret = StaticSecret::random_from_rng(&mut OsRng);
-        let (kyber_secret, kyber_ek) = MlKem1024::generate(&mut OsRng);
-        let init = DeviceRatchetState::initiate(X25519PublicKey::from(&x_secret).as_bytes(), &kyber_ek.as_bytes(), T0)
+        let (kyber_secret, kyber_ek) = mlkem_generate();
+        let init = DeviceRatchetState::initiate(X25519PublicKey::from(&x_secret).as_bytes(), &kyber_ek.to_bytes(), T0)
             .expect("initiate should succeed");
         (init, x_secret, kyber_secret)
     }
@@ -1182,8 +1232,8 @@ mod tests {
     /// secrets.
     #[test]
     fn key_derivation_checks_and_binds_its_inputs() {
-        let (_, kyber_ek) = MlKem1024::generate(&mut OsRng);
-        assert!(DeviceRatchetState::initiate(&[0u8; 32], &kyber_ek.as_bytes(), T0).is_err());
+        let (_, kyber_ek) = mlkem_generate();
+        assert!(DeviceRatchetState::initiate(&[0u8; 32], &kyber_ek.to_bytes(), T0).is_err());
 
         let ikm = vec![7u8; 64];
         let a = derive_keys(ikm.clone(), &[1u8; 32], true).unwrap();

@@ -62,7 +62,7 @@ impl P2PCore {
             contacts, groups, siblings, sibling_proofs,
             archive_root_key: self.archive_root_key_bytes(),
             name_changed_at_ms: self.meta_u64("name_changed_at"),
-            own_revokes: self.own_revokes(),
+            own_revokes: self.own_revokes_to_send(None),
         }
     }
 

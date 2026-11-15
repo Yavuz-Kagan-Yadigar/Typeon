@@ -65,7 +65,7 @@ object SkippedKeyManager {
             return try {
                 KeystoreCrypto.decrypt(file.readBytes(), KeystoreCrypto.ALIAS_SKIPPED_KEYS)
             } catch (e: Exception) {
-                android.util.Log.e(TAG, "Anahtar cozulemedi, YENIDEN URETILMIYOR", e)
+                com.p2p.messenger.util.Log.e(TAG, "Anahtar cozulemedi, YENIDEN URETILMIYOR", e)
                 null
             }
         }
@@ -77,7 +77,7 @@ object SkippedKeyManager {
         } catch (e: Exception) {
             // Keystore or disk failure: this runs on unguarded start-up
             // paths and took the process down before the network started.
-            android.util.Log.e(TAG, "Anahtar uretilemedi", e)
+            com.p2p.messenger.util.Log.e(TAG, "Anahtar uretilemedi", e)
             dataKey.fill(0)
             null
         }

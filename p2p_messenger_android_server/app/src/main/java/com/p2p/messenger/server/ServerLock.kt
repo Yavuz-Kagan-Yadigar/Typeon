@@ -18,7 +18,9 @@ import java.util.concurrent.Executors
 /**
  * PIN lock of the server app (same approach as the client's AppLock: PBKDF2
  * hash, escalating wait after 5 failures, relock after leaving / screen off).
- * The whole screen (join code, devices, settings) sits behind it.
+ * The whole screen (join code, devices, settings) sits behind it. The PIN is
+ * mandatory: the join code is a bearer token for enrolments, so an unlocked
+ * spare phone must not show it to whoever picks it up.
  */
 object ServerLock {
     private const val KEY_SALT = "lock_salt"
@@ -29,7 +31,10 @@ object ServerLock {
     private const val KEY_WAIT_FROM = "lock_wait_from_elapsed"
     private const val KEY_WAIT_MS = "lock_wait_ms"
     private const val KEY_WAIT_WALL = "lock_wait_wall"
-    private const val ITERATIONS = 300_000
+    private const val KEY_ITERATIONS = "lock_iterations"
+    private const val ITERATIONS = 600_000
+    /** PINs saved before `KEY_ITERATIONS` existed. */
+    private const val OLD_ITERATIONS = 300_000
     private const val MIN_LEN = 6
     private const val FREE_ATTEMPTS = 5
     private const val GRACE_MS = 30_000L
@@ -43,9 +48,9 @@ object ServerLock {
 
     fun hasPin(c: Context) = prefs(c).contains(KEY_HASH)
 
-    /** True when the content must stay hidden until the PIN is entered. */
+    /** True when the content must stay hidden until the PIN is entered (or, with no PIN yet, set). */
     fun isLocked(c: Context): Boolean {
-        if (!hasPin(c)) return false
+        if (!hasPin(c)) return true
         val l = leftAt
         leftAt = 0L
         if (l != 0L && SystemClock.elapsedRealtime() - l > GRACE_MS) unlocked = false
@@ -55,22 +60,31 @@ object ServerLock {
     fun noteLeft() { leftAt = SystemClock.elapsedRealtime() }
     fun lockNow() { unlocked = false }
 
-    private fun derive(pin: String, salt: ByteArray): ByteArray =
-        SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-            .generateSecret(PBEKeySpec(pin.toCharArray(), salt, ITERATIONS, 256)).encoded
+    private fun derive(pin: String, salt: ByteArray, iterations: Int): ByteArray {
+        val chars = pin.toCharArray()
+        val spec = PBEKeySpec(chars, salt, iterations, 256)
+        try {
+            return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+        } finally {
+            spec.clearPassword()
+            chars.fill('\u0000')
+        }
+    }
 
     private fun verify(c: Context, pin: String): Boolean {
         val p = prefs(c)
         val salt = p.getString(KEY_SALT, null) ?: return false
         val hash = p.getString(KEY_HASH, null) ?: return false
-        return MessageDigest.isEqual(Base64.decode(hash, Base64.NO_WRAP), derive(pin, Base64.decode(salt, Base64.NO_WRAP)))
+        val iterations = p.getInt(KEY_ITERATIONS, OLD_ITERATIONS)
+        return MessageDigest.isEqual(Base64.decode(hash, Base64.NO_WRAP), derive(pin, Base64.decode(salt, Base64.NO_WRAP), iterations))
     }
 
     private fun setPin(c: Context, pin: String) {
         val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
         prefs(c).edit()
             .putString(KEY_SALT, Base64.encodeToString(salt, Base64.NO_WRAP))
-            .putString(KEY_HASH, Base64.encodeToString(derive(pin, salt), Base64.NO_WRAP))
+            .putString(KEY_HASH, Base64.encodeToString(derive(pin, salt, ITERATIONS), Base64.NO_WRAP))
+            .putInt(KEY_ITERATIONS, ITERATIONS)
             .commit()
     }
 
@@ -90,7 +104,7 @@ object ServerLock {
         return ((from + waitMs - now).coerceAtLeast(0L) + 999).div(1000).toInt()
     }
 
-    /** PBKDF2 at 300k iterations: always run on [cpu], never the UI thread. */
+    /** PBKDF2 at 600k iterations: always run on [cpu], never the UI thread. */
     private fun tryPin(c: Context, pin: String): Boolean {
         if (waitSeconds(c) > 0) return false
         val p = prefs(c)
@@ -151,8 +165,9 @@ object ServerLock {
         return dlg
     }
 
-    /** Set, change or (empty new PIN) remove the PIN. Asks for the current one if set. */
-    fun showSettings(a: Activity) {
+    /** Set or change the PIN. Asks for the current one if set. [mandatory]: first PIN, the screen stays hidden
+     *  until one is saved (Exit closes the app); [onSaved] runs after that. */
+    fun showSettings(a: Activity, mandatory: Boolean = false, onSaved: () -> Unit = {}): AlertDialog {
         val has = hasPin(a)
         val cur = field(a, R.string.pin_current_hint)
         val new = field(a, R.string.pin_new_hint)
@@ -162,33 +177,30 @@ object ServerLock {
             if (has) addView(cur)
             addView(new)
         }
-        val dlg = AlertDialog.Builder(a)
+        val builder = AlertDialog.Builder(a)
             .setTitle(R.string.pin_settings_title)
             .setMessage(if (has) R.string.pin_change_msg else R.string.pin_set_msg)
             .setView(box)
             .setPositiveButton(android.R.string.ok, null)
-            .setNegativeButton(android.R.string.cancel, null)
-            .create()
+        if (mandatory) builder.setCancelable(false).setNegativeButton(R.string.pin_exit) { _, _ -> a.finish() }
+        else builder.setNegativeButton(android.R.string.cancel, null)
+        val dlg = builder.create()
         dlg.setOnShowListener {
             dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { btn ->
                 val n = new.text.toString()
-                val erase = n.isEmpty() && has
                 // PBKDF2 off the UI thread (same worker as showUnlock).
                 btn.isEnabled = false
                 val curPin = cur.text.toString()
                 cpu.execute {
                     val curOk = !has || tryPin(a, curPin)
-                    if (curOk && !erase && n.length >= MIN_LEN) setPin(a, n)
+                    if (curOk && n.length >= MIN_LEN) setPin(a, n)
                     a.runOnUiThread {
                         btn.isEnabled = true
                         if (!curOk) {
                             Toast.makeText(a, R.string.pin_wrong, Toast.LENGTH_SHORT).show()
                             return@runOnUiThread
                         }
-                        if (erase) {
-                            prefs(a).edit().remove(KEY_HASH).remove(KEY_SALT).commit()
-                            Toast.makeText(a, R.string.pin_removed, Toast.LENGTH_SHORT).show()
-                        } else if (n.length < MIN_LEN) {
+                        if (n.length < MIN_LEN) {
                             Toast.makeText(a, a.getString(R.string.pin_too_short_fmt, MIN_LEN), Toast.LENGTH_SHORT).show()
                             return@runOnUiThread
                         } else {
@@ -196,10 +208,12 @@ object ServerLock {
                             Toast.makeText(a, R.string.pin_saved, Toast.LENGTH_SHORT).show()
                         }
                         dlg.dismiss()
+                        onSaved()
                     }
                 }
             }
         }
         dlg.show()
+        return dlg
     }
 }

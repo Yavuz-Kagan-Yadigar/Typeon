@@ -43,8 +43,8 @@ fn main() -> glib::ExitCode {
     // Show the core's `log` output. Without this, connection, ratchet and
     // server diagnostics were dropped silently. The desktop had no
     // equivalent of the logcat output on Android.
-    // Default `warn`: quiet in normal runs. Set `RUST_LOG=info` to see more.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    // Debug builds default to `warn`, release builds log nothing. `RUST_LOG=info` shows more in either.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(if cfg!(debug_assertions) { "warn" } else { "off" })).init();
 
     // GTK closures unwind into C and abort; leave a trace before that happens.
     // (Message text is never in a panic payload we write: location + type only.)

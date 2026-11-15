@@ -77,7 +77,7 @@ impl P2PCore {
                 sign_sk_ed25519: k.sign_sk_ed25519.to_bytes().to_vec(),
                 sign_sk_mldsa: k.sign_sk_mldsa.to_bytes().to_vec(),
                 kem_sk_x25519: k.kem_sk_x25519.to_bytes().to_vec(),
-                kem_sk_mlkem: k.kem_sk_mlkem.as_bytes().to_vec(),
+                kem_sk_mlkem: mlkem_dk_to_bytes(&k.kem_sk_mlkem),
             }))
             .collect();
         // Primary first: import takes the first device (see `import_recovery`).
@@ -297,15 +297,14 @@ impl P2PCore {
             let kem_sk_x25519 = StaticSecret::from(*kem_sk_x_bytes);
             let kem_pk_x25519 = X25519PublicKey::from(&kem_sk_x25519);
 
-            let kem_sk_encoded: ml_kem::Encoded<MlKem1024DecapsulationKey> = dev.kem_sk_mlkem.as_slice().try_into().map_err(|_| "Bozuk Kyber secret key")?;
-            let kem_sk_mlkem = MlKem1024DecapsulationKey::from_bytes(&kem_sk_encoded);
+            let kem_sk_mlkem = mlkem_dk_from_bytes(&dev.kem_sk_mlkem).map_err(|_| "Bad Kyber secret key")?;
             let kem_pk_mlkem = kem_sk_mlkem.encapsulation_key().clone();
 
             let computed_fp = hex::encode(compute_fingerprint(
                 sign_pk_ed25519.as_bytes(),
                 &sign_pk_mldsa.encode(),
                 kem_pk_x25519.as_bytes(),
-                &kem_pk_mlkem.as_bytes(),
+                &mlkem_ek_to_bytes(&kem_pk_mlkem),
             ));
             if computed_fp != dev.device_fingerprint {
                 return Err("Kurtarma dosyası bozuk (fingerprint uyuşmazlığı)".to_string());
@@ -321,7 +320,7 @@ impl P2PCore {
                 sign_pubkey_ed25519: sign_pk_ed25519.as_bytes().to_vec(),
                 sign_pubkey_mldsa: sign_pk_mldsa.encode().to_vec(),
                 kem_pubkey_x25519: kem_pk_x25519.as_bytes().to_vec(),
-                kem_pubkey_mlkem: kem_pk_mlkem.as_bytes().to_vec(),
+                kem_pubkey_mlkem: mlkem_ek_to_bytes(&kem_pk_mlkem),
                 device_name: name.clone(),
                 is_active: true,
                 last_seen: current_time_ms(),

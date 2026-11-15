@@ -251,7 +251,7 @@ object ThemePrefs {
         try {
             tmp.outputStream().use { out.compress(Bitmap.CompressFormat.JPEG, PROCESSED_JPEG_QUALITY, it) }
             if (!tmp.renameTo(processed)) throw java.io.IOException("rename failed")
-            android.util.Log.i(TAG, "wallpaper processed file computed blur=$blur darkness=$dark ${out.width}x${out.height}")
+            com.p2p.messenger.util.Log.i(TAG, "wallpaper processed file computed blur=$blur darkness=$dark ${out.width}x${out.height}")
         } finally {
             tmp.delete()
             if (out !== src) out.recycle()

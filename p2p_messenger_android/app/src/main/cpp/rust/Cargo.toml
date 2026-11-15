@@ -1,6 +1,6 @@
 [package]
 name = "p2p_messenger_core"
-version = "0.2.0"
+version = "7.4.6-beta.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
 
@@ -32,18 +32,12 @@ ring = "0.17"
 # requires >=0.1.0-rc.4: rc.2 and rc.3 carry the signature malleability issue
 # GHSA-5x2r-hc65-25f9, where repeated hint indices were accepted as valid signatures.
 #
-# The Decapsulate/Encapsulate traits of ml-kem come from a separate `kem` crate.
-# ml-kem re-exports them only in its `ml_kem::kem` submodule, not at the root,
-# so `kem` is a direct dependency too.
-#
-# ml-kem uses rand_core 0.6.4, and x25519-dalek/ed25519-dalek use rand_core 0.6
-# through rand 0.8. Same major version, so there is no conflict: `rand::rngs::OsRng`
-# can be passed straight to ml-kem's `CryptoRngCore` parameters. ml-kem has no
-# "getrandom" feature, because it has no parameterless key generation; the RNG is
-# always supplied by the caller.
-# ml-dsa instead exposes a parameterless `generate()` through crypto-common's
-# `Generate` trait, using the `getrandom` feature to draw from its own ambient RNG.
-# So the ml-dsa side keeps the parameterless `SigningKey::generate()`.
+# ml-kem 0.3 (stable, constant-time hardening of 0.3.3/0.3.4) re-exports the
+# kem 0.3 traits at its root, so `kem` is no direct dependency any more. Like
+# ml-dsa, it draws from its own system RNG (`getrandom` feature, getrandom 0.4),
+# so its rand_core 0.10 never meets the rand_core 0.6 of x25519/ed25519-dalek.
+# Decapsulation keys are stored as their 64-byte seed; the 3168-byte expanded
+# form of ml-kem 0.2 still loads (`ratchet::mlkem_dk_from_bytes`).
 # Security-audit fix: the `zeroize` feature is enabled in all four crates (ml-kem,
 # ml-dsa, x25519-dalek, ed25519-dalek). Long-term identity secret keys (DeviceKeys)
 # and each ratchet session's own X25519/Kyber secret pair
@@ -54,9 +48,8 @@ ring = "0.17"
 # were released with a plain Rust drop and never overwritten. If process memory
 # were readable (for example through another device-level flaw), those bytes
 # could still be there.
-ml-kem = { version = "0.2", features = ["zeroize"] }
-kem = "=0.3.0-pre.0"
-ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
+ml-kem = { version = "0.3.4", features = ["zeroize", "getrandom"] }
+ml-dsa = { version = "0.1.2", features = ["getrandom", "zeroize"] }
 chacha20poly1305 = "0.10"
 rand = "0.8"
 sha2 = "0.10"
@@ -149,6 +142,8 @@ webpki-roots = "1"
 jni = "0.21"
 android_logger = "0.13"
 log = "0.4"
+# `log` feature: with no tracing subscriber, arti's `tracing` events become `log` records, so a debug APK shows them.
+tracing = { version = "0.1", features = ["log"] }
 lazy_static = "1.4"
 # CLOCK_BOOTTIME for `mono_ms` (timers keep counting through suspend).
 libc = "0.2"

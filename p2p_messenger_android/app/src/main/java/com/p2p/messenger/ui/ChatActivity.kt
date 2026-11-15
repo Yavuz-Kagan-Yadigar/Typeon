@@ -1,5 +1,6 @@
 package com.p2p.messenger.ui
 
+import com.p2p.messenger.util.safeSaveFileName
 import android.app.AlertDialog
 import android.content.ContentValues
 import android.content.Intent
@@ -1495,28 +1496,6 @@ class ChatActivity : AppCompatActivity() {
      * Rows already in the `files` table keep the raw name, and the API 26-28 branch below does `File(p2pDir, displayName)`.
      * A name such as "../../DCIM/Camera/IMG_0001.jpg" would write to an arbitrary path in shared storage.
      */
-    private fun safeSaveFileName(name: String): String {
-        val cleaned = name
-            .filter {
-                it != '/' && it != '\\' && it != ':' && !it.isISOControl() &&
-                    // Bidi overrides and zero-width characters disguise the extension.
-                    Character.getType(it) != Character.FORMAT.toInt()
-            }
-            .trim()
-            .trimStart('.')
-            .trim()
-        val base = cleaned.ifEmpty { "file" }
-        // Cap by UTF-8 bytes (200) at a char boundary; keep the extension.
-        if (base.toByteArray().size <= 200) return base
-        val dot = base.lastIndexOf('.')
-        val ext = if (dot > 0 && base.length - dot <= 16) base.substring(dot) else ""
-        var stem = if (ext.isEmpty()) base else base.substring(0, dot)
-        while (stem.isNotEmpty() && (stem + ext).toByteArray().size > 200) {
-            stem = stem.dropLast(if (stem.length > 1 && Character.isLowSurrogate(stem.last())) 2 else 1)
-        }
-        return stem.ifEmpty { "file" } + ext
-    }
-
     private fun saveToPublicDownloads(source: File, displayName: String, mimeType: String): Boolean {
         return try {
             val safeName = safeSaveFileName(displayName)

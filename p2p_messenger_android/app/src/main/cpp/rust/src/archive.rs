@@ -282,6 +282,15 @@ impl P2PCore {
         ).is_ok())
     }
 
+    /// `message_exists_in_chat` for the 1:1 chat with `identity_id`: under any of its devices, either direction.
+    pub(crate) fn message_exists_with_identity(&self, message_id: &str, identity_id: &str) -> bool {
+        let Some(conn) = &self.db else { return false };
+        self.known_remote_devices.values().filter(|d| d.identity_id == identity_id).any(|d| conn.query_row(
+            "SELECT 1 FROM messages WHERE message_id = ?1 AND peer_device_fingerprint = ?2 AND group_id IS NULL LIMIT 1",
+            params![message_id, d.device_fingerprint], |_| Ok(()),
+        ).is_ok())
+    }
+
     pub(crate) fn message_exists_with_id(&self, message_id: &str) -> bool {
         let conn = match &self.db {
             Some(c) => c,

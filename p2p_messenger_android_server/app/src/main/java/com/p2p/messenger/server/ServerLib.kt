@@ -24,7 +24,11 @@ fun serverErrorText(ctx: android.content.Context, raw: String): String {
 object ServerLib {
     init {
         System.loadLibrary("typeon_server")
+        if (BuildConfig.DEBUG) enableLogging()
     }
+
+    /** Logcat output of the core and arti; never called in a release. */
+    private external fun enableLogging()
 
     /**
      * Starts the server and returns its `peer_id`. A no-op if it is already running, so the foreground service can be restarted with `START_STICKY`.

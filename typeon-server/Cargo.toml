@@ -53,7 +53,7 @@ ed25519-dalek = "2"
 # `EncodedSignature` are not carried in the protocol, but both sides must produce
 # the same encoding. The >=0.1.0-rc.4 requirement still applies
 # (GHSA-5x2r-hc65-25f9, signature malleability).
-ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
+ml-dsa = { version = "0.1.2", features = ["getrandom", "zeroize"] }
 log = "0.4"
 # For the headless Linux daemon. On Android, `android_logger` is used instead
 # (see src/jni.rs).

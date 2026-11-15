@@ -137,6 +137,8 @@ pub(crate) const SWARM_CONNECTION_TIMEOUT_SECS: u64 = 60;
 pub(crate) const ENVELOPE_PROTOCOL: &str = "/p2pmessenger/envelope/1.0.0";
 /// Largest serialized envelope any path carries.
 pub(crate) const MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
+/// Revokes one `IdentityExchange` or `SyncPayload` carries (about 4.7 KB each, so about 300 KB at most). See `own_revokes_to_send`.
+pub(crate) const REVOKES_PER_PACKET: usize = 64;
 
 /// Swarm events one `poll_events` turn handles in its main drain.
 pub(crate) const MAX_SWARM_EVENTS_PER_TURN: u32 = 256;

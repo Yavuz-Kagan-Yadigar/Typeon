@@ -8,7 +8,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.*
-import android.util.Log
+import com.p2p.messenger.util.Log
 import androidx.core.app.NotificationCompat
 import com.p2p.messenger.P2PLib
 import com.p2p.messenger.R
@@ -76,7 +76,7 @@ class P2PService : Service() {
          *  fire these alarms every 3 minutes (in practice about every 9 minutes). To get the 3 minutes, the app must be exempt from battery optimisation, which the app
          *  asks for in Settings (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`). With the exemption, 3 minutes applies exactly; without it, the system stretches it to about 9 minutes.
          *
-         *  This is a delay, not message loss: the sender keeps retrying for 7 days, and the server keeps the message for 30 days if one is available. */
+         *  This is a delay, not message loss: the sender keeps retrying for 7 days, and the server keeps the message for 14 days if one is available. */
         private const val DOZE_WAKE_INTERVAL_MS = 3 * 60 * 1000L
         /** The longest-lived partial wake lock (see `acquireWakeLock`): the device may sleep even if the core stays busy. */
         private const val WAKE_LOCK_MAX_MS = 10 * 60 * 1000L
@@ -313,18 +313,18 @@ class P2PService : Service() {
                         if (msg.isEmpty()) continue
                         for (listener in listeners) {
                             try { listener(msg) } catch (e: Throwable) {
-                                android.util.Log.e("P2PService", "Listener failed", e)
+                                com.p2p.messenger.util.Log.e("P2PService", "Listener failed", e)
                             }
                         }
                         try { maybeNotify(msg) } catch (e: Throwable) {
-                            android.util.Log.e("P2PService", "Notify failed", e)
+                            com.p2p.messenger.util.Log.e("P2PService", "Notify failed", e)
                         }
                     }
                     try { refreshForegroundStatus() } catch (e: Throwable) {
-                        android.util.Log.e("P2PService", "Status refresh failed", e)
+                        com.p2p.messenger.util.Log.e("P2PService", "Status refresh failed", e)
                     }
                 } catch (e: Throwable) {
-                    android.util.Log.e("P2PService", "Poll cycle failed", e)
+                    com.p2p.messenger.util.Log.e("P2PService", "Poll cycle failed", e)
                 } finally {
                                         // After every turn, decide again which stage of power-save we are in.
                     refreshCoreBusy()

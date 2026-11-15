@@ -3,7 +3,7 @@ package com.p2p.messenger.service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.util.Log
+import com.p2p.messenger.util.Log
 import androidx.core.content.ContextCompat
 import com.p2p.messenger.P2PLib
 

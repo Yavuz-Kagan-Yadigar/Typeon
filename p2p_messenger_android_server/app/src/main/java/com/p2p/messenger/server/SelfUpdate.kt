@@ -8,7 +8,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
 import android.os.Build
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.io.File
 import java.util.concurrent.Executors
@@ -41,6 +40,9 @@ object SelfUpdate {
     /** `force` (check button, channel change) skips the day wait. */
     fun checkNow(context: Context, force: Boolean = false) {
         val ctx = context.applicationContext
+        // The APK is ~100 MB: the hourly tick waits for an unmetered network; the button does not.
+        val cm = ctx.getSystemService(android.net.ConnectivityManager::class.java)
+        if (!force && cm?.isActiveNetworkMetered != false) return
         worker.execute {
             val out = ServerLib.checkUpdate(dir(ctx).absolutePath, currentVersion(ctx), force)
             if (out.startsWith("Error:")) Log.w(TAG, out)

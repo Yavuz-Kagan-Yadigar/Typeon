@@ -3,7 +3,11 @@ package com.p2p.messenger
 object P2PLib {
     init {
         System.loadLibrary("p2p_messenger")
+        if (BuildConfig.DEBUG) enableLogging()
     }
+
+    /** Logcat output of the core and arti; never called in a release. */
+    private external fun enableLogging()
 
     // --- Section 1: Identity and device ---
     /** Opens the SQLite database in the app's private files directory (Context.filesDir.absolutePath). Must be called before anything else.

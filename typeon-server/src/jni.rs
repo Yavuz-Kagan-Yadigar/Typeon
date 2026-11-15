@@ -111,6 +111,14 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_setDbKey<'local>(
     })
 }
 
+/// Debug APKs only (`ServerLib` init): a release installs no logger, so nothing reaches logcat.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_enableLogging<'local>(_env: JNIEnv<'local>, _class: JClass<'local>) {
+    android_logger::init_once(
+        android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("TypeonServer"),
+    );
+}
+
 /// Starts the server. Calling it again is a no-op (the foreground service can restart with `START_STICKY`). If the
 /// previous loop is still shutting down, returns `Error:`.
 #[no_mangle]
@@ -124,10 +132,6 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
     blob_dir: JString<'local>,
 ) -> jstring {
     guarded(&mut env, |mut env| {
-        android_logger::init_once(
-            android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("TypeonServer"),
-        );
-
         let dir = jstr(&mut env, &data_dir);
         let server_name = jstr(&mut env, &name);
         let node = node_mode != 0;

@@ -8,7 +8,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.os.Build
-import android.util.Log
+import com.p2p.messenger.util.Log
 import com.p2p.messenger.P2PLib
 import java.io.File
 import java.nio.ByteBuffer

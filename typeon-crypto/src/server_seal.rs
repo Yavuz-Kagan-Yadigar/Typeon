@@ -185,14 +185,27 @@ fn conv_archive_key(archive_root_key: &[u8; 32], conv_key: &str) -> Result<[u8; 
 /// The bucket is derived from ARK, so the same group gets different buckets for
 /// different identities. The server cannot tell that two users are in the same
 /// group from the bucket ids.
+///
+/// The id is a hash of the bucket's purge secret (see `ServerRequest::ArchivePurge`):
+/// knowing the id lets one fetch the sealed rows, only the secret deletes them.
 pub fn server_archive_bucket(archive_root_key: &[u8; 32], conv_key: &str, epoch: u64) -> Result<String, String> {
+    let secret = server_archive_purge_secret(archive_root_key, conv_key, epoch)?;
+    crate::server_proto::archive_bucket_for_purge_secret(&secret).ok_or_else(|| "bad purge secret".to_string())
+}
+
+/// The secret that deletes one bucket (64 hex chars). Derived from ARK, so every device of the account has it
+/// and the server never sees it until a purge.
+pub fn server_archive_purge_secret(archive_root_key: &[u8; 32], conv_key: &str, epoch: u64) -> Result<String, String> {
     let mut cak = conv_archive_key(archive_root_key, conv_key)?;
     let mut info = Vec::with_capacity(26 + 8);
-    info.extend_from_slice(b"p2pmsg-v0.1-archive-bucket");
+    info.extend_from_slice(b"p2pmsg-v2-archive-purge");
     info.extend_from_slice(&epoch.to_be_bytes());
-    let id = derive::<16>(&cak, &info);
+    let secret = derive::<32>(&cak, &info);
     cak.zeroize();
-    Ok(format!("ar_{}", hex::encode(id?)))
+    let mut secret = secret?;
+    let out = hex::encode(secret);
+    secret.zeroize();
+    Ok(out)
 }
 
 // Blob ids are not blinded, on purpose. Attachments are served over the
@@ -431,11 +444,11 @@ mod tests {
 
     #[test]
     fn first_contact_seal_roundtrip() {
-        use ml_kem::{EncodedSizeUser, KemCore};
+        use ml_kem::KeyExport;
         let x_secret = x25519_dalek::StaticSecret::random_from_rng(&mut OsRng);
         let x_public = x25519_dalek::PublicKey::from(&x_secret);
-        let (kyber_secret, kyber_ek) = ml_kem::MlKem1024::generate(&mut OsRng);
-        let kyber_public = kyber_ek.as_bytes();
+        let (kyber_secret, kyber_ek) = crate::ratchet::mlkem_generate();
+        let kyber_public = kyber_ek.to_bytes();
         let payload = b"ilk temas zarfi";
         for kem in [None, Some((&x_public.as_bytes()[..], &kyber_public[..]))] {
             let sealed = seal_first_contact(&[7; 16], "mb_1", kem, payload).unwrap();
@@ -445,7 +458,7 @@ mod tests {
         }
         // The KEM layer needs the device's keys, not only the code.
         let sealed = seal_first_contact(&[7; 16], "mb_1", Some((&x_public.as_bytes()[..], &kyber_public[..])), payload).unwrap();
-        let (other_kyber, _) = ml_kem::MlKem1024::generate(&mut OsRng);
+        let (other_kyber, _) = crate::ratchet::mlkem_generate();
         assert!(open_first_contact(&[7; 16], "mb_1", &x_secret, &other_kyber, &sealed).is_err());
         // A clear envelope (the format before sealing) does not open.
         let clear = [&[0u8; 12][..], payload].concat();
@@ -488,6 +501,9 @@ mod tests {
         let a = server_archive_bucket(&ark, "conv-x", 600).unwrap();
         assert_eq!(a, server_archive_bucket(&ark, "conv-x", 600).unwrap());
         assert_ne!(a, server_archive_bucket(&ark, "conv-x", 601).unwrap(), "donem degisince kova degismeli");
+        let secret = server_archive_purge_secret(&ark, "conv-x", 600).unwrap();
+        assert_eq!(crate::server_proto::archive_bucket_for_purge_secret(&secret).as_deref(), Some(a.as_str()));
+        assert!(!secret.contains(&a[3..]), "the id must not reveal the secret");
         assert_ne!(a, server_archive_bucket(&ark, "conv-y", 600).unwrap(), "farkli sohbet farkli kova");
         assert_ne!(a, server_archive_bucket(&[2u8; 32], "conv-x", 600).unwrap(), "farkli ARK farkli kova");
         assert!(a.starts_with("ar_"));

@@ -908,7 +908,7 @@ impl P2PCore {
         let Some(peer_id) = self.server_rt.get(server_id).and_then(|r| r.peer_id) else { return };
 
         let now = current_time_ms();
-        let buckets: Vec<String> = conv_keys.iter().flat_map(|c| archive_buckets(&ark, c, now)).collect();
+        let buckets: Vec<String> = conv_keys.iter().flat_map(|c| archive_purge_secrets(&ark, c, now)).collect();
         if buckets.is_empty() {
             return;
         }
@@ -916,7 +916,7 @@ impl P2PCore {
         // request). 500: the server refuses a list longer than its 512-mailbox cap.
         let cap = self.server_rt.get(server_id).map_or(1, Self::mailbox_cap).min(500);
         for chunk in buckets.chunks(cap) {
-            let req = ServerRequest::ArchivePurge { buckets: chunk.to_vec() };
+            let req = ServerRequest::ArchivePurge { purge_secrets: chunk.to_vec() };
             if self.send_server_request(peer_id, req).is_none() {
                 warn!("Arşiv silme isteği gönderilemedi: {}", crate::log_id(server_id));
                 return;
@@ -2932,7 +2932,7 @@ impl P2PCore {
         for h in keys.split(',') {
             let Some(old) = hex::decode(h).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) else { continue };
             for c in &conv_keys {
-                rest.extend(archive_buckets(&old, c, now));
+                rest.extend(archive_purge_secrets(&old, c, now));
             }
         }
         self.send_archive_purge(peer_id, server_id.to_string(), keys, rest);
@@ -2950,7 +2950,7 @@ impl P2PCore {
         // 500: the server refuses a list longer than its 512-mailbox cap.
         let cap = self.server_rt.get(&server_id).map_or(1, Self::mailbox_cap).min(500);
         let tail = rest.split_off(rest.len().min(cap));
-        let req = ServerRequest::ArchivePurge { buckets: rest };
+        let req = ServerRequest::ArchivePurge { purge_secrets: rest };
         if let Some(id) = self.send_server_request(peer_id, req) {
             self.server_inflight.insert(id, ServerInflight::ArchivePurge { server_id, keys, rest: tail });
         }
@@ -3362,7 +3362,13 @@ impl P2PCore {
                 warn!("Sunucu arşiv kaydı reddedildi: görülenden eski revizyon");
                 continue;
             }
-            if self.message_exists_with_id(&record_id) {
+            // Per chat, as `archive.rs` does: a sibling-crafted record must not hide a row of another chat.
+            let exists = if group {
+                self.message_exists_in_chat(&record_id, Some(conv_key), "")
+            } else {
+                self.message_exists_with_identity(&record_id, conv_key)
+            };
+            if exists {
                 continue;
             }
             // Cleared or pruned by the user (`history_floor`). `conv_key` is the identity ID or group ID the floor is kept under.
@@ -3719,6 +3725,15 @@ fn archive_buckets(ark: &[u8; 32], conv_key: &str, newest_ms: u64) -> Vec<String
     (newest.saturating_sub(35)..=newest)
         .rev()
         .filter_map(|epoch| server_seal::server_archive_bucket(ark, conv_key, epoch).ok())
+        .collect()
+}
+
+/// The purge secrets of the same buckets as `archive_buckets` (see `ServerRequest::ArchivePurge`).
+fn archive_purge_secrets(ark: &[u8; 32], conv_key: &str, newest_ms: u64) -> Vec<String> {
+    let newest = server_seal::archive_epoch_for(newest_ms);
+    (newest.saturating_sub(35)..=newest)
+        .rev()
+        .filter_map(|epoch| server_seal::server_archive_purge_secret(ark, conv_key, epoch).ok())
         .collect()
 }
 

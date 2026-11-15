@@ -21,8 +21,7 @@ base32 = "0.5"
 # both sides decode the same byte format. ml-dsa and ed25519 are deliberately not
 # listed: these modules carry signatures and keys as raw bytes and do not need
 # those crates.
-ml-kem = { version = "0.2", features = ["zeroize"] }
-kem = "=0.3.0-pre.0"
+ml-kem = { version = "0.3.4", features = ["zeroize", "getrandom"] }
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
@@ -35,3 +34,5 @@ rand = "0.8"
 # It does not build for the wasm target without the "js" feature. Native targets are unaffected.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
+# ml-kem 0.3 draws from getrandom 0.4 (encapsulate, key generation).
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }

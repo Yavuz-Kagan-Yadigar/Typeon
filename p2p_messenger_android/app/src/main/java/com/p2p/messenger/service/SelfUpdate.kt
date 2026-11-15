@@ -8,7 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
 import android.os.Build
-import android.util.Log
+import com.p2p.messenger.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -50,16 +50,19 @@ object SelfUpdate {
         File(dir(context), "last-check").delete()
         WorkManager.getInstance(context).enqueueUniqueWork(
             "self_update_now", ExistingWorkPolicy.REPLACE,
-            OneTimeWorkRequestBuilder<UpdateWorker>().setConstraints(constraints()).build()
+            // Asked for by the user: any network, metered too.
+            OneTimeWorkRequestBuilder<UpdateWorker>().setConstraints(constraints(NetworkType.CONNECTED)).build()
         )
     }
 
-    private fun constraints() = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
+    /** The APK is ~85 MB: the daily check waits for Wi-Fi (unmetered), so it never eats mobile data. */
+    private fun constraints(type: NetworkType = NetworkType.UNMETERED) = Constraints.Builder().setRequiredNetworkType(type).build()
 
     /** Twice a day; the core skips a check younger than 20 h, so this is one check a day. */
     fun schedule(context: Context) {
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-            "self_update", ExistingPeriodicWorkPolicy.KEEP,
+            // UPDATE, not KEEP: phones that queued the old metered constraint pick up the new one.
+            "self_update", ExistingPeriodicWorkPolicy.UPDATE,
             PeriodicWorkRequestBuilder<UpdateWorker>(12, TimeUnit.HOURS).setConstraints(constraints()).build()
         )
     }
@@ -131,7 +134,11 @@ object SelfUpdate {
 class UpdateWorker(context: Context, params: WorkerParameters) : Worker(context, params) {
     override fun doWork(): Result {
         // The check rides the core's Tor client, which only runs inside P2PService.
-        if (!P2PService.alive) return Result.retry()
+        // No account (logged out, wiped): nothing will start the service, so retrying only wakes the phone.
+        if (!P2PService.alive) {
+            val account = try { P2PLib.hasStoredIdentity() } catch (e: Exception) { false }
+            return if (account) Result.retry() else Result.success()
+        }
         val ctx = applicationContext
         val out = P2PLib.checkUpdate(SelfUpdate.dir(ctx).absolutePath, SelfUpdate.currentVersion(ctx), false)
         if (out.startsWith("Error:")) {

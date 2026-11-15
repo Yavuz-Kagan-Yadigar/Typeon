@@ -51,7 +51,7 @@ object MessageHistoryManager {
                 KeystoreCrypto.decrypt(encrypted, KeystoreCrypto.ALIAS_HISTORY)
             } catch (e: Exception) {
                 // See the TAG note (#04). NEVER regenerate here.
-                android.util.Log.e(TAG, "Anahtar cozulemedi, YENIDEN URETILMIYOR", e)
+                com.p2p.messenger.util.Log.e(TAG, "Anahtar cozulemedi, YENIDEN URETILMIYOR", e)
                 KeystoreCrypto.reportKeyFailure(context)
                 return
             }
@@ -77,7 +77,7 @@ object MessageHistoryManager {
         } catch (e: Exception) {
             // Keystore or disk failure: this runs on unguarded start-up
             // paths and took the process down before the network started.
-            android.util.Log.e(TAG, "Anahtar uretilemedi", e)
+            com.p2p.messenger.util.Log.e(TAG, "Anahtar uretilemedi", e)
         } finally {
             dataKey.fill(0)
         }

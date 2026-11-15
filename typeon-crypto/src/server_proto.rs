@@ -64,7 +64,9 @@ pub const RELAY_PROTOCOL: &str = "/typeon/relay/1.0.0";
 ///    (`blob_id_for_upload_secret`).
 /// 7: the id hashes only the secret bytes after the tag. A group file's tag is
 ///    made per file (core `group_msg_tag`).
-pub const SERVER_PROTOCOL_VERSION: u16 = 7;
+/// 8: archive bucket ids are hashes of per-bucket purge secrets; `ArchivePurge`
+///    carries the secrets (`archive_bucket_for_purge_secret`).
+pub const SERVER_PROTOCOL_VERSION: u16 = 8;
 
 /// Maximum payload of one `Deposit`. See the size-limit note at the top of the
 /// module: the codec's hard limit is 1 MiB, and this leaves room for CBOR framing.
@@ -257,7 +259,12 @@ pub enum ServerRequest {
     /// Deletes this device's history on the server. This is tied to the visible
     /// settings action and to `remove_server`. The app cannot prove the server
     /// actually deleted it. SECURITY.md documents this.
-    ArchivePurge { buckets: Vec<MailboxId> },
+    ///
+    /// Carries each bucket's purge secret (64 hex chars), not the bucket id: the id is
+    /// a hash of the secret (`archive_bucket_for_purge_secret`), so the server and any
+    /// peer that learns an id can read the sealed rows but cannot delete them. Only the
+    /// holders of the archive key can.
+    ArchivePurge { purge_secrets: Vec<String> },
 
     // --- Attachment blobs (upload direction only) ---
     /// Uploads one file chunk.
@@ -885,6 +892,15 @@ pub const BLOB_TAG_LEN: usize = 8;
 /// id belongs to the member who offers it (core `group_msg_tag`, derived from the hash
 /// part, so it differs per file). The server does not read it. `None` if the secret has
 /// the wrong length.
+/// The archive bucket id a purge secret deletes (`ar_` + 32 hex chars), or `None` for a
+/// malformed secret. `server_seal::server_archive_bucket` builds ids the same way.
+pub fn archive_bucket_for_purge_secret(secret_hex: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let secret = hex::decode(secret_hex).ok().filter(|b| b.len() == 32)?;
+    let hash = Sha256::new_with_prefix(b"typeon-archive-bucket-v2").chain_update(&secret).finalize();
+    Some(format!("ar_{}", hex::encode(&hash[..16])))
+}
+
 pub fn blob_id_for_upload_secret(upload_secret: &[u8]) -> Option<String> {
     if upload_secret.len() != BLOB_UPLOAD_SECRET_LEN {
         return None;

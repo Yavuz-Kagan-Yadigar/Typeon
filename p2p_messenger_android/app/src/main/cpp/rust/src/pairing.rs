@@ -127,15 +127,14 @@ impl P2PCore {
         let sign_pk_mldsa = sign_sk_mldsa.verifying_key().clone();
         let kem_sk_x25519 = StaticSecret::random_from_rng(&mut csprng);
         let kem_pk_x25519 = X25519PublicKey::from(&kem_sk_x25519);
-        // X25519 (rand_core 0.6 via rand 0.8) and ML-KEM (rand_core 0.6.4) share the same rand_core major version, so one OsRng can be used for both.
-        let (kem_sk_mlkem, _kem_pk_mlkem_dup) = MlKem1024::generate(&mut csprng);
-        let kem_pk_mlkem = kem_sk_mlkem.encapsulation_key().clone();
+        // ML-KEM draws from the system RNG itself (getrandom feature), like ML-DSA above.
+        let (kem_sk_mlkem, kem_pk_mlkem) = mlkem_generate();
 
         let fingerprint_raw = compute_fingerprint(
             sign_pk_ed25519.as_bytes(),
             &sign_pk_mldsa.encode(),
             kem_pk_x25519.as_bytes(),
-            &kem_pk_mlkem.as_bytes(),
+            &mlkem_ek_to_bytes(&kem_pk_mlkem),
         );
         let fingerprint_hex = hex::encode(&fingerprint_raw);
 
@@ -160,7 +159,7 @@ impl P2PCore {
             sign_pubkey_ed25519: sign_pk_ed25519.as_bytes().to_vec(),
             sign_pubkey_mldsa: sign_pk_mldsa.encode().to_vec(),
             kem_pubkey_x25519: kem_pk_x25519.as_bytes().to_vec(),
-            kem_pubkey_mlkem: kem_pk_mlkem.as_bytes().to_vec(),
+            kem_pubkey_mlkem: mlkem_ek_to_bytes(&kem_pk_mlkem),
             device_name,
             is_active: true,
             last_seen: current_time_ms(),
@@ -173,8 +172,8 @@ impl P2PCore {
             // `SigningKey::from_seed`, deterministically.
             sign_sk_mldsa: sign_sk_mldsa.to_bytes().to_vec(),
             kem_sk_x25519: kem_sk_x25519.to_bytes().to_vec(),
-            // ML-KEM cannot be regenerated from a seed (see the ratchet.rs note), so the full serialized secret key (`EncodedSizeUser::as_bytes`) is stored.
-            kem_sk_mlkem: kem_sk_mlkem.as_bytes().to_vec(),
+            // The 64-byte ML-KEM seed (`mlkem_dk_to_bytes`).
+            kem_sk_mlkem: mlkem_dk_to_bytes(&kem_sk_mlkem),
         };
         let secret_bundle_bytes = ciborium_bytes(&secret_bundle)?;
 
@@ -245,11 +244,8 @@ impl P2PCore {
         zeroize::Zeroize::zeroize(&mut kem_sk_x_bytes);
         let kem_pk_x25519 = X25519PublicKey::from(&kem_sk_x25519);
 
-        // The ML-KEM secret key is stored in full serialized form (see the generate_identity note; ml-kem has no regeneration from a seed).
-        let kem_sk_encoded: ml_kem::Encoded<MlKem1024DecapsulationKey> = bundle.kem_sk_mlkem.as_slice().try_into().map_err(|_| "Bozuk Kyber secret key")?;
-        let kem_sk_mlkem = MlKem1024DecapsulationKey::from_bytes(&kem_sk_encoded);
-        let kem_pk_encoded: ml_kem::Encoded<MlKem1024EncapsulationKey> = record.kem_pubkey_mlkem.as_slice().try_into().map_err(|_| "Bozuk Kyber public key")?;
-        let kem_pk_mlkem = MlKem1024EncapsulationKey::from_bytes(&kem_pk_encoded);
+        let kem_sk_mlkem = mlkem_dk_from_bytes(&bundle.kem_sk_mlkem).map_err(|_| "Bad Kyber secret key")?;
+        let kem_pk_mlkem = kyber_pubkey_from_bytes(&record.kem_pubkey_mlkem).map_err(|_| "Bad Kyber public key")?;
 
         // The secrets must be the ones behind the stored public keys (the
         // fingerprint peers trust). A bundle of another device would sign and
@@ -257,7 +253,7 @@ impl P2PCore {
         if sign_pk_ed25519.as_bytes().to_vec() != record.sign_pubkey_ed25519
             || sign_sk_mldsa.verifying_key().encode().to_vec() != record.sign_pubkey_mldsa
             || kem_pk_x25519.as_bytes().to_vec() != record.kem_pubkey_x25519
-            || kem_sk_mlkem.encapsulation_key().as_bytes().to_vec() != record.kem_pubkey_mlkem
+            || mlkem_ek_to_bytes(kem_sk_mlkem.encapsulation_key()) != record.kem_pubkey_mlkem
         {
             return Err("Secret key paketi bu cihazın kayıtlı public key'leriyle eşleşmiyor".to_string());
         }
@@ -624,14 +620,22 @@ impl P2PCore {
             .unwrap_or_default()
     }
 
+    /// The revokes a packet carries: the newest `REVOKES_PER_PACKET`, plus `target`'s own revoke when it is older (a revoked
+    /// sibling must see the one that wipes it). The full list stays in `own_revokes`, so this device's bans are permanent, and a
+    /// contact keeps every revoke it has seen (`owner_revoked`). Only a contact that missed more than this many revokes in a row
+    /// can miss an old one.
+    pub(crate) fn own_revokes_to_send(&self, target: Option<&str>) -> Vec<DeviceRevoke> {
+        newest_plus_target(self.own_revokes(), REVOKES_PER_PACKET, |r| Some(r.revoked_device_fingerprint.as_str()) == target)
+    }
+
     pub(crate) fn remember_own_revoke(&self, revoke: &DeviceRevoke) {
         let mut all = self.own_revokes();
         if all.iter().any(|r| r.revoked_device_fingerprint == revoke.revoked_device_fingerprint) {
             return;
         }
         // Every revoke is kept: a DeviceAdd has no expiry, so a contact that never saw the revoke would take the device back.
-        // ponytail: each one adds about 4.7 KB to every IdentityExchange, and near 200 the packet passes `MAX_ENVELOPE_BYTES`. Add a device-set epoch to
-        // DeviceAdd if an identity ever revokes that many.
+        // Packets carry only the newest ones (`own_revokes_to_send`): each is about 4.7 KB, and all of them would pass
+        // `MAX_ENVELOPE_BYTES` near 200.
         all.push(revoke.clone());
         if let Ok(bytes) = ciborium_bytes(&all) {
             self.meta_put("own_revokes", &hex::encode(bytes));
@@ -863,7 +867,7 @@ impl P2PCore {
         // on the bytes): at most one new copy per interval and target.
         let now = current_time_ms();
         let timestamp = now - now % HANDSHAKE_REDO_MIN_INTERVAL_MS;
-        let revokes = self.own_revokes();
+        let revokes = self.own_revokes_to_send(Some(target_device_fingerprint));
         let to_sign = packet::identity_exchange_signing_input(
             &own_identity_id, &own_fp, &own_record.device_name, &pairing_proof, target_device_fingerprint, timestamp, &revokes,
         );
@@ -1480,5 +1484,28 @@ impl P2PCore {
         } else {
             contact_id
         }
+    }
+}
+
+/// The last `n` items, oldest first, preceded by the first older item `is_target` picks (if any).
+fn newest_plus_target<T>(mut all: Vec<T>, n: usize, is_target: impl Fn(&T) -> bool) -> Vec<T> {
+    let tail = all.split_off(all.len().saturating_sub(n));
+    let mut out: Vec<T> = all.into_iter().find(|x| is_target(x)).into_iter().collect();
+    out.extend(tail);
+    out
+}
+
+#[cfg(test)]
+mod revoke_cap_tests {
+    use super::newest_plus_target;
+
+    #[test]
+    fn keeps_the_newest_and_the_target() {
+        let all: Vec<u32> = (0..10).collect();
+        assert_eq!(newest_plus_target(all.clone(), 3, |_| false), [7, 8, 9]);
+        assert_eq!(newest_plus_target(all.clone(), 3, |&x| x == 2), [2, 7, 8, 9]);
+        assert_eq!(newest_plus_target(all.clone(), 3, |&x| x == 8), [7, 8, 9], "target already in the tail");
+        assert_eq!(newest_plus_target(all.clone(), 20, |&x| x == 2), all);
+        assert_eq!(newest_plus_target(Vec::<u32>::new(), 3, |_| true), Vec::<u32>::new());
     }
 }

@@ -1397,7 +1397,18 @@ impl P2PCore {
                             // Only the root device answers (a desktop's request
                             // reaches every sibling). Off the core lock: one
                             // decrypt + send per sticker, the lock taken each time.
-                            if self.own_device_add.is_none() {
+                            // One sending thread per sibling: a burst of requests must not start one each.
+                            static SENDING_TO: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+                            let busy = SENDING_TO.lock().map_or(true, |mut s| {
+                                let busy = s.contains(&peer_fp);
+                                if !busy {
+                                    s.push(peer_fp.clone());
+                                }
+                                busy
+                            });
+                            if busy {
+                                info!("Sticker request from sibling {}: already sending", crate::log_id(&peer_fp));
+                            } else if self.own_device_add.is_none() {
                                 let have: std::collections::HashSet<String> = have.into_iter().collect();
                                 let ids: Vec<String> = self.sticker_ids().into_iter().filter(|id| !have.contains(id)).collect();
                                 info!("Sticker request from sibling {}: sending {}", crate::log_id(&peer_fp), ids.len());
@@ -1407,7 +1418,12 @@ impl P2PCore {
                                     for id in ids {
                                         crate::core_lock().send_sticker_to_sibling(&to, &id);
                                     }
+                                    if let Ok(mut s) = SENDING_TO.lock() {
+                                        s.retain(|f| f != &to);
+                                    }
                                 });
+                            } else if let Ok(mut s) = SENDING_TO.lock() {
+                                s.retain(|f| f != &peer_fp);
                             }
                             serde_json::json!({"type": "noop"})
                         }

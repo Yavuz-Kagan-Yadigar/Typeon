@@ -75,13 +75,12 @@
     <string name="pin_wrong">Yanlış PIN</string>
     <string name="pin_wait_fmt">Çok fazla deneme. %1$d sn sonra tekrar deneyin</string>
     <string name="pin_settings_title">Uygulama PIN\'i</string>
-    <string name="pin_set_msg">Katılım kodunu, cihaz listesini ve ayarları korur. Uygulama kilitliyken sunucu çalışmaya devam eder.</string>
-    <string name="pin_change_msg">Mevcut PIN\'i ve yeni bir PIN girin. Kilidi kaldırmak için yeni PIN\'i boş bırakın.</string>
+    <string name="pin_set_msg">Önce bir PIN belirleyin. Katılım kodunu, cihaz listesini ve ayarları korur. Uygulama kilitliyken sunucu çalışmaya devam eder.</string>
+    <string name="pin_change_msg">Mevcut PIN\'i ve yeni bir PIN girin.</string>
     <string name="pin_current_hint">Mevcut PIN</string>
     <string name="pin_new_hint">Yeni PIN</string>
     <string name="pin_too_short_fmt">PIN en az %1$d karakter olmalı</string>
     <string name="pin_saved">PIN kaydedildi</string>
-    <string name="pin_removed">PIN kaldırıldı</string>
     <string name="lbl_beta_updates">Beta güncellemeleri</string>
     <string name="lbl_beta_updates_desc">Sunucu günde bir kez GitHub sürümlerinden, Tor üzerinden kendini günceller. Açık: beta sürümleri de kurar.</string>
     <string name="action_check_updates">Güncellemeleri denetle</string>

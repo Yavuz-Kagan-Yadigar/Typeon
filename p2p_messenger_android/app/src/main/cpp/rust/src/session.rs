@@ -233,8 +233,7 @@ impl P2PCore {
                 let Some(mut plain) = self.open_local_blob(&sealed) else { continue };
                 if let Ok(mut stored) = ciborium::from_reader::<StoredPrekey, _>(plain.as_slice()) {
                     let sk_x = <[u8; 32]>::try_from(stored.sk_x25519.as_slice()).ok().map(StaticSecret::from);
-                    let sk_m = <ml_kem::Encoded<MlKem1024DecapsulationKey>>::try_from(stored.sk_mlkem.as_slice())
-                        .ok().map(|e| MlKem1024DecapsulationKey::from_bytes(&e));
+                    let sk_m = mlkem_dk_from_bytes(&stored.sk_mlkem).ok();
                     // an id the table cannot hold is not a row we wrote.
                     if let (Some(sk_x25519), Some(sk_mlkem), true) = (sk_x, sk_m, stored.signed.id <= i64::MAX as u64) {
                         self.own_prekeys.push(OwnPrekey { signed: stored.signed.clone(), sk_x25519, sk_mlkem });
@@ -256,9 +255,9 @@ impl P2PCore {
         if due {
             let mut csprng = OsRng;
             let sk_x25519 = StaticSecret::random_from_rng(&mut csprng);
-            let (sk_mlkem, _) = MlKem1024::generate(&mut csprng);
+            let (sk_mlkem, ek_mlkem) = mlkem_generate();
             let kem_pubkey_x25519 = X25519PublicKey::from(&sk_x25519).as_bytes().to_vec();
-            let kem_pubkey_mlkem = sk_mlkem.encapsulation_key().as_bytes().to_vec();
+            let kem_pubkey_mlkem = mlkem_ek_to_bytes(&ek_mlkem);
             // Larger than every earlier id, also after a clock set back.
             let id = now.max(self.own_prekeys.last().map_or(0, |k| k.signed.id.saturating_add(1))).clamp(1, i64::MAX as u64);
             let keys = self.own_device_keys.get(&own_fp)?;
@@ -273,7 +272,7 @@ impl P2PCore {
             let mut stored = StoredPrekey {
                 signed: signed.clone(),
                 sk_x25519: sk_x25519.to_bytes().to_vec(),
-                sk_mlkem: sk_mlkem.as_bytes().to_vec(),
+                sk_mlkem: mlkem_dk_to_bytes(&sk_mlkem),
             };
             let mut plain = ciborium_bytes(&stored).ok();
             stored.sk_x25519.zeroize();

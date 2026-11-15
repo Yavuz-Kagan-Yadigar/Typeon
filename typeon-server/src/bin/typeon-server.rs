@@ -235,6 +235,7 @@ async fn main() {
         "devices" => devices(&args[1..]),
         "address" => address(),
         "updates" => updates(&args[1..]),
+        "install-staged" => install_staged(),
         "version" | "--version" | "-V" => println!("typeon-server {}", env!("CARGO_PKG_VERSION")),
         "help" | "--help" | "-h" => usage(),
         other => {
@@ -258,6 +259,7 @@ fn usage() {
          devices unblock <enrollment_id>     Engeli kaldır (cihaz yeniden kaydolabilir)\n\
          address                             İlan edilen adresler\n\
          updates beta on|off                 Beta sürümleri de otomatik kur (varsayılan kapalı)\n\
+         install-staged                      İndirilen imzalı güncellemeyi kur (systemd ExecStartPre, root)\n\
          version                             Sürüm\n\n\
          Genel seçenekler (her komutta):\n\
          --dir <yol>                         Veri dizini (TYPEON_SERVER_DIR)\n\
@@ -466,6 +468,7 @@ fn updates(args: &[String]) {
 const EXIT_UPDATE: i32 = 75;
 /// Name the unit's `ExecStartPre` looks for when the binary itself is read-only (`ProtectSystem=strict`).
 const STAGED: &str = "typeon-server.staged";
+const ASSET: &str = "typeon-server-linux";
 
 /// Once Tor had time to bootstrap, then hourly; `update::check` keeps it to one real check a day.
 async fn update_loop(tor: std::sync::Weak<p2p_messenger::update::TorClientRt>) {
@@ -473,7 +476,7 @@ async fn update_loop(tor: std::sync::Weak<p2p_messenger::update::TorClientRt>) {
     loop {
         if let Some(tor) = tor.upgrade() {
             let dir = update_dir();
-            match p2p_messenger::update::check(&tor, &dir, env!("CARGO_PKG_VERSION"), "typeon-server-linux", false, true).await {
+            match p2p_messenger::update::check(&tor, &dir, env!("CARGO_PKG_VERSION"), ASSET, false, true).await {
                 Ok(Some((version, path))) => apply_update(&version, &path),
                 Ok(None) => {}
                 Err(e) => log::warn!("update check: {e}"),
@@ -517,4 +520,64 @@ fn apply_update(version: &str, path: &std::path::Path) {
         std::process::exit(EXIT_UPDATE);
     }
     log::info!("update: {version} takes effect at the next start");
+}
+
+/// Root `ExecStartPre` step of the unit. The staged files are written by the sandboxed service user, so
+/// nothing in them is trusted: the binary is installed only when the owner's offline release signature
+/// covers its hash and it is not older than the running binary (a beta may go back to a release).
+/// Always exits 0, so a refused file leaves the server starting on the binary it has.
+fn install_staged() {
+    use sha2::Digest;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use p2p_messenger::update;
+    let dir = update_dir();
+    let staged = dir.join(STAGED);
+    // Regular files only: a symlink or FIFO planted by the service user is not followed.
+    if !std::fs::symlink_metadata(&staged).is_ok_and(|m| m.is_file()) {
+        let _ = std::fs::remove_file(&staged);
+        return;
+    }
+    let result = (|| -> Result<String, String> {
+        let regular = |name: &str| -> Result<Vec<u8>, String> {
+            let path = dir.join(name);
+            let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("{name}: {e}"))?;
+            if !meta.is_file() || meta.len() > 512 * 1024 * 1024 {
+                return Err(format!("{name}: not a regular file of sane size"));
+            }
+            std::fs::read(&path).map_err(|e| format!("{name}: {e}"))
+        };
+        let msg = regular(update::SIGNED_FILE)?;
+        let sig = String::from_utf8(regular(update::SIG_FILE)?).map_err(|_| "signature not text")?;
+        let (tag, sums) = update::verify_release(&msg, &sig)?;
+        let want = update::sums_hash(&sums, ASSET).ok_or("signed sums do not list the server binary")?;
+        let bin = regular(STAGED)?;
+        if hex::encode(sha2::Sha256::digest(&bin)) != want {
+            return Err("staged binary does not match the signed hash".into());
+        }
+        let version = tag.trim_start_matches('v').to_string();
+        let current = env!("CARGO_PKG_VERSION");
+        if !(update::is_newer(&version, current) || (current.contains('-') && !version.contains('-'))) {
+            return Err(format!("{version} is not newer than {current}"));
+        }
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let tmp = exe.with_extension("new");
+        let _ = std::fs::remove_file(&tmp);
+        let write = || -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o755).open(&tmp)?;
+            f.write_all(&bin)?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, &exe)
+        };
+        write().map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            e.to_string()
+        })?;
+        Ok(version)
+    })();
+    let _ = std::fs::remove_file(&staged);
+    match result {
+        Ok(v) => eprintln!("install-staged: installed {v}"),
+        Err(e) => eprintln!("install-staged: refused: {e}"),
+    }
 }

@@ -18,7 +18,7 @@ import android.media.ToneGenerator
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
+import com.p2p.messenger.util.Log
 import android.util.Rational
 import android.util.Size
 import android.view.Gravity

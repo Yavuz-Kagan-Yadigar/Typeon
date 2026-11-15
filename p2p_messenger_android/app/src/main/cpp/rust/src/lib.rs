@@ -111,7 +111,7 @@ use log::{debug, error, info, warn};
 // ML-KEM-1024 and ML-DSA-87 (NIST category 5), for extra margin. An earlier version used ML-DSA-44 by mistake, and was then moved to
 // ML-DSA-65 before the category 5 sets were chosen. See the "Key sizes" note in SECURITY.md.
 use ml_dsa::{EncodedSignature, EncodedVerifyingKey, Generate as MlDsaGenerate, KeyExport as MlDsaKeyExport, Keypair as MlDsaKeypair, MlDsa87, Signature as MlDsaSignature, SigningKey as MlDsaSigningKey, Signer as MlDsaSigner, VerifyingKey as MlDsaVerifyingKey, Verifier as MlDsaVerifier};
-use ml_kem::{EncodedSizeUser as MlKemEncodedSizeUser, KemCore as MlKemCore, MlKem1024};
+use ratchet::{kyber_pubkey_from_bytes, mlkem_dk_from_bytes, mlkem_dk_to_bytes, mlkem_ek_to_bytes, mlkem_generate};
 use rand::rngs::OsRng;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};

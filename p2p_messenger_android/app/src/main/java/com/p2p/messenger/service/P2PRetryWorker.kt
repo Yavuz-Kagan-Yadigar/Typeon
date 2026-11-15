@@ -39,7 +39,7 @@ class P2PRetryWorker(context: Context, params: WorkerParameters) : Worker(contex
             try {
                 ContextCompat.startForegroundService(applicationContext, serviceIntent)
             } catch (e: Exception) {
-                android.util.Log.w("P2PRetryWorker", "Servis arka plandan başlatılamadı: ${e.message}")
+                com.p2p.messenger.util.Log.w("P2PRetryWorker", "Servis arka plandan başlatılamadı: ${e.message}")
                 // Reporting "success" would hide that this fallback never actually ran. Tell WorkManager the status, so the job is retried with its own
                 // backoff rule.
                 return Result.retry()

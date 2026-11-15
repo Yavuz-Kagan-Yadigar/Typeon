@@ -213,7 +213,7 @@ object BatteryLog {
                 e.apply()
             }
         } catch (e: Exception) {
-            android.util.Log.w("BatteryLog", "write failed: ${e.message}")
+            com.p2p.messenger.util.Log.w("BatteryLog", "write failed: ${e.message}")
         }
     }
 

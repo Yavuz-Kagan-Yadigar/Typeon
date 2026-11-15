@@ -75,13 +75,12 @@
     <string name="pin_wrong">Wrong PIN</string>
     <string name="pin_wait_fmt">Too many attempts. Try again in %1$d s</string>
     <string name="pin_settings_title">App PIN</string>
-    <string name="pin_set_msg">Protects the join code, the device list and the settings. The server keeps running while the app is locked.</string>
-    <string name="pin_change_msg">Enter the current PIN and a new one. Leave the new PIN empty to remove the lock.</string>
+    <string name="pin_set_msg">Set a PIN first. It protects the join code, the device list and the settings. The server keeps running while the app is locked.</string>
+    <string name="pin_change_msg">Enter the current PIN and a new one.</string>
     <string name="pin_current_hint">Current PIN</string>
     <string name="pin_new_hint">New PIN</string>
     <string name="pin_too_short_fmt">The PIN needs at least %1$d characters</string>
     <string name="pin_saved">PIN saved</string>
-    <string name="pin_removed">PIN removed</string>
     <string name="lbl_beta_updates">Beta updates</string>
     <string name="lbl_beta_updates_desc">The server updates itself once a day from GitHub releases, over Tor. On: also install beta releases.</string>
     <string name="action_check_updates">Check for updates</string>

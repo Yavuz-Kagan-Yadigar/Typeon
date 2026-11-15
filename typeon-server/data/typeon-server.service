@@ -29,9 +29,11 @@ Group=typeon
 # K/M/G/T (powers of 1024). Set it to suit your disk.
 # Self-update: the server downloads new releases over Tor and stages them in its data
 # directory (it cannot write /usr/local/bin), then exits 75. "+" runs this one step
-# outside the sandbox to install the staged binary. Beta channel:
+# outside the sandbox: the INSTALLED (root-owned) binary checks the staged one against
+# the owner's offline release signature before it replaces itself. The service user
+# writes the staged files, so they are never installed unchecked. Beta channel:
 #   sudo -u typeon /usr/local/bin/typeon-server --dir /var/lib/typeon-server updates beta on
-ExecStartPre=+/bin/sh -c 'f=/var/lib/typeon-server/update/typeon-server.staged; if [ -f "$f" ]; then install -m 0755 "$f" /usr/local/bin/typeon-server && rm -f "$f"; fi'
+ExecStartPre=+/usr/local/bin/typeon-server --dir /var/lib/typeon-server install-staged
 ExecStart=/usr/local/bin/typeon-server --dir /var/lib/typeon-server --storage 16G run
 Restart=on-failure
 RestartSec=5

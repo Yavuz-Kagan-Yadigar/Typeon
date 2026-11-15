@@ -30,9 +30,8 @@ object AppLock {
     private const val KEY_ITERATIONS = "app_lock_iterations"
 
     /** The old fixed value was 120,000. That was the OWASP recommendation around 2018, and modern GPU and ASIC guessing
-     *  makes it weak. Current OWASP guidance for PBKDF2-HMAC-SHA256 is at least 600,000, but that adds a noticeable delay
-     *  on every unlock (see AppLockActivity). 300,000 still takes about 300-500 ms on a modern phone, and it multiplies
-     *  the cost of a dictionary attack by two and a half. It is a reasonable middle point.
+     *  makes it weak. 600,000 is the current OWASP guidance for PBKDF2-HMAC-SHA256. The native (ring) path in `derive`
+     *  keeps the unlock delay acceptable even on slow tablets.
      *
      *  Raising the constant must NOT lock out existing installs. The iteration count a hash was derived with is stored
      *  separately in `KEY_ITERATIONS` (see `setPassword` / `verify`). If an old record has no such field, the old constant
@@ -43,7 +42,9 @@ object AppLock {
      *  before that constant is raised. */
     private const val LEGACY_ITERATIONS = 120_000
     private const val KEY_LENGTH_BITS = 256
-    const val MIN_PASSWORD_LENGTH = 6
+    /** The hash sits in SharedPreferences; on a rooted phone it can be guessed offline, so short passwords fall fast.
+     *  Only new passwords are checked; an existing shorter one keeps working until it is changed. */
+    const val MIN_PASSWORD_LENGTH = 8
 
     /** Lock state for the life of the process. NOT written to disk. When the process dies, or the app goes to the
      *  background and `lock()` is called, the password is asked again. */
@@ -122,8 +123,14 @@ object AppLock {
             if (out.size == KEY_LENGTH_BITS / 8) return out
         } catch (e: Throwable) {
         }
-        val spec = PBEKeySpec(password.toCharArray(), salt, iterations, KEY_LENGTH_BITS)
-        return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+        val chars = password.toCharArray()
+        val spec = PBEKeySpec(chars, salt, iterations, KEY_LENGTH_BITS)
+        try {
+            return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+        } finally {
+            spec.clearPassword()
+            chars.fill('\u0000')
+        }
     }
 
     fun isUnlocked(): Boolean = unlocked

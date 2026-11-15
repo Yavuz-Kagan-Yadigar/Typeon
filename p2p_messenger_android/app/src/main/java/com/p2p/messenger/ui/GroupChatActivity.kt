@@ -1,5 +1,6 @@
 package com.p2p.messenger.ui
 
+import com.p2p.messenger.util.safeSaveFileName
 import android.Manifest
 import android.app.AlertDialog
 import android.content.Context
@@ -2337,19 +2338,6 @@ class GroupChatActivity : AppCompatActivity() {
      * Rows already in the `files` table keep the raw name, and the API 26-28 branch below does `File(p2pDir, displayName)`.
      * A name such as "../../DCIM/Camera/IMG_0001.jpg" would then write to an arbitrary path in shared storage.
      */
-    private fun safeSaveFileName(name: String): String {
-        val cleaned = name
-            .filter {
-                it != '/' && it != '\\' && it != ':' && !it.isISOControl() &&
-                    // Bidi overrides and zero-width characters disguise the extension.
-                    Character.getType(it) != Character.FORMAT.toInt()
-            }
-            .trim()
-            .trimStart('.')
-            .trim()
-        return cleaned.ifEmpty { "file" }.take(120)
-    }
-
     private fun saveToPublicDownloads(source: File, displayName: String, mimeType: String): Boolean {
         return try {
             val safeName = safeSaveFileName(displayName)

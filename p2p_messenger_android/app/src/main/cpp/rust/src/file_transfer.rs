@@ -489,6 +489,15 @@ impl P2PCore {
 
     /// Starts or resumes a file download (on the user's tap, or automatically when node mode is on). No-op if it is already downloading or complete.
     pub(crate) fn download_file(&mut self, file_id: String, peer_device_fingerprint: String) -> Result<(), String> {
+        self.download_file_with(file_id, peer_device_fingerprint, None)
+    }
+
+    /// `scanned`: the chunks a background scan of the partial file found intact (see the resume block).
+    fn download_file_with(&mut self, file_id: String, peer_device_fingerprint: String, scanned: Option<std::collections::HashSet<u32>>) -> Result<(), String> {
+        // A partial file being scanned off the lock: that scan starts the download when it is done.
+        if scanned.is_none() && RESUME_SCANS.lock().map_or(false, |s| s.contains(&file_id)) {
+            return Ok(());
+        }
         info!("download_file çağrıldı: file_id={} peer={}", file_id, crate::log_id(&peer_device_fingerprint));
         if self.active_downloads.contains_key(&file_id) {
             info!("download_file: {} zaten indiriliyor, no-op", file_id);
@@ -555,22 +564,30 @@ impl P2PCore {
         let enc_path = self.enc_path_for(&file_id)?;
         let _ = std::fs::create_dir_all(self.attachments_dir()?);
         // Resume: every chunk group that a previous attempt left on disk and that matches its hash in the offer is kept, wherever it is in the file.
-        // The rest is fetched again.
-        // ponytail: hashes the whole partial file on this thread; move it off the lock if multi-GB resumes show up as a stall.
-        let mut received_chunks: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        let mut resumed_bytes: u64 = 0;
-        if enc_path.exists() {
-            for (entry, want) in chunk_hashes.chunks_exact(32).enumerate() {
-                let first = entry as u32 * per_hash;
-                let count = per_hash.min(total_chunks - first);
-                if attachments::enc_range_hash(&enc_path, first, count, chunk_size).is_ok_and(|h| h[..] == *want) {
-                    for i in first..first + count {
-                        received_chunks.insert(i);
-                        resumed_bytes += attachments::chunk_plain_len(total_size, chunk_size, i);
-                    }
+        // The rest is fetched again. A big partial file is hashed on its own thread, not under the core lock (a multi-GB scan stalled the poll loop);
+        // the thread comes back here with the result.
+        let received_chunks = match scanned {
+            Some(set) => set,
+            None if std::fs::metadata(&enc_path).map_or(0, |m| m.len()) > RESUME_SCAN_OFF_LOCK_BYTES => {
+                if let Ok(mut scans) = RESUME_SCANS.lock() {
+                    scans.push(file_id.clone());
                 }
+                std::thread::spawn(move || {
+                    let set = scan_resumable(&enc_path, &chunk_hashes, per_hash, total_chunks, chunk_size);
+                    let _guard = crate::RUNTIME.enter();
+                    let mut core = crate::core_lock();
+                    if let Ok(mut scans) = RESUME_SCANS.lock() {
+                        scans.retain(|f| f != &file_id);
+                    }
+                    if let Err(e) = core.download_file_with(file_id.clone(), peer_device_fingerprint, Some(set)) {
+                        warn!("download_file {}: {}", file_id, e);
+                    }
+                });
+                return Ok(());
             }
-        }
+            None => scan_resumable(&enc_path, &chunk_hashes, per_hash, total_chunks, chunk_size),
+        };
+        let resumed_bytes: u64 = received_chunks.iter().map(|&i| attachments::chunk_plain_len(total_size, chunk_size, i)).sum();
         let resumed = (0..total_chunks).find(|i| !received_chunks.contains(i)).unwrap_or(total_chunks);
         if !received_chunks.is_empty() {
             info!("download_file: {} kaldığı yerden sürüyor, {}/{} parça diskte", file_id, received_chunks.len(), total_chunks);
@@ -1425,4 +1442,25 @@ impl P2PCore {
         let enc_path = self.enc_path_for(file_id)?;
         Ok((file_key, sha256_hex, enc_path, plain_path))
     }
+}
+
+/// Partial downloads larger than this are scanned for intact chunks off the core lock.
+const RESUME_SCAN_OFF_LOCK_BYTES: u64 = 32 * 1024 * 1024;
+/// File ids whose partial file a background thread is scanning.
+static RESUME_SCANS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The chunks of a partial `.enc` file whose hash group matches the offer's `chunk_hashes`, wherever they are.
+fn scan_resumable(enc_path: &std::path::Path, chunk_hashes: &[u8], per_hash: u32, total_chunks: u32, chunk_size: usize) -> std::collections::HashSet<u32> {
+    let mut received = std::collections::HashSet::new();
+    if !enc_path.exists() {
+        return received;
+    }
+    for (entry, want) in chunk_hashes.chunks_exact(32).enumerate() {
+        let first = entry as u32 * per_hash;
+        let count = per_hash.min(total_chunks - first);
+        if attachments::enc_range_hash(enc_path, first, count, chunk_size).is_ok_and(|h| h[..] == *want) {
+            received.extend(first..first + count);
+        }
+    }
+    received
 }

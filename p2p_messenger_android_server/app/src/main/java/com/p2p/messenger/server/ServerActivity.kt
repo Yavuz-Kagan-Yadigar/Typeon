@@ -149,11 +149,13 @@ class ServerActivity : AppCompatActivity() {
         }
         content.visibility = android.view.View.INVISIBLE
         if (lockDialog?.isShowing == true) return
-        lockDialog = ServerLock.showUnlock(this) {
+        val open = {
             content.visibility = android.view.View.VISIBLE
             // The dialog is gone now, so one poll repaints the hidden screen.
             refreshStatus()
         }
+        lockDialog = if (ServerLock.hasPin(this)) ServerLock.showUnlock(this, open)
+        else ServerLock.showSettings(this, mandatory = true, onSaved = open)
     }
 
     override fun onResume() {

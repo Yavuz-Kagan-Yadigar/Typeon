@@ -343,16 +343,22 @@ class SettingsFragment : Fragment() {
         view.findViewById<Button>(R.id.btn_add_relay_address).setOnClickListener {
             val addr = relayAddressInput.text.toString().trim()
             if (addr.isEmpty()) return@setOnClickListener
-            val result = try {
-                P2PLib.addKnownRelayAddress(addr)
-            } catch (e: Exception) {
-                "Error: ${e.message}"
-            }
-            if (result.startsWith("Error:")) {
-                Toast.makeText(requireContext(), com.p2p.messenger.util.coreErrorText(requireContext(), result), Toast.LENGTH_SHORT).show()
-            } else {
-                relayAddressInput.text.clear()
-                Toast.makeText(requireContext(), R.string.msg_relay_address_added, Toast.LENGTH_SHORT).show()
+            // Takes the core lock, which a long poll turn can hold: never on the main thread.
+            lifecycleScope.launch(Dispatchers.IO) {
+                val result = try {
+                    P2PLib.addKnownRelayAddress(addr)
+                } catch (e: Exception) {
+                    "Error: ${e.message}"
+                }
+                withContext(Dispatchers.Main) {
+                    if (!isAdded) return@withContext
+                    if (result.startsWith("Error:")) {
+                        Toast.makeText(requireContext(), com.p2p.messenger.util.coreErrorText(requireContext(), result), Toast.LENGTH_SHORT).show()
+                    } else {
+                        relayAddressInput.text.clear()
+                        Toast.makeText(requireContext(), R.string.msg_relay_address_added, Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
         }
 
@@ -1011,7 +1017,7 @@ class SettingsFragment : Fragment() {
                     try {
                         ThemePrefs.regenerateProcessedWallpaper(app)
                     } catch (e: Exception) {
-                        android.util.Log.w("SettingsFragment", "wallpaper effects failed", e)
+                        com.p2p.messenger.util.Log.w("SettingsFragment", "wallpaper effects failed", e)
                     }
                 }
             }
