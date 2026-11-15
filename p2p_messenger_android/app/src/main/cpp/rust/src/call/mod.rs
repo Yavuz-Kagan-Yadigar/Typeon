@@ -92,6 +92,13 @@ const RING_TIMEOUT_MS: u64 = 45_000;
 /// how long and how often a running group call rings absent members again.
 const REINVITE_FOR_MS: u64 = 5 * 60_000;
 const REINVITE_EVERY_MS: u64 = 30_000;
+/// After `REINVITE_FOR_MS` the caller keeps inviting, this rarely, so absent
+/// members still see the call running ("Attend" in the group chat).
+const REINVITE_LATE_EVERY_MS: u64 = 120_000;
+/// A group call offer with no Invite for this long is gone.
+const OFFER_TTL_MS: u64 = 150_000;
+/// What is left of an offer once its inviter hung up.
+const OFFER_HANGUP_GRACE_MS: u64 = 40_000;
 /// Every participant sends a state packet each second, even muted with the
 /// camera off: this long with nothing from anyone means the others are gone
 /// (app killed, device off, network lost) and never got to send a Hangup.
@@ -395,6 +402,23 @@ lazy_static::lazy_static! {
     /// overtook its Invite), not one from another group member. A few, not
     /// one: two overtaken Hangups in a group let the first Invite ring.
     static ref EARLY_HANGUP: Mutex<VecDeque<(String, String)>> = Mutex::new(VecDeque::new());
+    /// Group id -> the last Invite of a group call running there, rung or
+    /// not: what "Attend" joins (`start_group_call`).
+    static ref GROUP_OFFERS: Mutex<HashMap<String, GroupOffer>> = Mutex::new(HashMap::new());
+}
+
+pub(crate) struct GroupOffer {
+    call_id: String,
+    video: bool,
+    peer_fp: String,
+    media_key: Zeroizing<Vec<u8>>,
+    stream_id: Vec<u8>,
+    participants: Vec<String>,
+    at: Instant,
+}
+
+fn group_offers() -> MutexGuard<'static, HashMap<String, GroupOffer>> {
+    GROUP_OFFERS.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +533,13 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_endCall<'local>(_env: JNIEn
         crate::core_lock().end_call()
     });
     r.is_ok() as jboolean
+}
+
+/// 0 = no call running in the group (or I am in it), 1 = voice, 2 = video.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_groupCallOffer<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>) -> jint {
+    let group_id = jstr(&mut env, &group_id);
+    crate::catch_panic(move || crate::core_lock_read().group_call_offer(&group_id)).unwrap_or(0)
 }
 
 #[no_mangle]

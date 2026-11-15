@@ -452,6 +452,7 @@
     <!-- Calls -->
     <string name="action_voice_call">Sesli arama</string>
     <string name="action_video_call">Görüntülü arama</string>
+    <string name="action_attend_call">Katıl</string>
     <string name="call_calling">Aranıyor…</string>
     <string name="call_incoming_voice">Gelen sesli arama</string>
     <string name="call_incoming_video">Gelen görüntülü arama</string>

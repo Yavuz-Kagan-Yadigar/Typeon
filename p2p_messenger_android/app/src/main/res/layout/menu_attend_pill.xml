@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The "Attend" pill of a running group call (menu item action_attend_call).
+     Its alpha fades in and out (util.SlowPulse); the icon is set in code. -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/txtAttendCall"
+    android:layout_width="wrap_content"
+    android:layout_height="32dp"
+    android:layout_marginEnd="8dp"
+    android:background="@drawable/attend_pill_background"
+    android:gravity="center_vertical"
+    android:paddingStart="12dp"
+    android:paddingEnd="12dp"
+    android:drawablePadding="6dp"
+    android:text="@string/action_attend_call"
+    android:textAppearance="?attr/textAppearanceLabelLarge"
+    android:textColor="?attr/colorOnPrimary" />

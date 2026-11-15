@@ -487,6 +487,7 @@
     <!-- Calls -->
     <string name="action_voice_call">Voice call</string>
     <string name="action_video_call">Video call</string>
+    <string name="action_attend_call">Attend</string>
     <string name="call_calling">Calling…</string>
     <string name="call_incoming_voice">Incoming voice call</string>
     <string name="call_incoming_video">Incoming video call</string>

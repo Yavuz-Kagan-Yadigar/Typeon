@@ -319,6 +319,8 @@ class GroupChatActivity : AppCompatActivity() {
             val type = obj.optString("type")
             when {
                 type == "stickers_changed" -> runOnUiThread { stickerPicker.reload() }
+                (type == "group_call_offer" && obj.optString("group_id") == groupId) || type == "call_state" ->
+                    runOnUiThread { refreshCallOffer() }
                 type == "group_message" && obj.optString("group_id") == groupId ->
                     runOnUiThread { handleIncomingGroupMessage(obj) }
                 // Multi-device echo: a group message I sent from another of my devices is shown here as sent as well.
@@ -414,6 +416,16 @@ class GroupChatActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) { ownIdentityId }
         refreshContactCacheAsync()
         whiteboard = WhiteboardPanel(this, findViewById(R.id.whiteboardHost), findViewById(R.id.whiteboardHandle))
+        // Sender names in the main colour of each member's whiteboard pen, at 60 % saturation.
+        whiteboard.onParticipants = { ids ->
+            val colors = ids.withIndex().associate { (i, id) ->
+                id to androidx.core.graphics.ColorUtils.HSLToColor(floatArrayOf(360f * i / ids.size, 0.6f, 0.55f))
+            }
+            if (colors != adapter.senderColors) {
+                adapter.senderColors = colors
+                @Suppress("NotifyDataSetChanged") adapter.notifyDataSetChanged()
+            }
+        }
         com.p2p.messenger.util.ThemePrefs.applyChatBackground(this)
         // See the util.ChatListDrawer docs.
         com.p2p.messenger.util.ChatListDrawer.setup(this) {
@@ -584,6 +596,7 @@ class GroupChatActivity : AppCompatActivity() {
 
         groupId = newGroupId
         whiteboard.bind("", groupId)
+        refreshCallOffer()
         P2PService.activeConversationId = "group:$groupId"
         localMessages.clear()
         adapter.notifyDataSetChanged()
@@ -635,7 +648,44 @@ class GroupChatActivity : AppCompatActivity() {
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.menu_chat_search, menu)
+        attendView = menu.findItem(R.id.action_attend_call).actionView?.findViewById<TextView>(R.id.txtAttendCall)?.apply {
+            setOnClickListener { CallActivity.startOutgoing(this@GroupChatActivity, null, groupId, callOffer == 2) }
+        }
         return true
+    }
+
+    /** A call running in this group (`P2PLib.groupCallOffer`): 0 none, 1 voice, 2 video. */
+    private var callOffer = 0
+    private var attendView: TextView? = null
+    private val attendPulse = com.p2p.messenger.util.SlowPulse { attendView?.alpha = 1f - 0.6f * it }
+
+    override fun onPrepareOptionsMenu(menu: Menu): Boolean {
+        menu.findItem(R.id.action_attend_call).isVisible = callOffer != 0
+        menu.findItem(R.id.action_voice_call).isVisible = callOffer == 0
+        menu.findItem(R.id.action_video_call).isVisible = callOffer == 0
+        attendView?.let { v ->
+            val icon = ContextCompat.getDrawable(this, if (callOffer == 2) R.drawable.videocall else R.drawable.voicecall)?.mutate()
+            val size = (18 * resources.displayMetrics.density).toInt()
+            icon?.setBounds(0, 0, size, size)
+            icon?.setTint(v.currentTextColor)
+            v.setCompoundDrawablesRelative(icon, null, null, null)
+        }
+        return super.onPrepareOptionsMenu(menu)
+    }
+
+    /** Off the main thread (core lock); the pill only fades while the screen is in front. */
+    internal fun refreshCallOffer() {
+        if (!::groupId.isInitialized) return
+        val gid = groupId
+        lifecycleScope.launch {
+            val offer = withContext(Dispatchers.IO) { try { P2PLib.groupCallOffer(gid) } catch (e: Throwable) { 0 } }
+            if (gid != groupId) return@launch
+            if (offer != callOffer) {
+                callOffer = offer
+                invalidateOptionsMenu()
+            }
+            attendPulse.running = callOffer != 0 && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+        }
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
@@ -671,6 +721,7 @@ class GroupChatActivity : AppCompatActivity() {
         // the group that is already open on the screen.
         P2PService.activeConversationId = "group:$groupId"
         P2PService.addMessageListener(messageListener)
+        refreshCallOffer()
         ownStatusPollHandler.post(ownStatusPollRunnable)
         // While paused (e.g. the file picker or MediaViewerActivity was on
         // top of this screen), the live listener above was detached — any
@@ -702,6 +753,7 @@ class GroupChatActivity : AppCompatActivity() {
         ownStatusPollHandler.removeCallbacks(ownStatusPollRunnable)
         // Same note as ChatActivity onPause: a pulse animation must not stay registered with vsync in the background while the Activity is not visible.
         ownStatusDot.cancelPulse()
+        attendPulse.running = false
         // Tell members we stopped typing and clear pending timeouts.
         typingHandler.removeCallbacksAndMessages(null)
         typingMembers.clear()

@@ -1112,6 +1112,12 @@ pub fn end_call() {
 }
 
 /// `{"state": "idle"|"outgoing"|"incoming"|"active", ...}`.
+/// 0 = no call running in the group (or this device is in it), 1 = voice, 2 = video.
+/// `start_group_call` then joins it; changes arrive as `group_call_offer` events.
+pub fn group_call_offer(group_id: &str) -> i32 {
+    catch_panic(|| crate::core_lock_read().group_call_offer(group_id)).unwrap_or(0)
+}
+
 pub fn call_state() -> String {
     catch_panic(|| crate::core_lock_read().call_state_json()).unwrap_or_else(|_| "{\"state\":\"idle\"}".to_string())
 }

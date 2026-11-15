@@ -89,9 +89,11 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
     private val chromeColor = MaterialColors.getColor(activity, com.google.android.material.R.attr.colorSurfaceContainer, Color.DKGRAY)
     private val onChromeColor = MaterialColors.getColor(activity, com.google.android.material.R.attr.colorOnSurface, Color.BLACK)
     private val accentColor = MaterialColors.getColor(activity, com.google.android.material.R.attr.colorPrimary, onChromeColor)
-    private val alertColor = MaterialColors.getColor(activity, com.google.android.material.R.attr.colorError, Color.RED)
-
-    private val tab = TabDrawable(chromeColor, onChromeColor, alertColor)
+    private val tab = TabDrawable(chromeColor, onChromeColor, accentColor)
+    /** Unread strokes: the chevron fades to the accent colour and back. */
+    private val pulse = com.p2p.messenger.util.SlowPulse { tab.pulse = it }
+    /** Group chat: sender name colours follow the board's participant order. */
+    var onParticipants: ((List<String>) -> Unit)? = null
     private val isOpen: Boolean get() = host.visibility == View.VISIBLE
 
     private val savePdf = activity.registerForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
@@ -127,6 +129,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
             }
             override fun onStop(owner: LifecycleOwner) {
                 P2PService.removeMessageListener(listener)
+                pulse.running = false
             }
             override fun onDestroy(owner: LifecycleOwner) {
                 ui.removeCallbacksAndMessages(null)
@@ -180,6 +183,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
                 board.participants = people?.length() ?: 2
                 board.me = info.optInt("me", 0)
                 setUnread(info.optInt("unread"))
+                if (people != null) onParticipants?.invoke(List(people.length()) { people.getJSONObject(it).optString("id") })
                 if (built && people != null) {
                     showLegend(List(people.length()) { people.getJSONObject(it).optString("name") })
                     styleTools()
@@ -230,7 +234,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
 
     private fun setUnread(mask: Int) {
         unread = mask
-        tab.unread = mask != 0
+        pulse.running = mask != 0 && activity.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
         if (built) updatePageLabel()
     }
 
@@ -543,7 +547,8 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
     ) : Drawable() {
         var open = false
             set(value) { field = value; invalidateSelf() }
-        var unread = false
+        /** 0 = chevron colour, 1 = [unreadColor]. */
+        var pulse = 0f
             set(value) { field = value; invalidateSelf() }
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val path = Path()
@@ -579,14 +584,8 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
             paint.strokeWidth = h * 0.14f
             paint.strokeCap = Paint.Cap.ROUND
             paint.strokeJoin = Paint.Join.ROUND
-            paint.color = chevronColor
+            paint.color = if (pulse == 0f) chevronColor else ColorUtils.blendARGB(chevronColor, unreadColor, pulse)
             canvas.drawPath(path, paint)
-
-            if (unread) {
-                paint.style = Paint.Style.FILL
-                paint.color = unreadColor
-                canvas.drawCircle(cx + half + h * 0.5f, cy, h * 0.14f, paint)
-            }
         }
 
         override fun setAlpha(alpha: Int) {}

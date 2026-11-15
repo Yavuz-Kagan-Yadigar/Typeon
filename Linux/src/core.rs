@@ -931,6 +931,11 @@ pub fn end_call() {
     api::end_call()
 }
 
+/// A call running in the group that this device is not in: 0 none, 1 voice, 2 video.
+pub fn group_call_offer(group_id: &str) -> i32 {
+    api::group_call_offer(group_id)
+}
+
 pub fn call_state() -> CallState {
     parse_or_default(api::call_state(), "call state")
 }

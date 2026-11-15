@@ -66,6 +66,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
     /** 1:1 chats: label used for the peer's quoted messages. */
     var peerName: () -> String? = { null }
+    /** Group chats: sender identity id -> name colour (see GroupChatActivity). */
+    var senderColors: Map<String, Int> = emptyMap()
 
     /** Inline quote (see util.Quote). Shows the quoted message's own text when it is
      *  available locally; otherwise the sender's preview with no label. */
@@ -817,6 +819,10 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
         if (!item.isMine && item.senderName != null && !groupedWithPrevious) {
             holder.senderName.text = item.senderName
+            holder.senderName.setTextColor(
+                senderColors[item.senderIdentityId]
+                    ?: MaterialColors.getColor(holder.senderName, com.google.android.material.R.attr.colorPrimary)
+            )
             AvatarUtil.renderInto(holder.senderAvatar, item.senderAvatarJpeg, item.senderName)
             holder.senderRow.visibility = View.VISIBLE
         } else {

@@ -473,6 +473,9 @@ object P2PLib {
     external fun startCall(peerFingerprint: String, video: Boolean): String
     /** Rings every other member of the group. Returns the call id or "Error: ...". */
     external fun startGroupCall(groupId: String, video: Boolean): String
+    /** A call running in the group that this device is not in: 0 none, 1 voice, 2 video.
+     *  `startGroupCall` then joins it. Changes arrive as `group_call_offer` events. */
+    external fun groupCallOffer(groupId: String): Int
     /** Answers the ringing incoming call. */
     external fun acceptCall(): Boolean
     /** Rejects a ringing call, hangs up otherwise. */

@@ -14,6 +14,15 @@
         android:title="@string/action_video_call"
         app:showAsAction="ifRoom" />
 
+    <!-- Group chat only: a call is running there. Replaces the two call
+         buttons; tapping it joins (see GroupChatActivity.refreshCallOffer). -->
+    <item
+        android:id="@+id/action_attend_call"
+        android:title="@string/action_attend_call"
+        android:visible="false"
+        app:actionLayout="@layout/menu_attend_pill"
+        app:showAsAction="always" />
+
         <!-- In-chat message search. -->
     <item
         android:id="@+id/action_search_messages"
