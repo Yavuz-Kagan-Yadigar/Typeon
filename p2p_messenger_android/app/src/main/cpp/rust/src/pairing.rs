@@ -778,6 +778,8 @@ impl P2PCore {
         if let Some(conn) = &self.db {
             let _ = conn.execute("DELETE FROM removed_contacts WHERE identity_id = ?1", params![identity_id]);
         }
+        // Siblings that removed the contact earlier take it back from the roster (`SyncedContact.added_at_ms`).
+        self.note_contact_added(&identity_id, current_time_ms());
         self.dial_pairing_addr(&device_fingerprint, rendezvous_node, known_relays);
         // See `pairing_mailbox_subs`: during pairing, also subscribe to the other side's mailbox topic (a real mesh gives fast IX/Handshake).
         self.subscribe_pairing_mailbox(&device_fingerprint);
@@ -1132,6 +1134,7 @@ impl P2PCore {
         // and the activity (link, pairing again). Name and `last_seen` stay.
         // The keys are the ones the fingerprint commits to (lengths checked).
         let prev = self.known_remote_devices.get(&fp);
+        let newly_active = prev.map_or(true, |p| !p.is_active);
         let record = DeviceRecord {
             device_fingerprint: fp.clone(),
             identity_id: stored_identity_id,
@@ -1149,6 +1152,14 @@ impl P2PCore {
         if prev != Some(&record) {
             self.persist_remote_device(&record);
             self.known_remote_devices.insert(fp.clone(), record);
+        }
+        // A contact device whose keys we learn only now: the roster sync sent
+        // at scan time (`pair_with_code`) had no keys for it, and a contact
+        // that scanned our code sent none at all. Without its keys a sibling
+        // cannot create the contact, so it never introduces itself and the
+        // contact never learns our other devices.
+        if newly_active && !as_sibling && self.identity_to_contact.contains_key(&exchange.identity_id) {
+            self.sync_to_siblings();
         }
         // The code of ours this device read: kept past the code's 24 h as
         // the secret of the first-contact mailboxes between the two devices

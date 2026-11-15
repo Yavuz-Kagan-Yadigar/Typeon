@@ -29,6 +29,7 @@ impl P2PCore {
                 avatar_jpeg: None,
                 devices,
                 device_proofs,
+                added_at_ms: self.contact_added_at(&contact.trusted_identity_id),
             });
         }
         // Contact avatars are left out on purpose (the 1 MiB `max_transmit_size` limit). Groups, however, were embedded as-is through
@@ -148,6 +149,7 @@ impl P2PCore {
                     avatar_jpeg: Some(avatar),
                     devices: Vec::new(),
                     device_proofs: Vec::new(),
+                    added_at_ms: 0,
                 }],
                 ..groups_part(Vec::new())
             });
@@ -162,7 +164,8 @@ impl P2PCore {
             .unwrap_or(0)
     }
 
-    /// Merges a sync payload idempotently. It NEVER overwrites the keys of a known device; it only adds missing contacts, devices and groups.
+    /// Merges a sync payload idempotently. It NEVER overwrites the keys of a known device; it only adds missing contacts, devices and groups,
+    /// and replaces a group copy older than the sibling's.
     /// Returns the newly learned contact identity ids, so the caller can introduce itself to them.
     pub(crate) fn import_sync_payload(&mut self, sync: &SyncPayload) -> Vec<String> {
         let now = current_time_ms();
@@ -171,8 +174,21 @@ impl P2PCore {
         for sc in &sync.contacts {
             if my_id.as_deref() == Some(sc.identity_id.as_str()) { continue; }
             if !is_fingerprint_hex(&sc.identity_id) { continue; }
-            // Deleted on this device: the sibling's copy must not bring it back.
-            if !self.identity_to_contact.contains_key(&sc.identity_id) && self.contact_removed_locally(&sc.identity_id) { continue; }
+            // Deleted here or on a sibling: the sibling's copy brings it back only
+            // if the user paired with it again after that removal. A stale copy
+            // (paired before the removal) does not. Clamped: a stamp in the future
+            // would beat every later removal.
+            let added_at = sc.added_at_ms.min(now);
+            if !self.identity_to_contact.contains_key(&sc.identity_id) {
+                if let Some(removed_at) = self.contact_removed_at(&sc.identity_id) {
+                    if added_at <= removed_at { continue; }
+                    if let Some(conn) = &self.db {
+                        let _ = conn.execute("DELETE FROM removed_contacts WHERE identity_id = ?1", params![sc.identity_id]);
+                    }
+                }
+            }
+            // Kept so a delete echo older than this pairing is ignored, and passed on to further siblings.
+            self.note_contact_added(&sc.identity_id, added_at);
             // Add the device public keys, without overwriting known ones.
             for sd in &sc.devices {
                 // The fingerprint is the hash of the keys. Verify it, per the trust model.
@@ -269,13 +285,25 @@ impl P2PCore {
             }
         }
         for gv in &sync.groups {
-            if let Ok(g) = serde_json::from_value::<Group>(gv.clone()) {
+            if let Ok(mut g) = serde_json::from_value::<Group>(gv.clone()) {
                 // Left or deleted on this device (`remove_group_locally`): the
                 // sibling's copy must not bring it back.
-                if !self.groups.contains_key(&g.group_id) && !self.group_removed_locally(&g.group_id) {
-                    self.persist_group(&g);
-                    self.groups.insert(g.group_id.clone(), g);
+                if self.group_removed_locally(&g.group_id) { continue; }
+                match self.groups.get(&g.group_id) {
+                    None => {}
+                    // A newer version from the sibling replaces a stale copy:
+                    // a founder that does not know this device never sends it
+                    // the GroupUpdate. An older or equal one never rolls it back.
+                    Some(local) if g.version > local.version => {
+                        // The sync carries no avatar; the founder's tie hash of
+                        // the old version no longer applies.
+                        g.avatar_jpeg = local.avatar_jpeg.clone();
+                        self.set_group_tie(&g.group_id, &[]);
+                    }
+                    Some(_) => continue,
                 }
+                self.persist_group(&g);
+                self.groups.insert(g.group_id.clone(), g);
             }
         }
         // Sibling devices: learn the other devices of our identity (3+ devices). Skip our own fingerprint and do not overwrite known ones.

@@ -403,6 +403,8 @@ impl P2PCore {
             }
         };
         migrate("ALTER TABLE removed_groups ADD COLUMN version INTEGER NOT NULL DEFAULT 0")?;
+        // When the contact was removed: a pairing after it brings it back on a sibling.
+        migrate("ALTER TABLE removed_contacts ADD COLUMN removed_at INTEGER NOT NULL DEFAULT 0")?;
         migrate("ALTER TABLE removed_groups ADD COLUMN founder TEXT NOT NULL DEFAULT ''")?;
         // Added later; fails harmlessly when the column is there.
         migrate("ALTER TABLE wb_tombstones ADD COLUMN seen INTEGER NOT NULL DEFAULT 1")?;

@@ -1927,3 +1927,119 @@ mod fable_review_tests {
         assert_eq!(me.group_call_offer(&gid), 0);
     }
 }
+
+#[cfg(test)]
+mod sibling_roster_tests {
+    use super::*;
+
+    fn on_disk(dir: &std::path::Path, name: &str) -> P2PCore {
+        let d = dir.join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        let mut c = P2PCore::new();
+        c.init_db(d.to_str().unwrap(), &[1u8; 32]).unwrap();
+        c.ratchets_loaded = true;
+        c
+    }
+
+    /// A root `r`, its linked sibling `l` (same identity), and a stranger `n`.
+    fn trio(dir: &std::path::Path) -> (P2PCore, P2PCore, P2PCore, String, String, String) {
+        let (mut r, mut l, mut n) = (on_disk(dir, "r"), on_disk(dir, "l"), on_disk(dir, "n"));
+        let root_id = r.generate_identity("r".into()).unwrap().0;
+        let l_fp = l.generate_identity("l".into()).unwrap().0;
+        let n_id = n.generate_identity("n".into()).unwrap().0;
+        l.identity.as_mut().unwrap().identity_id = root_id.clone();
+        l.own_devices.get_mut(&l_fp).unwrap().identity_id = root_id.clone();
+        l.known_remote_devices.insert(root_id.clone(), r.own_devices[&root_id].clone());
+        let mut l_rec = l.own_devices[&l_fp].clone();
+        l_rec.identity_id = root_id.clone();
+        r.known_remote_devices.insert(l_fp.clone(), l_rec);
+        (r, l, n, root_id, l_fp, n_id)
+    }
+
+    /// A contact that pairs with the root after a sibling was linked: the
+    /// root's roster goes to the sibling once the contact's keys are known
+    /// (the sync at scan time carries no keys yet), and the sibling learns
+    /// the contact from it.
+    #[test]
+    fn contact_paired_on_the_root_reaches_the_sibling() {
+        let dir = std::env::temp_dir().join(format!("typeon-sibroster-{}", std::process::id()));
+        let (mut r, mut l, mut n, root_id, l_fp, n_id) = trio(&dir);
+        // n scans r's code: its IdentityExchange carries the code's proof.
+        let nonce = r.issue_pairing_nonce().unwrap();
+        n.put_pairing_secret("pn", &root_id, &nonce);
+        let _ = n.send_identity_exchange_fresh(&root_id);
+        let ix = n.pending_envelopes.iter().find_map(|q| match &q.envelope {
+            NetworkEnvelope::IdentityExchange(ix) => Some(ix.clone()),
+            _ => None,
+        }).expect("queued IdentityExchange");
+        r.process_identity_exchange(None, &ix).unwrap();
+        assert!(r.identity_to_contact.contains_key(&n_id));
+        assert!(r.pending_envelopes.iter().any(|q| q.target == l_fp) || r.awaiting_confirmation.values().any(|p| p.peer_device_fingerprint == l_fp),
+            "the roster with the new contact's keys goes to the sibling");
+        let mut learned = Vec::new();
+        for p in r.build_sync_payloads() { learned.extend(l.import_sync_payload(&p)); }
+        assert_eq!(learned, vec![n_id.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A contact removed on the sibling and paired again on the root comes
+    /// back on the sibling with the next roster; a removal after that pairing
+    /// wins over a roster copy made before it.
+    #[test]
+    fn pairing_again_lifts_a_siblings_removed_marker_but_a_later_delete_wins() {
+        let dir = std::env::temp_dir().join(format!("typeon-sibremoved-{}", std::process::id()));
+        let (mut r, mut l, n, _root_id, _l_fp, n_id) = trio(&dir);
+        let n_rec = n.own_devices[&n_id].clone();
+        // The sibling had the contact and the user deleted it there.
+        l.known_remote_devices.insert(n_id.clone(), n_rec.clone());
+        l.register_contact_from_pairing(n_id.clone(), n_id.clone(), "n".into()).unwrap();
+        let cid = l.identity_to_contact[&n_id].clone();
+        l.delete_contact(&cid, false).unwrap();
+        assert!(l.contact_removed_locally(&n_id));
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        // The root pairs again by scanning n's code; then n's keys arrive.
+        r.pair_with_code(n_id.clone(), n_id.clone(), "n", "", &[], &[5; 16]).unwrap();
+        r.known_remote_devices.insert(n_id.clone(), n_rec);
+        let roster = r.build_sync_payloads();
+        let mut learned = Vec::new();
+        for p in &roster { learned.extend(l.import_sync_payload(p)); }
+        assert_eq!(learned, vec![n_id.clone()]);
+        assert!(!l.contact_removed_locally(&n_id));
+
+        // Deleted again on the sibling, after that pairing: the same (older)
+        // roster copy no longer brings it back.
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        let cid = l.identity_to_contact[&n_id].clone();
+        l.delete_contact(&cid, false).unwrap();
+        for p in &roster { assert!(l.import_sync_payload(p).is_empty()); }
+        assert!(!l.identity_to_contact.contains_key(&n_id));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sibling's newer copy of a group updates the stale one here; an
+    /// older copy does not roll it back.
+    #[test]
+    fn sibling_sync_updates_a_stale_group_but_never_rolls_it_back() {
+        let dir = std::env::temp_dir().join(format!("typeon-sibgroup-{}", std::process::id()));
+        let (mut r, mut l, _n, root_id, _l_fp, n_id) = trio(&dir);
+        let taba = "a".repeat(64);
+        let gid = "group-0123456789abcdef".to_string();
+        let mut g = Group::new(gid.clone(), "g".into(), n_id.clone(), 1);
+        g.sync_members(&[n_id.clone(), root_id.clone()], 1);
+        g.version = 1;
+        l.groups.insert(gid.clone(), g.clone());
+        let mut newer = g.clone();
+        newer.sync_members(&[n_id.clone(), root_id.clone(), taba.clone()], 2);
+        newer.version = 2;
+        r.groups.insert(gid.clone(), newer);
+        for p in r.build_sync_payloads() { l.import_sync_payload(&p); }
+        assert_eq!(l.groups[&gid].version, 2);
+        assert!(l.groups[&gid].is_member(&taba));
+        // r's copy is older now: l keeps its own.
+        r.groups.insert(gid.clone(), g);
+        for p in r.build_sync_payloads() { l.import_sync_payload(&p); }
+        assert_eq!(l.groups[&gid].version, 2);
+        assert!(l.groups[&gid].is_member(&taba));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

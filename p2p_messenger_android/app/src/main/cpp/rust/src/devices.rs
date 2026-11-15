@@ -18,9 +18,35 @@ impl P2PCore {
     }
 
     pub(crate) fn contact_removed_locally(&self, identity_id: &str) -> bool {
-        self.db.as_ref().map_or(false, |conn| {
-            conn.query_row("SELECT 1 FROM removed_contacts WHERE identity_id = ?1", params![identity_id], |_| Ok(())).is_ok()
-        })
+        self.contact_removed_at(identity_id).is_some()
+    }
+
+    /// When the contact was removed on this device or a sibling (ms), if it was.
+    pub(crate) fn contact_removed_at(&self, identity_id: &str) -> Option<u64> {
+        self.db.as_ref().and_then(|conn| {
+            conn.query_row("SELECT removed_at FROM removed_contacts WHERE identity_id = ?1", params![identity_id], |r| r.get::<_, i64>(0)).ok()
+        }).map(|t| t.max(0) as u64)
+    }
+
+    /// Writes the removed marker; a later removal time wins.
+    pub(crate) fn mark_contact_removed(conn: &rusqlite::Connection, identity_id: &str, removed_at: u64) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO removed_contacts (identity_id, removed_at) VALUES (?1, ?2) \
+             ON CONFLICT(identity_id) DO UPDATE SET removed_at = MAX(removed_at, excluded.removed_at)",
+            params![identity_id, removed_at as i64],
+        )
+    }
+
+    /// When the user last paired with this contact on any of my devices (ms, 0 = never).
+    pub(crate) fn contact_added_at(&self, identity_id: &str) -> u64 {
+        self.meta_u64(&format!("cadd:{}", identity_id))
+    }
+
+    /// Keeps the later of the stored pairing time and `at`.
+    pub(crate) fn note_contact_added(&self, identity_id: &str, at: u64) {
+        if at > self.contact_added_at(identity_id) {
+            self.meta_put(&format!("cadd:{}", identity_id), &at.to_string());
+        }
     }
 
     // ===============================================================

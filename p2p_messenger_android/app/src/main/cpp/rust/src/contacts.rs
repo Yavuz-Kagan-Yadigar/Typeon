@@ -214,6 +214,8 @@ impl P2PCore {
                     warn!("TOFU reddedildi: {}", e);
                     return DeviceCheckOutcome::UnverifiedNewDeviceAlert;
                 }
+                // The sender read our code: a pairing, carried to siblings (`SyncedContact.added_at_ms`).
+                self.note_contact_added(identity_id, now);
             }
             DeviceCheckOutcome::NewDeviceViaSignedAdd => {
                 if let Some(cid) = &contact_id {
@@ -849,14 +851,16 @@ impl P2PCore {
     /// `sync`: also delete it on my other devices (`SiblingEchoBody::ContactRemoved`).
     pub(crate) fn delete_contact(&mut self, contact_id: &str, sync: bool) -> Result<(), String> {
         let identity_id = self.contacts.get(contact_id).ok_or("Contact not found")?.trusted_identity_id.clone();
-        self.delete_contact_local(contact_id)?;
+        let removed_at_ms = current_time_ms();
+        self.delete_contact_local(contact_id, removed_at_ms)?;
         if sync {
-            self.send_to_siblings(SiblingEchoBody::ContactRemoved { identity_id });
+            self.send_to_siblings(SiblingEchoBody::ContactRemoved { identity_id, removed_at_ms });
         }
         Ok(())
     }
 
-    fn delete_contact_local(&mut self, contact_id: &str) -> Result<(), String> {
+    /// `removed_at`: when the user deleted it (here, or on the sibling that sent the delete).
+    pub(crate) fn delete_contact_local(&mut self, contact_id: &str, removed_at: u64) -> Result<(), String> {
         let contact = self.contacts.get(contact_id).ok_or("Contact not found")?.clone();
         // see the `hfloor:` filter in the HistorySyncResponse arm.
         self.raise_history_floor(&contact.trusted_identity_id, current_time_ms());
@@ -887,8 +891,7 @@ impl P2PCore {
         if let Some(conn) = &self.db {
             let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
             // see `contact_removed_locally`.
-            tx.execute("INSERT OR REPLACE INTO removed_contacts (identity_id) VALUES (?1)", params![contact.trusted_identity_id])
-                .map_err(|e| e.to_string())?;
+            Self::mark_contact_removed(&tx, &contact.trusted_identity_id, removed_at).map_err(|e| e.to_string())?;
             for fp in &fingerprints {
                 for sql in [
                     "DELETE FROM message_reactions WHERE message_id IN (SELECT message_id FROM messages WHERE peer_device_fingerprint = ?1)",

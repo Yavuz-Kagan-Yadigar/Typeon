@@ -477,6 +477,11 @@ pub struct SyncedContact {
     /// device.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub device_proofs: Vec<DeviceAddProof>,
+    /// When the user last paired with this contact (ms; 0 = never, e.g. added
+    /// through a group). A sibling that removed the contact before this time
+    /// drops its removed marker and takes the contact again.
+    #[serde(default)]
+    pub added_at_ms: u64,
 }
 
 /// Sync payload. The first connection carries a full copy. It goes to the new
@@ -1560,8 +1565,9 @@ pub enum SiblingEchoBody {
     },
     /// A sticker removed from my sticker store.
     StickerRemoved { id: String },
-    /// The user deleted this contact (by identity) on one of my devices.
-    ContactRemoved { identity_id: String },
+    /// The user deleted this contact (by identity) on one of my devices, at
+    /// `removed_at_ms`. A sibling that paired with it again later keeps it.
+    ContactRemoved { identity_id: String, removed_at_ms: u64 },
     /// "Send me your whole sticker store". A linked desktop asks. Only the root device answers, with one
     /// `Sticker` per id that is not in `have`.
     StickersRequest { #[serde(default)] have: Vec<String> },
@@ -1771,6 +1777,7 @@ mod parse_limit_tests {
                     identity_id: "c".into(), display_name: "n".into(), added_via_group: false, avatar_jpeg: None,
                     devices: vec![device.clone()],
                     device_proofs: vec![DeviceAddProof { device_add: add, signer: device.clone() }],
+                    added_at_ms: 0,
                 }],
                 groups: vec![serde_json::json!({"founder_chain": [{"signature": [1, 2], "x": {"y": {"z": [[1]]}}}]})],
                 siblings: vec![device],

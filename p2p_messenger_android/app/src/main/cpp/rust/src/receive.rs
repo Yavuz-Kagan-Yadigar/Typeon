@@ -1436,17 +1436,29 @@ impl P2PCore {
                                 serde_json::json!({"type": "noop"})
                             }
                         },
-                        SiblingEchoBody::ContactRemoved { identity_id } => {
-                            match self.identity_to_contact.get(&identity_id).cloned() {
-                                Some(cid) => match self.delete_contact(&cid, false) {
-                                    Ok(()) => serde_json::json!({"type": "device_change", "identity_id": identity_id}),
-                                    Err(e) => {
-                                        warn!("Could not delete sibling contact: {}", e);
-                                        ack = false; // DB error: the sibling sends again.
+                        SiblingEchoBody::ContactRemoved { identity_id, removed_at_ms } => {
+                            let removed_at = removed_at_ms.min(current_time_ms());
+                            if self.contact_added_at(&identity_id) > removed_at {
+                                // Paired again after that delete (here or on a sibling): the pairing wins.
+                                serde_json::json!({"type": "noop"})
+                            } else {
+                                match self.identity_to_contact.get(&identity_id).cloned() {
+                                    Some(cid) => match self.delete_contact_local(&cid, removed_at) {
+                                        Ok(()) => serde_json::json!({"type": "device_change", "identity_id": identity_id}),
+                                        Err(e) => {
+                                            warn!("Could not delete sibling contact: {}", e);
+                                            ack = false; // DB error: the sibling sends again.
+                                            serde_json::json!({"type": "noop"})
+                                        }
+                                    },
+                                    // Not held here: the marker still stops an older roster copy from creating it.
+                                    None => {
+                                        if let Some(conn) = &self.db {
+                                            let _ = Self::mark_contact_removed(conn, &identity_id, removed_at);
+                                        }
                                         serde_json::json!({"type": "noop"})
                                     }
-                                },
-                                None => serde_json::json!({"type": "noop"}),
+                                }
                             }
                         }
                         SiblingEchoBody::GroupLeft => match &group_id {
