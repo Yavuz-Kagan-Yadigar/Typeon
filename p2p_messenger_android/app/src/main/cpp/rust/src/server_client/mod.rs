@@ -43,7 +43,6 @@ mod archive;
 mod blobs;
 pub(crate) use mailbox::*;
 use archive::*;
-use blobs::*;
 
 /// Full scan interval, a safety net for when the server pushes nothing.
 ///

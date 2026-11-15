@@ -224,7 +224,7 @@ internal fun ChatActivity.toggleMessageSearch() {
         searchMessagesView.isIconified = false
         searchMessagesView.requestFocus()
         searchMessagesView.post {
-            val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+            val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as InputMethodManager
             imm.showSoftInput(searchMessagesView.findFocus(), InputMethodManager.SHOW_IMPLICIT)
         }
     }

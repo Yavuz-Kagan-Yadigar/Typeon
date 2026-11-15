@@ -36,7 +36,6 @@ mod reactions;
 mod events;
 mod group;
 use header::*;
-use history::*;
 use message_list::*;
 use attachments::*;
 use composer::*;

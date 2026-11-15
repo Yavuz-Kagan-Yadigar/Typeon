@@ -68,7 +68,6 @@ pub use config::advertised_addrs;
 pub use config::create_invite;
 pub use config::join_code;
 pub use config::public_join_token;
-use blobs::*;
 use relay_streams::*;
 use limits::*;
 

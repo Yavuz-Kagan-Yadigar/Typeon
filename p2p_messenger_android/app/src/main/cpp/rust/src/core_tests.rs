@@ -200,7 +200,7 @@ mod review_oct2026_tests {
             ciphertext: Vec::new(), nonce: Vec::new(), salt: vec![1, 2, 3, 4, 5, 6, 7, 8],
         }).unwrap();
         let err = P2PCore::new().import_recovery(&file, "x", "n".to_string()).unwrap_err();
-        assert!(err.contains("Argon2 parametreleri"), "{err}");
+        assert!(err.contains("Argon2 parameters"), "{err}");
     }
 
     #[test]
