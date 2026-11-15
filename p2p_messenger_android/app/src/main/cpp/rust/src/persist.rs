@@ -165,7 +165,10 @@ impl P2PCore {
                 };
                 let skipped_keys = self.load_skipped_keys_from_db(&peer_fp);
                 match DeviceRatchetState::from_persistable(persistable, skipped_keys) {
-                    Ok(state) => loaded.push((peer_fp, state)),
+                    Ok(mut state) => {
+                        state.expire_old_recv(current_time_ms());
+                        loaded.push((peer_fp, state))
+                    }
                     Err(e) => error!("Ratchet state could not be rebuilt ({}): {}", crate::log_id(&peer_fp), e),
                 }
             }

@@ -247,6 +247,8 @@
          messages. -->
     <string name="action_resume_download">Resume</string>
     <string name="action_retry_message">Retry</string>
+    <string name="action_resend_message">Resend</string>
+    <string name="msg_resend_nothing">Already delivered, nothing to resend</string>
     <string name="msg_retrying_message">Retrying…</string>
     <string name="confirm_delete_message">Are you sure you want to delete this message?</string>
     <string name="lbl_edit_message_hint">Edit message</string>

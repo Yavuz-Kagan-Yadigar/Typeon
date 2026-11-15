@@ -422,7 +422,11 @@ async fn check_inner(tor: &Tor, dir: &Path, current: &str, asset: &str, force: b
             Err(e) => return Err(e),
         };
         let msg = signed_message(&tag, &sums);
-        verify_release(&msg, &sig).map_err(|e| format!("{tag}: {e}"))?;
+        if let Err(e) = verify_release(&msg, &sig) {
+            // A bad signature does not fix itself on a retry: wait the normal interval, not the caller's backoff.
+            let _ = std::fs::write(&stamp, b"");
+            return Err(format!("{tag}: {e}"));
+        }
         found = Some((tag, version, name, base, want, msg, sig));
         break;
     }

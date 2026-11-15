@@ -660,7 +660,7 @@ Source: `git log e916a13..HEAD`. Facts below were read from the code on 2026-11-
 - Source split (c7af0f6; compile fixes in b10034e): `Linux/src/ui/chat.rs` → `ui/chat/`; core `attachments.rs`, `call.rs`, `network.rs`, `server_client.rs`, `jni_exports.rs` → directories (§1.1); Android `SettingsFragment.kt`, `ChatActivity.kt`, `GroupChatActivity.kt` → `Settings*.kt`, `ChatActivity*.kt`, `GroupChatActivity*.kt`; server `store.rs`/`lib.rs` split as above.
 - Comments and log/error strings: Turkish → English (d752646, the many `docs:` commits). Protocol spec (`Description.md`) and this document are in English.
 - Review files moved to `reviews/archive/root` (47bb856). Personal config and screenshot untracked (`.gitignore`).
-- Release CI (50bb608): pre-release tags (`-`) build debug artifacts; plain tags build release. Release APKs are still unsigned by Gradle; `sign-release.sh` signs them.
+- Release CI: every tag, pre-release (`-`) included, builds release artifacts (pre-releases built debug from 50bb608 until 2026-11-15; dropped because a debug APK is debuggable and carries `DebugDbKeyReceiver`). Release APKs are still unsigned by Gradle; `sign-release.sh` signs them.
 - Version bump touches: `p2p_messenger_android/app/build.gradle` (versionCode + versionName), `p2p_messenger_android_server/app/build.gradle`, `Linux/Cargo.toml`, `Linux/data/com.p2p.messenger.Typeon.metainfo.xml`, `p2p_messenger_android/app/src/main/cpp/rust/Cargo.toml`, `typeon-server/Cargo.toml`, plus the lock files. `tools/bump-version.sh` does this.
 
 **NOT VERIFIED in this pass:** the desktop `bye` behaviour, the Windows client status after the split, and every server `SCHEMA_VERSION` 5 migration step (read `store/mod.rs` before touching it).

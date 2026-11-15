@@ -77,6 +77,8 @@ impl ServerConfig {
     }
 }
 
+/// The libp2p identity is persistent: the `PeerId` must NOT change across restarts, or every distributed invite
+/// code would become invalid.
 pub(super) fn load_or_generate_keypair(store: &Store) -> Result<libp2p::identity::Keypair, String> {
     if let Some(bytes) = store.meta_get("libp2p_key") {
         if let Ok(kp) = libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {

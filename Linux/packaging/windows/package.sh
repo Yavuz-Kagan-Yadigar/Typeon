@@ -18,7 +18,7 @@ mkdir -p "$OUT/bin" "$OUT/lib/gstreamer-1.0" "$OUT/share/glib-2.0/schemas" "$OUT
 cp "$ROOT/target/x86_64-pc-windows-gnullvm/debug/typeon.exe" "$OUT/bin/typeon-debug.exe"
 # Debug assertions + console stay; the 700 MB of DWARF does not.
 "$LLVM/bin/llvm-strip" --strip-debug "$OUT/bin/typeon-debug.exe"
-# TYPEON_WIN_DEBUG=1 (pre-releases): typeon.exe is that debug build too.
+# TYPEON_WIN_DEBUG=1 (local test builds only, CI never sets it): typeon.exe is that debug build too.
 if [ "${TYPEON_WIN_DEBUG:-}" = 1 ]; then
     cp "$OUT/bin/typeon-debug.exe" "$OUT/bin/typeon.exe"
 else

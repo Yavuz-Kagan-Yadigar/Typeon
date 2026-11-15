@@ -354,8 +354,8 @@ pub(crate) enum PublishFailure {
 pub(crate) enum MessageSendStatus {
     /// `publish_envelope` has not succeeded yet. It is waiting in `pending_envelopes`, and `poll_events` keeps retrying.
     Pending,
-    /// gossipsub publish() completed. This is NOT a guarantee that the other side actually received it. It only guarantees that the local node published the
-    /// message to the network. The protocol defines no delivery receipt here (Ack is separate).
+    /// `try_publish_raw` handed the envelope to the network (a direct peer stream or a server deposit). This is NOT a guarantee that the other
+    /// side received it. Delivery is the end-to-end Ack (`Delivered`).
     Sent,
     /// Could not be sent within `PENDING_ENVELOPE_TIMEOUT_MS`, and was given up.
     Failed,

@@ -451,7 +451,7 @@ pub(crate) const RECENTLY_ACKED_MAX_ENTRIES: usize = 8192;
 /// Critical: a packet is encrypted against one specific ratchet chain step (see `PendingConfirmation.envelope`, resent AS-IS without re-encryption).
 /// If the peer has ALREADY consumed that step (the normal flow), and the session has since gone through a 30-minute DH/KEM rotation
 /// (see `ratchet::RATCHET_ROTATION_MS`), the recipient's skipped-key cache for the old chain is cleared entirely (`perform_dh_ratchet` and
-/// `respond_to_rotation`, which is the intended forward-secrecy result). From that point the packet can NEVER be decrypted. "Keep retrying until
+/// `apply_rotation`, which is the intended forward-secrecy result). From that point the packet can NEVER be decrypted. "Keep retrying until
 /// acknowledged" then means trying something cryptographically impossible, and only makes the recipient log "Decryption failed" forever. This pattern
 /// was observed in a long test session, where several messages fell into this state at once. So `awaiting_confirmation` is NOT unbounded. It has an
 /// age limit a little below the rotation window (with a safety margin). Past it, the packet is marked "Failed", and the user can resend it manually as a new message.

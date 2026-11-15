@@ -7,24 +7,43 @@ on:
 permissions:
   contents: write
 
-# A "-" tag (v7.4.6-beta.2) is a pre-release and ships DEBUG builds; any other tag ships release builds.
-env:
-  DEBUG_BUILD: ${{ contains(github.ref_name, '-') && '1' || '' }}
-  CARGO_PROFILE: ${{ contains(github.ref_name, '-') && 'dev' || 'release' }}
-  PROFILE_DIR: ${{ contains(github.ref_name, '-') && 'debug' || 'release' }}
-  GRADLE_ASSEMBLE: ${{ contains(github.ref_name, '-') && 'assembleDebug' || 'assembleRelease' }}
-
+# Every tag, pre-release ("-" tag) or not, ships release builds: a debug APK is debuggable (`run-as` reads
+# the app data) and carries DebugDbKeyReceiver, so it must never reach a user's phone.
 jobs:
+  # The unit suites gate the release: a red test stops the `release` job.
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: |
+            typeon-crypto
+            typeon-server
+            p2p_messenger_android/app/src/main/cpp/rust
+      - run: cargo test --locked --manifest-path typeon-crypto/Cargo.toml
+      - run: cargo test --locked --manifest-path typeon-server/Cargo.toml --lib
+      - run: cargo test --locked --manifest-path p2p_messenger_android/app/src/main/cpp/rust/Cargo.toml --lib
+      # Advisories are reported, not gating: an advisory with no fixed version would block every release.
+      - name: cargo audit
+        continue-on-error: true
+        run: |
+          cargo install cargo-audit --locked --version 0.21.2
+          for d in typeon-crypto typeon-server p2p_messenger_android/app/src/main/cpp/rust Linux; do
+            echo "== $d"; (cd $d && cargo audit) || status=1
+          done
+          exit ${status:-0}
+
   server:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with: { workspaces: typeon-server }
-      - run: cargo build --profile $CARGO_PROFILE --manifest-path typeon-server/Cargo.toml --bin typeon-server
+      - run: cargo build --release --manifest-path typeon-server/Cargo.toml --bin typeon-server
       - run: |
           mkdir out
-          cp typeon-server/target/$PROFILE_DIR/typeon-server out/typeon-server-linux
+          cp typeon-server/target/release/typeon-server out/typeon-server-linux
           cp typeon-server/data/typeon-server.service out/
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: server, path: out/* }
@@ -34,7 +53,7 @@ jobs:
     env:
       LLVM_MINGW: '20261104'
       LLVM_MINGW_SHA256: '919380403de87dca3c581c2053230cd298af5e891286628ba0613b7fed370926'
-      CARGO_PROFILE_DEV_DEBUG: '0'   # debug exe is stripped anyway; DWARF filled the disk
+      CARGO_PROFILE_DEV_DEBUG: '0'   # typeon-debug.exe is stripped anyway; DWARF filled the disk
     steps:
       - name: free disk
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
@@ -50,7 +69,7 @@ jobs:
           echo "$LLVM_MINGW_SHA256  $RUNNER_TEMP/llvm-mingw.tar.xz" | sha256sum -c -
           tar -xJf "$RUNNER_TEMP/llvm-mingw.tar.xz" -C ~/tools
       - run: python3 -I Linux/packaging/windows/fetch-sysroot.py
-      - run: TYPEON_WIN_DEBUG=$DEBUG_BUILD Linux/packaging/windows/package.sh
+      - run: Linux/packaging/windows/package.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: windows, path: Linux/target/typeon-windows-*.zip }
 
@@ -67,10 +86,6 @@ jobs:
           flatpak install --user -y flathub org.gnome.Platform//49 org.gnome.Sdk//49 org.freedesktop.Sdk.Extension.rust-stable//25.08
       - run: |
           cd Linux/packaging
-          if [ -n "$DEBUG_BUILD" ]; then
-            sed -i 's|cargo build --release --manifest-path Linux/Cargo.toml|cargo build --manifest-path Linux/Cargo.toml|; s|Linux/target/release/typeon |Linux/target/debug/typeon |' com.p2p.messenger.Typeon.yml
-            grep -q 'target/debug/typeon ' com.p2p.messenger.Typeon.yml
-          fi
           flatpak-builder --user --force-clean --disable-rofiles-fuse --repo=repo build-dir com.p2p.messenger.Typeon.yml
           flatpak build-bundle repo ../../typeon-linux.flatpak com.p2p.messenger.Typeon
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -90,14 +105,14 @@ jobs:
       - name: build client + server apps
         run: |
           for d in p2p_messenger_android p2p_messenger_android_server; do
-            (cd $d && ./gradlew --no-daemon $GRADLE_ASSEMBLE)
+            (cd $d && ./gradlew --no-daemon assembleRelease)
           done
       - name: collect unsigned
         run: |
           mkdir out
           VER=$(sed -n 's/.*versionName "\(.*\)"/\1/p' p2p_messenger_android/app/build.gradle | head -1)
-          cp p2p_messenger_android/app/build/outputs/apk/$PROFILE_DIR/*.apk "out/typeon-client-$VER.apk"
-          cp p2p_messenger_android_server/app/build/outputs/apk/$PROFILE_DIR/*.apk "out/typeon-server-$VER.apk"
+          cp p2p_messenger_android/app/build/outputs/apk/release/*.apk "out/typeon-client-$VER.apk"
+          cp p2p_messenger_android_server/app/build/outputs/apk/release/*.apk "out/typeon-server-$VER.apk"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: android-unsigned, path: out/*.apk }
 
@@ -129,7 +144,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [server, windows, flatpak, sign]
+    needs: [test, server, windows, flatpak, sign]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

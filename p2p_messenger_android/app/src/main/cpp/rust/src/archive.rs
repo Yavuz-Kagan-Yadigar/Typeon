@@ -1488,7 +1488,7 @@ impl P2PCore {
         results
     }
 
-    /// Deletes ALL skipped keys stored on disk for a device pair. When a rotation happens (`perform_dh_ratchet`/`respond_to_rotation`, see ratchet.rs), the skipped keys of the
+    /// Deletes ALL skipped keys stored on disk for a device pair. When a rotation happens (`perform_dh_ratchet`/`apply_rotation`, see ratchet.rs), the skipped keys of the
     /// old chain are meaningless, so they must be cleared from disk too, together with the in-memory `skipped_keys.clear()`.
     pub(crate) fn clear_persisted_skipped_keys(&self, peer_device_fingerprint: &str) {
         if let Some(conn) = &self.db {

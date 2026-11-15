@@ -145,7 +145,7 @@ impl RatchetPublicKeys {
 #[derive(Clone)]
 pub struct DeviceRatchetState {
     pub root_key: Vec<u8>,
-    /// The `root_key` as it was before `perform_dh_ratchet` overwrote it. Set by `respond_to_rotation`
+    /// The `root_key` as it was before `perform_dh_ratchet` overwrote it. Set by `apply_rotation`
     /// too. Both sides keep it for one generation so that they can keep listening on the previous topic.
     /// The sending side uses it in `perform_dh_ratchet`: the message that announces a rotation
     /// (`rotation_kyber_ciphertext` set) must go out on the OLD shared topic. The peer does not know the
@@ -179,7 +179,7 @@ pub struct DeviceRatchetState {
     /// - `true`: this side already generated a new key pair against the peer's current key
     ///   (`perform_dh_ratchet` ran, or the session was just created). This side does NOT trigger a
     ///   rotation. The next rotation right belongs to the peer, which must answer this side's new key.
-    /// - `false`: the peer rotated after this side (`respond_to_rotation` ran) and this side has not yet
+    /// - `false`: the peer rotated after this side (`apply_rotation` ran) and this side has not yet
     ///   answered its new key. When 30 minutes pass, this side triggers (`perform_dh_ratchet`).
     pub has_responded_to_peer_key: bool,
     /// Ciphertext of the last rotation announcement (Kyber ciphertext from `perform_dh_ratchet`). It is
@@ -188,7 +188,7 @@ pub struct DeviceRatchetState {
     /// that triggered the rotation. If that packet was not reliably delivered (TypingIndicator, Ack) and
     /// it was lost, the peer never learned the new root key and the session broke for good. Cleared when
     /// a packet on the new chain decrypts (proof the peer applied it). Repeated announcements are
-    /// idempotent on the receiving side (see the double-application guard in `respond_to_rotation`).
+    /// idempotent on the receiving side (see the double-application guard in `derive_rotation`).
     pub pending_rotation_ct: Option<Vec<u8>>,
     /// Cache of skipped message keys, for out-of-order and late packets. This is the standard Signal
     /// Double Ratchet mechanism. If a packet arrives with a `message_number` higher than expected, the
@@ -341,6 +341,22 @@ impl Drop for SkippedKeyChanges {
     }
 }
 
+/// A rotation computed by `derive_rotation` but not yet applied: (root, send chain, receive chain) and the peer's
+/// new public keys. The chain keys are wiped on drop.
+struct RotationKeys {
+    keys: (Vec<u8>, Vec<u8>, Vec<u8>),
+    peer_x25519: X25519PublicKey,
+    peer_kyber: MlKem1024EncapsulationKey,
+}
+
+impl Drop for RotationKeys {
+    fn drop(&mut self) {
+        self.keys.0.zeroize();
+        self.keys.1.zeroize();
+        self.keys.2.zeroize();
+    }
+}
+
 fn set_secret(slot: &mut Vec<u8>, new: Vec<u8>) {
     slot.zeroize();
     *slot = new;
@@ -476,6 +492,15 @@ fn kem_key(mut ikm: Vec<u8>, transcript: &[u8; 32]) -> Result<[u8; 32], RatchetE
     let mut key = [0u8; 32];
     hk.expand_multi_info(&[b"p2pmsg-v0.5-kem-seal", transcript], &mut key).map_err(|_| "HKDF expand failed")?;
     Ok(key)
+}
+
+/// The next chain key only, same value as `chain_step(..).1`.
+fn chain_key_step(chain_key: &[u8]) -> Result<[u8; 32], RatchetError> {
+    let mut next_chain_key = [0u8; 32];
+    Hkdf::<Sha256>::new(None, chain_key)
+        .expand(b"p2pmsg-v0.1-chainkey", &mut next_chain_key)
+        .map_err(|_| "HKDF expand failed")?;
+    Ok(next_chain_key)
 }
 
 /// One symmetric ratchet step: the key of this message and the chain key of the next. Send
@@ -626,7 +651,7 @@ impl DeviceRatchetState {
         ///
         /// The returned ML-KEM ciphertext must be sent to the peer with the next `MessagePacket`, in its
         /// header `ratchet_pubkey` field (`RatchetPublicKeys` plus this ciphertext). The peer synchronizes
-        /// with `respond_to_rotation` when it receives it.
+        /// with `derive_rotation` + `apply_rotation` when it receives it.
     pub fn perform_dh_ratchet(&mut self, now_ms: u64) -> Result<Vec<u8>, RatchetError> {
         let mut csprng = OsRng;
         let new_x25519_secret = StaticSecret::random_from_rng(&mut csprng);
@@ -694,8 +719,8 @@ impl DeviceRatchetState {
         /// updated here: the X25519 part is used in this decapsulation, and the Kyber part is used by our
         /// future rotations (`perform_dh_ratchet` encapsulates against `self.peer_kyber_pubkey`).
         ///
-        /// Returns: `Ok(true)` = rotation APPLIED. `Ok(false)` = this announcement was ALREADY applied, and no
-        /// state changed (guard below).
+        /// Returns: `Ok(Some(keys))` = a new rotation, not yet applied. `Ok(None)` = this announcement was ALREADY
+        /// applied (guard below).
         ///
         /// Double-application guard: this function mixes the current `root_key` into the KDF. Applying the same
         /// announcement twice would derive a root key the sender never saw, and would break the session for
@@ -708,11 +733,12 @@ impl DeviceRatchetState {
         /// Nothing here is authenticated by itself. ML-KEM decapsulation never fails (a ciphertext made for
         /// another key gives pseudo-random bytes). The guard above knows only the current peer key. So a
         /// delayed announcement of an older rotation would overwrite the root and chains with garbage. `decrypt`
-        /// runs this on a copy and keeps the result only if the packet then decrypts on the new chain.
-    fn respond_to_rotation(&mut self, new_peer_keys: &RatchetPublicKeys, rotation_kyber_ciphertext: &[u8], now_ms: u64) -> Result<bool, RatchetError> {
+        /// therefore derives the keys read-only here, tries the packet on the new receive chain, and calls
+        /// `apply_rotation` only if it opens. No copy of the whole state is made per announcement.
+    fn derive_rotation(&self, new_peer_keys: &RatchetPublicKeys, rotation_kyber_ciphertext: &[u8]) -> Result<Option<RotationKeys>, RatchetError> {
         let x25519_bytes: [u8; 32] = new_peer_keys.x25519_pubkey.as_slice().try_into().map_err(|_| "Bad peer X25519 key length")?;
         if x25519_bytes == *self.peer_x25519_pubkey.as_bytes() {
-            return Ok(false);
+            return Ok(None);
         }
         let new_peer_x25519_pk = X25519PublicKey::from(x25519_bytes);
         let new_peer_kyber_pk = kyber_pubkey_from_bytes(&new_peer_keys.kyber_pubkey)?;
@@ -734,7 +760,17 @@ impl DeviceRatchetState {
         );
         // We did not start this rotation, the peer did: we_initiated = false.
         let keys = derive_keys(ikm, &bound_to, false)?;
+        Ok(Some(RotationKeys { keys, peer_x25519: new_peer_x25519_pk, peer_kyber: new_peer_kyber_pk }))
+    }
 
+    fn apply_rotation(&mut self, mut rotation: RotationKeys, now_ms: u64) {
+        let keys = (
+            std::mem::take(&mut rotation.keys.0),
+            std::mem::take(&mut rotation.keys.1),
+            std::mem::take(&mut rotation.keys.2),
+        );
+        let new_peer_x25519_pk = rotation.peer_x25519;
+        let new_peer_kyber_pk = rotation.peer_kyber.clone();
         // `prev_chain_length` is MY previous send-chain length, as in `perform_dh_ratchet`.
         self.rotate_chains(keys, now_ms);
         // If the peer rotated, it already knows our CURRENT public key. A lingering repeated announcement from
@@ -749,7 +785,6 @@ impl DeviceRatchetState {
         // The peer generated a new public key, and this side has not yet done a DH/KEM step against it. The
         // next rotation right is ours: we call `perform_dh_ratchet` when 30 minutes have passed.
         self.has_responded_to_peer_key = false;
-        Ok(true)
     }
 
         /// The 30-minute rule, following Signal's model. ONLY a side that has not yet answered the peer's
@@ -814,6 +849,14 @@ impl DeviceRatchetState {
         Ok((ciphertext, message_number, self.prev_chain_length))
     }
 
+    /// Drops the chain the last rotation replaced once it is `OLD_RECV_MAX_AGE_MS` old. Called on receive, on send
+    /// and on load, so a session that stops receiving does not keep the old keys forever.
+    pub fn expire_old_recv(&mut self, now_ms: u64) {
+        if self.old_recv.is_some() && now_ms.abs_diff(self.last_rotation) > OLD_RECV_MAX_AGE_MS {
+            self.old_recv = None;
+        }
+    }
+
     /// `(message_number, prev_chain_length)` that the next `encrypt_next` uses.
     pub fn next_send_numbers(&self) -> (u32, u32) {
         (self.send_message_number, self.prev_chain_length)
@@ -838,22 +881,29 @@ impl DeviceRatchetState {
         now_ms: u64,
         aad: &[u8],
     ) -> Result<(Vec<u8>, SkippedKeyChanges), RatchetError> {
-        if self.old_recv.is_some() && now_ms.abs_diff(self.last_rotation) > OLD_RECV_MAX_AGE_MS {
-            self.old_recv = None;
-        }
+        self.expire_old_recv(now_ms);
         if let Some((new_peer_keys, kyber_ct)) = rotation {
             // Checked before the copy: the announcement is repeated on every packet until we answer on the new chain.
             if new_peer_keys.x25519_pubkey != self.peer_x25519_pubkey.as_bytes() {
-                let mut candidate = self.clone();
-                if let Ok(true) = candidate.respond_to_rotation(new_peer_keys, kyber_ct, now_ms) {
-                    let opened = chain_decrypt(
-                        &mut candidate.ck_recv, &mut candidate.recv_message_number, &mut candidate.skipped_keys,
-                        ciphertext, message_number, aad,
-                    );
-                    if let Ok((plaintext, mut changes)) = opened {
-                        changes.rotated = true;
-                        *self = candidate;
-                        return Ok((plaintext, changes));
+                // Only the new receive chain is tried; the state is touched only if the packet opens on it.
+                if let Ok(Some(rotation)) = self.derive_rotation(new_peer_keys, kyber_ct) {
+                    let mut ck_recv = rotation.keys.2.clone();
+                    let mut next = 0u32;
+                    let mut skipped = HashMap::new();
+                    let opened = chain_decrypt(&mut ck_recv, &mut next, &mut skipped, ciphertext, message_number, aad);
+                    match opened {
+                        Ok((plaintext, mut changes)) => {
+                            changes.rotated = true;
+                            self.apply_rotation(rotation, now_ms);
+                            set_secret(&mut self.ck_recv, ck_recv);
+                            self.recv_message_number = next;
+                            self.skipped_keys = skipped;
+                            return Ok((plaintext, changes));
+                        }
+                        Err(_) => {
+                            ck_recv.zeroize();
+                            skipped.values_mut().for_each(|key| key.zeroize());
+                        }
                     }
                 }
             }
@@ -912,10 +962,16 @@ fn chain_decrypt(
         }
         let mut cursor = chain_key.clone();
         for number in *next..message_number {
-            let (mut skipped_key, mut next_chain_key) = chain_step(&cursor)?;
-            if message_number - number <= MAX_SKIPPED_KEYS as u32 {
-                changes.added.push((number, skipped_key));
+            if message_number - number > MAX_SKIPPED_KEYS as u32 {
+                // This key would be evicted at once: advance the chain without deriving it (one HMAC less
+                // per step of unauthenticated work).
+                let mut next_chain_key = chain_key_step(&cursor)?;
+                set_secret(&mut cursor, next_chain_key.to_vec());
+                next_chain_key.zeroize();
+                continue;
             }
+            let (mut skipped_key, mut next_chain_key) = chain_step(&cursor)?;
+            changes.added.push((number, skipped_key));
             skipped_key.zeroize();
             set_secret(&mut cursor, next_chain_key.to_vec());
             next_chain_key.zeroize();
@@ -1001,13 +1057,13 @@ fn kyber_ciphertext_from_bytes(bytes: &[u8]) -> Result<MlKemCiphertext, RatchetE
 // is written to disk as `SerializableRatchetState`. Both are encrypted in archive.rs and persist.rs
 // (`persist_skipped_key`, `persist_ratchet_state`).
 //
-// NOTE [SIGNAL MODEL]: the `perform_dh_ratchet` / `respond_to_rotation` pair implements Signal's real asymmetric
+// NOTE [SIGNAL MODEL]: the `perform_dh_ratchet` / `apply_rotation` pair implements Signal's real asymmetric
 // model. There is no deterministic "the smaller fingerprint triggers" rule. Instead each `DeviceRatchetState`
 // carries `has_responded_to_peer_key` to record who holds the right to trigger the next rotation:
 // - In the first handshake, initiator = true (it already answered the responder), responder = false (it has not
 //   yet answered the initiator).
 // - The side that calls `perform_dh_ratchet` sets it to true (it answered the peer's key, and the turn is now the peer's).
-// - The side that calls `respond_to_rotation` sets it to false (the peer generated a new key, this side has not
+// - The side that calls `apply_rotation` sets it to false (the peer generated a new key, this side has not
 //   answered it yet, and the turn is ours).
 // `should_rotate()` = `!has_responded_to_peer_key && 30 minutes have passed`. This is the direct counterpart of
 // Signal's "whoever's turn it is triggers" model. Both sides cannot trigger at once, because at any moment only one
@@ -1027,6 +1083,12 @@ mod tests {
     use super::*;
 
     const T0: u64 = 1_000_000;
+
+    #[test]
+    fn chain_key_step_matches_chain_step() {
+        let ck = [7u8; 32];
+        assert_eq!(chain_key_step(&ck).unwrap(), chain_step(&ck).unwrap().1);
+    }
 
     /// A handshake as the core performs it: the responder's long-term KEM keys, and the initiator's fresh ones
     /// (`state.own_x25519_secret`, not its identity key; mixing these up once made every message fail to decrypt).

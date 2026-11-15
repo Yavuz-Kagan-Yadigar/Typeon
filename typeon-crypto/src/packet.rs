@@ -556,6 +556,11 @@ pub struct MessagePacketHeader {
     pub sent_at_ms: u64,
 }
 
+/// Upper bound on the id strings of a header (identity id, device fingerprint, message id). Real ones are a 64-char
+/// hex fingerprint, a UUID or a conversation id; the cap stops a signed header from carrying megabyte keys into
+/// the dedup maps and the DB.
+pub const MAX_HEADER_ID_LEN: usize = 256;
+
 /// A `MessagePacketHeader` together with the exact CBOR bytes it travels as. The
 /// packet signature and the ratchet AEAD (associated data) cover these bytes and
 /// never a re-encoding. A receiver therefore checks what the sender actually made,
@@ -597,6 +602,13 @@ impl<'de> Deserialize<'de> for SignedHeader {
             .map_err(|e| serde::de::Error::custom(e.to_string()))?;
         if !rest.is_empty() {
             return Err(serde::de::Error::custom("header: trailing bytes"));
+        }
+        let header: &MessagePacketHeader = &parsed;
+        if [&header.sender_identity_id, &header.sender_device_fingerprint, &header.message_id]
+            .iter()
+            .any(|field| field.len() > MAX_HEADER_ID_LEN)
+        {
+            return Err(serde::de::Error::custom("header: id field too long"));
         }
         Ok(Self { raw, parsed })
     }
@@ -1659,6 +1671,27 @@ mod wire_size_tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn header_with_oversized_id_is_refused() {
+        let header = |message_id: String| MessagePacketHeader {
+            sender_identity_id: String::new(),
+            sender_device_fingerprint: String::new(),
+            message_id,
+            ratchet_pubkey: Vec::new(),
+            message_number: 0,
+            prev_chain_length: 0,
+            rotation_kyber_ciphertext: None,
+            sent_at_ms: 0,
+        };
+        let roundtrip = |id: String| {
+            let mut buf = Vec::new();
+            ciborium::into_writer(&SignedHeader::new(header(id)).unwrap(), &mut buf).unwrap();
+            ciborium::from_reader::<SignedHeader, _>(buf.as_slice())
+        };
+        assert!(roundtrip("m".repeat(MAX_HEADER_ID_LEN)).is_ok());
+        assert!(roundtrip("m".repeat(MAX_HEADER_ID_LEN + 1)).is_err());
     }
 }
 

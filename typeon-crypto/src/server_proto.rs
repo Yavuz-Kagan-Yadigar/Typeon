@@ -416,15 +416,16 @@ pub enum ServerErrorCode {
     NotEnrolled,
     /// Invite token invalid, used up, or expired.
     BadInvite,
+    /// `Enroll`/`Rebind` signature does not verify. The client treats it as permanent
+    /// (`handle_server_error` in the core).
     BadSignature,
     /// `ts_ms` is outside the `ENROLL_MAX_SKEW_MS` window.
     Stale,
     /// No one on this server has registered this mailbox.
     ///
-    /// The client reads this as "this recipient is not on my server" and sends
-    /// traffic for that contact straight to gossipsub for a while (see
-    /// `server_unknown_mailboxes` in lib.rs). That avoids a wasted round trip on
-    /// every message.
+    /// The client reads this as "this recipient is not on my server" and pauses
+    /// deposits for that mailbox (with a doubling pause), so it does not spend a
+    /// round trip on every message. Direct delivery to the peer is unaffected.
     UnknownMailbox,
     /// The item exceeds `ServerLimits.max_item_bytes`. Retrying with the same bytes
     /// never succeeds. This is a permanent error.
@@ -445,27 +446,6 @@ pub enum ServerErrorCode {
     /// blob was swept, or chunks are missing. Not permanent: the client uploads again
     /// from chunk 0.
     BlobIncomplete,
-}
-
-impl ServerErrorCode {
-    /// Could this error succeed if the same bytes were retried?
-    ///
-    /// The caller (`try_publish_raw`) maps this to `PublishFailure::Permanent` or
-    /// `Transient`. Misclassifying causes harm both ways: a permanent error treated as
-    /// transient is retried for days for nothing, and a transient error treated as
-    /// permanent loses a message that could have been recovered. See the
-    /// `PublishFailure` docs in types.rs.
-    pub fn is_permanent(self) -> bool {
-        matches!(
-            self,
-            ServerErrorCode::TooLarge | ServerErrorCode::Unsupported | ServerErrorCode::BadDirection | ServerErrorCode::BadHash
-        )
-    }
-
-    /// Should the client rebuild its server relationship after this error?
-    pub fn needs_reenroll(self) -> bool {
-        matches!(self, ServerErrorCode::NotEnrolled)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -614,6 +594,10 @@ pub fn parse_server_invite(text: &str) -> Result<ServerInvite, String> {
         .collect();
     if addrs.is_empty() {
         return Err("Server address missing from code".to_string());
+    }
+    // A server announces a handful of addresses; a code with more is not one we made.
+    if addrs.len() > 16 {
+        return Err("Too many server addresses in code".to_string());
     }
     if token.trim().is_empty() {
         return Err("Invite token in code is empty".to_string());
@@ -778,20 +762,6 @@ mod tests {
         assert!(parse_server_invite("typeon-server:/ip4/1.2.3.4/tcp/1/p2p/x").is_err());
         assert!(parse_server_invite("/ip4/1.2.3.4/tcp/1/p2p/x#tok").is_err());
         assert!(parse_server_invite("typeon-server:#tok").is_err());
-    }
-
-    #[test]
-    fn error_permanence_classification() {
-        // Permanent: the same bytes never succeed.
-        assert!(ServerErrorCode::TooLarge.is_permanent());
-        assert!(ServerErrorCode::Unsupported.is_permanent());
-        assert!(ServerErrorCode::BadHash.is_permanent());
-        // Transient: the user can free space, the limit can reset, or the record can be renewed.
-        assert!(!ServerErrorCode::QuotaExceeded.is_permanent());
-        assert!(!ServerErrorCode::RateLimited.is_permanent());
-        assert!(!ServerErrorCode::UnknownMailbox.is_permanent());
-        assert!(!ServerErrorCode::BlobIncomplete.is_permanent());
-        assert!(ServerErrorCode::NotEnrolled.needs_reenroll());
     }
 
     #[test]

@@ -228,6 +228,8 @@
     <string name="action_edit_message">Düzenle</string>
     <string name="action_delete_message">Sil</string>
     <string name="action_retry_message">Yeniden dene</string>
+    <string name="action_resend_message">Yeniden gönder</string>
+    <string name="msg_resend_nothing">Zaten iletildi, yeniden gönderilecek bir şey yok</string>
     <string name="msg_retrying_message">Yeniden deneniyor…</string>
     <string name="confirm_delete_message">Bu mesajı silmek istediğinizden emin misiniz?</string>
     <string name="lbl_edit_message_hint">Mesajı düzenle</string>

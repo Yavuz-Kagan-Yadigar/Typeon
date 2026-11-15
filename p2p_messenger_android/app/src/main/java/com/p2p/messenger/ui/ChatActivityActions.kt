@@ -136,6 +136,7 @@ internal fun ChatActivity.showEditDeleteDialog(item: SimpleChatAdapter.Item) {
     val showRetry = item.status == SimpleChatAdapter.Status.ERROR
     val options = mutableListOf<String>().apply {
         if (showRetry) add(getString(R.string.action_retry_message))
+        else if (!item.isDeleted) add(getString(R.string.action_resend_message))
         add(getString(R.string.action_react))
         add(getString(R.string.action_edit_message))
         add(getString(R.string.action_delete_message))
@@ -146,6 +147,7 @@ internal fun ChatActivity.showEditDeleteDialog(item: SimpleChatAdapter.Item) {
     AlertDialog.Builder(this)
         .setItems(options.toTypedArray()) { _, which ->
             when (options[which]) {
+                getString(R.string.action_resend_message) -> resendNow(item)
                 getString(R.string.action_forward) -> com.p2p.messenger.util.Forward.start(this, item)
                 getString(R.string.action_select) -> selection.start(item)
                 getString(R.string.action_retry_message) -> retryFailedMessage(item)
@@ -347,6 +349,17 @@ internal fun ChatActivity.scrollToMessage(targetMessageId: String) {
     adapter.setHighlighted(targetMessageId)
     replyHighlightHandler.removeCallbacksAndMessages(null)
     replyHighlightHandler.postDelayed({ adapter.setHighlighted(null) }, REPLY_HIGHLIGHT_DURATION_MS)
+}
+
+/** "Resend" on a message still waiting for its Ack: the next retry happens now (one poll turn), not after its backoff.
+ *  Nothing is queued for a message the peer already acknowledged. */
+internal fun ChatActivity.resendNow(item: SimpleChatAdapter.Item) {
+    lifecycleScope.launch {
+        val queued = withContext(Dispatchers.IO) {
+            try { P2PLib.retryPendingMessageNow(item.messageId) } catch (e: Throwable) { false }
+        }
+        Toast.makeText(this@resendNow, if (queued) R.string.msg_retrying_message else R.string.msg_resend_nothing, Toast.LENGTH_SHORT).show()
+    }
 }
 
 /** Resends a FAILED message in the SAME bubble. It does not create a second bubble (see SimpleChatAdapter.retryMessage). */

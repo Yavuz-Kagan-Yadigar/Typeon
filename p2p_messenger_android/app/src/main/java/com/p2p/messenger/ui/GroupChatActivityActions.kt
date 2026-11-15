@@ -90,6 +90,13 @@ import com.p2p.messenger.ui.GroupChatActivity.ContactLookup
 
 // GroupChatActivity: per-message actions (edit, delete, reactions, reply, copy, retry).
 
+/** "Resend" on a group message: its member copies are queued under per-member ids, so every pending retry is pulled to now
+ *  (same as opening the app). Copies already acknowledged are not sent again. */
+internal fun GroupChatActivity.resendGroupNow() {
+    lifecycleScope.launch(Dispatchers.IO) { try { P2PLib.retryAllPendingNow() } catch (e: Throwable) {} }
+    Toast.makeText(this, R.string.msg_retrying_message, Toast.LENGTH_SHORT).show()
+}
+
 /**
  * Resends a failed (ERROR) group message. It keeps the SAME bubble (see `SimpleChatAdapter.retryMessage`) and adds no second copy.
  * It fans out again with a new `group_message_local_id` (same mechanism as `sendNewMessage`).
@@ -151,6 +158,7 @@ internal fun GroupChatActivity.showGroupEditDeleteDialog(item: SimpleChatAdapter
     val showRetry = item.status == SimpleChatAdapter.Status.ERROR
     val options = mutableListOf<String>().apply {
         if (showRetry) add(getString(R.string.action_retry_message))
+        else if (!item.isDeleted) add(getString(R.string.action_resend_message))
         add(getString(R.string.action_react))
         add(getString(R.string.action_edit_message))
         add(getString(R.string.action_delete_message))
@@ -161,6 +169,7 @@ internal fun GroupChatActivity.showGroupEditDeleteDialog(item: SimpleChatAdapter
     AlertDialog.Builder(this)
         .setItems(options.toTypedArray()) { _, which ->
             when (options[which]) {
+                getString(R.string.action_resend_message) -> resendGroupNow()
                 getString(R.string.action_forward) -> com.p2p.messenger.util.Forward.start(this, item)
                 getString(R.string.action_select) -> selection.start(item)
                 getString(R.string.action_retry_message) -> retryFailedGroupMessage(item)

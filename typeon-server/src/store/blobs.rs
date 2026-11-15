@@ -56,11 +56,11 @@ impl Store {
         if inserted == 0 {
             return Ok(());
         }
-        // `received_chunks` is now a real count, not a high-water mark, because chunks can arrive out of order.
+        // A new distinct chunk (the insert above took): one more. A COUNT(*) here scanned every earlier chunk row, O(n^2)
+        // over an upload.
         self.conn
             .execute(
-                "UPDATE blobs SET byte_len = byte_len + ?2,
-                                  received_chunks = (SELECT COUNT(*) FROM blob_chunks WHERE blob_id = ?1)
+                "UPDATE blobs SET byte_len = byte_len + ?2, received_chunks = received_chunks + 1
                  WHERE blob_id = ?1",
                 params![blob_id, len as i64],
             )
@@ -147,8 +147,10 @@ impl Store {
              WHERE enrollment_id = (SELECT owner FROM blobs WHERE blob_id = ?1)",
             params![blob_id],
         );
-        let _ = self.conn.execute("DELETE FROM blobs WHERE blob_id = ?1", params![blob_id]);
+        // Chunk rows first: a crash between the two leaves a blob row without chunks (swept later), never stale chunk
+        // rows that a new blob with the same id would inherit.
         let _ = self.conn.execute("DELETE FROM blob_chunks WHERE blob_id = ?1", params![blob_id]);
+        let _ = self.conn.execute("DELETE FROM blobs WHERE blob_id = ?1", params![blob_id]);
     }
 
     /// Blob rows (files on disk) that `owner` holds.

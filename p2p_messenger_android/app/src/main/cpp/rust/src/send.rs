@@ -90,7 +90,7 @@ impl P2PCore {
         );
 
         // A rotation is announced only on content that is retried until acknowledged. A lost announcement would otherwise break the session for good.
-        // A previous, unconfirmed rotation (`pending_rotation_ct`, see ratchet.rs) is attached to every outgoing packet. The receiver applies it idempotently (see `respond_to_rotation`). `try_publish_raw` sends these packets on the OLD topic the peer still listens on.
+        // A previous, unconfirmed rotation (`pending_rotation_ct`, see ratchet.rs) is attached to every outgoing packet. The receiver applies it idempotently (see `apply_rotation`). `try_publish_raw` sends these packets on the OLD topic the peer still listens on.
         // A responder leaves the handshake chain before it sends anything, Ack included (see `respond` in ratchet.rs). That chain depends only on the HandshakeInit, so repeating the announcement is safe.
         let fresh_responder = self.ratchets.get(&peer_device_fingerprint).map_or(false, |s| s.is_fresh_responder());
         // a peer that only reads sends `Seen` (and `ReadStateSync`,
@@ -148,6 +148,8 @@ impl P2PCore {
         // Rollback copy: a state that cannot be saved must not burn the
         // message number (nothing is published with it).
         let snapshot = state.clone();
+        // A session that only sends still drops the old receive chain on time (the next persist writes it out).
+        state.expire_old_recv(current_time_ms());
         let (ciphertext, used_number, used_prev) = state.encrypt_next(&content_bytes, header.raw())?;
         if (used_number, used_prev) != (message_number, prev_chain_length) {
             self.ratchets.insert(peer_device_fingerprint.clone(), snapshot);

@@ -27,7 +27,7 @@ impl P2PCore {
 
 
         // Ratchet rotation sync: if the sender triggered a DH/KEM rotation with this message (`rotation_kyber_ciphertext` is set),
-        // call `respond_to_rotation` to derive the same new keys on our side. If empty (normal message, no rotation), nothing is done.
+        // call `apply_rotation` to derive the same new keys on our side. If empty (normal message, no rotation), nothing is done.
         // `ratchet_pubkey` is sent with every message but only changes on rotation, so ignoring it otherwise is safe.
         // The ratchet applies the rotation only if the packet then decrypts on the new chain (see `decrypt` in ratchet.rs). The header is
         // not bound to the recipient: if a rotated packet sent to B were replayed to C, applying the rotation first would break C's session.

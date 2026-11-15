@@ -301,8 +301,6 @@ impl ServerCore {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// The libp2p identity is persistent: the `PeerId` must NOT change across restarts, or every distributed invite
-/// code would become invalid.
 /// Hashes a file with SHA-256 without loading it fully into memory.
 pub(super) fn hash_file_streaming(path: &std::path::Path) -> Option<Vec<u8>> {
     use std::io::Read;

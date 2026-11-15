@@ -501,7 +501,13 @@ impl ServerCore {
             .listen_on(format!("/ip4/127.0.0.1/tcp/{}", TOR_LIBP2P_PORT).parse().map_err(|_| "bad multiaddr")?)
             .map_err(|e| e.to_string())?;
 
-        let relay_incoming = swarm.behaviour().stream.new_control().accept(RELAY_PROTOCOL).ok();
+        let relay_incoming = match swarm.behaviour().stream.new_control().accept(RELAY_PROTOCOL) {
+            Ok(incoming) => Some(incoming),
+            Err(e) => {
+                error!("Call relay protocol could not be registered, relay is off: {e}");
+                None
+            }
+        };
 
         let (hash_tx, hash_rx) = tokio::sync::mpsc::unbounded_channel();
         Ok(ServerCore {

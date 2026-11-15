@@ -312,26 +312,23 @@ impl Store {
         (items, more)
     }
 
-    /// Cumulative delete.
-    ///
-    /// ONLY the side that DEPOSITED the envelope can delete it. Group messaging is pairwise, so a `mb_*` box has exactly
-    /// two possible readers, and one of them is the depositor. There is no need for accounting of "have all subscribers
-    /// acknowledged". The depositor's own `Ack` is silently ignored. Otherwise a sender could delete a message before the
-    /// recipient saw it.
-    /// Deletes the items in `mailbox_id` that `reader` has not acknowledged (and did not deposit itself). See
-    /// `ServerRequest::Push`.
+    /// Counts the items in `mailbox_id` that `reader` has not acknowledged (and did not deposit itself), capped at 2:
+    /// the caller only asks "exactly one?" (see `ServerRequest::Push`), and runs this per deposit.
     pub fn unacked_for(&self, mailbox_id: &str, reader: &[u8]) -> i64 {
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM mail m WHERE m.mailbox_id = ?1 AND m.depositor != ?2
+                "SELECT COUNT(*) FROM (SELECT 1 FROM mail m WHERE m.mailbox_id = ?1 AND m.depositor != ?2
                    AND m.seq > COALESCE((SELECT a.through_seq FROM mail_acks a
-                                         WHERE a.mailbox_id = ?1 AND a.owner = ?2), 0)",
+                                         WHERE a.mailbox_id = ?1 AND a.owner = ?2), 0)
+                   LIMIT 2)",
                 params![mailbox_id, reader],
                 |r| r.get(0),
             )
             .unwrap_or(i64::MAX)
     }
 
+    /// Cumulative ack: moves `acker`'s cursor in the box, then deletes what every active registered reader other than
+    /// the depositor has acknowledged (`delete_fully_acked`). The depositor's own ack never deletes its deposit.
     pub fn ack(&self, mailbox_id: &str, through_seq: u64, acker: &[u8]) -> Result<usize, String> {
         // Only a reader that REGISTERED the box can acknowledge.
         let is_reader = self

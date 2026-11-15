@@ -28,8 +28,8 @@ pub struct Identity {
     /// Fingerprint of the first device. Fixed.
     pub identity_id: String,
     pub devices: Vec<DeviceInfo>,
-    /// Device allowed to add and remove devices. Any active device has this
-    /// right; `primary_device` only marks the first device set up.
+    /// The first device set up. Only this device (fingerprint == `identity_id`)
+    /// may sign DeviceAdd/DeviceRevoke; the core enforces it (`verify_device_auth`).
     pub primary_device: Option<String>,
 }
 
