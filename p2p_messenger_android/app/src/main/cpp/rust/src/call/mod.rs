@@ -94,11 +94,12 @@ const REINVITE_FOR_MS: u64 = 5 * 60_000;
 const REINVITE_EVERY_MS: u64 = 30_000;
 /// After `REINVITE_FOR_MS` the caller keeps inviting, this rarely, so absent
 /// members still see the call running ("Attend" in the group chat).
-const REINVITE_LATE_EVERY_MS: u64 = 120_000;
-/// A group call offer with no Invite for this long is gone.
-const OFFER_TTL_MS: u64 = 150_000;
+const REINVITE_LATE_EVERY_MS: u64 = 30_000;
+/// Safety net: a group call offer with no Invite for this long is gone, even if
+/// its `Ended` signal was lost. Normally `Ended` removes it at once.
+const OFFER_TTL_MS: u64 = 60_000;
 /// What is left of an offer once its inviter hung up.
-const OFFER_HANGUP_GRACE_MS: u64 = 40_000;
+const OFFER_HANGUP_GRACE_MS: u64 = 10_000;
 /// Every participant sends a state packet each second, even muted with the
 /// camera off: this long with nothing from anyone means the others are gone
 /// (app killed, device off, network lost) and never got to send a Hangup.
@@ -436,6 +437,9 @@ lazy_static::lazy_static! {
     /// not: what "Attend" joins (`start_group_call`).
     static ref GROUP_OFFERS: Mutex<HashMap<String, GroupOffer>> = Mutex::new(HashMap::new());
 }
+
+/// `EARLY_HANGUP` sender marking a group call whose `Ended` arrived.
+const ENDED: &str = "\u{0}ended";
 
 pub(crate) struct GroupOffer {
     call_id: String,

@@ -1327,6 +1327,8 @@ pub enum CallAction {
     Reject,
     Hangup,
     Busy,
+    /// Sent by the last participant of a group call to every member device: the call is over, drop its "Attend".
+    Ended,
 }
 
 /// Handshake packet. It carries the hybrid KEM step of the initial handshake. The Kyber

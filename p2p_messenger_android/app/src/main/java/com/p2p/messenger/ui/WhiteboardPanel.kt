@@ -89,7 +89,7 @@ class WhiteboardPanel(private val activity: AppCompatActivity, private val host:
     private val chromeColor = MaterialColors.getColor(activity, com.google.android.material.R.attr.colorSurfaceContainer, Color.DKGRAY)
     private val onChromeColor = MaterialColors.getColor(activity, com.google.android.material.R.attr.colorOnSurface, Color.BLACK)
     private val accentColor = MaterialColors.getColor(activity, com.google.android.material.R.attr.colorPrimary, onChromeColor)
-    private val tab = TabDrawable(chromeColor, onChromeColor, accentColor)
+    private val tab = TabDrawable(chromeColor, onChromeColor, com.p2p.messenger.util.fullSaturation(accentColor))
     /** Unread strokes: the chevron fades to the accent colour and back. */
     private val pulse = com.p2p.messenger.util.SlowPulse { tab.pulse = it }
     /** Group chat: sender name colours follow the board's participant order. */

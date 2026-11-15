@@ -118,7 +118,9 @@ impl P2PCore {
         // Left a group call that goes on: "Attend" shows at once, from the
         // keys of someone still in it, not after the next re-invite reaches us.
         if let (Some(gid), "local", CallPhase::Active) = (&s.group_id, reason, s.phase) {
-            if let Some((fp, (key, sid))) = s.keys.iter().find(|(fp, _)| s.joined.contains(*fp)) {
+            if s.joined.is_empty() {
+                self.group_call_ended(&s);
+            } else if let Some((fp, (key, sid))) = s.keys.iter().find(|(fp, _)| s.joined.contains(*fp)) {
                 group_offers().insert(gid.clone(), GroupOffer {
                     call_id: s.call_id.clone(), video: s.video, peer_fp: fp.clone(),
                     media_key: key.clone(), stream_id: sid.clone(),
@@ -128,6 +130,18 @@ impl P2PCore {
             }
         }
         self.last_call_end = Some((s.call_id, reason.to_string()));
+    }
+
+    /// The last participant of a group call is gone: every member device drops
+    /// its "Attend" (`CallAction::Ended`), mine too.
+    fn group_call_ended(&mut self, s: &CallSession) {
+        let Some(gid) = s.group_id.clone() else { return };
+        for fp in self.group_call_devices(&gid).unwrap_or_default() {
+            self.send_call_signal(&fp, &s.call_id, Some(gid.clone()), s.video, CallAction::Ended, None, Vec::new());
+        }
+        if group_offers().remove(&gid).is_some() {
+            self.attachment_events.push(serde_json::json!({"type": "group_call_offer", "group_id": gid}).to_string());
+        }
     }
 
     /// What `groupCallOffer` reports for [group_id].
@@ -258,6 +272,11 @@ impl P2PCore {
                     if !is_member(self, gid) {
                         return noop();
                     }
+                    // An Invite that arrives after the call's `Ended` must not bring the offer back.
+                    let ended = EARLY_HANGUP.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|(id, who)| *id == call_id && who == ENDED);
+                    if ended {
+                        return noop();
+                    }
                     let offer = GroupOffer {
                         call_id: call_id.clone(), video, peer_fp: peer_fp.to_string(),
                         media_key: Zeroizing::new(media_key.clone()), stream_id: stream_id.clone(),
@@ -386,6 +405,21 @@ impl P2PCore {
                 }
                 serde_json::json!({"type": "call", "action": "accept", "call_id": call_id, "peer": self.canonical_peer_key(peer_fp)})
             }
+            CallAction::Ended => {
+                let Some(gid) = group_id.filter(|g| is_member(self, g)) else { return noop() };
+                let mut early = EARLY_HANGUP.lock().unwrap_or_else(|p| p.into_inner());
+                if early.len() >= 16 {
+                    early.pop_front();
+                }
+                early.push_back((call_id.clone(), ENDED.to_string()));
+                drop(early);
+                let gone = group_offers().get(&gid).map_or(false, |o| o.call_id == call_id);
+                if gone {
+                    group_offers().remove(&gid);
+                    self.attachment_events.push(serde_json::json!({"type": "group_call_offer", "group_id": gid}).to_string());
+                }
+                noop()
+            }
             CallAction::Reject | CallAction::Busy | CallAction::Hangup => {
                 // The device that kept the offer alive left. The call may go
                 // on without it: the next inviter (`is_call_inviter`) renews
@@ -471,6 +505,10 @@ impl P2PCore {
                             for fp in s.invited.iter().filter(|f| *f != peer_fp) {
                                 self.call_signal(fp, &s, stop);
                             }
+                        }
+                        // Everyone else left: I was the last one. Tell all members.
+                        if s.phase == CallPhase::Active && s.group_id.is_some() {
+                            self.group_call_ended(&s);
                         }
                     }
                     media_stop();

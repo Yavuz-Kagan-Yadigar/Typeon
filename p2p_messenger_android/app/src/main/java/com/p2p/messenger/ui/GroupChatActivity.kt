@@ -654,6 +654,9 @@ class GroupChatActivity : AppCompatActivity() {
         menuInflater.inflate(R.menu.menu_chat_search, menu)
         attendView = menu.findItem(R.id.action_attend_call).actionView?.findViewById<TextView>(R.id.txtAttendCall)?.apply {
             setOnClickListener { CallActivity.startOutgoing(this@GroupChatActivity, null, groupId, callOffer == 2) }
+            val tv = android.util.TypedValue()
+            theme.resolveAttribute(androidx.appcompat.R.attr.colorPrimary, tv, true)
+            background = background?.mutate()?.also { it.setTint(com.p2p.messenger.util.fullSaturation(tv.data)) }
         }
         return true
     }
@@ -661,6 +664,7 @@ class GroupChatActivity : AppCompatActivity() {
     /** A call running in this group (`P2PLib.groupCallOffer`): 0 none, 1 voice, 2 video. */
     private var callOffer = 0
     private var attendView: TextView? = null
+    private val offerRecheck = android.os.Handler(android.os.Looper.getMainLooper())
     private val attendPulse = com.p2p.messenger.util.SlowPulse { attendView?.alpha = 1f - 0.6f * it }
 
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
@@ -689,6 +693,9 @@ class GroupChatActivity : AppCompatActivity() {
                 invalidateOptionsMenu()
             }
             attendPulse.running = callOffer != 0 && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+            // The core's expiry event can be missed: look again until the pill is gone.
+            offerRecheck.removeCallbacksAndMessages(null)
+            if (callOffer != 0) offerRecheck.postDelayed({ refreshCallOffer() }, 20_000)
         }
     }
 
@@ -758,6 +765,7 @@ class GroupChatActivity : AppCompatActivity() {
         // Same note as ChatActivity onPause: a pulse animation must not stay registered with vsync in the background while the Activity is not visible.
         ownStatusDot.cancelPulse()
         attendPulse.running = false
+        offerRecheck.removeCallbacksAndMessages(null)
         // Tell members we stopped typing and clear pending timeouts.
         typingHandler.removeCallbacksAndMessages(null)
         typingMembers.clear()

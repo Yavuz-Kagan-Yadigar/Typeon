@@ -35,3 +35,11 @@ class SlowPulse(private val onFrame: (Float) -> Unit) {
         const val STEP_MS = 80L
     }
 }
+
+/** [color] with its saturation raised to 100 % (hue and value kept). */
+fun fullSaturation(color: Int): Int {
+    val hsv = FloatArray(3)
+    android.graphics.Color.colorToHSV(color, hsv)
+    hsv[1] = 1f
+    return android.graphics.Color.HSVToColor(android.graphics.Color.alpha(color), hsv)
+}

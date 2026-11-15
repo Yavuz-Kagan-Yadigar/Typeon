@@ -1908,5 +1908,13 @@ mod fable_review_tests {
         assert_eq!(me.group_call_offer(&own_gid), 0, "in the call");
         me.end_call();
         assert_eq!(me.group_call_offer(&own_gid), 1, "left, the call goes on");
+
+        // The last participant leaves: Ended drops the offer at once, and a
+        // late Invite of that call does not bring it back.
+        signal(&mut me, &other_fp, &other_id, CallAction::Ended);
+        assert_eq!(me.group_call_offer(&gid), 0);
+        signal(&mut me, &other_fp, &other_id, CallAction::Invite);
+        assert_eq!(me.group_call_offer(&gid), 0);
+        assert!(me.call.is_none());
     }
 }
