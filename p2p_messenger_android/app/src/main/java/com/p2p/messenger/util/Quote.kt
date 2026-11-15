@@ -29,7 +29,10 @@ object Quote {
 
     private fun clean(s: String) = s.replace(Regex("[⁢-⁤]"), "")
 
-    fun marker(messageId: String, preview: String) = START + clean(messageId) + SEP + clean(preview) + END
+    /** The preview holds no line break and no breakable space: the box is one
+     *  replacement span, and every line the marker text spans draws the whole box. */
+    fun marker(messageId: String, preview: String) =
+        START + clean(messageId) + SEP + clean(preview).replace(Regex("\\s+"), " ") + END
 
     /** The text with every quote removed: the sender's own words only. */
     fun withoutQuotes(text: String) = MARKER.replace(text, "")
@@ -59,11 +62,6 @@ object Quote {
     /** Inserts a quote at the cursor, on its own line. */
     fun insert(edit: EditText, messageId: String, preview: String) {
         val text = edit.text
-        // The same message is never quoted twice: a scroll that clips the swipe-to-reply gesture can fire it more than once.
-        if (MARKER.findAll(text).any { it.groupValues[1] == clean(messageId) }) {
-            edit.requestFocus()
-            return
-        }
         val at = edit.selectionStart.coerceIn(0, text.length)
         val before = if (at > 0 && text[at - 1] != '\n') "\n" else ""
         val after = if (at < text.length && text[at] == '\n') "" else "\n"
