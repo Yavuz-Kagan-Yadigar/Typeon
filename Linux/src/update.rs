@@ -120,8 +120,10 @@ fn platform_install(bundle: &Path) -> Result<(), String> {
             "--host",
             "sh",
             "-c",
-            "i=0; while [ $i -lt 60 ] && flatpak ps --columns=application | grep -qx com.p2p.messenger.Typeon; \
-             do sleep 1; i=$((i+1)); done; exec flatpak run com.p2p.messenger.Typeon",
+            // Detached on the host: flatpak-spawn returns at once, so this sandbox can end. A waiting
+            // flatpak-spawn kept the old instance listed by `flatpak ps` for as long as the new one ran.
+            "setsid sh -c 'i=0; while [ $i -lt 60 ] && flatpak ps --columns=application | grep -qx com.p2p.messenger.Typeon; \
+             do sleep 1; i=$((i+1)); done; exec flatpak run com.p2p.messenger.Typeon' >/dev/null 2>&1 </dev/null &",
         ])
         .spawn()
         .map_err(|e| format!("restart: {e}"))?;
