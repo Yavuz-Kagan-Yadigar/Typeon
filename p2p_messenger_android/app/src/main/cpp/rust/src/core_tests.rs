@@ -2005,6 +2005,12 @@ mod sibling_roster_tests {
         for p in &roster { learned.extend(l.import_sync_payload(p)); }
         assert_eq!(learned, vec![n_id.clone()]);
         assert!(!l.contact_removed_locally(&n_id));
+        // Scanning the code of a device the root already lists as active is a
+        // new pairing too (the early return in `pair_with_code`).
+        let first = r.contact_added_at(&n_id);
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        r.pair_with_code(n_id.clone(), n_id.clone(), "n", "", &[], &[6; 16]).unwrap();
+        assert!(r.contact_added_at(&n_id) > first);
 
         // Deleted again on the sibling, after that pairing: the same (older)
         // roster copy no longer brings it back.

@@ -763,6 +763,10 @@ impl P2PCore {
             if let Err(e) = self.send_identity_exchange_fresh(&device_fingerprint) {
                 error!("IdentityExchange send temporarily failed (will retry): {}", e);
             }
+            // Still the user pairing again: a sibling that removed this contact
+            // takes it back only from a roster whose pairing time is newer.
+            self.note_contact_added(&identity_id, current_time_ms());
+            self.sync_to_siblings();
             return Ok((identity_id, device_fingerprint, device_name));
         }
         // Goes into each IdentityExchange to this device (`pairing_proof`).
